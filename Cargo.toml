@@ -15,6 +15,7 @@ regex = { version = "1", default-features = false, features = ["std", "unicode-p
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+unicode-script = "0.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

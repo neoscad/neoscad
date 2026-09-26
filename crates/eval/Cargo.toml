@@ -10,6 +10,7 @@ name = "eval"
 
 [dependencies]
 lang = { package = "neoscad-lang", path = "../lang" }
+unicode-script.workspace = true
 
 [lints]
 workspace = true

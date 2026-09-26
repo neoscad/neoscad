@@ -25,6 +25,11 @@ fn timestamp_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(", timestamp = -?[0-9]+").expect("valid regex"))
 }
 
+/// `normalize_string`'s one active rule: drop `, timestamp = N`.
+pub fn strip_timestamps(text: &str) -> String {
+    timestamp_re().replace_all(text, "").into_owned()
+}
+
 /// Python's `open(f).read()` under `-Xutf8=1`: strict UTF-8, retried as
 /// latin-1 (the fallback exists for `ord-tests.scad` output), with universal
 /// newline translation.

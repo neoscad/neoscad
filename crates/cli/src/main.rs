@@ -4,8 +4,9 @@
 //! `desc.add_options()` block) so that OpenSCAD's regression suite can drive
 //! this binary unchanged: the conformance harness passes exactly the
 //! arguments `tests/CMakeLists.txt` registers. The `.ast` export (with
-//! customizer parameter sets) and the `.echo` export (evaluation messages)
-//! are implemented; every other output mode reports that it is missing and
+//! customizer parameter sets), the `.echo` export (evaluation messages) and
+//! the `.csg` and `.term` node-tree exports are implemented; every other
+//! output mode reports that it is missing and
 //! exits with [`EXIT_NOT_IMPLEMENTED`], which the harness can tell apart
 //! from a crash or a usage error.
 //!
@@ -261,6 +262,21 @@ fn run_cli(cli: Cli) -> ExitCode {
         };
         return ExitCode::from(run::export_echo(&job, &options));
     }
+    let tree: Option<Vec<run::TreeFormat>> = formats
+        .iter()
+        .map(|(id, _)| match *id {
+            "csg" => Some(run::TreeFormat::Csg),
+            "term" => Some(run::TreeFormat::Term),
+            _ => None,
+        })
+        .collect();
+    if let Some(tree) = tree {
+        let options = match eval_options(&cli) {
+            Ok(o) => o,
+            Err(code) => return ExitCode::from(code),
+        };
+        return ExitCode::from(run::export_tree(&job, &options, &tree));
+    }
 
     for (id, name) in &formats {
         eprintln!("neoscad: {name} export ({id}) is not implemented yet");
@@ -288,7 +304,11 @@ fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
     let mut o = eval::Options {
         // `$preview` is true for preview-capable exports unless --render.
         preview: cli.render.is_none(),
-        trace_usermodule_parameters: flag(&cli.trace_usermodule_parameters, true, "trace-usermodule-parameters")?,
+        trace_usermodule_parameters: flag(
+            &cli.trace_usermodule_parameters,
+            true,
+            "trace-usermodule-parameters",
+        )?,
         check_parameters: flag(&cli.check_parameters, true, "check-parameters")?,
         check_parameter_ranges: flag(&cli.check_parameter_ranges, false, "check-parameter-ranges")?,
         ..Default::default()
@@ -300,7 +320,9 @@ fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
         let nums: Result<Vec<f64>, _> = cam.split(',').map(|s| s.trim().parse::<f64>()).collect();
         let n = cam.split(',').count();
         if n != 6 && n != 7 {
-            eprintln!("Camera setup requires either 7 numbers for Gimbal Camera or 6 numbers for Vector Camera");
+            eprintln!(
+                "Camera setup requires either 7 numbers for Gimbal Camera or 6 numbers for Vector Camera"
+            );
             return Err(EXIT_ERROR);
         }
         match nums.ok().and_then(|v| eval::Camera::from_args(&v)) {

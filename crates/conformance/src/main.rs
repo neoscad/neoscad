@@ -97,7 +97,7 @@ enum Cmd {
     /// Differential test: run a reference OpenSCAD and neoscad on each input
     /// and compare exit status, output and the format's diagnostics.
     Diff {
-        /// Output format to compare.
+        /// Output format to compare: ast, echo or csg.
         #[arg(long, default_value = "ast")]
         format: String,
         /// Reference binary (default: the pinned nightly).

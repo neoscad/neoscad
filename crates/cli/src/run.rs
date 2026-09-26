@@ -1,5 +1,6 @@
 //! Running a program through the front end and evaluator, the way
-//! `openscad.cc`'s `cmdline()` does, and the `.ast` and `.echo` exports.
+//! `openscad.cc`'s `cmdline()` does, and the `.ast`, `.echo`, `.csg` and
+//! `.term` exports.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -44,7 +45,11 @@ struct Loaded {
 impl Paths {
     fn of(job: &Job<'_>) -> Paths {
         let cwd = std::env::current_dir().unwrap_or_default();
-        let main_dir = cwd.join(display_name(job)).parent().map(Path::to_path_buf).unwrap_or_else(|| cwd.clone());
+        let main_dir = cwd
+            .join(display_name(job))
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| cwd.clone());
         Paths { cwd, main_dir }
     }
 }
@@ -52,7 +57,11 @@ impl Paths {
 /// OpenSCAD names stdin `<stdin>` and resolves it like a file in the
 /// working directory.
 fn display_name<'a>(job: &Job<'a>) -> &'a str {
-    if job.input == "-" { "<stdin>" } else { job.input }
+    if job.input == "-" {
+        "<stdin>"
+    } else {
+        job.input
+    }
 }
 
 /// Parse the input with `-D` definitions, apply a parameter set and parse
@@ -69,7 +78,10 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
         std::fs::read(job.input).map(|t| text = t)
     };
     if read.is_err() {
-        con.print(None, format!("Can't open input file '{display}'!\n").as_bytes());
+        con.print(
+            None,
+            format!("Can't open input file '{display}'!\n").as_bytes(),
+        );
         return Err(EXIT_ERROR);
     }
     // cmdline(): the text, then an end-of-text marker, then each -D.
@@ -111,13 +123,19 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
     let libraries = load_dependencies(&program, &suffix, &StdFs, &libs);
     for lib in &libraries {
         match (&lib.program, lib.open_error()) {
-            (Some(p), _) => p.openscad_diags().for_each(|d| con.diagnostic(d, &p.sources, &paths.cwd)),
+            (Some(p), _) => p
+                .openscad_diags()
+                .for_each(|d| con.diagnostic(d, &p.sources, &paths.cwd)),
             (None, Some(msg)) => con.print(Some(Severity::Warning), msg.as_bytes()),
             (None, None) => {}
         }
     }
     let uses = resolve_uses(&program, &StdFs, &libs);
-    Ok(Loaded { program, uses, libraries })
+    Ok(Loaded {
+        program,
+        uses,
+        libraries,
+    })
 }
 
 /// Write `data` to `-o` targets (`-` is stdout).
@@ -144,7 +162,88 @@ pub fn export_ast(job: &Job<'_>) -> u8 {
     };
     let text = lang::dump::dump(&loaded.program.ast);
     for target in job.outputs {
-        if let Err(code) = write_output(target, &text) {
+        // Like `.csg`, OpenSCAD writes a relative `.ast` into the document's
+        // directory (`openscad.cc`), not the working directory.
+        let target = if target != "-" {
+            paths.main_dir.join(target).to_string_lossy().into_owned()
+        } else {
+            target.clone()
+        };
+        if let Err(code) = write_output(&target, &text) {
+            return code;
+        }
+    }
+    0
+}
+
+/// Evaluate a loaded program, printing messages to `con`.
+fn evaluate<W: Write>(
+    l: &Loaded,
+    paths: &Paths,
+    options: &Options,
+    con: &mut Console<W>,
+) -> eval::Evaluation {
+    let libs: Vec<eval::Library<'_>> = l
+        .libraries
+        .iter()
+        .map(|lib| eval::Library {
+            path: &lib.path,
+            program: lib.program.as_ref(),
+            uses: &lib.uses,
+        })
+        .collect();
+    // `main` runs this on a thread with `eval::DEFAULT_THREAD_STACK`.
+    eval::evaluate(
+        &l.program,
+        &l.uses,
+        &libs,
+        paths.main_dir.clone(),
+        options,
+        con,
+    )
+}
+
+/// A node-tree export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeFormat {
+    Csg,
+    Term,
+}
+
+/// `-o x.csg` and `-o x.term`, one evaluation for all outputs, with
+/// messages on stderr. As in OpenSCAD, an evaluation error still exports
+/// the partial tree and exits 0; only a load failure is an error.
+pub fn export_tree(job: &Job<'_>, options: &Options, formats: &[TreeFormat]) -> u8 {
+    let paths = Paths::of(job);
+    let mut con = Console::new(std::io::stderr(), paths.main_dir.clone(), job.quiet);
+    let loaded = match load(job, &paths, &mut con) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    let ev = evaluate(&loaded, &paths, options, &mut con);
+    // A root modifier (`!`) makes the tagged node the whole tree.
+    let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+    for (target, format) in job.outputs.iter().zip(formats) {
+        let text = match format {
+            TreeFormat::Csg => eval::dump::csg(top, &paths.main_dir),
+            // `openscad.cc` builds the CSG term with a `CSGTreeEvaluator`
+            // that has no geometry evaluator, so every leaf is a null term
+            // and the tree always reduces to nothing (`CSGTreeEvaluator.cc`,
+            // `visit(AbstractPolyNode)`). The nightly prints this line for
+            // any input, `cube();` included.
+            TreeFormat::Term => "No top-level CSG object\n".to_string(),
+        };
+        // OpenSCAD changes into the document directory before writing a
+        // `.csg` (`openscad.cc`, so `import()` paths print relative to it)
+        // and opens the output there too: `openscad sub/a.scad -o a.csg`
+        // writes `sub/a.csg`. `.term` is written from the original
+        // directory.
+        let target = if *format == TreeFormat::Csg && target != "-" {
+            paths.main_dir.join(target).to_string_lossy().into_owned()
+        } else {
+            target.clone()
+        };
+        if let Err(code) = write_output(&target, text.as_bytes()) {
             return code;
         }
     }
@@ -159,13 +258,7 @@ pub fn export_echo(job: &Job<'_>, options: &Options) -> u8 {
     let code = match load(job, &paths, &mut con) {
         Err(code) => code,
         Ok(l) => {
-            let libs: Vec<eval::Library<'_>> = l
-                .libraries
-                .iter()
-                .map(|lib| eval::Library { path: &lib.path, program: lib.program.as_ref(), uses: &lib.uses })
-                .collect();
-            // `main` runs this on a thread with `eval::DEFAULT_THREAD_STACK`.
-            eval::evaluate(&l.program, &l.uses, &libs, paths.main_dir.clone(), options, &mut con);
+            evaluate(&l, &paths, options, &mut con);
             0
         }
     };

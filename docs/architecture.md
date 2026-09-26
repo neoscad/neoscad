@@ -152,7 +152,7 @@ ffmpeg.
    recording.
 2. **`lang`** (done): tier 0.
 3. **`eval`** (done): tier 1.
-4. **CSG tree:** tier 2.
+4. **CSG tree** (done): tier 2.
 5. **`geom` + `io`:** tier 3.
 6. **`render` + `snapshot`:** tier 4.
 7. **`serve`, JSON output, MCP.**

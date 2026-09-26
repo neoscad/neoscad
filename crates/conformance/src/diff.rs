@@ -12,7 +12,14 @@
 //!   (`ECHO:`, evaluation warnings), which OpenSCAD also prints because it
 //!   evaluates before exporting, belongs to `echo`. For `echo` every
 //!   message goes into the output file (OpenSCAD's `Echostream`), so the
-//!   file is compared even when both runs fail.
+//!   file is compared even when both runs fail. For `csg` none: its stderr
+//!   is the same parse and evaluation output that `ast` and `echo` already
+//!   compare, and counting it again would file one echo difference under
+//!   two formats.
+//!
+//! `csg` output is compared after removing `, timestamp = N`, as the
+//! regression harness does (`normalize.rs`): the value is a file's
+//! modification time, which is not what the comparison is about.
 //!
 //! Mismatches are grouped into categories so a run's result reads as a
 //! short table. The full report goes to `target/conformance/diff-<format>.json`.
@@ -36,6 +43,7 @@ pub const DEFAULT_REFERENCE: &str = "/Applications/OpenSCAD.app/Contents/MacOS/O
 pub enum Format {
     Ast,
     Echo,
+    Csg,
 }
 
 impl Format {
@@ -43,7 +51,8 @@ impl Format {
         match s {
             "ast" => Ok(Format::Ast),
             "echo" => Ok(Format::Echo),
-            other => Err(format!("unsupported --format '{other}' (supported: ast, echo)")),
+            "csg" => Ok(Format::Csg),
+            other => Err(format!("unsupported --format '{other}' (supported: ast, echo, csg)")),
         }
     }
 
@@ -51,6 +60,15 @@ impl Format {
         match self {
             Format::Ast => "ast",
             Format::Echo => "echo",
+            Format::Csg => "csg",
+        }
+    }
+
+    /// The output as compared.
+    fn normalize(self, out: Vec<u8>) -> Vec<u8> {
+        match self {
+            Format::Csg => crate::normalize::strip_timestamps(&String::from_utf8_lossy(&out)).into_bytes(),
+            Format::Ast | Format::Echo => out,
         }
     }
 
@@ -76,6 +94,8 @@ impl Format {
             }
             // Everything is in the output file.
             Format::Echo => false,
+            // Covered by `ast` and `echo` (see the module docs).
+            Format::Csg => false,
         }
     }
 }
@@ -183,6 +203,7 @@ fn run_one(bin: &Path, input: &Path, out_file: &Path, format: Format, env: &[(&s
     let messages = stderr.lines().filter(|l| format.owns_message(l)).map(String::from).collect();
     let code = result.unwrap_or(None);
     let output = if code == Some(0) || format == Format::Echo { fs::read(out_file).ok() } else { None };
+    let output = output.map(|o| format.normalize(o));
     RunResult { code, output, messages, ms }
 }
 

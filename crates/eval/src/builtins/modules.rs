@@ -127,11 +127,19 @@ fn cmax(a: f64, b: f64) -> f64 {
 
 const F_MINIMUM: f64 = 0.01;
 
+/// Eigen's `Transform::rotate(m3)` on an identity transform: the linear
+/// part becomes `I * m3`, evaluated as a real product. The product is not a
+/// copy: `1 * x + 0 * y + 0 * z` turns a `-0` in `m3` into `+0` unless every
+/// term is `-0`, and the `.csg` export prints the sign (`rotate([90, 0, 0])`
+/// has `-sin(0) = -0` below the diagonal, which OpenSCAD prints as `0`).
 fn rot3(m3: [[f64; 3]; 3]) -> Matrix {
     let mut m = node::IDENTITY;
-    for i in 0..3 {
-        for j in 0..3 {
-            m[i][j] = m3[i][j];
+    for (i, row) in m.iter_mut().enumerate().take(3) {
+        for (j, x) in row.iter_mut().enumerate().take(3) {
+            let id = |k: usize| if k == i { 1.0 } else { 0.0 };
+            // Eigen's reduction starts from the first term, not from 0.0,
+            // so an all-`-0` sum stays `-0`.
+            *x = id(0) * m3[0][j] + id(1) * m3[1][j] + id(2) * m3[2][j];
         }
     }
     m
@@ -519,9 +527,15 @@ impl<'a> Evaluator<'a> {
                     t.push(b')');
                     self.warn(loc, DiagCode::InvalidArgument, t);
                 }
+                // Eigen's `Transform::scale`: the identity times a diagonal,
+                // coefficient by coefficient, so the off-diagonal entries of a
+                // negative factor's column are `0 * s = -0`, which the `.csg`
+                // export prints (`scale([1, -1, 1])` has `-0`s in column 1).
                 let mut m = node::IDENTITY;
-                for k in 0..3 {
-                    m[k][k] = s[k];
+                for row in m.iter_mut().take(3) {
+                    for k in 0..3 {
+                        row[k] *= s[k];
+                    }
                 }
                 NodeKind::Transform { matrix: m, verb: "scale" }
             }
@@ -554,8 +568,11 @@ impl<'a> Evaluator<'a> {
                 let ok = v.get_vec3_or2(&mut t3, 0.0) && t3.iter().all(|x| x.is_finite());
                 let mut m = node::IDENTITY;
                 if ok {
+                    // Eigen's `Transform::translate`: `translation += linear *
+                    // v` from a zero column, which turns a `-0` component into
+                    // `+0` (`translate([-10, -0])` prints `0`).
                     for k in 0..3 {
-                        m[k][3] = t3[k];
+                        m[k][3] += t3[k];
                     }
                 } else {
                     let mut t = b"Unable to convert translate(".to_vec();
