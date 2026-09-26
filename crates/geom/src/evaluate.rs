@@ -40,11 +40,14 @@ use manifold_rust::manifold::Manifold;
 use manifold_rust::types::OpType;
 use sha2::{Digest, Sha256};
 
+use eval::node::OffsetJoin;
+use eval::trig::cos_degrees;
+
 use crate::color::{Color, Scheme};
 use crate::manifold_geom::{IdSource, ManifoldGeometry};
 use crate::polygon2d::Polygon2d;
 use crate::polyset::PolySet;
-use crate::{Geometry, primitives};
+use crate::{Geometry, clipper, extrude, fragments, primitives};
 
 /// Where a message points: the instantiation that produced the node.
 #[derive(Debug, Clone, PartialEq)]
@@ -172,7 +175,7 @@ fn cost_of(g: &Geometry) -> usize {
     match g {
         Geometry::PolySet(p) => p.vertices.len() * 24 + p.faces.iter().map(|f| 24 + 4 * f.len()).sum::<usize>(),
         Geometry::Manifold(m) => m.manifold.num_vert() * 48 + m.manifold.num_tri() * 112,
-        Geometry::Polygon2d(p) => p.outlines.iter().map(|o| 24 + 16 * o.len()).sum(),
+        Geometry::Polygon2d(p) => p.outlines.iter().map(|o| 24 + 16 * o.vertices.len()).sum(),
     }
 }
 
@@ -343,14 +346,15 @@ impl Ctx<'_> {
                 leaf(Geometry::PolySet(Arc::new(primitives::cylinder(*h, *r1, *r2, *center, disc))))
             }
             NodeKind::Polyhedron { points, faces, .. } => leaf(Geometry::PolySet(Arc::new(primitives::polyhedron(points, faces)))),
-            NodeKind::Square { size, center } => leaf(Geometry::Polygon2d(Arc::new(primitives::square(*size, *center)))),
-            NodeKind::Circle { r, disc } => leaf(Geometry::Polygon2d(Arc::new(primitives::circle2d(*r, disc)))),
-            NodeKind::Polygon { points, paths, .. } => leaf(Geometry::Polygon2d(Arc::new(primitives::polygon(points, paths)))),
+            NodeKind::Square { size, center } => leaf(leaf_2d(primitives::square(*size, *center))),
+            NodeKind::Circle { r, disc } => leaf(leaf_2d(primitives::circle2d(*r, disc))),
+            NodeKind::Polygon { points, paths, .. } => leaf(leaf_2d(primitives::polygon(points, paths))),
             NodeKind::Root | NodeKind::Group { .. } | NodeKind::Render { .. } => self.apply(n, Op::Union),
             NodeKind::IntersectionFor => self.apply(n, Op::Intersection),
             NodeKind::Csg(CsgOp::Union) => self.apply(n, Op::Union),
             NodeKind::Csg(CsgOp::Intersection) => self.apply(n, Op::Intersection),
             NodeKind::Csg(CsgOp::Difference) => self.apply(n, Op::Difference),
+            NodeKind::Fill => self.apply(n, Op::Fill),
             NodeKind::Color { rgba } => {
                 let mut out = self.apply(n, Op::Union)?;
                 out.geom = out.geom.map(|g| self.color(n, g, Color(*rgba)));
@@ -365,17 +369,50 @@ impl Ctx<'_> {
                     return Ok(Out { geom: None, msgs });
                 }
                 let mut out = self.apply(n, Op::Union)?;
-                out.geom = out.geom.map(|g| transform(g, matrix));
+                out.geom = out.geom.map(|g| transform(g, matrix, &mut out.msgs));
                 Ok(out)
             }
-            NodeKind::Projection { .. } => unsupported("projection"),
+            NodeKind::Offset { delta, join, disc, .. } => {
+                let (poly, msgs) = self.children_2d_union(n)?;
+                let geom = poly.map(|p| {
+                    // "The formula for the number of steps in a full circular
+                    // arc is ... Pi / acos(1 - arc_tolerance / abs(delta))"
+                    // (`GeometryEvaluator.cc:617-621`): the tolerance that
+                    // makes Clipper step like a circle of `|delta|` would.
+                    let steps = f64::from(fragments::circular_segments(disc, delta.abs()).unwrap_or(3));
+                    let tolerance = delta.abs() * (1.0 - cos_degrees(180.0 / steps));
+                    let join = match join {
+                        OffsetJoin::Round => clipper::Join::Round,
+                        OffsetJoin::Miter => clipper::Join::Miter,
+                        OffsetJoin::Square => clipper::Join::Square,
+                    };
+                    // `OffsetNode::miter_limit`, "fixed high value to disable
+                    // chamfers with jtMiter".
+                    Geometry::Polygon2d(Arc::new(clipper::offset(&p, *delta, join, 1_000_000.0, tolerance)))
+                });
+                Ok(Out { geom, msgs })
+            }
+            NodeKind::LinearExtrude(e) => {
+                let (poly, msgs) = self.children_2d_union(n)?;
+                let geom = poly.map(|p| Geometry::PolySet(Arc::new(extrude::linear_extrude(e, &p))));
+                Ok(Out { geom, msgs })
+            }
+            NodeKind::RotateExtrude { angle, start, disc, .. } => {
+                let (poly, mut msgs) = self.children_2d_union(n)?;
+                let geom = match poly.map(|p| extrude::rotate_extrude(*angle, *start, disc, &p)) {
+                    Some(Ok(ps)) => ps.map(|ps| Geometry::PolySet(Arc::new(ps))),
+                    Some(Err(text)) => {
+                        msgs.push(Msg { severity: Severity::Error, text, loc: None });
+                        None
+                    }
+                    None => None,
+                };
+                Ok(Out { geom, msgs })
+            }
+            NodeKind::Projection { cut, .. } => self.projection(n, *cut),
             NodeKind::Minkowski { .. } => unsupported("minkowski"),
             NodeKind::Hull => unsupported("hull"),
-            NodeKind::Fill => unsupported("fill"),
             NodeKind::Resize { .. } => unsupported("resize"),
-            NodeKind::Offset { .. } => unsupported("offset"),
-            NodeKind::LinearExtrude(_) => unsupported("linear_extrude"),
-            NodeKind::RotateExtrude { .. } => unsupported("rotate_extrude"),
             NodeKind::Surface { .. } => unsupported("surface"),
             NodeKind::Import(_) => unsupported("import"),
             NodeKind::Text(_) => unsupported("text"),
@@ -394,7 +431,9 @@ impl Ctx<'_> {
                 m.set_color(c, &self.block(n, OWN));
                 Geometry::Manifold(Arc::new(m))
             }
-            // `Polygon2d::setColor` is a no-op for geometry in this phase.
+            // `Polygon2d` does not override `Geometry::setColor`, so a colour
+            // on 2D geometry is dropped: a render shows 2D in the scheme's
+            // colour, and an extrusion of a coloured shape is uncoloured.
             g @ Geometry::Polygon2d(_) => g,
         }
     }
@@ -423,7 +462,7 @@ impl Ctx<'_> {
             }
         }
         let geom = match dim {
-            2 => self.apply_2d(&items, &mut msgs),
+            2 => self.apply_2d(&items, op, &mut msgs),
             3 => self.apply_3d(n, &items, op, &mut msgs),
             _ => None,
         };
@@ -452,8 +491,29 @@ impl Ctx<'_> {
         if children.is_empty() {
             return None;
         }
+        if op == Op::Fill {
+            for (_, c, _) in &children {
+                msgs.push(warn(c, "fill() not yet implemented for 3D"));
+            }
+        }
         if children.len() == 1 {
             return children.pop().and_then(|(_, _, g)| g);
+        }
+        if op == Op::Fill {
+            // `applyOperator3DManifold` has no case for FILL: the first
+            // solid is kept and every later one is an error
+            // (`manifold-applyops.cc`, "Unsupported CGAL operator", FILL
+            // being 5 in `OpenSCADOperator`).
+            let mut first = None;
+            for (i, _, g) in children {
+                let Some(m) = g.and_then(|g| self.to_manifold(n, i, g, msgs)).filter(|m| !m.is_empty()) else { continue };
+                if first.is_none() {
+                    first = Some(m);
+                } else {
+                    msgs.push(Msg { severity: Severity::Error, text: "Unsupported CGAL operator: 5".into(), loc: None });
+                }
+            }
+            return first.map(|m| Geometry::Manifold(Arc::new(m)));
         }
         let children: Vec<(u32, &Node, Option<Geometry>)> = if op == Op::Union {
             let actual: Vec<_> = children.into_iter().filter(|(_, _, g)| g.as_ref().is_some_and(|g| !g.is_empty())).collect();
@@ -500,39 +560,104 @@ impl Ctx<'_> {
         }
     }
 
-    /// `applyToChildren2D` without a 2D kernel (phase 5b): one child passes
-    /// through; several are concatenated and marked approximate.
-    fn apply_2d(&self, items: &[(&Node, Option<Geometry>)], msgs: &mut Vec<Msg>) -> Option<Geometry> {
-        let mut polys: Vec<Arc<Polygon2d>> = Vec::new();
-        let mut count = 0;
+    /// `collectChildren2D` (`GeometryEvaluator.cc:302-336`): one entry per
+    /// non-background child, `None` for nothing, empty or 3D (which warns).
+    fn collect_2d(&self, items: &[(&Node, Option<Geometry>)], msgs: &mut Vec<Msg>) -> Vec<Option<Arc<Polygon2d>>> {
+        let mut out = Vec::with_capacity(items.len());
         for (c, g) in items {
             if is_background(c) {
                 continue;
             }
-            count += 1;
             match g {
-                Some(g) if g.dimension() == 3 => msgs.push(warn(c, "Ignoring 3D child object for 2D operation")),
-                Some(Geometry::Polygon2d(p)) if !p.is_empty() => polys.push(p.clone()),
-                _ => {}
+                Some(g) if g.dimension() == 3 => {
+                    msgs.push(warn(c, "Ignoring 3D child object for 2D operation"));
+                    out.push(None);
+                }
+                Some(Geometry::Polygon2d(p)) if !p.is_empty() => out.push(Some(p.clone())),
+                _ => out.push(None),
             }
         }
-        match (count, polys.len()) {
-            (0, _) => None,
-            (1, 1) => polys.pop().map(Geometry::Polygon2d),
-            (1, _) => None,
+        out
+    }
+
+    /// `applyToChildren2D` (`GeometryEvaluator.cc:416-454`). One child
+    /// passes through untouched; more go through Clipper.
+    fn apply_2d(&self, items: &[(&Node, Option<Geometry>)], op: Op, msgs: &mut Vec<Msg>) -> Option<Geometry> {
+        let children = self.collect_2d(items, msgs);
+        let refs: Vec<Option<&Polygon2d>> = children.iter().map(|c| c.as_deref()).collect();
+        if op == Op::Fill {
+            return Some(Geometry::Polygon2d(Arc::new(clipper::fill(&refs))));
+        }
+        match children.len() {
+            0 => None,
+            1 => children.into_iter().next().flatten().map(Geometry::Polygon2d),
             _ => {
-                let mut p = Polygon2d { approximate: true, ..Default::default() };
-                for q in polys {
-                    p.outlines.extend(q.outlines.iter().cloned());
-                }
-                Some(Geometry::Polygon2d(Arc::new(p)))
+                let op = match op {
+                    Op::Union => clipper::Op2::Union,
+                    Op::Intersection => clipper::Op2::Intersection,
+                    Op::Difference => clipper::Op2::Difference,
+                    Op::Fill => unreachable!("handled above"),
+                };
+                Some(Geometry::Polygon2d(Arc::new(clipper::apply(&refs, op))))
             }
         }
     }
+
+    /// The children of a 2D-only operation (offset, the extrusions) as one
+    /// shape: `applyToChildren2D(node, UNION)` called directly, so there is
+    /// no mixing check, only a warning per 3D child.
+    fn children_2d_union(&self, n: &Node) -> Result<(Option<Polygon2d>, Vec<Msg>), Unsupported> {
+        let results = self.children(n)?;
+        let mut msgs = Vec::new();
+        let mut items: Vec<(&Node, Option<Geometry>)> = Vec::with_capacity(results.len());
+        for (c, o) in n.children.iter().zip(results) {
+            msgs.extend(o.msgs);
+            items.push((c, o.geom));
+        }
+        let geom = self.apply_2d(&items, Op::Union, &mut msgs);
+        let poly = match geom {
+            Some(Geometry::Polygon2d(p)) => Some(Arc::unwrap_or_clone(p)),
+            _ => None,
+        };
+        Ok((poly, msgs))
+    }
+
+    /// `projectionCut` / `projectionNoCut` for the Manifold backend
+    /// (`GeometryEvaluator.cc:845-907`): union the 3D children, then slice
+    /// at z = 0 or take the outline from above, and sanitize. With no 3D
+    /// geometry a cut gives nothing and a projection an empty shape.
+    fn projection(&self, n: &Node, cut: bool) -> Result<Out, Unsupported> {
+        let results = self.children(n)?;
+        let mut msgs = Vec::new();
+        let mut items: Vec<(&Node, Option<Geometry>)> = Vec::with_capacity(results.len());
+        for (c, o) in n.children.iter().zip(results) {
+            msgs.extend(o.msgs);
+            items.push((c, o.geom));
+        }
+        let solid = self.apply_3d(n, &items, Op::Union, &mut msgs);
+        let Some(solid) = solid else {
+            let geom = (!cut).then(|| Geometry::Polygon2d(Arc::new(Polygon2d::default())));
+            return Ok(Out { geom, msgs });
+        };
+        // `createManifoldFromGeometry` converts a mesh with a fresh set of
+        // IDs; the slot past the children is this node's own.
+        let m = self.to_manifold(n, OWN, solid, &mut msgs);
+        let geom = m.map(|m| {
+            let flat = if cut { m.slice() } else { m.project() };
+            Geometry::Polygon2d(Arc::new(clipper::sanitize(&flat)))
+        });
+        Ok(Out { geom, msgs })
+    }
+}
+
+/// A 2D leaf as `visit(LeafNode)` stores it: sanitized unless the
+/// primitive already guarantees it (`GeometryEvaluator.cc:672-675`).
+fn leaf_2d(p: Polygon2d) -> Geometry {
+    Geometry::Polygon2d(Arc::new(if p.sanitized { p } else { clipper::sanitize(&p) }))
 }
 
 /// Transform a result: 2D keeps the 2D part of the matrix, 3D takes it all.
-fn transform(g: Geometry, m: &crate::Matrix) -> Geometry {
+fn transform(g: Geometry, m: &crate::Matrix, msgs: &mut Vec<Msg>) -> Geometry {
     match g {
         Geometry::PolySet(ps) => {
             let mut ps: PolySet = Arc::unwrap_or_clone(ps);
@@ -546,7 +671,16 @@ fn transform(g: Geometry, m: &crate::Matrix) -> Geometry {
         }
         Geometry::Polygon2d(p) => {
             let mut p = Arc::unwrap_or_clone(p);
-            p.transform(m);
+            let m2 = Polygon2d::matrix_2d(m);
+            if let Some(w) = p.transform(&m2) {
+                msgs.push(Msg { severity: Severity::Warning, text: w.into(), loc: None });
+            }
+            // A mirror reverses every outline, so a sanitized shape would
+            // have clockwise outers and counter-clockwise holes; Clipper
+            // puts them right (`GeometryEvaluator.cc:759-765`).
+            if p.sanitized && crate::polygon2d::det3(&m2) <= 0.0 {
+                p = clipper::sanitize(&p);
+            }
             Geometry::Polygon2d(Arc::new(p))
         }
     }
@@ -557,6 +691,8 @@ enum Op {
     Union,
     Intersection,
     Difference,
+    /// `fill()`: a 2D operation; 3D children only warn.
+    Fill,
 }
 
 impl Op {
@@ -565,6 +701,8 @@ impl Op {
             Op::Union => OpType::Add,
             Op::Intersection => OpType::Intersect,
             Op::Difference => OpType::Subtract,
+            // Not a Manifold operation; `apply_3d` handles it first.
+            Op::Fill => OpType::Add,
         }
     }
 }

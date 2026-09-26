@@ -16,6 +16,7 @@ use manifold_rust::types::{BooleanEngine, Error, MeshGL64, OpType};
 
 use crate::Matrix;
 use crate::color::{Color, Scheme};
+use crate::polygon2d::{Outline, Polygon2d};
 use crate::polyset::{PolySet, Warnings};
 
 /// Where original IDs come from. OpenSCAD calls `Manifold::ReserveIDs`
@@ -216,8 +217,28 @@ impl ManifoldGeometry {
         for p in &rest {
             ids = ids.combine_ids(p, op, Manifold::empty());
         }
-        let leaves: Vec<CsgNode> =
-            std::iter::once(first).chain(rest).map(|p| CsgNode::leaf(p.manifold.into_impl())).collect();
+        // Every operand must carry its own mesh IDs. The C++ `Compose` (the
+        // disjoint-parts step of a union) offsets each node's IDs "since the
+        // nodes may be copies containing the same meshIDs"
+        // (`csg_tree.cpp:386-395`); manifold-rust's `compose_meshes` does
+        // not, so two copies of one cached solid would merge into a single
+        // run. Whether copies share IDs depends on scheduling (siblings with
+        // the same key computed at once both miss the cache and get
+        // separate IDs; computed in turn, the second is a cache hit), so
+        // without this the exported triangle order changed from run to run.
+        let mut seen = std::collections::HashSet::new();
+        let leaves: Vec<CsgNode> = std::iter::once(first)
+            .chain(rest)
+            .map(|p| {
+                let mut imp = p.manifold.into_impl();
+                let keys = &imp.mesh_relation.mesh_id_transform;
+                if keys.keys().any(|k| seen.contains(k)) {
+                    imp.increment_mesh_ids();
+                }
+                seen.extend(imp.mesh_relation.mesh_id_transform.keys().copied());
+                CsgNode::leaf(imp)
+            })
+            .collect();
         ids.manifold = Manifold::from_impl(CsgNode::op_n(op, leaves).evaluate());
         Some(ids)
     }
@@ -275,7 +296,7 @@ impl ManifoldGeometry {
         }
         let id = ids.reserve(1);
         if !self.manifold.is_empty() {
-            let mut mesh = self.manifold.get_mesh_gl64(-1);
+            let mut mesh = canonical_mesh(&self.manifold);
             mesh.run_index = vec![0, mesh.tri_verts.len() as u64];
             mesh.run_original_id = vec![id];
             mesh.run_transform.clear();
@@ -293,7 +314,7 @@ impl ManifoldGeometry {
     /// `ManifoldGeometry::toPolySet` (`ManifoldGeometry.cc:129-210`): the
     /// triangles run by run, each run coloured by its original ID.
     pub fn to_polyset(&self, scheme: &Scheme) -> PolySet {
-        let mesh = self.manifold.get_mesh_gl64(-1);
+        let mesh = canonical_mesh(&self.manifold);
         let np = mesh.num_prop as usize;
         let mut ps = PolySet { triangular: true, ..Default::default() };
         ps.vertices = mesh.vert_properties.chunks(np.max(3)).map(|v| [v[0], v[1], v[2]]).collect();
@@ -322,29 +343,19 @@ impl ManifoldGeometry {
         if mesh.run_index.is_empty() {
             return ps;
         }
-        // Manifold orders runs by original ID, then by its internal mesh
-        // ID. Mesh IDs come from a global counter, so when copies of one
-        // mesh were built on different threads their order is a race.
-        // Ordering runs that share an original ID by their lowest vertex
-        // instead keeps exports byte-identical from run to run; OpenSCAD's
-        // serial order is not reproducible anyway, as its IDs differ too.
-        let mut runs: Vec<(u32, u64, usize, usize)> = Vec::with_capacity(mesh.run_index.len());
+        // Runs come in `canonical_mesh` order.
         let mut start = mesh.run_index[0] as usize;
         for run in 0..mesh.run_index.len() - 1 {
             let end = mesh.run_index[run + 1] as usize;
-            if end > start {
-                let low = mesh.tri_verts[start..end].iter().copied().min().unwrap_or(0);
-                runs.push((mesh.run_original_id[run], low, start, end));
-                start = end;
+            if end == start {
+                continue;
             }
-        }
-        runs.sort_by_key(|&(id, low, _, _)| (id, low));
-        for (id, _, start, end) in runs {
-            let ci = color_index(&mut ps, id);
+            let ci = color_index(&mut ps, mesh.run_original_id[run]);
             for t in mesh.tri_verts[start..end].chunks(3) {
                 ps.faces.push(vec![t[0] as u32, t[1] as u32, t[2] as u32]);
                 ps.color_indices.push(ci);
             }
+            start = end;
         }
         ps
     }
@@ -355,6 +366,126 @@ impl ManifoldGeometry {
         }
         let b = self.manifold.bounding_box();
         Some(([b.min.x, b.min.y, b.min.z], [b.max.x, b.max.y, b.max.z]))
+    }
+
+    /// `ManifoldGeometry::slice`: the cross-section at z = 0, as
+    /// `CrossSection(manifold.Slice()).ToPolygons()`. The result is
+    /// unsanitized; `projection(cut = true)` sanitizes it.
+    pub fn slice(&self) -> Polygon2d {
+        if self.is_empty() {
+            return Polygon2d::default();
+        }
+        positive_union(self.manifold.slice(0.0).to_polygons())
+    }
+
+    /// `ManifoldGeometry::project`: the outline seen from above, as
+    /// `CrossSection(manifold.Project()).ToPolygons()`. manifold-rust's own
+    /// `project()` unions with the non-zero rule at 6 decimals, where the
+    /// C++ `CrossSection` constructor uses the positive rule at 8
+    /// (`cross_section.cpp:35,273-279`), so the raw loops are taken from the
+    /// implementation and unioned here.
+    pub fn project(&self) -> Polygon2d {
+        if self.is_empty() || self.manifold.as_impl().is_soup {
+            return Polygon2d::default();
+        }
+        positive_union(self.manifold.as_impl().project())
+    }
+}
+
+/// The solid's mesh with its runs in an order that does not depend on
+/// thread scheduling.
+///
+/// `GetMeshGL` groups triangles into runs sorted by original ID and then by
+/// mesh ID. Mesh IDs come from Manifold's process-wide counter, drawn inside
+/// the kernel (every boolean renumbers its right operand's IDs, every
+/// transformed copy gets new ones), so when subtrees are built on several
+/// threads the relative order of two runs sharing an original ID (copies of
+/// one cached mesh, say) depends on which thread drew first. Everything else
+/// in the kernel only compares mesh IDs for equality, so this ordering is
+/// the one place the race leaks out: into exported files, and, through
+/// [`ManifoldGeometry::set_color`]'s rebuild, into later solids.
+///
+/// Runs sharing an original ID are ordered here by their first triangle
+/// instead. Vertex numbering and the triangle order inside a run follow the
+/// kernel's own (stable, geometric) sorts, so that triangle is the same
+/// every time, and no two runs share one, so the order is total. OpenSCAD's
+/// serial order cannot be reproduced anyway: its IDs differ from ours.
+fn canonical_mesh(m: &Manifold) -> MeshGL64 {
+    let mut mesh = m.get_mesh_gl64(-1);
+    let runs = mesh.run_original_id.len();
+    if runs < 2 {
+        return mesh;
+    }
+    let total = mesh.tri_verts.len();
+    let span = |r: usize| -> (usize, usize) {
+        let start = mesh.run_index[r] as usize;
+        let end = mesh.run_index.get(r + 1).map_or(total, |&e| e as usize);
+        (start, end)
+    };
+    let mut order: Vec<usize> = (0..runs).collect();
+    order.sort_by_key(|&r| {
+        let (start, end) = span(r);
+        let first: [u64; 3] = if end >= start + 3 { [mesh.tri_verts[start], mesh.tri_verts[start + 1], mesh.tri_verts[start + 2]] } else { [u64::MAX; 3] };
+        (mesh.run_original_id[r], first)
+    });
+    if order.iter().enumerate().all(|(i, &r)| i == r) {
+        return mesh;
+    }
+    let per_run_transform = mesh.run_transform.len() == 12 * runs;
+    let per_run_flags = mesh.run_flags.len() == runs;
+    let per_tri_face = mesh.face_id.len() * 3 == total;
+    let mut tri_verts = Vec::with_capacity(total);
+    let mut run_index = Vec::with_capacity(runs + 1);
+    let mut run_original_id = Vec::with_capacity(runs);
+    let mut run_transform = Vec::new();
+    let mut run_flags = Vec::new();
+    let mut face_id = Vec::new();
+    for &r in &order {
+        let (start, end) = span(r);
+        run_index.push(tri_verts.len() as u64);
+        tri_verts.extend_from_slice(&mesh.tri_verts[start..end]);
+        run_original_id.push(mesh.run_original_id[r]);
+        if per_run_transform {
+            run_transform.extend_from_slice(&mesh.run_transform[12 * r..12 * r + 12]);
+        }
+        if per_run_flags {
+            run_flags.push(mesh.run_flags[r]);
+        }
+        if per_tri_face {
+            face_id.extend_from_slice(&mesh.face_id[start / 3..end / 3]);
+        }
+    }
+    run_index.push(tri_verts.len() as u64);
+    mesh.tri_verts = tri_verts;
+    mesh.run_index = run_index;
+    mesh.run_original_id = run_original_id;
+    if per_run_transform {
+        mesh.run_transform = run_transform;
+    }
+    if per_run_flags {
+        mesh.run_flags = run_flags;
+    }
+    if per_tri_face {
+        mesh.face_id = face_id;
+    }
+    // Per-halfedge tangents are not requested (`get_mesh_gl64(-1)`), so
+    // there is nothing else to permute.
+    debug_assert!(mesh.halfedge_tangent.is_empty());
+    mesh
+}
+
+/// `CrossSection(Polygons)`: Clipper's union with the positive fill rule at
+/// 8 decimal digits, read back as outlines.
+fn positive_union(polys: Vec<Vec<manifold_rust::linalg::Vec2>>) -> Polygon2d {
+    use clipper2_rust::{FillRule, PathD, PathsD, Point, union_d};
+    if polys.is_empty() {
+        return Polygon2d::default();
+    }
+    let paths: PathsD = polys.iter().map(|p| p.iter().map(|v| Point::new(v.x, v.y)).collect::<PathD>()).collect();
+    let res = union_d(&paths, &PathsD::new(), FillRule::Positive, 8);
+    Polygon2d {
+        outlines: res.iter().map(|p| Outline::new(p.iter().map(|q| [q.x, q.y]).collect())).collect(),
+        sanitized: false,
     }
 }
 

@@ -321,6 +321,7 @@ dependencies = [
 name = "neoscad-geom"
 version = "0.1.0"
 dependencies = [
+ "clipper2-rust",
  "manifold-rust",
  "neoscad-eval",
  "neoscad-lang",

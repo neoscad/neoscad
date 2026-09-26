@@ -16,6 +16,9 @@ default = ["parallel"]
 parallel = ["dep:rayon", "manifold-rust/parallel"]
 
 [dependencies]
+# Pinned exactly, like manifold-rust (which depends on the same version):
+# offset() output is Clipper's arc stepping vertex for vertex.
+clipper2-rust = "=1.2.0"
 eval = { package = "neoscad-eval", path = "../eval" }
 lang = { package = "neoscad-lang", path = "../lang" }
 # Pinned exactly: the port tracks Manifold C++ v3.5.0 and its output

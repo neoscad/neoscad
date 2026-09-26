@@ -1,5 +1,6 @@
-//! Mesh files in OpenSCAD's formats (`src/io/export_{stl,off,obj}.cc`) and
-//! the render summary (`src/RenderStatistic.cc`).
+//! Mesh files in OpenSCAD's formats (`src/io/export_{stl,off,obj}.cc`), 2D
+//! files (`export_{svg,dxf}.cc`) and the render summary
+//! (`src/RenderStatistic.cc`).
 //!
 //! The byte layout follows OpenSCAD: OFF and OBJ print coordinates with
 //! C++'s default `ostream << double` (`%g`, 6 significant digits), ASCII STL
@@ -13,6 +14,7 @@ use lang::number::fmt_g;
 
 use crate::Geometry;
 use crate::color::Scheme;
+use crate::polygon2d::Polygon2d;
 use crate::polyset::{PolySet, Warnings};
 
 /// `PolySetUtils::getGeometryAsPolySet`: the mesh a 3D result exports as.
@@ -186,6 +188,100 @@ pub fn shortest(v: f64) -> String {
     out
 }
 
+/// `export_svg` (`export_svg.cc`) with the default options (no fill, a
+/// black stroke 0.35 wide): a view box of whole millimetres around the
+/// shape padded by half the stroke, then one path with every outline, y
+/// flipped (so `0` prints as `-0`), six points to a line.
+pub fn svg(p: &Polygon2d) -> Vec<u8> {
+    let stroke_width = 0.35;
+    let pad = stroke_width / 2.0;
+    let (lo, hi) = p.bounds().unwrap_or(([f64::MAX; 2], [-f64::MAX; 2]));
+    let minx = (lo[0] - pad).floor() as i32;
+    let miny = (-hi[1] - pad).floor() as i32;
+    let maxx = (hi[0] + pad).ceil() as i32;
+    let maxy = (-lo[1] + pad).ceil() as i32;
+    let (width, height) = (maxx - minx, maxy - miny);
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" standalone=\"no\"?>\n");
+    out.push_str("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n");
+    out.push_str(&format!(
+        "<svg width=\"{width}mm\" height=\"{height}mm\" viewBox=\"{minx} {miny} {width} {height}\" xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\">\n"
+    ));
+    out.push_str("<title>OpenSCAD Model</title>\n");
+    out.push_str("<path d=\"\n");
+    for o in &p.outlines {
+        let Some(p0) = o.vertices.first() else { continue };
+        out.push_str(&format!("M {},{}", fmt_g(p0[0]), fmt_g(-p0[1])));
+        for (idx, v) in o.vertices.iter().enumerate().skip(1) {
+            out.push_str(&format!(" L {},{}", fmt_g(v[0]), fmt_g(-v[1])));
+            if idx % 6 == 5 {
+                out.push('\n');
+            }
+        }
+        out.push_str(" z\n");
+    }
+    out.push_str(&format!("\" stroke=\"black\" fill=\"none\" stroke-width=\"{}\"/>\n", fmt_g(stroke_width)));
+    out.push_str("</svg>\n");
+    out.into_bytes()
+}
+
+/// The fixed part of `export_dxf_header` (`export_dxf.cc:40-200`) after the
+/// extents: line type, layer and style tables, and an empty BLOCKS section.
+const DXF_TABLES: &str = "  0\nENDSEC\n  0\nSECTION\n  2\nTABLES\n  0\nTABLE\n  2\nLTYPE\n 70\n1\n  0\nLTYPE\n  2\nCONTINUOUS\n 70\n64\n  3\nSolid line\n 72\n65\n 73\n0\n 40\n0.000000\n  0\nENDTAB\n  0\nTABLE\n  2\nLAYER\n 70\n6\n  0\nLAYER\n  2\n0\n 70\n64\n 62\n7\n  6\nCONTINUOUS\n  0\nENDTAB\n  0\nTABLE\n  2\nSTYLE\n 70\n0\n  0\nENDTAB\n  0\nENDSEC\n  0\nSECTION\n  2\nBLOCKS\n  0\nENDSEC\n";
+
+/// `export_dxf` (`export_dxf.cc`): an R12-style header with the extents,
+/// then one entity per outline (a POINT, a LINE, or a closed LWPOLYLINE).
+///
+/// The extents start from `DBL_MAX` and `DBL_MIN` as in OpenSCAD, and
+/// `DBL_MIN` is the smallest positive double, not the most negative: a
+/// shape entirely left of or below the origin keeps `2.22507e-308` as its
+/// maximum. That is copied so the files compare equal.
+pub fn dxf(p: &Polygon2d) -> Vec<u8> {
+    let (mut x_min, mut y_min) = (f64::MAX, f64::MAX);
+    let (mut x_max, mut y_max) = (f64::MIN_POSITIVE, f64::MIN_POSITIVE);
+    for v in p.outlines.iter().flat_map(|o| o.vertices.iter()) {
+        if x_min > v[0] {
+            x_min = v[0];
+        }
+        if x_max < v[0] {
+            x_max = v[0];
+        }
+        if y_min > v[1] {
+            y_min = v[1];
+        }
+        if y_max < v[1] {
+            y_max = v[1];
+        }
+    }
+    let (x0, y0, x1, y1) = (fmt_g(x_min), fmt_g(y_min), fmt_g(x_max), fmt_g(y_max));
+    let mut out = String::from("999\nDXF from OpenSCAD\n");
+    out.push_str("  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1006\n  9\n$INSBASE\n 10\n0.0\n 20\n0.0\n 30\n0.0\n");
+    out.push_str(&format!("  9\n$EXTMIN\n 10\n{x0}\n 20\n{y0}\n  9\n$EXTMAX\n 10\n{x1}\n 20\n{y1}\n"));
+    out.push_str(&format!("  9\n$LINMIN\n 10\n{x0}\n 20\n{y0}\n  9\n$LINMAX\n 10\n{x1}\n 20\n{y1}\n"));
+    out.push_str(DXF_TABLES);
+    out.push_str("  0\nSECTION\n  2\nENTITIES\n");
+    for o in &p.outlines {
+        match o.vertices.as_slice() {
+            [a] => out.push_str(&format!("  0\nPOINT\n100\nAcDbEntity\n  8\n0\n100\nAcDbPoint\n 10\n{}\n 20\n{}\n", fmt_g(a[0]), fmt_g(a[1]))),
+            [a, b] => out.push_str(&format!(
+                "  0\nLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbLine\n 10\n{}\n 20\n{}\n 11\n{}\n 21\n{}\n",
+                fmt_g(a[0]),
+                fmt_g(a[1]),
+                fmt_g(b[0]),
+                fmt_g(b[1])
+            )),
+            vs => {
+                out.push_str(&format!("  0\nLWPOLYLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbPolyline\n 90\n{}\n 70\n1\n", vs.len()));
+                for v in vs {
+                    out.push_str(&format!(" 10\n{}\n 20\n{}\n", fmt_g(v[0]), fmt_g(v[1])));
+                }
+            }
+        }
+    }
+    out.push_str("  0\nENDSEC\n  0\nEOF\n");
+    out.into_bytes()
+}
+
 /// The top-level object lines of OpenSCAD's render summary
 /// (`LogVisitor::visit`, `RenderStatistic.cc:224-303`). Empty geometry
 /// prints nothing.
@@ -250,6 +346,44 @@ mod tests {
         // `openscad -o c.off` on `cube(1);`, 2026.09.23 nightly.
         let expected = "OFF\n8 6 0\n0 0 0 \n1 0 0 \n0 1 0 \n1 1 0 \n0 0 1 \n1 0 1 \n0 1 1 \n1 1 1 \n4 4 5 7 6\n4 2 3 1 0\n4 0 1 5 4\n4 1 3 7 5\n4 3 2 6 7\n4 2 0 4 6\n";
         assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn svg_of_an_offset_matches_the_nightly() {
+        // `offset(r=1, $fn=8) square(10);` exported with `-o x.svg` by the
+        // 2026.09.23 nightly: Clipper's vertex order and start point, the
+        // flipped y with its `-0`, and the six-points-a-line wrapping.
+        let n = 8.0f64;
+        let tol = 1.0 - eval::trig::cos_degrees(180.0 / n);
+        let sq = primitives::square([10.0, 10.0], false);
+        let p = crate::clipper::offset(&sq, 1.0, crate::clipper::Join::Round, 2.0, tol);
+        let expected = "<?xml version=\"1.0\" standalone=\"no\"?>
+<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">
+<svg width=\"14mm\" height=\"14mm\" viewBox=\"-2 -12 14 14\" xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\">
+<title>OpenSCAD Model</title>
+<path d=\"
+M 10.7071,0.707107 L 11,-0 L 11,-10 L 10.7071,-10.7071 L 10,-11 L 0,-11
+ L -0.707107,-10.7071 L -1,-10 L -1,-0 L -0.707107,0.707107 L 0,1 L 10,1
+ z
+\" stroke=\"black\" fill=\"none\" stroke-width=\"0.35\"/>
+</svg>
+";
+        assert_eq!(String::from_utf8(svg(&p)).unwrap(), expected);
+    }
+
+    #[test]
+    fn dxf_keeps_openscads_extent_quirk() {
+        // `translate([-5,-3]) polygon([[0,0],[2,0],[1,1]]);` on the nightly:
+        // the maximum extents stay at DBL_MIN for a shape left of and below
+        // the origin.
+        let p = Polygon2d::from_outline(vec![[-4.0, -2.0], [-5.0, -3.0], [-3.0, -3.0]]);
+        let text = String::from_utf8(dxf(&p)).unwrap();
+        assert!(text.starts_with("999\nDXF from OpenSCAD\n  0\nSECTION\n  2\nHEADER\n"));
+        assert!(text.contains("  9\n$EXTMIN\n 10\n-5\n 20\n-3\n  9\n$EXTMAX\n 10\n2.22507e-308\n 20\n2.22507e-308\n"));
+        assert!(text.ends_with(
+            "  0\nLWPOLYLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbPolyline\n 90\n3\n 70\n1\n 10\n-4\n 20\n-2\n 10\n-5\n 20\n-3\n 10\n-3\n 20\n-3\n  0\nENDSEC\n  0\nEOF\n"
+        ));
+        assert_eq!(text.len(), 708);
     }
 
     #[test]

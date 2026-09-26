@@ -108,6 +108,23 @@ fn output_is_deterministic_and_cache_hits_are_silent() {
     assert!(second.is_empty(), "{second:?}");
 }
 
+/// Copies of one cached solid, unioned: the case whose output order
+/// depended on thread scheduling. Whether two sibling copies share mesh
+/// IDs depended on which thread computed first (a cache hit shares them),
+/// and manifold-rust's union of disjoint parts merged copies that shared
+/// IDs into one run. At 736bcc1 about one render in six came out in a
+/// different order.
+#[test]
+fn copies_of_a_cached_solid_export_identically_every_time() {
+    let src = "module m() difference() { cube(2, center=true); sphere(1.2, $fn=16); }
+module row() for (i = [0:3]) translate([i*2,0,0]) m();
+for (j = [0:3]) translate([0,j*2,0]) row();";
+    let first = off(src);
+    for _ in 0..20 {
+        assert!(off(src) == first, "export differs between renders");
+    }
+}
+
 #[test]
 fn flipped_polyhedron_face_is_repaired() {
     // polyhedron-tests.scad's "one face flipped" octahedron, unioned so it

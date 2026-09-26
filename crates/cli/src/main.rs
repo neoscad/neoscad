@@ -285,6 +285,8 @@ fn run_cli(cli: Cli) -> ExitCode {
             "binstl" => Some(run::MeshFormat::BinaryStl),
             "off" => Some(run::MeshFormat::Off),
             "obj" => Some(run::MeshFormat::Obj),
+            "svg" => Some(run::MeshFormat::Svg),
+            "dxf" => Some(run::MeshFormat::Dxf),
             _ => None,
         })
         .collect();

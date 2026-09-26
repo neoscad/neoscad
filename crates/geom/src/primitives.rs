@@ -7,7 +7,7 @@ use eval::node::Discretizer;
 use eval::trig::{cos_degrees, sin_degrees};
 
 use crate::fragments::circular_segments;
-use crate::polygon2d::Polygon2d;
+use crate::polygon2d::{Outline, Polygon2d};
 use crate::polyset::PolySet;
 
 /// `generate_circle` (`primitives.cc:58-65`): `fragments` points at height
@@ -130,7 +130,7 @@ pub fn square(size: [f64; 2], center: bool) -> Polygon2d {
         return Polygon2d::default();
     }
     let (v1, v2) = if center { ([-size[0] / 2.0, -size[1] / 2.0], [size[0] / 2.0, size[1] / 2.0]) } else { ([0.0, 0.0], size) };
-    Polygon2d::from_outlines(vec![vec![v1, [v2[0], v1[1]], v2, [v1[0], v2[1]]]])
+    Polygon2d::from_outline(vec![v1, [v2[0], v1[1]], v2, [v1[0], v2[1]]])
 }
 
 /// `CircleNode::createGeometry` (`primitives.cc:550-564`).
@@ -145,20 +145,26 @@ pub fn circle2d(r: f64, disc: &Discretizer) -> Polygon2d {
             [r * cos_degrees(phi), r * sin_degrees(phi)]
         })
         .collect();
-    Polygon2d::from_outlines(vec![pts])
+    Polygon2d::from_outline(pts)
 }
 
 /// `PolygonNode::createGeometry` (`primitives.cc:626-653`): without paths
 /// the points form one outline (if there are at least three); otherwise
-/// each path is an outline.
+/// each path is an outline, the first positive and the rest holes. The
+/// result is unsanitized: the evaluator runs it through Clipper's even-odd
+/// union, which is what makes nested paths holes whatever their winding.
 pub fn polygon(points: &[[f64; 2]], paths: &[Vec<usize>]) -> Polygon2d {
+    let mut p = Polygon2d::default();
     if paths.is_empty() {
         if points.len() > 2 {
-            return Polygon2d::from_outlines(vec![points.to_vec()]);
+            p.outlines.push(Outline::new(points.to_vec()));
         }
-        return Polygon2d::default();
+        return p;
     }
-    Polygon2d::from_outlines(paths.iter().map(|p| p.iter().map(|&i| points[i]).collect()).collect())
+    for (i, path) in paths.iter().enumerate() {
+        p.outlines.push(Outline { vertices: path.iter().map(|&k| points[k]).collect(), positive: i == 0 });
+    }
+    p
 }
 
 #[cfg(test)]
