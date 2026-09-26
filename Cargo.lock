@@ -722,6 +722,7 @@ dependencies = [
  "neoscad-render",
  "neoscad-text",
  "png",
+ "serde_json",
 ]
 
 [[package]]
@@ -784,6 +785,7 @@ version = "0.1.0"
 dependencies = [
  "neoscad-geom",
  "neoscad-io",
+ "neoscad-lang",
  "png",
  "pollster",
  "serde_json",

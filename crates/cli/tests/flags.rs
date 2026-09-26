@@ -239,3 +239,92 @@ fn png_export_uses_the_camera_and_the_files_view() {
     let (_, _, near) = png(&["--camera=0,0,0,55,0,25,40"]).unwrap();
     assert!(far > 0 && near > 20 * far, "{far} vs {near} model pixels");
 }
+
+/// Without `--render` a PNG is OpenSCAD's preview: a `#` object is drawn
+/// again in translucent red, and the same input gives the same bytes.
+/// Skipped without a GPU.
+#[test]
+fn png_preview_draws_highlights_and_is_deterministic() {
+    let d = scratch("preview");
+    std::fs::write(
+        d.join("h.scad"),
+        "difference() { cube(10, center=true); #cylinder(h=20, r=3, center=true); }\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| -> Option<Vec<u8>> {
+        let mut all = vec!["h.scad", "--imgsize=200,200", "-o", "h.png"];
+        all.extend_from_slice(args);
+        let out = neoscad(&d, &all);
+        if !out.status.success() {
+            let err = text(&out.stderr);
+            assert!(err.contains("GPU"), "{err}");
+            eprintln!("skipped: {err}");
+            return None;
+        }
+        Some(std::fs::read(d.join("h.png")).unwrap())
+    };
+    let Some(first) = run(&[]) else { return };
+    assert_eq!(run(&[]).unwrap(), first, "same input, same bytes");
+    let reddish = |bytes: &[u8]| {
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        buf[..info.buffer_size()]
+            .chunks(3)
+            .filter(|p| p[0] > 150 && p[1] < 120 && p[2] < 120)
+            .count()
+    };
+    assert!(
+        reddish(&first) > 200,
+        "{} highlight pixels",
+        reddish(&first)
+    );
+    // Render mode draws the geometry only: no highlight.
+    assert_eq!(reddish(&run(&["--render"]).unwrap()), 0);
+    // The throwntogether view also draws the cylinder, in the highlight
+    // colour because it is marked.
+    assert!(reddish(&run(&["--preview=throwntogether"]).unwrap()) > 200);
+}
+
+/// `neoscad snapshot`: a sheet of the requested size, and a JSON summary
+/// with the solid's numbers and, with `--diff`, the changed volumes.
+/// Skipped without a GPU.
+#[test]
+fn snapshot_writes_a_sheet_and_a_summary() {
+    let d = scratch("snapshot");
+    std::fs::write(d.join("a.scad"), "cube(10);\n").unwrap();
+    std::fs::write(d.join("b.scad"), "cube([10, 10, 5]);\n").unwrap();
+    let out = neoscad(
+        &d,
+        &[
+            "snapshot", "a.scad", "--size", "400x300", "--dims", "--diff", "b.scad", "--format",
+            "json",
+        ],
+    );
+    if !out.status.success() {
+        let err = text(&out.stderr);
+        assert!(err.contains("GPU"), "{err}");
+        eprintln!("skipped: {err}");
+        return;
+    }
+    let summary = text(&out.stdout);
+    assert!(summary.contains(r#""volume":1000.0"#), "{summary}");
+    assert!(summary.contains(r#""added_volume":500.0"#), "{summary}");
+    assert!(summary.contains(r#""removed_volume":0.0"#), "{summary}");
+    assert!(
+        summary.contains(r#""output":"a-snapshot.png""#),
+        "{summary}"
+    );
+    let file = std::fs::File::open(d.join("a-snapshot.png")).unwrap();
+    let reader = png::Decoder::new(std::io::BufReader::new(file))
+        .read_info()
+        .unwrap();
+    let info = reader.info();
+    assert_eq!((info.width, info.height), (400, 300));
+    // Unknown views are an error naming the valid ones.
+    let out = neoscad(&d, &["snapshot", "a.scad", "--views", "side"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("iso, front, back"));
+}

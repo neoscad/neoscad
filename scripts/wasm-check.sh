@@ -3,9 +3,11 @@
 # pulls in lang, eval, geom with default features, io, text and the bundled
 # assets) and runs its cases in node: primitives, a boolean, minkowski,
 # text in the bundled font, include <MCAD/...>, import() and dxf_dim() from
-# an in-memory file system, a host-supplied rands() seed, and recursion
-# that must end in OpenSCAD's error rather than a trap. Each result also
-# goes through the renderer's CPU side (scene, colour scheme, camera fit).
+# an in-memory file system, a host-supplied rands() seed, recursion that
+# must end in OpenSCAD's error rather than a trap, and a preview (CSG
+# products with `#` and `%`, their booleans, the preview scene). Each
+# result also goes through the renderer's CPU side (scene, colour scheme,
+# camera fit).
 # The renderer's GPU side (wgpu on WebGPU) is only built, not run: it needs
 # a browser and wasm-bindgen glue, which this plain module has neither of.
 #

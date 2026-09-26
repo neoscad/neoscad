@@ -390,66 +390,49 @@ impl Renderer {
         }
     }
 
+    /// The geometry of several nodes of one tree, each as [`Renderer::render`]
+    /// would give it (without `force`), in the order given: the leaves a
+    /// preview draws (`CSGTreeEvaluator` asks for each leaf's geometry on
+    /// its own). The nodes may nest; one tree-order pass assigns keys and ID
+    /// blocks to all of them before anything runs, so the results are the
+    /// same at any thread count. Nodes are evaluated deepest first, those
+    /// at one depth in parallel, so a nested node is computed once and an
+    /// enclosing one finds it in the cache (and does not repeat its
+    /// messages).
+    pub fn render_many(
+        &self,
+        tops: &[&Node],
+        keys: &Keys,
+        opts: RenderOptions,
+    ) -> Result<Vec<Rendered>, Unsupported> {
+        let opts = RenderOptions {
+            force: false,
+            ..opts
+        };
+        loop {
+            let (out, overflow) = self.render_tops(tops, keys, &opts)?;
+            if overflow.is_empty() {
+                return Ok(out);
+            }
+            let mut needs = self.needs.lock().expect("id needs");
+            for (k, n) in overflow {
+                let e = needs.entry(k).or_insert(0);
+                *e = (*e).max(n);
+            }
+            drop(needs);
+            self.clear();
+        }
+    }
+
     fn render_once(
         &self,
         top: &Node,
         keys: &Keys,
         opts: &RenderOptions,
     ) -> Result<(Rendered, Needs), Unsupported> {
-        fn max_index(n: &Node) -> usize {
-            n.children.iter().map(max_index).fold(n.index, usize::max)
-        }
-        let len = max_index(top) + 1;
-        let mut ctx = Ctx {
-            r: self,
-            opts,
-            hashes: vec![0; len],
-            first: vec![false; len],
-            blocks: HashMap::new(),
-            overflow: Mutex::new(HashMap::new()),
-        };
-        // Tree order pass: hashes, first occurrences and ID blocks, all
-        // decided before anything runs in parallel.
-        {
-            let mut seen = HashSet::new();
-            let mut ids = self.ids.lock().expect("id registry");
-            let needs = self.needs.lock().expect("id needs");
-            // (node, its parent's key and first-occurrence flag)
-            let mut stack: Vec<(&Node, Option<(Key, bool)>)> = vec![(top, None)];
-            while let Some((n, parent)) = stack.pop() {
-                let h = keys.get(n);
-                ctx.hashes[n.index] = h;
-                // A group with one child that has content shares that
-                // child's key (`Keys`): it is the same computation, so the
-                // child inherits the group's claim to be first.
-                let first = match parent {
-                    Some((ph, pf)) if ph == h => pf,
-                    _ => seen.insert(h),
-                };
-                seen.insert(h);
-                ctx.first[n.index] = first;
-                for slot in std::iter::once(OWN).chain(0..n.children.len() as u32) {
-                    let size = needs.get(&(h, slot)).map_or(BLOCK, |&n| n.max(BLOCK));
-                    let b = ids.entry((h, slot)).or_insert((0, 0));
-                    if b.1 < size {
-                        *b = (Manifold::reserve_ids(size), size);
-                    }
-                    ctx.blocks.insert((h, slot), *b);
-                }
-                stack.extend(n.children.iter().rev().map(|c| (c, Some((h, first)))));
-            }
-        }
+        let ctx = self.prepare(&[top], keys, opts);
         #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
-        let out = {
-            let pool = self.pool.get_or_init(|| {
-                rayon::ThreadPoolBuilder::new()
-                    .stack_size(eval::DEFAULT_THREAD_STACK)
-                    .thread_name(|i| format!("geom-{i}"))
-                    .build()
-                    .expect("geometry thread pool")
-            });
-            pool.install(|| ctx.node(top))?
-        };
+        let out = self.pool().install(|| ctx.node(top))?;
         #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
         let out = ctx.node(top)?;
         let mut geom = out.geom;
@@ -483,6 +466,138 @@ impl Renderer {
             },
             overflow,
         ))
+    }
+
+    /// [`Renderer::render_many`]'s single pass.
+    fn render_tops(
+        &self,
+        tops: &[&Node],
+        keys: &Keys,
+        opts: &RenderOptions,
+    ) -> Result<(Vec<Rendered>, Needs), Unsupported> {
+        let ctx = self.prepare(tops, keys, opts);
+        // Depth of each top: how many other tops enclose it.
+        let mut depth = vec![0usize; tops.len()];
+        {
+            let mut owner: HashMap<usize, usize> = HashMap::new();
+            for (i, t) in tops.iter().enumerate() {
+                owner.insert(t.index, i);
+            }
+            fn walk(
+                n: &Node,
+                enclosing: usize,
+                owner: &HashMap<usize, usize>,
+                depth: &mut [usize],
+            ) {
+                let mut enclosing = enclosing;
+                if let Some(&i) = owner.get(&n.index) {
+                    depth[i] = depth[i].max(enclosing);
+                    enclosing += 1;
+                }
+                for c in &n.children {
+                    walk(c, enclosing, owner, depth);
+                }
+            }
+            for t in tops {
+                walk(t, 0, &owner, &mut depth);
+            }
+        }
+        let mut outs: Vec<Option<Out>> = (0..tops.len()).map(|_| None).collect();
+        let max_depth = depth.iter().copied().max().unwrap_or(0);
+        for d in (0..=max_depth).rev() {
+            let at: Vec<usize> = (0..tops.len()).filter(|&i| depth[i] == d).collect();
+            #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+            let results: Vec<Result<Out, Unsupported>> = {
+                use rayon::prelude::*;
+                self.pool()
+                    .install(|| at.par_iter().map(|&i| ctx.node(tops[i])).collect())
+            };
+            #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
+            let results: Vec<Result<Out, Unsupported>> =
+                at.iter().map(|&i| ctx.node(tops[i])).collect();
+            for (i, r) in at.into_iter().zip(results) {
+                outs[i] = Some(r?);
+            }
+        }
+        let cache_entries = self.cache.lock().expect("cache").entries.len();
+        let overflow = std::mem::take(&mut *ctx.overflow.lock().expect("overflow log"));
+        let rendered = outs
+            .into_iter()
+            .map(|o| {
+                let o = o.expect("every top is evaluated at its depth");
+                Rendered {
+                    geometry: o.geom,
+                    messages: o.msgs,
+                    cache_entries,
+                }
+            })
+            .collect();
+        Ok((rendered, overflow))
+    }
+
+    #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+    fn pool(&self) -> &rayon::ThreadPool {
+        self.pool.get_or_init(|| {
+            rayon::ThreadPoolBuilder::new()
+                .stack_size(eval::DEFAULT_THREAD_STACK)
+                .thread_name(|i| format!("geom-{i}"))
+                .build()
+                .expect("geometry thread pool")
+        })
+    }
+
+    /// The tree-order pass: hashes, first occurrences and ID blocks for
+    /// every node under `tops`, all decided before anything runs in
+    /// parallel. A node reached again under a later top (a nested top) is
+    /// not revisited, so it keeps the flags of its first, tree-order visit.
+    fn prepare<'a>(&'a self, tops: &[&Node], keys: &Keys, opts: &'a RenderOptions) -> Ctx<'a> {
+        fn max_index(n: &Node) -> usize {
+            n.children.iter().map(max_index).fold(n.index, usize::max)
+        }
+        let len = tops.iter().map(|t| max_index(t)).max().unwrap_or(0) + 1;
+        let mut ctx = Ctx {
+            r: self,
+            opts,
+            hashes: vec![0; len],
+            first: vec![false; len],
+            blocks: HashMap::new(),
+            overflow: Mutex::new(HashMap::new()),
+        };
+        {
+            let mut seen = HashSet::new();
+            let mut visited = vec![false; len];
+            let mut ids = self.ids.lock().expect("id registry");
+            let needs = self.needs.lock().expect("id needs");
+            // (node, its parent's key and first-occurrence flag)
+            let mut stack: Vec<(&Node, Option<(Key, bool)>)> =
+                tops.iter().rev().map(|t| (*t, None)).collect();
+            while let Some((n, parent)) = stack.pop() {
+                if std::mem::replace(&mut visited[n.index], true) {
+                    continue;
+                }
+                let h = keys.get(n);
+                ctx.hashes[n.index] = h;
+                // A group with one child that has content shares that
+                // child's key (`Keys`): it is the same computation, so the
+                // child inherits the group's claim to be first.
+                let first = match parent {
+                    Some((ph, pf)) if ph == h => pf,
+                    _ => seen.insert(h),
+                };
+                seen.insert(h);
+                ctx.first[n.index] = first;
+                for slot in std::iter::once(OWN).chain(0..n.children.len() as u32) {
+                    let size = needs.get(&(h, slot)).map_or(BLOCK, |&n| n.max(BLOCK));
+                    let b = ids.entry((h, slot)).or_insert((0, 0));
+                    if b.1 < size {
+                        *b = (Manifold::reserve_ids(size), size);
+                    }
+                    ctx.blocks.insert((h, slot), *b);
+                }
+                stack.extend(n.children.iter().rev().map(|c| (c, Some((h, first)))));
+            }
+        }
+        ctx
     }
 
     /// Forget every cached geometry.

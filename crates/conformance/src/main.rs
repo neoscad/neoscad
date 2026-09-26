@@ -113,9 +113,10 @@ enum Cmd {
     /// Compare two PNGs as OpenSCAD's tests/image_compare.py does; exits 0
     /// when they match.
     ImageCompare { expected: PathBuf, actual: PathBuf },
-    /// Survey neoscad's own renderer: draw every render-mode PNG case (tier
-    /// 3's direct `--render` images and tier 4's image cases) with neoscad
-    /// and compare with the expected image under tier 4's rules. A
+    /// Survey neoscad's own renderer: draw every PNG case (tier 3's direct
+    /// `--render` images and tier 4's image cases: render mode, previews,
+    /// throwntogether, view options) with neoscad and compare with the
+    /// expected image under tier 4's rules, reported per kind. A
     /// diagnostic only: tier 3 still checks geometry through the nightly,
     /// and nothing here touches the baseline.
     Images {
@@ -134,11 +135,6 @@ enum Cmd {
         /// Binary under test (default: target/release/neoscad).
         #[arg(long)]
         binary: Option<PathBuf>,
-        /// Also draw tier 4's pending OpenCSG previews (no --view or
-        /// --preview) from the rendered geometry, to see how far render
-        /// mode gets on them. They stay pending in `run`.
-        #[arg(long)]
-        previews: bool,
     },
     /// Differential test: run a reference OpenSCAD and neoscad on each input
     /// and compare exit status, output and the format's diagnostics.
@@ -264,7 +260,6 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             timeout,
             jobs,
             binary,
-            previews,
         } => {
             if timeout.is_nan() || timeout <= 0.0 {
                 return Err("--timeout must be positive".into());
@@ -276,7 +271,6 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
                 Duration::from_secs_f64(timeout),
                 jobs,
                 binary,
-                previews,
             )
         }
         Cmd::ImageCompare { expected, actual } => {

@@ -2,9 +2,10 @@
 //! exist, in the layout of OpenSCAD's `LibraryInfo::info()` and
 //! `help_export()` (`openscad.cc`), with neoscad's own facts. `--info`
 //! names the Rust libraries that stand in for OpenSCAD's C++ ones rather
-//! than borrowing OpenSCAD's version numbers, and has no OpenGL section:
-//! neoscad draws images with wgpu (the `render` crate), and `--info` does
-//! not open a GPU just to describe it.
+//! than borrowing OpenSCAD's version numbers. Where OpenSCAD ends with its
+//! OpenGL context (renderer, vendor, version, framebuffer), neoscad ends
+//! with the wgpu adapter it draws PNGs and snapshots on, opening it as
+//! OpenSCAD opens its GL context to describe it.
 
 use crate::host::{self, FontSource, Host};
 
@@ -202,6 +203,30 @@ pub fn info() -> String {
             FontSource::Dir(d) => s.push_str(&format!("  {}\n", d.display())),
         }
     }
+    s.push_str(&renderer_info());
+    s
+}
+
+/// The renderer section: the GPU `-o x.png` and `neoscad snapshot` draw
+/// on, or why there is none.
+fn renderer_info() -> String {
+    let mut s = String::from("\nRenderer: wgpu (offscreen)\n");
+    match crate::png::offscreen() {
+        Ok(gpu) => {
+            let i = gpu.info();
+            s.push_str(&format!("GPU backend: {}\n", i.backend));
+            s.push_str(&format!("GPU: {} ({})\n", i.name, i.device_type));
+            if !i.driver.is_empty() || !i.driver_info.is_empty() {
+                s.push_str(
+                    &format!("GPU driver: {} {}\n", i.driver, i.driver_info).replace("  ", " "),
+                );
+            }
+            s.push_str(&format!("Max image size: {0}x{0}\n", i.max_texture_size));
+            // The target `export_png` draws into (see `render::gpu`).
+            s.push_str("RGBA(8888), depth(24), no multisampling\n");
+        }
+        Err(e) => s.push_str(&format!("GPU: none ({e})\n")),
+    }
     s
 }
 
@@ -227,5 +252,8 @@ mod tests {
         assert!(text.contains("\nmanifold-rust version: "));
         assert!(text.contains("\nclipper2-rust version: "));
         assert!(text.contains("\nOpenSCAD library path:\n"));
+        assert!(text.contains("\nwgpu version: "));
+        // With a GPU or without one, the renderer section is there.
+        assert!(text.contains("\nRenderer: wgpu (offscreen)\nGPU"));
     }
 }

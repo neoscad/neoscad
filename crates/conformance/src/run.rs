@@ -285,11 +285,11 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
     Ok(0)
 }
 
-/// `conformance images`: every render-mode PNG case drawn by neoscad and
-/// scored as tier 4 scores images. Tier 3's direct renders (a PNG of the
-/// input with `--render`, no script) are included: their expected images
-/// come from the same OpenSCAD renderer, so they measure neoscad's
-/// renderer on far more models than tier 4's own cases.
+/// `conformance images`: every PNG case neoscad draws itself, scored as
+/// tier 4 scores images. Tier 3's direct renders (a PNG of the input with
+/// `--render`, no script) are included: their expected images come from
+/// the same OpenSCAD renderer, so they measure neoscad's renderer on far
+/// more models than tier 4's own cases.
 pub fn survey_images(
     ctx: &Ctx,
     filter: Option<&str>,
@@ -297,7 +297,6 @@ pub fn survey_images(
     timeout: Duration,
     jobs: Option<usize>,
     binary: Option<PathBuf>,
-    previews: bool,
 ) -> Result<u8, String> {
     let manifest = Manifest::load(&ctx.manifest_path())?;
     let binary = binary.unwrap_or_else(|| ctx.default_binary());
@@ -311,24 +310,10 @@ pub fn survey_images(
             && c.suffix == "png"
             && c.args.iter().any(|a| a.starts_with("--render"))
     };
-    // A pending OpenCSG preview, drawn from the rendered geometry: shows
-    // how far render mode alone gets on them (cameras, colour schemes).
-    let preview = |c: &Case| {
-        previews
-            && c.runner == Runner::Pending
-            && c.tier == 4
-            && c.expected.is_some()
-            && c.input.is_some()
-            && c.suffix == "png"
-            && !c
-                .args
-                .iter()
-                .any(|a| crate::manifest::is_view_option(a) || a.starts_with("--preview"))
-    };
     let selected: Vec<&Case> = manifest
         .tests
         .iter()
-        .filter(|c| c.runner == Runner::Image || direct_render(c) || preview(c))
+        .filter(|c| c.runner == Runner::Image || direct_render(c))
         .filter(|c| filter.is_none_or(|f| c.id.contains(f)))
         .collect();
     let mut env = Env::new(ctx, &manifest, &binary, timeout);
@@ -339,31 +324,25 @@ pub fn survey_images(
         .map_err(|e| e.to_string())?;
     let outcomes: Vec<Outcome> =
         pool.install(|| selected.par_iter().map(|c| env.run_image(c)).collect());
-    let pending: BTreeSet<&str> = selected
+    let kind: BTreeMap<&str, ImageKind> = selected
         .iter()
-        .filter(|c| c.runner == Runner::Pending)
-        .map(|c| c.id.as_str())
+        .map(|c| (c.id.as_str(), ImageKind::of(c)))
         .collect();
-    for tier in [3u8, 4] {
-        let of_tier: Vec<Outcome> = outcomes
+    for (tier, k) in [
+        (3u8, ImageKind::Render),
+        (4, ImageKind::Render),
+        (4, ImageKind::Preview),
+        (4, ImageKind::ThrownTogether),
+        (4, ImageKind::View),
+    ] {
+        let of: Vec<Outcome> = outcomes
             .iter()
-            .filter(|o| o.tier == tier && !pending.contains(o.id.as_str()))
+            .filter(|o| o.tier == tier && kind.get(o.id.as_str()) == Some(&k))
             .cloned()
             .collect();
-        if !of_tier.is_empty() {
-            print_image_report(&format!("tier {tier} render-mode images"), &of_tier);
+        if !of.is_empty() {
+            print_image_report(&format!("tier {tier} {}", k.title()), &of);
         }
-    }
-    let previews: Vec<Outcome> = outcomes
-        .iter()
-        .filter(|o| pending.contains(o.id.as_str()))
-        .cloned()
-        .collect();
-    if !previews.is_empty() {
-        print_image_report(
-            "tier 4 previews drawn from the rendered geometry (pending; not a pass)",
-            &previews,
-        );
     }
     let mut worst: Vec<&Outcome> = outcomes
         .iter()
@@ -389,6 +368,47 @@ pub fn survey_images(
     }
     println!("images written to {}", env.actual_dir.display());
     Ok(0)
+}
+
+/// What a PNG case exercises, for the survey's report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageKind {
+    /// The rendered geometry (`--render`), no view options.
+    Render,
+    /// The OpenCSG preview.
+    Preview,
+    /// `--preview=throwntogether`.
+    ThrownTogether,
+    /// Any `--view` option.
+    View,
+}
+
+impl ImageKind {
+    fn of(c: &Case) -> ImageKind {
+        let has = |p: &dyn Fn(&str) -> bool| c.args.iter().any(|a| p(a));
+        if has(&crate::manifest::is_view_option) {
+            ImageKind::View
+        } else if has(&|a| a.starts_with("--preview")) {
+            if has(&|a| a.contains("throwntogether")) {
+                ImageKind::ThrownTogether
+            } else {
+                ImageKind::Preview
+            }
+        } else if has(&|a| a.starts_with("--render")) {
+            ImageKind::Render
+        } else {
+            ImageKind::Preview
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            ImageKind::Render => "render-mode images",
+            ImageKind::Preview => "OpenCSG previews",
+            ImageKind::ThrownTogether => "throwntogether previews",
+            ImageKind::View => "--view images",
+        }
+    }
 }
 
 fn short(sha: &str) -> &str {

@@ -232,12 +232,7 @@ impl GlMatrices {
     /// Metal, Direct3D, Vulkan), where OpenGL's is -1..1: `z' = (z + w) / 2`.
     /// x, y and w, and so every pixel position, are OpenGL's.
     pub fn clip_from_model_zero_to_one(&self) -> Mat4 {
-        let gl = mul(&self.projection, &self.modelview);
-        let mut m = gl;
-        for c in 0..4 {
-            m[2][c] = 0.5 * gl[2][c] + 0.5 * gl[3][c];
-        }
-        m
+        zero_to_one(&mul(&self.projection, &self.modelview))
     }
 
     /// The matrix fixed-function lighting transforms normals with: the
@@ -249,6 +244,16 @@ impl GlMatrices {
     }
 }
 
+/// An OpenGL clip matrix (depth -1..1) for a target whose depth range is
+/// 0..1: `z' = (z + w) / 2`.
+pub fn zero_to_one(gl: &Mat4) -> Mat4 {
+    let mut m = *gl;
+    for c in 0..4 {
+        m[2][c] = 0.5 * gl[2][c] + 0.5 * gl[3][c];
+    }
+    m
+}
+
 fn norm(v: [f64; 3]) -> f64 {
     (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
@@ -257,7 +262,7 @@ pub fn mul(a: &Mat4, b: &Mat4) -> Mat4 {
     std::array::from_fn(|r| std::array::from_fn(|c| (0..4).map(|k| a[r][k] * b[k][c]).sum()))
 }
 
-fn identity() -> Mat4 {
+pub(crate) fn identity() -> Mat4 {
     std::array::from_fn(|r| std::array::from_fn(|c| if r == c { 1.0 } else { 0.0 }))
 }
 
@@ -278,7 +283,7 @@ fn perspective(fovy: f64, aspect: f64, near: f64, far: f64) -> Mat4 {
 }
 
 /// `glOrtho`.
-fn ortho(l: f64, r: f64, b: f64, t: f64, n: f64, f: f64) -> Mat4 {
+pub(crate) fn ortho(l: f64, r: f64, b: f64, t: f64, n: f64, f: f64) -> Mat4 {
     let mut m = identity();
     m[0][0] = 2.0 / (r - l);
     m[1][1] = 2.0 / (t - b);
@@ -291,7 +296,7 @@ fn ortho(l: f64, r: f64, b: f64, t: f64, n: f64, f: f64) -> Mat4 {
 
 /// `gluLookAt(0, -dist, 0, 0, 0, 0, 0, 0, 1)`: forward is +y and up is +z,
 /// so eye space is `(x, z, -(y + dist))`.
-fn look_at_from_minus_y(dist: f64) -> Mat4 {
+pub(crate) fn look_at_from_minus_y(dist: f64) -> Mat4 {
     [
         [1.0, 0.0, 0.0, 0.0],
         [0.0, 0.0, 1.0, 0.0],
@@ -301,7 +306,7 @@ fn look_at_from_minus_y(dist: f64) -> Mat4 {
 }
 
 /// `glRotated(angle, x, y, z)` for a unit axis.
-fn rotation(angle: f64, axis: [f64; 3]) -> Mat4 {
+pub(crate) fn rotation(angle: f64, axis: [f64; 3]) -> Mat4 {
     let a = angle.to_radians();
     let (s, c) = a.sin_cos();
     let [x, y, z] = axis;
@@ -314,7 +319,7 @@ fn rotation(angle: f64, axis: [f64; 3]) -> Mat4 {
     ]
 }
 
-fn translation(t: [f64; 3]) -> Mat4 {
+pub(crate) fn translation(t: [f64; 3]) -> Mat4 {
     let mut m = identity();
     m[0][3] = t[0];
     m[1][3] = t[1];

@@ -1,16 +1,14 @@
 //! `-o x.png`: the camera from the command line (`get_camera` in
 //! `openscad.cc`), the file's `$vp*` view, and the offscreen render
-//! (`export_png` in `src/io/export_png.cc`).
-//!
-//! Only render mode is implemented. Without `--render` OpenSCAD draws an
-//! OpenCSG preview of the unevaluated CSG tree; neoscad draws the rendered
-//! geometry instead and says so, which shows the same solid for models
-//! without `%`/`#` modifiers, in render-mode colours.
+//! (`export_png` and `prepare_preview` in `src/io/export_png.cc`): the
+//! rendered geometry with `--render`, otherwise a preview of the CSG
+//! products (the OpenCSG preview, or `--preview=throwntogether`), with the
+//! `--view` options drawn around it.
 
 use std::sync::OnceLock;
 
 use render::offscreen::Offscreen;
-use render::{Camera, ColorScheme, Projection, Scene};
+use render::{Camera, ColorScheme, Previewer, Projection, Scene, ViewOptions};
 
 /// OpenSCAD's general failure exit code.
 const EXIT_ERROR: u8 = 1;
@@ -22,32 +20,35 @@ pub struct Settings {
     /// `--projection` and `--imgsize`, before the file's `$vp*`.
     pub camera: Camera,
     pub scheme: ColorScheme,
+    /// `None` draws the rendered geometry (`--render`), otherwise the
+    /// preview.
+    pub previewer: Option<Previewer>,
+    pub view: ViewOptions,
+    /// `--csglimit`: the most operations a normalised CSG term may have.
+    pub csg_limit: usize,
 }
 
-/// `ViewOptions` names (`src/io/export.h`).
-const VIEW_OPTIONS: [&str; 4] = ["axes", "scales", "edges", "crosshairs"];
-
-/// Say what a PNG export will not show yet: the preview (drawn from the
-/// rendered geometry instead) and `--view` options. An unknown `--view`
-/// name gets OpenSCAD's own message.
-pub fn notes(render: bool, preview: Option<&str>, view: &[String]) {
-    if !render {
-        let what = if preview == Some("throwntogether") {
-            "throwntogether previews"
-        } else {
-            "preview images"
-        };
-        eprintln!(
-            "neoscad: {what} are not implemented yet; drawing the rendered geometry instead (as --render)"
-        );
+/// `viewOptions.renderer` (`openscad.cc:1035-1049`): `--preview` wins over
+/// `--render`, and its value only matters when it is `throwntogether`;
+/// with neither, a PNG is an OpenCSG preview.
+pub fn previewer(render: Option<&str>, preview: Option<&str>) -> Option<Previewer> {
+    match (preview, render) {
+        (Some("throwntogether"), _) => Some(Previewer::ThrownTogether),
+        (Some(_), _) | (None, None) => Some(Previewer::OpenCsg),
+        (None, Some(_)) => None,
     }
-    for v in view {
-        if VIEW_OPTIONS.contains(&v.as_str()) {
-            eprintln!("neoscad: --view {v} is not implemented yet; ignored");
-        } else {
-            eprintln!("Unknown --view option '{v}' ignored. Use -h to list available options.");
+}
+
+/// `--view` names as OpenSCAD reads them: an unknown name gets its
+/// message and is ignored.
+pub fn view_options(names: &[String], quiet: bool) -> ViewOptions {
+    let mut v = ViewOptions::default();
+    for n in names {
+        if !v.set(n) && !quiet {
+            eprintln!("Unknown --view option '{n}' ignored. Use -h to list available options.");
         }
     }
+    v
 }
 
 /// `get_camera`: the camera the command line describes. Errors that
@@ -123,7 +124,7 @@ pub fn camera(
 /// it, the camera takes the view the evaluation ended with (the defaults
 /// or the file's `$vp*`), and `$vp*` assignments that cleared
 /// [`eval::Camera::auto`] turn off `--viewall` and `--autocenter`.
-fn with_view(mut cam: Camera, view: &eval::Camera) -> Camera {
+pub fn with_view(mut cam: Camera, view: &eval::Camera) -> Camera {
     if cam.locked {
         return cam;
     }
@@ -140,7 +141,7 @@ fn with_view(mut cam: Camera, view: &eval::Camera) -> Camera {
 
 /// The GPU device, opened on first use and kept for later frames of an
 /// animation.
-fn offscreen() -> Result<&'static Offscreen, String> {
+pub fn offscreen() -> Result<&'static Offscreen, String> {
     static DEVICE: OnceLock<Result<Offscreen, String>> = OnceLock::new();
     DEVICE
         .get_or_init(|| Offscreen::new_blocking(wgpu_backends()).map_err(|e| e.to_string()))
@@ -158,19 +159,59 @@ fn wgpu_backends() -> render::offscreen::Backends {
     }
 }
 
-/// Draw `geometry` (the render result; `None` when empty) as a PNG.
+/// Draw `geometry` (the render result; `None` when empty) as a PNG, and
+/// the camera it was drawn with.
 pub fn render_png(
     settings: &Settings,
     geometry: Option<&geom::Geometry>,
     view: &eval::Camera,
-) -> Result<Vec<u8>, String> {
-    let scene = Scene::new(geometry, &settings.scheme);
+) -> Result<(Vec<u8>, Camera), String> {
+    draw(
+        settings,
+        &Scene::new(geometry, &settings.scheme),
+        view,
+        false,
+    )
+}
+
+/// Draw the preview of `tree` as a PNG, and the camera it was drawn with.
+pub fn preview_png(
+    settings: &Settings,
+    tree: &geom::csg::CsgTree,
+    view: &eval::Camera,
+) -> Result<(Vec<u8>, Camera), String> {
+    let previewer = settings.previewer.unwrap_or(Previewer::OpenCsg);
+    let scene = render::preview::scene(tree, &settings.scheme, previewer);
+    draw(settings, &scene, view, true)
+}
+
+fn draw(
+    settings: &Settings,
+    scene: &Scene,
+    view: &eval::Camera,
+    preview: bool,
+) -> Result<(Vec<u8>, Camera), String> {
     let mut cam = with_view(settings.camera, view);
-    render::fit_camera(&mut cam, &scene);
+    render::fit_camera(&mut cam, scene);
+    let overlay = render::overlay::overlay(&cam, &settings.scheme, &settings.view, preview);
     let image = offscreen()?
-        .render_blocking(&scene, &cam, &settings.scheme)
+        .render_view_blocking(scene, &cam, &settings.scheme, &overlay, settings.view.edges)
         .map_err(|e| e.to_string())?;
-    Ok(render::encode_png(image.width, image.height, &image.rgba))
+    Ok((
+        render::encode_png(image.width, image.height, &image.rgba),
+        cam,
+    ))
+}
+
+/// The summary's view of the camera an image was drawn with.
+pub fn summary_camera(cam: &Camera, view: &eval::Camera) -> eval::Camera {
+    eval::Camera {
+        vpt: cam.vpt(),
+        vpr: cam.vpr(),
+        vpd: cam.viewer_distance,
+        vpf: cam.fov,
+        ..*view
+    }
 }
 
 /// `set_render_color_scheme(name, true)`: an unknown name prints every
@@ -227,6 +268,19 @@ mod tests {
         assert!(!c.viewall && !c.autocenter);
         let locked = camera(Some("1,2,3,0,0,0"), false, false, None, None).unwrap();
         assert_eq!(with_view(locked, &view), locked);
+    }
+
+    #[test]
+    fn preview_wins_over_render() {
+        assert_eq!(previewer(None, None), Some(Previewer::OpenCsg));
+        assert_eq!(previewer(Some(""), None), None);
+        assert_eq!(previewer(Some("force"), Some("")), Some(Previewer::OpenCsg));
+        assert_eq!(
+            previewer(Some(""), Some("throwntogether")),
+            Some(Previewer::ThrownTogether)
+        );
+        let v = view_options(&["axes".into(), "nope".into(), "edges".into()], true);
+        assert!(v.axes && v.edges && !v.scales && !v.crosshairs);
     }
 
     #[test]

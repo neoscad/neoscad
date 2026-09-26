@@ -1,0 +1,1117 @@
+//! OpenSCAD's preview model: the node tree as a CSG expression over leaf
+//! meshes (`CSGTreeEvaluator`, `src/core/CSGTreeEvaluator.cc`), put in
+//! sum-of-products form (`CSGTreeNormalizer`,
+//! `src/glview/preview/CSGTreeNormalizer.cc`) and split into products
+//! (`CSGProducts::import`, `src/core/CSGNode.cc`).
+//!
+//! OpenSCAD's preview never computes the booleans: OpenCSG draws each
+//! product (an intersection of leaves minus a union of leaves) in image
+//! space, and a union is just several products drawn into one depth
+//! buffer. The renderer here draws the same products, but gets each
+//! product's visible surface from real Manifold booleans ([`product_mesh`])
+//! with every face coloured by the leaf it came from, so the colours come
+//! out as OpenCSG's do (a subtracted leaf's faces in the cut-out colour or
+//! its own). A product of one leaf needs no boolean at all, so a union of
+//! many objects (the common case) costs nothing beyond its leaves.
+//!
+//! Which nodes are leaves follows the evaluator: every primitive, import,
+//! extrusion, `offset`, `projection`, `text`, `render()`, and the
+//! operations CGAL evaluates (`minkowski`, `hull`, `fill`, `resize`). Only
+//! groups, `union`/`difference`/`intersection`, transforms and colours are
+//! CSG structure. A 2D leaf becomes a slab one unit thick
+//! (`polygon2dToPolySet`), which is how previews show 2D shapes.
+
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use eval::dump::Keys;
+use eval::node::{CsgOp, Node, NodeKind};
+use lang::diag::Severity;
+use manifold_rust::types::OpType;
+
+use crate::color::{Color, Scheme};
+use crate::manifold_geom::{IdSource, ManifoldGeometry};
+use crate::polygon2d::Polygon2d;
+use crate::polyset::{PolySet, apply};
+use crate::{Geometry, Matrix, Msg, RenderOptions, Renderer, Unsupported};
+
+/// An axis-aligned box, `None` when empty (Eigen's null `AlignedBox3d`).
+pub type BoundingBox = Option<([f64; 3], [f64; 3])>;
+
+/// `CSGNode::FLAG_BACKGROUND` (`%`).
+pub const FLAG_BACKGROUND: u8 = 1;
+/// `CSGNode::FLAG_HIGHLIGHT` (`#`).
+pub const FLAG_HIGHLIGHT: u8 = 2;
+
+/// The colour of an uncoloured leaf: every component unset.
+pub const NO_COLOR: Color = Color([-1.0; 4]);
+
+/// `CSGTreeNormalizer`'s default limit (`RenderSettings::openCSGTermLimit`).
+pub const DEFAULT_TERM_LIMIT: usize = 100_000;
+
+/// One leaf of the CSG expression (`CSGLeaf`).
+#[derive(Debug)]
+pub struct Leaf {
+    /// The leaf's mesh in its own coordinates, or `None` for the empty
+    /// set. Faces are polygons (convex ones are kept whole, as OpenSCAD
+    /// keeps them for drawing) and may carry colours.
+    pub mesh: Option<Arc<PolySet>>,
+    /// 2 for a 2D shape drawn as a slab.
+    pub dim: u32,
+    /// The accumulated transform from the leaf to the model.
+    pub matrix: Matrix,
+    /// The outermost `color()` above the leaf that set a valid colour
+    /// (`CSGTreeEvaluator` keeps the first one it meets on the way down).
+    /// [`NO_COLOR`] when none applies.
+    pub color: Color,
+    /// The node's index, OpenSCAD's `CSGLeaf::index`.
+    pub index: usize,
+    /// The mesh's bounding box moved by `matrix` (its eight corners).
+    pub bbox: BoundingBox,
+}
+
+impl Leaf {
+    fn empty() -> Leaf {
+        Leaf {
+            mesh: None,
+            dim: 3,
+            matrix: crate::IDENTITY,
+            color: NO_COLOR,
+            index: 0,
+            bbox: None,
+        }
+    }
+
+    fn is_empty_set(&self) -> bool {
+        self.mesh.as_ref().is_none_or(|m| m.is_empty())
+    }
+}
+
+/// A leaf with the flags accumulated on the way to it (`CSGChainObject`).
+#[derive(Debug, Clone)]
+pub struct ChainObject {
+    pub leaf: Arc<Leaf>,
+    pub flags: u8,
+}
+
+/// `CSGProduct`: the intersection of `intersections` minus the union of
+/// `subtractions`.
+#[derive(Debug, Clone, Default)]
+pub struct Product {
+    pub intersections: Vec<ChainObject>,
+    pub subtractions: Vec<ChainObject>,
+}
+
+impl Product {
+    /// `CSGProduct::getBoundingBox`: the intersection of the positive
+    /// leaves' boxes, or with `throwntogether` the union of every leaf's.
+    pub fn bounding_box(&self, throwntogether: bool) -> BoundingBox {
+        let mut it = self.intersections.iter();
+        let first = it.next()?.leaf.bbox;
+        if throwntogether {
+            let b = it.fold(first, |a, c| merged(a, c.leaf.bbox));
+            self.subtractions
+                .iter()
+                .fold(b, |a, c| merged(a, c.leaf.bbox))
+        } else {
+            it.fold(first, |a, c| intersection(a, c.leaf.bbox))
+        }
+    }
+}
+
+/// `CSGProducts`: products drawn into one depth buffer, whose union is the
+/// shape.
+#[derive(Debug, Clone)]
+pub struct Products {
+    pub products: Vec<Product>,
+}
+
+impl Products {
+    fn new() -> Products {
+        Products {
+            products: vec![Product::default()],
+        }
+    }
+
+    /// `CSGProducts::getBoundingBox`.
+    pub fn bounding_box(&self, throwntogether: bool) -> BoundingBox {
+        self.products
+            .iter()
+            .fold(None, |a, p| merged(a, p.bounding_box(throwntogether)))
+    }
+
+    /// `CSGProducts::import`: walk a normalised term, starting a product
+    /// at each leaf reached through a union once the current one has
+    /// positive leaves.
+    fn import(&mut self, term: &Term) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Kind {
+            Union,
+            Intersection,
+            Difference,
+        }
+        let mut current_is_sub = false;
+        let mut stack: Vec<(Term, Kind, u8)> = vec![(term.clone(), Kind::Union, 0)];
+        while let Some((node, kind, flags)) = stack.pop() {
+            let flags = node.flags.get() | flags;
+            match &node.kind {
+                TermKind::Leaf(leaf) => {
+                    let cur = self.products.last().expect("a product is always open");
+                    match kind {
+                        Kind::Union if !cur.intersections.is_empty() => {
+                            self.products.push(Product::default());
+                            current_is_sub = false;
+                        }
+                        Kind::Difference => current_is_sub = true,
+                        Kind::Intersection => current_is_sub = false,
+                        Kind::Union => {}
+                    }
+                    let cur = self.products.last_mut().expect("a product is always open");
+                    let obj = ChainObject {
+                        leaf: leaf.clone(),
+                        flags,
+                    };
+                    if current_is_sub {
+                        cur.subtractions.push(obj);
+                    } else {
+                        cur.intersections.push(obj);
+                    }
+                }
+                TermKind::Op(op, l, r) => {
+                    let k = match op {
+                        CsgOp::Union => Kind::Union,
+                        CsgOp::Intersection => Kind::Intersection,
+                        CsgOp::Difference => Kind::Difference,
+                    };
+                    stack.push((r.clone(), k, flags));
+                    stack.push((l.clone(), kind, flags));
+                }
+            }
+        }
+    }
+
+    /// Leaves in all products (`CSGProducts::size`).
+    pub fn len(&self) -> usize {
+        self.products
+            .iter()
+            .map(|p| p.intersections.len() + p.subtractions.len())
+            .sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A node of the CSG expression (`CSGNode`): a leaf or a binary operation,
+/// with its box and flags. Terms are shared (normalisation duplicates
+/// subtrees), and flags are set on shared terms as OpenSCAD sets them.
+#[derive(Debug)]
+struct TermNode {
+    kind: TermKind,
+    flags: Cell<u8>,
+    bbox: BoundingBox,
+}
+
+#[derive(Debug)]
+enum TermKind {
+    Leaf(Arc<Leaf>),
+    Op(CsgOp, Term, Term),
+}
+
+type Term = Rc<TermNode>;
+
+fn leaf_term(leaf: Arc<Leaf>) -> Term {
+    let bbox = leaf.bbox;
+    Rc::new(TermNode {
+        kind: TermKind::Leaf(leaf),
+        flags: Cell::new(0),
+        bbox,
+    })
+}
+
+/// `CSGNode::createEmptySet`.
+fn empty_set() -> Term {
+    leaf_term(Arc::new(Leaf::empty()))
+}
+
+impl TermNode {
+    fn is_empty_set(&self) -> bool {
+        match &self.kind {
+            TermKind::Leaf(l) => l.is_empty_set(),
+            TermKind::Op(..) => false,
+        }
+    }
+    fn is_leaf(&self) -> bool {
+        matches!(self.kind, TermKind::Leaf(_))
+    }
+    fn has(&self, flag: u8) -> bool {
+        self.flags.get() & flag != 0
+    }
+    fn set(&self, flag: u8) {
+        self.flags.set(self.flags.get() | flag);
+    }
+}
+
+fn merged(a: BoundingBox, b: BoundingBox) -> BoundingBox {
+    match (a, b) {
+        (None, b) => b,
+        (a, None) => a,
+        (Some((al, ah)), Some((bl, bh))) => Some((
+            std::array::from_fn(|k| al[k].min(bl[k])),
+            std::array::from_fn(|k| ah[k].max(bh[k])),
+        )),
+    }
+}
+
+/// Eigen's `AlignedBox::intersection`, which may be empty (min > max).
+fn intersection(a: BoundingBox, b: BoundingBox) -> BoundingBox {
+    let ((al, ah), (bl, bh)) = (a?, b?);
+    let lo: [f64; 3] = std::array::from_fn(|k| al[k].max(bl[k]));
+    let hi: [f64; 3] = std::array::from_fn(|k| ah[k].min(bh[k]));
+    (0..3).all(|k| lo[k] <= hi[k]).then_some((lo, hi))
+}
+
+/// `CSGOperation::createCSGNode`, with its pruning: an empty operand
+/// decides the result, an intersection of disjoint boxes is empty, and a
+/// difference whose negative box misses the positive one drops the
+/// negative.
+fn create(op: CsgOp, left: Option<Term>, right: Option<Term>) -> Term {
+    let (left, right) = match (left, right) {
+        (None, None) => return empty_set(),
+        (None, Some(r)) => return r,
+        (Some(l), None) => return l,
+        (Some(l), Some(r)) => (l, r),
+    };
+    if right.is_empty_set() {
+        return if matches!(op, CsgOp::Union | CsgOp::Difference) {
+            left
+        } else {
+            right
+        };
+    }
+    if left.is_empty_set() {
+        return if op == CsgOp::Union { right } else { left };
+    }
+    match op {
+        CsgOp::Intersection => {
+            if intersection(left.bbox, right.bbox).is_none() {
+                return empty_set();
+            }
+        }
+        CsgOp::Difference => {
+            if intersection(left.bbox, right.bbox).is_none() {
+                return left;
+            }
+        }
+        CsgOp::Union => {}
+    }
+    // `CSGOperation::initBoundingBox`.
+    let bbox = match op {
+        CsgOp::Union => merged(left.bbox, right.bbox),
+        CsgOp::Intersection => intersection(left.bbox, right.bbox),
+        CsgOp::Difference => left.bbox,
+    };
+    Rc::new(TermNode {
+        kind: TermKind::Op(op, left, right),
+        flags: Cell::new(0),
+        bbox,
+    })
+}
+
+/// The preview's CSG expression: the model's products, and the highlighted
+/// (`#`) and background (`%`) terms drawn over it, each as products.
+#[derive(Debug)]
+pub struct CsgTree {
+    /// `None` when there is nothing to draw, or normalisation gave up.
+    pub root: Option<Products>,
+    pub highlights: Option<Products>,
+    pub background: Option<Products>,
+    /// Geometry messages of the leaves and the normaliser's, in order.
+    pub messages: Vec<Msg>,
+}
+
+impl CsgTree {
+    /// `CsgInfo::compile_products` for the tree under `top` (the root, or
+    /// the node a `!` selected): each leaf's geometry from `renderer` (so
+    /// from its cache when a render already computed it), the terms, and
+    /// their products, normalised with at most `limit` operations per term
+    /// (OpenSCAD's `--csglimit`).
+    pub fn build(
+        top: &Node,
+        renderer: &Renderer,
+        keys: &Keys,
+        opts: RenderOptions,
+        limit: usize,
+    ) -> Result<CsgTree, Unsupported> {
+        let scheme = opts.scheme;
+        let mut leaves = Vec::new();
+        collect_leaves(top, &mut leaves);
+        let rendered = renderer.render_many(&leaves, keys, opts)?;
+        let mut messages = Vec::new();
+        let mut geometry: HashMap<usize, Option<Geometry>> = HashMap::with_capacity(leaves.len());
+        for (n, r) in leaves.iter().zip(rendered) {
+            messages.extend(r.messages);
+            geometry.insert(n.index, r.geometry);
+        }
+        let mut ev = TreeEvaluator {
+            geometry: &geometry,
+            scheme,
+            highlights: Vec::new(),
+            background: Vec::new(),
+            messages: Vec::new(),
+        };
+        let state = State {
+            matrix: crate::IDENTITY,
+            color: NO_COLOR,
+        };
+        // `buildCSGTree`.
+        let mut root = match ev.visit(top, &state) {
+            Visited::Pruned => None,
+            Visited::Term(t) => t,
+        };
+        if let Some(t) = &root {
+            if t.has(FLAG_HIGHLIGHT) {
+                ev.highlights.push(t.clone());
+            }
+            if t.has(FLAG_BACKGROUND) {
+                ev.background.push(t.clone());
+                root = None;
+            }
+        }
+        messages.append(&mut ev.messages);
+
+        let mut normalizer = Normalizer {
+            limit,
+            count: 0,
+            aborted: false,
+        };
+        let root = root.and_then(|t| {
+            let n = normalizer.normalize(&t);
+            if n.is_none() {
+                messages.push(Msg {
+                    severity: Some(Severity::Warning),
+                    text: "CSG normalization resulted in an empty tree".into(),
+                    loc: None,
+                });
+            }
+            n.map(|n| {
+                let mut p = Products::new();
+                p.import(&n);
+                p
+            })
+        });
+        if normalizer.aborted {
+            messages.push(Msg {
+                severity: Some(Severity::Warning),
+                text: format!(
+                    "Normalized tree is growing past {limit} elements. Aborting normalization.\n"
+                ),
+                loc: None,
+            });
+        }
+        let mut compile = |terms: Vec<Term>| -> Option<Products> {
+            if terms.is_empty() {
+                return None;
+            }
+            let mut p = Products::new();
+            for t in terms {
+                // A term normalised to nothing is skipped (`import` of a
+                // null term would crash OpenSCAD; it never happens there).
+                if let Some(n) = normalizer.normalize(&t) {
+                    p.import(&n);
+                }
+            }
+            Some(p)
+        };
+        let highlights = compile(std::mem::take(&mut ev.highlights));
+        let background = compile(std::mem::take(&mut ev.background));
+        Ok(CsgTree {
+            root,
+            highlights,
+            background,
+            messages,
+        })
+    }
+
+    /// `OpenCSGRenderer::getBoundingBox` (or with `throwntogether`,
+    /// `ThrownTogetherRenderer`'s): what `--viewall` fits.
+    pub fn bounding_box(&self, throwntogether: bool) -> BoundingBox {
+        [&self.root, &self.highlights, &self.background]
+            .into_iter()
+            .flatten()
+            .fold(None, |a, p| merged(a, p.bounding_box(throwntogether)))
+    }
+}
+
+/// Which kind of node a node is to the CSG evaluator.
+enum Role {
+    /// Children combined with an operation (groups, CSG, transforms,
+    /// colours).
+    Op(CsgOp),
+    /// An `AbstractPolyNode` or `render()`: a leaf; its children are
+    /// visited but their terms dropped.
+    Leaf,
+    /// A `CgalAdvNode` (`minkowski`, `hull`, `fill`, `resize`): a leaf
+    /// whose highlighted and background children are still drawn.
+    AdvLeaf,
+}
+
+fn role(n: &Node) -> Role {
+    match &n.kind {
+        NodeKind::Root
+        | NodeKind::Group { .. }
+        | NodeKind::Transform { .. }
+        | NodeKind::Color { .. } => Role::Op(CsgOp::Union),
+        NodeKind::IntersectionFor => Role::Op(CsgOp::Intersection),
+        NodeKind::Csg(op) => Role::Op(*op),
+        NodeKind::Minkowski { .. } | NodeKind::Hull | NodeKind::Fill | NodeKind::Resize { .. } => {
+            Role::AdvLeaf
+        }
+        _ => Role::Leaf,
+    }
+}
+
+fn prunes(n: &Node) -> bool {
+    matches!(&n.kind, NodeKind::Transform { matrix, .. } if matrix.iter().flatten().any(|v| !v.is_finite()))
+}
+
+/// Every node the evaluator asks the geometry evaluator about, children
+/// before parents (the traversal's postfix order).
+fn collect_leaves<'n>(n: &'n Node, out: &mut Vec<&'n Node>) {
+    if prunes(n) {
+        return;
+    }
+    for c in &n.children {
+        collect_leaves(c, out);
+    }
+    if !matches!(role(n), Role::Op(_)) {
+        out.push(n);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct State {
+    matrix: Matrix,
+    color: Color,
+}
+
+enum Visited {
+    /// Not added to the parent (a transform with NaN or infinity).
+    Pruned,
+    Term(Option<Term>),
+}
+
+struct TreeEvaluator<'a> {
+    geometry: &'a HashMap<usize, Option<Geometry>>,
+    scheme: Scheme,
+    highlights: Vec<Term>,
+    background: Vec<Term>,
+    messages: Vec<Msg>,
+}
+
+fn mul(a: &Matrix, b: &Matrix) -> Matrix {
+    std::array::from_fn(|r| std::array::from_fn(|c| (0..4).map(|k| a[r][k] * b[k][c]).sum()))
+}
+
+impl TreeEvaluator<'_> {
+    fn visit(&mut self, n: &Node, state: &State) -> Visited {
+        let mut state = *state;
+        match &n.kind {
+            NodeKind::Transform { matrix, .. } => {
+                if prunes(n) {
+                    self.messages.push(Msg {
+                        severity: Some(Severity::Warning),
+                        text: "Transformation matrix contains Not-a-Number and/or Infinity - removing object.".into(),
+                        loc: n.origin.as_ref().map(|o| crate::MsgLoc {
+                            unit: o.unit,
+                            span: o.span,
+                            line: o.line,
+                            base: lang::diag::PathBase::MainFileDir,
+                        }),
+                    });
+                    return Visited::Pruned;
+                }
+                state.matrix = mul(&state.matrix, matrix);
+            }
+            // The outermost colour wins: an inner `color()` only applies
+            // where no valid colour is set yet.
+            NodeKind::Color { rgba } if !state.color.is_valid() => {
+                state.color = Color(*rgba);
+            }
+            _ => {}
+        }
+        let children: Vec<Option<Term>> = n
+            .children
+            .iter()
+            .filter_map(|c| match self.visit(c, &state) {
+                Visited::Pruned => None,
+                Visited::Term(t) => Some(t),
+            })
+            .collect();
+        let (highlight, background) = n
+            .origin
+            .as_ref()
+            .map_or((false, false), |o| (o.tag_highlight, o.tag_background));
+        match role(n) {
+            Role::Op(op) => {
+                Visited::Term(self.apply_to_children(children, op, highlight, background))
+            }
+            Role::Leaf | Role::AdvLeaf => {
+                if matches!(role(n), Role::AdvLeaf) {
+                    // `applyBackgroundAndHighlight`.
+                    for t in children.into_iter().flatten() {
+                        if t.has(FLAG_BACKGROUND) {
+                            self.background.push(t.clone());
+                        }
+                        if t.has(FLAG_HIGHLIGHT) {
+                            self.highlights.push(t);
+                        }
+                    }
+                }
+                let t = match self.geometry.get(&n.index) {
+                    Some(Some(g)) => leaf_term(Arc::new(self.leaf(n, g, &state))),
+                    _ => empty_set(),
+                };
+                if highlight {
+                    t.set(FLAG_HIGHLIGHT);
+                }
+                if background {
+                    t.set(FLAG_BACKGROUND);
+                }
+                Visited::Term(Some(t))
+            }
+        }
+    }
+
+    /// `evaluateCSGNodeFromGeometry`: the leaf's mesh as the preview draws
+    /// it.
+    fn leaf(&self, n: &Node, g: &Geometry, state: &State) -> Leaf {
+        let (mesh, dim) = if g.is_empty() {
+            (None, g.dimension())
+        } else {
+            match g {
+                Geometry::Polygon2d(p) => (Some(Arc::new(slab(p))), 2),
+                Geometry::PolySet(ps) => {
+                    // `evaluateGeometry(node, false)`: faces of a mesh not
+                    // known to be convex are split, since OpenGL draws
+                    // only convex polygons.
+                    let ps = if ps.triangular || ps.convex == Some(true) {
+                        ps.clone()
+                    } else {
+                        Arc::new(ps.tessellate(&mut Vec::new()))
+                    };
+                    (Some(ps), 3)
+                }
+                Geometry::Manifold(m) => (Some(Arc::new(m.to_polyset(&self.scheme))), 3),
+            }
+        };
+        let bbox = mesh
+            .as_ref()
+            .and_then(|m| transformed_box(&state.matrix, &all_vertices_box(m)));
+        Leaf {
+            mesh,
+            dim,
+            matrix: state.matrix,
+            color: state.color,
+            index: n.index,
+            bbox,
+        }
+    }
+
+    /// `CSGTreeEvaluator::applyToChildren`, with its handling of `%` and
+    /// `#` children: a background child leaves the expression for the
+    /// background list; a highlighted one is also drawn in the highlight
+    /// colour, and a highlighted operand of a union leaves the expression.
+    fn apply_to_children(
+        &mut self,
+        children: Vec<Option<Term>>,
+        op: CsgOp,
+        highlight: bool,
+        background: bool,
+    ) -> Option<Term> {
+        if children.is_empty() {
+            return Some(empty_set());
+        }
+        let mut t1: Option<Term> = None;
+        for t2 in children {
+            let Some(t2) = t2 else { continue };
+            let Some(a) = t1.clone() else {
+                t1 = Some(t2);
+                continue;
+            };
+            let mut t = if t2.has(FLAG_BACKGROUND) {
+                self.background.push(t2.clone());
+                a.clone()
+            } else if a.has(FLAG_BACKGROUND) {
+                self.background.push(a.clone());
+                t2.clone()
+            } else {
+                create(op, Some(a.clone()), Some(t2.clone()))
+            };
+            let is = |x: &Term, y: &Term| Rc::ptr_eq(x, y);
+            match op {
+                CsgOp::Difference => {
+                    if !is(&t, &a) && a.has(FLAG_HIGHLIGHT) {
+                        t.set(FLAG_HIGHLIGHT);
+                    } else if !is(&t, &t2) && t2.has(FLAG_HIGHLIGHT) {
+                        self.highlights.push(t2.clone());
+                    }
+                }
+                CsgOp::Intersection => {
+                    if !t.is_empty_set()
+                        && !is(&t, &a)
+                        && !is(&t, &t2)
+                        && a.has(FLAG_HIGHLIGHT)
+                        && t2.has(FLAG_HIGHLIGHT)
+                    {
+                        t.set(FLAG_HIGHLIGHT);
+                    } else {
+                        if !is(&t, &a) && a.has(FLAG_HIGHLIGHT) {
+                            self.highlights.push(a.clone());
+                        }
+                        if !is(&t, &t2) && t2.has(FLAG_HIGHLIGHT) {
+                            self.highlights.push(t2.clone());
+                        }
+                    }
+                }
+                CsgOp::Union => {
+                    if !is(&t, &a)
+                        && !is(&t, &t2)
+                        && a.has(FLAG_HIGHLIGHT)
+                        && t2.has(FLAG_HIGHLIGHT)
+                    {
+                        t.set(FLAG_HIGHLIGHT);
+                    } else if !is(&t, &a) && a.has(FLAG_HIGHLIGHT) {
+                        self.highlights.push(a.clone());
+                        t = t2.clone();
+                    } else if !is(&t, &t2) && t2.has(FLAG_HIGHLIGHT) {
+                        self.highlights.push(t2.clone());
+                        t = a.clone();
+                    }
+                }
+            }
+            t1 = Some(t);
+        }
+        if let Some(t) = &t1 {
+            if background {
+                t.set(FLAG_BACKGROUND);
+            }
+            if highlight {
+                t.set(FLAG_HIGHLIGHT);
+            }
+        }
+        t1
+    }
+}
+
+/// `PolySet::getBoundingBox`: every vertex, used or not.
+fn all_vertices_box(ps: &PolySet) -> BoundingBox {
+    let mut it = ps.vertices.iter();
+    let first = *it.next()?;
+    Some(it.fold((first, first), |(lo, hi), v| {
+        (
+            std::array::from_fn(|k| lo[k].min(v[k])),
+            std::array::from_fn(|k| hi[k].max(v[k])),
+        )
+    }))
+}
+
+/// `operator*(Transform3d, BoundingBox)`: the box of the eight moved
+/// corners.
+fn transformed_box(m: &Matrix, b: &BoundingBox) -> BoundingBox {
+    let (lo, hi) = (*b)?;
+    let mut out: BoundingBox = None;
+    for z in [lo[2], hi[2]] {
+        for y in [lo[1], hi[1]] {
+            for x in [lo[0], hi[0]] {
+                let p = apply(m, [x, y, z]);
+                out = merged(out, Some((p, p)));
+            }
+        }
+    }
+    out
+}
+
+/// `polygon2dToPolySet`: a 2D shape as a slab from z = -0.5 to 0.5: the
+/// triangulation reversed at the bottom and as it is at the top, and a
+/// quad down each outline edge.
+pub fn slab(p: &Polygon2d) -> PolySet {
+    // `Polygon2d::tessellate` keeps one vertex per outline vertex, in
+    // order, so the bottom copy of vertex `i` is `i` and the top copy
+    // `n + i`, and the sides can share them: the slab is a closed mesh,
+    // which the product booleans need.
+    let tri = p.tessellate();
+    let n = tri.vertices.len() as u32;
+    let mut ps = PolySet {
+        convex: Some(p.is_convex()),
+        ..Default::default()
+    };
+    ps.vertices
+        .extend(tri.vertices.iter().map(|v| [v[0], v[1], v[2] - 0.5]));
+    ps.vertices
+        .extend(tri.vertices.iter().map(|v| [v[0], v[1], v[2] + 0.5]));
+    for f in &tri.faces {
+        ps.faces.push(f.iter().rev().copied().collect());
+    }
+    for f in &tri.faces {
+        ps.faces.push(f.iter().map(|&i| n + i).collect());
+    }
+    let mut start = 0u32;
+    for o in &p.outlines {
+        let len = o.vertices.len() as u32;
+        for i in 0..len {
+            let (a, b) = (start + i, start + (i + 1) % len);
+            ps.faces.push(vec![a, b, n + b, n + a]);
+        }
+        start += len;
+    }
+    ps
+}
+
+/// `CSGTreeNormalizer`: rewrites a term into a union of products
+/// (Goldfeather et al., "Near Real-Time CSG Rendering Using Tree
+/// Normalization and Geometric Pruning", 1989) with OpenSCAD's rule order,
+/// giving up (and yielding nothing) past `limit` operations.
+struct Normalizer {
+    limit: usize,
+    count: usize,
+    aborted: bool,
+}
+
+fn op_parts(t: &Term) -> Option<(CsgOp, &Term, &Term)> {
+    match &t.kind {
+        TermKind::Op(op, l, r) => Some((*op, l, r)),
+        TermKind::Leaf(_) => None,
+    }
+}
+
+fn is_union(t: &Term) -> bool {
+    matches!(op_parts(t), Some((CsgOp::Union, _, _)))
+}
+
+/// The same operation with new children, keeping the node's flags and
+/// its box: the C++ assigns the children in place, and a node's box is
+/// computed once, when it is created, so later pruning sees the box from
+/// before normalisation.
+fn with_children(t: &Term, l: Term, r: Term) -> Term {
+    let (op, _, _) = op_parts(t).expect("an operation");
+    Rc::new(TermNode {
+        kind: TermKind::Op(op, l, r),
+        flags: Cell::new(t.flags.get()),
+        bbox: t.bbox,
+    })
+}
+
+impl Normalizer {
+    fn normalize(&mut self, root: &Term) -> Option<Term> {
+        self.aborted = false;
+        self.count = 0;
+        self.pass(root.clone())
+    }
+
+    /// `normalizePass`, recursively: rewrite the top until no rule
+    /// applies, normalise the left operand, and repeat while the node is
+    /// not a union and still has an operation on the right or a union on
+    /// the left; then normalise the right operand. `None` once the limit
+    /// is passed: OpenSCAD then abandons the whole term.
+    fn pass(&mut self, node: Term) -> Option<Term> {
+        if node.is_leaf() {
+            return Some(node);
+        }
+        let mut node = node;
+        loop {
+            while let Some(n) = match_and_replace(&node) {
+                node = n;
+            }
+            self.count += 1;
+            if self.count > self.limit {
+                self.aborted = true;
+                return None;
+            }
+            if node.is_leaf() {
+                return Some(node);
+            }
+            let (_, l, r) = op_parts(&node).expect("an operation");
+            let (l, r) = (l.clone(), r.clone());
+            let left = self.pass(l)?;
+            node = with_children(&node, left, r);
+            let (_, l, r) = op_parts(&node).expect("an operation");
+            if is_union(&node) || !(!r.is_leaf() || is_union(l)) {
+                break;
+            }
+        }
+        let (_, l, r) = op_parts(&node).expect("an operation");
+        let (l, r) = (l.clone(), r.clone());
+        let right = self.pass(r)?;
+        Some(with_children(&node, l, right))
+    }
+}
+
+/// `CSGTreeNormalizer::match_and_replace`: one rewrite at the top of
+/// `node`, if a rule applies.
+fn match_and_replace(node: &Term) -> Option<Term> {
+    use CsgOp::{Difference as D, Intersection as I, Union as U};
+    let (op, left, right) = op_parts(node)?;
+    if op == U {
+        return None;
+    }
+    let c = |op, l: &Term, r: &Term| create(op, Some(l.clone()), Some(r.clone()));
+    if let Some((rop, y, z)) = op_parts(right) {
+        let x = left;
+        return Some(match (op, rop) {
+            // 1. x - (y + z) -> (x - y) - z
+            (D, U) => create(D, Some(c(D, x, y)), Some(z.clone())),
+            // 2. x * (y + z) -> (x * y) + (x * z)
+            (I, U) => create(U, Some(c(I, x, y)), Some(c(I, x, z))),
+            // 3. x - (y * z) -> (x - y) + (x - z)
+            (D, I) => create(U, Some(c(D, x, y)), Some(c(D, x, z))),
+            // 4. x * (y * z) -> (x * y) * z
+            (I, I) => create(I, Some(c(I, x, y)), Some(z.clone())),
+            // 5. x - (y - z) -> (x - y) + (x * z)
+            (D, D) => create(U, Some(c(D, x, y)), Some(c(I, x, z))),
+            // 6. x * (y - z) -> (x * y) - z
+            (I, D) => create(D, Some(c(I, x, y)), Some(z.clone())),
+            (U, _) => unreachable!("unions return early"),
+        });
+    }
+    if let Some((lop, x, y)) = op_parts(left) {
+        let z = right;
+        return match (lop, op) {
+            // 7. (x - y) * z -> (x * z) - y
+            (D, I) => Some(create(D, Some(c(I, x, z)), Some(y.clone()))),
+            // 8. (x + y) - z -> (x - z) + (y - z)
+            (U, D) => Some(create(U, Some(c(D, x, z)), Some(c(D, y, z)))),
+            // 9. (x + y) * z -> (x * z) + (y * z)
+            (U, I) => Some(create(U, Some(c(I, x, z)), Some(c(I, y, z)))),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// One product for [`product_meshes`]: its positive and negative leaves as
+/// meshes in model coordinates, every face already in the colour it should
+/// be drawn in.
+#[derive(Debug, Clone, Default)]
+pub struct ProductJob {
+    pub positives: Vec<PolySet>,
+    pub negatives: Vec<PolySet>,
+}
+
+/// The visible solid of each product: the intersection of its positives
+/// minus the union of its negatives, as a triangle mesh whose faces keep
+/// the colour of the leaf face they came from (Manifold's original IDs
+/// carry them through the booleans). Products are solved in parallel;
+/// every conversion's IDs come from a range reserved in product order
+/// beforehand, so the meshes are the same at any thread count. `scheme`
+/// colours only faces that lost their colour to a mesh repair.
+pub fn product_meshes(jobs: Vec<ProductJob>, scheme: &Scheme) -> Vec<Option<PolySet>> {
+    // A conversion takes one ID per colour group and one for a repair.
+    let need = |ps: &PolySet| {
+        let mut colours: Vec<[u32; 4]> = ps
+            .color_indices
+            .iter()
+            .filter_map(|&ci| usize::try_from(ci).ok())
+            .filter_map(|ci| ps.colors.get(ci))
+            .map(Color::key)
+            .collect();
+        colours.sort_unstable();
+        colours.dedup();
+        colours.len() as u32 + 2
+    };
+    let firsts: Vec<u32> = jobs
+        .iter()
+        .map(|j| {
+            let n: u32 = j.positives.iter().chain(&j.negatives).map(need).sum();
+            manifold_rust::manifold::Manifold::reserve_ids(n.max(1))
+        })
+        .collect();
+    let solve = |(job, first): (ProductJob, u32)| product_mesh(job, first, scheme);
+    let work: Vec<(ProductJob, u32)> = jobs.into_iter().zip(firsts).collect();
+    #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+    {
+        use rayon::prelude::*;
+        work.into_par_iter().map(solve).collect()
+    }
+    #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
+    work.into_iter().map(solve).collect()
+}
+
+/// IDs handed out in order from a reserved range.
+struct Range(Cell<u32>);
+
+impl IdSource for Range {
+    fn reserve(&self, count: u32) -> u32 {
+        let first = self.0.get();
+        self.0.set(first + count);
+        first
+    }
+}
+
+fn product_mesh(job: ProductJob, first: u32, scheme: &Scheme) -> Option<PolySet> {
+    let ids = Range(Cell::new(first));
+    let mut warnings = Vec::new();
+    let mut convert = |ps: &PolySet| {
+        let mut errors = Vec::new();
+        ManifoldGeometry::from_polyset(ps, &ids, &mut warnings, &mut errors)
+    };
+    let positives: Vec<ManifoldGeometry> = job.positives.iter().map(&mut convert).collect();
+    let negatives: Vec<ManifoldGeometry> = job.negatives.iter().map(&mut convert).collect();
+    let pos = ManifoldGeometry::batch(OpType::Intersect, positives)?;
+    let solid = match union_tree(negatives) {
+        None => pos,
+        Some(neg) => pos.boolean(&neg, OpType::Subtract),
+    };
+    (!solid.is_empty()).then(|| solid.to_polyset(scheme))
+}
+
+/// Operands a product's union of negatives handles in one batch; more are
+/// split in two halves, unioned in parallel, and joined.
+const UNION_LEAF: usize = 16;
+
+/// The union of `parts` by a tree of fixed shape (halves, down to
+/// [`UNION_LEAF`] operands), the halves in parallel. A product can hold
+/// hundreds of negatives (a difference of one solid and a `for` loop of
+/// holes normalises to one), and one batch unions them with Manifold's
+/// pairwise rounds one after another, where a render unions each subtree
+/// of the model in parallel. The tree's shape depends only on the count,
+/// so the result does not depend on the thread count.
+fn union_tree(mut parts: Vec<ManifoldGeometry>) -> Option<ManifoldGeometry> {
+    if parts.len() <= UNION_LEAF {
+        return ManifoldGeometry::batch(OpType::Add, parts);
+    }
+    let right = parts.split_off(parts.len() / 2);
+    #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+    let (a, b) = rayon::join(|| union_tree(parts), || union_tree(right));
+    #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
+    let (a, b) = (union_tree(parts), union_tree(right));
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.boolean(&b, OpType::Add)),
+        (a, b) => a.or(b),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cube_leaf(lo: f64, hi: f64) -> Term {
+        let ps = crate::primitives::cube([hi - lo; 3], false);
+        let m: Matrix = [
+            [1.0, 0.0, 0.0, lo],
+            [0.0, 1.0, 0.0, lo],
+            [0.0, 0.0, 1.0, lo],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let bbox = transformed_box(&m, &all_vertices_box(&ps));
+        leaf_term(Arc::new(Leaf {
+            mesh: Some(Arc::new(ps)),
+            dim: 3,
+            matrix: m,
+            color: NO_COLOR,
+            index: 0,
+            bbox,
+        }))
+    }
+
+    fn products(t: &Term) -> Vec<(usize, usize)> {
+        let mut n = Normalizer {
+            limit: DEFAULT_TERM_LIMIT,
+            count: 0,
+            aborted: false,
+        };
+        let t = n.normalize(t).unwrap();
+        let mut p = Products::new();
+        p.import(&t);
+        p.products
+            .iter()
+            .map(|p| (p.intersections.len(), p.subtractions.len()))
+            .collect()
+    }
+
+    #[test]
+    fn union_minus_one_becomes_two_products() {
+        // (a + b) - c -> (a - c) + (b - c)
+        let (a, b, c) = (
+            cube_leaf(0.0, 2.0),
+            cube_leaf(1.0, 3.0),
+            cube_leaf(1.5, 2.5),
+        );
+        let t = create(
+            CsgOp::Difference,
+            Some(create(CsgOp::Union, Some(a), Some(b))),
+            Some(c),
+        );
+        assert_eq!(products(&t), vec![(1, 1), (1, 1)]);
+    }
+
+    #[test]
+    fn disjoint_negative_is_pruned() {
+        let (a, c) = (cube_leaf(0.0, 1.0), cube_leaf(5.0, 6.0));
+        let t = create(CsgOp::Difference, Some(a.clone()), Some(c));
+        assert!(Rc::ptr_eq(&t, &a));
+        let t = create(CsgOp::Intersection, Some(a), Some(cube_leaf(5.0, 6.0)));
+        assert!(t.is_empty_set());
+    }
+
+    #[test]
+    fn nested_difference_turns_into_an_intersection() {
+        // x - (y - z) -> (x - y) + (x * z)
+        let (x, y, z) = (
+            cube_leaf(0.0, 4.0),
+            cube_leaf(1.0, 3.0),
+            cube_leaf(1.5, 2.5),
+        );
+        let t = create(
+            CsgOp::Difference,
+            Some(x),
+            Some(create(CsgOp::Difference, Some(y), Some(z))),
+        );
+        assert_eq!(products(&t), vec![(1, 1), (2, 0)]);
+    }
+
+    #[test]
+    fn slab_is_one_unit_thick() {
+        let p = Polygon2d::from_outline(vec![[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0]]);
+        let s = slab(&p);
+        assert_eq!(
+            all_vertices_box(&s),
+            Some(([0.0, 0.0, -0.5], [2.0, 1.0, 0.5]))
+        );
+        // Two triangles each at the bottom and top, four sides.
+        assert_eq!(s.faces.len(), 8);
+    }
+
+    #[test]
+    fn product_mesh_keeps_face_colours() {
+        let red = Color([1.0, 0.0, 0.0, 1.0]);
+        let green = Color([0.0, 1.0, 0.0, 1.0]);
+        let mut a = crate::primitives::cube([2.0; 3], false);
+        a.set_color(red);
+        let mut b = crate::primitives::cube([1.0; 3], false);
+        b.transform(&[
+            [1.0, 0.0, 0.0, 1.5],
+            [0.0, 1.0, 0.0, 0.5],
+            [0.0, 0.0, 1.0, 0.5],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        b.set_color(green);
+        let out = product_meshes(
+            vec![ProductJob {
+                positives: vec![a],
+                negatives: vec![b],
+            }],
+            &crate::color::CORNFIELD,
+        );
+        let ps = out[0].as_ref().unwrap();
+        let used: std::collections::BTreeSet<[u32; 4]> = ps
+            .color_indices
+            .iter()
+            .map(|&i| ps.colors[i as usize].key())
+            .collect();
+        assert_eq!(used.len(), 2, "outer faces red, cut faces green");
+    }
+}

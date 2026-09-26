@@ -3,8 +3,8 @@
 //! Some tier 0-2 inputs do not exist in a fresh checkout:
 //! `misc/include-tests.scad`, `misc/use-tests.scad` and the `import_*-tests`
 //! files are `configure_file` outputs (tests/CMakeLists.txt:164-173), and
-//! `issue2342.scad` is written by a Python generator at build time
-//! (`:183-187`). OpenSCAD's own `.gitignore` covers all of them, so writing
+//! `issue2342.scad` and the viewbox SVGs are written by Python generators
+//! at build time (`:176-195`). OpenSCAD's own `.gitignore` covers all of them, so writing
 //! them into the reference checkout mirrors what an OpenSCAD build does and
 //! leaves its `git status` clean.
 
@@ -33,6 +33,12 @@ pub fn prepare(ctx: &Ctx, manifest: &Manifest) -> Result<(), String> {
     for g in &manifest.generated_files {
         let out = ctx.ref_root.join(&g.output);
         let content = match (&g.template, g.generator.as_deref()) {
+            (Some(tpl), Some("gen_svg_viewbox")) => {
+                let text = fs::read_to_string(ctx.ref_root.join(tpl))
+                    .map_err(|e| format!("{tpl}: {e}"))?;
+                gen_svg_viewbox(&text, &g.output)
+                    .ok_or_else(|| format!("{}: not a viewbox test name", g.output))?
+            }
             (Some(tpl), _) => {
                 let text = fs::read_to_string(ctx.ref_root.join(tpl))
                     .map_err(|e| format!("{tpl}: {e}"))?;
@@ -79,6 +85,25 @@ fn gen_issue2342() -> String {
     s
 }
 
+/// Port of `tests/data/python/gen_svg_viewbox_tests-template.py` for one
+/// output: `viewbox_<w>x<h>_<aspect parts reversed, joined by _>.svg`
+/// gets `viewBox="0 0 w h"` and `preserveAspectRatio="<parts>"`.
+fn gen_svg_viewbox(template: &str, output: &str) -> Option<String> {
+    let name = Path::new(output).file_stem()?.to_str()?;
+    let rest = name.strip_prefix("viewbox_")?;
+    let (size, aspect) = rest.split_once('_')?;
+    let (w, h) = size.split_once('x')?;
+    let parts: Vec<&str> = aspect.split('_').rev().collect();
+    Some(
+        template
+            .replace("__VIEWBOX__", &format!("viewBox=\"0 0 {w} {h}\""))
+            .replace(
+                "__PRESERVE_ASPECT_RATIO__",
+                &format!("preserveAspectRatio=\"{}\"", parts.join(" ")),
+            ),
+    )
+}
+
 fn write_if_changed(path: &Path, content: &str) -> Result<(), String> {
     if fs::read_to_string(path).is_ok_and(|old| old == content) {
         return Ok(());
@@ -97,6 +122,19 @@ mod tests {
     fn configure_substitutes_and_blanks_unknowns() {
         let vars: HashMap<&str, String> = [("A", "x".to_string())].into_iter().collect();
         assert_eq!(configure("@A@/${A}/@B@.", &vars), "x/x/.");
+    }
+
+    #[test]
+    fn viewbox_names_give_the_generators_attributes() {
+        let t = "<svg __VIEWBOX__ __PRESERVE_ASPECT_RATIO__>";
+        assert_eq!(
+            gen_svg_viewbox(t, "x/viewbox_600x200_slice_xMinYMin.svg").unwrap(),
+            r#"<svg viewBox="0 0 600 200" preserveAspectRatio="xMinYMin slice">"#
+        );
+        assert_eq!(
+            gen_svg_viewbox(t, "viewbox_300x400_none.svg").unwrap(),
+            r#"<svg viewBox="0 0 300 400" preserveAspectRatio="none">"#
+        );
     }
 
     #[test]

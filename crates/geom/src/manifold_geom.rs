@@ -13,7 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use manifold_rust::impl_mesh::ManifoldImpl;
 use manifold_rust::linalg::{Mat3x4, Vec3};
 use manifold_rust::manifold::Manifold;
-use manifold_rust::types::{BooleanEngine, Error, MeshGL64, OpType};
+/// The boolean operations, for [`ManifoldGeometry::boolean`].
+pub use manifold_rust::types::OpType;
+use manifold_rust::types::{BooleanEngine, Error, MeshGL64};
 
 use crate::Matrix;
 use crate::color::{Color, Scheme};
@@ -104,6 +106,13 @@ impl ManifoldGeometry {
 
     pub fn is_empty(&self) -> bool {
         self.manifold.is_empty()
+    }
+
+    /// A proper 2-manifold: Manifold reported no error and did not have to
+    /// keep the mesh as a triangle soup (the repair path for closed but
+    /// non-manifold input).
+    pub fn is_valid(&self) -> bool {
+        self.manifold.status() == Error::NoError && !self.manifold.as_impl().is_soup
     }
 
     /// `createManifoldFromPolySet` (`manifoldutils.cc:127-195`): triangulate,

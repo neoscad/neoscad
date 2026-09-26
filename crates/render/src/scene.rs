@@ -1,23 +1,32 @@
-//! What the renderer draws, built from `geom`'s result the way OpenSCAD's
-//! render-mode `PolySetRenderer` builds its vertex buffers
-//! (`src/glview/PolySetRenderer.cc`, `VBOBuilder.cc`), with no GPU
-//! involved: the app, the web build and the offscreen exporter all draw a
-//! [`Scene`].
+//! What the renderer draws, with no GPU involved: the app, the web build and
+//! the offscreen exporter all draw a [`Scene`].
 //!
-//! - A 3D result becomes one triangulated mesh. A Manifold solid is turned
-//!   into a mesh by `geom` exactly as for export (`toPolySet`, with the
-//!   scheme's front colour and its back colour on faces cut by a
-//!   `difference()`); a mesh that is already triangulated is shared with
-//!   `geom`, not copied.
-//! - Each triangle gets its own three vertices carrying the face normal,
-//!   so shading is flat, as in OpenSCAD, and its face colour.
-//! - A 2D result is its triangulation, unlit in the scheme's 2D face
-//!   colour, plus its outlines, drawn over it as 2-pixel lines in the 2D
-//!   edge colour.
+//! A scene is a list of surfaces (a mesh, the matrix placing it and the
+//! colour its uncoloured faces get), each drawn with a [`DrawState`]:
+//! which faces are culled, how depth is tested, and whether colour is
+//! written at all. Render mode needs one state; OpenSCAD's previews change
+//! state between objects (a subtracted object shows only its back faces,
+//! a transparent one its back faces before its front faces, a CSG product
+//! is drawn where its depth is equal to the depth pass's), and a scene
+//! records those changes in order, as OpenSCAD's `VertexState` list does.
 //!
-//! The vertex bytes are produced by iterators, so a GPU target can write
-//! them straight into a mapped buffer: geometry reaches the GPU in one pass
-//! from `geom`'s own `f64` mesh, with no intermediate vertex array.
+//! - Render mode ([`Scene::new`], after `PolySetRenderer`): a 3D result is
+//!   one triangulated mesh; a Manifold solid is turned into a mesh by
+//!   `geom` exactly as for export (with the scheme's front colour and its
+//!   back colour on faces cut by a `difference()`). A 2D result is its
+//!   triangulation, unlit in the scheme's 2D face colour, plus its
+//!   outlines, drawn over it as 2-pixel lines in the 2D edge colour.
+//! - Previews: see [`crate::preview`].
+//!
+//! Faces become triangles as `VBOBuilder::create_surface` makes them:
+//! triangles as they are, a quad as two triangles sharing its 1-3 diagonal,
+//! larger polygons as a fan around their centroid. Each triangle gets its
+//! own three vertices carrying the face normal (so shading is flat, as in
+//! OpenSCAD), its colour, and the barycentric flags the edge view draws
+//! from (a diagonal a quad or fan introduced is not an edge).
+//!
+//! The vertex bytes come from iterators, so a GPU target can write them
+//! straight into a mapped buffer, from `geom`'s own `f64` meshes.
 
 use std::sync::Arc;
 
@@ -29,51 +38,121 @@ use geom::polyset::PolySet;
 use crate::camera::BoundingBox;
 use crate::scheme::ColorScheme;
 
-/// Bytes per face vertex: position (3 x f32), normal (3 x f32) and colour
-/// (4 x f32), little-endian, in that order. A zero normal marks a vertex
-/// that is drawn unlit (2D shapes).
-pub const FACE_VERTEX_SIZE: usize = 40;
+/// Bytes per face vertex: position (3 x f32), normal (3 x f32), colour
+/// (4 x f32), little-endian, then four barycentric bytes (0 or 1; the
+/// fourth unused). A zero normal marks a vertex that is drawn unlit (2D
+/// shapes in render mode).
+pub const FACE_VERTEX_SIZE: usize = 44;
 
 /// Bytes per outline segment: its two end points (2 x 3 x f32).
 pub const EDGE_SEGMENT_SIZE: usize = 24;
 
-/// A 3D mesh and the colour of faces that have none.
-#[derive(Debug)]
-struct Solid {
-    mesh: Arc<PolySet>,
-    default_color: Color,
+/// Which faces are not drawn (`glCullFace`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Cull {
+    None,
+    /// Front faces (counter-clockwise on screen) are culled: only back
+    /// faces are drawn.
+    Front,
+    /// Back faces are culled.
+    Back,
 }
 
-/// A 2D shape: its outlines and their triangulation.
+/// The depth test (`glDepthFunc`); depth is always written when the test
+/// passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Depth {
+    Less,
+    LessEqual,
+    Equal,
+    Always,
+}
+
+/// Fixed-function state for one run of surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DrawState {
+    pub cull: Cull,
+    pub depth: Depth,
+    /// `false` for a depth-only pass.
+    pub color_write: bool,
+    /// Pull the faces a hair towards the camera. A preview's highlighted
+    /// objects are drawn over the model's CSG result, and a `#` subtracted
+    /// object lies exactly on the cut it makes: OpenCSG compares depths of
+    /// the very same triangles there, which tie, and `GL_LEQUAL` lets the
+    /// highlight through. The model's surface here comes from a boolean
+    /// that split those triangles, whose depths differ in the last bits, so
+    /// without the offset the highlight would z-fight with the cut. (A `%`
+    /// object is taken out of the CSG, so it never lies on a cut by
+    /// construction, and gets no offset: where it merely touches the
+    /// model, OpenSCAD shows the model.)
+    pub bias: bool,
+}
+
+impl DrawState {
+    /// Render mode's state: no culling, `GL_LESS`, colour on.
+    pub const DEFAULT: DrawState = DrawState {
+        cull: Cull::None,
+        depth: Depth::Less,
+        color_write: true,
+        bias: false,
+    };
+}
+
+/// A range of [`Scene::face_vertices`] drawn with one state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Draw {
+    pub first: u32,
+    pub count: u32,
+    pub state: DrawState,
+}
+
+/// One mesh placed and coloured for drawing (`VBOBuilder::create_surface`).
+#[derive(Debug, Clone)]
+pub struct Surface {
+    pub mesh: Arc<PolySet>,
+    /// Model coordinates of the mesh's vertices; `None` for identity.
+    pub matrix: Option<geom::Matrix>,
+    /// The colour of faces without a valid colour of their own, or of
+    /// every face with `force_color`.
+    pub color: Color,
+    pub force_color: bool,
+    /// `false` draws the faces unlit (2D shapes in render mode).
+    pub lit: bool,
+    pub state: DrawState,
+}
+
+/// A 2D outline set, drawn over everything as 2-pixel lines.
 #[derive(Debug)]
-struct Flat {
+struct Outlines {
     polygon: Arc<Polygon2d>,
-    fill: PolySet,
 }
 
 /// Everything one image shows, in model coordinates.
 #[derive(Debug)]
 pub struct Scene {
-    solids: Vec<Solid>,
-    flats: Vec<Flat>,
-    face_2d: Color,
+    surfaces: Vec<Surface>,
+    outlines: Vec<Outlines>,
     edge_2d: Color,
     bbox: BoundingBox,
 }
 
 impl Scene {
-    /// The scene for a render result (`None`: nothing to draw, as for an
-    /// empty top level). `scheme` supplies the colours `PolySetRenderer`
-    /// takes from it: the default face colour, the Manifold face colours
-    /// and the 2D colours.
-    pub fn new(geometry: Option<&Geometry>, scheme: &ColorScheme) -> Scene {
-        let mut scene = Scene {
-            solids: Vec::new(),
-            flats: Vec::new(),
-            face_2d: scheme.cgal_face_2d,
+    /// A scene with nothing in it yet; `bbox` is what `--viewall` fits.
+    pub fn empty(scheme: &ColorScheme, bbox: BoundingBox) -> Scene {
+        Scene {
+            surfaces: Vec::new(),
+            outlines: Vec::new(),
             edge_2d: scheme.cgal_edge_2d,
-            bbox: None,
-        };
+            bbox,
+        }
+    }
+
+    /// The render-mode scene for a render result (`None`: nothing to draw,
+    /// as for an empty top level). `scheme` supplies the colours
+    /// `PolySetRenderer` takes from it: the default face colour, the
+    /// Manifold face colours and the 2D colours.
+    pub fn new(geometry: Option<&Geometry>, scheme: &ColorScheme) -> Scene {
+        let mut scene = Scene::empty(scheme, None);
         match geometry {
             None => {}
             Some(Geometry::PolySet(ps)) => {
@@ -84,115 +163,99 @@ impl Scene {
                 } else {
                     Arc::new(ps.tessellate(&mut Vec::new()))
                 };
-                scene.add_solid(mesh, scheme);
+                scene.add_render_solid(mesh, scheme);
             }
             Some(Geometry::Manifold(m)) => {
-                scene.add_solid(Arc::new(m.to_polyset(&scheme.geometry_scheme())), scheme);
+                scene.add_render_solid(Arc::new(m.to_polyset(&scheme.geometry_scheme())), scheme);
             }
             Some(Geometry::Polygon2d(p)) => {
                 let fill = p.tessellate();
                 if let Some((lo, hi)) = p.bounds() {
                     scene.bbox = Some(([lo[0], lo[1], 0.0], [hi[0], hi[1], 0.0]));
                 }
-                scene.flats.push(Flat {
-                    polygon: p.clone(),
-                    fill,
+                scene.surfaces.push(Surface {
+                    mesh: Arc::new(fill),
+                    matrix: None,
+                    color: scheme.cgal_face_2d,
+                    force_color: true,
+                    lit: false,
+                    state: DrawState::DEFAULT,
                 });
+                scene.outlines.push(Outlines { polygon: p.clone() });
             }
         }
         scene
     }
 
-    fn add_solid(&mut self, mesh: Arc<PolySet>, scheme: &ColorScheme) {
+    fn add_render_solid(&mut self, mesh: Arc<PolySet>, scheme: &ColorScheme) {
         // `createPolySetStates`: the first colour of the mesh, with
         // whichever of its RGB and alpha are unset taken from the scheme's
         // `MATERIAL` colour (`Renderer::getShaderColor`).
-        let mut color = mesh.colors.first().copied().unwrap_or(Color([-1.0; 4]));
-        if !color.is_valid() {
-            let base = scheme.opencsg_face_front.0;
-            if color.0[..3].iter().any(|&c| c < 0.0) {
-                color.0[..3].copy_from_slice(&base[..3]);
-            }
-            if color.0[3] < 0.0 {
-                color.0[3] = base[3];
-            }
-        }
+        let first = mesh.colors.first().copied().unwrap_or(Color([-1.0; 4]));
+        let color =
+            crate::preview::shader_color(crate::preview::ColorMode::Material, first, scheme);
         // `PolySet::getBoundingBox` spans every vertex.
-        let mut it = mesh.vertices.iter();
-        if let Some(&first) = it.next() {
-            let (lo, hi) = it.fold((first, first), |(lo, hi), v| {
-                (
-                    std::array::from_fn(|k| lo[k].min(v[k])),
-                    std::array::from_fn(|k| hi[k].max(v[k])),
-                )
-            });
-            self.bbox = Some(match self.bbox {
-                None => (lo, hi),
-                Some((l, h)) => (
-                    std::array::from_fn(|k| l[k].min(lo[k])),
-                    std::array::from_fn(|k| h[k].max(hi[k])),
-                ),
-            });
-        }
-        self.solids.push(Solid {
+        self.bbox = merge(self.bbox, vertex_box(&mesh.vertices));
+        self.surfaces.push(Surface {
             mesh,
-            default_color: color,
+            matrix: None,
+            color,
+            force_color: false,
+            lit: true,
+            state: DrawState::DEFAULT,
         });
     }
 
-    /// `PolySetRenderer::getBoundingBox`, which `--viewall` fits.
+    /// Append a surface; surfaces are drawn in the order they are added.
+    pub fn push(&mut self, surface: Surface) {
+        self.surfaces.push(surface);
+    }
+
+    /// The box `--viewall` fits: `PolySetRenderer::getBoundingBox` in
+    /// render mode, the products' box in a preview.
     pub fn bounding_box(&self) -> BoundingBox {
         self.bbox
     }
 
-    /// Vertices [`Scene::face_vertices`] yields: three per triangle.
-    pub fn face_vertex_count(&self) -> usize {
-        let solids: usize = self
-            .solids
-            .iter()
-            .map(|s| s.mesh.faces.iter().filter(|f| f.len() >= 3).count())
-            .sum();
-        let flats: usize = self.flats.iter().map(|f| f.fill.faces.len()).sum();
-        3 * (solids + flats)
+    /// The surfaces, in drawing order.
+    pub fn surfaces(&self) -> &[Surface] {
+        &self.surfaces
     }
 
-    /// Every triangle's three vertices ([`FACE_VERTEX_SIZE`] bytes each):
-    /// the meshes first, then the 2D fills.
+    /// Vertices [`Scene::face_vertices`] yields.
+    pub fn face_vertex_count(&self) -> usize {
+        self.surfaces.iter().map(surface_vertex_count).sum()
+    }
+
+    /// The draw calls: consecutive surfaces with the same state share one.
+    pub fn draws(&self) -> Vec<Draw> {
+        let mut out: Vec<Draw> = Vec::new();
+        let mut first = 0u32;
+        for s in &self.surfaces {
+            let count = surface_vertex_count(s) as u32;
+            match out.last_mut() {
+                Some(d) if d.state == s.state && d.first + d.count == first => d.count += count,
+                _ => out.push(Draw {
+                    first,
+                    count,
+                    state: s.state,
+                }),
+            }
+            first += count;
+        }
+        out.retain(|d| d.count > 0);
+        out
+    }
+
+    /// Every triangle's three vertices ([`FACE_VERTEX_SIZE`] bytes each),
+    /// surface by surface.
     pub fn face_vertices(&self) -> impl Iterator<Item = [u8; FACE_VERTEX_SIZE]> + '_ {
-        let solids = self.solids.iter().flat_map(|s| {
-            let ps = &*s.mesh;
-            let has_colors = !ps.color_indices.is_empty();
-            ps.faces
-                .iter()
-                .enumerate()
-                .filter(|(_, f)| f.len() >= 3)
-                .flat_map(move |(i, f)| {
-                    // `VBOBuilder::create_surface`: a face's own colour
-                    // when it has a valid one, else the mesh default.
-                    let color = has_colors
-                        .then(|| ps.color_indices.get(i).copied())
-                        .flatten()
-                        .and_then(|ci| usize::try_from(ci).ok())
-                        .and_then(|ci| ps.colors.get(ci))
-                        .filter(|c| c.is_valid())
-                        .copied()
-                        .unwrap_or(s.default_color);
-                    let p = [f[0], f[1], f[2]].map(|v| ps.vertices[v as usize]);
-                    triangle(p, Some(face_normal(p)), color)
-                })
-        });
-        let flats = self.flats.iter().flat_map(move |fl| {
-            fl.fill.faces.iter().flat_map(move |f| {
-                let p = [f[0], f[1], f[2]].map(|v| fl.fill.vertices[v as usize]);
-                triangle(p, None, self.face_2d)
-            })
-        });
-        solids.chain(flats)
+        self.surfaces.iter().flat_map(surface_vertices)
     }
 
     /// Outline segments [`Scene::edge_segments`] yields.
     pub fn edge_segment_count(&self) -> usize {
-        self.flats
+        self.outlines
             .iter()
             .flat_map(|f| f.polygon.outlines.iter())
             .map(|o| o.vertices.len())
@@ -202,7 +265,7 @@ impl Scene {
     /// Each 2D outline as a closed loop of segments
     /// ([`EDGE_SEGMENT_SIZE`] bytes each), at z = 0.
     pub fn edge_segments(&self) -> impl Iterator<Item = [u8; EDGE_SEGMENT_SIZE]> + '_ {
-        self.flats
+        self.outlines
             .iter()
             .flat_map(|f| f.polygon.outlines.iter())
             .flat_map(|o| {
@@ -224,6 +287,56 @@ impl Scene {
     }
 }
 
+/// The box of a list of points.
+pub(crate) fn vertex_box(v: &[[f64; 3]]) -> BoundingBox {
+    let mut it = v.iter();
+    let first = *it.next()?;
+    Some(it.fold((first, first), |(lo, hi), v| {
+        (
+            std::array::from_fn(|k| lo[k].min(v[k])),
+            std::array::from_fn(|k| hi[k].max(v[k])),
+        )
+    }))
+}
+
+pub(crate) fn merge(a: BoundingBox, b: BoundingBox) -> BoundingBox {
+    match (a, b) {
+        (None, b) => b,
+        (a, None) => a,
+        (Some((al, ah)), Some((bl, bh))) => Some((
+            std::array::from_fn(|k| al[k].min(bl[k])),
+            std::array::from_fn(|k| ah[k].max(bh[k])),
+        )),
+    }
+}
+
+fn surface_vertex_count(s: &Surface) -> usize {
+    s.mesh
+        .faces
+        .iter()
+        .map(|f| match f.len() {
+            0..=2 => 0,
+            3 => 3,
+            4 => 6,
+            n => 3 * n,
+        })
+        .sum()
+}
+
+/// `VBOBuilder::add_barycentric_attribute`: the flags of vertex `active`
+/// of triangle `primitive` cut from a face of `shape_size` vertices. A 1
+/// in component `k` means the edge opposite vertex `k` is not drawn.
+fn barycentric(active: usize, primitive: usize, shape_size: usize) -> [u8; 3] {
+    let _ = primitive;
+    let mut f = match shape_size {
+        3 => [0, 0, 0],
+        4 => [1, 0, 0],
+        _ => [0, 1, 1],
+    };
+    f[active] = 1;
+    f
+}
+
 /// `VBOBuilder::create_triangle`'s normal: `(p1 - p0) x (p1 - p2)`,
 /// normalised, in `f64`. It points into the solid for counter-clockwise
 /// faces; OpenSCAD's two lights are opposite each other, so the sign does
@@ -239,14 +352,75 @@ fn face_normal(p: [[f64; 3]; 3]) -> [f64; 3] {
     [nx / nl, ny / nl, nz / nl]
 }
 
+/// Determinant of the matrix's linear part: negative for a mirror.
+fn determinant(m: &geom::Matrix) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+/// The triangles of one surface, as `VBOBuilder::create_surface` emits
+/// them.
+fn surface_vertices(s: &Surface) -> impl Iterator<Item = [u8; FACE_VERTEX_SIZE]> + '_ {
+    let ps = &*s.mesh;
+    let has_colors = !ps.color_indices.is_empty();
+    let mirrored = s.matrix.as_ref().is_some_and(|m| determinant(m) < 0.0);
+    let place = move |v: [f64; 3]| match &s.matrix {
+        None => v,
+        Some(m) => geom::polyset::apply(m, v),
+    };
+    ps.faces
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.len() >= 3)
+        .flat_map(move |(i, f)| {
+            // A face's own colour when it has a valid one (and the surface
+            // does not force its colour), else the surface's.
+            let color = (!s.force_color && has_colors)
+                .then(|| ps.color_indices.get(i).copied())
+                .flatten()
+                .and_then(|ci| usize::try_from(ci).ok())
+                .and_then(|ci| ps.colors.get(ci))
+                .filter(|c| c.is_valid())
+                .copied()
+                .unwrap_or(s.color);
+            let v = |k: usize| place(ps.vertices[f[k] as usize]);
+            let n = f.len();
+            let tris: Vec<([[f64; 3]; 3], usize)> = match n {
+                3 => vec![([v(0), v(1), v(2)], 0)],
+                4 => vec![([v(0), v(1), v(3)], 0), ([v(2), v(3), v(1)], 1)],
+                _ => {
+                    // The centroid of the untransformed vertices, moved.
+                    let mut c = [0.0; 3];
+                    for &k in f {
+                        let p = ps.vertices[k as usize];
+                        c = [c[0] + p[0], c[1] + p[1], c[2] + p[2]];
+                    }
+                    let c = place(c.map(|x| x / n as f64));
+                    (1..=n).map(|j| ([c, v(j - 1), v(j % n)], j - 1)).collect()
+                }
+            };
+            tris.into_iter().flat_map(move |(p, prim)| {
+                triangle(p, prim, n, s.lit.then(|| face_normal(p)), color, mirrored)
+            })
+        })
+}
+
 /// The three vertices of one triangle; `normal: None` draws it unlit.
+/// Mirrored surfaces emit the vertices as 0, 2, 1, so the winding on
+/// screen is the model's again.
 fn triangle(
     p: [[f64; 3]; 3],
+    primitive: usize,
+    shape_size: usize,
     normal: Option<[f64; 3]>,
     color: Color,
+    mirrored: bool,
 ) -> [[u8; FACE_VERTEX_SIZE]; 3] {
     let n = normal.unwrap_or([0.0; 3]);
-    p.map(|v| {
+    let order = if mirrored { [0, 2, 1] } else { [0, 1, 2] };
+    order.map(|k| {
+        let v = p[k];
         let mut out = [0u8; FACE_VERTEX_SIZE];
         let floats = [
             v[0] as f32,
@@ -260,9 +434,11 @@ fn triangle(
             color.0[2],
             color.0[3],
         ];
-        for (k, x) in floats.into_iter().enumerate() {
-            out[4 * k..4 * k + 4].copy_from_slice(&x.to_le_bytes());
+        for (i, x) in floats.into_iter().enumerate() {
+            out[4 * i..4 * i + 4].copy_from_slice(&x.to_le_bytes());
         }
+        let b = barycentric(k, primitive, shape_size);
+        out[40..43].copy_from_slice(&b);
         out
     })
 }
@@ -272,7 +448,8 @@ mod tests {
     use super::*;
 
     fn floats(v: &[u8]) -> Vec<f32> {
-        v.chunks(4)
+        v[..40]
+            .chunks(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }
@@ -294,6 +471,7 @@ mod tests {
         let f = floats(&v[0]);
         assert_eq!(&f[3..6], &[0.0, 0.0, -1.0], "(p1-p0) x (p1-p2)");
         assert_eq!(&f[6..10], &Color::from_u8(1, 2, 3).0);
+        assert_eq!(&v[0][40..43], &[1, 0, 0]);
         assert_eq!(scene.bounding_box(), Some(([0.0; 3], [1.0, 1.0, 0.0])));
     }
 
@@ -309,9 +487,56 @@ mod tests {
         let f = floats(&scene.face_vertices().next().unwrap());
         assert_eq!(&f[3..6], &[0.0; 3], "2D is unlit");
         assert_eq!(scene.edge_segment_count(), 4);
-        let last = floats(&scene.edge_segments().last().unwrap());
+        let last = scene.edge_segments().last().unwrap();
+        let last: Vec<f32> = last
+            .chunks(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
         assert_eq!(last, [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(scene.bounding_box(), Some(([0.0; 3], [2.0, 1.0, 0.0])));
+    }
+
+    #[test]
+    fn quads_split_on_their_diagonal_and_fans_hide_inner_edges() {
+        let ps = PolySet {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [-1.0, 0.5, 0.0],
+            ],
+            faces: vec![vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4]],
+            ..Default::default()
+        };
+        let mut scene = Scene::empty(&ColorScheme::cornfield(), None);
+        scene.push(Surface {
+            mesh: Arc::new(ps),
+            matrix: None,
+            color: Color::from_u8(1, 2, 3),
+            force_color: false,
+            lit: true,
+            state: DrawState::DEFAULT,
+        });
+        assert_eq!(scene.face_vertex_count(), 6 + 15);
+        let v: Vec<_> = scene.face_vertices().collect();
+        // The quad's first triangle is 0, 1, 3: its 1-3 edge (opposite
+        // vertex 0) is the hidden diagonal.
+        assert_eq!(
+            [&v[0][40..43], &v[1][40..43], &v[2][40..43]],
+            [[1, 0, 0], [1, 1, 0], [1, 0, 1]]
+        );
+        // A fan triangle (centroid, a, b) keeps only the edge a-b.
+        assert_eq!(&v[6][40..43], &[1, 1, 1]);
+        assert_eq!(&v[7][40..43], &[0, 1, 1]);
+        assert_eq!(
+            scene.draws(),
+            vec![Draw {
+                first: 0,
+                count: 21,
+                state: DrawState::DEFAULT
+            }]
+        );
     }
 
     #[test]
@@ -319,5 +544,6 @@ mod tests {
         let scene = Scene::new(None, &ColorScheme::cornfield());
         assert_eq!(scene.face_vertex_count(), 0);
         assert_eq!(scene.bounding_box(), None);
+        assert!(scene.draws().is_empty());
     }
 }

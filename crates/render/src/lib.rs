@@ -1,5 +1,6 @@
-//! NeoSCAD's renderer: OpenSCAD's render-mode image (`--render -o x.png`)
-//! drawn with wgpu.
+//! NeoSCAD's renderer: OpenSCAD's images (`-o x.png`: render mode, the
+//! OpenCSG and throwntogether previews, the `--view` options) drawn with
+//! wgpu, and `neoscad snapshot`'s contact sheets.
 //!
 //! OpenSCAD's own renderer is fixed-function OpenGL (`src/glview`). This
 //! crate reproduces what it draws, not how: the same camera maths
@@ -19,14 +20,21 @@
 //!   colour view the caller owns.
 //! - [`offscreen`] (feature `gpu`) is one such caller: a texture read back
 //!   into memory, which [`encode_png`] turns into OpenSCAD's PNG.
-//!
-//! Preview mode (OpenCSG's view of an unevaluated CSG tree, `%` and `#`
-//! modifiers, throwntogether) and the view options (axes, scale markers,
-//! edges, crosshairs) are not implemented yet.
+//! - [`preview`] turns OpenSCAD's preview model (CSG products,
+//!   `geom::csg`) into a scene: the OpenCSG preview, with `%` and `#`
+//!   objects, and the throwntogether view.
+//! - [`overlay`] builds the `--view` options' lines (axes, scale markers
+//!   with [`hershey`] numbers, crosshairs) for a camera; edges are a
+//!   shader mode.
+//! - [`snapshot`] lays out and annotates contact sheets.
 
 pub mod camera;
+pub mod hershey;
+pub mod overlay;
+pub mod preview;
 pub mod scene;
 pub mod scheme;
+pub mod snapshot;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -34,8 +42,18 @@ pub mod gpu;
 pub mod offscreen;
 
 pub use camera::{Camera, Projection};
+pub use overlay::{Overlay, ViewOptions};
+pub use preview::Previewer;
 pub use scene::Scene;
 pub use scheme::ColorScheme;
+
+/// A rendered image: `width * height` pixels, RGBA, top row first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
 
 /// `setupCamera` in `export_png.cc`: with `--viewall`, fit the scene's
 /// bounding box (`Camera::viewAll`, which also centres on it with

@@ -182,12 +182,6 @@ entry when it is done.
   the two `CGAL ...` lines after it, and the JSON has `bytes` and
   `max_size` null (`docs/cli-json.md`). Exposing the cache's byte total
   and budget from `geom` would fill both. (H3)
-- The summary's camera and POV export use the command line's camera; the
-  nightly's summary also applies top-level `$vpt`/`$vpr`/`$vpd`/`$vpf`
-  (`Camera::updateView`). `eval::Evaluation::camera` now carries that
-  camera (6a, for PNG export), so the summary fix is to pass it to
-  `summary::Facts`. (POV export uses the command line's camera in the
-  nightly too.) (H3)
 - `-d` lists dependencies in first-seen order where OpenSCAD uses hash
   order (same set). Files read by `dxf_dim()`/`dxf_cross()` are not
   listed, and `-m` does not run for them: the evaluator reads them
@@ -236,13 +230,46 @@ entry when it is done.
   experimental `import()` function (JSON) is not implemented either. (5c)
 
 ## Rendering
-- `-o x.png` without `--render` draws the rendered geometry, not
-  OpenSCAD's OpenCSG preview, and says so on stderr: `%` objects are
-  missing, `#` objects are not highlighted, and colours are render mode's.
-  `conformance images --previews` shows 189 of the 343 pending preview
-  cases would already pass that way (camera and image-size cases among
-  them); they stay pending until 6b draws real previews. `--view` options
-  are accepted and ignored with a note. (6a)
+- Previews draw each CSG product's visible surface from real Manifold
+  booleans (`geom::csg::product_meshes`), not OpenCSG's image-space CSG,
+  so image-space artefacts are not reproduced: z-fighting where a
+  positive and a negative face are coplanar, holes from a `convexity` set
+  too low, and whatever OpenCSG makes of a mesh that is not a closed
+  solid. `preview-manifold_polyhedron-tests` fails on the last: OpenCSG
+  draws a subtraction from an inside-out octahedron as nothing and one
+  with a single flipped face as a partial shape, while Manifold repairs
+  both. (6b)
+- A preview's `#` objects are drawn with a small depth offset
+  (`DrawState::bias`, constant -2, slope -0.5) so that they show on the
+  cut faces they make, whose triangles the boolean re-split (OpenCSG
+  compares the very same triangles there). The values pass every
+  highlight case; a `#` object within that offset behind a surface would
+  show through it. (6b)
+- `--view edges` in render mode splits quads along other diagonals than
+  OpenSCAD's libtess2 (`PolySetUtils::tessellate_faces`), and a Manifold
+  result's triangles follow manifold-rust's triangulation, so interior
+  edge lines differ: `render-view-edges-manifold_cube10` and both
+  `*-view-edges-manifold_render-preserve-colors` fail on those lines
+  alone. Same root as "Faces with more than three vertices" under
+  Parity. (6b)
+- The preview of a model with a `.nef3` import fails like its render
+  (`import()` of `.nef3` is not implemented): the two
+  `preview-manifold_nef3_*` cases. (6b)
+- With `--csglimit` exceeded, OpenSCAD's preview draws nothing (the
+  normaliser gives up on the whole term), and so does neoscad's. For the
+  GUI and snapshots the real boolean of the unnormalised term would be a
+  better fallback; not done, to stay with OpenSCAD. (6b)
+- The render summary after a PNG preview reports 0 geometry cache
+  entries (`CsgTree::build` does not return the renderer's count). (6b)
+- `.term` export still prints "No top-level CSG object"; `geom::csg`
+  now builds OpenSCAD's CSG terms, so `CSGNode::dump` could be ported on
+  top of it. (6b)
+- Preview speed (best of 3, wall, this machine): at most `--render`'s
+  time on the benchmark models, and 1.5-4.5x faster than the nightly's
+  OpenCSG preview, except `csg_spheres` (380 ms against the nightly's
+  273: one product of a cube minus 125 spheres is one big boolean,
+  which OpenCSG never computes) and `text_30lines` (550 against 486, as
+  in render mode). (6b)
 - PNG export needs a GPU adapter (Metal, Vulkan, Direct3D 12). Without
   one it fails with "no GPU adapter"; a headless Linux CI runner would
   need a software Vulkan driver (lavapipe), or neoscad a CPU rasteriser.
@@ -263,7 +290,8 @@ entry when it is done.
   non-planar quads: `PolySet::tessellate` ear-clips them along other
   diagonals than OpenSCAD's libtess2 (see "Faces with more than three
   vertices" under Parity), so the shading of those faces differs. The
-  renderer draws what `geom` hands it. (6a)
+  renderer draws what `geom` hands it. Their preview and throwntogether
+  cases fail the same way. (6a, 6b)
 - Colour schemes are only the built-in and vendored ones; OpenSCAD also
   reads `color-schemes/render/*.json` from the user's configuration
   directory. The app can pass such files to `render::scheme::parse`. (6a)

@@ -25,6 +25,7 @@ eval = { package = "neoscad-eval", path = "../eval" }
 geom = { package = "neoscad-geom", path = "../geom" }
 io = { package = "neoscad-io", path = "../io" }
 render = { package = "neoscad-render", path = "../render" }
+serde_json.workspace = true
 text = { package = "neoscad-text", path = "../text" }
 
 [lints]

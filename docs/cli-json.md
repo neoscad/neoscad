@@ -118,10 +118,12 @@ doubles each, `size` being `max - min`.
  "translation": [x, y, z]}
 ```
 
-The command line's camera: `--camera` if given, otherwise OpenSCAD's
-default (translation 0, rotation 55/0/25, distance 140, fov 22.5).
-Top-level `$vpt`/`$vpr`/`$vpd`/`$vpf` in the file are not reflected yet
-(the nightly applies them; `docs/followups.md`).
+The camera as the nightly reports it: `--camera` if given, otherwise
+OpenSCAD's default (translation 0, rotation 55/0/25, distance 140, fov
+22.5), with the file's top-level `$vpt`/`$vpr`/`$vpd`/`$vpf` applied
+unless `--camera` locked it (`Camera::updateView`). After a PNG export it
+is the camera the image was drawn with, `--viewall` fitted
+(`export_png` fits the same camera object the summary prints).
 
 ## Example
 
@@ -134,6 +136,97 @@ Top-level `$vpt`/`$vpr`/`$vpd`/`$vpf` in the file are not reflected yet
 
 The nightly writes the same apart from the three cache byte fields.
 
+# `neoscad snapshot --format json`
+
+`neoscad snapshot MODEL.scad --format json` writes one JSON object to
+stdout after the sheet is written (`crates/cli/src/snapshot.rs`). The
+same contract holds: fields are only added. Unlike the summary above
+this is neoscad's own format, printed with `serde_json` (keys sorted,
+compact, a trailing newline). Timings vary from run to run; everything
+else is the same for the same input.
+
+```json
+{"diagnostics": DIAG, "geometry": GEOM|null, "input": "model.scad",
+ "mode": "render"|"preview"|"diff", "output": "model-snapshot.png",
+ "schema": 1, "size": [1024, 1024], "timings_ms": TIMES,
+ "views": ["iso", "front", "top", "right"],
+ "diff": DIFF, "preview_bbox": BBOX|null}
+```
+
+- `schema`: 1.
+- `input`, `output`: the paths as given (the default output is the
+  model's file stem with `-snapshot.png`, in the working directory).
+- `mode`: what the sheet shows. `render` (the default) draws the rendered
+  geometry; `preview` OpenSCAD's preview (`--preview`); `diff` the
+  comparison (`--diff`).
+- `views` and `size`: the panels in order and the sheet's pixel size.
+- `geometry`: the model's rendered geometry, or `null` when it is empty
+  or with `--preview` (a preview does not compute the booleans). 3D:
+
+  ```json
+  {"dimensions": 3, "bbox": BBOX, "volume": double, "area": double,
+   "triangles": int, "vertices": int, "manifold": bool,
+   "components": int}
+  ```
+
+  `volume` (mm³) and `area` (mm²) are Manifold's. A result that is a
+  mesh rather than a solid (a lone primitive, an extrusion) is converted
+  as `--render=force` would convert it first. `manifold` is false when
+  Manifold reported an error or had to keep the mesh as a triangle soup.
+  `components` counts the pieces whose faces share no vertex. 2D:
+
+  ```json
+  {"dimensions": 2, "bbox": BBOX2, "area": double, "contours": int}
+  ```
+
+- `BBOX` is `{"min": [x, y, z], "max": [...], "size": [...]}` in mm
+  (two numbers each in 2D).
+- `preview_bbox`: with `--preview`, the box the preview fits
+  (`OpenCSGRenderer::getBoundingBox`: the products', including `%` and
+  `#` objects; 2D shapes as their one-unit slabs); `null` when there is
+  nothing to draw. Absent otherwise.
+- `diff`, only with `--diff OTHER`:
+
+  ```json
+  {"other": "OTHER.scad", "added_volume": double,
+   "removed_volume": double, "unchanged_volume": double,
+   "other_geometry": GEOM|null}
+  ```
+
+  `added_volume` is MODEL − OTHER, `removed_volume` OTHER − MODEL,
+  `unchanged_volume` their intersection, in mm³, from real booleans on
+  the two rendered solids (a 2D model as its one-unit slab).
+- `timings_ms`: `evaluate` (parsing and evaluation), `geometry` (the
+  render or the preview's products, both models and the diff booleans
+  with `--diff`), `gpu_init` (opening the GPU), `draw` (the panels and
+  the sheet), `encode` (the PNG) and `total`, rounded to 0.1 ms.
+- `diagnostics`: `errors`, `warnings` and `echoes` count the lines the
+  run logged (`ERROR:`, `WARNING:`, `ECHO:`); `messages` holds the first
+  20 errors then the first 20 warnings, and `echo` the first 20 echoes,
+  verbatim. The same lines go to stderr as they are printed.
+
+When the model (or the `--diff` model) cannot be loaded or evaluated
+(a syntax error, `--hardwarnings`), no sheet is written and the summary
+is only
+
+```json
+{"schema": 1, "input": "model.scad", "failed": true, "exit_code": int,
+ "diagnostics": DIAG}
+```
+
+with the process's exit code (1 for an error, 3 for a feature neoscad
+does not have yet).
+
+Example, `neoscad snapshot cube.scad --format json` for `cube(10);`
+(timings elided):
+
+```json
+{"diagnostics":{"echo":[],"echoes":0,"errors":0,"messages":[],"warnings":0},"geometry":{"area":600.0,"bbox":{"max":[10.0,10.0,10.0],"min":[0.0,0.0,0.0],"size":[10.0,10.0,10.0]},"components":1,"dimensions":3,"manifold":true,"triangles":12,"vertices":8,"volume":1000.0},"input":"cube.scad","mode":"render","output":"cube-snapshot.png","schema":1,"size":[1024,1024],"timings_ms":{...},"views":["iso","front","top","right"]}
+```
+
 ## Changes
 
 - 2026-09-26: first version.
+- Phase 6b: `camera` in the render summary now applies the file's
+  `$vp*` (as the nightly does) and, after a PNG, is the camera the image
+  was drawn with. Added `neoscad snapshot --format json`.

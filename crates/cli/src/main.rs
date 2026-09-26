@@ -8,14 +8,19 @@
 //! the `.csg` and `.term` node-tree exports, the `.param` customizer
 //! export, the 3D mesh exports (`.stl` ASCII and binary, `.off`, `.obj`,
 //! `.3mf`, `.wrl`, `.pov`) and the 2D exports (`.svg`, `.dxf`, `.pdf`) are
-//! implemented, and `.png` in render mode ([`png`], drawn by the
-//! `render` crate); every other output mode (`.nef3`, `.nefdbg`)
+//! implemented, and `.png` ([`png`], drawn by the `render` crate: the
+//! rendered geometry with `--render`, otherwise the OpenCSG or
+//! throwntogether preview, with the `--view` options); every other output
+//! mode (`.nef3`, `.nefdbg`)
 //! reports that it is missing and exits with [`EXIT_NOT_IMPLEMENTED`],
 //! which the harness can tell apart from a crash or a usage error.
 //!
 //! `-d`/`-m` are in [`deps`], `--summary`/`--summary-file` in [`summary`]
 //! (its JSON is documented in `docs/cli-json.md`), `--info` and
 //! `--help-export` in [`info`].
+//!
+//! `neoscad snapshot` is neoscad's own subcommand, with its own flags
+//! ([`snapshot`]): a contact sheet of a model for agents.
 //!
 //! Cold start is a tracked benchmark (docs/architecture.md, "Agent surface"),
 //! so `main` does nothing before argument parsing and nothing expensive after.
@@ -27,6 +32,7 @@ mod info;
 mod param_json;
 mod png;
 mod run;
+mod snapshot;
 mod summary;
 
 use std::path::Path;
@@ -229,6 +235,15 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
+    // `neoscad snapshot ...` is neoscad's own command, with its own flags;
+    // everything else is OpenSCAD's command line.
+    let mut args = std::env::args_os();
+    if args.nth(1).is_some_and(|a| a == "snapshot") {
+        let rest: Vec<std::ffi::OsString> = args.collect();
+        return ExitCode::from(eval::with_stack(eval::DEFAULT_THREAD_STACK, move || {
+            snapshot::main(rest)
+        }));
+    }
     // OpenSCAD answers every command-line error (an unknown option, a
     // repeated single-valued one such as `--export-format`) with its usage
     // text and exit status 1 (`help(..., true)` in `openscad.cc`); clap
@@ -448,12 +463,14 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
             Ok(c) => c,
             Err(code) => return code,
         };
-        if !cli.quiet {
-            png::notes(cli.render.is_some(), cli.preview.as_deref(), &cli.view);
-        }
         Some(png::Settings {
             camera,
             scheme: scheme.clone(),
+            previewer: png::previewer(cli.render.as_deref(), cli.preview.as_deref()),
+            view: png::view_options(&cli.view, cli.quiet),
+            csg_limit: cli
+                .csglimit
+                .map_or(geom::csg::DEFAULT_TERM_LIMIT, |n| n as usize),
         })
     } else {
         None
@@ -529,10 +546,10 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
             Err(code) => return code,
         };
         // `$preview` is false for every geometry export, and for a PNG
-        // with `--render` (`fileformat::canPreview`, `openscad.cc:646-650`).
-        // A PNG without it is a preview, which neoscad draws from the
-        // rendered geometry, but `$preview` stays true as the model expects.
-        options.preview = cli.render.is_none() && mesh.iter().all(|f| *f == run::MeshFormat::Png);
+        // drawn from the rendered geometry (`fileformat::canPreview`,
+        // `openscad.cc:646-650`).
+        options.preview = png::previewer(cli.render.as_deref(), cli.preview.as_deref()).is_some()
+            && mesh.iter().all(|f| *f == run::MeshFormat::Png);
         if let Some(b) = cli.backend.as_deref()
             && !b.eq_ignore_ascii_case("manifold")
         {
@@ -541,7 +558,9 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
         }
         // `--render=force` (and the legacy `--render=cgal`) converts a mesh
         // result to a solid before export (`openscad.cc:1040-1041`).
-        let force = matches!(cli.render.as_deref(), Some("force" | "cgal"));
+        // `--preview` wins over it, as it does for images.
+        let force =
+            cli.preview.is_none() && matches!(cli.render.as_deref(), Some("force" | "cgal"));
         return run::export_mesh(&job, &options, &mesh, force);
     }
 
@@ -569,8 +588,9 @@ fn flag(value: &Option<String>, default: bool, name: &str) -> Result<bool, u8> {
 /// them (`RenderVariables`, `get_camera`, the `OpenSCAD::` flags).
 fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
     let mut o = eval::Options {
-        // `$preview` is true for preview-capable exports unless --render.
-        preview: cli.render.is_none(),
+        // `$preview` is true for preview-capable exports unless they draw
+        // the rendered geometry (`--render` without `--preview`).
+        preview: png::previewer(cli.render.as_deref(), cli.preview.as_deref()).is_some(),
         trace_usermodule_parameters: flag(
             &cli.trace_usermodule_parameters,
             true,

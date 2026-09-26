@@ -49,7 +49,9 @@ the app core API is the `serve` API.
 - **Diagnostics that say how to fix,** not only what failed.
 - **`neoscad snapshot`:** one contact-sheet PNG (iso/front/top/right) with a
   scale grid, axes and optional dimensions; can highlight parts or show a
-  diff against a previous version.
+  diff against a previous version. Implemented in 6b: `render::snapshot`
+  draws the sheet, the CLI adds `--diff` (real booleans) and a JSON
+  summary (`docs/cli-json.md`).
 - **`neoscad check`** (manifold, minimum wall, overhangs, floating or
   intersecting parts), **`measure`** (bbox, distances, cross-sections),
   **`test`** (assert-based model tests), **`fmt`**, **`docs <builtin>`**.
@@ -154,10 +156,11 @@ ffmpeg.
 3. **`eval`** (done): tier 1.
 4. **CSG tree** (done): tier 2.
 5. **`geom`, `io`, `text`** (done): tiers 3 and 5, 1,103 runnable cases in all. Audited in `docs/audits/engine-milestone.md`.
-6. **`render` + `snapshot`:** tier 4. 6a (done): the `render` crate
+6. **`render` + `snapshot`** (done): tier 4. 6a: the `render` crate
    (wgpu, OpenSCAD's camera, colour schemes and lighting) and `--render`
-   PNG export. 6b: previews (OpenCSG, throwntogether, `%`/`#`), view
-   options and `neoscad snapshot`.
+   PNG export. 6b: previews (OpenCSG from real booleans on the CSG
+   products, throwntogether, `%`/`#`), view options and `neoscad
+   snapshot`.
 7. **`serve`, JSON output, MCP.**
 8. **macOS app.**
 9. **WASM web app.**

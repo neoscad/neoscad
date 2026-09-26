@@ -20,11 +20,25 @@ const LIBRARY_DIR: &str = "/neoscad/libraries";
 /// Run `src` as `/doc/main.scad` over `files` and return what the command
 /// line would print (messages, then the geometry summary), one line each.
 pub fn run(files: Arc<MemFs>, src: &[u8], seed: u32) -> String {
-    run_with(files, src, seed, eval::recursion::DEFAULT_FRAME_LIMIT)
+    run_with(
+        files,
+        src,
+        seed,
+        eval::recursion::DEFAULT_FRAME_LIMIT,
+        false,
+    )
 }
 
-/// [`run`] with another frame budget (for calibrating the default).
-pub fn run_with(files: Arc<MemFs>, src: &[u8], seed: u32, frame_limit: u32) -> String {
+/// [`run`] with another frame budget (for calibrating the default), and
+/// with `preview`, OpenSCAD's preview instead of the render: the CSG
+/// products, their booleans and the preview scene.
+pub fn run_with(
+    files: Arc<MemFs>,
+    src: &[u8],
+    seed: u32,
+    frame_limit: u32,
+    preview: bool,
+) -> String {
     let base: Arc<dyn FileSystem + Send + Sync> = files;
     let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(base, LIBRARY_DIR));
     let libs = LibraryPath(vec![PathBuf::from(LIBRARY_DIR)]);
@@ -56,7 +70,7 @@ pub fn run_with(files: Arc<MemFs>, src: &[u8], seed: u32, frame_limit: u32) -> S
         rng_seed: seed,
         frame_limit,
         fs: fs.clone(),
-        preview: false,
+        preview,
         ..Default::default()
     };
     let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
@@ -72,6 +86,15 @@ pub fn run_with(files: Arc<MemFs>, src: &[u8], seed: u32, frame_limit: u32) -> S
         ..Default::default()
     };
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+    if preview {
+        let limit = geom::csg::DEFAULT_TERM_LIMIT;
+        match geom::csg::CsgTree::build(top, &geom::Renderer::new(), &keys, ro, limit) {
+            Err(u) => con.print(None, format!("{}() is not implemented", u.what).as_bytes()),
+            Ok(t) => con.print(None, preview_line(&t).as_bytes()),
+        }
+        drop(con);
+        return String::from_utf8_lossy(&out).into_owned();
+    }
     match geom::Renderer::new().render(top, &keys, ro) {
         Err(u) => con.print(None, format!("{}() is not implemented", u.what).as_bytes()),
         Ok(r) => {
@@ -116,6 +139,28 @@ fn scene_line(g: &geom::Geometry) -> String {
     )
 }
 
+/// What the preview would draw: products, the triangles of its scene
+/// (booleans included) and the distance `--viewall` fits.
+fn preview_line(t: &geom::csg::CsgTree) -> String {
+    let scheme = render::ColorScheme::cornfield();
+    let scene = render::preview::scene(t, &scheme, render::Previewer::OpenCsg);
+    let mut camera = render::Camera {
+        viewall: true,
+        autocenter: true,
+        ..Default::default()
+    };
+    render::fit_camera(&mut camera, &scene);
+    let count = |p: &Option<geom::csg::Products>| p.as_ref().map_or(0, |p| p.products.len());
+    format!(
+        "Preview: {} products, {} highlighted, {} background, {} triangles, viewall distance {:.4}",
+        count(&t.root),
+        count(&t.highlights),
+        count(&t.background),
+        scene.face_vertex_count() / 3,
+        camera.viewer_distance
+    )
+}
+
 // --- The module's interface to JavaScript ---------------------------------
 //
 // JavaScript writes into `INPUT` (sized by `input`), then calls `add_file`
@@ -152,11 +197,12 @@ pub extern "C" fn add_file(name_len: usize) {
         .insert(name, data.to_vec());
 }
 
-/// Run the input as the main file with `seed` for unseeded `rands()` and
-/// `frame_limit` as the frame budget (0 for the default).
+/// Run the input as the main file with `seed` for unseeded `rands()`,
+/// `frame_limit` as the frame budget (0 for the default), and as a preview
+/// when `preview` is not 0.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn run_input(seed: u32, frame_limit: u32) {
+pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
     // A panic aborts the module (wasm32-unknown-unknown cannot unwind);
     // leave its message where the caller reads the output.
     std::panic::set_hook(Box::new(|info| {
@@ -175,7 +221,7 @@ pub extern "C" fn run_input(seed: u32, frame_limit: u32) {
         n => n,
     };
     OUTPUT.lock().expect("output").clear();
-    let out = run_with(files, &src, seed, limit);
+    let out = run_with(files, &src, seed, limit, preview != 0);
     *OUTPUT.lock().expect("output") = out.into_bytes();
 }
 
@@ -257,7 +303,14 @@ mod tests {
                 continue;
             }
             let seed = c["seed"].as_u64().unwrap_or(0) as u32;
-            let out = run(files, c["src"].as_str().unwrap().as_bytes(), seed);
+            let preview = c["preview"].as_bool().unwrap_or(false);
+            let out = run_with(
+                files,
+                c["src"].as_str().unwrap().as_bytes(),
+                seed,
+                eval::recursion::DEFAULT_FRAME_LIMIT,
+                preview,
+            );
             let expect: Vec<&str> = c["expect"]
                 .as_array()
                 .unwrap()

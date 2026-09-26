@@ -27,7 +27,7 @@ any test listed in `conformance/baseline.json` no longer passes.
 | `run --binary PATH` | Runs another binary. Pointing it at the OpenSCAD nightly checks the harness itself: all tier 0-2 cases should pass. |
 | `showcase` | Checks that every model in `conformance/showcase.json` and its expected image exist. |
 | `image-compare EXPECTED ACTUAL` | Compares two PNGs with the port of OpenSCAD's `tests/image_compare.py`; exit 0 when they match. |
-| `images` | Surveys neoscad's own renderer: draws every render-mode PNG case (tier 3's direct `--render` images and tier 4's image cases) with neoscad and scores it under tier 4's rules (see "Tier 4" below), printing how many pass each rule and the distribution of the perceptual score. `--previews` adds tier 4's pending OpenCSG previews, drawn from the rendered geometry (they stay pending in `run`). A diagnostic only: it touches neither the baseline nor tier 3's results. Images go to `target/conformance/images/`. |
+| `images` | Surveys neoscad's own renderer: draws every PNG case neoscad draws itself (tier 3's direct `--render` images and all of tier 4: render mode, OpenCSG previews, throwntogether, `--view`) and scores it under tier 4's rules (see "Tier 4" below), printing per kind how many pass each rule and the distribution of the perceptual score. A diagnostic only: it touches neither the baseline nor tier 3's results. Images go to `target/conformance/images/`. |
 | `diff [PATHS...]` | Differential test: runs a reference OpenSCAD (`--binary-ref`, default the pinned nightly) and neoscad on every `.scad` under `PATHS` (default: the reference's `tests/data/scad`, `examples`, `libraries/MCAD`) and compares exit status, the output (`--format ast`, `echo` or `csg`; an `.echo` file holds every message, so it is compared even when both runs fail; `csg` ignores `timestamp = N` and owns no stderr messages, which `ast` and `echo` already cover) and the diagnostics that format covers. `--library-path DIR` (repeatable) puts a library directory before the reference's `libraries/` in `OPENSCADPATH` for both binaries, so a library's own files and examples run unmodified (`--library-path .reference` for `include <BOSL2/...>`). Prints the match rate and mismatches by category; the full list goes to `target/conformance/diff-<format>.json`. |
 | `bench` | Times neoscad against the reference binaries on `conformance/bench.json`; see "Benchmarks" below. |
 | `bench-chart [FILE\|--latest] [--out PATH]` | Draws a benchmark result as a 1920x1080 PNG (default: next to the result). |
@@ -124,14 +124,14 @@ Each case gets a tier (see `src/manifest.rs`) and a runner:
   below.
 - `script`: tests driven by a Python script or a raw command, ported in
   `src/script.rs`; see "Script cases" below.
-- `image`: tier 4 images drawn by neoscad's renderer in render mode (a
-  PNG of the input with `--render` and no `--view`); see "Tier 4" below.
+- `image`: tier 4 images drawn by neoscad's renderer (a PNG of the
+  input): render mode (`--render`), the OpenCSG preview (no `--render`),
+  the throwntogether preview (`--preview=throwntogether`), with any
+  `--view` options (axes, scales, edges, crosshairs); see "Tier 4" below.
   `relative-output_png_*` (re-tiered from 5 because it needs PNG export)
   runs as a `script` case.
-- `pending`, with a `pending_reason`: tier 4 cases that need phase 6b,
-  the OpenCSG preview (no `--render`), the throwntogether preview
-  (`--preview=throwntogether`) or `--view` options (axes, scales, edges,
-  crosshairs).
+- `pending`, with a `pending_reason`: a case with no runner yet (none at
+  present).
 - `skip`, with a reason: experimental features, the CGAL backend, tests
   disabled upstream, tests tagged `Bugs`, and OpenSCAD's harness self-test.
 
@@ -161,8 +161,10 @@ Actual outputs and each run's stderr go to `target/conformance/actual/`.
 
 Before running, the harness creates the inputs that OpenSCAD's configure
 step would generate: `include-tests.scad`, `use-tests.scad`, the
-`import_*-tests.scad` files and `issue2342.scad`. It writes them into the
-reference checkout, where OpenSCAD's own `.gitignore` covers them.
+`import_*-tests.scad` files, `issue2342.scad` and the fourteen SVGs of
+the `svgviewbox-*` images (`gen_svg_viewbox_tests.py`, ported in
+`src/prepare.rs`). It writes them into the reference checkout, where
+OpenSCAD's own `.gitignore` covers them.
 
 Several tier 0-2 inputs use MCAD (`include-tests`, `use-tests`,
 `text-search-test`, `example023`). A shallow clone does not fetch that
@@ -248,3 +250,12 @@ each rule and the score's distribution.
 The expected images come from OpenSCAD's offscreen renderer, which draws
 without multisampling into an 8-bit RGBA framebuffer object; neoscad
 matches both (see `crates/render/src/gpu.rs`).
+
+Previews are held to the same rule. OpenSCAD draws them with OpenCSG's
+image-space CSG; neoscad draws the same CSG products from real booleans
+(`crates/render/src/preview.rs` says what that cannot reproduce), so a
+pass means the preview's shapes, colours, `%` and `#` objects and view
+options agree with OpenSCAD's to within the tolerance. At phase 6b on an
+Apple M4 Pro: OpenCSG previews 340 of 345 (image_compare 339,
+perceptual 328), throwntogether 265 of 267 (265, 250), `--view` 5 of 8
+(5, 4); the failures are listed in `docs/followups.md`, "Rendering".

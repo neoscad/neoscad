@@ -15,6 +15,7 @@ pub use wgpu::Backends;
 
 use crate::camera::Camera;
 use crate::gpu::{DEPTH_FORMAT, FrameParams, Renderer, SceneBuffers};
+use crate::overlay::Overlay;
 use crate::scene::Scene;
 use crate::scheme::ColorScheme;
 
@@ -60,13 +61,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// A rendered image: `width * height` pixels, RGBA, top row first.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Image {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
-}
+pub use crate::Image;
 
 /// A GPU device with the render pipelines, ready to draw offscreen.
 #[derive(Debug)]
@@ -74,6 +69,21 @@ pub struct Offscreen {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: Renderer,
+    adapter: wgpu::AdapterInfo,
+}
+
+/// What `--info` says about the GPU (OpenSCAD prints its GL context's
+/// renderer, vendor and version in the same place).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuInfo {
+    /// The graphics API wgpu drives: Metal, Vulkan, Dx12, Gl or WebGPU.
+    pub backend: String,
+    pub name: String,
+    pub device_type: String,
+    pub driver: String,
+    pub driver_info: String,
+    /// The largest image side the device allows, in pixels.
+    pub max_texture_size: u32,
 }
 
 impl Offscreen {
@@ -105,7 +115,21 @@ impl Offscreen {
             device,
             queue,
             renderer,
+            adapter: adapter.get_info(),
         })
+    }
+
+    /// The GPU this draws on.
+    pub fn info(&self) -> GpuInfo {
+        let a = &self.adapter;
+        GpuInfo {
+            backend: format!("{:?}", a.backend),
+            name: a.name.clone(),
+            device_type: format!("{:?}", a.device_type),
+            driver: a.driver.clone(),
+            driver_info: a.driver_info.clone(),
+            max_texture_size: self.device.limits().max_texture_dimension_2d,
+        }
     }
 
     /// Draw `scene` as `camera` sees it, at the camera's pixel size, in
@@ -116,6 +140,55 @@ impl Offscreen {
         scene: &Scene,
         camera: &Camera,
         scheme: &ColorScheme,
+    ) -> Result<Image, Error> {
+        self.render_view(scene, camera, scheme, &Overlay::default(), false)
+            .await
+    }
+
+    /// [`Offscreen::render`] with view-option lines (see
+    /// [`crate::overlay`]) and, with `edges`, the faces' edges.
+    pub async fn render_view(
+        &self,
+        scene: &Scene,
+        camera: &Camera,
+        scheme: &ColorScheme,
+        overlay: &Overlay,
+        edges: bool,
+    ) -> Result<Image, Error> {
+        let mut images = self
+            .render_views(scene, &[(*camera, overlay.clone())], scheme, edges)
+            .await?;
+        Ok(images.pop().expect("one view gives one image"))
+    }
+
+    /// The scene from several cameras, each with its own lines: the scene
+    /// is uploaded once (snapshots draw one model from four sides).
+    pub async fn render_views(
+        &self,
+        scene: &Scene,
+        views: &[(Camera, Overlay)],
+        scheme: &ColorScheme,
+        edges: bool,
+    ) -> Result<Vec<Image>, Error> {
+        let buffers =
+            SceneBuffers::upload(&self.device, scene).map_err(|t| Error::SceneTooLarge {
+                bytes: t.bytes,
+                max: t.max,
+            })?;
+        let mut out = Vec::with_capacity(views.len());
+        for (camera, overlay) in views {
+            out.push(self.draw(&buffers, camera, scheme, overlay, edges).await?);
+        }
+        Ok(out)
+    }
+
+    async fn draw(
+        &self,
+        buffers: &SceneBuffers,
+        camera: &Camera,
+        scheme: &ColorScheme,
+        overlay: &Overlay,
+        edges: bool,
     ) -> Result<Image, Error> {
         let (width, height) = (camera.pixel_width, camera.pixel_height);
         let max = self.device.limits().max_texture_dimension_2d;
@@ -149,12 +222,7 @@ impl Offscreen {
             DEPTH_FORMAT,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
         );
-        let buffers =
-            SceneBuffers::upload(&self.device, scene).map_err(|t| Error::SceneTooLarge {
-                bytes: t.bytes,
-                max: t.max,
-            })?;
-        let frame = FrameParams::new(camera, scheme);
+        let frame = FrameParams::new(camera, scheme, edges);
 
         // Rows of a texture copy are padded to 256 bytes.
         let row = 4 * width;
@@ -182,8 +250,9 @@ impl Offscreen {
             &color.create_view(&Default::default()),
             None,
             &depth.create_view(&Default::default()),
-            &buffers,
+            buffers,
             &frame,
+            overlay,
         );
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -248,6 +317,31 @@ impl Offscreen {
         scheme: &ColorScheme,
     ) -> Result<Image, Error> {
         pollster::block_on(self.render(scene, camera, scheme))
+    }
+
+    /// [`Offscreen::render_views`], blocking until the images are read back.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_views_blocking(
+        &self,
+        scene: &Scene,
+        views: &[(Camera, Overlay)],
+        scheme: &ColorScheme,
+        edges: bool,
+    ) -> Result<Vec<Image>, Error> {
+        pollster::block_on(self.render_views(scene, views, scheme, edges))
+    }
+
+    /// [`Offscreen::render_view`], blocking until the image is read back.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_view_blocking(
+        &self,
+        scene: &Scene,
+        camera: &Camera,
+        scheme: &ColorScheme,
+        overlay: &Overlay,
+        edges: bool,
+    ) -> Result<Image, Error> {
+        pollster::block_on(self.render_view(scene, camera, scheme, overlay, edges))
     }
 }
 

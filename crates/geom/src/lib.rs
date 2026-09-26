@@ -23,6 +23,7 @@
 
 pub mod clipper;
 pub mod color;
+pub mod csg;
 pub mod evaluate;
 pub mod export;
 pub mod extrude;

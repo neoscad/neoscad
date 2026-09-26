@@ -314,9 +314,9 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
         }
     }
 
-    // Inputs CMake creates at configure/build time. Only the configured
-    // templates and the issue2342 stress file feed runnable tiers; the SVG
-    // viewbox generator only feeds tier-4 image tests, so it is not ported.
+    // Inputs CMake creates at configure/build time: the configured
+    // templates, the issue2342 stress file, and the SVG viewbox files the
+    // tier 4 `svgviewbox-*` images import.
     let mut generated_files: Vec<Generated> = eval
         .configured_files
         .iter()
@@ -347,6 +347,28 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
             template: None,
             copy_only: false,
             generator: Some("gen_issue2342".into()),
+        });
+    }
+
+    // `gen_svg_viewbox_tests.py` writes one SVG per viewbox test from one
+    // template; each test names its file in a `-Dfile=...` argument.
+    let mut viewboxes: Vec<String> = tests
+        .iter()
+        .flat_map(|t| t.args.iter())
+        .filter_map(|a| {
+            let i = a.find("/build/tests/data/svg/viewbox/")?;
+            let end = a[i..].find(".svg")? + i + 4;
+            Some(a[i + 1..end].to_string())
+        })
+        .collect();
+    viewboxes.sort();
+    viewboxes.dedup();
+    for out in viewboxes {
+        generated_files.push(Generated {
+            output: out,
+            template: Some("tests/data/svg/viewbox/viewbox-tests.svg.in".into()),
+            copy_only: false,
+            generator: Some("gen_svg_viewbox".into()),
         });
     }
 
@@ -421,10 +443,10 @@ fn is_geometry(r: &Registration, tier: u8) -> bool {
     }
 }
 
-/// A tier 4 image neoscad's renderer draws (phase 6a): a direct PNG of
-/// the input in render mode (`--render`, any form) with no `--view`
-/// options, whatever its camera, image size, projection or colour scheme.
-/// Previews and view options are phase 6b ([`pending_reason`]).
+/// A tier 4 image neoscad's renderer draws: a direct PNG of the input,
+/// in render mode (`--render`) or as a preview (the OpenCSG preview, or
+/// `--preview=throwntogether`), with any `--view` options, camera, image
+/// size, projection or colour scheme.
 fn is_image(r: &Registration, tier: u8) -> bool {
     tier == 4
         && r.kind == RegKind::Cmdline
@@ -432,8 +454,6 @@ fn is_image(r: &Registration, tier: u8) -> bool {
         && r.script.is_none()
         && !r.stdio
         && r.suffix == "png"
-        && has_arg(r, |a| a.starts_with("--render"))
-        && !has_arg(r, |a| is_view_option(a) || a.starts_with("--preview"))
 }
 
 /// `--view` or `--view=...`, but not `--viewall`.
@@ -442,19 +462,8 @@ pub fn is_view_option(arg: &str) -> bool {
 }
 
 /// What a pending case waits for.
-fn pending_reason(r: &Registration, tier: u8) -> String {
-    if tier != 4 {
-        return "no runner for this test yet".into();
-    }
-    if has_arg(r, |a| a.starts_with("--preview")) {
-        "throwntogether preview (phase 6b)".into()
-    } else if has_arg(r, is_view_option) {
-        "--view options (axes, scales, edges, crosshairs; phase 6b)".into()
-    } else if r.kind == RegKind::Cmdline && !has_arg(r, |a| a.starts_with("--render")) {
-        "OpenCSG preview of the CSG tree (no --render; phase 6b)".into()
-    } else {
-        "no runner for this test yet".into()
-    }
+fn pending_reason(_r: &Registration, _tier: u8) -> String {
+    "no runner for this test yet".into()
 }
 
 fn has_arg(r: &Registration, pred: impl Fn(&str) -> bool) -> bool {

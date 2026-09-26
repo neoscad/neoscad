@@ -553,68 +553,65 @@ fn render_frame<W: Write>(
     let started = std::time::Instant::now();
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
     let keys = eval::dump::Keys::new(&ev.root, &*loaded.host.fs);
-    let used = std::iter::once(&loaded.program)
-        .chain(
-            loaded
-                .libraries
-                .iter()
-                .filter_map(|lib| lib.program.as_ref()),
-        )
-        .flat_map(|p| p.ast.uses.iter());
-    let opts = geom::RenderOptions {
-        force,
-        fs: loaded.host.fs.clone(),
-        work_dir: paths.cwd.clone(),
-        fonts: std::sync::Arc::new(loaded.host.fonts(used)),
-        scheme: job.scheme.geometry_scheme(),
-    };
-    let rendered = renderer.render(top, &keys, opts.clone());
-    let rendered = match rendered {
-        Ok(r) => r,
-        Err(u) => {
-            let mut line = format!("neoscad: {}() is not implemented yet", u.what);
-            if let Some(l) = &u.loc
-                && let Some(sources) = unit_sources(loaded, l.unit)
-            {
-                let rel = lang::diag::relative_path(sources.path(l.span.file), &paths.main_dir);
-                line.push_str(&format!(" (in file {}, line {})", rel.display(), l.line));
-            }
-            eprintln!("{line}");
-            return EXIT_NOT_IMPLEMENTED;
-        }
-    };
-    for m in &rendered.messages {
-        let Some(severity) = m.severity else {
-            // A plain `LOG(...)` line.
-            con.print(None, m.text.as_bytes());
-            continue;
-        };
-        let mut diag =
-            lang::diag::Diagnostic::new(lang::diag::DiagCode::Geometry, severity, m.text.clone());
-        let mut sources = &loaded.program.sources;
-        if let Some(l) = &m.loc
-            && let Some(s) = unit_sources(loaded, l.unit)
+    let opts = render_options(job, loaded, paths, force);
+    let unsupported = |u: geom::Unsupported| {
+        let mut line = format!("neoscad: {}() is not implemented yet", u.what);
+        if let Some(l) = &u.loc
+            && let Some(sources) = unit_sources(loaded, l.unit)
         {
-            // Each message's file prints relative to its own base (see
-            // `geom::MsgLoc::base`): `in file ../../x.scad` from the
-            // working directory for a reader's error, as the nightly
-            // prints it.
-            diag = diag.at(l.span, l.line).with_base(l.base);
-            sources = s;
+            let rel = lang::diag::relative_path(sources.path(l.span.file), &paths.main_dir);
+            line.push_str(&format!(" (in file {}, line {})", rel.display(), l.line));
         }
-        con.diagnostic(&diag, sources, &paths.cwd);
-        // OpenSCAD's geometry evaluation stops here; neoscad has already
-        // built the rest, but prints nothing more.
-        if job.hardwarnings && severity == Severity::Warning && !printed_in_handler(&m.text) {
-            return EXIT_ERROR;
+        eprintln!("{line}");
+        EXIT_NOT_IMPLEMENTED
+    };
+    // A PNG preview needs only the leaves' geometry and the CSG products
+    // (`prepare_preview`); the full render is for the other outputs and
+    // for a PNG with `--render`.
+    let previewer = job
+        .png
+        .and_then(|s| s.previewer)
+        .filter(|_| formats.contains(&MeshFormat::Png));
+    let needs_geometry = previewer.is_none() || formats.iter().any(|f| *f != MeshFormat::Png);
+    let tree = match job.png.filter(|_| previewer.is_some()) {
+        Some(settings) => {
+            match geom::csg::CsgTree::build(top, renderer, &keys, opts.clone(), settings.csg_limit)
+            {
+                Ok(t) => {
+                    if print_messages(job, loaded, paths, &t.messages, con) {
+                        return EXIT_ERROR;
+                    }
+                    Some(t)
+                }
+                Err(u) => return unsupported(u),
+            }
         }
-    }
+        None => None,
+    };
+    let rendered = if needs_geometry {
+        match renderer.render(top, &keys, opts.clone()) {
+            Ok(r) => {
+                if print_messages(job, loaded, paths, &r.messages, con) {
+                    return EXIT_ERROR;
+                }
+                Some(r)
+            }
+            Err(u) => return unsupported(u),
+        }
+    } else {
+        None
+    };
+    let cache_entries = rendered.as_ref().map_or(0, |r| r.cache_entries);
     // `if (!root_geom) root_geom = std::make_shared<PolySet>(3);`
-    let root = rendered.geometry;
+    let root = rendered.and_then(|r| r.geometry);
     let dim = root.as_ref().map_or(3, geom::Geometry::dimension);
     if force && dim == 3 {
         con.print(None, b"Converted to backend-specific geometry");
     }
+    // The summary's camera: the view after `$vp*` (`Camera::updateView`),
+    // or, after a PNG, the camera the image was drawn with (`export_png`
+    // fits `--viewall` into the same object).
+    let mut summary_camera = ev.camera;
     let mut mesh = None;
     for (target, format) in job.outputs.iter().zip(formats) {
         let target = &frame_target(target, frame.number);
@@ -622,12 +619,19 @@ fn render_frame<W: Write>(
             let Some(settings) = job.png else {
                 unreachable!("PNG settings are made for PNG outputs");
             };
-            let data = match crate::png::render_png(
-                settings,
-                root.as_ref().filter(|g| !g.is_empty()),
-                &ev.camera,
-            ) {
-                Ok(d) => d,
+            let drawn = match &tree {
+                Some(t) => crate::png::preview_png(settings, t, &ev.camera),
+                None => crate::png::render_png(
+                    settings,
+                    root.as_ref().filter(|g| !g.is_empty()),
+                    &ev.camera,
+                ),
+            };
+            let data = match drawn {
+                Ok((d, cam)) => {
+                    summary_camera = crate::png::summary_camera(&cam, &ev.camera);
+                    d
+                }
                 Err(e) => {
                     eprintln!("neoscad: cannot export PNG: {e}");
                     return EXIT_ERROR;
@@ -741,15 +745,141 @@ fn render_frame<W: Write>(
     // `RenderStatistic::printAll`: cache size, time, the object, then the
     // parts `--summary` asks for; or all of it as JSON to `--summary-file`.
     let facts = crate::summary::Facts {
-        cache_entries: rendered.cache_entries,
+        cache_entries,
         elapsed_ms: started.elapsed().as_millis(),
         geometry: root.as_ref(),
-        camera: &options.camera,
+        camera: &summary_camera,
     };
     if !crate::summary::emit(job.summary, &facts, con) {
         return EXIT_ERROR;
     }
     0
+}
+
+/// What the geometry evaluator needs besides the tree: files, fonts (those
+/// the program `use`s as well as the bundled ones) and the scheme's face
+/// colours.
+fn render_options(
+    job: &Job<'_>,
+    loaded: &Loaded,
+    paths: &Paths,
+    force: bool,
+) -> geom::RenderOptions {
+    let used = std::iter::once(&loaded.program)
+        .chain(
+            loaded
+                .libraries
+                .iter()
+                .filter_map(|lib| lib.program.as_ref()),
+        )
+        .flat_map(|p| p.ast.uses.iter());
+    geom::RenderOptions {
+        force,
+        fs: loaded.host.fs.clone(),
+        work_dir: paths.cwd.clone(),
+        fonts: std::sync::Arc::new(loaded.host.fonts(used)),
+        scheme: job.scheme.geometry_scheme(),
+    }
+}
+
+/// A model evaluated and built in memory (`neoscad snapshot`).
+#[derive(Debug)]
+pub struct Built {
+    /// The rendered geometry, when not previewing (`None` when empty).
+    pub geometry: Option<geom::Geometry>,
+    /// The preview's CSG products, when previewing.
+    pub tree: Option<geom::csg::CsgTree>,
+    /// Parsing and evaluation, then geometry, in milliseconds.
+    pub evaluate_ms: f64,
+    pub geometry_ms: f64,
+}
+
+/// Load, evaluate and build `job.input` once: its geometry through
+/// `renderer` (whose cache a second model shares), or with `preview` its
+/// CSG products. Messages go to `out` as they would to stderr.
+pub fn build<W: Write>(
+    job: &Job<'_>,
+    options: &Options,
+    renderer: &geom::Renderer,
+    preview: bool,
+    out: W,
+) -> Result<Built, u8> {
+    let paths = Paths::of(job);
+    let mut con = Console::new(out, paths.main_dir.clone(), job.quiet);
+    let started = std::time::Instant::now();
+    let loaded = load(job, &paths, &mut con)?;
+    let ev = evaluate(&loaded, &paths, options, &mut con);
+    if ev.hard_warning {
+        return Err(EXIT_ERROR);
+    }
+    let evaluate_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let started = std::time::Instant::now();
+    let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+    let keys = eval::dump::Keys::new(&ev.root, &*loaded.host.fs);
+    let opts = render_options(job, &loaded, &paths, false);
+    let unsupported = |u: geom::Unsupported| {
+        eprintln!("neoscad: {}() is not implemented yet", u.what);
+        EXIT_NOT_IMPLEMENTED
+    };
+    let (geometry, tree) = if preview {
+        let t =
+            geom::csg::CsgTree::build(top, renderer, &keys, opts, geom::csg::DEFAULT_TERM_LIMIT)
+                .map_err(unsupported)?;
+        if print_messages(job, &loaded, &paths, &t.messages, &mut con) {
+            return Err(EXIT_ERROR);
+        }
+        (None, Some(t))
+    } else {
+        let r = renderer.render(top, &keys, opts).map_err(unsupported)?;
+        if print_messages(job, &loaded, &paths, &r.messages, &mut con) {
+            return Err(EXIT_ERROR);
+        }
+        (r.geometry.filter(|g| !g.is_empty()), None)
+    };
+    Ok(Built {
+        geometry,
+        tree,
+        evaluate_ms,
+        geometry_ms: started.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+/// Print geometry messages as OpenSCAD's log does; `true` when
+/// `--hardwarnings` stops the run at one.
+fn print_messages<W: Write>(
+    job: &Job<'_>,
+    loaded: &Loaded,
+    paths: &Paths,
+    messages: &[geom::Msg],
+    con: &mut Console<W>,
+) -> bool {
+    for m in messages {
+        let Some(severity) = m.severity else {
+            // A plain `LOG(...)` line.
+            con.print(None, m.text.as_bytes());
+            continue;
+        };
+        let mut diag =
+            lang::diag::Diagnostic::new(lang::diag::DiagCode::Geometry, severity, m.text.clone());
+        let mut sources = &loaded.program.sources;
+        if let Some(l) = &m.loc
+            && let Some(s) = unit_sources(loaded, l.unit)
+        {
+            // Each message's file prints relative to its own base (see
+            // `geom::MsgLoc::base`): `in file ../../x.scad` from the
+            // working directory for a reader's error, as the nightly
+            // prints it.
+            diag = diag.at(l.span, l.line).with_base(l.base);
+            sources = s;
+        }
+        con.diagnostic(&diag, sources, &paths.cwd);
+        // OpenSCAD's geometry evaluation stops here; neoscad has already
+        // built the rest, but prints nothing more.
+        if job.hardwarnings && severity == Severity::Warning && !printed_in_handler(&m.text) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether OpenSCAD prints this geometry warning from inside a `catch`

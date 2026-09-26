@@ -16,6 +16,7 @@ const REPORTED: &[&str] = &[
     "flate2",
     "quick-xml",
     "png",
+    "wgpu",
 ];
 
 fn main() {
