@@ -167,7 +167,13 @@ impl ManifoldGeometry {
                 None => {
                     let r = Manifold::from_mesh_gl64_robust(&mesh);
                     if r.status() != Error::NoError {
+                        // The repaired surface is converted anyway, fails
+                        // again, and `createManifoldFromSurfaceMesh` returns
+                        // null (`manifoldutils.cc:181-187, 275-279`): the
+                        // result is empty, and callers that can fall back
+                        // (`projection()`) do.
                         errors.push("[manifold] Input mesh is not closed!".into());
+                        errors.push(format!("[manifold] Surface_mesh -> Manifold conversion failed: {}", status_name(Error::NotManifold)));
                         return ManifoldGeometry::default();
                     }
                     r

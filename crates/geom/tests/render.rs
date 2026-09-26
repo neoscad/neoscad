@@ -21,7 +21,7 @@ fn render_with(r: &Renderer, src: &str, force: bool) -> (Option<Geometry>, Vec<S
     let ev = tree(src);
     let keys = eval::dump::Keys::new(&ev.root);
     let out = r.render(&ev.root, &keys, RenderOptions { force, ..Default::default() }).expect("supported");
-    (out.geometry, out.messages.iter().map(|m| format!("{:?}: {} @{}", m.severity, m.text, m.loc.as_ref().map_or(0, |l| l.line))).collect())
+    (out.geometry, out.messages.iter().map(|m| format!("{:?}: {} @{}", m.severity.expect("prefixed message"), m.text, m.loc.as_ref().map_or(0, |l| l.line))).collect())
 }
 
 fn off(src: &str) -> String {

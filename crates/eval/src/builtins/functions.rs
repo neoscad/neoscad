@@ -393,8 +393,9 @@ impl<'a> Evaluator<'a> {
         let bytes = if path.is_dir() { None } else { std::fs::read(path).ok() };
         let display = lang::diag::relative_path(path, &self.main_dir).display().to_string();
         let mut warnings = Vec::new();
-        let req = crate::dxf::Request { file: &file, display: &display, layer: &layer, origin: [xo, yo], scale };
-        let data = crate::dxf::read(bytes.as_deref(), &req, &mut |w| warnings.push(w));
+        let req = io::dxf::Request { file: &file, display: &display, layer: &layer, origin: [xo, yo], scale };
+        // `dxf_dim`/`dxf_cross` read with `CurveDiscretizer(36)` (dxfdim.cc).
+        let data = io::dxf::read(bytes.as_deref(), &req, &io::dxf::Fixed36, &mut |w| warnings.push(w));
         for w in warnings {
             self.warn_noloc(DiagCode::InvalidArgument, w);
         }

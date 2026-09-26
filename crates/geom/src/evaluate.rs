@@ -30,11 +30,13 @@
 //! as a serial run's.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use eval::dump::Keys;
 use eval::node::{CsgOp, Node, NodeKind};
 use lang::diag::Severity;
+use lang::loader::{FileSystem, StdFs};
 use lang::source::Span;
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::OpType;
@@ -60,7 +62,9 @@ pub struct MsgLoc {
 /// A message from rendering, with OpenSCAD's text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Msg {
-    pub severity: Severity,
+    /// `None` for a plain `LOG(...)` line with no `WARNING:`-style prefix
+    /// (e.g. "Reading 3MF with title ...").
+    pub severity: Option<Severity>,
     pub text: String,
     pub loc: Option<MsgLoc>,
 }
@@ -74,18 +78,29 @@ pub struct Unsupported {
 }
 
 /// Rendering settings from the command line.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct RenderOptions {
     /// The render colour scheme's face colours, which reach exported meshes.
     pub scheme: Scheme,
     /// `--render=force`: convert a mesh result to a Manifold solid, as
     /// OpenSCAD's `RenderType::BACKEND_SPECIFIC` does (`openscad.cc:495-509`).
     pub force: bool,
+    /// Where `import()` and `surface()` read their files.
+    pub fs: Arc<dyn FileSystem + Send + Sync>,
+    /// The document's directory: the working directory OpenSCAD runs in,
+    /// which some import messages print file names relative to.
+    pub doc_dir: PathBuf,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        RenderOptions { scheme: crate::color::CORNFIELD, force: false }
+        RenderOptions { scheme: crate::color::CORNFIELD, force: false, fs: Arc::new(StdFs), doc_dir: PathBuf::new() }
+    }
+}
+
+impl std::fmt::Debug for RenderOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderOptions").field("scheme", &self.scheme).field("force", &self.force).field("doc_dir", &self.doc_dir).finish()
     }
 }
 
@@ -195,6 +210,25 @@ impl IdSource for Block {
     }
 }
 
+/// Consecutive ranges of one block, for several conversions under one
+/// node; past the block's end, fresh IDs from Manifold's counter.
+struct Seq {
+    block: Block,
+    used: std::cell::Cell<u32>,
+}
+
+impl IdSource for Seq {
+    fn reserve(&self, count: u32) -> u32 {
+        let used = self.used.get();
+        if used + count <= BLOCK {
+            self.used.set(used + count);
+            self.block.0 + used
+        } else {
+            Manifold::reserve_ids(count)
+        }
+    }
+}
+
 /// What one subtree produced.
 struct Out {
     geom: Option<Geometry>,
@@ -204,6 +238,7 @@ struct Out {
 /// Per-render context.
 struct Ctx<'a> {
     r: &'a Renderer,
+    opts: &'a RenderOptions,
     /// Node index → key hash.
     hashes: Vec<Key>,
     /// Node index → this is the first node with its key in tree order, so
@@ -228,7 +263,7 @@ fn is_background(n: &Node) -> bool {
 }
 
 fn warn(n: &Node, text: &str) -> Msg {
-    Msg { severity: Severity::Warning, text: text.into(), loc: loc_of(n) }
+    Msg { severity: Some(Severity::Warning), text: text.into(), loc: loc_of(n) }
 }
 
 impl Renderer {
@@ -244,7 +279,7 @@ impl Renderer {
             n.children.iter().map(max_index).fold(n.index, usize::max)
         }
         let len = max_index(top) + 1;
-        let mut ctx = Ctx { r: self, hashes: vec![0; len], first: vec![false; len], blocks: HashMap::new() };
+        let mut ctx = Ctx { r: self, opts: &opts, hashes: vec![0; len], first: vec![false; len], blocks: HashMap::new() };
         // Tree order pass: hashes, first occurrences and ID blocks, all
         // decided before anything runs in parallel.
         {
@@ -293,8 +328,8 @@ impl Renderer {
             let mut w = Vec::new();
             let mut e = Vec::new();
             let m = ManifoldGeometry::from_polyset(ps, &ctx.block(top, OWN), &mut w, &mut e);
-            msgs.extend(w.into_iter().map(|t| Msg { severity: Severity::Warning, text: t, loc: None }));
-            msgs.extend(e.into_iter().map(|t| Msg { severity: Severity::Error, text: t, loc: None }));
+            msgs.extend(w.into_iter().map(|t| Msg { severity: Some(Severity::Warning), text: t, loc: None }));
+            msgs.extend(e.into_iter().map(|t| Msg { severity: Some(Severity::Error), text: t, loc: None }));
             geom = Some(Geometry::Manifold(Arc::new(m)));
         }
         let cache_entries = self.cache.lock().expect("cache").entries.len();
@@ -402,7 +437,7 @@ impl Ctx<'_> {
                 let geom = match poly.map(|p| extrude::rotate_extrude(*angle, *start, disc, &p)) {
                     Some(Ok(ps)) => ps.map(|ps| Geometry::PolySet(Arc::new(ps))),
                     Some(Err(text)) => {
-                        msgs.push(Msg { severity: Severity::Error, text, loc: None });
+                        msgs.push(Msg { severity: Some(Severity::Error), text, loc: None });
                         None
                     }
                     None => None,
@@ -413,10 +448,45 @@ impl Ctx<'_> {
             NodeKind::Minkowski { .. } => unsupported("minkowski"),
             NodeKind::Hull => unsupported("hull"),
             NodeKind::Resize { .. } => unsupported("resize"),
-            NodeKind::Surface { .. } => unsupported("surface"),
-            NodeKind::Import(_) => unsupported("import"),
+            NodeKind::Surface { file, center, invert, .. } => Ok(self.surface(n, file, *center, *invert)),
+            NodeKind::Import(i) if i.kind == "nef3" => unsupported("import"),
+            NodeKind::Import(i) => Ok(self.import(n, i)),
             NodeKind::Text(_) => unsupported("text"),
         }
+    }
+
+    /// Messages from a reader, located at the node when OpenSCAD logs them
+    /// with the call's location.
+    fn read_msgs(n: &Node, msgs: Vec<io::Message>) -> Vec<Msg> {
+        msgs.into_iter().map(|m| Msg { severity: m.severity, text: m.text, loc: if m.located { loc_of(n) } else { None } }).collect()
+    }
+
+    fn import(&self, n: &Node, i: &eval::node::Import) -> Out {
+        let line = loc_of(n).map_or(0, |l| l.line);
+        let union = |meshes: Vec<PolySet>| -> PolySet {
+            // `ManifoldUtils::applyOperator3DManifold(children, UNION)`, then
+            // `getGeometryAsPolySet`. Each conversion takes fresh IDs; they
+            // come from this node's own block, in order, so the result does
+            // not depend on scheduling.
+            let ids = Seq { block: self.block(n, OWN), used: std::cell::Cell::new(0) };
+            let mut parts = Vec::with_capacity(meshes.len());
+            let mut w = Vec::new();
+            let mut e = Vec::new();
+            for ps in &meshes {
+                let m = ManifoldGeometry::from_polyset(ps, &ids, &mut w, &mut e);
+                if !m.is_empty() {
+                    parts.push(m);
+                }
+            }
+            ManifoldGeometry::batch(Op::Union.manifold(), parts).map(|m| m.to_polyset(&self.opts.scheme)).unwrap_or_default()
+        };
+        let (geom, msgs) = crate::import::import(self.opts, i, line, &union);
+        Out { geom: Some(geom), msgs: Self::read_msgs(n, msgs) }
+    }
+
+    fn surface(&self, n: &Node, file: &str, center: bool, invert: bool) -> Out {
+        let (geom, msgs) = crate::import::surface(self.opts, file, center, invert);
+        Out { geom: Some(geom), msgs: Self::read_msgs(n, msgs) }
     }
 
     fn color(&self, n: &Node, g: Geometry, c: Color) -> Geometry {
@@ -510,7 +580,7 @@ impl Ctx<'_> {
                 if first.is_none() {
                     first = Some(m);
                 } else {
-                    msgs.push(Msg { severity: Severity::Error, text: "Unsupported CGAL operator: 5".into(), loc: None });
+                    msgs.push(Msg { severity: Some(Severity::Error), text: "Unsupported CGAL operator: 5".into(), loc: None });
                 }
             }
             return first.map(|m| Geometry::Manifold(Arc::new(m)));
@@ -552,8 +622,8 @@ impl Ctx<'_> {
                 let mut w = Vec::new();
                 let mut e = Vec::new();
                 let m = ManifoldGeometry::from_polyset(&ps, &self.block(n, slot), &mut w, &mut e);
-                msgs.extend(w.into_iter().map(|t| Msg { severity: Severity::Warning, text: t, loc: None }));
-                msgs.extend(e.into_iter().map(|t| Msg { severity: Severity::Error, text: t, loc: None }));
+                msgs.extend(w.into_iter().map(|t| Msg { severity: Some(Severity::Warning), text: t, loc: None }));
+                msgs.extend(e.into_iter().map(|t| Msg { severity: Some(Severity::Error), text: t, loc: None }));
                 Some(m)
             }
             Geometry::Polygon2d(_) => None,
@@ -641,7 +711,34 @@ impl Ctx<'_> {
         };
         // `createManifoldFromGeometry` converts a mesh with a fresh set of
         // IDs; the slot past the children is this node's own.
+        let had_faces = !solid.is_empty();
         let m = self.to_manifold(n, OWN, solid, &mut msgs);
+        if had_faces && m.as_ref().is_some_and(ManifoldGeometry::is_empty) {
+            // The conversion failed (a mesh that is not closed even after
+            // repair), which OpenSCAD reports as a null solid and answers
+            // with its non-Manifold paths (`GeometryEvaluator.cc:859-906`).
+            if cut {
+                // CGAL cannot build a Nef polyhedron from it either.
+                msgs.push(Msg {
+                    severity: Some(Severity::Error),
+                    text: "The given mesh is not closed! Unable to convert to CGALNefGeometry.".into(),
+                    loc: None,
+                });
+                return Ok(Out { geom: None, msgs });
+            }
+            // Each child's faces projected and unioned with Clipper.
+            let faces: Vec<Polygon2d> = items
+                .iter()
+                .filter(|(c, _)| !is_background(c))
+                .filter_map(|(_, g)| g.as_ref().and_then(|g| crate::export::as_polyset(g, &self.opts.scheme)))
+                .map(|ps| Polygon2d {
+                    outlines: ps.faces.iter().map(|f| crate::polygon2d::Outline::new(f.iter().map(|&v| [ps.vertices[v as usize][0], ps.vertices[v as usize][1]]).collect())).collect(),
+                    sanitized: false,
+                })
+                .collect();
+            let geom = clipper::project_union(&faces).map(|p| Geometry::Polygon2d(Arc::new(p)));
+            return Ok(Out { geom, msgs });
+        }
         let geom = m.map(|m| {
             let flat = if cut { m.slice() } else { m.project() };
             Geometry::Polygon2d(Arc::new(clipper::sanitize(&flat)))
@@ -673,7 +770,7 @@ fn transform(g: Geometry, m: &crate::Matrix, msgs: &mut Vec<Msg>) -> Geometry {
             let mut p = Arc::unwrap_or_clone(p);
             let m2 = Polygon2d::matrix_2d(m);
             if let Some(w) = p.transform(&m2) {
-                msgs.push(Msg { severity: Severity::Warning, text: w.into(), loc: None });
+                msgs.push(Msg { severity: Some(Severity::Warning), text: w.into(), loc: None });
             }
             // A mirror reverses every outline, so a sanitized shape would
             // have clockwise outers and counter-clockwise holes; Clipper

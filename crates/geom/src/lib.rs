@@ -11,11 +11,12 @@
 //! - [`extrude`]: `linear_extrude` and `rotate_extrude`.
 //! - [`evaluate`]: the tree walk, with a cache keyed by
 //!   [`eval::dump::Keys`] and optional parallelism (feature `parallel`).
-//! - [`export`]: STL (ASCII and binary), OFF, OBJ, SVG and DXF in
-//!   OpenSCAD's formats, and the render summary.
+//! - [`export`]: the mesh a result exports as, handed to the `io` crate's
+//!   STL, OFF, OBJ, 3MF, SVG and DXF writers, and the render summary.
+//! - `import`: `import()` and `surface()` over the `io` crate's readers.
 //!
-//! Hull, minkowski, resize, surface, import and text belong to later
-//! phases; the evaluator reports them as [`evaluate::Unsupported`].
+//! Hull, minkowski, resize and text belong to later phases; the evaluator
+//! reports them as [`evaluate::Unsupported`].
 
 pub mod clipper;
 pub mod color;
@@ -23,6 +24,7 @@ pub mod evaluate;
 pub mod export;
 pub mod extrude;
 pub mod fragments;
+mod import;
 pub mod manifold_geom;
 pub mod polygon2d;
 pub mod polyset;

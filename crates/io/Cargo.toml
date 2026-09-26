@@ -1,0 +1,25 @@
+[package]
+name = "neoscad-io"
+description = "File formats for NeoSCAD: import readers (STL, OFF, OBJ, 3MF, DXF, SVG, surface heightmaps) and export writers, in OpenSCAD's layouts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "io"
+
+[dependencies]
+# Pinned exactly, like geom: SVG strokes are Clipper offsets, and OpenSCAD's
+# libsvg output is Clipper's arc stepping vertex for vertex.
+clipper2-rust = "=1.2.0"
+# zip's `deflate-flate2` leaves the flate2 backend to the dependent; this
+# selects the pure-Rust one (miniz_oxide), which also builds for wasm32.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+lang = { package = "neoscad-lang", path = "../lang" }
+png.workspace = true
+quick-xml = "0.42.0"
+sha2.workspace = true
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+
+[lints]
+workspace = true

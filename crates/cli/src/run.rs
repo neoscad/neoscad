@@ -1,6 +1,7 @@
 //! Running a program through the front end and evaluator, the way
 //! `openscad.cc`'s `cmdline()` does, and the `.ast`, `.echo`, `.csg`,
-//! `.term`, mesh (`.stl`, `.off`, `.obj`) and 2D (`.svg`, `.dxf`) exports.
+//! `.term`, mesh (`.stl`, `.off`, `.obj`, `.3mf`) and 2D (`.svg`, `.dxf`)
+//! exports.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -281,6 +282,7 @@ pub enum MeshFormat {
     BinaryStl,
     Off,
     Obj,
+    ThreeMf,
     Svg,
     Dxf,
 }
@@ -295,7 +297,7 @@ impl MeshFormat {
     }
 }
 
-/// `-o x.stl|x.off|x.obj|x.svg|x.dxf`: evaluate, build the geometry, and
+/// `-o x.stl|x.off|x.obj|x.3mf|x.svg|x.dxf`: evaluate, build the geometry, and
 /// export it, following the geometry branch of `openscad.cc`'s `do_export`
 /// (`:476-541`): messages on stderr, a refusal with exit 1 when the result
 /// has the wrong dimension or is empty (`checkAndExport`), then the render
@@ -311,8 +313,8 @@ pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat
     let ev = evaluate(&loaded, &paths, options, &mut con);
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
     let keys = eval::dump::Keys::new(&ev.root);
-    let opts = geom::RenderOptions { force, ..Default::default() };
-    let rendered = geom::Renderer::new().render(top, &keys, opts);
+    let opts = geom::RenderOptions { force, doc_dir: paths.main_dir.clone(), ..Default::default() };
+    let rendered = geom::Renderer::new().render(top, &keys, opts.clone());
     let rendered = match rendered {
         Ok(r) => r,
         Err(u) => {
@@ -328,7 +330,12 @@ pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat
         }
     };
     for m in &rendered.messages {
-        let mut diag = lang::diag::Diagnostic::new(lang::diag::DiagCode::Geometry, m.severity, m.text.clone());
+        let Some(severity) = m.severity else {
+            // A plain `LOG(...)` line.
+            con.print(None, m.text.as_bytes());
+            continue;
+        };
+        let mut diag = lang::diag::Diagnostic::new(lang::diag::DiagCode::Geometry, severity, m.text.clone());
         let mut sources = None;
         if let Some(l) = &m.loc {
             diag = diag.at(l.span, l.line);
@@ -365,6 +372,18 @@ pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat
                     MeshFormat::AsciiStl => geom::export::stl(ps, false, &mut warnings),
                     MeshFormat::BinaryStl => geom::export::stl(ps, true, &mut warnings),
                     MeshFormat::Off => geom::export::off(ps, &mut warnings),
+                    MeshFormat::ThreeMf => {
+                        // `ExportInfo::title` is the input's file name.
+                        let title = Path::new(display_name(job)).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                        let (data, msgs) = geom::export::threemf(ps, &title, &iso8601_now(), opts.scheme.face_front, &mut warnings);
+                        for m in msgs {
+                            match m.severity {
+                                Some(Severity::Warning) => warnings.push(m.text),
+                                _ => con.print(Some(Severity::Error), m.text.as_bytes()),
+                            }
+                        }
+                        data
+                    }
                     _ => geom::export::obj(ps, &mut warnings),
                 }
             }
@@ -387,6 +406,23 @@ pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat
         con.print(None, l.as_bytes());
     }
     0
+}
+
+/// `get_current_iso8601_date_time_utc` (`export.cc`): `YYYY-MM-DDTHH:MM:SSZ`.
+fn iso8601_now() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant's `civil_from_days`.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
 }
 
 /// The source map of evaluation unit `unit`: 0 is the main program, `1 + i`

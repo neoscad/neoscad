@@ -9,6 +9,7 @@ rust-version.workspace = true
 name = "eval"
 
 [dependencies]
+io = { package = "neoscad-io", path = "../io" }
 lang = { package = "neoscad-lang", path = "../lang" }
 unicode-script.workspace = true
 

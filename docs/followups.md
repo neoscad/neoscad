@@ -59,6 +59,26 @@ entry when it is done.
 - A `\r` inside `include<>`/`use<>` brackets doesn't count as a new line,
   as it does in OpenSCAD. (2)
 - Malformed parameter-set JSON gives different error text from Boost. (2)
+- SVG import: libsvg's arc math is not modelled with the nightly's fused
+  multiply-adds, so an arc whose sweep lands within ~1e-6 of a step
+  boundary gets one step fewer (`spec-paths-arcs01.svg`: 15 vs 16 steps at
+  180 degrees). The other 110 SVG import cases compared are byte for byte
+  the same; the images match. (5c)
+- 3MF: lib3mf's error texts for malformed files are only reproduced for a
+  missing file, a non-ZIP and an empty file; other problems get our own
+  description in OpenSCAD's frame. Exported object and build UUIDs are
+  hashes of the content rather than random, so files are reproducible.
+  Only the default export options are implemented (`-O export-3mf/...`
+  is not parsed). (5c)
+- libxml prints its own parser diagnostics to stderr for a broken SVG
+  (`file:1: parser error : ...`) before OpenSCAD's "Error parsing file";
+  only the latter is reproduced. Likewise the lines libsvg writes to
+  stdout (an invalid transform, a `<use>` href that is not `#id`). (5c)
+- OBJ: `f 1  2 3` (two separators in a row) crashes OpenSCAD with an
+  uncaught `bad_lexical_cast`; the empty word is skipped here. (5c)
+- `import()` of `.nef3` needs CGAL's Nef reader and still reports
+  "import() is not implemented"; only preview tests (tier 4) use it. The
+  experimental `import()` function (JSON) is not implemented either. (5c)
 
 ## Determinism
 - manifold-rust's `Slice` starts each loop from a `HashSet` iteration, so
@@ -70,7 +90,12 @@ entry when it is done.
   then drop the workaround. (5b)
 
 ## Structure
-- The DXF reader lives in `crates/eval/src/dxf.rs` for `dxf_dim` and
-  `dxf_cross`; move it to `io` when that crate exists. (3)
+- File access is not all behind `lang::loader::FileSystem` yet, so it
+  breaks under WASM: `dxf_dim()`/`dxf_cross()` read with `std::fs` in the
+  evaluator, and the cache keys (`eval::dump`) stat imported files for
+  their mtime and size with `std::fs`. The trait needs a `metadata` call
+  and `Keys::new` a file system. (5c)
+- `docs/architecture.md` still lists `usvg` for SVG; 5c ported OpenSCAD's
+  `libsvg` instead (see `crates/io/src/svg/mod.rs` for why). (5c)
 - The tier 3 baseline needs the pinned nightly installed as its renderer.
   CI would need it too. (5a)

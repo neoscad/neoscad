@@ -20,12 +20,13 @@
 //!   OpenSCAD it is exact: numbers print with Rust's shortest round-trip
 //!   form instead of 6 digits (OpenSCAD's 6-digit key makes `cube(1)` and
 //!   `cube(1.0000001)` share cached geometry), files are absolute with a
-//!   nanosecond timestamp (a file edited twice in one second still misses),
-//!   every string is quoted and escaped (OpenSCAD writes `text()` strings
-//!   raw, so a `"` in the text can make two keys equal), and parameters the
-//!   dump leaves out but geometry uses are included. All of a tree's keys
-//!   are slices of one string built in a single pass, as OpenSCAD's
-//!   `NodeCache` does, so computing them is linear in the dump size.
+//!   nanosecond timestamp and the file size (a file edited twice in one
+//!   second still misses), every string is quoted and escaped (OpenSCAD
+//!   writes `text()` strings raw, so a `"` in the text can make two keys
+//!   equal), and parameters the dump leaves out but geometry uses are
+//!   included. All of a tree's keys are slices of one string built in a
+//!   single pass, as OpenSCAD's `NodeCache` does, so computing them is
+//!   linear in the dump size.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -191,6 +192,11 @@ impl Writer<'_> {
         let t = mtime_nanos(file);
         if self.key() {
             self.int(t);
+            // The key also holds the size, so a file rewritten within the
+            // file system's timestamp resolution still misses the cache
+            // (imported geometry is cached under this key).
+            self.lit(", size = ");
+            self.int(file_size(file));
         } else {
             // std::chrono::duration_cast truncates toward zero.
             self.int(t / 1_000_000_000);
@@ -523,6 +529,14 @@ fn mtime_nanos(file: &str) -> i128 {
         Ok(d) => d.as_nanos() as i128,
         Err(e) => -(e.duration().as_nanos() as i128),
     }
+}
+
+/// The size of `file` in bytes, or -1 if it does not exist.
+fn file_size(file: &str) -> i128 {
+    if file.is_empty() {
+        return -1;
+    }
+    std::fs::metadata(file).map_or(-1, |m| i128::from(m.len()))
 }
 
 /// `std::filesystem::relative(p, base)` as `fs_uncomplete` calls it:

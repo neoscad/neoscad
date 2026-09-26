@@ -9,21 +9,9 @@
 use crate::Matrix;
 use crate::polyset::PolySet;
 
-/// One closed outline (`Outline2d`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Outline {
-    pub vertices: Vec<[f64; 2]>,
-    /// `positive`: an outer outline rather than a hole. Clipper results set
-    /// it from the winding; `polygon()` sets it from path order (only the
-    /// first path is positive), which matters for extrusion diagonals.
-    pub positive: bool,
-}
-
-impl Outline {
-    pub fn new(vertices: Vec<[f64; 2]>) -> Outline {
-        Outline { vertices, positive: true }
-    }
-}
+/// One closed outline (`Outline2d`); shared with the `io` crate's readers
+/// and writers.
+pub use io::Outline;
 
 /// Outlines of a 2D shape (`Polygon2d`).
 #[derive(Debug, Clone, Default, PartialEq)]

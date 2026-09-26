@@ -20,6 +20,7 @@ parallel = ["dep:rayon", "manifold-rust/parallel"]
 # offset() output is Clipper's arc stepping vertex for vertex.
 clipper2-rust = "=1.2.0"
 eval = { package = "neoscad-eval", path = "../eval" }
+io = { package = "neoscad-io", path = "../io" }
 lang = { package = "neoscad-lang", path = "../lang" }
 # Pinned exactly: the port tracks Manifold C++ v3.5.0 and its output
 # (triangle topology, run order) is part of what the tier 3 images see.

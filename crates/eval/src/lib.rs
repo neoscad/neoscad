@@ -26,7 +26,6 @@
 mod builtins;
 mod call;
 mod context;
-mod dxf;
 pub mod dump;
 mod eval;
 mod inst;
@@ -37,7 +36,9 @@ mod print;
 pub mod rng;
 mod sym;
 pub mod text_props;
-pub mod trig;
+/// Degree trigonometry lives in `io`, the lowest crate that needs it
+/// (its DXF and SVG readers); re-exported so evaluator code keeps its path.
+pub use io::trig;
 mod utf8;
 pub mod value;
 

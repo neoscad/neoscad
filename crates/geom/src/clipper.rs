@@ -164,6 +164,23 @@ fn apply_paths(paths: &[Paths64], op: Op2) -> Polygon2d {
     from_tree(&tree)
 }
 
+/// `ClipperUtils::applyProjection`: the union of meshes projected face by
+/// face (`PolySetUtils::project`), each first unioned with the non-zero
+/// rule so faces sharing edges leave no holes. `None` when nothing is left.
+pub fn project_union(polys: &[Polygon2d]) -> Option<Polygon2d> {
+    let mut sum = clipper();
+    for p in polys {
+        let mut c = clipper();
+        c.add_subject(&to_paths(p));
+        let mut result = Paths64::new();
+        c.execute(ClipType::Union, FillRule::NonZero, &mut result, None);
+        sum.add_subject(&result);
+    }
+    let mut tree = PolyTree64::new();
+    sum.execute_tree(ClipType::Union, FillRule::NonZero, &mut tree, &mut Paths64::new());
+    if tree.root().children().is_empty() { None } else { Some(from_tree(&tree)) }
+}
+
 /// Offset join types, as `OffsetNode` selects them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Join {

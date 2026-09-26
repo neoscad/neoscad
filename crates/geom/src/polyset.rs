@@ -34,6 +34,18 @@ impl PolySet {
         self.faces.is_empty()
     }
 
+    /// The mesh fields, as the `io` writers take them.
+    pub fn mesh(&self) -> io::MeshRef<'_> {
+        io::MeshRef { vertices: &self.vertices, faces: &self.faces, colors: &self.colors, color_indices: &self.color_indices }
+    }
+
+    /// A mesh a reader built (`PolySetBuilder::build`): convexity unknown,
+    /// triangular when every face is a triangle.
+    pub fn from_mesh(m: io::Mesh) -> PolySet {
+        let triangular = m.faces.iter().all(|f| f.len() <= 3);
+        PolySet { vertices: m.vertices, faces: m.faces, colors: m.colors, color_indices: m.color_indices, convex: None, triangular }
+    }
+
     /// `PolySet::setColor`: one colour for every face.
     pub fn set_color(&mut self, c: Color) {
         self.colors = vec![c];
@@ -62,9 +74,12 @@ impl PolySet {
         }))
     }
 
-    /// `PolySet::isConvex`: known for primitives, otherwise tested. OpenSCAD
-    /// asks CGAL (`is_approximately_convex`); this checks that no vertex lies
-    /// in front of any face's plane, which agrees on closed meshes.
+    /// `PolySet::isConvex`: known for primitives, otherwise
+    /// `CGALUtils::is_approximately_convex` (`cgalutils.cc:178-253`): the
+    /// mesh must be closed (every directed edge used once and its reverse
+    /// present, edges compared by position), connected, and no two faces
+    /// sharing an edge may bend inwards by more than 0.1 degrees. Linear in
+    /// the number of faces, so it is cheap for large imported meshes.
     pub fn is_convex(&self) -> bool {
         if self.is_empty() {
             return true;
@@ -72,24 +87,71 @@ impl PolySet {
         if let Some(c) = self.convex {
             return c;
         }
-        let scale = self.bounds().map_or(1.0, |(lo, hi)| (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max));
-        let eps = 1e-9 * scale.max(1.0);
-        for f in &self.faces {
-            let pts: Vec<[f64; 3]> = f.iter().map(|&i| self.vertices[i as usize]).collect();
-            let n = newell(&pts);
-            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            if len == 0.0 {
+        type Edge = [u64; 6];
+        let key = |a: [f64; 3], b: [f64; 3]| -> Edge {
+            let k = |c: f64| if c == 0.0 { 0u64 } else { c.to_bits() };
+            [k(a[0]), k(a[1]), k(a[2]), k(b[0]), k(b[1]), k(b[2])]
+        };
+        let v = |i: u32| self.vertices[i as usize];
+        let angle_threshold = eval::trig::cos_degrees(0.1);
+        let mut edges: std::collections::HashMap<Edge, usize> = std::collections::HashMap::with_capacity(self.faces.len() * 3);
+        // (normal, d) of each face's plane, `Plane_3(v[0], newell normal)`.
+        let mut planes: Vec<([f64; 3], f64)> = Vec::with_capacity(self.faces.len());
+        for (i, f) in self.faces.iter().enumerate() {
+            let n = f.len();
+            let mut plane = ([0.0; 3], 0.0);
+            if n >= 3 {
+                for j in 0..n {
+                    if edges.insert(key(v(f[j]), v(f[(j + 1) % n])), i).is_some() {
+                        return false;
+                    }
+                }
+                let pts: Vec<[f64; 3]> = f.iter().map(|&k| v(k)).collect();
+                let normal = newell(&pts);
+                let p = pts[0];
+                plane = (normal, -(normal[0] * p[0] + normal[1] * p[1] + normal[2] * p[2]));
+            }
+            planes.push(plane);
+        }
+        let unit = |u: [f64; 3]| {
+            let l = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+            u.map(|c| c / l)
+        };
+        for (i, f) in self.faces.iter().enumerate() {
+            let n = f.len();
+            if n < 3 {
                 continue;
             }
-            let p0 = pts[0];
-            for v in &self.vertices {
-                let d = (0..3).map(|k| n[k] / len * (v[k] - p0[k])).sum::<f64>();
-                if d > eps {
-                    return false;
+            for j in 0..n {
+                let Some(&other) = edges.get(&key(v(f[(j + 1) % n]), v(f[j]))) else { return false };
+                let p = v(f[(j + 2) % n]);
+                let (u, d) = planes[other];
+                if u[0] * p[0] + u[1] * p[1] + u[2] * p[2] + d > 0.0 {
+                    let (a, b) = (unit(u), unit(planes[i].0));
+                    if a[0] * b[0] + a[1] * b[1] + a[2] * b[2] < angle_threshold {
+                        return false;
+                    }
                 }
             }
         }
-        true
+        // Every face reachable from the first across shared edges.
+        let mut seen = vec![false; self.faces.len()];
+        seen[0] = true;
+        let mut count = 1;
+        let mut queue = std::collections::VecDeque::from([0usize]);
+        while let Some(f) = queue.pop_front() {
+            let face = &self.faces[f];
+            for i in 0..face.len() {
+                let j = (i + 1) % face.len();
+                let Some(&o) = edges.get(&key(v(face[j]), v(face[i]))) else { return false };
+                if !seen[o] {
+                    seen[o] = true;
+                    count += 1;
+                    queue.push_back(o);
+                }
+            }
+        }
+        count == self.faces.len()
     }
 
     /// `PolySetUtils::tessellate_faces`: split every face into triangles.

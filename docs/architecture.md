@@ -23,14 +23,14 @@ Library choices were checked in `docs/audits/phase0.md`.
 | 3D kernel | `manifold-rust` (pure-Rust port of Manifold; its parity claims must be checked against the Manifold C API in native test builds) | Same algorithm as OpenSCAD's default backend, with a clean `wasm32` build (the C++ binding needs patches for WASM) |
 | 2D kernel | `clipper2-rust` (pure-Rust Clipper2) | OpenSCAD's `offset()` depends on Clipper2's exact arc steps and join types; `i_overlay` differs visibly |
 | Text | `harfrust` (shaping) + `skrifa` (outlines), plus a matcher for fontconfig-style names | No FreeType/fontconfig; portable to WASM. `rustybuzz` is archived |
-| I/O | STL, OFF, OBJ, 3MF, SVG (`usvg`), DXF, PDF | |
+| I/O | `crates/io`: STL, OFF, OBJ, 3MF (zip + quick-xml), DXF, SVG (a port of OpenSCAD's libsvg), PDF | `usvg` turns arcs into f32 Béziers and keeps strokes as paint, so it can't reproduce OpenSCAD's `$fn`-dependent flattening or its stroke outlines |
 | Renderer | wgpu — Metal on macOS, WebGPU on web, offscreen for snapshots | One renderer for the GUI, the web and agent snapshots |
 
 ### Crates
 
 `lang` (lexer, parser, CST/AST, diagnostics) · `eval` (values, builtins,
 modules → CSG tree) · `geom` (kernels, extrude, hull, minkowski, offset,
-text) · `io` (import/export) · `render` (wgpu) · `cli` (the `neoscad`
+text) · `io` (import/export; sits below `eval` and `geom`) · `render` (wgpu) · `cli` (the `neoscad`
 binary; accepts OpenSCAD's CLI flags so OpenSCAD's tests can drive it) ·
 `serve` (long-lived process holding caches; the one API every client uses) ·
 `lsp` · `mcp` · `wasm` (wasm-bindgen package) · `conformance` (test harness).

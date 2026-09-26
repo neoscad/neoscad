@@ -1,22 +1,25 @@
-//! Reading DXF files for `dxf_dim()` and `dxf_cross()`.
+//! DXF: the reader behind `import()` of DXF files and the evaluator's
+//! `dxf_dim()`/`dxf_cross()`, and the writer.
 //!
-//! A port of `DxfData`'s reader (io/DxfData.cc): it collects dimension
-//! entities, and joins line-like entities (lines, polylines, circles, arcs,
-//! ellipses and block inserts) into paths on OpenSCAD's coarse snapping
-//! grid. The two builtin functions are evaluation-time features, which is
-//! why this lives in the evaluator for now; the `import()` of DXF geometry
-//! in the geometry phase should move this reader into the `io` crate and
-//! share it.
+//! The reader is a port of `DxfData` (`src/io/DxfData.cc`): it collects
+//! dimension entities, and joins line-like entities (lines, polylines,
+//! circles, arcs, ellipses and block inserts) into paths on OpenSCAD's
+//! coarse snapping grid. Curves are split by the caller's [`Curves`]:
+//! `import()` passes its `$fn`/`$fa`/`$fs`, the dimension functions
+//! OpenSCAD's fixed `CurveDiscretizer(36)`.
 //!
 //! Quirks kept on purpose: the reader does not check which entity a group
 //! code belongs to (an ellipse's ratio lands in `radius`, an insert's scale
 //! in the ellipse angles), a missing coordinate aborts the entity with a
-//! "Not enough input values" warning, and the grid inserts empty cells when
-//! it is merely queried, which affects later snapping.
+//! "Not enough input values" warning, the grid inserts empty cells when
+//! it is merely queried, which affects later snapping, and path directions
+//! are only normalised when the first path is closed.
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::text::{Lines, fmt_g, quoted, trim};
 use crate::trig::{cos_degrees, sin_degrees};
+use crate::{Curves, Outline};
 
 const GRID_COARSE: f64 = 0.0009765625;
 const GRID_FINE: f64 = 0.00000095367431640625;
@@ -98,42 +101,23 @@ struct Line {
     disabled: bool,
 }
 
-/// `std::getline` over a byte buffer, with the stream's eof flag.
-struct Lines<'a> {
-    data: &'a [u8],
-    pos: usize,
-    eof: bool,
-}
+/// `CurveDiscretizer(36)`, which `dxf_dim()` and `dxf_cross()` read
+/// with: `$fn = 36`, so a circle always gets 36 segments.
+#[derive(Debug, Clone, Copy)]
+pub struct Fixed36;
 
-impl Lines<'_> {
-    fn next(&mut self) -> String {
-        if self.pos >= self.data.len() {
-            self.eof = true;
-            return String::new();
+impl Curves for Fixed36 {
+    fn circular_segments(&self, r: f64, angle: f64) -> Option<i32> {
+        if r < GRID_FINE || angle.is_nan() || angle.is_infinite() {
+            return None;
         }
-        let rest = &self.data[self.pos..];
-        let line = match rest.iter().position(|&b| b == b'\n') {
-            Some(i) => {
-                self.pos += i + 1;
-                &rest[..i]
-            }
-            None => {
-                self.pos = self.data.len();
-                self.eof = true;
-                rest
-            }
-        };
-        String::from_utf8_lossy(line).trim().to_string()
+        let result = 36.0 * angle.abs() / 360.0;
+        Some((result.ceil() as i32).max(1))
     }
-}
 
-/// `CurveDiscretizer(36).getCircularSegmentCount(r, angle)`.
-fn segments(r: f64, angle: f64) -> Option<i32> {
-    if r < GRID_FINE || angle.is_nan() || angle.is_infinite() {
-        return None;
+    fn path_segments(&self) -> i32 {
+        36
     }
-    let result = 36.0 * angle.abs() / 360.0;
-    Some((result.ceil() as i32).max(1))
 }
 
 enum Abort {
@@ -143,8 +127,9 @@ enum Abort {
     Range,
 }
 
+/// `boost::lexical_cast<double>`.
 fn num(s: &str) -> Result<f64, Abort> {
-    s.parse::<f64>().map_err(|_| Abort::Value)
+    crate::text::parse_f64(s).ok_or(Abort::Value)
 }
 
 fn at(v: &[f64], i: usize) -> Result<f64, Abort> {
@@ -152,6 +137,7 @@ fn at(v: &[f64], i: usize) -> Result<f64, Abort> {
 }
 
 /// What to read from a DXF file.
+#[derive(Debug)]
 pub struct Request<'a> {
     /// The absolute path, as some messages print it.
     pub file: &'a str,
@@ -164,7 +150,7 @@ pub struct Request<'a> {
 }
 
 /// Read a DXF file's contents (`None` when it could not be opened).
-pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, warn: &mut dyn FnMut(String)) -> DxfData {
+pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: &mut dyn FnMut(String)) -> DxfData {
     let (file, display, layer_name, scale) = (req.file, req.display, req.layer, req.scale);
     let [xorigin, yorigin] = req.origin;
     let mut out = DxfData::default();
@@ -189,10 +175,10 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, warn: &mut dyn FnMut(String
     let (mut ell_start, mut ell_stop) = (0.0f64, 0.0f64);
     let mut unsupported: Vec<(String, i32)> = Vec::new();
 
-    let mut reader = Lines { data: bytes, pos: 0, eof: false };
+    let mut reader = Lines::new(bytes);
     while !reader.eof {
-        let id_str = reader.next();
-        let data = reader.next();
+        let id_str = trim(&reader.next_line()).to_string();
+        let data = trim(&reader.next_line()).to_string();
         let Ok(id) = id_str.parse::<i32>() else {
             if !reader.eof {
                 warn(format!("Illegal ID '{id_str}' in `{file}'"));
@@ -277,7 +263,7 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, warn: &mut dyn FnMut(String
                             }
                         }
                         "CIRCLE" => {
-                            let n = segments(radius, 360.0).unwrap_or(3);
+                            let n = curves.circular_segments(radius, 360.0).unwrap_or(3);
                             let c = [at(&xverts, 0)?, at(&yverts, 0)?];
                             for i in 0..n {
                                 let a1 = 360.0 * f64::from(i) / f64::from(n);
@@ -301,7 +287,7 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, warn: &mut dyn FnMut(String
                                 guard += 1;
                             }
                             let angle = arc_stop - arc_start;
-                            let n = segments(radius, angle).unwrap_or(1);
+                            let n = curves.circular_segments(radius, angle).unwrap_or(1);
                             for i in 0..n {
                                 let a1 = arc_start + angle * f64::from(i) / f64::from(n);
                                 let a2 = arc_start + angle * f64::from(i + 1) / f64::from(n);
@@ -329,7 +315,7 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, warn: &mut dyn FnMut(String
                             }
                             let r_minor = r_major * radius;
                             let sweep = ell_stop - ell_start;
-                            let n = segments(r_major, sweep / (2.0 * std::f64::consts::PI) * 360.0).unwrap_or(1);
+                            let n = curves.circular_segments(r_major, sweep / (2.0 * std::f64::consts::PI) * 360.0).unwrap_or(1);
                             let mut p1 = [0.0, 0.0];
                             for i in 0..=n {
                                 let a = ell_start + sweep * f64::from(i) / f64::from(n);
@@ -416,7 +402,7 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, warn: &mut dyn FnMut(String
                 50 => arc_start = num(&data)?,
                 42 => ell_stop = num(&data)?,
                 51 => arc_stop = num(&data)?,
-                70 => dimtype = data.parse::<i32>().map_err(|_| Abort::Value)?,
+                70 => dimtype = crate::text::parse_i32(&data).ok_or(Abort::Value)?,
                 _ => {}
             }
             Ok(())
@@ -430,9 +416,7 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, warn: &mut dyn FnMut(String
 
     for (m, n) in &unsupported {
         if layer_name.is_empty() {
-            let mut q = Vec::new();
-            lang::dump::quoted(&mut q, display.as_bytes());
-            warn(format!("Unsupported DXF Entity '{m}' ({n:x}) in {}.", String::from_utf8_lossy(&q)));
+            warn(format!("Unsupported DXF Entity '{m}' ({n:x}) in {}.", quoted(display)));
         } else {
             warn(format!("Unsupported DXF Entity '{m}' ({n:x}) in layer '{layer_name}' of {display}"));
         }
@@ -440,6 +424,79 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, warn: &mut dyn FnMut(String
 
     extract_paths(&mut out, &mut grid, &mut lines);
     out
+}
+
+impl DxfData {
+    /// `DxfData::toPolygon2d`: every path as an outline, in reverse. Open
+    /// paths are closed ("to be compatible with existing behavior"), and a
+    /// closed path's repeated end point is dropped.
+    pub fn to_outlines(&self) -> Vec<Outline> {
+        self.paths
+            .iter()
+            .map(|path| {
+                let n = path.indices.len();
+                let end = if path.closed { n } else { n + 1 };
+                Outline::new((1..end).map(|j| self.points[path.indices[n - j]]).collect())
+            })
+            .collect()
+    }
+}
+
+/// The fixed part of `export_dxf_header` (`export_dxf.cc:40-200`) after the
+/// extents: line type, layer and style tables, and an empty BLOCKS section.
+const DXF_TABLES: &str = "  0\nENDSEC\n  0\nSECTION\n  2\nTABLES\n  0\nTABLE\n  2\nLTYPE\n 70\n1\n  0\nLTYPE\n  2\nCONTINUOUS\n 70\n64\n  3\nSolid line\n 72\n65\n 73\n0\n 40\n0.000000\n  0\nENDTAB\n  0\nTABLE\n  2\nLAYER\n 70\n6\n  0\nLAYER\n  2\n0\n 70\n64\n 62\n7\n  6\nCONTINUOUS\n  0\nENDTAB\n  0\nTABLE\n  2\nSTYLE\n 70\n0\n  0\nENDTAB\n  0\nENDSEC\n  0\nSECTION\n  2\nBLOCKS\n  0\nENDSEC\n";
+
+/// `export_dxf` (`export_dxf.cc`): an R12-style header with the extents,
+/// then one entity per outline (a POINT, a LINE, or a closed LWPOLYLINE).
+///
+/// The extents start from `DBL_MAX` and `DBL_MIN` as in OpenSCAD, and
+/// `DBL_MIN` is the smallest positive double, not the most negative: a
+/// shape entirely left of or below the origin keeps `2.22507e-308` as its
+/// maximum. That is copied so the files compare equal.
+pub fn write(outlines: &[Outline]) -> Vec<u8> {
+    let (mut x_min, mut y_min) = (f64::MAX, f64::MAX);
+    let (mut x_max, mut y_max) = (f64::MIN_POSITIVE, f64::MIN_POSITIVE);
+    for v in outlines.iter().flat_map(|o| o.vertices.iter()) {
+        if x_min > v[0] {
+            x_min = v[0];
+        }
+        if x_max < v[0] {
+            x_max = v[0];
+        }
+        if y_min > v[1] {
+            y_min = v[1];
+        }
+        if y_max < v[1] {
+            y_max = v[1];
+        }
+    }
+    let (x0, y0, x1, y1) = (fmt_g(x_min), fmt_g(y_min), fmt_g(x_max), fmt_g(y_max));
+    let mut out = String::from("999\nDXF from OpenSCAD\n");
+    out.push_str("  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1006\n  9\n$INSBASE\n 10\n0.0\n 20\n0.0\n 30\n0.0\n");
+    out.push_str(&format!("  9\n$EXTMIN\n 10\n{x0}\n 20\n{y0}\n  9\n$EXTMAX\n 10\n{x1}\n 20\n{y1}\n"));
+    out.push_str(&format!("  9\n$LINMIN\n 10\n{x0}\n 20\n{y0}\n  9\n$LINMAX\n 10\n{x1}\n 20\n{y1}\n"));
+    out.push_str(DXF_TABLES);
+    out.push_str("  0\nSECTION\n  2\nENTITIES\n");
+    for o in outlines {
+        match o.vertices.as_slice() {
+            [a] => out.push_str(&format!("  0\nPOINT\n100\nAcDbEntity\n  8\n0\n100\nAcDbPoint\n 10\n{}\n 20\n{}\n", fmt_g(a[0]), fmt_g(a[1]))),
+            [a, b] => out.push_str(&format!(
+                "  0\nLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbLine\n 10\n{}\n 20\n{}\n 11\n{}\n 21\n{}\n",
+                fmt_g(a[0]),
+                fmt_g(a[1]),
+                fmt_g(b[0]),
+                fmt_g(b[1])
+            )),
+            vs => {
+                out.push_str(&format!("  0\nLWPOLYLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbPolyline\n 90\n{}\n 70\n1\n", vs.len()));
+                for v in vs {
+                    out.push_str(&format!(" 10\n{}\n 20\n{}\n", fmt_g(v[0]), fmt_g(v[1])));
+                }
+            }
+        }
+    }
+    out.push_str("  0\nENDSEC\n  0\nEOF\n");
+    out.into_bytes()
 }
 
 /// Join lines into paths: open paths first (starting from free line ends),
@@ -530,5 +587,40 @@ fn extract_paths(out: &mut DxfData, grid: &mut Grid, lines: &mut [Line]) {
         if ax.atan2(ay) < cx.atan2(cy) {
             path.indices.reverse();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dxf_keeps_openscads_extent_quirk() {
+        // `translate([-5,-3]) polygon([[0,0],[2,0],[1,1]]);` on the nightly:
+        // the maximum extents stay at DBL_MIN for a shape left of and below
+        // the origin.
+        let o = [Outline::new(vec![[-4.0, -2.0], [-5.0, -3.0], [-3.0, -3.0]])];
+        let text = String::from_utf8(write(&o)).unwrap();
+        assert!(text.starts_with("999\nDXF from OpenSCAD\n  0\nSECTION\n  2\nHEADER\n"));
+        assert!(text.contains("  9\n$EXTMIN\n 10\n-5\n 20\n-3\n  9\n$EXTMAX\n 10\n2.22507e-308\n 20\n2.22507e-308\n"));
+        assert!(text.ends_with(
+            "  0\nLWPOLYLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbPolyline\n 90\n3\n 70\n1\n 10\n-4\n 20\n-2\n 10\n-5\n 20\n-3\n 10\n-3\n 20\n-3\n  0\nENDSEC\n  0\nEOF\n"
+        ));
+        assert_eq!(text.len(), 708);
+    }
+
+    #[test]
+    fn written_outlines_read_back() {
+        // A square written by the exporter reads back as one closed path
+        // with the same corners (in the reader's reversed order).
+        let sq = [Outline::new(vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]])];
+        let bytes = write(&sq);
+        let req = Request { file: "f", display: "f", layer: "", origin: [0.0, 0.0], scale: 1.0 };
+        let data = read(Some(&bytes), &req, &Fixed36, &mut |w| panic!("{w}"));
+        let out = data.to_outlines();
+        assert_eq!(out.len(), 1);
+        let mut v = out[0].vertices.clone();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(v, vec![[0.0, 0.0], [0.0, 2.0], [2.0, 0.0], [2.0, 2.0]]);
     }
 }
