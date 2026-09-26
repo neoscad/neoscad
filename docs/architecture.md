@@ -103,16 +103,25 @@ expected-failures list. Every change must shrink that list and never grow it.
 ### Progress recording
 
 Each `conformance --record` run (at least once per milestone commit) writes
-`progress/<date>-<sha>/` containing:
+a snapshot into `progress/`. That directory lives in the repo tree but is
+gitignored, so the images never bloat history.
 
-- `scoreboard.json`: per-test results, per-tier counts and timings.
-- A test-grid image with one cell per test, which shows progress before any
-  renderer exists.
-- A fixed showcase set of about 25 models, each rendered as OpenSCAD's
+- **Directory name:** `progress/<UTC timestamp>-<short sha>[-dirty]/`, e.g.
+  `20260925T184210Z-1220a01/`. It sorts chronologically and ties the snapshot
+  to the commit it measured. `-dirty` marks a run on uncommitted changes.
+- **`meta.json`:** the full sha, branch, commit subject and timestamp, a dirty
+  flag, and the OpenSCAD reference commit. A snapshot is self-describing even
+  if it is renamed.
+- **`progress/index.jsonl`:** one line appended per snapshot, so the timeline
+  can be listed without walking the directories.
+- **`scoreboard.json`:** per-test results, per-tier counts and timings.
+- **A test-grid image** with one cell per test, which shows progress before
+  any renderer exists.
+- **A fixed showcase set** of about 25 models, each rendered as OpenSCAD's
   output, ours and a diff side by side.
 
-The images live in Git LFS. A later script stitches the snapshots into a
-progress video with ffmpeg.
+A later script stitches the snapshots in order into a progress video with
+ffmpeg.
 
 ## Scope
 
