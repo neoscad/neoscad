@@ -1,4 +1,5 @@
-// A document window's content: the editor above, the console below.
+// A document window's content: the editor above the console on the left,
+// the 3D view on the right.
 
 import SwiftUI
 
@@ -6,11 +7,16 @@ struct DocumentView: View {
     @Bindable var model: DocumentModel
 
     var body: some View {
-        VSplitView {
-            PlainTextEditor(text: $model.text)
-                .frame(minWidth: 400, minHeight: 200)
-            ConsoleView(report: model.report)
-                .frame(minHeight: 90, idealHeight: 180)
+        HSplitView {
+            VSplitView {
+                PlainTextEditor(text: $model.text)
+                    .frame(minWidth: 320, minHeight: 200)
+                ConsoleView(report: model.report)
+                    .frame(minHeight: 90, idealHeight: 160)
+            }
+            .frame(minWidth: 320, idealWidth: 420)
+            ViewportView(controller: model.viewport)
+                .frame(minWidth: 320, idealWidth: 640, minHeight: 240)
         }
     }
 }

@@ -945,8 +945,10 @@ dependencies = [
  "neoscad-render",
  "neoscad-session",
  "neoscad-text",
+ "objc2-quartz-core",
  "serde_json",
  "uniffi",
+ "wgpu",
 ]
 
 [[package]]

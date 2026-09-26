@@ -78,3 +78,18 @@ fn offscreen() -> Result<&'static Offscreen, String> {
         .as_ref()
         .map_err(Clone::clone)
 }
+
+/// The GPU the viewports draw on, opened on first use and shared by every
+/// window (and by the background uploads for them). A device of its own,
+/// not the snapshots' [`offscreen`] one: a window surface must come from
+/// the instance its device was opened on, and the offscreen renderer does
+/// not keep its instance.
+pub fn viewport_gpu() -> Result<Arc<render::viewport::Gpu>, String> {
+    static GPU: OnceLock<Result<Arc<render::viewport::Gpu>, String>> = OnceLock::new();
+    GPU.get_or_init(|| {
+        render::viewport::Gpu::new_blocking(Backends::METAL)
+            .map(Arc::new)
+            .map_err(|e| e.to_string())
+    })
+    .clone()
+}

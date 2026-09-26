@@ -12,6 +12,7 @@ enum MainMenu {
         bar.addItem(submenu(fileMenu()))
         bar.addItem(submenu(editMenu()))
         bar.addItem(submenu(designMenu()))
+        bar.addItem(submenu(viewMenu()))
         let window = windowMenu()
         bar.addItem(submenu(window))
         NSApp.windowsMenu = window
@@ -96,11 +97,48 @@ enum MainMenu {
         return m
     }
 
-    /// OpenSCAD's Design menu, with its key: F6 renders.
+    /// OpenSCAD's Design menu, with its keys: F5 previews, F6 renders.
     private static func designMenu() -> NSMenu {
         let m = NSMenu(title: "Design")
+        let f5 = String(Character(UnicodeScalar(NSF5FunctionKey)!))
         let f6 = String(Character(UnicodeScalar(NSF6FunctionKey)!))
+        m.addItem(item("Preview", #selector(SCADDocument.previewDocument(_:)), f5, []))
         m.addItem(item("Render", #selector(SCADDocument.renderDocument(_:)), f6, []))
+        return m
+    }
+
+    /// OpenSCAD's View menu (`src/gui/MainWindow.ui`), with its shortcuts
+    /// where it has them. Qt's Ctrl is the Command key on macOS, so its
+    /// Ctrl+4 (Top) is Command-4 here. The grid and the lighting choice
+    /// are NeoSCAD's and have no OpenSCAD shortcut.
+    private static func viewMenu() -> NSMenu {
+        typealias D = SCADDocument
+        let m = NSMenu(title: "View")
+        m.addItem(item("Show Edges", #selector(D.toggleEdges(_:)), "1"))
+        m.addItem(item("Show Axes", #selector(D.toggleAxes(_:)), "2"))
+        m.addItem(item("Show Crosshairs", #selector(D.toggleCrosshairs(_:)), "3"))
+        m.addItem(item("Show Scale Markers", #selector(D.toggleScaleMarkers(_:))))
+        m.addItem(item("Show Grid", #selector(D.toggleGrid(_:))))
+        m.addItem(.separator())
+        m.addItem(item("OpenSCAD Lighting", #selector(D.useOpenSCADLighting(_:))))
+        m.addItem(item("Headlight", #selector(D.useHeadlight(_:))))
+        m.addItem(.separator())
+        m.addItem(item("Top", #selector(D.showTop(_:)), "4"))
+        m.addItem(item("Bottom", #selector(D.showBottom(_:)), "5"))
+        m.addItem(item("Left", #selector(D.showLeft(_:)), "6"))
+        m.addItem(item("Right", #selector(D.showRight(_:)), "7"))
+        m.addItem(item("Front", #selector(D.showFront(_:)), "8"))
+        m.addItem(item("Back", #selector(D.showBack(_:)), "9"))
+        m.addItem(item("Diagonal", #selector(D.showDiagonal(_:)), "0"))
+        m.addItem(item("Center", #selector(D.centerView(_:)), "0", [.command, .shift]))
+        m.addItem(.separator())
+        m.addItem(item("Perspective", #selector(D.usePerspective(_:))))
+        m.addItem(item("Orthogonal", #selector(D.useOrthographic(_:))))
+        m.addItem(.separator())
+        m.addItem(item("Reset View", #selector(D.resetView(_:))))
+        m.addItem(item("View All", #selector(D.viewAll(_:)), "v", [.command, .shift]))
+        m.addItem(item("Zoom In", #selector(D.zoomIn(_:)), "]"))
+        m.addItem(item("Zoom Out", #selector(D.zoomOut(_:)), "["))
         return m
     }
 

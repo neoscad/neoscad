@@ -531,3 +531,38 @@ entry when it is done.
   CI would need it too. (5a)
 - The six PDF cases need a PDF rasteriser (Ghostscript or poppler), which
   CI would need too. (5f)
+
+## macOS app
+- A viewport frame holds the main thread for about 2.6 ms (p50; p95
+  3.3 ms) at 60 Hz, nearly all of it `-[CAMetalLayer nextDrawable]`
+  waiting for a free drawable; encoding is 0.14 ms. `Immediate` present
+  mode halved it against `Fifo` (whose wait was up to a whole refresh).
+  A render thread would take the wait off the main thread, but wgpu-hal's
+  acquire reads the window's `occlusionState`
+  (`wgpu-hal-30.0.1/src/metal/surface.rs:353-369`), an AppKit property of
+  the main thread; `CAMetalDisplayLink` hands out drawables itself, which
+  wgpu cannot take. (8c)
+- 120 Hz pacing is unverified: the only display online during 8c was a
+  60 Hz external one. The display link asks for up to 120 Hz
+  (`preferredFrameRateRange`); run `NEOSCAD_VIEWPORT_BENCH=8` on a
+  ProMotion panel. (8c)
+- View-option lines are one pixel and the scale markers' numbers are sized
+  in pixels, as in OpenSCAD's offscreen export (DPI 1). OpenSCAD's GUI
+  scales them by the screen's DPI (`glLineWidth(dpi)`), so on a 2x display
+  NeoSCAD's are half as heavy. (8c)
+- Switching between the light and dark scheme renders the last request
+  again, because `session.render` bakes the scheme's face colours into the
+  geometry (`geom::color::Scheme`); a slow render-mode model is recomputed.
+  (8c)
+- The app opens two GPU devices, one for snapshots (`host::offscreen`) and
+  one for viewports (`host::viewport_gpu`), because `Offscreen` drops its
+  instance and a window surface must come from the device's instance. One
+  would do. (8c)
+- The app's memory with `csg_spheres` open is about 790 MB RSS; not yet
+  broken down. (8c)
+- Mouse mapping covers orbit, pan and zoom; OpenSCAD's shift-drag
+  (pitch/roll), middle-drag (forward/back), shift-wheel (field of view) and
+  zoom-to-cursor are not mapped. A Magic Mouse's precise scroll pans, as a
+  trackpad's does. (8c)
+- The first model of a window is fitted (View All); the file's `$vpt`,
+  `$vpr` and `$vpd` are not applied to the view yet. (8c)

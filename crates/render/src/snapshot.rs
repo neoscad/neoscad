@@ -64,7 +64,7 @@ impl View {
 
     /// OpenSCAD's `object_rot` for the view (`MainWindow.cc`,
     /// `on_viewAction*`; the diagonal view is the default camera).
-    fn object_rot(self) -> [f64; 3] {
+    pub fn object_rot(self) -> [f64; 3] {
         match self {
             View::Iso => [35.0, 0.0, 335.0],
             View::Front => [0.0, 0.0, 0.0],

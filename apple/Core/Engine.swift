@@ -83,6 +83,16 @@ public final class Engine: Sendable {
         try await run(path) { try $0.render(path: path, mode: mode) }
     }
 
+    /// Render (or preview) and show the result in `viewport`: the scene is
+    /// built and uploaded to the GPU on the engine's queue, so the main
+    /// thread only draws. The mesh never leaves Rust. A newer call for the
+    /// same viewport wins even if this one finishes later.
+    public func render(
+        _ path: String, mode: RenderMode, into viewport: Viewport
+    ) async throws -> RenderResult {
+        try await run(path) { try $0.renderInto(path: path, mode: mode, viewport: viewport) }
+    }
+
     public func snapshot(
         _ path: String, options: SnapshotOptions = SnapshotOptions()
     ) async throws -> SnapshotResult {

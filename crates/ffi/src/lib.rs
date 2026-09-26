@@ -1,8 +1,9 @@
 //! The NeoSCAD core for the macOS app: a [`session::Session`] behind a
-//! small UniFFI API (`docs/audits/macos-prep.md`, step 8b). Swift sees one
-//! object, `Core`, whose methods mirror the session's operations:
-//! documents (`open`, `update`, `edit`, `close`), `evaluate`, `render`,
-//! `snapshot`, `export`, `cancel` and `set_limits`.
+//! small UniFFI API (`docs/audits/macos-prep.md`, steps 8b and 8c). Swift
+//! sees two objects: `Core`, whose methods mirror the session's operations
+//! (documents: `open`, `update`, `edit`, `close`; `evaluate`, `render`,
+//! `render_into`, `snapshot`, `export`, `cancel` and `set_limits`), and
+//! [`Viewport`], a document window's 3D view.
 //!
 //! # Rules of the bridge
 //!
@@ -17,13 +18,20 @@
 //!   `guarded`). The session's locks tolerate poisoning, so the next call
 //!   runs normally.
 //! - **Meshes never cross.** Results carry statistics, diagnostics and at
-//!   most a PNG; the viewport (8c) will draw from the session inside Rust.
+//!   most a PNG. The viewport ([`Viewport`]) draws from the session inside
+//!   Rust: `render_into` puts a render's scene straight onto the GPU, and
+//!   Swift only passes the `CAMetalLayer` in and pointer movements.
+//! - **One raw pointer.** The layer is the only pointer that crosses, and
+//!   `layer.rs` is the only module allowed `unsafe` (see its documentation
+//!   for why that use is sound).
 //! - **Calls block.** Evaluation and rendering take milliseconds to
 //!   minutes; Swift calls them off the main actor (`NeoSCADCore`'s async
 //!   wrapper), and `cancel` from any thread stops them.
 
 mod host;
+mod layer;
 mod types;
+mod viewport;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -32,6 +40,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use session::{Run, Session};
 
 pub use types::*;
+pub use viewport::*;
 
 uniffi::setup_scaffolding!();
 
@@ -225,18 +234,7 @@ impl Core {
             let run = self.run(&path)?;
             let scheme = render::ColorScheme::cornfield();
             let r = self.session.render(&run, mode.into(), &scheme)?;
-            Ok(RenderResult {
-                exit_code: r.exit_code,
-                diagnostics: types::diagnostics(&r.log),
-                echo: r.log.echo(),
-                console: types::console(&r.log),
-                geometry: r
-                    .geometry
-                    .as_ref()
-                    .map(|g| types::geometry_stats(g, &scheme.geometry_scheme())),
-                cache_entries: r.cache_entries as u64,
-                timings: r.timings.into(),
-            })
+            Ok(render_result(&r, &scheme))
         })
     }
 
@@ -341,6 +339,22 @@ impl Core {
             }
             panic!("debug_panic requested");
         })
+    }
+}
+
+/// What `render` (and `render_into`) report about a finished render.
+fn render_result(r: &session::Rendered, scheme: &render::ColorScheme) -> RenderResult {
+    RenderResult {
+        exit_code: r.exit_code,
+        diagnostics: types::diagnostics(&r.log),
+        echo: r.log.echo(),
+        console: types::console(&r.log),
+        geometry: r
+            .geometry
+            .as_ref()
+            .map(|g| types::geometry_stats(g, &scheme.geometry_scheme())),
+        cache_entries: r.cache_entries as u64,
+        timings: r.timings.into(),
     }
 }
 

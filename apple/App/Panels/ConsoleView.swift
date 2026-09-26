@@ -14,7 +14,7 @@ struct ConsoleView: View {
             summary
                 .font(.callout)
                 .accessibilityIdentifier("render-summary")
-            if case .rendered(let r) = report {
+            if case .rendered(let r, _) = report {
                 ForEach(Array(r.diagnostics.enumerated()), id: \.offset) { _, d in
                     DiagnosticRow(diagnostic: d)
                 }
@@ -37,24 +37,28 @@ struct ConsoleView: View {
     @ViewBuilder private var summary: some View {
         switch report {
         case .idle:
-            Text("Design > Render (F6) renders the model.")
+            Text("Design > Preview (F5) previews the model; Render (F6) renders it.")
                 .foregroundStyle(.secondary)
-        case .running:
+        case .running(let mode):
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text("Rendering…")
+                Text(mode == .preview ? "Previewing…" : "Rendering…")
             }
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.octagon")
                 .foregroundStyle(.red)
-        case .rendered(let r):
-            Text(Self.describe(r))
+        case .rendered(let r, let mode):
+            Text(Self.describe(r, mode: mode))
         }
     }
 
-    /// One line: time, then the geometry's numbers.
-    static func describe(_ r: RenderResult) -> String {
+    /// One line: time, then the geometry's numbers (a preview has none:
+    /// it builds the CSG products, not one mesh).
+    static func describe(_ r: RenderResult, mode: RenderMode = .render) -> String {
         let ms = String(format: "%.1f ms", r.timings.totalMs)
+        if mode == .preview {
+            return r.exitCode == 0 ? "Previewed in \(ms)." : "Preview failed (\(ms))."
+        }
         guard r.exitCode == 0 else { return "Render failed (\(ms))." }
         guard let g = r.geometry else { return "Rendered in \(ms): empty result." }
         let size = zip(g.bboxMax, g.bboxMin).map { fmt($0 - $1) }.joined(separator: " × ")

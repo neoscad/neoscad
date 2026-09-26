@@ -1,6 +1,6 @@
 [package]
 name = "neoscad-render"
-description = "NeoSCAD's renderer: OpenSCAD's camera, colour schemes, lighting, previews and view options on wgpu, drawing into any target (offscreen PNG export and snapshots now; a CAMetalLayer or WebGPU canvas later)"
+description = "NeoSCAD's renderer: OpenSCAD's camera, colour schemes, lighting, previews and view options on wgpu, drawing into any target (offscreen PNG export and snapshots, the macOS app's CAMetalLayer viewport; a WebGPU canvas later)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

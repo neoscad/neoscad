@@ -90,26 +90,7 @@ impl Offscreen {
     /// Open the default GPU on `backends` (for example
     /// [`wgpu::Backends::PRIMARY`]).
     pub async fn new(backends: wgpu::Backends) -> Result<Offscreen, Error> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .map_err(|e| Error::NoAdapter(e.to_string()))?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("neoscad offscreen"),
-                // Everything the adapter offers: a large model needs a large
-                // vertex buffer, and a large image a large texture and
-                // readback buffer; WebGPU's portable defaults (256 MiB
-                // buffers) would refuse models the GPU could draw.
-                required_limits: adapter.limits(),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| Error::Device(e.to_string()))?;
+        let (_, adapter, device, queue) = open_device(backends, "neoscad offscreen").await?;
         let renderer = Renderer::new(&device, FORMAT, 1);
         Ok(Offscreen {
             device,
@@ -241,20 +222,8 @@ impl Offscreen {
         );
         let frame = FrameParams::new(camera, scheme, edges).with_lighting(lighting);
 
-        // Rows of a texture copy are padded to 256 bytes.
-        let row = 4 * width;
-        let padded_row =
-            row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let readback_size = u64::from(padded_row) * u64::from(height);
-        if readback_size > self.device.limits().max_buffer_size {
-            return Err(Error::Size { width, height, max });
-        }
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("neoscad readback"),
-            size: readback_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let readback =
+            Readback::new(&self.device, width, height).ok_or(Error::Size { width, height, max })?;
 
         let mut encoder = self
             .device
@@ -271,47 +240,9 @@ impl Offscreen {
             &frame,
             overlay,
         );
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &color,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            size,
-        );
+        readback.copy(&mut encoder, &color);
         self.queue.submit([encoder.finish()]);
-
-        let (tx, rx) = futures_channel();
-        readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            tx.send(r.map_err(|e| e.to_string()));
-        });
-        // Native backends need polling to finish the work and run the
-        // callback; on the web the browser does it and this is a no-op.
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| Error::Readback(e.to_string()))?;
-        rx.recv().await.map_err(Error::Readback)?;
-
-        let mapped = readback
-            .slice(..)
-            .get_mapped_range()
-            .map_err(|e| Error::Readback(e.to_string()))?;
-        let mut rgba = Vec::with_capacity((row * height) as usize);
-        for r in 0..height as usize {
-            let start = r * padded_row as usize;
-            rgba.extend_from_slice(&mapped[start..start + row as usize]);
-        }
-        drop(mapped);
-        readback.unmap();
+        let rgba = readback.read(&self.device).await?;
         Ok(Image {
             width,
             height,
@@ -359,6 +290,128 @@ impl Offscreen {
         edges: bool,
     ) -> Result<Image, Error> {
         pollster::block_on(self.render_view(scene, camera, scheme, overlay, edges))
+    }
+}
+
+/// The default GPU on `backends`, with its instance (which a window
+/// surface must be made from) and a device with every limit the adapter
+/// offers: a large model needs a large vertex buffer, and a large image a
+/// large texture and readback buffer; WebGPU's portable defaults (256 MiB
+/// buffers) would refuse models the GPU could draw.
+pub(crate) async fn open_device(
+    backends: wgpu::Backends,
+    label: &str,
+) -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue), Error> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .map_err(|e| Error::NoAdapter(e.to_string()))?;
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some(label),
+            required_limits: adapter.limits(),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| Error::Device(e.to_string()))?;
+    Ok((instance, adapter, device, queue))
+}
+
+/// A colour texture on its way back to the CPU: a mappable buffer the
+/// texture is copied into, rows padded to the 256 bytes a copy needs.
+/// The offscreen exporter and the viewport's pixel read share it.
+#[derive(Debug)]
+pub(crate) struct Readback {
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_row: u32,
+}
+
+impl Readback {
+    /// A buffer for a `width` by `height` image of 4-byte pixels; `None`
+    /// when it would be larger than the device allows.
+    pub(crate) fn new(device: &wgpu::Device, width: u32, height: u32) -> Option<Readback> {
+        let row = 4 * width;
+        let padded_row =
+            row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let size = u64::from(padded_row) * u64::from(height);
+        if size > device.limits().max_buffer_size {
+            return None;
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("neoscad readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        Some(Readback {
+            buffer,
+            width,
+            height,
+            padded_row,
+        })
+    }
+
+    /// Record the copy of `texture` (the image's size, 4 bytes a pixel).
+    pub(crate) fn copy(&self, encoder: &mut wgpu::CommandEncoder, texture: &wgpu::Texture) {
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.padded_row),
+                    rows_per_image: Some(self.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// The pixels, top row first and unpadded, once the submitted copy has
+    /// finished.
+    pub(crate) async fn read(self, device: &wgpu::Device) -> Result<Vec<u8>, Error> {
+        let (tx, rx) = futures_channel();
+        self.buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                tx.send(r.map_err(|e| e.to_string()));
+            });
+        // Native backends need polling to finish the work and run the
+        // callback; on the web the browser does it and this is a no-op.
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        rx.recv().await.map_err(Error::Readback)?;
+
+        let row = 4 * self.width as usize;
+        let mapped = self
+            .buffer
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        let mut rgba = Vec::with_capacity(row * self.height as usize);
+        for r in 0..self.height as usize {
+            let start = r * self.padded_row as usize;
+            rgba.extend_from_slice(&mapped[start..start + row]);
+        }
+        drop(mapped);
+        self.buffer.unmap();
+        Ok(rgba)
     }
 }
 

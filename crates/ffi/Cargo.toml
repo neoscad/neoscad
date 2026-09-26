@@ -24,9 +24,28 @@ serde_json.workspace = true
 session = { package = "neoscad-session", path = "../session" }
 text = { package = "neoscad-text", path = "../text" }
 uniffi = { version = "=0.32.2", default-features = false }
+# The window surface for the viewport: `SurfaceTargetUnsafe` (the same
+# wgpu the renderer uses; no second copy is built).
+wgpu = "30"
 
-# The workspace's lints, `forbid(unsafe_code)` included: UniFFI's
-# `extern "C"` exports come from its macros, which the lint does not look
-# into, and the hand-written code needs no `unsafe`.
-[lints]
-workspace = true
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+# The viewport tests draw into a real `CAMetalLayer` (not in a window), so
+# the unsafe surface path runs under `cargo test`. Already in the build
+# through wgpu's Metal backend.
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
+
+# The workspace's lints, written out because one differs: `unsafe_code` is
+# `deny` rather than the workspace's `forbid`, since `forbid` cannot be
+# lifted for a single module and the viewport must turn the app's
+# `CAMetalLayer` pointer into a wgpu surface. `src/layer.rs` is the only
+# module that allows it; everything else here still refuses `unsafe`.
+# UniFFI's `extern "C"` exports come from its macros, which the lint does
+# not look into. Keep the rest in step with `[workspace.lints]`.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"

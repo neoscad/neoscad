@@ -20,6 +20,9 @@
 //!   colour view the caller owns.
 //! - [`offscreen`] (feature `gpu`) is one such caller: a texture read back
 //!   into memory, which [`encode_png`] turns into OpenSCAD's PNG.
+//! - [`viewport`] (feature `gpu`) is another: the apps' interactive view,
+//!   drawing into a window surface (or a texture, headless) with MSAA,
+//!   a camera the user moves and the GUI's view options.
 //! - [`preview`] turns OpenSCAD's preview model (CSG products,
 //!   `geom::csg`) into a scene: the OpenCSG preview, with `%` and `#`
 //!   objects, and the throwntogether view.
@@ -40,6 +43,8 @@ pub mod snapshot;
 pub mod gpu;
 #[cfg(feature = "gpu")]
 pub mod offscreen;
+#[cfg(feature = "gpu")]
+pub mod viewport;
 
 pub use camera::{Camera, Projection};
 

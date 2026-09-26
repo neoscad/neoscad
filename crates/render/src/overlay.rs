@@ -90,11 +90,13 @@ impl LineVertex {
     }
 }
 
-/// Line segments for one frame: `before` the model (depth-tested) and
-/// `after` it (drawn over everything).
+/// Line segments for one frame: `before` the model (depth-tested),
+/// `behind` it (depth-tested against the model without writing depth: the
+/// app's [`grid`]), and `after` it (drawn over everything).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Overlay {
     pub before: Vec<LineVertex>,
+    pub behind: Vec<LineVertex>,
     pub after: Vec<LineVertex>,
 }
 
@@ -189,6 +191,53 @@ pub fn overlay(
         small_axes(&mut o.after, camera, axes);
     }
     o
+}
+
+/// A grid on the ground (z = 0) plane around the point the camera looks
+/// at, for the app's viewport. OpenSCAD draws no grid (`GLView::paintGL`
+/// has axes, scale markers and crosshairs only); this is NeoSCAD's, so
+/// exported images never include it.
+///
+/// The spacing is a power of ten chosen from the viewer distance, like the
+/// scale markers', so it steps tenfold as the view zooms; every tenth line
+/// is stronger. Lines are snapped to multiples of the spacing, so panning
+/// slides the model over a fixed grid rather than dragging the grid along.
+/// The lines go in [`Overlay::behind`]: drawn after the model and hidden by
+/// it, but never writing depth, because a plane of depth-writing lines at
+/// z = 0 would cut into the preview's depth passes wherever a face lies in
+/// that plane.
+pub fn grid(out: &mut Vec<LineVertex>, camera: &Camera, color: [f32; 4]) {
+    let dist = camera.viewer_distance;
+    if !(dist.is_finite() && dist > 0.0) {
+        return;
+    }
+    let step = 10f64.powi((dist / 10.0).log10().floor() as i32);
+    // Out to about the viewer distance each way: at OpenSCAD's 22.5 degree
+    // field of view that covers the visible ground from any angle but the
+    // most grazing, with at most 200 lines per direction.
+    let n = (dist / step).ceil() as i64;
+    let [cx, cy, _] = camera.vpt();
+    let (i0, j0) = ((cx / step).round() as i64, (cy / step).round() as i64);
+    let (lo_x, hi_x) = ((i0 - n) as f64 * step, (i0 + n) as f64 * step);
+    let (lo_y, hi_y) = ((j0 - n) as f64 * step, (j0 + n) as f64 * step);
+    let minor = [color[0], color[1], color[2], color[3] * 0.18];
+    let major = [color[0], color[1], color[2], color[3] * 0.4];
+    for k in -n..=n {
+        for (index, horizontal) in [(i0 + k, false), (j0 + k, true)] {
+            let v = index as f64 * step;
+            let mut pen = Pen {
+                out: &mut *out,
+                space: Space::Model,
+                color: if index % 10 == 0 { major } else { minor },
+                stipple: false,
+            };
+            if horizontal {
+                pen.line([lo_x, v, 0.0], [hi_x, v, 0.0]);
+            } else {
+                pen.line([v, lo_y, 0.0], [v, hi_y, 0.0]);
+            }
+        }
+    }
 }
 
 /// `showScalemarkers`: ticks along each axis whose spacing changes with
@@ -446,5 +495,34 @@ mod tests {
                 .before
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn grid_lies_on_the_ground_snapped_to_its_spacing() {
+        let mut camera = Camera::default();
+        camera.set_vpt(13.0, -27.0, 5.0);
+        let mut out = Vec::new();
+        grid(&mut out, &camera, [0.0, 0.0, 0.0, 1.0]);
+        // Distance 140: spacing 10, 14 lines each side of the centre
+        // line, in both directions.
+        assert_eq!(out.len(), 2 * 2 * (2 * 14 + 1));
+        for v in &out {
+            assert_eq!(v.space, Space::Model);
+            assert_eq!(v.position[2], 0.0);
+            assert_eq!(v.position[3], 1.0);
+        }
+        // Every line sits on a multiple of the spacing, whatever the centre.
+        for pair in out.chunks(2) {
+            let (a, b) = (pair[0].position, pair[1].position);
+            let fixed = if a[0] == b[0] { a[0] } else { a[1] };
+            assert_eq!(fixed % 10.0, 0.0, "{a:?} {b:?}");
+        }
+        // Tenfold closer, tenfold finer.
+        camera.set_vpd(14.0);
+        let mut fine = Vec::new();
+        grid(&mut fine, &camera, [0.0; 4]);
+        let first = fine[0].position;
+        assert!((first[0] - first[0].round()).abs() < 1e-4);
+        assert_eq!(fine.len(), out.len());
     }
 }

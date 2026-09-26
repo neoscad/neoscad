@@ -24,7 +24,7 @@
 //! want MSAA; [`Renderer::new`] takes the sample count for that reason.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use wgpu::util::DeviceExt;
 
@@ -239,6 +239,10 @@ pub struct Renderer {
     /// View-option lines: depth-tested before the model, over it after.
     lines_tested: wgpu::RenderPipeline,
     lines_over: wgpu::RenderPipeline,
+    /// Lines hidden by the model but not hiding it (the app's grid): built
+    /// on first use, so the command line, which never draws them, does not
+    /// pay for the pipeline at start-up.
+    lines_behind: OnceLock<wgpu::RenderPipeline>,
     faces: Mutex<HashMap<DrawState, Arc<wgpu::RenderPipeline>>>,
     layout: wgpu::BindGroupLayout,
 }
@@ -425,9 +429,35 @@ impl Renderer {
             edges,
             lines_tested,
             lines_over,
+            lines_behind: OnceLock::new(),
             faces: Mutex::new(HashMap::new()),
             layout,
         }
+    }
+
+    /// The pipeline for [`Overlay::behind`], built on first use.
+    fn lines_behind(&self) -> &wgpu::RenderPipeline {
+        self.lines_behind.get_or_init(|| {
+            let attributes = wgpu::vertex_attr_array![
+                0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Uint32, 4 => Uint32
+            ];
+            self.base.pipeline(&PipelineSpec {
+                label: "neoscad lines behind",
+                vs: "line_vs",
+                fs: "line_fs",
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: LINE_VERTEX_SIZE as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &attributes,
+                })],
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull: None,
+                depth: wgpu::CompareFunction::Less,
+                depth_write: false,
+                bias: wgpu::DepthBiasState::default(),
+                color_write: true,
+            })
+        })
     }
 
     /// The face pipeline for `state`, built on first use.
@@ -477,8 +507,10 @@ impl Renderer {
 
     /// Record one frame: clear `color` and `depth`, draw the background
     /// gradient if the scheme has one, the view-option lines that go under
-    /// the model, the model's draws, its 2D outlines, and the lines that go
-    /// over everything (`GLView::paintGL`'s order). With multisampling,
+    /// the model, the model's draws, its 2D outlines, the lines the model
+    /// hides without being hidden by them (the app's grid, which OpenSCAD
+    /// does not have), and the lines that go over everything
+    /// (`GLView::paintGL`'s order). With multisampling,
     /// `resolve` receives the resolved image.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
@@ -513,7 +545,12 @@ impl Renderer {
                 v.iter().map(LineVertex::bytes),
             )
         };
-        let (before, after) = (lines(&overlay.before), lines(&overlay.after));
+        let (before, behind, after) = (
+            lines(&overlay.before),
+            lines(&overlay.behind),
+            lines(&overlay.after),
+        );
+        let behind_pipeline = behind.as_ref().map(|_| self.lines_behind());
         let pipelines: Vec<(Draw, Arc<wgpu::RenderPipeline>)> = scene
             .draws
             .iter()
@@ -529,7 +566,14 @@ impl Renderer {
                 ops: wgpu::Operations {
                     // glClearColor(background, 1).
                     load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }),
-                    store: wgpu::StoreOp::Store,
+                    // With a resolve target only the resolved image is
+                    // wanted; keeping the multisampled one would write four
+                    // samples a pixel back to memory every frame.
+                    store: if resolve.is_some() {
+                        wgpu::StoreOp::Discard
+                    } else {
+                        wgpu::StoreOp::Store
+                    },
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -565,6 +609,11 @@ impl Renderer {
             pass.set_pipeline(&self.edges);
             pass.set_vertex_buffer(0, edges.slice(..));
             pass.draw(0..6, 0..scene.edge_segments);
+        }
+        if let (Some(b), Some(p)) = (&behind, behind_pipeline) {
+            pass.set_pipeline(p);
+            pass.set_vertex_buffer(0, b.slice(..));
+            pass.draw(0..overlay.behind.len() as u32, 0..1);
         }
         if let Some(a) = &after {
             pass.set_pipeline(&self.lines_over);

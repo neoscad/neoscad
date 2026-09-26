@@ -217,6 +217,109 @@ impl Camera {
     }
 }
 
+/// Degrees of rotation, and the fraction of the view panned, per point of
+/// pointer movement: OpenSCAD scales every mouse delta by 0.7 before using
+/// it (`QGLView::mouseMoveEvent`, `src/gui/QGLView.cc`).
+const DRAG_SCALE: f64 = 0.7;
+
+/// The interactive view (`QGLView`'s mouse handling, `src/gui/QGLView.cc`,
+/// with the default "OpenSCAD" mouse preset, `src/core/MouseConfig.h`).
+/// Pointer deltas are in points, y down, as AppKit and Qt report them
+/// after flipping; the view size is in the same units.
+impl Camera {
+    /// A left-button drag (`ROTATE_ALT_AZ`): vertical movement tilts the
+    /// view about x, horizontal movement turns it about z, 0.7 degrees per
+    /// point.
+    pub fn orbit(&mut self, dx: f64, dy: f64) {
+        self.rotate_by([DRAG_SCALE * dy, 0.0, DRAG_SCALE * dx]);
+    }
+
+    /// Turn the model about the vertical (z) axis by `degrees`
+    /// (counterclockwise seen from above for a positive angle): the
+    /// trackpad's rotate gesture. OpenSCAD has no such gesture; a turntable
+    /// turn is its azimuth drag without the tilt.
+    pub fn turn(&mut self, degrees: f64) {
+        self.rotate_by([0.0, 0.0, degrees]);
+    }
+
+    /// `QGLView::rotate(x, y, z, relative = true)`: add to the Euler
+    /// angles and bring each back into 0..=360 (`normalizeAngle`, whose
+    /// `while` loops leave exactly 360 alone, unlike `wrap`).
+    pub fn rotate_by(&mut self, d: [f64; 3]) {
+        for (a, d) in self.object_rot.iter_mut().zip(d) {
+            *a += d;
+            while *a < 0.0 {
+                *a += 360.0;
+            }
+            while *a > 360.0 {
+                *a -= 360.0;
+            }
+        }
+    }
+
+    /// A right-button drag (`PAN_LR_UD`): move the view centre across the
+    /// screen so the model follows the pointer, by three viewer distances
+    /// per view width (OpenSCAD's `3.0 * cam.zoomValue()`), for a view
+    /// `width` by `height` points.
+    pub fn pan(&mut self, dx: f64, dy: f64, width: f64, height: f64) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let k = 3.0 * self.viewer_distance;
+        let mx = DRAG_SCALE * dx / width * k;
+        let mz = -DRAG_SCALE * dy / height * k;
+        self.translate_view([mx, 0.0, mz]);
+    }
+
+    /// `QGLView::translate(x, y, z, relative = true, viewPortRelative =
+    /// true)`: move the centre by `v` given in the view's frame (x right,
+    /// y into the screen, z up), which the inverse of the view rotation
+    /// takes into model space.
+    pub fn translate_view(&mut self, v: [f64; 3]) {
+        let [rx, ry, rz] = self.object_rot;
+        let m = mul(
+            &rotation(-rz, [0.0, 0.0, 1.0]),
+            &mul(
+                &rotation(-ry, [0.0, 1.0, 0.0]),
+                &rotation(-rx, [1.0, 0.0, 0.0]),
+            ),
+        );
+        for (i, t) in self.object_trans.iter_mut().enumerate() {
+            *t += m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2];
+        }
+    }
+
+    /// `Camera::zoom(v, relative = true)`: a mouse wheel's `angleDelta`,
+    /// 120 per notch, each notch bringing the eye to 0.9 of its distance.
+    /// Positive is towards the model.
+    pub fn zoom(&mut self, v: f64) {
+        self.viewer_distance *= 0.9f64.powf(v / 120.0);
+    }
+
+    /// Scale the viewer distance by `1 / factor` (a pinch that spreads the
+    /// fingers by `factor` brings the model that much closer). Factors
+    /// that are not positive are ignored, so a runaway gesture cannot put
+    /// the eye on or behind the centre.
+    pub fn zoom_by(&mut self, factor: f64) {
+        if factor > 0.0 && factor.is_finite() {
+            self.viewer_distance /= factor;
+        }
+    }
+
+    /// View > Center (`on_viewActionCenter_triggered`): look at the origin.
+    pub fn center(&mut self) {
+        self.object_trans = [0.0; 3];
+    }
+
+    /// View > View All (`QGLView::viewAll`): centre on the bounding box and
+    /// fit it. The GUI's view-all always centres, unlike `--viewall`
+    /// without `--autocenter`.
+    pub fn view_all_centered(&mut self, bbox: BoundingBox) {
+        self.autocenter = true;
+        self.view_all(bbox);
+    }
+}
+
 /// A 4x4 matrix, row-major (`m[row][column]`).
 pub type Mat4 = [[f64; 4]; 4];
 
@@ -389,5 +492,54 @@ mod tests {
         let z01 = 0.5 * clip[2] + 0.5 * clip[3];
         assert!((z01 / clip[3]).abs() < 1e-12);
         assert_eq!(m[0], mul(&gl.projection, &gl.modelview)[0]);
+    }
+
+    #[test]
+    fn drags_follow_openscads_mouse_preset() {
+        let mut c = Camera::default();
+        // [35, 0, 335]: 0.7 degrees a point, x from vertical movement and
+        // z from horizontal, wrapped into 0..=360.
+        c.orbit(50.0, -10.0);
+        assert!((c.object_rot[0] - 28.0).abs() < 1e-9);
+        assert!((c.object_rot[2] - 10.0).abs() < 1e-9, "{:?}", c.object_rot);
+        c.turn(-20.0);
+        assert!((c.object_rot[2] - 350.0).abs() < 1e-9);
+
+        // Front view: panning right moves the centre left (the model
+        // follows the pointer), panning down moves it up, and a full view
+        // width at 0.7 is 2.1 viewer distances.
+        let mut c = Camera {
+            object_rot: [0.0; 3],
+            ..Camera::default()
+        };
+        c.pan(100.0, 0.0, 100.0, 50.0);
+        let [x, y, z] = c.vpt();
+        assert!((x + 2.1 * 140.0).abs() < 1e-9 && y.abs() < 1e-9 && z.abs() < 1e-9);
+        c.center();
+        c.pan(0.0, 50.0, 100.0, 50.0);
+        assert!((c.vpt()[2] - 2.1 * 140.0).abs() < 1e-9);
+
+        // Top view: screen right is still +x, screen up is +y.
+        let mut c = Camera {
+            object_rot: [90.0, 0.0, 0.0],
+            ..Camera::default()
+        };
+        c.pan(0.0, 10.0, 100.0, 100.0);
+        let [x, y, z] = c.vpt();
+        assert!(x.abs() < 1e-9 && y > 0.0 && z.abs() < 1e-9, "{:?}", c.vpt());
+    }
+
+    #[test]
+    fn zoom_is_a_tenth_per_wheel_notch() {
+        let mut c = Camera::default();
+        c.zoom(120.0);
+        assert!((c.viewer_distance - 126.0).abs() < 1e-9);
+        c.zoom(-120.0);
+        assert!((c.viewer_distance - 140.0).abs() < 1e-9);
+        c.zoom_by(2.0);
+        assert!((c.viewer_distance - 70.0).abs() < 1e-9);
+        c.zoom_by(0.0);
+        c.zoom_by(f64::NAN);
+        assert!((c.viewer_distance - 70.0).abs() < 1e-9);
     }
 }

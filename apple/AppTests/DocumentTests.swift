@@ -34,7 +34,7 @@ private let scad = "org.openscad.scad"
         doc.model.text = "cube(10);"
         doc.renderDocument(nil)
         await doc.renderTask?.value
-        guard case .rendered(let r) = doc.model.report else {
+        guard case .rendered(let r, _) = doc.model.report else {
             Issue.record("expected a render, got \(doc.model.report)")
             return
         }
@@ -48,7 +48,7 @@ private let scad = "org.openscad.scad"
         doc.model.text = "cube(10);\ncube(;\n"
         doc.renderDocument(nil)
         await doc.renderTask?.value
-        guard case .rendered(let r) = doc.model.report else {
+        guard case .rendered(let r, _) = doc.model.report else {
             Issue.record("expected a render, got \(doc.model.report)")
             return
         }
