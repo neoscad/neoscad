@@ -22,6 +22,11 @@ struct Frame {
     edge_color: vec4<f32>,
     background_top: vec4<f32>,
     background_bottom: vec4<f32>,
+    // x: the ambient term, y: the diffuse scale. OpenSCAD's lighting is
+    // 0.2 and 1 (below); a snapshot's headlight uses others. With 0.2 and 1
+    // the expressions below are OpenSCAD's to the bit: multiplying by 1 is
+    // exact and 0.2 is the same f32 either way.
+    shade: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -110,9 +115,11 @@ fn face_vs(v: FaceVertex) -> FlatShaded {
         // GL_NORMALIZE: normals are renormalised after the modelview.
         let n = normalize((frame.normal_matrix * vec4(v.normal, 0.0)).xyz);
         let d = dot(n, frame.light.xyz);
-        let lit = v.color.rgb * 0.2 + v.color.rgb * max(d, 0.0) + v.color.rgb * max(-d, 0.0);
+        let k = frame.shade.y;
+        let lit = v.color.rgb * frame.shade.x + v.color.rgb * max(d, 0.0) * k
+            + v.color.rgb * max(-d, 0.0) * k;
         out.color = vec4(clamp(lit, vec3(0.0), vec3(1.0)), v.color.a);
-        out.shading = 0.2 + abs(d);
+        out.shading = frame.shade.x + abs(d) * k;
     }
     return out;
 }

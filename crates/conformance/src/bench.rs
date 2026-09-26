@@ -42,6 +42,8 @@ struct Config {
     libraries: BTreeMap<String, LibConfig>,
     cold_start: ColdStart,
     eval_only: EvalOnly,
+    #[serde(default)]
+    edit_loop: Option<crate::edit_loop::EditLoop>,
     models: BTreeMap<String, ModelConfig>,
 }
 
@@ -106,12 +108,12 @@ pub struct BenchOptions {
 
 /// One process run.
 #[derive(Debug, Clone, Copy)]
-struct Run {
+pub(crate) struct Run {
     /// Exit code; `None` for a timeout (or death by signal).
-    code: Option<i32>,
-    timed_out: bool,
-    wall_s: f64,
-    cpu_s: f64,
+    pub(crate) code: Option<i32>,
+    pub(crate) timed_out: bool,
+    pub(crate) wall_s: f64,
+    pub(crate) cpu_s: f64,
 }
 
 /// User plus system time of every waited-for child so far.
@@ -138,6 +140,19 @@ fn time_run(
     timeout: Duration,
     stderr_to: &Path,
 ) -> Result<Run, String> {
+    time_run_with(cmd, cwd, env, timeout, stderr_to, false)
+}
+
+/// [`time_run`]; with `allow_server` a running `neoscad serve` (named by
+/// `NEOSCAD_SOCKET` in `env`) may answer, otherwise the run is cold.
+pub(crate) fn time_run_with(
+    cmd: &[String],
+    cwd: &Path,
+    env: &[(&str, &Path)],
+    timeout: Duration,
+    stderr_to: &Path,
+    allow_server: bool,
+) -> Result<Run, String> {
     let err = File::create(stderr_to).map_err(|e| format!("{}: {e}", stderr_to.display()))?;
     let mut c = Command::new(&cmd[0]);
     c.args(&cmd[1..])
@@ -147,6 +162,10 @@ fn time_run(
         .stderr(err)
         .env_remove("NEOSCAD_FONT_DIR")
         .env_remove("OPENSCAD_FONT_PATH");
+    if !allow_server {
+        // Cold runs are cold: never answered by a running server.
+        c.env(crate::geometry::NO_SERVER_VAR, "1");
+    }
     for (k, v) in env {
         c.env(k, v);
     }
@@ -644,7 +663,8 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
         );
     }
     for m in &opts.only {
-        if !cfg.models.contains_key(m) && m != "cold_start" && m != "eval_only" {
+        if !cfg.models.contains_key(m) && m != "cold_start" && m != "eval_only" && m != "edit_loop"
+        {
             return Err(format!("unknown model '{m}'"));
         }
     }
@@ -844,6 +864,27 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
                 );
             }
         }
+    }
+
+    if selected("edit_loop")
+        && let Some(el) = &cfg.edit_loop
+    {
+        let nightly = refs
+            .iter()
+            .find(|(r, _)| r.id == "nightly-manifold")
+            .map(|(r, b)| (b.clone(), r.args.clone()));
+        let ctx_el = crate::edit_loop::Setup {
+            neoscad: &neo_bin,
+            nightly: nightly.as_ref().map(|(b, a)| (b.as_path(), a.as_slice())),
+            work: &work,
+            libpath: &libpath,
+            timeout,
+            runs: opts.runs,
+        };
+        let expand_file = |f: &str| expand(ctx, &cfg, f);
+        let missing = |req: &[String]| missing_library(ctx, &cfg, req);
+        let v = crate::edit_loop::run(el, &ctx_el, &expand_file, &missing)?;
+        extra.insert("edit_loop".into(), v);
     }
 
     // The record.

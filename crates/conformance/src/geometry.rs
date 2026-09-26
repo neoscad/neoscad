@@ -166,6 +166,11 @@ pub enum Result3 {
 /// (`crates/assets` tests this), so the suite runs with the fonts neoscad
 /// ships, and a developer's own setting can't change the results.
 /// OpenSCAD ignores the variable.
+/// Set for every neoscad the harness runs: a `neoscad serve` the user has
+/// running must not answer the harness's exports. Its output should be the
+/// same, but the suite measures the binary under test, in its own process.
+pub const NO_SERVER_VAR: &str = "NEOSCAD_NO_SERVER";
+
 pub const FONT_DIR_VAR: &str = "NEOSCAD_FONT_DIR";
 
 /// The parts of the process environment a case needs from the runner.
@@ -318,6 +323,7 @@ impl GeometryEnv {
         cmd.current_dir(env.work_dir)
             .env("OPENSCAD_FONT_PATH", env.font_path)
             .env_remove(FONT_DIR_VAR)
+            .env(NO_SERVER_VAR, "1")
             .env("OPENSCADPATH", env.library_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null());

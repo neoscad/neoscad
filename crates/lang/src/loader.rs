@@ -12,12 +12,13 @@
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use crate::diag::{DiagCode, Diagnostic, Severity};
 use crate::source::{FileId, SourceMap, Span};
 use crate::syntax::SyntaxKind;
-use crate::syntax::lexer::{Token, directive_path, lex};
+use crate::syntax::lexer::{LexDiag, Token, directive_path, lex};
 
 /// Every file operation the pipeline performs: includes and `use`,
 /// `import()`, `surface()`, `dxf_dim()`, fonts, parameter files and the
@@ -165,6 +166,28 @@ pub struct Loaded {
     pub includes: Vec<(String, String)>,
 }
 
+/// A file read and lexed once, kept by a [`LexCache`]. Its tokens are
+/// tagged with `FileId(0)`; the loader retags them with the id the file
+/// gets in each load.
+#[derive(Debug)]
+pub struct LexedFile {
+    pub text: Arc<[u8]>,
+    pub tokens: Vec<Token>,
+    pub diags: Vec<LexDiag>,
+}
+
+/// Included files a host has already read and lexed, keyed by path and
+/// validated by [`FileSystem::metadata`]. A long-lived host re-parses a
+/// program after every edit to its main file; its includes (a library
+/// such as BOSL2 is thousands of lines of includes) are part of that
+/// parse, because OpenSCAD's includes are textual, but reading and lexing
+/// them again is not needed while they are unchanged.
+pub trait LexCache {
+    /// `path`'s cached text and tokens, if they were cached for `meta`.
+    fn get(&self, path: &Path, meta: &Metadata) -> Option<Arc<LexedFile>>;
+    fn put(&self, path: &Path, meta: Metadata, file: Arc<LexedFile>);
+}
+
 /// Sequence key for a message emitted while scanning token `index`. Parser
 /// messages at the same token use `+1`, so scanner messages come first.
 pub fn seq_for_token(index: u32) -> u64 {
@@ -179,15 +202,28 @@ pub fn load(
     fs: &dyn FileSystem,
     libs: &LibraryPath,
 ) -> Loaded {
+    load_cached(main_path, main_text, fs, libs, None)
+}
+
+/// [`load`], taking included files from `cache` when they are unchanged
+/// and adding the ones it reads. The result is the same as [`load`]'s.
+pub fn load_cached(
+    main_path: PathBuf,
+    main_text: Vec<u8>,
+    fs: &dyn FileSystem,
+    libs: &LibraryPath,
+    cache: Option<&dyn LexCache>,
+) -> Loaded {
     let mut l = Loader {
         fs,
         libs,
+        cache,
         out: Loaded::default(),
         open: Vec::new(),
         last_name: String::new(),
     };
     let main = l.out.sources.add(main_path, main_text);
-    l.splice(main);
+    l.splice(main, None);
     l.out
 }
 
@@ -212,6 +248,7 @@ pub fn load_single(path: PathBuf, text: Vec<u8>) -> Loaded {
 struct Loader<'a> {
     fs: &'a dyn FileSystem,
     libs: &'a LibraryPath,
+    cache: Option<&'a dyn LexCache>,
     out: Loaded,
     /// Full names of the included files currently being read, to stop
     /// circular includes (OpenSCAD's `openfilenames`).
@@ -222,10 +259,21 @@ struct Loader<'a> {
 }
 
 impl Loader<'_> {
-    fn splice(&mut self, file: FileId) {
-        let lexed = lex(&self.out.sources.get(file).text, file);
-        let mut diags = lexed.diags.into_iter().peekable();
-        for (k, tok) in lexed.tokens.into_iter().enumerate() {
+    /// Splice `file`'s tokens into the stream: `pre`'s when it was lexed
+    /// before (retagged with `file`), otherwise lexed now.
+    fn splice(&mut self, file: FileId, pre: Option<Arc<LexedFile>>) {
+        let (tokens, diags): (Vec<Token>, Vec<LexDiag>) = match pre {
+            Some(f) => (
+                f.tokens.iter().map(|t| Token { file, ..*t }).collect(),
+                f.diags.clone(),
+            ),
+            None => {
+                let lexed = lex(&self.out.sources.get(file).text, file);
+                (lexed.tokens, lexed.diags)
+            }
+        };
+        let mut diags = diags.into_iter().peekable();
+        for (k, tok) in tokens.into_iter().enumerate() {
             let global = self.out.tokens.len() as u32;
             while let Some(d) = diags.next_if(|d| d.token as usize == k) {
                 let line = self.out.sources.get(file).line_of(d.line_at);
@@ -289,20 +337,52 @@ impl Loader<'_> {
         };
         let full_name = generic(&full);
         self.out.includes.push((local.clone(), full_name.clone()));
-        let Ok(text) = self.fs.read(&full) else {
-            self.warn(
-                DiagCode::IncludeNotFound,
-                format!("Can't open include file '{local}'."),
-                file,
-                tok,
-                global,
-            );
-            return;
+        let meta = self.cache.and_then(|_| self.fs.metadata(&full));
+        let cached = match (self.cache, &meta) {
+            (Some(c), Some(m)) => c.get(&full, m),
+            _ => None,
+        };
+        let text = match &cached {
+            Some(f) => f.text.to_vec(),
+            None => match self.fs.read(&full) {
+                Ok(t) => t,
+                Err(_) => {
+                    self.warn(
+                        DiagCode::IncludeNotFound,
+                        format!("Can't open include file '{local}'."),
+                        file,
+                        tok,
+                        global,
+                    );
+                    return;
+                }
+            },
         };
         self.last_name.clear();
+        let pre = match (cached, self.cache, meta) {
+            (Some(f), _, _) => f,
+            (None, Some(c), Some(m)) => {
+                // Lexed with `FileId(0)` for the cache; `splice` retags.
+                let lexed = lex(&text, FileId(0));
+                let f = Arc::new(LexedFile {
+                    text: text.as_slice().into(),
+                    tokens: lexed.tokens,
+                    diags: lexed.diags,
+                });
+                c.put(&full, m, f.clone());
+                f
+            }
+            _ => {
+                let id = self.out.sources.add(full, text);
+                self.open.push(full_name);
+                self.splice(id, None);
+                self.open.pop();
+                return;
+            }
+        };
         let id = self.out.sources.add(full, text);
         self.open.push(full_name);
-        self.splice(id);
+        self.splice(id, Some(pre));
         self.open.pop();
     }
 
@@ -420,7 +500,9 @@ fn join_path(dir: &Path, local: &Path) -> PathBuf {
     p
 }
 
-pub(crate) fn generic(p: &Path) -> String {
+/// A path as OpenSCAD's `generic_string()` prints it (`/`-separated),
+/// which is how used libraries are keyed (`deps::Library::path`).
+pub fn generic(p: &Path) -> String {
     let s = p.to_string_lossy();
     if cfg!(windows) {
         s.replace('\\', "/")
@@ -533,6 +615,70 @@ mod tests {
         assert_eq!(
             uses,
             [("", false), ("/p/a.scad", true), ("/p/a.scad", true)]
+        );
+    }
+    /// A cache the tests can inspect.
+    #[derive(Default)]
+    struct Cache(std::sync::Mutex<HashMap<PathBuf, (Metadata, Arc<LexedFile>)>>);
+
+    impl LexCache for Cache {
+        fn get(&self, path: &Path, meta: &Metadata) -> Option<Arc<LexedFile>> {
+            let m = self.0.lock().unwrap();
+            m.get(path)
+                .filter(|(k, _)| k == meta)
+                .map(|(_, f)| f.clone())
+        }
+        fn put(&self, path: &Path, meta: Metadata, file: Arc<LexedFile>) {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf(), (meta, file));
+        }
+    }
+
+    #[test]
+    fn cached_loads_equal_fresh_ones() {
+        let fs = crate::vfs::MemFs::new();
+        fs.insert("/d/a.scad", b"x = 1;\ninclude <b.scad>\n".to_vec());
+        fs.insert("/d/b.scad", b"y = \"\\q\";\n".to_vec());
+        let libs = LibraryPath::default();
+        let main = b"include <a.scad>\ninclude <b.scad>\ncube(x);\n".to_vec();
+        let cache = Cache::default();
+        let fresh = load(PathBuf::from("/d/m.scad"), main.clone(), &fs, &libs);
+        let key = |l: &Loaded| {
+            (
+                l.tokens.clone(),
+                l.diags.clone(),
+                l.sources
+                    .iter()
+                    .map(|(_, f)| (f.path.clone(), f.text.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        for _ in 0..2 {
+            let cached = load_cached(
+                PathBuf::from("/d/m.scad"),
+                main.clone(),
+                &fs,
+                &libs,
+                Some(&cache),
+            );
+            assert_eq!(key(&cached), key(&fresh));
+        }
+        assert_eq!(cache.0.lock().unwrap().len(), 2, "both includes cached");
+        assert!(!fresh.diags.is_empty(), "the undefined escape warns");
+        // A changed file is read again.
+        fs.insert("/d/b.scad", b"y = 2;\n".to_vec());
+        let after = load_cached(
+            PathBuf::from("/d/m.scad"),
+            main.clone(),
+            &fs,
+            &libs,
+            Some(&cache),
+        );
+        assert_eq!(
+            key(&after),
+            key(&load(PathBuf::from("/d/m.scad"), main, &fs, &libs))
         );
     }
 }

@@ -56,6 +56,31 @@
   ],
   "tests": "{BOSL2}/tests"
  },
+ "edit_loop": {
+  "description": "The agent's edit loop: a one-line edit, then a re-render or a snapshot. `serve`: neoscad serve on stdio driven over JSON-RPC (update + render, update + snapshot); `cli_via_serve`: the edited file on disk, then `neoscad FILE -o out.stl` / `neoscad snapshot FILE` as clients of `neoscad serve --socket`; `cli_cold`: the same with no server; `nightly_cold`: the nightly exporting STL and a 1024x1024 --render PNG. Every edit gives the edited line a new value, so the geometry cache never answers a whole model. Best and median of `runs` edits, in ms.",
+  "runs": 10,
+  "cases": {
+   "bosl2": {
+    "description": "A BOSL2 part: rounded cuboid, chamfered cylinder and prismoid; the edit changes the cuboid's height",
+    "source": "include <BOSL2/std.scad>\ncuboid([40,30,12], rounding=2, edges=\"Z\");\nright(35) cyl(h=20, d=10, chamfer=1);\nleft(35) prismoid([20,20], [10,10], h=15);\n",
+    "requires": [
+     "BOSL2"
+    ],
+    "find": "cuboid([40,30,12]",
+    "replace": "cuboid([40,30,{N}]",
+    "start": 12,
+    "step": 0.25
+   },
+   "csg": {
+    "description": "OpenSCAD's examples/Basics/CSG.scad; the edit moves the difference (the third object)",
+    "file": "{REF}/examples/Basics/CSG.scad",
+    "find": "translate([24,0,0])",
+    "replace": "translate([{N},0,0])",
+    "start": 24,
+    "step": 0.25
+   }
+  }
+ },
  "models": {
   "bosl_fractal_tree": {
    "description": "BOSL2 examples/fractal_tree.scad (recursive attach, depth 10)",

@@ -39,7 +39,10 @@ pub mod primitives;
 use std::sync::Arc;
 
 pub use eval::node::{IDENTITY, Matrix};
-pub use evaluate::{Msg, MsgLoc, RenderOptions, Rendered, Renderer, Unsupported};
+pub use evaluate::{
+    CACHE_BUDGET, CacheStats, INTERRUPTED, Msg, MsgLoc, RenderOptions, Rendered, Renderer,
+    Unsupported,
+};
 
 use manifold_geom::ManifoldGeometry;
 use polygon2d::Polygon2d;

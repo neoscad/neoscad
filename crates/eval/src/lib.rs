@@ -57,7 +57,7 @@ use std::sync::atomic::AtomicBool;
 use lang::Program;
 use lang::loader::{FileSystem, StdFs};
 
-pub use message::{Collect, Console, Message, Output};
+pub use message::{Collect, Console, Location, Logged, LoggedHint, Message, Output, excerpt};
 pub use node::Node;
 pub use value::Value;
 

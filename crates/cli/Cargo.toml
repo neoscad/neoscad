@@ -25,8 +25,15 @@ eval = { package = "neoscad-eval", path = "../eval" }
 geom = { package = "neoscad-geom", path = "../geom" }
 io = { package = "neoscad-io", path = "../io" }
 render = { package = "neoscad-render", path = "../render" }
+session = { package = "neoscad-session", path = "../session" }
 serde_json.workspace = true
 text = { package = "neoscad-text", path = "../text" }
+
+# The server's socket: the user id for the default per-user path and the
+# directory's ownership check, through nix's safe wrapper (the workspace
+# forbids unsafe code).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["user"] }
 
 [lints]
 workspace = true

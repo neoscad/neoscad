@@ -76,6 +76,7 @@ fn binary(env: &Env) -> Command {
     cmd.current_dir(&env.work_dir)
         .env("OPENSCAD_FONT_PATH", &env.font_path)
         .env_remove(FONT_DIR_VAR)
+        .env(crate::geometry::NO_SERVER_VAR, "1")
         .env("OPENSCADPATH", &env.library_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null());

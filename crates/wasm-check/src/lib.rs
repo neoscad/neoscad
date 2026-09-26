@@ -118,6 +118,59 @@ pub fn run_with(
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Separates the versions of the document in a session case's source.
+pub const EDIT_MARK: &str = "\n//--edit--\n";
+
+/// The session, as an app or a web worker drives it: `src` holds versions
+/// of `/doc/main.scad` separated by [`EDIT_MARK`]; each is sent as an
+/// edit to the open document and rendered, and the lines report the
+/// messages, the geometry and how much the caches answered. On wasm32 the
+/// session runs every request synchronously on the calling thread.
+pub fn run_session(files: Arc<MemFs>, src: &[u8]) -> String {
+    let base: Arc<dyn FileSystem + Send + Sync> = files;
+    let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(base, LIBRARY_DIR));
+    let mut cfg = session::Config::new(fs, LibraryPath(vec![PathBuf::from(LIBRARY_DIR)]));
+    cfg.work_dir = PathBuf::from(DOC_DIR);
+    cfg.fonts = Arc::new(|_used: &[String]| {
+        let mut db = text::FontDb::new();
+        assets::add_fonts(&mut db);
+        db
+    });
+    let s = session::Session::new(cfg);
+    let scheme = render::ColorScheme::cornfield();
+    let doc = std::path::Path::new("main.scad");
+    let mut out = String::new();
+    let text = String::from_utf8_lossy(src);
+    for (i, version) in text.split(EDIT_MARK).enumerate() {
+        s.update(doc, version.as_bytes().to_vec());
+        let before = s.stats().geometry;
+        let r = match s.render(
+            &session::Run::new("main.scad"),
+            session::Mode::Render,
+            &scheme,
+        ) {
+            Ok(r) => r,
+            Err(c) => {
+                out.push_str(&format!("{c}\n"));
+                continue;
+            }
+        };
+        out.push_str(&String::from_utf8_lossy(&r.log.stderr));
+        let g = r.geometry_json(&scheme.geometry_scheme());
+        let after = s.stats().geometry;
+        out.push_str(&format!(
+            "Session {}: exit {}, volume {:.3}, {} triangles, {} nodes built, {} from the cache\n",
+            i + 1,
+            r.exit_code,
+            g["volume"].as_f64().unwrap_or(0.0),
+            g["triangles"].as_u64().unwrap_or(0),
+            after.misses - before.misses,
+            after.hits - before.hits,
+        ));
+    }
+    out
+}
+
 /// What the renderer would draw, without a GPU: the scene's triangles and
 /// outline segments, and the viewer distance `--viewall` fits (the
 /// default camera's). This runs the renderer's CPU side (scene building,
@@ -199,7 +252,8 @@ pub extern "C" fn add_file(name_len: usize) {
 
 /// Run the input as the main file with `seed` for unseeded `rands()`,
 /// `frame_limit` as the frame budget (0 for the default), and as a preview
-/// when `preview` is not 0.
+/// when `preview` is 1; with `preview` 2, as a session case
+/// ([`run_session`]).
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
@@ -221,7 +275,11 @@ pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
         n => n,
     };
     OUTPUT.lock().expect("output").clear();
-    let out = run_with(files, &src, seed, limit, preview != 0);
+    let out = if preview == 2 {
+        run_session(files, &src)
+    } else {
+        run_with(files, &src, seed, limit, preview != 0)
+    };
     *OUTPUT.lock().expect("output") = out.into_bytes();
 }
 
@@ -304,13 +362,18 @@ mod tests {
             }
             let seed = c["seed"].as_u64().unwrap_or(0) as u32;
             let preview = c["preview"].as_bool().unwrap_or(false);
-            let out = run_with(
-                files,
-                c["src"].as_str().unwrap().as_bytes(),
-                seed,
-                eval::recursion::DEFAULT_FRAME_LIMIT,
-                preview,
-            );
+            let src = c["src"].as_str().unwrap().as_bytes();
+            let out = if c["session"].as_bool().unwrap_or(false) {
+                run_session(files, src)
+            } else {
+                run_with(
+                    files,
+                    src,
+                    seed,
+                    eval::recursion::DEFAULT_FRAME_LIMIT,
+                    preview,
+                )
+            };
             let expect: Vec<&str> = c["expect"]
                 .as_array()
                 .unwrap()

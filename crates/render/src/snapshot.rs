@@ -120,6 +120,10 @@ pub struct Sheet {
     pub header: Vec<String>,
     /// Colour keys shown in the header (diffs).
     pub legend: Vec<([f32; 4], String)>,
+    /// How the panels are lit: [`crate::Lighting::Headlight`] for agents'
+    /// sheets, so faces turned away from OpenSCAD's fixed light stay
+    /// legible.
+    pub lighting: crate::Lighting,
 }
 
 /// Where each panel goes.
@@ -600,7 +604,9 @@ pub async fn draw(
 ) -> Result<crate::Image, crate::offscreen::Error> {
     let bbox = scene.bounding_box();
     let views = sheet.views(bbox, scheme);
-    let images = gpu.render_views(scene, &views, scheme, false).await?;
+    let images = gpu
+        .render_views_lit(scene, &views, scheme, false, sheet.lighting)
+        .await?;
     let cameras: Vec<Camera> = views.iter().map(|(c, _)| *c).collect();
     let bg = scheme.background.0.map(|v| (v * 255.0).round() as u8);
     Ok(sheet.compose(&images, &cameras, bbox, [bg[0], bg[1], bg[2]]))
@@ -646,6 +652,7 @@ mod tests {
             dims: false,
             header: vec![],
             legend: vec![],
+            lighting: crate::Lighting::Headlight,
         };
         let l = s.layout();
         assert_eq!((l.cols, l.rows, l.panel_w, l.panel_h), (2, 2, 512, 490));

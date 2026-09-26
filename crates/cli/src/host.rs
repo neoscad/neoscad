@@ -17,6 +17,7 @@ use lang::loader::{FileSystem, LibraryPath, StdFs};
 const FONT_DIR_VAR: &str = "NEOSCAD_FONT_DIR";
 
 /// The file system and library path of one run.
+#[derive(Clone)]
 pub struct Host {
     pub fs: Arc<dyn FileSystem + Send + Sync>,
     pub libs: LibraryPath,
@@ -88,6 +89,8 @@ impl Host {
     }
 
     /// Where [`Host::fonts`] looks, in order; `--info` lists the same.
+    ///
+    /// (See also [`Host::session_config`].)
     pub fn font_sources(&self) -> Vec<FontSource> {
         let mut out = Vec::new();
         match std::env::var_os(FONT_DIR_VAR) {
@@ -111,6 +114,23 @@ impl Host {
             }
         }
         out
+    }
+}
+
+impl Host {
+    /// A session over this host: its files, library path and fonts, the
+    /// working directory, a monotonic clock for timings and the GPU.
+    /// `seed` is the seed of unseeded `rands()`.
+    pub fn session_config(&self, seed: u32) -> session::Config {
+        let mut cfg = session::Config::new(self.fs.clone(), self.libs.clone());
+        let host = self.clone();
+        cfg.fonts = Arc::new(move |used: &[String]| host.fonts(used.iter()));
+        cfg.work_dir = std::env::current_dir().unwrap_or_default();
+        let t0 = std::time::Instant::now();
+        cfg.clock = Some(Arc::new(move || t0.elapsed().as_secs_f64() * 1000.0));
+        cfg.rng_seed = seed;
+        cfg.gpu = Some(Arc::new(crate::png::offscreen));
+        cfg
     }
 }
 

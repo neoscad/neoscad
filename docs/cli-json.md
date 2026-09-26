@@ -160,6 +160,10 @@ else is the same for the same input.
   geometry; `preview` OpenSCAD's preview (`--preview`); `diff` the
   comparison (`--diff`).
 - `views` and `size`: the panels in order and the sheet's pixel size.
+- `lighting`: `headlight` (the default: one light at the camera, so no
+  visible face is drawn near black) or `openscad` (`--lighting openscad`:
+  OpenSCAD's two fixed lights, as PNG export draws). See
+  `render::Lighting`.
 - `geometry`: the model's rendered geometry, or `null` when it is empty
   or with `--preview` (a preview does not compute the booleans). 3D:
 
@@ -203,7 +207,9 @@ else is the same for the same input.
 - `diagnostics`: `errors`, `warnings` and `echoes` count the lines the
   run logged (`ERROR:`, `WARNING:`, `ECHO:`); `messages` holds the first
   20 errors then the first 20 warnings, and `echo` the first 20 echoes,
-  verbatim. The same lines go to stderr as they are printed.
+  verbatim. `items` holds the same errors and warnings as structured
+  diagnostics (see "Diagnostics" below). The same lines go to stderr as
+  they are printed.
 
 When the model (or the `--diff` model) cannot be loaded or evaluated
 (a syntax error, `--hardwarnings`), no sheet is written and the summary
@@ -224,9 +230,101 @@ Example, `neoscad snapshot cube.scad --format json` for `cube(10);`
 {"diagnostics":{"echo":[],"echoes":0,"errors":0,"messages":[],"warnings":0},"geometry":{"area":600.0,"bbox":{"max":[10.0,10.0,10.0],"min":[0.0,0.0,0.0],"size":[10.0,10.0,10.0]},"components":1,"dimensions":3,"manifold":true,"triangles":12,"vertices":8,"volume":1000.0},"input":"cube.scad","mode":"render","output":"cube-snapshot.png","schema":1,"size":[1024,1024],"timings_ms":{...},"views":["iso","front","top","right"]}
 ```
 
+# `--format json`: a run as one JSON object
+
+`neoscad IN -o OUT --format json` (any output format) prints one JSON
+object describing the run on stdout after it ends, instead of printing
+its messages on stderr (`crates/cli/src/report.rs`). When an output is
+`-` (the data owns stdout) the object goes to stderr. Same contract:
+fields are only added. Keys sorted, compact, a trailing newline.
+
+```json
+{"schema": 1, "command": "export", "input": "model.scad",
+ "outputs": [{"file": "model.stl", "format": "stl"}],
+ "exit_code": 0, "served": false,
+ "counts": {"errors": 0, "warnings": 1, "echoes": 1},
+ "diagnostics": [DIAG, ...], "echo": ["ECHO: ..."], "log": ["..."],
+ "geometry": GEOM|null, "timings_ms": TIMES}
+```
+
+- `outputs`: each `-o`, with the format identifier it was written as.
+- `exit_code`: the process's (it exits with it too).
+- `served`: whether a running `neoscad serve` did the work
+  (`docs/serve-protocol.md`).
+- `diagnostics`: errors, warnings and deprecations in order, as
+  structured diagnostics (below); each error has the `TRACE:` lines that
+  followed it in `trace`.
+- `echo`: `echo()` output as printed. `log`: every plain line (render
+  summary, `Current top level object is empty.`, ...).
+- `geometry`: the rendered geometry of a geometry export (or a
+  `--render` PNG), the snapshot summary's `GEOM` object; `null` for
+  other formats, or when empty.
+- `timings_ms`: `total` for a local run; `parse`, `evaluate`, `geometry`
+  and `total` for a served one.
+
+Usage errors (a bad flag, no `-o`) happen before the run and print their
+usual text with no JSON.
+
+# Diagnostics
+
+Every diagnostic in JSON output (the run object above, the snapshot
+summary's `items`, and the server's results and notifications) has the
+same shape:
+
+```json
+{"code": "unknown-module", "severity": "warning",
+ "message": "Ignoring unknown module 'cub'",
+ "text": "WARNING: Ignoring unknown module 'cub' in file model.scad, line 2",
+ "file": "/abs/model.scad", "line": 2,
+ "span": {"start": {"line": 2, "column": 1}, "end": {"line": 2, "column": 8}},
+ "hints": [{"message": "did you mean 'cube'?"}]}
+```
+
+- `code`: the stable code (`lang::diag::DiagCode::as_str`: `syntax-error`,
+  `unknown-module`, `assertion-failed`, `geometry`, ...); `log` for a
+  line with no code.
+- `severity`: `error`, `warning`, `deprecated` (and `echo`, `trace`,
+  `info` where those appear).
+- `message`: the message alone; `text`: the whole line exactly as
+  OpenSCAD prints it, word for word, which is what to compare with
+  OpenSCAD.
+- `file`, `line`, `span`: present when the diagnostic has a location.
+  `line` is the line OpenSCAD reports (for a syntax error, where the
+  offending token ends); `span` is the precise range, 1-based lines and
+  1-based byte columns, `end` exclusive.
+- `hints`, when there are any: how to fix it. A hint the front end
+  attached may carry `replace` (`{"span", "text"}`), an exact edit.
+  Otherwise hints come from the code: "did you mean" against the names
+  the program and its libraries define and OpenSCAD's builtins for
+  unknown modules, functions and variables, and a short suggestion for
+  syntax errors, missing includes, reassignments, argument mismatches,
+  assertions, recursion and iteration limits and undefined operations.
+
+## Human-readable diagnostics
+
+When stderr is a terminal, each located error and warning is followed by
+its source line and a caret under the span:
+
+```
+WARNING: Ignoring unknown module 'cub' in file model.scad, line 2
+  2 | cub(2);
+    | ^^^^^^^
+```
+
+Only then: OpenSCAD prints no such lines, and whatever compares
+neoscad's output with OpenSCAD's (the conformance harness, scripts,
+agents) reads stderr from a file or a pipe, so it keeps the exact text
+without a flag to remember. `NEOSCAD_DIAGNOSTICS=openscad` turns the
+excerpts off on a terminal, `=rich` on in a pipe. `.echo` exports never
+have them.
+
 ## Changes
 
 - 2026-09-26: first version.
 - Phase 6b: `camera` in the render summary now applies the file's
   `$vp*` (as the nightly does) and, after a PNG, is the camera the image
   was drawn with. Added `neoscad snapshot --format json`.
+- Phase 7a: added `--format json` for every export, the structured
+  diagnostics, `lighting` and `diagnostics.items` in the snapshot
+  summary, and the server's results (`docs/serve-protocol.md`), which
+  use the same `GEOM` and diagnostic objects.

@@ -180,8 +180,9 @@ entry when it is done.
   size: `geom::Rendered` reports only the entry count, so the stderr
   summary leaves out OpenSCAD's `Geometry cache size in bytes` line and
   the two `CGAL ...` lines after it, and the JSON has `bytes` and
-  `max_size` null (`docs/cli-json.md`). Exposing the cache's byte total
-  and budget from `geom` would fill both. (H3)
+  `max_size` null (`docs/cli-json.md`). `geom::Renderer::stats()` now
+  reports the byte total and budget (7a), so both can be filled; the
+  summary's text and JSON have not been changed yet. (H3)
 - `-d` lists dependencies in first-seen order where OpenSCAD uses hash
   order (same set). Files read by `dxf_dim()`/`dxf_cross()` are not
   listed, and `-m` does not run for them: the evaluator reads them
@@ -298,6 +299,57 @@ entry when it is done.
 - OpenSCAD's `PolySetRenderer` draws nothing (and logs an error) for a
   result holding both 3D and 2D parts; `geom` never returns such a
   result, so the case is not handled. (6a)
+
+## Serve and session
+- A one-line edit re-parses the main file together with everything it
+  `include`s, because OpenSCAD's includes are textual (one token stream,
+  one parse): the session only skips reading and lexing unchanged
+  includes (`lang::loader::LexCache`) and re-parses `use`d libraries
+  only when they change. For the `edit_loop` BOSL2 case that parse is
+  about 16 ms of a 33 ms re-render (load 3, parse 5, lower 7, measured
+  with `lang::parse_program_cached`); the rest is whole-program
+  evaluation (16 ms) and a little geometry. Parsing each included file
+  on its own and splicing ASTs (or an incremental parser) is the next
+  step, and needs care with reassignment across includes and with
+  includes that are not whole statements. (7a)
+- The command line's own export path (`crates/cli/src/run.rs`) does not
+  go through `session::Session`; the session re-implements its steps for
+  served exports and shares only the encoder (`session::export`). That
+  served and direct runs agree is checked by
+  `crates/cli/tests/serve.rs` (files and stderr for 3D and 2D formats,
+  warnings, errors, `--format json` and snapshots), not guaranteed by
+  construction (PNG exports: the server renders on the session and draws
+  with the command line's `png` module). Moving `run.rs` onto the
+  session would also bring echo, AST, CSG and param exports, `--animate`
+  and `--hardwarnings` to the server, which run in-process today. (7a)
+- A served run's render summary reports the server's `Geometries in
+  cache` count and times, which differ from a fresh process's. (7a)
+- Cancellation stops the evaluator at the next call or loop iteration
+  and the geometry evaluator before the next node; one long kernel
+  operation (a big boolean, a hull, minkowski) runs to its end. (7a)
+- The release profile has `panic = "abort"`, so a panic while serving a
+  request ends the server (clients fall back to running in-process).
+  Catching panics per request would need unwinding in that binary. (7a)
+- The session keeps up to four renderers (one per colour scheme and
+  font set in use, since geometry keys include neither), each with its
+  own geometry budget, so the worst case is four budgets. (7a)
+- Unix sockets only; a Windows server would need a named pipe. The
+  default socket path must fit `SUN_LEN` (104 bytes on macOS); a long
+  `$TMPDIR` or `$XDG_RUNTIME_DIR` would need `NEOSCAD_SOCKET`. (7a)
+- `progress` notifications report stages, not fractions of the work.
+  (7a)
+- Fix hints are a table by code plus "did you mean" over the program's
+  and OpenSCAD's builtin names (`session::diag`, the builtin list copied
+  from the reference's `Builtins::init` registrations). Scoped names
+  (a module's parameters and local variables) are not candidates. (7a)
+- The snapshot headlight's direction, ambient and diffuse terms were
+  chosen by eye on a bracket (`render::Lighting::Headlight`); no test
+  pins its images. (7a)
+- Cached geometry replays its messages in a warm render only when the
+  pattern of first occurrences below it is the same as when it was
+  computed; otherwise the node is computed again from its children's
+  cached results (`geom::RenderOptions::replay`). Correct, but a cached
+  subtree whose earlier twin was edited away is recomputed once. (7a)
 
 ## WASM
 - Recursion on wasm32 stops at a frame budget calibrated for V8's default

@@ -20,18 +20,27 @@
 //! `--help-export` in [`info`].
 //!
 //! `neoscad snapshot` is neoscad's own subcommand, with its own flags
-//! ([`snapshot`]): a contact sheet of a model for agents.
+//! ([`snapshot`]): a contact sheet of a model for agents. `neoscad serve`
+//! ([`serve`]) keeps a session's caches warm behind JSON-RPC; exports and
+//! snapshots use a running one automatically ([`client`], [`delegate`]).
+//! `--format json` prints one JSON object for the run ([`report`]).
 //!
 //! Cold start is a tracked benchmark (docs/architecture.md, "Agent surface"),
 //! so `main` does nothing before argument parsing and nothing expensive after.
 
+mod client;
+mod delegate;
 mod deps;
 mod export_options;
 mod host;
 mod info;
+mod outcome;
 mod param_json;
 mod png;
+mod report;
+mod rpc;
 mod run;
+mod serve;
 mod snapshot;
 mod summary;
 
@@ -232,17 +241,32 @@ struct Cli {
     /// Print the version and exit.
     #[arg(short = 'v', long)]
     version: bool,
+
+    /// `json`: print one JSON object describing the run on stdout (on
+    /// stderr when an output is '-') instead of the messages
+    /// (docs/cli-json.md).
+    #[arg(long, value_name = "FORMAT")]
+    format: Option<String>,
+
+    /// Export in this process even when a `neoscad serve` is running.
+    #[arg(long = "no-server")]
+    no_server: bool,
 }
 
 fn main() -> ExitCode {
     // `neoscad snapshot ...` is neoscad's own command, with its own flags;
     // everything else is OpenSCAD's command line.
     let mut args = std::env::args_os();
-    if args.nth(1).is_some_and(|a| a == "snapshot") {
-        let rest: Vec<std::ffi::OsString> = args.collect();
-        return ExitCode::from(eval::with_stack(eval::DEFAULT_THREAD_STACK, move || {
-            snapshot::main(rest)
-        }));
+    match args.nth(1) {
+        Some(a) if a == "snapshot" => {
+            let rest: Vec<std::ffi::OsString> = args.collect();
+            return ExitCode::from(snapshot::main(rest));
+        }
+        Some(a) if a == "serve" => {
+            let rest: Vec<std::ffi::OsString> = args.collect();
+            return ExitCode::from(serve::main(rest));
+        }
+        _ => {}
     }
     // OpenSCAD answers every command-line error (an unknown option, a
     // repeated single-valued one such as `--export-format`) with its usage
@@ -264,6 +288,26 @@ fn main() -> ExitCode {
     // default stack allows, and the evaluator's recursion limit assumes
     // this much stack (see `eval::Options::stack_limit`).
     eval::with_stack(eval::DEFAULT_THREAD_STACK, move || run_cli(cli))
+}
+
+/// Whether human-readable diagnostics on stderr get the source line and a
+/// caret under the span.
+///
+/// Only when stderr is a terminal: OpenSCAD prints no such lines, and
+/// everything that compares neoscad's output with OpenSCAD's (the
+/// conformance harness, scripts, agents) captures stderr into a file or a
+/// pipe, so detecting the terminal keeps them on the exact OpenSCAD text
+/// with no flag to remember. A person at a terminal gets the helpful form
+/// by default. `NEOSCAD_DIAGNOSTICS=openscad` forces the exact text on a
+/// terminal too, `=rich` the excerpts in a pipe. Agents that want spans
+/// should use `--format json`, which carries them as data.
+pub fn rich_diagnostics() -> bool {
+    use std::io::IsTerminal;
+    match std::env::var("NEOSCAD_DIAGNOSTICS").as_deref() {
+        Ok("openscad") => false,
+        Ok("rich") => true,
+        _ => std::io::stderr().is_terminal(),
+    }
 }
 
 /// OpenSCAD's experimental features (`Feature.cc`), in its order.
@@ -418,8 +462,43 @@ fn run_cli(cli: Cli) -> ExitCode {
         return ExitCode::from(2);
     }
 
+    let json = match cli.format.as_deref() {
+        None => false,
+        Some("json") => true,
+        Some(f) => {
+            eprintln!("neoscad: unknown --format '{f}' (only json)");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    };
+    if json {
+        report::enable();
+    }
+    let started = std::time::Instant::now();
     deps::set_make_command(cli.make_command.clone());
     let code = export(&cli, &outputs, animate);
+    if json && report::enabled() {
+        let text = report::finish(&report::Run {
+            command: "export",
+            input: &cli.input[0],
+            outputs: outputs
+                .iter()
+                .map(|o| {
+                    let id = resolve_format(o, cli.export_format.as_deref()).map_or("", |f| f.0);
+                    (o.clone(), id.to_string())
+                })
+                .collect(),
+            exit_code: code,
+            timings: serde_json::json!({
+                "total": (started.elapsed().as_secs_f64() * 10000.0).round() / 10.0
+            }),
+            served: false,
+        });
+        if outputs.iter().any(|o| o == "-") {
+            eprint!("{text}");
+        } else {
+            print!("{text}");
+        }
+    }
     // `write_deps` runs after every export, whatever their outcome.
     if let Some(d) = &cli.deps_file
         && !deps::write(d, &outputs)
@@ -493,6 +572,8 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
         animate,
         scheme: &scheme,
         png: png_settings.as_ref(),
+        json: cli.format.as_deref() == Some("json"),
+        rich: rich_diagnostics(),
     };
     if formats.iter().all(|(id, _)| *id == "ast") {
         return run::export_ast(&job);
@@ -561,6 +642,9 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
         // `--preview` wins over it, as it does for images.
         let force =
             cli.preview.is_none() && matches!(cli.render.as_deref(), Some("force" | "cgal"));
+        if let Some(code) = served_export(cli, outputs, &formats, &options, force, &scheme) {
+            return code;
+        }
         return run::export_mesh(&job, &options, &mesh, force);
     }
 
@@ -568,6 +652,72 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
         eprintln!("neoscad: {name} export ({id}) is not implemented yet");
     }
     EXIT_NOT_IMPLEMENTED
+}
+
+/// Run a plain geometry export on a running server (see [`delegate`]):
+/// `Some(exit code)` when the server did it, `None` to run it here.
+fn served_export(
+    cli: &Cli,
+    outputs: &[String],
+    formats: &[(&'static str, &'static str)],
+    options: &eval::Options,
+    force: bool,
+    scheme: &render::ColorScheme,
+) -> Option<u8> {
+    let local_only = cli.input.len() != 1
+        || cli.input[0] == "-"
+        || cli.animate.is_some()
+        || cli.parameter_file.is_some()
+        || cli.parameter_set.is_some()
+        || cli.deps_file.is_some()
+        || cli.make_command.is_some()
+        || cli.summary_file.is_some()
+        || cli.hardwarnings
+        || cli.trace_depth.is_some()
+        || cli.trace_usermodule_parameters.is_some()
+        || cli.check_parameters.is_some()
+        || cli.check_parameter_ranges.is_some()
+        || !(formats
+            .iter()
+            .all(|(id, _)| session::export::Format::from_id(id).is_some())
+            || formats.iter().all(|(id, _)| *id == "png"));
+    if local_only {
+        return None;
+    }
+    let socket = client::available(cli.no_server)?;
+    let params = delegate::params(&delegate::Plan {
+        input: &cli.input[0],
+        outputs,
+        formats: formats.iter().map(|(id, _)| *id).collect(),
+        defines: &cli.define,
+        export_options: &cli.export_option,
+        summary: &cli.summary,
+        scheme: &scheme.name,
+        force,
+        camera: options.camera,
+        quiet: cli.quiet,
+        json: cli.format.as_deref() == Some("json"),
+        rich: rich_diagnostics(),
+        seed: options.rng_seed,
+        png: formats
+            .iter()
+            .all(|(id, _)| *id == "png")
+            .then(|| delegate::PngArgs {
+                camera: cli.camera.as_deref(),
+                viewall: cli.viewall,
+                autocenter: cli.autocenter,
+                projection: cli.projection.as_deref(),
+                imgsize: cli.imgsize.as_deref(),
+                render: cli.render.as_deref(),
+                preview: cli.preview.as_deref(),
+                view: &cli.view,
+                csglimit: cli.csglimit,
+            }),
+    });
+    let outcome = client::run(&socket, "cli.export", params)?;
+    // The server wrote the report: nothing more to print here.
+    report::disable();
+    Some(outcome.emit())
 }
 
 /// `flagConvert` in openscad.cc: the accepted spellings of a boolean flag.

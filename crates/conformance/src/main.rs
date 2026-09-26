@@ -20,6 +20,7 @@ mod bench_chart;
 mod cmake;
 mod ctx;
 mod diff;
+mod edit_loop;
 mod geometry;
 mod grid;
 mod image_compare;

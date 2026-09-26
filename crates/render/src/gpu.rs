@@ -41,7 +41,7 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 const OUTLINE_WIDTH: f32 = 2.0;
 
 /// Bytes of the `Frame` uniform block in `shader.wgsl`.
-const FRAME_SIZE: usize = 4 * 64 + 5 * 16;
+const FRAME_SIZE: usize = 4 * 64 + 6 * 16;
 
 /// A scene's geometry on the GPU.
 #[derive(Debug)]
@@ -144,6 +144,7 @@ pub struct FrameParams {
     background_top: [f32; 4],
     background_bottom: [f32; 4],
     edges: bool,
+    lighting: crate::Lighting,
 }
 
 impl FrameParams {
@@ -168,7 +169,13 @@ impl FrameParams {
             background_top: scheme.background.0,
             background_bottom: scheme.background_stop.0,
             edges,
+            lighting: crate::Lighting::OpenScad,
         }
+    }
+
+    /// The same frame lit another way (OpenSCAD's lighting by default).
+    pub fn with_lighting(self, lighting: crate::Lighting) -> FrameParams {
+        FrameParams { lighting, ..self }
     }
 
     /// The `Frame` uniform block, column-major as WGSL matrices are.
@@ -191,10 +198,10 @@ impl FrameParams {
         }
         mat4(&mut f, &self.clip_from_view);
         mat4(&mut f, &self.clip_from_small_axes);
-        // GL_LIGHT0 at (-1, 1, 1, 0) in eye space: a direction, which
-        // fixed-function lighting normalises.
-        let l = 1.0 / 3.0f64.sqrt();
-        f.extend([-l as f32, l as f32, l as f32, 0.0]);
+        // OpenSCAD's GL_LIGHT0 is at (-1, 1, 1, 0) in eye space: a
+        // direction, which fixed-function lighting normalises.
+        let (l, ambient, diffuse) = self.lighting.params();
+        f.extend([l[0] as f32, l[1] as f32, l[2] as f32, 0.0]);
         f.extend([
             self.width as f32,
             self.height as f32,
@@ -204,6 +211,7 @@ impl FrameParams {
         f.extend(edge_color);
         f.extend(self.background_top);
         f.extend(self.background_bottom);
+        f.extend([ambient as f32, diffuse as f32, 0.0, 0.0]);
         let mut out = [0u8; FRAME_SIZE];
         for (i, x) in f.into_iter().enumerate() {
             out[4 * i..4 * i + 4].copy_from_slice(&x.to_le_bytes());

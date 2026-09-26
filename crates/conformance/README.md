@@ -56,10 +56,22 @@ neoscad is skipped with a note.
   with neoscad's. A volume or area more than 0.1% apart, or a bounding
   box off by more than 0.1% of its size, is flagged (`mesh_flags`, a `!`
   in the table and on the chart), so a fast but wrong result shows.
-- **Extra metrics:** `cold_start` (`cube(1);`, best of 20) and
+- **Extra metrics:** `cold_start` (`cube(1);`, best of 20),
   `eval_only` (BOSL2's test suite, 976 tests from `tests/*.scadtest`,
   each exported to `.echo` by its own process; the summed wall time and
-  the pass count, for neoscad and the nightly).
+  the pass count, for neoscad and the nightly) and `edit_loop`, the
+  agents' headline: for each case in `bench.json` (a BOSL2 part and
+  OpenSCAD's `examples/Basics/CSG.scad`), a one-line edit that gives a
+  line a new value every time, then a re-render or a snapshot, best and
+  median of 10 edits in ms, timed four ways (`src/edit_loop.rs`):
+  `serve` (neoscad serve on stdio driven over JSON-RPC: `update` +
+  `render`, `update` + `snapshot`), `cli_via_serve` (the edited file on
+  disk, then `neoscad FILE -o out.stl` and `neoscad snapshot FILE` as
+  clients of `neoscad serve --socket`; `served_requests` confirms every
+  run went through it), `cli_cold` (the same commands, no server) and
+  `nightly_cold` (the nightly exporting STL and a 1024x1024 `--render`
+  PNG, one view where a snapshot draws four). `--only edit_loop` runs it
+  alone.
 - **Environment:** the working directory is `target/conformance/bench`,
   `OPENSCADPATH` is `.reference` (which holds BOSL2), and
   `NEOSCAD_FONT_DIR`/`OPENSCAD_FONT_PATH` are unset, so each binary uses
@@ -153,6 +165,9 @@ This follows `tests/test_cmdline_tool.py`:
   `NEOSCAD_FONT_DIR`, so neoscad uses the Liberation fonts compiled into
   it, OpenSCAD's `<resources>/fonts`; they are byte-identical to the
   reference checkout's `fonts/`, which a test in `crates/assets` checks.
+  It also sets `NEOSCAD_NO_SERVER=1` for every neoscad it runs (here, in
+  `diff` and in `bench`'s cold runs), so a `neoscad serve` the developer
+  has running never answers for the binary under test.
 - A non-zero exit fails the case.
 - Otherwise the outputs are normalised as in `src/normalize.rs` and must
   match line for line.

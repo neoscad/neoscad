@@ -35,7 +35,9 @@
 //! (`canonical_mesh`), and built hulls are retagged from a block.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use eval::dump::Keys;
@@ -77,12 +79,34 @@ pub struct Msg {
     pub loc: Option<MsgLoc>,
 }
 
-/// A node kind this phase cannot build yet.
+/// A node kind this phase cannot build yet, or a render that
+/// [`RenderOptions::interrupt`] stopped ([`Unsupported::interrupted`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Unsupported {
-    /// The module name as OpenSCAD spells it, e.g. `linear_extrude`.
+    /// The module name as OpenSCAD spells it, e.g. `linear_extrude`, or
+    /// [`INTERRUPTED`].
     pub what: &'static str,
     pub loc: Option<MsgLoc>,
+}
+
+/// [`Unsupported::what`] of a render stopped by its interrupt flag. It is
+/// not a module name, so no caller can mistake it for one.
+pub const INTERRUPTED: &str = "(interrupted)";
+
+impl Unsupported {
+    /// The error a render returns when its interrupt flag was set.
+    pub fn interrupted() -> Unsupported {
+        Unsupported {
+            what: INTERRUPTED,
+            loc: None,
+        }
+    }
+
+    /// Whether this is [`Unsupported::interrupted`] rather than a missing
+    /// feature.
+    pub fn is_interrupted(&self) -> bool {
+        self.what == INTERRUPTED
+    }
 }
 
 /// Rendering settings from the command line.
@@ -101,6 +125,26 @@ pub struct RenderOptions {
     pub work_dir: PathBuf,
     /// The fonts `text()` can use.
     pub fonts: Arc<text::FontDb>,
+    /// Checked before each node is computed: when set, the render stops
+    /// with [`Unsupported::interrupted`]. Results finished before that stay
+    /// cached, so a long-lived host that cancels a stale render keeps what
+    /// it already paid for. A single kernel operation is not interrupted.
+    pub interrupt: Option<Arc<AtomicBool>>,
+    /// What a node answered from the cache prints. `None` is OpenSCAD's
+    /// rule: nothing, as its geometry cache answers silently. That is what
+    /// the command line wants: `--animate` frames share one cache, and the
+    /// nightly prints a subtree's warnings in the first frame only.
+    ///
+    /// `Some(epoch)` makes a warm render print what a fresh one would,
+    /// for a long-lived host whose every render should read like a
+    /// command-line run: a cached node that is the first with its key
+    /// replays the messages its first computation printed. They carry
+    /// source locations, and a node's key ignores where it came from, so
+    /// they are replayed only in a render of the same `epoch` (derived by
+    /// the host from the sources' contents); with another, a cached node
+    /// that had messages is computed again, its children still from the
+    /// cache.
+    pub replay: Option<u64>,
 }
 
 impl Default for RenderOptions {
@@ -111,6 +155,8 @@ impl Default for RenderOptions {
             fs: Arc::new(StdFs),
             work_dir: PathBuf::new(),
             fonts: Arc::new(text::FontDb::new()),
+            interrupt: None,
+            replay: None,
         }
     }
 }
@@ -121,6 +167,7 @@ impl std::fmt::Debug for RenderOptions {
             .field("scheme", &self.scheme)
             .field("force", &self.force)
             .field("work_dir", &self.work_dir)
+            .field("replay", &self.replay)
             .finish()
     }
 }
@@ -144,6 +191,9 @@ type Key = u128;
 #[derive(Debug, Default)]
 pub struct Renderer {
     cache: Mutex<Cache>,
+    /// Lookups answered from the cache, and nodes computed.
+    hits: AtomicU64,
+    misses: AtomicU64,
     /// ID blocks by (subtree key, slot): first ID and size.
     ids: Mutex<HashMap<(Key, u32), (u32, u32)>>,
     /// IDs each block turned out to need beyond [`BLOCK`], so the next tree
@@ -163,12 +213,39 @@ pub struct Renderer {
 /// result and memory grows with the square of the depth.
 #[derive(Debug)]
 struct Cache {
-    entries: HashMap<Key, (Option<Geometry>, usize, u64)>,
+    entries: HashMap<Key, Entry>,
     /// Use stamp -> key, oldest first.
     order: std::collections::BTreeMap<u64, Key>,
     bytes: usize,
     budget: usize,
     clock: u64,
+    evictions: u64,
+}
+
+/// One cached result.
+#[derive(Debug)]
+struct Entry {
+    geom: Option<Geometry>,
+    cost: usize,
+    stamp: u64,
+    replay: Replay,
+}
+
+/// The messages a cached node printed when it was computed as the first
+/// node with its key, so that a later render in which it is again the
+/// first prints them again, as a fresh render would. They are only valid
+/// for renders whose nodes below it are first or not in the same pattern
+/// (a node that is not first prints nothing, so its messages are missing
+/// from its parent's), and whose sources are the same
+/// ([`RenderOptions::replay`]).
+#[derive(Debug, Clone)]
+struct Replay {
+    /// `None` when the node was computed while not first: its messages
+    /// then lack those of its children and cannot be replayed.
+    msgs: Option<Arc<Vec<Msg>>>,
+    /// [`Ctx::pattern`] of the node when it was computed.
+    pattern: u64,
+    epoch: u64,
 }
 
 impl Default for Cache {
@@ -179,39 +256,74 @@ impl Default for Cache {
             bytes: 0,
             budget: CACHE_BUDGET,
             clock: 0,
+            evictions: 0,
         }
     }
 }
 
 /// Default cache budget, the sum of OpenSCAD's two default cache sizes.
-const CACHE_BUDGET: usize = 200 << 20;
+pub const CACHE_BUDGET: usize = 200 << 20;
+
+/// What the geometry cache holds, for hosts that report it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CacheStats {
+    pub entries: usize,
+    /// Estimated memory of the cached geometry.
+    pub bytes: usize,
+    /// The budget: least recently used entries go once `bytes` passes it.
+    pub budget: usize,
+    /// Node lookups answered from the cache, and nodes computed, since the
+    /// renderer was made.
+    pub hits: u64,
+    pub misses: u64,
+    /// Entries dropped to stay within the budget.
+    pub evictions: u64,
+}
 
 impl Cache {
-    fn get(&mut self, k: Key) -> Option<Option<Geometry>> {
-        let (g, _, stamp) = self.entries.get_mut(&k)?;
-        self.order.remove(stamp);
+    fn get(&mut self, k: Key) -> Option<(Option<Geometry>, Replay)> {
+        let e = self.entries.get_mut(&k)?;
+        self.order.remove(&e.stamp);
         self.clock += 1;
-        *stamp = self.clock;
+        e.stamp = self.clock;
         self.order.insert(self.clock, k);
-        Some(g.clone())
+        Some((e.geom.clone(), e.replay.clone()))
     }
 
-    fn insert(&mut self, k: Key, g: Option<Geometry>) {
+    fn insert(&mut self, k: Key, g: Option<Geometry>, mut replay: Replay) {
         let cost = g.as_ref().map_or(0, cost_of) + 64;
-        if let Some((_, c, stamp)) = self.entries.remove(&k) {
-            self.bytes -= c;
-            self.order.remove(&stamp);
+        if let Some(old) = self.entries.remove(&k) {
+            self.bytes -= old.cost;
+            self.order.remove(&old.stamp);
+            // Two threads can compute the same key in one render, only one
+            // of them as the first node; keep the messages that one found.
+            if replay.msgs.is_none() && old.replay.msgs.is_some() {
+                replay = old.replay;
+            }
         }
         self.clock += 1;
-        self.entries.insert(k, (g, cost, self.clock));
+        self.entries.insert(
+            k,
+            Entry {
+                geom: g,
+                cost,
+                stamp: self.clock,
+                replay,
+            },
+        );
         self.order.insert(self.clock, k);
         self.bytes += cost;
+        self.shrink();
+    }
+
+    fn shrink(&mut self) {
         while self.bytes > self.budget && self.entries.len() > 1 {
             let Some((_, old)) = self.order.pop_first() else {
                 break;
             };
-            if let Some((_, c, _)) = self.entries.remove(&old) {
-                self.bytes -= c;
+            if let Some(e) = self.entries.remove(&old) {
+                self.bytes -= e.cost;
+                self.evictions += 1;
             }
         }
     }
@@ -328,6 +440,11 @@ struct Ctx<'a> {
     /// Node index → this is the first node with its key in tree order, so
     /// its messages are printed (later copies hit OpenSCAD's cache).
     first: Vec<bool>,
+    /// Node index → a hash of the `first` flags of its subtree in tree
+    /// order. A node's messages include those of its first descendants
+    /// only, so cached messages are replayed only under the same pattern
+    /// (see [`Replay`]).
+    pattern: Vec<u64>,
     /// ID blocks by (subtree key, slot): slot `i` for the conversion of
     /// child `i`, [`OWN`] for the node's own use (colouring a solid).
     blocks: HashMap<(Key, u32), (u32, u32)>,
@@ -359,6 +476,34 @@ fn warn(n: &Node, text: &str) -> Msg {
 impl Renderer {
     pub fn new() -> Renderer {
         Renderer::default()
+    }
+
+    /// A renderer whose geometry cache holds about `bytes` (estimated)
+    /// before it evicts the least recently used entries.
+    pub fn with_budget(bytes: usize) -> Renderer {
+        let r = Renderer::default();
+        r.cache.lock().expect("cache").budget = bytes;
+        r
+    }
+
+    /// Change the cache budget, evicting at once if it is now over.
+    pub fn set_budget(&self, bytes: usize) {
+        let mut c = self.cache.lock().expect("cache");
+        c.budget = bytes;
+        c.shrink();
+    }
+
+    /// The cache's size, budget and counters.
+    pub fn stats(&self) -> CacheStats {
+        let c = self.cache.lock().expect("cache");
+        CacheStats {
+            entries: c.entries.len(),
+            bytes: c.bytes,
+            budget: c.budget,
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            evictions: c.evictions,
+        }
     }
 
     /// Render `top` (the root, or the node a `!` selected), whose keys are
@@ -560,6 +705,7 @@ impl Renderer {
             opts,
             hashes: vec![0; len],
             first: vec![false; len],
+            pattern: vec![0; len],
             blocks: HashMap::new(),
             overflow: Mutex::new(HashMap::new()),
         };
@@ -597,12 +743,34 @@ impl Renderer {
                 stack.extend(n.children.iter().rev().map(|c| (c, Some((h, first)))));
             }
         }
+        fn pattern(n: &Node, first: &[bool], out: &mut [u64], done: &mut [bool]) -> u64 {
+            if done[n.index] {
+                return out[n.index];
+            }
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            first[n.index].hash(&mut h);
+            for c in &n.children {
+                pattern(c, first, out, done).hash(&mut h);
+            }
+            out[n.index] = h.finish();
+            done[n.index] = true;
+            out[n.index]
+        }
+        let mut done = vec![false; len];
+        for t in tops {
+            pattern(t, &ctx.first, &mut ctx.pattern, &mut done);
+        }
         ctx
     }
 
-    /// Forget every cached geometry.
+    /// Forget every cached geometry (the budget stays).
     pub fn clear(&self) {
-        *self.cache.lock().expect("cache") = Cache::default();
+        let mut c = self.cache.lock().expect("cache");
+        let budget = c.budget;
+        *c = Cache {
+            budget,
+            ..Cache::default()
+        };
     }
 }
 
@@ -621,21 +789,57 @@ impl Ctx<'_> {
     /// Evaluate one node, from the cache when possible.
     fn node(&self, n: &Node) -> Result<Out, Unsupported> {
         let h = self.hashes[n.index];
-        if let Some(g) = self.r.cache.lock().expect("cache").get(h) {
-            return Ok(Out {
-                geom: g,
-                msgs: Vec::new(),
-            });
+        let first = self.first[n.index];
+        let pattern = self.pattern[n.index];
+        let cached = self.r.cache.lock().expect("cache").get(h);
+        if let Some((geom, replay)) = cached {
+            if !first || self.opts.replay.is_none() {
+                // A later copy, or a host that keeps OpenSCAD's rule: the
+                // cache answers silently.
+                self.r.hits.fetch_add(1, Ordering::Relaxed);
+                return Ok(Out {
+                    geom,
+                    msgs: Vec::new(),
+                });
+            }
+            if let Some(msgs) = replay.msgs
+                && replay.pattern == pattern
+                && (msgs.is_empty() || Some(replay.epoch) == self.opts.replay)
+            {
+                self.r.hits.fetch_add(1, Ordering::Relaxed);
+                return Ok(Out {
+                    geom,
+                    msgs: msgs.to_vec(),
+                });
+            }
+            // The messages a fresh render would print here are not known:
+            // compute the node again, from its children's cached results.
         }
+        if self
+            .opts
+            .interrupt
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+        {
+            return Err(Unsupported::interrupted());
+        }
+        self.r.misses.fetch_add(1, Ordering::Relaxed);
         let mut out = self.compute(n)?;
-        if !self.first[n.index] {
+        let msgs = if first {
+            Some(Arc::new(out.msgs.clone()))
+        } else {
             out.msgs.clear();
-        }
-        self.r
-            .cache
-            .lock()
-            .expect("cache")
-            .insert(h, out.geom.clone());
+            None
+        };
+        self.r.cache.lock().expect("cache").insert(
+            h,
+            out.geom.clone(),
+            Replay {
+                msgs,
+                pattern,
+                epoch: self.opts.replay.unwrap_or(0),
+            },
+        );
         Ok(out)
     }
 

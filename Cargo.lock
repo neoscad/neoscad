@@ -720,7 +720,9 @@ dependencies = [
  "neoscad-io",
  "neoscad-lang",
  "neoscad-render",
+ "neoscad-session",
  "neoscad-text",
+ "nix",
  "png",
  "serde_json",
 ]
@@ -793,6 +795,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "neoscad-session"
+version = "0.1.0"
+dependencies = [
+ "neoscad-eval",
+ "neoscad-geom",
+ "neoscad-io",
+ "neoscad-lang",
+ "neoscad-render",
+ "neoscad-text",
+ "serde_json",
+]
+
+[[package]]
 name = "neoscad-text"
 version = "0.1.0"
 dependencies = [
@@ -810,6 +825,7 @@ dependencies = [
  "neoscad-geom",
  "neoscad-lang",
  "neoscad-render",
+ "neoscad-session",
  "neoscad-text",
  "serde_json",
 ]

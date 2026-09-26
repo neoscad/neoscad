@@ -590,6 +590,7 @@ impl Env {
         cmd.current_dir(&self.work_dir)
             .env("OPENSCAD_FONT_PATH", &self.font_path)
             .env_remove(crate::geometry::FONT_DIR_VAR)
+            .env(crate::geometry::NO_SERVER_VAR, "1")
             .env("OPENSCADPATH", &self.library_path);
         if c.stdio {
             let stdin = File::open(input).map_err(|e| e.to_string())?;

@@ -77,8 +77,24 @@ pub fn parse_program(
     fs: &dyn FileSystem,
     libs: &LibraryPath,
 ) -> Program {
+    parse_program_cached(path, text, fs, libs, None)
+}
+
+/// [`parse_program`], reading and lexing included files through `cache`
+/// ([`loader::LexCache`]). The program is the same.
+pub fn parse_program_cached(
+    path: PathBuf,
+    text: Vec<u8>,
+    fs: &dyn FileSystem,
+    libs: &LibraryPath,
+    cache: Option<&dyn loader::LexCache>,
+) -> Program {
     let main = path.clone();
-    finish(loader::load(path, text, fs, libs), &main, true)
+    finish(
+        loader::load_cached(path, text, fs, libs, cache),
+        &main,
+        true,
+    )
 }
 
 /// Parse a `use`d library the way `SourceFileCache` does: like a program,
@@ -91,7 +107,23 @@ pub fn parse_library(
     fs: &dyn FileSystem,
     libs: &LibraryPath,
 ) -> Program {
-    finish(loader::load(path, text, fs, libs), main, false)
+    parse_library_cached(path, text, main, fs, libs, None)
+}
+
+/// [`parse_library`] with a [`loader::LexCache`].
+pub fn parse_library_cached(
+    path: PathBuf,
+    text: Vec<u8>,
+    main: &Path,
+    fs: &dyn FileSystem,
+    libs: &LibraryPath,
+    cache: Option<&dyn loader::LexCache>,
+) -> Program {
+    finish(
+        loader::load_cached(path, text, fs, libs, cache),
+        main,
+        false,
+    )
 }
 
 /// Parse one file without following includes (for editors and formatters).

@@ -23,6 +23,8 @@ lang = { package = "neoscad-lang", path = "../lang" }
 # so it runs the renderer's CPU side only. `scripts/wasm-check.sh` builds
 # the GPU side for wasm32 separately.
 render = { package = "neoscad-render", path = "../render", default-features = false }
+# The session every client uses, without the GPU (as `render` above).
+session = { package = "neoscad-session", path = "../session", default-features = false }
 text = { package = "neoscad-text", path = "../text" }
 
 [dev-dependencies]

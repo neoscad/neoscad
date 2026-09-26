@@ -31,18 +31,24 @@ Library choices were checked in `docs/audits/phase0.md`.
 `lang` (lexer, parser, CST/AST, diagnostics) · `eval` (values, builtins,
 modules → CSG tree) · `geom` (kernels, extrude, hull, minkowski, offset) ·
 `text` (fonts, shaping, outlines) · `io` (import/export; sits below `eval` and `geom`) · `render` (wgpu) · `cli` (the `neoscad`
-binary; accepts OpenSCAD's CLI flags so OpenSCAD's tests can drive it) ·
-`serve` (long-lived process holding caches; the one API every client uses) ·
-`lsp` · `mcp` · `wasm` (wasm-bindgen package) · `conformance` (test harness).
+binary; accepts OpenSCAD's CLI flags so OpenSCAD's tests can drive it,
+and hosts `neoscad serve`) · `session` (the long-lived core holding
+documents and warm caches; the one API every client uses) · `lsp` ·
+`mcp` · `wasm` (wasm-bindgen package) · `conformance` (test harness).
 
 Rule: no rendering or app logic lives in a UI layer. The renderer is Rust;
-the app core API is the `serve` API.
+the app core API is the `session` API, which `neoscad serve` exposes as
+JSON-RPC (`docs/serve-protocol.md`).
 
 ## Agent surface
 
 - **Fast one-shot CLI.** No GUI toolkit; cold start targets milliseconds.
 - **`neoscad serve`** keeps the geometry cache warm so a one-line edit
   re-renders in milliseconds. The CLI, GUI and MCP server are its clients.
+  Implemented in 7a: `crates/session` (documents, parse and geometry
+  caches with budgets, cancellation) behind JSON-RPC over stdio or a
+  per-user Unix socket (`docs/serve-protocol.md`); the command line's
+  exports and snapshots use a running server automatically.
 - **`--format json` everywhere:** diagnostics with spans and stable codes,
   echo output, timings, geometry stats (volume, bbox, manifold, triangle
   count, component count). Terse by default — never an unrequested mesh dump.
@@ -51,7 +57,10 @@ the app core API is the `serve` API.
   scale grid, axes and optional dimensions; can highlight parts or show a
   diff against a previous version. Implemented in 6b: `render::snapshot`
   draws the sheet, the CLI adds `--diff` (real booleans) and a JSON
-  summary (`docs/cli-json.md`).
+  summary (`docs/cli-json.md`). Since 7a the sheet lives in
+  `session::snapshot` and is lit by a camera-relative headlight
+  (`render::Lighting`), so faces turned away from OpenSCAD's fixed light
+  stay legible; PNG export keeps OpenSCAD's lighting.
 - **`neoscad check`** (manifold, minimum wall, overhangs, floating or
   intersecting parts), **`measure`** (bbox, distances, cross-sections),
   **`test`** (assert-based model tests), **`fmt`**, **`docs <builtin>`**.
@@ -161,9 +170,15 @@ ffmpeg.
    PNG export. 6b: previews (OpenCSG from real booleans on the CSG
    products, throwntogether, `%`/`#`), view options and `neoscad
    snapshot`.
-7. **`serve`, JSON output, MCP.**
+7. **`serve`, JSON output, MCP.** 7a (done): `crates/session`,
+   `neoscad serve`, `--format json` everywhere, incremental re-render,
+   snapshot lighting and the `edit_loop` benchmark. 7b: `check`,
+   `measure`, `test`, `fmt`, `docs`, `part()`. 7c: the MCP server and an
+   agent-loop eval.
 8. **macOS app.**
-9. **WASM web app.**
+9. **WASM web app** (deferred by the owner, 2026-09-26). The library crates
+   stay WASM-compatible, checked by `scripts/wasm-check.sh`, so it can be
+   picked up later.
 
 The agent CLI (phases 1–7) comes before any GUI, because the conformance
 harness drives it anyway.

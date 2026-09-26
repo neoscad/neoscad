@@ -90,6 +90,105 @@ pub struct Console<W: Write> {
     /// of the key: a file's parser errors print relative to the working
     /// directory and its warnings relative to the main file's directory.
     paths: Vec<((usize, u32, PathBuf), String)>,
+    /// Every printed line with its tool view, when recording
+    /// ([`Console::record`]).
+    records: Option<Vec<Logged>>,
+    /// Follow each located diagnostic with its source line and a caret
+    /// under the span ([`Console::rich`]).
+    rich: bool,
+}
+
+/// A line the console printed, with the tool view of it: what
+/// `--format json` and the server report. `text` is the OpenSCAD line
+/// exactly as printed; the rest is structure a tool can use.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Logged {
+    /// `None` for a plain line (OpenSCAD's `message_group::NONE`).
+    pub severity: Option<Severity>,
+    /// `None` for a plain line.
+    pub code: Option<DiagCode>,
+    /// The line as printed, without the newline (lossy UTF-8).
+    pub text: String,
+    /// The message alone: no severity prefix, no location.
+    pub message: String,
+    pub location: Option<Location>,
+    pub hints: Vec<LoggedHint>,
+}
+
+/// Where a diagnostic points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Location {
+    /// The file as loaded (absolute).
+    pub file: PathBuf,
+    /// The line OpenSCAD reports, which is not always the span's first
+    /// line (a syntax error reports where the offending token ends).
+    pub line: u32,
+    /// The span: 1-based line and 1-based byte column of its start, and of
+    /// its end (exclusive).
+    pub start: (u32, u32),
+    pub end: (u32, u32),
+}
+
+/// A fix hint: what to do, and optionally the exact replacement text for
+/// a range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggedHint {
+    pub message: String,
+    pub replacement: Option<(Location, String)>,
+}
+
+fn location(sources: &SourceMap, span: Span, line: u32) -> Location {
+    let f = sources.get(span.file);
+    Location {
+        file: f.path.clone(),
+        line,
+        start: f.line_col(span.start),
+        end: f.line_col(span.end.max(span.start)),
+    }
+}
+
+fn logged_hints(d: &Diagnostic, sources: &SourceMap) -> Vec<LoggedHint> {
+    d.hints
+        .iter()
+        .map(|h| LoggedHint {
+            message: h.message.clone(),
+            replacement: h.replacement.as_ref().map(|(sp, t)| {
+                let line = sources.get(sp.file).line_of(sp.start);
+                (location(sources, *sp, line), t.clone())
+            }),
+        })
+        .collect()
+}
+
+/// The source line of `span`'s start with a caret line under the span
+/// (clamped to that line), for a human reading a terminal:
+///
+/// ```text
+///     3 | cube(10) sphere(2);
+///       |          ^^^^^^
+/// ```
+pub fn excerpt(sources: &SourceMap, span: Span) -> String {
+    let f = sources.get(span.file);
+    let text = &f.text;
+    let (line, col) = f.line_col(span.start.min(text.len() as u32));
+    let start = (span.start - (col - 1)) as usize;
+    let end = text[start..]
+        .iter()
+        .position(|&b| b == b'\n' || b == 0x03)
+        .map_or(text.len(), |p| start + p);
+    let src = String::from_utf8_lossy(&text[start..end]).replace('\t', " ");
+    let src = src.trim_end_matches('\r');
+    let from = (col - 1) as usize;
+    let upto =
+        (span.end as usize).clamp(span.start as usize + 1, end.max(start + from + 1)) - start;
+    let width = upto.saturating_sub(from).max(1);
+    let num = line.to_string();
+    let pad = " ".repeat(num.len());
+    format!(
+        "  {num} | {src}\n  {pad} | {}{}",
+        " ".repeat(from.min(src.len())),
+        "^".repeat(width)
+    )
 }
 
 impl<W: Write> Console<W> {
@@ -100,7 +199,35 @@ impl<W: Write> Console<W> {
             last: VecDeque::with_capacity(5),
             main_dir,
             paths: Vec::new(),
+            records: None,
+            rich: false,
         }
+    }
+
+    /// Keep every printed line with its tool view ([`Logged`]), to be
+    /// collected with [`Console::take_records`]. Lines the filters drop
+    /// (`--quiet`, repeats) are not kept, so the records are exactly what
+    /// was printed.
+    pub fn record(mut self, on: bool) -> Self {
+        self.records = on.then(Vec::new);
+        self
+    }
+
+    /// Print the source line and a caret under the span after each
+    /// diagnostic that has one. Off by default: OpenSCAD prints no such
+    /// lines, and the conformance suite compares the output word for
+    /// word, so only a host that knows a human is reading turns it on.
+    pub fn rich(mut self, on: bool) -> Self {
+        self.rich = on;
+        self
+    }
+
+    /// The lines recorded so far (see [`Console::record`]).
+    pub fn take_records(&mut self) -> Vec<Logged> {
+        self.records
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     pub fn into_inner(self) -> W {
@@ -110,13 +237,63 @@ impl<W: Write> Console<W> {
     /// Print one line with OpenSCAD's filtering. `severity` is `None` for
     /// plain output (OpenSCAD's `message_group::NONE`).
     pub fn print(&mut self, severity: Option<Severity>, line: &[u8]) {
+        if self.emit(severity, line)
+            && let Some(r) = &mut self.records
+        {
+            let text = String::from_utf8_lossy(line).into_owned();
+            let (code, message) = match severity {
+                Some(sev) => {
+                    let label = format!("{}: ", sev.openscad_label());
+                    let code = match sev {
+                        Severity::Echo => DiagCode::Echo,
+                        Severity::Trace => DiagCode::Trace,
+                        _ => DiagCode::Evaluation,
+                    };
+                    (
+                        Some(code),
+                        text.strip_prefix(&label).unwrap_or(&text).to_string(),
+                    )
+                }
+                None => (None, text.clone()),
+            };
+            r.push(Logged {
+                severity,
+                code,
+                text,
+                message,
+                location: None,
+                hints: Vec::new(),
+            });
+        }
+    }
+
+    /// Print a line past the filters (`--quiet` and repeats), as the
+    /// command line prints its own `eprintln!` lines; recorded as plain.
+    pub fn print_unfiltered(&mut self, line: &[u8]) {
+        let _ = self.out.write_all(line);
+        let _ = self.out.write_all(b"\n");
+        if let Some(r) = &mut self.records {
+            let text = String::from_utf8_lossy(line).into_owned();
+            r.push(Logged {
+                severity: None,
+                code: None,
+                message: text.clone(),
+                text,
+                location: None,
+                hints: Vec::new(),
+            });
+        }
+    }
+
+    /// OpenSCAD's filters, then the line; whether it was printed.
+    fn emit(&mut self, severity: Option<Severity>, line: &[u8]) -> bool {
         let repeatable = matches!(
             severity,
             Some(Severity::Warning | Severity::Error | Severity::Trace)
         );
         if repeatable {
             if self.last.len() == 5 && self.last.iter().all(|l| l == line) {
-                return;
+                return false;
             }
             if self.last.len() == 5 {
                 self.last.pop_front();
@@ -124,10 +301,34 @@ impl<W: Write> Console<W> {
             self.last.push_back(line.to_vec());
         }
         if self.quiet && severity != Some(Severity::Error) {
-            return;
+            return false;
         }
         let _ = self.out.write_all(line);
         let _ = self.out.write_all(b"\n");
+        true
+    }
+
+    /// After a located diagnostic was printed: its record, and in rich
+    /// mode its excerpt. Trace lines point at call sites up the stack; an
+    /// excerpt under each would bury the error, so they get none.
+    fn located(&mut self, d: &Diagnostic, text: &[u8], message: String, sources: &SourceMap) {
+        if self.rich
+            && let Some(span) = d.span
+            && d.severity != Severity::Trace
+            && d.severity != Severity::Echo
+        {
+            let _ = writeln!(self.out, "{}", excerpt(sources, span));
+        }
+        if let Some(r) = &mut self.records {
+            r.push(Logged {
+                severity: Some(d.severity),
+                code: Some(d.code),
+                text: String::from_utf8_lossy(text).into_owned(),
+                message,
+                location: d.span.map(|sp| location(sources, sp, d.line)),
+                hints: logged_hints(d, sources),
+            });
+        }
     }
 
     fn path_of(&mut self, sources: &SourceMap, span: Span, base: &Path) -> String {
@@ -158,7 +359,9 @@ impl<W: Write> Console<W> {
             let p = self.path_of(sources, span, &base);
             line.extend_from_slice(format!(" in file {}, line {}", p, d.line).as_bytes());
         }
-        self.print(Some(d.severity), &line);
+        if self.emit(Some(d.severity), &line) {
+            self.located(d, &line, d.message.clone(), sources);
+        }
     }
 }
 
@@ -173,7 +376,24 @@ impl<W: Write> Output for Console<W> {
             let p = self.path_of(sources, span, &base);
             line.extend_from_slice(format!(" in file {}, line {}", p, m.diag.line).as_bytes());
         }
-        self.print(Some(m.diag.severity), &line);
+        if self.emit(Some(m.diag.severity), &line) {
+            let message = String::from_utf8_lossy(m.text).into_owned();
+            match m.sources {
+                Some(sources) => self.located(&m.diag, &line, message, sources),
+                None => {
+                    if let Some(r) = &mut self.records {
+                        r.push(Logged {
+                            severity: Some(m.diag.severity),
+                            code: Some(m.diag.code),
+                            text: String::from_utf8_lossy(&line).into_owned(),
+                            message,
+                            location: None,
+                            hints: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 

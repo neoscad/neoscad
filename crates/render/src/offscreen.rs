@@ -170,6 +170,19 @@ impl Offscreen {
         scheme: &ColorScheme,
         edges: bool,
     ) -> Result<Vec<Image>, Error> {
+        self.render_views_lit(scene, views, scheme, edges, crate::Lighting::OpenScad)
+            .await
+    }
+
+    /// [`Offscreen::render_views`] with another [`crate::Lighting`].
+    pub async fn render_views_lit(
+        &self,
+        scene: &Scene,
+        views: &[(Camera, Overlay)],
+        scheme: &ColorScheme,
+        edges: bool,
+        lighting: crate::Lighting,
+    ) -> Result<Vec<Image>, Error> {
         let buffers =
             SceneBuffers::upload(&self.device, scene).map_err(|t| Error::SceneTooLarge {
                 bytes: t.bytes,
@@ -177,7 +190,10 @@ impl Offscreen {
             })?;
         let mut out = Vec::with_capacity(views.len());
         for (camera, overlay) in views {
-            out.push(self.draw(&buffers, camera, scheme, overlay, edges).await?);
+            out.push(
+                self.draw(&buffers, camera, scheme, overlay, edges, lighting)
+                    .await?,
+            );
         }
         Ok(out)
     }
@@ -189,6 +205,7 @@ impl Offscreen {
         scheme: &ColorScheme,
         overlay: &Overlay,
         edges: bool,
+        lighting: crate::Lighting,
     ) -> Result<Image, Error> {
         let (width, height) = (camera.pixel_width, camera.pixel_height);
         let max = self.device.limits().max_texture_dimension_2d;
@@ -222,7 +239,7 @@ impl Offscreen {
             DEPTH_FORMAT,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
         );
-        let frame = FrameParams::new(camera, scheme, edges);
+        let frame = FrameParams::new(camera, scheme, edges).with_lighting(lighting);
 
         // Rows of a texture copy are padded to 256 bytes.
         let row = 4 * width;

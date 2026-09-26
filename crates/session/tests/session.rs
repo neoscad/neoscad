@@ -1,0 +1,246 @@
+//! The session as a long-lived host uses it: warm renders match cold
+//! ones, edits on disk invalidate what they must, and a stale request
+//! stops when a newer one supersedes it.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use lang::loader::LibraryPath;
+use lang::vfs::MemFs;
+use session::{Cancelled, Config, Mode, Run, Session, Stage};
+
+fn session(fs: &Arc<MemFs>) -> Session {
+    let mut cfg = Config::new(fs.clone(), LibraryPath(vec![PathBuf::from("/lib")]));
+    cfg.work_dir = PathBuf::from("/doc");
+    Session::new(cfg)
+}
+
+fn volume(s: &Session, input: &str) -> f64 {
+    let r = s
+        .render(
+            &Run::new(input),
+            Mode::Render,
+            &render::ColorScheme::cornfield(),
+        )
+        .expect("not cancelled");
+    assert_eq!(r.exit_code, 0, "{}", String::from_utf8_lossy(&r.log.stderr));
+    let g = r.geometry_json(&render::ColorScheme::cornfield().geometry_scheme());
+    g["volume"].as_f64().expect("a 3D result")
+}
+
+#[test]
+fn a_changed_include_use_or_import_is_read_again() {
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/main.scad",
+        b"include <part.scad>\nuse <lib.scad>\npart(); libcube(); translate([10, 0, 0]) import(\"tetra.off\");\n".to_vec(),
+    );
+    fs.insert("/doc/part.scad", b"module part() cube(2);\n".to_vec());
+    fs.insert(
+        "/lib/lib.scad",
+        b"module libcube() translate([5,0,0]) cube(1);\n".to_vec(),
+    );
+    let tetra = |s: f64| {
+        format!(
+            "OFF\n4 4 0\n0 0 {s}\n{s} 0 0\n0 {s} 0\n0 0 0\n3 0 1 2\n3 0 3 1\n3 0 2 3\n3 1 3 2\n"
+        )
+    };
+    fs.insert("/doc/tetra.off", tetra(1.0).into_bytes());
+    let s = session(&fs);
+    let v0 = volume(&s, "main.scad");
+    assert!((v0 - (8.0 + 1.0 + 1.0 / 6.0)).abs() < 1e-6, "{v0}");
+    // Warm and unchanged: the parse and the geometry come from the caches.
+    let before = s.stats();
+    assert_eq!(volume(&s, "main.scad"), v0);
+    let after = s.stats();
+    assert!(after.parse.hits > before.parse.hits, "{after:?}");
+    assert_eq!(after.geometry.misses, before.geometry.misses, "{after:?}");
+    // Each file changed on disk: the result follows, as a cold session's.
+    fs.insert("/doc/part.scad", b"module part() cube(3);\n".to_vec());
+    assert!((volume(&s, "main.scad") - (27.0 + 1.0 + 1.0 / 6.0)).abs() < 1e-6);
+    fs.insert(
+        "/lib/lib.scad",
+        b"module libcube() translate([5,0,0]) cube(2);\n".to_vec(),
+    );
+    assert!((volume(&s, "main.scad") - (27.0 + 8.0 + 1.0 / 6.0)).abs() < 1e-6);
+    fs.insert("/doc/tetra.off", tetra(2.0).into_bytes());
+    let v = volume(&s, "main.scad");
+    assert!((v - (27.0 + 8.0 + 8.0 / 6.0)).abs() < 1e-6, "{v}");
+    assert_eq!(v, volume(&session(&fs), "main.scad"));
+}
+
+#[test]
+fn a_missing_include_is_found_once_it_exists() {
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/main.scad",
+        b"include <later.scad>\ncube(1);\n".to_vec(),
+    );
+    let s = session(&fs);
+    let r = s.evaluate(&Run::new("main.scad"), false).unwrap();
+    assert_eq!(r.log.diagnostics_json()[0]["code"], "include-not-found");
+    fs.insert("/doc/later.scad", b"echo(\"here\");\n".to_vec());
+    let r = s.evaluate(&Run::new("main.scad"), false).unwrap();
+    assert!(r.log.diagnostics_json().is_empty());
+    assert_eq!(r.log.echo(), ["ECHO: \"here\""]);
+}
+
+#[test]
+fn unsaved_buffers_are_what_every_read_sees() {
+    let fs = Arc::new(MemFs::new());
+    fs.insert("/doc/main.scad", b"include <part.scad>\npart();\n".to_vec());
+    fs.insert("/doc/part.scad", b"module part() cube(1);\n".to_vec());
+    let s = session(&fs);
+    assert_eq!(volume(&s, "main.scad"), 1.0);
+    // An editor's unsaved change to the included file.
+    s.update(Path::new("part.scad"), b"module part() cube(2);\n".to_vec());
+    assert_eq!(volume(&s, "main.scad"), 8.0);
+    assert!(s.close(Path::new("part.scad")));
+    assert_eq!(volume(&s, "main.scad"), 1.0);
+}
+
+#[test]
+fn warm_messages_match_a_cold_session() {
+    let fs = Arc::new(MemFs::new());
+    let src = "echo(1);\nunion() { cube(1); square(1); }\ncub(1);\n";
+    fs.insert("/doc/m.scad", src.as_bytes().to_vec());
+    let run = || {
+        let s = session(&fs);
+        let r = s
+            .render(
+                &Run::new("m.scad"),
+                Mode::Render,
+                &render::ColorScheme::cornfield(),
+            )
+            .unwrap();
+        String::from_utf8(r.log.stderr).unwrap()
+    };
+    let cold = run();
+    assert!(cold.contains("WARNING: Mixing 2D and 3D"), "{cold}");
+    let s = session(&fs);
+    for _ in 0..3 {
+        let r = s
+            .render(
+                &Run::new("m.scad"),
+                Mode::Render,
+                &render::ColorScheme::cornfield(),
+            )
+            .unwrap();
+        assert_eq!(String::from_utf8(r.log.stderr).unwrap(), cold);
+    }
+    // After an edit that moves the lines, the locations follow.
+    s.update(Path::new("m.scad"), format!("\n{src}").into_bytes());
+    let r = s
+        .render(
+            &Run::new("m.scad"),
+            Mode::Render,
+            &render::ColorScheme::cornfield(),
+        )
+        .unwrap();
+    let moved = String::from_utf8(r.log.stderr).unwrap();
+    assert!(moved.contains("line 3"), "{moved}");
+    assert!(!moved.contains("line 2\n"), "{moved}");
+}
+
+/// Wait for `stage` of the request on `rx`, then run `then`.
+fn when(rx: &mpsc::Receiver<Stage>, stage: Stage, then: impl FnOnce()) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(s) if s == stage => break,
+            Ok(_) => {}
+            Err(e) => panic!("no {stage:?} stage: {e}"),
+        }
+        assert!(Instant::now() < deadline);
+    }
+    then();
+}
+
+/// A run that reports its stages on a channel.
+fn watched(input: &str) -> (Run, mpsc::Receiver<Stage>) {
+    let (tx, rx) = mpsc::channel();
+    let tx = std::sync::Mutex::new(tx);
+    let mut run = Run::new(input);
+    run.progress = Some(Arc::new(move |s| {
+        let _ = tx.lock().unwrap().send(s);
+    }));
+    (run, rx)
+}
+
+#[test]
+fn an_edit_cancels_a_stale_evaluation() {
+    let fs = Arc::new(MemFs::new());
+    // Tens of millions of loop iterations: seconds, unless interrupted.
+    fs.insert(
+        "/doc/slow.scad",
+        b"n = 6000;\necho(len([for (i = [0:n]) for (j = [0:n]) if (i * j < 0) 1]));\n".to_vec(),
+    );
+    let s = Arc::new(session(&fs));
+    let (run, rx) = watched("slow.scad");
+    let t = Instant::now();
+    let worker = {
+        let s = s.clone();
+        std::thread::spawn(move || s.evaluate(&run, false).map(|_| ()))
+    };
+    when(&rx, Stage::Evaluate, || {
+        std::thread::sleep(Duration::from_millis(20));
+        s.update(Path::new("slow.scad"), b"cube(1);\n".to_vec());
+    });
+    assert_eq!(worker.join().unwrap(), Err(Cancelled));
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert_eq!(s.stats().cancelled, 1);
+    // The new text renders normally.
+    assert_eq!(volume(&s, "slow.scad"), 1.0);
+}
+
+#[test]
+fn a_newer_request_cancels_a_stale_render_between_operations() {
+    let fs = Arc::new(MemFs::new());
+    // Quick to evaluate, slow to build: many fine spheres, unioned.
+    fs.insert(
+        "/doc/heavy.scad",
+        b"for (i = [0:59]) translate([i * 1.5, i % 7, 0]) sphere(1, $fn = 96);\n".to_vec(),
+    );
+    let s = Arc::new(session(&fs));
+    let (run, rx) = watched("heavy.scad");
+    let worker = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            s.render(&run, Mode::Render, &render::ColorScheme::cornfield())
+                .map(|_| ())
+        })
+    };
+    when(&rx, Stage::Geometry, || {
+        // Any newer request on the document supersedes the render.
+        let _ = s.evaluate(&Run::new("heavy.scad"), false).unwrap();
+    });
+    assert_eq!(worker.join().unwrap(), Err(Cancelled));
+    // What the stale render finished stays cached and correct.
+    let fresh = volume(&session(&fs), "heavy.scad");
+    assert_eq!(volume(&s, "heavy.scad"), fresh);
+}
+
+#[test]
+fn explicit_cancel_and_one_shot_requests() {
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/slow.scad",
+        b"n = 6000;\necho(len([for (i = [0:n]) for (j = [0:n]) if (i * j < 0) 1]));\n".to_vec(),
+    );
+    let s = Arc::new(session(&fs));
+    let (mut run, rx) = watched("slow.scad");
+    // One-shot requests (the command line's) are not superseded by
+    // others, only cancelled explicitly.
+    run.supersede = false;
+    let worker = {
+        let s = s.clone();
+        std::thread::spawn(move || s.evaluate(&run, false).map(|_| ()))
+    };
+    when(&rx, Stage::Evaluate, || {
+        assert_eq!(s.cancel(Path::new("slow.scad")), 1);
+    });
+    assert_eq!(worker.join().unwrap(), Err(Cancelled));
+    assert_eq!(s.stats().running, 0);
+}

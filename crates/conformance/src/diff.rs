@@ -186,7 +186,8 @@ fn run_one(
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(err_file);
-        cmd.env_remove(crate::geometry::FONT_DIR_VAR);
+        cmd.env_remove(crate::geometry::FONT_DIR_VAR)
+            .env(crate::geometry::NO_SERVER_VAR, "1");
         for (k, v) in env {
             cmd.env(k, v);
         }
