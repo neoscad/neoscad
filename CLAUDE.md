@@ -15,6 +15,11 @@ OpenSCAD's behaviour is the spec. A shallow clone lives at
 Its `tests/data/scad` inputs and `tests/regression` expected outputs are the
 ground truth for conformance. Port behaviour, not code structure.
 
+For differential testing and benchmarks, a matching nightly (2026.09.23,
+Manifold backend) is at `/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD`.
+Use `--backend=manifold`. Don't use `/Applications/OpenSCAD-2021.01.app`:
+it predates Manifold and the current test suite.
+
 ## Working with agents
 
 - Work is delegated to the `builder` (diffs) and `auditor` (documents)
