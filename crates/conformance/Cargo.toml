@@ -1,0 +1,22 @@
+[package]
+name = "neoscad-conformance"
+description = "Runs OpenSCAD's regression suite against neoscad and records progress"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "conformance"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+png.workspace = true
+rayon.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

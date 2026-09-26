@@ -1,0 +1,161 @@
+{
+  "comment": "Fixed showcase set from docs/audits/phase0.md part C. Paths are relative to the OpenSCAD reference checkout. The expected image is OpenSCAD's Manifold-backend --render at 512x512 with the default camera (2D inputs use the ortho top camera). Check with `conformance showcase`.",
+  "models": [
+    {
+      "id": "logo",
+      "input": "examples/Basics/logo.scad",
+      "expected": "tests/regression/render/logo-expected.png",
+      "shows": "CSG difference, the OpenSCAD logo"
+    },
+    {
+      "id": "CSG",
+      "input": "examples/Basics/CSG.scad",
+      "expected": "tests/regression/render/CSG-expected.png",
+      "shows": "union, intersection, difference"
+    },
+    {
+      "id": "CSG-modules",
+      "input": "examples/Basics/CSG-modules.scad",
+      "expected": "tests/regression/render-manifold/CSG-modules-expected.png",
+      "shows": "modules, colour"
+    },
+    {
+      "id": "hull",
+      "input": "examples/Basics/hull.scad",
+      "expected": "tests/regression/render/hull-expected.png",
+      "shows": "hull"
+    },
+    {
+      "id": "LetterBlock",
+      "input": "examples/Basics/LetterBlock.scad",
+      "expected": "tests/regression/render/LetterBlock-expected.png",
+      "shows": "text + linear_extrude"
+    },
+    {
+      "id": "text_on_cube",
+      "input": "examples/Basics/text_on_cube.scad",
+      "expected": "tests/regression/render-manifold/text_on_cube-expected.png",
+      "shows": "text on faces, colour"
+    },
+    {
+      "id": "logo_and_text",
+      "input": "examples/Basics/logo_and_text.scad",
+      "expected": "tests/regression/render-manifold/logo_and_text-expected.png",
+      "shows": "text, colour"
+    },
+    {
+      "id": "rotate_extrude",
+      "input": "examples/Basics/rotate_extrude.scad",
+      "expected": "tests/regression/render-manifold/rotate_extrude-expected.png",
+      "shows": "rotate_extrude, colour"
+    },
+    {
+      "id": "linear_extrude",
+      "input": "examples/Basics/linear_extrude.scad",
+      "expected": "tests/regression/render-manifold/linear_extrude-expected.png",
+      "shows": "twist/scale extrude"
+    },
+    {
+      "id": "GEB",
+      "input": "examples/Advanced/GEB.scad",
+      "expected": "tests/regression/render-manifold/GEB-expected.png",
+      "shows": "text, projection, offset, intersection"
+    },
+    {
+      "id": "offset",
+      "input": "examples/Advanced/offset.scad",
+      "expected": "tests/regression/render/offset-expected.png",
+      "shows": "offset r/delta/chamfer"
+    },
+    {
+      "id": "surface_image",
+      "input": "examples/Advanced/surface_image.scad",
+      "expected": "tests/regression/render-manifold/surface_image-expected.png",
+      "shows": "surface() from PNG"
+    },
+    {
+      "id": "children",
+      "input": "examples/Advanced/children.scad",
+      "expected": "tests/regression/render-manifold/children-expected.png",
+      "shows": "children(), colour"
+    },
+    {
+      "id": "example001",
+      "input": "examples/Old/example001.scad",
+      "expected": "tests/regression/render/example001-expected.png",
+      "shows": "sphere minus cylinders"
+    },
+    {
+      "id": "example006",
+      "input": "examples/Old/example006.scad",
+      "expected": "tests/regression/render/example006-expected.png",
+      "shows": "rounded die (hull)"
+    },
+    {
+      "id": "example009",
+      "input": "examples/Old/example009.scad",
+      "expected": "tests/regression/render/example009-expected.png",
+      "shows": "DXF import, extrudes (fan)"
+    },
+    {
+      "id": "example010",
+      "input": "examples/Old/example010.scad",
+      "expected": "tests/regression/render/example010-expected.png",
+      "shows": "surface() from .dat"
+    },
+    {
+      "id": "example011",
+      "input": "examples/Old/example011.scad",
+      "expected": "tests/regression/render/example011-expected.png",
+      "shows": "polyhedron"
+    },
+    {
+      "id": "example012",
+      "input": "examples/Old/example012.scad",
+      "expected": "tests/regression/render/example012-expected.png",
+      "shows": "STL import"
+    },
+    {
+      "id": "example017",
+      "input": "examples/Old/example017.scad",
+      "expected": "tests/regression/render-manifold/example017-expected.png",
+      "shows": "large rotate_extrude assembly"
+    },
+    {
+      "id": "example024",
+      "input": "examples/Old/example024.scad",
+      "expected": "tests/regression/render/example024-expected.png",
+      "shows": "Menger sponge (boolean stress)"
+    },
+    {
+      "id": "candleStand",
+      "input": "examples/Parametric/candleStand.scad",
+      "expected": "tests/regression/render/candleStand-expected.png",
+      "shows": "parametric, extrude"
+    },
+    {
+      "id": "sign",
+      "input": "examples/Parametric/sign.scad",
+      "expected": "tests/regression/render/sign-expected.png",
+      "shows": "text sign"
+    },
+    {
+      "id": "minkowski3-tests",
+      "input": "tests/data/scad/3D/features/minkowski3-tests.scad",
+      "expected": "tests/regression/render/minkowski3-tests-expected.png",
+      "shows": "3D minkowski (none in examples/)"
+    },
+    {
+      "id": "text-font-direction-tests",
+      "input": "tests/data/scad/2D/features/text-font-direction-tests.scad",
+      "expected": "tests/regression/render/text-font-direction-tests-expected.png",
+      "shows": "2D text: direction, shaping"
+    },
+    {
+      "id": "offset-tests",
+      "input": "tests/data/scad/2D/features/offset-tests.scad",
+      "expected": "tests/regression/render/offset-tests-expected.png",
+      "shows": "2D offset joins"
+    }
+  ]
+}

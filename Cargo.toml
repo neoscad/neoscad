@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+
+[workspace.dependencies]
+clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
+png = "0.18"
+rayon = "1"
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+
+# The conformance suite runs hundreds of neoscad processes per pass, and the
+# CLI's cold start is itself a tracked benchmark, so release builds favour
+# runtime speed over build time.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"

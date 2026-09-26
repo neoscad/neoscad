@@ -75,13 +75,14 @@ the app core API is the `serve` API.
 
 ### Conformance against OpenSCAD's own suite
 
-OpenSCAD has 522 `.scad` test inputs, about 1,760 expected-output files and
-168 test registrations. The harness reads them from the reference checkout
-and runs them in tiers that follow the build order:
+OpenSCAD's `tests/CMakeLists.txt` registers 3,258 ctest cases over 522
+`.scad` inputs (1,309 are CGAL-only and skipped). The harness evaluates that
+CMake file directly into `conformance/manifest.json` and runs the cases in
+tiers that follow the build order:
 
 | Tier | OpenSCAD tests | Comparison |
 |---|---|---|
-| 0 Parse | `astdump` | Exact text |
+| 0 Parse | `astdump`, customizer | Exact text |
 | 1 Evaluate | `echo` | Exact text, including number formatting |
 | 2 Tree | `dump`, `csgterm` | Exact text |
 | 3 Geometry | All 3D/2D render tests (about 1,250 expected PNGs), plus about 90 exact SVG/JSON/export files | We export our mesh and have the pinned nightly render it to PNG, then compare with OpenSCAD's own image tolerance. This checks our geometry against every image test without needing to match OpenSCAD's renderer. It is backed by reference meshes the nightly generates, compared geometrically (volume, area, bbox, topology, Hausdorff distance) |
@@ -93,8 +94,10 @@ OpenSCAD-compatible message text; the richer agent/IDE output (spans, fix
 hints) wraps that text rather than replacing it. Numbers print like
 `double-conversion` with 6 significant digits (`src/core/Value.cc:62`).
 
-A committed scoreboard records pass counts per tier along with an
-expected-failures list. Every change must shrink that list and never grow it.
+Tier 5 holds the rest (exit-code and harness tests).
+
+`conformance/baseline.json` lists the passing test ids. Every id in it must
+keep passing; a change may only add to it.
 
 ### Beyond the stock suite
 
@@ -111,7 +114,7 @@ expected-failures list. Every change must shrink that list and never grow it.
 
 ### Progress recording
 
-Each `conformance --record` run (at least once per milestone commit) writes
+Each `conformance run --record` run (at least once per milestone commit) writes
 a snapshot into `progress/`. That directory lives in the repo tree but is
 gitignored, so the images never bloat history.
 
@@ -140,9 +143,8 @@ ffmpeg.
 
 ## Build order
 
-0. **Audit:** verify the bets marked *(to verify)*, map OpenSCAD's test
-   registrations to the tiers, and define the showcase set.
-1. **Skeleton:** workspace, the `conformance` harness, and progress
+0. **Audit** (done: `docs/audits/phase0.md`).
+1. **Skeleton** (done): workspace, the `conformance` harness, and progress
    recording.
 2. **`lang`:** tier 0.
 3. **`eval`:** tier 1.
