@@ -126,11 +126,15 @@ gitignored, so the images never bloat history.
   if it is renamed.
 - **`progress/index.jsonl`:** one line appended per snapshot, so the timeline
   can be listed without walking the directories.
-- **`scoreboard.json`:** per-test results, per-tier counts and timings.
-- **A test-grid image** with one cell per test, which shows progress before
-  any renderer exists.
-- **A fixed showcase set** of about 25 models, each rendered as OpenSCAD's
-  output, ours and a diff side by side.
+- **`scoreboard.json`:** about 5 KB: one status character per manifest test,
+  per-tier counts and timings, and failure reasons deduplicated with counts.
+  It is pinned to the manifest by its SHA-256.
+- **Images are generated on demand,** not at record time:
+  `conformance grid [DIR…|--all]` redraws the test grid (one cell per test,
+  a 1920×1080 video frame) from the scoreboard plus the committed manifest.
+  `--record --grid` writes one immediately.
+- **Later:** a fixed showcase set of about 25 models, each rendered as
+  OpenSCAD's output, ours and a diff side by side, also generated on demand.
 
 A later script stitches the snapshots in order into a progress video with
 ffmpeg.

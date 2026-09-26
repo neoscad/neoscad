@@ -71,6 +71,8 @@ pub struct RunOptions {
     pub binary: Option<PathBuf>,
     pub update_baseline: bool,
     pub record: bool,
+    /// With `record`, also write the snapshot's grid.png.
+    pub grid: bool,
 }
 
 /// Everything a finished run produced; `record` turns it into a snapshot.
@@ -199,7 +201,7 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
 
     let report = RunReport { outcomes, per_tier, wall, binary };
     if opts.record {
-        let dir = crate::record::record(ctx, &manifest, &report)?;
+        let dir = crate::record::record(ctx, &manifest, &report, opts.grid)?;
         println!("recorded {}", dir.display());
     }
 

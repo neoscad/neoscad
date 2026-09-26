@@ -4,6 +4,7 @@
 //!   reference checkout's `tests/CMakeLists.txt`.
 //! - `conformance run` executes it, gates on `conformance/baseline.json` and
 //!   with `--record` writes a progress snapshot.
+//! - `conformance grid` renders snapshots' `grid.png` from their data.
 //! - `conformance showcase` checks the showcase list.
 //!
 //! See crates/conformance/README.md.
@@ -16,6 +17,7 @@ mod normalize;
 mod prepare;
 mod record;
 mod run;
+mod sha256;
 mod showcase;
 
 use std::collections::HashMap;
@@ -69,6 +71,23 @@ enum Cmd {
         /// Write a progress snapshot under progress/.
         #[arg(long)]
         record: bool,
+        /// With --record, also render the snapshot's grid.png now.
+        #[arg(long, requires = "record")]
+        grid: bool,
+    },
+    /// Render grid.png for progress snapshots from their recorded data.
+    Grid {
+        /// Snapshot directories (a path, or a name under progress/).
+        dirs: Vec<PathBuf>,
+        /// Every snapshot listed in progress/index.jsonl.
+        #[arg(long)]
+        all: bool,
+        /// Write here instead of <dir>/grid.png (one snapshot only).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Re-render snapshots that already have a grid.png.
+        #[arg(long)]
+        force: bool,
     },
     /// Check that every showcase input and expected image exists.
     Showcase,
@@ -89,7 +108,7 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
     let ctx = Ctx::discover()?;
     match cmd {
         Cmd::Manifest { check } => manifest_cmd(&ctx, check),
-        Cmd::Run { tier, filter, verbose, timeout, jobs, binary, update_baseline, record } => {
+        Cmd::Run { tier, filter, verbose, timeout, jobs, binary, update_baseline, record, grid } => {
             if timeout.is_nan() || timeout <= 0.0 {
                 return Err("--timeout must be positive".into());
             }
@@ -102,9 +121,11 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
                 binary,
                 update_baseline,
                 record,
+                grid,
             };
             run::run(&ctx, &opts).map(|c| u8::try_from(c).unwrap_or(1))
         }
+        Cmd::Grid { dirs, all, out, force } => grid::command(&ctx, &dirs, all, out.as_deref(), force),
         Cmd::Showcase => Ok(u8::from(showcase::check(&ctx)? > 0)),
     }
 }
