@@ -150,7 +150,7 @@ ffmpeg.
 0. **Audit** (done: `docs/audits/phase0.md`).
 1. **Skeleton** (done): workspace, the `conformance` harness, and progress
    recording.
-2. **`lang`:** tier 0.
+2. **`lang`** (done): tier 0.
 3. **`eval`:** tier 1.
 4. **CSG tree:** tier 2.
 5. **`geom` + `io`:** tier 3.

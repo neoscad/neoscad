@@ -3,13 +3,15 @@
 //! The flags mirror OpenSCAD's own (`src/openscad.cc`, the
 //! `desc.add_options()` block) so that OpenSCAD's regression suite can drive
 //! this binary unchanged: the conformance harness passes exactly the
-//! arguments `tests/CMakeLists.txt` registers. Nothing is implemented yet;
-//! every output mode reports that it is missing and exits with
-//! [`EXIT_NOT_IMPLEMENTED`], which the harness can tell apart from a crash or
-//! a usage error.
+//! arguments `tests/CMakeLists.txt` registers. The `.ast` export (with
+//! customizer parameter sets) is implemented; every other output mode
+//! reports that it is missing and exits with [`EXIT_NOT_IMPLEMENTED`], which
+//! the harness can tell apart from a crash or a usage error.
 //!
 //! Cold start is a tracked benchmark (docs/architecture.md, "Agent surface"),
 //! so `main` does nothing before argument parsing and nothing expensive after.
+
+mod run;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -231,6 +233,17 @@ fn main() -> ExitCode {
                 return ExitCode::from(EXIT_ERROR);
             }
         }
+    }
+
+    if formats.iter().all(|(id, _)| *id == "ast") {
+        let job = run::Job {
+            input: &cli.input[0],
+            outputs: &cli.output,
+            defines: &cli.define,
+            parameter_file: cli.parameter_file.as_deref(),
+            parameter_set: cli.parameter_set.as_deref(),
+        };
+        return ExitCode::from(run::export_ast(&job));
     }
 
     for (id, name) in &formats {

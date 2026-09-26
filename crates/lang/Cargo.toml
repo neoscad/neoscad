@@ -1,0 +1,14 @@
+[package]
+name = "neoscad-lang"
+description = "OpenSCAD language front end: lexer, lossless syntax tree, typed AST, diagnostics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "lang"
+
+[dependencies]
+
+[lints]
+workspace = true

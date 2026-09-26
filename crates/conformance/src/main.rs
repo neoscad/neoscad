@@ -6,11 +6,14 @@
 //!   with `--record` writes a progress snapshot.
 //! - `conformance grid` renders snapshots' `grid.png` from their data.
 //! - `conformance showcase` checks the showcase list.
+//! - `conformance diff` compares neoscad with a reference OpenSCAD binary
+//!   on a corpus of inputs.
 //!
 //! See crates/conformance/README.md.
 
 mod cmake;
 mod ctx;
+mod diff;
 mod grid;
 mod manifest;
 mod normalize;
@@ -91,6 +94,31 @@ enum Cmd {
     },
     /// Check that every showcase input and expected image exists.
     Showcase,
+    /// Differential test: run a reference OpenSCAD and neoscad on each input
+    /// and compare exit status, output and the format's diagnostics.
+    Diff {
+        /// Output format to compare.
+        #[arg(long, default_value = "ast")]
+        format: String,
+        /// Reference binary (default: the pinned nightly).
+        #[arg(long, default_value = diff::DEFAULT_REFERENCE)]
+        binary_ref: PathBuf,
+        /// Binary under test (default: target/release/neoscad).
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        /// Parallel jobs (default: one per CPU).
+        #[arg(long, short)]
+        jobs: Option<usize>,
+        /// Per-run timeout in seconds.
+        #[arg(long, default_value_t = 60.0)]
+        timeout: f64,
+        /// List every mismatch, not just the first few per category.
+        #[arg(long, short)]
+        verbose: bool,
+        /// Files or directories (searched for .scad). Default: the reference's
+        /// tests/data/scad, examples and libraries/MCAD.
+        paths: Vec<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -127,6 +155,21 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
         }
         Cmd::Grid { dirs, all, out, force } => grid::command(&ctx, &dirs, all, out.as_deref(), force),
         Cmd::Showcase => Ok(u8::from(showcase::check(&ctx)? > 0)),
+        Cmd::Diff { format, binary_ref, binary, jobs, timeout, verbose, paths } => {
+            if timeout.is_nan() || timeout <= 0.0 {
+                return Err("--timeout must be positive".into());
+            }
+            let opts = diff::DiffOptions {
+                format: diff::Format::parse(&format)?,
+                reference: binary_ref,
+                binary,
+                paths,
+                jobs,
+                timeout: Duration::from_secs_f64(timeout),
+                verbose,
+            };
+            diff::diff(&ctx, &opts)
+        }
     }
 }
 
