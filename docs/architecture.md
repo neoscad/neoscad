@@ -11,7 +11,7 @@ edit→see loop:
 OpenSCAD's *behaviour* is the spec (see "Validation"); its code structure is
 not a template.
 
-Items marked *(to verify)* are bets awaiting the phase-0 audit.
+Library choices were checked in `docs/audits/phase0.md`.
 
 ## Stack
 
@@ -20,9 +20,9 @@ Items marked *(to verify)* are bets awaiting the phase-0 audit.
 | Core | Rust | Native speed, first-class WASM, safe parallelism; one core for CLI, app, web, LSP |
 | Parser | Hand-written recursive descent, lossless CST | Error recovery and good diagnostics; the same tree serves the formatter and LSP |
 | Evaluator | Tree-walking interpreter → CSG tree, content-hash cache per subtree | A one-line edit re-evaluates only the subtrees it touched |
-| 3D kernel | Manifold via its C API *(pure-Rust ports to be benchmarked)* | OpenSCAD's current default backend, so outputs converge; builds to WASM |
-| 2D kernel | Clipper2 *(or pure-Rust `i_overlay`)* | Same as OpenSCAD |
-| Text | `rustybuzz` + `skrifa`/`ttf-parser` | No FreeType/fontconfig; portable to WASM |
+| 3D kernel | `manifold-rust` (pure-Rust port of Manifold; its parity claims must be checked against the Manifold C API in native test builds) | Same algorithm as OpenSCAD's default backend, with a clean `wasm32` build (the C++ binding needs patches for WASM) |
+| 2D kernel | `clipper2-rust` (pure-Rust Clipper2) | OpenSCAD's `offset()` depends on Clipper2's exact arc steps and join types; `i_overlay` differs visibly |
+| Text | `harfrust` (shaping) + `skrifa` (outlines), plus a matcher for fontconfig-style names | No FreeType/fontconfig; portable to WASM. `rustybuzz` is archived |
 | I/O | STL, OFF, OBJ, 3MF, SVG (`usvg`), DXF, PDF | |
 | Renderer | wgpu — Metal on macOS, WebGPU on web, offscreen for snapshots | One renderer for the GUI, the web and agent snapshots |
 
@@ -84,8 +84,14 @@ and runs them in tiers that follow the build order:
 | 0 Parse | `astdump` | Exact text |
 | 1 Evaluate | `echo` | Exact text, including number formatting |
 | 2 Tree | `dump`, `csgterm` | Exact text |
-| 3 Geometry | `export-*`, `render-*` exports | Geometric: volume, area, bbox, topology, Hausdorff distance within tolerance (triangulation may legitimately differ) |
-| 4 Image | `preview-*`, `render-*`, camera and colour-scheme tests | Image diff with tolerance |
+| 3 Geometry | All 3D/2D render tests (about 1,250 expected PNGs), plus about 90 exact SVG/JSON/export files | We export our mesh and have the pinned nightly render it to PNG, then compare with OpenSCAD's own image tolerance. This checks our geometry against every image test without needing to match OpenSCAD's renderer. It is backed by reference meshes the nightly generates, compared geometrically (volume, area, bbox, topology, Hausdorff distance) |
+| 4 Image | Our own wgpu renderer | Showcase set and camera/colour-scheme tests, with a looser perceptual comparison. Matching OpenSCAD's renderer pixel-for-pixel is not a goal |
+
+Echo and warning text must match OpenSCAD word for word: 75 of the 122 echo
+files contain warnings. Every diagnostic therefore has a stable code and
+OpenSCAD-compatible message text; the richer agent/IDE output (spans, fix
+hints) wraps that text rather than replacing it. Numbers print like
+`double-conversion` with 6 significant digits (`src/core/Value.cc:62`).
 
 A committed scoreboard records pass counts per tier along with an
 expected-failures list. Every change must shrink that list and never grow it.
@@ -94,8 +100,11 @@ expected-failures list. Every change must shrink that list and never grow it.
 
 - **Comparison against a current OpenSCAD build** on fuzzed inputs and on
   corpora: `examples/`, MCAD, and BOSL2 (whose own tests are assert-based).
-- **Benchmarks:** full render time against OpenSCAD, CLI cold start, and the
-  time to re-render after a one-line edit through `serve`.
+- **Benchmarks:** full render time, CLI cold start, and the time to
+  re-render after a one-line edit through `serve`. Every benchmark records
+  the same cases on each OpenSCAD build installed, as reference series:
+  2021.01 stable (CGAL), and the nightly with both `--backend=cgal` and
+  `--backend=manifold`. Results carry the version strings and the machine.
 - **Agent-loop metrics:** token size of the default outputs, and later an
   eval where agents perform modeling tasks, recording success rate,
   iterations and tokens compared with OpenSCAD.
