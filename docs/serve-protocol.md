@@ -4,7 +4,8 @@
 `session::Session` (`crates/session`): open documents, parsed files,
 the geometry cache and the last CSG products, all warm. It answers
 [JSON-RPC 2.0](https://www.jsonrpc.org/specification) requests. The
-command line, the future MCP server and the apps are its clients; the
+command line, the MCP server (`docs/mcp.md`, which calls these methods
+in-process) and the apps are its clients; the
 methods mirror the session's API (`evaluate`, `render`, `export`,
 `snapshot`, `check`, `measure`, `format`, `docs`, `test`, `cancel` and
 the document methods).
@@ -23,7 +24,7 @@ change would get a new `protocol` number; there has been none.
 
 | `protocol` | Changes |
 |---|---|
-| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. |
+| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. |
 
 ## Transports
 
@@ -99,6 +100,7 @@ Requests on a model take:
 | `enable` | [string] | `["part"]` turns on neoscad's `part()` extension for the request (`docs/cli-json.md`, "Named parts"), as `--enable part` does. |
 | `parts` | bool | The same as `"enable": ["part"]`. |
 | `progress` | bool | Send `progress` notifications (default true). |
+| `supersede` | bool | Cancel older requests on the same document when this one starts (default true; see "Ordering and concurrency"). `false` lets requests on one file run side by side, as `neoscad mcp` sends them. |
 
 Results that describe a run carry `exit_code` (0, or the command line's
 code: 1 for an error, 3 for a feature neoscad lacks), `diagnostics`,

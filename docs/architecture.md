@@ -81,6 +81,11 @@ JSON-RPC (`docs/serve-protocol.md`).
   evaluator's builtins by a test) and from the comment blocks of user
   and library code, BOSL2's structured ones included.
 - **MCP server** exposing evaluate, snapshot, check, measure, diff and docs.
+  Implemented in 7c: `neoscad mcp` (`docs/mcp.md`), MCP 2026-07-28 over
+  stdio with the legacy `initialize` handshake too, eight tools
+  (`evaluate`, `render`, `snapshot` with `diff_against`, `check`,
+  `measure`, `test`, `format`, `docs`) on the warm session of `serve`,
+  inline source or files, and file access fenced to allowed roots.
 - **Named parts:** a `part("lid") { … }` extension behind a flag, so checks
   and measurements can refer to parts. A deliberate divergence from
   OpenSCAD, off by default. Implemented in 7b-1 (`--enable part`,
@@ -150,7 +155,9 @@ keep passing; a change may only add to it.
   `--backend=manifold`. Results carry the version strings and the machine.
 - **Agent-loop metrics:** token size of the default outputs, and later an
   eval where agents perform modeling tasks, recording success rate,
-  iterations and tokens compared with OpenSCAD.
+  iterations and tokens compared with OpenSCAD. The harness is
+  `scripts/agent-eval/run.py` with tasks in `conformance/agent-tasks.json`
+  graded by hidden model tests (`docs/agent-eval.md`); 7c ran a pilot.
 
 ### Progress recording
 
@@ -204,8 +211,8 @@ ffmpeg.
    snapshot lighting and the `edit_loop` benchmark. 7b: `check`,
    `measure`, `test`, `fmt`, `docs`, `part()` (7b-1 done: `part()`,
    `check`, `measure`, snapshot parts and issues, and a server that
-   survives a panicking request). 7c: the MCP server and an
-   agent-loop eval.
+   survives a panicking request). 7c (done): the MCP server and an
+   agent-loop eval pilot.
 8. **macOS app.**
 9. **WASM web app** (deferred by the owner, 2026-09-26). The library crates
    stay WASM-compatible, checked by `scripts/wasm-check.sh`, so it can be

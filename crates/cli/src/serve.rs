@@ -282,21 +282,91 @@ fn connection(server: Arc<Server>, mut r: impl BufRead, w: Writer) {
 /// warm caches with it; the session's locks tolerate a request that
 /// panicked while holding one, so the next request runs normally.
 fn answer(id: &Value, handle: impl FnOnce() -> Reply) -> Value {
+    match guarded(handle) {
+        Ok(v) => rpc::response(id, v),
+        Err((c, m)) => rpc::error(id, c, &m),
+    }
+}
+
+/// `handle`'s reply, or error -32603 with the panic's message when it
+/// panics (see [`answer`]).
+fn guarded(handle: impl FnOnce() -> Reply) -> Reply {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(handle)) {
-        Ok(Ok(v)) => rpc::response(id, v),
-        Ok(Err((c, m))) => rpc::error(id, c, &m),
+        Ok(r) => r,
         Err(payload) => {
             let what = payload
                 .downcast_ref::<&str>()
                 .map(|s| s.to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "unknown panic".into());
-            rpc::error(
-                id,
+            Err((
                 code::INTERNAL_ERROR,
-                &format!("internal error: the request panicked: {what}"),
-            )
+                format!("internal error: the request panicked: {what}"),
+            ))
         }
+    }
+}
+
+/// The server's methods with no transport, for `neoscad mcp` ([`crate::mcp`]):
+/// the same session, caches, cancellation and parameter handling as
+/// `neoscad serve`, so the two can never disagree about what a request
+/// means. Notifications (progress, diagnostics) go nowhere.
+pub(crate) struct Local {
+    server: Arc<Server>,
+    sink: Writer,
+}
+
+impl std::fmt::Debug for Local {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Local").finish_non_exhaustive()
+    }
+}
+
+impl Local {
+    pub(crate) fn new(cfg: session::Config) -> Local {
+        let server = Arc::new(Server {
+            session: session::Session::new(cfg),
+            binary: client::binary_id(),
+            environment: client::environment(),
+            socket: None,
+            started: Instant::now(),
+            last: Mutex::new(Instant::now()),
+            active: AtomicUsize::new(0),
+            connections: AtomicUsize::new(0),
+            idle_timeout: Duration::ZERO,
+            stopping: AtomicBool::new(false),
+            running: Mutex::new(HashMap::new()),
+        });
+        let sink: Box<dyn Write + Send> = Box::new(std::io::sink());
+        Local {
+            server,
+            sink: Arc::new(Mutex::new(sink)),
+        }
+    }
+
+    pub(crate) fn session(&self) -> &session::Session {
+        &self.server.session
+    }
+
+    /// Answer one request of `docs/serve-protocol.md` (a model method:
+    /// `evaluate`, `render`, `export`, `check`, `measure`, `format`,
+    /// `docs`, `test`). `id` keys the request for cancellation.
+    pub(crate) fn call(&self, id: &Value, method: &str, params: &Value) -> Reply {
+        let mut params = params.clone();
+        params["progress"] = json!(false);
+        let r = guarded(|| heavy(&self.server, id, method, &params, &self.sink));
+        self.server
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id.to_string());
+        r
+    }
+
+    /// Stop request `id` (LSP's `$/cancelRequest`, MCP's
+    /// `notifications/cancelled`): it cancels the request's document.
+    pub(crate) fn cancel(&self, id: &Value) {
+        notification(&self.server, "$/cancelRequest", &json!({"id": id}));
     }
 }
 
@@ -324,7 +394,7 @@ fn notification(server: &Server, method: &str, params: &Value) {
     }
 }
 
-type Reply = Result<Value, (i64, String)>;
+pub(crate) type Reply = Result<Value, (i64, String)>;
 
 fn invalid(m: impl Into<String>) -> (i64, String) {
     (code::INVALID_PARAMS, m.into())
@@ -468,6 +538,13 @@ fn run_of(params: &Value, id: &Value, w: &Writer) -> Result<session::Run, (i64, 
         .and_then(Value::as_bool)
         .unwrap_or(false);
     run.rng_seed = params.get("seed").and_then(Value::as_u64).map(|n| n as u32);
+    // An editor's requests supersede older ones on the document (their
+    // text is stale); `neoscad mcp` turns that off, because an agent's
+    // parallel calls on one file (a check and a measure) are both wanted.
+    run.supersede = params
+        .get("supersede")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     // neoscad's `part()`: `"enable": ["part"]` as on the command line, or
     // `"parts": true`.
     let enable: Vec<String> = params
@@ -617,7 +694,7 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
             let mut p = params.clone();
             p["model"] = json!(run.input);
             p["json"] = json!(true);
-            p["supersede"] = json!(true);
+            p["supersede"] = json!(run.supersede);
             if run.parts {
                 p["parts"] = json!(true);
             }

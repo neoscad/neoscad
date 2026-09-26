@@ -1,0 +1,34 @@
+{
+  "about": "Modeling tasks for scripts/agent-eval: each is graded by a hidden neoscad test file (grader) that the agent never sees; reference is a solution the grader must pass (scripts/agent-eval/run.py --check-graders).",
+  "common": "Write the result to model.scad in the current directory. It must define the modules named above (it may also draw them at top level). Plain OpenSCAD only, no external libraries. Check your work before you finish, then reply with one short line.",
+  "conditions": {
+    "A": "You have the NeoSCAD MCP tools (an OpenSCAD-compatible modeller) to evaluate, render, view and check OpenSCAD models, and Read, Write and Edit for files.",
+    "B": "You have Bash and Read. The OpenSCAD command line is /Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD (pass --backend=manifold). It exports meshes (-o out.stl) and PNG images (-o out.png; --viewall --autocenter and --camera choose the view); use Read to look at a PNG."
+  },
+  "tasks": [
+    {
+      "id": "box_lid",
+      "grader": "agent-tasks/box_lid_test.scad",
+      "reference": "agent-tasks/box_lid.ref.scad",
+      "prompt": "Design a 3D-printable box with a fitted lid in OpenSCAD.\n- module box(): outer size 60 x 40 x 30 mm (x, y, z), occupying [0, 60] x [0, 40] x [0, 30]; 2 mm walls and a 2 mm floor; open at the top.\n- module lid(): drawn in its assembled position on the box. Its outer footprint is 60 x 40 mm. It must not overlap the box anywhere, and it needs a lip or plug that reaches down inside the opening so it cannot slide off.\n- Each is one solid piece."
+    },
+    {
+      "id": "phone_stand",
+      "grader": "agent-tasks/phone_stand_test.scad",
+      "reference": "agent-tasks/phone_stand.ref.scad",
+      "prompt": "Design a 3D-printable phone stand in OpenSCAD that holds a phone at 70 degrees from the table.\nThe phone is exactly this solid (x across, y front to back, z up):\n    translate([-40, 0, 10]) rotate([-20, 0, 0]) cube([80, 10, 160]);\nIt leans back with its back face at 70 degrees from the table and its bottom front edge at y = 0, z = 10.\n- module stand(): one solid piece standing on the table (z = 0, nothing below it).\n- It must hold the phone in exactly that pose: come within 1 mm of the phone's back face and of its bottom face, with a lip in front of the phone's bottom edge so it cannot slide forward, and never overlap the phone.\n- Its base must reach from y = -5 or further forward to y = 40 or further back, so it does not tip.\n- It must print on an FDM printer (no floating parts)."
+    },
+    {
+      "id": "pipe_adapter",
+      "grader": "agent-tasks/pipe_adapter_test.scad",
+      "reference": "agent-tasks/pipe_adapter.ref.scad",
+      "prompt": "Design a 3D-printable pipe reducer in OpenSCAD joining a pipe of 32 mm outside diameter to one of 20 mm outside diameter.\n- module adapter(): axis along z, centred on the z axis, from z = 0 to z = 70.\n- Bottom socket: bore 32.5 mm diameter, 30 mm deep, open at the bottom; the 32 mm pipe slides in from below and stops at z = 30.\n- Top socket: bore 20.5 mm diameter, 25 mm deep (z = 45 to 70), open at the top.\n- Between them a tapered transition; the passage is never narrower than 16 mm, so it is open all the way through.\n- Walls at least 2.5 mm thick everywhere. One solid piece that prints standing on its bottom."
+    },
+    {
+      "id": "gears",
+      "grader": "agent-tasks/gears_test.scad",
+      "reference": "agent-tasks/gears.ref.scad",
+      "prompt": "Design a pair of meshing spur gears in OpenSCAD, without libraries.\n- Module 2 mm, 20 degree pressure angle, involute (or close to involute) teeth, 6 mm thick from z = 0 to z = 6, each with a 5 mm bore on its axis.\n- module gear_a(): 24 teeth, centred on [0, 0].\n- module gear_b(): 12 teeth, centred on [36, 0] (the standard centre distance), turned so its teeth sit in gear_a's gaps: the gears must mesh without overlapping."
+    }
+  ]
+}

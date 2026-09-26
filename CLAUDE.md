@@ -33,6 +33,7 @@ nightly with `--backend=cgal` and `--backend=manifold`.
     scripts/wasm-check.sh [--depths]                 # wasm32 build run in node
     ./target/release/conformance bench [--quick]     # vs all OpenSCAD refs -> progress/bench/
     ./target/release/conformance bench-chart --latest  # PNG summary
+    scripts/agent-eval/run.py --help                  # agent-loop eval (uses claude -p; costs credits)
     ./target/release/conformance manifest [--check]  # after updating .reference
     ./target/release/conformance diff --format ast|echo|csg [PATHS]  # vs the nightly
 

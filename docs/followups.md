@@ -421,6 +421,41 @@ entry when it is done.
   use. Experimental builtins (`roof`, `textmetrics`, ...) have no
   entries, only a note that they are not enabled. (7b-2)
 
+## MCP and the agent eval
+- `neoscad mcp` implements MCP 2026-07-28 statelessly plus the legacy
+  `initialize` handshake, and only the core: no `subscriptions/listen`,
+  no progress notifications (a long render sends nothing until it
+  ends), no logging, no MRTR (`input_required`), no completions. The
+  client's `roots` capability is not read either: the roots are the
+  working directory and `--root`s given at start. (7c)
+- Claude Code (2.1.283) shows the model the JSON of `structuredContent`
+  instead of the text summary when a result has both, so the text is
+  what other clients see. If a client shows both, a result costs about
+  twice its tokens; a flag to send only one would fix that. (7c)
+- Inline `source` is one document per `base_dir` (`inline.scad`), so
+  inline calls take turns rather than running in parallel, and while
+  one runs it shadows a real `inline.scad` in that directory. (7c)
+- `neoscad serve`'s `export` result says nothing when the output
+  cannot be written (exit code 1, no diagnostic: the message is a plain
+  log line). `neoscad mcp` creates the output's directory, which avoids
+  the common case. (7c)
+- The snapshot sheet's header line runs under the legend at the MCP
+  default size (768 px) when `issues` adds check counts. (7c)
+- Tool-description token counts are estimates from byte counts (5,404
+  bytes of name, description and schema); no tokenizer was run. (7c)
+- In the pilot an agent sent inline source with HTML-escaped brackets
+  (`use &lt;model.scad&gt;`) twice and got a bare "syntax error"; a
+  syntax-error hint for `&lt;`/`&gt;`/`&amp;` in the source
+  (`session::diag`) would name the cause. (7c)
+- The pilot is n = 1 per cell (`docs/agent-eval.md`); a real comparison
+  needs several runs per task and condition, more tasks, and a second
+  model. (7c)
+- The agent eval's graders can only express geometry through `@expect`
+  on derived solids (intersections with probes plus a 1 mm³ marker, so
+  "no overlap" measures 1 instead of failing as an empty model). An
+  `@expect empty` or `@expect volume-between` would make them plainer.
+  (7c)
+
 ## WASM
 - Recursion on wasm32 stops at a frame budget calibrated for V8's default
   stack in node 18 (`eval::recursion`): function depth 498 and module

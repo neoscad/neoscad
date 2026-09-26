@@ -47,9 +47,16 @@ impl Host {
     /// messages from them name a plausible path, and a library of the same
     /// name earlier in the path wins as it does in OpenSCAD.
     pub fn from_env() -> Host {
+        Host::from_env_over(Arc::new(StdFs))
+    }
+
+    /// [`Host::from_env`] over another file system than the disk:
+    /// `neoscad mcp` passes one limited to its allowed roots
+    /// (`crate::mcp::roots`), under the bundled libraries, which stay
+    /// readable.
+    pub fn from_env_over(fs: Arc<dyn FileSystem + Send + Sync>) -> Host {
         #[allow(unused_mut)]
         let mut libs = LibraryPath::from_env();
-        let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(StdFs);
         #[cfg(feature = "bundled-assets")]
         let fs: Arc<dyn FileSystem + Send + Sync> = {
             let root = resource_dir().join("libraries");

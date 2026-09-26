@@ -39,6 +39,7 @@ mod export_options;
 mod format;
 mod host;
 mod info;
+mod mcp;
 mod measure;
 mod modeltest;
 mod outcome;
@@ -290,6 +291,10 @@ fn main() -> ExitCode {
         Some(a) if a == "docs" => {
             let rest: Vec<std::ffi::OsString> = args.collect();
             return ExitCode::from(docs::main(rest));
+        }
+        Some(a) if a == "mcp" => {
+            let rest: Vec<std::ffi::OsString> = args.collect();
+            return ExitCode::from(mcp::main(rest));
         }
         Some(a) if a == "serve" => {
             let rest: Vec<std::ffi::OsString> = args.collect();

@@ -144,15 +144,14 @@ fn fail(msg: impl std::fmt::Display) -> Outcome {
     Outcome::fail(EXIT_ERROR, format!("neoscad snapshot: {msg}"))
 }
 
-/// Draw a snapshot as the command line asked (`params` as `main` builds
-/// them), writing the PNG relative to `cwd`: what `neoscad snapshot`
-/// prints, whether it runs here or in the server.
-pub fn execute(
-    session: &session::Session,
+/// The session's snapshot request for `params` (as `main` builds them;
+/// the server and `neoscad mcp` pass theirs), relative to `cwd`, or what
+/// is wrong with them.
+pub fn request(
     params: &Value,
     cwd: &Path,
     progress: Option<session::Progress>,
-) -> Outcome {
+) -> Result<SnapshotRequest, String> {
     let s = |k: &str| params.get(k).and_then(Value::as_str);
     let b = |k: &str| params.get(k).and_then(Value::as_bool).unwrap_or(false);
     let strings = |k: &str| -> Vec<String> {
@@ -165,18 +164,18 @@ pub fn execute(
             .collect()
     };
     let Some(model) = s("model") else {
-        return fail("no model given");
+        return Err("no model given".into());
     };
     let size = s("size").unwrap_or("1024x1024");
     let Some(size) = parse_size(size) else {
-        return fail(format!(
+        return Err(format!(
             "--size must be WxH, 64 to 8192 each (got '{size}')"
         ));
     };
     let lighting = match s("lighting").unwrap_or("headlight") {
         "headlight" => render::Lighting::Headlight,
         "openscad" => render::Lighting::OpenScad,
-        l => return fail(format!("unknown --lighting '{l}' (headlight or openscad)")),
+        l => return Err(format!("unknown --lighting '{l}' (headlight or openscad)")),
     };
     let output = s("output").map(str::to_string).unwrap_or_else(|| {
         let stem = Path::new(model)
@@ -200,19 +199,13 @@ pub fn execute(
     // alongside, as for `check`), or an object of settings.
     let issues = match params.get("issues") {
         None | Some(Value::Null) | Some(Value::Bool(false)) => None,
-        Some(Value::Bool(true)) => match crate::check::settings_of(params) {
-            Ok(s) => Some(s),
-            Err(e) => return fail(e),
-        },
-        Some(o @ Value::Object(_)) => match crate::check::settings_of(o) {
-            Ok(s) => Some(s),
-            Err(e) => return fail(e),
-        },
-        Some(_) => return fail("issues must be true or an object of check settings"),
+        Some(Value::Bool(true)) => Some(crate::check::settings_of(params)?),
+        Some(o @ Value::Object(_)) => Some(crate::check::settings_of(o)?),
+        Some(_) => return Err("issues must be true or an object of check settings".into()),
     };
-    let req = SnapshotRequest {
+    Ok(SnapshotRequest {
         run,
-        output: output.clone(),
+        output,
         views: strings("views"),
         size,
         dims: b("dims"),
@@ -221,7 +214,24 @@ pub fn execute(
         lighting,
         highlight: strings("highlight"),
         issues,
+    })
+}
+
+/// Draw a snapshot as the command line asked (`params` as `main` builds
+/// them), writing the PNG relative to `cwd`: what `neoscad snapshot`
+/// prints, whether it runs here or in the server.
+pub fn execute(
+    session: &session::Session,
+    params: &Value,
+    cwd: &Path,
+    progress: Option<session::Progress>,
+) -> Outcome {
+    let req = match request(params, cwd, progress) {
+        Ok(r) => r,
+        Err(m) => return fail(m),
     };
+    let output = req.output.clone();
+    let b = |k: &str| params.get(k).and_then(Value::as_bool).unwrap_or(false);
     let snap = match session.snapshot(&req) {
         Ok(s) => s,
         Err(SnapshotError::Failed(m)) => return fail(m),
