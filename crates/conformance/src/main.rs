@@ -14,7 +14,9 @@
 mod cmake;
 mod ctx;
 mod diff;
+mod geometry;
 mod grid;
+mod image_compare;
 mod manifest;
 mod normalize;
 mod prepare;
@@ -22,6 +24,7 @@ mod record;
 mod run;
 mod sha256;
 mod showcase;
+mod validatestl;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -68,6 +71,9 @@ enum Cmd {
         /// at an OpenSCAD build checks the harness itself.
         #[arg(long)]
         binary: Option<PathBuf>,
+        /// Renderer for tier 3 geometry cases: draws the exported meshes.
+        #[arg(long, default_value = diff::DEFAULT_REFERENCE)]
+        renderer: PathBuf,
         /// Rewrite conformance/baseline.json from the current passes.
         #[arg(long)]
         update_baseline: bool,
@@ -94,6 +100,12 @@ enum Cmd {
     },
     /// Check that every showcase input and expected image exists.
     Showcase,
+    /// Compare two PNGs as OpenSCAD's tests/image_compare.py does; exits 0
+    /// when they match.
+    ImageCompare {
+        expected: PathBuf,
+        actual: PathBuf,
+    },
     /// Differential test: run a reference OpenSCAD and neoscad on each input
     /// and compare exit status, output and the format's diagnostics.
     Diff {
@@ -136,7 +148,7 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
     let ctx = Ctx::discover()?;
     match cmd {
         Cmd::Manifest { check } => manifest_cmd(&ctx, check),
-        Cmd::Run { tier, filter, verbose, timeout, jobs, binary, update_baseline, record, grid } => {
+        Cmd::Run { tier, filter, verbose, timeout, jobs, binary, renderer, update_baseline, record, grid } => {
             if timeout.is_nan() || timeout <= 0.0 {
                 return Err("--timeout must be positive".into());
             }
@@ -147,6 +159,7 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
                 timeout: Duration::from_secs_f64(timeout),
                 jobs,
                 binary,
+                renderer,
                 update_baseline,
                 record,
                 grid,
@@ -155,6 +168,16 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
         }
         Cmd::Grid { dirs, all, out, force } => grid::command(&ctx, &dirs, all, out.as_deref(), force),
         Cmd::Showcase => Ok(u8::from(showcase::check(&ctx)? > 0)),
+        Cmd::ImageCompare { expected, actual } => {
+            let c = image_compare::compare_files(&expected, &actual)?;
+            if c.passed() {
+                println!("3x3 image block comparison successfully passed.");
+                Ok(0)
+            } else {
+                println!("{}", c.describe());
+                Ok(1)
+            }
+        }
         Cmd::Diff { format, binary_ref, binary, jobs, timeout, verbose, paths } => {
             if timeout.is_nan() || timeout <= 0.0 {
                 return Err("--timeout must be positive".into());
@@ -208,12 +231,15 @@ fn manifest_cmd(ctx: &Ctx, check: bool) -> Result<u8, String> {
     for d in eval.messages.iter().chain(&m.diagnostics) {
         eprintln!("note: {d}");
     }
-    println!("{:<4} {:<9} {:>6} {:>6} {:>8} {:>6} {:>8}", "tier", "name", "total", "text", "pending", "skip", "no-exp");
+    println!(
+        "{:<4} {:<9} {:>6} {:>6} {:>8} {:>8} {:>6} {:>8}",
+        "tier", "name", "total", "text", "geometry", "pending", "skip", "no-exp"
+    );
     for (t, c) in &m.counts {
         let name = t.parse::<usize>().ok().and_then(|i| manifest::TIER_NAMES.get(i)).copied().unwrap_or("?");
         println!(
-            "{:<4} {:<9} {:>6} {:>6} {:>8} {:>6} {:>8}",
-            t, name, c.total, c.text, c.pending, c.skip, c.missing_expected
+            "{:<4} {:<9} {:>6} {:>6} {:>8} {:>8} {:>6} {:>8}",
+            t, name, c.total, c.text, c.geometry, c.pending, c.skip, c.missing_expected
         );
     }
     println!("skip reasons:");

@@ -31,6 +31,11 @@ pub const TIER_NAMES: [&str; 6] = ["Parse", "Evaluate", "Tree", "Geometry", "Ima
 pub enum Runner {
     /// Run neoscad and compare text output as `test_cmdline_tool.py` does.
     Text,
+    /// Tier 3 geometry test (see `geometry.rs`): neoscad exports the
+    /// model's mesh, the pinned OpenSCAD nightly renders it with the test's
+    /// arguments, and the PNG is compared as `image_compare.py` does; or,
+    /// for `stlexportsanitytest.py`, the exported STL is validated.
+    Geometry,
     /// In scope, but the comparison is not implemented yet (tiers 3-5).
     Pending,
     /// Out of scope; `skip_reason` says why.
@@ -80,9 +85,11 @@ pub struct Case {
 pub struct TierCounts {
     pub total: usize,
     pub text: usize,
+    #[serde(default)]
+    pub geometry: usize,
     pub pending: usize,
     pub skip: usize,
-    /// Runnable cases whose expected file does not exist in the checkout.
+    /// Runnable (text or geometry) cases whose expected file does not exist in the checkout.
     #[serde(default)]
     pub missing_expected: usize,
 }
@@ -182,6 +189,8 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
             Runner::Skip
         } else if tier <= 2 && r.kind == RegKind::Cmdline && r.openscad && r.script.is_none() {
             Runner::Text
+        } else if is_geometry(r, tier) {
+            Runner::Geometry
         } else {
             Runner::Pending
         };
@@ -215,8 +224,12 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
         let c = counts.entry(t.tier.to_string()).or_default();
         c.total += 1;
         match t.runner {
-            Runner::Text => {
-                c.text += 1;
+            Runner::Text | Runner::Geometry => {
+                if t.runner == Runner::Text {
+                    c.text += 1;
+                } else {
+                    c.geometry += 1;
+                }
                 let exists = t
                     .expected
                     .as_deref()
@@ -280,6 +293,24 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
             .map(|d| d.replace(ref_root, "{REF}"))
             .collect(),
         tests,
+    }
+}
+
+/// A tier 3 test the geometry runner handles: a PNG from a direct
+/// `--render` of the input (the runner substitutes a mesh export and has the
+/// nightly render it) or from `export_import_pngtest.py`, whose export step
+/// is exactly what neoscad is being tested on; and
+/// `stlexportsanitytest.py`, which validates an exported STL.
+/// `export_pngtest.py` (PDF through Ghostscript), the SVG re-export tests
+/// and `export-param` stay pending.
+fn is_geometry(r: &Registration, tier: u8) -> bool {
+    if tier != 3 || r.kind != RegKind::Cmdline || r.stdio {
+        return false;
+    }
+    match &r.script {
+        None => r.openscad && r.suffix == "png",
+        Some(s) if s.ends_with("/export_import_pngtest.py") => r.suffix == "png",
+        Some(s) => s.ends_with("/stlexportsanitytest.py"),
     }
 }
 

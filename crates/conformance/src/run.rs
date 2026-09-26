@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -13,6 +12,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::ctx::{Ctx, relpath};
+use crate::geometry::{CaseEnv, GeometryEnv, Result3};
 use crate::manifest::{Case, Manifest, Runner, TIER_NAMES};
 use crate::normalize;
 
@@ -69,6 +69,8 @@ pub struct RunOptions {
     pub timeout: Duration,
     pub jobs: Option<usize>,
     pub binary: Option<PathBuf>,
+    /// Renders tier 3 meshes (the pinned OpenSCAD nightly).
+    pub renderer: PathBuf,
     pub update_baseline: bool,
     pub record: bool,
     /// With `record`, also write the snapshot's grid.png.
@@ -136,7 +138,10 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
         .filter(|c| opts.filter.as_ref().is_none_or(|f| c.id.contains(f.as_str())))
         .collect();
 
-    let env = Env::new(ctx, &manifest, &binary, opts.timeout);
+    let mut env = Env::new(ctx, &manifest, &binary, opts.timeout);
+    if selected.iter().any(|c| c.runner == Runner::Geometry) {
+        env.geometry = Some(GeometryEnv::new(ctx, &opts.renderer)?);
+    }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.jobs.unwrap_or(0))
         .build()
@@ -147,6 +152,7 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
             .par_iter()
             .map(|c| match c.runner {
                 Runner::Text => env.run_text(c),
+                Runner::Geometry => env.run_geometry(c),
                 Runner::Pending => outcome(c, Status::Pending, None),
                 Runner::Skip => outcome(c, Status::Skip, c.skip_reason.clone()),
             })
@@ -161,6 +167,9 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
 
     if opts.verbose {
         print_failures(&outcomes);
+    }
+    if let Some(g) = &env.geometry {
+        print_geometry_report(&manifest, &outcomes, g);
     }
     print_summary(&per_tier, wall, &binary);
 
@@ -238,6 +247,7 @@ struct Env {
     default_exclude: Option<String>,
     font_path: PathBuf,
     library_path: PathBuf,
+    geometry: Option<GeometryEnv>,
 }
 
 impl Env {
@@ -254,6 +264,7 @@ impl Env {
             default_exclude: manifest.default_exclude_line.clone(),
             font_path: ctx.ref_root.join("tests/data/ttf"),
             library_path: ctx.ref_root.join("libraries"),
+            geometry: None,
         }
     }
 
@@ -288,6 +299,37 @@ impl Env {
         o
     }
 
+    /// One tier 3 geometry case (see `geometry.rs`). A failure of a case
+    /// listed in `conformance/tier3-limits.json` is a known artefact of the
+    /// pipeline, so it is reported as skipped with the listed reason.
+    fn run_geometry(&self, c: &Case) -> Outcome {
+        let Some(image) = &self.geometry else {
+            return outcome(c, Status::Fail, Some("no renderer configured".into()));
+        };
+        let env = CaseEnv {
+            ref_root: &self.ref_root,
+            ref_str: &self.ref_str,
+            work_dir: &self.work_dir,
+            actual_dir: &self.actual_dir,
+            binary: &self.binary,
+            timeout: self.timeout,
+            font_path: &self.font_path,
+            library_path: &self.library_path,
+        };
+        let started = Instant::now();
+        let result = image.run(&env, c);
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let mut o = match result {
+            Result3::Pass => outcome(c, Status::Pass, None),
+            Result3::Fail(reason) => match image.limits.get(&c.id) {
+                Some(limit) => outcome(c, Status::Skip, Some(format!("harness limit: {limit}"))),
+                None => outcome(c, Status::Fail, Some(reason)),
+            },
+        };
+        o.ms = Some((ms * 10.0).round() / 10.0);
+        o
+    }
+
     fn spawn_and_wait(
         &self,
         c: &Case,
@@ -300,13 +342,10 @@ impl Env {
         // test_cmdline_tool.py opens the output file before running the
         // tool, so it exists (empty) even if the tool never writes it.
         let out_file = File::create(actual).map_err(|e| format!("{}: {e}", actual.display()))?;
-        let err_file = File::create(stderr_path).map_err(|e| e.to_string())?;
-
         let mut cmd = Command::new(&self.binary);
         cmd.current_dir(&self.work_dir)
             .env("OPENSCAD_FONT_PATH", &self.font_path)
-            .env("OPENSCADPATH", &self.library_path)
-            .stderr(err_file);
+            .env("OPENSCADPATH", &self.library_path);
         if c.stdio {
             let stdin = File::open(input).map_err(|e| e.to_string())?;
             cmd.arg("-").stdin(stdin).stdout(out_file);
@@ -324,36 +363,7 @@ impl Env {
         } else {
             cmd.arg("-o").arg(actual);
         }
-
-        let mut child = cmd.spawn().map_err(|e| format!("cannot run {}: {e}", self.binary.display()))?;
-        let start = Instant::now();
-        // Start polling finely so the recorded time of a fast case is not
-        // dominated by the poll interval, then back off for slow ones.
-        let mut poll = Duration::from_micros(200);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(s)) => break s,
-                Ok(None) if start.elapsed() > self.timeout => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("timeout after {:.0}s", self.timeout.as_secs_f64()));
-                }
-                Ok(None) => {
-                    std::thread::sleep(poll);
-                    poll = (poll * 2).min(Duration::from_millis(10));
-                }
-                Err(e) => return Err(format!("wait failed: {e}")),
-            }
-        };
-        if !status.success() {
-            let first = File::open(stderr_path)
-                .ok()
-                .and_then(|f| BufReader::new(f).lines().map_while(Result::ok).find(|l| !l.trim().is_empty()))
-                .unwrap_or_default();
-            let code = status.code().map_or("signal".to_string(), |c| format!("exit {c}"));
-            return Err(if first.is_empty() { code } else { format!("{code}: {first}") });
-        }
-        Ok(())
+        crate::geometry::exec(&mut cmd, self.timeout, stderr_path).map_err(|f| f.reason)
     }
 
     /// The exclusion regex for `c`; mirrors `Manifest::exclude_line`.
@@ -403,6 +413,58 @@ fn print_failures(outcomes: &[Outcome]) {
     if outcomes.iter().any(|o| o.status == Status::Fail) {
         println!();
     }
+}
+
+/// Tier 3 geometry results by registration group and dimension, then the
+/// failure reasons (with the exit/stderr detail cut off so similar causes
+/// group together).
+fn print_geometry_report(manifest: &Manifest, outcomes: &[Outcome], image: &GeometryEnv) {
+    let cases: BTreeMap<&str, &Case> = manifest.tests.iter().map(|c| (c.id.as_str(), c)).collect();
+    let mut by_cat: BTreeMap<(String, &str), Counts> = BTreeMap::new();
+    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+    let mut limit_passes = Vec::new();
+    for o in outcomes {
+        let Some(c) = cases.get(o.id.as_str()) else { continue };
+        if c.runner != Runner::Geometry {
+            continue;
+        }
+        by_cat.entry(crate::geometry::category(c)).or_default().add(o.status);
+        if o.status == Status::Fail {
+            // Group by cause: drop locations and the numbers of image diffs.
+            let r = o.reason.as_deref().unwrap_or("?");
+            let r = r.split(" (in file").next().unwrap_or(r);
+            let r = if r.starts_with("image differs") { "image differs" } else { r };
+            let r: String = r.chars().take(90).collect();
+            *reasons.entry(r).or_default() += 1;
+        }
+        if o.status == Status::Pass && image.limits.contains_key(&o.id) {
+            limit_passes.push(o.id.as_str());
+        }
+    }
+    println!("tier 3 geometry cases (renderer {}):", image.renderer.display());
+    println!("  {:<36} {:>3} {:>6} {:>6} {:>6} {:>6}", "group", "dim", "pass", "fail", "skip", "total");
+    let mut dims: BTreeMap<&str, Counts> = BTreeMap::new();
+    for ((g, d), c) in &by_cat {
+        println!("  {:<36} {:>3} {:>6} {:>6} {:>6} {:>6}", g, d, c.pass, c.fail, c.skip, c.total);
+        let t = dims.entry(d).or_default();
+        t.pass += c.pass;
+        t.fail += c.fail;
+        t.skip += c.skip;
+        t.total += c.total;
+    }
+    for (d, c) in &dims {
+        println!("  {:<36} {:>3} {:>6} {:>6} {:>6} {:>6}", "all", d, c.pass, c.fail, c.skip, c.total);
+    }
+    let mut reasons: Vec<_> = reasons.into_iter().collect();
+    reasons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    println!("  failure reasons:");
+    for (r, n) in reasons.iter().take(25) {
+        println!("  {n:>5}  {r}");
+    }
+    if !limit_passes.is_empty() {
+        println!("  listed as harness limits but passed with this binary: {}", limit_passes.join(", "));
+    }
+    println!();
 }
 
 fn print_summary(per_tier: &BTreeMap<u8, Counts>, wall: Duration, binary: &Path) {

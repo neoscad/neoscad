@@ -41,5 +41,6 @@ against the nightly, which is how the harness itself is checked.
 - Work is delegated to the `builder` (diffs) and `auditor` (documents)
   agents in `.claude/agents`, one at a time. Agents never commit; the
   manager session reviews and commits each logical step.
+- Deferred issues go in `docs/followups.md`.
 - Large files: follow the `shunt` skill (`.claude/skills/shunt`). The hooks
   in `.claude/hooks` block whole reads of files over 350 lines.

@@ -4,8 +4,9 @@
 //! `desc.add_options()` block) so that OpenSCAD's regression suite can drive
 //! this binary unchanged: the conformance harness passes exactly the
 //! arguments `tests/CMakeLists.txt` registers. The `.ast` export (with
-//! customizer parameter sets), the `.echo` export (evaluation messages) and
-//! the `.csg` and `.term` node-tree exports are implemented; every other
+//! customizer parameter sets), the `.echo` export (evaluation messages),
+//! the `.csg` and `.term` node-tree exports and the 3D mesh exports (`.stl`
+//! ASCII and binary, `.off`, `.obj`) are implemented; every other
 //! output mode reports that it is missing and
 //! exits with [`EXIT_NOT_IMPLEMENTED`], which the harness can tell apart
 //! from a crash or a usage error.
@@ -276,6 +277,35 @@ fn run_cli(cli: Cli) -> ExitCode {
             Err(code) => return ExitCode::from(code),
         };
         return ExitCode::from(run::export_tree(&job, &options, &tree));
+    }
+    let mesh: Option<Vec<run::MeshFormat>> = formats
+        .iter()
+        .map(|(id, _)| match *id {
+            "stl" | "asciistl" => Some(run::MeshFormat::AsciiStl),
+            "binstl" => Some(run::MeshFormat::BinaryStl),
+            "off" => Some(run::MeshFormat::Off),
+            "obj" => Some(run::MeshFormat::Obj),
+            _ => None,
+        })
+        .collect();
+    if let Some(mesh) = mesh {
+        let mut options = match eval_options(&cli) {
+            Ok(o) => o,
+            Err(code) => return ExitCode::from(code),
+        };
+        // `$preview` is false for every geometry export
+        // (`fileformat::canPreview`, `openscad.cc:646-650`).
+        options.preview = false;
+        if let Some(b) = cli.backend.as_deref()
+            && !b.eq_ignore_ascii_case("manifold")
+        {
+            eprintln!("neoscad: only the manifold backend is implemented (got --backend={b})");
+            return ExitCode::from(EXIT_NOT_IMPLEMENTED);
+        }
+        // `--render=force` (and the legacy `--render=cgal`) converts a mesh
+        // result to a solid before export (`openscad.cc:1040-1041`).
+        let force = matches!(cli.render.as_deref(), Some("force" | "cgal"));
+        return ExitCode::from(run::export_mesh(&job, &options, &mesh, force));
     }
 
     for (id, name) in &formats {

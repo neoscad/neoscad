@@ -1,0 +1,28 @@
+[package]
+name = "neoscad-geom"
+description = "Geometry for NeoSCAD: primitives, the Manifold kernel, CSG evaluation of the node tree and mesh export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "geom"
+
+[features]
+# Evaluate independent subtrees on rayon's pool and let the kernel use its
+# own determinism-preserving parallelism. Off for wasm32, where both run
+# serially with identical results.
+default = ["parallel"]
+parallel = ["dep:rayon", "manifold-rust/parallel"]
+
+[dependencies]
+eval = { package = "neoscad-eval", path = "../eval" }
+lang = { package = "neoscad-lang", path = "../lang" }
+# Pinned exactly: the port tracks Manifold C++ v3.5.0 and its output
+# (triangle topology, run order) is part of what the tier 3 images see.
+manifold-rust = { version = "=0.13.1", default-features = false }
+rayon = { workspace = true, optional = true }
+sha2.workspace = true
+
+[lints]
+workspace = true

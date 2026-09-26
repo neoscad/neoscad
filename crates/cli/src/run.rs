@@ -1,6 +1,6 @@
 //! Running a program through the front end and evaluator, the way
-//! `openscad.cc`'s `cmdline()` does, and the `.ast`, `.echo`, `.csg` and
-//! `.term` exports.
+//! `openscad.cc`'s `cmdline()` does, and the `.ast`, `.echo`, `.csg`,
+//! `.term` and mesh (`.stl`, `.off`, `.obj`) exports.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,9 @@ use lang::{Program, parse_program};
 
 /// OpenSCAD's general failure exit code.
 const EXIT_ERROR: u8 = 1;
+
+/// A feature of a later phase (see `main.rs`).
+const EXIT_NOT_IMPLEMENTED: u8 = 3;
 
 /// One command-line invocation's inputs.
 #[derive(Debug)]
@@ -269,4 +272,105 @@ pub fn export_echo(job: &Job<'_>, options: &Options) -> u8 {
         }
     }
     code
+}
+
+/// A 3D mesh export format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshFormat {
+    AsciiStl,
+    BinaryStl,
+    Off,
+    Obj,
+}
+
+/// `-o x.stl|x.off|x.obj`: evaluate, build the geometry, and export it,
+/// following the geometry branch of `openscad.cc`'s `do_export`
+/// (`:476-541`): messages on stderr, a refusal with exit 1 when the result
+/// is not 3D or is empty (`checkAndExport`), then the render summary.
+pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat], force: bool) -> u8 {
+    let started = std::time::Instant::now();
+    let paths = Paths::of(job);
+    let mut con = Console::new(std::io::stderr(), paths.main_dir.clone(), job.quiet);
+    let loaded = match load(job, &paths, &mut con) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    let ev = evaluate(&loaded, &paths, options, &mut con);
+    let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+    let keys = eval::dump::Keys::new(&ev.root);
+    let opts = geom::RenderOptions { force, ..Default::default() };
+    let rendered = geom::Renderer::new().render(top, &keys, opts);
+    let rendered = match rendered {
+        Ok(r) => r,
+        Err(u) => {
+            let mut line = format!("neoscad: {}() is not implemented yet", u.what);
+            if let Some(l) = &u.loc
+                && let Some(sources) = unit_sources(&loaded, l.unit)
+            {
+                let rel = lang::diag::relative_path(sources.path(l.span.file), &paths.main_dir);
+                line.push_str(&format!(" (in file {}, line {})", rel.display(), l.line));
+            }
+            eprintln!("{line}");
+            return EXIT_NOT_IMPLEMENTED;
+        }
+    };
+    for m in &rendered.messages {
+        let mut diag = lang::diag::Diagnostic::new(lang::diag::DiagCode::Geometry, m.severity, m.text.clone());
+        let mut sources = None;
+        if let Some(l) = &m.loc {
+            diag = diag.at(l.span, l.line);
+            sources = unit_sources(&loaded, l.unit);
+        }
+        use eval::Output;
+        con.message(&eval::Message { diag, text: m.text.as_bytes(), sources });
+    }
+    // `if (!root_geom) root_geom = std::make_shared<PolySet>(3);`
+    let root = rendered.geometry;
+    if force && root.as_ref().is_none_or(|g| g.dimension() == 3) {
+        con.print(None, b"Converted to backend-specific geometry");
+    }
+    if root.as_ref().is_some_and(|g| g.dimension() != 3) {
+        con.print(None, b"Current top level object is not a 3D object.");
+        return EXIT_ERROR;
+    }
+    let Some(root) = root.filter(|g| !g.is_empty()) else {
+        con.print(None, b"Current top level object is empty.");
+        return EXIT_ERROR;
+    };
+    let ps = geom::export::as_polyset(&root, &opts.scheme).expect("3D geometry has a mesh");
+    for (target, format) in job.outputs.iter().zip(formats) {
+        let mut warnings = Vec::new();
+        let data = match format {
+            MeshFormat::AsciiStl => geom::export::stl(&ps, false, &mut warnings),
+            MeshFormat::BinaryStl => geom::export::stl(&ps, true, &mut warnings),
+            MeshFormat::Off => geom::export::off(&ps, &mut warnings),
+            MeshFormat::Obj => geom::export::obj(&ps, &mut warnings),
+        };
+        for w in warnings {
+            con.print(Some(Severity::Warning), format!("WARNING: {w}").as_bytes());
+        }
+        if let Err(code) = write_output(target, &data) {
+            return code;
+        }
+    }
+    // `RenderStatistic::printAll`: cache size, time, then the object.
+    con.print(None, format!("Geometries in cache: {}", rendered.cache_entries).as_bytes());
+    let ms = started.elapsed().as_millis();
+    con.print(
+        None,
+        format!("Total rendering time: {}:{:02}:{:02}.{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000).as_bytes(),
+    );
+    for l in geom::export::summary(&root) {
+        con.print(None, l.as_bytes());
+    }
+    0
+}
+
+/// The source map of evaluation unit `unit`: 0 is the main program, `1 + i`
+/// the i-th library, in the order `evaluate` passed them.
+fn unit_sources(l: &Loaded, unit: u32) -> Option<&lang::source::SourceMap> {
+    if unit == 0 {
+        return Some(&l.program.sources);
+    }
+    l.libraries.get(unit as usize - 1).and_then(|lib| lib.program.as_ref()).map(|p| &p.sources)
 }

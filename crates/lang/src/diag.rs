@@ -100,6 +100,9 @@ pub enum DiagCode {
     ExperimentalFeature,
     /// Any other evaluation-time message.
     Evaluation,
+    /// A message from building geometry (render time): mixed dimensions,
+    /// invalid transforms, meshes that are not manifold.
+    Geometry,
 }
 
 impl DiagCode {
@@ -136,6 +139,7 @@ impl DiagCode {
             DiagCode::Overwrite => "overwrite",
             DiagCode::ExperimentalFeature => "experimental-feature",
             DiagCode::Evaluation => "evaluation",
+            DiagCode::Geometry => "geometry",
         }
     }
 }

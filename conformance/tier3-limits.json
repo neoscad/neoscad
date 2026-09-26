@@ -1,0 +1,6 @@
+{
+  "comment": "Tier 3 image cases that fail even when the OpenSCAD nightly produces the mesh itself (conformance run --tier 3 --binary <nightly>): artefacts of exporting a mesh and rendering it again, not geometry bugs. A listed case that fails is reported as skipped with this reason; one that passes counts as a pass, and the run lists it so the entry can be removed.",
+  "limits": {
+    "render-manifold_issue5216": "color() with no arguments: the render falls back to the scheme colour, but OFF export writes the invalid colour as 0 0 0 0 ('WARNING: Invalid color in OFF export', src/io/export_off.cc:72-74), so the re-import draws it transparent"
+  }
+}
