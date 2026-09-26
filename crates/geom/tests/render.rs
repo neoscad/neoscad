@@ -327,3 +327,29 @@ fn resize_auto_scales_like_openscad() {
     };
     assert_eq!(p.bounds(), Some(([0.0, 0.0], [10.0, 20.0])));
 }
+
+/// QuickHull folded both of these (finding 7 of the engine audit): the
+/// hull came out non-convex and too small. The expected volumes are the
+/// nightly's with CGAL, measured on its binary STL export (single
+/// precision, so good to a few 1e-7 relative); the folded results were
+/// 10780.23 and 9751.29.
+#[test]
+fn folded_hulls_are_repaired() {
+    for (src, expected) in [
+        (
+            "hull() for (x=[-20,20], y=[-5,5], z=[-2,2]) translate([x,y,z]) sphere(r=4.5, $fn=40);",
+            10780.8115,
+        ),
+        (
+            "minkowski(){cube([30,20,5],center=true); sphere(3,$fn=48);}",
+            9751.4192,
+        ),
+    ] {
+        let (g, _) = render_with(&Renderer::new(), src, false);
+        let Some(Geometry::Manifold(m)) = g else {
+            panic!("no solid for {src}");
+        };
+        let v = m.manifold.volume();
+        assert!((v - expected).abs() < 1e-2, "{src}: volume {v}");
+    }
+}

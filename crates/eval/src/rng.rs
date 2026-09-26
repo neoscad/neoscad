@@ -70,9 +70,12 @@ impl Mt19937 {
         }
     }
 
-    /// `std::uniform_real_distribution<double>(min, max)(*this)`.
+    /// `std::uniform_real_distribution<double>(min, max)(*this)`: libc++
+    /// computes `(b - a) * generate_canonical(g) + a`, which the arm64
+    /// nightly fuses (see `fma`). (`canonical`'s own multiply-add,
+    /// `hi * 2^32 + lo`, is exact either way.)
     pub fn uniform(&mut self, min: f64, max: f64) -> f64 {
-        self.canonical() * (max - min) + min
+        crate::fma::mul_add(self.canonical(), max - min, min)
     }
 }
 

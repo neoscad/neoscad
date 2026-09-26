@@ -16,24 +16,26 @@
 //!   them in the same order, since QuickHull's triangulation of a
 //!   face with more than three vertices depends on it.
 
-use manifold_rust::linalg::Vec3;
+use manifold_rust::impl_mesh::ManifoldImpl;
+use manifold_rust::linalg::{Vec3, cross, dot};
+use manifold_rust::quickhull;
 
 use crate::Geometry;
 use crate::polygon2d::{Outline, Polygon2d};
 
 /// `Left_turn_2` of `Simple_cartesian<double>`: `orientationC2` is the sign
 /// of `determinant2x2(qx-px, qy-py, rx-px, ry-py)`, computed as
-/// `a00*a11 - a10*a01`. Apple clang contracts that into one fused
-/// multiply-subtract with the second product rounded first, so the same
-/// form is used here; a plain evaluation can flip the sign of a
-/// near-collinear triple.
+/// `a00*a11 - a10*a01`. The arm64 nightly contracts that into one fused
+/// multiply-subtract with the second product rounded first (the x86_64
+/// build does not; see `eval::fma`), so the same form is used here; a
+/// plain evaluation can flip the sign of a near-collinear triple.
 fn left_turn(p: [f64; 2], q: [f64; 2], r: [f64; 2]) -> bool {
     orientation(p, q, r) > 0.0
 }
 
 fn orientation(p: [f64; 2], q: [f64; 2], r: [f64; 2]) -> f64 {
     let (a00, a01, a10, a11) = (q[0] - p[0], q[1] - p[1], r[0] - p[0], r[1] - p[1]);
-    a00.mul_add(a11, -(a10 * a01))
+    eval::fma::mul_sub_mul(a00, a11, a10, a01)
 }
 
 fn less_xy(a: [f64; 2], b: [f64; 2]) -> bool {
@@ -236,6 +238,147 @@ pub fn hull_points(children: &[Geometry], out: &mut Vec<Vec3>) {
             Geometry::Polygon2d(_) => {}
         }
     }
+}
+
+/// `Manifold::Hull` of `points`, with its result checked.
+///
+/// Manifold's QuickHull (C++ and Rust alike) sometimes returns a folded
+/// mesh: coplanar triangles with opposite normals, and hull vertices well
+/// above some face planes. `minkowski() { cube([30,20,5], center=true);
+/// sphere(3, $fn=48); }` came out 0.13 too small with a vertex 2.0 above a
+/// face, and about one rounded-box hull or minkowski sum in 30 folds; the
+/// nightly fails the same way on other inputs and exports such meshes as
+/// they are. Here a hull that fails [`locally_convex`] is built again from
+/// its own vertices: first as they are, then sorted, then in reverse, since
+/// QuickHull's result depends on the order. A rebuild must pass the full
+/// [`convex`] check, and any input point it leaves outside is added back
+/// before the next round. It all depends only on the points, so the repair
+/// is deterministic.
+pub fn hull_3d(points: &[Vec3]) -> ManifoldImpl {
+    let first = quickhull::convex_hull(points);
+    if locally_convex(&first) {
+        return first;
+    }
+    let mut best = first;
+    let mut pts = best.vert_pos.clone();
+    for round in 0..MAX_REPAIRS {
+        match round % 3 {
+            1 => pts.sort_by(|a, b| {
+                a.x.total_cmp(&b.x)
+                    .then(a.y.total_cmp(&b.y))
+                    .then(a.z.total_cmp(&b.z))
+            }),
+            2 => pts.reverse(),
+            _ => {}
+        }
+        let imp = quickhull::convex_hull(&pts);
+        if convex(&imp) {
+            let planes = planes(&imp);
+            let outside: Vec<Vec3> = points
+                .iter()
+                .copied()
+                .filter(|&p| !below(&planes, p))
+                .collect();
+            if outside.is_empty() {
+                return imp;
+            }
+            pts = imp.vert_pos.clone();
+            pts.extend(outside);
+        } else {
+            pts = imp.vert_pos.clone();
+        }
+        best = imp;
+    }
+    best
+}
+
+/// Rebuilds [`hull_3d`] tries before it keeps what it has.
+const MAX_REPAIRS: usize = 6;
+
+/// The distance a point may lie above a face plane and still count as on
+/// it: rounding in the hull's own arithmetic, relative to its size.
+fn tolerance(imp: &ManifoldImpl) -> f64 {
+    let scale = imp.vert_pos.iter().fold(0.0f64, |m, p| {
+        m.max(p.x.abs()).max(p.y.abs()).max(p.z.abs())
+    });
+    1e-9 * scale
+}
+
+/// Face planes as (corner, unnormalised normal, allowed height times the
+/// normal's length); degenerate triangles have no plane and are skipped.
+fn planes(imp: &ManifoldImpl) -> Vec<(Vec3, Vec3, f64)> {
+    let v = &imp.vert_pos;
+    let tol = tolerance(imp);
+    imp.halfedge
+        .chunks(3)
+        .filter_map(|t| {
+            let [a, b, c] = [0, 1, 2].map(|k| v[t[k].start_vert as usize]);
+            let n = cross(b - a, c - a);
+            let len = dot(n, n).sqrt();
+            (len > 0.0).then_some((a, n, tol * len))
+        })
+        .collect()
+}
+
+/// Whether every vertex lies on or below every face plane.
+fn convex(imp: &ManifoldImpl) -> bool {
+    let planes = planes(imp);
+    imp.vert_pos.iter().all(|&p| below(&planes, p))
+}
+
+/// The quick test [`hull_3d`] runs on every hull, linear in its size: at
+/// every edge the far corner of each neighbouring triangle is on or below
+/// the other's plane, the two are not folded onto each other (opposite
+/// normals, the shape of every failure seen), and no vertex has more than
+/// a full turn of face angles around it. A closed surface that is convex
+/// at every edge and vertex bounds a convex solid, so this matches the
+/// all-pairs [`convex`] check at a fraction of its cost: on a minkowski
+/// sum with a 4,900-vertex hull, the all-pairs check took the whole render
+/// from 9 ms to 37 ms, this one to 10 ms. The two agreed on all 300 random
+/// rounded-box hulls and minkowski sums tried, 10 of them folded.
+fn locally_convex(imp: &ManifoldImpl) -> bool {
+    let v = &imp.vert_pos;
+    let he = &imp.halfedge;
+    let tol = tolerance(imp);
+    let corner = |e: usize| v[he[e].start_vert as usize];
+    let mut turn = vec![0.0f64; v.len()];
+    for t in 0..he.len() / 3 {
+        for k in 0..3 {
+            let a = corner(3 * t + k);
+            let (x, y) = (
+                corner(3 * t + (k + 1) % 3) - a,
+                corner(3 * t + (k + 2) % 3) - a,
+            );
+            let c = cross(x, y);
+            turn[he[3 * t + k].start_vert as usize] += dot(c, c).sqrt().atan2(dot(x, y));
+        }
+    }
+    if turn.iter().any(|&a| a > std::f64::consts::TAU + 1e-9) {
+        return false;
+    }
+    let plane = |t: usize| {
+        let a = corner(3 * t);
+        let n = cross(corner(3 * t + 1) - a, corner(3 * t + 2) - a);
+        (a, n, dot(n, n).sqrt())
+    };
+    he.iter().enumerate().all(|(i, h)| {
+        let j = h.paired_halfedge as usize;
+        if j < i {
+            return true;
+        }
+        let ((a, n1, l1), (_, n2, l2)) = (plane(i / 3), plane(j / 3));
+        if l1 == 0.0 || l2 == 0.0 {
+            return true;
+        }
+        // The corner of j's triangle that is not on the shared edge.
+        let far = corner(3 * (j / 3) + (j % 3 + 2) % 3);
+        dot(n1, far - a) <= tol * l1 && dot(n1, n2) >= -(1.0 - 1e-12) * l1 * l2
+    })
+}
+
+/// Whether `p` lies on or below every plane.
+fn below(planes: &[(Vec3, Vec3, f64)], p: Vec3) -> bool {
+    planes.iter().all(|&(a, n, lim)| dot(n, p - a) <= lim)
 }
 
 #[cfg(test)]

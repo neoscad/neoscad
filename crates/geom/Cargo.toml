@@ -27,7 +27,6 @@ lang = { package = "neoscad-lang", path = "../lang" }
 # (triangle topology, run order) is part of what the tier 3 images see.
 manifold-rust = { version = "=0.13.1", default-features = false }
 rayon = { workspace = true, optional = true }
-sha2.workspace = true
 text = { package = "neoscad-text", path = "../text" }
 
 [lints]

@@ -25,7 +25,6 @@ use clipper2_rust::{ClipType, FillRule, Path64, Paths64, Point64, PolyTree64, is
 use manifold_rust::impl_mesh::ManifoldImpl;
 use manifold_rust::linalg::{Vec3, dot};
 use manifold_rust::manifold::Manifold;
-use manifold_rust::quickhull;
 use manifold_rust::types::OpType;
 
 use crate::Geometry;
@@ -524,7 +523,7 @@ fn hulls(sets: &[Vec<Vec3>]) -> Vec<ManifoldImpl> {
         if s.len() <= 3 || coplanar(s) {
             ManifoldImpl::new()
         } else {
-            quickhull::convex_hull(s)
+            crate::hull::hull_3d(s)
         }
     };
     #[cfg(feature = "parallel")]

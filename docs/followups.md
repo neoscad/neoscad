@@ -62,6 +62,15 @@ entry when it is done.
 ## Parity
 - `manifold-rust` 0.13.1 ports Manifold v3.5.0; OpenSCAD pins v3.5.2.
   (5a)
+- `vendor/manifold-rust` patches `collapse_edge`, whose clean-up after a
+  boolean could slide a vertex across a crease and fill a concave corner
+  (BOSL2 `cubetruss`, 7.3 mm³ too much; `vendor/README.md`). C++ Manifold
+  3.5.2 fails the same way. Report it to Manifold and manifold-rust with
+  the 35- and 28-vertex operands in `crates/geom/tests/data/collapse-crease-*.txt`
+  (union 328.29 instead of 314.49), then drop the copy. Separately, C++
+  3.5.2 built by hand (`-O2 -ffp-contract=off`, no TBB) crashed with
+  SIGSEGV intersecting the larger cubetruss operand with some boxes; not
+  investigated. (H1)
 - Manifold's `MinkowskiSum` (C++ and the Rust port alike) is only right
   when the second operand contains the origin: it always unions the first
   operand, unmoved, into the result (`minkowski.cpp:84`,
@@ -88,6 +97,15 @@ entry when it is done.
   lines differ, all rotations). The QuickHull port's `build_mesh` reads
   the same as C++ `buildMesh`, so the rotation presumably comes from later
   in the kernel, like the boolean rotations above; not traced. (5d)
+- QuickHull (Manifold C++ and manifold-rust) sometimes returns a folded,
+  non-convex hull; `geom::hull::hull_3d` checks every 3D hull, including
+  minkowski's, and rebuilds a folded one (H1). About 1 in 30 rounded-box
+  hulls and minkowski sums fold. Where the nightly's own hull folds (e.g.
+  `hull() for (x=[0,30], y=[0,30], z=[0,5]) translate([x,y,z])
+  sphere(r=3, $fn=16);`, 13453.12 against CGAL's 13453.41) neoscad now
+  differs from it, correctly. Report upstream to Manifold and
+  manifold-rust with `minkowski(){cube([30,20,5],center=true);
+  sphere(3,$fn=48);}` (9751.29 instead of 9751.42). (H1)
 - The nightly prints CGAL's own diagnostics for some minkowski operands
   (Nef assertion failures for cubes touching at an edge or a vertex,
   `minkowski-cubes-touch-*.scad`, `issue1137.scad`); they are not
@@ -106,12 +124,31 @@ entry when it is done.
   vertex count (`example017.scad` assembled: 623 vs 626). The 2D shapes and
   extrusions going in are identical, so this is the kernel (manifold-rust
   v3.5.0 against v3.5.2, above). Images match. (5b)
-- The nightly is built with Apple clang, which fuses multiply-adds (Eigen's
-  matrix products become FMA chains). Extrusions and 2D transforms model
-  this and match byte for byte; 3D transforms (`PolySet::transform`, and the
-  matrix products in `eval`) use plain arithmetic, so transformed meshes can
-  differ in the last bit (e.g. `rotate([30,40,50]) cube(1)` STL). Fusing
-  `PolySet::transform` alone fixed a few coordinates, not all. (5b)
+- Fused multiply-adds follow the platform, as upstream does: OpenSCAD's
+  arm64 build rounds `a * b + c` in one expression as an FMA and its
+  x86_64 build does not (`[1, 0.1] * [-0.010000000000000002, 0.1]` is
+  `-8.32667e-19` on the arm64 nightly, `0` on its x86_64 slice). neoscad
+  routes every such site through `eval::fma` (`mul_add`, fused only on
+  `aarch64`): vector and matrix products, `norm`, `cross`, `lookup`, range
+  iteration, `rands`, the `rotate([x,y,z])` and `mirror` matrices, the DXF
+  dimension functions, and in `geom` the extrusion and 2D transforms and
+  the hull orientation test. With it, BOSL2's tests match the arm64
+  nightly as `.csg` on 976/976 and its examples on 2,525/2,526 (the other
+  uses unseeded `rands()`). Still plain: 3D transforms
+  (`PolySet::transform`), so transformed meshes can differ in the last
+  bit (e.g. `rotate([30,40,50]) cube(1)` STL); fusing `PolySet::transform`
+  alone fixed a few coordinates, not all. A new port of C++ arithmetic
+  should use `eval::fma` where the C++ multiplies and adds in one
+  expression; which product clang fuses has to be checked against the
+  nightly (`rotate` fuses the first, `mirror`'s `x*x + y*y + z*z` is
+  `fma(z, z, fma(x, x, y*y))`). (5b, H1)
+- `lang::number::fmt_g` prints a negative NaN as `-nan`, as glibc's
+  `printf` does; macOS's `printf`, and so the nightly, always prints `nan`.
+  The `.csg` export now drops the sign itself (`eval::dump`), since the
+  fused `rotate` matrix made `transform-nan-inf-tests.scad` carry a
+  negative NaN; the other `fmt_g` callers (the OFF, OBJ, WRL, DXF and SVG
+  writers in `io`) still print `-nan`. Decide which platform to match.
+  (H1)
 - OpenSCAD pins Clipper2 2.0.1 (submodule `c7f820f`); clipper2-rust 1.2.0
   ports 1.5.4. Every 2D case compared so far (booleans, sanitizing, all
   three offset joins, fill, projection) is byte-identical in SVG, but an
@@ -187,6 +224,14 @@ entry when it is done.
   mesh IDs as C++ `Compose` does (`csg_tree.cpp:386-395`); `batch` in
   `manifold_geom.rs` renumbers colliding operands first. Report upstream,
   then drop the workaround. (5b)
+- Several `minkowski()` siblings under one union export their triangles
+  in a different order from run to run (same triangles; checked at 1e5c75b
+  too, so not new): 300 rounded boxes side by side, every third a
+  minkowski sum, differ only in the minkowski ones. Likely cause:
+  `minkowski::fold` takes its hull IDs from `Manifold::reserve_ids` while
+  sibling subtrees run in parallel, so the base ID, and with it the
+  union's triangle order, depends on scheduling; the IDs should come from
+  the node's reserved block like other built solids. (H1)
 
 ## Structure
 - File access is not all behind `lang::loader::FileSystem` yet, so it

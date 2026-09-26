@@ -28,6 +28,7 @@ mod call;
 mod context;
 pub mod dump;
 mod eval;
+pub mod fma;
 mod inst;
 pub mod message;
 pub mod node;

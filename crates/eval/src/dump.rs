@@ -24,14 +24,18 @@
 //!   second still misses), every string is quoted and escaped (OpenSCAD
 //!   writes `text()` strings raw, so a `"` in the text can make two keys
 //!   equal), and parameters the dump leaves out but geometry uses are
-//!   included. All of a tree's keys are slices of one string built in a
-//!   single pass, as OpenSCAD's `NodeCache` does, so computing them is
-//!   linear in the dump size.
+//!   included. The key itself is a Merkle hash rather than the text: each
+//!   node hashes its own label with its children's hashes (and their
+//!   `%`/`#`), bottom-up in one pass, so computing every key is linear in
+//!   the dump size. Two subtrees get the same key exactly when their
+//!   exact texts would be equal, up to SHA-256 collisions and the empty
+//!   groups the text also ignores.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use lang::number::fmt_g;
+use sha2::{Digest as _, Sha256};
 
 use crate::node::{CsgOp, Discretizer, Node, NodeKind, OffsetJoin};
 use crate::text_props;
@@ -117,6 +121,13 @@ impl Writer<'_> {
     fn num(&mut self, v: f64) {
         if self.key() {
             self.out.push_str(&format!("{v:?}"));
+        } else if v.is_nan() {
+            // macOS's printf, under the nightly's `ostream`, writes `nan`
+            // whatever the sign bit (`multmatrix([[n, -n]])` with `n =
+            // asin(1.1)` prints `nan, nan`), where `fmt_g` follows glibc's
+            // `-nan`. Which sign a NaN ends up with is an accident of the
+            // arithmetic (fused or not, see `fma`), so the dump drops it.
+            self.out.push_str("nan");
         } else {
             self.out.push_str(&fmt_g(v));
         }
@@ -658,10 +669,17 @@ fn lexically_relative(p: &Path, base: &Path) -> PathBuf {
 /// Canonical keys for every subtree of a node tree (see the module docs).
 #[derive(Debug)]
 pub struct Keys {
-    text: String,
-    /// Byte range of each node's key in `text`, by `Node::index`.
-    spans: Vec<(usize, usize)>,
+    /// Each node's Merkle hash, by `Node::index`.
+    hashes: Vec<Digest>,
 }
+
+type Digest = [u8; 32];
+
+/// First byte of every hashed record, so records of different shapes can
+/// never be the same bytes.
+const TAG_NODE: u8 = b'N';
+const TAG_MODS: u8 = b'M';
+const TAG_EMPTY: u8 = b'E';
 
 impl Keys {
     pub fn new(root: &Node) -> Keys {
@@ -671,23 +689,26 @@ impl Keys {
         let len = max_index(root) + 1;
         let mut counts = vec![0u32; len];
         content_counts(root, &mut counts);
-        let mut w = Writer {
-            out: String::new(),
-            style: Style::Key,
-            base: Path::new(""),
+        let mut b = KeyBuilder {
+            w: Writer {
+                out: String::new(),
+                style: Style::Key,
+                base: Path::new(""),
+            },
+            counts: &counts,
+            hashes: vec![[0; 32]; len],
         };
-        let mut spans = vec![(0, 0); len];
-        w.key_node(root, &counts, &mut spans);
-        Keys { text: w.out, spans }
+        b.hash(root);
+        Keys { hashes: b.hashes }
     }
 
     /// The key of the subtree rooted at `node`, which must belong to the
-    /// tree these keys were built from. A node's own `%`/`#` are not part of
-    /// its key (they change how its parent uses it, not what it is), but
-    /// they are part of the parent's.
-    pub fn get(&self, node: &Node) -> &str {
-        let (a, b) = self.spans[node.index];
-        &self.text[a..b]
+    /// tree these keys were built from: 128 bits of its Merkle hash. A
+    /// node's own `%`/`#` are not part of its key (they change how its
+    /// parent uses it, not what it is), but they are part of the parent's.
+    pub fn get(&self, node: &Node) -> u128 {
+        let d = &self.hashes[node.index];
+        u128::from_le_bytes(d[..16].try_into().expect("16 bytes"))
     }
 }
 
@@ -709,35 +730,76 @@ fn content_counts(n: &Node, counts: &mut [u32]) -> bool {
     !is_group(n) || c > 0
 }
 
-impl Writer<'_> {
-    fn key_node(&mut self, n: &Node, counts: &[u32], spans: &mut [(usize, usize)]) {
-        self.modifiers(n);
-        let start = self.out.len();
-        if is_group(n) {
-            let wrap = counts[n.index] > 1;
-            if wrap {
-                self.label(n);
-                self.out.push('{');
-            }
-            for c in &n.children {
-                self.key_node(c, counts, spans);
-            }
-            if wrap {
-                self.out.push('}');
-            }
-        } else {
-            self.label(n);
-            if n.children.is_empty() {
-                self.out.push(';');
-            } else {
-                self.out.push('{');
-                for c in &n.children {
-                    self.key_node(c, counts, spans);
-                }
-                self.out.push('}');
-            }
+/// `%` and `#` of a node as one byte, as its parent sees them.
+fn modifier_bits(n: &Node) -> u8 {
+    n.origin.as_ref().map_or(0, |o| {
+        u8::from(o.tag_background) | (u8::from(o.tag_highlight) << 1)
+    })
+}
+
+/// Builds the keys bottom-up. A key used to be the whole subtree's text,
+/// hashed separately at every node, which costs the tree size times its
+/// depth: BOSL2's `attach()` recursion in `examples/fractal_tree.scad`
+/// makes a 475 MB dump and spent about 9 s in SHA-256. Hashing each node's
+/// own label once, together with its children's fixed-size hashes, is
+/// linear in the dump size and just as exact, because every record is
+/// self-delimiting (a tag byte, the label's length, the child count, then
+/// 32 bytes per child).
+struct KeyBuilder<'a> {
+    w: Writer<'a>,
+    counts: &'a [u32],
+    hashes: Vec<Digest>,
+}
+
+impl KeyBuilder<'_> {
+    fn hash(&mut self, n: &Node) -> Digest {
+        for c in &n.children {
+            self.hash(c);
         }
-        spans[n.index] = (start, self.out.len());
+        let d = if is_group(n) && self.counts[n.index] <= 1 {
+            self.transparent(n)
+        } else {
+            self.w.out.clear();
+            self.w.label(n);
+            let mut h = Sha256::new();
+            h.update([TAG_NODE]);
+            h.update((self.w.out.len() as u64).to_le_bytes());
+            h.update(self.w.out.as_bytes());
+            h.update((n.children.len() as u64).to_le_bytes());
+            for c in &n.children {
+                h.update([modifier_bits(c)]);
+                h.update(self.hashes[c.index]);
+            }
+            h.finalize().into()
+        };
+        self.hashes[n.index] = d;
+        d
+    }
+
+    /// A group with at most one child that has content computes exactly
+    /// what that child does (`Tree::getIdString` leaves such groups out),
+    /// so it takes the child's key: `group() { cube(); }` and `cube()`
+    /// share cached geometry. Children without content are empty groups,
+    /// which add nothing, so they are left out whatever their modifiers.
+    /// A `%`/`#` on the content child changes the group's result (a
+    /// background child is skipped), so it is hashed in rather than lost.
+    fn transparent(&self, n: &Node) -> Digest {
+        let content = n
+            .children
+            .iter()
+            .find(|c| !is_group(c) || self.counts[c.index] > 0);
+        match content {
+            None => Sha256::digest([TAG_EMPTY]).into(),
+            Some(c) => match modifier_bits(c) {
+                0 => self.hashes[c.index],
+                m => {
+                    let mut h = Sha256::new();
+                    h.update([TAG_MODS, m]);
+                    h.update(self.hashes[c.index]);
+                    h.finalize().into()
+                }
+            },
+        }
     }
 }
 
@@ -798,23 +860,49 @@ mod tests {
     fn keys_are_exact_and_skip_single_child_groups() {
         let a = node(NodeKind::Group { name: None }, 1, vec![cube(1.0, 2)]);
         let b = cube(1.0000001, 3);
+        let c = cube(1.0, 4);
         let root = Node {
             kind: NodeKind::Root,
-            children: vec![a, b],
+            children: vec![a, b, c],
             origin: None,
             index: 0,
         };
         let k = Keys::new(&root);
+        // The label hashed for a node keeps every digit.
+        let mut w = Writer {
+            out: String::new(),
+            style: Style::Key,
+            base: Path::new(""),
+        };
+        w.label(&root.children[1]);
         assert_eq!(
-            k.get(&root.children[0]),
-            "cube(size=[1.0,1.0,1.0],center=false);"
+            w.out,
+            "cube(size=[1.0000001,1.0000001,1.0000001],center=false)"
         );
-        assert_eq!(
-            k.get(&root.children[0]),
-            k.get(&root.children[0].children[0])
-        );
-        assert_ne!(k.get(&root.children[0]), k.get(&root.children[1]));
-        assert!(k.get(&root).starts_with("root(){cube("));
+        let [a, b, c] = [0, 1, 2].map(|i| k.get(&root.children[i]));
+        assert_eq!(a, k.get(&root.children[0].children[0]));
+        assert_eq!(a, c);
+        assert_ne!(a, b);
+        assert_ne!(k.get(&root), a);
+    }
+
+    #[test]
+    fn keys_see_child_modifiers_and_order() {
+        let group = |index, children| node(NodeKind::Group { name: None }, index, children);
+        let mut bg = cube(1.0, 2);
+        bg.origin.as_mut().unwrap().tag_background = true;
+        // `group() { %cube(1); }` makes nothing; `cube(1)` makes a cube.
+        let tree = group(0, vec![group(1, vec![bg]), cube(1.0, 3)]);
+        let k = Keys::new(&tree);
+        assert_ne!(k.get(&tree.children[0]), k.get(&tree.children[1]));
+        // The same children in another order are another union key, and
+        // empty groups beside a single child don't hide it.
+        let ab = group(0, vec![cube(1.0, 1), cube(2.0, 2)]);
+        let ba = group(0, vec![cube(2.0, 1), cube(1.0, 2)]);
+        assert_ne!(Keys::new(&ab).get(&ab), Keys::new(&ba).get(&ba));
+        let padded = group(0, vec![group(1, vec![]), cube(1.0, 2), group(3, vec![])]);
+        let bare = cube(1.0, 0);
+        assert_eq!(Keys::new(&padded).get(&padded), Keys::new(&bare).get(&bare));
     }
 
     #[test]

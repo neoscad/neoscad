@@ -13,6 +13,7 @@
 
 use std::rc::Rc;
 
+use crate::fma::mul_add;
 use crate::value::{Type, Value, Vector};
 
 /// Why an operation produced `undef`: messages joined with `"\n\t"` when
@@ -210,7 +211,7 @@ fn mul_mat_vec(m: &Vector, v: &Vector) -> OpResult {
                     "Vector must contain only numbers. Problem at index {j}"
                 )));
             };
-            sum += a * b;
+            sum = mul_add(*a, b, sum);
         }
         out.push(Value::Number(sum));
     }
@@ -243,7 +244,7 @@ fn mul_vec_mat(v: &Vector, m: &Vector, warn: &mut Vec<String>) -> OpResult {
                 warn.push(s.clone());
                 return Err(Why::new(s));
             };
-            sum += a * b;
+            sum = mul_add(a, b, sum);
         }
         out.push(Value::Number(sum));
     }
@@ -280,7 +281,7 @@ fn mul_vectors(x: &Vector, y: &Vector, warn: &mut Vec<String>) -> OpResult {
             let mut r = 0.0;
             for (p, q) in x.iter().zip(y.iter()) {
                 match (p, q) {
-                    (Value::Number(p), Value::Number(q)) => r += p * q,
+                    (Value::Number(p), Value::Number(q)) => r = mul_add(*p, *q, r),
                     _ => {
                         return Err(Why::new(format!(
                             "undefined operation ({} * {})",

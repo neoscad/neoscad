@@ -313,8 +313,6 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "manifold-rust"
 version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "895f10126b206ed4e9427f337e3a6d1c586ce7c9cd76c0ac8bca83a4f5f9eb7c"
 dependencies = [
  "clipper2-rust",
  "dashu-int",
@@ -381,6 +379,7 @@ version = "0.1.0"
 dependencies = [
  "neoscad-io",
  "neoscad-lang",
+ "sha2",
  "unicode-script",
 ]
 
@@ -395,7 +394,6 @@ dependencies = [
  "neoscad-lang",
  "neoscad-text",
  "rayon",
- "sha2",
 ]
 
 [[package]]

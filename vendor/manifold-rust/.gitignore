@@ -1,0 +1,11 @@
+/target
+/demo/dist
+/demo/node_modules
+/demo/wasm/pkg
+*.swp
+*.swo
+.DS_Store
+.claude/worktrees/
+*.db
+thingi_sweep_log.txt
+thingi_sweep_err.txt

@@ -6,6 +6,8 @@
 //! OpenSCAD marks them otherwise, and the evaluator sanitizes them with
 //! [`crate::clipper`] before anything else sees them.
 
+use eval::fma::mul_add;
+
 use crate::Matrix;
 use crate::polyset::PolySet;
 
@@ -74,8 +76,8 @@ impl Polygon2d {
                 // left to right with each later term fused (see
                 // `extrude::apply`); the last term is `m02 * 1`, an exact add.
                 *p = [
-                    m[0][1].mul_add(y, m[0][0] * x) + m[0][2],
-                    m[1][1].mul_add(y, m[1][0] * x) + m[1][2],
+                    mul_add(m[0][1], y, m[0][0] * x) + m[0][2],
+                    mul_add(m[1][1], y, m[1][0] * x) + m[1][2],
                 ];
             }
         }

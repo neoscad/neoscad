@@ -14,6 +14,7 @@ use lang::diag::DiagCode;
 use crate::call::ArgVal;
 use crate::context::{Children, Ctx, CtxKind, ScopeRef};
 use crate::eval::Evaluator;
+use crate::fma::mul_add;
 use crate::message::{Loc, R};
 use crate::node::{self, CsgOp, Discretizer, LinearExtrude, Matrix, Node, NodeKind, OffsetJoin};
 use crate::sym::{FxBuild, Sym, Syms};
@@ -698,7 +699,9 @@ impl<'a> Evaluator<'a> {
                 let [x, y, z] = xyz;
                 let mut m = node::IDENTITY;
                 if x != 0.0 || y != 0.0 || z != 0.0 {
-                    let a = x * x + y * y + z * z;
+                    // `x * x + y * y + z * z` as the arm64 nightly rounds it
+                    // (see `fma`).
+                    let a = mul_add(z, z, mul_add(x, x, y * y));
                     m = [
                         [
                             1.0 - 2.0 * x * x / a,
@@ -1100,9 +1103,21 @@ impl<'a> Evaluator<'a> {
                 t.extend_from_slice(b") parameter");
                 self.warn(loc, DiagCode::InvalidArgument, t);
             }
+            // OpenSCAD writes each entry as one expression, so the arm64
+            // nightly fuses the first product of each sum (see `fma`).
+            // Checked against the nightly on 14,000 angle triples, where
+            // fusing the other product flips signs of near-zero entries.
             rot3([
-                [cy * cz, cz * sx * sy - cx * sz, cx * cz * sy + sx * sz],
-                [cy * sz, cx * cz + sx * sy * sz, -cz * sx + cx * sy * sz],
+                [
+                    cy * cz,
+                    mul_add(cz * sx, sy, -(cx * sz)),
+                    mul_add(cx * cz, sy, sx * sz),
+                ],
+                [
+                    cy * sz,
+                    mul_add(cx, cz, sx * sy * sz),
+                    mul_add(-cz, sx, cx * sy * sz),
+                ],
                 [-sy, cy * sx, cx * cy],
             ])
         } else {

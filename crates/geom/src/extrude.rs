@@ -10,6 +10,7 @@
 //! and the order of the triangles all follow OpenSCAD, because the images
 //! show the triangles' shading and Manifold orders its output by them.
 
+use eval::fma::mul_add;
 use eval::node::{Discretizer, LinearExtrude};
 use eval::trig::{cos_degrees, sin_degrees};
 
@@ -27,20 +28,20 @@ fn scale_rotate(sx: f64, sy: f64, rot: f64) -> [[f64; 2]; 2] {
 }
 
 /// A matrix-vector product as the nightly computes it: Eigen sums each row
-/// left to right and Apple clang fuses every multiply-add after the first
-/// into an FMA (`-ffp-contract=on`), so `m00*x + m01*y` is
-/// `fma(m01, y, m00*x)`. Plain arithmetic differs in the last bit, which
+/// left to right and the arm64 build fuses every multiply-add after the
+/// first into an FMA (the x86_64 build does not; see `eval::fma`), so
+/// `m00*x + m01*y` is `fma(m01, y, m00*x)`. Plain arithmetic differs in the last bit, which
 /// shows as `2.22045e-16` against `0` in exported coordinates.
 pub(crate) fn apply(m: &[[f64; 2]; 2], v: [f64; 2]) -> [f64; 2] {
     [
-        m[0][1].mul_add(v[1], m[0][0] * v[0]),
-        m[1][1].mul_add(v[1], m[1][0] * v[0]),
+        mul_add(m[0][1], v[1], m[0][0] * v[0]),
+        mul_add(m[1][1], v[1], m[1][0] * v[0]),
     ]
 }
 
 /// Eigen's `norm()`, with the same fused sum as [`apply`].
 fn norm(v: [f64; 2]) -> f64 {
-    v[1].mul_add(v[1], v[0] * v[0]).sqrt()
+    mul_add(v[1], v[1], v[0] * v[0]).sqrt()
 }
 
 fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {

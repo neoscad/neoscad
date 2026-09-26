@@ -386,7 +386,9 @@ impl Range {
             if i == 0 {
                 self.begin
             } else {
-                self.begin + self.step * f64::from(i)
+                // `begin_val + step_val * ++i_step`, fused on arm64 like
+                // the nightly (see `fma`).
+                crate::fma::mul_add(self.step, f64::from(i), self.begin)
             }
         })
     }

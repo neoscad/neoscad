@@ -9,6 +9,7 @@ use lang::diag::DiagCode;
 use crate::call::ArgVal;
 use crate::context::Ctx;
 use crate::eval::Evaluator;
+use crate::fma::{mul_add, mul_sub_mul};
 use crate::message::{Loc, R, UnwindKind};
 use crate::rng::hash_float;
 use crate::sym::{FxBuild, Sym, Syms};
@@ -393,7 +394,7 @@ impl<'a> Evaluator<'a> {
                     .unwrap_or_default()
                 {
                     match e {
-                        Value::Number(x) => sum += x * x,
+                        Value::Number(x) => sum = mul_add(*x, *x, sum),
                         _ => {
                             self.warn(
                                 loc,
@@ -424,7 +425,8 @@ impl<'a> Evaluator<'a> {
         })
     }
 
-    /// `dxf_dim()` and `dxf_cross()` (io/dxfdim.cc).
+    /// `dxf_dim()` and `dxf_cross()` (io/dxfdim.cc), with its multiply-adds
+    /// rounded as the platform's OpenSCAD build rounds them (see `fma`).
     fn dxf(&mut self, dim: bool, a: Vec<ArgVal>, loc: Loc) -> Value {
         let fname = if dim { "dxf_dim" } else { "dxf_cross" };
         let names = ["file", "layer", "origin", "scale", "name"];
@@ -495,12 +497,17 @@ impl<'a> Evaluator<'a> {
                     0 => {
                         let (x, y) = (c[4][0] - c[3][0], c[4][1] - c[3][1]);
                         Some(
-                            (x * trig::cos_degrees(d.angle) + y * trig::sin_degrees(d.angle)).abs(),
+                            mul_add(
+                                x,
+                                trig::cos_degrees(d.angle),
+                                y * trig::sin_degrees(d.angle),
+                            )
+                            .abs(),
                         )
                     }
                     1 => {
                         let (x, y) = (c[4][0] - c[3][0], c[4][1] - c[3][1]);
-                        Some((x * x + y * y).sqrt())
+                        Some(mul_add(x, x, y * y).sqrt())
                     }
                     2 => {
                         let a1 = trig::atan2_degrees(c[0][0] - c[5][0], c[0][1] - c[5][1]);
@@ -509,7 +516,7 @@ impl<'a> Evaluator<'a> {
                     }
                     3 | 4 => {
                         let (x, y) = (c[5][0] - c[0][0], c[5][1] - c[0][1]);
-                        Some((x * x + y * y).sqrt())
+                        Some(mul_add(x, x, y * y).sqrt())
                     }
                     6 => Some(if d.ty & 64 != 0 { c[3][0] } else { c[3][1] }),
                     _ => None,
@@ -538,14 +545,14 @@ impl<'a> Evaluator<'a> {
             j += 2;
             if j == 4 {
                 let [[x1, y1], [x2, y2], [x3, y3], [x4, y4]] = coords;
-                let dem = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
+                let dem = mul_sub_mul(y4 - y3, x2 - x1, x4 - x3, y2 - y1);
                 if dem == 0.0 {
                     break;
                 }
-                let ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / dem;
+                let ua = mul_sub_mul(x4 - x3, y1 - y3, y4 - y3, x1 - x3) / dem;
                 return Value::vector(vec![
-                    Value::Number(x1 + ua * (x2 - x1)),
-                    Value::Number(y1 + ua * (y2 - y1)),
+                    Value::Number(mul_add(ua, x2 - x1, x1)),
+                    Value::Number(mul_add(ua, y2 - y1, y1)),
                 ]);
             }
         }
@@ -780,7 +787,9 @@ impl<'a> Evaluator<'a> {
             return Value::Number(low_v);
         }
         let f = (p - low_p) / (high_p - low_p);
-        Value::Number(high_v * f + low_v * (1.0 - f))
+        // `high_v * f + low_v * (1 - f)`: clang fuses the first product on
+        // arm64 (see `fma`).
+        Value::Number(mul_add(high_v, f, low_v * (1.0 - f)))
     }
 
     fn search(&mut self, a: &[ArgVal], loc: Loc) -> Value {
@@ -927,9 +936,12 @@ impl<'a> Evaluator<'a> {
             return Value::Undef;
         };
         if v0.len() == 2 && v1.len() == 2 {
-            return Value::Number(
-                v0[0].to_f64() * v1[1].to_f64() - v0[1].to_f64() * v1[0].to_f64(),
-            );
+            return Value::Number(mul_sub_mul(
+                v0[0].to_f64(),
+                v1[1].to_f64(),
+                v0[1].to_f64(),
+                v1[0].to_f64(),
+            ));
         }
         if v0.len() != 3 || v1.len() != 3 {
             self.warn(
@@ -966,9 +978,10 @@ impl<'a> Evaluator<'a> {
             }
         }
         let f = |v: &crate::value::Vector, i: usize| v[i].to_f64();
-        let x = f(v0, 1) * f(v1, 2) - f(v0, 2) * f(v1, 1);
-        let y = f(v0, 2) * f(v1, 0) - f(v0, 0) * f(v1, 2);
-        let z = f(v0, 0) * f(v1, 1) - f(v0, 1) * f(v1, 0);
+        // Fused on arm64 like the nightly's `a * b - c * d` (see `fma`).
+        let x = mul_sub_mul(f(v0, 1), f(v1, 2), f(v0, 2), f(v1, 1));
+        let y = mul_sub_mul(f(v0, 2), f(v1, 0), f(v0, 0), f(v1, 2));
+        let z = mul_sub_mul(f(v0, 0), f(v1, 1), f(v0, 1), f(v1, 0));
         Value::vector(vec![Value::Number(x), Value::Number(y), Value::Number(z)])
     }
 }

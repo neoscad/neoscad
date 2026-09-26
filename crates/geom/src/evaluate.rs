@@ -17,7 +17,7 @@
 //!   (or at the end, for `--render=force`).
 //!
 //! Results are cached by the subtree's canonical key ([`eval::dump::Keys`],
-//! hashed), which is exactly OpenSCAD's cache discipline with an exact key.
+//! a Merkle hash), which is exactly OpenSCAD's cache discipline with an exact key.
 //! The cache outlives one render, so a long-lived process re-renders an edit
 //! by recomputing only the subtrees whose keys changed.
 //!
@@ -40,7 +40,6 @@ use lang::loader::{FileSystem, StdFs};
 use lang::source::Span;
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::OpType;
-use sha2::{Digest, Sha256};
 
 use eval::node::OffsetJoin;
 use eval::trig::cos_degrees;
@@ -278,11 +277,6 @@ struct Ctx<'a> {
     blocks: HashMap<(Key, u32), u32>,
 }
 
-fn hash_key(s: &str) -> Key {
-    let d = Sha256::digest(s.as_bytes());
-    u128::from_le_bytes(d[..16].try_into().expect("16 bytes"))
-}
-
 fn loc_of(n: &Node) -> Option<MsgLoc> {
     n.origin.as_ref().map(|o| MsgLoc {
         unit: o.unit,
@@ -336,7 +330,7 @@ impl Renderer {
             // (node, its parent's key and first-occurrence flag)
             let mut stack: Vec<(&Node, Option<(Key, bool)>)> = vec![(top, None)];
             while let Some((n, parent)) = stack.pop() {
-                let h = hash_key(keys.get(n));
+                let h = keys.get(n);
                 ctx.hashes[n.index] = h;
                 // A group with one child that has content shares that
                 // child's key (`Keys`): it is the same computation, so the
@@ -972,7 +966,7 @@ impl Ctx<'_> {
                 hull::hull_points(&children, &mut points);
                 // No points: `applyOperator3DManifold` returns null.
                 (!points.is_empty()).then(|| {
-                    let imp = manifold_rust::quickhull::convex_hull(&points);
+                    let imp = hull::hull_3d(&points);
                     let id = self.block(n, OWN).reserve(1);
                     Geometry::Manifold(Arc::new(ManifoldGeometry::from_built(imp, id)))
                 })
