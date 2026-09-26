@@ -8,9 +8,13 @@
 //! - `conformance showcase` checks the showcase list.
 //! - `conformance diff` compares neoscad with a reference OpenSCAD binary
 //!   on a corpus of inputs.
+//! - `conformance bench` times neoscad against reference binaries on
+//!   `conformance/bench.json`; `conformance bench-chart` draws a result.
 //!
 //! See crates/conformance/README.md.
 
+mod bench;
+mod bench_chart;
 mod cmake;
 mod ctx;
 mod diff;
@@ -128,9 +132,49 @@ enum Cmd {
         /// List every mismatch, not just the first few per category.
         #[arg(long, short)]
         verbose: bool,
+        /// A library directory for both binaries, searched before the
+        /// reference's libraries/ (repeatable): lets a library's own files
+        /// and examples keep their `include <Lib/...>` lines.
+        #[arg(long = "library-path", value_name = "DIR")]
+        library_path: Vec<PathBuf>,
         /// Files or directories (searched for .scad). Default: the reference's
         /// tests/data/scad, examples and libraries/MCAD.
         paths: Vec<PathBuf>,
+    },
+    /// Benchmark neoscad against the reference binaries on the models in
+    /// conformance/bench.json; writes progress/bench/<UTC>-<sha>.json.
+    Bench {
+        /// Only these models (ids from bench.json, or cold_start,
+        /// eval_only); repeatable or comma separated.
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+        /// Only these references (neoscad, nightly-manifold, nightly-cgal,
+        /// openscad-2021.01); repeatable or comma separated.
+        #[arg(long, value_delimiter = ',')]
+        refs: Vec<String>,
+        /// neoscad and the nightly's Manifold backend only.
+        #[arg(long)]
+        quick: bool,
+        /// Per-run timeout in seconds (default: bench.json's).
+        #[arg(long)]
+        timeout: Option<f64>,
+        /// Runs per model, the best kept (default: bench.json's).
+        #[arg(long)]
+        runs: Option<u32>,
+        /// neoscad binary (default: target/release/neoscad).
+        #[arg(long)]
+        binary: Option<PathBuf>,
+    },
+    /// Draw a benchmark result as a 1920x1080 PNG.
+    BenchChart {
+        /// A result file (a path, or a name under progress/bench/).
+        file: Option<PathBuf>,
+        /// The newest result (the default without FILE).
+        #[arg(long)]
+        latest: bool,
+        /// Where to write the PNG (default: next to the result).
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -202,6 +246,7 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             jobs,
             timeout,
             verbose,
+            library_path,
             paths,
         } => {
             if timeout.is_nan() || timeout <= 0.0 {
@@ -215,8 +260,33 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
                 jobs,
                 timeout: Duration::from_secs_f64(timeout),
                 verbose,
+                library_path,
             };
             diff::diff(&ctx, &opts)
+        }
+        Cmd::Bench {
+            only,
+            refs,
+            quick,
+            timeout,
+            runs,
+            binary,
+        } => {
+            if timeout.is_some_and(|t| t.is_nan() || t <= 0.0) {
+                return Err("--timeout must be positive".into());
+            }
+            let opts = bench::BenchOptions {
+                only,
+                refs,
+                quick,
+                timeout,
+                runs,
+                binary,
+            };
+            bench::bench(&ctx, &opts)
+        }
+        Cmd::BenchChart { file, latest, out } => {
+            bench_chart::command(&ctx, file.as_deref(), latest, out.as_deref())
         }
     }
 }

@@ -113,6 +113,9 @@ pub struct DiffOptions {
     pub jobs: Option<usize>,
     pub timeout: Duration,
     pub verbose: bool,
+    /// Directories put before the reference's `libraries/` in
+    /// `OPENSCADPATH`.
+    pub library_path: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -303,6 +306,26 @@ fn classify(r: &RunResult, n: &RunResult) -> Option<(&'static str, String)> {
     None
 }
 
+/// `OPENSCADPATH` for both binaries: the `--library-path` directories
+/// (absolute, since each input runs in its own directory), then the
+/// reference's `libraries/`, as ctest sets it.
+fn library_path(ctx: &Ctx, extra: &[PathBuf]) -> Result<PathBuf, String> {
+    let mut dirs = Vec::with_capacity(extra.len() + 1);
+    for d in extra {
+        let abs = d
+            .canonicalize()
+            .map_err(|e| format!("--library-path {}: {e}", d.display()))?;
+        if !abs.is_dir() {
+            return Err(format!("--library-path {}: not a directory", d.display()));
+        }
+        dirs.push(abs);
+    }
+    dirs.push(ctx.ref_root.join("libraries"));
+    std::env::join_paths(dirs)
+        .map(PathBuf::from)
+        .map_err(|e| e.to_string())
+}
+
 pub fn diff(ctx: &Ctx, opts: &DiffOptions) -> Result<u8, String> {
     let binary = opts.binary.clone().unwrap_or_else(|| ctx.default_binary());
     if !binary.is_file() {
@@ -344,7 +367,7 @@ pub fn diff(ctx: &Ctx, opts: &DiffOptions) -> Result<u8, String> {
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
     let env = [
         ("OPENSCAD_FONT_PATH", ctx.ref_root.join("tests/data/ttf")),
-        ("OPENSCADPATH", ctx.ref_root.join("libraries")),
+        ("OPENSCADPATH", library_path(ctx, &opts.library_path)?),
     ];
 
     let pool = rayon::ThreadPoolBuilder::new()

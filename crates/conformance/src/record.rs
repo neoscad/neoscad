@@ -376,7 +376,7 @@ fn write_file(path: &Path, text: &str) -> Result<(), String> {
 }
 
 /// (`20260925T184210Z`, `2026-09-25T18:42:10Z`) for a Unix time.
-fn utc_timestamps(secs: u64) -> (String, String) {
+pub(crate) fn utc_timestamps(secs: u64) -> (String, String) {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     let (h, mi, s) = (rem / 3600, rem % 3600 / 60, rem % 60);

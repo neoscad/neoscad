@@ -176,8 +176,38 @@ entry when it is done.
   Sans (same metrics, slightly different glyphs), and Cairo's object
   layout and compression are not reproduced. Cairo's path simplification
   is modelled only as far as its single-rectangle `re` output. (5f)
-- `-O` options are parsed for SVG and PDF only; `export-3mf/...` is still
-  ignored (see 3MF below). (5f)
+- The render summary (stderr and `--summary-file`) has no geometry cache
+  size: `geom::Rendered` reports only the entry count, so the stderr
+  summary leaves out OpenSCAD's `Geometry cache size in bytes` line and
+  the two `CGAL ...` lines after it, and the JSON has `bytes` and
+  `max_size` null (`docs/cli-json.md`). Exposing the cache's byte total
+  and budget from `geom` would fill both. (H3)
+- The summary's camera and POV export use the command line's camera; the
+  nightly's summary also applies top-level `$vpt`/`$vpr`/`$vpd`/`$vpf`
+  (`Camera::updateView`). `eval` computes that camera but
+  `eval::Evaluation` does not return it. (POV export uses the command
+  line's camera in the nightly too.) (H3)
+- `-d` lists dependencies in first-seen order where OpenSCAD uses hash
+  order (same set). Files read by `dxf_dim()`/`dxf_cross()` are not
+  listed, and `-m` does not run for them: the evaluator reads them
+  itself. (H3)
+- `.ast` export does not evaluate the program, so it prints no `ECHO:` or
+  evaluation warnings; the nightly evaluates first (`do_export`) and
+  prints them (`echo(1);`: `ECHO: 1` on stderr). The `.ast` file is the
+  same. (H3)
+- `--animate` with several `-o` files evaluates each frame once for all
+  of them; OpenSCAD runs all frames for the first output, then all for
+  the next, so the `Exporting ...` lines come in a different order. The
+  files are the same. (H3)
+- `--debug` prints OpenSCAD's `Debug on.` line and nothing more; neoscad
+  has no `PRINTDB` output. (H3)
+- OFF export writes no colour for a face whose colour is invalid
+  (`color()` with no arguments), where the nightly writes `0 0 0 0`
+  (`export_off.cc:72-74`); the warnings match. Matching the bytes would
+  make tier 3's `render-manifold_issue5216` fail as it does with the
+  nightly (the re-import draws the face transparent), so the harness
+  limit for it was dropped instead and `conformance run --binary
+  <nightly>` now reports that case as a failure. (H3)
 - A `\r` inside `include<>`/`use<>` brackets doesn't count as a new line,
   as it does in OpenSCAD. (2)
 - Malformed parameter-set JSON gives different error text from Boost. (2)
@@ -190,8 +220,10 @@ entry when it is done.
   missing file, a non-ZIP and an empty file; other problems get our own
   description in OpenSCAD's frame. Exported object and build UUIDs are
   hashes of the content rather than random, so files are reproducible.
-  Only the default export options are implemented (`-O export-3mf/...`
-  is not parsed). (5c)
+  (5c) Every `-O export-3mf/...` option is implemented; against the
+  nightly, 55 option and model combinations give the same model XML apart
+  from UUIDs, the date and triangle order, which follows the tessellation
+  differences above. (H3)
 - libxml prints its own parser diagnostics to stderr for a broken SVG
   (`file:1: parser error : ...`) before OpenSCAD's "Error parsing file";
   only the latter is reproduced. Likewise the lines libsvg writes to

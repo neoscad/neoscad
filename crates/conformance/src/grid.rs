@@ -22,12 +22,12 @@ use crate::sha256;
 
 pub const WIDTH: usize = 1920;
 pub const HEIGHT: usize = 1080;
-const MARGIN: usize = 24;
+pub(crate) const MARGIN: usize = 24;
 
-type Rgb = [u8; 3];
-const BG: Rgb = [22, 22, 26];
-const TEXT: Rgb = [235, 235, 235];
-const DIM: Rgb = [150, 150, 160];
+pub(crate) type Rgb = [u8; 3];
+pub(crate) const BG: Rgb = [22, 22, 26];
+pub(crate) const TEXT: Rgb = [235, 235, 235];
+pub(crate) const DIM: Rgb = [150, 150, 160];
 
 pub fn colour(s: Status) -> Rgb {
     match s {
@@ -38,12 +38,14 @@ pub fn colour(s: Status) -> Rgb {
     }
 }
 
-struct Canvas {
-    px: Vec<u8>,
+/// A 1920x1080 RGB image with rectangles and bitmap text; the benchmark
+/// chart (`bench_chart.rs`) draws on it too.
+pub(crate) struct Canvas {
+    pub(crate) px: Vec<u8>,
 }
 
 impl Canvas {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut px = vec![0; WIDTH * HEIGHT * 3];
         for p in px.as_chunks_mut::<3>().0 {
             *p = BG;
@@ -51,7 +53,7 @@ impl Canvas {
         Self { px }
     }
 
-    fn rect(&mut self, x: usize, y: usize, w: usize, h: usize, c: Rgb) {
+    pub(crate) fn rect(&mut self, x: usize, y: usize, w: usize, h: usize, c: Rgb) {
         for yy in y..(y + h).min(HEIGHT) {
             for xx in x..(x + w).min(WIDTH) {
                 let i = (yy * WIDTH + xx) * 3;
@@ -62,7 +64,7 @@ impl Canvas {
 
     /// Draw text at `scale` (glyphs are 5x7, advance 6). Returns the x after
     /// the last glyph. Text past the right margin is cut off.
-    fn text(&mut self, x: usize, y: usize, s: &str, scale: usize, c: Rgb) -> usize {
+    pub(crate) fn text(&mut self, x: usize, y: usize, s: &str, scale: usize, c: Rgb) -> usize {
         let mut cx = x;
         for ch in s.chars() {
             if cx + 5 * scale > WIDTH - MARGIN {
@@ -98,13 +100,17 @@ pub fn write_png(
     subject: &str,
     cells: &[(u8, Status)],
 ) -> Result<(), String> {
-    let img = render(title, subject, cells);
+    save_png(path, &render(title, subject, cells))
+}
+
+/// Write a canvas's pixels as an 8-bit RGB PNG.
+pub(crate) fn save_png(path: &Path, img: &[u8]) -> Result<(), String> {
     let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut enc = png::Encoder::new(BufWriter::new(file), WIDTH as u32, HEIGHT as u32);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     let mut w = enc.write_header().map_err(|e| e.to_string())?;
-    w.write_image_data(&img).map_err(|e| e.to_string())?;
+    w.write_image_data(img).map_err(|e| e.to_string())?;
     w.finish().map_err(|e| e.to_string())
 }
 

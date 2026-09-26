@@ -1,7 +1,8 @@
 //! Running a program through the front end and evaluator, the way
 //! `openscad.cc`'s `cmdline()` does, and the `.ast`, `.echo`, `.csg`,
-//! `.term`, `.param`, mesh (`.stl`, `.off`, `.obj`, `.3mf`, `.wrl`) and 2D
-//! (`.svg`, `.dxf`, `.pdf`) exports.
+//! `.term`, `.param`, mesh (`.stl`, `.off`, `.obj`, `.3mf`, `.wrl`, `.pov`)
+//! and 2D (`.svg`, `.dxf`, `.pdf`) exports, each once or once per
+//! `--animate` frame.
 //!
 //! `--hardwarnings` stops at the first warning with exit 1, wherever it is
 //! printed: by the parser (which OpenSCAD turns into the parse error "stop
@@ -42,6 +43,79 @@ pub struct Job<'a> {
     pub hardwarnings: bool,
     /// `-O` settings.
     pub export_options: &'a crate::export_options::ExportOptions,
+    /// `--summary` and `--summary-file`.
+    pub summary: &'a crate::summary::Request,
+    /// `--animate` (with `--animate_sharding`): the frames to export.
+    pub animate: Option<Animate>,
+}
+
+/// `AnimateArgs`: `frames` frames in all, of which this run exports
+/// `start..limit` (the whole range without sharding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Animate {
+    pub frames: u32,
+    pub start: u32,
+    pub limit: u32,
+}
+
+/// One export pass: the frame number when animating, and `$t`.
+#[derive(Debug, Clone, Copy)]
+struct Frame {
+    number: Option<u32>,
+    time: f64,
+}
+
+impl Job<'_> {
+    /// The passes to make: one at `$t = 0`, or one per animation frame at
+    /// `$t = frame / frames` (`cmdline()`, `openscad.cc:654-686`).
+    fn frames(&self) -> Vec<Frame> {
+        match self.animate {
+            None => vec![Frame {
+                number: None,
+                time: 0.0,
+            }],
+            Some(a) => (a.start..a.limit)
+                .map(|f| Frame {
+                    number: Some(f),
+                    time: f64::from(f) * (1.0 / f64::from(a.frames)),
+                })
+                .collect(),
+        }
+    }
+
+    /// Before each animation frame OpenSCAD logs the input it is exporting.
+    fn announce<W: Write>(&self, frame: Frame, con: &mut Console<W>) {
+        if frame.number.is_some() {
+            con.print(
+                None,
+                format!("Exporting {}...", display_name(self)).as_bytes(),
+            );
+        }
+    }
+}
+
+/// The output name of an animation frame: the frame number, five digits,
+/// before the extension (`out/x.stl` becomes `out/x00003.stl`).
+pub fn frame_target(target: &str, frame: Option<u32>) -> String {
+    let Some(n) = frame else {
+        return target.to_string();
+    };
+    let p = Path::new(target);
+    let stem = p.with_extension("");
+    let mut s = format!("{}{n:05}", stem.to_string_lossy());
+    if let Some(ext) = p.extension() {
+        s.push('.');
+        s.push_str(&ext.to_string_lossy());
+    }
+    s
+}
+
+/// `options` at the frame's `$t`.
+fn at_time(options: &Options, frame: Frame) -> Options {
+    Options {
+        time: frame.time,
+        ..options.clone()
+    }
 }
 
 /// Where messages are made relative to.
@@ -101,6 +175,10 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
         );
         return Err(EXIT_ERROR);
     }
+    if !stdin {
+        // The input is a dependency as named on the command line.
+        crate::deps::add(job.input);
+    }
     // cmdline(): the text, then an end-of-text marker, then each -D.
     let mut suffix = b"\n\x03\n".to_vec();
     for d in job.defines {
@@ -112,6 +190,7 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
     let host = Host::from_env();
     let (fs, libs) = (&*host.fs, &host.libs);
     let mut program = parse_program(path, text, fs, libs);
+    crate::deps::add_sources(&program.sources);
     let stopped = parser_diagnostics(&program, job.hardwarnings, paths, con);
     if stopped || program.has_syntax_errors() {
         con.print(None, format!("Can't parse file '{display}'!\n").as_bytes());
@@ -141,6 +220,10 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
     // handleDependencies(): parse the used libraries and report on them.
     let mut libraries = load_dependencies(&program, &suffix, fs, libs);
     for lib in &mut libraries {
+        crate::deps::add(&lib.path);
+        if let Some(p) = &lib.program {
+            crate::deps::add_sources(&p.sources);
+        }
         match (&lib.program, lib.open_error()) {
             (Some(p), _) => {
                 if parser_diagnostics(p, job.hardwarnings, paths, con) {
@@ -220,16 +303,20 @@ pub fn export_ast(job: &Job<'_>) -> u8 {
         Err(code) => return code,
     };
     let text = lang::dump::dump(&loaded.program.ast);
-    for target in job.outputs {
-        // Like `.csg`, OpenSCAD writes a relative `.ast` into the document's
-        // directory (`openscad.cc`), not the working directory.
-        let target = if target != "-" {
-            paths.main_dir.join(target).to_string_lossy().into_owned()
-        } else {
-            target.clone()
-        };
-        if let Err(code) = write_output(&target, &text) {
-            return code;
+    for frame in job.frames() {
+        job.announce(frame, &mut con);
+        for target in job.outputs {
+            // Like `.csg`, OpenSCAD writes a relative `.ast` into the
+            // document's directory (`openscad.cc`), not the working directory.
+            let target = frame_target(target, frame.number);
+            let target = if target != "-" {
+                paths.main_dir.join(target).to_string_lossy().into_owned()
+            } else {
+                target
+            };
+            if let Err(code) = write_output(&target, &text) {
+                return code;
+            }
         }
     }
     0
@@ -256,14 +343,18 @@ fn evaluate<W: Write>(
         ..options.clone()
     };
     // `main` runs this on a thread with `eval::DEFAULT_THREAD_STACK`.
-    eval::evaluate(
+    let ev = eval::evaluate(
         &l.program,
         &l.uses,
         &libs,
         paths.main_dir.clone(),
         &options,
         con,
-    )
+    );
+    // OpenSCAD records imported files (and runs `-m`) as it instantiates
+    // them, so every export format sees them, not just geometry.
+    crate::deps::add_node_files(&ev.root, &*l.host.fs);
+    ev
 }
 
 /// A node-tree export.
@@ -283,13 +374,32 @@ pub fn export_tree(job: &Job<'_>, options: &Options, formats: &[TreeFormat]) -> 
         Ok(l) => l,
         Err(code) => return code,
     };
-    let ev = evaluate(&loaded, &paths, options, &mut con);
-    if ev.hard_warning {
-        return EXIT_ERROR;
+    for frame in job.frames() {
+        job.announce(frame, &mut con);
+        let ev = evaluate(&loaded, &paths, &at_time(options, frame), &mut con);
+        if ev.hard_warning {
+            return EXIT_ERROR;
+        }
+        if let Err(code) = write_trees(job, &paths, &loaded, &ev, formats, frame) {
+            return code;
+        }
     }
+    0
+}
+
+/// The `.csg`/`.term` outputs of one evaluation.
+fn write_trees(
+    job: &Job<'_>,
+    paths: &Paths,
+    loaded: &Loaded,
+    ev: &eval::Evaluation,
+    formats: &[TreeFormat],
+    frame: Frame,
+) -> Result<(), u8> {
     // A root modifier (`!`) makes the tagged node the whole tree.
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
     for (target, format) in job.outputs.iter().zip(formats) {
+        let target = &frame_target(target, frame.number);
         let text = match format {
             TreeFormat::Csg => eval::dump::csg(top, &paths.main_dir, &*loaded.host.fs),
             // `openscad.cc` builds the CSG term with a `CSGTreeEvaluator`
@@ -309,11 +419,9 @@ pub fn export_tree(job: &Job<'_>, options: &Options, formats: &[TreeFormat]) -> 
         } else {
             target.clone()
         };
-        if let Err(code) = write_output(&target, text.as_bytes()) {
-            return code;
-        }
+        write_output(&target, text.as_bytes())?;
     }
-    0
+    Ok(())
 }
 
 /// `-o x.echo`: every message of parsing and evaluation, as OpenSCAD's
@@ -324,10 +432,20 @@ pub fn export_echo(job: &Job<'_>, options: &Options) -> u8 {
     let code = match load(job, &paths, &mut con) {
         Err(code) => code,
         // The echo file is written as messages arrive, so after a hard
-        // warning it holds everything up to it.
+        // warning it holds everything up to it. An animation writes every
+        // frame into the one file: OpenSCAD opens the echo stream before
+        // its frame loop and never renames it.
         Ok(l) => {
-            let ev = evaluate(&l, &paths, options, &mut con);
-            if ev.hard_warning { EXIT_ERROR } else { 0 }
+            let mut code = 0;
+            for frame in job.frames() {
+                job.announce(frame, &mut con);
+                let ev = evaluate(&l, &paths, &at_time(options, frame), &mut con);
+                if ev.hard_warning {
+                    code = EXIT_ERROR;
+                    break;
+                }
+            }
+            code
         }
     };
     let data = con.into_inner();
@@ -351,6 +469,7 @@ pub enum MeshFormat {
     Svg,
     Dxf,
     Pdf,
+    Pov,
 }
 
 impl MeshFormat {
@@ -363,28 +482,65 @@ impl MeshFormat {
     }
 }
 
-/// `-o x.stl|x.off|x.obj|x.3mf|x.svg|x.dxf`: evaluate, build the geometry, and
-/// export it, following the geometry branch of `openscad.cc`'s `do_export`
-/// (`:476-541`): messages on stderr, a refusal with exit 1 when the result
-/// has the wrong dimension or is empty (`checkAndExport`), then the render
-/// summary.
+/// `-o x.stl|x.off|x.obj|x.3mf|x.wrl|x.pov|x.svg|x.dxf|x.pdf`: evaluate,
+/// build the geometry, and export it, following the geometry branch of
+/// `openscad.cc`'s `do_export` (`:476-541`): messages on stderr, a refusal
+/// with exit 1 when the result has the wrong dimension or is empty
+/// (`checkAndExport`), then the render summary. Animation frames share
+/// one geometry cache, as they share OpenSCAD's.
 pub fn export_mesh(
     job: &Job<'_>,
     options: &eval::Options,
     formats: &[MeshFormat],
     force: bool,
 ) -> u8 {
-    let started = std::time::Instant::now();
     let paths = Paths::of(job);
     let mut con = Console::new(std::io::stderr(), paths.main_dir.clone(), job.quiet);
     let loaded = match load(job, &paths, &mut con) {
         Ok(l) => l,
         Err(code) => return code,
     };
-    let ev = evaluate(&loaded, &paths, options, &mut con);
+    let renderer = geom::Renderer::new();
+    for frame in job.frames() {
+        job.announce(frame, &mut con);
+        let code = render_frame(
+            job,
+            &paths,
+            &loaded,
+            &renderer,
+            &at_time(options, frame),
+            formats,
+            force,
+            frame,
+            &mut con,
+        );
+        if code != 0 {
+            return code;
+        }
+    }
+    0
+}
+
+/// One evaluation, render and set of exports of [`export_mesh`].
+#[allow(clippy::too_many_arguments)]
+fn render_frame<W: Write>(
+    job: &Job<'_>,
+    paths: &Paths,
+    loaded: &Loaded,
+    renderer: &geom::Renderer,
+    options: &eval::Options,
+    formats: &[MeshFormat],
+    force: bool,
+    frame: Frame,
+    con: &mut Console<W>,
+) -> u8 {
+    let ev = evaluate(loaded, paths, options, con);
     if ev.hard_warning {
         return EXIT_ERROR;
     }
+    // `RenderStatistic` starts timing after instantiation, when geometry
+    // evaluation begins.
+    let started = std::time::Instant::now();
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
     let keys = eval::dump::Keys::new(&ev.root, &*loaded.host.fs);
     let used = std::iter::once(&loaded.program)
@@ -402,13 +558,13 @@ pub fn export_mesh(
         fonts: std::sync::Arc::new(loaded.host.fonts(used)),
         ..Default::default()
     };
-    let rendered = geom::Renderer::new().render(top, &keys, opts.clone());
+    let rendered = renderer.render(top, &keys, opts.clone());
     let rendered = match rendered {
         Ok(r) => r,
         Err(u) => {
             let mut line = format!("neoscad: {}() is not implemented yet", u.what);
             if let Some(l) = &u.loc
-                && let Some(sources) = unit_sources(&loaded, l.unit)
+                && let Some(sources) = unit_sources(loaded, l.unit)
             {
                 let rel = lang::diag::relative_path(sources.path(l.span.file), &paths.main_dir);
                 line.push_str(&format!(" (in file {}, line {})", rel.display(), l.line));
@@ -427,7 +583,7 @@ pub fn export_mesh(
             lang::diag::Diagnostic::new(lang::diag::DiagCode::Geometry, severity, m.text.clone());
         let mut sources = &loaded.program.sources;
         if let Some(l) = &m.loc
-            && let Some(s) = unit_sources(&loaded, l.unit)
+            && let Some(s) = unit_sources(loaded, l.unit)
         {
             // Each message's file prints relative to its own base (see
             // `geom::MsgLoc::base`): `in file ../../x.scad` from the
@@ -451,6 +607,7 @@ pub fn export_mesh(
     }
     let mut mesh = None;
     for (target, format) in job.outputs.iter().zip(formats) {
+        let target = &frame_target(target, frame.number);
         // `checkAndExport`, per output: the dimension, then emptiness.
         let want = format.dimension();
         if dim != want {
@@ -495,13 +652,37 @@ pub fn export_mesh(
                     MeshFormat::BinaryStl => geom::export::stl(ps, true, &mut warnings),
                     MeshFormat::Off => geom::export::off(ps, &mut warnings),
                     MeshFormat::Wrl => geom::export::wrl(ps, &mut warnings),
+                    MeshFormat::Pov => io::pov::write(
+                        ps.mesh(),
+                        &io::pov::PovOptions {
+                            title: &file_title(job),
+                            default_color: opts.scheme.face_front,
+                            // `ExportInfo::camera` is the command line's
+                            // camera; the file's `$vp*` do not change it.
+                            camera: Some(io::pov::PovCamera {
+                                translation: options.camera.vpt,
+                                rotation: options.camera.vpr,
+                                distance: options.camera.vpd,
+                                fov: options.camera.vpf,
+                            }),
+                        },
+                    ),
                     MeshFormat::ThreeMf => {
-                        let (data, msgs) = geom::export::threemf(
-                            ps,
-                            &file_title(job),
-                            &iso8601_now(),
-                            opts.scheme.face_front,
-                            &mut warnings,
+                        // `export_3mf` with the `-O export-3mf/...` settings:
+                        // the mesh is triangulated first, as
+                        // `geom::export::threemf` does for the defaults.
+                        let (o3, color_warning) =
+                            job.export_options.threemf(opts.scheme.face_front);
+                        warnings.extend(color_warning);
+                        let tri = ps.tessellate(&mut warnings);
+                        let (data, msgs) = io::threemf::write_with(
+                            tri.mesh(),
+                            &io::threemf::WriteOptions {
+                                title: &file_title(job),
+                                creation_date: &iso8601_now(),
+                                default_color: opts.scheme.face_front,
+                            },
+                            &o3,
                         );
                         for m in msgs {
                             match m.severity {
@@ -525,25 +706,16 @@ pub fn export_mesh(
             return code;
         }
     }
-    // `RenderStatistic::printAll`: cache size, time, then the object.
-    con.print(
-        None,
-        format!("Geometries in cache: {}", rendered.cache_entries).as_bytes(),
-    );
-    let ms = started.elapsed().as_millis();
-    con.print(
-        None,
-        format!(
-            "Total rendering time: {}:{:02}:{:02}.{:03}",
-            ms / 3_600_000,
-            ms / 60_000 % 60,
-            ms / 1000 % 60,
-            ms % 1000
-        )
-        .as_bytes(),
-    );
-    for l in root.iter().flat_map(geom::export::summary) {
-        con.print(None, l.as_bytes());
+    // `RenderStatistic::printAll`: cache size, time, the object, then the
+    // parts `--summary` asks for; or all of it as JSON to `--summary-file`.
+    let facts = crate::summary::Facts {
+        cache_entries: rendered.cache_entries,
+        elapsed_ms: started.elapsed().as_millis(),
+        geometry: root.as_ref(),
+        camera: &options.camera,
+    };
+    if !crate::summary::emit(job.summary, &facts, con) {
+        return EXIT_ERROR;
     }
     0
 }
@@ -587,16 +759,33 @@ pub fn export_param(job: &Job<'_>, options: &Options) -> u8 {
         Ok(l) => l,
         Err(code) => return code,
     };
-    let ev = evaluate(&loaded, &paths, options, &mut con);
-    if ev.hard_warning {
-        return EXIT_ERROR;
+    for frame in job.frames() {
+        job.announce(frame, &mut con);
+        let ev = evaluate(&loaded, &paths, &at_time(options, frame), &mut con);
+        if ev.hard_warning {
+            return EXIT_ERROR;
+        }
+        if let Err(code) = write_params(job, &paths, &loaded, frame, &mut con) {
+            return code;
+        }
     }
+    0
+}
+
+/// The `.param` outputs after one evaluation.
+fn write_params<W: Write>(
+    job: &Job<'_>,
+    paths: &Paths,
+    loaded: &Loaded,
+    frame: Frame,
+    con: &mut Console<W>,
+) -> Result<(), u8> {
     let mut warnings = Vec::new();
     let params = Parameters::from_ast(&loaded.program.ast, &mut warnings);
     for w in &warnings {
         con.diagnostic(w, &loaded.program.sources, &paths.cwd);
         if job.hardwarnings {
-            return EXIT_ERROR;
+            return Err(EXIT_ERROR);
         }
     }
     // `path.stem()` of the absolute input path; stdin has none.
@@ -610,11 +799,9 @@ pub fn export_param(job: &Job<'_>, options: &Options) -> u8 {
     };
     let json = crate::param_json::export(&params, &title);
     for target in job.outputs {
-        if let Err(code) = write_output(target, json.as_bytes()) {
-            return code;
-        }
+        write_output(&frame_target(target, frame.number), json.as_bytes())?;
     }
-    0
+    Ok(())
 }
 
 /// `get_current_iso8601_date_time_utc` (`export.cc`): `YYYY-MM-DDTHH:MM:SSZ`.

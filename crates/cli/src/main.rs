@@ -7,19 +7,25 @@
 //! customizer parameter sets), the `.echo` export (evaluation messages),
 //! the `.csg` and `.term` node-tree exports, the `.param` customizer
 //! export, the 3D mesh exports (`.stl` ASCII and binary, `.off`, `.obj`,
-//! `.3mf`, `.wrl`) and the 2D exports (`.svg`, `.dxf`, `.pdf`) are
-//! implemented; every other output mode (`.png`, `.pov`, `.nef3`) reports
-//! that it is missing and
-//! exits with [`EXIT_NOT_IMPLEMENTED`], which the harness can tell apart
-//! from a crash or a usage error.
+//! `.3mf`, `.wrl`, `.pov`) and the 2D exports (`.svg`, `.dxf`, `.pdf`) are
+//! implemented; every other output mode (`.png`, `.nef3`, `.nefdbg`)
+//! reports that it is missing and exits with [`EXIT_NOT_IMPLEMENTED`],
+//! which the harness can tell apart from a crash or a usage error.
+//!
+//! `-d`/`-m` are in [`deps`], `--summary`/`--summary-file` in [`summary`]
+//! (its JSON is documented in `docs/cli-json.md`), `--info` and
+//! `--help-export` in [`info`].
 //!
 //! Cold start is a tracked benchmark (docs/architecture.md, "Agent surface"),
 //! so `main` does nothing before argument parsing and nothing expensive after.
 
+mod deps;
 mod export_options;
 mod host;
+mod info;
 mod param_json;
 mod run;
+mod summary;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -99,9 +105,23 @@ struct Cli {
     #[arg(short = 'P', value_name = "NAME")]
     parameter_set: Option<String>,
 
-    /// Enable an experimental feature ('all' enables every one).
+    /// Accepted for compatibility: neoscad implements none of OpenSCAD's
+    /// experimental features, and says so for each one named.
     #[arg(long, value_name = "FEATURE", action = ArgAction::Append)]
     enable: Vec<String>,
+
+    /// Print the -O export settings and their values, then exit.
+    #[arg(long = "help-export")]
+    help_export: bool,
+
+    /// Print information about the build and the search paths, then exit.
+    #[arg(long)]
+    info: bool,
+
+    /// Accepted for compatibility ('all' or source file names): neoscad
+    /// prints OpenSCAD's "Debug on" line but has no debug output.
+    #[arg(long, value_name = "WHAT")]
+    debug: Option<String>,
 
     /// Camera: translate_x,y,z,rot_x,y,z,dist or eye_x,y,z,center_x,y,z.
     #[arg(long, value_name = "PARAMS", allow_hyphen_values = true)]
@@ -149,15 +169,23 @@ struct Cli {
     #[arg(long, value_name = "N")]
     csglimit: Option<u32>,
 
-    /// Export N animated frames.
+    /// Export N animated frames ($t = frame / N), each to the output name
+    /// with the frame number before the extension (x00000.stl, ...).
     #[arg(long, value_name = "N")]
     animate: Option<u32>,
 
-    /// Print a summary of the rendered model.
+    /// SHARD/NUM_SHARDS: export only the SHARD-th of NUM_SHARDS equal
+    /// parts of the --animate frames (e.g. 2/5), to split the work.
+    #[arg(long = "animate_sharding", value_name = "SHARD/NUM")]
+    animate_sharding: Option<String>,
+
+    /// Extra render summary: all, cache, time, camera, geometry,
+    /// bounding-box or area. May be given more than once.
     #[arg(long, value_name = "WHAT", action = ArgAction::Append)]
     summary: Vec<String>,
 
-    /// Write the summary to a file.
+    /// Write the summary as JSON to FILE ('-' for stdout) instead of
+    /// printing it (schema: docs/cli-json.md).
     #[arg(long = "summary-file", value_name = "FILE")]
     summary_file: Option<String>,
 
@@ -165,7 +193,7 @@ struct Cli {
     #[arg(short = 'd', value_name = "DEPS_FILE")]
     deps_file: Option<String>,
 
-    /// Run this make command for missing files.
+    /// Run MAKE_CMD 'file' for a missing imported file before reading it.
     #[arg(short = 'm', value_name = "MAKE_CMD")]
     make_command: Option<String>,
 
@@ -221,15 +249,146 @@ fn main() -> ExitCode {
     eval::with_stack(eval::DEFAULT_THREAD_STACK, move || run_cli(cli))
 }
 
+/// OpenSCAD's experimental features (`Feature.cc`), in its order.
+const FEATURES: &[&str] = &[
+    "roof",
+    "input-driver-dbus",
+    "lazy-union",
+    "vertex-object-renderers-indexing",
+    "textmetrics",
+    "import-function",
+    "object-function",
+    "predictible-output",
+    "vector-swizzle",
+    "discretization-by-error",
+    "ai-features",
+    "unicode-identifiers",
+];
+
+/// `--enable`: OpenSCAD switches the named features on (`all` switches on
+/// every one and ends the list) and warns about unknown names. neoscad has
+/// none of them, so a known name gets a warning instead of silently doing
+/// nothing; an unknown one gets OpenSCAD's own warning. Like OpenSCAD's,
+/// these are warnings (dropped by `--quiet`), not errors.
+fn enable_warnings(names: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in names {
+        if name == "all" {
+            out.push(
+                "WARNING: --enable all: no experimental feature is supported by neoscad; ignoring it."
+                    .to_string(),
+            );
+            break;
+        }
+        if FEATURES.contains(&name.as_str()) {
+            out.push(format!(
+                "WARNING: Experimental feature '{name}' is not supported by neoscad; ignoring it."
+            ));
+        } else {
+            out.push(format!(
+                "WARNING: Ignoring request to enable unknown feature '{name}'."
+            ));
+        }
+    }
+    out
+}
+
+/// `get_animate`: the frame range, or OpenSCAD's message for a bad
+/// `--animate_sharding` (which exits 1).
+fn animate_args(
+    frames: Option<u32>,
+    sharding: Option<&str>,
+) -> Result<Option<run::Animate>, String> {
+    let (mut shard, mut shards) = (1u32, 1u32);
+    if let Some(s) = sharding {
+        let parts: Vec<&str> = s.split('/').collect();
+        if parts.len() != 2 {
+            return Err("--animate_sharding requires <shard>/<num_shards>".into());
+        }
+        // `boost::lexical_cast<unsigned>`: digits only.
+        let num = |p: &str| {
+            (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| p.parse::<u32>().ok())
+                .flatten()
+        };
+        match (num(parts[0]), num(parts[1])) {
+            (Some(a), Some(b)) => (shard, shards) = (a, b),
+            _ => return Err("--animate_sharding parameters need to be positive integers".into()),
+        }
+        if shard > shards || shard == 0 {
+            return Err("--animate_sharding: shard needs to be in range <1..num_shards>".into());
+        }
+    }
+    Ok(frames.filter(|&n| n > 0).map(|n| {
+        let (n64, s, k) = (u64::from(n), u64::from(shard), u64::from(shards));
+        run::Animate {
+            frames: n,
+            start: ((s - 1) * n64 / k) as u32,
+            limit: (s * n64 / k) as u32,
+        }
+    }))
+}
+
 fn run_cli(cli: Cli) -> ExitCode {
+    // Printed before anything else, and before --quiet takes effect.
+    if let Some(d) = &cli.debug {
+        eprintln!("Debug on. --debug={d}");
+    }
+    if cli.help_export {
+        eprint!("{}", info::help_export());
+        return ExitCode::SUCCESS;
+    }
     if cli.version {
         println!("neoscad {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
+    if cli.info {
+        if cli.input.len() > 1 {
+            eprintln!(
+                "neoscad: expected at most one input file, got {}",
+                cli.input.len()
+            );
+            return ExitCode::from(EXIT_ERROR);
+        }
+        print!("{}", info::info());
+        return ExitCode::SUCCESS;
+    }
+    if !cli.quiet {
+        for w in enable_warnings(&cli.enable) {
+            eprintln!("{w}");
+        }
+    }
+
+    // An unknown --export-format is rejected before any output is attempted,
+    // with OpenSCAD's wording (openscad.cc, "Unknown --export-format option").
+    if let Some(fmt) = &cli.export_format
+        && lookup_format(fmt).is_none()
+    {
+        eprintln!("Unknown --export-format option '{fmt}'.  Use -h to list available options.");
+        return ExitCode::from(EXIT_ERROR);
+    }
+    let animate = match animate_args(cli.animate, cli.animate_sharding.as_deref()) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    };
+    let mut outputs = cli.output.clone();
+    if animate.is_some() {
+        if outputs.iter().any(|o| o == "-") {
+            eprintln!("Option --animate is not supported when exporting to stdout.");
+            return ExitCode::from(EXIT_ERROR);
+        }
+        // OpenSCAD's default animation target.
+        if outputs.is_empty() {
+            outputs.push("frame.png".into());
+        }
+    }
 
     // OpenSCAD opens its GUI when no -o is given. neoscad has no GUI in this
     // binary, so a missing -o is a usage error rather than a silent no-op.
-    if cli.output.is_empty() {
+    if outputs.is_empty() {
         eprintln!("neoscad: no output file given; use -o FILE (the extension selects the format)");
         return ExitCode::from(2);
     }
@@ -242,17 +401,22 @@ fn run_cli(cli: Cli) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // An unknown --export-format is rejected before any output is attempted,
-    // with OpenSCAD's wording (openscad.cc, "Unknown --export-format option").
-    if let Some(fmt) = &cli.export_format
-        && lookup_format(fmt).is_none()
+    deps::set_make_command(cli.make_command.clone());
+    let code = export(&cli, &outputs, animate);
+    // `write_deps` runs after every export, whatever their outcome.
+    if let Some(d) = &cli.deps_file
+        && !deps::write(d, &outputs)
     {
-        eprintln!("Unknown --export-format option '{fmt}'.  Use -h to list available options.");
         return ExitCode::from(EXIT_ERROR);
     }
+    ExitCode::from(code)
+}
 
-    let mut formats = Vec::with_capacity(cli.output.len());
-    for output in &cli.output {
+/// Every `-o` output, grouped the way neoscad evaluates them: formats that
+/// share an evaluation run together.
+fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
+    let mut formats = Vec::with_capacity(outputs.len());
+    for output in outputs {
         match resolve_format(output, cli.export_format.as_deref()) {
             Ok(f) => formats.push(f),
             Err(suffix) => {
@@ -260,38 +424,42 @@ fn run_cli(cli: Cli) -> ExitCode {
                 eprintln!(
                     "Invalid suffix {suffix}. Either add a valid suffix or specify one using the --export-format option."
                 );
-                return ExitCode::from(EXIT_ERROR);
+                return EXIT_ERROR;
             }
         }
     }
 
     let export_options = export_options::ExportOptions::parse(&cli.export_option);
+    let summary = summary::Request {
+        options: cli.summary.clone(),
+        file: cli.summary_file.clone(),
+    };
     let job = run::Job {
         input: &cli.input[0],
-        outputs: &cli.output,
+        outputs,
         defines: &cli.define,
         parameter_file: cli.parameter_file.as_deref(),
         parameter_set: cli.parameter_set.as_deref(),
         quiet: cli.quiet,
         hardwarnings: cli.hardwarnings,
         export_options: &export_options,
+        summary: &summary,
+        animate,
     };
     if formats.iter().all(|(id, _)| *id == "ast") {
-        return ExitCode::from(run::export_ast(&job));
+        return run::export_ast(&job);
     }
     if formats.iter().all(|(id, _)| *id == "echo") {
-        let options = match eval_options(&cli) {
-            Ok(o) => o,
-            Err(code) => return ExitCode::from(code),
+        return match eval_options(cli) {
+            Ok(o) => run::export_echo(&job, &o),
+            Err(code) => code,
         };
-        return ExitCode::from(run::export_echo(&job, &options));
     }
     if formats.iter().all(|(id, _)| *id == "param") {
-        let options = match eval_options(&cli) {
-            Ok(o) => o,
-            Err(code) => return ExitCode::from(code),
+        return match eval_options(cli) {
+            Ok(o) => run::export_param(&job, &o),
+            Err(code) => code,
         };
-        return ExitCode::from(run::export_param(&job, &options));
     }
     let tree: Option<Vec<run::TreeFormat>> = formats
         .iter()
@@ -302,11 +470,10 @@ fn run_cli(cli: Cli) -> ExitCode {
         })
         .collect();
     if let Some(tree) = tree {
-        let options = match eval_options(&cli) {
-            Ok(o) => o,
-            Err(code) => return ExitCode::from(code),
+        return match eval_options(cli) {
+            Ok(o) => run::export_tree(&job, &o, &tree),
+            Err(code) => code,
         };
-        return ExitCode::from(run::export_tree(&job, &options, &tree));
     }
     let mesh: Option<Vec<run::MeshFormat>> = formats
         .iter()
@@ -317,6 +484,7 @@ fn run_cli(cli: Cli) -> ExitCode {
             "obj" => Some(run::MeshFormat::Obj),
             "3mf" => Some(run::MeshFormat::ThreeMf),
             "wrl" => Some(run::MeshFormat::Wrl),
+            "pov" => Some(run::MeshFormat::Pov),
             "svg" => Some(run::MeshFormat::Svg),
             "dxf" => Some(run::MeshFormat::Dxf),
             "pdf" => Some(run::MeshFormat::Pdf),
@@ -324,9 +492,9 @@ fn run_cli(cli: Cli) -> ExitCode {
         })
         .collect();
     if let Some(mesh) = mesh {
-        let mut options = match eval_options(&cli) {
+        let mut options = match eval_options(cli) {
             Ok(o) => o,
-            Err(code) => return ExitCode::from(code),
+            Err(code) => return code,
         };
         // `$preview` is false for every geometry export
         // (`fileformat::canPreview`, `openscad.cc:646-650`).
@@ -335,18 +503,18 @@ fn run_cli(cli: Cli) -> ExitCode {
             && !b.eq_ignore_ascii_case("manifold")
         {
             eprintln!("neoscad: only the manifold backend is implemented (got --backend={b})");
-            return ExitCode::from(EXIT_NOT_IMPLEMENTED);
+            return EXIT_NOT_IMPLEMENTED;
         }
         // `--render=force` (and the legacy `--render=cgal`) converts a mesh
         // result to a solid before export (`openscad.cc:1040-1041`).
         let force = matches!(cli.render.as_deref(), Some("force" | "cgal"));
-        return ExitCode::from(run::export_mesh(&job, &options, &mesh, force));
+        return run::export_mesh(&job, &options, &mesh, force);
     }
 
     for (id, name) in &formats {
         eprintln!("neoscad: {name} export ({id}) is not implemented yet");
     }
-    ExitCode::from(EXIT_NOT_IMPLEMENTED)
+    EXIT_NOT_IMPLEMENTED
 }
 
 /// `flagConvert` in openscad.cc: the accepted spellings of a boolean flag.
@@ -442,6 +610,70 @@ mod tests {
         assert_eq!(resolve_format("-", None), Err(String::new()));
         assert_eq!(resolve_format("-", Some("ast")).unwrap().0, "ast");
         assert!(resolve_format("x.txt", None).is_err());
+    }
+
+    #[test]
+    fn animate_sharding_splits_frames_as_openscad_does() {
+        let a = |n, s: Option<&str>| animate_args(n, s);
+        assert_eq!(a(None, None), Ok(None));
+        assert_eq!(
+            a(Some(4), None),
+            Ok(Some(run::Animate {
+                frames: 4,
+                start: 0,
+                limit: 4
+            }))
+        );
+        // `--animate 4 --animate_sharding 2/2` exports frames 2 and 3 in
+        // the nightly; 10 frames in 3 shards split 0..3, 3..6, 6..10.
+        assert_eq!(
+            a(Some(4), Some("2/2")).unwrap().map(|x| (x.start, x.limit)),
+            Some((2, 4))
+        );
+        assert_eq!(
+            a(Some(10), Some("3/3"))
+                .unwrap()
+                .map(|x| (x.start, x.limit)),
+            Some((6, 10))
+        );
+        assert_eq!(
+            a(Some(4), Some("3/2")),
+            Err("--animate_sharding: shard needs to be in range <1..num_shards>".into())
+        );
+        assert_eq!(
+            a(Some(4), Some("a/2")),
+            Err("--animate_sharding parameters need to be positive integers".into())
+        );
+        assert_eq!(
+            a(None, Some("2")),
+            Err("--animate_sharding requires <shard>/<num_shards>".into())
+        );
+    }
+
+    #[test]
+    fn enable_warns_instead_of_silently_ignoring() {
+        let w = |names: &[&str]| {
+            enable_warnings(&names.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        // The nightly's own text for an unknown name.
+        assert_eq!(
+            w(&["foo"]),
+            ["WARNING: Ignoring request to enable unknown feature 'foo'."]
+        );
+        assert_eq!(
+            w(&["roof"]),
+            ["WARNING: Experimental feature 'roof' is not supported by neoscad; ignoring it."]
+        );
+        // `all` ends the list, as in OpenSCAD.
+        assert_eq!(w(&["all", "foo"]).len(), 1);
+    }
+
+    #[test]
+    fn frame_targets_number_before_the_extension() {
+        assert_eq!(run::frame_target("out/x.stl", Some(3)), "out/x00003.stl");
+        assert_eq!(run::frame_target("a.b.stl", Some(12)), "a.b00012.stl");
+        assert_eq!(run::frame_target("x", Some(0)), "x00000");
+        assert_eq!(run::frame_target("x.stl", None), "x.stl");
     }
 
     /// The exact argument shapes tests/CMakeLists.txt passes for tiers 0-2.

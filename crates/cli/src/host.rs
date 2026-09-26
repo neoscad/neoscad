@@ -66,24 +66,13 @@ impl Host {
     /// Nothing is read until a `text()` needs a font.
     pub fn fonts<'u>(&self, used: impl Iterator<Item = &'u String>) -> text::FontDb {
         let mut db = text::FontDb::with_fs(self.fs.clone());
-        match std::env::var_os(FONT_DIR_VAR) {
-            Some(d) => db.add_dir(PathBuf::from(d)),
-            #[cfg(feature = "bundled-assets")]
-            None => assets::add_fonts(&mut db),
-            #[cfg(not(feature = "bundled-assets"))]
-            None => db.add_dir(resource_dir().join("fonts")),
-        }
-        if let Some(home) = std::env::var_os("HOME") {
-            db.add_dir(PathBuf::from(home).join(".fonts"));
-        }
-        if let Some(paths) = std::env::var_os("OPENSCAD_FONT_PATH") {
-            let sep = if cfg!(windows) { ';' } else { ':' };
-            let cwd = std::env::current_dir().unwrap_or_default();
-            for p in paths.to_string_lossy().split(sep) {
-                let p = cwd.join(p);
-                if self.fs.is_dir(&p) {
-                    db.add_dir(p);
-                }
+        for source in self.font_sources() {
+            match source {
+                #[cfg(feature = "bundled-assets")]
+                FontSource::Bundled => assets::add_fonts(&mut db),
+                #[cfg(not(feature = "bundled-assets"))]
+                FontSource::Bundled => {}
+                FontSource::Dir(d) => db.add_dir(d),
             }
         }
         for u in used {
@@ -97,7 +86,50 @@ impl Host {
         }
         db
     }
+
+    /// Where [`Host::fonts`] looks, in order; `--info` lists the same.
+    pub fn font_sources(&self) -> Vec<FontSource> {
+        let mut out = Vec::new();
+        match std::env::var_os(FONT_DIR_VAR) {
+            Some(d) => out.push(FontSource::Dir(PathBuf::from(d))),
+            #[cfg(feature = "bundled-assets")]
+            None => out.push(FontSource::Bundled),
+            #[cfg(not(feature = "bundled-assets"))]
+            None => out.push(FontSource::Dir(resource_dir().join("fonts"))),
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            out.push(FontSource::Dir(PathBuf::from(home).join(".fonts")));
+        }
+        if let Some(paths) = std::env::var_os("OPENSCAD_FONT_PATH") {
+            let sep = if cfg!(windows) { ';' } else { ':' };
+            let cwd = std::env::current_dir().unwrap_or_default();
+            for p in paths.to_string_lossy().split(sep) {
+                let p = cwd.join(p);
+                if self.fs.is_dir(&p) {
+                    out.push(FontSource::Dir(p));
+                }
+            }
+        }
+        out
+    }
 }
+
+/// One place fonts come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontSource {
+    /// The Liberation fonts compiled into the binary.
+    Bundled,
+    Dir(PathBuf),
+}
+
+/// The directory OpenSCAD calls its resource path: where the bundled
+/// libraries are mounted.
+pub fn resource_path() -> PathBuf {
+    resource_dir()
+}
+
+/// The environment variable that replaces the bundled fonts.
+pub const FONT_DIR_ENV: &str = FONT_DIR_VAR;
 
 /// The seed of unseeded `rands()`, as OpenSCAD makes it: the time in
 /// seconds plus the process ID (`builtin_functions.cc:69`, truncated to

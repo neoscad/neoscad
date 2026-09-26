@@ -113,6 +113,98 @@ impl ExportOptions {
     }
 }
 
+impl ExportOptions {
+    /// `SettingsEntryInt::decode`: `boost::lexical_cast<int>` of the
+    /// trimmed value (digits with an optional sign, nothing else). The
+    /// entry's range is not applied.
+    fn int(&self, section: &str, name: &str, default: i32) -> i32 {
+        self.raw(section, name)
+            .map(str::trim)
+            .filter(|v| {
+                let d = v.strip_prefix(['+', '-']).unwrap_or(v);
+                !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())
+            })
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// `SettingsEntryEnum::decode`: the item whose name is exactly the
+    /// value, else the default.
+    fn choice<T: Copy>(&self, section: &str, name: &str, items: &[(&str, T)], default: T) -> T {
+        self.raw(section, name)
+            .and_then(|v| items.iter().find(|(n, _)| *n == v).map(|(_, t)| *t))
+            .unwrap_or(default)
+    }
+
+    /// `Export3mfOptions::withOptions`, with the colour resolved as
+    /// `export_3mf` resolves it (`OpenSCAD::getColor(color, default)`, only
+    /// in `selected-only` mode). Returns the warning a colour name that
+    /// does not parse produces.
+    pub fn threemf(&self, default_color: io::Color) -> (io::threemf::Options, Option<String>) {
+        use io::threemf::{ColorMode, MaterialType, Unit};
+        const S: &str = "export-3mf";
+        let d = io::threemf::Options::default();
+        let color_mode = self.choice(
+            S,
+            "color-mode",
+            &[
+                ("model", ColorMode::Model),
+                ("none", ColorMode::None),
+                ("selected-only", ColorMode::SelectedOnly),
+            ],
+            d.color_mode,
+        );
+        let mut warning = None;
+        let color = (color_mode == ColorMode::SelectedOnly).then(|| {
+            let name = self.string(S, "color", "#f9d72c");
+            match eval::parse_color(&name) {
+                Some(c) => io::Color(c),
+                None => {
+                    warning = Some(format!(
+                        "Unable to parse color \"{name}\", reverting to default color."
+                    ));
+                    default_color
+                }
+            }
+        });
+        let options = io::threemf::Options {
+            color_mode,
+            color,
+            material_type: self.choice(
+                S,
+                "material-type",
+                &[
+                    ("color", MaterialType::Color),
+                    ("basematerial", MaterialType::BaseMaterial),
+                ],
+                d.material_type,
+            ),
+            unit: self.choice(
+                S,
+                "unit",
+                &[
+                    ("micron", Unit::Micron),
+                    ("millimeter", Unit::Millimeter),
+                    ("centimeter", Unit::Centimeter),
+                    ("meter", Unit::Meter),
+                    ("inch", Unit::Inch),
+                    ("foot", Unit::Foot),
+                ],
+                d.unit,
+            ),
+            decimal_precision: self.int(S, "decimal-precision", d.decimal_precision),
+            add_meta_data: self.bool(S, "add-meta-data", d.add_meta_data),
+            meta_data_title: self.string(S, "meta-data-title", ""),
+            meta_data_designer: self.string(S, "meta-data-designer", ""),
+            meta_data_description: self.string(S, "meta-data-description", ""),
+            meta_data_copyright: self.string(S, "meta-data-copyright", ""),
+            meta_data_license_terms: self.string(S, "meta-data-license-terms", ""),
+            meta_data_rating: self.string(S, "meta-data-rating", ""),
+        };
+        (options, warning)
+    }
+}
+
 /// The PDF paint colours as given, for the enabled paints only.
 #[derive(Debug, Clone)]
 pub struct PdfColors {
@@ -236,6 +328,52 @@ mod tests {
         assert_eq!(
             w,
             ["Unable to parse color \"nope\", reverting to default color."]
+        );
+    }
+
+    #[test]
+    fn threemf_options_as_the_nightly_decodes_them() {
+        use io::threemf::{ColorMode, MaterialType, Unit};
+        let front = io::Color::from_u8(0xf9, 0xd7, 0x2c);
+        let (o, w) = opts(&[]).threemf(front);
+        assert_eq!(o, io::threemf::Options::default());
+        assert!(w.is_none());
+        let (o, w) = opts(&[
+            "export-3mf/color-mode=selected-only",
+            "export-3mf/color=blue",
+            "export-3mf/material-type=color",
+            "export-3mf/unit=inch",
+            "export-3mf/decimal-precision= 4",
+            "export-3mf/add-meta-data=false",
+            "export-3mf/meta-data-designer=D",
+        ])
+        .threemf(front);
+        assert!(w.is_none());
+        assert_eq!(o.color_mode, ColorMode::SelectedOnly);
+        assert_eq!(o.color, Some(io::Color([0.0, 0.0, 1.0, 1.0])));
+        assert_eq!(o.material_type, MaterialType::Color);
+        assert_eq!(o.unit, Unit::Inch);
+        assert_eq!(o.decimal_precision, 4);
+        assert!(!o.add_meta_data);
+        assert_eq!(o.meta_data_designer, "D");
+        // Unknown enum names fall back to the default; an out-of-range
+        // precision is kept for lib3mf to refuse, as the nightly does.
+        let (o, _) =
+            opts(&["export-3mf/unit=bogus", "export-3mf/decimal-precision=99"]).threemf(front);
+        assert_eq!(o.unit, Unit::Millimeter);
+        assert_eq!(o.decimal_precision, 99);
+        let (o, _) = opts(&["export-3mf/decimal-precision=4x"]).threemf(front);
+        assert_eq!(o.decimal_precision, 6);
+        // An unparsable colour warns and uses the default colour.
+        let (o, w) = opts(&[
+            "export-3mf/color-mode=selected-only",
+            "export-3mf/color=notacolor",
+        ])
+        .threemf(front);
+        assert_eq!(o.color, Some(front));
+        assert_eq!(
+            w.as_deref(),
+            Some("Unable to parse color \"notacolor\", reverting to default color.")
         );
     }
 

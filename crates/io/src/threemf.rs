@@ -524,18 +524,28 @@ pub struct WriteOptions<'a> {
     pub default_color: Color,
 }
 
-/// lib3mf's decimal output at precision 6: the coordinate as a `float`,
-/// times 10^6 in `float`, truncated to an integer, printed with six
-/// decimals, and `0` for zero. Large values show the `float` rounding of
-/// the product (123456.789 prints as `123456.790528`), as lib3mf's do.
-fn lib3mf_float(v: f64) -> String {
-    let n = ((v as f32) * 1_000_000f32) as i64;
+/// lib3mf's decimal output at `precision` places: the coordinate as a
+/// `float`, times 10^precision in `float`, truncated to an integer, printed
+/// with that many decimals, and `0` for zero. Large values show the `float`
+/// rounding of the product (123456.789 prints as `123456.790528` at 6), as
+/// lib3mf's do; at 16 places even `1` shows it (`1.0000000272564224`,
+/// checked against the nightly), because 10^16 is not a `float`.
+fn lib3mf_float(v: f64, precision: u32) -> String {
+    // The scale as the nearest `float`, not a product of rounded powers.
+    let scale: f32 = format!("1e{precision}").parse().unwrap_or(1.0e6);
+    let n = ((v as f32) * scale) as i64;
     if n == 0 {
         return "0".into();
     }
     let sign = if n < 0 { "-" } else { "" };
     let a = n.unsigned_abs();
-    format!("{sign}{}.{:06}", a / 1_000_000, a % 1_000_000)
+    let unit = 10u64.pow(precision);
+    format!(
+        "{sign}{}.{:0width$}",
+        a / unit,
+        a % unit,
+        width = precision as usize
+    )
 }
 
 fn xml_escape(s: &str) -> String {
@@ -577,13 +587,119 @@ fn hex_color(c: [i32; 4]) -> String {
     format!("#{:02X}{:02X}{:02X}{:02X}", c[0], c[1], c[2], c[3])
 }
 
+/// `export-3mf/color-mode`: which colours the file carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorMode {
+    /// Face colours from the model, over the default colour.
+    #[default]
+    Model,
+    /// No colour or material resources at all.
+    None,
+    /// Only [`Options::color`], for the whole object.
+    SelectedOnly,
+}
+
+/// `export-3mf/material-type`: the resource the colours go into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MaterialType {
+    /// A `<m:colorgroup>`.
+    Color,
+    /// A `<basematerials>` group (lib3mf's default for OpenSCAD).
+    #[default]
+    BaseMaterial,
+}
+
+/// `export-3mf/unit`, as lib3mf writes the model's `unit` attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Unit {
+    Micron,
+    #[default]
+    Millimeter,
+    Centimeter,
+    Meter,
+    Inch,
+    Foot,
+}
+
+impl Unit {
+    fn attr(self) -> &'static str {
+        match self {
+            Unit::Micron => "micron",
+            Unit::Millimeter => "millimeter",
+            Unit::Centimeter => "centimeter",
+            Unit::Meter => "meter",
+            Unit::Inch => "inch",
+            Unit::Foot => "foot",
+        }
+    }
+}
+
+/// The `-O export-3mf/...` settings (`Export3mfOptions`, `io/export.h`),
+/// already decoded; [`Options::default`] is OpenSCAD's defaults.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Options {
+    pub color_mode: ColorMode,
+    /// The colour of `selected-only` mode, already resolved by the caller
+    /// (`OpenSCAD::getColor(color, defaultColor)`, which prints its own
+    /// warning for a name it cannot parse). Unused in the other modes.
+    pub color: Option<Color>,
+    pub material_type: MaterialType,
+    pub unit: Unit,
+    /// Passed to lib3mf as given: outside 1..=16 lib3mf refuses it, the
+    /// export says so and keeps lib3mf's default of 6.
+    pub decimal_precision: i32,
+    pub add_meta_data: bool,
+    /// Replaces the file-name `Title` when not empty.
+    pub meta_data_title: String,
+    pub meta_data_designer: String,
+    pub meta_data_description: String,
+    pub meta_data_copyright: String,
+    pub meta_data_license_terms: String,
+    pub meta_data_rating: String,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            color_mode: ColorMode::Model,
+            color: None,
+            material_type: MaterialType::BaseMaterial,
+            unit: Unit::Millimeter,
+            decimal_precision: 6,
+            add_meta_data: true,
+            meta_data_title: String::new(),
+            meta_data_designer: String::new(),
+            meta_data_description: String::new(),
+            meta_data_copyright: String::new(),
+            meta_data_license_terms: String::new(),
+            meta_data_rating: String::new(),
+        }
+    }
+}
+
 /// `export_3mf` with OpenSCAD's default options (colour mode "model",
 /// base materials, millimetres, precision 6, metadata on) for one
 /// triangulated mesh. Returns the file and the messages OpenSCAD would
 /// print; an empty file means the export failed.
 pub fn write(mesh: MeshRef<'_>, opts: &WriteOptions<'_>) -> (Vec<u8>, Vec<Message>) {
+    write_with(mesh, opts, &Options::default())
+}
+
+/// `export_3mf` with the `-O export-3mf/...` settings in `o`, for one
+/// triangulated mesh. Each branch below was checked against the files the
+/// 2026.09.23 nightly writes for the same settings.
+pub fn write_with(
+    mesh: MeshRef<'_>,
+    opts: &WriteOptions<'_>,
+    o: &Options,
+) -> (Vec<u8>, Vec<Message>) {
     let mut msgs = Vec::new();
     let invalid = || Message::warning("Invalid color in 3MF export");
+    let export_error = |t: String| Message {
+        severity: Some(Severity::Error),
+        text: format!("EXPORT-ERROR: {t}"),
+        located: false,
+    };
     // `NMR_MESH_MAXCOORDINATE`: lib3mf refuses a vertex beyond 1e9 mm.
     if mesh
         .vertices
@@ -591,62 +707,101 @@ pub fn write(mesh: MeshRef<'_>, opts: &WriteOptions<'_>) -> (Vec<u8>, Vec<Messag
         .flatten()
         .any(|c| (c.abs() as f32) > 1.0e9)
     {
-        let e = |t: &str| Message {
-            severity: Some(Severity::Error),
-            text: t.into(),
-            located: false,
-        };
-        msgs.push(Message { text: format!("EXPORT-ERROR: {}", "Error: GENERICEXCEPTION: The coordinates exceed NMR_MESH_MAXCOORDINATE (= 1 billion mm)"), ..e("") });
-        msgs.push(Message {
-            text: "EXPORT-ERROR: Can't add vertex to 3MF model.".into(),
-            ..e("")
-        });
+        msgs.push(export_error(
+            "Error: GENERICEXCEPTION: The coordinates exceed NMR_MESH_MAXCOORDINATE (= 1 billion mm)"
+                .into(),
+        ));
+        msgs.push(export_error("Can't add vertex to 3MF model.".into()));
         return (Vec::new(), msgs);
     }
-    let default = opts.default_color.rgba_int().unwrap_or_else(|| {
-        msgs.push(invalid());
-        [0, 0, 0, 0]
-    });
-    // Base materials: "Default" first (alpha forced opaque), then one per
-    // new face colour, in face order. The map starts with the scheme colour
-    // itself, so faces of exactly that colour use "Default".
-    let mut materials: Vec<(String, [i32; 4])> =
-        vec![("Default".into(), [default[0], default[1], default[2], 255])];
+
+    // The colour resource: none, base materials or a colour group. Its
+    // entries are (name, RGBA); a colour group's names are unused.
+    let group: Option<MaterialType> = (o.color_mode != ColorMode::None).then_some(o.material_type);
+    let color = match o.color_mode {
+        ColorMode::SelectedOnly => o.color.unwrap_or(opts.default_color),
+        _ => opts.default_color,
+    };
+    let mut entries: Vec<(String, [i32; 4])> = Vec::new();
     let mut by_color: HashMap<[u32; 4], usize> = HashMap::new();
-    by_color.insert(opts.default_color.0.map(f32::to_bits), 0);
-    let mut tri_prop: Vec<usize> = Vec::with_capacity(mesh.faces.len());
-    for i in 0..mesh.faces.len() {
-        let prop = match mesh.face_color(i) {
-            None => 0,
-            Some(c) => *by_color.entry(c.0.map(f32::to_bits)).or_insert_with(|| {
-                let rgba = c.rgba_int().unwrap_or_else(|| {
-                    msgs.push(invalid());
-                    [0, 0, 0, 0]
+    if let Some(kind) = group {
+        let c = color.rgba_int().unwrap_or_else(|| {
+            msgs.push(invalid());
+            [0, 0, 0, 0]
+        });
+        match kind {
+            // "Default", alpha forced opaque. The map starts with the colour
+            // itself, so faces of exactly that colour use "Default".
+            MaterialType::BaseMaterial => {
+                entries.push(("Default".into(), [c[0], c[1], c[2], 255]));
+                by_color.insert(color.0.map(f32::to_bits), 0);
+            }
+            // The colour as it is, and not in the map: a face of the same
+            // colour adds a second entry, as the nightly's files show.
+            MaterialType::Color => entries.push((String::new(), c)),
+        }
+    }
+    // Per-face properties: only in "model" mode, one entry per new colour
+    // in face order; faces without a colour keep the object's.
+    let mut tri_prop: Vec<usize> = vec![0; mesh.faces.len()];
+    if group.is_some() && o.color_mode == ColorMode::Model {
+        for (i, prop) in tri_prop.iter_mut().enumerate() {
+            if let Some(c) = mesh.face_color(i) {
+                *prop = *by_color.entry(c.0.map(f32::to_bits)).or_insert_with(|| {
+                    let rgba = c.rgba_int().unwrap_or_else(|| {
+                        msgs.push(invalid());
+                        [0, 0, 0, 0]
+                    });
+                    entries.push((format!("Color {}", entries.len()), rgba));
+                    entries.len() - 1
                 });
-                materials.push((format!("Color {}", materials.len()), rgba));
-                materials.len() - 1
-            }),
-        };
-        tri_prop.push(prop);
+            }
+        }
     }
+
+    // `SetDecimalPrecision` rejects anything outside 1..=16; the writer then
+    // keeps its default.
+    let precision = match u32::try_from(o.decimal_precision) {
+        Ok(p @ 1..=16) => p,
+        _ => {
+            msgs.push(export_error(
+                "Error setting decimal precision for export: Error: GENERICEXCEPTION: The call parameter to the function was invalid"
+                    .into(),
+            ));
+            6
+        }
+    };
+
     let mut body = String::with_capacity(mesh.vertices.len() * 64 + mesh.faces.len() * 64);
-    body.push_str("\t\t<basematerials id=\"1\">\n");
-    for (name, c) in &materials {
-        body.push_str(&format!(
-            "\t\t\t<base name=\"{}\" displaycolor=\"{}\"/>\n",
-            xml_escape(name),
-            hex_color(*c)
-        ));
+    match group {
+        Some(MaterialType::BaseMaterial) => {
+            body.push_str("\t\t<basematerials id=\"1\">\n");
+            for (name, c) in &entries {
+                body.push_str(&format!(
+                    "\t\t\t<base name=\"{}\" displaycolor=\"{}\"/>\n",
+                    xml_escape(name),
+                    hex_color(*c)
+                ));
+            }
+            body.push_str("\t\t</basematerials>\n");
+        }
+        Some(MaterialType::Color) => {
+            body.push_str("\t\t<m:colorgroup id=\"1\">\n");
+            for (_, c) in &entries {
+                body.push_str(&format!("\t\t\t<m:color color=\"{}\"/>\n", hex_color(*c)));
+            }
+            body.push_str("\t\t</m:colorgroup>\n");
+        }
+        None => {}
     }
-    body.push_str("\t\t</basematerials>\n");
     let mut geometry = String::with_capacity(body.capacity());
     geometry.push_str("\t\t\t<mesh>\n\t\t\t\t<vertices>\n");
     for v in mesh.vertices {
         geometry.push_str(&format!(
             "\t\t\t\t\t<vertex x=\"{}\" y=\"{}\" z=\"{}\" />\n",
-            lib3mf_float(v[0]),
-            lib3mf_float(v[1]),
-            lib3mf_float(v[2])
+            lib3mf_float(v[0], precision),
+            lib3mf_float(v[1], precision),
+            lib3mf_float(v[2], precision)
         ));
     }
     geometry.push_str("\t\t\t\t</vertices>\n\t\t\t\t<triangles>\n");
@@ -665,29 +820,49 @@ pub fn write(mesh: MeshRef<'_>, opts: &WriteOptions<'_>) -> (Vec<u8>, Vec<Messag
     let seed = [body.as_bytes(), geometry.as_bytes()].concat();
     let mut xml = String::with_capacity(body.len() + geometry.len() + 2048);
     xml.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
-    xml.push_str("<model xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\" unit=\"millimeter\" xml:lang=\"en-US\" xmlns:m=\"http://schemas.microsoft.com/3dmanufacturing/material/2015/02\" xmlns:p=\"http://schemas.microsoft.com/3dmanufacturing/production/2015/06\" xmlns:b=\"http://schemas.microsoft.com/3dmanufacturing/beamlattice/2017/02\" xmlns:s=\"http://schemas.microsoft.com/3dmanufacturing/slice/2015/07\" xmlns:t=\"http://schemas.microsoft.com/3dmanufacturing/trianglesets/2021/07\" xmlns:sc=\"http://schemas.microsoft.com/3dmanufacturing/securecontent/2019/04\" xmlns:v=\"http://schemas.3mf.io/3dmanufacturing/volumetric/2022/01\" xmlns:i=\"http://schemas.3mf.io/3dmanufacturing/implicit/2023/12\">\n");
-    for (name, value) in [
-        ("Title", opts.title),
-        ("Application", "OpenSCAD (https://www.openscad.org/)"),
-        ("CreationDate", opts.creation_date),
-    ] {
-        if !value.is_empty() {
-            xml.push_str(&format!(
-                "\t<metadata name=\"{name}\" preserve=\"1\">{}</metadata>\n",
-                xml_escape(value)
-            ));
+    xml.push_str(&format!("<model xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\" unit=\"{}\" xml:lang=\"en-US\" xmlns:m=\"http://schemas.microsoft.com/3dmanufacturing/material/2015/02\" xmlns:p=\"http://schemas.microsoft.com/3dmanufacturing/production/2015/06\" xmlns:b=\"http://schemas.microsoft.com/3dmanufacturing/beamlattice/2017/02\" xmlns:s=\"http://schemas.microsoft.com/3dmanufacturing/slice/2015/07\" xmlns:t=\"http://schemas.microsoft.com/3dmanufacturing/trianglesets/2021/07\" xmlns:sc=\"http://schemas.microsoft.com/3dmanufacturing/securecontent/2019/04\" xmlns:v=\"http://schemas.3mf.io/3dmanufacturing/volumetric/2022/01\" xmlns:i=\"http://schemas.3mf.io/3dmanufacturing/implicit/2023/12\">\n", o.unit.attr()));
+    if o.add_meta_data {
+        // `add_meta_data`: the setting, else the fallback; empty is skipped.
+        let title = if o.meta_data_title.is_empty() {
+            opts.title
+        } else {
+            &o.meta_data_title
+        };
+        for (name, value) in [
+            ("Title", title),
+            ("Application", "OpenSCAD (https://www.openscad.org/)"),
+            ("CreationDate", opts.creation_date),
+            ("Designer", &o.meta_data_designer),
+            ("Description", &o.meta_data_description),
+            ("Copyright", &o.meta_data_copyright),
+            ("LicenseTerms", &o.meta_data_license_terms),
+            ("Rating", &o.meta_data_rating),
+        ] {
+            if !value.is_empty() {
+                xml.push_str(&format!(
+                    "\t<metadata name=\"{name}\" preserve=\"1\">{}</metadata>\n",
+                    xml_escape(value)
+                ));
+            }
         }
     }
     xml.push_str("\t<resources>\n");
     xml.push_str(&body);
+    // lib3mf numbers resources in creation order: the colour resource, if
+    // any, is 1 and the object follows it.
+    let (object_id, props) = if group.is_some() {
+        (2, " pid=\"1\" pindex=\"0\"")
+    } else {
+        (1, "")
+    };
     xml.push_str(&format!(
-        "\t\t<object id=\"2\" name=\"OpenSCAD Model\" type=\"model\" p:UUID=\"{}\" pid=\"1\" pindex=\"0\">\n",
+        "\t\t<object id=\"{object_id}\" name=\"OpenSCAD Model\" type=\"model\" p:UUID=\"{}\"{props}>\n",
         uuid(&seed, 0)
     ));
     xml.push_str(&geometry);
     xml.push_str("\t\t</object>\n\t</resources>\n");
     xml.push_str(&format!(
-        "\t<build p:UUID=\"{}\">\n\t\t<item objectid=\"2\" p:UUID=\"{}\"/>\n\t</build>\n</model>\n",
+        "\t<build p:UUID=\"{}\">\n\t\t<item objectid=\"{object_id}\" p:UUID=\"{}\"/>\n\t</build>\n</model>\n",
         uuid(&seed, 1),
         uuid(&seed, 2)
     ));
@@ -734,8 +909,114 @@ mod tests {
             (-0.0000019, "-0.000001"),
             (1234.5678, "1234.567808"),
         ] {
-            assert_eq!(lib3mf_float(v), s, "{v}");
+            assert_eq!(lib3mf_float(v, 6), s, "{v}");
         }
+    }
+
+    #[test]
+    fn other_precisions_print_like_lib3mf() {
+        // `cube(1/3)` and `cube(1)` exported by the 2026.09.23 nightly with
+        // `-O export-3mf/decimal-precision=N`.
+        let third = 1.0 / 3.0;
+        for (p, s) in [
+            (1, "0.3"),
+            (2, "0.33"),
+            (7, "0.3333333"),
+            (10, "0.3333333504"),
+            (16, "0.3333333513666560"),
+        ] {
+            assert_eq!(lib3mf_float(third, p), s, "{p}");
+        }
+        assert_eq!(lib3mf_float(1.0, 1), "1.0");
+        assert_eq!(lib3mf_float(1.0, 3), "1.000");
+        assert_eq!(lib3mf_float(1.0, 16), "1.0000000272564224");
+    }
+
+    /// The model part of a written file.
+    fn model_xml(bytes: &[u8]) -> String {
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        zip_text(&mut zip, "3D/3dmodel.model").unwrap()
+    }
+
+    #[test]
+    fn export_options_shape_the_file_as_the_nightly_does() {
+        let red = Color::from_u8(255, 0, 0);
+        let front = Color::from_u8(0xf9, 0xd7, 0x2c);
+        let m = tet(vec![red, front], vec![0, 1, -1, 0]);
+        let opts = WriteOptions {
+            title: "t.scad",
+            creation_date: "2026-09-26T00:00:00Z",
+            default_color: front,
+        };
+        let write = |o: &Options| {
+            let (bytes, msgs) = write_with(m.as_ref(), &opts, o);
+            (model_xml(&bytes), msgs)
+        };
+
+        // color-mode=none: no colour resource, the object is resource 1.
+        let (x, _) = write(&Options {
+            color_mode: ColorMode::None,
+            ..Options::default()
+        });
+        assert!(!x.contains("basematerials") && !x.contains("colorgroup"));
+        assert!(x.contains("<object id=\"1\" name=\"OpenSCAD Model\" type=\"model\" p:UUID="));
+        assert!(!x.contains("pid="));
+        assert!(x.contains("<item objectid=\"1\""));
+
+        // material-type=color: the default colour is not pre-mapped, so a
+        // face of that colour gets its own entry.
+        let (x, _) = write(&Options {
+            material_type: MaterialType::Color,
+            ..Options::default()
+        });
+        assert!(x.contains(
+            "<m:colorgroup id=\"1\">\n\t\t\t<m:color color=\"#F9D72CFF\"/>\n\t\t\t<m:color color=\"#FF0000FF\"/>\n\t\t\t<m:color color=\"#F9D72CFF\"/>\n\t\t</m:colorgroup>"
+        ));
+        assert_eq!(x.matches("p1=\"1\"").count(), 2);
+        assert_eq!(x.matches("p1=\"2\"").count(), 1);
+
+        // selected-only: one material in the chosen colour, alpha forced
+        // opaque, and no per-face properties.
+        let (x, _) = write(&Options {
+            color_mode: ColorMode::SelectedOnly,
+            color: Some(Color([1.0, 0.0, 0.0, 0.5])),
+            ..Options::default()
+        });
+        assert!(
+            x.contains("<base name=\"Default\" displaycolor=\"#FF0000FF\"/>\n\t\t</basematerials>")
+        );
+        assert!(!x.contains("p1="));
+
+        // Units, precision and metadata.
+        let (x, msgs) = write(&Options {
+            unit: Unit::Inch,
+            decimal_precision: 3,
+            add_meta_data: true,
+            meta_data_title: "T&<x>".into(),
+            meta_data_rating: "R".into(),
+            ..Options::default()
+        });
+        assert!(msgs.is_empty());
+        assert!(x.contains(" unit=\"inch\" "));
+        assert!(x.contains("<vertex x=\"1.000\" y=\"0\" z=\"0\" />"));
+        assert!(x.contains("<metadata name=\"Title\" preserve=\"1\">T&amp;&lt;x&gt;</metadata>"));
+        assert!(x.contains("<metadata name=\"Rating\" preserve=\"1\">R</metadata>\n\t<resources>"));
+        let (x, _) = write(&Options {
+            add_meta_data: false,
+            ..Options::default()
+        });
+        assert!(!x.contains("<metadata"));
+
+        // An out-of-range precision is reported and 6 is used.
+        let (x, msgs) = write(&Options {
+            decimal_precision: 17,
+            ..Options::default()
+        });
+        assert_eq!(
+            msgs[0].text,
+            "EXPORT-ERROR: Error setting decimal precision for export: Error: GENERICEXCEPTION: The call parameter to the function was invalid"
+        );
+        assert!(x.contains("<vertex x=\"1.000000\""));
     }
 
     fn tet(colors: Vec<Color>, color_indices: Vec<i32>) -> Mesh {
