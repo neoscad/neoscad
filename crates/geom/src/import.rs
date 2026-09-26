@@ -47,10 +47,10 @@ fn quoted_relative(opts: &RenderOptions, file: &str) -> String {
 }
 
 fn relative(opts: &RenderOptions, file: &str) -> String {
-    if file.is_empty() || opts.doc_dir.as_os_str().is_empty() {
+    if file.is_empty() || opts.work_dir.as_os_str().is_empty() {
         return file.to_string();
     }
-    lang::diag::relative_path(Path::new(file), &opts.doc_dir)
+    lang::diag::relative_path(Path::new(file), &opts.work_dir)
         .to_string_lossy()
         .replace('\\', "/")
 }

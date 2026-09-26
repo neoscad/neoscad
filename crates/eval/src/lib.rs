@@ -17,9 +17,15 @@
 //!   `context`.
 //! - **Errors** unwind as `Err(Box<Unwind>)`, collecting OpenSCAD's
 //!   `TRACE:` lines at the same call sites; see `message`.
-//! - **Recursion limits** are measured on the real stack, like OpenSCAD's
-//!   `StackCheck`, so deep recursion reports an error instead of crashing.
-//!   Run evaluation on a thread with enough stack ([`with_stack`]).
+//! - **Recursion limits** are a measured stack budget, like OpenSCAD's
+//!   `StackCheck`, and a frame budget for where the stack cannot be
+//!   measured (WASM), so deep recursion reports an error instead of
+//!   crashing; see [`recursion`]. Run evaluation on a thread with enough
+//!   stack ([`with_stack`]).
+//! - **No ambient platform access.** Files are read through
+//!   [`Options::fs`], and unseeded `rands()` starts from
+//!   [`Options::rng_seed`], which the host chooses; nothing reads the
+//!   clock or the environment.
 //! - **Cancellation**: set [`Options::interrupt`] and evaluation stops at
 //!   the next call or loop iteration.
 
@@ -34,6 +40,7 @@ pub mod message;
 pub mod node;
 mod ops;
 mod print;
+pub mod recursion;
 pub mod rng;
 mod sym;
 pub mod text_props;
@@ -48,6 +55,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use lang::Program;
+use lang::loader::{FileSystem, StdFs};
 
 pub use message::{Collect, Console, Message, Output};
 pub use node::Node;
@@ -169,12 +177,21 @@ pub struct Options {
     /// `--check-parameter-ranges`: warn about degenerate primitive sizes.
     pub check_parameter_ranges: bool,
     /// Bytes of stack evaluation may use before reporting recursion
-    /// (OpenSCAD's `StackCheck`, 8 MiB minus 128 KiB on macOS and Linux).
+    /// (OpenSCAD's `StackCheck`, 8 MiB minus 128 KiB on macOS and Linux);
+    /// see [`recursion`].
     pub stack_limit: usize,
+    /// Nested function calls and statement instantiations allowed before
+    /// reporting recursion, whatever the stack; see [`recursion`].
+    pub frame_limit: u32,
     /// `version()`: the OpenSCAD release this evaluator matches.
     pub version: [f64; 3],
-    /// The seed for unseeded `rands()`; `None` seeds from the clock.
-    pub rng_seed: Option<u32>,
+    /// The seed unseeded `rands()` starts from. OpenSCAD seeds from the
+    /// clock and its process ID, and the command line does the same; other
+    /// hosts choose (a WASM host from its own entropy). The same seed
+    /// always gives the same numbers, so the default, 0, is repeatable.
+    pub rng_seed: u32,
+    /// Where `dxf_dim()` and `dxf_cross()` read their files.
+    pub fs: Arc<dyn FileSystem + Send + Sync>,
     /// Checked at every call and loop iteration; when set, evaluation stops.
     pub interrupt: Option<Arc<AtomicBool>>,
     /// `--hardwarnings`: stop at the first warning, with the `TRACE:` lines
@@ -193,23 +210,31 @@ impl Default for Options {
             check_parameters: true,
             check_parameter_ranges: false,
             stack_limit: DEFAULT_STACK_LIMIT,
+            frame_limit: recursion::DEFAULT_FRAME_LIMIT,
             version: [2026.0, 9.0, 23.0],
-            rng_seed: None,
+            rng_seed: 0,
+            fs: Arc::new(StdFs),
             interrupt: None,
             hardwarnings: false,
         }
     }
 }
 
-/// The default [`Options::stack_limit`]. Rust frames for one OpenSCAD call
-/// are larger than OpenSCAD's own, so this is scaled up from OpenSCAD's
-/// 8 MiB so programs recurse at least as deep as they do there.
-pub const DEFAULT_STACK_LIMIT: usize = 48 << 20;
-
-/// Stack to give a thread running [`evaluate`] with the default limit.
-pub const DEFAULT_THREAD_STACK: usize = DEFAULT_STACK_LIMIT + (16 << 20);
+pub use recursion::{DEFAULT_STACK_LIMIT, DEFAULT_THREAD_STACK};
 
 /// Run `f` on a thread with `bytes` of stack and wait for it.
+///
+/// On wasm32 this calls `f` directly: wasm32-unknown-unknown cannot spawn
+/// threads (the spawn fails with "operation not supported"), and a wasm
+/// module's stack size is fixed when it is linked (see [`recursion`]), so
+/// a new thread would buy nothing.
+#[cfg(target_arch = "wasm32")]
+pub fn with_stack<T: Send>(_bytes: usize, f: impl FnOnce() -> T + Send) -> T {
+    f()
+}
+
+/// Run `f` on a thread with `bytes` of stack and wait for it.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn with_stack<T: Send>(bytes: usize, f: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|s| {
         std::thread::Builder::new()
@@ -243,7 +268,8 @@ pub struct Evaluation {
 /// Call this on a thread with at least [`Options::stack_limit`] plus some
 /// headroom of stack ([`with_stack`] with [`DEFAULT_THREAD_STACK`] for the
 /// default limit): the recursion check measures the real stack and
-/// assumes it is there.
+/// assumes it is there. On wasm32 the module must be linked with the stack
+/// [`recursion`] describes.
 pub fn evaluate(
     main: &Program,
     main_uses: &[String],

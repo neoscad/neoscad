@@ -61,10 +61,10 @@ fn render(r: &Renderer, fs: Arc<MemFs>, src: &str) -> (Option<Geometry>, Vec<Str
             &mut out,
         )
     });
-    let keys = eval::dump::Keys::new(&ev.root);
+    let keys = eval::dump::Keys::new(&ev.root, &*fs);
     let opts = RenderOptions {
         fs,
-        doc_dir: PathBuf::from("/mem"),
+        work_dir: PathBuf::from("/mem"),
         ..Default::default()
     };
     let out = r.render(&ev.root, &keys, opts).expect("supported");

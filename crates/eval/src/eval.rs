@@ -165,6 +165,12 @@ pub(crate) struct Evaluator<'a> {
     pub opts: Options,
     pub rng: Mt19937,
     stack_base: usize,
+    /// [`Options::stack_limit`], capped on wasm32 by the stack actually left
+    /// (see [`crate::recursion`]).
+    stack_limit: usize,
+    /// Frames in use for [`Options::frame_limit`]: nested function calls
+    /// and statement instantiations.
+    pub frames: u32,
     pub main_dir: PathBuf,
     node_index: usize,
     pub builtin_ctx: Rc<Ctx>,
@@ -267,8 +273,10 @@ impl<'a> Evaluator<'a> {
                 i += 1;
             }
         }
-        let seed = opts.rng_seed.unwrap_or_else(clock_seed);
+        let seed = opts.rng_seed;
         let marker = 0u8;
+        let stack_base = std::ptr::addr_of!(marker) as usize;
+        let stack_limit = crate::recursion::stack_limit(opts.stack_limit, stack_base);
         Evaluator {
             units,
             syms,
@@ -277,7 +285,9 @@ impl<'a> Evaluator<'a> {
             module_names: Vec::new(),
             out,
             rng: Mt19937::new(seed),
-            stack_base: std::ptr::addr_of!(marker) as usize,
+            stack_base,
+            stack_limit,
+            frames: 0,
             main_dir,
             node_index: 1,
             builtin_ctx: Ctx::new(None, CtxKind::Builtin),
@@ -307,10 +317,18 @@ impl<'a> Evaluator<'a> {
         self.stack_base.abs_diff(here)
     }
 
-    /// `StackCheck::check`.
+    /// `StackCheck::check`, made of the two limits in [`crate::recursion`]:
+    /// the stack measured, and the frame budget.
     #[inline]
-    pub fn stack_exhausted(&self) -> bool {
-        self.stack_used() >= self.opts.stack_limit
+    pub fn recursion_exhausted(&self) -> bool {
+        self.stack_used() >= self.stack_limit || self.frames >= self.opts.frame_limit
+    }
+
+    /// The measured stack limit alone (for printing, which has its own
+    /// depth count).
+    #[inline]
+    pub fn stack_limit(&self) -> usize {
+        self.stack_limit
     }
 
     #[inline]
@@ -619,7 +637,13 @@ impl<'a> Evaluator<'a> {
     /// programs can recurse within the stack limit.
     #[inline]
     pub fn eval(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
-        let v = self.eval_expr(u, id, ctx)?;
+        // A nested expression is a frame for the frame budget (see
+        // `crate::recursion`): a recursive function whose body nests
+        // deeply costs stack between its calls too.
+        self.frames += crate::recursion::EXPRESSION_FRAMES;
+        let v = self.eval_expr(u, id, ctx);
+        self.frames -= crate::recursion::EXPRESSION_FRAMES;
+        let v = v?;
         self.check_hard()?;
         Ok(v)
     }
@@ -937,7 +961,16 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// A list comprehension element holds frames of the frame budget, like
+    /// an expression (see `crate::recursion`).
     fn eval_lc(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>, out: &mut Vec<Value>) -> R<()> {
+        self.frames += crate::recursion::COMPREHENSION_FRAMES;
+        let r = self.eval_lc_frame(u, id, ctx, out);
+        self.frames -= crate::recursion::COMPREHENSION_FRAMES;
+        r
+    }
+
+    fn eval_lc_frame(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>, out: &mut Vec<Value>) -> R<()> {
         let ast: &'a Ast = self.units[u as usize].ast;
         let e = ast.expr(id);
         match &e.kind {
@@ -1211,20 +1244,5 @@ impl<'a> Evaluator<'a> {
         }
         self.error(Some(loc), DiagCode::AssertionFailed, text);
         Err(self.unwind(UnwindKind::Assertion))
-    }
-}
-
-fn clock_seed() -> u32 {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        (t as u32).wrapping_add(std::process::id())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        0
     }
 }

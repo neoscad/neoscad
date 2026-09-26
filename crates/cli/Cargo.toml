@@ -10,7 +10,15 @@ license.workspace = true
 name = "neoscad"
 path = "src/main.rs"
 
+[features]
+# Compile the Liberation fonts and the MCAD library into the binary (about
+# 4.3 MB), so the default font and `include <MCAD/...>` work with nothing
+# installed, as they do in OpenSCAD, which ships them as resources.
+default = ["bundled-assets"]
+bundled-assets = ["dep:assets"]
+
 [dependencies]
+assets = { package = "neoscad-assets", path = "../assets", optional = true }
 clap.workspace = true
 lang = { package = "neoscad-lang", path = "../lang" }
 eval = { package = "neoscad-eval", path = "../eval" }

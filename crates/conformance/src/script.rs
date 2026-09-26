@@ -75,7 +75,7 @@ fn binary(env: &Env) -> Command {
     let mut cmd = Command::new(&env.binary);
     cmd.current_dir(&env.work_dir)
         .env("OPENSCAD_FONT_PATH", &env.font_path)
-        .env(FONT_DIR_VAR, env.ref_root.join("fonts"))
+        .env_remove(FONT_DIR_VAR)
         .env("OPENSCADPATH", &env.library_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null());

@@ -315,8 +315,39 @@ impl Vector {
     }
 
     /// The elements, without copying when this is the only reference.
-    pub fn into_vec(self) -> Vec<Value> {
-        Rc::try_unwrap(self.0).unwrap_or_else(|rc| (*rc).clone())
+    pub fn into_vec(mut self) -> Vec<Value> {
+        match Rc::get_mut(&mut self.0) {
+            Some(v) => std::mem::take(v),
+            None => (*self.0).clone(),
+        }
+    }
+}
+
+/// Frees nested vectors with a loop instead of recursion. A tail-recursive
+/// function can nest a vector a million levels deep (`f(n, acc) = n == 0 ?
+/// acc : f(n - 1, [acc])`) without using any stack, and freeing it
+/// recursively would then overflow the stack: natively only at depths far
+/// beyond that, but in a WASM engine at a few thousand. (The nightly
+/// crashes on such a value even natively.)
+impl Drop for Vector {
+    fn drop(&mut self) {
+        let Some(items) = Rc::get_mut(&mut self.0) else {
+            return;
+        };
+        if !items.iter().any(|v| matches!(v, Value::Vector(_))) {
+            return;
+        }
+        let mut pending = vec![std::mem::take(items)];
+        while let Some(mut items) = pending.pop() {
+            for v in items.drain(..) {
+                if let Value::Vector(mut inner) = v
+                    && let Some(inner) = Rc::get_mut(&mut inner.0)
+                    && !inner.is_empty()
+                {
+                    pending.push(std::mem::take(inner));
+                }
+            }
+        }
     }
 }
 

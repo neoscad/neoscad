@@ -240,7 +240,7 @@ impl<'a> Evaluator<'a> {
     /// constant native stack.
     #[inline(never)]
     pub fn eval_call(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
-        if self.stack_exhausted() {
+        if self.recursion_exhausted() {
             let loc = self.expr_loc(u, id);
             let mut t = b"Recursion detected calling function '".to_vec();
             t.extend_from_slice(&self.call_name(u, id));
@@ -249,6 +249,9 @@ impl<'a> Evaluator<'a> {
             return Err(self.unwind(UnwindKind::Recursion));
         }
         self.check_interrupt()?;
+        // A frame for the frame budget (see `crate::recursion`); tail
+        // calls below reuse it, as they reuse the native stack.
+        self.frames += crate::recursion::CALL_FRAMES;
         let slot = self.push(Ctx::child(ctx));
         let mut cur = self.stack[slot].clone();
         let mut unit = u;
@@ -309,6 +312,7 @@ impl<'a> Evaluator<'a> {
             }
         };
         self.truncate(slot);
+        self.frames -= crate::recursion::CALL_FRAMES;
         result
     }
 

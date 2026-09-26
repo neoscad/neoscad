@@ -457,17 +457,18 @@ impl<'a> Evaluator<'a> {
         let name = text(get(4));
         let raw_s = String::from_utf8_lossy(&raw).into_owned();
         let path = std::path::Path::new(&file);
-        if file.is_empty() || !path.exists() {
+        let fs = self.opts.fs.clone();
+        if file.is_empty() || !fs.exists(path) {
             let mut t = b"Can't open DXF file '".to_vec();
             t.extend_from_slice(&raw);
             t.extend_from_slice(b"'!");
             self.warn(loc, DiagCode::InvalidArgument, t);
             return Value::Undef;
         }
-        let bytes = if path.is_dir() {
+        let bytes = if fs.is_dir(path) {
             None
         } else {
-            std::fs::read(path).ok()
+            fs.read(path).ok()
         };
         let display = lang::diag::relative_path(path, &self.main_dir)
             .display()

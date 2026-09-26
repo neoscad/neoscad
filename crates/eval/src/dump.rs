@@ -32,8 +32,8 @@
 //!   groups the text also ignores.
 
 use std::path::{Component, Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
+use lang::loader::FileSystem;
 use lang::number::fmt_g;
 use sha2::{Digest as _, Sha256};
 
@@ -54,15 +54,18 @@ struct Writer<'a> {
     style: Style,
     /// The document directory `.csg` file names are made relative to.
     base: &'a Path,
+    /// Where imported files are stat'ed for their time and size.
+    fs: &'a dyn FileSystem,
 }
 
 /// The `.csg` export of `top`: the root's children, or the node the root
 /// modifier (`!`) picked, with the trailing newline `openscad.cc` adds.
-pub fn csg(top: &Node, doc_dir: &Path) -> String {
+pub fn csg(top: &Node, doc_dir: &Path, fs: &dyn FileSystem) -> String {
     let mut w = Writer {
         out: String::new(),
         style: Style::Csg,
         base: doc_dir,
+        fs,
     };
     if top.kind == NodeKind::Root {
         for c in &top.children {
@@ -197,21 +200,21 @@ impl Writer<'_> {
         if self.key() {
             self.quoted(file);
         } else {
-            let rel = fs_relative(Path::new(file), self.base);
+            let rel = fs_relative(self.fs, Path::new(file), self.base);
             self.quoted(&rel.to_string_lossy());
         }
     }
 
     fn timestamp(&mut self, file: &str) {
         self.lit(", timestamp = ");
-        let t = mtime_nanos(file);
+        let t = mtime_nanos(self.fs, file);
         if self.key() {
             self.int(t);
             // The key also holds the size, so a file rewritten within the
             // file system's timestamp resolution still misses the cache
             // (imported geometry is cached under this key).
             self.lit(", size = ");
-            self.int(file_size(file));
+            self.int(file_size(self.fs, file));
         } else {
             // std::chrono::duration_cast truncates toward zero.
             self.int(t / 1_000_000_000);
@@ -572,43 +575,41 @@ impl Writer<'_> {
 
 /// The modification time of `file` in nanoseconds since the Unix epoch, or
 /// 0 if it does not exist (`fs_timestamp`).
-fn mtime_nanos(file: &str) -> i128 {
+/// 0 as well when the file system cannot tell (`FileSystem::metadata`).
+fn mtime_nanos(fs: &dyn FileSystem, file: &str) -> i128 {
     if file.is_empty() {
         return 0;
     }
-    let Ok(t) = std::fs::metadata(file).and_then(|m| m.modified()) else {
-        return 0;
-    };
-    match t.duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_nanos() as i128,
-        Err(e) => -(e.duration().as_nanos() as i128),
-    }
+    fs.metadata(Path::new(file))
+        .and_then(|m| m.modified)
+        .unwrap_or(0)
 }
 
 /// The size of `file` in bytes, or -1 if it does not exist.
-fn file_size(file: &str) -> i128 {
+fn file_size(fs: &dyn FileSystem, file: &str) -> i128 {
     if file.is_empty() {
         return -1;
     }
-    std::fs::metadata(file).map_or(-1, |m| i128::from(m.len()))
+    fs.metadata(Path::new(file))
+        .map_or(-1, |m| i128::from(m.len))
 }
 
 /// `std::filesystem::relative(p, base)` as `fs_uncomplete` calls it:
 /// both sides made weakly canonical (symlinks resolved as far as the path
 /// exists, then `.` and `..` folded), then `lexically_relative`. An empty
 /// path stays empty.
-fn fs_relative(p: &Path, base: &Path) -> PathBuf {
+fn fs_relative(fs: &dyn FileSystem, p: &Path, base: &Path) -> PathBuf {
     if p.as_os_str().is_empty() {
         return PathBuf::new();
     }
-    lexically_relative(&weakly_canonical(p), &weakly_canonical(base))
+    lexically_relative(&weakly_canonical(fs, p), &weakly_canonical(fs, base))
 }
 
-fn weakly_canonical(p: &Path) -> PathBuf {
+fn weakly_canonical(fs: &dyn FileSystem, p: &Path) -> PathBuf {
     let comps: Vec<Component<'_>> = p.components().collect();
     for i in (1..=comps.len()).rev() {
         let head: PathBuf = comps[..i].iter().collect();
-        if let Ok(mut c) = head.canonicalize() {
+        if let Some(mut c) = fs.canonicalize(&head) {
             c.extend(&comps[i..]);
             return lexically_normal(&c);
         }
@@ -682,7 +683,8 @@ const TAG_MODS: u8 = b'M';
 const TAG_EMPTY: u8 = b'E';
 
 impl Keys {
-    pub fn new(root: &Node) -> Keys {
+    /// Keys for `root`'s tree; imported files are stat'ed through `fs`.
+    pub fn new(root: &Node, fs: &dyn FileSystem) -> Keys {
         fn max_index(n: &Node) -> usize {
             n.children.iter().map(max_index).fold(n.index, usize::max)
         }
@@ -694,6 +696,7 @@ impl Keys {
                 out: String::new(),
                 style: Style::Key,
                 base: Path::new(""),
+                fs,
             },
             counts: &counts,
             hashes: vec![[0; 32]; len],
@@ -807,6 +810,7 @@ impl KeyBuilder<'_> {
 mod tests {
     use super::*;
     use crate::node::Origin;
+    use lang::loader::StdFs;
     use lang::source::Span;
 
     fn node(kind: NodeKind, index: usize, children: Vec<Node>) -> Node {
@@ -851,7 +855,7 @@ mod tests {
             index: 0,
         };
         assert_eq!(
-            csg(&root, Path::new("/")),
+            csg(&root, Path::new("/"), &StdFs),
             "group() {\n\tcube(size = [1, 1, 1], center = false);\n%#\tcube(size = [2, 2, 2], center = false);\n}\n\n"
         );
     }
@@ -867,12 +871,13 @@ mod tests {
             origin: None,
             index: 0,
         };
-        let k = Keys::new(&root);
+        let k = Keys::new(&root, &StdFs);
         // The label hashed for a node keeps every digit.
         let mut w = Writer {
             out: String::new(),
             style: Style::Key,
             base: Path::new(""),
+            fs: &StdFs,
         };
         w.label(&root.children[1]);
         assert_eq!(
@@ -893,16 +898,22 @@ mod tests {
         bg.origin.as_mut().unwrap().tag_background = true;
         // `group() { %cube(1); }` makes nothing; `cube(1)` makes a cube.
         let tree = group(0, vec![group(1, vec![bg]), cube(1.0, 3)]);
-        let k = Keys::new(&tree);
+        let k = Keys::new(&tree, &StdFs);
         assert_ne!(k.get(&tree.children[0]), k.get(&tree.children[1]));
         // The same children in another order are another union key, and
         // empty groups beside a single child don't hide it.
         let ab = group(0, vec![cube(1.0, 1), cube(2.0, 2)]);
         let ba = group(0, vec![cube(2.0, 1), cube(1.0, 2)]);
-        assert_ne!(Keys::new(&ab).get(&ab), Keys::new(&ba).get(&ba));
+        assert_ne!(
+            Keys::new(&ab, &StdFs).get(&ab),
+            Keys::new(&ba, &StdFs).get(&ba)
+        );
         let padded = group(0, vec![group(1, vec![]), cube(1.0, 2), group(3, vec![])]);
         let bare = cube(1.0, 0);
-        assert_eq!(Keys::new(&padded).get(&padded), Keys::new(&bare).get(&bare));
+        assert_eq!(
+            Keys::new(&padded, &StdFs).get(&padded),
+            Keys::new(&bare, &StdFs).get(&bare)
+        );
     }
 
     #[test]

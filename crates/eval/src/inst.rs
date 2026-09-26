@@ -184,6 +184,18 @@ impl<'a> Evaluator<'a> {
     /// `ModuleInstantiation::evaluate`.
     pub fn instantiate(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
         self.check_interrupt()?;
+        // Every nested statement holds frames of the frame budget (see
+        // `crate::recursion`), builtin ones included: a module recursing
+        // through `if`, `for` or `children()` nests those too, and each
+        // becomes a level of the node tree that rendering walks later.
+        self.frames += crate::recursion::STATEMENT_FRAMES;
+        let r = self.instantiate_frame(sr, i, ctx);
+        self.frames -= crate::recursion::STATEMENT_FRAMES;
+        r
+    }
+
+    #[inline(always)]
+    fn instantiate_frame(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
         let name = self.inst_name(sr, i);
         let loc = self.inst_loc(sr, i);
         let Some(m) = self.lookup_module(ctx, name, loc)? else {
@@ -193,6 +205,13 @@ impl<'a> Evaluator<'a> {
             return Ok(None);
         };
         let r = match m {
+            // OpenSCAD checks the stack only for user modules, but a chain
+            // of builtins can nest as deep as the user modules around it
+            // (`children()` of `children()` of ...), so the frame budget
+            // is checked here too, with a quarter more room so that a
+            // recursive module still stops at its own call, with
+            // OpenSCAD's message, rather than at an `if` inside it.
+            // Natively the budget is unlimited, and this never fires.
             Instantiable::Builtin(b) => self.builtin_module(b, sr, i, ctx),
             Instantiable::User {
                 ctx: dctx,
@@ -209,6 +228,18 @@ impl<'a> Evaluator<'a> {
             self.trace(&mut e, loc, t.into_bytes());
             e
         })
+    }
+
+    /// The frame budget ran out at a builtin module (see `builtin_module`).
+    /// Kept out of line: `instantiate` is on every level of a recursion,
+    /// and its frame should stay small.
+    #[cold]
+    #[inline(never)]
+    pub fn builtin_recursion(&mut self, sr: ScopeRef, i: usize) -> Box<crate::message::Unwind> {
+        let (name, loc) = (self.inst_name(sr, i), self.inst_loc(sr, i));
+        let t = format!("Recursion detected calling module '{}'", self.name(name));
+        self.error(Some(loc), DiagCode::RecursionLimit, t);
+        self.unwind(UnwindKind::Recursion)
     }
 
     /// `UserModule::instantiate`.
@@ -228,7 +259,7 @@ impl<'a> Evaluator<'a> {
             span: def.span,
         };
         let inst_name = self.inst_name(sr, i);
-        if self.stack_exhausted() {
+        if self.recursion_exhausted() {
             let t = format!(
                 "Recursion detected calling module '{}'",
                 self.name(inst_name)
@@ -305,7 +336,7 @@ impl<'a> Evaluator<'a> {
         let ast = self.units[mu as usize].ast;
         let mut t = format!("call of '{}(", ast.name(def.name)).into_bytes();
         if !def.params.is_empty() {
-            if self.stack_exhausted() {
+            if self.recursion_exhausted() {
                 t.extend_from_slice(b"...");
             } else {
                 for (k, p) in def.params.iter().enumerate() {

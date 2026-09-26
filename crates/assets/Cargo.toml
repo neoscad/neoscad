@@ -1,0 +1,20 @@
+[package]
+name = "neoscad-assets"
+description = "The fonts and libraries OpenSCAD ships as resources (Liberation 2.00.1, MCAD), compiled into NeoSCAD binaries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# The crate's code; the assets it embeds keep their own licences (SIL OFL
+# 1.1 for the fonts, LGPL 2.1 for MCAD), see assets/README.md.
+license.workspace = true
+publish = false
+
+[lib]
+name = "assets"
+
+[dependencies]
+lang = { package = "neoscad-lang", path = "../lang" }
+text = { package = "neoscad-text", path = "../text" }
+
+[lints]
+workspace = true

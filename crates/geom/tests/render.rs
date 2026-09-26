@@ -26,7 +26,7 @@ fn tree(src: &str) -> eval::Evaluation {
 
 fn render_with(r: &Renderer, src: &str, force: bool) -> (Option<Geometry>, Vec<String>) {
     let ev = tree(src);
-    let keys = eval::dump::Keys::new(&ev.root);
+    let keys = eval::dump::Keys::new(&ev.root, &lang::loader::StdFs);
     let out = r
         .render(
             &ev.root,

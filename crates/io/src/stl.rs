@@ -17,8 +17,13 @@ pub fn read(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Mesh {
     let size = bytes.len();
     let mut binary = false;
     if size >= 84 {
-        let n = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
-        binary = size == 84 + 50 * n;
+        // In 64 bits, as on the 64-bit platforms OpenSCAD's goldens come
+        // from: the count of an ASCII file is four letters, and 50 times it
+        // overflows a wasm32 `usize` (a panic in a debug build).
+        let n = u64::from(u32::from_le_bytes([
+            bytes[80], bytes[81], bytes[82], bytes[83],
+        ]));
+        binary = size as u64 == 84 + 50 * n;
     }
     if binary {
         let mut b = MeshBuilder::new();

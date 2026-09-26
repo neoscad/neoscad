@@ -30,6 +30,7 @@ nightly with `--backend=cgal` and `--backend=manifold`.
     cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test
     ./target/release/conformance run [--tier N] [--filter S] [-v]
     ./target/release/conformance run --record       # progress snapshot
+    scripts/wasm-check.sh [--depths]                 # wasm32 build run in node
     ./target/release/conformance manifest [--check]  # after updating .reference
     ./target/release/conformance diff --format ast|echo|csg [PATHS]  # vs the nightly
 
@@ -37,6 +38,18 @@ nightly with `--backend=cgal` and `--backend=manifold`.
 that adds passes runs `conformance run --update-baseline` and commits it.
 `--binary /Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD` runs the suite
 against the nightly, which is how the harness itself is checked.
+
+## Rules
+
+- Library crates never touch `std::fs`, `std::env` or the clock. Files go
+  through `lang`'s `FileSystem`; seeds, paths and limits come in through
+  `Options`. Only `crates/cli`, `crates/conformance` and test code may use
+  them directly. This is what keeps the WASM build honest.
+- Output must be byte-identical at any thread count; add a determinism test
+  for anything parallel.
+- `assets/` is vendored upstream content (Liberation fonts, MCAD); see
+  `assets/README.md` for sources and the update procedure.
+- `vendor/manifold-rust` carries a local patch; see `vendor/README.md`.
 
 ## Working with agents
 

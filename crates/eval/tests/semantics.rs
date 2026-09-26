@@ -386,3 +386,105 @@ fn hardwarnings_stop_at_the_first_warning() {
     assert!(!ev.hard_warning);
     assert_eq!(lines.len(), 2);
 }
+
+/// The frame budget (`eval::recursion`), which decides on wasm32, stops a
+/// recursion with OpenSCAD's messages wherever it runs out: at the
+/// recursive module itself rather than at a builtin inside it, and at a
+/// chain of builtins (`children()` of `children()`) that no user module
+/// check sees.
+#[test]
+fn frame_budget_gives_the_recursion_errors() {
+    let small = Options {
+        frame_limit: 400,
+        ..Options::default()
+    };
+    let (lines, ev) = run_with(
+        "function f(n) = n == 0 ? 0 : 1 + f(n - 1);\necho(f(1000));",
+        &small,
+    );
+    assert!(ev.aborted);
+    assert_eq!(
+        lines[0],
+        "ERROR: Recursion detected calling function 'f' @1"
+    );
+    let (lines, _) = run_with(
+        "function f(n) = n == 0 ? 0 : 1 + f(n - 1);\necho(f(50));",
+        &small,
+    );
+    assert_eq!(lines, ["ECHO: 50"]);
+
+    let (lines, _) = run_with(
+        "module m(n) { if (n > 0) translate([1, 0, 0]) m(n - 1); }\nm(1000);",
+        &small,
+    );
+    assert_eq!(lines[0], "ERROR: Recursion detected calling module 'm' @1");
+
+    // Each level nests `children()` once more; the innermost resolves the
+    // whole chain without instantiating a user module.
+    let chain = "module c(n) { if (n > 0) c(n - 1) children(); else children(); }\nc(80) cube(1);";
+    let (lines, ev) = run_with(chain, &small);
+    assert!(ev.aborted);
+    assert!(
+        lines[0].starts_with("ERROR: Recursion detected calling module '"),
+        "{lines:?}"
+    );
+
+    // Printing a nested vector counts its levels against the budget too.
+    let (lines, _) = run_with(
+        "function nest(n, acc) = n == 0 ? acc : nest(n - 1, [acc]);\necho(nest(1000, 0));",
+        &small,
+    );
+    assert_eq!(
+        lines[0],
+        "ERROR: Stack exhausted while trying to convert a vector to EchoString"
+    );
+}
+
+/// Unseeded `rands()` starts from the seed the host passes, so a host that
+/// passes the same seed gets the same numbers (the command line passes
+/// OpenSCAD's time-and-process seed).
+#[test]
+fn unseeded_rands_follow_the_host_seed() {
+    let with = |seed| {
+        let opts = Options {
+            rng_seed: seed,
+            ..Options::default()
+        };
+        run_with("echo(rands(0, 1, 3));", &opts).0
+    };
+    assert_eq!(with(7), with(7));
+    assert_ne!(with(7), with(8));
+    // Seeded calls ignore it.
+    let seeded = |seed| {
+        let opts = Options {
+            rng_seed: seed,
+            ..Options::default()
+        };
+        run_with("echo(rands(0, 1, 2, 42));", &opts).0
+    };
+    assert_eq!(seeded(1), seeded(2));
+}
+
+/// `dxf_dim()` reads through `Options::fs`, so an in-memory file system
+/// serves it (the WASM build has no other).
+#[test]
+fn dxf_dim_reads_through_the_file_system() {
+    let Ok(dxf) = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.reference/openscad/examples/Old/example009.dxf"),
+    ) else {
+        eprintln!("skipped: no reference checkout");
+        return;
+    };
+    let fs = lang::vfs::MemFs::new();
+    fs.insert("/mem/parts.dxf", dxf);
+    let opts = Options {
+        fs: Arc::new(fs),
+        ..Options::default()
+    };
+    let (lines, _) = run_with(
+        "echo(dxf_dim(file = \"/mem/parts.dxf\", name = \"bodywidth\"));",
+        &opts,
+    );
+    assert_eq!(lines, ["ECHO: 22"]);
+}

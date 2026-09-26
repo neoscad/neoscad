@@ -21,9 +21,10 @@
 //! The cache outlives one render, so a long-lived process re-renders an edit
 //! by recomputing only the subtrees whose keys changed.
 //!
-//! With the `parallel` feature, a node's children are evaluated on rayon's
-//! pool. Everything that could depend on scheduling is fixed up front:
-//! original IDs come from blocks reserved in tree order, one per child
+//! With the `parallel` feature, on native targets, a node's children are
+//! evaluated on rayon's pool. Everything that could depend on scheduling
+//! is fixed up front: original IDs come from blocks reserved in tree
+//! order, one per child
 //! slot of each subtree key (see [`crate::manifold_geom::IdSource`]; a
 //! block that turns out too small makes the render start again with a
 //! bigger one, see [`Overflow`]), and messages travel with the results and
@@ -39,7 +40,7 @@ use std::sync::{Arc, Mutex};
 
 use eval::dump::Keys;
 use eval::node::{CsgOp, Node, NodeKind};
-use lang::diag::Severity;
+use lang::diag::{PathBase, Severity};
 use lang::loader::{FileSystem, StdFs};
 use lang::source::Span;
 use manifold_rust::manifold::Manifold;
@@ -60,6 +61,10 @@ pub struct MsgLoc {
     pub unit: u32,
     pub span: Span,
     pub line: u32,
+    /// What the file name prints relative to: OpenSCAD's geometry
+    /// evaluator logs with the main file's directory, its file readers
+    /// with the working directory.
+    pub base: PathBase,
 }
 
 /// A message from rendering, with OpenSCAD's text.
@@ -90,9 +95,10 @@ pub struct RenderOptions {
     pub force: bool,
     /// Where `import()` and `surface()` read their files.
     pub fs: Arc<dyn FileSystem + Send + Sync>,
-    /// The document's directory: the working directory OpenSCAD runs in,
-    /// which some import messages print file names relative to.
-    pub doc_dir: PathBuf,
+    /// The working directory, which file names in import messages are
+    /// relative to (`Filename`'s `operator<<`, `Value.cc:195-201`). Empty
+    /// leaves them as they are.
+    pub work_dir: PathBuf,
     /// The fonts `text()` can use.
     pub fonts: Arc<text::FontDb>,
 }
@@ -103,7 +109,7 @@ impl Default for RenderOptions {
             scheme: crate::color::CORNFIELD,
             force: false,
             fs: Arc::new(StdFs),
-            doc_dir: PathBuf::new(),
+            work_dir: PathBuf::new(),
             fonts: Arc::new(text::FontDb::new()),
         }
     }
@@ -114,7 +120,7 @@ impl std::fmt::Debug for RenderOptions {
         f.debug_struct("RenderOptions")
             .field("scheme", &self.scheme)
             .field("force", &self.force)
-            .field("doc_dir", &self.doc_dir)
+            .field("work_dir", &self.work_dir)
             .finish()
     }
 }
@@ -146,7 +152,7 @@ pub struct Renderer {
     /// Worker threads with the evaluator's stack size: the tree walk
     /// recurses once per level, and trees from recursive modules are as
     /// deep as the evaluator allowed, far beyond a default 2 MiB stack.
-    #[cfg(feature = "parallel")]
+    #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
     pool: std::sync::OnceLock<rayon::ThreadPool>,
 }
 
@@ -334,6 +340,7 @@ fn loc_of(n: &Node) -> Option<MsgLoc> {
         unit: o.unit,
         span: o.span,
         line: o.line,
+        base: PathBase::MainFileDir,
     })
 }
 
@@ -432,7 +439,7 @@ impl Renderer {
                 stack.extend(n.children.iter().rev().map(|c| (c, Some((h, first)))));
             }
         }
-        #[cfg(feature = "parallel")]
+        #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
         let out = {
             let pool = self.pool.get_or_init(|| {
                 rayon::ThreadPoolBuilder::new()
@@ -443,7 +450,7 @@ impl Renderer {
             });
             pool.install(|| ctx.node(top))?
         };
-        #[cfg(not(feature = "parallel"))]
+        #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
         let out = ctx.node(top)?;
         let mut geom = out.geom;
         let mut msgs = out.msgs;
@@ -519,7 +526,7 @@ impl Ctx<'_> {
 
     /// Children's results in order, evaluated in parallel when enabled.
     fn children(&self, n: &Node) -> Result<Vec<Out>, Unsupported> {
-        #[cfg(feature = "parallel")]
+        #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
         if n.children.len() > 1 {
             use rayon::prelude::*;
             return n.children.par_iter().map(|c| self.node(c)).collect();
@@ -674,7 +681,18 @@ impl Ctx<'_> {
             .map(|m| Msg {
                 severity: m.severity,
                 text: m.text,
-                loc: if m.located { loc_of(n) } else { None },
+                // The readers log with an empty document path, so the
+                // file prints relative to the working directory
+                // (`import_stl.cc:201` and the like), where messages of
+                // the geometry evaluator use the main file's directory.
+                loc: if m.located {
+                    loc_of(n).map(|l| MsgLoc {
+                        base: PathBase::WorkingDir,
+                        ..l
+                    })
+                } else {
+                    None
+                },
             })
             .collect()
     }

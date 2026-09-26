@@ -11,8 +11,14 @@ name = "geom"
 
 [features]
 # Evaluate independent subtrees on rayon's pool and let the kernel use its
-# own determinism-preserving parallelism. Off for wasm32, where both run
-# serially with identical results.
+# own determinism-preserving parallelism. On wasm32 the feature is a no-op,
+# so default features work there: wasm32-unknown-unknown cannot spawn
+# threads, and building geom's pool panicked at render time. geom's own
+# parallel code is gated on the target (Cargo cannot enable a dependency's
+# feature for some targets only), and the kernel's parallel loops run on
+# rayon's global pool, which falls back to the calling thread when threads
+# are unsupported (rayon-core's `default_global_registry`). The output is
+# identical either way.
 default = ["parallel"]
 parallel = ["dep:rayon", "manifold-rust/parallel"]
 

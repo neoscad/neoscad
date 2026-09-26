@@ -183,6 +183,7 @@ fn run_one(
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(err_file);
+        cmd.env_remove(crate::geometry::FONT_DIR_VAR);
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -343,7 +344,6 @@ pub fn diff(ctx: &Ctx, opts: &DiffOptions) -> Result<u8, String> {
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
     let env = [
         ("OPENSCAD_FONT_PATH", ctx.ref_root.join("tests/data/ttf")),
-        (crate::geometry::FONT_DIR_VAR, ctx.ref_root.join("fonts")),
         ("OPENSCADPATH", ctx.ref_root.join("libraries")),
     ];
 

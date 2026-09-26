@@ -1,0 +1,38 @@
+[package]
+name = "neoscad-wasm-check"
+description = "A wasm32 build of the NeoSCAD pipeline with an in-memory file system, run in node by scripts/wasm-check.sh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "wasm_check"
+# `cdylib` is the module node loads; `rlib` lets the native tests run the
+# same cases through the same code.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+assets = { package = "neoscad-assets", path = "../assets" }
+eval = { package = "neoscad-eval", path = "../eval" }
+# Default features, `parallel` included: the web build must work with them.
+geom = { package = "neoscad-geom", path = "../geom" }
+lang = { package = "neoscad-lang", path = "../lang" }
+text = { package = "neoscad-text", path = "../text" }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+# The workspace lints, except that `unsafe_code` is `deny` rather than
+# `forbid`: exporting a function to JavaScript needs `#[unsafe(no_mangle)]`,
+# which the lint counts as unsafe code, so the exports (and nothing else)
+# allow it. The crate has no other unsafe code.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"

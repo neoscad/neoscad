@@ -371,6 +371,17 @@ impl<'a> Evaluator<'a> {
         ctx: &Rc<Ctx>,
     ) -> R<Option<Node>> {
         use BuiltinModule as B;
+        // OpenSCAD checks the stack only for user modules, but a chain of
+        // builtins can nest as deep as the user modules around it
+        // (`children()` of `children()` of ...), so the frame budget is
+        // checked here too, with a quarter more room so that a recursive
+        // module still stops at its own call, with OpenSCAD's message,
+        // rather than at an `if` inside it. Natively the budget is
+        // unlimited, and this never fires.
+        let budget = self.opts.frame_limit;
+        if self.frames >= budget.saturating_add(budget / 4) {
+            return Err(self.builtin_recursion(sr, i));
+        }
         let loc = self.inst_loc(sr, i);
         match b {
             B::Children => self.children_module(sr, i, ctx),

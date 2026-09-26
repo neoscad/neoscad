@@ -29,12 +29,6 @@ entry when it is done.
   in clipper2-rust's `execute_internal`. (5e)
 
 ## Fonts
-- neoscad bundles no fonts. The default font (Liberation Sans) comes from
-  `NEOSCAD_FONT_DIR`, or `fonts/` next to the executable; without either,
-  `text()` with the default font draws nothing and warns "Can't get
-  font". The conformance runner points the variable at the reference
-  checkout's `fonts/`. Decide whether to embed Liberation 2.00.1 (SIL OFL,
-  12 files, 3.9 MB) in the CLI and the WASM build. (5e)
 - Fontconfig's system configuration is not consulted, so names the
   nightly resolves to installed system fonts render in the matching
   Liberation font instead (on this Mac `Arial`, `Helvetica`, `Courier
@@ -160,9 +154,10 @@ entry when it is done.
   same; the time is not), and an evaluator warning after its check point
   rather than at its throw (messages in between are dropped). Against
   the nightly with `--hardwarnings`, the output and exit code match on
-  259 of 263 test inputs as `.echo` (the 4 others are the recursion-limit
-  difference below) and 235 of 237 as `.stl` (the 2 others differ without
-  the flag too; see the entry on geometry error paths below).
+  259 of 263 test inputs as `.echo` (the 4 others are recursion-limit
+  depths; see `eval::recursion` for the policy) and 235 of 237 as `.stl`
+  (the 2 others differed without the flag too, in geometry error paths,
+  which H2 fixed; not rechecked with the flag).
   Warnings OpenSCAD prints inside a `catch` never raise it; the CLI knows
   them by text (`printed_in_handler` in `crates/cli/src/run.rs`), and the
   DXF ones printed by `dxf_dim()`/`dxf_cross()` in the evaluator are not
@@ -183,15 +178,6 @@ entry when it is done.
   is modelled only as far as its single-rectangle `re` output. (5f)
 - `-O` options are parsed for SVG and PDF only; `export-3mf/...` is still
   ignored (see 3MF below). (5f)
-- Errors printed while building geometry give the file of the failing
-  call relative to the main file's directory (`in file empty-stl.scad`,
-  `'"B-\" C-..."'` in `escape-test.scad`) where the nightly makes them
-  relative to the working directory (`in file
-  ../../tests/data/scad/misc/empty-stl.scad`), with or without
-  `--hardwarnings`. Found in 5f, not investigated. (5f)
-- `r(3000)`-style recursion succeeds where the nightly stops with a
-  recursion error. The deeper limit is deliberate, but decide whether a
-  compatibility mode should match the nightly. (3, 5a)
 - A `\r` inside `include<>`/`use<>` brackets doesn't count as a new line,
   as it does in OpenSCAD. (2)
 - Malformed parameter-set JSON gives different error text from Boost. (2)
@@ -216,6 +202,33 @@ entry when it is done.
   "import() is not implemented"; only preview tests (tier 4) use it. The
   experimental `import()` function (JSON) is not implemented either. (5c)
 
+## WASM
+- Recursion on wasm32 stops at a frame budget calibrated for V8's default
+  stack in node 18 (`eval::recursion`): function depth 498 and module
+  depth 249 for the simplest recursions, against 52,417 and 13,046
+  natively and the nightly's 9,190 and 7,043. Without the budget V8
+  overflows at 1,076 and 527. Raising it needs smaller wasm frames: per
+  level, rendering's walk over the node tree costs about four times an
+  expression's stack, and list comprehensions twice. Only node 18 was
+  measured; browsers (and workers, which may have less stack) are
+  unverified. (H2)
+- Operations over a whole value other than printing and freeing it
+  (comparing with `==` or `<`, `ops::equals` and the ordering) recurse
+  once per level of vector nesting. Nesting deeper than the budget can only be built by tail
+  recursion (`f(n, acc) = ... f(n - 1, [acc])`), and comparing such a
+  value can overflow a WASM engine's stack; natively it needs a far deeper
+  value, and the nightly crashes even on `len()` of one. (H2)
+- A wasm32 build must be linked with `-C link-arg=-zstack-size=8388608`
+  (`eval::recursion::WASM_STACK_SIZE`; `crates/wasm-check/build.rs` does
+  this). With rustc's default 1 MiB, recursion stops earlier, still
+  cleanly. The release `wasm_check.wasm` is 38 MB, of which all but
+  9.0 MB are DWARF line tables (the release profile keeps them); 4.3 MB
+  of the rest is the bundled fonts and MCAD. (H2)
+- Rust's wasm32 maths functions differ from macOS libm in the last bit
+  (engine milestone audit, finding 6.5), so WASM output is not
+  byte-identical to native. Decide whether to accept that or use one libm
+  everywhere. (H2)
+
 ## Determinism
 - manifold-rust's `Slice` starts each loop from a `HashSet` iteration, so
   the raw polygon order varies; `projection(cut=true)` output is canonical
@@ -226,11 +239,6 @@ entry when it is done.
   then drop the workaround. (5b)
 
 ## Structure
-- File access is not all behind `lang::loader::FileSystem` yet, so it
-  breaks under WASM: `dxf_dim()`/`dxf_cross()` read with `std::fs` in the
-  evaluator, and the cache keys (`eval::dump`) stat imported files for
-  their mtime and size with `std::fs`. The trait needs a `metadata` call
-  and `Keys::new` a file system. (5c)
 - `docs/architecture.md` lists text under `geom` and A5 proposed `fontdb`
   for font discovery; 5e added a `text` crate (the evaluator's
   `textmetrics()` needs shaping and sits below `geom`) with its own small

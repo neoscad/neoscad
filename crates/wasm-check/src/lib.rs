@@ -1,0 +1,258 @@
+//! The whole pipeline (parse, evaluate, render) with nothing from the host
+//! machine: files come from a [`MemFs`], fonts and MCAD from
+//! `neoscad-assets`, the `rands()` seed from the caller. Built for
+//! wasm32-unknown-unknown and run in node by `scripts/wasm-check.sh`
+//! (`run.js`); the native tests run the same cases (`cases.json`) through
+//! the same [`run`], so a difference between the two is a WASM problem.
+//!
+//! The document is `/doc/main.scad` and the working directory `/doc`; the
+//! bundled libraries are mounted at `/neoscad/libraries`.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use lang::loader::{FileSystem, LibraryPath};
+use lang::vfs::MemFs;
+
+const DOC_DIR: &str = "/doc";
+const LIBRARY_DIR: &str = "/neoscad/libraries";
+
+/// Run `src` as `/doc/main.scad` over `files` and return what the command
+/// line would print (messages, then the geometry summary), one line each.
+pub fn run(files: Arc<MemFs>, src: &[u8], seed: u32) -> String {
+    run_with(files, src, seed, eval::recursion::DEFAULT_FRAME_LIMIT)
+}
+
+/// [`run`] with another frame budget (for calibrating the default).
+pub fn run_with(files: Arc<MemFs>, src: &[u8], seed: u32, frame_limit: u32) -> String {
+    let base: Arc<dyn FileSystem + Send + Sync> = files;
+    let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(base, LIBRARY_DIR));
+    let libs = LibraryPath(vec![PathBuf::from(LIBRARY_DIR)]);
+    let doc = PathBuf::from(DOC_DIR);
+
+    let mut text = src.to_vec();
+    text.extend_from_slice(b"\n\x03\n");
+    let program = lang::parse_program(doc.join("main.scad"), text, &*fs, &libs);
+    let mut out: Vec<u8> = Vec::new();
+    let mut con = eval::Console::new(&mut out, doc.clone(), false);
+    for d in program.openscad_diags() {
+        con.diagnostic(d, &program.sources, &doc);
+    }
+    if program.has_syntax_errors() {
+        drop(con);
+        return String::from_utf8_lossy(&out).into_owned();
+    }
+    let libraries = lang::deps::load_dependencies(&program, b"\n\x03\n", &*fs, &libs);
+    let uses = lang::deps::resolve_uses(&program, &*fs, &libs);
+    let elibs: Vec<eval::Library<'_>> = libraries
+        .iter()
+        .map(|l| eval::Library {
+            path: &l.path,
+            program: l.program.as_ref(),
+            uses: &l.uses,
+        })
+        .collect();
+    let opts = eval::Options {
+        rng_seed: seed,
+        frame_limit,
+        fs: fs.clone(),
+        preview: false,
+        ..Default::default()
+    };
+    let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+        eval::evaluate(&program, &uses, &elibs, doc.clone(), &opts, &mut con)
+    });
+    let keys = eval::dump::Keys::new(&ev.root, &*fs);
+    let mut fonts = text::FontDb::with_fs(fs.clone());
+    assets::add_fonts(&mut fonts);
+    let ro = geom::RenderOptions {
+        fs: fs.clone(),
+        work_dir: doc.clone(),
+        fonts: Arc::new(fonts),
+        ..Default::default()
+    };
+    let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+    match geom::Renderer::new().render(top, &keys, ro) {
+        Err(u) => con.print(None, format!("{}() is not implemented", u.what).as_bytes()),
+        Ok(r) => {
+            for m in &r.messages {
+                let label = m.severity.map_or("", |s| s.openscad_label());
+                let sep = if label.is_empty() { "" } else { ": " };
+                con.print(m.severity, format!("{label}{sep}{}", m.text).as_bytes());
+            }
+            match r.geometry.as_ref().filter(|g| !g.is_empty()) {
+                Some(g) => {
+                    for l in geom::export::summary(g) {
+                        con.print(None, l.as_bytes());
+                    }
+                }
+                None => con.print(None, b"Current top level object is empty."),
+            }
+        }
+    }
+    drop(con);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+// --- The module's interface to JavaScript ---------------------------------
+//
+// JavaScript writes into `INPUT` (sized by `input`), then calls `add_file`
+// or `run_input`; the result is read from `OUTPUT`. All of it is safe Rust: the
+// exports hand out pointers into vectors they own and never read through
+// raw pointers.
+
+static INPUT: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static OUTPUT: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static FILES: Mutex<Option<Arc<MemFs>>> = Mutex::new(None);
+
+/// Size the input buffer to `len` bytes and return where to write them.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn input(len: usize) -> *mut u8 {
+    let mut b = INPUT.lock().expect("input");
+    b.clear();
+    b.resize(len, 0);
+    b.as_mut_ptr()
+}
+
+/// Add a file: the input holds its absolute path (`name_len` bytes), then
+/// its contents.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn add_file(name_len: usize) {
+    let b = INPUT.lock().expect("input");
+    let (name, data) = b.split_at(name_len.min(b.len()));
+    let name = String::from_utf8_lossy(name).into_owned();
+    FILES
+        .lock()
+        .expect("files")
+        .get_or_insert_with(Default::default)
+        .insert(name, data.to_vec());
+}
+
+/// Run the input as the main file with `seed` for unseeded `rands()` and
+/// `frame_limit` as the frame budget (0 for the default).
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn run_input(seed: u32, frame_limit: u32) {
+    // A panic aborts the module (wasm32-unknown-unknown cannot unwind);
+    // leave its message where the caller reads the output.
+    std::panic::set_hook(Box::new(|info| {
+        if let Ok(mut out) = OUTPUT.try_lock() {
+            *out = format!("PANIC: {info}\n").into_bytes();
+        }
+    }));
+    let src = INPUT.lock().expect("input").clone();
+    let files = FILES
+        .lock()
+        .expect("files")
+        .get_or_insert_with(Default::default)
+        .clone();
+    let limit = match frame_limit {
+        0 => eval::recursion::DEFAULT_FRAME_LIMIT,
+        n => n,
+    };
+    OUTPUT.lock().expect("output").clear();
+    let out = run_with(files, &src, seed, limit);
+    *OUTPUT.lock().expect("output") = out.into_bytes();
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn output_ptr() -> *const u8 {
+    OUTPUT.lock().expect("output").as_ptr()
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn output_len() -> usize {
+    OUTPUT.lock().expect("output").len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// `line` against `pattern`, where `*` stands for any text (the
+    /// recursion traces name a depth, which differs between targets).
+    /// `run.js` matches the same way.
+    fn matches(line: &str, pattern: &str) -> bool {
+        let parts: Vec<&str> = pattern.split('*').collect();
+        if parts.len() == 1 {
+            return line == pattern;
+        }
+        let (first, last) = (parts[0], parts[parts.len() - 1]);
+        if !line.starts_with(first) || !line[first.len()..].ends_with(last) {
+            return false;
+        }
+        let mut rest = &line[first.len()..line.len() - last.len()];
+        for p in &parts[1..parts.len() - 1] {
+            match rest.find(p) {
+                Some(i) => rest = &rest[i + p.len()..],
+                None => return false,
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn linked_stack_matches_the_evaluator() {
+        let linked: usize = env!("WASM_CHECK_STACK_SIZE").parse().unwrap();
+        assert_eq!(linked, eval::recursion::WASM_STACK_SIZE);
+    }
+
+    /// Every case in `cases.json` natively; `run.js` checks the same
+    /// expectations in node.
+    #[test]
+    fn cases() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("cases.json");
+        let cases: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for c in cases.as_array().unwrap() {
+            let name = c["name"].as_str().unwrap();
+            let files = Arc::new(MemFs::new());
+            let mut missing = false;
+            for f in c["files"].as_array().into_iter().flatten() {
+                let data = match (f.get("text"), f.get("from")) {
+                    (Some(t), _) => t.as_str().unwrap().as_bytes().to_vec(),
+                    // Files from the reference checkout: the case is
+                    // skipped without it.
+                    (_, Some(p)) => match std::fs::read(root.join(p.as_str().unwrap())) {
+                        Ok(d) => d,
+                        Err(_) => {
+                            missing = true;
+                            break;
+                        }
+                    },
+                    _ => panic!("{name}: a file needs text or from"),
+                };
+                files.insert(f["path"].as_str().unwrap(), data);
+            }
+            if missing {
+                eprintln!("skipped {name}: no reference checkout");
+                continue;
+            }
+            let seed = c["seed"].as_u64().unwrap_or(0) as u32;
+            let out = run(files, c["src"].as_str().unwrap().as_bytes(), seed);
+            let expect: Vec<&str> = c["expect"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| l.as_str().unwrap())
+                .collect();
+            let got: Vec<&str> = out.lines().collect();
+            // `WASM_CHECK_PRINT=1 cargo test -p neoscad-wasm-check -- --nocapture`
+            // prints every case's lines instead, for writing expectations.
+            if std::env::var_os("WASM_CHECK_PRINT").is_some() {
+                println!("{name}: {}", serde_json::to_string(&got).unwrap());
+                continue;
+            }
+            assert!(
+                got.len() == expect.len() && got.iter().zip(&expect).all(|(g, e)| matches(g, e)),
+                "case {name}:\n got {got:#?}\n expected {expect:#?}"
+            );
+        }
+    }
+}

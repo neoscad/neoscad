@@ -12,19 +12,58 @@
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use crate::diag::{DiagCode, Diagnostic, Severity};
 use crate::source::{FileId, SourceMap, Span};
 use crate::syntax::SyntaxKind;
 use crate::syntax::lexer::{Token, directive_path, lex};
 
-/// The file operations include resolution needs.
+/// Every file operation the pipeline performs: includes and `use`,
+/// `import()`, `surface()`, `dxf_dim()`, fonts, parameter files and the
+/// cache keys of imported files. Nothing below the command line touches the
+/// real file system except through this trait, so the WASM build and tests
+/// can supply their own files ([`crate::vfs`]).
 pub trait FileSystem {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
     fn exists(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
     /// Resolve symlinks and `..`; `None` if the path does not exist.
     fn canonicalize(&self, path: &Path) -> Option<PathBuf>;
+    /// A file's modification time and size, which key the cache of
+    /// imported geometry and print as the `.csg` `timestamp`. `None` when
+    /// the file does not exist or the file system cannot say; the default
+    /// says nothing, which makes every version of a file share one cache
+    /// key, so a long-lived host whose files change should implement it.
+    fn metadata(&self, path: &Path) -> Option<Metadata> {
+        let _ = path;
+        None
+    }
+    /// The entries of a directory (full paths, in any order), for font
+    /// directories. The default lists nothing.
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        let _ = path;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// What [`FileSystem::metadata`] knows about a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Metadata {
+    /// Modification time in nanoseconds since the Unix epoch, if known.
+    /// An in-memory file system may use any value that changes whenever
+    /// the contents do (a write counter, say).
+    pub modified: Option<i128>,
+    /// Size in bytes.
+    pub len: u64,
+}
+
+/// Options structs that hold a shared file system derive `Debug`; the file
+/// system itself has nothing useful to show.
+impl std::fmt::Debug for dyn FileSystem + Send + Sync {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("dyn FileSystem")
+    }
 }
 
 /// The real file system.
@@ -44,16 +83,40 @@ impl FileSystem for StdFs {
     fn canonicalize(&self, path: &Path) -> Option<PathBuf> {
         path.canonicalize().ok()
     }
+    fn metadata(&self, path: &Path) -> Option<Metadata> {
+        let m = std::fs::metadata(path).ok()?;
+        let modified = m
+            .modified()
+            .ok()
+            .map(|t| match t.duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_nanos() as i128,
+                Err(e) => -(e.duration().as_nanos() as i128),
+            });
+        Some(Metadata {
+            modified,
+            len: m.len(),
+        })
+    }
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        std::fs::read_dir(path)?
+            .map(|e| e.map(|e| e.path()))
+            .collect()
+    }
 }
 
 /// Library directories searched after the including file's directory, in
-/// order (OpenSCAD's `librarypath`).
+/// order (OpenSCAD's `librarypath`). A host that bundles libraries appends
+/// their directory last, as OpenSCAD appends `<resources>/libraries`.
 #[derive(Debug, Clone, Default)]
 pub struct LibraryPath(pub Vec<PathBuf>);
 
 impl LibraryPath {
     /// `OPENSCADPATH` entries, then the per-user library directory, as
-    /// `parser_init()` in parsersettings.cc builds it.
+    /// `parser_init()` in parsersettings.cc builds it (the resource
+    /// directory it adds last is the host's to add). This is the only place
+    /// `lang` reads the process environment, and only when a host asks: a
+    /// WASM host builds its path directly (and there `var_os` finds
+    /// nothing and `current_dir` fails, without panicking).
     pub fn from_env() -> Self {
         let mut dirs = Vec::new();
         let cwd = std::env::current_dir().unwrap_or_default();

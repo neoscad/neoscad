@@ -50,12 +50,23 @@ fn push_range(out: &mut Vec<u8>, r: &Range) {
 const PRINT_STACK_LIMIT: usize = (8 << 20) - (128 << 10);
 
 impl Evaluator<'_> {
-    fn print_stack_exhausted(&self) -> bool {
-        self.stack_used() >= self.opts.stack_limit.min(PRINT_STACK_LIMIT)
+    /// Whether printing a vector nested `depth` levels inside the value
+    /// being printed must stop. Each level is also a frame of the frame
+    /// budget ([`crate::recursion`]), on top of the frames the evaluation
+    /// holds: a printing level costs less stack than an evaluation frame,
+    /// so this is conservative, and it is what keeps printing a deeply
+    /// nested value from overflowing a WASM engine's stack.
+    fn print_stack_exhausted(&self, depth: u32) -> bool {
+        self.stack_used() >= self.stack_limit().min(PRINT_STACK_LIMIT)
+            || self.frames.saturating_add(depth) >= self.opts.frame_limit
     }
 
     /// `tostream_visitor`: nested values.
     fn write_nested(&self, v: &Value, out: &mut Vec<u8>) -> Result<(), Exhausted> {
+        self.write_nested_at(v, out, 0)
+    }
+
+    fn write_nested_at(&self, v: &Value, out: &mut Vec<u8>, depth: u32) -> Result<(), Exhausted> {
         match v {
             Value::Undef => out.extend_from_slice(b"undef"),
             Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
@@ -66,7 +77,7 @@ impl Evaluator<'_> {
                 out.push(b'"');
             }
             Value::Vector(items) => {
-                if self.print_stack_exhausted() {
+                if self.print_stack_exhausted(depth) {
                     return Err(Exhausted);
                 }
                 out.push(b'[');
@@ -74,7 +85,7 @@ impl Evaluator<'_> {
                     if i > 0 {
                         out.extend_from_slice(b", ");
                     }
-                    self.write_nested(e, out)?;
+                    self.write_nested_at(e, out, depth + 1)?;
                 }
                 out.push(b']');
             }

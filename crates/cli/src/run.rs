@@ -17,8 +17,9 @@ use eval::{Console, Options};
 use lang::customizer::{Parameters, read_parameter_sets};
 use lang::deps::{Library, load_dependencies, resolve_uses};
 use lang::diag::Severity;
-use lang::loader::{LibraryPath, StdFs};
 use lang::{Program, parse_program};
+
+use crate::host::Host;
 
 /// OpenSCAD's general failure exit code.
 const EXIT_ERROR: u8 = 1;
@@ -51,6 +52,7 @@ struct Paths {
 
 /// The main program and the libraries it uses.
 struct Loaded {
+    host: Host,
     program: Program,
     /// Keys of the libraries the main program uses, in search order.
     uses: Vec<String>,
@@ -107,8 +109,9 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
     }
     text.extend_from_slice(&suffix);
 
-    let libs = LibraryPath::from_env();
-    let mut program = parse_program(path, text, &StdFs, &libs);
+    let host = Host::from_env();
+    let (fs, libs) = (&*host.fs, &host.libs);
+    let mut program = parse_program(path, text, fs, libs);
     let stopped = parser_diagnostics(&program, job.hardwarnings, paths, con);
     if stopped || program.has_syntax_errors() {
         con.print(None, format!("Can't parse file '{display}'!\n").as_bytes());
@@ -124,7 +127,7 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
                 return Err(EXIT_ERROR);
             }
         }
-        match read_parameter_sets(Path::new(file)) {
+        match read_parameter_sets(fs, Path::new(file)) {
             Ok(sets) => {
                 if let Some(set) = sets.iter().find(|s| s.name == set_name) {
                     params.import(set);
@@ -136,7 +139,7 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
     }
 
     // handleDependencies(): parse the used libraries and report on them.
-    let mut libraries = load_dependencies(&program, &suffix, &StdFs, &libs);
+    let mut libraries = load_dependencies(&program, &suffix, fs, libs);
     for lib in &mut libraries {
         match (&lib.program, lib.open_error()) {
             (Some(p), _) => {
@@ -155,8 +158,9 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
             (None, None) => {}
         }
     }
-    let uses = resolve_uses(&program, &StdFs, &libs);
+    let uses = resolve_uses(&program, fs, libs);
     Ok(Loaded {
+        host,
         program,
         uses,
         libraries,
@@ -247,13 +251,17 @@ fn evaluate<W: Write>(
             uses: &lib.uses,
         })
         .collect();
+    let options = Options {
+        fs: l.host.fs.clone(),
+        ..options.clone()
+    };
     // `main` runs this on a thread with `eval::DEFAULT_THREAD_STACK`.
     eval::evaluate(
         &l.program,
         &l.uses,
         &libs,
         paths.main_dir.clone(),
-        options,
+        &options,
         con,
     )
 }
@@ -283,7 +291,7 @@ pub fn export_tree(job: &Job<'_>, options: &Options, formats: &[TreeFormat]) -> 
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
     for (target, format) in job.outputs.iter().zip(formats) {
         let text = match format {
-            TreeFormat::Csg => eval::dump::csg(top, &paths.main_dir),
+            TreeFormat::Csg => eval::dump::csg(top, &paths.main_dir, &*loaded.host.fs),
             // `openscad.cc` builds the CSG term with a `CSGTreeEvaluator`
             // that has no geometry evaluator, so every leaf is a null term
             // and the tree always reduces to nothing (`CSGTreeEvaluator.cc`,
@@ -378,11 +386,20 @@ pub fn export_mesh(
         return EXIT_ERROR;
     }
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
-    let keys = eval::dump::Keys::new(&ev.root);
+    let keys = eval::dump::Keys::new(&ev.root, &*loaded.host.fs);
+    let used = std::iter::once(&loaded.program)
+        .chain(
+            loaded
+                .libraries
+                .iter()
+                .filter_map(|lib| lib.program.as_ref()),
+        )
+        .flat_map(|p| p.ast.uses.iter());
     let opts = geom::RenderOptions {
         force,
-        doc_dir: paths.main_dir.clone(),
-        fonts: std::sync::Arc::new(fonts(&loaded)),
+        fs: loaded.host.fs.clone(),
+        work_dir: paths.cwd.clone(),
+        fonts: std::sync::Arc::new(loaded.host.fonts(used)),
         ..Default::default()
     };
     let rendered = geom::Renderer::new().render(top, &keys, opts.clone());
@@ -408,17 +425,18 @@ pub fn export_mesh(
         };
         let mut diag =
             lang::diag::Diagnostic::new(lang::diag::DiagCode::Geometry, severity, m.text.clone());
-        let mut sources = None;
-        if let Some(l) = &m.loc {
-            diag = diag.at(l.span, l.line);
-            sources = unit_sources(&loaded, l.unit);
+        let mut sources = &loaded.program.sources;
+        if let Some(l) = &m.loc
+            && let Some(s) = unit_sources(&loaded, l.unit)
+        {
+            // Each message's file prints relative to its own base (see
+            // `geom::MsgLoc::base`): `in file ../../x.scad` from the
+            // working directory for a reader's error, as the nightly
+            // prints it.
+            diag = diag.at(l.span, l.line).with_base(l.base);
+            sources = s;
         }
-        use eval::Output;
-        con.message(&eval::Message {
-            diag,
-            text: m.text.as_bytes(),
-            sources,
-        });
+        con.diagnostic(&diag, sources, &paths.cwd);
         // OpenSCAD's geometry evaluation stops here; neoscad has already
         // built the rest, but prints nothing more.
         if job.hardwarnings && severity == Severity::Warning && !printed_in_handler(&m.text) {
@@ -597,57 +615,6 @@ pub fn export_param(job: &Job<'_>, options: &Options) -> u8 {
         }
     }
     0
-}
-
-/// The environment variable naming the directory of bundled fonts, the
-/// counterpart of OpenSCAD's `<resources>/fonts` (the Liberation fonts
-/// in the reference checkout's `fonts/`, which supply the default font,
-/// Liberation Sans). Without it, `fonts/` next to the executable is used
-/// if it exists.
-const FONT_DIR_VAR: &str = "NEOSCAD_FONT_DIR";
-
-/// The fonts `text()` sees, in the order `FontCache::FontCache` adds them:
-/// the bundled fonts, `~/.fonts`, each directory in `OPENSCAD_FONT_PATH`,
-/// then the files the program and its libraries register with
-/// `use <font.ttf>` (`SourceFile::registerUse`). Fontconfig's system
-/// configuration is not consulted, so only these fonts exist. Nothing is
-/// read until a `text()` needs a font.
-fn fonts(l: &Loaded) -> text::FontDb {
-    let mut db = text::FontDb::new();
-    let bundled = std::env::var_os(FONT_DIR_VAR)
-        .map(PathBuf::from)
-        .or_else(|| {
-            let exe = std::env::current_exe().ok()?;
-            Some(exe.parent()?.join("fonts"))
-        });
-    if let Some(d) = bundled {
-        db.add_dir(d);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        db.add_dir(PathBuf::from(home).join(".fonts"));
-    }
-    if let Some(paths) = std::env::var_os("OPENSCAD_FONT_PATH") {
-        let sep = if cfg!(windows) { ';' } else { ':' };
-        let cwd = std::env::current_dir().unwrap_or_default();
-        for p in paths.to_string_lossy().split(sep) {
-            let p = cwd.join(p);
-            if p.is_dir() {
-                db.add_dir(p);
-            }
-        }
-    }
-    let used = std::iter::once(&l.program)
-        .chain(l.libraries.iter().filter_map(|lib| lib.program.as_ref()))
-        .flat_map(|p| p.ast.uses.iter());
-    for u in used {
-        let is_font = Path::new(u)
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"));
-        if is_font && Path::new(u).is_file() {
-            db.add_file(u);
-        }
-    }
-    db
 }
 
 /// `get_current_iso8601_date_time_utc` (`export.cc`): `YYYY-MM-DDTHH:MM:SSZ`.

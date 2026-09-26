@@ -246,6 +246,13 @@ impl Diagnostic {
 /// `std::filesystem::relative(path, base)`: both sides are made canonical
 /// where they exist (resolving symlinks such as macOS `/tmp`), then the
 /// shortest `..`-path from `base` to `path` is returned.
+///
+/// This asks the real file system rather than a [`crate::loader::FileSystem`]
+/// because it only shapes how a path is printed, and it is called from
+/// places that have no file system at hand (message printing). Where there
+/// is no real file system (wasm32-unknown-unknown, where `current_dir` and
+/// `canonicalize` fail rather than panic) it falls back to the lexical
+/// result, which is exact for in-memory files: they have no symlinks.
 pub fn relative_path(path: &Path, base: &Path) -> PathBuf {
     let p = weakly_canonical(path);
     let b = weakly_canonical(base);

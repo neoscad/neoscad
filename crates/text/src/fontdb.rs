@@ -7,7 +7,8 @@
 //! `use <font.ttf>`, and whatever the system configuration lists. Here the
 //! host adds directories, files or font data explicitly: nothing is found
 //! by searching the system, so the same inputs give the same fonts on every
-//! machine and in WASM, where fonts can only come from memory.
+//! machine and in WASM. Directories and files are read through the
+//! database's [`FileSystem`], so a WASM host can serve them from memory.
 //!
 //! Font files are read and indexed on the first lookup, not when they are
 //! added, so a run that draws no text never touches them.
@@ -16,6 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use lang::loader::{FileSystem, StdFs};
 use skrifa::raw::{FileRef, FontRef, TableProvider};
 use skrifa::{MetadataProvider, string::StringId};
 
@@ -27,13 +29,31 @@ enum Source {
     /// A directory, searched recursively as fontconfig does.
     Dir(PathBuf),
     File(PathBuf),
-    Data(Arc<Vec<u8>>),
+    Data(FontData),
+}
+
+/// A font file's bytes: owned, or compiled into the binary (the bundled
+/// fonts, which are then never copied).
+#[derive(Debug, Clone)]
+pub enum FontData {
+    Owned(Arc<Vec<u8>>),
+    Static(&'static [u8]),
+}
+
+impl std::ops::Deref for FontData {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            FontData::Owned(d) => d,
+            FontData::Static(d) => d,
+        }
+    }
 }
 
 /// One face of a font file, with the properties fontconfig matches on.
 #[derive(Debug)]
 pub struct Face {
-    pub data: Arc<Vec<u8>>,
+    pub data: FontData,
     /// The face's index in a collection (`FC_INDEX`).
     pub index: u32,
     /// Family names in every language, as keys ([`pattern::family_key`]).
@@ -54,8 +74,9 @@ impl Face {
 }
 
 /// The fonts available to `text()`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FontDb {
+    fs: Arc<dyn FileSystem + Send + Sync>,
     sources: Vec<Source>,
     faces: OnceLock<Vec<Arc<Face>>>,
     /// Lookups by font name, as `FontCache::get_font` caches them. Failures
@@ -63,9 +84,26 @@ pub struct FontDb {
     lookups: Mutex<HashMap<String, Arc<Face>>>,
 }
 
+impl Default for FontDb {
+    fn default() -> Self {
+        FontDb::with_fs(Arc::new(StdFs))
+    }
+}
+
 impl FontDb {
+    /// An empty database reading directories and files from disk.
     pub fn new() -> FontDb {
         FontDb::default()
+    }
+
+    /// An empty database reading directories and files through `fs`.
+    pub fn with_fs(fs: Arc<dyn FileSystem + Send + Sync>) -> FontDb {
+        FontDb {
+            fs,
+            sources: Vec::new(),
+            faces: OnceLock::new(),
+            lookups: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Add every font file under `dir` (`FcConfigAppFontAddDir`). A
@@ -81,7 +119,13 @@ impl FontDb {
 
     /// Add a font from memory (for WASM, or fonts embedded by the host).
     pub fn add_data(&mut self, data: Vec<u8>) {
-        self.sources.push(Source::Data(Arc::new(data)));
+        self.sources
+            .push(Source::Data(FontData::Owned(Arc::new(data))));
+    }
+
+    /// Add a font compiled into the binary, without copying it.
+    pub fn add_static(&mut self, data: &'static [u8]) {
+        self.sources.push(Source::Data(FontData::Static(data)));
     }
 
     /// Every face, indexed on first use.
@@ -90,10 +134,10 @@ impl FontDb {
             let mut out = Vec::new();
             for s in &self.sources {
                 match s {
-                    Source::Dir(d) => scan_dir(d, &mut out),
+                    Source::Dir(d) => scan_dir(&*self.fs, d, &mut out),
                     Source::File(f) => {
-                        if let Ok(data) = std::fs::read(f) {
-                            index_data(Arc::new(data), &mut out);
+                        if let Ok(data) = self.fs.read(f) {
+                            index_data(FontData::Owned(Arc::new(data)), &mut out);
                         }
                     }
                     Source::Data(d) => index_data(d.clone(), &mut out),
@@ -134,17 +178,16 @@ pub enum LookupError {
     NotFound,
 }
 
-fn scan_dir(dir: &Path, out: &mut Vec<Arc<Face>>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
+fn scan_dir(fs: &dyn FileSystem, dir: &Path, out: &mut Vec<Arc<Face>>) {
+    let Ok(mut entries) = fs.read_dir(dir) else {
         return;
     };
     // Sorted, so the order (the last tie-break in matching) does not depend
     // on the file system.
-    let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
     entries.sort();
     for p in entries {
-        if p.is_dir() {
-            scan_dir(&p, out);
+        if fs.is_dir(&p) {
+            scan_dir(fs, &p, out);
             continue;
         }
         let ext = p
@@ -154,13 +197,13 @@ fn scan_dir(dir: &Path, out: &mut Vec<Arc<Face>>) {
         if !matches!(ext.as_str(), "ttf" | "otf" | "ttc" | "otc") {
             continue;
         }
-        if let Ok(data) = std::fs::read(&p) {
-            index_data(Arc::new(data), out);
+        if let Ok(data) = fs.read(&p) {
+            index_data(FontData::Owned(Arc::new(data)), out);
         }
     }
 }
 
-fn index_data(data: Arc<Vec<u8>>, out: &mut Vec<Arc<Face>>) {
+fn index_data(data: FontData, out: &mut Vec<Arc<Face>>) {
     let count = match FileRef::new(&data) {
         Ok(FileRef::Font(_)) => 1,
         Ok(FileRef::Collection(c)) => c.len(),

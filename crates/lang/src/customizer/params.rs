@@ -11,6 +11,7 @@ use std::path::Path;
 use crate::ast::{Assignment, Ast, ExprId, ExprKind};
 use crate::customizer::json::{self, JsonNode};
 use crate::diag::{DiagCode, Diagnostic, PathBase, Severity};
+use crate::loader::FileSystem;
 use crate::number::fmt_g;
 use crate::source::Span;
 
@@ -87,9 +88,12 @@ impl ParameterSet {
 
 /// Read the `parameterSets` object of a parameter file. Errors carry
 /// OpenSCAD's message text.
-pub fn read_parameter_sets(path: &Path) -> Result<Vec<ParameterSet>, Diagnostic> {
+pub fn read_parameter_sets(
+    fs: &dyn FileSystem,
+    path: &Path,
+) -> Result<Vec<ParameterSet>, Diagnostic> {
     let err = |msg: String| Diagnostic::new(DiagCode::ParameterFile, Severity::Error, msg);
-    let text = std::fs::read(path).map_err(|_| {
+    let text = fs.read(path).map_err(|_| {
         err(format!(
             "Cannot open Parameter Set '{}' for reading",
             path.display()

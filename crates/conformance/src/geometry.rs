@@ -159,13 +159,16 @@ pub enum Result3 {
     Fail(String),
 }
 
-/// The parts of the process environment a case needs from the runner.
-/// neoscad's bundled-fonts directory, OpenSCAD's `<resources>/fonts`. The
-/// nightly finds its own copy inside the app bundle; neoscad bundles no
-/// fonts, so runs point it at the reference checkout's `fonts/` (Liberation
-/// 2.00.1, the same files), which supplies the default font. OpenSCAD
-/// ignores the variable.
+/// The variable that replaces neoscad's bundled fonts (OpenSCAD's
+/// `<resources>/fonts`) with a directory. Runs remove it from the
+/// environment: neoscad's bundled Liberation 2.00.1 is byte-identical to
+/// the reference checkout's `fonts/`, which made the expected outputs
+/// (`crates/assets` tests this), so the suite runs with the fonts neoscad
+/// ships, and a developer's own setting can't change the results.
+/// OpenSCAD ignores the variable.
 pub const FONT_DIR_VAR: &str = "NEOSCAD_FONT_DIR";
+
+/// The parts of the process environment a case needs from the runner.
 
 #[derive(Debug)]
 pub struct CaseEnv<'a> {
@@ -314,7 +317,7 @@ impl GeometryEnv {
         let mut cmd = Command::new(program);
         cmd.current_dir(env.work_dir)
             .env("OPENSCAD_FONT_PATH", env.font_path)
-            .env(FONT_DIR_VAR, env.ref_root.join("fonts"))
+            .env_remove(FONT_DIR_VAR)
             .env("OPENSCADPATH", env.library_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null());

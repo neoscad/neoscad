@@ -27,7 +27,7 @@ pub mod shape;
 
 use std::sync::Arc;
 
-pub use fontdb::{FontDb, LookupError};
+pub use fontdb::{FontData, FontDb, LookupError};
 
 use shape::{FaceState, SCALE};
 

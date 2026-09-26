@@ -17,6 +17,7 @@
 //! so `main` does nothing before argument parsing and nothing expensive after.
 
 mod export_options;
+mod host;
 mod param_json;
 mod run;
 
@@ -376,6 +377,7 @@ fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
         check_parameters: flag(&cli.check_parameters, true, "check-parameters")?,
         check_parameter_ranges: flag(&cli.check_parameter_ranges, false, "check-parameter-ranges")?,
         hardwarnings: cli.hardwarnings,
+        rng_seed: host::entropy_seed(),
         ..Default::default()
     };
     if let Some(d) = cli.trace_depth {

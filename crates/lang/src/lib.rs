@@ -6,7 +6,7 @@
 //!   recovery and a lossless concrete syntax tree (every byte, comments
 //!   included), for the formatter and the LSP;
 //! - [`loader`]: `include` splicing and `use` resolution over a pluggable
-//!   [`loader::FileSystem`];
+//!   [`loader::FileSystem`] ([`vfs`] has in-memory ones);
 //! - [`ast`]: the typed AST the evaluator consumes, lowered from the tree
 //!   with OpenSCAD's semantics (scopes, reassignment, literal folding);
 //! - [`deps`]: parsing `use`d libraries, as OpenSCAD does before running;
@@ -26,6 +26,7 @@ pub mod loader;
 pub mod number;
 pub mod source;
 pub mod syntax;
+pub mod vfs;
 
 use std::path::{Path, PathBuf};
 

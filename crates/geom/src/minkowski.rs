@@ -526,12 +526,12 @@ fn hulls(sets: &[Vec<Vec3>]) -> Vec<ManifoldImpl> {
             crate::hull::hull_3d(s)
         }
     };
-    #[cfg(feature = "parallel")]
+    #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
     {
         use rayon::prelude::*;
         sets.par_iter().map(one).collect()
     }
-    #[cfg(not(feature = "parallel"))]
+    #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
     sets.iter().map(one).collect()
 }
 
@@ -815,7 +815,7 @@ mod tests {
 
     /// The hulls are built on rayon's pool; the result must not depend on
     /// how many threads there are or which finishes first.
-    #[cfg(feature = "parallel")]
+    #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
     #[test]
     fn same_output_at_any_thread_count() {
         let l = {

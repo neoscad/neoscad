@@ -10,6 +10,8 @@ license.workspace = true
 name = "text"
 
 [dependencies]
+# Only for `FileSystem`, through which font files are read.
+lang = { package = "neoscad-lang", path = "../lang" }
 # Both pinned exactly, like the kernels: glyph positions and the hinted
 # outlines are part of what the output bytes show.
 harfrust = "=0.13.3"

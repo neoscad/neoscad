@@ -91,10 +91,12 @@ This follows `tests/test_cmdline_tool.py`:
 - The working directory is `.reference/openscad/build/tests`, where ctest
   ran when the goldens were made. Diagnostics print input paths relative to
   it (`in file ../../tests/...`).
-- The environment sets `OPENSCAD_FONT_PATH` and `OPENSCADPATH`, plus
-  `NEOSCAD_FONT_DIR` (the reference checkout's `fonts/`), where neoscad
-  finds the bundled Liberation fonts that OpenSCAD keeps in its resources;
-  OpenSCAD ignores it.
+- The environment sets `OPENSCAD_FONT_PATH` and `OPENSCADPATH` (the
+  reference checkout's `libraries/`, as ctest does, so MCAD comes from
+  there rather than from neoscad's bundled copy). It removes
+  `NEOSCAD_FONT_DIR`, so neoscad uses the Liberation fonts compiled into
+  it, OpenSCAD's `<resources>/fonts`; they are byte-identical to the
+  reference checkout's `fonts/`, which a test in `crates/assets` checks.
 - A non-zero exit fails the case.
 - Otherwise the outputs are normalised as in `src/normalize.rs` and must
   match line for line.
