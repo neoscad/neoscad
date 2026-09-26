@@ -105,10 +105,13 @@ JSON-RPC (`docs/serve-protocol.md`).
   WKWebView, the same component the web app uses.
 - **Web:** the same core compiled to WASM and run in a worker, the same wgpu
   renderer on WebGPU, and CodeMirror 6.
-- **Project definition:** the Xcode project is generated from a committed
-  declarative spec: Xcode's own JSON project format if Xcode 27 really
-  supports one (verify first), otherwise XcodeGen's `project.yml`. The
-  `.xcodeproj` is a build output, never hand-edited.
+- **Project definition:** XcodeGen `project.yml`; the generated `.xcodeproj`
+  is a build output, never hand-edited. Xcode's JSON format (`.xcproj`) only
+  becomes the default in Xcode 27.2 (beta), and XcodeGen can't emit it yet.
+  Revisit when both land (`docs/audits/macos-prep.md`).
+- **Resource limits:** the app, `serve` and `mcp` enforce per-request time
+  and memory limits, configurable. The OpenSCAD-compatible one-shot CLI
+  stays unlimited, as OpenSCAD is.
 - **Panics:** the core runs inside the app's process, so release builds
   unwind (`panic = "unwind"`) and requests catch panics. A bug in one render
   must not take down the app and its unsaved work. This costs 5–8% on
