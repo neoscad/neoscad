@@ -4,6 +4,7 @@ description = "OpenSCAD language front end: lexer, lossless syntax tree, typed A
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [lib]
 name = "lang"

@@ -6,6 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
+license = "GPL-2.0-or-later"
 
 [workspace.dependencies]
 clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }

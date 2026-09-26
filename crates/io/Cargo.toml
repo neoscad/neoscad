@@ -4,6 +4,7 @@ description = "File formats for NeoSCAD: import readers (STL, OFF, OBJ, 3MF, DXF
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [lib]
 name = "io"

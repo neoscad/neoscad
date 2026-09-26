@@ -4,6 +4,7 @@ description = "text() for NeoSCAD: font lookup by fontconfig-style names, shapin
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [lib]
 name = "text"

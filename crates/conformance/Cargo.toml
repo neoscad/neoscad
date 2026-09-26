@@ -4,6 +4,7 @@ description = "Runs OpenSCAD's regression suite against neoscad and records prog
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [[bin]]
