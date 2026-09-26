@@ -26,7 +26,7 @@ any test listed in `conformance/baseline.json` no longer passes.
 | `grid [DIR...]` | Renders `grid.png` for snapshot directories (a path or a name under `progress/`) from their recorded data. `--all` takes every snapshot in `index.jsonl`; existing images are skipped unless `--force`. `--out PATH` writes elsewhere (one snapshot only). |
 | `run --binary PATH` | Runs another binary. Pointing it at the OpenSCAD nightly checks the harness itself: all tier 0-2 cases should pass. |
 | `showcase` | Checks that every model in `conformance/showcase.json` and its expected image exist. |
-| `diff [PATHS...]` | Differential test: runs a reference OpenSCAD (`--binary-ref`, default the pinned nightly) and neoscad on every `.scad` under `PATHS` (default: the reference's `tests/data/scad`, `examples`, `libraries/MCAD`) and compares exit status, the output (`--format`, currently `ast`) and the diagnostics that format covers. Prints the match rate and mismatches by category; the full list goes to `target/conformance/diff-<format>.json`. |
+| `diff [PATHS...]` | Differential test: runs a reference OpenSCAD (`--binary-ref`, default the pinned nightly) and neoscad on every `.scad` under `PATHS` (default: the reference's `tests/data/scad`, `examples`, `libraries/MCAD`) and compares exit status, the output (`--format ast` or `echo`; an `.echo` file holds every message, so it is compared even when both runs fail) and the diagnostics that format covers. Prints the match rate and mismatches by category; the full list goes to `target/conformance/diff-<format>.json`. |
 
 ## Progress snapshots
 

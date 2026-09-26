@@ -10,7 +10,9 @@
 //! - the diagnostics on stderr that the format is responsible for. For
 //!   `ast` that is the scanner and parser messages; evaluation output
 //!   (`ECHO:`, evaluation warnings), which OpenSCAD also prints because it
-//!   evaluates before exporting, is out of scope until the evaluator exists.
+//!   evaluates before exporting, belongs to `echo`. For `echo` every
+//!   message goes into the output file (OpenSCAD's `Echostream`), so the
+//!   file is compared even when both runs fail.
 //!
 //! Mismatches are grouped into categories so a run's result reads as a
 //! short table. The full report goes to `target/conformance/diff-<format>.json`.
@@ -33,19 +35,22 @@ pub const DEFAULT_REFERENCE: &str = "/Applications/OpenSCAD.app/Contents/MacOS/O
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     Ast,
+    Echo,
 }
 
 impl Format {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             "ast" => Ok(Format::Ast),
-            other => Err(format!("unsupported --format '{other}' (supported: ast)")),
+            "echo" => Ok(Format::Echo),
+            other => Err(format!("unsupported --format '{other}' (supported: ast, echo)")),
         }
     }
 
     fn suffix(self) -> &'static str {
         match self {
             Format::Ast => "ast",
+            Format::Echo => "echo",
         }
     }
 
@@ -69,6 +74,8 @@ impl Format {
                 ];
                 PARSE_PHASE.iter().any(|p| line.contains(p))
             }
+            // Everything is in the output file.
+            Format::Echo => false,
         }
     }
 }
@@ -175,7 +182,7 @@ fn run_one(bin: &Path, input: &Path, out_file: &Path, format: Format, env: &[(&s
     }
     let messages = stderr.lines().filter(|l| format.owns_message(l)).map(String::from).collect();
     let code = result.unwrap_or(None);
-    let output = if code == Some(0) { fs::read(out_file).ok() } else { None };
+    let output = if code == Some(0) || format == Format::Echo { fs::read(out_file).ok() } else { None };
     RunResult { code, output, messages, ms }
 }
 
@@ -202,7 +209,7 @@ fn classify(r: &RunResult, n: &RunResult) -> Option<(&'static str, String)> {
             format!("ref exit {:?} `{}` / neo exit {:?} `{}`", r.code, first(r), n.code, first(n)),
         ));
     }
-    if ok(r) {
+    if ok(r) || (r.output.is_some() && n.output.is_some()) {
         let (a, b) = (r.output.as_deref().unwrap_or(&[]), n.output.as_deref().unwrap_or(&[]));
         if a != b {
             return Some(("output-differs", first_difference(a, b)));

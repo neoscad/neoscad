@@ -29,7 +29,7 @@ it predates Manifold and the current test suite.
     ./target/release/conformance run [--tier N] [--filter S] [-v]
     ./target/release/conformance run --record       # progress snapshot
     ./target/release/conformance manifest [--check]  # after updating .reference
-    ./target/release/conformance diff --format ast [PATHS]  # vs the nightly
+    ./target/release/conformance diff --format ast|echo [PATHS]  # vs the nightly
 
 `conformance/baseline.json` lists test ids that must keep passing; a change
 that adds passes runs `conformance run --update-baseline` and commits it.

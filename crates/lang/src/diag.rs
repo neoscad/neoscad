@@ -27,6 +27,11 @@ pub enum Severity {
     Error,
     Warning,
     Deprecated,
+    /// Output of `echo()`: not a problem, but it travels the same channel
+    /// and OpenSCAD interleaves it with warnings in one stream.
+    Echo,
+    /// A call-stack line printed after an evaluation error.
+    Trace,
 }
 
 impl Severity {
@@ -36,6 +41,8 @@ impl Severity {
             Severity::Error => "ERROR",
             Severity::Warning => "WARNING",
             Severity::Deprecated => "DEPRECATED",
+            Severity::Echo => "ECHO",
+            Severity::Trace => "TRACE",
         }
     }
 }
@@ -69,6 +76,30 @@ pub enum DiagCode {
     ParameterRange,
     /// A parameter-set file that cannot be read or parsed.
     ParameterFile,
+    /// `echo()` output.
+    Echo,
+    /// A call-stack line after an evaluation error.
+    Trace,
+    UnknownVariable,
+    UnknownFunction,
+    UnknownModule,
+    /// An operator applied to operands it is not defined for; the result is
+    /// `undef`.
+    UndefinedOperation,
+    /// Arguments that do not fit the parameters (count, names, duplicates).
+    ArgumentMismatch,
+    /// A builtin received a value of the wrong type or out of range.
+    InvalidArgument,
+    AssertionFailed,
+    /// Recursion or stack exhaustion.
+    RecursionLimit,
+    /// A loop or range that would run too many iterations.
+    IterationLimit,
+    /// A variable reassigned in a way OpenSCAD warns about at run time.
+    Overwrite,
+    ExperimentalFeature,
+    /// Any other evaluation-time message.
+    Evaluation,
 }
 
 impl DiagCode {
@@ -91,6 +122,20 @@ impl DiagCode {
             DiagCode::Reassignment => "reassignment",
             DiagCode::ParameterRange => "parameter-range",
             DiagCode::ParameterFile => "parameter-file",
+            DiagCode::Echo => "echo",
+            DiagCode::Trace => "trace",
+            DiagCode::UnknownVariable => "unknown-variable",
+            DiagCode::UnknownFunction => "unknown-function",
+            DiagCode::UnknownModule => "unknown-module",
+            DiagCode::UndefinedOperation => "undefined-operation",
+            DiagCode::ArgumentMismatch => "argument-mismatch",
+            DiagCode::InvalidArgument => "invalid-argument",
+            DiagCode::AssertionFailed => "assertion-failed",
+            DiagCode::RecursionLimit => "recursion-limit",
+            DiagCode::IterationLimit => "iteration-limit",
+            DiagCode::Overwrite => "overwrite",
+            DiagCode::ExperimentalFeature => "experimental-feature",
+            DiagCode::Evaluation => "evaluation",
         }
     }
 }

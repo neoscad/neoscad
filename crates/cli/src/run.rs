@@ -1,12 +1,13 @@
-//! Running a program through the front end, the way `openscad.cc`'s
-//! `cmdline()` does, and the `.ast` export.
+//! Running a program through the front end and evaluator, the way
+//! `openscad.cc`'s `cmdline()` does, and the `.ast` and `.echo` exports.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use eval::{Console, Options};
 use lang::customizer::{Parameters, read_parameter_sets};
-use lang::deps::{Library, load_dependencies};
-use lang::diag::Diagnostic;
+use lang::deps::{Library, load_dependencies, resolve_uses};
+use lang::diag::Severity;
 use lang::loader::{LibraryPath, StdFs};
 use lang::{Program, parse_program};
 
@@ -22,6 +23,8 @@ pub struct Job<'a> {
     pub defines: &'a [String],
     pub parameter_file: Option<&'a str>,
     pub parameter_set: Option<&'a str>,
+    /// `--quiet`: only errors are printed.
+    pub quiet: bool,
 }
 
 /// Where messages are made relative to.
@@ -30,26 +33,35 @@ struct Paths {
     main_dir: PathBuf,
 }
 
-fn print_diag(d: &Diagnostic, program: &Program, paths: &Paths) {
-    eprintln!("{}", d.render_openscad(&program.sources, &paths.cwd, &paths.main_dir));
-}
-
 /// The main program and the libraries it uses.
 struct Loaded {
     program: Program,
-    #[allow(dead_code)] // consumed by the evaluator (next phase)
+    /// Keys of the libraries the main program uses, in search order.
+    uses: Vec<String>,
     libraries: Vec<Library>,
 }
 
+impl Paths {
+    fn of(job: &Job<'_>) -> Paths {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let main_dir = cwd.join(display_name(job)).parent().map(Path::to_path_buf).unwrap_or_else(|| cwd.clone());
+        Paths { cwd, main_dir }
+    }
+}
+
+/// OpenSCAD names stdin `<stdin>` and resolves it like a file in the
+/// working directory.
+fn display_name<'a>(job: &Job<'a>) -> &'a str {
+    if job.input == "-" { "<stdin>" } else { job.input }
+}
+
 /// Parse the input with `-D` definitions, apply a parameter set and parse
-/// the used libraries, printing OpenSCAD's messages. On failure returns the
-/// exit code.
-fn load(job: &Job<'_>) -> Result<(Loaded, Paths), u8> {
-    let cwd = std::env::current_dir().unwrap_or_default();
+/// the used libraries, printing OpenSCAD's messages to `con`. On failure
+/// returns the exit code.
+fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<Loaded, u8> {
     let stdin = job.input == "-";
-    // OpenSCAD names stdin `<stdin>` and resolves it like a file in the
-    // working directory.
-    let display = if stdin { "<stdin>" } else { job.input };
+    let display = display_name(job);
+    let path = paths.cwd.join(display);
     let mut text = Vec::new();
     let read = if stdin {
         std::io::stdin().read_to_end(&mut text).map(|_| ())
@@ -57,7 +69,7 @@ fn load(job: &Job<'_>) -> Result<(Loaded, Paths), u8> {
         std::fs::read(job.input).map(|t| text = t)
     };
     if read.is_err() {
-        eprintln!("Can't open input file '{display}'!\n");
+        con.print(None, format!("Can't open input file '{display}'!\n").as_bytes());
         return Err(EXIT_ERROR);
     }
     // cmdline(): the text, then an end-of-text marker, then each -D.
@@ -67,16 +79,14 @@ fn load(job: &Job<'_>) -> Result<(Loaded, Paths), u8> {
         suffix.extend_from_slice(b";\n");
     }
     text.extend_from_slice(&suffix);
-    let path = cwd.join(display);
-    let paths = Paths { main_dir: path.parent().map(Path::to_path_buf).unwrap_or_else(|| cwd.clone()), cwd: cwd.clone() };
 
     let libs = LibraryPath::from_env();
     let mut program = parse_program(path, text, &StdFs, &libs);
     for d in program.openscad_diags() {
-        print_diag(d, &program, &paths);
+        con.diagnostic(d, &program.sources, &paths.cwd);
     }
     if program.has_syntax_errors() {
-        eprintln!("Can't parse file '{display}'!\n");
+        con.print(None, format!("Can't parse file '{display}'!\n").as_bytes());
         return Err(EXIT_ERROR);
     }
 
@@ -84,7 +94,7 @@ fn load(job: &Job<'_>) -> Result<(Loaded, Paths), u8> {
         let mut warnings = Vec::new();
         let mut params = Parameters::from_ast(&program.ast, &mut warnings);
         for w in &warnings {
-            print_diag(w, &program, &paths);
+            con.diagnostic(w, &program.sources, &paths.cwd);
         }
         match read_parameter_sets(Path::new(file)) {
             Ok(sets) => {
@@ -93,7 +103,7 @@ fn load(job: &Job<'_>) -> Result<(Loaded, Paths), u8> {
                     params.apply(&mut program.ast);
                 }
             }
-            Err(e) => print_diag(&e, &program, &paths),
+            Err(e) => con.diagnostic(&e, &program.sources, &paths.cwd),
         }
     }
 
@@ -101,12 +111,13 @@ fn load(job: &Job<'_>) -> Result<(Loaded, Paths), u8> {
     let libraries = load_dependencies(&program, &suffix, &StdFs, &libs);
     for lib in &libraries {
         match (&lib.program, lib.open_error()) {
-            (Some(p), _) => p.openscad_diags().for_each(|d| print_diag(d, p, &paths)),
-            (None, Some(msg)) => eprintln!("{msg}"),
+            (Some(p), _) => p.openscad_diags().for_each(|d| con.diagnostic(d, &p.sources, &paths.cwd)),
+            (None, Some(msg)) => con.print(Some(Severity::Warning), msg.as_bytes()),
             (None, None) => {}
         }
     }
-    Ok((Loaded { program, libraries }, paths))
+    let uses = resolve_uses(&program, &StdFs, &libs);
+    Ok(Loaded { program, uses, libraries })
 }
 
 /// Write `data` to `-o` targets (`-` is stdout).
@@ -125,8 +136,10 @@ fn write_output(target: &str, data: &[u8]) -> Result<(), u8> {
 
 /// `-o x.ast`: the parsed program printed back (`SourceFile::dump`).
 pub fn export_ast(job: &Job<'_>) -> u8 {
-    let (loaded, _paths) = match load(job) {
-        Ok(p) => p,
+    let paths = Paths::of(job);
+    let mut con = Console::new(std::io::stderr(), paths.main_dir.clone(), job.quiet);
+    let loaded = match load(job, &paths, &mut con) {
+        Ok(l) => l,
         Err(code) => return code,
     };
     let text = lang::dump::dump(&loaded.program.ast);
@@ -136,4 +149,31 @@ pub fn export_ast(job: &Job<'_>) -> u8 {
         }
     }
     0
+}
+
+/// `-o x.echo`: every message of parsing and evaluation, as OpenSCAD's
+/// `Echostream` captures them, and nothing on stderr.
+pub fn export_echo(job: &Job<'_>, options: &Options) -> u8 {
+    let paths = Paths::of(job);
+    let mut con = Console::new(Vec::new(), paths.main_dir.clone(), job.quiet);
+    let code = match load(job, &paths, &mut con) {
+        Err(code) => code,
+        Ok(l) => {
+            let libs: Vec<eval::Library<'_>> = l
+                .libraries
+                .iter()
+                .map(|lib| eval::Library { path: &lib.path, program: lib.program.as_ref(), uses: &lib.uses })
+                .collect();
+            // `main` runs this on a thread with `eval::DEFAULT_THREAD_STACK`.
+            eval::evaluate(&l.program, &l.uses, &libs, paths.main_dir.clone(), options, &mut con);
+            0
+        }
+    };
+    let data = con.into_inner();
+    for target in job.outputs {
+        if let Err(c) = write_output(target, &data) {
+            return c;
+        }
+    }
+    code
 }

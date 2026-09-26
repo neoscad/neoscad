@@ -22,9 +22,26 @@ pub fn dump(ast: &Ast) -> Vec<u8> {
 
 /// Print one expression (lossily as UTF-8; for messages and tests).
 pub fn expr_to_string(ast: &Ast, e: ExprId) -> String {
-    let mut p = Printer { ast, out: Vec::new(), num: String::new() };
+    let mut out = Vec::new();
+    write_expr(ast, e, &mut out);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Append one expression as OpenSCAD's `Expression::print` writes it. The
+/// evaluator needs the exact bytes: messages such as `Assertion '...'
+/// failed` and printed function literals quote source strings verbatim,
+/// which may not be UTF-8.
+pub fn write_expr(ast: &Ast, e: ExprId, out: &mut Vec<u8>) {
+    let mut p = Printer { ast, out: std::mem::take(out), num: String::new() };
     p.expr(e);
-    String::from_utf8_lossy(&p.out).into_owned()
+    *out = p.out;
+}
+
+/// Append a parameter list (`a, b = 1`) as function literals print it.
+pub fn write_params(ast: &Ast, params: &[Param], out: &mut Vec<u8>) {
+    let mut p = Printer { ast, out: std::mem::take(out), num: String::new() };
+    p.params(params);
+    *out = p.out;
 }
 
 struct Printer<'a> {

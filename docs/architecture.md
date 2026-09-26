@@ -151,7 +151,7 @@ ffmpeg.
 1. **Skeleton** (done): workspace, the `conformance` harness, and progress
    recording.
 2. **`lang`** (done): tier 0.
-3. **`eval`:** tier 1.
+3. **`eval`** (done): tier 1.
 4. **CSG tree:** tier 2.
 5. **`geom` + `io`:** tier 3.
 6. **`render` + `snapshot`:** tier 4.

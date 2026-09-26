@@ -4,9 +4,10 @@
 //! `desc.add_options()` block) so that OpenSCAD's regression suite can drive
 //! this binary unchanged: the conformance harness passes exactly the
 //! arguments `tests/CMakeLists.txt` registers. The `.ast` export (with
-//! customizer parameter sets) is implemented; every other output mode
-//! reports that it is missing and exits with [`EXIT_NOT_IMPLEMENTED`], which
-//! the harness can tell apart from a crash or a usage error.
+//! customizer parameter sets) and the `.echo` export (evaluation messages)
+//! are implemented; every other output mode reports that it is missing and
+//! exits with [`EXIT_NOT_IMPLEMENTED`], which the harness can tell apart
+//! from a crash or a usage error.
 //!
 //! Cold start is a tracked benchmark (docs/architecture.md, "Agent surface"),
 //! so `main` does nothing before argument parsing and nothing expensive after.
@@ -191,7 +192,14 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Parsing and evaluation recurse over the program; OpenSCAD programs
+    // (and OpenSCAD's own tests) recurse deeper than the main thread's
+    // default stack allows, and the evaluator's recursion limit assumes
+    // this much stack (see `eval::Options::stack_limit`).
+    eval::with_stack(eval::DEFAULT_THREAD_STACK, move || run_cli(cli))
+}
 
+fn run_cli(cli: Cli) -> ExitCode {
     if cli.version {
         println!("neoscad {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
@@ -235,21 +243,75 @@ fn main() -> ExitCode {
         }
     }
 
+    let job = run::Job {
+        input: &cli.input[0],
+        outputs: &cli.output,
+        defines: &cli.define,
+        parameter_file: cli.parameter_file.as_deref(),
+        parameter_set: cli.parameter_set.as_deref(),
+        quiet: cli.quiet,
+    };
     if formats.iter().all(|(id, _)| *id == "ast") {
-        let job = run::Job {
-            input: &cli.input[0],
-            outputs: &cli.output,
-            defines: &cli.define,
-            parameter_file: cli.parameter_file.as_deref(),
-            parameter_set: cli.parameter_set.as_deref(),
-        };
         return ExitCode::from(run::export_ast(&job));
+    }
+    if formats.iter().all(|(id, _)| *id == "echo") {
+        let options = match eval_options(&cli) {
+            Ok(o) => o,
+            Err(code) => return ExitCode::from(code),
+        };
+        return ExitCode::from(run::export_echo(&job, &options));
     }
 
     for (id, name) in &formats {
         eprintln!("neoscad: {name} export ({id}) is not implemented yet");
     }
     ExitCode::from(EXIT_NOT_IMPLEMENTED)
+}
+
+/// `flagConvert` in openscad.cc: the accepted spellings of a boolean flag.
+fn flag(value: &Option<String>, default: bool, name: &str) -> Result<bool, u8> {
+    let Some(v) = value else { return Ok(default) };
+    let l = v.to_ascii_lowercase();
+    match l.as_str() {
+        "1" | "on" | "true" => Ok(true),
+        "0" | "off" | "false" => Ok(false),
+        _ => {
+            eprintln!("neoscad: invalid value '{v}' for --{name} (use true/false, on/off or 1/0)");
+            Err(EXIT_ERROR)
+        }
+    }
+}
+
+/// Evaluation settings from the command line, as `openscad.cc` derives
+/// them (`RenderVariables`, `get_camera`, the `OpenSCAD::` flags).
+fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
+    let mut o = eval::Options {
+        // `$preview` is true for preview-capable exports unless --render.
+        preview: cli.render.is_none(),
+        trace_usermodule_parameters: flag(&cli.trace_usermodule_parameters, true, "trace-usermodule-parameters")?,
+        check_parameters: flag(&cli.check_parameters, true, "check-parameters")?,
+        check_parameter_ranges: flag(&cli.check_parameter_ranges, false, "check-parameter-ranges")?,
+        ..Default::default()
+    };
+    if let Some(d) = cli.trace_depth {
+        o.trace_depth = d;
+    }
+    if let Some(cam) = &cli.camera {
+        let nums: Result<Vec<f64>, _> = cam.split(',').map(|s| s.trim().parse::<f64>()).collect();
+        let n = cam.split(',').count();
+        if n != 6 && n != 7 {
+            eprintln!("Camera setup requires either 7 numbers for Gimbal Camera or 6 numbers for Vector Camera");
+            return Err(EXIT_ERROR);
+        }
+        match nums.ok().and_then(|v| eval::Camera::from_args(&v)) {
+            Some(c) => o.camera = c,
+            None => eprintln!("Camera setup requires numbers as parameters"),
+        }
+    }
+    if cli.viewall || cli.autocenter {
+        o.camera.auto = true;
+    }
+    Ok(o)
 }
 
 fn lookup_format(id: &str) -> Option<(&'static str, &'static str)> {

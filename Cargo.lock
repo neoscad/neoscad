@@ -230,6 +230,7 @@ name = "neoscad-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "neoscad-eval",
  "neoscad-lang",
 ]
 
@@ -244,6 +245,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "neoscad-eval"
+version = "0.1.0"
+dependencies = [
+ "neoscad-lang",
 ]
 
 [[package]]

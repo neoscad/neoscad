@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 lang = { package = "neoscad-lang", path = "../lang" }
+eval = { package = "neoscad-eval", path = "../eval" }
 
 [lints]
 workspace = true

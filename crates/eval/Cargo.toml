@@ -1,0 +1,15 @@
+[package]
+name = "neoscad-eval"
+description = "OpenSCAD evaluator: values, builtins, scoping and module instantiation into a node tree"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "eval"
+
+[dependencies]
+lang = { package = "neoscad-lang", path = "../lang" }
+
+[lints]
+workspace = true

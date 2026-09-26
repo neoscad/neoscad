@@ -76,6 +76,19 @@ impl Interner {
     pub fn resolve(&self, n: Name) -> &str {
         &self.names[n.0 as usize]
     }
+
+    /// All names, in [`Name`] order (names are numbered densely from 0).
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.names.iter().map(|n| &**n)
+    }
+
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
