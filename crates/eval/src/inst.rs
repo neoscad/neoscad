@@ -24,12 +24,18 @@ impl<'a> Evaluator<'a> {
 
     /// The scope holding an instantiation's children.
     pub fn children_scope(&self, sr: ScopeRef, i: usize) -> ScopeRef {
-        ScopeRef { unit: sr.unit, scope: self.units[sr.unit as usize].scopes[sr.scope as usize].children[i] }
+        ScopeRef {
+            unit: sr.unit,
+            scope: self.units[sr.unit as usize].scopes[sr.scope as usize].children[i],
+        }
     }
 
     pub fn else_scope(&self, sr: ScopeRef, i: usize) -> Option<ScopeRef> {
         let s = self.units[sr.unit as usize].scopes[sr.scope as usize].else_children[i];
-        (s != u32::MAX).then_some(ScopeRef { unit: sr.unit, scope: s })
+        (s != u32::MAX).then_some(ScopeRef {
+            unit: sr.unit,
+            scope: s,
+        })
     }
 
     /// `ScopeContext::init`: evaluate a scope's assignments in order.
@@ -38,9 +44,15 @@ impl<'a> Evaluator<'a> {
         let ast = self.units[sr.unit as usize].ast;
         for a in &scope.assignments {
             let s = self.units[sr.unit as usize].sym(a.name);
-            let loc = Loc { unit: sr.unit, span: a.loc.span };
+            let loc = Loc {
+                unit: sr.unit,
+                span: a.loc.span,
+            };
             if ast.is_literal(a.expr) && ctx.has_local(s) {
-                let t = format!("Parameter {} is overwritten with a literal", self.quote_sym(s));
+                let t = format!(
+                    "Parameter {} is overwritten with a literal",
+                    self.quote_sym(s)
+                );
                 self.warn(loc, DiagCode::Overwrite, t);
             }
             match self.eval(sr.unit, a.expr, ctx) {
@@ -50,11 +62,16 @@ impl<'a> Evaluator<'a> {
                     match a.overwrite {
                         None => self.trace(&mut e, loc, format!("assignment to {q}").into_bytes()),
                         Some(ow) => {
-                            let t = format!("overwritten assignment to {q} (this is where the assignment is evaluated)");
+                            let t = format!(
+                                "overwritten assignment to {q} (this is where the assignment is evaluated)"
+                            );
                             if let Some(p) = e.log(self.pending_trace(loc, t)) {
                                 self.emit_pending(p);
                             }
-                            let ow = Loc { unit: sr.unit, span: ow.span };
+                            let ow = Loc {
+                                unit: sr.unit,
+                                span: ow.span,
+                            };
                             let t = format!("overwriting assignment to {q}");
                             self.trace(&mut e, ow, t.into_bytes());
                         }
@@ -77,7 +94,13 @@ impl<'a> Evaluator<'a> {
 
     /// `LocalScope::instantiateModules`: instantiate a scope's modules (or
     /// the ones at `indices`) into `out`.
-    pub fn instantiate_scope(&mut self, sr: ScopeRef, ctx: &Rc<Ctx>, out: &mut Vec<Node>, indices: Option<&[usize]>) -> R<()> {
+    pub fn instantiate_scope(
+        &mut self,
+        sr: ScopeRef,
+        ctx: &Rc<Ctx>,
+        out: &mut Vec<Node>,
+        indices: Option<&[usize]>,
+    ) -> R<()> {
         let n = self.scope(sr).instantiations.len();
         match indices {
             None => {
@@ -100,10 +123,17 @@ impl<'a> Evaluator<'a> {
 
     /// `Children::instantiate`: a new scope context for the children, whose
     /// assignments are evaluated each time.
-    pub fn instantiate_children(&mut self, children: &Children, out: &mut Vec<Node>, indices: Option<&[usize]>) -> R<()> {
+    pub fn instantiate_children(
+        &mut self,
+        children: &Children,
+        out: &mut Vec<Node>,
+        indices: Option<&[usize]>,
+    ) -> R<()> {
         let c = Ctx::new(Some(children.ctx.clone()), CtxKind::Scope(children.scope));
         let mark = self.push(c.clone());
-        let r = self.init_scope(&c, children.scope).and_then(|_| self.instantiate_scope(children.scope, &c, out, indices));
+        let r = self
+            .init_scope(&c, children.scope)
+            .and_then(|_| self.instantiate_scope(children.scope, &c, out, indices));
         self.truncate(mark);
         r
     }
@@ -111,7 +141,11 @@ impl<'a> Evaluator<'a> {
     pub fn origin(&self, sr: ScopeRef, i: usize) -> Box<Origin> {
         let inst = self.inst(sr, i);
         let unit = &self.units[sr.unit as usize];
-        let line = unit.program.sources.get(inst.span.file).line_of(inst.span.start);
+        let line = unit
+            .program
+            .sources
+            .get(inst.span.file)
+            .line_of(inst.span.start);
         Box::new(Origin {
             name: unit.ast.name(inst.name).to_string(),
             unit: sr.unit,
@@ -125,11 +159,19 @@ impl<'a> Evaluator<'a> {
 
     pub fn new_node(&mut self, kind: NodeKind, sr: ScopeRef, i: usize) -> Node {
         let index = self.next_node_index();
-        Node { kind, children: Vec::new(), origin: Some(self.origin(sr, i)), index }
+        Node {
+            kind,
+            children: Vec::new(),
+            origin: Some(self.origin(sr, i)),
+            index,
+        }
     }
 
     pub fn inst_loc(&self, sr: ScopeRef, i: usize) -> Loc {
-        Loc { unit: sr.unit, span: self.inst(sr, i).span }
+        Loc {
+            unit: sr.unit,
+            span: self.inst(sr, i).span,
+        }
     }
 
     pub fn inst_name(&self, sr: ScopeRef, i: usize) -> Sym {
@@ -141,10 +183,17 @@ impl<'a> Evaluator<'a> {
         self.check_interrupt()?;
         let name = self.inst_name(sr, i);
         let loc = self.inst_loc(sr, i);
-        let Some(m) = self.lookup_module(ctx, name, loc)? else { return Ok(None) };
+        let Some(m) = self.lookup_module(ctx, name, loc)? else {
+            return Ok(None);
+        };
         let r = match m {
             Instantiable::Builtin(b) => self.builtin_module(b, sr, i, ctx),
-            Instantiable::User { ctx: dctx, unit, scope, index } => self.user_module(&dctx, ScopeRef { unit, scope }, index, sr, i, ctx),
+            Instantiable::User {
+                ctx: dctx,
+                unit,
+                scope,
+                index,
+            } => self.user_module(&dctx, ScopeRef { unit, scope }, index, sr, i, ctx),
         };
         r.map_err(|mut e| {
             let t = format!("called by '{}'", self.name(name));
@@ -154,13 +203,27 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `UserModule::instantiate`.
-    fn user_module(&mut self, dctx: &Rc<Ctx>, def_scope: ScopeRef, index: u32, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
+    fn user_module(
+        &mut self,
+        dctx: &Rc<Ctx>,
+        def_scope: ScopeRef,
+        index: u32,
+        sr: ScopeRef,
+        i: usize,
+        ctx: &Rc<Ctx>,
+    ) -> R<Option<Node>> {
         let mu = def_scope.unit;
         let def = &self.scope(def_scope).modules[index as usize];
-        let def_loc = Loc { unit: mu, span: def.span };
+        let def_loc = Loc {
+            unit: mu,
+            span: def.span,
+        };
         let inst_name = self.inst_name(sr, i);
         if self.stack_exhausted() {
-            let t = format!("Recursion detected calling module '{}'", self.name(inst_name));
+            let t = format!(
+                "Recursion detected calling module '{}'",
+                self.name(inst_name)
+            );
             self.error(Some(def_loc), DiagCode::RecursionLimit, t);
             return Err(self.unwind(UnwindKind::Recursion));
         }
@@ -170,14 +233,28 @@ impl<'a> Evaluator<'a> {
         r
     }
 
-    fn user_module_inner(&mut self, dctx: &Rc<Ctx>, def_scope: ScopeRef, index: u32, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
+    fn user_module_inner(
+        &mut self,
+        dctx: &Rc<Ctx>,
+        def_scope: ScopeRef,
+        index: u32,
+        sr: ScopeRef,
+        i: usize,
+        ctx: &Rc<Ctx>,
+    ) -> R<Option<Node>> {
         let mu = def_scope.unit;
         let def = &self.scope(def_scope).modules[index as usize];
-        let body = ScopeRef { unit: mu, scope: self.units[mu as usize].scopes[def_scope.scope as usize].bodies[index as usize] };
+        let body = ScopeRef {
+            unit: mu,
+            scope: self.units[mu as usize].scopes[def_scope.scope as usize].bodies[index as usize],
+        };
         let inst = self.inst(sr, i);
         let loc = self.inst_loc(sr, i);
         let args = self.eval_args(sr.unit, &inst.args, ctx)?;
-        let children = Children { scope: self.children_scope(sr, i), ctx: ctx.clone() };
+        let children = Children {
+            scope: self.children_scope(sr, i),
+            ctx: ctx.clone(),
+        };
         let n_children = self.scope(children.scope).instantiations.len();
         let mctx = Ctx::new(Some(dctx.clone()), CtxKind::Module(body, children));
         let (sc, sp) = (self.k.children, self.k.parent_modules);
@@ -195,7 +272,10 @@ impl<'a> Evaluator<'a> {
                 Err(mut e) => {
                     if self.opts.trace_usermodule_parameters {
                         let t = self.module_call_text(mu, def, &mctx);
-                        let def_loc = Loc { unit: mu, span: def.span };
+                        let def_loc = Loc {
+                            unit: mu,
+                            span: def.span,
+                        };
                         self.trace(&mut e, def_loc, t);
                     }
                     Err(e)
@@ -207,7 +287,12 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `call of 'name(a = 1, b = "x")'` for a module's trace line.
-    fn module_call_text(&mut self, mu: u32, def: &'a lang::ast::ModuleDef, mctx: &Rc<Ctx>) -> Vec<u8> {
+    fn module_call_text(
+        &mut self,
+        mu: u32,
+        def: &'a lang::ast::ModuleDef,
+        mctx: &Rc<Ctx>,
+    ) -> Vec<u8> {
         let ast = self.units[mu as usize].ast;
         let mut t = format!("call of '{}(", ast.name(def.name)).into_bytes();
         if !def.params.is_empty() {

@@ -302,7 +302,12 @@ impl MeshFormat {
 /// (`:476-541`): messages on stderr, a refusal with exit 1 when the result
 /// has the wrong dimension or is empty (`checkAndExport`), then the render
 /// summary.
-pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat], force: bool) -> u8 {
+pub fn export_mesh(
+    job: &Job<'_>,
+    options: &eval::Options,
+    formats: &[MeshFormat],
+    force: bool,
+) -> u8 {
     let started = std::time::Instant::now();
     let paths = Paths::of(job);
     let mut con = Console::new(std::io::stderr(), paths.main_dir.clone(), job.quiet);
@@ -313,7 +318,11 @@ pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat
     let ev = evaluate(&loaded, &paths, options, &mut con);
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
     let keys = eval::dump::Keys::new(&ev.root);
-    let opts = geom::RenderOptions { force, doc_dir: paths.main_dir.clone(), ..Default::default() };
+    let opts = geom::RenderOptions {
+        force,
+        doc_dir: paths.main_dir.clone(),
+        ..Default::default()
+    };
     let rendered = geom::Renderer::new().render(top, &keys, opts.clone());
     let rendered = match rendered {
         Ok(r) => r,
@@ -335,14 +344,19 @@ pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat
             con.print(None, m.text.as_bytes());
             continue;
         };
-        let mut diag = lang::diag::Diagnostic::new(lang::diag::DiagCode::Geometry, severity, m.text.clone());
+        let mut diag =
+            lang::diag::Diagnostic::new(lang::diag::DiagCode::Geometry, severity, m.text.clone());
         let mut sources = None;
         if let Some(l) = &m.loc {
             diag = diag.at(l.span, l.line);
             sources = unit_sources(&loaded, l.unit);
         }
         use eval::Output;
-        con.message(&eval::Message { diag, text: m.text.as_bytes(), sources });
+        con.message(&eval::Message {
+            diag,
+            text: m.text.as_bytes(),
+            sources,
+        });
     }
     // `if (!root_geom) root_geom = std::make_shared<PolySet>(3);`
     let root = rendered.geometry;
@@ -355,7 +369,10 @@ pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat
         // `checkAndExport`, per output: the dimension, then emptiness.
         let want = format.dimension();
         if dim != want {
-            con.print(None, format!("Current top level object is not a {want}D object.").as_bytes());
+            con.print(
+                None,
+                format!("Current top level object is not a {want}D object.").as_bytes(),
+            );
             return EXIT_ERROR;
         }
         let Some(root) = root.as_ref().filter(|g| !g.is_empty()) else {
@@ -367,15 +384,26 @@ pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat
             (MeshFormat::Svg, geom::Geometry::Polygon2d(p)) => geom::export::svg(p),
             (MeshFormat::Dxf, geom::Geometry::Polygon2d(p)) => geom::export::dxf(p),
             _ => {
-                let ps = mesh.get_or_insert_with(|| geom::export::as_polyset(root, &opts.scheme).expect("3D geometry has a mesh"));
+                let ps = mesh.get_or_insert_with(|| {
+                    geom::export::as_polyset(root, &opts.scheme).expect("3D geometry has a mesh")
+                });
                 match format {
                     MeshFormat::AsciiStl => geom::export::stl(ps, false, &mut warnings),
                     MeshFormat::BinaryStl => geom::export::stl(ps, true, &mut warnings),
                     MeshFormat::Off => geom::export::off(ps, &mut warnings),
                     MeshFormat::ThreeMf => {
                         // `ExportInfo::title` is the input's file name.
-                        let title = Path::new(display_name(job)).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-                        let (data, msgs) = geom::export::threemf(ps, &title, &iso8601_now(), opts.scheme.face_front, &mut warnings);
+                        let title = Path::new(display_name(job))
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let (data, msgs) = geom::export::threemf(
+                            ps,
+                            &title,
+                            &iso8601_now(),
+                            opts.scheme.face_front,
+                            &mut warnings,
+                        );
                         for m in msgs {
                             match m.severity {
                                 Some(Severity::Warning) => warnings.push(m.text),
@@ -396,11 +424,21 @@ pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat
         }
     }
     // `RenderStatistic::printAll`: cache size, time, then the object.
-    con.print(None, format!("Geometries in cache: {}", rendered.cache_entries).as_bytes());
+    con.print(
+        None,
+        format!("Geometries in cache: {}", rendered.cache_entries).as_bytes(),
+    );
     let ms = started.elapsed().as_millis();
     con.print(
         None,
-        format!("Total rendering time: {}:{:02}:{:02}.{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000).as_bytes(),
+        format!(
+            "Total rendering time: {}:{:02}:{:02}.{:03}",
+            ms / 3_600_000,
+            ms / 60_000 % 60,
+            ms / 1000 % 60,
+            ms % 1000
+        )
+        .as_bytes(),
     );
     for l in root.iter().flat_map(geom::export::summary) {
         con.print(None, l.as_bytes());
@@ -410,7 +448,9 @@ pub fn export_mesh(job: &Job<'_>, options: &eval::Options, formats: &[MeshFormat
 
 /// `get_current_iso8601_date_time_utc` (`export.cc`): `YYYY-MM-DDTHH:MM:SSZ`.
 fn iso8601_now() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs()) as i64;
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // Howard Hinnant's `civil_from_days`.
     let z = days + 719_468;
@@ -422,7 +462,12 @@ fn iso8601_now() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem / 60 % 60,
+        rem % 60
+    )
 }
 
 /// The source map of evaluation unit `unit`: 0 is the main program, `1 + i`
@@ -431,5 +476,8 @@ fn unit_sources(l: &Loaded, unit: u32) -> Option<&lang::source::SourceMap> {
     if unit == 0 {
         return Some(&l.program.sources);
     }
-    l.libraries.get(unit as usize - 1).and_then(|lib| lib.program.as_ref()).map(|p| &p.sources)
+    l.libraries
+        .get(unit as usize - 1)
+        .and_then(|lib| lib.program.as_ref())
+        .map(|p| &p.sources)
 }

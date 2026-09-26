@@ -52,9 +52,22 @@ pub fn dxf(p: &Polygon2d) -> Vec<u8> {
 /// base material, the scheme's front colour as the default material. The
 /// messages are OpenSCAD's (`Some` severity) or its plain `EXPORT-ERROR`
 /// lines; an empty file means the export failed.
-pub fn threemf(ps: &PolySet, title: &str, creation_date: &str, default_color: Color, warnings: &mut Warnings) -> (Vec<u8>, Vec<io::Message>) {
+pub fn threemf(
+    ps: &PolySet,
+    title: &str,
+    creation_date: &str,
+    default_color: Color,
+    warnings: &mut Warnings,
+) -> (Vec<u8>, Vec<io::Message>) {
     let tri = ps.tessellate(warnings);
-    io::threemf::write(tri.mesh(), &io::threemf::WriteOptions { title, creation_date, default_color })
+    io::threemf::write(
+        tri.mesh(),
+        &io::threemf::WriteOptions {
+            title,
+            creation_date,
+            default_color,
+        },
+    )
 }
 
 /// The top-level object lines of OpenSCAD's render summary
@@ -68,7 +81,10 @@ pub fn summary(g: &Geometry) -> Vec<String> {
         Geometry::PolySet(ps) => {
             let mut l = vec![
                 "Top level object is a 3D object (PolySet):".to_string(),
-                format!("   Convex:       {}", if ps.is_convex() { "yes" } else { "no" }),
+                format!(
+                    "   Convex:       {}",
+                    if ps.is_convex() { "yes" } else { "no" }
+                ),
             ];
             if ps.triangular {
                 l.push(format!("   Triangles: {:6}", ps.faces.len()));
@@ -79,12 +95,18 @@ pub fn summary(g: &Geometry) -> Vec<String> {
         }
         Geometry::Manifold(m) => vec![
             "   Top level object is a 3D object (manifold):".to_string(),
-            format!("   Status:     {}", crate::manifold_geom::status_name(m.manifold.status())),
+            format!(
+                "   Status:     {}",
+                crate::manifold_geom::status_name(m.manifold.status())
+            ),
             format!("   Genus:      {}", m.manifold.genus()),
             format!("   Vertices:   {:6}", m.manifold.num_vert()),
             format!("   Facets:     {:6}", m.manifold.num_tri()),
         ],
-        Geometry::Polygon2d(p) => vec!["Top level object is a 2D object:".to_string(), format!("   Contours:   {:6}", p.outlines.len())],
+        Geometry::Polygon2d(p) => vec![
+            "Top level object is a 2D object:".to_string(),
+            format!("   Contours:   {:6}", p.outlines.len()),
+        ],
     }
 }
 

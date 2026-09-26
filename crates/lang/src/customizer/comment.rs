@@ -35,7 +35,10 @@ fn is_word_byte(b: u8) -> bool {
 
 /// Length of the longest NUM match at `i`, or 0.
 fn num_len(s: &[u8], i: usize) -> usize {
-    let digits = |from: usize| s.get(from..).map_or(0, |t| t.iter().take_while(|b| b.is_ascii_digit()).count());
+    let digits = |from: usize| {
+        s.get(from..)
+            .map_or(0, |t| t.iter().take_while(|b| b.is_ascii_digit()).count())
+    };
     let exp = |from: usize| -> usize {
         if !matches!(s.get(from), Some(b'e' | b'E')) {
             return 0;
@@ -75,7 +78,9 @@ fn lex(s: &[u8]) -> Vec<Tok> {
         if nl > 0 && nl >= wl {
             // lexical_cast<double> failures (overflow) make the rule not
             // return, so the text is skipped.
-            if let Ok(v) = std::str::from_utf8(&s[i..i + nl]).unwrap_or("x").parse::<f64>()
+            if let Ok(v) = std::str::from_utf8(&s[i..i + nl])
+                .unwrap_or("x")
+                .parse::<f64>()
                 && v.is_finite()
             {
                 out.push(Tok::Num(v));
@@ -201,7 +206,10 @@ fn lit(ast: &mut Ast, item: Item) -> ExprId {
 /// `ast`, or `None` when the grammar rejects it.
 pub fn parse(comment: &[u8], ast: &mut Ast) -> Option<ExprId> {
     let toks = lex(comment);
-    let mut p = P { toks: &toks, pos: 0 };
+    let mut p = P {
+        toks: &toks,
+        pos: 0,
+    };
     let e = match p.peek(0)? {
         Tok::LBrack => {
             p.pos += 1;
@@ -220,7 +228,14 @@ pub fn parse(comment: &[u8], ast: &mut Ast) -> Option<ExprId> {
                 if p.peek(3) == Some(&Tok::RBrack) {
                     p.pos += 4;
                     let end = ast.add(ExprKind::Number(b), Span::default());
-                    ast.add(ExprKind::Range { begin, step: None, end }, Span::default())
+                    ast.add(
+                        ExprKind::Range {
+                            begin,
+                            step: None,
+                            end,
+                        },
+                        Span::default(),
+                    )
                 } else {
                     if !(is_num(p.peek(4)) && p.peek(5) == Some(&Tok::RBrack)) {
                         return None;
@@ -229,7 +244,14 @@ pub fn parse(comment: &[u8], ast: &mut Ast) -> Option<ExprId> {
                     p.pos += 6;
                     let step = ast.add(ExprKind::Number(b), Span::default());
                     let end = ast.add(ExprKind::Number(c), Span::default());
-                    ast.add(ExprKind::Range { begin, step: Some(step), end }, Span::default())
+                    ast.add(
+                        ExprKind::Range {
+                            begin,
+                            step: Some(step),
+                            end,
+                        },
+                        Span::default(),
+                    )
                 }
             } else {
                 let mut values = Vec::new();
@@ -279,8 +301,14 @@ mod tests {
     #[test]
     fn parameter_comments() {
         assert_eq!(show(" [0, 1, 2, 3]").as_deref(), Some("[0, 1, 2, 3]"));
-        assert_eq!(show(" [10:L, 20:M, 30:L]").as_deref(), Some("[[10, \"L\"], [20, \"M\"], [30, \"L\"]]"));
-        assert_eq!(show(" [S:Small, M:Medium]").as_deref(), Some("[[\"S\", \"Small\"], [\"M\", \"Medium\"]]"));
+        assert_eq!(
+            show(" [10:L, 20:M, 30:L]").as_deref(),
+            Some("[[10, \"L\"], [20, \"M\"], [30, \"L\"]]")
+        );
+        assert_eq!(
+            show(" [S:Small, M:Medium]").as_deref(),
+            Some("[[\"S\", \"Small\"], [\"M\", \"Medium\"]]")
+        );
         assert_eq!(show(" [10:100]").as_deref(), Some("[10 : 100]"));
         assert_eq!(show("[0:5:100]").as_deref(), Some("[0 : 5 : 100]"));
         assert_eq!(show("[1:2, 3]").as_deref(), Some("[[1, 2], 3]"));

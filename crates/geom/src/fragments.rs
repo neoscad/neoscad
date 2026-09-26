@@ -26,7 +26,12 @@ pub fn circular_segments_for_angle(disc: &Discretizer, r: f64, angle_degrees: f6
     let fn_ = disc.fn_;
     // `r < GRID_FINE` is false for NaN, so a NaN radius falls through to the
     // arithmetic below exactly as in C++.
-    if r < GRID_FINE || fn_.is_infinite() || fn_.is_nan() || angle_degrees.is_infinite() || angle_degrees.is_nan() {
+    if r < GRID_FINE
+        || fn_.is_infinite()
+        || fn_.is_nan()
+        || angle_degrees.is_infinite()
+        || angle_degrees.is_nan()
+    {
         return None;
     }
     let result = if fn_ > 0.0 {
@@ -66,13 +71,19 @@ mod tests {
         assert_eq!(circular_segments(&d(7.0, 12.0, 2.0), 100.0), Some(7));
         assert_eq!(circular_segments(&d(1.0, 12.0, 2.0), 100.0), Some(3));
         assert_eq!(circular_segments(&d(4.5, 12.0, 2.0), 1.0), Some(5));
-        assert_eq!(circular_segments_for_angle(&d(10.0, 12.0, 2.0), 1.0, 90.0), Some(3));
+        assert_eq!(
+            circular_segments_for_angle(&d(10.0, 12.0, 2.0), 1.0, 90.0),
+            Some(3)
+        );
     }
 
     #[test]
     fn degenerate_inputs() {
         assert_eq!(circular_segments(&d(0.0, 12.0, 2.0), 0.0), None);
         assert_eq!(circular_segments(&d(f64::INFINITY, 12.0, 2.0), 1.0), None);
-        assert_eq!(circular_segments(&d(0.0, 12.0, 2.0), f64::INFINITY), Some(30));
+        assert_eq!(
+            circular_segments(&d(0.0, 12.0, 2.0), f64::INFINITY),
+            Some(30)
+        );
     }
 }

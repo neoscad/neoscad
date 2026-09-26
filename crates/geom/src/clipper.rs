@@ -19,8 +19,8 @@
 //!   (`chamfer`) joins, with OpenSCAD's arc tolerance.
 
 use clipper2_rust::{
-    ClipType, Clipper64, ClipperOffset, EndType, FillRule, JoinType, Path64, Paths64, Point64, PolyTree64, is_positive,
-    poly_tree_to_paths64, simplify_path,
+    ClipType, Clipper64, ClipperOffset, EndType, FillRule, JoinType, Path64, Paths64, Point64,
+    PolyTree64, is_positive, poly_tree_to_paths64, simplify_path,
 };
 
 use crate::polygon2d::{Outline, Polygon2d};
@@ -63,7 +63,11 @@ pub fn to_paths(poly: &Polygon2d) -> Paths64 {
     poly.outlines
         .iter()
         .map(|o| {
-            let mut p: Path64 = o.vertices.iter().map(|v| Point64::new((v[0] * s).round() as i64, (v[1] * s).round() as i64)).collect();
+            let mut p: Path64 = o
+                .vertices
+                .iter()
+                .map(|v| Point64::new((v[0] * s).round() as i64, (v[1] * s).round() as i64))
+                .collect();
             if !poly.sanitized && !is_positive(&p) {
                 p.reverse();
             }
@@ -75,7 +79,10 @@ pub fn to_paths(poly: &Polygon2d) -> Paths64 {
 /// `toPolygon2d(PolyTree64)`: each node, then its children, depth-first.
 pub fn from_tree(tree: &PolyTree64) -> Polygon2d {
     let inv = 1.0 / scale();
-    let mut out = Polygon2d { outlines: Vec::new(), sanitized: true };
+    let mut out = Polygon2d {
+        outlines: Vec::new(),
+        sanitized: true,
+    };
     fn walk(tree: &PolyTree64, idx: usize, inv: f64, out: &mut Polygon2d) {
         let node = &tree.nodes[idx];
         let path = node.polygon();
@@ -85,7 +92,10 @@ pub fn from_tree(tree: &PolyTree64) -> Polygon2d {
         let cleaned = simplify_path(path, SIMPLIFY_EPSILON, true);
         if cleaned.len() >= 3 {
             out.outlines.push(Outline {
-                vertices: cleaned.iter().map(|p| [inv * p.x as f64, inv * p.y as f64]).collect(),
+                vertices: cleaned
+                    .iter()
+                    .map(|p| [inv * p.x as f64, inv * p.y as f64])
+                    .collect(),
                 positive,
             });
         }
@@ -110,7 +120,12 @@ fn sanitize_paths(paths: &Paths64) -> PolyTree64 {
     let mut c = clipper();
     c.add_subject(paths);
     let mut tree = PolyTree64::new();
-    c.execute_tree(ClipType::Union, FillRule::EvenOdd, &mut tree, &mut Paths64::new());
+    c.execute_tree(
+        ClipType::Union,
+        FillRule::EvenOdd,
+        &mut tree,
+        &mut Paths64::new(),
+    );
     tree
 }
 
@@ -127,7 +142,11 @@ pub fn apply(polys: &[Option<&Polygon2d>], op: Op2) -> Polygon2d {
         .map(|p| match p {
             Some(p) => {
                 let paths = to_paths(p);
-                if p.sanitized { paths } else { poly_tree_to_paths64(&sanitize_paths(&paths)) }
+                if p.sanitized {
+                    paths
+                } else {
+                    poly_tree_to_paths64(&sanitize_paths(&paths))
+                }
             }
             None => Paths64::new(),
         })
@@ -145,7 +164,12 @@ fn apply_paths(paths: &[Paths64], op: Op2) -> Polygon2d {
         for (i, clip) in paths.iter().enumerate().skip(1) {
             c.add_subject(&source);
             c.add_clip(clip);
-            c.execute_tree(op.clip_type(), FillRule::NonZero, &mut tree, &mut Paths64::new());
+            c.execute_tree(
+                op.clip_type(),
+                FillRule::NonZero,
+                &mut tree,
+                &mut Paths64::new(),
+            );
             if i != paths.len() - 1 {
                 source = poly_tree_to_paths64(&tree);
                 c.clear();
@@ -160,7 +184,12 @@ fn apply_paths(paths: &[Paths64], op: Op2) -> Polygon2d {
             c.add_clip(p);
         }
     }
-    c.execute_tree(op.clip_type(), FillRule::NonZero, &mut tree, &mut Paths64::new());
+    c.execute_tree(
+        op.clip_type(),
+        FillRule::NonZero,
+        &mut tree,
+        &mut Paths64::new(),
+    );
     from_tree(&tree)
 }
 
@@ -177,8 +206,17 @@ pub fn project_union(polys: &[Polygon2d]) -> Option<Polygon2d> {
         sum.add_subject(&result);
     }
     let mut tree = PolyTree64::new();
-    sum.execute_tree(ClipType::Union, FillRule::NonZero, &mut tree, &mut Paths64::new());
-    if tree.root().children().is_empty() { None } else { Some(from_tree(&tree)) }
+    sum.execute_tree(
+        ClipType::Union,
+        FillRule::NonZero,
+        &mut tree,
+        &mut Paths64::new(),
+    );
+    if tree.root().children().is_empty() {
+        None
+    } else {
+        Some(from_tree(&tree))
+    }
 }
 
 /// Offset join types, as `OffsetNode` selects them.
@@ -191,7 +229,13 @@ pub enum Join {
 
 /// `ClipperUtils::applyOffset`. `miter_limit` only applies to Miter (and
 /// Clipper's default of 2 otherwise); `arc_tolerance` only to Round.
-pub fn offset(poly: &Polygon2d, delta: f64, join: Join, miter_limit: f64, arc_tolerance: f64) -> Polygon2d {
+pub fn offset(
+    poly: &Polygon2d,
+    delta: f64,
+    join: Join,
+    miter_limit: f64,
+    arc_tolerance: f64,
+) -> Polygon2d {
     let s = scale();
     let (jt, ml, at) = match join {
         Join::Round => (JoinType::Round, 2.0, arc_tolerance * s),
@@ -213,7 +257,10 @@ pub fn fill(polys: &[Option<&Polygon2d>]) -> Polygon2d {
         .outlines
         .into_iter()
         .filter(|o| o.positive)
-        .map(|o| Polygon2d { outlines: vec![o], sanitized: true })
+        .map(|o| Polygon2d {
+            outlines: vec![o],
+            sanitized: true,
+        })
         .collect();
     let refs: Vec<Option<&Polygon2d>> = outer.iter().map(Some).collect();
     apply(&refs, Op2::Union)
@@ -232,7 +279,10 @@ mod tests {
             .iter()
             .map(|o| {
                 let v = &o.vertices;
-                (0..v.len()).map(|i| v[i][0] * v[(i + 1) % v.len()][1] - v[(i + 1) % v.len()][0] * v[i][1]).sum::<f64>() / 2.0
+                (0..v.len())
+                    .map(|i| v[i][0] * v[(i + 1) % v.len()][1] - v[(i + 1) % v.len()][0] * v[i][1])
+                    .sum::<f64>()
+                    / 2.0
             })
             .sum()
     }

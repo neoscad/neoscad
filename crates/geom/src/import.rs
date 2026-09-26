@@ -50,14 +50,23 @@ fn relative(opts: &RenderOptions, file: &str) -> String {
     if file.is_empty() || opts.doc_dir.as_os_str().is_empty() {
         return file.to_string();
     }
-    lang::diag::relative_path(Path::new(file), &opts.doc_dir).to_string_lossy().replace('\\', "/")
+    lang::diag::relative_path(Path::new(file), &opts.doc_dir)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 /// `optionally_center` for a mesh: move the centre of the bounding box of
 /// all its vertices (used or not) to the origin.
 fn center_mesh(ps: &mut PolySet) {
-    let Some(first) = ps.vertices.first().copied() else { return };
-    let (lo, hi) = ps.vertices.iter().fold((first, first), |(lo, hi), v| (std::array::from_fn(|k| lo[k].min(v[k])), std::array::from_fn(|k| hi[k].max(v[k]))));
+    let Some(first) = ps.vertices.first().copied() else {
+        return;
+    };
+    let (lo, hi) = ps.vertices.iter().fold((first, first), |(lo, hi), v| {
+        (
+            std::array::from_fn(|k| lo[k].min(v[k])),
+            std::array::from_fn(|k| hi[k].max(v[k])),
+        )
+    });
     let c: [f64; 3] = std::array::from_fn(|k| (lo[k] + hi[k]) / 2.0);
     for v in &mut ps.vertices {
         for k in 0..3 {
@@ -81,10 +90,19 @@ fn center_outlines(p: &mut Polygon2d) {
 /// the meshes of a multi-object 3MF with the Manifold backend and returns
 /// the result as a mesh. Never fails: problems are messages and an empty
 /// result.
-pub(crate) fn import(opts: &RenderOptions, node: &Import, line: u32, union: &dyn Fn(Vec<PolySet>) -> PolySet) -> (Geometry, Vec<Message>) {
+pub(crate) fn import(
+    opts: &RenderOptions,
+    node: &Import,
+    line: u32,
+    union: &dyn Fn(Vec<PolySet>) -> PolySet,
+) -> (Geometry, Vec<Message>) {
     let mut msgs = Vec::new();
     let file = node.file.as_str();
-    let cant_open = |msgs: &mut Vec<Message>| msgs.push(Message::warning(format!("Can't open import file '{file}', import() at line {line}")));
+    let cant_open = |msgs: &mut Vec<Message>| {
+        msgs.push(Message::warning(format!(
+            "Can't open import file '{file}', import() at line {line}"
+        )))
+    };
     let mesh = |ps: PolySet| {
         let mut ps = ps;
         if node.center {
@@ -107,9 +125,17 @@ pub(crate) fn import(opts: &RenderOptions, node: &Import, line: u32, union: &dyn
             }
             Some(b) => mesh(PolySet::from_mesh(io::obj::read(&b, file, &mut msgs))),
         },
-        "off" => mesh(PolySet::from_mesh(io::off::read(read(opts, file).as_deref(), file, &mut msgs))),
+        "off" => mesh(PolySet::from_mesh(io::off::read(
+            read(opts, file).as_deref(),
+            file,
+            &mut msgs,
+        ))),
         "3mf" => {
-            let meshes: Vec<PolySet> = io::threemf::read(read(opts, file).as_deref(), file, line, &mut msgs).into_iter().map(PolySet::from_mesh).collect();
+            let meshes: Vec<PolySet> =
+                io::threemf::read(read(opts, file).as_deref(), file, line, &mut msgs)
+                    .into_iter()
+                    .map(PolySet::from_mesh)
+                    .collect();
             let ps = match meshes.len() {
                 0 => PolySet::default(),
                 1 => meshes.into_iter().next().unwrap_or_default(),
@@ -118,24 +144,60 @@ pub(crate) fn import(opts: &RenderOptions, node: &Import, line: u32, union: &dyn
             mesh(ps)
         }
         "svg" => {
-            let svg_opts = io::svg::Options { id: node.id.as_deref(), layer: node.layer.as_deref(), dpi: node.dpi, center: node.center };
-            let shapes = io::svg::read(read(opts, file).as_deref(), file, line, &svg_opts, &Curves(&node.disc), &mut msgs);
-            let polys: Vec<Polygon2d> = shapes.into_iter().map(|outlines| Polygon2d { outlines, sanitized: false }).collect();
+            let svg_opts = io::svg::Options {
+                id: node.id.as_deref(),
+                layer: node.layer.as_deref(),
+                dpi: node.dpi,
+                center: node.center,
+            };
+            let shapes = io::svg::read(
+                read(opts, file).as_deref(),
+                file,
+                line,
+                &svg_opts,
+                &Curves(&node.disc),
+                &mut msgs,
+            );
+            let polys: Vec<Polygon2d> = shapes
+                .into_iter()
+                .map(|outlines| Polygon2d {
+                    outlines,
+                    sanitized: false,
+                })
+                .collect();
             let refs: Vec<Option<&Polygon2d>> = polys.iter().map(Some).collect();
-            Geometry::Polygon2d(std::sync::Arc::new(clipper::apply(&refs, clipper::Op2::Union)))
+            Geometry::Polygon2d(std::sync::Arc::new(clipper::apply(
+                &refs,
+                clipper::Op2::Union,
+            )))
         }
         "dxf" => {
             let display = relative(opts, file);
-            let req = io::dxf::Request { file, display: &display, layer: node.layer.as_deref().unwrap_or(""), origin: node.origin, scale: node.scale };
+            let req = io::dxf::Request {
+                file,
+                display: &display,
+                layer: node.layer.as_deref().unwrap_or(""),
+                origin: node.origin,
+                scale: node.scale,
+            };
             let bytes = read(opts, file);
             let mut warnings = Vec::new();
-            let data = io::dxf::read(bytes.as_deref(), &req, &Curves(&node.disc), &mut |w| warnings.push(w));
+            let data = io::dxf::read(bytes.as_deref(), &req, &Curves(&node.disc), &mut |w| {
+                warnings.push(w)
+            });
             msgs.extend(warnings.into_iter().map(Message::warning));
-            let mut p = Polygon2d { outlines: data.to_outlines(), sanitized: false };
+            let mut p = Polygon2d {
+                outlines: data.to_outlines(),
+                sanitized: false,
+            };
             if node.center {
                 center_outlines(&mut p);
             }
-            Geometry::Polygon2d(std::sync::Arc::new(if p.is_empty() { p } else { clipper::sanitize(&p) }))
+            Geometry::Polygon2d(std::sync::Arc::new(if p.is_empty() {
+                p
+            } else {
+                clipper::sanitize(&p)
+            }))
         }
         _ => {
             msgs.push(Message::error(format!(
@@ -149,7 +211,12 @@ pub(crate) fn import(opts: &RenderOptions, node: &Import, line: u32, union: &dyn
 }
 
 /// `SurfaceNode::createGeometry`.
-pub(crate) fn surface(opts: &RenderOptions, file: &str, center: bool, invert: bool) -> (Geometry, Vec<Message>) {
+pub(crate) fn surface(
+    opts: &RenderOptions,
+    file: &str,
+    center: bool,
+    invert: bool,
+) -> (Geometry, Vec<Message>) {
     let mut msgs = Vec::new();
     let h = io::surface::read(read(opts, file).as_deref(), file, invert, &mut msgs);
     let ps = PolySet::from_mesh(io::surface::mesh(&h, center));

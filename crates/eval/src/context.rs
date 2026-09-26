@@ -84,7 +84,13 @@ impl Vars {
         if let Some(m) = &mut self.index {
             m.insert(s, self.items.len() as u32 - 1);
         } else if self.items.len() > INDEX_THRESHOLD {
-            self.index = Some(self.items.iter().enumerate().map(|(i, (k, _))| (*k, i as u32)).collect());
+            self.index = Some(
+                self.items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (k, _))| (*k, i as u32))
+                    .collect(),
+            );
         }
         true
     }
@@ -119,7 +125,11 @@ pub(crate) struct Ctx {
 
 impl Ctx {
     pub fn new(parent: Option<Rc<Ctx>>, kind: CtxKind) -> Rc<Ctx> {
-        Rc::new(Ctx { parent: RefCell::new(parent), kind, vars: RefCell::new(Vars::default()) })
+        Rc::new(Ctx {
+            parent: RefCell::new(parent),
+            kind,
+            vars: RefCell::new(Vars::default()),
+        })
     }
 
     pub fn child(parent: &Rc<Ctx>) -> Rc<Ctx> {

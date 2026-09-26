@@ -81,13 +81,25 @@ fn alignment(a: Align, page_mm: f64, scale: f64, viewbox: f64) -> f64 {
 /// Read an SVG file (`None` when it could not be opened) into one list of
 /// outlines per shape, in millimetres. `file` is the path as messages
 /// print it, `line` the `import()` call's line.
-pub fn read(bytes: Option<&[u8]>, file: &str, line: u32, opts: &Options<'_>, curves: &dyn Curves, msgs: &mut Vec<Message>) -> Vec<Vec<Outline>> {
+pub fn read(
+    bytes: Option<&[u8]>,
+    file: &str,
+    line: u32,
+    opts: &Options<'_>,
+    curves: &dyn Curves,
+    msgs: &mut Vec<Message>,
+) -> Vec<Vec<Outline>> {
     let Some(bytes) = bytes else {
-        msgs.push(Message::error(format!("Can't open file '{file}', import() at line {line}")));
+        msgs.push(Message::error(format!(
+            "Can't open file '{file}', import() at line {line}"
+        )));
         return Vec::new();
     };
     let selector = match (opts.id, opts.layer) {
-        (Some(id), layer) => Selector::Id { id: id.to_string(), layer: layer.map(str::to_string) },
+        (Some(id), layer) => Selector::Id {
+            id: id.to_string(),
+            layer: layer.map(str::to_string),
+        },
         (None, Some(layer)) => Selector::Layer(layer.to_string()),
         (None, None) => Selector::Root,
     };
@@ -95,7 +107,9 @@ pub fn read(bytes: Option<&[u8]>, file: &str, line: u32, opts: &Options<'_>, cur
     let doc = match libsvg::read(&text, &selector, curves) {
         Ok(d) => d,
         Err(libsvg::ParseError) => {
-            msgs.push(Message::error(format!("Error parsing file '{file}', import() at line {line}")));
+            msgs.push(Message::error(format!(
+                "Error parsing file '{file}', import() at line {line}"
+            )));
             return Vec::new();
         }
     };
@@ -110,10 +124,16 @@ pub fn read(bytes: Option<&[u8]>, file: &str, line: u32, opts: &Options<'_>, cur
         match_args.push_str(&format!("layer = \"{layer}\""));
     }
     if !match_args.is_empty() && doc.matches == 0 {
-        msgs.push(Message::warning(format!("import() filter {match_args} did not match anything")).at_call());
+        msgs.push(
+            Message::warning(format!(
+                "import() filter {match_args} did not match anything"
+            ))
+            .at_call(),
+        );
     }
 
-    let (mut height_mm, mut scale, mut align, mut viewbox) = (0.0, [1.0, 1.0], [0.0, 0.0], [0.0, 0.0]);
+    let (mut height_mm, mut scale, mut align, mut viewbox) =
+        (0.0, [1.0, 1.0], [0.0, 0.0], [0.0, 0.0]);
     let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
     for item in &doc.items {
         if let Some(page) = &item.page {
@@ -121,8 +141,16 @@ pub fn read(bytes: Option<&[u8]>, file: &str, line: u32, opts: &Options<'_>, cur
             let width_mm = to_mm(page.width, vb.width, vb.valid, opts.dpi);
             height_mm = to_mm(page.height, vb.height, vb.valid, opts.dpi);
             if vb.valid {
-                let px = if page.width.unit == Unit::Percent { page.width.number / 100.0 } else { 1.0 };
-                let py = if page.height.unit == Unit::Percent { page.height.number / 100.0 } else { 1.0 };
+                let px = if page.width.unit == Unit::Percent {
+                    page.width.number / 100.0
+                } else {
+                    1.0
+                };
+                let py = if page.height.unit == Unit::Percent {
+                    page.height.number / 100.0
+                } else {
+                    1.0
+                };
                 viewbox = [px * vb.x, py * vb.y];
                 scale = [width_mm / vb.width, height_mm / vb.height];
                 let a = page.alignment;
@@ -130,14 +158,21 @@ pub fn read(bytes: Option<&[u8]>, file: &str, line: u32, opts: &Options<'_>, cur
                     // `meet` fits the page (the smaller scale), `slice`
                     // fills it (the larger).
                     let s = if a.meet {
-                        if scale[0] < scale[1] { scale[0] } else { scale[1] }
+                        if scale[0] < scale[1] {
+                            scale[0]
+                        } else {
+                            scale[1]
+                        }
                     } else if scale[0] > scale[1] {
                         scale[0]
                     } else {
                         scale[1]
                     };
                     scale = [s, s];
-                    align = [alignment(a.x, width_mm, s, vb.width), alignment(a.y, height_mm, s, vb.height)];
+                    align = [
+                        alignment(a.x, width_mm, s, vb.width),
+                        alignment(a.y, height_mm, s, vb.height),
+                    ];
                 }
             }
         }
@@ -153,16 +188,37 @@ pub fn read(bytes: Option<&[u8]>, file: &str, line: u32, opts: &Options<'_>, cur
     }
     // Eigen's empty box has min = DBL_MAX and max = lowest, so its centre
     // is 0.
-    let centre = |k: usize| if lo[k] > hi[k] { 0.0 } else { (lo[k] + hi[k]) / 2.0 };
+    let centre = |k: usize| {
+        if lo[k] > hi[k] {
+            0.0
+        } else {
+            (lo[k] + hi[k]) / 2.0
+        }
+    };
     let cx = if opts.center { centre(0) } else { -align[0] };
-    let cy = if opts.center { centre(1) } else { height_mm - align[1] };
+    let cy = if opts.center {
+        centre(1)
+    } else {
+        height_mm - align[1]
+    };
     doc.items
         .iter()
         .filter(|item| !item.excluded)
         .map(|item| {
             item.paths
                 .iter()
-                .map(|p| Outline::new(p.iter().map(|v| [scale[0] * (-viewbox[0] + v[0]) - cx, scale[1] * (-viewbox[1] - v[1]) + cy]).collect()))
+                .map(|p| {
+                    Outline::new(
+                        p.iter()
+                            .map(|v| {
+                                [
+                                    scale[0] * (-viewbox[0] + v[0]) - cx,
+                                    scale[1] * (-viewbox[1] - v[1]) + cy,
+                                ]
+                            })
+                            .collect(),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .filter(|o: &Vec<Outline>| !o.is_empty())
@@ -178,7 +234,12 @@ pub fn write(outlines: &[Outline]) -> Vec<u8> {
     let pad = stroke_width / 2.0;
     let mut it = outlines.iter().flat_map(|o| o.vertices.iter());
     let (lo, hi) = match it.next() {
-        Some(&first) => it.fold((first, first), |(lo, hi), v| ([lo[0].min(v[0]), lo[1].min(v[1])], [hi[0].max(v[0]), hi[1].max(v[1])])),
+        Some(&first) => it.fold((first, first), |(lo, hi), v| {
+            (
+                [lo[0].min(v[0]), lo[1].min(v[1])],
+                [hi[0].max(v[0]), hi[1].max(v[1])],
+            )
+        }),
         None => ([f64::MAX; 2], [-f64::MAX; 2]),
     };
     let minx = (lo[0] - pad).floor() as i32;
@@ -195,7 +256,9 @@ pub fn write(outlines: &[Outline]) -> Vec<u8> {
     out.push_str("<title>OpenSCAD Model</title>\n");
     out.push_str("<path d=\"\n");
     for o in outlines {
-        let Some(p0) = o.vertices.first() else { continue };
+        let Some(p0) = o.vertices.first() else {
+            continue;
+        };
         out.push_str(&format!("M {},{}", fmt_g(p0[0]), fmt_g(-p0[1])));
         for (idx, v) in o.vertices.iter().enumerate().skip(1) {
             out.push_str(&format!(" L {},{}", fmt_g(v[0]), fmt_g(-v[1])));
@@ -205,7 +268,10 @@ pub fn write(outlines: &[Outline]) -> Vec<u8> {
         }
         out.push_str(" z\n");
     }
-    out.push_str(&format!("\" stroke=\"black\" fill=\"none\" stroke-width=\"{}\"/>\n", fmt_g(stroke_width)));
+    out.push_str(&format!(
+        "\" stroke=\"black\" fill=\"none\" stroke-width=\"{}\"/>\n",
+        fmt_g(stroke_width)
+    ));
     out.push_str("</svg>\n");
     out.into_bytes()
 }
@@ -218,7 +284,10 @@ mod tests {
     impl Curves for Fn0 {
         fn circular_segments(&self, r: f64, angle: f64) -> Option<i32> {
             // `$fn = 0, $fa = 12, $fs = 2`.
-            let n = (360.0f64 / 12.0).min(r * 2.0 * std::f64::consts::PI / 2.0).max(5.0).ceil();
+            let n = (360.0f64 / 12.0)
+                .min(r * 2.0 * std::f64::consts::PI / 2.0)
+                .max(5.0)
+                .ceil();
             Some(((n * angle.abs() / 360.0).ceil() as i32).max(1))
         }
         fn path_segments(&self) -> i32 {
@@ -232,14 +301,31 @@ mod tests {
         (out, msgs)
     }
 
-    const DEFAULT: Options<'static> = Options { id: None, layer: None, dpi: 72.0, center: false };
+    const DEFAULT: Options<'static> = Options {
+        id: None,
+        layer: None,
+        dpi: 72.0,
+        center: false,
+    };
 
     #[test]
     fn rect_in_millimetres_is_flipped() {
-        let (out, msgs) = read_str(r#"<svg width="10mm" height="20mm" viewBox="0 0 10 20"><rect x="1" y="2" width="3" height="4"/></svg>"#, &DEFAULT);
+        let (out, msgs) = read_str(
+            r#"<svg width="10mm" height="20mm" viewBox="0 0 10 20"><rect x="1" y="2" width="3" height="4"/></svg>"#,
+            &DEFAULT,
+        );
         assert!(msgs.is_empty());
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0][0].vertices, vec![[1.0, 18.0], [4.0, 18.0], [4.0, 14.0], [1.0, 14.0], [1.0, 18.0]]);
+        assert_eq!(
+            out[0][0].vertices,
+            vec![
+                [1.0, 18.0],
+                [4.0, 18.0],
+                [4.0, 14.0],
+                [1.0, 14.0],
+                [1.0, 18.0]
+            ]
+        );
     }
 
     #[test]
@@ -250,21 +336,34 @@ mod tests {
 
     #[test]
     fn selection_and_parse_errors() {
-        let opts = Options { id: Some("nope"), ..DEFAULT };
+        let opts = Options {
+            id: Some("nope"),
+            ..DEFAULT
+        };
         let (out, msgs) = read_str(r#"<svg><rect id="a" width="1" height="1"/></svg>"#, &opts);
         assert!(out.is_empty());
-        assert_eq!(msgs[0].text, "import() filter id = \"nope\" did not match anything");
+        assert_eq!(
+            msgs[0].text,
+            "import() filter id = \"nope\" did not match anything"
+        );
         assert!(msgs[0].located);
         let (_, msgs) = read_str("hello world", &DEFAULT);
-        assert_eq!(msgs[0].text, "Error parsing file 'f.svg', import() at line 1");
+        assert_eq!(
+            msgs[0].text,
+            "Error parsing file 'f.svg', import() at line 1"
+        );
     }
 
     #[test]
     fn open_paths_are_stroked_closed_ones_filled() {
-        let (out, _) = read_str(r#"<svg><path d="M 0 0 L 10 0" stroke-width="2"/></svg>"#, &DEFAULT);
+        let (out, _) = read_str(
+            r#"<svg><path d="M 0 0 L 10 0" stroke-width="2"/></svg>"#,
+            &DEFAULT,
+        );
         let v = &out[0][0].vertices;
         let ys: Vec<f64> = v.iter().map(|p| p[1]).collect();
-        let span = ys.iter().cloned().fold(f64::MIN, f64::max) - ys.iter().cloned().fold(f64::MAX, f64::min);
+        let span = ys.iter().cloned().fold(f64::MIN, f64::max)
+            - ys.iter().cloned().fold(f64::MAX, f64::min);
         // Without a viewBox, user units are millimetres.
         assert!((span - 2.0).abs() < 1e-6, "{span}");
         let (out, _) = read_str(r#"<svg><path d="M 0 0 L 10 0 L 0 10 z"/></svg>"#, &DEFAULT);

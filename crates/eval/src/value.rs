@@ -130,12 +130,16 @@ impl Value {
 
     /// `Value::getUnsignedInt`.
     pub fn as_unsigned(&self) -> Option<u32> {
-        self.as_finite().filter(|&v| (0.0..=f64::from(u32::MAX)).contains(&v)).map(|v| v as u32)
+        self.as_finite()
+            .filter(|&v| (0.0..=f64::from(u32::MAX)).contains(&v))
+            .map(|v| v as u32)
     }
 
     /// `Value::getPositiveInt`.
     pub fn as_positive_int(&self) -> Option<u32> {
-        self.as_finite().filter(|&v| (1.0..=f64::from(u32::MAX)).contains(&v)).map(|v| v as u32)
+        self.as_finite()
+            .filter(|&v| (1.0..=f64::from(u32::MAX)).contains(&v))
+            .map(|v| v as u32)
     }
 
     /// `getVec2`: a two-element vector of numbers (finite ones when
@@ -176,7 +180,9 @@ impl Value {
     /// the leading numbers even when a later element fails, and callers
     /// that ignore the failure see them.
     pub fn get_vec3(&self, out: &mut [f64; 3]) -> bool {
-        let Some(v) = self.as_vector() else { return false };
+        let Some(v) = self.as_vector() else {
+            return false;
+        };
         v.len() == 3 && v.iter().zip(out.iter_mut()).all(|(e, o)| e.get_f64(o))
     }
 
@@ -184,7 +190,9 @@ impl Value {
     /// defaulted. A two-element vector succeeds even when its elements are
     /// not numbers; `x` and `y` are then left untouched.
     pub fn get_vec3_or2(&self, out: &mut [f64; 3], default: f64) -> bool {
-        let Some(v) = self.as_vector() else { return false };
+        let Some(v) = self.as_vector() else {
+            return false;
+        };
         if v.len() == 2 {
             let (mut x, mut y) = (out[0], out[1]);
             if self.get_vec2(&mut x, &mut y, false) {
@@ -234,11 +242,17 @@ struct StrData {
 
 impl Str {
     pub fn new(bytes: &[u8]) -> Self {
-        Str(Rc::new(StrData { chars: Cell::new(usize::MAX), bytes: bytes.into() }))
+        Str(Rc::new(StrData {
+            chars: Cell::new(usize::MAX),
+            bytes: bytes.into(),
+        }))
     }
 
     pub fn from_vec(bytes: Vec<u8>) -> Self {
-        Str(Rc::new(StrData { chars: Cell::new(usize::MAX), bytes: bytes.into_boxed_slice() }))
+        Str(Rc::new(StrData {
+            chars: Cell::new(usize::MAX),
+            bytes: bytes.into_boxed_slice(),
+        }))
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -353,17 +367,28 @@ impl Range {
         // nextafter compensates for a quotient just below a whole number.
         let q = next_after((e - b) / s, f64::from(u32::MAX));
         let steps = q as u32;
-        if steps == u32::MAX { u32::MAX } else { steps + 1 }
+        if steps == u32::MAX {
+            u32::MAX
+        } else {
+            steps + 1
+        }
     }
 
     /// The values, as `RangeType::iterator` produces them.
     pub fn iter(&self) -> impl Iterator<Item = f64> + '_ {
-        let n = if self.begin.is_nan() || self.end.is_nan() || self.step.is_nan() || self.step == 0.0 {
-            0
-        } else {
-            self.num_values()
-        };
-        (0..n).map(move |i| if i == 0 { self.begin } else { self.begin + self.step * f64::from(i) })
+        let n =
+            if self.begin.is_nan() || self.end.is_nan() || self.step.is_nan() || self.step == 0.0 {
+                0
+            } else {
+                self.num_values()
+            };
+        (0..n).map(move |i| {
+            if i == 0 {
+                self.begin
+            } else {
+                self.begin + self.step * f64::from(i)
+            }
+        })
     }
 
     fn cmp_key(&self) -> (f64, f64, u32) {
@@ -393,7 +418,8 @@ impl Range {
         if n2 == 0 {
             return false;
         }
-        b1 < b2 || (b1 == b2 && (s1 < s2 || (s1 == s2 && if or_equal { n1 <= n2 } else { n1 < n2 })))
+        b1 < b2
+            || (b1 == b2 && (s1 < s2 || (s1 == s2 && if or_equal { n1 <= n2 } else { n1 < n2 })))
     }
 
     /// `RangeType::operator>` (`or_equal`: `>=`).
@@ -406,7 +432,8 @@ impl Range {
         if n1 == 0 {
             return false;
         }
-        b1 > b2 || (b1 == b2 && (s1 > s2 || (s1 == s2 && if or_equal { n1 >= n2 } else { n1 > n2 })))
+        b1 > b2
+            || (b1 == b2 && (s1 > s2 || (s1 == s2 && if or_equal { n1 >= n2 } else { n1 > n2 })))
     }
 }
 
@@ -447,7 +474,11 @@ mod tests {
 
     #[test]
     fn range_counts_like_openscad() {
-        let r = |b, s, e| Range { begin: b, step: s, end: e };
+        let r = |b, s, e| Range {
+            begin: b,
+            step: s,
+            end: e,
+        };
         assert_eq!(r(0.0, 1.0, 5.0).num_values(), 6);
         assert_eq!(r(0.0, 0.1, 1.0).num_values(), 11);
         assert_eq!(r(5.0, 1.0, 0.0).num_values(), 0);
@@ -455,7 +486,10 @@ mod tests {
         assert_eq!(r(0.0, 0.0, 1.0).num_values(), u32::MAX);
         assert_eq!(r(1.0, 0.0, 1.0).num_values(), 1);
         assert_eq!(r(0.0, 1.0, f64::INFINITY).num_values(), u32::MAX);
-        assert_eq!(r(0.0, 1.0, 5.0).iter().collect::<Vec<_>>(), vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(
+            r(0.0, 1.0, 5.0).iter().collect::<Vec<_>>(),
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+        );
         assert_eq!(r(0.0, 0.0, 1.0).iter().count(), 0);
         assert!(r(1.0, 1.0, 0.0).equals(&r(2.0, 1.0, 0.0)));
     }

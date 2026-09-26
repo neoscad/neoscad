@@ -21,7 +21,12 @@ pub struct Mesh {
 
 impl Mesh {
     pub fn as_ref(&self) -> MeshRef<'_> {
-        MeshRef { vertices: &self.vertices, faces: &self.faces, colors: &self.colors, color_indices: &self.color_indices }
+        MeshRef {
+            vertices: &self.vertices,
+            faces: &self.faces,
+            colors: &self.colors,
+            color_indices: &self.color_indices,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -43,7 +48,11 @@ impl MeshRef<'_> {
     /// The colour of face `i`, if it has one.
     pub fn face_color(&self, i: usize) -> Option<&Color> {
         let ci = *self.color_indices.get(i)?;
-        if ci < 0 { None } else { self.colors.get(ci as usize) }
+        if ci < 0 {
+            None
+        } else {
+            self.colors.get(ci as usize)
+        }
     }
 }
 
@@ -87,7 +96,9 @@ impl MeshBuilder {
     /// `addVertex(int)`: consecutive duplicates (and a repeat of the first
     /// vertex) are skipped.
     pub fn add_index(&mut self, i: u32) {
-        if self.current.is_empty() || (Some(&i) != self.current.last() && Some(&i) != self.current.first()) {
+        if self.current.is_empty()
+            || (Some(&i) != self.current.last() && Some(&i) != self.current.first())
+        {
             self.current.push(i);
         }
     }
@@ -130,7 +141,12 @@ impl MeshBuilder {
 
     pub fn build(mut self) -> Mesh {
         self.end_polygon(None);
-        Mesh { vertices: self.vertices, faces: self.faces, colors: self.colors, color_indices: self.color_indices }
+        Mesh {
+            vertices: self.vertices,
+            faces: self.faces,
+            colors: self.colors,
+            color_indices: self.color_indices,
+        }
     }
 }
 

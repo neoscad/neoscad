@@ -19,7 +19,14 @@ fn run_with(src: &str, opts: &Options) -> (Vec<String>, eval::Evaluation) {
     assert!(!program.has_syntax_errors(), "syntax error in test program");
     let mut out = LineCollector::default();
     let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
-        eval::evaluate(&program, &[], &[], PathBuf::from("/nonexistent"), opts, &mut out)
+        eval::evaluate(
+            &program,
+            &[],
+            &[],
+            PathBuf::from("/nonexistent"),
+            opts,
+            &mut out,
+        )
     });
     (out.lines, ev)
 }
@@ -35,7 +42,11 @@ struct LineCollector {
 
 impl eval::Output for LineCollector {
     fn message(&mut self, m: &eval::Message<'_>) {
-        let mut s = format!("{}: {}", m.diag.severity.openscad_label(), String::from_utf8_lossy(m.text));
+        let mut s = format!(
+            "{}: {}",
+            m.diag.severity.openscad_label(),
+            String::from_utf8_lossy(m.text)
+        );
         if m.diag.span.is_some() {
             s.push_str(&format!(" @{}", m.diag.line));
         }
@@ -53,7 +64,10 @@ fn numbers_print_like_openscad() {
 
 #[test]
 fn strings_print_raw_in_echo_and_quoted_in_vectors() {
-    assert_eq!(run(r#"s = "a\tb\"c"; echo(s, [s], str(s, 1));"#), ["ECHO: \"a\tb\"c\", [\"a\tb\"c\"], \"a\tb\"c1\""]);
+    assert_eq!(
+        run(r#"s = "a\tb\"c"; echo(s, [s], str(s, 1));"#),
+        ["ECHO: \"a\tb\"c\", [\"a\tb\"c\"], \"a\tb\"c1\""]
+    );
 }
 
 #[test]
@@ -80,7 +94,9 @@ fn element_wise_undef_is_silent() {
 #[test]
 fn matrix_products() {
     assert_eq!(
-        run("echo([1, 2, 3] * [[1, 0], [0, 1], [1, 1]], [[1, 2], [3, 4]] * [1, 1], [1, 2] * [3, 4]);"),
+        run(
+            "echo([1, 2, 3] * [[1, 0], [0, 1], [1, 1]], [[1, 2], [3, 4]] * [1, 1], [1, 2] * [3, 4]);"
+        ),
         ["ECHO: [4, 5], [3, 7], 11"]
     );
 }
@@ -88,14 +104,19 @@ fn matrix_products() {
 #[test]
 fn function_literals_compare_by_identity_and_print_their_source() {
     assert_eq!(
-        run("f = function(x, y = 2) x + y; g = f; echo(f == g, f == (function(x, y = 2) x + y), f);"),
+        run(
+            "f = function(x, y = 2) x + y; g = f; echo(f == g, f == (function(x, y = 2) x + y), f);"
+        ),
         ["ECHO: true, false, function(x, y = 2) (x + y)"]
     );
 }
 
 #[test]
 fn closures_capture_their_scope() {
-    assert_eq!(run("function adder(n) = function(x) x + n; a = adder(3); echo(a(4));"), ["ECHO: 7"]);
+    assert_eq!(
+        run("function adder(n) = function(x) x + n; a = adder(3); echo(a(4));"),
+        ["ECHO: 7"]
+    );
 }
 
 #[test]
@@ -106,7 +127,8 @@ fn special_variables_are_dynamically_scoped() {
 
 #[test]
 fn children_count_is_lexical() {
-    let src = "module lex() { echo($children); kid(); }\nmodule kid() echo($children);\nlex() cube();";
+    let src =
+        "module lex() { echo($children); kid(); }\nmodule kid() echo($children);\nlex() cube();";
     assert_eq!(run(src), ["ECHO: 1", "ECHO: 0"]);
 }
 
@@ -132,7 +154,10 @@ fn argument_binding_warnings() {
 fn list_comprehensions() {
     let src = "echo([for (i = [0 : 3]) if (i % 2) i else -i], [each [1, 2], each \"ab\", each undef],\n\
                [for (i = 0, j = 1; i < 4; i = i + 1, j = j * 2) j], [for (a = [1, 2]) for (b = [3, 4]) a * b]);";
-    assert_eq!(run(src), ["ECHO: [0, 1, -2, 3], [1, 2, \"a\", \"b\"], [1, 2, 4, 8], [3, 4, 6, 8]"]);
+    assert_eq!(
+        run(src),
+        ["ECHO: [0, 1, -2, 3], [1, 2, \"a\", \"b\"], [1, 2, 4, 8], [3, 4, 6, 8]"]
+    );
 }
 
 #[test]
@@ -143,18 +168,34 @@ fn tail_recursion_runs_in_constant_stack() {
 
 #[test]
 fn infinite_recursion_is_an_error_not_a_crash() {
-    let (lines, ev) = run_with("function f(n) = 1 + f(n + 1);\necho(f(0));", &Options::default());
+    let (lines, ev) = run_with(
+        "function f(n) = 1 + f(n + 1);\necho(f(0));",
+        &Options::default(),
+    );
     assert!(ev.aborted);
-    assert_eq!(lines[0], "ERROR: Recursion detected calling function 'f' @1");
-    assert_eq!(lines.last().map(String::as_str), Some("TRACE: called by 'echo' @2"));
+    assert_eq!(
+        lines[0],
+        "ERROR: Recursion detected calling function 'f' @1"
+    );
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("TRACE: called by 'echo' @2")
+    );
     let (lines, _) = run_with("module m() m();\nm();", &Options::default());
     assert_eq!(lines[0], "ERROR: Recursion detected calling module 'm' @1");
-    assert!(lines.iter().any(|l| l.starts_with("TRACE:   *** Excluding")));
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("TRACE:   *** Excluding"))
+    );
 }
 
 #[test]
 fn tail_call_limit() {
-    let (lines, _) = run_with("function crash() = crash();\necho(crash());", &Options::default());
+    let (lines, _) = run_with(
+        "function crash() = crash();\necho(crash());",
+        &Options::default(),
+    );
     assert_eq!(
         lines,
         [
@@ -167,7 +208,10 @@ fn tail_call_limit() {
 
 #[test]
 fn assertions() {
-    let (lines, ev) = run_with("function g(n) = assert(n < 2, str(\"big \", n)) n;\necho(g(1));\necho(g(5));", &Options::default());
+    let (lines, ev) = run_with(
+        "function g(n) = assert(n < 2, str(\"big \", n)) n;\necho(g(1));\necho(g(5));",
+        &Options::default(),
+    );
     assert!(ev.aborted);
     assert_eq!(
         lines,
@@ -183,16 +227,19 @@ fn assertions() {
 #[test]
 fn seeded_rands_match_openscad() {
     // rands.scad: echo(rands(1, 2, 3, 4.1)) prints [1.96977, 1.55343, 1.99383].
-    assert_eq!(run("echo(rands(1, 2, 3, 4.1), rands(1, 2, 3, -4.1));"), [
-        "ECHO: [1.96977, 1.55343, 1.99383], [1.19758, 1.92189, 1.67397]"
-    ]);
+    assert_eq!(
+        run("echo(rands(1, 2, 3, 4.1), rands(1, 2, 3, -4.1));"),
+        ["ECHO: [1.96977, 1.55343, 1.99383], [1.19758, 1.92189, 1.67397]"]
+    );
 }
 
 #[test]
 fn builtin_edge_cases() {
     assert_eq!(
-        run("echo(sin(30), cos(90), tan(45), asin(0.5), atan2(1, 1), chr([65, 66], [67 : 68]), ord(\"\u{e4}\"),\n\
-             len(\"a\u{e4}\"), search(\"a\", \"abca\", 0), lookup(1.5, [[1, 10], [2, 20]]), norm([3, 4]), cross([1, 0, 0], [0, 1, 0]));"),
+        run(
+            "echo(sin(30), cos(90), tan(45), asin(0.5), atan2(1, 1), chr([65, 66], [67 : 68]), ord(\"\u{e4}\"),\n\
+             len(\"a\u{e4}\"), search(\"a\", \"abca\", 0), lookup(1.5, [[1, 10], [2, 20]]), norm([3, 4]), cross([1, 0, 0], [0, 1, 0]));"
+        ),
         ["ECHO: 0.5, 0, 1, 30, 45, \"ABCD\", 228, 2, [[0, 3]], 15, 5, [0, 0, 1]"]
     );
     assert_eq!(
@@ -233,22 +280,39 @@ fn repeated_messages_are_suppressed_by_the_console() {
 #[test]
 fn interrupt_stops_evaluation() {
     let flag = Arc::new(AtomicBool::new(true));
-    let opts = Options { interrupt: Some(flag), ..Default::default() };
-    let (lines, ev) = run_with("function f(n) = n == 0 ? 0 : f(n - 1);\necho(f(10));\necho(\"after\");", &opts);
+    let opts = Options {
+        interrupt: Some(flag),
+        ..Default::default()
+    };
+    let (lines, ev) = run_with(
+        "function f(n) = n == 0 ? 0 : f(n - 1);\necho(f(10));\necho(\"after\");",
+        &opts,
+    );
     assert!(ev.interrupted);
     assert!(lines.is_empty(), "{lines:?}");
 }
 
 #[test]
 fn node_tree_carries_parameters() {
-    let (_, ev) = run_with("translate([1, 2]) cube(3, center = true);\nsphere(d = 4, $fn = 12);", &Options::default());
+    let (_, ev) = run_with(
+        "translate([1, 2]) cube(3, center = true);\nsphere(d = 4, $fn = 12);",
+        &Options::default(),
+    );
     let kids = &ev.root.children;
     assert_eq!(kids.len(), 2);
     match &kids[0].kind {
-        eval::node::NodeKind::Transform { matrix, .. } => assert_eq!([matrix[0][3], matrix[1][3], matrix[2][3]], [1.0, 2.0, 0.0]),
+        eval::node::NodeKind::Transform { matrix, .. } => {
+            assert_eq!([matrix[0][3], matrix[1][3], matrix[2][3]], [1.0, 2.0, 0.0])
+        }
         k => panic!("unexpected {k:?}"),
     }
-    assert_eq!(kids[0].children[0].kind, eval::node::NodeKind::Cube { size: [3.0; 3], center: true });
+    assert_eq!(
+        kids[0].children[0].kind,
+        eval::node::NodeKind::Cube {
+            size: [3.0; 3],
+            center: true
+        }
+    );
     match &kids[1].kind {
         eval::node::NodeKind::Sphere { r, disc } => {
             assert_eq!(*r, 2.0);
@@ -264,7 +328,14 @@ fn collect_output_keeps_codes() {
     let program = lang::parse_file(path, b"echo(x);\n\x03\n".to_vec());
     let mut out = Collect::default();
     eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
-        eval::evaluate(&program, &[], &[], PathBuf::from("/nonexistent"), &Options::default(), &mut out)
+        eval::evaluate(
+            &program,
+            &[],
+            &[],
+            PathBuf::from("/nonexistent"),
+            &Options::default(),
+            &mut out,
+        )
     });
     assert_eq!(out.lines[0].1, lang::diag::DiagCode::UnknownVariable);
     assert_eq!(out.lines[1].1, lang::diag::DiagCode::Echo);

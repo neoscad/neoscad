@@ -69,10 +69,16 @@ pub struct Failure {
 /// `timeout`. A non-zero exit is a failure whose reason carries the first
 /// explanatory stderr line.
 pub fn exec(cmd: &mut Command, timeout: Duration, stderr_path: &Path) -> Result<(), Failure> {
-    let fail = |reason: String| Failure { reason, stderr: String::new() };
-    let err_file = File::create(stderr_path).map_err(|e| fail(format!("{}: {e}", stderr_path.display())))?;
+    let fail = |reason: String| Failure {
+        reason,
+        stderr: String::new(),
+    };
+    let err_file =
+        File::create(stderr_path).map_err(|e| fail(format!("{}: {e}", stderr_path.display())))?;
     cmd.stderr(err_file);
-    let mut child = cmd.spawn().map_err(|e| fail(format!("cannot run {:?}: {e}", cmd.get_program())))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| fail(format!("cannot run {:?}: {e}", cmd.get_program())))?;
     let start = Instant::now();
     // Start polling finely so the recorded time of a fast case is not
     // dominated by the poll interval, then back off for slow ones.
@@ -108,8 +114,14 @@ pub fn exec(cmd: &mut Command, timeout: Duration, stderr_path: &Path) -> Result<
         .find(|l| l.starts_with("neoscad:") || l.starts_with("ERROR:"))
         .or_else(|| stderr.lines().find(|l| !l.trim().is_empty()))
         .unwrap_or_default();
-    let code = status.code().map_or("signal".to_string(), |c| format!("exit {c}"));
-    let reason = if first.is_empty() { code } else { format!("{code}: {first}") };
+    let code = status
+        .code()
+        .map_or("signal".to_string(), |c| format!("exit {c}"));
+    let reason = if first.is_empty() {
+        code
+    } else {
+        format!("{code}: {first}")
+    };
     Err(Failure { reason, stderr })
 }
 
@@ -155,7 +167,10 @@ pub struct CaseEnv<'a> {
 impl GeometryEnv {
     pub fn new(ctx: &Ctx, renderer: &Path) -> Result<GeometryEnv, String> {
         if !renderer.is_file() {
-            return Err(format!("renderer {} not found (tier 3 needs the pinned OpenSCAD nightly)", renderer.display()));
+            return Err(format!(
+                "renderer {} not found (tier 3 needs the pinned OpenSCAD nightly)",
+                renderer.display()
+            ));
         }
         let out = Command::new(renderer)
             .arg("--version")
@@ -174,10 +189,19 @@ impl GeometryEnv {
         fs::write(&empty_wrapper, "").map_err(|e| e.to_string())?;
         let limits_path = ctx.repo.join("conformance/tier3-limits.json");
         let limits: Limits = match fs::read_to_string(&limits_path) {
-            Ok(t) => serde_json::from_str(&t).map_err(|e| format!("{}: {e}", limits_path.display()))?,
+            Ok(t) => {
+                serde_json::from_str(&t).map_err(|e| format!("{}: {e}", limits_path.display()))?
+            }
             Err(_) => Limits::default(),
         };
-        Ok(GeometryEnv { renderer: renderer.to_path_buf(), renderer_id, cache_dir, wrapper, empty_wrapper, limits: limits.limits })
+        Ok(GeometryEnv {
+            renderer: renderer.to_path_buf(),
+            renderer_id,
+            cache_dir,
+            wrapper,
+            empty_wrapper,
+            limits: limits.limits,
+        })
     }
 
     /// Run one geometry case: compare its PNG with the expected image, or
@@ -190,7 +214,9 @@ impl GeometryEnv {
         let (input, expected, out_dir, basename, args) = prepared;
         let result = match c.script.as_deref() {
             None => self.direct(env, &input, &out_dir, &basename, &args),
-            Some(s) if s.ends_with("export_import_pngtest.py") => self.export_import(env, &input, &out_dir, &basename, &args),
+            Some(s) if s.ends_with("export_import_pngtest.py") => {
+                self.export_import(env, &input, &out_dir, &basename, &args)
+            }
             Some(s) if s.ends_with("stlexportsanitytest.py") => {
                 return match self.stl_sanity(env, &input, &out_dir, &basename, &args) {
                     Ok(()) => Result3::Pass,
@@ -199,7 +225,9 @@ impl GeometryEnv {
             }
             Some(s) => Err(format!("no geometry runner for script {s}")),
         };
-        match result.and_then(|png| image_compare::compare_files(&expected, &png).map_err(|e| format!("image compare: {e}"))) {
+        match result.and_then(|png| {
+            image_compare::compare_files(&expected, &png).map_err(|e| format!("image compare: {e}"))
+        }) {
             Err(reason) => Result3::Fail(reason),
             Ok(cmp) if cmp.passed() => Result3::Pass,
             Ok(cmp) => Result3::Fail(format!("image differs: {}", cmp.describe())),
@@ -207,7 +235,11 @@ impl GeometryEnv {
     }
 
     /// Resolve a case's paths and arguments.
-    fn prepare(&self, env: &CaseEnv<'_>, c: &Case) -> Result<(PathBuf, PathBuf, PathBuf, String, Vec<String>), String> {
+    fn prepare(
+        &self,
+        env: &CaseEnv<'_>,
+        c: &Case,
+    ) -> Result<(PathBuf, PathBuf, PathBuf, String, Vec<String>), String> {
         let (Some(input), Some(expected)) = (&c.input, &c.expected) else {
             return Err("manifest case lacks input or expected path".into());
         };
@@ -219,14 +251,20 @@ impl GeometryEnv {
         if !expected.is_file() {
             return Err(format!("missing expected output {}", expected.display()));
         }
-        let basename = c.id.strip_prefix(&format!("{}_", c.group)).unwrap_or(&c.id).to_string();
+        let basename =
+            c.id.strip_prefix(&format!("{}_", c.group))
+                .unwrap_or(&c.id)
+                .to_string();
         let out_dir = env.actual_dir.join(&c.group);
         fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
         let _ = fs::remove_file(out_dir.join(format!("{basename}-actual.png")));
         let args: Vec<String> = c
             .args
             .iter()
-            .map(|a| a.replace("{REF}", env.ref_str).replace("{OPENSCAD}", &env.binary.to_string_lossy()))
+            .map(|a| {
+                a.replace("{REF}", env.ref_str)
+                    .replace("{OPENSCAD}", &env.binary.to_string_lossy())
+            })
             .collect();
         Ok((input, expected, out_dir, basename, args))
     }
@@ -235,8 +273,18 @@ impl GeometryEnv {
     /// test (which must succeed, `check_call`) and validate it as
     /// `validatestl.py` does. The registered expected file is empty and so
     /// is the output file the harness creates, so validation decides.
-    fn stl_sanity(&self, env: &CaseEnv<'_>, input: &Path, out_dir: &Path, basename: &str, args: &[String]) -> Result<(), String> {
-        let remaining: Vec<&String> = args.iter().filter(|a| !a.starts_with("--openscad=")).collect();
+    fn stl_sanity(
+        &self,
+        env: &CaseEnv<'_>,
+        input: &Path,
+        out_dir: &Path,
+        basename: &str,
+        args: &[String],
+    ) -> Result<(), String> {
+        let remaining: Vec<&String> = args
+            .iter()
+            .filter(|a| !a.starts_with("--openscad="))
+            .collect();
         let stl = out_dir.join(format!("{basename}-actual.txt.stl"));
         let _ = fs::remove_file(&stl);
         let stderr = out_dir.join(format!("{basename}-export.stderr"));
@@ -285,7 +333,12 @@ impl GeometryEnv {
                 // the checks before `exportFileByName`), where a direct
                 // render would still draw them: a 2D result is tried again
                 // as SVG, and an empty one draws the empty scene.
-                Err(f) if f.stderr.contains("Current top level object is not a 3D object.") => continue,
+                Err(f)
+                    if f.stderr
+                        .contains("Current top level object is not a 3D object.") =>
+                {
+                    continue;
+                }
                 Err(f) if f.stderr.contains("Current top level object is empty.") => {
                     empty = true;
                     break;
@@ -343,11 +396,22 @@ impl GeometryEnv {
         }
         // `exportfile = join(outputdir, inputfilename) + "." + format`
         // (`:104-107`); the input is always a .scad here.
-        let file_name = input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let file_name = input
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let target = out_dir.join(format!("{file_name}.{format}"));
         let _ = fs::remove_file(&target);
-        let mut tmpargs: Vec<String> =
-            remaining.iter().map(|a| if a.starts_with("--render") { "--render=force".into() } else { a.clone() }).collect();
+        let mut tmpargs: Vec<String> = remaining
+            .iter()
+            .map(|a| {
+                if a.starts_with("--render") {
+                    "--render=force".into()
+                } else {
+                    a.clone()
+                }
+            })
+            .collect();
         if let Some(f) = export_format {
             tmpargs.extend(["--export-format".into(), f.into()]);
         }
@@ -384,7 +448,12 @@ impl GeometryEnv {
         if let Some(m) = mesh {
             let bytes = fs::read(m).map_err(|e| format!("{}: {e}", m.display()))?;
             // The importer picks the parser by extension.
-            h.update(m.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default().as_bytes());
+            h.update(
+                m.extension()
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
             h.update([0]);
             h.update(&bytes);
         }
@@ -398,8 +467,13 @@ impl GeometryEnv {
         let mut cmd = self.command(env, &self.renderer);
         match mesh {
             Some(m) => {
-                let path = m.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-                cmd.arg(&self.wrapper).arg("-D").arg(format!("file=\"{path}\";"));
+                let path = m
+                    .to_string_lossy()
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"");
+                cmd.arg(&self.wrapper)
+                    .arg("-D")
+                    .arg(format!("file=\"{path}\";"));
             }
             None => {
                 cmd.arg(&self.empty_wrapper);
@@ -412,7 +486,9 @@ impl GeometryEnv {
         }
         // Write through a temporary name so a concurrent reader never sees
         // a partial file.
-        let tmp = self.cache_dir.join(format!("{key}.{}.tmp", std::process::id()));
+        let tmp = self
+            .cache_dir
+            .join(format!("{key}.{}.tmp", std::process::id()));
         if fs::copy(png, &tmp).is_ok() {
             let _ = fs::rename(&tmp, &cached);
         }
@@ -431,15 +507,25 @@ impl GeometryEnv {
 /// (`examples/Basics/logo_and_text.scad`) uses literals, and evaluating
 /// arbitrary expressions here would mean running the model twice.
 fn viewport_defines(input: &Path) -> Vec<String> {
-    let Ok(text) = fs::read_to_string(input) else { return Vec::new() };
+    let Ok(text) = fs::read_to_string(input) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix("$vp") else { continue };
-        let Some((name, value)) = rest.split_once('=') else { continue };
+        let Some(rest) = line.strip_prefix("$vp") else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once('=') else {
+            continue;
+        };
         let name = name.trim();
-        let Some(value) = value.trim().strip_suffix(';') else { continue };
-        let literal = value.chars().all(|ch| ch.is_ascii_digit() || " \t[],.-+eE".contains(ch));
+        let Some(value) = value.trim().strip_suffix(';') else {
+            continue;
+        };
+        let literal = value
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || " \t[],.-+eE".contains(ch));
         if ["r", "t", "d", "f"].contains(&name) && literal {
             out.push("-D".into());
             out.push(format!("$vp{name}={value};"));

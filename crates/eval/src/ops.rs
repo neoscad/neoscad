@@ -41,7 +41,11 @@ impl Why {
 pub type OpResult = Result<Value, Why>;
 
 fn undefined_op(a: &Value, op: &str, b: &Value) -> Why {
-    Why::new(format!("undefined operation ({} {op} {})", a.type_name(), b.type_name()))
+    Why::new(format!(
+        "undefined operation ({} {op} {})",
+        a.type_name(),
+        b.type_name()
+    ))
 }
 
 /// Drop the reasons: an element stored inside a vector.
@@ -126,12 +130,14 @@ pub fn compare(a: &Value, b: &Value, op: Cmp) -> Result<bool, Why> {
             Cmp::Greater => x.greater(y, false),
             Cmp::GreaterEqual => x.greater(y, true),
         }),
-        (Value::Undef, Value::Undef) => {
-            Err(Why::new(format!("operation undefined (undefined {} undefined)", op.symbol())))
-        }
-        (Value::Function(_), Value::Function(_)) => {
-            Err(Why::new(format!("operation undefined (function {} function)", op.symbol())))
-        }
+        (Value::Undef, Value::Undef) => Err(Why::new(format!(
+            "operation undefined (undefined {} undefined)",
+            op.symbol()
+        ))),
+        (Value::Function(_), Value::Function(_)) => Err(Why::new(format!(
+            "operation undefined (function {} function)",
+            op.symbol()
+        ))),
         _ => Err(undefined_op(a, op.symbol(), b)),
     }
 }
@@ -186,15 +192,23 @@ fn mul_mat_vec(m: &Vector, v: &Vector) -> OpResult {
     for (i, row) in m.iter().enumerate() {
         let row = match row {
             Value::Vector(r) if r.len() == v.len() => r,
-            _ => return Err(Why::new(format!("Matrix must be rectangular. Problem at row {i}"))),
+            _ => {
+                return Err(Why::new(format!(
+                    "Matrix must be rectangular. Problem at row {i}"
+                )));
+            }
         };
         let mut sum = 0.0;
         for (j, e) in row.iter().enumerate() {
             let Value::Number(a) = e else {
-                return Err(Why::new(format!("Matrix must contain only numbers. Problem at row {i}, col {j}")));
+                return Err(Why::new(format!(
+                    "Matrix must contain only numbers. Problem at row {i}, col {j}"
+                )));
             };
             let Value::Number(b) = v[j] else {
-                return Err(Why::new(format!("Vector must contain only numbers. Problem at index {j}")));
+                return Err(Why::new(format!(
+                    "Vector must contain only numbers. Problem at index {j}"
+                )));
             };
             sum += a * b;
         }
@@ -249,13 +263,19 @@ pub fn mul(a: &Value, b: &Value, warn: &mut Vec<String>) -> OpResult {
 
 fn mul_vectors(x: &Vector, y: &Vector, warn: &mut Vec<String>) -> OpResult {
     if x.is_empty() || y.is_empty() {
-        return Err(Why::new("Multiplication is undefined on empty vectors".into()));
+        return Err(Why::new(
+            "Multiplication is undefined on empty vectors".into(),
+        ));
     }
     let (t1, t2) = (x[0].ty(), y[0].ty());
     match (t1, t2) {
         (Type::Number, Type::Number) => {
             if x.len() != y.len() {
-                return Err(Why::new(format!("vector*vector requires matching lengths ({} != {})", x.len(), y.len())));
+                return Err(Why::new(format!(
+                    "vector*vector requires matching lengths ({} != {})",
+                    x.len(),
+                    y.len()
+                )));
             }
             let mut r = 0.0;
             for (p, q) in x.iter().zip(y.iter()) {
@@ -315,7 +335,9 @@ fn mul_vectors(x: &Vector, y: &Vector, warn: &mut Vec<String>) -> OpResult {
                 }
                 match mul_vec_mat(r, y, warn) {
                     Ok(v) => out.push(v),
-                    Err(w) => return Err(w.append(format!("while processing left operand at row {i}"))),
+                    Err(w) => {
+                        return Err(w.append(format!("while processing left operand at row {i}")));
+                    }
                 }
             }
             Ok(Value::vector(out))
@@ -331,8 +353,12 @@ fn mul_vectors(x: &Vector, y: &Vector, warn: &mut Vec<String>) -> OpResult {
 pub fn div(a: &Value, b: &Value) -> OpResult {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x / y)),
-        (Value::Vector(v), Value::Number(_)) => Ok(Value::vector(v.iter().map(|e| elem(div(e, b))).collect())),
-        (Value::Number(_), Value::Vector(v)) => Ok(Value::vector(v.iter().map(|e| elem(div(a, e))).collect())),
+        (Value::Vector(v), Value::Number(_)) => {
+            Ok(Value::vector(v.iter().map(|e| elem(div(e, b))).collect()))
+        }
+        (Value::Number(_), Value::Vector(v)) => {
+            Ok(Value::vector(v.iter().map(|e| elem(div(a, e))).collect()))
+        }
         _ => Err(undefined_op(a, "/", b)),
     }
 }
@@ -372,7 +398,9 @@ pub fn bitwise(a: &Value, b: &Value, op: Bitwise) -> OpResult {
         Bitwise::Shl => "<<",
         Bitwise::Shr => ">>",
     };
-    let (Value::Number(x), Value::Number(y)) = (a, b) else { return Err(undefined_op(a, sym, b)) };
+    let (Value::Number(x), Value::Number(y)) = (a, b) else {
+        return Err(undefined_op(a, sym, b));
+    };
     let (l, r) = (to_i64(*x), to_i64(*y));
     let v = match op {
         Bitwise::And => l & r,
@@ -384,7 +412,11 @@ pub fn bitwise(a: &Value, b: &Value, op: Bitwise) -> OpResult {
             if r >= 64 {
                 return Err(Why::new("shift too large".into()));
             }
-            if matches!(op, Bitwise::Shl) { l << r } else { l >> r }
+            if matches!(op, Bitwise::Shl) {
+                l << r
+            } else {
+                l >> r
+            }
         }
     };
     Ok(Value::Number(v as f64))
@@ -394,27 +426,39 @@ pub fn neg(a: &Value) -> OpResult {
     match a {
         Value::Number(x) => Ok(Value::Number(-x)),
         Value::Vector(v) => Ok(Value::vector(v.iter().map(|e| elem(neg(e))).collect())),
-        _ => Err(Why::new(format!("undefined operation (-{})", a.type_name()))),
+        _ => Err(Why::new(format!(
+            "undefined operation (-{})",
+            a.type_name()
+        ))),
     }
 }
 
 pub fn bit_not(a: &Value) -> OpResult {
     match a {
         Value::Number(x) => Ok(Value::Number(!to_i64(*x) as f64)),
-        _ => Err(Why::new(format!("undefined operation (~{})", a.type_name()))),
+        _ => Err(Why::new(format!(
+            "undefined operation (~{})",
+            a.type_name()
+        ))),
     }
 }
 
 /// `convert_to_uint32`: an index, or `u32::MAX` when it is not a finite
 /// number in range (boost::numeric_cast truncates toward zero).
 fn to_index(d: f64) -> u32 {
-    if d.is_finite() && d > -1.0 && d < 4_294_967_296.0 { d as u32 } else { u32::MAX }
+    if d.is_finite() && d > -1.0 && d < 4_294_967_296.0 {
+        d as u32
+    } else {
+        u32::MAX
+    }
 }
 
 /// `a[i]`. An out-of-range or ill-typed index gives `undef`; its reason is
 /// never printed by OpenSCAD, so none is kept.
 pub fn index(a: &Value, i: &Value) -> Value {
-    let Value::Number(d) = i else { return Value::Undef };
+    let Value::Number(d) = i else {
+        return Value::Undef;
+    };
     let i = to_index(*d) as usize;
     match a {
         Value::Str(s) => s.char_at(i).map_or(Value::Undef, Value::str),
@@ -452,31 +496,65 @@ mod tests {
     fn matrix_products() {
         let m = Value::vector(vec![v(&[1.0, 2.0]), v(&[3.0, 4.0])]);
         let mut w = Vec::new();
-        assert!(equals(&mul(&m, &v(&[1.0, 1.0]), &mut w).unwrap(), &v(&[3.0, 7.0])));
-        assert!(equals(&mul(&v(&[1.0, 1.0]), &m, &mut w).unwrap(), &v(&[4.0, 6.0])));
-        assert!(equals(&mul(&v(&[1.0, 2.0]), &v(&[3.0, 4.0]), &mut w).unwrap(), &n(11.0)));
+        assert!(equals(
+            &mul(&m, &v(&[1.0, 1.0]), &mut w).unwrap(),
+            &v(&[3.0, 7.0])
+        ));
+        assert!(equals(
+            &mul(&v(&[1.0, 1.0]), &m, &mut w).unwrap(),
+            &v(&[4.0, 6.0])
+        ));
+        assert!(equals(
+            &mul(&v(&[1.0, 2.0]), &v(&[3.0, 4.0]), &mut w).unwrap(),
+            &n(11.0)
+        ));
         let e = mul(&v(&[1.0]), &v(&[1.0, 2.0]), &mut w).unwrap_err();
-        assert_eq!(e.message(), "vector*vector requires matching lengths (1 != 2)");
+        assert_eq!(
+            e.message(),
+            "vector*vector requires matching lengths (1 != 2)"
+        );
         assert!(w.is_empty());
     }
 
     #[test]
     fn comparisons_and_their_messages() {
-        assert_eq!(compare(&v(&[1.0, 2.0]), &v(&[1.0, 3.0]), Cmp::Less), Ok(true));
+        assert_eq!(
+            compare(&v(&[1.0, 2.0]), &v(&[1.0, 3.0]), Cmp::Less),
+            Ok(true)
+        );
         assert_eq!(compare(&v(&[1.0]), &v(&[1.0, 0.0]), Cmp::Less), Ok(true));
         let e = compare(&Value::Undef, &Value::Undef, Cmp::Less).unwrap_err();
         assert_eq!(e.message(), "operation undefined (undefined < undefined)");
-        let e = compare(&Value::vector(vec![n(1.0), Value::str(b"a")]), &v(&[1.0, 2.0]), Cmp::Less).unwrap_err();
-        assert_eq!(e.message(), "undefined operation (string < number)\n\tin vector comparison at index 1");
+        let e = compare(
+            &Value::vector(vec![n(1.0), Value::str(b"a")]),
+            &v(&[1.0, 2.0]),
+            Cmp::Less,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.message(),
+            "undefined operation (string < number)\n\tin vector comparison at index 1"
+        );
         assert!(equals(&Value::Undef, &Value::Undef));
         assert!(!equals(&n(f64::NAN), &n(f64::NAN)));
     }
 
     #[test]
     fn bitwise_and_shifts() {
-        assert!(equals(&bitwise(&n(6.0), &n(3.0), Bitwise::And).unwrap(), &n(2.0)));
-        assert!(equals(&bitwise(&n(1.0), &n(4.0), Bitwise::Shl).unwrap(), &n(16.0)));
-        assert_eq!(bitwise(&n(1.0), &n(-1.0), Bitwise::Shl).unwrap_err().message(), "negative shift");
+        assert!(equals(
+            &bitwise(&n(6.0), &n(3.0), Bitwise::And).unwrap(),
+            &n(2.0)
+        ));
+        assert!(equals(
+            &bitwise(&n(1.0), &n(4.0), Bitwise::Shl).unwrap(),
+            &n(16.0)
+        ));
+        assert_eq!(
+            bitwise(&n(1.0), &n(-1.0), Bitwise::Shl)
+                .unwrap_err()
+                .message(),
+            "negative shift"
+        );
         assert!(equals(&bit_not(&n(0.0)).unwrap(), &n(-1.0)));
     }
 
@@ -484,6 +562,9 @@ mod tests {
     fn indexing() {
         assert!(equals(&index(&v(&[1.0, 2.0]), &n(1.9)), &n(2.0)));
         assert!(index(&v(&[1.0, 2.0]), &n(-1.0)).is_undef());
-        assert!(equals(&index(&Value::range(1.0, 2.0, 9.0), &n(2.0)), &n(9.0)));
+        assert!(equals(
+            &index(&Value::range(1.0, 2.0, 9.0), &n(2.0)),
+            &n(9.0)
+        ));
     }
 }

@@ -29,7 +29,11 @@ fn round_half_up(v: f64, precision: usize) -> Digits {
     let s = format!("{a:.20e}");
     let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
     let exp: i32 = exp.parse().unwrap_or(0);
-    let mut digits: Vec<u8> = mant.bytes().filter(u8::is_ascii_digit).map(|b| b - b'0').collect();
+    let mut digits: Vec<u8> = mant
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| b - b'0')
+        .collect();
     let round_up = {
         let next = digits[precision];
         let rest_zero = digits[precision + 1..].iter().all(|&d| d == 0);
@@ -37,7 +41,14 @@ fn round_half_up(v: f64, precision: usize) -> Digits {
             // Possibly an exact tie: look at the full exact expansion (a
             // double has at most 767 significant digits).
             let exact = format!("{a:.800e}");
-            let ed: Vec<u8> = exact.split('e').next().unwrap_or("").bytes().filter(u8::is_ascii_digit).map(|b| b - b'0').collect();
+            let ed: Vec<u8> = exact
+                .split('e')
+                .next()
+                .unwrap_or("")
+                .bytes()
+                .filter(u8::is_ascii_digit)
+                .map(|b| b - b'0')
+                .collect();
             ed[precision] >= 5
         } else {
             next >= 5
@@ -135,20 +146,32 @@ pub fn write_number(out: &mut String, v: f64) {
 /// C++ `std::ostream << double` with default flags: `%g` at precision 6.
 pub fn fmt_g(v: f64) -> String {
     if v.is_nan() {
-        return if v.is_sign_negative() { "-nan".into() } else { "nan".into() };
+        return if v.is_sign_negative() {
+            "-nan".into()
+        } else {
+            "nan".into()
+        };
     }
     if v.is_infinite() {
         return if v < 0.0 { "-inf".into() } else { "inf".into() };
     }
     if v == 0.0 {
-        return if v.is_sign_negative() { "-0".into() } else { "0".into() };
+        return if v.is_sign_negative() {
+            "-0".into()
+        } else {
+            "0".into()
+        };
     }
     // printf rounds half-to-even on the exact value, as Rust does.
     let e = format!("{v:.5e}");
     let (mant, exp) = e.split_once('e').unwrap_or((&e, "0"));
     let x: i32 = exp.parse().unwrap_or(0);
     let trim = |s: &str| -> String {
-        if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s.to_string() }
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s.to_string()
+        }
     };
     if (-4..6).contains(&x) {
         let decimals = (5 - x).max(0) as usize;

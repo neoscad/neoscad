@@ -64,7 +64,11 @@ fn script_from_tag(t: Tag) -> Tag {
     if let Some(a) = alias {
         return tag(a);
     }
-    if t & 0xE0E0_E0E0 == 0x4060_6060 { t } else { UNKNOWN }
+    if t & 0xE0E0_E0E0 == 0x4060_6060 {
+        t
+    } else {
+        UNKNOWN
+    }
 }
 
 /// `is_ignored_script` in FreetypeRenderer.cc.
@@ -107,9 +111,10 @@ fn detect_script(text: &str, script: &str) -> Tag {
 /// (including unknown scripts).
 fn script_rtl(t: Tag) -> Option<bool> {
     match &t.to_be_bytes() {
-        b"Arab" | b"Hebr" | b"Syrc" | b"Thaa" | b"Cprt" | b"Khar" | b"Phnx" | b"Nkoo" | b"Lydi" | b"Avst" | b"Armi"
-        | b"Phli" | b"Prti" | b"Sarb" | b"Orkh" | b"Samr" | b"Mand" | b"Merc" | b"Mero" | b"Mani" | b"Mend" | b"Nbat"
-        | b"Narb" | b"Palm" | b"Phlp" | b"Hatr" | b"Adlm" | b"Rohg" | b"Sogo" | b"Sogd" | b"Elym" | b"Chrs" | b"Yezi"
+        b"Arab" | b"Hebr" | b"Syrc" | b"Thaa" | b"Cprt" | b"Khar" | b"Phnx" | b"Nkoo" | b"Lydi"
+        | b"Avst" | b"Armi" | b"Phli" | b"Prti" | b"Sarb" | b"Orkh" | b"Samr" | b"Mand"
+        | b"Merc" | b"Mero" | b"Mani" | b"Mend" | b"Nbat" | b"Narb" | b"Palm" | b"Phlp"
+        | b"Hatr" | b"Adlm" | b"Rohg" | b"Sogo" | b"Sogd" | b"Elym" | b"Chrs" | b"Yezi"
         | b"Ougr" | b"Gara" | b"Sidt" => Some(true),
         b"Hung" | b"Ital" | b"Runr" | b"Tfng" => None,
         _ => Some(false),
@@ -139,7 +144,11 @@ fn detect_direction(direction: &str, script: Tag) -> &'static str {
 /// is kept, which may be empty.
 pub fn resolve(t: &Text) -> (String, &'static str) {
     let s = detect_script(&t.text, &t.script);
-    let script = if is_ignored(s) { t.script.clone() } else { String::from_utf8_lossy(&s.to_be_bytes()).into_owned() };
+    let script = if is_ignored(s) {
+        t.script.clone()
+    } else {
+        String::from_utf8_lossy(&s.to_be_bytes()).into_owned()
+    };
     (script, detect_direction(&t.direction, s))
 }
 
@@ -159,7 +168,11 @@ mod tests {
             script: script.into(),
             halign: "default".into(),
             valign: "default".into(),
-            disc: Discretizer { fn_: 0.0, fa: 12.0, fs: 2.0 },
+            disc: Discretizer {
+                fn_: 0.0,
+                fa: 12.0,
+                fs: 2.0,
+            },
         }
     }
 

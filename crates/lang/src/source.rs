@@ -47,7 +47,11 @@ pub struct SourceFile {
 
 impl SourceFile {
     pub fn new(path: PathBuf, text: impl Into<Box<[u8]>>) -> Self {
-        Self { path, text: text.into(), line_starts: OnceLock::new() }
+        Self {
+            path,
+            text: text.into(),
+            line_starts: OnceLock::new(),
+        }
     }
 
     /// Byte offsets at which lines start. Only `\n` ends a line: OpenSCAD's
@@ -124,7 +128,10 @@ impl SourceMap {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (FileId, &SourceFile)> {
-        self.files.iter().enumerate().map(|(i, f)| (FileId(i as u32), f))
+        self.files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (FileId(i as u32), f))
     }
 }
 

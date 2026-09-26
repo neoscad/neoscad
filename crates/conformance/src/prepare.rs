@@ -36,7 +36,11 @@ pub fn prepare(ctx: &Ctx, manifest: &Manifest) -> Result<(), String> {
             (Some(tpl), _) => {
                 let text = fs::read_to_string(ctx.ref_root.join(tpl))
                     .map_err(|e| format!("{tpl}: {e}"))?;
-                if g.copy_only { text } else { configure(&text, &vars) }
+                if g.copy_only {
+                    text
+                } else {
+                    configure(&text, &vars)
+                }
             }
             (None, Some("gen_issue2342")) => gen_issue2342(),
             (None, other) => return Err(format!("{}: unknown generator {other:?}", g.output)),

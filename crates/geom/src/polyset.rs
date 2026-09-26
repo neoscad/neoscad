@@ -2,12 +2,12 @@
 //! (`src/geometry/PolySet.{h,cc}`, `PolySetUtils.cc`): shared vertices,
 //! faces as vertex index lists of any length, and optional per-face colours.
 
+use manifold_rust::linalg::Vec2;
 use manifold_rust::polygon::triangulate_idx;
 use manifold_rust::types::PolyVert;
-use manifold_rust::linalg::Vec2;
 
-use crate::color::Color;
 use crate::Matrix;
+use crate::color::Color;
 
 /// A 3D polygon mesh.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -36,14 +36,26 @@ impl PolySet {
 
     /// The mesh fields, as the `io` writers take them.
     pub fn mesh(&self) -> io::MeshRef<'_> {
-        io::MeshRef { vertices: &self.vertices, faces: &self.faces, colors: &self.colors, color_indices: &self.color_indices }
+        io::MeshRef {
+            vertices: &self.vertices,
+            faces: &self.faces,
+            colors: &self.colors,
+            color_indices: &self.color_indices,
+        }
     }
 
     /// A mesh a reader built (`PolySetBuilder::build`): convexity unknown,
     /// triangular when every face is a triangle.
     pub fn from_mesh(m: io::Mesh) -> PolySet {
         let triangular = m.faces.iter().all(|f| f.len() <= 3);
-        PolySet { vertices: m.vertices, faces: m.faces, colors: m.colors, color_indices: m.color_indices, convex: None, triangular }
+        PolySet {
+            vertices: m.vertices,
+            faces: m.faces,
+            colors: m.colors,
+            color_indices: m.color_indices,
+            convex: None,
+            triangular,
+        }
     }
 
     /// `PolySet::setColor`: one colour for every face.
@@ -67,10 +79,17 @@ impl PolySet {
 
     /// Axis-aligned bounds of the vertices faces use, or `None` if empty.
     pub fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {
-        let mut it = self.faces.iter().flatten().map(|&i| self.vertices[i as usize]);
+        let mut it = self
+            .faces
+            .iter()
+            .flatten()
+            .map(|&i| self.vertices[i as usize]);
         let first = it.next()?;
         Some(it.fold((first, first), |(lo, hi), v| {
-            (std::array::from_fn(|k| lo[k].min(v[k])), std::array::from_fn(|k| hi[k].max(v[k])))
+            (
+                std::array::from_fn(|k| lo[k].min(v[k])),
+                std::array::from_fn(|k| hi[k].max(v[k])),
+            )
         }))
     }
 
@@ -94,7 +113,8 @@ impl PolySet {
         };
         let v = |i: u32| self.vertices[i as usize];
         let angle_threshold = eval::trig::cos_degrees(0.1);
-        let mut edges: std::collections::HashMap<Edge, usize> = std::collections::HashMap::with_capacity(self.faces.len() * 3);
+        let mut edges: std::collections::HashMap<Edge, usize> =
+            std::collections::HashMap::with_capacity(self.faces.len() * 3);
         // (normal, d) of each face's plane, `Plane_3(v[0], newell normal)`.
         let mut planes: Vec<([f64; 3], f64)> = Vec::with_capacity(self.faces.len());
         for (i, f) in self.faces.iter().enumerate() {
@@ -109,7 +129,10 @@ impl PolySet {
                 let pts: Vec<[f64; 3]> = f.iter().map(|&k| v(k)).collect();
                 let normal = newell(&pts);
                 let p = pts[0];
-                plane = (normal, -(normal[0] * p[0] + normal[1] * p[1] + normal[2] * p[2]));
+                plane = (
+                    normal,
+                    -(normal[0] * p[0] + normal[1] * p[1] + normal[2] * p[2]),
+                );
             }
             planes.push(plane);
         }
@@ -123,7 +146,9 @@ impl PolySet {
                 continue;
             }
             for j in 0..n {
-                let Some(&other) = edges.get(&key(v(f[(j + 1) % n]), v(f[j]))) else { return false };
+                let Some(&other) = edges.get(&key(v(f[(j + 1) % n]), v(f[j]))) else {
+                    return false;
+                };
                 let p = v(f[(j + 2) % n]);
                 let (u, d) = planes[other];
                 if u[0] * p[0] + u[1] * p[1] + u[2] * p[2] + d > 0.0 {
@@ -143,7 +168,9 @@ impl PolySet {
             let face = &self.faces[f];
             for i in 0..face.len() {
                 let j = (i + 1) % face.len();
-                let Some(&o) = edges.get(&key(v(face[j]), v(face[i]))) else { return false };
+                let Some(&o) = edges.get(&key(v(face[j]), v(face[i]))) else {
+                    return false;
+                };
                 if !seen[o] {
                     seen[o] = true;
                     count += 1;
@@ -165,7 +192,11 @@ impl PolySet {
     /// which gives the same surface for planar faces but may choose other
     /// diagonals (and so other shading) for non-planar ones.
     pub fn tessellate(&self, warnings: &mut Warnings) -> PolySet {
-        let mut out = PolySet { convex: self.convex, triangular: true, ..Default::default() };
+        let mut out = PolySet {
+            convex: self.convex,
+            triangular: true,
+            ..Default::default()
+        };
         if self.triangular {
             let mut c = self.clone();
             c.triangular = true;
@@ -197,7 +228,14 @@ impl PolySet {
             for &ind in &cur {
                 used[ind as usize] = true;
             }
-            polygons.push((cur, if has_colors { self.color_indices[i] } else { -1 }));
+            polygons.push((
+                cur,
+                if has_colors {
+                    self.color_indices[i]
+                } else {
+                    -1
+                },
+            ));
         }
         let mut map = vec![u32::MAX; self.vertices.len()];
         for (i, v) in self.vertices.iter().enumerate() {
@@ -211,7 +249,11 @@ impl PolySet {
         }
         for (face, color) in polygons {
             let face: Vec<u32> = face.iter().map(|&i| map[i as usize]).collect();
-            let tris = if face.len() == 3 { vec![[face[0], face[1], face[2]]] } else { triangulate_face(&out.vertices, &face) };
+            let tris = if face.len() == 3 {
+                vec![[face[0], face[1], face[2]]]
+            } else {
+                triangulate_face(&out.vertices, &face)
+            };
             for t in tris {
                 out.faces.push(t.to_vec());
                 if has_colors {
@@ -234,9 +276,18 @@ impl PolySet {
     /// Faces with fewer than three vertices are dropped; colours are not
     /// kept.
     pub fn triangulate_faces(&self) -> PolySet {
-        let mut out = PolySet { vertices: self.vertices.clone(), convex: self.convex, triangular: true, ..Default::default() };
+        let mut out = PolySet {
+            vertices: self.vertices.clone(),
+            convex: self.convex,
+            triangular: true,
+            ..Default::default()
+        };
         for f in self.faces.iter().filter(|f| f.len() >= 3) {
-            let tris = if f.len() == 3 { vec![[f[0], f[1], f[2]]] } else { triangulate_face(&self.vertices, f) };
+            let tris = if f.len() == 3 {
+                vec![[f[0], f[1], f[2]]]
+            } else {
+                triangulate_face(&self.vertices, f)
+            };
             out.faces.extend(tris.into_iter().map(|t| t.to_vec()));
         }
         out
@@ -275,7 +326,11 @@ pub fn determinant3(m: &Matrix) -> f64 {
         .map(|j| {
             let sign = if (3 + j) % 2 == 0 { 1.0 } else { -1.0 };
             let e = a[3][j];
-            if e == 0.0 { 0.0 } else { sign * e * minor(rows, cols(j)) }
+            if e == 0.0 {
+                0.0
+            } else {
+                sign * e * minor(rows, cols(j))
+            }
         })
         .sum()
 }
@@ -300,7 +355,9 @@ fn triangulate_face(verts: &[[f64; 3]], face: &[u32]) -> Vec<[u32; 3]> {
     let n = newell(&pts);
     // Drop the axis the face is most perpendicular to; flip one kept axis if
     // the normal points down it, so the projection stays counter-clockwise.
-    let axis = (0..3).max_by(|&a, &b| n[a].abs().total_cmp(&n[b].abs())).unwrap_or(2);
+    let axis = (0..3)
+        .max_by(|&a, &b| n[a].abs().total_cmp(&n[b].abs()))
+        .unwrap_or(2);
     let (u, v) = match axis {
         0 => (1, 2),
         1 => (2, 0),
@@ -312,7 +369,10 @@ fn triangulate_face(verts: &[[f64; 3]], face: &[u32]) -> Vec<[u32; 3]> {
         .enumerate()
         .map(|(k, p)| {
             let x = if flip { -p[u] } else { p[u] };
-            PolyVert { pos: Vec2::new(x, p[v]), idx: k as i32 }
+            PolyVert {
+                pos: Vec2::new(x, p[v]),
+                idx: k as i32,
+            }
         })
         .collect();
     let tris = triangulate_idx(&vec![poly], -1.0, true);
@@ -324,7 +384,9 @@ fn triangulate_face(verts: &[[f64; 3]], face: &[u32]) -> Vec<[u32; 3]> {
         // A face with no area (all points collinear): fan it so the mesh
         // keeps its edges, as libtess2's zero-area output would be dropped
         // but its neighbours still reference the vertices.
-        out = (1..face.len() - 1).map(|k| [face[0], face[k], face[k + 1]]).collect();
+        out = (1..face.len() - 1)
+            .map(|k| [face[0], face[k], face[k + 1]])
+            .collect();
     }
     out
 }
@@ -336,8 +398,19 @@ mod tests {
     #[test]
     fn concave_face_tessellates_to_its_area() {
         // An L-shaped hexagon in the z = 0 plane, counter-clockwise.
-        let verts = vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 2.0, 0.0], [0.0, 2.0, 0.0]];
-        let ps = PolySet { vertices: verts.clone(), faces: vec![(0..6).collect()], ..Default::default() };
+        let verts = vec![
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 2.0, 0.0],
+            [0.0, 2.0, 0.0],
+        ];
+        let ps = PolySet {
+            vertices: verts.clone(),
+            faces: vec![(0..6).collect()],
+            ..Default::default()
+        };
         let t = ps.tessellate(&mut Vec::new());
         assert_eq!(t.faces.len(), 4);
         let area: f64 = t
@@ -353,7 +426,11 @@ mod tests {
 
     #[test]
     fn degenerate_faces_warn() {
-        let ps = PolySet { vertices: vec![[0.0; 3]; 3], faces: vec![vec![0, 1]], ..Default::default() };
+        let ps = PolySet {
+            vertices: vec![[0.0; 3]; 3],
+            faces: vec![vec![0, 1]],
+            ..Default::default()
+        };
         let mut w = Vec::new();
         let t = ps.tessellate(&mut w);
         assert!(t.faces.is_empty());
@@ -362,7 +439,11 @@ mod tests {
 
     #[test]
     fn mirror_flips_faces() {
-        let mut ps = PolySet { vertices: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], faces: vec![vec![0, 1, 2]], ..Default::default() };
+        let mut ps = PolySet {
+            vertices: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            faces: vec![vec![0, 1, 2]],
+            ..Default::default()
+        };
         let mut m = crate::IDENTITY;
         m[0][0] = -1.0;
         ps.transform(&m);

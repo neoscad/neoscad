@@ -39,7 +39,8 @@ impl std::hash::Hasher for FxHasher {
         for chunk in bytes.chunks(8) {
             let mut b = [0u8; 8];
             b[..chunk.len()].copy_from_slice(chunk);
-            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(b)).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(b))
+                .wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
         }
     }
     fn write_u8(&mut self, i: u8) {
@@ -202,7 +203,11 @@ pub enum ExprKind {
     Index(ExprId, ExprId),
     Member(ExprId, Name),
     Call(ExprId, Vec<Arg>),
-    Range { begin: ExprId, step: Option<ExprId>, end: ExprId },
+    Range {
+        begin: ExprId,
+        step: Option<ExprId>,
+        end: ExprId,
+    },
     Vector(Vec<ExprId>),
     Function(Vec<Param>, ExprId),
     Let(Vec<Arg>, ExprId),
@@ -211,7 +216,12 @@ pub enum ExprKind {
     LcIf(ExprId, ExprId, Option<ExprId>),
     LcEach(ExprId),
     LcFor(Vec<Arg>, ExprId),
-    LcForC { init: Vec<Arg>, cond: ExprId, incr: Vec<Arg>, body: ExprId },
+    LcForC {
+        init: Vec<Arg>,
+        cond: ExprId,
+        incr: Vec<Arg>,
+        body: ExprId,
+    },
     LcLet(Vec<Arg>, ExprId),
     /// Stands in for a missing or broken expression after a syntax error.
     Invalid,
@@ -252,7 +262,10 @@ pub struct Assignment {
 
 impl Assignment {
     pub fn annotation(&self, name: &str) -> Option<ExprId> {
-        self.annotations.iter().find(|a| a.name == name).map(|a| a.expr)
+        self.annotations
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.expr)
     }
 }
 
@@ -276,7 +289,9 @@ pub struct FunctionDef {
 pub enum InstKind {
     Module,
     /// `if (args[0]) children else else_children`.
-    If { else_children: Option<Box<Scope>> },
+    If {
+        else_children: Option<Box<Scope>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,7 +357,9 @@ impl Ast {
             ExprKind::Unary(_, e) => self.is_literal(*e),
             ExprKind::Vector(v) => v.iter().all(|&e| self.is_literal(e)),
             ExprKind::Range { begin, step, end } => {
-                self.is_literal(*begin) && self.is_literal(*end) && step.is_none_or(|s| self.is_literal(s))
+                self.is_literal(*begin)
+                    && self.is_literal(*end)
+                    && step.is_none_or(|s| self.is_literal(s))
             }
             _ => false,
         }
@@ -352,8 +369,21 @@ impl Ast {
 /// Lower a parsed program. `main` is the path OpenSCAD treats as the main
 /// file for reassignment warnings: the program's own file, or for a `use`d
 /// library the program that uses it.
-pub fn lower(cst: &Cst, sources: &SourceMap, main: &Path, uses: &[crate::loader::UseRef]) -> (Ast, Vec<Diagnostic>) {
-    let mut l = Lower { sources, main, ast: Ast::default(), diags: Vec::new(), file_ended: false, uses, next_use: 0 };
+pub fn lower(
+    cst: &Cst,
+    sources: &SourceMap,
+    main: &Path,
+    uses: &[crate::loader::UseRef],
+) -> (Ast, Vec<Diagnostic>) {
+    let mut l = Lower {
+        sources,
+        main,
+        ast: Ast::default(),
+        diags: Vec::new(),
+        file_ended: false,
+        uses,
+        next_use: 0,
+    };
     let mut root = Scope::default();
     l.statements(cst.root(), &mut root);
     l.ast.root = root;
@@ -422,26 +452,48 @@ impl<'a> Lower<'a> {
             K::BlockStmt => self.statements(n, scope),
             K::Assignment => self.assignment(n, scope),
             K::ModuleDef => {
-                let Some(name) = n.token(K::Ident) else { return };
+                let Some(name) = n.token(K::Ident) else {
+                    return;
+                };
                 let name = self.intern(name);
-                let params = n.children().find(|c| c.kind() == K::ParamList).map(|p| self.params(p)).unwrap_or_default();
+                let params = n
+                    .children()
+                    .find(|c| c.kind() == K::ParamList)
+                    .map(|p| self.params(p))
+                    .unwrap_or_default();
                 let mut body = Scope::default();
                 if let Some(b) = n.children().filter(|c| c.kind() != K::ParamList).last() {
                     self.statement(b, &mut body);
                 }
                 let span = self.span(n);
-                scope.modules.push(ModuleDef { name, params, body, span });
+                scope.modules.push(ModuleDef {
+                    name,
+                    params,
+                    body,
+                    span,
+                });
             }
             K::FunctionDef => {
-                let Some(name) = n.token(K::Ident) else { return };
+                let Some(name) = n.token(K::Ident) else {
+                    return;
+                };
                 let name = self.intern(name);
-                let params = n.children().find(|c| c.kind() == K::ParamList).map(|p| self.params(p)).unwrap_or_default();
+                let params = n
+                    .children()
+                    .find(|c| c.kind() == K::ParamList)
+                    .map(|p| self.params(p))
+                    .unwrap_or_default();
                 let span = self.span(n);
                 let body = match n.children().find(|c| c.kind() != K::ParamList) {
                     Some(b) => self.expr(b),
                     None => self.invalid(span),
                 };
-                scope.functions.push(FunctionDef { name, params, body, span });
+                scope.functions.push(FunctionDef {
+                    name,
+                    params,
+                    body,
+                    span,
+                });
             }
             K::EotStmt => self.file_ended = true,
             K::UseStmt => {
@@ -470,7 +522,10 @@ impl<'a> Lower<'a> {
             Some(e) => self.expr(e),
             None => self.invalid(loc.span),
         };
-        let seq = n.tokens().last().map_or(0, |t| seq_for_token(t.index()) + 1);
+        let seq = n
+            .tokens()
+            .last()
+            .map_or(0, |t| seq_for_token(t.index()) + 1);
         if let Some(a) = scope.assignments.iter_mut().find(|a| a.name == name) {
             let prev = a.loc;
             if let Some(d) = self.reassignment_warning(name, prev, loc) {
@@ -480,7 +535,13 @@ impl<'a> Lower<'a> {
             a.overwrite = Some(loc);
             return;
         }
-        scope.assignments.push(Assignment { name, expr, loc, overwrite: None, annotations: Vec::new() });
+        scope.assignments.push(Assignment {
+            name,
+            expr,
+            loc,
+            overwrite: None,
+            annotations: Vec::new(),
+        });
     }
 
     fn reassignment_warning(&self, name: Name, prev: Loc, cur: Loc) -> Option<Diagnostic> {
@@ -492,7 +553,10 @@ impl<'a> Lower<'a> {
         let cur_path = self.sources.path(cur.span.file);
         let quoted = format!("\"{}\"", self.ast.name(name));
         let message = if prev_path == main && cur_path == main {
-            format!("{quoted} was assigned on line {} but was overwritten", prev.line)
+            format!(
+                "{quoted} was assigned on line {} but was overwritten",
+                prev.line
+            )
         } else if prev_path == cur_path || prev_path == main {
             // Same (included) file: a file included twice reassigns at the
             // same line, which is not worth a warning.
@@ -523,7 +587,11 @@ impl<'a> Lower<'a> {
             .filter_map(|p| {
                 let name = self.intern(p.token(K::Ident)?);
                 let default = p.children().next().map(|e| self.expr(e));
-                Some(Param { name, default, span: self.span(p) })
+                Some(Param {
+                    name,
+                    default,
+                    span: self.span(p),
+                })
             })
             .collect()
     }
@@ -599,7 +667,11 @@ impl<'a> Lower<'a> {
                 let name = self.ast.names.intern("if");
                 Some(Instantiation {
                     name,
-                    args: vec![Arg { name: None, expr: cond, span: cond_span }],
+                    args: vec![Arg {
+                        name: None,
+                        expr: cond,
+                        span: cond_span,
+                    }],
                     children,
                     kind: InstKind::If { else_children },
                     tag_root: false,
@@ -647,7 +719,9 @@ impl<'a> Lower<'a> {
         let kids = &Kids::of(n);
         let kind = match n.kind() {
             K::Literal => {
-                let Some(t) = n.tokens().next() else { return self.invalid(span) };
+                let Some(t) = n.tokens().next() else {
+                    return self.invalid(span);
+                };
                 match t.kind() {
                     K::KwTrue => ExprKind::Bool(true),
                     K::KwFalse => ExprKind::Bool(false),
@@ -718,15 +792,27 @@ impl<'a> Lower<'a> {
                 if kids.len >= 3 {
                     let step = self.nth_expr(kids, 1, span);
                     let end = self.nth_expr(kids, 2, span);
-                    ExprKind::Range { begin, step: Some(step), end }
+                    ExprKind::Range {
+                        begin,
+                        step: Some(step),
+                        end,
+                    }
                 } else {
                     let end = self.nth_expr(kids, 1, span);
-                    ExprKind::Range { begin, step: None, end }
+                    ExprKind::Range {
+                        begin,
+                        step: None,
+                        end,
+                    }
                 }
             }
             K::VectorExpr => ExprKind::Vector(n.children().map(|k| self.expr(k)).collect()),
             K::FunctionExpr => {
-                let params = kids.get(0).filter(|p| p.kind() == K::ParamList).map(|p| self.params(p)).unwrap_or_default();
+                let params = kids
+                    .get(0)
+                    .filter(|p| p.kind() == K::ParamList)
+                    .map(|p| self.params(p))
+                    .unwrap_or_default();
                 let body = self.nth_expr(kids, 1, span);
                 ExprKind::Function(params, body)
             }
@@ -751,7 +837,12 @@ impl<'a> Lower<'a> {
                 let cond = self.nth_expr(kids, 1, span);
                 let incr = self.args(kids.get(2));
                 let body = self.nth_expr(kids, 3, span);
-                ExprKind::LcForC { init, cond, incr, body }
+                ExprKind::LcForC {
+                    init,
+                    cond,
+                    incr,
+                    body,
+                }
             }
             K::LcEach => ExprKind::LcEach(self.nth_expr(kids, 0, span)),
             K::LcIf => {
@@ -775,7 +866,10 @@ struct Kids<'a> {
 
 impl<'a> Kids<'a> {
     fn of(n: Node<'a>) -> Self {
-        let mut k = Kids { buf: [None; 4], len: 0 };
+        let mut k = Kids {
+            buf: [None; 4],
+            len: 0,
+        };
         if n.kind() != K::VectorExpr {
             for c in n.children() {
                 if k.len < 4 {

@@ -28,9 +28,9 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 
+use quick_xml::NsReader;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
-use quick_xml::NsReader;
 use sha2::{Digest, Sha256};
 
 use crate::mesh::{Mesh, MeshRef};
@@ -45,7 +45,12 @@ const MODEL_REL: &str = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3d
 /// linear part, row 3 the translation, in `float`.
 type Fields = [[f32; 3]; 4];
 
-const IDENTITY: Fields = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]];
+const IDENTITY: Fields = [
+    [1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 0.0, 0.0],
+];
 
 #[derive(Debug, Default)]
 struct Tri {
@@ -84,22 +89,34 @@ struct Model {
 /// `import()` call's line, which OpenSCAD's messages quote.
 pub fn read(bytes: Option<&[u8]>, file: &str, line: u32, msgs: &mut Vec<Message>) -> Vec<Mesh> {
     let fail = |msgs: &mut Vec<Message>, why: &str| {
-        msgs.push(Message::warning(format!("Could not read file '{file}', import() at line {line}: Error: GENERICEXCEPTION: {why}")));
+        msgs.push(Message::warning(format!(
+            "Could not read file '{file}', import() at line {line}: Error: GENERICEXCEPTION: {why}"
+        )));
         Vec::new()
     };
-    let Some(bytes) = bytes else { return fail(msgs, "The specified file could not be opened") };
+    let Some(bytes) = bytes else {
+        return fail(msgs, "The specified file could not be opened");
+    };
     if bytes.is_empty() {
         return fail(msgs, "Could not get stream position");
     }
-    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else { return fail(msgs, "Could not read ZIP file") };
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
+        return fail(msgs, "Could not read ZIP file");
+    };
     let model_path = root_model_path(&mut zip).unwrap_or_else(|| "3D/3dmodel.model".to_string());
-    let Some(text) = zip_text(&mut zip, &model_path) else { return fail(msgs, "Could not find 3D model part") };
+    let Some(text) = zip_text(&mut zip, &model_path) else {
+        return fail(msgs, "Could not find 3D model part");
+    };
     let model = match parse_model(&text) {
         Ok(m) => m,
         Err(e) => return fail(msgs, &e),
     };
     if let Some(t) = &model.title {
-        msgs.push(Message { severity: None, text: format!("Reading 3MF with title '{t}'"), located: false });
+        msgs.push(Message {
+            severity: None,
+            text: format!("Reading 3MF with title '{t}'"),
+            located: false,
+        });
     }
     let mut meshes = Vec::new();
     for &(id, transform) in &model.items {
@@ -110,7 +127,9 @@ pub fn read(bytes: Option<&[u8]>, file: &str, line: u32, msgs: &mut Vec<Message>
         }
         for (obj, m) in objects {
             if obj.vertices.is_empty() || obj.tris.is_empty() {
-                msgs.push(Message::warning(format!("Empty mesh, import() at line {line}")));
+                msgs.push(Message::warning(format!(
+                    "Empty mesh, import() at line {line}"
+                )));
                 return Vec::new();
             }
             match to_mesh(&model, obj, &m) {
@@ -124,9 +143,14 @@ pub fn read(bytes: Option<&[u8]>, file: &str, line: u32, msgs: &mut Vec<Message>
 
 fn zip_text(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Option<String> {
     let name = name.trim_start_matches('/');
-    let index = (0..zip.len()).find(|&i| zip.name_for_index(i).is_some_and(|n| n == name)).or_else(|| {
-        (0..zip.len()).find(|&i| zip.name_for_index(i).is_some_and(|n| n.eq_ignore_ascii_case(name)))
-    })?;
+    let index = (0..zip.len())
+        .find(|&i| zip.name_for_index(i).is_some_and(|n| n == name))
+        .or_else(|| {
+            (0..zip.len()).find(|&i| {
+                zip.name_for_index(i)
+                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            })
+        })?;
     let mut f = zip.by_index(index).ok()?;
     let mut s = String::new();
     f.read_to_string(&mut s).ok()?;
@@ -151,30 +175,61 @@ fn root_model_path(zip: &mut zip::ZipArchive<Cursor<&[u8]>>) -> Option<String> {
 }
 
 fn attr(e: &BytesStart<'_>, key: &str) -> Option<String> {
-    e.attributes().flatten().find(|a| a.key.as_ref() == key).and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok()).map(|v| v.into_owned())
+    e.attributes()
+        .flatten()
+        .find(|a| a.key.as_ref() == key)
+        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
+        .map(|v| v.into_owned())
 }
 
-fn num_attr<T: std::str::FromStr>(e: &BytesStart<'_>, key: &str, what: &str) -> Result<Option<T>, String> {
+fn num_attr<T: std::str::FromStr>(
+    e: &BytesStart<'_>,
+    key: &str,
+    what: &str,
+) -> Result<Option<T>, String> {
     match attr(e, key) {
         None => Ok(None),
-        Some(v) => v.trim().parse::<T>().map(Some).map_err(|_| format!("Invalid {what} '{v}'")),
+        Some(v) => v
+            .trim()
+            .parse::<T>()
+            .map(Some)
+            .map_err(|_| format!("Invalid {what} '{v}'")),
     }
 }
 
 fn parse_transform(s: &str) -> Result<Fields, String> {
-    let v: Vec<f32> = s.split_ascii_whitespace().map(|w| parse_f64(w).map(|x| x as f32)).collect::<Option<_>>().ok_or("Invalid transform")?;
+    let v: Vec<f32> = s
+        .split_ascii_whitespace()
+        .map(|w| parse_f64(w).map(|x| x as f32))
+        .collect::<Option<_>>()
+        .ok_or("Invalid transform")?;
     if v.len() != 12 {
         return Err(format!("Invalid transform '{s}'"));
     }
-    Ok([[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]], [v[9], v[10], v[11]]])
+    Ok([
+        [v[0], v[1], v[2]],
+        [v[3], v[4], v[5]],
+        [v[6], v[7], v[8]],
+        [v[9], v[10], v[11]],
+    ])
 }
 
 /// `#RRGGBB` or `#RRGGBBAA`.
 fn parse_color(s: &str) -> Result<[u8; 4], String> {
-    let h = s.trim().strip_prefix('#').filter(|h| (h.len() == 6 || h.len() == 8) && h.bytes().all(|b| b.is_ascii_hexdigit()));
-    let Some(h) = h else { return Err(format!("Invalid color '{s}'")) };
+    let h = s
+        .trim()
+        .strip_prefix('#')
+        .filter(|h| (h.len() == 6 || h.len() == 8) && h.bytes().all(|b| b.is_ascii_hexdigit()));
+    let Some(h) = h else {
+        return Err(format!("Invalid color '{s}'"));
+    };
     let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
-    Ok([byte(0), byte(2), byte(4), if h.len() == 8 { byte(6) } else { 255 }])
+    Ok([
+        byte(0),
+        byte(2),
+        byte(4),
+        if h.len() == 8 { byte(6) } else { 255 },
+    ])
 }
 
 fn parse_model(text: &str) -> Result<Model, String> {
@@ -198,7 +253,8 @@ fn parse_model(text: &str) -> Result<Model, String> {
                 let name = e.local_name();
                 match (core, material, name.as_ref()) {
                     (true, _, "object") => {
-                        let id = num_attr::<u32>(e, "id", "resource id")?.ok_or("Missing object id")?;
+                        let id =
+                            num_attr::<u32>(e, "id", "resource id")?.ok_or("Missing object id")?;
                         let o = Object {
                             pid: num_attr(e, "pid", "property id")?,
                             pindex: num_attr(e, "pindex", "property index")?.unwrap_or(0),
@@ -214,18 +270,27 @@ fn parse_model(text: &str) -> Result<Model, String> {
                         if let Some((_, o)) = object.as_mut() {
                             let c = |k: &str| -> Result<f32, String> {
                                 let v = attr(e, k).ok_or("Missing vertex coordinate")?;
-                                parse_f64(v.trim()).map(|x| x as f32).ok_or(format!("Invalid vertex coordinate '{v}'"))
+                                parse_f64(v.trim())
+                                    .map(|x| x as f32)
+                                    .ok_or(format!("Invalid vertex coordinate '{v}'"))
                             };
                             o.vertices.push([c("x")?, c("y")?, c("z")?]);
                         }
                     }
                     (true, _, "triangle") => {
                         if let Some((_, o)) = object.as_mut() {
-                            let v = |k: &str| -> Result<u32, String> { num_attr::<u32>(e, k, "vertex index")?.ok_or("Missing vertex index".into()) };
+                            let v = |k: &str| -> Result<u32, String> {
+                                num_attr::<u32>(e, k, "vertex index")?
+                                    .ok_or("Missing vertex index".into())
+                            };
                             o.tris.push(Tri {
                                 v: [v("v1")?, v("v2")?, v("v3")?],
                                 pid: num_attr(e, "pid", "property id")?,
-                                p: [num_attr(e, "p1", "property index")?, num_attr(e, "p2", "property index")?, num_attr(e, "p3", "property index")?],
+                                p: [
+                                    num_attr(e, "p1", "property index")?,
+                                    num_attr(e, "p2", "property index")?,
+                                    num_attr(e, "p3", "property index")?,
+                                ],
                             });
                         }
                     }
@@ -236,16 +301,27 @@ fn parse_model(text: &str) -> Result<Model, String> {
                     }
                     (true, _, "component") => {
                         if let Some((_, o)) = object.as_mut() {
-                            let id = num_attr::<u32>(e, "objectid", "object id")?.ok_or("Missing component object id")?;
-                            let t = attr(e, "transform").map(|t| parse_transform(&t)).transpose()?;
+                            let id = num_attr::<u32>(e, "objectid", "object id")?
+                                .ok_or("Missing component object id")?;
+                            let t = attr(e, "transform")
+                                .map(|t| parse_transform(&t))
+                                .transpose()?;
                             o.components.push((id, t));
                         }
                     }
                     (true, _, "basematerials") | (_, true, "colorgroup") => {
-                        let id = num_attr::<u32>(e, "id", "resource id")?.ok_or("Missing resource id")?;
+                        let id = num_attr::<u32>(e, "id", "resource id")?
+                            .ok_or("Missing resource id")?;
                         let is_base = name.as_ref() == "basematerials";
                         if empty {
-                            model.resources.insert(id, if is_base { Resource::Base(Vec::new()) } else { Resource::Colors(Vec::new()) });
+                            model.resources.insert(
+                                id,
+                                if is_base {
+                                    Resource::Base(Vec::new())
+                                } else {
+                                    Resource::Colors(Vec::new())
+                                },
+                            );
                         } else {
                             group = Some((id, is_base, Vec::new()));
                         }
@@ -266,11 +342,16 @@ fn parse_model(text: &str) -> Result<Model, String> {
                     }
                     (true, _, "build") => in_build = !empty,
                     (true, _, "item") if in_build => {
-                        let id = num_attr::<u32>(e, "objectid", "object id")?.ok_or("Missing build item object id")?;
-                        let t = attr(e, "transform").map(|t| parse_transform(&t)).transpose()?;
+                        let id = num_attr::<u32>(e, "objectid", "object id")?
+                            .ok_or("Missing build item object id")?;
+                        let t = attr(e, "transform")
+                            .map(|t| parse_transform(&t))
+                            .transpose()?;
                         model.items.push((id, t));
                     }
-                    (true, _, "metadata") => title_meta = !empty && attr(e, "name").as_deref() == Some("Title"),
+                    (true, _, "metadata") => {
+                        title_meta = !empty && attr(e, "name").as_deref() == Some("Title")
+                    }
                     _ => {}
                 }
             }
@@ -281,27 +362,34 @@ fn parse_model(text: &str) -> Result<Model, String> {
             Event::GeneralRef(g) if title_meta => {
                 let s = match g.resolve_char_ref() {
                     Ok(Some(c)) => c.to_string(),
-                    _ => quick_xml::escape::resolve_predefined_entity(&g).unwrap_or("").to_string(),
+                    _ => quick_xml::escape::resolve_predefined_entity(&g)
+                        .unwrap_or("")
+                        .to_string(),
                 };
                 model.title.get_or_insert_with(String::new).push_str(&s);
             }
-            Event::End(ref e) => {
-                match (core, material, e.local_name().as_ref()) {
-                    (true, _, "object") => {
-                        if let Some((id, o)) = object.take() {
-                            model.resources.insert(id, Resource::Object(o));
-                        }
+            Event::End(ref e) => match (core, material, e.local_name().as_ref()) {
+                (true, _, "object") => {
+                    if let Some((id, o)) = object.take() {
+                        model.resources.insert(id, Resource::Object(o));
                     }
-                    (true, _, "basematerials") | (_, true, "colorgroup") => {
-                        if let Some((id, is_base, g)) = group.take() {
-                            model.resources.insert(id, if is_base { Resource::Base(g) } else { Resource::Colors(g) });
-                        }
-                    }
-                    (true, _, "build") => in_build = false,
-                    (true, _, "metadata") => title_meta = false,
-                    _ => {}
                 }
-            }
+                (true, _, "basematerials") | (_, true, "colorgroup") => {
+                    if let Some((id, is_base, g)) = group.take() {
+                        model.resources.insert(
+                            id,
+                            if is_base {
+                                Resource::Base(g)
+                            } else {
+                                Resource::Colors(g)
+                            },
+                        );
+                    }
+                }
+                (true, _, "build") => in_build = false,
+                (true, _, "metadata") => title_meta = false,
+                _ => {}
+            },
             Event::Eof => break,
             _ => {}
         }
@@ -327,7 +415,13 @@ fn mul(a: &[[f64; 4]; 4], b: &[[f64; 4]; 4]) -> [[f64; 4]; 4] {
 
 /// `collect_mesh_objects`. Errors are problems lib3mf would have reported
 /// while reading (a missing or recursive reference).
-fn collect<'m>(model: &'m Model, id: u32, m: [[f64; 4]; 4], out: &mut Vec<(&'m Object, [[f64; 4]; 4])>, depth: u32) -> Result<(), String> {
+fn collect<'m>(
+    model: &'m Model,
+    id: u32,
+    m: [[f64; 4]; 4],
+    out: &mut Vec<(&'m Object, [[f64; 4]; 4])>,
+    depth: u32,
+) -> Result<(), String> {
     let Some(Resource::Object(o)) = model.resources.get(&id) else {
         return Err(format!("Could not find object resource {id}"));
     };
@@ -343,7 +437,12 @@ fn collect<'m>(model: &'m Model, id: u32, m: [[f64; 4]; 4], out: &mut Vec<(&'m O
         // stand-in then has {0, 0, 1} as its translation row.
         let t = match t {
             Some(t) if *t != IDENTITY => *t,
-            _ => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+            _ => [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
         };
         collect(model, *child, mul(&get_matrix(&t), &m), out, depth + 1)?;
     }
@@ -386,15 +485,26 @@ fn to_mesh(model: &Model, o: &Object, m: &[[f64; 4]; 4]) -> Result<Mesh, String>
 
 fn triangle_color(model: &Model, o: &Object, t: &Tri) -> Option<Color> {
     let (pid, p) = match (t.pid, t.p[0]) {
-        (Some(pid), p1) => (pid, [p1.unwrap_or(o.pindex), t.p[1].or(p1).unwrap_or(o.pindex), t.p[2].or(p1).unwrap_or(o.pindex)]),
+        (Some(pid), p1) => (
+            pid,
+            [
+                p1.unwrap_or(o.pindex),
+                t.p[1].or(p1).unwrap_or(o.pindex),
+                t.p[2].or(p1).unwrap_or(o.pindex),
+            ],
+        ),
         (None, Some(p1)) => (o.pid?, [p1, t.p[1].unwrap_or(p1), t.p[2].unwrap_or(p1)]),
         (None, None) => (o.pid?, [o.pindex; 3]),
     };
-    let to_color = |c: &[u8; 4]| Color::from_ints(c[0].into(), c[1].into(), c[2].into(), c[3].into());
+    let to_color =
+        |c: &[u8; 4]| Color::from_ints(c[0].into(), c[1].into(), c[2].into(), c[3].into());
     match model.resources.get(&pid)? {
         Resource::Base(b) => b.get(p[0] as usize).map(to_color),
         Resource::Colors(g) => {
-            let cs: Vec<Color> = p.iter().map(|&i| g.get(i as usize).filter(|c| **c != [0; 4]).map(to_color)).collect::<Option<_>>()?;
+            let cs: Vec<Color> = p
+                .iter()
+                .map(|&i| g.get(i as usize).filter(|c| **c != [0; 4]).map(to_color))
+                .collect::<Option<_>>()?;
             let mean = |k: usize| ((cs[0].0[k] + cs[1].0[k] + cs[2].0[k]) / 3.0).clamp(0.0, 1.0);
             Some(Color([mean(0), mean(1), mean(2), mean(3)]))
         }
@@ -453,7 +563,14 @@ fn uuid(seed: &[u8], n: u8) -> String {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let x: String = b.iter().map(|v| format!("{v:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &x[..8], &x[8..12], &x[12..16], &x[16..20], &x[20..])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &x[..8],
+        &x[8..12],
+        &x[12..16],
+        &x[16..20],
+        &x[20..]
+    )
 }
 
 fn hex_color(c: [i32; 4]) -> String {
@@ -468,10 +585,22 @@ pub fn write(mesh: MeshRef<'_>, opts: &WriteOptions<'_>) -> (Vec<u8>, Vec<Messag
     let mut msgs = Vec::new();
     let invalid = || Message::warning("Invalid color in 3MF export");
     // `NMR_MESH_MAXCOORDINATE`: lib3mf refuses a vertex beyond 1e9 mm.
-    if mesh.vertices.iter().flatten().any(|c| (c.abs() as f32) > 1.0e9) {
-        let e = |t: &str| Message { severity: Some(Severity::Error), text: t.into(), located: false };
+    if mesh
+        .vertices
+        .iter()
+        .flatten()
+        .any(|c| (c.abs() as f32) > 1.0e9)
+    {
+        let e = |t: &str| Message {
+            severity: Some(Severity::Error),
+            text: t.into(),
+            located: false,
+        };
         msgs.push(Message { text: format!("EXPORT-ERROR: {}", "Error: GENERICEXCEPTION: The coordinates exceed NMR_MESH_MAXCOORDINATE (= 1 billion mm)"), ..e("") });
-        msgs.push(Message { text: "EXPORT-ERROR: Can't add vertex to 3MF model.".into(), ..e("") });
+        msgs.push(Message {
+            text: "EXPORT-ERROR: Can't add vertex to 3MF model.".into(),
+            ..e("")
+        });
         return (Vec::new(), msgs);
     }
     let default = opts.default_color.rgba_int().unwrap_or_else(|| {
@@ -481,7 +610,8 @@ pub fn write(mesh: MeshRef<'_>, opts: &WriteOptions<'_>) -> (Vec<u8>, Vec<Messag
     // Base materials: "Default" first (alpha forced opaque), then one per
     // new face colour, in face order. The map starts with the scheme colour
     // itself, so faces of exactly that colour use "Default".
-    let mut materials: Vec<(String, [i32; 4])> = vec![("Default".into(), [default[0], default[1], default[2], 255])];
+    let mut materials: Vec<(String, [i32; 4])> =
+        vec![("Default".into(), [default[0], default[1], default[2], 255])];
     let mut by_color: HashMap<[u32; 4], usize> = HashMap::new();
     by_color.insert(opts.default_color.0.map(f32::to_bits), 0);
     let mut tri_prop: Vec<usize> = Vec::with_capacity(mesh.faces.len());
@@ -502,17 +632,29 @@ pub fn write(mesh: MeshRef<'_>, opts: &WriteOptions<'_>) -> (Vec<u8>, Vec<Messag
     let mut body = String::with_capacity(mesh.vertices.len() * 64 + mesh.faces.len() * 64);
     body.push_str("\t\t<basematerials id=\"1\">\n");
     for (name, c) in &materials {
-        body.push_str(&format!("\t\t\t<base name=\"{}\" displaycolor=\"{}\"/>\n", xml_escape(name), hex_color(*c)));
+        body.push_str(&format!(
+            "\t\t\t<base name=\"{}\" displaycolor=\"{}\"/>\n",
+            xml_escape(name),
+            hex_color(*c)
+        ));
     }
     body.push_str("\t\t</basematerials>\n");
     let mut geometry = String::with_capacity(body.capacity());
     geometry.push_str("\t\t\t<mesh>\n\t\t\t\t<vertices>\n");
     for v in mesh.vertices {
-        geometry.push_str(&format!("\t\t\t\t\t<vertex x=\"{}\" y=\"{}\" z=\"{}\" />\n", lib3mf_float(v[0]), lib3mf_float(v[1]), lib3mf_float(v[2])));
+        geometry.push_str(&format!(
+            "\t\t\t\t\t<vertex x=\"{}\" y=\"{}\" z=\"{}\" />\n",
+            lib3mf_float(v[0]),
+            lib3mf_float(v[1]),
+            lib3mf_float(v[2])
+        ));
     }
     geometry.push_str("\t\t\t\t</vertices>\n\t\t\t\t<triangles>\n");
     for (f, &prop) in mesh.faces.iter().zip(&tri_prop) {
-        geometry.push_str(&format!("\t\t\t\t\t<triangle v1=\"{}\" v2=\"{}\" v3=\"{}\"", f[0], f[1], f[2]));
+        geometry.push_str(&format!(
+            "\t\t\t\t\t<triangle v1=\"{}\" v2=\"{}\" v3=\"{}\"",
+            f[0], f[1], f[2]
+        ));
         // lib3mf leaves out properties equal to the object's default.
         if prop != 0 {
             geometry.push_str(&format!(" pid=\"1\" p1=\"{prop}\""));
@@ -524,9 +666,16 @@ pub fn write(mesh: MeshRef<'_>, opts: &WriteOptions<'_>) -> (Vec<u8>, Vec<Messag
     let mut xml = String::with_capacity(body.len() + geometry.len() + 2048);
     xml.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     xml.push_str("<model xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\" unit=\"millimeter\" xml:lang=\"en-US\" xmlns:m=\"http://schemas.microsoft.com/3dmanufacturing/material/2015/02\" xmlns:p=\"http://schemas.microsoft.com/3dmanufacturing/production/2015/06\" xmlns:b=\"http://schemas.microsoft.com/3dmanufacturing/beamlattice/2017/02\" xmlns:s=\"http://schemas.microsoft.com/3dmanufacturing/slice/2015/07\" xmlns:t=\"http://schemas.microsoft.com/3dmanufacturing/trianglesets/2021/07\" xmlns:sc=\"http://schemas.microsoft.com/3dmanufacturing/securecontent/2019/04\" xmlns:v=\"http://schemas.3mf.io/3dmanufacturing/volumetric/2022/01\" xmlns:i=\"http://schemas.3mf.io/3dmanufacturing/implicit/2023/12\">\n");
-    for (name, value) in [("Title", opts.title), ("Application", "OpenSCAD (https://www.openscad.org/)"), ("CreationDate", opts.creation_date)] {
+    for (name, value) in [
+        ("Title", opts.title),
+        ("Application", "OpenSCAD (https://www.openscad.org/)"),
+        ("CreationDate", opts.creation_date),
+    ] {
         if !value.is_empty() {
-            xml.push_str(&format!("\t<metadata name=\"{name}\" preserve=\"1\">{}</metadata>\n", xml_escape(value)));
+            xml.push_str(&format!(
+                "\t<metadata name=\"{name}\" preserve=\"1\">{}</metadata>\n",
+                xml_escape(value)
+            ));
         }
     }
     xml.push_str("\t<resources>\n");
@@ -537,7 +686,11 @@ pub fn write(mesh: MeshRef<'_>, opts: &WriteOptions<'_>) -> (Vec<u8>, Vec<Messag
     ));
     xml.push_str(&geometry);
     xml.push_str("\t\t</object>\n\t</resources>\n");
-    xml.push_str(&format!("\t<build p:UUID=\"{}\">\n\t\t<item objectid=\"2\" p:UUID=\"{}\"/>\n\t</build>\n</model>\n", uuid(&seed, 1), uuid(&seed, 2)));
+    xml.push_str(&format!(
+        "\t<build p:UUID=\"{}\">\n\t\t<item objectid=\"2\" p:UUID=\"{}\"/>\n\t</build>\n</model>\n",
+        uuid(&seed, 1),
+        uuid(&seed, 2)
+    ));
     (package(&xml), msgs)
 }
 
@@ -548,8 +701,13 @@ const RELS: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Relationships x
 /// The OPC package, with lib3mf's part order.
 fn package(model: &str) -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    for (name, text) in [("3D/3dmodel.model", model), ("[Content_Types].xml", CONTENT_TYPES), ("_rels/.rels", RELS)] {
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, text) in [
+        ("3D/3dmodel.model", model),
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", RELS),
+    ] {
         // Writing to memory cannot fail.
         zip.start_file(name, opts).expect("zip entry");
         zip.write_all(text.as_bytes()).expect("zip write");
@@ -582,7 +740,12 @@ mod tests {
 
     fn tet(colors: Vec<Color>, color_indices: Vec<i32>) -> Mesh {
         Mesh {
-            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
             faces: vec![vec![0, 2, 1], vec![0, 1, 3], vec![0, 3, 2], vec![1, 2, 3]],
             colors,
             color_indices,
@@ -594,7 +757,11 @@ mod tests {
         let red = Color::from_u8(255, 0, 0);
         let front = Color::from_u8(0xf9, 0xd7, 0x2c);
         let m = tet(vec![red, front], vec![0, 1, -1, 0]);
-        let opts = WriteOptions { title: "t.scad", creation_date: "2026-09-26T00:00:00Z", default_color: front };
+        let opts = WriteOptions {
+            title: "t.scad",
+            creation_date: "2026-09-26T00:00:00Z",
+            default_color: front,
+        };
         let (bytes, msgs) = write(m.as_ref(), &opts);
         assert!(msgs.is_empty());
         let mut msgs = Vec::new();
@@ -605,7 +772,9 @@ mod tests {
         assert_eq!(back[0].vertices, m.vertices);
         assert_eq!(back[0].faces, m.faces);
         // Uncoloured faces read back with the default material's colour.
-        let colors: Vec<Option<Color>> = (0..4).map(|i| back[0].as_ref().face_color(i).copied()).collect();
+        let colors: Vec<Option<Color>> = (0..4)
+            .map(|i| back[0].as_ref().face_color(i).copied())
+            .collect();
         assert_eq!(colors, vec![Some(red), Some(front), Some(front), Some(red)]);
         // Deterministic output.
         assert_eq!(write(m.as_ref(), &opts).0, bytes);
@@ -615,7 +784,10 @@ mod tests {
     fn unreadable_files() {
         let mut msgs = Vec::new();
         assert!(read(Some(b"garbage"), "g.3mf", 3, &mut msgs).is_empty());
-        assert_eq!(msgs[0].text, "Could not read file 'g.3mf', import() at line 3: Error: GENERICEXCEPTION: Could not read ZIP file");
+        assert_eq!(
+            msgs[0].text,
+            "Could not read file 'g.3mf', import() at line 3: Error: GENERICEXCEPTION: Could not read ZIP file"
+        );
         assert_eq!(msgs[0].severity, Some(Severity::Warning));
     }
 }

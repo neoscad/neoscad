@@ -144,14 +144,20 @@ impl Manifest {
         head.tests.clear();
         let head = serde_json::to_string_pretty(&head).map_err(|e| e.to_string())?;
         let stub = "\"tests\": []\n}";
-        let body = head.strip_suffix(stub).ok_or("unexpected manifest layout")?;
+        let body = head
+            .strip_suffix(stub)
+            .ok_or("unexpected manifest layout")?;
         let mut out = String::with_capacity(self.tests.len() * 400);
         out.push_str(body);
         out.push_str("\"tests\": [\n");
         for (i, t) in self.tests.iter().enumerate() {
             out.push_str("    ");
             out.push_str(&serde_json::to_string(t).map_err(|e| e.to_string())?);
-            out.push_str(if i + 1 < self.tests.len() { ",\n" } else { "\n" });
+            out.push_str(if i + 1 < self.tests.len() {
+                ",\n"
+            } else {
+                "\n"
+            });
         }
         out.push_str("  ]\n}\n");
         Ok(out)
@@ -169,18 +175,29 @@ impl Manifest {
 /// `ref_root` is the absolute reference checkout; `binpath` is the value
 /// the CMake file computed for OPENSCAD_BINPATH, rewritten to `{OPENSCAD}`.
 pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> Manifest {
-    let binpath = eval.vars.get("OPENSCAD_BINPATH").cloned().unwrap_or_default();
+    let binpath = eval
+        .vars
+        .get("OPENSCAD_BINPATH")
+        .cloned()
+        .unwrap_or_default();
     let rel = |p: &str| -> String {
         p.strip_prefix(ref_root)
             .map(|s| s.trim_start_matches('/').to_string())
             .unwrap_or_else(|| p.to_string())
     };
     let placeholder = |a: &str| -> String {
-        let a = if binpath.is_empty() { a.to_string() } else { a.replace(&binpath, "{OPENSCAD}") };
+        let a = if binpath.is_empty() {
+            a.to_string()
+        } else {
+            a.replace(&binpath, "{OPENSCAD}")
+        };
         a.replace(ref_root, "{REF}")
     };
 
-    let default_exclude_line = eval.registrations.first().and_then(|r| r.exclude_line.clone());
+    let default_exclude_line = eval
+        .registrations
+        .first()
+        .and_then(|r| r.exclude_line.clone());
     let mut tests = Vec::new();
     for r in &eval.registrations {
         let tier = tier_of(r);
@@ -196,7 +213,10 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
         };
         let expected = (r.kind == RegKind::Cmdline).then(|| {
             let dir = r.expected_dir.as_deref().unwrap_or(&r.group);
-            format!("tests/regression/{dir}/{}-expected.{}", r.basename, r.suffix)
+            format!(
+                "tests/regression/{dir}/{}-expected.{}",
+                r.basename, r.suffix
+            )
         });
         tests.push(Case {
             id: r.name.clone(),
@@ -262,13 +282,19 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
             generator: None,
         })
         .collect();
-    let needs_issue2342 = tests
-        .iter()
-        .any(|t| t.input.as_deref().is_some_and(|i| i.ends_with("/issues/issue2342.scad")));
+    let needs_issue2342 = tests.iter().any(|t| {
+        t.input
+            .as_deref()
+            .is_some_and(|i| i.ends_with("/issues/issue2342.scad"))
+    });
     if needs_issue2342 {
         let out = tests
             .iter()
-            .find_map(|t| t.input.clone().filter(|i| i.ends_with("/issues/issue2342.scad")))
+            .find_map(|t| {
+                t.input
+                    .clone()
+                    .filter(|i| i.ends_with("/issues/issue2342.scad"))
+            })
             .expect("checked above");
         generated_files.push(Generated {
             output: out,
@@ -281,7 +307,10 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
     Manifest {
         schema: SCHEMA,
         generated_by: "cargo run --release -p neoscad-conformance -- manifest".into(),
-        reference: Reference { path: ref_rel.into(), commit: commit.into() },
+        reference: Reference {
+            path: ref_rel.into(),
+            commit: commit.into(),
+        },
         tier_names: TIER_NAMES.iter().map(|s| s.to_string()).collect(),
         counts,
         skip_reasons,
@@ -336,9 +365,16 @@ fn tier_of(r: &Registration) -> u8 {
         "png" => {
             let renders = has_arg(r, |a| a.starts_with("--render"));
             let renderer_specific = has_arg(r, |a| {
-                ["--camera", "--view", "--colorscheme", "--imgsize", "--projection", "--preview"]
-                    .iter()
-                    .any(|p| a.starts_with(p))
+                [
+                    "--camera",
+                    "--view",
+                    "--colorscheme",
+                    "--imgsize",
+                    "--projection",
+                    "--preview",
+                ]
+                .iter()
+                .any(|p| a.starts_with(p))
             });
             if renders && !renderer_specific { 3 } else { 4 }
         }
@@ -350,16 +386,13 @@ fn tier_of(r: &Registration) -> u8 {
 /// wins, so each skipped test is counted under one reason.
 fn skip_reason(r: &Registration) -> Option<String> {
     if r.experimental {
-        let feature = r
-            .test_args
-            .iter()
-            .enumerate()
-            .find_map(|(i, a)| {
-                a.strip_prefix("--enable=")
-                    .map(String::from)
-                    .or_else(|| (a == "--enable").then(|| r.test_args.get(i + 1).cloned()).flatten())
+        let feature = r.test_args.iter().enumerate().find_map(|(i, a)| {
+            a.strip_prefix("--enable=").map(String::from).or_else(|| {
+                (a == "--enable")
+                    .then(|| r.test_args.get(i + 1).cloned())
+                    .flatten()
             })
-            ;
+        });
         return Some(match feature {
             Some(f) => format!("experimental feature ({f})"),
             // Registered EXPERIMENTAL without an --enable flag
@@ -380,7 +413,11 @@ fn skip_reason(r: &Registration) -> Option<String> {
     if r.configs.iter().any(|c| c == "Bugs") {
         return Some("known upstream bug (Bugs config)".into());
     }
-    if r.kind == RegKind::Raw && r.command.iter().any(|c| c.ends_with("test_pretty_print_logfile.py")) {
+    if r.kind == RegKind::Raw
+        && r.command
+            .iter()
+            .any(|c| c.ends_with("test_pretty_print_logfile.py"))
+    {
         return Some("tests OpenSCAD's own harness".into());
     }
     None

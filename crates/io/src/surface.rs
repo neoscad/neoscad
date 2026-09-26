@@ -13,9 +13,9 @@
 //! weighted by the Rec. 709 luma coefficients into 0..100; rows are flipped
 //! so the image's top row is at the largest y.
 
+use crate::Message;
 use crate::mesh::{Mesh, MeshBuilder};
 use crate::text::{Lines, parse_f64, trim};
-use crate::Message;
 
 /// A heightmap: row-major, row 0 at y = 0.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -31,7 +31,9 @@ pub struct Heightmap {
 /// `read_png_or_dat`: `bytes` is `None` when the file could not be opened.
 pub fn read(bytes: Option<&[u8]>, file: &str, invert: bool, msgs: &mut Vec<Message>) -> Heightmap {
     let Some(bytes) = bytes else {
-        msgs.push(Message::warning(format!("The file '{file}' couldn't be opened.")));
+        msgs.push(Message::warning(format!(
+            "The file '{file}' couldn't be opened."
+        )));
         return Heightmap::default();
     };
     if !bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
@@ -56,21 +58,34 @@ fn read_png(bytes: &[u8], invert: bool) -> Option<Heightmap> {
     let channels = info.color_type.samples();
     let wide = info.bit_depth == png::BitDepth::Sixteen;
     let sample = |i: usize| -> u16 {
-        if wide { u16::from_be_bytes([buf[2 * i], buf[2 * i + 1]]) } else { u16::from(buf[i]) * 257 }
+        if wide {
+            u16::from_be_bytes([buf[2 * i], buf[2 * i + 1]])
+        } else {
+            u16::from(buf[i]) * 257
+        }
     };
     let mut data = vec![0.0; width * height];
     let mut min_val = 200.0f64;
     for y in 0..height {
         for x in 0..width {
             let p = (y * width + x) * channels;
-            let (r, g, b) = if channels >= 3 { (sample(p), sample(p + 1), sample(p + 2)) } else { (sample(p), sample(p), sample(p)) };
+            let (r, g, b) = if channels >= 3 {
+                (sample(p), sample(p + 1), sample(p + 2))
+            } else {
+                (sample(p), sample(p), sample(p))
+            };
             let pixel = 0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b);
             let z = 100.0 / 65535.0 * if invert { 0.0 - pixel } else { pixel };
             data[x + width * (height - 1 - y)] = z;
             min_val = z.min(min_val);
         }
     }
-    Some(Heightmap { width, height, data, min_val })
+    Some(Heightmap {
+        width,
+        height,
+        data,
+        min_val,
+    })
 }
 
 /// `read_dat`: rows of numbers separated by spaces or tabs; blank lines
@@ -120,7 +135,12 @@ pub fn read_dat(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Heightmap 
     for (i, row) in rows.iter().enumerate() {
         data[i * columns..i * columns + row.len()].copy_from_slice(row);
     }
-    Heightmap { width: columns, height, data, min_val }
+    Heightmap {
+        width: columns,
+        height,
+        data,
+        min_val,
+    }
 }
 
 /// `SurfaceNode::createGeometry` for a heightmap.
@@ -128,8 +148,16 @@ pub fn mesh(h: &Heightmap, center: bool) -> Mesh {
     let lines = h.height as i64;
     let columns = h.width as i64;
     let min_val = h.min_val - 1.0;
-    let ox = if center { -((columns - 1) as f64) / 2.0 } else { 0.0 };
-    let oy = if center { -((lines - 1) as f64) / 2.0 } else { 0.0 };
+    let ox = if center {
+        -((columns - 1) as f64) / 2.0
+    } else {
+        0.0
+    };
+    let oy = if center {
+        -((lines - 1) as f64) / 2.0
+    } else {
+        0.0
+    };
     let d = |x: i64, y: i64| h.data[(x + y * columns) as usize];
     let p = |x: f64, y: f64, z: f64| [ox + x, oy + y, z];
     let mut b = MeshBuilder::new();
@@ -149,17 +177,42 @@ pub fn mesh(h: &Heightmap, center: bool) -> Mesh {
     let last_l = (lines - 1) as f64;
     // Edges along Y.
     for i in 1..lines {
-        let (v1, v2, v3, v4) = (d(0, i - 1), d(0, i), d(columns - 1, i - 1), d(columns - 1, i));
+        let (v1, v2, v3, v4) = (
+            d(0, i - 1),
+            d(0, i),
+            d(columns - 1, i - 1),
+            d(columns - 1, i),
+        );
         let fi = i as f64;
-        b.append_polygon(&[p(0.0, fi - 1.0, min_val), p(0.0, fi - 1.0, v1), p(0.0, fi, v2), p(0.0, fi, min_val)]);
-        b.append_polygon(&[p(last_c, fi, min_val), p(last_c, fi, v4), p(last_c, fi - 1.0, v3), p(last_c, fi - 1.0, min_val)]);
+        b.append_polygon(&[
+            p(0.0, fi - 1.0, min_val),
+            p(0.0, fi - 1.0, v1),
+            p(0.0, fi, v2),
+            p(0.0, fi, min_val),
+        ]);
+        b.append_polygon(&[
+            p(last_c, fi, min_val),
+            p(last_c, fi, v4),
+            p(last_c, fi - 1.0, v3),
+            p(last_c, fi - 1.0, min_val),
+        ]);
     }
     // Edges along X.
     for i in 1..columns {
         let (v1, v2, v3, v4) = (d(i - 1, 0), d(i, 0), d(i - 1, lines - 1), d(i, lines - 1));
         let fi = i as f64;
-        b.append_polygon(&[p(fi, 0.0, min_val), p(fi, 0.0, v2), p(fi - 1.0, 0.0, v1), p(fi - 1.0, 0.0, min_val)]);
-        b.append_polygon(&[p(fi - 1.0, last_l, min_val), p(fi - 1.0, last_l, v3), p(fi, last_l, v4), p(fi, last_l, min_val)]);
+        b.append_polygon(&[
+            p(fi, 0.0, min_val),
+            p(fi, 0.0, v2),
+            p(fi - 1.0, 0.0, v1),
+            p(fi - 1.0, 0.0, min_val),
+        ]);
+        b.append_polygon(&[
+            p(fi - 1.0, last_l, min_val),
+            p(fi - 1.0, last_l, v3),
+            p(fi, last_l, v4),
+            p(fi, last_l, min_val),
+        ]);
     }
     // The bottom, one below the lowest height.
     if columns > 1 && lines > 1 {

@@ -171,14 +171,26 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `Parameters::parse(arguments, loc, required, optional)`, pushed.
-    fn params(&mut self, args: Vec<ArgVal>, loc: Loc, required: &[&str], optional: &[&str], caller: &'static str) -> Params {
+    fn params(
+        &mut self,
+        args: Vec<ArgVal>,
+        loc: Loc,
+        required: &[&str],
+        optional: &[&str],
+        caller: &'static str,
+    ) -> Params {
         let req: Vec<Sym> = required.iter().map(|s| self.sym(s)).collect();
         let opt: Vec<Sym> = optional.iter().map(|s| self.sym(s)).collect();
         let vars = self.bind_builtin(args, loc, &req, &opt, true);
         let frame = Ctx::new(None, CtxKind::Plain);
         *frame.vars.borrow_mut() = vars;
         let mark = self.push(frame.clone());
-        Params { frame, loc, mark, caller }
+        Params {
+            frame,
+            loc,
+            mark,
+            caller,
+        }
     }
 
     fn end(&mut self, p: Params) {
@@ -189,7 +201,11 @@ impl<'a> Evaluator<'a> {
     /// on it), others from the frame.
     fn lookup_param(&mut self, p: &Params, name: &str) -> Option<Value> {
         let s = self.sym(name);
-        if self.syms.is_config(s) { self.lookup_special(s) } else { p.frame.get_local(s) }
+        if self.syms.is_config(s) {
+            self.lookup_special(s)
+        } else {
+            p.frame.get_local(s)
+        }
     }
 
     fn get(&mut self, p: &Params, name: &str) -> Value {
@@ -217,7 +233,14 @@ impl<'a> Evaluator<'a> {
     fn convert_warning(&mut self, p: &Params, name: &str, v: &Value, expected: Type) {
         let mut t = format!("{}(..., {name}=", p.caller).into_bytes();
         self.write_echo_nothrow(v, &mut t);
-        t.extend_from_slice(format!(") Invalid type: expected {}, found {}", expected.name(), v.type_name()).as_bytes());
+        t.extend_from_slice(
+            format!(
+                ") Invalid type: expected {}, found {}",
+                expected.name(),
+                v.type_name()
+            )
+            .as_bytes(),
+        );
         self.warn(p.loc, DiagCode::InvalidArgument, t);
     }
 
@@ -271,15 +294,27 @@ impl<'a> Evaluator<'a> {
         let mut fs = self.get(p, "$fs").to_f64();
         let mut fa = self.get(p, "$fa").to_f64();
         if fn_ < 0.0 {
-            self.warn(p.loc, DiagCode::InvalidArgument, "$fn negative - setting to 0");
+            self.warn(
+                p.loc,
+                DiagCode::InvalidArgument,
+                "$fn negative - setting to 0",
+            );
             fn_ = 0.0;
         }
         if fs < F_MINIMUM {
-            self.warn(p.loc, DiagCode::InvalidArgument, format!("$fs too small - clamping to {F_MINIMUM:.6}"));
+            self.warn(
+                p.loc,
+                DiagCode::InvalidArgument,
+                format!("$fs too small - clamping to {F_MINIMUM:.6}"),
+            );
             fs = F_MINIMUM;
         }
         if fa < F_MINIMUM {
-            self.warn(p.loc, DiagCode::InvalidArgument, format!("$fa too small - clamping to {F_MINIMUM:.6}"));
+            self.warn(
+                p.loc,
+                DiagCode::InvalidArgument,
+                format!("$fa too small - clamping to {F_MINIMUM:.6}"),
+            );
             fa = F_MINIMUM;
         }
         Discretizer { fn_, fa, fs }
@@ -297,7 +332,10 @@ impl<'a> Evaluator<'a> {
     fn no_children(&mut self, sr: ScopeRef, i: usize) {
         let cs = self.children_scope(sr, i);
         if !self.scope(cs).instantiations.is_empty() {
-            let t = format!("module {}() does not support child modules", self.name(self.inst_name(sr, i)));
+            let t = format!(
+                "module {}() does not support child modules",
+                self.name(self.inst_name(sr, i))
+            );
             let loc = self.inst_loc(sr, i);
             self.warn(loc, DiagCode::ArgumentMismatch, t);
         }
@@ -309,13 +347,28 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Instantiate children into `node` and return it.
-    fn with_children(&mut self, mut node: Node, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
-        let ch = Children { scope: self.children_scope(sr, i), ctx: ctx.clone() };
+    fn with_children(
+        &mut self,
+        mut node: Node,
+        sr: ScopeRef,
+        i: usize,
+        ctx: &Rc<Ctx>,
+    ) -> R<Option<Node>> {
+        let ch = Children {
+            scope: self.children_scope(sr, i),
+            ctx: ctx.clone(),
+        };
         self.instantiate_children(&ch, &mut node.children, None)?;
         Ok(Some(node))
     }
 
-    pub fn builtin_module(&mut self, b: BuiltinModule, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
+    pub fn builtin_module(
+        &mut self,
+        b: BuiltinModule,
+        sr: ScopeRef,
+        i: usize,
+        ctx: &Rc<Ctx>,
+    ) -> R<Option<Node>> {
         use BuiltinModule as B;
         let loc = self.inst_loc(sr, i);
         match b {
@@ -338,22 +391,35 @@ impl<'a> Evaluator<'a> {
                 let inst = self.inst(sr, i);
                 let c = Ctx::child(ctx);
                 let mark = self.push(c.clone());
-                let r = self.sequential_assign(sr.unit, &inst.args, inst.span, &c).and_then(|_| {
-                    let node = self.new_node(NodeKind::Group { name: None }, sr, i);
-                    self.with_children(node, sr, i, &c)
-                });
+                let r = self
+                    .sequential_assign(sr.unit, &inst.args, inst.span, &c)
+                    .and_then(|_| {
+                        let node = self.new_node(NodeKind::Group { name: None }, sr, i);
+                        self.with_children(node, sr, i, &c)
+                    });
                 self.truncate(mark);
                 r
             }
             B::For | B::IntersectionFor => {
-                let kind = if b == B::For { NodeKind::Group { name: None } } else { NodeKind::IntersectionFor };
+                let kind = if b == B::For {
+                    NodeKind::Group { name: None }
+                } else {
+                    NodeKind::IntersectionFor
+                };
                 let mut node = self.new_node(kind, sr, i);
                 let inst = self.inst(sr, i);
                 if !inst.args.is_empty() {
                     let scope = self.children_scope(sr, i);
                     let mut kids = Vec::new();
                     self.for_each(sr.unit, &inst.args, loc, ctx, &mut |ev, c| {
-                        ev.instantiate_children(&Children { scope, ctx: c.clone() }, &mut kids, None)
+                        ev.instantiate_children(
+                            &Children {
+                                scope,
+                                ctx: c.clone(),
+                            },
+                            &mut kids,
+                            None,
+                        )
                     })?;
                     node.children = kids;
                 }
@@ -369,7 +435,14 @@ impl<'a> Evaluator<'a> {
                 };
                 let Some(scope) = branch else { return Ok(None) };
                 let mut node = self.new_node(NodeKind::Group { name: None }, sr, i);
-                self.instantiate_children(&Children { scope, ctx: ctx.clone() }, &mut node.children, None)?;
+                self.instantiate_children(
+                    &Children {
+                        scope,
+                        ctx: ctx.clone(),
+                    },
+                    &mut node.children,
+                    None,
+                )?;
                 Ok(Some(node))
             }
             _ => self.geometry_module(b, sr, i, ctx, loc),
@@ -387,14 +460,26 @@ impl<'a> Evaluator<'a> {
         r
     }
 
-    fn children_module_inner(&mut self, p: &Params, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
+    fn children_module_inner(
+        &mut self,
+        p: &Params,
+        sr: ScopeRef,
+        i: usize,
+        ctx: &Rc<Ctx>,
+    ) -> R<Option<Node>> {
         let loc = p.loc;
-        let Some(children) = ctx.module_children() else { return Ok(None) };
+        let Some(children) = ctx.module_children() else {
+            return Ok(None);
+        };
         let size = self.scope(children.scope).instantiations.len();
         let index = self.lookup_param(p, "index");
         let valid = |ev: &mut Self, n: i32| -> Option<usize> {
             if n < 0 || n as usize >= size {
-                ev.warn(loc, DiagCode::InvalidArgument, format!("Children index ({n}) out of bounds ({size} children)"));
+                ev.warn(
+                    loc,
+                    DiagCode::InvalidArgument,
+                    format!("Children index ({n}) out of bounds ({size} children)"),
+                );
                 None
             } else {
                 Some(n as usize)
@@ -418,7 +503,9 @@ impl<'a> Evaluator<'a> {
                         other => {
                             let mut t = b"Bad parameter type (".to_vec();
                             let _ = self.write_string(other, &mut t);
-                            t.extend_from_slice(b") for children, only accept: empty, number, vector, range.");
+                            t.extend_from_slice(
+                                b") for children, only accept: empty, number, vector, range.",
+                            );
                             self.warn(loc, DiagCode::InvalidArgument, t);
                         }
                     }
@@ -428,7 +515,8 @@ impl<'a> Evaluator<'a> {
             Some(Value::Range(r)) => {
                 let steps = r.num_values();
                 if steps >= MAX_RANGE_STEPS {
-                    let t = format!("Bad range parameter for children: too many elements ({steps})");
+                    let t =
+                        format!("Bad range parameter for children: too many elements ({steps})");
                     self.warn(loc, DiagCode::IterationLimit, t);
                     return Ok(None);
                 }
@@ -453,18 +541,36 @@ impl<'a> Evaluator<'a> {
         Ok(Some(node))
     }
 
-    fn geometry_module(&mut self, b: BuiltinModule, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>, loc: Loc) -> R<Option<Node>> {
+    fn geometry_module(
+        &mut self,
+        b: BuiltinModule,
+        sr: ScopeRef,
+        i: usize,
+        ctx: &Rc<Ctx>,
+        loc: Loc,
+    ) -> R<Option<Node>> {
         use BuiltinModule as B;
         let args = self.inst_args(sr, i, ctx)?;
         let leaf = matches!(
             b,
-            B::Cube | B::Sphere | B::Cylinder | B::Polyhedron | B::Square | B::Circle | B::Polygon | B::Surface | B::Import | B::Text
+            B::Cube
+                | B::Sphere
+                | B::Cylinder
+                | B::Polyhedron
+                | B::Square
+                | B::Circle
+                | B::Polygon
+                | B::Surface
+                | B::Import
+                | B::Text
         );
         if leaf {
             self.no_children(sr, i);
         }
         let (req, opt, caller): (&[&str], &[&str], &'static str) = match b {
-            B::Group | B::Union | B::Difference | B::Intersection | B::Hull | B::Fill => (&[], &[], ""),
+            B::Group | B::Union | B::Difference | B::Intersection | B::Hull | B::Fill => {
+                (&[], &[], "")
+            }
             B::Scale | B::Mirror | B::Translate => (&["v"], &[], ""),
             B::Rotate => (&["a", "v"], &[], ""),
             B::Multmatrix => (&["m"], &[], ""),
@@ -474,9 +580,13 @@ impl<'a> Evaluator<'a> {
             B::Minkowski => (&["convexity"], &[], ""),
             B::Resize => (&["newsize", "auto", "convexity"], &[], ""),
             B::Offset => (&["r"], &["delta", "chamfer"], ""),
-            B::LinearExtrude => {
-                (&["height", "v", "scale", "center", "twist", "slices", "segments"], &["convexity", "h"], "linear_extrude")
-            }
+            B::LinearExtrude => (
+                &[
+                    "height", "v", "scale", "center", "twist", "slices", "segments",
+                ],
+                &["convexity", "h"],
+                "linear_extrude",
+            ),
             B::RotateExtrude => (&["angle", "start"], &["convexity", "a"], ""),
             B::Cube | B::Square => (&["size", "center"], &[], ""),
             B::Sphere | B::Circle => (&["r"], &["d"], ""),
@@ -486,10 +596,30 @@ impl<'a> Evaluator<'a> {
             B::Surface => (&["file", "center", "convexity"], &["invert"], ""),
             B::Import => (
                 &["file", "layer", "convexity", "origin", "scale"],
-                &["width", "height", "filename", "layername", "center", "dpi", "id"],
+                &[
+                    "width",
+                    "height",
+                    "filename",
+                    "layername",
+                    "center",
+                    "dpi",
+                    "id",
+                ],
                 "",
             ),
-            B::Text => (&["text", "size", "font"], &["direction", "language", "script", "halign", "valign", "spacing", "em"], "text"),
+            B::Text => (
+                &["text", "size", "font"],
+                &[
+                    "direction",
+                    "language",
+                    "script",
+                    "halign",
+                    "valign",
+                    "spacing",
+                    "em",
+                ],
+                "text",
+            ),
             _ => (&[], &[], ""),
         };
         let p = self.params(args, loc, req, opt, caller);
@@ -498,7 +628,14 @@ impl<'a> Evaluator<'a> {
         r
     }
 
-    fn geometry_node(&mut self, b: BuiltinModule, p: &Params, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
+    fn geometry_node(
+        &mut self,
+        b: BuiltinModule,
+        p: &Params,
+        sr: ScopeRef,
+        i: usize,
+        ctx: &Rc<Ctx>,
+    ) -> R<Option<Node>> {
         use BuiltinModule as B;
         let loc = p.loc;
         let kind = match b {
@@ -517,11 +654,14 @@ impl<'a> Evaluator<'a> {
                     } else {
                         let mut t = b"Unable to convert scale(".to_vec();
                         self.write_echo_nothrow(&v, &mut t);
-                        t.extend_from_slice(b") parameter to a number, a vec3 or vec2 of numbers or a number");
+                        t.extend_from_slice(
+                            b") parameter to a number, a vec3 or vec2 of numbers or a number",
+                        );
                         self.warn(loc, DiagCode::InvalidArgument, t);
                     }
                 }
-                if self.opts.check_parameter_ranges && s.iter().any(|&x| x == 0.0 || !x.is_finite()) {
+                if self.opts.check_parameter_ranges && s.iter().any(|&x| x == 0.0 || !x.is_finite())
+                {
                     let mut t = b"scale(".to_vec();
                     self.write_echo_nothrow(&v, &mut t);
                     t.push(b')');
@@ -537,9 +677,15 @@ impl<'a> Evaluator<'a> {
                         row[k] *= s[k];
                     }
                 }
-                NodeKind::Transform { matrix: m, verb: "scale" }
+                NodeKind::Transform {
+                    matrix: m,
+                    verb: "scale",
+                }
             }
-            B::Rotate => NodeKind::Transform { matrix: self.rotate_matrix(p), verb: "rotate" },
+            B::Rotate => NodeKind::Transform {
+                matrix: self.rotate_matrix(p),
+                verb: "rotate",
+            },
             B::Mirror => {
                 let v = self.get(p, "v");
                 let mut xyz = [1.0, 0.0, 0.0];
@@ -554,13 +700,31 @@ impl<'a> Evaluator<'a> {
                 if x != 0.0 || y != 0.0 || z != 0.0 {
                     let a = x * x + y * y + z * z;
                     m = [
-                        [1.0 - 2.0 * x * x / a, -2.0 * y * x / a, -2.0 * z * x / a, 0.0],
-                        [-2.0 * x * y / a, 1.0 - 2.0 * y * y / a, -2.0 * z * y / a, 0.0],
-                        [-2.0 * x * z / a, -2.0 * y * z / a, 1.0 - 2.0 * z * z / a, 0.0],
+                        [
+                            1.0 - 2.0 * x * x / a,
+                            -2.0 * y * x / a,
+                            -2.0 * z * x / a,
+                            0.0,
+                        ],
+                        [
+                            -2.0 * x * y / a,
+                            1.0 - 2.0 * y * y / a,
+                            -2.0 * z * y / a,
+                            0.0,
+                        ],
+                        [
+                            -2.0 * x * z / a,
+                            -2.0 * y * z / a,
+                            1.0 - 2.0 * z * z / a,
+                            0.0,
+                        ],
                         [0.0, 0.0, 0.0, 1.0],
                     ];
                 }
-                NodeKind::Transform { matrix: m, verb: "mirror" }
+                NodeKind::Transform {
+                    matrix: m,
+                    verb: "mirror",
+                }
             }
             B::Translate => {
                 let v = self.get(p, "v");
@@ -580,7 +744,10 @@ impl<'a> Evaluator<'a> {
                     t.extend_from_slice(b") parameter to a vec3 or vec2 of numbers");
                     self.warn(loc, DiagCode::InvalidArgument, t);
                 }
-                NodeKind::Transform { matrix: m, verb: "translate" }
+                NodeKind::Transform {
+                    matrix: m,
+                    verb: "translate",
+                }
             }
             B::Multmatrix => {
                 let mut m = node::IDENTITY;
@@ -601,19 +768,28 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                 }
-                NodeKind::Transform { matrix: m, verb: "multmatrix" }
+                NodeKind::Transform {
+                    matrix: m,
+                    verb: "multmatrix",
+                }
             }
-            B::Color => NodeKind::Color { rgba: self.color(p) },
+            B::Color => NodeKind::Color {
+                rgba: self.color(p),
+            },
             B::Render => {
                 let c = self.get(p, "convexity");
-                NodeKind::Render { convexity: c.as_number().map_or(1, |x| x as i32) }
+                NodeKind::Render {
+                    convexity: c.as_number().map_or(1, |x| x as i32),
+                }
             }
             B::Projection => {
                 let convexity = self.get(p, "convexity").to_f64() as i32;
                 let cut = matches!(self.get(p, "cut"), Value::Bool(true));
                 NodeKind::Projection { cut, convexity }
             }
-            B::Minkowski => NodeKind::Minkowski { convexity: self.get(p, "convexity").to_f64() as i32 },
+            B::Minkowski => NodeKind::Minkowski {
+                convexity: self.get(p, "convexity").to_f64() as i32,
+            },
             B::Resize => {
                 let convexity = self.get(p, "convexity").to_f64() as i32;
                 let mut newsize = [0.0; 3];
@@ -632,15 +808,27 @@ impl<'a> Evaluator<'a> {
                     Value::Bool(b) => autosize = [b; 3],
                     _ => {}
                 }
-                NodeKind::Resize { newsize, autosize, convexity }
+                NodeKind::Resize {
+                    newsize,
+                    autosize,
+                    convexity,
+                }
             }
             B::Offset => {
                 let disc = self.discretizer_quiet(p);
-                let (r, delta, chamfer) = (self.get(p, "r"), self.get(p, "delta"), self.get(p, "chamfer"));
+                let (r, delta, chamfer) = (
+                    self.get(p, "r"),
+                    self.get(p, "delta"),
+                    self.get(p, "chamfer"),
+                );
                 let mut kind = (1.0, false, OffsetJoin::Round);
                 if let Value::Number(r) = r {
                     if delta.as_number().is_some() {
-                        self.warn(loc, DiagCode::ArgumentMismatch, "Ignoring \"delta\" argument as \"r\" is defined too.");
+                        self.warn(
+                            loc,
+                            DiagCode::ArgumentMismatch,
+                            "Ignoring \"delta\" argument as \"r\" is defined too.",
+                        );
                     }
                     kind.0 = r;
                 } else if let Value::Number(d) = delta {
@@ -649,7 +837,12 @@ impl<'a> Evaluator<'a> {
                         kind = (d, true, OffsetJoin::Square);
                     }
                 }
-                NodeKind::Offset { delta: kind.0, chamfer: kind.1, join: kind.2, disc }
+                NodeKind::Offset {
+                    delta: kind.0,
+                    chamfer: kind.1,
+                    join: kind.2,
+                    disc,
+                }
             }
             B::LinearExtrude => NodeKind::LinearExtrude(self.linear_extrude(p)),
             B::RotateExtrude => {
@@ -681,7 +874,12 @@ impl<'a> Evaluator<'a> {
                         None,
                     );
                 }
-                NodeKind::RotateExtrude { angle, start, convexity, disc }
+                NodeKind::RotateExtrude {
+                    angle,
+                    start,
+                    convexity,
+                    disc,
+                }
             }
             B::Cube => {
                 let size = self.get(p, "size");
@@ -698,14 +896,19 @@ impl<'a> Evaluator<'a> {
                         self.write_echo_nothrow(&size, &mut t);
                         t.extend_from_slice(b", ...) parameter to a number or a vec3 of numbers");
                         self.warn(loc, DiagCode::InvalidArgument, t);
-                    } else if self.opts.check_parameter_ranges && !s.iter().all(|&x| x > 0.0 && x.is_finite()) {
+                    } else if self.opts.check_parameter_ranges
+                        && !s.iter().all(|&x| x > 0.0 && x.is_finite())
+                    {
                         let mut t = b"cube(size=".to_vec();
                         self.write_echo_nothrow(&size, &mut t);
                         t.extend_from_slice(b", ...)");
                         self.warn(loc, DiagCode::InvalidArgument, t);
                     }
                 }
-                NodeKind::Cube { size: s, center: self.center(p) }
+                NodeKind::Cube {
+                    size: s,
+                    center: self.center(p),
+                }
             }
             B::Square => {
                 let size = self.get(p, "size");
@@ -725,14 +928,19 @@ impl<'a> Evaluator<'a> {
                         self.write_echo_nothrow(&size, &mut t);
                         t.extend_from_slice(b", ...) parameter to a number or a vec2 of numbers");
                         self.warn(loc, DiagCode::InvalidArgument, t);
-                    } else if self.opts.check_parameter_ranges && !s.iter().all(|&x| x > 0.0 && x.is_finite()) {
+                    } else if self.opts.check_parameter_ranges
+                        && !s.iter().all(|&x| x > 0.0 && x.is_finite())
+                    {
                         let mut t = b"square(size=".to_vec();
                         self.write_echo_nothrow(&size, &mut t);
                         t.extend_from_slice(b", ...)");
                         self.warn(loc, DiagCode::InvalidArgument, t);
                     }
                 }
-                NodeKind::Square { size: s, center: self.center(p) }
+                NodeKind::Square {
+                    size: s,
+                    center: self.center(p),
+                }
             }
             B::Sphere | B::Circle => {
                 let disc = self.discretizer(p);
@@ -748,19 +956,32 @@ impl<'a> Evaluator<'a> {
                         self.warn(loc, DiagCode::InvalidArgument, t);
                     }
                 }
-                if b == B::Sphere { NodeKind::Sphere { r: radius, disc } } else { NodeKind::Circle { r: radius, disc } }
+                if b == B::Sphere {
+                    NodeKind::Sphere { r: radius, disc }
+                } else {
+                    NodeKind::Circle { r: radius, disc }
+                }
             }
             B::Cylinder => self.cylinder(p),
             B::Polyhedron => self.polyhedron(p),
             B::Polygon => self.polygon(p),
             B::Surface => {
                 let file = self.get(p, "file");
-                let name = if file.is_undef() { Vec::new() } else { self.string_of(&file) };
+                let name = if file.is_undef() {
+                    Vec::new()
+                } else {
+                    self.string_of(&file)
+                };
                 let file = self.lookup_file(&name, loc);
                 let center = matches!(self.get(p, "center"), Value::Bool(true));
                 let convexity = self.get(p, "convexity").as_number().map_or(1, |x| x as i32);
                 let invert = matches!(self.get(p, "invert"), Value::Bool(true));
-                NodeKind::Surface { file, center, invert, convexity }
+                NodeKind::Surface {
+                    file,
+                    center,
+                    invert,
+                    convexity,
+                }
             }
             B::Import => NodeKind::Import(self.import(p)),
             B::Text => NodeKind::Text(self.text(p)),
@@ -769,9 +990,22 @@ impl<'a> Evaluator<'a> {
         let node = self.new_node(kind, sr, i);
         let leaf = matches!(
             b,
-            B::Cube | B::Sphere | B::Cylinder | B::Polyhedron | B::Square | B::Circle | B::Polygon | B::Surface | B::Import | B::Text
+            B::Cube
+                | B::Sphere
+                | B::Cylinder
+                | B::Polyhedron
+                | B::Square
+                | B::Circle
+                | B::Polygon
+                | B::Surface
+                | B::Import
+                | B::Text
         );
-        if leaf { Ok(Some(node)) } else { self.with_children(node, sr, i, ctx) }
+        if leaf {
+            Ok(Some(node))
+        } else {
+            self.with_children(node, sr, i, ctx)
+        }
     }
 
     fn center(&mut self, p: &Params) -> bool {
@@ -809,7 +1043,8 @@ impl<'a> Evaluator<'a> {
         let r_defined = matches!(rv, Value::Number(_));
         if let Value::Number(x) = dv {
             if r_defined {
-                let t = format!("Ignoring radius variable \"{r}\" as diameter \"{d}\" is defined too.");
+                let t =
+                    format!("Ignoring radius variable \"{r}\" as diameter \"{d}\" is defined too.");
                 self.warn(p.loc, DiagCode::ArgumentMismatch, t);
             }
             return Value::Number(x / 2.0);
@@ -847,7 +1082,8 @@ impl<'a> Evaluator<'a> {
             let v_supplied = v.is_defined();
             if ok {
                 if v_supplied {
-                    let mut t = b"When parameter a is supplied as vector, v is ignored rotate(a=".to_vec();
+                    let mut t =
+                        b"When parameter a is supplied as vector, v is ignored rotate(a=".to_vec();
                     self.write_echo_nothrow(&a, &mut t);
                     t.extend_from_slice(b", v=");
                     self.write_echo_nothrow(&v, &mut t);
@@ -903,9 +1139,16 @@ impl<'a> Evaluator<'a> {
         match self.get(p, "c") {
             Value::Vector(v) => {
                 for (k, slot) in rgba.iter_mut().enumerate() {
-                    *slot = if k < v.len() { v[k].to_f64() as f32 } else { 1.0 };
+                    *slot = if k < v.len() {
+                        v[k].to_f64() as f32
+                    } else {
+                        1.0
+                    };
                     if *slot > 1.0 || *slot < 0.0 {
-                        let t = format!("color() expects numbers between 0.0 and 1.0. Value of {:.1} is out of range", *slot);
+                        let t = format!(
+                            "color() expects numbers between 0.0 and 1.0. Value of {:.1} is out of range",
+                            *slot
+                        );
                         self.warn(loc, DiagCode::InvalidArgument, t);
                     }
                 }
@@ -924,7 +1167,10 @@ impl<'a> Evaluator<'a> {
         if let Value::Number(a) = self.get(p, "alpha") {
             rgba[3] = a as f32;
             if rgba[3] < 0.0 || rgba[3] > 1.0 {
-                let t = format!("color() expects alpha between 0.0 and 1.0. Value of {:.1} is out of range", rgba[3]);
+                let t = format!(
+                    "color() expects alpha between 0.0 and 1.0. Value of {:.1} is out of range",
+                    rgba[3]
+                );
                 self.warn(loc, DiagCode::InvalidArgument, t);
             }
         }
@@ -939,7 +1185,11 @@ impl<'a> Evaluator<'a> {
         let v = self.get(p, "v");
         if v.is_defined() {
             if !v.get_vec3(&mut height_v) {
-                self.warn(loc, DiagCode::InvalidArgument, "v when specified should be a 3d vector");
+                self.warn(
+                    loc,
+                    DiagCode::InvalidArgument,
+                    "v when specified should be a 3d vector",
+                );
             }
             height = 1.0;
         }
@@ -948,11 +1198,17 @@ impl<'a> Evaluator<'a> {
             match hv.as_finite() {
                 Some(h) => height = h,
                 None => {
-                    self.warn(loc, DiagCode::InvalidArgument, "height when specified should be a number");
+                    self.warn(
+                        loc,
+                        DiagCode::InvalidArgument,
+                        "height when specified should be a number",
+                    );
                     height = 100.0;
                 }
             }
-            let n = (height_v[0] * height_v[0] + height_v[1] * height_v[1] + height_v[2] * height_v[2]).sqrt();
+            let n =
+                (height_v[0] * height_v[0] + height_v[1] * height_v[1] + height_v[2] * height_v[2])
+                    .sqrt();
             if n > 0.0 {
                 for x in height_v.iter_mut() {
                     *x /= n;
@@ -1015,7 +1271,11 @@ impl<'a> Evaluator<'a> {
         let r2 = self.lookup_radius(p, "d2", "r2");
         let num = |v: &Value| v.as_number();
         if num(&r).is_some() && (num(&r1).is_some() || num(&r2).is_some()) {
-            self.warn(loc, DiagCode::ArgumentMismatch, "Cylinder parameters ambiguous");
+            self.warn(
+                loc,
+                DiagCode::ArgumentMismatch,
+                "Cylinder parameters ambiguous",
+            );
         }
         let (mut n1, mut n2) = (1.0, 1.0);
         if let Some(x) = num(&r) {
@@ -1035,18 +1295,37 @@ impl<'a> Evaluator<'a> {
                 t.extend_from_slice(b", ...)");
                 self.warn(loc, DiagCode::InvalidArgument, t);
             }
-            if n1 < 0.0 || n2 < 0.0 || (n1 == 0.0 && n2 == 0.0) || !n1.is_finite() || !n2.is_finite() {
+            if n1 < 0.0
+                || n2 < 0.0
+                || (n1 == 0.0 && n2 == 0.0)
+                || !n1.is_finite()
+                || !n2.is_finite()
+            {
                 let mut t = b"cylinder(r1=".to_vec();
-                let a = if num(&r1).is_some() { r1.clone() } else { r.clone() };
+                let a = if num(&r1).is_some() {
+                    r1.clone()
+                } else {
+                    r.clone()
+                };
                 self.write_echo_nothrow(&a, &mut t);
                 t.extend_from_slice(b", r2=");
-                let b = if num(&r2).is_some() { r2.clone() } else { r.clone() };
+                let b = if num(&r2).is_some() {
+                    r2.clone()
+                } else {
+                    r.clone()
+                };
                 self.write_echo_nothrow(&b, &mut t);
                 t.extend_from_slice(b", ...)");
                 self.warn(loc, DiagCode::InvalidArgument, t);
             }
         }
-        NodeKind::Cylinder { h, r1: n1, r2: n2, center: self.center(p), disc }
+        NodeKind::Cylinder {
+            h,
+            r1: n1,
+            r2: n2,
+            center: self.center(p),
+            disc,
+        }
     }
 
     fn polyhedron(&mut self, p: &Params) -> NodeKind {
@@ -1059,7 +1338,11 @@ impl<'a> Evaluator<'a> {
             self.write_echo_nothrow(&pts, &mut t);
             t.extend_from_slice(b" to a vector of coordinates");
             self.warn(loc, DiagCode::InvalidArgument, t);
-            return NodeKind::Polyhedron { points, faces, convexity: 1 };
+            return NodeKind::Polyhedron {
+                points,
+                faces,
+                convexity: 1,
+            };
         };
         for pt in pv.iter() {
             let mut xyz = [0.0; 3];
@@ -1079,7 +1362,11 @@ impl<'a> Evaluator<'a> {
             self.write_echo_nothrow(&fv, &mut t);
             t.extend_from_slice(b" to a vector of vector of point indices");
             self.warn(loc, DiagCode::InvalidArgument, t);
-            return NodeKind::Polyhedron { points, faces, convexity: 1 };
+            return NodeKind::Polyhedron {
+                points,
+                faces,
+                convexity: 1,
+            };
         };
         for (fi, face) in fl.iter().enumerate() {
             let Value::Vector(ix) = face else {
@@ -1097,7 +1384,9 @@ impl<'a> Evaluator<'a> {
                         if pi < points.len() {
                             f.push(pi);
                         } else {
-                            let t = format!("Point index {pi} is out of bounds (from faces[{fi}][{k}])");
+                            let t = format!(
+                                "Point index {pi} is out of bounds (from faces[{fi}][{k}])"
+                            );
                             self.warn(loc, DiagCode::InvalidArgument, t);
                         }
                     }
@@ -1114,7 +1403,11 @@ impl<'a> Evaluator<'a> {
             }
         }
         let convexity = (self.get(p, "convexity").to_f64() as i32).max(1);
-        NodeKind::Polyhedron { points, faces, convexity }
+        NodeKind::Polyhedron {
+            points,
+            faces,
+            convexity,
+        }
     }
 
     fn polygon(&mut self, p: &Params) -> NodeKind {
@@ -1127,13 +1420,21 @@ impl<'a> Evaluator<'a> {
             self.write_echo_nothrow(&pts, &mut t);
             t.extend_from_slice(b" to a vector of coordinates");
             self.warn(loc, DiagCode::InvalidArgument, t);
-            return NodeKind::Polygon { points, paths, convexity: 1 };
+            return NodeKind::Polygon {
+                points,
+                paths,
+                convexity: 1,
+            };
         };
         for pt in pv.iter() {
-            match pt.as_vec2(false).filter(|v| v.iter().all(|x| x.is_finite())) {
+            match pt
+                .as_vec2(false)
+                .filter(|v| v.iter().all(|x| x.is_finite()))
+            {
                 Some(xy) => points.push(xy),
                 None => {
-                    let mut t = format!("Unable to convert points[{}] = ", points.len()).into_bytes();
+                    let mut t =
+                        format!("Unable to convert points[{}] = ", points.len()).into_bytes();
                     self.write_echo_nothrow(pt, &mut t);
                     t.extend_from_slice(b" to a vec2 of numbers");
                     self.warn(loc, DiagCode::InvalidArgument, t);
@@ -1159,12 +1460,15 @@ impl<'a> Evaluator<'a> {
                                 if idx < points.len() {
                                     out.push(idx);
                                 } else {
-                                    let t = format!("Point index {idx} is out of bounds (from paths[{pi}][{k}])");
+                                    let t = format!(
+                                        "Point index {idx} is out of bounds (from paths[{pi}][{k}])"
+                                    );
                                     self.warn(loc, DiagCode::InvalidArgument, t);
                                 }
                             }
                             other => {
-                                let mut t = format!("Unable to convert paths[{pi}][{k}] = ").into_bytes();
+                                let mut t =
+                                    format!("Unable to convert paths[{pi}][{k}] = ").into_bytes();
                                 self.write_echo_nothrow(other, &mut t);
                                 t.extend_from_slice(b" to a number");
                                 self.warn(loc, DiagCode::InvalidArgument, t);
@@ -1180,11 +1484,19 @@ impl<'a> Evaluator<'a> {
                 self.write_echo_nothrow(&other, &mut t);
                 t.extend_from_slice(b" to a vector of vector of point indices");
                 self.warn(loc, DiagCode::InvalidArgument, t);
-                return NodeKind::Polygon { points, paths, convexity: 1 };
+                return NodeKind::Polygon {
+                    points,
+                    paths,
+                    convexity: 1,
+                };
             }
         }
         let convexity = (self.get(p, "convexity").to_f64() as i32).max(1);
-        NodeKind::Polygon { points, paths, convexity }
+        NodeKind::Polygon {
+            points,
+            paths,
+            convexity,
+        }
     }
 
     fn import(&mut self, p: &Params) -> node::Import {
@@ -1196,12 +1508,24 @@ impl<'a> Evaluator<'a> {
         } else {
             let f = self.get(p, "filename");
             if f.is_defined() {
-                self.emit(lang::diag::Severity::Deprecated, DiagCode::Evaluation, b"filename= is deprecated. Please use file=", None);
+                self.emit(
+                    lang::diag::Severity::Deprecated,
+                    DiagCode::Evaluation,
+                    b"filename= is deprecated. Please use file=",
+                    None,
+                );
             }
-            let name = if f.is_undef() { Vec::new() } else { self.string_of(&f) };
+            let name = if f.is_undef() {
+                Vec::new()
+            } else {
+                self.string_of(&f)
+            };
             self.lookup_file(&name, loc)
         };
-        let ext = std::path::Path::new(&file).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let ext = std::path::Path::new(&file)
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
         let kind = match ext.as_str() {
             "stl" | "off" | "dxf" | "nef3" | "3mf" | "svg" | "obj" => ext.clone(),
             _ => String::new(),
@@ -1214,7 +1538,12 @@ impl<'a> Evaluator<'a> {
             } else {
                 let l = self.get(p, "layername");
                 if l.is_defined() {
-                    self.emit(lang::diag::Severity::Deprecated, DiagCode::Evaluation, b"layername= is deprecated. Please use layer=", None);
+                    self.emit(
+                        lang::diag::Severity::Deprecated,
+                        DiagCode::Evaluation,
+                        b"layername= is deprecated. Please use layer=",
+                        None,
+                    );
                     Some(String::from_utf8_lossy(&self.string_of(&l)).into_owned())
                 } else {
                     None
@@ -1223,7 +1552,8 @@ impl<'a> Evaluator<'a> {
         };
         let id = {
             let v = self.get(p, "id");
-            v.is_defined().then(|| String::from_utf8_lossy(&self.string_of(&v)).into_owned())
+            v.is_defined()
+                .then(|| String::from_utf8_lossy(&self.string_of(&v)).into_owned())
         };
         let convexity = (self.get(p, "convexity").to_f64() as i32).max(1);
         let convexity = if convexity <= 0 { 1 } else { convexity };
@@ -1251,7 +1581,9 @@ impl<'a> Evaluator<'a> {
         if let Value::Number(d) = self.get(p, "dpi") {
             if d < 0.001 {
                 let src = &self.units[loc.unit as usize].program.sources;
-                let rel = lang::diag::relative_path(src.path(loc.span.file), &self.main_dir).display().to_string();
+                let rel = lang::diag::relative_path(src.path(loc.span.file), &self.main_dir)
+                    .display()
+                    .to_string();
                 let mut t = b"Invalid dpi value giving, using default of ".to_vec();
                 self.write_echo_nothrow(&origin_v, &mut t);
                 t.extend_from_slice(
@@ -1264,7 +1596,20 @@ impl<'a> Evaluator<'a> {
         }
         let width = self.get(p, "width").as_number().unwrap_or(-1.0);
         let height = self.get(p, "height").as_number().unwrap_or(-1.0);
-        node::Import { kind, file, layer, id, convexity, origin, scale, center, dpi, width, height, disc }
+        node::Import {
+            kind,
+            file,
+            layer,
+            id,
+            convexity,
+            origin,
+            scale,
+            center,
+            dpi,
+            width,
+            height,
+            disc,
+        }
     }
 
     fn text(&mut self, p: &Params) -> node::Text {
@@ -1317,7 +1662,10 @@ impl<'a> Evaluator<'a> {
 pub(crate) fn parse_color(s: &[u8]) -> Option<[f32; 4]> {
     let lower: String = String::from_utf8_lossy(s).to_lowercase();
     let find = |table: &[(&str, [u8; 4])], name: &str| {
-        table.binary_search_by(|(n, _)| (*n).cmp(name)).ok().map(|i| table[i].1)
+        table
+            .binary_search_by(|(n, _)| (*n).cmp(name))
+            .ok()
+            .map(|i| table[i].1)
     };
     let named = lower
         .strip_prefix("xkcd:")

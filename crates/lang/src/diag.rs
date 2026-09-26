@@ -216,7 +216,10 @@ impl Diagnostic {
     }
 
     pub fn with_hint(mut self, message: impl Into<String>) -> Self {
-        self.hints.push(Hint { message: message.into(), replacement: None });
+        self.hints.push(Hint {
+            message: message.into(),
+            replacement: None,
+        });
         self
     }
 
@@ -267,7 +270,9 @@ fn weakly_canonical(path: &Path) -> PathBuf {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir().map(|d| d.join(path)).unwrap_or_else(|_| path.to_path_buf())
+        std::env::current_dir()
+            .map(|d| d.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
     };
     let mut existing = abs.clone();
     let mut rest = Vec::new();
@@ -279,7 +284,10 @@ fn weakly_canonical(path: &Path) -> PathBuf {
             }
             return normalize_lexically(&out);
         }
-        match (existing.file_name().map(|f| f.to_os_string()), existing.parent()) {
+        match (
+            existing.file_name().map(|f| f.to_os_string()),
+            existing.parent(),
+        ) {
             (Some(name), Some(parent)) => {
                 rest.push(name);
                 existing = parent.to_path_buf();
@@ -309,25 +317,41 @@ mod tests {
 
     #[test]
     fn relative_paths_like_std_filesystem() {
-        assert_eq!(relative_path(Path::new("/nonexist/a/b.scad"), Path::new("/nonexist/a")), Path::new("b.scad"));
         assert_eq!(
-            relative_path(Path::new("/nonexist/t/data/x.scad"), Path::new("/nonexist/b/t")),
+            relative_path(Path::new("/nonexist/a/b.scad"), Path::new("/nonexist/a")),
+            Path::new("b.scad")
+        );
+        assert_eq!(
+            relative_path(
+                Path::new("/nonexist/t/data/x.scad"),
+                Path::new("/nonexist/b/t")
+            ),
             Path::new("../../t/data/x.scad")
         );
-        assert_eq!(relative_path(Path::new("/nonexist/a"), Path::new("/nonexist/a")), Path::new("."));
+        assert_eq!(
+            relative_path(Path::new("/nonexist/a"), Path::new("/nonexist/a")),
+            Path::new(".")
+        );
     }
 
     #[test]
     fn renders_openscad_format() {
         let mut sm = SourceMap::new();
         let f = sm.add("/nonexist/d/e.scad".into(), b"x".to_vec());
-        let d = Diagnostic::new(DiagCode::SyntaxError, Severity::Error, "Parser error: syntax error")
-            .at(Span::new(f, 0, 1), 3);
+        let d = Diagnostic::new(
+            DiagCode::SyntaxError,
+            Severity::Error,
+            "Parser error: syntax error",
+        )
+        .at(Span::new(f, 0, 1), 3);
         assert_eq!(
             d.render_openscad(&sm, Path::new("/nonexist/d"), Path::new("/")),
             "ERROR: Parser error: syntax error in file e.scad, line 3"
         );
         let d = Diagnostic::new(DiagCode::SyntaxError, Severity::Warning, "plain");
-        assert_eq!(d.render_openscad(&sm, Path::new("/"), Path::new("/")), "WARNING: plain");
+        assert_eq!(
+            d.render_openscad(&sm, Path::new("/"), Path::new("/")),
+            "WARNING: plain"
+        );
     }
 }

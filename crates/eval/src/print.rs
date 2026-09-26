@@ -127,7 +127,11 @@ impl Evaluator<'_> {
 
     /// The error `tostring_visitor` logs when printing runs out of stack.
     pub fn log_exhausted(&mut self) {
-        self.error(None, lang::diag::DiagCode::RecursionLimit, "Stack exhausted while trying to convert a vector to EchoString");
+        self.error(
+            None,
+            lang::diag::DiagCode::RecursionLimit,
+            "Stack exhausted while trying to convert a vector to EchoString",
+        );
     }
 
     /// `operator<<(ostream&, const Value&)`: a string is quoted and escaped.

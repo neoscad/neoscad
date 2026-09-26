@@ -50,9 +50,18 @@ impl<'a> Unit<'a> {
     fn new(program: &'a Program, syms: &mut Syms) -> Unit<'a> {
         let ast = &program.ast;
         let names: Rc<[Sym]> = ast.names.iter().map(|s| syms.intern(s)).collect();
-        let mut u = Unit { program, ast, syms: names, scopes: Vec::new(), consts: Vec::new(), uses: Vec::new() };
+        let mut u = Unit {
+            program,
+            ast,
+            syms: names,
+            scopes: Vec::new(),
+            consts: Vec::new(),
+            uses: Vec::new(),
+        };
         u.add_scope(&ast.root);
-        u.consts = (0..ast.exprs.len()).map(|i| const_value(ast, ExprId(i as u32))).collect();
+        u.consts = (0..ast.exprs.len())
+            .map(|i| const_value(ast, ExprId(i as u32)))
+            .collect();
         u
     }
 
@@ -74,13 +83,19 @@ impl<'a> Unit<'a> {
             else_children: Vec::new(),
             bodies: Vec::new(),
         });
-        let bodies: Vec<u32> = scope.modules.iter().map(|m| self.add_scope(&m.body)).collect();
+        let bodies: Vec<u32> = scope
+            .modules
+            .iter()
+            .map(|m| self.add_scope(&m.body))
+            .collect();
         let mut children = Vec::new();
         let mut elses = Vec::new();
         for inst in &scope.instantiations {
             children.push(self.add_scope(&inst.children));
             elses.push(match &inst.kind {
-                lang::ast::InstKind::If { else_children: Some(e) } => self.add_scope(e),
+                lang::ast::InstKind::If {
+                    else_children: Some(e),
+                } => self.add_scope(e),
                 _ => u32::MAX,
             });
         }
@@ -172,7 +187,12 @@ type DeprecationKey = (Vec<u8>, Option<(u32, Span)>);
 
 pub(crate) enum Step {
     Done(Value),
-    Next { unit: u32, expr: Option<ExprId>, ctx: Option<Rc<Ctx>>, call: Option<(u32, ExprId)> },
+    Next {
+        unit: u32,
+        expr: Option<ExprId>,
+        ctx: Option<Rc<Ctx>>,
+        call: Option<(u32, ExprId)>,
+    },
 }
 
 impl<'a> Evaluator<'a> {
@@ -214,7 +234,11 @@ impl<'a> Evaluator<'a> {
                 units.push(Unit::new(p, &mut syms));
             }
         }
-        let resolve = |uses: &[String]| uses.iter().filter_map(|k| keys.get(k.as_str()).copied()).collect::<Vec<_>>();
+        let resolve = |uses: &[String]| {
+            uses.iter()
+                .filter_map(|k| keys.get(k.as_str()).copied())
+                .collect::<Vec<_>>()
+        };
         units[0].uses = resolve(main_uses);
         let mut i = 1;
         for lib in libraries {
@@ -266,11 +290,18 @@ impl<'a> Evaluator<'a> {
 
     #[inline]
     pub fn interrupted(&self) -> bool {
-        self.opts.interrupt.as_ref().is_some_and(|f| f.load(Ordering::Relaxed))
+        self.opts
+            .interrupt
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
     }
 
     pub fn check_interrupt(&self) -> R<()> {
-        if self.interrupted() { Err(Unwind::new(UnwindKind::Interrupted, 0)) } else { Ok(()) }
+        if self.interrupted() {
+            Err(Unwind::new(UnwindKind::Interrupted, 0))
+        } else {
+            Ok(())
+        }
     }
 
     pub fn push(&mut self, c: Rc<Ctx>) -> usize {
@@ -297,7 +328,11 @@ impl<'a> Evaluator<'a> {
 
     /// `Context::try_lookup_variable`.
     pub fn try_lookup(&self, ctx: &Ctx, s: Sym) -> Option<Value> {
-        if self.syms.is_config(s) { self.lookup_special(s) } else { ctx.lookup_lexical(s) }
+        if self.syms.is_config(s) {
+            self.lookup_special(s)
+        } else {
+            ctx.lookup_lexical(s)
+        }
     }
 
     pub fn set_var(&mut self, ctx: &Ctx, s: Sym, v: Value) {
@@ -314,14 +349,22 @@ impl<'a> Evaluator<'a> {
     // --- messages --------------------------------------------------------
 
     pub fn expr_loc(&self, unit: u32, e: ExprId) -> Loc {
-        Loc { unit, span: self.units[unit as usize].ast.expr(e).span }
+        Loc {
+            unit,
+            span: self.units[unit as usize].ast.expr(e).span,
+        }
     }
 
     pub fn emit(&mut self, severity: Severity, code: DiagCode, text: &[u8], loc: Option<Loc>) {
-        if severity == Severity::Deprecated && !self.deprecations.insert((text.to_vec(), loc.map(|l| (l.unit, l.span)))) {
+        if severity == Severity::Deprecated
+            && !self
+                .deprecations
+                .insert((text.to_vec(), loc.map(|l| (l.unit, l.span))))
+        {
             return;
         }
-        let mut diag = Diagnostic::new(code, severity, String::from_utf8_lossy(text).into_owned()).with_base(PathBase::MainFileDir);
+        let mut diag = Diagnostic::new(code, severity, String::from_utf8_lossy(text).into_owned())
+            .with_base(PathBase::MainFileDir);
         let mut sources = None;
         if let Some(l) = loc {
             let src = &self.units[l.unit as usize].program.sources;
@@ -329,7 +372,11 @@ impl<'a> Evaluator<'a> {
             diag = diag.at(l.span, line);
             sources = Some(src);
         }
-        self.out.message(&Message { diag, text, sources });
+        self.out.message(&Message {
+            diag,
+            text,
+            sources,
+        });
     }
 
     pub fn warn(&mut self, loc: Loc, code: DiagCode, text: impl AsRef<[u8]>) {
@@ -351,7 +398,12 @@ impl<'a> Evaluator<'a> {
     /// Add a trace line to an error on its way up (`e.LOG(Trace, ...)`
     /// followed by `e.traceDepth--`).
     pub fn trace(&mut self, e: &mut Unwind, loc: Loc, text: Vec<u8>) {
-        if let Some(p) = e.log(Pending { severity: Severity::Trace, code: DiagCode::Trace, text, loc: Some(loc) }) {
+        if let Some(p) = e.log(Pending {
+            severity: Severity::Trace,
+            code: DiagCode::Trace,
+            text,
+            loc: Some(loc),
+        }) {
             self.emit_pending(p);
         }
         e.depth -= 1;
@@ -376,8 +428,9 @@ impl<'a> Evaluator<'a> {
         let b = self.builtin_ctx.clone();
         self.push(b.clone());
         let k = &self.k;
-        let (fn_, fs, fa, t, preview, vpt, vpr, vpd, vpf, pi) =
-            (k.fn_, k.fs, k.fa, k.t, k.preview, k.vpt, k.vpr, k.vpd, k.vpf, k.pi);
+        let (fn_, fs, fa, t, preview, vpt, vpr, vpd, vpf, pi) = (
+            k.fn_, k.fs, k.fa, k.t, k.preview, k.vpt, k.vpr, k.vpd, k.vpf, k.pi,
+        );
         let zero = Value::vector(vec![Value::Number(0.0); 3]);
         for (s, v) in [
             (fn_, Value::Number(0.0)),
@@ -402,12 +455,19 @@ impl<'a> Evaluator<'a> {
         self.set_var(&b, vpd, Value::Number(cam.vpd));
         self.set_var(&b, vpf, Value::Number(cam.vpf));
 
-        let mut root = Node { kind: NodeKind::Root, children: Vec::new(), origin: None, index: 0 };
+        let mut root = Node {
+            kind: NodeKind::Root,
+            children: Vec::new(),
+            origin: None,
+            index: 0,
+        };
         root.index = self.next_node_index();
         let scope = ScopeRef { unit: 0, scope: 0 };
         let file = Ctx::new(Some(b.clone()), CtxKind::File(scope));
         let mark = self.push(file.clone());
-        let result = self.init_scope(&file, scope).and_then(|_| self.instantiate_scope(scope, &file, &mut root.children, None));
+        let result = self
+            .init_scope(&file, scope)
+            .and_then(|_| self.instantiate_scope(scope, &file, &mut root.children, None));
         self.truncate(mark);
         let mut aborted = false;
         let mut interrupted = false;
@@ -421,7 +481,10 @@ impl<'a> Evaluator<'a> {
             self.update_camera(&file);
         }
         let (tagged, next) = root.find_root_tag();
-        let next = next.map(|o| Loc { unit: o.unit, span: o.span });
+        let next = next.map(|o| Loc {
+            unit: o.unit,
+            span: o.span,
+        });
         if tagged.is_some()
             && let Some(l) = next
         {
@@ -429,7 +492,11 @@ impl<'a> Evaluator<'a> {
         }
         self.truncate(0);
         self.release_cycles();
-        Evaluation { root, aborted, interrupted }
+        Evaluation {
+            root,
+            aborted,
+            interrupted,
+        }
     }
 
     /// `Camera::updateView`: top-level `$vp*` assignments.
@@ -451,7 +518,11 @@ impl<'a> Evaluator<'a> {
             if ok {
                 noauto = true;
             } else {
-                let what = if is_vec { "a vec3 or vec2 of numbers" } else { "a number" };
+                let what = if is_vec {
+                    "a vec3 or vec2 of numbers"
+                } else {
+                    "a number"
+                };
                 let mut text = format!("Unable to convert {}=", self.name(s)).into_bytes();
                 self.write_echo(&v, &mut text);
                 text.extend_from_slice(format!(" to {what}").as_bytes());
@@ -459,7 +530,10 @@ impl<'a> Evaluator<'a> {
             }
         }
         if cam.auto && noauto {
-            self.warn_noloc(DiagCode::Evaluation, "Viewall and autocenter disabled in favor of $vp*");
+            self.warn_noloc(
+                DiagCode::Evaluation,
+                "Viewall and autocenter disabled in favor of $vp*",
+            );
         }
     }
 
@@ -503,11 +577,22 @@ impl<'a> Evaluator<'a> {
                 {
                     return Ok(v);
                 }
-                Ok(self.lookup_variable(ctx, s, Loc { unit: u, span: e.span }))
+                Ok(self.lookup_variable(
+                    ctx,
+                    s,
+                    Loc {
+                        unit: u,
+                        span: e.span,
+                    },
+                ))
             }
             ExprKind::Binary(op, l, r) => self.eval_binary(u, *op, *l, *r, e.span, ctx),
             ExprKind::Ternary(c, a, b) => {
-                let next = if self.eval(u, *c, ctx)?.to_bool() { *a } else { *b };
+                let next = if self.eval(u, *c, ctx)?.to_bool() {
+                    *a
+                } else {
+                    *b
+                };
                 self.eval(u, next, ctx)
             }
             ExprKind::Index(a, i) => {
@@ -525,7 +610,9 @@ impl<'a> Evaluator<'a> {
         let ast: &'a Ast = self.units[u as usize].ast;
         let e = ast.expr(id);
         match &e.kind {
-            ExprKind::String(_) => Ok(self.units[u as usize].consts[id.0 as usize].clone().unwrap_or_default()),
+            ExprKind::String(_) => Ok(self.units[u as usize].consts[id.0 as usize]
+                .clone()
+                .unwrap_or_default()),
             ExprKind::Unary(op, x) => {
                 let v = self.eval(u, *x, ctx)?;
                 let r = match op {
@@ -546,7 +633,9 @@ impl<'a> Evaluator<'a> {
                 };
                 Ok(ops::index(&v, &Value::Number(i)))
             }
-            ExprKind::Range { begin, step, end } => self.eval_range(u, id, *begin, *step, *end, ctx),
+            ExprKind::Range { begin, step, end } => {
+                self.eval_range(u, id, *begin, *step, *end, ctx)
+            }
             ExprKind::Vector(items) => {
                 if let Some(c) = &self.units[u as usize].consts[id.0 as usize] {
                     return Ok(c.clone());
@@ -559,12 +648,18 @@ impl<'a> Evaluator<'a> {
             }
             ExprKind::Function(..) => {
                 self.register_capture(ctx);
-                Ok(Value::Function(Rc::new(FunctionValue { unit: u, expr: id, ctx: ctx.clone() })))
+                Ok(Value::Function(Rc::new(FunctionValue {
+                    unit: u,
+                    expr: id,
+                    ctx: ctx.clone(),
+                })))
             }
             ExprKind::Let(args, body) => {
                 let c = Ctx::child(ctx);
                 let mark = self.push(c.clone());
-                let r = self.sequential_assign(u, args, e.span, &c).and_then(|_| self.eval(u, *body, &c));
+                let r = self
+                    .sequential_assign(u, args, e.span, &c)
+                    .and_then(|_| self.eval(u, *body, &c));
                 self.truncate(mark);
                 r
             }
@@ -582,7 +677,11 @@ impl<'a> Evaluator<'a> {
                     None => Ok(Value::Undef),
                 }
             }
-            ExprKind::LcIf(..) | ExprKind::LcEach(_) | ExprKind::LcFor(..) | ExprKind::LcForC { .. } | ExprKind::LcLet(..) => {
+            ExprKind::LcIf(..)
+            | ExprKind::LcEach(_)
+            | ExprKind::LcFor(..)
+            | ExprKind::LcForC { .. }
+            | ExprKind::LcLet(..) => {
                 let mut out = Vec::new();
                 self.eval_lc(u, id, ctx, &mut out)?;
                 Ok(Value::vector(out))
@@ -597,13 +696,25 @@ impl<'a> Evaluator<'a> {
         match r {
             Ok(v) => v,
             Err(why) => {
-                self.warn(Loc { unit: u, span }, DiagCode::UndefinedOperation, why.message());
+                self.warn(
+                    Loc { unit: u, span },
+                    DiagCode::UndefinedOperation,
+                    why.message(),
+                );
                 Value::Undef
             }
         }
     }
 
-    fn eval_binary(&mut self, u: u32, op: BinaryOp, l: ExprId, r: ExprId, span: Span, ctx: &Rc<Ctx>) -> R<Value> {
+    fn eval_binary(
+        &mut self,
+        u: u32,
+        op: BinaryOp,
+        l: ExprId,
+        r: ExprId,
+        span: Span,
+        ctx: &Rc<Ctx>,
+    ) -> R<Value> {
         match op {
             BinaryOp::LogicalAnd => {
                 let a = self.eval(u, l, ctx)?.to_bool();
@@ -683,7 +794,15 @@ impl<'a> Evaluator<'a> {
     }
 
     #[inline(never)]
-    fn eval_range(&mut self, u: u32, id: ExprId, begin: ExprId, step: Option<ExprId>, end: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
+    fn eval_range(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        begin: ExprId,
+        step: Option<ExprId>,
+        end: ExprId,
+        ctx: &Rc<Ctx>,
+    ) -> R<Value> {
         let loc = self.expr_loc(u, id);
         let b = self.eval(u, begin, ctx)?;
         let e = self.eval(u, end, ctx)?;
@@ -712,9 +831,17 @@ impl<'a> Evaluator<'a> {
         }
         if self.units[u as usize].ast.is_literal(id) {
             if sd > 0.0 && ed < bd {
-                self.warn(loc, DiagCode::InvalidArgument, "begin is greater than the end, but step is positive");
+                self.warn(
+                    loc,
+                    DiagCode::InvalidArgument,
+                    "begin is greater than the end, but step is positive",
+                );
             } else if sd < 0.0 && ed > bd {
-                self.warn(loc, DiagCode::InvalidArgument, "begin is smaller than the end, but step is negative");
+                self.warn(
+                    loc,
+                    DiagCode::InvalidArgument,
+                    "begin is smaller than the end, but step is negative",
+                );
             }
         }
         Ok(Value::range(bd, sd, ed))
@@ -723,13 +850,23 @@ impl<'a> Evaluator<'a> {
     fn is_lc(&self, u: u32, id: ExprId) -> bool {
         matches!(
             self.units[u as usize].ast.expr(id).kind,
-            ExprKind::LcIf(..) | ExprKind::LcEach(_) | ExprKind::LcFor(..) | ExprKind::LcForC { .. } | ExprKind::LcLet(..)
+            ExprKind::LcIf(..)
+                | ExprKind::LcEach(_)
+                | ExprKind::LcFor(..)
+                | ExprKind::LcForC { .. }
+                | ExprKind::LcLet(..)
         )
     }
 
     /// One element of a vector literal: list comprehensions splice their
     /// values in (OpenSCAD's embedded vectors), anything else is one value.
-    pub fn eval_element(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>, out: &mut Vec<Value>) -> R<()> {
+    pub fn eval_element(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        ctx: &Rc<Ctx>,
+        out: &mut Vec<Value>,
+    ) -> R<()> {
         if self.is_lc(u, id) {
             self.eval_lc(u, id, ctx, out)
         } else {
@@ -753,7 +890,10 @@ impl<'a> Evaluator<'a> {
                 }
             }
             ExprKind::LcEach(x) => {
-                let loc = Loc { unit: u, span: e.span };
+                let loc = Loc {
+                    unit: u,
+                    span: e.span,
+                };
                 if self.is_lc(u, *x) {
                     let mut inner = Vec::new();
                     self.eval_lc(u, *x, ctx, &mut inner)?;
@@ -767,12 +907,25 @@ impl<'a> Evaluator<'a> {
                 Ok(())
             }
             ExprKind::LcFor(args, body) => {
-                let loc = Loc { unit: u, span: e.span };
+                let loc = Loc {
+                    unit: u,
+                    span: e.span,
+                };
                 let body = *body;
-                self.for_each(u, args, loc, ctx, &mut |ev, c| ev.eval_element(u, body, c, out))
+                self.for_each(u, args, loc, ctx, &mut |ev, c| {
+                    ev.eval_element(u, body, c, out)
+                })
             }
-            ExprKind::LcForC { init, cond, incr, body } => {
-                let loc = Loc { unit: u, span: e.span };
+            ExprKind::LcForC {
+                init,
+                cond,
+                incr,
+                body,
+            } => {
+                let loc = Loc {
+                    unit: u,
+                    span: e.span,
+                };
                 let initial = Ctx::child(ctx);
                 let mark = self.push(initial.clone());
                 let r = (|| {
@@ -784,7 +937,11 @@ impl<'a> Evaluator<'a> {
                         self.check_interrupt()?;
                         self.eval_element(u, *body, &current, out)?;
                         if counter == 1_000_000 {
-                            self.error(Some(loc), DiagCode::IterationLimit, "For loop counter exceeded limit");
+                            self.error(
+                                Some(loc),
+                                DiagCode::IterationLimit,
+                                "For loop counter exceeded limit",
+                            );
                             return Err(self.unwind(UnwindKind::LoopLimit));
                         }
                         counter += 1;
@@ -804,7 +961,9 @@ impl<'a> Evaluator<'a> {
             ExprKind::LcLet(args, body) => {
                 let c = Ctx::child(ctx);
                 let mark = self.push(c.clone());
-                let r = self.sequential_assign(u, args, e.span, &c).and_then(|_| self.eval_element(u, *body, &c, out));
+                let r = self
+                    .sequential_assign(u, args, e.span, &c)
+                    .and_then(|_| self.eval_element(u, *body, &c, out));
                 self.truncate(mark);
                 r
             }
@@ -822,7 +981,11 @@ impl<'a> Evaluator<'a> {
             Value::Range(r) => {
                 let n = r.num_values();
                 if n >= 1_000_000 {
-                    self.warn(loc, DiagCode::IterationLimit, format!("Bad range parameter in for statement: too many elements ({n})"));
+                    self.warn(
+                        loc,
+                        DiagCode::IterationLimit,
+                        format!("Bad range parameter in for statement: too many elements ({n})"),
+                    );
                 } else {
                     out.extend(r.iter().map(Value::Number));
                 }
@@ -847,7 +1010,9 @@ impl<'a> Evaluator<'a> {
         let Some((first, rest)) = args.split_first() else {
             return op(self, ctx);
         };
-        let name = first.name.map_or(self.k.empty, |n| self.units[u as usize].sym(n));
+        let name = first
+            .name
+            .map_or(self.k.empty, |n| self.units[u as usize].sym(n));
         let values = self.eval(u, first.expr, ctx)?;
         let mut iterate = |ev: &mut Self, v: Value| -> R<()> {
             ev.check_interrupt()?;
@@ -862,7 +1027,11 @@ impl<'a> Evaluator<'a> {
             Value::Range(r) => {
                 let n = r.num_values();
                 if n >= 1_000_000 {
-                    self.warn(loc, DiagCode::IterationLimit, format!("Bad range parameter in for statement: too many elements ({n})"));
+                    self.warn(
+                        loc,
+                        DiagCode::IterationLimit,
+                        format!("Bad range parameter in for statement: too many elements ({n})"),
+                    );
                 } else {
                     for x in r.iter() {
                         iterate(self, Value::Number(x))?;
@@ -886,7 +1055,13 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `Let::doSequentialAssignment` into `target`.
-    pub fn sequential_assign(&mut self, u: u32, args: &'a [Arg], span: Span, target: &Rc<Ctx>) -> R<()> {
+    pub fn sequential_assign(
+        &mut self,
+        u: u32,
+        args: &'a [Arg],
+        span: Span,
+        target: &Rc<Ctx>,
+    ) -> R<()> {
         let loc = Loc { unit: u, span };
         let mut seen: Vec<Sym> = Vec::new();
         for a in args {
@@ -900,7 +1075,11 @@ impl<'a> Evaluator<'a> {
                 Some(n) => {
                     let s = self.units[u as usize].sym(n);
                     if seen.contains(&s) {
-                        let mut t = format!("Ignoring duplicate variable assignment {} = ", self.quote_sym(s)).into_bytes();
+                        let mut t = format!(
+                            "Ignoring duplicate variable assignment {} = ",
+                            self.quote_sym(s)
+                        )
+                        .into_bytes();
                         self.write_echo_nothrow(&v, &mut t);
                         self.warn(loc, DiagCode::Overwrite, t);
                     } else {
@@ -928,7 +1107,12 @@ impl<'a> Evaluator<'a> {
             if self.write_echo_checked(&a.value, &mut text).is_err() {
                 let msg = "Stack exhausted while trying to convert a vector to EchoString";
                 let mut e = self.unwind(UnwindKind::EchoStack);
-                if let Some(p) = e.log(Pending { severity: Severity::Error, code: DiagCode::RecursionLimit, text: msg.into(), loc: None }) {
+                if let Some(p) = e.log(Pending {
+                    severity: Severity::Error,
+                    code: DiagCode::RecursionLimit,
+                    text: msg.into(),
+                    loc: None,
+                }) {
                     self.emit_pending(p);
                 }
                 return Err(e);
@@ -949,7 +1133,9 @@ impl<'a> Evaluator<'a> {
             return Ok(());
         }
         let ast = self.units[u as usize].ast;
-        let cond_expr = args.iter().find(|a| a.name.is_none() || a.name.is_some_and(|n| ast.name(n) == "condition"));
+        let cond_expr = args
+            .iter()
+            .find(|a| a.name.is_none() || a.name.is_some_and(|n| ast.name(n) == "condition"));
         let mut text = b"Assertion".to_vec();
         if let Some(a) = cond_expr {
             text.extend_from_slice(b" '");
@@ -970,7 +1156,10 @@ impl<'a> Evaluator<'a> {
 fn clock_seed() -> u32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         (t as u32).wrapping_add(std::process::id())
     }
     #[cfg(target_arch = "wasm32")]

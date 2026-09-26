@@ -52,7 +52,10 @@ impl Comparison {
     /// The line `image_compare.py` prints for a failure (`:81`).
     pub fn describe(&self) -> String {
         let perc = 100.0 * self.differing as f64 / self.total.max(1) as f64;
-        format!("{perc:0.8}% of 3x3 blocks differ with median block diff: {:0.2}", self.median)
+        format!(
+            "{perc:0.8}% of 3x3 blocks differ with median block diff: {:0.2}",
+            self.median
+        )
     }
 }
 
@@ -63,10 +66,15 @@ fn decode(path: &Path) -> Result<Samples, String> {
     // OpenSCAD writes and commits 8-bit RGB; anything else is reported
     // rather than silently converted.
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
-    let mut reader = decoder.read_info().map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let (color, depth) = reader.output_color_type();
     if depth != png::BitDepth::Eight {
-        return Err(format!("{}: unsupported bit depth {depth:?}", path.display()));
+        return Err(format!(
+            "{}: unsupported bit depth {depth:?}",
+            path.display()
+        ));
     }
     let channels = match color {
         png::ColorType::Grayscale | png::ColorType::Indexed => 1,
@@ -74,11 +82,20 @@ fn decode(path: &Path) -> Result<Samples, String> {
         png::ColorType::Rgb => 3,
         png::ColorType::Rgba => 4,
     };
-    let size = reader.output_buffer_size().ok_or_else(|| format!("{}: image too large", path.display()))?;
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| format!("{}: image too large", path.display()))?;
     let mut data = vec![0; size];
-    let info = reader.next_frame(&mut data).map_err(|e| format!("{}: {e}", path.display()))?;
+    let info = reader
+        .next_frame(&mut data)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     data.truncate(info.buffer_size());
-    Ok(Samples { width: info.width as usize, height: info.height as usize, channels, data })
+    Ok(Samples {
+        width: info.width as usize,
+        height: info.height as usize,
+        channels,
+        data,
+    })
 }
 
 /// Compare `expected` with `actual` as `CompareImageFiles(expected, actual)`
@@ -101,7 +118,11 @@ fn compare(a: &Samples, b: &Samples) -> Result<Comparison, String> {
     if w < 3 || h < 3 {
         // numpy's slices are empty, so there are no blocks and the script
         // divides 0 by 0: perc_diff is NaN, which is not 0, so it fails.
-        return Ok(Comparison { differing: 1, total: 0, median: f64::NAN });
+        return Ok(Comparison {
+            differing: 1,
+            total: 0,
+            median: f64::NAN,
+        });
     }
     // d = a1 - a2 with small differences zeroed (`:28-30`).
     let d: Vec<f64> = a
@@ -135,7 +156,11 @@ fn compare(a: &Samples, b: &Samples) -> Result<Comparison, String> {
     }
     let total = (h - 2) * (w - 2) * c;
     let median = median(&mut diffs);
-    Ok(Comparison { differing: diffs.len(), total, median })
+    Ok(Comparison {
+        differing: diffs.len(),
+        total,
+        median,
+    })
 }
 
 /// numpy's median: the mean of the two middle values for an even count.
@@ -145,7 +170,11 @@ fn median(v: &mut [f64]) -> f64 {
     }
     v.sort_by(f64::total_cmp);
     let n = v.len();
-    if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
 }
 
 #[cfg(test)]
@@ -159,7 +188,12 @@ mod tests {
                 data.push(f(x, y));
             }
         }
-        Samples { width: w, height: h, channels: 1, data }
+        Samples {
+            width: w,
+            height: h,
+            channels: 1,
+            data,
+        }
     }
 
     #[test]
@@ -174,7 +208,13 @@ mod tests {
     #[test]
     fn one_consistent_block_fails() {
         let a = img(8, 8, |_, _| 100);
-        let b = img(8, 8, |x, y| if (2..5).contains(&x) && (2..5).contains(&y) { 120 } else { 100 });
+        let b = img(8, 8, |x, y| {
+            if (2..5).contains(&x) && (2..5).contains(&y) {
+                120
+            } else {
+                100
+            }
+        });
         let c = compare(&a, &b).unwrap();
         assert_eq!(c.differing, 1);
         assert!((c.median - 20.0).abs() < 1e-9, "{}", c.median);

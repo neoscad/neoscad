@@ -44,7 +44,14 @@ fn minkowski_outline(poly: &Path64, path: &Path64, quads: &mut Paths64) {
     if poly_cnt == 0 || path_cnt == 0 {
         return;
     }
-    let pp: Vec<Path64> = path.iter().map(|q| poly.iter().map(|p| Point64::new(q.x + p.x, q.y + p.y)).collect()).collect();
+    let pp: Vec<Path64> = path
+        .iter()
+        .map(|q| {
+            poly.iter()
+                .map(|p| Point64::new(q.x + p.x, q.y + p.y))
+                .collect()
+        })
+        .collect();
     for i in 0..path_cnt {
         for j in 0..poly_cnt {
             let mut quad = vec![
@@ -69,7 +76,11 @@ fn fill_insides(a: &Paths64, b: &Paths64, target: &mut Paths64) {
         if !b_path.is_empty() && is_positive(b_path) {
             let d = b_path[0];
             for path in a {
-                target.push(path.iter().map(|p| Point64::new(p.x + d.x, p.y + d.y)).collect());
+                target.push(
+                    path.iter()
+                        .map(|p| Point64::new(p.x + d.x, p.y + d.y))
+                        .collect(),
+                );
             }
         }
     }
@@ -111,7 +122,12 @@ pub fn minkowski_2d(polys: &[Option<&Polygon2d>]) -> Option<Polygon2d> {
         }
     }
     let mut tree = PolyTree64::new();
-    c.execute_tree(ClipType::Union, FillRule::NonZero, &mut tree, &mut Paths64::new());
+    c.execute_tree(
+        ClipType::Union,
+        FillRule::NonZero,
+        &mut tree,
+        &mut Paths64::new(),
+    );
     Some(clipper::from_tree(&tree))
 }
 
@@ -160,7 +176,12 @@ fn operand(g: &Geometry, ids: &dyn IdSource) -> Result<Operand, Failed> {
             // in `issue2090.scad`) is one CGAL cannot make a valid Nef
             // polyhedron of either.
             let mut warnings = Vec::new();
-            let m = ManifoldGeometry::from_polyset(&ps.triangulate_faces(), ids, &mut warnings, &mut Vec::new());
+            let m = ManifoldGeometry::from_polyset(
+                &ps.triangulate_faces(),
+                ids,
+                &mut warnings,
+                &mut Vec::new(),
+            );
             if m.is_empty() || !warnings.is_empty() {
                 return Err(Failed);
             }
@@ -244,7 +265,10 @@ fn convex_pieces(m: &Manifold) -> Option<Vec<Vec<Vec3>>> {
         if cuts > 2 * MAX_PIECES {
             return None;
         }
-        let halves = planes.into_iter().map(|(n, d)| s.split_by_plane(n, d)).find(|(a, b)| !a.is_empty() && !b.is_empty());
+        let halves = planes
+            .into_iter()
+            .map(|(n, d)| s.split_by_plane(n, d))
+            .find(|(a, b)| !a.is_empty() && !b.is_empty());
         let (a, b) = halves?;
         stack.push(b);
         stack.push(a);
@@ -261,7 +285,9 @@ fn convex_patches(imp: &ManifoldImpl) -> Vec<Vec<Vec3>> {
     let tri = |t: usize| [0, 1, 2].map(|k| imp.halfedge[3 * t + k].start_vert as usize);
     let scale = {
         let (lo, hi) = (imp.bbox.min, imp.bbox.max);
-        [hi.x - lo.x, hi.y - lo.y, hi.z - lo.z].into_iter().fold(1e-300, f64::max)
+        [hi.x - lo.x, hi.y - lo.y, hi.z - lo.z]
+            .into_iter()
+            .fold(1e-300, f64::max)
     };
     let eps = imp.epsilon.max(1e-12 * scale);
     let mut done = vec![false; nt];
@@ -310,7 +336,10 @@ fn convex_patches(imp: &ManifoldImpl) -> Vec<Vec<Vec3>> {
                     continue;
                 }
                 let p0 = imp.vert_pos[verts[0]];
-                if tri(u).iter().any(|&i| dot(imp.vert_pos[i] - p0, n).abs() > eps) {
+                if tri(u)
+                    .iter()
+                    .any(|&i| dot(imp.vert_pos[i] - p0, n).abs() > eps)
+                {
                     continue;
                 }
                 let mut cand = verts.clone();
@@ -337,7 +366,11 @@ fn convex_patches(imp: &ManifoldImpl) -> Vec<Vec<Vec3>> {
 
 fn polygon_area(p: &[[f64; 2]]) -> f64 {
     let n = p.len();
-    (0..n).map(|i| p[i][0] * p[(i + 1) % n][1] - p[(i + 1) % n][0] * p[i][1]).sum::<f64>().abs() / 2.0
+    (0..n)
+        .map(|i| p[i][0] * p[(i + 1) % n][1] - p[(i + 1) % n][0] * p[i][1])
+        .sum::<f64>()
+        .abs()
+        / 2.0
 }
 
 /// One vertex of each connected piece of a solid's surface.
@@ -355,7 +388,10 @@ fn component_vertices(imp: &ManifoldImpl) -> Vec<Vec3> {
         if h.start_vert < 0 || h.end_vert < 0 {
             continue;
         }
-        let (a, b) = (find(&mut parent, h.start_vert as usize), find(&mut parent, h.end_vert as usize));
+        let (a, b) = (
+            find(&mut parent, h.start_vert as usize),
+            find(&mut parent, h.end_vert as usize),
+        );
         if a != b {
             parent[a.max(b)] = a.min(b);
         }
@@ -367,7 +403,8 @@ fn component_vertices(imp: &ManifoldImpl) -> Vec<Vec3> {
             continue;
         }
         let r = find(&mut parent, h.start_vert as usize);
-        seen.entry(r).or_insert_with(|| out.push(imp.vert_pos[h.start_vert as usize]));
+        seen.entry(r)
+            .or_insert_with(|| out.push(imp.vert_pos[h.start_vert as usize]));
     }
     out
 }
@@ -384,9 +421,13 @@ fn pair_terms(a: &Operand, b: &Operand) -> (Vec<Vec<Vec3>>, Vec<(ManifoldGeometr
     };
     match (a, b) {
         // What OpenSCAD does: every pair of convex pieces.
-        (Operand::Pieces(pa), Operand::Pieces(pb)) => {
-            (pa.iter().flat_map(|p| pb.iter().map(move |q| (p, q))).map(|(p, q)| sums(p, q)).collect(), Vec::new())
-        }
+        (Operand::Pieces(pa), Operand::Pieces(pb)) => (
+            pa.iter()
+                .flat_map(|p| pb.iter().map(move |q| (p, q)))
+                .map(|(p, q)| sums(p, q))
+                .collect(),
+            Vec::new(),
+        ),
         // For a convex piece Q, S + Q is the sum of S's boundary with Q (each
         // convex patch P of it giving the convex P + Q), plus S moved by any
         // point of Q, which covers what lies deeper inside: a point s + q
@@ -394,7 +435,8 @@ fn pair_terms(a: &Operand, b: &Operand) -> (Vec<Vec<Vec3>>, Vec<(ManifoldGeometr
         // p - q(t) leaves S through its boundary. Manifold's own
         // `MinkowskiSum` takes the same route but adds S unmoved, which is
         // only right when Q contains the origin.
-        (Operand::Boundary(s), Operand::Pieces(pieces)) | (Operand::Pieces(pieces), Operand::Boundary(s)) => {
+        (Operand::Boundary(s), Operand::Pieces(pieces))
+        | (Operand::Pieces(pieces), Operand::Boundary(s)) => {
             let patches = convex_patches(s.manifold.as_impl());
             let mut parts = Vec::with_capacity(patches.len() * pieces.len());
             let mut copies = Vec::with_capacity(pieces.len());
@@ -428,8 +470,15 @@ fn pair_terms(a: &Operand, b: &Operand) -> (Vec<Vec<Vec3>>, Vec<(ManifoldGeometr
                     parts.push(sums(p, q));
                 }
             }
-            let mut copies: Vec<(ManifoldGeometry, Vec3)> = component_vertices(ib).into_iter().map(|v| ((**sa).clone(), v)).collect();
-            copies.extend(component_vertices(ia).into_iter().map(|v| ((**sb).clone(), v)));
+            let mut copies: Vec<(ManifoldGeometry, Vec3)> = component_vertices(ib)
+                .into_iter()
+                .map(|v| ((**sa).clone(), v))
+                .collect();
+            copies.extend(
+                component_vertices(ia)
+                    .into_iter()
+                    .map(|v| ((**sb).clone(), v)),
+            );
             (parts, copies)
         }
     }
@@ -441,7 +490,9 @@ fn coplanar(pts: &[Vec3]) -> bool {
     use manifold_rust::linalg::cross;
     use manifold_rust::robust::exact::{Sign, filtered::orient3d};
     let a = pts[0];
-    let Some(&b) = pts.iter().find(|&&p| p != a) else { return true };
+    let Some(&b) = pts.iter().find(|&&p| p != a) else {
+        return true;
+    };
     // The point making the largest triangle with a and b spans the plane;
     // if rounding hides an exactly collinear triple, every orientation
     // below is zero and the set is reported flat, which it then is.
@@ -469,7 +520,13 @@ fn hulls(sets: &[Vec<Vec3>]) -> Vec<ManifoldImpl> {
     // gives nothing either: OpenSCAD keeps only hull vertices whose faces
     // are not all coplanar, which leaves none of a planar hull, where
     // QuickHull returns a zero-volume mesh.
-    let one = |s: &Vec<Vec3>| if s.len() <= 3 || coplanar(s) { ManifoldImpl::new() } else { quickhull::convex_hull(s) };
+    let one = |s: &Vec<Vec3>| {
+        if s.len() <= 3 || coplanar(s) {
+            ManifoldImpl::new()
+        } else {
+            quickhull::convex_hull(s)
+        }
+    };
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
@@ -525,7 +582,9 @@ fn fallback(
     let mut geom: Option<ManifoldGeometry> = None;
     for (i, g) in children.iter().enumerate() {
         let m = match g {
-            Geometry::PolySet(ps) => ManifoldGeometry::from_polyset(ps, &*conv(i), warnings, errors),
+            Geometry::PolySet(ps) => {
+                ManifoldGeometry::from_polyset(ps, &*conv(i), warnings, errors)
+            }
             Geometry::Manifold(m) => (**m).clone(),
             Geometry::Polygon2d(_) => continue,
         };
@@ -538,7 +597,10 @@ fn fallback(
                 if acc.is_empty() || acc.manifold.volume() == 0.0 || m.manifold.volume() == 0.0 {
                     ManifoldGeometry::default()
                 } else {
-                    let pair = [Geometry::Manifold(Arc::new(acc)), Geometry::Manifold(Arc::new(m))];
+                    let pair = [
+                        Geometry::Manifold(Arc::new(acc)),
+                        Geometry::Manifold(Arc::new(m)),
+                    ];
                     fold(&pair, conv, own).unwrap_or_default()
                 }
             }
@@ -547,7 +609,11 @@ fn fallback(
     geom
 }
 
-fn fold(children: &[Geometry], conv: &dyn Fn(usize) -> Box<dyn IdSource>, own: &dyn IdSource) -> Result<ManifoldGeometry, Failed> {
+fn fold(
+    children: &[Geometry],
+    conv: &dyn Fn(usize) -> Box<dyn IdSource>,
+    own: &dyn IdSource,
+) -> Result<ManifoldGeometry, Failed> {
     let mut lhs = operand(&children[0], &*conv(0))?;
     let mut result: Option<ManifoldGeometry> = None;
     for (i, g) in children.iter().enumerate().skip(1) {
@@ -574,7 +640,9 @@ fn fold(children: &[Geometry], conv: &dyn Fn(usize) -> Box<dyn IdSource>, own: &
             s.transform(&translation(v));
             parts.push(s);
         }
-        let mut n = ManifoldGeometry::batch(OpType::Add, parts).filter(|m| !m.is_empty()).ok_or(Failed)?;
+        let mut n = ManifoldGeometry::batch(OpType::Add, parts)
+            .filter(|m| !m.is_empty())
+            .ok_or(Failed)?;
         n.to_original(own);
         result = Some(n);
     }
@@ -582,7 +650,12 @@ fn fold(children: &[Geometry], conv: &dyn Fn(usize) -> Box<dyn IdSource>, own: &
 }
 
 fn translation(v: Vec3) -> crate::Matrix {
-    [[1.0, 0.0, 0.0, v.x], [0.0, 1.0, 0.0, v.y], [0.0, 0.0, 1.0, v.z], [0.0, 0.0, 0.0, 1.0]]
+    [
+        [1.0, 0.0, 0.0, v.x],
+        [0.0, 1.0, 0.0, v.y],
+        [0.0, 0.0, 1.0, v.z],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
 }
 
 #[cfg(test)]
@@ -630,15 +703,26 @@ mod tests {
         let m = sum(&[l.clone(), cube_at(3.0, [1.0; 3])]);
         // The L grown by one in every direction: a 3x3x2 box less a 1x1x2
         // corner, moved by (3, 0, 0).
-        assert!((m.manifold.volume() - 16.0).abs() < 1e-9, "{}", m.manifold.volume());
-        assert_eq!(m.bounds().expect("bounds"), ([3.0, 0.0, 0.0], [6.0, 3.0, 2.0]));
+        assert!(
+            (m.manifold.volume() - 16.0).abs() < 1e-9,
+            "{}",
+            m.manifold.volume()
+        );
+        assert_eq!(
+            m.bounds().expect("bounds"),
+            ([3.0, 0.0, 0.0], [6.0, 3.0, 2.0])
+        );
         // Order does not matter.
         let m2 = sum(&[cube_at(3.0, [1.0; 3]), l.clone()]);
         assert!((m2.manifold.volume() - 16.0).abs() < 1e-9);
         // Non-convex with non-convex: L + L is a staircase of 4x2, 3x3 and
         // 2x4 rectangles (area 13), 2 high.
         let m3 = sum(&[l.clone(), l]);
-        assert!((m3.manifold.volume() - 26.0).abs() < 1e-9, "{}", m3.manifold.volume());
+        assert!(
+            (m3.manifold.volume() - 26.0).abs() < 1e-9,
+            "{}",
+            m3.manifold.volume()
+        );
     }
 
     #[test]
@@ -647,15 +731,33 @@ mod tests {
         // OpenSCAD's warning.
         let flat = |s: [f64; 3]| {
             let mut ps = primitives::cube([1.0; 3], false);
-            ps.transform(&[[s[0], 0.0, 0.0, 0.0], [0.0, s[1], 0.0, 0.0], [0.0, 0.0, s[2], 0.0], [0.0, 0.0, 0.0, 1.0]]);
+            ps.transform(&[
+                [s[0], 0.0, 0.0, 0.0],
+                [0.0, s[1], 0.0, 0.0],
+                [0.0, 0.0, s[2], 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]);
             Geometry::PolySet(Arc::new(ps))
         };
         let mut w = Vec::new();
         let mut e = Vec::new();
         let conv = |_: usize| -> Box<dyn IdSource> { Box::new(GlobalIds) };
-        let r = minkowski_3d(&[flat([0.0, 0.0, 1.0]), flat([0.0, 1.0, 0.0]), flat([1.0, 0.0, 0.0])], &conv, &GlobalIds, &mut w, &mut e);
+        let r = minkowski_3d(
+            &[
+                flat([0.0, 0.0, 1.0]),
+                flat([0.0, 1.0, 0.0]),
+                flat([1.0, 0.0, 0.0]),
+            ],
+            &conv,
+            &GlobalIds,
+            &mut w,
+            &mut e,
+        );
         assert!(r.is_none_or(|m| m.is_empty()));
-        assert_eq!(w, vec!["[manifold] Minkowski hard-crashed, falling back to Nef operation.".to_string()]);
+        assert_eq!(
+            w,
+            vec!["[manifold] Minkowski hard-crashed, falling back to Nef operation.".to_string()]
+        );
     }
 
     fn solid(ps: &crate::polyset::PolySet) -> ManifoldGeometry {
@@ -663,7 +765,11 @@ mod tests {
     }
 
     fn disc(n: f64) -> eval::node::Discretizer {
-        eval::node::Discretizer { fn_: n, fa: 12.0, fs: 2.0 }
+        eval::node::Discretizer {
+            fn_: n,
+            fa: 12.0,
+            fs: 2.0,
+        }
     }
 
     /// A block with a faceted spherical dent: 48 or more reflex edges, so
@@ -677,15 +783,26 @@ mod tests {
 
     #[test]
     fn dented_block_is_covered_by_its_boundary() {
-        let Geometry::Manifold(m) = dented_block() else { unreachable!() };
+        let Geometry::Manifold(m) = dented_block() else {
+            unreachable!()
+        };
         assert!(reflex_planes(m.manifold.as_impl()).len() > MAX_REFLEX);
-        assert!(matches!(operand(&Geometry::Manifold(m), &GlobalIds), Ok(Operand::Boundary(_))));
+        assert!(matches!(
+            operand(&Geometry::Manifold(m), &GlobalIds),
+            Ok(Operand::Boundary(_))
+        ));
         // The sum with a small cube: the dent shrinks by the cube, the block
         // grows by it. Its volume lies between the two blocks' volumes.
         let m = sum(&[dented_block(), cube_at(0.0, [1.0; 3])]);
-        assert_eq!(m.bounds().expect("bounds"), ([0.0, 0.0, 0.0], [11.0, 11.0, 11.0]));
+        assert_eq!(
+            m.bounds().expect("bounds"),
+            ([0.0, 0.0, 0.0], [11.0, 11.0, 11.0])
+        );
         let v = m.manifold.volume();
-        assert!(v > 1331.0 - 4.0 / 3.0 * std::f64::consts::PI * 27.0 / 2.0 && v < 1331.0, "{v}");
+        assert!(
+            v > 1331.0 - 4.0 / 3.0 * std::f64::consts::PI * 27.0 / 2.0 && v < 1331.0,
+            "{v}"
+        );
     }
 
     /// The hulls are built on rayon's pool; the result must not depend on
@@ -701,7 +818,10 @@ mod tests {
         let ball = Geometry::PolySet(Arc::new(primitives::sphere(2.0, &disc(24.0))));
         for children in [vec![l, ball.clone()], vec![dented_block(), ball]] {
             let run = |threads: usize| {
-                let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("pool");
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .expect("pool");
                 pool.install(|| sum(&children).to_polyset(&crate::color::CORNFIELD))
             };
             let one = run(1);

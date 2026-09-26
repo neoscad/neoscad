@@ -18,7 +18,9 @@ fn read(data: &[u8]) -> Result<Vec<Facet>, String> {
         let mut normal = [0.0; 3];
         let mut points = Vec::new();
         // Python's `float()` accepts "nan" and "inf" too.
-        let num = |s: &str| -> Result<f64, String> { s.parse::<f64>().map_err(|_| format!("bad number '{s}'")) };
+        let num = |s: &str| -> Result<f64, String> {
+            s.parse::<f64>().map_err(|_| format!("bad number '{s}'"))
+        };
         for line in text.lines() {
             let line = line.trim();
             let parts: Vec<&str> = line.split(' ').collect();
@@ -47,7 +49,11 @@ fn read(data: &[u8]) -> Result<Vec<Facet>, String> {
         return Err("Invalid binary stl format".into());
     }
     let count = u32::from_le_bytes(data[80..84].try_into().expect("4 bytes")) as usize;
-    let f = |o: usize| f64::from(f32::from_le_bytes(data[o..o + 4].try_into().expect("4 bytes")));
+    let f = |o: usize| {
+        f64::from(f32::from_le_bytes(
+            data[o..o + 4].try_into().expect("4 bytes"),
+        ))
+    };
     let mut out = Vec::with_capacity(count);
     for k in 0..count {
         let o = 84 + k * 50;
@@ -81,7 +87,10 @@ pub fn validate(data: &[u8]) -> Result<(), String> {
         let n = ids.len();
         *ids.entry(k).or_insert(n)
     };
-    let tris: Vec<[usize; 3]> = facets.iter().map(|(_, p)| [id(&p[0]), id(&p[1]), id(&p[2])]).collect();
+    let tris: Vec<[usize; 3]> = facets
+        .iter()
+        .map(|(_, p)| [id(&p[0]), id(&p[1]), id(&p[2])])
+        .collect();
     let mut edges: HashMap<(usize, usize), i64> = HashMap::new();
     for t in &tris {
         for i in 0..3 {
@@ -135,9 +144,16 @@ endsolid t
     #[test]
     fn closed_tetrahedron_passes_and_open_one_fails() {
         assert_eq!(validate(TETRA.as_bytes()), Ok(()));
-        let open = TETRA.replacen("vertex 0 0 1\n      vertex 0 1 0", "vertex 0 1 0\n      vertex 0 0 1", 1);
+        let open = TETRA.replacen(
+            "vertex 0 0 1\n      vertex 0 1 0",
+            "vertex 0 1 0\n      vertex 0 0 1",
+            1,
+        );
         assert!(validate(open.as_bytes()).is_err());
         let nan = TETRA.replacen("normal 0 0 -1", "normal nan 0 -1", 1);
-        assert_eq!(validate(nan.as_bytes()), Err("NaN of Inf normals found".into()));
+        assert_eq!(
+            validate(nan.as_bytes()),
+            Err("NaN of Inf normals found".into())
+        );
     }
 }

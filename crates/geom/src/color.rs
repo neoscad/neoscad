@@ -17,7 +17,10 @@ pub struct Scheme {
 /// OpenSCAD's built-in default scheme, "Cornfield"
 /// (`src/glview/ColorMap.cc:19,37,41`): `CGAL_FACE_FRONT_COLOR` #f9d72c
 /// and `CGAL_FACE_BACK_COLOR` #9dcb51.
-pub const CORNFIELD: Scheme = Scheme { face_front: Color::from_u8(0xf9, 0xd7, 0x2c), face_back: Color::from_u8(0x9d, 0xcb, 0x51) };
+pub const CORNFIELD: Scheme = Scheme {
+    face_front: Color::from_u8(0xf9, 0xd7, 0x2c),
+    face_back: Color::from_u8(0x9d, 0xcb, 0x51),
+};
 
 #[cfg(test)]
 mod tests {

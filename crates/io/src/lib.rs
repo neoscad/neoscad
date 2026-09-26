@@ -49,7 +49,10 @@ pub struct Outline {
 
 impl Outline {
     pub fn new(vertices: Vec<[f64; 2]>) -> Outline {
-        Outline { vertices, positive: true }
+        Outline {
+            vertices,
+            positive: true,
+        }
     }
 }
 
@@ -68,11 +71,19 @@ pub struct Message {
 
 impl Message {
     pub fn warning(text: impl Into<String>) -> Message {
-        Message { severity: Some(Severity::Warning), text: text.into(), located: false }
+        Message {
+            severity: Some(Severity::Warning),
+            text: text.into(),
+            located: false,
+        }
     }
 
     pub fn error(text: impl Into<String>) -> Message {
-        Message { severity: Some(Severity::Error), text: text.into(), located: false }
+        Message {
+            severity: Some(Severity::Error),
+            text: text.into(),
+            located: false,
+        }
     }
 
     /// The same message, logged with the caller's location.

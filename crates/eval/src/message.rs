@@ -43,7 +43,9 @@ impl Message<'_> {
         out.extend_from_slice(self.text);
         if let (Some(span), Some(sources)) = (self.diag.span, self.sources) {
             let rel = relative_path(sources.path(span.file), main_dir);
-            out.extend_from_slice(format!(" in file {}, line {}", rel.display(), self.diag.line).as_bytes());
+            out.extend_from_slice(
+                format!(" in file {}, line {}", rel.display(), self.diag.line).as_bytes(),
+            );
         }
         out
     }
@@ -62,7 +64,11 @@ pub struct Collect {
 
 impl Output for Collect {
     fn message(&mut self, m: &Message<'_>) {
-        self.lines.push((m.diag.severity, m.diag.code, String::from_utf8_lossy(m.text).into_owned()));
+        self.lines.push((
+            m.diag.severity,
+            m.diag.code,
+            String::from_utf8_lossy(m.text).into_owned(),
+        ));
     }
 }
 
@@ -86,7 +92,13 @@ pub struct Console<W: Write> {
 
 impl<W: Write> Console<W> {
     pub fn new(out: W, main_dir: PathBuf, quiet: bool) -> Self {
-        Console { out, quiet, last: VecDeque::with_capacity(5), main_dir, paths: Vec::new() }
+        Console {
+            out,
+            quiet,
+            last: VecDeque::with_capacity(5),
+            main_dir,
+            paths: Vec::new(),
+        }
     }
 
     pub fn into_inner(self) -> W {
@@ -96,7 +108,10 @@ impl<W: Write> Console<W> {
     /// Print one line with OpenSCAD's filtering. `severity` is `None` for
     /// plain output (OpenSCAD's `message_group::NONE`).
     pub fn print(&mut self, severity: Option<Severity>, line: &[u8]) {
-        let repeatable = matches!(severity, Some(Severity::Warning | Severity::Error | Severity::Trace));
+        let repeatable = matches!(
+            severity,
+            Some(Severity::Warning | Severity::Error | Severity::Trace)
+        );
         if repeatable {
             if self.last.len() == 5 && self.last.iter().all(|l| l == line) {
                 return;
@@ -118,7 +133,9 @@ impl<W: Write> Console<W> {
         if let Some((_, p)) = self.paths.iter().find(|(k, _)| *k == key) {
             return p.clone();
         }
-        let p = relative_path(sources.path(span.file), base).display().to_string();
+        let p = relative_path(sources.path(span.file), base)
+            .display()
+            .to_string();
         self.paths.push((key, p.clone()));
         p
     }
@@ -192,7 +209,12 @@ pub(crate) struct Unwind {
 
 impl Unwind {
     pub fn new(kind: UnwindKind, trace_depth: u32) -> Box<Unwind> {
-        Box::new(Unwind { kind, depth: trace_depth as i32, tail: VecDeque::new(), cap: trace_depth as usize })
+        Box::new(Unwind {
+            kind,
+            depth: trace_depth as i32,
+            tail: VecDeque::new(),
+            cap: trace_depth as usize,
+        })
     }
 
     /// `EvaluationException::LOG`: print now, or keep for the end. Returns

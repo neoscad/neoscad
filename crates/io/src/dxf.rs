@@ -150,7 +150,12 @@ pub struct Request<'a> {
 }
 
 /// Read a DXF file's contents (`None` when it could not be opened).
-pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: &mut dyn FnMut(String)) -> DxfData {
+pub fn read(
+    bytes: Option<&[u8]>,
+    req: &Request<'_>,
+    curves: &dyn Curves,
+    warn: &mut dyn FnMut(String),
+) -> DxfData {
     let (file, display, layer_name, scale) = (req.file, req.display, req.layer, req.scale);
     let [xorigin, yorigin] = req.origin;
     let mut out = DxfData::default();
@@ -158,14 +163,18 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
         warn(format!("Can't open DXF file '{file}'."));
         return out;
     };
-    let mut grid = Grid { res: GRID_COARSE, db: HashMap::new() };
+    let mut grid = Grid {
+        res: GRID_COARSE,
+        db: HashMap::new(),
+    };
     let mut lines: Vec<Line> = Vec::new();
     let mut blockdata: HashMap<String, Vec<Line>> = HashMap::new();
     let mut in_entities = false;
     let mut in_blocks = false;
     let mut current_block = String::new();
 
-    let (mut mode, mut layer, mut name, mut iddata) = (String::new(), String::new(), String::new(), String::new());
+    let (mut mode, mut layer, mut name, mut iddata) =
+        (String::new(), String::new(), String::new(), String::new());
     let mut dimtype = 0i32;
     let mut coords = [[0.0f64; 2]; 7];
     let mut xverts: Vec<f64> = Vec::new();
@@ -187,11 +196,11 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
         };
         let r: Result<(), Abort> = (|| {
             let add_line = |out: &mut DxfData,
-                                grid: &mut Grid,
-                                lines: &mut Vec<Line>,
-                                blockdata: &mut HashMap<String, Vec<Line>>,
-                                layer: &str,
-                                p: [f64; 4]| {
+                            grid: &mut Grid,
+                            lines: &mut Vec<Line>,
+                            blockdata: &mut HashMap<String, Vec<Line>>,
+                            layer: &str,
+                            p: [f64; 4]| {
                 let [mut x1, mut y1, mut x2, mut y2] = p;
                 if !in_entities && !in_blocks {
                     return;
@@ -206,13 +215,22 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
                     out.points.push([x1, y1]);
                     out.points.push([x2, y2]);
                     let l = out.points.len();
-                    lines.push(Line { idx: [l - 2, l - 1], disabled: false });
+                    lines.push(Line {
+                        idx: [l - 2, l - 1],
+                        disabled: false,
+                    });
                 }
                 if in_blocks && !current_block.is_empty() {
                     out.points.push([x1, y1]);
                     out.points.push([x2, y2]);
                     let l = out.points.len();
-                    blockdata.entry(current_block.clone()).or_default().push(Line { idx: [l - 2, l - 1], disabled: false });
+                    blockdata
+                        .entry(current_block.clone())
+                        .or_default()
+                        .push(Line {
+                            idx: [l - 2, l - 1],
+                            disabled: false,
+                        });
                 }
             };
             if (10..=16).contains(&id) {
@@ -243,14 +261,31 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
                             in_blocks = iddata == "BLOCKS";
                         }
                         "LINE" => {
-                            let p = [at(&xverts, 0)?, at(&yverts, 0)?, at(&xverts, 1)?, at(&yverts, 1)?];
+                            let p = [
+                                at(&xverts, 0)?,
+                                at(&yverts, 0)?,
+                                at(&xverts, 1)?,
+                                at(&yverts, 1)?,
+                            ];
                             add_line(&mut out, &mut grid, &mut lines, &mut blockdata, &layer, p);
                         }
                         "LWPOLYLINE" => {
                             let n = xverts.len().max(yverts.len());
                             for i in 1..n {
-                                let p = [at(&xverts, i - 1)?, at(&yverts, i - 1)?, at(&xverts, i % n)?, at(&yverts, i % n)?];
-                                add_line(&mut out, &mut grid, &mut lines, &mut blockdata, &layer, p);
+                                let p = [
+                                    at(&xverts, i - 1)?,
+                                    at(&yverts, i - 1)?,
+                                    at(&xverts, i % n)?,
+                                    at(&yverts, i % n)?,
+                                ];
+                                add_line(
+                                    &mut out,
+                                    &mut grid,
+                                    &mut lines,
+                                    &mut blockdata,
+                                    &layer,
+                                    p,
+                                );
                             }
                             if dimtype & 1 != 0 {
                                 let p = [
@@ -259,7 +294,14 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
                                     at(&xverts, 0)?,
                                     at(&yverts, 0)?,
                                 ];
-                                add_line(&mut out, &mut grid, &mut lines, &mut blockdata, &layer, p);
+                                add_line(
+                                    &mut out,
+                                    &mut grid,
+                                    &mut lines,
+                                    &mut blockdata,
+                                    &layer,
+                                    p,
+                                );
                             }
                         }
                         "CIRCLE" => {
@@ -274,7 +316,14 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
                                     cos_degrees(a2) * radius + c[0],
                                     sin_degrees(a2) * radius + c[1],
                                 ];
-                                add_line(&mut out, &mut grid, &mut lines, &mut blockdata, &layer, p);
+                                add_line(
+                                    &mut out,
+                                    &mut grid,
+                                    &mut lines,
+                                    &mut blockdata,
+                                    &layer,
+                                    p,
+                                );
                             }
                         }
                         "ARC" => {
@@ -297,7 +346,14 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
                                     cos_degrees(a2) * radius + c[0],
                                     sin_degrees(a2) * radius + c[1],
                                 ];
-                                add_line(&mut out, &mut grid, &mut lines, &mut blockdata, &layer, p);
+                                add_line(
+                                    &mut out,
+                                    &mut grid,
+                                    &mut lines,
+                                    &mut blockdata,
+                                    &layer,
+                                    p,
+                                );
                             }
                         }
                         "ELLIPSE" => {
@@ -315,7 +371,12 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
                             }
                             let r_minor = r_major * radius;
                             let sweep = ell_stop - ell_start;
-                            let n = curves.circular_segments(r_major, sweep / (2.0 * std::f64::consts::PI) * 360.0).unwrap_or(1);
+                            let n = curves
+                                .circular_segments(
+                                    r_major,
+                                    sweep / (2.0 * std::f64::consts::PI) * 360.0,
+                                )
+                                .unwrap_or(1);
                             let mut p1 = [0.0, 0.0];
                             for i in 0..=n {
                                 let a = ell_start + sweep * f64::from(i) / f64::from(n);
@@ -325,7 +386,14 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
                                     rot.sin() * p2[0] + rot.cos() * p2[1] + c[1],
                                 ];
                                 if i > 0 {
-                                    add_line(&mut out, &mut grid, &mut lines, &mut blockdata, &layer, [p1[0], p1[1], q[0], q[1]]);
+                                    add_line(
+                                        &mut out,
+                                        &mut grid,
+                                        &mut lines,
+                                        &mut blockdata,
+                                        &layer,
+                                        [p1[0], p1[1], q[0], q[1]],
+                                    );
                                 }
                                 p1 = q;
                             }
@@ -345,17 +413,31 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
                                     (c * lx2 - s * ly2) * scale + at(&xverts, 0)?,
                                     (s * lx2 + c * ly2) * scale + at(&yverts, 0)?,
                                 ];
-                                add_line(&mut out, &mut grid, &mut lines, &mut blockdata, &layer, p);
+                                add_line(
+                                    &mut out,
+                                    &mut grid,
+                                    &mut lines,
+                                    &mut blockdata,
+                                    &layer,
+                                    p,
+                                );
                             }
                         }
                         "DIMENSION" if layer_name.is_empty() || layer_name == layer => {
-                            out.dims.push(Dim { ty: dimtype, coords, angle: arc_start, name: name.clone() });
+                            out.dims.push(Dim {
+                                ty: dimtype,
+                                coords,
+                                angle: arc_start,
+                                name: name.clone(),
+                            });
                         }
                         "BLOCK" => current_block = iddata.clone(),
                         "ENDBLK" => current_block.clear(),
                         "ENDSEC" => {}
                         _ => {
-                            if in_blocks || (in_entities && (layer_name.is_empty() || layer_name == layer)) {
+                            if in_blocks
+                                || (in_entities && (layer_name.is_empty() || layer_name == layer))
+                            {
                                 match unsupported.iter_mut().find(|(m, _)| *m == mode) {
                                     Some(e) => e.1 += 1,
                                     None => unsupported.push((mode.clone(), 1)),
@@ -416,9 +498,14 @@ pub fn read(bytes: Option<&[u8]>, req: &Request<'_>, curves: &dyn Curves, warn: 
 
     for (m, n) in &unsupported {
         if layer_name.is_empty() {
-            warn(format!("Unsupported DXF Entity '{m}' ({n:x}) in {}.", quoted(display)));
+            warn(format!(
+                "Unsupported DXF Entity '{m}' ({n:x}) in {}.",
+                quoted(display)
+            ));
         } else {
-            warn(format!("Unsupported DXF Entity '{m}' ({n:x}) in layer '{layer_name}' of {display}"));
+            warn(format!(
+                "Unsupported DXF Entity '{m}' ({n:x}) in layer '{layer_name}' of {display}"
+            ));
         }
     }
 
@@ -473,8 +560,12 @@ pub fn write(outlines: &[Outline]) -> Vec<u8> {
     let (x0, y0, x1, y1) = (fmt_g(x_min), fmt_g(y_min), fmt_g(x_max), fmt_g(y_max));
     let mut out = String::from("999\nDXF from OpenSCAD\n");
     out.push_str("  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1006\n  9\n$INSBASE\n 10\n0.0\n 20\n0.0\n 30\n0.0\n");
-    out.push_str(&format!("  9\n$EXTMIN\n 10\n{x0}\n 20\n{y0}\n  9\n$EXTMAX\n 10\n{x1}\n 20\n{y1}\n"));
-    out.push_str(&format!("  9\n$LINMIN\n 10\n{x0}\n 20\n{y0}\n  9\n$LINMAX\n 10\n{x1}\n 20\n{y1}\n"));
+    out.push_str(&format!(
+        "  9\n$EXTMIN\n 10\n{x0}\n 20\n{y0}\n  9\n$EXTMAX\n 10\n{x1}\n 20\n{y1}\n"
+    ));
+    out.push_str(&format!(
+        "  9\n$LINMIN\n 10\n{x0}\n 20\n{y0}\n  9\n$LINMAX\n 10\n{x1}\n 20\n{y1}\n"
+    ));
     out.push_str(DXF_TABLES);
     out.push_str("  0\nSECTION\n  2\nENTITIES\n");
     for o in outlines {
@@ -503,7 +594,13 @@ pub fn write(outlines: &[Outline]) -> Vec<u8> {
 /// then closed loops.
 fn extract_paths(out: &mut DxfData, grid: &mut Grid, lines: &mut [Line]) {
     let mut enabled: BTreeMap<usize, usize> = (0..lines.len()).map(|i| (i, i)).collect();
-    let follow = |out: &mut DxfData, grid: &mut Grid, lines: &mut [Line], enabled: &mut BTreeMap<usize, usize>, path: &mut Path, mut line: usize, mut point: usize| {
+    let follow = |out: &mut DxfData,
+                  grid: &mut Grid,
+                  lines: &mut [Line],
+                  enabled: &mut BTreeMap<usize, usize>,
+                  path: &mut Path,
+                  mut line: usize,
+                  mut point: usize| {
         path.indices.push(lines[line].idx[point]);
         loop {
             path.indices.push(lines[line].idx[1 - point]);
@@ -544,7 +641,8 @@ fn extract_paths(out: &mut DxfData, grid: &mut Grid, lines: &mut [Line]) {
                 let p = out.points[lines[idx].idx[j]];
                 let lv = grid.data(p[0], p[1]);
                 let connected = lv.iter().any(|&k| {
-                    usize::try_from(k).is_ok_and(|k| k < lines.len() && k != idx && !lines[k].disabled)
+                    usize::try_from(k)
+                        .is_ok_and(|k| k < lines.len() && k != idx && !lines[k].disabled)
                 });
                 if !connected {
                     start = Some((idx, j));
@@ -552,14 +650,19 @@ fn extract_paths(out: &mut DxfData, grid: &mut Grid, lines: &mut [Line]) {
                 }
             }
         }
-        let Some((line, point)) = start else { break 'open };
+        let Some((line, point)) = start else {
+            break 'open;
+        };
         let mut path = Path::default();
         follow(out, grid, lines, &mut enabled, &mut path, line, point);
         out.paths.push(path);
     }
     // Closed paths.
     while let Some((_, &line)) = enabled.iter().next() {
-        let mut path = Path { closed: true, ..Default::default() };
+        let mut path = Path {
+            closed: true,
+            ..Default::default()
+        };
         follow(out, grid, lines, &mut enabled, &mut path, line, 0);
         out.paths.push(path);
     }
@@ -581,7 +684,11 @@ fn extract_paths(out: &mut DxfData, grid: &mut Grid, lines: &mut [Line]) {
         let n = path.indices.len();
         let a = if b == 0 { n - 2 } else { b - 1 };
         let c = if b == n - 1 { 1 } else { b + 1 };
-        let (pa, pb, pc) = (pts[path.indices[a]], pts[path.indices[b]], pts[path.indices[c]]);
+        let (pa, pb, pc) = (
+            pts[path.indices[a]],
+            pts[path.indices[b]],
+            pts[path.indices[c]],
+        );
         let (ax, ay) = (pa[0] - pb[0], pa[1] - pb[1]);
         let (cx, cy) = (pc[0] - pb[0], pc[1] - pb[1]);
         if ax.atan2(ay) < cx.atan2(cy) {
@@ -602,7 +709,9 @@ mod tests {
         let o = [Outline::new(vec![[-4.0, -2.0], [-5.0, -3.0], [-3.0, -3.0]])];
         let text = String::from_utf8(write(&o)).unwrap();
         assert!(text.starts_with("999\nDXF from OpenSCAD\n  0\nSECTION\n  2\nHEADER\n"));
-        assert!(text.contains("  9\n$EXTMIN\n 10\n-5\n 20\n-3\n  9\n$EXTMAX\n 10\n2.22507e-308\n 20\n2.22507e-308\n"));
+        assert!(text.contains(
+            "  9\n$EXTMIN\n 10\n-5\n 20\n-3\n  9\n$EXTMAX\n 10\n2.22507e-308\n 20\n2.22507e-308\n"
+        ));
         assert!(text.ends_with(
             "  0\nLWPOLYLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbPolyline\n 90\n3\n 70\n1\n 10\n-4\n 20\n-2\n 10\n-5\n 20\n-3\n 10\n-3\n 20\n-3\n  0\nENDSEC\n  0\nEOF\n"
         ));
@@ -613,9 +722,20 @@ mod tests {
     fn written_outlines_read_back() {
         // A square written by the exporter reads back as one closed path
         // with the same corners (in the reader's reversed order).
-        let sq = [Outline::new(vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]])];
+        let sq = [Outline::new(vec![
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [2.0, 2.0],
+            [0.0, 2.0],
+        ])];
         let bytes = write(&sq);
-        let req = Request { file: "f", display: "f", layer: "", origin: [0.0, 0.0], scale: 1.0 };
+        let req = Request {
+            file: "f",
+            display: "f",
+            layer: "",
+            origin: [0.0, 0.0],
+            scale: 1.0,
+        };
         let data = read(Some(&bytes), &req, &Fixed36, &mut |w| panic!("{w}"));
         let out = data.to_outlines();
         assert_eq!(out.len(), 1);

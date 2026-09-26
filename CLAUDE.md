@@ -25,7 +25,7 @@ it predates Manifold and the current test suite.
 
     source $HOME/.cargo/env              # if cargo isn't on PATH
     cargo build --release
-    cargo clippy --all-targets -- -D warnings && cargo test
+    cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test
     ./target/release/conformance run [--tier N] [--filter S] [-v]
     ./target/release/conformance run --record       # progress snapshot
     ./target/release/conformance manifest [--check]  # after updating .reference

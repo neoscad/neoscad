@@ -50,7 +50,11 @@ struct Parser<'a> {
 
 impl Parser<'_> {
     fn err(&self, message: &'static str) -> JsonError {
-        let line = self.s[..self.i.min(self.s.len())].iter().filter(|&&b| b == b'\n').count() + 1;
+        let line = self.s[..self.i.min(self.s.len())]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count()
+            + 1;
         JsonError { line, message }
     }
 
@@ -122,12 +126,18 @@ impl Parser<'_> {
                     return Err(self.err("expected ']' or ','"));
                 }
             }
-            Some(b'"') => Ok(JsonNode { data: self.string()?, children: Vec::new() }),
+            Some(b'"') => Ok(JsonNode {
+                data: self.string()?,
+                children: Vec::new(),
+            }),
             Some(_) => {
                 for word in [&b"true"[..], b"false", b"null"] {
                     if self.s[self.i..].starts_with(word) {
                         self.i += word.len();
-                        return Ok(JsonNode { data: String::from_utf8_lossy(word).into_owned(), children: Vec::new() });
+                        return Ok(JsonNode {
+                            data: String::from_utf8_lossy(word).into_owned(),
+                            children: Vec::new(),
+                        });
                     }
                 }
                 self.number()
@@ -161,7 +171,10 @@ impl Parser<'_> {
                 return Err(self.err("need at least one digit in exponent"));
             }
         }
-        Ok(JsonNode { data: String::from_utf8_lossy(&self.s[start..self.i]).into_owned(), children: Vec::new() })
+        Ok(JsonNode {
+            data: String::from_utf8_lossy(&self.s[start..self.i]).into_owned(),
+            children: Vec::new(),
+        })
     }
 
     fn string(&mut self) -> Result<String, JsonError> {
@@ -192,7 +205,9 @@ impl Parser<'_> {
                                     .and_then(|h| std::str::from_utf8(h).ok())
                                     .and_then(|h| u32::from_str_radix(h, 16).ok())
                             };
-                            let Some(mut cp) = hex(self, self.i) else { return Err(self.err("invalid escape sequence")) };
+                            let Some(mut cp) = hex(self, self.i) else {
+                                return Err(self.err("invalid escape sequence"));
+                            };
                             self.i += 4;
                             if (0xd800..0xdc00).contains(&cp)
                                 && self.s.get(self.i..self.i + 2) == Some(b"\\u")
@@ -224,7 +239,8 @@ mod tests {
 
     #[test]
     fn keeps_scalar_text_and_order() {
-        let v = parse(br#"{"a": {"x": "1", "y": 1.50, "z": true, "x": [1, "s"]}, "b": null}"#).unwrap();
+        let v =
+            parse(br#"{"a": {"x": "1", "y": 1.50, "z": true, "x": [1, "s"]}, "b": null}"#).unwrap();
         let a = v.child("a").unwrap();
         assert_eq!(a.children.len(), 4);
         assert_eq!(a.children[1].1.data, "1.50");

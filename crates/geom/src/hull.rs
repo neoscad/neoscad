@@ -114,7 +114,9 @@ pub fn convex_hull_2(points: &[[f64; 2]]) -> Vec<[f64; 2]> {
     // not assigned to regions (they head them).
     let mut ranges = [w, e, n, s];
     ranges.sort_unstable();
-    let duplicated = usize::from(ranges[0] == ranges[1]) + usize::from(ranges[1] == ranges[2]) + usize::from(ranges[2] == ranges[3]);
+    let duplicated = usize::from(ranges[0] == ranges[1])
+        + usize::from(ranges[1] == ranges[2])
+        + usize::from(ranges[2] == ranges[3]);
 
     let mut regions: [Vec<[f64; 2]>; 4] = [vec![pw], vec![ps], vec![pe], vec![pn]];
     // `r1`/`r3` of the degenerate assignment: an extreme point that is two
@@ -196,12 +198,19 @@ pub fn convex_hull_2(points: &[[f64; 2]]) -> Vec<[f64; 2]> {
 /// `applyHull2D`: the hull of every child outline's vertices as one
 /// sanitized outline, or an empty shape when there are no points.
 pub fn hull_2d(children: &[Option<&Polygon2d>]) -> Polygon2d {
-    let points: Vec<[f64; 2]> =
-        children.iter().flatten().flat_map(|p| p.outlines.iter()).flat_map(|o| o.vertices.iter().copied()).collect();
+    let points: Vec<[f64; 2]> = children
+        .iter()
+        .flatten()
+        .flat_map(|p| p.outlines.iter())
+        .flat_map(|o| o.vertices.iter().copied())
+        .collect();
     if points.is_empty() {
         return Polygon2d::default();
     }
-    Polygon2d { outlines: vec![Outline::new(convex_hull_2(&points))], sanitized: true }
+    Polygon2d {
+        outlines: vec![Outline::new(convex_hull_2(&points))],
+        sanitized: true,
+    }
 }
 
 /// The points `applyOperator3DManifold(HULL)` hands to `Manifold::Hull`: for
@@ -235,10 +244,21 @@ mod tests {
 
     #[test]
     fn square_with_inner_points() {
-        let pts = [[1.0, 1.0], [0.0, 0.0], [2.0, 0.0], [0.5, 0.5], [2.0, 2.0], [0.0, 2.0], [1.0, 0.0]];
+        let pts = [
+            [1.0, 1.0],
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [0.5, 0.5],
+            [2.0, 2.0],
+            [0.0, 2.0],
+            [1.0, 0.0],
+        ];
         // Counter-clockwise from the lexicographically smallest point; the
         // collinear (1, 0) is dropped.
-        assert_eq!(convex_hull_2(&pts), vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]);
+        assert_eq!(
+            convex_hull_2(&pts),
+            vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]
+        );
     }
 
     #[test]
@@ -246,9 +266,15 @@ mod tests {
         assert!(convex_hull_2(&[]).is_empty());
         assert_eq!(convex_hull_2(&[[1.0, 1.0], [1.0, 1.0]]), vec![[1.0, 1.0]]);
         // Collinear points: the two ends.
-        assert_eq!(convex_hull_2(&[[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]), vec![[0.0, 0.0], [2.0, 2.0]]);
+        assert_eq!(
+            convex_hull_2(&[[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]),
+            vec![[0.0, 0.0], [2.0, 2.0]]
+        );
         // A triangle whose south point is also its west point.
-        assert_eq!(convex_hull_2(&[[0.0, 0.0], [2.0, 1.0], [1.0, 2.0]]), vec![[0.0, 0.0], [2.0, 1.0], [1.0, 2.0]]);
+        assert_eq!(
+            convex_hull_2(&[[0.0, 0.0], [2.0, 1.0], [1.0, 2.0]]),
+            vec![[0.0, 0.0], [2.0, 1.0], [1.0, 2.0]]
+        );
     }
 
     #[test]
@@ -263,7 +289,10 @@ mod tests {
             .collect();
         let h = convex_hull_2(&pts);
         assert_eq!(h.len(), 8);
-        let w = pts.iter().copied().fold(pts[0], |a, b| if less_xy(b, a) { b } else { a });
+        let w = pts
+            .iter()
+            .copied()
+            .fold(pts[0], |a, b| if less_xy(b, a) { b } else { a });
         assert_eq!(h[0], w);
         for i in 0..8 {
             assert!(orientation(h[i], h[(i + 1) % 8], h[(i + 2) % 8]) > 0.0);

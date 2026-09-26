@@ -125,7 +125,10 @@ fn collect_groups(text: &[u8]) -> Vec<Group> {
                 i += 1;
             }
             if is_group {
-                groups.push(Group { name: group_name(&text[from..i]), line });
+                groups.push(Group {
+                    name: group_name(&text[from..i]),
+                    line,
+                });
             }
         }
         i += 1;
@@ -138,7 +141,9 @@ fn group_name(mut comment: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut first = true;
     while let Some(open) = comment.iter().position(|&b| b == b'[') {
-        let Some(close) = comment[open + 1..].iter().position(|&b| b == b']') else { break };
+        let Some(close) = comment[open + 1..].iter().position(|&b| b == b']') else {
+            break;
+        };
         if !first {
             out.push(b'-');
         }
@@ -253,18 +258,32 @@ pub fn collect_parameters(ast: &mut Ast, fulltext: &[u8], is_main: impl Fn(FileI
         }
         let mut list = Vec::new();
         let c = get_comment(fulltext, loc.line);
-        let param = if c.is_empty() { None } else { comment::parse(&c, ast) };
-        let param = param.unwrap_or_else(|| ast.add(ExprKind::String(Box::default()), Span::default()));
-        list.push(Annotation { name: "Parameter", expr: param });
+        let param = if c.is_empty() {
+            None
+        } else {
+            comment::parse(&c, ast)
+        };
+        let param =
+            param.unwrap_or_else(|| ast.add(ExprKind::String(Box::default()), Span::default()));
+        list.push(Annotation {
+            name: "Parameter",
+            expr: param,
+        });
 
         let descr = get_description(fulltext, loc.line - 1);
         if !descr.is_empty() {
             let e = ast.add(ExprKind::String(descr.into()), Span::default());
-            list.push(Annotation { name: "Description", expr: e });
+            list.push(Annotation {
+                name: "Description",
+                expr: e,
+            });
         }
         if let Some(g) = groups.iter().rev().find(|g| g.line < loc.line) {
             let e = ast.add(ExprKind::String(g.name.as_slice().into()), Span::default());
-            list.push(Annotation { name: "Group", expr: e });
+            list.push(Annotation {
+                name: "Group",
+                expr: e,
+            });
         }
         // `addAnnotations` inserts into a map, so an existing annotation of
         // the same name is kept.

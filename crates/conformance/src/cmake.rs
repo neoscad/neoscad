@@ -338,9 +338,16 @@ impl Interpreter {
         let name = c.name.as_str();
         match name {
             // Build-system plumbing with no effect on which tests exist.
-            "cmake_minimum_required" | "cmake_policy" | "project" | "enable_testing"
-            | "include" | "find_package" | "pkg_check_modules" | "add_custom_target"
-            | "set_property" | "set_directory_properties" => Ok(()),
+            "cmake_minimum_required"
+            | "cmake_policy"
+            | "project"
+            | "enable_testing"
+            | "include"
+            | "find_package"
+            | "pkg_check_modules"
+            | "add_custom_target"
+            | "set_property"
+            | "set_directory_properties" => Ok(()),
             "message" => {
                 let args = self.expand_args(&c.args);
                 if let Some(level @ ("WARNING" | "FATAL_ERROR" | "SEND_ERROR")) =
@@ -402,9 +409,10 @@ impl Interpreter {
                 let v = match mode.as_str() {
                     "NAME_WE" => name_we(path),
                     "NAME" => file_name(path).to_string(),
-                    "DIRECTORY" | "PATH" => {
-                        path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default()
-                    }
+                    "DIRECTORY" | "PATH" => path
+                        .rsplit_once('/')
+                        .map(|(d, _)| d.to_string())
+                        .unwrap_or_default(),
                     m => return Err(format!("unsupported mode {m}")),
                 };
                 self.vars.insert(var.clone(), v);
@@ -419,7 +427,9 @@ impl Interpreter {
                 };
                 self.virtual_files.insert(output.clone());
                 let copy_only = args.iter().any(|a| a == "COPYONLY");
-                self.out.configured_files.push((input.clone(), output.clone(), copy_only));
+                self.out
+                    .configured_files
+                    .push((input.clone(), output.clone(), copy_only));
                 Ok(())
             }
             "ctest_env_append_value" => {
@@ -503,7 +513,10 @@ impl Interpreter {
             }
             "set_tests_properties" => {
                 let args = self.function_args(&c.args);
-                let p = args.iter().position(|a| a == "PROPERTIES").ok_or("no PROPERTIES")?;
+                let p = args
+                    .iter()
+                    .position(|a| a == "PROPERTIES")
+                    .ok_or("no PROPERTIES")?;
                 let props = &args[p + 1..];
                 let disables = props
                     .chunks(2)
@@ -531,10 +544,9 @@ impl Interpreter {
     fn disable(&mut self, name: &str, line: usize, strict: bool) {
         match self.index.get(name) {
             Some(&i) => self.out.registrations[i].disabled_at = Some(line),
-            None if strict => self
-                .out
-                .diagnostics
-                .push(format!("CMakeLists.txt:{line}: disabling unknown test {name}")),
+            None if strict => self.out.diagnostics.push(format!(
+                "CMakeLists.txt:{line}: disabling unknown test {name}"
+            )),
             None => {}
         }
     }
@@ -548,7 +560,8 @@ impl Interpreter {
             ));
             return;
         }
-        self.index.insert(reg.name.clone(), self.out.registrations.len());
+        self.index
+            .insert(reg.name.clone(), self.out.registrations.len());
         self.out.registrations.push(reg);
     }
 
@@ -568,7 +581,11 @@ impl Interpreter {
     fn get_test_config(&self, name: &str) -> Vec<String> {
         split_list(self.get("TEST_CONFIGS"))
             .into_iter()
-            .filter(|c| split_list(self.get(&format!("{c}_TEST_CONFIG"))).iter().any(|n| n == name))
+            .filter(|c| {
+                split_list(self.get(&format!("{c}_TEST_CONFIG")))
+                    .iter()
+                    .any(|n| n == name)
+            })
             .collect()
     }
 
@@ -594,9 +611,14 @@ impl Interpreter {
             let fullname = format!("{group}_{basename}");
             let mut camera: Vec<String> = Vec::new();
             if all_2d.iter().any(|f| f == file) {
-                camera = ["--camera=0,0,100,0,0,0", "--viewall", "--autocenter", "--projection=ortho"]
-                    .map(String::from)
-                    .to_vec();
+                camera = [
+                    "--camera=0,0,100,0,0,0",
+                    "--viewall",
+                    "--autocenter",
+                    "--projection=ortho",
+                ]
+                .map(String::from)
+                .to_vec();
             }
             let found = self.get_test_config(&fullname);
             if found.is_empty() {
@@ -700,7 +722,10 @@ impl Interpreter {
         let bin = self.get("OPENSCAD_BINPATH").to_string();
         for (step, command) in [
             ("run", vec![bin, file.clone(), "-o".into(), out.clone()]),
-            ("check", vec!["cmake".into(), "-E".into(), "cat".into(), out.clone()]),
+            (
+                "check",
+                vec!["cmake".into(), "-E".into(), "cat".into(), out.clone()],
+            ),
         ] {
             let name = format!("{base}_{format}_{step}");
             let reg = Registration {
@@ -774,7 +799,10 @@ impl Interpreter {
                 let [item, out, ..] = rest else {
                     return Err("FIND needs ITEM OUT".into());
                 };
-                let pos = list.iter().position(|x| x == item).map_or(-1, |p| p as isize);
+                let pos = list
+                    .iter()
+                    .position(|x| x == item)
+                    .map_or(-1, |p| p as isize);
                 self.vars.insert(out.clone(), pos.to_string());
                 return Ok(());
             }
@@ -791,14 +819,19 @@ impl Interpreter {
             "MAKE_DIRECTORY" => Ok(()),
             "GLOB" | "GLOB_RECURSE" => {
                 let (var, patterns) = rest.split_first().ok_or("GLOB needs a variable")?;
-                if patterns
-                    .iter()
-                    .any(|p| matches!(p.as_str(), "RELATIVE" | "LIST_DIRECTORIES" | "FOLLOW_SYMLINKS"))
-                {
+                if patterns.iter().any(|p| {
+                    matches!(
+                        p.as_str(),
+                        "RELATIVE" | "LIST_DIRECTORIES" | "FOLLOW_SYMLINKS"
+                    )
+                }) {
                     return Err(format!("unsupported GLOB option in {patterns:?}"));
                 }
                 let mut result = Vec::new();
-                for pat in patterns.iter().filter(|p| p.as_str() != "CONFIGURE_DEPENDS") {
+                for pat in patterns
+                    .iter()
+                    .filter(|p| p.as_str() != "CONFIGURE_DEPENDS")
+                {
                     result.extend(self.glob(pat, op == "GLOB_RECURSE"));
                 }
                 self.vars.insert(var.clone(), result.join(";"));
@@ -815,12 +848,18 @@ impl Interpreter {
     fn glob(&self, pattern: &str, recurse: bool) -> Vec<String> {
         let (dir, pat) = pattern.rsplit_once('/').unwrap_or((".", pattern));
         if !pat.contains(['*', '?', '[']) && !dir.contains(['*', '?', '[']) {
-            return if self.exists(pattern) { vec![pattern.to_string()] } else { Vec::new() };
+            return if self.exists(pattern) {
+                vec![pattern.to_string()]
+            } else {
+                Vec::new()
+            };
         }
         let mut found = BTreeSet::new();
         let mut stack = vec![dir.to_string()];
         while let Some(d) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&d) else { continue };
+            let Ok(entries) = fs::read_dir(&d) else {
+                continue;
+            };
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
                 let path = format!("{d}/{name}");
@@ -836,7 +875,11 @@ impl Interpreter {
         }
         for v in &self.virtual_files {
             if let Some((vd, vn)) = v.rsplit_once('/') {
-                let under = if recurse { vd == dir || vd.starts_with(&format!("{dir}/")) } else { vd == dir };
+                let under = if recurse {
+                    vd == dir || vd.starts_with(&format!("{dir}/"))
+                } else {
+                    vd == dir
+                };
                 if under && wildcard_match(pat, vn) {
                     found.insert(v.clone());
                 }
@@ -938,8 +981,12 @@ impl Interpreter {
             return Ok(match op.as_str() {
                 "STREQUAL" => lhs_v == rhs_v,
                 "EQUAL" | "LESS" | "GREATER" => {
-                    let a: f64 = lhs_v.parse().map_err(|_| format!("not a number: {lhs_v}"))?;
-                    let b: f64 = rhs_v.parse().map_err(|_| format!("not a number: {rhs_v}"))?;
+                    let a: f64 = lhs_v
+                        .parse()
+                        .map_err(|_| format!("not a number: {lhs_v}"))?;
+                    let b: f64 = rhs_v
+                        .parse()
+                        .map_err(|_| format!("not a number: {rhs_v}"))?;
                     match op.as_str() {
                         "EQUAL" => a == b,
                         "LESS" => a < b,
@@ -958,10 +1005,7 @@ impl Interpreter {
         if is_false_constant(&tok) || quoted {
             return Ok(false);
         }
-        Ok(self
-            .vars
-            .get(&tok)
-            .is_some_and(|v| !is_false_constant(v)))
+        Ok(self.vars.get(&tok).is_some_and(|v| !is_false_constant(v)))
     }
 
     /// An `if()` operand: an unquoted name of a defined variable means its
@@ -1053,8 +1097,10 @@ fn is_true_constant(s: &str) -> bool {
 
 fn is_false_constant(s: &str) -> bool {
     let u = s.to_uppercase();
-    matches!(u.as_str(), "" | "0" | "OFF" | "NO" | "FALSE" | "N" | "IGNORE" | "NOTFOUND")
-        || u.ends_with("-NOTFOUND")
+    matches!(
+        u.as_str(),
+        "" | "0" | "OFF" | "NO" | "FALSE" | "N" | "IGNORE" | "NOTFOUND"
+    ) || u.ends_with("-NOTFOUND")
 }
 
 /// Split a CMake list on unescaped `;`, dropping empty elements.
@@ -1244,7 +1290,8 @@ fn parse(src: &str) -> Result<Vec<Command>> {
                 } else if let Some((content_start, eqs)) = bracket_open(&chars, i) {
                     let (end, content_lines) = bracket_close(&chars, content_start, eqs);
                     let close_len = eqs + 2;
-                    let mut content: String = chars[content_start..end - close_len].iter().collect();
+                    let mut content: String =
+                        chars[content_start..end - close_len].iter().collect();
                     // CMake drops a newline immediately after the opening bracket.
                     if content.starts_with('\n') {
                         content.remove(0);
@@ -1269,7 +1316,11 @@ fn parse(src: &str) -> Result<Vec<Command>> {
                     args.push(RawArg::Unquoted(s));
                 }
             }
-            cmds.push(Command { name, args, line: cmd_line });
+            cmds.push(Command {
+                name,
+                args,
+                line: cmd_line,
+            });
         } else {
             return Err(format!("line {line}: unexpected character {c:?}"));
         }
@@ -1342,7 +1393,10 @@ mod tests {
             "#,
         );
         let names: Vec<_> = e.registrations.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, ["echo_a", "echo_c", "g-one_my_file", "g-two_my_file"]);
+        assert_eq!(
+            names,
+            ["echo_a", "echo_c", "g-one_my_file", "g-two_my_file"]
+        );
         assert_eq!(e.registrations[0].args, ["-D", "a=3;"]);
         assert_eq!(e.registrations[0].configs, ["All", "Default", "Good"]);
         assert!(e.registrations[2].experimental);
@@ -1371,7 +1425,10 @@ mod tests {
             add_line_exclusion_for_test(echo r [[^B$]])
             "#,
         );
-        assert_eq!(e.registrations[0].exclude_line.as_deref(), Some("(?:^A$)|(?:^B$)"));
+        assert_eq!(
+            e.registrations[0].exclude_line.as_deref(),
+            Some("(?:^A$)|(?:^B$)")
+        );
     }
 
     #[test]

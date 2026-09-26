@@ -81,7 +81,12 @@ impl Ctx {
 
 /// Run git in `dir` and return trimmed stdout, or None on any failure.
 pub fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -93,8 +98,16 @@ pub fn relpath(path: &Path, start: &Path) -> String {
     let s: Vec<Component> = start.components().collect();
     let common = p.iter().zip(&s).take_while(|(a, b)| a == b).count();
     let mut parts: Vec<String> = vec!["..".into(); s.len() - common];
-    parts.extend(p[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
-    if parts.is_empty() { ".".into() } else { parts.join("/") }
+    parts.extend(
+        p[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    if parts.is_empty() {
+        ".".into()
+    } else {
+        parts.join("/")
+    }
 }
 
 #[cfg(test)]
@@ -103,7 +116,10 @@ mod tests {
 
     #[test]
     fn relpath_like_python() {
-        assert_eq!(relpath(Path::new("/r/tests"), Path::new("/r/build/tests")), "../../tests");
+        assert_eq!(
+            relpath(Path::new("/r/tests"), Path::new("/r/build/tests")),
+            "../../tests"
+        );
         assert_eq!(relpath(Path::new("/a/b"), Path::new("/a/b")), ".");
         assert_eq!(relpath(Path::new("/a/b/c"), Path::new("/a")), "b/c");
     }

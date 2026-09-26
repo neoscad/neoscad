@@ -94,13 +94,22 @@ pub struct RenderOptions {
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        RenderOptions { scheme: crate::color::CORNFIELD, force: false, fs: Arc::new(StdFs), doc_dir: PathBuf::new() }
+        RenderOptions {
+            scheme: crate::color::CORNFIELD,
+            force: false,
+            fs: Arc::new(StdFs),
+            doc_dir: PathBuf::new(),
+        }
     }
 }
 
 impl std::fmt::Debug for RenderOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RenderOptions").field("scheme", &self.scheme).field("force", &self.force).field("doc_dir", &self.doc_dir).finish()
+        f.debug_struct("RenderOptions")
+            .field("scheme", &self.scheme)
+            .field("force", &self.force)
+            .field("doc_dir", &self.doc_dir)
+            .finish()
     }
 }
 
@@ -148,7 +157,13 @@ struct Cache {
 
 impl Default for Cache {
     fn default() -> Self {
-        Cache { entries: HashMap::new(), order: Default::default(), bytes: 0, budget: CACHE_BUDGET, clock: 0 }
+        Cache {
+            entries: HashMap::new(),
+            order: Default::default(),
+            bytes: 0,
+            budget: CACHE_BUDGET,
+            clock: 0,
+        }
     }
 }
 
@@ -176,7 +191,9 @@ impl Cache {
         self.order.insert(self.clock, k);
         self.bytes += cost;
         while self.bytes > self.budget && self.entries.len() > 1 {
-            let Some((_, old)) = self.order.pop_first() else { break };
+            let Some((_, old)) = self.order.pop_first() else {
+                break;
+            };
             if let Some((_, c, _)) = self.entries.remove(&old) {
                 self.bytes -= c;
             }
@@ -188,7 +205,9 @@ impl Cache {
 /// halfedges, normals and triangle references for a solid.
 fn cost_of(g: &Geometry) -> usize {
     match g {
-        Geometry::PolySet(p) => p.vertices.len() * 24 + p.faces.iter().map(|f| 24 + 4 * f.len()).sum::<usize>(),
+        Geometry::PolySet(p) => {
+            p.vertices.len() * 24 + p.faces.iter().map(|f| 24 + 4 * f.len()).sum::<usize>()
+        }
         Geometry::Manifold(m) => m.manifold.num_vert() * 48 + m.manifold.num_tri() * 112,
         Geometry::Polygon2d(p) => p.outlines.iter().map(|o| 24 + 16 * o.vertices.len()).sum(),
     }
@@ -206,7 +225,11 @@ struct Block(u32);
 
 impl IdSource for Block {
     fn reserve(&self, count: u32) -> u32 {
-        if count <= BLOCK { self.0 } else { Manifold::reserve_ids(count) }
+        if count <= BLOCK {
+            self.0
+        } else {
+            Manifold::reserve_ids(count)
+        }
     }
 }
 
@@ -258,7 +281,11 @@ fn hash_key(s: &str) -> Key {
 }
 
 fn loc_of(n: &Node) -> Option<MsgLoc> {
-    n.origin.as_ref().map(|o| MsgLoc { unit: o.unit, span: o.span, line: o.line })
+    n.origin.as_ref().map(|o| MsgLoc {
+        unit: o.unit,
+        span: o.span,
+        line: o.line,
+    })
 }
 
 fn is_background(n: &Node) -> bool {
@@ -266,7 +293,11 @@ fn is_background(n: &Node) -> bool {
 }
 
 fn warn(n: &Node, text: &str) -> Msg {
-    Msg { severity: Some(Severity::Warning), text: text.into(), loc: loc_of(n) }
+    Msg {
+        severity: Some(Severity::Warning),
+        text: text.into(),
+        loc: loc_of(n),
+    }
 }
 
 impl Renderer {
@@ -277,12 +308,23 @@ impl Renderer {
     /// Render `top` (the root, or the node a `!` selected), whose keys are
     /// in `keys`. Returns the node that stopped the render if it uses a
     /// feature of a later phase.
-    pub fn render(&self, top: &Node, keys: &Keys, opts: RenderOptions) -> Result<Rendered, Unsupported> {
+    pub fn render(
+        &self,
+        top: &Node,
+        keys: &Keys,
+        opts: RenderOptions,
+    ) -> Result<Rendered, Unsupported> {
         fn max_index(n: &Node) -> usize {
             n.children.iter().map(max_index).fold(n.index, usize::max)
         }
         let len = max_index(top) + 1;
-        let mut ctx = Ctx { r: self, opts: &opts, hashes: vec![0; len], first: vec![false; len], blocks: HashMap::new() };
+        let mut ctx = Ctx {
+            r: self,
+            opts: &opts,
+            hashes: vec![0; len],
+            first: vec![false; len],
+            blocks: HashMap::new(),
+        };
         // Tree order pass: hashes, first occurrences and ID blocks, all
         // decided before anything runs in parallel.
         {
@@ -303,7 +345,9 @@ impl Renderer {
                 seen.insert(h);
                 ctx.first[n.index] = first;
                 for slot in std::iter::once(OWN).chain(0..n.children.len() as u32) {
-                    let b = *ids.entry((h, slot)).or_insert_with(|| Manifold::reserve_ids(BLOCK));
+                    let b = *ids
+                        .entry((h, slot))
+                        .or_insert_with(|| Manifold::reserve_ids(BLOCK));
                     ctx.blocks.insert((h, slot), b);
                 }
                 stack.extend(n.children.iter().rev().map(|c| (c, Some((h, first)))));
@@ -331,12 +375,24 @@ impl Renderer {
             let mut w = Vec::new();
             let mut e = Vec::new();
             let m = ManifoldGeometry::from_polyset(ps, &ctx.block(top, OWN), &mut w, &mut e);
-            msgs.extend(w.into_iter().map(|t| Msg { severity: Some(Severity::Warning), text: t, loc: None }));
-            msgs.extend(e.into_iter().map(|t| Msg { severity: Some(Severity::Error), text: t, loc: None }));
+            msgs.extend(w.into_iter().map(|t| Msg {
+                severity: Some(Severity::Warning),
+                text: t,
+                loc: None,
+            }));
+            msgs.extend(e.into_iter().map(|t| Msg {
+                severity: Some(Severity::Error),
+                text: t,
+                loc: None,
+            }));
             geom = Some(Geometry::Manifold(Arc::new(m)));
         }
         let cache_entries = self.cache.lock().expect("cache").entries.len();
-        Ok(Rendered { geometry: geom, messages: msgs, cache_entries })
+        Ok(Rendered {
+            geometry: geom,
+            messages: msgs,
+            cache_entries,
+        })
     }
 
     /// Forget every cached geometry.
@@ -354,13 +410,20 @@ impl Ctx<'_> {
     fn node(&self, n: &Node) -> Result<Out, Unsupported> {
         let h = self.hashes[n.index];
         if let Some(g) = self.r.cache.lock().expect("cache").get(h) {
-            return Ok(Out { geom: g, msgs: Vec::new() });
+            return Ok(Out {
+                geom: g,
+                msgs: Vec::new(),
+            });
         }
         let mut out = self.compute(n)?;
         if !self.first[n.index] {
             out.msgs.clear();
         }
-        self.r.cache.lock().expect("cache").insert(h, out.geom.clone());
+        self.r
+            .cache
+            .lock()
+            .expect("cache")
+            .insert(h, out.geom.clone());
         Ok(out)
     }
 
@@ -375,19 +438,45 @@ impl Ctx<'_> {
     }
 
     fn compute(&self, n: &Node) -> Result<Out, Unsupported> {
-        let unsupported = |what: &'static str| Err(Unsupported { what, loc: loc_of(n) });
-        let leaf = |g: Geometry| Ok(Out { geom: Some(g), msgs: Vec::new() });
+        let unsupported = |what: &'static str| {
+            Err(Unsupported {
+                what,
+                loc: loc_of(n),
+            })
+        };
+        let leaf = |g: Geometry| {
+            Ok(Out {
+                geom: Some(g),
+                msgs: Vec::new(),
+            })
+        };
         match &n.kind {
-            NodeKind::Cube { size, center } => leaf(Geometry::PolySet(Arc::new(primitives::cube(*size, *center)))),
-            NodeKind::Sphere { r, disc } => leaf(Geometry::PolySet(Arc::new(primitives::sphere(*r, disc)))),
-            NodeKind::Cylinder { h, r1, r2, center, disc } => {
-                leaf(Geometry::PolySet(Arc::new(primitives::cylinder(*h, *r1, *r2, *center, disc))))
+            NodeKind::Cube { size, center } => leaf(Geometry::PolySet(Arc::new(primitives::cube(
+                *size, *center,
+            )))),
+            NodeKind::Sphere { r, disc } => {
+                leaf(Geometry::PolySet(Arc::new(primitives::sphere(*r, disc))))
             }
-            NodeKind::Polyhedron { points, faces, .. } => leaf(Geometry::PolySet(Arc::new(primitives::polyhedron(points, faces)))),
+            NodeKind::Cylinder {
+                h,
+                r1,
+                r2,
+                center,
+                disc,
+            } => leaf(Geometry::PolySet(Arc::new(primitives::cylinder(
+                *h, *r1, *r2, *center, disc,
+            )))),
+            NodeKind::Polyhedron { points, faces, .. } => leaf(Geometry::PolySet(Arc::new(
+                primitives::polyhedron(points, faces),
+            ))),
             NodeKind::Square { size, center } => leaf(leaf_2d(primitives::square(*size, *center))),
             NodeKind::Circle { r, disc } => leaf(leaf_2d(primitives::circle2d(*r, disc))),
-            NodeKind::Polygon { points, paths, .. } => leaf(leaf_2d(primitives::polygon(points, paths))),
-            NodeKind::Root | NodeKind::Group { .. } | NodeKind::Render { .. } => self.apply(n, Op::Union),
+            NodeKind::Polygon { points, paths, .. } => {
+                leaf(leaf_2d(primitives::polygon(points, paths)))
+            }
+            NodeKind::Root | NodeKind::Group { .. } | NodeKind::Render { .. } => {
+                self.apply(n, Op::Union)
+            }
             NodeKind::IntersectionFor => self.apply(n, Op::Intersection),
             NodeKind::Csg(CsgOp::Union) => self.apply(n, Op::Union),
             NodeKind::Csg(CsgOp::Intersection) => self.apply(n, Op::Intersection),
@@ -402,7 +491,8 @@ impl Ctx<'_> {
                 if matrix.iter().flatten().any(|v| !v.is_finite()) {
                     // The children are still evaluated (and report their own
                     // messages) before the transform gives up on them.
-                    let mut msgs: Vec<Msg> = self.children(n)?.into_iter().flat_map(|o| o.msgs).collect();
+                    let mut msgs: Vec<Msg> =
+                        self.children(n)?.into_iter().flat_map(|o| o.msgs).collect();
                     msgs.push(warn(n, "Transformation matrix contains Not-a-Number and/or Infinity - removing object."));
                     return Ok(Out { geom: None, msgs });
                 }
@@ -410,14 +500,17 @@ impl Ctx<'_> {
                 out.geom = out.geom.map(|g| transform(g, matrix, &mut out.msgs));
                 Ok(out)
             }
-            NodeKind::Offset { delta, join, disc, .. } => {
+            NodeKind::Offset {
+                delta, join, disc, ..
+            } => {
                 let (poly, msgs) = self.children_2d_union(n)?;
                 let geom = poly.map(|p| {
                     // "The formula for the number of steps in a full circular
                     // arc is ... Pi / acos(1 - arc_tolerance / abs(delta))"
                     // (`GeometryEvaluator.cc:617-621`): the tolerance that
                     // makes Clipper step like a circle of `|delta|` would.
-                    let steps = f64::from(fragments::circular_segments(disc, delta.abs()).unwrap_or(3));
+                    let steps =
+                        f64::from(fragments::circular_segments(disc, delta.abs()).unwrap_or(3));
                     let tolerance = delta.abs() * (1.0 - cos_degrees(180.0 / steps));
                     let join = match join {
                         OffsetJoin::Round => clipper::Join::Round,
@@ -426,21 +519,34 @@ impl Ctx<'_> {
                     };
                     // `OffsetNode::miter_limit`, "fixed high value to disable
                     // chamfers with jtMiter".
-                    Geometry::Polygon2d(Arc::new(clipper::offset(&p, *delta, join, 1_000_000.0, tolerance)))
+                    Geometry::Polygon2d(Arc::new(clipper::offset(
+                        &p,
+                        *delta,
+                        join,
+                        1_000_000.0,
+                        tolerance,
+                    )))
                 });
                 Ok(Out { geom, msgs })
             }
             NodeKind::LinearExtrude(e) => {
                 let (poly, msgs) = self.children_2d_union(n)?;
-                let geom = poly.map(|p| Geometry::PolySet(Arc::new(extrude::linear_extrude(e, &p))));
+                let geom =
+                    poly.map(|p| Geometry::PolySet(Arc::new(extrude::linear_extrude(e, &p))));
                 Ok(Out { geom, msgs })
             }
-            NodeKind::RotateExtrude { angle, start, disc, .. } => {
+            NodeKind::RotateExtrude {
+                angle, start, disc, ..
+            } => {
                 let (poly, mut msgs) = self.children_2d_union(n)?;
                 let geom = match poly.map(|p| extrude::rotate_extrude(*angle, *start, disc, &p)) {
                     Some(Ok(ps)) => ps.map(|ps| Geometry::PolySet(Arc::new(ps))),
                     Some(Err(text)) => {
-                        msgs.push(Msg { severity: Some(Severity::Error), text, loc: None });
+                        msgs.push(Msg {
+                            severity: Some(Severity::Error),
+                            text,
+                            loc: None,
+                        });
                         None
                     }
                     None => None,
@@ -450,12 +556,21 @@ impl Ctx<'_> {
             NodeKind::Projection { cut, .. } => self.projection(n, *cut),
             NodeKind::Minkowski { .. } => self.minkowski(n),
             NodeKind::Hull => self.hull(n),
-            NodeKind::Resize { newsize, autosize, .. } => {
+            NodeKind::Resize {
+                newsize, autosize, ..
+            } => {
                 let mut out = self.apply(n, Op::Union)?;
-                out.geom = out.geom.map(|g| resize(g, *newsize, *autosize, &mut out.msgs));
+                out.geom = out
+                    .geom
+                    .map(|g| resize(g, *newsize, *autosize, &mut out.msgs));
                 Ok(out)
             }
-            NodeKind::Surface { file, center, invert, .. } => Ok(self.surface(n, file, *center, *invert)),
+            NodeKind::Surface {
+                file,
+                center,
+                invert,
+                ..
+            } => Ok(self.surface(n, file, *center, *invert)),
             NodeKind::Import(i) if i.kind == "nef3" => unsupported("import"),
             NodeKind::Import(i) => Ok(self.import(n, i)),
             NodeKind::Text(_) => unsupported("text"),
@@ -465,7 +580,13 @@ impl Ctx<'_> {
     /// Messages from a reader, located at the node when OpenSCAD logs them
     /// with the call's location.
     fn read_msgs(n: &Node, msgs: Vec<io::Message>) -> Vec<Msg> {
-        msgs.into_iter().map(|m| Msg { severity: m.severity, text: m.text, loc: if m.located { loc_of(n) } else { None } }).collect()
+        msgs.into_iter()
+            .map(|m| Msg {
+                severity: m.severity,
+                text: m.text,
+                loc: if m.located { loc_of(n) } else { None },
+            })
+            .collect()
     }
 
     fn import(&self, n: &Node, i: &eval::node::Import) -> Out {
@@ -475,7 +596,10 @@ impl Ctx<'_> {
             // `getGeometryAsPolySet`. Each conversion takes fresh IDs; they
             // come from this node's own block, in order, so the result does
             // not depend on scheduling.
-            let ids = Seq { block: self.block(n, OWN), used: std::cell::Cell::new(0) };
+            let ids = Seq {
+                block: self.block(n, OWN),
+                used: std::cell::Cell::new(0),
+            };
             let mut parts = Vec::with_capacity(meshes.len());
             let mut w = Vec::new();
             let mut e = Vec::new();
@@ -485,15 +609,23 @@ impl Ctx<'_> {
                     parts.push(m);
                 }
             }
-            ManifoldGeometry::batch(Op::Union.manifold(), parts).map(|m| m.to_polyset(&self.opts.scheme)).unwrap_or_default()
+            ManifoldGeometry::batch(Op::Union.manifold(), parts)
+                .map(|m| m.to_polyset(&self.opts.scheme))
+                .unwrap_or_default()
         };
         let (geom, msgs) = crate::import::import(self.opts, i, line, &union);
-        Out { geom: Some(geom), msgs: Self::read_msgs(n, msgs) }
+        Out {
+            geom: Some(geom),
+            msgs: Self::read_msgs(n, msgs),
+        }
     }
 
     fn surface(&self, n: &Node, file: &str, center: bool, invert: bool) -> Out {
         let (geom, msgs) = crate::import::surface(self.opts, file, center, invert);
-        Out { geom: Some(geom), msgs: Self::read_msgs(n, msgs) }
+        Out {
+            geom: Some(geom),
+            msgs: Self::read_msgs(n, msgs),
+        }
     }
 
     fn color(&self, n: &Node, g: Geometry, c: Color) -> Geometry {
@@ -562,7 +694,10 @@ impl Ctx<'_> {
     /// `collectChildren3D` (`GeometryEvaluator.cc:386-411`): one entry per
     /// non-background child as (child index, node, geometry), with 2D
     /// geometry replaced by nothing and a warning.
-    fn collect_3d<'n>(items: &[(&'n Node, Option<Geometry>)], msgs: &mut Vec<Msg>) -> Vec<(u32, &'n Node, Option<Geometry>)> {
+    fn collect_3d<'n>(
+        items: &[(&'n Node, Option<Geometry>)],
+        msgs: &mut Vec<Msg>,
+    ) -> Vec<(u32, &'n Node, Option<Geometry>)> {
         let mut children = Vec::new();
         for (i, (c, g)) in items.iter().enumerate() {
             let i = i as u32;
@@ -582,7 +717,13 @@ impl Ctx<'_> {
 
     /// `applyToChildren3D` (`GeometryEvaluator.cc:146-209`) with
     /// `applyOperator3DManifold` (`manifold-applyops.cc`).
-    fn apply_3d(&self, n: &Node, items: &[(&Node, Option<Geometry>)], op: Op, msgs: &mut Vec<Msg>) -> Option<Geometry> {
+    fn apply_3d(
+        &self,
+        n: &Node,
+        items: &[(&Node, Option<Geometry>)],
+        op: Op,
+        msgs: &mut Vec<Msg>,
+    ) -> Option<Geometry> {
         let mut children = Self::collect_3d(items, msgs);
         if children.is_empty() {
             return None;
@@ -602,17 +743,29 @@ impl Ctx<'_> {
             // being 5 in `OpenSCADOperator`).
             let mut first = None;
             for (i, _, g) in children {
-                let Some(m) = g.and_then(|g| self.to_manifold(n, i, g, msgs)).filter(|m| !m.is_empty()) else { continue };
+                let Some(m) = g
+                    .and_then(|g| self.to_manifold(n, i, g, msgs))
+                    .filter(|m| !m.is_empty())
+                else {
+                    continue;
+                };
                 if first.is_none() {
                     first = Some(m);
                 } else {
-                    msgs.push(Msg { severity: Some(Severity::Error), text: "Unsupported CGAL operator: 5".into(), loc: None });
+                    msgs.push(Msg {
+                        severity: Some(Severity::Error),
+                        text: "Unsupported CGAL operator: 5".into(),
+                        loc: None,
+                    });
                 }
             }
             return first.map(|m| Geometry::Manifold(Arc::new(m)));
         }
         let children: Vec<(u32, &Node, Option<Geometry>)> = if op == Op::Union {
-            let actual: Vec<_> = children.into_iter().filter(|(_, _, g)| g.as_ref().is_some_and(|g| !g.is_empty())).collect();
+            let actual: Vec<_> = children
+                .into_iter()
+                .filter(|(_, _, g)| g.as_ref().is_some_and(|g| !g.is_empty()))
+                .collect();
             match actual.len() {
                 0 => return None,
                 1 => return actual.into_iter().next().and_then(|(_, _, g)| g),
@@ -641,15 +794,29 @@ impl Ctx<'_> {
     /// reserves fresh IDs for every conversion, so the same mesh converted
     /// under two different parents gets two sets of IDs (and a sphere cut
     /// out in one place is not painted as a cut face in another).
-    fn to_manifold(&self, n: &Node, slot: u32, g: Geometry, msgs: &mut Vec<Msg>) -> Option<ManifoldGeometry> {
+    fn to_manifold(
+        &self,
+        n: &Node,
+        slot: u32,
+        g: Geometry,
+        msgs: &mut Vec<Msg>,
+    ) -> Option<ManifoldGeometry> {
         match g {
             Geometry::Manifold(m) => Some(Arc::unwrap_or_clone(m)),
             Geometry::PolySet(ps) => {
                 let mut w = Vec::new();
                 let mut e = Vec::new();
                 let m = ManifoldGeometry::from_polyset(&ps, &self.block(n, slot), &mut w, &mut e);
-                msgs.extend(w.into_iter().map(|t| Msg { severity: Some(Severity::Warning), text: t, loc: None }));
-                msgs.extend(e.into_iter().map(|t| Msg { severity: Some(Severity::Error), text: t, loc: None }));
+                msgs.extend(w.into_iter().map(|t| Msg {
+                    severity: Some(Severity::Warning),
+                    text: t,
+                    loc: None,
+                }));
+                msgs.extend(e.into_iter().map(|t| Msg {
+                    severity: Some(Severity::Error),
+                    text: t,
+                    loc: None,
+                }));
                 Some(m)
             }
             Geometry::Polygon2d(_) => None,
@@ -658,7 +825,11 @@ impl Ctx<'_> {
 
     /// `collectChildren2D` (`GeometryEvaluator.cc:302-336`): one entry per
     /// non-background child, `None` for nothing, empty or 3D (which warns).
-    fn collect_2d(&self, items: &[(&Node, Option<Geometry>)], msgs: &mut Vec<Msg>) -> Vec<Option<Arc<Polygon2d>>> {
+    fn collect_2d(
+        &self,
+        items: &[(&Node, Option<Geometry>)],
+        msgs: &mut Vec<Msg>,
+    ) -> Vec<Option<Arc<Polygon2d>>> {
         let mut out = Vec::with_capacity(items.len());
         for (c, g) in items {
             if is_background(c) {
@@ -678,7 +849,12 @@ impl Ctx<'_> {
 
     /// `applyToChildren2D` (`GeometryEvaluator.cc:416-454`). One child
     /// passes through untouched; more go through Clipper.
-    fn apply_2d(&self, items: &[(&Node, Option<Geometry>)], op: Op, msgs: &mut Vec<Msg>) -> Option<Geometry> {
+    fn apply_2d(
+        &self,
+        items: &[(&Node, Option<Geometry>)],
+        op: Op,
+        msgs: &mut Vec<Msg>,
+    ) -> Option<Geometry> {
         let children = self.collect_2d(items, msgs);
         let refs: Vec<Option<&Polygon2d>> = children.iter().map(|c| c.as_deref()).collect();
         if op == Op::Fill {
@@ -686,7 +862,11 @@ impl Ctx<'_> {
         }
         match children.len() {
             0 => None,
-            1 => children.into_iter().next().flatten().map(Geometry::Polygon2d),
+            1 => children
+                .into_iter()
+                .next()
+                .flatten()
+                .map(Geometry::Polygon2d),
             _ => {
                 let op = match op {
                     Op::Union => clipper::Op2::Union,
@@ -723,7 +903,10 @@ impl Ctx<'_> {
                 Some(Geometry::Polygon2d(Arc::new(hull::hull_2d(&refs))))
             }
             3 => {
-                let children: Vec<Geometry> = Self::collect_3d(&items, &mut msgs).into_iter().filter_map(|(_, _, g)| g).collect();
+                let children: Vec<Geometry> = Self::collect_3d(&items, &mut msgs)
+                    .into_iter()
+                    .filter_map(|(_, _, g)| g)
+                    .collect();
                 let mut points = Vec::new();
                 hull::hull_points(&children, &mut points);
                 // No points: `applyOperator3DManifold` returns null.
@@ -750,7 +933,8 @@ impl Ctx<'_> {
                 if children.is_empty() {
                     None
                 } else {
-                    let refs: Vec<Option<&Polygon2d>> = children.iter().map(|c| c.as_deref()).collect();
+                    let refs: Vec<Option<&Polygon2d>> =
+                        children.iter().map(|c| c.as_deref()).collect();
                     minkowski::minkowski_2d(&refs).map(|p| Geometry::Polygon2d(Arc::new(p)))
                 }
             }
@@ -759,20 +943,36 @@ impl Ctx<'_> {
                 if children.len() <= 1 {
                     children.pop().and_then(|(_, _, g)| g)
                 } else {
-                    let actual: Vec<(u32, Geometry)> =
-                        children.into_iter().filter_map(|(i, _, g)| g.filter(|g| !g.is_empty()).map(|g| (i, g))).collect();
+                    let actual: Vec<(u32, Geometry)> = children
+                        .into_iter()
+                        .filter_map(|(i, _, g)| g.filter(|g| !g.is_empty()).map(|g| (i, g)))
+                        .collect();
                     match actual.len() {
                         0 => None,
                         1 => actual.into_iter().next().map(|(_, g)| g),
                         _ => {
-                            let (slots, geoms): (Vec<u32>, Vec<Geometry>) = actual.into_iter().unzip();
-                            let conv = |k: usize| -> Box<dyn IdSource> { Box::new(self.block(n, slots[k])) };
-                            let own = Seq { block: self.block(n, OWN), used: std::cell::Cell::new(0) };
+                            let (slots, geoms): (Vec<u32>, Vec<Geometry>) =
+                                actual.into_iter().unzip();
+                            let conv = |k: usize| -> Box<dyn IdSource> {
+                                Box::new(self.block(n, slots[k]))
+                            };
+                            let own = Seq {
+                                block: self.block(n, OWN),
+                                used: std::cell::Cell::new(0),
+                            };
                             let mut w = Vec::new();
                             let mut e = Vec::new();
                             let m = minkowski::minkowski_3d(&geoms, &conv, &own, &mut w, &mut e);
-                            msgs.extend(w.into_iter().map(|t| Msg { severity: Some(Severity::Warning), text: t, loc: None }));
-                            msgs.extend(e.into_iter().map(|t| Msg { severity: Some(Severity::Error), text: t, loc: None }));
+                            msgs.extend(w.into_iter().map(|t| Msg {
+                                severity: Some(Severity::Warning),
+                                text: t,
+                                loc: None,
+                            }));
+                            msgs.extend(e.into_iter().map(|t| Msg {
+                                severity: Some(Severity::Error),
+                                text: t,
+                                loc: None,
+                            }));
                             m.map(|m| Geometry::Manifold(Arc::new(m)))
                         }
                     }
@@ -806,7 +1006,8 @@ impl Ctx<'_> {
                 // CGAL cannot build a Nef polyhedron from it either.
                 msgs.push(Msg {
                     severity: Some(Severity::Error),
-                    text: "The given mesh is not closed! Unable to convert to CGALNefGeometry.".into(),
+                    text: "The given mesh is not closed! Unable to convert to CGALNefGeometry."
+                        .into(),
                     loc: None,
                 });
                 return Ok(Out { geom: None, msgs });
@@ -815,9 +1016,24 @@ impl Ctx<'_> {
             let faces: Vec<Polygon2d> = items
                 .iter()
                 .filter(|(c, _)| !is_background(c))
-                .filter_map(|(_, g)| g.as_ref().and_then(|g| crate::export::as_polyset(g, &self.opts.scheme)))
+                .filter_map(|(_, g)| {
+                    g.as_ref()
+                        .and_then(|g| crate::export::as_polyset(g, &self.opts.scheme))
+                })
                 .map(|ps| Polygon2d {
-                    outlines: ps.faces.iter().map(|f| crate::polygon2d::Outline::new(f.iter().map(|&v| [ps.vertices[v as usize][0], ps.vertices[v as usize][1]]).collect())).collect(),
+                    outlines: ps
+                        .faces
+                        .iter()
+                        .map(|f| {
+                            crate::polygon2d::Outline::new(
+                                f.iter()
+                                    .map(|&v| {
+                                        [ps.vertices[v as usize][0], ps.vertices[v as usize][1]]
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
                     sanitized: false,
                 })
                 .collect();
@@ -835,7 +1051,11 @@ impl Ctx<'_> {
 /// A 2D leaf as `visit(LeafNode)` stores it: sanitized unless the
 /// primitive already guarantees it (`GeometryEvaluator.cc:672-675`).
 fn leaf_2d(p: Polygon2d) -> Geometry {
-    Geometry::Polygon2d(Arc::new(if p.sanitized { p } else { clipper::sanitize(&p) }))
+    Geometry::Polygon2d(Arc::new(if p.sanitized {
+        p
+    } else {
+        clipper::sanitize(&p)
+    }))
 }
 
 /// `resize()`: the scale `Polygon2d::resize` (`Polygon2d.cc:105-125`) or
@@ -847,19 +1067,44 @@ fn leaf_2d(p: Polygon2d) -> Geometry {
 /// transform's warning.
 fn resize(g: Geometry, newsize: [f64; 3], autosize: [bool; 3], msgs: &mut Vec<Msg>) -> Geometry {
     let scale = if g.dimension() == 2 {
-        let Geometry::Polygon2d(p) = &g else { unreachable!("2D geometry is a Polygon2d") };
-        let size = p.bounds().map_or([f64::NEG_INFINITY; 2], |(lo, hi)| [hi[0] - lo[0], hi[1] - lo[1]]);
+        let Geometry::Polygon2d(p) = &g else {
+            unreachable!("2D geometry is a Polygon2d")
+        };
+        let size = p.bounds().map_or([f64::NEG_INFINITY; 2], |(lo, hi)| {
+            [hi[0] - lo[0], hi[1] - lo[1]]
+        });
         // `newsize[1] && newsize[1] > newsize[0]`: a NaN counts as set.
         let maxdim = usize::from(newsize[1] != 0.0 && newsize[1] > newsize[0]);
-        let scale: [f64; 2] = std::array::from_fn(|i| if newsize[i] > 0.0 { newsize[i] / size[i] } else { 1.0 });
-        let auto = if newsize[maxdim] > 0.0 { newsize[maxdim] / size[maxdim] } else { 1.0 };
-        let s: [f64; 2] = std::array::from_fn(|i| if !autosize[i] || newsize[i] > 0.0 { scale[i] } else { auto });
+        let scale: [f64; 2] = std::array::from_fn(|i| {
+            if newsize[i] > 0.0 {
+                newsize[i] / size[i]
+            } else {
+                1.0
+            }
+        });
+        let auto = if newsize[maxdim] > 0.0 {
+            newsize[maxdim] / size[maxdim]
+        } else {
+            1.0
+        };
+        let s: [f64; 2] = std::array::from_fn(|i| {
+            if !autosize[i] || newsize[i] > 0.0 {
+                scale[i]
+            } else {
+                auto
+            }
+        });
         [s[0], s[1], 1.0]
     } else {
         let bounds = match &g {
             // `PolySet::getBoundingBox` covers every vertex.
             Geometry::PolySet(ps) => ps.vertices.first().map(|&v0| {
-                ps.vertices.iter().fold((v0, v0), |(lo, hi), v| (std::array::from_fn(|k| lo[k].min(v[k])), std::array::from_fn(|k| hi[k].max(v[k]))))
+                ps.vertices.iter().fold((v0, v0), |(lo, hi), v| {
+                    (
+                        std::array::from_fn(|k| lo[k].min(v[k])),
+                        std::array::from_fn(|k| hi[k].max(v[k])),
+                    )
+                })
             }),
             Geometry::Manifold(m) => m.bounds(),
             Geometry::Polygon2d(_) => None,
@@ -873,11 +1118,28 @@ fn resize(g: Geometry, newsize: [f64; 3], autosize: [bool; 3], msgs: &mut Vec<Ms
                 maxdim = i;
             }
         }
-        let scale: [f64; 3] = std::array::from_fn(|i| if newsize[i] > 0.0 { newsize[i] / size[i] } else { 1.0 });
+        let scale: [f64; 3] = std::array::from_fn(|i| {
+            if newsize[i] > 0.0 {
+                newsize[i] / size[i]
+            } else {
+                1.0
+            }
+        });
         let auto = scale[maxdim];
-        std::array::from_fn(|i| if !autosize[i] || newsize[i] > 0.0 { scale[i] } else { auto })
+        std::array::from_fn(|i| {
+            if !autosize[i] || newsize[i] > 0.0 {
+                scale[i]
+            } else {
+                auto
+            }
+        })
     };
-    let m = [[scale[0], 0.0, 0.0, 0.0], [0.0, scale[1], 0.0, 0.0], [0.0, 0.0, scale[2], 0.0], [0.0, 0.0, 0.0, 1.0]];
+    let m = [
+        [scale[0], 0.0, 0.0, 0.0],
+        [0.0, scale[1], 0.0, 0.0],
+        [0.0, 0.0, scale[2], 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
     transform(g, &m, msgs)
 }
 
@@ -898,7 +1160,11 @@ fn transform(g: Geometry, m: &crate::Matrix, msgs: &mut Vec<Msg>) -> Geometry {
             let mut p = Arc::unwrap_or_clone(p);
             let m2 = Polygon2d::matrix_2d(m);
             if let Some(w) = p.transform(&m2) {
-                msgs.push(Msg { severity: Some(Severity::Warning), text: w.into(), loc: None });
+                msgs.push(Msg {
+                    severity: Some(Severity::Warning),
+                    text: w.into(),
+                    loc: None,
+                });
             }
             // A mirror reverses every outline, so a sanitized shape would
             // have clockwise outers and counter-clockwise holes; Clipper

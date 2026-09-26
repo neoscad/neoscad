@@ -16,7 +16,13 @@ use crate::{Color, Message};
 /// Read an OFF file's bytes (`None` when it could not be opened). `file`
 /// is the path as messages print it.
 pub fn read(bytes: Option<&[u8]>, file: &str, msgs: &mut Vec<Message>) -> Mesh {
-    let mut r = Reader { lines: Lines::new(bytes.unwrap_or_default()), lineno: 0, line: String::new(), file, msgs };
+    let mut r = Reader {
+        lines: Lines::new(bytes.unwrap_or_default()),
+        lineno: 0,
+        line: String::new(),
+        file,
+        msgs,
+    };
     if bytes.is_none() {
         r.error("File error");
         return Mesh::default();
@@ -54,7 +60,10 @@ fn words(s: &str) -> Vec<&str> {
 
 impl Reader<'_, '_> {
     fn error(&mut self, what: &str) {
-        let text = format!("OFF File line {}, {what} line '{}' importing file '{}'", self.lineno, self.line, self.file);
+        let text = format!(
+            "OFF File line {}, {what} line '{}' importing file '{}'",
+            self.lineno, self.line, self.file
+        );
         self.msgs.push(Message::error(text).at_call());
     }
 
@@ -121,7 +130,8 @@ impl Reader<'_, '_> {
             self.error("bad header: missing data");
             return None;
         }
-        let (Some(nv), Some(nf), Some(_)) = (parse_u64(&w[0]), parse_u64(&w[1]), parse_u64(&w[2])) else {
+        let (Some(nv), Some(nf), Some(_)) = (parse_u64(&w[0]), parse_u64(&w[1]), parse_u64(&w[2]))
+        else {
             self.error("bad header: bad data");
             return None;
         };
@@ -193,7 +203,11 @@ impl Reader<'_, '_> {
                 let red = channel(self, &mut i)?;
                 let green = channel(self, &mut i)?;
                 let blue = channel(self, &mut i)?;
-                let alpha = if i < w.len() { channel(self, &mut i)? } else { 255 };
+                let alpha = if i < w.len() {
+                    channel(self, &mut i)?
+                } else {
+                    255
+                };
                 mesh.colors.push(Color::from_ints(red, green, blue, alpha));
                 mesh.color_indices.resize(face_idx, -1);
                 mesh.color_indices.push(mesh.colors.len() as i32 - 1);
@@ -304,9 +318,18 @@ fn header(line: &str) -> (usize, bool, bool, u32) {
 /// default colour, which is what OpenSCAD's own render shows.
 pub fn write(mesh: MeshRef<'_>, warnings: &mut Vec<String>) -> Vec<u8> {
     let mut out = String::with_capacity(mesh.vertices.len() * 32 + mesh.faces.len() * 24);
-    out.push_str(&format!("OFF\n{} {} 0\n", mesh.vertices.len(), mesh.faces.len()));
+    out.push_str(&format!(
+        "OFF\n{} {} 0\n",
+        mesh.vertices.len(),
+        mesh.faces.len()
+    ));
     for v in mesh.vertices {
-        out.push_str(&format!("{} {} {} \n", fmt_g(v[0]), fmt_g(v[1]), fmt_g(v[2])));
+        out.push_str(&format!(
+            "{} {} {} \n",
+            fmt_g(v[0]),
+            fmt_g(v[1]),
+            fmt_g(v[2])
+        ));
     }
     let has_color = !mesh.color_indices.is_empty();
     for (i, f) in mesh.faces.iter().enumerate() {
@@ -350,15 +373,28 @@ mod tests {
     #[test]
     fn counts_without_magic_and_errors() {
         let mut msgs = Vec::new();
-        let m = read(Some(b"3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 5\n"), "f", &mut msgs);
+        let m = read(
+            Some(b"3 1 0\n0 0 0\n1 0 0\n0 1 0\n3 0 1 5\n"),
+            "f",
+            &mut msgs,
+        );
         assert_eq!(m.faces, vec![vec![0, 1]]);
-        assert_eq!(msgs[0].text, "OFF File line 5, ignored bad face vertex index: 5 line '3 0 1 5' importing file 'f'");
+        assert_eq!(
+            msgs[0].text,
+            "OFF File line 5, ignored bad face vertex index: 5 line '3 0 1 5' importing file 'f'"
+        );
         msgs.clear();
         read(Some(b""), "e.off", &mut msgs);
         // The nightly on an empty file.
-        assert_eq!(msgs[0].text, "OFF File line 1, bad header: end of file line '' importing file 'e.off'");
+        assert_eq!(
+            msgs[0].text,
+            "OFF File line 1, bad header: end of file line '' importing file 'e.off'"
+        );
         msgs.clear();
         read(None, "m.off", &mut msgs);
-        assert_eq!(msgs[0].text, "OFF File line 0, File error line '' importing file 'm.off'");
+        assert_eq!(
+            msgs[0].text,
+            "OFF File line 0, File error line '' importing file 'm.off'"
+        );
     }
 }

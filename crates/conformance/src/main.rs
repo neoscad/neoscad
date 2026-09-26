@@ -36,7 +36,10 @@ use clap::{Parser, Subcommand};
 use crate::ctx::{Ctx, REF_REL};
 
 #[derive(Parser, Debug)]
-#[command(name = "conformance", about = "OpenSCAD regression suite runner for neoscad")]
+#[command(
+    name = "conformance",
+    about = "OpenSCAD regression suite runner for neoscad"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -102,10 +105,7 @@ enum Cmd {
     Showcase,
     /// Compare two PNGs as OpenSCAD's tests/image_compare.py does; exits 0
     /// when they match.
-    ImageCompare {
-        expected: PathBuf,
-        actual: PathBuf,
-    },
+    ImageCompare { expected: PathBuf, actual: PathBuf },
     /// Differential test: run a reference OpenSCAD and neoscad on each input
     /// and compare exit status, output and the format's diagnostics.
     Diff {
@@ -148,7 +148,18 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
     let ctx = Ctx::discover()?;
     match cmd {
         Cmd::Manifest { check } => manifest_cmd(&ctx, check),
-        Cmd::Run { tier, filter, verbose, timeout, jobs, binary, renderer, update_baseline, record, grid } => {
+        Cmd::Run {
+            tier,
+            filter,
+            verbose,
+            timeout,
+            jobs,
+            binary,
+            renderer,
+            update_baseline,
+            record,
+            grid,
+        } => {
             if timeout.is_nan() || timeout <= 0.0 {
                 return Err("--timeout must be positive".into());
             }
@@ -166,7 +177,12 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             };
             run::run(&ctx, &opts).map(|c| u8::try_from(c).unwrap_or(1))
         }
-        Cmd::Grid { dirs, all, out, force } => grid::command(&ctx, &dirs, all, out.as_deref(), force),
+        Cmd::Grid {
+            dirs,
+            all,
+            out,
+            force,
+        } => grid::command(&ctx, &dirs, all, out.as_deref(), force),
         Cmd::Showcase => Ok(u8::from(showcase::check(&ctx)? > 0)),
         Cmd::ImageCompare { expected, actual } => {
             let c = image_compare::compare_files(&expected, &actual)?;
@@ -178,7 +194,15 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
                 Ok(1)
             }
         }
-        Cmd::Diff { format, binary_ref, binary, jobs, timeout, verbose, paths } => {
+        Cmd::Diff {
+            format,
+            binary_ref,
+            binary,
+            jobs,
+            timeout,
+            verbose,
+            paths,
+        } => {
             if timeout.is_nan() || timeout <= 0.0 {
                 return Err("--timeout must be positive".into());
             }
@@ -236,7 +260,12 @@ fn manifest_cmd(ctx: &Ctx, check: bool) -> Result<u8, String> {
         "tier", "name", "total", "text", "geometry", "pending", "skip", "no-exp"
     );
     for (t, c) in &m.counts {
-        let name = t.parse::<usize>().ok().and_then(|i| manifest::TIER_NAMES.get(i)).copied().unwrap_or("?");
+        let name = t
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| manifest::TIER_NAMES.get(i))
+            .copied()
+            .unwrap_or("?");
         println!(
             "{:<4} {:<9} {:>6} {:>6} {:>8} {:>8} {:>6} {:>8}",
             t, name, c.total, c.text, c.geometry, c.pending, c.skip, c.missing_expected
@@ -250,7 +279,10 @@ fn manifest_cmd(ctx: &Ctx, check: bool) -> Result<u8, String> {
     if check {
         let current = std::fs::read_to_string(&path).unwrap_or_default();
         if current != text {
-            eprintln!("{} is out of date; run `conformance manifest`", path.display());
+            eprintln!(
+                "{} is out of date; run `conformance manifest`",
+                path.display()
+            );
             return Ok(1);
         }
         println!("{} is up to date", path.display());

@@ -24,14 +24,24 @@ pub(crate) struct ArgVal {
 pub(crate) enum Callable {
     Builtin(Builtin),
     /// A `function` definition, with the scope context it was found in.
-    User { ctx: Rc<Ctx>, unit: u32, scope: u32, index: u32 },
+    User {
+        ctx: Rc<Ctx>,
+        unit: u32,
+        scope: u32,
+        index: u32,
+    },
     Literal(Rc<FunctionValue>),
 }
 
 /// Something `m(...)` can instantiate.
 pub(crate) enum Instantiable {
     Builtin(BuiltinModule),
-    User { ctx: Rc<Ctx>, unit: u32, scope: u32, index: u32 },
+    User {
+        ctx: Rc<Ctx>,
+        unit: u32,
+        scope: u32,
+        index: u32,
+    },
 }
 
 impl<'a> Evaluator<'a> {
@@ -49,7 +59,14 @@ impl<'a> Evaluator<'a> {
     /// `parse_without_defaults`: match arguments to parameter names.
     /// `params` gives the `n` parameter names by position (a closure, so
     /// calls need not collect them).
-    fn bind(&mut self, args: Vec<ArgVal>, loc: Loc, n: usize, params: impl Fn(usize) -> Sym, warn: bool) -> Vars {
+    fn bind(
+        &mut self,
+        args: Vec<ArgVal>,
+        loc: Loc,
+        n: usize,
+        params: impl Fn(usize) -> Sym,
+        warn: bool,
+    ) -> Vars {
         let n_params = n;
         let mut out = Vars::default();
         let mut named: Vec<Sym> = Vec::new();
@@ -62,10 +79,17 @@ impl<'a> Evaluator<'a> {
                         let t = format!("argument {} supplied more than once", self.quote_sym(n));
                         self.warn(loc, DiagCode::ArgumentMismatch, t);
                     } else if out.get(n).is_some() {
-                        let t = format!("argument {} overrides positional argument", self.quote_sym(n));
+                        let t = format!(
+                            "argument {} overrides positional argument",
+                            self.quote_sym(n)
+                        );
                         self.warn(loc, DiagCode::ArgumentMismatch, t);
-                    } else if warn && !self.syms.is_config(n) && !(0..n_params).any(|i| params(i) == n) {
-                        let t = format!("variable {} not specified as parameter", self.quote_sym(n));
+                    } else if warn
+                        && !self.syms.is_config(n)
+                        && !(0..n_params).any(|i| params(i) == n)
+                    {
+                        let t =
+                            format!("variable {} not specified as parameter", self.quote_sym(n));
                         self.warn(loc, DiagCode::ArgumentMismatch, t);
                     }
                     named.push(n);
@@ -85,7 +109,11 @@ impl<'a> Evaluator<'a> {
                         Some(n) => n,
                         None => {
                             if warn && !warned_extra {
-                                self.warn(loc, DiagCode::ArgumentMismatch, "Too many unnamed arguments supplied");
+                                self.warn(
+                                    loc,
+                                    DiagCode::ArgumentMismatch,
+                                    "Too many unnamed arguments supplied",
+                                );
                                 warned_extra = true;
                             }
                             continue;
@@ -101,9 +129,22 @@ impl<'a> Evaluator<'a> {
 
     /// `Parameters::parse` for builtins: `required` parameters are set to
     /// `undef` when absent, `optional` ones are left unset.
-    pub fn bind_builtin(&mut self, args: Vec<ArgVal>, loc: Loc, required: &[Sym], optional: &[Sym], warn: bool) -> Vars {
+    pub fn bind_builtin(
+        &mut self,
+        args: Vec<ArgVal>,
+        loc: Loc,
+        required: &[Sym],
+        optional: &[Sym],
+        warn: bool,
+    ) -> Vars {
         let r = required.len();
-        let mut frame = self.bind(args, loc, r + optional.len(), |i| if i < r { required[i] } else { optional[i - r] }, warn);
+        let mut frame = self.bind(
+            args,
+            loc,
+            r + optional.len(),
+            |i| if i < r { required[i] } else { optional[i - r] },
+            warn,
+        );
         for &p in required {
             if frame.get(p).is_none() {
                 let config = self.syms.is_config(p);
@@ -115,12 +156,25 @@ impl<'a> Evaluator<'a> {
 
     /// `Parameters::parse` for user functions and modules: defaults are
     /// evaluated in the defining context.
-    pub fn bind_user(&mut self, args: Vec<ArgVal>, loc: Loc, unit: u32, params: &'a [Param], defining: &Rc<Ctx>) -> R<Vars> {
+    pub fn bind_user(
+        &mut self,
+        args: Vec<ArgVal>,
+        loc: Loc,
+        unit: u32,
+        params: &'a [Param],
+        defining: &Rc<Ctx>,
+    ) -> R<Vars> {
         let warn = self.opts.check_parameters;
         // A cheap clone (reference count), so the closure does not borrow
         // `self` while `bind` needs it mutably.
         let unit_syms = self.units[unit as usize].syms.clone();
-        let mut frame = self.bind(args, loc, params.len(), |i| unit_syms[params[i].name.0 as usize], warn);
+        let mut frame = self.bind(
+            args,
+            loc,
+            params.len(),
+            |i| unit_syms[params[i].name.0 as usize],
+            warn,
+        );
         for p in params {
             let s = unit_syms[p.name.0 as usize];
             if frame.get(s).is_none() {
@@ -166,7 +220,9 @@ impl<'a> Evaluator<'a> {
     /// parentheses.
     pub fn call_name(&self, u: u32, call: ExprId) -> Vec<u8> {
         let ast = self.units[u as usize].ast;
-        let ExprKind::Call(callee, _) = &ast.expr(call).kind else { return Vec::new() };
+        let ExprKind::Call(callee, _) = &ast.expr(call).kind else {
+            return Vec::new();
+        };
         match &ast.expr(*callee).kind {
             ExprKind::Var(n) => ast.name(*n).as_bytes().to_vec(),
             _ => {
@@ -202,7 +258,12 @@ impl<'a> Evaluator<'a> {
         let result = loop {
             match self.simplify(unit, expr, &cur) {
                 Ok(Step::Done(v)) => break Ok(v),
-                Ok(Step::Next { unit: nu, expr: ne, ctx: nc, call: c }) => {
+                Ok(Step::Next {
+                    unit: nu,
+                    expr: ne,
+                    ctx: nc,
+                    call: c,
+                }) => {
                     unit = nu;
                     expr = ne;
                     if let Some(nc) = nc {
@@ -215,7 +276,9 @@ impl<'a> Evaluator<'a> {
                         let hit_limit = depth == 1_000_000;
                         depth += 1;
                         let err = if hit_limit {
-                            let loc = expr.map(|e| self.expr_loc(unit, e)).unwrap_or(self.expr_loc(c.0, c.1));
+                            let loc = expr
+                                .map(|e| self.expr_loc(unit, e))
+                                .unwrap_or(self.expr_loc(c.0, c.1));
                             let mut t = b"Recursion detected calling function '".to_vec();
                             t.extend_from_slice(&self.call_name(c.0, c.1));
                             t.push(b'\'');
@@ -250,13 +313,24 @@ impl<'a> Evaluator<'a> {
 
     /// `simplify_function_body`: one step of the tail-call loop.
     fn simplify(&mut self, u: u32, expr: Option<ExprId>, ctx: &Rc<Ctx>) -> R<Step> {
-        let Some(id) = expr else { return Ok(Step::Done(Value::Undef)) };
+        let Some(id) = expr else {
+            return Ok(Step::Done(Value::Undef));
+        };
         let ast: &'a Ast = self.units[u as usize].ast;
         let e = ast.expr(id);
-        let next = |expr: Option<ExprId>| Step::Next { unit: u, expr, ctx: None, call: None };
+        let next = |expr: Option<ExprId>| Step::Next {
+            unit: u,
+            expr,
+            ctx: None,
+            call: None,
+        };
         match &e.kind {
             ExprKind::Ternary(c, a, b) => {
-                let pick = if self.eval(u, *c, ctx)?.to_bool() { *a } else { *b };
+                let pick = if self.eval(u, *c, ctx)?.to_bool() {
+                    *a
+                } else {
+                    *b
+                };
                 Ok(next(Some(pick)))
             }
             ExprKind::Assert(args, body) => {
@@ -272,10 +346,18 @@ impl<'a> Evaluator<'a> {
                 self.push(c.clone());
                 self.copy_config(ctx, &c);
                 self.sequential_assign(u, args, e.span, &c)?;
-                Ok(Step::Next { unit: u, expr: Some(*body), ctx: Some(c), call: None })
+                Ok(Step::Next {
+                    unit: u,
+                    expr: Some(*body),
+                    ctx: Some(c),
+                    call: None,
+                })
             }
             ExprKind::Call(callee, args) => {
-                let loc = Loc { unit: u, span: e.span };
+                let loc = Loc {
+                    unit: u,
+                    span: e.span,
+                };
                 let callable = match &ast.expr(*callee).kind {
                     ExprKind::Var(n) => {
                         let s = self.units[u as usize].sym(*n);
@@ -293,32 +375,46 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                 };
-                let (fu, params, body, defining): (u32, &'a [Param], ExprId, Rc<Ctx>) = match callable {
-                    None => return Ok(Step::Done(Value::Undef)),
-                    Some(Callable::Builtin(b)) => {
-                        let v = self.call_builtin(b, u, id, args, ctx)?;
-                        return Ok(Step::Done(v));
-                    }
-                    Some(Callable::User { ctx: dctx, unit, scope, index }) => {
-                        let scope: &'a lang::ast::Scope = self.units[unit as usize].scopes[scope as usize].scope;
-                        let f = &scope.functions[index as usize];
-                        (unit, &f.params, f.body, dctx)
-                    }
-                    Some(Callable::Literal(f)) => {
-                        let fast: &'a Ast = self.units[f.unit as usize].ast;
-                        match &fast.expr(f.expr).kind {
-                            ExprKind::Function(params, body) => (f.unit, params.as_slice(), *body, f.ctx.clone()),
-                            _ => return Ok(Step::Done(Value::Undef)),
+                let (fu, params, body, defining): (u32, &'a [Param], ExprId, Rc<Ctx>) =
+                    match callable {
+                        None => return Ok(Step::Done(Value::Undef)),
+                        Some(Callable::Builtin(b)) => {
+                            let v = self.call_builtin(b, u, id, args, ctx)?;
+                            return Ok(Step::Done(v));
                         }
-                    }
-                };
+                        Some(Callable::User {
+                            ctx: dctx,
+                            unit,
+                            scope,
+                            index,
+                        }) => {
+                            let scope: &'a lang::ast::Scope =
+                                self.units[unit as usize].scopes[scope as usize].scope;
+                            let f = &scope.functions[index as usize];
+                            (unit, &f.params, f.body, dctx)
+                        }
+                        Some(Callable::Literal(f)) => {
+                            let fast: &'a Ast = self.units[f.unit as usize].ast;
+                            match &fast.expr(f.expr).kind {
+                                ExprKind::Function(params, body) => {
+                                    (f.unit, params.as_slice(), *body, f.ctx.clone())
+                                }
+                                _ => return Ok(Step::Done(Value::Undef)),
+                            }
+                        }
+                    };
                 let body_ctx = Ctx::child(&defining);
                 self.push(body_ctx.clone());
                 self.copy_config(ctx, &body_ctx);
                 let argv = self.eval_args(u, args, ctx)?;
                 let frame = self.bind_user(argv, loc, fu, params, &defining)?;
                 self.apply_frame(&body_ctx, frame);
-                Ok(Step::Next { unit: fu, expr: Some(body), ctx: Some(body_ctx), call: Some((u, id)) })
+                Ok(Step::Next {
+                    unit: fu,
+                    expr: Some(body),
+                    ctx: Some(body_ctx),
+                    call: Some((u, id)),
+                })
             }
             _ => Ok(Step::Done(self.eval(u, id, ctx)?)),
         }
@@ -363,14 +459,25 @@ impl<'a> Evaluator<'a> {
                     if b.enabled() {
                         return Ok(Some(Callable::Builtin(b)));
                     }
-                    let t = format!("Experimental builtin function '{}' is not enabled", self.name(s));
+                    let t = format!(
+                        "Experimental builtin function '{}' is not enabled",
+                        self.name(s)
+                    );
                     self.warn(loc, DiagCode::ExperimentalFeature, t);
                 }
                 Ok(Self::var_function(c, s))
             }
             CtxKind::Scope(sr) | CtxKind::Module(sr, _) | CtxKind::File(sr) => {
-                if let Some(&index) = self.units[sr.unit as usize].scopes[sr.scope as usize].functions.get(&s) {
-                    return Ok(Some(Callable::User { ctx: c.clone(), unit: sr.unit, scope: sr.scope, index }));
+                if let Some(&index) = self.units[sr.unit as usize].scopes[sr.scope as usize]
+                    .functions
+                    .get(&s)
+                {
+                    return Ok(Some(Callable::User {
+                        ctx: c.clone(),
+                        unit: sr.unit,
+                        scope: sr.scope,
+                        index,
+                    }));
                 }
                 if let Some(f) = Self::var_function(c, s) {
                     return Ok(Some(f));
@@ -380,7 +487,12 @@ impl<'a> Evaluator<'a> {
                     for lib in uses {
                         if let Some(&index) = self.units[lib as usize].scopes[0].functions.get(&s) {
                             let lctx = self.library_context(c, lib)?;
-                            return Ok(Some(Callable::User { ctx: lctx, unit: lib, scope: 0, index }));
+                            return Ok(Some(Callable::User {
+                                ctx: lctx,
+                                unit: lib,
+                                scope: 0,
+                                index,
+                            }));
                         }
                     }
                 }
@@ -392,7 +504,10 @@ impl<'a> Evaluator<'a> {
     /// A fresh `FileContext` for a used library: its top-level assignments
     /// are evaluated anew on every lookup, as OpenSCAD does.
     fn library_context(&mut self, file: &Rc<Ctx>, lib: u32) -> R<Rc<Ctx>> {
-        let sr = ScopeRef { unit: lib, scope: 0 };
+        let sr = ScopeRef {
+            unit: lib,
+            scope: 0,
+        };
         let lctx = Ctx::new(file.parent(), CtxKind::File(sr));
         let mark = self.push(lctx.clone());
         let r = self.init_scope(&lctx, sr);
@@ -431,21 +546,37 @@ impl<'a> Evaluator<'a> {
                     if m.enabled() {
                         return Ok(Some(Instantiable::Builtin(m)));
                     }
-                    let t = format!("Experimental builtin module '{}' is not enabled", self.name(s));
+                    let t = format!(
+                        "Experimental builtin module '{}' is not enabled",
+                        self.name(s)
+                    );
                     self.warn(loc, DiagCode::ExperimentalFeature, t);
                 }
                 Ok(None)
             }
             CtxKind::Scope(sr) | CtxKind::Module(sr, _) | CtxKind::File(sr) => {
-                if let Some(&index) = self.units[sr.unit as usize].scopes[sr.scope as usize].modules.get(&s) {
-                    return Ok(Some(Instantiable::User { ctx: c.clone(), unit: sr.unit, scope: sr.scope, index }));
+                if let Some(&index) = self.units[sr.unit as usize].scopes[sr.scope as usize]
+                    .modules
+                    .get(&s)
+                {
+                    return Ok(Some(Instantiable::User {
+                        ctx: c.clone(),
+                        unit: sr.unit,
+                        scope: sr.scope,
+                        index,
+                    }));
                 }
                 if let CtxKind::File(sr) = &c.kind {
                     let uses = self.units[sr.unit as usize].uses.clone();
                     for lib in uses {
                         if let Some(&index) = self.units[lib as usize].scopes[0].modules.get(&s) {
                             let lctx = self.library_context(c, lib)?;
-                            return Ok(Some(Instantiable::User { ctx: lctx, unit: lib, scope: 0, index }));
+                            return Ok(Some(Instantiable::User {
+                                ctx: lctx,
+                                unit: lib,
+                                scope: 0,
+                                index,
+                            }));
                         }
                     }
                 }

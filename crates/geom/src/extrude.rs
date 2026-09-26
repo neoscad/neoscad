@@ -32,7 +32,10 @@ fn scale_rotate(sx: f64, sy: f64, rot: f64) -> [[f64; 2]; 2] {
 /// `fma(m01, y, m00*x)`. Plain arithmetic differs in the last bit, which
 /// shows as `2.22045e-16` against `0` in exported coordinates.
 pub(crate) fn apply(m: &[[f64; 2]; 2], v: [f64; 2]) -> [f64; 2] {
-    [m[0][1].mul_add(v[1], m[0][0] * v[0]), m[1][1].mul_add(v[1], m[1][0] * v[0])]
+    [
+        m[0][1].mul_add(v[1], m[0][0] * v[0]),
+        m[1][1].mul_add(v[1], m[1][0] * v[0]),
+    ]
 }
 
 /// Eigen's `norm()`, with the same fused sum as [`apply`].
@@ -60,7 +63,12 @@ fn min_twist_slices(twist: f64) -> i32 {
 fn helix_slices(d: &Discretizer, r_sqr: f64, height: f64, twist: f64) -> Option<i32> {
     let twist = twist.abs();
     let min_slices = min_twist_slices(twist);
-    if r_sqr.sqrt() < GRID_FINE || d.fn_.is_infinite() || d.fn_.is_nan() || height.is_nan() || twist.is_nan() {
+    if r_sqr.sqrt() < GRID_FINE
+        || d.fn_.is_infinite()
+        || d.fn_.is_nan()
+        || height.is_nan()
+        || twist.is_nan()
+    {
         return None;
     }
     if d.fn_ > 0.0 {
@@ -81,7 +89,13 @@ fn archimedes_length(a: f64, theta: f64) -> f64 {
 }
 
 /// `getConicalHelixSlices`: twist with a uniform scale other than 1.
-fn conical_helix_slices(d: &Discretizer, r_sqr: f64, height: f64, twist: f64, scale: f64) -> Option<i32> {
+fn conical_helix_slices(
+    d: &Discretizer,
+    r_sqr: f64,
+    height: f64,
+    twist: f64,
+    scale: f64,
+) -> Option<i32> {
     let twist = twist.abs();
     let r = r_sqr.sqrt();
     let min_slices = min_twist_slices(twist);
@@ -92,7 +106,11 @@ fn conical_helix_slices(d: &Discretizer, r_sqr: f64, height: f64, twist: f64, sc
         return Some(((twist * d.fn_ / 360.0).ceil() as i32).max(min_slices));
     }
     let rads = twist * std::f64::consts::PI / 180.0;
-    let angle_end = if scale > 1.0 { rads * scale / (scale - 1.0) } else { rads / (1.0 - scale) };
+    let angle_end = if scale > 1.0 {
+        rads * scale / (scale - 1.0)
+    } else {
+        rads / (1.0 - scale)
+    };
     let angle_start = angle_end - rads;
     let a = r / angle_end;
     let spiral = archimedes_length(a, angle_end) - archimedes_length(a, angle_start);
@@ -291,8 +309,15 @@ fn split_by_fn(o: &Outline, twist: f64, sx: f64, sy: f64, fn_: f64, slices: u32)
     let n = o.vertices.len();
     let mut counts = vec![1u32; n];
     let mut q = Heap::default();
-    for (i, len) in max_edge_lengths(o, twist, sx, sy, slices).into_iter().enumerate() {
-        q.push(Tracker { edge: i, max_len: len, count: 1 });
+    for (i, len) in max_edge_lengths(o, twist, sx, sy, slices)
+        .into_iter()
+        .enumerate()
+    {
+        q.push(Tracker {
+            edge: i,
+            max_len: len,
+            count: 1,
+        });
     }
     let mut tmp: Vec<Tracker> = Vec::new();
     let mut total = n;
@@ -325,7 +350,10 @@ fn split_by_fn(o: &Outline, twist: f64, sx: f64, sy: f64, fn_: f64, slices: u32)
         add_segmented_edge(&mut out, v0, v1, counts[i - 1]);
         v0 = v1;
     }
-    Outline { vertices: out, positive: o.positive }
+    Outline {
+        vertices: out,
+        positive: o.positive,
+    }
 }
 
 /// `splitOutlineByFs`: every edge in pieces no longer than `$fs`.
@@ -339,13 +367,28 @@ fn split_by_fs(o: &Outline, twist: f64, sx: f64, sy: f64, fs: f64, slices: u32) 
         add_segmented_edge(&mut out, v0, v1, (lens[i - 1] / fs).ceil() as u32);
         v0 = v1;
     }
-    Outline { vertices: out, positive: o.positive }
+    Outline {
+        vertices: out,
+        positive: o.positive,
+    }
 }
 
 /// `CurveDiscretizer::splitOutline`.
-fn split_outline(d: &Discretizer, o: &Outline, twist: f64, sx: f64, sy: f64, slices: u32, segments: u32) -> Outline {
+fn split_outline(
+    d: &Discretizer,
+    o: &Outline,
+    twist: f64,
+    sx: f64,
+    sy: f64,
+    slices: u32,
+    segments: u32,
+) -> Outline {
     if segments > 0 || d.fn_ > 0.0 {
-        let min_vertices = if segments > 0 { segments } else { d.fn_.max(3.0) as u32 };
+        let min_vertices = if segments > 0 {
+            segments
+        } else {
+            d.fn_.max(3.0) as u32
+        };
         if o.vertices.len() >= min_vertices as usize {
             return o.clone();
         }
@@ -356,7 +399,11 @@ fn split_outline(d: &Discretizer, o: &Outline, twist: f64, sx: f64, sy: f64, sli
         return o.clone();
     }
     let by_fs = split_by_fs(o, twist, sx, sy, d.fs, slices);
-    if by_fs.vertices.len() >= fa_segs as usize { split_by_fn(o, twist, sx, sy, f64::from(fa_segs), slices) } else { by_fs }
+    if by_fs.vertices.len() >= fa_segs as usize {
+        split_by_fn(o, twist, sx, sy, f64::from(fa_segs), slices)
+    } else {
+        by_fs
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -430,20 +477,29 @@ fn add_slice_indices(
 /// `extrudePolygon` (`linear_extrude.cc:362-419`), Manifold branch. `poly`
 /// must be sanitized.
 pub fn linear_extrude(e: &LinearExtrude, poly: &Polygon2d) -> PolySet {
-    let empty = PolySet { triangular: true, ..Default::default() };
+    let empty = PolySet {
+        triangular: true,
+        ..Default::default()
+    };
     if e.height[2] <= 0.0 {
         return empty;
     }
     let (sx, sy) = (e.scale[0], e.scale[1]);
     let non_linear = e.twist != 0.0 || sx != sy;
     // "Twist makes convex polygons into unknown polyhedrons"
-    let convex = if poly.is_convex() { if non_linear { None } else { Some(true) } } else { Some(false) };
+    let convex = if poly.is_convex() {
+        if non_linear { None } else { Some(true) }
+    } else {
+        Some(false)
+    };
     let slices = num_slices(e, poly);
 
     let mut seg = Polygon2d::default();
     if !(e.has_segments && e.segments == 0) && (e.segments > 0 || non_linear) {
         for o in &poly.outlines {
-            seg.outlines.push(split_outline(&e.disc, o, e.twist, sx, sy, slices, e.segments));
+            seg.outlines.push(split_outline(
+                &e.disc, o, e.twist, sx, sy, slices, e.segments,
+            ));
         }
     }
     let polyref = if seg.is_empty() { poly } else { &seg };
@@ -457,7 +513,11 @@ pub fn linear_extrude(e: &LinearExtrude, poly: &Polygon2d) -> PolySet {
     }
 
     // `prepareVerticesAndIndices`.
-    let stride: u32 = polyref.outlines.iter().map(|o| o.vertices.len() as u32).sum();
+    let stride: u32 = polyref
+        .outlines
+        .iter()
+        .map(|o| o.vertices.len() as u32)
+        .sum();
     let mut vertices = Vec::with_capacity((stride * (slices + 1)) as usize);
     let full_scale = [1.0 - sx, 1.0 - sy];
     let full_rot = -e.twist;
@@ -486,7 +546,9 @@ pub fn linear_extrude(e: &LinearExtrude, poly: &Polygon2d) -> PolySet {
         let rot_top = e.twist * jt / n;
         let scale_bot = [1.0 - (1.0 - sx) * jb / n, 1.0 - (1.0 - sy) * jb / n];
         let scale_top = [1.0 - (1.0 - sx) * jt / n, 1.0 - (1.0 - sy) * jt / n];
-        add_slice_indices(&mut faces, j, stride, polyref, rot_bot, rot_top, scale_bot, scale_top);
+        add_slice_indices(
+            &mut faces, j, stride, polyref, rot_bot, rot_top, scale_bot, scale_top,
+        );
     }
 
     // `assemblePolySetForManifold`: the caps reuse the ring vertices, top
@@ -499,7 +561,13 @@ pub fn linear_extrude(e: &LinearExtrude, poly: &Polygon2d) -> PolySet {
     for t in &caps.faces {
         faces.push(t.iter().rev().copied().collect());
     }
-    PolySet { vertices, faces, convex, triangular: true, ..Default::default() }
+    PolySet {
+        vertices,
+        faces,
+        convex,
+        triangular: true,
+        ..Default::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +594,8 @@ pub fn rotate_extrude(angle: f64, start: f64, disc: &Discretizer, poly: &Polygon
             "Children of rotate_extrude() may not lie across the Y axis (Range of X coords for all children [{min_x:.2} : {max_x:.2}])"
         ));
     }
-    let sections = circular_segments_for_angle(disc, max_x - min_x, angle).unwrap_or_else(|| ((angle.abs() / 360.0 * 3.0) as i32).max(1));
+    let sections = circular_segments_for_angle(disc, max_x - min_x, angle)
+        .unwrap_or_else(|| ((angle.abs() / 360.0 * 3.0) as i32).max(1));
     let closed = angle == 360.0;
     let rings = sections as u32 + u32::from(!closed);
     let flip = (min_x >= 0.0 && angle > 0.0) || (min_x < 0.0 && angle < 0.0);
@@ -553,11 +622,27 @@ pub fn rotate_extrude(angle: f64, start: f64, disc: &Discretizer, poly: &Polygon
                 let ci = curr + i % n;
                 let pi = curr + i - 1;
                 if flip {
-                    faces.push(vec![(prev_slice + pi) % nv, (curr_slice + ci) % nv, (prev_slice + ci) % nv]);
-                    faces.push(vec![(curr_slice + ci) % nv, (prev_slice + pi) % nv, (curr_slice + pi) % nv]);
+                    faces.push(vec![
+                        (prev_slice + pi) % nv,
+                        (curr_slice + ci) % nv,
+                        (prev_slice + ci) % nv,
+                    ]);
+                    faces.push(vec![
+                        (curr_slice + ci) % nv,
+                        (prev_slice + pi) % nv,
+                        (curr_slice + pi) % nv,
+                    ]);
                 } else {
-                    faces.push(vec![(prev_slice + ci) % nv, (curr_slice + ci) % nv, (prev_slice + pi) % nv]);
-                    faces.push(vec![(curr_slice + pi) % nv, (prev_slice + pi) % nv, (curr_slice + ci) % nv]);
+                    faces.push(vec![
+                        (prev_slice + ci) % nv,
+                        (curr_slice + ci) % nv,
+                        (prev_slice + pi) % nv,
+                    ]);
+                    faces.push(vec![
+                        (curr_slice + pi) % nv,
+                        (prev_slice + pi) % nv,
+                        (curr_slice + ci) % nv,
+                    ]);
                 }
             }
             curr += n;
@@ -569,14 +654,28 @@ pub fn rotate_extrude(angle: f64, start: f64, disc: &Discretizer, poly: &Polygon
         let caps = poly.tessellate();
         let offset = stride * sections as u32;
         for t in &caps.faces {
-            faces.push(if flip { t.clone() } else { t.iter().rev().copied().collect() });
+            faces.push(if flip {
+                t.clone()
+            } else {
+                t.iter().rev().copied().collect()
+            });
         }
         for t in &caps.faces {
-            let t: Vec<u32> = if flip { t.iter().rev().copied().collect() } else { t.clone() };
+            let t: Vec<u32> = if flip {
+                t.iter().rev().copied().collect()
+            } else {
+                t.clone()
+            };
             faces.push(t.iter().map(|&i| i + offset).collect());
         }
     }
-    Ok(Some(PolySet { vertices, faces, convex: Some(false), triangular: true, ..Default::default() }))
+    Ok(Some(PolySet {
+        vertices,
+        faces,
+        convex: Some(false),
+        triangular: true,
+        ..Default::default()
+    }))
 }
 
 #[cfg(test)]
@@ -584,7 +683,11 @@ mod tests {
     use super::*;
 
     fn disc(fn_: f64) -> Discretizer {
-        Discretizer { fn_, fa: 12.0, fs: 2.0 }
+        Discretizer {
+            fn_,
+            fa: 12.0,
+            fs: 2.0,
+        }
     }
 
     fn ext(h: f64) -> LinearExtrude {
@@ -631,11 +734,27 @@ mod tests {
             e.scale = s;
             e
         };
-        let centered = Polygon2d::from_outline(vec![[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0]]);
+        let centered =
+            Polygon2d::from_outline(vec![[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0]]);
         let cases: Vec<(&str, PolySet, usize, usize)> = vec![
-            ("linear_extrude(10) square(10)", linear_extrude(&ext(10.0), &square(10.0)), 8, 12),
-            ("linear_extrude(10, twist=90) square(10)", linear_extrude(&twist(ext(10.0), 90.0), &square(10.0)), 180, 356),
-            ("linear_extrude(10, scale=[2,0.5]) square(10)", linear_extrude(&scale(ext(10.0), [2.0, 0.5]), &square(10.0)), 270, 536),
+            (
+                "linear_extrude(10) square(10)",
+                linear_extrude(&ext(10.0), &square(10.0)),
+                8,
+                12,
+            ),
+            (
+                "linear_extrude(10, twist=90) square(10)",
+                linear_extrude(&twist(ext(10.0), 90.0), &square(10.0)),
+                180,
+                356,
+            ),
+            (
+                "linear_extrude(10, scale=[2,0.5]) square(10)",
+                linear_extrude(&scale(ext(10.0), [2.0, 0.5]), &square(10.0)),
+                270,
+                536,
+            ),
             // circle(5) has 16 fragments by default.
             (
                 "linear_extrude(10, twist=90, scale=0.5) circle(5)",
@@ -659,22 +778,42 @@ mod tests {
     fn rotate_counts() {
         // rotate_extrude($fn=8) translate([5,0]) square(1);
         let sq = Polygon2d::from_outline(vec![[5.0, 0.0], [6.0, 0.0], [6.0, 1.0], [5.0, 1.0]]);
-        let ps = rotate_extrude(360.0, 0.0, &disc(8.0), &sq).unwrap().unwrap();
+        let ps = rotate_extrude(360.0, 0.0, &disc(8.0), &sq)
+            .unwrap()
+            .unwrap();
         assert_eq!((ps.vertices.len(), ps.faces.len()), (32, 64));
         // rotate_extrude(angle=90) translate([5,0]) circle(1): 5 sections
         // of a 5-gon, plus caps.
-        let c: Vec<[f64; 2]> = circle(1.0, 5).outlines[0].vertices.iter().map(|v| [v[0] + 5.0, v[1]]).collect();
-        let ps = rotate_extrude(90.0, 0.0, &disc(0.0), &Polygon2d::from_outline(c)).unwrap().unwrap();
+        let c: Vec<[f64; 2]> = circle(1.0, 5).outlines[0]
+            .vertices
+            .iter()
+            .map(|v| [v[0] + 5.0, v[1]])
+            .collect();
+        let ps = rotate_extrude(90.0, 0.0, &disc(0.0), &Polygon2d::from_outline(c))
+            .unwrap()
+            .unwrap();
         assert_eq!((ps.vertices.len(), ps.faces.len()), (30, 56));
-        let err = rotate_extrude(360.0, 0.0, &disc(8.0), &Polygon2d::from_outline(vec![[-1.0, 0.0], [1.0, 0.0], [1.0, 1.0]]));
-        assert_eq!(err.unwrap_err(), "Children of rotate_extrude() may not lie across the Y axis (Range of X coords for all children [-1.00 : 1.00])");
+        let err = rotate_extrude(
+            360.0,
+            0.0,
+            &disc(8.0),
+            &Polygon2d::from_outline(vec![[-1.0, 0.0], [1.0, 0.0], [1.0, 1.0]]),
+        );
+        assert_eq!(
+            err.unwrap_err(),
+            "Children of rotate_extrude() may not lie across the Y axis (Range of X coords for all children [-1.00 : 1.00])"
+        );
     }
 
     #[test]
     fn heap_pops_in_libcxx_order() {
         let mut h = Heap::default();
         for (i, l) in [3.0, 1.0, 3.0, 2.0, 3.0].into_iter().enumerate() {
-            h.push(Tracker { edge: i, max_len: l, count: 1 });
+            h.push(Tracker {
+                edge: i,
+                max_len: l,
+                count: 1,
+            });
         }
         let mut order = Vec::new();
         while let Some(t) = h.top() {

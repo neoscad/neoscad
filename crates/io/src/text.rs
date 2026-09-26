@@ -18,7 +18,11 @@ pub struct Lines<'a> {
 
 impl<'a> Lines<'a> {
     pub fn new(data: &'a [u8]) -> Lines<'a> {
-        Lines { data, pos: 0, eof: false }
+        Lines {
+            data,
+            pos: 0,
+            eof: false,
+        }
     }
 
     /// The next line without its `\n` (a `\r` stays, as in C++).
@@ -94,7 +98,9 @@ pub fn parse_i32(s: &str) -> Option<i32> {
 /// and wraps it, as `strtoul` does.
 pub fn parse_u64(s: &str) -> Option<u64> {
     match s.strip_prefix('-') {
-        Some(rest) if !rest.starts_with(['-', '+']) => rest.parse::<u64>().ok().map(|v| v.wrapping_neg()),
+        Some(rest) if !rest.starts_with(['-', '+']) => {
+            rest.parse::<u64>().ok().map(|v| v.wrapping_neg())
+        }
         _ => s.parse::<u64>().ok(),
     }
 }

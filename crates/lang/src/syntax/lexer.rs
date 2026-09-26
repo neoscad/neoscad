@@ -62,12 +62,22 @@ pub struct Lexed {
 pub fn lex(src: &[u8], file: FileId) -> Lexed {
     // OpenSCAD reads its text as a C string: a NUL byte ends the input.
     let end = src.iter().position(|&b| b == 0).unwrap_or(src.len());
-    let mut lx = Lexer { src: &src[..end], file, pos: 0, out: Lexed::default() };
+    let mut lx = Lexer {
+        src: &src[..end],
+        file,
+        pos: 0,
+        out: Lexed::default(),
+    };
     lx.out.tokens.reserve(src.len() / 3);
     lx.run();
     let mut out = lx.out;
     if end < src.len() {
-        out.tokens.push(Token { kind: SyntaxKind::Ignored, file, start: end as u32, len: (src.len() - end) as u32 });
+        out.tokens.push(Token {
+            kind: SyntaxKind::Ignored,
+            file,
+            start: end as u32,
+            len: (src.len() - end) as u32,
+        });
     }
     out
 }
@@ -122,11 +132,24 @@ fn ws_len(s: &[u8], i: usize) -> usize {
 
 impl Lexer<'_> {
     fn push(&mut self, kind: SyntaxKind, start: usize, end: usize) {
-        self.out.tokens.push(Token { kind, file: self.file, start: start as u32, len: (end - start) as u32 });
+        self.out.tokens.push(Token {
+            kind,
+            file: self.file,
+            start: start as u32,
+            len: (end - start) as u32,
+        });
     }
 
     /// Record a diagnostic for the token about to be pushed.
-    fn diag(&mut self, code: DiagCode, severity: Severity, message: String, start: usize, end: usize, line_at: usize) {
+    fn diag(
+        &mut self,
+        code: DiagCode,
+        severity: Severity,
+        message: String,
+        start: usize,
+        end: usize,
+        line_at: usize,
+    ) {
         self.out.diags.push(LexDiag {
             token: self.out.tokens.len() as u32,
             code,
@@ -159,24 +182,32 @@ impl Lexer<'_> {
             }
             match b {
                 b'/' if s.get(i + 1) == Some(&b'/') => {
-                    let j = s[i..].iter().position(|&c| c == b'\n').map_or(s.len(), |p| i + p);
+                    let j = s[i..]
+                        .iter()
+                        .position(|&c| c == b'\n')
+                        .map_or(s.len(), |p| i + p);
                     self.push(SyntaxKind::LineComment, i, j);
                     self.pos = j;
                 }
-                b'/' if s.get(i + 1) == Some(&b'*') => {
-                    match find(&s[i + 2..], b"*/") {
-                        Some(p) => {
-                            self.push(SyntaxKind::BlockComment, i, i + 2 + p + 2);
-                            self.pos = i + 2 + p + 2;
-                        }
-                        None => {
-                            let n = s.len();
-                            self.diag(DiagCode::UnterminatedComment, Severity::Error, "Parser error: Unterminated comment".into(), n, n, n);
-                            self.push(SyntaxKind::Error, i, n);
-                            self.pos = n;
-                        }
+                b'/' if s.get(i + 1) == Some(&b'*') => match find(&s[i + 2..], b"*/") {
+                    Some(p) => {
+                        self.push(SyntaxKind::BlockComment, i, i + 2 + p + 2);
+                        self.pos = i + 2 + p + 2;
                     }
-                }
+                    None => {
+                        let n = s.len();
+                        self.diag(
+                            DiagCode::UnterminatedComment,
+                            Severity::Error,
+                            "Parser error: Unterminated comment".into(),
+                            n,
+                            n,
+                            n,
+                        );
+                        self.push(SyntaxKind::Error, i, n);
+                        self.pos = n;
+                    }
+                },
                 b'"' => self.string(i),
                 b'0'..=b'9' => self.number(i),
                 b'.' if s.get(i + 1).is_some_and(u8::is_ascii_digit) => self.number(i),
@@ -316,16 +347,26 @@ impl Lexer<'_> {
         if j >= s.len() {
             let n = s.len();
             let (code, msg) = if include {
-                (DiagCode::UnterminatedInclude, "Parser error: Unterminated include statement")
+                (
+                    DiagCode::UnterminatedInclude,
+                    "Parser error: Unterminated include statement",
+                )
             } else {
-                (DiagCode::UnterminatedUse, "Parser error: Unterminated use statement")
+                (
+                    DiagCode::UnterminatedUse,
+                    "Parser error: Unterminated use statement",
+                )
             };
             self.diag(code, Severity::Error, msg.into(), n, n, n);
             self.push(SyntaxKind::Error, i, n);
             self.pos = n;
             return;
         }
-        let kind = if include { SyntaxKind::IncludeDirective } else { SyntaxKind::UseDirective };
+        let kind = if include {
+            SyntaxKind::IncludeDirective
+        } else {
+            SyntaxKind::UseDirective
+        };
         self.push(kind, i, j + 1);
         self.pos = j + 1;
     }
@@ -334,13 +375,27 @@ impl Lexer<'_> {
         let mut warnings = Vec::new();
         let (end, terminated) = scan_string(self.src, i, None, &mut warnings);
         for w in warnings {
-            self.diag(DiagCode::UndefinedEscape, Severity::Warning, "Undefined escape sequence".into(), w, w + 1, w);
+            self.diag(
+                DiagCode::UndefinedEscape,
+                Severity::Warning,
+                "Undefined escape sequence".into(),
+                w,
+                w + 1,
+                w,
+            );
         }
         if terminated {
             self.push(SyntaxKind::String, i, end);
         } else {
             let n = self.src.len();
-            self.diag(DiagCode::UnterminatedString, Severity::Error, "Parser error: Unterminated string".into(), n, n, n);
+            self.diag(
+                DiagCode::UnterminatedString,
+                Severity::Error,
+                "Parser error: Unterminated string".into(),
+                n,
+                n,
+                n,
+            );
             self.push(SyntaxKind::Error, i, n);
         }
         self.pos = end;
@@ -420,7 +475,12 @@ enum NumRule {
 
 /// Which of lexer.l's number-ish rules wins at `i`, and its length.
 fn number_rule(s: &[u8], i: usize) -> (NumRule, usize) {
-    let digits = |from: usize| s[from.min(s.len())..].iter().take_while(|b| b.is_ascii_digit()).count();
+    let digits = |from: usize| {
+        s[from.min(s.len())..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count()
+    };
     let exp = |from: usize| -> usize {
         // [Ee][+-]?{D}+
         if !matches!(s.get(from), Some(b'e' | b'E')) {
@@ -442,7 +502,10 @@ fn number_rule(s: &[u8], i: usize) -> (NumRule, usize) {
     };
     // Rules in lexer.l order, so a later rule wins only when strictly longer.
     if d1 > 0 && s[i] == b'0' && s.get(i + 1) == Some(&b'x') {
-        let h = s[i + 2..].iter().take_while(|b| b.is_ascii_hexdigit()).count();
+        let h = s[i + 2..]
+            .iter()
+            .take_while(|b| b.is_ascii_hexdigit())
+            .count();
         if h > 0 {
             offer(NumRule::Hex, 2 + h);
         }
@@ -524,7 +587,12 @@ fn hex_val(b: u8) -> Option<u32> {
 /// offset (past the closing quote, or the end of input) and whether it was
 /// terminated. Appends decoded bytes to `out` when given and the offsets of
 /// undefined escape sequences to `warnings`.
-pub(crate) fn scan_string(s: &[u8], i: usize, mut out: Option<&mut Vec<u8>>, warnings: &mut Vec<usize>) -> (usize, bool) {
+pub(crate) fn scan_string(
+    s: &[u8],
+    i: usize,
+    mut out: Option<&mut Vec<u8>>,
+    warnings: &mut Vec<usize>,
+) -> (usize, bool) {
     let mut j = i + 1;
     let hex_run = |from: usize, n: usize| -> Option<u32> {
         let mut v = 0u32;
@@ -567,7 +635,10 @@ pub(crate) fn scan_string(s: &[u8], i: usize, mut out: Option<&mut Vec<u8>>, war
                     emit!(b"\"");
                     j += 2;
                 }
-                Some(b'x') if matches!(s.get(j + 2), Some(b'0'..=b'7')) && s.get(j + 3).and_then(|&b| hex_val(b)).is_some() => {
+                Some(b'x')
+                    if matches!(s.get(j + 2), Some(b'0'..=b'7'))
+                        && s.get(j + 3).and_then(|&b| hex_val(b)).is_some() =>
+                {
                     let v = hex_run(j + 2, 2).unwrap_or(0) as u8;
                     emit!(&[if v == 0 { b' ' } else { v }]);
                     j += 4;
@@ -627,7 +698,10 @@ pub struct DirectivePath {
 }
 
 pub fn directive_path(text: &[u8], include: bool) -> DirectivePath {
-    let lt = text.iter().position(|&b| b == b'<').map_or(text.len(), |p| p + 1);
+    let lt = text
+        .iter()
+        .position(|&b| b == b'<')
+        .map_or(text.len(), |p| p + 1);
     let body = &text[lt..text.len().saturating_sub(1).max(lt)];
     let mut out = DirectivePath::default();
     let lossy = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
@@ -662,7 +736,15 @@ mod tests {
         l.tokens
             .iter()
             .filter(|t| t.kind != Whitespace)
-            .map(|t| (t.kind, std::string::String::from_utf8_lossy(&src.as_bytes()[t.start as usize..t.end() as usize]).into_owned()))
+            .map(|t| {
+                (
+                    t.kind,
+                    std::string::String::from_utf8_lossy(
+                        &src.as_bytes()[t.start as usize..t.end() as usize],
+                    )
+                    .into_owned(),
+                )
+            })
             .collect()
     }
 
@@ -691,11 +773,17 @@ mod tests {
         assert_eq!(kinds("0x1F"), [(Number, "0x1F".into())]);
         assert_eq!(kinds("0X1F"), [(Ident, "0X1F".into())]);
         assert_eq!(kinds("0x1G"), [(Ident, "0x1G".into())]);
-        assert_eq!(kinds("1.5.3"), [(Number, "1.5".into()), (Number, ".3".into())]);
+        assert_eq!(
+            kinds("1.5.3"),
+            [(Number, "1.5".into()), (Number, ".3".into())]
+        );
         assert_eq!(kinds("5."), [(Number, "5.".into())]);
         assert_eq!(kinds(".5e3"), [(Number, ".5e3".into())]);
         assert_eq!(kinds("1.5e"), [(Number, "1.5".into()), (Ident, "e".into())]);
-        assert_eq!(kinds("a.b"), [(Ident, "a".into()), (Dot, ".".into()), (Ident, "b".into())]);
+        assert_eq!(
+            kinds("a.b"),
+            [(Ident, "a".into()), (Dot, ".".into()), (Ident, "b".into())]
+        );
         assert_eq!(k("1e400"), [DroppedNumber]);
         assert_eq!(k("1e-310"), [DroppedNumber]);
         assert_eq!(k("0e999"), [Number]);
@@ -707,31 +795,50 @@ mod tests {
         assert_eq!(number_value(b"01.5"), 1.5);
         assert_eq!(number_value(b"5."), 5.0);
         assert_eq!(number_value(b".5e3"), 500.0);
-        assert_eq!(number_value(b"123456789012345678901234567890"), 1.2345678901234568e29);
+        assert_eq!(
+            number_value(b"123456789012345678901234567890"),
+            1.2345678901234568e29
+        );
         assert_eq!(number_value(b"2.2250738585072014e-308"), f64::MIN_POSITIVE);
     }
 
     #[test]
     fn number_warnings() {
-        let l = lex(b"x = 123456789012345678901234567890 + 9007199254740993 + 2d;", FileId(0));
+        let l = lex(
+            b"x = 123456789012345678901234567890 + 9007199254740993 + 2d;",
+            FileId(0),
+        );
         let codes: Vec<_> = l.diags.iter().map(|d| d.code).collect();
-        assert_eq!(codes, [DiagCode::ImpreciseInteger, DiagCode::ImpreciseInteger, DiagCode::DigitIdentifier]);
-        assert_eq!(l.diags[2].message, "Variable names starting with digits (\"2d\") will be removed in future releases.");
+        assert_eq!(
+            codes,
+            [
+                DiagCode::ImpreciseInteger,
+                DiagCode::ImpreciseInteger,
+                DiagCode::DigitIdentifier
+            ]
+        );
+        assert_eq!(
+            l.diags[2].message,
+            "Variable names starting with digits (\"2d\") will be removed in future releases."
+        );
     }
 
     #[test]
     fn keywords_and_directives() {
-        assert_eq!(k("module modules include<a> use <b> use=1 include x"), [
-            KwModule,
-            Ident,
-            IncludeDirective,
-            UseDirective,
-            Ident,
-            Eq,
-            Number,
-            Ident,
-            Ident
-        ]);
+        assert_eq!(
+            k("module modules include<a> use <b> use=1 include x"),
+            [
+                KwModule,
+                Ident,
+                IncludeDirective,
+                UseDirective,
+                Ident,
+                Eq,
+                Number,
+                Ident,
+                Ident
+            ]
+        );
         assert_eq!(k("include\n <a/b>"), [IncludeDirective]);
         let l = lex(b"include <foo\n", FileId(0));
         assert_eq!(l.diags.len(), 2);
@@ -740,9 +847,12 @@ mod tests {
 
     #[test]
     fn operators() {
-        assert_eq!(k("<= >= == != && || << >> <<= ! ~ ^ \u{3}"), [
-            Le, Ge, EqEq, Ne, AndAnd, OrOr, Shl, Shr, Shl, Eq, Bang, Tilde, Caret, Eot
-        ]);
+        assert_eq!(
+            k("<= >= == != && || << >> <<= ! ~ ^ \u{3}"),
+            [
+                Le, Ge, EqEq, Ne, AndAnd, OrOr, Shl, Shr, Shl, Eq, Bang, Tilde, Caret, Eot
+            ]
+        );
         assert_eq!(k("$fn a$b"), [Ident, Ident, Ident]);
         assert_eq!(k("@ ' \\"), [Error, Error, Error]);
     }
@@ -754,7 +864,10 @@ mod tests {
         assert_eq!(k("\u{e9}"), [Error]);
         assert_eq!(k("a\u{e9}"), [Error]);
         let l = lex(b"x\xc3(", FileId(0));
-        assert_eq!(l.tokens.iter().map(|t| t.kind).collect::<Vec<_>>(), [Ident, Error, LParen]);
+        assert_eq!(
+            l.tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            [Ident, Error, LParen]
+        );
     }
 
     #[test]
@@ -777,7 +890,10 @@ mod tests {
 
     #[test]
     fn comments_and_nul() {
-        assert_eq!(k("/*/ */ a // b\nc"), [BlockComment, Ident, LineComment, Ident]);
+        assert_eq!(
+            k("/*/ */ a // b\nc"),
+            [BlockComment, Ident, LineComment, Ident]
+        );
         assert_eq!(k("/* x"), [Error]);
         assert_eq!(k("a\0b c"), [Ident, Ignored]);
     }
@@ -785,10 +901,28 @@ mod tests {
     #[test]
     fn directive_paths() {
         let p = directive_path(b"include <a/b/c.scad>", true);
-        assert_eq!(p, DirectivePath { dir: Some("a/b/".into()), name: Some("c.scad".into()) });
-        assert_eq!(directive_path(b"include <test/>", true), DirectivePath { dir: Some("test/".into()), name: None });
+        assert_eq!(
+            p,
+            DirectivePath {
+                dir: Some("a/b/".into()),
+                name: Some("c.scad".into())
+            }
+        );
+        assert_eq!(
+            directive_path(b"include <test/>", true),
+            DirectivePath {
+                dir: Some("test/".into()),
+                name: None
+            }
+        );
         assert_eq!(directive_path(b"use <>", false), DirectivePath::default());
-        assert_eq!(directive_path(b"use <a/b c>", false).name.as_deref(), Some("a/b c"));
-        assert_eq!(directive_path(b"include <x\ty>", true).name.as_deref(), Some("y"));
+        assert_eq!(
+            directive_path(b"use <a/b c>", false).name.as_deref(),
+            Some("a/b c")
+        );
+        assert_eq!(
+            directive_path(b"include <x\ty>", true).name.as_deref(),
+            Some("y")
+        );
     }
 }

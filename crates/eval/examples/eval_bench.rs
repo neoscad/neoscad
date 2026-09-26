@@ -17,7 +17,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const CASES: &[(&str, &str)] = &[
-    ("fib(24) recursive", "function fib(n) = n < 2 ? n : fib(n - 1) + fib(n - 2);\necho(fib(24));\n"),
+    (
+        "fib(24) recursive",
+        "function fib(n) = n < 2 ? n : fib(n - 1) + fib(n - 2);\necho(fib(24));\n",
+    ),
     (
         "tail loop 9e5",
         "function count(n, acc = 0) = n == 0 ? acc : count(n - 1, acc + n);\necho(count(900000));\n",
@@ -65,7 +68,14 @@ fn time_process(bin: &Path, script: &Path) -> Option<Duration> {
     let mut best_t = None::<Duration>;
     for _ in 0..3 {
         let t = Instant::now();
-        let ok = Command::new(bin).arg(script).arg("-o").arg(&out).output().ok()?.status.success();
+        let ok = Command::new(bin)
+            .arg(script)
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .ok()?
+            .status
+            .success();
         let e = t.elapsed();
         if !ok {
             return None;
@@ -84,7 +94,10 @@ fn main() {
     let neoscad = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/neoscad");
     let neoscad = neoscad.is_file().then_some(neoscad);
     let dir = scratch_dir();
-    println!("{:<24} {:>12} {:>14} {:>14}", "case", "in-process", "neoscad proc", "openscad proc");
+    println!(
+        "{:<24} {:>12} {:>14} {:>14}",
+        "case", "in-process", "neoscad proc", "openscad proc"
+    );
     for (i, (name, src)) in CASES.iter().enumerate() {
         let path = dir.join(format!("case{i}.scad"));
         std::fs::write(&path, src).expect("write scratch file");
@@ -99,7 +112,11 @@ fn main() {
                 std::hint::black_box(r);
             })
         });
-        let fmt = |d: Option<Duration>| d.map_or("-".to_string(), |d| format!("{:.1} ms", d.as_secs_f64() * 1e3));
+        let fmt = |d: Option<Duration>| {
+            d.map_or("-".to_string(), |d| {
+                format!("{:.1} ms", d.as_secs_f64() * 1e3)
+            })
+        };
         let neo = neoscad.as_deref().and_then(|b| time_process(b, &path));
         let ours = format!("{:.1} ms", t.as_secs_f64() * 1e3);
         let theirs = reference.as_deref().and_then(|b| time_process(b, &path));

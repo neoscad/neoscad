@@ -31,7 +31,9 @@ fn reduce(x: f64, period: f64) -> Option<f64> {
 }
 
 pub fn sin_degrees(x: f64) -> f64 {
-    let Some(mut x) = reduce(x, 360.0) else { return f64::NAN };
+    let Some(mut x) = reduce(x, 360.0) else {
+        return f64::NAN;
+    };
     let oppose = x >= 180.0;
     if oppose {
         x -= 180.0;
@@ -52,7 +54,9 @@ pub fn sin_degrees(x: f64) -> f64 {
 }
 
 pub fn cos_degrees(x: f64) -> f64 {
-    let Some(mut x) = reduce(x, 360.0) else { return f64::NAN };
+    let Some(mut x) = reduce(x, 360.0) else {
+        return f64::NAN;
+    };
     let mut oppose = x >= 180.0;
     if oppose {
         x -= 180.0;
@@ -62,7 +66,11 @@ pub fn cos_degrees(x: f64) -> f64 {
         oppose = !oppose;
     }
     let r = if x > 45.0 {
-        if x == 60.0 { 0.5 } else { ((90.0 - x) * DEG2RAD).sin() }
+        if x == 60.0 {
+            0.5
+        } else {
+            ((90.0 - x) * DEG2RAD).sin()
+        }
     } else if x == 45.0 {
         SQRT1_2
     } else if x == 30.0 {
@@ -96,7 +104,11 @@ pub fn tan_degrees(x: f64) -> f64 {
     } else if x == 60.0 {
         SQRT3
     } else if x == 90.0 {
-        if cycles % 2 == 0 { f64::INFINITY } else { f64::NEG_INFINITY }
+        if cycles % 2 == 0 {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        }
     } else {
         (x * DEG2RAD).tan()
     };
@@ -129,7 +141,11 @@ pub fn atan_degrees(x: f64) -> f64 {
 pub fn atan2_degrees(y: f64, x: f64) -> f64 {
     let degs = y.atan2(x) * RAD2DEG;
     let whole = round(degs);
-    if (degs - whole).abs() < 3.0e-14 { whole } else { degs }
+    if (degs - whole).abs() < 3.0e-14 {
+        whole
+    } else {
+        degs
+    }
 }
 
 #[cfg(test)]

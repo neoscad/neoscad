@@ -8,9 +8,9 @@
 //! facet count at byte 80, the failed read leaves the stream in a failed
 //! state, and every later read fails too.
 
+use crate::Message;
 use crate::mesh::{Mesh, MeshBuilder, MeshRef};
 use crate::text::{Lines, parse_f64, shortest, trim};
-use crate::Message;
 
 /// Read an STL file's bytes. `file` is the path as messages print it.
 pub fn read(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Mesh {
@@ -23,7 +23,14 @@ pub fn read(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Mesh {
     if binary {
         let mut b = MeshBuilder::new();
         for facet in bytes[84..].as_chunks::<50>().0 {
-            let f = |k: usize| f64::from(f32::from_le_bytes([facet[k], facet[k + 1], facet[k + 2], facet[k + 3]]));
+            let f = |k: usize| {
+                f64::from(f32::from_le_bytes([
+                    facet[k],
+                    facet[k + 1],
+                    facet[k + 2],
+                    facet[k + 3],
+                ]))
+            };
             let v = |i: usize| [f(12 + 12 * i), f(16 + 12 * i), f(20 + 12 * i)];
             b.append_polygon(&[v(0), v(1), v(2)]);
         }
@@ -43,7 +50,12 @@ fn read_ascii(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Mesh {
     let mut lineno = 1;
     let mut vdata = [[0.0f64; 3]; 3];
     let err = |msgs: &mut Vec<Message>, lineno: i32, what: &str, line: &str| {
-        msgs.push(Message::error(format!("STL line {lineno}, {what} line '{line}' importing file '{file}'")).at_call());
+        msgs.push(
+            Message::error(format!(
+                "STL line {lineno}, {what} line '{line}' importing file '{file}'"
+            ))
+            .at_call(),
+        );
     };
     lines.next_raw();
     let mut line = String::new();
@@ -53,7 +65,11 @@ fn read_ascii(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Mesh {
         line = trim(&lines.next_line()).to_string();
         let l = line.as_str();
         // `^\s*solid|^\s*facet|^\s*endfacet` on the trimmed line.
-        if l.is_empty() || l.starts_with("solid") || l.starts_with("facet") || l.starts_with("endfacet") {
+        if l.is_empty()
+            || l.starts_with("solid")
+            || l.starts_with("facet")
+            || l.starts_with("endfacet")
+        {
             continue;
         } else if l == "outer loop" {
             i = 0;
@@ -99,7 +115,11 @@ fn vertex_words(l: &str) -> Option<[&str; 3]> {
     }
     let mut it = rest.split(crate::text::is_space).filter(|w| !w.is_empty());
     let words = [it.next()?, it.next()?, it.next()?];
-    if it.next().is_some() { None } else { Some(words) }
+    if it.next().is_some() {
+        None
+    } else {
+        Some(words)
+    }
 }
 
 /// `export_stl`, ASCII or binary, of a triangulated mesh.
@@ -109,7 +129,11 @@ pub fn write(mesh: MeshRef<'_>, binary: bool) -> Vec<u8> {
         let (p0, p1, p2) = (p(0), p(1), p(2));
         let a = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
         let b = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-        let n = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        let n = [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ];
         // Eigen's `normalize()`: divide by the norm unless it is zero.
         let sq = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
         if sq > 0.0 {
@@ -127,7 +151,10 @@ pub fn write(mesh: MeshRef<'_>, binary: bool) -> Vec<u8> {
         out.extend_from_slice(&(mesh.faces.len() as u32).to_le_bytes());
         for t in mesh.faces {
             let n = normal(t);
-            let mut put = |v: [f64; 3]| v.iter().for_each(|&c| out.extend_from_slice(&(c as f32).to_le_bytes()));
+            let mut put = |v: [f64; 3]| {
+                v.iter()
+                    .for_each(|&c| out.extend_from_slice(&(c as f32).to_le_bytes()))
+            };
             put(n);
             for &i in t {
                 put(mesh.vertices[i as usize]);
@@ -183,7 +210,10 @@ mod tests {
         let mut msgs = Vec::new();
         let m = read(b"solid x\nendsolid x\n", "s1.stl", &mut msgs);
         assert!(m.is_empty());
-        assert_eq!(msgs, vec![Message::error("STL format not recognized in 's1.stl'.").at_call()]);
+        assert_eq!(
+            msgs,
+            vec![Message::error("STL format not recognized in 's1.stl'.").at_call()]
+        );
     }
 
     #[test]
@@ -195,10 +225,16 @@ mod tests {
         let texts: Vec<&str> = msgs.iter().map(|m| m.text.as_str()).collect();
         assert_eq!(
             texts,
-            ["STL line 6, missing vertex line 'endloop' importing file 's2'", "STL line 13, extra vertex line 'vertex 0 1 1' importing file 's2'"]
+            [
+                "STL line 6, missing vertex line 'endloop' importing file 's2'",
+                "STL line 13, extra vertex line 'vertex 0 1 1' importing file 's2'"
+            ]
         );
         msgs.clear();
         read(format!("solid x\n{TRI}").as_bytes(), "s3", &mut msgs);
-        assert_eq!(msgs[0].text, "STL line 9, file incomplete line '' importing file 's3'");
+        assert_eq!(
+            msgs[0].text,
+            "STL line 9, file incomplete line '' importing file 's3'"
+        );
     }
 }

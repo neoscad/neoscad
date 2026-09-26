@@ -10,9 +10,9 @@
 //! (`f 1  2 3`) crashes OpenSCAD with an uncaught `bad_lexical_cast`; here
 //! the empty word is skipped.
 
+use crate::Message;
 use crate::mesh::{Mesh, MeshBuilder, MeshRef};
 use crate::text::{Lines, fmt_g, parse_f64, parse_i32, trim};
-use crate::Message;
 
 pub fn read(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Mesh {
     let mut b = MeshBuilder::new();
@@ -33,7 +33,9 @@ pub fn read(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Mesh {
                 match parse_f64(w) {
                     Some(x) => *c = x,
                     None => {
-                        let text = format!("OBJ File line {lineno}, can't parse vertex line '{line}' importing file '{file}'");
+                        let text = format!(
+                            "OBJ File line {lineno}, can't parse vertex line '{line}' importing file '{file}'"
+                        );
                         msgs.push(Message::error(text).at_call());
                         return Mesh::default();
                     }
@@ -48,19 +50,31 @@ pub fn read(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Mesh {
                 // range).
                 let first = word.split('/').next().unwrap_or("");
                 let Some(ind) = parse_i32(first) else {
-                    msgs.push(Message::warning(format!("Index {file} out of range in Line {lineno}")));
+                    msgs.push(Message::warning(format!(
+                        "Index {file} out of range in Line {lineno}"
+                    )));
                     continue;
                 };
                 if ind >= 1 && (ind as usize) <= vertex_map.len() {
                     b.add_index(vertex_map[ind as usize - 1]);
                 } else {
-                    msgs.push(Message::warning(format!("Index {file} out of range in Line {lineno}")));
+                    msgs.push(Message::warning(format!(
+                        "Index {file} out of range in Line {lineno}"
+                    )));
                 }
             }
-        } else if starts("vt") || starts("vn") || starts("mtllib") || starts("usemtl") || starts("o") || starts("s") || starts("g")
+        } else if starts("vt")
+            || starts("vn")
+            || starts("mtllib")
+            || starts("usemtl")
+            || starts("o")
+            || starts("s")
+            || starts("g")
         {
         } else {
-            msgs.push(Message::warning(format!("Unrecognized Line  {line} in line Line {lineno}")));
+            msgs.push(Message::warning(format!(
+                "Unrecognized Line  {line} in line Line {lineno}"
+            )));
         }
     }
     b.build()
@@ -74,7 +88,11 @@ fn vertex_coords(l: &str) -> Option<[&str; 3]> {
     }
     let mut it = rest.split(crate::text::is_space).filter(|w| !w.is_empty());
     let words = [it.next()?, it.next()?, it.next()?];
-    if it.next().is_some() { None } else { Some(words) }
+    if it.next().is_some() {
+        None
+    } else {
+        Some(words)
+    }
 }
 
 /// `^\s*f\s+(.*)$`: the text after `f` and its spaces.
@@ -91,7 +109,12 @@ fn face_rest(l: &str) -> Option<&str> {
 pub fn write(mesh: MeshRef<'_>) -> Vec<u8> {
     let mut out = String::from("# OpenSCAD obj exporter\n");
     for v in mesh.vertices {
-        out.push_str(&format!("v {} {} {}\n", fmt_g(v[0]), fmt_g(v[1]), fmt_g(v[2])));
+        out.push_str(&format!(
+            "v {} {} {}\n",
+            fmt_g(v[0]),
+            fmt_g(v[1]),
+            fmt_g(v[2])
+        ));
     }
     for f in mesh.faces {
         out.push_str("f ");
@@ -116,7 +139,11 @@ mod tests {
         let texts: Vec<&str> = msgs.iter().map(|m| m.text.as_str()).collect();
         assert_eq!(
             texts,
-            ["Unrecognized Line  v 1 1 1 1 in line Line 6", "Index e2.obj out of range in Line 7", "Unrecognized Line  foo bar in line Line 8"]
+            [
+                "Unrecognized Line  v 1 1 1 1 in line Line 6",
+                "Index e2.obj out of range in Line 7",
+                "Unrecognized Line  foo bar in line Line 8"
+            ]
         );
         assert_eq!(m.faces, vec![vec![0, 1, 2]]);
     }

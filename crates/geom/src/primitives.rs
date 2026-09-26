@@ -20,7 +20,10 @@ fn circle(out: &mut Vec<[f64; 3]>, r: f64, z: f64, fragments: i32) {
 }
 
 fn empty3() -> PolySet {
-    PolySet { triangular: true, ..Default::default() }
+    PolySet {
+        triangular: true,
+        ..Default::default()
+    }
 }
 
 /// `CubeNode::createGeometry` (`primitives.cc:100-135`).
@@ -28,9 +31,19 @@ pub fn cube(size: [f64; 3], center: bool) -> PolySet {
     if size.iter().any(|&s| s <= 0.0 || !s.is_finite()) {
         return empty3();
     }
-    let (lo, hi) = if center { (size.map(|s| -s / 2.0), size.map(|s| s / 2.0)) } else { ([0.0; 3], size) };
+    let (lo, hi) = if center {
+        (size.map(|s| -s / 2.0), size.map(|s| s / 2.0))
+    } else {
+        ([0.0; 3], size)
+    };
     let vertices = (0..8)
-        .map(|i| [if i & 1 != 0 { hi[0] } else { lo[0] }, if i & 2 != 0 { hi[1] } else { lo[1] }, if i & 4 != 0 { hi[2] } else { lo[2] }])
+        .map(|i| {
+            [
+                if i & 1 != 0 { hi[0] } else { lo[0] },
+                if i & 2 != 0 { hi[1] } else { lo[1] },
+                if i & 4 != 0 { hi[2] } else { lo[2] },
+            ]
+        })
         .collect();
     let faces = vec![
         vec![4, 5, 7, 6], // top
@@ -40,7 +53,12 @@ pub fn cube(size: [f64; 3], center: bool) -> PolySet {
         vec![3, 2, 6, 7], // back
         vec![2, 0, 4, 6], // left
     ];
-    PolySet { vertices, faces, convex: Some(true), ..Default::default() }
+    PolySet {
+        vertices,
+        faces,
+        convex: Some(true),
+        ..Default::default()
+    }
 }
 
 /// `SphereNode::createGeometry` (`primitives.cc:177-223`): `(n + 1) / 2`
@@ -63,22 +81,43 @@ pub fn sphere(r: f64, disc: &Discretizer) -> PolySet {
     faces.push((0..n).collect());
     for i in 0..rings - 1 {
         for j in 0..n {
-            faces.push(vec![i * n + (j + 1) % n, i * n + j, (i + 1) * n + j, (i + 1) * n + (j + 1) % n]);
+            faces.push(vec![
+                i * n + (j + 1) % n,
+                i * n + j,
+                (i + 1) * n + j,
+                (i + 1) * n + (j + 1) % n,
+            ]);
         }
     }
     faces.push((0..n).map(|i| rings * n - i - 1).collect());
-    PolySet { vertices, faces, convex: Some(true), ..Default::default() }
+    PolySet {
+        vertices,
+        faces,
+        convex: Some(true),
+        ..Default::default()
+    }
 }
 
 /// `CylinderNode::createGeometry` (`primitives.cc:251-308`), including
 /// cones (`r2 == 0`, one apex vertex) and inverted cones (`r1 == 0`).
 pub fn cylinder(h: f64, r1: f64, r2: f64, center: bool, disc: &Discretizer) -> PolySet {
-    if h <= 0.0 || !h.is_finite() || r1 < 0.0 || !r1.is_finite() || r2 < 0.0 || !r2.is_finite() || (r1 <= 0.0 && r2 <= 0.0) {
+    if h <= 0.0
+        || !h.is_finite()
+        || r1 < 0.0
+        || !r1.is_finite()
+        || r2 < 0.0
+        || !r2.is_finite()
+        || (r1 <= 0.0 && r2 <= 0.0)
+    {
         return empty3();
     }
     // `std::fmax`: the larger radius sets the fragment count.
     let n = circular_segments(disc, r1.max(r2)).unwrap_or(3);
-    let (z1, z2) = if center { (-h / 2.0, h / 2.0) } else { (0.0, h) };
+    let (z1, z2) = if center {
+        (-h / 2.0, h / 2.0)
+    } else {
+        (0.0, h)
+    };
     let cone = r2 == 0.0;
     let inverted = r1 == 0.0;
     let mut vertices = Vec::new();
@@ -111,7 +150,12 @@ pub fn cylinder(h: f64, r1: f64, r2: f64, center: bool, disc: &Discretizer) -> P
         let offset = if inverted { 1 } else { n };
         faces.push((0..n).map(|i| offset + i).collect());
     }
-    PolySet { vertices, faces, convex: Some(true), ..Default::default() }
+    PolySet {
+        vertices,
+        faces,
+        convex: Some(true),
+        ..Default::default()
+    }
 }
 
 /// `PolyhedronNode::createGeometry` (`primitives.cc:399-414`): the points
@@ -119,9 +163,18 @@ pub fn cylinder(h: f64, r1: f64, r2: f64, center: bool, disc: &Discretizer) -> P
 /// clockwise seen from outside; meshes are counter-clockwise). Convexity is
 /// unknown. Index validation happened when the node was built.
 pub fn polyhedron(points: &[[f64; 3]], faces: &[Vec<usize>]) -> PolySet {
-    let faces: Vec<Vec<u32>> = faces.iter().map(|f| f.iter().rev().map(|&i| i as u32).collect()).collect();
+    let faces: Vec<Vec<u32>> = faces
+        .iter()
+        .map(|f| f.iter().rev().map(|&i| i as u32).collect())
+        .collect();
     let triangular = faces.iter().all(|f| f.len() <= 3);
-    PolySet { vertices: points.to_vec(), faces, convex: None, triangular, ..Default::default() }
+    PolySet {
+        vertices: points.to_vec(),
+        faces,
+        convex: None,
+        triangular,
+        ..Default::default()
+    }
 }
 
 /// `SquareNode::createGeometry` (`primitives.cc:492-508`).
@@ -129,7 +182,14 @@ pub fn square(size: [f64; 2], center: bool) -> Polygon2d {
     if size.iter().any(|&s| s <= 0.0 || !s.is_finite()) {
         return Polygon2d::default();
     }
-    let (v1, v2) = if center { ([-size[0] / 2.0, -size[1] / 2.0], [size[0] / 2.0, size[1] / 2.0]) } else { ([0.0, 0.0], size) };
+    let (v1, v2) = if center {
+        (
+            [-size[0] / 2.0, -size[1] / 2.0],
+            [size[0] / 2.0, size[1] / 2.0],
+        )
+    } else {
+        ([0.0, 0.0], size)
+    };
     Polygon2d::from_outline(vec![v1, [v2[0], v1[1]], v2, [v1[0], v2[1]]])
 }
 
@@ -162,7 +222,10 @@ pub fn polygon(points: &[[f64; 2]], paths: &[Vec<usize>]) -> Polygon2d {
         return p;
     }
     for (i, path) in paths.iter().enumerate() {
-        p.outlines.push(Outline { vertices: path.iter().map(|&k| points[k]).collect(), positive: i == 0 });
+        p.outlines.push(Outline {
+            vertices: path.iter().map(|&k| points[k]).collect(),
+            positive: i == 0,
+        });
     }
     p
 }
@@ -172,7 +235,11 @@ mod tests {
     use super::*;
 
     fn d(fn_: f64) -> Discretizer {
-        Discretizer { fn_, fa: 12.0, fs: 2.0 }
+        Discretizer {
+            fn_,
+            fa: 12.0,
+            fs: 2.0,
+        }
     }
 
     #[test]
@@ -226,16 +293,66 @@ mod tests {
             ("sphere(r=10)", sphere(10.0, &def), 450, 422),
             ("sphere(r=5)", sphere(5.0, &def), 128, 114),
             ("sphere(r=0.001)", sphere(0.001, &def), 15, 12),
-            ("sphere(r=3,$fn=7)", sphere(3.0, &disc(7.0, 12.0, 2.0)), 28, 23),
-            ("sphere(r=3,$fn=2)", sphere(3.0, &disc(2.0, 12.0, 2.0)), 6, 5),
-            ("sphere(r=100,$fa=5,$fs=0.5)", sphere(100.0, &disc(0.0, 5.0, 0.5)), 2592, 2522),
-            ("sphere(r=2,$fs=0.1)", sphere(2.0, &disc(0.0, 12.0, 0.1)), 450, 422),
-            ("cylinder(h=2,r=1)", cylinder(2.0, 1.0, 1.0, false, &def), 10, 7),
-            ("cylinder(h=2,r=10)", cylinder(2.0, 10.0, 10.0, false, &def), 60, 32),
-            ("cylinder(h=2,r1=3,r2=0,$fn=9)", cylinder(2.0, 3.0, 0.0, false, &disc(9.0, 12.0, 2.0)), 10, 10),
-            ("cylinder(h=2,r1=0,r2=4)", cylinder(2.0, 0.0, 4.0, false, &def), 14, 14),
-            ("cylinder(h=1,r1=1,r2=20,$fa=3)", cylinder(1.0, 1.0, 20.0, false, &disc(0.0, 3.0, 2.0)), 126, 65),
-            ("cylinder(h=1,r=5,$fn=4.5)", cylinder(1.0, 5.0, 5.0, false, &disc(4.5, 12.0, 2.0)), 10, 7),
+            (
+                "sphere(r=3,$fn=7)",
+                sphere(3.0, &disc(7.0, 12.0, 2.0)),
+                28,
+                23,
+            ),
+            (
+                "sphere(r=3,$fn=2)",
+                sphere(3.0, &disc(2.0, 12.0, 2.0)),
+                6,
+                5,
+            ),
+            (
+                "sphere(r=100,$fa=5,$fs=0.5)",
+                sphere(100.0, &disc(0.0, 5.0, 0.5)),
+                2592,
+                2522,
+            ),
+            (
+                "sphere(r=2,$fs=0.1)",
+                sphere(2.0, &disc(0.0, 12.0, 0.1)),
+                450,
+                422,
+            ),
+            (
+                "cylinder(h=2,r=1)",
+                cylinder(2.0, 1.0, 1.0, false, &def),
+                10,
+                7,
+            ),
+            (
+                "cylinder(h=2,r=10)",
+                cylinder(2.0, 10.0, 10.0, false, &def),
+                60,
+                32,
+            ),
+            (
+                "cylinder(h=2,r1=3,r2=0,$fn=9)",
+                cylinder(2.0, 3.0, 0.0, false, &disc(9.0, 12.0, 2.0)),
+                10,
+                10,
+            ),
+            (
+                "cylinder(h=2,r1=0,r2=4)",
+                cylinder(2.0, 0.0, 4.0, false, &def),
+                14,
+                14,
+            ),
+            (
+                "cylinder(h=1,r1=1,r2=20,$fa=3)",
+                cylinder(1.0, 1.0, 20.0, false, &disc(0.0, 3.0, 2.0)),
+                126,
+                65,
+            ),
+            (
+                "cylinder(h=1,r=5,$fn=4.5)",
+                cylinder(1.0, 5.0, 5.0, false, &disc(4.5, 12.0, 2.0)),
+                10,
+                7,
+            ),
             ("cube([1,2,3])", cube([1.0, 2.0, 3.0], false), 8, 6),
         ];
         for (name, ps, v, f) in cases {
@@ -245,7 +362,10 @@ mod tests {
 
     #[test]
     fn polyhedron_reverses_faces() {
-        let p = polyhedron(&[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], &[vec![0, 1, 2], vec![0, 3, 1, 2]]);
+        let p = polyhedron(
+            &[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[vec![0, 1, 2], vec![0, 3, 1, 2]],
+        );
         assert_eq!(p.faces[0], vec![2, 1, 0]);
         assert!(!p.triangular);
     }

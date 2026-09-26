@@ -9,13 +9,20 @@
 //! name prints the callee in parentheses; `use` statements and included
 //! files leave no trace except the spliced-in definitions.
 
-use crate::ast::{Arg, Assignment, Ast, ExprId, ExprKind, FunctionDef, InstKind, Instantiation, ModuleDef, Param, Scope, UnaryOp};
+use crate::ast::{
+    Arg, Assignment, Ast, ExprId, ExprKind, FunctionDef, InstKind, Instantiation, ModuleDef, Param,
+    Scope, UnaryOp,
+};
 use crate::number::write_number;
 
 /// Dump the whole program. The result is bytes because OpenSCAD strings
 /// are: a Latin-1 string literal is written back unchanged.
 pub fn dump(ast: &Ast) -> Vec<u8> {
-    let mut p = Printer { ast, out: Vec::with_capacity(4096), num: String::new() };
+    let mut p = Printer {
+        ast,
+        out: Vec::with_capacity(4096),
+        num: String::new(),
+    };
     p.scope(&ast.root, "", false);
     p.out
 }
@@ -32,14 +39,22 @@ pub fn expr_to_string(ast: &Ast, e: ExprId) -> String {
 /// failed` and printed function literals quote source strings verbatim,
 /// which may not be UTF-8.
 pub fn write_expr(ast: &Ast, e: ExprId, out: &mut Vec<u8>) {
-    let mut p = Printer { ast, out: std::mem::take(out), num: String::new() };
+    let mut p = Printer {
+        ast,
+        out: std::mem::take(out),
+        num: String::new(),
+    };
     p.expr(e);
     *out = p.out;
 }
 
 /// Append a parameter list (`a, b = 1`) as function literals print it.
 pub fn write_params(ast: &Ast, params: &[Param], out: &mut Vec<u8>) {
-    let mut p = Printer { ast, out: std::mem::take(out), num: String::new() };
+    let mut p = Printer {
+        ast,
+        out: std::mem::take(out),
+        num: String::new(),
+    };
     p.params(params);
     *out = p.out;
 }
@@ -130,7 +145,10 @@ impl Printer<'_> {
             self.expr(a.expr);
         }
         self.body(&i.children, indent, ");\n", ") ", ") {\n");
-        if let InstKind::If { else_children: Some(e) } = &i.kind {
+        if let InstKind::If {
+            else_children: Some(e),
+        } = &i.kind
+        {
             self.s(indent);
             if e.num_elements() == 0 {
                 self.s("else;");
@@ -282,7 +300,11 @@ impl Printer<'_> {
                 self.expr(*body);
             }
             ExprKind::Assert(args, body) | ExprKind::Echo(args, body) => {
-                self.s(if matches!(ast.expr(id).kind, ExprKind::Assert(..)) { "assert(" } else { "echo(" });
+                self.s(if matches!(ast.expr(id).kind, ExprKind::Assert(..)) {
+                    "assert("
+                } else {
+                    "echo("
+                });
                 self.args(args);
                 self.out.push(b')');
                 if let Some(b) = body {
@@ -314,7 +336,12 @@ impl Printer<'_> {
                 self.expr(*body);
                 self.out.push(b')');
             }
-            ExprKind::LcForC { init, cond, incr, body } => {
+            ExprKind::LcForC {
+                init,
+                cond,
+                incr,
+                body,
+            } => {
                 self.s("for(");
                 self.args(init);
                 self.out.push(b';');

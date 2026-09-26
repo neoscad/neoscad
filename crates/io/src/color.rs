@@ -16,7 +16,12 @@ impl Color {
     /// `Color4f(int r, int g, int b, int a)`: each channel over 255 in
     /// `f32`, whatever the range (OFF files may hold values above 255).
     pub fn from_ints(r: i32, g: i32, b: i32, a: i32) -> Color {
-        Color([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0])
+        Color([
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+            a as f32 / 255.0,
+        ])
     }
 
     /// `Color4f::isValid`: every component is set.
@@ -41,7 +46,11 @@ impl Color {
         self.0.map(|c| {
             // Order-preserving map of f32 to u32 (flip negatives).
             let b = c.to_bits();
-            if b & 0x8000_0000 != 0 { !b } else { b | 0x8000_0000 }
+            if b & 0x8000_0000 != 0 {
+                !b
+            } else {
+                b | 0x8000_0000
+            }
         })
     }
 }
@@ -53,7 +62,10 @@ mod tests {
     #[test]
     fn invalid_and_out_of_range() {
         assert_eq!(Color([-1.0; 4]).rgba_int(), None);
-        assert_eq!(Color([1.5, 0.5, 0.0, 1.0]).rgba_int(), Some([255, 127, 0, 255]));
+        assert_eq!(
+            Color([1.5, 0.5, 0.0, 1.0]).rgba_int(),
+            Some([255, 127, 0, 255])
+        );
     }
 
     #[test]

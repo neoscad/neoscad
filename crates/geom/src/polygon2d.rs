@@ -26,7 +26,10 @@ impl Polygon2d {
     /// `Polygon2d(Outline2d)`: a single outline is taken as sanitized, the
     /// way `square()` and `circle()` build theirs.
     pub fn from_outline(vertices: Vec<[f64; 2]>) -> Polygon2d {
-        Polygon2d { outlines: vec![Outline::new(vertices)], sanitized: true }
+        Polygon2d {
+            outlines: vec![Outline::new(vertices)],
+            sanitized: true,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -37,13 +40,22 @@ impl Polygon2d {
     pub fn bounds(&self) -> Option<([f64; 2], [f64; 2])> {
         let mut it = self.outlines.iter().flat_map(|o| o.vertices.iter());
         let first = *it.next()?;
-        Some(it.fold((first, first), |(lo, hi), v| ([lo[0].min(v[0]), lo[1].min(v[1])], [hi[0].max(v[0]), hi[1].max(v[1])])))
+        Some(it.fold((first, first), |(lo, hi), v| {
+            (
+                [lo[0].min(v[0]), lo[1].min(v[1])],
+                [hi[0].max(v[0]), hi[1].max(v[1])],
+            )
+        }))
     }
 
     /// The 2D part of a 3D transform (`GeometryEvaluator.cc:754-758`: rows
     /// and columns 0, 1 and 3).
     pub fn matrix_2d(m: &Matrix) -> [[f64; 3]; 3] {
-        [[m[0][0], m[0][1], m[0][3]], [m[1][0], m[1][1], m[1][3]], [m[3][0], m[3][1], m[3][3]]]
+        [
+            [m[0][0], m[0][1], m[0][3]],
+            [m[1][0], m[1][1], m[1][3]],
+            [m[3][0], m[3][1], m[3][3]],
+        ]
     }
 
     /// `Polygon2d::transform(Transform2d)`. A singular matrix empties the
@@ -61,7 +73,10 @@ impl Polygon2d {
                 // Eigen multiplies the 3x3 matrix by (x, y, 1), summing
                 // left to right with each later term fused (see
                 // `extrude::apply`); the last term is `m02 * 1`, an exact add.
-                *p = [m[0][1].mul_add(y, m[0][0] * x) + m[0][2], m[1][1].mul_add(y, m[1][0] * x) + m[1][2]];
+                *p = [
+                    m[0][1].mul_add(y, m[0][0] * x) + m[0][2],
+                    m[1][1].mul_add(y, m[1][0] * x) + m[1][2],
+                ];
             }
         }
         None
@@ -72,7 +87,9 @@ impl Polygon2d {
         if self.outlines.len() > 1 {
             return false;
         }
-        let Some(o) = self.outlines.first() else { return true };
+        let Some(o) = self.outlines.first() else {
+            return true;
+        };
         let pts = &o.vertices;
         let n = pts.len();
         for i in 0..n {
@@ -96,14 +113,21 @@ impl Polygon2d {
     /// rely on the vertices being kept in order, one per outline vertex.
     pub fn tessellate(&self) -> PolySet {
         use manifold_rust::linalg::Vec2;
-        let mut ps = PolySet { triangular: true, ..Default::default() };
+        let mut ps = PolySet {
+            triangular: true,
+            ..Default::default()
+        };
         let mut polys: Vec<Vec<Vec2>> = Vec::with_capacity(self.outlines.len());
         for o in &self.outlines {
-            ps.vertices.extend(o.vertices.iter().map(|v| [v[0], v[1], 0.0]));
+            ps.vertices
+                .extend(o.vertices.iter().map(|v| [v[0], v[1], 0.0]));
             polys.push(o.vertices.iter().map(|v| Vec2::new(v[0], v[1])).collect());
         }
         let tris = manifold_rust::polygon::triangulate(&polys, -1.0, true);
-        ps.faces = tris.iter().map(|t| vec![t.x as u32, t.y as u32, t.z as u32]).collect();
+        ps.faces = tris
+            .iter()
+            .map(|t| vec![t.x as u32, t.y as u32, t.z as u32])
+            .collect();
         ps
     }
 }
@@ -124,7 +148,14 @@ mod tests {
     fn convexity() {
         let sq = Polygon2d::from_outline(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
         assert!(sq.is_convex());
-        let l = Polygon2d::from_outline(vec![[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [1.0, 1.0], [1.0, 2.0], [0.0, 2.0]]);
+        let l = Polygon2d::from_outline(vec![
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [2.0, 1.0],
+            [1.0, 1.0],
+            [1.0, 2.0],
+            [0.0, 2.0],
+        ]);
         assert!(!l.is_convex());
     }
 
@@ -138,7 +169,14 @@ mod tests {
 
     #[test]
     fn tessellation_keeps_vertices() {
-        let l = Polygon2d::from_outline(vec![[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [1.0, 1.0], [1.0, 2.0], [0.0, 2.0]]);
+        let l = Polygon2d::from_outline(vec![
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [2.0, 1.0],
+            [1.0, 1.0],
+            [1.0, 2.0],
+            [0.0, 2.0],
+        ]);
         let ps = l.tessellate();
         assert_eq!(ps.vertices.len(), 6);
         assert_eq!(ps.faces.len(), 4);

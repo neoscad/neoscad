@@ -19,7 +19,9 @@ impl Mt19937 {
         let mut mt = [0u32; 624];
         mt[0] = seed;
         for i in 1..624 {
-            mt[i] = 1_812_433_253u32.wrapping_mul(mt[i - 1] ^ (mt[i - 1] >> 30)).wrapping_add(i as u32);
+            mt[i] = 1_812_433_253u32
+                .wrapping_mul(mt[i - 1] ^ (mt[i - 1] >> 30))
+                .wrapping_add(i as u32);
         }
         Mt19937 { mt, index: 624 }
     }
@@ -61,7 +63,11 @@ impl Mt19937 {
         let lo = f64::from(self.next_u32());
         let hi = f64::from(self.next_u32());
         let r = (lo + hi * R) / (R * R);
-        if r >= 1.0 { 1.0 - f64::EPSILON / 2.0 } else { r }
+        if r >= 1.0 {
+            1.0 - f64::EPSILON / 2.0
+        } else {
+            r
+        }
     }
 
     /// `std::uniform_real_distribution<double>(min, max)(*this)`.
@@ -78,7 +84,11 @@ pub fn hash_float(v: f64) -> i32 {
     const INF: u32 = 314_159;
     if !v.is_finite() {
         if v.is_infinite() {
-            return if v > 0.0 { INF as i32 } else { (INF as i32).wrapping_neg() };
+            return if v > 0.0 {
+                INF as i32
+            } else {
+                (INF as i32).wrapping_neg()
+            };
         }
         return 0;
     }
@@ -100,7 +110,11 @@ pub fn hash_float(v: f64) -> i32 {
             x -= MODULUS;
         }
     }
-    let e = if e >= 0 { e % BITS as i32 } else { BITS as i32 - 1 - ((-1 - e) % BITS as i32) } as u32;
+    let e = if e >= 0 {
+        e % BITS as i32
+    } else {
+        BITS as i32 - 1 - ((-1 - e) % BITS as i32)
+    } as u32;
     x = ((x << e) & MODULUS) | (x >> (BITS - e));
     x.wrapping_mul(sign as u32) as i32
 }

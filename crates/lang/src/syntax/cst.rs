@@ -98,8 +98,14 @@ impl Cst {
     /// The deepest token covering `offset` in `file`.
     pub fn token_at(&self, file: FileId, offset: u32) -> Option<TokenRef<'_>> {
         self.entries.iter().enumerate().find_map(|(i, e)| {
-            let t = self.tokens.get(e.data as usize).filter(|_| e.kind.is_token())?;
-            (t.file == file && t.start <= offset && offset < t.end()).then_some(TokenRef { cst: self, idx: i as u32 })
+            let t = self
+                .tokens
+                .get(e.data as usize)
+                .filter(|_| e.kind.is_token())?;
+            (t.file == file && t.start <= offset && offset < t.end()).then_some(TokenRef {
+                cst: self,
+                idx: i as u32,
+            })
         })
     }
 
@@ -141,7 +147,10 @@ impl<'a> Node<'a> {
 
     pub fn parent(&self) -> Option<Node<'a>> {
         let p = self.entry().parent;
-        (p != u32::MAX).then_some(Node { cst: self.cst, idx: p })
+        (p != u32::MAX).then_some(Node {
+            cst: self.cst,
+            idx: p,
+        })
     }
 
     pub fn children_with_tokens(&self) -> impl Iterator<Item = Element<'a>> + 'a {
@@ -188,7 +197,10 @@ impl<'a> Node<'a> {
     pub fn descendant_tokens(&self) -> impl Iterator<Item = &'a Token> + 'a {
         let cst = self.cst;
         let (start, end) = (self.idx as usize + 1, self.entry().data as usize);
-        cst.entries[start..end].iter().filter(|e| e.kind.is_token()).map(move |e| &cst.tokens[e.data as usize])
+        cst.entries[start..end]
+            .iter()
+            .filter(|e| e.kind.is_token())
+            .map(move |e| &cst.tokens[e.data as usize])
     }
 
     /// Span from the first to the last significant token, in the file of the
@@ -198,9 +210,19 @@ impl<'a> Node<'a> {
         // would make lowering quadratic in nesting depth.
         let cst = self.cst;
         let sub = &cst.entries[self.idx as usize + 1..self.entry().data as usize];
-        let sig = |e: &Entry| cst.tokens.get(e.data as usize).filter(|_| e.kind.is_token() && !e.kind.is_trivia()).copied();
+        let sig = |e: &Entry| {
+            cst.tokens
+                .get(e.data as usize)
+                .filter(|_| e.kind.is_token() && !e.kind.is_trivia())
+                .copied()
+        };
         let first = sub.iter().find_map(sig)?;
-        let last = sub.iter().rev().filter_map(sig).find(|t| t.file == first.file).unwrap_or(first);
+        let last = sub
+            .iter()
+            .rev()
+            .filter_map(sig)
+            .find(|t| t.file == first.file)
+            .unwrap_or(first);
         Some(Span::new(first.file, first.start, last.end()))
     }
 
@@ -244,7 +266,10 @@ impl<'a> TokenRef<'a> {
     }
 
     pub fn parent(&self) -> Node<'a> {
-        Node { cst: self.cst, idx: self.cst.entries[self.idx as usize].parent }
+        Node {
+            cst: self.cst,
+            idx: self.cst.entries[self.idx as usize].parent,
+        }
     }
 }
 
@@ -258,9 +283,15 @@ pub(crate) struct Builder {
 impl Builder {
     pub(crate) fn new(tokens: Vec<Token>) -> Self {
         let n = tokens.len();
-        let mut cst = Cst { tokens, entries: Vec::new() };
+        let mut cst = Cst {
+            tokens,
+            entries: Vec::new(),
+        };
         cst.entries.reserve(n + n / 2);
-        Self { cst, stack: Vec::new() }
+        Self {
+            cst,
+            stack: Vec::new(),
+        }
     }
 
     fn parent(&self) -> u32 {
@@ -270,7 +301,11 @@ impl Builder {
     pub(crate) fn start(&mut self, kind: SyntaxKind) {
         let idx = self.cst.entries.len() as u32;
         let parent = self.parent();
-        self.cst.entries.push(Entry { kind, parent, data: 0 });
+        self.cst.entries.push(Entry {
+            kind,
+            parent,
+            data: 0,
+        });
         self.stack.push(idx);
     }
 
@@ -283,7 +318,11 @@ impl Builder {
     pub(crate) fn token(&mut self, token_index: u32) {
         let kind = self.cst.tokens[token_index as usize].kind;
         let parent = self.parent();
-        self.cst.entries.push(Entry { kind, parent, data: token_index });
+        self.cst.entries.push(Entry {
+            kind,
+            parent,
+            data: token_index,
+        });
     }
 
     pub(crate) fn depth(&self) -> usize {

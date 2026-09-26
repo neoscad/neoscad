@@ -72,7 +72,12 @@ impl Builtin {
     pub fn enabled(self) -> bool {
         !matches!(
             self,
-            Builtin::TextMetrics | Builtin::FontMetrics | Builtin::IsObject | Builtin::Object | Builtin::HasKey | Builtin::Import
+            Builtin::TextMetrics
+                | Builtin::FontMetrics
+                | Builtin::IsObject
+                | Builtin::Object
+                | Builtin::HasKey
+                | Builtin::Import
         )
     }
 }
@@ -133,14 +138,27 @@ pub(crate) fn table(syms: &mut Syms) -> HashMap<Sym, Builtin, FxBuild> {
 impl<'a> Evaluator<'a> {
     /// `print_argCnt_warning`.
     fn arg_count_warning(&mut self, name: &str, found: usize, expected: &str, loc: Loc) {
-        let t = format!("{name}() number of parameters does not match: expected {expected}, found {found}");
+        let t = format!(
+            "{name}() number of parameters does not match: expected {expected}, found {found}"
+        );
         self.warn(loc, DiagCode::ArgumentMismatch, t);
     }
 
     /// `print_argConvert_positioned_warning`.
-    fn arg_type_warning(&mut self, name: &str, what: &str, found: &Value, expected: Type, loc: Loc) {
-        let mut t = format!("{name}() parameter could not be converted: {what}: expected {}, found {} (", expected.name(), found.type_name())
-            .into_bytes();
+    fn arg_type_warning(
+        &mut self,
+        name: &str,
+        what: &str,
+        found: &Value,
+        expected: Type,
+        loc: Loc,
+    ) {
+        let mut t = format!(
+            "{name}() parameter could not be converted: {what}: expected {}, found {} (",
+            expected.name(),
+            found.type_name()
+        )
+        .into_bytes();
         self.write_echo_nothrow(found, &mut t);
         t.push(b')');
         self.warn(loc, DiagCode::InvalidArgument, t);
@@ -172,10 +190,21 @@ impl<'a> Evaluator<'a> {
 
     /// A one-number function.
     fn num1(&mut self, name: &str, args: &[ArgVal], loc: Loc, f: impl Fn(f64) -> f64) -> Value {
-        if self.check(name, args, loc, &[Type::Number]) { Value::Number(f(args[0].value.to_f64())) } else { Value::Undef }
+        if self.check(name, args, loc, &[Type::Number]) {
+            Value::Number(f(args[0].value.to_f64()))
+        } else {
+            Value::Undef
+        }
     }
 
-    pub fn call_builtin(&mut self, b: Builtin, u: u32, call: ExprId, args: &'a [Arg], ctx: &Rc<Ctx>) -> R<Value> {
+    pub fn call_builtin(
+        &mut self,
+        b: Builtin,
+        u: u32,
+        call: ExprId,
+        args: &'a [Arg],
+        ctx: &Rc<Ctx>,
+    ) -> R<Value> {
         let loc = self.expr_loc(u, call);
         if b == Builtin::IsUndef {
             if args.len() != 1 {
@@ -185,7 +214,9 @@ impl<'a> Evaluator<'a> {
             let ast = self.units[u as usize].ast;
             if let ExprKind::Var(n) = ast.expr(args[0].expr).kind {
                 let s = self.units[u as usize].sym(n);
-                return Ok(Value::Bool(self.try_lookup(ctx, s).is_none_or(|v| v.is_undef())));
+                return Ok(Value::Bool(
+                    self.try_lookup(ctx, s).is_none_or(|v| v.is_undef()),
+                ));
             }
             let v = self.eval(u, args[0].expr, ctx)?;
             return Ok(Value::Bool(v.is_undef()));
@@ -194,7 +225,15 @@ impl<'a> Evaluator<'a> {
         use Builtin::*;
         Ok(match b {
             Abs => self.num1("abs", &a, loc, f64::abs),
-            Sign => self.num1("sign", &a, loc, |x| if x < 0.0 { -1.0 } else if x > 0.0 { 1.0 } else { 0.0 }),
+            Sign => self.num1("sign", &a, loc, |x| {
+                if x < 0.0 {
+                    -1.0
+                } else if x > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }),
             Sin => self.num1("sin", &a, loc, trig::sin_degrees),
             Cos => self.num1("cos", &a, loc, trig::cos_degrees),
             Asin => self.num1("asin", &a, loc, trig::asin_degrees),
@@ -209,7 +248,10 @@ impl<'a> Evaluator<'a> {
             Ln => self.num1("ln", &a, loc, f64::ln),
             Atan2 => {
                 if self.check("atan2", &a, loc, &[Type::Number, Type::Number]) {
-                    Value::Number(trig::atan2_degrees(a[0].value.to_f64(), a[1].value.to_f64()))
+                    Value::Number(trig::atan2_degrees(
+                        a[0].value.to_f64(),
+                        a[1].value.to_f64(),
+                    ))
                 } else {
                     Value::Undef
                 }
@@ -269,7 +311,11 @@ impl<'a> Evaluator<'a> {
                 if !self.check("ord", &a, loc, &[Type::Str]) {
                     return Ok(Value::Undef);
                 }
-                let s = a[0].value.as_str().map(|s| s.as_bytes()).unwrap_or_default();
+                let s = a[0]
+                    .value
+                    .as_str()
+                    .map(|s| s.as_bytes())
+                    .unwrap_or_default();
                 if !utf8::validate(s) {
                     let mut t = b"ord() argument '".to_vec();
                     t.extend_from_slice(s);
@@ -296,7 +342,11 @@ impl<'a> Evaluator<'a> {
             Search => self.search(&a, loc),
             Version => self.version_value(),
             VersionNum => {
-                let v = if a.is_empty() { self.version_value() } else { a[0].value.clone() };
+                let v = if a.is_empty() {
+                    self.version_value()
+                } else {
+                    a[0].value.clone()
+                };
                 let mut ymd = [0.0; 3];
                 if !v.get_vec3_or2(&mut ymd, 0.0) {
                     return Ok(Value::Undef);
@@ -314,11 +364,17 @@ impl<'a> Evaluator<'a> {
                 let n = d.trunc() as i32;
                 let s = self.module_names.len() as i32;
                 if n < 0 {
-                    self.warn(loc, DiagCode::InvalidArgument, format!("Negative parent module index ({n}) not allowed"));
+                    self.warn(
+                        loc,
+                        DiagCode::InvalidArgument,
+                        format!("Negative parent module index ({n}) not allowed"),
+                    );
                     return Ok(Value::Undef);
                 }
                 if n >= s {
-                    let t = format!("Parent module index ({n}) greater than the number of modules on the stack");
+                    let t = format!(
+                        "Parent module index ({n}) greater than the number of modules on the stack"
+                    );
                     self.warn(loc, DiagCode::InvalidArgument, t);
                     return Ok(Value::Undef);
                 }
@@ -330,11 +386,20 @@ impl<'a> Evaluator<'a> {
                     return Ok(Value::Undef);
                 }
                 let mut sum = 0.0;
-                for e in a[0].value.as_vector().map(|v| v.as_slice()).unwrap_or_default() {
+                for e in a[0]
+                    .value
+                    .as_vector()
+                    .map(|v| v.as_slice())
+                    .unwrap_or_default()
+                {
                     match e {
                         Value::Number(x) => sum += x * x,
                         _ => {
-                            self.warn(loc, DiagCode::InvalidArgument, "Incorrect arguments to norm()");
+                            self.warn(
+                                loc,
+                                DiagCode::InvalidArgument,
+                                "Incorrect arguments to norm()",
+                            );
                             return Ok(Value::Undef);
                         }
                     }
@@ -343,12 +408,19 @@ impl<'a> Evaluator<'a> {
             }
             Cross => self.cross(&a, loc),
             IsList => self.is_type(&a, loc, "is_list", |v| matches!(v, Value::Vector(_))),
-            IsNum => self.is_type(&a, loc, "is_num", |v| matches!(v, Value::Number(x) if !x.is_nan())),
+            IsNum => self.is_type(
+                &a,
+                loc,
+                "is_num",
+                |v| matches!(v, Value::Number(x) if !x.is_nan()),
+            ),
             IsBool => self.is_type(&a, loc, "is_bool", |v| matches!(v, Value::Bool(_))),
             IsString => self.is_type(&a, loc, "is_string", |v| matches!(v, Value::Str(_))),
             IsFunction => self.is_type(&a, loc, "is_function", |v| matches!(v, Value::Function(_))),
             DxfDim | DxfCross => self.dxf(b == DxfDim, a, loc),
-            IsUndef | TextMetrics | FontMetrics | IsObject | Object | HasKey | Import => Value::Undef,
+            IsUndef | TextMetrics | FontMetrics | IsObject | Object | HasKey | Import => {
+                Value::Undef
+            }
         })
     }
 
@@ -390,12 +462,26 @@ impl<'a> Evaluator<'a> {
             self.warn(loc, DiagCode::InvalidArgument, t);
             return Value::Undef;
         }
-        let bytes = if path.is_dir() { None } else { std::fs::read(path).ok() };
-        let display = lang::diag::relative_path(path, &self.main_dir).display().to_string();
+        let bytes = if path.is_dir() {
+            None
+        } else {
+            std::fs::read(path).ok()
+        };
+        let display = lang::diag::relative_path(path, &self.main_dir)
+            .display()
+            .to_string();
         let mut warnings = Vec::new();
-        let req = io::dxf::Request { file: &file, display: &display, layer: &layer, origin: [xo, yo], scale };
+        let req = io::dxf::Request {
+            file: &file,
+            display: &display,
+            layer: &layer,
+            origin: [xo, yo],
+            scale,
+        };
         // `dxf_dim`/`dxf_cross` read with `CurveDiscretizer(36)` (dxfdim.cc).
-        let data = io::dxf::read(bytes.as_deref(), &req, &io::dxf::Fixed36, &mut |w| warnings.push(w));
+        let data = io::dxf::read(bytes.as_deref(), &req, &io::dxf::Fixed36, &mut |w| {
+            warnings.push(w)
+        });
         for w in warnings {
             self.warn_noloc(DiagCode::InvalidArgument, w);
         }
@@ -408,7 +494,9 @@ impl<'a> Evaluator<'a> {
                 let v = match d.ty & 7 {
                     0 => {
                         let (x, y) = (c[4][0] - c[3][0], c[4][1] - c[3][1]);
-                        Some((x * trig::cos_degrees(d.angle) + y * trig::sin_degrees(d.angle)).abs())
+                        Some(
+                            (x * trig::cos_degrees(d.angle) + y * trig::sin_degrees(d.angle)).abs(),
+                        )
                     }
                     1 => {
                         let (x, y) = (c[4][0] - c[3][0], c[4][1] - c[3][1]);
@@ -429,7 +517,9 @@ impl<'a> Evaluator<'a> {
                 if let Some(v) = v {
                     return Value::Number(v);
                 }
-                let t = format!("Dimension '{name}' in '{raw_s}', layer '{layer}' has unsupported type!");
+                let t = format!(
+                    "Dimension '{name}' in '{raw_s}', layer '{layer}' has unsupported type!"
+                );
                 self.warn(loc, DiagCode::InvalidArgument, t);
                 return Value::Undef;
             }
@@ -453,7 +543,10 @@ impl<'a> Evaluator<'a> {
                     break;
                 }
                 let ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / dem;
-                return Value::vector(vec![Value::Number(x1 + ua * (x2 - x1)), Value::Number(y1 + ua * (y2 - y1))]);
+                return Value::vector(vec![
+                    Value::Number(x1 + ua * (x2 - x1)),
+                    Value::Number(y1 + ua * (y2 - y1)),
+                ]);
             }
         }
         let t = format!("Can't find cross in '{raw_s}', layer '{layer}'!");
@@ -479,11 +572,21 @@ impl<'a> Evaluator<'a> {
     }
 
     fn is_type(&mut self, a: &[ArgVal], loc: Loc, name: &str, f: impl Fn(&Value) -> bool) -> Value {
-        if self.check_count(name, a, loc, 1) { Value::Bool(f(&a[0].value)) } else { Value::Undef }
+        if self.check_count(name, a, loc, 1) {
+            Value::Bool(f(&a[0].value))
+        } else {
+            Value::Undef
+        }
     }
 
     fn version_value(&self) -> Value {
-        Value::vector(self.opts.version.iter().map(|&x| Value::Number(x)).collect())
+        Value::vector(
+            self.opts
+                .version
+                .iter()
+                .map(|&x| Value::Number(x))
+                .collect(),
+        )
     }
 
     /// `min_max_arguments` and the reduction.
@@ -503,7 +606,13 @@ impl<'a> Evaluator<'a> {
                     Value::Number(x) => values.push(*x),
                     _ => {
                         let e = e.clone();
-                        self.arg_type_warning(name, &format!("vector element {i}"), &e, Type::Number, loc);
+                        self.arg_type_warning(
+                            name,
+                            &format!("vector element {i}"),
+                            &e,
+                            Type::Number,
+                            loc,
+                        );
                         return Value::Undef;
                     }
                 }
@@ -514,7 +623,13 @@ impl<'a> Evaluator<'a> {
                     Value::Number(n) => values.push(n),
                     _ => {
                         let v = x.value.clone();
-                        self.arg_type_warning(name, &format!("argument {i}"), &v, Type::Number, loc);
+                        self.arg_type_warning(
+                            name,
+                            &format!("argument {i}"),
+                            &v,
+                            Type::Number,
+                            loc,
+                        );
                         return Value::Undef;
                     }
                 }
@@ -541,13 +656,21 @@ impl<'a> Evaluator<'a> {
         }
         let mut min = a[0].value.to_f64();
         if !min.is_finite() {
-            self.warn(loc, DiagCode::InvalidArgument, "rands() range min cannot be infinite");
+            self.warn(
+                loc,
+                DiagCode::InvalidArgument,
+                "rands() range min cannot be infinite",
+            );
             min = -f64::MAX / 2.0;
             self.warn_noloc(DiagCode::InvalidArgument, format!("resetting to {min:.6}"));
         }
         let mut max = a[1].value.to_f64();
         if !max.is_finite() {
-            self.warn(loc, DiagCode::InvalidArgument, "rands() range max cannot be infinite");
+            self.warn(
+                loc,
+                DiagCode::InvalidArgument,
+                "rands() range max cannot be infinite",
+            );
             max = f64::MAX / 2.0;
             self.warn_noloc(DiagCode::InvalidArgument, format!("resetting to {max:.6}"));
         }
@@ -556,8 +679,15 @@ impl<'a> Evaluator<'a> {
         }
         let mut n = a[2].value.to_f64().abs();
         if !n.is_finite() {
-            self.warn(loc, DiagCode::InvalidArgument, "rands() cannot create an infinite number of results");
-            self.warn_noloc(DiagCode::InvalidArgument, "resetting number of results to 1");
+            self.warn(
+                loc,
+                DiagCode::InvalidArgument,
+                "rands() cannot create an infinite number of results",
+            );
+            self.warn_noloc(
+                DiagCode::InvalidArgument,
+                "resetting number of results to 1",
+            );
             n = 1.0;
         }
         let n = n as usize;
@@ -592,7 +722,9 @@ impl<'a> Evaluator<'a> {
             Value::Range(r) => {
                 let steps = r.num_values();
                 if steps >= MAX_RANGE_STEPS {
-                    let t = format!("Bad range parameter in for statement: too many elements ({steps}).");
+                    let t = format!(
+                        "Bad range parameter in for statement: too many elements ({steps})."
+                    );
                     self.warn_noloc(DiagCode::IterationLimit, t);
                     return;
                 }
@@ -619,11 +751,15 @@ impl<'a> Evaluator<'a> {
         }
         let empty = crate::value::Vector::empty();
         let vec = a[1].value.as_vector().unwrap_or(&empty);
-        let Some(first) = vec.first() else { return Value::Undef };
+        let Some(first) = vec.first() else {
+            return Value::Undef;
+        };
         if first.as_vector().map_or(0, |v| v.len()) < 2 {
             return Value::Undef;
         }
-        let Some([mut low_p, mut low_v]) = first.as_vec2(false) else { return Value::Undef };
+        let Some([mut low_p, mut low_v]) = first.as_vec2(false) else {
+            return Value::Undef;
+        };
         let (mut high_p, mut high_v) = (low_p, low_v);
         for e in &vec[1..] {
             if let Some([tp, tv]) = e.as_vec2(false) {
@@ -655,13 +791,23 @@ impl<'a> Evaluator<'a> {
         let find = &a[0].value;
         let table = &a[1].value;
         // `(unsigned int)double`: truncation, negative and NaN become 0.
-        let per_match = if a.len() > 2 { a[2].value.to_f64() as u32 } else { 1 };
-        let col = if a.len() > 3 { a[3].value.to_f64() as u32 } else { 0 } as usize;
+        let per_match = if a.len() > 2 {
+            a[2].value.to_f64() as u32
+        } else {
+            1
+        };
+        let col = if a.len() > 3 {
+            a[3].value.to_f64() as u32
+        } else {
+            0
+        } as usize;
         let empty = crate::value::Vector::empty();
         let rows = table.as_vector().unwrap_or(&empty);
         let matches_row = |needle: &Value, row: &Value| {
             (col == 0 && crate::ops::equals(needle, row))
-                || row.as_vector().is_some_and(|r| col < r.len() && crate::ops::equals(needle, &r[col]))
+                || row
+                    .as_vector()
+                    .is_some_and(|r| col < r.len() && crate::ops::equals(needle, &r[col]))
         };
         let mut out = Vec::new();
         match find {
@@ -680,13 +826,18 @@ impl<'a> Evaluator<'a> {
             Value::Str(s) => {
                 let n_find = s.char_count();
                 if let Value::Str(t) = table {
-                    let hay: Vec<&[u8]> = (0..t.char_count()).map(|j| t.char_at(j).unwrap_or_default()).collect();
+                    let hay: Vec<&[u8]> = (0..t.char_count())
+                        .map(|j| t.char_at(j).unwrap_or_default())
+                        .collect();
                     for i in 0..n_find {
                         let ft = s.char_at(i).unwrap_or_default();
                         let mut count = 0;
                         let mut res = Vec::new();
                         for (j, st) in hay.iter().enumerate() {
-                            if !ft.is_empty() && !st.is_empty() && utf8::first_char(ft) == utf8::first_char(st) {
+                            if !ft.is_empty()
+                                && !st.is_empty()
+                                && utf8::first_char(ft) == utf8::first_char(st)
+                            {
                                 count += 1;
                                 if per_match == 1 {
                                     out.push(Value::Number(j as f64));
@@ -721,7 +872,9 @@ impl<'a> Evaluator<'a> {
                                 return Value::vector(Vec::new());
                             }
                             let Value::Str(e) = &entry[col] else { continue };
-                            if !ft.is_empty() && utf8::first_char(ft) == utf8::first_char(e.as_bytes()) {
+                            if !ft.is_empty()
+                                && utf8::first_char(ft) == utf8::first_char(e.as_bytes())
+                            {
                                 count += 1;
                                 if per_match == 1 {
                                     out.push(Value::Number(j as f64));
@@ -770,25 +923,45 @@ impl<'a> Evaluator<'a> {
         if !self.check("cross", a, loc, &[Type::Vector, Type::Vector]) {
             return Value::Undef;
         }
-        let (Some(v0), Some(v1)) = (a[0].value.as_vector(), a[1].value.as_vector()) else { return Value::Undef };
+        let (Some(v0), Some(v1)) = (a[0].value.as_vector(), a[1].value.as_vector()) else {
+            return Value::Undef;
+        };
         if v0.len() == 2 && v1.len() == 2 {
-            return Value::Number(v0[0].to_f64() * v1[1].to_f64() - v0[1].to_f64() * v1[0].to_f64());
+            return Value::Number(
+                v0[0].to_f64() * v1[1].to_f64() - v0[1].to_f64() * v1[0].to_f64(),
+            );
         }
         if v0.len() != 3 || v1.len() != 3 {
-            self.warn(loc, DiagCode::InvalidArgument, "Invalid vector size of parameter for cross()");
+            self.warn(
+                loc,
+                DiagCode::InvalidArgument,
+                "Invalid vector size of parameter for cross()",
+            );
             return Value::Undef;
         }
         for i in 0..3 {
             let (Value::Number(d0), Value::Number(d1)) = (&v0[i], &v1[i]) else {
-                self.warn(loc, DiagCode::InvalidArgument, "Invalid value in parameter vector for cross()");
+                self.warn(
+                    loc,
+                    DiagCode::InvalidArgument,
+                    "Invalid value in parameter vector for cross()",
+                );
                 return Value::Undef;
             };
             if d0.is_nan() || d1.is_nan() {
-                self.warn(loc, DiagCode::InvalidArgument, "Invalid value (NaN) in parameter vector for cross()");
+                self.warn(
+                    loc,
+                    DiagCode::InvalidArgument,
+                    "Invalid value (NaN) in parameter vector for cross()",
+                );
                 return Value::Undef;
             }
             if d0.is_infinite() || d1.is_infinite() {
-                self.warn(loc, DiagCode::InvalidArgument, "Invalid value (INF) in parameter vector for cross()");
+                self.warn(
+                    loc,
+                    DiagCode::InvalidArgument,
+                    "Invalid value (INF) in parameter vector for cross()",
+                );
                 return Value::Undef;
             }
         }

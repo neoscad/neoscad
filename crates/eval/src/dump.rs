@@ -55,7 +55,11 @@ struct Writer<'a> {
 /// The `.csg` export of `top`: the root's children, or the node the root
 /// modifier (`!`) picked, with the trailing newline `openscad.cc` adds.
 pub fn csg(top: &Node, doc_dir: &Path) -> String {
-    let mut w = Writer { out: String::new(), style: Style::Csg, base: doc_dir };
+    let mut w = Writer {
+        out: String::new(),
+        style: Style::Csg,
+        base: doc_dir,
+    };
     if top.kind == NodeKind::Root {
         for c in &top.children {
             w.csg_node(c, 0);
@@ -248,7 +252,11 @@ impl Writer<'_> {
             }
             NodeKind::Hull => self.lit("hull()"),
             NodeKind::Fill => self.lit("fill()"),
-            NodeKind::Resize { newsize, autosize, convexity } => {
+            NodeKind::Resize {
+                newsize,
+                autosize,
+                convexity,
+            } => {
                 // CgalAdvNode::toString: no spaces inside these vectors, and
                 // the flags stream as C++ bools (0/1).
                 self.lit("resize(newsize = [");
@@ -269,9 +277,18 @@ impl Writer<'_> {
                 self.int(convexity);
                 self.lit(")");
             }
-            NodeKind::Offset { delta, chamfer, join, disc } => {
+            NodeKind::Offset {
+                delta,
+                chamfer,
+                join,
+                disc,
+            } => {
                 let round = *join == OffsetJoin::Round;
-                self.lit(if round { "offset(r = " } else { "offset(delta = " });
+                self.lit(if round {
+                    "offset(r = "
+                } else {
+                    "offset(delta = "
+                });
                 self.num(*delta);
                 if !round {
                     self.lit(", chamfer = ");
@@ -336,7 +353,12 @@ impl Writer<'_> {
                 }
                 self.lit(")");
             }
-            NodeKind::RotateExtrude { angle, start, convexity, disc } => {
+            NodeKind::RotateExtrude {
+                angle,
+                start,
+                convexity,
+                disc,
+            } => {
                 self.lit("rotate_extrude(angle = ");
                 self.num(*angle);
                 self.lit(", start = ");
@@ -361,7 +383,13 @@ impl Writer<'_> {
                 self.num(*r);
                 self.lit(")");
             }
-            NodeKind::Cylinder { h, r1, r2, center, disc } => {
+            NodeKind::Cylinder {
+                h,
+                r1,
+                r2,
+                center,
+                disc,
+            } => {
                 self.lit("cylinder(");
                 self.disc(disc);
                 self.lit(", h = ");
@@ -374,7 +402,11 @@ impl Writer<'_> {
                 self.boolean(*center);
                 self.lit(")");
             }
-            NodeKind::Polyhedron { points, faces, convexity } => {
+            NodeKind::Polyhedron {
+                points,
+                faces,
+                convexity,
+            } => {
                 self.lit("polyhedron(points = [");
                 for (i, p) in points.iter().enumerate() {
                     if i > 0 {
@@ -402,7 +434,11 @@ impl Writer<'_> {
                 self.num(*r);
                 self.lit(")");
             }
-            NodeKind::Polygon { points, paths, convexity } => {
+            NodeKind::Polygon {
+                points,
+                paths,
+                convexity,
+            } => {
                 self.lit("polygon(points = [");
                 for (i, p) in points.iter().enumerate() {
                     if i > 0 {
@@ -420,7 +456,12 @@ impl Writer<'_> {
                 self.int(convexity);
                 self.lit(")");
             }
-            NodeKind::Surface { file, center, invert, convexity } => {
+            NodeKind::Surface {
+                file,
+                center,
+                invert,
+                convexity,
+            } => {
                 self.lit("surface(file = ");
                 self.file(file);
                 self.lit(", center = ");
@@ -524,7 +565,9 @@ fn mtime_nanos(file: &str) -> i128 {
     if file.is_empty() {
         return 0;
     }
-    let Ok(t) = std::fs::metadata(file).and_then(|m| m.modified()) else { return 0 };
+    let Ok(t) = std::fs::metadata(file).and_then(|m| m.modified()) else {
+        return 0;
+    };
     match t.duration_since(UNIX_EPOCH) {
         Ok(d) => d.as_nanos() as i128,
         Err(e) => -(e.duration().as_nanos() as i128),
@@ -583,7 +626,11 @@ fn lexically_normal(p: &Path) -> PathBuf {
 fn lexically_relative(p: &Path, base: &Path) -> PathBuf {
     let a: Vec<Component<'_>> = p.components().collect();
     let b: Vec<Component<'_>> = base.components().collect();
-    let root = |v: &[Component<'_>]| v.iter().take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir)).count();
+    let root = |v: &[Component<'_>]| {
+        v.iter()
+            .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+            .count()
+    };
     if a[..root(&a)] != b[..root(&b)] {
         return PathBuf::new();
     }
@@ -624,7 +671,11 @@ impl Keys {
         let len = max_index(root) + 1;
         let mut counts = vec![0u32; len];
         content_counts(root, &mut counts);
-        let mut w = Writer { out: String::new(), style: Style::Key, base: Path::new("") };
+        let mut w = Writer {
+            out: String::new(),
+            style: Style::Key,
+            base: Path::new(""),
+        };
         let mut spans = vec![(0, 0); len];
         w.key_node(root, &counts, &mut spans);
         Keys { text: w.out, spans }
@@ -706,11 +757,23 @@ mod tests {
             tag_highlight: false,
             tag_background: false,
         };
-        Node { kind, children, origin: Some(Box::new(origin)), index }
+        Node {
+            kind,
+            children,
+            origin: Some(Box::new(origin)),
+            index,
+        }
     }
 
     fn cube(s: f64, index: usize) -> Node {
-        node(NodeKind::Cube { size: [s; 3], center: false }, index, vec![])
+        node(
+            NodeKind::Cube {
+                size: [s; 3],
+                center: false,
+            },
+            index,
+            vec![],
+        )
     }
 
     #[test]
@@ -719,7 +782,12 @@ mod tests {
         hl.origin.as_mut().unwrap().tag_highlight = true;
         hl.origin.as_mut().unwrap().tag_background = true;
         let g = node(NodeKind::Group { name: None }, 1, vec![cube(1.0, 2), hl]);
-        let root = Node { kind: NodeKind::Root, children: vec![g], origin: None, index: 0 };
+        let root = Node {
+            kind: NodeKind::Root,
+            children: vec![g],
+            origin: None,
+            index: 0,
+        };
         assert_eq!(
             csg(&root, Path::new("/")),
             "group() {\n\tcube(size = [1, 1, 1], center = false);\n%#\tcube(size = [2, 2, 2], center = false);\n}\n\n"
@@ -730,20 +798,38 @@ mod tests {
     fn keys_are_exact_and_skip_single_child_groups() {
         let a = node(NodeKind::Group { name: None }, 1, vec![cube(1.0, 2)]);
         let b = cube(1.0000001, 3);
-        let root = Node { kind: NodeKind::Root, children: vec![a, b], origin: None, index: 0 };
+        let root = Node {
+            kind: NodeKind::Root,
+            children: vec![a, b],
+            origin: None,
+            index: 0,
+        };
         let k = Keys::new(&root);
-        assert_eq!(k.get(&root.children[0]), "cube(size=[1.0,1.0,1.0],center=false);");
-        assert_eq!(k.get(&root.children[0]), k.get(&root.children[0].children[0]));
+        assert_eq!(
+            k.get(&root.children[0]),
+            "cube(size=[1.0,1.0,1.0],center=false);"
+        );
+        assert_eq!(
+            k.get(&root.children[0]),
+            k.get(&root.children[0].children[0])
+        );
         assert_ne!(k.get(&root.children[0]), k.get(&root.children[1]));
         assert!(k.get(&root).starts_with("root(){cube("));
     }
 
     #[test]
     fn relative_paths() {
-        let r = |p: &str, b: &str| lexically_relative(Path::new(p), Path::new(b)).display().to_string();
+        let r = |p: &str, b: &str| {
+            lexically_relative(Path::new(p), Path::new(b))
+                .display()
+                .to_string()
+        };
         assert_eq!(r("/a/b/c.stl", "/a/b"), "c.stl");
         assert_eq!(r("/a/x/c.stl", "/a/b"), "../x/c.stl");
         assert_eq!(r("/a/b", "/a/b"), ".");
-        assert_eq!(lexically_normal(Path::new("/a/b/../c/./d")), Path::new("/a/c/d"));
+        assert_eq!(
+            lexically_normal(Path::new("/a/b/../c/./d")),
+            Path::new("/a/c/d")
+        );
     }
 }

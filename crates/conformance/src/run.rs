@@ -112,7 +112,10 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
         );
     }
     let mcad = ctx.ref_root.join("libraries/MCAD");
-    if fs::read_dir(&mcad).map(|mut d| d.next().is_none()).unwrap_or(true) {
+    if fs::read_dir(&mcad)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true)
+    {
         eprintln!(
             "warning: {} is empty, so tests that use MCAD cannot pass; fetch it with\n  git -C {} submodule update --init libraries/MCAD",
             mcad.display(),
@@ -135,7 +138,11 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
         .tests
         .iter()
         .filter(|c| opts.tiers.is_empty() || opts.tiers.contains(&c.tier))
-        .filter(|c| opts.filter.as_ref().is_none_or(|f| c.id.contains(f.as_str())))
+        .filter(|c| {
+            opts.filter
+                .as_ref()
+                .is_none_or(|f| c.id.contains(f.as_str()))
+        })
         .collect();
 
     let mut env = Env::new(ctx, &manifest, &binary, opts.timeout);
@@ -176,7 +183,9 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
     // Regression gate.
     let baseline_path = ctx.baseline_path();
     let baseline: Baseline = match fs::read_to_string(&baseline_path) {
-        Ok(t) => serde_json::from_str(&t).map_err(|e| format!("{}: {e}", baseline_path.display()))?,
+        Ok(t) => {
+            serde_json::from_str(&t).map_err(|e| format!("{}: {e}", baseline_path.display()))?
+        }
         Err(_) => Baseline::default(),
     };
     let by_id: BTreeMap<&str, &Outcome> = outcomes.iter().map(|o| (o.id.as_str(), o)).collect();
@@ -201,21 +210,41 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
             .filter(|id| !by_id.contains_key(id.as_str()) && known.contains(id.as_str()))
             .cloned()
             .collect();
-        passing.extend(outcomes.iter().filter(|o| o.status == Status::Pass).map(|o| o.id.clone()));
-        let b = Baseline { comment: BASELINE_COMMENT.into(), passing: passing.into_iter().collect() };
+        passing.extend(
+            outcomes
+                .iter()
+                .filter(|o| o.status == Status::Pass)
+                .map(|o| o.id.clone()),
+        );
+        let b = Baseline {
+            comment: BASELINE_COMMENT.into(),
+            passing: passing.into_iter().collect(),
+        };
         let text = serde_json::to_string_pretty(&b).map_err(|e| e.to_string())? + "\n";
         fs::write(&baseline_path, text).map_err(|e| format!("{}: {e}", baseline_path.display()))?;
-        println!("baseline: {} passing ids written to {}", b.passing.len(), baseline_path.display());
+        println!(
+            "baseline: {} passing ids written to {}",
+            b.passing.len(),
+            baseline_path.display()
+        );
     }
 
-    let report = RunReport { outcomes, per_tier, wall, binary };
+    let report = RunReport {
+        outcomes,
+        per_tier,
+        wall,
+        binary,
+    };
     if opts.record {
         let dir = crate::record::record(ctx, &manifest, &report, opts.grid)?;
         println!("recorded {}", dir.display());
     }
 
     if !regressions.is_empty() && !opts.update_baseline {
-        eprintln!("\nREGRESSION: {} baseline test(s) no longer pass:", regressions.len());
+        eprintln!(
+            "\nREGRESSION: {} baseline test(s) no longer pass:",
+            regressions.len()
+        );
         for (id, reason) in &regressions {
             eprintln!("  {id} ({reason})");
         }
@@ -229,7 +258,14 @@ fn short(sha: &str) -> &str {
 }
 
 fn outcome(c: &Case, status: Status, reason: Option<String>) -> Outcome {
-    Outcome { id: c.id.clone(), tier: c.tier, status, reason, ms: None, excerpt: Vec::new() }
+    Outcome {
+        id: c.id.clone(),
+        tier: c.tier,
+        status,
+        reason,
+        ms: None,
+        excerpt: Vec::new(),
+    }
 }
 
 /// Per-run constants shared by every case.
@@ -386,7 +422,8 @@ impl Env {
             Err(_) => return fail(format!("missing expected output {}", expected.display())),
         };
         let act_text = normalize::read_text(actual).unwrap_or_default();
-        let exp = normalize::normalized_lines(&exp_text, Some(&self.runtime_tests), exclude.as_ref());
+        let exp =
+            normalize::normalized_lines(&exp_text, Some(&self.runtime_tests), exclude.as_ref());
         let act = normalize::normalized_lines(&act_text, None, exclude.as_ref());
         match normalize::compare(&exp, &act) {
             Ok(()) => outcome(c, Status::Pass, None),
@@ -424,16 +461,25 @@ fn print_geometry_report(manifest: &Manifest, outcomes: &[Outcome], image: &Geom
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
     let mut limit_passes = Vec::new();
     for o in outcomes {
-        let Some(c) = cases.get(o.id.as_str()) else { continue };
+        let Some(c) = cases.get(o.id.as_str()) else {
+            continue;
+        };
         if c.runner != Runner::Geometry {
             continue;
         }
-        by_cat.entry(crate::geometry::category(c)).or_default().add(o.status);
+        by_cat
+            .entry(crate::geometry::category(c))
+            .or_default()
+            .add(o.status);
         if o.status == Status::Fail {
             // Group by cause: drop locations and the numbers of image diffs.
             let r = o.reason.as_deref().unwrap_or("?");
             let r = r.split(" (in file").next().unwrap_or(r);
-            let r = if r.starts_with("image differs") { "image differs" } else { r };
+            let r = if r.starts_with("image differs") {
+                "image differs"
+            } else {
+                r
+            };
             let r: String = r.chars().take(90).collect();
             *reasons.entry(r).or_default() += 1;
         }
@@ -441,11 +487,20 @@ fn print_geometry_report(manifest: &Manifest, outcomes: &[Outcome], image: &Geom
             limit_passes.push(o.id.as_str());
         }
     }
-    println!("tier 3 geometry cases (renderer {}):", image.renderer.display());
-    println!("  {:<36} {:>3} {:>6} {:>6} {:>6} {:>6}", "group", "dim", "pass", "fail", "skip", "total");
+    println!(
+        "tier 3 geometry cases (renderer {}):",
+        image.renderer.display()
+    );
+    println!(
+        "  {:<36} {:>3} {:>6} {:>6} {:>6} {:>6}",
+        "group", "dim", "pass", "fail", "skip", "total"
+    );
     let mut dims: BTreeMap<&str, Counts> = BTreeMap::new();
     for ((g, d), c) in &by_cat {
-        println!("  {:<36} {:>3} {:>6} {:>6} {:>6} {:>6}", g, d, c.pass, c.fail, c.skip, c.total);
+        println!(
+            "  {:<36} {:>3} {:>6} {:>6} {:>6} {:>6}",
+            g, d, c.pass, c.fail, c.skip, c.total
+        );
         let t = dims.entry(d).or_default();
         t.pass += c.pass;
         t.fail += c.fail;
@@ -453,7 +508,10 @@ fn print_geometry_report(manifest: &Manifest, outcomes: &[Outcome], image: &Geom
         t.total += c.total;
     }
     for (d, c) in &dims {
-        println!("  {:<36} {:>3} {:>6} {:>6} {:>6} {:>6}", "all", d, c.pass, c.fail, c.skip, c.total);
+        println!(
+            "  {:<36} {:>3} {:>6} {:>6} {:>6} {:>6}",
+            "all", d, c.pass, c.fail, c.skip, c.total
+        );
     }
     let mut reasons: Vec<_> = reasons.into_iter().collect();
     reasons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -462,13 +520,19 @@ fn print_geometry_report(manifest: &Manifest, outcomes: &[Outcome], image: &Geom
         println!("  {n:>5}  {r}");
     }
     if !limit_passes.is_empty() {
-        println!("  listed as harness limits but passed with this binary: {}", limit_passes.join(", "));
+        println!(
+            "  listed as harness limits but passed with this binary: {}",
+            limit_passes.join(", ")
+        );
     }
     println!();
 }
 
 fn print_summary(per_tier: &BTreeMap<u8, Counts>, wall: Duration, binary: &Path) {
-    println!("{:<4} {:<9} {:>6} {:>6} {:>6} {:>8} {:>6}", "tier", "name", "pass", "fail", "skip", "pending", "total");
+    println!(
+        "{:<4} {:<9} {:>6} {:>6} {:>6} {:>8} {:>6}",
+        "tier", "name", "pass", "fail", "skip", "pending", "total"
+    );
     let mut all = Counts::default();
     for (t, c) in per_tier {
         println!(
@@ -491,5 +555,9 @@ fn print_summary(per_tier: &BTreeMap<u8, Counts>, wall: Duration, binary: &Path)
         "{:<4} {:<9} {:>6} {:>6} {:>6} {:>8} {:>6}",
         "all", "", all.pass, all.fail, all.skip, all.pending, all.total
     );
-    println!("{:.2}s wall, binary {}", wall.as_secs_f64(), binary.display());
+    println!(
+        "{:.2}s wall, binary {}",
+        wall.as_secs_f64(),
+        binary.display()
+    );
 }

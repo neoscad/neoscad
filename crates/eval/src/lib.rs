@@ -83,7 +83,14 @@ pub struct Camera {
 impl Default for Camera {
     /// OpenSCAD's `Camera()` after `resetView()`.
     fn default() -> Self {
-        Camera { vpt: [0.0; 3], vpr: [55.0, 0.0, 25.0], vpd: 140.0, vpf: 22.5, auto: true, locked: false }
+        Camera {
+            vpt: [0.0; 3],
+            vpr: [55.0, 0.0, 25.0],
+            vpd: 140.0,
+            vpf: 22.5,
+            auto: true,
+            locked: false,
+        }
     }
 }
 
@@ -92,7 +99,13 @@ impl Camera {
     /// (translate, rotate, distance) or 6 for eye and centre points.
     pub fn from_args(p: &[f64]) -> Option<Camera> {
         let wrap = |a: f64| (360.0 + a) % 360.0;
-        let rot = |x: f64, y: f64, z: f64| [wrap(90.0 - wrap(90.0 - x)), wrap(-wrap(-y)), wrap(-wrap(-z))];
+        let rot = |x: f64, y: f64, z: f64| {
+            [
+                wrap(90.0 - wrap(90.0 - x)),
+                wrap(-wrap(-y)),
+                wrap(-wrap(-z)),
+            ]
+        };
         match p.len() {
             7 => Some(Camera {
                 vpt: [p[0], p[1], p[2]],
@@ -115,7 +128,14 @@ impl Camera {
                 let rx = -trig::atan2_degrees(dir[2], proj);
                 // object_rot = (rx, 0, rz); $vpr = wrap(90 - rx), wrap(-0), wrap(-rz).
                 let vpr = [wrap(90.0 - rx), wrap(-0.0), wrap(-rz)];
-                Some(Camera { vpt: center, vpr, vpd: dist, vpf: 22.5, auto: false, locked: true })
+                Some(Camera {
+                    vpt: center,
+                    vpr,
+                    vpd: dist,
+                    vpf: 22.5,
+                    auto: false,
+                    locked: true,
+                })
             }
             _ => None,
         }

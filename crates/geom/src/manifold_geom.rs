@@ -10,8 +10,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use manifold_rust::linalg::{Mat3x4, Vec3};
 use manifold_rust::impl_mesh::ManifoldImpl;
+use manifold_rust::linalg::{Mat3x4, Vec3};
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::{BooleanEngine, Error, MeshGL64, OpType};
 
@@ -93,7 +93,13 @@ impl Default for ManifoldGeometry {
 
 impl ManifoldGeometry {
     fn new(manifold: Manifold) -> Self {
-        ManifoldGeometry { manifold, original_ids: BTreeSet::new(), id_to_color: BTreeMap::new(), subtracted: BTreeSet::new(), own_id: None }
+        ManifoldGeometry {
+            manifold,
+            original_ids: BTreeSet::new(),
+            id_to_color: BTreeMap::new(),
+            subtracted: BTreeSet::new(),
+            own_id: None,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -110,7 +116,12 @@ impl ManifoldGeometry {
     /// non-manifold mesh as a triangle soup that the robust boolean engine
     /// accepts. A mesh that is not even closed becomes empty, with the
     /// error OpenSCAD gives when its repair finds the same.
-    pub fn from_polyset(ps: &PolySet, ids: &dyn IdSource, warnings: &mut Warnings, errors: &mut Warnings) -> ManifoldGeometry {
+    pub fn from_polyset(
+        ps: &PolySet,
+        ids: &dyn IdSource,
+        warnings: &mut Warnings,
+        errors: &mut Warnings,
+    ) -> ManifoldGeometry {
         let tri;
         let ps = if ps.triangular && ps.faces.iter().all(|f| f.len() == 3) {
             ps
@@ -122,7 +133,10 @@ impl ManifoldGeometry {
             tri = t;
             &tri
         };
-        let mut mesh = MeshGL64 { num_prop: 3, ..Default::default() };
+        let mut mesh = MeshGL64 {
+            num_prop: 3,
+            ..Default::default()
+        };
         mesh.vert_properties = ps.vertices.iter().flatten().copied().collect();
         // `std::map<std::optional<Color4f>, ...>`: uncoloured faces first,
         // then colours in order.
@@ -131,7 +145,11 @@ impl ManifoldGeometry {
         for i in 0..ps.faces.len() {
             let ci = ps.color_indices.get(i).copied().unwrap_or(-1);
             let color = (ci >= 0).then(|| ps.colors[ci as usize]);
-            groups.entry(color.map(|c| c.key())).or_insert((color, Vec::new())).1.push(i);
+            groups
+                .entry(color.map(|c| c.key()))
+                .or_insert((color, Vec::new()))
+                .1
+                .push(i);
         }
         let first = ids.reserve(groups.len() as u32);
         let mut original_ids = BTreeSet::new();
@@ -144,7 +162,8 @@ impl ManifoldGeometry {
             mesh.run_original_id.push(id);
             original_ids.insert(id);
             for &f in faces {
-                mesh.tri_verts.extend(ps.faces[f].iter().map(|&v| u64::from(v)));
+                mesh.tri_verts
+                    .extend(ps.faces[f].iter().map(|&v| u64::from(v)));
             }
         }
         mesh.run_index.push(mesh.tri_verts.len() as u64);
@@ -162,7 +181,9 @@ impl ManifoldGeometry {
             // ("TODO: preserve color", `manifoldutils.cc:188`) as one new
             // original.
             let id = ids.reserve(1);
-            let repaired = orient_soup(&mesh, id).map(|r| Manifold::from_mesh_gl64(&r)).filter(|r| r.status() == Error::NoError);
+            let repaired = orient_soup(&mesh, id)
+                .map(|r| Manifold::from_mesh_gl64(&r))
+                .filter(|r| r.status() == Error::NoError);
             m = match repaired {
                 Some(r) => r,
                 None => {
@@ -174,22 +195,41 @@ impl ManifoldGeometry {
                         // result is empty, and callers that can fall back
                         // (`projection()`) do.
                         errors.push("[manifold] Input mesh is not closed!".into());
-                        errors.push(format!("[manifold] Surface_mesh -> Manifold conversion failed: {}", status_name(Error::NotManifold)));
+                        errors.push(format!(
+                            "[manifold] Surface_mesh -> Manifold conversion failed: {}",
+                            status_name(Error::NotManifold)
+                        ));
                         return ManifoldGeometry::default();
                     }
                     r
                 }
             };
-            return ManifoldGeometry { manifold: m, original_ids: BTreeSet::from([id]), id_to_color: BTreeMap::new(), subtracted: BTreeSet::new(), own_id: None };
+            return ManifoldGeometry {
+                manifold: m,
+                original_ids: BTreeSet::from([id]),
+                id_to_color: BTreeMap::new(),
+                subtracted: BTreeSet::new(),
+                own_id: None,
+            };
         }
-        ManifoldGeometry { manifold: m, original_ids, id_to_color, subtracted: BTreeSet::new(), own_id: None }
+        ManifoldGeometry {
+            manifold: m,
+            original_ids,
+            id_to_color,
+            subtracted: BTreeSet::new(),
+            own_id: None,
+        }
     }
 
     /// `ManifoldGeometry::binOp` (`ManifoldGeometry.cc:263-289`).
     pub fn boolean(&self, rhs: &ManifoldGeometry, op: OpType) -> ManifoldGeometry {
         // The exact engine needs manifold operands; a soup from the repair
         // path goes through the robust engine instead.
-        let engine = if self.manifold.as_impl().is_soup || rhs.manifold.as_impl().is_soup { BooleanEngine::Robust } else { BooleanEngine::Exact };
+        let engine = if self.manifold.as_impl().is_soup || rhs.manifold.as_impl().is_soup {
+            BooleanEngine::Robust
+        } else {
+            BooleanEngine::Exact
+        };
         let manifold = self.manifold.boolean_with_engine(&rhs.manifold, op, engine);
         self.combine_ids(rhs, op, manifold)
     }
@@ -216,7 +256,8 @@ impl ManifoldGeometry {
         if rest.is_empty() {
             return Some(first);
         }
-        let soup = first.manifold.as_impl().is_soup || rest.iter().any(|p| p.manifold.as_impl().is_soup);
+        let soup =
+            first.manifold.as_impl().is_soup || rest.iter().any(|p| p.manifold.as_impl().is_soup);
         if soup {
             return Some(rest.iter().fold(first, |acc, p| acc.boolean(p, op)));
         }
@@ -252,7 +293,12 @@ impl ManifoldGeometry {
 
     /// The colour bookkeeping of `binOp` for `self op rhs`, with the
     /// already computed solid.
-    fn combine_ids(&self, rhs: &ManifoldGeometry, op: OpType, manifold: Manifold) -> ManifoldGeometry {
+    fn combine_ids(
+        &self,
+        rhs: &ManifoldGeometry,
+        op: OpType,
+        manifold: Manifold,
+    ) -> ManifoldGeometry {
         let mut id_to_color = self.id_to_color.clone();
         let mut subtracted = self.subtracted.clone();
         let mut original_ids = self.original_ids.clone();
@@ -276,7 +322,13 @@ impl ManifoldGeometry {
             }
             subtracted.extend(rhs.subtracted.iter().copied());
         }
-        ManifoldGeometry { manifold, original_ids, id_to_color, subtracted, own_id: None }
+        ManifoldGeometry {
+            manifold,
+            original_ids,
+            id_to_color,
+            subtracted,
+            own_id: None,
+        }
     }
 
     /// A solid the kernel built from points (`Manifold::Hull`), wrapped as
@@ -288,7 +340,13 @@ impl ManifoldGeometry {
     /// its triangles the same way on every run.
     pub fn from_built(mut imp: ManifoldImpl, id: u32) -> ManifoldGeometry {
         set_original_id(&mut imp, id);
-        ManifoldGeometry { manifold: Manifold::from_impl(imp), original_ids: BTreeSet::new(), id_to_color: BTreeMap::new(), subtracted: BTreeSet::new(), own_id: Some(id) }
+        ManifoldGeometry {
+            manifold: Manifold::from_impl(imp),
+            original_ids: BTreeSet::new(),
+            id_to_color: BTreeMap::new(),
+            subtracted: BTreeSet::new(),
+            own_id: Some(id),
+        }
     }
 
     /// `ManifoldGeometry::toOriginal` (`ManifoldGeometry.cc:383-392`): the
@@ -344,8 +402,15 @@ impl ManifoldGeometry {
     pub fn to_polyset(&self, scheme: &Scheme) -> PolySet {
         let mesh = canonical_mesh(&self.manifold);
         let np = mesh.num_prop as usize;
-        let mut ps = PolySet { triangular: true, ..Default::default() };
-        ps.vertices = mesh.vert_properties.chunks(np.max(3)).map(|v| [v[0], v[1], v[2]]).collect();
+        let mut ps = PolySet {
+            triangular: true,
+            ..Default::default()
+        };
+        ps.vertices = mesh
+            .vert_properties
+            .chunks(np.max(3))
+            .map(|v| [v[0], v[1], v[2]])
+            .collect();
         let mut front: Option<i32> = None;
         let mut back: Option<i32> = None;
         let mut by_color: BTreeMap<[u32; 4], i32> = BTreeMap::new();
@@ -435,7 +500,15 @@ pub fn set_original_id(imp: &mut ManifoldImpl, id: u32) {
         r.coplanar_id = tri as i32;
     }
     imp.mesh_relation.mesh_id_transform.clear();
-    imp.mesh_relation.mesh_id_transform.insert(id, Relation { original_id: id, transform: Mat3x4::identity(), back_side: false, has_normals: had_normals });
+    imp.mesh_relation.mesh_id_transform.insert(
+        id,
+        Relation {
+            original_id: id,
+            transform: Mat3x4::identity(),
+            back_side: false,
+            has_normals: had_normals,
+        },
+    );
 }
 
 /// The solid's mesh with its runs in an order that does not depend on
@@ -471,7 +544,15 @@ fn canonical_mesh(m: &Manifold) -> MeshGL64 {
     let mut order: Vec<usize> = (0..runs).collect();
     order.sort_by_key(|&r| {
         let (start, end) = span(r);
-        let first: [u64; 3] = if end >= start + 3 { [mesh.tri_verts[start], mesh.tri_verts[start + 1], mesh.tri_verts[start + 2]] } else { [u64::MAX; 3] };
+        let first: [u64; 3] = if end >= start + 3 {
+            [
+                mesh.tri_verts[start],
+                mesh.tri_verts[start + 1],
+                mesh.tri_verts[start + 2],
+            ]
+        } else {
+            [u64::MAX; 3]
+        };
         (mesh.run_original_id[r], first)
     });
     if order.iter().enumerate().all(|(i, &r)| i == r) {
@@ -527,10 +608,16 @@ fn positive_union(polys: Vec<Vec<manifold_rust::linalg::Vec2>>) -> Polygon2d {
     if polys.is_empty() {
         return Polygon2d::default();
     }
-    let paths: PathsD = polys.iter().map(|p| p.iter().map(|v| Point::new(v.x, v.y)).collect::<PathD>()).collect();
+    let paths: PathsD = polys
+        .iter()
+        .map(|p| p.iter().map(|v| Point::new(v.x, v.y)).collect::<PathD>())
+        .collect();
     let res = union_d(&paths, &PathsD::new(), FillRule::Positive, 8);
     Polygon2d {
-        outlines: res.iter().map(|p| Outline::new(p.iter().map(|q| [q.x, q.y]).collect())).collect(),
+        outlines: res
+            .iter()
+            .map(|p| Outline::new(p.iter().map(|q| [q.x, q.y]).collect()))
+            .collect(),
         sanitized: false,
     }
 }
@@ -568,7 +655,11 @@ fn orient_soup(mesh: &MeshGL64, id: u32) -> Option<MeshGL64> {
     let mut done = vec![false; tris.len()];
     let pos = |v: u64| {
         let i = 3 * v as usize;
-        [mesh.vert_properties[i], mesh.vert_properties[i + 1], mesh.vert_properties[i + 2]]
+        [
+            mesh.vert_properties[i],
+            mesh.vert_properties[i + 1],
+            mesh.vert_properties[i + 2],
+        ]
     };
     for seed in 0..tris.len() {
         if done[seed] {
@@ -599,7 +690,8 @@ fn orient_soup(mesh: &MeshGL64, id: u32) -> Option<MeshGL64> {
             .iter()
             .map(|&i| {
                 let [p, q, r] = tris[i].map(pos);
-                p[0] * (q[1] * r[2] - q[2] * r[1]) - p[1] * (q[0] * r[2] - q[2] * r[0]) + p[2] * (q[0] * r[1] - q[1] * r[0])
+                p[0] * (q[1] * r[2] - q[2] * r[1]) - p[1] * (q[0] * r[2] - q[2] * r[0])
+                    + p[2] * (q[0] * r[1] - q[1] * r[0])
             })
             .sum();
         if volume < 0.0 {
@@ -653,8 +745,19 @@ fn merge_coincident(mesh: &mut MeshGL64) -> bool {
     if open.is_empty() {
         return false;
     }
-    let open_verts: Vec<usize> = open.iter().map(|&(_, b)| b).collect::<BTreeSet<_>>().into_iter().collect();
-    let pos = |v: usize| Vec3::new(mesh.vert_properties[3 * v], mesh.vert_properties[3 * v + 1], mesh.vert_properties[3 * v + 2]);
+    let open_verts: Vec<usize> = open
+        .iter()
+        .map(|&(_, b)| b)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let pos = |v: usize| {
+        Vec3::new(
+            mesh.vert_properties[3 * v],
+            mesh.vert_properties[3 * v + 1],
+            mesh.vert_properties[3 * v + 2],
+        )
+    };
     let mut bbox = BBox::default();
     for v in 0..num_vert {
         bbox.union_point(pos(v));
@@ -663,9 +766,17 @@ fn merge_coincident(mesh: &mut MeshGL64) -> bool {
     let half = tolerance / 2.0;
     let boxes: Vec<BBox> = open_verts
         .iter()
-        .map(|&v| BBox::from_points(pos(v) - Vec3::new(half, half, half), pos(v) + Vec3::new(half, half, half)))
+        .map(|&v| {
+            BBox::from_points(
+                pos(v) - Vec3::new(half, half, half),
+                pos(v) + Vec3::new(half, half, half),
+            )
+        })
         .collect();
-    let codes: Vec<u32> = open_verts.iter().map(|&v| morton_code(pos(v), &bbox)).collect();
+    let codes: Vec<u32> = open_verts
+        .iter()
+        .map(|&v| morton_code(pos(v), &bbox))
+        .collect();
     let mut order: Vec<usize> = (0..open_verts.len()).collect();
     order.sort_by_key(|&i| codes[i]);
     let sorted_box: Vec<BBox> = order.iter().map(|&i| boxes[i]).collect();

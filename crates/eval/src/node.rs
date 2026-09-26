@@ -19,7 +19,12 @@ pub struct Discretizer {
 /// A 4x4 affine matrix, row major.
 pub type Matrix = [[f64; 4]; 4];
 
-pub const IDENTITY: Matrix = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+pub const IDENTITY: Matrix = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CsgOp {
@@ -34,29 +39,88 @@ pub enum NodeKind {
     Root,
     /// `group()`, a control module's children, or a user module call
     /// (`name` is then `"module <name>"`).
-    Group { name: Option<String> },
+    Group {
+        name: Option<String>,
+    },
     /// The children of `intersection_for`.
     IntersectionFor,
     Csg(CsgOp),
-    Transform { matrix: Matrix, verb: &'static str },
-    Color { rgba: [f32; 4] },
-    Render { convexity: i32 },
-    Projection { cut: bool, convexity: i32 },
-    Minkowski { convexity: i32 },
+    Transform {
+        matrix: Matrix,
+        verb: &'static str,
+    },
+    Color {
+        rgba: [f32; 4],
+    },
+    Render {
+        convexity: i32,
+    },
+    Projection {
+        cut: bool,
+        convexity: i32,
+    },
+    Minkowski {
+        convexity: i32,
+    },
     Hull,
     Fill,
-    Resize { newsize: [f64; 3], autosize: [bool; 3], convexity: i32 },
-    Offset { delta: f64, chamfer: bool, join: OffsetJoin, disc: Discretizer },
+    Resize {
+        newsize: [f64; 3],
+        autosize: [bool; 3],
+        convexity: i32,
+    },
+    Offset {
+        delta: f64,
+        chamfer: bool,
+        join: OffsetJoin,
+        disc: Discretizer,
+    },
     LinearExtrude(LinearExtrude),
-    RotateExtrude { angle: f64, start: f64, convexity: i32, disc: Discretizer },
-    Cube { size: [f64; 3], center: bool },
-    Sphere { r: f64, disc: Discretizer },
-    Cylinder { h: f64, r1: f64, r2: f64, center: bool, disc: Discretizer },
-    Polyhedron { points: Vec<[f64; 3]>, faces: Vec<Vec<usize>>, convexity: i32 },
-    Square { size: [f64; 2], center: bool },
-    Circle { r: f64, disc: Discretizer },
-    Polygon { points: Vec<[f64; 2]>, paths: Vec<Vec<usize>>, convexity: i32 },
-    Surface { file: String, center: bool, invert: bool, convexity: i32 },
+    RotateExtrude {
+        angle: f64,
+        start: f64,
+        convexity: i32,
+        disc: Discretizer,
+    },
+    Cube {
+        size: [f64; 3],
+        center: bool,
+    },
+    Sphere {
+        r: f64,
+        disc: Discretizer,
+    },
+    Cylinder {
+        h: f64,
+        r1: f64,
+        r2: f64,
+        center: bool,
+        disc: Discretizer,
+    },
+    Polyhedron {
+        points: Vec<[f64; 3]>,
+        faces: Vec<Vec<usize>>,
+        convexity: i32,
+    },
+    Square {
+        size: [f64; 2],
+        center: bool,
+    },
+    Circle {
+        r: f64,
+        disc: Discretizer,
+    },
+    Polygon {
+        points: Vec<[f64; 2]>,
+        paths: Vec<Vec<usize>>,
+        convexity: i32,
+    },
+    Surface {
+        file: String,
+        center: bool,
+        invert: bool,
+        convexity: i32,
+    },
     Import(Import),
     Text(Text),
 }
@@ -158,7 +222,10 @@ impl Node {
                     match found {
                         None => *found = Some(c),
                         Some(f) => {
-                            let same = f.origin.as_ref().is_some_and(|fo| fo.span == o.span && fo.unit == o.unit);
+                            let same = f
+                                .origin
+                                .as_ref()
+                                .is_some_and(|fo| fo.span == o.span && fo.unit == o.unit);
                             if !same {
                                 *next = Some(o);
                                 return;

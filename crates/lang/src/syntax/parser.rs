@@ -54,16 +54,32 @@ pub fn parse(tokens: Vec<Token>) -> Parse {
     kinds.push(Eof);
     raw.push(tokens.len() as u32);
 
-    let mut p = Parser { kinds, raw, pos: 0, events: Vec::with_capacity(tokens.len()), open: Vec::new(), errors: Vec::new() };
+    let mut p = Parser {
+        kinds,
+        raw,
+        pos: 0,
+        events: Vec::with_capacity(tokens.len()),
+        open: Vec::new(),
+        errors: Vec::new(),
+    };
     p.source_file();
-    let errors = p.errors.iter().map(|&sig| SyntaxError { token: p.raw[sig as usize] }).collect();
+    let errors = p
+        .errors
+        .iter()
+        .map(|&sig| SyntaxError {
+            token: p.raw[sig as usize],
+        })
+        .collect();
     let cst = build(tokens, p.events);
     Parse { cst, errors }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Event {
-    Start { kind: SyntaxKind, forward_parent: u32 },
+    Start {
+        kind: SyntaxKind,
+        forward_parent: u32,
+    },
     Token,
     Finish,
     /// A start event already consumed through a forward-parent chain.
@@ -147,7 +163,10 @@ impl Parser {
 
     fn start(&mut self) -> Marker {
         let pos = self.events.len() as u32;
-        self.events.push(Event::Start { kind: Tombstone, forward_parent: 0 });
+        self.events.push(Event::Start {
+            kind: Tombstone,
+            forward_parent: 0,
+        });
         self.open.push(pos);
         Marker(pos)
     }
@@ -353,7 +372,11 @@ impl Parser {
                         return self.error();
                     }
                     let depth = self.open.len();
-                    let r = if self.at(Ident) && self.nth(1) == Eq { self.assignment() } else { self.child_statement() };
+                    let r = if self.at(Ident) && self.nth(1) == Eq {
+                        self.assignment()
+                    } else {
+                        self.child_statement()
+                    };
                     if r.is_err() {
                         self.recover(depth, true);
                     }
@@ -702,7 +725,10 @@ fn build(tokens: Vec<Token>, mut events: Vec<Event>) -> Cst {
 
     for i in 0..events.len() {
         match std::mem::replace(&mut events[i], Event::Taken) {
-            Event::Start { kind, forward_parent } => {
+            Event::Start {
+                kind,
+                forward_parent,
+            } => {
                 if kind == Tombstone && forward_parent == 0 {
                     continue;
                 }
@@ -712,7 +738,10 @@ fn build(tokens: Vec<Token>, mut events: Vec<Event>) -> Cst {
                 while fp != 0 {
                     j += fp as usize;
                     match std::mem::replace(&mut events[j], Event::Taken) {
-                        Event::Start { kind, forward_parent } => {
+                        Event::Start {
+                            kind,
+                            forward_parent,
+                        } => {
                             chain.push(kind);
                             fp = forward_parent;
                         }
@@ -765,7 +794,8 @@ mod tests {
         let e = p.errors.first()?;
         let toks = p.cst.tokens();
         Some(match toks.get(e.token as usize) {
-            Some(t) => std::string::String::from_utf8_lossy(sm.get(t.file).slice(t.start, t.end())).into_owned(),
+            Some(t) => std::string::String::from_utf8_lossy(sm.get(t.file).slice(t.start, t.end()))
+                .into_owned(),
             None => "<eof>".into(),
         })
     }
@@ -853,8 +883,9 @@ mod tests {
     #[test]
     fn survives_garbage() {
         let pieces = [
-            "a", "=", "(", ")", "[", "]", "{", "}", ";", ",", ":", "?", "1", "\"s\"", "let", "for", "if", "else",
-            "each", "module", "function", "+", "-", "*", "!", "#", "%", ".", "^", "use <x>", "/*c*/", " ", "\n",
+            "a", "=", "(", ")", "[", "]", "{", "}", ";", ",", ":", "?", "1", "\"s\"", "let", "for",
+            "if", "else", "each", "module", "function", "+", "-", "*", "!", "#", "%", ".", "^",
+            "use <x>", "/*c*/", " ", "\n",
         ];
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         for _ in 0..2000 {

@@ -9,7 +9,12 @@ use lang::parse_program;
 fn program(src: &str) -> lang::Program {
     let mut text = src.as_bytes().to_vec();
     text.extend_from_slice(b"\n\x03\n");
-    parse_program("/nonexistent/t.scad".into(), text, &StdFs, &LibraryPath::default())
+    parse_program(
+        "/nonexistent/t.scad".into(),
+        text,
+        &StdFs,
+        &LibraryPath::default(),
+    )
 }
 
 fn dump(src: &str) -> String {
@@ -63,7 +68,10 @@ fn numbers_and_parameter_annotations() {
         "//Parameter(\"\")\nx = [1.23457e+6, 1e+6, 1e+21, 1e+20, 0.00001, 1e-6, 0, 16, 1.5, 5, 1.23457e+29, 500, 5];\n"
     );
     // Assignments at or after the first `{` get no annotations.
-    assert_eq!(dump("a = 1;;\n{b=2;}\nc=3;x();"), "//Parameter(\"\")\na = 1;\nb = 2;\nc = 3;\nx();\n");
+    assert_eq!(
+        dump("a = 1;;\n{b=2;}\nc=3;x();"),
+        "//Parameter(\"\")\na = 1;\nb = 2;\nc = 3;\nx();\n"
+    );
 }
 
 #[test]
@@ -71,19 +79,40 @@ fn reassignment_keeps_first_position() {
     let p = program("// keep\na = \"test\";\nb = true;\na = assert(b);");
     let out = String::from_utf8(lang::dump::dump(&p.ast)).unwrap();
     assert_eq!(out, "a = assert(b);\n//Parameter(\"\")\nb = true;\n");
-    let msgs: Vec<_> = p.diags.iter().map(|d| (d.message.as_str(), d.line)).collect();
-    assert_eq!(msgs, [("\"a\" was assigned on line 2 but was overwritten", 4)]);
+    let msgs: Vec<_> = p
+        .diags
+        .iter()
+        .map(|d| (d.message.as_str(), d.line))
+        .collect();
+    assert_eq!(
+        msgs,
+        [("\"a\" was assigned on line 2 but was overwritten", 4)]
+    );
 }
 
 #[test]
 fn first_error_matches_openscad_and_recovery_continues() {
     let p = program("a = 1;\nb = (;\nc = ;\nd = 2;");
-    let errors: Vec<_> = p.diags.iter().filter(|d| d.is_error()).map(|d| d.line).collect();
+    let errors: Vec<_> = p
+        .diags
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| d.line)
+        .collect();
     assert_eq!(errors, [2, 3]);
     assert_eq!(p.openscad_diags().count(), 1);
     let p = program("a = \"abc");
-    let msgs: Vec<_> = p.openscad_diags().map(|d| (d.message.as_str(), d.line)).collect();
-    assert_eq!(msgs, [("Parser error: Unterminated string", 3), ("Parser error: syntax error", 3)]);
+    let msgs: Vec<_> = p
+        .openscad_diags()
+        .map(|d| (d.message.as_str(), d.line))
+        .collect();
+    assert_eq!(
+        msgs,
+        [
+            ("Parser error: Unterminated string", 3),
+            ("Parser error: syntax error", 3)
+        ]
+    );
 }
 
 #[test]
@@ -95,7 +124,10 @@ fn parameter_sets_apply_with_validation() {
     assert!(warnings.is_empty());
     let set_json = br#"{"n": "7", "s": "340", "b": "false", "v": "[3, 4]", "t": "abcdef"}"#;
     let root = json::parse(set_json).unwrap();
-    let set = ParameterSet { name: "x".into(), values: root.children.clone() };
+    let set = ParameterSet {
+        name: "x".into(),
+        values: root.children.clone(),
+    };
     params.import(&set);
     params.apply(&mut p.ast);
     let out = String::from_utf8(lang::dump::dump(&p.ast)).unwrap();
@@ -111,8 +143,9 @@ fn parameter_sets_apply_with_validation() {
 #[test]
 fn broken_programs_lower_and_dump() {
     let pieces = [
-        "a", "=", "(", ")", "[", "]", "{", "}", ";", ",", ":", "?", "1", "\"s\"", "let", "for", "if", "else", "each",
-        "module", "function", "+", "-", "*", "!", "#", "%", ".", "^", "echo", "assert", "\n",
+        "a", "=", "(", ")", "[", "]", "{", "}", ";", ",", ":", "?", "1", "\"s\"", "let", "for",
+        "if", "else", "each", "module", "function", "+", "-", "*", "!", "#", "%", ".", "^", "echo",
+        "assert", "\n",
     ];
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;
     for _ in 0..3000 {

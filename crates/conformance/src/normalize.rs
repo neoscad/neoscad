@@ -50,7 +50,15 @@ fn py_splitlines(s: &str) -> Vec<&str> {
     while let Some((i, c)) = chars.next() {
         let is_break = matches!(
             c,
-            '\n' | '\r' | '\x0b' | '\x0c' | '\x1c' | '\x1d' | '\x1e' | '\u{85}' | '\u{2028}' | '\u{2029}'
+            '\n' | '\r'
+                | '\x0b'
+                | '\x0c'
+                | '\x1c'
+                | '\x1d'
+                | '\x1e'
+                | '\u{85}'
+                | '\u{2028}'
+                | '\u{2029}'
         );
         if is_break {
             out.push(&s[start..i]);
@@ -70,7 +78,11 @@ fn py_splitlines(s: &str) -> Vec<&str> {
 
 /// `get_normalized_lines`. `replace_paths` carries the runtime path to the
 /// tests directory when normalising an expected file.
-pub fn normalized_lines(text: &str, replace_paths: Option<&str>, exclude: Option<&Regex>) -> Vec<String> {
+pub fn normalized_lines(
+    text: &str,
+    replace_paths: Option<&str>,
+    exclude: Option<&Regex>,
+) -> Vec<String> {
     let s = timestamp_re().replace_all(text, "");
     let mut t = s.trim_matches(['\r', '\n']).replace("\r\n", "\n");
     t.push('\n');
@@ -140,13 +152,20 @@ mod tests {
             normalized_lines(t, Some("../../.reference/openscad/tests"), None),
             ["in file ../../.reference/openscad/tests/data/x.scad, line 1"]
         );
-        assert_eq!(normalized_lines(t, Some("../../tests"), None), ["in file ../../tests/data/x.scad, line 1"]);
+        assert_eq!(
+            normalized_lines(t, Some("../../tests"), None),
+            ["in file ../../tests/data/x.scad, line 1"]
+        );
     }
 
     #[test]
     fn excludes_lines_with_upstream_default_regex() {
         let re = Regex::new(r"^TRACE:\s*\*\*\* Excluding \d+ frames \*\*\*\s*$").unwrap();
-        let l = normalized_lines("a\nTRACE:   *** Excluding 12 frames ***\nb", None, Some(&re));
+        let l = normalized_lines(
+            "a\nTRACE:   *** Excluding 12 frames ***\nb",
+            None,
+            Some(&re),
+        );
         assert_eq!(l, ["a", "b"]);
     }
 
@@ -160,7 +179,13 @@ mod tests {
     #[test]
     fn empty_output_equals_empty_expected() {
         assert_eq!(normalized_lines("", None, None), [""]);
-        assert!(compare(&normalized_lines("\n\n", None, None), &normalized_lines("", None, None)).is_ok());
+        assert!(
+            compare(
+                &normalized_lines("\n\n", None, None),
+                &normalized_lines("", None, None)
+            )
+            .is_ok()
+        );
     }
 
     #[test]

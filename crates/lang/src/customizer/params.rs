@@ -29,11 +29,34 @@ pub struct EnumItem {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParamKind {
-    Bool { value: bool, default: bool },
-    String { value: Vec<u8>, default: Vec<u8>, max_len: Option<usize> },
-    Number { value: f64, default: f64, min: Option<f64>, max: Option<f64>, step: Option<f64> },
-    Vector { value: Vec<f64>, default: Vec<f64>, min: Option<f64>, max: Option<f64>, step: Option<f64> },
-    Enum { index: usize, default: usize, items: Vec<EnumItem> },
+    Bool {
+        value: bool,
+        default: bool,
+    },
+    String {
+        value: Vec<u8>,
+        default: Vec<u8>,
+        max_len: Option<usize>,
+    },
+    Number {
+        value: f64,
+        default: f64,
+        min: Option<f64>,
+        max: Option<f64>,
+        step: Option<f64>,
+    },
+    Vector {
+        value: Vec<f64>,
+        default: Vec<f64>,
+        min: Option<f64>,
+        max: Option<f64>,
+        step: Option<f64>,
+    },
+    Enum {
+        index: usize,
+        default: usize,
+        items: Vec<EnumItem>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,7 +77,11 @@ pub struct ParameterSet {
 impl ParameterSet {
     fn get(&self, name: &str) -> Option<&JsonNode> {
         // `set[key] = value` in readFile: the last duplicate wins.
-        self.values.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v)
+        self.values
+            .iter()
+            .rev()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
     }
 }
 
@@ -62,14 +89,28 @@ impl ParameterSet {
 /// OpenSCAD's message text.
 pub fn read_parameter_sets(path: &Path) -> Result<Vec<ParameterSet>, Diagnostic> {
     let err = |msg: String| Diagnostic::new(DiagCode::ParameterFile, Severity::Error, msg);
-    let text = std::fs::read(path)
-        .map_err(|_| err(format!("Cannot open Parameter Set '{}' for reading", path.display())))?;
-    let root = json::parse(&text).map_err(|e| err(format!("Cannot open Parameter Set '{}': {e}", path.display())))?;
-    let Some(sets) = root.child("parameterSets") else { return Ok(Vec::new()) };
+    let text = std::fs::read(path).map_err(|_| {
+        err(format!(
+            "Cannot open Parameter Set '{}' for reading",
+            path.display()
+        ))
+    })?;
+    let root = json::parse(&text).map_err(|e| {
+        err(format!(
+            "Cannot open Parameter Set '{}': {e}",
+            path.display()
+        ))
+    })?;
+    let Some(sets) = root.child("parameterSets") else {
+        return Ok(Vec::new());
+    };
     Ok(sets
         .children
         .iter()
-        .map(|(name, set)| ParameterSet { name: name.clone(), values: set.children.clone() })
+        .map(|(name, set)| ParameterSet {
+            name: name.clone(),
+            values: set.children.clone(),
+        })
         .collect())
 }
 
@@ -92,12 +133,22 @@ fn string(ast: &Ast, e: ExprId) -> Option<&[u8]> {
 }
 
 fn is_literal_node(ast: &Ast, e: ExprId) -> bool {
-    matches!(ast.expr(e).kind, ExprKind::Undef | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String(_))
+    matches!(
+        ast.expr(e).kind,
+        ExprKind::Undef | ExprKind::Bool(_) | ExprKind::Number(_) | ExprKind::String(_)
+    )
 }
 
 /// `parseEnumItems`: `None` when the annotation is not an enum list.
-fn enum_items(ast: &Ast, param: ExprId, default_key: &str, default: &EnumValue) -> Option<(Vec<EnumItem>, usize)> {
-    let ExprKind::Vector(elements) = &ast.expr(param).kind else { return None };
+fn enum_items(
+    ast: &Ast,
+    param: ExprId,
+    default_key: &str,
+    default: &EnumValue,
+) -> Option<(Vec<EnumItem>, usize)> {
+    let ExprKind::Vector(elements) = &ast.expr(param).kind else {
+        return None;
+    };
     let mut items = Vec::new();
     for &el in elements {
         let item = match &ast.expr(el).kind {
@@ -106,11 +157,20 @@ fn enum_items(ast: &Ast, param: ExprId, default_key: &str, default: &EnumValue) 
                 if elements.len() == 1 {
                     return None;
                 }
-                EnumItem { key: fmt_g(*v), value: EnumValue::Number(*v) }
+                EnumItem {
+                    key: fmt_g(*v),
+                    value: EnumValue::Number(*v),
+                }
             }
-            ExprKind::String(s) => EnumItem { key: lossy(s), value: EnumValue::String(s.to_vec()) },
+            ExprKind::String(s) => EnumItem {
+                key: lossy(s),
+                value: EnumValue::String(s.to_vec()),
+            },
             ExprKind::Vector(pair) => {
-                if pair.len() != 2 || !is_literal_node(ast, pair[0]) || !is_literal_node(ast, pair[1]) {
+                if pair.len() != 2
+                    || !is_literal_node(ast, pair[0])
+                    || !is_literal_node(ast, pair[1])
+                {
                     return None;
                 }
                 let key = match (&ast.expr(pair[1]).kind, number(ast, pair[1])) {
@@ -132,7 +192,13 @@ fn enum_items(ast: &Ast, param: ExprId, default_key: &str, default: &EnumValue) 
     if let Some(i) = items.iter().position(|it| it.value == *default) {
         return Some((items, i));
     }
-    items.insert(0, EnumItem { key: default_key.to_string(), value: default.clone() });
+    items.insert(
+        0,
+        EnumItem {
+            key: default_key.to_string(),
+            value: default.clone(),
+        },
+    );
     Some((items, 0))
 }
 
@@ -144,8 +210,18 @@ struct Limits {
 
 /// `parseNumericLimits`, including its warnings when the default lies
 /// outside the declared range (which then widens the range).
-fn numeric_limits(ast: &Ast, a: &Assignment, param: ExprId, values: &[f64], diags: &mut Vec<Diagnostic>) -> Limits {
-    let mut l = Limits { min: None, max: None, step: None };
+fn numeric_limits(
+    ast: &Ast,
+    a: &Assignment,
+    param: ExprId,
+    values: &[f64],
+    diags: &mut Vec<Diagnostic>,
+) -> Limits {
+    let mut l = Limits {
+        min: None,
+        max: None,
+        step: None,
+    };
     match &ast.expr(param).kind {
         ExprKind::Number(v) => l.step = Some(*v),
         ExprKind::String(_) | ExprKind::Bool(_) | ExprKind::Undef => {}
@@ -203,7 +279,11 @@ fn range_warning(a: &Assignment, message: String) -> Diagnostic {
 /// `ParameterObject::fromAssignment`.
 fn from_assignment(ast: &Ast, a: &Assignment, diags: &mut Vec<Diagnostic>) -> Option<Parameter> {
     let param = a.annotation("Parameter")?;
-    let description = a.annotation("Description").and_then(|e| string(ast, e)).map(lossy).unwrap_or_default();
+    let description = a
+        .annotation("Description")
+        .and_then(|e| string(ast, e))
+        .map(lossy)
+        .unwrap_or_default();
     let mut group = "Parameters".to_string();
     if let Some(g) = a.annotation("Group") {
         if let Some(s) = string(ast, g) {
@@ -214,25 +294,55 @@ fn from_assignment(ast: &Ast, a: &Assignment, diags: &mut Vec<Diagnostic>) -> Op
         }
     }
     let name = ast.name(a.name).to_string();
-    let make = |kind| Some(Parameter { name: name.clone(), description: description.clone(), group: group.clone(), kind });
+    let make = |kind| {
+        Some(Parameter {
+            name: name.clone(),
+            description: description.clone(),
+            group: group.clone(),
+            kind,
+        })
+    };
     match &ast.expr(a.expr).kind {
-        ExprKind::Bool(b) => make(ParamKind::Bool { value: *b, default: *b }),
+        ExprKind::Bool(b) => make(ParamKind::Bool {
+            value: *b,
+            default: *b,
+        }),
         ExprKind::Number(v) => {
             if let Some((items, i)) = enum_items(ast, param, &fmt_g(*v), &EnumValue::Number(*v)) {
-                return make(ParamKind::Enum { index: i, default: i, items });
+                return make(ParamKind::Enum {
+                    index: i,
+                    default: i,
+                    items,
+                });
             }
             let l = numeric_limits(ast, a, param, &[*v], diags);
-            make(ParamKind::Number { value: *v, default: *v, min: l.min, max: l.max, step: l.step })
+            make(ParamKind::Number {
+                value: *v,
+                default: *v,
+                min: l.min,
+                max: l.max,
+                step: l.step,
+            })
         }
         ExprKind::String(s) => {
-            if let Some((items, i)) = enum_items(ast, param, &lossy(s), &EnumValue::String(s.to_vec())) {
-                return make(ParamKind::Enum { index: i, default: i, items });
+            if let Some((items, i)) =
+                enum_items(ast, param, &lossy(s), &EnumValue::String(s.to_vec()))
+            {
+                return make(ParamKind::Enum {
+                    index: i,
+                    default: i,
+                    items,
+                });
             }
             // StringParameter's constructor means to widen the limit to fit
             // the default but assigns to its argument, not the member, so
             // the declared limit stands (and truncates imported values).
             let max_len = number(ast, param).map(|m| m as usize);
-            make(ParamKind::String { value: s.to_vec(), default: s.to_vec(), max_len })
+            make(ParamKind::String {
+                value: s.to_vec(),
+                default: s.to_vec(),
+                max_len,
+            })
         }
         ExprKind::Vector(v) => {
             if v.is_empty() || v.len() > 4 {
@@ -241,7 +351,13 @@ fn from_assignment(ast: &Ast, a: &Assignment, diags: &mut Vec<Diagnostic>) -> Op
             let values: Option<Vec<f64>> = v.iter().map(|&e| number(ast, e)).collect();
             let values = values?;
             let l = numeric_limits(ast, a, param, &values, diags);
-            make(ParamKind::Vector { value: values.clone(), default: values, min: l.min, max: l.max, step: l.step })
+            make(ParamKind::Vector {
+                value: values.clone(),
+                default: values,
+                min: l.min,
+                max: l.max,
+                step: l.step,
+            })
         }
         _ => None,
     }
@@ -307,8 +423,12 @@ impl Parameter {
                 }
                 true
             }
-            ParamKind::Number { value, min, max, .. } => {
-                let Some(mut d) = decode_double(data) else { return false };
+            ParamKind::Number {
+                value, min, max, ..
+            } => {
+                let Some(mut d) = decode_double(data) else {
+                    return false;
+                };
                 if let Some(m) = *min
                     && d < m
                 {
@@ -322,7 +442,9 @@ impl Parameter {
                 *value = d;
                 true
             }
-            ParamKind::Vector { value, min, max, .. } => {
+            ParamKind::Vector {
+                value, min, max, ..
+            } => {
                 let enc: String = data.chars().filter(|&c| c != ' ').collect();
                 if enc.len() < 2 || !enc.starts_with('[') || !enc.ends_with(']') {
                     return false;
@@ -357,7 +479,8 @@ impl Parameter {
             ParamKind::Enum { index, items, .. } => {
                 let d = decode_double(data);
                 let found = items.iter().position(|it| {
-                    d.is_some_and(|d| it.value == EnumValue::Number(d)) || it.value == EnumValue::String(data.as_bytes().to_vec())
+                    d.is_some_and(|d| it.value == EnumValue::Number(d))
+                        || it.value == EnumValue::String(data.as_bytes().to_vec())
                 });
                 match found {
                     Some(i) => {
@@ -374,10 +497,15 @@ impl Parameter {
         let sp = Span::default();
         match &self.kind {
             ParamKind::Bool { value, .. } => ast.add(ExprKind::Bool(*value), sp),
-            ParamKind::String { value, .. } => ast.add(ExprKind::String(value.as_slice().into()), sp),
+            ParamKind::String { value, .. } => {
+                ast.add(ExprKind::String(value.as_slice().into()), sp)
+            }
             ParamKind::Number { value, .. } => ast.add(ExprKind::Number(*value), sp),
             ParamKind::Vector { value, .. } => {
-                let items = value.iter().map(|&v| ast.add(ExprKind::Number(v), sp)).collect();
+                let items = value
+                    .iter()
+                    .map(|&v| ast.add(ExprKind::Number(v), sp))
+                    .collect();
                 ast.add(ExprKind::Vector(items), sp)
             }
             ParamKind::Enum { index, items, .. } => match &items[*index].value {
@@ -397,7 +525,12 @@ pub struct Parameters {
 impl Parameters {
     /// `ParameterObjects::fromSourceFile`. Range warnings go to `diags`.
     pub fn from_ast(ast: &Ast, diags: &mut Vec<Diagnostic>) -> Self {
-        let params = ast.root.assignments.iter().filter_map(|a| from_assignment(ast, a, diags)).collect();
+        let params = ast
+            .root
+            .assignments
+            .iter()
+            .filter_map(|a| from_assignment(ast, a, diags))
+            .collect();
         Self { params }
     }
 
@@ -419,7 +552,12 @@ impl Parameters {
         let mut root = std::mem::take(&mut ast.root);
         for a in &mut root.assignments {
             // `namedParameters[name]` keeps the last parameter of a name.
-            if let Some(p) = self.params.iter().rev().find(|p| p.name == ast.name(a.name)) {
+            if let Some(p) = self
+                .params
+                .iter()
+                .rev()
+                .find(|p| p.name == ast.name(a.name))
+            {
                 a.expr = p.value_expr(ast);
             }
         }

@@ -106,9 +106,13 @@ pub fn parse_status(c: char) -> Option<Status> {
 impl Scoreboard {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         if v.get("schema").and_then(serde_json::Value::as_u64) != Some(u64::from(SCHEMA)) {
-            return Err(format!("{}: not a schema-{SCHEMA} scoreboard", path.display()));
+            return Err(format!(
+                "{}: not a schema-{SCHEMA} scoreboard",
+                path.display()
+            ));
         }
         serde_json::from_value(v).map_err(|e| format!("{}: {e}", path.display()))
     }
@@ -133,12 +137,21 @@ pub fn manifest_at(ctx: &Ctx, rev: &str) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
-pub fn record(ctx: &Ctx, manifest: &Manifest, report: &RunReport, with_grid: bool) -> Result<PathBuf, String> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
+pub fn record(
+    ctx: &Ctx,
+    manifest: &Manifest,
+    report: &RunReport,
+    with_grid: bool,
+) -> Result<PathBuf, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
     let (compact, iso) = utc_timestamps(now);
 
     let sha = git(&ctx.repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".into());
-    let short = git(&ctx.repo, &["rev-parse", "--short=7", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let short =
+        git(&ctx.repo, &["rev-parse", "--short=7", "HEAD"]).unwrap_or_else(|| "unknown".into());
     let branch = git(&ctx.repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let subject = git(&ctx.repo, &["log", "-1", "--format=%s"]).unwrap_or_default();
     let commit_time = git(&ctx.repo, &["log", "-1", "--format=%cI"]).unwrap_or_default();
@@ -161,7 +174,10 @@ pub fn record(ctx: &Ctx, manifest: &Manifest, report: &RunReport, with_grid: boo
         n += 1;
     }
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let dir_name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let dir_name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
     let meta = json!({
         "sha": sha,
@@ -183,8 +199,10 @@ pub fn record(ctx: &Ctx, manifest: &Manifest, report: &RunReport, with_grid: boo
     // this is the manifest as run unless it was edited mid-run; comparing the
     // parsed test lists catches that, and then the hash is withheld rather
     // than let a later `conformance grid` map statuses onto the wrong tests.
-    let bytes = fs::read(ctx.manifest_path()).map_err(|e| format!("{}: {e}", ctx.manifest_path().display()))?;
-    let same_as_run = serde_json::from_slice::<Manifest>(&bytes).is_ok_and(|m| same_tests(&m, manifest));
+    let bytes = fs::read(ctx.manifest_path())
+        .map_err(|e| format!("{}: {e}", ctx.manifest_path().display()))?;
+    let same_as_run =
+        serde_json::from_slice::<Manifest>(&bytes).is_ok_and(|m| same_tests(&m, manifest));
     let hash = same_as_run.then(|| sha256::hex(&bytes));
     // `conformance grid` finds the manifest again with `git show <sha>:...`.
     // When the run used a manifest HEAD does not have (an uncommitted
@@ -197,8 +215,18 @@ pub fn record(ctx: &Ctx, manifest: &Manifest, report: &RunReport, with_grid: boo
     write_file(&dir.join("scoreboard.json"), &text)?;
 
     if with_grid {
-        let cells: Vec<(u8, Status)> = manifest.tests.iter().map(|c| c.tier).zip(scoreboard.statuses()?).collect();
-        grid::write_png(&dir.join("grid.png"), &grid::title(&iso, &short, dirty), &subject, &cells)?;
+        let cells: Vec<(u8, Status)> = manifest
+            .tests
+            .iter()
+            .map(|c| c.tier)
+            .zip(scoreboard.statuses()?)
+            .collect();
+        grid::write_png(
+            &dir.join("grid.png"),
+            &grid::title(&iso, &short, dirty),
+            &subject,
+            &cells,
+        )?;
     }
 
     // The index keeps the shape of its earliest lines (per-tier counts only,
@@ -226,7 +254,11 @@ pub fn record(ctx: &Ctx, manifest: &Manifest, report: &RunReport, with_grid: boo
 }
 
 fn same_tests(a: &Manifest, b: &Manifest) -> bool {
-    a.tests.len() == b.tests.len() && a.tests.iter().zip(&b.tests).all(|(x, y)| x.id == y.id && x.tier == y.tier)
+    a.tests.len() == b.tests.len()
+        && a.tests
+            .iter()
+            .zip(&b.tests)
+            .all(|(x, y)| x.id == y.id && x.tier == y.tier)
 }
 
 /// The compact scoreboard for a run, with statuses in manifest order. A test
@@ -241,11 +273,18 @@ pub fn build_scoreboard(
     manifest_sha256: Option<String>,
     embed: bool,
 ) -> Scoreboard {
-    let by_id: BTreeMap<&str, &crate::run::Outcome> = report.outcomes.iter().map(|o| (o.id.as_str(), o)).collect();
+    let by_id: BTreeMap<&str, &crate::run::Outcome> =
+        report.outcomes.iter().map(|o| (o.id.as_str(), o)).collect();
     let status: String = manifest
         .tests
         .iter()
-        .map(|c| status_char(by_id.get(c.id.as_str()).map_or(Status::Pending, |o| o.status)))
+        .map(|c| {
+            status_char(
+                by_id
+                    .get(c.id.as_str())
+                    .map_or(Status::Pending, |o| o.status),
+            )
+        })
         .collect();
 
     let mut tier_ms: BTreeMap<u8, f64> = BTreeMap::new();
@@ -256,22 +295,46 @@ pub fn build_scoreboard(
         .per_tier
         .iter()
         .map(|(t, c)| {
-            let name = TIER_NAMES.get(usize::from(*t)).copied().unwrap_or("?").to_string();
+            let name = TIER_NAMES
+                .get(usize::from(*t))
+                .copied()
+                .unwrap_or("?")
+                .to_string();
             let ms = round1(tier_ms.get(t).copied().unwrap_or(0.0));
-            (t.to_string(), TierSummary { name, pass: c.pass, fail: c.fail, skip: c.skip, pending: c.pending, total: c.total, ms })
+            (
+                t.to_string(),
+                TierSummary {
+                    name,
+                    pass: c.pass,
+                    fail: c.fail,
+                    skip: c.skip,
+                    pending: c.pending,
+                    total: c.total,
+                    ms,
+                },
+            )
         })
         .collect();
 
     // Walk in manifest order so each reason's id list is in manifest order.
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for c in &manifest.tests {
-        if let Some(o) = by_id.get(c.id.as_str()).filter(|o| o.status == Status::Fail) {
+        if let Some(o) = by_id
+            .get(c.id.as_str())
+            .filter(|o| o.status == Status::Fail)
+        {
             let reason = o.reason.clone().unwrap_or_else(|| "?".into());
             groups.entry(reason).or_default().push(o.id.clone());
         }
     }
-    let failures = groups.iter().map(|(r, ids)| (r.clone(), ids.len())).collect();
-    let failure_ids = groups.into_iter().filter(|(_, ids)| ids.len() <= FEW_IDS).collect();
+    let failures = groups
+        .iter()
+        .map(|(r, ids)| (r.clone(), ids.len()))
+        .collect();
+    let failure_ids = groups
+        .into_iter()
+        .filter(|(_, ids)| ids.len() <= FEW_IDS)
+        .collect();
 
     let embedded = embed.then(|| EmbeddedTests {
         ids: manifest.tests.iter().map(|c| c.id.clone()).collect(),
@@ -287,7 +350,12 @@ pub fn build_scoreboard(
         status,
         tiers,
         wall_seconds: (report.wall.as_secs_f64() * 1000.0).round() / 1000.0,
-        process_ms_total: report.outcomes.iter().filter_map(|o| o.ms).sum::<f64>().round(),
+        process_ms_total: report
+            .outcomes
+            .iter()
+            .filter_map(|o| o.ms)
+            .sum::<f64>()
+            .round(),
         failures,
         failure_ids,
         embedded,

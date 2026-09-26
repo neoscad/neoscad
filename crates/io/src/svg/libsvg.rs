@@ -23,9 +23,9 @@ use std::collections::{BTreeMap, HashMap};
 use clipper2_rust::{ClipperOffset, EndType, JoinType, Path64, Paths64, Point64};
 use quick_xml::events::{BytesStart, Event};
 
+use crate::Curves;
 use crate::text::fmt_g;
 use crate::trig::{atan2_degrees, cos_degrees, sin_degrees, tan_degrees};
-use crate::Curves;
 
 /// A path of points (`path_t`, which holds `Vector3d`s with z = 0).
 pub type Path = Vec<[f64; 2]>;
@@ -111,7 +111,10 @@ pub enum Selector {
     /// No `id` or `layer`: the root is selected.
     Root,
     /// `id`, optionally within a `layer`.
-    Id { id: String, layer: Option<String> },
+    Id {
+        id: String,
+        layer: Option<String>,
+    },
     Layer(String),
 }
 
@@ -140,7 +143,10 @@ struct Reader<'a> {
 }
 
 const CONTAINERS: [&str; 4] = ["svg", "g", "text", "tspan"];
-const KNOWN: [&str; 13] = ["circle", "ellipse", "line", "text", "tspan", "data", "polygon", "polyline", "rect", "svg", "path", "g", "use"];
+const KNOWN: [&str; 13] = [
+    "circle", "ellipse", "line", "text", "tspan", "data", "polygon", "polyline", "rect", "svg",
+    "path", "g", "use",
+];
 
 /// The file is not well-formed XML (libxml's reader failed, which
 /// `libsvg` reports as `SvgException("Error parsing file ...")`).
@@ -149,7 +155,12 @@ pub struct ParseError;
 
 /// `libsvg_read_file`.
 pub fn read(text: &str, selector: &Selector, curves: &dyn Curves) -> Result<Document, ParseError> {
-    let mut r = Reader { shapes: Vec::new(), curves, selector, matches: 0 };
+    let mut r = Reader {
+        shapes: Vec::new(),
+        curves,
+        selector,
+        matches: 0,
+    };
     let mut stack: Vec<usize> = Vec::new();
     let mut list: Vec<usize> = Vec::new();
     let mut defs: HashMap<String, usize> = HashMap::new();
@@ -234,7 +245,11 @@ pub fn read(text: &str, selector: &Selector, curves: &dyn Curves) -> Result<Docu
                 end_element(&name, &mut in_defs, &mut stack);
             }
             Event::Text(t) if depth == 0 => {
-                if !t.xml10_content().trim_matches(crate::text::is_space).is_empty() {
+                if !t
+                    .xml10_content()
+                    .trim_matches(crate::text::is_space)
+                    .is_empty()
+                {
                     return Err(ParseError);
                 }
             }
@@ -251,9 +266,16 @@ pub fn read(text: &str, selector: &Selector, curves: &dyn Curves) -> Result<Docu
     }
     let items = list
         .iter()
-        .map(|&i| Item { paths: r.shapes[i].paths.clone(), excluded: r.is_excluded(i), page: r.shapes[i].page })
+        .map(|&i| Item {
+            paths: r.shapes[i].paths.clone(),
+            excluded: r.is_excluded(i),
+            page: r.shapes[i].page,
+        })
         .collect();
-    Ok(Document { items, matches: r.matches })
+    Ok(Document {
+        items,
+        matches: r.matches,
+    })
 }
 
 fn end_element(name: &str, in_defs: &mut bool, stack: &mut Vec<usize>) {
@@ -277,21 +299,28 @@ fn parse_entities(doctype: &str, out: &mut HashMap<String, String>) {
         let name_end = t.find(crate::text::is_space).unwrap_or(t.len());
         let name = &t[..name_end];
         let v = t[name_end..].trim_start();
-        let Some(q) = v.chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
+        let Some(q) = v.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            continue;
+        };
         let Some(end) = v[1..].find(q) else { continue };
-        out.entry(name.to_string()).or_insert_with(|| v[1..1 + end].to_string());
+        out.entry(name.to_string())
+            .or_insert_with(|| v[1..1 + end].to_string());
     }
 }
 
 /// `read_attributes`, by qualified name, with entities expanded and the
 /// value normalised (tabs and newlines become spaces) as libxml does.
-fn attributes(e: &BytesStart<'_>, entities: &HashMap<String, String>) -> Result<BTreeMap<String, String>, ParseError> {
+fn attributes(
+    e: &BytesStart<'_>,
+    entities: &HashMap<String, String>,
+) -> Result<BTreeMap<String, String>, ParseError> {
     let mut out = BTreeMap::new();
     for a in e.attributes() {
         let a = a.map_err(|_| ParseError)?;
         let v = a
             .normalized_value_with(quick_xml::XmlVersion::Implicit1_0, 128, |name| {
-                quick_xml::escape::resolve_predefined_entity(name).or_else(|| entities.get(name).map(String::as_str))
+                quick_xml::escape::resolve_predefined_entity(name)
+                    .or_else(|| entities.get(name).map(String::as_str))
             })
             .map_err(|_| ParseError)?;
         out.insert(a.key.as_ref().to_string(), v.into_owned());
@@ -366,11 +395,26 @@ fn skip_space(s: &str) -> &str {
 /// `parse_length`: a number and an optional unit, with space allowed
 /// around and between them; anything else is `{0, UNDEFINED}`.
 pub fn parse_length(value: &str) -> Length {
-    let undefined = Length { number: 0.0, unit: Unit::Undefined };
+    let undefined = Length {
+        number: 0.0,
+        unit: Unit::Undefined,
+    };
     let s = skip_space(value);
-    let Some((number, n)) = double_prefix(s) else { return undefined };
+    let Some((number, n)) = double_prefix(s) else {
+        return undefined;
+    };
     let rest = skip_space(&s[n..]);
-    let units = [("em", Unit::Em), ("ex", Unit::Ex), ("px", Unit::Px), ("in", Unit::In), ("cm", Unit::Cm), ("mm", Unit::Mm), ("pt", Unit::Pt), ("pc", Unit::Pc), ("%", Unit::Percent)];
+    let units = [
+        ("em", Unit::Em),
+        ("ex", Unit::Ex),
+        ("px", Unit::Px),
+        ("in", Unit::In),
+        ("cm", Unit::Cm),
+        ("mm", Unit::Mm),
+        ("pt", Unit::Pt),
+        ("pc", Unit::Pc),
+        ("%", Unit::Percent),
+    ];
     let (unit, rest) = match units.iter().find(|(u, _)| rest.starts_with(u)) {
         Some((u, unit)) => (*unit, &rest[u.len()..]),
         None => (Unit::None, rest),
@@ -384,7 +428,13 @@ pub fn parse_length(value: &str) -> Length {
 /// `parse_viewbox`: four numbers separated by space or one comma each, the
 /// last two not negative.
 pub fn parse_viewbox(value: &str) -> ViewBox {
-    let invalid = ViewBox { x: 0.0, y: 0.0, width: 0.0, height: 0.0, valid: false };
+    let invalid = ViewBox {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+        valid: false,
+    };
     let mut s = skip_space(value);
     let mut v = [0.0; 4];
     for (k, slot) in v.iter_mut().enumerate() {
@@ -394,20 +444,32 @@ pub fn parse_viewbox(value: &str) -> ViewBox {
                 s = skip_space(r);
             }
         }
-        let Some((x, n)) = double_prefix(s) else { return invalid };
+        let Some((x, n)) = double_prefix(s) else {
+            return invalid;
+        };
         *slot = x;
         s = &s[n..];
     }
     if !skip_space(s).is_empty() || v[2] < 0.0 || v[3] < 0.0 {
         return invalid;
     }
-    ViewBox { x: v[0], y: v[1], width: v[2], height: v[3], valid: true }
+    ViewBox {
+        x: v[0],
+        y: v[1],
+        width: v[2],
+        height: v[3],
+        valid: true,
+    }
 }
 
 /// `parse_alignment`: `[defer] <align> [meet|slice]`; the default (also
 /// for anything unparsable) is `xMidYMid meet`.
 pub fn parse_alignment(value: &str) -> Alignment {
-    let default = Alignment { x: Align::Mid, y: Align::Mid, meet: true };
+    let default = Alignment {
+        x: Align::Mid,
+        y: Align::Mid,
+        meet: true,
+    };
     let mut s = skip_space(value);
     if let Some(r) = s.strip_prefix("defer") {
         s = skip_space(r);
@@ -424,7 +486,9 @@ pub fn parse_alignment(value: &str) -> Alignment {
         ("xMidYMax", Align::Mid, Align::Max),
         ("xMaxYMax", Align::Max, Align::Max),
     ];
-    let Some((word, x, y)) = aligns.iter().find(|(w, _, _)| s.starts_with(w)) else { return default };
+    let Some((word, x, y)) = aligns.iter().find(|(w, _, _)| s.starts_with(w)) else {
+        return default;
+    };
     s = skip_space(&s[word.len()..]);
     let mut meet = true;
     if let Some(r) = s.strip_prefix("meet") {
@@ -506,13 +570,21 @@ impl Reader<'_> {
 
     fn stroke_width(&self, idx: usize) -> f64 {
         let s = &self.shapes[idx].stroke_width;
-        let w = if s.is_empty() { parse_double(&self.style(idx, "stroke-width")) } else { parse_double(s) };
+        let w = if s.is_empty() {
+            parse_double(&self.style(idx, "stroke-width"))
+        } else {
+            parse_double(s)
+        };
         if w < 0.01 { 1.0 } else { w }
     }
 
     fn linecap(&self, idx: usize) -> EndType {
         let s = &self.shapes[idx].stroke_linecap;
-        let cap = if s.is_empty() { self.style(idx, "stroke-linecap") } else { s.clone() };
+        let cap = if s.is_empty() {
+            self.style(idx, "stroke-linecap")
+        } else {
+            s.clone()
+        };
         match cap.as_str() {
             "round" => EndType::Round,
             "square" => EndType::Square,
@@ -522,7 +594,11 @@ impl Reader<'_> {
 
     fn linejoin(&self, idx: usize) -> JoinType {
         let s = &self.shapes[idx].stroke_linejoin;
-        let join = if s.is_empty() { self.style(idx, "stroke-linejoin") } else { s.clone() };
+        let join = if s.is_empty() {
+            self.style(idx, "stroke-linejoin")
+        } else {
+            s.clone()
+        };
         match join.as_str() {
             "bevel" => JoinType::Square,
             "round" => JoinType::Round,
@@ -601,16 +677,41 @@ impl Reader<'_> {
                     let g = fmt_g;
                     let path = format!(
                         "M {},{} H {} A {},{} 0 0,1 {},{} V {} A {},{} 0 0,1 {},{} H {} A {},{} 0 0,1 {},{} V {} A {},{} 0 0,1 {},{} z",
-                        g(x + rx), g(y), g(x + w - rx), g(rx), g(ry), g(x + w), g(y + ry), g(y + h - ry),
-                        g(rx), g(ry), g(x + w - rx), g(y + h), g(x + rx), g(rx), g(ry), g(x), g(y + h - ry),
-                        g(y + ry), g(rx), g(ry), g(x + rx), g(y)
+                        g(x + rx),
+                        g(y),
+                        g(x + w - rx),
+                        g(rx),
+                        g(ry),
+                        g(x + w),
+                        g(y + ry),
+                        g(y + h - ry),
+                        g(rx),
+                        g(ry),
+                        g(x + w - rx),
+                        g(y + h),
+                        g(x + rx),
+                        g(rx),
+                        g(ry),
+                        g(x),
+                        g(y + h - ry),
+                        g(y + ry),
+                        g(rx),
+                        g(ry),
+                        g(x + rx),
+                        g(y)
                     );
                     attrs.insert("d".into(), path);
                     // `path::set_attrs`, which runs `shape::set_attrs` again.
                     self.base_attrs(idx, &attrs);
                     self.path(idx, &attrs["d"]);
                 } else {
-                    self.shapes[idx].paths.push(vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]]);
+                    self.shapes[idx].paths.push(vec![
+                        [x, y],
+                        [x + w, y],
+                        [x + w, y + h],
+                        [x, y + h],
+                        [x, y],
+                    ]);
                 }
             }
             "path" => {
@@ -627,7 +728,12 @@ impl Reader<'_> {
                 self.shapes[idx].href = href;
                 // "apply the x/y coordinates to all the children by using a
                 // transform", printed with the stream's six digits.
-                let t = format!("{} translate({},{})", self.shapes[idx].transform, fmt_g(x), fmt_g(y));
+                let t = format!(
+                    "{} translate({},{})",
+                    self.shapes[idx].transform,
+                    fmt_g(x),
+                    fmt_g(y)
+                );
                 self.shapes[idx].transform = t;
             }
             _ => {}
@@ -685,7 +791,12 @@ impl Reader<'_> {
     /// `offset_path`: the outline of a stroke, closed by repeating its first
     /// point.
     fn stroke(&mut self, idx: usize, path: &Path) {
-        let out = offset_stroke(path, self.stroke_width(idx), self.linejoin(idx), self.linecap(idx));
+        let out = offset_stroke(
+            path,
+            self.stroke_width(idx),
+            self.linejoin(idx),
+            self.linecap(idx),
+        );
         self.shapes[idx].paths.extend(out);
     }
 
@@ -698,7 +809,8 @@ impl Reader<'_> {
         }
         let (mut x, mut y, mut xx) = (0.0f64, 0.0f64, 0.0f64);
         let mut yy: f64;
-        let (mut rx, mut ry, mut cx1, mut cy1, mut cx2, mut cy2, mut angle) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut rx, mut ry, mut cx1, mut cy1, mut cx2, mut cy2, mut angle) =
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let (mut large, mut sweep) = (false, false);
         let (mut last_cubic, mut last_quad) = (false, false);
         let mut cmd = ' ';
@@ -708,7 +820,11 @@ impl Reader<'_> {
         let mut pre_exp = String::new();
         // An open subpath is replaced by its stroke outline where it ends,
         // so the outlines keep the C++ order.
-        let (width, join, cap) = (self.stroke_width(idx), self.linejoin(idx), self.linecap(idx));
+        let (width, join, cap) = (
+            self.stroke_width(idx),
+            self.linejoin(idx),
+            self.linecap(idx),
+        );
         let mut list: Vec<Path> = vec![Vec::new()];
         for v in &tokens {
             let mut p = 0.0;
@@ -720,7 +836,10 @@ impl Reader<'_> {
                 point = -1;
                 cmd = v.chars().next().unwrap_or(' ');
             } else {
-                if v.chars().last().is_some_and(|c| c.eq_ignore_ascii_case(&'e')) {
+                if v.chars()
+                    .last()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(&'e'))
+                {
                     pre_exp = if negate { format!("-{v}") } else { v.clone() };
                     negate = false;
                     continue;
@@ -1020,7 +1139,19 @@ fn is_open(path: &Path) -> bool {
 
 /// `path::arc_to`, after the SVG implementation notes (F.6.5).
 #[allow(clippy::too_many_arguments)]
-fn arc_to(path: &mut Path, x1: f64, y1: f64, mut rx: f64, mut ry: f64, x2: f64, y2: f64, angle: f64, large: bool, sweep: bool, curves: &dyn Curves) {
+fn arc_to(
+    path: &mut Path,
+    x1: f64,
+    y1: f64,
+    mut rx: f64,
+    mut ry: f64,
+    x2: f64,
+    y2: f64,
+    angle: f64,
+    large: bool,
+    sweep: bool,
+    curves: &dyn Curves,
+) {
     let cos_rad = cos_degrees(angle);
     let sin_rad = sin_degrees(angle);
     let dx = (x1 - x2) / 2.0;
@@ -1086,7 +1217,16 @@ fn bezier_steps(curves: &dyn Curves) -> i32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn quad_to(path: &mut Path, x: f64, y: f64, cx1: f64, cy1: f64, x2: f64, y2: f64, curves: &dyn Curves) {
+fn quad_to(
+    path: &mut Path,
+    x: f64,
+    y: f64,
+    cx1: f64,
+    cy1: f64,
+    x2: f64,
+    y2: f64,
+    curves: &dyn Curves,
+) {
     let n = bezier_steps(curves);
     for i in 1..=n {
         let a = f64::from(i) * (1.0 / f64::from(n));
@@ -1097,12 +1237,25 @@ fn quad_to(path: &mut Path, x: f64, y: f64, cx1: f64, cy1: f64, x2: f64, y2: f64
 }
 
 #[allow(clippy::too_many_arguments)]
-fn cubic_to(path: &mut Path, x: f64, y: f64, cx1: f64, cy1: f64, cx2: f64, cy2: f64, x2: f64, y2: f64, curves: &dyn Curves) {
+fn cubic_to(
+    path: &mut Path,
+    x: f64,
+    y: f64,
+    cx1: f64,
+    cy1: f64,
+    cx2: f64,
+    cy2: f64,
+    x2: f64,
+    y2: f64,
+    curves: &dyn Curves,
+) {
     let n = bezier_steps(curves);
     for i in 1..=n {
         let a = f64::from(i) * (1.0 / f64::from(n));
-        let xx = x * t(a, 3) + cx1 * 3.0 * t(a, 2) * a + cx2 * 3.0 * t(a, 1) * a * a + x2 * a * a * a;
-        let yy = y * t(a, 3) + cy1 * 3.0 * t(a, 2) * a + cy2 * 3.0 * t(a, 1) * a * a + y2 * a * a * a;
+        let xx =
+            x * t(a, 3) + cx1 * 3.0 * t(a, 2) * a + cx2 * 3.0 * t(a, 1) * a * a + x2 * a * a * a;
+        let yy =
+            y * t(a, 3) + cy1 * 3.0 * t(a, 2) * a + cy2 * 3.0 * t(a, 1) * a * a + y2 * a * a * a;
         path.push([xx, yy]);
     }
 }
@@ -1113,7 +1266,10 @@ fn cubic_to(path: &mut Path, x: f64, y: f64, cx1: f64, cy1: f64, cx2: f64, cy2: 
 /// point.
 pub fn offset_stroke(path: &Path, width: f64, join: JoinType, cap: EndType) -> Vec<Path> {
     let scale = 2f64.powi(27);
-    let line: Path64 = path.iter().map(|v| Point64::new((v[0] * scale).round() as i64, (v[1] * scale).round() as i64)).collect();
+    let line: Path64 = path
+        .iter()
+        .map(|v| Point64::new((v[0] * scale).round() as i64, (v[1] * scale).round() as i64))
+        .collect();
     let mut co = ClipperOffset::new_default();
     co.add_path(&line, join, cap);
     let mut result = Paths64::new();
@@ -1122,7 +1278,10 @@ pub fn offset_stroke(path: &Path, width: f64, join: JoinType, cap: EndType) -> V
         .iter()
         .filter(|p| !p.is_empty())
         .map(|p| {
-            let mut out: Path = p.iter().map(|q| [q.x as f64 / scale, q.y as f64 / scale]).collect();
+            let mut out: Path = p
+                .iter()
+                .map(|q| [q.x as f64 / scale, q.y as f64 / scale])
+                .collect();
             out.push([p[0].x as f64 / scale, p[0].y as f64 / scale]);
             out
         })
@@ -1162,8 +1321,16 @@ fn transform_matrices(transform: &str) -> Vec<Mat3> {
         // note to stdout).
         match (op, a.len()) {
             ('m', 6) => out.push([[a[0], a[2], a[4]], [a[1], a[3], a[5]], [0.0, 0.0, 1.0]]),
-            ('t', 1 | 2) => out.push([[1.0, 0.0, a[0]], [0.0, 1.0, a.get(1).copied().unwrap_or(0.0)], [0.0, 0.0, 1.0]]),
-            ('s', 1 | 2) => out.push([[a[0], 0.0, 0.0], [0.0, a.get(1).copied().unwrap_or(a[0]), 0.0], [0.0, 0.0, 1.0]]),
+            ('t', 1 | 2) => out.push([
+                [1.0, 0.0, a[0]],
+                [0.0, 1.0, a.get(1).copied().unwrap_or(0.0)],
+                [0.0, 0.0, 1.0],
+            ]),
+            ('s', 1 | 2) => out.push([
+                [a[0], 0.0, 0.0],
+                [0.0, a.get(1).copied().unwrap_or(a[0]), 0.0],
+                [0.0, 0.0, 1.0],
+            ]),
             ('r', 1 | 3) => {
                 let (c, s) = (cos_degrees(a[0]), sin_degrees(a[0]));
                 let r = [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]];
@@ -1175,8 +1342,16 @@ fn transform_matrices(transform: &str) -> Vec<Mat3> {
                     out.push(r);
                 }
             }
-            ('x', 1) => out.push([[1.0, tan_degrees(a[0]), 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
-            ('y', 1) => out.push([[1.0, 0.0, 0.0], [tan_degrees(a[0]), 1.0, 0.0], [0.0, 0.0, 1.0]]),
+            ('x', 1) => out.push([
+                [1.0, tan_degrees(a[0]), 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]),
+            ('y', 1) => out.push([
+                [1.0, 0.0, 0.0],
+                [tan_degrees(a[0]), 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]),
             _ => {}
         }
     }
@@ -1189,22 +1364,63 @@ mod tests {
 
     #[test]
     fn tokenizer_and_dots() {
-        assert_eq!(tokenize("M1,2-3 4", " ,", "-M"), vec!["M", "1", "2", "-", "3", "4"]);
+        assert_eq!(
+            tokenize("M1,2-3 4", " ,", "-M"),
+            vec!["M", "1", "2", "-", "3", "4"]
+        );
         assert_eq!(split_dots("1.5.5"), vec!["1.5", ".5"]);
         assert_eq!(split_dots("-1.5"), vec!["-1.5"]);
     }
 
     #[test]
     fn lengths_viewboxes_alignment() {
-        assert_eq!(parse_length(" 10 mm "), Length { number: 10.0, unit: Unit::Mm });
-        assert_eq!(parse_length("10em"), Length { number: 10.0, unit: Unit::Em });
-        assert_eq!(parse_length("50%"), Length { number: 50.0, unit: Unit::Percent });
-        assert_eq!(parse_length("7"), Length { number: 7.0, unit: Unit::None });
+        assert_eq!(
+            parse_length(" 10 mm "),
+            Length {
+                number: 10.0,
+                unit: Unit::Mm
+            }
+        );
+        assert_eq!(
+            parse_length("10em"),
+            Length {
+                number: 10.0,
+                unit: Unit::Em
+            }
+        );
+        assert_eq!(
+            parse_length("50%"),
+            Length {
+                number: 50.0,
+                unit: Unit::Percent
+            }
+        );
+        assert_eq!(
+            parse_length("7"),
+            Length {
+                number: 7.0,
+                unit: Unit::None
+            }
+        );
         assert_eq!(parse_length("x").unit, Unit::Undefined);
         assert!(parse_viewbox("0 0 10,20").valid);
         assert!(!parse_viewbox("0 0 -1 2").valid);
-        assert_eq!(parse_alignment("xMaxYMin slice"), Alignment { x: Align::Max, y: Align::Min, meet: false });
-        assert_eq!(parse_alignment(""), Alignment { x: Align::Mid, y: Align::Mid, meet: true });
+        assert_eq!(
+            parse_alignment("xMaxYMin slice"),
+            Alignment {
+                x: Align::Max,
+                y: Align::Min,
+                meet: false
+            }
+        );
+        assert_eq!(
+            parse_alignment(""),
+            Alignment {
+                x: Align::Mid,
+                y: Align::Mid,
+                meet: true
+            }
+        );
     }
 
     #[test]

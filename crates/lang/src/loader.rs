@@ -60,7 +60,11 @@ impl LibraryPath {
         if let Some(paths) = std::env::var_os("OPENSCADPATH") {
             let sep = if cfg!(windows) { ';' } else { ':' };
             for p in paths.to_string_lossy().split(sep) {
-                dirs.push(if p.is_empty() { cwd.clone() } else { cwd.join(p) });
+                dirs.push(if p.is_empty() {
+                    cwd.clone()
+                } else {
+                    cwd.join(p)
+                });
             }
         }
         if let Some(home) = std::env::var_os("HOME") {
@@ -106,8 +110,19 @@ pub fn seq_for_token(index: u32) -> u64 {
 
 /// Load `main_text` (already including any `-D` suffix) as the file
 /// `main_path`, splicing includes.
-pub fn load(main_path: PathBuf, main_text: Vec<u8>, fs: &dyn FileSystem, libs: &LibraryPath) -> Loaded {
-    let mut l = Loader { fs, libs, out: Loaded::default(), open: Vec::new(), last_name: String::new() };
+pub fn load(
+    main_path: PathBuf,
+    main_text: Vec<u8>,
+    fs: &dyn FileSystem,
+    libs: &LibraryPath,
+) -> Loaded {
+    let mut l = Loader {
+        fs,
+        libs,
+        out: Loaded::default(),
+        open: Vec::new(),
+        last_name: String::new(),
+    };
     let main = l.out.sources.add(main_path, main_text);
     l.splice(main);
     l.out
@@ -200,13 +215,25 @@ impl Loader<'_> {
         let source_dir = parent(self.out.sources.path(file));
         let Some(full) = self.find_valid_path(&source_dir, Path::new(&local)) else {
             self.out.includes.push((local.clone(), local.clone()));
-            self.warn(DiagCode::IncludeNotFound, format!("Can't find include file '{local}'."), file, tok, global);
+            self.warn(
+                DiagCode::IncludeNotFound,
+                format!("Can't find include file '{local}'."),
+                file,
+                tok,
+                global,
+            );
             return;
         };
         let full_name = generic(&full);
         self.out.includes.push((local.clone(), full_name.clone()));
         let Ok(text) = self.fs.read(&full) else {
-            self.warn(DiagCode::IncludeNotFound, format!("Can't open include file '{local}'."), file, tok, global);
+            self.warn(
+                DiagCode::IncludeNotFound,
+                format!("Can't open include file '{local}'."),
+                file,
+                tok,
+                global,
+            );
             return;
         };
         self.last_name.clear();
@@ -227,10 +254,24 @@ impl Loader<'_> {
         let name = self.last_name.clone();
         let source_dir = parent(self.out.sources.path(file));
         match self.find_valid_path(&source_dir, Path::new(&name)) {
-            Some(full) => self.out.uses.push(UseRef { token: global, path: generic(&full), found: true }),
+            Some(full) => self.out.uses.push(UseRef {
+                token: global,
+                path: generic(&full),
+                found: true,
+            }),
             None => {
-                self.warn(DiagCode::LibraryNotFound, format!("Can't open library '{name}'."), file, tok, global);
-                self.out.uses.push(UseRef { token: global, path: name, found: false });
+                self.warn(
+                    DiagCode::LibraryNotFound,
+                    format!("Can't open library '{name}'."),
+                    file,
+                    tok,
+                    global,
+                );
+                self.out.uses.push(UseRef {
+                    token: global,
+                    path: name,
+                    found: false,
+                });
             }
         }
     }
@@ -244,7 +285,13 @@ impl Loader<'_> {
 /// `source_dir`, then in each library directory. A file named in `open`
 /// (an include currently being read) is refused, which stops circular
 /// includes.
-pub fn find_valid_path(fs: &dyn FileSystem, libs: &LibraryPath, source_dir: &Path, local: &Path, open: &[String]) -> Option<PathBuf> {
+pub fn find_valid_path(
+    fs: &dyn FileSystem,
+    libs: &LibraryPath,
+    source_dir: &Path,
+    local: &Path,
+    open: &[String],
+) -> Option<PathBuf> {
     let check_valid = |p: &Path| -> bool {
         if p.as_os_str().is_empty() || p.parent().is_none_or(|q| q.as_os_str().is_empty()) {
             return false;
@@ -255,7 +302,10 @@ pub fn find_valid_path(fs: &dyn FileSystem, libs: &LibraryPath, source_dir: &Pat
         !open.contains(&generic(p))
     };
     if local.is_absolute() {
-        return check_valid(local).then(|| fs.canonicalize(local).unwrap_or_else(|| local.to_path_buf()));
+        return check_valid(local).then(|| {
+            fs.canonicalize(local)
+                .unwrap_or_else(|| local.to_path_buf())
+        });
     }
     let mut p = join_path(source_dir, local);
     if fs.exists(&p)
@@ -309,7 +359,11 @@ fn join_path(dir: &Path, local: &Path) -> PathBuf {
 
 pub(crate) fn generic(p: &Path) -> String {
     let s = p.to_string_lossy();
-    if cfg!(windows) { s.replace('\\', "/") } else { s.into_owned() }
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
 }
 
 /// Lexically normalise a path (drop `.`; keep `..`), for display.
@@ -328,7 +382,10 @@ mod tests {
 
     impl FileSystem for MemFs {
         fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-            self.0.get(path).cloned().ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+            self.0
+                .get(path)
+                .cloned()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
         }
         fn exists(&self, path: &Path) -> bool {
             self.0.contains_key(path) || self.is_dir(path)
@@ -336,23 +393,41 @@ mod tests {
         fn is_dir(&self, path: &Path) -> bool {
             let s = path.to_string_lossy();
             let s = s.trim_end_matches('/');
-            self.0.keys().any(|k| k.to_string_lossy().starts_with(&format!("{s}/")))
+            self.0
+                .keys()
+                .any(|k| k.to_string_lossy().starts_with(&format!("{s}/")))
         }
         fn canonicalize(&self, path: &Path) -> Option<PathBuf> {
-            self.exists(path).then(|| PathBuf::from(path.to_string_lossy().trim_end_matches('/')))
+            self.exists(path)
+                .then(|| PathBuf::from(path.to_string_lossy().trim_end_matches('/')))
         }
     }
 
     fn memfs(files: &[(&str, &str)]) -> MemFs {
-        MemFs(files.iter().map(|(p, t)| (PathBuf::from(p), t.as_bytes().to_vec())).collect())
+        MemFs(
+            files
+                .iter()
+                .map(|(p, t)| (PathBuf::from(p), t.as_bytes().to_vec()))
+                .collect(),
+        )
     }
 
     #[test]
     fn splices_includes_in_place() {
         let fs = memfs(&[("/p/sub/a.scad", "b = 2;"), ("/lib/l.scad", "c = 3;")]);
         let libs = LibraryPath(vec!["/lib".into()]);
-        let l = load("/p/main.scad".into(), b"a = 1; include <sub/a.scad> include <l.scad>".to_vec(), &fs, &libs);
-        let kinds: Vec<_> = l.tokens.iter().filter(|t| !t.kind.is_trivia()).map(|t| (t.kind, t.file)).collect();
+        let l = load(
+            "/p/main.scad".into(),
+            b"a = 1; include <sub/a.scad> include <l.scad>".to_vec(),
+            &fs,
+            &libs,
+        );
+        let kinds: Vec<_> = l
+            .tokens
+            .iter()
+            .filter(|t| !t.kind.is_trivia())
+            .map(|t| (t.kind, t.file))
+            .collect();
         assert_eq!(kinds.len(), 12);
         assert_eq!(kinds[4].1, FileId(1));
         assert_eq!(kinds[8].1, FileId(2));
@@ -362,16 +437,39 @@ mod tests {
     #[test]
     fn missing_and_circular_includes_warn() {
         let fs = memfs(&[("/p/self.scad", "include <self.scad>\nx = 1;")]);
-        let l = load("/p/main.scad".into(), b"include <self.scad>\ninclude <nope/x.scad>".to_vec(), &fs, &LibraryPath::default());
-        let msgs: Vec<_> = l.diags.iter().map(|d| (d.message.as_str(), d.line)).collect();
-        assert_eq!(msgs, [("Can't find include file 'self.scad'.", 1), ("Can't find include file 'nope/x.scad'.", 2)]);
+        let l = load(
+            "/p/main.scad".into(),
+            b"include <self.scad>\ninclude <nope/x.scad>".to_vec(),
+            &fs,
+            &LibraryPath::default(),
+        );
+        let msgs: Vec<_> = l
+            .diags
+            .iter()
+            .map(|d| (d.message.as_str(), d.line))
+            .collect();
+        assert_eq!(
+            msgs,
+            [
+                ("Can't find include file 'self.scad'.", 1),
+                ("Can't find include file 'nope/x.scad'.", 2)
+            ]
+        );
     }
 
     #[test]
     fn empty_use_reuses_previous_name() {
         let fs = memfs(&[("/p/a.scad", "")]);
-        let l = load("/p/m.scad".into(), b"use <>\ninclude <q/>\nuse <a.scad>\nuse <>".to_vec(), &fs, &LibraryPath::default());
+        let l = load(
+            "/p/m.scad".into(),
+            b"use <>\ninclude <q/>\nuse <a.scad>\nuse <>".to_vec(),
+            &fs,
+            &LibraryPath::default(),
+        );
         let uses: Vec<_> = l.uses.iter().map(|u| (u.path.as_str(), u.found)).collect();
-        assert_eq!(uses, [("", false), ("/p/a.scad", true), ("/p/a.scad", true)]);
+        assert_eq!(
+            uses,
+            [("", false), ("/p/a.scad", true), ("/p/a.scad", true)]
+        );
     }
 }
