@@ -153,7 +153,7 @@ ffmpeg.
 2. **`lang`** (done): tier 0.
 3. **`eval`** (done): tier 1.
 4. **CSG tree** (done): tier 2.
-5. **`geom`, `io`, `text`** (done): tier 3, 660/660.
+5. **`geom`, `io`, `text`** (done): tiers 3 and 5, 1,103 runnable cases in all. Audited in `docs/audits/engine-milestone.md`.
 6. **`render` + `snapshot`:** tier 4.
 7. **`serve`, JSON output, MCP.**
 8. **macOS app.**

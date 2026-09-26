@@ -18,8 +18,10 @@ ground truth for conformance. Port behaviour, not code structure.
 
 For differential testing and benchmarks, a matching nightly (2026.09.23,
 Manifold backend) is at `/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD`.
-Use `--backend=manifold`. Don't use `/Applications/OpenSCAD-2021.01.app`:
-it predates Manifold and the current test suite.
+Use `--backend=manifold`. For differential testing don't use
+`/Applications/OpenSCAD-2021.01.app`: it predates Manifold and the current
+test suite. It is still a reference series in benchmarks, alongside the
+nightly with `--backend=cgal` and `--backend=manifold`.
 
 ## Build and test
 
