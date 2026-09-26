@@ -54,6 +54,9 @@ impl<'a> Evaluator<'a> {
                     self.quote_sym(s)
                 );
                 self.warn(loc, DiagCode::Overwrite, t);
+                // Printed before `ScopeContext::init`'s try block, so it
+                // stops without an "assignment to" trace.
+                self.check_hard()?;
             }
             match self.eval(sr.unit, a.expr, ctx) {
                 Ok(v) => self.set_var(ctx, s, v),
@@ -184,6 +187,9 @@ impl<'a> Evaluator<'a> {
         let name = self.inst_name(sr, i);
         let loc = self.inst_loc(sr, i);
         let Some(m) = self.lookup_module(ctx, name, loc)? else {
+            // "Ignoring unknown module" is printed by the lookup, before
+            // `ModuleInstantiation::evaluate`'s try block: no trace.
+            self.check_hard()?;
             return Ok(None);
         };
         let r = match m {
@@ -195,6 +201,9 @@ impl<'a> Evaluator<'a> {
                 index,
             } => self.user_module(&dctx, ScopeRef { unit, scope }, index, sr, i, ctx),
         };
+        // A builtin module's own warnings (its argument checks) are raised
+        // inside the try block, so they get the "called by" line.
+        let r = r.and_then(|n| self.check_hard().map(|_| n));
         r.map_err(|mut e| {
             let t = format!("called by '{}'", self.name(name));
             self.trace(&mut e, loc, t.into_bytes());

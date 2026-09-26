@@ -22,6 +22,7 @@ mod normalize;
 mod prepare;
 mod record;
 mod run;
+mod script;
 mod sha256;
 mod showcase;
 mod validatestl;
@@ -256,8 +257,8 @@ fn manifest_cmd(ctx: &Ctx, check: bool) -> Result<u8, String> {
         eprintln!("note: {d}");
     }
     println!(
-        "{:<4} {:<9} {:>6} {:>6} {:>8} {:>8} {:>6} {:>8}",
-        "tier", "name", "total", "text", "geometry", "pending", "skip", "no-exp"
+        "{:<4} {:<9} {:>6} {:>6} {:>8} {:>6} {:>8} {:>6} {:>8}",
+        "tier", "name", "total", "text", "geometry", "script", "pending", "skip", "no-exp"
     );
     for (t, c) in &m.counts {
         let name = t
@@ -267,8 +268,8 @@ fn manifest_cmd(ctx: &Ctx, check: bool) -> Result<u8, String> {
             .copied()
             .unwrap_or("?");
         println!(
-            "{:<4} {:<9} {:>6} {:>6} {:>8} {:>8} {:>6} {:>8}",
-            t, name, c.total, c.text, c.geometry, c.pending, c.skip, c.missing_expected
+            "{:<4} {:<9} {:>6} {:>6} {:>8} {:>6} {:>8} {:>6} {:>8}",
+            t, name, c.total, c.text, c.geometry, c.script, c.pending, c.skip, c.missing_expected
         );
     }
     println!("skip reasons:");

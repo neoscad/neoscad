@@ -66,39 +66,49 @@ pub struct Failure {
 }
 
 /// Run `cmd` with its stderr going to `stderr_path`, killing it after
-/// `timeout`. A non-zero exit is a failure whose reason carries the first
-/// explanatory stderr line.
-pub fn exec(cmd: &mut Command, timeout: Duration, stderr_path: &Path) -> Result<(), Failure> {
-    let fail = |reason: String| Failure {
-        reason,
-        stderr: String::new(),
-    };
+/// `timeout`. Returns the exit code (`None` for a signal); an error is a
+/// failure to run or wait, or the timeout.
+pub fn exec_status(
+    cmd: &mut Command,
+    timeout: Duration,
+    stderr_path: &Path,
+) -> Result<Option<i32>, String> {
     let err_file =
-        File::create(stderr_path).map_err(|e| fail(format!("{}: {e}", stderr_path.display())))?;
+        File::create(stderr_path).map_err(|e| format!("{}: {e}", stderr_path.display()))?;
     cmd.stderr(err_file);
     let mut child = cmd
         .spawn()
-        .map_err(|e| fail(format!("cannot run {:?}: {e}", cmd.get_program())))?;
+        .map_err(|e| format!("cannot run {:?}: {e}", cmd.get_program()))?;
     let start = Instant::now();
     // Start polling finely so the recorded time of a fast case is not
     // dominated by the poll interval, then back off for slow ones.
     let mut poll = Duration::from_micros(200);
-    let status = loop {
+    loop {
         match child.try_wait() {
-            Ok(Some(s)) => break s,
+            Ok(Some(s)) => return Ok(s.code()),
             Ok(None) if start.elapsed() > timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(fail(format!("timeout after {:.0}s", timeout.as_secs_f64())));
+                return Err(format!("timeout after {:.0}s", timeout.as_secs_f64()));
             }
             Ok(None) => {
                 std::thread::sleep(poll);
                 poll = (poll * 2).min(Duration::from_millis(10));
             }
-            Err(e) => return Err(fail(format!("wait failed: {e}"))),
+            Err(e) => return Err(format!("wait failed: {e}")),
         }
-    };
-    if status.success() {
+    }
+}
+
+/// Run `cmd` with its stderr going to `stderr_path`, killing it after
+/// `timeout`. A non-zero exit is a failure whose reason carries the first
+/// explanatory stderr line.
+pub fn exec(cmd: &mut Command, timeout: Duration, stderr_path: &Path) -> Result<(), Failure> {
+    let code = exec_status(cmd, timeout, stderr_path).map_err(|reason| Failure {
+        reason,
+        stderr: String::new(),
+    })?;
+    if code == Some(0) {
         return Ok(());
     }
     let mut stderr = String::new();
@@ -114,9 +124,7 @@ pub fn exec(cmd: &mut Command, timeout: Duration, stderr_path: &Path) -> Result<
         .find(|l| l.starts_with("neoscad:") || l.starts_with("ERROR:"))
         .or_else(|| stderr.lines().find(|l| !l.trim().is_empty()))
         .unwrap_or_default();
-    let code = status
-        .code()
-        .map_or("signal".to_string(), |c| format!("exit {c}"));
+    let code = code.map_or("signal".to_string(), |c| format!("exit {c}"));
     let reason = if first.is_empty() {
         code
     } else {

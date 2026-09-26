@@ -1,7 +1,14 @@
 //! Running a program through the front end and evaluator, the way
 //! `openscad.cc`'s `cmdline()` does, and the `.ast`, `.echo`, `.csg`,
-//! `.term`, mesh (`.stl`, `.off`, `.obj`, `.3mf`) and 2D (`.svg`, `.dxf`)
-//! exports.
+//! `.term`, `.param`, mesh (`.stl`, `.off`, `.obj`, `.3mf`, `.wrl`) and 2D
+//! (`.svg`, `.dxf`, `.pdf`) exports.
+//!
+//! `--hardwarnings` stops at the first warning with exit 1, wherever it is
+//! printed: by the parser (which OpenSCAD turns into the parse error "stop
+//! on first warning"), the customizer, a missing library, the evaluator
+//! (see `eval::Options::hardwarnings`), the geometry or an export. OpenSCAD
+//! raises the warning as an exception that the command line maps to exit 1
+//! without printing anything more (`openscad.cc:1186`).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -30,6 +37,10 @@ pub struct Job<'a> {
     pub parameter_set: Option<&'a str>,
     /// `--quiet`: only errors are printed.
     pub quiet: bool,
+    /// `--hardwarnings`: stop at the first warning, with exit 1.
+    pub hardwarnings: bool,
+    /// `-O` settings.
+    pub export_options: &'a crate::export_options::ExportOptions,
 }
 
 /// Where messages are made relative to.
@@ -98,10 +109,8 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
 
     let libs = LibraryPath::from_env();
     let mut program = parse_program(path, text, &StdFs, &libs);
-    for d in program.openscad_diags() {
-        con.diagnostic(d, &program.sources, &paths.cwd);
-    }
-    if program.has_syntax_errors() {
+    let stopped = parser_diagnostics(&program, job.hardwarnings, paths, con);
+    if stopped || program.has_syntax_errors() {
         con.print(None, format!("Can't parse file '{display}'!\n").as_bytes());
         return Err(EXIT_ERROR);
     }
@@ -111,6 +120,9 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
         let mut params = Parameters::from_ast(&program.ast, &mut warnings);
         for w in &warnings {
             con.diagnostic(w, &program.sources, &paths.cwd);
+            if job.hardwarnings {
+                return Err(EXIT_ERROR);
+            }
         }
         match read_parameter_sets(Path::new(file)) {
             Ok(sets) => {
@@ -124,13 +136,22 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
     }
 
     // handleDependencies(): parse the used libraries and report on them.
-    let libraries = load_dependencies(&program, &suffix, &StdFs, &libs);
-    for lib in &libraries {
+    let mut libraries = load_dependencies(&program, &suffix, &StdFs, &libs);
+    for lib in &mut libraries {
         match (&lib.program, lib.open_error()) {
-            (Some(p), _) => p
-                .openscad_diags()
-                .for_each(|d| con.diagnostic(d, &p.sources, &paths.cwd)),
-            (None, Some(msg)) => con.print(Some(Severity::Warning), msg.as_bytes()),
+            (Some(p), _) => {
+                if parser_diagnostics(p, job.hardwarnings, paths, con) {
+                    // The library's parse failed on the warning, so it
+                    // defines nothing; evaluation goes on without it.
+                    lib.program = None;
+                }
+            }
+            (None, Some(msg)) => {
+                con.print(Some(Severity::Warning), msg.as_bytes());
+                if job.hardwarnings {
+                    return Err(EXIT_ERROR);
+                }
+            }
             (None, None) => {}
         }
     }
@@ -140,6 +161,36 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
         uses,
         libraries,
     })
+}
+
+/// Print a parsed file's diagnostics. With `--hardwarnings` the first
+/// warning ends the parse: the parser catches the warning's exception and
+/// reports it as a syntax error at the scanner's position, which is the
+/// warning's line (`parser.y`, `yyerror("stop on first warning")`).
+/// Returns whether that happened.
+fn parser_diagnostics<W: Write>(
+    program: &Program,
+    hardwarnings: bool,
+    paths: &Paths,
+    con: &mut Console<W>,
+) -> bool {
+    for d in program.openscad_diags() {
+        con.diagnostic(d, &program.sources, &paths.cwd);
+        if hardwarnings
+            && d.severity == Severity::Warning
+            && let Some(span) = d.span
+        {
+            let e = lang::diag::Diagnostic::new(
+                lang::diag::DiagCode::SyntaxError,
+                Severity::Error,
+                "Parser error: stop on first warning",
+            )
+            .at(span, d.line);
+            con.diagnostic(&e, &program.sources, &paths.cwd);
+            return true;
+        }
+    }
+    false
 }
 
 /// Write `data` to `-o` targets (`-` is stdout).
@@ -225,6 +276,9 @@ pub fn export_tree(job: &Job<'_>, options: &Options, formats: &[TreeFormat]) -> 
         Err(code) => return code,
     };
     let ev = evaluate(&loaded, &paths, options, &mut con);
+    if ev.hard_warning {
+        return EXIT_ERROR;
+    }
     // A root modifier (`!`) makes the tagged node the whole tree.
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
     for (target, format) in job.outputs.iter().zip(formats) {
@@ -261,9 +315,11 @@ pub fn export_echo(job: &Job<'_>, options: &Options) -> u8 {
     let mut con = Console::new(Vec::new(), paths.main_dir.clone(), job.quiet);
     let code = match load(job, &paths, &mut con) {
         Err(code) => code,
+        // The echo file is written as messages arrive, so after a hard
+        // warning it holds everything up to it.
         Ok(l) => {
-            evaluate(&l, &paths, options, &mut con);
-            0
+            let ev = evaluate(&l, &paths, options, &mut con);
+            if ev.hard_warning { EXIT_ERROR } else { 0 }
         }
     };
     let data = con.into_inner();
@@ -283,15 +339,17 @@ pub enum MeshFormat {
     Off,
     Obj,
     ThreeMf,
+    Wrl,
     Svg,
     Dxf,
+    Pdf,
 }
 
 impl MeshFormat {
     /// The dimension `checkAndExport` requires (`fileformat::is3D/is2D`).
     fn dimension(self) -> u32 {
         match self {
-            MeshFormat::Svg | MeshFormat::Dxf => 2,
+            MeshFormat::Svg | MeshFormat::Dxf | MeshFormat::Pdf => 2,
             _ => 3,
         }
     }
@@ -316,6 +374,9 @@ pub fn export_mesh(
         Err(code) => return code,
     };
     let ev = evaluate(&loaded, &paths, options, &mut con);
+    if ev.hard_warning {
+        return EXIT_ERROR;
+    }
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
     let keys = eval::dump::Keys::new(&ev.root);
     let opts = geom::RenderOptions {
@@ -358,6 +419,11 @@ pub fn export_mesh(
             text: m.text.as_bytes(),
             sources,
         });
+        // OpenSCAD's geometry evaluation stops here; neoscad has already
+        // built the rest, but prints nothing more.
+        if job.hardwarnings && severity == Severity::Warning && !printed_in_handler(&m.text) {
+            return EXIT_ERROR;
+        }
     }
     // `if (!root_geom) root_geom = std::make_shared<PolySet>(3);`
     let root = rendered.geometry;
@@ -382,8 +448,26 @@ pub fn export_mesh(
         };
         let mut warnings = Vec::new();
         let data = match (format, root) {
-            (MeshFormat::Svg, geom::Geometry::Polygon2d(p)) => geom::export::svg(p),
+            (MeshFormat::Svg, geom::Geometry::Polygon2d(p)) => {
+                geom::export::svg(p, &job.export_options.svg())
+            }
             (MeshFormat::Dxf, geom::Geometry::Polygon2d(p)) => geom::export::dxf(p),
+            (MeshFormat::Pdf, geom::Geometry::Polygon2d(p)) => {
+                let (mut pdf_options, colors) = job.export_options.pdf();
+                warnings.extend(colors.resolve(&mut pdf_options));
+                let info = io::pdf::PdfInfo {
+                    title: &file_title(job),
+                    source_path: display_name(job),
+                    creation_date: &iso8601_now(),
+                };
+                let (data, export_warnings) = geom::export::pdf(p, &pdf_options, &info);
+                for w in export_warnings {
+                    // `message_group::Export_Warning`: not a warning for
+                    // `--hardwarnings`.
+                    con.print(None, format!("EXPORT-WARNING: {w}").as_bytes());
+                }
+                data
+            }
             _ => {
                 let ps = mesh.get_or_insert_with(|| {
                     geom::export::as_polyset(root, &opts.scheme).expect("3D geometry has a mesh")
@@ -392,15 +476,11 @@ pub fn export_mesh(
                     MeshFormat::AsciiStl => geom::export::stl(ps, false, &mut warnings),
                     MeshFormat::BinaryStl => geom::export::stl(ps, true, &mut warnings),
                     MeshFormat::Off => geom::export::off(ps, &mut warnings),
+                    MeshFormat::Wrl => geom::export::wrl(ps, &mut warnings),
                     MeshFormat::ThreeMf => {
-                        // `ExportInfo::title` is the input's file name.
-                        let title = Path::new(display_name(job))
-                            .file_name()
-                            .map(|f| f.to_string_lossy().into_owned())
-                            .unwrap_or_default();
                         let (data, msgs) = geom::export::threemf(
                             ps,
-                            &title,
+                            &file_title(job),
                             &iso8601_now(),
                             opts.scheme.face_front,
                             &mut warnings,
@@ -419,6 +499,9 @@ pub fn export_mesh(
         };
         for w in warnings {
             con.print(Some(Severity::Warning), format!("WARNING: {w}").as_bytes());
+            if job.hardwarnings {
+                return EXIT_ERROR;
+            }
         }
         if let Err(code) = write_output(target, &data) {
             return code;
@@ -443,6 +526,75 @@ pub fn export_mesh(
     );
     for l in root.iter().flat_map(geom::export::summary) {
         con.print(None, l.as_bytes());
+    }
+    0
+}
+
+/// Whether OpenSCAD prints this geometry warning from inside a `catch`
+/// block. `PRINT` only raises `--hardwarnings` when no exception is being
+/// handled (`if (!std::current_exception())`, `printutils.cc:125`), so
+/// these warnings never stop a run: without this, `import()` of a missing
+/// 3MF file would exit 1 where the nightly renders on. The list is every
+/// `LOG(message_group::Warning, ...)` in a handler that neoscad reproduces:
+/// `import_3mf_v2.cc:385`, `SurfaceNode.cc:211`, `DxfData.cc:144,362,364`
+/// and `manifold-applyops-minkowski.cc:246`.
+fn printed_in_handler(text: &str) -> bool {
+    const PREFIXES: [&str; 6] = [
+        "Could not read file '",
+        "Illegal value in '",
+        "Illegal ID '",
+        "Illegal value '",
+        "Not enough input values for ",
+        "[manifold] Minkowski hard-crashed",
+    ];
+    PREFIXES.iter().any(|p| text.starts_with(p))
+}
+
+/// `ExportInfo::title`: the input's file name.
+fn file_title(job: &Job<'_>) -> String {
+    Path::new(display_name(job))
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// `-o x.param` (`export_param.cc`): the program is evaluated first, as
+/// for every export (`do_export`), then its customizer parameters are
+/// written as JSON. Reading the parameters prints their range warnings
+/// again, after any from `-p`/`-P`, as OpenSCAD does.
+pub fn export_param(job: &Job<'_>, options: &Options) -> u8 {
+    let paths = Paths::of(job);
+    let mut con = Console::new(std::io::stderr(), paths.main_dir.clone(), job.quiet);
+    let loaded = match load(job, &paths, &mut con) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    let ev = evaluate(&loaded, &paths, options, &mut con);
+    if ev.hard_warning {
+        return EXIT_ERROR;
+    }
+    let mut warnings = Vec::new();
+    let params = Parameters::from_ast(&loaded.program.ast, &mut warnings);
+    for w in &warnings {
+        con.diagnostic(w, &loaded.program.sources, &paths.cwd);
+        if job.hardwarnings {
+            return EXIT_ERROR;
+        }
+    }
+    // `path.stem()` of the absolute input path; stdin has none.
+    let title = if job.input == "-" {
+        "Unnamed".to_string()
+    } else {
+        Path::new(job.input)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Unnamed".into())
+    };
+    let json = crate::param_json::export(&params, &title);
+    for target in job.outputs {
+        if let Err(code) = write_output(target, json.as_bytes()) {
+            return code;
+        }
     }
     0
 }

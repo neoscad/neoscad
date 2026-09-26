@@ -20,7 +20,7 @@ any test listed in `conformance/baseline.json` no longer passes.
 | Command | What it does |
 |---|---|
 | `manifest` | Regenerates `conformance/manifest.json` from `tests/CMakeLists.txt`. `--check` only verifies it is current. Run it after updating the reference checkout. |
-| `run` | Runs the manifest's `text` and `geometry` cases in parallel (`--jobs`, `--timeout` seconds per process, default 30). `--tier N` (repeatable) and `--filter SUBSTR` narrow the run; `-v` prints the first differing lines of each failure. `--renderer PATH` sets the OpenSCAD that draws tier 3 meshes (default: the pinned nightly). |
+| `run` | Runs the manifest's `text`, `geometry` and `script` cases in parallel (`--jobs`, `--timeout` seconds per process, default 30). `--tier N` (repeatable) and `--filter SUBSTR` narrow the run; `-v` prints the first differing lines of each failure. `--renderer PATH` sets the OpenSCAD that draws tier 3 meshes (default: the pinned nightly). |
 | `run --update-baseline` | Rewrites `conformance/baseline.json` from the current passes. A narrowed run only updates the ids it ran. |
 | `run --record` | Writes `progress/<UTC>-<sha>[-dirty]/` (`meta.json`, `scoreboard.json`) and appends to `progress/index.jsonl`. Needs a full run. `--grid` also writes `grid.png`. |
 | `grid [DIR...]` | Renders `grid.png` for snapshot directories (a path or a name under `progress/`) from their recorded data. `--all` takes every snapshot in `index.jsonl`; existing images are skipped unless `--force`. `--out PATH` writes elsewhere (one snapshot only). |
@@ -65,12 +65,17 @@ upstream change that needs new support fails loudly.
 
 Each case gets a tier (see `src/manifest.rs`) and a runner:
 
-- `text`: tiers 0-2 (`.ast`, `.echo`, `.csg`, `.term`), compared exactly.
+- `text`: tiers 0-2 (`.ast`, `.echo`, `.csg`, `.term`), compared exactly,
+  and the tier 3 `export-param` JSON, compared as parsed JSON
+  (`compare_json`).
 - `geometry`: tier 3 PNG tests (direct `--render` and
   `export_import_pngtest.py`) and `stlexportsanitytest.py`; see "Tier 3"
   below.
-- `pending`: the rest of tiers 3-5, which this harness does not compare
-  yet (PDF, SVG re-export, `export-param`, image tests).
+- `script`: tests driven by a Python script or a raw command, ported in
+  `src/script.rs`; see "Script cases" below.
+- `pending`: tier 4, neoscad's own image rendering, which this harness
+  does not compare yet (including `relative-output_png_*`, re-tiered
+  from 5 because it needs PNG export).
 - `skip`, with a reason: experimental features, the CGAL backend, tests
   disabled upstream, tests tagged `Bugs`, and OpenSCAD's harness self-test.
 
@@ -106,6 +111,26 @@ Several tier 0-2 inputs use MCAD (`include-tests`, `use-tests`,
 submodule, and `run` warns when it is missing. To fetch it:
 
     git -C .reference/openscad submodule update --init libraries/MCAD
+
+## Script cases
+
+These need no renderer: the binary under test does every OpenSCAD step.
+
+- **SVG re-export** (`export-svg*`, `export_import_pngtest.py` with an SVG
+  result): export as SVG, import that in a wrapper, export again; the
+  second SVG is compared as text. Both steps get the test's `-O` options.
+- **PDF** (`export-pdf*`, `export_pngtest.py`): the PDF is rasterised at
+  300 dpi and compared with OpenSCAD's image comparator. Upstream uses
+  Ghostscript (`gs`), used here when it is on `PATH`; otherwise poppler's
+  `pdftoppm` (with `pdfinfo` for the page size), cropped to Ghostscript's
+  page size. With neither, the cases fail with a message saying so. On
+  macOS: `brew install poppler` (or `ghostscript`).
+- **Exit codes** (`shouldfail.py`): the test's arguments plus
+  `--export-format=<suffix> -o -`; the exit code must equal `--retval`.
+- **Relative output** (`relative-output_*`): `_run` writes
+  `relative-output.<format>` into the working directory, `_check` passes
+  when the file is there. Checks run after all other cases, as ctest's
+  `DEPENDS` orders them.
 
 ## Tier 3: geometry through images
 

@@ -85,9 +85,11 @@ pub struct Console<W: Write> {
     quiet: bool,
     last: VecDeque<Vec<u8>>,
     main_dir: PathBuf,
-    /// Rendered paths per (source map address, file), as computing a
-    /// relative path touches the file system.
-    paths: Vec<((usize, u32), String)>,
+    /// Rendered paths per (source map address, file, base directory), as
+    /// computing a relative path touches the file system. The base is part
+    /// of the key: a file's parser errors print relative to the working
+    /// directory and its warnings relative to the main file's directory.
+    paths: Vec<((usize, u32, PathBuf), String)>,
 }
 
 impl<W: Write> Console<W> {
@@ -129,14 +131,19 @@ impl<W: Write> Console<W> {
     }
 
     fn path_of(&mut self, sources: &SourceMap, span: Span, base: &Path) -> String {
-        let key = (sources as *const SourceMap as usize, span.file.0);
-        if let Some((_, p)) = self.paths.iter().find(|(k, _)| *k == key) {
+        let (addr, file) = (sources as *const SourceMap as usize, span.file.0);
+        if let Some((_, p)) = self
+            .paths
+            .iter()
+            .find(|(k, _)| k.0 == addr && k.1 == file && k.2 == base)
+        {
             return p.clone();
         }
         let p = relative_path(sources.path(span.file), base)
             .display()
             .to_string();
-        self.paths.push((key, p.clone()));
+        self.paths
+            .push(((addr, file, base.to_path_buf()), p.clone()));
         p
     }
 
@@ -195,6 +202,8 @@ pub(crate) enum UnwindKind {
     EchoStack,
     /// The embedder asked evaluation to stop.
     Interrupted,
+    /// `--hardwarnings`: a warning was printed (`HardWarningException`).
+    HardWarning,
 }
 
 /// An evaluation error on its way up (OpenSCAD's `EvaluationException`).

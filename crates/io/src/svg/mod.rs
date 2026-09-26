@@ -225,13 +225,44 @@ pub fn read(
         .collect()
 }
 
-/// `export_svg` with the default options (no fill, a black stroke 0.35
-/// wide): a view box of whole millimetres around the shape padded by half
-/// the stroke, then one path with every outline, y flipped (so `0` prints
-/// as `-0`), six points to a line.
+/// `ExportSvgOptions`: the paint of the exported path. Colours are
+/// written as given (OpenSCAD does not parse them for SVG).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SvgStyle {
+    /// `fill-color` when `fill` is on.
+    pub fill: Option<String>,
+    /// `stroke-color` when `stroke` is on.
+    pub stroke: Option<String>,
+    pub stroke_width: f64,
+}
+
+impl Default for SvgStyle {
+    /// The settings' defaults (`Settings.cc`): no fill, a black stroke
+    /// 0.35 wide.
+    fn default() -> Self {
+        SvgStyle {
+            fill: None,
+            stroke: Some("black".into()),
+            stroke_width: 0.35,
+        }
+    }
+}
+
+/// `export_svg` with the default options.
 pub fn write(outlines: &[Outline]) -> Vec<u8> {
-    let stroke_width = 0.35;
-    let pad = stroke_width / 2.0;
+    write_styled(outlines, &SvgStyle::default())
+}
+
+/// `export_svg`: a view box of whole millimetres around the shape, padded
+/// by half the stroke when there is one, then one path with every outline,
+/// y flipped (so `0` prints as `-0`), six points to a line.
+pub fn write_styled(outlines: &[Outline], style: &SvgStyle) -> Vec<u8> {
+    let stroke_width = style.stroke_width;
+    let pad = if style.stroke.is_some() {
+        stroke_width / 2.0
+    } else {
+        0.0
+    };
     let mut it = outlines.iter().flat_map(|o| o.vertices.iter());
     let (lo, hi) = match it.next() {
         Some(&first) => it.fold((first, first), |(lo, hi), v| {
@@ -269,7 +300,9 @@ pub fn write(outlines: &[Outline]) -> Vec<u8> {
         out.push_str(" z\n");
     }
     out.push_str(&format!(
-        "\" stroke=\"black\" fill=\"none\" stroke-width=\"{}\"/>\n",
+        "\" stroke=\"{}\" fill=\"{}\" stroke-width=\"{}\"/>\n",
+        style.stroke.as_deref().unwrap_or("none"),
+        style.fill.as_deref().unwrap_or("none"),
         fmt_g(stroke_width)
     ));
     out.push_str("</svg>\n");

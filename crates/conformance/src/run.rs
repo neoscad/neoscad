@@ -154,17 +154,31 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
         .build()
         .map_err(|e| e.to_string())?;
     let start = Instant::now();
-    let outcomes: Vec<Outcome> = pool.install(|| {
-        selected
-            .par_iter()
-            .map(|c| match c.runner {
-                Runner::Text => env.run_text(c),
-                Runner::Geometry => env.run_geometry(c),
-                Runner::Pending => outcome(c, Status::Pending, None),
-                Runner::Skip => outcome(c, Status::Skip, c.skip_reason.clone()),
-            })
-            .collect()
+    // ctest runs a test after the tests it `DEPENDS` on; the only such
+    // tests are the relative-output checks, which read the file their
+    // `_run` test wrote. They run in a second pass.
+    let (first, second): (Vec<&Case>, Vec<&Case>) = selected
+        .iter()
+        .partition(|c| !(c.runner == Runner::Script && crate::script::is_dependent(c)));
+    let run_one = |c: &&Case| match c.runner {
+        Runner::Text => env.run_text(c),
+        Runner::Geometry => env.run_geometry(c),
+        Runner::Script => crate::script::run(&env, c),
+        Runner::Pending => outcome(c, Status::Pending, None),
+        Runner::Skip => outcome(c, Status::Skip, c.skip_reason.clone()),
+    };
+    let mut outcomes: Vec<Outcome> = pool.install(|| {
+        let mut o: Vec<Outcome> = first.par_iter().map(run_one).collect();
+        o.extend(second.par_iter().map(run_one).collect::<Vec<_>>());
+        o
     });
+    // Report in manifest order whatever the passes.
+    let order: BTreeMap<&str, usize> = selected
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.id.as_str(), i))
+        .collect();
+    outcomes.sort_by_key(|o| order.get(o.id.as_str()).copied().unwrap_or(usize::MAX));
     let wall = start.elapsed();
 
     let mut per_tier: BTreeMap<u8, Counts> = BTreeMap::new();
@@ -257,7 +271,7 @@ fn short(sha: &str) -> &str {
     &sha[..sha.len().min(8)]
 }
 
-fn outcome(c: &Case, status: Status, reason: Option<String>) -> Outcome {
+pub(crate) fn outcome(c: &Case, status: Status, reason: Option<String>) -> Outcome {
     Outcome {
         id: c.id.clone(),
         tier: c.tier,
@@ -269,20 +283,20 @@ fn outcome(c: &Case, status: Status, reason: Option<String>) -> Outcome {
 }
 
 /// Per-run constants shared by every case.
-struct Env {
-    ref_root: PathBuf,
-    ref_str: String,
-    work_dir: PathBuf,
-    actual_dir: PathBuf,
-    binary: PathBuf,
+pub(crate) struct Env {
+    pub ref_root: PathBuf,
+    pub ref_str: String,
+    pub work_dir: PathBuf,
+    pub actual_dir: PathBuf,
+    pub binary: PathBuf,
     /// Runtime path from the working directory to the reference `tests/`,
     /// substituted for `../../tests` in expected files.
     runtime_tests: String,
-    timeout: Duration,
+    pub timeout: Duration,
     /// Manifest-wide `OPENSCAD_TEST_EXCLUDE_LINE`.
     default_exclude: Option<String>,
-    font_path: PathBuf,
-    library_path: PathBuf,
+    pub font_path: PathBuf,
+    pub library_path: PathBuf,
     geometry: Option<GeometryEnv>,
 }
 
@@ -412,8 +426,16 @@ impl Env {
         }
     }
 
-    fn compare(&self, c: &Case, expected: &Path, actual: &Path) -> Outcome {
+    /// `compare_with_expected`: `compare_json` for `.json` outputs, the
+    /// normalised text comparison (`compare_default`) otherwise.
+    pub(crate) fn compare(&self, c: &Case, expected: &Path, actual: &Path) -> Outcome {
         let fail = |reason: String| outcome(c, Status::Fail, Some(reason));
+        if c.suffix == "json" {
+            return match compare_json(expected, actual) {
+                Ok(()) => outcome(c, Status::Pass, None),
+                Err(reason) => fail(reason),
+            };
+        }
         let exclude = match self.exclude_line(c).map(Regex::new).transpose() {
             Ok(r) => r,
             Err(e) => return fail(format!("bad exclude regex: {e}")),
@@ -437,6 +459,39 @@ impl Env {
                 o
             }
         }
+    }
+}
+
+/// `compare_json`: both files parsed, then compared as Python compares
+/// the parsed values, where `5` equals `5.0` and object key order does
+/// not matter.
+fn compare_json(expected: &Path, actual: &Path) -> Result<(), String> {
+    let read = |p: &Path| -> Result<serde_json::Value, String> {
+        let text = fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))
+    };
+    let exp = read(expected).map_err(|e| format!("missing expected output: {e}"))?;
+    let act = read(actual)?;
+    if json_eq(&exp, &act) {
+        Ok(())
+    } else {
+        Err("json differs".into())
+    }
+}
+
+fn json_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value as J;
+    match (a, b) {
+        (J::Number(x), J::Number(y)) => x.as_f64() == y.as_f64(),
+        (J::Array(x), J::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| json_eq(p, q))
+        }
+        (J::Object(x), J::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| json_eq(v, w)))
+        }
+        _ => a == b,
     }
 }
 

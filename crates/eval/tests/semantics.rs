@@ -340,3 +340,49 @@ fn collect_output_keeps_codes() {
     assert_eq!(out.lines[0].1, lang::diag::DiagCode::UnknownVariable);
     assert_eq!(out.lines[1].1, lang::diag::DiagCode::Echo);
 }
+
+/// `--hardwarnings`: the first warning stops evaluation with the traces an
+/// error would get, and nothing printed after it survives (the nightly,
+/// `-o x.echo --hardwarnings`).
+#[test]
+fn hardwarnings_stop_at_the_first_warning() {
+    let opts = Options {
+        hardwarnings: true,
+        ..Default::default()
+    };
+    let (lines, ev) = run_with(
+        "module m(){ echo(1); circle(r=1,d=4); echo(2);}\nm();\necho(3);",
+        &opts,
+    );
+    assert!(ev.hard_warning);
+    assert_eq!(
+        lines,
+        [
+            "ECHO: 1",
+            "WARNING: Ignoring radius variable \"r\" as diameter \"d\" is defined too. @1",
+            "TRACE: called by 'circle' @1",
+            "TRACE: call of 'm()' @1",
+            "TRACE: called by 'm' @2",
+        ]
+    );
+    let (lines, ev) = run_with(
+        "function f(a) = a + undefvar;\nb = f(1);\nc = test();",
+        &opts,
+    );
+    assert!(ev.hard_warning);
+    assert_eq!(
+        lines,
+        [
+            "WARNING: Ignoring unknown variable \"undefvar\" @1",
+            "TRACE: called by 'f' @2",
+            "TRACE: assignment to \"b\" @2",
+        ]
+    );
+    // An unknown module is reported before the instantiation's try block.
+    let (lines, _) = run_with("hello();\necho(1);", &opts);
+    assert_eq!(lines, ["WARNING: Ignoring unknown module 'hello' @1"]);
+    // Without the flag, evaluation carries on.
+    let (lines, ev) = run_with("hello();\necho(1);", &Options::default());
+    assert!(!ev.hard_warning);
+    assert_eq!(lines.len(), 2);
+}

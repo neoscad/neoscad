@@ -5,15 +5,19 @@
 //! this binary unchanged: the conformance harness passes exactly the
 //! arguments `tests/CMakeLists.txt` registers. The `.ast` export (with
 //! customizer parameter sets), the `.echo` export (evaluation messages),
-//! the `.csg` and `.term` node-tree exports and the 3D mesh exports (`.stl`
-//! ASCII and binary, `.off`, `.obj`) are implemented; every other
-//! output mode reports that it is missing and
+//! the `.csg` and `.term` node-tree exports, the `.param` customizer
+//! export, the 3D mesh exports (`.stl` ASCII and binary, `.off`, `.obj`,
+//! `.3mf`, `.wrl`) and the 2D exports (`.svg`, `.dxf`, `.pdf`) are
+//! implemented; every other output mode (`.png`, `.pov`, `.nef3`) reports
+//! that it is missing and
 //! exits with [`EXIT_NOT_IMPLEMENTED`], which the harness can tell apart
 //! from a crash or a usage error.
 //!
 //! Cold start is a tracked benchmark (docs/architecture.md, "Agent surface"),
 //! so `main` does nothing before argument parsing and nothing expensive after.
 
+mod export_options;
+mod param_json;
 mod run;
 
 use std::path::Path;
@@ -22,8 +26,9 @@ use std::process::ExitCode;
 use clap::{ArgAction, Parser};
 
 /// Exit code for "this output mode exists in OpenSCAD but not in neoscad yet".
-/// OpenSCAD itself exits with 1 for every error, and clap exits with 2 on a
-/// usage error, so 3 is unambiguous in conformance results.
+/// OpenSCAD itself exits with 1 for every error, usage errors included, and
+/// neoscad's only exit 2 is a missing `-o`, so 3 is unambiguous in
+/// conformance results.
 const EXIT_NOT_IMPLEMENTED: u8 = 3;
 
 /// OpenSCAD's general failure code (`return 1` throughout `openscad.cc`).
@@ -193,7 +198,21 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // OpenSCAD answers every command-line error (an unknown option, a
+    // repeated single-valued one such as `--export-format`) with its usage
+    // text and exit status 1 (`help(..., true)` in `openscad.cc`); clap
+    // would exit with 2. Help and version requests still exit 0.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let _ = e.print();
+            return if e.use_stderr() {
+                ExitCode::from(EXIT_ERROR)
+            } else {
+                ExitCode::SUCCESS
+            };
+        }
+    };
     // Parsing and evaluation recurse over the program; OpenSCAD programs
     // (and OpenSCAD's own tests) recurse deeper than the main thread's
     // default stack allows, and the evaluator's recursion limit assumes
@@ -245,6 +264,7 @@ fn run_cli(cli: Cli) -> ExitCode {
         }
     }
 
+    let export_options = export_options::ExportOptions::parse(&cli.export_option);
     let job = run::Job {
         input: &cli.input[0],
         outputs: &cli.output,
@@ -252,6 +272,8 @@ fn run_cli(cli: Cli) -> ExitCode {
         parameter_file: cli.parameter_file.as_deref(),
         parameter_set: cli.parameter_set.as_deref(),
         quiet: cli.quiet,
+        hardwarnings: cli.hardwarnings,
+        export_options: &export_options,
     };
     if formats.iter().all(|(id, _)| *id == "ast") {
         return ExitCode::from(run::export_ast(&job));
@@ -262,6 +284,13 @@ fn run_cli(cli: Cli) -> ExitCode {
             Err(code) => return ExitCode::from(code),
         };
         return ExitCode::from(run::export_echo(&job, &options));
+    }
+    if formats.iter().all(|(id, _)| *id == "param") {
+        let options = match eval_options(&cli) {
+            Ok(o) => o,
+            Err(code) => return ExitCode::from(code),
+        };
+        return ExitCode::from(run::export_param(&job, &options));
     }
     let tree: Option<Vec<run::TreeFormat>> = formats
         .iter()
@@ -286,8 +315,10 @@ fn run_cli(cli: Cli) -> ExitCode {
             "off" => Some(run::MeshFormat::Off),
             "obj" => Some(run::MeshFormat::Obj),
             "3mf" => Some(run::MeshFormat::ThreeMf),
+            "wrl" => Some(run::MeshFormat::Wrl),
             "svg" => Some(run::MeshFormat::Svg),
             "dxf" => Some(run::MeshFormat::Dxf),
+            "pdf" => Some(run::MeshFormat::Pdf),
             _ => None,
         })
         .collect();
@@ -344,6 +375,7 @@ fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
         )?,
         check_parameters: flag(&cli.check_parameters, true, "check-parameters")?,
         check_parameter_ranges: flag(&cli.check_parameter_ranges, false, "check-parameter-ranges")?,
+        hardwarnings: cli.hardwarnings,
         ..Default::default()
     };
     if let Some(d) = cli.trace_depth {

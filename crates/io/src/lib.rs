@@ -11,7 +11,8 @@
 //! - [`svg`]: a port of OpenSCAD's own `libsvg` plus `import_svg.cc`;
 //! - [`surface`]: `.dat` and PNG heightmaps (`SurfaceNode.cc`).
 //!
-//! Writers: STL, OFF, OBJ, SVG, DXF and 3MF (`export_*.cc`).
+//! Writers: STL, OFF, OBJ, SVG, DXF, 3MF, VRML ([`wrl`]) and PDF ([`pdf`])
+//! (`export_*.cc`).
 //!
 //! This crate knows file formats and nothing about geometry kernels, so it
 //! sits below both the evaluator (which needs the DXF reader) and `geom`
@@ -26,12 +27,14 @@ pub mod dxf;
 pub mod mesh;
 pub mod obj;
 pub mod off;
+pub mod pdf;
 pub mod stl;
 pub mod surface;
 pub mod svg;
 pub mod text;
 pub mod threemf;
 pub mod trig;
+pub mod wrl;
 
 pub use color::Color;
 pub use lang::diag::Severity;

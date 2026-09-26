@@ -118,8 +118,40 @@ entry when it is done.
   engine change between the versions would show up here first. (5b)
 - A render warning for a duplicated sibling subtree is printed once;
   OpenSCAD prints it again, because of how it caches. (5a)
-- `--hardwarnings` is parsed but has no effect. Only tier 5 uses it.
-  (2, 3, 5a)
+- `--hardwarnings` stops at the first warning, but a geometry warning is
+  only acted on after the whole geometry is built (the output is the
+  same; the time is not), and an evaluator warning after its check point
+  rather than at its throw (messages in between are dropped). Against
+  the nightly with `--hardwarnings`, the output and exit code match on
+  259 of 263 test inputs as `.echo` (the 4 others are the recursion-limit
+  difference below) and 235 of 237 as `.stl` (the 2 others differ without
+  the flag too; see the entry on geometry error paths below).
+  Warnings OpenSCAD prints inside a `catch` never raise it; the CLI knows
+  them by text (`printed_in_handler` in `crates/cli/src/run.rs`), and the
+  DXF ones printed by `dxf_dim()`/`dxf_cross()` in the evaluator are not
+  exempted. (5f)
+- Upstream's `export-param-hardwarnings` and
+  `export-paramset-hardwarnings` tests pass without `--hardwarnings`
+  doing anything: `shouldfail.py` appends `--export-format=json` to
+  arguments that already hold `--export-format param`, and Boost rejects
+  the repeated option with exit 1. neoscad now exits 1 on usage errors as
+  OpenSCAD does (clap's default was 2), so they pass for the same reason;
+  `--hardwarnings` with a param export is checked against the nightly by
+  hand (identical). Worth reporting upstream. (5f)
+- PDF export draws what Cairo draws (checked by image on all six test
+  PDFs, rasterised with poppler), but the file is hand-built: labels use
+  the standard Helvetica font unembedded where Cairo embeds Liberation
+  Sans (same metrics, slightly different glyphs), and Cairo's object
+  layout and compression are not reproduced. Cairo's path simplification
+  is modelled only as far as its single-rectangle `re` output. (5f)
+- `-O` options are parsed for SVG and PDF only; `export-3mf/...` is still
+  ignored (see 3MF below). (5f)
+- Errors printed while building geometry give the file of the failing
+  call relative to the main file's directory (`in file empty-stl.scad`,
+  `'"B-\" C-..."'` in `escape-test.scad`) where the nightly makes them
+  relative to the working directory (`in file
+  ../../tests/data/scad/misc/empty-stl.scad`), with or without
+  `--hardwarnings`. Found in 5f, not investigated. (5f)
 - `r(3000)`-style recursion succeeds where the nightly stops with a
   recursion error. The deeper limit is deliberate, but decide whether a
   compatibility mode should match the nightly. (3, 5a)
@@ -170,3 +202,5 @@ entry when it is done.
   `libsvg` instead (see `crates/io/src/svg/mod.rs` for why). (5c)
 - The tier 3 baseline needs the pinned nightly installed as its renderer.
   CI would need it too. (5a)
+- The six PDF cases need a PDF rasteriser (Ghostscript or poppler), which
+  CI would need too. (5f)

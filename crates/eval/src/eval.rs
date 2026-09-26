@@ -180,6 +180,26 @@ pub(crate) struct Evaluator<'a> {
     /// Deprecation messages already printed, with their location: OpenSCAD
     /// prints each one once (`printedDeprecations`).
     deprecations: std::collections::HashSet<DeprecationKey>,
+    /// `--hardwarnings` progress; see [`Hard`].
+    hard: std::cell::Cell<Hard>,
+}
+
+/// Where a `--hardwarnings` run stands. OpenSCAD throws a
+/// `HardWarningException` from `PRINT` itself, right after printing the
+/// first warning (`printutils.cc:125-130`); the exception is an
+/// `EvaluationException`, so every call site it passes adds its `TRACE:`
+/// line, and the command line maps it to exit 1 (`openscad.cc:1186`).
+/// Here a warning only arms the abort ([`Hard::Pending`]) because many
+/// warnings are printed from functions that cannot fail; the next check
+/// (after any expression, call step, assignment or instantiation) turns
+/// it into an [`UnwindKind::HardWarning`] error, which travels the same
+/// call sites as OpenSCAD's exception and so collects the same traces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hard {
+    Off,
+    Armed,
+    Pending,
+    Thrown,
 }
 
 /// A printed deprecation: its text and location.
@@ -267,6 +287,11 @@ impl<'a> Evaluator<'a> {
             builtin_mods,
             op_warnings: Vec::new(),
             deprecations: Default::default(),
+            hard: std::cell::Cell::new(if opts.hardwarnings {
+                Hard::Armed
+            } else {
+                Hard::Off
+            }),
             opts,
         }
     }
@@ -299,6 +324,20 @@ impl<'a> Evaluator<'a> {
     pub fn check_interrupt(&self) -> R<()> {
         if self.interrupted() {
             Err(Unwind::new(UnwindKind::Interrupted, 0))
+        } else {
+            self.check_hard()
+        }
+    }
+
+    /// Raise the `--hardwarnings` abort if a warning has armed it (see
+    /// [`Hard`]). Only the first warning raises it: once thrown, warnings
+    /// printed while the error travels up (none, as nothing is evaluated
+    /// then) cannot start a second one.
+    #[inline]
+    pub fn check_hard(&self) -> R<()> {
+        if self.hard.get() == Hard::Pending {
+            self.hard.set(Hard::Thrown);
+            Err(self.unwind(UnwindKind::HardWarning))
         } else {
             Ok(())
         }
@@ -356,6 +395,13 @@ impl<'a> Evaluator<'a> {
     }
 
     pub fn emit(&mut self, severity: Severity, code: DiagCode, text: &[u8], loc: Option<Loc>) {
+        // OpenSCAD would already be unwinding from the first warning, so
+        // nothing printed between it and the check that raises it exists
+        // there (a builtin warning about several arguments, an unknown
+        // function after a disabled experimental one).
+        if self.hard.get() == Hard::Pending {
+            return;
+        }
         if severity == Severity::Deprecated
             && !self
                 .deprecations
@@ -377,6 +423,9 @@ impl<'a> Evaluator<'a> {
             text,
             sources,
         });
+        if severity == Severity::Warning && self.hard.get() == Hard::Armed {
+            self.hard.set(Hard::Pending);
+        }
     }
 
     pub fn warn(&mut self, loc: Loc, code: DiagCode, text: impl AsRef<[u8]>) {
@@ -471,6 +520,8 @@ impl<'a> Evaluator<'a> {
         self.truncate(mark);
         let mut aborted = false;
         let mut interrupted = false;
+        // A warning in the last expression evaluated may still be armed.
+        let result = result.and_then(|_| self.check_hard());
         if let Err(e) = result {
             interrupted = e.kind == UnwindKind::Interrupted;
             aborted = !interrupted;
@@ -496,6 +547,9 @@ impl<'a> Evaluator<'a> {
             root,
             aborted,
             interrupted,
+            // Also set by a warning printed after instantiation (the root
+            // modifier check), which OpenSCAD raises from `do_export`.
+            hard_warning: matches!(self.hard.get(), Hard::Pending | Hard::Thrown),
         }
     }
 
@@ -563,7 +617,14 @@ impl<'a> Evaluator<'a> {
     /// live in [`Self::eval_cold`] so this function's stack frame stays
     /// small, which matters both for speed and for how deep OpenSCAD
     /// programs can recurse within the stack limit.
+    #[inline]
     pub fn eval(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
+        let v = self.eval_expr(u, id, ctx)?;
+        self.check_hard()?;
+        Ok(v)
+    }
+
+    fn eval_expr(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
         let ast: &'a Ast = self.units[u as usize].ast;
         let e = ast.expr(id);
         match &e.kind {

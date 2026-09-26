@@ -36,6 +36,13 @@ pub enum Runner {
     /// arguments, and the PNG is compared as `image_compare.py` does; or,
     /// for `stlexportsanitytest.py`, the exported STL is validated.
     Geometry,
+    /// A test OpenSCAD drives with one of its Python scripts or a raw
+    /// command, ported natively in `script.rs` and needing no renderer:
+    /// SVG re-export (`export_import_pngtest.py` with an `.svg` result),
+    /// PDF export (`export_pngtest.py`, the PDF rasterised and compared as
+    /// an image), exit codes (`shouldfail.py`) and the relative-output
+    /// commands.
+    Script,
     /// In scope, but the comparison is not implemented yet (tiers 3-5).
     Pending,
     /// Out of scope; `skip_reason` says why.
@@ -87,6 +94,8 @@ pub struct TierCounts {
     pub text: usize,
     #[serde(default)]
     pub geometry: usize,
+    #[serde(default)]
+    pub script: usize,
     pub pending: usize,
     pub skip: usize,
     /// Runnable (text or geometry) cases whose expected file does not exist in the checkout.
@@ -204,10 +213,13 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
         let skip_reason = skip_reason(r);
         let runner = if skip_reason.is_some() {
             Runner::Skip
-        } else if tier <= 2 && r.kind == RegKind::Cmdline && r.openscad && r.script.is_none() {
+        } else if is_text(r, tier) {
             Runner::Text
         } else if is_geometry(r, tier) {
             Runner::Geometry
+        } else if tier != 4 && is_script(r, &binpath) {
+            // Tier 4 is neoscad's own image rendering, not ported yet.
+            Runner::Script
         } else {
             Runner::Pending
         };
@@ -255,6 +267,17 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
                     .as_deref()
                     .is_some_and(|e| Path::new(ref_root).join(e).exists());
                 if !exists {
+                    c.missing_expected += 1;
+                }
+            }
+            Runner::Script => {
+                c.script += 1;
+                // Only the SVG re-export and PDF cases compare with a file.
+                let missing = t
+                    .expected
+                    .as_deref()
+                    .is_some_and(|e| !Path::new(ref_root).join(e).exists());
+                if missing {
                     c.missing_expected += 1;
                 }
             }
@@ -325,13 +348,45 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
     }
 }
 
+/// A test compared as text, as `test_cmdline_tool.py` does: the tiers 0-2
+/// outputs, and the `.json` of `export-param` (tier 3, compared as parsed
+/// JSON like `compare_json`).
+fn is_text(r: &Registration, tier: u8) -> bool {
+    r.kind == RegKind::Cmdline
+        && r.openscad
+        && r.script.is_none()
+        && (tier <= 2 || (r.suffix == "json" && !r.stdio))
+}
+
+/// A test the script runner ports (see [`Runner::Script`]). A raw command
+/// is supported when it runs the binary under test (`{OPENSCAD}`) or
+/// `cmake -E cat`, which is all the relative-output tests use.
+fn is_script(r: &Registration, binpath: &str) -> bool {
+    match r.kind {
+        RegKind::Failing => r
+            .script
+            .as_deref()
+            .is_some_and(|s| s.ends_with("/shouldfail.py")),
+        RegKind::Raw => match r.command.first().map(String::as_str) {
+            Some("cmake") => r.command.get(1).is_some_and(|a| a == "-E"),
+            Some(c) => !binpath.is_empty() && c == binpath,
+            None => false,
+        },
+        RegKind::Cmdline => match r.script.as_deref() {
+            Some(s) if s.ends_with("/export_import_pngtest.py") => r.suffix != "png" && !r.stdio,
+            Some(s) => s.ends_with("/export_pngtest.py"),
+            None => false,
+        },
+    }
+}
+
 /// A tier 3 test the geometry runner handles: a PNG from a direct
 /// `--render` of the input (the runner substitutes a mesh export and has the
 /// nightly render it) or from `export_import_pngtest.py`, whose export step
 /// is exactly what neoscad is being tested on; and
 /// `stlexportsanitytest.py`, which validates an exported STL.
-/// `export_pngtest.py` (PDF through Ghostscript), the SVG re-export tests
-/// and `export-param` stay pending.
+/// PDF, SVG re-export and `export-param` belong to other runners
+/// ([`is_script`], [`is_text`]).
 fn is_geometry(r: &Registration, tier: u8) -> bool {
     if tier != 3 || r.kind != RegKind::Cmdline || r.stdio {
         return false;
@@ -352,6 +407,11 @@ fn has_arg(r: &Registration, pred: impl Fn(&str) -> bool) -> bool {
 /// renderer behaviour (preview modes, cameras, view options, colour
 /// schemes), per the architecture's tier 3/4 definitions.
 fn tier_of(r: &Registration) -> u8 {
+    if r.kind == RegKind::Raw && r.suffix == "png" {
+        // `relative-output_png_*` writes a PNG with the binary under test:
+        // image rendering by neoscad's own renderer, which is tier 4.
+        return 4;
+    }
     if r.kind != RegKind::Cmdline {
         return 5;
     }

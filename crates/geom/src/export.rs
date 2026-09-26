@@ -38,9 +38,23 @@ pub fn stl(ps: &PolySet, binary: bool, warnings: &mut Warnings) -> Vec<u8> {
     io::stl::write(ps.tessellate(warnings).mesh(), binary)
 }
 
-/// `export_svg` with the default options.
-pub fn svg(p: &Polygon2d) -> Vec<u8> {
-    io::svg::write(&p.outlines)
+/// `export_svg` with the given paint (`-O export-svg/...`).
+pub fn svg(p: &Polygon2d, style: &io::svg::SvgStyle) -> Vec<u8> {
+    io::svg::write_styled(&p.outlines, style)
+}
+
+/// `export_pdf`: the file and its `EXPORT-WARNING` texts.
+pub fn pdf(
+    p: &Polygon2d,
+    options: &io::pdf::PdfOptions,
+    info: &io::pdf::PdfInfo<'_>,
+) -> (Vec<u8>, Vec<String>) {
+    io::pdf::write(&p.outlines, options, info)
+}
+
+/// `export_wrl` (see `io::wrl::write`).
+pub fn wrl(ps: &PolySet, warnings: &mut Warnings) -> Vec<u8> {
+    io::wrl::write(ps.mesh(), warnings)
 }
 
 /// `export_dxf`.
@@ -144,7 +158,10 @@ M 10.7071,0.707107 L 11,-0 L 11,-10 L 10.7071,-10.7071 L 10,-11 L 0,-11
 \" stroke=\"black\" fill=\"none\" stroke-width=\"0.35\"/>
 </svg>
 ";
-        assert_eq!(String::from_utf8(svg(&p)).unwrap(), expected);
+        assert_eq!(
+            String::from_utf8(svg(&p, &io::svg::SvgStyle::default())).unwrap(),
+            expected
+        );
     }
 
     #[test]

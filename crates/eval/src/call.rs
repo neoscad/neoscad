@@ -257,7 +257,16 @@ impl<'a> Evaluator<'a> {
         let mut depth: u32 = 0;
         let result = loop {
             match self.simplify(unit, expr, &cur) {
-                Ok(Step::Done(v)) => break Ok(v),
+                // A warning from the callee itself (an unknown function, a
+                // builtin's argument check) is raised inside OpenSCAD's
+                // `FunctionCall::evaluate`, so it is traced as its caller.
+                Ok(Step::Done(v)) => match self.check_hard() {
+                    Ok(()) => break Ok(v),
+                    Err(mut e) => {
+                        self.trace_call(&mut e, call);
+                        break Err(e);
+                    }
+                },
                 Ok(Step::Next {
                     unit: nu,
                     expr: ne,

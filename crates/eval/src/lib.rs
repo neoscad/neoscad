@@ -52,6 +52,13 @@ pub use message::{Collect, Console, Message, Output};
 pub use node::Node;
 pub use value::Value;
 
+/// `OpenSCAD::parse_color`: a CSS or `xkcd:` colour name, or `#rgb[a]` /
+/// `#rrggbb[aa]`, as RGBA in 0..=1. Exports that take colour options (PDF)
+/// resolve them with the same table `color()` uses.
+pub fn parse_color(s: &str) -> Option<[f32; 4]> {
+    builtins::modules::parse_color(s.as_bytes())
+}
+
 /// A `use`d library, already parsed (see `lang::deps::load_dependencies`).
 #[derive(Debug, Clone, Copy)]
 pub struct Library<'a> {
@@ -169,6 +176,9 @@ pub struct Options {
     pub rng_seed: Option<u32>,
     /// Checked at every call and loop iteration; when set, evaluation stops.
     pub interrupt: Option<Arc<AtomicBool>>,
+    /// `--hardwarnings`: stop at the first warning, with the `TRACE:` lines
+    /// of an evaluation error (see [`Evaluation::hard_warning`]).
+    pub hardwarnings: bool,
 }
 
 impl Default for Options {
@@ -185,6 +195,7 @@ impl Default for Options {
             version: [2026.0, 9.0, 23.0],
             rng_seed: None,
             interrupt: None,
+            hardwarnings: false,
         }
     }
 }
@@ -218,6 +229,10 @@ pub struct Evaluation {
     pub aborted: bool,
     /// Whether [`Options::interrupt`] stopped it.
     pub interrupted: bool,
+    /// Whether [`Options::hardwarnings`] was set and a warning was printed:
+    /// evaluation stopped there (or ended just after it), and OpenSCAD
+    /// would exit with status 1.
+    pub hard_warning: bool,
 }
 
 /// Evaluate `main` with its `use`d `libraries`. `main_uses` are the keys of
