@@ -33,6 +33,9 @@ nightly with `--backend=cgal` and `--backend=manifold`.
     scripts/wasm-check.sh [--depths]                 # wasm32 build run in node
     ./target/release/conformance bench [--quick]     # vs all OpenSCAD refs -> progress/bench/
     ./target/release/conformance bench-chart --latest  # PNG summary
+    scripts/apple/build-core.sh                    # Rust core -> apple/build/NeoSCADCore.xcframework + Swift bindings
+    xcodegen generate --spec apple/project.yml     # apple/NeoSCAD.xcodeproj (gitignored); builds the core if missing
+    xcodebuild -project apple/NeoSCAD.xcodeproj -scheme NeoSCAD -derivedDataPath apple/build/DerivedData build|test
     scripts/agent-eval/run.py --help                  # agent-loop eval (uses claude -p; costs credits)
     ./target/release/conformance manifest [--check]  # after updating .reference
     ./target/release/conformance diff --format ast|echo|csg [PATHS]  # vs the nightly
@@ -46,13 +49,17 @@ against the nightly, which is how the harness itself is checked.
 
 - Library crates never touch `std::fs`, `std::env` or the clock. Files go
   through `lang`'s `FileSystem`; seeds, paths and limits come in through
-  `Options`. Only `crates/cli`, `crates/conformance` and test code may use
-  them directly. This is what keeps the WASM build honest.
+  `Options`. Only the host crates (`crates/cli`, `crates/ffi`,
+  `crates/conformance`) and test code may use them directly. This is what keeps the WASM build honest.
 - Output must be byte-identical at any thread count; add a determinism test
   for anything parallel.
 - `assets/` is vendored upstream content (Liberation fonts, MCAD); see
   `assets/README.md` for sources and the update procedure.
 - `vendor/manifold-rust` carries a local patch; see `vendor/README.md`.
+
+- Disk: build output is large. Keep the dev profile's reduced debug info,
+  and delete `apple/build/DerivedData` or `target/*` subdirectories freely,
+  since they rebuild.
 
 ## Working with agents
 

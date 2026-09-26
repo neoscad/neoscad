@@ -1,0 +1,24 @@
+[package]
+name = "neoscad-uniffi-bindgen"
+description = "UniFFI's Swift bindings generator, pinned to the UniFFI version crates/ffi uses (run by scripts/apple/build-core.sh)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# A crate of its own rather than a binary of `neoscad-ffi`: a binary there
+# would link the whole core (session, geom, wgpu) just to read the
+# library's metadata, and the generator's dependencies (clap, askama,
+# goblin) would join the static library the app links. The version must
+# match `crates/ffi`'s exactly: the generated Swift checks the library's
+# contract version and checksums at startup.
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "src/main.rs"
+
+[dependencies]
+uniffi = { version = "=0.32.2", default-features = false, features = ["cli", "cargo-metadata"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,32 @@
+[package]
+name = "neoscad-ffi"
+description = "The NeoSCAD core for the macOS app: a UniFFI bridge over `session::Session` (native only; not part of the WASM build)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "neoscad_ffi"
+# `staticlib` is what the app links (through the XCFramework that
+# scripts/apple/build-core.sh makes); `lib` is for `cargo test`.
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+assets = { package = "neoscad-assets", path = "../assets" }
+eval = { package = "neoscad-eval", path = "../eval" }
+geom = { package = "neoscad-geom", path = "../geom" }
+io = { package = "neoscad-io", path = "../io" }
+lang = { package = "neoscad-lang", path = "../lang" }
+render = { package = "neoscad-render", path = "../render" }
+serde_json.workspace = true
+session = { package = "neoscad-session", path = "../session" }
+text = { package = "neoscad-text", path = "../text" }
+uniffi = { version = "=0.32.2", default-features = false }
+
+# The workspace's lints, `forbid(unsafe_code)` included: UniFFI's
+# `extern "C"` exports come from its macros, which the lint does not look
+# into, and the hand-written code needs no `unsafe`.
+[lints]
+workspace = true

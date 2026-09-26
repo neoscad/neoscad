@@ -230,7 +230,7 @@ ffmpeg.
    `check`, `measure`, snapshot parts and issues, and a server that
    survives a panicking request). 7c (done): the MCP server and an
    agent-loop eval pilot.
-8. **macOS app.**
+8. **macOS app.** 8a+8b (done): XcodeGen project, NSDocument app, `crates/ffi` (UniFFI) and the `NeoSCADCore` framework. Plan: `docs/audits/macos-prep.md`.
 9. **WASM web app** (deferred by the owner, 2026-09-26). The library crates
    stay WASM-compatible, checked by `scripts/wasm-check.sh`, so it can be
    picked up later.

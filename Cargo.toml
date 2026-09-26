@@ -51,3 +51,11 @@ lto = "thin"
 codegen-units = 1
 panic = "unwind"
 debug = "line-tables-only"
+
+# Full debug info made `target/debug` about 21 GB and filled the disk. Line
+# tables still give file:line backtraces; dependencies carry none.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

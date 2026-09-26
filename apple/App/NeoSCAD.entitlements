@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  No App Sandbox (docs/audits/macos-prep.md, "Sandboxing"): OpenSCAD models
+  include and import files anywhere, and read OPENSCADPATH and the user
+  library folder. The hardened runtime is on through the build setting
+  ENABLE_HARDENED_RUNTIME and needs no exceptions: the core does no JIT
+  and loads no unsigned code.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

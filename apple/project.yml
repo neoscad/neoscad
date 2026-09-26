@@ -1,0 +1,194 @@
+# The macOS app's project, for XcodeGen (docs/architecture.md, "Apps").
+# `xcodegen generate --spec apple/project.yml` writes NeoSCAD.xcodeproj,
+# which is a build output: gitignored and never edited by hand.
+#
+# Targets:
+#   NeoSCADCore   framework: the UniFFI bindings (Core/Generated, written
+#                 by scripts/apple/build-core.sh) and the async wrapper
+#                 (Core/Engine.swift), linking the Rust core's XCFramework
+#   NeoSCAD       the app: an NSDocument editor for .scad files
+#   NeoSCADTests  Swift tests of the core through the bindings
+#   NeoSCADAppTests  tests hosted in the app: documents, the Render command
+name: NeoSCAD
+
+options:
+  bundleIdPrefix: org.neoscad
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  # The core build phase's input file list must exist before Xcode plans
+  # the first build; on a clean checkout this also builds the core once,
+  # because Xcode resolves the XCFramework when it plans the build, before
+  # any build phase can make it.
+  preGenCommand: ../scripts/apple/build-core.sh --prepare
+
+settings:
+  base:
+    # arm64 only: the Rust core is built for aarch64-apple-darwin alone,
+    # and a new target defaults to arm64 + x86_64, whose x86_64 link would
+    # fail (docs/audits/macos-prep.md, "arm64 only").
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+    MARKETING_VERSION: 0.1.0
+    CURRENT_PROJECT_VERSION: 1
+    SWIFT_VERSION: "6.0"
+    # Signed to run locally (ad hoc) until Developer ID signing (8j).
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: YES
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  NeoSCADCore:
+    type: framework
+    platform: macOS
+    sources:
+      - path: Core
+        excludes:
+          - Generated
+      # Written by the build phase below; listed even when missing (a clean
+      # checkout before the first build) so the target compiles it.
+      - path: Core/Generated/neoscad_ffi.swift
+        optional: true
+    dependencies:
+      # First: the Rust core, which writes the XCFramework and the Swift
+      # below.
+      - target: RustCore
+      - framework: build/NeoSCADCore.xcframework
+        embed: false
+      # What the Rust core (wgpu on Metal) calls.
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: Foundation.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.neoscad.NeoSCADCore
+        PRODUCT_NAME: NeoSCADCore
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: YES
+
+  NeoSCAD:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+        excludes:
+          - Info.plist
+    dependencies:
+      - target: NeoSCADCore
+        embed: true
+        codeSign: true
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleName: NeoSCAD
+        CFBundleDisplayName: NeoSCAD
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSApplicationCategoryType: public.app-category.graphics-design
+        NSPrincipalClass: NSApplication
+        NSHumanReadableCopyright: "GPL-2.0-or-later"
+        # NeoSCAD edits OpenSCAD's format; it does not own it. The type is
+        # imported (not exported) under OpenSCAD's own reverse-DNS prefix,
+        # so if OpenSCAD ever exports org.openscad.scad, its declaration
+        # wins and ours defers to it. OpenSCAD itself declares no UTI, so
+        # without this Finder types .scad files as a dynamic type, and
+        # Quick Look (8h) cannot match them.
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: org.openscad.scad
+            UTTypeDescription: OpenSCAD Design
+            UTTypeConformsTo:
+              - public.source-code
+              - public.plain-text
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - scad
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: OpenSCAD Design
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Default
+            LSItemContentTypes:
+              - org.openscad.scad
+            NSDocumentClass: SCADDocument
+    entitlements:
+      path: App/NeoSCAD.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.neoscad.NeoSCAD
+        PRODUCT_NAME: NeoSCAD
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: App/NeoSCAD.entitlements
+
+  NeoSCADTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: NeoSCADCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.neoscad.NeoSCADTests
+        GENERATE_INFOPLIST_FILE: YES
+
+  NeoSCADAppTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: AppTests
+    dependencies:
+      - target: NeoSCAD
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.neoscad.NeoSCADAppTests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/NeoSCAD.app/Contents/MacOS/NeoSCAD
+        BUNDLE_LOADER: $(TEST_HOST)
+
+aggregateTargets:
+  # The Rust core's build (scripts/apple/build-core.sh) as a target of its
+  # own that NeoSCADCore depends on, rather than a build phase inside
+  # NeoSCADCore: Xcode processes a target's XCFrameworks before its first
+  # build phase, so a phase in the same target that rewrites the
+  # XCFramework is a dependency cycle ("Cycle inside NeoSCADCore").
+  RustCore:
+    buildScripts:
+      - name: Build Rust core
+        # Cargo, then the bindings and the XCFramework when the library
+        # changed. Xcode skips the phase when no input is newer than the
+        # outputs; the input list is every file cargo reads for the core.
+        script: exec "${SRCROOT}/../scripts/apple/build-core.sh"
+        inputFileLists:
+          - $(SRCROOT)/build/core-inputs.xcfilelist
+        outputFiles:
+          - $(SRCROOT)/build/core.stamp
+          - $(SRCROOT)/Core/Generated/neoscad_ffi.swift
+          - $(SRCROOT)/build/NeoSCADCore.xcframework/Info.plist
+        basedOnDependencyAnalysis: true
+        showEnvVars: false
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+schemes:
+  NeoSCAD:
+    build:
+      targets:
+        NeoSCAD: all
+        NeoSCADTests: [test]
+        NeoSCADAppTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - NeoSCADTests
+        - NeoSCADAppTests
+    archive:
+      config: Release
