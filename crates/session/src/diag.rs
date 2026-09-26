@@ -240,6 +240,13 @@ fn hint(d: &Logged, names: &Names) -> Option<String> {
         closest(name, pool.into_iter()).map(|c| format!("did you mean '{c}'?"))
     };
     let text = match code {
+        DiagCode::UnknownModule if quoted(&d.message) == Some("part") => {
+            "`part()` is neoscad's named-parts extension: turn it on with `--enable part` \
+             (the `parts` request option), or define a module called `part`"
+        }
+        DiagCode::DuplicatePart => {
+            "give each part a unique name: parts with one name are measured and checked as one"
+        }
         DiagCode::UnknownModule => {
             let pool = names
                 .modules

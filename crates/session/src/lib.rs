@@ -42,10 +42,14 @@
 //! through [`Config::fonts`], timings through [`Config::clock`] and the
 //! GPU through [`Config::gpu`].
 
+pub mod check;
 pub mod diag;
 mod docfs;
 pub mod export;
+pub mod measure;
+pub mod mesh;
 mod parse;
+pub mod parts;
 pub mod snapshot;
 pub mod stats;
 
@@ -101,6 +105,9 @@ pub struct Config {
     pub rng_seed: u32,
     #[cfg(feature = "gpu")]
     pub gpu: Option<GpuProvider>,
+    /// neoscad's `part()` extension for every request (`--enable part`);
+    /// a request can also turn it on alone ([`Run::parts`]).
+    pub parts: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -138,6 +145,7 @@ impl Config {
             rng_seed: 0,
             #[cfg(feature = "gpu")]
             gpu: None,
+            parts: false,
         }
     }
 }
@@ -200,6 +208,9 @@ pub struct Run {
     /// requests do not, so two exports of one file can run side by side.
     pub supersede: bool,
     pub progress: Option<Progress>,
+    /// neoscad's `part("name") { ... }` extension (`--enable part`), on
+    /// for this request; see `eval::Options::parts`.
+    pub parts: bool,
 }
 
 impl std::fmt::Debug for Run {
@@ -232,6 +243,7 @@ impl Run {
             rng_seed: None,
             supersede: true,
             progress: None,
+            parts: false,
         }
     }
 }
@@ -469,7 +481,11 @@ struct JobGuard<'a> {
 
 impl Drop for JobGuard<'_> {
     fn drop(&mut self) {
-        let mut jobs = self.session.jobs.lock().expect("jobs");
+        let mut jobs = self
+            .session
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(v) = jobs.get_mut(&self.doc) {
             v.retain(|j| j.id != self.id);
             if v.is_empty() {
@@ -661,7 +677,10 @@ impl Session {
                 0
             }
         };
-        self.docs.lock().expect("docs").insert(doc.clone(), version);
+        self.docs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(doc.clone(), version);
         self.supersede(&doc);
         DocInfo {
             path: doc,
@@ -715,13 +734,23 @@ impl Session {
         let doc = self.doc_path(path);
         self.cancel(&doc);
         self.fs.remove(&doc);
-        self.products.lock().expect("products").remove(&doc);
-        self.docs.lock().expect("docs").remove(&doc).is_some()
+        self.products
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&doc);
+        self.docs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&doc)
+            .is_some()
     }
 
     /// The open documents.
     pub fn documents(&self) -> Vec<DocInfo> {
-        let docs = self.docs.lock().expect("docs");
+        let docs = self
+            .docs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut v: Vec<DocInfo> = docs
             .iter()
             .map(|(p, &version)| DocInfo {
@@ -739,7 +768,10 @@ impl Session {
     /// Stop every request running on `path`. Returns how many there were.
     pub fn cancel(&self, path: &Path) -> usize {
         let doc = self.doc_path(path);
-        let jobs = self.jobs.lock().expect("jobs");
+        let jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let v = jobs.get(&doc).map_or(&[][..], Vec::as_slice);
         for j in v {
             j.flag.store(true, Ordering::Relaxed);
@@ -750,7 +782,10 @@ impl Session {
     /// Stop the superseding requests running on `doc` (see
     /// [`Run::supersede`]).
     fn supersede(&self, doc: &Path) {
-        let jobs = self.jobs.lock().expect("jobs");
+        let jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for j in jobs.get(doc).into_iter().flatten() {
             if j.supersede {
                 j.flag.store(true, Ordering::Relaxed);
@@ -767,7 +802,7 @@ impl Session {
         let flag = Arc::new(AtomicBool::new(false));
         self.jobs
             .lock()
-            .expect("jobs")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(doc.to_path_buf())
             .or_default()
             .push(Job {
@@ -791,7 +826,10 @@ impl Session {
     // --- Caches ------------------------------------------------------------
 
     pub fn stats(&self) -> Stats {
-        let renderers = self.renderers.lock().expect("renderers");
+        let renderers = self
+            .renderers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut g = geom::CacheStats::default();
         for (_, r) in renderers.iter() {
             let s = r.stats();
@@ -802,14 +840,32 @@ impl Session {
             g.misses += s.misses;
             g.evictions += s.evictions;
         }
+        // Before the first render there is no renderer, and the sum of
+        // their budgets is 0 (`serve --status` said "of 0 MiB"): the budget
+        // is then the one the first renderer will get.
+        g.budget = g.budget.max(self.cfg.geometry_budget);
         Stats {
-            documents: self.docs.lock().expect("docs").len(),
-            parse: self.parse.lock().expect("parse cache").stats(),
+            documents: self
+                .docs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            parse: self
+                .parse
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stats(),
             geometry: g,
             renderers: renderers.len(),
             requests: self.requests.load(Ordering::Relaxed),
             cancelled: self.cancelled.load(Ordering::Relaxed),
-            running: self.jobs.lock().expect("jobs").values().map(Vec::len).sum(),
+            running: self
+                .jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .map(Vec::len)
+                .sum(),
             lexed: self.lexed.size(),
         }
     }
@@ -818,19 +874,39 @@ impl Session {
     pub fn set_budgets(&mut self, geometry: usize, parse: usize) {
         self.cfg.geometry_budget = geometry;
         self.cfg.parse_budget = parse;
-        self.parse.lock().expect("parse cache").set_budget(parse);
-        for (_, r) in self.renderers.lock().expect("renderers").iter() {
+        self.parse
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_budget(parse);
+        for (_, r) in self
+            .renderers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
             r.set_budget(geometry);
         }
     }
 
     /// Drop every cached parse, geometry and product.
     pub fn clear_caches(&self) {
-        self.parse.lock().expect("parse cache").clear();
+        self.parse
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.lexed.clear();
-        self.renderers.lock().expect("renderers").clear();
-        self.fonts.lock().expect("fonts").clear();
-        self.products.lock().expect("products").clear();
+        self.renderers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.fonts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.products
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     /// The fonts for a program's `use`d files, shared while they are the
@@ -842,7 +918,10 @@ impl Session {
             .map(|u| (u, self.fs.metadata(Path::new(u))))
             .collect();
         let sig = hash_of(format!("{fonts:?}"));
-        let mut cache = self.fonts.lock().expect("fonts");
+        let mut cache = self
+            .fonts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(i) = cache.iter().position(|(k, _)| *k == sig) {
             let e = cache.remove(i);
             cache.push(e.clone());
@@ -861,7 +940,10 @@ impl Session {
     /// used, so each combination has its own cache.
     fn renderer_for(&self, scheme: &geom::color::Scheme, fonts: u64) -> (u64, Arc<geom::Renderer>) {
         let key = hash_of((format!("{scheme:?}"), fonts));
-        let mut rs = self.renderers.lock().expect("renderers");
+        let mut rs = self
+            .renderers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(i) = rs.iter().position(|(k, _)| *k == key) {
             let e = rs.remove(i);
             rs.push(e.clone());
@@ -1020,6 +1102,7 @@ impl Session {
             rng_seed: run.rng_seed.unwrap_or(self.cfg.rng_seed),
             fs: self.fs.clone(),
             interrupt: Some(job.flag.clone()),
+            parts: run.parts || self.cfg.parts,
             ..eval::Options::default()
         };
         let ev = eval::evaluate(
@@ -1081,7 +1164,7 @@ impl Session {
         let reuse = self
             .products
             .lock()
-            .expect("products")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&doc)
             .filter(|p| p.key == key)
             .cloned();
@@ -1121,7 +1204,7 @@ impl Session {
                     Ok(p) => {
                         self.products
                             .lock()
-                            .expect("products")
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .insert(doc, p.clone());
                         p
                     }
@@ -1242,6 +1325,39 @@ impl Session {
         scheme: &render::ColorScheme,
         csg_limit: usize,
     ) -> Result<Rendered, Cancelled> {
+        self.render_impl(run, mode, scheme, csg_limit, false)
+            .map(|(r, _)| r)
+    }
+
+    /// [`Session::render`] in [`Mode::Render`], with the solid of each
+    /// `part()` in the model (none without `--enable part`, or when the
+    /// model has no parts): what `check`, `measure` and part snapshots
+    /// work from.
+    pub fn render_parts(
+        &self,
+        run: &Run,
+        scheme: &render::ColorScheme,
+    ) -> Result<(Rendered, Vec<parts::Part>), Cancelled> {
+        eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+            self.render_impl(
+                run,
+                Mode::Render,
+                scheme,
+                geom::csg::DEFAULT_TERM_LIMIT,
+                true,
+            )
+        })
+    }
+
+    fn render_impl(
+        &self,
+        run: &Run,
+        mode: Mode,
+        scheme: &render::ColorScheme,
+        csg_limit: usize,
+        want_parts: bool,
+    ) -> Result<(Rendered, Vec<parts::Part>), Cancelled> {
+        let mut parts = Vec::new();
         let mut pipe = self.pipe(run);
         let job = self.begin(&pipe.paths.doc, run.supersede);
         let mut out = Rendered {
@@ -1270,6 +1386,10 @@ impl Session {
             out.geometry = p.geometry.filter(|g| !g.is_empty());
             out.tree = p.tree;
             out.cache_entries = entries;
+            if want_parts {
+                let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+                parts = self.part_solids(&pipe, &loaded, top, &scheme.geometry_scheme(), &job)?;
+            }
             Ok(())
         })();
         match step {
@@ -1278,7 +1398,50 @@ impl Session {
             Ok(()) => {}
         }
         (out.log, out.timings) = self.finish(pipe);
-        Ok(out)
+        Ok((out, parts))
+    }
+
+    /// The solid of every part under `top`, each on its own and placed as
+    /// the model places it ([`parts::Part`]). Each part node is rendered
+    /// through the same renderer as the model, so its geometry comes from
+    /// the cache the render just filled.
+    fn part_solids(
+        &self,
+        pipe: &Pipe,
+        loaded: &Loaded,
+        top: &eval::Node,
+        scheme: &geom::color::Scheme,
+        job: &JobGuard<'_>,
+    ) -> Result<Vec<parts::Part>, Stop> {
+        let found = parts::find(top);
+        if found.is_empty() {
+            return Ok(Vec::new());
+        }
+        let keys = eval::dump::Keys::new(top, &*self.fs);
+        let (font_sig, fonts) = self.fonts_for(&loaded.used());
+        let (_, renderer) = self.renderer_for(scheme, font_sig);
+        let opts = geom::RenderOptions {
+            scheme: *scheme,
+            force: false,
+            fs: self.fs.clone(),
+            work_dir: pipe.paths.cwd.clone(),
+            fonts,
+            interrupt: Some(job.flag.clone()),
+            // The model's render printed every message already.
+            replay: None,
+        };
+        let nodes: Vec<&eval::Node> = found.iter().map(|f| f.node).collect();
+        let built = match renderer.render_many(&nodes, &keys, opts) {
+            Ok(b) => b,
+            Err(u) if u.is_interrupted() => return Err(Stop::Cancelled),
+            // The model rendered, so its parts do too; a part that somehow
+            // does not is left out rather than failing the request.
+            Err(_) => return Ok(Vec::new()),
+        };
+        if job.stopped() {
+            return Err(Stop::Cancelled);
+        }
+        Ok(parts::assemble(&found, built))
     }
 
     /// Evaluate, render and export to each output in turn, printing what

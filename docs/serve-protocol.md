@@ -22,7 +22,7 @@ change would get a new `protocol` number; there has been none.
 
 | `protocol` | Changes |
 |---|---|
-| 1 | First version (phase 7a). |
+| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. |
 
 ## Transports
 
@@ -68,7 +68,8 @@ over the limit) ends the connection.
 `initialize`, `status`, `stats`, `documents`, `open`, `update`, `close`
 and `cancel` are handled in arrival order before the next message is
 read, so `update` then `render` renders the new text. `evaluate`,
-`render`, `export`, `snapshot` and the `cli.*` methods run concurrently,
+`render`, `export`, `snapshot`, `check`, `measure` and the `cli.*`
+methods run concurrently,
 each on its own thread; responses may come back in any order (match them
 by `id`).
 
@@ -94,6 +95,8 @@ Requests on a model take:
 | `defines` | [string] | `-D` assignments, e.g. `"a=3"`. |
 | `quiet` | bool | Only errors in the log. |
 | `seed` | int | The seed of unseeded `rands()` (default: the server's, fixed per process). |
+| `enable` | [string] | `["part"]` turns on neoscad's `part()` extension for the request (`docs/cli-json.md`, "Named parts"), as `--enable part` does. |
+| `parts` | bool | The same as `"enable": ["part"]`. |
 | `progress` | bool | Send `progress` notifications (default true). |
 
 Results that describe a run carry `exit_code` (0, or the command line's
@@ -125,7 +128,8 @@ Params: anything (ignored). Result:
                       "svg", "dxf", "pdf", "png", "echo", "ast", "csg"],
    "render_modes": ["render", "force", "preview"],
    "incremental_edits": true,
-   "snapshot": true}}
+   "snapshot": true, "check": true, "measure": true,
+   "features": ["part"]}}
 ```
 
 `initialize` is optional (the command line does not send it).
@@ -153,7 +157,10 @@ answering; a stdio server waits for `exit` or the end of input.
 ```
 
 Sizes are estimates in bytes. Both caches evict least recently used
-entries past their budgets. `requests` counts evaluations, renders,
+entries past their budgets. `geometry_cache.budget` sums the renderers'
+budgets, and is never below the configured budget (`--cache-mb`): before
+the first render, when there is no renderer yet, it is the budget the
+first will get. `requests` counts evaluations, renders,
 exports and snapshots (a snapshot with `diff` is two).
 
 ### `documents`
@@ -230,19 +237,44 @@ nothing, except `echo`, whose file holds the messages that say why.
 A contact sheet (`neoscad snapshot`). Params: the common ones, `output`
 (default: the model's stem with `-snapshot.png`, relative to `cwd`),
 `views` ([string]), `size` (`"WxH"`), `dims`, `preview`, `diff` (another
-model), `lighting` (`headlight`, the default, or `openscad`). Result: the
+model), `lighting` (`headlight`, the default, or `openscad`),
+`highlight` ([string]: parts to show in colour, the rest ghosted) and
+`issues` (`true` to run `check` with its defaults, or with the check
+parameters given alongside; or an object of check parameters: the
+findings are marked on the sheet). Result: the
 snapshot summary of `docs/cli-json.md` plus `exit_code`. A request the
 server cannot draw (no GPU, a bad view name) is error -32001 with the
 message.
 
-### `cli.export`, `cli.snapshot`
+### `check`
+
+Printability checks (`neoscad check`). Params: the common ones, `bed`
+(`"WxDxH"` or `[w, d, h]`, mm), `nozzle`, `min_wall`, `max_overhang`
+(degrees from vertical) and `max_findings`; out of range is error
+-32602. Result: the check object of `docs/cli-json.md` ("`neoscad
+check`"), whose `exit_code` is 1 when a finding is an error. Publishes
+the document's diagnostics.
+
+### `measure`
+
+Measurements (`neoscad measure`). Params: the common ones, `part`
+(string), `between` ([A, B]), `section` (`"z=5"`, `"x=-2"`, `"y=0"`)
+and `svg`: a file name (the server writes the section's outline there,
+relative to `cwd`, and `section.svg` names it) or `true` (the SVG text
+in `section.svg_text`). Result: the measure object of
+`docs/cli-json.md`; an unknown part gives `failed` and `error` with
+`exit_code` 1.
+
+### `cli.export`, `cli.snapshot`, `cli.check`, `cli.measure`
 
 The command line's server mode: a command-line run for a client of the
 **same build** (`binary`, which identifies the executable) in the **same
 environment** (`environment`: `OPENSCADPATH`, `OPENSCAD_FONT_PATH`,
 `NEOSCAD_FONT_DIR`, `HOME`), with `cwd`. The other parameters are the
-command line's, as `crates/cli/src/delegate.rs` and
-`crates/cli/src/snapshot.rs` build them. The result is what the command
+command line's, as `crates/cli/src/delegate.rs`,
+`crates/cli/src/snapshot.rs`, `crates/cli/src/check.rs` and
+`crates/cli/src/measure.rs` build them (`cli.export` carries `parts`
+for `--enable part`). The result is what the command
 would have printed: `{"exit_code", "stderr", "stdout"}` (strings, or
 arrays of bytes when not UTF-8). A server of another build or environment
 answers -32001, and the client runs the command itself.
@@ -254,7 +286,8 @@ From the server:
 - `progress`: `{"id": <request id>, "stage": "parse" | "evaluate" |
   "geometry" | "draw"}`, as each stage starts.
 - `diagnostics`: `{"path": <normalised path>, "diagnostics": [...]}`
-  after each `evaluate`, `render` or `export` of a document: its current
+  after each `evaluate`, `render`, `export`, `check` or `measure` of a
+  document: its current
   diagnostics (possibly none), as LSP publishes them.
 
 From the client:
@@ -274,13 +307,15 @@ From the client:
 | -32602 | Bad parameters (the message says which). |
 | -32800 | Cancelled by a newer request on the document, or `cancel`. |
 | -32001 | The operation could not run: no GPU, a snapshot with a bad view, a `cli.*` request from another build or environment. |
+| -32603 | The request panicked (a bug): the message is `internal error: the request panicked: ...`. The server keeps serving; its documents and caches stay (the release build unwinds, and the session's locks survive a request that panicked holding one). |
 
 A model's own failures (a syntax error, an empty result) are not errors:
 they are results with a non-zero `exit_code` and the diagnostics.
 
 ## The command line as a client
 
-`neoscad IN -o OUT` (geometry and PNG exports) and `neoscad snapshot`
+`neoscad IN -o OUT` (geometry and PNG exports), `neoscad snapshot`,
+`neoscad check` and `neoscad measure`
 send their work to the server on the default socket when one answers,
 unless `--no-server` is given or `NEOSCAD_NO_SERVER` is set (the
 conformance harness sets it). The output is the command's own: the same

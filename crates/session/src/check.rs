@@ -1,0 +1,1117 @@
+//! `check`: printability checks on a model's rendered solid, for FDM
+//! printing (`neoscad check`, the server's `check` method, and the marks of
+//! `snapshot --issues`). The JSON is documented in `docs/cli-json.md`.
+//!
+//! Each check works on the rendered solid's triangles ([`Mesh`]); with
+//! named parts, findings name the part their faces came from, and the
+//! parts' own solids are checked too.
+//!
+//! - **closed and manifold:** Manifold's status of the solid (and of each
+//!   part's); a mesh result that was never through a boolean has its open
+//!   and over-shared edges counted.
+//! - **components:** pieces whose triangles share no vertex. A piece
+//!   whose lowest point is above the model's lowest point (by more than
+//!   [`CheckSettings::bed_tolerance`]) is an unsupported island.
+//! - **wall thickness:** a sampled estimate. From points on every face
+//!   (the centroid, or a grid of points on large faces) a ray goes inward
+//!   along the face's normal to where it leaves the solid; that distance
+//!   is the wall's thickness there. Rays measure along the normal, so a
+//!   wall is measured exactly where its two sides are parallel and
+//!   overestimated where they are not, and a feature narrower than the
+//!   sample spacing on a large face can be missed.
+//! - **overhangs:** downward faces steeper than the limit from vertical,
+//!   excluding faces on the bed, grouped into connected regions.
+//! - **bed fit**, **tiny features** (pieces smaller than two extrusion
+//!   widths) and **intersecting parts** (overlap volume by a boolean
+//!   intersection of the two parts' solids).
+
+use std::collections::HashMap;
+
+use geom::Geometry;
+use geom::manifold_geom::{ManifoldGeometry, OpType};
+use serde_json::{Value, json};
+
+use crate::mesh::{Aabb, Bvh, Mesh, V3, add, dot, scale};
+use crate::parts::Part;
+use crate::{Cancelled, Log, Run, Session, stats};
+
+/// What counts as a problem. The defaults are common FDM values: a 0.4 mm
+/// nozzle, walls of at least two perimeters (0.8 mm), overhangs up to 45°
+/// from vertical without support, and no bed unless one is given.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CheckSettings {
+    /// Build volume `[width, depth, height]` in mm; `None` skips the check.
+    pub bed: Option<[f64; 3]>,
+    /// Nozzle diameter (mm): walls thinner than this cannot be printed at
+    /// all (an error), and features smaller than twice it are tiny.
+    pub nozzle: f64,
+    /// Walls thinner than this are a warning (mm).
+    pub min_wall: f64,
+    /// The steepest printable overhang, degrees from vertical.
+    pub max_overhang: f64,
+    /// How far above the lowest point a piece may start and still count
+    /// as on the bed, and a face as bed contact (mm).
+    pub bed_tolerance: f64,
+    /// Findings reported per code; the rest are counted in `truncated`.
+    pub max_findings: usize,
+}
+
+impl Default for CheckSettings {
+    fn default() -> Self {
+        CheckSettings {
+            bed: None,
+            nozzle: 0.4,
+            min_wall: 0.8,
+            max_overhang: 45.0,
+            bed_tolerance: 0.05,
+            max_findings: 10,
+        }
+    }
+}
+
+impl CheckSettings {
+    pub fn json(&self) -> Value {
+        json!({
+            "bed": self.bed,
+            "nozzle": self.nozzle,
+            "min_wall": self.min_wall,
+            "max_overhang": self.max_overhang,
+            "bed_tolerance": self.bed_tolerance,
+            "max_findings": self.max_findings,
+        })
+    }
+}
+
+/// How bad a finding is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    /// Will not print (or not as modelled).
+    Error,
+    /// Likely to print badly.
+    Warning,
+    Info,
+}
+
+impl Level {
+    pub fn name(self) -> &'static str {
+        match self {
+            Level::Error => "error",
+            Level::Warning => "warning",
+            Level::Info => "info",
+        }
+    }
+}
+
+/// One problem found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Finding {
+    pub level: Level,
+    /// Stable: `not-3d`, `empty`, `not-closed`, `not-manifold`,
+    /// `floating`, `thin-wall`, `overhang`, `bed-fit`, `tiny-feature`,
+    /// `parts-intersect`, `part-not-manifold`, `off-bed`.
+    pub code: &'static str,
+    pub message: String,
+    /// Where: the worst point, and the box of the whole problem.
+    pub point: V3,
+    pub bbox: Aabb,
+    pub part: Option<String>,
+    pub fix: String,
+    /// The measured value (thickness, area, volume, ...) and the limit it
+    /// broke, in mm, mm² or mm³.
+    pub value: Option<f64>,
+    pub limit: Option<f64>,
+}
+
+/// Rounded to 1e-4 (a tenth of a micron is below any printer's
+/// resolution), so the JSON stays short.
+fn r4(x: f64) -> f64 {
+    let y = (x * 1e4).round() / 1e4;
+    if y == 0.0 { 0.0 } else { y }
+}
+
+fn v4(p: V3) -> [f64; 3] {
+    p.map(r4)
+}
+
+fn bbox4(b: &Aabb) -> Value {
+    if b.is_empty() {
+        return Value::Null;
+    }
+    stats::bbox_json(&v4(b.lo), &v4(b.hi))
+        .as_object()
+        .map_or(Value::Null, |o| {
+            let mut o = o.clone();
+            if let Some(Value::Array(s)) = o.get_mut("size") {
+                for x in s.iter_mut() {
+                    *x = json!(r4(x.as_f64().unwrap_or(0.0)));
+                }
+            }
+            Value::Object(o)
+        })
+}
+
+impl Finding {
+    pub fn json(&self, id: usize) -> Value {
+        json!({
+            "id": id,
+            "severity": self.level.name(),
+            "code": self.code,
+            "message": self.message,
+            "part": self.part,
+            "location": {"point": v4(self.point), "bbox": bbox4(&self.bbox)},
+            "fix": self.fix,
+            "value": self.value.map(r4),
+            "limit": self.limit,
+        })
+    }
+}
+
+fn mm(x: f64) -> String {
+    render::snapshot::number(x)
+}
+
+/// Everything a check found, before it is JSON.
+#[derive(Debug, Clone, Default)]
+pub struct Analysis {
+    /// Sorted: errors first, then by code order of the checks.
+    pub findings: Vec<Finding>,
+    /// Per code, findings left out past [`CheckSettings::max_findings`].
+    pub truncated: Vec<(&'static str, usize)>,
+    /// Findings by level (errors, warnings, info), before truncation.
+    pub counts: [usize; 3],
+    pub model: Value,
+    pub parts: Vec<Value>,
+    /// Milliseconds per stage.
+    pub timings: Vec<(&'static str, f64)>,
+    /// The mesh the checks ran on, with the triangles each marked (for
+    /// `snapshot --issues`).
+    pub mesh: Mesh,
+    pub thin: Vec<u32>,
+    pub overhang: Vec<u32>,
+    /// Triangles of floating pieces.
+    pub floating: Vec<u32>,
+}
+
+/// Run every check on a rendered model and its parts. `now` is a clock in
+/// milliseconds for the stage timings.
+pub fn analyze(
+    geometry: Option<&Geometry>,
+    parts: &[Part],
+    s: &CheckSettings,
+    now: &dyn Fn() -> f64,
+) -> Analysis {
+    let mut a = Analysis::default();
+    let mut out: Vec<Finding> = Vec::new();
+    let mut t = now();
+    let mut lap = |a: &mut Analysis, name: &'static str| {
+        let n = now();
+        a.timings.push((name, n - t));
+        t = n;
+    };
+    let Some(g) = geometry.filter(|g| !g.is_empty()) else {
+        out.push(Finding {
+            level: Level::Error,
+            code: "empty",
+            message: "the model is empty: nothing to print".into(),
+            point: [0.0; 3],
+            bbox: Aabb::EMPTY,
+            part: None,
+            fix: "check that the top level creates geometry (a `%` or `*` modifier, or an \
+                  intersection or difference that removes everything, leaves nothing)"
+                .into(),
+            value: None,
+            limit: None,
+        });
+        a.counts[0] = 1;
+        a.findings = out;
+        a.model = Value::Null;
+        return a;
+    };
+    if let Geometry::Polygon2d(p) = g {
+        let (lo, hi) = p.bounds().unwrap_or(([0.0; 2], [0.0; 2]));
+        out.push(Finding {
+            level: Level::Error,
+            code: "not-3d",
+            message: "the model is 2D: printability checks need a 3D solid".into(),
+            point: [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, 0.0],
+            bbox: Aabb {
+                lo: [lo[0], lo[1], 0.0],
+                hi: [hi[0], hi[1], 0.0],
+            },
+            part: None,
+            fix: "extrude it (`linear_extrude(height) ...`) to check it as a print".into(),
+            value: None,
+            limit: None,
+        });
+        a.counts[0] = 1;
+        a.findings = out;
+        a.model = json!({"dimensions": 2});
+        return a;
+    }
+
+    // Closed and manifold. A mesh that was never through a boolean (a lone
+    // polyhedron or extrusion) is looked at directly, since converting it
+    // is exactly what can fail.
+    let mut open_edges = 0usize;
+    let mut shared_edges = 0usize;
+    if let Geometry::PolySet(ps) = g {
+        let tri = ps.tessellate(&mut Vec::new());
+        let mut edges: HashMap<(u32, u32), i32> = HashMap::new();
+        for f in &tri.faces {
+            for k in 0..f.len() {
+                let (u, v) = (f[k], f[(k + 1) % f.len()]);
+                *edges.entry((u.min(v), u.max(v))).or_insert(0) += 1;
+            }
+        }
+        open_edges = edges.values().filter(|&&n| n == 1).count();
+        shared_edges = edges.values().filter(|&&n| n > 2).count();
+    }
+    let solid = stats::solid(g);
+    let mesh = Mesh::of_solid(&solid);
+    let bbox = mesh.bbox();
+    let manifold = solid.is_valid() && open_edges == 0 && shared_edges == 0;
+    lap(&mut a, "manifold");
+    if !manifold {
+        let (code, message, fix) = if open_edges > 0 {
+            (
+                "not-closed",
+                format!("the surface is not closed: {open_edges} edges belong to only one face"),
+                "close the mesh: every edge of a polyhedron must be shared by exactly two faces \
+                 (check the face lists for missing or duplicated faces)",
+            )
+        } else {
+            (
+                "not-manifold",
+                if shared_edges > 0 {
+                    format!(
+                        "the solid is not manifold: {shared_edges} edges belong to more than two faces"
+                    )
+                } else {
+                    "the solid is not manifold (Manifold could not build a valid solid)".to_string()
+                },
+                "make objects that should be one overlap a little instead of touching at an edge \
+                 or a point, and check polyhedron faces for consistent winding",
+            )
+        };
+        out.push(Finding {
+            level: Level::Error,
+            code,
+            message,
+            point: bbox.center(),
+            bbox,
+            part: None,
+            fix: fix.into(),
+            value: None,
+            limit: None,
+        });
+    }
+    if mesh.tris.is_empty() {
+        a.counts[0] = out.len();
+        a.findings = out;
+        a.model = json!({"dimensions": 3, "manifold": manifold, "components": 0});
+        a.mesh = mesh;
+        return a;
+    }
+    let bed_z = bbox.lo[2];
+
+    // Components: floating islands and tiny pieces.
+    let (comp_of, ncomp) = mesh.components();
+    let mut comp_box = vec![Aabb::EMPTY; ncomp];
+    let mut comp_part: Vec<HashMap<u32, f64>> = vec![HashMap::new(); ncomp];
+    for (t, &c) in comp_of.iter().enumerate() {
+        let c = c as usize;
+        comp_box[c] = comp_box[c].union(&mesh.tri_box(t));
+        if let Some(p) = mesh.part[t] {
+            *comp_part[c].entry(p).or_insert(0.0) += mesh.area(t);
+        }
+    }
+    let owner = |m: &HashMap<u32, f64>| -> Option<String> {
+        m.iter()
+            .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(a.0)))
+            .map(|(&p, _)| mesh.part_names[p as usize].to_string())
+    };
+    let mut floating = 0;
+    let mut floating_comps = Vec::new();
+    let tiny = 2.0 * s.nozzle;
+    for c in 0..ncomp {
+        let b = comp_box[c];
+        let lift = b.lo[2] - bed_z;
+        if lift > s.bed_tolerance {
+            floating += 1;
+            floating_comps.push(c as u32);
+            out.push(Finding {
+                level: Level::Error,
+                code: "floating",
+                message: format!(
+                    "a piece starts {} mm above the bed with nothing under it",
+                    mm(lift)
+                ),
+                // The piece's centre (its bottom face is where the
+                // overhang finding for it points).
+                point: b.center(),
+                bbox: b,
+                part: owner(&comp_part[c]),
+                fix: "connect it to the rest of the model or lower it onto the bed; otherwise it \
+                      needs support, or print it as a separate object"
+                    .into(),
+                value: Some(lift),
+                limit: Some(s.bed_tolerance),
+            });
+        }
+        let size = b.size();
+        let extent = size[0].max(size[1]).max(size[2]);
+        if extent < tiny {
+            out.push(Finding {
+                level: Level::Warning,
+                code: "tiny-feature",
+                message: format!(
+                    "a piece {} x {} x {} mm is smaller than two extrusion widths ({} mm)",
+                    mm(size[0]),
+                    mm(size[1]),
+                    mm(size[2]),
+                    mm(tiny)
+                ),
+                point: b.center(),
+                bbox: b,
+                part: owner(&comp_part[c]),
+                fix: "enlarge it, merge it into a bigger piece, or remove it; the slicer will \
+                      likely drop or blob it"
+                    .into(),
+                value: Some(extent),
+                limit: Some(tiny),
+            });
+        }
+    }
+    if bed_z.abs() > s.bed_tolerance {
+        out.push(Finding {
+            level: Level::Info,
+            code: "off-bed",
+            message: format!(
+                "the model's lowest point is at z = {} mm, not on the bed (z = 0)",
+                mm(bed_z)
+            ),
+            point: [bbox.center()[0], bbox.center()[1], bed_z],
+            bbox,
+            part: None,
+            fix: "slicers usually drop a model onto the bed; translate it to z = 0 to print it \
+                  where it is modelled"
+                .into(),
+            value: Some(bed_z),
+            limit: Some(0.0),
+        });
+    }
+    a.floating = (0..mesh.tris.len() as u32)
+        .filter(|&t| floating_comps.contains(&comp_of[t as usize]))
+        .collect();
+    lap(&mut a, "components");
+
+    // Wall thickness.
+    let bvh = Bvh::new(&mesh);
+    let diag = crate::mesh::norm(bbox.size()).max(1e-9);
+    let (walls, thin_tris, min_wall) = walls(&mesh, &bvh, s, diag);
+    out.extend(walls);
+    a.thin = thin_tris;
+    lap(&mut a, "walls");
+
+    // Overhangs.
+    let (overhangs, over_tris, over_area) = overhangs(&mesh, s, bed_z);
+    out.extend(overhangs);
+    a.overhang = over_tris;
+    lap(&mut a, "overhangs");
+
+    // Bed fit.
+    if let Some(bed) = s.bed {
+        let size = bbox.size();
+        let fits = |x: f64, y: f64| x <= bed[0] + 1e-9 && y <= bed[1] + 1e-9;
+        let tall = size[2] > bed[2] + 1e-9;
+        if tall || !fits(size[0], size[1]) {
+            let rotated = !tall && fits(size[1], size[0]);
+            out.push(Finding {
+                level: if rotated {
+                    Level::Warning
+                } else {
+                    Level::Error
+                },
+                code: "bed-fit",
+                message: format!(
+                    "the model ({} x {} x {} mm) does not fit the {} x {} x {} mm bed{}",
+                    mm(size[0]),
+                    mm(size[1]),
+                    mm(size[2]),
+                    mm(bed[0]),
+                    mm(bed[1]),
+                    mm(bed[2]),
+                    if rotated { " as placed" } else { "" }
+                ),
+                point: bbox.center(),
+                bbox,
+                part: None,
+                fix: if rotated {
+                    "rotate it 90° about z (`rotate([0, 0, 90])`) and it fits".into()
+                } else {
+                    "scale it down, split it into parts that fit, or lay it on another side".into()
+                },
+                value: Some(size[0].max(size[1]).max(size[2])),
+                limit: None,
+            });
+        }
+    }
+
+    // Parts: their own solids.
+    let mut part_json = Vec::new();
+    for p in parts {
+        let Some(sol) = &p.solid else {
+            part_json.push(json!({"name": p.name, "instances": p.instances,
+                "context": p.context, "dimensions": 2}));
+            continue;
+        };
+        let pm = Mesh::of_solid(sol);
+        let (vol, area, _) = pm.mass();
+        let (_, pc) = pm.components();
+        let pb = pm.bbox();
+        if !sol.is_valid() {
+            out.push(Finding {
+                level: Level::Error,
+                code: "part-not-manifold",
+                message: format!("part '{}' is not a valid solid on its own", p.name),
+                point: pb.center(),
+                bbox: pb,
+                part: Some(p.name.clone()),
+                fix: "make its pieces overlap a little instead of touching at an edge or a \
+                      point, and check polyhedron faces"
+                    .into(),
+                value: None,
+                limit: None,
+            });
+        }
+        part_json.push(json!({
+            "name": p.name,
+            "instances": p.instances,
+            "context": p.context,
+            "dimensions": 3,
+            "manifold": sol.is_valid(),
+            "components": pc,
+            "volume": r4(vol),
+            "area": r4(area),
+            "bbox": bbox4(&pb),
+        }));
+    }
+    out.extend(intersections(parts));
+    lap(&mut a, "parts");
+
+    let (vol, area, centroid) = mesh.mass();
+    a.model = json!({
+        "dimensions": 3,
+        "manifold": manifold,
+        "components": ncomp,
+        "floating": floating,
+        "volume": r4(vol),
+        "area": r4(area),
+        "centroid": v4(centroid),
+        "bbox": bbox4(&bbox),
+        "triangles": mesh.tris.len(),
+        "min_wall": min_wall.map(|(d, p, part)| json!({"thickness": r4(d), "point": v4(p), "part": part})),
+        "overhang_area": r4(over_area),
+    });
+    a.parts = part_json;
+
+    // Errors first, then in check order; truncate per code.
+    out.sort_by_key(|f| f.level);
+    for f in &out {
+        a.counts[f.level as usize] += 1;
+    }
+    let mut per: Vec<(&'static str, usize)> = Vec::new();
+    let mut kept = Vec::new();
+    for f in out {
+        let n = match per.iter_mut().find(|(c, _)| *c == f.code) {
+            Some(e) => {
+                e.1 += 1;
+                e.1
+            }
+            None => {
+                per.push((f.code, 1));
+                1
+            }
+        };
+        if n <= s.max_findings {
+            kept.push(f);
+        }
+    }
+    a.truncated = per
+        .into_iter()
+        .filter(|(_, n)| *n > s.max_findings)
+        .map(|(c, n)| (c, n - s.max_findings))
+        .collect();
+    a.findings = kept;
+    a.mesh = mesh;
+    a
+}
+
+/// Points on triangle `t` to measure from: the centroid, or the centroids
+/// of a 4- or 16-way midpoint subdivision on larger faces, so a thin spot
+/// in the middle of a big face is not missed.
+fn samples(mesh: &Mesh, t: usize, cell: f64) -> Vec<V3> {
+    let [a, b, c] = mesh.corners(t);
+    let area = mesh.area(t);
+    let level = if area <= cell * cell {
+        0
+    } else if area <= 16.0 * cell * cell {
+        1
+    } else {
+        2
+    };
+    let mut tris = vec![[a, b, c]];
+    for _ in 0..level {
+        let mut next = Vec::with_capacity(tris.len() * 4);
+        for [p, q, r] in tris {
+            let m = |x: V3, y: V3| scale(add(x, y), 0.5);
+            let (pq, qr, rp) = (m(p, q), m(q, r), m(r, p));
+            next.extend([[p, pq, rp], [pq, q, qr], [rp, qr, r], [pq, qr, rp]]);
+        }
+        tris = next;
+    }
+    tris.iter()
+        .map(|[p, q, r]| scale(add(add(*p, *q), *r), 1.0 / 3.0))
+        .collect()
+}
+
+/// A thin spot: where, how thin, and on which triangle.
+struct Thin {
+    mid: V3,
+    thickness: f64,
+    tri: u32,
+    /// The face the ray left through.
+    hit: u32,
+}
+
+/// How parallel a wall's two sides must be: the cosine of 45°.
+const WALL_COS: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
+/// Rays at most this many, spread evenly over the faces; beyond it faces
+/// are strided (a mesh this dense samples finely anyway).
+const MAX_RAYS: usize = 400_000;
+
+type Walls = (Vec<Finding>, Vec<u32>, Option<(f64, V3, Option<String>)>);
+
+fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
+    let n = mesh.tris.len();
+    let stride = n.div_ceil(MAX_RAYS / 4).max(1);
+    // Sample spacing: fine enough to catch a wall a few widths across.
+    let cell = (4.0 * s.min_wall).max(diag / 200.0);
+    let tmin = diag * 1e-9;
+    let mut thin: Vec<Thin> = Vec::new();
+    let mut thinnest: Option<(f64, V3, u32)> = None;
+    for t in (0..n).step_by(stride) {
+        let normal = mesh.normal(t);
+        if normal == [0.0; 3] {
+            continue;
+        }
+        let d = scale(normal, -1.0);
+        for p in samples(mesh, t, cell) {
+            // Faces sharing a corner with this one are not across a wall
+            // from it: at a sharp edge the neighbour is hit at once, and
+            // every knife edge and sliver would measure zero.
+            let corners = mesh.tris[t];
+            let near = |h: u32| mesh.tris[h as usize].iter().any(|v| corners.contains(v));
+            let Some((h, hit)) = bvh.ray(mesh, p, d, tmin, 2.0 * diag, near) else {
+                continue;
+            };
+            // A wall's two sides face away from each other. The far face
+            // must look within 45° of the ray's way (it is where the ray
+            // leaves the solid, roughly parallel to this face); anything
+            // else is a corner or a slope, not a wall, and an entering hit
+            // means the mesh is inconsistent here. Either way the sample
+            // says nothing.
+            if dot(mesh.normal(hit as usize), d) < WALL_COS {
+                continue;
+            }
+            let mid = add(p, scale(d, h / 2.0));
+            if thinnest.is_none_or(|(x, _, _)| h < x) {
+                thinnest = Some((h, mid, t as u32));
+            }
+            if h < s.min_wall {
+                thin.push(Thin {
+                    mid,
+                    thickness: h,
+                    tri: t as u32,
+                    hit,
+                });
+            }
+        }
+    }
+    let mut tris: Vec<u32> = thin.iter().map(|x| x.tri).collect();
+    tris.sort_unstable();
+    tris.dedup();
+    // One finding per wall: thin faces that share an edge are one place,
+    // and so are the two sides of a wall (a ray's start and the face it
+    // left through), as long as they are in the same part.
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    fn find(p: &mut [u32], mut x: u32) -> u32 {
+        while p[x as usize] != x {
+            p[x as usize] = p[p[x as usize] as usize];
+            x = p[x as usize];
+        }
+        x
+    }
+    let unite = |p: &mut Vec<u32>, a: u32, b: u32| {
+        if mesh.part[a as usize] != mesh.part[b as usize] {
+            return;
+        }
+        let (ra, rb) = (find(p, a), find(p, b));
+        if ra != rb {
+            p[ra.max(rb) as usize] = ra.min(rb);
+        }
+    };
+    for x in &thin {
+        unite(&mut parent, x.tri, x.hit);
+    }
+    let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
+    for &t in &tris {
+        let v = mesh.tris[t as usize];
+        for k in 0..3 {
+            let (a, b) = (v[k], v[(k + 1) % 3]);
+            match edges.entry((a.min(b), a.max(b))) {
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    let o = *e.get();
+                    unite(&mut parent, t, o);
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(t);
+                }
+            }
+        }
+    }
+    struct Cluster {
+        root: u32,
+        /// The thinnest sample.
+        first: usize,
+        b: Aabb,
+        part: Option<u32>,
+        area: f64,
+    }
+    let mut clusters: Vec<Cluster> = Vec::new();
+    // Thinnest first, so each cluster's `first` is its worst sample.
+    thin.sort_by(|a, b| {
+        a.thickness
+            .total_cmp(&b.thickness)
+            .then(a.tri.cmp(&b.tri))
+            .then(a.mid[0].total_cmp(&b.mid[0]))
+            .then(a.mid[1].total_cmp(&b.mid[1]))
+            .then(a.mid[2].total_cmp(&b.mid[2]))
+    });
+    for (i, x) in thin.iter().enumerate() {
+        let root = find(&mut parent, x.tri);
+        if !clusters.iter().any(|c| c.root == root) {
+            clusters.push(Cluster {
+                root,
+                first: i,
+                b: Aabb::EMPTY,
+                part: mesh.part[x.tri as usize],
+                area: 0.0,
+            });
+        }
+    }
+    for &t in &tris {
+        let root = find(&mut parent, t);
+        if let Some(c) = clusters.iter_mut().find(|c| c.root == root) {
+            c.b = c.b.union(&mesh.tri_box(t as usize));
+            c.area += mesh.area(t as usize);
+        }
+    }
+    // Nearby places of one part and one severity are one finding: gear
+    // teeth or a perforated plate would otherwise list every tooth and
+    // hole. Clusters are in thinnest-first order, so each merged finding
+    // keeps its thinnest place.
+    let reach = (4.0 * s.min_wall).max(0.05 * diag);
+    let level = |c: &Cluster| thin[c.first].thickness < s.nozzle;
+    let mut merged: Vec<(Cluster, usize)> = Vec::new();
+    for c in clusters {
+        let at = merged
+            .iter()
+            .position(|(m, _)| m.part == c.part && level(m) == level(&c) && m.b.gap(&c.b) <= reach);
+        match at {
+            Some(i) => {
+                let (m, n) = &mut merged[i];
+                m.b = m.b.union(&c.b);
+                m.area += c.area;
+                *n += 1;
+            }
+            None => merged.push((c, 1)),
+        }
+    }
+    let findings = merged
+        .iter()
+        .map(|(c, places)| {
+            let x = &thin[c.first];
+            let error = x.thickness < s.nozzle;
+            Finding {
+                level: if error { Level::Error } else { Level::Warning },
+                code: "thin-wall",
+                message: format!(
+                    "{} {} mm thick{} ({} mm² of surface measures under the minimum)",
+                    if *places > 1 {
+                        format!("walls at {places} places, the thinnest")
+                    } else {
+                        "a wall".to_string()
+                    },
+                    mm(x.thickness),
+                    if error {
+                        format!(", thinner than the {} mm nozzle", mm(s.nozzle))
+                    } else {
+                        format!(", under the {} mm minimum", mm(s.min_wall))
+                    },
+                    mm(c.area)
+                ),
+                point: x.mid,
+                bbox: c.b,
+                part: c.part.map(|p| mesh.part_names[p as usize].to_string()),
+                fix: format!(
+                    "thicken it to at least {} mm ({} perimeters of a {} mm nozzle), or remove it",
+                    mm(s.min_wall),
+                    mm((s.min_wall / s.nozzle).round()),
+                    mm(s.nozzle)
+                ),
+                value: Some(x.thickness),
+                limit: Some(if error { s.nozzle } else { s.min_wall }),
+            }
+        })
+        .collect();
+    let min = thinnest.map(|(d, p, t)| (d, p, mesh.part_name(t as usize).map(|n| n.to_string())));
+    (findings, tris, min)
+}
+
+fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u32>, f64) {
+    let limit = s.max_overhang.to_radians().sin();
+    let over: Vec<usize> = (0..mesh.tris.len())
+        .filter(|&t| {
+            let n = mesh.normal(t);
+            if -n[2] <= limit + 1e-12 {
+                return false;
+            }
+            // Faces on the bed are held up by it.
+            !mesh
+                .corners(t)
+                .iter()
+                .all(|v| v[2] <= bed_z + s.bed_tolerance)
+        })
+        .collect();
+    // Regions: overhanging faces sharing an edge.
+    let mut parent: Vec<usize> = (0..over.len()).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let mut edges: HashMap<(u32, u32), usize> = HashMap::new();
+    for (i, &t) in over.iter().enumerate() {
+        let v = mesh.tris[t];
+        for k in 0..3 {
+            let (a, b) = (v[k], v[(k + 1) % 3]);
+            let key = (a.min(b), a.max(b));
+            match edges.get(&key) {
+                Some(&j) => {
+                    let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                    if ri != rj {
+                        parent[ri.max(rj)] = ri.min(rj);
+                    }
+                }
+                None => {
+                    edges.insert(key, i);
+                }
+            }
+        }
+    }
+    struct Region {
+        area: f64,
+        b: Aabb,
+        weighted: V3,
+        worst: f64,
+        parts: HashMap<u32, f64>,
+        tris: Vec<usize>,
+    }
+    let mut regions: Vec<Region> = Vec::new();
+    let mut slot: HashMap<usize, usize> = HashMap::new();
+    let mut total = 0.0;
+    for (i, &t) in over.iter().enumerate() {
+        let r = find(&mut parent, i);
+        let k = *slot.entry(r).or_insert_with(|| {
+            regions.push(Region {
+                area: 0.0,
+                b: Aabb::EMPTY,
+                weighted: [0.0; 3],
+                worst: 0.0,
+                parts: HashMap::new(),
+                tris: Vec::new(),
+            });
+            regions.len() - 1
+        });
+        let reg = &mut regions[k];
+        reg.tris.push(t);
+        let a = mesh.area(t);
+        total += a;
+        reg.area += a;
+        reg.b = reg.b.union(&mesh.tri_box(t));
+        reg.weighted = add(reg.weighted, scale(mesh.centroid(t), a));
+        let angle = (-mesh.normal(t)[2]).clamp(-1.0, 1.0).asin().to_degrees();
+        reg.worst = reg.worst.max(angle);
+        if let Some(p) = mesh.part[t] {
+            *reg.parts.entry(p).or_insert(0.0) += a;
+        }
+    }
+    // Specks below two extrusion widths squared are noise (a chamfer's
+    // sliver, a tessellation artefact), not something to support.
+    let min_area = (2.0 * s.nozzle).powi(2);
+    regions.retain(|r| r.area >= min_area);
+    regions.sort_by(|a, b| b.area.total_cmp(&a.area));
+    let findings = regions
+        .iter()
+        .map(|r| {
+            let part = r
+                .parts
+                .iter()
+                .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(&p, _)| mesh.part_names[p as usize].to_string());
+            Finding {
+                level: Level::Warning,
+                code: "overhang",
+                message: format!(
+                    "{} mm² faces down at up to {}° from vertical (limit {}°)",
+                    mm(r.area),
+                    mm(r.worst.round()),
+                    mm(s.max_overhang)
+                ),
+                // On the surface: the region's face nearest its centroid
+                // (the centroid of a curved region is off it, inside a
+                // ring under a coil, say).
+                point: {
+                    let c = scale(r.weighted, 1.0 / r.area.max(1e-300));
+                    r.tris
+                        .iter()
+                        .map(|&t| mesh.centroid(t))
+                        .min_by(|a, b| {
+                            crate::mesh::dist(*a, c).total_cmp(&crate::mesh::dist(*b, c))
+                        })
+                        .unwrap_or(c)
+                },
+                bbox: r.b,
+                part,
+                fix: format!(
+                    "add support, chamfer it to {}° or less, or reorient the model; a short \
+                     flat span between two walls may bridge instead",
+                    mm(s.max_overhang)
+                ),
+                value: Some(r.area),
+                limit: Some(s.max_overhang),
+            }
+        })
+        .collect();
+    let tris = over.iter().map(|&t| t as u32).collect();
+    (findings, tris, total)
+}
+
+/// Pairs of parts whose solids overlap (neither nested in the other, both
+/// reaching the model as themselves).
+fn intersections(parts: &[Part]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    fn solid(p: &Part) -> Option<&ManifoldGeometry> {
+        p.solid.as_ref().filter(|_| p.context.is_none())
+    }
+    for (i, a) in parts.iter().enumerate() {
+        for b in &parts[i + 1..] {
+            if a.contains(&b.name) || b.contains(&a.name) {
+                continue;
+            }
+            let (Some(sa), Some(sb)) = (solid(a), solid(b)) else {
+                continue;
+            };
+            let (Some(ba), Some(bb)) = (sa.bounds(), sb.bounds()) else {
+                continue;
+            };
+            let (ba, bb) = (Aabb { lo: ba.0, hi: ba.1 }, Aabb { lo: bb.0, hi: bb.1 });
+            if !ba.overlaps(&bb, 0.0) {
+                continue;
+            }
+            let both: ManifoldGeometry = sa.boolean(sb, OpType::Intersect);
+            let vol = both.manifold.volume();
+            let floor = 1e-6_f64.max(1e-9 * sa.manifold.volume().min(sb.manifold.volume()));
+            if vol <= floor {
+                continue;
+            }
+            let bx = both
+                .bounds()
+                .map_or(Aabb::EMPTY, |(lo, hi)| Aabb { lo, hi });
+            out.push(Finding {
+                level: Level::Warning,
+                code: "parts-intersect",
+                message: format!(
+                    "parts '{}' and '{}' overlap by {} mm³",
+                    a.name,
+                    b.name,
+                    mm(vol)
+                ),
+                point: bx.center(),
+                bbox: bx,
+                part: Some(a.name.clone()),
+                fix: "if they are separate pieces, move them apart or subtract one from the \
+                     other (with clearance, e.g. 0.2 mm, for a fit); if they are one piece, \
+                     put them in one part"
+                    .into(),
+                value: Some(vol),
+                limit: None,
+            });
+        }
+    }
+    out
+}
+
+/// A `check` request.
+#[derive(Debug, Clone)]
+pub struct CheckRequest {
+    pub run: Run,
+    pub settings: CheckSettings,
+}
+
+/// A check's result.
+#[derive(Debug)]
+pub struct Checked {
+    /// 0 when nothing is an error; 1 for errors, or a model that failed to
+    /// load, evaluate or render (then `summary.failed` is true).
+    pub exit_code: u8,
+    /// The JSON summary (`docs/cli-json.md`, "check").
+    pub summary: Value,
+    pub analysis: Analysis,
+    pub log: Log,
+}
+
+fn round(ms: f64) -> f64 {
+    (ms * 10.0).round() / 10.0
+}
+
+impl Session {
+    /// Check a model's printability.
+    pub fn check(&self, req: &CheckRequest) -> Result<Checked, Cancelled> {
+        let started = self.now();
+        let scheme = render::ColorScheme::cornfield();
+        let (model, parts) = self.render_parts(&req.run, &scheme)?;
+        if model.exit_code != 0 {
+            return Ok(Checked {
+                exit_code: model.exit_code,
+                summary: json!({
+                    "schema": 1,
+                    "input": req.run.input,
+                    "failed": true,
+                    "exit_code": model.exit_code,
+                    "diagnostics": crate::diag::summary_json(&model.log.lines, &model.log.names),
+                }),
+                analysis: Analysis::default(),
+                log: model.log,
+            });
+        }
+        let t = self.now();
+        let clock = || self.now();
+        let analysis = analyze(model.geometry.as_ref(), &parts, &req.settings, &clock);
+        let check_ms = self.now() - t;
+        let count = |l: Level| analysis.counts[l as usize];
+        let errors = count(Level::Error);
+        let exit_code = if errors > 0 { 1 } else { 0 };
+        let mut timings = serde_json::Map::new();
+        timings.insert(
+            "evaluate".into(),
+            json!(round(model.timings.parse + model.timings.evaluate)),
+        );
+        timings.insert("geometry".into(), json!(round(model.timings.geometry)));
+        let mut stages = serde_json::Map::new();
+        for (k, v) in &analysis.timings {
+            stages.insert((*k).into(), json!(round(*v)));
+        }
+        stages.insert("total".into(), json!(round(check_ms)));
+        timings.insert("check".into(), Value::Object(stages));
+        timings.insert("total".into(), json!(round(self.now() - started)));
+        let summary = json!({
+            "schema": 1,
+            "input": req.run.input,
+            "ok": errors == 0,
+            "exit_code": exit_code,
+            "settings": req.settings.json(),
+            "model": analysis.model,
+            "parts": analysis.parts,
+            "counts": {
+                "errors": errors,
+                "warnings": count(Level::Warning),
+                "info": count(Level::Info),
+            },
+            "findings": analysis.findings.iter().enumerate().map(|(i, f)| f.json(i + 1)).collect::<Vec<_>>(),
+            "truncated": analysis.truncated.iter().map(|(c, n)| (c.to_string(), json!(n))).collect::<serde_json::Map<_, _>>(),
+            "timings_ms": Value::Object(timings),
+            "diagnostics": crate::diag::summary_json(&model.log.lines, &model.log.names),
+        });
+        Ok(Checked {
+            exit_code,
+            summary,
+            analysis,
+            log: model.log,
+        })
+    }
+}
+
+/// The human-readable report of a check: one line per finding and its
+/// fix, after a summary line.
+pub fn text(summary: &Value) -> String {
+    let mut out = String::new();
+    let input = summary["input"].as_str().unwrap_or("");
+    if summary["failed"] == json!(true) {
+        out.push_str(&format!("check {input}: the model did not render\n"));
+        return out;
+    }
+    let c = &summary["counts"];
+    let m = &summary["model"];
+    out.push_str(&format!(
+        "check {input}: {} errors, {} warnings, {} info",
+        c["errors"], c["warnings"], c["info"]
+    ));
+    if m["dimensions"] == json!(3) {
+        out.push_str(&format!(
+            " ({}, {} component{}",
+            if m["manifold"] == json!(true) {
+                "manifold"
+            } else {
+                "not manifold"
+            },
+            m["components"],
+            if m["components"] == json!(1) { "" } else { "s" }
+        ));
+        if let Some(w) = m["min_wall"]["thickness"].as_f64() {
+            out.push_str(&format!(", thinnest wall {} mm", mm(w)));
+        }
+        out.push(')');
+    }
+    out.push('\n');
+    for f in summary["findings"].as_array().into_iter().flatten() {
+        let p = &f["location"]["point"];
+        let at: Vec<String> = p
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|x| mm(x.as_f64().unwrap_or(0.0)))
+            .collect();
+        out.push_str(&format!(
+            "{:>2}. {} {}: {} at [{}]",
+            f["id"],
+            f["severity"].as_str().unwrap_or(""),
+            f["code"].as_str().unwrap_or(""),
+            f["message"].as_str().unwrap_or(""),
+            at.join(", ")
+        ));
+        if let Some(part) = f["part"].as_str() {
+            out.push_str(&format!(" in part '{part}'"));
+        }
+        out.push('\n');
+        out.push_str(&format!("    fix: {}\n", f["fix"].as_str().unwrap_or("")));
+    }
+    for (code, n) in summary["truncated"].as_object().into_iter().flatten() {
+        out.push_str(&format!("    ... and {n} more {code}\n"));
+    }
+    out
+}

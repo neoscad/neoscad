@@ -118,12 +118,24 @@ pub struct Sheet {
     pub dims: bool,
     /// Header lines: the first larger (the model's name), the rest small.
     pub header: Vec<String>,
-    /// Colour keys shown in the header (diffs).
+    /// Colour keys shown in the header (diffs, parts, issues).
     pub legend: Vec<([f32; 4], String)>,
+    /// Numbered points drawn over every panel (`snapshot --issues`).
+    pub markers: Vec<Marker>,
     /// How the panels are lit: [`crate::Lighting::Headlight`] for agents'
     /// sheets, so faces turned away from OpenSCAD's fixed light stay
     /// legible.
     pub lighting: crate::Lighting,
+}
+
+/// A labelled point in model coordinates, drawn as a numbered disc over
+/// the panels. It is drawn whether or not the model hides the point from
+/// that view, so a problem at the back is still pointed at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marker {
+    pub point: [f64; 3],
+    pub label: String,
+    pub color: [u8; 3],
 }
 
 /// Where each panel goes.
@@ -237,6 +249,46 @@ impl Sheet {
                 );
                 if self.dims {
                     dimensions(&mut c, cam, *view, b, (x0, y0));
+                }
+            }
+            // Markers that would cover one another (two findings at one
+            // point, or seen end on) step aside to the nearest free spot
+            // around their point, so every number shows and stays close to
+            // what it marks; with no free spot near, it is drawn on top.
+            let mut placed: Vec<(f64, f64)> = Vec::new();
+            for m in &self.markers {
+                let [px, py] = to_pixel(cam, m.point);
+                let (px, py) = (px + x0 as f64, py + y0 as f64);
+                let free = |x: f64, y: f64, placed: &[(f64, f64)]| {
+                    placed
+                        .iter()
+                        .all(|(qx, qy)| (qx - x).abs() >= 19.0 || (qy - y).abs() >= 19.0)
+                };
+                const STEPS: [(f64, f64); 8] = [
+                    (1.0, 0.0),
+                    (0.0, 1.0),
+                    (-1.0, 0.0),
+                    (0.0, -1.0),
+                    (1.0, 1.0),
+                    (-1.0, 1.0),
+                    (-1.0, -1.0),
+                    (1.0, -1.0),
+                ];
+                let (px, py) = std::iter::once((px, py))
+                    .chain((1..=2).flat_map(|k| {
+                        STEPS.iter().map(move |(dx, dy)| {
+                            (px + dx * 20.0 * k as f64, py + dy * 20.0 * k as f64)
+                        })
+                    }))
+                    .find(|&(x, y)| free(x, y, &placed))
+                    .unwrap_or((px, py));
+                placed.push((px, py));
+                let inside = px >= x0 as f64
+                    && py >= y0 as f64
+                    && px < (x0 + l.panel_w) as f64
+                    && py < (y0 + l.panel_h) as f64;
+                if inside {
+                    c.marker(px, py, &m.label, m.color);
                 }
             }
         }
@@ -581,6 +633,33 @@ impl Canvas {
         }
     }
 
+    /// A numbered disc centred at (`x`, `y`): the colour with a white rim
+    /// and a white label, so it reads on the model and on the background.
+    fn marker(&mut self, x: f64, y: f64, label: &str, c: [u8; 3]) {
+        const R: f64 = 9.0;
+        let white = [255, 255, 255];
+        for yy in (y - R - 1.0).floor() as i64..=(y + R + 1.0).ceil() as i64 {
+            for xx in (x - R - 1.0).floor() as i64..=(x + R + 1.0).ceil() as i64 {
+                let d = ((xx as f64 - x).powi(2) + (yy as f64 - y).powi(2)).sqrt();
+                if d <= R - 1.0 {
+                    self.put(xx, yy, c);
+                } else if d <= R + 0.5 {
+                    self.put(xx, yy, white);
+                }
+            }
+        }
+        let size = if label.len() > 2 { 9.0 } else { 11.0 };
+        let base = y + size * 0.45;
+        for stroke in hershey::strokes(label, 0.0, 0.0, Align::Center, size as f32) {
+            for w in stroke.windows(2) {
+                let p = |q: [f32; 2]| (x + f64::from(q[0]), base - f64::from(q[1]));
+                let (a, b) = (p(w[0]), p(w[1]));
+                self.line(a.0, a.1, b.0, b.1, white);
+                self.line(a.0 + 1.0, a.1, b.0 + 1.0, b.1, white);
+            }
+        }
+    }
+
     fn into_pixels(self) -> crate::Image {
         let mut rgba = Vec::with_capacity(self.rgb.len() * 4);
         for p in self.rgb {
@@ -652,6 +731,7 @@ mod tests {
             dims: false,
             header: vec![],
             legend: vec![],
+            markers: vec![],
             lighting: crate::Lighting::Headlight,
         };
         let l = s.layout();

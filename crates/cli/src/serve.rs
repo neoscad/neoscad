@@ -193,7 +193,10 @@ fn send(w: &Writer, msg: &Value) {
 
 impl Server {
     fn touch(&self) {
-        *self.last.lock().expect("clock") = Instant::now();
+        *self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
     }
 
     fn shutdown(&self) -> ! {
@@ -241,10 +244,7 @@ fn connection(server: Arc<Server>, mut r: impl BufRead, w: Writer) {
             // Ordered: handled before the next message is read.
             "initialize" | "open" | "update" | "close" | "cancel" | "stats" | "status"
             | "documents" => {
-                let reply = match quick(&server, method, &params) {
-                    Ok(v) => rpc::response(&id, v),
-                    Err((c, m)) => rpc::error(&id, c, &m),
-                };
+                let reply = answer(&id, || quick(&server, method, &params));
                 send(&w, &reply);
             }
             "shutdown" => {
@@ -259,15 +259,12 @@ fn connection(server: Arc<Server>, mut r: impl BufRead, w: Writer) {
                 let method = method.to_string();
                 server.active.fetch_add(1, Ordering::SeqCst);
                 std::thread::spawn(move || {
-                    let reply = match heavy(&server, &id, &method, &params, &w) {
-                        Ok(v) => rpc::response(&id, v),
-                        Err((c, m)) => rpc::error(&id, c, &m),
-                    };
+                    let reply = answer(&id, || heavy(&server, &id, &method, &params, &w));
                     send(&w, &reply);
                     server
                         .running
                         .lock()
-                        .expect("running")
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&id.to_string());
                     server.touch();
                     server.active.fetch_sub(1, Ordering::SeqCst);
@@ -279,12 +276,41 @@ fn connection(server: Arc<Server>, mut r: impl BufRead, w: Writer) {
     server.touch();
 }
 
+/// The response to request `id`: `handle`'s result or error, or when it
+/// panics, error -32603 with the panic's message. A bug in one request
+/// (in the kernel, say) must not end the server and every other client's
+/// warm caches with it; the session's locks tolerate a request that
+/// panicked while holding one, so the next request runs normally.
+fn answer(id: &Value, handle: impl FnOnce() -> Reply) -> Value {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(handle)) {
+        Ok(Ok(v)) => rpc::response(id, v),
+        Ok(Err((c, m))) => rpc::error(id, c, &m),
+        Err(payload) => {
+            let what = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            rpc::error(
+                id,
+                code::INTERNAL_ERROR,
+                &format!("internal error: the request panicked: {what}"),
+            )
+        }
+    }
+}
+
 fn notification(server: &Server, method: &str, params: &Value) {
     match method {
         "exit" => server.shutdown(),
         "$/cancelRequest" => {
             let key = params.get("id").map(Value::to_string).unwrap_or_default();
-            let doc = server.running.lock().expect("running").get(&key).cloned();
+            let doc = server
+                .running
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&key)
+                .cloned();
             if let Some(doc) = doc {
                 server.session.cancel(&doc);
             }
@@ -331,8 +357,12 @@ const METHODS: &[&str] = &[
     "render",
     "export",
     "snapshot",
+    "check",
+    "measure",
     "cli.export",
     "cli.snapshot",
+    "cli.check",
+    "cli.measure",
 ];
 
 fn quick(server: &Server, method: &str, params: &Value) -> Reply {
@@ -348,10 +378,18 @@ fn quick(server: &Server, method: &str, params: &Value) -> Reply {
                 "render_modes": ["render", "force", "preview"],
                 "incremental_edits": true,
                 "snapshot": true,
+                "check": true,
+                "measure": true,
+                "features": ["part"],
             },
         })),
         "status" => {
-            let idle = server.last.lock().expect("clock").elapsed().as_secs();
+            let idle = server
+                .last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .elapsed()
+                .as_secs();
             Ok(json!({
                 "pid": std::process::id(),
                 "socket": server.socket,
@@ -424,6 +462,20 @@ fn run_of(params: &Value, id: &Value, w: &Writer) -> Result<session::Run, (i64, 
         .and_then(Value::as_bool)
         .unwrap_or(false);
     run.rng_seed = params.get("seed").and_then(Value::as_u64).map(|n| n as u32);
+    // neoscad's `part()`: `"enable": ["part"]` as on the command line, or
+    // `"parts": true`.
+    let enable: Vec<String> = params
+        .get("enable")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    run.parts = crate::parts_enabled(&enable)
+        || params
+            .get("parts")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     if params
         .get("progress")
         .and_then(Value::as_bool)
@@ -479,10 +531,18 @@ fn publish(w: &Writer, doc: &Path, log: &session::Log) {
 
 fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) -> Reply {
     let s = &server.session;
+    // A request that panics on purpose, for the tests of [`answer`]; only
+    // a server started with this variable set has it.
+    if method == "debug.panic" && std::env::var_os("NEOSCAD_SERVE_TEST_PANIC").is_some() {
+        panic!("debug.panic requested");
+    }
     if method.starts_with("cli.") {
         return cli(server, method, params);
     }
-    if !matches!(method, "evaluate" | "render" | "export" | "snapshot") {
+    if !matches!(
+        method,
+        "evaluate" | "render" | "export" | "snapshot" | "check" | "measure"
+    ) {
         return Err((code::METHOD_NOT_FOUND, format!("unknown method '{method}'")));
     }
     let run = run_of(params, id, w)?;
@@ -494,7 +554,7 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
     server
         .running
         .lock()
-        .expect("running")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(id.to_string(), doc.clone());
     match method {
         "evaluate" => {
@@ -546,6 +606,9 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
             p["model"] = json!(run.input);
             p["json"] = json!(true);
             p["supersede"] = json!(true);
+            if run.parts {
+                p["parts"] = json!(true);
+            }
             let out = crate::snapshot::execute(s, &p, &cwd, run.progress.clone());
             let summary: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
             if out.exit_code != 0 && summary.is_null() {
@@ -555,6 +618,34 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
                 ));
             }
             Ok(merge(summary, json!({"exit_code": out.exit_code})))
+        }
+        "check" => {
+            let settings = crate::check::settings_of(params).map_err(invalid)?;
+            let c = s
+                .check(&session::check::CheckRequest { run, settings })
+                .map_err(cancelled)?;
+            publish(w, &doc, &c.log);
+            Ok(merge(c.summary, json!({"exit_code": c.exit_code})))
+        }
+        "measure" => {
+            let req = crate::measure::request_of(params, run).map_err(invalid)?;
+            let m = s.measure(&req).map_err(cancelled)?;
+            publish(w, &doc, &m.log);
+            let mut summary = m.summary;
+            match (params.get("svg"), &m.svg) {
+                // A file name: the server writes it, relative to `cwd`.
+                (Some(Value::String(file)), Some(svg)) => {
+                    std::fs::write(cwd.join(file), svg)
+                        .map_err(|e| (code::FAILED, format!("cannot write '{file}': {e}")))?;
+                    summary["section"]["svg"] = json!(file);
+                }
+                // `true`: the SVG text in the result.
+                (Some(Value::Bool(true)), Some(svg)) => {
+                    summary["section"]["svg_text"] = json!(svg);
+                }
+                _ => {}
+            }
+            Ok(summary)
         }
         _ => Err((code::METHOD_NOT_FOUND, format!("unknown method '{method}'"))),
     }
@@ -751,6 +842,8 @@ fn cli(server: &Server, method: &str, params: &Value) -> Reply {
     let out = match method {
         "cli.export" => crate::delegate::execute(&server.session, params, &cwd),
         "cli.snapshot" => crate::snapshot::execute(&server.session, params, &cwd, None),
+        "cli.check" => crate::check::execute(&server.session, params, &cwd, None),
+        "cli.measure" => crate::measure::execute(&server.session, params, &cwd, None),
         _ => return Err((code::METHOD_NOT_FOUND, format!("unknown method '{method}'"))),
     };
     Ok(out.json())
@@ -810,7 +903,11 @@ fn listen(server: Arc<Server>, path: &Path) -> Result<(), String> {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_millis(500));
-                let idle = s.last.lock().expect("clock").elapsed();
+                let idle = s
+                    .last
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .elapsed();
                 if s.connections.load(Ordering::SeqCst) == 0
                     && s.active.load(Ordering::SeqCst) == 0
                     && idle >= s.idle_timeout

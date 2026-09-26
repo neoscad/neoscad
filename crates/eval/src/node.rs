@@ -123,6 +123,13 @@ pub enum NodeKind {
     },
     Import(Import),
     Text(Text),
+    /// neoscad's `part("name") { ... }` (only with `--enable part`): a
+    /// union whose faces keep the part's identity through rendering, so
+    /// checks and measurements can name it. `name` is the full dotted
+    /// name, `lid.hinge` for a `hinge` part inside a `lid` part.
+    Part {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

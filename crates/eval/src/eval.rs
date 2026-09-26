@@ -189,6 +189,12 @@ pub(crate) struct Evaluator<'a> {
     deprecations: std::collections::HashSet<DeprecationKey>,
     /// `--hardwarnings` progress; see [`Hard`].
     hard: std::cell::Cell<Hard>,
+    /// The dotted names of the `part()`s being instantiated, innermost
+    /// last. Instantiation nests exactly as the node tree does, so the top
+    /// is the enclosing part of any node made now.
+    pub part_stack: Vec<String>,
+    /// Every part name used so far, for the duplicate warning.
+    pub part_names: std::collections::HashSet<String>,
 }
 
 /// Where a `--hardwarnings` run stands. OpenSCAD throws a
@@ -250,7 +256,7 @@ impl<'a> Evaluator<'a> {
             empty: syms.intern(""),
         };
         let builtin_fns = crate::builtins::functions::table(&mut syms);
-        let builtin_mods = crate::builtins::modules::table(&mut syms);
+        let builtin_mods = crate::builtins::modules::table(&mut syms, opts.parts);
         let mut units = vec![Unit::new(main, &mut syms)];
         let mut keys: HashMap<&str, u32> = HashMap::new();
         for lib in libraries {
@@ -303,6 +309,8 @@ impl<'a> Evaluator<'a> {
             } else {
                 Hard::Off
             }),
+            part_stack: Vec::new(),
+            part_names: Default::default(),
             opts,
         }
     }

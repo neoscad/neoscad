@@ -327,9 +327,14 @@ entry when it is done.
 - Cancellation stops the evaluator at the next call or loop iteration
   and the geometry evaluator before the next node; one long kernel
   operation (a big boolean, a hull, minkowski) runs to its end. (7a)
-- The release profile has `panic = "abort"`, so a panic while serving a
-  request ends the server (clients fall back to running in-process).
-  Catching panics per request would need unwinding in that binary. (7a)
+- The release profile unwinds so the server can answer a panicking
+  request with -32603 and carry on (7b-1). That costs the one-shot
+  command line 5-8% on evaluation-bound BOSL2 models (fractal_tree
+  5.87 -> 6.33 s best of 5) and 2 MB of binary; cold start and
+  geometry-bound models are unchanged. Cargo cannot set `panic` per
+  binary; a separate `abort` profile for the benchmarked one-shot binary,
+  or finding what in the evaluator unwinding tables slow down, would win
+  it back. (7b-1)
 - The session keeps up to four renderers (one per colour scheme and
   font set in use, since geometry keys include neither), each with its
   own geometry budget, so the worst case is four budgets. (7a)
@@ -350,6 +355,36 @@ entry when it is done.
   computed; otherwise the node is computed again from its children's
   cached results (`geom::RenderOptions::replay`). Correct, but a cached
   subtree whose earlier twin was edited away is recomputed once. (7a)
+
+## Parts, check and measure
+- A part's solid is its subtree's geometry: a part under a `difference()`
+  that cuts it is measured uncut (its `context` is only set for the
+  operations that change a part as a whole: subtracting it,
+  intersecting, hull, minkowski, resize, 2D). Measuring "what of the
+  model belongs to the part" would need the model's faces by part plus
+  closing the cut. (7b-1)
+- Face attribution survives booleans, transforms and `color()` (over
+  several parts the IDs are kept instead of collapsed, which changes
+  only how an export groups triangles); `hull()`, `minkowski()` and
+  2D operations make new solids and drop the parts inside them. (7b-1)
+- Wall thickness is sampled along face normals from fixed points per
+  face (up to 16 on large faces, at most 400,000 rays); a wall whose
+  sides are not parallel measures thicker than its narrowest point, and
+  a narrow feature in the middle of a big face between samples can be
+  missed. A medial-axis or sphere-probe estimate would be exact. Knife
+  edges formed by two faces sharing a corner are skipped; the feather
+  edges a `difference()` leaves where a curved cut meets a face are
+  reported (correctly thin, but many). (7b-1)
+- Overhangs do not recognise bridges (a flat span supported at both
+  ends); they are reported as overhangs. (7b-1)
+- Checks run serially (about 150 ms for a 220k-triangle model). Rays are
+  independent, so they could run on rayon with a deterministic merge.
+  (7b-1)
+- `snapshot --issues` uses the default check settings from the command
+  line (the server's `issues` takes any). Markers are drawn whether or
+  not the model hides the point from that view. (7b-1)
+- `measure --section` cuts the model or one part; a per-part breakdown
+  of a model section is not reported. (7b-1)
 
 ## WASM
 - Recursion on wasm32 stops at a frame budget calibrated for V8's default

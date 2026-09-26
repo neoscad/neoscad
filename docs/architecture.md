@@ -64,10 +64,20 @@ JSON-RPC (`docs/serve-protocol.md`).
 - **`neoscad check`** (manifold, minimum wall, overhangs, floating or
   intersecting parts), **`measure`** (bbox, distances, cross-sections),
   **`test`** (assert-based model tests), **`fmt`**, **`docs <builtin>`**.
+  `check` and `measure` are implemented in 7b-1 (`session::check`,
+  `session::measure` on the analysis mesh and BVH of `session::mesh`;
+  JSON in `docs/cli-json.md`), as session operations the server exposes
+  as the `check` and `measure` methods; `snapshot --issues` marks the
+  findings on the sheet.
 - **MCP server** exposing evaluate, snapshot, check, measure, diff and docs.
 - **Named parts:** a `part("lid") { … }` extension behind a flag, so checks
   and measurements can refer to parts. A deliberate divergence from
-  OpenSCAD, off by default.
+  OpenSCAD, off by default. Implemented in 7b-1 (`--enable part`,
+  `eval::Options::parts`): a part node is a union whose faces keep its
+  dotted name through rendering by Manifold original IDs
+  (`ManifoldGeometry::tag_part`), and each part's own solid is rendered
+  from the warm cache (`session::parts`); `snapshot --highlight` ghosts
+  the other parts.
 
 ## Apps
 
@@ -79,6 +89,14 @@ JSON-RPC (`docs/serve-protocol.md`).
   WKWebView, the same component the web app uses.
 - **Web:** the same core compiled to WASM and run in a worker, the same wgpu
   renderer on WebGPU, and CodeMirror 6.
+- **Project definition:** the Xcode project is generated from a committed
+  declarative spec: Xcode's own JSON project format if Xcode 27 really
+  supports one (verify first), otherwise XcodeGen's `project.yml`. The
+  `.xcodeproj` is a build output, never hand-edited.
+- **Panics:** the core runs inside the app's process, so release builds
+  unwind (`panic = "unwind"`) and requests catch panics. A bug in one render
+  must not take down the app and its unsaved work. This costs 5–8% on
+  evaluation-heavy models.
 - **Written twice:** only the thin UI around the editor and viewport (panels,
   customizer, console).
 
@@ -173,7 +191,9 @@ ffmpeg.
 7. **`serve`, JSON output, MCP.** 7a (done): `crates/session`,
    `neoscad serve`, `--format json` everywhere, incremental re-render,
    snapshot lighting and the `edit_loop` benchmark. 7b: `check`,
-   `measure`, `test`, `fmt`, `docs`, `part()`. 7c: the MCP server and an
+   `measure`, `test`, `fmt`, `docs`, `part()` (7b-1 done: `part()`,
+   `check`, `measure`, snapshot parts and issues, and a server that
+   survives a panicking request). 7c: the MCP server and an
    agent-loop eval.
 8. **macOS app.**
 9. **WASM web app** (deferred by the owner, 2026-09-26). The library crates

@@ -59,12 +59,18 @@ impl LexStore {
 
     /// Entries and bytes of text held.
     pub fn size(&self) -> (usize, usize) {
-        let f = self.files.lock().expect("lex cache");
+        let f = self
+            .files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         (f.len(), f.values().map(|(_, l, _)| cost(l)).sum())
     }
 
     pub fn clear(&self) {
-        self.files.lock().expect("lex cache").clear();
+        self.files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 
@@ -74,7 +80,10 @@ fn cost(f: &LexedFile) -> usize {
 
 impl LexCache for LexStore {
     fn get(&self, path: &Path, meta: &Metadata) -> Option<Arc<LexedFile>> {
-        let mut files = self.files.lock().expect("lex cache");
+        let mut files = self
+            .files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let e = files.get_mut(path).filter(|(m, _, _)| m == meta)?;
         e.2 = self
             .clock
@@ -83,7 +92,10 @@ impl LexCache for LexStore {
     }
 
     fn put(&self, path: &Path, meta: Metadata, file: Arc<LexedFile>) {
-        let mut files = self.files.lock().expect("lex cache");
+        let mut files = self
+            .files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stamp = self
             .clock
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -323,7 +335,11 @@ pub fn main_program(
     libs: &LibraryPath,
 ) -> Arc<Program> {
     let k = key(&[b"main", generic(path).as_bytes(), &text]);
-    if let Some(p) = cache.lock().expect("parse cache").get(k, fs) {
+    if let Some(p) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(k, fs)
+    {
         return p;
     }
     let program = Arc::new(lang::parse_program_cached(
@@ -335,7 +351,9 @@ pub fn main_program(
     ));
     // The main file's text is in the key; its includes are checked by
     // their metadata.
-    let mut c = cache.lock().expect("parse cache");
+    let mut c = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     c.put(k, &program, FileId(1).0 as usize, fs);
     if c.entries.contains_key(&k) {
         c.main_key(path, k);
@@ -440,7 +458,12 @@ impl Visit<'_> {
             generic(self.main).as_bytes(),
             self.suffix,
         ]);
-        if let Some(p) = self.cache.lock().expect("parse cache").get(k, self.fs) {
+        if let Some(p) = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(k, self.fs)
+        {
             return Some(p);
         }
         // A directory (`use </>`) opens as an empty stream in OpenSCAD.
@@ -460,7 +483,7 @@ impl Visit<'_> {
         ));
         self.cache
             .lock()
-            .expect("parse cache")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .put(k, &program, 0, self.fs);
         Some(program)
     }

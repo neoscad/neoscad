@@ -30,9 +30,14 @@ struct Stdio_ {
 
 impl Stdio_ {
     fn start(dir: &Path) -> Stdio_ {
+        Stdio_::start_env(dir, &[])
+    }
+
+    fn start_env(dir: &Path, env: &[(&str, &str)]) -> Stdio_ {
         let mut child = Command::new(BIN)
             .arg("serve")
             .current_dir(dir)
+            .envs(env.iter().copied())
             .env_remove("OPENSCADPATH")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -489,4 +494,84 @@ fn served_outputs_are_the_direct_ones() {
     let status = server.wait().unwrap();
     assert!(status.success());
     assert!(!socket.exists(), "the socket is removed on exit");
+}
+
+/// A request that panics is answered with an internal error, and the
+/// server, its documents and its caches carry on.
+#[test]
+fn a_panicking_request_does_not_end_the_server() {
+    let d = scratch("panic");
+    let mut s = Stdio_::start_env(&d, &[("NEOSCAD_SERVE_TEST_PANIC", "1")]);
+    // The geometry budget is the real one before the first render.
+    let st = s.result("stats", json!({}));
+    assert_eq!(st["geometry_cache"]["budget"], 200 << 20, "{st}");
+    let path = d.join("m.scad");
+    let p = path.to_str().unwrap();
+    s.result("open", json!({"path": p, "text": "cube(10);"}));
+    let first = s.result("render", json!({"path": p}));
+    let m = s.call("debug.panic", json!({"path": p}));
+    assert_eq!(m["error"]["code"], -32603, "{m}");
+    assert!(
+        m["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("debug.panic requested"),
+        "{m}"
+    );
+    let again = s.result("render", json!({"path": p}));
+    assert_eq!(again["geometry"], first["geometry"]);
+    assert_eq!(
+        s.result("documents", json!({})).as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn check_and_measure_are_served() {
+    let d = scratch("check");
+    let mut s = Stdio_::start(&d);
+    let init = s.result("initialize", json!({}));
+    let methods = init["capabilities"]["methods"].as_array().unwrap();
+    for m in ["check", "measure", "cli.check", "cli.measure"] {
+        assert!(methods.contains(&json!(m)), "{m}");
+    }
+    assert_eq!(init["capabilities"]["features"], json!(["part"]));
+    let path = d.join("m.scad");
+    let p = path.to_str().unwrap();
+    s.result(
+        "open",
+        json!({"path": p, "text": "part(\"a\") cube(10); part(\"b\") translate([12,0,0]) cube([5,0.5,5]);"}),
+    );
+    let c = s.result(
+        "check",
+        json!({"path": p, "enable": ["part"], "bed": "100x100x100"}),
+    );
+    assert_eq!(c["exit_code"], 0, "{c}");
+    assert_eq!(c["settings"]["bed"], json!([100.0, 100.0, 100.0]));
+    let thin: Vec<&Value> = c["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "thin-wall")
+        .collect();
+    assert_eq!(thin.len(), 1, "{c}");
+    assert_eq!(thin[0]["part"], "b");
+    let bad = s.call("check", json!({"path": p, "max_overhang": 100}));
+    assert_eq!(bad["error"]["code"], -32602, "{bad}");
+    let m = s.result(
+        "measure",
+        json!({"path": p, "parts": true, "between": ["a", "b"], "section": "z=1", "svg": true}),
+    );
+    assert_eq!(m["between"]["distance"], 2.0, "{m}");
+    assert_eq!(m["section"]["area"], 102.5, "{m}");
+    assert!(
+        m["section"]["svg_text"]
+            .as_str()
+            .unwrap()
+            .starts_with("<?xml")
+    );
+    // Without `part` enabled the same text has no parts.
+    let m = s.result("measure", json!({"path": p}));
+    assert_eq!(m["parts"], json!([]), "{m}");
+    assert_eq!(m["diagnostics"]["warnings"], 2, "{m}");
 }

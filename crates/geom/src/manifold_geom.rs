@@ -9,6 +9,7 @@
 //! cut faces of a render), and everything else gets the front colour.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use manifold_rust::impl_mesh::ManifoldImpl;
 use manifold_rust::linalg::{Mat3x4, Vec3};
@@ -53,6 +54,11 @@ pub struct ManifoldGeometry {
     /// The single ID the whole solid carries after `set_color` (C++:
     /// `OriginalID() != -1` after `AsOriginal()`).
     own_id: Option<u32>,
+    /// Original ID -> the dotted name of the `part()` its faces came from
+    /// (neoscad's `part()` extension; empty without parts). Original IDs
+    /// survive booleans, so this says which part each output face belongs
+    /// to; see [`ManifoldGeometry::tag_part`].
+    parts: BTreeMap<u32, Arc<str>>,
 }
 
 /// Manifold's status names as OpenSCAD prints them
@@ -83,6 +89,7 @@ impl std::fmt::Debug for ManifoldGeometry {
             .field("original_ids", &self.original_ids)
             .field("id_to_color", &self.id_to_color)
             .field("subtracted", &self.subtracted)
+            .field("parts", &self.parts)
             .finish()
     }
 }
@@ -101,6 +108,7 @@ impl ManifoldGeometry {
             id_to_color: BTreeMap::new(),
             subtracted: BTreeSet::new(),
             own_id: None,
+            parts: BTreeMap::new(),
         }
     }
 
@@ -219,6 +227,7 @@ impl ManifoldGeometry {
                 id_to_color: BTreeMap::new(),
                 subtracted: BTreeSet::new(),
                 own_id: None,
+                parts: BTreeMap::new(),
             };
         }
         ManifoldGeometry {
@@ -227,6 +236,7 @@ impl ManifoldGeometry {
             id_to_color,
             subtracted: BTreeSet::new(),
             own_id: None,
+            parts: BTreeMap::new(),
         }
     }
 
@@ -312,6 +322,22 @@ impl ManifoldGeometry {
         let mut subtracted = self.subtracted.clone();
         let mut original_ids = self.original_ids.clone();
         original_ids.extend(rhs.original_ids.iter().copied());
+        let mut parts = self.parts.clone();
+        if op == OpType::Subtract {
+            // Faces a subtrahend leaves behind are the minuend's new
+            // surface, so they belong to the minuend's part when it is a
+            // single part; a subtracted part's own name does not carry
+            // over (it is not in the result).
+            if let Some(owner) = self.single_part() {
+                for id in rhs.ids() {
+                    parts.insert(id, owner.clone());
+                }
+            }
+        } else {
+            for (id, name) in &rhs.parts {
+                parts.entry(*id).or_insert_with(|| name.clone());
+            }
+        }
         if op == OpType::Subtract {
             // Faces from the subtrahend are cut faces unless they had a
             // colour of their own.
@@ -337,6 +363,111 @@ impl ManifoldGeometry {
             id_to_color,
             subtracted,
             own_id: None,
+            parts,
+        }
+    }
+
+    /// Every original ID the bookkeeping knows (the colour state's and the
+    /// solid's own).
+    fn ids(&self) -> BTreeSet<u32> {
+        let mut ids = self.original_ids.clone();
+        ids.extend(self.own_id);
+        ids
+    }
+
+    /// The part every face belongs to, if it is one part.
+    fn single_part(&self) -> Option<Arc<str>> {
+        let mut owner: Option<&Arc<str>> = None;
+        for id in self.ids() {
+            let name = self.parts.get(&id)?;
+            match owner {
+                None => owner = Some(name),
+                Some(o) if o == name => {}
+                Some(_) => return None,
+            }
+        }
+        owner.cloned()
+    }
+
+    /// Faces of more than one part (or of a part and no part): collapsing
+    /// the solid into one original, as `set_color` and `to_original` do,
+    /// would lose which is which.
+    fn mixed_parts(&self) -> bool {
+        !self.parts.is_empty() && self.single_part().is_none()
+    }
+
+    /// Whether any face belongs to a `part()`.
+    pub fn has_parts(&self) -> bool {
+        !self.parts.is_empty()
+    }
+
+    /// The part the faces with original ID `id` came from.
+    pub fn part_of(&self, id: u32) -> Option<&Arc<str>> {
+        self.parts.get(&id)
+    }
+
+    /// Attribute every face not already in a (nested) part to part `name`,
+    /// giving each original ID a fresh one from `ids` first.
+    ///
+    /// The fresh IDs matter because a cached subtree is shared: in
+    /// `part("a") x(); part("b") x();` both parts hold the same solid with
+    /// the same IDs, and without renumbering the union could not tell
+    /// their faces apart. The mesh is not rebuilt: only the IDs in its
+    /// relation tables change, one for one, so the geometry, the triangle
+    /// order within runs and the colours stay as they were.
+    pub fn tag_part(&mut self, name: &Arc<str>, ids: &dyn IdSource) {
+        let mut old = self.ids();
+        old.extend(self.id_to_color.keys().copied());
+        old.extend(self.subtracted.iter().copied());
+        if !self.manifold.is_empty() {
+            let imp = self.manifold.as_impl();
+            old.extend(
+                imp.mesh_relation
+                    .mesh_id_transform
+                    .values()
+                    .filter(|r| r.original_id >= 0)
+                    .map(|r| r.original_id as u32),
+            );
+        }
+        if old.is_empty() {
+            return;
+        }
+        let first = ids.reserve(old.len() as u32);
+        let map: BTreeMap<u32, u32> = old.iter().copied().zip(first..).collect();
+        let to = |id: u32| map.get(&id).copied().unwrap_or(id);
+        let to_i = |id: i32| {
+            if id < 0 { id } else { to(id as u32) as i32 }
+        };
+        if !self.manifold.is_empty() {
+            let mut imp = std::mem::replace(&mut self.manifold, Manifold::empty()).into_impl();
+            imp.mesh_relation.original_id = to_i(imp.mesh_relation.original_id);
+            for r in imp.mesh_relation.mesh_id_transform.values_mut() {
+                r.original_id = to_i(r.original_id);
+            }
+            for r in imp.mesh_relation.tri_ref.iter_mut() {
+                r.original_id = to_i(r.original_id);
+            }
+            self.manifold = Manifold::from_impl(imp);
+        }
+        self.original_ids = self.original_ids.iter().map(|&i| to(i)).collect();
+        self.id_to_color = self.id_to_color.iter().map(|(&i, c)| (to(i), *c)).collect();
+        self.subtracted = self.subtracted.iter().map(|&i| to(i)).collect();
+        self.own_id = self.own_id.map(to);
+        self.parts = old
+            .iter()
+            .map(|&i| {
+                let owner = self.parts.get(&i).cloned().unwrap_or_else(|| name.clone());
+                (to(i), owner)
+            })
+            .collect();
+    }
+
+    /// Attribute every face not already in a nested part to part `name`,
+    /// keeping the IDs: for a solid whose IDs were just drawn for it (a
+    /// mesh converted at the part itself).
+    pub fn claim_part(&mut self, name: &Arc<str>) {
+        for id in self.ids() {
+            self.parts.entry(id).or_insert_with(|| name.clone());
         }
     }
 
@@ -355,6 +486,7 @@ impl ManifoldGeometry {
             id_to_color: BTreeMap::new(),
             subtracted: BTreeSet::new(),
             own_id: Some(id),
+            parts: BTreeMap::new(),
         }
     }
 
@@ -364,6 +496,7 @@ impl ManifoldGeometry {
     /// with a fresh one from `ids` instead (same mesh, no rebuild). Any
     /// other solid goes through `to_original`.
     pub fn to_fresh_original(&mut self, ids: &dyn IdSource) {
+        let owner = self.single_part();
         if self.own_id.is_none() || self.manifold.is_empty() {
             self.own_id = None;
             self.to_original(ids);
@@ -377,15 +510,28 @@ impl ManifoldGeometry {
         self.original_ids = BTreeSet::from([id]);
         self.id_to_color.clear();
         self.subtracted.clear();
+        self.parts = owner.map(|o| BTreeMap::from([(id, o)])).unwrap_or_default();
     }
 
     /// `ManifoldGeometry::toOriginal` (`ManifoldGeometry.cc:383-392`): the
     /// solid becomes one original with no colour and no cut faces.
+    ///
+    /// With faces of several parts the IDs are kept instead (only the
+    /// colours and cut faces are dropped), so the parts stay apart: the
+    /// geometry is the same, only the triangle runs differ from a
+    /// collapsed solid's. That case needs `part()`, which OpenSCAD lacks.
     pub fn to_original(&mut self, ids: &dyn IdSource) {
+        if self.mixed_parts() {
+            self.id_to_color.clear();
+            self.subtracted.clear();
+            return;
+        }
+        let owner = self.single_part();
         let id = self.make_original(ids);
         self.original_ids = BTreeSet::from([id]);
         self.id_to_color.clear();
         self.subtracted.clear();
+        self.parts = owner.map(|o| BTreeMap::from([(id, o)])).unwrap_or_default();
     }
 
     /// `ManifoldGeometry::transform`.
@@ -398,11 +544,22 @@ impl ManifoldGeometry {
     /// `ManifoldGeometry::setColor` (`ManifoldGeometry.cc:371-381`): make
     /// the whole solid one original (if it is not already) and map that ID
     /// to the colour, forgetting earlier colours and cut faces.
+    ///
+    /// With faces of several parts (`color() { part("a") ...; part("b")
+    /// ...; }`) the IDs are kept and each is mapped to the colour, which
+    /// colours the same faces without merging the parts into one.
     pub fn set_color(&mut self, c: Color, ids: &dyn IdSource) {
+        if self.mixed_parts() {
+            self.id_to_color = self.ids().into_iter().map(|id| (id, c)).collect();
+            self.subtracted.clear();
+            return;
+        }
+        let owner = self.single_part();
         let id = self.make_original(ids);
         self.original_ids = BTreeSet::from([id]);
         self.id_to_color = BTreeMap::from([(id, c)]);
         self.subtracted.clear();
+        self.parts = owner.map(|o| BTreeMap::from([(id, o)])).unwrap_or_default();
     }
 
     /// C++ `AsOriginal()` with an ID from `ids`: rebuild the mesh as one run.
@@ -430,6 +587,13 @@ impl ManifoldGeometry {
     /// `ManifoldGeometry::toPolySet` (`ManifoldGeometry.cc:129-210`): the
     /// triangles run by run, each run coloured by its original ID.
     pub fn to_polyset(&self, scheme: &Scheme) -> PolySet {
+        self.to_polyset_with_ids(scheme).0
+    }
+
+    /// [`Self::to_polyset`] with each face's original ID (see
+    /// [`Self::part_of`]).
+    pub fn to_polyset_with_ids(&self, scheme: &Scheme) -> (PolySet, Vec<u32>) {
+        let mut face_ids = Vec::new();
         let mesh = canonical_mesh(&self.manifold);
         let np = mesh.num_prop as usize;
         let mut ps = PolySet {
@@ -464,7 +628,7 @@ impl ManifoldGeometry {
             i
         };
         if mesh.run_index.is_empty() {
-            return ps;
+            return (ps, face_ids);
         }
         // Runs come in `canonical_mesh` order.
         let mut start = mesh.run_index[0] as usize;
@@ -477,10 +641,11 @@ impl ManifoldGeometry {
             for t in mesh.tri_verts[start..end].chunks(3) {
                 ps.faces.push(vec![t[0] as u32, t[1] as u32, t[2] as u32]);
                 ps.color_indices.push(ci);
+                face_ids.push(mesh.run_original_id[run]);
             }
             start = end;
         }
-        ps
+        (ps, face_ids)
     }
 
     pub fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {

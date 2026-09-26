@@ -377,7 +377,10 @@ struct Block<'a> {
 impl Block<'_> {
     /// Record that this block needed `n` IDs, and draw them globally.
     fn overflow(&self, n: u32, count: u32) -> u32 {
-        let mut o = self.overflow.lock().expect("overflow log");
+        let mut o = self
+            .overflow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let need = o.entry(self.key).or_insert(0);
         *need = (*need).max(n);
         Manifold::reserve_ids(count)
@@ -482,20 +485,29 @@ impl Renderer {
     /// before it evicts the least recently used entries.
     pub fn with_budget(bytes: usize) -> Renderer {
         let r = Renderer::default();
-        r.cache.lock().expect("cache").budget = bytes;
+        r.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .budget = bytes;
         r
     }
 
     /// Change the cache budget, evicting at once if it is now over.
     pub fn set_budget(&self, bytes: usize) {
-        let mut c = self.cache.lock().expect("cache");
+        let mut c = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         c.budget = bytes;
         c.shrink();
     }
 
     /// The cache's size, budget and counters.
     pub fn stats(&self) -> CacheStats {
-        let c = self.cache.lock().expect("cache");
+        let c = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         CacheStats {
             entries: c.entries.len(),
             bytes: c.bytes,
@@ -525,7 +537,10 @@ impl Renderer {
             // blocks for what they needed and start again from nothing;
             // the results cached on the way may hold such IDs too. The
             // needs only grow, so this ends after one retry.
-            let mut needs = self.needs.lock().expect("id needs");
+            let mut needs = self
+                .needs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for (k, n) in overflow {
                 let e = needs.entry(k).or_insert(0);
                 *e = (*e).max(n);
@@ -559,7 +574,10 @@ impl Renderer {
             if overflow.is_empty() {
                 return Ok(out);
             }
-            let mut needs = self.needs.lock().expect("id needs");
+            let mut needs = self
+                .needs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for (k, n) in overflow {
                 let e = needs.entry(k).or_insert(0);
                 *e = (*e).max(n);
@@ -601,8 +619,18 @@ impl Renderer {
             }));
             geom = Some(Geometry::Manifold(Arc::new(m)));
         }
-        let cache_entries = self.cache.lock().expect("cache").entries.len();
-        let overflow = std::mem::take(&mut *ctx.overflow.lock().expect("overflow log"));
+        let cache_entries = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .len();
+        let overflow = std::mem::take(
+            &mut *ctx
+                .overflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         Ok((
             Rendered {
                 geometry: geom,
@@ -664,8 +692,18 @@ impl Renderer {
                 outs[i] = Some(r?);
             }
         }
-        let cache_entries = self.cache.lock().expect("cache").entries.len();
-        let overflow = std::mem::take(&mut *ctx.overflow.lock().expect("overflow log"));
+        let cache_entries = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .len();
+        let overflow = std::mem::take(
+            &mut *ctx
+                .overflow
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         let rendered = outs
             .into_iter()
             .map(|o| {
@@ -712,8 +750,14 @@ impl Renderer {
         {
             let mut seen = HashSet::new();
             let mut visited = vec![false; len];
-            let mut ids = self.ids.lock().expect("id registry");
-            let needs = self.needs.lock().expect("id needs");
+            let mut ids = self
+                .ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let needs = self
+                .needs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // (node, its parent's key and first-occurrence flag)
             let mut stack: Vec<(&Node, Option<(Key, bool)>)> =
                 tops.iter().rev().map(|t| (*t, None)).collect();
@@ -765,7 +809,10 @@ impl Renderer {
 
     /// Forget every cached geometry (the budget stays).
     pub fn clear(&self) {
-        let mut c = self.cache.lock().expect("cache");
+        let mut c = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let budget = c.budget;
         *c = Cache {
             budget,
@@ -791,7 +838,12 @@ impl Ctx<'_> {
         let h = self.hashes[n.index];
         let first = self.first[n.index];
         let pattern = self.pattern[n.index];
-        let cached = self.r.cache.lock().expect("cache").get(h);
+        let cached = self
+            .r
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(h);
         if let Some((geom, replay)) = cached {
             if !first || self.opts.replay.is_none() {
                 // A later copy, or a host that keeps OpenSCAD's rule: the
@@ -831,15 +883,19 @@ impl Ctx<'_> {
             out.msgs.clear();
             None
         };
-        self.r.cache.lock().expect("cache").insert(
-            h,
-            out.geom.clone(),
-            Replay {
-                msgs,
-                pattern,
-                epoch: self.opts.replay.unwrap_or(0),
-            },
-        );
+        self.r
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                h,
+                out.geom.clone(),
+                Replay {
+                    msgs,
+                    pattern,
+                    epoch: self.opts.replay.unwrap_or(0),
+                },
+            );
         Ok(out)
     }
 
@@ -987,6 +1043,11 @@ impl Ctx<'_> {
                 invert,
                 ..
             } => Ok(self.surface(n, file, *center, *invert)),
+            NodeKind::Part { name } => {
+                let mut out = self.apply(n, Op::Union)?;
+                out.geom = out.geom.map(|g| self.part(n, g, name, &mut out.msgs));
+                Ok(out)
+            }
             NodeKind::Import(i) if i.kind == "nef3" => unsupported("import"),
             NodeKind::Import(i) => Ok(self.import(n, i)),
             NodeKind::Text(t) => Ok(self.text(n, t)),
@@ -1110,6 +1171,30 @@ impl Ctx<'_> {
         Out {
             geom: Some(geom),
             msgs: Self::read_msgs(n, msgs),
+        }
+    }
+
+    /// A `part()`'s union, made a solid whose faces carry the part's name
+    /// (`ManifoldGeometry::tag_part`). A mesh is converted here rather
+    /// than at the first boolean above, because that conversion would draw
+    /// IDs no part claims. 2D parts stay as they are: parts are tracked in
+    /// 3D only.
+    fn part(&self, n: &Node, g: Geometry, name: &str, msgs: &mut Vec<Msg>) -> Geometry {
+        let name: Arc<str> = Arc::from(name);
+        match g {
+            Geometry::PolySet(_) => match self.to_manifold(n, 0, g, msgs) {
+                Some(mut m) => {
+                    m.claim_part(&name);
+                    Geometry::Manifold(Arc::new(m))
+                }
+                None => Geometry::Manifold(Arc::new(ManifoldGeometry::default())),
+            },
+            Geometry::Manifold(m) => {
+                let mut m = Arc::unwrap_or_clone(m);
+                m.tag_part(&name, &self.block(n, OWN));
+                Geometry::Manifold(Arc::new(m))
+            }
+            g @ Geometry::Polygon2d(_) => g,
         }
     }
 

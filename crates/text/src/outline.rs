@@ -140,7 +140,12 @@ impl Cache {
     /// The hinted glyph, loaded once per face. `None` when the glyph cannot
     /// be loaded ("Could not load glyph").
     pub fn glyph(&self, font: &FontRef<'_>, state: &FaceState, g: u32) -> Option<Arc<Glyph>> {
-        if let Some(x) = self.glyphs.lock().expect("glyph cache").get(&g) {
+        if let Some(x) = self
+            .glyphs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&g)
+        {
             return Some(x.clone());
         }
         let outlines = font.outline_glyphs();
@@ -170,20 +175,25 @@ impl Cache {
         });
         self.glyphs
             .lock()
-            .expect("glyph cache")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(g, out.clone());
         Some(out)
     }
 
     /// The glyph flattened with `fn` steps per curve.
     pub fn flat(&self, glyph: &Glyph, g: u32, fn_: u32) -> Flat {
-        if let Some(x) = self.flat.lock().expect("flat cache").get(&(g, fn_)) {
+        if let Some(x) = self
+            .flat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(g, fn_))
+        {
             return x.clone();
         }
         let out = Arc::new(flatten(glyph, fn_));
         self.flat
             .lock()
-            .expect("flat cache")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert((g, fn_), out.clone());
         out
     }

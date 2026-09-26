@@ -265,6 +265,11 @@ impl Writer<'_> {
                 self.lit(")");
             }
             NodeKind::Hull => self.lit("hull()"),
+            NodeKind::Part { name } => {
+                self.lit("part(name = ");
+                self.quoted(name);
+                self.lit(")");
+            }
             NodeKind::Fill => self.lit("fill()"),
             NodeKind::Resize {
                 newsize,

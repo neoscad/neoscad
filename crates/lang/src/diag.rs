@@ -103,6 +103,9 @@ pub enum DiagCode {
     /// A message from building geometry (render time): mixed dimensions,
     /// invalid transforms, meshes that are not manifold.
     Geometry,
+    /// Two `part()`s with the same (dotted) name: neoscad's `part()`
+    /// extension, on only with `--enable part`.
+    DuplicatePart,
 }
 
 impl DiagCode {
@@ -140,6 +143,7 @@ impl DiagCode {
             DiagCode::ExperimentalFeature => "experimental-feature",
             DiagCode::Evaluation => "evaluation",
             DiagCode::Geometry => "geometry",
+            DiagCode::DuplicatePart => "duplicate-part",
         }
     }
 }

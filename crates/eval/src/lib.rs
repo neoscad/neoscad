@@ -197,6 +197,11 @@ pub struct Options {
     /// `--hardwarnings`: stop at the first warning, with the `TRACE:` lines
     /// of an evaluation error (see [`Evaluation::hard_warning`]).
     pub hardwarnings: bool,
+    /// neoscad's `part("name") { ... }` extension (`--enable part`). Off,
+    /// `part` is an unknown module exactly as in OpenSCAD, with its
+    /// warning; on, it is a builtin that a program's own `part` module
+    /// still shadows (see [`node::NodeKind::Part`]).
+    pub parts: bool,
 }
 
 impl Default for Options {
@@ -216,6 +221,7 @@ impl Default for Options {
             fs: Arc::new(StdFs),
             interrupt: None,
             hardwarnings: false,
+            parts: false,
         }
     }
 }

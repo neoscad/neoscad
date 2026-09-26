@@ -199,11 +199,19 @@ impl FaceState {
     }
 
     fn unhinted(&self, font: &FontRef<'_>, g: u32) -> Arc<UnhintedMetrics> {
-        if let Some(m) = self.metrics.lock().expect("metrics").get(&g) {
+        if let Some(m) = self
+            .metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&g)
+        {
             return m.clone();
         }
         let m = Arc::new(self.compute_unhinted(font, g));
-        self.metrics.lock().expect("metrics").insert(g, m.clone());
+        self.metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(g, m.clone());
         m
     }
 

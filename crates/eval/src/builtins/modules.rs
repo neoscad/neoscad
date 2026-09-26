@@ -61,6 +61,8 @@ pub(crate) enum BuiltinModule {
     Text,
     /// Experimental: known, but not enabled.
     Roof,
+    /// neoscad's `part()` extension; in the table only when enabled.
+    Part,
 }
 
 impl BuiltinModule {
@@ -69,7 +71,7 @@ impl BuiltinModule {
     }
 }
 
-pub(crate) fn table(syms: &mut Syms) -> HashMap<Sym, BuiltinModule, FxBuild> {
+pub(crate) fn table(syms: &mut Syms, parts: bool) -> HashMap<Sym, BuiltinModule, FxBuild> {
     use BuiltinModule::*;
     let all = [
         ("children", Children),
@@ -110,7 +112,14 @@ pub(crate) fn table(syms: &mut Syms) -> HashMap<Sym, BuiltinModule, FxBuild> {
         ("text", Text),
         ("roof", Roof),
     ];
-    all.into_iter().map(|(n, b)| (syms.intern(n), b)).collect()
+    // `part` is left out entirely when off (not registered as a disabled
+    // experiment like `roof`): OpenSCAD has no such module, so a program
+    // calling it must get OpenSCAD's plain "Ignoring unknown module".
+    let part = parts.then_some(("part", Part));
+    all.into_iter()
+        .chain(part)
+        .map(|(n, b)| (syms.intern(n), b))
+        .collect()
 }
 
 /// A builtin's bound arguments (`Parameters`), on the context stack.
@@ -457,8 +466,52 @@ impl<'a> Evaluator<'a> {
                 )?;
                 Ok(Some(node))
             }
+            B::Part => self.part_module(sr, i, ctx, loc),
             _ => self.geometry_module(b, sr, i, ctx, loc),
         }
+    }
+
+    /// `part("name") { ... }`: a union node carrying the part's dotted name
+    /// (see [`NodeKind::Part`]). A name that is not a non-empty string is
+    /// a warning, and the children are kept as a plain group, so the
+    /// geometry is the same either way.
+    fn part_module(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>, loc: Loc) -> R<Option<Node>> {
+        let args = self.inst_args(sr, i, ctx)?;
+        let p = self.params(args, loc, &["name"], &[], "part");
+        let name = match self.get(&p, "name") {
+            Value::Str(s) if !s.as_bytes().is_empty() => {
+                Some(String::from_utf8_lossy(s.as_bytes()).into_owned())
+            }
+            v => {
+                let mut t = b"part(name=".to_vec();
+                self.write_echo_nothrow(&v, &mut t);
+                t.extend_from_slice(b") needs a non-empty string name; treating it as a group");
+                self.warn(loc, DiagCode::InvalidArgument, t);
+                None
+            }
+        };
+        let Some(name) = name else {
+            let node = self.new_node(NodeKind::Group { name: None }, sr, i);
+            let r = self.with_children(node, sr, i, ctx);
+            self.end(p);
+            return r;
+        };
+        let full = match self.part_stack.last() {
+            Some(outer) => format!("{outer}.{name}"),
+            None => name,
+        };
+        if !self.part_names.insert(full.clone()) {
+            // Two parts with one name would be measured and checked as
+            // one; the geometry is unaffected.
+            let t = format!("Duplicate part name '{full}'");
+            self.warn(loc, DiagCode::DuplicatePart, t);
+        }
+        let node = self.new_node(NodeKind::Part { name: full.clone() }, sr, i);
+        self.part_stack.push(full);
+        let r = self.with_children(node, sr, i, ctx);
+        self.part_stack.pop();
+        self.end(p);
+        r
     }
 
     /// `builtin_children`.

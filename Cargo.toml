@@ -37,9 +37,17 @@ todo = "warn"
 # The conformance suite runs hundreds of neoscad processes per pass, and the
 # CLI's cold start is itself a tracked benchmark, so release builds favour
 # runtime speed over build time.
+#
+# Panics unwind (Cargo cannot set `panic` per binary): `neoscad serve`
+# answers a request that panics with a JSON-RPC internal error and keeps
+# serving, which `abort` made impossible (one bad request ended the server
+# and every client's warm caches). Measured against `abort` in phase 7b
+# (best of 5, `conformance bench`): cold start 4.2 -> 4.3 ms, geometry-bound
+# models unchanged, evaluation-bound BOSL2 models 5-8% slower
+# (fractal_tree 5.87 -> 6.33 s), binary 14.9 -> 17.0 MB.
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 debug = "line-tables-only"

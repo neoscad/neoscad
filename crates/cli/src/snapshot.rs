@@ -66,6 +66,21 @@ struct Args {
     #[arg(long, value_name = "MODE", default_value = "headlight")]
     lighting: String,
 
+    /// Parts to draw in colour, comma separated; the others are ghosted
+    /// (needs `--enable part`; a name includes the parts nested in it).
+    #[arg(long, value_delimiter = ',', value_name = "PART[,PART]")]
+    highlight: Vec<String>,
+
+    /// Run `neoscad check` (default settings) and mark its findings: thin
+    /// walls red, overhangs amber, and a numbered marker per finding.
+    #[arg(long)]
+    issues: bool,
+
+    /// `part`: neoscad's `part("name") { ... }` extension; parts are then
+    /// drawn in colours with a legend.
+    #[arg(long, value_name = "FEATURE", action = clap::ArgAction::Append)]
+    enable: Vec<String>,
+
     /// `json` also writes a summary to stdout.
     #[arg(long, value_name = "FORMAT")]
     format: Option<String>,
@@ -102,6 +117,9 @@ pub fn main(args: Vec<OsString>) -> u8 {
         "preview": a.preview,
         "diff": a.diff,
         "lighting": a.lighting,
+        "highlight": a.highlight,
+        "issues": a.issues,
+        "enable": a.enable,
         "json": match a.format.as_deref() {
             None => false,
             Some("json") => true,
@@ -177,6 +195,21 @@ pub fn execute(
     run.progress = progress;
     // Unseeded `rands()` repeats from snapshot to snapshot.
     run.rng_seed = Some(0);
+    run.parts = b("parts") || crate::parts_enabled(&strings("enable"));
+    // `issues`: true for the default check settings (or those given
+    // alongside, as for `check`), or an object of settings.
+    let issues = match params.get("issues") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => None,
+        Some(Value::Bool(true)) => match crate::check::settings_of(params) {
+            Ok(s) => Some(s),
+            Err(e) => return fail(e),
+        },
+        Some(o @ Value::Object(_)) => match crate::check::settings_of(o) {
+            Ok(s) => Some(s),
+            Err(e) => return fail(e),
+        },
+        Some(_) => return fail("issues must be true or an object of check settings"),
+    };
     let req = SnapshotRequest {
         run,
         output: output.clone(),
@@ -186,6 +219,8 @@ pub fn execute(
         preview: b("preview"),
         diff: s("diff").map(str::to_string),
         lighting,
+        highlight: strings("highlight"),
+        issues,
     };
     let snap = match session.snapshot(&req) {
         Ok(s) => s,

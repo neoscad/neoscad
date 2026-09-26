@@ -150,7 +150,12 @@ impl FontDb {
     /// `FontCache::get_font`: the face a font name selects. An empty name
     /// means OpenSCAD's default, `Liberation Sans:style=Regular`.
     pub fn lookup(&self, name: &str) -> Result<Arc<Face>, LookupError> {
-        if let Some(f) = self.lookups.lock().expect("font lookups").get(name) {
+        if let Some(f) = self
+            .lookups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+        {
             return Ok(f.clone());
         }
         let trimmed = name.trim();
@@ -163,7 +168,7 @@ impl FontDb {
         let face = best_match(self.faces(), &pat).ok_or(LookupError::NotFound)?;
         self.lookups
             .lock()
-            .expect("font lookups")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(name.to_string(), face.clone());
         Ok(face)
     }

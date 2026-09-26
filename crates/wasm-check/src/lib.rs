@@ -171,6 +171,58 @@ pub fn run_session(files: Arc<MemFs>, src: &[u8]) -> String {
     out
 }
 
+/// `check` and `measure` with named parts, as an agent's web worker runs
+/// them: `src` is `/doc/main.scad`, rendered with `part()` on; the lines
+/// report the check's findings (code, severity, part, value) and each
+/// part's measured volume.
+pub fn run_check(files: Arc<MemFs>, src: &[u8]) -> String {
+    let base: Arc<dyn FileSystem + Send + Sync> = files;
+    let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(base, LIBRARY_DIR));
+    let mut cfg = session::Config::new(fs, LibraryPath(vec![PathBuf::from(LIBRARY_DIR)]));
+    cfg.work_dir = PathBuf::from(DOC_DIR);
+    cfg.parts = true;
+    let s = session::Session::new(cfg);
+    s.update(std::path::Path::new("main.scad"), src.to_vec());
+    let mut out = String::new();
+    let req = session::check::CheckRequest {
+        run: session::Run::new("main.scad"),
+        settings: session::check::CheckSettings::default(),
+    };
+    let c = match s.check(&req) {
+        Ok(c) => c,
+        Err(e) => return format!("{e}\n"),
+    };
+    out.push_str(&String::from_utf8_lossy(&c.log.stderr));
+    let v = &c.summary;
+    out.push_str(&format!(
+        "Check: exit {}, {} errors, {} warnings, {} components\n",
+        c.exit_code, v["counts"]["errors"], v["counts"]["warnings"], v["model"]["components"]
+    ));
+    for f in v["findings"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "Finding: {} {} {} {}\n",
+            f["code"].as_str().unwrap_or(""),
+            f["severity"].as_str().unwrap_or(""),
+            f["part"].as_str().unwrap_or("-"),
+            f["value"]
+        ));
+    }
+    let m = match s.measure(&session::measure::MeasureRequest::new(session::Run::new(
+        "main.scad",
+    ))) {
+        Ok(m) => m,
+        Err(e) => return format!("{out}{e}\n"),
+    };
+    for p in m.summary["parts"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "Part {}: volume {:.3}\n",
+            p["name"].as_str().unwrap_or(""),
+            p["volume"].as_f64().unwrap_or(0.0)
+        ));
+    }
+    out
+}
+
 /// What the renderer would draw, without a GPU: the scene's triangles and
 /// outline segments, and the viewer distance `--viewall` fits (the
 /// default camera's). This runs the renderer's CPU side (scene building,
@@ -253,7 +305,7 @@ pub extern "C" fn add_file(name_len: usize) {
 /// Run the input as the main file with `seed` for unseeded `rands()`,
 /// `frame_limit` as the frame budget (0 for the default), and as a preview
 /// when `preview` is 1; with `preview` 2, as a session case
-/// ([`run_session`]).
+/// ([`run_session`]); with 3, as a check case ([`run_check`]).
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
@@ -275,7 +327,9 @@ pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
         n => n,
     };
     OUTPUT.lock().expect("output").clear();
-    let out = if preview == 2 {
+    let out = if preview == 3 {
+        run_check(files, &src)
+    } else if preview == 2 {
         run_session(files, &src)
     } else {
         run_with(files, &src, seed, limit, preview != 0)
@@ -363,7 +417,9 @@ mod tests {
             let seed = c["seed"].as_u64().unwrap_or(0) as u32;
             let preview = c["preview"].as_bool().unwrap_or(false);
             let src = c["src"].as_str().unwrap().as_bytes();
-            let out = if c["session"].as_bool().unwrap_or(false) {
+            let out = if c["session"] == "check" {
+                run_check(files, src)
+            } else if c["session"].as_bool().unwrap_or(false) {
                 run_session(files, src)
             } else {
                 run_with(

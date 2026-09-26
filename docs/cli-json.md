@@ -210,6 +210,21 @@ else is the same for the same input.
   verbatim. `items` holds the same errors and warnings as structured
   diagnostics (see "Diagnostics" below). The same lines go to stderr as
   they are printed.
+- `parts` (phase 7b), with `--enable part` and a 3D model that has
+  parts: their dotted names, in the order their colours are assigned.
+  The sheet then draws each part in its own colour with a legend (at
+  most eight entries).
+- `highlight`, with `--highlight PART[,PART]`: the names given. Those
+  parts (and the parts nested in them) keep their colours; the rest are
+  drawn translucent grey. A name that is not a part fails the snapshot
+  with the list of parts.
+- `issues`, with `--issues`: the `check` result's `counts` and
+  `findings` (see "`neoscad check`" below; same objects and `id`s).
+  The sheet paints thin-wall faces red, overhangs amber and floating
+  pieces purple, and puts a numbered marker at each error and warning's
+  `location.point`, numbered by its `id`. `--highlight` and `--issues`
+  draw the rendered model, so they cannot be combined with `--preview`
+  or `--diff`.
 
 When the model (or the `--diff` model) cannot be loaded or evaluated
 (a syntax error, `--hardwarnings`), no sheet is written and the summary
@@ -264,6 +279,149 @@ fields are only added. Keys sorted, compact, a trailing newline.
 
 Usage errors (a bad flag, no `-o`) happen before the run and print their
 usual text with no JSON.
+
+# Named parts: `--enable part`
+
+`part("name") { ... }` is neoscad's language extension for naming the
+pieces of a model, so that `check`, `measure` and `snapshot` can refer
+to them. It is off by default: without `--enable part` (the `parts` or
+`enable` option of a server request, `session::Run::parts` or
+`session::Config::parts`), `part` is an unknown module exactly as in
+OpenSCAD, with its warning (`WARNING: Ignoring unknown module 'part'
+...`), and `--enable all` does not turn it on. A program's own `part`
+module always wins over the extension.
+
+- Geometrically a part is a union of its children; the rendered model
+  is the same with or without it (the triangles may be grouped
+  differently in exported files).
+- Nested parts have dotted names: a `hinge` part inside a `lid` part is
+  `lid.hinge`. A name used twice warns `Duplicate part name 'lid'`
+  (code `duplicate-part`); instances of one name are measured and
+  checked as one part. A name that is not a non-empty string warns and
+  the children are kept as a plain group.
+- The `.csg` export shows `part(name = "lid") { ... }` nodes, only when
+  the extension is on.
+- Each output face remembers its part through Manifold's original IDs,
+  across booleans and colours; faces a `difference()` cuts into a part
+  belong to that part. Parts are tracked in 3D only.
+- A part's own solid (for `measure` and the checks between parts) is
+  its subtree's geometry, placed by the transforms above it. When an
+  operation above it changes what reaches the model, the part's
+  `context` names it: `difference` (a subtracted part), `intersection`,
+  `hull`, `minkowski`, `resize`, or `2d` (projected, extruded, offset).
+
+# `neoscad check`
+
+`neoscad check MODEL.scad [--bed WxDxH] [--nozzle MM] [--min-wall MM]
+[--max-overhang DEG] [--enable part] [-D var=val] [--format json]`
+checks a model's rendered solid for FDM printing
+(`crates/session/src/check.rs`). Without `--format json` it prints a
+summary line and one line per finding with its fix; with it, one JSON
+object on stdout (keys sorted, compact, a trailing newline). The
+model's own messages go to stderr. Exit status: 0 when no finding is an
+error, 1 when one is or when the model fails to load, evaluate or
+render. A running `neoscad serve` does the work when there is one.
+
+Defaults, for a common FDM printer: `nozzle` 0.4 mm, `min_wall` twice
+the nozzle (0.8 mm: two perimeters), `max_overhang` 45° from vertical,
+no bed (the bed-fit check runs only with `--bed`), `bed_tolerance` 0.05
+mm (how far above the lowest point a piece may start and still count
+as on the bed), at most 10 findings per code.
+
+```json
+{"schema": 1, "input": "model.scad", "ok": bool, "exit_code": 0|1,
+ "settings": {"bed": [w, d, h]|null, "nozzle": 0.4, "min_wall": 0.8,
+              "max_overhang": 45.0, "bed_tolerance": 0.05,
+              "max_findings": 10},
+ "model": MODEL, "parts": [PART, ...],
+ "counts": {"errors": int, "warnings": int, "info": int},
+ "findings": [FINDING, ...], "truncated": {"code": int, ...},
+ "timings_ms": {"evaluate", "geometry",
+                "check": {"manifold", "components", "walls",
+                          "overhangs", "parts", "total"},
+                "total"},
+ "diagnostics": DIAG}
+```
+
+- `MODEL` (3D): `{"dimensions": 3, "manifold", "components",
+  "floating", "volume", "area", "centroid", "bbox", "triangles",
+  "min_wall": {"thickness", "point", "part"}|null, "overhang_area"}`;
+  `{"dimensions": 2}` for a 2D model, `null` for an empty one.
+  `min_wall` is the thinnest wall any sample measured.
+- `PART`: `{"name", "instances", "context", "dimensions", "manifold",
+  "components", "volume", "area", "bbox"}` for each part's own solid.
+- `FINDING`: `{"id": int, "severity": "error"|"warning"|"info", "code",
+  "message", "part": name|null, "location": {"point": [x, y, z],
+  "bbox": BBOX}, "fix", "value": number|null, "limit": number|null}`.
+  `id`s count from 1 in order: errors first. `value` is what was
+  measured (mm, mm², mm³ or degrees, as the message says) and `limit`
+  what it broke. Numbers are rounded to 0.1 µm.
+- `counts` are before truncation; `truncated` counts, per code, the
+  findings past the limit.
+
+Codes and how each is found:
+
+| Code | Severity | What |
+|---|---|---|
+| `empty` | error | Nothing to print. |
+| `not-3d` | error | A 2D model. |
+| `not-closed` | error | A mesh result (a lone polyhedron) with edges on one face only. |
+| `not-manifold` | error | Manifold reports an error or kept the solid as a triangle soup, or edges are shared by more than two faces. |
+| `floating` | error | A connected piece (triangles sharing vertices) whose lowest point is more than `bed_tolerance` above the model's lowest point. `point` is the piece's centre. |
+| `thin-wall` | error below `nozzle`, else warning below `min_wall` | From points on every face (the centroid, or 4 or 16 points on faces larger than (4 × `min_wall`)²) a ray goes inward along the face's normal to where it leaves the solid, ignoring faces that share a corner with the start (so knife edges do not measure zero) and exits through faces more than 45° from parallel (corners and slopes are not walls). Thin faces that share an edge, or face each other across a wall, are one place; places of one part and severity within max(4 × `min_wall`, 5% of the model's diagonal) are one finding ("walls at N places"), located at its thinnest point. |
+| `overhang` | warning | Faces pointing down more than `max_overhang` from vertical, except faces within `bed_tolerance` of the lowest point, grouped into regions by shared edges; regions under (2 × `nozzle`)² are ignored. `value` is the region's area, the message its steepest angle; `point` is on the region. |
+| `bed-fit` | error, or warning when turning it 90° about z fits | With `--bed`: the bounding box against the bed. |
+| `tiny-feature` | warning | A piece whose largest extent is under two nozzle widths. |
+| `parts-intersect` | warning | Two parts (neither nested in the other, both reaching the model as themselves) whose solids overlap: `value` is the overlap volume, by a boolean intersection. |
+| `part-not-manifold` | error | A part's own solid is not valid. |
+| `off-bed` | info | The model's lowest point is not at z = 0. |
+
+Accuracy: on the synthetic models of `crates/session/tests/check.rs`
+the thickness of a 0.3 and a 0.5 mm wall, a 200 mm² overhang, a 45°
+chamfer at a 30° limit (141.42 mm²), a floating cube's 5 mm lift, the
+overlap of two parts and a thin part's name come out exact. Rays
+measure along the normal: a wall whose sides are not parallel measures
+thicker than its narrowest point, and a feature narrower than the
+sample spacing on a large face can be missed. A flat span between two
+walls (a bridge) is reported as an overhang.
+
+# `neoscad measure`
+
+`neoscad measure MODEL.scad [--part P] [--between A B] [--section
+z=H|x=H|y=H] [--svg FILE] [--enable part] [-D var=val] [--format json]`
+(`crates/session/src/measure.rs`). Exit status 0, or 1 when the model
+fails or a named part does not exist (then `error` says which parts
+there are).
+
+```json
+{"schema": 1, "input": "model.scad", "exit_code": 0,
+ "model": SOLID|GEOM2D|null, "parts": [SOLID + {"name", "instances",
+ "context"}, ...],
+ "between": BETWEEN, "section": SECTION|null,
+ "timings_ms": {"evaluate", "geometry", "measure", "total"},
+ "diagnostics": DIAG}
+```
+
+- `SOLID`: `{"volume", "area", "bbox", "centroid", "triangles"}` (the
+  model's also `"dimensions": 3, "components", "manifold"`), in mm, mm²
+  and mm³, rounded to 1e-6. `centroid` is the centre of mass of the
+  enclosed volume at uniform density. A 2D model is the `GEOM` object
+  of the snapshot summary.
+- `parts`: every part, or with `--part P` that part and the parts
+  nested in it.
+- `between` (with `--between A B`): `{"a", "b", "distance",
+  "touching", "overlapping", "overlap_volume", "overlap_bbox",
+  "points"}`. Overlap is a boolean intersection of the two solids
+  (then `distance` is 0); otherwise `distance` is the exact smallest
+  distance between their surfaces (triangle to triangle, over bounding
+  volume hierarchies) and `points` the closest points on A and on B.
+  `touching`: within 1 µm.
+- `section` (with `--section`): `{"plane": "z=5", "axes": ["x", "y"],
+  "area", "perimeter", "contours", "bbox", "part"?, "svg"?}` for the
+  cut through the model (or `--part`'s solid): `axes` are the section's
+  2D axes (x, y for z; y, z for x; x, z for y); `bbox` is in model
+  coordinates; `svg` is the file written with `--svg` (the outline in
+  mm, the second axis up, holes by the even-odd rule).
 
 # Diagnostics
 
@@ -328,3 +486,6 @@ have them.
   diagnostics, `lighting` and `diagnostics.items` in the snapshot
   summary, and the server's results (`docs/serve-protocol.md`), which
   use the same `GEOM` and diagnostic objects.
+- Phase 7b: added named parts (`--enable part`), `neoscad check`,
+  `neoscad measure`, and the snapshot's `parts`, `highlight` and
+  `issues`.

@@ -24,10 +24,13 @@ use geom::Geometry;
 use geom::color::Color;
 use geom::manifold_geom::{ManifoldGeometry, OpType};
 use render::scene::{Cull, Depth, DrawState, Surface};
-use render::snapshot::{Sheet, View, number};
+use render::snapshot::{Marker, Sheet, View, number};
 use render::{ColorScheme, Scene};
 use serde_json::{Value, json};
 
+use crate::check::{Analysis, CheckSettings, Level};
+use crate::mesh::Mesh;
+use crate::parts::is_within;
 use crate::{Cancelled, Log, Mode, Rendered, Run, Session, stats};
 
 /// What to draw.
@@ -46,6 +49,11 @@ pub struct SnapshotRequest {
     /// Another version of the model (as named, like [`Run::input`]).
     pub diff: Option<String>,
     pub lighting: render::Lighting,
+    /// Parts to show in colour, the others ghosted (with `--enable part`;
+    /// a name also selects the parts nested in it).
+    pub highlight: Vec<String>,
+    /// Run `check` with these settings and mark its findings on the sheet.
+    pub issues: Option<CheckSettings>,
 }
 
 impl SnapshotRequest {
@@ -59,8 +67,208 @@ impl SnapshotRequest {
             preview: false,
             diff: None,
             lighting: render::Lighting::Headlight,
+            highlight: Vec::new(),
+            issues: None,
         }
     }
+}
+
+/// Part colours, in order of first appearance (Tableau 10 without its red
+/// and orange, which mark issues).
+const PALETTE: [[f32; 3]; 8] = [
+    [0.12, 0.47, 0.71],
+    [0.17, 0.63, 0.17],
+    [0.58, 0.40, 0.74],
+    [0.09, 0.75, 0.81],
+    [0.55, 0.34, 0.29],
+    [0.89, 0.47, 0.76],
+    [0.74, 0.74, 0.13],
+    [0.50, 0.50, 0.50],
+];
+/// Faces of no part, and a whole model under `--issues`.
+const NEUTRAL: Color = Color([0.80, 0.80, 0.77, 1.0]);
+/// Parts not highlighted.
+const GHOST: Color = Color([0.62, 0.62, 0.60, 0.22]);
+const THIN: Color = Color([0.86, 0.12, 0.10, 1.0]);
+const OVERHANG: Color = Color([1.00, 0.62, 0.05, 1.0]);
+const FLOATING: Color = Color([0.62, 0.36, 0.85, 1.0]);
+/// The most legend entries the header has room for.
+const LEGEND_MAX: usize = 8;
+
+fn marker_color(l: Level) -> [u8; 3] {
+    match l {
+        Level::Error => [190, 20, 20],
+        Level::Warning => [200, 110, 0],
+        Level::Info => [40, 90, 190],
+    }
+}
+
+/// The faces `tris` of `mesh` as a mesh to draw.
+fn subset(mesh: &Mesh, tris: impl Iterator<Item = usize>) -> Arc<geom::polyset::PolySet> {
+    Arc::new(geom::polyset::PolySet {
+        vertices: mesh.verts.clone(),
+        faces: tris.map(|t| mesh.tris[t].to_vec()).collect(),
+        triangular: true,
+        ..Default::default()
+    })
+}
+
+/// What a part or issue scene adds to the sheet.
+struct Marked {
+    scene: Scene,
+    legend: Vec<([f32; 4], String)>,
+    markers: Vec<Marker>,
+    parts: Vec<String>,
+}
+
+/// The rendered model drawn by part (each in its colour, or the
+/// highlighted ones in colour and the rest ghosted), with the issues of
+/// `analysis` painted on (thin walls red, overhangs amber) and its
+/// findings marked by number.
+fn marked_scene(
+    mesh: &Mesh,
+    scheme: &ColorScheme,
+    highlight: &[String],
+    analysis: Option<&Analysis>,
+) -> Result<Marked, SnapshotError> {
+    let names: Vec<String> = mesh.part_names.iter().map(|n| n.to_string()).collect();
+    for h in highlight {
+        if !names.iter().any(|n| is_within(n, h)) {
+            return Err(SnapshotError::Failed(if names.is_empty() {
+                format!("no part '{h}': the model has no parts (they need `--enable part`)")
+            } else {
+                format!("no part '{h}' (parts: {})", names.join(", "))
+            }));
+        }
+    }
+    let b = mesh.bbox();
+    let bbox = (!b.is_empty()).then_some((b.lo, b.hi));
+    let mut scene = Scene::empty(scheme, bbox);
+    let opaque = DrawState {
+        cull: Cull::None,
+        depth: Depth::LessEqual,
+        color_write: true,
+        bias: false,
+    };
+    let surface = |mesh: Arc<geom::polyset::PolySet>, color: Color, state: DrawState| Surface {
+        mesh,
+        matrix: None,
+        color,
+        force_color: true,
+        lit: true,
+        state,
+    };
+    // Groups of faces by colour: `None` for faces of no part.
+    let lit = |p: Option<u32>| -> bool {
+        highlight.is_empty()
+            || p.is_some_and(|p| highlight.iter().any(|h| is_within(&names[p as usize], h)))
+    };
+    let color_of = |p: Option<u32>| -> Color {
+        match p {
+            _ if analysis.is_some() && highlight.is_empty() => NEUTRAL,
+            None => NEUTRAL,
+            Some(p) => {
+                let c = PALETTE[p as usize % PALETTE.len()];
+                Color([c[0], c[1], c[2], 1.0])
+            }
+        }
+    };
+    let mut groups: Vec<(Option<u32>, Vec<usize>)> = Vec::new();
+    for t in 0..mesh.tris.len() {
+        let p = mesh.part[t];
+        match groups.iter_mut().find(|(q, _)| *q == p) {
+            Some(g) => g.1.push(t),
+            None => groups.push((p, vec![t])),
+        }
+    }
+    let mut ghosts = Vec::new();
+    for (p, tris) in &groups {
+        if lit(*p) {
+            scene.push(surface(
+                subset(mesh, tris.iter().copied()),
+                color_of(*p),
+                opaque,
+            ));
+        } else {
+            ghosts.extend(tris.iter().copied());
+        }
+    }
+    let mut legend = Vec::new();
+    let mut markers = Vec::new();
+    if let Some(a) = analysis {
+        // Painted over the model, pulled towards the camera so they win the
+        // depth test against the faces they cover.
+        let over = DrawState {
+            bias: true,
+            ..opaque
+        };
+        let keep = |t: &&u32| lit(mesh.part[**t as usize]);
+        let thin: Vec<usize> = a.thin.iter().filter(keep).map(|&t| t as usize).collect();
+        let hang: Vec<usize> = a
+            .overhang
+            .iter()
+            .filter(keep)
+            .map(|&t| t as usize)
+            .collect();
+        let float: Vec<usize> = a
+            .floating
+            .iter()
+            .filter(keep)
+            .map(|&t| t as usize)
+            .collect();
+        if !float.is_empty() {
+            scene.push(surface(subset(mesh, float.into_iter()), FLOATING, over));
+        }
+        if !hang.is_empty() {
+            scene.push(surface(subset(mesh, hang.into_iter()), OVERHANG, over));
+        }
+        if !thin.is_empty() {
+            scene.push(surface(subset(mesh, thin.into_iter()), THIN, over));
+        }
+        legend.push((THIN.0, "thin wall".to_string()));
+        legend.push((OVERHANG.0, "overhang".to_string()));
+        legend.push((FLOATING.0, "floating".to_string()));
+        for (i, f) in a.findings.iter().enumerate() {
+            // Info findings (a model off the bed) point at nothing to fix.
+            if f.bbox.is_empty() || f.level == Level::Info {
+                continue;
+            }
+            let c = marker_color(f.level);
+            markers.push(Marker {
+                point: f.point,
+                label: (i + 1).to_string(),
+                color: c,
+            });
+        }
+    }
+    if !ghosts.is_empty() {
+        // Translucent: back faces first, as OpenSCAD draws transparent
+        // objects, after everything opaque.
+        let mesh = subset(mesh, ghosts.into_iter());
+        for cull in [Cull::Front, Cull::Back] {
+            scene.push(surface(mesh.clone(), GHOST, DrawState { cull, ..opaque }));
+        }
+    }
+    if analysis.is_none() || !highlight.is_empty() {
+        let shown: Vec<(usize, &String)> = names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| lit(Some(*i as u32)))
+            .collect();
+        let room = LEGEND_MAX.saturating_sub(legend.len());
+        for (i, n) in shown.iter().take(room) {
+            legend.push((color_of(Some(*i as u32)).0, n.to_string()));
+        }
+        if shown.len() > room {
+            legend.push((GHOST.0, format!("+{} more", shown.len() - room)));
+        }
+    }
+    Ok(Marked {
+        scene,
+        legend,
+        markers,
+        parts: names,
+    })
 }
 
 /// A snapshot.
@@ -156,7 +364,19 @@ impl Session {
         } else {
             Mode::Render
         };
-        let model = self.render(&req.run, mode, &scheme)?;
+        let marking = !req.highlight.is_empty() || req.issues.is_some();
+        if marking && (req.preview || req.diff.is_some()) {
+            return Err(SnapshotError::Failed(
+                "--highlight and --issues draw the rendered model: they cannot be combined \
+                 with --preview or --diff"
+                    .into(),
+            ));
+        }
+        let (model, parts) = if req.issues.is_some() {
+            self.render_parts(&req.run, &scheme)?
+        } else {
+            (self.render(&req.run, mode, &scheme)?, Vec::new())
+        };
         // A model that fails to load or evaluate still gets its summary,
         // with the diagnostics that say why: that is what an agent needs.
         let failed = |log: Log, code: u8| {
@@ -196,7 +416,63 @@ impl Session {
         let mut legend = Vec::new();
         let mut summary = serde_json::Map::new();
         let mut log = model.log.clone();
-        let (scene, is_2d) = if let Some(other) = &req.diff {
+        // Parts and issues: the rendered solid by part, with the findings.
+        let solid_mesh = match &model.geometry {
+            Some(g) if !req.preview && req.diff.is_none() && g.dimension() == 3 => {
+                Some(Mesh::of_solid(&stats::solid(g)))
+            }
+            _ => None,
+        };
+        let mut check_line: Option<String> = None;
+        let has_parts = solid_mesh
+            .as_ref()
+            .is_some_and(|m| !m.part_names.is_empty());
+        let mut marked = None;
+        if marking || has_parts {
+            let t = self.now();
+            let analysis = req.issues.as_ref().map(|settings| {
+                let clock = || self.now();
+                crate::check::analyze(model.geometry.as_ref(), &parts, settings, &clock)
+            });
+            let mesh = analysis
+                .as_ref()
+                .map(|a| &a.mesh)
+                .or(solid_mesh.as_ref())
+                .filter(|m| !m.tris.is_empty());
+            if let Some(mesh) = mesh {
+                let m = marked_scene(mesh, &scheme, &req.highlight, analysis.as_ref())?;
+                legend = m.legend.clone();
+                if !m.parts.is_empty() {
+                    summary.insert("parts".into(), json!(m.parts));
+                }
+                if !req.highlight.is_empty() {
+                    summary.insert("highlight".into(), json!(req.highlight));
+                }
+                marked = Some(m);
+            } else if !req.highlight.is_empty() {
+                return Err(SnapshotError::Failed(
+                    "--highlight needs a 3D model with parts (`--enable part`)".into(),
+                ));
+            }
+            if let Some(a) = &analysis {
+                let [e, w, i] = a.counts;
+                // Markers are numbered by `issues.findings[].id`.
+                check_line = Some(format!("; check: {e} errors, {w} warnings"));
+                summary.insert(
+                    "issues".into(),
+                    json!({
+                        "counts": {"errors": e, "warnings": w, "info": i},
+                        "findings": a.findings.iter().enumerate().map(|(k, f)| f.json(k + 1)).collect::<Vec<_>>(),
+                    }),
+                );
+            }
+            geometry_ms += self.now() - t;
+        }
+        let mut markers = Vec::new();
+        let (scene, is_2d) = if let Some(m) = marked {
+            markers = m.markers;
+            (m.scene, false)
+        } else if let Some(other) = &req.diff {
             let run = Run {
                 input: other.clone(),
                 supersede: false,
@@ -315,6 +591,9 @@ impl Session {
             if let Some(t) = g.get("triangles").and_then(Value::as_u64) {
                 line.push_str(&format!(", {t} triangles"));
             }
+            if let Some(c) = &check_line {
+                line.push_str(c);
+            }
             if req.diff.is_none() {
                 header.push(line);
             }
@@ -342,6 +621,7 @@ impl Session {
             header,
             legend,
             lighting: req.lighting,
+            markers,
         };
         req.run.stage(crate::Stage::Draw);
         let (png, gpu_ms, draw_ms, encode_ms) = self.draw_sheet(&scene, &scheme, &sheet)?;

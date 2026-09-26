@@ -488,3 +488,45 @@ fn dxf_dim_reads_through_the_file_system() {
     );
     assert_eq!(lines, ["ECHO: 22"]);
 }
+
+/// neoscad's `part()` extension: off by default, when it is exactly
+/// OpenSCAD's unknown module; on, a node with a dotted name.
+#[test]
+fn part_is_opt_in() {
+    let src = "part(\"lid\") { cube(1); part(\"hinge\") cube(2); }\npart(\"lid\") sphere(1);";
+    assert_eq!(
+        run(src),
+        [
+            "WARNING: Ignoring unknown module 'part' @1",
+            "WARNING: Ignoring unknown module 'part' @2",
+        ]
+    );
+    let on = Options {
+        parts: true,
+        ..Options::default()
+    };
+    let (lines, ev) = run_with(src, &on);
+    assert_eq!(lines, ["WARNING: Duplicate part name 'lid' @2"]);
+    let csg = eval::dump::csg(
+        &ev.root,
+        std::path::Path::new("/nonexistent"),
+        &lang::loader::StdFs,
+    );
+    assert_eq!(
+        csg,
+        "part(name = \"lid\") {\n\tcube(size = [1, 1, 1], center = false);\n\tpart(name = \"lid.hinge\") {\n\t\tcube(size = [2, 2, 2], center = false);\n\t}\n}\npart(name = \"lid\") {\n\tsphere($fn = 0, $fa = 12, $fs = 2, r = 1);\n}\n\n"
+    );
+    // A program's own `part` module wins, as any user module over a
+    // builtin; a bad name warns and keeps the children as a group.
+    let (lines, _) = run_with("module part(n) echo(n); part(\"x\");\npart2 = 1;", &on);
+    assert_eq!(lines, ["ECHO: \"x\""]);
+    let (lines, ev) = run_with("part(3) cube(1);", &on);
+    assert_eq!(
+        lines,
+        ["WARNING: part(name=3) needs a non-empty string name; treating it as a group @1"]
+    );
+    assert!(matches!(
+        ev.root.children[0].kind,
+        eval::node::NodeKind::Group { .. }
+    ));
+}

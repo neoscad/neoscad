@@ -19,7 +19,9 @@
 //! (its JSON is documented in `docs/cli-json.md`), `--info` and
 //! `--help-export` in [`info`].
 //!
-//! `neoscad snapshot` is neoscad's own subcommand, with its own flags
+//! `neoscad check` ([`check`]) and `neoscad measure` ([`measure`]) are
+//! neoscad's printability checks and measurements, on the session like
+//! snapshots. `neoscad snapshot` is neoscad's own subcommand, with its own flags
 //! ([`snapshot`]): a contact sheet of a model for agents. `neoscad serve`
 //! ([`serve`]) keeps a session's caches warm behind JSON-RPC; exports and
 //! snapshots use a running one automatically ([`client`], [`delegate`]).
@@ -28,12 +30,14 @@
 //! Cold start is a tracked benchmark (docs/architecture.md, "Agent surface"),
 //! so `main` does nothing before argument parsing and nothing expensive after.
 
+mod check;
 mod client;
 mod delegate;
 mod deps;
 mod export_options;
 mod host;
 mod info;
+mod measure;
 mod outcome;
 mod param_json;
 mod png;
@@ -122,8 +126,10 @@ struct Cli {
     #[arg(short = 'P', value_name = "NAME")]
     parameter_set: Option<String>,
 
-    /// Accepted for compatibility: neoscad implements none of OpenSCAD's
-    /// experimental features, and says so for each one named.
+    /// `part` turns on neoscad's `part("name") { ... }` extension (named
+    /// parts for `check` and `measure`). OpenSCAD's experimental features
+    /// are accepted for compatibility: neoscad implements none of them,
+    /// and says so for each one named.
     #[arg(long, value_name = "FEATURE", action = ArgAction::Append)]
     enable: Vec<String>,
 
@@ -262,6 +268,14 @@ fn main() -> ExitCode {
             let rest: Vec<std::ffi::OsString> = args.collect();
             return ExitCode::from(snapshot::main(rest));
         }
+        Some(a) if a == "check" => {
+            let rest: Vec<std::ffi::OsString> = args.collect();
+            return ExitCode::from(check::main(rest));
+        }
+        Some(a) if a == "measure" => {
+            let rest: Vec<std::ffi::OsString> = args.collect();
+            return ExitCode::from(measure::main(rest));
+        }
         Some(a) if a == "serve" => {
             let rest: Vec<std::ffi::OsString> = args.collect();
             return ExitCode::from(serve::main(rest));
@@ -326,6 +340,17 @@ const FEATURES: &[&str] = &[
     "unicode-identifiers",
 ];
 
+/// neoscad's own `--enable` feature: the `part("name") { ... }` module
+/// (`eval::Options::parts`). Only this exact name turns it on; `--enable
+/// all` means OpenSCAD's experiments and leaves it off, so a program run
+/// with OpenSCAD's flags behaves as it does in OpenSCAD.
+pub const PART_FEATURE: &str = "part";
+
+/// Whether `--enable` names neoscad's `part()` extension.
+pub fn parts_enabled(names: &[String]) -> bool {
+    names.iter().any(|n| n == PART_FEATURE)
+}
+
 /// `--enable`: OpenSCAD switches the named features on (`all` switches on
 /// every one and ends the list) and warns about unknown names. neoscad has
 /// none of them, so a known name gets a warning instead of silently doing
@@ -334,6 +359,9 @@ const FEATURES: &[&str] = &[
 fn enable_warnings(names: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for name in names {
+        if name == PART_FEATURE {
+            continue;
+        }
         if name == "all" {
             out.push(
                 "WARNING: --enable all: no experimental feature is supported by neoscad; ignoring it."
@@ -699,6 +727,7 @@ fn served_export(
         json: cli.format.as_deref() == Some("json"),
         rich: rich_diagnostics(),
         seed: options.rng_seed,
+        parts: options.parts,
         png: formats
             .iter()
             .all(|(id, _)| *id == "png")
@@ -750,6 +779,7 @@ fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
         check_parameter_ranges: flag(&cli.check_parameter_ranges, false, "check-parameter-ranges")?,
         hardwarnings: cli.hardwarnings,
         rng_seed: host::entropy_seed(),
+        parts: parts_enabled(&cli.enable),
         ..Default::default()
     };
     if let Some(d) = cli.trace_depth {

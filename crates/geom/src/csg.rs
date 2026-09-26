@@ -463,6 +463,7 @@ fn role(n: &Node) -> Role {
     match &n.kind {
         NodeKind::Root
         | NodeKind::Group { .. }
+        | NodeKind::Part { .. }
         | NodeKind::Transform { .. }
         | NodeKind::Color { .. } => Role::Op(CsgOp::Union),
         NodeKind::IntersectionFor => Role::Op(CsgOp::Intersection),
