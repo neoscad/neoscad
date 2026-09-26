@@ -321,6 +321,7 @@ pub fn export_mesh(
     let opts = geom::RenderOptions {
         force,
         doc_dir: paths.main_dir.clone(),
+        fonts: std::sync::Arc::new(fonts(&loaded)),
         ..Default::default()
     };
     let rendered = geom::Renderer::new().render(top, &keys, opts.clone());
@@ -444,6 +445,57 @@ pub fn export_mesh(
         con.print(None, l.as_bytes());
     }
     0
+}
+
+/// The environment variable naming the directory of bundled fonts, the
+/// counterpart of OpenSCAD's `<resources>/fonts` (the Liberation fonts
+/// in the reference checkout's `fonts/`, which supply the default font,
+/// Liberation Sans). Without it, `fonts/` next to the executable is used
+/// if it exists.
+const FONT_DIR_VAR: &str = "NEOSCAD_FONT_DIR";
+
+/// The fonts `text()` sees, in the order `FontCache::FontCache` adds them:
+/// the bundled fonts, `~/.fonts`, each directory in `OPENSCAD_FONT_PATH`,
+/// then the files the program and its libraries register with
+/// `use <font.ttf>` (`SourceFile::registerUse`). Fontconfig's system
+/// configuration is not consulted, so only these fonts exist. Nothing is
+/// read until a `text()` needs a font.
+fn fonts(l: &Loaded) -> text::FontDb {
+    let mut db = text::FontDb::new();
+    let bundled = std::env::var_os(FONT_DIR_VAR)
+        .map(PathBuf::from)
+        .or_else(|| {
+            let exe = std::env::current_exe().ok()?;
+            Some(exe.parent()?.join("fonts"))
+        });
+    if let Some(d) = bundled {
+        db.add_dir(d);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        db.add_dir(PathBuf::from(home).join(".fonts"));
+    }
+    if let Some(paths) = std::env::var_os("OPENSCAD_FONT_PATH") {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let cwd = std::env::current_dir().unwrap_or_default();
+        for p in paths.to_string_lossy().split(sep) {
+            let p = cwd.join(p);
+            if p.is_dir() {
+                db.add_dir(p);
+            }
+        }
+    }
+    let used = std::iter::once(&l.program)
+        .chain(l.libraries.iter().filter_map(|lib| lib.program.as_ref()))
+        .flat_map(|p| p.ast.uses.iter());
+    for u in used {
+        let is_font = Path::new(u)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"));
+        if is_font && Path::new(u).is_file() {
+            db.add_file(u);
+        }
+    }
+    db
 }
 
 /// `get_current_iso8601_date_time_utc` (`export.cc`): `YYYY-MM-DDTHH:MM:SSZ`.

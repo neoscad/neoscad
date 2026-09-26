@@ -22,15 +22,15 @@ Library choices were checked in `docs/audits/phase0.md`.
 | Evaluator | Tree-walking interpreter → CSG tree, content-hash cache per subtree | A one-line edit re-evaluates only the subtrees it touched |
 | 3D kernel | `manifold-rust` (pure-Rust port of Manifold; its parity claims must be checked against the Manifold C API in native test builds) | Same algorithm as OpenSCAD's default backend, with a clean `wasm32` build (the C++ binding needs patches for WASM) |
 | 2D kernel | `clipper2-rust` (pure-Rust Clipper2) | OpenSCAD's `offset()` depends on Clipper2's exact arc steps and join types; `i_overlay` differs visibly |
-| Text | `harfrust` (shaping) + `skrifa` (outlines), plus a matcher for fontconfig-style names | No FreeType/fontconfig; portable to WASM. `rustybuzz` is archived |
+| Text | `crates/text`: `harfrust` (shaping, with `hb_ft`-exact font functions) + `skrifa` (hinted outlines), plus a port of fontconfig name matching over an in-memory font database | No FreeType or fontconfig; portable to WASM. Glyph outlines are byte-identical to the nightly |
 | I/O | `crates/io`: STL, OFF, OBJ, 3MF (zip + quick-xml), DXF, SVG (a port of OpenSCAD's libsvg), PDF | `usvg` turns arcs into f32 Béziers and keeps strokes as paint, so it can't reproduce OpenSCAD's `$fn`-dependent flattening or its stroke outlines |
 | Renderer | wgpu — Metal on macOS, WebGPU on web, offscreen for snapshots | One renderer for the GUI, the web and agent snapshots |
 
 ### Crates
 
 `lang` (lexer, parser, CST/AST, diagnostics) · `eval` (values, builtins,
-modules → CSG tree) · `geom` (kernels, extrude, hull, minkowski, offset,
-text) · `io` (import/export; sits below `eval` and `geom`) · `render` (wgpu) · `cli` (the `neoscad`
+modules → CSG tree) · `geom` (kernels, extrude, hull, minkowski, offset) ·
+`text` (fonts, shaping, outlines) · `io` (import/export; sits below `eval` and `geom`) · `render` (wgpu) · `cli` (the `neoscad`
 binary; accepts OpenSCAD's CLI flags so OpenSCAD's tests can drive it) ·
 `serve` (long-lived process holding caches; the one API every client uses) ·
 `lsp` · `mcp` · `wasm` (wasm-bindgen package) · `conformance` (test harness).
@@ -153,7 +153,7 @@ ffmpeg.
 2. **`lang`** (done): tier 0.
 3. **`eval`** (done): tier 1.
 4. **CSG tree** (done): tier 2.
-5. **`geom` + `io`:** tier 3.
+5. **`geom`, `io`, `text`** (done): tier 3, 660/660.
 6. **`render` + `snapshot`:** tier 4.
 7. **`serve`, JSON output, MCP.**
 8. **macOS app.**

@@ -21,6 +21,44 @@ entry when it is done.
   nightly's 0.7 s, nearly all of the difference in the cap triangulation.
   (5b)
 
+- Many `text()` nodes side by side render slower than the nightly: 200
+  lines of 125 characters take 2.25 s against 1.05 s (30 lines: 0.36 s
+  against 0.26 s), with byte-identical SVGs. Shaping and outlines are not
+  the cost (one `text()` of 3,750 glyphs takes 0.70 s in both); nearly
+  all of it is the single-threaded top-level 2D union of the 200 results
+  in clipper2-rust's `execute_internal`. (5e)
+
+## Fonts
+- neoscad bundles no fonts. The default font (Liberation Sans) comes from
+  `NEOSCAD_FONT_DIR`, or `fonts/` next to the executable; without either,
+  `text()` with the default font draws nothing and warns "Can't get
+  font". The conformance runner points the variable at the reference
+  checkout's `fonts/`. Decide whether to embed Liberation 2.00.1 (SIL OFL,
+  12 files, 3.9 MB) in the CLI and the WASM build. (5e)
+- Fontconfig's system configuration is not consulted, so names the
+  nightly resolves to installed system fonts render in the matching
+  Liberation font instead (on this Mac `Arial`, `Helvetica`, `Courier
+  New` and `Times New Roman` are system fonts for the nightly; here they
+  are the metric-compatible Liberation Sans, Mono and Serif). No test
+  depends on it. (5e)
+- `use <font.ttf>` registers the font (in the CLI, from the programs'
+  `uses`), but `lang` still also treats the file as a library and parses
+  the font as OpenSCAD source, and a missing font file does not print
+  OpenSCAD's "Can't read font with path '...'" error
+  (`SourceFile::registerUse`). Both belong in `lang`. (5e)
+- The font-name matcher (`crates/text/src/pattern.rs`) ranks on charset,
+  family, style, slant, weight and width. It leaves out fontconfig's
+  language coverage and every value after the first for weight, slant and
+  width, and matches a weight range by its midpoint. Every font name in
+  the test suite resolves as in the nightly. (5e)
+- The experimental `textmetrics()` and `fontmetrics()` functions can now
+  be built on the `text` crate (`TextMetrics`/`FontMetrics` in
+  `FreetypeRenderer.cc` use the same shaping). (5e)
+- Cubic glyph segments (CFF fonts) are flattened with `powf(3.0)` like
+  the C++ `std::pow`; that matches on macOS because both call the system
+  libm, but a WASM libm may round a cube differently in the last bit. No
+  test font is CFF. (5e)
+
 ## Parity
 - `manifold-rust` 0.13.1 ports Manifold v3.5.0; OpenSCAD pins v3.5.2.
   (5a)
@@ -124,6 +162,10 @@ entry when it is done.
   evaluator, and the cache keys (`eval::dump`) stat imported files for
   their mtime and size with `std::fs`. The trait needs a `metadata` call
   and `Keys::new` a file system. (5c)
+- `docs/architecture.md` lists text under `geom` and A5 proposed `fontdb`
+  for font discovery; 5e added a `text` crate (the evaluator's
+  `textmetrics()` needs shaping and sits below `geom`) with its own small
+  font index instead of `fontdb`. (5e)
 - `docs/architecture.md` still lists `usvg` for SVG; 5c ported OpenSCAD's
   `libsvg` instead (see `crates/io/src/svg/mod.rs` for why). (5c)
 - The tier 3 baseline needs the pinned nightly installed as its renderer.

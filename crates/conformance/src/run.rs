@@ -381,6 +381,7 @@ impl Env {
         let mut cmd = Command::new(&self.binary);
         cmd.current_dir(&self.work_dir)
             .env("OPENSCAD_FONT_PATH", &self.font_path)
+            .env(crate::geometry::FONT_DIR_VAR, self.ref_root.join("fonts"))
             .env("OPENSCADPATH", &self.library_path);
         if c.stdio {
             let stdin = File::open(input).map_err(|e| e.to_string())?;

@@ -15,9 +15,11 @@
 //! - [`export`]: the mesh a result exports as, handed to the `io` crate's
 //!   STL, OFF, OBJ, 3MF, SVG and DXF writers, and the render summary.
 //! - `import`: `import()` and `surface()` over the `io` crate's readers.
+//! - `text()` is built by the `text` crate (fonts, shaping, outlines) and
+//!   unioned here; the fonts come in [`RenderOptions::fonts`].
 //!
-//! Text belongs to a later phase; the evaluator reports it (and `.nef3`
-//! imports) as [`evaluate::Unsupported`].
+//! `.nef3` imports belong to a later phase; the evaluator reports them as
+//! [`evaluate::Unsupported`].
 
 pub mod clipper;
 pub mod color;

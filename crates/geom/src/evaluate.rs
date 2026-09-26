@@ -90,6 +90,8 @@ pub struct RenderOptions {
     /// The document's directory: the working directory OpenSCAD runs in,
     /// which some import messages print file names relative to.
     pub doc_dir: PathBuf,
+    /// The fonts `text()` can use.
+    pub fonts: Arc<text::FontDb>,
 }
 
 impl Default for RenderOptions {
@@ -99,6 +101,7 @@ impl Default for RenderOptions {
             force: false,
             fs: Arc::new(StdFs),
             doc_dir: PathBuf::new(),
+            fonts: Arc::new(text::FontDb::new()),
         }
     }
 }
@@ -573,7 +576,7 @@ impl Ctx<'_> {
             } => Ok(self.surface(n, file, *center, *invert)),
             NodeKind::Import(i) if i.kind == "nef3" => unsupported("import"),
             NodeKind::Import(i) => Ok(self.import(n, i)),
-            NodeKind::Text(_) => unsupported("text"),
+            NodeKind::Text(t) => Ok(self.text(n, t)),
         }
     }
 
@@ -617,6 +620,64 @@ impl Ctx<'_> {
         Out {
             geom: Some(geom),
             msgs: Self::read_msgs(n, msgs),
+        }
+    }
+
+    /// `GeometryEvaluator::visit(TextNode)`: the glyphs, each a sanitized
+    /// polygon whose contours keep the font's winding, unioned with the
+    /// non-zero rule (`ClipperUtils::apply(polygons, Union)`), which fills
+    /// overlapping contours and combining marks rather than cutting holes.
+    fn text(&self, n: &Node, t: &eval::node::Text) -> Out {
+        let (script, direction) = eval::text_props::resolve(t);
+        let segments = text::segments_for(fragments::circular_segments(&t.disc, t.size));
+        let r = text::render(
+            &self.opts.fonts,
+            &text::Params {
+                text: &t.text,
+                size: t.size,
+                spacing: t.spacing,
+                font: &t.font,
+                direction,
+                language: &t.language,
+                script: &script,
+                halign: &t.halign,
+                valign: &t.valign,
+                segments,
+            },
+        );
+        let msgs = r
+            .messages
+            .into_iter()
+            .map(|m| match m.level {
+                text::Level::FontWarning => Msg {
+                    severity: None,
+                    text: format!("FONT-WARNING: {}", m.text),
+                    loc: None,
+                },
+                text::Level::Warning => warn(n, &m.text),
+            })
+            .collect();
+        let polys: Vec<Polygon2d> = r
+            .glyphs
+            .into_iter()
+            .map(|g| Polygon2d {
+                outlines: g
+                    .into_iter()
+                    .map(|vertices| crate::polygon2d::Outline {
+                        vertices,
+                        positive: true,
+                    })
+                    .collect(),
+                sanitized: true,
+            })
+            .collect();
+        let refs: Vec<Option<&Polygon2d>> = polys.iter().map(Some).collect();
+        Out {
+            geom: Some(Geometry::Polygon2d(Arc::new(clipper::apply(
+                &refs,
+                clipper::Op2::Union,
+            )))),
+            msgs,
         }
     }
 

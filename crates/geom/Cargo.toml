@@ -27,6 +27,7 @@ lang = { package = "neoscad-lang", path = "../lang" }
 manifold-rust = { version = "=0.13.1", default-features = false }
 rayon = { workspace = true, optional = true }
 sha2.workspace = true
+text = { package = "neoscad-text", path = "../text" }
 
 [lints]
 workspace = true

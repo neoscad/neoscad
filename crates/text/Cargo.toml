@@ -1,0 +1,21 @@
+[package]
+name = "neoscad-text"
+description = "text() for NeoSCAD: font lookup by fontconfig-style names, shaping and glyph outlines as OpenSCAD's FreeType renderer produces them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "text"
+
+[dependencies]
+# Both pinned exactly, like the kernels: glyph positions and the hinted
+# outlines are part of what the output bytes show.
+harfrust = "=0.13.3"
+# 0.46 rather than the newer 0.47: harfrust 0.13.3 builds on read-fonts
+# 0.43, as skrifa 0.46 does (0.47 moved to 0.44), so the fonts are parsed
+# by one copy of the parser.
+skrifa = "=0.46.2"
+
+[lints]
+workspace = true
