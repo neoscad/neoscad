@@ -2,7 +2,8 @@
 
 A ground-up reimplementation of OpenSCAD (language, features, test suite)
 on a modern stack. macOS client first, WebAssembly web build close behind.
-The architecture is still being decided; this file grows as it is.
+Humans and AI coding agents are both first-class users. See
+`docs/architecture.md` for the stack, validation and build order.
 
 ## Reference checkout
 
