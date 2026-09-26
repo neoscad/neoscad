@@ -195,6 +195,7 @@ pub fn request(
     // Unseeded `rands()` repeats from snapshot to snapshot.
     run.rng_seed = Some(0);
     run.parts = b("parts") || crate::parts_enabled(&strings("enable"));
+    run.limits = crate::limits::of_params(params, session::Limits::NONE)?;
     // `issues`: true for the default check settings (or those given
     // alongside, as for `check`), or an object of settings.
     let issues = match params.get("issues") {

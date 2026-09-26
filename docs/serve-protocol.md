@@ -24,7 +24,7 @@ change would get a new `protocol` number; there has been none.
 
 | `protocol` | Changes |
 |---|---|
-| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. |
+| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. |
 
 ## Transports
 
@@ -42,6 +42,9 @@ change would get a new `protocol` number; there has been none.
   listener.
   - A stale socket (left by a server that did not exit cleanly) is
     removed at start; a live one makes the new server refuse to start.
+    Only a socket is ever removed: any other file at the path (a
+    mistyped `--socket notes.txt`) makes the server refuse to start and
+    leaves the file alone.
   - `--idle-timeout SECS` (default 1800, 0 for never): the server exits
     when it has had no connection and no request for that long.
   - `neoscad serve --status [--format json]` prints the running server's
@@ -49,6 +52,8 @@ change would get a new `protocol` number; there has been none.
     when no server answers.
   - `--cache-mb N` sets the geometry cache budget (MiB, per colour scheme
     and font set; default 200, OpenSCAD's two default cache sizes).
+- `--limit NAME=VALUE` (repeatable, both transports) changes one of the
+  resource limits every request runs under; see "Resource limits".
 
 ## Framing
 
@@ -101,6 +106,7 @@ Requests on a model take:
 | `parts` | bool | The same as `"enable": ["part"]`. |
 | `progress` | bool | Send `progress` notifications (default true). |
 | `supersede` | bool | Cancel older requests on the same document when this one starts (default true; see "Ordering and concurrency"). `false` lets requests on one file run side by side, as `neoscad mcp` sends them. |
+| `limits` | object | This request's resource limits, on top of the server's: `{"fragments": 20000, "time": null, ...}`, each name of "Resource limits" to a number in its unit or `null`/`"off"` for none. An unknown name or a bad value is -32602. |
 
 Results that describe a run carry `exit_code` (0, or the command line's
 code: 1 for an error, 3 for a feature neoscad lacks), `diagnostics`,
@@ -185,7 +191,9 @@ Params: `path` and either `text` (the full new text) or `edits`:
 `[{"start": byte, "end": byte, "text": "..."}]`, applied in order, each
 to the result of the one before (byte offsets into UTF-8). Result as for
 `open`. An edit out of range, or one that splits a character, is error
--32602 and changes nothing.
+-32602 and changes nothing, the version included. `version` counts the
+document's changes: 1 for its first text, then one more for each
+`open` with text or `update` (0 while it is read from disk).
 
 ### `close`
 
@@ -223,7 +231,10 @@ extension), `force` (bool), `options` (`-O` settings, e.g.
 `bytes` (written), `geometry` (`null` for the non-mesh formats),
 `diagnostics`, `echo`, `counts`, `timings_ms`. A model that fails (wrong
 dimension, empty, a syntax error) has a non-zero `exit_code` and writes
-nothing, except `echo`, whose file holds the messages that say why.
+nothing, except `echo`, whose file holds the messages that say why. A
+mesh output that cannot be written has `exit_code` 1 and an
+`output-not-writable` error, and a missing input an `input-not-found`
+one (as for every model method).
 
 - Mesh and 2D formats (`stl`, `binstl`, `off`, `obj`, `3mf`, `wrl`,
   `pov`, `svg`, `dxf`, `pdf`) go through the command line's encoder,
@@ -286,7 +297,10 @@ Neither `path` nor `text` is error -32602.
 
 Reference text (`neoscad docs`; `docs/cli-json.md`). Params: `name`
 (none: the index), `file` (also `in`: search this file, its includes and
-the libraries it `use`s), `cwd`, `full`. Result: the command's JSON plus
+the libraries it `use`s), `cwd`, `full`, `brief` (bool: a short index
+for an agent's context: `_private` names left out, and when the
+included and used files define more than 100 names, each file with its
+count instead of its names; `neoscad mcp` sends it). Result: the command's JSON plus
 `text`, the text the command prints. An unknown name is a result with
 `exit_code` 1 and `did_you_mean`.
 
@@ -332,6 +346,22 @@ From the client:
   document (LSP's name).
 - `cancel` `{"path": ...}`: as the `cancel` method, with no answer.
 
+## Resource limits
+
+Every model request (`evaluate`, `render`, `export`, `snapshot`,
+`check`, `measure`, and the models `test` runs) runs under resource
+limits, because a server runs models that agents and editors write and
+one runaway `$fn` must not exhaust the machine: time 60 s, estimated
+memory 4 GiB, 10,000 fragments per primitive, 10,000 slices per
+extrusion, 10 million list elements, 64 MiB strings, 10 million
+`rands()` numbers and 10 million triangles per result
+(`docs/cli-json.md`, "Resource limits", has the details). A request that
+would pass one is an ordinary result: `exit_code` 1 and a
+`resource-limit` error saying which limit, where, and how to raise it.
+`--limit NAME=VALUE` at start changes the server's limits and a
+request's `limits` parameter its own. The command line's `cli.*`
+requests run unlimited, as the command line does in its own process.
+
 ## Errors
 
 | Code | Meaning |
@@ -353,11 +383,15 @@ they are results with a non-zero `exit_code` and the diagnostics.
 `neoscad check` and `neoscad measure`
 send their work to the server on the default socket when one answers,
 unless `--no-server` is given or `NEOSCAD_NO_SERVER` is set (the
-conformance harness sets it). The output is the command's own: the same
+conformance harness sets it). Before it sends anything (its working
+directory, environment and command line) the client checks the socket:
+it must be a socket owned by the user, in a directory that is the
+user's and not writable by group or others (or a sticky one such as
+`/tmp`). Otherwise the command runs in-process, on every platform. The output is the command's own: the same
 files and the same stderr, except the render summary's `Geometries in
 cache` count and times, which are the (warm) server's. Runs the server
 cannot take (dependency files, `-m`, parameter sets, `--animate`,
-`--summary-file`, `--hardwarnings`, the evaluation flags, echo, AST, CSG
+`--summary-file`, `--hardwarnings`, `--limit`, the evaluation flags, echo, AST, CSG
 and param exports, and a run mixing PNG with other formats) and every
 failure to reach a server (none, another build or environment, a dropped
 connection) run in the process, silently.

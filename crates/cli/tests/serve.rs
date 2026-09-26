@@ -614,3 +614,135 @@ fn format_docs_and_test_are_served() {
     assert_eq!(r["counts"]["tests"], 1);
     assert_eq!(r["tests"][0]["id"], "m_test.scad::test_c");
 }
+
+#[test]
+fn versions_limits_and_missing_files_over_stdio() {
+    let d = scratch("harden");
+    let mut s = Stdio_::start(&d);
+    let p = d.join("v.scad");
+    let p = p.to_str().unwrap();
+    // One version per change: a rejected update changes nothing, the
+    // version included (the audit saw open 1, then 3).
+    assert_eq!(
+        s.result("open", json!({"path": p, "text": "cube(1);"}))["version"],
+        1
+    );
+    let bad = s.call(
+        "update",
+        json!({"path": p, "edits": [{"start": 50, "end": 60, "text": "x"}]}),
+    );
+    assert_eq!(bad["error"]["code"], -32602, "{bad}");
+    assert_eq!(s.result("render", json!({"path": p}))["exit_code"], 0);
+    assert_eq!(
+        s.result("update", json!({"path": p, "text": "cube(2);"}))["version"],
+        2
+    );
+    // The server runs with the agent limits unless a request changes them.
+    s.result(
+        "update",
+        json!({"path": p, "text": "circle(r=1, $fn=100000);"}),
+    );
+    let r = s.result("render", json!({"path": p}));
+    assert_eq!(r["exit_code"], 1, "{r}");
+    assert_eq!(r["diagnostics"][0]["code"], "resource-limit", "{r}");
+    assert!(
+        r["diagnostics"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("ERROR: Resource limit exceeded: circle() would make 100,000 fragments")
+    );
+    let r = s.result(
+        "render",
+        json!({"path": p, "limits": {"fragments": 200000}}),
+    );
+    assert_eq!(r["exit_code"], 0, "{r}");
+    let bad = s.call("render", json!({"path": p, "limits": {"frags": 1}}));
+    assert_eq!(bad["error"]["code"], -32602, "{bad}");
+    // A missing input says so, with a stable code (finding 5).
+    let r = s.result("render", json!({"path": d.join("nope.scad")}));
+    assert_eq!(r["exit_code"], 1);
+    assert_eq!(r["diagnostics"][0]["code"], "input-not-found", "{r}");
+    // An export that cannot be written, likewise.
+    std::fs::write(d.join("ok.scad"), "cube(1);").unwrap();
+    let r = s.result(
+        "export",
+        json!({"path": d.join("ok.scad"), "output": d.join("no/such/dir/x.stl")}),
+    );
+    assert_eq!(r["exit_code"], 1, "{r}");
+    assert_eq!(r["diagnostics"][0]["code"], "output-not-writable", "{r}");
+    // check's settings errors name the parameter, not a flag.
+    let bad = s.call("check", json!({"path": d.join("ok.scad"), "nozzle": -1}));
+    let m = bad["error"]["message"].as_str().unwrap();
+    assert!(m.starts_with("`nozzle` must be"), "{m}");
+    s.result("shutdown", Value::Null);
+}
+
+#[test]
+#[cfg(unix)]
+fn the_socket_never_replaces_a_file_and_the_command_line_stays_unlimited() {
+    let d = scratch("sock");
+    // `--socket notes.txt` deleted the notes (finding 7).
+    std::fs::write(d.join("notes.txt"), "precious notes").unwrap();
+    let o = neoscad(
+        &d,
+        None,
+        &["serve", "--socket", "notes.txt", "--idle-timeout", "1"],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("not a socket"),
+        "{o:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join("notes.txt")).unwrap(),
+        "precious notes"
+    );
+    // The server has the agent limits; the command line's requests to it
+    // are unlimited, as the command line is in its own process.
+    let socket = d.join("s.sock");
+    let mut server = Command::new(BIN)
+        .args(["serve", "--socket"])
+        .arg(&socket)
+        .args(["--idle-timeout", "60"])
+        .current_dir(&d)
+        .env_remove("OPENSCADPATH")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let t = Instant::now();
+    while !socket.exists() && t.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(d.join("fine.scad"), "circle(r=1, $fn=20000);").unwrap();
+    let before = served_requests(&d, &socket);
+    let o = neoscad(&d, Some(&socket), &["fine.scad", "-o", "fine.svg"]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(
+        served_requests(&d, &socket) > before,
+        "the run was not served"
+    );
+    assert!(d.join("fine.svg").exists());
+    // `--limit` on the command line applies (and runs in-process).
+    let o = neoscad(
+        &d,
+        Some(&socket),
+        &["fine.scad", "-o", "limited.svg", "--limit", "fragments=100"],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&o.stderr)
+            .contains("ERROR: Resource limit exceeded: circle() would make 20,000 fragments, over the fragments limit of 100 in file fine.scad, line 1"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(!d.join("limited.svg").exists());
+    let _ = neoscad(&d, Some(&socket), &["serve", "--stop"]);
+    let _ = server.wait();
+}

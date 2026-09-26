@@ -64,6 +64,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
         file: a.file,
         cwd: Some(std::env::current_dir().unwrap_or_default()),
         full: a.full,
+        brief: false,
     });
     let (stdout, stderr) = if json {
         (format!("{}\n", r.json).into_bytes(), Vec::new())

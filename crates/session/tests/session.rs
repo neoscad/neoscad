@@ -244,3 +244,100 @@ fn explicit_cancel_and_one_shot_requests() {
     assert_eq!(worker.join().unwrap(), Err(Cancelled));
     assert_eq!(s.stats().running, 0);
 }
+
+#[test]
+fn limits_stop_a_request_with_a_located_diagnostic() {
+    // The app embeds the session: its limits are the configuration's,
+    // and a request can carry its own.
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/big.scad",
+        b"cube(1);\nsphere(10, $fn = 100000);\n".to_vec(),
+    );
+    fs.insert("/doc/ok.scad", b"circle(r = 1, $fn = 20000);\n".to_vec());
+    let mut cfg = Config::new(fs.clone(), LibraryPath(Vec::new()));
+    cfg.work_dir = PathBuf::from("/doc");
+    cfg.limits = session::Limits::AGENT;
+    let s = Session::new(cfg);
+    let scheme = render::ColorScheme::cornfield();
+    let r = s
+        .render(&Run::new("big.scad"), Mode::Render, &scheme)
+        .expect("a limit is not a cancellation");
+    assert_eq!(r.exit_code, 1);
+    let d = r.log.diagnostics_json();
+    assert_eq!(d[0]["code"], "resource-limit", "{d:?}");
+    assert_eq!(d[0]["line"], 2, "located at the sphere: {d:?}");
+    assert_eq!(s.stats().cancelled, 0);
+    // Over the fragment limit by default; unlimited for this request.
+    let r = s
+        .render(&Run::new("ok.scad"), Mode::Render, &scheme)
+        .unwrap();
+    assert_eq!(r.exit_code, 1);
+    let mut run = Run::new("ok.scad");
+    run.limits = Some(session::Limits::NONE);
+    let r = s.render(&run, Mode::Render, &scheme).unwrap();
+    assert_eq!(r.exit_code, 0, "{}", String::from_utf8_lossy(&r.log.stderr));
+    // The same cached subtree is not charged again or refused on a warm
+    // render.
+    let r = s
+        .render(&Run::new("big.scad"), Mode::Render, &scheme)
+        .unwrap();
+    assert_eq!(r.exit_code, 1);
+}
+
+#[test]
+fn cancel_all_stops_every_document() {
+    // What `neoscad mcp` does when its client goes away.
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/slow.scad",
+        b"n = 6000;\necho(len([for (i = [0:n]) for (j = [0:n]) if (i * j < 0) 1]));\n".to_vec(),
+    );
+    let s = Arc::new(session(&fs));
+    let (mut run, rx) = watched("slow.scad");
+    run.supersede = false;
+    let worker = {
+        let s = s.clone();
+        std::thread::spawn(move || s.evaluate(&run, false).map(|_| ()))
+    };
+    when(&rx, Stage::Evaluate, || {
+        assert_eq!(s.cancel_all(), 1);
+    });
+    assert_eq!(worker.join().unwrap(), Err(Cancelled));
+    assert_eq!(s.cancel_all(), 0);
+}
+
+#[test]
+fn a_limit_in_parallel_geometry_reports_the_same_every_time() {
+    // Siblings render in parallel; the one over the limit is named the
+    // same way whatever the scheduling (the determinism rule).
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/m.scad",
+        b"for (i = [0:15]) translate([i * 3, 0, 0]) sphere(1, $fn = 48);\ntranslate([0, 10, 0]) cylinder(h = 1, r = 1, $fn = 50000);\n".to_vec(),
+    );
+    let mut first: Option<Vec<u8>> = None;
+    for _ in 0..5 {
+        let mut cfg = Config::new(fs.clone(), LibraryPath(Vec::new()));
+        cfg.work_dir = PathBuf::from("/doc");
+        cfg.limits = session::Limits::AGENT;
+        let s = Session::new(cfg);
+        let r = s
+            .render(
+                &Run::new("m.scad"),
+                Mode::Render,
+                &render::ColorScheme::cornfield(),
+            )
+            .unwrap();
+        assert_eq!(r.exit_code, 1);
+        match &first {
+            None => first = Some(r.log.stderr.clone()),
+            Some(f) => assert_eq!(f, &r.log.stderr),
+        }
+    }
+    let text = String::from_utf8(first.unwrap()).unwrap();
+    assert_eq!(
+        text,
+        "ERROR: Resource limit exceeded: cylinder() would make 50,000 fragments, over the fragments limit of 10,000 in file m.scad, line 2\n"
+    );
+}

@@ -195,7 +195,45 @@ pub(crate) struct Evaluator<'a> {
     pub part_stack: Vec<String>,
     /// Every part name used so far, for the duplicate warning.
     pub part_names: std::collections::HashSet<String>,
+    /// [`Options::guard`]'s limits as plain numbers for hot checks.
+    pub caps: Caps,
+    /// Checks since the clock and memory were last looked at.
+    limit_ticks: u32,
+    /// A limit passed and printed, waiting to be raised at the next check
+    /// (as [`Hard`] does for a warning): builtins that find it cannot fail.
+    limit: std::cell::Cell<Hard>,
 }
+
+/// Resource limits as numbers for the checks on hot paths; `usize::MAX`
+/// (and so on) when unlimited. See [`crate::limits`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Caps {
+    pub list: usize,
+    pub string: usize,
+    pub rands: f64,
+}
+
+impl Caps {
+    fn of(l: Option<&crate::limits::Limits>) -> Caps {
+        let n = |x: Option<u64>| x.map_or(usize::MAX, |x| usize::try_from(x).unwrap_or(usize::MAX));
+        Caps {
+            list: n(l.and_then(|l| l.list)),
+            string: n(l.and_then(|l| l.string)),
+            rands: l.and_then(|l| l.rands).map_or(f64::INFINITY, |x| x as f64),
+        }
+    }
+}
+
+/// Estimated bytes of one node of the tree, for the memory limit: the
+/// node, its origin (name and location), its parameters and its slot in
+/// the parent's children, with allocator overhead. Measured: a million
+/// `cube(1)` nodes in two nested loops peak at 337 MB, three million in
+/// three at 1.49 GB (about 500 bytes each).
+const NODE_BYTES: u64 = 512;
+
+/// How many evaluator checks pass between looks at the clock and the
+/// memory estimate: a few milliseconds of evaluation at most.
+const LIMIT_TICKS: u32 = 4096;
 
 /// Where a `--hardwarnings` run stands. OpenSCAD throws a
 /// `HardWarningException` from `PRINT` itself, right after printing the
@@ -281,6 +319,10 @@ impl<'a> Evaluator<'a> {
             }
         }
         let seed = opts.rng_seed;
+        let caps = Caps::of(opts.guard.as_deref().map(crate::limits::Guard::limits));
+        // Values of an earlier evaluation on this thread are gone or are
+        // not this request's to count.
+        crate::limits::live::reset();
         let marker = 0u8;
         let stack_base = std::ptr::addr_of!(marker) as usize;
         let stack_limit = crate::recursion::stack_limit(opts.stack_limit, stack_base);
@@ -311,6 +353,9 @@ impl<'a> Evaluator<'a> {
             }),
             part_stack: Vec::new(),
             part_names: Default::default(),
+            caps,
+            limit_ticks: 0,
+            limit: std::cell::Cell::new(Hard::Off),
             opts,
         }
     }
@@ -348,11 +393,98 @@ impl<'a> Evaluator<'a> {
             .is_some_and(|f| f.load(Ordering::Relaxed))
     }
 
-    pub fn check_interrupt(&self) -> R<()> {
+    pub fn check_interrupt(&mut self) -> R<()> {
         if self.interrupted() {
-            Err(Unwind::new(UnwindKind::Interrupted, 0))
+            return Err(Unwind::new(UnwindKind::Interrupted, 0));
+        }
+        if self.opts.guard.is_some() {
+            self.limit_ticks = self.limit_ticks.wrapping_add(1);
+            if self.limit_ticks.is_multiple_of(LIMIT_TICKS) {
+                self.check_limits(None)?;
+            }
+        }
+        self.check_hard()
+    }
+
+    /// The time and memory limits, now: a passed one is printed (at `loc`,
+    /// or with no location; the unwinding error collects the call sites)
+    /// and raised.
+    pub fn check_limits(&mut self, loc: Option<Loc>) -> R<()> {
+        let Some(g) = self.opts.guard.clone() else {
+            return Ok(());
+        };
+        let e = if g.over_time() {
+            Some(g.time_exceeded())
         } else {
-            self.check_hard()
+            g.memory_exceeds(crate::limits::live::get(), "the evaluation")
+        };
+        if let Some(e) = e {
+            self.limit_exceeded(loc, e);
+            return self.check_hard();
+        }
+        Ok(())
+    }
+
+    /// A limit passed: print it at `loc` with its hint, record it on the
+    /// guard, and raise it at the next check (a builtin that finds it
+    /// returns `undef` meanwhile). Only the first limit is reported.
+    pub fn limit_exceeded(&mut self, loc: Option<Loc>, e: crate::limits::Exceeded) {
+        if self.limit.get() != Hard::Off {
+            return;
+        }
+        if let Some(g) = &self.opts.guard {
+            g.record(e.clone());
+        }
+        let text = e.message();
+        self.emit_hinted(
+            Severity::Error,
+            DiagCode::ResourceLimit,
+            text.as_bytes(),
+            loc,
+            Some(e.hint()),
+        );
+        self.limit.set(Hard::Pending);
+    }
+
+    /// Whether a list of `n` elements fits the list limit; otherwise the
+    /// limit is reported at `loc` as made by `what`.
+    pub fn list_fits(&mut self, n: usize, loc: Loc, what: &str) -> bool {
+        if n <= self.caps.list {
+            return true;
+        }
+        self.over_limit(crate::limits::Limit::List, n as f64, loc, what);
+        false
+    }
+
+    /// Whether a string of `n` bytes fits the string limit.
+    pub fn string_fits(&mut self, n: usize, loc: Loc, what: &str) -> bool {
+        if n <= self.caps.string {
+            return true;
+        }
+        self.over_limit(crate::limits::Limit::String, n as f64, loc, what);
+        false
+    }
+
+    /// Report limit `l` passed by `asked` at `loc`.
+    pub fn over_limit(&mut self, l: crate::limits::Limit, asked: f64, loc: Loc, what: &str) {
+        if let Some(g) = self.opts.guard.clone()
+            && let Some(e) = g.exceeds(l, asked, what)
+        {
+            self.limit_exceeded(Some(loc), e);
+        }
+    }
+
+    /// Whether `bytes` more of live values fit the memory limit.
+    pub fn memory_fits(&mut self, bytes: u64, loc: Loc, what: &str) -> bool {
+        let Some(g) = self.opts.guard.clone() else {
+            return true;
+        };
+        match g.memory_exceeds(crate::limits::live::get().saturating_add(bytes), what) {
+            None => true,
+            Some(e) => {
+                self.limit_exceeded(Some(loc), e);
+                false
+            }
         }
     }
 
@@ -362,6 +494,10 @@ impl<'a> Evaluator<'a> {
     /// then) cannot start a second one.
     #[inline]
     pub fn check_hard(&self) -> R<()> {
+        if self.limit.get() == Hard::Pending {
+            self.limit.set(Hard::Thrown);
+            return Err(self.unwind(UnwindKind::Limit));
+        }
         if self.hard.get() == Hard::Pending {
             self.hard.set(Hard::Thrown);
             Err(self.unwind(UnwindKind::HardWarning))
@@ -407,6 +543,9 @@ impl<'a> Evaluator<'a> {
     }
 
     pub fn next_node_index(&mut self) -> usize {
+        // Every node lives until evaluation ends: count it towards the
+        // memory limit (a nest of loops can make a billion of them).
+        crate::limits::live::charge(NODE_BYTES);
         let i = self.node_index;
         self.node_index += 1;
         i
@@ -422,6 +561,18 @@ impl<'a> Evaluator<'a> {
     }
 
     pub fn emit(&mut self, severity: Severity, code: DiagCode, text: &[u8], loc: Option<Loc>) {
+        self.emit_hinted(severity, code, text, loc, None);
+    }
+
+    /// [`Evaluator::emit`] with a fix hint for the tools' JSON.
+    pub fn emit_hinted(
+        &mut self,
+        severity: Severity,
+        code: DiagCode,
+        text: &[u8],
+        loc: Option<Loc>,
+        hint: Option<String>,
+    ) {
         // OpenSCAD would already be unwinding from the first warning, so
         // nothing printed between it and the check that raises it exists
         // there (a builtin warning about several arguments, an unknown
@@ -436,8 +587,14 @@ impl<'a> Evaluator<'a> {
         {
             return;
         }
+        // A host keeps what was printed (as bytes, a record and JSON), so
+        // an echo in a long loop is memory like any value.
+        crate::limits::live::charge(3 * text.len() as u64);
         let mut diag = Diagnostic::new(code, severity, String::from_utf8_lossy(text).into_owned())
             .with_base(PathBase::MainFileDir);
+        if let Some(h) = hint {
+            diag = diag.with_hint(h);
+        }
         let mut sources = None;
         if let Some(l) = loc {
             let src = &self.units[l.unit as usize].program.sources;
@@ -985,12 +1142,19 @@ impl<'a> Evaluator<'a> {
         out: &mut Vec<Value>,
     ) -> R<()> {
         if self.is_lc(u, id) {
-            self.eval_lc(u, id, ctx, out)
+            self.eval_lc(u, id, ctx, out)?;
         } else {
             let v = self.eval(u, id, ctx)?;
             out.push(v);
-            Ok(())
         }
+        // Checked as the list grows, so a comprehension that would make a
+        // billion elements stops at the limit instead of at the end.
+        if out.len() > self.caps.list {
+            let loc = self.expr_loc(u, id);
+            self.list_fits(out.len(), loc, "a list");
+            return self.check_hard();
+        }
+        Ok(())
     }
 
     /// A list comprehension element holds frames of the frame budget, like

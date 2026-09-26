@@ -197,7 +197,7 @@ fn every_tool_round_trips() {
     let t = text(&r);
     assert!(t.starts_with("ok: 1 warning"), "{t}");
     assert!(
-        t.contains("warning inline.scad:1: Ignoring unknown module 'cub' (did you mean 'cube'?)"),
+        t.contains("warning inline.scad:1:1: Ignoring unknown module 'cub' (did you mean 'cube'?)"),
         "{t}"
     );
     assert!(t.contains("ECHO: \"hi\", 3"), "{t}");
@@ -281,6 +281,7 @@ fn every_tool_round_trips() {
     assert!(t.contains("error floating"), "{t}");
     assert!(t.contains("Fix: "), "{t}");
     assert_eq!(r["structuredContent"]["counts"]["errors"], 1);
+    assert_eq!(r["structuredContent"]["exit_code"], 1);
 
     // measure: a section.
     let r = s.tool("measure", json!({"path": "box.scad", "section": "z=5"}));
@@ -415,4 +416,374 @@ fn parallel_calls_on_one_file_both_answer() {
     }
     seen.sort_unstable();
     assert_eq!(seen, [1, 2, 3]);
+}
+
+#[test]
+fn resource_limits_stop_runaway_models_fast() {
+    // The agent-surface audit's finding 1: each of these asked for
+    // gigabytes (a sphere at $fn=100000 reached 43 GB). With the agent
+    // limits on by default, each fails at once with a `resource-limit`
+    // error naming the limit and how to raise it.
+    let dir = scratch("limits");
+    let mut s = Mcp::start(&dir, &[]);
+    for (src, limit) in [
+        ("sphere(10, $fn=100000);", "fragments"),
+        ("x = rands(0,1,1e9);", "rands"),
+        (
+            "function f(s,n) = n==0 ? s : f(str(s,s), n-1); echo(len(f(\"a\",40)));",
+            "string",
+        ),
+        (
+            "function g(v,n) = n==0 ? v : g(concat(v,v), n-1); echo(len(g([1],40)));",
+            "list",
+        ),
+        (
+            "linear_extrude(height=10, slices=100000000) square(1);",
+            "slices",
+        ),
+        ("circle(r=1, $fn=1e9);", "fragments"),
+        ("cylinder(h=1, r=1, $fn=3e8);", "fragments"),
+        ("sphere(10, $fn=5000);", "triangles"),
+    ] {
+        let t0 = std::time::Instant::now();
+        let r = s.tool("render", json!({"source": src}));
+        assert!(
+            t0.elapsed().as_secs_f64() < 5.0,
+            "{src}: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(r["isError"], false, "{r}");
+        let st = &r["structuredContent"];
+        assert_eq!(st["exit_code"], 1, "{src}: {r}");
+        let d = &st["diagnostics"][0];
+        assert_eq!(d["code"], "resource-limit", "{src}: {r}");
+        assert!(
+            d["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("{limit} limit")),
+            "{src}: {d}"
+        );
+        assert!(
+            d["hint"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("--limit {limit}=N")),
+            "{d}"
+        );
+    }
+    // A model under the limits is untouched.
+    let r = s.tool("render", json!({"source": "sphere(10, $fn=64);"}));
+    assert_eq!(r["structuredContent"]["exit_code"], 0, "{r}");
+    // `--limit` raises one (and `off` removes it).
+    let mut s = Mcp::start(
+        &dir,
+        &["--limit", "fragments=200000", "--limit", "triangles=off"],
+    );
+    let r = s.tool("render", json!({"source": "circle(r=1, $fn=100000);"}));
+    assert_eq!(r["structuredContent"]["exit_code"], 0, "{r}");
+    // Time: an evaluation that would run for minutes stops at the limit.
+    let mut s = Mcp::start(&dir, &["--limit", "time=1"]);
+    let t0 = std::time::Instant::now();
+    let r = s.tool(
+        "evaluate",
+        json!({"source": "function f(n) = n == 0 ? 0 : 1 + f(n - 1);\nfor (i = [0:99999]) for (j = [0:99]) if (f(1000) < 0) cube(1);"}),
+    );
+    assert!(t0.elapsed().as_secs_f64() < 5.0, "{:?}", t0.elapsed());
+    let d = &r["structuredContent"]["diagnostics"][0];
+    assert_eq!(d["code"], "resource-limit", "{r}");
+    assert!(
+        d["message"].as_str().unwrap().contains("time limit of 1 s"),
+        "{d}"
+    );
+    // Memory: a nest of lists past the budget.
+    let mut s = Mcp::start(&dir, &["--limit", "memory=256M"]);
+    let r = s.tool(
+        "evaluate",
+        json!({"source": "x = [for (i = [0:999]) [for (j = [0:99999]) j]];"}),
+    );
+    let d = &r["structuredContent"]["diagnostics"][0];
+    assert_eq!(d["code"], "resource-limit", "{r}");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("memory limit of 256 MiB"),
+        "{d}"
+    );
+    // A bad --limit is refused at start.
+    let out = Command::new(BIN)
+        .args(["mcp", "--limit", "frags=1"])
+        .current_dir(&dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown limit 'frags'"));
+}
+
+#[test]
+fn the_end_of_input_cancels_running_calls_and_exits() {
+    // A dead client must not leave an orphan computing (the audit's
+    // finding 1): at the end of input the server cancels its calls and
+    // exits. With the limits off, this render would run for minutes.
+    let dir = scratch("eof");
+    let mut child = Command::new(BIN)
+        .args(["mcp", "--limit", "time=off", "--limit", "fragments=off"])
+        .args(["--limit", "triangles=off", "--limit", "memory=off"])
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}});
+    let call = json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+        "params": {"name": "render", "arguments": {"source":
+            "function f(n) = n == 0 ? 0 : 1 + f(n - 1);\nfor (i = [0:99999]) for (j = [0:99]) if (f(1000) < 0) cube(1);"}}});
+    writeln!(stdin, "{init}\n{call}").unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let t0 = std::time::Instant::now();
+    drop(stdin);
+    let status = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st;
+        }
+        if t0.elapsed().as_secs_f64() > 10.0 {
+            let _ = child.kill();
+            panic!("still running {:?} after the end of input", t0.elapsed());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(status.success());
+    // Well inside the 2 s grace: the call was cancelled, not cut off.
+    assert!(t0.elapsed().as_secs_f64() < 1.5, "{:?}", t0.elapsed());
+}
+
+#[test]
+fn writes_never_follow_links_out_or_replace_other_files() {
+    // Findings 2 and 3 of the agent-surface audit.
+    let top = scratch("writes");
+    let (root, outside) = (top.join("R"), top.join("outside"));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(root.join("model.scad"), "cube(2);\n").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.join("newfile.stl"), root.join("dangling.stl")).unwrap();
+        std::os::unix::fs::symlink(outside.join("dangle.png"), root.join("dangle.png")).unwrap();
+        std::os::unix::fs::symlink("model.scad", root.join("alias.stl")).unwrap();
+    }
+    let mut s = Mcp::start(&root, &[]);
+    #[cfg(unix)]
+    {
+        let r = s.tool(
+            "render",
+            json!({"source": "cube(1);", "export": "dangling.stl"}),
+        );
+        assert_eq!(r["isError"], true, "{r}");
+        assert!(text(&r).contains("outside the allowed roots"), "{r}");
+        let r = s.tool(
+            "snapshot",
+            json!({"source": "cube(1);", "output": "dangle.png", "size": "64x64"}),
+        );
+        assert_eq!(r["isError"], true, "{r}");
+        assert!(!outside.join("newfile.stl").exists());
+        assert!(!outside.join("dangle.png").exists());
+        // A link inside the root to the model: the file it leads to is
+        // a .scad, so an STL never replaces it.
+        let r = s.tool(
+            "render",
+            json!({"source": "cube(1);", "export": "alias.stl", "overwrite": true}),
+        );
+        assert_eq!(r["isError"], true, "{r}");
+        assert!(text(&r).contains("existing .scad file"), "{r}");
+    }
+    // The snapshot's output is a PNG, never the model.
+    let r = s.tool(
+        "snapshot",
+        json!({"source": "cube(1);", "output": "model.scad", "size": "64x64"}),
+    );
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(text(&r).contains("must end in .png"), "{r}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("model.scad")).unwrap(),
+        "cube(2);\n"
+    );
+    // An export of an unknown type is refused before any directory is made.
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(1);", "export": "new/x.txt"}),
+    );
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(!root.join("new").exists());
+    // Same type: only with overwrite.
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(1);", "export": "out/a.stl"}),
+    );
+    assert!(text(&r).contains("wrote "), "{r}");
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(2);", "export": "out/a.stl"}),
+    );
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(text(&r).contains("overwrite: true"), "{r}");
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(2);", "export": "out/a.stl", "overwrite": true}),
+    );
+    assert!(text(&r).contains("wrote "), "{r}");
+}
+
+#[test]
+fn bad_calls_are_explained_in_the_callers_terms() {
+    let dir = scratch("args");
+    let mut s = Mcp::start(&dir, &[]);
+    // Wrong types are refused, naming the argument (finding 10 of the
+    // audit): they were silently treated as absent.
+    for (tool, args, want) in [
+        (
+            "check",
+            json!({"source": "cube(1);", "nozzle": "big"}),
+            "argument `nozzle` of check must be a number",
+        ),
+        (
+            "render",
+            json!({"source": "cube(1);", "parts": "yes"}),
+            "argument `parts` of render must be a boolean",
+        ),
+        (
+            "snapshot",
+            json!({"source": "cube(1);", "views": "iso"}),
+            "argument `views` of snapshot must be an array",
+        ),
+        (
+            "measure",
+            json!({"source": "cube(1);", "between": ["a", 2]}),
+            "must be an array of strings",
+        ),
+        (
+            "render",
+            json!({"source": "cube(1);", "file": "x"}),
+            "render has no argument `file`",
+        ),
+    ] {
+        let r = s.tool(tool, args);
+        assert_eq!(r["isError"], true, "{r}");
+        assert!(text(&r).contains(want), "{}", text(&r));
+    }
+    // The shared parsers' messages name arguments, not command-line flags.
+    for (tool, args, want) in [
+        (
+            "snapshot",
+            json!({"source": "cube(1);", "size": "3x3"}),
+            "`size` must be WxH",
+        ),
+        (
+            "check",
+            json!({"source": "cube(1);", "max_overhang": 400}),
+            "`max_overhang` must be",
+        ),
+        (
+            "check",
+            json!({"source": "cube(1);", "bed": [1, 2]}),
+            "bed must be",
+        ),
+        (
+            "measure",
+            json!({"source": "cube(1);", "between": ["a"]}),
+            "`between` takes two part names",
+        ),
+    ] {
+        let r = s.tool(tool, args);
+        assert!(!text(&r).contains("--"), "{}", text(&r));
+        assert!(text(&r).contains(want), "{}", text(&r));
+    }
+    let r = s.tool("measure", json!({"source": "cube(1);", "part": "a"}));
+    assert!(text(&r).contains("`parts: true`"), "{}", text(&r));
+    // A missing file says so, with a stable code (finding 5), and check
+    // has an exit code.
+    let r = s.tool("render", json!({"path": "nope.scad"}));
+    let d = &r["structuredContent"]["diagnostics"][0];
+    assert_eq!(d["code"], "input-not-found", "{r}");
+    assert!(text(&r).contains("Can't open input file"), "{r}");
+    let r = s.tool("check", json!({"path": "nope.scad"}));
+    assert_eq!(r["structuredContent"]["exit_code"], 1, "{r}");
+    assert_eq!(r["structuredContent"]["counts"]["errors"], 1, "{r}");
+    assert_eq!(
+        r["structuredContent"]["diagnostics"][0]["code"],
+        "input-not-found"
+    );
+    // A syntax error has its column, and the hint names the token (finding 6).
+    let r = s.tool("evaluate", json!({"source": "rotate(45 cube(3);"}));
+    let d = &r["structuredContent"]["diagnostics"][0];
+    assert_eq!(d["code"], "syntax-error");
+    assert_eq!(d["column"], 11, "{d}");
+    assert!(text(&r).contains("inline.scad:1:11"), "{}", text(&r));
+    assert!(
+        d["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("unexpected `cube` at line 1, column 11"),
+        "{d}"
+    );
+    let r = s.tool(
+        "evaluate",
+        json!({"source": "use &lt;x.scad&gt;\ncube(1);"}),
+    );
+    let d = &r["structuredContent"]["diagnostics"][0];
+    assert!(d["hint"].as_str().unwrap().contains("HTML-escaped"), "{d}");
+}
+
+#[test]
+fn library_indexes_are_short_by_default() {
+    // Finding 9: a file's index named every library file by a long `../`
+    // path and listed every `_private` helper (21 KB for a BOSL2 model).
+    let top = scratch("docidx");
+    let (work, lib) = (top.join("work"), top.join("lib"));
+    std::fs::create_dir_all(lib.join("big")).unwrap();
+    std::fs::create_dir(&work).unwrap();
+    let mut big = String::new();
+    for i in 0..150 {
+        big.push_str(&format!(
+            "module part{i}() cube({i});\nfunction _helper{i}() = {i};\n"
+        ));
+    }
+    std::fs::write(lib.join("big/all.scad"), big).unwrap();
+    std::fs::write(
+        work.join("m.scad"),
+        "include <big/all.scad>\nmodule mine() part1();\n",
+    )
+    .unwrap();
+    let mut child = Command::new(BIN)
+        .args(["mcp", "--root", "../lib"])
+        .current_dir(&work)
+        .env("OPENSCADPATH", &lib)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut s = Mcp {
+        stdin: child.stdin.take().unwrap(),
+        stdout: BufReader::new(child.stdout.take().unwrap()),
+        child,
+        next: 1,
+    };
+    let r = s.tool("docs", json!({"path": "m.scad"}));
+    let t = text(&r);
+    assert!(t.contains("m.scad: mine"), "{t}");
+    assert!(
+        t.contains("150 more from includes and uses, by file: big/all.scad (150)"),
+        "{t}"
+    );
+    assert!(!t.contains("_helper") && !t.contains("../"), "{t}");
+    assert!(t.len() < 400, "{t}");
+    let r = s.tool("docs", json!({"path": "m.scad", "verbose": true}));
+    let t = text(&r);
+    assert!(t.contains("big/all.scad: part0 _helper0()"), "{t}");
 }

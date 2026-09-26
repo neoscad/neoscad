@@ -240,15 +240,25 @@ struct StrData {
     bytes: Box<[u8]>,
 }
 
+/// A large string counts towards the evaluator's memory estimate while it
+/// lives (see `crate::limits::live`).
+impl Drop for StrData {
+    fn drop(&mut self) {
+        if self.bytes.len() >= crate::limits::live::STR_MIN {
+            crate::limits::live::credit(self.bytes.len() as u64);
+        }
+    }
+}
+
 impl Str {
     pub fn new(bytes: &[u8]) -> Self {
-        Str(Rc::new(StrData {
-            chars: Cell::new(usize::MAX),
-            bytes: bytes.into(),
-        }))
+        Self::from_vec(bytes.to_vec())
     }
 
     pub fn from_vec(bytes: Vec<u8>) -> Self {
+        if bytes.len() >= crate::limits::live::STR_MIN {
+            crate::limits::live::charge(bytes.len() as u64);
+        }
         Str(Rc::new(StrData {
             chars: Cell::new(usize::MAX),
             bytes: bytes.into_boxed_slice(),
@@ -317,9 +327,47 @@ impl Vector {
     /// The elements, without copying when this is the only reference.
     pub fn into_vec(mut self) -> Vec<Value> {
         match Rc::get_mut(&mut self.0) {
-            Some(v) => std::mem::take(v),
+            Some(v) => {
+                // They leave the count with the list; whoever builds a new
+                // list from them counts them again.
+                credit_list(v);
+                std::mem::take(v)
+            }
             None => (*self.0).clone(),
         }
+    }
+}
+
+/// Bytes a list counts for towards the evaluator's memory estimate
+/// (`crate::limits::live`): large lists only, with the small lists and
+/// strings they hold (a path of a million `[x, y, z]` points is 16 bytes
+/// of outer list per point but about 120 with each point's own vector).
+/// Values never change once in a list, so this is the same number when
+/// the list is built and when it is freed.
+fn list_bytes(items: &[Value]) -> u64 {
+    use crate::limits::live::{LIST_MIN, STR_MIN};
+    if items.len() < LIST_MIN {
+        return 0;
+    }
+    const SLOT: u64 = std::mem::size_of::<Value>() as u64;
+    // An `Rc` allocation (counts and header) with the allocator's rounding.
+    const BOX: u64 = 64;
+    items
+        .iter()
+        .map(|v| match v {
+            Value::Vector(inner) if inner.len() < LIST_MIN => {
+                SLOT + BOX + SLOT * inner.len() as u64
+            }
+            Value::Str(t) if t.as_bytes().len() < STR_MIN => SLOT + BOX + t.as_bytes().len() as u64,
+            _ => SLOT,
+        })
+        .sum()
+}
+
+fn credit_list(items: &[Value]) {
+    let b = list_bytes(items);
+    if b > 0 {
+        crate::limits::live::credit(b);
     }
 }
 
@@ -334,6 +382,7 @@ impl Drop for Vector {
         let Some(items) = Rc::get_mut(&mut self.0) else {
             return;
         };
+        credit_list(items);
         if !items.iter().any(|v| matches!(v, Value::Vector(_))) {
             return;
         }
@@ -344,6 +393,7 @@ impl Drop for Vector {
                     && let Some(inner) = Rc::get_mut(&mut inner.0)
                     && !inner.is_empty()
                 {
+                    credit_list(inner);
                     pending.push(std::mem::take(inner));
                 }
             }
@@ -353,6 +403,10 @@ impl Drop for Vector {
 
 impl From<Vec<Value>> for Vector {
     fn from(v: Vec<Value>) -> Self {
+        let b = list_bytes(&v);
+        if b > 0 {
+            crate::limits::live::charge(b);
+        }
         Vector(Rc::new(v))
     }
 }

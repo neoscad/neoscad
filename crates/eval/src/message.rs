@@ -267,6 +267,33 @@ impl<W: Write> Console<W> {
         }
     }
 
+    /// Print a plain OpenSCAD line that is an error for the tools (`Can't
+    /// open input file`): the bytes exactly as [`Console::print`] prints
+    /// them with no severity, recorded as an error with `code` so a
+    /// server's and the JSON report's diagnostics say why the run failed.
+    /// `unfiltered` prints past `--quiet`, as [`Console::print_unfiltered`].
+    pub fn print_error_line(&mut self, code: DiagCode, line: &[u8], unfiltered: bool) {
+        let printed = if unfiltered {
+            let _ = self.out.write_all(line);
+            let _ = self.out.write_all(b"\n");
+            true
+        } else {
+            self.emit(None, line)
+        };
+        if printed && let Some(r) = &mut self.records {
+            let text = String::from_utf8_lossy(line).trim_end().to_string();
+            let message = text.strip_prefix("ERROR: ").unwrap_or(&text).to_string();
+            r.push(Logged {
+                severity: Some(Severity::Error),
+                code: Some(code),
+                text,
+                message,
+                location: None,
+                hints: Vec::new(),
+            });
+        }
+    }
+
     /// Print a line past the filters (`--quiet` and repeats), as the
     /// command line prints its own `eprintln!` lines; recorded as plain.
     pub fn print_unfiltered(&mut self, line: &[u8]) {
@@ -424,6 +451,9 @@ pub(crate) enum UnwindKind {
     Interrupted,
     /// `--hardwarnings`: a warning was printed (`HardWarningException`).
     HardWarning,
+    /// A resource limit ([`crate::limits`]) was passed; its error is
+    /// printed where it happened.
+    Limit,
 }
 
 /// An evaluation error on its way up (OpenSCAD's `EvaluationException`).

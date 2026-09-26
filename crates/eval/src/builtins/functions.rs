@@ -299,6 +299,11 @@ impl<'a> Evaluator<'a> {
                         self.log_exhausted();
                         return Err(self.unwind(UnwindKind::EchoStack));
                     }
+                    // Each argument is bounded by the limits already, so
+                    // the text built so far is at most one over them.
+                    if !self.string_fits(out.len(), loc, "str()") {
+                        return Ok(Value::Undef);
+                    }
                 }
                 Value::Str(crate::value::Str::from_vec(out))
             }
@@ -306,6 +311,9 @@ impl<'a> Evaluator<'a> {
                 let mut out = Vec::new();
                 for x in &a {
                     self.chr_into(&x.value, &mut out);
+                }
+                if !self.string_fits(out.len(), loc, "chr()") {
+                    return Ok(Value::Undef);
                 }
                 Value::Str(crate::value::Str::from_vec(out))
             }
@@ -331,6 +339,20 @@ impl<'a> Evaluator<'a> {
                 Value::Number(f64::from(utf8::first_char(s)))
             }
             Concat => {
+                // Before anything is copied: doubling a list forty times
+                // asks for a trillion elements.
+                let n: usize = a
+                    .iter()
+                    .map(|x| match &x.value {
+                        Value::Vector(v) => v.len(),
+                        _ => 1,
+                    })
+                    .fold(0usize, usize::saturating_add);
+                if !self.list_fits(n, loc, "concat()")
+                    || !self.memory_fits((n * std::mem::size_of::<Value>()) as u64, loc, "concat()")
+                {
+                    return Ok(Value::Undef);
+                }
                 let mut out = Vec::with_capacity(a.len());
                 for x in a {
                     match x.value {
@@ -699,7 +721,17 @@ impl<'a> Evaluator<'a> {
             );
             n = 1.0;
         }
+        // Before allocating: `rands(0, 1, 1e9)` is 16 GB of numbers.
+        if n > self.caps.rands {
+            self.over_limit(crate::limits::Limit::Rands, n.floor(), loc, "rands()");
+            return Value::Undef;
+        }
         let n = n as usize;
+        if !self.list_fits(n, loc, "rands()")
+            || !self.memory_fits((n * std::mem::size_of::<Value>()) as u64, loc, "rands()")
+        {
+            return Value::Undef;
+        }
         if a.len() > 3 {
             let seed = hash_float(a[3].value.to_f64()) as u32;
             self.rng.seed(seed);

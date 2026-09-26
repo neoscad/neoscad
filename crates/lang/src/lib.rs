@@ -163,7 +163,12 @@ fn finish(loaded: loader::Loaded, main_path: &Path, annotate: bool) -> Program {
                 "Parser error: syntax error",
             )
             .at(span, line)
-            .with_seq(seq_for_token(e.token) + 1),
+            .with_seq(seq_for_token(e.token) + 1)
+            .with_hint(syntax_hint(
+                &sources,
+                span,
+                toks.get(e.token as usize).is_none(),
+            )),
         );
     }
     let (mut ast, lower_diags) = ast::lower(&parse.cst, &sources, main_path, &uses);
@@ -183,4 +188,40 @@ fn finish(loaded: loader::Loaded, main_path: &Path, annotate: bool) -> Program {
         uses,
         diags,
     }
+}
+
+/// The fix hint of a syntax error: the offending token and where it is
+/// (OpenSCAD's message names only a line, and in a one-line model that
+/// says nothing), what usually causes it, and HTML-escaped brackets when
+/// the line has them (an agent that sent `use &lt;x.scad&gt;` saw only
+/// "syntax error").
+fn syntax_hint(sources: &source::SourceMap, span: Span, at_end: bool) -> String {
+    let f = sources.get(span.file);
+    let (line, col) = f.line_col(span.start);
+    let what = if at_end {
+        "the end of the input".to_string()
+    } else {
+        let tok = &f.text[span.start as usize..(span.end as usize).min(f.text.len())];
+        match std::str::from_utf8(tok) {
+            Ok(t) if !t.is_empty() && t.len() <= 24 && !t.contains(['\n', '`']) => format!("`{t}`"),
+            _ => "this token".to_string(),
+        }
+    };
+    let mut hint = format!(
+        "unexpected {what} at line {line}, column {col}: look just before it for a missing ';', ')', ']' or '}}', or an unbalanced bracket"
+    );
+    let start = f.text[..span.start as usize]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    let end = f.text[span.start as usize..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(f.text.len(), |i| span.start as usize + i);
+    let text = &f.text[start..end];
+    let has = |pat: &[u8]| text.windows(pat.len()).any(|w| w == pat);
+    if has(b"&lt;") || has(b"&gt;") || has(b"&amp;") {
+        hint.push_str("; the line has HTML-escaped characters (&lt; &gt; &amp;): write <, > and & as they are");
+    }
+    hint
 }

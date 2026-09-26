@@ -28,6 +28,10 @@
 //!   clock or the environment.
 //! - **Cancellation**: set [`Options::interrupt`] and evaluation stops at
 //!   the next call or loop iteration.
+//! - **Resource limits** ([`limits`]): a host running models it did not
+//!   write sets [`Options::guard`], and a list, string, `rands()` or
+//!   evaluation that would pass a limit stops with a `resource-limit`
+//!   error before it allocates.
 
 mod builtins;
 mod call;
@@ -36,6 +40,7 @@ pub mod dump;
 mod eval;
 pub mod fma;
 mod inst;
+pub mod limits;
 pub mod message;
 pub mod node;
 mod ops;
@@ -194,6 +199,9 @@ pub struct Options {
     pub fs: Arc<dyn FileSystem + Send + Sync>,
     /// Checked at every call and loop iteration; when set, evaluation stops.
     pub interrupt: Option<Arc<AtomicBool>>,
+    /// The request's resource limits ([`limits`]); `None` is unlimited, as
+    /// OpenSCAD is. Its interrupt flag should be [`Options::interrupt`].
+    pub guard: Option<Arc<limits::Guard>>,
     /// `--hardwarnings`: stop at the first warning, with the `TRACE:` lines
     /// of an evaluation error (see [`Evaluation::hard_warning`]).
     pub hardwarnings: bool,
@@ -220,6 +228,7 @@ impl Default for Options {
             rng_seed: 0,
             fs: Arc::new(StdFs),
             interrupt: None,
+            guard: None,
             hardwarnings: false,
             parts: false,
         }

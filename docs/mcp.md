@@ -31,7 +31,8 @@ shape):
 
 Flags: `--root DIR` (repeatable), `--cache-mb N` (the geometry cache
 budget, as for `serve`), `--log FILE` (append every message received
-and sent, for debugging a client).
+and sent, for debugging a client), `--limit NAME=VALUE` (repeatable:
+change a resource limit; see "Safety").
 
 ## Protocol
 
@@ -53,9 +54,14 @@ server is *dual-era* in that revision's terms (`basic/versioning`):
 
 Framing is the stdio binding: one JSON-RPC message per line, and nothing
 else on stdout. Tool calls run concurrently; `notifications/cancelled`
-stops a call at its next evaluation step, and no answer is sent for it.
-At the end of input the server answers the calls still running, then
-exits.
+stops a call at its next evaluation step (or the next ring of a
+primitive, slice of an extrusion or geometry node), and no answer is
+sent for it. The end of input means the client is gone: the server
+cancels the calls still running, sends no answers for them, and exits,
+within 2 s even if one is inside a single kernel operation (which
+cannot be interrupted). A dead client used to leave the server
+computing as an orphan. A script that pipes requests in must read each
+answer before it closes the stream.
 
 Claude Code 2.1.283 speaks the modern protocol: it probes with
 `server/discover`, then sends `resources/list`, `tools/list` and
@@ -81,21 +87,30 @@ full JSON result.
 | Tool | What it answers | Extra arguments |
 |---|---|---|
 | `evaluate` | errors and warnings with fix hints, `echo()` output; no geometry | |
-| `render` | bbox, volume, area, manifold, components; optionally writes the model | `export` (a file; format from its extension) |
-| `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `dims`, `preview`, `output` (also save the PNG) |
+| `render` | bbox, volume, area, manifold, components; optionally writes the model | `export` (a file; format from its extension), `overwrite` |
+| `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `dims`, `preview`, `output` (also save the PNG; a `.png` name), `overwrite` |
 | `check` | printability findings, each with location and fix | `bed`, `nozzle`, `min_wall`, `max_overhang` |
 | `measure` | model and part bbox, volume, centroid; distance between parts; sections | `part`, `between`, `section` |
 | `test` | model tests (`docs/model-tests.md`); `path` is a test file or directory, `source` a test file's text | `filter` |
 | `format` | `source`: the formatted text; `path`: rewrites the file (only whitespace changes) | `check` (return the diff, write nothing) |
-| `docs` | a builtin's reference, or with `path` a file's definitions; no name: the index | `name`, `full` |
+| `docs` | a builtin's reference, or with `path` a file's definitions; no name: the index | `name`, `full`, `verbose` (the whole index) |
 
 The server's `instructions` (sent once, at discovery or `initialize`)
 say when to use which: iterate on inline source, `evaluate` for errors,
 `render` for numbers, `snapshot` to see, `check` before finishing. The
-tool list as the model sees it (name, description, input schema) is
-5,404 bytes of JSON, roughly 1,350-1,550 tokens (estimated at 3.5-4 bytes
-a token; not measured with a tokenizer). `crates/cli/tests/mcp.rs` keeps
-it under 5,500 bytes and each description under 300.
+tool list is 5,498 bytes of compact JSON as `[name, description, input
+schema]` arrays, which is what `crates/cli/tests/mcp.rs` measures and
+keeps under 5,500 bytes (each description under 300). What a client
+receives is larger: 5,778 bytes with the keys (`name`, `description`,
+`inputSchema`) and 6,069 with `annotations`, roughly 1,450-1,700 tokens
+(estimated at 3.5-4 bytes a token; not measured with a tokenizer).
+
+Arguments are checked against the schemas before a tool runs: a
+wrongly typed argument (`"parts": "yes"`, `"nozzle": "big"`) or one the
+tool does not take is refused with `isError` and a message naming the
+argument and the type it needs; it used to be treated as absent. Errors
+from the parsers the tools share with the command line name the
+arguments (`` `size` must be WxH``), not command-line flags.
 
 ### Results
 
@@ -121,7 +136,8 @@ facts as `structuredContent`:
 ```
 
 The structured content has the diagnostics without spans
-or full text (`file` only for an included file), the geometry object of
+or full text but with `column` (where the span starts; in the text,
+`inline.scad:1:11`), `file` only for an included file, the geometry object of
 `docs/cli-json.md`, findings without their bboxes, at most 20
 diagnostics and 20 echo lines. **The structured content must stand on
 its own:** Claude Code shows the model the JSON of `structuredContent`
@@ -144,12 +160,30 @@ output's directory is created.
 - **Files:** the allowed roots are the working directory and each
   `--root`, read and write; the library path (`OPENSCADPATH`, the user
   library directory) and font directories are readable. Tool arguments
-  that name files are checked before the call runs (symlinks resolved,
-  so neither `..` nor a link leads out), and refused with a message
-  naming the roots and `--root`. The session's file system itself is
-  fenced (`mcp::roots::RootedFs`), so a model's `include`, `use`,
-  `import()` or `surface()` cannot read outside them either: the file
-  simply cannot be opened.
+  that name files are checked before the call runs, by where they
+  resolve: `..` is folded, then every symlink along the path is
+  followed, the last one included even when it dangles
+  (`mcp::roots::resolve`), so a planted `out.stl -> ~/Library/...` is
+  refused like any path outside. A write goes to the resolved path. The
+  refusal names the roots and `--root`. The session's file system
+  itself is fenced (`mcp::roots::RootedFs`), so a model's `include`,
+  `use`, `import()` or `surface()` cannot read outside them either: the
+  file simply cannot be opened.
+- **Outputs never replace other files:** `render`'s `export` must have
+  an export format's extension and `snapshot`'s `output` must be a
+  `.png`. An existing file whose extension is not the output's (a
+  `.scad` model above all, even through a link) is never replaced; an
+  existing file of the same type only with `overwrite: true`. An
+  output's directory is created only once every argument has been
+  checked.
+- **Resource limits:** every call runs under the agent limits (60 s,
+  4 GiB estimated memory, 10,000 fragments per primitive, 10,000
+  slices, 10 million list elements and `rands()` numbers, 64 MiB
+  strings, 10 million triangles per result; `docs/cli-json.md`,
+  "Resource limits"). A model that would pass one (`sphere(10,
+  $fn=100000)` once reached a 43 GB footprint) fails at once with a
+  `resource-limit` error that names the limit and the flag that raises
+  it; `neoscad mcp --limit fragments=50000` (or `=off`) does.
 - **No network** and **no command execution:** the tools evaluate
   OpenSCAD, which has neither.
 - Writes happen only through `render`'s `export`, `snapshot`'s `output`

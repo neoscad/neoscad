@@ -328,3 +328,30 @@ fn snapshot_writes_a_sheet_and_a_summary() {
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("iso, front, back"));
 }
+
+#[test]
+fn json_reports_say_why_a_run_failed() {
+    let d = scratch("whyfail");
+    // A missing input is a diagnostic with a stable code, not only a line.
+    let o = neoscad(&d, &["nope.scad", "-o", "x.stl", "--format", "json"]);
+    assert_eq!(o.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["diagnostics"][0]["code"], "input-not-found", "{v}");
+    assert_eq!(v["counts"]["errors"], 1, "{v}");
+    // A syntax error's hint names the token and its column.
+    std::fs::write(d.join("se.scad"), "rotate(45 cube(3);\n").unwrap();
+    let o = neoscad(&d, &["se.scad", "-o", "x.stl", "--format", "json"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let diag = &v["diagnostics"][0];
+    assert_eq!(diag["span"]["start"]["column"], 11, "{v}");
+    assert!(
+        diag["hints"][0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("unexpected `cube` at line 1, column 11"),
+        "{v}"
+    );
+    // Without --format json the bytes are OpenSCAD's.
+    let o = neoscad(&d, &["nope.scad", "-o", "x.stl"]);
+    assert_eq!(text(&o.stderr), "Can't open input file 'nope.scad'!\n\n");
+}

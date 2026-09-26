@@ -151,6 +151,11 @@ pub fn run_of(params: &Value, model: &str, cwd: &Path) -> session::Run {
     run.supersede = b("supersede");
     run.rng_seed = Some(0);
     run.parts = b("parts") || crate::parts_enabled(&strings("enable"));
+    // A server resolves a request's limits into a whole `limits` object
+    // (`crate::limits`), so nothing here depends on its defaults.
+    run.limits = crate::limits::of_params(params, session::Limits::NONE)
+        .ok()
+        .flatten();
     run
 }
 

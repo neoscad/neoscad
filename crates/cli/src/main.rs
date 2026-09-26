@@ -39,6 +39,7 @@ mod export_options;
 mod format;
 mod host;
 mod info;
+mod limits;
 mod mcp;
 mod measure;
 mod modeltest;
@@ -231,6 +232,12 @@ struct Cli {
     /// Stop on the first warning.
     #[arg(long)]
     hardwarnings: bool,
+
+    /// A resource limit, NAME=VALUE (repeatable): time (s), memory (MiB,
+    /// or 4G), fragments, slices, list, string, rands, triangles; 'off'
+    /// for none. Unlimited by default, as OpenSCAD is.
+    #[arg(long = "limit", value_name = "NAME=VALUE", action = ArgAction::Append)]
+    limit: Vec<String>,
 
     /// Maximum number of trace messages.
     #[arg(long = "trace-depth", value_name = "N")]
@@ -721,6 +728,7 @@ fn served_export(
         || cli.make_command.is_some()
         || cli.summary_file.is_some()
         || cli.hardwarnings
+        || !cli.limit.is_empty()
         || cli.trace_depth.is_some()
         || cli.trace_usermodule_parameters.is_some()
         || cli.check_parameters.is_some()
@@ -804,6 +812,18 @@ fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
     };
     if let Some(d) = cli.trace_depth {
         o.trace_depth = d;
+    }
+    match limits::from_flags(limits::Limits::NONE, &cli.limit) {
+        Ok(l) => {
+            if let Some((guard, flag)) = limits::guard(l) {
+                o.interrupt = Some(flag);
+                o.guard = Some(guard);
+            }
+        }
+        Err(e) => {
+            eprintln!("neoscad: {e}");
+            return Err(EXIT_ERROR);
+        }
     }
     if let Some(cam) = &cli.camera {
         let nums: Result<Vec<f64>, _> = cam.split(',').map(|s| s.trim().parse::<f64>()).collect();

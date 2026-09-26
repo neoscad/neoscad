@@ -69,6 +69,13 @@ struct Args {
     /// `json`: --status prints the server's status object.
     #[arg(long, value_name = "FORMAT")]
     format: Option<String>,
+
+    /// Change a resource limit, NAME=VALUE (repeatable; 'off' for none):
+    /// time (s, default 60), memory (MiB or 4G, default 4G), fragments
+    /// (10000), slices (10000), list (1e7), string (64 MiB), rands (1e7),
+    /// triangles (1e7). The command line's own requests are unlimited.
+    #[arg(long = "limit", value_name = "NAME=VALUE", action = clap::ArgAction::Append)]
+    limit: Vec<String>,
 }
 
 /// Run `neoscad serve` with the arguments after `serve`.
@@ -105,6 +112,13 @@ pub fn main(args: Vec<OsString>) -> u8 {
     if let Some(mb) = a.cache_mb {
         cfg.geometry_budget = mb << 20;
     }
+    cfg.limits = match crate::limits::from_flags(session::Limits::AGENT, &a.limit) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("neoscad serve: {e}");
+            return EXIT_ERROR;
+        }
+    };
     let server = Arc::new(Server {
         session: session::Session::new(cfg),
         binary: client::binary_id(),
@@ -517,8 +531,14 @@ fn quick(server: &Server, method: &str, params: &Value) -> Reply {
     }
 }
 
-/// The session's run for a request's parameters.
-fn run_of(params: &Value, id: &Value, w: &Writer) -> Result<session::Run, (i64, String)> {
+/// The session's run for a request's parameters. `base` is the server's
+/// limits, which a request's `limits` object changes.
+fn run_of(
+    params: &Value,
+    id: &Value,
+    w: &Writer,
+    base: session::Limits,
+) -> Result<session::Run, (i64, String)> {
     let input = params
         .get("path")
         .or_else(|| params.get("input"))
@@ -538,6 +558,7 @@ fn run_of(params: &Value, id: &Value, w: &Writer) -> Result<session::Run, (i64, 
         .and_then(Value::as_bool)
         .unwrap_or(false);
     run.rng_seed = params.get("seed").and_then(Value::as_u64).map(|n| n as u32);
+    run.limits = crate::limits::of_params(params, base).map_err(invalid)?;
     // An editor's requests supersede older ones on the document (their
     // text is stale); `neoscad mcp` turns that off, because an agent's
     // parallel calls on one file (a check and a measure) are both wanted.
@@ -573,6 +594,32 @@ fn run_of(params: &Value, id: &Value, w: &Writer) -> Result<session::Run, (i64, 
         }));
     }
     Ok(run)
+}
+
+/// A message of the parsers the command line shares with the server
+/// (`--nozzle must be ...`) with each flag named as a request spells the
+/// parameter (`nozzle`): a server's or an agent's client has never seen
+/// the flags.
+pub(crate) fn param_names(msg: &str) -> String {
+    const NAMES: &[(&str, &str)] = &[
+        ("`--enable part`", "`parts: true`"),
+        ("--enable part", "`parts: true`"),
+        ("--max-overhang", "`max_overhang`"),
+        ("--min-wall", "`min_wall`"),
+        ("--nozzle", "`nozzle`"),
+        ("--bed", "`bed`"),
+        ("--between", "`between`"),
+        ("--section", "`section`"),
+        ("--size", "`size`"),
+        ("--lighting", "`lighting`"),
+        ("--highlight", "`highlight`"),
+        ("--issues", "`issues`"),
+    ];
+    let mut out = msg.to_string();
+    for (flag, name) in NAMES {
+        out = out.replace(flag, name);
+    }
+    out
 }
 
 fn cancelled(_: session::Cancelled) -> (i64, String) {
@@ -634,7 +681,7 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
     ) {
         return Err((code::METHOD_NOT_FOUND, format!("unknown method '{method}'")));
     }
-    let run = run_of(params, id, w)?;
+    let run = run_of(params, id, w, s.config().limits)?;
     let cwd = run
         .cwd
         .clone()
@@ -695,6 +742,7 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
             p["model"] = json!(run.input);
             p["json"] = json!(true);
             p["supersede"] = json!(run.supersede);
+            p["limits"] = crate::limits::json(&run.limits.unwrap_or(s.config().limits));
             if run.parts {
                 p["parts"] = json!(true);
             }
@@ -709,7 +757,8 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
             Ok(merge(summary, json!({"exit_code": out.exit_code})))
         }
         "check" => {
-            let settings = crate::check::settings_of(params).map_err(invalid)?;
+            let settings =
+                crate::check::settings_of(params).map_err(|e| invalid(param_names(&e)))?;
             let c = s
                 .check(&session::check::CheckRequest { run, settings })
                 .map_err(cancelled)?;
@@ -717,7 +766,8 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
             Ok(merge(c.summary, json!({"exit_code": c.exit_code})))
         }
         "measure" => {
-            let req = crate::measure::request_of(params, run).map_err(invalid)?;
+            let req =
+                crate::measure::request_of(params, run).map_err(|e| invalid(param_names(&e)))?;
             let m = s.measure(&req).map_err(cancelled)?;
             publish(w, &doc, &m.log);
             let mut summary = m.summary;
@@ -779,6 +829,10 @@ fn docs_method(s: &session::Session, params: &Value) -> Reply {
         file: str_param(params, "file").or_else(|| str_param(params, "in")),
         cwd: str_param(params, "cwd").map(PathBuf::from),
         full: params.get("full").and_then(Value::as_bool).unwrap_or(false),
+        brief: params
+            .get("brief")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     });
     Ok(merge(r.json, json!({"text": r.text})))
 }
@@ -1006,6 +1060,13 @@ fn cli(server: &Server, method: &str, params: &Value) -> Reply {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .ok_or_else(|| invalid("missing \"cwd\""))?;
+    // The command line is unlimited, as OpenSCAD is, whether it runs in
+    // its own process or here; its `--limit` runs never come here.
+    let mut params = params.clone();
+    if params.get("limits").is_none_or(Value::is_null) {
+        params["limits"] = crate::limits::json(&session::Limits::NONE);
+    }
+    let params = &params;
     let out = match method {
         "cli.export" => crate::delegate::execute(&server.session, params, &cwd),
         "cli.snapshot" => crate::snapshot::execute(&server.session, params, &cwd, None),
@@ -1046,7 +1107,17 @@ fn listen(server: Arc<Server>, path: &Path) -> Result<(), String> {
                 .map_err(|e| format!("cannot make {} private: {e}", dir.display()))?;
         }
     }
-    if path.exists() {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        use std::os::unix::fs::FileTypeExt;
+        // Only a socket is ever replaced: `--socket notes.txt` (or
+        // `--socket model.scad`) deleted the file as a "stale socket" (the
+        // agent-surface audit's finding 7).
+        if !meta.file_type().is_socket() {
+            return Err(format!(
+                "{} exists and is not a socket; refusing to replace it (choose another --socket path)",
+                path.display()
+            ));
+        }
         if UnixStream::connect(path).is_ok() {
             return Err(format!(
                 "a server is already listening at {}",

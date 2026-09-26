@@ -22,7 +22,17 @@ pub struct DocsRequest {
     /// The whole comment block of a user definition, not the compact
     /// form.
     pub full: bool,
+    /// A short index for an agent's context: `_private` helpers left out,
+    /// and when the included libraries define many names, only how many
+    /// each file has (a BOSL2 model's full index is 21 KB, most of it
+    /// names the agent will look up one at a time anyway). A name asked
+    /// for is answered whatever its spelling.
+    pub brief: bool,
 }
+
+/// In a brief index, the included and used files' names are listed only
+/// up to this many; past it, each file with its count.
+const BRIEF_NAMES: usize = 100;
 
 /// A docs answer: text for people, JSON for agents.
 #[derive(Debug, Clone)]
@@ -76,6 +86,28 @@ fn user_json(d: &UserDoc, location: &str, full: bool) -> Value {
     v
 }
 
+/// `file: name name()` lines, one per file in order.
+fn index_lines(user: &[&UserDoc], rel: &dyn Fn(&Path) -> String) -> String {
+    let mut by_file: Vec<(String, Vec<String>)> = Vec::new();
+    for d in user {
+        let f = rel(&d.file);
+        let label = format!(
+            "{}{}",
+            d.name,
+            if d.kind == Kind::Function { "()" } else { "" }
+        );
+        match by_file.last_mut() {
+            Some((lf, v)) if *lf == f => v.push(label),
+            _ => by_file.push((f, vec![label])),
+        }
+    }
+    let mut text = String::new();
+    for (f, names) in by_file {
+        text.push_str(&format!("{f}: {}\n", names.join(" ")));
+    }
+    text
+}
+
 impl Session {
     /// Look up a builtin or a user definition (see [`DocsRequest`]).
     pub fn docs(&self, req: &DocsRequest) -> DocsResult {
@@ -93,9 +125,24 @@ impl Session {
                 }
             }
         }
-        let rel = |p: &Path| lang::diag::relative_path(p, &cwd).display().to_string();
+        // Files as a reader finds them: under the working directory
+        // relative to it, a library's relative to its library directory
+        // (`BOSL2/affine.scad`, not sixty bytes of `../`), anything else
+        // relative to the working directory after all.
+        let rel = |p: &Path| {
+            if let Ok(r) = p.strip_prefix(&cwd) {
+                return r.display().to_string();
+            }
+            for dir in &self.cfg.libs.0 {
+                if let Ok(r) = p.strip_prefix(crate::normal(&cwd.join(dir))) {
+                    return r.display().to_string();
+                }
+            }
+            lang::diag::relative_path(p, &cwd).display().to_string()
+        };
         let Some(name) = &req.name else {
-            return self.docs_index(&user, &rel);
+            let main = req.file.as_ref().map(|f| crate::normal(&cwd.join(f)));
+            return self.docs_index(&user, &rel, req.brief.then_some(main.as_deref()).flatten());
         };
         let found_user: Vec<&UserDoc> = user.iter().filter(|d| d.name == *name).collect();
         let found_builtin = docs::builtin(name);
@@ -159,28 +206,57 @@ impl Session {
         }
     }
 
-    fn docs_index(&self, user: &[UserDoc], rel: &dyn Fn(&Path) -> String) -> DocsResult {
+    /// The index: builtins, or a file's definitions by file. `brief` is
+    /// the file asked about, for a [`DocsRequest::brief`] index.
+    fn docs_index(
+        &self,
+        user: &[UserDoc],
+        rel: &dyn Fn(&Path) -> String,
+        brief: Option<&Path>,
+    ) -> DocsResult {
         let mut text = String::new();
         let mut defs = Vec::new();
-        if !user.is_empty() {
-            let mut by_file: Vec<(String, Vec<String>)> = Vec::new();
-            for d in user {
-                let f = rel(&d.file);
-                let label = format!(
-                    "{}{}",
-                    d.name,
-                    if d.kind == Kind::Function { "()" } else { "" }
-                );
-                match by_file.last_mut() {
-                    Some((lf, v)) if *lf == f => v.push(label),
-                    _ => by_file.push((f, vec![label])),
+        let user: Vec<&UserDoc> = match brief {
+            Some(main) => {
+                let public: Vec<&UserDoc> =
+                    user.iter().filter(|d| !d.name.starts_with('_')).collect();
+                let others = public.iter().filter(|d| d.file != main).count();
+                if others > BRIEF_NAMES {
+                    let own: Vec<&UserDoc> =
+                        public.iter().copied().filter(|d| d.file == main).collect();
+                    let mut counts: Vec<(String, usize)> = Vec::new();
+                    for d in public.iter().filter(|d| d.file != main) {
+                        let f = rel(&d.file);
+                        match counts.last_mut() {
+                            Some((lf, n)) if *lf == f => *n += 1,
+                            _ => counts.push((f, 1)),
+                        }
+                    }
+                    text.push_str(&index_lines(&own, rel));
+                    text.push_str(&format!(
+                        "{others} more from includes and uses, by file: {}\n\
+                         Ask for one by name, or verbose: true for every name.\n",
+                        counts
+                            .iter()
+                            .map(|(f, n)| format!("{f} ({n})"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
+                public
+            }
+            None => user.iter().collect(),
+        };
+        if !user.is_empty() {
+            for d in &user {
                 defs.push(json!({"kind": kind_name(d.kind), "name": d.name, "file": rel(&d.file), "line": d.line}));
             }
-            for (f, names) in by_file {
-                text.push_str(&format!("{f}: {}\n", names.join(" ")));
+            if text.is_empty() {
+                text = index_lines(&user, rel);
             }
-            text.push_str("(names ending in () are functions)\n");
+            if brief.is_none() || text.contains("() ") || text.contains("()\n") {
+                text.push_str("(names ending in () are functions)\n");
+            }
         } else {
             text = docs::index_text();
         }

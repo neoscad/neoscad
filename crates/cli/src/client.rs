@@ -109,6 +109,8 @@ pub enum CallError {
     Rpc(i64, String),
     /// The connection failed part-way.
     Io(String),
+    /// The socket is not one this user's server made (see [`trusted`]).
+    Untrusted(String),
 }
 
 impl std::fmt::Display for CallError {
@@ -117,6 +119,7 @@ impl std::fmt::Display for CallError {
             CallError::NoServer => f.write_str("no server is running"),
             CallError::Rpc(c, m) => write!(f, "{m} ({c})"),
             CallError::Io(e) => f.write_str(e),
+            CallError::Untrusted(e) => f.write_str(e),
         }
     }
 }
@@ -130,6 +133,7 @@ pub fn call(socket: &std::path::Path, method: &str, params: Value) -> Result<Val
     if !socket.exists() {
         return Err(CallError::NoServer);
     }
+    trusted(socket).map_err(CallError::Untrusted)?;
     let stream = UnixStream::connect(socket).map_err(|_| CallError::NoServer)?;
     let mut w = stream
         .try_clone()
@@ -154,6 +158,51 @@ pub fn call(socket: &std::path::Path, method: &str, params: Value) -> Result<Val
     }
 }
 
+/// Whether `socket` is this user's server's, before anything is sent to
+/// it: the client sends its working directory, environment (`HOME`,
+/// library and font paths) and command line, and prints what comes back.
+/// The socket must be a socket owned by this user, in a directory that is
+/// this user's and not writable by group or others (or a sticky one, like
+/// `/tmp`, where no one else can replace a socket that is ours).
+///
+/// Without this, on Linux without `XDG_RUNTIME_DIR` another local user
+/// could create `/tmp/neoscad-<uid>/` first, listen there, and receive a
+/// victim's paths and environment and forge their output (the
+/// agent-surface audit's finding 8). The server checks the default
+/// directory's owner when it starts; the client now checks too, on every
+/// platform, and refuses (running in-process) otherwise.
+#[cfg(unix)]
+pub fn trusted(socket: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let me = uid();
+    let s = std::fs::symlink_metadata(socket).map_err(|e| format!("{}: {e}", socket.display()))?;
+    if !s.file_type().is_socket() {
+        return Err(format!("{} is not a socket", socket.display()));
+    }
+    if s.uid() != me {
+        return Err(format!("{} belongs to another user", socket.display()));
+    }
+    let dir = socket
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let d = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let private = d.uid() == me && d.mode() & 0o022 == 0;
+    let sticky = d.mode() & 0o1000 != 0;
+    if !(private || sticky) {
+        return Err(format!(
+            "{} is writable by other users or not this user's; not trusting the socket in it",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn trusted(_socket: &std::path::Path) -> Result<(), String> {
+    Err("Unix sockets are not available here".into())
+}
+
 #[cfg(not(unix))]
 pub fn call(_socket: &std::path::Path, _method: &str, _params: Value) -> Result<Value, CallError> {
     Err(CallError::NoServer)
@@ -166,7 +215,7 @@ pub fn available(no_server: bool) -> Option<PathBuf> {
         return None;
     }
     let socket = default_socket();
-    socket.exists().then_some(socket)
+    (socket.exists() && trusted(&socket).is_ok()).then_some(socket)
 }
 
 /// Run a command-line method (`cli.export`, `cli.snapshot`) on the server
@@ -182,4 +231,36 @@ pub fn run(socket: &std::path::Path, method: &str, mut params: Value) -> Option<
     call(socket, method, params)
         .ok()
         .and_then(|v| Outcome::from_json(&v))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn only_a_private_directorys_socket_is_trusted() {
+        let d = std::env::temp_dir().join(format!("nstrust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let sock = d.join("s.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(trusted(&sock).is_ok());
+        // Anyone could have put it there.
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            trusted(&sock)
+                .unwrap_err()
+                .contains("writable by other users")
+        );
+        // Sticky (like /tmp): no one else can replace a socket that is ours.
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(trusted(&sock).is_ok());
+        // Not a socket at all.
+        std::fs::write(d.join("f"), "x").unwrap();
+        assert!(trusted(&d.join("f")).unwrap_err().contains("not a socket"));
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

@@ -78,13 +78,16 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "render",
-            "Build the geometry; report bbox, volume, area, manifold and components. Verifies dimensions numerically. `export` also writes it (.stl .3mf .obj .off .svg .dxf .png).",
-            json!({"export": {"type": "string", "description": "Output file"}}),
+            "Build the geometry; report bbox, volume, area, manifold and components, to verify dimensions. `export` also writes it (.stl .3mf .obj .off .svg .dxf .png).",
+            json!({
+                "export": {"type": "string", "description": "Output file"},
+                "overwrite": {"type": "boolean"},
+            }),
             false,
         ),
         tool(
             "snapshot",
-            "See the model: a PNG of iso/front/top/right views on a mm grid, plus bbox and volume. Use it to judge shape and placement; use render or measure for exact numbers.",
+            "See the model: a PNG of iso/front/top/right views on a mm grid, plus bbox and volume. Judge shape and placement with it; render and measure give exact numbers.",
             json!({
                 "views": {"type": "array", "items": {"type": "string"}, "description": "iso front back left right top bottom"},
                 "size": {"type": "string", "description": "WxH pixels, default 768x768"},
@@ -95,6 +98,7 @@ pub fn list() -> Vec<Value> {
                 "dims": {"type": "boolean", "description": "Label bbox sizes"},
                 "preview": {"type": "boolean", "description": "OpenSCAD preview: shows % and # modifiers"},
                 "output": {"type": "string", "description": "Also save the PNG here"},
+                "overwrite": {"type": "boolean"},
             }),
             false,
         ),
@@ -147,12 +151,13 @@ pub fn list() -> Vec<Value> {
         },
         json!({
             "name": "docs",
-            "description": "Reference for an OpenSCAD builtin (cube, rotate_extrude, $fn...) or a library module; no name gives the index. With `path`, searches that file's definitions and includes.",
+            "description": "Reference for an OpenSCAD builtin (cube, rotate_extrude, $fn...) or a library module; no name gives the index. With `path`, that file's definitions and includes.",
             "inputSchema": {"type": "object", "properties": {
                 "name": {"type": "string"},
                 "path": {"type": "string", "description": "File whose definitions to search"},
                 "base_dir": {"type": "string"},
                 "full": {"type": "boolean", "description": "Whole comment block"},
+                "verbose": {"type": "boolean", "description": "Full index"},
             }},
             "annotations": {"readOnlyHint": true},
         }),
@@ -226,6 +231,11 @@ impl Tools {
         self.local.cancel(id);
     }
 
+    /// Stop every call in flight (the client is gone).
+    pub fn cancel_all(&self) {
+        self.local.session().cancel_all();
+    }
+
     /// `tools/call`'s result for a known tool. Failures of the request
     /// itself (a bad argument, a path outside the roots) are results with
     /// `isError`, which MCP gives the model so it can correct the call; a
@@ -233,16 +243,19 @@ impl Tools {
     pub fn call(&self, id: &Value, name: &str, args: &Value) -> Value {
         // A tool that panics (a bug) answers like a failed call, and the
         // server keeps its caches, as `neoscad serve` does.
-        let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match name {
-            "evaluate" => self.evaluate(id, args),
-            "render" => self.render(id, args),
-            "snapshot" => self.snapshot(args),
-            "check" => self.check(id, args),
-            "measure" => self.measure(id, args),
-            "test" => self.test(id, args),
-            "format" => self.format(id, args),
-            "docs" => self.docs(id, args),
-            _ => Err(format!("unknown tool '{name}'")),
+        let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            check_args(name, args)?;
+            match name {
+                "evaluate" => self.evaluate(id, args),
+                "render" => self.render(id, args),
+                "snapshot" => self.snapshot(args),
+                "check" => self.check(id, args),
+                "measure" => self.measure(id, args),
+                "test" => self.test(id, args),
+                "format" => self.format(id, args),
+                "docs" => self.docs(id, args),
+                _ => Err(format!("unknown tool '{name}'")),
+            }
         }))
         .unwrap_or_else(|p| {
             let what = p
@@ -251,7 +264,10 @@ impl Tools {
                 .or_else(|| p.downcast_ref::<String>().cloned())
                 .unwrap_or_default();
             Err(format!("internal error: the tool panicked: {what}"))
-        });
+        })
+        // The shared parsers speak the command line's flags; an agent
+        // knows only its arguments.
+        .map_err(|e| crate::serve::param_names(&e));
         match reply {
             Ok(out) => {
                 let mut content = vec![json!({"type": "text", "text": out.text})];
@@ -309,9 +325,23 @@ impl Tools {
         Ok(Some(p))
     }
 
-    /// `key`'s path, absolute, if it may be written; its directory is
-    /// created (inside the roots) so "write it to out/x.stl" just works.
-    fn writable(&self, base: &Path, args: &Value, key: &str) -> Result<Option<PathBuf>, String> {
+    /// `key`'s path, absolute and with symlinks resolved, if it may be
+    /// written as a file of one of `formats` (lower-case extensions).
+    ///
+    /// The fence is where the path *resolves* ([`super::roots::resolve`]),
+    /// so a planted link cannot lead a write out of the roots. And an
+    /// output never replaces a file of another type: an agent that
+    /// confuses `output` with `path` must not turn the user's model into
+    /// a PNG (the agent-surface audit's finding 3). An existing file of
+    /// the same type is replaced only with `overwrite: true`. Nothing is
+    /// created here; [`make_dir`] does that once every argument is valid.
+    fn writable(
+        &self,
+        base: &Path,
+        args: &Value,
+        key: &str,
+        formats: &[&str],
+    ) -> Result<Option<PathBuf>, String> {
         let Some(p) = str_arg(args, key) else {
             return Ok(None);
         };
@@ -319,11 +349,46 @@ impl Tools {
         if !self.roots.can_write(&p) {
             return Err(self.roots.refusal(key, &p));
         }
-        if let Some(dir) = p.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| format!("cannot create '{}': {e}", dir.display()))?;
+        let real = super::roots::resolve(&p);
+        let ext = |q: &Path| {
+            q.extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        };
+        let want = ext(&p);
+        if !formats.contains(&want.as_str()) {
+            return Err(format!(
+                "{key} '{}' must end in {}",
+                p.display(),
+                formats
+                    .iter()
+                    .map(|f| format!(".{f}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
-        Ok(Some(p))
+        if let Ok(meta) = std::fs::metadata(&real) {
+            if meta.is_dir() {
+                return Err(format!("{key} '{}' is a directory", p.display()));
+            }
+            if ext(&real) != want {
+                return Err(format!(
+                    "{key} '{}' is an existing {} file; a .{want} output never replaces a file of another type (choose another name)",
+                    p.display(),
+                    match ext(&real).as_str() {
+                        "" => "extension-less".to_string(),
+                        e => format!(".{e}"),
+                    }
+                ));
+            }
+            if !bool_arg(args, "overwrite") {
+                return Err(format!(
+                    "{key} '{}' exists; pass overwrite: true to replace it, or choose another name",
+                    p.display()
+                ));
+            }
+        }
+        Ok(Some(real))
     }
 
     /// The model of `path` or `source` (`inline` names the document inline
@@ -396,7 +461,19 @@ impl Tools {
     fn render(&self, id: &Value, args: &Value) -> Reply {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
-        let export = self.writable(&m.base, args, "export")?;
+        let export = match self.writable(&m.base, args, "export", EXPORT_FORMATS) {
+            Ok(e) => e,
+            Err(e) => {
+                self.done(m);
+                return Err(e);
+            }
+        };
+        if let Some(out) = &export
+            && let Err(e) = make_dir(out)
+        {
+            self.done(m);
+            return Err(e);
+        }
         let mut p = self.params(&m, args);
         let method = match &export {
             Some(out) => {
@@ -429,7 +506,13 @@ impl Tools {
     fn snapshot(&self, args: &Value) -> Reply {
         let mut m = self.model(args, INLINE)?;
         let main = m.path.clone();
-        let output = self.writable(&m.base, args, "output")?;
+        let output = match self.writable(&m.base, args, "output", &["png"]) {
+            Ok(o) => o,
+            Err(e) => {
+                self.done(m);
+                return Err(e);
+            }
+        };
         let diff = match (
             str_arg(args, "diff_source"),
             self.readable(&m.base, args, "diff_against")?,
@@ -477,6 +560,7 @@ impl Tools {
         };
         if let Some(png) = &snap.png {
             if let Some(o) = &output {
+                make_dir(o)?;
                 std::fs::write(o, png)
                     .map_err(|e| format!("cannot write '{}': {e}", o.display()))?;
                 text.push_str(&format!("; saved {}", o.display()));
@@ -542,8 +626,17 @@ impl Tools {
         self.done(m);
         let r = r?;
         if r.get("failed").and_then(Value::as_bool) == Some(true) || r["model"].is_null() {
-            let mut text = "the model did not render; nothing to check".to_string();
-            let log = json!({"diagnostics": r["diagnostics"]["items"], "echo": []});
+            let mut text = format!(
+                "failed (exit {}): the model did not render; nothing to check",
+                r["exit_code"]
+            );
+            let d = &r["diagnostics"];
+            let log = json!({
+                "exit_code": r["exit_code"],
+                "counts": {"errors": d["errors"], "warnings": d["warnings"], "echoes": d["echoes"]},
+                "diagnostics": d["items"],
+                "echo": d["echo"],
+            });
             push_log(&mut text, &log);
             return Ok(finish(args, text, terse_log(&log, &main), r));
         }
@@ -574,6 +667,7 @@ impl Tools {
             json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"]});
         push_log(&mut text, &log);
         let s = json!({
+            "exit_code": r["exit_code"],
             "ok": r["ok"],
             "counts": r["counts"],
             "model": model,
@@ -597,7 +691,7 @@ impl Tools {
         let r = r?;
         let mut text = String::new();
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            text.push_str(e);
+            text.push_str(&crate::serve::param_names(e));
         } else {
             text.push_str(&solid_line("model", &r["model"]));
             for part in r["parts"].as_array().into_iter().flatten() {
@@ -648,6 +742,9 @@ impl Tools {
             }
         }
         s["diagnostics"] = terse_diags(&log["diagnostics"], &main);
+        if let Some(e) = s.get("error").and_then(Value::as_str) {
+            s["error"] = json!(crate::serve::param_names(e));
+        }
         Ok(finish(args, text, s, r))
     }
 
@@ -794,7 +891,8 @@ impl Tools {
         let r = self.run(
             id,
             "docs",
-            &json!({"name": str_arg(args, "name"), "file": file, "cwd": base, "full": bool_arg(args, "full")}),
+            &json!({"name": str_arg(args, "name"), "file": file, "cwd": base,
+                    "full": bool_arg(args, "full"), "brief": !bool_arg(args, "verbose")}),
         )?;
         Ok(Out {
             text: r["text"].as_str().unwrap_or("").trim_end().to_string(),
@@ -802,6 +900,90 @@ impl Tools {
             png: None,
         })
     }
+}
+
+/// What `render`'s `export` can write: `neoscad serve`'s export formats
+/// by extension (`binstl` is a format name, not an extension).
+const EXPORT_FORMATS: &[&str] = &[
+    "stl", "off", "obj", "3mf", "wrl", "pov", "svg", "dxf", "pdf", "png", "echo", "ast", "csg",
+];
+
+/// Create an output's directory (inside the roots: `writable` resolved
+/// it), so "write it to out/x.stl" just works.
+fn make_dir(p: &Path) -> Result<(), String> {
+    match p.parent() {
+        Some(dir) => std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create '{}': {e}", dir.display())),
+        None => Ok(()),
+    }
+}
+
+/// Refuse arguments of the wrong JSON type, and arguments the tool does
+/// not take, naming the argument and what it should be. A wrong type was
+/// silently treated as absent (`"parts": "true"` gave "no part 'a'" with
+/// no reason), which is the least actionable answer an agent can get.
+fn check_args(name: &str, args: &Value) -> Result<(), String> {
+    let tools = list();
+    let Some(tool) = tools.iter().find(|t| t["name"] == name) else {
+        return Ok(());
+    };
+    let props = &tool["inputSchema"]["properties"];
+    let obj = match args {
+        Value::Null => return Ok(()),
+        Value::Object(o) => o,
+        _ => return Err(format!("the arguments of {name} must be an object")),
+    };
+    let kind = |v: &Value| match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    };
+    let fits = |ty: &str, v: &Value| match ty {
+        "string" => v.is_string(),
+        "boolean" => v.is_boolean(),
+        "number" => v.is_number(),
+        "array" => v.is_array(),
+        _ => true,
+    };
+    let a = |ty: &str| match ty {
+        "array" | "object" => format!("an {ty}"),
+        t => format!("a {t}"),
+    };
+    for (k, v) in obj {
+        let Some(schema) = props.get(k) else {
+            let known: Vec<&str> = props
+                .as_object()
+                .map(|o| o.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            return Err(format!(
+                "{name} has no argument `{k}`; it takes {}",
+                known.join(", ")
+            ));
+        };
+        if v.is_null() {
+            continue;
+        }
+        let ty = schema["type"].as_str().unwrap_or("");
+        if !fits(ty, v) {
+            return Err(format!(
+                "argument `{k}` of {name} must be {}, not {} ({v})",
+                a(ty),
+                kind(v)
+            ));
+        }
+        if let (Some(items), Some(item_ty)) = (v.as_array(), schema["items"]["type"].as_str())
+            && let Some(bad) = items.iter().find(|x| !fits(item_ty, x))
+        {
+            return Err(format!(
+                "argument `{k}` of {name} must be an array of {item_ty}s, but has {} ({bad})",
+                kind(bad)
+            ));
+        }
+    }
+    Ok(())
 }
 
 // --- Summaries ---------------------------------------------------------------
@@ -956,6 +1138,11 @@ fn terse_diag(d: &Value, main: &Path) -> Value {
     if let Some(v) = d.get("line") {
         t["line"] = v.clone();
     }
+    // The column says where on the line: an agent iterating on one-line
+    // inline source learns nothing from the line alone.
+    if let Some(c) = d["span"]["start"].get("column") {
+        t["column"] = c.clone();
+    }
     if let Some(h) = d["hints"].get(0).and_then(|h| h.get("message")) {
         t["hint"] = h.clone();
     }
@@ -987,14 +1174,18 @@ fn terse_log(r: &Value, main: &Path) -> Value {
 fn push_log(text: &mut String, r: &Value) {
     let diags = r["diagnostics"].as_array().map_or(&[][..], Vec::as_slice);
     for d in diags.iter().take(MAX_LINES) {
+        let col = d["span"]["start"]["column"]
+            .as_u64()
+            .or_else(|| d["column"].as_u64())
+            .map_or(String::new(), |c| format!(":{c}"));
         let at = match (d["file"].as_str(), d["line"].as_u64()) {
             (Some(f), Some(l)) => format!(
-                " {}:{l}",
+                " {}:{l}{col}",
                 Path::new(f)
                     .file_name()
                     .map_or(f.into(), |n| n.to_string_lossy())
             ),
-            (None, Some(l)) => format!(" line {l}"),
+            (None, Some(l)) => format!(" line {l}{col}"),
             _ => String::new(),
         };
         text.push_str(&format!(

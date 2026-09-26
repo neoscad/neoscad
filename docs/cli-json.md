@@ -147,6 +147,7 @@ else is the same for the same input.
 
 ```json
 {"diagnostics": DIAG, "geometry": GEOM|null, "input": "model.scad",
+ "lighting": "headlight"|"openscad",
  "mode": "render"|"preview"|"diff", "output": "model-snapshot.png",
  "schema": 1, "size": [1024, 1024], "timings_ms": TIMES,
  "views": ["iso", "front", "top", "right"],
@@ -367,8 +368,9 @@ Codes and how each is found:
 | `not-3d` | error | A 2D model. |
 | `not-closed` | error | A mesh result (a lone polyhedron) with edges on one face only. |
 | `not-manifold` | error | Manifold reports an error or kept the solid as a triangle soup, or edges are shared by more than two faces. |
-| `floating` | error | A connected piece (triangles sharing vertices) whose lowest point is more than `bed_tolerance` above the model's lowest point. `point` is the piece's centre. |
-| `thin-wall` | error below `nozzle`, else warning below `min_wall` | From points on every face (the centroid, or 4 or 16 points on faces larger than (4 × `min_wall`)²) a ray goes inward along the face's normal to where it leaves the solid, ignoring faces that share a corner with the start (so knife edges do not measure zero) and exits through faces more than 45° from parallel (corners and slopes are not walls). Thin faces that share an edge, or face each other across a wall, are one place; places of one part and severity within max(4 × `min_wall`, 5% of the model's diagonal) are one finding ("walls at N places"), located at its thinnest point. |
+| `floating` | error | A connected piece (triangles sharing vertices) whose lowest point is more than `bed_tolerance` above the model's lowest point. `point` is the piece's centre. The message says what is under it, straight down from its lowest points: another piece it rests on (within `bed_tolerance`), another piece N mm below, or nothing. |
+| `thin-wall` | error below `nozzle`, else warning below `min_wall` | From points on every face (the centroid, or 4 or 16 points on faces larger than (4 × `min_wall`)²) a ray goes inward along the face's normal to where it leaves the solid, ignoring faces that share a corner with the start (so knife edges do not measure zero) and exits through faces more than 45° from parallel (corners and slopes are not walls). Thin faces that share an edge, or face each other across a wall, are one place; places of one part and severity within max(4 × `min_wall`, 5% of the model's diagonal) are one finding ("walls at N places"), located at its thinnest point. An exit closer than min(0.01 mm, 1e-4 of the diagonal) behind which the ray leaves through another face facing its way is a contact seam (two pieces that touch keep both surfaces), not a wall: the wall is measured to that second exit, and the seams are one `touching-surfaces` finding. |
+| `touching-surfaces` | info | Surfaces of pieces that touch with no gap (coils of a spring, a lid on its box): they print fused. `value` is 0; the message gives the area. The fix: leave a gap of at least the nozzle if they should be separate, overlap them a little if they should be one. |
 | `overhang` | warning | Faces pointing down more than `max_overhang` from vertical, except faces within `bed_tolerance` of the lowest point, grouped into regions by shared edges; regions under (2 × `nozzle`)² are ignored. `value` is the region's area, the message its steepest angle; `point` is on the region. |
 | `bed-fit` | error, or warning when turning it 90° about z fits | With `--bed`: the bounding box against the bed. |
 | `tiny-feature` | warning | A piece whose largest extent is under two nozzle widths. |
@@ -557,6 +559,51 @@ same shape:
   unknown modules, functions and variables, and a short suggestion for
   syntax errors, missing includes, reassignments, argument mismatches,
   assertions, recursion and iteration limits and undefined operations.
+  A syntax error's hint names the offending token and its column
+  (``unexpected `cube` at line 1, column 11: look just before it for a
+  missing ';' ...``), and says so when the line has HTML-escaped
+  brackets (`&lt;`).
+
+Codes a run's failure itself can have, besides the evaluator's:
+
+- `input-not-found`: the input cannot be read. Its `text` is OpenSCAD's
+  `Can't open input file 'x.scad'!` (the bytes on stderr are unchanged);
+  it was only a plain `log` line before.
+- `output-not-writable`: a served export's output cannot be written
+  (`ERROR: Can't write to ...`).
+- `resource-limit`: the run passed one of the resource limits (below).
+
+## Resource limits
+
+`neoscad serve`, `neoscad mcp` and (later) the app run models that
+agents and editors write, so they limit what one request may use
+(`eval::limits`); the OpenSCAD-compatible command line is unlimited, as
+OpenSCAD is, unless `--limit` is given. A request that would pass a
+limit fails with exit code 1 and one `resource-limit` error, located at
+the call or node that asked when there is one:
+
+```text
+ERROR: Resource limit exceeded: sphere() would make 100,000 fragments, over the fragments limit of 10,000 in file m.scad, line 1
+```
+
+with the hint "lower $fn (or raise $fa/$fs); or raise the limit: start
+`neoscad serve` or `neoscad mcp` with `--limit fragments=N` (`=off`
+removes it)". The limits, and the defaults of `serve` and `mcp`:
+
+| Name | Default | What |
+|---|---|---|
+| `time` | 60 (s) | Wall time, checked at evaluator calls and loop iterations, before every geometry node, and in primitive and extrusion loops. One kernel operation (a boolean) is not interrupted. |
+| `memory` | 4096 (MiB; `4G` also works) | An estimate, not a measurement: the large lists and strings the evaluator holds, every node and message it makes, and the geometry results the render holds, weighted for the kernel's working copies (each counts until its parent has used it; the geometry cache has its own budget). On the benchmark models it runs from about the process's peak RSS to 8 times below it (BOSL2's fractal_tree: 1.96 GB real, under 512 MiB estimated), so the count limits, not this, are what stop a runaway primitive. |
+| `fragments` | 10,000 | Segments of one circle, sphere, cylinder, `rotate_extrude` or round `offset`. |
+| `slices` | 10,000 | Slices of one `linear_extrude`. |
+| `list` | 10,000,000 | Elements of one list (checked as a comprehension grows, and before `concat`). |
+| `string` | 67,108,864 | Bytes of one string (`str`, `chr`). |
+| `rands` | 10,000,000 | Numbers from one `rands()` call. |
+| `triangles` | 10,000,000 | Triangles of one geometry result (2D: vertices), checked before a primitive or extrusion is built and after every node. |
+
+`--limit NAME=VALUE` (repeatable) changes one: seconds for `time`, MiB
+for `memory`, a count otherwise, `off` for none. The one-shot command
+line accepts the same flag; such a run stays in-process.
 
 ## Human-readable diagnostics
 
@@ -591,3 +638,10 @@ have them.
   `issues`.
 - Phase 7b-2: added `neoscad fmt`, `neoscad docs` and `neoscad test`
   (`docs/model-tests.md`).
+- Hardening (H4): added the diagnostic codes `input-not-found`,
+  `output-not-writable` and `resource-limit`, resource limits and
+  `--limit`, the syntax error hint's token and column, and the
+  `check` finding `touching-surfaces`. A missing input is now a
+  diagnostic rather than a `log` line. `neoscad docs --in` names a
+  library's files relative to their library directory
+  (`BOSL2/affine.scad`).

@@ -29,12 +29,19 @@ Library choices were checked in `docs/audits/phase0.md`.
 ### Crates
 
 `lang` (lexer, parser, CST/AST, diagnostics) · `eval` (values, builtins,
-modules → CSG tree) · `geom` (kernels, extrude, hull, minkowski, offset) ·
-`text` (fonts, shaping, outlines) · `io` (import/export; sits below `eval` and `geom`) · `render` (wgpu) · `cli` (the `neoscad`
-binary; accepts OpenSCAD's CLI flags so OpenSCAD's tests can drive it,
-and hosts `neoscad serve`) · `session` (the long-lived core holding
-documents and warm caches; the one API every client uses) · `lsp` ·
-`mcp` · `wasm` (wasm-bindgen package) · `conformance` (test harness).
+modules → CSG tree, resource limits) · `geom` (kernels, extrude, hull,
+minkowski, offset) · `text` (fonts, shaping, outlines) · `io`
+(import/export; sits below `eval` and `geom`) · `render` (wgpu) ·
+`session` (the long-lived core holding documents and warm caches; the
+one API every client uses) · `docs` (builtin reference and doc
+comments) · `fmt` (the formatter) · `assets` (bundled fonts and MCAD) ·
+`cli` (the `neoscad` binary; accepts OpenSCAD's CLI flags so OpenSCAD's
+tests can drive it, and hosts `neoscad serve` and the MCP server,
+`neoscad mcp`, in `crates/cli/src/mcp/`) · `conformance` (test harness)
+· `wasm-check` (a wasm32 build of the pipeline run in node by
+`scripts/wasm-check.sh`). Planned, not yet crates: `lsp` (phase 8e,
+`docs/audits/macos-prep.md`) and a wasm-bindgen package for the web app
+(phase 9).
 
 Rule: no rendering or app logic lives in a UI layer. The renderer is Rust;
 the app core API is the `session` API, which `neoscad serve` exposes as
@@ -111,7 +118,14 @@ JSON-RPC (`docs/serve-protocol.md`).
   Revisit when both land (`docs/audits/macos-prep.md`).
 - **Resource limits:** the app, `serve` and `mcp` enforce per-request time
   and memory limits, configurable. The OpenSCAD-compatible one-shot CLI
-  stays unlimited, as OpenSCAD is.
+  stays unlimited, as OpenSCAD is. Implemented (hardening H4) as
+  `eval::limits`: `session::Config::limits` (and a request's
+  `Run::limits`) set time, estimated memory, and caps on fragments,
+  slices, list and string sizes, `rands()` counts and triangles; `serve`
+  and `mcp` start from `Limits::AGENT` and take `--limit NAME=VALUE`,
+  and the command line takes `--limit` too. Checks are cooperative and
+  come before the big allocations; see `docs/cli-json.md`, "Resource
+  limits".
 - **Panics:** the core runs inside the app's process, so release builds
   unwind (`panic = "unwind"`) and requests catch panics. A bug in one render
   must not take down the app and its unsaved work. This costs 5–8% on

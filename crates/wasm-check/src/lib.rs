@@ -136,6 +136,9 @@ pub fn run_session(files: Arc<MemFs>, src: &[u8]) -> String {
         assets::add_fonts(&mut db);
         db
     });
+    // The web app runs agents' and users' models as the native app does,
+    // under the agent limits (no clock here, so no time limit).
+    cfg.limits = session::Limits::AGENT;
     let s = session::Session::new(cfg);
     let scheme = render::ColorScheme::cornfield();
     let doc = std::path::Path::new("main.scad");

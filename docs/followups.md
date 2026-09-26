@@ -324,9 +324,35 @@ entry when it is done.
   and `--hardwarnings` to the server, which run in-process today. (7a)
 - A served run's render summary reports the server's `Geometries in
   cache` count and times, which differ from a fresh process's. (7a)
-- Cancellation stops the evaluator at the next call or loop iteration
-  and the geometry evaluator before the next node; one long kernel
-  operation (a big boolean, a hull, minkowski) runs to its end. (7a)
+- Cancellation (and the time limit) stops the evaluator at the next
+  call or loop iteration, the geometry evaluator before the next node,
+  and primitives and extrusions at their next ring or slice; one long
+  kernel operation (a big boolean, a hull, minkowski) runs to its end.
+  `neoscad mcp` exits 2 s after the end of input whatever is running.
+  (7a, H4)
+- The memory limit is an estimate kept at the allocation-heavy points
+  (`eval::limits`), not a measurement: the evaluator's large values,
+  nodes and messages, and the geometry results a render holds until
+  their parents use them. A kernel operation's own working memory (a
+  boolean's intermediate meshes), the geometry cache (its own budget),
+  the check's rays and the snapshot's drawing are not counted; the
+  triangle limit bounds their inputs. Geometry results are weighted 6x
+  their cache cost for the kernel's working copies, calibrated on the
+  benchmark models; still, BOSL2's fractal_tree peaks at 1.96 GB real
+  against under 512 MiB estimated (its evaluation alone is 451 MB). A
+  host-side RSS probe (Linux `/proc/self/statm`; macOS needs
+  `task_info`, i.e. `unsafe` or a crate) would make the limit real. A
+  process-wide budget for the app's several documents (one
+  memory-pressure hook) is still to do. (H4)
+- When several parallel geometry siblings pass a count limit, the
+  earliest in the source that recorded one is reported; a sibling that
+  stopped (on the others' trip) before its own check never records, so
+  which one is named can vary between runs. One over-limit node is
+  reported the same every time (`crates/session/tests/session.rs`). The
+  time and memory limits depend on timing by nature. (H4)
+- The one-shot command line applies `--limit` to evaluation and mesh
+  and PNG geometry; `neoscad check`, `measure`, `snapshot` and `test`
+  have no `--limit` (they are unlimited, as the command line is). (H4)
 - The release profile unwinds so the server can answer a panicking
   request with -32603 and carry on (7b-1). That costs the one-shot
   command line 5-8% on evaluation-bound BOSL2 models (fractal_tree
@@ -435,18 +461,20 @@ entry when it is done.
 - Inline `source` is one document per `base_dir` (`inline.scad`), so
   inline calls take turns rather than running in parallel, and while
   one runs it shadows a real `inline.scad` in that directory. (7c)
-- `neoscad serve`'s `export` result says nothing when the output
-  cannot be written (exit code 1, no diagnostic: the message is a plain
-  log line). `neoscad mcp` creates the output's directory, which avoids
-  the common case. (7c)
+- `notifications/cancelled` does not reach an MCP `snapshot` call: the
+  tool calls the session directly, not through the server's request
+  table that `$/cancelRequest` looks up. The end of input still stops
+  it (`Session::cancel_all`). (H4)
+- `neoscad serve --socket PATH` in a shared directory binds and then
+  makes the socket 0600, a short window harmless under the default
+  umask 022 (connecting needs write permission); binding under a
+  tightened umask needs nix's `fs` feature. (H4)
 - The snapshot sheet's header line runs under the legend at the MCP
   default size (768 px) when `issues` adds check counts. (7c)
-- Tool-description token counts are estimates from byte counts (5,404
-  bytes of name, description and schema); no tokenizer was run. (7c)
-- In the pilot an agent sent inline source with HTML-escaped brackets
-  (`use &lt;model.scad&gt;`) twice and got a bare "syntax error"; a
-  syntax-error hint for `&lt;`/`&gt;`/`&amp;` in the source
-  (`session::diag`) would name the cause. (7c)
+- Tool-description token counts are estimates from byte counts (6,069
+  bytes of compact JSON as a client receives the list, 5,498 as the
+  test measures it); no tokenizer was run. The test's 5,500-byte guard
+  has 2 bytes to spare. (7c, H4)
 - The pilot is n = 1 per cell (`docs/agent-eval.md`); a real comparison
   needs several runs per task and condition, more tasks, and a second
   model. (7c)

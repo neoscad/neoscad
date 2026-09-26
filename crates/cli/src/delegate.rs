@@ -168,6 +168,11 @@ fn run_of(params: &Value, input: &str, cwd: &Path) -> session::Run {
     run.rng_seed = params.get("seed").and_then(Value::as_u64).map(|n| n as u32);
     run.supersede = false;
     run.parts = b("parts");
+    // Unlimited, as the command line is, unless the request says (the
+    // server sets `limits` on every `cli.*` request; `crate::limits`).
+    run.limits = crate::limits::of_params(params, session::Limits::NONE)
+        .ok()
+        .flatten();
     run
 }
 

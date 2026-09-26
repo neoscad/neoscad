@@ -333,19 +333,37 @@ pub fn analyze(
     let mut floating = 0;
     let mut floating_comps = Vec::new();
     let tiny = 2.0 * s.nozzle;
+    let lifted: Vec<u32> = (0..ncomp as u32)
+        .filter(|&c| comp_box[c as usize].lo[2] - bed_z > s.bed_tolerance)
+        .collect();
+    let under = gaps_below(&mesh, &comp_of, &comp_box, &lifted, s.bed_tolerance);
     for c in 0..ncomp {
         let b = comp_box[c];
         let lift = b.lo[2] - bed_z;
         if lift > s.bed_tolerance {
             floating += 1;
             floating_comps.push(c as u32);
-            out.push(Finding {
-                level: Level::Error,
-                code: "floating",
-                message: format!(
+            // What is under the piece: "nothing under it" was said of a
+            // lid resting on its box too (the agent-eval pilot).
+            let message = match under.get(&(c as u32)).copied().flatten() {
+                Some(g) if g <= s.bed_tolerance => format!(
+                    "a separate piece starts {} mm above the bed, resting on another piece (touching it, not joined to it)",
+                    mm(lift)
+                ),
+                Some(g) => format!(
+                    "a separate piece starts {} mm above the bed, {} mm above the piece under it",
+                    mm(lift),
+                    mm(g)
+                ),
+                None => format!(
                     "a piece starts {} mm above the bed with nothing under it",
                     mm(lift)
                 ),
+            };
+            out.push(Finding {
+                level: Level::Error,
+                code: "floating",
+                message,
                 // The piece's centre (its bottom face is where the
                 // overhang finding for it points).
                 point: b.center(),
@@ -547,6 +565,55 @@ pub fn analyze(
     a
 }
 
+/// How far below each piece's lowest points the nearest other piece is,
+/// straight down (`None`: nothing under them), for the pieces in `which`.
+/// Casts from up to 64 of each piece's vertices within `tol` of its
+/// bottom, found in one pass over the triangles.
+fn gaps_below(
+    mesh: &Mesh,
+    comp_of: &[u32],
+    comp_box: &[Aabb],
+    which: &[u32],
+    tol: f64,
+) -> HashMap<u32, Option<f64>> {
+    const PER_PIECE: usize = 64;
+    let mut out = HashMap::new();
+    if which.is_empty() || comp_box.len() < 2 {
+        return out;
+    }
+    let mut feet: HashMap<u32, Vec<V3>> = which.iter().map(|&c| (c, Vec::new())).collect();
+    for (t, tri) in mesh.tris.iter().enumerate() {
+        let c = comp_of[t];
+        let Some(f) = feet.get_mut(&c) else { continue };
+        if f.len() >= PER_PIECE {
+            continue;
+        }
+        let z = comp_box[c as usize].lo[2];
+        for &v in tri {
+            let p = mesh.verts[v as usize];
+            if p[2] <= z + tol && f.len() < PER_PIECE {
+                f.push(p);
+            }
+        }
+    }
+    let bvh = Bvh::new(mesh);
+    let down = [0.0, 0.0, -1.0];
+    for (&c, f) in &feet {
+        let mut best: Option<f64> = None;
+        for p in f {
+            let o = [p[0], p[1], p[2] + 1e-9];
+            if let Some((h, _)) = bvh.ray(mesh, o, down, -1e-6, f64::INFINITY, |x| {
+                comp_of[x as usize] == c
+            }) {
+                let g = (h - 1e-9).max(0.0);
+                best = Some(best.map_or(g, |b: f64| b.min(g)));
+            }
+        }
+        out.insert(c, best);
+    }
+    out
+}
+
 /// Points on triangle `t` to measure from: the centroid, or the centroids
 /// of a 4- or 16-way midpoint subdivision on larger faces, so a thin spot
 /// in the middle of a big face is not missed.
@@ -599,6 +666,11 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
     // Sample spacing: fine enough to catch a wall a few widths across.
     let cell = (4.0 * s.min_wall).max(diag / 200.0);
     let tmin = diag * 1e-9;
+    // Closer than this, an exit is checked for a contact seam: Manifold
+    // keeps touching surfaces within its tolerance (0.0002 mm on the
+    // spring_handle example), and no printable wall is this thin.
+    let seam_eps = (diag * 1e-4).min(0.01);
+    let mut seams: Vec<(V3, u32)> = Vec::new();
     let mut thin: Vec<Thin> = Vec::new();
     let mut thinnest: Option<(f64, V3, u32)> = None;
     for t in (0..n).step_by(stride) {
@@ -624,6 +696,27 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
             // says nothing.
             if dot(mesh.normal(hit as usize), d) < WALL_COS {
                 continue;
+            }
+            let (mut h, mut hit) = (h, hit);
+            if h < seam_eps {
+                // An exit this close is usually not the far side of a
+                // wall but a contact seam: two pieces that touch (coils
+                // of a spring, a lid on a box) keep both their surfaces,
+                // and the ray leaves the neighbour's copy at once. Look
+                // past it: if the ray next leaves through another face
+                // facing its way, the material goes on and the wall is
+                // that far; the seam itself is not a wall (it measured
+                // "0 mm" with the fix "thicken it", which an agent would
+                // obey). Nothing further, or an entering face, and it is
+                // a thin sliver after all.
+                let first = hit;
+                if let Some((h2, hit2)) = bvh.ray(mesh, p, d, h + tmin.max(1e-9), 2.0 * diag, |x| {
+                    near(x) || x == first
+                }) && dot(mesh.normal(hit2 as usize), d) >= WALL_COS
+                {
+                    seams.push((add(p, scale(d, h / 2.0)), t as u32));
+                    (h, hit) = (h2, hit2);
+                }
             }
             let mid = add(p, scale(d, h / 2.0));
             if thinnest.is_none_or(|(x, _, _)| h < x) {
@@ -739,7 +832,7 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
             None => merged.push((c, 1)),
         }
     }
-    let findings = merged
+    let mut findings: Vec<Finding> = merged
         .iter()
         .map(|(c, places)| {
             let x = &thin[c.first];
@@ -776,6 +869,32 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
             }
         })
         .collect();
+    if let Some(&(point, _)) = seams.first() {
+        let mut b = Aabb::EMPTY;
+        let mut faces: Vec<u32> = seams.iter().map(|&(_, t)| t).collect();
+        faces.sort_unstable();
+        faces.dedup();
+        for &t in &faces {
+            b = b.union(&mesh.tri_box(t as usize));
+        }
+        findings.push(Finding {
+            level: Level::Info,
+            code: "touching-surfaces",
+            message: format!(
+                "surfaces touch with no gap ({} mm² of faces): pieces that meet here keep both their surfaces; this is a contact, not a thin wall",
+                mm(faces.iter().map(|&t| mesh.area(t as usize)).sum())
+            ),
+            point,
+            bbox: b,
+            part: None,
+            fix: format!(
+                "they print fused together: if they should be separate, leave a gap of at least the {} mm nozzle; if they should be one piece, overlap them a little so they union into one solid",
+                mm(s.nozzle)
+            ),
+            value: Some(0.0),
+            limit: None,
+        });
+    }
     let min = thinnest.map(|(d, p, t)| (d, p, mesh.part_name(t as usize).map(|n| n.to_string())));
     (findings, tris, min)
 }

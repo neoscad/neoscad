@@ -10,13 +10,30 @@ use crate::fragments::circular_segments;
 use crate::polygon2d::{Outline, Polygon2d};
 use crate::polyset::PolySet;
 
+/// A cooperative stop check for long loops: true when the request was
+/// cancelled or passed a limit (`RenderOptions::interrupt`, `guard`).
+pub type Stop<'a> = &'a (dyn Fn() -> bool + Sync);
+
+/// Never stops: the one-shot command line's primitives.
+pub fn never() -> bool {
+    false
+}
+
+/// Points between stop checks in a circle: a fraction of a millisecond.
+const CHECK_EVERY: i32 = 1 << 16;
+
 /// `generate_circle` (`primitives.cc:58-65`): `fragments` points at height
-/// `z`, starting on +x and going counter-clockwise.
-fn circle(out: &mut Vec<[f64; 3]>, r: f64, z: f64, fragments: i32) {
+/// `z`, starting on +x and going counter-clockwise. `None` when `stop`
+/// said so part way.
+fn circle(out: &mut Vec<[f64; 3]>, r: f64, z: f64, fragments: i32, stop: Stop<'_>) -> Option<()> {
     for i in 0..fragments {
+        if i % CHECK_EVERY == CHECK_EVERY - 1 && stop() {
+            return None;
+        }
         let phi = (360.0 * f64::from(i)) / f64::from(fragments);
         out.push([r * cos_degrees(phi), r * sin_degrees(phi), z]);
     }
+    Some(())
 }
 
 fn empty3() -> PolySet {
@@ -65,21 +82,39 @@ pub fn cube(size: [f64; 3], center: bool) -> PolySet {
 /// rings of `n` points, each ring at the middle of its latitude band (so
 /// there are no poles), capped by one `n`-gon at each end.
 pub fn sphere(r: f64, disc: &Discretizer) -> PolySet {
+    sphere_with(r, disc, &never).unwrap_or_else(empty3)
+}
+
+/// [`sphere`], checking `stop` once per ring (a sphere at a huge `$fn` is
+/// the longest loop a primitive has). `None` when it stopped.
+pub fn sphere_with(r: f64, disc: &Discretizer, stop: Stop<'_>) -> Option<PolySet> {
     if r <= 0.0 || !r.is_finite() {
-        return empty3();
+        return Some(empty3());
     }
     let n = circular_segments(disc, r).unwrap_or(3);
     let rings = (n + 1) / 2;
     let mut vertices = Vec::with_capacity((rings * n) as usize);
     for i in 0..rings {
+        if stop() {
+            return None;
+        }
         let phi = (180.0 * (f64::from(i) + 0.5)) / f64::from(rings);
-        circle(&mut vertices, r * sin_degrees(phi), r * cos_degrees(phi), n);
+        circle(
+            &mut vertices,
+            r * sin_degrees(phi),
+            r * cos_degrees(phi),
+            n,
+            stop,
+        )?;
     }
     let n = n as u32;
     let rings = rings as u32;
     let mut faces = Vec::with_capacity((rings * n + 2) as usize);
     faces.push((0..n).collect());
     for i in 0..rings - 1 {
+        if stop() {
+            return None;
+        }
         for j in 0..n {
             faces.push(vec![
                 i * n + (j + 1) % n,
@@ -90,17 +125,29 @@ pub fn sphere(r: f64, disc: &Discretizer) -> PolySet {
         }
     }
     faces.push((0..n).map(|i| rings * n - i - 1).collect());
-    PolySet {
+    Some(PolySet {
         vertices,
         faces,
         convex: Some(true),
         ..Default::default()
-    }
+    })
 }
 
 /// `CylinderNode::createGeometry` (`primitives.cc:251-308`), including
 /// cones (`r2 == 0`, one apex vertex) and inverted cones (`r1 == 0`).
 pub fn cylinder(h: f64, r1: f64, r2: f64, center: bool, disc: &Discretizer) -> PolySet {
+    cylinder_with(h, r1, r2, center, disc, &never).unwrap_or_else(empty3)
+}
+
+/// [`cylinder`], checking `stop` as it goes; `None` when it stopped.
+pub fn cylinder_with(
+    h: f64,
+    r1: f64,
+    r2: f64,
+    center: bool,
+    disc: &Discretizer,
+    stop: Stop<'_>,
+) -> Option<PolySet> {
     if h <= 0.0
         || !h.is_finite()
         || r1 < 0.0
@@ -109,7 +156,7 @@ pub fn cylinder(h: f64, r1: f64, r2: f64, center: bool, disc: &Discretizer) -> P
         || !r2.is_finite()
         || (r1 <= 0.0 && r2 <= 0.0)
     {
-        return empty3();
+        return Some(empty3());
     }
     // `std::fmax`: the larger radius sets the fragment count.
     let n = circular_segments(disc, r1.max(r2)).unwrap_or(3);
@@ -124,16 +171,19 @@ pub fn cylinder(h: f64, r1: f64, r2: f64, center: bool, disc: &Discretizer) -> P
     if inverted {
         vertices.push([0.0, 0.0, z1]);
     } else {
-        circle(&mut vertices, r1, z1, n);
+        circle(&mut vertices, r1, z1, n, stop)?;
     }
     if cone {
         vertices.push([0.0, 0.0, z2]);
     } else {
-        circle(&mut vertices, r2, z2, n);
+        circle(&mut vertices, r2, z2, n, stop)?;
     }
     let n = n as u32;
     let mut faces = Vec::new();
     for i in 0..n {
+        if i % CHECK_EVERY as u32 == CHECK_EVERY as u32 - 1 && stop() {
+            return None;
+        }
         let j = (i + 1) % n;
         if cone {
             faces.push(vec![i, j, n]);
@@ -150,12 +200,12 @@ pub fn cylinder(h: f64, r1: f64, r2: f64, center: bool, disc: &Discretizer) -> P
         let offset = if inverted { 1 } else { n };
         faces.push((0..n).map(|i| offset + i).collect());
     }
-    PolySet {
+    Some(PolySet {
         vertices,
         faces,
         convex: Some(true),
         ..Default::default()
-    }
+    })
 }
 
 /// `PolyhedronNode::createGeometry` (`primitives.cc:399-414`): the points
@@ -195,17 +245,24 @@ pub fn square(size: [f64; 2], center: bool) -> Polygon2d {
 
 /// `CircleNode::createGeometry` (`primitives.cc:550-564`).
 pub fn circle2d(r: f64, disc: &Discretizer) -> Polygon2d {
+    circle2d_with(r, disc, &never).unwrap_or_default()
+}
+
+/// [`circle2d`], checking `stop` as it goes; `None` when it stopped.
+pub fn circle2d_with(r: f64, disc: &Discretizer, stop: Stop<'_>) -> Option<Polygon2d> {
     if r <= 0.0 || !r.is_finite() {
-        return Polygon2d::default();
+        return Some(Polygon2d::default());
     }
     let n = circular_segments(disc, r).unwrap_or(3);
-    let pts = (0..n)
-        .map(|i| {
-            let phi = (360.0 * f64::from(i)) / f64::from(n);
-            [r * cos_degrees(phi), r * sin_degrees(phi)]
-        })
-        .collect();
-    Polygon2d::from_outline(pts)
+    let mut pts = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        if i % CHECK_EVERY == CHECK_EVERY - 1 && stop() {
+            return None;
+        }
+        let phi = (360.0 * f64::from(i)) / f64::from(n);
+        pts.push([r * cos_degrees(phi), r * sin_degrees(phi)]);
+    }
+    Some(Polygon2d::from_outline(pts))
 }
 
 /// `PolygonNode::createGeometry` (`primitives.cc:626-653`): without paths
@@ -233,6 +290,28 @@ pub fn polygon(points: &[[f64; 2]], paths: &[Vec<usize>]) -> Polygon2d {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_loops_stop_when_asked() {
+        // A request cancelled (or out of time) mid-primitive stops within
+        // a ring, not at the end of a 43 GB sphere.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = AtomicU32::new(0);
+        let stop = || calls.fetch_add(1, Ordering::Relaxed) >= 3;
+        let disc = Discretizer {
+            fn_: 1000.0,
+            fa: 12.0,
+            fs: 2.0,
+        };
+        assert!(sphere_with(10.0, &disc, &stop).is_none());
+        assert!(calls.load(Ordering::Relaxed) < 10);
+        assert!(sphere_with(10.0, &disc, &never).is_some());
+        let big = Discretizer { fn_: 1e6, ..disc };
+        calls.store(0, Ordering::Relaxed);
+        assert!(circle2d_with(1.0, &big, &stop).is_none());
+        calls.store(0, Ordering::Relaxed);
+        assert!(cylinder_with(1.0, 1.0, 1.0, false, &big, &stop).is_none());
+    }
 
     fn d(fn_: f64) -> Discretizer {
         Discretizer {

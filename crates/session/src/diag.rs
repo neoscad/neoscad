@@ -296,6 +296,12 @@ fn hint(d: &Logged, names: &Names) -> Option<String> {
         DiagCode::AssertionFailed => "the assert's condition is false for these arguments",
         DiagCode::RecursionLimit => "add or fix the recursion's base case",
         DiagCode::IterationLimit => "reduce the range or its step",
+        DiagCode::InputNotFound => {
+            "check the file name: a relative path is relative to the working directory (MCP: `base_dir`, or the server's directory)"
+        }
+        DiagCode::OutputNotWritable => {
+            "check that the output's directory exists and is writable, and that the name is not a directory"
+        }
         DiagCode::UndefinedOperation => {
             "an operand is undef or of the wrong type; check the values reaching this expression"
         }

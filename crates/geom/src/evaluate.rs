@@ -130,6 +130,14 @@ pub struct RenderOptions {
     /// cached, so a long-lived host that cancels a stale render keeps what
     /// it already paid for. A single kernel operation is not interrupted.
     pub interrupt: Option<Arc<AtomicBool>>,
+    /// The request's resource limits (`eval::limits`); `None` is
+    /// unlimited, as OpenSCAD is. Primitives and extrusions are checked
+    /// against the fragment, slice and triangle limits before they are
+    /// built, every result against the triangle and memory limits after,
+    /// and the time limit before every node and inside long loops. A limit
+    /// passed stops the render as [`RenderOptions::interrupt`] does, with
+    /// the limit recorded on the guard.
+    pub guard: Option<Arc<eval::limits::Guard>>,
     /// What a node answered from the cache prints. `None` is OpenSCAD's
     /// rule: nothing, as its geometry cache answers silently. That is what
     /// the command line wants: `--animate` frames share one cache, and the
@@ -156,6 +164,7 @@ impl Default for RenderOptions {
             work_dir: PathBuf::new(),
             fonts: Arc::new(text::FontDb::new()),
             interrupt: None,
+            guard: None,
             replay: None,
         }
     }
@@ -453,6 +462,28 @@ struct Ctx<'a> {
     blocks: HashMap<(Key, u32), (u32, u32)>,
     /// Blocks that ran out during this render.
     overflow: Overflow,
+    /// With resource limits: the bytes each computed node's result was
+    /// charged to the guard's memory estimate (by node index), until its
+    /// parent has used it.
+    charged: Mutex<HashMap<usize, u64>>,
+}
+
+/// A result's weight in the memory limit's estimate, as a multiple of
+/// its [`cost_of`] (the geometry cache's measure of what it holds): the
+/// kernel's working copies (a mesh converted to a solid, a boolean's
+/// operands and intermediate results, Manifold's collider and relations)
+/// are not results but take memory while a node computes. Calibrated on
+/// five benchmark models, whose peak RSS ran 4 to 10 times the
+/// unweighted estimate (BOSL2's fractal_tree: 1.96 GB against under 256
+/// MiB); weighted, the estimate is within about 1x to 4x of the peak.
+const KERNEL_FACTOR: u64 = 6;
+
+/// A node as a limit message names it: `sphere()`, `linear_extrude()`.
+fn node_what(n: &Node) -> String {
+    match &n.origin {
+        Some(o) if !o.name.is_empty() => format!("{}()", o.name),
+        _ => "the model".into(),
+    }
 }
 
 fn loc_of(n: &Node) -> Option<MsgLoc> {
@@ -746,6 +777,7 @@ impl Renderer {
             pattern: vec![0; len],
             blocks: HashMap::new(),
             overflow: Mutex::new(HashMap::new()),
+            charged: Mutex::new(HashMap::new()),
         };
         {
             let mut seen = HashSet::new();
@@ -822,6 +854,92 @@ impl Renderer {
 }
 
 impl Ctx<'_> {
+    /// Whether the render should stop: cancelled, a limit passed, or out
+    /// of time. Cheap enough for every node and every ring of a sphere.
+    fn stopped(&self) -> bool {
+        self.opts
+            .interrupt
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+            || self.opts.guard.as_ref().is_some_and(|g| g.stopped())
+    }
+
+    /// Limit `l` against what node `n` (`what`) is about to build; a limit
+    /// passed is recorded, located at the node, and stops the render.
+    fn limit(
+        &self,
+        n: &Node,
+        l: eval::limits::Limit,
+        asked: f64,
+        what: &str,
+    ) -> Result<(), Unsupported> {
+        let Some(g) = &self.opts.guard else {
+            return Ok(());
+        };
+        match g.exceeds(l, asked, what) {
+            None => Ok(()),
+            Some(e) => Err(self.trip(n, g, e)),
+        }
+    }
+
+    fn trip(
+        &self,
+        n: &Node,
+        g: &eval::limits::Guard,
+        mut e: eval::limits::Exceeded,
+    ) -> Unsupported {
+        e.at = n.origin.as_ref().map(|o| eval::limits::At {
+            unit: o.unit,
+            span: o.span,
+            line: o.line,
+        });
+        g.trip(e);
+        Unsupported {
+            what: INTERRUPTED,
+            loc: loc_of(n),
+        }
+    }
+
+    /// A computed result against the triangle limit and the request's
+    /// geometry memory. The memory estimate is what is alive: results
+    /// computed and not yet used by their parent. Once a node is computed
+    /// its children's results are its parent's input no longer (the
+    /// cache, with its own budget, may still hold them), so they leave
+    /// the estimate; counting every result ever made refused BOSL2's
+    /// fractal_tree (1.96 GB peak) at 4 GiB.
+    fn check_result(
+        &self,
+        n: &Node,
+        g: &eval::limits::Guard,
+        geom: Option<&Geometry>,
+    ) -> Result<(), Unsupported> {
+        let what = node_what(n);
+        let mut bytes = 0;
+        if let Some(geom) = geom {
+            let tris = match geom {
+                Geometry::PolySet(p) => p.faces.iter().map(|f| f.len().saturating_sub(2)).sum(),
+                Geometry::Manifold(m) => m.manifold.num_tri(),
+                Geometry::Polygon2d(p) => p.outlines.iter().map(|o| o.vertices.len()).sum(),
+            };
+            self.limit(n, eval::limits::Limit::Triangles, tris as f64, &what)?;
+            bytes = KERNEL_FACTOR * cost_of(geom) as u64;
+        }
+        let charged = g.charge_geometry(bytes, &what);
+        let freed: u64 = {
+            let mut c = self
+                .charged
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            c.insert(n.index, bytes);
+            n.children.iter().filter_map(|ch| c.remove(&ch.index)).sum()
+        };
+        g.credit_geometry(freed);
+        if let Err(e) = charged {
+            return Err(self.trip(n, g, e));
+        }
+        Ok(())
+    }
+
     fn block(&self, n: &Node, slot: u32) -> Block<'_> {
         let key = (self.hashes[n.index], slot);
         let (first, size) = self.blocks[&key];
@@ -867,16 +985,14 @@ impl Ctx<'_> {
             // The messages a fresh render would print here are not known:
             // compute the node again, from its children's cached results.
         }
-        if self
-            .opts
-            .interrupt
-            .as_ref()
-            .is_some_and(|f| f.load(Ordering::Relaxed))
-        {
+        if self.stopped() {
             return Err(Unsupported::interrupted());
         }
         self.r.misses.fetch_add(1, Ordering::Relaxed);
         let mut out = self.compute(n)?;
+        if let Some(g) = &self.opts.guard {
+            self.check_result(n, g, out.geom.as_ref())?;
+        }
         let msgs = if first {
             Some(Arc::new(out.msgs.clone()))
         } else {
@@ -922,12 +1038,33 @@ impl Ctx<'_> {
                 msgs: Vec::new(),
             })
         };
+        use eval::limits::Limit;
+        let stop = || self.stopped();
+        let stopped = || Unsupported {
+            what: INTERRUPTED,
+            loc: loc_of(n),
+        };
+        // Fragments of a circle of radius `r`, checked against the
+        // fragment limit, and `tris` of them against the triangle limit,
+        // before anything is allocated.
+        let fragments =
+            |disc: &eval::node::Discretizer, r: f64, tris: &dyn Fn(f64) -> f64, what: &str| {
+                if self.opts.guard.is_none() || !(r > 0.0 && r.is_finite()) {
+                    return Ok(());
+                }
+                let f = f64::from(fragments::circular_segments(disc, r).unwrap_or(3));
+                self.limit(n, Limit::Fragments, f, what)?;
+                self.limit(n, Limit::Triangles, tris(f), what)
+            };
         match &n.kind {
             NodeKind::Cube { size, center } => leaf(Geometry::PolySet(Arc::new(primitives::cube(
                 *size, *center,
             )))),
             NodeKind::Sphere { r, disc } => {
-                leaf(Geometry::PolySet(Arc::new(primitives::sphere(*r, disc))))
+                // (f + 1) / 2 rings of f quads.
+                fragments(disc, *r, &|f| f * (f + 1.0), "sphere()")?;
+                let s = primitives::sphere_with(*r, disc, &stop).ok_or_else(stopped)?;
+                leaf(Geometry::PolySet(Arc::new(s)))
             }
             NodeKind::Cylinder {
                 h,
@@ -935,14 +1072,21 @@ impl Ctx<'_> {
                 r2,
                 center,
                 disc,
-            } => leaf(Geometry::PolySet(Arc::new(primitives::cylinder(
-                *h, *r1, *r2, *center, disc,
-            )))),
+            } => {
+                fragments(disc, r1.max(*r2), &|f| 4.0 * f, "cylinder()")?;
+                let c = primitives::cylinder_with(*h, *r1, *r2, *center, disc, &stop)
+                    .ok_or_else(stopped)?;
+                leaf(Geometry::PolySet(Arc::new(c)))
+            }
             NodeKind::Polyhedron { points, faces, .. } => leaf(Geometry::PolySet(Arc::new(
                 primitives::polyhedron(points, faces),
             ))),
             NodeKind::Square { size, center } => leaf(leaf_2d(primitives::square(*size, *center))),
-            NodeKind::Circle { r, disc } => leaf(leaf_2d(primitives::circle2d(*r, disc))),
+            NodeKind::Circle { r, disc } => {
+                fragments(disc, *r, &|f| f, "circle()")?;
+                let c = primitives::circle2d_with(*r, disc, &stop).ok_or_else(stopped)?;
+                leaf(leaf_2d(c))
+            }
             NodeKind::Polygon { points, paths, .. } => {
                 leaf(leaf_2d(primitives::polygon(points, paths)))
             }
@@ -976,6 +1120,9 @@ impl Ctx<'_> {
                 delta, join, disc, ..
             } => {
                 let (poly, msgs) = self.children_2d_union(n)?;
+                if *join == OffsetJoin::Round && poly.is_some() {
+                    fragments(disc, delta.abs(), &|f| f, "offset()")?;
+                }
                 let geom = poly.map(|p| {
                     // "The formula for the number of steps in a full circular
                     // arc is ... Pi / acos(1 - arc_tolerance / abs(delta))"
@@ -1003,15 +1150,52 @@ impl Ctx<'_> {
             }
             NodeKind::LinearExtrude(e) => {
                 let (poly, msgs) = self.children_2d_union(n)?;
-                let geom =
-                    poly.map(|p| Geometry::PolySet(Arc::new(extrude::linear_extrude(e, &p))));
+                let geom = match poly {
+                    Some(p) => {
+                        if self.opts.guard.is_some() && e.height[2] > 0.0 {
+                            let slices = f64::from(extrude::num_slices(e, &p));
+                            let ring: usize = p.outlines.iter().map(|o| o.vertices.len()).sum();
+                            self.limit(n, Limit::Slices, slices, "linear_extrude()")?;
+                            self.limit(
+                                n,
+                                Limit::Triangles,
+                                2.0 * slices * ring as f64,
+                                "linear_extrude()",
+                            )?;
+                        }
+                        let ps = extrude::linear_extrude_with(e, &p, &stop).ok_or_else(stopped)?;
+                        Some(Geometry::PolySet(Arc::new(ps)))
+                    }
+                    None => None,
+                };
                 Ok(Out { geom, msgs })
             }
             NodeKind::RotateExtrude {
                 angle, start, disc, ..
             } => {
                 let (poly, mut msgs) = self.children_2d_union(n)?;
-                let geom = match poly.map(|p| extrude::rotate_extrude(*angle, *start, disc, &p)) {
+                if let Some(p) = &poly
+                    && self.opts.guard.is_some()
+                    && *angle != 0.0
+                {
+                    let f = f64::from(extrude::rotate_sections(*angle, disc, p));
+                    let ring: usize = p.outlines.iter().map(|o| o.vertices.len()).sum();
+                    self.limit(n, Limit::Fragments, f, "rotate_extrude()")?;
+                    self.limit(
+                        n,
+                        Limit::Triangles,
+                        2.0 * f * ring as f64,
+                        "rotate_extrude()",
+                    )?;
+                }
+                let rotated = match poly {
+                    Some(p) => Some(
+                        extrude::rotate_extrude_with(*angle, *start, disc, &p, &stop)
+                            .ok_or_else(stopped)?,
+                    ),
+                    None => None,
+                };
+                let geom = match rotated {
                     Some(Ok(ps)) => ps.map(|ps| Geometry::PolySet(Arc::new(ps))),
                     Some(Err(text)) => {
                         msgs.push(Msg {

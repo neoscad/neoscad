@@ -106,6 +106,13 @@ pub enum DiagCode {
     /// Two `part()`s with the same (dotted) name: neoscad's `part()`
     /// extension, on only with `--enable part`.
     DuplicatePart,
+    /// A request passed one of a host's resource limits (`eval::limits`):
+    /// too many fragments, slices, list elements, time or memory.
+    ResourceLimit,
+    /// The input file cannot be read (OpenSCAD's `Can't open input file`).
+    InputNotFound,
+    /// An output file cannot be written (`Can't write to ...`).
+    OutputNotWritable,
 }
 
 impl DiagCode {
@@ -144,6 +151,9 @@ impl DiagCode {
             DiagCode::Evaluation => "evaluation",
             DiagCode::Geometry => "geometry",
             DiagCode::DuplicatePart => "duplicate-part",
+            DiagCode::ResourceLimit => "resource-limit",
+            DiagCode::InputNotFound => "input-not-found",
+            DiagCode::OutputNotWritable => "output-not-writable",
         }
     }
 }

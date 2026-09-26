@@ -75,6 +75,13 @@ struct Args {
     /// client).
     #[arg(long = "log", value_name = "FILE")]
     log: Option<PathBuf>,
+
+    /// Change a resource limit, NAME=VALUE (repeatable; 'off' for none):
+    /// time (s, default 60), memory (MiB or 4G, default 4G), fragments
+    /// (10000), slices (10000), list (1e7), string (64 MiB), rands (1e7),
+    /// triangles (1e7).
+    #[arg(long = "limit", value_name = "NAME=VALUE", action = clap::ArgAction::Append)]
+    limit: Vec<String>,
 }
 
 /// Run `neoscad mcp` with the arguments after `mcp`.
@@ -113,6 +120,15 @@ pub fn main(args: Vec<OsString>) -> u8 {
     if let Some(mb) = a.cache_mb {
         cfg.geometry_budget = mb << 20;
     }
+    // An agent's generated code is exactly what one runaway `$fn` comes
+    // from: the agent limits are on unless the user changes them.
+    cfg.limits = match crate::limits::from_flags(session::Limits::AGENT, &a.limit) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("neoscad mcp: {e}");
+            return EXIT_ERROR;
+        }
+    };
     let server = Arc::new(Server {
         tools: tools::Tools::new(crate::serve::Local::new(cfg), roots),
         out: Mutex::new(Box::new(std::io::stdout())),
@@ -162,10 +178,15 @@ impl Server {
     }
 }
 
+/// How long the calls still running at the end of input get to notice
+/// their cancellation before the process exits anyway (a single kernel
+/// operation cannot be interrupted).
+const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn serve(server: &Arc<Server>, r: impl BufRead) {
-    let mut running: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    let mut running: Vec<(Value, std::thread::JoinHandle<()>)> = Vec::new();
     for line in r.lines() {
-        running.retain(|h| !h.is_finished());
+        running.retain(|(_, h)| !h.is_finished());
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
@@ -196,22 +217,36 @@ fn serve(server: &Arc<Server>, r: impl BufRead) {
         if method == "tools/call" {
             // Tools run concurrently; the session cancels an older request
             // on the same document when a newer one arrives.
-            let (server, method) = (server.clone(), method.to_string());
-            running.push(std::thread::spawn(move || {
-                let reply = request(&server, &id, &method, &params);
-                respond(&server, &id, reply);
-            }));
+            let (server, method, key) = (server.clone(), method.to_string(), id.clone());
+            running.push((
+                key,
+                std::thread::spawn(move || {
+                    let reply = request(&server, &id, &method, &params);
+                    respond(&server, &id, reply);
+                }),
+            ));
         } else {
             let reply = request(server, &id, method, &params);
             respond(server, &id, reply);
         }
     }
-    // The end of input: answer what is still running before exiting, so
-    // a script that pipes requests in gets every answer. A host closing
-    // the stream to stop the server escalates to a signal if it waits too
-    // long (the stdio binding's "Shutdown").
-    for h in running {
-        let _ = h.join();
+    // The end of input means the client is gone (or is stopping the
+    // server): nobody will read an answer. Cancel what is still running
+    // and exit, rather than computing on as an orphan; a render stuck in
+    // one kernel operation is cut off when the process exits after the
+    // grace period.
+    running.retain(|(_, h)| !h.is_finished());
+    for (id, _) in &running {
+        server
+            .cancelled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.to_string());
+    }
+    server.tools.cancel_all();
+    let deadline = std::time::Instant::now() + EXIT_GRACE;
+    while running.iter().any(|(_, h)| !h.is_finished()) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 

@@ -55,16 +55,19 @@ impl Roots {
     /// May `p` (absolute) be read?
     pub fn can_read(&self, p: &Path) -> bool {
         let r = resolve(p);
-        self.write
-            .iter()
-            .chain(&self.read)
-            .any(|d| r.starts_with(d))
+        !r.as_os_str().is_empty()
+            && self
+                .write
+                .iter()
+                .chain(&self.read)
+                .any(|d| r.starts_with(d))
     }
 
-    /// May `p` (absolute) be written?
+    /// May `p` (absolute) be written? Judged by where it resolves
+    /// ([`resolve`]), dangling links included.
     pub fn can_write(&self, p: &Path) -> bool {
         let r = resolve(p);
-        self.write.iter().any(|d| r.starts_with(d))
+        !r.as_os_str().is_empty() && self.write.iter().any(|d| r.starts_with(d))
     }
 
     /// Why `p` was refused, for the agent: which roots there are and how
@@ -79,29 +82,75 @@ impl Roots {
     }
 }
 
-/// `p` with symlinks resolved as far as it exists and `.`/`..` folded
-/// lexically after that, so neither a symlink inside a root nor `..`
-/// can lead outside it. A path that does not exist yet (an output file)
-/// is judged by its deepest existing ancestor.
-fn resolve(p: &Path) -> PathBuf {
+/// Symlinks followed before a path is judged unresolvable (Linux's
+/// `MAXSYMLINKS`); a loop is refused like a path outside the roots.
+const MAX_LINKS: u32 = 40;
+
+/// Where `p` really leads: `.`/`..` folded lexically (the tools use the
+/// folded path), then every symlink along it followed, the last one
+/// included **even when it dangles**. A path that does not exist yet (an
+/// output file) keeps its missing tail as written.
+///
+/// Following a dangling link matters for writes: `canonicalize` fails on
+/// one, and judging it by its parent (inside the root) let
+/// `out.stl -> ~/Library/LaunchAgents/x.plist` pass while the kernel
+/// followed the link out of the root on write (the agent-surface audit's
+/// finding 2). A link loop resolves to an empty path, which no root
+/// contains.
+pub fn resolve(p: &Path) -> PathBuf {
     let p = session::normal(p);
-    let mut existing = p.as_path();
-    let mut rest: Vec<Component<'_>> = Vec::new();
-    loop {
-        if let Ok(c) = existing.canonicalize() {
-            let mut out = c;
-            for comp in rest.iter().rev() {
-                out.push(comp);
-            }
-            return session::normal(&out);
+    let mut todo: std::collections::VecDeque<std::ffi::OsString> =
+        std::collections::VecDeque::new();
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir => out.push(c.as_os_str()),
+            _ => todo.push_back(c.as_os_str().to_os_string()),
         }
-        let (Some(parent), Some(last)) = (existing.parent(), existing.components().next_back())
-        else {
-            return p;
-        };
-        rest.push(last);
-        existing = parent;
     }
+    let mut hops = 0;
+    while let Some(name) = todo.pop_front() {
+        if name == "." {
+            continue;
+        }
+        if name == ".." {
+            out.pop();
+            continue;
+        }
+        let next = out.join(&name);
+        match std::fs::symlink_metadata(&next) {
+            Ok(m) if m.file_type().is_symlink() => {
+                hops += 1;
+                let Ok(target) = std::fs::read_link(&next) else {
+                    return PathBuf::new();
+                };
+                if hops > MAX_LINKS {
+                    return PathBuf::new();
+                }
+                // The target's components replace the link's; a relative
+                // target is relative to the link's directory (`out`).
+                if target.is_absolute() {
+                    out = PathBuf::new();
+                }
+                for c in target.components().rev() {
+                    match c {
+                        Component::Prefix(_) | Component::RootDir => {}
+                        _ => todo.push_front(c.as_os_str().to_os_string()),
+                    }
+                }
+                if target.is_absolute() {
+                    for c in target.components() {
+                        match c {
+                            Component::Prefix(_) | Component::RootDir => out.push(c.as_os_str()),
+                            _ => break,
+                        }
+                    }
+                }
+            }
+            _ => out = next,
+        }
+    }
+    out
 }
 
 /// A file system that refuses everything outside the roots' readable
@@ -202,6 +251,34 @@ mod tests {
             let fs = RootedFs::new(Arc::new(lang::loader::StdFs), roots.clone());
             assert!(fs.read(&link.join("secret.scad")).is_err());
             assert!(!fs.exists(&link.join("secret.scad")));
+            // A dangling link out of the root: its parent is inside, but a
+            // write would follow it (the audit's repro).
+            let dangling = inside.join("dangling.stl");
+            let _ = std::fs::remove_file(&dangling);
+            std::os::unix::fs::symlink(outside.join("newfile.stl"), &dangling).unwrap();
+            assert!(!roots.can_write(&dangling));
+            assert!(!roots.can_read(&dangling));
+            // A relative dangling link that climbs out, and one through a
+            // link to a directory.
+            let rel = inside.join("rel.png");
+            let _ = std::fs::remove_file(&rel);
+            std::os::unix::fs::symlink("../outside/dangle.png", &rel).unwrap();
+            assert!(!roots.can_write(&rel));
+            // A dangling link that stays inside is fine, and resolves to
+            // its target.
+            let ok = inside.join("ok.stl");
+            let _ = std::fs::remove_file(&ok);
+            std::os::unix::fs::symlink("new/target.stl", &ok).unwrap();
+            assert!(roots.can_write(&ok));
+            assert_eq!(resolve(&ok), inside.join("new/target.stl"));
+            // A loop is refused.
+            let (a, b) = (inside.join("loop-a"), inside.join("loop-b"));
+            let _ = std::fs::remove_file(&a);
+            let _ = std::fs::remove_file(&b);
+            std::os::unix::fs::symlink(&b, &a).unwrap();
+            std::os::unix::fs::symlink(&a, &b).unwrap();
+            assert!(!roots.can_write(&a.join("x.stl")));
+            assert!(!outside.join("newfile.stl").exists());
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }

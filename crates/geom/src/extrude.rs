@@ -144,8 +144,8 @@ fn max_delta_sqr(poly: &Polygon2d, sx: f64, sy: f64) -> f64 {
     m
 }
 
-/// `calc_num_slices`.
-fn num_slices(e: &LinearExtrude, poly: &Polygon2d) -> u32 {
+/// `calc_num_slices`: how many slices `linear_extrude` makes of `poly`.
+pub fn num_slices(e: &LinearExtrude, poly: &Polygon2d) -> u32 {
     if e.has_slices {
         return e.slices;
     }
@@ -478,12 +478,22 @@ fn add_slice_indices(
 /// `extrudePolygon` (`linear_extrude.cc:362-419`), Manifold branch. `poly`
 /// must be sanitized.
 pub fn linear_extrude(e: &LinearExtrude, poly: &Polygon2d) -> PolySet {
+    linear_extrude_with(e, poly, &crate::primitives::never).unwrap_or_default()
+}
+
+/// [`linear_extrude`], checking `stop` once per slice (a hundred million
+/// slices is one mistyped number); `None` when it stopped.
+pub fn linear_extrude_with(
+    e: &LinearExtrude,
+    poly: &Polygon2d,
+    stop: crate::primitives::Stop<'_>,
+) -> Option<PolySet> {
     let empty = PolySet {
         triangular: true,
         ..Default::default()
     };
     if e.height[2] <= 0.0 {
-        return empty;
+        return Some(empty);
     }
     let (sx, sy) = (e.scale[0], e.scale[1]);
     let non_linear = e.twist != 0.0 || sx != sy;
@@ -525,6 +535,9 @@ pub fn linear_extrude(e: &LinearExtrude, poly: &Polygon2d) -> PolySet {
     let full_height = [h2[0] - h1[0], h2[1] - h1[1], h2[2] - h1[2]];
     let n = f64::from(slices);
     for j in 0..=slices {
+        if stop() {
+            return None;
+        }
         let jf = f64::from(j);
         let s = [1.0 - full_scale[0] * jf / n, 1.0 - full_scale[1] * jf / n];
         // `rotate_degrees(full_rot * j / n)`, which is the same matrix as
@@ -542,6 +555,9 @@ pub fn linear_extrude(e: &LinearExtrude, poly: &Polygon2d) -> PolySet {
     }
     let mut faces = Vec::with_capacity((stride * (slices + 1) * 2) as usize);
     for j in 1..=slices {
+        if stop() {
+            return None;
+        }
         let (jb, jt) = (f64::from(j - 1), f64::from(j));
         let rot_bot = e.twist * jb / n;
         let rot_top = e.twist * jt / n;
@@ -562,13 +578,13 @@ pub fn linear_extrude(e: &LinearExtrude, poly: &Polygon2d) -> PolySet {
     for t in &caps.faces {
         faces.push(t.iter().rev().copied().collect());
     }
-    PolySet {
+    Some(PolySet {
         vertices,
         faces,
         convex,
         triangular: true,
         ..Default::default()
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -580,9 +596,11 @@ pub type Rotated = Result<Option<PolySet>, String>;
 
 /// `rotatePolygon` (`rotate_extrude.cc:84-177`).
 pub fn rotate_extrude(angle: f64, start: f64, disc: &Discretizer, poly: &Polygon2d) -> Rotated {
-    if angle == 0.0 {
-        return Ok(None);
-    }
+    rotate_extrude_with(angle, start, disc, poly, &crate::primitives::never).unwrap_or(Ok(None))
+}
+
+/// The x range of `poly`'s vertices, from 0 (`rotatePolygon`).
+fn x_range(poly: &Polygon2d) -> (f64, f64) {
     let (mut min_x, mut max_x) = (0.0f64, 0.0f64);
     for o in &poly.outlines {
         for v in &o.vertices {
@@ -590,13 +608,35 @@ pub fn rotate_extrude(angle: f64, start: f64, disc: &Discretizer, poly: &Polygon
             max_x = max_x.max(v[0]);
         }
     }
-    if max_x > 0.0 && min_x < 0.0 {
-        return Err(format!(
-            "Children of rotate_extrude() may not lie across the Y axis (Range of X coords for all children [{min_x:.2} : {max_x:.2}])"
-        ));
+    (min_x, max_x)
+}
+
+/// How many sections `rotate_extrude` makes of `poly`.
+pub fn rotate_sections(angle: f64, disc: &Discretizer, poly: &Polygon2d) -> i32 {
+    let (min_x, max_x) = x_range(poly);
+    circular_segments_for_angle(disc, max_x - min_x, angle)
+        .unwrap_or_else(|| ((angle.abs() / 360.0 * 3.0) as i32).max(1))
+}
+
+/// [`rotate_extrude`], checking `stop` once per section; `None` when it
+/// stopped.
+pub fn rotate_extrude_with(
+    angle: f64,
+    start: f64,
+    disc: &Discretizer,
+    poly: &Polygon2d,
+    stop: crate::primitives::Stop<'_>,
+) -> Option<Rotated> {
+    if angle == 0.0 {
+        return Some(Ok(None));
     }
-    let sections = circular_segments_for_angle(disc, max_x - min_x, angle)
-        .unwrap_or_else(|| ((angle.abs() / 360.0 * 3.0) as i32).max(1));
+    let (min_x, max_x) = x_range(poly);
+    if max_x > 0.0 && min_x < 0.0 {
+        return Some(Err(format!(
+            "Children of rotate_extrude() may not lie across the Y axis (Range of X coords for all children [{min_x:.2} : {max_x:.2}])"
+        )));
+    }
+    let sections = rotate_sections(angle, disc, poly);
     let closed = angle == 360.0;
     let rings = sections as u32 + u32::from(!closed);
     let flip = (min_x >= 0.0 && angle > 0.0) || (min_x < 0.0 && angle < 0.0);
@@ -604,6 +644,9 @@ pub fn rotate_extrude(angle: f64, start: f64, disc: &Discretizer, poly: &Polygon
     let nv = stride * rings;
     let mut vertices = Vec::with_capacity(nv as usize);
     for j in 0..rings {
+        if stop() {
+            return None;
+        }
         let a = start + f64::from(j) * angle / f64::from(sections);
         let (c, s) = (cos_degrees(a), sin_degrees(a));
         for o in &poly.outlines {
@@ -614,6 +657,9 @@ pub fn rotate_extrude(angle: f64, start: f64, disc: &Discretizer, poly: &Polygon
     }
     let mut faces: Vec<Vec<u32>> = Vec::with_capacity((stride * rings * 2) as usize);
     for slice in 1..=sections as u32 {
+        if stop() {
+            return None;
+        }
         let prev_slice = (slice - 1) * stride;
         let curr_slice = slice * stride;
         let mut curr = 0u32;
@@ -670,18 +716,34 @@ pub fn rotate_extrude(angle: f64, start: f64, disc: &Discretizer, poly: &Polygon
             faces.push(t.iter().map(|&i| i + offset).collect());
         }
     }
-    Ok(Some(PolySet {
+    Some(Ok(Some(PolySet {
         vertices,
         faces,
         convex: Some(false),
         triangular: true,
         ..Default::default()
-    }))
+    })))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extrusions_stop_when_asked() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = AtomicU32::new(0);
+        let stop = || calls.fetch_add(1, Ordering::Relaxed) >= 3;
+        let sq = Polygon2d::from_outline(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        let mut e = ext(10.0);
+        e.slices = 1_000_000;
+        e.has_slices = true;
+        assert!(linear_extrude_with(&e, &sq, &stop).is_none());
+        assert!(calls.load(Ordering::Relaxed) < 10);
+        calls.store(0, Ordering::Relaxed);
+        let ring = Polygon2d::from_outline(vec![[5.0, 0.0], [6.0, 0.0], [6.0, 1.0], [5.0, 1.0]]);
+        assert!(rotate_extrude_with(360.0, 0.0, &disc(1e6), &ring, &stop).is_none());
+    }
 
     fn disc(fn_: f64) -> Discretizer {
         Discretizer {

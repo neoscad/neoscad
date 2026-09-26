@@ -180,9 +180,10 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
         std::fs::read(job.input).map(|t| text = t)
     };
     if read.is_err() {
-        con.print(
-            None,
+        con.print_error_line(
+            lang::diag::DiagCode::InputNotFound,
             format!("Can't open input file '{display}'!\n").as_bytes(),
+            false,
         );
         return Err(EXIT_ERROR);
     }
@@ -621,7 +622,9 @@ fn render_frame<W: Write>(
     con: &mut Console<W>,
 ) -> u8 {
     let ev = evaluate(loaded, paths, options, con);
-    if ev.hard_warning {
+    // `--limit`: the evaluator printed the limit it passed.
+    let exceeded = || options.guard.as_ref().and_then(|g| g.exceeded());
+    if ev.hard_warning || exceeded().is_some() {
         return EXIT_ERROR;
     }
     // `RenderStatistic` starts timing after instantiation, when geometry
@@ -629,8 +632,33 @@ fn render_frame<W: Write>(
     let started = std::time::Instant::now();
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
     let keys = eval::dump::Keys::new(&ev.root, &*loaded.host.fs);
-    let opts = render_options(job, loaded, paths, force);
+    let mut opts = render_options(job, loaded, paths, force);
+    opts.interrupt = options.interrupt.clone();
+    opts.guard = options.guard.clone();
     let unsupported = |u: geom::Unsupported, con: &mut Console<W>| {
+        // A limit the geometry stage passed (only `--limit` runs have
+        // any), reported at the node that passed it.
+        if u.is_interrupted()
+            && let Some(e) = exceeded()
+        {
+            let mut d = lang::diag::Diagnostic::new(
+                lang::diag::DiagCode::ResourceLimit,
+                lang::diag::Severity::Error,
+                e.message(),
+            )
+            .with_hint(e.hint());
+            let mut sources = &loaded.program.sources;
+            if let Some(at) = e.at
+                && let Some(s) = unit_sources(loaded, at.unit)
+            {
+                d = d
+                    .at(at.span, at.line)
+                    .with_base(lang::diag::PathBase::MainFileDir);
+                sources = s;
+            }
+            con.diagnostic(&d, sources, &paths.cwd);
+            return EXIT_ERROR;
+        }
         let mut line = format!("neoscad: {}() is not implemented yet", u.what);
         if let Some(l) = &u.loc
             && let Some(sources) = unit_sources(loaded, l.unit)
@@ -848,6 +876,7 @@ fn render_options(
         // Cache hits are silent, as in OpenSCAD (animation frames share
         // the cache).
         interrupt: None,
+        guard: None,
         replay: None,
     }
 }

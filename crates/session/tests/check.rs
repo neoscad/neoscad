@@ -128,6 +128,98 @@ fn a_floating_island_is_an_error() {
     assert_eq!(v["counts"]["errors"], 1);
 }
 
+/// Two closed boxes as one polyhedron (no boolean merges them) whose
+/// facing sides overlap by `overlap` mm along x: coils of a spring that
+/// fuse within Manifold's tolerance keep both surfaces the same way.
+fn two_boxes(overlap: f64) -> String {
+    let b = |x0: f64, x1: f64| {
+        [
+            [x0, 0.0, 0.0],
+            [x1, 0.0, 0.0],
+            [x1, 10.0, 0.0],
+            [x0, 10.0, 0.0],
+            [x0, 0.0, 10.0],
+            [x1, 0.0, 10.0],
+            [x1, 10.0, 10.0],
+            [x0, 10.0, 10.0],
+        ]
+    };
+    let pts: Vec<String> = b(0.0, 10.0)
+        .iter()
+        .chain(b(10.0 - overlap, 20.0).iter())
+        .map(|p| format!("[{},{},{}]", p[0], p[1], p[2]))
+        .collect();
+    let cube = [
+        [0, 1, 2, 3],
+        [4, 5, 1, 0],
+        [7, 6, 5, 4],
+        [5, 6, 2, 1],
+        [6, 7, 3, 2],
+        [7, 4, 0, 3],
+    ];
+    let faces: Vec<String> = [0, 8]
+        .iter()
+        .flat_map(|o| {
+            cube.iter()
+                .map(move |f| format!("[{}]", f.map(|i| (i + o).to_string()).join(",")))
+        })
+        .collect();
+    format!(
+        "polyhedron(points=[{}], faces=[{}]);",
+        pts.join(","),
+        faces.join(",")
+    )
+}
+
+#[test]
+fn touching_surfaces_are_a_contact_not_a_thin_wall() {
+    // The agent-surface audit's spring_handle: coincident opposing faces
+    // measured as "0 mm" thin-wall errors with the fix "thicken it".
+    let v = check(&two_boxes(0.0002), false, CheckSettings::default());
+    assert!(findings(&v, "thin-wall").is_empty(), "{v}");
+    let t = findings(&v, "touching-surfaces");
+    assert_eq!(t.len(), 1, "{v}");
+    assert_eq!(t[0]["severity"], "info");
+    assert!(t[0]["fix"].as_str().unwrap().contains("gap"), "{v}");
+    // The walls measure what they are: 10 mm through each box.
+    assert!(
+        v["model"]["min_wall"]["thickness"].as_f64().unwrap() > 9.0,
+        "{v}"
+    );
+    assert_eq!(v["counts"]["errors"], 0, "{v}");
+}
+
+#[test]
+fn a_resting_piece_is_not_said_to_have_nothing_under_it() {
+    let lid = |z: f64| {
+        format!(
+            "difference() {{ cube([20,20,10]); translate([2,2,2]) cube([16,16,10]); }}\n\
+             translate([0,0,{z}]) cube([20,20,2]);"
+        )
+    };
+    let resting = check(&lid(10.01), false, CheckSettings::default());
+    let f = findings(&resting, "floating");
+    assert_eq!(f.len(), 1, "{resting}");
+    let m = f[0]["message"].as_str().unwrap();
+    assert!(m.contains("resting on another piece"), "{m}");
+    let above = check(&lid(13.0), false, CheckSettings::default());
+    let m = findings(&above, "floating")[0]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(m.contains("3 mm above the piece under it"), "{m}");
+    let alone = check(
+        "cube(5); translate([20,0,5]) cube(5);",
+        false,
+        CheckSettings::default(),
+    );
+    let m = findings(&alone, "floating")[0]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(m.contains("nothing under it"), "{m}");
+}
+
 #[test]
 fn bed_fit_and_tiny_features() {
     let s = CheckSettings {

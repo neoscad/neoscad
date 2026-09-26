@@ -62,6 +62,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+pub use eval::limits::{Exceeded, Limit, Limits};
 use eval::{Console, Logged};
 use lang::Program;
 use lang::diag::{DiagCode, Diagnostic, Severity};
@@ -111,6 +112,12 @@ pub struct Config {
     /// neoscad's `part()` extension for every request (`--enable part`);
     /// a request can also turn it on alone ([`Run::parts`]).
     pub parts: bool,
+    /// Every request's resource limits ([`eval::limits`]), unless it says
+    /// otherwise ([`Run::limits`]). [`Limits::NONE`] (the default) is
+    /// OpenSCAD's behaviour, for the one-shot command line; a host that
+    /// runs models it did not write (`serve`, `mcp`, the app) sets
+    /// [`Limits::AGENT`] or its own. The time limit needs [`Config::clock`].
+    pub limits: Limits,
 }
 
 impl std::fmt::Debug for Config {
@@ -149,6 +156,7 @@ impl Config {
             #[cfg(feature = "gpu")]
             gpu: None,
             parts: false,
+            limits: Limits::NONE,
         }
     }
 }
@@ -220,6 +228,9 @@ pub struct Run {
     /// `neoscad test` runs each `module test_*()` of a test file as its
     /// own model.
     pub entry: Option<String>,
+    /// This request's resource limits instead of [`Config::limits`] (the
+    /// command line's requests to a server are unlimited, as it is).
+    pub limits: Option<Limits>,
 }
 
 impl std::fmt::Debug for Run {
@@ -254,6 +265,7 @@ impl Run {
             progress: None,
             parts: false,
             entry: None,
+            limits: None,
         }
     }
 }
@@ -487,6 +499,10 @@ struct JobGuard<'a> {
     doc: PathBuf,
     id: u64,
     flag: Arc<AtomicBool>,
+    /// The request's resource limits, when it has any. Tripping one sets
+    /// `flag`, so every stage stops as for a cancellation, and the limit
+    /// is reported instead.
+    limits: Option<Arc<eval::limits::Guard>>,
 }
 
 impl Drop for JobGuard<'_> {
@@ -508,6 +524,11 @@ impl Drop for JobGuard<'_> {
 impl JobGuard<'_> {
     fn stopped(&self) -> bool {
         self.flag.load(Ordering::Relaxed)
+    }
+
+    /// The limit the request passed, if one stopped it.
+    fn exceeded(&self) -> Option<Exceeded> {
+        self.limits.as_ref().and_then(|g| g.exceeded())
     }
 }
 
@@ -705,17 +726,27 @@ impl Session {
     pub fn open(&self, path: &Path, text: Option<Vec<u8>>) -> DocInfo {
         let doc = self.doc_path(path);
         let len = text.as_ref().map(Vec::len);
+        let mut docs = self
+            .docs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Each document counts its own changes, one per change: the
+        // buffer's file-system version is session-wide (requests draw from
+        // the same counter), and reporting it made versions jump (`open`
+        // 1, a good `update` 3), which an LSP-style client reads as missed
+        // edits.
         let version = match text {
-            Some(t) => self.set_buffer(&doc, t.into()),
+            Some(t) => {
+                self.set_buffer(&doc, t.into());
+                docs.get(&doc).copied().unwrap_or(0) + 1
+            }
             None => {
                 self.fs.remove(&doc);
                 0
             }
         };
-        self.docs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(doc.clone(), version);
+        docs.insert(doc.clone(), version);
+        drop(docs);
         self.supersede(&doc);
         DocInfo {
             path: doc,
@@ -814,6 +845,21 @@ impl Session {
         v.len()
     }
 
+    /// Stop every request running on any document (a host whose client
+    /// went away). Returns how many there were.
+    pub fn cancel_all(&self) -> usize {
+        let jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut n = 0;
+        for j in jobs.values().flatten() {
+            j.flag.store(true, Ordering::Relaxed);
+            n += 1;
+        }
+        n
+    }
+
     /// Stop the superseding requests running on `doc` (see
     /// [`Run::supersede`]).
     fn supersede(&self, doc: &Path) {
@@ -828,13 +874,22 @@ impl Session {
         }
     }
 
-    fn begin(&self, doc: &Path, supersede: bool) -> JobGuard<'_> {
+    fn begin(&self, doc: &Path, run: &Run) -> JobGuard<'_> {
         self.requests.fetch_add(1, Ordering::Relaxed);
+        let supersede = run.supersede;
         if supersede {
             self.supersede(doc);
         }
         let id = self.ids.fetch_add(1, Ordering::Relaxed) + 1;
         let flag = Arc::new(AtomicBool::new(false));
+        let limits = run.limits.unwrap_or(self.cfg.limits);
+        let limits = (!limits.is_none()).then(|| {
+            Arc::new(eval::limits::Guard::new(
+                limits,
+                flag.clone(),
+                self.cfg.clock.clone(),
+            ))
+        });
         self.jobs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -850,7 +905,30 @@ impl Session {
             doc: doc.to_path_buf(),
             id,
             flag,
+            limits,
         }
+    }
+
+    /// Why a stage that was interrupted stopped: a limit (reported here
+    /// when the geometry stage found it; the evaluator prints its own), or
+    /// a cancellation.
+    fn interrupted(&self, pipe: &mut Pipe, loaded: &Loaded, job: &JobGuard<'_>) -> Stop {
+        let Some(e) = job.exceeded() else {
+            return Stop::Cancelled;
+        };
+        let mut d = Diagnostic::new(DiagCode::ResourceLimit, Severity::Error, e.message())
+            .with_hint(e.hint());
+        let mut sources = &loaded.program.sources;
+        if let Some(at) = e.at
+            && let Some(s) = loaded.unit_sources(at.unit)
+        {
+            d = d
+                .at(at.span, at.line)
+                .with_base(lang::diag::PathBase::MainFileDir);
+            sources = s;
+        }
+        pipe.con.diagnostic(&d, sources, &pipe.paths.cwd);
+        Stop::Exit(EXIT_ERROR)
     }
 
     fn cancelled(&self) -> Cancelled {
@@ -1041,9 +1119,10 @@ impl Session {
         let (fs, libs) = (&*self.fs, &self.cfg.libs);
         let paths = pipe.paths.clone();
         let Ok(mut text) = fs.read(&paths.path) else {
-            pipe.con.print(
-                None,
+            pipe.con.print_error_line(
+                DiagCode::InputNotFound,
                 format!("Can't open input file '{}'!\n", paths.display).as_bytes(),
+                false,
             );
             return Err(Stop::Exit(EXIT_ERROR));
         };
@@ -1151,6 +1230,7 @@ impl Session {
             rng_seed: run.rng_seed.unwrap_or(self.cfg.rng_seed),
             fs: self.fs.clone(),
             interrupt: Some(job.flag.clone()),
+            guard: job.limits.clone(),
             parts: run.parts || self.cfg.parts,
             ..eval::Options::default()
         };
@@ -1163,6 +1243,10 @@ impl Session {
             &mut pipe.con,
         );
         pipe.timings.evaluate = self.now() - t;
+        // The evaluator printed the limit where it was passed.
+        if job.exceeded().is_some() {
+            return Err(Stop::Exit(EXIT_ERROR));
+        }
         if ev.interrupted || job.stopped() {
             return Err(Stop::Cancelled);
         }
@@ -1227,6 +1311,7 @@ impl Session {
                     work_dir: pipe.paths.cwd.clone(),
                     fonts,
                     interrupt: Some(job.flag.clone()),
+                    guard: job.limits.clone(),
                     // Every request prints what a fresh command-line run
                     // would, however warm the cache.
                     replay: Some(loaded.epoch),
@@ -1257,7 +1342,9 @@ impl Session {
                             .insert(doc, p.clone());
                         p
                     }
-                    Err(u) if u.is_interrupted() => return Err(Stop::Cancelled),
+                    Err(u) if u.is_interrupted() => {
+                        return Err(self.interrupted(pipe, loaded, job));
+                    }
                     Err(u) => {
                         let mut line = format!("neoscad: {}() is not implemented yet", u.what);
                         if let Some(l) = &u.loc
@@ -1280,7 +1367,7 @@ impl Session {
             }
         };
         if job.stopped() {
-            return Err(Stop::Cancelled);
+            return Err(self.interrupted(pipe, loaded, job));
         }
         self.print_messages(pipe, loaded, &product.messages);
         pipe.timings.geometry = self.now() - t;
@@ -1294,7 +1381,7 @@ impl Session {
     pub fn ast(&self, run: &Run) -> Result<(Option<String>, Log), Cancelled> {
         eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
             let mut pipe = self.pipe(run);
-            let _job = self.begin(&pipe.paths.doc, run.supersede);
+            let _job = self.begin(&pipe.paths.doc, run);
             let text = match self.load(&mut pipe, run) {
                 Ok(loaded) => Some(
                     String::from_utf8_lossy(&lang::dump::dump(&loaded.program.ast)).into_owned(),
@@ -1314,7 +1401,7 @@ impl Session {
 
     fn evaluate_now(&self, run: &Run, csg: bool) -> Result<Evaluated, Cancelled> {
         let mut pipe = self.pipe(run);
-        let job = self.begin(&pipe.paths.doc, run.supersede);
+        let job = self.begin(&pipe.paths.doc, run);
         let (exit_code, tree, aborted) = match self.load(&mut pipe, run) {
             Err(Stop::Cancelled) => return Err(self.cancelled()),
             Err(Stop::Exit(c)) => (c, None, false),
@@ -1408,7 +1495,7 @@ impl Session {
     ) -> Result<(Rendered, Vec<parts::Part>), Cancelled> {
         let mut parts = Vec::new();
         let mut pipe = self.pipe(run);
-        let job = self.begin(&pipe.paths.doc, run.supersede);
+        let job = self.begin(&pipe.paths.doc, run);
         let mut out = Rendered {
             exit_code: 0,
             log: Log::default(),
@@ -1437,7 +1524,8 @@ impl Session {
             out.cache_entries = entries;
             if want_parts {
                 let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
-                parts = self.part_solids(&pipe, &loaded, top, &scheme.geometry_scheme(), &job)?;
+                parts =
+                    self.part_solids(&mut pipe, &loaded, top, &scheme.geometry_scheme(), &job)?;
             }
             Ok(())
         })();
@@ -1456,7 +1544,7 @@ impl Session {
     /// the cache the render just filled.
     fn part_solids(
         &self,
-        pipe: &Pipe,
+        pipe: &mut Pipe,
         loaded: &Loaded,
         top: &eval::Node,
         scheme: &geom::color::Scheme,
@@ -1476,19 +1564,20 @@ impl Session {
             work_dir: pipe.paths.cwd.clone(),
             fonts,
             interrupt: Some(job.flag.clone()),
+            guard: job.limits.clone(),
             // The model's render printed every message already.
             replay: None,
         };
         let nodes: Vec<&eval::Node> = found.iter().map(|f| f.node).collect();
         let built = match renderer.render_many(&nodes, &keys, opts) {
             Ok(b) => b,
-            Err(u) if u.is_interrupted() => return Err(Stop::Cancelled),
+            Err(u) if u.is_interrupted() => return Err(self.interrupted(pipe, loaded, job)),
             // The model rendered, so its parts do too; a part that somehow
             // does not is left out rather than failing the request.
             Err(_) => return Ok(Vec::new()),
         };
         if job.stopped() {
-            return Err(Stop::Cancelled);
+            return Err(self.interrupted(pipe, loaded, job));
         }
         Ok(parts::assemble(&found, built))
     }
@@ -1511,7 +1600,7 @@ impl Session {
     ) -> Result<Exported, Cancelled> {
         let run = &req.run;
         let mut pipe = self.pipe(run);
-        let job = self.begin(&pipe.paths.doc, run.supersede);
+        let job = self.begin(&pipe.paths.doc, run);
         let mut geometry = None;
         let step = (|| -> Result<u8, Stop> {
             let loaded = self.load(&mut pipe, run)?;
@@ -1560,7 +1649,8 @@ impl Session {
                         .print(Some(Severity::Warning), format!("WARNING: {w}").as_bytes());
                 }
                 if let Err(line) = sink.write(target, &enc.data) {
-                    pipe.con.print_unfiltered(line.as_bytes());
+                    pipe.con
+                        .print_error_line(DiagCode::OutputNotWritable, line.as_bytes(), true);
                     return Err(Stop::Exit(EXIT_ERROR));
                 }
             }
