@@ -226,6 +226,12 @@ fn closest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<
         .map(|(_, c)| c)
 }
 
+/// "did you mean" for `name` among `candidates`: the closest within a
+/// third of its length, as the diagnostics' hints choose.
+pub fn did_you_mean<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    closest(name, candidates)
+}
+
 /// The quoted name in a message such as `Ignoring unknown module 'cub'`.
 fn quoted(message: &str) -> Option<&str> {
     let start = message.find('\'')? + 1;

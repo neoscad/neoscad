@@ -34,10 +34,13 @@ mod check;
 mod client;
 mod delegate;
 mod deps;
+mod docs;
 mod export_options;
+mod format;
 mod host;
 mod info;
 mod measure;
+mod modeltest;
 mod outcome;
 mod param_json;
 mod png;
@@ -275,6 +278,18 @@ fn main() -> ExitCode {
         Some(a) if a == "measure" => {
             let rest: Vec<std::ffi::OsString> = args.collect();
             return ExitCode::from(measure::main(rest));
+        }
+        Some(a) if a == "fmt" => {
+            let rest: Vec<std::ffi::OsString> = args.collect();
+            return ExitCode::from(format::main(rest));
+        }
+        Some(a) if a == "test" => {
+            let rest: Vec<std::ffi::OsString> = args.collect();
+            return ExitCode::from(modeltest::main(rest));
+        }
+        Some(a) if a == "docs" => {
+            let rest: Vec<std::ffi::OsString> = args.collect();
+            return ExitCode::from(docs::main(rest));
         }
         Some(a) if a == "serve" => {
             let rest: Vec<std::ffi::OsString> = args.collect();

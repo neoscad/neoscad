@@ -386,6 +386,41 @@ entry when it is done.
 - `measure --section` cuts the model or one part; a per-part breakdown
   of a model section is not reported. (7b-1)
 
+## Tooling: fmt, test, docs
+- `session::diag`'s "did you mean" pools are hand-copied lists of
+  OpenSCAD's builtin modules and functions; `eval::builtins()` (7b-2)
+  now lists the evaluator's own tables and could replace them. (7b-2)
+- `neoscad fmt` keeps what OpenSCAD's customizer reads at the top of a
+  file (before the first `{`): there an assignment with a trailing `//`
+  comment is never wrapped (it can run past the width), assignments
+  sharing a line keep sharing it, and indented `//` comments keep their
+  indent. A narrower rule (only lines whose annotations would change)
+  would format more of those headers. (7b-2)
+- Formatter layout limits: binary chains break all or nothing (no
+  filling); only a lone vector argument hugs its parentheses (no
+  "last argument" hugging of a trailing vector or function literal); a
+  `//` comment inside an expression ends the line there, and block
+  comments are kept verbatim, not re-indented; blank lines are kept
+  between list items as between statements. (7b-2)
+- `neoscad fmt` refuses files that need `--enable` to parse (the
+  unicode-identifier tests); it has no `--enable`. It rewrites files in
+  place (no temporary file and rename) and never goes through a running
+  server. (7b-2)
+- `neoscad test` runs in-process; unlike `check` and `measure` it does
+  not hand its work to a running `neoscad serve` (a `cli.test`), so a
+  command-line run starts cold. Each test re-parses its file (a test's
+  program is changed, so it skips the parse cache; included files still
+  come from the lex cache). (7b-2)
+- `@expect parts` checks that the named parts exist, not that they are
+  the only ones; there are no expectations on echo output (tests use
+  `assert()`), on 2D contour counts, or on `measure --between`
+  distances. (7b-2)
+- `neoscad docs --in` prints a user definition's parameters as the
+  `.ast` dump does (`r = 1`), builtins as written in `builtins.toml`
+  (`r=1`); it follows `use`d libraries one level, not the libraries they
+  use. Experimental builtins (`roof`, `textmetrics`, ...) have no
+  entries, only a note that they are not enabled. (7b-2)
+
 ## WASM
 - Recursion on wasm32 stops at a frame budget calibrated for V8's default
   stack in node 18 (`eval::recursion`): function depth 498 and module

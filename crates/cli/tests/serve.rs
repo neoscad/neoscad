@@ -575,3 +575,42 @@ fn check_and_measure_are_served() {
     assert_eq!(m["parts"], json!([]), "{m}");
     assert_eq!(m["diagnostics"]["warnings"], 2, "{m}");
 }
+
+#[test]
+fn format_docs_and_test_are_served() {
+    let d = scratch("fdt");
+    let mut s = Stdio_::start(&d);
+    let init = s.result("initialize", json!({}));
+    let methods = init["capabilities"]["methods"].as_array().unwrap();
+    for m in ["format", "docs", "test"] {
+        assert!(methods.contains(&json!(m)), "{m}");
+    }
+    // `format` reads an open document's unsaved text and writes nothing.
+    let path = d.join("m.scad");
+    let p = path.to_str().unwrap();
+    std::fs::write(&path, "cube(1);\n").unwrap();
+    s.result("open", json!({"path": p, "text": "module m(){cube(2);}"}));
+    let f = s.result("format", json!({"path": p, "diff": true}));
+    assert_eq!(f["changed"], true, "{f}");
+    assert_eq!(f["text"], "module m() {\n    cube(2);\n}\n");
+    assert!(f["diff"].as_str().unwrap().contains("+    cube(2);"), "{f}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "cube(1);\n");
+    let f = s.result("format", json!({"text": "x=1;", "indent": 2}));
+    assert_eq!(f["text"], "x = 1;\n");
+    let f = s.result("format", json!({"text": "x=;"}));
+    assert_eq!(f["exit_code"], 1);
+    assert_eq!(f["error"]["kind"], "syntax");
+    assert_eq!(s.call("format", json!({}))["error"]["code"], -32602);
+    // `docs`.
+    let r = s.result("docs", json!({"name": "cube"}));
+    assert_eq!(r["entries"][0]["signature"], "cube(size=1, center=false)");
+    let r = s.result("docs", json!({"name": "m", "file": p}));
+    assert_eq!(r["entries"][0]["signature"], "module m()", "{r}");
+    // `test`: the document's buffer is what runs.
+    let t = d.join("m_test.scad");
+    std::fs::write(&t, "// @expect volume 8\nmodule test_c() cube(2);\n").unwrap();
+    let r = s.result("test", json!({"cwd": d.to_str().unwrap(), "jobs": 2}));
+    assert_eq!(r["exit_code"], 0, "{r}");
+    assert_eq!(r["counts"]["tests"], 1);
+    assert_eq!(r["tests"][0]["id"], "m_test.scad::test_c");
+}

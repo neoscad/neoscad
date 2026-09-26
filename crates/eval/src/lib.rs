@@ -228,6 +228,89 @@ impl Default for Options {
 
 pub use recursion::{DEFAULT_STACK_LIMIT, DEFAULT_THREAD_STACK};
 
+/// What kind of name a builtin is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BuiltinKind {
+    Module,
+    Function,
+    /// A special variable (`$fn`) or constant (`PI`) the evaluator sets.
+    Variable,
+}
+
+/// Whether a builtin is on by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinStatus {
+    Stable,
+    /// Known but disabled, as in OpenSCAD without `--enable` (`roof`,
+    /// `textmetrics`, ...).
+    Experimental,
+    /// neoscad's own, off by default (`part` with `--enable part`).
+    Extension,
+}
+
+/// A builtin the evaluator registers, for documentation and completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinName {
+    pub name: &'static str,
+    pub kind: BuiltinKind,
+    pub status: BuiltinStatus,
+}
+
+/// The special variables and constants every evaluation starts with, or
+/// that module calls set (`$children`, `$parent_modules`).
+pub const BUILTIN_VARIABLES: [&str; 12] = [
+    "$fn",
+    "$fa",
+    "$fs",
+    "$t",
+    "$preview",
+    "$vpt",
+    "$vpr",
+    "$vpd",
+    "$vpf",
+    "$children",
+    "$parent_modules",
+    "PI",
+];
+
+/// Every builtin module, function and variable the evaluator knows, from
+/// the tables it evaluates with (so a new builtin cannot be missed by what
+/// lists them).
+pub fn builtins() -> Vec<BuiltinName> {
+    use BuiltinKind::*;
+    let status = |enabled: bool| {
+        if enabled {
+            BuiltinStatus::Stable
+        } else {
+            BuiltinStatus::Experimental
+        }
+    };
+    let mut out: Vec<BuiltinName> = builtins::modules::ALL
+        .iter()
+        .map(|(n, b)| BuiltinName {
+            name: n,
+            kind: Module,
+            status: status(b.enabled()),
+        })
+        .collect();
+    out.push(BuiltinName {
+        name: "part",
+        kind: Module,
+        status: BuiltinStatus::Extension,
+    });
+    out.extend(builtins::functions::ALL.iter().map(|(n, b)| BuiltinName {
+        name: n,
+        kind: Function,
+        status: status(b.enabled()),
+    }));
+    out.extend(BUILTIN_VARIABLES.iter().map(|n| BuiltinName {
+        name: n,
+        kind: Variable,
+        status: BuiltinStatus::Stable,
+    }));
+    out
+}
+
 /// Run `f` on a thread with `bytes` of stack and wait for it.
 ///
 /// On wasm32 this calls `f` directly: wasm32-unknown-unknown cannot spawn

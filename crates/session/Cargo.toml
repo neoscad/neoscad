@@ -17,7 +17,9 @@ default = ["gpu"]
 gpu = ["render/gpu"]
 
 [dependencies]
+docs = { package = "neoscad-docs", path = "../docs" }
 eval = { package = "neoscad-eval", path = "../eval" }
+scadfmt = { package = "neoscad-fmt", path = "../fmt" }
 geom = { package = "neoscad-geom", path = "../geom" }
 io = { package = "neoscad-io", path = "../io" }
 lang = { package = "neoscad-lang", path = "../lang" }

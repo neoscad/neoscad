@@ -25,10 +25,9 @@ lang = { package = "neoscad-lang", path = "../lang" }
 render = { package = "neoscad-render", path = "../render", default-features = false }
 # The session every client uses, without the GPU (as `render` above).
 session = { package = "neoscad-session", path = "../session", default-features = false }
+serde_json.workspace = true
 text = { package = "neoscad-text", path = "../text" }
 
-[dev-dependencies]
-serde_json.workspace = true
 
 # The workspace lints, except that `unsafe_code` is `deny` rather than
 # `forbid`: exporting a function to JavaScript needs `#[unsafe(no_mangle)]`,

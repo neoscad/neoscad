@@ -75,6 +75,14 @@ fn line_to_stop(text: &[u8]) -> u32 {
     line
 }
 
+/// The line at which OpenSCAD stops looking for customizer parameters:
+/// the line of the first `{` outside comments (even one in a string), or
+/// the last line. Assignments starting on it or later are not parameters.
+/// A formatter needs it to keep the lines those parameters are read from.
+pub fn parameter_region_end(text: &[u8]) -> u32 {
+    line_to_stop(text)
+}
+
 /// Single-line `/* ... */` comments, each naming a group by its `[...]`
 /// parts joined with `-`.
 fn collect_groups(text: &[u8]) -> Vec<Group> {

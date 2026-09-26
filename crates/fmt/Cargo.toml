@@ -1,0 +1,16 @@
+[package]
+name = "neoscad-fmt"
+description = "The OpenSCAD formatter behind `neoscad fmt`: layout from the lossless syntax tree, comments kept, semantics checked"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "scadfmt"
+
+[dependencies]
+lang = { package = "neoscad-lang", path = "../lang" }
+
+[lints]
+workspace = true

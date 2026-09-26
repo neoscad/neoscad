@@ -6,7 +6,8 @@ the geometry cache and the last CSG products, all warm. It answers
 [JSON-RPC 2.0](https://www.jsonrpc.org/specification) requests. The
 command line, the future MCP server and the apps are its clients; the
 methods mirror the session's API (`evaluate`, `render`, `export`,
-`snapshot`, `cancel` and the document methods).
+`snapshot`, `check`, `measure`, `format`, `docs`, `test`, `cancel` and
+the document methods).
 
 The implementation is `crates/cli/src/serve.rs` (server),
 `crates/cli/src/rpc.rs` (framing) and `crates/cli/src/client.rs` (the
@@ -22,7 +23,7 @@ change would get a new `protocol` number; there has been none.
 
 | `protocol` | Changes |
 |---|---|
-| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. |
+| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. |
 
 ## Transports
 
@@ -68,8 +69,8 @@ over the limit) ends the connection.
 `initialize`, `status`, `stats`, `documents`, `open`, `update`, `close`
 and `cancel` are handled in arrival order before the next message is
 read, so `update` then `render` renders the new text. `evaluate`,
-`render`, `export`, `snapshot`, `check`, `measure` and the `cli.*`
-methods run concurrently,
+`render`, `export`, `snapshot`, `check`, `measure`, `format`, `docs`,
+`test` and the `cli.*` methods run concurrently,
 each on its own thread; responses may come back in any order (match them
 by `id`).
 
@@ -129,6 +130,7 @@ Params: anything (ignored). Result:
    "render_modes": ["render", "force", "preview"],
    "incremental_edits": true,
    "snapshot": true, "check": true, "measure": true,
+   "format": true, "docs": true, "test": true,
    "features": ["part"]}}
 ```
 
@@ -264,6 +266,37 @@ relative to `cwd`, and `section.svg` names it) or `true` (the SVG text
 in `section.svg_text`). Result: the measure object of
 `docs/cli-json.md`; an unknown part gives `failed` and `error` with
 `exit_code` 1.
+
+### `format`
+
+Formatting (`neoscad fmt`; `docs/cli-json.md`). Params: `path` (the
+file: an open document's buffer when it is one, else the file; relative
+to `cwd`) and/or `text` (format this instead of the file's text; the
+path, if any, still selects the configuration), `cwd`, `indent`,
+`width` (override `.neoscad-fmt.toml`) and `diff` (bool). Nothing is
+written: the result carries the text. Result: `{"path", "changed",
+"error", "config", "text", "exit_code"}` plus `diff` when asked for;
+`text` is the formatted text (`null` on an error), `error` as in the
+command's JSON (`exit_code` 1: a syntax error, the file left as it is).
+Neither `path` nor `text` is error -32602.
+
+### `docs`
+
+Reference text (`neoscad docs`; `docs/cli-json.md`). Params: `name`
+(none: the index), `file` (also `in`: search this file, its includes and
+the libraries it `use`s), `cwd`, `full`. Result: the command's JSON plus
+`text`, the text the command prints. An unknown name is a result with
+`exit_code` 1 and `did_you_mean`.
+
+### `test`
+
+Model tests (`neoscad test`; `docs/model-tests.md`). Params: `paths`
+([string]) and/or `path` (test files or directories; default `cwd`),
+`cwd`, `filter`, `enable`/`parts` (`part()` for every test) and `jobs`
+(threads; default one per CPU). Open documents' buffers are what the
+tests run. Result: the JSON of `docs/model-tests.md`. Each test is a run
+of its file (not superseding others), so `cancel` on a test file's path
+stops the request with -32800.
 
 ### `cli.export`, `cli.snapshot`, `cli.check`, `cli.measure`
 

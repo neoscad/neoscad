@@ -45,9 +45,12 @@
 pub mod check;
 pub mod diag;
 mod docfs;
+pub mod docs;
 pub mod export;
+pub mod format;
 pub mod measure;
 pub mod mesh;
+pub mod modeltest;
 mod parse;
 pub mod parts;
 pub mod snapshot;
@@ -211,6 +214,12 @@ pub struct Run {
     /// neoscad's `part("name") { ... }` extension (`--enable part`), on
     /// for this request; see `eval::Options::parts`.
     pub parts: bool,
+    /// Run only this module of the main file: its top-level
+    /// instantiations are replaced by one call, `entry();`, while its
+    /// assignments, definitions, includes and `use`s stay. This is how
+    /// `neoscad test` runs each `module test_*()` of a test file as its
+    /// own model.
+    pub entry: Option<String>,
 }
 
 impl std::fmt::Debug for Run {
@@ -244,6 +253,7 @@ impl Run {
             supersede: true,
             progress: None,
             parts: false,
+            entry: None,
         }
     }
 }
@@ -540,6 +550,31 @@ impl Paths {
             display: run.input.clone(),
         }
     }
+}
+
+/// Replace the top-level instantiations of `p` with one call of the
+/// module `entry` ([`Run::entry`]), located at its definition so its
+/// messages point there.
+fn entry_only(p: &mut Program, entry: &str) {
+    let span = p
+        .ast
+        .root
+        .modules
+        .iter()
+        .find(|m| p.ast.name(m.name) == entry)
+        .map(|m| m.span)
+        .unwrap_or_default();
+    let name = p.ast.names.intern(entry);
+    p.ast.root.instantiations = vec![lang::ast::Instantiation {
+        name,
+        args: Vec::new(),
+        children: lang::ast::Scope::default(),
+        kind: lang::ast::InstKind::Module,
+        tag_root: false,
+        tag_highlight: false,
+        tag_background: false,
+        span,
+    }];
 }
 
 /// Why a request's pipeline stopped early.
@@ -1020,7 +1055,21 @@ impl Session {
         }
         text.extend_from_slice(&suffix);
         let epoch_text = hash_of(&text);
-        let program = parse::main_program(&self.parse, &self.lexed, &paths.path, text, fs, libs);
+        let program = match &run.entry {
+            None => parse::main_program(&self.parse, &self.lexed, &paths.path, text, fs, libs),
+            Some(entry) => {
+                // Not through the parse cache: the program is changed.
+                let mut p = lang::parse_program_cached(
+                    paths.path.clone(),
+                    text,
+                    fs,
+                    libs,
+                    Some(&self.lexed),
+                );
+                entry_only(&mut p, entry);
+                Arc::new(p)
+            }
+        };
         for d in program.openscad_diags() {
             pipe.con.diagnostic(d, &program.sources, &paths.cwd);
         }

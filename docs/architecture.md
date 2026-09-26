@@ -68,7 +68,18 @@ JSON-RPC (`docs/serve-protocol.md`).
   `session::measure` on the analysis mesh and BVH of `session::mesh`;
   JSON in `docs/cli-json.md`), as session operations the server exposes
   as the `check` and `measure` methods; `snapshot --issues` marks the
-  findings on the sheet.
+  findings on the sheet. `test`, `fmt` and `docs` are implemented in
+  7b-2, each a session operation and a server method: `neoscad test`
+  runs each `module test_*()` of `*_test.scad`/`test_*.scad` files as
+  its own model, with `// @expect` lines (volume, bbox, manifold,
+  components, check, parts; `docs/model-tests.md`) checked on the
+  rendered result by `measure`'s and `check`'s code; `neoscad fmt`
+  (`crates/fmt`) lays out the lossless CST and proves on every file that
+  only whitespace changed and the `.ast` dump, customizer annotations
+  included, is identical; `neoscad docs` answers from
+  `crates/docs/builtins.toml` (written for neoscad, kept in step with the
+  evaluator's builtins by a test) and from the comment blocks of user
+  and library code, BOSL2's structured ones included.
 - **MCP server** exposing evaluate, snapshot, check, measure, diff and docs.
 - **Named parts:** a `part("lid") { … }` extension behind a flag, so checks
   and measurements can refer to parts. A deliberate divergence from

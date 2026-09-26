@@ -1,0 +1,16 @@
+[package]
+name = "neoscad-docs"
+description = "Reference text for OpenSCAD's builtins and the doc comments of user and library code (`neoscad docs`)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "docs"
+
+[dependencies]
+lang = { package = "neoscad-lang", path = "../lang" }
+
+[lints]
+workspace = true

@@ -1,0 +1,841 @@
+# Reference entries for OpenSCAD's builtins, shown by `neoscad docs`.
+#
+# Written for neoscad, not copied from the OpenSCAD manual (whose text is
+# CC-BY-SA): short enough for an agent's context. Parameter lists follow
+# the evaluator's (crates/eval/src/builtins). Every builtin the
+# evaluator registers as stable must have an entry, and every example
+# must parse and evaluate without an error (crates/session/tests/docs.rs).
+#
+# Each entry: `name`, `signature`, `summary` (one line), `params` (each
+# "name: type = default -- meaning"; the default is optional), `example`,
+# and optionally `returns` (functions) and `notes`.
+
+# --- 3D primitives ---------------------------------------------------------
+
+[[module]]
+name = "cube"
+signature = "cube(size=1, center=false)"
+summary = "A box with a corner at the origin, or centred on it."
+params = [
+    "size: number | [x, y, z] = 1 -- edge length, or the three edge lengths",
+    "center: bool = false -- centre the box on the origin",
+]
+example = "cube([20, 10, 5], center=true);"
+
+[[module]]
+name = "sphere"
+signature = "sphere(r=1) | sphere(d=...)"
+summary = "A sphere centred on the origin."
+params = [
+    "r: number = 1 -- radius",
+    "d: number -- diameter (instead of r)",
+    "$fn, $fa, $fs: number -- resolution (see $fn)",
+]
+example = "sphere(d=10, $fn=48);"
+
+[[module]]
+name = "cylinder"
+signature = "cylinder(h=1, r1=1, r2=1, center=false) | cylinder(h, r=..., d=..., d1=..., d2=...)"
+summary = "A cylinder or cone along +z, its base on z=0 unless centred."
+params = [
+    "h: number = 1 -- height",
+    "r: number -- radius of both ends (sets r1 and r2)",
+    "r1: number = 1 -- bottom radius",
+    "r2: number = 1 -- top radius (0 for a cone)",
+    "d, d1, d2: number -- diameters, instead of r, r1, r2",
+    "center: bool = false -- centre on z=0",
+    "$fn, $fa, $fs: number -- resolution",
+]
+example = "cylinder(h=10, r1=5, r2=2, $fn=32);"
+
+[[module]]
+name = "polyhedron"
+signature = "polyhedron(points, faces, convexity=1)"
+summary = "A solid from vertices and faces that list vertex indices."
+params = [
+    "points: [[x, y, z], ...] -- the vertices",
+    "faces: [[i, j, k, ...], ...] -- each face's vertex indices, clockwise seen from outside",
+    "convexity: number = 1 -- preview hint: most times a ray can cross the surface",
+]
+example = "polyhedron(points=[[0, 0, 0], [10, 0, 0], [0, 10, 0], [0, 0, 10]], faces=[[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]]);"
+notes = "Wrong winding or open edges make a solid that is not manifold; `neoscad check` finds them."
+
+# --- 2D primitives ---------------------------------------------------------
+
+[[module]]
+name = "square"
+signature = "square(size=1, center=false)"
+summary = "A 2D rectangle with a corner at the origin, or centred on it."
+params = [
+    "size: number | [x, y] = 1 -- side length, or width and depth",
+    "center: bool = false -- centre on the origin",
+]
+example = "square([20, 10]);"
+
+[[module]]
+name = "circle"
+signature = "circle(r=1) | circle(d=...)"
+summary = "A 2D circle (a regular polygon) centred on the origin."
+params = [
+    "r: number = 1 -- radius",
+    "d: number -- diameter (instead of r)",
+    "$fn, $fa, $fs: number -- resolution",
+]
+example = "circle(r=5, $fn=6);  // a hexagon"
+
+[[module]]
+name = "polygon"
+signature = "polygon(points, paths=undef, convexity=1)"
+summary = "A 2D shape from points, with optional paths for holes."
+params = [
+    "points: [[x, y], ...] -- the vertices",
+    "paths: [[i, ...], ...] = undef -- outlines as point indices (the first outer, others holes); default: all points in order",
+    "convexity: number = 1 -- preview hint",
+]
+example = "polygon([[0, 0], [10, 0], [0, 10]]);"
+
+[[module]]
+name = "text"
+signature = "text(text, size=10, font=\"Liberation Sans\", halign=\"left\", valign=\"baseline\", spacing=1, direction=\"ltr\", language=\"en\", script=\"latin\")"
+summary = "2D outlines of a string in a font."
+params = [
+    "text: string -- what to write",
+    "size: number = 10 -- roughly the height of capital letters (the em size)",
+    "font: string = \"Liberation Sans\" -- family, optionally \":style=Bold\"",
+    "halign: string = \"left\" -- left, center or right",
+    "valign: string = \"baseline\" -- top, center, baseline or bottom",
+    "spacing: number = 1 -- letter spacing factor",
+    "direction: string = \"ltr\" -- ltr, rtl, ttb or btt",
+    "language, script: string -- for shaping",
+    "$fn: number -- curve resolution",
+]
+example = "linear_extrude(2) text(\"Hi\", size=8, halign=\"center\");"
+
+[[module]]
+name = "import"
+signature = "import(file, convexity=1, layer, origin=[0, 0], scale=1, center=false, dpi=96, id)"
+summary = "Load geometry from a file: STL, OFF, OBJ, 3MF, AMF (3D) or SVG, DXF (2D)."
+params = [
+    "file: string -- path, relative to the file that calls it",
+    "convexity: number = 1 -- preview hint",
+    "layer: string -- DXF layer to read",
+    "origin: [x, y] = [0, 0] -- DXF origin",
+    "scale: number = 1 -- DXF scale",
+    "center: bool = false -- SVG: centre on the origin",
+    "dpi: number = 96 -- SVG: resolution for units in px",
+    "id: string -- SVG: only the element with this id",
+]
+example = "import(\"part.stl\");"
+notes = "Also a function (experimental in OpenSCAD, not enabled): `import(file)` returning data."
+
+[[module]]
+name = "surface"
+signature = "surface(file, center=false, invert=false, convexity=1)"
+summary = "A height map from a text file of numbers or a PNG, as a 3D surface on a base."
+params = [
+    "file: string -- .dat (rows of numbers) or .png (brightness)",
+    "center: bool = false -- centre in x and y",
+    "invert: bool = false -- PNG: dark is high",
+    "convexity: number = 1 -- preview hint",
+]
+example = "surface(\"heights.dat\", center=true);"
+
+# --- transformations -------------------------------------------------------
+
+[[module]]
+name = "translate"
+signature = "translate(v) children"
+summary = "Move the children by a vector."
+params = ["v: [x, y, z] | [x, y] -- the offset"]
+example = "translate([10, 0, 5]) cube(2);"
+
+[[module]]
+name = "rotate"
+signature = "rotate(a=[x, y, z]) | rotate(a=deg, v=[x, y, z]) children"
+summary = "Rotate the children, in degrees: about x, then y, then z, or about an axis."
+params = [
+    "a: number | [x, y, z] -- angles about the axes (a number alone rotates about z)",
+    "v: [x, y, z] -- axis for a single angle",
+]
+example = "rotate([0, 90, 0]) cylinder(h=10, r=1);"
+
+[[module]]
+name = "scale"
+signature = "scale(v) children"
+summary = "Scale the children about the origin."
+params = ["v: number | [x, y, z] -- factors (a number scales uniformly)"]
+example = "scale([2, 1, 1]) sphere(5);"
+
+[[module]]
+name = "mirror"
+signature = "mirror(v) children"
+summary = "Mirror the children in the plane through the origin normal to v."
+params = ["v: [x, y, z] -- the plane's normal"]
+example = "mirror([1, 0, 0]) translate([5, 0, 0]) cube(2);"
+
+[[module]]
+name = "multmatrix"
+signature = "multmatrix(m) children"
+summary = "Transform the children by a 4x4 (or 3x4) affine matrix."
+params = ["m: [[...], [...], [...], [...]] -- rows of the matrix; the last column is the translation"]
+example = "multmatrix([[1, 0.5, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) cube(5);  // shear"
+
+[[module]]
+name = "resize"
+signature = "resize(newsize, auto=false, convexity=1) children"
+summary = "Scale the children so their bounding box has the given size."
+params = [
+    "newsize: [x, y, z] -- target size; 0 leaves an axis alone",
+    "auto: bool | [bool, bool, bool] = false -- scale the zero axes in proportion",
+    "convexity: number = 1 -- preview hint",
+]
+example = "resize([30, 10, 0], auto=true) sphere(5);"
+
+[[module]]
+name = "color"
+signature = "color(c, alpha=1) children"
+summary = "Colour the children (preview, PNG and coloured exports)."
+params = [
+    "c: string | [r, g, b] | [r, g, b, a] -- a colour name, \"#rrggbb\", or components 0..1",
+    "alpha: number = 1 -- opacity 0..1",
+]
+example = "color(\"steelblue\", 0.5) cube(5);"
+
+[[module]]
+name = "offset"
+signature = "offset(r=1) | offset(delta=..., chamfer=false) children"
+summary = "Grow or shrink 2D children: round corners with r, sharp ones with delta."
+params = [
+    "r: number = 1 -- rounded offset (negative shrinks)",
+    "delta: number -- straight offset, instead of r",
+    "chamfer: bool = false -- with delta: cut the corners",
+    "$fn, $fa, $fs: number -- resolution of the rounds",
+]
+example = "offset(r=2) square(10);"
+
+# --- boolean and other operations -------------------------------------------
+
+[[module]]
+name = "union"
+signature = "union() children"
+summary = "Combine the children into one shape."
+params = []
+example = "union() { cube(5); sphere(4); }"
+
+[[module]]
+name = "difference"
+signature = "difference() children"
+summary = "The first child minus all the others."
+params = []
+example = "difference() { cube(10, center=true); sphere(6); }"
+notes = "Let a cutting shape pass through the faces it cuts (make it slightly longer) so no zero-thickness skin is left."
+
+[[module]]
+name = "intersection"
+signature = "intersection() children"
+summary = "Only the space all children share."
+params = []
+example = "intersection() { cube(10, center=true); sphere(6.5); }"
+
+[[module]]
+name = "hull"
+signature = "hull() children"
+summary = "The convex hull of the children."
+params = []
+example = "hull() { translate([10, 0]) circle(2); circle(5); }"
+
+[[module]]
+name = "minkowski"
+signature = "minkowski(convexity=1) children"
+summary = "The Minkowski sum of the children (e.g. a box with rounded edges)."
+params = ["convexity: number = 1 -- preview hint"]
+example = "minkowski() { cube([10, 10, 2]); cylinder(r=1, h=1, $fn=16); }"
+notes = "Slow for non-convex children with many faces."
+
+[[module]]
+name = "fill"
+signature = "fill() children"
+summary = "2D children with their holes filled in."
+params = []
+example = "fill() difference() { circle(10); circle(5); }"
+
+[[module]]
+name = "render"
+signature = "render(convexity=1) children"
+summary = "Compute the children's geometry in preview instead of drawing them with CSG."
+params = ["convexity: number = 1 -- preview hint"]
+example = "render() difference() { cube(5); sphere(3); }"
+
+[[module]]
+name = "projection"
+signature = "projection(cut=false) children"
+summary = "A 3D child flattened to 2D: its shadow on z=0, or its cross-section there."
+params = [
+    "cut: bool = false -- true: the section at z=0; false: the whole outline",
+    "convexity: number -- preview hint",
+]
+example = "projection(cut=true) translate([0, 0, -2]) sphere(5);"
+
+[[module]]
+name = "linear_extrude"
+signature = "linear_extrude(height=100, v=[0, 0, 1], center=false, twist=0, slices, segments=0, scale=1, convexity=1) children"
+summary = "Extrude 2D children along z (or v), optionally twisting and scaling."
+params = [
+    "height: number = 100 -- length (also `h`)",
+    "v: [x, y, z] = [0, 0, 1] -- direction; its length is the height when height is not given",
+    "center: bool = false -- centre on z=0",
+    "twist: number = 0 -- degrees turned over the height",
+    "slices: number -- steps along the height (default from twist and $fn/$fa/$fs)",
+    "segments: number = 0 -- extra points on each edge of the outline",
+    "scale: number | [x, y] = 1 -- size of the top relative to the bottom",
+    "convexity: number = 1 -- preview hint",
+]
+example = "linear_extrude(height=10, twist=90, scale=0.5) square(5, center=true);"
+
+[[module]]
+name = "rotate_extrude"
+signature = "rotate_extrude(angle=360, start, convexity=1) children"
+summary = "Sweep 2D children (at x >= 0) around the z axis."
+params = [
+    "angle: number = 360 -- degrees to sweep (also `a`)",
+    "start: number -- starting angle in degrees",
+    "convexity: number = 1 -- preview hint",
+    "$fn, $fa, $fs: number -- resolution of the sweep",
+]
+example = "rotate_extrude($fn=64) translate([10, 0]) circle(2);  // a torus"
+notes = "The 2D shape must lie entirely on one side of the y axis."
+
+# --- structure and control ----------------------------------------------------
+
+[[module]]
+name = "group"
+signature = "group() children"
+summary = "The children, unchanged (what a module call or `{ }` block makes)."
+params = []
+example = "group() { cube(1); }"
+
+[[module]]
+name = "children"
+signature = "children(index)"
+summary = "Inside a module: its call's children, all or chosen by index."
+params = ["index: number | vector | range -- which children (default: all)"]
+example = "module row() { for (i = [0:$children - 1]) translate([i * 10, 0, 0]) children(i); }\nrow() { cube(5); sphere(3); }"
+
+[[module]]
+name = "for"
+signature = "for (name = range_or_list, ...) children"
+summary = "Repeat the children for each value; several variables nest."
+params = ["name = values: range | vector | string -- each value in turn"]
+example = "for (i = [0:3]) translate([i * 10, 0, 0]) cube(5);"
+
+[[module]]
+name = "intersection_for"
+signature = "intersection_for (name = range_or_list) children"
+summary = "Like for, but intersects the results instead of uniting them."
+params = ["name = values: range | vector -- each value in turn"]
+example = "intersection_for (a = [0, 60, 120]) rotate([0, 0, a]) cube([20, 5, 5], center=true);"
+
+[[module]]
+name = "if"
+signature = "if (condition) children [else children]"
+summary = "The children only when the condition is true."
+params = ["condition: any -- tested for truth (0, \"\", [], undef and false are false)"]
+example = "big = true;\nif (big) cube(10); else cube(2);"
+
+[[module]]
+name = "let"
+signature = "let (name = value, ...) children"
+summary = "Evaluate the children with extra variables; each may use the ones before."
+params = ["name = value -- a binding"]
+example = "let (w = 10, h = w / 2) cube([w, w, h]);"
+
+[[module]]
+name = "echo"
+signature = "echo(values...)"
+summary = "Print values to the console (`ECHO: ...`); named arguments print their names."
+params = ["values: any -- printed in order, `name = value` for named ones"]
+example = "echo(\"size\", 10, area=10 * 10);"
+
+[[module]]
+name = "assert"
+signature = "assert(condition, message)"
+summary = "Stop with an error when the condition is false."
+params = [
+    "condition: any -- must be true",
+    "message: any -- shown with the error",
+]
+example = "assert(10 > 0, \"size must be positive\");"
+notes = "A failed assert fails `neoscad test`."
+
+[[module]]
+name = "part"
+signature = "part(name) children"
+summary = "neoscad extension (`--enable part`): name a piece of the model for check, measure and snapshot."
+params = ["name: string -- the part's name; nested parts get dotted names"]
+example = "part(\"lid\") translate([0, 0, 10]) cube([20, 20, 2]);"
+notes = "Without --enable part it is an unknown module, as in OpenSCAD. See docs/cli-json.md, Named parts."
+
+# --- functions: numbers --------------------------------------------------------
+
+[[function]]
+name = "abs"
+signature = "abs(x)"
+summary = "Absolute value."
+params = ["x: number"]
+returns = "number"
+example = "echo(abs(-3));  // 3"
+
+[[function]]
+name = "sign"
+signature = "sign(x)"
+summary = "-1, 0 or 1 by the sign of x."
+params = ["x: number"]
+returns = "number"
+example = "echo(sign(-2.5));  // -1"
+
+[[function]]
+name = "round"
+signature = "round(x)"
+summary = "Nearest whole number; halves round away from zero."
+params = ["x: number"]
+returns = "number"
+example = "echo(round(2.5), round(-2.5));  // 3, -3"
+
+[[function]]
+name = "ceil"
+signature = "ceil(x)"
+summary = "Smallest whole number not less than x."
+params = ["x: number"]
+returns = "number"
+example = "echo(ceil(1.2));  // 2"
+
+[[function]]
+name = "floor"
+signature = "floor(x)"
+summary = "Largest whole number not greater than x."
+params = ["x: number"]
+returns = "number"
+example = "echo(floor(1.8));  // 1"
+
+[[function]]
+name = "sqrt"
+signature = "sqrt(x)"
+summary = "Square root."
+params = ["x: number"]
+returns = "number (nan for negative x)"
+example = "echo(sqrt(16));  // 4"
+
+[[function]]
+name = "pow"
+signature = "pow(base, exponent)"
+summary = "base raised to exponent (also the ^ operator)."
+params = ["base: number", "exponent: number"]
+returns = "number"
+example = "echo(pow(2, 10));  // 1024"
+
+[[function]]
+name = "exp"
+signature = "exp(x)"
+summary = "e raised to x."
+params = ["x: number"]
+returns = "number"
+example = "echo(exp(1));  // 2.71828"
+
+[[function]]
+name = "ln"
+signature = "ln(x)"
+summary = "Natural logarithm."
+params = ["x: number"]
+returns = "number"
+example = "echo(ln(exp(2)));  // 2"
+
+[[function]]
+name = "log"
+signature = "log(x) | log(base, x)"
+summary = "Logarithm, base 10 or the given base."
+params = ["base: number = 10", "x: number"]
+returns = "number"
+example = "echo(log(1000), log(2, 8));  // 3, 3"
+
+[[function]]
+name = "min"
+signature = "min(a, b, ...) | min(vector)"
+summary = "The smallest of the numbers, or of a vector's numbers."
+params = ["values: numbers, or one vector of numbers"]
+returns = "number"
+example = "echo(min(3, 1, 2), min([5, 4]));  // 1, 4"
+
+[[function]]
+name = "max"
+signature = "max(a, b, ...) | max(vector)"
+summary = "The largest of the numbers, or of a vector's numbers."
+params = ["values: numbers, or one vector of numbers"]
+returns = "number"
+example = "echo(max(3, 1, 2), max([5, 4]));  // 3, 5"
+
+[[function]]
+name = "rands"
+signature = "rands(min, max, count, seed)"
+summary = "A vector of count random numbers in [min, max]."
+params = [
+    "min: number -- lower bound",
+    "max: number -- upper bound",
+    "count: number -- how many",
+    "seed: number -- repeatable sequence (default: seeded per run)",
+]
+returns = "vector of numbers"
+example = "echo(rands(0, 1, 3, 42));"
+
+# --- functions: trigonometry (degrees) -----------------------------------------
+
+[[function]]
+name = "sin"
+signature = "sin(degrees)"
+summary = "Sine of an angle in degrees."
+params = ["degrees: number"]
+returns = "number"
+example = "echo(sin(30));  // 0.5"
+
+[[function]]
+name = "cos"
+signature = "cos(degrees)"
+summary = "Cosine of an angle in degrees."
+params = ["degrees: number"]
+returns = "number"
+example = "echo(cos(60));  // 0.5"
+
+[[function]]
+name = "tan"
+signature = "tan(degrees)"
+summary = "Tangent of an angle in degrees."
+params = ["degrees: number"]
+returns = "number"
+example = "echo(tan(45));  // 1"
+
+[[function]]
+name = "asin"
+signature = "asin(x)"
+summary = "Arc sine, in degrees."
+params = ["x: number -- in [-1, 1]"]
+returns = "number (degrees)"
+example = "echo(asin(0.5));  // 30"
+
+[[function]]
+name = "acos"
+signature = "acos(x)"
+summary = "Arc cosine, in degrees."
+params = ["x: number -- in [-1, 1]"]
+returns = "number (degrees)"
+example = "echo(acos(0.5));  // 60"
+
+[[function]]
+name = "atan"
+signature = "atan(x)"
+summary = "Arc tangent, in degrees (-90 to 90)."
+params = ["x: number"]
+returns = "number (degrees)"
+example = "echo(atan(1));  // 45"
+
+[[function]]
+name = "atan2"
+signature = "atan2(y, x)"
+summary = "Angle of the point [x, y] from the x axis, in degrees (-180 to 180)."
+params = ["y: number", "x: number"]
+returns = "number (degrees)"
+example = "echo(atan2(1, -1));  // 135"
+
+# --- functions: vectors and strings ---------------------------------------------
+
+[[function]]
+name = "len"
+signature = "len(value)"
+summary = "Number of elements of a vector or characters of a string."
+params = ["value: vector | string"]
+returns = "number (undef, with a warning, for other types)"
+example = "echo(len([1, 2, 3]), len(\"abc\"));  // 3, 3"
+
+[[function]]
+name = "concat"
+signature = "concat(a, b, ...)"
+summary = "Join vectors (and single values) into one vector."
+params = ["values: vectors or values"]
+returns = "vector"
+example = "echo(concat([1, 2], [3], 4));  // [1, 2, 3, 4]"
+
+[[function]]
+name = "lookup"
+signature = "lookup(key, table)"
+summary = "Linear interpolation in a table of [key, value] pairs sorted by key."
+params = [
+    "key: number -- where to look",
+    "table: [[key, value], ...] -- the samples; keys outside clamp to the ends",
+]
+returns = "number"
+example = "echo(lookup(1.5, [[1, 10], [2, 20]]));  // 15"
+
+[[function]]
+name = "search"
+signature = "search(match, data, num_returns_per_match=1, index_col_num=0)"
+summary = "Indices where values (or characters) of match occur in data."
+params = [
+    "match: value | vector | string -- what to find",
+    "data: vector | string -- where to look",
+    "num_returns_per_match: number = 1 -- 0 for all matches",
+    "index_col_num: number = 0 -- column compared in a vector of vectors",
+]
+returns = "vector of indices (or of vectors of indices)"
+example = "echo(search(\"b\", \"abcb\", 0));  // [[1, 3]]"
+
+[[function]]
+name = "norm"
+signature = "norm(v)"
+summary = "Euclidean length of a vector."
+params = ["v: vector of numbers"]
+returns = "number"
+example = "echo(norm([3, 4]));  // 5"
+
+[[function]]
+name = "cross"
+signature = "cross(a, b)"
+summary = "Cross product of two 3D vectors (a number for 2D vectors)."
+params = ["a: [x, y, z] | [x, y]", "b: [x, y, z] | [x, y]"]
+returns = "vector (number for 2D)"
+example = "echo(cross([1, 0, 0], [0, 1, 0]));  // [0, 0, 1]"
+
+[[function]]
+name = "str"
+signature = "str(values...)"
+summary = "Concatenate values as text."
+params = ["values: any -- printed as echo prints them (strings without quotes)"]
+returns = "string"
+example = "echo(str(\"w=\", 10, \"mm\"));  // \"w=10mm\""
+
+[[function]]
+name = "chr"
+signature = "chr(code, ...)"
+summary = "Characters from Unicode code points."
+params = ["code: number | vector | range -- code points"]
+returns = "string"
+example = "echo(chr(65, 66));  // \"AB\""
+
+[[function]]
+name = "ord"
+signature = "ord(character)"
+summary = "Unicode code point of a one-character string."
+params = ["character: string -- exactly one character"]
+returns = "number"
+example = "echo(ord(\"A\"));  // 65"
+
+# --- functions: types -------------------------------------------------------------
+
+[[function]]
+name = "is_undef"
+signature = "is_undef(x)"
+summary = "Whether x is undef (without the warning an undefined variable gives)."
+params = ["x: any"]
+returns = "bool"
+example = "echo(is_undef(undef));  // true"
+
+[[function]]
+name = "is_bool"
+signature = "is_bool(x)"
+summary = "Whether x is true or false."
+params = ["x: any"]
+returns = "bool"
+example = "echo(is_bool(false));  // true"
+
+[[function]]
+name = "is_num"
+signature = "is_num(x)"
+summary = "Whether x is a number other than nan."
+params = ["x: any"]
+returns = "bool"
+example = "echo(is_num(1), is_num(0 / 0));  // true, false"
+
+[[function]]
+name = "is_string"
+signature = "is_string(x)"
+summary = "Whether x is a string."
+params = ["x: any"]
+returns = "bool"
+example = "echo(is_string(\"a\"));  // true"
+
+[[function]]
+name = "is_list"
+signature = "is_list(x)"
+summary = "Whether x is a vector."
+params = ["x: any"]
+returns = "bool"
+example = "echo(is_list([1]));  // true"
+
+[[function]]
+name = "is_function"
+signature = "is_function(x)"
+summary = "Whether x is a function literal."
+params = ["x: any"]
+returns = "bool"
+example = "f = function(x) x * 2;\necho(is_function(f));  // true"
+
+# --- functions: other ---------------------------------------------------------------
+
+[[function]]
+name = "version"
+signature = "version()"
+summary = "OpenSCAD's version as [year, month, day]."
+params = []
+returns = "vector"
+example = "echo(version());"
+
+[[function]]
+name = "version_num"
+signature = "version_num()"
+summary = "OpenSCAD's version as one number, year * 10000 + month * 100 + day."
+params = []
+returns = "number"
+example = "echo(version_num() >= 20210101);"
+
+[[function]]
+name = "parent_module"
+signature = "parent_module(n)"
+summary = "Name of the module n levels up the call stack (0: the current one)."
+params = ["n: number -- levels up"]
+returns = "string"
+example = "module who() echo(parent_module(0));\nwho();  // \"who\""
+
+[[function]]
+name = "dxf_dim"
+signature = "dxf_dim(file, name, layer, origin, scale)"
+summary = "A named dimension's value from a DXF drawing."
+params = [
+    "file: string -- the DXF file",
+    "name: string -- the dimension's name",
+    "layer: string -- only this layer",
+    "origin: [x, y] -- offset",
+    "scale: number -- factor",
+]
+returns = "number"
+example = "echo(dxf_dim(file=\"drawing.dxf\", name=\"width\"));"
+
+[[function]]
+name = "dxf_cross"
+signature = "dxf_cross(file, layer, origin, scale)"
+summary = "The crossing point of the two lines on a DXF layer."
+params = [
+    "file: string -- the DXF file",
+    "layer: string -- the layer with two lines",
+    "origin: [x, y] -- offset",
+    "scale: number -- factor",
+]
+returns = "[x, y]"
+example = "echo(dxf_cross(file=\"drawing.dxf\", layer=\"center\"));"
+
+[[function]]
+name = "echo"
+signature = "echo(values...) expression"
+summary = "Print values, then return the expression's value (for tracing functions)."
+params = ["values: any -- printed as the echo module prints them"]
+returns = "the expression's value"
+example = "function f(x) = echo(\"f\", x) x * 2;\ny = f(3);"
+
+[[function]]
+name = "assert"
+signature = "assert(condition, message) expression"
+summary = "Stop with an error when the condition is false, else return the expression."
+params = ["condition: any -- must be true", "message: any -- shown with the error"]
+returns = "the expression's value"
+example = "function half(x) = assert(is_num(x), \"x must be a number\") x / 2;\necho(half(4));"
+
+[[function]]
+name = "let"
+signature = "let (name = value, ...) expression"
+summary = "The expression evaluated with extra variables."
+params = ["name = value -- a binding; later ones see earlier ones"]
+returns = "the expression's value"
+example = "echo(let (a = 2, b = a * 3) a + b);  // 8"
+
+# --- special variables -------------------------------------------------------------
+
+[[variable]]
+name = "$fn"
+signature = "$fn = 0"
+summary = "Fixed number of segments for circles, spheres, cylinders and arcs; 0 uses $fa and $fs."
+params = []
+example = "sphere(5, $fn=64);"
+notes = "Values of 3 or more override $fa/$fs. Like every $ variable it passes down to the calls below where it is set."
+
+[[variable]]
+name = "$fa"
+signature = "$fa = 12"
+summary = "Minimum angle in degrees per segment of a curve (used when $fn is 0)."
+params = []
+example = "$fa = 6;\ncircle(10);"
+
+[[variable]]
+name = "$fs"
+signature = "$fs = 2"
+summary = "Minimum length in mm of a curve's segment (used when $fn is 0)."
+params = []
+example = "$fs = 0.5;\ncircle(10);"
+
+[[variable]]
+name = "$t"
+signature = "$t = 0"
+summary = "Animation time, from 0 to 1 across the frames of an animation."
+params = []
+example = "rotate([0, 0, 360 * $t]) cube(5);"
+
+[[variable]]
+name = "$preview"
+signature = "$preview"
+summary = "True in preview (and preview-style exports), false in a full render."
+params = []
+example = "sphere(5, $fn=$preview ? 16 : 64);"
+
+[[variable]]
+name = "$vpt"
+signature = "$vpt"
+summary = "The camera's target point [x, y, z]; assign it at top level to set the view."
+params = []
+example = "echo($vpt);"
+
+[[variable]]
+name = "$vpr"
+signature = "$vpr"
+summary = "The camera's rotation [x, y, z] in degrees; assign it at top level to set the view."
+params = []
+example = "$vpr = [60, 0, 30];\ncube(5);"
+
+[[variable]]
+name = "$vpd"
+signature = "$vpd"
+summary = "The camera's distance from its target; assign it at top level to set the view."
+params = []
+example = "echo($vpd);"
+
+[[variable]]
+name = "$vpf"
+signature = "$vpf = 22.5"
+summary = "The camera's field of view in degrees."
+params = []
+example = "echo($vpf);"
+
+[[variable]]
+name = "$children"
+signature = "$children"
+summary = "Inside a module: how many children its call has."
+params = []
+example = "module count() echo($children);\ncount() { cube(1); sphere(1); }  // 2"
+
+[[variable]]
+name = "$parent_modules"
+signature = "$parent_modules"
+summary = "Inside a module: how many module calls are on the stack (for parent_module())."
+params = []
+example = "module depth() echo($parent_modules);\ndepth();"
+
+[[variable]]
+name = "PI"
+signature = "PI"
+summary = "The constant pi, 3.14159..."
+params = []
+example = "echo(2 * PI * 5);  // circumference of r=5"

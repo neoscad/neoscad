@@ -71,52 +71,55 @@ impl BuiltinModule {
     }
 }
 
+/// Every builtin module OpenSCAD registers, in registration order
+/// (neoscad's `part` is added only when enabled).
+pub(crate) const ALL: [(&str, BuiltinModule); 37] = [
+    ("children", BuiltinModule::Children),
+    ("echo", BuiltinModule::Echo),
+    ("assert", BuiltinModule::Assert),
+    ("for", BuiltinModule::For),
+    ("let", BuiltinModule::Let),
+    ("intersection_for", BuiltinModule::IntersectionFor),
+    ("if", BuiltinModule::If),
+    ("group", BuiltinModule::Group),
+    ("union", BuiltinModule::Union),
+    ("difference", BuiltinModule::Difference),
+    ("intersection", BuiltinModule::Intersection),
+    ("scale", BuiltinModule::Scale),
+    ("rotate", BuiltinModule::Rotate),
+    ("mirror", BuiltinModule::Mirror),
+    ("translate", BuiltinModule::Translate),
+    ("multmatrix", BuiltinModule::Multmatrix),
+    ("color", BuiltinModule::Color),
+    ("render", BuiltinModule::Render),
+    ("projection", BuiltinModule::Projection),
+    ("minkowski", BuiltinModule::Minkowski),
+    ("hull", BuiltinModule::Hull),
+    ("fill", BuiltinModule::Fill),
+    ("resize", BuiltinModule::Resize),
+    ("offset", BuiltinModule::Offset),
+    ("linear_extrude", BuiltinModule::LinearExtrude),
+    ("rotate_extrude", BuiltinModule::RotateExtrude),
+    ("cube", BuiltinModule::Cube),
+    ("sphere", BuiltinModule::Sphere),
+    ("cylinder", BuiltinModule::Cylinder),
+    ("polyhedron", BuiltinModule::Polyhedron),
+    ("square", BuiltinModule::Square),
+    ("circle", BuiltinModule::Circle),
+    ("polygon", BuiltinModule::Polygon),
+    ("surface", BuiltinModule::Surface),
+    ("import", BuiltinModule::Import),
+    ("text", BuiltinModule::Text),
+    ("roof", BuiltinModule::Roof),
+];
+
 pub(crate) fn table(syms: &mut Syms, parts: bool) -> HashMap<Sym, BuiltinModule, FxBuild> {
     use BuiltinModule::*;
-    let all = [
-        ("children", Children),
-        ("echo", Echo),
-        ("assert", Assert),
-        ("for", For),
-        ("let", Let),
-        ("intersection_for", IntersectionFor),
-        ("if", If),
-        ("group", Group),
-        ("union", Union),
-        ("difference", Difference),
-        ("intersection", Intersection),
-        ("scale", Scale),
-        ("rotate", Rotate),
-        ("mirror", Mirror),
-        ("translate", Translate),
-        ("multmatrix", Multmatrix),
-        ("color", Color),
-        ("render", Render),
-        ("projection", Projection),
-        ("minkowski", Minkowski),
-        ("hull", Hull),
-        ("fill", Fill),
-        ("resize", Resize),
-        ("offset", Offset),
-        ("linear_extrude", LinearExtrude),
-        ("rotate_extrude", RotateExtrude),
-        ("cube", Cube),
-        ("sphere", Sphere),
-        ("cylinder", Cylinder),
-        ("polyhedron", Polyhedron),
-        ("square", Square),
-        ("circle", Circle),
-        ("polygon", Polygon),
-        ("surface", Surface),
-        ("import", Import),
-        ("text", Text),
-        ("roof", Roof),
-    ];
     // `part` is left out entirely when off (not registered as a disabled
     // experiment like `roof`): OpenSCAD has no such module, so a program
     // calling it must get OpenSCAD's plain "Ignoring unknown module".
     let part = parts.then_some(("part", Part));
-    all.into_iter()
+    ALL.into_iter()
         .chain(part)
         .map(|(n, b)| (syms.intern(n), b))
         .collect()

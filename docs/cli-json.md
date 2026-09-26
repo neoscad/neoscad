@@ -423,6 +423,106 @@ there are).
   coordinates; `svg` is the file written with `--svg` (the outline in
   mm, the second axis up, holes by the even-odd rule).
 
+# `neoscad fmt`
+
+`neoscad fmt [PATHS...] [--check] [--diff] [--stdin] [--indent N]
+[--width N] [--format json]` formats OpenSCAD files
+(`crates/session/src/format.rs` over the `scadfmt` crate,
+`crates/fmt`). Directories are searched for `.scad` files, skipping
+hidden ones; no path is the current directory. Files are rewritten in
+place; `--check` lists the files that would change (`would reformat
+PATH` on stdout), `--diff` prints unified diffs, and both write nothing
+and exit 1 when something would change. `--stdin` formats standard
+input to standard output (a path, if given, names it and is where the
+configuration lookup starts). A file that does not parse is left as it
+is and reported on stderr (`neoscad fmt: PATH: line N: Parser error:
+...`); the exit status is then 1.
+
+**Guarantees**, checked on every file before anything is written: only
+whitespace changes (the same tokens and comments in the same order; a
+`//` comment may lose trailing blanks), and the `.ast` dump, customizer
+annotations included, is byte-identical; a file that would fail either
+is an internal error and is left alone. The output is idempotent. Over
+OpenSCAD's test inputs and examples, MCAD and BOSL2 (4,202 files that
+parse) every file formats with its program unchanged and formatting it
+again changes nothing.
+
+**Style** (close to BOSL2's and OpenSCAD's own examples): 4-space
+indent, 100 columns, one statement per line, `{` on its statement's line,
+`name = value` assignments and `for`/`let` bindings but `name=value`
+named arguments and parameter defaults (the corpus' majority), spaces
+around binary operators, `[0:n]` ranges of plain bounds and `[0 : n - 1]`
+otherwise, at most one blank line kept, none after `{`. A child
+statement stays on the line of its parent unless it was on its own line.
+Lists (arguments, parameters, vectors) that do not fit break one item
+per line (numbers fill lines instead), a lone vector argument hugs its
+parentheses (`polygon([` ... `])`), a long right-hand side moves to the
+next line, and ternary chains break before each `:`. At the top of the
+file, before the first `{`, where OpenSCAD reads customizer annotations
+from the raw lines, the layout keeps what they depend on: an assignment
+with a `//` annotation stays on one line, assignments sharing a line
+keep sharing it, and an indented `//` comment keeps its indent (in
+column 1 it would become the next assignment's description).
+
+**Configuration**: `.neoscad-fmt.toml` in the file's directory or the
+nearest one above it (read through the session's files), with
+`indent = N` (1-16) and `width = N` (20-1000) lines and `#` comments; an
+unknown key is an error. `--indent` and `--width` override it.
+
+With `--format json`, one object on stdout:
+
+```json
+{"schema": 1, "exit_code": 0, "mode": "write"|"check"|"diff",
+ "counts": {"files": 12, "changed": 3, "errors": 0},
+ "files": [FILE, ...]}
+```
+
+`FILE` is `{"path", "changed", "error", "config"}` (and `"diff"` with
+`--diff`): `config` is the configuration file used or `null`; `error` is
+`null` or `{"kind": "syntax"|"unsupported"|"internal"|"read"|"config",
+"message", "errors": [{"line", "message"}]}`. With `--stdin` the object
+is the one `FILE` plus `schema`, `exit_code`, `mode` (`stdin`) and
+`text`, the formatted text.
+
+# `neoscad docs`
+
+`neoscad docs [NAME] [--in FILE] [--full] [--format json]` prints the
+reference of a builtin module, function or special variable (entries
+written for neoscad in `crates/docs/builtins.toml` and compiled in: a
+test keeps them in step with the evaluator's builtins and runs every
+example), or with `--in FILE` of the modules and functions the file
+defines, includes or `use`s, with the comment block above each. BOSL2's
+structured blocks (`// Module:`, `// Synopsis:`, `// Usage:`,
+`// Arguments:` ...) are shown compactly: synopsis, usage, the first
+lines of the description and the arguments; `--full` shows the whole
+block. No name: a compact index (with `--in`, the file's definitions).
+An unknown name exits 1 with "did you mean" (the diagnostics' matcher),
+or says the name is an experimental OpenSCAD builtin neoscad does not
+enable.
+
+With `--format json`:
+
+```json
+{"schema": 1, "exit_code": 0, "name": "cube", "entries": [ENTRY, ...]}
+```
+
+A builtin `ENTRY` is `{"source": "builtin", "kind": "module"|"function"|
+"variable", "name", "signature", "summary", "params": [{"name", "type",
+"default", "doc"}], "returns", "example", "notes"}`; a user one is
+`{"source": "user", "kind", "name", "signature", "file", "line",
+"comment"?, "sections"?}` (`sections`: `[{"title", "text", "lines"}]`
+for structured blocks, synopsis, usage and arguments unless `--full`;
+`comment`: the block's lines otherwise). An unknown name gives
+`{"schema": 1, "exit_code": 1, "name", "error", "did_you_mean",
+"entries": []}`; the index is `{"schema": 1, "exit_code": 0,
+"builtins": [{"kind", "name", "summary"}], "definitions": [{"kind",
+"name", "file", "line"}]}`.
+
+# `neoscad test`
+
+Model tests; the command, the `@expect` grammar and the JSON are in
+`docs/model-tests.md`.
+
 # Diagnostics
 
 Every diagnostic in JSON output (the run object above, the snapshot
@@ -489,3 +589,5 @@ have them.
 - Phase 7b: added named parts (`--enable part`), `neoscad check`,
   `neoscad measure`, and the snapshot's `parts`, `highlight` and
   `issues`.
+- Phase 7b-2: added `neoscad fmt`, `neoscad docs` and `neoscad test`
+  (`docs/model-tests.md`).

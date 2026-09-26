@@ -223,6 +223,66 @@ pub fn run_check(files: Arc<MemFs>, src: &[u8]) -> String {
     out
 }
 
+/// `neoscad fmt` and `neoscad test` as a web worker runs them: with
+/// `test` false, `src` (an open document) formatted, then its formatted
+/// text formatted again (it must not change); with `test` true, `src` is
+/// `/doc/main_test.scad` and its tests run (in turn: wasm32 has no
+/// threads), each reported as `Test <id>: ok|FAILED`.
+pub fn run_tooling(files: Arc<MemFs>, src: &[u8], test: bool) -> String {
+    let base: Arc<dyn FileSystem + Send + Sync> = files;
+    let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(base, LIBRARY_DIR));
+    let mut cfg = session::Config::new(fs, LibraryPath(vec![PathBuf::from(LIBRARY_DIR)]));
+    cfg.work_dir = PathBuf::from(DOC_DIR);
+    let s = session::Session::new(cfg);
+    let mut out = String::new();
+    if test {
+        s.update(std::path::Path::new("main_test.scad"), src.to_vec());
+        let req = session::modeltest::TestRequest {
+            paths: vec!["main_test.scad".into()],
+            jobs: 4,
+            ..Default::default()
+        };
+        let r = match s.test(&req) {
+            Ok(r) => r,
+            Err(e) => return format!("{e}\n"),
+        };
+        for t in r.json["tests"].as_array().into_iter().flatten() {
+            let ok = t["ok"] == serde_json::json!(true);
+            out.push_str(&format!(
+                "Test {}: {}\n",
+                t["id"].as_str().unwrap_or(""),
+                if ok { "ok" } else { "FAILED" }
+            ));
+            for f in t["failures"].as_array().into_iter().flatten() {
+                out.push_str(&format!("  {}\n", f["message"].as_str().unwrap_or("")));
+            }
+        }
+        out.push_str(&format!("Tests: exit {}\n", r.exit_code));
+        return out;
+    }
+    s.update(std::path::Path::new("main.scad"), src.to_vec());
+    let req = session::format::FormatRequest {
+        input: Some("main.scad".into()),
+        ..Default::default()
+    };
+    let f = s.format(&req);
+    let text = match &f.result {
+        Ok(t) => t.clone(),
+        Err(e) => return format!("Format: {e}\n"),
+    };
+    out.push_str(&String::from_utf8_lossy(&text));
+    let again = s.format(&session::format::FormatRequest {
+        text: Some(text.clone()),
+        ..req
+    });
+    out.push_str(&format!(
+        "Format: changed {}, idempotent {}\n",
+        f.changed(),
+        again.result.as_ref().is_ok_and(|t| *t == text)
+    ));
+    out
+}
+
 /// What the renderer would draw, without a GPU: the scene's triangles and
 /// outline segments, and the viewer distance `--viewall` fits (the
 /// default camera's). This runs the renderer's CPU side (scene building,
@@ -305,7 +365,8 @@ pub extern "C" fn add_file(name_len: usize) {
 /// Run the input as the main file with `seed` for unseeded `rands()`,
 /// `frame_limit` as the frame budget (0 for the default), and as a preview
 /// when `preview` is 1; with `preview` 2, as a session case
-/// ([`run_session`]); with 3, as a check case ([`run_check`]).
+/// ([`run_session`]); with 3, as a check case ([`run_check`]); with 4
+/// formatted and with 5 as a test file ([`run_tooling`]).
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
@@ -327,7 +388,9 @@ pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
         n => n,
     };
     OUTPUT.lock().expect("output").clear();
-    let out = if preview == 3 {
+    let out = if preview == 4 || preview == 5 {
+        run_tooling(files, &src, preview == 5)
+    } else if preview == 3 {
         run_check(files, &src)
     } else if preview == 2 {
         run_session(files, &src)
@@ -417,7 +480,9 @@ mod tests {
             let seed = c["seed"].as_u64().unwrap_or(0) as u32;
             let preview = c["preview"].as_bool().unwrap_or(false);
             let src = c["src"].as_str().unwrap().as_bytes();
-            let out = if c["session"] == "check" {
+            let out = if c["session"] == "fmt" || c["session"] == "test" {
+                run_tooling(files, src, c["session"] == "test")
+            } else if c["session"] == "check" {
                 run_check(files, src)
             } else if c["session"].as_bool().unwrap_or(false) {
                 run_session(files, src)

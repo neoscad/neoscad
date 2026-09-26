@@ -359,6 +359,9 @@ const METHODS: &[&str] = &[
     "snapshot",
     "check",
     "measure",
+    "format",
+    "docs",
+    "test",
     "cli.export",
     "cli.snapshot",
     "cli.check",
@@ -380,6 +383,9 @@ fn quick(server: &Server, method: &str, params: &Value) -> Reply {
                 "snapshot": true,
                 "check": true,
                 "measure": true,
+                "format": true,
+                "docs": true,
+                "test": true,
                 "features": ["part"],
             },
         })),
@@ -539,6 +545,12 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
     if method.starts_with("cli.") {
         return cli(server, method, params);
     }
+    match method {
+        "format" => return format_method(s, params),
+        "docs" => return docs_method(s, params),
+        "test" => return test_method(s, params),
+        _ => {}
+    }
     if !matches!(
         method,
         "evaluate" | "render" | "export" | "snapshot" | "check" | "measure"
@@ -649,6 +661,84 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
         }
         _ => Err((code::METHOD_NOT_FOUND, format!("unknown method '{method}'"))),
     }
+}
+
+fn str_param(params: &Value, key: &str) -> Option<String> {
+    params.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn usize_param(params: &Value, key: &str) -> Result<Option<usize>, (i64, String)> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(|n| Some(n as usize))
+            .ok_or_else(|| invalid(format!("\"{key}\" must be a whole number"))),
+    }
+}
+
+/// `format`: a file's or a text's formatted text; nothing is written.
+fn format_method(s: &session::Session, params: &Value) -> Reply {
+    let req = session::format::FormatRequest {
+        input: str_param(params, "path").or_else(|| str_param(params, "input")),
+        text: str_param(params, "text").map(String::into_bytes),
+        cwd: str_param(params, "cwd").map(PathBuf::from),
+        indent: usize_param(params, "indent")?,
+        width: usize_param(params, "width")?,
+    };
+    if req.input.is_none() && req.text.is_none() {
+        return Err(invalid("missing \"path\" or \"text\""));
+    }
+    let diff = params.get("diff").and_then(Value::as_bool).unwrap_or(false);
+    let f = s.format(&req);
+    let exit_code = u8::from(f.result.is_err());
+    Ok(merge(f.json(true, diff), json!({"exit_code": exit_code})))
+}
+
+/// `docs`: a builtin's or a file's definition's reference.
+fn docs_method(s: &session::Session, params: &Value) -> Reply {
+    let r = s.docs(&session::docs::DocsRequest {
+        name: str_param(params, "name"),
+        file: str_param(params, "file").or_else(|| str_param(params, "in")),
+        cwd: str_param(params, "cwd").map(PathBuf::from),
+        full: params.get("full").and_then(Value::as_bool).unwrap_or(false),
+    });
+    Ok(merge(r.json, json!({"text": r.text})))
+}
+
+/// `test`: discover and run model tests.
+fn test_method(s: &session::Session, params: &Value) -> Reply {
+    let mut paths: Vec<String> = params
+        .get("paths")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    paths.extend(str_param(params, "path"));
+    let enable: Vec<String> = params
+        .get("enable")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let jobs = usize_param(params, "jobs")?.unwrap_or_else(|| {
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+    });
+    let req = session::modeltest::TestRequest {
+        paths,
+        cwd: str_param(params, "cwd").map(PathBuf::from),
+        filter: str_param(params, "filter"),
+        parts: crate::parts_enabled(&enable)
+            || params
+                .get("parts")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        jobs: jobs.max(1),
+    };
+    let r = s.test(&req).map_err(cancelled)?;
+    Ok(r.json)
 }
 
 /// `export`: one output, written by the server.

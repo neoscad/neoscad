@@ -742,6 +742,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "neoscad-docs"
+version = "0.1.0"
+dependencies = [
+ "neoscad-lang",
+]
+
+[[package]]
 name = "neoscad-eval"
 version = "0.1.0"
 dependencies = [
@@ -749,6 +756,13 @@ dependencies = [
  "neoscad-lang",
  "sha2",
  "unicode-script",
+]
+
+[[package]]
+name = "neoscad-fmt"
+version = "0.1.0"
+dependencies = [
+ "neoscad-lang",
 ]
 
 [[package]]
@@ -798,7 +812,9 @@ dependencies = [
 name = "neoscad-session"
 version = "0.1.0"
 dependencies = [
+ "neoscad-docs",
  "neoscad-eval",
+ "neoscad-fmt",
  "neoscad-geom",
  "neoscad-io",
  "neoscad-lang",

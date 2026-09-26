@@ -39,7 +39,8 @@ function instance(files) {
       put(Buffer.from(src));
       try {
         e.run_input(seed >>> 0, (frames || 0) >>> 0,
-          preview === 'check' ? 3 : preview === 'session' ? 2 : preview ? 1 : 0);
+          preview === 'test' ? 5 : preview === 'fmt' ? 4 : preview === 'check' ? 3
+            : preview === 'session' ? 2 : preview ? 1 : 0);
       } catch (x) {
         // A Rust panic leaves its message in the output before trapping.
         let why = '';
@@ -80,7 +81,8 @@ function runCase(c) {
   const t0 = Date.now();
   let out;
   try {
-    const mode = c.session === 'check' ? 'check' : c.session ? 'session' : c.preview;
+    const mode = ['check', 'fmt', 'test'].includes(c.session) ? c.session
+      : c.session ? 'session' : c.preview;
     out = instance(files).run(c.src, c.seed || 0, 0, mode);
   } catch (x) {
     return { error: String(x), ms: Date.now() - t0 };
