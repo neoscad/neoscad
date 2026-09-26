@@ -349,6 +349,27 @@ impl ManifoldGeometry {
         }
     }
 
+    /// [`Self::to_original`] for a solid that must not keep the ID it was
+    /// built with: a solid from [`Self::from_built`] already is one
+    /// original, and `to_original` would keep its ID, so it is retagged
+    /// with a fresh one from `ids` instead (same mesh, no rebuild). Any
+    /// other solid goes through `to_original`.
+    pub fn to_fresh_original(&mut self, ids: &dyn IdSource) {
+        if self.own_id.is_none() || self.manifold.is_empty() {
+            self.own_id = None;
+            self.to_original(ids);
+            return;
+        }
+        let id = ids.reserve(1);
+        let mut imp = std::mem::replace(&mut self.manifold, Manifold::empty()).into_impl();
+        set_original_id(&mut imp, id);
+        self.manifold = Manifold::from_impl(imp);
+        self.own_id = Some(id);
+        self.original_ids = BTreeSet::from([id]);
+        self.id_to_color.clear();
+        self.subtracted.clear();
+    }
+
     /// `ManifoldGeometry::toOriginal` (`ManifoldGeometry.cc:383-392`): the
     /// solid becomes one original with no colour and no cut faces.
     pub fn to_original(&mut self, ids: &dyn IdSource) {

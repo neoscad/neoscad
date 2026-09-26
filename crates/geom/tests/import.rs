@@ -145,3 +145,61 @@ fn svg_and_dat_imports() {
     };
     assert_eq!(ps.faces.len(), 9);
 }
+
+/// A closed bipyramid with `n` sides and a different colour on each of its
+/// `2n` faces, as OFF.
+fn coloured_bipyramid(n: usize, shade: usize) -> Vec<u8> {
+    use std::fmt::Write;
+    let mut t = format!("OFF\n{} {} 0\n", n + 2, 2 * n);
+    for i in 0..n {
+        let a = std::f64::consts::TAU * i as f64 / n as f64;
+        writeln!(t, "{} {} 0", 5.0 * a.cos(), 5.0 * a.sin()).unwrap();
+    }
+    t += "0 0 4\n0 0 -4\n";
+    for i in 0..n {
+        let j = (i + 1) % n;
+        for (k, face) in [[n, i, j], [n + 1, j, i]].iter().enumerate() {
+            let c = 2 * i + k + shade;
+            writeln!(
+                t,
+                "3 {} {} {} {} {} {} 255",
+                face[0],
+                face[1],
+                face[2],
+                (c * 37) % 256,
+                (c * 91) % 256,
+                (c * 13) % 256
+            )
+            .unwrap();
+        }
+    }
+    t.into_bytes()
+}
+
+/// A mesh with more colours than an ID block holds, converted inside
+/// sibling subtrees that run on different threads: the extra IDs used to
+/// come from Manifold's global counter in whatever order the threads drew
+/// them, so the parent union ordered the siblings' faces differently from
+/// run to run. Now the render starts again with blocks big enough.
+#[test]
+fn many_coloured_meshes_export_identically_every_time() {
+    let a = coloured_bipyramid(40, 0);
+    let b = coloured_bipyramid(40, 1);
+    let files = fs(&[("/mem/a.off", &a), ("/mem/b.off", &b)]);
+    let src = "union() { cube(1); import(\"a.off\"); }\n\
+               translate([20,0,0]) union() { cube(2); import(\"b.off\"); }\n\
+               translate([40,0,0]) union() { cube(3); import(\"a.off\"); }\n\
+               translate([60,0,0]) union() { cube(4); import(\"b.off\"); }";
+    let export = || {
+        let (g, msgs) = render(&Renderer::new(), files.clone(), src);
+        assert!(msgs.is_empty(), "{msgs:?}");
+        let ps =
+            geom::export::as_polyset(&g.expect("geometry"), &geom::color::CORNFIELD).expect("3D");
+        assert!(ps.colors.len() > 64, "{} colours", ps.colors.len());
+        geom::export::off(&ps, &mut Vec::new())
+    };
+    let first = export();
+    for run in 0..12 {
+        assert!(export() == first, "run {run} exported different bytes");
+    }
+}

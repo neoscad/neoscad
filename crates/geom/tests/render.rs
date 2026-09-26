@@ -353,3 +353,17 @@ fn folded_hulls_are_repaired() {
         assert!((v - expected).abs() < 1e-2, "{src}: volume {v}");
     }
 }
+
+/// Sibling minkowski sums are built on different threads. A sum that is a
+/// single hull used to keep the ID its hull drew from Manifold's global
+/// counter, so which sibling's triangles came first in the union changed
+/// from run to run (15 different files in 20 runs of this program).
+#[test]
+fn sibling_minkowski_sums_export_identically_every_time() {
+    let src = "for (i=[0:3]) translate([i*25,0,0]) minkowski() { \
+               cube([10+i,8,3], center=true); sphere(2+i/4, $fn=24); }";
+    let first = off(src);
+    for run in 0..20 {
+        assert!(off(src) == first, "run {run} exported different bytes");
+    }
+}

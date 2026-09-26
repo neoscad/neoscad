@@ -224,14 +224,6 @@ entry when it is done.
   mesh IDs as C++ `Compose` does (`csg_tree.cpp:386-395`); `batch` in
   `manifold_geom.rs` renumbers colliding operands first. Report upstream,
   then drop the workaround. (5b)
-- Several `minkowski()` siblings under one union export their triangles
-  in a different order from run to run (same triangles; checked at 1e5c75b
-  too, so not new): 300 rounded boxes side by side, every third a
-  minkowski sum, differ only in the minkowski ones. Likely cause:
-  `minkowski::fold` takes its hull IDs from `Manifold::reserve_ids` while
-  sibling subtrees run in parallel, so the base ID, and with it the
-  union's triangle order, depends on scheduling; the IDs should come from
-  the node's reserved block like other built solids. (H1)
 
 ## Structure
 - File access is not all behind `lang::loader::FileSystem` yet, so it

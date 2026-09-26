@@ -24,10 +24,14 @@
 //! With the `parallel` feature, a node's children are evaluated on rayon's
 //! pool. Everything that could depend on scheduling is fixed up front:
 //! original IDs come from blocks reserved in tree order, one per child
-//! slot of each subtree key
-//! (see [`crate::manifold_geom::IdSource`]), and messages travel with the
-//! results and are concatenated in child order, so the output is the same
-//! as a serial run's.
+//! slot of each subtree key (see [`crate::manifold_geom::IdSource`]; a
+//! block that turns out too small makes the render start again with a
+//! bigger one, see [`Overflow`]), and messages travel with the results and
+//! are concatenated in child order, so the output is the same as a serial
+//! run's. IDs that Manifold draws from its global counter on its own (mesh
+//! IDs, and the IDs of freshly built hulls) never decide an order in the
+//! output: runs sharing an original ID are ordered by geometry
+//! (`canonical_mesh`), and built hulls are retagged from a block.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -134,7 +138,11 @@ type Key = u128;
 #[derive(Debug, Default)]
 pub struct Renderer {
     cache: Mutex<Cache>,
-    ids: Mutex<HashMap<(Key, u32), u32>>,
+    /// ID blocks by (subtree key, slot): first ID and size.
+    ids: Mutex<HashMap<(Key, u32), (u32, u32)>>,
+    /// IDs each block turned out to need beyond [`BLOCK`], so the next tree
+    /// pass reserves enough (see [`Overflow`]).
+    needs: Mutex<Needs>,
     /// Worker threads with the evaluator's stack size: the tree walk
     /// recurses once per level, and trees from recursive modules are as
     /// deep as the evaluator allowed, far beyond a default 2 MiB stack.
@@ -215,41 +223,83 @@ fn cost_of(g: &Geometry) -> usize {
     }
 }
 
-/// IDs per block: enough for one conversion of a mesh with this many
-/// colours. A mesh with more takes fresh IDs from Manifold's counter.
+/// IDs per block by default: enough for one conversion of a mesh with
+/// this many colours, or this many conversions under one node.
 const BLOCK: u32 = 64;
 
 /// The slot of a node's own ID block (children use their index).
 const OWN: u32 = u32::MAX;
 
-#[derive(Debug, Clone, Copy)]
-struct Block(u32);
+/// Where blocks report running out.
+///
+/// An ID drawn from Manifold's global counter while subtrees are evaluated
+/// in parallel gets a value that depends on which thread drew first, and
+/// original IDs decide the order of a solid's triangle runs, so such an ID
+/// in a result makes the output depend on scheduling (two siblings that
+/// each drew one would swap places in their parent's union from run to
+/// run). So a block that runs out still hands out global IDs, to finish the
+/// render, but records how many it needed; [`Renderer::render`] then drops
+/// that render's results and renders again with blocks that size, reserved
+/// in tree order like the rest. Only a mesh with more than [`BLOCK`]
+/// colours, or a node converting more than that many meshes, pays for the
+/// second pass.
+type Overflow = Mutex<Needs>;
 
-impl IdSource for Block {
+/// IDs needed by (subtree key, slot), for blocks that ran out.
+type Needs = HashMap<(Key, u32), u32>;
+
+#[derive(Clone, Copy)]
+struct Block<'a> {
+    first: u32,
+    size: u32,
+    key: (Key, u32),
+    overflow: &'a Overflow,
+}
+
+impl Block<'_> {
+    /// Record that this block needed `n` IDs, and draw them globally.
+    fn overflow(&self, n: u32, count: u32) -> u32 {
+        let mut o = self.overflow.lock().expect("overflow log");
+        let need = o.entry(self.key).or_insert(0);
+        *need = (*need).max(n);
+        Manifold::reserve_ids(count)
+    }
+}
+
+impl std::fmt::Debug for Block<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Block({}, {})", self.first, self.size)
+    }
+}
+
+impl IdSource for Block<'_> {
+    /// The block's start every time: each call is a separate conversion of
+    /// the same child, whose IDs may repeat (as OpenSCAD's would not, but
+    /// they never meet in one solid).
     fn reserve(&self, count: u32) -> u32 {
-        if count <= BLOCK {
-            self.0
+        if count <= self.size {
+            self.first
         } else {
-            Manifold::reserve_ids(count)
+            self.overflow(count, count)
         }
     }
 }
 
 /// Consecutive ranges of one block, for several conversions under one
-/// node; past the block's end, fresh IDs from Manifold's counter.
-struct Seq {
-    block: Block,
+/// node.
+struct Seq<'a> {
+    block: Block<'a>,
     used: std::cell::Cell<u32>,
 }
 
-impl IdSource for Seq {
+impl IdSource for Seq<'_> {
     fn reserve(&self, count: u32) -> u32 {
         let used = self.used.get();
-        if used + count <= BLOCK {
-            self.used.set(used + count);
-            self.block.0 + used
+        self.used.set(used + count);
+        if used + count <= self.block.size {
+            self.block.first + used
         } else {
-            Manifold::reserve_ids(count)
+            self.block.overflow(used + count, count)
         }
     }
 }
@@ -274,7 +324,9 @@ struct Ctx<'a> {
     first: Vec<bool>,
     /// ID blocks by (subtree key, slot): slot `i` for the conversion of
     /// child `i`, [`OWN`] for the node's own use (colouring a solid).
-    blocks: HashMap<(Key, u32), u32>,
+    blocks: HashMap<(Key, u32), (u32, u32)>,
+    /// Blocks that ran out during this render.
+    overflow: Overflow,
 }
 
 fn loc_of(n: &Node) -> Option<MsgLoc> {
@@ -311,22 +363,50 @@ impl Renderer {
         keys: &Keys,
         opts: RenderOptions,
     ) -> Result<Rendered, Unsupported> {
+        loop {
+            let (out, overflow) = self.render_once(top, keys, &opts)?;
+            if overflow.is_empty() {
+                return Ok(out);
+            }
+            // Some block was too small, so this render's results hold IDs
+            // drawn in scheduling order (see [`Overflow`]). Size those
+            // blocks for what they needed and start again from nothing;
+            // the results cached on the way may hold such IDs too. The
+            // needs only grow, so this ends after one retry.
+            let mut needs = self.needs.lock().expect("id needs");
+            for (k, n) in overflow {
+                let e = needs.entry(k).or_insert(0);
+                *e = (*e).max(n);
+            }
+            drop(needs);
+            self.clear();
+        }
+    }
+
+    fn render_once(
+        &self,
+        top: &Node,
+        keys: &Keys,
+        opts: &RenderOptions,
+    ) -> Result<(Rendered, Needs), Unsupported> {
         fn max_index(n: &Node) -> usize {
             n.children.iter().map(max_index).fold(n.index, usize::max)
         }
         let len = max_index(top) + 1;
         let mut ctx = Ctx {
             r: self,
-            opts: &opts,
+            opts,
             hashes: vec![0; len],
             first: vec![false; len],
             blocks: HashMap::new(),
+            overflow: Mutex::new(HashMap::new()),
         };
         // Tree order pass: hashes, first occurrences and ID blocks, all
         // decided before anything runs in parallel.
         {
             let mut seen = HashSet::new();
             let mut ids = self.ids.lock().expect("id registry");
+            let needs = self.needs.lock().expect("id needs");
             // (node, its parent's key and first-occurrence flag)
             let mut stack: Vec<(&Node, Option<(Key, bool)>)> = vec![(top, None)];
             while let Some((n, parent)) = stack.pop() {
@@ -342,10 +422,12 @@ impl Renderer {
                 seen.insert(h);
                 ctx.first[n.index] = first;
                 for slot in std::iter::once(OWN).chain(0..n.children.len() as u32) {
-                    let b = *ids
-                        .entry((h, slot))
-                        .or_insert_with(|| Manifold::reserve_ids(BLOCK));
-                    ctx.blocks.insert((h, slot), b);
+                    let size = needs.get(&(h, slot)).map_or(BLOCK, |&n| n.max(BLOCK));
+                    let b = ids.entry((h, slot)).or_insert((0, 0));
+                    if b.1 < size {
+                        *b = (Manifold::reserve_ids(size), size);
+                    }
+                    ctx.blocks.insert((h, slot), *b);
                 }
                 stack.extend(n.children.iter().rev().map(|c| (c, Some((h, first)))));
             }
@@ -385,11 +467,15 @@ impl Renderer {
             geom = Some(Geometry::Manifold(Arc::new(m)));
         }
         let cache_entries = self.cache.lock().expect("cache").entries.len();
-        Ok(Rendered {
-            geometry: geom,
-            messages: msgs,
-            cache_entries,
-        })
+        let overflow = std::mem::take(&mut *ctx.overflow.lock().expect("overflow log"));
+        Ok((
+            Rendered {
+                geometry: geom,
+                messages: msgs,
+                cache_entries,
+            },
+            overflow,
+        ))
     }
 
     /// Forget every cached geometry.
@@ -399,8 +485,15 @@ impl Renderer {
 }
 
 impl Ctx<'_> {
-    fn block(&self, n: &Node, slot: u32) -> Block {
-        Block(self.blocks[&(self.hashes[n.index], slot)])
+    fn block(&self, n: &Node, slot: u32) -> Block<'_> {
+        let key = (self.hashes[n.index], slot);
+        let (first, size) = self.blocks[&key];
+        Block {
+            first,
+            size,
+            key,
+            overflow: &self.overflow,
+        }
     }
 
     /// Evaluate one node, from the cache when possible.
@@ -1008,7 +1101,7 @@ impl Ctx<'_> {
                         _ => {
                             let (slots, geoms): (Vec<u32>, Vec<Geometry>) =
                                 actual.into_iter().unzip();
-                            let conv = |k: usize| -> Box<dyn IdSource> {
+                            let conv = |k: usize| -> Box<dyn IdSource + '_> {
                                 Box::new(self.block(n, slots[k]))
                             };
                             let own = Seq {

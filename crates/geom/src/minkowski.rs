@@ -551,9 +551,9 @@ fn hulls(sets: &[Vec<Vec3>]) -> Vec<ManifoldImpl> {
 /// those overlaps is most of the cost, so fewer and larger pieces win (an
 /// extruded L summed with a 32-segment sphere took 53 ms through boundary
 /// patches, 5 ms as 2 pieces).
-pub fn minkowski_3d(
+pub fn minkowski_3d<'a>(
     children: &[Geometry],
-    conv: &dyn Fn(usize) -> Box<dyn IdSource>,
+    conv: &dyn Fn(usize) -> Box<dyn IdSource + 'a>,
     own: &dyn IdSource,
     warnings: &mut Warnings,
     errors: &mut Warnings,
@@ -571,9 +571,9 @@ pub fn minkowski_3d(
 /// which goes through Nef polyhedra. A flat solid makes an empty Nef
 /// polyhedron and so an empty sum (`issue1671.scad`); a child that cannot
 /// be converted drops out, leaving the others (`issue1137.scad`).
-fn fallback(
+fn fallback<'a>(
     children: &[Geometry],
-    conv: &dyn Fn(usize) -> Box<dyn IdSource>,
+    conv: &dyn Fn(usize) -> Box<dyn IdSource + 'a>,
     own: &dyn IdSource,
     warnings: &mut Warnings,
     errors: &mut Warnings,
@@ -608,9 +608,9 @@ fn fallback(
     geom
 }
 
-fn fold(
+fn fold<'a>(
     children: &[Geometry],
-    conv: &dyn Fn(usize) -> Box<dyn IdSource>,
+    conv: &dyn Fn(usize) -> Box<dyn IdSource + 'a>,
     own: &dyn IdSource,
 ) -> Result<ManifoldGeometry, Failed> {
     let mut lhs = operand(&children[0], &*conv(0))?;
@@ -642,7 +642,16 @@ fn fold(
         let mut n = ManifoldGeometry::batch(OpType::Add, parts)
             .filter(|m| !m.is_empty())
             .ok_or(Failed)?;
-        n.to_original(own);
+        // Not `to_original`: when the sum is a single hull, the batch
+        // returns that hull, which already counts as one original under
+        // the ID it was built with. That ID comes from Manifold's global
+        // counter, drawn while sibling subtrees run on other threads, so
+        // keeping it made the order of this solid's triangles in a parent
+        // union depend on scheduling. The hull IDs themselves may stay
+        // global: they are drawn in one call, so their relative order is
+        // fixed, they are above every ID reserved before the render, and
+        // they never outlive this step.
+        n.to_fresh_original(own);
         result = Some(n);
     }
     result.ok_or(Failed)
