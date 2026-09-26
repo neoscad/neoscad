@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use manifold_rust::linalg::{Mat3x4, Vec3};
+use manifold_rust::impl_mesh::ManifoldImpl;
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::{BooleanEngine, Error, MeshGL64, OpType};
 
@@ -278,6 +279,27 @@ impl ManifoldGeometry {
         ManifoldGeometry { manifold, original_ids, id_to_color, subtracted, own_id: None }
     }
 
+    /// A solid the kernel built from points (`Manifold::Hull`), wrapped as
+    /// `ManifoldGeometry(manifold)` does: no original IDs, colours or cut
+    /// faces, so a hull subtracted in a `difference()` is not drawn as a cut
+    /// face. The kernel tagged it with an ID from its process-wide counter,
+    /// whose value depends on which thread drew first; it is retagged with
+    /// `id`, from a block reserved in tree order, so later booleans order
+    /// its triangles the same way on every run.
+    pub fn from_built(mut imp: ManifoldImpl, id: u32) -> ManifoldGeometry {
+        set_original_id(&mut imp, id);
+        ManifoldGeometry { manifold: Manifold::from_impl(imp), original_ids: BTreeSet::new(), id_to_color: BTreeMap::new(), subtracted: BTreeSet::new(), own_id: Some(id) }
+    }
+
+    /// `ManifoldGeometry::toOriginal` (`ManifoldGeometry.cc:383-392`): the
+    /// solid becomes one original with no colour and no cut faces.
+    pub fn to_original(&mut self, ids: &dyn IdSource) {
+        let id = self.make_original(ids);
+        self.original_ids = BTreeSet::from([id]);
+        self.id_to_color.clear();
+        self.subtracted.clear();
+    }
+
     /// `ManifoldGeometry::transform`.
     pub fn transform(&mut self, m: &Matrix) {
         let col = |c: usize| Vec3::new(m[0][c], m[1][c], m[2][c]);
@@ -396,6 +418,24 @@ impl ManifoldGeometry {
         }
         positive_union(self.manifold.as_impl().project())
     }
+}
+
+/// Manifold's `InitializeOriginal` with a given ID instead of a fresh one
+/// from the kernel's counter: every triangle becomes part of one original
+/// mesh `id`.
+pub fn set_original_id(imp: &mut ManifoldImpl, id: u32) {
+    use manifold_rust::types::Relation;
+    let had_normals = imp.all_have_normals();
+    let id = id as i32;
+    imp.mesh_relation.original_id = id;
+    for (tri, r) in imp.mesh_relation.tri_ref.iter_mut().enumerate() {
+        r.mesh_id = id;
+        r.original_id = id;
+        r.face_id = -1;
+        r.coplanar_id = tri as i32;
+    }
+    imp.mesh_relation.mesh_id_transform.clear();
+    imp.mesh_relation.mesh_id_transform.insert(id, Relation { original_id: id, transform: Mat3x4::identity(), back_side: false, has_normals: had_normals });
 }
 
 /// The solid's mesh with its runs in an order that does not depend on

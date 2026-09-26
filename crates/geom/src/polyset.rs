@@ -224,6 +224,23 @@ impl PolySet {
         }
         out
     }
+
+    /// Every face split into triangles over the same vertices, with none
+    /// merged: the mesh `createSurfaceMeshFromPolySet` hands CGAL, which
+    /// takes the faces as they are. [`PolySet::tessellate`] merges vertices
+    /// that coincide in `float` precision, which tears a mesh whose
+    /// vertices are closer than that apart (`issue1138.scad`, 2e-7) into a
+    /// non-manifold one; minkowski() reads its operands the CGAL way.
+    /// Faces with fewer than three vertices are dropped; colours are not
+    /// kept.
+    pub fn triangulate_faces(&self) -> PolySet {
+        let mut out = PolySet { vertices: self.vertices.clone(), convex: self.convex, triangular: true, ..Default::default() };
+        for f in self.faces.iter().filter(|f| f.len() >= 3) {
+            let tris = if f.len() == 3 { vec![[f[0], f[1], f[2]]] } else { triangulate_face(&self.vertices, f) };
+            out.faces.extend(tris.into_iter().map(|t| t.to_vec()));
+        }
+        out
+    }
 }
 
 /// Apply a 4x4 row-major affine matrix to a point.

@@ -9,14 +9,15 @@
 //! - [`polygon2d`] and [`clipper`]: 2D shapes and the 2D kernel on
 //!   `clipper2-rust` (sanitizing, booleans, `offset`, `fill`).
 //! - [`extrude`]: `linear_extrude` and `rotate_extrude`.
+//! - [`hull`] and [`minkowski`]: `hull()` and `minkowski()` in 2D and 3D.
 //! - [`evaluate`]: the tree walk, with a cache keyed by
 //!   [`eval::dump::Keys`] and optional parallelism (feature `parallel`).
 //! - [`export`]: the mesh a result exports as, handed to the `io` crate's
 //!   STL, OFF, OBJ, 3MF, SVG and DXF writers, and the render summary.
 //! - `import`: `import()` and `surface()` over the `io` crate's readers.
 //!
-//! Hull, minkowski, resize and text belong to later phases; the evaluator
-//! reports them as [`evaluate::Unsupported`].
+//! Text belongs to a later phase; the evaluator reports it (and `.nef3`
+//! imports) as [`evaluate::Unsupported`].
 
 pub mod clipper;
 pub mod color;
@@ -24,8 +25,10 @@ pub mod evaluate;
 pub mod export;
 pub mod extrude;
 pub mod fragments;
+pub mod hull;
 mod import;
 pub mod manifold_geom;
+pub mod minkowski;
 pub mod polygon2d;
 pub mod polyset;
 pub mod primitives;

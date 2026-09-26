@@ -49,7 +49,7 @@ use crate::color::{Color, Scheme};
 use crate::manifold_geom::{IdSource, ManifoldGeometry};
 use crate::polygon2d::Polygon2d;
 use crate::polyset::PolySet;
-use crate::{Geometry, clipper, extrude, fragments, primitives};
+use crate::{Geometry, clipper, extrude, fragments, hull, minkowski, primitives};
 
 /// Where a message points: the instantiation that produced the node.
 #[derive(Debug, Clone, PartialEq)]
@@ -228,6 +228,9 @@ impl IdSource for Seq {
         }
     }
 }
+
+/// A node's children with their results.
+type Items<'n> = Vec<(&'n Node, Option<Geometry>)>;
 
 /// What one subtree produced.
 struct Out {
@@ -445,9 +448,13 @@ impl Ctx<'_> {
                 Ok(Out { geom, msgs })
             }
             NodeKind::Projection { cut, .. } => self.projection(n, *cut),
-            NodeKind::Minkowski { .. } => unsupported("minkowski"),
-            NodeKind::Hull => unsupported("hull"),
-            NodeKind::Resize { .. } => unsupported("resize"),
+            NodeKind::Minkowski { .. } => self.minkowski(n),
+            NodeKind::Hull => self.hull(n),
+            NodeKind::Resize { newsize, autosize, .. } => {
+                let mut out = self.apply(n, Op::Union)?;
+                out.geom = out.geom.map(|g| resize(g, *newsize, *autosize, &mut out.msgs));
+                Ok(out)
+            }
             NodeKind::Surface { file, center, invert, .. } => Ok(self.surface(n, file, *center, *invert)),
             NodeKind::Import(i) if i.kind == "nef3" => unsupported("import"),
             NodeKind::Import(i) => Ok(self.import(n, i)),
@@ -508,18 +515,25 @@ impl Ctx<'_> {
         }
     }
 
-    /// `applyToChildren` (`GeometryEvaluator.cc:128-139`).
-    fn apply(&self, n: &Node, op: Op) -> Result<Out, Unsupported> {
+    /// The children's results paired with their nodes, and their messages
+    /// in child order.
+    fn items<'n>(&self, n: &'n Node) -> Result<(Items<'n>, Vec<Msg>), Unsupported> {
         let results = self.children(n)?;
         let mut msgs = Vec::new();
-        let mut items: Vec<(&Node, Option<Geometry>)> = Vec::with_capacity(results.len());
+        let mut items: Items<'n> = Vec::with_capacity(results.len());
         for (c, o) in n.children.iter().zip(results) {
             msgs.extend(o.msgs);
             items.push((c, o.geom));
         }
-        // `isValidDim`: the first child with geometry sets the dimension.
+        Ok((items, msgs))
+    }
+
+    /// `isValidDim` over the children (`GeometryEvaluator.cc:114-125`): the
+    /// first child with geometry sets the dimension, and the first later
+    /// non-empty child of the other dimension warns and ends the scan.
+    fn dim(items: &[(&Node, Option<Geometry>)], msgs: &mut Vec<Msg>) -> u32 {
         let mut dim = 0;
-        for (c, g) in &items {
+        for (c, g) in items {
             if is_background(c) {
                 continue;
             }
@@ -531,7 +545,13 @@ impl Ctx<'_> {
                 break;
             }
         }
-        let geom = match dim {
+        dim
+    }
+
+    /// `applyToChildren` (`GeometryEvaluator.cc:128-139`).
+    fn apply(&self, n: &Node, op: Op) -> Result<Out, Unsupported> {
+        let (items, mut msgs) = self.items(n)?;
+        let geom = match Self::dim(&items, &mut msgs) {
             2 => self.apply_2d(&items, op, &mut msgs),
             3 => self.apply_3d(n, &items, op, &mut msgs),
             _ => None,
@@ -539,12 +559,11 @@ impl Ctx<'_> {
         Ok(Out { geom, msgs })
     }
 
-    /// `applyToChildren3D` (`GeometryEvaluator.cc:146-209`) with
-    /// `collectChildren3D` (`:386-411`) and `applyOperator3DManifold`
-    /// (`manifold-applyops.cc`).
-    fn apply_3d(&self, n: &Node, items: &[(&Node, Option<Geometry>)], op: Op, msgs: &mut Vec<Msg>) -> Option<Geometry> {
-        // (child index, node, geometry)
-        let mut children: Vec<(u32, &Node, Option<Geometry>)> = Vec::new();
+    /// `collectChildren3D` (`GeometryEvaluator.cc:386-411`): one entry per
+    /// non-background child as (child index, node, geometry), with 2D
+    /// geometry replaced by nothing and a warning.
+    fn collect_3d<'n>(items: &[(&'n Node, Option<Geometry>)], msgs: &mut Vec<Msg>) -> Vec<(u32, &'n Node, Option<Geometry>)> {
+        let mut children = Vec::new();
         for (i, (c, g)) in items.iter().enumerate() {
             let i = i as u32;
             if is_background(c) {
@@ -553,11 +572,18 @@ impl Ctx<'_> {
             match g {
                 Some(g) if g.dimension() == 2 => {
                     msgs.push(warn(c, "Ignoring 2D child object for 3D operation"));
-                    children.push((i, c, None));
+                    children.push((i, *c, None));
                 }
-                g => children.push((i, c, g.clone())),
+                g => children.push((i, *c, g.clone())),
             }
         }
+        children
+    }
+
+    /// `applyToChildren3D` (`GeometryEvaluator.cc:146-209`) with
+    /// `applyOperator3DManifold` (`manifold-applyops.cc`).
+    fn apply_3d(&self, n: &Node, items: &[(&Node, Option<Geometry>)], op: Op, msgs: &mut Vec<Msg>) -> Option<Geometry> {
+        let mut children = Self::collect_3d(items, msgs);
         if children.is_empty() {
             return None;
         }
@@ -677,13 +703,7 @@ impl Ctx<'_> {
     /// shape: `applyToChildren2D(node, UNION)` called directly, so there is
     /// no mixing check, only a warning per 3D child.
     fn children_2d_union(&self, n: &Node) -> Result<(Option<Polygon2d>, Vec<Msg>), Unsupported> {
-        let results = self.children(n)?;
-        let mut msgs = Vec::new();
-        let mut items: Vec<(&Node, Option<Geometry>)> = Vec::with_capacity(results.len());
-        for (c, o) in n.children.iter().zip(results) {
-            msgs.extend(o.msgs);
-            items.push((c, o.geom));
-        }
+        let (items, mut msgs) = self.items(n)?;
         let geom = self.apply_2d(&items, Op::Union, &mut msgs);
         let poly = match geom {
             Some(Geometry::Polygon2d(p)) => Some(Arc::unwrap_or_clone(p)),
@@ -692,18 +712,83 @@ impl Ctx<'_> {
         Ok((poly, msgs))
     }
 
+    /// `hull()`: `applyHull2D`, or `applyHull3D` for the Manifold backend,
+    /// which hulls even a single child (`GeometryEvaluator.cc:150-154`).
+    fn hull(&self, n: &Node) -> Result<Out, Unsupported> {
+        let (items, mut msgs) = self.items(n)?;
+        let geom = match Self::dim(&items, &mut msgs) {
+            2 => {
+                let children = self.collect_2d(&items, &mut msgs);
+                let refs: Vec<Option<&Polygon2d>> = children.iter().map(|c| c.as_deref()).collect();
+                Some(Geometry::Polygon2d(Arc::new(hull::hull_2d(&refs))))
+            }
+            3 => {
+                let children: Vec<Geometry> = Self::collect_3d(&items, &mut msgs).into_iter().filter_map(|(_, _, g)| g).collect();
+                let mut points = Vec::new();
+                hull::hull_points(&children, &mut points);
+                // No points: `applyOperator3DManifold` returns null.
+                (!points.is_empty()).then(|| {
+                    let imp = manifold_rust::quickhull::convex_hull(&points);
+                    let id = self.block(n, OWN).reserve(1);
+                    Geometry::Manifold(Arc::new(ManifoldGeometry::from_built(imp, id)))
+                })
+            }
+            _ => None,
+        };
+        Ok(Out { geom, msgs })
+    }
+
+    /// `minkowski()`: `applyMinkowski2D`, or the MINKOWSKI case of
+    /// `applyToChildren3D` (`GeometryEvaluator.cc:164-174`), where one child
+    /// passes through before empty children are dropped, and one non-empty
+    /// child passes through after.
+    fn minkowski(&self, n: &Node) -> Result<Out, Unsupported> {
+        let (items, mut msgs) = self.items(n)?;
+        let geom = match Self::dim(&items, &mut msgs) {
+            2 => {
+                let children = self.collect_2d(&items, &mut msgs);
+                if children.is_empty() {
+                    None
+                } else {
+                    let refs: Vec<Option<&Polygon2d>> = children.iter().map(|c| c.as_deref()).collect();
+                    minkowski::minkowski_2d(&refs).map(|p| Geometry::Polygon2d(Arc::new(p)))
+                }
+            }
+            3 => {
+                let mut children = Self::collect_3d(&items, &mut msgs);
+                if children.len() <= 1 {
+                    children.pop().and_then(|(_, _, g)| g)
+                } else {
+                    let actual: Vec<(u32, Geometry)> =
+                        children.into_iter().filter_map(|(i, _, g)| g.filter(|g| !g.is_empty()).map(|g| (i, g))).collect();
+                    match actual.len() {
+                        0 => None,
+                        1 => actual.into_iter().next().map(|(_, g)| g),
+                        _ => {
+                            let (slots, geoms): (Vec<u32>, Vec<Geometry>) = actual.into_iter().unzip();
+                            let conv = |k: usize| -> Box<dyn IdSource> { Box::new(self.block(n, slots[k])) };
+                            let own = Seq { block: self.block(n, OWN), used: std::cell::Cell::new(0) };
+                            let mut w = Vec::new();
+                            let mut e = Vec::new();
+                            let m = minkowski::minkowski_3d(&geoms, &conv, &own, &mut w, &mut e);
+                            msgs.extend(w.into_iter().map(|t| Msg { severity: Some(Severity::Warning), text: t, loc: None }));
+                            msgs.extend(e.into_iter().map(|t| Msg { severity: Some(Severity::Error), text: t, loc: None }));
+                            m.map(|m| Geometry::Manifold(Arc::new(m)))
+                        }
+                    }
+                }
+            }
+            _ => None,
+        };
+        Ok(Out { geom, msgs })
+    }
+
     /// `projectionCut` / `projectionNoCut` for the Manifold backend
     /// (`GeometryEvaluator.cc:845-907`): union the 3D children, then slice
     /// at z = 0 or take the outline from above, and sanitize. With no 3D
     /// geometry a cut gives nothing and a projection an empty shape.
     fn projection(&self, n: &Node, cut: bool) -> Result<Out, Unsupported> {
-        let results = self.children(n)?;
-        let mut msgs = Vec::new();
-        let mut items: Vec<(&Node, Option<Geometry>)> = Vec::with_capacity(results.len());
-        for (c, o) in n.children.iter().zip(results) {
-            msgs.extend(o.msgs);
-            items.push((c, o.geom));
-        }
+        let (items, mut msgs) = self.items(n)?;
         let solid = self.apply_3d(n, &items, Op::Union, &mut msgs);
         let Some(solid) = solid else {
             let geom = (!cut).then(|| Geometry::Polygon2d(Arc::new(Polygon2d::default())));
@@ -751,6 +836,49 @@ impl Ctx<'_> {
 /// primitive already guarantees it (`GeometryEvaluator.cc:672-675`).
 fn leaf_2d(p: Polygon2d) -> Geometry {
     Geometry::Polygon2d(Arc::new(if p.sanitized { p } else { clipper::sanitize(&p) }))
+}
+
+/// `resize()`: the scale `Polygon2d::resize` (`Polygon2d.cc:105-125`) or
+/// `GeometryUtils::getResizeTransform` (`GeometryUtils.cc:502-524`) works
+/// out from the bounding box, applied as a transform. The two differ: in 2D
+/// the largest requested size picks the auto-scale only when it is positive,
+/// in 3D the largest one is taken as is. A zero 2D scale (an empty shape,
+/// whose Eigen bounding box has size -inf) removes the shape with the
+/// transform's warning.
+fn resize(g: Geometry, newsize: [f64; 3], autosize: [bool; 3], msgs: &mut Vec<Msg>) -> Geometry {
+    let scale = if g.dimension() == 2 {
+        let Geometry::Polygon2d(p) = &g else { unreachable!("2D geometry is a Polygon2d") };
+        let size = p.bounds().map_or([f64::NEG_INFINITY; 2], |(lo, hi)| [hi[0] - lo[0], hi[1] - lo[1]]);
+        // `newsize[1] && newsize[1] > newsize[0]`: a NaN counts as set.
+        let maxdim = usize::from(newsize[1] != 0.0 && newsize[1] > newsize[0]);
+        let scale: [f64; 2] = std::array::from_fn(|i| if newsize[i] > 0.0 { newsize[i] / size[i] } else { 1.0 });
+        let auto = if newsize[maxdim] > 0.0 { newsize[maxdim] / size[maxdim] } else { 1.0 };
+        let s: [f64; 2] = std::array::from_fn(|i| if !autosize[i] || newsize[i] > 0.0 { scale[i] } else { auto });
+        [s[0], s[1], 1.0]
+    } else {
+        let bounds = match &g {
+            // `PolySet::getBoundingBox` covers every vertex.
+            Geometry::PolySet(ps) => ps.vertices.first().map(|&v0| {
+                ps.vertices.iter().fold((v0, v0), |(lo, hi), v| (std::array::from_fn(|k| lo[k].min(v[k])), std::array::from_fn(|k| hi[k].max(v[k]))))
+            }),
+            Geometry::Manifold(m) => m.bounds(),
+            Geometry::Polygon2d(_) => None,
+        };
+        // An empty solid stays empty whatever the scale.
+        let Some((lo, hi)) = bounds else { return g };
+        let size: [f64; 3] = std::array::from_fn(|i| hi[i] - lo[i]);
+        let mut maxdim = 0;
+        for i in 1..3 {
+            if newsize[i] > newsize[maxdim] {
+                maxdim = i;
+            }
+        }
+        let scale: [f64; 3] = std::array::from_fn(|i| if newsize[i] > 0.0 { newsize[i] / size[i] } else { 1.0 });
+        let auto = scale[maxdim];
+        std::array::from_fn(|i| if !autosize[i] || newsize[i] > 0.0 { scale[i] } else { auto })
+    };
+    let m = [[scale[0], 0.0, 0.0, 0.0], [0.0, scale[1], 0.0, 0.0], [0.0, 0.0, scale[2], 0.0], [0.0, 0.0, 0.0, 1.0]];
+    transform(g, &m, msgs)
 }
 
 /// Transform a result: 2D keeps the 2D part of the matrix, 3D takes it all.

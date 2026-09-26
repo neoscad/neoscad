@@ -23,8 +23,39 @@ entry when it is done.
 
 ## Parity
 - `manifold-rust` 0.13.1 ports Manifold v3.5.0; OpenSCAD pins v3.5.2.
-  `minkowski_sum` of two unit cubes gave volume 8.875 rather than 8; check
-  it against the C++ library before relying on it in 5c. (5a)
+  (5a)
+- Manifold's `MinkowskiSum` (C++ and the Rust port alike) is only right
+  when the second operand contains the origin: it always unions the first
+  operand, unmoved, into the result (`minkowski.cpp:84`,
+  `composedHulls.push_back(a)`; manifold-rust `minkowski.rs`, the same
+  statement).
+  Repro for an upstream report:
+  `Manifold::Cube({1,1,1}).MinkowskiSum(Manifold::Cube({1,1,1}).Translate({2,0,0}))`
+  has volume 9; the sum is the cube [2,4]x[0,2]x[0,2], volume 8.
+  manifold-rust gives 9 (checked); the C++ result is by reading the
+  source, not run. The 5a note of 8.875 for two unit cubes did not
+  reproduce (8, correct). neoscad does not use `MinkowskiSum`: OpenSCAD
+  builds without `USE_MANIFOLD_MINKOWSKI` (`CMakeLists.txt:43`) and sums
+  convex parts with hulls, which `geom::minkowski` ports. (5d)
+- 3D `minkowski()` cuts non-convex operands into convex pieces with
+  Manifold booleans rather than CGAL's `convex_decomposition_3`, and covers
+  a solid with more than 48 reflex edges through its boundary instead. The
+  solid is the same, but the mesh has more vertices than the nightly's
+  (e.g. an L of two unioned cubes plus a 32-segment sphere: 926 vs 764;
+  an L plus an L: 73 vs 35), because the pieces differ and the union keeps
+  vertices on flat faces. Images match; exported bytes do not. (5d)
+- 3D `hull()` matches the nightly's vertices and triangle order, but some
+  triangles start at a different vertex (e.g. `hull() { cylinder(r=10,
+  h=1); translate([0,0,10]) cube(5, center=true); }`: 11 of 190 OFF
+  lines differ, all rotations). The QuickHull port's `build_mesh` reads
+  the same as C++ `buildMesh`, so the rotation presumably comes from later
+  in the kernel, like the boolean rotations above; not traced. (5d)
+- The nightly prints CGAL's own diagnostics for some minkowski operands
+  (Nef assertion failures for cubes touching at an edge or a vertex,
+  `minkowski-cubes-touch-*.scad`, `issue1137.scad`); they are not
+  reproduced. Messages that come from OpenSCAD itself ("Minkowski
+  hard-crashed, falling back to Nef operation.", then the fallback's
+  conversion warnings) are. (5d)
 - Faces with more than three vertices are split by ear clipping, where
   OpenSCAD uses libtess2 (`PolySetUtils.cc:152`). The surface is the same,
   but STL/OBJ bytes differ for quads. 2D shapes are not affected: with
@@ -47,8 +78,6 @@ entry when it is done.
   ports 1.5.4. Every 2D case compared so far (booleans, sanitizing, all
   three offset joins, fill, projection) is byte-identical in SVG, but an
   engine change between the versions would show up here first. (5b)
-- 2D `hull()` needs CGAL's `convex_hull_2` output order (start point and
-  direction) to match exported SVG/DXF bytes. (5b)
 - A render warning for a duplicated sibling subtree is printed once;
   OpenSCAD prints it again, because of how it caches. (5a)
 - `--hardwarnings` is parsed but has no effect. Only tier 5 uses it.

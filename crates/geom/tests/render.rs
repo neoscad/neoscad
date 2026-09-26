@@ -135,3 +135,81 @@ fn flipped_polyhedron_face_is_repaired() {
     let Some(Geometry::Manifold(m)) = g else { panic!("expected a solid") };
     assert_eq!(m.manifold.num_tri(), 8 + 12);
 }
+
+/// `hull()` of 2D children keeps CGAL's output order: counter-clockwise
+/// from the lowest of the leftmost points. The nightly's SVG for this
+/// program lists (0,0), (2,0), (5.5,0.133975), (6,1), (5.5,1.86603),
+/// (2,2), (0,2).
+#[test]
+fn hull_2d_keeps_cgals_point_order() {
+    let (g, msgs) = render_with(&Renderer::new(), "hull() { translate([5,1]) circle(1,$fn=6); square(2); }", false);
+    assert!(msgs.is_empty(), "{msgs:?}");
+    let Some(Geometry::Polygon2d(p)) = g else { panic!("expected 2D") };
+    assert_eq!(p.outlines.len(), 1);
+    let want = [[0.0, 0.0], [2.0, 0.0], [5.5, 0.133975], [6.0, 1.0], [5.5, 1.86603], [2.0, 2.0], [0.0, 2.0]];
+    let got = &p.outlines[0].vertices;
+    assert_eq!(got.len(), want.len());
+    for (g, w) in got.iter().zip(want) {
+        assert!((g[0] - w[0]).abs() < 1e-5 && (g[1] - w[1]).abs() < 1e-5, "{got:?}");
+    }
+}
+
+/// A hull is a new solid with no original IDs (`ManifoldGeometry(Hull(...))`),
+/// so subtracting it leaves front-coloured faces; a minkowski result is made
+/// one original (`toOriginal`), so its cut is drawn in the back colour. The
+/// nightly shows both colours for this program, and a hull that drops
+/// the child's red.
+#[test]
+fn hull_and_minkowski_cut_faces_follow_openscad() {
+    let text = off("difference(){ cube(4,center=true); translate([1.5,1.5,1.5]) hull() color(\"red\") cube(1); translate([0,0,-2]) minkowski(){cube(1,center=true); sphere(0.5,$fn=8);} }");
+    let colours: Vec<String> = colour_counts(&text).into_iter().map(|(c, _)| c).collect();
+    assert_eq!(colours, ["157 203 81", "249 215 44"]);
+    let hull_only = off("difference(){ cube(4,center=true); translate([1.5,1.5,1.5]) hull() color(\"red\") cube(1); }");
+    let colours: Vec<String> = colour_counts(&hull_only).into_iter().map(|(c, _)| c).collect();
+    assert_eq!(colours, ["249 215 44"]);
+}
+
+/// OpenSCAD's minkowski (CGAL decomposition plus hulls) sums the operands
+/// wherever they are: a unit cube and one 5 units away give a single cube
+/// of side 2 (8 vertices in the nightly's OFF). Manifold's own
+/// `MinkowskiSum` would also keep the first cube at the origin.
+#[test]
+fn minkowski_of_disjoint_cubes_is_one_cube() {
+    let (g, msgs) = render_with(&Renderer::new(), "minkowski(){cube(1); translate([5,0,0]) cube(1);}", false);
+    assert!(msgs.is_empty(), "{msgs:?}");
+    let Some(Geometry::Manifold(m)) = g else { panic!("expected a solid") };
+    assert_eq!(m.manifold.num_vert(), 8);
+    assert_eq!(m.bounds(), Some(([5.0, 0.0, 0.0], [7.0, 2.0, 2.0])));
+}
+
+/// `issue1671.scad`: flat operands leave nothing, after OpenSCAD's warning.
+#[test]
+fn minkowski_of_flat_operands_warns_and_is_empty() {
+    let (g, msgs) = render_with(&Renderer::new(), "minkowski() { scale([0,0,1]) cube(1); scale([0,1,0]) cube(1); scale([1,0,0]) cube(1); }", false);
+    assert_eq!(msgs, ["Warning: [manifold] Minkowski hard-crashed, falling back to Nef operation. @0"]);
+    assert!(g.is_none_or(|g| g.is_empty()));
+}
+
+/// The rounded box renders the same every time, including through the
+/// cache of a long-lived renderer.
+#[test]
+fn minkowski_output_is_deterministic() {
+    let src = "minkowski(){ union(){cube([20,5,5]); cube([5,20,5]);} sphere(2,$fn=16);}
+translate([30,0,0]) minkowski(){ difference(){cube(10); translate([5,5,5]) sphere(3,$fn=16);} cube(1);}";
+    let first = off(src);
+    for _ in 0..5 {
+        assert!(off(src) == first, "export differs between renders");
+    }
+}
+
+/// `resize()` with `auto`: the auto axes take the largest requested scale
+/// (the nightly's OFF for this cube spans 4 x 8 x 8).
+#[test]
+fn resize_auto_scales_like_openscad() {
+    let (g, _) = render_with(&Renderer::new(), "resize([4,0,0], auto=[false,true,false]) cube([2,4,8]);", false);
+    let Some(Geometry::PolySet(ps)) = g else { panic!("expected a mesh") };
+    assert_eq!(ps.bounds(), Some(([0.0, 0.0, 0.0], [4.0, 8.0, 8.0])));
+    let (g, _) = render_with(&Renderer::new(), "resize([10,0], auto=true) square([2,4]);", false);
+    let Some(Geometry::Polygon2d(p)) = g else { panic!("expected 2D") };
+    assert_eq!(p.bounds(), Some(([0.0, 0.0], [10.0, 20.0])));
+}
