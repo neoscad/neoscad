@@ -181,3 +181,61 @@ fn help_export_and_debug() {
     let out = neoscad(&d, &["--debug=all", "-q", "-o", "x.stl", "c.scad"]);
     assert_eq!(text(&out.stderr), "Debug on. --debug=all\n");
 }
+
+/// `--colorscheme` colours exported Manifold meshes, as in the nightly
+/// (Metallic's #ddddff front and #dd22dd cut faces), and an unknown name
+/// lists the schemes and exits 1.
+#[test]
+fn colour_scheme_reaches_mesh_export() {
+    let d = scratch("scheme");
+    std::fs::write(d.join("d.scad"), "difference() { cube(10); cube(5); }\n").unwrap();
+    let out = neoscad(&d, &["--colorscheme=Metallic", "-o", "d.off", "d.scad"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let off = std::fs::read_to_string(d.join("d.off")).unwrap();
+    let faces = |c: &str| off.lines().filter(|l| l.ends_with(c)).count();
+    assert_eq!((faces(" 221 221 255"), faces(" 221 34 221")), (18, 6));
+    let out = neoscad(&d, &["--colorscheme=Nope", "-o", "d.off", "d.scad"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).starts_with("Cornfield\nMetallic\n"));
+}
+
+/// A PNG takes its size from `--imgsize` and its view from the file's
+/// `$vp*` unless `--camera` locks it. Skipped without a GPU.
+#[test]
+fn png_export_uses_the_camera_and_the_files_view() {
+    let d = scratch("png");
+    // Far away, the cube covers few pixels; `--camera` overrides that.
+    std::fs::write(d.join("c.scad"), "$vpd = 2000;\ncube(10, center=true);\n").unwrap();
+    let png = |args: &[&str]| -> Option<(u32, u32, usize)> {
+        let mut all = vec!["c.scad", "--render", "--imgsize=200,100", "-o", "c.png"];
+        all.extend_from_slice(args);
+        let out = neoscad(&d, &all);
+        if !out.status.success() {
+            let err = text(&out.stderr);
+            assert!(err.contains("GPU"), "{err}");
+            eprintln!("skipped: {err}");
+            return None;
+        }
+        // The view variables disable the default --viewall, with a warning.
+        if args.is_empty() {
+            assert!(text(&out.stderr).contains("Viewall and autocenter disabled in favor of $vp*"));
+        }
+        let file = std::fs::File::open(d.join("c.png")).unwrap();
+        let mut reader = png::Decoder::new(std::io::BufReader::new(file))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+        // Pixels that are not Cornfield's background.
+        let model = buf[..info.buffer_size()]
+            .chunks(3)
+            .filter(|p| *p != [0xff, 0xff, 0xe5])
+            .count();
+        Some((info.width, info.height, model))
+    };
+    let Some((w, h, far)) = png(&[]) else { return };
+    assert_eq!((w, h), (200, 100));
+    let (_, _, near) = png(&["--camera=0,0,0,55,0,25,40"]).unwrap();
+    assert!(far > 0 && near > 20 * far, "{far} vs {near} model pixels");
+}

@@ -184,9 +184,10 @@ entry when it is done.
   and budget from `geom` would fill both. (H3)
 - The summary's camera and POV export use the command line's camera; the
   nightly's summary also applies top-level `$vpt`/`$vpr`/`$vpd`/`$vpf`
-  (`Camera::updateView`). `eval` computes that camera but
-  `eval::Evaluation` does not return it. (POV export uses the command
-  line's camera in the nightly too.) (H3)
+  (`Camera::updateView`). `eval::Evaluation::camera` now carries that
+  camera (6a, for PNG export), so the summary fix is to pass it to
+  `summary::Facts`. (POV export uses the command line's camera in the
+  nightly too.) (H3)
 - `-d` lists dependencies in first-seen order where OpenSCAD uses hash
   order (same set). Files read by `dxf_dim()`/`dxf_cross()` are not
   listed, and `-m` does not run for them: the evaluator reads them
@@ -233,6 +234,42 @@ entry when it is done.
 - `import()` of `.nef3` needs CGAL's Nef reader and still reports
   "import() is not implemented"; only preview tests (tier 4) use it. The
   experimental `import()` function (JSON) is not implemented either. (5c)
+
+## Rendering
+- `-o x.png` without `--render` draws the rendered geometry, not
+  OpenSCAD's OpenCSG preview, and says so on stderr: `%` objects are
+  missing, `#` objects are not highlighted, and colours are render mode's.
+  `conformance images --previews` shows 189 of the 343 pending preview
+  cases would already pass that way (camera and image-size cases among
+  them); they stay pending until 6b draws real previews. `--view` options
+  are accepted and ignored with a note. (6a)
+- PNG export needs a GPU adapter (Metal, Vulkan, Direct3D 12). Without
+  one it fails with "no GPU adapter"; a headless Linux CI runner would
+  need a software Vulkan driver (lavapipe), or neoscad a CPU rasteriser.
+  The PNG tests in `crates/render/tests/offscreen.rs` skip without one.
+  (6a)
+- Determinism: the same scene gives the same PNG bytes on one machine
+  (checked with two devices on one GPU in `offscreen.rs`), but
+  rasterisation rules differ between GPUs and drivers at the pixel level
+  (edge pixels, depth ties between coplanar faces). Only Metal on an
+  Apple M4 Pro has been measured: 318 of 320 render-mode images pass
+  `image_compare` against OpenSCAD's goldens, 206 pixel-identical. Other
+  GPUs are unverified. (6a)
+- The first PNG export after a reboot or driver update pays for Metal's
+  shader compilation (about 0.5 s on this machine; the system caches it
+  after that, and a warm export costs about 18 ms over the geometry). (6a)
+- The two render-mode images that fail both tier 4 rules,
+  `render-manifold_issue964` and `issue1061`, are polyhedra with
+  non-planar quads: `PolySet::tessellate` ear-clips them along other
+  diagonals than OpenSCAD's libtess2 (see "Faces with more than three
+  vertices" under Parity), so the shading of those faces differs. The
+  renderer draws what `geom` hands it. (6a)
+- Colour schemes are only the built-in and vendored ones; OpenSCAD also
+  reads `color-schemes/render/*.json` from the user's configuration
+  directory. The app can pass such files to `render::scheme::parse`. (6a)
+- OpenSCAD's `PolySetRenderer` draws nothing (and logs an error) for a
+  result holding both 3D and 2D parts; `geom` never returns such a
+  result, so the case is not handled. (6a)
 
 ## WASM
 - Recursion on wasm32 stops at a frame budget calibrated for V8's default

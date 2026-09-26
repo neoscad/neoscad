@@ -10,6 +10,7 @@ use lang::ast::{Arg, Ast, BinaryOp, ExprId, ExprKind, Scope, UnaryOp};
 use lang::diag::{DiagCode, Diagnostic, PathBase, Severity};
 use lang::source::Span;
 
+use crate::Camera;
 use crate::context::{Ctx, CtxKind, ScopeRef};
 use crate::message::{Loc, Message, Output, Pending, R, Unwind, UnwindKind};
 use crate::node::{Node, NodeKind};
@@ -538,6 +539,7 @@ impl<'a> Evaluator<'a> {
         self.truncate(mark);
         let mut aborted = false;
         let mut interrupted = false;
+        let mut camera = self.opts.camera;
         // A warning in the last expression evaluated may still be armed.
         let result = result.and_then(|_| self.check_hard());
         if let Err(e) = result {
@@ -547,7 +549,7 @@ impl<'a> Evaluator<'a> {
                 self.emit_pending(p);
             }
         } else {
-            self.update_camera(&file);
+            camera = self.update_camera(&file);
         }
         let (tagged, next) = root.find_root_tag();
         let next = next.map(|o| Loc {
@@ -568,24 +570,44 @@ impl<'a> Evaluator<'a> {
             // Also set by a warning printed after instantiation (the root
             // modifier check), which OpenSCAD raises from `do_export`.
             hard_warning: matches!(self.hard.get(), Hard::Pending | Hard::Thrown),
+            camera,
         }
     }
 
-    /// `Camera::updateView`: top-level `$vp*` assignments.
-    fn update_camera(&mut self, file: &Rc<Ctx>) {
-        let cam = self.opts.camera;
+    /// `Camera::updateView`: top-level `$vp*` assignments, returning the
+    /// camera they leave.
+    fn update_camera(&mut self, file: &Rc<Ctx>) -> Camera {
+        let mut cam = self.opts.camera;
         if cam.locked {
-            return;
+            return cam;
         }
         let mut noauto = false;
         let (vpr, vpt, vpd, vpf) = (self.k.vpr, self.k.vpt, self.k.vpd, self.k.vpf);
         for (s, is_vec) in [(vpr, true), (vpt, true), (vpd, false), (vpf, false)] {
             let Some(v) = file.get_local(s) else { continue };
             let ok = if is_vec {
-                let mut out = [0.0; 3];
-                v.get_vec3_or2(&mut out, 0.0)
+                // `getVec3(x, y, z, 0.0)` fills its outputs only on
+                // success, so start from the current values as the C++
+                // locals would be overwritten.
+                let mut out = if s == vpr { cam.vpr } else { cam.vpt };
+                let ok = v.get_vec3_or2(&mut out, 0.0);
+                if ok {
+                    if s == vpr {
+                        cam.vpr = out;
+                    } else {
+                        cam.vpt = out;
+                    }
+                }
+                ok
+            } else if let Some(n) = v.as_number() {
+                if s == vpd {
+                    cam.vpd = n;
+                } else {
+                    cam.vpf = n;
+                }
+                true
             } else {
-                v.as_number().is_some()
+                false
             };
             if ok {
                 noauto = true;
@@ -606,7 +628,9 @@ impl<'a> Evaluator<'a> {
                 DiagCode::Evaluation,
                 "Viewall and autocenter disabled in favor of $vp*",
             );
+            cam.auto = false;
         }
+        cam
     }
 
     pub fn register_capture(&mut self, c: &Rc<Ctx>) {

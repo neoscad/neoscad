@@ -154,7 +154,10 @@ ffmpeg.
 3. **`eval`** (done): tier 1.
 4. **CSG tree** (done): tier 2.
 5. **`geom`, `io`, `text`** (done): tiers 3 and 5, 1,103 runnable cases in all. Audited in `docs/audits/engine-milestone.md`.
-6. **`render` + `snapshot`:** tier 4.
+6. **`render` + `snapshot`:** tier 4. 6a (done): the `render` crate
+   (wgpu, OpenSCAD's camera, colour schemes and lighting) and `--render`
+   PNG export. 6b: previews (OpenCSG, throwntogether, `%`/`#`), view
+   options and `neoscad snapshot`.
 7. **`serve`, JSON output, MCP.**
 8. **macOS app.**
 9. **WASM web app.**

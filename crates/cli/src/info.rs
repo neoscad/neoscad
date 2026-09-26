@@ -3,7 +3,8 @@
 //! `help_export()` (`openscad.cc`), with neoscad's own facts. `--info`
 //! names the Rust libraries that stand in for OpenSCAD's C++ ones rather
 //! than borrowing OpenSCAD's version numbers, and has no OpenGL section:
-//! neoscad renders no images yet.
+//! neoscad draws images with wgpu (the `render` crate), and `--info` does
+//! not open a GPU just to describe it.
 
 use crate::host::{self, FontSource, Host};
 

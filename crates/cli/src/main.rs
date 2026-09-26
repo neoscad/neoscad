@@ -8,7 +8,8 @@
 //! the `.csg` and `.term` node-tree exports, the `.param` customizer
 //! export, the 3D mesh exports (`.stl` ASCII and binary, `.off`, `.obj`,
 //! `.3mf`, `.wrl`, `.pov`) and the 2D exports (`.svg`, `.dxf`, `.pdf`) are
-//! implemented; every other output mode (`.png`, `.nef3`, `.nefdbg`)
+//! implemented, and `.png` in render mode ([`png`], drawn by the
+//! `render` crate); every other output mode (`.nef3`, `.nefdbg`)
 //! reports that it is missing and exits with [`EXIT_NOT_IMPLEMENTED`],
 //! which the harness can tell apart from a crash or a usage error.
 //!
@@ -24,6 +25,7 @@ mod export_options;
 mod host;
 mod info;
 mod param_json;
+mod png;
 mod run;
 mod summary;
 
@@ -429,6 +431,33 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
         }
     }
 
+    // `set_render_color_scheme(arg_colorscheme, true)` runs for every
+    // export: the scheme also colours exported Manifold meshes.
+    let scheme = match png::scheme(cli.colorscheme.as_deref()) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let png_settings = if formats.iter().any(|(id, _)| *id == "png") {
+        let camera = match png::camera(
+            cli.camera.as_deref(),
+            cli.viewall,
+            cli.autocenter,
+            cli.projection.as_deref(),
+            cli.imgsize.as_deref(),
+        ) {
+            Ok(c) => c,
+            Err(code) => return code,
+        };
+        if !cli.quiet {
+            png::notes(cli.render.is_some(), cli.preview.as_deref(), &cli.view);
+        }
+        Some(png::Settings {
+            camera,
+            scheme: scheme.clone(),
+        })
+    } else {
+        None
+    };
     let export_options = export_options::ExportOptions::parse(&cli.export_option);
     let summary = summary::Request {
         options: cli.summary.clone(),
@@ -445,6 +474,8 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
         export_options: &export_options,
         summary: &summary,
         animate,
+        scheme: &scheme,
+        png: png_settings.as_ref(),
     };
     if formats.iter().all(|(id, _)| *id == "ast") {
         return run::export_ast(&job);
@@ -488,6 +519,7 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
             "svg" => Some(run::MeshFormat::Svg),
             "dxf" => Some(run::MeshFormat::Dxf),
             "pdf" => Some(run::MeshFormat::Pdf),
+            "png" => Some(run::MeshFormat::Png),
             _ => None,
         })
         .collect();
@@ -496,9 +528,11 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
             Ok(o) => o,
             Err(code) => return code,
         };
-        // `$preview` is false for every geometry export
-        // (`fileformat::canPreview`, `openscad.cc:646-650`).
-        options.preview = false;
+        // `$preview` is false for every geometry export, and for a PNG
+        // with `--render` (`fileformat::canPreview`, `openscad.cc:646-650`).
+        // A PNG without it is a preview, which neoscad draws from the
+        // rendered geometry, but `$preview` stays true as the model expects.
+        options.preview = cli.render.is_none() && mesh.iter().all(|f| *f == run::MeshFormat::Png);
         if let Some(b) = cli.backend.as_deref()
             && !b.eq_ignore_ascii_case("manifold")
         {

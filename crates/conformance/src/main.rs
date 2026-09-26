@@ -6,6 +6,8 @@
 //!   with `--record` writes a progress snapshot.
 //! - `conformance grid` renders snapshots' `grid.png` from their data.
 //! - `conformance showcase` checks the showcase list.
+//! - `conformance images` surveys neoscad's renderer on every render-mode
+//!   PNG case.
 //! - `conformance diff` compares neoscad with a reference OpenSCAD binary
 //!   on a corpus of inputs.
 //! - `conformance bench` times neoscad against reference binaries on
@@ -111,6 +113,33 @@ enum Cmd {
     /// Compare two PNGs as OpenSCAD's tests/image_compare.py does; exits 0
     /// when they match.
     ImageCompare { expected: PathBuf, actual: PathBuf },
+    /// Survey neoscad's own renderer: draw every render-mode PNG case (tier
+    /// 3's direct `--render` images and tier 4's image cases) with neoscad
+    /// and compare with the expected image under tier 4's rules. A
+    /// diagnostic only: tier 3 still checks geometry through the nightly,
+    /// and nothing here touches the baseline.
+    Images {
+        /// Only cases whose id contains this substring.
+        #[arg(long)]
+        filter: Option<String>,
+        /// List every case that fails both rules.
+        #[arg(long, short)]
+        verbose: bool,
+        /// Per-case timeout in seconds.
+        #[arg(long, default_value_t = 30.0)]
+        timeout: f64,
+        /// Parallel jobs (default: one per CPU).
+        #[arg(long, short)]
+        jobs: Option<usize>,
+        /// Binary under test (default: target/release/neoscad).
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        /// Also draw tier 4's pending OpenCSG previews (no --view or
+        /// --preview) from the rendered geometry, to see how far render
+        /// mode gets on them. They stay pending in `run`.
+        #[arg(long)]
+        previews: bool,
+    },
     /// Differential test: run a reference OpenSCAD and neoscad on each input
     /// and compare exit status, output and the format's diagnostics.
     Diff {
@@ -229,6 +258,27 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             force,
         } => grid::command(&ctx, &dirs, all, out.as_deref(), force),
         Cmd::Showcase => Ok(u8::from(showcase::check(&ctx)? > 0)),
+        Cmd::Images {
+            filter,
+            verbose,
+            timeout,
+            jobs,
+            binary,
+            previews,
+        } => {
+            if timeout.is_nan() || timeout <= 0.0 {
+                return Err("--timeout must be positive".into());
+            }
+            run::survey_images(
+                &ctx,
+                filter.as_deref(),
+                verbose,
+                Duration::from_secs_f64(timeout),
+                jobs,
+                binary,
+                previews,
+            )
+        }
         Cmd::ImageCompare { expected, actual } => {
             let c = image_compare::compare_files(&expected, &actual)?;
             if c.passed() {

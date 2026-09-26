@@ -43,7 +43,12 @@ pub enum Runner {
     /// an image), exit codes (`shouldfail.py`) and the relative-output
     /// commands.
     Script,
-    /// In scope, but the comparison is not implemented yet (tiers 3-5).
+    /// Tier 4 image drawn by neoscad's own renderer (`-o x.png` with
+    /// `--render`), compared with the expected PNG under tier 4's rule:
+    /// OpenSCAD's `image_compare` or the perceptual score (see `run.rs`).
+    Image,
+    /// In scope, but the comparison is not implemented yet (tiers 3-5);
+    /// `pending_reason` says what is missing.
     Pending,
     /// Out of scope; `skip_reason` says why.
     Skip,
@@ -57,6 +62,9 @@ pub struct Case {
     pub runner: Runner,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
+    /// For a pending case: the missing piece that keeps it from running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_reason: Option<String>,
     /// Registration group (`add_cmdline_test` basename).
     pub group: String,
     /// Input path relative to the reference checkout.
@@ -96,6 +104,8 @@ pub struct TierCounts {
     pub geometry: usize,
     #[serde(default)]
     pub script: usize,
+    #[serde(default)]
+    pub image: usize,
     pub pending: usize,
     pub skip: usize,
     /// Runnable (text or geometry) cases whose expected file does not exist in the checkout.
@@ -217,12 +227,14 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
             Runner::Text
         } else if is_geometry(r, tier) {
             Runner::Geometry
-        } else if tier != 4 && is_script(r, &binpath) {
-            // Tier 4 is neoscad's own image rendering, not ported yet.
+        } else if is_image(r, tier) {
+            Runner::Image
+        } else if is_script(r, &binpath) {
             Runner::Script
         } else {
             Runner::Pending
         };
+        let pending_reason = (runner == Runner::Pending).then(|| pending_reason(r, tier));
         let expected = (r.kind == RegKind::Cmdline).then(|| {
             let dir = r.expected_dir.as_deref().unwrap_or(&r.group);
             format!(
@@ -235,6 +247,7 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
             tier,
             runner,
             skip_reason,
+            pending_reason,
             group: r.group.clone(),
             input: r.file.as_deref().map(rel),
             expected,
@@ -278,6 +291,16 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
                     .as_deref()
                     .is_some_and(|e| !Path::new(ref_root).join(e).exists());
                 if missing {
+                    c.missing_expected += 1;
+                }
+            }
+            Runner::Image => {
+                c.image += 1;
+                let exists = t
+                    .expected
+                    .as_deref()
+                    .is_some_and(|e| Path::new(ref_root).join(e).exists());
+                if !exists {
                     c.missing_expected += 1;
                 }
             }
@@ -395,6 +418,42 @@ fn is_geometry(r: &Registration, tier: u8) -> bool {
         None => r.openscad && r.suffix == "png",
         Some(s) if s.ends_with("/export_import_pngtest.py") => r.suffix == "png",
         Some(s) => s.ends_with("/stlexportsanitytest.py"),
+    }
+}
+
+/// A tier 4 image neoscad's renderer draws (phase 6a): a direct PNG of
+/// the input in render mode (`--render`, any form) with no `--view`
+/// options, whatever its camera, image size, projection or colour scheme.
+/// Previews and view options are phase 6b ([`pending_reason`]).
+fn is_image(r: &Registration, tier: u8) -> bool {
+    tier == 4
+        && r.kind == RegKind::Cmdline
+        && r.openscad
+        && r.script.is_none()
+        && !r.stdio
+        && r.suffix == "png"
+        && has_arg(r, |a| a.starts_with("--render"))
+        && !has_arg(r, |a| is_view_option(a) || a.starts_with("--preview"))
+}
+
+/// `--view` or `--view=...`, but not `--viewall`.
+pub fn is_view_option(arg: &str) -> bool {
+    arg == "--view" || arg.starts_with("--view=")
+}
+
+/// What a pending case waits for.
+fn pending_reason(r: &Registration, tier: u8) -> String {
+    if tier != 4 {
+        return "no runner for this test yet".into();
+    }
+    if has_arg(r, |a| a.starts_with("--preview")) {
+        "throwntogether preview (phase 6b)".into()
+    } else if has_arg(r, is_view_option) {
+        "--view options (axes, scales, edges, crosshairs; phase 6b)".into()
+    } else if r.kind == RegKind::Cmdline && !has_arg(r, |a| a.starts_with("--render")) {
+        "OpenCSG preview of the CSG tree (no --render; phase 6b)".into()
+    } else {
+        "no runner for this test yet".into()
     }
 }
 

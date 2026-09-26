@@ -27,6 +27,7 @@ any test listed in `conformance/baseline.json` no longer passes.
 | `run --binary PATH` | Runs another binary. Pointing it at the OpenSCAD nightly checks the harness itself: all tier 0-2 cases should pass. |
 | `showcase` | Checks that every model in `conformance/showcase.json` and its expected image exist. |
 | `image-compare EXPECTED ACTUAL` | Compares two PNGs with the port of OpenSCAD's `tests/image_compare.py`; exit 0 when they match. |
+| `images` | Surveys neoscad's own renderer: draws every render-mode PNG case (tier 3's direct `--render` images and tier 4's image cases) with neoscad and scores it under tier 4's rules (see "Tier 4" below), printing how many pass each rule and the distribution of the perceptual score. `--previews` adds tier 4's pending OpenCSG previews, drawn from the rendered geometry (they stay pending in `run`). A diagnostic only: it touches neither the baseline nor tier 3's results. Images go to `target/conformance/images/`. |
 | `diff [PATHS...]` | Differential test: runs a reference OpenSCAD (`--binary-ref`, default the pinned nightly) and neoscad on every `.scad` under `PATHS` (default: the reference's `tests/data/scad`, `examples`, `libraries/MCAD`) and compares exit status, the output (`--format ast`, `echo` or `csg`; an `.echo` file holds every message, so it is compared even when both runs fail; `csg` ignores `timestamp = N` and owns no stderr messages, which `ast` and `echo` already cover) and the diagnostics that format covers. `--library-path DIR` (repeatable) puts a library directory before the reference's `libraries/` in `OPENSCADPATH` for both binaries, so a library's own files and examples run unmodified (`--library-path .reference` for `include <BOSL2/...>`). Prints the match rate and mismatches by category; the full list goes to `target/conformance/diff-<format>.json`. |
 | `bench` | Times neoscad against the reference binaries on `conformance/bench.json`; see "Benchmarks" below. |
 | `bench-chart [FILE\|--latest] [--out PATH]` | Draws a benchmark result as a 1920x1080 PNG (default: next to the result). |
@@ -123,9 +124,14 @@ Each case gets a tier (see `src/manifest.rs`) and a runner:
   below.
 - `script`: tests driven by a Python script or a raw command, ported in
   `src/script.rs`; see "Script cases" below.
-- `pending`: tier 4, neoscad's own image rendering, which this harness
-  does not compare yet (including `relative-output_png_*`, re-tiered
-  from 5 because it needs PNG export).
+- `image`: tier 4 images drawn by neoscad's renderer in render mode (a
+  PNG of the input with `--render` and no `--view`); see "Tier 4" below.
+  `relative-output_png_*` (re-tiered from 5 because it needs PNG export)
+  runs as a `script` case.
+- `pending`, with a `pending_reason`: tier 4 cases that need phase 6b,
+  the OpenCSG preview (no `--render`), the throwntogether preview
+  (`--preview=throwntogether`) or `--view` options (axes, scales, edges,
+  crosshairs).
 - `skip`, with a reason: experimental features, the CGAL backend, tests
   disabled upstream, tests tagged `Bugs`, and OpenSCAD's harness self-test.
 
@@ -212,3 +218,33 @@ measure the pipeline's ceiling: whatever fails then is an artefact of
 export and re-import, not a geometry bug. Known artefacts are listed with a
 reason in `conformance/tier3-limits.json`; such a case is reported as
 skipped when it fails, and the run names any listed case that passed.
+
+## Tier 4: neoscad's own images
+
+A tier 4 `image` case runs neoscad with the test's arguments and `-o
+<actual>.png`; it must exit 0, and the image must meet tier 4's rule
+(`run_image` in `src/run.rs`):
+
+- **either** OpenSCAD's own `image_compare` accepts it (the tier 3
+  comparator: no 3x3 block whose nine samples all differ, in the same
+  direction, by 8 or more);
+- **or** at most 0.1% of its pixels have a channel 8 or more apart from
+  the expected image (`PERCEPTUAL_LIMIT_PERCENT` in
+  `src/image_compare.rs`).
+
+The second rule is the architecture's "looser perceptual comparison": the
+image comes from neoscad's renderer, not OpenSCAD's, so a pass should not
+hinge on rasterisation details. It is deliberately tight. 0.1% of a
+512x512 image is 262 pixels, a 16x16 patch: a missing feature, a wrong
+colour or a shifted camera fails it, while scattered edge pixels pass.
+`image_compare` already tolerates most rasterisation differences, since
+they come as one-pixel lines rather than 3x3 blocks, so in practice the
+second rule rarely decides: when it was introduced, `conformance images`
+drew 320 render-mode images (316 tier 3 direct renders, 4 tier 4 cases),
+318 passed `image_compare`, the same 318 passed either rule, and 206
+were pixel-identical to OpenSCAD's. The run prints how many images pass
+each rule and the score's distribution.
+
+The expected images come from OpenSCAD's offscreen renderer, which draws
+without multisampling into an 8-bit RGBA framebuffer object; neoscad
+matches both (see `crates/render/src/gpu.rs`).

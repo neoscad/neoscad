@@ -259,6 +259,12 @@ pub struct Evaluation {
     /// evaluation stopped there (or ended just after it), and OpenSCAD
     /// would exit with status 1.
     pub hard_warning: bool,
+    /// [`Options::camera`] after `Camera::updateView`: top-level `$vpt`,
+    /// `$vpr`, `$vpd` and `$vpf` assignments replace its values unless it
+    /// is locked by `--camera`, and clear [`Camera::auto`] (with OpenSCAD's
+    /// warning). A PNG export draws with this view, so the file's own
+    /// camera settings reach the image as they do in OpenSCAD.
+    pub camera: Camera,
 }
 
 /// Evaluate `main` with its `use`d `libraries`. `main_uses` are the keys of

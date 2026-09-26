@@ -4,7 +4,10 @@
 # assets) and runs its cases in node: primitives, a boolean, minkowski,
 # text in the bundled font, include <MCAD/...>, import() and dxf_dim() from
 # an in-memory file system, a host-supplied rands() seed, and recursion
-# that must end in OpenSCAD's error rather than a trap.
+# that must end in OpenSCAD's error rather than a trap. Each result also
+# goes through the renderer's CPU side (scene, colour scheme, camera fit).
+# The renderer's GPU side (wgpu on WebGPU) is only built, not run: it needs
+# a browser and wasm-bindgen glue, which this plain module has neither of.
 #
 #   scripts/wasm-check.sh            run the cases
 #   scripts/wasm-check.sh --depths   also report the deepest recursion
@@ -32,6 +35,8 @@ if [ ! -d "$(rustc --print sysroot)/lib/rustlib/wasm32-unknown-unknown" ]; then
 fi
 
 cargo build --quiet --release --target wasm32-unknown-unknown -p neoscad-wasm-check
+cargo build --quiet --release --target wasm32-unknown-unknown -p neoscad-render
+echo "wasm-check: neoscad-render (wgpu, WebGPU backend) builds for wasm32"
 wasm=target/wasm32-unknown-unknown/release/wasm_check.wasm
 echo "wasm-check: $(node --version), $wasm ($(wc -c <"$wasm" | tr -d ' ') bytes)"
 node crates/wasm-check/run.js "$wasm" "$@"

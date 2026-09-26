@@ -1,0 +1,28 @@
+[package]
+name = "neoscad-render"
+description = "NeoSCAD's renderer: OpenSCAD's camera, colour schemes and lighting on wgpu, drawing into any target (offscreen PNG export now; a CAMetalLayer or WebGPU canvas later)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "render"
+
+[features]
+default = ["gpu"]
+gpu = ["dep:wgpu", "dep:pollster"]
+
+[dependencies]
+geom = { package = "neoscad-geom", path = "../geom" }
+io = { package = "neoscad-io", path = "../io" }
+png.workspace = true
+serde_json.workspace = true
+# Default features: Metal, Vulkan, Direct3D 12, GLES and WebGPU, each
+# compiled only where it exists, and WGSL shaders.
+wgpu = { version = "30", optional = true }
+# Blocks on wgpu's futures in native callers; the web awaits them instead.
+pollster = { version = "1", optional = true }
+
+[lints]
+workspace = true

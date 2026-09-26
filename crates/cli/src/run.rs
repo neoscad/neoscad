@@ -47,6 +47,11 @@ pub struct Job<'a> {
     pub summary: &'a crate::summary::Request,
     /// `--animate` (with `--animate_sharding`): the frames to export.
     pub animate: Option<Animate>,
+    /// `--colorscheme`, which colours exported Manifold meshes as well as
+    /// images.
+    pub scheme: &'a render::ColorScheme,
+    /// PNG settings, when an output is a PNG.
+    pub png: Option<&'a crate::png::Settings>,
 }
 
 /// `AnimateArgs`: `frames` frames in all, of which this run exports
@@ -470,14 +475,19 @@ pub enum MeshFormat {
     Dxf,
     Pdf,
     Pov,
+    /// An image, which takes 2D and 3D results alike (and draws an empty
+    /// one as the background alone).
+    Png,
 }
 
 impl MeshFormat {
-    /// The dimension `checkAndExport` requires (`fileformat::is3D/is2D`).
-    fn dimension(self) -> u32 {
+    /// The dimension `checkAndExport` requires (`fileformat::is3D/is2D`);
+    /// none for an image.
+    fn dimension(self) -> Option<u32> {
         match self {
-            MeshFormat::Svg | MeshFormat::Dxf | MeshFormat::Pdf => 2,
-            _ => 3,
+            MeshFormat::Svg | MeshFormat::Dxf | MeshFormat::Pdf => Some(2),
+            MeshFormat::Png => None,
+            _ => Some(3),
         }
     }
 }
@@ -556,7 +566,7 @@ fn render_frame<W: Write>(
         fs: loaded.host.fs.clone(),
         work_dir: paths.cwd.clone(),
         fonts: std::sync::Arc::new(loaded.host.fonts(used)),
-        ..Default::default()
+        scheme: job.scheme.geometry_scheme(),
     };
     let rendered = renderer.render(top, &keys, opts.clone());
     let rendered = match rendered {
@@ -608,8 +618,30 @@ fn render_frame<W: Write>(
     let mut mesh = None;
     for (target, format) in job.outputs.iter().zip(formats) {
         let target = &frame_target(target, frame.number);
+        if *format == MeshFormat::Png {
+            let Some(settings) = job.png else {
+                unreachable!("PNG settings are made for PNG outputs");
+            };
+            let data = match crate::png::render_png(
+                settings,
+                root.as_ref().filter(|g| !g.is_empty()),
+                &ev.camera,
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("neoscad: cannot export PNG: {e}");
+                    return EXIT_ERROR;
+                }
+            };
+            if let Err(code) = write_output(target, &data) {
+                return code;
+            }
+            continue;
+        }
         // `checkAndExport`, per output: the dimension, then emptiness.
-        let want = format.dimension();
+        let Some(want) = format.dimension() else {
+            unreachable!("only images have no dimension");
+        };
         if dim != want {
             con.print(
                 None,

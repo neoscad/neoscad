@@ -38,6 +38,20 @@ pub struct Outcome {
     /// First differing lines, shown with --verbose; not recorded.
     #[serde(skip)]
     pub excerpt: Vec<String>,
+    /// For a compared image (tier 4): which rule it met and its score.
+    #[serde(skip)]
+    pub image: Option<ImageScore>,
+}
+
+/// How a tier 4 image compared with the expected one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageScore {
+    /// OpenSCAD's own `image_compare` accepted it.
+    pub exact: bool,
+    /// The perceptual rule accepted it.
+    pub perceptual: bool,
+    /// Percentage of pixels with a channel 8 or more apart.
+    pub percent_over: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -164,7 +178,8 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
         Runner::Text => env.run_text(c),
         Runner::Geometry => env.run_geometry(c),
         Runner::Script => crate::script::run(&env, c),
-        Runner::Pending => outcome(c, Status::Pending, None),
+        Runner::Image => env.run_image(c),
+        Runner::Pending => outcome(c, Status::Pending, c.pending_reason.clone()),
         Runner::Skip => outcome(c, Status::Skip, c.skip_reason.clone()),
     };
     let mut outcomes: Vec<Outcome> = pool.install(|| {
@@ -191,6 +206,9 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
     }
     if let Some(g) = &env.geometry {
         print_geometry_report(&manifest, &outcomes, g);
+    }
+    if outcomes.iter().any(|o| o.image.is_some()) {
+        print_image_report("tier 4 images", &outcomes);
     }
     print_summary(&per_tier, wall, &binary);
 
@@ -267,6 +285,112 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
     Ok(0)
 }
 
+/// `conformance images`: every render-mode PNG case drawn by neoscad and
+/// scored as tier 4 scores images. Tier 3's direct renders (a PNG of the
+/// input with `--render`, no script) are included: their expected images
+/// come from the same OpenSCAD renderer, so they measure neoscad's
+/// renderer on far more models than tier 4's own cases.
+pub fn survey_images(
+    ctx: &Ctx,
+    filter: Option<&str>,
+    verbose: bool,
+    timeout: Duration,
+    jobs: Option<usize>,
+    binary: Option<PathBuf>,
+    previews: bool,
+) -> Result<u8, String> {
+    let manifest = Manifest::load(&ctx.manifest_path())?;
+    let binary = binary.unwrap_or_else(|| ctx.default_binary());
+    let binary = binary
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", binary.display()))?;
+    crate::prepare::prepare(ctx, &manifest)?;
+    let direct_render = |c: &Case| {
+        c.runner == Runner::Geometry
+            && c.script.is_none()
+            && c.suffix == "png"
+            && c.args.iter().any(|a| a.starts_with("--render"))
+    };
+    // A pending OpenCSG preview, drawn from the rendered geometry: shows
+    // how far render mode alone gets on them (cameras, colour schemes).
+    let preview = |c: &Case| {
+        previews
+            && c.runner == Runner::Pending
+            && c.tier == 4
+            && c.expected.is_some()
+            && c.input.is_some()
+            && c.suffix == "png"
+            && !c
+                .args
+                .iter()
+                .any(|a| crate::manifest::is_view_option(a) || a.starts_with("--preview"))
+    };
+    let selected: Vec<&Case> = manifest
+        .tests
+        .iter()
+        .filter(|c| c.runner == Runner::Image || direct_render(c) || preview(c))
+        .filter(|c| filter.is_none_or(|f| c.id.contains(f)))
+        .collect();
+    let mut env = Env::new(ctx, &manifest, &binary, timeout);
+    env.actual_dir = ctx.repo.join("target/conformance/images");
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs.unwrap_or(0))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let outcomes: Vec<Outcome> =
+        pool.install(|| selected.par_iter().map(|c| env.run_image(c)).collect());
+    let pending: BTreeSet<&str> = selected
+        .iter()
+        .filter(|c| c.runner == Runner::Pending)
+        .map(|c| c.id.as_str())
+        .collect();
+    for tier in [3u8, 4] {
+        let of_tier: Vec<Outcome> = outcomes
+            .iter()
+            .filter(|o| o.tier == tier && !pending.contains(o.id.as_str()))
+            .cloned()
+            .collect();
+        if !of_tier.is_empty() {
+            print_image_report(&format!("tier {tier} render-mode images"), &of_tier);
+        }
+    }
+    let previews: Vec<Outcome> = outcomes
+        .iter()
+        .filter(|o| pending.contains(o.id.as_str()))
+        .cloned()
+        .collect();
+    if !previews.is_empty() {
+        print_image_report(
+            "tier 4 previews drawn from the rendered geometry (pending; not a pass)",
+            &previews,
+        );
+    }
+    let mut worst: Vec<&Outcome> = outcomes
+        .iter()
+        .filter(|o| o.status == Status::Fail)
+        .collect();
+    worst.sort_by(|a, b| {
+        let key = |o: &Outcome| o.image.map_or(f64::INFINITY, |s| s.percent_over);
+        key(b).total_cmp(&key(a))
+    });
+    let shown = if verbose {
+        worst.len()
+    } else {
+        worst.len().min(20)
+    };
+    if shown > 0 {
+        println!(
+            "failing both rules{}:",
+            if verbose { "" } else { " (worst 20)" }
+        );
+    }
+    for o in &worst[..shown] {
+        println!("  {} - {}", o.id, o.reason.as_deref().unwrap_or(""));
+    }
+    println!("images written to {}", env.actual_dir.display());
+    Ok(0)
+}
+
 fn short(sha: &str) -> &str {
     &sha[..sha.len().min(8)]
 }
@@ -279,6 +403,7 @@ pub(crate) fn outcome(c: &Case, status: Status, reason: Option<String>) -> Outco
         reason,
         ms: None,
         excerpt: Vec::new(),
+        image: None,
     }
 }
 
@@ -374,6 +499,55 @@ impl Env {
             Result3::Fail(reason) => match image.limits.get(&c.id) {
                 Some(limit) => outcome(c, Status::Skip, Some(format!("harness limit: {limit}"))),
                 None => outcome(c, Status::Fail, Some(reason)),
+            },
+        };
+        o.ms = Some((ms * 10.0).round() / 10.0);
+        o
+    }
+
+    /// One tier 4 image (`Runner::Image`): neoscad draws the PNG with the
+    /// test's arguments, which must exit 0, and the image passes tier 4's
+    /// rule: OpenSCAD's `image_compare` accepts it, or at most
+    /// `PERCEPTUAL_LIMIT_PERCENT` of its pixels differ by the tolerance or
+    /// more ([`image_compare::Comparison::perceptual_pass`]). The second
+    /// rule exists because the image comes from neoscad's renderer, not
+    /// OpenSCAD's: see crates/conformance/README.md, "Tier 4".
+    pub(crate) fn run_image(&self, c: &Case) -> Outcome {
+        let fail = |reason: String| outcome(c, Status::Fail, Some(reason));
+        let (Some(input), Some(expected)) = (&c.input, &c.expected) else {
+            return fail("manifest case lacks input or expected path".into());
+        };
+        let input = self.ref_root.join(input);
+        let expected = self.ref_root.join(expected);
+        let basename = c.id.strip_prefix(&format!("{}_", c.group)).unwrap_or(&c.id);
+        let out_dir = self.actual_dir.join(&c.group);
+        let actual = out_dir.join(format!("{basename}-actual.png"));
+        let stderr_path = out_dir.join(format!("{basename}-actual.png.stderr"));
+        let started = Instant::now();
+        let run = self.spawn_and_wait(c, &input, &actual, &stderr_path, &out_dir);
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let mut o = match run {
+            Err(reason) => fail(reason),
+            Ok(()) => match crate::image_compare::compare_files(&expected, &actual) {
+                Err(e) => fail(e),
+                Ok(cmp) => {
+                    let score = ImageScore {
+                        exact: cmp.passed(),
+                        perceptual: cmp.perceptual_pass(),
+                        percent_over: cmp.percent_pixels_over(),
+                    };
+                    let mut o = if score.exact || score.perceptual {
+                        outcome(c, Status::Pass, None)
+                    } else {
+                        fail(format!(
+                            "image differs: {:.3}% of pixels over tolerance; {}",
+                            score.percent_over,
+                            cmp.describe()
+                        ))
+                    };
+                    o.image = Some(score);
+                    o
+                }
             },
         };
         o.ms = Some((ms * 10.0).round() / 10.0);
@@ -580,6 +754,67 @@ fn print_geometry_report(manifest: &Manifest, outcomes: &[Outcome], image: &Geom
             "  listed as harness limits but passed with this binary: {}",
             limit_passes.join(", ")
         );
+    }
+    println!();
+}
+
+/// Images by the rule they passed, and how far off the others are: the
+/// distribution of the share of pixels over the tolerance.
+pub(crate) fn print_image_report(title: &str, outcomes: &[Outcome]) {
+    let scores: Vec<(&str, ImageScore)> = outcomes
+        .iter()
+        .filter_map(|o| o.image.map(|s| (o.id.as_str(), s)))
+        .collect();
+    let exact = scores.iter().filter(|(_, s)| s.exact).count();
+    let perceptual = scores.iter().filter(|(_, s)| s.perceptual).count();
+    let either = scores
+        .iter()
+        .filter(|(_, s)| s.exact || s.perceptual)
+        .count();
+    let only_perceptual = scores
+        .iter()
+        .filter(|(_, s)| s.perceptual && !s.exact)
+        .count();
+    let only_exact = scores
+        .iter()
+        .filter(|(_, s)| s.exact && !s.perceptual)
+        .count();
+    let errors = outcomes
+        .iter()
+        .filter(|o| o.image.is_none() && o.status == Status::Fail)
+        .count();
+    println!(
+        "{title}: {} compared, {errors} failed before comparing",
+        scores.len()
+    );
+    println!(
+        "  image_compare {exact}, perceptual (<= {}% of pixels over tolerance) {perceptual}, either {either}",
+        crate::image_compare::PERCEPTUAL_LIMIT_PERCENT
+    );
+    println!("  only image_compare {only_exact}, only perceptual {only_perceptual}");
+    let buckets = [0.0, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, f64::INFINITY];
+    let mut counts = vec![0usize; buckets.len()];
+    for (_, s) in &scores {
+        let i = buckets
+            .iter()
+            .position(|&b| s.percent_over <= b)
+            .unwrap_or(buckets.len() - 1);
+        counts[i] += 1;
+    }
+    println!("  % of pixels over tolerance:");
+    let mut lo = String::from("0");
+    for (b, n) in buckets.iter().zip(&counts) {
+        let label = if *b == 0.0 {
+            "= 0".to_string()
+        } else if b.is_infinite() {
+            format!("> {lo}")
+        } else {
+            format!("({lo}, {b}]")
+        };
+        println!("    {label:<12} {n:>5}");
+        if !b.is_infinite() {
+            lo = b.to_string();
+        }
     }
     println!();
 }

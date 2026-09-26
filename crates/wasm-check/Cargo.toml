@@ -19,6 +19,10 @@ eval = { package = "neoscad-eval", path = "../eval" }
 # Default features, `parallel` included: the web build must work with them.
 geom = { package = "neoscad-geom", path = "../geom" }
 lang = { package = "neoscad-lang", path = "../lang" }
+# Without the GPU: the module is loaded by node without wasm-bindgen glue,
+# so it runs the renderer's CPU side only. `scripts/wasm-check.sh` builds
+# the GPU side for wasm32 separately.
+render = { package = "neoscad-render", path = "../render", default-features = false }
 text = { package = "neoscad-text", path = "../text" }
 
 [dev-dependencies]

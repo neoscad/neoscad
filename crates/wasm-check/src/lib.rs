@@ -85,6 +85,7 @@ pub fn run_with(files: Arc<MemFs>, src: &[u8], seed: u32, frame_limit: u32) -> S
                     for l in geom::export::summary(g) {
                         con.print(None, l.as_bytes());
                     }
+                    con.print(None, scene_line(g).as_bytes());
                 }
                 None => con.print(None, b"Current top level object is empty."),
             }
@@ -92,6 +93,27 @@ pub fn run_with(files: Arc<MemFs>, src: &[u8], seed: u32, frame_limit: u32) -> S
     }
     drop(con);
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// What the renderer would draw, without a GPU: the scene's triangles and
+/// outline segments, and the viewer distance `--viewall` fits (the
+/// default camera's). This runs the renderer's CPU side (scene building,
+/// colour schemes, camera maths) on wasm32.
+fn scene_line(g: &geom::Geometry) -> String {
+    let scheme = render::ColorScheme::cornfield();
+    let scene = render::Scene::new(Some(g), &scheme);
+    let mut camera = render::Camera {
+        viewall: true,
+        autocenter: true,
+        ..Default::default()
+    };
+    render::fit_camera(&mut camera, &scene);
+    format!(
+        "Scene: {} triangles, {} outline segments, viewall distance {:.4}",
+        scene.face_vertex_count() / 3,
+        scene.edge_segment_count(),
+        camera.viewer_distance
+    )
 }
 
 // --- The module's interface to JavaScript ---------------------------------

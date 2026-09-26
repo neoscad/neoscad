@@ -456,6 +456,7 @@ mod tests {
                     reason,
                     ms: Some(1.25),
                     excerpt: Vec::new(),
+                    image: None,
                 }
             })
             .collect();

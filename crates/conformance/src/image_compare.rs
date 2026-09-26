@@ -23,6 +23,10 @@ use std::path::Path;
 /// `PIXEL_TOLERANCE` (`image_compare.py:8`).
 const PIXEL_TOLERANCE: f64 = 8.0;
 
+/// Tier 4's perceptual limit: the largest share of pixels, in percent,
+/// that may differ by [`PIXEL_TOLERANCE`] or more.
+pub const PERCEPTUAL_LIMIT_PERCENT: f64 = 0.1;
+
 /// A decoded image as Pillow's `np.array(Image.open(p))` sees it: raw
 /// samples, `channels` per pixel.
 #[derive(Debug)]
@@ -42,11 +46,30 @@ pub struct Comparison {
     pub total: usize,
     /// Median geometric-mean difference of the differing blocks.
     pub median: f64,
+    /// Pixels with any channel `PIXEL_TOLERANCE` or more apart: not part
+    /// of OpenSCAD's decision, but the perceptual score tier 4 uses (see
+    /// [`Comparison::perceptual_pass`]).
+    pub pixels_over: usize,
+    /// All pixels.
+    pub pixels: usize,
 }
 
 impl Comparison {
     pub fn passed(&self) -> bool {
         self.differing == 0
+    }
+
+    /// Percentage of pixels over the tolerance.
+    pub fn percent_pixels_over(&self) -> f64 {
+        100.0 * self.pixels_over as f64 / self.pixels.max(1) as f64
+    }
+
+    /// Tier 4's looser rule, for images drawn by neoscad's own renderer
+    /// rather than OpenSCAD's: at most [`PERCEPTUAL_LIMIT_PERCENT`] of the
+    /// pixels differ by the tolerance or more. See `crates/conformance/README.md`
+    /// ("Tier 4") for why the limit is what it is.
+    pub fn perceptual_pass(&self) -> bool {
+        self.pixels > 0 && self.percent_pixels_over() <= PERCEPTUAL_LIMIT_PERCENT
     }
 
     /// The line `image_compare.py` prints for a failure (`:81`).
@@ -122,6 +145,8 @@ fn compare(a: &Samples, b: &Samples) -> Result<Comparison, String> {
             differing: 1,
             total: 0,
             median: f64::NAN,
+            pixels_over: 0,
+            pixels: 0,
         });
     }
     // d = a1 - a2 with small differences zeroed (`:28-30`).
@@ -135,6 +160,7 @@ fn compare(a: &Samples, b: &Samples) -> Result<Comparison, String> {
         })
         .collect();
     let at = |y: usize, x: usize, ch: usize| d[(y * w + x) * c + ch];
+    let pixels_over = d.chunks(c).filter(|p| p.iter().any(|&v| v != 0.0)).count();
     let mut diffs = Vec::new();
     for y in 0..h - 2 {
         for x in 0..w - 2 {
@@ -160,6 +186,8 @@ fn compare(a: &Samples, b: &Samples) -> Result<Comparison, String> {
         differing: diffs.len(),
         total,
         median,
+        pixels_over,
+        pixels: w * h,
     })
 }
 
