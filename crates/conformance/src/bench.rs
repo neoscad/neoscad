@@ -15,6 +15,10 @@
 //! Two extra metrics: cold start (a trivial model, many runs) and
 //! evaluation only (BOSL2's test suite exported to `.echo`, summed).
 //!
+//! Reference results (everything but neoscad) are reused from
+//! `progress/bench/ref-cache.json` while their key matches; see
+//! `bench_cache.rs`.
+//!
 //! Results go to `progress/bench/<UTC>-<sha>[-dirty].json` in the audit's
 //! schema (`docs/audits/engine-milestone-bench.json`) plus the commit,
 //! subject and dirty flag, a line is appended to `progress/bench/index.jsonl`,
@@ -30,6 +34,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::bench_cache::{self, Measured, RefCache};
 use crate::ctx::{Ctx, git};
 
 /// `conformance/bench.json`.
@@ -104,6 +109,10 @@ pub struct BenchOptions {
     pub runs: Option<u32>,
     /// neoscad binary (default target/release/neoscad).
     pub binary: Option<PathBuf>,
+    /// Which cached reference results may be reused.
+    pub cache: crate::bench_cache::Policy,
+    /// `--seed-refs`: seed the cache from these result files and stop.
+    pub seed_refs: Vec<PathBuf>,
 }
 
 /// One process run.
@@ -625,9 +634,12 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
     let runs = opts.runs.unwrap_or(cfg.runs);
     let timeout = Duration::from_secs_f64(opts.timeout.unwrap_or(cfg.timeout_s));
     let single_over = cfg.single_run_over_s;
+    if !opts.seed_refs.is_empty() {
+        return seed_refs(ctx, &opts.seed_refs);
+    }
 
     // References: the requested ones that exist.
-    for r in &opts.refs {
+    for r in opts.refs.iter().chain(&opts.cache.fresh) {
         if !cfg.references.iter().any(|c| &c.id == r) {
             return Err(format!("unknown reference '{r}'"));
         }
@@ -681,6 +693,36 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
         .map(|(_, b)| b.clone())
         .expect("checked above");
 
+    // The tree and machine doing the measuring, and each reference's
+    // cache-key parts that don't depend on the model.
+    let sha = git(&ctx.repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let dirty = git(&ctx.repo, &["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
+    let machine = machine();
+    let mut results_src = RefResults {
+        cache: RefCache::load(&cache_path(ctx)),
+        policy: opts.cache.clone(),
+        env: run_env_identity(&work, &libpath),
+        machine: machine.clone(),
+        binaries: HashMap::new(),
+        sha: sha.clone(),
+        dirty,
+        hits: 0,
+        misses: 0,
+    };
+    let mut identities: HashMap<PathBuf, Value> = HashMap::new();
+    for (r, bin) in refs.iter().filter(|(r, _)| r.id != "neoscad") {
+        if !identities.contains_key(bin) {
+            let version = command_out(&bin.to_string_lossy(), &["--version"]);
+            identities.insert(
+                bin.clone(),
+                bench_cache::binary_identity(bin, version.as_deref())?,
+            );
+        }
+        results_src
+            .binaries
+            .insert(r.id.clone(), identities[bin].clone());
+    }
+
     let mut models_json = serde_json::Map::new();
     let mut skipped_models: BTreeMap<String, String> = BTreeMap::new();
     let mut failures = 0usize;
@@ -722,33 +764,46 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
                 }
             }
         }
+        let identity = model_identity(ctx, &cfg, &text, &m.requires, &m.inputs, &work)?;
+        let method = models_method(runs, single_over, timeout);
         let mut results = serde_json::Map::new();
         let mut meshes: BTreeMap<String, MeshStats> = BTreeMap::new();
         for (r, bin) in &refs {
             let stl = out_dir.join(format!("{id}.{}.stl", r.id));
+            // Removed even for a cached result, so no STL from an older
+            // run sits there looking like this run's.
             let _ = fs::remove_file(&stl);
-            let mut cmd = vec![bin.to_string_lossy().into_owned()];
-            cmd.extend(r.args.iter().cloned());
-            cmd.extend([
-                "-o".to_string(),
-                stl.to_string_lossy().into_owned(),
-                input.to_string_lossy().into_owned(),
-            ]);
-            let log = out_dir.join(format!("{id}.{}.stderr", r.id));
-            let mut res = measure(&cmd, &work, &env, runs, single_over, timeout, &log)?;
-            let mesh = (res["rc"] == json!(0))
-                .then(|| fs::read(&stl).ok().and_then(|d| mesh_stats(&d)))
-                .flatten();
-            res["mesh"] = mesh.as_ref().map_or(json!(null), stats_json);
-            if let Some(s) = mesh {
+            let res = results_src.get("model", id, r, &identity, &method, || {
+                let mut cmd = vec![bin.to_string_lossy().into_owned()];
+                cmd.extend(r.args.iter().cloned());
+                cmd.extend([
+                    "-o".to_string(),
+                    stl.to_string_lossy().into_owned(),
+                    input.to_string_lossy().into_owned(),
+                ]);
+                let log = out_dir.join(format!("{id}.{}.stderr", r.id));
+                let mut res = measure(&cmd, &work, &env, runs, single_over, timeout, &log)?;
+                let mesh = (res["rc"] == json!(0))
+                    .then(|| fs::read(&stl).ok().and_then(|d| mesh_stats(&d)))
+                    .flatten();
+                res["mesh"] = mesh.as_ref().map_or(json!(null), stats_json);
+                Ok(res)
+            })?;
+            // A cached result's mesh is compared with this run's neoscad
+            // like a fresh one's, from the stats it was stored with.
+            if let Some(s) = stats_from_json(&res["mesh"]) {
                 meshes.insert(r.id.clone(), s);
             }
             if res["rc"] != json!(0) && res["rc"] != json!("timeout") {
                 failures += 1;
             }
             eprintln!(
-                "{id:22} {:18} rc={} best={} runs={}",
-                r.id, res["rc"], res["best_s"], res["runs_s"]
+                "{id:22} {:18} rc={} best={} runs={}{}",
+                r.id,
+                res["rc"],
+                res["best_s"],
+                res["runs_s"],
+                cached_note(&res)
             );
             results.insert(r.id.clone(), res);
         }
@@ -781,27 +836,30 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
     if selected("cold_start") {
         let input = work.join("cold_start.scad");
         fs::write(&input, &cfg.cold_start.source).map_err(|e| e.to_string())?;
+        let identity = bench_cache::model_identity(&cfg.cold_start.source, &BTreeMap::new(), None);
+        let cs_runs = cfg.cold_start.runs.max(runs);
+        let method = models_method(cs_runs, single_over, timeout);
         let mut results = serde_json::Map::new();
         for (r, bin) in &refs {
             let stl = out_dir.join(format!("cold_start.{}.stl", r.id));
-            let mut cmd = vec![bin.to_string_lossy().into_owned()];
-            cmd.extend(r.args.iter().cloned());
-            cmd.extend([
-                "-o".to_string(),
-                stl.to_string_lossy().into_owned(),
-                input.to_string_lossy().into_owned(),
-            ]);
-            let log = out_dir.join(format!("cold_start.{}.stderr", r.id));
-            let res = measure(
-                &cmd,
-                &work,
-                &env,
-                cfg.cold_start.runs.max(runs),
-                single_over,
-                timeout,
-                &log,
-            )?;
-            eprintln!("{:22} {:18} best={}", "cold_start", r.id, res["best_s"]);
+            let res = results_src.get("cold_start", "cold_start", r, &identity, &method, || {
+                let mut cmd = vec![bin.to_string_lossy().into_owned()];
+                cmd.extend(r.args.iter().cloned());
+                cmd.extend([
+                    "-o".to_string(),
+                    stl.to_string_lossy().into_owned(),
+                    input.to_string_lossy().into_owned(),
+                ]);
+                let log = out_dir.join(format!("cold_start.{}.stderr", r.id));
+                measure(&cmd, &work, &env, cs_runs, single_over, timeout, &log)
+            })?;
+            eprintln!(
+                "{:22} {:18} best={}{}",
+                "cold_start",
+                r.id,
+                res["best_s"],
+                cached_note(&res)
+            );
             results.insert(r.id.clone(), res);
         }
         extra.insert(
@@ -820,43 +878,51 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
                     &expand(ctx, &cfg, &cfg.eval_only.tests),
                     &work.join("bosl2_tests"),
                 )?;
+                let identity = eval_identity(ctx, &cfg, &tests)?;
+                let method = eval_method(timeout);
                 let mut results = serde_json::Map::new();
                 for (r, bin) in refs.iter().filter(|(r, _)| r.eval) {
-                    let (mut total, mut cpu, mut passed, mut timeouts) = (0.0, 0.0, 0usize, 0usize);
-                    let echo = out_dir.join(format!("eval.{}.echo", r.id));
-                    let log = out_dir.join(format!("eval.{}.stderr", r.id));
-                    for (path, flags) in &tests {
-                        let _ = fs::remove_file(&echo);
-                        let mut cmd = vec![bin.to_string_lossy().into_owned()];
-                        cmd.extend(r.args.iter().cloned());
-                        cmd.extend([
-                            "-o".to_string(),
-                            echo.to_string_lossy().into_owned(),
-                            path.to_string_lossy().into_owned(),
-                        ]);
-                        let run = time_run(&cmd, &work, &env, timeout, &log)?;
-                        total += run.wall_s;
-                        cpu += run.cpu_s;
-                        timeouts += usize::from(run.timed_out);
-                        let text = fs::read_to_string(&echo).unwrap_or_default();
-                        passed += usize::from(!run.timed_out && test_passed(*flags, &run, &text));
-                    }
+                    let res =
+                        results_src.get("eval_only", "eval_only", r, &identity, &method, || {
+                            let (mut total, mut cpu, mut passed, mut timeouts) =
+                                (0.0, 0.0, 0usize, 0usize);
+                            let echo = out_dir.join(format!("eval.{}.echo", r.id));
+                            let log = out_dir.join(format!("eval.{}.stderr", r.id));
+                            for (path, flags) in &tests {
+                                let _ = fs::remove_file(&echo);
+                                let mut cmd = vec![bin.to_string_lossy().into_owned()];
+                                cmd.extend(r.args.iter().cloned());
+                                cmd.extend([
+                                    "-o".to_string(),
+                                    echo.to_string_lossy().into_owned(),
+                                    path.to_string_lossy().into_owned(),
+                                ]);
+                                let run = time_run(&cmd, &work, &env, timeout, &log)?;
+                                total += run.wall_s;
+                                cpu += run.cpu_s;
+                                timeouts += usize::from(run.timed_out);
+                                let text = fs::read_to_string(&echo).unwrap_or_default();
+                                passed +=
+                                    usize::from(!run.timed_out && test_passed(*flags, &run, &text));
+                            }
+                            Ok(json!({
+                                "total_s": round(total, 3),
+                                "cpu_s": round(cpu, 3),
+                                "tests": tests.len(),
+                                "passed": passed,
+                                "timeouts": timeouts,
+                            }))
+                        })?;
                     eprintln!(
-                        "{:22} {:18} total={total:.2}s passed={passed}/{}",
+                        "{:22} {:18} total={}s passed={}/{}{}",
                         "eval_only",
                         r.id,
-                        tests.len()
+                        res["total_s"],
+                        res["passed"],
+                        res["tests"],
+                        cached_note(&res)
                     );
-                    results.insert(
-                        r.id.clone(),
-                        json!({
-                            "total_s": round(total, 3),
-                            "cpu_s": round(cpu, 3),
-                            "tests": tests.len(),
-                            "passed": passed,
-                            "timeouts": timeouts,
-                        }),
-                    );
+                    results.insert(r.id.clone(), res);
                 }
                 extra.insert(
                     "eval_only".into(),
@@ -893,18 +959,22 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
         .map_err(|e| e.to_string())?
         .as_secs();
     let (compact, iso) = crate::record::utc_timestamps(now);
-    let sha = git(&ctx.repo, &["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".into());
     let short =
         git(&ctx.repo, &["rev-parse", "--short=7", "HEAD"]).unwrap_or_else(|| "unknown".into());
     let subject = git(&ctx.repo, &["log", "-1", "--format=%s"]).unwrap_or_default();
     let branch = git(&ctx.repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-    let dirty = git(&ctx.repo, &["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
     let mut binaries = serde_json::Map::new();
     for (r, bin) in &refs {
         let mut info = binary_info(bin, r);
         if r.id == "neoscad" {
             info["commit"] = json!(sha);
             info["build"] = json!("cargo build --release");
+        }
+        // The executable's identity, as the cache keys it: what a later
+        // seeding needs to prove a result came from the same binary.
+        if let Some(id) = results_src.binaries.get(&r.id) {
+            info["size"] = id["size"].clone();
+            info["sha256"] = id["sha256"].clone();
         }
         binaries.insert(r.id.clone(), info);
     }
@@ -928,14 +998,22 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
         "runs": runs,
         "timeout_s": timeout.as_secs_f64(),
         "method": format!(
-            "Wall time of `<binary> [backend flag] -o out.stl model.scad`, run one after another, best of {runs} (one run once a run takes over {single_over} s); {} s timeout per run. cpu_s is user+sys of the child (getrusage). Working directory is target/conformance/bench; OPENSCADPATH points at .reference (which holds BOSL2); NEOSCAD_FONT_DIR and OPENSCAD_FONT_PATH are unset, so each binary uses its own bundled fonts. ASCII STL output for all. mesh is measured from the last run's STL; mesh_vs_neoscad compares volume, area (0.1%) and bounding box with neoscad's.",
+            "Wall time of `<binary> [backend flag] -o out.stl model.scad`, run one after another, best of {runs} (one run once a run takes over {single_over} s); {} s timeout per run. cpu_s is user+sys of the child (getrusage). Working directory is target/conformance/bench; OPENSCADPATH points at .reference (which holds BOSL2); NEOSCAD_FONT_DIR and OPENSCAD_FONT_PATH are unset, so each binary uses its own bundled fonts. ASCII STL output for all. mesh is measured from the last run's STL; mesh_vs_neoscad compares volume, area (0.1%) and bounding box with neoscad's. neoscad is measured every run; a reference result may come from progress/bench/ref-cache.json, measured by an earlier run with the same binary, model, method, environment and machine: see its cached and measured_at.",
             timeout.as_secs_f64()
         ),
-        "machine": machine(),
+        "machine": machine,
         "binaries": binaries,
         "libraries": libraries,
         "models": models_json,
         "extra": extra,
+    });
+    doc["ref_cache"] = json!({
+        "file": "progress/bench/ref-cache.json",
+        "hits": results_src.hits,
+        "misses": results_src.misses,
+        "fresh_refs": opts.cache.fresh_all,
+        "fresh_ref": opts.cache.fresh,
+        "refs_max_age_days": opts.cache.max_age_days,
     });
     if !skipped.is_empty() {
         doc["skipped_references"] = json!(skipped);
@@ -975,8 +1053,541 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
     writeln!(index, "{line}").map_err(|e| e.to_string())?;
 
     print_table(&doc);
+    println!(
+        "reference results: {} cached, {} measured (progress/bench/ref-cache.json)",
+        results_src.hits, results_src.misses
+    );
     println!("wrote {}", path.display());
     Ok(u8::from(failures > 0))
+}
+
+/// Where reference results are cached.
+fn cache_path(ctx: &Ctx) -> PathBuf {
+    ctx.progress_dir().join("bench/ref-cache.json")
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The environment every run gets (see `time_run_with`), as a cache key
+/// part.
+fn run_env_identity(work: &Path, libpath: &Path) -> Value {
+    let no_server = crate::geometry::NO_SERVER_VAR;
+    bench_cache::env_identity(
+        work,
+        libpath,
+        &[(no_server, "1")],
+        &bench_cache::inherited_env(&["OPENSCADPATH", no_server]),
+    )
+}
+
+/// The method of a model (or cold start) result, as a cache key part. The
+/// timeout is exact: a timeout under a shorter limit says nothing about a
+/// longer one, and a result under a longer limit might not be one under a
+/// shorter.
+fn models_method(runs: u32, single_over: f64, timeout: Duration) -> Value {
+    json!({
+        "measure": "best wall time of runs, one run once a run takes over single_run_over_s",
+        "output": "ascii stl",
+        "runs": runs,
+        "single_run_over_s": single_over,
+        "timeout_s": timeout.as_secs_f64(),
+    })
+}
+
+/// The method of an `eval_only` result, as a cache key part.
+fn eval_method(timeout: Duration) -> Value {
+    json!({
+        "measure": "summed wall time of one run per test",
+        "output": "echo",
+        "timeout_s": timeout.as_secs_f64(),
+    })
+}
+
+/// The libraries a model with `requires` (or, lacking one, an include)
+/// may read: the named ones, or every configured one.
+fn model_libraries(ctx: &Ctx, cfg: &Config, requires: &[String]) -> Vec<(String, PathBuf)> {
+    cfg.libraries
+        .iter()
+        .filter(|(name, _)| requires.is_empty() || requires.contains(name))
+        .map(|(name, l)| (name.clone(), ctx.repo.join(&l.path)))
+        .collect()
+}
+
+/// A model's identity for the cache: its text, its generated inputs (by
+/// content: they are neoscad's output, so a rebuilt neoscad may change
+/// them), and the library corpus it can include from.
+fn model_identity(
+    ctx: &Ctx,
+    cfg: &Config,
+    text: &str,
+    requires: &[String],
+    inputs: &BTreeMap<String, String>,
+    work: &Path,
+) -> Result<Value, String> {
+    let mut hashes = BTreeMap::new();
+    for name in inputs.keys() {
+        let p = work.join(name);
+        let data = fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        hashes.insert(name.clone(), crate::sha256::hex(&data));
+    }
+    let libs = bench_cache::reads_libraries(text, requires).then(|| {
+        bench_cache::library_fingerprint(
+            &ctx.repo.join(".reference"),
+            &model_libraries(ctx, cfg, requires),
+        )
+    });
+    Ok(bench_cache::model_identity(text, &hashes, libs.as_ref()))
+}
+
+/// The `eval_only` suite's identity: every split test script and its
+/// flags, and the corpus they include.
+fn eval_identity(ctx: &Ctx, cfg: &Config, tests: &[(PathBuf, TestFlags)]) -> Result<Value, String> {
+    let mut all = String::new();
+    for (p, flags) in tests {
+        let text = fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        all.push_str(&format!("{name}\0{flags:?}\0{text}\0"));
+    }
+    let libs = bench_cache::library_fingerprint(
+        &ctx.repo.join(".reference"),
+        &model_libraries(ctx, cfg, &cfg.eval_only.requires),
+    );
+    Ok(bench_cache::model_identity(
+        &all,
+        &BTreeMap::new(),
+        Some(&libs),
+    ))
+}
+
+/// Mesh stats back from their JSON (as rounded by `stats_json`: to 1e-4,
+/// far inside the comparison's 0.1%).
+fn stats_from_json(v: &Value) -> Option<MeshStats> {
+    let b = v["bbox"].as_array()?;
+    let mut bbox = [0.0; 6];
+    for (k, x) in bbox.iter_mut().enumerate() {
+        *x = b.get(k)?.as_f64()?;
+    }
+    Some(MeshStats {
+        nv: usize::try_from(v["nv"].as_u64()?).ok()?,
+        nf: usize::try_from(v["nf"].as_u64()?).ok()?,
+        vol: v["vol"].as_f64()?,
+        area: v["area"].as_f64()?,
+        bbox,
+    })
+}
+
+fn cached_note(res: &Value) -> String {
+    if res["cached"] == json!(true) {
+        format!(
+            " (cached, measured {})",
+            res["measured_at"].as_str().unwrap_or("?")
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// Reference results for one run: from the cache where the key matches,
+/// else measured and stored.
+struct RefResults {
+    cache: RefCache,
+    policy: bench_cache::Policy,
+    env: Value,
+    machine: Value,
+    /// Binary identity by reference id (all but neoscad).
+    binaries: HashMap<String, Value>,
+    sha: String,
+    dirty: bool,
+    hits: usize,
+    misses: usize,
+}
+
+impl RefResults {
+    /// The result of reference `r` on `model`. neoscad always runs `run`:
+    /// it is what the benchmark measures. Another reference's result comes
+    /// from the cache on a key match; on a miss `run` measures it and the
+    /// result is stored, unless it failed (a failure is cheap to repeat and
+    /// more likely a broken setup than a property of the binary).
+    fn get(
+        &mut self,
+        kind: &str,
+        model: &str,
+        r: &RefConfig,
+        identity: &Value,
+        method: &Value,
+        run: impl FnOnce() -> Result<Value, String>,
+    ) -> Result<Value, String> {
+        if r.id == "neoscad" {
+            return run();
+        }
+        let binary = self.binaries.get(&r.id).cloned().unwrap_or(Value::Null);
+        let key = bench_cache::key(
+            kind,
+            &binary,
+            &r.args,
+            &self.env,
+            identity,
+            method,
+            &self.machine,
+        );
+        match self
+            .cache
+            .lookup(&r.id, model, &key, &self.policy, now_unix())
+        {
+            Ok(v) => {
+                self.hits += 1;
+                return Ok(v);
+            }
+            Err(why) => eprintln!("{model:22} {:18} measuring ({why})", r.id),
+        }
+        self.misses += 1;
+        let mut v = run()?;
+        let at = now_unix();
+        let m = Measured {
+            at_unix: at,
+            at: crate::record::utc_timestamps(at).1,
+            sha: self.sha.clone(),
+            dirty: self.dirty,
+            seeded_from: None,
+        };
+        let cacheable = v
+            .get("rc")
+            .is_none_or(|rc| *rc == json!(0) || *rc == json!("timeout"));
+        if cacheable {
+            self.cache.store(&r.id, model, &key, &v, &m)?;
+        }
+        v["cached"] = json!(false);
+        v["measured_at"] = json!(m.at);
+        Ok(v)
+    }
+}
+
+/// `--seed-refs FILE...`: fill the cache from earlier result files, taking
+/// only results whose whole key can be reconstructed exactly. A result
+/// file records the binaries' paths and versions, the method, the machine
+/// and the library commits, but not the executables' hashes or the model
+/// files' contents; those are taken from disk now, and accepted only where
+/// the file's status-change time (which no tool can set back) proves it is
+/// unchanged since before the run began. Anything unprovable is left out
+/// and reported: a wrong seed would be believed on every later run.
+fn seed_refs(ctx: &Ctx, files: &[PathBuf]) -> Result<u8, String> {
+    let mut cache = RefCache::load(&cache_path(ctx));
+    let before = cache.len();
+    for f in files {
+        let path = if f.is_file() {
+            f.clone()
+        } else {
+            ctx.progress_dir().join("bench").join(f)
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let doc: Value = serde_json::from_str(
+            &fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?,
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+        match seed_one(ctx, &doc, &name, &mut cache) {
+            Ok((n, rejected)) => {
+                println!("{name}: seeded {n} results");
+                for why in rejected {
+                    println!("  not seeded: {why}");
+                }
+            }
+            Err(why) => println!("{name}: not seeded: {why}"),
+        }
+    }
+    cache.save()?;
+    println!(
+        "{} entries in progress/bench/ref-cache.json ({} before)",
+        cache.len(),
+        before
+    );
+    Ok(0)
+}
+
+/// Seed from one result file: the number seeded and what was left out, or
+/// why the whole file can't be used.
+fn seed_one(
+    ctx: &Ctx,
+    doc: &Value,
+    name: &str,
+    cache: &mut RefCache,
+) -> Result<(usize, Vec<String>), String> {
+    if doc["dirty"] != json!(false) {
+        return Err(
+            "measured from a dirty tree, so the bench.json and timing code it ran are unknown"
+                .into(),
+        );
+    }
+    let sha = doc["sha"].as_str().ok_or("no sha")?;
+    if git(
+        &ctx.repo,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            bench_cache::METHOD_SINCE,
+            sha,
+        ],
+    )
+    .is_none()
+    {
+        return Err(format!(
+            "{} predates the current timing code ({})",
+            &sha[..sha.len().min(7)],
+            &bench_cache::METHOD_SINCE[..7]
+        ));
+    }
+    let cfg_text = git(
+        &ctx.repo,
+        &["show", &format!("{sha}:conformance/bench.json")],
+    )
+    .ok_or("no conformance/bench.json at its commit")?;
+    let cfg: Config = serde_json::from_str(&cfg_text).map_err(|e| e.to_string())?;
+    // The files proven unchanged below are this machine's; the key's
+    // machine is the file's own (power included).
+    let machine_now = machine();
+    for k in ["model", "cores", "memory_gb", "os"] {
+        if doc["machine"][k] != machine_now[k] {
+            return Err(format!(
+                "measured on another machine or OS ({k}: {} vs {})",
+                doc["machine"][k], machine_now[k]
+            ));
+        }
+    }
+    let default_neo = ctx.default_binary();
+    if doc["binaries"]["neoscad"]["binary"] != json!(default_neo.to_string_lossy()) {
+        return Err("measured from another checkout or with --binary".into());
+    }
+    let end = doc["timestamp"]
+        .as_str()
+        .and_then(bench_cache::unix_from_iso)
+        .ok_or("no timestamp")?;
+    // The timestamp is the run's end. Files must predate its start, which
+    // isn't recorded: bound it by the time the recorded runs took, plus an
+    // hour for everything unrecorded (input generation, the edit loop).
+    let bound = i64::try_from(end).map_err(|e| e.to_string())?
+        - recorded_duration_s(doc).ceil() as i64
+        - 3600;
+    let unchanged = |p: &Path| bench_cache::ctime(p).is_some_and(|c| c < bound);
+    let runs = u32::try_from(doc["runs"].as_u64().ok_or("no runs")?).map_err(|e| e.to_string())?;
+    let timeout = Duration::from_secs_f64(doc["timeout_s"].as_f64().ok_or("no timeout_s")?);
+    let work = ctx.repo.join("target/conformance/bench");
+    let libpath = ctx.repo.join(".reference");
+    let env = run_env_identity(&work, &libpath);
+    let mut rejected = Vec::new();
+
+    // References whose binary is provably the one that ran.
+    let mut binaries: Vec<(RefConfig, Value)> = Vec::new();
+    for (rid, info) in doc["binaries"].as_object().ok_or("no binaries")? {
+        if rid == "neoscad" {
+            continue;
+        }
+        let check = || -> Result<(RefConfig, Value), String> {
+            let r = cfg
+                .references
+                .iter()
+                .find(|r| &r.id == rid)
+                .ok_or("not in bench.json at its commit")?;
+            if info["args"] != json!(r.args) {
+                return Err("other arguments".into());
+            }
+            let bin = binary_path(ctx, r, None);
+            let then = info["binary"]
+                .as_str()
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            if fs::canonicalize(&then).ok() != fs::canonicalize(&bin).ok() {
+                return Err(format!("binary was {}", then.display()));
+            }
+            let version = command_out(&bin.to_string_lossy(), &["--version"]);
+            let last = version
+                .as_deref()
+                .and_then(|v| v.lines().last())
+                .map(str::to_string);
+            if json!(last) != info["version"] {
+                return Err(format!("version now {last:?}"));
+            }
+            let plist = bench_cache::bundle_info_plist(&bin);
+            if !unchanged(&bin) || plist.is_some_and(|p| !unchanged(&p)) {
+                return Err(format!("{} changed since the run", bin.display()));
+            }
+            Ok((
+                r.clone(),
+                bench_cache::binary_identity(&bin, version.as_deref())?,
+            ))
+        };
+        match check() {
+            Ok(b) => binaries.push(b),
+            Err(why) => rejected.push(format!("{rid}: {why}")),
+        }
+    }
+
+    // The library corpus, if proven unchanged: same commit, every tracked
+    // file and the library directory's listing untouched since the run.
+    let prove_libs = |libs: &[(String, PathBuf)]| -> Result<(), String> {
+        if !unchanged(&libpath) {
+            return Err(format!("{} changed since the run", libpath.display()));
+        }
+        for (lib, p) in libs {
+            let then = doc["libraries"][lib]
+                .as_str()
+                .and_then(|s| s.split_whitespace().next())
+                .ok_or(format!("no {lib} commit recorded"))?;
+            let now = git(p, &["rev-parse", "HEAD"]).unwrap_or_default();
+            if now != then {
+                return Err(format!("{lib} was at {then}, now {now}"));
+            }
+            let listed = git(p, &["ls-files"]).unwrap_or_default();
+            if let Some(f) = listed.lines().find(|f| !unchanged(&p.join(f))) {
+                return Err(format!("{lib}/{f} changed since the run"));
+            }
+        }
+        Ok(())
+    };
+
+    let measured = Measured {
+        at_unix: end,
+        at: doc["timestamp"].as_str().unwrap_or_default().to_string(),
+        sha: sha.to_string(),
+        dirty: false,
+        seeded_from: Some(name.to_string()),
+    };
+    let mut seeded = 0usize;
+    let mut seed = |kind: &str, model: &str, identity: &Value, method: &Value, results: &Value| {
+        for (r, binary) in &binaries {
+            let res = &results[&r.id];
+            if res.is_null()
+                || !(res
+                    .get("rc")
+                    .is_none_or(|rc| *rc == json!(0) || *rc == json!("timeout")))
+            {
+                continue;
+            }
+            let key = bench_cache::key(
+                kind,
+                binary,
+                &r.args,
+                &env,
+                identity,
+                method,
+                &doc["machine"],
+            );
+            if cache.seed(&r.id, model, &key, res, &measured) {
+                seeded += 1;
+            }
+        }
+    };
+
+    let method = models_method(runs, cfg.single_run_over_s, timeout);
+    for (id, entry) in doc["models"].as_object().into_iter().flatten() {
+        let Some(m) = cfg.models.get(id) else {
+            rejected.push(format!("{id}: not in bench.json at its commit"));
+            continue;
+        };
+        let prove = || -> Result<Value, String> {
+            let text = match (&m.file, &m.source) {
+                (Some(f), _) => {
+                    let p = expand(ctx, &cfg, f);
+                    if !unchanged(&p) {
+                        return Err(format!("{} changed since the run", p.display()));
+                    }
+                    fs::read_to_string(&p).map_err(|e| e.to_string())?
+                }
+                (None, Some(s)) => s.clone(),
+                (None, None) => return Err("neither file nor source".into()),
+            };
+            for n in m.inputs.keys() {
+                if !unchanged(&work.join(n)) {
+                    return Err(format!("input {n} regenerated since the run"));
+                }
+            }
+            if bench_cache::reads_libraries(&text, &m.requires) {
+                prove_libs(&model_libraries(ctx, &cfg, &m.requires))?;
+            }
+            model_identity(ctx, &cfg, &text, &m.requires, &m.inputs, &work)
+        };
+        match prove() {
+            Ok(identity) => seed("model", id, &identity, &method, &entry["results"]),
+            Err(why) => rejected.push(format!("{id}: {why}")),
+        }
+    }
+    if let Some(cs) = doc["extra"].get("cold_start") {
+        let identity = bench_cache::model_identity(&cfg.cold_start.source, &BTreeMap::new(), None);
+        let method = models_method(
+            cfg.cold_start.runs.max(runs),
+            cfg.single_run_over_s,
+            timeout,
+        );
+        seed(
+            "cold_start",
+            "cold_start",
+            &identity,
+            &method,
+            &cs["results"],
+        );
+    }
+    if let Some(ev) = doc["extra"].get("eval_only") {
+        let prove = || -> Result<Value, String> {
+            prove_libs(&model_libraries(ctx, &cfg, &cfg.eval_only.requires))?;
+            let tests = split_scadtests(
+                &expand(ctx, &cfg, &cfg.eval_only.tests),
+                &work.join("bosl2_tests"),
+            )?;
+            eval_identity(ctx, &cfg, &tests)
+        };
+        match prove() {
+            Ok(identity) => seed(
+                "eval_only",
+                "eval_only",
+                &identity,
+                &eval_method(timeout),
+                &ev["results"],
+            ),
+            Err(why) => rejected.push(format!("eval_only: {why}")),
+        }
+    }
+    Ok((seeded, rejected))
+}
+
+/// Seconds of process time a result file records: every run of every
+/// model (a timeout counted at the limit), cold starts and the eval suite.
+fn recorded_duration_s(doc: &Value) -> f64 {
+    let timeout = doc["timeout_s"].as_f64().unwrap_or(0.0);
+    let runs = |results: &Value| -> f64 {
+        results
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(_, r)| {
+                let walls: f64 = r["runs_s"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|w| w.as_f64().unwrap_or(timeout))
+                    .sum();
+                walls + r["total_s"].as_f64().unwrap_or(0.0)
+            })
+            .sum()
+    };
+    let models: f64 = doc["models"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(_, m)| runs(&m["results"]))
+        .sum();
+    let extra: f64 = ["cold_start", "eval_only"]
+        .iter()
+        .map(|k| runs(&doc["extra"][k]["results"]))
+        .sum();
+    models + extra
 }
 
 /// The speedup of neoscad against each reference over the models where
@@ -1095,6 +1706,13 @@ pub fn latest(ctx: &Ctx) -> Result<PathBuf, String> {
         .map_err(|e| format!("{}: {e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        // Result files are named `<UTC>-<sha>`; the directory also holds
+        // ref-cache.json, which sorts after them and isn't a result.
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(|c: char| c.is_ascii_digit()))
+        })
         .collect();
     files.sort();
     files
@@ -1145,6 +1763,33 @@ mod tests {
             ..a.clone()
         };
         assert_eq!(mesh_check(&a, &d).as_deref(), Some("bounding box"));
+    }
+
+    #[test]
+    fn cached_mesh_stats_round_trip() {
+        let s = MeshStats {
+            nv: 8,
+            nf: 12,
+            vol: 1000.00004,
+            area: 600.0,
+            bbox: [-5.0, 0.0, 0.0, 5.0, 10.0, 10.12345],
+        };
+        let back = stats_from_json(&stats_json(&s)).unwrap();
+        assert_eq!((back.nv, back.nf), (8, 12));
+        assert_eq!(mesh_check(&s, &back), None);
+        assert!(stats_from_json(&json!(null)).is_none());
+    }
+
+    #[test]
+    fn recorded_duration_counts_timeouts_at_the_limit() {
+        let doc = json!({
+            "timeout_s": 300.0,
+            "models": {"a": {"results": {
+                "neoscad": {"runs_s": [1.0, 2.0]},
+                "cgal": {"runs_s": [null]}}}},
+            "extra": {"eval_only": {"results": {"neoscad": {"total_s": 30.0}}}},
+        });
+        assert_eq!(recorded_duration_s(&doc), 333.0);
     }
 
     #[test]

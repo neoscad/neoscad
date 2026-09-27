@@ -35,9 +35,10 @@ any test listed in `conformance/baseline.json` no longer passes.
 
 ## Benchmarks
 
-    ./target/release/conformance bench                 # everything (about 40 minutes)
+    ./target/release/conformance bench                 # everything (about 1 minute cached, 40 uncached)
     ./target/release/conformance bench --quick         # neoscad and the nightly (Manifold) only
     ./target/release/conformance bench --only ex_menger,cold_start --refs neoscad,nightly-cgal
+    ./target/release/conformance bench --fresh-ref nightly-cgal   # re-time one reference
     ./target/release/conformance bench-chart --latest  # progress/bench/<same name>.png
 
 `conformance/bench.json` lists the models (the engine milestone audit's
@@ -92,6 +93,76 @@ Models from BOSL2 need a clone at `.reference/BOSL2`; without it they
 
 Run benchmarks on AC power with nothing else running: every number is a
 wall time.
+
+### Reference-result cache
+
+A reference's time on a model changes only when the binary, the model,
+the method or the machine does, yet timing the references is almost all
+of a full run: about 38 of its 40 minutes, including 300 s CGAL and
+2021.01 timeouts. So reference results are cached in
+`progress/bench/ref-cache.json` (`src/bench_cache.rs`), one entry per
+(reference, model), and reused while the key matches. **neoscad is always
+measured fresh**: it is what the benchmark is for.
+
+- **Key:** everything a result depends on, compared field by field.
+  - The binary: its resolved path, its whole `--version` output, and the
+    size and SHA-256 of the executable (about 0.1 s for the 44 MB
+    nightly; size plus mtime would be cheaper but would miss a same-size
+    rebuild), plus the app bundle's `Info.plist`.
+  - The model, by content: the SHA-256 of its text and of each generated
+    input (`import_stl`'s STL is neoscad's output, so a rebuilt neoscad
+    that writes it differently is a miss). A model that `requires` a
+    library, or has an `include`/`use`, also keys on the `OPENSCADPATH`
+    corpus: the entries of `.reference`, and each library's git commit
+    plus a hash of its uncommitted changes to tracked files. `eval_only`
+    keys on every split test script and its flags.
+  - The arguments and environment: backend flag, working directory,
+    `OPENSCADPATH`, the variables set and removed, and any inherited
+    `OPENSCAD*`/`NEOSCAD*` variable.
+  - The method: runs, `single_run_over_s`, the timeout (exact, so a longer
+    timeout is a miss), and `METHOD_VERSION`, which is bumped whenever the
+    timing code changes and so invalidates everything.
+  - The machine: `machine` as the result file records it (hardware model
+    and CPU, cores, memory, OS version and build, AC or battery power).
+- **Stored:** the result exactly as a run records it (runs, best, CPU,
+  mesh stats, `rc`, including `"timeout"`, so a 300 s timeout is paid
+  once), with `measured_at` and the tree (`measured_sha`, `measured_dirty`)
+  that measured it. Failures other than timeouts are not stored: they are
+  cheap to repeat and more likely a broken setup than a fact about the
+  binary.
+- **In the output:** every reference result carries `cached: true|false`
+  and `measured_at`; the file's `ref_cache` counts hits and misses. The
+  schema is otherwise unchanged, so `bench-chart` and `video` read it as
+  before. The mesh check still compares each reference's (cached) mesh
+  stats with this run's neoscad. A miss prints its cause, such as
+  `key differs: model.text_sha256`.
+- **Flags:** `--fresh-refs` re-measures every reference, `--fresh-ref ID`
+  one (repeatable), `--refs-max-age DAYS` treats older entries as misses
+  (no limit by default). A fresh result replaces the entry. Deleting the
+  file is always safe.
+- **Seeding:** `--seed-refs FILE,...` fills the cache from earlier result
+  files and stops. A result file records the binaries' paths and
+  versions, the method, the machine and the library commits, but not the
+  executables' or model files' contents. Those are taken from disk now and
+  accepted only where the file's ctime (which, unlike mtime, no tool can
+  set back) predates the run's start. The run's start is bounded by its
+  recorded run times plus an hour. A run is used only if its tree was
+  clean, at or after `METHOD_SINCE`, on this machine and OS, in this
+  checkout. Anything unprovable is listed as not seeded. The first seeding
+  took all 46 reference results of `20260927T072506Z-df6731d.json`. Every
+  other file then in `progress/bench/` was from a dirty tree and was
+  refused.
+
+What the cache doesn't replace: comparing neoscad with neoscad (a change
+against its parent, as the performance audits do) still needs an
+**interleaved A/B**, both builds alternating run by run in one session.
+The cache holds reference times from another session, and the machine's
+background load differs between sessions: `dasd` alone took most of a
+core during `docs/audits/performance.md`, which moves absolute times by a
+few percent. That is fine for a 3x-or-more gap to a reference, but it
+swamps the 1-5% a neoscad change is judged on. Only runs of both builds
+under the same load show a difference that size. The edit loop's
+`nightly_cold` series is not cached either; it takes seconds.
 
 ## Progress snapshots
 

@@ -18,6 +18,7 @@
 //! See crates/conformance/README.md.
 
 mod bench;
+mod bench_cache;
 mod bench_chart;
 mod cmake;
 mod ctx;
@@ -193,6 +194,22 @@ enum Cmd {
         /// neoscad binary (default: target/release/neoscad).
         #[arg(long)]
         binary: Option<PathBuf>,
+        /// Re-measure every reference instead of reusing cached results
+        /// (progress/bench/ref-cache.json).
+        #[arg(long)]
+        fresh_refs: bool,
+        /// Re-measure this reference; repeatable or comma separated.
+        #[arg(long, value_delimiter = ',')]
+        fresh_ref: Vec<String>,
+        /// Treat cached reference results older than this many days as
+        /// misses (default: no limit).
+        #[arg(long, value_name = "DAYS")]
+        refs_max_age: Option<f64>,
+        /// Seed the reference cache from these result files (paths, or
+        /// names under progress/bench/) where every key part can be
+        /// proven, then stop.
+        #[arg(long, value_name = "FILE", value_delimiter = ',')]
+        seed_refs: Vec<PathBuf>,
     },
     /// Draw a benchmark result as a 1920x1080 PNG.
     BenchChart {
@@ -362,9 +379,16 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             timeout,
             runs,
             binary,
+            fresh_refs,
+            fresh_ref,
+            refs_max_age,
+            seed_refs,
         } => {
             if timeout.is_some_and(|t| t.is_nan() || t <= 0.0) {
                 return Err("--timeout must be positive".into());
+            }
+            if refs_max_age.is_some_and(|d| d.is_nan() || d < 0.0) {
+                return Err("--refs-max-age must not be negative".into());
             }
             let opts = bench::BenchOptions {
                 only,
@@ -373,6 +397,12 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
                 timeout,
                 runs,
                 binary,
+                cache: bench_cache::Policy {
+                    fresh_all: fresh_refs,
+                    fresh: fresh_ref,
+                    max_age_days: refs_max_age,
+                },
+                seed_refs,
             };
             bench::bench(&ctx, &opts)
         }
