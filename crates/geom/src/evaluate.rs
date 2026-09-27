@@ -560,6 +560,71 @@ fn is_background(n: &Node) -> bool {
     n.origin.as_ref().is_some_and(|o| o.tag_background)
 }
 
+/// The key a node's result is cached under: its [`Keys`] key, except for a
+/// group that `Keys` makes transparent but the evaluator does not.
+///
+/// `Keys` gives a group with at most one child that has content its
+/// child's key, since OpenSCAD's `getIdString` leaves such groups out. Its
+/// other children are empty groups, and the 2D union still counts them:
+/// `applyToChildren2D` sends `[nothing, X]` through Clipper, which snaps
+/// `X` to Clipper's grid, while `X` alone passes through
+/// (`GeometryEvaluator.cc:317-333,434-441`). So `group() { group(); X }`
+/// and `X` share a key but not a result, and whichever the cache held last
+/// answered the other. Parallel siblings made that a race: in BOSL2's
+/// `torx_mask2d` the hulled tip circles are such groups, and the drive
+/// recess came out differently in most runs of `bosl_screws__001`.
+///
+/// Such a group gets a key of its own instead, derived from its content
+/// child's, so it computes and caches what it computes: the first copy's
+/// result, as in OpenSCAD, for every copy. (OpenSCAD's own later copies
+/// hit its cache entry for `X`, so its output depends on its cache; the
+/// first occurrence is the one a cold render always computes.) The 3D
+/// union drops empty children before deciding to pass one through, so
+/// 3D groups did not need this; they get their own key too, which costs a
+/// cache entry sharing the child's geometry and nothing more.
+fn cache_key(n: &Node, keys: &Keys, memo: &mut [Option<Key>]) -> Key {
+    // The chain of transparent groups from `n` down to the node with
+    // content, walked iteratively: BOSL2 nests groups deeply.
+    let mut chain: Vec<&Node> = Vec::new();
+    let mut cur = n;
+    let mut key = loop {
+        if let Some(k) = memo[cur.index] {
+            break k;
+        }
+        let h = keys.get(cur);
+        let group = matches!(cur.kind, NodeKind::Root | NodeKind::Group { .. });
+        // A transparent group's key is its content child's (`Keys` hashes
+        // any other group from its own label), so the child with an equal
+        // key is the content.
+        match group
+            .then(|| cur.children.iter().find(|c| keys.get(c) == h))
+            .flatten()
+        {
+            Some(c) => {
+                chain.push(cur);
+                cur = c;
+            }
+            None => {
+                memo[cur.index] = Some(h);
+                break h;
+            }
+        }
+    };
+    for g in chain.into_iter().rev() {
+        if g.children.iter().filter(|c| !is_background(c)).count() > 1 {
+            // Any fixed bijection works: keys are SHA-256 prefixes, so
+            // the result meets another key only by collision. Each level
+            // applies it again, since `group() { group(); group() {
+            // group(); X } }` goes through Clipper twice.
+            key = key
+                .wrapping_mul(0x2545_f491_4f6c_dd1d_9e37_79b9_7f4a_7c15)
+                .wrapping_add(0x6a09_e667_f3bc_c908);
+        }
+        memo[g.index] = Some(key);
+    }
+    key
+}
+
 fn warn(n: &Node, text: &str) -> Msg {
     Msg {
         severity: Some(Severity::Warning),
@@ -844,6 +909,7 @@ impl Renderer {
         {
             let mut seen = HashSet::new();
             let mut visited = vec![false; len];
+            let mut memo = vec![None; len];
             let mut ids = self
                 .ids
                 .lock()
@@ -859,11 +925,12 @@ impl Renderer {
                 if std::mem::replace(&mut visited[n.index], true) {
                     continue;
                 }
-                let h = keys.get(n);
+                let h = cache_key(n, keys, &mut memo);
                 ctx.hashes[n.index] = h;
-                // A group with one child that has content shares that
-                // child's key (`Keys`): it is the same computation, so the
-                // child inherits the group's claim to be first.
+                // A group with one child that has content, and nothing
+                // else the evaluator counts, shares that child's key
+                // (`Keys`, see `cache_key`): it is the same computation,
+                // so the child inherits the group's claim to be first.
                 let first = match parent {
                     Some((ph, pf)) if ph == h => pf,
                     _ => seen.insert(h),

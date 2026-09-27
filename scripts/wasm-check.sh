@@ -45,6 +45,9 @@ fi
 cargo build --quiet --release --target wasm32-unknown-unknown -p neoscad-wasm-check
 cargo build --quiet --release --target wasm32-unknown-unknown -p neoscad-render
 echo "wasm-check: neoscad-render (wgpu, WebGPU backend) builds for wasm32"
-wasm=target/wasm32-unknown-unknown/release/wasm_check.wasm
+# Cargo writes to $CARGO_TARGET_DIR when it is set (shared or per-worktree
+# target directories); looking only in ./target would run a stale module, or
+# fail because none was ever built there.
+wasm="${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/wasm_check.wasm"
 echo "wasm-check: $(node --version), $wasm ($(wc -c <"$wasm" | tr -d ' ') bytes)"
 node crates/wasm-check/run.js "$wasm" "$@"

@@ -367,3 +367,46 @@ fn sibling_minkowski_sums_export_identically_every_time() {
         assert!(off(src) == first, "run {run} exported different bytes");
     }
 }
+
+/// A 2D result, bit for bit (`{:?}` prints each f64 exactly).
+fn outlines(r: &Renderer, src: &str) -> String {
+    let (g, msgs) = render_with(r, src, false);
+    assert!(msgs.is_empty(), "{msgs:?}");
+    let Some(Geometry::Polygon2d(p)) = g else {
+        panic!("expected 2D")
+    };
+    format!("{:?}", p.outlines)
+}
+
+/// `group() { group(); X }` shares `X`'s cache key, but its 2D union
+/// sends `[nothing, X]` through Clipper, which snaps `X` to Clipper's grid.
+/// A cache holding `X` answered the group with the unsnapped `X`, so the
+/// group's result depended on what had been rendered before it.
+#[test]
+fn a_group_with_empty_siblings_is_not_answered_by_its_childs_cache_entry() {
+    let x = "translate([1.171, 0]) rotate(7) circle(r = 0.229, $fn = 18);";
+    let wrapped = format!("group() {{ group(); {x} }}");
+    let cold = outlines(&Renderer::new(), &wrapped);
+    let warm = Renderer::new();
+    let bare = outlines(&warm, x);
+    assert_ne!(bare, cold, "the program no longer tells the two apart");
+    assert_eq!(outlines(&warm, &wrapped), cold);
+}
+
+/// Reduced from BOSL2's `torx_mask2d` (`bosl_screws__001` came out 5
+/// ways in 16 runs): copies of `group() { group(); X }` rendered on
+/// several threads, each finding the cache holding `X` (unsnapped), its
+/// own result (snapped) or nothing, depending on timing. The hull keeps
+/// the difference visible. It gave a different result in almost every run.
+#[test]
+fn copies_of_a_group_with_empty_siblings_render_identically_every_time() {
+    let src = "module x() translate([1.171, 0]) circle(r = 0.229, $fn = 18);
+hull() for (b = [0 : 20 : 340]) rotate(b) group() { group(); x(); }";
+    let first = outlines(&Renderer::new(), src);
+    for run in 0..20 {
+        assert!(
+            outlines(&Renderer::new(), src) == first,
+            "run {run} gave a different outline"
+        );
+    }
+}

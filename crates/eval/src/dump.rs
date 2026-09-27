@@ -16,7 +16,9 @@
 //! - [`Keys`] follows OpenSCAD's `Tree::getIdString` (`NodeDumper` with
 //!   `idString`), which is what OpenSCAD keys its geometry cache on: no
 //!   whitespace, and a `group` with at most one child that has content is
-//!   transparent, so `group() { cube(); }` and `cube()` share a key. Unlike
+//!   transparent, so `group() { cube(); }` and `cube()` share a key (even
+//!   with empty groups beside the cube, which in 2D do change the result;
+//!   the geometry cache splits those, see `geom`'s `cache_key`). Unlike
 //!   OpenSCAD it is exact: numbers go in as their raw bits instead of 6
 //!   digits (OpenSCAD's 6-digit key makes `cube(1)` and `cube(1.0000001)`
 //!   share cached geometry; `-0` and `0` differ, all NaNs are one value,
@@ -800,11 +802,19 @@ impl KeyBuilder<'_> {
         d
     }
 
-    /// A group with at most one child that has content computes exactly
-    /// what that child does (`Tree::getIdString` leaves such groups out),
-    /// so it takes the child's key: `group() { cube(); }` and `cube()`
-    /// share cached geometry. Children without content are empty groups,
-    /// which add nothing, so they are left out whatever their modifiers.
+    /// A group with at most one child that has content takes that child's
+    /// key, as `Tree::getIdString` leaves such groups out: `group() {
+    /// cube(); }` and `cube()` share a key. Children without content are
+    /// empty groups and are left out whatever their modifiers, but they
+    /// are not always inert. In 3D the union drops them, so the group
+    /// computes exactly what its child does. In 2D it does not:
+    /// `group() { group(); square(1); }` unions `[nothing, square]`
+    /// through Clipper, which snaps the square to Clipper's grid, while
+    /// the square alone passes through (OpenSCAD's `applyToChildren2D`
+    /// does the same). So equal keys here do not promise equal geometry.
+    /// `geom`'s evaluator gives such groups keys of their own
+    /// (`cache_key`); anything else caching on these keys must do the
+    /// same, or its result depends on which of the two it computed first.
     /// A `%`/`#` on the content child changes the group's result (a
     /// background child is skipped), so it is hashed in rather than lost.
     fn transparent(&self, n: &Node) -> Digest {
