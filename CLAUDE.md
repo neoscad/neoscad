@@ -64,6 +64,8 @@ against the nightly, which is how the harness itself is checked.
   write another conversion.
 - After app tests or launches, make sure no NeoSCAD.app instance is left
   running.
+- Worktrees each need their own `CARGO_TARGET_DIR`. Never share one between
+  checkouts: cargo can treat another worktree's build of a crate as fresh.
 - Disk: build output is large. Keep the dev profile's reduced debug info,
   and delete `apple/build/DerivedData` or `target/*` subdirectories freely,
   since they rebuild.
