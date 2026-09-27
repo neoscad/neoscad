@@ -195,7 +195,7 @@ impl<'a> Evaluator<'a> {
         let req: Vec<Sym> = required.iter().map(|s| self.sym(s)).collect();
         let opt: Vec<Sym> = optional.iter().map(|s| self.sym(s)).collect();
         let vars = self.bind_builtin(args, loc, &req, &opt, true);
-        let frame = Ctx::new(None, CtxKind::Plain);
+        let frame = Ctx::new(None, CtxKind::Plain, crate::resolve::NONE_REGION, 0);
         *frame.vars.borrow_mut() = vars;
         let mark = self.push(frame.clone());
         Params {
@@ -217,7 +217,7 @@ impl<'a> Evaluator<'a> {
         if self.syms.is_config(s) {
             self.lookup_special(s)
         } else {
-            p.frame.get_local(s)
+            p.frame.get_local(s, &self.regions)
         }
     }
 
@@ -413,7 +413,8 @@ impl<'a> Evaluator<'a> {
             }
             B::Let => {
                 let inst = self.inst(sr, i);
-                let c = Ctx::child(ctx);
+                let region = self.inst_res(sr, i).1;
+                let c = self.new_ctx(ctx, CtxKind::Plain, region);
                 let mark = self.push(c.clone());
                 let r = self
                     .sequential_assign(sr.unit, &inst.args, inst.span, &c)
@@ -435,7 +436,8 @@ impl<'a> Evaluator<'a> {
                 if !inst.args.is_empty() {
                     let scope = self.children_scope(sr, i);
                     let mut kids = Vec::new();
-                    self.for_each(sr.unit, &inst.args, loc, ctx, &mut |ev, c| {
+                    let region = self.inst_res(sr, i).1;
+                    self.for_each(sr.unit, &inst.args, region, loc, ctx, &mut |ev, c| {
                         ev.instantiate_children(
                             &Children {
                                 scope,

@@ -15,6 +15,7 @@ use crate::context::{Ctx, CtxKind, ScopeRef};
 use crate::message::{Loc, Message, Output, Pending, R, Unwind, UnwindKind};
 use crate::node::{Node, NodeKind};
 use crate::ops::{self, Bitwise, Cmp};
+use crate::resolve::{BUILTIN_REGION, Cand, NO_SLOT, Ref, Region};
 use crate::rng::Mt19937;
 use crate::sym::{FxBuild, Sym, Syms};
 use crate::value::{FunctionValue, Str, Value};
@@ -49,6 +50,8 @@ pub(crate) struct Unit<'a> {
     /// (`Evaluator::move_accumulators`): 0 not yet known, 1 no, 2 yes.
     /// Sized on the first call, so a unit that calls nothing costs nothing.
     pub accumulates: Vec<u8>,
+    /// Where each name reference can be bound (see [`crate::resolve`]).
+    pub res: crate::resolve::UnitRes,
 }
 
 impl<'a> Unit<'a> {
@@ -63,6 +66,7 @@ impl<'a> Unit<'a> {
             consts: Vec::new(),
             uses: Vec::new(),
             accumulates: Vec::new(),
+            res: crate::resolve::UnitRes::default(),
         };
         u.add_scope(&ast.root);
         u.consts = (0..ast.exprs.len())
@@ -216,6 +220,17 @@ pub(crate) struct Evaluator<'a> {
     /// Accumulators moved out of a dying frame for a tail call's arguments
     /// (see `Evaluator::move_accumulators`), innermost last.
     pub moved: Vec<Moved>,
+    /// Every unit's regions (see [`crate::resolve`]), indexed by
+    /// [`Ctx::region`].
+    pub regions: Vec<Region>,
+    /// Names passed as named arguments (see `resolve::Cand::Extra`).
+    extras: std::cell::OnceCell<crate::resolve::NameSet>,
+    /// Lookups that fell back to the by-name walk.
+    pub stats: crate::resolve::Stats,
+    /// An empty context for `eval_call`'s stack slot (see there).
+    pub placeholder: Rc<Ctx>,
+    /// Emptied argument vectors for user calls to reuse.
+    pub arg_pool: Vec<Vec<crate::call::ArgVal>>,
 }
 
 /// A variable's value moved out of its frame, to be handed to the one read
@@ -343,6 +358,12 @@ impl<'a> Evaluator<'a> {
                 i += 1;
             }
         }
+        // Names are resolved as definitions are first used (see
+        // `crate::resolve`); these are the empty tables.
+        for unit in &mut units {
+            unit.res = crate::resolve::UnitRes::new(unit);
+        }
+        let k_pi = k.pi;
         let seed = opts.rng_seed;
         let caps = Caps::of(opts.guard.as_deref().map(crate::limits::Guard::limits));
         // Values of an earlier evaluation on this thread are gone or are
@@ -364,7 +385,7 @@ impl<'a> Evaluator<'a> {
             frames: 0,
             main_dir,
             node_index: 1,
-            builtin_ctx: Ctx::new(None, CtxKind::Builtin),
+            builtin_ctx: Ctx::new(None, CtxKind::Builtin, BUILTIN_REGION, 1),
             captured: Vec::new(),
             captured_limit: 1024,
             builtin_fns,
@@ -383,6 +404,11 @@ impl<'a> Evaluator<'a> {
             limit: std::cell::Cell::new(Hard::Off),
             pending: std::cell::Cell::new(false),
             moved: Vec::new(),
+            regions: vec![Region::default(), crate::resolve::builtin_region(k_pi)],
+            extras: std::cell::OnceCell::new(),
+            stats: crate::resolve::Stats::default(),
+            arg_pool: Vec::new(),
+            placeholder: Ctx::new(None, CtxKind::Plain, crate::resolve::NONE_REGION, 0),
             opts,
         }
     }
@@ -572,18 +598,192 @@ impl<'a> Evaluator<'a> {
         None
     }
 
-    /// `Context::try_lookup_variable`.
+    /// `Context::try_lookup_variable`, by name.
     pub fn try_lookup(&self, ctx: &Ctx, s: Sym) -> Option<Value> {
         if self.syms.is_config(s) {
             self.lookup_special(s)
         } else {
-            ctx.lookup_lexical(s)
+            ctx.lookup_lexical(s, &self.regions)
         }
     }
 
+    /// A variable reference's value: resolved, or by name when the
+    /// resolver left it (`$` names).
+    pub fn read_var(&self, u: u32, id: ExprId, s: Sym, ctx: &Ctx) -> Option<Value> {
+        match self.units[u as usize].res.var(id).cands() {
+            Some(r) => self.find_var(u, r, s, ctx),
+            None => self.try_lookup(ctx, s),
+        }
+    }
+
+    /// A resolved variable lookup: walk the chain from `ctx`, looking only
+    /// in contexts of the candidates' regions (see [`crate::resolve`]).
+    #[inline]
+    pub fn find_var(&self, u: u32, r: Ref, s: Sym, ctx: &Ctx) -> Option<Value> {
+        let found = self.find_binding(u, r, s, ctx);
+        // Debug builds check every resolved lookup against the by-name
+        // walk it replaces: they must stop at the same context.
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            found.as_ref().map(|(c, _)| std::ptr::from_ref(*c)),
+            ctx.binder(s, &self.regions),
+            "resolved lookup of {} disagrees with the scope chain",
+            self.name(s)
+        );
+        found.map(|(_, v)| v)
+    }
+
+    #[inline]
+    fn find_binding<'c>(&self, u: u32, r: Ref, s: Sym, ctx: &'c Ctx) -> Option<(&'c Ctx, Value)> {
+        let cands = self.units[u as usize].res.cands(r);
+        // Most names have one binding that can see them (a parameter, a
+        // `let`, a global): a tighter loop for those.
+        if let [Cand::Slot { region, slot }] = *cands {
+            let mut c = ctx;
+            loop {
+                if c.region == region
+                    && let Some(v) = c.slot(slot)
+                {
+                    return Some((c, v));
+                }
+                c = c.parent.as_deref()?;
+            }
+        }
+        if cands.is_empty() {
+            return None;
+        }
+        let mut c = ctx;
+        loop {
+            let region = c.region;
+            for cand in cands {
+                if cand.region() != region {
+                    continue;
+                }
+                match *cand {
+                    Cand::Slot { slot, .. } => {
+                        if let Some(v) = c.slot(slot) {
+                            return Some((c, v));
+                        }
+                    }
+                    Cand::Extra { .. } => {
+                        if let Some(v) = c.vars.borrow().get(s) {
+                            return Some((c, v.clone()));
+                        }
+                    }
+                    Cand::Def { .. } | Cand::Use { .. } => {}
+                }
+            }
+            c = c.parent.as_deref()?;
+        }
+    }
+
+    /// Resolve unit `u`'s top level, if not yet (see [`crate::resolve`]).
+    pub fn resolve_root(&mut self, u: u32) {
+        if self.units[u as usize].res.root {
+            return;
+        }
+        let mut res = std::mem::take(&mut self.units[u as usize].res);
+        let mut regions = std::mem::take(&mut self.regions);
+        let t = self.tables();
+        crate::resolve::resolve_root(&t, u, &mut regions, &mut res);
+        self.regions = regions;
+        self.units[u as usize].res = res;
+    }
+
+    /// The body region of function `index` of scope `scope`, resolving the
+    /// function at its first call.
+    #[inline]
+    pub fn function_region(&mut self, u: u32, scope: u32, index: u32) -> u32 {
+        match self.units[u as usize].res.fn_region[scope as usize][index as usize] {
+            0 => self.resolve_function(u, scope, index),
+            r => r,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn resolve_function(&mut self, u: u32, scope: u32, index: u32) -> u32 {
+        let mut res = std::mem::take(&mut self.units[u as usize].res);
+        let mut regions = std::mem::take(&mut self.regions);
+        let t = self.tables();
+        let r = crate::resolve::resolve_function(&t, u, scope, index, &mut regions, &mut res);
+        self.regions = regions;
+        self.units[u as usize].res = res;
+        r
+    }
+
+    /// The body region of module `index` of scope `scope`, resolving the
+    /// module at its first instantiation.
+    #[inline]
+    pub fn module_region(&mut self, u: u32, scope: u32, index: u32) -> u32 {
+        let body = self.units[u as usize].scopes[scope as usize].bodies[index as usize];
+        match self.units[u as usize].res.scope_region[body as usize] {
+            0 => self.resolve_module(u, scope, index),
+            r => r,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn resolve_module(&mut self, u: u32, scope: u32, index: u32) -> u32 {
+        let mut res = std::mem::take(&mut self.units[u as usize].res);
+        let mut regions = std::mem::take(&mut self.regions);
+        let t = self.tables();
+        let r = crate::resolve::resolve_module(&t, u, scope, index, &mut regions, &mut res);
+        self.regions = regions;
+        self.units[u as usize].res = res;
+        r
+    }
+
+    /// What the resolver reads (the unit being resolved and the regions are
+    /// taken out of `self` meanwhile).
+    fn tables(&self) -> crate::resolve::Tables<'_, 'a> {
+        crate::resolve::Tables {
+            units: &self.units,
+            syms: &self.syms,
+            builtin_fns: &self.builtin_fns,
+            builtin_mods: &self.builtin_mods,
+            extras: &self.extras,
+            empty: self.k.empty,
+            children: self.k.children,
+        }
+    }
+
+    /// A new context of `region`.
+    #[inline]
+    pub fn new_ctx(&self, parent: &Rc<Ctx>, kind: CtxKind, region: u32) -> Rc<Ctx> {
+        Ctx::new(
+            Some(parent.clone()),
+            kind,
+            region,
+            self.regions[region as usize].len(),
+        )
+    }
+
+    /// Set a variable by name: in its slot when the context's region has
+    /// one, else in the name map.
     pub fn set_var(&mut self, ctx: &Ctx, s: Sym, v: Value) {
         let config = self.syms.is_config(s);
+        if !config && let Some(i) = self.regions[ctx.region as usize].slot_of(s) {
+            ctx.set_slot(i, v);
+            return;
+        }
         ctx.vars.borrow_mut().set(s, v, config);
+    }
+
+    /// Set the `k`th binder of `ctx`'s region (see `Region::binds`). A
+    /// context of an unresolved construct (none are known; its references
+    /// are looked up by name too) keeps everything in its name map.
+    #[inline]
+    pub fn set_bound(&mut self, ctx: &Ctx, k: usize, s: Sym, v: Value) {
+        let binds = &self.regions[ctx.region as usize].binds;
+        match binds.get(k).copied().unwrap_or(NO_SLOT) {
+            NO_SLOT => {
+                let config = self.syms.is_config(s);
+                ctx.vars.borrow_mut().set(s, v, config);
+            }
+            i => ctx.set_slot(i, v),
+        }
     }
 
     /// The memory estimate: live lists, strings and messages
@@ -748,7 +948,9 @@ impl<'a> Evaluator<'a> {
         };
         root.index = self.next_node_index();
         let scope = ScopeRef { unit: 0, scope: 0 };
-        let file = Ctx::new(Some(b.clone()), CtxKind::File(scope));
+        self.resolve_root(0);
+        let region = self.units[0].res.scope_region[0];
+        let file = self.new_ctx(&b, CtxKind::File(scope), region);
         let mark = self.push(file.clone());
         let result = self
             .init_scope(&file, scope)
@@ -790,6 +992,13 @@ impl<'a> Evaluator<'a> {
             hard_warning: matches!(self.hard.get(), Hard::Pending | Hard::Thrown),
             camera,
             camera_assigned,
+            resolution: {
+                let mut st = self.stats;
+                for u in &self.units {
+                    st.add(&u.res.stats);
+                }
+                st
+            },
         }
     }
 
@@ -804,7 +1013,9 @@ impl<'a> Evaluator<'a> {
         let mut noauto = false;
         let (vpr, vpt, vpd, vpf) = (self.k.vpr, self.k.vpt, self.k.vpd, self.k.vpf);
         for (s, is_vec) in [(vpr, true), (vpt, true), (vpd, false), (vpf, false)] {
-            let Some(v) = file.get_local(s) else { continue };
+            let Some(v) = file.get_local(s, &self.regions) else {
+                continue;
+            };
             let ok = if is_vec {
                 // `getVec3(x, y, z, 0.0)` fills its outputs only on
                 // success, so start from the current values as the C++
@@ -872,13 +1083,20 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Break the cycles function literals create (a literal stored in a
-    /// context it captured), so an evaluation frees all its memory.
+    /// context it captured, or in one of its ancestors), so an evaluation
+    /// frees all its memory: emptying the variables of every context from
+    /// the captured one outward cuts every such cycle, since a cycle has to
+    /// pass through a stored value.
     fn release_cycles(&mut self) {
         for w in std::mem::take(&mut self.captured) {
-            let mut cur = w.upgrade();
+            let Some(c) = w.upgrade() else { continue };
+            let mut cur: Option<&Ctx> = Some(&c);
             while let Some(c) = cur {
                 c.vars.borrow_mut().clear();
-                cur = c.parent.borrow_mut().take();
+                for v in c.slots.borrow_mut().iter_mut() {
+                    *v = None;
+                }
+                cur = c.parent.as_deref();
             }
         }
     }
@@ -910,10 +1128,13 @@ impl<'a> Evaluator<'a> {
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::Number(n) => Ok(Value::Number(*n)),
             ExprKind::Var(n) => {
-                let s = self.units[u as usize].sym(*n);
-                if !self.syms.is_config(s)
-                    && let Some(v) = ctx.lookup_lexical(s)
-                {
+                let unit = &self.units[u as usize];
+                let s = unit.sym(*n);
+                let found = match unit.res.var(id).cands() {
+                    Some(r) => self.find_var(u, r, s, ctx),
+                    None => self.var_fallback(ctx, s),
+                };
+                if let Some(v) = found {
                     // A moved accumulator leaves `undef` in its frame (see
                     // `move_accumulators`), so only an `undef` needs the
                     // check, which keeps it off the common path.
@@ -1009,7 +1230,8 @@ impl<'a> Evaluator<'a> {
                 })))
             }
             ExprKind::Let(args, body) => {
-                let c = Ctx::child(ctx);
+                let region = self.units[u as usize].res.expr[id.0 as usize];
+                let c = self.new_ctx(ctx, CtxKind::Plain, region);
                 let mark = self.push(c.clone());
                 let r = self
                     .sequential_assign(u, args, e.span, &c)
@@ -1132,6 +1354,18 @@ impl<'a> Evaluator<'a> {
             BinaryOp::LogicalAnd | BinaryOp::LogicalOr => unreachable!("handled above"),
         };
         Ok(self.check_undef(res, u, span))
+    }
+
+    /// A lexical lookup by name, for a reference the resolver did not
+    /// reach (counted), or `None` for a `$` name.
+    #[cold]
+    #[inline(never)]
+    fn var_fallback(&mut self, ctx: &Ctx, s: Sym) -> Option<Value> {
+        if self.syms.is_config(s) {
+            return None;
+        }
+        self.stats.fallbacks += 1;
+        ctx.lookup_lexical(s, &self.regions)
     }
 
     /// `Context::lookup_variable`.
@@ -1314,7 +1548,7 @@ impl<'a> Evaluator<'a> {
         if !self.moved.iter().any(|m| m.sym == s && m.value.is_some()) {
             return None;
         }
-        let owner = ctx.binder(s)?;
+        let owner = ctx.binder(s, &self.regions)?;
         self.moved
             .iter_mut()
             .rev()
@@ -1368,7 +1602,8 @@ impl<'a> Evaluator<'a> {
                     span: e.span,
                 };
                 let body = *body;
-                self.for_each(u, args, loc, ctx, &mut |ev, c| {
+                let region = self.units[u as usize].res.expr[id.0 as usize];
+                self.for_each(u, args, region, loc, ctx, &mut |ev, c| {
                     ev.eval_element(u, body, c, out)
                 })
             }
@@ -1377,45 +1612,10 @@ impl<'a> Evaluator<'a> {
                 cond,
                 incr,
                 body,
-            } => {
-                let loc = Loc {
-                    unit: u,
-                    span: e.span,
-                };
-                let initial = Ctx::child(ctx);
-                let mark = self.push(initial.clone());
-                let r = (|| {
-                    self.sequential_assign(u, init, e.span, &initial)?;
-                    let mut current = Ctx::child(&initial);
-                    let slot = self.push(current.clone());
-                    let mut counter: u32 = 0;
-                    while self.eval(u, *cond, &current)?.to_bool() {
-                        self.check_interrupt()?;
-                        self.eval_element(u, *body, &current, out)?;
-                        if counter == 1_000_000 {
-                            self.error(
-                                Some(loc),
-                                DiagCode::IterationLimit,
-                                "For loop counter exceeded limit",
-                            );
-                            return Err(self.unwind(UnwindKind::LoopLimit));
-                        }
-                        counter += 1;
-                        let next = Ctx::child(&current);
-                        self.push(next.clone());
-                        self.sequential_assign(u, incr, e.span, &next)?;
-                        *next.parent.borrow_mut() = Some(initial.clone());
-                        self.truncate(slot);
-                        self.push(next.clone());
-                        current = next;
-                    }
-                    Ok(())
-                })();
-                self.truncate(mark);
-                r
-            }
+            } => self.lc_for_c(u, id, e.span, (init, *cond, incr, *body), ctx, out),
             ExprKind::LcLet(args, body) => {
-                let c = Ctx::child(ctx);
+                let region = self.units[u as usize].res.expr[id.0 as usize];
+                let c = self.new_ctx(ctx, CtxKind::Plain, region);
                 let mark = self.push(c.clone());
                 let r = self
                     .sequential_assign(u, args, e.span, &c)
@@ -1429,6 +1629,68 @@ impl<'a> Evaluator<'a> {
                 Ok(())
             }
         }
+    }
+
+    /// `LcForC::evaluate`: a C-style `for` comprehension. Out of line, so
+    /// its locals are not part of `eval_lc_frame`'s frame, which a
+    /// recursion through comprehensions holds at every level.
+    #[inline(never)]
+    fn lc_for_c(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        span: Span,
+        (init, cond, incr, body): (&'a [Arg], ExprId, &'a [Arg], ExprId),
+        ctx: &Rc<Ctx>,
+        out: &mut Vec<Value>,
+    ) -> R<()> {
+        let loc = Loc { unit: u, span };
+        let first = self.units[u as usize].res.expr[id.0 as usize];
+        let initial = self.new_ctx(ctx, CtxKind::Plain, first);
+        let mark = self.push(initial.clone());
+        let r = (|| {
+            self.sequential_assign(u, init, span, &initial)?;
+            let iteration = crate::resolve::next_region(first);
+            let mut current = self.new_ctx(&initial, CtxKind::Plain, iteration);
+            let slot = self.push(current.clone());
+            let mut counter: u32 = 0;
+            while self.eval(u, cond, &current)?.to_bool() {
+                self.check_interrupt()?;
+                self.eval_element(u, body, &current, out)?;
+                if counter == 1_000_000 {
+                    self.error(
+                        Some(loc),
+                        DiagCode::IterationLimit,
+                        "For loop counter exceeded limit",
+                    );
+                    return Err(self.unwind(UnwindKind::LoopLimit));
+                }
+                counter += 1;
+                // `LcForC::evaluate` assigns the increment in a
+                // child of the current iteration (so `i = i + 1`
+                // reads the old `i`), then re-parents it to the
+                // initial context so the chain stays two deep.
+                // Contexts' parents are fixed here, so the values
+                // move to a fresh context of the initial one
+                // instead. A function literal made in the
+                // increment keeps the first context, which differs
+                // only by also reaching the old iteration, whose
+                // names that one binds all over again.
+                let step = self.new_ctx(&current, CtxKind::Plain, iteration);
+                self.push(step.clone());
+                self.sequential_assign(u, incr, span, &step)?;
+                let next = self.new_ctx(&initial, CtxKind::Plain, iteration);
+                next.slots.borrow_mut().clone_from(&step.slots.borrow());
+                next.vars.borrow_mut().clone_from(&step.vars.borrow());
+                drop(step);
+                self.truncate(slot);
+                self.push(next.clone());
+                current = next;
+            }
+            Ok(())
+        })();
+        self.truncate(mark);
+        r
     }
 
     /// `LcEach::evalRecur` for one value.
@@ -1454,11 +1716,13 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `LcFor::forEach`: nested iteration over the assignments, calling
-    /// `op` with each innermost iteration context.
+    /// `op` with each innermost iteration context. Variable `k` binds in
+    /// region `region + k`.
     pub fn for_each(
         &mut self,
         u: u32,
         args: &'a [Arg],
+        region: u32,
         loc: Loc,
         ctx: &Rc<Ctx>,
         op: &mut dyn FnMut(&mut Self, &Rc<Ctx>) -> R<()>,
@@ -1470,12 +1734,21 @@ impl<'a> Evaluator<'a> {
             .name
             .map_or(self.k.empty, |n| self.units[u as usize].sym(n));
         let values = self.eval(u, first.expr, ctx)?;
+        // The variable's slot, looked up once rather than per iteration.
+        let slot = self.regions[region as usize]
+            .binds
+            .first()
+            .copied()
+            .unwrap_or(NO_SLOT);
+        let config = self.syms.is_config(name);
         let mut iterate = |ev: &mut Self, v: Value| -> R<()> {
             ev.check_interrupt()?;
-            let c = Ctx::child(ctx);
-            ev.set_var(&c, name, v);
+            let c = match slot {
+                NO_SLOT => ev.iteration_vars(ctx, region, name, config, v),
+                i => Ctx::with_slot(ctx, region, i, v),
+            };
             let mark = ev.push(c.clone());
-            let r = ev.for_each(u, rest, loc, &c, op);
+            let r = ev.for_each(u, rest, crate::resolve::next_region(region), loc, &c, op);
             ev.truncate(mark);
             r
         };
@@ -1510,6 +1783,23 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
+    /// A `for` iteration's context binding a variable that has no slot (a
+    /// `$` name). Out of line: `for_each` is on every level of a recursion
+    /// through a comprehension.
+    #[inline(never)]
+    fn iteration_vars(
+        &self,
+        ctx: &Rc<Ctx>,
+        region: u32,
+        name: Sym,
+        config: bool,
+        v: Value,
+    ) -> Rc<Ctx> {
+        let c = self.new_ctx(ctx, CtxKind::Plain, region);
+        c.vars.borrow_mut().set(name, v, config);
+        c
+    }
+
     /// `Let::doSequentialAssignment` into `target`.
     pub fn sequential_assign(
         &mut self,
@@ -1519,8 +1809,13 @@ impl<'a> Evaluator<'a> {
         target: &Rc<Ctx>,
     ) -> R<()> {
         let loc = Loc { unit: u, span };
+        // Names bound earlier in this `let`, for the duplicate warning. A
+        // name with a slot is a duplicate when its slot is already set
+        // (`target` is new, so only this `let` set it); the rest (`$`
+        // names, which `target` may hold copies of from the caller) are
+        // listed.
         let mut seen: Vec<Sym> = Vec::new();
-        for a in args {
+        for (k, a) in args.iter().enumerate() {
             let v = self.eval(u, a.expr, target)?;
             match a.name {
                 None => {
@@ -1530,7 +1825,16 @@ impl<'a> Evaluator<'a> {
                 }
                 Some(n) => {
                     let s = self.units[u as usize].sym(n);
-                    if seen.contains(&s) {
+                    let slot = self.regions[target.region as usize]
+                        .binds
+                        .get(k)
+                        .copied()
+                        .unwrap_or(NO_SLOT);
+                    let duplicate = match slot {
+                        NO_SLOT => seen.contains(&s),
+                        i => target.has_slot(i),
+                    };
+                    if duplicate {
                         let mut t = format!(
                             "Ignoring duplicate variable assignment {} = ",
                             self.quote_sym(s)
@@ -1538,9 +1842,12 @@ impl<'a> Evaluator<'a> {
                         .into_bytes();
                         self.write_echo_nothrow(&v, &mut t);
                         self.warn(loc, DiagCode::Overwrite, t);
-                    } else {
-                        self.set_var(target, s, v);
+                    } else if slot == NO_SLOT {
+                        let config = self.syms.is_config(s);
+                        target.vars.borrow_mut().set(s, v, config);
                         seen.push(s);
+                    } else {
+                        target.set_slot(slot, v);
                     }
                 }
             }

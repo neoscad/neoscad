@@ -29,6 +29,33 @@ entry when it is done.
   nightly's 0.7 s, nearly all of the difference in the cap triangulation.
   (5b)
 
+- Resolved variable lookups (O4, `crates/eval/src/resolve.rs`) still walk
+  the context chain, comparing each context's region with the reference's
+  candidates, rather than hopping a fixed (depth, slot). Fixed addressing
+  needs a static frame layout, and four things get in the way: a scope
+  assignment not yet made falls through to an outer binding, a builtin
+  that binds (`intersection_for`) can be redefined by a user module, a
+  C-style `for` has two iteration contexts in the chain while it
+  increments, and function literals capture whatever chain they were made
+  in. In the hero, 17.5M of 25M single-candidate lookups stop at the first
+  context, but 2.2M walk 7 or 8. (O4)
+- Each evaluation that resolves a function body or literal scans every
+  expression of every unit once for named-argument names
+  (`resolve::named_arguments`, about 0.25-0.4 ms over BOSL2), because a
+  named argument that is not a parameter binds in any callee. Lowering
+  could record the names with the program (and its fragments), so the
+  session's edit loop would not rescan them. (O4)
+- Keeping up to three slots inline in each context, to save the slot
+  vector's allocation per call, `let` and loop iteration, measured 2-4%
+  slower on the BOSL2 models: every context grows. Worth retrying with a
+  smaller `Value` or a slab of contexts. (O4)
+- The wasm32 frame budget's calibration in `crates/eval/src/recursion.rs`
+  (budget depths at most 63% of where V8 overflows) is stale: at 9b89400
+  `module-children` reaches 206 of V8's 214 and `function-lc` 199 of 326
+  (`scripts/wasm-check.sh --depths --all-programs`, with and without
+  `--frames=4000000000`). After O4, V8 overflows `function-lc` at 353
+  and `module-children` still at 214. (O4)
+
 - Many `text()` nodes side by side render slower than the nightly: 200
   lines of 125 characters take 2.25 s against 1.05 s (30 lines: 0.36 s
   against 0.26 s), with byte-identical SVGs. Shaping and outlines are not
@@ -770,6 +797,19 @@ entry when it is done.
   defined twice resolves to the file asked from, then the document, then
   the includes in the order they were found (OpenSCAD's last definition
   wins); `use`d libraries are searched last `use` first. (8e)
+- The evaluator now resolves names statically (`crates/eval/src/resolve.rs`,
+  O4), and some of its rules differ from the index's "assignments are
+  visible throughout their scope": an assignment that reads a name
+  assigned later in the same scope gets the outer binding
+  (`a = 5; module m() { b = a; a = 1; }` sets `b` to 5); a function called
+  while its scope is being initialised sees only the assignments made so
+  far; a named argument that is not a parameter binds in the callee's body
+  (`function f() = zz; f(zz = 5)` is 5); and parameter defaults are
+  evaluated in the defining scope, so they never see other parameters.
+  The index could share `resolve`'s region model, but the resolver works
+  on a whole program's spliced AST and the index per file on the syntax
+  tree, accepting broken code, so sharing means moving the model into
+  `lang`. (O4)
 - References and rename see the document and what it includes, not the
   files that include it (there is no workspace index): renaming a
   top-level name of a file other files include can break them. Rename

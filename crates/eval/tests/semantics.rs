@@ -262,6 +262,141 @@ fn infinite_recursion_is_an_error_not_a_crash() {
 }
 
 #[test]
+fn scoping_rules_survive_static_resolution() {
+    // Names are resolved ahead of time (the evaluator's `resolve`), and
+    // each of these is a rule a static resolution could get wrong: a scope
+    // assignment that reads a name assigned later in it (the outer one, or
+    // a named argument), a function reading a global before it is set, a
+    // named argument that is not a parameter, a C-style `for` whose
+    // increment makes a closure, `for` variables seen by later ones, a
+    // `let` binding that reads a later one, a user module named like a
+    // builtin that binds, `$children` passed by name, a variable holding a
+    // function shadowing a function, a parameter default naming another
+    // parameter (it sees the defining scope), `$` variables through calls,
+    // children in the caller's scope, and duplicate parameters. The
+    // expected lines are the nightly's.
+    let src = r#"a = 5;
+module m1() { b = a; a = 1; echo(m1b = b, a = a); }
+m1();
+function early() = late;
+e1 = early();
+late = 9;
+echo(e1 = e1, e2 = early());
+function fz() = zz;
+echo(fz = fz(zz = 5));
+module mq() echo(q = q);
+mq(q = 3);
+module mx() { x = 1; echo(mx = x); }
+mx(x = 5);
+module my() { y = x2 + 1; x2 = 10; echo(my = y); }
+my(x2 = 4);
+echo([for (i = 0, f = function() i; i < 3; i = i + 1, f = function() i * 10) f()]);
+echo([for (i = [0:2], j = [0:i]) [i, j]]);
+echo(let(p = q0, q0 = 1) p);
+q0 = 100;
+module intersection_for(i) { echo(uif = i); children(); }
+intersection_for(i = [1:2]) echo(child_i = i);
+module mc() echo(mc = $children);
+mc($children = 4);
+function f10() = 1;
+echo(f10 = let(f10 = function() 2) f10());
+function fd(a, b = a) = b;
+echo(fd = fd(1));
+module rec(n) { function g() = n; if (n > 0) { echo(rec = g()); rec(n - 1); } }
+rec(2);
+$fn = 3;
+function dyn() = $fn;
+module md() echo(md = dyn());
+md($fn = 7);
+x3 = 1;
+echo([for (x3 = [x3 + 1]) x3]);
+module ch() { v = 2; children(); }
+v = 1;
+ch() echo(ch_v = v);
+function g5(n) = let(n = n + 1) n;
+echo(g5 = g5(1));
+function cl(k) = function(x) x + k;
+h = cl(10);
+echo(cl = h(1));
+echo(is_undef(nope), is_undef(a));
+function dup(a, a) = a;
+echo(dup = dup(1, 2));"#;
+    assert_eq!(
+        run(src),
+        [
+            "WARNING: Ignoring unknown variable \"late\" @4",
+            "ECHO: m1b = 5, a = 1",
+            "ECHO: e1 = undef, e2 = 9",
+            "WARNING: variable \"zz\" not specified as parameter @9",
+            "ECHO: fz = 5",
+            "WARNING: variable \"q\" not specified as parameter @11",
+            "ECHO: q = 3",
+            "WARNING: variable \"x\" not specified as parameter @13",
+            "WARNING: Parameter \"x\" is overwritten with a literal @12",
+            "ECHO: mx = 1",
+            "WARNING: variable \"x2\" not specified as parameter @15",
+            "WARNING: Parameter \"x2\" is overwritten with a literal @14",
+            "ECHO: my = 5",
+            "ECHO: [0, 10, 20]",
+            "ECHO: [[0, 0], [1, 0], [1, 1], [2, 0], [2, 1], [2, 2]]",
+            "ECHO: 100",
+            "ECHO: uif = [1 : 1 : 2]",
+            "WARNING: Ignoring unknown variable \"i\" @21",
+            "ECHO: child_i = undef",
+            "WARNING: variable \"$children\" not specified as parameter @23",
+            "ECHO: mc = 4",
+            "ECHO: f10 = 2",
+            "ECHO: fd = 5",
+            "ECHO: rec = 2",
+            "ECHO: rec = 1",
+            "ECHO: md = 7",
+            "ECHO: [2]",
+            "ECHO: ch_v = 1",
+            "ECHO: g5 = 2",
+            "ECHO: cl = 11",
+            "ECHO: true, false",
+            "ECHO: dup = 2",
+        ]
+    );
+}
+
+#[test]
+fn duplicate_let_bindings_warn() {
+    // The first binding of a name in a `let` wins; a `$` name is checked
+    // apart from copies of the caller's `$` variables in the same frame.
+    // The expected lines are the nightly's.
+    let src = r#"echo(let(a = 1, a = 2) a);
+function f() = let($x = 1, $x = 2, b = 3, b = 4) [$x, b];
+function g() = f();
+$x = 9;
+echo(f(), g());
+echo([for (i = 0, i = 5; i < 2; i = i + 1, i = 7) i]);
+let (q = 1, q = 2) echo(q);
+module mm() { let ($fn = 1, $fn = 2) echo($fn); }
+mm($fn = 5);"#;
+    assert_eq!(
+        run(src),
+        [
+            "WARNING: Ignoring duplicate variable assignment \"a\" = 2 @1",
+            "ECHO: 1",
+            "WARNING: Ignoring duplicate variable assignment \"$x\" = 2 @2",
+            "WARNING: Ignoring duplicate variable assignment \"b\" = 4 @2",
+            "WARNING: Ignoring duplicate variable assignment \"$x\" = 2 @2",
+            "WARNING: Ignoring duplicate variable assignment \"b\" = 4 @2",
+            "ECHO: [1, 3], [1, 3]",
+            "WARNING: Ignoring duplicate variable assignment \"i\" = 5 @6",
+            "WARNING: Ignoring duplicate variable assignment \"i\" = 7 @6",
+            "WARNING: Ignoring duplicate variable assignment \"i\" = 7 @6",
+            "ECHO: [0, 1]",
+            "WARNING: Ignoring duplicate variable assignment \"q\" = 2 @7",
+            "ECHO: 1",
+            "WARNING: Ignoring duplicate variable assignment \"$fn\" = 2 @8",
+            "ECHO: 1",
+        ]
+    );
+}
+
+#[test]
 fn tail_call_limit() {
     let (lines, _) = run_with(
         "function crash() = crash();\necho(crash());",

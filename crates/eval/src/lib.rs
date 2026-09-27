@@ -14,7 +14,9 @@
 //! - **Values** ([`Value`]) are small and cheap to clone; see `value`.
 //! - **Scoping** follows OpenSCAD's contexts: lexical lookup through
 //!   parents, and `$` variables through the stack of live contexts; see
-//!   `context`.
+//!   `context`. Ordinary names are resolved ahead of time, as each
+//!   definition is first used, to the few contexts that can bind them,
+//!   where they sit in numbered slots; see `resolve`.
 //! - **Errors** unwind as `Err(Box<Unwind>)`, collecting OpenSCAD's
 //!   `TRACE:` lines at the same call sites; see `message`.
 //! - **Recursion limits** are a measured stack budget, like OpenSCAD's
@@ -46,6 +48,8 @@ pub mod node;
 mod ops;
 mod print;
 pub mod recursion;
+mod resolve;
+pub use resolve::Stats as ResolveStats;
 pub mod rng;
 mod sym;
 pub mod text_props;
@@ -366,6 +370,9 @@ pub struct Evaluation {
     /// Which of those the file itself assigned (and converted): the GUI
     /// moves its view to exactly these (`Camera::updateView`).
     pub camera_assigned: CameraAssigned,
+    /// How the program's names were resolved: how many references are
+    /// left to a dynamic lookup.
+    pub resolution: ResolveStats,
 }
 
 /// Which of `$vpt`, `$vpr`, `$vpd` and `$vpf` a program assigned at its

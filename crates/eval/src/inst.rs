@@ -38,17 +38,40 @@ impl<'a> Evaluator<'a> {
         })
     }
 
+    /// Instantiation `i`'s resolution: its module reference plus one and
+    /// its first binding region (see `resolve::UnitRes::inst`), or zeros.
+    pub fn inst_res(&self, sr: ScopeRef, i: usize) -> (u32, u32) {
+        let insts = &self.units[sr.unit as usize].res.inst[sr.scope as usize];
+        insts.get(i).copied().unwrap_or((0, 0))
+    }
+
     /// `ScopeContext::init`: evaluate a scope's assignments in order.
     pub fn init_scope(&mut self, ctx: &Rc<Ctx>, sr: ScopeRef) -> R<()> {
         let scope = self.scope(sr);
         let ast = self.units[sr.unit as usize].ast;
-        for a in &scope.assignments {
+        // The region's binders are a module's parameters, then these
+        // assignments (see `resolve::Region::binds`).
+        let region = &self.regions[ctx.region as usize];
+        let base = region
+            .binds
+            .len()
+            .saturating_sub(scope.assignments.len() + usize::from(region.params));
+        for (k, a) in scope.assignments.iter().enumerate() {
             let s = self.units[sr.unit as usize].sym(a.name);
             let loc = Loc {
                 unit: sr.unit,
                 span: a.loc.span,
             };
-            if ast.is_literal(a.expr) && ctx.has_local(s) {
+            let slot = self.regions[ctx.region as usize]
+                .binds
+                .get(base + k)
+                .copied()
+                .unwrap_or(crate::resolve::NO_SLOT);
+            let bound = match slot {
+                crate::resolve::NO_SLOT => ctx.vars.borrow().get(s).is_some(),
+                i => ctx.has_slot(i),
+            };
+            if ast.is_literal(a.expr) && bound {
                 let t = format!(
                     "Parameter {} is overwritten with a literal",
                     self.quote_sym(s)
@@ -59,7 +82,7 @@ impl<'a> Evaluator<'a> {
                 self.check_hard()?;
             }
             match self.eval(sr.unit, a.expr, ctx) {
-                Ok(v) => self.set_var(ctx, s, v),
+                Ok(v) => self.set_bound(ctx, base + k, s, v),
                 Err(mut e) => {
                     let q = self.quote_sym(s);
                     match a.overwrite {
@@ -132,7 +155,9 @@ impl<'a> Evaluator<'a> {
         out: &mut Vec<Node>,
         indices: Option<&[usize]>,
     ) -> R<()> {
-        let c = Ctx::new(Some(children.ctx.clone()), CtxKind::Scope(children.scope));
+        let region = self.units[children.scope.unit as usize].res.scope_region
+            [children.scope.scope as usize];
+        let c = self.new_ctx(&children.ctx, CtxKind::Scope(children.scope), region);
         let mark = self.push(c.clone());
         let r = self
             .init_scope(&c, children.scope)
@@ -198,7 +223,16 @@ impl<'a> Evaluator<'a> {
     fn instantiate_frame(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
         let name = self.inst_name(sr, i);
         let loc = self.inst_loc(sr, i);
-        let Some(m) = self.lookup_module(ctx, name, loc)? else {
+        let found = match self.inst_res(sr, i).0 {
+            0 => {
+                if !self.syms.is_config(name) {
+                    self.stats.fallbacks += 1;
+                }
+                self.lookup_module(ctx, name, loc)?
+            }
+            r => self.find_module(sr.unit, r - 1, ctx, name, loc)?,
+        };
+        let Some(m) = found else {
             // "Ignoring unknown module" is printed by the lookup, before
             // `ModuleInstantiation::evaluate`'s try block: no trace.
             self.check_hard()?;
@@ -296,12 +330,14 @@ impl<'a> Evaluator<'a> {
             ctx: ctx.clone(),
         };
         let n_children = self.scope(children.scope).instantiations.len();
-        let mctx = Ctx::new(Some(dctx.clone()), CtxKind::Module(body, children));
+        let region = self.module_region(mu, def_scope.scope, index);
+        let mctx = self.new_ctx(dctx, CtxKind::Module(body, children), region);
         let (sc, sp) = (self.k.children, self.k.parent_modules);
-        self.set_var(&mctx, sc, Value::Number(n_children as f64));
+        // `$children` is the region's last binder.
+        let last = self.regions[region as usize].binds.len().wrapping_sub(1);
+        self.set_bound(&mctx, last, sc, Value::Number(n_children as f64));
         self.set_var(&mctx, sp, Value::Number(self.module_names.len() as f64));
-        let frame = self.bind_user(args, loc, mu, &def.params, dctx)?;
-        self.apply_frame(&mctx, frame);
+        self.bind_module(args, loc, mu, &def.params, dctx, &mctx)?;
         let mark = self.push(mctx.clone());
         let r = (|| {
             self.init_scope(&mctx, body)?;
@@ -324,6 +360,24 @@ impl<'a> Evaluator<'a> {
         })();
         self.truncate(mark);
         r
+    }
+
+    /// Bind a module call's arguments into its context. Out of line, so the
+    /// bound frame is not part of the instantiation's stack frame, which
+    /// every level of a recursive module holds.
+    #[inline(never)]
+    fn bind_module(
+        &mut self,
+        mut args: Vec<crate::call::ArgVal>,
+        loc: Loc,
+        mu: u32,
+        params: &'a [lang::ast::Param],
+        dctx: &Rc<Ctx>,
+        mctx: &Ctx,
+    ) -> R<()> {
+        let frame = self.bind_user(&mut args, loc, mu, params, dctx, mctx.region)?;
+        self.apply_frame(mctx, frame);
+        Ok(())
     }
 
     /// `call of 'name(a = 1, b = "x")'` for a module's trace line.

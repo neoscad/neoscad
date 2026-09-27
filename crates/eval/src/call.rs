@@ -10,8 +10,34 @@ use crate::builtins::modules::BuiltinModule;
 use crate::context::{Ctx, CtxKind, ScopeRef, Vars};
 use crate::eval::{Evaluator, Step};
 use crate::message::{Loc, R, UnwindKind};
+use crate::resolve::{BUILTIN_REGION, Cand, NO_SLOT, Region};
 use crate::sym::Sym;
 use crate::value::{FunctionValue, Value};
+
+/// A user call's bound arguments: the callee region's slots, and the
+/// `$` names and other names the region has no slot for.
+pub(crate) struct Frame {
+    pub slots: Vec<Option<Value>>,
+    pub vars: Vars,
+}
+
+impl Frame {
+    fn has(&self, slot: u32, s: Sym) -> bool {
+        match slot {
+            NO_SLOT => self.vars.get(s).is_some(),
+            i => self.slots[i as usize].is_some(),
+        }
+    }
+
+    fn set(&mut self, slot: u32, s: Sym, v: Value, config: bool) {
+        match slot {
+            NO_SLOT => {
+                self.vars.set(s, v, config);
+            }
+            i => self.slots[i as usize] = Some(v),
+        }
+    }
+}
 
 /// An evaluated argument.
 #[derive(Debug, Clone)]
@@ -49,7 +75,7 @@ pub(crate) enum Instantiable {
 /// `Evaluator::move_accumulators`): `ctx` is held by the loop's stack slot
 /// and its `cur`, each context above it only by its child. Only plain
 /// contexts (function bodies, `let`) qualify.
-fn private_binder(ctx: &Rc<Ctx>, s: Sym) -> Option<Rc<Ctx>> {
+fn private_binder(ctx: &Rc<Ctx>, s: Sym, regions: &[Region]) -> Option<Rc<Ctx>> {
     // The counts include the clone held here.
     let mut c = ctx.clone();
     let mut expected = 3;
@@ -60,7 +86,7 @@ fn private_binder(ctx: &Rc<Ctx>, s: Sym) -> Option<Rc<Ctx>> {
         {
             return None;
         }
-        if c.has_local(s) {
+        if c.has_local(s, regions) {
             return Some(c);
         }
         c = c.parent()?;
@@ -72,12 +98,24 @@ impl<'a> Evaluator<'a> {
     /// `Arguments`: evaluate call arguments in order.
     pub fn eval_args(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>) -> R<Vec<ArgVal>> {
         let mut out = Vec::with_capacity(args.len());
+        self.eval_args_into(u, args, ctx, &mut out)?;
+        Ok(out)
+    }
+
+    /// [`Self::eval_args`] into `out` (a vector from `arg_pool`).
+    fn eval_args_into(
+        &mut self,
+        u: u32,
+        args: &'a [Arg],
+        ctx: &Rc<Ctx>,
+        out: &mut Vec<ArgVal>,
+    ) -> R<()> {
         for a in args {
             let value = self.eval(u, a.expr, ctx)?;
             let name = a.name.map(|n| self.units[u as usize].sym(n));
             out.push(ArgVal { name, value });
         }
-        Ok(out)
+        Ok(())
     }
 
     /// `parse_without_defaults`: match arguments to parameter names.
@@ -178,49 +216,124 @@ impl<'a> Evaluator<'a> {
         frame
     }
 
-    /// `Parameters::parse` for user functions and modules: defaults are
-    /// evaluated in the defining context.
+    /// `Parameters::parse` for user functions and modules, into the slots
+    /// of the callee's `region`: `parse_without_defaults` as [`Self::bind`]
+    /// does it, then each missing parameter's default, evaluated in the
+    /// defining context (so a default sees neither the other parameters
+    /// nor the body; `Parameters.cc`).
     pub fn bind_user(
         &mut self,
-        args: Vec<ArgVal>,
+        args: &mut Vec<ArgVal>,
         loc: Loc,
         unit: u32,
         params: &'a [Param],
         defining: &Rc<Ctx>,
-    ) -> R<Vars> {
+        region: u32,
+    ) -> R<Frame> {
         let warn = self.opts.check_parameters;
         // A cheap clone (reference count), so the closure does not borrow
-        // `self` while `bind` needs it mutably.
+        // `self` while warnings need it mutably.
         let unit_syms = self.units[unit as usize].syms.clone();
-        let mut frame = self.bind(
-            args,
-            loc,
-            params.len(),
-            |i| unit_syms[params[i].name.0 as usize],
-            warn,
-        );
-        for p in params {
-            let s = unit_syms[p.name.0 as usize];
-            if frame.get(s).is_none() {
+        let psym = |i: usize| unit_syms[params[i].name.0 as usize];
+        let n_params = params.len();
+        let mut f = Frame {
+            slots: vec![None; self.regions[region as usize].len()],
+            vars: Vars::default(),
+        };
+        let mut named: Vec<Sym> = Vec::new();
+        let mut position = 0;
+        let mut warned_extra = false;
+        for a in args.drain(..) {
+            let (name, slot) = match a.name {
+                Some(n) => {
+                    let slot = self.slot_in(region, n);
+                    if named.contains(&n) {
+                        let t = format!("argument {} supplied more than once", self.quote_sym(n));
+                        self.warn(loc, DiagCode::ArgumentMismatch, t);
+                    } else if f.has(slot, n) {
+                        let t = format!(
+                            "argument {} overrides positional argument",
+                            self.quote_sym(n)
+                        );
+                        self.warn(loc, DiagCode::ArgumentMismatch, t);
+                    } else if warn
+                        && !self.syms.is_config(n)
+                        && !(0..n_params).any(|i| psym(i) == n)
+                    {
+                        let t =
+                            format!("variable {} not specified as parameter", self.quote_sym(n));
+                        self.warn(loc, DiagCode::ArgumentMismatch, t);
+                    }
+                    named.push(n);
+                    (n, slot)
+                }
+                None => {
+                    let mut found = None;
+                    while position < n_params {
+                        let candidate = psym(position);
+                        position += 1;
+                        if !named.contains(&candidate) {
+                            found = Some((candidate, self.param_slot(region, position - 1)));
+                            break;
+                        }
+                    }
+                    match found {
+                        Some(found) => found,
+                        None => {
+                            if warn && !warned_extra {
+                                self.warn(
+                                    loc,
+                                    DiagCode::ArgumentMismatch,
+                                    "Too many unnamed arguments supplied",
+                                );
+                                warned_extra = true;
+                            }
+                            continue;
+                        }
+                    }
+                }
+            };
+            let config = self.syms.is_config(name);
+            f.set(slot, name, a.value, config);
+        }
+        for (k, p) in params.iter().enumerate() {
+            let s = psym(k);
+            let slot = self.param_slot(region, k);
+            if !f.has(slot, s) {
                 let v = match p.default {
                     Some(d) => self.eval(unit, d, defining)?,
                     None => Value::Undef,
                 };
                 let config = self.syms.is_config(s);
-                frame.set(s, v, config);
+                f.set(slot, s, v, config);
             }
         }
-        Ok(frame)
+        Ok(f)
     }
 
-    /// Copy a frame into a context's variables.
-    pub fn apply_frame(&mut self, ctx: &Ctx, frame: Vars) {
+    /// The slot of parameter `k` in `region` (its `k`th binder).
+    fn param_slot(&self, region: u32, k: usize) -> u32 {
+        let binds = &self.regions[region as usize].binds;
+        binds.get(k).copied().unwrap_or(NO_SLOT)
+    }
+
+    /// The slot of `s` in `region`, or [`NO_SLOT`] for the name map.
+    fn slot_in(&self, region: u32, s: Sym) -> u32 {
+        if self.syms.is_config(s) {
+            return NO_SLOT;
+        }
+        self.regions[region as usize].slot_of(s).unwrap_or(NO_SLOT)
+    }
+
+    /// Put a call's bound arguments into the callee's context.
+    pub fn apply_frame(&mut self, ctx: &Ctx, frame: Frame) {
+        ctx.merge_slots(frame.slots);
         let mut vars = ctx.vars.borrow_mut();
         if vars.is_empty() {
-            *vars = frame;
+            *vars = frame.vars;
             return;
         }
-        for (s, v) in frame.into_items() {
+        for (s, v) in frame.vars.into_items() {
             let config = self.syms.is_config(s);
             vars.set(s, v, config);
         }
@@ -276,14 +389,23 @@ impl<'a> Evaluator<'a> {
         // A frame for the frame budget (see `crate::recursion`); tail
         // calls below reuse it, as they reuse the native stack.
         self.frames += crate::recursion::CALL_FRAMES;
-        let slot = self.push(Ctx::child(ctx));
-        let mut cur = self.stack[slot].clone();
+        // The loop's stack slot is replaced by each callee's context.
+        // OpenSCAD evaluates the first call in a fresh empty context, which
+        // only a `$` lookup (it binds none) or `copy_config` (it has none
+        // to copy) could see, so the slot starts with a shared empty
+        // context, `entry` skips the copy, and the call is evaluated
+        // directly in `ctx`. (Pushing `ctx` itself would not do: it need
+        // not be on the stack, and its `$` variables would then become
+        // visible to the arguments.)
+        let slot = self.push(self.placeholder.clone());
+        let mut cur = ctx.clone();
+        let mut entry = true;
         let mut unit = u;
         let mut expr = Some(id);
         let mut call = (u, id);
         let mut depth: u32 = 0;
         let result = loop {
-            match self.simplify(unit, expr, &cur) {
+            match self.simplify(unit, expr, &cur, entry) {
                 // A warning from the callee itself (an unknown function, a
                 // builtin's argument check) is raised inside OpenSCAD's
                 // `FunctionCall::evaluate`, so it is traced as its caller.
@@ -306,6 +428,7 @@ impl<'a> Evaluator<'a> {
                         self.truncate(slot);
                         self.push(nc.clone());
                         cur = nc;
+                        entry = false;
                     }
                     if let Some(c) = c {
                         call = c;
@@ -348,8 +471,10 @@ impl<'a> Evaluator<'a> {
         self.trace(e, loc, t);
     }
 
-    /// `simplify_function_body`: one step of the tail-call loop.
-    fn simplify(&mut self, u: u32, expr: Option<ExprId>, ctx: &Rc<Ctx>) -> R<Step> {
+    /// `simplify_function_body`: one step of the tail-call loop. `entry`:
+    /// `ctx` is the caller's context, not one of the loop's own, and its
+    /// `$` variables are not copied (see `eval_call`).
+    fn simplify(&mut self, u: u32, expr: Option<ExprId>, ctx: &Rc<Ctx>, entry: bool) -> R<Step> {
         let Some(id) = expr else {
             return Ok(Step::Done(Value::Undef));
         };
@@ -379,9 +504,12 @@ impl<'a> Evaluator<'a> {
                 Ok(next(*body))
             }
             ExprKind::Let(args, body) => {
-                let c = Ctx::child(ctx);
+                let region = self.units[u as usize].res.expr[id.0 as usize];
+                let c = self.new_ctx(ctx, CtxKind::Plain, region);
                 self.push(c.clone());
-                self.copy_config(ctx, &c);
+                if !entry {
+                    self.copy_config(ctx, &c);
+                }
                 self.sequential_assign(u, args, e.span, &c)?;
                 Ok(Step::Next {
                     unit: u,
@@ -398,7 +526,15 @@ impl<'a> Evaluator<'a> {
                 let callable = match &ast.expr(*callee).kind {
                     ExprKind::Var(n) => {
                         let s = self.units[u as usize].sym(*n);
-                        self.lookup_function(ctx, s, loc)?
+                        match self.units[u as usize].res.expr[id.0 as usize] {
+                            0 => {
+                                if !self.syms.is_config(s) {
+                                    self.stats.fallbacks += 1;
+                                }
+                                self.lookup_function(ctx, s, loc)?
+                            }
+                            r => self.find_function(u, r - 1, ctx, s, loc)?,
+                        }
                     }
                     _ => {
                         let v = self.eval(u, *callee, ctx)?;
@@ -412,7 +548,7 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                 };
-                let (fu, params, body, defining): (u32, &'a [Param], ExprId, Rc<Ctx>) =
+                let (fu, params, body, defining, region): (u32, &'a [Param], ExprId, Rc<Ctx>, u32) =
                     match callable {
                         None => return Ok(Step::Done(Value::Undef)),
                         Some(Callable::Builtin(b)) => {
@@ -422,34 +558,33 @@ impl<'a> Evaluator<'a> {
                         Some(Callable::User {
                             ctx: dctx,
                             unit,
-                            scope,
+                            scope: scope_id,
                             index,
                         }) => {
                             let scope: &'a lang::ast::Scope =
-                                self.units[unit as usize].scopes[scope as usize].scope;
+                                self.units[unit as usize].scopes[scope_id as usize].scope;
                             let f = &scope.functions[index as usize];
-                            (unit, &f.params, f.body, dctx)
+                            let region = self.function_region(unit, scope_id, index);
+                            (unit, &f.params, f.body, dctx, region)
                         }
                         Some(Callable::Literal(f)) => {
                             let fast: &'a Ast = self.units[f.unit as usize].ast;
                             match &fast.expr(f.expr).kind {
                                 ExprKind::Function(params, body) => {
-                                    (f.unit, params.as_slice(), *body, f.ctx.clone())
+                                    let region =
+                                        self.units[f.unit as usize].res.expr[f.expr.0 as usize];
+                                    (f.unit, params.as_slice(), *body, f.ctx.clone(), region)
                                 }
                                 _ => return Ok(Step::Done(Value::Undef)),
                             }
                         }
                     };
-                let body_ctx = Ctx::child(&defining);
+                let body_ctx = self.new_ctx(&defining, CtxKind::Plain, region);
                 self.push(body_ctx.clone());
-                self.copy_config(ctx, &body_ctx);
-                let argv = if self.accumulates(u, id, args) {
-                    self.eval_args_moving(u, args, ctx)?
-                } else {
-                    self.eval_args(u, args, ctx)?
-                };
-                let frame = self.bind_user(argv, loc, fu, params, &defining)?;
-                self.apply_frame(&body_ctx, frame);
+                if !entry {
+                    self.copy_config(ctx, &body_ctx);
+                }
+                self.call_frame(u, id, args, ctx, loc, fu, params, &defining, &body_ctx)?;
                 Ok(Step::Next {
                     unit: fu,
                     expr: Some(body),
@@ -459,6 +594,39 @@ impl<'a> Evaluator<'a> {
             }
             _ => Ok(Step::Done(self.eval(u, id, ctx)?)),
         }
+    }
+
+    /// A user call's arguments, evaluated and bound into `body_ctx`. Out
+    /// of line, so the argument vector and the bound frame are not part of
+    /// `eval_call`'s stack frame, which every level of a recursion holds.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn call_frame(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        args: &'a [Arg],
+        ctx: &Rc<Ctx>,
+        loc: Loc,
+        fu: u32,
+        params: &'a [Param],
+        defining: &Rc<Ctx>,
+        body_ctx: &Ctx,
+    ) -> R<()> {
+        // Argument vectors are reused: a call allocates only its context
+        // and slots.
+        let mut argv = self.arg_pool.pop().unwrap_or_default();
+        let r = if self.accumulates(u, id, args) {
+            self.eval_args_moving(u, args, ctx, &mut argv)
+        } else {
+            self.eval_args_into(u, args, ctx, &mut argv)
+        };
+        let frame =
+            r.and_then(|()| self.bind_user(&mut argv, loc, fu, params, defining, body_ctx.region));
+        argv.clear();
+        self.arg_pool.push(argv);
+        self.apply_frame(body_ctx, frame?);
+        Ok(())
     }
 
     /// Before a tail call's arguments are evaluated, move the accumulator
@@ -484,12 +652,18 @@ impl<'a> Evaluator<'a> {
     /// The value is handed to the one read that resolves to that binding
     /// ([`Evaluator::take_moved`]); the frame keeps `undef`.
     #[inline(never)]
-    fn eval_args_moving(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>) -> R<Vec<ArgVal>> {
+    fn eval_args_moving(
+        &mut self,
+        u: u32,
+        args: &'a [Arg],
+        ctx: &Rc<Ctx>,
+        out: &mut Vec<ArgVal>,
+    ) -> R<()> {
         let mark = self.moved.len();
         self.move_accumulators(u, args, ctx);
-        let argv = self.eval_args(u, args, ctx);
+        let r = self.eval_args_into(u, args, ctx, out);
         self.moved.truncate(mark);
-        argv
+        r
     }
 
     /// Whether call `id` has an argument [`Evaluator::accumulator`] finds,
@@ -524,10 +698,10 @@ impl<'a> Evaluator<'a> {
             if self.syms.is_config(s) || self.uses(u, args, s) != 1 {
                 continue;
             }
-            let Some(owner) = private_binder(ctx, s) else {
+            let Some(owner) = private_binder(ctx, s, &self.regions) else {
                 continue;
             };
-            let value = owner.vars.borrow_mut().take(s);
+            let value = owner.take_local(s, &self.regions);
             self.moved.push(crate::eval::Moved {
                 owner: Rc::as_ptr(&owner),
                 sym: s,
@@ -657,9 +831,144 @@ impl<'a> Evaluator<'a> {
         Ok(None)
     }
 
-    fn var_function(c: &Ctx, s: Sym) -> Option<Callable> {
-        match c.vars.borrow().get(s) {
-            Some(Value::Function(f)) => Some(Callable::Literal(f.clone())),
+    /// `Context::lookup_function` for a name the resolver resolved (see
+    /// [`crate::resolve`]): the same walk, looking only in the contexts
+    /// that can define or bind the name, in the same order. Not inlined:
+    /// its frame would add to every level of a recursion.
+    #[inline(never)]
+    fn find_function(
+        &mut self,
+        u: u32,
+        r: u32,
+        ctx: &Rc<Ctx>,
+        s: Sym,
+        loc: Loc,
+    ) -> R<Option<Callable>> {
+        let fr = self.units[u as usize].res.fns[r as usize];
+        let mut c: &Rc<Ctx> = ctx;
+        loop {
+            if c.region == BUILTIN_REGION
+                && let Some(b) = fr.builtin
+            {
+                if b.enabled() {
+                    return Ok(Some(Callable::Builtin(b)));
+                }
+                let t = format!(
+                    "Experimental builtin function '{}' is not enabled",
+                    self.name(s)
+                );
+                self.warn(loc, DiagCode::ExperimentalFeature, t);
+            }
+            for k in fr.cands.start..fr.cands.start + fr.cands.len {
+                let cand = self.units[u as usize].res.cands[k as usize];
+                if cand.region() != c.region {
+                    continue;
+                }
+                match cand {
+                    Cand::Def { scope, index, .. } => {
+                        return Ok(Some(Callable::User {
+                            ctx: c.clone(),
+                            unit: u,
+                            scope,
+                            index,
+                        }));
+                    }
+                    Cand::Slot { slot, .. } => {
+                        if let Some(Value::Function(f)) = c.slot(slot) {
+                            return Ok(Some(Callable::Literal(f)));
+                        }
+                    }
+                    Cand::Extra { .. } => {
+                        if let Some(Value::Function(f)) = c.vars.borrow().get(s) {
+                            return Ok(Some(Callable::Literal(f.clone())));
+                        }
+                    }
+                    Cand::Use { lib, index, .. } => {
+                        let lctx = self.library_context(c, lib)?;
+                        return Ok(Some(Callable::User {
+                            ctx: lctx,
+                            unit: lib,
+                            scope: 0,
+                            index,
+                        }));
+                    }
+                }
+            }
+            match &c.parent {
+                Some(p) => c = p,
+                None => break,
+            }
+        }
+        let t = format!("Ignoring unknown function '{}'", self.name(s));
+        self.warn(loc, DiagCode::UnknownFunction, t);
+        Ok(None)
+    }
+
+    /// `Context::lookup_module` for a resolved name (see
+    /// [`Self::find_function`]).
+    #[inline(never)]
+    pub fn find_module(
+        &mut self,
+        u: u32,
+        r: u32,
+        ctx: &Rc<Ctx>,
+        s: Sym,
+        loc: Loc,
+    ) -> R<Option<Instantiable>> {
+        let mr = self.units[u as usize].res.mods[r as usize];
+        let mut c: &Rc<Ctx> = ctx;
+        loop {
+            if c.region == BUILTIN_REGION
+                && let Some(m) = mr.builtin
+            {
+                if m.enabled() {
+                    return Ok(Some(Instantiable::Builtin(m)));
+                }
+                let t = format!(
+                    "Experimental builtin module '{}' is not enabled",
+                    self.name(s)
+                );
+                self.warn(loc, DiagCode::ExperimentalFeature, t);
+            }
+            for k in mr.cands.start..mr.cands.start + mr.cands.len {
+                let cand = self.units[u as usize].res.cands[k as usize];
+                if cand.region() != c.region {
+                    continue;
+                }
+                match cand {
+                    Cand::Def { scope, index, .. } => {
+                        return Ok(Some(Instantiable::User {
+                            ctx: c.clone(),
+                            unit: u,
+                            scope,
+                            index,
+                        }));
+                    }
+                    Cand::Use { lib, index, .. } => {
+                        let lctx = self.library_context(c, lib)?;
+                        return Ok(Some(Instantiable::User {
+                            ctx: lctx,
+                            unit: lib,
+                            scope: 0,
+                            index,
+                        }));
+                    }
+                    Cand::Slot { .. } | Cand::Extra { .. } => {}
+                }
+            }
+            match &c.parent {
+                Some(p) => c = p,
+                None => break,
+            }
+        }
+        let t = format!("Ignoring unknown module '{}'", self.name(s));
+        self.warn(loc, DiagCode::UnknownModule, t);
+        Ok(None)
+    }
+
+    fn var_function(&self, c: &Ctx, s: Sym) -> Option<Callable> {
+        match c.get_local(s, &self.regions) {
+            Some(Value::Function(f)) => Some(Callable::Literal(f)),
             _ => None,
         }
     }
@@ -667,7 +976,7 @@ impl<'a> Evaluator<'a> {
     /// `lookup_local_function` of each context kind.
     fn local_function(&mut self, c: &Rc<Ctx>, s: Sym, loc: Loc) -> R<Option<Callable>> {
         match &c.kind {
-            CtxKind::Plain => Ok(Self::var_function(c, s)),
+            CtxKind::Plain => Ok(self.var_function(c, s)),
             CtxKind::Builtin => {
                 if let Some(&b) = self.builtin_fns.get(&s) {
                     if b.enabled() {
@@ -679,7 +988,7 @@ impl<'a> Evaluator<'a> {
                     );
                     self.warn(loc, DiagCode::ExperimentalFeature, t);
                 }
-                Ok(Self::var_function(c, s))
+                Ok(self.var_function(c, s))
             }
             CtxKind::Scope(sr) | CtxKind::Module(sr, _) | CtxKind::File(sr) => {
                 if let Some(&index) = self.units[sr.unit as usize].scopes[sr.scope as usize]
@@ -693,7 +1002,7 @@ impl<'a> Evaluator<'a> {
                         index,
                     }));
                 }
-                if let Some(f) = Self::var_function(c, s) {
+                if let Some(f) = self.var_function(c, s) {
                     return Ok(Some(f));
                 }
                 if let CtxKind::File(sr) = &c.kind {
@@ -722,7 +1031,14 @@ impl<'a> Evaluator<'a> {
             unit: lib,
             scope: 0,
         };
-        let lctx = Ctx::new(file.parent(), CtxKind::File(sr));
+        self.resolve_root(lib);
+        let region = self.units[lib as usize].res.scope_region[0];
+        let lctx = Ctx::new(
+            file.parent(),
+            CtxKind::File(sr),
+            region,
+            self.regions[region as usize].len(),
+        );
         let mark = self.push(lctx.clone());
         let r = self.init_scope(&lctx, sr);
         self.truncate(mark);

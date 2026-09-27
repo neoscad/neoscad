@@ -217,7 +217,8 @@ impl<'a> Evaluator<'a> {
             if let ExprKind::Var(n) = ast.expr(args[0].expr).kind {
                 let s = self.units[u as usize].sym(n);
                 return Ok(Value::Bool(
-                    self.try_lookup(ctx, s).is_none_or(|v| v.is_undef()),
+                    self.read_var(u, args[0].expr, s, ctx)
+                        .is_none_or(|v| v.is_undef()),
                 ));
             }
             let v = self.eval(u, args[0].expr, ctx)?;
