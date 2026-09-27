@@ -64,6 +64,11 @@ impl Syms {
         n
     }
 
+    /// `s`'s symbol, if it has been interned.
+    pub fn get(&self, s: &str) -> Option<Sym> {
+        self.map.get(s).copied()
+    }
+
     pub fn name(&self, s: Sym) -> &str {
         &self.names[s.0 as usize]
     }

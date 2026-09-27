@@ -533,3 +533,46 @@ fn a_top_level_group_with_empty_siblings_is_not_answered_by_its_childs_product()
     );
     assert_eq!(outline(&warm, "wrapped"), cold);
 }
+
+#[test]
+fn edits_reuse_unchanged_statements_and_answer_as_a_full_evaluation() {
+    // Two sessions over the same document, one reusing statements'
+    // evaluation across edits and one evaluating everything each time.
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/part.scad",
+        b"module part(x) { echo(\"part\", x); cube(x + k); }\nk = 1;\n".to_vec(),
+    );
+    let mut on = Config::new(fs.clone(), LibraryPath(vec![PathBuf::from("/lib")]));
+    on.work_dir = PathBuf::from("/doc");
+    let mut off = on.clone();
+    off.reuse_evaluation = false;
+    let (warm, cold) = (Session::new(on), Session::new(off));
+    let versions = [
+        "include <part.scad>\na = 2;\npart(a);\nsphere(3, $fn = 12);\necho(undefined_x);\n",
+        "include <part.scad>\na = 2;\npart(a);\nsphere(4, $fn = 12);\necho(undefined_x);\n",
+        "// moved down\n\ninclude <part.scad>\na = 2;\npart(a);\nsphere(4, $fn = 12);\necho(undefined_x);\n",
+        "include <part.scad>\na = 3;\npart(a);\nsphere(4, $fn = 12);\necho(undefined_x);\n$fn = 7;\n",
+        "include <part.scad>\na = 3;\n!part(a);\nsphere(4, $fn = 12);\necho(undefined_x);\n",
+    ];
+    let scheme = render::ColorScheme::cornfield();
+    for (i, v) in versions.iter().enumerate() {
+        for s in [&warm, &cold] {
+            s.update(Path::new("/doc/main.scad"), v.as_bytes().to_vec());
+        }
+        let run = Run::new("main.scad");
+        let (a, b) = (
+            warm.evaluate(&run, true).unwrap(),
+            cold.evaluate(&run, true).unwrap(),
+        );
+        assert_eq!(a.csg, b.csg, "version {i}");
+        assert_eq!(a.log.stderr, b.log.stderr, "version {i}");
+        assert_eq!(format!("{:?}", a.log.lines), format!("{:?}", b.log.lines));
+        let (a, b) = (
+            warm.render(&run, Mode::Preview, &scheme).unwrap(),
+            cold.render(&run, Mode::Preview, &scheme).unwrap(),
+        );
+        assert_eq!(a.log.stderr, b.log.stderr, "version {i}");
+        assert_eq!(format!("{:?}", a.log.lines), format!("{:?}", b.log.lines));
+    }
+}

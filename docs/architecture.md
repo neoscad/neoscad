@@ -62,7 +62,10 @@ JSON-RPC (`docs/serve-protocol.md`).
   Implemented in 7a: `crates/session` (documents, parse and geometry
   caches with budgets, cancellation) behind JSON-RPC over stdio or a
   per-user Unix socket (`docs/serve-protocol.md`); the command line's
-  exports and snapshots use a running server automatically.
+  exports and snapshots use a running server automatically. Across edits
+  the session also replays each top-level statement whose inputs did not
+  change (`crates/eval/src/memo.rs`), so an edit to one part of a heavy
+  model evaluates only that part, with output identical to a full run.
 - **`--format json` everywhere:** diagnostics with spans and stable codes,
   echo output, timings, geometry stats (volume, bbox, manifold, triangle
   count, component count). Terse by default — never an unrequested mesh dump.

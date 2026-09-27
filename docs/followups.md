@@ -336,6 +336,18 @@ entry when it is done.
   result, so the case is not handled. (6a)
 
 ## Serve and session
+- Statement reuse across edits (O3, `crates/eval/src/memo.rs`) keys each
+  top-level statement on the names it mentions, followed through
+  top-level definitions by name alone. A local binder that shares a
+  top-level variable's name (BOSL2's `mod`, `base`, `r` parameters) makes
+  that variable an input of every statement reaching the code, so editing
+  it re-evaluates more than it must. The resolver (`eval::resolve`) knows
+  which references a lexical binder captures; using it would narrow the
+  key. Two more limits of the first version: top-level assignments always
+  run again (in the hero, its `planetary_gears()` call is part of the
+  32 ms a carrier edit still evaluates), and a statement is the unit of
+  reuse, so an edit inside the hero's plinth statement still costs the
+  whole isosurface.
 - A one-line edit re-parses the main file. Since `4d877c7` an include
   between top-level statements of a file that parses on its own
   (`include <BOSL2/std.scad>`) is parsed and lowered once and spliced

@@ -43,6 +43,8 @@ mod eval;
 pub mod fma;
 mod inst;
 pub mod limits;
+mod memo;
+pub use memo::{MEMO_BUDGET, Memo, ReuseStats};
 pub mod message;
 pub mod node;
 mod ops;
@@ -371,8 +373,11 @@ pub struct Evaluation {
     /// moves its view to exactly these (`Camera::updateView`).
     pub camera_assigned: CameraAssigned,
     /// How the program's names were resolved: how many references are
-    /// left to a dynamic lookup.
+    /// left to a dynamic lookup. Counts only definitions that ran, so a
+    /// statement replayed from a [`Memo`] adds nothing.
     pub resolution: ResolveStats,
+    /// How [`evaluate_incremental`] used its memo (all zero otherwise).
+    pub reuse: ReuseStats,
 }
 
 /// Which of `$vpt`, `$vpr`, `$vpd` and `$vpf` a program assigned at its
@@ -408,6 +413,44 @@ pub fn evaluate(
     options: &Options,
     out: &mut dyn Output,
 ) -> Evaluation {
+    run(main, main_uses, libraries, main_dir, options, out, None)
+}
+
+/// [`evaluate`], reusing the top-level statements whose inputs have not
+/// changed since `memo` last saw them, and recording the rest for next
+/// time. The result is the same as [`evaluate`]'s: the nodes (their
+/// indices and source positions included), the messages in order, the
+/// camera; see the `memo` module for how, and for what is always
+/// evaluated. `memo` belongs to one document; a host keeps one per
+/// document it evaluates repeatedly. With [`Options::hardwarnings`] it is
+/// not used.
+pub fn evaluate_incremental(
+    main: &Program,
+    main_uses: &[String],
+    libraries: &[Library<'_>],
+    main_dir: PathBuf,
+    options: &Options,
+    out: &mut dyn Output,
+    memo: &mut Memo,
+) -> Evaluation {
+    let memo = (!options.hardwarnings).then_some(memo);
+    run(main, main_uses, libraries, main_dir, options, out, memo)
+}
+
+/// The one path both entry points take, so the native stack evaluation
+/// starts on (which the recursion limit measures) is the same for both.
+#[inline(never)]
+fn run(
+    main: &Program,
+    main_uses: &[String],
+    libraries: &[Library<'_>],
+    main_dir: PathBuf,
+    options: &Options,
+    out: &mut dyn Output,
+    memo: Option<&mut Memo>,
+) -> Evaluation {
+    let memo = memo.map(|m| memo::MemoRun::new(m, main, main_uses, libraries, &main_dir, options));
     let mut ev = eval::Evaluator::new(main, main_uses, libraries, main_dir, options.clone(), out);
+    ev.memo = memo;
     ev.run()
 }

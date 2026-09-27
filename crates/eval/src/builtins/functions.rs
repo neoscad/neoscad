@@ -473,6 +473,8 @@ impl<'a> Evaluator<'a> {
     /// `dxf_dim()` and `dxf_cross()` (io/dxfdim.cc), with its multiply-adds
     /// rounded as the platform's OpenSCAD build rounds them (see `fma`).
     fn dxf(&mut self, dim: bool, a: Vec<ArgVal>, loc: Loc) -> Value {
+        // Reads a file, whose content no fingerprint covers.
+        self.untracked();
         let fname = if dim { "dxf_dim" } else { "dxf_cross" };
         let names = ["file", "layer", "origin", "scale", "name"];
         let syms: Vec<Sym> = names.iter().map(|n| self.syms.intern(n)).collect();
@@ -699,6 +701,9 @@ impl<'a> Evaluator<'a> {
     }
 
     fn rands(&mut self, a: &[ArgVal], loc: Loc) -> Value {
+        // The generator is shared by the whole evaluation: a seed resets it
+        // for later statements, and a draw moves it on (see `crate::memo`).
+        self.untracked();
         if a.len() < 3 || a.len() > 4 {
             self.arg_count_warning("rands", a.len(), "3 or 4", loc);
             return Value::Undef;

@@ -505,6 +505,8 @@ impl<'a> Evaluator<'a> {
             Some(outer) => format!("{outer}.{name}"),
             None => name,
         };
+        // Part names are checked for duplicates across the whole file.
+        self.untracked();
         if !self.part_names.insert(full.clone()) {
             // Two parts with one name would be measured and checked as
             // one; the geometry is unaffected.
@@ -1038,6 +1040,8 @@ impl<'a> Evaluator<'a> {
             B::Polyhedron => self.polyhedron(p),
             B::Polygon => self.polygon(p),
             B::Surface => {
+                // Kept out of the memo with `import()`, as a file reader.
+                self.untracked();
                 let file = self.get(p, "file");
                 let name = if file.is_undef() {
                     Vec::new()
@@ -1055,7 +1059,13 @@ impl<'a> Evaluator<'a> {
                     convexity,
                 }
             }
-            B::Import => NodeKind::Import(self.import(p)),
+            B::Import => {
+                // The node names the file and the geometry key stats it,
+                // but a statement that imports is always evaluated anew,
+                // so nothing of a changed file can be replayed.
+                self.untracked();
+                NodeKind::Import(self.import(p))
+            }
             B::Text => NodeKind::Text(self.text(p)),
             _ => NodeKind::Group { name: None },
         };

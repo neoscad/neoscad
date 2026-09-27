@@ -231,6 +231,11 @@ pub(crate) struct Evaluator<'a> {
     pub placeholder: Rc<Ctx>,
     /// Emptied argument vectors for user calls to reuse.
     pub arg_pool: Vec<Vec<crate::call::ArgVal>>,
+    /// Reuse of top-level statements from an earlier evaluation (see
+    /// [`crate::memo`]), when the host keeps a memo.
+    pub(crate) memo: Option<crate::memo::MemoRun<'a>>,
+    /// The top-level statement being recorded for the memo, if one is.
+    pub(crate) rec: Option<Box<crate::memo::Recording>>,
 }
 
 /// A variable's value moved out of its frame, to be handed to the one read
@@ -409,6 +414,8 @@ impl<'a> Evaluator<'a> {
             stats: crate::resolve::Stats::default(),
             arg_pool: Vec::new(),
             placeholder: Ctx::new(None, CtxKind::Plain, crate::resolve::NONE_REGION, 0),
+            memo: None,
+            rec: None,
             opts,
         }
     }
@@ -452,6 +459,9 @@ impl<'a> Evaluator<'a> {
         }
         if self.opts.guard.is_some() {
             self.limit_ticks = self.limit_ticks.wrapping_add(1);
+            if self.rec.is_some() {
+                self.track_peak(0);
+            }
             if self.limit_ticks.is_multiple_of(LIMIT_TICKS) {
                 self.check_limits(None)?;
             }
@@ -533,6 +543,7 @@ impl<'a> Evaluator<'a> {
         let Some(g) = self.opts.guard.clone() else {
             return true;
         };
+        self.track_peak(bytes);
         match g.memory_exceeds(self.live_bytes().saturating_add(bytes), what) {
             None => true,
             Some(e) => {
@@ -802,6 +813,58 @@ impl<'a> Evaluator<'a> {
         i
     }
 
+    // --- the memo's view (see `crate::memo`) ------------------------------
+
+    /// The next node index.
+    pub(crate) fn node_counter(&self) -> usize {
+        self.node_index
+    }
+
+    /// The limits' check counter.
+    pub(crate) fn ticks(&self) -> u32 {
+        self.limit_ticks
+    }
+
+    pub(crate) fn live_bytes_now(&self) -> u64 {
+        self.live_bytes()
+    }
+
+    /// Whether a resource limit has been passed.
+    pub(crate) fn limit_passed(&self) -> bool {
+        self.limit.get() != Hard::Off
+    }
+
+    /// Account for a replayed statement: the node indices and limit checks
+    /// it consumed when it ran, so what follows is numbered and sampled as
+    /// in a full evaluation.
+    pub(crate) fn advance(&mut self, indices: usize, ticks: u32) {
+        self.node_index += indices;
+        self.limit_ticks = self.limit_ticks.wrapping_add(ticks);
+    }
+
+    /// The most memory seen while recording, with `bytes` about to be
+    /// allocated: a replay must not skip over a memory limit.
+    fn track_peak(&mut self, bytes: u64) {
+        let live = self.live_bytes().saturating_add(bytes);
+        if let Some(r) = &mut self.rec {
+            r.peak = r.peak.max(live);
+        }
+    }
+
+    /// Something happened that a statement's fingerprint does not cover
+    /// (see `crate::memo`): the statement being recorded is not kept.
+    pub(crate) fn untracked(&mut self) {
+        if let Some(r) = &mut self.rec {
+            r.untrack();
+        }
+    }
+
+    /// Print a replayed message as [`Evaluator::emit_hinted`] printed it.
+    pub(crate) fn replay_message(&mut self, m: &Message<'_>) {
+        crate::limits::live::charge(3 * m.text.len() as u64);
+        self.out.message(m);
+    }
+
     // --- messages --------------------------------------------------------
 
     pub fn expr_loc(&self, unit: u32, e: ExprId) -> Loc {
@@ -831,6 +894,10 @@ impl<'a> Evaluator<'a> {
         if self.hard.get() == Hard::Pending {
             return;
         }
+        if severity == Severity::Deprecated {
+            // Whether it prints depends on the statements before.
+            self.untracked();
+        }
         if severity == Severity::Deprecated
             && !self
                 .deprecations
@@ -852,6 +919,15 @@ impl<'a> Evaluator<'a> {
             let line = src.get(l.span.file).line_of(l.span.start);
             diag = diag.at(l.span, line);
             sources = Some(src);
+        }
+        if let Some(r) = &mut self.rec
+            && !r.untracked
+        {
+            r.record(crate::memo::Recorded {
+                unit: loc.map(|l| l.unit),
+                diag: diag.clone(),
+                text: text.to_vec(),
+            });
         }
         self.out.message(&Message {
             diag,
@@ -954,7 +1030,7 @@ impl<'a> Evaluator<'a> {
         let mark = self.push(file.clone());
         let result = self
             .init_scope(&file, scope)
-            .and_then(|_| self.instantiate_scope(scope, &file, &mut root.children, None));
+            .and_then(|_| self.instantiate_top(&file, &mut root.children));
         self.truncate(mark);
         let mut aborted = false;
         let mut interrupted = false;
@@ -983,7 +1059,13 @@ impl<'a> Evaluator<'a> {
         }
         self.truncate(0);
         self.release_cycles();
+        let reuse = self
+            .memo
+            .take()
+            .map(|m| m.finish(!aborted && !interrupted))
+            .unwrap_or_default();
         Evaluation {
+            reuse,
             root,
             aborted,
             interrupted,

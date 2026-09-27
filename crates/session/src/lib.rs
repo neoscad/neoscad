@@ -13,7 +13,9 @@
 //!   metadata of every file they read (`parse`), the geometry cache of
 //!   each renderer (subtrees keyed by their Merkle hash, so an edit
 //!   recomputes only the subtrees it changed), fonts, and each document's
-//!   last CSG products;
+//!   last CSG products and top-level statements' evaluation (an edit
+//!   evaluates only the statements whose inputs it changed; see
+//!   `eval::evaluate_incremental` and [`Config::reuse_evaluation`]);
 //! - **a budget**: both caches evict least recently used entries past
 //!   their budgets ([`Config`]), and [`Session::stats`] reports them.
 //!
@@ -118,6 +120,11 @@ pub struct Config {
     /// runs models it did not write (`serve`, `mcp`, the app) sets
     /// [`Limits::AGENT`] or its own. The time limit needs [`Config::clock`].
     pub limits: Limits,
+    /// Reuse the evaluation of a document's top-level statements whose
+    /// inputs an edit did not change (`eval::evaluate_incremental`). On by
+    /// default; the result is the same either way, so turning it off is for
+    /// comparing against full evaluations.
+    pub reuse_evaluation: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -157,6 +164,7 @@ impl Config {
             gpu: None,
             parts: false,
             limits: Limits::NONE,
+            reuse_evaluation: true,
         }
     }
 }
@@ -703,6 +711,9 @@ pub struct Session {
     docs: Mutex<HashMap<PathBuf, u64>>,
     jobs: Mutex<HashMap<PathBuf, Vec<Job>>>,
     products: Mutex<HashMap<PathBuf, Product>>,
+    /// Each recently evaluated document's statement memo, most recently
+    /// used last (see [`Config::reuse_evaluation`]).
+    memos: Mutex<Vec<(PathBuf, eval::Memo)>>,
     ids: AtomicU64,
     requests: AtomicU64,
     cancelled: AtomicU64,
@@ -730,6 +741,14 @@ fn wants_names(lines: &[Logged]) -> bool {
 /// At most this many renderers (colour schemes and font sets) stay warm.
 const RENDERERS: usize = 4;
 
+/// At most this many documents keep a statement memo, within
+/// [`MEMO_TOTAL`] estimated bytes together (each also has its own budget,
+/// `eval::MEMO_BUDGET`). A memo holds a copy of its document's node tree
+/// per setting; a host evaluating many files in turn (an agent's checks)
+/// does not keep them all.
+const MEMOS: usize = 8;
+const MEMO_TOTAL: usize = 2 * eval::MEMO_BUDGET;
+
 fn hash_of(x: impl Hash) -> u64 {
     let mut h = DefaultHasher::new();
     x.hash(&mut h);
@@ -748,6 +767,7 @@ impl Session {
             docs: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
             products: Mutex::new(HashMap::new()),
+            memos: Mutex::new(Vec::new()),
             ids: AtomicU64::new(0),
             requests: AtomicU64::new(0),
             cancelled: AtomicU64::new(0),
@@ -865,6 +885,7 @@ impl Session {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&doc);
+        self.take_memo(&doc);
         self.docs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1105,6 +1126,39 @@ impl Session {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        self.memos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// A document's statement memo, taken out while a request uses it: a
+    /// concurrent request on the same document starts from an empty one
+    /// rather than waiting.
+    fn take_memo(&self, doc: &Path) -> eval::Memo {
+        let mut memos = self
+            .memos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match memos.iter().position(|(p, _)| p == doc) {
+            Some(i) => memos.remove(i).1,
+            None => eval::Memo::new(),
+        }
+    }
+
+    fn put_memo(&self, doc: PathBuf, memo: eval::Memo) {
+        let mut memos = self
+            .memos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        memos.retain(|(p, _)| *p != doc);
+        memos.push((doc, memo));
+        while memos.len() > 1
+            && (memos.len() > MEMOS
+                || memos.iter().map(|(_, m)| m.bytes()).sum::<usize>() > MEMO_TOTAL)
+        {
+            memos.remove(0);
+        }
     }
 
     /// The fonts for a program's `use`d files, shared while they are the
@@ -1333,14 +1387,30 @@ impl Session {
             parts: run.parts || self.cfg.parts,
             ..eval::Options::default()
         };
-        let ev = eval::evaluate(
-            &loaded.program,
-            &loaded.uses,
-            &libs,
-            pipe.paths.main_dir.clone(),
-            &options,
-            &mut pipe.con,
-        );
+        let ev = if self.cfg.reuse_evaluation {
+            let doc = pipe.paths.doc.clone();
+            let mut memo = self.take_memo(&doc);
+            let ev = eval::evaluate_incremental(
+                &loaded.program,
+                &loaded.uses,
+                &libs,
+                pipe.paths.main_dir.clone(),
+                &options,
+                &mut pipe.con,
+                &mut memo,
+            );
+            self.put_memo(doc, memo);
+            ev
+        } else {
+            eval::evaluate(
+                &loaded.program,
+                &loaded.uses,
+                &libs,
+                pipe.paths.main_dir.clone(),
+                &options,
+                &mut pipe.con,
+            )
+        };
         pipe.timings.evaluate = self.now() - t;
         // The evaluator printed the limit where it was passed.
         if job.exceeded().is_some() {
