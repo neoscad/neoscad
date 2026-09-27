@@ -75,6 +75,19 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         DEFINES_MODULE: YES
         SKIP_INSTALL: YES
+      configs:
+        # Release only (scripts/apple/release.sh, docs/release.md). The Rust
+        # core arrives as a static library whose ~14,000 Rust symbols are
+        # global, and a dylib exports every global symbol, so dead-code
+        # stripping had to keep all of them and everything they reach.
+        # Only the Swift API is used from outside (the app never calls the
+        # UniFFI C functions; the framework's own Swift does), so exporting
+        # just Swift's `_$s` symbols and the framework's version lets the
+        # linker drop the rest, and `non-global` strips the locals the
+        # default `debugging` style leaves. The dSYM keeps the names.
+        Release:
+          OTHER_LDFLAGS: ["$(inherited)", "-Wl,-exported_symbol,_$s*", "-Wl,-exported_symbol,_NeoSCADCore*"]
+          STRIP_STYLE: non-global
 
   NeoSCAD:
     type: application

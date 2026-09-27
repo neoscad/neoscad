@@ -674,6 +674,16 @@ entry when it is done.
   Revisit if the page ever shows content from elsewhere. (8d)
 - Building the app needs node 18 or newer (`scripts/apple/build-editor.sh`
   finds nvm's and Homebrew's), and the network once, for `npm ci`. (8d)
+- Release (8j, `docs/release.md`):
+  - The Developer ID path (`-exportArchive`, notarization, stapling, an
+    accepting Gatekeeper) has never run: no Developer ID identity or
+    notary profile exists yet. The first signed release is its test, and
+    the clean-machine checklist in `docs/release.md` is still open.
+  - Ad-hoc release builds carry
+    `com.apple.security.cs.disable-library-validation`, since the
+    hardened runtime will not load an ad-hoc framework into an ad-hoc
+    process; a Developer ID build must not, and the script checks.
+  - `CLAUDE.md`'s build list does not mention `scripts/apple/release.sh`.
 
 - Check and measure panels, export and App Intents (8i):
   - The check panel marks findings in the view with numbered rings and
