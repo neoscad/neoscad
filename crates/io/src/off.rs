@@ -10,7 +10,7 @@
 //! (the C++ keeps its colour map inside the face loop).
 
 use crate::mesh::{Mesh, MeshRef};
-use crate::text::{Lines, fmt_g, parse_f64, parse_i32, parse_u64, trim};
+use crate::text::{Lines, parse_f64, parse_i32, parse_u64, trim, write_g, write_int};
 use crate::{Color, Message};
 
 /// Read an OFF file's bytes (`None` when it could not be opened). `file`
@@ -317,41 +317,43 @@ fn header(line: &str) -> (usize, bool, bool, u32) {
 /// the face is written without a colour, so readers fall back to their
 /// default colour, which is what OpenSCAD's own render shows.
 pub fn write(mesh: MeshRef<'_>, warnings: &mut Vec<String>) -> Vec<u8> {
-    let mut out = String::with_capacity(mesh.vertices.len() * 32 + mesh.faces.len() * 24);
-    out.push_str(&format!(
-        "OFF\n{} {} 0\n",
-        mesh.vertices.len(),
-        mesh.faces.len()
-    ));
+    // Numbers go straight into the output (`write_g`, `write_int`): a
+    // `String` per number was most of the time of a big export.
+    let mut out = Vec::with_capacity(mesh.vertices.len() * 32 + mesh.faces.len() * 24);
+    out.extend_from_slice(b"OFF\n");
+    write_int(&mut out, mesh.vertices.len());
+    out.push(b' ');
+    write_int(&mut out, mesh.faces.len());
+    out.extend_from_slice(b" 0\n");
     for v in mesh.vertices {
-        out.push_str(&format!(
-            "{} {} {} \n",
-            fmt_g(v[0]),
-            fmt_g(v[1]),
-            fmt_g(v[2])
-        ));
+        for &c in v {
+            write_g(&mut out, c);
+            out.push(b' ');
+        }
+        out.push(b'\n');
     }
     let has_color = !mesh.color_indices.is_empty();
     for (i, f) in mesh.faces.iter().enumerate() {
-        out.push_str(&f.len().to_string());
-        for idx in f {
-            out.push(' ');
-            out.push_str(&idx.to_string());
+        write_int(&mut out, f.len());
+        for &idx in f {
+            out.push(b' ');
+            write_int(&mut out, idx);
         }
         if has_color && let Some(c) = mesh.face_color(i) {
             match c.rgba_int() {
                 Some([r, g, b, a]) => {
-                    out.push_str(&format!(" {r} {g} {b}"));
-                    if a != 255 {
-                        out.push_str(&format!(" {a}"));
+                    let channels: &[_] = if a != 255 { &[r, g, b, a] } else { &[r, g, b] };
+                    for &ch in channels {
+                        out.push(b' ');
+                        write_int(&mut out, ch);
                     }
                 }
                 None => warnings.push("Invalid color in OFF export".into()),
             }
         }
-        out.push('\n');
+        out.push(b'\n');
     }
-    out.into_bytes()
+    out
 }
 
 #[cfg(test)]

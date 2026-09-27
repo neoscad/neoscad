@@ -10,7 +10,7 @@
 
 use crate::Message;
 use crate::mesh::{Mesh, MeshBuilder, MeshRef};
-use crate::text::{Lines, parse_f64, shortest, trim};
+use crate::text::{Lines, parse_f64, trim, write_shortest};
 
 /// Read an STL file's bytes. `file` is the path as messages print it.
 pub fn read(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Mesh {
@@ -168,22 +168,56 @@ pub fn write(mesh: MeshRef<'_>, binary: bool) -> Vec<u8> {
         }
         return out;
     }
-    let vec3 = |v: [f64; 3]| format!("{} {} {}", shortest(v[0]), shortest(v[1]), shortest(v[2]));
-    let strings: Vec<String> = mesh.vertices.iter().map(|v| vec3(*v)).collect();
-    let mut out = String::from("solid OpenSCAD_Model\n");
-    for t in mesh.faces {
-        out.push_str("  facet normal ");
-        out.push_str(&vec3(normal(t)));
-        out.push_str("\n    outer loop\n");
-        for &i in t {
-            out.push_str("      vertex ");
-            out.push_str(&strings[i as usize]);
-            out.push('\n');
-        }
-        out.push_str("    endloop\n  endfacet\n");
+    let vec3 = |out: &mut Vec<u8>, v: [f64; 3]| {
+        write_shortest(out, v[0]);
+        out.push(b' ');
+        write_shortest(out, v[1]);
+        out.push(b' ');
+        write_shortest(out, v[2]);
+    };
+    // Each vertex is shared by about six facets, so its text is made once,
+    // into one buffer indexed by `ends`, rather than once per use (or into
+    // a `String` per vertex, whose allocations were most of the cost).
+    let mut text = Vec::with_capacity(mesh.vertices.len() * 32);
+    let mut ends = Vec::with_capacity(mesh.vertices.len() + 1);
+    ends.push(0);
+    for v in mesh.vertices {
+        vec3(&mut text, *v);
+        ends.push(text.len());
     }
-    out.push_str("endsolid OpenSCAD_Model\n");
-    out.into_bytes()
+    let vertex = |i: u32| &text[ends[i as usize]..ends[i as usize + 1]];
+    const HEAD: &[u8] = b"solid OpenSCAD_Model\n";
+    const FACET: &[u8] = b"  facet normal ";
+    const LOOP: &[u8] = b"\n    outer loop\n";
+    const VERTEX: &[u8] = b"      vertex ";
+    const END: &[u8] = b"    endloop\n  endfacet\n";
+    const TAIL: &[u8] = b"endsolid OpenSCAD_Model\n";
+    // The exact size except for the normals, which are allowed 20 bytes a
+    // number (most are shorter; axis-aligned ones are `0` or `1`), so the
+    // whole file is usually one allocation.
+    let vertex_bytes: usize = mesh
+        .faces
+        .iter()
+        .flatten()
+        .map(|&i| vertex(i).len() + 1)
+        .sum();
+    let per_facet = FACET.len() + 3 * 20 + LOOP.len() + 3 * VERTEX.len() + END.len();
+    let mut out =
+        Vec::with_capacity(HEAD.len() + TAIL.len() + mesh.faces.len() * per_facet + vertex_bytes);
+    out.extend_from_slice(HEAD);
+    for t in mesh.faces {
+        out.extend_from_slice(FACET);
+        vec3(&mut out, normal(t));
+        out.extend_from_slice(LOOP);
+        for &i in t {
+            out.extend_from_slice(VERTEX);
+            out.extend_from_slice(vertex(i));
+            out.push(b'\n');
+        }
+        out.extend_from_slice(END);
+    }
+    out.extend_from_slice(TAIL);
+    out
 }
 
 #[cfg(test)]

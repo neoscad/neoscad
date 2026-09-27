@@ -12,7 +12,7 @@
 
 use crate::Message;
 use crate::mesh::{Mesh, MeshBuilder, MeshRef};
-use crate::text::{Lines, fmt_g, parse_f64, parse_i32, trim};
+use crate::text::{Lines, parse_f64, parse_i32, trim, write_g, write_int};
 
 pub fn read(bytes: &[u8], file: &str, msgs: &mut Vec<Message>) -> Mesh {
     let mut b = MeshBuilder::new();
@@ -107,23 +107,26 @@ fn face_rest(l: &str) -> Option<&str> {
 /// `export_obj` of a triangulated mesh: 1-based indices, and OpenSCAD's
 /// `"f "` followed by `" " + index` (two spaces after `f`).
 pub fn write(mesh: MeshRef<'_>) -> Vec<u8> {
-    let mut out = String::from("# OpenSCAD obj exporter\n");
+    // Numbers go straight into the output, as in the OFF writer.
+    let mut out = Vec::with_capacity(32 + mesh.vertices.len() * 32 + mesh.faces.len() * 24);
+    out.extend_from_slice(b"# OpenSCAD obj exporter\n");
     for v in mesh.vertices {
-        out.push_str(&format!(
-            "v {} {} {}\n",
-            fmt_g(v[0]),
-            fmt_g(v[1]),
-            fmt_g(v[2])
-        ));
+        out.push(b'v');
+        for &c in v {
+            out.push(b' ');
+            write_g(&mut out, c);
+        }
+        out.push(b'\n');
     }
     for f in mesh.faces {
-        out.push_str("f ");
-        for idx in f {
-            out.push_str(&format!(" {}", idx + 1));
+        out.extend_from_slice(b"f ");
+        for &idx in f {
+            out.push(b' ');
+            write_int(&mut out, u64::from(idx) + 1);
         }
-        out.push('\n');
+        out.push(b'\n');
     }
-    out.into_bytes()
+    out
 }
 
 #[cfg(test)]

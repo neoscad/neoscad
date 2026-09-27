@@ -17,9 +17,10 @@
 //!   `idString`), which is what OpenSCAD keys its geometry cache on: no
 //!   whitespace, and a `group` with at most one child that has content is
 //!   transparent, so `group() { cube(); }` and `cube()` share a key. Unlike
-//!   OpenSCAD it is exact: numbers print with Rust's shortest round-trip
-//!   form instead of 6 digits (OpenSCAD's 6-digit key makes `cube(1)` and
-//!   `cube(1.0000001)` share cached geometry), files are absolute with a
+//!   OpenSCAD it is exact: numbers go in as their raw bits instead of 6
+//!   digits (OpenSCAD's 6-digit key makes `cube(1)` and `cube(1.0000001)`
+//!   share cached geometry; `-0` and `0` differ, all NaNs are one value,
+//!   see `Writer::num`), files are absolute with a
 //!   nanosecond timestamp and the file size (a file edited twice in one
 //!   second still misses), every string is quoted and escaped (OpenSCAD
 //!   writes `text()` strings raw, so a `"` in the text can make two keys
@@ -31,6 +32,7 @@
 //!   exact texts would be equal, up to SHA-256 collisions and the empty
 //!   groups the text also ignores.
 
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 
 use lang::loader::FileSystem;
@@ -50,7 +52,9 @@ enum Style {
 }
 
 struct Writer<'a> {
-    out: String,
+    /// Bytes rather than text: the key writes numbers as raw bits (see
+    /// [`Writer::num`]). The `.csg` form only ever writes UTF-8.
+    out: Vec<u8>,
     style: Style,
     /// The document directory `.csg` file names are made relative to.
     base: &'a Path,
@@ -62,7 +66,7 @@ struct Writer<'a> {
 /// modifier (`!`) picked, with the trailing newline `openscad.cc` adds.
 pub fn csg(top: &Node, doc_dir: &Path, fs: &dyn FileSystem) -> String {
     let mut w = Writer {
-        out: String::new(),
+        out: Vec::new(),
         style: Style::Csg,
         base: doc_dir,
         fs,
@@ -74,24 +78,26 @@ pub fn csg(top: &Node, doc_dir: &Path, fs: &dyn FileSystem) -> String {
     } else {
         w.csg_node(top, 0);
     }
-    w.out.push('\n');
-    w.out
+    w.out.push(b'\n');
+    // Everything written in this style came from `str`s, so this is
+    // always valid; the lossy fallback only avoids a panic path.
+    String::from_utf8(w.out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 impl Writer<'_> {
     fn csg_node(&mut self, n: &Node, depth: usize) {
         self.modifiers(n);
-        (0..depth).for_each(|_| self.out.push('\t'));
+        (0..depth).for_each(|_| self.out.push(b'\t'));
         self.label(n);
         if n.children.is_empty() {
-            self.out.push_str(";\n");
+            self.out.extend_from_slice(b";\n");
         } else {
-            self.out.push_str(" {\n");
+            self.out.extend_from_slice(b" {\n");
             for c in &n.children {
                 self.csg_node(c, depth + 1);
             }
-            (0..depth).for_each(|_| self.out.push('\t'));
-            self.out.push_str("}\n");
+            (0..depth).for_each(|_| self.out.push(b'\t'));
+            self.out.extend_from_slice(b"}\n");
         }
     }
 
@@ -100,10 +106,10 @@ impl Writer<'_> {
     fn modifiers(&mut self, n: &Node) {
         if let Some(o) = &n.origin {
             if o.tag_background {
-                self.out.push('%');
+                self.out.push(b'%');
             }
             if o.tag_highlight {
-                self.out.push('#');
+                self.out.push(b'#');
             }
         }
     }
@@ -115,49 +121,56 @@ impl Writer<'_> {
     /// Literal label text; the key drops its spaces.
     fn lit(&mut self, s: &str) {
         if self.key() {
-            self.out.extend(s.chars().filter(|&c| c != ' '));
+            self.out.extend(s.bytes().filter(|&c| c != b' '));
         } else {
-            self.out.push_str(s);
+            self.out.extend_from_slice(s.as_bytes());
         }
     }
 
+    /// A number. The `.csg` form prints it as C++ streams do; the key
+    /// takes its raw bits, which used to be its `{:?}` text: formatting
+    /// every point of a big polyhedron was a quarter of a render's time.
+    ///
+    /// The bits are exactly as fine as that text was. Every finite value
+    /// is its own key, including `-0` apart from `0`, which must stay
+    /// apart because the geometry can differ (a `-0` coordinate exports
+    /// as `-0` in OFF). All NaNs are one key, as `{:?}`'s `NaN` was: a
+    /// NaN's sign and payload are accidents of the arithmetic (fused or
+    /// not), and splitting on them would only make the cache miss.
+    ///
+    /// The record stays unambiguous: [`NUM`] can't occur in the UTF-8
+    /// text around it, and exactly eight bytes follow it.
     fn num(&mut self, v: f64) {
         if self.key() {
-            self.out.push_str(&format!("{v:?}"));
+            let v = if v.is_nan() { f64::NAN } else { v };
+            self.out.push(NUM);
+            self.out.extend_from_slice(&v.to_bits().to_le_bytes());
         } else if v.is_nan() {
             // macOS's printf, under the nightly's `ostream`, writes `nan`
             // whatever the sign bit (`multmatrix([[n, -n]])` with `n =
             // asin(1.1)` prints `nan, nan`), where `fmt_g` follows glibc's
             // `-nan`. Which sign a NaN ends up with is an accident of the
             // arithmetic (fused or not, see `fma`), so the dump drops it.
-            self.out.push_str("nan");
+            self.out.extend_from_slice(b"nan");
         } else {
-            self.out.push_str(&fmt_g(v));
+            self.out.extend_from_slice(fmt_g(v).as_bytes());
         }
     }
 
+    /// An integer, as text in both forms (formatted in place: polyhedron
+    /// face lists are most of a big key).
     fn int(&mut self, v: impl std::fmt::Display) {
-        self.out.push_str(&v.to_string());
+        let _ = write!(self.out, "{v}");
     }
 
     fn boolean(&mut self, b: bool) {
-        self.out.push_str(if b { "true" } else { "false" });
+        self.out
+            .extend_from_slice(if b { b"true" } else { b"false" });
     }
 
     /// `QuotedString`'s `operator<<`.
     fn quoted(&mut self, s: &str) {
-        self.out.push('"');
-        for c in s.chars() {
-            match c {
-                '\t' => self.out.push_str("\\t"),
-                '\n' => self.out.push_str("\\n"),
-                '\r' => self.out.push_str("\\r"),
-                '"' => self.out.push_str("\\\""),
-                '\\' => self.out.push_str("\\\\"),
-                c => self.out.push(c),
-            }
-        }
-        self.out.push('"');
+        lang::dump::quoted(&mut self.out, s.as_bytes());
     }
 
     /// A string OpenSCAD writes between quotes without escaping (the
@@ -166,21 +179,21 @@ impl Writer<'_> {
         if self.key() {
             self.quoted(s);
         } else {
-            self.out.push('"');
-            self.out.push_str(s);
-            self.out.push('"');
+            self.out.push(b'"');
+            self.out.extend_from_slice(s.as_bytes());
+            self.out.push(b'"');
         }
     }
 
     fn vec(&mut self, v: &[f64]) {
-        self.out.push('[');
+        self.out.push(b'[');
         for (i, &x) in v.iter().enumerate() {
             if i > 0 {
                 self.lit(", ");
             }
             self.num(x);
         }
-        self.out.push(']');
+        self.out.push(b']');
     }
 
     /// `operator<<(CurveDiscretizer)` (without the experimental `$fe`).
@@ -281,14 +294,14 @@ impl Writer<'_> {
                 self.lit("resize(newsize = [");
                 for (i, &x) in newsize.iter().enumerate() {
                     if i > 0 {
-                        self.out.push(',');
+                        self.out.push(b',');
                     }
                     self.num(x);
                 }
                 self.lit("], auto = [");
                 for (i, &b) in autosize.iter().enumerate() {
                     if i > 0 {
-                        self.out.push(',');
+                        self.out.push(b',');
                     }
                     self.int(u8::from(b));
                 }
@@ -560,21 +573,21 @@ impl Writer<'_> {
     }
 
     fn indices(&mut self, lists: &[Vec<usize>]) {
-        self.out.push('[');
+        self.out.push(b'[');
         for (i, l) in lists.iter().enumerate() {
             if i > 0 {
                 self.lit(", ");
             }
-            self.out.push('[');
+            self.out.push(b'[');
             for (k, x) in l.iter().enumerate() {
                 if k > 0 {
                     self.lit(", ");
                 }
                 self.int(x);
             }
-            self.out.push(']');
+            self.out.push(b']');
         }
-        self.out.push(']');
+        self.out.push(b']');
     }
 }
 
@@ -686,6 +699,9 @@ type Digest = [u8; 32];
 const TAG_NODE: u8 = b'N';
 const TAG_MODS: u8 = b'M';
 const TAG_EMPTY: u8 = b'E';
+/// Marks a number's eight raw bytes inside a key label. It is never part
+/// of UTF-8, so no literal, integer or quoted string can contain it.
+const NUM: u8 = 0xFF;
 
 impl Keys {
     /// Keys for `root`'s tree; imported files are stat'ed through `fs`.
@@ -698,7 +714,7 @@ impl Keys {
         content_counts(root, &mut counts);
         let mut b = KeyBuilder {
             w: Writer {
-                out: String::new(),
+                out: Vec::new(),
                 style: Style::Key,
                 base: Path::new(""),
                 fs,
@@ -772,7 +788,7 @@ impl KeyBuilder<'_> {
             let mut h = Sha256::new();
             h.update([TAG_NODE]);
             h.update((self.w.out.len() as u64).to_le_bytes());
-            h.update(self.w.out.as_bytes());
+            h.update(&self.w.out);
             h.update((n.children.len() as u64).to_le_bytes());
             for c in &n.children {
                 h.update([modifier_bits(c)]);
@@ -877,18 +893,24 @@ mod tests {
             index: 0,
         };
         let k = Keys::new(&root, &StdFs);
-        // The label hashed for a node keeps every digit.
+        // The label hashed for a node keeps every bit of its numbers.
         let mut w = Writer {
-            out: String::new(),
+            out: Vec::new(),
             style: Style::Key,
             base: Path::new(""),
             fs: &StdFs,
         };
         w.label(&root.children[1]);
-        assert_eq!(
-            w.out,
-            "cube(size=[1.0000001,1.0000001,1.0000001],center=false)"
-        );
+        let mut want = b"cube(size=[".to_vec();
+        for i in 0..3 {
+            if i > 0 {
+                want.push(b',');
+            }
+            want.push(NUM);
+            want.extend_from_slice(&1.0000001f64.to_bits().to_le_bytes());
+        }
+        want.extend_from_slice(b"],center=false)");
+        assert_eq!(w.out, want);
         let [a, b, c] = [0, 1, 2].map(|i| k.get(&root.children[i]));
         assert_eq!(a, k.get(&root.children[0].children[0]));
         assert_eq!(a, c);
@@ -919,6 +941,50 @@ mod tests {
             Keys::new(&padded, &StdFs).get(&padded),
             Keys::new(&bare, &StdFs).get(&bare)
         );
+    }
+
+    #[test]
+    fn number_keys_split_zeros_and_merge_nans() {
+        let key = |s: f64| Keys::new(&cube(s, 0), &StdFs).get(&cube(s, 0));
+        // `-0` and `0` can make different output (`-0` coordinates), so
+        // they stay apart; neighbouring doubles do too.
+        assert_ne!(key(0.0), key(-0.0));
+        assert_ne!(key(1.0), key(f64::from_bits(1.0f64.to_bits() + 1)));
+        // Every NaN is one key, whatever its sign or payload.
+        let odd_nan = f64::from_bits(f64::NAN.to_bits() | 0x8000_0000_0000_0001);
+        assert!(odd_nan.is_nan());
+        assert_eq!(key(f64::NAN), key(odd_nan));
+        assert_eq!(key(f64::NAN), key(-f64::NAN));
+        assert_ne!(key(f64::NAN), key(f64::INFINITY));
+    }
+
+    #[test]
+    fn number_bytes_cannot_pose_as_text() {
+        // Text is UTF-8, which never holds the byte that opens a number,
+        // even for the highest code points; a number is that byte plus 8.
+        let part = |name: &str| {
+            node(
+                NodeKind::Part {
+                    name: name.to_string(),
+                },
+                0,
+                vec![],
+            )
+        };
+        let label = |n: &Node| {
+            let mut w = Writer {
+                out: Vec::new(),
+                style: Style::Key,
+                base: Path::new(""),
+                fs: &StdFs,
+            };
+            w.label(n);
+            w.out
+        };
+        let text = label(&part("\u{ff}\u{fffe}\u{10ffff}\"\\"));
+        assert!(!text.contains(&NUM));
+        let c = label(&cube(1.0, 0));
+        assert_eq!(c.iter().filter(|&&b| b == NUM).count(), 3);
     }
 
     #[test]
