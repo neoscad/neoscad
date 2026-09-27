@@ -26,6 +26,16 @@ options:
   # because Xcode resolves the XCFramework when it plans the build, before
   # any build phase can make it. The editor bundle's input list likewise.
   preGenCommand: ../scripts/apple/build-core.sh --prepare && ../scripts/apple/build-editor.sh --prepare
+  # The app icon is an Icon Composer document (App/AppIcon.icon,
+  # docs/icon.md), which is a directory. XcodeGen 2.44 walks into any
+  # directory it does not know, so without this it adds the icon's
+  # icon.json and layer PNG to the app's Resources as loose files, and
+  # actool never sees an icon. As a file, it goes to the Resources phase
+  # whole and Xcode compiles it into Assets.car and AppIcon.icns.
+  fileTypes:
+    icon:
+      file: true
+      buildPhase: resources
 
 settings:
   base:

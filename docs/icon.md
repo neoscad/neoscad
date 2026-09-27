@@ -3,8 +3,8 @@
 NeoSCAD's icon and its hero image are NeoSCAD models, rendered by
 NeoSCAD. The sources are in `apple/Icon/`. Everything built from them
 goes to `apple/Icon/build/`, which is gitignored by `apple/.gitignore`'s
-`build/` rule. None of it is wired into `apple/project.yml` yet. That
-waits until a concept is picked (see [Adopting a concept](#adopting-a-concept)).
+`build/` rule. Concept C is the app icon: its Icon Composer document is
+committed as `apple/App/AppIcon.icon` (see [The app icon](#the-app-icon)).
 
 ## Concepts
 
@@ -19,7 +19,7 @@ on an Apple M4 Pro.
 |-|-|-|-|-|
 | A | `concept-a.scad`, "Lattice cube" | A rounded cube (a hull of 8 spheres) minus one oversized sphere per octant. The spheres break through the faces and into each other, which leaves a Schwarz-P-like frame of saddle surfaces. A coral sphere floats in each cell and shows through the openings. Teal and coral. | A rounded block. The holes blur into texture. | 0.35 s |
 | B | `concept-b.scad`, "Cutaway core" | A hollow rounded cube around a hollow sphere around a solid rounded cube, with the octant facing the viewer subtracted from all three. It reads like an engineering section. Indigo, cyan and coral. | A block with a bright notch. This one is the most legible. | 0.10 s |
-| C | `concept-c.scad`, "Threaded ring" | A torus carved by one smooth helical channel (a chain of sphere hulls), then cut into 36 wedges, each in its own colour, which gives a cyan to violet to magenta sweep. | A colourful ring. It is the least like OpenSCAD's disc. | 1.35 s |
+| C | `concept-c.scad`, "Threaded ring" | A torus carved by one smooth helical channel (a circle swept along a helix), then cut into 36 wedges, each in its own colour, which gives a cyan to violet to magenta sweep. **Adopted.** | A colourful ring. It is the least like OpenSCAD's disc. | 2.8 s |
 
 Concept C went through two versions that failed:
 
@@ -28,8 +28,18 @@ Concept C went through two versions that failed:
   This left ragged, half-cut grooves, because the channel is wide enough
   on the inside of the ring to reach wedges well beyond its own angle.
   The nightly OpenSCAD rendered the same wrong result, so it was a bug
-  in the model, not in NeoSCAD. The file now carves the whole ring once
-  and intersects it with each wedge.
+  in the model, not in NeoSCAD. Each wedge is now carved by the whole
+  channel.
+
+On adoption its tessellation was raised, because facets are shaded flat
+and the 1024 px icon showed every one as a stripe. With the channel as a
+chain of hulls, 360 hulls of 48-gon spheres already took 10 s, so the
+channel became one swept polyhedron, and each wedge became a partial
+`rotate_extrude` instead of the whole ring intersected with a prism
+(36 intersections with the full ring cost more than the channel). At
+540 channel sections of 72 sides and a 432 x 216 torus it renders in
+2.8 s (was 1.35 s at the old, coarse counts); the nightly renders the
+same file to within 2% of NeoSCAD's facet count.
 
 ## How the images are made
 
@@ -163,14 +173,41 @@ Both scripts use `target/release/neoscad`. From a worktree, they use the
 main checkout's copy, or whatever `NEOSCAD` is set to. `build-hero.sh`
 sets `OPENSCADPATH` to `.reference`.
 
-## Adopting a concept
+## The app icon
 
-This is not done yet, and it touches `apple/project.yml`:
+`apple/App/AppIcon.icon` is concept C's Icon Composer document, copied
+from `apple/Icon/build/concept-c/AppIcon.icon`. The app target picks it
+up from `App/` and selects it with
+`ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`. `apple/project.yml`'s
+`fileTypes` entry for `icon` is needed: XcodeGen 2.44 otherwise walks
+into the `.icon` directory and copies `icon.json` and `art.png` into the
+app's Resources as loose files, and no icon is compiled. The build turns
+the document into `Contents/Resources/Assets.car` and `AppIcon.icns`,
+and sets `CFBundleIconFile` and `CFBundleIconName`. The placeholder
+`apple/App/Assets.xcassets/AppIcon.appiconset` is superseded; the
+catalogue held nothing else.
 
-1. Copy `apple/Icon/build/concept-X/AppIcon.icon` to `apple/App/AppIcon.icon`.
-   It is a small, reviewable directory: one JSON file and one PNG.
-2. Add the file to the app target's sources.
-3. Set `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`.
-4. The existing `apple/App/Assets.xcassets/AppIcon.appiconset` is
-   superseded by the `.icon`, so remove it to avoid two sources of
-   truth.
+**The committed document is a source, not a build output.** It is small
+(one JSON file and a 1024 px PNG, about 440 KB), Xcode needs it at build
+time, and regenerating it needs a release `neoscad` build, `swiftc` and
+Xcode's `ictool`, which a plain app build should not depend on. The
+`.scad` stays the true source of the art. The copy in `App/` is the
+reviewed snapshot of it.
+
+Other places the icon appears need no wiring. The About panel
+(`AppDelegate.showAboutPanel`, `apple/App/NeoSCADApp.swift`) calls
+`orderFrontStandardAboutPanel`, which shows the application icon from
+those Info.plist keys. The Quick Look thumbnail's badge is the text
+`SCAD` (`extensionBadge` in `apple/Thumbnail/ThumbnailProvider.swift`),
+not an image, so it does not involve the icon.
+
+To change the icon, edit `apple/Icon/concept-c.scad`, then:
+
+```sh
+scripts/apple/build-icon.sh c
+rm -rf apple/App/AppIcon.icon
+cp -R apple/Icon/build/concept-c/AppIcon.icon apple/App/AppIcon.icon
+```
+
+Check `apple/Icon/build/concept-c/sheet.png` and the `preview-*.png`
+renders before committing the new `App/AppIcon.icon`.

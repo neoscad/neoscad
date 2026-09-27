@@ -5,8 +5,8 @@
 // (The camera and tile lines are read by scripts/apple/build-icon.sh.)
 //
 // A torus carved by a smooth helical channel that winds round the tube
-// while it circles the ring. The channel is a chain of hulls between
-// consecutive spheres along its path, subtracted from the ring.
+// while it circles the ring. The channel is a tube swept along that
+// path (one polyhedron), subtracted from the ring.
 // The ring is built as wedges, each its own colour, which gives the solid
 // a cyan-to-violet-to-magenta sweep (color() applies per object, so a
 // gradient has to be made of pieces). At 16 px it is a ring, unlike both
@@ -16,7 +16,15 @@ R = 7;          // ring radius (centre of the tube)
 r = 3.6;        // tube radius
 turns = 6;      // how many times each channel winds round the tube
 groove = 1.4;   // channel radius
-steps = 180;    // hull segments per channel, round the whole ring
+// Tessellation. Facets are shaded flat, so each one shows as a band of
+// its own shade: at 144/72 round the ring and tube, and a channel of 180
+// hulled 28-gon spheres, the 1024 px icon was visibly striped. These
+// counts are about as high as a render of under 3 s allows (2.8 s to STL
+// on an M4 Pro); the channel's steps * groove_fn costs the most.
+steps = 540;    // channel cross-sections, round the whole ring
+groove_fn = 72; // segments round the channel's cross-section
+ring_fn = 432;  // segments round the ring (rotate_extrude)
+tube_fn = 216;  // segments round the tube's cross-section
 wedges = 36;    // colour pieces round the ring
 // Winding directions: [1] is one helix; [-1, 1] crosses two into a braid,
 // which reads as noise rather than knurling at icon sizes.
@@ -40,41 +48,45 @@ function sweep(t) =
 function path(a, dir) = let(w = dir * a * turns)
     [(R + r * cos(w)) * cos(a), (R + r * cos(w)) * sin(a), r * sin(w)];
 
+// The channel is a circle of radius `groove` swept along the path, in
+// the plane normal to it. It used to be a hull between each pair of
+// consecutive spheres, which is nearly the same solid, but 360 hulls of
+// 48-gon spheres already took 10 s to render. The circle's plane is
+// spanned by the tube's outward normal n (the path lies on the tube, so
+// n is perpendicular to its tangent t) and t x n; both follow the path
+// smoothly and close up after a full turn, so the tube does not twist. Faces wind so that they face outward: reversed, the polyhedron
+// is inside out and the difference below silently removes nothing.
 module channel() {
-    for (dir = dirs, k = [0 : steps - 1])
-        hull() {
-            translate(path(k * 360 / steps, dir)) sphere(groove, $fn = 28);
-            translate(path((k + 1) * 360 / steps, dir)) sphere(groove, $fn = 28);
-        }
-}
-
-module carved_ring() {
-    difference() {
-        rotate_extrude($fn = 144) translate([R, 0]) circle(r, $fn = 72);
-        channel();
+    for (dir = dirs) {
+        pts = [for (k = [0 : steps - 1]) let(
+                    a = k * 360 / steps,
+                    p = path(a, dir),
+                    w = dir * a * turns,
+                    t = path(a + 0.5, dir) - path(a - 0.5, dir),
+                    n = [cos(w) * cos(a), cos(w) * sin(a), sin(w)],
+                    b = cross(t, n) / norm(cross(t, n)))
+                for (j = [0 : groove_fn - 1]) let(c = j * 360 / groove_fn)
+                    p + groove * (cos(c) * n + sin(c) * b)];
+        faces = [for (k = [0 : steps - 1], j = [0 : groove_fn - 1]) let(
+                    k1 = (k + 1) % steps, j1 = (j + 1) % groove_fn)
+                    [k * groove_fn + j, k1 * groove_fn + j, k1 * groove_fn + j1, k * groove_fn + j1]];
+        polyhedron(pts, faces);
     }
 }
 
-// A prism covering ring angles [i, i + 1] * 360 / wedges. Neighbouring
-// prisms compute their shared edge from the same expression, so they meet
-// exactly and the coloured pieces tile the ring with no slivers.
-module wedge(i) {
-    far = 2 * (R + r);
-    a0 = i * 360 / wedges;
-    a1 = (i + 1) * 360 / wedges;
-    translate([0, 0, -far / 2])
-        linear_extrude(far)
-            polygon([[0, 0], far * [cos(a0), sin(a0)], far * [cos(a1), sin(a1)]]);
-}
-
-// The ring is carved once and then cut into coloured wedges. Carving each
-// wedge separately with only the nearby part of the channel is tempting
-// but wrong: the channel is wide, so on the inside of the ring a stretch
-// well outside a wedge's angles still cuts into it, and the result has
-// ragged, half-cut grooves.
+// The ring is cut into coloured wedges and each wedge is carved by the
+// whole channel. Carving each wedge with only the nearby part of the
+// channel is tempting but wrong: the channel is wide, so on the inside of
+// the ring a stretch well outside a wedge's angles still cuts into it,
+// and the result has ragged, half-cut grooves. Each wedge is its own
+// partial rotate_extrude rather than the whole ring intersected with a
+// prism, because that intersection handled the full, finely tessellated
+// ring 36 times and cost more than the channel did.
 for (i = [0 : wedges - 1])
     color(sweep(i / wedges))
-    intersection() {
-        carved_ring();
-        wedge(i);
+    difference() {
+        rotate(i * 360 / wedges)
+            rotate_extrude(angle = 360 / wedges, $fn = ring_fn)
+                translate([R, 0]) circle(r, $fn = tube_fn);
+        channel();
     }

@@ -15,8 +15,9 @@
 #
 # The concept's .scad carries its own camera and tile colours in header
 # comments ("// camera: ..." and "// tile: #top #bottom"), so a concept
-# is one self-describing file. Nothing here is wired into the Xcode
-# project; that waits for a chosen concept (docs/icon.md).
+# is one self-describing file. Nothing here touches the Xcode project:
+# the app's icon is a committed copy of concept C's AppIcon.icon, updated
+# by hand (docs/icon.md, "The app icon").
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
