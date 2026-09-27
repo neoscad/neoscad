@@ -355,3 +355,34 @@ fn json_reports_say_why_a_run_failed() {
     let o = neoscad(&d, &["nope.scad", "-o", "x.stl"]);
     assert_eq!(text(&o.stderr), "Can't open input file 'nope.scad'!\n\n");
 }
+
+/// A run that draws nothing must not initialize the GPU frameworks: they
+/// are linked delay-init (`build.rs`, `delay_gpu_frameworks`), which saves
+/// about 400 initializers and most of a millisecond per process. The linker
+/// warns that it ignores the flag for CoreGraphics, so a linker that one
+/// day means it would bring the cost back silently; dyld's own trace of the
+/// initializers it runs is what shows it.
+#[cfg(target_os = "macos")]
+#[test]
+fn gpu_frameworks_are_not_initialized_at_launch() {
+    let out = Command::new(env!("CARGO_BIN_EXE_neoscad"))
+        .arg("--version")
+        .env("DYLD_PRINT_INITIALIZERS", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let trace = text(&out.stderr);
+    assert!(
+        trace.contains("running initializer"),
+        "no dyld trace:\n{trace}"
+    );
+    let frameworks: Vec<&str> = trace
+        .lines()
+        .filter(|l| l.contains("running initializer") && l.contains("/System/Library/"))
+        .collect();
+    assert!(
+        frameworks.is_empty(),
+        "framework initializers ran at launch:\n{}",
+        frameworks.join("\n")
+    );
+}

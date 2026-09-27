@@ -30,6 +30,14 @@
 //!
 //! Cold start is a tracked benchmark (docs/architecture.md, "Agent surface"),
 //! so `main` does nothing before argument parsing and nothing expensive after.
+//! For the same reason the GPU frameworks are linked delay-init (`build.rs`).
+
+// The linker warns on every link that it ignores delay-init for
+// CoreGraphics, then records it anyway, and dyld honours it (see
+// `delay_gpu_frameworks` in `build.rs`; a test checks that it still does).
+// A warning that is known and checked would only train readers to skip the
+// linker's output.
+#![allow(linker_messages)]
 
 mod check;
 mod client;
@@ -59,6 +67,16 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use clap::{ArgAction, Parser};
+
+/// mimalloc rather than the system allocator, as OpenSCAD ships
+/// (`USE_MIMALLOC`, on by default). Evaluation and geometry allocate
+/// heavily (small values, then large vertex buffers); measured in the
+/// performance audit's O1, mimalloc makes allocation-heavy models 7-15%
+/// faster and cuts peak RSS by about a fifth. Allocation order never reaches
+/// results, so output is unchanged. The WASM build keeps Rust's allocator.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Exit code for "this output mode exists in OpenSCAD but not in neoscad yet".
 /// OpenSCAD itself exits with 1 for every error, usage errors included, and

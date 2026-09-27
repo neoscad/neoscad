@@ -148,20 +148,13 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSApplicationCategoryType: public.app-category.graphics-design
-        # The system allocator keeps freed large blocks (128 KiB and up) in
-        # a cache for reuse instead of returning them, and they count
-        # against the app's footprint until the system is short of memory.
-        # A run's evaluation and geometry allocate and free hundreds of
-        # megabytes that way: with the cache, a document of 125 spheres
-        # stayed at 775 MB after its preview (338 MB of it "Malloc Large
-        # (empty)"); without, 177 MB (phase 8f, `footprint`). The price is
-        # fresh pages for each large block: the same render took 8% longer
-        # from the command line (0.66 to 0.72 s), which does not set this.
-        # libmalloc reads it before `main`, so it can only come from the
-        # environment; LaunchServices applies it to Finder, Dock and `open`
-        # launches (not to a test host started by xcodebuild).
-        LSEnvironment:
-          MallocLargeCache: "0"
+        # No `LSEnvironment: MallocLargeCache=0` any more. Phase 8f set it
+        # because the system allocator kept a 125-sphere document's freed
+        # large blocks (775 MB after its preview, 177 MB without the cache).
+        # The core now allocates through mimalloc (crates/ffi), which the
+        # variable does not reach: with and without it the same document
+        # settles at 212 and 211 MB, and renders take the same time, where
+        # the variable used to cost the core 8% (performance audit, O1).
         NSPrincipalClass: NSApplication
         NSHumanReadableCopyright: "GPL-2.0-or-later"
         # NeoSCAD edits OpenSCAD's format; it does not own it. The type is

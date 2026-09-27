@@ -4,6 +4,14 @@ Deferred items found along the way, with where they came from. Remove an
 entry when it is done.
 
 ## Performance
+- CLI cold start is about 0.7 ms lower with the GPU frameworks linked
+  delay-init (`crates/cli/build.rs`), but not yet at the audit's 3 ms
+  target. What is left: the first rayon use starts the whole global pool
+  (about 0.27 ms of a `cube(1)` export; `RAYON_NUM_THREADS=1` removes it),
+  which a small model never needs; the delay-init frameworks are still
+  mapped and bound (about 0.3 ms, measured on a C program linking the
+  same ones), which only a `dlopen`ed renderer or a helper binary would
+  save; and mimalloc's start-up, about 0.1-0.2 ms. (O1, R2)
 - Deep union trees and the level-4 Menger sponge render slower than the
   nightly (3.0 s vs 1.8 s and 1.3 s vs 0.7 s). Total CPU is the same, but
   the nightly spreads the work across cores better. The gap is structural:
@@ -575,11 +583,19 @@ entry when it is done.
   What remains per window is mostly the model's vertex buffer, about
   20 MB of malloc (parse caches, the language server's index), the
   layer's drawables and WebKit's layers (10 MB IOSurface). Left open:
-  - `MallocLargeCache=0` comes from `LSEnvironment`, so a test host or a
-    binary run directly keeps the cache; a render took 8% longer with it
-    off (0.66 to 0.72 s from the command line on 125 spheres). An
-    allocator of the core's own that returns big blocks at once would
-    not depend on the launch.
+  - mimalloc (O1) replaced `MallocLargeCache=0`, but keeps more after a
+    big preview: 125 spheres settle at about 210 MB 30 s after the preview
+    (about 90 MB of it mimalloc's, tagged "IOAccelerator" by `footprint`,
+    since mimalloc marks its memory with VM tag 100), where the system
+    allocator without its large cache settled at about 125 MB.
+    `MIMALLOC_PURGE_DELAY=0` gets there within a second instead of about
+    30 but no lower, and costs 1-7% of render time. mimalloc v2 (the
+    crate's `v2` feature) settled lower in `neoscad serve` with that
+    variable (83 against 185 MB), but was 2-3% slower and peaked 65%
+    higher on fractal_tree (2.52 against 1.53 GB); v3 is also what
+    OpenSCAD ships (its `submodules/mimalloc` is the v3.3.2 tag). Worth
+    trying: `mi_collect` on the pool's threads after a run (needs an
+    `unsafe` call into `libmimalloc-sys`). (O1)
   - The web content processes were not measured again (56 MB and a 32 MB
     prewarmed one in 8d).
   - A preview's peak is far above its result: 125 spheres peaked at

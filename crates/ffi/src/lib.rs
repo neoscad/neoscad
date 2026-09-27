@@ -56,6 +56,17 @@ pub use viewport::*;
 
 uniffi::setup_scaffolding!();
 
+/// The core allocates through mimalloc, as `neoscad` does (see
+/// `crates/cli/src/main.rs`): evaluation and meshing are 7-15% faster than
+/// on the system allocator. It is the static library's allocator, so it
+/// serves only the core's Rust code; Swift and the system frameworks keep
+/// the system malloc. Nothing allocated on one side is freed on the other:
+/// UniFFI hands buffers back to Rust to free. It also made the app's
+/// `MallocLargeCache=0` launch environment moot (`apple/project.yml`): the
+/// core's large buffers no longer pass through the system allocator.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Run `f`, turning a panic into [`CoreError::Panicked`] with the panic's
 /// message (see the crate documentation).
 fn guarded<T>(f: impl FnOnce() -> Result<T, CoreError>) -> Result<T, CoreError> {

@@ -25,6 +25,7 @@ Library choices were checked in `docs/audits/phase0.md`.
 | Text | `crates/text`: `harfrust` (shaping, with `hb_ft`-exact font functions) + `skrifa` (hinted outlines), plus a port of fontconfig name matching over an in-memory font database | No FreeType or fontconfig; portable to WASM. Glyph outlines are byte-identical to the nightly |
 | I/O | `crates/io`: STL, OFF, OBJ, 3MF (zip + quick-xml), DXF, SVG (a port of OpenSCAD's libsvg), PDF | `usvg` turns arcs into f32 Béziers and keeps strokes as paint, so it can't reproduce OpenSCAD's `$fn`-dependent flattening or its stroke outlines |
 | Renderer | wgpu — Metal on macOS, WebGPU on web, offscreen for snapshots | One renderer for the GUI, the web and agent snapshots |
+| Allocator | `mimalloc` (crate `=0.1.52`, which builds mimalloc 3.3.2's C sources through `libmimalloc-sys` 0.1.49 and `cc`) as the global allocator of `neoscad` and the app's core; wasm32 keeps Rust's allocator | 7–15% faster on allocation-heavy models, about a fifth less peak memory (performance audit, O1). OpenSCAD ships it too (`USE_MIMALLOC`, on by default). The one C dependency outside the system frameworks |
 
 ### Crates
 
@@ -52,6 +53,10 @@ JSON-RPC (`docs/serve-protocol.md`).
 ## Agent surface
 
 - **Fast one-shot CLI.** No GUI toolkit; cold start targets milliseconds.
+  The renderer's frameworks (Metal, QuartzCore, CoreGraphics, Foundation)
+  are linked delay-init (`crates/cli/build.rs`), so a run that draws
+  nothing does not initialize them; this needs a macOS 15 deployment
+  target, which `neoscad` and the app both use.
 - **`neoscad serve`** keeps the geometry cache warm so a one-line edit
   re-renders in milliseconds. The CLI, GUI and MCP server are its clients.
   Implemented in 7a: `crates/session` (documents, parse and geometry

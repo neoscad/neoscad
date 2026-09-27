@@ -24,6 +24,8 @@ render = { package = "neoscad-render", path = "../render" }
 serde_json.workspace = true
 session = { package = "neoscad-session", path = "../session" }
 text = { package = "neoscad-text", path = "../text" }
+# The global allocator of the app's core (see `lib.rs`).
+mimalloc.workspace = true
 uniffi = { version = "=0.32.2", default-features = false }
 # The window surface for the viewport: `SurfaceTargetUnsafe` (the same
 # wgpu the renderer uses; no second copy is built).

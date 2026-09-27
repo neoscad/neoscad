@@ -12,6 +12,11 @@ license = "GPL-2.0-or-later"
 
 [workspace.dependencies]
 clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
+# The global allocator of the native binaries and the app's core (crates/cli,
+# crates/ffi; never wasm32). Pinned exactly: it builds mimalloc's C sources
+# (libmimalloc-sys, mimalloc 3.x) with `cc`, the one C dependency outside
+# the system frameworks (docs/architecture.md, "Stack").
+mimalloc = { version = "=0.1.52", default-features = false }
 png = "0.18"
 rayon = "1"
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }

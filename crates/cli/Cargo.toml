@@ -33,6 +33,11 @@ text = { package = "neoscad-text", path = "../text" }
 # The server's socket: the user id for the default per-user path and the
 # directory's ownership check, through nix's safe wrapper (the workspace
 # forbids unsafe code).
+# The global allocator (see `main.rs`). Native only: the WASM build keeps
+# Rust's default allocator, and never builds this crate anyway.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["user"] }
 
