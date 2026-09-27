@@ -804,3 +804,5 @@ entry when it is done.
 - The release `wasm_check.wasm` is 44.6 MB with the language server in it
   (the WASM section's 38 MB is from H2); the language server's share was
   not measured. (8e)
+
+- Session product cache keys on `keys.get(top)` directly (`crates/session/src/lib.rs`), so a top-level `group(){ group(); X }` and a top-level `X` may share an entry the way geom's cache did before `dc7153b`. Untested; apply geom's `cache_key` rule there too.
