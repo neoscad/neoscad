@@ -15,7 +15,7 @@ use crate::rng::hash_float;
 use crate::sym::{FxBuild, Sym, Syms};
 use crate::trig;
 use crate::utf8;
-use crate::value::{MAX_RANGE_STEPS, Type, Value};
+use crate::value::{Growable, MAX_RANGE_STEPS, Type, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Builtin {
@@ -353,14 +353,35 @@ impl<'a> Evaluator<'a> {
                 {
                     return Ok(Value::Undef);
                 }
-                let mut out = Vec::with_capacity(a.len());
+                // A first list that nothing else holds is appended to in
+                // place (see `value::Growable`), which keeps a tail-recursive
+                // `concat(acc, [x])` linear; any other is copied into a list
+                // of exactly the final size.
+                let mut a = a.into_iter();
+                let mut out = match a.next().map(|x| x.value) {
+                    None => return Ok(Value::vector(Vec::new())),
+                    Some(Value::Vector(v)) => match v.into_growable() {
+                        Ok(g) => g,
+                        Err(v) => {
+                            let mut g = Growable::with_capacity(n);
+                            g.extend(v.iter().cloned());
+                            g
+                        }
+                    },
+                    Some(other) => {
+                        let mut g = Growable::with_capacity(n);
+                        g.push(other);
+                        g
+                    }
+                };
+                out.reserve(n - out.len());
                 for x in a {
                     match x.value {
                         Value::Vector(v) => out.extend(v.into_vec()),
                         other => out.push(other),
                     }
                 }
-                Value::vector(out)
+                Value::Vector(out.finish())
             }
             Lookup => self.lookup_fn(&a, loc),
             Search => self.search(&a, loc),

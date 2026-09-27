@@ -95,6 +95,12 @@ impl Vars {
         true
     }
 
+    /// Move a variable's value out, leaving `undef` bound in its place.
+    pub fn take(&mut self, s: Sym) -> Option<Value> {
+        let i = self.position(s)?;
+        Some(std::mem::take(&mut self.items[i].1))
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &(Sym, Value)> {
         self.items.iter()
     }
@@ -156,6 +162,18 @@ impl Ctx {
         }
         match &*self.parent.borrow() {
             Some(p) => p.lookup_lexical(s),
+            None => None,
+        }
+    }
+
+    /// The context a lexical lookup of `s` from here finds it in, as an
+    /// address to compare with (see `Evaluator::take_moved`).
+    pub fn binder(&self, s: Sym) -> Option<*const Ctx> {
+        if self.has_local(s) {
+            return Some(std::ptr::from_ref(self));
+        }
+        match &*self.parent.borrow() {
+            Some(p) => p.binder(s),
             None => None,
         }
     }

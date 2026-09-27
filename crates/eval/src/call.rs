@@ -44,6 +44,30 @@ pub(crate) enum Instantiable {
     },
 }
 
+/// The context binding `s`, found from a tail call's `ctx` when that and
+/// every context up to it can be seen by nothing but the call loop (see
+/// `Evaluator::move_accumulators`): `ctx` is held by the loop's stack slot
+/// and its `cur`, each context above it only by its child. Only plain
+/// contexts (function bodies, `let`) qualify.
+fn private_binder(ctx: &Rc<Ctx>, s: Sym) -> Option<Rc<Ctx>> {
+    // The counts include the clone held here.
+    let mut c = ctx.clone();
+    let mut expected = 3;
+    loop {
+        if Rc::strong_count(&c) != expected
+            || Rc::weak_count(&c) != 0
+            || !matches!(c.kind, CtxKind::Plain)
+        {
+            return None;
+        }
+        if c.has_local(s) {
+            return Some(c);
+        }
+        c = c.parent()?;
+        expected = 2;
+    }
+}
+
 impl<'a> Evaluator<'a> {
     /// `Arguments`: evaluate call arguments in order.
     pub fn eval_args(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>) -> R<Vec<ArgVal>> {
@@ -419,7 +443,11 @@ impl<'a> Evaluator<'a> {
                 let body_ctx = Ctx::child(&defining);
                 self.push(body_ctx.clone());
                 self.copy_config(ctx, &body_ctx);
-                let argv = self.eval_args(u, args, ctx)?;
+                let argv = if self.accumulates(u, id, args) {
+                    self.eval_args_moving(u, args, ctx)?
+                } else {
+                    self.eval_args(u, args, ctx)?
+                };
                 let frame = self.bind_user(argv, loc, fu, params, &defining)?;
                 self.apply_frame(&body_ctx, frame);
                 Ok(Step::Next {
@@ -431,6 +459,179 @@ impl<'a> Evaluator<'a> {
             }
             _ => Ok(Step::Done(self.eval(u, id, ctx)?)),
         }
+    }
+
+    /// Before a tail call's arguments are evaluated, move the accumulator
+    /// of an argument `concat(acc, ...)` or `[each acc, ...]` out of the
+    /// frame the call replaces, so that the list has one owner and grows in
+    /// place (see [`crate::value::Growable`]). The frame still holds it
+    /// otherwise, and each step of `f(n, acc) = ... f(n - 1, concat(acc,
+    /// [x]))` copied the whole list: quadratic where OpenSCAD is linear.
+    ///
+    /// Values are immutable, so the move must be unobservable. It is made
+    /// only when:
+    ///
+    /// - `acc` is read exactly once in all the call's arguments (counting
+    ///   function literals and comprehensions in them), in a position that
+    ///   is evaluated at most once, so no later read can see the hole;
+    /// - `acc` is an ordinary variable (a `$` variable is read dynamically,
+    ///   from anywhere below);
+    /// - every context from `ctx` up to the one binding `acc` is held only
+    ///   by the evaluator's tail-call loop and its own child: no function
+    ///   literal captured it, the callee is not defined in it, and nothing
+    ///   else will look in it after this call replaces it.
+    ///
+    /// The value is handed to the one read that resolves to that binding
+    /// ([`Evaluator::take_moved`]); the frame keeps `undef`.
+    #[inline(never)]
+    fn eval_args_moving(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>) -> R<Vec<ArgVal>> {
+        let mark = self.moved.len();
+        self.move_accumulators(u, args, ctx);
+        let argv = self.eval_args(u, args, ctx);
+        self.moved.truncate(mark);
+        argv
+    }
+
+    /// Whether call `id` has an argument [`Evaluator::accumulator`] finds,
+    /// remembered per call (this runs at every user function call).
+    #[inline]
+    fn accumulates(&mut self, u: u32, id: ExprId, args: &[Arg]) -> bool {
+        let known = &self.units[u as usize].accumulates;
+        match known.get(id.0 as usize) {
+            Some(1) => false,
+            Some(2) => true,
+            _ => self.find_accumulators(u, id, args),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn find_accumulators(&mut self, u: u32, id: ExprId, args: &[Arg]) -> bool {
+        let yes = args.iter().any(|a| self.accumulator(u, a.expr).is_some());
+        let unit = &mut self.units[u as usize];
+        if unit.accumulates.is_empty() {
+            unit.accumulates = vec![0; unit.ast.exprs.len()];
+        }
+        unit.accumulates[id.0 as usize] = if yes { 2 } else { 1 };
+        yes
+    }
+
+    fn move_accumulators(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>) {
+        for a in args {
+            let Some(s) = self.accumulator(u, a.expr) else {
+                continue;
+            };
+            if self.syms.is_config(s) || self.uses(u, args, s) != 1 {
+                continue;
+            }
+            let Some(owner) = private_binder(ctx, s) else {
+                continue;
+            };
+            let value = owner.vars.borrow_mut().take(s);
+            self.moved.push(crate::eval::Moved {
+                owner: Rc::as_ptr(&owner),
+                sym: s,
+                value,
+            });
+        }
+    }
+
+    /// The variable `acc` of an argument `concat(acc, ...)` or
+    /// `[each acc, ...]`.
+    fn accumulator(&self, u: u32, e: ExprId) -> Option<Sym> {
+        let unit = &self.units[u as usize];
+        let ast: &Ast = unit.ast;
+        let var = match &ast.expr(e).kind {
+            ExprKind::Call(callee, cargs) => {
+                let ExprKind::Var(f) = ast.expr(*callee).kind else {
+                    return None;
+                };
+                let first = cargs.first()?;
+                if unit.sym(f) != self.k.concat || first.name.is_some() {
+                    return None;
+                }
+                first.expr
+            }
+            ExprKind::Vector(items) => match ast.expr(*items.first()?).kind {
+                ExprKind::LcEach(x) => x,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        match ast.expr(var).kind {
+            ExprKind::Var(n) => Some(unit.sym(n)),
+            _ => None,
+        }
+    }
+
+    /// How many times `s` is named in `args` (stopping at 2), walked with an
+    /// explicit stack: expressions can nest deeper than the native stack.
+    fn uses(&self, u: u32, args: &[Arg], s: Sym) -> usize {
+        let unit = &self.units[u as usize];
+        let ast: &Ast = unit.ast;
+        let mut todo: Vec<ExprId> = args.iter().map(|a| a.expr).collect();
+        let mut n = 0;
+        let arg_exprs = |todo: &mut Vec<ExprId>, args: &[Arg]| {
+            todo.extend(args.iter().map(|a| a.expr));
+        };
+        while let Some(e) = todo.pop() {
+            match &ast.expr(e).kind {
+                ExprKind::Var(v) => {
+                    if unit.sym(*v) == s {
+                        n += 1;
+                        if n > 1 {
+                            return n;
+                        }
+                    }
+                }
+                ExprKind::Undef
+                | ExprKind::Bool(_)
+                | ExprKind::Number(_)
+                | ExprKind::String(_)
+                | ExprKind::Invalid => {}
+                ExprKind::Unary(_, x) | ExprKind::Member(x, _) | ExprKind::LcEach(x) => {
+                    todo.push(*x);
+                }
+                ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => todo.extend([*a, *b]),
+                ExprKind::Ternary(a, b, c) => todo.extend([*a, *b, *c]),
+                ExprKind::LcIf(a, b, c) => {
+                    todo.extend([*a, *b]);
+                    todo.extend(*c);
+                }
+                ExprKind::Call(callee, a) => {
+                    todo.push(*callee);
+                    arg_exprs(&mut todo, a);
+                }
+                ExprKind::Range { begin, step, end } => {
+                    todo.extend([*begin, *end]);
+                    todo.extend(*step);
+                }
+                ExprKind::Vector(items) => todo.extend(items.iter().copied()),
+                ExprKind::Function(params, body) => {
+                    todo.extend(params.iter().filter_map(|p| p.default));
+                    todo.push(*body);
+                }
+                ExprKind::Let(a, body) | ExprKind::LcFor(a, body) | ExprKind::LcLet(a, body) => {
+                    arg_exprs(&mut todo, a);
+                    todo.push(*body);
+                }
+                ExprKind::Assert(a, body) | ExprKind::Echo(a, body) => {
+                    arg_exprs(&mut todo, a);
+                    todo.extend(*body);
+                }
+                ExprKind::LcForC {
+                    init,
+                    cond,
+                    incr,
+                    body,
+                } => {
+                    arg_exprs(&mut todo, init);
+                    arg_exprs(&mut todo, incr);
+                    todo.extend([*cond, *body]);
+                }
+            }
+        }
+        n
     }
 
     /// `Context::lookup_function`.

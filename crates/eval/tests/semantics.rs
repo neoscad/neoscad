@@ -167,6 +167,77 @@ fn tail_recursion_runs_in_constant_stack() {
 }
 
 #[test]
+fn accumulators_moved_into_a_tail_call_keep_their_values() {
+    // `concat(acc, [x])` and `[each acc, x]` in a tail call take `acc` out
+    // of the frame the call replaces, so the list can grow in place (see
+    // `Evaluator::move_accumulators`). Each case here is one where that
+    // must not happen, or must not be visible: a list shared with a global,
+    // a closure or a later read, a module parameter the callee reads, a `$`
+    // variable, a named argument, a nested call of the same function.
+    let src = r#"function b(n, acc=[]) = n==0 ? acc : b(n-1, concat(acc,[n]));
+echo(b(5));
+x = [1,2];
+echo(b(3, x), x);
+function c(n, acc) = let(g = function() acc) n==0 ? [acc, g()] : c(n-1, concat(acc,[n]));
+echo(c(3, [0]));
+function d(n, acc) = n==0 ? acc : d(n-1, concat(acc,[len(acc)]));
+echo(d(4, [7]));
+function s(n, acc) = n==0 ? acc : s(n-1, [each acc, n]);
+echo(s(3, "ab"), s(3, [0:2]), s(2, 5), s(2, undef));
+f = function(n, acc) n==0 ? acc : f(n-1, [each acc, n]);
+echo(f(4, [0]));
+function e(n, acc) = let(a2 = concat(acc,[0])) n==0 ? a2 : e(n-1, concat(a2, [n]));
+echo(e(3, []));
+module m(acc) {
+  function h(n, a) = n==0 ? [a, acc] : h(n-1, a);
+  echo(h(2, concat(acc,[1])));
+  function g(n, a) = n==0 ? [a, acc] : g(n-1, concat(a, [n]));
+  echo(g(3, acc), acc);
+}
+m([9]);
+function k(n, $acc) = n==0 ? $acc : k(n-1, concat($acc,[n]));
+echo(k(3, []));
+function q(n, acc) = n==0 ? acc : q(n-1, concat(acc, [len(q(n-1, []))]));
+echo(q(3, []));
+function r(n, acc) = n==0 ? acc : r(n-1, acc=concat(acc,[n]));
+echo(r(3, [1]));
+function u(n, acc) = n==0 ? acc : u(n-1, [each acc, n, each acc]);
+echo(u(2, [1]));
+function v(n, acc) = n==0 ? acc : v(n-1, [each acc, for (i=[0:1]) n*10+i]);
+echo(v(3, []));
+function w(n, acc) = n==0 ? acc : w(n-1, concat(acc, [n], 7, "s"));
+echo(w(2, []));
+function z(n, acc, keep) = n==0 ? [acc, keep] : z(n-1, concat(acc, [n]), n==2 ? acc : keep);
+echo(z(4, [], undef));
+function bb(n, acc) = n == 0 ? acc : let(p = acc) bb(n-1, concat(p, [n, len(acc)]));
+echo(bb(3, [5]));
+echo([for (a = [[1],[2]]) b(2, a)]);"#;
+    assert_eq!(
+        run(src),
+        [
+            "ECHO: [5, 4, 3, 2, 1]",
+            "ECHO: [1, 2, 3, 2, 1], [1, 2]",
+            "ECHO: [[0, 3, 2, 1], [0, 3, 2, 1]]",
+            "ECHO: [7, 1, 2, 3, 4]",
+            "ECHO: [\"a\", \"b\", 3, 2, 1], [0, 1, 2, 3, 2, 1], [5, 2, 1], [2, 1]",
+            "ECHO: [0, 4, 3, 2, 1]",
+            "ECHO: [0, 3, 0, 2, 0, 1, 0]",
+            "ECHO: [[9, 1], [9]]",
+            "ECHO: [[9, 3, 2, 1], [9]], [9]",
+            "ECHO: [3, 2, 1]",
+            "ECHO: [2, 1, 0]",
+            "ECHO: [1, 3, 2, 1]",
+            "ECHO: [1, 2, 1, 1, 1, 2, 1]",
+            "ECHO: [30, 31, 20, 21, 10, 11]",
+            "ECHO: [2, 7, \"s\", 1, 7, \"s\"]",
+            "ECHO: [[4, 3, 2, 1], [4, 3]]",
+            "ECHO: [5, 3, 1, 2, 3, 1, 5]",
+            "ECHO: [[1, 2, 1], [2, 2, 1]]",
+        ]
+    );
+}
+
+#[test]
 fn infinite_recursion_is_an_error_not_a_crash() {
     let (lines, ev) = run_with(
         "function f(n) = 1 + f(n + 1);\necho(f(0));",

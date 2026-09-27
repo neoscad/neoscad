@@ -4,8 +4,9 @@
 //!
 //! Each case is a small script that stresses one hot path: non-tail
 //! recursion (calls and variable lookup), tail recursion (the call loop),
-//! a large list comprehension (vector building), string building, and
-//! module instantiation. The case is parsed once and evaluated for about a
+//! a large list comprehension (vector building), string building, list
+//! accumulation in tail recursion (`concat` and `each`), and module
+//! instantiation. The case is parsed once and evaluated for about a
 //! second; the best time is reported. If an OpenSCAD binary is given (the
 //! pinned nightly by default, when present), the same script also runs
 //! there with `-o x.echo`, and its wall time (process start included) is
@@ -36,6 +37,24 @@ const CASES: &[(&str, &str)] = &[
     (
         "string build 20000",
         "function build(n, s = \"\") = n == 0 ? s : build(n - 1, str(s, chr(65 + n % 26)));\necho(len(build(20000)));\n",
+    ),
+    // Tail-recursive accumulators: linear only if each step appends to the
+    // list in place (OpenSCAD's own evaluator is linear here).
+    (
+        "concat acc 20000",
+        "function build(n, acc = []) = n == 0 ? acc : build(n - 1, concat(acc, [n]));\necho(len(build(20000)));\n",
+    ),
+    (
+        "concat acc 100000",
+        "function build(n, acc = []) = n == 0 ? acc : build(n - 1, concat(acc, [n]));\necho(len(build(100000)));\n",
+    ),
+    (
+        "each acc 20000",
+        "function build(n, acc = []) = n == 0 ? acc : build(n - 1, [each acc, n]);\necho(len(build(20000)));\n",
+    ),
+    (
+        "each acc 100000",
+        "function build(n, acc = []) = n == 0 ? acc : build(n - 1, [each acc, n]);\necho(len(build(100000)));\n",
     ),
     (
         "modules 100k",

@@ -324,6 +324,16 @@ impl Vector {
         Rc::make_mut(&mut self.0)
     }
 
+    /// This list to append to in place, when this is the only reference
+    /// (see [`Growable`]); otherwise the list back.
+    pub fn into_growable(mut self) -> Result<Growable, Vector> {
+        match Rc::get_mut(&mut self.0) {
+            // Its count moves with the elements: `self` drops empty.
+            Some(v) => Ok(Growable(std::mem::take(v))),
+            None => Err(self),
+        }
+    }
+
     /// The elements, without copying when this is the only reference.
     pub fn into_vec(mut self) -> Vec<Value> {
         match Rc::get_mut(&mut self.0) {
@@ -338,32 +348,105 @@ impl Vector {
     }
 }
 
+/// A list being built or appended to, with its share of the memory
+/// estimate kept current as it grows (see [`list_bytes`]), so appending one
+/// element costs one element's accounting rather than a pass over the
+/// whole list.
+///
+/// This is what makes `concat(acc, [x])` and `[each acc, x]` linear in a
+/// tail-recursive accumulator: when the evaluator hands over the only
+/// reference to `acc` (`Vector::into_growable`), its buffer is appended to
+/// in place. Values are immutable in the language, so that is only done
+/// when nothing else can see the list.
+#[derive(Debug, Default)]
+pub struct Growable(Vec<Value>);
+
+impl Growable {
+    pub fn with_capacity(n: usize) -> Growable {
+        Growable(Vec::with_capacity(n))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Room for `n` more elements, growing geometrically (as `Vec` does),
+    /// so a list appended to one element at a time is not copied each time.
+    pub fn reserve(&mut self, n: usize) {
+        self.0.reserve(n);
+    }
+
+    pub fn push(&mut self, v: Value) {
+        use crate::limits::live::LIST_MIN;
+        self.0.push(v);
+        let n = self.0.len();
+        if n > LIST_MIN {
+            crate::limits::live::charge(item_bytes(&self.0[n - 1]));
+        } else if n == LIST_MIN {
+            // The list starts to count: all of it, once.
+            crate::limits::live::charge(large_list_bytes(&self.0));
+        }
+    }
+
+    pub fn extend(&mut self, items: impl IntoIterator<Item = Value>) {
+        for v in items {
+            self.push(v);
+        }
+    }
+
+    /// The list, still counted (its `Drop` credits it).
+    pub fn finish(mut self) -> Vector {
+        Vector(Rc::new(std::mem::take(&mut self.0)))
+    }
+}
+
+/// A list dropped unfinished (an error while building it) leaves the count.
+impl Drop for Growable {
+    fn drop(&mut self) {
+        credit_list(&self.0);
+    }
+}
+
 /// Bytes a list counts for towards the evaluator's memory estimate
 /// (`crate::limits::live`): large lists only, with the small lists and
 /// strings they hold (a path of a million `[x, y, z]` points is 16 bytes
 /// of outer list per point but about 120 with each point's own vector).
 /// Values never change once in a list, so this is the same number when
 /// the list is built and when it is freed.
+#[inline(always)]
 fn list_bytes(items: &[Value]) -> u64 {
-    use crate::limits::live::{LIST_MIN, STR_MIN};
-    if items.len() < LIST_MIN {
+    if items.len() < crate::limits::live::LIST_MIN {
         return 0;
     }
+    large_list_bytes(items)
+}
+
+/// [`list_bytes`] of a list long enough to count. Out of line: every list
+/// is built and dropped through `list_bytes`, and nearly all are short.
+#[inline(never)]
+fn large_list_bytes(items: &[Value]) -> u64 {
+    items.iter().map(item_bytes).sum()
+}
+
+/// One element's share of [`list_bytes`] (of a list long enough to count):
+/// its slot, and a small list or string it holds.
+fn item_bytes(v: &Value) -> u64 {
+    use crate::limits::live::{LIST_MIN, STR_MIN};
     const SLOT: u64 = std::mem::size_of::<Value>() as u64;
     // An `Rc` allocation (counts and header) with the allocator's rounding.
     const BOX: u64 = 64;
-    items
-        .iter()
-        .map(|v| match v {
-            Value::Vector(inner) if inner.len() < LIST_MIN => {
-                SLOT + BOX + SLOT * inner.len() as u64
-            }
-            Value::Str(t) if t.as_bytes().len() < STR_MIN => SLOT + BOX + t.as_bytes().len() as u64,
-            _ => SLOT,
-        })
-        .sum()
+    match v {
+        Value::Vector(inner) if inner.len() < LIST_MIN => SLOT + BOX + SLOT * inner.len() as u64,
+        Value::Str(t) if t.as_bytes().len() < STR_MIN => SLOT + BOX + t.as_bytes().len() as u64,
+        _ => SLOT,
+    }
 }
 
+#[inline(always)]
 fn credit_list(items: &[Value]) {
     let b = list_bytes(items);
     if b > 0 {
@@ -597,5 +680,52 @@ mod tests {
         assert!(!Value::str(b"").to_bool());
         assert!(Value::range(0.0, 1.0, -1.0).to_bool());
         assert!(!Value::vector(vec![]).to_bool());
+    }
+
+    #[test]
+    fn a_list_grown_in_place_is_counted_as_one_built_whole() {
+        // The memory estimate must not drift: a list appended to through
+        // `Growable` counts what `list_bytes` of the final list says, and
+        // leaves the count when freed, however it was built. Unit tests run
+        // on their own threads, so the thread-local count is this test's.
+        use crate::limits::live;
+        live::reset();
+        let item = |i: usize| match i % 3 {
+            0 => Value::Number(i as f64),
+            1 => Value::vector(vec![Value::Number(1.0); 3]),
+            _ => Value::str(b"abc"),
+        };
+        let mut g = Growable::with_capacity(0);
+        let mut v = Vector::empty();
+        for i in 0..3000 {
+            g.push(item(i));
+            if i % 500 == 0 {
+                v = g.finish();
+                assert_eq!(live::get(), list_bytes(&v), "at {i}");
+                g = v.into_growable().expect("the only reference");
+                v = Vector::empty();
+            }
+        }
+        let whole = Vector::from((0..3000).map(item).collect::<Vec<_>>());
+        let one = list_bytes(&whole);
+        assert!(one > 0);
+        assert_eq!(live::get(), 2 * one);
+        drop(whole);
+        let kept = g.finish();
+        assert_eq!(live::get(), one);
+        // Shared, it is not handed out, and it still counts once.
+        let other = kept.clone();
+        let kept = kept.into_growable().expect_err("shared");
+        drop(other);
+        assert_eq!(live::get(), one);
+        drop(kept);
+        drop(v);
+        assert_eq!(live::get(), 0);
+        // Dropped unfinished (an error while building).
+        let mut g = Growable::with_capacity(0);
+        g.extend((0..2000).map(item));
+        assert!(live::get() > 0);
+        drop(g);
+        assert_eq!(live::get(), 0);
     }
 }

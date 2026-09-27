@@ -45,6 +45,10 @@ pub(crate) struct Unit<'a> {
     pub consts: Vec<Option<Value>>,
     /// Used libraries, as unit indices, in search order.
     pub uses: Vec<u32>,
+    /// Per call expression, whether an argument is an accumulator
+    /// (`Evaluator::move_accumulators`): 0 not yet known, 1 no, 2 yes.
+    /// Sized on the first call, so a unit that calls nothing costs nothing.
+    pub accumulates: Vec<u8>,
 }
 
 impl<'a> Unit<'a> {
@@ -58,6 +62,7 @@ impl<'a> Unit<'a> {
             scopes: Vec::new(),
             consts: Vec::new(),
             uses: Vec::new(),
+            accumulates: Vec::new(),
         };
         u.add_scope(&ast.root);
         u.consts = (0..ast.exprs.len())
@@ -152,6 +157,7 @@ pub(crate) struct Known {
     pub condition: Sym,
     pub message: Sym,
     pub empty: Sym,
+    pub concat: Sym,
 }
 
 pub(crate) struct Evaluator<'a> {
@@ -202,6 +208,24 @@ pub(crate) struct Evaluator<'a> {
     /// A limit passed and printed, waiting to be raised at the next check
     /// (as [`Hard`] does for a warning): builtins that find it cannot fail.
     limit: std::cell::Cell<Hard>,
+    /// Whether `hard` or `limit` is [`Hard::Pending`]: the one flag that
+    /// [`Evaluator::check_hard`] tests after every expression. Testing the
+    /// two states there instead (one more load and branch per expression)
+    /// cost measurably on evaluation-bound models.
+    pending: std::cell::Cell<bool>,
+    /// Accumulators moved out of a dying frame for a tail call's arguments
+    /// (see `Evaluator::move_accumulators`), innermost last.
+    pub moved: Vec<Moved>,
+}
+
+/// A variable's value moved out of its frame, to be handed to the one read
+/// of it in a tail call's arguments.
+pub(crate) struct Moved {
+    /// The frame it was bound in: only a read that resolves to this binding
+    /// takes it.
+    pub owner: *const Ctx,
+    pub sym: Sym,
+    pub value: Option<Value>,
 }
 
 /// Resource limits as numbers for the checks on hot paths; `usize::MAX`
@@ -292,6 +316,7 @@ impl<'a> Evaluator<'a> {
             condition: syms.intern("condition"),
             message: syms.intern("message"),
             empty: syms.intern(""),
+            concat: syms.intern("concat"),
         };
         let builtin_fns = crate::builtins::functions::table(&mut syms);
         let builtin_mods = crate::builtins::modules::table(&mut syms, opts.parts);
@@ -356,6 +381,8 @@ impl<'a> Evaluator<'a> {
             caps,
             limit_ticks: 0,
             limit: std::cell::Cell::new(Hard::Off),
+            pending: std::cell::Cell::new(false),
+            moved: Vec::new(),
             opts,
         }
     }
@@ -416,7 +443,7 @@ impl<'a> Evaluator<'a> {
         let e = if g.over_time() {
             Some(g.time_exceeded())
         } else {
-            g.memory_exceeds(crate::limits::live::get(), "the evaluation")
+            g.memory_exceeds(self.live_bytes(), "the evaluation")
         };
         if let Some(e) = e {
             self.limit_exceeded(loc, e);
@@ -444,6 +471,7 @@ impl<'a> Evaluator<'a> {
             Some(e.hint()),
         );
         self.limit.set(Hard::Pending);
+        self.pending.set(true);
     }
 
     /// Whether a list of `n` elements fits the list limit; otherwise the
@@ -479,7 +507,7 @@ impl<'a> Evaluator<'a> {
         let Some(g) = self.opts.guard.clone() else {
             return true;
         };
-        match g.memory_exceeds(crate::limits::live::get().saturating_add(bytes), what) {
+        match g.memory_exceeds(self.live_bytes().saturating_add(bytes), what) {
             None => true,
             Some(e) => {
                 self.limit_exceeded(Some(loc), e);
@@ -492,18 +520,34 @@ impl<'a> Evaluator<'a> {
     /// [`Hard`]). Only the first warning raises it: once thrown, warnings
     /// printed while the error travels up (none, as nothing is evaluated
     /// then) cannot start a second one.
-    #[inline]
+    ///
+    /// This runs after every expression, so the common case is one load
+    /// and one branch, and the rest lives out of line.
+    #[inline(always)]
     pub fn check_hard(&self) -> R<()> {
-        if self.limit.get() == Hard::Pending {
+        if self.pending.get() {
+            return Err(self.raise_pending());
+        }
+        Ok(())
+    }
+
+    /// [`Evaluator::check_hard`]'s slow path: a passed limit first, then
+    /// an armed `--hardwarnings` abort (which stays pending for the next
+    /// check, as it did when both were tested in turn).
+    #[cold]
+    #[inline(never)]
+    fn raise_pending(&self) -> Box<Unwind> {
+        let kind = if self.limit.get() == Hard::Pending {
             self.limit.set(Hard::Thrown);
-            return Err(self.unwind(UnwindKind::Limit));
-        }
-        if self.hard.get() == Hard::Pending {
-            self.hard.set(Hard::Thrown);
-            Err(self.unwind(UnwindKind::HardWarning))
+            UnwindKind::Limit
         } else {
-            Ok(())
-        }
+            debug_assert_eq!(self.hard.get(), Hard::Pending);
+            self.hard.set(Hard::Thrown);
+            UnwindKind::HardWarning
+        };
+        self.pending
+            .set(self.limit.get() == Hard::Pending || self.hard.get() == Hard::Pending);
+        self.unwind(kind)
     }
 
     pub fn push(&mut self, c: Rc<Ctx>) -> usize {
@@ -542,10 +586,17 @@ impl<'a> Evaluator<'a> {
         ctx.vars.borrow_mut().set(s, v, config);
     }
 
+    /// The memory estimate: live lists, strings and messages
+    /// ([`crate::limits::live`]), and every node made so far. Nodes live
+    /// until evaluation ends (a nest of loops can make a billion of them),
+    /// so they are counted from the node counter rather than charged one by
+    /// one on a hot path.
+    fn live_bytes(&self) -> u64 {
+        let nodes = (self.node_index as u64).saturating_sub(1);
+        crate::limits::live::get().saturating_add(nodes.saturating_mul(NODE_BYTES))
+    }
+
     pub fn next_node_index(&mut self) -> usize {
-        // Every node lives until evaluation ends: count it towards the
-        // memory limit (a nest of loops can make a billion of them).
-        crate::limits::live::charge(NODE_BYTES);
         let i = self.node_index;
         self.node_index += 1;
         i
@@ -609,6 +660,7 @@ impl<'a> Evaluator<'a> {
         });
         if severity == Severity::Warning && self.hard.get() == Hard::Armed {
             self.hard.set(Hard::Pending);
+            self.pending.set(true);
         }
     }
 
@@ -862,6 +914,15 @@ impl<'a> Evaluator<'a> {
                 if !self.syms.is_config(s)
                     && let Some(v) = ctx.lookup_lexical(s)
                 {
+                    // A moved accumulator leaves `undef` in its frame (see
+                    // `move_accumulators`), so only an `undef` needs the
+                    // check, which keeps it off the common path.
+                    if v.is_undef()
+                        && !self.moved.is_empty()
+                        && let Some(m) = self.take_moved(ctx, s)
+                    {
+                        return Ok(m);
+                    }
                     return Ok(v);
                 }
                 Ok(self.lookup_variable(
@@ -926,6 +987,12 @@ impl<'a> Evaluator<'a> {
             ExprKind::Vector(items) => {
                 if let Some(c) = &self.units[u as usize].consts[id.0 as usize] {
                     return Ok(c.clone());
+                }
+                if let Some((&first, rest)) = items.split_first()
+                    && let ExprKind::LcEach(x) = ast.expr(first).kind
+                    && !self.is_lc(u, x)
+                {
+                    return self.each_then(u, first, x, rest, ctx);
                 }
                 let mut out = Vec::with_capacity(items.len());
                 for &it in items {
@@ -1163,11 +1230,97 @@ impl<'a> Evaluator<'a> {
         // Checked as the list grows, so a comprehension that would make a
         // billion elements stops at the limit instead of at the end.
         if out.len() > self.caps.list {
-            let loc = self.expr_loc(u, id);
-            self.list_fits(out.len(), loc, "a list");
-            return self.check_hard();
+            return self.list_overflow(u, id, out.len());
         }
         Ok(())
+    }
+
+    /// [`Evaluator::eval_element`]'s list limit, passed: kept out of line
+    /// so the per-element path stays one compare.
+    #[cold]
+    #[inline(never)]
+    fn list_overflow(&mut self, u: u32, id: ExprId, n: usize) -> R<()> {
+        let loc = self.expr_loc(u, id);
+        self.list_fits(n, loc, "a list");
+        self.check_hard()
+    }
+
+    /// `[each x, rest...]`, appending `rest` to `x`'s list in place when
+    /// nothing else holds it (see [`crate::value::Growable`]): a
+    /// tail-recursive `[each acc, n]` is then linear, not quadratic. The
+    /// result is the same as [`Evaluator::eval_element`] on each item.
+    fn each_then(
+        &mut self,
+        u: u32,
+        first: ExprId,
+        x: ExprId,
+        rest: &[ExprId],
+        ctx: &Rc<Ctx>,
+    ) -> R<Value> {
+        self.frames += crate::recursion::COMPREHENSION_FRAMES;
+        let v = self.eval(u, x, ctx);
+        self.frames -= crate::recursion::COMPREHENSION_FRAMES;
+        let mut g = match v? {
+            Value::Vector(v) => match v.into_growable() {
+                Ok(g) => g,
+                Err(v) => return self.each_copied(u, first, Value::Vector(v), rest, ctx),
+            },
+            other => return self.each_copied(u, first, other, rest, ctx),
+        };
+        // The list limit is checked where `eval_element` checks it: after
+        // each element, on the whole list so far.
+        if g.len() > self.caps.list {
+            self.list_overflow(u, first, g.len())?;
+        }
+        let mut tail = Vec::with_capacity(rest.len());
+        for &it in rest {
+            self.eval_element(u, it, ctx, &mut tail)?;
+            let n = g.len() + tail.len();
+            if n > self.caps.list {
+                self.list_overflow(u, it, n)?;
+            }
+        }
+        g.reserve(tail.len());
+        g.extend(tail);
+        Ok(Value::Vector(g.finish()))
+    }
+
+    /// [`Evaluator::each_then`] when `x`'s value is shared or not a list.
+    fn each_copied(
+        &mut self,
+        u: u32,
+        first: ExprId,
+        v: Value,
+        rest: &[ExprId],
+        ctx: &Rc<Ctx>,
+    ) -> R<Value> {
+        let loc = self.expr_loc(u, first);
+        let mut out = Vec::new();
+        self.each_value(v, loc, &mut out);
+        if out.len() > self.caps.list {
+            self.list_overflow(u, first, out.len())?;
+        }
+        out.reserve(rest.len());
+        for &it in rest {
+            self.eval_element(u, it, ctx, &mut out)?;
+        }
+        Ok(Value::vector(out))
+    }
+
+    /// The value moved out for this read of `s`, if it resolves to a
+    /// binding [`Evaluator::move_accumulators`] moved.
+    #[inline(never)]
+    fn take_moved(&mut self, ctx: &Ctx, s: Sym) -> Option<Value> {
+        if !self.moved.iter().any(|m| m.sym == s && m.value.is_some()) {
+            return None;
+        }
+        let owner = ctx.binder(s)?;
+        self.moved
+            .iter_mut()
+            .rev()
+            .find(|m| m.sym == s && m.owner == owner)?
+            .value
+            .take()
     }
 
     /// A list comprehension element holds frames of the frame budget, like
