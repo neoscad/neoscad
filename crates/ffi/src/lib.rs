@@ -2,7 +2,7 @@
 //! small UniFFI API (`docs/audits/macos-prep.md`, steps 8b, 8c and 8e).
 //! Swift sees three objects: `Core`, whose methods mirror the session's
 //! operations (documents: `open`, `update`, `edit`, `close`; `evaluate`,
-//! `render`, `render_into`, `snapshot`, `export`, `cancel` and
+//! `render`, `render_into`, `snapshot`, `picture`, `export`, `cancel` and
 //! `set_limits`; the panels' `check`, `measure`, `export_file` and
 //! `snapshot_file`, in `inspect.rs`), [`Viewport`], a document window's 3D
 //! view, and [`LanguageServer`], its editor's language server
@@ -37,6 +37,7 @@ mod host;
 mod inspect;
 mod language;
 mod layer;
+mod picture;
 mod types;
 mod viewport;
 
@@ -49,6 +50,7 @@ use session::{Run, Session};
 pub use document::*;
 pub use inspect::*;
 pub use language::*;
+pub use picture::*;
 pub use types::*;
 pub use viewport::*;
 

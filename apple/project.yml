@@ -8,6 +8,10 @@
 #                 (Core/Engine.swift), linking the Rust core's XCFramework
 #   NeoSCAD       the app: an NSDocument editor for .scad files, with the
 #                 editor bundle (EditorBundle) in Resources/Editor
+#   NeoSCADQuickLook  sandboxed Quick Look preview extension (picture,
+#                 notes and source; Core/QuickLook.swift), in the app's
+#                 PlugIns
+#   NeoSCADThumbnail  sandboxed Quick Look thumbnail extension, likewise
 #   NeoSCADTests  Swift tests of the core through the bindings
 #   NeoSCADAppTests  tests hosted in the app: documents, the Render command
 name: NeoSCAD
@@ -85,6 +89,10 @@ targets:
         codeSign: true
       # The editor's page and script, built before this target copies them.
       - target: EditorBundle
+      # Embedded in Contents/PlugIns, where Quick Look finds them once the
+      # app has been launched (or registered with lsregister).
+      - target: NeoSCADQuickLook
+      - target: NeoSCADThumbnail
     # The editor bundle into Resources/Editor, where
     # App/Editor/EditorSchemeHandler.swift serves it from. A script rather
     # than a folder reference: Xcode decides whether to copy a folder
@@ -164,6 +172,106 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: App/NeoSCAD.entitlements
+
+  # The Quick Look extensions (docs/audits/macos-prep.md, 8h). Sandboxed:
+  # Quick Look grants each request the one file it is about. Both link
+  # NeoSCADCore from the app's Frameworks (not a copy of their own: the
+  # core is a few hundred MB of static Rust before stripping) through the
+  # run path below, and list the exact imported UTI, because Quick Look
+  # matches exact types, not the parents a type conforms to.
+  #
+  # Checking them: build, launch the app once (or `lsregister -f` it),
+  # then `qlmanage -t -x -s 256 -o DIR FILE.scad` and `qlmanage -p
+  # FILE.scad`; without `-x`, `qlmanage -t` draws in-process and never
+  # reaches the extension. `xcodebuild test` re-signs the embedded
+  # extensions with Xcode's testing exceptions (read-only access to `/`),
+  # and a later `build` does not replace them, so delete
+  # NeoSCAD.app/Contents/PlugIns and build again before checking the
+  # sandbox.
+  NeoSCADQuickLook:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: QuickLook
+        excludes:
+          - Info.plist
+    dependencies:
+      - target: NeoSCADCore
+        embed: false
+      - sdk: QuickLookUI.framework
+    info:
+      path: QuickLook/Info.plist
+      properties:
+        CFBundleDisplayName: NeoSCAD Preview
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHumanReadableCopyright: "GPL-2.0-or-later"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.quicklook.preview
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PreviewProvider
+          NSExtensionAttributes:
+            QLSupportedContentTypes:
+              - org.openscad.scad
+            QLIsDataBasedPreview: true
+            QLSupportsSearchableItems: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.neoscad.NeoSCAD.QuickLook
+        PRODUCT_NAME: NeoSCADQuickLook
+        # Set here rather than with XcodeGen's `entitlements:` key, which
+        # rewrites the file from its `properties:` and drops the comment.
+        CODE_SIGN_ENTITLEMENTS: QuickLook/NeoSCADQuickLook.entitlements
+        ENABLE_APP_SANDBOX: YES
+        # Xcode otherwise adds debugging entitlements to Debug builds,
+        # among them a read-only exception for the whole disk (`/`), so a
+        # Debug extension would read sibling includes that the shipped one
+        # cannot. Off, Debug is sandboxed exactly as Release; the cost is
+        # that a debugger cannot attach without re-signing.
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"
+
+  NeoSCADThumbnail:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Thumbnail
+        excludes:
+          - Info.plist
+    dependencies:
+      - target: NeoSCADCore
+        embed: false
+      - sdk: QuickLookThumbnailing.framework
+    info:
+      path: Thumbnail/Info.plist
+      properties:
+        CFBundleDisplayName: NeoSCAD Thumbnail
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHumanReadableCopyright: "GPL-2.0-or-later"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.quicklook.thumbnail
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ThumbnailProvider
+          NSExtensionAttributes:
+            QLSupportedContentTypes:
+              - org.openscad.scad
+            QLThumbnailMinimumDimension: 16
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.neoscad.NeoSCAD.Thumbnail
+        PRODUCT_NAME: NeoSCADThumbnail
+        # Set here rather than with XcodeGen's `entitlements:` key, which
+        # rewrites the file from its `properties:` and drops the comment.
+        CODE_SIGN_ENTITLEMENTS: Thumbnail/NeoSCADThumbnail.entitlements
+        ENABLE_APP_SANDBOX: YES
+        # Xcode otherwise adds debugging entitlements to Debug builds,
+        # among them a read-only exception for the whole disk (`/`), so a
+        # Debug extension would read sibling includes that the shipped one
+        # cannot. Off, Debug is sandboxed exactly as Release; the cost is
+        # that a debugger cannot attach without re-signing.
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"
 
   NeoSCADTests:
     type: bundle.unit-test

@@ -74,8 +74,8 @@ fn entropy_seed() -> u32 {
 /// because `Offscreen` dropped the instance a window surface needs; one
 /// device serves both now, so the app pays for one set of queues,
 /// pipeline caches and driver allocations. Metal only: this crate is
-/// built for macOS.
-fn offscreen() -> Result<&'static Offscreen, String> {
+/// built for macOS. `picture` draws on it too.
+pub(crate) fn offscreen() -> Result<&'static Offscreen, String> {
     static DEVICE: OnceLock<Result<Offscreen, String>> = OnceLock::new();
     DEVICE
         .get_or_init(|| viewport_gpu().map(|gpu| Offscreen::on_gpu(&gpu)))

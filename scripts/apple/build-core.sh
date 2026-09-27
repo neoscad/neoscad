@@ -36,8 +36,14 @@ inputs=$build/core-inputs.xcfilelist
 xcframework=$build/NeoSCADCore.xcframework
 stamp=$build/core.stamp
 target=aarch64-apple-darwin
-lib=$root/target/$target/release/libneoscad_ffi.a
-bindgen=$root/target/release/uniffi-bindgen-swift
+# Cargo's output directory: `CARGO_TARGET_DIR` when set (several checkouts
+# of the repository can share one, so the dependencies compile once), else
+# the workspace's `target`. It has to be read here and handed to cargo
+# explicitly, because cargo runs under `env -i` below and would otherwise
+# build into `target` while this script looked for the library elsewhere.
+target_dir=${CARGO_TARGET_DIR:-$root/target}
+lib=$target_dir/$target/release/libneoscad_ffi.a
+bindgen=$target_dir/release/uniffi-bindgen-swift
 
 # Every file cargo reads for the core: the workspace's manifests and lock
 # file, each crate's sources and build scripts, the vendored crates and
@@ -81,6 +87,7 @@ cargo_env=(env -i
     TERM="${TERM:-dumb}")
 if [ -n "${RUSTUP_HOME:-}" ]; then cargo_env+=(RUSTUP_HOME="$RUSTUP_HOME"); fi
 if [ -n "${CARGO_HOME:-}" ]; then cargo_env+=(CARGO_HOME="$CARGO_HOME"); fi
+cargo_env+=(CARGO_TARGET_DIR="$target_dir")
 
 "${cargo_env[@]}" cargo build --quiet --release --target "$target" -p neoscad-ffi --lib
 "${cargo_env[@]}" cargo build --quiet --release -p neoscad-uniffi-bindgen

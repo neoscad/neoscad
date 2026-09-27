@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Sandboxed, as Quick Look extensions are (docs/audits/macos-prep.md, 8h):
+  Quick Look grants read access to the file being thumbnailed and nothing
+  else, so a relative include of a sibling file fails and the model is
+  drawn without it (apple/Core/QuickLook.swift). Metal needs no
+  entitlement.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+</dict>
+</plist>
