@@ -238,6 +238,28 @@ echo([for (a = [[1],[2]]) b(2, a)]);"#;
 }
 
 #[test]
+fn a_non_tail_call_never_moves_its_callers_accumulator() {
+    // `len1(concat(acc, [0]))` is not a tail call: it is evaluated in the
+    // context of `t`'s tail-call loop, which reads `acc` again afterwards.
+    // The loop borrows its caller's context for a first call instead of
+    // holding a reference of its own (`Evaluator::eval_call`), so the
+    // reference count that proves a context private has to allow for
+    // that, or this call would take `acc` from its caller. Expected lines
+    // are the nightly's.
+    let src = r#"function len1(a) = len(a);
+function t(n, acc) = n == 0 ? [len1(concat(acc, [0])), acc] : t(n - 1, concat(acc, [n]));
+echo(t(2, [9]));
+function t2(n, acc) = n == 0 ? len1(concat(acc, [0])) + len(acc) : t2(n - 1, concat(acc, [n]));
+echo(t2(2, [9]));
+function t3(n, acc) = n == 0 ? let(x = len1([each acc, 0])) [x, acc] : t3(n - 1, [each acc, n]);
+echo(t3(1, [4]));"#;
+    assert_eq!(
+        run(src),
+        ["ECHO: [4, [9, 2, 1]]", "ECHO: 7", "ECHO: [3, [4, 1]]",]
+    );
+}
+
+#[test]
 fn infinite_recursion_is_an_error_not_a_crash() {
     let (lines, ev) = run_with(
         "function f(n) = 1 + f(n + 1);\necho(f(0));",

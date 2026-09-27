@@ -862,3 +862,6 @@ entry when it is done.
 - The release `wasm_check.wasm` is 44.6 MB with the language server in it
   (the WASM section's 38 MB is from H2); the language server's share was
   not measured. (8e)
+
+- **Evaluator layout sensitivity.** Moving or removing fields in `Evaluator` shifts timings by ±2–5%, which is larger than many micro-optimisations. Group the hot scalar fields (`frames`, `pending`, stack bounds, `limit_ticks`, `hard`/`limit`) into one 64-byte-aligned block, then drop the unused `placeholder` field (worth about −2.5% instructions on fib and −1.4% on isosurface). The unwind-vs-abort gap is still 5–9% after D1 (`docs/audits/unwind.md`). D2 (`extern "C"` drop shims) measured 3–7% slower and was reverted.
+- **Incremental harness RSS cap.** The opt-in full-corpus shard `1/4` exceeds the default 4096 MB cap on HEAD as well (peaks vary by run: 4.2–4.9 GB around `vnf__015`/`v6.scad`). It passes at 8192 MB. Raise the default for full-corpus runs, or reset the session per file.

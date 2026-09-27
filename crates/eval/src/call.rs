@@ -75,10 +75,17 @@ pub(crate) enum Instantiable {
 /// `Evaluator::move_accumulators`): `ctx` is held by the loop's stack slot
 /// and its `cur`, each context above it only by its child. Only plain
 /// contexts (function bodies, `let`) qualify.
-fn private_binder(ctx: &Rc<Ctx>, s: Sym, regions: &[Region]) -> Option<Rc<Ctx>> {
+///
+/// `entry`: `ctx` is the caller's context, which the loop borrows rather
+/// than holding in `cur` (see `Evaluator::eval_call`). Its bar is one
+/// lower, so it is the same "held by exactly one other owner" test that
+/// applied when the loop cloned it; a caller's loop context, held by its
+/// own slot and `cur`, must never pass it, or a non-tail call would move
+/// a value its caller still reads.
+fn private_binder(ctx: &Rc<Ctx>, s: Sym, entry: bool, regions: &[Region]) -> Option<Rc<Ctx>> {
     // The counts include the clone held here.
     let mut c = ctx.clone();
-    let mut expected = 3;
+    let mut expected = if entry { 2 } else { 3 };
     loop {
         if Rc::strong_count(&c) != expected
             || Rc::weak_count(&c) != 0
@@ -389,23 +396,29 @@ impl<'a> Evaluator<'a> {
         // A frame for the frame budget (see `crate::recursion`); tail
         // calls below reuse it, as they reuse the native stack.
         self.frames += crate::recursion::CALL_FRAMES;
-        // The loop's stack slot is replaced by each callee's context.
+        // The loop owns one stack slot, holding the context of the step
+        // being evaluated, and `simplify` pushes each callee's (or `let`'s)
+        // context just above it, where it is visible to the arguments as
+        // in OpenSCAD; the loop then moves it down into the slot rather
+        // than popping it and pushing a clone.
+        //
         // OpenSCAD evaluates the first call in a fresh empty context, which
         // only a `$` lookup (it binds none) or `copy_config` (it has none
         // to copy) could see, so the slot starts with a shared empty
-        // context, `entry` skips the copy, and the call is evaluated
-        // directly in `ctx`. (Pushing `ctx` itself would not do: it need
-        // not be on the stack, and its `$` variables would then become
-        // visible to the arguments.)
+        // context, `entry` (`cur` is `None`) skips the copy, and the call
+        // is evaluated directly in `ctx`, borrowed rather than cloned.
+        // (Pushing `ctx` itself would not do: it need not be on the stack,
+        // and its `$` variables would then become visible to the
+        // arguments.)
         let slot = self.push(self.placeholder.clone());
-        let mut cur = ctx.clone();
-        let mut entry = true;
+        let mut cur: Option<Rc<Ctx>> = None;
         let mut unit = u;
         let mut expr = Some(id);
         let mut call = (u, id);
         let mut depth: u32 = 0;
         let result = loop {
-            match self.simplify(unit, expr, &cur, entry) {
+            let entry = cur.is_none();
+            match self.simplify(unit, expr, cur.as_ref().unwrap_or(ctx), entry) {
                 // A warning from the callee itself (an unknown function, a
                 // builtin's argument check) is raised inside OpenSCAD's
                 // `FunctionCall::evaluate`, so it is traced as its caller.
@@ -425,10 +438,13 @@ impl<'a> Evaluator<'a> {
                     unit = nu;
                     expr = ne;
                     if let Some(nc) = nc {
-                        self.truncate(slot);
-                        self.push(nc.clone());
-                        cur = nc;
-                        entry = false;
+                        // `simplify` left `nc` on top of the stack, just
+                        // above the slot: it replaces the previous step's
+                        // context there, which only this loop could still
+                        // see.
+                        debug_assert_eq!(self.stack.len(), slot + 2);
+                        self.stack.swap_remove(slot);
+                        cur = Some(nc);
                     }
                     if let Some(c) = c {
                         call = c;
@@ -579,12 +595,14 @@ impl<'a> Evaluator<'a> {
                             }
                         }
                     };
-                let body_ctx = self.new_ctx(&defining, CtxKind::Plain, region);
+                // `defining` is this call's own reference (the lookup
+                // cloned it), so it becomes the body's parent as it is.
+                let body_ctx = self.new_ctx_in(defining, CtxKind::Plain, region);
                 self.push(body_ctx.clone());
                 if !entry {
                     self.copy_config(ctx, &body_ctx);
                 }
-                self.call_frame(u, id, args, ctx, loc, fu, params, &defining, &body_ctx)?;
+                self.call_frame(u, id, args, ctx, entry, loc, fu, params, &body_ctx)?;
                 Ok(Step::Next {
                     unit: fu,
                     expr: Some(body),
@@ -607,17 +625,22 @@ impl<'a> Evaluator<'a> {
         id: ExprId,
         args: &'a [Arg],
         ctx: &Rc<Ctx>,
+        entry: bool,
         loc: Loc,
         fu: u32,
         params: &'a [Param],
-        defining: &Rc<Ctx>,
         body_ctx: &Ctx,
     ) -> R<()> {
+        // Defaults are evaluated in the defining context: the body's parent.
+        let defining = body_ctx
+            .parent
+            .as_ref()
+            .expect("a function body context has its defining context as parent");
         // Argument vectors are reused: a call allocates only its context
         // and slots.
         let mut argv = self.arg_pool.pop().unwrap_or_default();
         let r = if self.accumulates(u, id, args) {
-            self.eval_args_moving(u, args, ctx, &mut argv)
+            self.eval_args_moving(u, args, ctx, entry, &mut argv)
         } else {
             self.eval_args_into(u, args, ctx, &mut argv)
         };
@@ -657,10 +680,11 @@ impl<'a> Evaluator<'a> {
         u: u32,
         args: &'a [Arg],
         ctx: &Rc<Ctx>,
+        entry: bool,
         out: &mut Vec<ArgVal>,
     ) -> R<()> {
         let mark = self.moved.len();
-        self.move_accumulators(u, args, ctx);
+        self.move_accumulators(u, args, ctx, entry);
         let r = self.eval_args_into(u, args, ctx, out);
         self.moved.truncate(mark);
         r
@@ -690,7 +714,7 @@ impl<'a> Evaluator<'a> {
         yes
     }
 
-    fn move_accumulators(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>) {
+    fn move_accumulators(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>, entry: bool) {
         for a in args {
             let Some(s) = self.accumulator(u, a.expr) else {
                 continue;
@@ -698,7 +722,7 @@ impl<'a> Evaluator<'a> {
             if self.syms.is_config(s) || self.uses(u, args, s) != 1 {
                 continue;
             }
-            let Some(owner) = private_binder(ctx, s, &self.regions) else {
+            let Some(owner) = private_binder(ctx, s, entry, &self.regions) else {
                 continue;
             };
             let value = owner.take_local(s, &self.regions);

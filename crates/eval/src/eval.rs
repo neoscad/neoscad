@@ -771,6 +771,18 @@ impl<'a> Evaluator<'a> {
         )
     }
 
+    /// [`Self::new_ctx`] taking over a reference the caller owns (a
+    /// callee's defining context), which saves a clone and a drop per call.
+    #[inline]
+    pub fn new_ctx_in(&self, parent: Rc<Ctx>, kind: CtxKind, region: u32) -> Rc<Ctx> {
+        Ctx::new(
+            Some(parent),
+            kind,
+            region,
+            self.regions[region as usize].len(),
+        )
+    }
+
     /// Set a variable by name: in its slot when the context's region has
     /// one, else in the name map.
     pub fn set_var(&mut self, ctx: &Ctx, s: Sym, v: Value) {
