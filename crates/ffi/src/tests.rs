@@ -190,3 +190,67 @@ fn exports_write_the_file() {
     ));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The editor's language server over the core: its own copy of the
+/// document (the session's buffer is the app's), diagnostics of the exact
+/// version it was sent, and the bundled MCAD reachable for hover and
+/// definition although it exists only in memory.
+#[test]
+fn language_server_over_the_core() {
+    let c = core();
+    // The app's copy says one thing; the server's client another.
+    with_text(&c, "cube(1);\n");
+    let ls = c.clone().language_server().unwrap();
+    let send = |m: serde_json::Value| -> Vec<serde_json::Value> {
+        ls.handle(m.to_string())
+            .unwrap()
+            .iter()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect()
+    };
+    let uri = format!("file://{DOC}");
+    let r = send(
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}}),
+    );
+    assert!(
+        r[0]["result"]["capabilities"]["hoverProvider"]
+            .as_bool()
+            .unwrap()
+    );
+    let text = "include <MCAD/units.scad>\nsphre(r = mm);\n";
+    send(
+        serde_json::json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+        "textDocument": {"uri": uri, "languageId": "openscad", "version": 7, "text": text}}}),
+    );
+    // The app's copy is untouched.
+    assert_eq!(c.read_file(DOC.into()).unwrap(), "cube(1);\n");
+    assert!(ls.diagnostics_pending().unwrap());
+    let pubs: Vec<serde_json::Value> = ls
+        .publish_diagnostics()
+        .unwrap()
+        .iter()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    let p = &pubs[0]["params"];
+    assert_eq!(p["version"], 7);
+    assert_eq!(p["diagnostics"][0]["code"], "unknown-module");
+    assert_eq!(
+        p["diagnostics"][0]["data"]["fixes"][0]["edits"][0]["newText"],
+        "sphere"
+    );
+    // Definition into MCAD, whose text the core serves for the viewer.
+    let r = send(
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition", "params": {
+        "textDocument": {"uri": uri}, "position": {"line": 1, "character": 11}}}),
+    );
+    let target = r[0]["result"]["uri"].as_str().unwrap().to_string();
+    assert!(target.ends_with("/libraries/MCAD/units.scad"), "{target}");
+    let path = target.strip_prefix("file://").unwrap();
+    assert!(c.read_file(path.into()).unwrap().contains("mm = 1;"));
+    assert!(
+        c.library_dirs()
+            .unwrap()
+            .iter()
+            .any(|d| path.starts_with(d.as_str()))
+    );
+}

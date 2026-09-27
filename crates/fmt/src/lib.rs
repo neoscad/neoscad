@@ -31,6 +31,7 @@ mod diff;
 mod doc;
 
 pub use diff::unified as unified_diff;
+pub use diff::{LineChange, line_changes};
 
 use std::path::{Path, PathBuf};
 

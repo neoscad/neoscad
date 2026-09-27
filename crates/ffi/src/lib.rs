@@ -1,9 +1,10 @@
 //! The NeoSCAD core for the macOS app: a [`session::Session`] behind a
-//! small UniFFI API (`docs/audits/macos-prep.md`, steps 8b and 8c). Swift
-//! sees two objects: `Core`, whose methods mirror the session's operations
-//! (documents: `open`, `update`, `edit`, `close`; `evaluate`, `render`,
-//! `render_into`, `snapshot`, `export`, `cancel` and `set_limits`), and
-//! [`Viewport`], a document window's 3D view.
+//! small UniFFI API (`docs/audits/macos-prep.md`, steps 8b, 8c and 8e).
+//! Swift sees three objects: `Core`, whose methods mirror the session's
+//! operations (documents: `open`, `update`, `edit`, `close`; `evaluate`,
+//! `render`, `render_into`, `snapshot`, `export`, `cancel` and
+//! `set_limits`), [`Viewport`], a document window's 3D view, and
+//! [`LanguageServer`], its editor's language server (`language.rs`).
 //!
 //! # Rules of the bridge
 //!
@@ -29,6 +30,7 @@
 //!   wrapper), and `cancel` from any thread stops them.
 
 mod host;
+mod language;
 mod layer;
 mod types;
 mod viewport;
@@ -39,6 +41,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use session::{Run, Session};
 
+pub use language::*;
 pub use types::*;
 pub use viewport::*;
 
@@ -81,6 +84,8 @@ pub struct Core {
     session: Session,
     limits: Mutex<session::Limits>,
     test_hooks: bool,
+    /// Analysed library files, shared by every window's language server.
+    lsp_cache: Arc<lsp::Cache>,
 }
 
 impl std::fmt::Debug for Core {
@@ -133,6 +138,7 @@ impl Core {
                 session: Session::new(cfg),
                 limits: Mutex::new(limits),
                 test_hooks: config.test_hooks,
+                lsp_cache: Arc::new(lsp::Cache::new()),
             }))
         })
     }

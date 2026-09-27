@@ -9,8 +9,10 @@
 # `session::Session` taking an edit to an open document (synchronous on
 # wasm32, the second render reusing cached subtrees), `check` and
 # `measure` with named parts, `fmt` on an open document (and again on its
-# output, which must not change) and `neoscad test` on a test file (its
-# tests in turn: no threads on wasm32). Each result also
+# output, which must not change), `neoscad test` on a test file (its
+# tests in turn: no threads on wasm32), and the language server
+# (`crates/lsp`: hover, definition into the bundled MCAD, completion and
+# published diagnostics, as a web worker would drive it). Each result also
 # goes through the renderer's CPU side (scene, colour scheme, camera fit).
 # The renderer's GPU side (wgpu on WebGPU) is only built, not run: it needs
 # a browser and wasm-bindgen glue, which this plain module has neither of.

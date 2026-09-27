@@ -88,6 +88,97 @@ impl SourceFile {
     pub fn slice(&self, start: u32, end: u32) -> &[u8] {
         &self.text[start as usize..end as usize]
     }
+
+    /// Number of lines (a text ending in `\n` has an empty last line).
+    pub fn line_count(&self) -> u32 {
+        self.line_starts().len() as u32
+    }
+
+    /// Byte offset where 1-based `line` starts; the end of the text past
+    /// the last line.
+    pub fn line_start(&self, line: u32) -> u32 {
+        let starts = self.line_starts();
+        match line.checked_sub(1) {
+            Some(i) => starts
+                .get(i as usize)
+                .copied()
+                .unwrap_or(self.text.len() as u32),
+            None => 0,
+        }
+    }
+
+    /// Byte offset where the 1-based `line` ends (before its `\n`).
+    pub fn line_end(&self, line: u32) -> u32 {
+        if line >= 1 && line < self.line_count() {
+            // The next line starts just after this one's `\n`.
+            self.line_start(line + 1) - 1
+        } else {
+            self.text.len() as u32
+        }
+    }
+
+    /// A byte offset as an editor position: the 0-based line and the
+    /// 0-based column in UTF-16 code units, which is how the Language
+    /// Server Protocol and the JavaScript editor count (LSP's default
+    /// `positionEncoding`). Bytes that are not UTF-8 count one unit each,
+    /// as the U+FFFD an editor decodes them to does. An offset inside a
+    /// character counts from that character's start. Lines end at `\n`
+    /// only, as everywhere else here (see `line_starts`).
+    pub fn utf16_position(&self, offset: u32) -> (u32, u32) {
+        let offset = offset.min(self.text.len() as u32);
+        let line = self.line_of(offset);
+        let start = self.line_start(line);
+        let col = utf16_len(&self.text[start as usize..offset as usize]);
+        (line - 1, col)
+    }
+
+    /// The byte offset of an editor position (0-based line, UTF-16
+    /// column): the inverse of [`SourceFile::utf16_position`]. A column
+    /// past the line's end clamps to the end (LSP asks servers to), a line
+    /// past the last to the end of the text, and a column inside a
+    /// surrogate pair to the character's start.
+    pub fn offset_at_utf16(&self, line: u32, col: u32) -> u32 {
+        if line >= self.line_count() {
+            return self.text.len() as u32;
+        }
+        let start = self.line_start(line + 1);
+        let end = self.line_end(line + 1);
+        let bytes = &self.text[start as usize..end as usize];
+        let mut units = 0u32;
+        let mut at = 0usize;
+        for chunk in bytes.utf8_chunks() {
+            for c in chunk.valid().chars() {
+                let n = c.len_utf16() as u32;
+                if units + n > col {
+                    return start + at as u32;
+                }
+                units += n;
+                at += c.len_utf8();
+            }
+            for _ in chunk.invalid() {
+                if units + 1 > col {
+                    return start + at as u32;
+                }
+                units += 1;
+                at += 1;
+            }
+        }
+        start + at as u32
+    }
+}
+
+/// UTF-16 code units of `bytes`, invalid UTF-8 counting one per byte.
+pub fn utf16_len(bytes: &[u8]) -> u32 {
+    bytes
+        .utf8_chunks()
+        .map(|c| {
+            c.valid()
+                .chars()
+                .map(|ch| ch.len_utf16() as u32)
+                .sum::<u32>()
+                + c.invalid().len() as u32
+        })
+        .sum()
 }
 
 /// Every file taking part in one parse: the main file and everything it
@@ -149,5 +240,34 @@ mod tests {
         assert_eq!(f.line_of(6), 3);
         assert_eq!(f.line_of(8), 3);
         assert_eq!(f.line_of(9), 3);
+    }
+
+    #[test]
+    fn utf16_positions_round_trip() {
+        // "é" is two bytes and one unit, "😀" four bytes and two units, and
+        // 0xFF is not UTF-8 (one unit, as its U+FFFD).
+        let f = SourceFile::new("x".into(), b"a\xc3\xa9b\n\xf0\x9f\x98\x80c\xffd\n".to_vec());
+        assert_eq!(f.utf16_position(0), (0, 0));
+        assert_eq!(f.utf16_position(3), (0, 2));
+        assert_eq!(f.utf16_position(5), (1, 0));
+        assert_eq!(f.utf16_position(9), (1, 2));
+        assert_eq!(f.utf16_position(11), (1, 4));
+        assert_eq!(f.utf16_position(13), (2, 0));
+        assert_eq!(f.offset_at_utf16(0, 2), 3);
+        assert_eq!(f.offset_at_utf16(1, 2), 9);
+        // Inside the surrogate pair: the character's start.
+        assert_eq!(f.offset_at_utf16(1, 1), 5);
+        assert_eq!(f.offset_at_utf16(1, 4), 11);
+        // Past the line's end: its end, before the newline.
+        assert_eq!(f.offset_at_utf16(0, 99), 4);
+        assert_eq!(f.offset_at_utf16(2, 0), 13);
+        assert_eq!(f.offset_at_utf16(7, 0), 13);
+        for off in [0, 1, 3, 4, 5, 9, 10, 11, 12, 13] {
+            let (l, c) = f.utf16_position(off);
+            assert_eq!(f.offset_at_utf16(l, c), off, "offset {off}");
+        }
+        let g = SourceFile::new("y".into(), b"ab".to_vec());
+        assert_eq!(g.line_end(1), 2);
+        assert_eq!(g.offset_at_utf16(0, 5), 2);
     }
 }

@@ -38,6 +38,7 @@ nightly with `--backend=cgal` and `--backend=manifold`.
     xcodebuild -project apple/NeoSCAD.xcodeproj -scheme NeoSCAD -derivedDataPath apple/build/DerivedData build|test
     scripts/apple/build-editor.sh                  # CodeMirror bundle -> apple/Editor/web/dist (needs node 18+)
     (cd apple/Editor/web && npm test && npm run corpus)  # grammar tests; corpus = 0 error nodes
+    ./target/release/neoscad lsp --stdio            # language server (crates/lsp), for any LSP editor
     scripts/agent-eval/run.py --help                  # agent-loop eval (uses claude -p; costs credits)
     ./target/release/conformance manifest [--check]  # after updating .reference
     ./target/release/conformance diff --format ast|echo|csg [PATHS]  # vs the nightly
@@ -59,6 +60,10 @@ against the nightly, which is how the harness itself is checked.
   `assets/README.md` for sources and the update procedure.
 - `vendor/manifold-rust` carries a local patch; see `vendor/README.md`.
 
+- Editor positions are UTF-16, converted only through `lang::source`; don't
+  write another conversion.
+- After app tests or launches, make sure no NeoSCAD.app instance is left
+  running.
 - Disk: build output is large. Keep the dev profile's reduced debug info,
   and delete `apple/build/DerivedData` or `target/*` subdirectories freely,
   since they rebuild.

@@ -1,10 +1,11 @@
 // Between the editor's offsets and the core's.
 //
 // CodeMirror, like every JavaScript editor, counts UTF-16 code units; the
-// core (`TextEdit`, diagnostic spans) counts UTF-8 bytes. The two agree on
-// ASCII and nowhere else: "é" is one unit and two bytes, "漢" one and
-// three, "😀" two and four. Every edit from the editor and every
-// diagnostic to it crosses here.
+// core (`TextEdit`) counts UTF-8 bytes. The two agree on ASCII and nowhere
+// else: "é" is one unit and two bytes, "漢" one and three, "😀" two and
+// four. Every edit from the editor crosses here. (Diagnostics reach the
+// editor from the language server, already in UTF-16 positions:
+// `lang::source::SourceFile::utf16_position` in the core.)
 
 import Foundation
 
@@ -69,48 +70,5 @@ public enum TextOffsets {
             throw TextOffsetError.splitsCharacter(offset)
         }
         return i
-    }
-}
-
-/// A text's lines, for turning the core's positions (1-based lines and
-/// 1-based UTF-8 byte columns, `SourceSpan`) into an editor's UTF-16
-/// offsets. Lines end at "\n" only, as the core counts them.
-public struct SourceLines: Sendable {
-    public let text: String
-    /// The UTF-8 offset of each line's first byte.
-    private let starts: [Int]
-
-    public init(_ text: String) {
-        var text = text
-        // Offsets into a string bridged from NSString (UTF-16 inside) cost
-        // a scan each; into native UTF-8, a subtraction.
-        text.makeContiguousUTF8()
-        self.text = text
-        var starts = [0]
-        for (i, byte) in text.utf8.enumerated() where byte == 0x0A {
-            starts.append(i + 1)
-        }
-        self.starts = starts
-    }
-
-    public var lineCount: Int { starts.count }
-
-    /// The UTF-16 offset of `line`:`column` (both 1-based, the column in
-    /// bytes). A column past the line's end is its end, a line past the
-    /// last is the text's end, and a column inside a multi-byte character
-    /// is that character's start.
-    public func utf16Offset(line: Int, column: Int) -> Int {
-        let utf8 = text.utf8
-        guard line >= 1 else { return 0 }
-        guard line <= starts.count else { return text.utf16.count }
-        let lineStart = starts[line - 1]
-        // The line's end, before its "\n".
-        let lineEnd = line < starts.count ? starts[line] - 1 : utf8.count
-        let byte = min(max(lineStart + column - 1, lineStart), lineEnd)
-        var i = utf8.index(utf8.startIndex, offsetBy: byte)
-        while i.samePosition(in: text.unicodeScalars) == nil {
-            i = utf8.index(before: i)
-        }
-        return text.utf16.distance(from: text.utf16.startIndex, to: i)
     }
 }

@@ -39,9 +39,11 @@ comments) · `fmt` (the formatter) · `assets` (bundled fonts and MCAD) ·
 tests can drive it, and hosts `neoscad serve` and the MCP server,
 `neoscad mcp`, in `crates/cli/src/mcp/`) · `conformance` (test harness)
 · `wasm-check` (a wasm32 build of the pipeline run in node by
-`scripts/wasm-check.sh`). Planned, not yet crates: `lsp` (phase 8e,
-`docs/audits/macos-prep.md`) and a wasm-bindgen package for the web app
-(phase 9).
+`scripts/wasm-check.sh`) · `lsp` (the language server over a session,
+transport-agnostic: the app's editor through `crates/ffi`, other editors
+through `neoscad lsp --stdio`) · `ffi` (the app's UniFFI bridge).
+Planned, not yet a crate: a wasm-bindgen package for the web app (phase
+9).
 
 Rule: no rendering or app logic lives in a UI layer. The renderer is Rust;
 the app core API is the `session` API, which `neoscad serve` exposes as
@@ -114,6 +116,13 @@ JSON-RPC (`docs/serve-protocol.md`).
   through a custom URL scheme. CodeMirror owns editing (selection, undo);
   each change crosses the bridge at once, into the document's copy (which
   NSDocument saves) and the core's (`Core.edit`, in UTF-8 offsets).
+  Language features come from `crates/lsp` in-process: the editor's
+  `@codemirror/lsp-client` talks JSON-RPC over the same bridge to a
+  server per window (sharing the session and its cache of analysed
+  library files). Its diagnostics, evaluated from the exact text version
+  the editor sent, are the editor's only lint markers; a render's go to
+  the console. Go to definition opens the user's own files as documents
+  and library files (BOSL2, the bundled MCAD) read-only in a tab.
 - **Web:** the same core compiled to WASM and run in a worker, the same wgpu
   renderer on WebGPU, and CodeMirror 6.
 - **Project definition:** XcodeGen `project.yml`; the generated `.xcodeproj`
@@ -234,7 +243,8 @@ ffmpeg.
    `check`, `measure`, snapshot parts and issues, and a server that
    survives a panicking request). 7c (done): the MCP server and an
    agent-loop eval pilot.
-8. **macOS app.** 8a–8d (done): viewport and CodeMirror editor too. 8a+8b: XcodeGen project, NSDocument app, `crates/ffi` (UniFFI) and the `NeoSCADCore` framework. Plan: `docs/audits/macos-prep.md`.
+8. **macOS app.** 8a–8e (done): viewport, CodeMirror editor and the
+   language server (`crates/lsp`, also `neoscad lsp --stdio`) too. 8a+8b: XcodeGen project, NSDocument app, `crates/ffi` (UniFFI) and the `NeoSCADCore` framework. Plan: `docs/audits/macos-prep.md`.
 9. **WASM web app** (deferred by the owner, 2026-09-26). The library crates
    stay WASM-compatible, checked by `scripts/wasm-check.sh`, so it can be
    picked up later.

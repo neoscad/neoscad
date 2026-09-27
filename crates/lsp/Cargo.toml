@@ -1,0 +1,22 @@
+[package]
+name = "neoscad-lsp"
+description = "The OpenSCAD language server over a NeoSCAD session: diagnostics, hover, completion, signature help, navigation, formatting, outline, rename and fixes, transport-agnostic (JSON messages in and out)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "lsp"
+
+[dependencies]
+docs = { package = "neoscad-docs", path = "../docs" }
+lang = { package = "neoscad-lang", path = "../lang" }
+scadfmt = { package = "neoscad-fmt", path = "../fmt" }
+serde_json.workspace = true
+# Without the GPU, so the server builds for wasm32 (scripts/wasm-check.sh);
+# a host that has it (the app, the command line) turns it on for itself.
+session = { package = "neoscad-session", path = "../session", default-features = false }
+
+[lints]
+workspace = true

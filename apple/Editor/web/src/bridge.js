@@ -2,8 +2,6 @@
 // can test it (test/bridge.test.js). The protocol itself is described in
 // apple/App/Editor/EditorController.swift, the other end.
 
-import { MapMode } from "@codemirror/state";
-
 /// A transaction's changes as the edits Swift applies: `[from, to, insert]`
 /// in UTF-16 offsets, each to the text the previous one left. They come
 /// from the change set's original coordinates, last change first, so an
@@ -24,91 +22,69 @@ export function editKind(tr) {
   return "edit";
 }
 
-/// The document's versions and the changes between them, so positions the
-/// core computed for an older version (diagnostics of a render that
-/// finished after more typing) map to the current text. A load starts a
-/// new line of versions: nothing maps across it.
-export class VersionHistory {
-  constructor(limit = 1000) {
-    this.limit = limit;
+/// The document's versions, so the app applies each change to the text it
+/// was made on: a change carries the version it applies to (`base`) and
+/// the one it makes. A load starts a new line of versions.
+export class Versions {
+  constructor() {
     this.version = 0;
-    this.base = 0;
-    // entries[i] takes version base + i to base + i + 1.
-    this.entries = [];
   }
 
-  /// A new document: no version before this one maps to it.
+  /// A new document: the version it starts at.
   reset() {
     this.version += 1;
-    this.base = this.version;
-    this.entries = [];
     return this.version;
   }
 
   /// A change: the version it makes.
-  push(changes) {
-    this.entries.push(changes);
+  push() {
     this.version += 1;
-    if (this.entries.length > this.limit) {
-      this.entries.shift();
-      this.base += 1;
-    }
     return this.version;
-  }
-
-  /// `pos` at `version` in the current document, or null if that version
-  /// is unknown (too old, or before a load) or the text at `pos` was
-  /// deleted since. `assoc` is the side the position sticks to.
-  map(pos, version, assoc = -1) {
-    if (version < this.base || version > this.version) return null;
-    for (let i = version - this.base; i < this.entries.length; i++) {
-      pos = this.entries[i].mapPos(pos, assoc, MapMode.TrackDel);
-      if (pos === null) return null;
-    }
-    return pos;
-  }
-
-  /// A range at `version` in the current document, or null. A range that
-  /// shrank to nothing keeps its start, so a marker stays visible.
-  mapRange(from, to, version) {
-    const a = this.map(from, version, 1);
-    const b = this.map(to, version, -1);
-    if (a !== null && b !== null) return { from: a, to: Math.max(a, b) };
-    // TrackDel dropped an end whose neighbourhood changed; fall back to
-    // the positions without it, which never fail.
-    if (version < this.base || version > this.version) return null;
-    let x = from;
-    let y = to;
-    for (let i = version - this.base; i < this.entries.length; i++) {
-      x = this.entries[i].mapPos(x, 1);
-      y = this.entries[i].mapPos(y, -1);
-    }
-    return { from: x, to: Math.max(x, y) };
   }
 }
 
-/// Diagnostics from Swift (UTF-16 ranges at `version`) as CodeMirror lint
-/// diagnostics in the current document. `apply(view, from, to, insert)`
-/// makes a fix's edit.
-export function mapDiagnostics(history, version, list, apply) {
+/// CodeMirror's severity of an LSP diagnostic's (1 error ... 4 hint).
+function severityName(n) {
+  return n === 1 ? "error" : n === 2 ? "warning" : n === 3 ? "info" : "hint";
+}
+
+/// The language server's diagnostics (a `publishDiagnostics` list) as
+/// CodeMirror lint diagnostics. `toOffset(position)` turns a position in
+/// the text they were computed on into an offset in the current text, or
+/// null. Each fix the server sent in `data.fixes` becomes an action;
+/// `apply(view, changes)` makes its edits. The edits are kept relative to
+/// the diagnostic's start, because CodeMirror hands an action the
+/// diagnostic's current range, which moves with typing done since.
+export function lintDiagnostics(items, toOffset, apply) {
   const out = [];
-  for (const d of list) {
-    const range = history.mapRange(d.from, d.to, version);
-    if (!range) continue;
+  for (const d of items) {
+    const from = toOffset(d.range.start);
+    const to = toOffset(d.range.end);
+    if (from === null || to === null) continue;
     const diagnostic = {
-      from: range.from,
-      to: range.to,
-      severity: d.severity,
+      from,
+      to: Math.max(from, to),
+      severity: severityName(d.severity ?? 1),
       message: d.message,
     };
-    if (d.source) diagnostic.source = d.source;
+    if (d.code !== undefined) diagnostic.source = String(d.code);
     const actions = [];
-    for (const a of d.actions ?? []) {
-      const r = history.mapRange(a.from, a.to, version);
-      if (!r) continue;
+    for (const fix of d.data?.fixes ?? []) {
+      const edits = [];
+      for (const e of fix.edits ?? []) {
+        const a = toOffset(e.range.start);
+        const b = toOffset(e.range.end);
+        if (a === null || b === null) break;
+        edits.push({ from: a - from, to: b - from, insert: e.newText });
+      }
+      if (edits.length !== (fix.edits ?? []).length || !edits.length) continue;
       actions.push({
-        name: a.name,
-        apply: (view) => apply(view, r.from, r.to, a.insert),
+        name: fix.title,
+        apply: (view, at) =>
+          apply(
+            view,
+            edits.map((e) => ({ from: at + e.from, to: at + e.to, insert: e.insert })),
+          ),
       });
     }
     if (actions.length) diagnostic.actions = actions;
@@ -119,8 +95,9 @@ export function mapDiagnostics(history, version, list, apply) {
 
 /// A `Transport` for @codemirror/lsp-client (its `dist/index.d.ts:170`:
 /// `send`, `subscribe`, `unsubscribe`) over the Swift bridge: `post` sends
-/// a JSON-RPC message to the app, and the app's messages come back through
-/// `receive`. The language server itself is 8e's; this is the channel.
+/// a JSON-RPC message to the app, which hands it to the core's language
+/// server (`crates/lsp`), and the server's messages come back through
+/// `receive`.
 export function lspTransport(post) {
   const handlers = new Set();
   return {

@@ -286,6 +286,108 @@ pub fn run_tooling(files: Arc<MemFs>, src: &[u8], test: bool) -> String {
     out
 }
 
+/// The language server as a web worker would run it: `src` is
+/// `/doc/main.scad` with three markers removed first, `^` where to hover,
+/// `@` where to go to the definition and `|` where to complete. Prints
+/// the hover's signature line, the definition's file (under the library
+/// directory), the first completion labels, and the published
+/// diagnostics (code, line and column).
+pub fn run_lsp(files: Arc<MemFs>, src: &[u8]) -> String {
+    let base: Arc<dyn FileSystem + Send + Sync> = files;
+    let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(base, LIBRARY_DIR));
+    let mut cfg = session::Config::new(fs, LibraryPath(vec![PathBuf::from(LIBRARY_DIR)]));
+    cfg.work_dir = PathBuf::from(DOC_DIR);
+    let s = session::Session::new(cfg);
+    let server = lsp::Server::new(lsp::Options {
+        sync_session: true,
+        limits: None,
+    });
+    let text = String::from_utf8_lossy(src).into_owned();
+    // Each marker's position in the text without the markers (ASCII
+    // texts: characters are UTF-16 units).
+    let mut clean = String::new();
+    let mut at = std::collections::HashMap::new();
+    let (mut line, mut col) = (0u32, 0u32);
+    for ch in text.chars() {
+        if matches!(ch, '^' | '@' | '|') {
+            at.insert(ch, serde_json::json!({"line": line, "character": col}));
+            continue;
+        }
+        clean.push(ch);
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.len_utf16() as u32;
+        }
+    }
+    let uri = "file:///doc/main.scad";
+    let mut id = 0;
+    let mut ask = |method: &str, params: serde_json::Value| -> serde_json::Value {
+        id += 1;
+        let msg =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let out = server.handle(&s, &msg.to_string());
+        out.first()
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .map_or(serde_json::Value::Null, |v| v["result"].clone())
+    };
+    ask("initialize", serde_json::json!({"capabilities": {}}));
+    server.handle(
+        &s,
+        &serde_json::json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "openscad", "version": 1, "text": clean}}})
+        .to_string(),
+    );
+    let mut out = String::new();
+    let pos = |c: char| at.get(&c).cloned().unwrap_or(serde_json::Value::Null);
+    let h = ask(
+        "textDocument/hover",
+        serde_json::json!({"textDocument": {"uri": uri}, "position": pos('^')}),
+    );
+    let sig = h["contents"]["value"]
+        .as_str()
+        .and_then(|v| v.lines().nth(1))
+        .unwrap_or("none");
+    out.push_str(&format!("Hover: {sig}\n"));
+    let d = ask(
+        "textDocument/definition",
+        serde_json::json!({"textDocument": {"uri": uri}, "position": pos('@')}),
+    );
+    let target = d["uri"].as_str().unwrap_or("none");
+    let target = target
+        .strip_prefix(&format!("file://{LIBRARY_DIR}/"))
+        .unwrap_or(target);
+    out.push_str(&format!(
+        "Definition: {target} line {}\n",
+        d["range"]["start"]["line"]
+    ));
+    let c = ask(
+        "textDocument/completion",
+        serde_json::json!({"textDocument": {"uri": uri}, "position": pos('|')}),
+    );
+    let labels: Vec<&str> = c["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| i["label"].as_str())
+        .take(3)
+        .collect();
+    out.push_str(&format!("Completion: {}\n", labels.join(" ")));
+    for m in server.publish_diagnostics(&s) {
+        let v: serde_json::Value = serde_json::from_str(&m).unwrap_or_default();
+        for d in v["params"]["diagnostics"].as_array().into_iter().flatten() {
+            out.push_str(&format!(
+                "Diagnostic: {} {}:{}\n",
+                d["code"].as_str().unwrap_or(""),
+                d["range"]["start"]["line"],
+                d["range"]["start"]["character"]
+            ));
+        }
+    }
+    out
+}
+
 /// What the renderer would draw, without a GPU: the scene's triangles and
 /// outline segments, and the viewer distance `--viewall` fits (the
 /// default camera's). This runs the renderer's CPU side (scene building,
@@ -369,7 +471,8 @@ pub extern "C" fn add_file(name_len: usize) {
 /// `frame_limit` as the frame budget (0 for the default), and as a preview
 /// when `preview` is 1; with `preview` 2, as a session case
 /// ([`run_session`]); with 3, as a check case ([`run_check`]); with 4
-/// formatted and with 5 as a test file ([`run_tooling`]).
+/// formatted and with 5 as a test file ([`run_tooling`]); with 6 through
+/// the language server ([`run_lsp`]).
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
@@ -391,7 +494,9 @@ pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
         n => n,
     };
     OUTPUT.lock().expect("output").clear();
-    let out = if preview == 4 || preview == 5 {
+    let out = if preview == 6 {
+        run_lsp(files, &src)
+    } else if preview == 4 || preview == 5 {
         run_tooling(files, &src, preview == 5)
     } else if preview == 3 {
         run_check(files, &src)
@@ -483,7 +588,9 @@ mod tests {
             let seed = c["seed"].as_u64().unwrap_or(0) as u32;
             let preview = c["preview"].as_bool().unwrap_or(false);
             let src = c["src"].as_str().unwrap().as_bytes();
-            let out = if c["session"] == "fmt" || c["session"] == "test" {
+            let out = if c["session"] == "lsp" {
+                run_lsp(files, src)
+            } else if c["session"] == "fmt" || c["session"] == "test" {
                 run_tooling(files, src, c["session"] == "test")
             } else if c["session"] == "check" {
                 run_check(files, src)

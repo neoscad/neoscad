@@ -19,6 +19,11 @@
 // change schedules a preview after a short pause. Each request supersedes
 // the one before: the session cancels a document's older requests, and the
 // viewport ignores a model from an older request that finishes late.
+//
+// Language features (hover, completion, diagnostics ...) come from the
+// core's language server, which the editor's page talks to through
+// Editor/LanguageClient.swift. Its diagnostics are the editor's lint
+// markers; a render's go to the console.
 
 import AppKit
 import NeoSCADCore
@@ -47,8 +52,6 @@ final class DocumentModel {
     /// The editor (CodeMirror in a web view) and its bridge.
     @ObservationIgnored let editor = EditorController()
     @ObservationIgnored var textReplaced: (() -> Void)?
-    /// The lint markers last sent to the editor (the app tests read them).
-    @ObservationIgnored var diagnostics: [EditorDiagnostic] = []
 
     @ObservationIgnored private var storage = ""
     /// The text's length in UTF-16 units, kept with each edit: counting a
@@ -94,8 +97,6 @@ final class SCADDocument: NSDocument {
     /// the file's, or for an untitled document a path of its own that
     /// exists nowhere on disk.
     private(set) var corePath: String?
-    /// The same path as the core normalised it, which its diagnostics name.
-    private var coreDocumentPath: String?
     /// Whether the core's copy of the text is the document's: edits are
     /// forwarded only then, and the next request sends the whole text
     /// otherwise.
@@ -134,6 +135,32 @@ final class SCADDocument: NSDocument {
                 default: break
                 }
             }
+            editor.documentURI = { [weak self] in self?.languageURI }
+            editor.openLocation = { [weak self] uri, line, character in
+                LocationOpener.open(
+                    uri: uri, line: line, character: character,
+                    from: self?.windowControllers.first?.window)
+            }
+            if case .success(let engine) = CoreService.shared,
+                let server = try? engine.core.languageServer()
+            {
+                editor.connect(server)
+            }
+        }
+    }
+
+    /// The URI the language server knows this document by: its file's, or
+    /// for an untitled document its path of its own (so `include`s of
+    /// libraries resolve, relative ones not).
+    var languageURI: String {
+        URL(fileURLWithPath: fileURL?.path ?? untitledPath).absoluteString
+    }
+
+    /// Saved under a new name (or moved): the language server follows.
+    override var fileURL: URL? {
+        didSet {
+            guard oldValue != fileURL else { return }
+            MainActor.assumeIsolated { model.editor.documentURIChanged() }
         }
     }
 
@@ -269,7 +296,7 @@ final class SCADDocument: NSDocument {
         corePath = path
         if !coreInSync {
             do {
-                coreDocumentPath = try engine.update(path, text: model.text).path
+                try engine.update(path, text: model.text)
                 coreInSync = true
             } catch let e as CoreError {
                 model.report = .failed(e.message)
@@ -285,12 +312,6 @@ final class SCADDocument: NSDocument {
         model.report = .running(mode)
         let model = self.model
         let viewport = model.viewport
-        // The text and the editor version the core renders, for placing
-        // its diagnostics in the editor (which maps them through any
-        // typing done meanwhile).
-        let text = model.text
-        let version = model.editor.version
-        let documentPath = coreDocumentPath ?? path
         renderTask = Task { @MainActor in
             do {
                 let result: RenderResult
@@ -301,31 +322,14 @@ final class SCADDocument: NSDocument {
                     result = try await engine.render(path, mode: mode)
                 }
                 model.report = .rendered(result, mode)
-                Self.publish(result.diagnostics, of: documentPath, text: text, version: version, to: model)
             } catch CoreError.Cancelled {
                 // A newer request took over; it reports instead.
             } catch let e as CoreError {
                 model.report = .failed(e.message)
-                Self.publish([], of: documentPath, text: text, version: version, to: model)
             } catch {
                 model.report = .failed("\(error)")
-                Self.publish([], of: documentPath, text: text, version: version, to: model)
             }
         }
-    }
-
-    /// Show a request's diagnostics as the editor's lint markers.
-    private static func publish(
-        _ diagnostics: [Diagnostic], of path: String, text: String, version: Int?,
-        to model: DocumentModel
-    ) {
-        let list =
-            diagnostics.isEmpty
-            ? [] : EditorDiagnostic.from(diagnostics, path: path, lines: SourceLines(text))
-        model.diagnostics = list
-        // Without a version the editor is being reloaded, and the text these
-        // ranges are in may not be its text.
-        if let version { model.editor.setDiagnostics(list, version: version) }
     }
 
     // MARK: View menu

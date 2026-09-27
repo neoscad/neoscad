@@ -9,7 +9,13 @@
 // saves synchronously). The app replaces the whole text only when the
 // document is read (open, revert), through `load`.
 
-import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
+import {
+  closeBrackets,
+  closeBracketsKeymap,
+  completionStatus,
+  currentCompletions,
+  startCompletion,
+} from "@codemirror/autocomplete";
 import {
   defaultKeymap,
   history,
@@ -27,7 +33,8 @@ import {
   foldKeymap,
   indentOnInput,
 } from "@codemirror/language";
-import { forEachDiagnostic, lintGutter, lintKeymap, setDiagnostics } from "@codemirror/lint";
+import { forEachDiagnostic, lintGutter, lintKeymap } from "@codemirror/lint";
+import { LSPPlugin, formatDocument, showSignatureHelp } from "@codemirror/lsp-client";
 import {
   highlightSelectionMatches,
   openSearchPanel,
@@ -47,13 +54,8 @@ import {
   lineNumbers,
   rectangularSelection,
 } from "@codemirror/view";
-import {
-  VersionHistory,
-  changesToEdits,
-  editKind,
-  lspTransport,
-  mapDiagnostics,
-} from "./bridge.js";
+import { Versions, changesToEdits, editKind, lspTransport } from "./bridge.js";
+import { goToDefinition, languageClient } from "./language.js";
 import { builtinHighlighter } from "./lang/builtins.js";
 import { openscad } from "./lang/openscad.js";
 import { fontTheme, themes } from "./theme.js";
@@ -80,8 +82,23 @@ window.addEventListener("unhandledrejection", (e) => {
 
 // --- State ----------------------------------------------------------------
 
-const versions = new VersionHistory();
+const versions = new Versions();
 const lsp = lspTransport(post);
+
+/// A location in another file, for the app to open.
+function openLocation(uri, line, character) {
+  post({ type: "open", uri, line, character });
+}
+
+// The language server's client: connected at once (the app answers from
+// the start), attached to the document once the app says which file it is.
+const client = languageClient(lsp, openLocation);
+const lspSlot = new Compartment();
+const readOnlySlot = new Compartment();
+/// The document's `file://` URI and whether it is read-only (a library
+/// file), as the last load gave them.
+let documentURI = null;
+let readOnly = false;
 
 const themeSlot = new Compartment();
 const fontSlot = new Compartment();
@@ -101,7 +118,7 @@ const changeReporter = EditorView.updateListener.of((update) => {
     // seen here is the user's (or a fix's) and goes to the app.
     if (!tr.docChanged) continue;
     const base = versions.version;
-    const version = versions.push(tr.changes);
+    const version = versions.push();
     post({
       type: "changes",
       base,
@@ -128,6 +145,8 @@ const appKeys = keymap.of([
 
 function extensions() {
   return [
+    lspSlot.of(documentURI ? client.plugin(documentURI, "openscad") : []),
+    readOnlySlot.of(readOnly ? EditorState.readOnly.of(true) : []),
     // Only "\n" separates lines, so a "\r\n" or lone "\r" in a file stays
     // in the text as it is. CodeMirror's default splits on all three and
     // joins with "\n", which would change the file's bytes on save and make
@@ -192,16 +211,32 @@ function historyState() {
   };
 }
 
-function applyFix(v, from, to, insert) {
-  v.dispatch({ changes: { from, to, insert }, userEvent: "input.fix" });
+/// Poll `get` until it returns something other than null or undefined,
+/// for at most `ms` milliseconds (the tests' helpers wait for the language
+/// server's answers this way).
+function until(get, ms = 5000) {
+  return new Promise((resolve) => {
+    const t0 = performance.now();
+    const tick = () => {
+      const v = get();
+      if (v !== null && v !== undefined) resolve(v);
+      else if (performance.now() - t0 > ms) resolve(null);
+      else setTimeout(tick, 10);
+    };
+    tick();
+  });
 }
 
 // --- What the app calls (callAsyncJavaScript) -----------------------------
 
 window.NeoSCADEditor = {
   /// Replace the document (the file was read): a new state, so the undo
-  /// history starts over, as it does for a reverted NSDocument.
-  load(text) {
+  /// history starts over, as it does for a reverted NSDocument. `uri` is
+  /// the file's (`file://`, for the language server; null for none) and
+  /// `readOnly` marks a library file shown for reading.
+  load(text, uri = null, readOnlyFile = false) {
+    documentURI = uri;
+    readOnly = readOnlyFile;
     view.setState(EditorState.create({ doc: text, extensions: extensions() }));
     versions.reset();
     return historyState();
@@ -212,12 +247,24 @@ window.NeoSCADEditor = {
     return { version: versions.version, text: view.state.doc.toString() };
   },
 
-  /// Lint markers: `list` holds UTF-16 ranges in the text of `version`,
-  /// mapped here through the edits made since. How many are shown.
-  setDiagnostics(version, list) {
-    const diagnostics = mapDiagnostics(versions, version, list, applyFix);
-    view.dispatch(setDiagnostics(view.state, diagnostics));
-    return diagnostics.length;
+  /// The document was saved under another name: the language server
+  /// sees the file close and the new one open.
+  setURI(uri) {
+    documentURI = uri;
+    view.dispatch({
+      effects: lspSlot.reconfigure(uri ? client.plugin(uri, "openscad") : []),
+    });
+    return true;
+  },
+
+  /// Put the cursor at a 0-based line and UTF-16 column (a definition the
+  /// app opened this file for), scrolled into view.
+  reveal(line, character) {
+    const doc = view.state.doc;
+    const l = doc.line(Math.min(Math.max(line + 1, 1), doc.lines));
+    const at = Math.min(l.from + character, l.to);
+    view.dispatch({ selection: { anchor: at }, scrollIntoView: true });
+    return at;
   },
 
   setFontSize(size) {
@@ -237,7 +284,7 @@ window.NeoSCADEditor = {
     return view.hasFocus;
   },
 
-  /// A message from the language server (8e) to the LSP client.
+  /// A message from the language server to the LSP client.
   lspReceive(message) {
     lsp.receive(message);
     return true;
@@ -263,9 +310,113 @@ window.NeoSCADEditor = {
     return true;
   },
 
+  // The language features as a person would trigger them, answered by
+  // the server (for the app's tests): each resolves to what was shown,
+  // or null when nothing came.
+
+  /// Completion at `pos`: the labels offered.
+  async complete(pos) {
+    view.dispatch({ selection: { anchor: pos } });
+    startCompletion(view);
+    return until(() =>
+      completionStatus(view.state) === "active" && currentCompletions(view.state).length
+        ? currentCompletions(view.state).map((c) => c.label)
+        : null,
+    );
+  },
+
+  /// The hover tooltip's text at `pos`, as the pointer resting there shows it.
+  async hover(pos) {
+    const c = view.coordsAtPos(pos);
+    if (!c) return null;
+    const x = c.left + 1;
+    const y = (c.top + c.bottom) / 2;
+    for (const type of ["mouseenter", "mousemove"]) {
+      view.contentDOM.dispatchEvent(
+        new MouseEvent(type, { clientX: x, clientY: y, bubbles: true }),
+      );
+    }
+    return until(() => document.querySelector(".cm-tooltip-hover")?.textContent || null);
+  },
+
+  /// The signature help shown at `pos`.
+  async signature(pos) {
+    view.dispatch({ selection: { anchor: pos } });
+    showSignatureHelp(view);
+    return until(() => document.querySelector(".cm-lsp-signature-tooltip")?.textContent || null);
+  },
+
+  /// A key pressed in the editor as WebKit would deliver it to the page
+  /// (`init` as for a KeyboardEvent): whether a binding took it.
+  key(init) {
+    view.focus();
+    const e = new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true });
+    // The constructor ignores the legacy `keyCode`, which CodeMirror reads
+    // to find the key under an Option combination (⌥⇧F types "Ï").
+    if (init.keyCode) Object.defineProperty(e, "keyCode", { get: () => init.keyCode });
+    return !view.contentDOM.dispatchEvent(e);
+  },
+
+  /// Go to the definition of the name at `pos` (F12).
+  definition(pos) {
+    view.dispatch({ selection: { anchor: pos } });
+    return goToDefinition(view, openLocation);
+  },
+
+  /// Format the document (Shift-Alt-F): the text once it changed.
+  async format() {
+    const before = view.state.doc.toString();
+    formatDocument(view);
+    return until(() => (view.state.doc.toString() !== before ? view.state.doc.toString() : null));
+  },
+
+  /// Time `count` completion requests at `completeAt` and hover requests
+  /// at `hoverAt` (after one of each to warm up), each from the page's
+  /// client through the app to the server and back: milliseconds, p50 and
+  /// p95 (WebKit's clock has 1 ms resolution).
+  async benchmarkLanguage(completeAt, hoverAt, count) {
+    const plugin = LSPPlugin.get(view);
+    if (!plugin) return null;
+    client.sync();
+    const doc = { uri: plugin.uri };
+    const params = { textDocument: doc, position: plugin.toPosition(hoverAt) };
+    const completion = {
+      textDocument: doc,
+      position: plugin.toPosition(completeAt),
+      context: { triggerKind: 1 },
+    };
+    await client.request("textDocument/completion", completion);
+    await client.request("textDocument/hover", params);
+    const c = [];
+    const h = [];
+    for (let i = 0; i < count; i++) {
+      let t0 = performance.now();
+      await client.request("textDocument/completion", completion);
+      c.push(performance.now() - t0);
+      t0 = performance.now();
+      await client.request("textDocument/hover", params);
+      h.push(performance.now() - t0);
+    }
+    const at = (v, q) => v.sort((a, b) => a - b)[Math.min(v.length - 1, Math.floor(q * v.length))];
+    return {
+      completion: { p50: at(c, 0.5), p95: at(c, 0.95) },
+      hover: { p50: at(h, 0.5), p95: at(h, 0.95) },
+    };
+  },
+
+  /// Resolves once the language server answered `initialize`.
+  async lspReady() {
+    await client.initializing;
+    return client.serverCapabilities !== null;
+  },
+
   state() {
     let diagnostics = 0;
-    forEachDiagnostic(view.state, () => diagnostics++);
+    const fixes = [];
+    forEachDiagnostic(view.state, (d) => {
+      diagnostics++;
+      for (const a of d.actions ?? []) fixes.push(a.name);
+    });
     const sel = view.state.selection.main;
     return {
       ...historyState(),
@@ -274,8 +425,12 @@ window.NeoSCADEditor = {
       focused: view.hasFocus,
       selection: [sel.anchor, sel.head],
       diagnostics,
+      fixes,
       dark: darkQuery.matches,
       fontSize,
+      uri: documentURI,
+      readOnly,
+      lsp: client.serverCapabilities !== null,
     };
   },
 

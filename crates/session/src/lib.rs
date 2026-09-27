@@ -231,6 +231,18 @@ pub struct Run {
     /// This request's resource limits instead of [`Config::limits`] (the
     /// command line's requests to a server are unlimited, as it is).
     pub limits: Option<Limits>,
+    /// The main file's text for this request, instead of what the file
+    /// system or the document's buffer holds. A language server evaluates
+    /// the exact version its client sent, which can be a keystroke ahead
+    /// of or behind the buffer another client (the app's own edit path)
+    /// keeps; its diagnostics would otherwise land on the wrong text.
+    /// Other files still read through the session.
+    pub text: Option<Arc<[u8]>>,
+    /// A flag the host sets to stop this request, besides the session's
+    /// own superseding. A language server's evaluation does not supersede
+    /// (it must not cancel the app's render of the same document, nor be
+    /// cancelled by it), so it stops its own stale runs through this.
+    pub interrupt: Option<Arc<AtomicBool>>,
 }
 
 impl std::fmt::Debug for Run {
@@ -266,6 +278,8 @@ impl Run {
             parts: false,
             entry: None,
             limits: None,
+            text: None,
+            interrupt: None,
         }
     }
 }
@@ -881,7 +895,10 @@ impl Session {
             self.supersede(doc);
         }
         let id = self.ids.fetch_add(1, Ordering::Relaxed) + 1;
-        let flag = Arc::new(AtomicBool::new(false));
+        let flag = run
+            .interrupt
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         let limits = run.limits.unwrap_or(self.cfg.limits);
         let limits = (!limits.is_none()).then(|| {
             Arc::new(eval::limits::Guard::new(
@@ -1118,7 +1135,11 @@ impl Session {
         let t = self.now();
         let (fs, libs) = (&*self.fs, &self.cfg.libs);
         let paths = pipe.paths.clone();
-        let Ok(mut text) = fs.read(&paths.path) else {
+        let read = match &run.text {
+            Some(t) => Ok(t.to_vec()),
+            None => fs.read(&paths.path),
+        };
+        let Ok(mut text) = read else {
             pipe.con.print_error_line(
                 DiagCode::InputNotFound,
                 format!("Can't open input file '{}'!\n", paths.display).as_bytes(),

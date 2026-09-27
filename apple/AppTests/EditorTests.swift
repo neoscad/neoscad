@@ -1,7 +1,8 @@
 // The editor end to end, hosted in the app: a document window with
 // CodeMirror loaded from the app's own scheme, edits made in the page and
 // carried over the bridge into the document's copy and the core, undo
-// against NSDocument's edited state, diagnostics as lint markers, keys
+// against NSDocument's edited state, the language server's diagnostics as
+// lint markers, keys
 // sent through NSApp as the keyboard would, and input method calls.
 //
 // These tests put windows on screen: focus, keys and layout need one.
@@ -42,6 +43,28 @@ func openDocument(_ text: String, file: URL? = nil) async throws -> SCADDocument
     let editor = doc.model.editor
     try await waitUntil("the editor is ready") { editor.isReady && editor.version != nil }
     return doc
+}
+
+/// The text under each warning or error marker, once there are `count`.
+@MainActor
+func lintMarkers(_ doc: SCADDocument, count: Int) async throws -> [String] {
+    var shown: [String] = []
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(20)
+    while clock.now < deadline {
+        shown =
+            try await doc.model.editor.call(
+                """
+                let out = [];
+                document.querySelectorAll('.cm-lintRange-warning, .cm-lintRange-error')
+                    .forEach(e => out.push(e.textContent));
+                return out;
+                """) as? [String] ?? []
+        if shown.count == count { return shown }
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    Issue.record("timed out waiting for \(count) lint markers (have \(shown))")
+    return shown
 }
 
 @MainActor
@@ -172,47 +195,29 @@ func focusEditor(_ doc: SCADDocument) async throws -> NSWindow {
     @Test func diagnosticsBecomeLintMarkersAtTheirUTF16Offsets() async throws {
         // "é" is one UTF-16 unit and two bytes, so the core's byte column
         // of `cub` is one more than its UTF-16 column: a marker placed by
-        // bytes would start one character late.
+        // bytes would start one character late. The markers come from the
+        // language server, without a render.
         let text = "cube(1);\nx = \"é\"; cub(2);\n"
         let doc = try await openDocument(text)
-        doc.previewDocument(nil)
-        await doc.renderTask?.value
-        let d = try #require(doc.model.diagnostics.first, "\(doc.model.report)")
-        #expect(d.source == "unknown-module")
-        #expect(d.severity == "warning")
-        let cub = (text as NSString).range(of: "cub(2)")
-        #expect(d.from == cub.location)
-        #expect(d.to >= d.from + 3 && d.to <= cub.location + cub.length + 1)
-        #expect(d.message.contains("cub"))
-        try await waitUntil("the editor shows it") {
-            doc.model.diagnostics.count == 1
-        }
+        let shown = try await lintMarkers(doc, count: 1)
+        #expect(shown == ["cub(2);"])
         let state = try await editorState(doc)
-        #expect(state["diagnostics"] as? Int == 1)
+        #expect(state["fixes"] as? [String] == ["Change 'cub' to 'cube'"])
         doc.close()
     }
 
-    @Test func diagnosticsMapThroughTypingDoneWhileRendering() async throws {
+    @Test func diagnosticsFollowTypingDoneMeanwhile() async throws {
         let doc = try await openDocument("cub(1);\n")
-        let editor = doc.model.editor
-        // Hold the version the render sees, type, then publish the old
-        // version's diagnostics: the marker follows the text.
-        let version = try #require(editor.version)
+        #expect(try await lintMarkers(doc, count: 1) == ["cub(1);"])
+        // Typing above the marker moves it with its text, and the next
+        // publication (of the new version) puts it in the same place.
+        let before = doc.model.editor.languageClient?.publications ?? 0
         try await editInPage(doc, from: 0, to: 0, insert: "// 😀\n")
-        let n = try await editor.call(
-            "return NeoSCADEditor.setDiagnostics(version, list)",
-            [
-                "version": version,
-                "list": [["from": 0, "to": 3, "severity": "warning", "message": "m"]],
-            ])
-        #expect(n as? Int == 1)
-        let shown = try await editor.call(
-            """
-            let out = [];
-            document.querySelectorAll('.cm-lintRange-warning').forEach(e => out.push(e.textContent));
-            return out;
-            """)
-        #expect(shown as? [String] == ["cub"])
+        #expect(try await lintMarkers(doc, count: 1) == ["cub(1);"])
+        try await waitUntil("the new version's diagnostics arrive") {
+            (doc.model.editor.languageClient?.publications ?? 0) > before
+        }
+        #expect(try await lintMarkers(doc, count: 1) == ["cub(1);"])
         doc.close()
     }
 
@@ -415,6 +420,17 @@ struct EditorKeyTests {
         let window = try await focusEditor(doc)
         press("c", keyCode: 8, in: window)
         try await waitUntil("the key arrives") { doc.model.text == "c" }
+        doc.close()
+    }
+
+    @Test func optionShiftFFormatsThroughNSApp() async throws {
+        let doc = try await openDocument("cube( 1 );\n")
+        let window = try await focusEditor(doc)
+        let ready = try await doc.model.editor.call("return await NeoSCADEditor.lspReady()")
+        #expect(ready as? Bool == true)
+        // ⌥⇧F types "Ï" on a US layout; the editor must format, not type.
+        press("Ï", keyCode: 3, modifiers: [.option, .shift], in: window)
+        try await waitUntil("the document is formatted") { doc.model.text == "cube(1);\n" }
         doc.close()
     }
 

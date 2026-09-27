@@ -24,6 +24,7 @@ lang = { package = "neoscad-lang", path = "../lang" }
 eval = { package = "neoscad-eval", path = "../eval" }
 geom = { package = "neoscad-geom", path = "../geom" }
 io = { package = "neoscad-io", path = "../io" }
+lsp = { package = "neoscad-lsp", path = "../lsp" }
 render = { package = "neoscad-render", path = "../render" }
 session = { package = "neoscad-session", path = "../session" }
 serde_json.workspace = true

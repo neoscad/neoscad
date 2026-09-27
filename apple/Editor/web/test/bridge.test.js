@@ -1,17 +1,17 @@
 // The bridge's logic: change sets become sequential edits the app can apply
-// in order, versions map late diagnostics to the current text, and the LSP
-// transport routes both ways.
+// in order, the language server's diagnostics become lint markers with
+// their fixes, and the LSP transport routes both ways.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ChangeSet, EditorState, Text } from "@codemirror/state";
 import { history, undo } from "@codemirror/commands";
 import {
-  VersionHistory,
+  Versions,
   changesToEdits,
   editKind,
+  lintDiagnostics,
   lspTransport,
-  mapDiagnostics,
 } from "../src/bridge.js";
 
 /// What the app does with the edits: each applied to the previous result.
@@ -54,59 +54,56 @@ test("undo and redo are reported as such", () => {
   assert.equal(editKind(undone), "undo");
 });
 
-test("positions of an older version map to the current text", () => {
-  const h = new VersionHistory();
-  const v0 = h.reset();
-  // "abc def" -> insert "XX" at 0 -> delete "def"
-  const c1 = ChangeSet.of([{ from: 0, insert: "XX" }], 7);
-  const v1 = h.push(c1);
-  const c2 = ChangeSet.of([{ from: 6, to: 9 }], 9);
-  h.push(c2);
-  // "abc" at v0 is 0..3; now 2..5.
-  assert.deepEqual(h.mapRange(0, 3, v0), { from: 2, to: 5 });
-  // "def" at v1 (6..9) was deleted: the range collapses to where it was.
-  assert.deepEqual(h.mapRange(6, 9, v1), { from: 6, to: 6 });
-  // Nothing maps across a load, or from the future.
-  const v3 = h.reset();
-  assert.equal(h.mapRange(0, 1, v0), null);
-  assert.equal(h.map(0, v3 + 1), null);
+test("versions count changes and restart at a load", () => {
+  const v = new Versions();
+  const a = v.reset();
+  assert.equal(v.push(), a + 1);
+  assert.equal(v.push(), a + 2);
+  assert.equal(v.reset(), a + 3);
 });
 
-test("the history forgets its oldest versions past its limit", () => {
-  const h = new VersionHistory(2);
-  const v0 = h.reset();
-  for (let i = 0; i < 3; i++) h.push(ChangeSet.of([{ from: 0, insert: "x" }], i));
-  assert.equal(h.map(0, v0), null);
-  // Each push inserted before position 0; a position that sticks right
-  // moves past both insertions still known.
-  assert.equal(h.map(0, v0 + 1, 1), 2);
-});
-
-test("diagnostics map with their fixes", () => {
-  const h = new VersionHistory();
-  const v = h.reset();
-  h.push(ChangeSet.of([{ from: 0, insert: "// x\n" }], 10));
+test("server diagnostics become lint markers with their fixes", () => {
+  // Positions are {line, character}; this stand-in maps them into a text
+  // where two characters were typed at the start since the server saw it.
+  const lines = ["cub(1);", "x = zz;"];
+  const toOffset = (p) => {
+    if (p.line >= lines.length) return null;
+    let at = 0;
+    for (let i = 0; i < p.line; i++) at += lines[i].length + 1;
+    return at + p.character + 2;
+  };
   const applied = [];
-  const out = mapDiagnostics(
-    h,
-    v,
+  const out = lintDiagnostics(
     [
       {
-        from: 0,
-        to: 4,
-        severity: "warning",
-        message: "unknown module",
-        source: "unknown-module",
-        actions: [{ name: "cube", from: 0, to: 4, insert: "cube" }],
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 7 } },
+        severity: 2,
+        code: "unknown-module",
+        message: "Ignoring unknown module 'cub'\ndid you mean 'cube'?",
+        data: {
+          fixes: [
+            {
+              title: "Change 'cub' to 'cube'",
+              edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "cube" }],
+            },
+          ],
+        },
       },
+      { range: { start: { line: 1, character: 4 }, end: { line: 1, character: 6 } }, severity: 1, message: "e" },
+      // A position that no longer exists is dropped.
+      { range: { start: { line: 9, character: 0 }, end: { line: 9, character: 1 } }, message: "gone" },
     ],
-    (_view, from, to, insert) => applied.push([from, to, insert]),
+    toOffset,
+    (_view, changes) => applied.push(changes),
   );
-  assert.equal(out.length, 1);
-  assert.deepEqual([out[0].from, out[0].to], [5, 9]);
-  assert.equal(out[0].source, "unknown-module");
-  out[0].actions[0].apply(null);
-  assert.deepEqual(applied, [[5, 9, "cube"]]);
+  assert.equal(out.length, 2);
+  assert.deepEqual([out[0].from, out[0].to, out[0].severity, out[0].source], [2, 9, "warning", "unknown-module"]);
+  assert.deepEqual([out[1].from, out[1].to, out[1].severity], [14, 16, "error"]);
+  assert.equal(out[0].actions[0].name, "Change 'cub' to 'cube'");
+  // The action gets the marker's current start (it moved by 3 more).
+  out[0].actions[0].apply(null, 5, 12);
+  assert.deepEqual(applied, [[{ from: 5, to: 8, insert: "cube" }]]);
+  assert.equal(out[1].actions, undefined);
 });
 
 test("the LSP transport routes messages both ways", () => {

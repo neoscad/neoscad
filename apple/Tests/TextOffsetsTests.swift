@@ -62,24 +62,6 @@ import Testing
         #expect(text == "a😀b")
     }
 
-    @Test func diagnosticPositionsBecomeUTF16Offsets() {
-        let lines = SourceLines("x = \"漢字\";\ncub😀e(1);\n")
-        #expect(lines.lineCount == 3)
-        // Line 1, byte column 6 is the first "漢" (after `x = "`).
-        #expect(lines.utf16Offset(line: 1, column: 6) == 5)
-        // Byte column 9 is "字" (3 bytes on), UTF-16 offset 6.
-        #expect(lines.utf16Offset(line: 1, column: 9) == 6)
-        // A column inside "字" rounds to its start.
-        #expect(lines.utf16Offset(line: 1, column: 10) == 6)
-        // Line 2 starts after "x = \"漢字\";\n" (10 units); byte column 8
-        // is just after the 4-byte emoji, 2 units on from byte column 4.
-        #expect(lines.utf16Offset(line: 2, column: 4) == 13)
-        #expect(lines.utf16Offset(line: 2, column: 8) == 15)
-        // Past the line's end: its end; past the last line: the text's end.
-        #expect(lines.utf16Offset(line: 1, column: 99) == 9)
-        #expect(lines.utf16Offset(line: 9, column: 1) == lines.text.utf16.count)
-    }
-
     /// The conversion's edits, applied by the core, give the same text the
     /// editor has: the property the app relies on.
     @Test func theCoreAppliesTheConvertedEdits() throws {

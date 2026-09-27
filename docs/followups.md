@@ -605,9 +605,6 @@ entry when it is done.
   the 3D view; they still work with the view focused. Undo and Redo work
   only while the editor has focus: elsewhere the window's own undo manager
   answers the menu, and it has nothing to undo. (8d)
-- Lint markers show only diagnostics about the document itself; those
-  about an included file stay in the console. The editor could mark the
-  `include` line instead. (8d)
 - The builtin names are coloured by name (OpenSCAD's editor's lists), so a
   user module called `cube` is coloured as the primitive; OpenSCAD's editor
   does the same. The grammar accepts non-ASCII identifiers, which OpenSCAD
@@ -618,8 +615,58 @@ entry when it is done.
   holds only the bundle (the Content-Security-Policy admits no other
   script and no network), so there is nothing to isolate the bridge from.
   Revisit if the page ever shows content from elsewhere. (8d)
-- The language server transport (`lspTransport` in `src/bridge.js`, the
-  `lsp` message) is in place, but no `LSPClient` is created and the app
-  answers every request with "method not found" until 8e's server. (8d)
 - Building the app needs node 18 or newer (`scripts/apple/build-editor.sh`
   finds nvm's and Homebrew's), and the network once, for `npm ci`. (8d)
+
+## Language server
+- Diagnostics are the session's parse and evaluation, not the geometry
+  stage: warnings only a render prints (the kernels', `render()`'s) reach
+  the console, not the editor's markers. In the app each pause in typing
+  now evaluates the document twice, once for the preview and once for the
+  diagnostics; the preview's evaluation could publish when its text is the
+  version the editor last sent. (8e)
+- Name resolution is lexical from the syntax tree (`crates/lsp/src/index.rs`,
+  `world.rs`), not the evaluator's: an `include` inside a module body is
+  treated as a top-level one; an empty `include <>` does not reuse the
+  previous name as OpenSCAD's scanner does; among included files a module
+  defined twice resolves to the file asked from, then the document, then
+  the includes in the order they were found (OpenSCAD's last definition
+  wins); `use`d libraries are searched last `use` first. (8e)
+- References and rename see the document and what it includes, not the
+  files that include it (there is no workspace index): renaming a
+  top-level name of a file other files include can break them. Rename
+  refuses whenever an included file defines or uses the name, and renames
+  a parameter's named arguments only in calls within the document. (8e)
+- Completion: no path completion inside `include <...>` and `use <...>`;
+  no `completionItem/resolve` (each item carries its one-line summary);
+  more than 400 matches are cut and marked incomplete. (8e)
+- Hover shows a top-level constant's value when it folds from the syntax
+  (literals, vectors, arithmetic, conditionals, other constants); function
+  calls and `$` variables show only the expression. (8e)
+- Formatting follows `.neoscad-fmt.toml`, not the client's `tabSize` and
+  `insertSpaces`. Range formatting formats the top-level statements the
+  range touches, as a file of their own (the formatter lays out whole
+  programs). (8e)
+- Positions count lines at `\n` only, as the core and the app's editor do;
+  a client that also breaks lines at a lone `\r` (VS Code) disagrees on a
+  file with classic Mac line endings. UTF-16 is the only position
+  encoding offered. (8e)
+- `$/cancelRequest` is ignored: requests are answered synchronously in
+  milliseconds; only diagnostics' evaluations stop (on a newer change or
+  the host's cancel). (8e)
+- The app has keys but no menu items for the language features: Format
+  Document (⌥⇧F), Go to Definition (F12, ⌘-click), Rename (F2) and Find
+  References (⇧F12). ⌘-click now goes to the definition and ⌥-click adds
+  a cursor (in 8d ⌘-click added one), as in Xcode and VS Code. (8e)
+- Library viewers (read-only tabs for BOSL2, MCAD and other library files)
+  are not documents: they are not restored after a relaunch, and one
+  showing the bundled MCAD, which exists only in memory, has no proxy
+  icon. A library file changed on disk while shown is not reloaded. (8e)
+- Markers appear about 0.65 s after typing stops plus the evaluation: the
+  CodeMirror client syncs 500 ms after the last change and the app waits
+  150 ms more for messages to pause (`LanguageClient.debounce`). (8e)
+- `neoscad lsp --stdio` has no page on setting it up in VS Code, Zed,
+  Neovim or Helix. (8e)
+- The release `wasm_check.wasm` is 44.6 MB with the language server in it
+  (the WASM section's 38 MB is from H2); the language server's share was
+  not measured. (8e)

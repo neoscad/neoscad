@@ -25,6 +25,7 @@
 //! ([`snapshot`]): a contact sheet of a model for agents. `neoscad serve`
 //! ([`serve`]) keeps a session's caches warm behind JSON-RPC; exports and
 //! snapshots use a running one automatically ([`client`], [`delegate`]).
+//! `neoscad lsp --stdio` ([`lsp`]) is the language server for editors.
 //! `--format json` prints one JSON object for the run ([`report`]).
 //!
 //! Cold start is a tracked benchmark (docs/architecture.md, "Agent surface"),
@@ -40,6 +41,7 @@ mod format;
 mod host;
 mod info;
 mod limits;
+mod lsp;
 mod mcp;
 mod measure;
 mod modeltest;
@@ -298,6 +300,10 @@ fn main() -> ExitCode {
         Some(a) if a == "docs" => {
             let rest: Vec<std::ffi::OsString> = args.collect();
             return ExitCode::from(docs::main(rest));
+        }
+        Some(a) if a == "lsp" => {
+            let rest: Vec<std::ffi::OsString> = args.collect();
+            return ExitCode::from(lsp::main(rest));
         }
         Some(a) if a == "mcp" => {
             let rest: Vec<std::ffi::OsString> = args.collect();

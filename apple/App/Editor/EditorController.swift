@@ -27,14 +27,24 @@
 //   {type: "command", name}          a key the app's menu owns ("preview",
 //                                    "render")
 //   {type: "lsp", message}           a JSON-RPC message for the language
-//                                    server (8e)
+//                                    server (LanguageClient.swift)
+//   {type: "open", uri, line, character}
+//                                    go to a definition in another file
+//                                    (0-based line, UTF-16 column)
 //   {type: "log", level, message}    a script error, for the app's log
 //
 // Swift -> JS through `callAsyncJavaScript` on `window.NeoSCADEditor`:
-// `load(text)`, `text()`, `setDiagnostics(version, list)`,
-// `setFontSize(px)`, `undo()`, `redo()`, `selectAll()`, `openSearch()`,
-// `focus()`, `lspReceive(message)`, and `edit`, `select`, `state` and
-// `benchmarkTyping` for tests.
+// `load(text, uri, readOnly)`, `text()`, `setURI(uri)`,
+// `reveal(line, character)`, `setFontSize(px)`, `undo()`, `redo()`,
+// `selectAll()`, `openSearch()`, `focus()`, `lspReceive(message)`, and
+// for tests `edit`, `select`, `state`, `benchmarkTyping`, and `complete`,
+// `hover`, `signature`, `definition`, `format` and `lspReady`, which
+// trigger the language features as a person would.
+//
+// Diagnostics. The lint markers come from the language server only
+// (`textDocument/publishDiagnostics`, handled in the page): it evaluates
+// the exact text version the editor sent it, so the markers always fit
+// the text, and their fixes come with them. Renders report to the console.
 //
 // Versions keep the copies in step. The editor numbers its texts; a change
 // is applied here only if its `base` is the version this copy holds. After
@@ -61,40 +71,6 @@ enum EditKind: String {
     }
 }
 
-/// A lint marker for the editor: a range in the UTF-16 offsets of the text
-/// at some editor version.
-struct EditorDiagnostic: Equatable {
-    var from: Int
-    var to: Int
-    /// CodeMirror's: "error", "warning", "info" or "hint".
-    var severity: String
-    var message: String
-    /// The diagnostic's code, e.g. `unknown-module`.
-    var source: String?
-    /// Fixes: a name and the replacement.
-    var actions: [(name: String, edit: UTF16Edit)] = []
-
-    static func == (a: Self, b: Self) -> Bool {
-        a.from == b.from && a.to == b.to && a.severity == b.severity
-            && a.message == b.message && a.source == b.source
-            && a.actions.map(\.name) == b.actions.map(\.name)
-            && a.actions.map(\.edit) == b.actions.map(\.edit)
-    }
-
-    var json: [String: Any] {
-        var d: [String: Any] = [
-            "from": from, "to": to, "severity": severity, "message": message,
-        ]
-        if let source { d["source"] = source }
-        if !actions.isEmpty {
-            d["actions"] = actions.map {
-                ["name": $0.name, "from": $0.edit.from, "to": $0.edit.to, "insert": $0.edit.insert]
-            }
-        }
-        return d
-    }
-}
-
 @MainActor
 final class EditorController: NSObject {
     private static let log = Logger(subsystem: "org.neoscad.NeoSCAD", category: "editor")
@@ -114,10 +90,18 @@ final class EditorController: NSObject {
     var replaceText: (String) -> Void = { _ in }
     /// A menu command the editor forwarded (F5, F6).
     var perform: (String) -> Void = { _ in }
-    /// Where language server messages go (8e). Without one, requests are
-    /// answered with JSON-RPC's "method not found", so a client never
-    /// waits for an answer that is not coming.
-    var languageServer: ((String) -> Void)?
+    /// The document's `file://` URI, which the language server knows it
+    /// by; asked at each load. Nil: no language features.
+    var documentURI: () -> String? = { nil }
+    /// A library file shown for reading: the editor refuses edits.
+    var readOnly = false
+    /// Show a location in another file (a definition): its URI, 0-based
+    /// line and UTF-16 column.
+    var openLocation: (_ uri: String, _ line: Int, _ character: Int) -> Void = { _, _, _ in }
+    /// The language server. Without one, requests are answered with
+    /// JSON-RPC's "method not found", so a client never waits for an
+    /// answer that is not coming.
+    private(set) var languageClient: LanguageClient?
 
     // MARK: State
 
@@ -135,6 +119,8 @@ final class EditorController: NSObject {
     private(set) var resyncCount = 0
 
     private var fontObserver: NSObjectProtocol?
+    /// A location to show once the page is ready.
+    private var pendingReveal: (Int, Int)?
 
     /// The web view, made on first use: a document that is never shown
     /// (a test, a render from a script) starts no web content process.
@@ -181,7 +167,8 @@ final class EditorController: NSObject {
         version = nil
         Task {
             do {
-                let state = try await call("return NeoSCADEditor.load(text)", ["text": text])
+                let state = try await call(
+                    "return NeoSCADEditor.load(text, uri, readOnly)", loadArguments(text))
                 updateHistory(state)
             } catch {
                 Self.log.error("load failed: \(error)")
@@ -189,14 +176,33 @@ final class EditorController: NSObject {
         }
     }
 
-    /// Replace the lint markers. `version` is the editor version whose text
-    /// the ranges are in; the editor maps them through the edits since.
-    func setDiagnostics(_ diagnostics: [EditorDiagnostic], version: Int) {
+    /// Talk to `server` from now on: the page's client (connected when
+    /// the page loads) reaches it through here.
+    func connect(_ server: LanguageServer) {
+        let client = LanguageClient(server: server)
+        client.diagnostics = !readOnly
+        client.deliver = { [weak self] message in self?.receiveFromLanguageServer(message) }
+        languageClient = client
+    }
+
+    /// The document now has this URI (saved under a new name): the
+    /// language server sees the old file close and the new one open.
+    func documentURIChanged() {
         guard isReady else { return }
+        let uri = documentURI()
+        Task { _ = try? await call("return NeoSCADEditor.setURI(uri)", ["uri": uri.map { $0 as Any } ?? NSNull()]) }
+    }
+
+    /// Put the cursor at a 0-based line and UTF-16 column, in view.
+    func reveal(line: Int, character: Int) {
+        guard isReady else {
+            pendingReveal = (line, character)
+            return
+        }
         Task {
             _ = try? await call(
-                "return NeoSCADEditor.setDiagnostics(version, list)",
-                ["version": version, "list": diagnostics.map(\.json)])
+                "return NeoSCADEditor.reveal(line, character)",
+                ["line": line, "character": character])
         }
     }
 
@@ -211,9 +217,10 @@ final class EditorController: NSObject {
         Task { _ = try? await call("return NeoSCADEditor.\(name)()") }
     }
 
-    /// Send a language server message to the editor's LSP client.
+    /// Send a language server message to the editor's LSP client. Not
+    /// gated on `isReady`: the page's client starts before the page says
+    /// it is ready, and its `initialize` must be answered.
     func receiveFromLanguageServer(_ message: String) {
-        guard isReady else { return }
         Task { _ = try? await call("return NeoSCADEditor.lspReceive(message)", ["message": message]) }
     }
 
@@ -221,6 +228,11 @@ final class EditorController: NSObject {
         guard isReady else { return }
         let size = EditorSettings.fontSize
         Task { _ = try? await call("return NeoSCADEditor.setFontSize(size)", ["size": size]) }
+    }
+
+    private func loadArguments(_ text: String) -> [String: Any] {
+        // A missing URI crosses as `null` (an Optional would not cross).
+        ["text": text, "uri": documentURI().map { $0 as Any } ?? NSNull(), "readOnly": readOnly]
     }
 
     private func updateHistory(_ state: Any?) {
@@ -256,6 +268,10 @@ final class EditorController: NSObject {
             if let name = m["name"] as? String { perform(name) }
         case "lsp":
             if let message = m["message"] as? String { languageServerMessage(message) }
+        case "open":
+            if let uri = m["uri"] as? String {
+                openLocation(uri, m["line"] as? Int ?? 0, m["character"] as? Int ?? 0)
+            }
         case "log":
             Self.log.error("editor: \(m["message"] as? String ?? "", privacy: .public)")
         default:
@@ -272,8 +288,13 @@ final class EditorController: NSObject {
             do {
                 _ = try await call(
                     "return NeoSCADEditor.setFontSize(size)", ["size": EditorSettings.fontSize])
-                let state = try await call("return NeoSCADEditor.load(text)", ["text": text])
+                let state = try await call(
+                    "return NeoSCADEditor.load(text, uri, readOnly)", loadArguments(text))
                 updateHistory(state)
+                if let (line, character) = pendingReveal {
+                    pendingReveal = nil
+                    reveal(line: line, character: character)
+                }
                 onReady?()
             } catch {
                 Self.log.error("the editor did not load: \(error)")
@@ -314,8 +335,8 @@ final class EditorController: NSObject {
     }
 
     private func languageServerMessage(_ message: String) {
-        if let languageServer {
-            languageServer(message)
+        if let languageClient {
+            languageClient.send(message)
             return
         }
         // A request (it has an id) gets an error; a notification nothing.

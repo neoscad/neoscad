@@ -176,6 +176,48 @@ pub fn unified(old: &str, new: &str, old_name: &str, new_name: &str) -> String {
     out
 }
 
+/// One changed run of lines: lines `old` of the old text are replaced by
+/// lines `new` of the new one (0-based, half-open).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineChange {
+    pub old: std::ops::Range<usize>,
+    pub new: std::ops::Range<usize>,
+}
+
+/// The changed runs of lines between two texts, in order, lines split
+/// after each `\n` (so a line keeps its terminator and the runs rebuild
+/// the new text exactly). An editor applies them as edits: a language
+/// server's formatting answer is these runs, not the whole file, so the
+/// cursor, folds and markers outside them stay where they are.
+pub fn line_changes(old: &str, new: &str) -> Vec<LineChange> {
+    let a: Vec<&str> = old.split_inclusive('\n').collect();
+    let b: Vec<&str> = new.split_inclusive('\n').collect();
+    let mut out: Vec<LineChange> = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    for op in script(&a, &b) {
+        let (di, dj) = match op {
+            Op::Equal => (1, 1),
+            Op::Delete => (1, 0),
+            Op::Insert => (0, 1),
+        };
+        if op != Op::Equal {
+            match out.last_mut() {
+                Some(c) if c.old.end == i && c.new.end == j => {
+                    c.old.end += di;
+                    c.new.end += dj;
+                }
+                _ => out.push(LineChange {
+                    old: i..i + di,
+                    new: j..j + dj,
+                }),
+            }
+        }
+        i += di;
+        j += dj;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +229,32 @@ mod tests {
         assert_eq!(unified("a\n", "a\n", "x", "y"), "");
         let d = unified("", "new\n", "x", "y");
         assert_eq!(d, "--- x\n+++ y\n@@ -0,0 +1 @@\n+new\n");
+    }
+
+    #[test]
+    fn line_changes_rebuild_the_new_text() {
+        let old = "a\nb\nc\nd";
+        let new = "a\nB\nc\nd\ne\n";
+        let changes = line_changes(old, new);
+        let a: Vec<&str> = old.split_inclusive('\n').collect();
+        let b: Vec<&str> = new.split_inclusive('\n').collect();
+        let mut out = String::new();
+        let mut at = 0;
+        for c in &changes {
+            out.extend(a[at..c.old.start].iter().copied());
+            out.extend(b[c.new.clone()].iter().copied());
+            at = c.old.end;
+        }
+        out.extend(a[at..].iter().copied());
+        assert_eq!(out, new);
+        assert_eq!(
+            changes[0],
+            LineChange {
+                old: 1..2,
+                new: 1..2
+            }
+        );
+        assert!(line_changes(old, old).is_empty());
     }
 
     #[test]
