@@ -309,17 +309,23 @@ entry when it is done.
   result, so the case is not handled. (6a)
 
 ## Serve and session
-- A one-line edit re-parses the main file together with everything it
-  `include`s, because OpenSCAD's includes are textual (one token stream,
-  one parse): the session only skips reading and lexing unchanged
-  includes (`lang::loader::LexCache`) and re-parses `use`d libraries
-  only when they change. For the `edit_loop` BOSL2 case that parse is
-  about 16 ms of a 33 ms re-render (load 3, parse 5, lower 7, measured
-  with `lang::parse_program_cached`); the rest is whole-program
-  evaluation (16 ms) and a little geometry. Parsing each included file
-  on its own and splicing ASTs (or an incremental parser) is the next
-  step, and needs care with reassignment across includes and with
-  includes that are not whole statements. (7a)
+- A one-line edit re-parses the main file. Since `4d877c7` an include
+  between top-level statements of a file that parses on its own
+  (`include <BOSL2/std.scad>`) is parsed and lowered once and spliced
+  into each new program (`lang::fragment`, the session's
+  `FragmentStore`); with the evaluator work since, the served BOSL2
+  edit (`edit_loop`) takes about 18 ms, from 34.
+  What is still redone on every edit: the main file's own parse; the
+  splice, which copies each fragment's tokens and syntax tree into the
+  new program (`Cst::splice`) and renumbers a copy of its AST, rather
+  than sharing them; every include that is not a whole top-level unit
+  (inside a module body or an expression, mid-statement, after a syntax
+  error, or of a file with errors of its own), which is spliced as
+  tokens and parsed again, as before; and whole-program evaluation,
+  which is now most of an edit.
+  One-shot command-line runs parse everything, as there is nothing to
+  reuse. An incremental parser for the main file is not started. (7a,
+  `4d877c7`)
 - The command line's own export path (`crates/cli/src/run.rs`) does not
   go through `session::Session`; the session re-implements its steps for
   served exports and shares only the encoder (`session::export`). That
@@ -804,5 +810,3 @@ entry when it is done.
 - The release `wasm_check.wasm` is 44.6 MB with the language server in it
   (the WASM section's 38 MB is from H2); the language server's share was
   not measured. (8e)
-
-- Session product cache keys on `keys.get(top)` directly (`crates/session/src/lib.rs`), so a top-level `group(){ group(); X }` and a top-level `X` may share an entry the way geom's cache did before `dc7153b`. Untested; apply geom's `cache_key` rule there too.

@@ -498,3 +498,38 @@ fn a_render_says_which_view_variables_the_file_assigned() {
         .unwrap();
     assert!(!r.camera_assigned.any());
 }
+
+/// The document's last product is keyed on its tree's root. `Keys` gives
+/// `group() { group(); X }` the key of `X`, but its 2D union sends
+/// `[nothing, X]` through Clipper, which snaps `X` to Clipper's grid
+/// (geom's `cache_key`). Two entry modules of one file (as `neoscad test`
+/// runs them) have the same sources, so with the root's `Keys` key the
+/// second was answered with the first's unsnapped outline.
+#[test]
+fn a_top_level_group_with_empty_siblings_is_not_answered_by_its_childs_product() {
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/t.scad",
+        b"module x() translate([1.171, 0]) rotate(7) circle(r = 0.229, $fn = 18);\n\
+          module bare() x();\n\
+          module wrapped() { group(); x(); }\n"
+            .to_vec(),
+    );
+    let outline = |s: &Session, entry: &str| {
+        let mut run = Run::new("t.scad");
+        run.entry = Some(entry.into());
+        let r = s
+            .render(&run, Mode::Render, &render::ColorScheme::cornfield())
+            .expect("not cancelled");
+        assert_eq!(r.exit_code, 0, "{}", String::from_utf8_lossy(&r.log.stderr));
+        format!("{:?}", r.geometry.expect("2D"))
+    };
+    let cold = outline(&session(&fs), "wrapped");
+    let warm = session(&fs);
+    assert_ne!(
+        outline(&warm, "bare"),
+        cold,
+        "the program no longer tells the two apart"
+    );
+    assert_eq!(outline(&warm, "wrapped"), cold);
+}

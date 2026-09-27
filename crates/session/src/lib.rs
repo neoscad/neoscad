@@ -1397,7 +1397,12 @@ impl Session {
         // `geom::evaluate`'s `Demand`) and a warm request answers as a
         // cold one would.
         let limits = hash_of(format!("{:?}", job.limits.as_ref().map(|g| *g.limits())));
-        let key = (keys.get(top), loaded.epoch, mode, rkey, csg_limit, limits);
+        // The root's key as the renderer's cache has it, not `keys.get`:
+        // that one is shared by `group() { group(); X }` and `X`, whose
+        // 2D results differ, and the epoch does not tell them apart when
+        // one file's entry modules (`Run::entry`) are rendered in turn.
+        let root = geom::result_key(top, &keys);
+        let key = (root, loaded.epoch, mode, rkey, csg_limit, limits);
         let doc = pipe.paths.doc.clone();
         let reuse = self
             .products

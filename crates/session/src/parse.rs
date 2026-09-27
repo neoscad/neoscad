@@ -255,6 +255,8 @@ pub struct ParseCache {
     hits: u64,
     misses: u64,
     evictions: u64,
+    /// Programs evicted and not yet handed to [`retire`].
+    retired: Vec<Arc<Program>>,
 }
 
 /// One `use`d library, as `lang::deps::Library` describes it, with a
@@ -305,6 +307,7 @@ impl ParseCache {
             hits: 0,
             misses: 0,
             evictions: 0,
+            retired: Vec::new(),
         }
     }
 
@@ -322,12 +325,15 @@ impl ParseCache {
     pub fn set_budget(&mut self, budget: usize) {
         self.budget = budget;
         self.shrink();
+        // Not on an edit's path: free them now rather than at the next parse.
+        self.retired.clear();
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
         self.mains.clear();
         self.bytes = 0;
+        self.retired.clear();
     }
 
     /// Record `k` as `path`'s newest main program, dropping all but the
@@ -341,6 +347,7 @@ impl ParseCache {
             if let Some(e) = self.entries.remove(&old) {
                 self.bytes -= e.cost;
                 self.evictions += 1;
+                self.retired.push(e.program);
             }
         }
     }
@@ -417,6 +424,7 @@ impl ParseCache {
             if let Some(e) = self.entries.remove(&k) {
                 self.bytes -= e.cost;
                 self.evictions += 1;
+                self.retired.push(e.program);
             }
         }
     }
@@ -456,7 +464,45 @@ pub fn main_program(
     if c.entries.contains_key(&k) {
         c.main_key(path, k);
     }
+    let dead = std::mem::take(&mut c.retired);
+    drop(c);
+    retire(dead);
     program
+}
+
+/// Free evicted programs off the request's path. Every edit evicts the
+/// main program from two edits ago (`MAINS_PER_PATH`), and freeing a
+/// BOSL2 program's syntax trees took about 1.5 ms of each served edit
+/// (5.7% of its samples), under the cache's lock, before evaluation began.
+/// One long-lived thread frees them instead, with the evaluator's stack
+/// size since a syntax tree is freed recursively and may be as deep as the
+/// parser allowed. Where threads are unavailable (WASM, or a failed spawn)
+/// they are freed here as before. Nothing observable depends on when a
+/// program is freed.
+fn retire(dead: Vec<Arc<Program>>) {
+    if dead.is_empty() {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::sync::OnceLock;
+        use std::sync::mpsc::{Sender, channel};
+        static DROPPER: OnceLock<Option<Sender<Vec<Arc<Program>>>>> = OnceLock::new();
+        let tx = DROPPER.get_or_init(|| {
+            let (tx, rx) = channel::<Vec<Arc<Program>>>();
+            std::thread::Builder::new()
+                .name("parse-drop".into())
+                .stack_size(eval::DEFAULT_THREAD_STACK)
+                .spawn(move || rx.into_iter().for_each(drop))
+                .ok()
+                .map(|_| tx)
+        });
+        // A send fails only if the thread is gone; the error hands the
+        // programs back, and they are freed here.
+        if let Some(tx) = tx {
+            let _ = tx.send(dead);
+        }
+    }
 }
 
 /// `SourceFile::handleDependencies`: a used name as a library key, if the
@@ -579,10 +625,15 @@ impl Visit<'_> {
             self.libs,
             self.stores.caches(),
         ));
-        self.cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .put(k, &program, 0, self.fs);
+        let dead = {
+            let mut c = self
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            c.put(k, &program, 0, self.fs);
+            std::mem::take(&mut c.retired)
+        };
+        retire(dead);
         Some(program)
     }
 }

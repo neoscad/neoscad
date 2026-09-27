@@ -500,6 +500,34 @@ struct Out {
     msgs: Vec<Msg>,
 }
 
+/// Nodes a tree may have and still be walked on the calling thread: few
+/// enough that the walk's recursion (one level per node) fits any thread's
+/// stack, where a deep tree needs the pool's [`eval::DEFAULT_THREAD_STACK`].
+#[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+const CHAIN_NODES: usize = 32;
+
+/// Whether `top` is a short chain: at most [`CHAIN_NODES`] nodes, none of
+/// them with more than one child (`cube(1)`, `rotate(..) linear_extrude(..)
+/// square(..)`). Such a tree has no two subtrees to run side by side, so
+/// its walk runs on the calling thread without starting the pool. The
+/// kernels' own data-parallel loops still run on rayon (on its global
+/// pool, started only if one of them is large enough to split), and each
+/// of those gives the same result at any thread count, so the output is
+/// the same either way; a build without the `parallel` feature walks every
+/// tree like this.
+#[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+fn is_chain(top: &Node) -> bool {
+    let mut n = top;
+    for _ in 0..CHAIN_NODES {
+        match n.children.as_slice() {
+            [] => return true,
+            [c] => n = c,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Per-render context.
 struct Ctx<'a> {
     r: &'a Renderer,
@@ -582,6 +610,8 @@ fn is_background(n: &Node) -> bool {
 /// union drops empty children before deciding to pass one through, so
 /// 3D groups did not need this; they get their own key too, which costs a
 /// cache entry sharing the child's geometry and nothing more.
+///
+/// [`result_key`] is the same key for callers outside this module.
 fn cache_key(n: &Node, keys: &Keys, memo: &mut [Option<Key>]) -> Key {
     // The chain of transparent groups from `n` down to the node with
     // content, walked iteratively: BOSL2 nests groups deeply.
@@ -623,6 +653,25 @@ fn cache_key(n: &Node, keys: &Keys, memo: &mut [Option<Key>]) -> Key {
         memo[g.index] = Some(key);
     }
     key
+}
+
+/// The key [`Renderer::render`] caches `top`'s result under (see
+/// `cache_key`). A cache of whole results kept outside the renderer must
+/// key on this rather than on `keys.get(top)`, or a top-level
+/// `group(); X` would be answered with the result of a top-level `X`.
+pub fn result_key(top: &Node, keys: &Keys) -> u128 {
+    // `cache_key` memoises by node index; only the chain of groups under
+    // `top` is visited, so the memo needs to reach that chain's indices.
+    let mut len = 0;
+    let mut n = top;
+    loop {
+        len = len.max(n.index + 1);
+        match n.children.iter().find(|c| keys.get(c) == keys.get(n)) {
+            Some(c) => n = c,
+            None => break,
+        }
+    }
+    cache_key(top, keys, &mut vec![None; len])
 }
 
 fn warn(n: &Node, text: &str) -> Msg {
@@ -752,7 +801,11 @@ impl Renderer {
     ) -> Result<(Rendered, Needs), Unsupported> {
         let ctx = self.prepare(&[top], keys, opts);
         #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
-        let out = self.pool().install(|| ctx.node(top))?;
+        let out = if is_chain(top) {
+            ctx.node(top)?
+        } else {
+            self.pool().install(|| ctx.node(top))?
+        };
         #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
         let out = ctx.node(top)?;
         let mut geom = out.geom;
@@ -837,7 +890,11 @@ impl Renderer {
         for d in (0..=max_depth).rev() {
             let at: Vec<usize> = (0..tops.len()).filter(|&i| depth[i] == d).collect();
             #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
-            let results: Vec<Result<Out, Unsupported>> = {
+            let results: Vec<Result<Out, Unsupported>> = if let [i] = at[..]
+                && is_chain(tops[i])
+            {
+                vec![ctx.node(tops[i])]
+            } else {
                 use rayon::prelude::*;
                 self.pool()
                     .install(|| at.par_iter().map(|&i| ctx.node(tops[i])).collect())
@@ -875,6 +932,10 @@ impl Renderer {
         Ok((rendered, overflow))
     }
 
+    /// The pool, started on first use. Starting it spawns every worker
+    /// thread at once, a measurable share of a whole `cube(1)` run from
+    /// the command line; [`is_chain`] keeps trees with nothing to run side
+    /// by side from starting it at all.
     #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
     fn pool(&self) -> &rayon::ThreadPool {
         self.pool.get_or_init(|| {

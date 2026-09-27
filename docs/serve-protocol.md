@@ -24,7 +24,7 @@ change would get a new `protocol` number; there has been none.
 
 | `protocol` | Changes |
 |---|---|
-| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. |
+| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. Parsing each included file once (`4d877c7`) added `stats`' `parse_cache.fragment_files` and `fragment_bytes`. |
 
 ## Transports
 
@@ -161,7 +161,8 @@ answering; a stdio server waits for `exit` or the end of input.
    "renderers": 1,
    "parse_cache": {"entries": 3, "bytes": 1234, "budget": 268435456,
                    "hits": 9, "misses": 3, "evictions": 0,
-                   "lexed_files": 31, "lexed_bytes": 9325744},
+                   "lexed_files": 31, "lexed_bytes": 9325744,
+                   "fragment_files": 31, "fragment_bytes": 50594868},
    "geometry_cache": {"entries": 100, "bytes": 419112, "budget": 209715200,
                       "hits": 113, "misses": 1105, "evictions": 0}}}
 ```
@@ -172,6 +173,17 @@ budgets, and is never below the configured budget (`--cache-mb`): before
 the first render, when there is no renderer yet, it is the budget the
 first will get. `requests` counts evaluations, renders,
 exports and snapshots (a snapshot with `diff` is two).
+
+`lexed_files` and `lexed_bytes` are the included files kept read and
+lexed, and their text and tokens, bounded by a quarter of the parse
+budget. `fragment_files` and `fragment_bytes` are the included files
+kept parsed and lowered, and their estimated size, bounded by half of
+the parse budget: an include between top-level statements
+(`include <BOSL2/std.scad>`) comes from here after its first parse.
+There is one entry for each included file, the includes it is read
+inside and the main file: `BOSL2/std.scad` and each file it includes
+make 31. A fragment holds the files it includes as well, so nested
+files count in more than one entry's bytes.
 
 ### `documents`
 

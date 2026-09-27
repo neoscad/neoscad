@@ -410,3 +410,39 @@ hull() for (b = [0 : 20 : 340]) rotate(b) group() { group(); x(); }";
         );
     }
 }
+
+/// A short chain of nodes (nothing to run side by side) is walked on the
+/// calling thread without starting the geometry pool; a tree with
+/// siblings is walked on the pool. Either way the kernel splits its large
+/// loops over whichever pool it runs in. Both walks, at any thread count,
+/// must export the same bytes: the chain here is the tree without its
+/// empty sibling, which a 3D union drops.
+#[test]
+fn a_chain_renders_as_a_tree_does_at_any_thread_count() {
+    let chain = "rotate([10, 20, 30]) scale([1, 2, 1]) sphere(10, $fn = 200);";
+    let tree = format!("{chain} group();");
+    let forced = |src: &str| {
+        let (g, msgs) = render_with(&Renderer::new(), src, true);
+        assert!(msgs.is_empty(), "{msgs:?}");
+        let ps =
+            geom::export::as_polyset(&g.expect("geometry"), &geom::color::CORNFIELD).expect("3D");
+        geom::export::off(&ps, &mut Vec::new())
+    };
+    let first = forced(chain);
+    assert!(forced(&tree) == first, "the tree exported different bytes");
+    for threads in [1, 2, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .stack_size(eval::DEFAULT_THREAD_STACK)
+            .build()
+            .unwrap();
+        assert!(
+            pool.install(|| forced(chain)) == first,
+            "the chain differs on {threads} threads"
+        );
+        assert!(
+            pool.install(|| forced(&tree)) == first,
+            "the tree differs on {threads} threads"
+        );
+    }
+}
