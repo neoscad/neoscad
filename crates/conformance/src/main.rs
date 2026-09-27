@@ -12,6 +12,8 @@
 //!   on a corpus of inputs.
 //! - `conformance bench` times neoscad against reference binaries on
 //!   `conformance/bench.json`; `conformance bench-chart` draws a result.
+//! - `conformance video` stitches the recorded snapshots, benchmarks and
+//!   agent eval into a progress video.
 //!
 //! See crates/conformance/README.md.
 
@@ -33,6 +35,7 @@ mod script;
 mod sha256;
 mod showcase;
 mod validatestl;
+mod video;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -202,6 +205,30 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Render the progress video: one scene per snapshot in
+    /// progress/index.jsonl, with benchmark and agent-eval interludes,
+    /// encoded to H.264 by ffmpeg.
+    Video {
+        /// Output file (default: progress/video/progress.mp4).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Frames per second.
+        #[arg(long, default_value_t = 30)]
+        fps: u32,
+        /// Seconds each snapshot is held after its transition.
+        #[arg(long, default_value_t = 2.0)]
+        hold: f64,
+        /// Keep the PNG frames in this directory (default: a temporary
+        /// directory, deleted after encoding).
+        #[arg(long)]
+        frames_dir: Option<PathBuf>,
+        /// The recorded data to read (default: this checkout's progress/).
+        #[arg(long)]
+        progress: Option<PathBuf>,
+        /// The ffmpeg to encode with.
+        #[arg(long, default_value = "ffmpeg")]
+        ffmpeg: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -216,6 +243,25 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cmd: Cmd) -> Result<u8, String> {
+    if let Cmd::Video {
+        out,
+        fps,
+        hold,
+        frames_dir,
+        progress,
+        ffmpeg,
+    } = cmd
+    {
+        let opts = video::VideoOptions {
+            out,
+            fps,
+            hold,
+            frames_dir,
+            progress,
+            ffmpeg,
+        };
+        return video::command(&Ctx::repo_only()?, &opts);
+    }
     let ctx = Ctx::discover()?;
     match cmd {
         Cmd::Manifest { check } => manifest_cmd(&ctx, check),
@@ -333,6 +379,7 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
         Cmd::BenchChart { file, latest, out } => {
             bench_chart::command(&ctx, file.as_deref(), latest, out.as_deref())
         }
+        Cmd::Video { .. } => unreachable!("handled before the reference is required"),
     }
 }
 

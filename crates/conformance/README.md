@@ -31,6 +31,7 @@ any test listed in `conformance/baseline.json` no longer passes.
 | `diff [PATHS...]` | Differential test: runs a reference OpenSCAD (`--binary-ref`, default the pinned nightly) and neoscad on every `.scad` under `PATHS` (default: the reference's `tests/data/scad`, `examples`, `libraries/MCAD`) and compares exit status, the output (`--format ast`, `echo` or `csg`; an `.echo` file holds every message, so it is compared even when both runs fail; `csg` ignores `timestamp = N` and owns no stderr messages, which `ast` and `echo` already cover) and the diagnostics that format covers. `--library-path DIR` (repeatable) puts a library directory before the reference's `libraries/` in `OPENSCADPATH` for both binaries, so a library's own files and examples run unmodified (`--library-path .reference` for `include <BOSL2/...>`). Prints the match rate and mismatches by category; the full list goes to `target/conformance/diff-<format>.json`. |
 | `bench` | Times neoscad against the reference binaries on `conformance/bench.json`; see "Benchmarks" below. |
 | `bench-chart [FILE\|--latest] [--out PATH]` | Draws a benchmark result as a 1920x1080 PNG (default: next to the result). |
+| `video` | Renders the progress video from `progress/`; see "Progress video" below. |
 
 ## Benchmarks
 
@@ -115,6 +116,22 @@ on that lookup, so it embeds the test list (`embedded.ids` and a one-digit
 
 The grid has one cell per test at a position fixed by the manifest, so
 images of successive snapshots can be stitched into a video.
+
+## Progress video
+
+    ./target/release/conformance video [--out FILE.mp4] [--fps 30] [--hold 2] [--frames-dir DIR]
+                                       [--progress DIR] [--ffmpeg PATH]
+
+Draws one 1920x1080 scene per snapshot in `progress/index.jsonl` (the grid,
+a caption with time, sha and subject, per-tier pass counts and a chart of
+total passes over time, interpolated between snapshots), benchmark and
+agent-eval interludes, and title and end cards, then encodes H.264
+(`yuv420p`, CRF 20) with ffmpeg. The default output is
+`progress/video/progress.mp4`; frames go to a temporary directory unless
+`--frames-dir` keeps them. `--progress` reads another checkout's
+`progress/` (from a worktree, the main tree's); no reference checkout is
+needed. The same data gives the same file. Details, and the unbuilt
+`--showcase` mode, are in `docs/progress-video.md`.
 
 ## How the manifest is built
 

@@ -18,7 +18,7 @@ use crate::ctx::Ctx;
 use crate::grid::{self, Canvas, DIM, HEIGHT, MARGIN, Rgb, TEXT, WIDTH};
 
 /// Reference order and colours.
-const REFS: &[(&str, &str, Rgb)] = &[
+pub(crate) const REFS: &[(&str, &str, Rgb)] = &[
     ("neoscad", "NEOSCAD", [46, 204, 113]),
     ("nightly-manifold", "NIGHTLY MANIFOLD", [52, 152, 219]),
     ("nightly-cgal", "NIGHTLY CGAL", [230, 126, 34]),

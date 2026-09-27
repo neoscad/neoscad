@@ -117,46 +117,90 @@ pub(crate) fn save_png(path: &Path, img: &[u8]) -> Result<(), String> {
 fn render(title: &str, subject: &str, cells: &[(u8, Status)]) -> Vec<u8> {
     let mut cv = Canvas::new();
     let mut totals = [0usize; 4];
-    let mut tiers: Vec<(u8, Vec<Status>)> = Vec::new();
-    for &(t, s) in cells {
+    for &(_, s) in cells {
         totals[s as usize] += 1;
-        match tiers.last_mut() {
-            Some((lt, v)) if *lt == t => v.push(s),
-            _ => match tiers.iter_mut().find(|(lt, _)| *lt == t) {
-                Some((_, v)) => v.push(s),
-                None => tiers.push((t, vec![s])),
-            },
-        }
     }
-    tiers.sort_by_key(|(t, _)| *t);
 
     // Header: title, commit subject, legend with totals.
     cv.text(MARGIN, 18, title, 3, TEXT);
     cv.text(MARGIN, 52, subject, 2, DIM);
-    let mut x = MARGIN;
-    let legend_y = 78;
+    let x = legend(&mut cv, MARGIN, 78, Some(&totals));
+    cv.text(x + 10, 78, &format!("TOTAL {}", cells.len()), 2, DIM);
+    let header = 110;
+
+    let tiers = by_tier(cells.iter().map(|&(t, s)| (t, colour(s), s)));
+    draw_tiers(
+        &mut cv,
+        (
+            MARGIN,
+            header,
+            WIDTH - 2 * MARGIN,
+            HEIGHT - MARGIN / 2 - header,
+        ),
+        &tiers,
+        true,
+    );
+    cv.px
+}
+
+/// The status legend (a swatch and label per status, with its count when
+/// `totals` is given), drawn left to right from `x`. Returns the x after it.
+pub(crate) fn legend(
+    cv: &mut Canvas,
+    mut x: usize,
+    y: usize,
+    totals: Option<&[usize; 4]>,
+) -> usize {
     for (label, s) in [
         ("PASS", Status::Pass),
         ("FAIL", Status::Fail),
         ("SKIP", Status::Skip),
         ("PENDING", Status::Pending),
     ] {
-        cv.rect(x, legend_y, 14, 14, colour(s));
-        x = cv.text(
-            x + 22,
-            legend_y,
-            &format!("{label} {}", totals[s as usize]),
-            2,
-            TEXT,
-        ) + 30;
+        cv.rect(x, y, 14, 14, colour(s));
+        let text = match totals {
+            Some(t) => format!("{label} {}", t[s as usize]),
+            None => label.to_string(),
+        };
+        x = cv.text(x + 22, y, &text, 2, TEXT) + 30;
     }
-    cv.text(x + 10, legend_y, &format!("TOTAL {}", cells.len()), 2, DIM);
-    let header = 110;
+    x
+}
 
-    // Largest cell pitch that fits every tier on the canvas.
+/// One tier's cells: the colour each is drawn in, plus the status its label
+/// counts. The video blends colours between snapshots, so the two differ.
+pub(crate) type TierCells = (u8, Vec<(Rgb, Status)>);
+
+/// Group cells by tier, in tier order, keeping manifest order within a tier.
+pub(crate) fn by_tier(cells: impl Iterator<Item = (u8, Rgb, Status)>) -> Vec<TierCells> {
+    let mut tiers: Vec<TierCells> = Vec::new();
+    for (t, c, s) in cells {
+        match tiers.last_mut() {
+            Some((lt, v)) if *lt == t => v.push((c, s)),
+            _ => match tiers.iter_mut().find(|(lt, _)| *lt == t) {
+                Some((_, v)) => v.push((c, s)),
+                None => tiers.push((t, vec![(c, s)])),
+            },
+        }
+    }
+    tiers.sort_by_key(|(t, _)| *t);
+    tiers
+}
+
+/// Lay the tiers out inside `area` (x, y, width, height) with the largest
+/// cell pitch that fits them all, each under a label line. With `counts`
+/// the label carries the tier's status counts; without, only its name and
+/// size, for the video, whose side panel shows animated counts that a
+/// static label would contradict mid-transition.
+pub(crate) fn draw_tiers(
+    cv: &mut Canvas,
+    area: (usize, usize, usize, usize),
+    tiers: &[TierCells],
+    counts: bool,
+) {
     const LABEL: usize = 22;
     const SECTION_GAP: usize = 10;
-    let avail_w = WIDTH - 2 * MARGIN;
+    let (x0, y0, avail_w, avail_h) = area;
     let pitch = (3..=48)
         .rev()
         .find(|&p| {
@@ -165,16 +209,16 @@ fn render(title: &str, subject: &str, cells: &[(u8, Status)]) -> Vec<u8> {
                 .iter()
                 .map(|(_, v)| LABEL + v.len().div_ceil(cols) * p + SECTION_GAP)
                 .sum();
-            header + h <= HEIGHT - MARGIN / 2
+            h <= avail_h
         })
         .unwrap_or(3);
     let cols = avail_w / pitch;
     let gap = (pitch / 6).max(1);
 
-    let mut y = header;
-    for (t, statuses) in &tiers {
+    let mut y = y0;
+    for (t, cells) in tiers {
         let mut c = [0usize; 4];
-        for s in statuses {
+        for (_, s) in cells {
             c[*s as usize] += 1;
         }
         let name = TIER_NAMES
@@ -182,29 +226,32 @@ fn render(title: &str, subject: &str, cells: &[(u8, Status)]) -> Vec<u8> {
             .copied()
             .unwrap_or("?")
             .to_uppercase();
-        let label = format!(
-            "TIER {t} {name}   PASS {}  FAIL {}  SKIP {}  PENDING {}   ({})",
-            c[0],
-            c[1],
-            c[2],
-            c[3],
-            statuses.len()
-        );
-        cv.text(MARGIN, y, &label, 2, TEXT);
+        let label = if counts {
+            format!(
+                "TIER {t} {name}   PASS {}  FAIL {}  SKIP {}  PENDING {}   ({})",
+                c[0],
+                c[1],
+                c[2],
+                c[3],
+                cells.len()
+            )
+        } else {
+            format!("TIER {t} {name}   ({})", cells.len())
+        };
+        cv.text(x0, y, &label, 2, TEXT);
         y += LABEL;
-        for (i, s) in statuses.iter().enumerate() {
+        for (i, (rgb, _)) in cells.iter().enumerate() {
             let (row, col) = (i / cols, i % cols);
             cv.rect(
-                MARGIN + col * pitch,
+                x0 + col * pitch,
                 y + row * pitch,
                 pitch - gap,
                 pitch - gap,
-                colour(*s),
+                *rgb,
             );
         }
-        y += statuses.len().div_ceil(cols) * pitch + SECTION_GAP;
+        y += cells.len().div_ceil(cols) * pitch + SECTION_GAP;
     }
-    cv.px
 }
 
 /// The (tier, status) cells of a snapshot, in manifest order.
@@ -387,7 +434,9 @@ fn glyph(c: char) -> [u8; 7] {
         ',' => [0, 0, 0, 0, 0x0C, 0x04, 0x08],
         ':' => [0, 0x0C, 0x0C, 0, 0x0C, 0x0C, 0],
         ';' => [0, 0x0C, 0x0C, 0, 0x0C, 0x04, 0x08],
-        '-' => [0, 0, 0, 0x1F, 0, 0, 0],
+        // En and em dashes: the title card's "NeoSCAD — rebuilding
+        // OpenSCAD" and date ranges would otherwise draw as '?'.
+        '-' | '\u{2013}' | '\u{2014}' => [0, 0, 0, 0x1F, 0, 0, 0],
         '_' => [0, 0, 0, 0, 0, 0, 0x1F],
         '/' => [0, 0x01, 0x02, 0x04, 0x08, 0x10, 0],
         '\\' => [0, 0x10, 0x08, 0x04, 0x02, 0x01, 0],
@@ -401,6 +450,7 @@ fn glyph(c: char) -> [u8; 7] {
         '+' => [0, 0x04, 0x04, 0x1F, 0x04, 0x04, 0],
         '=' => [0, 0, 0x1F, 0, 0x1F, 0, 0],
         '#' => [0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A],
+        '$' => [0x04, 0x0F, 0x14, 0x0E, 0x05, 0x1E, 0x04],
         '*' => [0, 0x04, 0x15, 0x0E, 0x15, 0x04, 0],
         '&' => [0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D],
         '@' => [0x0E, 0x11, 0x17, 0x15, 0x17, 0x10, 0x0F],

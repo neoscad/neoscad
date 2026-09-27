@@ -36,6 +36,18 @@ impl Ctx {
         Ok(Self { repo, ref_root })
     }
 
+    /// The repository alone, for commands that only read `progress/` and
+    /// git (`video`): they must also work in a worktree or checkout that
+    /// has no reference clone. `ref_root` is where the clone would be.
+    pub fn repo_only() -> Result<Self, String> {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve repository root: {e}"))?;
+        let ref_root = repo.join(REF_REL);
+        Ok(Self { repo, ref_root })
+    }
+
     pub fn ref_str(&self) -> String {
         self.ref_root.to_string_lossy().into_owned()
     }
