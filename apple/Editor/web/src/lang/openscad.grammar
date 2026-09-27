@@ -1,0 +1,269 @@
+// The OpenSCAD language for CodeMirror (Lezer). Ported from the behaviour
+// of OpenSCAD's own lexer and parser (.reference/openscad/src/core/lexer.l
+// and parser.y), not from their structure.
+//
+// This grammar drives highlighting, folding, indentation and bracket
+// matching; it is not the language's validator (the Rust core is, and its
+// diagnostics become lint markers). So it is deliberately a little more
+// permissive than OpenSCAD where that keeps the grammar small and free of
+// conflicts, and never less: every program OpenSCAD accepts must parse
+// here without error nodes, or the editor would mark valid code as broken.
+// The permissive spots:
+//   - `let`, `assert`, `echo` and function literals are prefix operators of
+//     the lowest precedence, so they may appear as a binary operand
+//     (OpenSCAD requires parentheses there).
+//   - A comprehension (`for`, `each`, `if`) may appear anywhere an
+//     expression may, not only in a vector or its parenthesised elements.
+//   - A block may hold definitions wherever it appears (OpenSCAD allows them
+//     only in a top-level block and a module's body).
+//   - `use <...>` may appear inside a block (OpenSCAD: top level only).
+
+@precedence {
+  member,
+  call,
+  index,
+  exp @right,
+  prefix,
+  times @left,
+  plus @left,
+  shift @left,
+  compare @left,
+  equal @left,
+  bitand @left,
+  bitor @left,
+  and @left,
+  or @left,
+  ternary @right,
+  else @right,
+  body @right
+}
+
+@top Program { statement* }
+
+@skip { whitespace | LineComment | BlockComment }
+
+statement[@isGroup=Statement] {
+  ";" |
+  Block |
+  ModuleDefinition |
+  FunctionDefinition |
+  Assignment |
+  UseStatement |
+  IncludeStatement |
+  instantiation
+}
+
+Block { "{" statement* "}" }
+
+ModuleDefinition { kw<"module"> DefName ParamList statement }
+
+FunctionDefinition { kw<"function"> DefName ParamList "=" expression ";" }
+
+Assignment { VariableDefinition "=" expression ";" }
+
+UseStatement { kw<"use"> IncludePath }
+
+IncludeStatement { kw<"include"> IncludePath }
+
+// A module instantiation: a call with its child, a modified one, or `if`.
+instantiation {
+  ModifiedStatement |
+  ModuleCall |
+  IfStatement
+}
+
+ModifiedStatement { Modifier instantiation }
+
+Modifier { "!" | "#" | "%" | "*" }
+
+// `for`, `let`, `assert`, `echo` and `each` are keywords that also name
+// modules (parser.y's `module_id`).
+ModuleCall {
+  (ModuleName | kw<"for"> | kw<"let"> | kw<"assert"> | kw<"echo"> | kw<"each">)
+  ArgList childStatement
+}
+
+IfStatement {
+  kw<"if"> ParenthesizedCondition childStatement (!else kw<"else"> childStatement)?
+}
+
+ParenthesizedCondition { "(" expression ")" }
+
+childStatement { ";" | Block | instantiation }
+
+ParamList { "(" commaSep<Param> ")" }
+
+Param { ParamName ("=" expression)? }
+
+ArgList { "(" commaSep<argument> ")" }
+
+// The C-style `for (init; condition; update)` of list comprehensions.
+ForHeader {
+  "(" commaSep<argument> ";" expression ";" commaSep<argument> ")"
+}
+
+argument { expression | NamedArgument }
+
+NamedArgument { ArgName "=" expression }
+
+expression[@isGroup=Expression] {
+  Number |
+  String |
+  kw<"true"> |
+  kw<"false"> |
+  kw<"undef"> |
+  VariableName |
+  ParenthesizedExpression |
+  Vector |
+  Range |
+  CallExpression |
+  IndexExpression |
+  MemberExpression |
+  UnaryExpression |
+  BinaryExpression |
+  ConditionalExpression |
+  LetExpression |
+  AssertExpression |
+  EchoExpression |
+  FunctionLiteral |
+  comprehension
+}
+
+ParenthesizedExpression { "(" expression ")" }
+
+Vector { "[" commaSep<expression> "]" }
+
+Range { "[" expression ":" expression (":" expression)? "]" }
+
+CallExpression { expression !call ArgList }
+
+IndexExpression { expression !index "[" expression "]" }
+
+MemberExpression { expression !member "." PropertyName }
+
+UnaryExpression { !prefix (ArithOp<"-" | "+"> | LogicOp<"!"> | BitOp<"~">) expression }
+
+BinaryExpression {
+  expression !exp ArithOp<"^"> expression |
+  expression !times (ArithOp<"*" | "/" | "%">) expression |
+  expression !plus ArithOp<"+" | "-"> expression |
+  expression !shift BitOp<"<<" | ">>"> expression |
+  expression !compare CompareOp<"<" | "<=" | ">" | ">="> expression |
+  expression !equal CompareOp<"==" | "!="> expression |
+  expression !bitand BitOp<"&"> expression |
+  expression !bitor BitOp<"|"> expression |
+  expression !and LogicOp<"&&"> expression |
+  expression !or LogicOp<"||"> expression
+}
+
+ConditionalExpression { expression !ternary LogicOp<"?"> expression LogicOp<":"> expression }
+
+LetExpression { kw<"let"> ArgList !body expression }
+
+// The body is optional: `assert(x)` alone is an expression (parser.y's
+// `expr_or_empty`). When one follows it binds as far right as it can.
+AssertExpression { kw<"assert"> ArgList (!body expression)? }
+
+EchoExpression { kw<"echo"> ArgList (!body expression)? }
+
+FunctionLiteral { kw<"function"> ParamList !body expression }
+
+comprehension {
+  ForComprehension |
+  EachComprehension |
+  IfComprehension
+}
+
+ForComprehension { kw<"for"> (ArgList | ForHeader) !body expression }
+
+EachComprehension { kw<"each"> !body expression }
+
+IfComprehension {
+  kw<"if"> ParenthesizedCondition expression (!else kw<"else"> expression)?
+}
+
+// Any name may start with `$` (lexer.l's IDSTART); those are OpenSCAD's
+// special variables and get a node of their own, for highlighting.
+name { identifier | digitIdentifier | SpecialVariable }
+
+VariableName { name }
+VariableDefinition { name }
+DefName { name }
+ModuleName { name }
+ParamName { name }
+ArgName { name }
+PropertyName { name }
+
+// OpenSCAD allows a trailing comma in argument and parameter lists and in
+// vectors (`optional_trailing_comma`), and an empty list.
+commaSep<content> { (content ("," content)* ","?)? }
+
+kw<term> { @specialize[@name={term}]<identifier, term> }
+
+ArithOp<expr> { expr }
+LogicOp<expr> { expr }
+BitOp<expr> { expr }
+CompareOp<expr> { expr }
+
+// Inside a string nothing is skipped: whitespace and `//` are its text.
+@skip {} {
+  String { '"' (stringContent | Escape)* stringEnd }
+}
+
+@local tokens {
+  stringEnd[@name='"'] { '"' | @eof }
+  // lexer.l's escapes; any other backslash is a lone "Undefined escape
+  // sequence" warning in OpenSCAD and plain text here.
+  Escape {
+    "\\" ($[ntr\\"] | "\n" | "\r\n" |
+      "x" $[0-7] hex |
+      "u" hex hex hex hex |
+      "U" hex hex hex hex hex hex)
+  }
+  @else stringContent
+}
+
+// Numbers, and names that start with a digit (deprecated, but MCAD's
+// `8bit_polyfont` has one). lexer.l has flex take the longest match, a tie
+// going to the number: `8bit` is a name, `8`, `1e5` and `0x1F` numbers.
+// Lezer settles overlapping tokens by precedence rather than length, so no
+// @tokens rule can say that; src/lang/tokens.js does.
+@external tokens numbers from "./tokens.js" { Number, digitIdentifier }
+
+@tokens {
+  // U+00A0 and U+FEFF are whitespace in OpenSCAD (lexer.l).
+  whitespace { ($[ \t\r\n] | "\u{a0}" | "\u{feff}")+ }
+
+  LineComment { "//" ![\n]* }
+
+  // An unterminated comment runs to the end of the file, as OpenSCAD reads
+  // it (it then reports "Unterminated comment").
+  BlockComment { "/*" blockCommentRest }
+  blockCommentRest { ![*] blockCommentRest | "*" blockCommentAfterStar | @eof }
+  blockCommentAfterStar { "/" | "*" blockCommentAfterStar | ![/*] blockCommentRest | @eof }
+
+  hex { $[0-9a-fA-F] }
+
+  // lexer.l: IDSTART is [a-zA-Z_$], IDREST [a-zA-Z0-9_], and any non-ASCII
+  // code point but the two whitespace ones. A `$` starts only a name, so
+  // `$fn` and `$` alone are names, and `a$b` is two.
+  identifierChar { $[a-zA-Z0-9_\u{80}-\u{9f}\u{a1}-\u{fefe}\u{ff00}-\u{10ffff}] }
+  identifierLetter { $[a-zA-Z_\u{80}-\u{9f}\u{a1}-\u{fefe}\u{ff00}-\u{10ffff}] }
+  identifier { identifierLetter identifierChar* }
+  SpecialVariable { "$" identifierChar* }
+
+  // `include <path>` and `use <path>`: everything to the `>`, as lexer.l's
+  // cond_include/cond_use states read it.
+  IncludePath { "<" ![>]* ">" }
+
+  "(" ")" "[" "]" "{" "}"
+  "," ";" "." "=" ":" "?"
+  "!" "#" "%" "*"
+  "+" "-" "/" "^" "~"
+  "<" "<=" ">" ">=" "==" "!="
+  "&&" "||" "&" "|" "<<" ">>"
+
+    @precedence { LineComment, BlockComment, "/" }
+}
+
+@detectDelim

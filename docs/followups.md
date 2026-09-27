@@ -566,3 +566,60 @@ entry when it is done.
   trackpad's does. (8c)
 - The first model of a window is fitted (View All); the file's `$vpt`,
   `$vpr` and `$vpd` are not applied to the view yet. (8c)
+- The app's own footprint is 900-950 MB (`footprint`), with a one-line
+  file or a 1.1 MB one: 620 MB of it is malloc (Large and Small) and
+  175-235 MB unmapped graphics memory. The editor is not part of it: its
+  web content process is 56 MB, plus a 32 MB process WebKit keeps
+  prewarmed. The app's share wants the breakdown the 8c entry asks for. (8d)
+- Each editor keystroke costs the app about 1 ms on a 1.1 MB file (p50;
+  `EditorBenchmark`), nearly all of it the offset conversion and the edit
+  of the document's `String` copy, which are linear in the text; the
+  core's `edit` is 0.07 ms. A rope or an incremental line index would make
+  it logarithmic. The round trip from the page's change to the app's copy
+  is 2.2 ms p50 (3.1 ms p95), CodeMirror's own work 1-2 ms. (8d)
+- Editor checks that need a person (verified by test so far: IME's
+  NSTextInputClient calls commit once, in `EditorTests`; keys through
+  NSApp, in the opt-in `EditorKeyTests`):
+  - Japanese input with the system input method: composing (underlined
+    marked text, the candidate window placed at the caret), committing,
+    cancelling with Escape, and reconversion; the same for Chinese
+    (Pinyin) and Korean. The document must see only committed text.
+  - Dead keys and the accent menu (hold `e`).
+  - VoiceOver: the editor is announced as a text area labelled "OpenSCAD
+    source"; reading by line, word and character; hearing typed and
+    deleted text; lint markers and the search panel being reachable.
+    An in-process query of the web view's accessibility tree found no text
+    area without an assistive client attached, so this was not testable
+    from `xcodebuild`.
+  - Dictation, and Services (Edit > Services) on selected text.
+  (8d)
+- The key tests that go through NSApp (`EditorKeyTests`) run only with
+  `NEOSCAD_EDITOR_KEYS=1` and the test host in front: macOS does not let a
+  test host started in the background take focus. They passed once with the
+  host brought forward (`open -a` on its bundle), but a later run could not
+  get it forward. Whether the menu alone would take F5 and F6 from a
+  focused web view is unverified; the editor forwards them itself
+  (`appKeys` in `src/editor.js`). (8d)
+- With the editor focused, CodeMirror's keymap takes ⌘[ and ⌘] (indent
+  less and more), so the View menu's Zoom Out and Zoom In keys do not reach
+  the 3D view; they still work with the view focused. Undo and Redo work
+  only while the editor has focus: elsewhere the window's own undo manager
+  answers the menu, and it has nothing to undo. (8d)
+- Lint markers show only diagnostics about the document itself; those
+  about an included file stay in the console. The editor could mark the
+  `include` line instead. (8d)
+- The builtin names are coloured by name (OpenSCAD's editor's lists), so a
+  user module called `cube` is coloured as the primitive; OpenSCAD's editor
+  does the same. The grammar accepts non-ASCII identifiers, which OpenSCAD
+  accepts only with the `unicode-identifiers` feature; the core's
+  diagnostic marks them. (8d)
+- The editor runs in the page's content world, not a dedicated
+  `WKContentWorld` as `docs/audits/macos-prep.md` §4 suggested: the page
+  holds only the bundle (the Content-Security-Policy admits no other
+  script and no network), so there is nothing to isolate the bridge from.
+  Revisit if the page ever shows content from elsewhere. (8d)
+- The language server transport (`lspTransport` in `src/bridge.js`, the
+  `lsp` message) is in place, but no `LSPClient` is created and the app
+  answers every request with "method not found" until 8e's server. (8d)
+- Building the app needs node 18 or newer (`scripts/apple/build-editor.sh`
+  finds nvm's and Homebrew's), and the network once, for `npm ci`. (8d)

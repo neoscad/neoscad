@@ -36,6 +36,8 @@ nightly with `--backend=cgal` and `--backend=manifold`.
     scripts/apple/build-core.sh                    # Rust core -> apple/build/NeoSCADCore.xcframework + Swift bindings
     xcodegen generate --spec apple/project.yml     # apple/NeoSCAD.xcodeproj (gitignored); builds the core if missing
     xcodebuild -project apple/NeoSCAD.xcodeproj -scheme NeoSCAD -derivedDataPath apple/build/DerivedData build|test
+    scripts/apple/build-editor.sh                  # CodeMirror bundle -> apple/Editor/web/dist (needs node 18+)
+    (cd apple/Editor/web && npm test && npm run corpus)  # grammar tests; corpus = 0 error nodes
     scripts/agent-eval/run.py --help                  # agent-loop eval (uses claude -p; costs credits)
     ./target/release/conformance manifest [--check]  # after updating .reference
     ./target/release/conformance diff --format ast|echo|csg [PATHS]  # vs the nightly

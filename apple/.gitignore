@@ -8,3 +8,9 @@ Core/Generated/
 DerivedData/
 # Written by `xcodegen generate` from the `info` properties in project.yml.
 App/Info.plist
+# scripts/apple/build-editor.sh output: the editor bundle, and the parser
+# its build generates from the Lezer grammar (node_modules/ is ignored at
+# the root).
+Editor/web/dist/
+Editor/web/src/lang/parser.js
+Editor/web/src/lang/parser.terms.js

@@ -1,0 +1,39 @@
+<!doctype html>
+<!--
+  The editor page. apple/App/Editor/EditorSchemeHandler.swift serves it with
+  a Content-Security-Policy header and replaces NONCE_PLACEHOLDER with a
+  fresh nonce, which CodeMirror puts on the style elements it writes. The
+  policy is repeated here in case the header is ever lost: nothing loads
+  from the network, and the only script is the bundle beside this page.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src neoscad-editor:; style-src 'nonce-NONCE_PLACEHOLDER'; img-src data:; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="neoscad-nonce" content="NONCE_PLACEHOLDER" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Editor</title>
+    <style nonce="NONCE_PLACEHOLDER">
+      html,
+      body,
+      #editor {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+      }
+      #editor > .cm-editor {
+        height: 100%;
+      }
+      #editor > .cm-editor.cm-focused {
+        outline: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="editor"></div>
+    <script src="editor.js"></script>
+  </body>
+</html>

@@ -4,12 +4,12 @@
 import SwiftUI
 
 struct DocumentView: View {
-    @Bindable var model: DocumentModel
+    let model: DocumentModel
 
     var body: some View {
         HSplitView {
             VSplitView {
-                PlainTextEditor(text: $model.text)
+                CodeEditor(controller: model.editor)
                     .frame(minWidth: 320, minHeight: 200)
                 ConsoleView(report: model.report)
                     .frame(minHeight: 90, idealHeight: 160)

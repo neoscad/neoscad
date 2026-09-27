@@ -6,7 +6,8 @@
 #   NeoSCADCore   framework: the UniFFI bindings (Core/Generated, written
 #                 by scripts/apple/build-core.sh) and the async wrapper
 #                 (Core/Engine.swift), linking the Rust core's XCFramework
-#   NeoSCAD       the app: an NSDocument editor for .scad files
+#   NeoSCAD       the app: an NSDocument editor for .scad files, with the
+#                 editor bundle (EditorBundle) in Resources/Editor
 #   NeoSCADTests  Swift tests of the core through the bindings
 #   NeoSCADAppTests  tests hosted in the app: documents, the Render command
 name: NeoSCAD
@@ -19,8 +20,8 @@ options:
   # The core build phase's input file list must exist before Xcode plans
   # the first build; on a clean checkout this also builds the core once,
   # because Xcode resolves the XCFramework when it plans the build, before
-  # any build phase can make it.
-  preGenCommand: ../scripts/apple/build-core.sh --prepare
+  # any build phase can make it. The editor bundle's input list likewise.
+  preGenCommand: ../scripts/apple/build-core.sh --prepare && ../scripts/apple/build-editor.sh --prepare
 
 settings:
   base:
@@ -82,6 +83,31 @@ targets:
       - target: NeoSCADCore
         embed: true
         codeSign: true
+      # The editor's page and script, built before this target copies them.
+      - target: EditorBundle
+    # The editor bundle into Resources/Editor, where
+    # App/Editor/EditorSchemeHandler.swift serves it from. A script rather
+    # than a folder reference: Xcode decides whether to copy a folder
+    # reference by the folder's own time stamp, which a rebuilt file inside
+    # it does not change, so the app could keep a stale bundle.
+    postCompileScripts:
+      - name: Copy editor bundle
+        script: |
+          dest="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Editor"
+          mkdir -p "$dest"
+          for f in "${SCRIPT_INPUT_FILE_0}" "${SCRIPT_INPUT_FILE_1}" "${SCRIPT_INPUT_FILE_2}"; do
+            cp "$f" "$dest/"
+          done
+        inputFiles:
+          - $(SRCROOT)/Editor/web/dist/editor.html
+          - $(SRCROOT)/Editor/web/dist/editor.js
+          - $(SRCROOT)/Editor/web/dist/THIRD-PARTY-LICENSES.txt
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Editor/editor.html
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Editor/editor.js
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Editor/THIRD-PARTY-LICENSES.txt
+        basedOnDependencyAnalysis: true
+        showEnvVars: false
     info:
       path: App/Info.plist
       properties:
@@ -170,6 +196,27 @@ aggregateTargets:
           - $(SRCROOT)/build/core.stamp
           - $(SRCROOT)/Core/Generated/neoscad_ffi.swift
           - $(SRCROOT)/build/NeoSCADCore.xcframework/Info.plist
+        basedOnDependencyAnalysis: true
+        showEnvVars: false
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+  # The editor bundle (scripts/apple/build-editor.sh): npm when the lock
+  # file changed, then the grammar and esbuild. Skipped when no input is
+  # newer than the outputs; the input list is every file the bundle is
+  # built from.
+  EditorBundle:
+    buildScripts:
+      - name: Build editor bundle
+        script: exec "${SRCROOT}/../scripts/apple/build-editor.sh"
+        inputFileLists:
+          - $(SRCROOT)/build/editor-inputs.xcfilelist
+        outputFiles:
+          - $(SRCROOT)/build/editor.stamp
+          - $(SRCROOT)/Editor/web/dist/editor.html
+          - $(SRCROOT)/Editor/web/dist/editor.js
+          - $(SRCROOT)/Editor/web/dist/THIRD-PARTY-LICENSES.txt
         basedOnDependencyAnalysis: true
         showEnvVars: false
     settings:

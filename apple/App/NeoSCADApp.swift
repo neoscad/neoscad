@@ -41,6 +41,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    // MARK: The editor's font (View menu), for every window
+
+    @objc func increaseEditorFontSize(_ sender: Any?) {
+        EditorSettings.fontSize += 1
+    }
+
+    @objc func decreaseEditorFontSize(_ sender: Any?) {
+        EditorSettings.fontSize -= 1
+    }
+
+    @objc func resetEditorFontSize(_ sender: Any?) {
+        EditorSettings.fontSize = EditorSettings.defaultFontSize
+    }
+
     /// The standard About panel (name, icon and "Version x (build)" from
     /// Info.plist), with the core's version as credits.
     @objc func showAboutPanel(_ sender: Any?) {

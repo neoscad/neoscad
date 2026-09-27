@@ -1,6 +1,6 @@
 // The menu bar. Items send standard AppKit actions down the responder
-// chain (the document handles `saveDocument:`, the text view `copy:`), so
-// nothing here knows about documents or views.
+// chain (the document handles `saveDocument:`, the editor's web view
+// `copy:` and `undo:`), so nothing here knows about documents or views.
 
 import AppKit
 
@@ -139,6 +139,17 @@ enum MainMenu {
         m.addItem(item("View All", #selector(D.viewAll(_:)), "v", [.command, .shift]))
         m.addItem(item("Zoom In", #selector(D.zoomIn(_:)), "]"))
         m.addItem(item("Zoom Out", #selector(D.zoomOut(_:)), "["))
+        m.addItem(.separator())
+        // The editor's font, for every window. ⌘+ is typed as ⌘= on most
+        // layouts (the + is shifted), so a hidden twin answers ⌘= too.
+        typealias A = AppDelegate
+        m.addItem(item("Bigger", #selector(A.increaseEditorFontSize(_:)), "+"))
+        let bigger = item("Bigger", #selector(A.increaseEditorFontSize(_:)), "=")
+        bigger.isHidden = true
+        bigger.allowsKeyEquivalentWhenHidden = true
+        m.addItem(bigger)
+        m.addItem(item("Smaller", #selector(A.decreaseEditorFontSize(_:)), "-"))
+        m.addItem(item("Default Font Size", #selector(A.resetEditorFontSize(_:))))
         return m
     }
 

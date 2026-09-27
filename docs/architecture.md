@@ -109,7 +109,11 @@ JSON-RPC (`docs/serve-protocol.md`).
   gestures) calls the Rust core through UniFFI. The Rust wgpu viewport draws
   into a `CAMetalLayer`: meshes go to the GPU with no copy across a bridge,
   and the view can run at 120 Hz. The editor is CodeMirror 6 in an embedded
-  WKWebView, the same component the web app uses.
+  WKWebView, the same component the web app uses: `apple/Editor/web`, with
+  a Lezer grammar for OpenSCAD, bundled by esbuild and served offline
+  through a custom URL scheme. CodeMirror owns editing (selection, undo);
+  each change crosses the bridge at once, into the document's copy (which
+  NSDocument saves) and the core's (`Core.edit`, in UTF-8 offsets).
 - **Web:** the same core compiled to WASM and run in a worker, the same wgpu
   renderer on WebGPU, and CodeMirror 6.
 - **Project definition:** XcodeGen `project.yml`; the generated `.xcodeproj`
@@ -230,7 +234,7 @@ ffmpeg.
    `check`, `measure`, snapshot parts and issues, and a server that
    survives a panicking request). 7c (done): the MCP server and an
    agent-loop eval pilot.
-8. **macOS app.** 8a+8b (done): XcodeGen project, NSDocument app, `crates/ffi` (UniFFI) and the `NeoSCADCore` framework. Plan: `docs/audits/macos-prep.md`.
+8. **macOS app.** 8a–8d (done): viewport and CodeMirror editor too. 8a+8b: XcodeGen project, NSDocument app, `crates/ffi` (UniFFI) and the `NeoSCADCore` framework. Plan: `docs/audits/macos-prep.md`.
 9. **WASM web app** (deferred by the owner, 2026-09-26). The library crates
    stay WASM-compatible, checked by `scripts/wasm-check.sh`, so it can be
    picked up later.
