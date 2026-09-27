@@ -164,10 +164,22 @@ impl EarClip {
         self.polygon[left].right_dir = safe_normalize_2d(dir);
     }
 
-    /// Apply `f` to each unclipped vert in the polygon ring starting from `first`.
-    /// Returns `Some(last_v)` on success (last_v == first), or `None` if degenerate.
+    /// The unclipped verts of the polygon ring starting from `first`, in ring
+    /// order, or `None` if the ring is degenerate.
     fn loop_verts(&self, first: usize) -> Option<Vec<usize>> {
         let mut result = Vec::new();
+        self.for_each_loop_vert(first, |v| result.push(v)).then_some(result)
+    }
+
+    /// NeoSCAD patch (see vendor/README.md): apply `f` to each unclipped vert
+    /// of the ring starting from `first`, in the order `loop_verts` returns
+    /// them, without collecting them. Returns `false` if the ring is
+    /// degenerate; `f` has then already seen the verts before the degenerate
+    /// one, so a caller that must match `loop_verts`'s all-or-nothing `None`
+    /// has to undo what `f` did. `cut_keyhole` and `find_closer_bridge` walk
+    /// every outer ring once per hole, and collecting each ring into a fresh
+    /// `Vec` was 60% of extruding a square with 5,041 holes.
+    fn for_each_loop_vert(&self, first: usize, mut f: impl FnMut(usize)) -> bool {
         let mut v = first;
         let mut cur_first = first;
         loop {
@@ -176,22 +188,22 @@ impl EarClip {
                 if !self.clipped(cur_first) {
                     v = cur_first;
                     if self.polygon[v].right == self.polygon[v].left {
-                        return None;
+                        return false;
                     }
-                    result.push(v);
+                    f(v);
                 }
             } else {
                 if self.polygon[v].right == self.polygon[v].left {
-                    return None;
+                    return false;
                 }
-                result.push(v);
+                f(v);
             }
             v = self.polygon[v].right;
             if v == cur_first {
                 break;
             }
         }
-        Some(result)
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -555,13 +567,15 @@ impl EarClip {
         // lies inside THAT edge's wedge, and it beats the current connector —
         // either the crossing point is CCW of the connector edge, or (for any
         // non-CCW result) the vertical-ordering InsideEdge tie-break holds.
-        let outers: Vec<usize> = self.outers.clone();
-        for outer_start in &outers {
-            let verts = match self.loop_verts(*outer_start) {
-                None => continue,
-                Some(v) => v,
-            };
-            for &edge in &verts {
+        //
+        // NeoSCAD patch: walk each ring in place instead of cloning `outers`
+        // and collecting the ring (see `for_each_loop_vert`). A degenerate
+        // ring used to be skipped whole, so the connector is restored if the
+        // walk stops part-way; that keeps the bridges, and so the triangles,
+        // exactly as before.
+        for &outer_start in &self.outers {
+            let before = connector;
+            let complete = self.for_each_loop_vert(outer_start, |edge| {
                 let x = self.vert_interp_y2x(edge, start_pos, on_top);
                 if x.is_finite()
                     && self.vert_inside_edge(start, edge, true)
@@ -580,6 +594,9 @@ impl EarClip {
                 {
                     connector = edge;
                 }
+            });
+            if !complete {
+                connector = before;
             }
         }
 
@@ -615,13 +632,11 @@ impl EarClip {
             -1.0
         };
 
-        let outers: Vec<usize> = self.outers.clone();
-        for outer_start in &outers {
-            let verts = match self.loop_verts(*outer_start) {
-                None => continue,
-                Some(v) => v,
-            };
-            for &vert in &verts {
+        // NeoSCAD patch: in place, and all-or-nothing per ring, as in
+        // `cut_keyhole`.
+        for &outer_start in &self.outers {
+            let before = connector;
+            let complete = self.for_each_loop_vert(outer_start, |vert| {
                 let inside = above
                     * ccw(start_pos, self.polygon[vert].pos, self.polygon[connector].pos, self.epsilon) as f64;
                 let vp = self.polygon[vert].pos;
@@ -635,6 +650,9 @@ impl EarClip {
                 {
                     connector = vert;
                 }
+            });
+            if !complete {
+                connector = before;
             }
         }
 
