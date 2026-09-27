@@ -12,10 +12,13 @@
 //!   warnings name it) and the suffix, validated by the metadata of the
 //!   library and its includes.
 //!
-//! So a one-line edit to the main file parses the main file (and its
-//! includes, which are part of it) again, while every `use`d library comes
-//! from the cache; an edit on disk to any file a parse read invalidates
-//! that parse. A parse that could not find an include is never cached:
+//! So a one-line edit to the main file parses the main file again, while
+//! every `use`d library comes from the cache; an edit on disk to any file
+//! a parse read invalidates that parse. Its includes are part of that
+//! parse, but an include between top-level statements (a library's
+//! `include <BOSL2/std.scad>`) comes from the [`FragmentStore`], parsed
+//! and lowered once (`lang::fragment`), and the rest from the
+//! [`LexStore`], read and lexed once. A parse that could not find an include is never cached:
 //! the file may appear before the next request, and nothing would notice.
 //!
 //! Entries are evicted least recently used first once their estimated
@@ -28,6 +31,7 @@ use std::sync::Arc;
 
 use lang::Program;
 use lang::diag::DiagCode;
+use lang::fragment::{Fragment, FragmentCache, FragmentKey};
 use lang::loader::{
     FileSystem, LexCache, LexedFile, LibraryPath, Metadata, find_valid_path, generic,
 };
@@ -112,6 +116,100 @@ impl LexCache for LexStore {
             if let Some((_, l, _)) = files.remove(&oldest) {
                 total -= cost(&l);
             }
+        }
+    }
+}
+
+/// Included files parsed and lowered (`lang::fragment`): after an edit to
+/// a main file that includes a large library between its statements, the
+/// parse takes the library's statements as they are instead of parsing
+/// them again, which is most of a re-parse. Checked by the loader against
+/// the files and paths they depend on; bounded by `budget` estimated
+/// bytes, dropping the least recently used.
+#[derive(Debug)]
+pub struct FragmentStore {
+    frags: std::sync::Mutex<HashMap<FragmentKey, (Arc<Fragment>, u64)>>,
+    clock: std::sync::atomic::AtomicU64,
+    budget: usize,
+}
+
+impl FragmentStore {
+    pub fn new(budget: usize) -> FragmentStore {
+        FragmentStore {
+            frags: Default::default(),
+            clock: Default::default(),
+            budget,
+        }
+    }
+
+    /// Entries and estimated bytes held.
+    pub fn size(&self) -> (usize, usize) {
+        let f = self
+            .frags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (f.len(), f.values().map(|(x, _)| x.cost()).sum())
+    }
+
+    pub fn clear(&self) {
+        self.frags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
+impl FragmentCache for FragmentStore {
+    fn get(&self, key: &FragmentKey) -> Option<Arc<Fragment>> {
+        let mut frags = self
+            .frags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let e = frags.get_mut(key)?;
+        e.1 = self
+            .clock
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(e.0.clone())
+    }
+
+    fn put(&self, key: FragmentKey, fragment: Arc<Fragment>) {
+        let mut frags = self
+            .frags
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stamp = self
+            .clock
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        frags.insert(key, (fragment, stamp));
+        let mut total: usize = frags.values().map(|(f, _)| f.cost()).sum();
+        while total > self.budget && frags.len() > 1 {
+            let Some(oldest) = frags
+                .iter()
+                .min_by_key(|(_, (_, s))| *s)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some((f, _)) = frags.remove(&oldest) {
+                total -= f.cost();
+            }
+        }
+    }
+}
+
+/// The caches a parse draws on.
+#[derive(Debug, Clone, Copy)]
+pub struct Stores<'a> {
+    pub lexed: &'a LexStore,
+    pub fragments: &'a FragmentStore,
+}
+
+impl Stores<'_> {
+    pub fn caches(&self) -> lang::Caches<'_> {
+        lang::Caches {
+            lex: Some(self.lexed),
+            fragments: Some(self.fragments),
+            stats: None,
         }
     }
 }
@@ -328,7 +426,7 @@ impl ParseCache {
 /// `path`, from the cache when its includes are unchanged.
 pub fn main_program(
     cache: &std::sync::Mutex<ParseCache>,
-    lexed: &LexStore,
+    stores: Stores<'_>,
     path: &Path,
     text: Vec<u8>,
     fs: &dyn FileSystem,
@@ -342,12 +440,12 @@ pub fn main_program(
     {
         return p;
     }
-    let program = Arc::new(lang::parse_program_cached(
+    let program = Arc::new(lang::parse_program_with(
         path.to_path_buf(),
         text,
         fs,
         libs,
-        Some(lexed),
+        stores.caches(),
     ));
     // The main file's text is in the key; its includes are checked by
     // their metadata.
@@ -377,7 +475,7 @@ fn resolve(name: &str, dir: &Path, fs: &dyn FileSystem, libs: &LibraryPath) -> O
 /// processes them.
 pub fn libraries(
     cache: &std::sync::Mutex<ParseCache>,
-    lexed: &LexStore,
+    stores: Stores<'_>,
     root: &Program,
     suffix: &[u8],
     fs: &dyn FileSystem,
@@ -389,7 +487,7 @@ pub fn libraries(
     let mut seen = HashSet::new();
     let mut ctx = Visit {
         cache,
-        lexed,
+        stores,
         main: &main,
         suffix,
         fs,
@@ -401,7 +499,7 @@ pub fn libraries(
 
 struct Visit<'a> {
     cache: &'a std::sync::Mutex<ParseCache>,
-    lexed: &'a LexStore,
+    stores: Stores<'a>,
     main: &'a Path,
     suffix: &'a [u8],
     fs: &'a dyn FileSystem,
@@ -473,13 +571,13 @@ impl Visit<'_> {
             self.fs.read(path).ok()?
         };
         text.extend_from_slice(self.suffix);
-        let program = Arc::new(lang::parse_library_cached(
+        let program = Arc::new(lang::parse_library_with(
             path.to_path_buf(),
             text,
             self.main,
             self.fs,
             self.libs,
-            Some(self.lexed),
+            self.stores.caches(),
         ));
         self.cache
             .lock()

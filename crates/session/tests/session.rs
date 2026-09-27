@@ -144,6 +144,45 @@ fn warm_messages_match_a_cold_session() {
     assert!(!moved.contains("line 2\n"), "{moved}");
 }
 
+#[test]
+fn edits_reuse_included_parses_with_the_same_messages() {
+    // The included file's messages depend on what the main file assigned
+    // before the include (the reassignment warning names both places),
+    // and its line numbers on nothing the main file does.
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/part.scad",
+        b"a = 2; b = \"\\q\";\nmodule part() { x = 1; x = 2; cube(a + x); }\n".to_vec(),
+    );
+    let render = |s: &Session| {
+        let r = s
+            .render(
+                &Run::new("m.scad"),
+                Mode::Render,
+                &render::ColorScheme::cornfield(),
+            )
+            .unwrap();
+        String::from_utf8(r.log.stderr).unwrap()
+    };
+    let s = session(&fs);
+    for (i, main) in [
+        "a = 1;\ninclude <part.scad>\npart();\n",
+        "\n\na = 1; // moved\ninclude <part.scad>\npart();\n",
+        "include <part.scad>\npart();\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        s.update(Path::new("m.scad"), main.as_bytes().to_vec());
+        let warm = render(&s);
+        fs.insert("/doc/m.scad", main.as_bytes().to_vec());
+        let cold = render(&session(&fs));
+        assert_eq!(warm, cold, "edit {i}");
+        assert!(warm.contains("part.scad"), "{warm}");
+        assert_eq!(s.stats().fragments.0, 1, "one included file, parsed once");
+    }
+}
+
 /// Wait for `stage` of the request on `rx`, then run `then`.
 fn when(rx: &mpsc::Receiver<Stage>, stage: Stage, then: impl FnOnce()) {
     let deadline = Instant::now() + Duration::from_secs(60);

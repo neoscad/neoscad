@@ -7,15 +7,23 @@
 //! parser) is followed by the included file's tokens. `use <f>` is resolved
 //! here too, because OpenSCAD resolves it in the scanner and warns there.
 //!
+//! With a [`crate::fragment::FragmentCache`], an include may instead come
+//! as the included file's parse, which the stream then leaves out: the
+//! loader numbers everything (tokens, files, message order) as if its
+//! tokens were there, and [`crate::fragment`] puts the parse in after the
+//! includer's is done.
+//!
 //! File access goes through [`FileSystem`] so the WASM build and tests can
 //! supply their own files.
 
+use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use crate::diag::{DiagCode, Diagnostic, Severity};
+use crate::fragment::{self, Ctx, Dep, Fragment, FragmentKey, SpliceStats};
 use crate::source::{FileId, SourceMap, Span};
 use crate::syntax::SyntaxKind;
 use crate::syntax::lexer::{LexDiag, Token, directive_path, lex};
@@ -214,17 +222,26 @@ pub fn load_cached(
     libs: &LibraryPath,
     cache: Option<&dyn LexCache>,
 ) -> Loaded {
-    let mut l = Loader {
+    let stats = std::cell::Cell::default();
+    let main = main_path.clone();
+    let ctx = Ctx {
         fs,
         libs,
-        cache,
-        out: Loaded::default(),
-        open: Vec::new(),
-        last_name: String::new(),
+        lex: cache,
+        frags: None,
+        main: &main,
+        stats: &stats,
     };
-    let main = l.out.sources.add(main_path, main_text);
-    l.splice(main, None);
-    l.out
+    assemble(
+        &ctx,
+        main_path,
+        main_text,
+        None,
+        Vec::new(),
+        &HashSet::new(),
+        true,
+    )
+    .loaded
 }
 
 /// Lex a single file without following includes (for formatters and
@@ -245,10 +262,82 @@ pub fn load_single(path: PathBuf, text: Vec<u8>) -> Loaded {
     out
 }
 
+/// An included file put in as its parse ([`Fragment`]) rather than its
+/// tokens.
+#[derive(Debug)]
+pub(crate) struct Pending {
+    /// Index in [`Loaded::tokens`] of the directive it follows.
+    pub at: u32,
+    /// The directive: its file and byte offset, which stay the same when
+    /// an earlier include is spliced as tokens instead.
+    pub key: (u32, u32),
+    pub frag: Arc<Fragment>,
+    /// The file id and token index the fragment's own ids start from in
+    /// the program.
+    pub file_base: u32,
+    pub token_base: u32,
+}
+
+/// What [`assemble`] built: the token stream without the fragments'
+/// tokens (they are parsed already), and what the fragments need.
+#[derive(Debug)]
+pub(crate) struct Assembly {
+    /// Sources and diagnostics as the whole program has them, uses and
+    /// diagnostics numbered by the program's tokens; `tokens` lacks the
+    /// fragments' tokens.
+    pub loaded: Loaded,
+    pub inserts: Vec<Pending>,
+    /// The scanner's `filename` at the end (see [`Loader::last_name`]).
+    pub last_name: String,
+    /// Everything the assembly depended on, for a [`Fragment`] of it.
+    pub deps: Vec<Dep>,
+    /// Whether every file read had metadata and could be read.
+    pub cacheable: bool,
+    pub counts: SpliceStats,
+}
+
+/// Build the token stream for `path` (text `text`, lexed as `pre` if
+/// given): its tokens with each include's spliced in, except that an
+/// include between top-level statements, when a fragment cache is given,
+/// comes as its parse ([`Pending`]) unless `no_frags` or the directive is
+/// in `textual`. `open` is the chain of included files `path` is read
+/// inside (empty for a main file).
+pub(crate) fn assemble(
+    ctx: &Ctx<'_>,
+    path: PathBuf,
+    text: Vec<u8>,
+    pre: Option<Arc<LexedFile>>,
+    open: Vec<String>,
+    textual: &HashSet<(u32, u32)>,
+    no_frags: bool,
+) -> Assembly {
+    let mut l = Loader {
+        ctx,
+        out: Loaded::default(),
+        open,
+        last_name: String::new(),
+        virt: 0,
+        textual,
+        no_frags: no_frags || ctx.frags.is_none(),
+        inserts: Vec::new(),
+        deps: Vec::new(),
+        cacheable: true,
+        counts: SpliceStats::default(),
+    };
+    let root = l.out.sources.add(path, text);
+    l.splice(root, pre);
+    Assembly {
+        loaded: l.out,
+        inserts: l.inserts,
+        last_name: l.last_name,
+        deps: l.deps,
+        cacheable: l.cacheable,
+        counts: l.counts,
+    }
+}
+
 struct Loader<'a> {
-    fs: &'a dyn FileSystem,
-    libs: &'a LibraryPath,
-    cache: Option<&'a dyn LexCache>,
+    ctx: &'a Ctx<'a>,
     out: Loaded,
     /// Full names of the included files currently being read, to stop
     /// circular includes (OpenSCAD's `openfilenames`).
@@ -256,6 +345,15 @@ struct Loader<'a> {
     /// The scanner's global `filename`, which survives between directives:
     /// an empty `use <>` reuses the previous directive's name.
     last_name: String,
+    /// Tokens in the program so far, fragments' included: the index the
+    /// next token has in the program's stream (and in its syntax tree).
+    virt: u32,
+    textual: &'a HashSet<(u32, u32)>,
+    no_frags: bool,
+    inserts: Vec<Pending>,
+    deps: Vec<Dep>,
+    cacheable: bool,
+    counts: SpliceStats,
 }
 
 impl Loader<'_> {
@@ -274,7 +372,7 @@ impl Loader<'_> {
         };
         let mut diags = diags.into_iter().peekable();
         for (k, tok) in tokens.into_iter().enumerate() {
-            let global = self.out.tokens.len() as u32;
+            let global = self.virt;
             while let Some(d) = diags.next_if(|d| d.token as usize == k) {
                 let line = self.out.sources.get(file).line_of(d.line_at);
                 self.out.diags.push(
@@ -284,6 +382,7 @@ impl Loader<'_> {
                 );
             }
             self.out.tokens.push(tok);
+            self.virt += 1;
             match tok.kind {
                 SyntaxKind::IncludeDirective => self.include(file, tok, global),
                 SyntaxKind::UseDirective => self.use_(file, tok, global),
@@ -337,31 +436,64 @@ impl Loader<'_> {
         };
         let full_name = generic(&full);
         self.out.includes.push((local.clone(), full_name.clone()));
-        let meta = self.cache.and_then(|_| self.fs.metadata(&full));
-        let cached = match (self.cache, &meta) {
-            (Some(c), Some(m)) => c.get(&full, m),
-            _ => None,
+        let meta = if self.ctx.lex.is_some() || self.ctx.frags.is_some() {
+            self.fs().metadata(&full)
+        } else {
+            None
         };
-        let text = match &cached {
-            Some(f) => f.text.to_vec(),
-            None => match self.fs.read(&full) {
-                Ok(t) => t,
-                Err(_) => {
-                    self.warn(
-                        DiagCode::IncludeNotFound,
-                        format!("Can't open include file '{local}'."),
-                        file,
-                        tok,
-                        global,
-                    );
+        match meta {
+            Some(m) => self.deps.push(Dep::File(full.clone(), m)),
+            None => self.cacheable = false,
+        }
+        if self.ctx.frags.is_some() {
+            if self.no_frags {
+                self.counts.after_error += 1;
+            } else if self.textual.contains(&(file.0, tok.start)) {
+                self.counts.nested += 1;
+            } else if let Some(m) = meta {
+                if self.fragment(file, tok, &full, &full_name, m) {
                     return;
                 }
-            },
+            } else {
+                self.counts.unusable += 1;
+            }
+        }
+        let Some((text, pre)) = self.read(&full, meta) else {
+            self.cacheable = false;
+            self.warn(
+                DiagCode::IncludeNotFound,
+                format!("Can't open include file '{local}'."),
+                file,
+                tok,
+                global,
+            );
+            return;
         };
         self.last_name.clear();
-        let pre = match (cached, self.cache, meta) {
-            (Some(f), _, _) => f,
-            (None, Some(c), Some(m)) => {
+        let id = self.out.sources.add(full, text);
+        self.open.push(full_name);
+        self.splice(id, pre);
+        self.open.pop();
+    }
+
+    /// `full`'s text, and its tokens when a [`LexCache`] has or takes
+    /// them; `None` when it cannot be read.
+    fn read(
+        &self,
+        full: &Path,
+        meta: Option<Metadata>,
+    ) -> Option<(Vec<u8>, Option<Arc<LexedFile>>)> {
+        let cache = self.ctx.lex;
+        let cached = match (cache, &meta) {
+            (Some(c), Some(m)) => c.get(full, m),
+            _ => None,
+        };
+        if let Some(f) = cached {
+            return Some((f.text.to_vec(), Some(f)));
+        }
+        let text = self.fs().read(full).ok()?;
+        let pre = match (cache, meta) {
+            (Some(c), Some(m)) => {
                 // Lexed with `FileId(0)` for the cache; `splice` retags.
                 let lexed = lex(&text, FileId(0));
                 let f = Arc::new(LexedFile {
@@ -369,21 +501,91 @@ impl Loader<'_> {
                     tokens: lexed.tokens,
                     diags: lexed.diags,
                 });
-                c.put(&full, m, f.clone());
+                c.put(full, m, f.clone());
+                Some(f)
+            }
+            _ => None,
+        };
+        Some((text, pre))
+    }
+
+    /// Put `full` in as its parse, from the fragment cache or parsed now;
+    /// `false` when it has to be spliced as tokens.
+    fn fragment(
+        &mut self,
+        file: FileId,
+        tok: Token,
+        full: &Path,
+        full_name: &str,
+        meta: Metadata,
+    ) -> bool {
+        let Some(cache) = self.ctx.frags else {
+            return false;
+        };
+        let key = FragmentKey {
+            path: full.to_path_buf(),
+            open: self.open.clone(),
+            main: self.ctx.main.to_path_buf(),
+        };
+        let frag = match cache
+            .get(&key)
+            .filter(|f| f.is_current(self.fs(), self.ctx.libs))
+        {
+            Some(f) => {
+                self.counts.reused += 1;
                 f
             }
-            _ => {
-                let id = self.out.sources.add(full, text);
-                self.open.push(full_name);
-                self.splice(id, None);
-                self.open.pop();
-                return;
+            None => {
+                let Some((text, pre)) = self.read(full, Some(meta)) else {
+                    return false;
+                };
+                let mut open = self.open.clone();
+                open.push(full_name.to_string());
+                let f = Arc::new(fragment::build(
+                    self.ctx,
+                    full.to_path_buf(),
+                    text,
+                    pre,
+                    open,
+                    meta,
+                ));
+                cache.put(key, f.clone());
+                self.counts.built += 1;
+                f
             }
         };
-        let id = self.out.sources.add(full, text);
-        self.open.push(full_name);
-        self.splice(id, Some(pre));
-        self.open.pop();
+        self.deps.extend(frag.deps.iter().cloned());
+        let Some(body) = &frag.body else {
+            self.counts.unusable += 1;
+            return false;
+        };
+        let file_base = self.out.sources.len() as u32;
+        let token_base = self.virt;
+        for f in &body.files {
+            self.out.sources.push(f.duplicate());
+        }
+        let seq = seq_for_token(token_base);
+        self.out.diags.extend(
+            body.diags
+                .iter()
+                .map(|d| crate::ast::rebase_diag(d, file_base, seq)),
+        );
+        self.out.uses.extend(body.uses.iter().map(|u| UseRef {
+            token: u.token + token_base,
+            ..u.clone()
+        }));
+        self.out.includes.extend(body.includes.iter().cloned());
+        self.last_name = body.last_name.clone();
+        self.inserts.push(Pending {
+            at: self.out.tokens.len() as u32 - 1,
+            key: (file.0, tok.start),
+            frag: frag.clone(),
+            file_base,
+            token_base,
+        });
+        self.virt += body.cst.tokens().len() as u32;
+        self.counts.fragments += 1;
+        true
     }
 
     fn use_(&mut self, file: FileId, tok: Token, global: u32) {
@@ -419,8 +621,24 @@ impl Loader<'_> {
         }
     }
 
-    fn find_valid_path(&self, source_dir: &Path, local: &Path) -> Option<PathBuf> {
-        find_valid_path(self.fs, self.libs, source_dir, local, &self.open)
+    fn fs(&self) -> &dyn FileSystem {
+        self.ctx.fs
+    }
+
+    /// [`find_valid_path`], noting the answer: a fragment is only good
+    /// while every path in it still resolves to the same file (a new file
+    /// next to the includer would shadow a library's).
+    fn find_valid_path(&mut self, source_dir: &Path, local: &Path) -> Option<PathBuf> {
+        let found = find_valid_path(self.fs(), self.ctx.libs, source_dir, local, &self.open);
+        if self.ctx.frags.is_some() {
+            self.deps.push(Dep::Path {
+                dir: source_dir.to_path_buf(),
+                local: local.to_path_buf(),
+                open: self.open.clone(),
+                found: found.clone(),
+            });
+        }
+        found
     }
 }
 

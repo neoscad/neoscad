@@ -375,6 +375,79 @@ pub fn lower(
     main: &Path,
     uses: &[crate::loader::UseRef],
 ) -> (Ast, Vec<Diagnostic>) {
+    let (ast, diags, _) = lower_with(cst, sources, main, uses, &[], false);
+    (ast, diags)
+}
+
+/// An included file's statements lowered once, for every program that
+/// includes it between top-level statements to take without lowering the
+/// file again (`crate::fragment`).
+///
+/// Lowered on its own, a file numbers its expressions, names and files
+/// from zero; [`Placed`] says where they go in a program. What depends on
+/// the statements before the include is not resolved but recorded, in
+/// order, as [`Event`]s: a top-level assignment may reassign a name the
+/// including file assigned earlier (the value moves to the first
+/// position, with a warning naming both places), and a `use` joins the
+/// program's list of libraries at its turn.
+#[derive(Debug, Default)]
+pub(crate) struct FragmentAst {
+    exprs: Vec<Expr>,
+    /// The file's names in [`Name`] order.
+    names: Vec<Box<str>>,
+    functions: Vec<FunctionDef>,
+    modules: Vec<ModuleDef>,
+    instantiations: Vec<Instantiation>,
+    events: Vec<Event>,
+}
+
+impl FragmentAst {
+    /// Expressions held, for cost estimates.
+    pub(crate) fn expr_count(&self) -> usize {
+        self.exprs.len()
+    }
+}
+
+/// A step of a [`FragmentAst`] that depends on the including program, in
+/// lowering order.
+#[derive(Debug)]
+enum Event {
+    /// A top-level assignment, before reassignment is resolved.
+    Assign {
+        name: Name,
+        expr: ExprId,
+        loc: Loc,
+        seq: u64,
+    },
+    /// A warning from inside the file, kept in order with the others.
+    Diag(Diagnostic),
+    /// A `use` statement: it takes the program's next [`crate::loader::UseRef`].
+    Use,
+}
+
+/// A [`FragmentAst`] in a program: the entry range its statements take in
+/// the program's tree (the lowering skips them), and what its file ids and
+/// token indices start from.
+#[derive(Debug, Clone)]
+pub(crate) struct Placed<'a> {
+    pub entries: std::ops::Range<u32>,
+    pub ast: &'a FragmentAst,
+    pub file_base: u32,
+    pub token_base: u32,
+}
+
+/// [`lower`], taking the statements in each of `frags` from their lowered
+/// fragment instead of the tree. With `record`, top-level assignments,
+/// warnings and `use`s are recorded rather than resolved and the result
+/// includes the [`FragmentAst`]; the diagnostics are then in it.
+pub(crate) fn lower_with(
+    cst: &Cst,
+    sources: &SourceMap,
+    main: &Path,
+    uses: &[crate::loader::UseRef],
+    frags: &[Placed<'_>],
+    record: bool,
+) -> (Ast, Vec<Diagnostic>, Option<FragmentAst>) {
     let mut l = Lower {
         sources,
         main,
@@ -383,11 +456,34 @@ pub fn lower(
         file_ended: false,
         uses,
         next_use: 0,
+        events: record.then(Vec::new),
+        depth: 0,
     };
     let mut root = Scope::default();
-    l.statements(cst.root(), &mut root);
-    l.ast.root = root;
-    (l.ast, l.diags)
+    l.root(cst.root(), &mut root, frags);
+    match l.events.take() {
+        Some(events) => {
+            let Scope {
+                functions,
+                modules,
+                assignments: _,
+                instantiations,
+            } = root;
+            let frag = FragmentAst {
+                exprs: std::mem::take(&mut l.ast.exprs),
+                names: std::mem::take(&mut l.ast.names.names),
+                functions,
+                modules,
+                instantiations,
+                events,
+            };
+            (l.ast, l.diags, Some(frag))
+        }
+        None => {
+            l.ast.root = root;
+            (l.ast, l.diags, None)
+        }
+    }
 }
 
 struct Lower<'a> {
@@ -400,6 +496,11 @@ struct Lower<'a> {
     file_ended: bool,
     uses: &'a [crate::loader::UseRef],
     next_use: usize,
+    /// Recording a [`FragmentAst`]: the steps that depend on the includer.
+    events: Option<Vec<Event>>,
+    /// Scopes entered below the root (module bodies, instantiations'
+    /// children): only the root's assignments can meet the includer's.
+    depth: u32,
 }
 
 fn lossy(b: &[u8]) -> String {
@@ -440,6 +541,92 @@ impl<'a> Lower<'a> {
 
     // --- statements -----------------------------------------------------
 
+    /// The root's statements, taking each fragment's from its lowering at
+    /// the point where its statements begin. Its expressions then take
+    /// the same arena positions and its names the same numbers as they
+    /// would lowered in place: a fragment's statements are consecutive,
+    /// so nothing else is lowered in between.
+    fn root(&mut self, n: Node<'_>, scope: &mut Scope, frags: &[Placed<'_>]) {
+        let mut next = 0;
+        for c in n.children() {
+            let at = c.index();
+            while let Some(f) = frags.get(next).filter(|f| f.entries.start <= at) {
+                self.merge(f, scope);
+                next += 1;
+            }
+            if next > 0 && frags[next - 1].entries.contains(&at) {
+                continue;
+            }
+            self.statement(c, scope);
+        }
+        for f in &frags[next..] {
+            self.merge(f, scope);
+        }
+    }
+
+    /// Take a lowered fragment into the root scope: its definitions and
+    /// instantiations as they are (renumbered), and its assignments,
+    /// warnings and `use`s replayed in order against what came before.
+    fn merge(&mut self, p: &Placed<'_>, scope: &mut Scope) {
+        let f = p.ast;
+        let names: Vec<Name> = f.names.iter().map(|s| self.ast.names.intern(s)).collect();
+        let rb = Rebase {
+            expr: self.ast.exprs.len() as u32,
+            names: &names,
+            file: p.file_base,
+            seq: u64::from(p.token_base) << 2,
+        };
+        self.ast.exprs.extend(f.exprs.iter().map(|e| rb.expr(e)));
+        scope
+            .functions
+            .extend(f.functions.iter().map(|d| rb.function(d)));
+        scope.modules.extend(f.modules.iter().map(|d| rb.module(d)));
+        scope
+            .instantiations
+            .extend(f.instantiations.iter().map(|i| rb.inst(i)));
+        for ev in &f.events {
+            match ev {
+                Event::Assign {
+                    name,
+                    expr,
+                    loc,
+                    seq,
+                } => self.assign(
+                    scope,
+                    rb.name(*name),
+                    rb.id(*expr),
+                    rb.loc(*loc),
+                    seq + rb.seq,
+                ),
+                Event::Diag(d) => {
+                    let d = rb.diag(d);
+                    self.emit(d);
+                }
+                Event::Use => self.use_stmt(),
+            }
+        }
+    }
+
+    fn emit(&mut self, d: Diagnostic) {
+        match &mut self.events {
+            Some(ev) => ev.push(Event::Diag(d)),
+            None => self.diags.push(d),
+        }
+    }
+
+    fn use_stmt(&mut self) {
+        if let Some(ev) = &mut self.events {
+            ev.push(Event::Use);
+            return;
+        }
+        if let Some(u) = self.uses.get(self.next_use) {
+            let path = u.path.clone();
+            self.next_use += 1;
+            self.ast.uses.retain(|p| *p != path);
+            self.ast.uses.insert(0, path);
+        }
+    }
+
     /// Children of the root, a block or a module body.
     fn statements(&mut self, n: Node<'_>, scope: &mut Scope) {
         for c in n.children() {
@@ -463,7 +650,9 @@ impl<'a> Lower<'a> {
                     .unwrap_or_default();
                 let mut body = Scope::default();
                 if let Some(b) = n.children().filter(|c| c.kind() != K::ParamList).last() {
+                    self.depth += 1;
                     self.statement(b, &mut body);
+                    self.depth -= 1;
                 }
                 let span = self.span(n);
                 scope.modules.push(ModuleDef {
@@ -496,14 +685,7 @@ impl<'a> Lower<'a> {
                 });
             }
             K::EotStmt => self.file_ended = true,
-            K::UseStmt => {
-                if let Some(u) = self.uses.get(self.next_use) {
-                    let path = u.path.clone();
-                    self.next_use += 1;
-                    self.ast.uses.retain(|p| *p != path);
-                    self.ast.uses.insert(0, path);
-                }
-            }
+            K::UseStmt => self.use_stmt(),
             K::ModuleInst | K::ModifierInst | K::IfInst => {
                 if let Some(i) = self.instantiation(n) {
                     scope.instantiations.push(i);
@@ -526,13 +708,29 @@ impl<'a> Lower<'a> {
             .tokens()
             .last()
             .map_or(0, |t| seq_for_token(t.index()) + 1);
+        self.assign(scope, name, expr, loc, seq);
+    }
+
+    /// Add an assignment to `scope`, or reassign the name in place.
+    fn assign(&mut self, scope: &mut Scope, name: Name, expr: ExprId, loc: Loc, seq: u64) {
+        if self.depth == 0
+            && let Some(ev) = &mut self.events
+        {
+            ev.push(Event::Assign {
+                name,
+                expr,
+                loc,
+                seq,
+            });
+            return;
+        }
         if let Some(a) = scope.assignments.iter_mut().find(|a| a.name == name) {
             let prev = a.loc;
-            if let Some(d) = self.reassignment_warning(name, prev, loc) {
-                self.diags.push(d.with_seq(seq));
-            }
             a.expr = expr;
             a.overwrite = Some(loc);
+            if let Some(d) = self.reassignment_warning(name, prev, loc) {
+                self.emit(d.with_seq(seq));
+            }
             return;
         }
         scope.assignments.push(Assignment {
@@ -613,6 +811,13 @@ impl<'a> Lower<'a> {
     }
 
     fn instantiation(&mut self, n: Node<'_>) -> Option<Instantiation> {
+        self.depth += 1;
+        let i = self.instantiation_in(n);
+        self.depth -= 1;
+        i
+    }
+
+    fn instantiation_in(&mut self, n: Node<'_>) -> Option<Instantiation> {
         let span = self.span(n);
         match n.kind() {
             K::ModifierInst => {
@@ -855,6 +1060,238 @@ impl<'a> Lower<'a> {
         };
         self.ast.add(kind, span)
     }
+}
+
+/// Renumbers a [`FragmentAst`]'s pieces into a program: expressions by an
+/// offset, names through the program's interner, files by an offset and
+/// diagnostic order keys by the fragment's first token.
+struct Rebase<'a> {
+    expr: u32,
+    names: &'a [Name],
+    file: u32,
+    seq: u64,
+}
+
+impl Rebase<'_> {
+    fn id(&self, e: ExprId) -> ExprId {
+        ExprId(e.0 + self.expr)
+    }
+
+    fn opt(&self, e: Option<ExprId>) -> Option<ExprId> {
+        e.map(|e| self.id(e))
+    }
+
+    fn name(&self, n: Name) -> Name {
+        self.names[n.0 as usize]
+    }
+
+    /// A node without tokens gets `Span::default()`, which is in the
+    /// program's main file wherever it was lowered; so it stays put.
+    fn span(&self, s: Span) -> Span {
+        if s == Span::default() {
+            return s;
+        }
+        Span {
+            file: crate::source::FileId(s.file.0 + self.file),
+            ..s
+        }
+    }
+
+    fn loc(&self, l: Loc) -> Loc {
+        Loc {
+            span: self.span(l.span),
+            line: l.line,
+        }
+    }
+
+    fn args(&self, args: &[Arg]) -> Vec<Arg> {
+        args.iter()
+            .map(|a| Arg {
+                name: a.name.map(|n| self.name(n)),
+                expr: self.id(a.expr),
+                span: self.span(a.span),
+            })
+            .collect()
+    }
+
+    fn params(&self, params: &[Param]) -> Vec<Param> {
+        params
+            .iter()
+            .map(|p| Param {
+                name: self.name(p.name),
+                default: self.opt(p.default),
+                span: self.span(p.span),
+            })
+            .collect()
+    }
+
+    fn expr(&self, e: &Expr) -> Expr {
+        use ExprKind as E;
+        let kind = match &e.kind {
+            E::Undef => E::Undef,
+            E::Bool(b) => E::Bool(*b),
+            E::Number(v) => E::Number(*v),
+            E::String(s) => E::String(s.clone()),
+            E::Var(n) => E::Var(self.name(*n)),
+            E::Unary(op, a) => E::Unary(*op, self.id(*a)),
+            E::Binary(op, a, b) => E::Binary(*op, self.id(*a), self.id(*b)),
+            E::Ternary(c, a, b) => E::Ternary(self.id(*c), self.id(*a), self.id(*b)),
+            E::Index(a, i) => E::Index(self.id(*a), self.id(*i)),
+            E::Member(a, n) => E::Member(self.id(*a), self.name(*n)),
+            E::Call(f, args) => E::Call(self.id(*f), self.args(args)),
+            E::Range { begin, step, end } => E::Range {
+                begin: self.id(*begin),
+                step: self.opt(*step),
+                end: self.id(*end),
+            },
+            E::Vector(v) => E::Vector(v.iter().map(|&x| self.id(x)).collect()),
+            E::Function(p, b) => E::Function(self.params(p), self.id(*b)),
+            E::Let(a, b) => E::Let(self.args(a), self.id(*b)),
+            E::Assert(a, b) => E::Assert(self.args(a), self.opt(*b)),
+            E::Echo(a, b) => E::Echo(self.args(a), self.opt(*b)),
+            E::LcIf(c, a, b) => E::LcIf(self.id(*c), self.id(*a), self.opt(*b)),
+            E::LcEach(a) => E::LcEach(self.id(*a)),
+            E::LcFor(a, b) => E::LcFor(self.args(a), self.id(*b)),
+            E::LcForC {
+                init,
+                cond,
+                incr,
+                body,
+            } => E::LcForC {
+                init: self.args(init),
+                cond: self.id(*cond),
+                incr: self.args(incr),
+                body: self.id(*body),
+            },
+            E::LcLet(a, b) => E::LcLet(self.args(a), self.id(*b)),
+            E::Invalid => E::Invalid,
+        };
+        Expr {
+            kind,
+            span: self.span(e.span),
+        }
+    }
+
+    fn scope(&self, s: &Scope) -> Scope {
+        let Scope {
+            functions,
+            modules,
+            assignments,
+            instantiations,
+        } = s;
+        Scope {
+            functions: functions.iter().map(|d| self.function(d)).collect(),
+            modules: modules.iter().map(|d| self.module(d)).collect(),
+            assignments: assignments
+                .iter()
+                .map(|a| {
+                    let Assignment {
+                        name,
+                        expr,
+                        loc,
+                        overwrite,
+                        annotations,
+                    } = a;
+                    Assignment {
+                        name: self.name(*name),
+                        expr: self.id(*expr),
+                        loc: self.loc(*loc),
+                        overwrite: overwrite.map(|l| self.loc(l)),
+                        annotations: annotations
+                            .iter()
+                            .map(|x| Annotation {
+                                name: x.name,
+                                expr: self.id(x.expr),
+                            })
+                            .collect(),
+                    }
+                })
+                .collect(),
+            instantiations: instantiations.iter().map(|i| self.inst(i)).collect(),
+        }
+    }
+
+    fn function(&self, d: &FunctionDef) -> FunctionDef {
+        let FunctionDef {
+            name,
+            params,
+            body,
+            span,
+        } = d;
+        FunctionDef {
+            name: self.name(*name),
+            params: self.params(params),
+            body: self.id(*body),
+            span: self.span(*span),
+        }
+    }
+
+    fn module(&self, d: &ModuleDef) -> ModuleDef {
+        let ModuleDef {
+            name,
+            params,
+            body,
+            span,
+        } = d;
+        ModuleDef {
+            name: self.name(*name),
+            params: self.params(params),
+            body: self.scope(body),
+            span: self.span(*span),
+        }
+    }
+
+    fn inst(&self, i: &Instantiation) -> Instantiation {
+        let Instantiation {
+            name,
+            args,
+            children,
+            kind,
+            tag_root,
+            tag_highlight,
+            tag_background,
+            span,
+        } = i;
+        Instantiation {
+            name: self.name(*name),
+            args: self.args(args),
+            children: self.scope(children),
+            kind: match kind {
+                InstKind::Module => InstKind::Module,
+                InstKind::If { else_children } => InstKind::If {
+                    else_children: else_children.as_ref().map(|s| Box::new(self.scope(s))),
+                },
+            },
+            tag_root: *tag_root,
+            tag_highlight: *tag_highlight,
+            tag_background: *tag_background,
+            span: self.span(*span),
+        }
+    }
+
+    fn diag(&self, d: &Diagnostic) -> Diagnostic {
+        rebase_diag(d, self.file, self.seq)
+    }
+}
+
+/// A diagnostic from an included file's own parse, in a program where the
+/// file's ids start at `file` and its order keys at `seq`. Every span
+/// here is real (a diagnostic's location is never a default span), so all
+/// move.
+pub(crate) fn rebase_diag(d: &Diagnostic, file: u32, seq: u64) -> Diagnostic {
+    let mv = |s: Span| Span {
+        file: crate::source::FileId(s.file.0 + file),
+        ..s
+    };
+    let mut d = d.clone();
+    d.span = d.span.map(mv);
+    for h in &mut d.hints {
+        if let Some((s, _)) = &mut h.replacement {
+            *s = mv(*s);
+        }
+    }
+    d.seq += seq;
+    d
 }
 
 /// The first four child nodes of an expression node, without allocating

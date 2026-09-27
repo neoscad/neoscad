@@ -7,6 +7,9 @@
 //!   included), for the formatter and the LSP;
 //! - [`loader`]: `include` splicing and `use` resolution over a pluggable
 //!   [`loader::FileSystem`] ([`vfs`] has in-memory ones);
+//! - [`fragment`]: included files parsed once and put into each program
+//!   that includes them as their parse, for hosts that parse again after
+//!   every edit;
 //! - [`ast`]: the typed AST the evaluator consumes, lowered from the tree
 //!   with OpenSCAD's semantics (scopes, reassignment, literal folding);
 //! - [`deps`]: parsing `use`d libraries, as OpenSCAD does before running;
@@ -22,6 +25,7 @@ pub mod customizer;
 pub mod deps;
 pub mod diag;
 pub mod dump;
+pub mod fragment;
 pub mod loader;
 pub mod number;
 pub mod source;
@@ -89,12 +93,70 @@ pub fn parse_program_cached(
     libs: &LibraryPath,
     cache: Option<&dyn loader::LexCache>,
 ) -> Program {
-    let main = path.clone();
-    finish(
-        loader::load_cached(path, text, fs, libs, cache),
-        &main,
-        true,
+    parse_program_with(
+        path,
+        text,
+        fs,
+        libs,
+        Caches {
+            lex: cache,
+            ..Caches::default()
+        },
     )
+}
+
+/// What a parse may reuse from earlier ones. With none it reads, lexes
+/// and parses everything; the program is the same either way.
+#[derive(Clone, Copy, Default)]
+pub struct Caches<'a> {
+    /// Included files read and lexed.
+    pub lex: Option<&'a dyn loader::LexCache>,
+    /// Included files parsed and lowered ([`fragment`]).
+    pub fragments: Option<&'a dyn fragment::FragmentCache>,
+    /// Where to add how includes were put in.
+    pub stats: Option<&'a std::cell::Cell<fragment::SpliceStats>>,
+}
+
+impl std::fmt::Debug for Caches<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Caches")
+            .field("lex", &self.lex.is_some())
+            .field("fragments", &self.fragments.is_some())
+            .field("stats", &self.stats)
+            .finish()
+    }
+}
+
+/// [`parse_program`] through `caches`.
+pub fn parse_program_with(
+    path: PathBuf,
+    text: Vec<u8>,
+    fs: &dyn FileSystem,
+    libs: &LibraryPath,
+    caches: Caches<'_>,
+) -> Program {
+    let main = path.clone();
+    finish(parse_with(path, text, &main, fs, libs, caches), &main, true)
+}
+
+fn parse_with(
+    path: PathBuf,
+    text: Vec<u8>,
+    main: &Path,
+    fs: &dyn FileSystem,
+    libs: &LibraryPath,
+    caches: Caches<'_>,
+) -> fragment::Parsed {
+    let stats = std::cell::Cell::default();
+    let ctx = fragment::Ctx {
+        fs,
+        libs,
+        lex: caches.lex,
+        frags: caches.fragments,
+        main,
+        stats: caches.stats.unwrap_or(&stats),
+    };
+    fragment::parse(&ctx, path, text, None, Vec::new())
 }
 
 /// Parse a `use`d library the way `SourceFileCache` does: like a program,
@@ -119,17 +181,39 @@ pub fn parse_library_cached(
     libs: &LibraryPath,
     cache: Option<&dyn loader::LexCache>,
 ) -> Program {
-    finish(
-        loader::load_cached(path, text, fs, libs, cache),
+    parse_library_with(
+        path,
+        text,
         main,
-        false,
+        fs,
+        libs,
+        Caches {
+            lex: cache,
+            ..Caches::default()
+        },
     )
+}
+
+/// [`parse_library`] through `caches`.
+pub fn parse_library_with(
+    path: PathBuf,
+    text: Vec<u8>,
+    main: &Path,
+    fs: &dyn FileSystem,
+    libs: &LibraryPath,
+    caches: Caches<'_>,
+) -> Program {
+    finish(parse_with(path, text, main, fs, libs, caches), main, false)
 }
 
 /// Parse one file without following includes (for editors and formatters).
 pub fn parse_file(path: PathBuf, text: Vec<u8>) -> Program {
     let main = path.clone();
-    finish(loader::load_single(path, text), &main, false)
+    finish(
+        fragment::Parsed::plain(loader::load_single(path, text)),
+        &main,
+        false,
+    )
 }
 
 /// Parse one file without following includes, with its customizer
@@ -138,21 +222,37 @@ pub fn parse_file(path: PathBuf, text: Vec<u8>) -> Program {
 /// customizer panel need not read or parse what the file includes.
 pub fn parse_file_annotated(path: PathBuf, text: Vec<u8>) -> Program {
     let main = path.clone();
-    finish(loader::load_single(path, text), &main, true)
+    finish(
+        fragment::Parsed::plain(loader::load_single(path, text)),
+        &main,
+        true,
+    )
 }
 
-fn finish(loaded: loader::Loaded, main_path: &Path, annotate: bool) -> Program {
-    let loader::Loaded {
+fn finish(parsed: fragment::Parsed, main_path: &Path, annotate: bool) -> Program {
+    let (mut ast, lower_diags) = {
+        let placed = parsed.placed();
+        let (ast, diags, _) = ast::lower_with(
+            &parsed.cst,
+            &parsed.sources,
+            main_path,
+            &parsed.uses,
+            &placed,
+            false,
+        );
+        (ast, diags)
+    };
+    let fragment::Parsed {
         sources,
-        tokens,
+        cst,
+        errors,
         mut diags,
         uses,
         ..
-    } = loaded;
+    } = parsed;
     let main = FileId(0);
-    let parse = syntax::parse(tokens);
-    let toks = parse.cst.tokens();
-    for e in &parse.errors {
+    let toks = cst.tokens();
+    for e in &errors {
         // Bison reports the scanner's line counter, which has already moved
         // past the offending token: the line where that token *ends*.
         let (span, line) = match toks.get(e.token as usize) {
@@ -180,7 +280,6 @@ fn finish(loaded: loader::Loaded, main_path: &Path, annotate: bool) -> Program {
             )),
         );
     }
-    let (mut ast, lower_diags) = ast::lower(&parse.cst, &sources, main_path, &uses);
     diags.extend(lower_diags);
     diags.sort_by_key(|d| d.seq);
     if annotate {
@@ -192,7 +291,7 @@ fn finish(loaded: loader::Loaded, main_path: &Path, annotate: bool) -> Program {
     Program {
         sources,
         main,
-        cst: parse.cst,
+        cst,
         ast,
         uses,
         diags,

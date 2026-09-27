@@ -499,6 +499,8 @@ pub struct Stats {
     pub running: usize,
     /// Included files held read and lexed: entries and bytes.
     pub lexed: (usize, usize),
+    /// Included files held parsed: entries and estimated bytes.
+    pub fragments: (usize, usize),
 }
 
 impl Stats {
@@ -513,7 +515,8 @@ impl Stats {
             "renderers": self.renderers,
             "parse_cache": {"entries": p.entries, "bytes": p.bytes, "budget": p.budget,
                 "hits": p.hits, "misses": p.misses, "evictions": p.evictions,
-                "lexed_files": self.lexed.0, "lexed_bytes": self.lexed.1},
+                "lexed_files": self.lexed.0, "lexed_bytes": self.lexed.1,
+                "fragment_files": self.fragments.0, "fragment_bytes": self.fragments.1},
             "geometry_cache": {"entries": g.entries, "bytes": g.bytes, "budget": g.budget,
                 "hits": g.hits, "misses": g.misses, "evictions": g.evictions},
         })
@@ -693,6 +696,7 @@ pub struct Session {
     fs: Arc<docfs::DocFs>,
     parse: Mutex<parse::ParseCache>,
     lexed: parse::LexStore,
+    fragments: parse::FragmentStore,
     /// By scheme and font set, most recently used last.
     renderers: Mutex<Vec<(u64, Arc<geom::Renderer>)>>,
     fonts: Mutex<Vec<(u64, Arc<text::FontDb>)>>,
@@ -738,6 +742,7 @@ impl Session {
             fs: Arc::new(docfs::DocFs::new(cfg.fs.clone())),
             parse: Mutex::new(parse::ParseCache::new(cfg.parse_budget)),
             lexed: parse::LexStore::new(cfg.parse_budget / 4),
+            fragments: parse::FragmentStore::new(cfg.parse_budget / 2),
             renderers: Mutex::new(Vec::new()),
             fonts: Mutex::new(Vec::new()),
             docs: Mutex::new(HashMap::new()),
@@ -752,6 +757,13 @@ impl Session {
 
     pub fn config(&self) -> &Config {
         &self.cfg
+    }
+
+    fn stores(&self) -> parse::Stores<'_> {
+        parse::Stores {
+            lexed: &self.lexed,
+            fragments: &self.fragments,
+        }
     }
 
     /// The file system requests read through: the host's files with the
@@ -1051,6 +1063,7 @@ impl Session {
                 .map(Vec::len)
                 .sum(),
             lexed: self.lexed.size(),
+            fragments: self.fragments.size(),
         }
     }
 
@@ -1079,6 +1092,7 @@ impl Session {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         self.lexed.clear();
+        self.fragments.clear();
         self.renderers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1220,15 +1234,15 @@ impl Session {
         text.extend_from_slice(&suffix);
         let epoch_text = hash_of(&text);
         let program = match &run.entry {
-            None => parse::main_program(&self.parse, &self.lexed, &paths.path, text, fs, libs),
+            None => parse::main_program(&self.parse, self.stores(), &paths.path, text, fs, libs),
             Some(entry) => {
                 // Not through the parse cache: the program is changed.
-                let mut p = lang::parse_program_cached(
+                let mut p = lang::parse_program_with(
                     paths.path.clone(),
                     text,
                     fs,
                     libs,
-                    Some(&self.lexed),
+                    self.stores().caches(),
                 );
                 entry_only(&mut p, entry);
                 Arc::new(p)
@@ -1245,7 +1259,7 @@ impl Session {
             pipe.programs = vec![program.clone()];
             return Err(Stop::Exit(EXIT_ERROR));
         }
-        let libraries = parse::libraries(&self.parse, &self.lexed, &program, &suffix, fs, libs);
+        let libraries = parse::libraries(&self.parse, self.stores(), &program, &suffix, fs, libs);
         for lib in &libraries {
             match (&lib.program, lib.open_error()) {
                 (Some(p), _) => {

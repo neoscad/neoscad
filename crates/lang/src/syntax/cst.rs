@@ -23,7 +23,7 @@ use crate::source::{FileId, SourceMap, Span};
 use crate::syntax::SyntaxKind;
 use crate::syntax::lexer::Token;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Entry {
     kind: SyntaxKind,
     /// Entry index of the parent node (`u32::MAX` for the root).
@@ -32,7 +32,7 @@ struct Entry {
     data: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Cst {
     tokens: Vec<Token>,
     entries: Vec<Entry>,
@@ -137,6 +137,11 @@ fn dump(n: Node<'_>, sources: &SourceMap, depth: usize, out: &mut String) {
 }
 
 impl<'a> Node<'a> {
+    /// The node's entry index in its tree (its preorder position).
+    pub(crate) fn index(&self) -> u32 {
+        self.idx
+    }
+
     fn entry(&self) -> Entry {
         self.cst.entries[self.idx as usize]
     }
@@ -270,6 +275,148 @@ impl<'a> TokenRef<'a> {
             cst: self.cst,
             idx: self.cst.entries[self.idx as usize].parent,
         }
+    }
+}
+
+/// One included file's parse for [`Cst::splice`] to put into a tree.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Insert<'a> {
+    /// Index in the host tree's tokens of the `include` directive the
+    /// file's parse goes right after. It must be a child of the root.
+    pub at: u32,
+    pub cst: &'a Cst,
+    /// Added to the file id of every inserted token.
+    pub file_base: u32,
+}
+
+impl Cst {
+    /// Token indices of the tokens that are direct children of the root:
+    /// the trivia between top-level statements.
+    pub(crate) fn root_tokens(&self) -> Vec<u32> {
+        self.root()
+            .children_with_tokens()
+            .filter_map(|e| match e {
+                Element::Token(t) => Some(t.index()),
+                Element::Node(_) => None,
+            })
+            .collect()
+    }
+
+    /// The first token index of each direct child node of the root, in
+    /// order (`u32::MAX` for a node without tokens).
+    pub(crate) fn root_node_starts(&self) -> Vec<u32> {
+        self.root()
+            .children()
+            .map(|n| {
+                let sub = &self.entries[n.idx as usize + 1..n.entry().data as usize];
+                sub.iter()
+                    .find(|e| e.kind.is_token())
+                    .map_or(u32::MAX, |e| e.data)
+            })
+            .collect()
+    }
+
+    /// The tree the parser builds when each insert's tokens follow its
+    /// directive in the stream, provided that the inserted file parses on
+    /// its own, without errors, as whole statements and that its directive
+    /// sits between top-level statements. Then the parser flushes the
+    /// directive, the file's leading trivia, its statements and its
+    /// trailing trivia into the root one after the other (`parser::build`
+    /// flushes pending trivia into the parent when a node starts, and into
+    /// the root at the end), so the file's root children go right after
+    /// the directive, unchanged but renumbered. `inserts` are in token
+    /// order; returns the tree and the entry range each insert took.
+    pub(crate) fn splice(self, inserts: &[Insert<'_>]) -> (Cst, Vec<std::ops::Range<u32>>) {
+        let Cst { tokens, entries } = self;
+        let added_tokens: usize = inserts.iter().map(|i| i.cst.tokens.len()).sum();
+        let added_entries: usize = inserts
+            .iter()
+            .map(|i| i.cst.entries.len().saturating_sub(1))
+            .sum();
+        // The host's tokens: old index -> new.
+        let mut tok_map = Vec::with_capacity(tokens.len() + 1);
+        let mut new_tokens = Vec::with_capacity(tokens.len() + added_tokens);
+        let mut tok_base = Vec::with_capacity(inserts.len());
+        let mut next = inserts.iter().peekable();
+        for (i, t) in tokens.into_iter().enumerate() {
+            tok_map.push(new_tokens.len() as u32);
+            new_tokens.push(t);
+            while let Some(ins) = next.next_if(|ins| ins.at as usize == i) {
+                tok_base.push(new_tokens.len() as u32);
+                let base = ins.file_base;
+                new_tokens.extend(ins.cst.tokens.iter().map(|t| Token {
+                    file: FileId(t.file.0 + base),
+                    ..*t
+                }));
+            }
+        }
+        tok_map.push(new_tokens.len() as u32);
+        // The host's entries: each keeps its place, shifted by the entries
+        // inserted before it.
+        let mut entry_map = Vec::with_capacity(entries.len() + 1);
+        let mut after_entry = Vec::with_capacity(inserts.len());
+        let mut shift = 0u32;
+        for (i, e) in entries.iter().enumerate() {
+            entry_map.push(i as u32 + shift);
+            if let Some(ins) = inserts.get(after_entry.len())
+                && e.kind.is_token()
+                && e.parent == 0
+                && e.data == ins.at
+            {
+                after_entry.push(i);
+                shift += ins.cst.entries.len().saturating_sub(1) as u32;
+            }
+        }
+        entry_map.push(entries.len() as u32 + shift);
+        assert_eq!(
+            after_entry.len(),
+            inserts.len(),
+            "an included file's parse can only follow a directive between top-level statements"
+        );
+        let mut new_entries = Vec::with_capacity(entries.len() + added_entries);
+        let mut ranges = Vec::with_capacity(inserts.len());
+        let mut k = 0usize;
+        for (i, e) in entries.iter().enumerate() {
+            let parent = match e.parent {
+                u32::MAX => u32::MAX,
+                p => entry_map[p as usize],
+            };
+            let data = if e.kind.is_token() {
+                tok_map[e.data as usize]
+            } else {
+                entry_map[e.data as usize]
+            };
+            new_entries.push(Entry {
+                kind: e.kind,
+                parent,
+                data,
+            });
+            if after_entry.get(k) == Some(&i) {
+                let (ins, tb) = (&inserts[k], tok_base[k]);
+                let start = new_entries.len() as u32;
+                // Entry `j >= 1` of the file's tree lands at `start + j - 1`,
+                // and its root is the host's root (entry 0).
+                let off = start - 1;
+                new_entries.extend(ins.cst.entries.iter().skip(1).map(|f| Entry {
+                    kind: f.kind,
+                    parent: if f.parent == 0 { 0 } else { f.parent + off },
+                    data: if f.kind.is_token() {
+                        f.data + tb
+                    } else {
+                        f.data + off
+                    },
+                }));
+                ranges.push(start..new_entries.len() as u32);
+                k += 1;
+            }
+        }
+        (
+            Cst {
+                tokens: new_tokens,
+                entries: new_entries,
+            },
+            ranges,
+        )
     }
 }
 

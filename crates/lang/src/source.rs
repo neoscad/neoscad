@@ -54,6 +54,21 @@ impl SourceFile {
         }
     }
 
+    /// A copy for another program's [`SourceMap`] (an included file
+    /// parsed once and used by many programs), with its line starts if
+    /// they were already worked out.
+    pub(crate) fn duplicate(&self) -> Self {
+        let line_starts = OnceLock::new();
+        if let Some(v) = self.line_starts.get() {
+            let _ = line_starts.set(v.clone());
+        }
+        Self {
+            path: self.path.clone(),
+            text: self.text.clone(),
+            line_starts,
+        }
+    }
+
     /// Byte offsets at which lines start. Only `\n` ends a line: OpenSCAD's
     /// lexer counts `\n` and ignores a bare `\r`, so a classic-Mac file is one
     /// long line there too.
@@ -196,6 +211,15 @@ impl SourceMap {
     pub fn add(&mut self, path: PathBuf, text: impl Into<Box<[u8]>>) -> FileId {
         self.files.push(SourceFile::new(path, text));
         FileId(self.files.len() as u32 - 1)
+    }
+
+    pub(crate) fn push(&mut self, file: SourceFile) -> FileId {
+        self.files.push(file);
+        FileId(self.files.len() as u32 - 1)
+    }
+
+    pub(crate) fn into_files(self) -> Vec<SourceFile> {
+        self.files
     }
 
     pub fn get(&self, id: FileId) -> &SourceFile {
