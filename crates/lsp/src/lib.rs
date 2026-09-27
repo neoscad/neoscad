@@ -22,6 +22,18 @@
 //! stale). The evaluation is the session's (parse and evaluate, not
 //! geometry), of the exact text version the client sent.
 //!
+//! # Diagnostics from the host's own runs
+//!
+//! A host that evaluates the document anyway (the app previews it after
+//! each pause in typing) sets [`Options::host_diagnostics`]: the server
+//! then never evaluates, and the host hands it each run's diagnostics
+//! with the exact text the run read ([`Server::supply`]). They are
+//! published for the client's version of the document whose text is that
+//! text, as soon as both are known, whichever arrives first; a run of
+//! another text is kept until a newer one replaces it. So each pause
+//! costs one evaluation, not one for the view and one for the markers,
+//! and the geometry stage's warnings (a render's) reach the markers too.
+//!
 //! # Documents and the session
 //!
 //! The server keeps its documents' text itself. With
@@ -75,7 +87,13 @@ pub struct Options {
     /// Limits of the diagnostics' evaluations; the session's own when
     /// `None`.
     pub limits: Option<Limits>,
+    /// The host supplies each document's diagnostics ([`Server::supply`])
+    /// and the server never evaluates (see the crate documentation).
+    pub host_diagnostics: bool,
 }
+
+/// A run the host supplied: the text it read and its diagnostics.
+type Supplied = (Arc<[u8]>, Arc<Vec<Value>>);
 
 /// What a document's program read: each file with its metadata then.
 type Stamps = Vec<(PathBuf, Option<Metadata>)>;
@@ -123,6 +141,9 @@ struct State {
     published: HashMap<String, HashSet<String>>,
     /// The last diagnostics per URI, for code actions.
     diagnostics: HashMap<String, Vec<Value>>,
+    /// With [`Options::host_diagnostics`]: the latest run the host
+    /// supplied per document path, with the text it read.
+    supplied: HashMap<PathBuf, Supplied>,
 }
 
 /// A language server. See the crate documentation.
@@ -197,9 +218,81 @@ impl Server {
         i32::from(!self.state().shutdown)
     }
 
-    /// Whether a document changed since its diagnostics were published.
+    /// Whether a document changed since its diagnostics were published
+    /// and the server should evaluate it ([`Server::publish_diagnostics`]).
+    /// Never with [`Options::host_diagnostics`]: the host's runs publish.
     pub fn diagnostics_pending(&self) -> bool {
-        !self.state().dirty.is_empty()
+        !self.host_diagnostics() && !self.state().dirty.is_empty()
+    }
+
+    fn host_diagnostics(&self) -> bool {
+        self.opts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .host_diagnostics
+    }
+
+    /// With [`Options::host_diagnostics`]: the diagnostics of a run the
+    /// host made of the document at `path` (`Log::diagnostics_json`), and
+    /// the exact text it read. Returns the `publishDiagnostics`
+    /// notifications for the client's version with that text, if it has
+    /// sent it; otherwise they go out once it does (from
+    /// [`Server::handle`]). A later run replaces an earlier one.
+    pub fn supply(
+        &self,
+        session: &Session,
+        path: &Path,
+        text: Arc<[u8]>,
+        diagnostics: Vec<Value>,
+    ) -> Vec<String> {
+        let path = session::normal(path);
+        {
+            let mut st = self.state();
+            st.supplied
+                .insert(path.clone(), (text, Arc::new(diagnostics)));
+            // The same text evaluated again (a render after a preview) is
+            // news even for a version already published.
+            let uris: Vec<String> = st
+                .docs
+                .iter()
+                .filter(|(_, d)| session::normal(&d.path) == path)
+                .map(|(u, _)| u.clone())
+                .collect();
+            for u in uris {
+                if !st.dirty.contains(&u) {
+                    st.dirty.push(u);
+                }
+            }
+        }
+        self.publish_supplied(session)
+    }
+
+    /// Publish every due document whose text a supplied run read; the
+    /// others stay due.
+    fn publish_supplied(&self, session: &Session) -> Vec<String> {
+        let (jobs, open, uris) = {
+            let mut st = self.state();
+            let mut jobs = Vec::new();
+            let dirty = std::mem::take(&mut st.dirty);
+            for uri in dirty {
+                let run = st.docs.get(&uri).and_then(|d| {
+                    let (text, diags) = st.supplied.get(&session::normal(&d.path))?;
+                    (**text == *d.text).then(|| (d.clone(), diags.clone()))
+                });
+                match run {
+                    Some((doc, diags)) => jobs.push((uri, doc, diags)),
+                    None if st.docs.contains_key(&uri) => st.dirty.push(uri),
+                    None => {}
+                }
+            }
+            let (open, uris) = open_docs(&st);
+            (jobs, open, uris)
+        };
+        let mut out = Vec::new();
+        for (uri, doc, diags) in jobs {
+            out.extend(self.publish_one(session, &uri, &doc, &diags, &open, &uris, None));
+        }
+        out
     }
 
     /// Handle one message; the messages to send back (a response for a
@@ -245,7 +338,14 @@ impl Server {
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     self.notification(session, method, &params)
                 }));
-                Vec::new()
+                // A version the host has already run arrived: its
+                // diagnostics go out with nothing else to wait for.
+                if self.host_diagnostics() {
+                    catch_unwind(AssertUnwindSafe(|| self.publish_supplied(session)))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
             }
         }
     }
@@ -388,6 +488,9 @@ impl Server {
                         f.store(true, Ordering::Relaxed);
                     }
                     st.dirty.retain(|u| *u != uri);
+                    if !st.docs.values().any(|d| d.path == doc.path) {
+                        st.supplied.remove(&session::normal(&doc.path));
+                    }
                     if self.sync_session() {
                         session.close(&doc.path);
                     }
@@ -503,8 +606,13 @@ impl Server {
 
     /// Evaluate every document whose diagnostics are due and return the
     /// `publishDiagnostics` notifications. Blocks for the evaluations; a
-    /// document changed meanwhile is skipped (it is due again).
+    /// document changed meanwhile is skipped (it is due again). With
+    /// [`Options::host_diagnostics`] nothing is evaluated: only documents
+    /// with a supplied run of their text are published.
     pub fn publish_diagnostics(&self, session: &Session) -> Vec<String> {
+        if self.host_diagnostics() {
+            return self.publish_supplied(session);
+        }
         let (jobs, open, uris) = {
             let mut st = self.state();
             let uris = std::mem::take(&mut st.dirty);
@@ -517,16 +625,7 @@ impl Server {
                 st.running.insert(uri.clone(), flag.clone());
                 jobs.push((uri, doc, flag));
             }
-            let open: HashMap<PathBuf, Arc<Doc>> = st
-                .docs
-                .values()
-                .map(|d| (d.path.clone(), d.clone()))
-                .collect();
-            let uris: HashMap<PathBuf, String> = st
-                .docs
-                .iter()
-                .map(|(u, d)| (d.path.clone(), u.clone()))
-                .collect();
+            let (open, uris) = open_docs(&st);
             (jobs, open, uris)
         };
         let limits = self
@@ -556,52 +655,67 @@ impl Server {
                 }
                 continue;
             };
-            let world = self.world(session, &doc, &open);
-            let fs = session.fs();
-            let text_of = |p: &Path| -> Option<Arc<SourceFile>> {
-                let t = match open.get(p) {
-                    Some(d) => d.text.to_vec(),
-                    None => fs.read(p).ok()?,
-                };
-                Some(Arc::new(SourceFile::new(p.to_path_buf(), t)))
+            let diags = ev.log.diagnostics_json();
+            out.extend(self.publish_one(session, &uri, &doc, &diags, &open, &uris, Some(&flag)));
+        }
+        out
+    }
+
+    /// The notifications for `doc`'s diagnostics `diags` (the session's
+    /// JSON), recorded as its last published; nothing if the document
+    /// changed meanwhile (or `flag`, its evaluation's, was set).
+    #[allow(clippy::too_many_arguments)]
+    fn publish_one(
+        &self,
+        session: &Session,
+        uri: &str,
+        doc: &Arc<Doc>,
+        diags: &[Value],
+        open: &HashMap<PathBuf, Arc<Doc>>,
+        uris: &HashMap<PathBuf, String>,
+        flag: Option<&AtomicBool>,
+    ) -> Vec<String> {
+        let world = self.world(session, doc, open);
+        let fs = session.fs();
+        let text_of = |p: &Path| -> Option<Arc<SourceFile>> {
+            let t = match open.get(p) {
+                Some(d) => d.text.to_vec(),
+                None => fs.read(p).ok()?,
             };
-            let uri_for = |p: &Path| uris.get(p).cloned().unwrap_or_else(|| uri::from_path(p));
-            let per_uri = diagnose::convert(
-                &world,
-                &session.config().libs.0,
-                &ev.log.diagnostics_json(),
-                &text_of,
-                &uri_for,
-            );
-            let mut st = self.state();
-            let current = st.docs.get(&uri).is_some_and(|d| Arc::ptr_eq(d, &doc));
-            if !current || flag.load(Ordering::Relaxed) {
-                continue;
+            Some(Arc::new(SourceFile::new(p.to_path_buf(), t)))
+        };
+        let uri_for = |p: &Path| uris.get(p).cloned().unwrap_or_else(|| uri::from_path(p));
+        let per_uri =
+            diagnose::convert(&world, &session.config().libs.0, diags, &text_of, &uri_for);
+        let mut out = Vec::new();
+        let mut st = self.state();
+        let current = st.docs.get(uri).is_some_and(|d| Arc::ptr_eq(d, doc));
+        if !current || flag.is_some_and(|f| f.load(Ordering::Relaxed)) {
+            return out;
+        }
+        st.running.remove(uri);
+        let now: HashSet<String> = per_uri.iter().skip(1).map(|(u, _)| u.clone()).collect();
+        let before = st
+            .published
+            .insert(uri.to_string(), now.clone())
+            .unwrap_or_default();
+        for gone in before.difference(&now) {
+            st.diagnostics.remove(gone);
+            out.push(proto::notification(
+                "textDocument/publishDiagnostics",
+                json!({"uri": gone, "diagnostics": []}),
+            ));
+        }
+        for (i, (u, list)) in per_uri.into_iter().enumerate() {
+            let mut params = json!({"uri": u, "diagnostics": list});
+            if i == 0 {
+                params["version"] = json!(doc.version);
             }
-            st.running.remove(&uri);
-            let now: HashSet<String> = per_uri.iter().skip(1).map(|(u, _)| u.clone()).collect();
-            let before = st
-                .published
-                .insert(uri.clone(), now.clone())
-                .unwrap_or_default();
-            for gone in before.difference(&now) {
-                st.diagnostics.remove(gone);
-                out.push(proto::notification(
-                    "textDocument/publishDiagnostics",
-                    json!({"uri": gone, "diagnostics": []}),
-                ));
-            }
-            for (i, (u, list)) in per_uri.into_iter().enumerate() {
-                let mut params = json!({"uri": u, "diagnostics": list});
-                if i == 0 {
-                    params["version"] = json!(doc.version);
-                }
-                st.diagnostics.insert(u, list);
-                out.push(proto::notification(
-                    "textDocument/publishDiagnostics",
-                    params,
-                ));
-            }
+            st.diagnostics.insert(u, list);
+            out.push(proto::notification(
+                "textDocument/publishDiagnostics",
+                params,
+            ));
         }
         out
     }
@@ -610,6 +724,21 @@ impl Server {
     pub fn cached_files(&self) -> usize {
         self.cache.len()
     }
+}
+
+/// The open documents by path, and the URIs they were opened under.
+fn open_docs(st: &State) -> (HashMap<PathBuf, Arc<Doc>>, HashMap<PathBuf, String>) {
+    let open = st
+        .docs
+        .values()
+        .map(|d| (d.path.clone(), d.clone()))
+        .collect();
+    let uris = st
+        .docs
+        .iter()
+        .map(|(u, d)| (d.path.clone(), u.clone()))
+        .collect();
+    (open, uris)
 }
 
 /// The server's capabilities.

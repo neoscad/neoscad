@@ -267,6 +267,31 @@ window.NeoSCADEditor = {
     return at;
   },
 
+  /// Select a range given as 0-based lines and UTF-16 columns (a console
+  /// line's span), scrolled into view and focused, so the jump lands
+  /// where typing continues.
+  revealRange(line, character, endLine, endCharacter) {
+    const doc = view.state.doc;
+    const at = (l, c) => {
+      const ln = doc.line(Math.min(Math.max(l + 1, 1), doc.lines));
+      return Math.min(ln.from + c, ln.to);
+    };
+    const anchor = at(line, character);
+    const head = Math.max(anchor, at(endLine, endCharacter));
+    view.dispatch({ selection: { anchor, head }, scrollIntoView: true });
+    view.focus();
+    return [anchor, head];
+  },
+
+  /// Send the language server the document's pending changes now rather
+  /// than after the client's own pause: the app has just started a run of
+  /// this text, and the markers it produces are published for the
+  /// version that carries it.
+  lspSync() {
+    client.sync();
+    return true;
+  },
+
   setFontSize(size) {
     fontSize = size;
     view.dispatch({ effects: fontSlot.reconfigure(fontTheme(size)) });

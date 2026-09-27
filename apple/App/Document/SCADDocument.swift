@@ -14,16 +14,10 @@
 // so undoing back to the saved text clears the edited dot, and autosave
 // saves whenever NSDocument sees unsaved changes.
 //
-// Updating the 3D view (a stand-in for 8f's document loop): Design >
-// Preview (F5) and Render (F6) render into the viewport, and every text
-// change schedules a preview after a short pause. Each request supersedes
-// the one before: the session cancels a document's older requests, and the
-// viewport ignores a model from an older request that finishes late.
-//
-// Language features (hover, completion, diagnostics ...) come from the
-// core's language server, which the editor's page talks to through
-// Editor/LanguageClient.swift. Its diagnostics are the editor's lint
-// markers; a render's go to the console.
+// The document loop (Document/DocumentLoop.swift): each pause in typing,
+// customizer edit or change on disk to a file the model read runs the
+// document once, and that one run feeds the 3D view, the console, the
+// customizer and the editor's markers.
 
 import AppKit
 import NeoSCADCore
@@ -47,11 +41,29 @@ final class DocumentModel {
         }
     }
     var report: RenderReport = .idle
+    /// The last run's console lines.
+    var console: [ConsoleLine] = []
+    /// The customizer: the document's parameter groups, the values edited
+    /// away from the text's (by name), and the parameter sets of the file
+    /// beside the model.
+    var parameterGroups: [ParameterGroup] = []
+    var parameterValues: [String: ParameterValue] = [:]
+    var parameterSets: [String] = []
+    var selectedParameterSet: String?
+    /// Whether the customizer and the console list are shown.
+    var customizerShown = true
+    var consoleCollapsed = false
+    /// Whether parameter sets can be read and written: the document has a
+    /// file, next to which `name.json` lives.
+    var parameterSetsAvailable = false
+
     /// The 3D view's state (the Rust viewport and its view).
     @ObservationIgnored let viewport = ViewportController()
     /// The editor (CodeMirror in a web view) and its bridge.
     @ObservationIgnored let editor = EditorController()
     @ObservationIgnored var textReplaced: (() -> Void)?
+    /// What the panels ask of their document (set by it).
+    @ObservationIgnored var actions = DocumentActions()
 
     @ObservationIgnored private var storage = ""
     /// The text's length in UTF-16 units, kept with each edit: counting a
@@ -79,9 +91,28 @@ final class DocumentModel {
     func replaceWithEditorText(_ text: String) {
         setStorage(text)
     }
+
+    /// A parameter's value as the customizer shows it: the edited one, or
+    /// the text's.
+    func value(of p: Parameter) -> ParameterValue {
+        parameterValues[p.name] ?? p.defaultValue
+    }
 }
 
-/// What the console area shows about the last render.
+/// What the console and the customizer ask of their document.
+@MainActor
+struct DocumentActions {
+    /// Show a console line's span in the editor (or its file's window).
+    var jump: (SourceRange) -> Void = { _ in }
+    /// A customizer value was edited (`nil`: back to the text's).
+    var setParameter: (String, ParameterValue?) -> Void = { _, _ in }
+    /// Every value back to the text's.
+    var resetParameters: () -> Void = {}
+    var applyParameterSet: (String) -> Void = { _ in }
+    var saveParameterSet: () -> Void = {}
+}
+
+/// What the console area shows about the last run.
 enum RenderReport {
     case idle
     case running(RenderMode)
@@ -93,28 +124,38 @@ enum RenderReport {
 final class SCADDocument: NSDocument {
     let model = DocumentModel()
 
-    /// The path the core knows this document by, once it has rendered:
-    /// the file's, or for an untitled document a path of its own that
-    /// exists nowhere on disk.
-    private(set) var corePath: String?
+    /// The path the core knows this document by, once it has run: the
+    /// file's, or for an untitled document one of its own (see
+    /// `untitledPath`).
+    var corePath: String?
     /// Whether the core's copy of the text is the document's: edits are
-    /// forwarded only then, and the next request sends the whole text
+    /// forwarded only then, and the next run sends the whole text
     /// otherwise.
-    private(set) var coreInSync = false
-    private lazy var untitledPath =
-        "/NeoSCAD-untitled/\(UUID().uuidString)/Untitled.scad"
-    /// The render in flight (the app tests await it).
-    private(set) var renderTask: Task<Void, Never>?
-    /// How many renders and previews were started (the app tests count
-    /// them, so a key that reached two handlers would show).
-    private(set) var requestCount = 0
-    /// The preview waiting for typing to pause.
-    private var pendingPreview: Task<Void, Never>?
-    /// What the last request built, so a scheme change can rebuild it.
-    private var lastMode: RenderMode?
+    var coreInSync = false
+    /// The run in flight (the app tests await it).
+    var renderTask: Task<Void, Never>?
+    /// How many runs were started (the app tests count them, so a key that
+    /// reached two handlers would show).
+    var requestCount = 0
+    /// The run waiting for typing (or a customizer drag) to pause.
+    var pendingPreview: Task<Void, Never>?
+    /// What the last run built, so a scheme change or a file change on
+    /// disk runs it again.
+    var lastMode: RenderMode?
+    /// The customizer's parse of the text, in flight.
+    var parameterTask: Task<Void, Never>?
+    /// The files the last run read, watched for changes on disk.
+    let watcher = FileWatcher()
+    /// The editor's language server: markers come from this document's
+    /// runs (`hostDiagnostics`), which hand it their diagnostics.
+    private(set) var languageServer: LanguageServer?
+    /// Set by `close`: nothing more runs.
+    private(set) var isClosed = false
 
-    /// How long typing must pause before the model is previewed again.
-    static let previewDelay: Duration = .milliseconds(400)
+    /// How long typing must pause before the document runs again. The
+    /// run is the markers' source too, so this is also how soon they
+    /// follow typing (the language server's own debounce was 150 ms).
+    static let previewDelay: Duration = .milliseconds(150)
 
     override init() {
         super.init()
@@ -142,25 +183,69 @@ final class SCADDocument: NSDocument {
                     from: self?.windowControllers.first?.window)
             }
             if case .success(let engine) = CoreService.shared,
-                let server = try? engine.core.languageServer()
+                let server = try? engine.core.languageServer(hostDiagnostics: true)
             {
+                languageServer = server
                 editor.connect(server)
             }
+            watcher.onChange = { [weak self] in self?.filesChanged() }
+            connectPanels()
         }
     }
 
-    /// The URI the language server knows this document by: its file's, or
-    /// for an untitled document its path of its own (so `include`s of
-    /// libraries resolve, relative ones not).
+    /// The URI the language server knows this document by: the core's
+    /// path for it, as a file URI.
     var languageURI: String {
         URL(fileURLWithPath: fileURL?.path ?? untitledPath).absoluteString
     }
 
-    /// Saved under a new name (or moved): the language server follows.
+    /// Where an untitled document lives for its includes. OpenSCAD's GUI
+    /// resolves an unsaved file's relative `include`s and `use`s against
+    /// its working directory (`parser.y`: an empty file name is
+    /// `fs::current_path()`), which for an app started from the Finder is
+    /// `/`: nothing useful. The Mac's equivalent of "where the user is
+    /// working" is the document controller's current directory (the
+    /// last folder a file was opened from or saved to, else Documents),
+    /// so an untitled document behaves as a file there: `include
+    /// <parts.scad>` finds the parts next to the files just opened, and
+    /// messages name it "Untitled.scad". The name is unique among open
+    /// documents and never one of a file on disk (its buffer would hide
+    /// that file from other documents' includes).
+    var untitledPath: String {
+        if let p = untitledPathChosen { return p }
+        let dir =
+            NSDocumentController.shared.currentDirectory.map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+        let shown: String = displayName ?? ""
+        let base = shown.isEmpty ? "Untitled" : shown
+        var name = base
+        var n = 1
+        while true {
+            let path = dir.appendingPathComponent("\(name).scad").path
+            if !Self.untitledPaths.contains(path) && !FileManager.default.fileExists(atPath: path) {
+                Self.untitledPaths.insert(path)
+                untitledPathChosen = path
+                return path
+            }
+            n += 1
+            name = "\(base) \(n)"
+        }
+    }
+    private var untitledPathChosen: String?
+
+    /// The paths untitled documents use now.
+    static var untitledPaths: Set<String> = []
+
+    /// Saved under a new name (or moved): the language server follows,
+    /// and so do the customizer's parameter sets.
     override var fileURL: URL? {
         didSet {
             guard oldValue != fileURL else { return }
-            MainActor.assumeIsolated { model.editor.documentURIChanged() }
+            MainActor.assumeIsolated {
+                model.editor.documentURIChanged()
+                refreshParameterSets()
+            }
         }
     }
 
@@ -168,18 +253,19 @@ final class SCADDocument: NSDocument {
 
     override func makeWindowControllers() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 1320, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.contentViewController = NSHostingController(
             rootView: DocumentView(model: model))
-        window.setContentSize(NSSize(width: 1200, height: 760))
+        window.setContentSize(NSSize(width: 1320, height: 760))
         let controller = NSWindowController(window: window)
         controller.shouldCascadeWindows = true
         addWindowController(controller)
         window.center()
         // Typing goes to the editor from the start.
         window.initialFirstResponder = model.editor.webView
+        refreshParameterSets()
     }
 
     // MARK: Reading and writing
@@ -200,7 +286,7 @@ final class SCADDocument: NSDocument {
 
     // MARK: Edits
 
-    /// The text was read (open, revert): show it and render it.
+    /// The text was read (open, revert): show it and run it.
     private func textReplaced() {
         model.editor.load(model.text)
         coreInSync = false
@@ -258,78 +344,9 @@ final class SCADDocument: NSDocument {
         run(.preview)
     }
 
-    /// A preview once typing pauses; each keystroke restarts the wait.
-    private func schedulePreview() {
-        pendingPreview?.cancel()
-        pendingPreview = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: Self.previewDelay)
-            guard !Task.isCancelled else { return }
-            self?.run(.preview)
-        }
-    }
-
-    /// The last request again (after the colour scheme changed).
+    /// The last run again (after the colour scheme changed).
     private func rerender() {
         if let mode = lastMode { run(mode) }
-    }
-
-    /// Render the current text in the core, off the main actor, into the
-    /// 3D view; show the statistics and diagnostics in the console area.
-    /// A newer request supersedes an unfinished one.
-    private func run(_ mode: RenderMode) {
-        pendingPreview?.cancel()
-        pendingPreview = nil
-        let engine: Engine
-        switch CoreService.shared {
-        case .success(let e): engine = e
-        case .failure(let e):
-            model.report = .failed("The core did not start: \(e.message)")
-            return
-        }
-        let path = fileURL?.path ?? untitledPath
-        if let old = corePath, old != path {
-            // Saved under a new name: the old buffer would shadow the file
-            // that is still on disk at the old path.
-            _ = try? engine.close(old)
-            coreInSync = false
-        }
-        corePath = path
-        if !coreInSync {
-            do {
-                try engine.update(path, text: model.text)
-                coreInSync = true
-            } catch let e as CoreError {
-                model.report = .failed(e.message)
-                return
-            } catch {
-                model.report = .failed("\(error)")
-                return
-            }
-        }
-        renderTask?.cancel()
-        requestCount += 1
-        lastMode = mode
-        model.report = .running(mode)
-        let model = self.model
-        let viewport = model.viewport
-        renderTask = Task { @MainActor in
-            do {
-                let result: RenderResult
-                if let v = viewport.viewport {
-                    result = try await engine.render(path, mode: mode, into: v)
-                    viewport.view?.requestFrame()
-                } else {
-                    result = try await engine.render(path, mode: mode)
-                }
-                model.report = .rendered(result, mode)
-            } catch CoreError.Cancelled {
-                // A newer request took over; it reports instead.
-            } catch let e as CoreError {
-                model.report = .failed(e.message)
-            } catch {
-                model.report = .failed("\(error)")
-            }
-        }
     }
 
     // MARK: View menu
@@ -385,9 +402,24 @@ final class SCADDocument: NSDocument {
     @objc func useHeadlight(_ sender: Any?) {
         model.viewport.update { $0.lighting = .headlight }
     }
+    @objc func toggleCustomizer(_ sender: Any?) {
+        model.customizerShown.toggle()
+    }
+    @objc func toggleConsole(_ sender: Any?) {
+        model.consoleCollapsed.toggle()
+    }
 
     /// Check marks for the View menu's toggles and choices.
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(toggleCustomizer(_:)):
+            item.state = model.customizerShown ? .on : .off
+            return true
+        case #selector(toggleConsole(_:)):
+            item.state = model.consoleCollapsed ? .off : .on
+            return true
+        default: break
+        }
         guard let s = model.viewport.settings else {
             return super.validateMenuItem(item)
         }
@@ -411,13 +443,25 @@ final class SCADDocument: NSDocument {
         return super.validateMenuItem(item)
     }
 
+    /// Closing stops everything the document started: the waiting and
+    /// running runs (the core's requests on its path are cancelled, not
+    /// left to finish), the customizer's parse, the watcher, the editor's
+    /// language client, and the core's buffer.
     override func close() {
+        isClosed = true
         pendingPreview?.cancel()
+        pendingPreview = nil
         renderTask?.cancel()
+        parameterTask?.cancel()
+        watcher.stop()
         model.viewport.detach()
         model.editor.detach()
         if let path = corePath, case .success(let engine) = CoreService.shared {
+            _ = try? engine.cancel(path)
             _ = try? engine.close(path)
+        }
+        if let p = untitledPathChosen {
+            Self.untitledPaths.remove(p)
         }
         super.close()
     }

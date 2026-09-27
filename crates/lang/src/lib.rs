@@ -132,6 +132,15 @@ pub fn parse_file(path: PathBuf, text: Vec<u8>) -> Program {
     finish(loader::load_single(path, text), &main, false)
 }
 
+/// Parse one file without following includes, with its customizer
+/// annotations (`customizer::Parameters::from_ast` reads them). Only the
+/// main file's top-level assignments are parameters, so an editor's
+/// customizer panel need not read or parse what the file includes.
+pub fn parse_file_annotated(path: PathBuf, text: Vec<u8>) -> Program {
+    let main = path.clone();
+    finish(loader::load_single(path, text), &main, true)
+}
+
 fn finish(loaded: loader::Loaded, main_path: &Path, annotate: bool) -> Program {
     let loader::Loaded {
         sources,

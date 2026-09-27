@@ -381,6 +381,15 @@ entry when it is done.
   computed; otherwise the node is computed again from its children's
   cached results (`geom::RenderOptions::replay`). Correct, but a cached
   subtree whose earlier twin was edited away is recomputed once. (7a)
+- A geometry cache hit is used only if the fragment, slice and triangle
+  counts its subtree asked for are within the request's limits
+  (`geom::evaluate`'s `Demand`), and a document's last product is reused
+  only under the same limits; otherwise the node is computed again and
+  refused where a cold render refuses it, so lowering the limits cannot
+  let a warm cache pass a model a cold one stops. Results computed
+  without limits have no recorded demand and are computed again once
+  under limits. Memory and time are not re-checked on a hit (it
+  allocates and takes nothing). (8f)
 
 ## Parts, check and measure
 - A part's solid is its subtree's geometry: a part under a `difference()`
@@ -554,23 +563,71 @@ entry when it is done.
   again, because `session.render` bakes the scheme's face colours into the
   geometry (`geom::color::Scheme`); a slow render-mode model is recomputed.
   (8c)
-- The app opens two GPU devices, one for snapshots (`host::offscreen`) and
-  one for viewports (`host::viewport_gpu`), because `Offscreen` drops its
-  instance and a window surface must come from the device's instance. One
-  would do. (8c)
-- The app's memory with `csg_spheres` open is about 790 MB RSS; not yet
-  broken down. (8c)
+- Memory (8f; `footprint`, Debug app, one window 1320x760 points on a 2x
+  display). The 900-950 MB measured in 8d was six windows restored from
+  the saved state, not one file. One window with `cube(10)` went from
+  114 to 52 MB: its two 4x MSAA buffers (colour and depth, 61 MB at
+  1280x1520 pixels) are memoryless now (`TRANSIENT_ATTACHMENT`). 125
+  spheres: 834 to 121 MB, from the allocator's cache of freed large
+  blocks (338 MB "Malloc Large (empty)", now off through the app's
+  `LSEnvironment`) and the upload's staging copy of the vertex data
+  (57 MB, now freed after the upload). The six windows: 731 to 257 MB.
+  What remains per window is mostly the model's vertex buffer, about
+  20 MB of malloc (parse caches, the language server's index), the
+  layer's drawables and WebKit's layers (10 MB IOSurface). Left open:
+  - `MallocLargeCache=0` comes from `LSEnvironment`, so a test host or a
+    binary run directly keeps the cache; a render took 8% longer with it
+    off (0.66 to 0.72 s from the command line on 125 spheres). An
+    allocator of the core's own that returns big blocks at once would
+    not depend on the launch.
+  - The web content processes were not measured again (56 MB and a 32 MB
+    prewarmed one in 8d).
+  - A preview's peak is far above its result: 125 spheres peaked at
+    972 MB for 13 MB of live data afterwards; not broken down.
+  - The snapshot renderer now shares the viewports' device
+    (`Offscreen::on_gpu`); the app made no snapshot before, so the second
+    device had not cost memory at idle yet.
 - Mouse mapping covers orbit, pan and zoom; OpenSCAD's shift-drag
   (pitch/roll), middle-drag (forward/back), shift-wheel (field of view) and
   zoom-to-cursor are not mapped. A Magic Mouse's precise scroll pans, as a
   trackpad's does. (8c)
-- The first model of a window is fitted (View All); the file's `$vpt`,
-  `$vpr` and `$vpd` are not applied to the view yet. (8c)
-- The app's own footprint is 900-950 MB (`footprint`), with a one-line
-  file or a 1.1 MB one: 620 MB of it is malloc (Large and Small) and
-  175-235 MB unmapped graphics memory. The editor is not part of it: its
-  web content process is 56 MB, plus a 32 MB process WebKit keeps
-  prewarmed. The app's share wants the breakdown the 8c entry asks for. (8d)
+- The file's `$vpt`, `$vpr`, `$vpd` and `$vpf` move the view when they
+  first appear and whenever their values change; OpenSCAD's GUI applies
+  them after every evaluation (`Camera::updateView` from
+  `MainWindow::instantiateRoot`). Live preview runs after each pause in
+  typing, and snapping the view back after each keystroke would undo
+  every orbit, hence the difference. The program also sees the view it
+  is shown in as `$vp*` (`setRenderVariables`), not the command line's
+  default camera. (8f)
+- An untitled document's relative `include`s and `use`s resolve against
+  the document controller's current directory (the last folder a file
+  was opened from or saved to, else Documents), as if it were a file
+  named "Untitled.scad" there. OpenSCAD resolves them against its
+  working directory (`parser.y`, `fs::current_path()`), which is `/` for
+  a Finder-launched app. (8f)
+- Document loop gaps (8f):
+  - Echo lines carry no location, so they do not jump: the evaluator
+    emits them without one (OpenSCAD prints none), and giving the record
+    one needs the call's span passed into `echo`.
+  - A change to another open document's unsaved text does not re-run the
+    documents that include it; only changes on disk to files a run read
+    do (`FileWatcher`), and open documents are not watched (their
+    buffers, not the disk, are what runs read).
+  - Customizer values run as `-D` assignments after the text; OpenSCAD's
+    GUI writes them into the parsed program (`applyParameters`). Top-level
+    reassignment makes the two the same for a top-level assignment. Not
+    done: parameter-name NFC normalisation when reading sets
+    (`ParameterSets::readFile`), deleting a set, the description-only and
+    other view styles, and the Animate panel.
+  - Browse All Versions and Revert To are AppKit's for an
+    `autosavesInPlace` document with the File menu's Revert item; the
+    app test covers saving in place and reverting to other contents, not
+    the versions browser: NSFileVersion keeps no versions in the
+    temporary directory, and the browser needs a person. Checklist: open
+    a saved file, edit, wait for the autosave, edit again; File > Revert
+    To > Browse All Versions shows the earlier text; choosing one
+    restores it in the editor and the view; File > Revert To > Last
+    Saved (Opened) does the same for the opened version.
 - Each editor keystroke costs the app about 1 ms on a 1.1 MB file (p50;
   `EditorBenchmark`), nearly all of it the offset conversion and the edit
   of the document's `String` copy, which are linear in the text; the
@@ -619,12 +676,13 @@ entry when it is done.
   finds nvm's and Homebrew's), and the network once, for `npm ci`. (8d)
 
 ## Language server
-- Diagnostics are the session's parse and evaluation, not the geometry
-  stage: warnings only a render prints (the kernels', `render()`'s) reach
-  the console, not the editor's markers. In the app each pause in typing
-  now evaluates the document twice, once for the preview and once for the
-  diagnostics; the preview's evaluation could publish when its text is the
-  version the editor last sent. (8e)
+- `neoscad lsp --stdio`'s diagnostics are the session's parse and
+  evaluation, not the geometry stage: warnings only a render prints (the
+  kernels', `render()`'s) reach the console, not the markers. The app's
+  markers come from its runs instead (`Options::host_diagnostics`), the
+  geometry stage's warnings included; a preview's geometry stage says
+  less than a render's, so an F6 render's warnings show until the next
+  edit's preview replaces them. (8e, 8f)
 - Name resolution is lexical from the syntax tree (`crates/lsp/src/index.rs`,
   `world.rs`), not the evaluator's: an `include` inside a module body is
   treated as a top-level one; an empty `include <>` does not reuse the
@@ -662,9 +720,11 @@ entry when it is done.
   are not documents: they are not restored after a relaunch, and one
   showing the bundled MCAD, which exists only in memory, has no proxy
   icon. A library file changed on disk while shown is not reloaded. (8e)
-- Markers appear about 0.65 s after typing stops plus the evaluation: the
-  CodeMirror client syncs 500 ms after the last change and the app waits
-  150 ms more for messages to pause (`LanguageClient.debounce`). (8e)
+- Keystroke to markers and to the view (`PipelineLatencyTests`, p50):
+  CSG.scad 189 and 184 ms, a BOSL2 cuboid 195 and 192 ms; before 8f the
+  markers took 167 and 180 ms and the view 431 and 433 ms (two
+  evaluations per pause, the view's after a 400 ms pause). Nearly all of
+  it is the 150 ms pause (`SCADDocument.previewDelay`). (8e, 8f)
 - `neoscad lsp --stdio` has no page on setting it up in VS Code, Zed,
   Neovim or Helix. (8e)
 - The release `wasm_check.wasm` is 44.6 MB with the language server in it

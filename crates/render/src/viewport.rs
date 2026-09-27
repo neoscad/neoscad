@@ -41,6 +41,22 @@ use crate::{Image, snapshot};
 /// and WebGPU device supports for 8-bit colour and 24-bit depth.
 pub const MSAA_SAMPLES: u32 = 4;
 
+/// The usage of the multisampled colour and the depth buffers: attachments
+/// that live only inside the frame's one render pass (cleared on load,
+/// discarded on store, the colour resolved into the target). On Apple GPUs
+/// `TRANSIENT_ATTACHMENT` makes them memoryless, kept in tile memory only
+/// (`wgpu-hal-30.0.1/src/metal/device.rs:561`): together a window's two 4x
+/// buffers took 61 MB of GPU memory at 1280x1520 pixels (phase 8f,
+/// `footprint`), about half of an idle app's footprint with one window
+/// open. Elsewhere wgpu gives an ordinary texture. The web build keeps
+/// plain render attachments: whether browsers' WebGPU accepts the flag
+/// was not checked.
+#[cfg(not(target_arch = "wasm32"))]
+const TRANSIENT: wgpu::TextureUsages =
+    wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TRANSIENT_ATTACHMENT);
+#[cfg(target_arch = "wasm32")]
+const TRANSIENT: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT;
+
 /// A GPU device shared by every viewport (and by the uploads for them),
 /// with the instance its surfaces must be made from and the pipelines for
 /// each target format.
@@ -83,6 +99,14 @@ impl Gpu {
         &self.device
     }
 
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.adapter.get_info()
+    }
+
     /// The pipelines for `format` and `samples`, made on first use and
     /// shared by every viewport with that target (a second window opens
     /// without compiling them again).
@@ -122,6 +146,18 @@ impl Gpu {
                 bytes: t.bytes,
                 max: t.max,
             })?;
+        // The buffers were written through staging copies of the same
+        // size, which wgpu frees only once the copy into them has run and
+        // the device is polled again. An idle view submits nothing more,
+        // so they stayed: a model's whole vertex data twice over (57 MB for
+        // 125 spheres, phase 8f). Submitting the copies now and waiting
+        // for them (a few milliseconds, on the uploading thread, never the
+        // main one) frees the staging at once.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.queue.submit(std::iter::empty());
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        }
         Ok(Model {
             buffers,
             bbox: scene.bounding_box(),
@@ -425,7 +461,7 @@ impl Viewport {
                 (w, h),
                 a.format,
                 a.samples,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                TRANSIENT,
             )
             .create_view(&Default::default())
         });
@@ -436,7 +472,7 @@ impl Viewport {
                 (w, h),
                 DEPTH_FORMAT,
                 a.samples,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                TRANSIENT,
             )
             .create_view(&Default::default()),
         );
@@ -460,6 +496,34 @@ impl Viewport {
         self.model = Some(model);
         self.dirty = true;
         true
+    }
+
+    /// The program's own view: each of `$vpt`, `$vpr`, `$vpd` and `$vpf`
+    /// it assigned (`None` for one it did not), as OpenSCAD's GUI moves its
+    /// camera after an evaluation (`Camera::updateView`). A view set this
+    /// way is not replaced by View All when the first model arrives.
+    pub fn set_file_view(
+        &mut self,
+        vpt: Option<[f64; 3]>,
+        vpr: Option<[f64; 3]>,
+        vpd: Option<f64>,
+        vpf: Option<f64>,
+    ) {
+        self.with_camera(|c| {
+            if let Some([x, y, z]) = vpt {
+                c.set_vpt(x, y, z);
+            }
+            if let Some([x, y, z]) = vpr {
+                c.set_vpr(x, y, z);
+            }
+            if let Some(d) = vpd {
+                c.set_vpd(d);
+            }
+            if let Some(f) = vpf {
+                c.set_vpf(f);
+            }
+        });
+        self.fitted = true;
     }
 
     /// Show nothing (keeping the camera).

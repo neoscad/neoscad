@@ -119,10 +119,22 @@ JSON-RPC (`docs/serve-protocol.md`).
   Language features come from `crates/lsp` in-process: the editor's
   `@codemirror/lsp-client` talks JSON-RPC over the same bridge to a
   server per window (sharing the session and its cache of analysed
-  library files). Its diagnostics, evaluated from the exact text version
-  the editor sent, are the editor's only lint markers; a render's go to
-  the console. Go to definition opens the user's own files as documents
+  library files). Go to definition opens the user's own files as documents
   and library files (BOSL2, the bundled MCAD) read-only in a tab.
+- **The document loop** (8f, `crates/ffi/src/document.rs`,
+  `apple/App/Document/DocumentLoop.swift`): each pause in typing (and
+  each customizer edit, or change on disk to a file the model read) runs
+  the document once, and that one run feeds the whole window. Its
+  evaluation's diagnostics go to the language server as soon as it ends
+  (`lsp::Options::host_diagnostics`: the server then never evaluates,
+  and publishes a run's diagnostics for the editor's version with the
+  run's text), before the geometry is built; the geometry stage's
+  warnings follow; the model is swapped into the viewport unless a newer
+  run started; and the console's lines (with editor positions to jump
+  to), the customizer's parameters and the files to watch come back with
+  the result. Customizer values run as `-D` assignments after the text,
+  which never changes; parameter sets are OpenSCAD's JSON beside the
+  model.
 - **Web:** the same core compiled to WASM and run in a worker, the same wgpu
   renderer on WebGPU, and CodeMirror 6.
 - **Project definition:** XcodeGen `project.yml`; the generated `.xcodeproj`

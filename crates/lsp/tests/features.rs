@@ -656,3 +656,68 @@ fn answers_use_the_clients_spelling_of_its_uris() {
     let pubs = c.diagnostics();
     assert_eq!(pubs[0]["uri"], spelled);
 }
+
+/// What the app does after each pause in typing: one render of the text,
+/// whose diagnostics (the geometry stage's among them) the server
+/// publishes for the client's version of that text.
+#[test]
+fn a_hosts_run_publishes_for_the_version_with_its_text() {
+    use std::sync::Arc;
+    let v1 = "cub(1);\n";
+    let v2 = "union() { cube(1); square(1); }\n";
+    let mut c = Client::host_run(&[(MAIN, v1)]);
+    c.open(MAIN, v1);
+    // The server evaluates nothing itself.
+    assert!(!c.server.diagnostics_pending());
+    assert!(c.diagnostics().is_empty());
+    let run = |c: &Client, text: &str| {
+        let mut r = session::Run::new(MAIN);
+        r.text = Some(Arc::from(text.as_bytes()));
+        let out = c
+            .session
+            .render(&r, session::Mode::Render, &render::ColorScheme::cornfield())
+            .unwrap();
+        out.log.diagnostics_json()
+    };
+    let parse = |out: Vec<String>| -> Vec<Value> {
+        out.iter()
+            .map(|m| serde_json::from_str::<Value>(m).unwrap()["params"].clone())
+            .collect()
+    };
+    // The client's version has the run's text: published at once.
+    let d = run(&c, v1);
+    let pubs = parse(
+        c.server
+            .supply(&c.session, MAIN.as_ref(), Arc::from(v1.as_bytes()), d),
+    );
+    assert_eq!(pubs.len(), 1);
+    assert_eq!(pubs[0]["version"], 1);
+    assert_eq!(pubs[0]["diagnostics"][0]["code"], "unknown-module");
+    // A run of text the client has not sent yet waits for it...
+    let d = run(&c, v2);
+    let pubs = c
+        .server
+        .supply(&c.session, MAIN.as_ref(), Arc::from(v2.as_bytes()), d);
+    assert!(pubs.is_empty());
+    // ... and goes out with the change that brings it: the geometry
+    // stage's warning, located at the 2D child.
+    let pubs = c.notify_all(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri(MAIN), "version": 2}, "contentChanges": [{"text": v2}]}),
+    );
+    assert_eq!(pubs.len(), 1, "{pubs:?}");
+    let p = &pubs[0]["params"];
+    assert_eq!(p["version"], 2);
+    let w = &p["diagnostics"][0];
+    assert!(
+        w["message"].as_str().unwrap().contains("Mixing 2D and 3D"),
+        "{w}"
+    );
+    assert_eq!(w["range"]["start"], json!({"line": 0, "character": 19}));
+    // A version no run has read yet publishes nothing.
+    let pubs = c.notify_all(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri(MAIN), "version": 3}, "contentChanges": [{"text": "cube(2);\n"}]}),
+    );
+    assert!(pubs.is_empty());
+}

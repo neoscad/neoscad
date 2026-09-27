@@ -29,6 +29,7 @@
 //!   minutes; Swift calls them off the main actor (`NeoSCADCore`'s async
 //!   wrapper), and `cancel` from any thread stops them.
 
+mod document;
 mod host;
 mod language;
 mod layer;
@@ -41,6 +42,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use session::{Run, Session};
 
+pub use document::*;
 pub use language::*;
 pub use types::*;
 pub use viewport::*;

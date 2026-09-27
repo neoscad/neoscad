@@ -117,3 +117,79 @@ impl FileSystem for DocFs {
         self.base.read_dir(path)
     }
 }
+
+/// One request's view of the session's files: [`DocFs`], noting every file
+/// the request found (read, or asked the metadata of). Parses served from
+/// the cache still ask their files' metadata to validate themselves, and
+/// imports are keyed by it, so a warm request notes the same files as a
+/// cold one. A host watches these for changes on disk ([`crate::Rendered::files`]):
+/// the app re-previews a document when a file it includes or imports is
+/// saved by another program.
+pub struct Recorder {
+    fs: Arc<DocFs>,
+    seen: std::sync::Mutex<std::collections::BTreeSet<PathBuf>>,
+}
+
+impl std::fmt::Debug for Recorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recorder").finish_non_exhaustive()
+    }
+}
+
+impl Recorder {
+    pub fn new(fs: Arc<DocFs>) -> Recorder {
+        Recorder {
+            fs,
+            seen: std::sync::Mutex::new(Default::default()),
+        }
+    }
+
+    fn note(&self, path: &Path) {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(normal(path));
+    }
+
+    /// The files found so far, sorted.
+    pub fn files(&self) -> Vec<PathBuf> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+impl FileSystem for Recorder {
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let r = self.fs.read(path);
+        if r.is_ok() {
+            self.note(path);
+        }
+        r
+    }
+    // Existence probes are the library path search trying each directory
+    // in turn: the file it settles on is read or asked its metadata next,
+    // so a probe alone notes nothing.
+    fn exists(&self, path: &Path) -> bool {
+        self.fs.exists(path)
+    }
+    fn is_dir(&self, path: &Path) -> bool {
+        self.fs.is_dir(path)
+    }
+    fn canonicalize(&self, path: &Path) -> Option<PathBuf> {
+        self.fs.canonicalize(path)
+    }
+    fn metadata(&self, path: &Path) -> Option<Metadata> {
+        let m = self.fs.metadata(path);
+        if m.is_some() {
+            self.note(path);
+        }
+        m
+    }
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        self.fs.read_dir(path)
+    }
+}

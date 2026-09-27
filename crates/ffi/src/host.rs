@@ -68,22 +68,24 @@ fn entropy_seed() -> u32 {
     (t as u32).wrapping_add(std::process::id())
 }
 
-/// The GPU snapshots draw on, opened on first use and shared by every
-/// core in the process (a Metal device and its pipelines take tens of
-/// milliseconds to create). Metal only: this crate is built for macOS.
+/// The GPU snapshots draw on: an offscreen renderer on the viewports'
+/// device ([`viewport_gpu`]), made on first use and shared by every core
+/// in the process. Until phase 8f it opened a Metal device of its own,
+/// because `Offscreen` dropped the instance a window surface needs; one
+/// device serves both now, so the app pays for one set of queues,
+/// pipeline caches and driver allocations. Metal only: this crate is
+/// built for macOS.
 fn offscreen() -> Result<&'static Offscreen, String> {
     static DEVICE: OnceLock<Result<Offscreen, String>> = OnceLock::new();
     DEVICE
-        .get_or_init(|| Offscreen::new_blocking(Backends::METAL).map_err(|e| e.to_string()))
+        .get_or_init(|| viewport_gpu().map(|gpu| Offscreen::on_gpu(&gpu)))
         .as_ref()
         .map_err(Clone::clone)
 }
 
-/// The GPU the viewports draw on, opened on first use and shared by every
-/// window (and by the background uploads for them). A device of its own,
-/// not the snapshots' [`offscreen`] one: a window surface must come from
-/// the instance its device was opened on, and the offscreen renderer does
-/// not keep its instance.
+/// The GPU the viewports (and snapshots) draw on, opened on first use and
+/// shared by every window and by the background uploads for them. It keeps
+/// the instance it was opened on, which a window surface must come from.
 pub fn viewport_gpu() -> Result<Arc<render::viewport::Gpu>, String> {
     static GPU: OnceLock<Result<Arc<render::viewport::Gpu>, String>> = OnceLock::new();
     GPU.get_or_init(|| {

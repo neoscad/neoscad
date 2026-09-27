@@ -100,6 +100,20 @@ impl Offscreen {
         })
     }
 
+    /// An offscreen renderer on `gpu`'s device, not a device of its own. A
+    /// host that already draws viewports (the macOS app) snapshots on the
+    /// same device: a second Metal device costs its own command queues,
+    /// pipeline caches and driver allocations for nothing.
+    pub fn on_gpu(gpu: &crate::viewport::Gpu) -> Offscreen {
+        let device = gpu.device().clone();
+        Offscreen {
+            renderer: Renderer::new(&device, FORMAT, 1),
+            queue: gpu.queue().clone(),
+            device,
+            adapter: gpu.adapter_info(),
+        }
+    }
+
     /// The GPU this draws on.
     pub fn info(&self) -> GpuInfo {
         let a = &self.adapter;

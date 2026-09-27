@@ -200,7 +200,7 @@ fn language_server_over_the_core() {
     let c = core();
     // The app's copy says one thing; the server's client another.
     with_text(&c, "cube(1);\n");
-    let ls = c.clone().language_server().unwrap();
+    let ls = c.clone().language_server(false).unwrap();
     let send = |m: serde_json::Value| -> Vec<serde_json::Value> {
         ls.handle(m.to_string())
             .unwrap()

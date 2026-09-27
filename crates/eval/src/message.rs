@@ -223,6 +223,12 @@ impl<W: Write> Console<W> {
     }
 
     /// The lines recorded so far (see [`Console::record`]).
+    /// The records so far, leaving them in place (a host that reports a
+    /// request's messages before it ends).
+    pub fn records(&self) -> &[Logged] {
+        self.records.as_deref().unwrap_or_default()
+    }
+
     pub fn take_records(&mut self) -> Vec<Logged> {
         self.records
             .as_mut()

@@ -363,6 +363,25 @@ pub struct Evaluation {
     /// warning). A PNG export draws with this view, so the file's own
     /// camera settings reach the image as they do in OpenSCAD.
     pub camera: Camera,
+    /// Which of those the file itself assigned (and converted): the GUI
+    /// moves its view to exactly these (`Camera::updateView`).
+    pub camera_assigned: CameraAssigned,
+}
+
+/// Which of `$vpt`, `$vpr`, `$vpd` and `$vpf` a program assigned at its
+/// top level, with a value `Camera::updateView` accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CameraAssigned {
+    pub vpt: bool,
+    pub vpr: bool,
+    pub vpd: bool,
+    pub vpf: bool,
+}
+
+impl CameraAssigned {
+    pub fn any(self) -> bool {
+        self.vpt || self.vpr || self.vpd || self.vpf
+    }
 }
 
 /// Evaluate `main` with its `use`d `libraries`. `main_uses` are the keys of

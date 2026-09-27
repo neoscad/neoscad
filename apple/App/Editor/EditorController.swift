@@ -206,6 +206,28 @@ final class EditorController: NSObject {
         }
     }
 
+    /// Select a span given in editor positions (0-based lines, UTF-16
+    /// columns), in view and focused: a console line's jump.
+    func reveal(line: Int, character: Int, endLine: Int, endCharacter: Int) {
+        guard isReady else {
+            pendingReveal = (line, character)
+            return
+        }
+        Task {
+            _ = try? await call(
+                "return NeoSCADEditor.revealRange(line, character, endLine, endCharacter)",
+                ["line": line, "character": character, "endLine": endLine, "endCharacter": endCharacter])
+        }
+    }
+
+    /// Have the page's language client send its pending changes now: a run
+    /// of the current text has started, and its markers are published for
+    /// the version that carries that text.
+    func syncLanguage() {
+        guard isReady else { return }
+        Task { _ = try? await call("return NeoSCADEditor.lspSync()") }
+    }
+
     func undo() { command("undo") }
     func redo() { command("redo") }
     func selectAll() { command("selectAll") }
@@ -359,6 +381,7 @@ final class EditorController: NSObject {
     func detach() {
         if let fontObserver { NotificationCenter.default.removeObserver(fontObserver) }
         fontObserver = nil
+        languageClient?.stop()
     }
 }
 

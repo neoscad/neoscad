@@ -114,12 +114,20 @@ pub struct ViewportImage {
 /// the model, camera and settings survive in between.
 #[derive(uniffi::Object)]
 pub struct Viewport {
-    gpu: Arc<Gpu>,
+    pub(crate) gpu: Arc<Gpu>,
     inner: Mutex<render::viewport::Viewport>,
     /// Numbers `render_into` requests, so a slow old render cannot replace
     /// a newer one's model.
-    requests: AtomicU64,
+    pub(crate) requests: AtomicU64,
+    /// The file's `$vp*` the last document run applied, with its
+    /// generation (`document.rs`, `apply_file_view`).
+    #[allow(clippy::type_complexity)]
+    pub(crate) file_view: Mutex<Option<(FileView, u64)>>,
 }
+
+/// The `$vpt`, `$vpr`, `$vpd` and `$vpf` a file assigned (`None` for
+/// those it did not).
+pub(crate) type FileView = (Option<[f64; 3]>, Option<[f64; 3]>, Option<f64>, Option<f64>);
 
 impl std::fmt::Debug for Viewport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -128,7 +136,7 @@ impl std::fmt::Debug for Viewport {
 }
 
 impl Viewport {
-    fn lock(&self) -> MutexGuard<'_, render::viewport::Viewport> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, render::viewport::Viewport> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -171,6 +179,7 @@ impl Viewport {
                 gpu,
                 inner: Mutex::new(inner),
                 requests: AtomicU64::new(0),
+                file_view: Mutex::new(None),
             }))
         })
     }

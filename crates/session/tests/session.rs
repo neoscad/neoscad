@@ -341,3 +341,121 @@ fn a_limit_in_parallel_geometry_reports_the_same_every_time() {
         "ERROR: Resource limit exceeded: cylinder() would make 50,000 fragments, over the fragments limit of 10,000 in file m.scad, line 2\n"
     );
 }
+
+#[test]
+fn a_request_reports_the_files_it_read_warm_or_cold() {
+    // The app watches these to re-preview when an include, a used
+    // library or an imported file changes on disk. A warm request (every
+    // parse from the cache) must name the same files as a cold one.
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/main.scad",
+        b"include <parts.scad>\nuse <lib/util.scad>\npeg();\nimport(\"shape.off\");\n".to_vec(),
+    );
+    fs.insert(
+        "/doc/parts.scad",
+        b"module peg() cylinder(h = 5, r = 1);\n".to_vec(),
+    );
+    fs.insert("/lib/lib/util.scad", b"function f() = 1;\n".to_vec());
+    fs.insert(
+        "/doc/shape.off",
+        b"OFF\n4 4 0\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n3 0 2 1\n3 0 1 3\n3 1 2 3\n3 0 3 2\n".to_vec(),
+    );
+    let s = session(&fs);
+    let want: Vec<PathBuf> = [
+        "/doc/main.scad",
+        "/doc/parts.scad",
+        "/doc/shape.off",
+        "/lib/lib/util.scad",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    for round in ["cold", "warm"] {
+        let r = s
+            .render(
+                &Run::new("main.scad"),
+                Mode::Preview,
+                &render::ColorScheme::cornfield(),
+            )
+            .unwrap();
+        assert_eq!(r.exit_code, 0, "{}", String::from_utf8_lossy(&r.log.stderr));
+        assert_eq!(r.files, want, "{round}");
+        let e = s.evaluate(&Run::new("main.scad"), false).unwrap();
+        assert!(e.files.starts_with(&want[..2]), "{round}: {:?}", e.files);
+    }
+}
+
+#[test]
+fn a_warm_cache_answers_as_a_cold_one_under_lowered_limits() {
+    // A cache hit does no work, but after the limits are lowered it must
+    // not pass a model that a cold render refuses; and results computed
+    // without limits (whose demand is unknown) are checked too.
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/m.scad",
+        b"cube(1);\ntranslate([3, 0, 0]) sphere(1, $fn = 400);\n".to_vec(),
+    );
+    let scheme = render::ColorScheme::cornfield();
+    let tight = session::Limits {
+        fragments: Some(100),
+        ..session::Limits::AGENT
+    };
+    let render = |s: &Session, limits: session::Limits| {
+        let mut run = Run::new("m.scad");
+        run.limits = Some(limits);
+        s.render(&run, Mode::Render, &scheme).unwrap()
+    };
+    let cold = render(&session(&fs), tight);
+    assert_eq!(cold.exit_code, 1);
+    for first in [session::Limits::AGENT, session::Limits::NONE] {
+        let s = session(&fs);
+        assert_eq!(render(&s, first).exit_code, 0);
+        let warm = render(&s, tight);
+        assert_eq!(warm.exit_code, 1, "after {first:?}");
+        assert_eq!(warm.log.stderr, cold.log.stderr);
+        // And back: the looser limits reuse the cache again.
+        let again = render(&s, session::Limits::AGENT);
+        assert_eq!(again.exit_code, 0);
+    }
+    // The triangle limit, on a result that passed the fragment limit.
+    let s = session(&fs);
+    assert_eq!(render(&s, session::Limits::AGENT).exit_code, 0);
+    let few = session::Limits {
+        triangles: Some(1000),
+        ..session::Limits::AGENT
+    };
+    let r = render(&s, few);
+    assert_eq!(r.exit_code, 1);
+    assert_eq!(r.log.diagnostics_json()[0]["code"], "resource-limit");
+    assert_eq!(r.log.stderr, render(&session(&fs), few).log.stderr);
+}
+
+#[test]
+fn a_render_says_which_view_variables_the_file_assigned() {
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/v.scad",
+        b"$vpr = [10, 20, 30];\n$vpd = 50;\ncube(1);\n".to_vec(),
+    );
+    fs.insert("/doc/n.scad", b"cube(1);\n".to_vec());
+    let s = session(&fs);
+    let scheme = render::ColorScheme::cornfield();
+    let mut run = Run::new("v.scad");
+    run.camera.auto = false;
+    let r = s.render(&run, Mode::Preview, &scheme).unwrap();
+    assert!(r.camera_assigned.vpr && r.camera_assigned.vpd);
+    assert!(!r.camera_assigned.vpt && !r.camera_assigned.vpf);
+    assert_eq!(r.camera.vpr, [10.0, 20.0, 30.0]);
+    assert_eq!(r.camera.vpd, 50.0);
+    // Without `auto` (a GUI's view), no "Viewall and autocenter" warning.
+    assert!(
+        r.log.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&r.log.stderr)
+    );
+    let r = s
+        .render(&Run::new("n.scad"), Mode::Preview, &scheme)
+        .unwrap();
+    assert!(!r.camera_assigned.any());
+}

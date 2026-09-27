@@ -5,10 +5,11 @@
 // signature help, formatting (Shift-Alt-F), rename (F2) and references
 // (Shift-F12). This file adds what the client leaves to its host:
 //
-// - Diagnostics with fixes. The server's diagnostics are the editor's only
-//   lint markers, and each fix it sends in a diagnostic's `data` becomes
-//   an action on the marker (the client's own handler drops both codes
-//   and fixes).
+// - Diagnostics with fixes. The server's diagnostics (those of the app's
+//   runs of the document, which it publishes for the version with the
+//   run's text) are the editor's only lint markers, and each fix it sends
+//   in a diagnostic's `data` becomes an action on the marker (the client's
+//   own handler drops both codes and fixes).
 // - Go to definition (F12, Command-click) that can leave the document: a
 //   location in another file (an include, a library) goes to the app,
 //   which opens it (`{type: "open", uri, line, character}`).
@@ -135,8 +136,9 @@ const formatKey = EditorView.domEventHandlers({
 /// shows a location in another file.
 export function languageClient(transport, open) {
   const client = new LSPClient({
-    // The server evaluates the model for diagnostics, which can take a
-    // while for a large one; everything else answers in milliseconds.
+    // Every request answers in milliseconds (the app's runs produce the
+    // diagnostics); the first request on a BOSL2 model indexes the
+    // library, which takes longer.
     timeout: 10000,
     sanitizeHTML,
     notificationHandlers: {

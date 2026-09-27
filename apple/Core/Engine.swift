@@ -93,6 +93,44 @@ public final class Engine: Sendable {
         try await run(path) { try $0.renderInto(path: path, mode: mode, viewport: viewport) }
     }
 
+    /// One run of a document for its window (the document loop): evaluate
+    /// and build it once, hand its diagnostics to `language` (the editor's
+    /// server, made with `hostDiagnostics`), show the model in `viewport`,
+    /// and return the console and the files it read. A newer run of the
+    /// same document cancels this one.
+    public func runDocument(
+        _ path: String, request: DocumentRequest, viewport: Viewport?, language: LanguageServer?,
+        early: (@Sendable ([String]) -> Void)? = nil
+    ) async throws -> DocumentResult {
+        let listener = early.map { Listener(language: $0) }
+        return try await run(path) {
+            try $0.runDocument(
+                path: path, request: request, viewport: viewport, language: language,
+                listener: listener)
+        }
+    }
+
+    /// Hands a run's early language notifications (the evaluation's
+    /// diagnostics, before the geometry stage) to `language`, on the
+    /// engine's thread.
+    private final class Listener: DocumentListener {
+        let language: @Sendable ([String]) -> Void
+        init(language: @escaping @Sendable ([String]) -> Void) { self.language = language }
+        func language(messages: [String]) { language(messages) }
+    }
+
+    /// The customizer's groups of a document's current text. Parses the
+    /// main file alone, on the engine's queue (a large file takes a few
+    /// milliseconds); never cancelled by the document's runs.
+    public func parameters(_ path: String) async throws -> [ParameterGroup] {
+        let core = self.core
+        return try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                continuation.resume(with: Result { try core.parameters(path: path) })
+            }
+        }
+    }
+
     public func snapshot(
         _ path: String, options: SnapshotOptions = SnapshotOptions()
     ) async throws -> SnapshotResult {

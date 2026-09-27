@@ -301,6 +301,7 @@ pub fn run_lsp(files: Arc<MemFs>, src: &[u8]) -> String {
     let server = lsp::Server::new(lsp::Options {
         sync_session: true,
         limits: None,
+        host_diagnostics: false,
     });
     let text = String::from_utf8_lossy(src).into_owned();
     // Each marker's position in the text without the markers (ASCII

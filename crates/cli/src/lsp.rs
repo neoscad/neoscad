@@ -77,6 +77,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
         server: lsp::Server::new(lsp::Options {
             sync_session: true,
             limits: None,
+            host_diagnostics: false,
         }),
         out: Mutex::new(Box::new(std::io::stdout())),
         log: log.map(Mutex::new),

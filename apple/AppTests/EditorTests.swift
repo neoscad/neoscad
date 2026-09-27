@@ -196,7 +196,7 @@ func focusEditor(_ doc: SCADDocument) async throws -> NSWindow {
         // "é" is one UTF-16 unit and two bytes, so the core's byte column
         // of `cub` is one more than its UTF-16 column: a marker placed by
         // bytes would start one character late. The markers come from the
-        // language server, without a render.
+        // document's own run, through the language server.
         let text = "cube(1);\nx = \"é\"; cub(2);\n"
         let doc = try await openDocument(text)
         let shown = try await lintMarkers(doc, count: 1)

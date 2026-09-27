@@ -117,7 +117,7 @@ final class LibraryViewer: NSWindowController, NSWindowDelegate {
         editor.openLocation = { [weak self] uri, line, character in
             LocationOpener.open(uri: uri, line: line, character: character, from: self?.window)
         }
-        if let server = try? engine.core.languageServer() {
+        if let server = try? engine.core.languageServer(hostDiagnostics: false) {
             editor.connect(server)
         }
         window.contentView = editor.webView

@@ -255,6 +255,63 @@ struct Replay {
     /// [`Ctx::pattern`] of the node when it was computed.
     pattern: u64,
     epoch: u64,
+    /// The most the subtree asked of the count limits while it was
+    /// computed; `None` when it was computed without limits (the checks
+    /// that measure it are skipped then). See [`Demand`].
+    demand: Option<Demand>,
+}
+
+/// The largest fragment, slice and triangle counts a subtree asked for
+/// (a primitive's rings, an extrusion's slices, any result's triangles).
+///
+/// A cache hit costs no work, but it must not let a request pass that the
+/// same request with a cold cache refuses: after the limits are lowered
+/// (an agent checking whether a model fits a budget, or the app's own
+/// limits changing), a warm cache would otherwise answer with results no
+/// longer allowed, and whether a model passes would depend on what ran
+/// before it. So a hit is used only when its recorded demand is within
+/// the request's limits; otherwise the node is computed again, and the
+/// check that refuses it fails at the node that asked too much, with the
+/// message and location a cold render gives. Memory and time are not
+/// re-checked: a hit allocates nothing and takes no time.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Demand {
+    fragments: f64,
+    slices: f64,
+    triangles: f64,
+}
+
+impl Demand {
+    fn record(&mut self, l: eval::limits::Limit, asked: f64) {
+        use eval::limits::Limit;
+        let slot = match l {
+            Limit::Fragments => &mut self.fragments,
+            Limit::Slices => &mut self.slices,
+            Limit::Triangles => &mut self.triangles,
+            _ => return,
+        };
+        if asked > *slot {
+            *slot = asked;
+        }
+    }
+
+    fn merge(&mut self, o: &Demand) {
+        self.fragments = self.fragments.max(o.fragments);
+        self.slices = self.slices.max(o.slices);
+        self.triangles = self.triangles.max(o.triangles);
+    }
+
+    /// Whether every count is within `g`'s limits.
+    fn allowed(&self, g: &eval::limits::Guard) -> bool {
+        use eval::limits::Limit;
+        [
+            (Limit::Fragments, self.fragments),
+            (Limit::Slices, self.slices),
+            (Limit::Triangles, self.triangles),
+        ]
+        .into_iter()
+        .all(|(l, asked)| g.exceeds(l, asked, "").is_none())
+    }
 }
 
 impl Default for Cache {
@@ -466,6 +523,10 @@ struct Ctx<'a> {
     /// charged to the guard's memory estimate (by node index), until its
     /// parent has used it.
     charged: Mutex<HashMap<usize, u64>>,
+    /// With resource limits: each node's [`Demand`] in this render (by
+    /// node index), its own checks and its children's merged when it is
+    /// cached.
+    demand: Mutex<HashMap<usize, Demand>>,
 }
 
 /// A result's weight in the memory limit's estimate, as a multiple of
@@ -778,6 +839,7 @@ impl Renderer {
             blocks: HashMap::new(),
             overflow: Mutex::new(HashMap::new()),
             charged: Mutex::new(HashMap::new()),
+            demand: Mutex::new(HashMap::new()),
         };
         {
             let mut seen = HashSet::new();
@@ -876,6 +938,12 @@ impl Ctx<'_> {
         let Some(g) = &self.opts.guard else {
             return Ok(());
         };
+        self.demand
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(n.index)
+            .or_default()
+            .record(l, asked);
         match g.exceeds(l, asked, what) {
             None => Ok(()),
             Some(e) => Err(self.trip(n, g, e)),
@@ -962,6 +1030,22 @@ impl Ctx<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(h);
+        // A hit whose demand the request's limits no longer allow (or that
+        // was computed without limits, so its demand is unknown) is
+        // computed again; see [`Demand`].
+        let cached = match (&self.opts.guard, cached) {
+            (Some(g), Some((geom, replay))) => match replay.demand {
+                Some(d) if d.allowed(g) => {
+                    self.demand
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(n.index, d);
+                    Some((geom, replay))
+                }
+                _ => None,
+            },
+            (_, c) => c,
+        };
         if let Some((geom, replay)) = cached {
             if !first || self.opts.replay.is_none() {
                 // A later copy, or a host that keeps OpenSCAD's rule: the
@@ -993,6 +1077,20 @@ impl Ctx<'_> {
         if let Some(g) = &self.opts.guard {
             self.check_result(n, g, out.geom.as_ref())?;
         }
+        let demand = self.opts.guard.as_ref().map(|_| {
+            let mut d = self
+                .demand
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut own = d.get(&n.index).copied().unwrap_or_default();
+            for c in &n.children {
+                if let Some(cd) = d.get(&c.index) {
+                    own.merge(cd);
+                }
+            }
+            d.insert(n.index, own);
+            own
+        });
         let msgs = if first {
             Some(Arc::new(out.msgs.clone()))
         } else {
@@ -1010,6 +1108,7 @@ impl Ctx<'_> {
                     msgs,
                     pattern,
                     epoch: self.opts.replay.unwrap_or(0),
+                    demand,
                 },
             );
         Ok(out)

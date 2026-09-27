@@ -140,6 +140,11 @@ enum MainMenu {
         m.addItem(item("Zoom In", #selector(D.zoomIn(_:)), "]"))
         m.addItem(item("Zoom Out", #selector(D.zoomOut(_:)), "["))
         m.addItem(.separator())
+        // OpenSCAD's Window menu shows and hides its docks; here the
+        // console's lines and the customizer are parts of the window.
+        m.addItem(item("Console", #selector(D.toggleConsole(_:)), "c", [.command, .option]))
+        m.addItem(item("Customizer", #selector(D.toggleCustomizer(_:)), "p", [.command, .option]))
+        m.addItem(.separator())
         // The editor's font, for every window. ⌘+ is typed as ⌘= on most
         // layouts (the + is shifted), so a hidden twin answers ⌘= too.
         typealias A = AppDelegate

@@ -705,6 +705,7 @@ impl<'a> Evaluator<'a> {
         let mut aborted = false;
         let mut interrupted = false;
         let mut camera = self.opts.camera;
+        let mut camera_assigned = crate::CameraAssigned::default();
         // A warning in the last expression evaluated may still be armed.
         let result = result.and_then(|_| self.check_hard());
         if let Err(e) = result {
@@ -714,7 +715,7 @@ impl<'a> Evaluator<'a> {
                 self.emit_pending(p);
             }
         } else {
-            camera = self.update_camera(&file);
+            (camera, camera_assigned) = self.update_camera(&file);
         }
         let (tagged, next) = root.find_root_tag();
         let next = next.map(|o| Loc {
@@ -736,15 +737,17 @@ impl<'a> Evaluator<'a> {
             // modifier check), which OpenSCAD raises from `do_export`.
             hard_warning: matches!(self.hard.get(), Hard::Pending | Hard::Thrown),
             camera,
+            camera_assigned,
         }
     }
 
     /// `Camera::updateView`: top-level `$vp*` assignments, returning the
-    /// camera they leave.
-    fn update_camera(&mut self, file: &Rc<Ctx>) -> Camera {
+    /// camera they leave and which of them the file set.
+    fn update_camera(&mut self, file: &Rc<Ctx>) -> (Camera, crate::CameraAssigned) {
         let mut cam = self.opts.camera;
+        let mut set = crate::CameraAssigned::default();
         if cam.locked {
-            return cam;
+            return (cam, set);
         }
         let mut noauto = false;
         let (vpr, vpt, vpd, vpf) = (self.k.vpr, self.k.vpt, self.k.vpd, self.k.vpf);
@@ -776,6 +779,16 @@ impl<'a> Evaluator<'a> {
             };
             if ok {
                 noauto = true;
+                let flag = if s == vpr {
+                    &mut set.vpr
+                } else if s == vpt {
+                    &mut set.vpt
+                } else if s == vpd {
+                    &mut set.vpd
+                } else {
+                    &mut set.vpf
+                };
+                *flag = true;
             } else {
                 let what = if is_vec {
                     "a vec3 or vec2 of numbers"
@@ -795,7 +808,7 @@ impl<'a> Evaluator<'a> {
             );
             cam.auto = false;
         }
-        cam
+        (cam, set)
     }
 
     pub fn register_capture(&mut self, c: &Rc<Ctx>) {

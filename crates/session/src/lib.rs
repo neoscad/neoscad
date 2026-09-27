@@ -243,7 +243,16 @@ pub struct Run {
     /// (it must not cancel the app's render of the same document, nor be
     /// cancelled by it), so it stops its own stale runs through this.
     pub interrupt: Option<Arc<AtomicBool>>,
+    /// Told the messages so far once evaluation has finished and before
+    /// the geometry stage starts ([`Session::render`] only). An editor
+    /// shows the evaluation's diagnostics without waiting for the geometry
+    /// (which a preview of a large model can take seconds over); the
+    /// finished request's log then adds the geometry stage's own.
+    pub on_evaluated: Option<EvaluatedHook>,
 }
+
+/// The hook of [`Run::on_evaluated`].
+pub type EvaluatedHook = Arc<dyn Fn(&Log) + Send + Sync>;
 
 impl std::fmt::Debug for Run {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -280,6 +289,7 @@ impl Run {
             limits: None,
             text: None,
             interrupt: None,
+            on_evaluated: None,
         }
     }
 }
@@ -381,6 +391,8 @@ pub struct Evaluated {
     /// Whether an evaluation error stopped evaluation early.
     pub aborted: bool,
     pub timings: Timings,
+    /// Every file the request found, sorted ([`Rendered::files`]).
+    pub files: Vec<PathBuf>,
 }
 
 /// What [`Session::render`] builds.
@@ -406,9 +418,18 @@ pub struct Rendered {
     pub tree: Option<Arc<geom::csg::CsgTree>>,
     /// The file's view after `$vp*`.
     pub camera: eval::Camera,
+    /// Which `$vp*` the file assigned itself (a GUI moves its view to
+    /// these; the others keep the view's own).
+    pub camera_assigned: eval::CameraAssigned,
     /// Entries in the geometry cache after the render.
     pub cache_entries: usize,
     pub timings: Timings,
+    /// Every file the request found (read, or asked the metadata of),
+    /// sorted: the main file, its includes, the libraries it uses and
+    /// their includes, imported files and fonts. Open documents' buffers
+    /// are among them under their paths. A host that re-runs a document
+    /// when its inputs change on disk watches these.
+    pub files: Vec<PathBuf>,
 }
 
 impl Rendered {
@@ -549,8 +570,9 @@ impl JobGuard<'_> {
 /// A document's last render, reused when nothing it depends on changed.
 #[derive(Debug, Clone)]
 struct Product {
-    /// Root key, epoch, mode, renderer and the preview's term limit.
-    key: (u128, u64, Mode, u64, usize),
+    /// Root key, epoch, mode, renderer, the preview's term limit and the
+    /// request's limits.
+    key: (u128, u64, Mode, u64, usize, u64),
     geometry: Option<geom::Geometry>,
     tree: Option<Arc<geom::csg::CsgTree>>,
     messages: Vec<geom::Msg>,
@@ -661,6 +683,8 @@ struct Pipe {
     /// The programs loaded, for the names of "did you mean" hints, which
     /// are only collected when a diagnostic needs them.
     programs: Vec<Arc<Program>>,
+    /// The files as this request sees them, noting what it found.
+    fs: Arc<docfs::Recorder>,
 }
 
 /// The core. See the crate documentation.
@@ -686,6 +710,17 @@ impl std::fmt::Debug for Session {
             .field("cfg", &self.cfg)
             .finish_non_exhaustive()
     }
+}
+
+/// Whether any line is a diagnostic whose "did you mean" hint needs the
+/// program's names.
+fn wants_names(lines: &[Logged]) -> bool {
+    lines.iter().any(|l| {
+        matches!(
+            l.code,
+            Some(DiagCode::UnknownModule | DiagCode::UnknownFunction | DiagCode::UnknownVariable)
+        )
+    })
 }
 
 /// At most this many renderers (colour schemes and font sets) stay warm.
@@ -843,6 +878,15 @@ impl Session {
         v
     }
 
+    /// An open document's unsaved text, shared (no copy); `None` for a
+    /// path without a buffer. A host that must know exactly which text a
+    /// request evaluates takes it here and passes it as [`Run::text`]:
+    /// an edit arriving meanwhile then cannot change what the request
+    /// reads.
+    pub fn buffer_text(&self, path: &Path) -> Option<Arc<[u8]>> {
+        self.fs.buffer(&self.doc_path(path)).map(|b| b.text)
+    }
+
     // --- Cancellation ------------------------------------------------------
 
     /// Stop every request running on `path`. Returns how many there were.
@@ -857,6 +901,16 @@ impl Session {
             j.flag.store(true, Ordering::Relaxed);
         }
         v.len()
+    }
+
+    /// How many requests are running on `path`.
+    pub fn running(&self, path: &Path) -> usize {
+        let doc = self.doc_path(path);
+        self.jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&doc)
+            .map_or(0, Vec::len)
     }
 
     /// Stop every request running on any document (a host whose client
@@ -1041,11 +1095,11 @@ impl Session {
 
     /// The fonts for a program's `use`d files, shared while they are the
     /// same files (their fonts' outlines stay loaded).
-    fn fonts_for(&self, used: &[String]) -> (u64, Arc<text::FontDb>) {
+    fn fonts_for(&self, used: &[String], fs: &dyn FileSystem) -> (u64, Arc<text::FontDb>) {
         let fonts: Vec<(&String, Option<lang::loader::Metadata>)> = used
             .iter()
             .filter(|u| is_font(u))
-            .map(|u| (u, self.fs.metadata(Path::new(u))))
+            .map(|u| (u, fs.metadata(Path::new(u))))
             .collect();
         let sig = hash_of(format!("{fonts:?}"));
         let mut cache = self
@@ -1099,20 +1153,29 @@ impl Session {
             t0: self.now(),
             timings: Timings::default(),
             programs: Vec::new(),
+            fs: Arc::new(docfs::Recorder::new(self.fs.clone())),
+        }
+    }
+
+    /// The request's messages so far, as [`Session::finish`] will report
+    /// them (without the printed bytes).
+    fn log_so_far(&self, pipe: &Pipe) -> Log {
+        let lines = pipe.con.records().to_vec();
+        let names = if wants_names(&lines) {
+            Names::of(pipe.programs.iter().map(|p| &**p))
+        } else {
+            Names::default()
+        };
+        Log {
+            stderr: Vec::new(),
+            lines,
+            names: Arc::new(names),
         }
     }
 
     fn finish(&self, mut pipe: Pipe) -> (Log, Timings) {
         let lines = pipe.con.take_records();
-        let wants_names = lines.iter().any(|l| {
-            matches!(
-                l.code,
-                Some(
-                    DiagCode::UnknownModule | DiagCode::UnknownFunction | DiagCode::UnknownVariable
-                )
-            )
-        });
-        let names = if wants_names {
+        let names = if wants_names(&lines) {
             Names::of(pipe.programs.iter().map(|p| &**p))
         } else {
             Names::default()
@@ -1133,7 +1196,8 @@ impl Session {
     fn load(&self, pipe: &mut Pipe, run: &Run) -> Result<Loaded, Stop> {
         run.stage(Stage::Parse);
         let t = self.now();
-        let (fs, libs) = (&*self.fs, &self.cfg.libs);
+        let recorder = pipe.fs.clone();
+        let (fs, libs) = (&*recorder, &self.cfg.libs);
         let paths = pipe.paths.clone();
         let read = match &run.text {
             Some(t) => Ok(t.to_vec()),
@@ -1249,7 +1313,7 @@ impl Session {
             preview,
             camera: run.camera,
             rng_seed: run.rng_seed.unwrap_or(self.cfg.rng_seed),
-            fs: self.fs.clone(),
+            fs: pipe.fs.clone(),
             interrupt: Some(job.flag.clone()),
             guard: job.limits.clone(),
             parts: run.parts || self.cfg.parts,
@@ -1310,10 +1374,16 @@ impl Session {
     ) -> Result<(Product, usize), Stop> {
         let t = self.now();
         let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
-        let keys = eval::dump::Keys::new(&ev.root, &*self.fs);
-        let (font_sig, fonts) = self.fonts_for(&loaded.used());
+        let keys = eval::dump::Keys::new(&ev.root, &*pipe.fs);
+        let (font_sig, fonts) = self.fonts_for(&loaded.used(), &*pipe.fs);
         let (rkey, renderer) = self.renderer_for(scheme, font_sig);
-        let key = (keys.get(top), loaded.epoch, mode, rkey, csg_limit);
+        // The limits are part of the key: a product built under looser
+        // limits is not reused under tighter ones, so the renderer's
+        // cache checks each subtree's demand against them (see
+        // `geom::evaluate`'s `Demand`) and a warm request answers as a
+        // cold one would.
+        let limits = hash_of(format!("{:?}", job.limits.as_ref().map(|g| *g.limits())));
+        let key = (keys.get(top), loaded.epoch, mode, rkey, csg_limit, limits);
         let doc = pipe.paths.doc.clone();
         let reuse = self
             .products
@@ -1328,7 +1398,7 @@ impl Session {
                 let opts = geom::RenderOptions {
                     scheme: *scheme,
                     force: mode == Mode::Force,
-                    fs: self.fs.clone(),
+                    fs: pipe.fs.clone(),
                     work_dir: pipe.paths.cwd.clone(),
                     fonts,
                     interrupt: Some(job.flag.clone()),
@@ -1432,12 +1502,13 @@ impl Session {
                 Ok(ev) => {
                     let tree = csg.then(|| {
                         let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
-                        eval::dump::csg(top, &pipe.paths.main_dir, &*self.fs)
+                        eval::dump::csg(top, &pipe.paths.main_dir, &*pipe.fs)
                     });
                     (0, tree, ev.aborted)
                 }
             },
         };
+        let files = pipe.fs.files();
         let (log, timings) = self.finish(pipe);
         Ok(Evaluated {
             exit_code,
@@ -1445,6 +1516,7 @@ impl Session {
             csg: tree,
             aborted,
             timings,
+            files,
         })
     }
 
@@ -1523,13 +1595,19 @@ impl Session {
             geometry: None,
             tree: None,
             camera: run.camera,
+            camera_assigned: eval::CameraAssigned::default(),
             cache_entries: 0,
             timings: Timings::default(),
+            files: Vec::new(),
         };
         let step = (|| {
             let loaded = self.load(&mut pipe, run)?;
             let ev = self.evaluate_loaded(&mut pipe, &loaded, run, mode == Mode::Preview, &job)?;
+            if let Some(hook) = &run.on_evaluated {
+                hook(&self.log_so_far(&pipe));
+            }
             out.camera = ev.camera;
+            out.camera_assigned = ev.camera_assigned;
             run.stage(Stage::Geometry);
             let (p, entries) = self.build(
                 &mut pipe,
@@ -1555,6 +1633,7 @@ impl Session {
             Err(Stop::Exit(c)) => out.exit_code = c,
             Ok(()) => {}
         }
+        out.files = pipe.fs.files();
         (out.log, out.timings) = self.finish(pipe);
         Ok((out, parts))
     }
@@ -1575,13 +1654,13 @@ impl Session {
         if found.is_empty() {
             return Ok(Vec::new());
         }
-        let keys = eval::dump::Keys::new(top, &*self.fs);
-        let (font_sig, fonts) = self.fonts_for(&loaded.used());
+        let keys = eval::dump::Keys::new(top, &*pipe.fs);
+        let (font_sig, fonts) = self.fonts_for(&loaded.used(), &*pipe.fs);
         let (_, renderer) = self.renderer_for(scheme, font_sig);
         let opts = geom::RenderOptions {
             scheme: *scheme,
             force: false,
-            fs: self.fs.clone(),
+            fs: pipe.fs.clone(),
             work_dir: pipe.paths.cwd.clone(),
             fonts,
             interrupt: Some(job.flag.clone()),

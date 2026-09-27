@@ -7,11 +7,14 @@
 // first request on a BOSL2 model indexes the library. Answers come back
 // on the main thread, in order.
 //
-// Diagnostics. The server has no clock, so the debounce is here: after a
-// change it waits for the messages to pause (`debounce`), then asks the
-// server to evaluate the changed document on another queue, so completion
-// and hover keep answering while a large model evaluates. A change made
-// meanwhile stops that evaluation (the server's own doing).
+// Diagnostics. A document window's server is made with `hostDiagnostics`:
+// it never evaluates, and its markers come from the document's own runs
+// (Document/SCADDocument.swift hands each run's publications here, and a
+// version of the text the server receives after its run was supplied is
+// published from `handle`). A library viewer's server has no diagnostics
+// at all (`diagnostics` off). A server that evaluates by itself (neither)
+// is still served: after a change it waits for the messages to pause
+// (`debounce`), then evaluates on another queue.
 
 import Foundation
 import NeoSCADCore
@@ -38,6 +41,8 @@ final class LanguageClient {
     /// How many diagnostics publications arrived (the app's tests wait on
     /// it).
     private(set) var publications = 0
+    /// Set when the editor closes: nothing more is delivered or started.
+    private var stopped = false
 
     init(server: LanguageServer) {
         self.server = server
@@ -51,12 +56,32 @@ final class LanguageClient {
             let pending = (try? server.diagnosticsPending()) ?? false
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self else { return }
+                    guard let self, !self.stopped else { return }
+                    self.publications += out.filter(Self.isPublication).count
                     for m in out { self.deliver(m) }
                     if pending && self.diagnostics { self.scheduleDiagnostics() }
                 }
             }
         }
+    }
+
+    /// Publications from a document run (`DocumentResult.language`).
+    func deliverPublications(_ messages: [String]) {
+        guard !stopped, diagnostics else { return }
+        publications += messages.count
+        for m in messages { deliver(m) }
+    }
+
+    /// The editor closed: drop a pending evaluation and deliver nothing
+    /// more.
+    func stop() {
+        stopped = true
+        pendingDiagnostics?.cancel()
+        pendingDiagnostics = nil
+    }
+
+    private static func isPublication(_ message: String) -> Bool {
+        message.contains("\"textDocument/publishDiagnostics\"")
     }
 
     private func scheduleDiagnostics() {
@@ -74,7 +99,7 @@ final class LanguageClient {
             let out = (try? server.publishDiagnostics()) ?? []
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self else { return }
+                    guard let self, !self.stopped else { return }
                     self.publications += out.count
                     for m in out { self.deliver(m) }
                 }

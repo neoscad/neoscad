@@ -34,10 +34,29 @@ impl Client {
     }
 
     pub fn over(fs: Arc<dyn FileSystem + Send + Sync>, libs: LibraryPath) -> Client {
+        Client::with(fs, libs, false)
+    }
+
+    /// A server whose host supplies the diagnostics
+    /// (`Options::host_diagnostics`), as the app's does.
+    pub fn host_run(files: &[(&str, &str)]) -> Client {
+        let fs = Arc::new(MemFs::new());
+        for (p, t) in files {
+            fs.insert(p, t.as_bytes().to_vec());
+        }
+        Client::with(fs, LibraryPath(vec![PathBuf::from("/lib")]), true)
+    }
+
+    fn with(
+        fs: Arc<dyn FileSystem + Send + Sync>,
+        libs: LibraryPath,
+        host_diagnostics: bool,
+    ) -> Client {
         let session = Session::new(Config::new(fs, libs));
         let server = lsp::Server::new(lsp::Options {
             sync_session: true,
             limits: None,
+            host_diagnostics,
         });
         let mut c = Client {
             session,
@@ -78,8 +97,14 @@ impl Client {
     }
 
     pub fn notify(&mut self, method: &str, params: Value) {
-        let out = self.send(json!({"jsonrpc": "2.0", "method": method, "params": params}));
+        let out = self.notify_all(method, params);
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// A notification, and what the server sent back (publications, for
+    /// a host-supplied run of the text it brings).
+    pub fn notify_all(&mut self, method: &str, params: Value) -> Vec<Value> {
+        self.send(json!({"jsonrpc": "2.0", "method": method, "params": params}))
     }
 
     pub fn open(&mut self, path: &str, text: &str) {

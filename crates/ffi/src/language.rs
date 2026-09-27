@@ -18,16 +18,28 @@ use crate::{Core, CoreError, guarded};
 /// A language server for one editor. See the module documentation.
 #[derive(Debug, uniffi::Object)]
 pub struct LanguageServer {
-    core: Arc<Core>,
-    server: lsp::Server,
+    pub(crate) core: Arc<Core>,
+    pub(crate) server: lsp::Server,
 }
 
 #[uniffi::export]
 impl Core {
     /// A language server for one editor, sharing this core's session.
-    pub fn language_server(self: Arc<Self>) -> Result<Arc<LanguageServer>, CoreError> {
+    /// With `host_diagnostics` its diagnostics are those of the runs the
+    /// host makes anyway (`run_document` hands them over) and it never
+    /// evaluates by itself: a document window's editor, whose document is
+    /// previewed after every pause in typing. Without, it evaluates each
+    /// changed document for its diagnostics (`publish_diagnostics`).
+    pub fn language_server(
+        self: Arc<Self>,
+        host_diagnostics: bool,
+    ) -> Result<Arc<LanguageServer>, CoreError> {
         guarded(|| {
-            let server = lsp::Server::with_cache(lsp::Options::default(), self.lsp_cache.clone());
+            let options = lsp::Options {
+                host_diagnostics,
+                ..lsp::Options::default()
+            };
+            let server = lsp::Server::with_cache(options, self.lsp_cache.clone());
             Ok(Arc::new(LanguageServer { core: self, server }))
         })
     }
