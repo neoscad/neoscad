@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::Lighting;
 use crate::camera::{BoundingBox, Camera, Projection};
 use crate::gpu::{DEPTH_FORMAT, FrameParams, Renderer, SceneBuffers};
-use crate::offscreen::{Error, Readback};
+use crate::offscreen::{Error, Gate, Readback};
 use crate::overlay::{self, ViewOptions};
 use crate::scene::Scene;
 use crate::scheme::ColorScheme;
@@ -66,6 +66,9 @@ pub struct Gpu {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Every submission and surface configure on this device goes through
+    /// it (see [`Gate`]); offscreen renderers on the device share it.
+    gate: Gate,
     renderers: Mutex<HashMap<(wgpu::TextureFormat, u32), Arc<Renderer>>>,
 }
 
@@ -79,6 +82,7 @@ impl Gpu {
             adapter,
             device,
             queue,
+            gate: Gate::default(),
             renderers: Mutex::new(HashMap::new()),
         })
     }
@@ -105,6 +109,10 @@ impl Gpu {
 
     pub fn adapter_info(&self) -> wgpu::AdapterInfo {
         self.adapter.get_info()
+    }
+
+    pub(crate) fn gate(&self) -> &Gate {
+        &self.gate
     }
 
     /// The pipelines for `format` and `samples`, made on first use and
@@ -152,11 +160,17 @@ impl Gpu {
         // so they stayed: a model's whole vertex data twice over (57 MB for
         // 125 spheres, phase 8f). Submitting the copies now and waiting
         // for them (a few milliseconds, on the uploading thread, never the
-        // main one) frees the staging at once.
+        // main one) frees the staging at once. The wait is on this
+        // submission only and bounded: freeing the staging early is an
+        // economy, and a device that does not finish must not hang the
+        // upload (the model is usable either way).
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.queue.submit(std::iter::empty());
-            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            let submitted = self.gate.submit(&self.queue, std::iter::empty());
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(submitted),
+                timeout: Some(crate::offscreen::READBACK_WAIT),
+            });
         }
         Ok(Model {
             buffers,
@@ -552,7 +566,7 @@ impl Viewport {
             Target::Surface { surface, config } => {
                 config.width = w;
                 config.height = h;
-                surface.configure(device, config);
+                self.gpu.gate.configure(surface, device, config);
             }
             Target::Texture(t) => {
                 *t = Some(texture(
@@ -820,13 +834,13 @@ impl Viewport {
                     wgpu::CurrentSurfaceTexture::Success(t) => t,
                     wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
                         // Still drawable; reconfigure for the next frame.
-                        surface.configure(&self.gpu.device, config);
+                        self.gpu.gate.configure(surface, &self.gpu.device, config);
                         t
                     }
                     wgpu::CurrentSurfaceTexture::Timeout
                     | wgpu::CurrentSurfaceTexture::Occluded => return Ok(Drawn::Deferred),
                     wgpu::CurrentSurfaceTexture::Outdated => {
-                        surface.configure(&self.gpu.device, config);
+                        self.gpu.gate.configure(surface, &self.gpu.device, config);
                         return Ok(Drawn::Deferred);
                     }
                     wgpu::CurrentSurfaceTexture::Lost => {
@@ -838,8 +852,9 @@ impl Viewport {
                 };
                 let view = texture.texture.create_view(&Default::default());
                 let encoder = self.encode(a, &view);
-                self.gpu.queue.submit([encoder.finish()]);
-                self.gpu.queue.present(texture);
+                self.gpu
+                    .gate
+                    .submit_and_present(&self.gpu.queue, [encoder.finish()], texture);
             }
             Target::Texture(t) => {
                 let Some(t) = t else {
@@ -847,7 +862,7 @@ impl Viewport {
                 };
                 let view = t.create_view(&Default::default());
                 let encoder = self.encode(a, &view);
-                self.gpu.queue.submit([encoder.finish()]);
+                self.gpu.gate.submit(&self.gpu.queue, [encoder.finish()]);
             }
         }
         self.dirty = false;
@@ -874,7 +889,7 @@ impl Viewport {
             a.format,
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
         );
-        match &a.target {
+        let submitted = match &a.target {
             Target::Surface { surface, config } => {
                 if !config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
                     return Err(Error::Readback(
@@ -894,8 +909,9 @@ impl Viewport {
                 let view = texture.texture.create_view(&Default::default());
                 let mut encoder = self.encode(a, &view);
                 readback.copy(&mut encoder, &texture.texture);
-                self.gpu.queue.submit([encoder.finish()]);
-                self.gpu.queue.present(texture);
+                self.gpu
+                    .gate
+                    .submit_and_present(&self.gpu.queue, [encoder.finish()], texture)
             }
             Target::Texture(t) => {
                 let Some(t) = t else {
@@ -904,11 +920,11 @@ impl Viewport {
                 let view = t.create_view(&Default::default());
                 let mut encoder = self.encode(a, &view);
                 readback.copy(&mut encoder, t);
-                self.gpu.queue.submit([encoder.finish()]);
+                self.gpu.gate.submit(&self.gpu.queue, [encoder.finish()])
             }
-        }
+        };
         self.dirty = false;
-        let mut rgba = readback.read(&self.gpu.device).await?;
+        let mut rgba = readback.read(&self.gpu.device, submitted).await?;
         if bgra {
             for p in rgba.as_chunks_mut::<4>().0 {
                 p.swap(0, 2);

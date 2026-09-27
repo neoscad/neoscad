@@ -9,7 +9,7 @@
 //! directly).
 
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 pub use wgpu::Backends;
 
@@ -68,6 +68,8 @@ pub use crate::Image;
 pub struct Offscreen {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Shared with the [`crate::viewport::Gpu`] this was made on, if any.
+    gate: Gate,
     renderer: Renderer,
     adapter: wgpu::AdapterInfo,
 }
@@ -95,6 +97,7 @@ impl Offscreen {
         Ok(Offscreen {
             device,
             queue,
+            gate: Gate::default(),
             renderer,
             adapter: adapter.get_info(),
         })
@@ -109,6 +112,7 @@ impl Offscreen {
         Offscreen {
             renderer: Renderer::new(&device, FORMAT, 1),
             queue: gpu.queue().clone(),
+            gate: gpu.gate().clone(),
             device,
             adapter: gpu.adapter_info(),
         }
@@ -255,8 +259,8 @@ impl Offscreen {
             overlay,
         );
         readback.copy(&mut encoder, &color);
-        self.queue.submit([encoder.finish()]);
-        let rgba = readback.read(&self.device).await?;
+        let submitted = self.gate.submit(&self.queue, [encoder.finish()]);
+        let rgba = readback.read(&self.device, submitted).await?;
         Ok(Image {
             width,
             height,
@@ -396,21 +400,41 @@ impl Readback {
         );
     }
 
-    /// The pixels, top row first and unpadded, once the submitted copy has
-    /// finished.
-    pub(crate) async fn read(self, device: &wgpu::Device) -> Result<Vec<u8>, Error> {
+    /// The pixels, top row first and unpadded, once `submitted` (the
+    /// submission that recorded [`Readback::copy`]) has finished.
+    ///
+    /// Natively this drives the device itself until this buffer is mapped,
+    /// and gives up with [`Error::Readback`] after [`READBACK_WAIT`]
+    /// rather than block for ever. It does not trust the map callback
+    /// alone: on a device shared between threads, whichever thread polls
+    /// first collects every finished mapping, and wgpu-core 30.0.1 drops
+    /// the callbacks it collected, unrun, when `Surface::configure`'s wait
+    /// fails (`Device::configure_surface`, `device/resource.rs:5343` and
+    /// `:5351`: the closures are fired only on success). The buffer is
+    /// mapped all the same, so a lost callback is recovered by asking the
+    /// buffer; before this, `Core::picture` waited in `pollster` for a
+    /// wake that never came (the `neoscad-ffi` tests hung for hours).
+    pub(crate) async fn read(
+        self,
+        device: &wgpu::Device,
+        submitted: wgpu::SubmissionIndex,
+    ) -> Result<Vec<u8>, Error> {
         let (tx, rx) = futures_channel();
         self.buffer
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |r| {
                 tx.send(r.map_err(|e| e.to_string()));
             });
-        // Native backends need polling to finish the work and run the
-        // callback; on the web the browser does it and this is a no-op.
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| Error::Readback(e.to_string()))?;
-        rx.recv().await.map_err(Error::Readback)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.wait_mapped(device, &submitted, &rx)?;
+        // On the web the browser drives the device and runs the callback
+        // from its event loop, which wakes this future; nothing here can
+        // poll or block.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (device, submitted);
+            rx.recv().await.map_err(Error::Readback)?;
+        }
 
         let row = 4 * self.width as usize;
         let mapped = self
@@ -427,6 +451,124 @@ impl Readback {
         self.buffer.unmap();
         Ok(rgba)
     }
+
+    /// Poll the device, waiting on `submitted` a slice at a time, until the
+    /// buffer is mapped, the mapping fails, or [`READBACK_WAIT`] has been
+    /// spent waiting.
+    ///
+    /// Each round is `poll(Wait)` on this submission, then two checks: the
+    /// callback's result, and whether the buffer is mapped. A successful
+    /// wait triages the submission and maps the buffer under the queue's
+    /// lifetime lock, so once the GPU is done the second check passes even
+    /// if another thread took (or lost) the callback. The budget is counted
+    /// in poll slices rather than read from a clock (library crates never
+    /// read the clock); a slice that returns early means the submission is
+    /// done, and then the next check succeeds.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn wait_mapped(
+        &self,
+        device: &wgpu::Device,
+        submitted: &wgpu::SubmissionIndex,
+        rx: &Receiver,
+    ) -> Result<(), Error> {
+        let slices = READBACK_WAIT.as_millis() / READBACK_SLICE.as_millis();
+        for _ in 0..slices {
+            match device.poll(wgpu::PollType::Wait {
+                submission_index: Some(submitted.clone()),
+                timeout: Some(READBACK_SLICE),
+            }) {
+                Ok(_) | Err(wgpu::PollError::Timeout) => {}
+                Err(e) => return Err(Error::Readback(e.to_string())),
+            }
+            match rx.try_recv() {
+                Some(Ok(())) => return Ok(()),
+                // A callback that reports failure (or was dropped) may
+                // still have left the buffer mapped; the check below says.
+                Some(Err(e)) if !self.is_mapped() => return Err(Error::Readback(e)),
+                _ => {}
+            }
+            if self.is_mapped() {
+                return Ok(());
+            }
+        }
+        Err(Error::Readback(format!(
+            "the GPU did not finish within {} s",
+            READBACK_WAIT.as_secs()
+        )))
+    }
+
+    /// Whether the buffer's mapping has completed. Asking for the range of
+    /// a buffer still waiting to be mapped is an error, not a panic, and
+    /// changes nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_mapped(&self) -> bool {
+        self.buffer.slice(..).get_mapped_range().is_ok()
+    }
+}
+
+/// How long a readback waits for the GPU before it reports an error: far
+/// longer than any image takes (an 8192-pixel export draws in well under
+/// a second), short enough that a wedged device fails a request instead of
+/// hanging the app or a test run.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const READBACK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One `poll(Wait)` of a readback: short, so a mapping that completed on
+/// another thread is noticed promptly.
+#[cfg(not(target_arch = "wasm32"))]
+const READBACK_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Keeps `Surface::configure` from running while another thread submits
+/// on the same device. A configure waits for the queue to drain and fails
+/// (`ConfigureSurfaceError::GpuWaitTimeout`, "Failed to wait for GPU to
+/// come idle") when a submission lands during that wait (wgpu-core 30.0.1,
+/// `device/resource.rs:5351`); the failure goes to wgpu's uncaptured-error
+/// handler, which panics, and the finished mappings that wait collected
+/// are dropped with it. Submissions and presents take the gate shared,
+/// so they never wait for each other; a configure takes it alone. One
+/// gate belongs to one device: the viewports' [`crate::viewport::Gpu`]
+/// and every [`Offscreen`] made on it share a clone.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Gate(Arc<RwLock<()>>);
+
+impl Gate {
+    /// `queue.submit(buffers)`, never during a configure.
+    pub(crate) fn submit<I: IntoIterator<Item = wgpu::CommandBuffer>>(
+        &self,
+        queue: &wgpu::Queue,
+        buffers: I,
+    ) -> wgpu::SubmissionIndex {
+        let _shared = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        queue.submit(buffers)
+    }
+
+    /// [`Gate::submit`], then present `frame`. A present is a submission
+    /// too: wgpu-core submits the barrier that moves the drawable to its
+    /// present state (`Queue::prepare_surface_texture_for_present`,
+    /// `device/queue.rs:125`), so it takes the gate like any other.
+    pub(crate) fn submit_and_present<I: IntoIterator<Item = wgpu::CommandBuffer>>(
+        &self,
+        queue: &wgpu::Queue,
+        buffers: I,
+        frame: wgpu::SurfaceTexture,
+    ) -> wgpu::SubmissionIndex {
+        let _shared = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        let submitted = queue.submit(buffers);
+        queue.present(frame);
+        submitted
+    }
+
+    /// `surface.configure(device, config)`, with no submission in flight
+    /// from another thread.
+    pub(crate) fn configure(
+        &self,
+        surface: &wgpu::Surface<'_>,
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+    ) {
+        let _alone = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        surface.configure(device, config);
+    }
 }
 
 /// A one-shot channel for the map callback, which wgpu requires to be
@@ -440,6 +582,9 @@ fn futures_channel() -> (Sender, Receiver) {
 #[derive(Default)]
 struct Slot {
     result: Option<Result<(), String>>,
+    /// Whether the sender has put a result in (which the receiver may
+    /// already have taken).
+    delivered: bool,
     waker: Option<std::task::Waker>,
 }
 
@@ -452,18 +597,43 @@ fn lock(m: &Mutex<Slot>) -> std::sync::MutexGuard<'_, Slot> {
 
 impl Sender {
     fn send(self, r: Result<(), String>) {
-        let mut slot = lock(&self.0);
-        slot.result = Some(r);
-        if let Some(w) = slot.waker.take() {
-            w.wake();
-        }
+        deliver(&self.0, r);
+    }
+}
+
+/// wgpu can drop a map callback without running it (see
+/// [`Readback::read`]); the receiver then hears so instead of waiting for
+/// ever.
+impl Drop for Sender {
+    fn drop(&mut self) {
+        deliver(&self.0, Err("the map callback was dropped unrun".into()));
+    }
+}
+
+/// Put the first result in the slot and wake the receiver; later ones
+/// (the drop after a send) are ignored.
+fn deliver(slot: &Mutex<Slot>, r: Result<(), String>) {
+    let mut slot = lock(slot);
+    if slot.delivered {
+        return;
+    }
+    slot.delivered = true;
+    slot.result = Some(r);
+    if let Some(w) = slot.waker.take() {
+        w.wake();
     }
 }
 
 impl Receiver {
-    /// The callback's result, once it has run. Native backends run it
-    /// inside `poll(wait)`, before this is awaited; a browser runs it from
-    /// its event loop, which then wakes this future.
+    /// The callback's result if it has run (or been dropped).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_recv(&self) -> Option<Result<(), String>> {
+        lock(&self.0).result.take()
+    }
+
+    /// The callback's result, once it has run: a browser runs it from its
+    /// event loop, which then wakes this future.
+    #[cfg(target_arch = "wasm32")]
     async fn recv(self) -> Result<(), String> {
         std::future::poll_fn(|cx| {
             let mut slot = lock(&self.0);

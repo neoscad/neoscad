@@ -211,3 +211,128 @@ fn frame_time() {
         );
     }
 }
+
+/// Every kind of GPU work the app does on its one shared device, at once
+/// from [`STRESS_THREADS`] threads: `Core::picture` (Quick Look), a
+/// snapshot sheet, a viewport texture readback, File > Export's `image`,
+/// a model upload (`render_into`), and a `CAMetalLayer` surface being
+/// resized (a surface configure) and read. Before the submit gate and the
+/// self-driven readback, a configure racing a submission failed and
+/// dropped the map callbacks it had collected, and `picture` waited for
+/// ever (`cargo test` hung for hours). A watchdog turns any hang into a
+/// failure instead of a stuck test run.
+#[cfg(target_vendor = "apple")]
+#[test]
+fn the_shared_device_survives_concurrent_use() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    const STRESS_THREADS: usize = 8;
+    const ITERATIONS: usize = 200;
+    // Generous for 1600 small GPU jobs in a debug build; a hang, not a
+    // slow machine, is what trips it.
+    const WATCHDOG: Duration = Duration::from_secs(240);
+
+    if viewport().is_none() {
+        return;
+    }
+    let (done, finished) = mpsc::channel::<Result<usize, String>>();
+    let t0 = Instant::now();
+    for t in 0..STRESS_THREADS {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let run = || -> Result<usize, String> {
+                let err = |e: CoreError| e.to_string();
+                let c = core("cube(4); translate([6, 0, 0]) sphere(2, $fn = 12);");
+                let texture = viewport().ok_or("no GPU")?;
+                texture.lock().attach_texture(48, 32, 1.0);
+                let surface = viewport().ok_or("no GPU")?;
+                let (layer, addr) = metal::layer();
+                surface
+                    .attach_layer(addr, 24.0, 16.0, 2.0, true)
+                    .map_err(err)?;
+                let mut ops = 0;
+                for i in 0..ITERATIONS {
+                    match (t + i) % 6 {
+                        0 => {
+                            let p = c
+                                .picture(
+                                    DOC.into(),
+                                    crate::PictureOptions {
+                                        width: 32,
+                                        height: 32,
+                                        mode: RenderMode::Preview,
+                                    },
+                                )
+                                .map_err(err)?;
+                            if p.png.is_none() {
+                                return Err(format!("picture drew nothing: {}", p.console));
+                            }
+                        }
+                        1 => {
+                            let s = c
+                                .snapshot(
+                                    DOC.into(),
+                                    crate::SnapshotOptions {
+                                        width: 64,
+                                        height: 64,
+                                        views: vec![],
+                                        dims: false,
+                                        preview: true,
+                                    },
+                                )
+                                .map_err(err)?;
+                            if s.png.is_none() {
+                                return Err(format!("snapshot drew nothing: {}", s.console));
+                            }
+                        }
+                        2 => {
+                            texture.orbit(3.0, 0.0).map_err(err)?;
+                            let image = texture.read_pixels().map_err(err)?;
+                            assert_eq!((image.width, image.height), (48, 32));
+                        }
+                        3 => {
+                            texture.image(16, 16).map_err(err)?;
+                        }
+                        4 => {
+                            c.render_into(DOC.into(), RenderMode::Preview, texture.clone())
+                                .map_err(err)?;
+                        }
+                        _ => {
+                            // A new size configures the surface: the call
+                            // that used to fail while others submitted.
+                            let w = 16.0 + (i % 5) as f64;
+                            surface.resize(w, 16.0, 2.0).map_err(err)?;
+                            surface.draw().map_err(err)?;
+                            surface.read_pixels().map_err(err)?;
+                        }
+                    }
+                    ops += 1;
+                }
+                drop(layer);
+                Ok(ops)
+            };
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+                .unwrap_or_else(|_| Err("the worker panicked".into()));
+            let _ = done.send(r);
+        });
+    }
+    drop(done);
+    let mut total = 0;
+    for _ in 0..STRESS_THREADS {
+        let left = WATCHDOG.saturating_sub(t0.elapsed());
+        match finished.recv_timeout(left) {
+            Ok(Ok(ops)) => total += ops,
+            Ok(Err(e)) => panic!("a worker failed: {e}"),
+            Err(_) => panic!(
+                "GPU work hung: not every worker finished within {} s",
+                WATCHDOG.as_secs()
+            ),
+        }
+    }
+    assert_eq!(total, STRESS_THREADS * ITERATIONS);
+    eprintln!(
+        "{total} concurrent GPU jobs on {STRESS_THREADS} threads in {:.1} s",
+        t0.elapsed().as_secs_f64()
+    );
+}
