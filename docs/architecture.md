@@ -135,6 +135,16 @@ JSON-RPC (`docs/serve-protocol.md`).
   the result. Customizer values run as `-D` assignments after the text,
   which never changes; parameter sets are OpenSCAD's JSON beside the
   model.
+- **Panels, export and Shortcuts** (8i, `crates/ffi/src/inspect.rs`,
+  `apple/App/Document/Inspect.swift`, `Export.swift`,
+  `apple/App/Intents`): the inspector's check and measure panels,
+  File > Export and the App Intents call `check`, `measure`, exports and
+  snapshots as requests detached from the document loop (no superseding;
+  a cancel token of their own), so a check or an export neither cancels
+  the live preview nor is cancelled by typing. A measurement keeps its
+  solids in the core for sections, distances and picking; findings,
+  section outlines and picked points are drawn over the model as the
+  viewport's annotations.
 - **Web:** the same core compiled to WASM and run in a worker, the same wgpu
   renderer on WebGPU, and CodeMirror 6.
 - **Project definition:** XcodeGen `project.yml`; the generated `.xcodeproj`

@@ -79,7 +79,7 @@ impl Plane {
     }
 
     /// A section point back in model coordinates.
-    fn to_model(self, p: [f64; 2]) -> [f64; 3] {
+    pub fn to_model(self, p: [f64; 2]) -> [f64; 3] {
         match self {
             Plane::Z(h) => [p[0], p[1], h],
             Plane::X(h) => [h, p[0], p[1]],
@@ -88,7 +88,7 @@ impl Plane {
     }
 
     /// The names of the section's 2D axes.
-    fn axes(self) -> (&'static str, &'static str) {
+    pub fn axes(self) -> (&'static str, &'static str) {
         match self {
             Plane::Z(_) => ("x", "y"),
             Plane::X(_) => ("y", "z"),

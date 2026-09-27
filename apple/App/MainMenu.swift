@@ -77,6 +77,8 @@ enum MainMenu {
         m.addItem(item("Rename…", #selector(NSDocument.rename(_:))))
         m.addItem(item("Move To…", #selector(NSDocument.move(_:))))
         m.addItem(item("Revert to Saved", #selector(NSDocument.revertToSaved(_:))))
+        m.addItem(.separator())
+        m.addItem(item("Export…", #selector(SCADDocument.exportDocument(_:)), "e", [.command, .shift]))
         return m
     }
 
@@ -104,6 +106,10 @@ enum MainMenu {
         let f6 = String(Character(UnicodeScalar(NSF6FunctionKey)!))
         m.addItem(item("Preview", #selector(SCADDocument.previewDocument(_:)), f5, []))
         m.addItem(item("Render", #selector(SCADDocument.renderDocument(_:)), f6, []))
+        m.addItem(.separator())
+        // NeoSCAD's `check` and `measure`, in the inspector's panels.
+        m.addItem(item("Check", #selector(SCADDocument.checkDocument(_:)), "k", [.command, .shift]))
+        m.addItem(item("Measure", #selector(SCADDocument.measureDocument(_:)), "m", [.command, .shift]))
         return m
     }
 
@@ -144,6 +150,8 @@ enum MainMenu {
         // console's lines and the customizer are parts of the window.
         m.addItem(item("Console", #selector(D.toggleConsole(_:)), "c", [.command, .option]))
         m.addItem(item("Customizer", #selector(D.toggleCustomizer(_:)), "p", [.command, .option]))
+        m.addItem(item("Check", #selector(D.showCheck(_:)), "k", [.command, .option]))
+        m.addItem(item("Measure", #selector(D.showMeasure(_:)), "u", [.command, .option]))
         m.addItem(.separator())
         // The editor's font, for every window. ⌘+ is typed as ⌘= on most
         // layouts (the + is shifted), so a hidden twin answers ⌘= too.

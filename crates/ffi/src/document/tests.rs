@@ -24,6 +24,7 @@ fn request(mode: RenderMode) -> DocumentRequest {
     DocumentRequest {
         mode,
         overrides: Vec::new(),
+        parts: false,
     }
 }
 
@@ -418,4 +419,26 @@ fn a_run_superseded_by_a_newer_one_does_not_replace_its_model() {
         generation_before + 1
     );
     assert_eq!(c.running(DOC.into()).unwrap(), 0);
+}
+
+#[test]
+fn the_parts_toggle_reaches_the_documents_run() {
+    let c = Core::new(CoreConfig {
+        resource_dir: None,
+        test_hooks: true,
+    })
+    .unwrap();
+    let doc = "/NeoSCAD-ffi-document-parts/model.scad".to_string();
+    c.open(doc.clone(), Some("part(\"a\") cube(1);".into()))
+        .unwrap();
+    let unknown = |parts: bool| {
+        let mut req = request(RenderMode::Preview);
+        req.parts = parts;
+        let r = c.run_document(doc.clone(), req, None, None, None).unwrap();
+        r.console
+            .iter()
+            .any(|l| l.text.contains("unknown module 'part'"))
+    };
+    assert!(unknown(false));
+    assert!(!unknown(true));
 }

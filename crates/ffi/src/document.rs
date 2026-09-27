@@ -124,6 +124,11 @@ pub struct DocumentRequest {
     /// Customizer values, appended to the text as `-D` assignments are.
     #[uniffi(default = [])]
     pub overrides: Vec<ParameterOverride>,
+    /// neoscad's `part()` extension (`--enable part`), the window's
+    /// toggle: the check and measure panels name parts, and the view must
+    /// accept the same text without warning that `part` is unknown.
+    #[uniffi(default = false)]
+    pub parts: bool,
 }
 
 /// What a console line is.
@@ -228,7 +233,7 @@ fn identifier(name: &str) -> bool {
 }
 
 /// The `-D` assignment of an override.
-fn define(o: &ParameterOverride) -> Option<String> {
+pub(crate) fn define(o: &ParameterOverride) -> Option<String> {
     identifier(&o.name).then_some(())?;
     Some(format!("{}={}", o.name, literal(&o.value)?))
 }
@@ -530,6 +535,7 @@ impl Core {
             let text = self.text_now(&doc)?;
             run.text = Some(text.clone());
             run.defines = request.overrides.iter().filter_map(define).collect();
+            run.parts = request.parts;
             let (scheme, generation) = match &viewport {
                 Some(v) => {
                     let generation = v.requests.fetch_add(1, Ordering::SeqCst) + 1;

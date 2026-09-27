@@ -3,8 +3,11 @@
 //! Swift sees three objects: `Core`, whose methods mirror the session's
 //! operations (documents: `open`, `update`, `edit`, `close`; `evaluate`,
 //! `render`, `render_into`, `snapshot`, `export`, `cancel` and
-//! `set_limits`), [`Viewport`], a document window's 3D view, and
-//! [`LanguageServer`], its editor's language server (`language.rs`).
+//! `set_limits`; the panels' `check`, `measure`, `export_file` and
+//! `snapshot_file`, in `inspect.rs`), [`Viewport`], a document window's 3D
+//! view, and [`LanguageServer`], its editor's language server
+//! (`language.rs`). A [`Measurement`] keeps a measured model's solids for
+//! sections and distances, and a [`CancelToken`] stops one panel request.
 //!
 //! # Rules of the bridge
 //!
@@ -31,6 +34,7 @@
 
 mod document;
 mod host;
+mod inspect;
 mod language;
 mod layer;
 mod types;
@@ -43,6 +47,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use session::{Run, Session};
 
 pub use document::*;
+pub use inspect::*;
 pub use language::*;
 pub use types::*;
 pub use viewport::*;

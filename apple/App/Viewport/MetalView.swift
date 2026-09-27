@@ -41,6 +41,8 @@ final class MetalView: NSView {
     private var idleTicks = 0
     private var closeObserver: NSObjectProtocol?
     private let stats = FrameStats()
+    /// Where the left button went down, while it is down.
+    private var clickStart: NSPoint?
 
     init(controller: ViewportController) {
         self.controller = controller
@@ -216,6 +218,21 @@ final class MetalView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        clickStart = event.locationInWindow
+    }
+
+    /// A click that did not drag goes to the controller (the measure
+    /// panel's picking), in points from the view's top left.
+    override func mouseUp(with event: NSEvent) {
+        defer { clickStart = nil }
+        guard let start = clickStart, let onClick = controller.onClick else { return }
+        let end = event.locationInWindow
+        // A few points of wobble is still a click, not an orbit.
+        guard hypot(end.x - start.x, end.y - start.y) < 3 else { return }
+        let p = convert(end, from: nil)
+        if onClick(CGPoint(x: p.x, y: isFlipped ? p.y : bounds.height - p.y)) {
+            requestFrame()
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {

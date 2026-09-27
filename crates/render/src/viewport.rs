@@ -210,6 +210,115 @@ impl Default for ViewSettings {
     }
 }
 
+/// Marks the app draws over the model: the check panel's findings and the
+/// measure panel's section outline and picked points. They are view state,
+/// not part of the model, so a new model from the next run keeps them
+/// until the app replaces them, and exports never include them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Annotations {
+    pub lines: Vec<AnnotationLine>,
+    pub markers: Vec<AnnotationMarker>,
+}
+
+/// A polyline in model coordinates, drawn over everything: a section
+/// outline is inside the model by definition, so hiding it behind the
+/// faces would hide exactly what it shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotationLine {
+    pub points: Vec<[f64; 3]>,
+    /// Join the last point back to the first.
+    pub closed: bool,
+    pub color: [f32; 4],
+}
+
+/// A ring of fixed size on the screen around a model point, with a label
+/// beside it (a finding's number, as `snapshot --issues` numbers them).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotationMarker {
+    pub point: [f64; 3],
+    pub label: String,
+    pub color: [f32; 4],
+}
+
+/// The marker ring's radius in points.
+const MARKER_RADIUS: f64 = 9.0;
+
+/// The annotations' line segments for one frame of `camera` at `scale`
+/// pixels per point, into `out` (drawn over everything).
+fn annotation_lines(
+    out: &mut Vec<overlay::LineVertex>,
+    a: &Annotations,
+    camera: &Camera,
+    scale: f64,
+) {
+    for l in &a.lines {
+        let mut pen = overlay::Pen {
+            out,
+            space: overlay::Space::Model,
+            color: l.color,
+            stipple: false,
+        };
+        for w in l.points.windows(2) {
+            pen.line(w[0], w[1]);
+        }
+        if l.closed
+            && l.points.len() > 2
+            && let (Some(first), Some(last)) = (l.points.first(), l.points.last())
+        {
+            pen.line(*last, *first);
+        }
+    }
+    let (w, h) = (
+        f64::from(camera.pixel_width),
+        f64::from(camera.pixel_height),
+    );
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    for m in &a.markers {
+        let Some(p) = camera.project(m.point) else {
+            continue;
+        };
+        // Pixels from the lower left, as `overlay::pixel_text` takes them.
+        let (px, py) = ((p[0] + 1.0) / 2.0 * w, (p[1] + 1.0) / 2.0 * h);
+        let clip = |x: f64, y: f64| [2.0 * x / w - 1.0, 2.0 * y / h - 1.0, 0.0];
+        let mut pen = overlay::Pen {
+            out,
+            space: overlay::Space::Clip,
+            color: m.color,
+            stipple: false,
+        };
+        // Two rings a pixel apart, so the mark stays visible at one-pixel
+        // line width on a 2x display; and a cross at the point itself.
+        const SIDES: usize = 24;
+        for r in [MARKER_RADIUS * scale, MARKER_RADIUS * scale - 1.0] {
+            for i in 0..SIDES {
+                let a0 = i as f64 / SIDES as f64 * std::f64::consts::TAU;
+                let a1 = (i + 1) as f64 / SIDES as f64 * std::f64::consts::TAU;
+                pen.line(
+                    clip(px + r * a0.cos(), py + r * a0.sin()),
+                    clip(px + r * a1.cos(), py + r * a1.sin()),
+                );
+            }
+        }
+        let c = 3.0 * scale;
+        pen.line(clip(px - c, py), clip(px + c, py));
+        pen.line(clip(px, py - c), clip(px, py + c));
+        if !m.label.is_empty() {
+            overlay::pixel_text(
+                out,
+                &m.label,
+                px + (MARKER_RADIUS + 3.0) * scale,
+                py - 5.0 * scale,
+                crate::hershey::Align::Left,
+                12.0 * scale,
+                m.color,
+                (camera.pixel_width, camera.pixel_height),
+            );
+        }
+    }
+}
+
 /// What [`Viewport::draw`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Drawn {
@@ -263,6 +372,7 @@ pub struct Viewport {
     settings: ViewSettings,
     scheme: ColorScheme,
     model: Option<Arc<Model>>,
+    annotations: Annotations,
     /// What an empty view draws (no faces, no outlines).
     empty: SceneBuffers,
     /// The generation of the model shown: an older one arriving late is
@@ -295,6 +405,7 @@ impl Viewport {
             settings: ViewSettings::default(),
             scheme,
             model: None,
+            annotations: Annotations::default(),
             empty,
             generation: 0,
             fitted: false,
@@ -526,6 +637,19 @@ impl Viewport {
         self.fitted = true;
     }
 
+    /// Draw `annotations` over the model from now on (replacing the ones
+    /// before).
+    pub fn set_annotations(&mut self, annotations: Annotations) {
+        if annotations != self.annotations {
+            self.annotations = annotations;
+            self.dirty = true;
+        }
+    }
+
+    pub fn annotations(&self) -> &Annotations {
+        &self.annotations
+    }
+
     /// Show nothing (keeping the camera).
     pub fn clear_model(&mut self) {
         self.model = None;
@@ -601,6 +725,59 @@ impl Viewport {
     /// distance, as its View menu does.
     pub fn set_view(&mut self, view: snapshot::View) {
         self.with_camera(|c| c.object_rot = view.object_rot());
+    }
+
+    /// The camera as a frame draws it: the viewport's pixel size filled in
+    /// (the stored camera keeps whatever size it was made with).
+    fn frame_camera(&self) -> Camera {
+        let mut c = self.camera;
+        c.pixel_width = self.width;
+        c.pixel_height = self.height;
+        c
+    }
+
+    /// The ray under a point of the view, `x` and `y` in points from the
+    /// top left (as AppKit reports a click in a flipped view): origin and
+    /// unit direction in model coordinates. `None` before the view has a
+    /// size.
+    pub fn ray_at(&self, x: f64, y: f64) -> Option<([f64; 3], [f64; 3])> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+        let (w, h) = (f64::from(self.width), f64::from(self.height));
+        let nx = 2.0 * x * self.scale / w - 1.0;
+        let ny = 1.0 - 2.0 * y * self.scale / h;
+        self.frame_camera().ray(nx, ny)
+    }
+
+    /// The view as it is now (model, camera, view options and scheme),
+    /// drawn into a texture of its own at `width` by `height` pixels and
+    /// read back: File > Export's image of the current view. The grid and
+    /// the annotations are left out, as they are the app's own marks and
+    /// not the model's (OpenSCAD's image export has neither). The window's
+    /// own surface is never read: it is not readable, and reading it would
+    /// hold the main thread for the GPU.
+    ///
+    /// This makes the copy; [`Viewport::read_pixels_blocking`] on it draws
+    /// and reads it, which the caller can do without holding whatever
+    /// guards this viewport.
+    pub fn copy_for_image(&self, width: u32, height: u32) -> Result<Viewport, Error> {
+        let mut v = Viewport::new(self.gpu.clone(), self.scheme.clone())?;
+        v.attach_texture(width, height, self.scale);
+        v.camera = self.camera;
+        v.settings = ViewSettings {
+            grid: false,
+            ..self.settings
+        };
+        v.model = self.model.clone();
+        v.fitted = true;
+        Ok(v)
+    }
+
+    /// Look at `point`, keeping the rotation and the distance: how the
+    /// check panel brings a finding to the middle of the view.
+    pub fn look_at(&mut self, point: [f64; 3]) {
+        self.with_camera(|c| c.set_vpt(point[0], point[1], point[2]));
     }
 
     /// View > Reset View (`QGLView::resetView`).
@@ -770,6 +947,7 @@ impl Viewport {
         if s.grid {
             overlay::grid(&mut lines.behind, &camera, self.scheme.axes.0);
         }
+        annotation_lines(&mut lines.after, &self.annotations, &camera, self.scale);
         let buffers = self.model.as_ref().map_or(&self.empty, |m| &m.buffers);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("neoscad viewport"),

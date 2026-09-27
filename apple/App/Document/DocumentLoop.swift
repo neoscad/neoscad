@@ -84,9 +84,7 @@ extension SCADDocument {
         let viewport = model.viewport
         let language = languageServer
         let request = DocumentRequest(
-            mode: mode,
-            overrides: model.parameterValues.map { ParameterOverride(name: $0.key, value: $0.value) }
-                .sorted { $0.name < $1.name })
+            mode: mode, overrides: overrides, parts: model.partsEnabled)
         renderTask = Task { @MainActor [weak self] in
             do {
                 // The evaluation's markers arrive before the geometry is
@@ -106,6 +104,9 @@ extension SCADDocument {
                 model.report = .rendered(r.render, mode)
                 self?.watcher.watch(r.files)
                 self?.refreshParameters()
+                // Auto check follows renders, not previews (Panels/
+                // CheckPanel.swift says why).
+                if mode == .render, model.check.auto { self?.runCheck() }
             } catch CoreError.Cancelled {
                 // A newer run took over; it reports instead.
             } catch let e as CoreError {
@@ -121,6 +122,12 @@ extension SCADDocument {
     func filesChanged() {
         guard !isClosed else { return }
         if lastMode == .render { run(.render) } else { schedulePreview() }
+    }
+
+    /// The customizer's values as the core takes them, in a stable order.
+    var overrides: [ParameterOverride] {
+        model.parameterValues.map { ParameterOverride(name: $0.key, value: $0.value) }
+            .sorted { $0.name < $1.name }
     }
 
     // MARK: The customizer
@@ -164,7 +171,15 @@ extension SCADDocument {
             setParameter: { [weak self] name, value in self?.setParameter(name, value) },
             resetParameters: { [weak self] in self?.resetParameters() },
             applyParameterSet: { [weak self] name in self?.applyParameterSet(name) },
-            saveParameterSet: { [weak self] in self?.saveParameterSet() })
+            saveParameterSet: { [weak self] in self?.saveParameterSet() },
+            setParts: { [weak self] on in self?.setParts(on) },
+            runCheck: { [weak self] in self?.runCheck() },
+            selectFinding: { [weak self] id in self?.selectFinding(id) },
+            runMeasure: { [weak self] in self?.runMeasure() },
+            measureBetween: { [weak self] in self?.measureBetween() },
+            updateSection: { [weak self] in self?.updateSection() },
+            clearPicks: { [weak self] in self?.clearPicks() })
+        model.viewport.onClick = { [weak self] point in self?.pick(at: point) ?? false }
     }
 
     func setParameter(_ name: String, _ value: ParameterValue?) {

@@ -320,6 +320,73 @@ impl Camera {
     }
 }
 
+/// Between the screen and the model, for the app's pointer (picking a
+/// point on the surface) and its markers (drawn in pixels at a model
+/// point). Both use the matrices the model is drawn with, so a marker sits
+/// exactly on the pixel of its point and a click hits what is under it.
+impl Camera {
+    /// Normalised device coordinates (x and y in -1..1, y up; z in -1..1,
+    /// OpenGL's) of a model point, or `None` for a point behind the eye,
+    /// which has no place on the screen.
+    pub fn project(&self, p: [f64; 3]) -> Option<[f64; 3]> {
+        let g = self.gl_matrices();
+        let m = mul(&g.projection, &g.modelview);
+        let c: [f64; 4] =
+            std::array::from_fn(|r| m[r][0] * p[0] + m[r][1] * p[1] + m[r][2] * p[2] + m[r][3]);
+        (c[3] > 1e-12).then(|| [c[0] / c[3], c[1] / c[3], c[2] / c[3]])
+    }
+
+    /// The ray through a point of the screen (normalised device x and y,
+    /// y up): its origin on the near plane and its unit direction into the
+    /// scene. `None` when the matrices cannot be inverted (a degenerate
+    /// camera: zero distance or size).
+    pub fn ray(&self, x: f64, y: f64) -> Option<([f64; 3], [f64; 3])> {
+        let g = self.gl_matrices();
+        let inv = invert(&mul(&g.projection, &g.modelview))?;
+        let at = |z: f64| -> Option<[f64; 3]> {
+            let c: [f64; 4] =
+                std::array::from_fn(|r| inv[r][0] * x + inv[r][1] * y + inv[r][2] * z + inv[r][3]);
+            (c[3].abs() > 1e-300).then(|| [c[0] / c[3], c[1] / c[3], c[2] / c[3]])
+        };
+        let (near, far) = (at(-1.0)?, at(1.0)?);
+        let d = [far[0] - near[0], far[1] - near[1], far[2] - near[2]];
+        let n = norm(d);
+        (n > 0.0 && n.is_finite()).then(|| (near, d.map(|v| v / n)))
+    }
+}
+
+/// The inverse of a 4x4 matrix by Gauss-Jordan elimination with partial
+/// pivoting, or `None` when it is singular.
+pub fn invert(m: &Mat4) -> Option<Mat4> {
+    let mut a = *m;
+    let mut inv = identity();
+    for col in 0..4 {
+        let pivot = (col..4).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
+        if a[pivot][col].abs() < 1e-300 {
+            return None;
+        }
+        a.swap(col, pivot);
+        inv.swap(col, pivot);
+        let d = a[col][col];
+        for k in 0..4 {
+            a[col][k] /= d;
+            inv[col][k] /= d;
+        }
+        for r in 0..4 {
+            if r != col {
+                let f = a[r][col];
+                if f != 0.0 {
+                    for k in 0..4 {
+                        a[r][k] -= f * a[col][k];
+                        inv[r][k] -= f * inv[col][k];
+                    }
+                }
+            }
+        }
+    }
+    Some(inv)
+}
+
 /// A 4x4 matrix, row-major (`m[row][column]`).
 pub type Mat4 = [[f64; 4]; 4];
 
@@ -541,5 +608,46 @@ mod tests {
         c.zoom_by(0.0);
         c.zoom_by(f64::NAN);
         assert!((c.viewer_distance - 70.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_ray_through_a_projected_point_passes_through_it() {
+        for projection in [Projection::Perspective, Projection::Orthogonal] {
+            let mut c = Camera {
+                projection,
+                pixel_width: 800,
+                pixel_height: 600,
+                ..Camera::default()
+            };
+            c.set_vpt(3.0, -2.0, 5.0);
+            let p = [7.0, 1.5, -4.0];
+            let s = c.project(p).unwrap();
+            let (o, d) = c.ray(s[0], s[1]).unwrap();
+            // The distance from `p` to the ray's line.
+            let v = [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
+            let t = v[0] * d[0] + v[1] * d[1] + v[2] * d[2];
+            let miss = norm([v[0] - t * d[0], v[1] - t * d[1], v[2] - t * d[2]]);
+            assert!(t > 0.0 && miss < 1e-6, "{projection:?}: {miss}");
+        }
+        // The centre of the screen looks at the view centre.
+        let c = Camera::default();
+        let s = c.project(c.vpt()).unwrap();
+        assert!(s[0].abs() < 1e-12 && s[1].abs() < 1e-12);
+    }
+
+    #[test]
+    fn inverting_a_singular_matrix_fails() {
+        assert!(invert(&[[0.0; 4]; 4]).is_none());
+        let m = mul(
+            &rotation(30.0, [0.0, 0.0, 1.0]),
+            &translation([1.0, 2.0, 3.0]),
+        );
+        let i = mul(&m, &invert(&m).unwrap());
+        for (r, row) in i.iter().enumerate() {
+            for (k, x) in row.iter().enumerate() {
+                let want = if r == k { 1.0 } else { 0.0 };
+                assert!((x - want).abs() < 1e-12);
+            }
+        }
     }
 }

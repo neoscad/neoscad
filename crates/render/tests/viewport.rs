@@ -190,3 +190,78 @@ fn msaa_softens_edges_that_single_sample_leaves_hard() {
     colours.dedup();
     assert!(colours.len() > 8, "{} colours", colours.len());
 }
+
+#[test]
+fn annotations_draw_over_the_model_and_stay_out_of_the_image() {
+    use render::viewport::{AnnotationLine, AnnotationMarker, Annotations};
+    let Some(gpu) = gpu() else { return };
+    let scheme = ColorScheme::cornfield();
+    let mut vp = Viewport::new(gpu.clone(), scheme.clone()).unwrap();
+    vp.set_settings(BARE);
+    vp.attach_texture(160, 120, 1.0);
+    let model = gpu.upload(&Scene::new(None, &scheme)).unwrap();
+    vp.set_model(Arc::new(model), 1);
+    let empty = vp.read_pixels_blocking().unwrap();
+    assert_eq!(foreground(&empty, &scheme), 0);
+    // A square outline around the view centre and a labelled marker at
+    // the origin: both draw on an empty scene.
+    let s = 20.0;
+    vp.set_annotations(Annotations {
+        lines: vec![AnnotationLine {
+            points: vec![[-s, -s, 0.0], [s, -s, 0.0], [s, s, 0.0], [-s, s, 0.0]],
+            closed: true,
+            color: [1.0, 0.0, 0.0, 1.0],
+        }],
+        markers: vec![AnnotationMarker {
+            point: [0.0, 0.0, 0.0],
+            label: "1".into(),
+            color: [0.0, 0.0, 1.0, 1.0],
+        }],
+    });
+    assert!(vp.needs_draw());
+    let marked = vp.read_pixels_blocking().unwrap();
+    let red = marked
+        .rgba
+        .chunks(4)
+        .filter(|p| p[0] > 200 && p[1] < 80 && p[2] < 80)
+        .count();
+    let blue = marked
+        .rgba
+        .chunks(4)
+        .filter(|p| p[2] > 200 && p[0] < 80 && p[1] < 80)
+        .count();
+    assert!(red > 50 && blue > 20, "red {red}, blue {blue}");
+    // The image of the view leaves them out.
+    let mut copy = vp.copy_for_image(160, 120).unwrap();
+    let image = copy.read_pixels_blocking().unwrap();
+    assert_eq!((image.width, image.height), (160, 120));
+    assert_eq!(foreground(&image, &scheme), 0);
+}
+
+#[test]
+fn an_image_of_the_view_shows_the_model_from_the_same_camera() {
+    let Some(gpu) = gpu() else { return };
+    let scheme = ColorScheme::cornfield();
+    let mut vp = Viewport::new(gpu.clone(), scheme.clone()).unwrap();
+    vp.set_settings(BARE);
+    vp.attach_texture(200, 200, 1.0);
+    let model = gpu.upload(&Scene::new(Some(&cube10()), &scheme)).unwrap();
+    vp.set_model(Arc::new(model), 1);
+    let shown = vp.read_pixels_blocking().unwrap();
+    let mut copy = vp.copy_for_image(200, 200).unwrap();
+    let image = copy.read_pixels_blocking().unwrap();
+    assert!(foreground(&image, &scheme) > 1000);
+    assert_eq!(image.rgba, shown.rgba);
+    // Looking at a point moves the view's centre there.
+    vp.look_at([5.0, 5.0, 5.0]);
+    assert_eq!(vp.camera().vpt(), [5.0, 5.0, 5.0]);
+    // The ray through the middle of the view passes through that centre.
+    let (o, d) = vp.ray_at(100.0, 100.0).unwrap();
+    let v = [5.0 - o[0], 5.0 - o[1], 5.0 - o[2]];
+    let t = v[0] * d[0] + v[1] * d[1] + v[2] * d[2];
+    let miss = (0..3)
+        .map(|i| (v[i] - t * d[i]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!(miss < 1e-6, "{miss}");
+}

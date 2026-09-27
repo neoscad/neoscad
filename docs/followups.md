@@ -675,6 +675,54 @@ entry when it is done.
 - Building the app needs node 18 or newer (`scripts/apple/build-editor.sh`
   finds nvm's and Homebrew's), and the network once, for `npm ci`. (8d)
 
+- Check and measure panels, export and App Intents (8i):
+  - The check panel marks findings in the view with numbered rings and
+    the selected finding's box (`render::viewport::Annotations`); it does
+    not paint thin-wall, overhang and floating faces as `snapshot
+    --issues` does, which needs a second scene drawn over the model
+    (`session::snapshot::marked_scene` is private and builds the whole
+    model).
+  - "Auto" checks after each render (F6), not each preview: `check`
+    renders the model in full (`Session::check` calls `render_parts`),
+    which after every pause in typing would cost a render. Check and
+    measure evaluate the text again even when the last render was of the
+    same text; the geometry cache makes the build cheap, but the
+    evaluation is repeated.
+  - The printer presets' bed sizes (`PrinterPreset.all`) were written
+    from memory, not checked against the makers' spec sheets.
+  - Measurements are of the text when Measure was pressed; an edit does
+    not re-measure or mark them stale. Picking casts against the model's
+    solid only, not a part's.
+  - Export progress is by stage (parse, evaluate, geometry); encoding and
+    writing come after the last check for cancellation, so Cancel stops
+    evaluation and geometry but not a large file's encoding.
+  - AMF: neither NeoSCAD nor OpenSCAD's current source exports it
+    (`.reference/openscad/src/io/export.h:27-46` has no AMF format), so
+    File > Export does not offer it. WRL and POV, which both have, are
+    not in the popup either (`ExportFormat`); the core writes them.
+  - Only the 3MF options (colour mode, colour, material type) are
+    offered; SVG fill and stroke, PDF paper and 3MF unit and metadata
+    are the core's defaults.
+  - App Intents: the file parameters accept `public.plain-text`, not
+    `org.openscad.scad`: the metadata processor refuses a type it cannot
+    resolve at build time ("Could not determine the identifier of
+    '.scad', please use a UTType defined by
+    UniformTypeIdentifiers.framework"). Outputs go to
+    `$TMPDIR/NeoSCAD-Shortcuts/<uuid>/` and are left to the system's
+    temporary-file cleanup. A file handed over as data (no URL) runs
+    from a temporary copy, so its relative includes do not resolve.
+  - Registration was verified from the built app's
+    `Contents/Resources/Metadata.appintents/extract.actionsdata` (three
+    actions and three App Shortcuts). Not verified: that Shortcuts.app
+    lists them and runs them (the `shortcuts` command only lists and
+    runs the user's own shortcuts), nor Siri or Spotlight phrases. The
+    test host logs `connection to service named
+    com.apple.linkd.autoShortcut` errors at launch, as a test host that
+    is not a registered app would.
+  - The intents run on the app's shared core, whose limits are
+    `Limits::AGENT` because nothing in the app changes them; a future
+    limits preference would reach the intents too.
+
 ## Language server
 - `neoscad lsp --stdio`'s diagnostics are the session's parse and
   evaluation, not the geometry stage: warnings only a render prints (the

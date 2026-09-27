@@ -29,6 +29,11 @@ final class ViewportController {
     /// renders it again.
     var onSchemeChange: (() -> Void)?
 
+    /// A click in the view that did not drag, at a point in points from
+    /// the view's top left; returns whether it was taken (then the view
+    /// draws again). The measure panel picks surface points with it.
+    var onClick: ((CGPoint) -> Bool)?
+
     init() {
         do {
             viewport = try Viewport(colorScheme: Self.lightScheme)

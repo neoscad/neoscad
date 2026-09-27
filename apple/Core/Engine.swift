@@ -145,6 +145,80 @@ public final class Engine: Sendable {
         try await run(path) { try $0.export(path: path, output: output, format: format) }
     }
 
+    // MARK: Panel requests (check, measure, export)
+    //
+    // These run detached from the document's own runs (crates/ffi/src/
+    // inspect.rs says why): they neither cancel the live preview nor are
+    // cancelled by typing. Cancelling the calling task cancels only the
+    // request's own token, never the document's other requests, which
+    // `run` would do by cancelling everything on the path.
+
+    /// `neoscad check` on a document's current text.
+    public func check(
+        _ path: String, options: CheckOptions, run: RunOptions = RunOptions()
+    ) async throws -> CheckReport {
+        try await detached { core, token in
+            try core.check(path: path, options: options, run: run, cancel: token)
+        }
+    }
+
+    /// `neoscad measure` on a document's current text, keeping the solids
+    /// for sections, distances and picking.
+    public func measure(_ path: String, run: RunOptions = RunOptions()) async throws
+        -> MeasureResult
+    {
+        try await detached { core, token in
+            try core.measure(path: path, run: run, cancel: token)
+        }
+    }
+
+    /// Render and write to `output`, with the export's options; `stage` is
+    /// told each stage as it starts (on the engine's thread).
+    public func exportFile(
+        _ path: String, to output: String, options: ExportOptions = ExportOptions(),
+        run: RunOptions = RunOptions(), stage: (@Sendable (String) -> Void)? = nil
+    ) async throws -> ExportResult {
+        let listener = stage.map { Stages(stage: $0) }
+        return try await detached { core, token in
+            try core.exportFile(
+                path: path, output: output, options: options, run: run, cancel: token,
+                progress: listener)
+        }
+    }
+
+    /// A contact sheet of a document's current text.
+    public func snapshotFile(
+        _ path: String, options: SnapshotOptions = SnapshotOptions(), run: RunOptions = RunOptions()
+    ) async throws -> SnapshotResult {
+        try await detached { core, token in
+            try core.snapshotFile(path: path, options: options, run: run, cancel: token)
+        }
+    }
+
+    private final class Stages: ProgressListener {
+        let stage: @Sendable (String) -> Void
+        init(stage: @escaping @Sendable (String) -> Void) { self.stage = stage }
+        func stage(stage: String) { self.stage(stage) }
+    }
+
+    /// `body` on the engine's queue with a token of its own; cancelling the
+    /// calling task cancels that token only.
+    private func detached<T: Sendable>(
+        _ body: @escaping @Sendable (Core, CancelToken) throws -> T
+    ) async throws -> T {
+        let core = self.core
+        let token = try CancelToken()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.async {
+                    continuation.resume(with: Result { try body(core, token) })
+                }
+            }
+        } onCancel: {
+            try? token.cancel()
+        }
+    }
+
     /// `body` on the engine's queue; cancelling the calling task cancels
     /// the core's requests on `path`.
     private func run<T: Sendable>(

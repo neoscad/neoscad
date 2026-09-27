@@ -50,12 +50,21 @@ final class DocumentModel {
     var parameterValues: [String: ParameterValue] = [:]
     var parameterSets: [String] = []
     var selectedParameterSet: String?
-    /// Whether the customizer and the console list are shown.
+    /// Whether the inspector (customizer, check, measure) and the console
+    /// list are shown, and which of the inspector's panels.
     var customizerShown = true
+    var inspector: InspectorTab = .customizer
     var consoleCollapsed = false
+    /// neoscad's `part()` extension for this document (`--enable part`):
+    /// its runs, checks and measurements all accept `part("name")`.
+    var partsEnabled = false
     /// Whether parameter sets can be read and written: the document has a
     /// file, next to which `name.json` lives.
     var parameterSetsAvailable = false
+
+    /// The check and measure panels.
+    @ObservationIgnored let check = CheckModel()
+    @ObservationIgnored let measure = MeasureModel()
 
     /// The 3D view's state (the Rust viewport and its view).
     @ObservationIgnored let viewport = ViewportController()
@@ -110,6 +119,21 @@ struct DocumentActions {
     var resetParameters: () -> Void = {}
     var applyParameterSet: (String) -> Void = { _ in }
     var saveParameterSet: () -> Void = {}
+    /// The check and measure panels (Document/Inspect.swift).
+    var setParts: (Bool) -> Void = { _ in }
+    var runCheck: () -> Void = {}
+    var selectFinding: (UInt32?) -> Void = { _ in }
+    var runMeasure: () -> Void = {}
+    var measureBetween: () -> Void = {}
+    var updateSection: () -> Void = {}
+    var clearPicks: () -> Void = {}
+}
+
+/// The inspector's panels, beside the 3D view.
+enum InspectorTab: String, CaseIterable {
+    case customizer = "Customizer"
+    case check = "Check"
+    case measure = "Measure"
 }
 
 /// What the console area shows about the last run.
@@ -144,6 +168,11 @@ final class SCADDocument: NSDocument {
     var lastMode: RenderMode?
     /// The customizer's parse of the text, in flight.
     var parameterTask: Task<Void, Never>?
+    /// The check, measurement and export in flight (Document/Inspect.swift,
+    /// Document/Export.swift).
+    var checkTask: Task<Void, Never>?
+    var measureTask: Task<Void, Never>?
+    var exportTask: Task<Void, Never>?
     /// The files the last run read, watched for changes on disk.
     let watcher = FileWatcher()
     /// The editor's language server: markers come from this document's
@@ -403,7 +432,30 @@ final class SCADDocument: NSDocument {
         model.viewport.update { $0.lighting = .headlight }
     }
     @objc func toggleCustomizer(_ sender: Any?) {
-        model.customizerShown.toggle()
+        showInspector(.customizer)
+    }
+    @objc func showCheck(_ sender: Any?) { showInspector(.check) }
+    /// Design > Check and Measure: show the panel and run it.
+    @objc func checkDocument(_ sender: Any?) {
+        model.inspector = .check
+        model.customizerShown = true
+        runCheck()
+    }
+    @objc func measureDocument(_ sender: Any?) {
+        model.inspector = .measure
+        model.customizerShown = true
+        runMeasure()
+    }
+    @objc func showMeasure(_ sender: Any?) { showInspector(.measure) }
+
+    /// Show `tab`, or hide the inspector when it is already showing it.
+    private func showInspector(_ tab: InspectorTab) {
+        if model.customizerShown && model.inspector == tab {
+            model.customizerShown = false
+        } else {
+            model.inspector = tab
+            model.customizerShown = true
+        }
     }
     @objc func toggleConsole(_ sender: Any?) {
         model.consoleCollapsed.toggle()
@@ -413,7 +465,13 @@ final class SCADDocument: NSDocument {
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(toggleCustomizer(_:)):
-            item.state = model.customizerShown ? .on : .off
+            item.state = model.customizerShown && model.inspector == .customizer ? .on : .off
+            return true
+        case #selector(showCheck(_:)):
+            item.state = model.customizerShown && model.inspector == .check ? .on : .off
+            return true
+        case #selector(showMeasure(_:)):
+            item.state = model.customizerShown && model.inspector == .measure ? .on : .off
             return true
         case #selector(toggleConsole(_:)):
             item.state = model.consoleCollapsed ? .off : .on
@@ -453,6 +511,9 @@ final class SCADDocument: NSDocument {
         pendingPreview = nil
         renderTask?.cancel()
         parameterTask?.cancel()
+        checkTask?.cancel()
+        measureTask?.cancel()
+        exportTask?.cancel()
         watcher.stop()
         model.viewport.detach()
         model.editor.detach()
