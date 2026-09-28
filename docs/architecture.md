@@ -286,14 +286,15 @@ than dispatch (`docs/audits/bytecode-vm.md`, "Recommendation").
   VM spike (builtin names skip the context walk, pooled argument
   vectors, a positional binding fast path, a direct builtin call, and
   up to 256 recycled contexts): 1.07–1.10× on BOSL2 models.
-- **In progress:** porting the spike's register and pure-frame analyses
-  (`compile.rs`'s `scan`, `exec.rs`'s `pure_bindable` on branch
-  `mr/vm-spike`) into the tree-walker, so `let` and comprehension
-  variables and positional-only calls need no heap context; estimated
-  1.2–1.35× on BOSL2 evaluation in total. The spike's fuzzer and `vm_ab`
-  are its oracle; the VM itself is then deleted. A second engine was
-  rejected as a standing tax on every semantic change
-  (`docs/audits/bytecode-vm.md`, "Recommendation").
+- **Registers and pure frames** (`1ca570e`): the spike's register
+  analysis and pure-frame rule, ported into the tree-walker. `let`,
+  comprehension variables and positional-only calls need no heap context
+  when nothing can capture them: 1.08–1.16× on BOSL2 models (the spike
+  estimated 1.2–1.35×; the rest needs a second engine). The prototype
+  stays on branch `mr/vm-spike`; a second engine was rejected as a
+  standing tax on every semantic change (`docs/audits/bytecode-vm.md`).
+- Final numbers: `docs/audits/final.md` (about 2.8× the nightly on heavy
+  models; 3.7× geometric mean over 14 models including startup).
 
 Geometry-side work is in `docs/audits/performance.md` (O1–O12, each with
 its status).
@@ -412,7 +413,7 @@ ffmpeg.
 **Performance** (after phase 8, `docs/audits/performance.md`): its
 opportunities O1–O10 are done, O11 and O12 are not (status at the top of
 the audit). Evaluator work since: `unwind.md` D1 (done), the VM spike's
-T1–T5 (done) and the register/pure-frame port (in progress); see
+T1–T5 (done) and the register/pure-frame port (done, `1ca570e`); see
 "Evaluator performance".
 
 The agent CLI (phases 1–7) comes before any GUI, because the conformance

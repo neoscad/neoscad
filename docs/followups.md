@@ -113,14 +113,6 @@ lead them, come roughly in order of user impact.
   allocates and takes nothing). (8f)
 
 ## Performance
-- **Evaluator: the VM spike's register and pure-frame port** (in
-  progress). T1–T5 from `docs/audits/bytecode-vm.md` §5 are in. What is
-  left is its step 2: move the prototype's register analysis
-  (`compile.rs`'s `scan`) and pure-frame rule (`exec.rs`'s
-  `pure_bindable`, branch `mr/vm-spike`) into the tree-walker, as a
-  per-call register window in `eval_call`, `eval_cold`'s `let` and
-  `for_each`; estimated 1.2–1.35× on BOSL2 evaluation in total. The
-  branch's fuzzer and `vm_ab` are the oracle; delete the VM afterwards.
 - **`panic = "unwind"` costs 5–9% on evaluation-bound models** after D1
   (`docs/audits/unwind.md`; D2's `extern "C"` drop shims measured 3–7%
   slower and were reverted). Winning it back for the one-shot CLI means
@@ -180,9 +172,6 @@ lead them, come roughly in order of user impact.
   once. Needs a determinism test for message replay and ID blocks.
 
 ## Parity
-- `-o x.echo` exits 0 after an evaluation error (limits and
-  `assert(false)` included). Check what OpenSCAD's exit code is and
-  match it.
 - `manifold-rust` 0.13.1 ports Manifold v3.5.0; OpenSCAD pins v3.5.2.
   (5a)
 - `vendor/manifold-rust` patches `collapse_edge`, whose clean-up after a
@@ -509,7 +498,6 @@ lead them, come roughly in order of user impact.
     `com.apple.security.cs.disable-library-validation`, since the
     hardened runtime will not load an ad-hoc framework into an ad-hoc
     process; a Developer ID build must not, and the script checks.
-  - `CLAUDE.md`'s build list does not mention `scripts/apple/release.sh`.
 
 - Check and measure panels, export and App Intents (8i):
   - The check panel marks findings in the view with numbered rings and
@@ -624,7 +612,7 @@ lead them, come roughly in order of user impact.
   it is the 150 ms pause (`SCADDocument.previewDelay`). (8e, 8f)
 - `neoscad lsp --stdio` has no page on setting it up in VS Code, Zed,
   Neovim or Helix. (8e)
-- The release `wasm_check.wasm` is 44.6 MB with the language server in it
+- The release `wasm_check.wasm` is 46.3 MB with the language server in it
   (the WASM section's 38 MB is from H2); the language server's share was
   not measured. (8e)
 
@@ -684,8 +672,8 @@ lead them, come roughly in order of user impact.
 - The first PNG export after a reboot or driver update pays for Metal's
   shader compilation (about 0.5 s on this machine; the system caches it
   after that, and a warm export costs about 18 ms over the geometry). (6a)
-- The two render-mode images that fail both tier 4 rules,
-  `render-manifold_issue964` and `issue1061`, are polyhedra with
+- `issue964` and `issue1061` (render mode now passes; their preview and
+  throwntogether cases still fail) are polyhedra with
   non-planar quads: `PolySet::tessellate` ear-clips them along other
   diagonals than OpenSCAD's libtess2 (see "Faces with more than three
   vertices" under Parity), so the shading of those faces differs. The
@@ -866,3 +854,7 @@ lead them, come roughly in order of user impact.
   CI would need it too. (5a)
 - The six PDF cases need a PDF rasteriser (Ghostscript or poppler), which
   CI would need too. (5f)
+
+- **`str()`/`echo()` of shared lists overshoot the string limit** (`docs/audits/final.md` finding 4): fix in progress.
+- **The BOSL2 3597-file corpus had no generator** (`docs/audits/final.md` finding 3): fix in progress.
+- **Library crates touch the host file system for message paths** (`lang/src/diag.rs` `weakly_canonical`: `current_dir()`, `canonicalize()`; `eval::Options::default()` uses `StdFs`). Owner decision: route through `FileSystem`, or reword the CLAUDE.md rule to allow host-called helpers.
