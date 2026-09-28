@@ -158,10 +158,25 @@ impl Ctx {
     }
 
     /// A plain context of a one-variable `region` (a `for` variable), with
-    /// the variable set.
+    /// the variable set, reusing a context from `pool` (see
+    /// [`Ctx::recycle`]) when it has one.
     #[inline]
-    pub fn with_slot(parent: &Rc<Ctx>, region: u32, slot: u32, v: Value) -> Rc<Ctx> {
+    pub fn with_slot(
+        pool: &mut Vec<Rc<Ctx>>,
+        parent: &Rc<Ctx>,
+        region: u32,
+        slot: u32,
+        v: Value,
+    ) -> Rc<Ctx> {
         debug_assert_eq!(slot, 0);
+        if let Some(mut c) = pool.pop() {
+            let x = Rc::get_mut(&mut c).expect("a pooled context is held by the pool alone");
+            x.parent = Some(parent.clone());
+            x.region = region;
+            x.nslots = 1;
+            x.slots.get_mut().push(Some(v));
+            return c;
+        }
         Rc::new(Ctx {
             parent: Some(parent.clone()),
             kind: CtxKind::Plain,
@@ -170,6 +185,53 @@ impl Ctx {
             slots: RefCell::new(vec![Some(v)]),
             vars: RefCell::new(Vars::default()),
         })
+    }
+
+    /// Give a dead context's allocation to `pool` for [`Ctx::reuse`]: the
+    /// call frames, `let`s and `for` iterations the evaluator makes by the
+    /// million each cost an `Rc` allocation and a slot vector otherwise.
+    ///
+    /// Only a context nothing else holds is kept (`Rc::get_mut`), so a
+    /// function literal that captured it, or a scope still on the stack,
+    /// keeps its own. Everything it held is dropped here, exactly when
+    /// dropping it would have dropped it, and its kind is reset, so a
+    /// pooled context keeps no children or parent chain alive. The pool is
+    /// capped, because a burst of nested contexts need not be kept once
+    /// the recursion unwinds.
+    pub fn recycle(mut c: Rc<Ctx>, pool: &mut Vec<Rc<Ctx>>) {
+        const POOL_MAX: usize = 256;
+        if pool.len() < POOL_MAX
+            && let Some(x) = Rc::get_mut(&mut c)
+        {
+            x.parent = None;
+            x.kind = CtxKind::Plain;
+            x.slots.get_mut().clear();
+            x.vars.get_mut().clear();
+            pool.push(c);
+        }
+    }
+
+    /// [`Ctx::new`], with an allocation from `pool` when it has one. A
+    /// pooled context is empty (see [`Ctx::recycle`]); its slot vector
+    /// keeps its capacity and is sized on first write, as a new one is.
+    pub fn reuse(
+        pool: &mut Vec<Rc<Ctx>>,
+        parent: Option<Rc<Ctx>>,
+        kind: CtxKind,
+        region: u32,
+        nslots: usize,
+    ) -> Rc<Ctx> {
+        match pool.pop() {
+            Some(mut c) => {
+                let x = Rc::get_mut(&mut c).expect("a pooled context is held by the pool alone");
+                x.parent = parent;
+                x.kind = kind;
+                x.region = region;
+                x.nslots = nslots as u32;
+                c
+            }
+            None => Ctx::new(parent, kind, region, nslots),
+        }
     }
 
     pub fn parent(&self) -> Option<Rc<Ctx>> {

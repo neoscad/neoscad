@@ -224,11 +224,33 @@ impl<'a> Evaluator<'a> {
             let v = self.eval(u, args[0].expr, ctx)?;
             return Ok(Value::Bool(v.is_undef()));
         }
-        let a = self.eval_args(u, args, ctx)?;
+        // The argument vector comes from `arg_pool`, as a user call's does
+        // (`call_frame`): a builtin call is the commonest call there is
+        // (`min`, `abs`, `len` in every BOSL2 loop), and a fresh vector
+        // per call was a malloc and free on each. It goes back to the pool
+        // on every path, errors included, or the pool would drain.
+        let mut argv = self.arg_pool.pop().unwrap_or_default();
+        let r = match self.eval_args_into(u, args, ctx, &mut argv) {
+            Ok(()) => self.apply_builtin(b, loc, &mut argv),
+            Err(e) => Err(e),
+        };
+        argv.clear();
+        self.arg_pool.push(argv);
+        r
+    }
+
+    /// Builtin `b` applied to its evaluated arguments. They are borrowed
+    /// from the caller's pooled vector; `concat` drains it, because it must
+    /// own its first list to grow it in place, and the DXF builtins take it.
+    /// Forced inline: it was `call_builtin`'s body until the vector was
+    /// pooled, and the evaluator's speed is sensitive to how LLVM inlines
+    /// its hot functions (`docs/audits/bytecode-vm.md` §3.6).
+    #[inline(always)]
+    fn apply_builtin(&mut self, b: Builtin, loc: Loc, a: &mut Vec<ArgVal>) -> R<Value> {
         use Builtin::*;
         Ok(match b {
-            Abs => self.num1("abs", &a, loc, f64::abs),
-            Sign => self.num1("sign", &a, loc, |x| {
+            Abs => self.num1("abs", a, loc, f64::abs),
+            Sign => self.num1("sign", a, loc, |x| {
                 if x < 0.0 {
                     -1.0
                 } else if x > 0.0 {
@@ -237,20 +259,20 @@ impl<'a> Evaluator<'a> {
                     0.0
                 }
             }),
-            Sin => self.num1("sin", &a, loc, trig::sin_degrees),
-            Cos => self.num1("cos", &a, loc, trig::cos_degrees),
-            Asin => self.num1("asin", &a, loc, trig::asin_degrees),
-            Acos => self.num1("acos", &a, loc, trig::acos_degrees),
-            Tan => self.num1("tan", &a, loc, trig::tan_degrees),
-            Atan => self.num1("atan", &a, loc, trig::atan_degrees),
-            Round => self.num1("round", &a, loc, f64::round),
-            Ceil => self.num1("ceil", &a, loc, f64::ceil),
-            Floor => self.num1("floor", &a, loc, f64::floor),
-            Sqrt => self.num1("sqrt", &a, loc, f64::sqrt),
-            Exp => self.num1("exp", &a, loc, f64::exp),
-            Ln => self.num1("ln", &a, loc, f64::ln),
+            Sin => self.num1("sin", a, loc, trig::sin_degrees),
+            Cos => self.num1("cos", a, loc, trig::cos_degrees),
+            Asin => self.num1("asin", a, loc, trig::asin_degrees),
+            Acos => self.num1("acos", a, loc, trig::acos_degrees),
+            Tan => self.num1("tan", a, loc, trig::tan_degrees),
+            Atan => self.num1("atan", a, loc, trig::atan_degrees),
+            Round => self.num1("round", a, loc, f64::round),
+            Ceil => self.num1("ceil", a, loc, f64::ceil),
+            Floor => self.num1("floor", a, loc, f64::floor),
+            Sqrt => self.num1("sqrt", a, loc, f64::sqrt),
+            Exp => self.num1("exp", a, loc, f64::exp),
+            Ln => self.num1("ln", a, loc, f64::ln),
             Atan2 => {
-                if self.check("atan2", &a, loc, &[Type::Number, Type::Number]) {
+                if self.check("atan2", a, loc, &[Type::Number, Type::Number]) {
                     Value::Number(trig::atan2_degrees(
                         a[0].value.to_f64(),
                         a[1].value.to_f64(),
@@ -260,7 +282,7 @@ impl<'a> Evaluator<'a> {
                 }
             }
             Pow => {
-                if self.check("pow", &a, loc, &[Type::Number, Type::Number]) {
+                if self.check("pow", a, loc, &[Type::Number, Type::Number]) {
                     Value::Number(a[0].value.to_f64().powf(a[1].value.to_f64()))
                 } else {
                     Value::Undef
@@ -268,12 +290,12 @@ impl<'a> Evaluator<'a> {
             }
             Log => {
                 let (base, x) = if a.len() == 1 {
-                    if !self.check("log", &a, loc, &[Type::Number]) {
+                    if !self.check("log", a, loc, &[Type::Number]) {
                         return Ok(Value::Undef);
                     }
                     (10.0, a[0].value.to_f64())
                 } else {
-                    if !self.check("log", &a, loc, &[Type::Number, Type::Number]) {
+                    if !self.check("log", a, loc, &[Type::Number, Type::Number]) {
                         return Ok(Value::Undef);
                     }
                     (a[0].value.to_f64(), a[1].value.to_f64())
@@ -283,7 +305,7 @@ impl<'a> Evaluator<'a> {
             Len => match (a.len(), a.first().map(|x| &x.value)) {
                 (1, Some(Value::Vector(v))) => Value::Number(v.len() as f64),
                 _ => {
-                    if self.check("len", &a, loc, &[Type::Str]) {
+                    if self.check("len", a, loc, &[Type::Str]) {
                         let s = a[0].value.as_str().map_or(0, |s| s.char_count());
                         Value::Number(s as f64)
                     } else {
@@ -291,11 +313,11 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             },
-            Min | Max => self.min_max(b == Min, &a, loc),
-            Rands => self.rands(&a, loc),
+            Min | Max => self.min_max(b == Min, a, loc),
+            Rands => self.rands(a, loc),
             Str => {
                 let mut out = Vec::new();
-                for x in &a {
+                for x in a.iter() {
                     if self.write_string(&x.value, &mut out).is_err() {
                         self.log_exhausted();
                         return Err(self.unwind(UnwindKind::EchoStack));
@@ -310,7 +332,7 @@ impl<'a> Evaluator<'a> {
             }
             Chr => {
                 let mut out = Vec::new();
-                for x in &a {
+                for x in a.iter() {
                     self.chr_into(&x.value, &mut out);
                 }
                 if !self.string_fits(out.len(), loc, "chr()") {
@@ -319,7 +341,7 @@ impl<'a> Evaluator<'a> {
                 Value::Str(crate::value::Str::from_vec(out))
             }
             Ord => {
-                if !self.check("ord", &a, loc, &[Type::Str]) {
+                if !self.check("ord", a, loc, &[Type::Str]) {
                     return Ok(Value::Undef);
                 }
                 let s = a[0]
@@ -358,7 +380,7 @@ impl<'a> Evaluator<'a> {
                 // place (see `value::Growable`), which keeps a tail-recursive
                 // `concat(acc, [x])` linear; any other is copied into a list
                 // of exactly the final size.
-                let mut a = a.into_iter();
+                let mut a = a.drain(..);
                 let mut out = match a.next().map(|x| x.value) {
                     None => return Ok(Value::vector(Vec::new())),
                     Some(Value::Vector(v)) => match v.into_growable() {
@@ -384,8 +406,8 @@ impl<'a> Evaluator<'a> {
                 }
                 Value::Vector(out.finish())
             }
-            Lookup => self.lookup_fn(&a, loc),
-            Search => self.search(&a, loc),
+            Lookup => self.lookup_fn(a, loc),
+            Search => self.search(a, loc),
             Version => self.version_value(),
             VersionNum => {
                 let v = if a.is_empty() {
@@ -402,7 +424,7 @@ impl<'a> Evaluator<'a> {
             ParentModule => {
                 let d = if a.is_empty() {
                     1.0
-                } else if !self.check("parent_module", &a, loc, &[Type::Number]) {
+                } else if !self.check("parent_module", a, loc, &[Type::Number]) {
                     return Ok(Value::Undef);
                 } else {
                     a[0].value.to_f64()
@@ -428,7 +450,7 @@ impl<'a> Evaluator<'a> {
                 Value::str(self.name(name).as_bytes())
             }
             Norm => {
-                if !self.check("norm", &a, loc, &[Type::Vector]) {
+                if !self.check("norm", a, loc, &[Type::Vector]) {
                     return Ok(Value::Undef);
                 }
                 let mut sum = 0.0;
@@ -452,18 +474,18 @@ impl<'a> Evaluator<'a> {
                 }
                 Value::Number(sum.sqrt())
             }
-            Cross => self.cross(&a, loc),
-            IsList => self.is_type(&a, loc, "is_list", |v| matches!(v, Value::Vector(_))),
+            Cross => self.cross(a, loc),
+            IsList => self.is_type(a, loc, "is_list", |v| matches!(v, Value::Vector(_))),
             IsNum => self.is_type(
-                &a,
+                a,
                 loc,
                 "is_num",
                 |v| matches!(v, Value::Number(x) if !x.is_nan()),
             ),
-            IsBool => self.is_type(&a, loc, "is_bool", |v| matches!(v, Value::Bool(_))),
-            IsString => self.is_type(&a, loc, "is_string", |v| matches!(v, Value::Str(_))),
-            IsFunction => self.is_type(&a, loc, "is_function", |v| matches!(v, Value::Function(_))),
-            DxfDim | DxfCross => self.dxf(b == DxfDim, a, loc),
+            IsBool => self.is_type(a, loc, "is_bool", |v| matches!(v, Value::Bool(_))),
+            IsString => self.is_type(a, loc, "is_string", |v| matches!(v, Value::Str(_))),
+            IsFunction => self.is_type(a, loc, "is_function", |v| matches!(v, Value::Function(_))),
+            DxfDim | DxfCross => self.dxf(b == DxfDim, std::mem::take(a), loc),
             IsUndef | TextMetrics | FontMetrics | IsObject | Object | HasKey | Import => {
                 Value::Undef
             }

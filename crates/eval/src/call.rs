@@ -110,7 +110,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// [`Self::eval_args`] into `out` (a vector from `arg_pool`).
-    fn eval_args_into(
+    pub(crate) fn eval_args_into(
         &mut self,
         u: u32,
         args: &'a [Arg],
@@ -237,6 +237,9 @@ impl<'a> Evaluator<'a> {
         defining: &Rc<Ctx>,
         region: u32,
     ) -> R<Frame> {
+        if let Some(f) = self.bind_positional(args, unit, params, defining, region) {
+            return f;
+        }
         let warn = self.opts.check_parameters;
         // A cheap clone (reference count), so the closure does not borrow
         // `self` while warnings need it mutably.
@@ -318,6 +321,60 @@ impl<'a> Evaluator<'a> {
         Ok(f)
     }
 
+    /// [`Self::bind_user`] for the common call: positional arguments only,
+    /// no more of them than parameters, and every parameter in a slot (no
+    /// `$` parameter, which binds in the name map). Then argument `k`
+    /// binds parameter `k`, nothing can warn, and only the defaults of the
+    /// parameters left unset remain, evaluated in the same order as the
+    /// general path. `None`: not such a call; `bind_user` does it.
+    ///
+    /// The general path's bookkeeping (the named-argument list, the unit's
+    /// symbol table clone, a position search per argument) was a measurable
+    /// part of every user call, and almost every call in BOSL2 is this
+    /// shape. Duplicate parameter names share a slot here as they do there:
+    /// the later argument wins, and a default is skipped once the slot is
+    /// set.
+    #[inline]
+    fn bind_positional(
+        &mut self,
+        args: &mut Vec<ArgVal>,
+        unit: u32,
+        params: &'a [Param],
+        defining: &Rc<Ctx>,
+        region: u32,
+    ) -> Option<R<Frame>> {
+        let r = &self.regions[region as usize];
+        if args.len() > params.len()
+            || args.iter().any(|a| a.name.is_some())
+            || r.binds.len() < params.len()
+            || r.binds[..params.len()].contains(&NO_SLOT)
+        {
+            return None;
+        }
+        let mut slots = vec![None; r.len()];
+        let n = args.len();
+        for (k, a) in args.drain(..).enumerate() {
+            slots[self.regions[region as usize].binds[k] as usize] = Some(a.value);
+        }
+        for (k, p) in params.iter().enumerate().skip(n) {
+            let slot = self.regions[region as usize].binds[k] as usize;
+            if slots[slot].is_none() {
+                let v = match p.default {
+                    Some(d) => match self.eval(unit, d, defining) {
+                        Ok(v) => v,
+                        Err(e) => return Some(Err(e)),
+                    },
+                    None => Value::Undef,
+                };
+                slots[slot] = Some(v);
+            }
+        }
+        Some(Ok(Frame {
+            slots,
+            vars: Vars::default(),
+        }))
+    }
+
     /// The slot of parameter `k` in `region` (its `k`th binder).
     fn param_slot(&self, region: u32, k: usize) -> u32 {
         let binds = &self.regions[region as usize].binds;
@@ -396,6 +453,16 @@ impl<'a> Evaluator<'a> {
         // A frame for the frame budget (see `crate::recursion`); tail
         // calls below reuse it, as they reuse the native stack.
         self.frames += crate::recursion::CALL_FRAMES;
+        // A call that can only ever reach a builtin makes one step and no
+        // context, so it skips the loop and its stack slot. The checks
+        // above and the frame charge are the loop's, in the same order, so
+        // the recursion limit, interrupts and the frame budget see it as
+        // before.
+        if let Some(b) = self.static_builtin(u, id) {
+            let r = self.direct_builtin(b, u, id, ctx);
+            self.frames -= crate::recursion::CALL_FRAMES;
+            return r;
+        }
         // The loop owns one stack slot, holding the context of the step
         // being evaluated, and `simplify` pushes each callee's (or `let`'s)
         // context just above it, where it is visible to the arguments as
@@ -444,7 +511,12 @@ impl<'a> Evaluator<'a> {
                         // see.
                         debug_assert_eq!(self.stack.len(), slot + 2);
                         self.stack.swap_remove(slot);
-                        cur = Some(nc);
+                        // The replaced step's context dies here unless a
+                        // function literal captured it; if it does die,
+                        // its allocation serves the next call or `let`.
+                        if let Some(old) = cur.replace(nc) {
+                            Ctx::recycle(old, &mut self.ctx_pool);
+                        }
                     }
                     if let Some(c) = c {
                         call = c;
@@ -475,8 +547,55 @@ impl<'a> Evaluator<'a> {
             }
         };
         self.truncate(slot);
+        if let Some(c) = cur {
+            Ctx::recycle(c, &mut self.ctx_pool);
+        }
         self.frames -= crate::recursion::CALL_FRAMES;
         result
+    }
+
+    /// The builtin call `id` always makes, if it always makes one: its
+    /// callee is a name the resolver resolved, and no scope, variable,
+    /// parameter frame or used library on the way out can bind that name
+    /// (no candidates), so [`Self::find_function`] could only end at the
+    /// builtin context, where every chain ends. A disabled experimental
+    /// builtin is left to that walk, which warns. The same test is written
+    /// out in `find_function` rather than shared: a shared helper measured
+    /// 2-3% slower on call-heavy code at equal instruction counts (code
+    /// layout; see `docs/followups.md`, "Evaluator layout sensitivity").
+    #[inline]
+    fn static_builtin(&self, u: u32, id: ExprId) -> Option<Builtin> {
+        let unit = &self.units[u as usize];
+        let r = unit.res.expr[id.0 as usize];
+        if r == 0 {
+            return None;
+        }
+        let fr = unit.res.fns[(r - 1) as usize];
+        if fr.cands.len != 0 {
+            return None;
+        }
+        fr.builtin.filter(|b| b.enabled())
+    }
+
+    /// [`Self::eval_call`]'s one step for a [`Self::static_builtin`] call:
+    /// what `simplify` would do with it (the arguments evaluated in the
+    /// caller's context, which is what the loop's first step uses), then
+    /// the loop's `check_hard` and its trace of a failure as the call.
+    /// Out of line, so the direct path adds nothing to `eval_call`'s stack
+    /// frame, which every level of a recursion holds.
+    #[inline(never)]
+    fn direct_builtin(&mut self, b: Builtin, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
+        let ast: &'a Ast = self.units[u as usize].ast;
+        let ExprKind::Call(_, args) = &ast.expr(id).kind else {
+            unreachable!("a resolved function reference is a call");
+        };
+        let r = self
+            .call_builtin(b, u, id, args, ctx)
+            .and_then(|v| self.check_hard().map(|()| v));
+        r.map_err(|mut e| {
+            self.trace_call(&mut e, (u, id));
+            e
+        })
     }
 
     fn trace_call(&mut self, e: &mut crate::message::Unwind, call: (u32, ExprId)) {
@@ -869,6 +988,17 @@ impl<'a> Evaluator<'a> {
         loc: Loc,
     ) -> R<Option<Callable>> {
         let fr = self.units[u as usize].res.fns[r as usize];
+        // A name nothing can bind: the walk below would pass each context
+        // by and stop at the builtin context. Answering at once saves that
+        // walk through every `let` and call frame out to the file, for a
+        // builtin called in tail position (`function f(x) = max(x, 0)`);
+        // other builtin calls take `eval_call`'s direct path instead.
+        if fr.cands.len == 0
+            && let Some(b) = fr.builtin
+            && b.enabled()
+        {
+            return Ok(Some(Callable::Builtin(b)));
+        }
         let mut c: &Rc<Ctx> = ctx;
         loop {
             if c.region == BUILTIN_REGION

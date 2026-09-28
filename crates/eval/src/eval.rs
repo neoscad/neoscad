@@ -229,8 +229,10 @@ pub(crate) struct Evaluator<'a> {
     pub stats: crate::resolve::Stats,
     /// An empty context for `eval_call`'s stack slot (see there).
     pub placeholder: Rc<Ctx>,
-    /// Emptied argument vectors for user calls to reuse.
+    /// Emptied argument vectors for user and builtin calls to reuse.
     pub arg_pool: Vec<Vec<crate::call::ArgVal>>,
+    /// Dead contexts for new ones to reuse (see [`Ctx::recycle`]).
+    pub ctx_pool: Vec<Rc<Ctx>>,
     /// Reuse of top-level statements from an earlier evaluation (see
     /// [`crate::memo`]), when the host keeps a memo.
     pub(crate) memo: Option<crate::memo::MemoRun<'a>>,
@@ -413,6 +415,7 @@ impl<'a> Evaluator<'a> {
             extras: std::cell::OnceCell::new(),
             stats: crate::resolve::Stats::default(),
             arg_pool: Vec::new(),
+            ctx_pool: Vec::new(),
             placeholder: Ctx::new(None, CtxKind::Plain, crate::resolve::NONE_REGION, 0),
             memo: None,
             rec: None,
@@ -760,27 +763,20 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// A new context of `region`.
+    /// A new context of `region`, reusing a recycled one when there is one
+    /// (see [`Ctx::recycle`]).
     #[inline]
-    pub fn new_ctx(&self, parent: &Rc<Ctx>, kind: CtxKind, region: u32) -> Rc<Ctx> {
-        Ctx::new(
-            Some(parent.clone()),
-            kind,
-            region,
-            self.regions[region as usize].len(),
-        )
+    pub fn new_ctx(&mut self, parent: &Rc<Ctx>, kind: CtxKind, region: u32) -> Rc<Ctx> {
+        let n = self.regions[region as usize].len();
+        Ctx::reuse(&mut self.ctx_pool, Some(parent.clone()), kind, region, n)
     }
 
     /// [`Self::new_ctx`] taking over a reference the caller owns (a
     /// callee's defining context), which saves a clone and a drop per call.
     #[inline]
-    pub fn new_ctx_in(&self, parent: Rc<Ctx>, kind: CtxKind, region: u32) -> Rc<Ctx> {
-        Ctx::new(
-            Some(parent),
-            kind,
-            region,
-            self.regions[region as usize].len(),
-        )
+    pub fn new_ctx_in(&mut self, parent: Rc<Ctx>, kind: CtxKind, region: u32) -> Rc<Ctx> {
+        let n = self.regions[region as usize].len();
+        Ctx::reuse(&mut self.ctx_pool, Some(parent), kind, region, n)
     }
 
     /// Set a variable by name: in its slot when the context's region has
@@ -1331,6 +1327,7 @@ impl<'a> Evaluator<'a> {
                     .sequential_assign(u, args, e.span, &c)
                     .and_then(|_| self.eval(u, *body, &c));
                 self.truncate(mark);
+                Ctx::recycle(c, &mut self.ctx_pool);
                 r
             }
             ExprKind::Assert(args, body) => {
@@ -1839,11 +1836,14 @@ impl<'a> Evaluator<'a> {
             ev.check_interrupt()?;
             let c = match slot {
                 NO_SLOT => ev.iteration_vars(ctx, region, name, config, v),
-                i => Ctx::with_slot(ctx, region, i, v),
+                i => Ctx::with_slot(&mut ev.ctx_pool, ctx, region, i, v),
             };
             let mark = ev.push(c.clone());
             let r = ev.for_each(u, rest, crate::resolve::next_region(region), loc, &c, op);
             ev.truncate(mark);
+            // Each iteration's context dies here unless the body captured
+            // it (a function literal); the next iteration reuses it.
+            Ctx::recycle(c, &mut ev.ctx_pool);
             r
         };
         match &values {
@@ -1882,7 +1882,7 @@ impl<'a> Evaluator<'a> {
     /// through a comprehension.
     #[inline(never)]
     fn iteration_vars(
-        &self,
+        &mut self,
         ctx: &Rc<Ctx>,
         region: u32,
         name: Sym,
