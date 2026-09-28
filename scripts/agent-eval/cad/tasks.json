@@ -1,0 +1,46 @@
+{
+ "_comment": "Agent CAD comparison (docs/agent-eval.md, 'CAD comparison'; plan in docs/future/agent-cad-comparison.md). T1-T3 specs are ModelRift's wording as published at https://modelrift.com/blog/cadquery-vs-openscad/ (retrieved 2026-09-28); T0 is the harness's plumbing check, not part of the comparison.",
+ "tasks": {
+  "T0": {
+   "title": "plumbing check",
+   "spec": "A flat plate 20 x 10 x 4 with a 3 diameter through-hole in the middle of its large face.",
+   "parts": ["plate"]
+  },
+  "T1": {
+   "title": "L-bracket",
+   "spec": "A wall-mounted shelf L-bracket: two plates at 90 degrees, 4 thick, two triangular gussets, two countersunk holes for flat-head screws at 90 degrees and 9 head diameter, two plain holes, R3 on the outer vertical corners, R4 fillet on the inner corner, printable without supports.",
+   "parts": ["bracket"]
+  },
+  "T2": {
+   "title": "two-part enclosure",
+   "spec": "A two-part snap-fit enclosure for a 50 x 26 PCB. Walls 2, cavity clearance 0.4 per side, four M2 posts, a 9.5 x 3.5 USB-C cutout, a separate lid with a peripheral lip at 0.2 clearance and working snaps, five vent slots.",
+   "parts": ["base", "lid"]
+  },
+  "T3": {
+   "title": "threaded hose-barb adapter",
+   "spec": "An M24x2 threaded hose-barb adapter with a hex flange 30 across flats, a real helical thread 12 long, a 25 long barb carrying three barbs for 12 ID hose, and an 8 through-channel. Stacked rings are not a thread and are not allowed.",
+   "parts": ["adapter"]
+  }
+ },
+ "prompt": "Design this part for FDM 3D printing and export it as STL.\n\nSpec: {spec}\n\nOutput:\n- One source file per part in the current directory: {sources}. {how_export}\n- The final STL files are {stls}. Each must be one watertight solid, in millimetres, placed in its print orientation resting on the build plate at z = 0.\n- Every export to out/ counts as one version. You may make at most 12 versions. Do not write STL files anywhere else.\n\n3D-printing rules:\n- FDM, 0.4 mm nozzle, 0.2 mm layers, printed without support material.\n- Walls at least 1.2 mm unless the spec gives a size.\n- Overhangs no more than 45 degrees from vertical, except short bridges.\n- Use the clearances the spec gives; where it gives none, 0.2 mm per side between mating parts.\n\nRules:\n- Work unattended; there is nobody to ask.\n- Never fake success. Do not claim a feature works unless you checked it.\n- Report every failure, with the verbatim error text of every error a tool gave you.\n- When you finish, reply with: what you built, how many versions you made, and every failure or known deviation from the spec.",
+ "conditions": {
+  "openscad": {
+   "label": "OpenSCAD",
+   "ext": "scad",
+   "how_export": "Export each with OpenSCAD to out/<part>.stl.",
+   "briefing": "Your tools are Bash, Read, Write and Edit. OpenSCAD (nightly) is at {openscad}; always pass --backend=manifold. It exports meshes (-o out/part.stl part.scad) and PNG images (-o view.png, with --camera, --viewall --autocenter and --imgsize to choose the view); Read shows you a PNG. Run OpenSCAD as a Bash command on its own, not after cd, &&, ; or in a pipeline: it cannot start inside the Bash sandbox, and only a command of its own runs outside it. There is no network access."
+  },
+  "cadquery": {
+   "label": "CadQuery",
+   "ext": "py",
+   "how_export": "Each is a Python script that, run from this directory, exports out/<part>.stl.",
+   "briefing": "Your tools are Bash, Read, Write and Edit. CadQuery 2.8.0 is installed for the Python interpreter at {python}; run your scripts with it. cadquery.exporters.export(shape, 'out/part.stl') writes a mesh. To render a mesh to a PNG, run {viewer} MESH.stl VIEW.png [--azimuth 30] [--elevation 25] [--zoom 1] [--size 800x800] [--edges] as a Bash command on its own (not after cd, &&, ; or in a pipeline; CadQuery's own viewer cannot open a window in the Bash sandbox); Read shows you a PNG. There is no network access, so nothing else can be installed."
+  },
+  "neoscad": {
+   "label": "NeoSCAD",
+   "ext": "scad",
+   "how_export": "Export each with the render tool's export argument to out/<part>.stl.",
+   "briefing": "Your tools are the NeoSCAD MCP tools (an OpenSCAD-compatible modeller: evaluate, render, snapshot, check, measure, test, format, docs), Bash, Read, Write and Edit. The render tool exports meshes (its export argument, e.g. out/part.stl) and snapshot returns PNG images. There is no network access."
+  }
+ }
+}
