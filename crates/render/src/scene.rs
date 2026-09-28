@@ -121,6 +121,49 @@ pub struct Surface {
     pub state: DrawState,
 }
 
+/// Which part a primitive plays in an image-space CSG product
+/// (`OpenCSG::Operation`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CsgOp {
+    Intersection,
+    Subtraction,
+}
+
+/// One primitive of an image-space CSG product: a mesh placed in the
+/// model, drawn only into depth and the primitive ID buffer.
+#[derive(Debug, Clone)]
+pub struct CsgPrimitive {
+    pub mesh: Arc<PolySet>,
+    pub matrix: Option<geom::Matrix>,
+    pub op: CsgOp,
+}
+
+/// A product whose depth OpenCSG's SCS algorithm finds per pixel
+/// ([`Scene::push_image_csg`]), in place of a boolean.
+#[derive(Debug)]
+struct ImageProduct {
+    /// Surfaces pushed before it.
+    at: usize,
+    primitives: Vec<CsgPrimitive>,
+}
+
+/// An image-space product's vertex ranges, for the GPU: its primitives
+/// in the order given, each with its ID (from 1; 0 marks no primitive).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageCsgDraws {
+    /// Draws of [`Scene::draws`] that come before the product.
+    pub at_draw: usize,
+    pub primitives: Vec<ImageCsgPrimitive>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageCsgPrimitive {
+    pub first: u32,
+    pub count: u32,
+    pub op: CsgOp,
+    pub id: u32,
+}
+
 /// A 2D outline set, drawn over everything as 2-pixel lines.
 #[derive(Debug)]
 struct Outlines {
@@ -131,6 +174,7 @@ struct Outlines {
 #[derive(Debug)]
 pub struct Scene {
     surfaces: Vec<Surface>,
+    products: Vec<ImageProduct>,
     outlines: Vec<Outlines>,
     edge_2d: Color,
     bbox: BoundingBox,
@@ -141,6 +185,7 @@ impl Scene {
     pub fn empty(scheme: &ColorScheme, bbox: BoundingBox) -> Scene {
         Scene {
             surfaces: Vec::new(),
+            products: Vec::new(),
             outlines: Vec::new(),
             edge_2d: scheme.cgal_edge_2d,
             bbox,
@@ -211,6 +256,18 @@ impl Scene {
         self.surfaces.push(surface);
     }
 
+    /// Append a product drawn the way OpenCSG's SCS algorithm draws it:
+    /// its visible depth is found per pixel from the primitives' faces
+    /// (which way each points on screen deciding inside and outside) and
+    /// merged into the depth buffer, with the surfaces pushed next drawn
+    /// where their depth is equal to it. See [`crate::gpu`].
+    pub fn push_image_csg(&mut self, primitives: Vec<CsgPrimitive>) {
+        self.products.push(ImageProduct {
+            at: self.surfaces.len(),
+            primitives,
+        });
+    }
+
     /// The box `--viewall` fits: `PolySetRenderer::getBoundingBox` in
     /// render mode, the products' box in a preview.
     pub fn bounding_box(&self) -> BoundingBox {
@@ -224,17 +281,34 @@ impl Scene {
 
     /// Vertices [`Scene::face_vertices`] yields.
     pub fn face_vertex_count(&self) -> usize {
-        self.surfaces.iter().map(surface_vertex_count).sum()
+        self.surfaces
+            .iter()
+            .map(surface_vertex_count)
+            .sum::<usize>()
+            + self
+                .products
+                .iter()
+                .flat_map(|p| &p.primitives)
+                .map(|c| mesh_vertex_count(&c.mesh))
+                .sum::<usize>()
     }
 
-    /// The draw calls: consecutive surfaces with the same state share one.
+    /// The draw calls: consecutive surfaces with the same state share one,
+    /// unless an image-space product comes between them.
     pub fn draws(&self) -> Vec<Draw> {
         let mut out: Vec<Draw> = Vec::new();
         let mut first = 0u32;
-        for s in &self.surfaces {
+        let mut breaks = self.products.iter().map(|p| p.at).peekable();
+        for (i, s) in self.surfaces.iter().enumerate() {
+            let mut split = false;
+            while breaks.next_if(|&at| at <= i).is_some() {
+                split = true;
+            }
             let count = surface_vertex_count(s) as u32;
             match out.last_mut() {
-                Some(d) if d.state == s.state && d.first + d.count == first => d.count += count,
+                Some(d) if !split && d.state == s.state && d.first + d.count == first => {
+                    d.count += count
+                }
                 _ => out.push(Draw {
                     first,
                     count,
@@ -247,10 +321,74 @@ impl Scene {
         out
     }
 
+    /// The image-space products, with their place among [`Scene::draws`]
+    /// and their primitives' ranges of [`Scene::face_vertices`] (after
+    /// every surface's).
+    pub fn image_csg(&self) -> Vec<ImageCsgDraws> {
+        let draws = self.draws();
+        // The first vertex of each surface, and the end of the last one,
+        // where the primitives' vertices start.
+        let mut surface_first = Vec::with_capacity(self.surfaces.len() + 1);
+        let mut first = 0u32;
+        for s in &self.surfaces {
+            surface_first.push(first);
+            first += surface_vertex_count(s) as u32;
+        }
+        surface_first.push(first);
+        self.products
+            .iter()
+            .map(|p| {
+                // `draws` never joins surfaces across a product, so the
+                // draws before it are exactly those starting before its
+                // first surface.
+                let start = surface_first[p.at];
+                let at_draw = draws.iter().take_while(|d| d.first < start).count();
+                let primitives = p
+                    .primitives
+                    .iter()
+                    .zip(1u32..)
+                    .map(|(c, id)| {
+                        let count = mesh_vertex_count(&c.mesh) as u32;
+                        let out = ImageCsgPrimitive {
+                            first,
+                            count,
+                            op: c.op,
+                            id,
+                        };
+                        first += count;
+                        out
+                    })
+                    .collect();
+                ImageCsgDraws {
+                    at_draw,
+                    primitives,
+                }
+            })
+            .collect()
+    }
+
     /// Every triangle's three vertices ([`FACE_VERTEX_SIZE`] bytes each),
-    /// surface by surface.
+    /// surface by surface, then each image-space product's primitives with
+    /// their ID in the colour's first component.
     pub fn face_vertices(&self) -> impl Iterator<Item = [u8; FACE_VERTEX_SIZE]> + '_ {
-        self.surfaces.iter().flat_map(surface_vertices)
+        let primitives = self.products.iter().flat_map(|p| {
+            p.primitives.iter().zip(1u32..).flat_map(|(c, id)| {
+                // Unlit, in a colour that is the ID: nothing shades these.
+                let s = Surface {
+                    mesh: c.mesh.clone(),
+                    matrix: c.matrix,
+                    color: Color([id as f32, 0.0, 0.0, 1.0]),
+                    force_color: true,
+                    lit: false,
+                    state: DrawState::DEFAULT,
+                };
+                surface_vertices(&s).collect::<Vec<_>>()
+            })
+        });
+        self.surfaces
+            .iter()
+            .flat_map(surface_vertices)
+            .chain(primitives)
     }
 
     /// Outline segments [`Scene::edge_segments`] yields.
@@ -311,8 +449,11 @@ pub(crate) fn merge(a: BoundingBox, b: BoundingBox) -> BoundingBox {
 }
 
 fn surface_vertex_count(s: &Surface) -> usize {
-    s.mesh
-        .faces
+    mesh_vertex_count(&s.mesh)
+}
+
+fn mesh_vertex_count(mesh: &PolySet) -> usize {
+    mesh.faces
         .iter()
         .map(|f| match f.len() {
             0..=2 => 0,
@@ -545,5 +686,70 @@ mod tests {
         assert_eq!(scene.face_vertex_count(), 0);
         assert_eq!(scene.bounding_box(), None);
         assert!(scene.draws().is_empty());
+    }
+
+    /// Surfaces with one state share a draw, except across an image-space
+    /// product, whose primitives follow every surface's vertices with
+    /// their IDs (from 1) in the colour.
+    #[test]
+    fn image_csg_products_split_draws_and_follow_the_surfaces() {
+        let tri = Arc::new(PolySet {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![vec![0, 1, 2]],
+            triangular: true,
+            ..Default::default()
+        });
+        let scheme = ColorScheme::cornfield();
+        let surface = || Surface {
+            mesh: tri.clone(),
+            matrix: None,
+            color: scheme.opencsg_face_front,
+            force_color: true,
+            lit: true,
+            state: DrawState::DEFAULT,
+        };
+        let primitive = |op| CsgPrimitive {
+            mesh: tri.clone(),
+            matrix: None,
+            op,
+        };
+        let mut scene = Scene::empty(&scheme, None);
+        scene.push(surface());
+        scene.push_image_csg(vec![
+            primitive(CsgOp::Intersection),
+            primitive(CsgOp::Subtraction),
+        ]);
+        scene.push(surface());
+        scene.push(surface());
+        let draws = scene.draws();
+        assert_eq!(
+            draws.iter().map(|d| (d.first, d.count)).collect::<Vec<_>>(),
+            vec![(0, 3), (3, 6)]
+        );
+        let csg = scene.image_csg();
+        assert_eq!(csg.len(), 1);
+        assert_eq!(csg[0].at_draw, 1);
+        assert_eq!(
+            csg[0].primitives,
+            vec![
+                ImageCsgPrimitive {
+                    first: 9,
+                    count: 3,
+                    op: CsgOp::Intersection,
+                    id: 1
+                },
+                ImageCsgPrimitive {
+                    first: 12,
+                    count: 3,
+                    op: CsgOp::Subtraction,
+                    id: 2
+                },
+            ]
+        );
+        assert_eq!(scene.face_vertex_count(), 15);
+        let v: Vec<_> = scene.face_vertices().collect();
+        assert_eq!(v.len(), 15);
+        assert_eq!(floats(&v[9])[6], 1.0);
+        assert_eq!(floats(&v[14])[6], 2.0);
     }
 }

@@ -371,6 +371,9 @@ struct Attached {
     msaa: Option<wgpu::TextureView>,
     /// `None` until the viewport has a size.
     depth: Option<wgpu::TextureView>,
+    /// Whether `msaa` and `depth` keep their contents between render
+    /// passes (see [`Viewport::make_buffers`]).
+    stored: bool,
 }
 
 /// One interactive view (see the module documentation).
@@ -499,6 +502,7 @@ impl Viewport {
             renderer: self.gpu.renderer(format, samples),
             msaa: None,
             depth: None,
+            stored: false,
         });
         self.resize(width, height, scale);
         Ok(())
@@ -518,6 +522,7 @@ impl Viewport {
             renderer: self.gpu.renderer(format, samples),
             msaa: None,
             depth: None,
+            stored: false,
         });
         self.resize(width, height, scale);
     }
@@ -579,6 +584,35 @@ impl Viewport {
                 ));
             }
         }
+        self.make_buffers();
+    }
+
+    /// Make the multisampled colour buffer and the depth buffer at the
+    /// drawable size. They are memoryless ([`TRANSIENT`]) unless the model
+    /// has an image-space CSG product: its frame is several render passes
+    /// (`gpu::Renderer::draw`), and a memoryless buffer loses its contents
+    /// when a pass ends, which wgpu refuses to allow. Only such models pay
+    /// for buffers in memory.
+    fn make_buffers(&mut self) {
+        let stored = self
+            .model
+            .as_ref()
+            .is_some_and(|m| m.buffers.has_image_csg());
+        let device = &self.gpu.device;
+        let Some(a) = &mut self.attached else {
+            return;
+        };
+        let max = device.limits().max_texture_dimension_2d;
+        let (w, h) = (self.width.min(max), self.height.min(max));
+        if w == 0 || h == 0 {
+            return;
+        }
+        let usage = if stored {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        } else {
+            TRANSIENT
+        };
+        a.stored = stored;
         a.msaa = (a.samples > 1).then(|| {
             texture(
                 device,
@@ -586,7 +620,7 @@ impl Viewport {
                 (w, h),
                 a.format,
                 a.samples,
-                TRANSIENT,
+                usage,
             )
             .create_view(&Default::default())
         });
@@ -597,10 +631,26 @@ impl Viewport {
                 (w, h),
                 DEPTH_FORMAT,
                 a.samples,
-                TRANSIENT,
+                usage,
             )
             .create_view(&Default::default()),
         );
+    }
+
+    /// Remake the buffers if the model now shown needs them kept in
+    /// memory and they are not, or the other way round.
+    fn match_buffers_to_model(&mut self) {
+        let stored = self
+            .model
+            .as_ref()
+            .is_some_and(|m| m.buffers.has_image_csg());
+        if self
+            .attached
+            .as_ref()
+            .is_some_and(|a| a.depth.is_some() && a.stored != stored)
+        {
+            self.make_buffers();
+        }
     }
 
     // --- The model ----------------------------------------------------------
@@ -619,6 +669,7 @@ impl Viewport {
             self.fitted = true;
         }
         self.model = Some(model);
+        self.match_buffers_to_model();
         self.dirty = true;
         true
     }
@@ -667,6 +718,7 @@ impl Viewport {
     /// Show nothing (keeping the camera).
     pub fn clear_model(&mut self) {
         self.model = None;
+        self.match_buffers_to_model();
         self.dirty = true;
     }
 

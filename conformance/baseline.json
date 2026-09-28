@@ -693,6 +693,7 @@
     "preview-manifold_polyhedron-cube",
     "preview-manifold_polyhedron-nonplanar-tests",
     "preview-manifold_polyhedron-soup",
+    "preview-manifold_polyhedron-tests",
     "preview-manifold_polyset-reduce-crash",
     "preview-manifold_preview_variable",
     "preview-manifold_primitive-inf-tests",

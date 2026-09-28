@@ -308,6 +308,120 @@ impl PolySet {
         }
         out
     }
+
+    /// Whether the faces bound a solid the way a boolean reads them: the
+    /// mesh is closed with every face wound the same way (each directed
+    /// edge used once and its reverse present, edges compared by vertex
+    /// index or, failing that, by position with zero-length ones ignored),
+    /// and the winding is counter-clockwise from
+    /// outside (positive signed volume).
+    ///
+    /// A preview draws what OpenCSG makes of the faces, and for a mesh like
+    /// this that is exactly the solid a boolean computes. For any other
+    /// mesh it is not: OpenCSG decides inside and outside per pixel from
+    /// which way each face points on screen, so an inside-out octahedron
+    /// subtracted from nothing vanishes, where a boolean first repairs it
+    /// into an ordinary solid (`polyhedron-tests.scad`).
+    ///
+    /// Not detected: a separate inside-out shell next to a larger outward
+    /// one (the total volume stays positive), which cannot be told from a
+    /// cavity without testing which shell lies inside which.
+    pub fn is_outward_solid(&self) -> bool {
+        // `convex` is set only by the cube, sphere and cylinder builders,
+        // whose faces are right by construction; a preview of a difference
+        // with a hundred spheres would otherwise check each of them.
+        if self.convex == Some(true) {
+            return true;
+        }
+        (self.closed_by_index() || self.closed_by_position()) && self.signed_volume() > 0.0
+    }
+
+    /// Every directed edge between two distinct vertex indices used once,
+    /// and its reverse used too. The cheap test, which meshes built by
+    /// primitives and imports pass.
+    fn closed_by_index(&self) -> bool {
+        // One sorted list rather than a hash set: this runs for leaves of
+        // every previewed boolean, and hashing the 200k edges of an
+        // imported sphere with the default hasher took several
+        // milliseconds. Each undirected edge must turn up exactly twice,
+        // once each way.
+        let mut edges: Vec<(u64, bool)> = Vec::with_capacity(self.faces.len() * 3);
+        for f in self.faces.iter().filter(|f| f.len() >= 3) {
+            for j in 0..f.len() {
+                let (a, b) = (f[j], f[(j + 1) % f.len()]);
+                if a != b {
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    edges.push((u64::from(lo) << 32 | u64::from(hi), a < b));
+                }
+            }
+        }
+        #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+        {
+            use rayon::slice::ParallelSliceMut;
+            edges.par_sort_unstable();
+        }
+        #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
+        edges.sort_unstable();
+        let (pairs, rest) = edges.as_chunks::<2>();
+        rest.is_empty() && pairs.iter().all(|[a, b]| a.0 == b.0 && !a.1 && b.1)
+    }
+
+    /// [`PolySet::closed_by_index`] with vertices compared by position,
+    /// and a vertex repeated in a row within a face counted once: a
+    /// triangle on rotate_extrude's axis with two corners there has no area
+    /// and draws nothing, and its two remaining edges would pair with each
+    /// other.
+    fn closed_by_position(&self) -> bool {
+        type Edge = [u64; 6];
+        let key = |a: [f64; 3], b: [f64; 3]| -> Edge {
+            let k = |c: f64| if c == 0.0 { 0u64 } else { c.to_bits() };
+            [k(a[0]), k(a[1]), k(a[2]), k(b[0]), k(b[1]), k(b[2])]
+        };
+        let mut edges: std::collections::HashSet<Edge> =
+            std::collections::HashSet::with_capacity(self.faces.len() * 3);
+        let mut pts: Vec<[f64; 3]> = Vec::new();
+        for f in &self.faces {
+            pts.clear();
+            for &i in f {
+                let p = self.vertices[i as usize];
+                if pts.last() != Some(&p) {
+                    pts.push(p);
+                }
+            }
+            while pts.len() > 1 && pts.first() == pts.last() {
+                pts.pop();
+            }
+            let n = pts.len();
+            if n < 3 {
+                continue;
+            }
+            for j in 0..n {
+                if !edges.insert(key(pts[j], pts[(j + 1) % n])) {
+                    return false;
+                }
+            }
+        }
+        edges
+            .iter()
+            .all(|e| edges.contains(&[e[3], e[4], e[5], e[0], e[1], e[2]]))
+    }
+
+    /// Six times the signed volume: each face fanned from its first vertex,
+    /// each triangle with the origin.
+    fn signed_volume(&self) -> f64 {
+        let v = |i: u32| self.vertices[i as usize];
+        let mut volume = 0.0;
+        for f in self.faces.iter().filter(|f| f.len() >= 3) {
+            let p0 = v(f[0]);
+            for j in 1..f.len() - 1 {
+                let (p1, p2) = (v(f[j]), v(f[j + 1]));
+                volume += p0[0] * (p1[1] * p2[2] - p1[2] * p2[1])
+                    + p0[1] * (p1[2] * p2[0] - p1[0] * p2[2])
+                    + p0[2] * (p1[0] * p2[1] - p1[1] * p2[0]);
+            }
+        }
+        volume
+    }
 }
 
 /// Apply a 4x4 row-major affine matrix to a point.
@@ -469,5 +583,52 @@ mod tests {
         ps.transform(&m);
         assert_eq!(ps.faces[0], vec![2, 1, 0]);
         assert_eq!(ps.vertices[0], [-1.0, 0.0, 0.0]);
+    }
+
+    /// `polyhedron-tests.scad`'s octahedron, with the faces listed there
+    /// (clockwise from outside) reversed, as `polyhedron()` stores them.
+    fn octahedron(faces: &[[u32; 3]]) -> PolySet {
+        PolySet {
+            vertices: vec![
+                [1.0, 0.0, 0.0],
+                [-1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, -1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, -1.0],
+            ],
+            faces: faces.iter().map(|&[a, b, c]| vec![c, b, a]).collect(),
+            triangular: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn outward_solid_needs_closed_consistent_outward_faces() {
+        let good = [
+            [0, 4, 2],
+            [0, 2, 5],
+            [0, 3, 4],
+            [0, 5, 3],
+            [1, 2, 4],
+            [1, 5, 2],
+            [1, 4, 3],
+            [1, 3, 5],
+        ];
+        assert!(octahedron(&good).is_outward_solid());
+        // One face flipped: its edges repeat its neighbours' directions.
+        let mut one = good;
+        one[6] = [1, 3, 4];
+        assert!(!octahedron(&one).is_outward_solid());
+        // All flipped: closed and consistent, but inside out.
+        let all = good.map(|[a, b, c]| [a, c, b]);
+        assert!(!octahedron(&all).is_outward_solid());
+        // A face missing: not closed.
+        assert!(!octahedron(&good[1..]).is_outward_solid());
+        // A face with a vertex repeated (rotate_extrude's axis triangles)
+        // adds nothing, so a mesh with one is still a solid.
+        let mut with_sliver: Vec<[u32; 3]> = good.to_vec();
+        with_sliver.push([4, 4, 2]);
+        assert!(octahedron(&with_sliver).is_outward_solid());
     }
 }

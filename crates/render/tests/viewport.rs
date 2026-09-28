@@ -265,3 +265,87 @@ fn an_image_of_the_view_shows_the_model_from_the_same_camera() {
         .sqrt();
     assert!(miss < 1e-6, "{miss}");
 }
+
+/// An image-space CSG product in a multisampled view: the ID buffer has
+/// one sample a pixel and the frame four, and the merge reads one from the
+/// other. An inside-out octahedron minus a cube draws nothing; the same
+/// scene with an ordinary octahedron draws it.
+#[test]
+fn image_space_csg_draws_in_a_multisampled_view() {
+    use render::scene::{CsgOp, CsgPrimitive, Cull, Depth, DrawState, Surface};
+    let Some(gpu) = gpu() else { return };
+    let scheme = ColorScheme::cornfield();
+    let octahedron = |inside_out: bool| {
+        let faces = [
+            [0, 4, 2],
+            [0, 2, 5],
+            [0, 3, 4],
+            [0, 5, 3],
+            [1, 2, 4],
+            [1, 5, 2],
+            [1, 4, 3],
+            [1, 3, 5],
+        ];
+        Arc::new(PolySet {
+            vertices: vec![
+                [10.0, 0.0, 0.0],
+                [-10.0, 0.0, 0.0],
+                [0.0, 10.0, 0.0],
+                [0.0, -10.0, 0.0],
+                [0.0, 0.0, 10.0],
+                [0.0, 0.0, -10.0],
+            ],
+            faces: faces
+                .iter()
+                .map(|&[a, b, c]| {
+                    if inside_out {
+                        vec![a, b, c]
+                    } else {
+                        vec![c, b, a]
+                    }
+                })
+                .collect(),
+            triangular: true,
+            ..Default::default()
+        })
+    };
+    let Geometry::PolySet(cube) = cube10() else {
+        unreachable!()
+    };
+    let foreground_of = |inside_out| {
+        let oct = octahedron(inside_out);
+        let mut scene = Scene::empty(&scheme, Some(([-10.0; 3], [10.0; 3])));
+        scene.push_image_csg(vec![
+            CsgPrimitive {
+                mesh: oct.clone(),
+                matrix: None,
+                op: CsgOp::Intersection,
+            },
+            CsgPrimitive {
+                mesh: cube.clone(),
+                matrix: None,
+                op: CsgOp::Subtraction,
+            },
+        ]);
+        scene.push(Surface {
+            mesh: oct,
+            matrix: None,
+            color: scheme.opencsg_face_front,
+            force_color: true,
+            lit: true,
+            state: DrawState {
+                cull: Cull::None,
+                depth: Depth::Equal,
+                color_write: true,
+                bias: false,
+            },
+        });
+        let mut vp = Viewport::new(gpu.clone(), scheme.clone()).unwrap();
+        vp.set_settings(BARE);
+        vp.attach_texture(128, 128, 1.0);
+        vp.set_model(Arc::new(gpu.upload(&scene).unwrap()), 1);
+        foreground(&vp.read_pixels_blocking().unwrap(), &scheme)
+    };
+    assert!(foreground_of(false) > 100);
+    assert_eq!(foreground_of(true), 0);
+}

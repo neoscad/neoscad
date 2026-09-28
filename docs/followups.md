@@ -655,16 +655,28 @@ lead them, come roughly in order of user impact.
   not measured. (8e)
 
 ## Rendering
-- Previews draw each CSG product's visible surface from real Manifold
-  booleans (`geom::csg::product_meshes`), not OpenCSG's image-space CSG,
-  so image-space artefacts are not reproduced: z-fighting where a
-  positive and a negative face are coplanar, holes from a `convexity` set
-  too low, and whatever OpenCSG makes of a mesh that is not a closed
-  solid. `preview-manifold_polyhedron-tests` fails on the last: OpenCSG
-  draws a subtraction from an inside-out octahedron as nothing and one
-  with a single flipped face as a partial shape, while Manifold repairs
-  both. It still fails with the libtess2 port, which splits its faces as
-  OpenSCAD does: the difference is the CSG, not the triangles. (6b)
+- Previews draw a CSG product's visible surface from real Manifold
+  booleans (`geom::csg::product_meshes`) when every leaf bounds a solid
+  (`PolySet::is_outward_solid`), so those products do not show OpenCSG's
+  image-space artefacts: z-fighting where a positive and a negative face
+  are coplanar, and holes from a `convexity` set too low. (6b)
+- A product with a leaf that does not bound a solid (inside out, a face
+  flipped, not closed) is drawn with OpenCSG's SCS algorithm on the GPU
+  (`render::gpu`, "Image-space CSG"); `preview-manifold_polyhedron-tests`
+  now matches pixel for pixel. Gaps: meshes do not carry `convexity`, so
+  where OpenSCAD would pick Goldfeather (a primitive with convexity 2 or
+  more) SCS is used; with more than 20 primitives OpenCSG repeats the
+  subtractions until occlusion queries report no change, where this
+  always runs the Schoenfield sequence; and `is_outward_solid` misses a
+  separate inside-out shell next to a larger outward one (total volume
+  still positive). Such a product's frame is several render passes, so
+  the app's viewport keeps its MSAA and depth buffers in memory (not
+  memoryless) while such a model is shown.
+- `polyhedron-tests.scad` rendered to OFF differs from the nightly's: the
+  same 47 vertices in another order, and the cut face triangulated
+  differently (a different diagonal vertex). The render path was not
+  touched by the SCS work; HEAD gives the same bytes, and the tier 3 case
+  passes on its geometric comparison.
 - A preview's `#` objects are drawn with a small depth offset
   (`DrawState::bias`, constant -2, slope -0.5) so that they show on the
   cut faces they make, whose triangles the boolean re-split (OpenCSG

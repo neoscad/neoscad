@@ -240,3 +240,48 @@ fn line_fs(in: LineOut) -> @location(0) vec4<f32> {
     }
     return in.color;
 }
+
+// --- Image-space CSG (OpenCSG's SCS algorithm) ------------------------------------
+//
+// A product whose leaves do not bound a solid is drawn as OpenCSG draws it
+// (see gpu.rs): its primitives are drawn into a separate ID buffer and
+// depth-stencil buffer, each carrying its ID in its colour's first
+// component, then merged into the frame's depth where the ID buffer holds
+// their ID. The primitives go through `face_vs` like every other face, so
+// their depths are the very ones the colour pass compares against.
+
+@group(1) @binding(0) var csg_ids: texture_2d<u32>;
+
+@fragment
+fn csg_id_fs(in: FlatShaded) -> @location(0) u32 {
+    return u32(in.base.r);
+}
+
+// `glColor4ub(0, 0, 0, 0)`: no primitive.
+@fragment
+fn csg_zero_fs() -> @location(0) u32 {
+    return 0u;
+}
+
+// A screen-sized quad at depth 0 (`glDepthRange(0, 0)` and
+// `OpenGL::drawQuad`).
+@vertex
+fn csg_quad_vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    var corners = array<vec2<f32>, 6>(
+        vec2(-1.0, 1.0), vec2(1.0, 1.0), vec2(1.0, -1.0),
+        vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(-1.0, -1.0),
+    );
+    return vec4(corners[i], 0.0, 1.0);
+}
+
+// OpenCSG's merge (`mergeFragmentProgram2D`): keep a primitive's fragment
+// only where the ID buffer holds its ID. The ID buffer has one sample a
+// pixel, read at the pixel the fragment is in.
+@fragment
+fn csg_merge_fs(in: FlatShaded) -> @location(0) vec4<f32> {
+    let id = textureLoad(csg_ids, vec2<i32>(floor(in.position.xy)), 0).r;
+    if id != u32(in.base.r) {
+        discard;
+    }
+    return vec4(0.0);
+}

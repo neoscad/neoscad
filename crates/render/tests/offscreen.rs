@@ -139,3 +139,135 @@ fn square_is_flat_with_red_outline() {
     assert!(edge > 1_000, "{edge} outline pixels");
     assert_eq!(count([255, 255, 229]) + fill + edge, 512 * 512);
 }
+
+/// Pixels that are not the scheme's background.
+fn foreground(image: &render::Image, scheme: &ColorScheme) -> usize {
+    let bg = scheme.background.0.map(|c| (c * 255.0).round() as i32);
+    image
+        .rgba
+        .chunks(4)
+        .filter(|p| (0..3).any(|i| (i32::from(p[i]) - bg[i]).abs() > 2))
+        .count()
+}
+
+/// `polyhedron-tests.scad`'s octahedron scaled by 10, its faces as
+/// `polyhedron()` stores them (reversed), optionally all flipped.
+fn octahedron(inside_out: bool) -> Arc<PolySet> {
+    let faces = [
+        [0, 4, 2],
+        [0, 2, 5],
+        [0, 3, 4],
+        [0, 5, 3],
+        [1, 2, 4],
+        [1, 5, 2],
+        [1, 4, 3],
+        [1, 3, 5],
+    ];
+    Arc::new(PolySet {
+        vertices: vec![
+            [10.0, 0.0, 0.0],
+            [-10.0, 0.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [0.0, -10.0, 0.0],
+            [0.0, 0.0, 10.0],
+            [0.0, 0.0, -10.0],
+        ],
+        faces: faces
+            .iter()
+            .map(|&[a, b, c]| {
+                if inside_out {
+                    vec![a, b, c]
+                } else {
+                    vec![c, b, a]
+                }
+            })
+            .collect(),
+        triangular: true,
+        ..Default::default()
+    })
+}
+
+/// A preview product drawn in image space as `preview.rs` lays it out:
+/// the octahedron minus `cubes` (10 mm cubes at the given corners), then
+/// the colour pass.
+fn image_csg_scene(positive: Arc<PolySet>, cubes: &[[f64; 3]], scheme: &ColorScheme) -> Scene {
+    use render::scene::{CsgOp, CsgPrimitive, Cull, Depth, DrawState, Surface};
+    let Geometry::PolySet(cube) = cube10() else {
+        unreachable!()
+    };
+    let at = |t: [f64; 3]| {
+        let mut m = geom::IDENTITY;
+        for (r, x) in t.into_iter().enumerate() {
+            m[r][3] = x;
+        }
+        m
+    };
+    let mut scene = Scene::empty(scheme, Some(([-10.0; 3], [10.0; 3])));
+    let mut primitives = vec![CsgPrimitive {
+        mesh: positive.clone(),
+        matrix: None,
+        op: CsgOp::Intersection,
+    }];
+    primitives.extend(cubes.iter().map(|&t| CsgPrimitive {
+        mesh: cube.clone(),
+        matrix: Some(at(t)),
+        op: CsgOp::Subtraction,
+    }));
+    scene.push_image_csg(primitives);
+    let state = |cull| DrawState {
+        cull,
+        depth: Depth::Equal,
+        color_write: true,
+        bias: false,
+    };
+    scene.push(Surface {
+        mesh: positive,
+        matrix: None,
+        color: scheme.opencsg_face_front,
+        force_color: true,
+        lit: true,
+        state: state(Cull::None),
+    });
+    for &t in cubes {
+        scene.push(Surface {
+            mesh: cube.clone(),
+            matrix: Some(at(t)),
+            color: scheme.opencsg_face_back,
+            force_color: true,
+            lit: true,
+            state: state(Cull::Front),
+        });
+    }
+    scene
+}
+
+/// OpenCSG's SCS reads a face by its winding on screen: an octahedron cut
+/// by cubes shows its cut faces in the cut-out colour, and the same
+/// octahedron inside out, cut the same way, shows nothing at all (the
+/// second row of `polyhedron-tests.scad`'s preview). Three cubes take the
+/// Schoenfield sequence past its short cases.
+#[test]
+fn image_space_csg_cuts_a_solid_and_drops_an_inside_out_one() {
+    let Some(gpu) = gpu() else { return };
+    let scheme = ColorScheme::cornfield();
+    let cubes = [[0.0, 0.0, 0.0], [-10.0, -10.0, -10.0], [-10.0, 0.0, 0.0]];
+    let draw = |inside_out| {
+        let scene = image_csg_scene(octahedron(inside_out), &cubes, &scheme);
+        let camera = default_view(&scene);
+        gpu.render_blocking(&scene, &camera, &scheme).unwrap()
+    };
+    let solid = draw(false);
+    assert!(foreground(&solid, &scheme) > 1000);
+    let cut = scheme
+        .opencsg_face_back
+        .0
+        .map(|c| (c * 255.0).round() as i32);
+    let cut_pixels = solid
+        .rgba
+        .chunks(4)
+        .filter(|p| (0..3).all(|i| i32::from(p[i]) <= cut[i] + 2))
+        .filter(|p| i32::from(p[1]) > i32::from(p[0]))
+        .count();
+    assert!(cut_pixels > 100, "the cuts show in the cut-out colour");
+    assert_eq!(foreground(&draw(true), &scheme), 0);
+}

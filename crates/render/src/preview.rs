@@ -17,16 +17,21 @@
 //! (issue #1496), highlighted (`#`) and background (`%`) terms follow in
 //! their own translucent colours.
 //!
-//! What this cannot reproduce: image-space artefacts. Where a positive and
-//! a negative face are coplanar OpenCSG shows z-fighting, which real
-//! booleans resolve cleanly; a leaf whose `convexity` is set too low shows
-//! OpenCSG's holes; a mesh that is not closed is drawn by OpenCSG but has
-//! no solid to cut here.
+//! A boolean shows what OpenCSG shows only when every leaf bounds a solid
+//! ([`PolySet::is_outward_solid`]). A product with a leaf that does not
+//! (inside out, a face flipped, not closed) is drawn as OpenCSG draws it,
+//! in image space ([`Scene::push_image_csg`], `crate::gpu`).
+//!
+//! What this cannot reproduce: image-space artefacts of products drawn
+//! from booleans. Where a positive and a negative face are coplanar
+//! OpenCSG shows z-fighting, which real booleans resolve cleanly; a leaf
+//! whose `convexity` is set too low shows OpenCSG's holes.
 //!
 //! **Throwntogether.** Every leaf once, with no CSG at all: front faces in
 //! its colour (the cut-out colour for a subtracted leaf), back faces in
 //! magenta unless the leaf is coloured, which shows inside-out meshes.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use geom::Matrix;
@@ -34,7 +39,7 @@ use geom::color::Color;
 use geom::csg::{ChainObject, CsgTree, FLAG_HIGHLIGHT, ProductJob, Products};
 use geom::polyset::PolySet;
 
-use crate::scene::{Cull, Depth, DrawState, Scene, Surface};
+use crate::scene::{CsgOp, CsgPrimitive, Cull, Depth, DrawState, Scene, Surface};
 use crate::scheme::ColorScheme;
 
 /// OpenSCAD's `Renderer::ColorMode`, for the modes previews use.
@@ -191,6 +196,14 @@ fn negative_color(obj: &ChainObject, pass: Pass, scheme: &ColorScheme) -> Color 
     shader_color(mode, obj.leaf.color, scheme)
 }
 
+/// What goes into the scene, in order: a surface, a product waiting for
+/// its boolean, or a product drawn in image space.
+enum Slot {
+    Surface(Surface),
+    Boolean,
+    Image(Vec<CsgPrimitive>),
+}
+
 /// A product waiting for its boolean: where its draws go in the scene.
 struct Pending {
     at: usize,
@@ -206,7 +219,16 @@ fn opencsg(scene: &mut Scene, lists: &[(Pass, &Option<Products>); 3], scheme: &C
     let mut pending: Vec<Pending> = Vec::new();
     // Surfaces are collected in order; a product needing a boolean leaves
     // a placeholder to be filled once all booleans are done in parallel.
-    let mut surfaces: Vec<Option<Surface>> = Vec::new();
+    let mut slots: Vec<Slot> = Vec::new();
+    // Whether each leaf mesh bounds a solid (`PolySet::is_outward_solid`),
+    // by mesh: a leaf may be in many products.
+    let mut solid: HashMap<*const PolySet, bool> = HashMap::new();
+    let mut is_solid = |obj: &ChainObject| {
+        let mesh = obj.leaf.mesh.as_ref().expect("filtered");
+        *solid
+            .entry(Arc::as_ptr(mesh))
+            .or_insert_with(|| mesh.is_outward_solid())
+    };
     for (pass, list) in lists {
         let Some(products) = list else { continue };
         for product in &products.products {
@@ -240,12 +262,15 @@ fn opencsg(scene: &mut Scene, lists: &[(Pass, &Option<Products>); 3], scheme: &C
                         },
                     };
                     if color.0[3] == 1.0 {
-                        surfaces.push(Some(surface(Cull::None)));
+                        slots.push(Slot::Surface(surface(Cull::None)));
                     } else {
                         // Transparent: rear faces first (issue #1496).
-                        surfaces.push(Some(surface(Cull::Front)));
-                        surfaces.push(Some(surface(Cull::Back)));
+                        slots.push(Slot::Surface(surface(Cull::Front)));
+                        slots.push(Slot::Surface(surface(Cull::Back)));
                     }
+                }
+                _ if !pos.iter().chain(&neg).all(|o| is_solid(o)) => {
+                    image_product(&mut slots, &pos, &neg, *pass, scheme);
                 }
                 _ => {
                     let mut job = ProductJob::default();
@@ -255,21 +280,17 @@ fn opencsg(scene: &mut Scene, lists: &[(Pass, &Option<Products>); 3], scheme: &C
                             .extend(job_mesh(obj, &obj.leaf.matrix, color, force));
                     }
                     for obj in &neg {
-                        let m = if obj.leaf.dim == 2 {
-                            scaled_z(&obj.leaf.matrix)
-                        } else {
-                            obj.leaf.matrix
-                        };
                         let color = negative_color(obj, *pass, scheme);
-                        job.negatives.extend(job_mesh(obj, &m, color, true));
+                        job.negatives
+                            .extend(job_mesh(obj, &negative_matrix(obj), color, true));
                     }
                     jobs.push(job);
                     pending.push(Pending {
-                        at: surfaces.len(),
+                        at: slots.len(),
                         depth,
                         bias: *pass == Pass::Highlight,
                     });
-                    surfaces.push(None);
+                    slots.push(Slot::Boolean);
                 }
             }
             depth = Depth::LessEqual;
@@ -280,14 +301,15 @@ fn opencsg(scene: &mut Scene, lists: &[(Pass, &Option<Products>); 3], scheme: &C
         face_back: scheme.opencsg_face_back,
     };
     let meshes = geom::csg::product_meshes(jobs, &scheme_colors);
-    let mut solved: Vec<Option<(Arc<PolySet>, Depth, bool)>> = vec![None; surfaces.len()];
+    let mut solved: Vec<Option<(Arc<PolySet>, Depth, bool)>> = vec![None; slots.len()];
     for (p, m) in pending.iter().zip(meshes) {
         solved[p.at] = m.map(|m| (Arc::new(m), p.depth, p.bias));
     }
-    for (s, solved) in surfaces.into_iter().zip(solved) {
+    for (s, solved) in slots.into_iter().zip(solved) {
         match (s, solved) {
-            (Some(s), _) => scene.push(s),
-            (None, Some((mesh, depth, bias))) => {
+            (Slot::Surface(s), _) => scene.push(s),
+            (Slot::Image(primitives), _) => scene.push_image_csg(primitives),
+            (Slot::Boolean, Some((mesh, depth, bias))) => {
                 // OpenCSG's depth pass, then colour where the depth is
                 // the product's.
                 let base = Surface {
@@ -315,8 +337,91 @@ fn opencsg(scene: &mut Scene, lists: &[(Pass, &Option<Products>); 3], scheme: &C
                 scene.push(base);
                 scene.push(color);
             }
-            (None, None) => {}
+            (Slot::Boolean, None) => {}
         }
+    }
+}
+
+/// A subtracted leaf's placement: 2D slabs are stretched in z.
+fn negative_matrix(obj: &ChainObject) -> Matrix {
+    if obj.leaf.dim == 2 {
+        scaled_z(&obj.leaf.matrix)
+    } else {
+        obj.leaf.matrix
+    }
+}
+
+/// A product with a leaf that does not bound a solid, drawn as OpenSCAD
+/// draws every product: OpenCSG finds its depth in image space from the
+/// primitives' faces, then each leaf is drawn in colour where its depth is
+/// equal (`OpenCSGRenderer::draw`), positive leaves whole and subtracted
+/// ones by their back faces. A boolean would first repair the leaf into
+/// some solid, which is not what OpenCSG shows: it reads a face pointing
+/// away from the camera as the far side of a solid wherever it lies, so an
+/// inside-out leaf cut by anything disappears, and one with a single face
+/// flipped keeps only part of itself (`polyhedron-tests.scad`).
+///
+/// OpenCSG picks SCS when no primitive's convexity is 2 or more
+/// (`opencsgRender.cpp`, `chooseAlgorithm`). Meshes here do not carry the
+/// convexity, so SCS is used always: it is right for the default of 1.
+fn image_product(
+    slots: &mut Vec<Slot>,
+    pos: &[&ChainObject],
+    neg: &[&ChainObject],
+    pass: Pass,
+    scheme: &ColorScheme,
+) {
+    let primitive = |obj: &ChainObject, matrix: Matrix, op| CsgPrimitive {
+        mesh: obj.leaf.mesh.clone().expect("filtered"),
+        matrix: Some(matrix),
+        op,
+    };
+    let primitives = pos
+        .iter()
+        .map(|o| primitive(o, o.leaf.matrix, CsgOp::Intersection))
+        .chain(
+            neg.iter()
+                .map(|o| primitive(o, negative_matrix(o), CsgOp::Subtraction)),
+        )
+        .collect();
+    slots.push(Slot::Image(primitives));
+    // The colour pass (`createCSGVBOProducts`): positive leaves unculled,
+    // or rear faces first when transparent; subtracted leaves' rear faces
+    // only, in the cut-out colour.
+    let state = |cull| DrawState {
+        cull,
+        depth: Depth::Equal,
+        color_write: true,
+        bias: false,
+    };
+    for obj in pos {
+        let (color, force) = positive_color(obj, pass, scheme);
+        let surface = |cull| {
+            Slot::Surface(Surface {
+                mesh: obj.leaf.mesh.clone().expect("filtered"),
+                matrix: Some(obj.leaf.matrix),
+                color,
+                force_color: force,
+                lit: true,
+                state: state(cull),
+            })
+        };
+        if color.0[3] == 1.0 {
+            slots.push(surface(Cull::None));
+        } else {
+            slots.push(surface(Cull::Front));
+            slots.push(surface(Cull::Back));
+        }
+    }
+    for obj in neg {
+        slots.push(Slot::Surface(Surface {
+            mesh: obj.leaf.mesh.clone().expect("filtered"),
+            matrix: Some(negative_matrix(obj)),
+            color: negative_color(obj, pass, scheme),
+            force_color: true,
+            lit: true,
+            state: state(Cull::Front),
+        }));
     }
 }
 
