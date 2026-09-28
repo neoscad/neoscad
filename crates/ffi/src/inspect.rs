@@ -642,8 +642,11 @@ impl Core {
                 Some(g) => {
                     let solid = session::stats::solid(g);
                     out.model = solid_stats(&solid);
-                    out.components = Some(Mesh::of_solid(&solid).components().1 as u64);
-                    out.manifold = Some(solid.is_valid());
+                    let mesh = Mesh::of_solid(&solid);
+                    out.components = Some(mesh.components().1 as u64);
+                    // As `check` says it: two pieces touching along an
+                    // edge are not manifold in a file.
+                    out.manifold = Some(solid.is_valid() && mesh.bad_edges().is_none());
                     Some(Solid::new(solid))
                 }
             };

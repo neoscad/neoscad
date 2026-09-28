@@ -8,14 +8,20 @@
 //!   overlap (overlap by a boolean intersection, distance by an exact
 //!   triangle-to-triangle search over bounding volume hierarchies);
 //! - a cross-section at an axis plane: area, perimeter, contours and
-//!   bounding box, optionally as an SVG outline.
+//!   bounding box, optionally as an SVG outline, and per contour its area,
+//!   box, whether it is a hole, and its nearest and farthest distance from
+//!   an axis (a thread's minor and major radius, a barb's root and crest);
+//! - a radius profile along an axis: those radii every `step` over a range,
+//!   and the crests along one side (a thread's pitch).
+//!
+//! Where two parts overlap, the overlap's separate pieces are listed.
 
 use geom::Geometry;
 use geom::manifold_geom::{ManifoldGeometry, OpType};
 use geom::polygon2d::Polygon2d;
 use serde_json::{Value, json};
 
-use crate::mesh::{Bvh, Mesh};
+use crate::mesh::{Aabb, Bvh, Mesh, V3};
 use crate::parts::{Part, is_within};
 use crate::{Cancelled, Log, Run, Session, stats};
 
@@ -97,6 +103,127 @@ impl Plane {
     }
 }
 
+/// The line radii are measured from: parallel to an axis, through
+/// `center` (its position in the other two coordinates, in the order of
+/// [`Plane::axes`]: x, y for z; y, z for x; x, z for y).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Axis {
+    /// 0, 1 or 2: x, y or z.
+    pub along: usize,
+    pub center: [f64; 2],
+}
+
+impl Default for Axis {
+    /// The z axis: where a part turned on a lathe, a thread or a barb is
+    /// usually modelled.
+    fn default() -> Axis {
+        Axis {
+            along: 2,
+            center: [0.0; 2],
+        }
+    }
+}
+
+impl Axis {
+    /// `x`, `y` or `z`, and the centre (default the origin).
+    pub fn parse(letter: &str, center: Option<[f64; 2]>) -> Option<Axis> {
+        let along = match letter.trim() {
+            "x" | "X" => 0,
+            "y" | "Y" => 1,
+            "z" | "Z" => 2,
+            _ => return None,
+        };
+        let center = center.unwrap_or([0.0; 2]);
+        center
+            .iter()
+            .all(|c| c.is_finite())
+            .then_some(Axis { along, center })
+    }
+
+    pub fn name(&self) -> &'static str {
+        ["x", "y", "z"][self.along]
+    }
+
+    /// The plane across the axis at `h`.
+    pub fn plane(&self, h: f64) -> Plane {
+        match self.along {
+            0 => Plane::X(h),
+            1 => Plane::Y(h),
+            _ => Plane::Z(h),
+        }
+    }
+
+    /// A model point relative to the axis, in the other two coordinates.
+    fn flat(&self, p: V3) -> [f64; 2] {
+        let (i, j) = match self.along {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        [p[i] - self.center[0], p[j] - self.center[1]]
+    }
+
+    /// The nearest and farthest distance of a closed outline (model
+    /// points) from the axis: the farthest is at a corner, the nearest on
+    /// an edge.
+    fn radii(&self, pts: &[V3]) -> (f64, f64) {
+        let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+        for k in 0..pts.len() {
+            let (a, b) = (self.flat(pts[k]), self.flat(pts[(k + 1) % pts.len()]));
+            hi = hi.max(a[0].hypot(a[1]));
+            lo = lo.min(segment_to_origin(a, b));
+        }
+        (lo, hi)
+    }
+}
+
+/// The distance from the origin to the segment `ab`.
+fn segment_to_origin(a: [f64; 2], b: [f64; 2]) -> f64 {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let l = d[0] * d[0] + d[1] * d[1];
+    let t = if l > 0.0 {
+        (-(a[0] * d[0] + a[1] * d[1]) / l).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (a[0] + t * d[0]).hypot(a[1] + t * d[1])
+}
+
+/// A radius profile: from, to and step along the axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Profile {
+    pub from: f64,
+    pub to: f64,
+    pub step: f64,
+}
+
+/// At most this many samples in a profile: enough for a 50 mm part every
+/// 0.1 mm, and a bound on the slices one request can ask for.
+pub const MAX_PROFILE: usize = 1000;
+
+impl Profile {
+    /// `[from, to, step]`, checked.
+    pub fn new(from: f64, to: f64, step: f64) -> Result<Profile, String> {
+        if !(from.is_finite() && to.is_finite() && step.is_finite()) || step <= 0.0 || to < from {
+            return Err(format!(
+                "profile must be [from, to, step] with from <= to and step > 0 (got [{from}, {to}, {step}])"
+            ));
+        }
+        let p = Profile { from, to, step };
+        let n = p.samples();
+        if n > MAX_PROFILE {
+            return Err(format!(
+                "profile would take {n} samples; at most {MAX_PROFILE}: use a larger step or a shorter range"
+            ));
+        }
+        Ok(p)
+    }
+
+    pub fn samples(&self) -> usize {
+        ((self.to - self.from) / self.step + 1e-9).floor() as usize + 1
+    }
+}
+
 /// A `measure` request.
 #[derive(Debug, Clone)]
 pub struct MeasureRequest {
@@ -109,6 +236,9 @@ pub struct MeasureRequest {
     pub section: Option<Plane>,
     /// Also draw the section as SVG ([`Measured::svg`]).
     pub svg: bool,
+    /// The axis of a section's and a profile's radii.
+    pub axis: Axis,
+    pub profile: Option<Profile>,
 }
 
 impl MeasureRequest {
@@ -119,6 +249,8 @@ impl MeasureRequest {
             between: None,
             section: None,
             svg: false,
+            axis: Axis::default(),
+            profile: None,
         }
     }
 }
@@ -171,8 +303,19 @@ pub fn solid_json(m: &ManifoldGeometry) -> Value {
     })
 }
 
-/// A cross-section's numbers, and its outlines in the section's 2D axes.
+/// At most this many contours are described one by one (largest first);
+/// `contours` counts them all.
+const MAX_OUTLINES: usize = 20;
+
+/// A cross-section's numbers, and its outlines in the section's 2D axes,
+/// with radii about the z axis.
 pub fn section(m: &ManifoldGeometry, plane: Plane) -> (Value, Polygon2d) {
+    section_about(m, plane, Axis::default())
+}
+
+/// A cross-section's numbers, and its outlines in the section's 2D axes;
+/// each contour's radii are about `axis`.
+pub fn section_about(m: &ManifoldGeometry, plane: Plane, axis: Axis) -> (Value, Polygon2d) {
     let mut moved = m.clone();
     moved.transform(&plane.to_z0());
     let poly = moved.slice();
@@ -195,6 +338,38 @@ pub fn section(m: &ManifoldGeometry, plane: Plane) -> (Value, Polygon2d) {
     }
     let (u, v) = plane.axes();
     let empty = poly.outlines.is_empty();
+    // Each contour on its own. The outlines are sanitised (outer ones
+    // counter-clockwise, holes clockwise), so the sign of the area says
+    // which a contour is.
+    let mut each: Vec<(f64, Value)> = poly
+        .outlines
+        .iter()
+        .map(|o| {
+            let pts: Vec<V3> = o.vertices.iter().map(|&p| plane.to_model(p)).collect();
+            let signed: f64 = (0..o.vertices.len())
+                .map(|i| {
+                    let (a, b) = (o.vertices[i], o.vertices[(i + 1) % o.vertices.len()]);
+                    a[0] * b[1] - b[0] * a[1]
+                })
+                .sum::<f64>()
+                / 2.0;
+            let mut b = Aabb::EMPTY;
+            for &p in &pts {
+                b.grow(p);
+            }
+            let (rmin, rmax) = axis.radii(&pts);
+            (
+                signed.abs(),
+                json!({
+                    "area": r6(signed.abs()),
+                    "hole": signed < 0.0,
+                    "bbox": bbox(b.lo, b.hi),
+                    "radius": [r6(rmin), r6(rmax)],
+                }),
+            )
+        })
+        .collect();
+    each.sort_by(|a, b| b.0.total_cmp(&a.0));
     (
         json!({
             "plane": plane.name(),
@@ -203,9 +378,181 @@ pub fn section(m: &ManifoldGeometry, plane: Plane) -> (Value, Polygon2d) {
             "perimeter": r6(perimeter),
             "contours": poly.outlines.len(),
             "bbox": if empty { Value::Null } else { bbox(lo, hi) },
+            "axis": axis.name(),
+            "center": axis.center.map(r6),
+            "outlines": each.into_iter().take(MAX_OUTLINES).map(|(_, v)| v).collect::<Vec<_>>(),
         }),
         poly,
     )
+}
+
+/// The radius profile of a solid along an axis: at each sample the
+/// nearest and farthest distance of the outer contours from the axis (a
+/// thread's minor and major radius, a barb's root or crest), and the
+/// crests met along one side (the half-plane from the axis towards the
+/// first of the section's axes: +x for the z axis), whose spacing is a
+/// thread's pitch. A helical thread's section is the same at every height
+/// but turned, so its radii stay constant along the thread while the side
+/// sees one crest per pitch.
+pub fn profile(m: &ManifoldGeometry, axis: Axis, p: Profile) -> Value {
+    // One transform, then a slice per sample: the axis becomes z.
+    let mut moved = m.clone();
+    moved.transform(&axis.plane(0.0).to_z0());
+    let c = axis.center;
+    let mut bands: Vec<Value> = Vec::with_capacity(p.samples());
+    let mut side: Vec<(f64, f64)> = Vec::new();
+    let (mut all_lo, mut all_hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for k in 0..p.samples() {
+        let h = p.from + k as f64 * p.step;
+        let loops: Vec<Vec<[f64; 2]>> = if moved.is_empty() {
+            Vec::new()
+        } else {
+            moved
+                .manifold
+                .slice(h)
+                .to_polygons()
+                .iter()
+                .map(|l| l.iter().map(|v| [v.x - c[0], v.y - c[1]]).collect())
+                .collect()
+        };
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        let mut far: Option<f64> = None;
+        for l in &loops {
+            let n = l.len();
+            if n < 3 {
+                continue;
+            }
+            let signed: f64 = (0..n)
+                .map(|i| l[i][0] * l[(i + 1) % n][1] - l[(i + 1) % n][0] * l[i][1])
+                .sum();
+            for i in 0..n {
+                let (a, b) = (l[i], l[(i + 1) % n]);
+                // Where the boundary crosses the +u half-line: the
+                // outermost crossing is the surface's radius on that side.
+                if (a[1] > 0.0) != (b[1] > 0.0) {
+                    let x = a[0] + (b[0] - a[0]) * (0.0 - a[1]) / (b[1] - a[1]);
+                    if x >= 0.0 {
+                        far = Some(far.map_or(x, |f: f64| f.max(x)));
+                    }
+                }
+                if signed > 0.0 {
+                    hi = hi.max(a[0].hypot(a[1]));
+                    lo = lo.min(segment_to_origin(a, b));
+                }
+            }
+        }
+        if lo.is_finite() {
+            all_lo = all_lo.min(lo);
+            all_hi = all_hi.max(hi);
+            bands.push(json!([r6(h), r6(lo), r6(hi)]));
+        } else {
+            bands.push(json!([r6(h), Value::Null, Value::Null]));
+        }
+        if let Some(f) = far {
+            side.push((h, f));
+        }
+    }
+    let crests = crests(&side, p.step);
+    let pitch = pitch(&crests, p.step);
+    json!({
+        "axis": axis.name(),
+        "center": c.map(r6),
+        "from": r6(p.from),
+        "to": r6(p.to),
+        "step": r6(p.step),
+        "radius": if all_lo.is_finite() { json!([r6(all_lo), r6(all_hi)]) } else { Value::Null },
+        "crests": crests.iter().take(100).map(|&z| r6(z)).collect::<Vec<_>>(),
+        "pitch": pitch.map(|(x, _, _)| r6(x)),
+        "pitch_span": pitch.map(|(_, a, b)| [r6(a), r6(b)]),
+        "bands": bands,
+    })
+}
+
+/// A thread's pitch from its crests: the mean spacing of the longest run
+/// of evenly spaced crests (each gap within a tenth of the run's first, or
+/// a step), with the first and last crest of the run. A median over every
+/// gap mixes a thread with the barbs above it (4.8 for the pilot's M24x2
+/// adapter, whose thread crests are 2 apart).
+fn pitch(crests: &[f64], step: f64) -> Option<(f64, f64, f64)> {
+    let gaps: Vec<f64> = crests.windows(2).map(|w| w[1] - w[0]).collect();
+    let mut best: Option<(usize, usize)> = None;
+    let mut i = 0;
+    while i < gaps.len() {
+        let tol = (0.1 * gaps[i]).max(step);
+        let mut j = i;
+        while j + 1 < gaps.len() && (gaps[j + 1] - gaps[i]).abs() <= tol {
+            j += 1;
+        }
+        if best.is_none_or(|(a, b)| j - i > b - a) {
+            best = Some((i, j));
+        }
+        i = j + 1;
+    }
+    let (i, j) = best?;
+    let (a, b) = (crests[i], crests[j + 1]);
+    Some(((b - a) / (j + 1 - i) as f64, a, b))
+}
+
+/// The heights of the local maxima of a radius sampled along an axis, a
+/// plateau's at its middle. A crest must rise above the lowest sample
+/// between it and the neighbouring maximum on each side by more than a
+/// hundredth of the radius's range (and a micron), so facet noise on a
+/// smooth wall is not a crest. A gap in the samples (the side is empty
+/// there) ends a run: a maximum next to one is not a crest.
+fn crests(side: &[(f64, f64)], step: f64) -> Vec<f64> {
+    let (lo, hi) = side
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &(_, r)| {
+            (l.min(r), h.max(r))
+        });
+    let tol = (0.01 * (hi - lo)).max(1e-3);
+    let joined = |i: usize| side[i + 1].0 - side[i].0 <= 1.5 * step;
+    // Local maxima: runs of level samples with lower neighbours.
+    let mut peaks: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < side.len() {
+        let mut j = i;
+        while j + 1 < side.len() && joined(j) && (side[j + 1].1 - side[i].1).abs() <= 1e-6 {
+            j += 1;
+        }
+        let r = side[i].1;
+        let lower_before = i > 0 && joined(i - 1) && side[i - 1].1 < r;
+        let lower_after = j + 1 < side.len() && joined(j) && side[j + 1].1 < r;
+        if lower_before && lower_after {
+            peaks.push((i, j));
+        }
+        i = j + 1;
+    }
+    // Prominence against the valleys between neighbouring maxima (or the
+    // ends of the run of joined samples).
+    let valley = |from: usize, to: usize| -> f64 {
+        side[from..=to]
+            .iter()
+            .map(|&(_, r)| r)
+            .fold(f64::INFINITY, f64::min)
+    };
+    let mut out = Vec::new();
+    for (k, &(i, j)) in peaks.iter().enumerate() {
+        let mut start = i;
+        while start > 0 && joined(start - 1) {
+            start -= 1;
+            if k > 0 && start == peaks[k - 1].1 {
+                break;
+            }
+        }
+        let mut end = j;
+        while end + 1 < side.len() && joined(end) {
+            end += 1;
+            if k + 1 < peaks.len() && end == peaks[k + 1].0 {
+                break;
+            }
+        }
+        let r = side[i].1;
+        if r - valley(start, i) > tol && r - valley(j, end) > tol {
+            out.push((side[i].0 + side[j].0) / 2.0);
+        }
+    }
+    out
 }
 
 /// The section as an SVG document in mm, the second axis pointing up.
@@ -259,6 +606,34 @@ pub fn section_svg(poly: &Polygon2d, plane: Plane) -> String {
     )
 }
 
+/// At most this many overlap pieces are listed (largest first).
+const MAX_PIECES: usize = 10;
+
+/// The separate pieces of an overlap, largest first, each with its volume
+/// and box, and how many there are above `floor`. One box around
+/// everything (a pin through a plate that also grazes a boss) says
+/// neither where nor how much each overlap is.
+fn pieces(both: &ManifoldGeometry, floor: f64) -> (Vec<Value>, usize) {
+    let mesh = Mesh::of_solid(both);
+    let (comp, n) = mesh.components();
+    let mut vol = vec![0.0; n];
+    let mut boxes = vec![Aabb::EMPTY; n];
+    for (t, &c) in comp.iter().enumerate() {
+        let [a, b, d] = mesh.corners(t);
+        vol[c as usize] += crate::mesh::dot(a, crate::mesh::cross(b, d)) / 6.0;
+        boxes[c as usize] = boxes[c as usize].union(&mesh.tri_box(t));
+    }
+    let mut order: Vec<usize> = (0..n).filter(|&c| vol[c] > floor).collect();
+    order.sort_by(|&a, &b| vol[b].total_cmp(&vol[a]).then(a.cmp(&b)));
+    let count = order.len();
+    let list = order
+        .into_iter()
+        .take(MAX_PIECES)
+        .map(|c| json!({"volume": r6(vol[c]), "bbox": bbox(boxes[c].lo, boxes[c].hi)}))
+        .collect();
+    (list, count)
+}
+
 /// Distance, touch and overlap of two solids. Touching is within a
 /// micrometre (below that, the kernels' own rounding decides).
 pub fn between(a: &ManifoldGeometry, b: &ManifoldGeometry) -> Value {
@@ -270,12 +645,15 @@ pub fn between(a: &ManifoldGeometry, b: &ManifoldGeometry) -> Value {
     let closest = Bvh::new(&ma).closest(&ma, &Bvh::new(&mb), &mb);
     if overlap > floor {
         let bx = both.bounds();
+        let (pieces, count) = pieces(&both, floor);
         return json!({
             "distance": 0.0,
             "touching": true,
             "overlapping": true,
             "overlap_volume": r6(overlap),
             "overlap_bbox": bx.map(|(lo, hi)| bbox(lo, hi)),
+            "overlap_pieces": count,
+            "pieces": pieces,
             "points": Value::Null,
         });
     }
@@ -339,7 +717,15 @@ impl Session {
                 let mesh = Mesh::of_solid(&solid);
                 v["dimensions"] = json!(3);
                 v["components"] = json!(mesh.components().1);
-                v["manifold"] = json!(solid.is_valid());
+                let pinched = if solid.is_valid() {
+                    mesh.bad_edges()
+                } else {
+                    None
+                };
+                v["manifold"] = json!(solid.is_valid() && pinched.is_none());
+                if let Some(p) = pinched {
+                    v["pinched"] = stats::pinched_json(&p);
+                }
                 v
             }
         };
@@ -394,7 +780,7 @@ impl Session {
             };
             match solid {
                 Some(s) => {
-                    let (mut v, poly) = section(&s, plane);
+                    let (mut v, poly) = section_about(&s, plane, req.axis);
                     if let Some(c) = chosen {
                         v["part"] = json!(c);
                     }
@@ -407,6 +793,20 @@ impl Session {
                     out.insert("section".into(), Value::Null);
                 }
             }
+        }
+        if let Some(p) = req.profile {
+            let solid = match chosen {
+                Some(c) => find(c).ok().and_then(|p| p.solid.clone()),
+                None => match &model.geometry {
+                    Some(Geometry::Polygon2d(_)) | None => None,
+                    Some(g) => Some(stats::solid(g)),
+                },
+            };
+            let mut v = solid.map_or(Value::Null, |s| profile(&s, req.axis, p));
+            if let (Some(c), Some(o)) = (chosen, v.as_object_mut()) {
+                o.insert("part".into(), json!(c));
+            }
+            out.insert("profile".into(), v);
         }
         let round = |ms: f64| (ms * 10.0).round() / 10.0;
         out.insert(
@@ -481,6 +881,18 @@ pub fn text(summary: &Value) -> String {
                 "'{a}' and '{c}' overlap by {} mm³\n",
                 n(&b["overlap_volume"])
             ));
+            let count = b["overlap_pieces"].as_u64().unwrap_or(0);
+            if count > 1 {
+                out.push_str(&format!("  in {count} pieces:\n"));
+                for p in b["pieces"].as_array().into_iter().flatten() {
+                    out.push_str(&format!(
+                        "    {} mm³ at [{}]..[{}]\n",
+                        n(&p["volume"]),
+                        vec(&p["bbox"]["min"]),
+                        vec(&p["bbox"]["max"])
+                    ));
+                }
+            }
         } else {
             out.push_str(&format!(
                 "'{a}' to '{c}': {} mm{}\n",
@@ -509,6 +921,62 @@ pub fn text(summary: &Value) -> String {
                 out.push_str(&format!(", size [{}] mm", vec(&s["bbox"]["size"])));
             }
             out.push('\n');
+            for o in s["outlines"].as_array().into_iter().flatten() {
+                out.push_str(&format!(
+                    "  {} {} mm², [{}]..[{}], radius {}..{} mm about the {} axis\n",
+                    if o["hole"] == json!(true) {
+                        "hole"
+                    } else {
+                        "outline"
+                    },
+                    n(&o["area"]),
+                    vec(&o["bbox"]["min"]),
+                    vec(&o["bbox"]["max"]),
+                    n(&o["radius"][0]),
+                    n(&o["radius"][1]),
+                    s["axis"].as_str().unwrap_or("z"),
+                ));
+            }
+        }
+    }
+    if let Some(p) = summary.get("profile") {
+        if p.is_null() {
+            out.push_str("profile: nothing to measure\n");
+        } else {
+            let ax = p["axis"].as_str().unwrap_or("z");
+            out.push_str(&format!(
+                "profile along {ax} from {} to {} every {} mm: radius {}..{} mm",
+                n(&p["from"]),
+                n(&p["to"]),
+                n(&p["step"]),
+                n(&p["radius"][0]),
+                n(&p["radius"][1]),
+            ));
+            if !p["pitch"].is_null() {
+                out.push_str(&format!(
+                    ", pitch {} mm (crests {}..{})",
+                    n(&p["pitch"]),
+                    n(&p["pitch_span"][0]),
+                    n(&p["pitch_span"][1])
+                ));
+            }
+            out.push('\n');
+            let crests = vec(&p["crests"]);
+            if !crests.is_empty() {
+                out.push_str(&format!("  crests at {ax} = {crests}\n"));
+            }
+            for b in p["bands"].as_array().into_iter().flatten() {
+                if b[1].is_null() {
+                    out.push_str(&format!("  {ax}={}: empty\n", n(&b[0])));
+                } else {
+                    out.push_str(&format!(
+                        "  {ax}={}: radius {}..{}\n",
+                        n(&b[0]),
+                        n(&b[1]),
+                        n(&b[2])
+                    ));
+                }
+            }
         }
     }
     out

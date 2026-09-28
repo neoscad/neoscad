@@ -288,8 +288,9 @@ the document's diagnostics.
 ### `measure`
 
 Measurements (`neoscad measure`). Params: the common ones, `part`
-(string), `between` ([A, B]), `section` (`"z=5"`, `"x=-2"`, `"y=0"`)
-and `svg`: a file name (the server writes the section's outline there,
+(string), `between` ([A, B]), `section` (`"z=5"`, `"x=-2"`, `"y=0"`),
+`axis` (`"x"`, `"y"` or `"z"`), `center` (`[a, b]` or `"a,b"`),
+`profile` (`[from, to, step]` or `"from:to:step"`) and `svg`: a file name (the server writes the section's outline there,
 relative to `cwd`, and `section.svg` names it) or `true` (the SVG text
 in `section.svg_text`). Result: the measure object of
 `docs/cli-json.md`; an unknown part gives `failed` and `error` with

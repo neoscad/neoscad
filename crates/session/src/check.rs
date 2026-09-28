@@ -8,17 +8,22 @@
 //!
 //! - **closed and manifold:** Manifold's status of the solid (and of each
 //!   part's); a mesh result that was never through a boolean has its open
-//!   and over-shared edges counted.
+//!   and over-shared edges counted; and a valid solid is welded by vertex
+//!   position, as an STL reader sees it, to find edges pinched where two
+//!   pieces touch ([`crate::mesh::bad_edges`]).
 //! - **components:** pieces whose triangles share no vertex. A piece
 //!   whose lowest point is above the model's lowest point (by more than
 //!   [`CheckSettings::bed_tolerance`]) is an unsupported island.
 //! - **wall thickness:** a sampled estimate. From points on every face
 //!   (the centroid, or a grid of points on large faces) a ray goes inward
 //!   along the face's normal to where it leaves the solid; that distance
-//!   is the wall's thickness there. Rays measure along the normal, so a
-//!   wall is measured exactly where its two sides are parallel and
-//!   overestimated where they are not, and a feature narrower than the
-//!   sample spacing on a large face can be missed.
+//!   is the wall's thickness there. A thin reading is measured again in
+//!   the layer plane, as a slicer sees the wall (`in_layer`), and the
+//!   larger reading stands: a sliver's tilted normal no longer turns a
+//!   twisted extrusion's end caps into walls. A wall is measured exactly
+//!   where its two sides are parallel and overestimated where they are
+//!   not, and a feature narrower than the sample spacing on a large face
+//!   can be missed.
 //! - **overhangs:** downward faces steeper than the limit from vertical,
 //!   excluding faces on the bed, grouped into connected regions.
 //! - **bed fit**, **tiny features** (pieces smaller than two extrusion
@@ -81,6 +86,11 @@ impl CheckSettings {
         })
     }
 }
+
+/// The fix for a pinched edge or point (the `not-manifold` finding, and
+/// `render`'s note).
+pub const PINCH_FIX: &str = "two parts touch along an edge or at a point here; overlap them by at \
+                             least 0.01 or separate them";
 
 /// How bad a finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -269,9 +279,33 @@ pub fn analyze(
     let solid = stats::solid(g);
     let mesh = Mesh::of_solid(&solid);
     let bbox = mesh.bbox();
-    let manifold = solid.is_valid() && open_edges == 0 && shared_edges == 0;
+    // What a file of the solid would show: Manifold keeps a vertex per
+    // piece where two pieces touch, which its own status cannot see.
+    let pinched = if solid.is_valid() {
+        mesh.bad_edges()
+    } else {
+        None
+    };
+    let manifold = solid.is_valid() && open_edges == 0 && shared_edges == 0 && pinched.is_none();
     lap(&mut a, "manifold");
-    if !manifold {
+    if let Some(p) = pinched {
+        out.push(Finding {
+            level: Level::Error,
+            code: "not-manifold",
+            message: format!(
+                "the solid is not manifold as a file: {} edge{} {} shared by more than two faces once corners at the same position are merged, as an STL reader does",
+                p.edges,
+                if p.edges == 1 { "" } else { "s" },
+                if p.edges == 1 { "is" } else { "are" },
+            ),
+            point: p.at,
+            bbox: p.bbox,
+            part: None,
+            fix: PINCH_FIX.into(),
+            value: Some(p.edges as f64),
+            limit: None,
+        });
+    } else if !manifold {
         let (code, message, fix) = if open_edges > 0 {
             (
                 "not-closed",
@@ -487,7 +521,8 @@ pub fn analyze(
         let (vol, area, _) = pm.mass();
         let (_, pc) = pm.components();
         let pb = pm.bbox();
-        if !sol.is_valid() {
+        let valid = sol.is_valid() && pm.bad_edges().is_none();
+        if !valid {
             out.push(Finding {
                 level: Level::Error,
                 code: "part-not-manifold",
@@ -507,7 +542,7 @@ pub fn analyze(
             "instances": p.instances,
             "context": p.context,
             "dimensions": 3,
-            "manifold": sol.is_valid(),
+            "manifold": valid,
             "components": pc,
             "volume": r4(vol),
             "area": r4(area),
@@ -642,6 +677,78 @@ fn samples(mesh: &Mesh, t: usize, cell: f64) -> Vec<V3> {
         .collect()
 }
 
+/// A thin reading measured again in the layer plane.
+enum Layer {
+    /// The face is flat (a floor, a roof, a plate): no in-layer direction.
+    Flat,
+    /// The width in the layer: the thickness, the face the ray left
+    /// through and the ray's direction.
+    Across(f64, u32, V3),
+    /// The ray in the layer found no far side facing away.
+    Nothing,
+}
+
+/// A normal's direction in the layer (XY) plane, `None` for a flat face.
+fn in_plane(n: V3) -> Option<V3> {
+    let l = (n[0] * n[0] + n[1] * n[1]).sqrt();
+    (l > 1e-6).then(|| [n[0] / l, n[1] / l, 0.0])
+}
+
+/// Measure a thin reading from `p`, on a face with unit `normal`, again
+/// in the layer plane.
+///
+/// FDM prints a wall as perimeters in each layer, so what has to be at
+/// least two extrusion widths is the wall's width *in the layer*, as a
+/// slicer sees it. That is measured here, along the face's normal
+/// projected onto the layer plane: for any face that is not flat this is
+/// exactly the in-layer normal of the outline the face cuts from its
+/// layer, however the face is tilted, which the face's own normal is not
+/// a proxy for. The caller keeps the larger reading:
+///
+/// - A twisted `linear_extrude` is tessellated into slivers a slice high
+///   and a profile edge long. Their normals tilt steeply (76° on a 20 mm
+///   square twisted 360° over 12 mm in 100 slices), and near the corners
+///   of a fast twist the surface itself is a shallow helical ramp. A ray
+///   along such a normal runs down or up into the end cap: "8 walls 0.17
+///   mm thick" on a solid 20 mm square, every layer of which is a full
+///   square. The agent-eval pilot's T3 agent rewrote a thread to escape
+///   these and broke its major diameter.
+/// - A dome's top faces are nearly flat and a layer near the top is a
+///   small disc; there the reading along the normal, through the dome, is
+///   the larger and stands.
+/// - A leaning plate is as wide in each layer as its slope makes it, and
+///   is judged by that width.
+///
+/// A flat face has no in-layer direction; its reading along the normal
+/// is a floor's or a roof's thickness in layers. The caller keeps it only
+/// when the far side is flat too, a plate: through a sloped face it is a
+/// wedge where a slope meets a floor or an end cap (the twisted square's
+/// first layer at each corner, which the layer above no longer covers),
+/// and the sloped face's own samples measure that in the layer.
+fn in_layer(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    p: V3,
+    normal: V3,
+    tmin: f64,
+    diag: f64,
+    near: &dyn Fn(u32) -> bool,
+) -> Layer {
+    let Some(d) = in_plane(normal).map(|n| scale(n, -1.0)) else {
+        return Layer::Flat;
+    };
+    // Any face the ray leaves through will do, however oblique: this
+    // reading can only replace a thinner one, and a ray that runs far
+    // through material in the layer has shown the layer is not thin
+    // there. (Held to the 45° of a wall's two sides, a ray from a twisted
+    // tube's outside that left through its bore at a slant said nothing,
+    // and the sliver's reading stood.)
+    match bvh.ray(mesh, p, d, tmin, 2.0 * diag, near) {
+        Some((h, hit)) if dot(mesh.normal(hit as usize), d) > 0.0 => Layer::Across(h, hit, d),
+        _ => Layer::Nothing,
+    }
+}
+
 /// A thin spot: where, how thin, and on which triangle.
 struct Thin {
     mid: V3,
@@ -718,6 +825,20 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
                     (h, hit) = (h2, hit2);
                 }
             }
+            // A thin reading is measured again in the layer plane (see
+            // `in_layer`), and so is one that would be the thinnest yet,
+            // so the model's `min_wall` is always a measured one: a
+            // sliver's 0.8 mm under a 20 mm twisted square read as a
+            // wall below a 1.2 mm spec.
+            let (h, hit, d) = if h < s.min_wall || thinnest.is_none_or(|(x, _, _)| h < x) {
+                match in_layer(mesh, bvh, p, normal, tmin, diag, &near) {
+                    Layer::Across(h2, hit2, d2) if h2 > h => (h2, hit2, d2),
+                    Layer::Flat if in_plane(mesh.normal(hit as usize)).is_some() => continue,
+                    _ => (h, hit, d),
+                }
+            } else {
+                (h, hit, d)
+            };
             let mid = add(p, scale(d, h / 2.0));
             if thinnest.is_none_or(|(x, _, _)| h < x) {
                 thinnest = Some((h, mid, t as u32));
@@ -984,21 +1105,50 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
     let min_area = (2.0 * s.nozzle).powi(2);
     regions.retain(|r| r.area >= min_area);
     regions.sort_by(|a, b| b.area.total_cmp(&a.area));
-    let findings = regions
+    let owner = |r: &Region| -> Option<u32> {
+        r.parts
+            .iter()
+            .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(a.0)))
+            .map(|(&p, _)| p)
+    };
+    // Nearby regions of one part are one finding, as thin walls are: the
+    // undersides of a gear's teeth or a thread's flanks listed one by one
+    // were most of a check's text. Largest first, so each merged finding
+    // is placed on its largest region.
+    let diag = crate::mesh::norm(mesh.bbox().size());
+    let reach = (4.0 * s.min_wall).max(0.05 * diag);
+    let mut merged: Vec<(usize, Aabb, f64, f64, usize)> = Vec::new();
+    for (i, r) in regions.iter().enumerate() {
+        match merged
+            .iter_mut()
+            .find(|m| owner(&regions[m.0]) == owner(r) && m.1.gap(&r.b) <= reach)
+        {
+            Some(m) => {
+                m.1 = m.1.union(&r.b);
+                m.2 += r.area;
+                m.3 = m.3.max(r.worst);
+                m.4 += 1;
+            }
+            None => merged.push((i, r.b, r.area, r.worst, 1)),
+        }
+    }
+    let findings = merged
         .iter()
-        .map(|r| {
-            let part = r
-                .parts
-                .iter()
-                .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(a.0)))
-                .map(|(&p, _)| mesh.part_names[p as usize].to_string());
+        .map(|&(i, b, area, worst, places)| {
+            let r = &regions[i];
+            let part = owner(r).map(|p| mesh.part_names[p as usize].to_string());
             Finding {
                 level: Level::Warning,
                 code: "overhang",
                 message: format!(
-                    "{} mm² faces down at up to {}° from vertical (limit {}°)",
-                    mm(r.area),
-                    mm(r.worst.round()),
+                    "{} mm² faces down{} at up to {}° from vertical (limit {}°)",
+                    mm(area),
+                    if places > 1 {
+                        format!(" in {places} places")
+                    } else {
+                        String::new()
+                    },
+                    mm(worst.round()),
                     mm(s.max_overhang)
                 ),
                 // On the surface: the region's face nearest its centroid
@@ -1014,14 +1164,14 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
                         })
                         .unwrap_or(c)
                 },
-                bbox: r.b,
+                bbox: b,
                 part,
                 fix: format!(
                     "add support, chamfer it to {}° or less, or reorient the model; a short \
                      flat span between two walls may bridge instead",
                     mm(s.max_overhang)
                 ),
-                value: Some(r.area),
+                value: Some(area),
                 limit: Some(s.max_overhang),
             }
         })

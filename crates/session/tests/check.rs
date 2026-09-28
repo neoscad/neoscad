@@ -19,6 +19,9 @@ fn session(files: &[(&str, &str)]) -> Session {
     }
     let mut cfg = Config::new(fs, LibraryPath(Vec::new()));
     cfg.work_dir = PathBuf::from("/doc");
+    // Bounded like an agent's calls: a model here that ran away would
+    // stop with a diagnostic, not fill the machine's memory.
+    cfg.limits = session::Limits::AGENT;
     Session::new(cfg)
 }
 
@@ -361,4 +364,237 @@ fn checks_are_deterministic() {
     let a = strip(check(src, true, CheckSettings::default()));
     let b = strip(check(src, true, CheckSettings::default()));
     assert_eq!(a, b);
+}
+
+/// The agent-eval pilot's T3 part (an M24x2 hose-barb adapter; the final
+/// source of `cad-20260928T202850Z/T3-neoscad-1`): a swept thread rib whose
+/// end touches the rim where the core cylinder meets the flange's cone.
+const T3: &str = include_str!("data/pilot_t3_adapter.scad");
+
+#[test]
+fn twisted_extrusions_have_no_false_thin_walls() {
+    // Slivers of a fast twist tilt their normals up to 76°, and rays
+    // along them ran into the end caps: 8 "walls" 0.25 mm thick on a
+    // solid 20 mm square. Every layer of these is solid across.
+    for src in [
+        "linear_extrude(height=12, twist=90, slices=100) square(20,center=true);",
+        "linear_extrude(height=12, twist=360, slices=100) square(20,center=true);",
+        "linear_extrude(height=30, twist=-2160) square(20,center=true);",
+        "linear_extrude(height=12, twist=360, slices=100) circle(10, $fn=64);",
+        "linear_extrude(height=12, twist=2160, slices=200) circle(10, $fn=48);",
+        // A tube, twisted: the ray across the wall leaves through the bore
+        // at a slant.
+        "linear_extrude(height=50, twist=720, slices=400) difference() { square(20, center=true); circle(6, $fn=64); }",
+        // Threads made by twisting an offset circle.
+        "linear_extrude(height=20, twist=-360*10, slices=400, $fn=48) translate([0.6,0]) circle(r=6);",
+        "cylinder(r=5, h=20, $fn=48); linear_extrude(height=20, twist=-360*8, slices=640) translate([4.2,0]) circle(r=1.6, $fn=24);",
+    ] {
+        let v = check(src, false, CheckSettings::default());
+        assert!(findings(&v, "thin-wall").is_empty(), "{src}\n{v}");
+        // The thinnest wall is a measured one, not a sliver's reading
+        // just over the minimum.
+        let t = v["model"]["min_wall"]["thickness"].as_f64().unwrap();
+        assert!(t > 3.0, "{src}: thinnest {t}");
+    }
+    // The pilot's final part: walls of 1.5 mm and more.
+    let v = check(
+        T3,
+        false,
+        CheckSettings {
+            min_wall: 1.2,
+            ..CheckSettings::default()
+        },
+    );
+    assert!(findings(&v, "thin-wall").is_empty(), "{v}");
+}
+
+#[test]
+fn real_thin_walls_are_still_found() {
+    let wall = |src: &str| -> Vec<f64> {
+        let v = check(src, false, CheckSettings::default());
+        findings(&v, "thin-wall")
+            .iter()
+            .map(|f| f["value"].as_f64().unwrap())
+            .collect()
+    };
+    // A 0.3 mm fin on a base.
+    let fin = wall("cube([20,20,3]); translate([0,10,3]) cube([20,0.3,10]);");
+    assert_eq!(fin.len(), 1, "{fin:?}");
+    assert!(close(fin[0], 0.3, 1e-4), "{fin:?}");
+    // An open box with 0.5 mm walls and floor.
+    let open = wall("difference() { cube(20); translate([0.5,0.5,0.5]) cube([19,19,20]); }");
+    assert!(!open.is_empty() && close(open[0], 0.5, 1e-4), "{open:?}");
+    // A thin fin, twisted: 0.4 mm across in every layer.
+    let twisted =
+        wall("linear_extrude(height=10, twist=90, slices=50) square([0.4,10], center=true);");
+    assert!(
+        !twisted.is_empty() && twisted[0] > 0.3 && twisted[0] < 0.5,
+        "{twisted:?}"
+    );
+    let v = check(
+        "cylinder(r=8,h=2); linear_extrude(height=12, twist=360, slices=120) square([0.5,14], center=true);",
+        false,
+        CheckSettings::default(),
+    );
+    let t = findings(&v, "thin-wall");
+    assert!(!t.is_empty(), "{v}");
+    assert!(close(t[0]["value"].as_f64().unwrap(), 0.5, 0.05), "{v}");
+    // A flat plate is as thick as its layers.
+    let plate = wall("cube([20,20,0.3]);");
+    assert!(!plate.is_empty() && close(plate[0], 0.3, 1e-4), "{plate:?}");
+    // A leaning 0.5 mm plate: 0.5 / cos 30° = 0.577 mm across in a layer.
+    let leaning = wall("rotate([30,0,0]) cube([20,0.5,10]);");
+    assert!(
+        !leaning.is_empty() && close(leaning[0], 0.5 / 30f64.to_radians().cos(), 1e-3),
+        "{leaning:?}"
+    );
+}
+
+#[test]
+fn pinched_edges_are_not_manifold() {
+    // Two cubes sharing an edge: Manifold keeps a vertex for each and
+    // calls it valid; an STL of it has an edge with four faces.
+    let v = check(
+        "cube(10); translate([10,10,0]) cube(10);",
+        false,
+        CheckSettings::default(),
+    );
+    assert_eq!(v["model"]["manifold"], false, "{v}");
+    let f = findings(&v, "not-manifold");
+    assert_eq!(f.len(), 1, "{v}");
+    assert_eq!(f[0]["severity"], "error");
+    assert_eq!(f[0]["value"], 1.0);
+    assert_eq!(
+        f[0]["location"]["point"],
+        serde_json::json!([10.0, 10.0, 5.0])
+    );
+    assert!(
+        f[0]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("overlap them by at least 0.01")
+    );
+    // Overlapped a little, it is one solid.
+    let ok = check(
+        "cube(10); translate([9.99,9.99,0]) cube(10);",
+        false,
+        CheckSettings::default(),
+    );
+    assert_eq!(ok["model"]["manifold"], true, "{ok}");
+    assert!(findings(&ok, "not-manifold").is_empty(), "{ok}");
+    // The pilot's part: one pinched edge (the grader's count), where the
+    // rib's end meets the rim at r = 10.64, z = 12.
+    let v = check(T3, false, CheckSettings::default());
+    let f = findings(&v, "not-manifold");
+    assert_eq!(f.len(), 1, "{v}");
+    assert_eq!(f[0]["value"], 1.0, "{v}");
+    let p: Vec<f64> = f[0]["location"]["point"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap())
+        .collect();
+    assert!(close(p[2], 12.0, 1e-3), "{p:?}");
+    assert!(close(p[0].hypot(p[1]), 10.64, 0.01), "{p:?}");
+    // Render's geometry says so too, with where.
+    let s = session(&[("m.scad", T3)]);
+    let scheme = render::ColorScheme::cornfield();
+    let r = s
+        .render(&Run::new("m.scad"), session::Mode::Render, &scheme)
+        .unwrap();
+    let g = r.geometry_json(&scheme.geometry_scheme());
+    assert_eq!(g["manifold"], false, "{g}");
+    assert_eq!(g["pinched"]["edges"], 1, "{g}");
+    // And measure's model.
+    let m = measure(T3, |_| {});
+    assert_eq!(m["model"]["manifold"], false, "{m}");
+}
+
+#[test]
+fn sections_describe_each_contour_and_its_radii() {
+    // A tube: outer radius 10, bore 4, cut across.
+    let v = measure(
+        "difference() { cylinder(r=10, h=10, $fn=360); translate([0,0,-1]) cylinder(r=4, h=12, $fn=360); }",
+        |r| r.section = Some(Plane::Z(5.0)),
+    );
+    let o = v["section"]["outlines"].as_array().unwrap();
+    assert_eq!(o.len(), 2, "{v}");
+    assert_eq!(o[0]["hole"], false);
+    assert_eq!(o[1]["hole"], true);
+    let r = |x: &Value, k: usize| x["radius"][k].as_f64().unwrap();
+    assert!(
+        close(r(&o[0], 1), 10.0, 1e-6) && close(r(&o[0], 0), 10.0, 1e-3),
+        "{v}"
+    );
+    assert!(close(r(&o[1], 1), 4.0, 1e-6), "{v}");
+    assert_eq!(v["section"]["axis"], "z");
+    // About another axis: a 10 mm cube's section, about its own centre.
+    let v = measure("cube(10);", |r| {
+        r.section = Some(Plane::Z(5.0));
+        r.axis = session::measure::Axis::parse("z", Some([5.0, 5.0])).unwrap();
+    });
+    let o = &v["section"]["outlines"][0];
+    assert!(
+        close(r(o, 0), 5.0, 1e-9) && close(r(o, 1), 50f64.sqrt(), 1e-6),
+        "{v}"
+    );
+}
+
+#[test]
+fn profiles_give_a_threads_diameters_and_pitch() {
+    let v = measure(T3, |r| {
+        r.profile = Some(session::measure::Profile::new(0.0, 49.0, 0.1).unwrap());
+    });
+    let p = &v["profile"];
+    // Pitch 2 from the crests along +x, over the thread.
+    assert!(close(p["pitch"].as_f64().unwrap(), 2.0, 1e-6), "{p}");
+    assert_eq!(p["pitch_span"], serde_json::json!([2.0, 10.0]), "{p}");
+    // In the thread, the outer contour spans minor to major radius: the
+    // grader's 23.28 major diameter.
+    let band = p["bands"][60].as_array().unwrap();
+    assert!(close(band[0].as_f64().unwrap(), 6.0, 1e-9), "{band:?}");
+    assert!(
+        close(2.0 * band[2].as_f64().unwrap(), 23.29, 0.01),
+        "{band:?}"
+    );
+    assert!(
+        close(2.0 * band[1].as_f64().unwrap(), 21.28, 0.01),
+        "{band:?}"
+    );
+    // The hex flange above its chamfer: 30 across flats, 34.64 across
+    // corners.
+    let band = p["bands"][220].as_array().unwrap();
+    assert!(close(band[1].as_f64().unwrap(), 15.0, 1e-6), "{band:?}");
+    assert!(close(band[2].as_f64().unwrap(), 17.3205, 1e-3), "{band:?}");
+    assert_eq!(p["bands"].as_array().unwrap().len(), 491);
+    // Too many samples is refused.
+    assert!(session::measure::Profile::new(0.0, 100.0, 0.01).is_err());
+    assert!(session::measure::Profile::new(1.0, 0.0, 0.1).is_err());
+}
+
+#[test]
+fn overlaps_are_listed_piece_by_piece() {
+    // b pokes into a in two places: 2 x 2 x 1 and 1 x 1 x 1.
+    let v = measure(
+        "part(\"a\") cube([20,10,10]);\n\
+         part(\"b\") { translate([2,2,9]) cube([2,2,5]); translate([15,2,9]) cube([1,1,5]); translate([2,2,13]) cube([14,1,1]); }\n",
+        |r| r.between = Some(("a".into(), "b".into())),
+    );
+    let b = &v["between"];
+    assert_eq!(b["overlapping"], true, "{v}");
+    assert_eq!(b["overlap_pieces"], 2, "{b}");
+    let pieces = b["pieces"].as_array().unwrap();
+    assert!(
+        close(pieces[0]["volume"].as_f64().unwrap(), 4.0, 1e-6),
+        "{b}"
+    );
+    assert!(
+        close(pieces[1]["volume"].as_f64().unwrap(), 1.0, 1e-6),
+        "{b}"
+    );
+    assert_eq!(
+        pieces[1]["bbox"]["min"],
+        serde_json::json!([15.0, 2.0, 9.0]),
+        "{b}"
+    );
 }

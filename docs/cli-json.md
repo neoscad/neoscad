@@ -177,8 +177,16 @@ else is the same for the same input.
   `volume` (mm³) and `area` (mm²) are Manifold's. A result that is a
   mesh rather than a solid (a lone primitive, an extrusion) is converted
   as `--render=force` would convert it first. `manifold` is false when
-  Manifold reported an error or had to keep the mesh as a triangle soup.
-  `components` counts the pieces whose faces share no vertex. 2D:
+  Manifold reported an error or had to keep the mesh as a triangle soup,
+  or when the solid is *pinched*: then `"pinched": {"edges": int,
+  "point": [x, y, z]}` is added. Pinched means that once corners at the
+  same position are merged, as an STL reader does, edges are shared by
+  more than two faces (`point` is the midpoint of the first, to 6
+  significant digits). Two pieces touching along an edge (a rib ending
+  exactly on a rim, two cubes sharing an edge) do this: Manifold keeps
+  a vertex for each piece and reports no error, but a file of the
+  result is not manifold. `components` counts the pieces whose faces
+  share no vertex. 2D:
 
   ```json
   {"dimensions": 2, "bbox": BBOX2, "area": double, "contours": int}
@@ -369,7 +377,9 @@ as on the bed), at most 10 findings per code.
   "floating", "volume", "area", "centroid", "bbox", "triangles",
   "min_wall": {"thickness", "point", "part"}|null, "overhang_area"}`;
   `{"dimensions": 2}` for a 2D model, `null` for an empty one.
-  `min_wall` is the thinnest wall any sample measured.
+  `min_wall` is the thinnest wall any sample measured (after the
+  layer-plane measurement below). `manifold` is false for a pinched
+  solid too (see the snapshot's `geometry`).
 - `PART`: `{"name", "instances", "context", "dimensions", "manifold",
   "components", "volume", "area", "bbox"}` for each part's own solid.
 - `FINDING`: `{"id": int, "severity": "error"|"warning"|"info", "code",
@@ -388,30 +398,36 @@ Codes and how each is found:
 | `empty` | error | Nothing to print. |
 | `not-3d` | error | A 2D model. |
 | `not-closed` | error | A mesh result (a lone polyhedron) with edges on one face only. |
-| `not-manifold` | error | Manifold reports an error or kept the solid as a triangle soup, or edges are shared by more than two faces. |
+| `not-manifold` | error | Manifold reports an error or kept the solid as a triangle soup, or edges are shared by more than two faces. Also a pinched solid: Manifold calls it valid, but once corners at the same position are merged (as an STL reader does) edges have more than two faces. Then `value` is the number of such edges, `point` the midpoint of the first and `bbox` the box around all of them, and the fix says that two parts touch along an edge or at a point there and to overlap them by at least 0.01 or separate them. |
 | `floating` | error | A connected piece (triangles sharing vertices) whose lowest point is more than `bed_tolerance` above the model's lowest point. `point` is the piece's centre. The message says what is under it, straight down from its lowest points: another piece it rests on (within `bed_tolerance`), another piece N mm below, or nothing. |
-| `thin-wall` | error below `nozzle`, else warning below `min_wall` | From points on every face (the centroid, or 4 or 16 points on faces larger than (4 × `min_wall`)²) a ray goes inward along the face's normal to where it leaves the solid, ignoring faces that share a corner with the start (so knife edges do not measure zero) and exits through faces more than 45° from parallel (corners and slopes are not walls). Thin faces that share an edge, or face each other across a wall, are one place; places of one part and severity within max(4 × `min_wall`, 5% of the model's diagonal) are one finding ("walls at N places"), located at its thinnest point. An exit closer than min(0.01 mm, 1e-4 of the diagonal) behind which the ray leaves through another face facing its way is a contact seam (two pieces that touch keep both surfaces), not a wall: the wall is measured to that second exit, and the seams are one `touching-surfaces` finding. |
+| `thin-wall` | error below `nozzle`, else warning below `min_wall` | From points on every face (the centroid, or 4 or 16 points on faces larger than (4 × `min_wall`)²) a ray goes inward along the face's normal to where it leaves the solid, ignoring faces that share a corner with the start (so knife edges do not measure zero) and exits through faces more than 45° from parallel (corners and slopes are not walls). A reading under `min_wall` (or under the thinnest so far) is measured again in the layer plane, along the face's normal projected onto XY, and the larger of the two is the wall: FDM lays a wall as perimeters in each layer, so the width that matters is the width in the layer, and the projected normal is exactly the in-layer normal of the outline the face cuts, however the face is tilted. (The slivers of a twisted `linear_extrude` tilt their normals up to 76°; along them a solid 20 mm square measured walls of 0.17–0.25 mm at its end caps.) A flat face has no layer direction: its reading counts only when the far side is flat too (a plate, a floor); through a sloped face it is a wedge where a slope meets a cap, not a wall. Thin faces that share an edge, or face each other across a wall, are one place; places of one part and severity within max(4 × `min_wall`, 5% of the model's diagonal) are one finding ("walls at N places"), located at its thinnest point. An exit closer than min(0.01 mm, 1e-4 of the diagonal) behind which the ray leaves through another face facing its way is a contact seam (two pieces that touch keep both surfaces), not a wall: the wall is measured to that second exit, and the seams are one `touching-surfaces` finding. |
 | `touching-surfaces` | info | Surfaces of pieces that touch with no gap (coils of a spring, a lid on its box): they print fused. `value` is 0; the message gives the area. The fix: leave a gap of at least the nozzle if they should be separate, overlap them a little if they should be one. |
-| `overhang` | warning | Faces pointing down more than `max_overhang` from vertical, except faces within `bed_tolerance` of the lowest point, grouped into regions by shared edges; regions under (2 × `nozzle`)² are ignored. `value` is the region's area, the message its steepest angle; `point` is on the region. |
+| `overhang` | warning | Faces pointing down more than `max_overhang` from vertical, except faces within `bed_tolerance` of the lowest point, grouped into regions by shared edges; regions under (2 × `nozzle`)² are ignored. Regions of one part within max(4 × `min_wall`, 5% of the model's diagonal) of each other are one finding ("in N places"), as thin walls are. `value` is the finding's area, the message its steepest angle; `point` is on its largest region. |
 | `bed-fit` | error, or warning when turning it 90° about z fits | With `--bed`: the bounding box against the bed. |
 | `tiny-feature` | warning | A piece whose largest extent is under two nozzle widths. |
 | `parts-intersect` | warning | Two parts (neither nested in the other, both reaching the model as themselves) whose solids overlap: `value` is the overlap volume, by a boolean intersection. |
-| `part-not-manifold` | error | A part's own solid is not valid. |
+| `part-not-manifold` | error | A part's own solid is not valid, or is pinched. |
 | `off-bed` | info | The model's lowest point is not at z = 0. |
 
 Accuracy: on the synthetic models of `crates/session/tests/check.rs`
 the thickness of a 0.3 and a 0.5 mm wall, a 200 mm² overhang, a 45°
 chamfer at a 30° limit (141.42 mm²), a floating cube's 5 mm lift, the
 overlap of two parts and a thin part's name come out exact. Rays
-measure along the normal: a wall whose sides are not parallel measures
-thicker than its narrowest point, and a feature narrower than the
-sample spacing on a large face can be missed. A flat span between two
-walls (a bridge) is reported as an overhang.
+measure along the normal and in the layer: a wall whose sides are not
+parallel measures thicker than its narrowest point, a leaning plate
+measures its width in the layer (0.577 mm for a 0.5 mm plate leaning
+30°), and a feature narrower than the sample spacing on a large face
+can be missed. Twisted extrusions (squares and circles twisted 90° to
+2160°, threads made by twisting an offset circle) have no thin walls,
+and a 0.3 mm fin, a 0.5 mm open box and a 0.4 mm twisted fin are still
+found. A flat span between two walls (a bridge) is reported as an
+overhang.
 
 # `neoscad measure`
 
 `neoscad measure MODEL.scad [--part P] [--between A B] [--section
-z=H|x=H|y=H] [--svg FILE] [--enable part] [-D var=val] [--format json]`
+z=H|x=H|y=H] [--axis x|y|z] [--center A,B] [--profile FROM:TO:STEP]
+[--svg FILE] [--enable part] [-D var=val] [--format json]`
 (`crates/session/src/measure.rs`). Exit status 0, or 1 when the model
 fails or a named part does not exist (then `error` says which parts
 there are).
@@ -420,13 +436,14 @@ there are).
 {"schema": 1, "input": "model.scad", "exit_code": 0,
  "model": SOLID|GEOM2D|null, "parts": [SOLID + {"name", "instances",
  "context"}, ...],
- "between": BETWEEN, "section": SECTION|null,
+ "between": BETWEEN, "section": SECTION|null, "profile": PROFILE|null,
  "timings_ms": {"evaluate", "geometry", "measure", "total"},
  "diagnostics": DIAG}
 ```
 
 - `SOLID`: `{"volume", "area", "bbox", "centroid", "triangles"}` (the
-  model's also `"dimensions": 3, "components", "manifold"`), in mm, mm²
+  model's also `"dimensions": 3, "components", "manifold"` and, when
+  pinched, `"pinched"` as in the snapshot's `geometry`), in mm, mm²
   and mm³, rounded to 1e-6. `centroid` is the centre of mass of the
   enclosed volume at uniform density. A 2D model is the `GEOM` object
   of the snapshot summary.
@@ -434,7 +451,10 @@ there are).
   nested in it.
 - `between` (with `--between A B`): `{"a", "b", "distance",
   "touching", "overlapping", "overlap_volume", "overlap_bbox",
-  "points"}`. Overlap is a boolean intersection of the two solids
+  "points"}`, and when they overlap `"overlap_pieces": int, "pieces":
+  [{"volume", "bbox"}, ...]`: the overlap's separate pieces (connected
+  parts of the intersection), largest first, at most 10 listed.
+  Overlap is a boolean intersection of the two solids
   (then `distance` is 0); otherwise `distance` is the exact smallest
   distance between their surfaces (triangle to triangle, over bounding
   volume hierarchies) and `points` the closest points on A and on B.
@@ -444,7 +464,29 @@ there are).
   cut through the model (or `--part`'s solid): `axes` are the section's
   2D axes (x, y for z; y, z for x; x, z for y); `bbox` is in model
   coordinates; `svg` is the file written with `--svg` (the outline in
-  mm, the second axis up, holes by the even-odd rule).
+  mm, the second axis up, holes by the even-odd rule). Added: `"axis"`,
+  `"center"` and `"outlines": [{"area", "hole": bool, "bbox",
+  "radius": [min, max]}, ...]`, each contour (largest first, at most
+  20; `contours` counts all) with its nearest and farthest distance
+  from the axis: the line parallel to `--axis` (default z) through
+  `--center` (its position in the other two coordinates, in the order
+  of `axes`; default the origin). Across a thread the outer contour's
+  radii are its minor and major radius; a bore is a hole.
+- `profile` (with `--profile FROM:TO:STEP`, at most 1,000 samples):
+  `{"axis", "center", "from", "to", "step", "radius": [min, max]|null,
+  "crests": [h, ...], "pitch": number|null, "pitch_span": [h0, h1]|null,
+  "bands": [[h, rmin, rmax], ...]}`. At each height `h` along the axis
+  the solid is cut across it; `rmin` and `rmax` are the nearest and
+  farthest distance of the outer contours from the axis (`null` where
+  nothing is cut). A helical thread's cut is the same at every height,
+  turned, so there these are its minor and major radius; over a barb
+  they are its root and crest. `crests` are the local maxima of the
+  outer surface's radius on one side (the half-plane from the axis
+  towards the first of `axes`, +x for z), at most 100, and `pitch` the
+  mean spacing of the longest run of evenly spaced crests
+  (`pitch_span`: its first and last crest). The pilot's M24x2 adapter
+  gives pitch 2 over crests 2..10 and radii 10.64..11.64 in the
+  thread.
 
 # `neoscad fmt`
 
@@ -669,3 +711,13 @@ have them.
 - `--enable=predictible-output` sorts exported meshes ("Sorted
   exports"); `--info`'s `Features` line lists the experimental features
   neoscad implements.
+- After the CAD pilot (`docs/research/pilot-mcp-transcripts.md`):
+  `manifold` is false for a pinched solid, with `pinched` added (the
+  `geometry` object, `measure`'s model, `check`'s model and parts, and
+  a `not-manifold` finding at the first pinched edge); thin walls are
+  measured again in the layer plane, which removes the false thin walls
+  of twisted extrusions (flat faces now count only against a flat far
+  side); nearby overhang regions are one finding, so there are fewer
+  `overhang` findings and their `value` is the sum; `measure` adds
+  `--axis`, `--center` and `--profile`, the section's `axis`, `center`
+  and `outlines`, and `between`'s `overlap_pieces` and `pieces`.

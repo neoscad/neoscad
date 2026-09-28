@@ -218,6 +218,12 @@ impl Mesh {
         x
     }
 
+    /// Edges not shared by exactly two faces once corners are merged by
+    /// position ([`bad_edges`]).
+    pub fn bad_edges(&self) -> Option<BadEdges> {
+        bad_edges(&self.verts, self.tris.iter().copied())
+    }
+
     pub fn part_name(&self, t: usize) -> Option<&Arc<str>> {
         self.part[t].map(|i| &self.part_names[i as usize])
     }
@@ -277,6 +283,117 @@ impl Mesh {
         }
         (out, n as usize)
     }
+}
+
+/// Edges of a mesh that are not shared by exactly two faces once vertices
+/// are merged by position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BadEdges {
+    /// How many such edges.
+    pub edges: usize,
+    /// The midpoint of the first one (in a fixed order).
+    pub at: V3,
+    /// The box around all of them.
+    pub bbox: Aabb,
+}
+
+/// The edges an STL reader finds used by other than two faces.
+///
+/// Manifold's own status cannot see these: where two pieces touch along
+/// an edge (a rib ending exactly on the rim of a cylinder, two cubes
+/// sharing an edge), its result keeps a separate vertex for each piece at
+/// the same position, so every edge it knows of has two faces. An STL has
+/// no vertex identities; a reader merges corners by position, and then
+/// that edge has four faces and the file is not manifold. The agent-eval
+/// pilot's T3 part passed `check` as manifold and failed the grader's
+/// watertightness test this way.
+///
+/// Vertices merge by exact position, which is what an ASCII STL keeps
+/// (each coordinate is written in its shortest exact form); a binary STL
+/// rounds to `f32` and can merge more. A triangle that collapses when
+/// its corners merge is skipped, as a reader dropping degenerate facets
+/// would. Two sorts, no hashing, so it stays a small part of a render:
+/// the same approach as `PolySet::is_outward_solid`.
+///
+/// The mesh must be a valid Manifold solid's (every edge paired by vertex
+/// index): then only merged positions can unpair edges, and a mesh with
+/// no two vertices at one position is answered after the first sort.
+pub fn bad_edges(verts: &[V3], tris: impl Iterator<Item = [u32; 3]>) -> Option<BadEdges> {
+    // Canonical vertex per position: the lowest index at that position.
+    // Keys made once (a comparison that rebuilt them cost twice as much);
+    // -0 and 0 are one position.
+    let mut keys: Vec<([u64; 3], u32)> = verts
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            (
+                p.map(|c| if c == 0.0 { 0u64 } else { c.to_bits() }),
+                i as u32,
+            )
+        })
+        .collect();
+    keys.sort_unstable();
+    let mut canon: Vec<u32> = (0..verts.len() as u32).collect();
+    let mut shared = vec![false; verts.len()];
+    let mut merged = false;
+    for w in keys.windows(2) {
+        if w[0].0 == w[1].0 {
+            canon[w[1].1 as usize] = canon[w[0].1 as usize];
+            shared[w[0].1 as usize] = true;
+            shared[w[1].1 as usize] = true;
+            merged = true;
+        }
+    }
+    // Without merged vertices the edges are the solid's own, which a
+    // valid Manifold result pairs by construction: nothing to count, and
+    // the edge sort (most of the cost) is skipped for almost every model.
+    if !merged {
+        return None;
+    }
+    // Likewise an edge between two vertices that merged with nothing: its
+    // faces are the solid's own. Only edges at a shared position are
+    // counted, so even a pinched million-triangle mesh sorts a handful.
+    let mut edges: Vec<u64> = Vec::new();
+    for t in tris {
+        if !t.iter().any(|&v| shared[v as usize]) {
+            continue;
+        }
+        let [a, b, c] = t.map(|v| canon[v as usize]);
+        if a == b || b == c || c == a {
+            continue;
+        }
+        for (k, (u, v)) in [(a, b), (b, c), (c, a)].into_iter().enumerate() {
+            if shared[t[k] as usize] || shared[t[(k + 1) % 3] as usize] {
+                edges.push(u64::from(u.min(v)) << 32 | u64::from(u.max(v)));
+            }
+        }
+    }
+    edges.sort_unstable();
+    let mut count = 0usize;
+    let mut first: Option<u64> = None;
+    let mut bbox = Aabb::EMPTY;
+    let mut i = 0;
+    while i < edges.len() {
+        let mut j = i + 1;
+        while j < edges.len() && edges[j] == edges[i] {
+            j += 1;
+        }
+        if j - i != 2 {
+            count += 1;
+            first.get_or_insert(edges[i]);
+            let (u, v) = ((edges[i] >> 32) as usize, (edges[i] & 0xffff_ffff) as usize);
+            bbox.grow(verts[u]);
+            bbox.grow(verts[v]);
+        }
+        i = j;
+    }
+    let e = first?;
+    let (u, v) = ((e >> 32) as usize, (e & 0xffff_ffff) as usize);
+    Some(BadEdges {
+        edges: count,
+        at: scale(add(verts[u], verts[v]), 0.5),
+        bbox,
+    })
 }
 
 /// A bounding volume hierarchy over a mesh's triangles.
@@ -637,6 +754,39 @@ mod tests {
         assert!((v - 8.0).abs() < 1e-9, "{v}");
         assert!((a - 24.0).abs() < 1e-9);
         assert!(dist(c, [2.0, 3.0, 4.0]) < 1e-9);
+    }
+
+    /// Two meshes as one, the second's vertices after the first's.
+    fn join(mut a: Mesh, b: &Mesh) -> Mesh {
+        let n = a.verts.len() as u32;
+        a.verts.extend(&b.verts);
+        a.tris.extend(b.tris.iter().map(|t| t.map(|v| v + n)));
+        a.part.extend(&b.part);
+        a
+    }
+
+    #[test]
+    fn pinched_edges_are_found_by_position() {
+        // Apart: nothing merges.
+        assert_eq!(
+            join(cube([0.0; 3], 1.0), &cube([2.0, 0.0, 0.0], 1.0)).bad_edges(),
+            None
+        );
+        // Sharing an edge along z at x = y = 1: four faces there.
+        let m = join(cube([0.0; 3], 1.0), &cube([1.0, 1.0, 0.0], 1.0));
+        let b = m.bad_edges().unwrap();
+        assert_eq!(b.edges, 1);
+        assert_eq!(b.at, [1.0, 1.0, 0.5]);
+        // A vertex split in two at one position (as a property seam
+        // leaves it) is merged back and pairs.
+        let mut c = cube([0.0; 3], 1.0);
+        let v = c.tris[0][0];
+        c.verts.push(c.verts[v as usize]);
+        let dup = (c.verts.len() - 1) as u32;
+        c.tris[0][0] = dup;
+        // The other faces at that corner keep the original index, so by
+        // index the split breaks edges; by position it is whole.
+        assert_eq!(c.bad_edges(), None);
     }
 
     #[test]

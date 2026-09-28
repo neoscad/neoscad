@@ -761,6 +761,23 @@ lead them, come roughly in order of user impact.
   edges formed by two faces sharing a corner are skipped; the feather
   edges a `difference()` leaves where a curved cut meets a face are
   reported (correctly thin, but many). (7b-1)
+- Thin walls are measured in the layer plane as well as along the
+  normal, so a flat face counts only against a flat far side, and a
+  leaning plate is judged by its width in the layer. A thin roof or
+  floor that is sloped (a 0.4 mm shell at 5-30° from horizontal) is
+  wide in each layer and is not reported, though it is only a few
+  layers thick; a separate "too few layers" check (vertical thickness
+  under flat and shallow faces, excluding the bed's first layers) would
+  cover it. (CAD pilot fix)
+- A sealed hollow (`difference() { cube(20); translate([.5,.5,.5])
+  cube(19); }`) reports its cavity's inner surface as a `floating`
+  piece: components are counted by shared vertices, and the cavity is a
+  shell of its own. A shell inside another is a void, not a piece.
+  (found in the CAD pilot fix)
+- The `not-manifold` finding for a pinched solid counts edges only; two
+  pieces touching at a single point (tip to tip) are not found. A
+  vertex whose faces form more than one fan after welding would be the
+  test. (CAD pilot fix)
 - Overhangs do not recognise bridges (a flat span supported at both
   ends); they are reported as overhangs. (7b-1)
 - Checks run serially (about 150 ms for a 220k-triangle model). Rays are
@@ -796,10 +813,16 @@ lead them, come roughly in order of user impact.
   tightened umask needs nix's `fs` feature. (H4)
 - The snapshot sheet's header line runs under the legend at the MCP
   default size (768 px) when `issues` adds check counts. (7c)
-- Tool-description token counts are estimates from byte counts (6,069
-  bytes of compact JSON as a client receives the list, 5,498 as the
+- Tool-description token counts are estimates from byte counts (6,059
+  bytes of compact JSON as a client receives the list, 5,488 as the
   test measures it); no tokenizer was run. The test's 5,500-byte guard
-  has 2 bytes to spare. (7c, H4)
+  has 12 bytes to spare. (7c, H4, CAD pilot fix)
+- `crates/cli/tests/mcp.rs`'s `the_end_of_input_cancels_running_calls_and_exits`
+  fails at e1e4ac1 and 19da5b9 (and with the CAD pilot fix) when run
+  alone or with the other MCP tests: the server exits after about
+  2.47 s, the 2 s grace, rather than cancelling the evaluation within
+  the 1.5 s the test allows. It passed once inside a full `cargo test`.
+  (found during the CAD pilot fix)
 - The pilot is n = 1 per cell (`docs/agent-eval.md`); a real comparison
   needs several runs per task and condition, more tasks, and a second
   model. (7c)

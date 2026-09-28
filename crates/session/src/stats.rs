@@ -89,16 +89,64 @@ pub fn geometry(g: &Geometry, scheme: &geom::color::Scheme) -> Value {
     let m = solid(g);
     let ps = m.to_polyset(scheme);
     let (lo, hi) = m.bounds().unwrap_or(([0.0; 3], [0.0; 3]));
-    json!({
+    let pinched = if m.is_valid() { pinched(&ps) } else { None };
+    let mut v = json!({
         "dimensions": 3,
         "bbox": bbox(&lo, &hi),
         "volume": m.manifold.volume(),
         "area": m.manifold.surface_area(),
         "triangles": m.manifold.num_tri(),
         "vertices": m.manifold.num_vert(),
-        "manifold": m.is_valid(),
+        "manifold": m.is_valid() && pinched.is_none(),
         "components": components(&ps),
-    })
+    });
+    if let Some(p) = pinched {
+        v["pinched"] = pinched_json(&p);
+    }
+    v
+}
+
+/// Edges of a valid solid's mesh that a file of it would show shared by
+/// more than two faces ([`crate::mesh::bad_edges`]): where two pieces
+/// touch along an edge, Manifold keeps a vertex for each and calls the
+/// result manifold, and an STL of it is not.
+pub fn pinched(ps: &PolySet) -> Option<crate::mesh::BadEdges> {
+    crate::mesh::bad_edges(
+        &ps.vertices,
+        ps.faces
+            .iter()
+            .filter(|f| f.len() == 3)
+            .map(|f| [f[0], f[1], f[2]]),
+    )
+}
+
+/// The `pinched` object: how many edges, and the first one's midpoint.
+pub fn pinched_json(p: &crate::mesh::BadEdges) -> Value {
+    json!({"edges": p.edges, "point": p.at.map(round6)})
+}
+
+/// Six significant digits, as the tools print numbers.
+///
+/// Below 1e-9 (a picometre, far under any kernel's precision) a value is
+/// rounding noise and reads 0: a size of `4e-15` is a flat face.
+pub fn round6(x: f64) -> f64 {
+    if !x.is_finite() {
+        return x;
+    }
+    if x.abs() < 1e-9 {
+        return 0.0;
+    }
+    let digits = 5 - x.abs().log10().floor() as i32;
+    // Dividing by an exact power of ten gives the nearest double to the
+    // decimal, which prints short; multiplying by 0.01 would not.
+    let y = if digits >= 0 {
+        let f = 10f64.powi(digits);
+        (x * f).round() / f
+    } else {
+        let f = 10f64.powi(-digits);
+        (x / f).round() * f
+    };
+    if y == 0.0 { 0.0 } else { y }
 }
 
 /// A box as JSON (`{"min", "max", "size"}`).
@@ -109,6 +157,17 @@ pub fn bbox_json(lo: &[f64], hi: &[f64]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn six_significant_digits() {
+        assert_eq!(round6(23.282123456), 23.2821);
+        assert_eq!(round6(0.1 + 0.2), 0.3);
+        assert_eq!(round6(13105.098123), 13105.1);
+        assert_eq!(round6(12345678.0), 12345700.0);
+        assert_eq!(round6(-0.000_012_345_67), -0.0000123457);
+        assert_eq!(round6(0.0), 0.0);
+        assert_eq!(round6(-1e-300 * 0.0), 0.0);
+    }
 
     #[test]
     fn two_cubes_are_two_components() {

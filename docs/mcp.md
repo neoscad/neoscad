@@ -90,23 +90,25 @@ full JSON result.
 | Tool | What it answers | Extra arguments |
 |---|---|---|
 | `evaluate` | errors and warnings with fix hints, `echo()` output; no geometry | |
-| `render` | bbox, volume, area, manifold, components; optionally writes the model | `export` (a file; format from its extension), `overwrite` |
+| `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch), components; optionally writes the model | `export` (a file; format from its extension; `.stl` is ASCII STL), `overwrite` |
 | `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `dims`, `preview`, `output` (also save the PNG; a `.png` name), `overwrite` |
-| `check` | printability findings, each with location and fix | `bed`, `nozzle`, `min_wall`, `max_overhang` |
-| `measure` | model and part bbox, volume, centroid; distance between parts; sections | `part`, `between`, `section` |
+| `check` | printability findings, each with location and fix; the description asks for the spec's minimum wall as `min_wall` | `bed`, `nozzle`, `min_wall`, `max_overhang` |
+| `measure` | model and part bbox, volume, centroid; distance between parts, or the overlap's pieces; sections with each contour's area, bbox, hole and radii; a radius profile with crests and pitch | `part`, `between`, `section`, `axis` (`x`/`y`/`z`, default z), `center` (`[a, b]`, the axis's position, default `[0, 0]`), `profile` (`[from, to, step]` along the axis) |
 | `test` | model tests (`docs/model-tests.md`); `path` is a test file or directory, `source` a test file's text | `filter` |
-| `format` | `source`: the formatted text; `path`: rewrites the file (only whitespace changes) | `check` (return the diff, write nothing) |
+| `format` | `source`: the formatted text; `path`: rewrites the file (only whitespace changes) | `check` (say how many lines would change, write nothing), `diff` (with `check`: the diff itself) |
 | `docs` | a builtin's reference, or with `path` a file's definitions; no name: the index | `name`, `full`, `verbose` (the whole index) |
 
 The server's `instructions` (sent once, at discovery or `initialize`)
 say when to use which: iterate on inline source, `evaluate` for errors,
 `render` for numbers, `snapshot` to see, `check` before finishing. The
-tool list is 5,498 bytes of compact JSON as `[name, description, input
+tool list is 5,488 bytes of compact JSON as `[name, description, input
 schema]` arrays, which is what `crates/cli/tests/mcp.rs` measures and
 keeps under 5,500 bytes (each description under 300). What a client
-receives is larger: 5,778 bytes with the keys (`name`, `description`,
-`inputSchema`) and 6,069 with `annotations`, roughly 1,450-1,700 tokens
-(estimated at 3.5-4 bytes a token; not measured with a tokenizer).
+receives is larger: 5,768 bytes with the keys (`name`, `description`,
+`inputSchema`) and 6,059 with `annotations`, roughly 1,450-1,700 tokens
+(estimated at 3.5-4 bytes a token; not measured with a tokenizer). To
+make room for `measure`'s `axis`, `center` and `profile`, `base_dir`
+lost its description ("Dir for includes") and others were shortened.
 
 Arguments are checked against the schemas before a tool runs: a
 wrongly typed argument (`"parts": "yes"`, `"nozzle": "big"`) or one the
@@ -142,7 +144,18 @@ The structured content has the diagnostics without spans
 or full text but with `column` (where the span starts; in the text,
 `inline.scad:1:11`), `file` only for an included file, the geometry object of
 `docs/cli-json.md`, findings without their bboxes, at most 20
-diagnostics and 20 echo lines. **The structured content must stand on
+diagnostics and 20 echo lines. Every non-integer number in it has 6
+significant digits (render and snapshot used to give Manifold's 17,
+check 4 decimals and measure 6), and the text uses the same numbers;
+`verbose` keeps full precision. A finding's `fix` appears once per
+text: a later finding of the same code and fix has `"fix_as": id` (in
+the text, `Fix: as #id`) instead. `measure` asked for a `section`,
+`profile` or `between` leaves out the `model` block (`render` gives
+it). A pinched solid (two pieces touching along an edge: Manifold says
+valid, an STL of it is not manifold) reads `NOT manifold` with a line
+saying how many edges and where the first is, and the geometry's
+`pinched` carries the `fix`. `format` with `check` says how many lines
+would change (`diff: true` returns the diff). **The structured content must stand on
 its own:** Claude Code shows the model the JSON of `structuredContent`
 in place of the text when a result has both (observed in the smoke test
 below). `format` and `docs`, whose answer is text, send no structured

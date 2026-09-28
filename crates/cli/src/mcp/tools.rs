@@ -46,8 +46,8 @@ const INLINE_TEST: &str = "inline_test.scad";
 fn model_props() -> Value {
     json!({
         "path": {"type": "string", "description": ".scad file"},
-        "source": {"type": "string", "description": "OpenSCAD code, instead of path"},
-        "base_dir": {"type": "string", "description": "Dir for includes"},
+        "source": {"type": "string", "description": "OpenSCAD code"},
+        "base_dir": {"type": "string"},
         "parts": {"type": "boolean", "description": "Enable part(\"name\"){}"},
         "verbose": {"type": "boolean", "description": "Full JSON"},
     })
@@ -78,7 +78,7 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "render",
-            "Build the geometry; report bbox, volume, area, manifold and components, to verify dimensions. `export` also writes it (.stl .3mf .obj .off .svg .dxf .png).",
+            "Build the geometry; report bbox, volume, area, manifold and components, to verify dimensions. `export` also writes it (.stl is ASCII STL; .3mf .obj .off .svg .dxf .png).",
             json!({
                 "export": {"type": "string", "description": "Output file"},
                 "overwrite": {"type": "boolean"},
@@ -91,20 +91,20 @@ pub fn list() -> Vec<Value> {
             json!({
                 "views": {"type": "array", "items": {"type": "string"}, "description": "iso front back left right top bottom"},
                 "size": {"type": "string", "description": "WxH pixels, default 768x768"},
-                "diff_against": {"type": "string", "description": "Other model file: added green, removed red"},
+                "diff_against": {"type": "string", "description": "Model file: added green, removed red"},
                 "diff_source": {"type": "string", "description": "Other version as source"},
                 "highlight": {"type": "array", "items": {"type": "string"}, "description": "Parts in colour, rest ghosted"},
                 "issues": {"type": "boolean", "description": "Mark check findings"},
                 "dims": {"type": "boolean", "description": "Label bbox sizes"},
-                "preview": {"type": "boolean", "description": "OpenSCAD preview: shows % and # modifiers"},
-                "output": {"type": "string", "description": "Also save the PNG here"},
+                "preview": {"type": "boolean", "description": "Show % and # modifiers"},
+                "output": {"type": "string", "description": "Also save it here"},
                 "overwrite": {"type": "boolean"},
             }),
             false,
         ),
         tool(
             "check",
-            "3D-printability check: manifold, thin walls, overhangs, floating or tiny pieces, bed fit, intersecting parts; each finding has a location and a fix. Run before calling a printable model done.",
+            "3D-printability check: manifold, thin walls, overhangs, floating or tiny pieces, bed fit, intersecting parts; each finding has a location and a fix. Run before finishing; pass the spec's minimum wall as min_wall.",
             json!({
                 "bed": {"type": "array", "items": {"type": "number"}, "description": "[w, d, h] mm"},
                 "nozzle": num("mm, default 0.4"),
@@ -115,11 +115,14 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "measure",
-            "Exact numbers: bbox, volume, centroid of the model and its parts; distance or overlap `between` two parts (name them with part(\"a\"){...} and parts: true); a cross-section's area and outline.",
+            "Exact numbers: bbox, volume, centroid of model and parts; `between` two parts (part(\"a\"){...}): distance or overlap pieces; `section`: contours' area, bbox, radii about `axis`; `profile`: radii and crests (pitch) along it.",
             json!({
                 "part": {"type": "string", "description": "Only this part"},
                 "between": {"type": "array", "items": {"type": "string"}, "description": "[partA, partB]"},
                 "section": {"type": "string", "description": "Plane, e.g. z=5"},
+                "axis": {"type": "string", "description": "x, y or z"},
+                "center": {"type": "array", "items": {"type": "number"}, "description": "Axis at [a, b]"},
+                "profile": {"type": "array", "items": {"type": "number"}, "description": "[from, to, step]"},
             }),
             true,
         ),
@@ -127,7 +130,7 @@ pub fn list() -> Vec<Value> {
             let mut t = tool(
                 "test",
                 "Run model tests: each `module test_*()` of a *_test.scad file, checked by `// @expect` lines above it (volume 1000±1, bbox [x,y,z], manifold, components N, check clean) and assert(). Pin requirements first, then iterate until they pass.",
-                json!({"filter": {"type": "string", "description": "Only test ids containing this"}}),
+                json!({"filter": {"type": "string", "description": "Test ids containing this"}}),
                 true,
             );
             t["inputSchema"]["properties"]["path"]["description"] = json!("Test file or directory");
@@ -139,7 +142,10 @@ pub fn list() -> Vec<Value> {
             let mut t = tool(
                 "format",
                 "Format OpenSCAD (whitespace only; the program is unchanged). `source` returns the text; `path` rewrites the file unless `check`.",
-                json!({"check": {"type": "boolean", "description": "Only report the diff"}}),
+                json!({
+                    "check": {"type": "boolean", "description": "Count changes, write nothing"},
+                    "diff": {"type": "boolean", "description": "With check: the diff"},
+                }),
                 false,
             );
             if let Some(p) = t["inputSchema"]["properties"].as_object_mut() {
@@ -495,7 +501,7 @@ impl Tools {
         }
         push_log(&mut text, &r);
         let mut s = terse_log(&r, &main);
-        s["geometry"] = r["geometry"].clone();
+        s["geometry"] = terse_geometry(&r["geometry"]);
         if export.is_some() {
             s["output"] = r["output"].clone();
             s["bytes"] = r["bytes"].clone();
@@ -592,7 +598,7 @@ impl Tools {
         push_log(&mut text, &log);
         let mut s = json!({
             "exit_code": snap.exit_code,
-            "geometry": r["geometry"],
+            "geometry": terse_geometry(&r["geometry"]),
             "views": r["views"],
             "size": r["size"],
             "diagnostics": terse_diags(&log["diagnostics"], &main),
@@ -605,7 +611,7 @@ impl Tools {
         if let Some(i) = r.get("issues") {
             s["issues"] = json!({
                 "counts": i["counts"],
-                "findings": i["findings"].as_array().map(|f| f.iter().map(terse_finding).collect::<Vec<_>>()),
+                "findings": terse_findings(&i["findings"]),
             });
         }
         let mut out = finish(args, text, s, r);
@@ -671,7 +677,7 @@ impl Tools {
             "ok": r["ok"],
             "counts": r["counts"],
             "model": model,
-            "findings": r["findings"].as_array().map(|f| f.iter().map(terse_finding).collect::<Vec<_>>()),
+            "findings": terse_findings(&r["findings"]),
             "truncated": r["truncated"],
         });
         Ok(finish(args, text, s, r))
@@ -681,57 +687,50 @@ impl Tools {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
         let mut p = self.params(&m, args);
-        for k in ["part", "between", "section"] {
+        for k in ["part", "between", "section", "axis", "center", "profile"] {
             if let Some(v) = args.get(k) {
                 p[k] = v.clone();
             }
         }
+        // Asked for a section, a profile or a distance, the answer is that:
+        // the model's own numbers (which `render` gives) are left out.
+        let focused = ["between", "section", "profile"]
+            .iter()
+            .any(|k| args.get(*k).is_some_and(|v| !v.is_null()));
         let r = self.run(id, "measure", &p);
         self.done(m);
         let r = r?;
-        let mut text = String::new();
+        let mut lines: Vec<String> = Vec::new();
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            text.push_str(&crate::serve::param_names(e));
+            lines.push(crate::serve::param_names(e));
         } else {
-            text.push_str(&solid_line("model", &r["model"]));
+            if !focused {
+                lines.push(solid_line("model", &r["model"]));
+            }
             for part in r["parts"].as_array().into_iter().flatten() {
-                text.push('\n');
-                text.push_str(&solid_line(
+                lines.push(solid_line(
                     &format!("part {}", part["name"].as_str().unwrap_or("?")),
                     part,
                 ));
             }
             let b = &r["between"];
             if b.is_object() {
-                text.push_str(&format!(
-                    "\n{} to {}: distance {} mm{}{}",
-                    b["a"].as_str().unwrap_or("?"),
-                    b["b"].as_str().unwrap_or("?"),
-                    num_of(&b["distance"]),
-                    if b["touching"] == true {
-                        ", touching"
-                    } else {
-                        ""
-                    },
-                    if b["overlapping"] == true {
-                        format!(", overlap {} mm³", num_of(&b["overlap_volume"]))
-                    } else {
-                        String::new()
-                    }
-                ));
+                lines.push(between_line(b));
             }
             let sec = &r["section"];
             if sec.is_object() {
-                text.push_str(&format!(
-                    "\nsection {}: area {} mm², perimeter {} mm, {} contour(s), bbox {}",
-                    sec["plane"].as_str().unwrap_or("?"),
-                    num_of(&sec["area"]),
-                    num_of(&sec["perimeter"]),
-                    sec["contours"],
-                    corners_of(&sec["bbox"])
-                ));
+                lines.push(section_lines(sec));
+            } else if args.get("section").is_some() {
+                lines.push("section: nothing to cut".into());
+            }
+            let prof = &r["profile"];
+            if prof.is_object() {
+                lines.push(profile_lines(prof));
+            } else if args.get("profile").is_some() {
+                lines.push("profile: nothing to measure".into());
             }
         }
+        let mut text = lines.join("\n");
         let log =
             json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"]});
         push_log(&mut text, &log);
@@ -739,6 +738,9 @@ impl Tools {
         if let Some(o) = s.as_object_mut() {
             for k in ["schema", "input", "timings_ms", "diagnostics"] {
                 o.remove(k);
+            }
+            if focused {
+                o.remove("model");
             }
         }
         s["diagnostics"] = terse_diags(&log["diagnostics"], &main);
@@ -837,7 +839,7 @@ impl Tools {
                 ));
             }
             let text = if check {
-                r["diff"].as_str().unwrap_or("").to_string()
+                check_text(r["diff"].as_str().unwrap_or(""), bool_arg(args, "diff"))
             } else {
                 r["text"].as_str().unwrap_or("").to_string()
             };
@@ -871,7 +873,7 @@ impl Tools {
         let changed = r["changed"] == true;
         let text = match (changed, check) {
             (false, _) => "already formatted".to_string(),
-            (true, true) => r["diff"].as_str().unwrap_or("").to_string(),
+            (true, true) => check_text(r["diff"].as_str().unwrap_or(""), bool_arg(args, "diff")),
             (true, false) => {
                 std::fs::write(&path, r["text"].as_str().unwrap_or(""))
                     .map_err(|e| format!("cannot write '{}': {e}", path.display()))?;
@@ -907,6 +909,28 @@ impl Tools {
 const EXPORT_FORMATS: &[&str] = &[
     "stl", "off", "obj", "3mf", "wrl", "pov", "svg", "dxf", "pdf", "png", "echo", "ast", "csg",
 ];
+
+/// What `format` with `check` says: how many lines would change, or the
+/// diff itself with `diff: true`. A whole diff of a file that only needs
+/// its indentation fixed is long, and the agent's next step is the same
+/// either way (format it).
+fn check_text(diff: &str, full: bool) -> String {
+    if diff.is_empty() {
+        return String::new();
+    }
+    if full {
+        return diff.to_string();
+    }
+    let n = diff
+        .lines()
+        .skip_while(|l| !l.starts_with("@@"))
+        .filter(|l| l.starts_with('-'))
+        .count();
+    format!(
+        "not formatted: {n} line{} would change (diff: true shows them)",
+        if n == 1 { "" } else { "s" }
+    )
+}
 
 /// Create an output's directory (inside the roots: `writable` resolved
 /// it), so "write it to out/x.stl" just works.
@@ -1006,6 +1030,8 @@ fn finish(args: &Value, text: String, terse: Value, full: Value) -> Out {
             png: None,
         };
     }
+    let mut terse = terse;
+    round_json(&mut terse);
     Out {
         text,
         structured: terse,
@@ -1013,11 +1039,30 @@ fn finish(args: &Value, text: String, terse: Value, full: Value) -> Out {
     }
 }
 
-/// A number as an agent reads it: at most three decimals, no trailing
-/// zeros (Rust's shortest form of the rounded value).
+/// A number as an agent reads it: six significant digits, no trailing
+/// zeros (Rust's shortest form of the rounded value), as in the structured
+/// content ([`round_json`]).
 fn num(x: f64) -> String {
-    let r = (x * 1000.0).round() / 1000.0;
+    let r = session::stats::round6(x);
     if r == 0.0 { "0".into() } else { format!("{r}") }
+}
+
+/// Every non-integer number in a terse result to six significant digits.
+/// Render and snapshot gave Manifold's volumes and boxes at full
+/// precision (17 digits), check at four decimals and measure at six: one
+/// rule reads the same everywhere and is short. `verbose` keeps the full
+/// numbers.
+fn round_json(v: &mut Value) {
+    match v {
+        Value::Number(n) if n.is_f64() => {
+            if let Some(x) = n.as_f64() {
+                *v = json!(session::stats::round6(x));
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(round_json),
+        Value::Object(o) => o.values_mut().for_each(round_json),
+        _ => {}
+    }
 }
 
 fn num_of(v: &Value) -> String {
@@ -1074,7 +1119,33 @@ fn status(r: &Value) -> String {
     }
 }
 
+/// The geometry object as a terse result carries it: a pinched edge gets
+/// the fix, so the structured content says what to do on its own.
+fn terse_geometry(g: &Value) -> Value {
+    let mut g = g.clone();
+    if g["pinched"].is_object() {
+        g["pinched"]["fix"] = json!(session::check::PINCH_FIX);
+    }
+    g
+}
+
 fn geometry_line(g: &Value) -> String {
+    let mut line = geometry_summary(g);
+    // Manifold's status cannot see two pieces touching along an edge; an
+    // STL of it can (`session::stats::pinched`).
+    if g["pinched"].is_object() {
+        let n = g["pinched"]["edges"].as_u64().unwrap_or(0);
+        line.push_str(&format!(
+            "\nnot manifold as a file: {n} edge{} shared by more than two faces, the first at {}: {}",
+            if n == 1 { "" } else { "s" },
+            vec_of(&g["pinched"]["point"]),
+            session::check::PINCH_FIX
+        ));
+    }
+    line
+}
+
+fn geometry_summary(g: &Value) -> String {
     match g["dimensions"].as_u64() {
         Some(3) => format!(
             "3D bbox {} mm at {}, volume {} mm³, area {} mm², {}, {} component{}, {} triangles",
@@ -1117,6 +1188,92 @@ fn solid_line(label: &str, s: &Value) -> String {
         num_of(&s["area"]),
         vec_of(&s["centroid"])
     )
+}
+
+/// Distance, touch and overlap of two parts, with the overlap's pieces.
+fn between_line(b: &Value) -> String {
+    let mut t = format!(
+        "{} to {}: distance {} mm{}",
+        b["a"].as_str().unwrap_or("?"),
+        b["b"].as_str().unwrap_or("?"),
+        num_of(&b["distance"]),
+        if b["touching"] == true {
+            ", touching"
+        } else {
+            ""
+        },
+    );
+    if b["overlapping"] == true {
+        t.push_str(&format!(", overlap {} mm³", num_of(&b["overlap_volume"])));
+        let pieces = b["pieces"].as_array().map_or(&[][..], Vec::as_slice);
+        let n = b["overlap_pieces"].as_u64().unwrap_or(pieces.len() as u64);
+        if n > 1 {
+            t.push_str(&format!(" in {n} pieces:"));
+            for p in pieces {
+                t.push_str(&format!(
+                    "\n  {} mm³ at {}",
+                    num_of(&p["volume"]),
+                    corners_of(&p["bbox"])
+                ));
+            }
+        } else {
+            t.push_str(&format!(" at {}", corners_of(&b["overlap_bbox"])));
+        }
+    }
+    t
+}
+
+/// A section, and each contour with its radii about the axis.
+fn section_lines(sec: &Value) -> String {
+    let mut t = format!(
+        "section {}: area {} mm², perimeter {} mm, {} contour(s), bbox {}",
+        sec["plane"].as_str().unwrap_or("?"),
+        num_of(&sec["area"]),
+        num_of(&sec["perimeter"]),
+        sec["contours"],
+        corners_of(&sec["bbox"])
+    );
+    let axis = sec["axis"].as_str().unwrap_or("z");
+    for o in sec["outlines"].as_array().into_iter().flatten() {
+        t.push_str(&format!(
+            "\n  {} {} mm² at {}, radius {}..{} about {axis} at {}",
+            if o["hole"] == true { "hole" } else { "outline" },
+            num_of(&o["area"]),
+            corners_of(&o["bbox"]),
+            num_of(&o["radius"][0]),
+            num_of(&o["radius"][1]),
+            vec_of(&sec["center"]),
+        ));
+    }
+    t
+}
+
+/// A radius profile: the range, the crests and pitch, then each band.
+fn profile_lines(p: &Value) -> String {
+    let axis = p["axis"].as_str().unwrap_or("z");
+    let mut t = format!(
+        "profile along {axis} at {}, {}..{} every {}: outer radius {}..{}",
+        vec_of(&p["center"]),
+        num_of(&p["from"]),
+        num_of(&p["to"]),
+        num_of(&p["step"]),
+        num_of(&p["radius"][0]),
+        num_of(&p["radius"][1]),
+    );
+    if !p["pitch"].is_null() {
+        t.push_str(&format!(
+            ", pitch {} (crests {}..{})",
+            num_of(&p["pitch"]),
+            num_of(&p["pitch_span"][0]),
+            num_of(&p["pitch_span"][1])
+        ));
+    }
+    t.push_str(&format!("\ncrests at {axis} = {}", vec_of(&p["crests"])));
+    t.push_str(&format!("\nbands [{axis}, rmin, rmax]:"));
+    for b in p["bands"].as_array().into_iter().flatten() {
+        t.push_str(&format!(" {}", vec_of(b)));
+    }
+    t
 }
 
 /// A file as a diagnostic names it to an agent: its name.
@@ -1220,12 +1377,36 @@ fn push_log(text: &mut String, r: &Value) {
     }
 }
 
-fn terse_finding(f: &Value) -> Value {
-    json!({
-        "id": f["id"], "severity": f["severity"], "code": f["code"],
-        "message": f["message"], "fix": f["fix"], "part": f["part"],
-        "point": f["location"]["point"],
-    })
+/// The finding whose fix a later one repeats: the fixes of one code are
+/// mostly the same text (every overhang's "add support, chamfer it..."),
+/// so each is given once and later findings point back to it.
+fn same_fix_as(findings: &[Value], i: usize) -> Option<&Value> {
+    let f = &findings[i];
+    findings[..i]
+        .iter()
+        .find(|g| g["code"] == f["code"] && g["fix"] == f["fix"])
+        .map(|g| &g["id"])
+}
+
+fn terse_findings(findings: &Value) -> Value {
+    let list = findings.as_array().map_or(&[][..], Vec::as_slice);
+    Value::Array(
+        (0..list.len())
+            .map(|i| {
+                let f = &list[i];
+                let mut t = json!({
+                    "id": f["id"], "severity": f["severity"], "code": f["code"],
+                    "message": f["message"], "part": f["part"],
+                    "point": f["location"]["point"],
+                });
+                match same_fix_as(list, i) {
+                    Some(id) => t["fix_as"] = id.clone(),
+                    None => t["fix"] = f["fix"].clone(),
+                }
+                t
+            })
+            .collect(),
+    )
 }
 
 fn findings_text(counts: &Value, findings: &Value) -> String {
@@ -1240,9 +1421,14 @@ fn findings_text(counts: &Value, findings: &Value) -> String {
             n("info")
         )
     };
-    for f in findings.as_array().into_iter().flatten() {
+    let list = findings.as_array().map_or(&[][..], Vec::as_slice);
+    for (i, f) in list.iter().enumerate() {
+        let fix = match same_fix_as(list, i) {
+            Some(id) => format!("as #{id}"),
+            None => f["fix"].as_str().unwrap_or("").to_string(),
+        };
         text.push_str(&format!(
-            "\n#{} {} {}{}: {} at {}. Fix: {}",
+            "\n#{} {} {}{}: {} at {}. Fix: {fix}",
             f["id"],
             f["severity"].as_str().unwrap_or(""),
             f["code"].as_str().unwrap_or(""),
@@ -1251,7 +1437,6 @@ fn findings_text(counts: &Value, findings: &Value) -> String {
                 .map_or(String::new(), |p| format!(" (part {p})")),
             f["message"].as_str().unwrap_or(""),
             vec_of(&f["location"]["point"]),
-            f["fix"].as_str().unwrap_or("")
         ));
     }
     text
@@ -1299,8 +1484,16 @@ mod tests {
     fn numbers_read_short() {
         assert_eq!(num(15552.0), "15552");
         assert_eq!(num(0.1 + 0.2), "0.3");
-        assert_eq!(num(-0.0001), "0");
-        assert_eq!(num(1.23456), "1.235");
+        assert_eq!(num(-1e-12), "0");
+        assert_eq!(num(1.2345678), "1.23457");
+        assert_eq!(num(13105.098123), "13105.1");
+        let mut v =
+            json!({"volume": 13105.098123456, "triangles": 23152, "bbox": [17.32050807568877]});
+        round_json(&mut v);
+        assert_eq!(
+            v,
+            json!({"volume": 13105.1, "triangles": 23152, "bbox": [17.3205]})
+        );
     }
 
     #[test]

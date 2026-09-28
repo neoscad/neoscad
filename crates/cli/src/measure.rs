@@ -11,7 +11,7 @@ use std::path::Path;
 
 use clap::Parser;
 use serde_json::{Value, json};
-use session::measure::{MeasureRequest, Plane};
+use session::measure::{Axis, MeasureRequest, Plane, Profile};
 
 use crate::outcome::Outcome;
 
@@ -42,6 +42,21 @@ struct Args {
     /// A cross-section at an axis plane: z=H, x=H or y=H (mm).
     #[arg(long, value_name = "AXIS=MM")]
     section: Option<String>,
+
+    /// The axis radii are measured about (a section's contours and a
+    /// profile): x, y or z.
+    #[arg(long, value_name = "AXIS", default_value = "z")]
+    axis: String,
+
+    /// Where the axis is, in the other two coordinates (x,y for z; y,z for
+    /// x; x,z for y) [default: 0,0].
+    #[arg(long, value_name = "A,B", allow_hyphen_values = true)]
+    center: Option<String>,
+
+    /// A radius profile along the axis: the outer radii every STEP from
+    /// FROM to TO, and the crests on one side (a thread's pitch).
+    #[arg(long, value_name = "FROM:TO:STEP", allow_hyphen_values = true)]
+    profile: Option<String>,
 
     /// Also write the section's outline as SVG.
     #[arg(long, value_name = "FILE", requires = "section")]
@@ -83,6 +98,9 @@ pub fn main(args: Vec<OsString>) -> u8 {
         "part": a.part,
         "between": a.between,
         "section": a.section,
+        "axis": a.axis,
+        "center": a.center,
+        "profile": a.profile,
         "svg": a.svg,
         "json": match a.format.as_deref() {
             None => false,
@@ -110,7 +128,9 @@ fn fail(msg: impl std::fmt::Display) -> Outcome {
 }
 
 /// The measure request a command's parameters give (`part`, `between`
-/// as two names, `section` as `axis=mm`, `svg`).
+/// as two names, `section` as `axis=mm`, `axis` as a letter, `center` as
+/// `a,b` or `[a, b]`, `profile` as `from:to:step` or `[from, to, step]`,
+/// `svg`).
 pub fn request_of(params: &Value, run: session::Run) -> Result<MeasureRequest, String> {
     let mut req = MeasureRequest::new(run);
     req.part = params
@@ -130,6 +150,33 @@ pub fn request_of(params: &Value, run: session::Run) -> Result<MeasureRequest, S
             Plane::parse(s)
                 .ok_or_else(|| format!("--section must be z=MM, x=MM or y=MM (got '{s}')"))?,
         );
+    }
+    let numbers = |key: &str, sep: char, n: usize| -> Result<Option<Vec<f64>>, String> {
+        let v: Vec<f64> = match params.get(key) {
+            None | Some(Value::Null) => return Ok(None),
+            Some(Value::String(s)) => s
+                .split(sep)
+                .map(|x| x.trim().parse::<f64>())
+                .collect::<Result<_, _>>()
+                .map_err(|_| format!("--{key} takes {n} numbers (got '{s}')"))?,
+            Some(Value::Array(a)) => a
+                .iter()
+                .map(Value::as_f64)
+                .collect::<Option<_>>()
+                .ok_or_else(|| format!("--{key} takes {n} numbers"))?,
+            Some(v) => return Err(format!("--{key} takes {n} numbers (got {v})")),
+        };
+        if v.len() != n {
+            return Err(format!("--{key} takes {n} numbers (got {})", v.len()));
+        }
+        Ok(Some(v))
+    };
+    let center = numbers("center", ',', 2)?.map(|v| [v[0], v[1]]);
+    let letter = params.get("axis").and_then(Value::as_str).unwrap_or("z");
+    req.axis = Axis::parse(letter, center)
+        .ok_or_else(|| format!("--axis must be x, y or z (got '{letter}')"))?;
+    if let Some(v) = numbers("profile", ':', 3)? {
+        req.profile = Some(Profile::new(v[0], v[1], v[2]).map_err(|e| format!("--{e}"))?);
     }
     req.svg = matches!(
         params.get("svg"),

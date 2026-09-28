@@ -289,10 +289,69 @@ fn every_tool_round_trips() {
     assert_eq!(r["structuredContent"]["counts"]["errors"], 1);
     assert_eq!(r["structuredContent"]["exit_code"], 1);
 
-    // measure: a section.
+    // Each fix once per code: later findings point back to it.
+    let r = s.tool(
+        "check",
+        json!({"source": "cube(10); translate([30, 0, 20]) cube(2); translate([0, 30, 20]) cube(2);"}),
+    );
+    let f = r["structuredContent"]["findings"].as_array().unwrap();
+    let floating: Vec<&Value> = f.iter().filter(|x| x["code"] == "floating").collect();
+    assert_eq!(floating.len(), 2, "{r}");
+    assert!(floating[0]["fix"].is_string(), "{r}");
+    assert!(floating[1].get("fix").is_none(), "{r}");
+    assert_eq!(floating[1]["fix_as"], floating[0]["id"], "{r}");
+    assert!(text(&r).contains("Fix: as #"), "{}", text(&r));
+
+    // measure: a section, each contour with its radii; the model's own
+    // numbers are left out when a section is asked for.
     let r = s.tool("measure", json!({"path": "box.scad", "section": "z=5"}));
     let t = text(&r);
     assert!(t.contains("section z=5: area 76 mm²"), "{t}");
+    assert!(t.contains("hole 324 mm²"), "{t}");
+    assert!(!t.contains("model:"), "{t}");
+    let sc = &r["structuredContent"];
+    assert!(sc.get("model").is_none(), "{sc}");
+    assert_eq!(sc["section"]["outlines"][1]["hole"], true, "{sc}");
+    // A radius profile along z about the box's centre.
+    let r = s.tool(
+        "measure",
+        json!({"path": "box.scad", "profile": [2, 8, 2], "center": [10, 10]}),
+    );
+    let p = &r["structuredContent"]["profile"];
+    assert_eq!(p["bands"].as_array().unwrap().len(), 4, "{p}");
+    assert_eq!(p["bands"][0], json!([2.0, 10.0, 14.1421]), "{p}");
+    assert!(
+        text(&r).contains("profile along z at [10, 10]"),
+        "{}",
+        text(&r)
+    );
+    let r = s.tool("measure", json!({"path": "box.scad", "profile": [0, 1]}));
+    assert!(
+        text(&r).contains("`profile` takes 3 numbers"),
+        "{}",
+        text(&r)
+    );
+
+    // render: two cubes sharing an edge are not manifold as a file.
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(10); translate([10, 10, 0]) cube(10);"}),
+    );
+    let t = text(&r);
+    assert!(t.contains("NOT manifold"), "{t}");
+    assert!(
+        t.contains(
+            "not manifold as a file: 1 edge shared by more than two faces, the first at [10, 10, 5]"
+        ),
+        "{t}"
+    );
+    let g = &r["structuredContent"]["geometry"];
+    assert_eq!(g["manifold"], false, "{g}");
+    assert_eq!(g["pinched"]["edges"], 1, "{g}");
+    assert!(
+        g["pinched"]["fix"].as_str().unwrap().contains("overlap"),
+        "{g}"
+    );
 
     // test: inline test source against a model file.
     let r = s.tool(
@@ -312,7 +371,16 @@ fn every_tool_round_trips() {
     // Its answer is the text: a client that shows structured content in
     // place of text (Claude Code does) must not lose it.
     assert!(r.get("structuredContent").is_none(), "{r}");
+    // With check, how many lines would change; the diff when asked.
     let r = s.tool("format", json!({"path": "messy.scad", "check": true}));
+    assert_eq!(
+        text(&r),
+        "not formatted: 1 line would change (diff: true shows them)"
+    );
+    let r = s.tool(
+        "format",
+        json!({"path": "messy.scad", "check": true, "diff": true}),
+    );
     assert!(text(&r).contains("+cube([1, 2, 3]);"), "{}", text(&r));
     s.tool("format", json!({"path": "messy.scad"}));
     assert_eq!(
