@@ -153,9 +153,10 @@ struct Cli {
 
     /// `part` turns on neoscad's `part("name") { ... }` extension (named
     /// parts for `check` and `measure`). OpenSCAD's experimental features
-    /// `textmetrics`, `object-function`, `import-function` and
-    /// `vector-swizzle` work as in OpenSCAD; the others are accepted for
-    /// compatibility, with a warning for each one named.
+    /// `textmetrics`, `object-function`, `import-function`,
+    /// `vector-swizzle` and `predictible-output` (sorted mesh exports) work
+    /// as in OpenSCAD; the others are accepted for compatibility, with a
+    /// warning for each one named.
     #[arg(long, value_name = "FEATURE", action = ArgAction::Append)]
     enable: Vec<String>,
 
@@ -968,6 +969,12 @@ mod tests {
         assert!(w(&["textmetrics", "object-function", "vector-swizzle"]).is_empty());
         // `all` ends the list, as in OpenSCAD.
         assert_eq!(w(&["all", "foo"]).len(), 1);
+        assert!(w(&["predictible-output", "part"]).is_empty());
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let sorted = |n: &[&str]| features(&names(n)).has(eval::Feature::PredictibleOutput);
+        assert!(sorted(&["predictible-output"]));
+        assert!(sorted(&["all"]));
+        assert!(!sorted(&["roof", "part"]));
     }
 
     #[test]

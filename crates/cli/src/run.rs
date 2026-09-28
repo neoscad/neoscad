@@ -820,16 +820,19 @@ pub fn export_settings(
         opts.scheme,
         display_name(job),
         &options.camera,
+        options.features,
     )
 }
 
 /// [`export_settings`] from its parts: `input` as named on the command
-/// line and the command line's camera.
+/// line, the command line's camera, and the `--enable` features (for
+/// `predictible-output`).
 pub fn encode_settings(
     export_options: &crate::export_options::ExportOptions,
     scheme: geom::color::Scheme,
     input: &str,
     camera: &eval::Camera,
+    features: eval::Features,
 ) -> session::export::Settings {
     let (mut pdf, colors) = export_options.pdf();
     let pdf_warnings = colors.resolve(&mut pdf);
@@ -856,6 +859,7 @@ pub fn encode_settings(
             distance: camera.vpd,
             fov: camera.vpf,
         }),
+        predictible_output: features.has(eval::Feature::PredictibleOutput),
     }
 }
 

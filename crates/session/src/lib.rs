@@ -1835,6 +1835,16 @@ impl Session {
                 pipe.con
                     .print(None, b"Converted to backend-specific geometry");
             }
+            // `predictible-output` comes from the request's features, like
+            // every other experimental feature, rather than from the
+            // host's encoder settings: otherwise a host that forgot to
+            // copy the flag across would export unsorted meshes while
+            // reporting the feature as on.
+            let mut settings = req.settings.clone();
+            settings.predictible_output = run
+                .features
+                .union(self.cfg.features)
+                .has(eval::Feature::PredictibleOutput);
             let mut mesh = None;
             for (target, format) in &req.outputs {
                 // `checkAndExport`, per output: the dimension, then
@@ -1851,7 +1861,7 @@ impl Session {
                     pipe.con.print(None, b"Current top level object is empty.");
                     return Err(Stop::Exit(EXIT_ERROR));
                 };
-                let enc = export::encode(*format, root, &req.settings, &mut mesh);
+                let enc = export::encode(*format, root, &settings, &mut mesh);
                 for (severity, line) in &enc.immediate {
                     pipe.con.print(*severity, line.as_bytes());
                 }

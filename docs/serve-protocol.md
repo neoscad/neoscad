@@ -26,7 +26,7 @@ change would get a new `protocol` number; there has been none.
 
 | `protocol` | Changes |
 |---|---|
-| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. Parsing each included file once (`4d877c7`) added `stats`' `parse_cache.fragment_files` and `fragment_bytes`. |
+| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. Parsing each included file once (`4d877c7`) added `stats`' `parse_cache.fragment_files` and `fragment_bytes`. `enable` now also takes OpenSCAD's experimental features (`textmetrics`, `object-function`, `import-function`, `vector-swizzle`, and on `export`/`cli.export` `predictible-output`). |
 
 ## Transports
 
@@ -104,7 +104,7 @@ Requests on a model take:
 | `defines` | [string] | `-D` assignments, e.g. `"a=3"`. |
 | `quiet` | bool | Only errors in the log. |
 | `seed` | int | The seed of unseeded `rands()` (default: the server's, fixed per process). |
-| `enable` | [string] | `["part"]` turns on neoscad's `part()` extension for the request (`docs/cli-json.md`, "Named parts"), as `--enable part` does. |
+| `enable` | [string] | `--enable`'s names, for this request. `"part"` turns on neoscad's `part()` extension (`docs/cli-json.md`, "Named parts"), as `--enable part` does. OpenSCAD's experimental features by their names (`"all"` is every one): `textmetrics`, `object-function`, `import-function` and `vector-swizzle` change evaluation; `predictible-output` sorts an `export`'s mesh file (`docs/cli-json.md`, "Sorted exports"). Other names are ignored. |
 | `parts` | bool | The same as `"enable": ["part"]`. |
 | `progress` | bool | Send `progress` notifications (default true). |
 | `supersede` | bool | Cancel older requests on the same document when this one starts (default true; see "Ordering and concurrency"). `false` lets requests on one file run side by side, as `neoscad mcp` sends them. |
@@ -241,7 +241,8 @@ object of `docs/cli-json.md`, or `null` when empty or previewing),
 Params: the common ones, `output` (written by the server, relative to
 `cwd`), `format` (an OpenSCAD format identifier; default: the output's
 extension), `force` (bool), `options` (`-O` settings, e.g.
-`["export-svg/fill=true"]`). Result: `exit_code`, `output`, `format`,
+`["export-svg/fill=true"]`), `enable` (`["predictible-output"]` for a
+sorted mesh file). Result: `exit_code`, `output`, `format`,
 `bytes` (written), `geometry` (`null` for the non-mesh formats),
 `diagnostics`, `echo`, `counts`, `timings_ms`. A model that fails (wrong
 dimension, empty, a syntax error) has a non-zero `exit_code` and writes
@@ -337,7 +338,8 @@ environment** (`environment`: `OPENSCADPATH`, `OPENSCAD_FONT_PATH`,
 command line's, as `crates/cli/src/delegate.rs`,
 `crates/cli/src/snapshot.rs`, `crates/cli/src/check.rs` and
 `crates/cli/src/measure.rs` build them (`cli.export` carries `parts`
-for `--enable part`). The result is what the command
+for `--enable part`, and `enable` carries every `--enable` name,
+including the experimental features). The result is what the command
 would have printed: `{"exit_code", "stderr", "stdout"}` (strings, or
 arrays of bytes when not UTF-8). A server of another build or environment
 answers -32001, and the client runs the command itself.

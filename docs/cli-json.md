@@ -311,6 +311,27 @@ module always wins over the extension.
   `context` names it: `difference` (a subtracted part), `intersection`,
   `hull`, `minkowski`, `resize`, or `2d` (projected, extruded, offset).
 
+# Sorted exports: `--enable=predictible-output`
+
+One of OpenSCAD's experimental features, off by default as there. As in
+OpenSCAD
+(`src/io/export.cc`, `createSortedPolySet`), the STL, OBJ, 3MF, OFF,
+WRL and POV writers first sort the mesh: `-0` becomes `0`, equal
+positions merge, vertices are in (x, y, z) order, each face starts at
+its lowest vertex (keeping its winding) and the faces are sorted, each
+keeping its colour. STL, OBJ and 3MF are triangulated first and then
+sorted. The file then no longer depends on the order the geometry
+kernel emitted, which is what OpenSCAD's own export tests rely on.
+`--enable all` turns it on too. Off by default; without it the files are
+byte-identical to before.
+
+It is one flag in the same feature set as `textmetrics` and the others
+(`eval::Features`), so every host takes it where it takes those:
+`"enable": ["predictible-output"]` on a server request (`export`,
+`cli.export`), `RunOptions.enable` in the app's core, and
+`neoscad mcp --enable predictible-output` for every MCP call (a
+server-wide flag, so the tool schemas do not grow).
+
 # `neoscad check`
 
 `neoscad check MODEL.scad [--bed WxDxH] [--nozzle MM] [--min-wall MM]
@@ -645,3 +666,6 @@ have them.
   diagnostic rather than a `log` line. `neoscad docs --in` names a
   library's files relative to their library directory
   (`BOSL2/affine.scad`).
+- `--enable=predictible-output` sorts exported meshes ("Sorted
+  exports"); `--info`'s `Features` line lists the experimental features
+  neoscad implements.

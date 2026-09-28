@@ -394,14 +394,22 @@ pub fn build(eval: &Evaluation, ref_root: &str, ref_rel: &str, commit: &str) -> 
 }
 
 /// A test compared as text, as `test_cmdline_tool.py` does: the tiers 0-2
-/// outputs, and the `.json` of `export-param` (tier 3, compared as parsed
-/// JSON like `compare_json`).
+/// outputs, the `.json` of `export-param` (tier 3, compared as parsed
+/// JSON like `compare_json`), and exact mesh files (the `export-*` tests
+/// of `predictible-output`, whose sorted STL/OBJ/3MF/POV output is
+/// compared line for line; a 3MF first has its model XML extracted as
+/// `post_process_3mf` does).
 fn is_text(r: &Registration, tier: u8) -> bool {
     r.kind == RegKind::Cmdline
         && r.openscad
         && r.script.is_none()
-        && (tier <= 2 || (r.suffix == "json" && !r.stdio))
+        && (tier <= 2
+            || (r.suffix == "json" && !r.stdio)
+            || (tier == 3 && EXACT_MESH_SUFFIXES.contains(&r.suffix.as_str())))
 }
+
+/// Mesh formats a tier 3 test can compare as exact files.
+const EXACT_MESH_SUFFIXES: &[&str] = &["stl", "obj", "3mf", "pov", "off", "wrl"];
 
 /// A test the script runner ports (see [`Runner::Script`]). A raw command
 /// is supported when it runs the binary under test (`{OPENSCAD}`) or
@@ -512,13 +520,15 @@ fn tier_of(r: &Registration) -> u8 {
 
 /// OpenSCAD's experimental features neoscad implements (its `--enable`
 /// accepts them as OpenSCAD does, `eval::Feature::supported`). Their
-/// cases run like any other, under the rules below. The harness keeps its
+/// cases run like any other, under the rules below (a case runs when
+/// every feature it enables is here). The harness keeps its
 /// own list rather than asking the evaluator, so that pointing it at the
 /// nightly (`--binary`) checks the same cases.
 const SUPPORTED_FEATURES: &[&str] = &[
     "textmetrics",
     "object-function",
     "import-function",
+    "predictible-output",
     "vector-swizzle",
 ];
 
@@ -526,19 +536,23 @@ const SUPPORTED_FEATURES: &[&str] = &[
 /// wins, so each skipped test is counted under one reason.
 fn skip_reason(r: &Registration) -> Option<String> {
     if r.experimental {
-        let feature = r.test_args.iter().enumerate().find_map(|(i, a)| {
-            a.strip_prefix("--enable=").map(String::from).or_else(|| {
-                (a == "--enable")
-                    .then(|| r.test_args.get(i + 1).cloned())
-                    .flatten()
-            })
+        // The first feature neoscad lacks names the reason. A test whose
+        // features are all supported runs, and so do the two registered
+        // EXPERIMENTAL with no `--enable` at all (offcolorpngtest,
+        // 3mfcolorpngtest: colour OFF/3MF export and re-import), which need
+        // nothing experimental from the binary.
+        let unsupported = r.test_args.iter().enumerate().find_map(|(i, a)| {
+            a.strip_prefix("--enable=")
+                .map(String::from)
+                .or_else(|| {
+                    (a == "--enable")
+                        .then(|| r.test_args.get(i + 1).cloned())
+                        .flatten()
+                })
+                .filter(|f| !SUPPORTED_FEATURES.contains(&f.as_str()))
         });
-        match feature {
-            Some(f) if SUPPORTED_FEATURES.contains(&f.as_str()) => {}
-            Some(f) => return Some(format!("experimental feature ({f})")),
-            // Registered EXPERIMENTAL without an --enable flag
-            // (offcolorpngtest, 3mfcolorpngtest): colour export/import.
-            None => return Some("experimental registration".into()),
+        if let Some(f) = unsupported {
+            return Some(format!("experimental feature ({f})"));
         }
     }
     let cgal_args = r.test_args.iter().any(|a| a == "--backend=cgal");

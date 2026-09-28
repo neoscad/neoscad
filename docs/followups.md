@@ -396,6 +396,17 @@ lead them, come roughly in order of user impact.
   its garbage collector breaks; neoscad binds it when read
   (`value::Object`), with the same results in every case the nightly was
   checked on. (experimental features)
+- The nightly's own OFF of `rotate_extrude-touch-edge.scad` (and
+  `-touch-vertex.scad`), re-imported with `import()` and exported as OBJ,
+  STL or 3MF: neoscad writes all 240 triangles, the nightly 120
+  (touch-edge) or 180 (touch-vertex); OFF, WRL and POV agree. The file
+  lists `-0` and `0` corners as separate vertices on the axis, so faces
+  may collapse once they merge; whether the nightly drops them on import
+  or in `tessellate_faces` was not investigated. Flag-independent (HEAD
+  `1013c57` does the same). Found checking `predictible-output`.
+- `predictible-output` sorts coloured faces with a stable sort where
+  upstream's `std::sort` leaves equal faces of different colours in an
+  unspecified order; only a mesh with duplicate faces can show it.
 
 ## macOS app
 - A viewport frame holds the main thread for about 2.6 ms (p50; p95

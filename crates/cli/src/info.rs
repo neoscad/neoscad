@@ -151,9 +151,15 @@ pub fn info() -> String {
             s.push_str(&format!("{name} version: {v}\n"));
         }
     }
-    // OpenSCAD lists the experimental features it has; neoscad implements
-    // none of them (see `--enable`).
-    s.push_str("Features: none\n");
+    // OpenSCAD lists its experimental features (`Feature::features`,
+    // comma-separated); neoscad lists the ones it implements, the same
+    // set `--enable` switches on without a warning.
+    let features: Vec<&str> = eval::Feature::ALL
+        .into_iter()
+        .filter(|f| f.supported())
+        .map(|f| f.name())
+        .collect();
+    s.push_str(&format!("Features: {}\n", features.join(", ")));
     let exe = std::env::current_exe().ok();
     let app = exe
         .as_deref()

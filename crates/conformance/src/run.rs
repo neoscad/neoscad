@@ -486,6 +486,13 @@ impl Env {
         let started = Instant::now();
         let run = self.spawn_and_wait(c, &input, &actual, &stderr_path, &out_dir);
         let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let run = run.and_then(|()| {
+            if c.suffix == "3mf" {
+                post_process_3mf(&actual)
+            } else {
+                Ok(())
+            }
+        });
         let mut o = match run {
             Err(reason) => fail(reason),
             Ok(()) => self.compare(c, &expected, &actual),
@@ -655,6 +662,48 @@ impl Env {
             }
         }
     }
+}
+
+/// `post_process_3mf` (test_cmdline_tool.py): replace a 3MF file with its
+/// model XML, with the parts that vary between runs and lib3mf versions
+/// normalised, so it compares as text against the expected file (which
+/// was written the same way).
+fn post_process_3mf(path: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|e| format!("3MF is not a zip: {e}"))?;
+    let mut xml = String::new();
+    zip.by_name("3D/3dmodel.model")
+        .map_err(|e| format!("3MF has no 3D/3dmodel.model: {e}"))?
+        .read_to_string(&mut xml)
+        .map_err(|e| format!("3MF model: {e}"))?;
+    // Python's `re.sub` patterns, in order; `\1` became `${1}`.
+    let subs: [(&str, &str); 6] = [
+        (
+            r#"UUID="[^"]*""#,
+            r#"UUID="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXX""#,
+        ),
+        (
+            r#"(<metadata[^>]*"CreationDate"[^>]*>)[0-9-]{10}T[0-9:]{8}Z(</metadata>)"#,
+            "${1}XXXX-XX-XXTXXXXXXXXZ${2}",
+        ),
+        (
+            r#"(<metadata[^>]*?)\s+preserve\s*=\s*"[^"]*"([^>]*>)"#,
+            "${1}${2}",
+        ),
+        (
+            r#"(<base name="[^"]*" displaycolor="[^"]*)..""#,
+            r#"${1}FF""#,
+        ),
+        (r#"\s*xmlns:[a-z]+\s*=\s*"[^"]+"\s*"#, ""),
+        (r#""\s*/>"#, r#"" />"#),
+    ];
+    for (pattern, with) in subs {
+        let re = Regex::new(pattern).map_err(|e| e.to_string())?;
+        xml = re.replace_all(&xml, with).into_owned();
+    }
+    fs::write(path, xml).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// `compare_json`: both files parsed, then compared as Python compares

@@ -23,19 +23,47 @@ pub fn as_polyset(g: &Geometry, scheme: &Scheme) -> Option<PolySet> {
     }
 }
 
-/// `export_off` (see `io::off::write`).
-pub fn off(ps: &PolySet, warnings: &mut Warnings) -> Vec<u8> {
-    io::off::write(ps.mesh(), warnings)
+/// `createSortedPolySet` (see [`io::mesh::sorted`]): the mesh every 3D
+/// writer but DXF/SVG/PDF writes under `--enable=predictible-output`.
+pub fn sorted(ps: &PolySet) -> PolySet {
+    let m = io::mesh::sorted(ps.mesh());
+    PolySet {
+        vertices: m.vertices,
+        faces: m.faces,
+        colors: m.colors,
+        color_indices: m.color_indices,
+        convex: ps.convex,
+        triangular: ps.triangular,
+    }
 }
 
-/// `export_obj`: always triangulated.
-pub fn obj(ps: &PolySet, warnings: &mut Warnings) -> Vec<u8> {
-    io::obj::write(ps.tessellate(warnings).mesh())
+/// `ps`, or its sorted copy when `sort` (`predictible-output`) is on.
+/// Borrowing in the default case keeps plain exports free of the copy.
+pub fn ordered(ps: &PolySet, sort: bool) -> std::borrow::Cow<'_, PolySet> {
+    if sort {
+        std::borrow::Cow::Owned(sorted(ps))
+    } else {
+        std::borrow::Cow::Borrowed(ps)
+    }
 }
 
-/// `export_stl`, ASCII or binary: always triangulated.
-pub fn stl(ps: &PolySet, binary: bool, warnings: &mut Warnings) -> Vec<u8> {
-    io::stl::write(ps.tessellate(warnings).mesh(), binary)
+/// `export_off` (see `io::off::write`); `sort` is `predictible-output`.
+pub fn off(ps: &PolySet, sort: bool, warnings: &mut Warnings) -> Vec<u8> {
+    io::off::write(ordered(ps, sort).mesh(), warnings)
+}
+
+/// `export_obj`: always triangulated. Upstream sorts after triangulating,
+/// so the sort sees (and orders) the triangles, not the polygons.
+pub fn obj(ps: &PolySet, sort: bool, warnings: &mut Warnings) -> Vec<u8> {
+    let tri = ps.tessellate(warnings);
+    io::obj::write(ordered(&tri, sort).mesh())
+}
+
+/// `export_stl`, ASCII or binary: always triangulated, then sorted when
+/// `sort` is on, as `append_stl` does.
+pub fn stl(ps: &PolySet, binary: bool, sort: bool, warnings: &mut Warnings) -> Vec<u8> {
+    let tri = ps.tessellate(warnings);
+    io::stl::write(ordered(&tri, sort).mesh(), binary)
 }
 
 /// `export_svg` with the given paint (`-O export-svg/...`).
@@ -52,9 +80,9 @@ pub fn pdf(
     io::pdf::write(&p.outlines, options, info)
 }
 
-/// `export_wrl` (see `io::wrl::write`).
-pub fn wrl(ps: &PolySet, warnings: &mut Warnings) -> Vec<u8> {
-    io::wrl::write(ps.mesh(), warnings)
+/// `export_wrl` (see `io::wrl::write`); `sort` is `predictible-output`.
+pub fn wrl(ps: &PolySet, sort: bool, warnings: &mut Warnings) -> Vec<u8> {
+    io::wrl::write(ordered(ps, sort).mesh(), warnings)
 }
 
 /// `export_dxf`.
@@ -132,9 +160,19 @@ mod tests {
     #[test]
     fn off_of_a_cube_matches_the_nightly() {
         let c = primitives::cube([1.0; 3], false);
-        let text = String::from_utf8(off(&c, &mut Vec::new())).unwrap();
+        let text = String::from_utf8(off(&c, false, &mut Vec::new())).unwrap();
         // `openscad -o c.off` on `cube(1);`, 2026.09.23 nightly.
         let expected = "OFF\n8 6 0\n0 0 0 \n1 0 0 \n0 1 0 \n1 1 0 \n0 0 1 \n1 0 1 \n0 1 1 \n1 1 1 \n4 4 5 7 6\n4 2 3 1 0\n4 0 1 5 4\n4 1 3 7 5\n4 3 2 6 7\n4 2 0 4 6\n";
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn sorted_off_of_a_cube_matches_the_nightly() {
+        let c = primitives::cube([1.0; 3], false);
+        let text = String::from_utf8(off(&c, true, &mut Vec::new())).unwrap();
+        // `openscad --enable=predictible-output -o c.off` on `cube(1);`,
+        // 2026.09.23 nightly.
+        let expected = "OFF\n8 6 0\n0 0 0 \n0 0 1 \n0 1 0 \n0 1 1 \n1 0 0 \n1 0 1 \n1 1 0 \n1 1 1 \n4 0 1 3 2\n4 0 2 6 4\n4 0 4 5 1\n4 1 5 7 3\n4 2 3 7 6\n4 4 6 7 5\n";
         assert_eq!(text, expected);
     }
 
@@ -167,7 +205,7 @@ M 10.7071,0.707107 L 11,-0 L 11,-10 L 10.7071,-10.7071 L 10,-11 L 0,-11
     #[test]
     fn binary_stl_layout() {
         let c = primitives::cube([1.0; 3], false);
-        let b = stl(&c, true, &mut Vec::new());
+        let b = stl(&c, true, false, &mut Vec::new());
         assert_eq!(b.len(), 84 + 12 * 50);
         assert_eq!(&b[80..84], &12u32.to_le_bytes());
         assert!(b.starts_with(b"OpenSCAD Model\n\0"));

@@ -106,7 +106,7 @@ pub fn params(p: &Plan<'_>) -> Value {
         "json": p.json,
         "rich": p.rich,
         "seed": p.seed,
-    "parts": p.parts,
+        "parts": p.parts,
         "enable": p.enable,
         "png": p.png.as_ref().map(|g| json!({
             "camera": g.camera, "viewall": g.viewall, "autocenter": g.autocenter,
@@ -394,6 +394,7 @@ pub fn execute(session: &session::Session, params: &Value, cwd: &Path) -> Outcom
             scheme.geometry_scheme(),
             input,
             &camera,
+            run.features,
         ),
         run,
         outputs: targets.clone(),

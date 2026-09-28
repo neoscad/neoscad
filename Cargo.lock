@@ -941,6 +941,7 @@ name = "neoscad-conformance"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "flate2",
  "nix",
  "png",
  "rayon",
@@ -948,6 +949,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "zip",
 ]
 
 [[package]]

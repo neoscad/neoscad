@@ -911,6 +911,10 @@ fn export(server: &Server, run: session::Run, params: &Value, w: &Writer, doc: &
         scheme.geometry_scheme(),
         &run.input,
         &run.camera,
+        // `"enable": ["predictible-output"]` (or `"all"`) reached
+        // `run.features` with the request's other features; the session
+        // applies it again from there when it encodes.
+        run.features.union(server.session.config().features),
     );
     struct Files<'a> {
         cwd: &'a Path,

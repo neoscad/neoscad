@@ -56,7 +56,7 @@ fn render_with(r: &Renderer, src: &str, force: bool) -> (Option<Geometry>, Vec<S
 fn off(src: &str) -> String {
     let (g, _) = render_with(&Renderer::new(), src, false);
     let ps = geom::export::as_polyset(&g.expect("geometry"), &geom::color::CORNFIELD).expect("3D");
-    String::from_utf8(geom::export::off(&ps, &mut Vec::new())).unwrap()
+    String::from_utf8(geom::export::off(&ps, false, &mut Vec::new())).unwrap()
 }
 
 /// Face colour counts, as `awk '{print $5,$6,$7,$8}' | sort | uniq -c`.
@@ -426,7 +426,7 @@ fn a_chain_renders_as_a_tree_does_at_any_thread_count() {
         assert!(msgs.is_empty(), "{msgs:?}");
         let ps =
             geom::export::as_polyset(&g.expect("geometry"), &geom::color::CORNFIELD).expect("3D");
-        geom::export::off(&ps, &mut Vec::new())
+        geom::export::off(&ps, false, &mut Vec::new())
     };
     let first = forced(chain);
     assert!(forced(&tree) == first, "the tree exported different bytes");
@@ -473,7 +473,7 @@ translate([0, 30, 0]) polyhedron(
         let (g, _) = render_with(&Renderer::new(), src, false);
         let ps =
             geom::export::as_polyset(&g.expect("geometry"), &geom::color::CORNFIELD).expect("3D");
-        geom::export::stl(&ps, true, &mut Vec::new())
+        geom::export::stl(&ps, true, false, &mut Vec::new())
     };
     let first = (stl(src), stl(solo));
     for threads in [1, 2, 8] {

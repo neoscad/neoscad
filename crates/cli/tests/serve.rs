@@ -176,6 +176,30 @@ fn the_protocol_round_trips_over_stdio() {
     assert_eq!(x["bytes"], stl.len());
     assert!(stl.starts_with(b"solid OpenSCAD_Model"));
 
+    // `enable: ["predictible-output"]` sorts the file's vertices.
+    let x = s.result(
+        "export",
+        json!({"path": "m.scad", "cwd": d, "output": "m.off", "enable": ["predictible-output"]}),
+    );
+    assert_eq!(x["exit_code"], 0);
+    let off = std::fs::read_to_string(d.join("m.off")).unwrap();
+    let n: usize = off
+        .lines()
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let vertices: Vec<Vec<f64>> = off
+        .lines()
+        .skip(2)
+        .take(n)
+        .map(|l| l.split_whitespace().map(|t| t.parse().unwrap()).collect())
+        .collect();
+    assert!(vertices.windows(2).all(|w| w[0] < w[1]), "{off}");
+
     // The other formats: the messages, the tree, the program, an image.
     s.result(
         "update",
@@ -343,7 +367,12 @@ fn served_outputs_are_the_direct_ones() {
     let mut expected_requests = 0;
     for (name, _, formats) in models {
         for f in *formats {
-            for extra in [&[][..], &["-D", "$fn=12", "--render=force"][..]] {
+            for extra in [
+                &[][..],
+                &["-D", "$fn=12", "--render=force"][..],
+                // Delegated with `enable`, so the server sorts too.
+                &["--enable=predictible-output"][..],
+            ] {
                 let out_direct = format!("direct.{f}");
                 let out_served = format!("served.{f}");
                 let mut a = vec![*name, "-o", out_direct.as_str()];

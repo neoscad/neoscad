@@ -196,7 +196,7 @@ fn many_coloured_meshes_export_identically_every_time() {
         let ps =
             geom::export::as_polyset(&g.expect("geometry"), &geom::color::CORNFIELD).expect("3D");
         assert!(ps.colors.len() > 64, "{} colours", ps.colors.len());
-        geom::export::off(&ps, &mut Vec::new())
+        geom::export::off(&ps, false, &mut Vec::new())
     };
     let first = export();
     for run in 0..12 {

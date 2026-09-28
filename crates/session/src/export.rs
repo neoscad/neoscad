@@ -87,6 +87,14 @@ pub struct Settings {
     pub creation_date: String,
     /// The command line's camera, which POV files record.
     pub pov_camera: Option<io::pov::PovCamera>,
+    /// OpenSCAD's experimental `predictible-output` (`--enable`): the
+    /// STL, OBJ, 3MF, OFF, WRL and POV writers sort the mesh's vertices
+    /// and faces first ([`geom::export::sorted`]), so files are stable
+    /// across kernels and versions. Off, as in OpenSCAD, by default.
+    /// [`crate::Session::export`] sets it from the request's features
+    /// ([`crate::Run::features`] and [`crate::Config::features`]); only a
+    /// host calling [`encode`] directly sets it itself.
+    pub predictible_output: bool,
 }
 
 /// One encoded file and what its encoding printed.
@@ -135,13 +143,14 @@ pub fn encode(
             let ps = mesh.get_or_insert_with(|| {
                 geom::export::as_polyset(root, &s.scheme).expect("3D geometry has a mesh")
             });
+            let sort = s.predictible_output;
             match format {
-                Format::AsciiStl => geom::export::stl(ps, false, warnings),
-                Format::BinaryStl => geom::export::stl(ps, true, warnings),
-                Format::Off => geom::export::off(ps, warnings),
-                Format::Wrl => geom::export::wrl(ps, warnings),
+                Format::AsciiStl => geom::export::stl(ps, false, sort, warnings),
+                Format::BinaryStl => geom::export::stl(ps, true, sort, warnings),
+                Format::Off => geom::export::off(ps, sort, warnings),
+                Format::Wrl => geom::export::wrl(ps, sort, warnings),
                 Format::Pov => io::pov::write(
-                    ps.mesh(),
+                    geom::export::ordered(ps, sort).mesh(),
                     &io::pov::PovOptions {
                         title: &s.title,
                         default_color: s.scheme.face_front,
@@ -152,9 +161,11 @@ pub fn encode(
                     // `export_3mf` with the `-O export-3mf/...` settings:
                     // the mesh is triangulated first.
                     warnings.extend(s.threemf_warning.iter().cloned());
+                    // `append_polyset` sorts the triangulated mesh, so the
+                    // colour entries follow the sorted face order too.
                     let tri = ps.tessellate(warnings);
                     let (data, msgs) = io::threemf::write_with(
-                        tri.mesh(),
+                        geom::export::ordered(&tri, sort).mesh(),
                         &io::threemf::WriteOptions {
                             title: &s.title,
                             creation_date: &s.creation_date,
@@ -170,7 +181,7 @@ pub fn encode(
                     }
                     data
                 }
-                _ => geom::export::obj(ps, warnings),
+                _ => geom::export::obj(ps, sort, warnings),
             }
         }
     };

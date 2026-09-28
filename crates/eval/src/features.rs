@@ -80,6 +80,7 @@ impl Feature {
             Feature::TextMetrics
                 | Feature::ImportFunction
                 | Feature::ObjectFunction
+                | Feature::PredictibleOutput
                 | Feature::VectorSwizzle
         )
     }

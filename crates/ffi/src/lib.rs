@@ -401,6 +401,7 @@ fn export_settings(run: &Run, scheme: geom::color::Scheme) -> session::export::S
         source_path: run.input.clone(),
         creation_date: iso8601_now(),
         pov_camera: None,
+        predictible_output: run.features.has(eval::Feature::PredictibleOutput),
     }
 }
 

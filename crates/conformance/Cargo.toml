@@ -19,6 +19,10 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# `post_process_3mf`: a 3MF export compares as the XML inside its zip, read
+# with the same pure-Rust deflate backend as crates/io.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 
 # `conformance bench` reports each run's CPU time from `getrusage` of the
 # waited-for child, through nix's safe wrapper (the workspace forbids

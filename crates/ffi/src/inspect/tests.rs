@@ -186,6 +186,49 @@ fn a_2d_model_measures_as_2d() {
     assert!(m.measurement.is_none());
 }
 
+/// `predictible-output` in `RunOptions::enable` sorts the exported mesh,
+/// as `--enable` does on the command line; without it the file is in the
+/// kernel's order, as OpenSCAD writes it by default.
+#[test]
+fn exports_sort_with_predictible_output() {
+    let dir = temp_dir("export-sorted");
+    let (c, doc) = core("translate([2, 0, 0]) cube(1); cube(1);");
+    let off = |name: &str, sort: bool| {
+        let target = dir.join(name);
+        let r = c
+            .export_file(
+                doc.clone(),
+                target.to_string_lossy().into(),
+                ExportOptions::default(),
+                RunOptions {
+                    enable: if sort {
+                        vec!["predictible-output".into()]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(r.exit_code, 0, "{}", r.console);
+        std::fs::read_to_string(&target).unwrap()
+    };
+    let sorted = off("sorted.off", true);
+    let vertices: Vec<&str> = sorted.lines().skip(2).take(16).collect();
+    let mut expected = vertices.clone();
+    expected.sort_by(|a, b| {
+        let p =
+            |s: &str| -> Vec<f64> { s.split_whitespace().map(|t| t.parse().unwrap()).collect() };
+        p(a).partial_cmp(&p(b)).unwrap()
+    });
+    assert_eq!(vertices, expected);
+    assert_eq!(vertices[0], "0 0 0 ");
+    assert_ne!(off("plain.off", false), sorted);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn exports_write_binary_stl_and_3mf() {
     let dir = temp_dir("export");

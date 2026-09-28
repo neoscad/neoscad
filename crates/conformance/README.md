@@ -243,8 +243,11 @@ upstream change that needs new support fails loudly.
 Each case gets a tier (see `src/manifest.rs`) and a runner:
 
 - `text`: tiers 0-2 (`.ast`, `.echo`, `.csg`, `.term`), compared exactly,
-  and the tier 3 `export-param` JSON, compared as parsed JSON
-  (`compare_json`).
+  the tier 3 `export-param` JSON, compared as parsed JSON
+  (`compare_json`), and the tier 3 exact mesh files of the
+  `predictible-output` export tests (STL, OBJ, 3MF, POV), compared
+  exactly; a 3MF is first reduced to its model XML as
+  `post_process_3mf` does.
 - `geometry`: tier 3 PNG tests (direct `--render` and
   `export_import_pngtest.py`) and `stlexportsanitytest.py`; see "Tier 3"
   below.
@@ -258,7 +261,10 @@ Each case gets a tier (see `src/manifest.rs`) and a runner:
   runs as a `script` case.
 - `pending`, with a `pending_reason`: a case with no runner yet (none at
   present).
-- `skip`, with a reason: experimental features, the CGAL backend, tests
+- `skip`, with a reason: experimental features neoscad does not
+  implement (a case runs when every feature it enables is in
+  `SUPPORTED_FEATURES`, `src/manifest.rs`; the colour round trips
+  registered EXPERIMENTAL with no `--enable` run too), the CGAL backend, tests
   disabled upstream, tests tagged `Bugs`, and OpenSCAD's harness self-test.
 
 In `args`, `{REF}` stands for the reference checkout and `{OPENSCAD}` for
