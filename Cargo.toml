@@ -48,10 +48,11 @@ todo = "warn"
 # Panics unwind (Cargo cannot set `panic` per binary): `neoscad serve`
 # answers a request that panics with a JSON-RPC internal error and keeps
 # serving, which `abort` made impossible (one bad request ended the server
-# and every client's warm caches). Measured against `abort` in phase 7b
-# (best of 5, `conformance bench`): cold start 4.2 -> 4.3 ms, geometry-bound
-# models unchanged, evaluation-bound BOSL2 models 5-8% slower
-# (fractal_tree 5.87 -> 6.33 s), binary 14.9 -> 17.0 MB.
+# and every client's warm caches). The cost, measured A/B against `abort`
+# (`docs/audits/unwind.md`, `docs/architecture.md` "Panics"): nothing at
+# cold start, about 1% on geometry-bound runs, 5-9% on evaluation-bound
+# BOSL2 models after D1, up to 12% on call-heavy code. The unwind
+# `neoscad` binary is 18.8 MB (18,785,336 bytes, September 2026).
 [profile.release]
 opt-level = 3
 lto = "thin"

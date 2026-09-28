@@ -6,9 +6,12 @@
 //!   machine down. `--limit NAME=VALUE` changes one (`off` removes it).
 //! - The OpenSCAD-compatible command line starts unlimited, as OpenSCAD
 //!   is; `--limit` sets limits for that run (which then stays in-process).
-//! - A served request may carry a `limits` object; the command line's
-//!   `cli.*` requests carry none and so run unlimited, as they would in
-//!   the process.
+//! - A served request may carry a `limits` object. The command line never
+//!   sends one on its `cli.*` requests (a run with `--limit` is not
+//!   delegated), and the server fills in an explicit unlimited one
+//!   (`serve::cli`), so a delegated run is unlimited as it would be in
+//!   the process. Leaving `limits` absent is not enough: the session
+//!   would then apply the server's own `Limits::AGENT`.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

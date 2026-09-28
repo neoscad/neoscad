@@ -1,7 +1,14 @@
-//! The long-lived NeoSCAD core: the one API every client uses. The command
-//! line's own subcommands, `neoscad serve` (and through it the command
-//! line's server mode and the future MCP server), the macOS app (through
-//! UniFFI) and the WASM build all drive a [`Session`].
+//! The long-lived NeoSCAD core: the API every long-lived client uses.
+//! `neoscad serve` holds one for all its clients, including `neoscad mcp`
+//! (which calls serve's `Local` in-process) and the one-shot command line's
+//! `cli.*` requests when it delegates to a running server. `neoscad lsp`
+//! holds its own, the macOS app drives one through UniFFI (`crates/ffi`,
+//! which also runs the `lsp` server over it), and the WASM check
+//! (`crates/wasm-check`) builds one. The command line's `snapshot`,
+//! `check`, `measure`, `format`, `docs` and `test` subcommands make a
+//! short-lived one when they run in-process. The OpenSCAD-compatible
+//! one-shot export (`crates/cli/src/run.rs`) does not: it runs its own
+//! pipeline and borrows only this crate's encoders and statistics.
 //!
 //! A session holds:
 //!
