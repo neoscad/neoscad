@@ -460,6 +460,56 @@ fn unchanged_statements_are_replayed() {
 }
 
 #[test]
+fn values_digest_by_content_and_shared_trees_digest_fast() {
+    // A variable's digest walks its value. `t` below has 2^40 paths but 41
+    // distinct lists; walking it path by path never finished. And the
+    // digest is of the content alone: an equal value built another way
+    // (unshared, as a literal, from other pieces) replays the statements
+    // that read it, and a different one does not.
+    let tree = "function f(v, n) = n == 0 ? v : f([v, v], n - 1);\n";
+    let long = "a".repeat(70);
+    let v = |t: &str| format!("{tree}t = {t};\ncube(len(t));\nsphere(1);");
+    let versions_text = [
+        v("f([1], 40)"),
+        v("f([1], 40)"),
+        v("f([2], 40)"),
+        v("f([1], 3)"),
+        // The same content with no sharing: replays.
+        v("[[[[1], [1]], [[1], [1]]], [[[1], [1]], [[1], [1]]]]"),
+        // Long lists and long strings (hashed on their own), rebuilt.
+        v("[for (i = [0:19]) [i, str(\"x\", i)]]"),
+        v("concat([for (i = [0:9]) [i, str(\"x\", i)]], [for (i = [10:19]) [i, str(\"x\", i)]])"),
+        v(&format!("[\"{long}\", [\"{long}\"]]")),
+        v(&format!(
+            "[str(\"{}\", \"{}\"), [\"{long}\"]]",
+            &long[..35],
+            &long[35..]
+        )),
+        v(&format!("[\"{long}b\", [\"{long}\"]]")),
+    ];
+    let texts: Vec<&str> = versions_text.iter().map(String::as_str).collect();
+    let t0 = std::time::Instant::now();
+    let s = versions(&[], &texts);
+    assert!(t0.elapsed().as_secs_f64() < 20.0, "{:?}", t0.elapsed());
+    let reuse: Vec<_> = s.iter().map(|s| (s.reused, s.recorded)).collect();
+    assert_eq!(
+        reuse,
+        [
+            (0, 2),
+            (2, 0),
+            (1, 1),
+            (1, 1),
+            (2, 0),
+            (1, 1),
+            (2, 0),
+            (1, 1),
+            (2, 0),
+            (1, 1)
+        ]
+    );
+}
+
+#[test]
 fn moved_statements_keep_their_positions_and_indices() {
     versions(
         &[],

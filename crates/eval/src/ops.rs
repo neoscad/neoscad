@@ -11,10 +11,16 @@
 //! is: mixed types say `undefined operation (number < string)` while
 //! `undef < undef` says `operation undefined (undefined < undefined)`.
 
+use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use lang::ast::BinaryOp;
 
 use crate::fma::mul_add;
-use crate::value::{Type, Value, Vector};
+use crate::limits::Guard;
+use crate::sym::FxBuild;
+use crate::value::{Str, Type, Value, Vector};
 
 /// Why an operation produced `undef`: messages joined with `"\n\t"` when
 /// printed.
@@ -54,23 +60,277 @@ fn elem(r: OpResult) -> Value {
     r.unwrap_or(Value::Undef)
 }
 
+// --- walking two lists ----------------------------------------------------
+//
+// `==` and `<` on lists recurse element by element, as `VectorType`'s
+// operators do. Lists share their elements, so a tree of depth `d` whose
+// halves are one list (`t = [t, t]`, built by a tail-recursive function in
+// a few dozen steps and costing nothing) has 2^d paths, and a plain walk
+// takes 2^d steps: `t == t` at depth 28 ran for seconds, deeper ones for
+// hours, inside one operator call that neither the time limit nor a
+// cancel could stop. OpenSCAD walks it the same way; only the time differs.
+//
+// So the walk is iterative (lists can nest deeper than the stack allows)
+// and, once it has taken more than `MEMO_AFTER` steps, it remembers which
+// pairs of lists (by address) it has already walked to the end without
+// deciding anything, and skips them when they come round again: a shared
+// tree then costs its unique pairs, not its paths. It remembers only
+// undecided pairs because a decided one (`==` false, `<` either way, or an
+// undefined element comparison) decides the whole comparison, which ends
+// at once. It polls the request's cancel flag and limits every `POLL`
+// steps, and gives up with `Stopped` when they say so.
+//
+// `Rc::ptr_eq` cannot short-circuit `x == x`: `[0/0] == [0/0]` is false in
+// OpenSCAD even for one list compared with itself (NaN is unequal to
+// itself), so a list's equality with itself is its content's, and is only
+// remembered once walked.
+
+/// Steps a walk takes before it starts remembering pairs: comparisons of
+/// ordinary lists (points, matrices) finish well before this and never pay
+/// for the hashing.
+const MEMO_AFTER: u64 = 1 << 12;
+
+/// Steps between polls of the cancel flag and limits (a poll reads the
+/// clock).
+const POLL: u64 = 1 << 12;
+
+/// Strings this long are compared once per pair (see [`Walk::strings`]).
+const LONG_STR: usize = 64;
+
+/// A comparison gave up: the request was cancelled, ran out of time, or
+/// passed the memory limit. The caller reports it (`check_limits` then
+/// `check_interrupt`, which name the limit as any other check would).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stopped;
+
+/// What a long walk over two values polls to know it should stop.
+#[derive(Clone, Copy)]
+pub struct Stop<'a> {
+    interrupt: Option<&'a AtomicBool>,
+    guard: Option<&'a Guard>,
+}
+
+impl<'a> Stop<'a> {
+    /// Stop on the request's cancel flag, and on its time limit when it has
+    /// a guard.
+    pub fn new(interrupt: Option<&'a AtomicBool>, guard: Option<&'a Guard>) -> Self {
+        Stop { interrupt, guard }
+    }
+
+    /// Stop only on the memory limit, for callers without the request's
+    /// flags at hand. The memory limit trips the guard from the thread's
+    /// count ([`crate::limits::live`]), so it still stops the request.
+    pub const MEMORY_ONLY: Stop<'static> = Stop {
+        interrupt: None,
+        guard: None,
+    };
+
+    /// Whether to give up. `own` is the bytes the walk has allocated for
+    /// itself (its stack and the pairs it remembers), which are nobody's
+    /// values but count against the memory limit all the same: a walk of
+    /// millions of pairs would otherwise grow unseen until the time limit.
+    ///
+    /// Running out of time is left for the caller to record (the guard is
+    /// not tripped here): the evaluator's own check then reports the limit
+    /// with the call stack, where a tripped guard would unwind as a bare
+    /// interruption.
+    fn stopped(&self, own: u64) -> bool {
+        crate::limits::live::passes(own)
+            || self.interrupt.is_some_and(|f| f.load(Ordering::Relaxed))
+            || self.guard.is_some_and(Guard::over_time)
+    }
+}
+
+/// Two lists being walked side by side, and the next index.
+struct Pair<'v> {
+    x: &'v [Value],
+    y: &'v [Value],
+    i: usize,
+}
+
+impl<'v> Pair<'v> {
+    fn new(x: &'v Vector, y: &'v Vector) -> Self {
+        Pair {
+            x: x.as_slice(),
+            y: y.as_slice(),
+            i: 0,
+        }
+    }
+
+    /// The pair's identity for [`Walk`]'s memory: the lists' element
+    /// buffers. Two live lists never share a buffer, and every empty list
+    /// may have the same dangling one, which is harmless: empty lists have
+    /// one content, so remembering one pair of them is right for all.
+    fn key(&self) -> (usize, usize) {
+        (self.x.as_ptr() as usize, self.y.as_ptr() as usize)
+    }
+
+    /// The next pair of elements, up to the shorter list's end.
+    fn next(&mut self) -> Option<(&'v Value, &'v Value)> {
+        let i = self.i;
+        let pq = (self.x.get(i)?, self.y.get(i)?);
+        self.i += 1;
+        Some(pq)
+    }
+}
+
+/// The state of one walk: the pairs of lists entered and not finished,
+/// the undecided pairs it remembers, and its step count.
+struct Walk<'v, 's> {
+    top: Pair<'v>,
+    stack: Vec<Pair<'v>>,
+    done: HashSet<(usize, usize), FxBuild>,
+    steps: u64,
+    next_poll: u64,
+    stop: Stop<'s>,
+}
+
+impl<'v, 's> Walk<'v, 's> {
+    fn new(x: &'v Vector, y: &'v Vector, stop: Stop<'s>) -> Self {
+        Walk {
+            top: Pair::new(x, y),
+            stack: Vec::new(),
+            done: HashSet::default(),
+            steps: 0,
+            next_poll: POLL,
+            stop,
+        }
+    }
+
+    /// The next pair of elements of the innermost pair of lists, or `None`
+    /// when it has run out (see [`Walk::leave`]).
+    fn next(&mut self) -> Result<Option<(&'v Value, &'v Value)>, Stopped> {
+        self.steps += 1;
+        if self.steps >= self.next_poll {
+            self.next_poll = self.steps + POLL;
+            let own = self.done.capacity() as u64 * 24
+                + self.stack.capacity() as u64 * std::mem::size_of::<Pair>() as u64;
+            if self.stop.stopped(own) {
+                return Err(Stopped);
+            }
+        }
+        Ok(self.top.next())
+    }
+
+    /// Walk into a pair of lists, unless it is one already walked to the
+    /// end undecided.
+    fn enter(&mut self, x: &'v Vector, y: &'v Vector) {
+        let p = Pair::new(x, y);
+        if self.steps >= MEMO_AFTER && self.done.contains(&p.key()) {
+            return;
+        }
+        self.stack.push(std::mem::replace(&mut self.top, p));
+    }
+
+    /// The innermost pair of lists ran out undecided: remember it, and go
+    /// back to its parent. False when it was the outermost.
+    fn leave(&mut self) -> bool {
+        if self.steps >= MEMO_AFTER {
+            self.done.insert(self.top.key());
+        }
+        match self.stack.pop() {
+            Some(p) => {
+                self.top = p;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The order of two strings' bytes. A long string can be shared by
+    /// every element of a list (`[for (i = [0:1e5]) s]`) and compared with
+    /// another one equal to it at each of them, so long strings found equal
+    /// are remembered by pair (their buffers, which no two live strings
+    /// share) from the first time, and the steps count their length, so
+    /// that the polls keep their pace.
+    fn strings(&mut self, a: &Str, b: &Str) -> std::cmp::Ordering {
+        let (a, b) = (a.as_bytes(), b.as_bytes());
+        if a.len() < LONG_STR || b.len() < LONG_STR {
+            return a.cmp(b);
+        }
+        let key = (a.as_ptr() as usize, b.as_ptr() as usize);
+        if key.0 == key.1 || self.done.contains(&key) {
+            return std::cmp::Ordering::Equal;
+        }
+        self.steps += (a.len().min(b.len()) / LONG_STR) as u64;
+        let o = a.cmp(b);
+        if o.is_eq() {
+            self.done.insert(key);
+        }
+        o
+    }
+
+    /// The indices of the elements being compared, innermost first.
+    fn path(&self) -> impl Iterator<Item = usize> + '_ {
+        std::iter::once(&self.top)
+            .chain(self.stack.iter().rev())
+            .map(|p| p.i - 1)
+    }
+}
+
 // --- equality -------------------------------------------------------------
 
-/// `==`, which is always defined.
+/// `==`, which is always defined. Stops only on the memory limit (see
+/// [`Stop::MEMORY_ONLY`]), when the answer is `false` and meaningless.
 pub fn equals(a: &Value, b: &Value) -> bool {
+    equals_in(a, b, Stop::MEMORY_ONLY).unwrap_or(false)
+}
+
+/// [`equals`], stopping when `stop` says so.
+pub fn equals_in(a: &Value, b: &Value, stop: Stop<'_>) -> Result<bool, Stopped> {
+    match (a, b) {
+        (Value::Vector(x), Value::Vector(y)) => vectors_equal(x, y, stop),
+        _ => Ok(scalars_equal(a, b)),
+    }
+}
+
+/// `==` on anything but two lists.
+fn scalars_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Undef, Value::Undef) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Number(x), Value::Number(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x.as_bytes() == y.as_bytes(),
-        (Value::Vector(x), Value::Vector(y)) => {
-            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| equals(p, q))
-        }
         (Value::Range(x), Value::Range(y)) => x.equals(y),
         // Function literals are equal only to themselves (FunctionType
         // compares addresses).
         (Value::Function(x), Value::Function(y)) => Rc::ptr_eq(x, y),
         _ => false,
+    }
+}
+
+/// `VectorType::operator==`: equal lengths and equal elements. (OpenSCAD
+/// compares the common elements before the lengths; as `==` is never
+/// undefined, the order cannot show.)
+fn vectors_equal(x: &Vector, y: &Vector, stop: Stop<'_>) -> Result<bool, Stopped> {
+    if x.len() != y.len() {
+        return Ok(false);
+    }
+    let mut w = Walk::new(x, y, stop);
+    loop {
+        match w.next()? {
+            None => {
+                if !w.leave() {
+                    return Ok(true);
+                }
+            }
+            Some((Value::Vector(p), Value::Vector(q))) => {
+                if p.len() != q.len() {
+                    return Ok(false);
+                }
+                w.enter(p, q);
+            }
+            Some((Value::Str(p), Value::Str(q))) => {
+                if w.strings(p, q).is_ne() {
+                    return Ok(false);
+                }
+            }
+            Some((p, q)) => {
+                if !scalars_equal(p, q) {
+                    return Ok(false);
+                }
+            }
+        }
     }
 }
 
@@ -95,8 +355,39 @@ impl Cmp {
     }
 }
 
-/// `<`, `<=`, `>`, `>=`.
+#[cfg(test)]
+/// `<`, `<=`, `>`, `>=`. Stops only on the memory limit (see
+/// [`Stop::MEMORY_ONLY`]), when the answer is `false` and meaningless.
 pub fn compare(a: &Value, b: &Value, op: Cmp) -> Result<bool, Why> {
+    compare_in(a, b, op, Stop::MEMORY_ONLY).unwrap_or(Ok(false))
+}
+
+/// [`compare`], stopping when `stop` says so.
+pub fn compare_in(
+    a: &Value,
+    b: &Value,
+    op: Cmp,
+    stop: Stop<'_>,
+) -> Result<Result<bool, Why>, Stopped> {
+    let (Value::Vector(x), Value::Vector(y)) = (a, b) else {
+        return Ok(compare_scalars(a, b, op));
+    };
+    // `>` is `y < x`, and `<=` and `>=` negate `>` and `<`
+    // (`VectorType::operator<=`), so every one is a `<` walk, with the
+    // operands swapped for `>` and `<=`. The order matters beyond the
+    // result: an undefined element comparison is reported with the types
+    // in the walk's order (`[1, "a"] <= [1, 2]` says `number < string`).
+    let (x, y, less) = match op {
+        Cmp::Less => (x, y, true),
+        Cmp::GreaterEqual => (x, y, false),
+        Cmp::Greater => (y, x, true),
+        Cmp::LessEqual => (y, x, false),
+    };
+    Ok(vector_order(x, y, stop)?.map(|o| (o == Order::Less) == less))
+}
+
+/// The ordering operators on anything but two lists.
+fn compare_scalars(a: &Value, b: &Value, op: Cmp) -> Result<bool, Why> {
     match (a, b) {
         (Value::Bool(x), Value::Bool(y)) => Ok(match op {
             Cmp::Less => x < y,
@@ -119,12 +410,6 @@ pub fn compare(a: &Value, b: &Value, op: Cmp) -> Result<bool, Why> {
                 Cmp::GreaterEqual => x >= y,
             })
         }
-        (Value::Vector(x), Value::Vector(y)) => match op {
-            Cmp::Less => vec_less(x, y),
-            Cmp::Greater => vec_less(y, x),
-            Cmp::LessEqual => vec_less(y, x).map(|r| !r),
-            Cmp::GreaterEqual => vec_less(x, y).map(|r| !r),
-        },
         (Value::Range(x), Value::Range(y)) => Ok(match op {
             Cmp::Less => x.less(y, false),
             Cmp::LessEqual => x.less(y, true),
@@ -143,20 +428,87 @@ pub fn compare(a: &Value, b: &Value, op: Cmp) -> Result<bool, Why> {
     }
 }
 
-/// `VectorType::operator<`: lexicographic, undefined if an element
-/// comparison is.
-fn vec_less(x: &Vector, y: &Vector) -> Result<bool, Why> {
-    for (i, (p, q)) in x.iter().zip(y.iter()).enumerate() {
-        match compare(p, q, Cmp::Less) {
-            Err(w) => return Err(w.append(format!("in vector comparison at index {i}"))),
-            Ok(true) => return Ok(true),
-            Ok(false) => {}
+/// Where a `<` walk of two lists ends up: the first is less, the second
+/// is less, or neither (equal, or unordered like NaN).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Order {
+    Less,
+    Greater,
+    Neither,
+}
+
+/// `VectorType::operator<`, as one walk.
+///
+/// OpenSCAD's `x < y` asks, at each index, `x[i] < y[i]` (true: less;
+/// undefined: undefined, with the index appended) and then `y[i] < x[i]`
+/// (true: not less), and at the end compares the lengths. With nested
+/// lists that is two recursive walks per level, 2^depth steps even for a
+/// list nested thirty deep with no sharing at all. Both questions are
+/// answered by one walk that says which side is less, if either: the
+/// reverse comparison meets the same element pairs in the same order,
+/// swapped, so it decides at the same index the other way, and it is
+/// undefined exactly when the forward one is (undefinedness depends only
+/// on the two types), which is why OpenSCAD's `y[i] < x[i]` never has an
+/// undefined result to discard.
+fn vector_order(x: &Vector, y: &Vector, stop: Stop<'_>) -> Result<Result<Order, Why>, Stopped> {
+    let mut w = Walk::new(x, y, stop);
+    loop {
+        let (p, q) = match w.next()? {
+            Some(pq) => pq,
+            None => {
+                // The common elements tie: the shorter list is less.
+                let (n, m) = (w.top.x.len(), w.top.y.len());
+                if n != m {
+                    return Ok(Ok(if n < m { Order::Less } else { Order::Greater }));
+                }
+                if !w.leave() {
+                    return Ok(Ok(Order::Neither));
+                }
+                continue;
+            }
+        };
+        match (p, q) {
+            (Value::Vector(p), Value::Vector(q)) => {
+                w.enter(p, q);
+                continue;
+            }
+            (Value::Str(p), Value::Str(q)) => match w.strings(p, q) {
+                std::cmp::Ordering::Less => return Ok(Ok(Order::Less)),
+                std::cmp::Ordering::Greater => return Ok(Ok(Order::Greater)),
+                std::cmp::Ordering::Equal => continue,
+            },
+            _ => {}
         }
-        if compare(q, p, Cmp::Less).unwrap_or(false) {
-            return Ok(false);
+        match compare_scalars(p, q, Cmp::Less) {
+            Ok(true) => return Ok(Ok(Order::Less)),
+            // As undefinedness is symmetric, this is defined.
+            Ok(false) if compare_scalars(q, p, Cmp::Less) == Ok(true) => {
+                return Ok(Ok(Order::Greater));
+            }
+            Ok(false) => {}
+            Err(why) => {
+                let why = w.path().fold(why, |why, i| {
+                    why.append(format!("in vector comparison at index {i}"))
+                });
+                return Ok(Err(why));
+            }
         }
     }
-    Ok(x.len() < y.len())
+}
+
+/// The comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`), stopping
+/// when `stop` says so.
+pub fn relation(op: BinaryOp, a: &Value, b: &Value, stop: Stop<'_>) -> Result<OpResult, Stopped> {
+    let cmp = match op {
+        BinaryOp::Equal => return Ok(Ok(Value::Bool(equals_in(a, b, stop)?))),
+        BinaryOp::NotEqual => return Ok(Ok(Value::Bool(!equals_in(a, b, stop)?))),
+        BinaryOp::Less => Cmp::Less,
+        BinaryOp::LessEqual => Cmp::LessEqual,
+        BinaryOp::Greater => Cmp::Greater,
+        BinaryOp::GreaterEqual => Cmp::GreaterEqual,
+        _ => unreachable!("not a comparison: {op:?}"),
+    };
+    Ok(compare_in(a, b, cmp, stop)?.map(Value::Bool))
 }
 
 // --- arithmetic -----------------------------------------------------------
@@ -555,6 +907,30 @@ mod tests {
         );
         assert!(equals(&Value::Undef, &Value::Undef));
         assert!(!equals(&n(f64::NAN), &n(f64::NAN)));
+    }
+
+    #[test]
+    fn shared_trees_compare_by_their_distinct_lists() {
+        // 2^60 paths each; built separately, so no pair of lists is one.
+        let tree = |leaf: Value| {
+            let mut t = leaf;
+            for _ in 0..60 {
+                t = Value::vector(vec![t.clone(), t]);
+            }
+            t
+        };
+        let (a, b, c) = (tree(v(&[1.0])), tree(v(&[1.0])), tree(v(&[2.0])));
+        assert!(equals(&a, &a) && equals(&a, &b) && !equals(&a, &c));
+        assert_eq!(compare(&a, &b, Cmp::Less), Ok(false));
+        assert_eq!(compare(&a, &b, Cmp::LessEqual), Ok(true));
+        assert_eq!(compare(&a, &c, Cmp::Less), Ok(true));
+        assert_eq!(compare(&c, &a, Cmp::GreaterEqual), Ok(true));
+        // NaN is unequal to itself, so a list holding one is too, even
+        // compared with itself.
+        let nan = tree(v(&[f64::NAN]));
+        assert!(!equals(&nan, &nan));
+        let e = compare(&tree(Value::Undef), &tree(Value::Undef), Cmp::Less).unwrap_err();
+        assert_eq!(e.0.len(), 61, "the message and one index per level");
     }
 
     #[test]

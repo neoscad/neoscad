@@ -14,7 +14,7 @@ use crate::Camera;
 use crate::context::{Ctx, CtxKind, ScopeRef};
 use crate::message::{Loc, Message, Output, Pending, R, Unwind, UnwindKind};
 use crate::node::{Node, NodeKind};
-use crate::ops::{self, Bitwise, Cmp};
+use crate::ops::{self, Bitwise};
 use crate::resolve::{BUILTIN_REGION, Cand, NO_SLOT, Ref, Region};
 use crate::rng::Mt19937;
 use crate::sym::{FxBuild, Sym, Syms};
@@ -1695,12 +1695,24 @@ impl<'a> Evaluator<'a> {
             BinaryOp::Divide => ops::div(a, b),
             BinaryOp::Modulo => ops::rem(a, b),
             BinaryOp::Exponent => ops::pow(a, b),
-            BinaryOp::Less => ops::compare(a, b, Cmp::Less).map(Value::Bool),
-            BinaryOp::LessEqual => ops::compare(a, b, Cmp::LessEqual).map(Value::Bool),
-            BinaryOp::Greater => ops::compare(a, b, Cmp::Greater).map(Value::Bool),
-            BinaryOp::GreaterEqual => ops::compare(a, b, Cmp::GreaterEqual).map(Value::Bool),
-            BinaryOp::Equal => Ok(Value::Bool(ops::equals(a, b))),
-            BinaryOp::NotEqual => Ok(Value::Bool(!ops::equals(a, b))),
+            BinaryOp::Less
+            | BinaryOp::LessEqual
+            | BinaryOp::Greater
+            | BinaryOp::GreaterEqual
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual => {
+                // A comparison of two shared list trees is one long call:
+                // it polls the request's flags and stops (see `ops`).
+                let (i, g) = (self.opts.interrupt.as_deref(), self.opts.guard.as_deref());
+                match ops::relation(op, a, b, ops::Stop::new(i, g)) {
+                    Ok(r) => r,
+                    Err(ops::Stopped) => {
+                        self.check_limits(None)?;
+                        self.check_interrupt()?;
+                        Ok(Value::Undef)
+                    }
+                }
+            }
             BinaryOp::BinaryAnd => ops::bitwise(a, b, Bitwise::And),
             BinaryOp::BinaryOr => ops::bitwise(a, b, Bitwise::Or),
             BinaryOp::ShiftLeft => ops::bitwise(a, b, Bitwise::Shl),

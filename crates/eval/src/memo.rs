@@ -86,8 +86,8 @@ use crate::context::{Ctx, ScopeRef};
 use crate::eval::Evaluator;
 use crate::message::{Message, R, Unwind, UnwindKind};
 use crate::node::Node;
-use crate::sym::Sym;
-use crate::value::Value;
+use crate::sym::{FxBuild, Sym};
+use crate::value::{Value, Vector};
 use crate::{Library, Options};
 
 /// 128 bits of SHA-256: a collision would show a stale model, so the key
@@ -864,39 +864,155 @@ impl<'a> Evaluator<'a> {
 }
 
 /// Hash a value exactly (numbers by their bits); false if it holds a
-/// function. Iterative: values can nest deeper than the stack allows.
+/// function.
+///
+/// Lists and strings are shared, not copied, so a value can hold far more
+/// paths than it holds data: a tree whose halves are one list (`t = [t,
+/// t]`, a few dozen steps of a tail-recursive function) has 2^depth paths,
+/// and a long list can hold one long string at every element. Hashing path
+/// by path took 3.4 s at depth 26 and hours at depth 40, in every edit's
+/// fingerprint of a statement that mentions `t`, with no check that could
+/// stop it. So the big parts are hashed on their own, once each (by
+/// address), and wherever one occurs its digest stands in for it: lists
+/// that hold lists or have [`OWN_LIST`] elements or more, and strings of
+/// [`OWN_STR`] bytes or more. The rest (a point, a short name) goes inline,
+/// as hashing every point on its own would cost a hash per point. The walk
+/// then takes a bounded number of steps per element slot of a distinct
+/// list, at most the work of allocating the lists, which the evaluation
+/// already did under its limits; so it does not poll them itself.
+///
+/// The digest stays a function of the value alone, however it was built:
+/// which parts are hashed on their own depends only on their content
+/// (length, and whether a list holds a list), never on whether they are
+/// shared, so equal values built differently digest equal, and a statement
+/// replays when a variable is recomputed to the same value. The tags keep
+/// the forms apart (4 a list written out, 6 a list's digest, 3 a string
+/// written out, 7 a string's digest).
 fn value_digest(v: &Value, h: &mut Sha256) -> bool {
-    let mut stack = vec![v];
-    while let Some(v) = stack.pop() {
-        match v {
-            Value::Undef => h.update([0]),
-            Value::Bool(b) => h.update([1, u8::from(*b)]),
-            Value::Number(x) => {
-                h.update([2]);
-                h.update(x.to_bits().to_le_bytes());
-            }
-            Value::Str(s) => {
-                let b = s.as_bytes();
+    let mut done = Done::default();
+    match v {
+        Value::Vector(items) if own_list(items) => {
+            let Some(d) = tree_digest(items, &mut done) else {
+                return false;
+            };
+            h.update([6]);
+            h.update(d);
+            true
+        }
+        _ => plain_digest(v, h, &mut done),
+    }
+}
+
+/// Lists at least this long are hashed on their own (see
+/// [`value_digest`]).
+const OWN_LIST: usize = 16;
+/// Strings at least this long are hashed on their own.
+const OWN_STR: usize = 64;
+
+/// The digests of the parts hashed on their own, by the address of their
+/// elements or bytes: no two live lists or strings share one, and every
+/// part is alive for the whole walk, inside the value being hashed.
+type Done = HashMap<usize, [u8; 32], FxBuild>;
+
+/// Whether a list is hashed on its own.
+fn own_list(items: &[Value]) -> bool {
+    items.len() >= OWN_LIST || items.iter().any(|v| matches!(v, Value::Vector(_)))
+}
+
+/// Hash a value that is not a list hashed on its own: a short list of
+/// plain values, or a plain value. False for a function.
+fn plain_digest(v: &Value, h: &mut Sha256, done: &mut Done) -> bool {
+    match v {
+        Value::Undef => h.update([0]),
+        Value::Bool(b) => h.update([1, u8::from(*b)]),
+        Value::Number(x) => {
+            h.update([2]);
+            h.update(x.to_bits().to_le_bytes());
+        }
+        Value::Str(s) => {
+            let b = s.as_bytes();
+            if b.len() >= OWN_STR {
+                let d = done.entry(b.as_ptr() as usize).or_insert_with(|| {
+                    let mut h = Sha256::new();
+                    h.update((b.len() as u64).to_le_bytes());
+                    h.update(b);
+                    h.finalize().into()
+                });
+                h.update([7]);
+                h.update(*d);
+            } else {
                 h.update([3]);
                 h.update((b.len() as u64).to_le_bytes());
                 h.update(b);
             }
-            Value::Vector(items) => {
-                let items = items.as_slice();
-                h.update([4]);
-                h.update((items.len() as u64).to_le_bytes());
-                stack.extend(items.iter().rev());
-            }
-            Value::Range(r) => {
-                h.update([5]);
-                for x in [r.begin, r.step, r.end] {
-                    h.update(x.to_bits().to_le_bytes());
+        }
+        Value::Vector(items) => {
+            h.update([4]);
+            h.update((items.len() as u64).to_le_bytes());
+            for v in items.iter() {
+                if !plain_digest(v, h, done) {
+                    return false;
                 }
             }
-            Value::Function(_) => return false,
         }
+        Value::Range(r) => {
+            h.update([5]);
+            for x in [r.begin, r.step, r.end] {
+                h.update(x.to_bits().to_le_bytes());
+            }
+        }
+        Value::Function(_) => return false,
     }
     true
+}
+
+/// The digest of a list hashed on its own (see [`value_digest`]): its
+/// length, then its elements, each list among them that is hashed on its
+/// own by its digest. Iterative, as values can nest deeper than the stack
+/// allows.
+fn tree_digest(root: &Vector, done: &mut Done) -> Option<[u8; 32]> {
+    struct Frame<'v> {
+        items: &'v [Value],
+        i: usize,
+        h: Sha256,
+    }
+    fn open(items: &[Value]) -> Frame<'_> {
+        let mut h = Sha256::new();
+        h.update([4]);
+        h.update((items.len() as u64).to_le_bytes());
+        Frame { items, i: 0, h }
+    }
+    let mut stack = vec![open(root.as_slice())];
+    loop {
+        let top = stack.last_mut().expect("a frame");
+        let Some(v) = top.items.get(top.i) else {
+            let f = stack.pop().expect("a frame");
+            let d: [u8; 32] = f.h.finalize().into();
+            done.insert(f.items.as_ptr() as usize, d);
+            let Some(parent) = stack.last_mut() else {
+                return Some(d);
+            };
+            parent.h.update([6]);
+            parent.h.update(d);
+            continue;
+        };
+        top.i += 1;
+        match v {
+            Value::Vector(items) if own_list(items) => {
+                if let Some(d) = done.get(&(items.as_slice().as_ptr() as usize)) {
+                    top.h.update([6]);
+                    top.h.update(d);
+                } else {
+                    stack.push(open(items.as_slice()));
+                }
+            }
+            v => {
+                if !plain_digest(v, &mut top.h, done) {
+                    return None;
+                }
+            }
+        }
+    }
 }
 
 enum Item<'x> {

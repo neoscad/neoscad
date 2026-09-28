@@ -86,6 +86,8 @@ fn runaways() -> Vec<(&'static str, String)> {
             "nodes",
             "for (i = [0:1999]) for (j = [0:999]) cube(1);".into(),
         ),
+        // The text `chr()` builds is not a value until it is done.
+        ("chr", tree("echo(len(chr(f([65], 30))));")),
     ]
 }
 

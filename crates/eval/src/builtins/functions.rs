@@ -332,8 +332,13 @@ impl<'a> Evaluator<'a> {
             }
             Chr => {
                 let mut out = Vec::new();
+                let mut w = ChrWalk::default();
                 for x in a.iter() {
-                    self.chr_into(&x.value, &mut out);
+                    self.chr_into(&x.value, &mut out, &mut w);
+                }
+                if w.stopped {
+                    self.check_limits(Some(loc))?;
+                    self.check_interrupt()?;
                 }
                 if !self.string_fits(out.len(), loc, "chr()") {
                     return Ok(Value::Undef);
@@ -797,7 +802,22 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `Value::chrString`.
-    fn chr_into(&mut self, v: &Value, out: &mut Vec<u8>) {
+    ///
+    /// Lists share their elements, so a list can have 2^depth paths
+    /// (`t = [t, t]`): `chr()` of such a tree of zeros, which prints
+    /// nothing, walked every path in one uninterruptible call. A list
+    /// found to print nothing is remembered (by address; empty output is
+    /// empty whatever else holds the list) and skipped after that, unless
+    /// it warned (a range too long to expand warns at every occurrence,
+    /// as in OpenSCAD), and the
+    /// walk polls the cancel flag, the time limit and the memory limit (the
+    /// text being built is not a value yet, so nothing else counts it),
+    /// and stops once the text is past the string limit, which it could
+    /// only fail.
+    fn chr_into(&mut self, v: &Value, out: &mut Vec<u8>, w: &mut ChrWalk) {
+        if w.stopped {
+            return;
+        }
         match v {
             Value::Number(x) => {
                 if *x > 0.0 {
@@ -805,8 +825,24 @@ impl<'a> Evaluator<'a> {
                 }
             }
             Value::Vector(items) => {
+                let key = items.as_slice().as_ptr() as usize;
+                if w.silent.contains(&key) {
+                    return;
+                }
+                let (start, warnings) = (out.len(), w.warnings);
                 for e in items.iter() {
-                    self.chr_into(e, out);
+                    w.steps += 1;
+                    if w.steps.is_multiple_of(4096) && self.chr_stopped(out.capacity()) {
+                        w.stopped = true;
+                    }
+                    if w.stopped || out.len() > self.caps.string {
+                        w.stopped = true;
+                        return;
+                    }
+                    self.chr_into(e, out, w);
+                }
+                if out.len() == start && w.warnings == warnings {
+                    w.silent.insert(key);
                 }
             }
             Value::Range(r) => {
@@ -816,14 +852,27 @@ impl<'a> Evaluator<'a> {
                         "Bad range parameter in for statement: too many elements ({steps})."
                     );
                     self.warn_noloc(DiagCode::IterationLimit, t);
+                    w.warnings += 1;
                     return;
                 }
                 for d in r.iter() {
-                    self.chr_into(&Value::Number(d), out);
+                    self.chr_into(&Value::Number(d), out, w);
                 }
             }
             _ => {}
         }
+    }
+
+    /// Whether `chr()` should stop: cancelled, out of time, or the text
+    /// built so far passes the memory limit.
+    fn chr_stopped(&self, text: usize) -> bool {
+        crate::limits::live::passes(text as u64)
+            || self.interrupted()
+            || self
+                .opts
+                .guard
+                .as_deref()
+                .is_some_and(crate::limits::Guard::over_time)
     }
 
     fn lookup_fn(&mut self, a: &[ArgVal], loc: Loc) -> Value {
@@ -1067,4 +1116,17 @@ impl<'a> Evaluator<'a> {
         let z = mul_sub_mul(f(v0, 0), f(v1, 1), f(v0, 1), f(v1, 0));
         Value::vector(vec![Value::Number(x), Value::Number(y), Value::Number(z)])
     }
+}
+
+/// The state of one `chr()` call's walk (see `Evaluator::chr_into`).
+#[derive(Default)]
+struct ChrWalk {
+    steps: u64,
+    /// Lists (by the address of their elements) that print nothing and
+    /// warn of nothing.
+    silent: std::collections::HashSet<usize, FxBuild>,
+    /// Warnings printed so far.
+    warnings: u32,
+    /// Gave up: past a limit, or cancelled.
+    stopped: bool,
 }
