@@ -384,7 +384,7 @@ entry when it is done.
   `neoscad mcp` exits 2 s after the end of input whatever is running.
   (7a, H4)
 - The memory limit is an estimate kept at the allocation-heavy points
-  (`eval::limits`), not a measurement: the evaluator's large values,
+  (`eval::limits`), not a measurement: all evaluator values (every list, string, range and function literal since b78a9b9),
   nodes and messages, and the geometry results a render holds until
   their parents use them. A kernel operation's own working memory (a
   boolean's intermediate meshes), the geometry cache (its own budget),
@@ -868,3 +868,6 @@ entry when it is done.
 
 - **Memory limit blind spot (found by the VM fuzzer).** The evaluator's memory estimate ignores lists shorter than 1,024 elements (`crates/eval/src/limits.rs`, `value.rs` list accounting). A program that builds an exponentially shared tree of small lists, then materialises it element-wise (e.g. with unary minus), passed 1.1 GB under `--limit memory=64` on the plain tree-walker. This matters for serve, MCP and the app, which rely on `Limits::AGENT`. Account small lists too (e.g. in batches), or cap total live list elements.
 - **Evaluator speedups from the VM spike** (`docs/audits/bytecode-vm.md`, prototype on branch `mr/vm-spike`): land T1–T5 (compile-time builtins, reused arg vectors, a positional binding fast path, a direct builtin call path, recycled contexts; 1.02–1.11×). Then port the VM's register and pure-frame analyses into the tree-walker (an estimated 1.2–1.35× with one engine), using the branch's fuzzer and `vm_ab` as the oracle.
+
+- **Exponential-time walks over shared value trees (time DoS for serve, MCP and the app).** Found while fixing the memory limit (`b78a9b9`). `memo.rs` `var_digest`/`value_digest` hash a top-level variable's shared tree with no time check: through MCP, `t = f([1], 26)` takes 3.4 s and depth 28 takes 13.4 s, and deeper trees run far past the 60 s limit. `ops::equals`/`compare` walk shared trees the same way. Fix: memoise by `Rc` pointer while walking, and add interrupt/time checks.
+- **`-o x.echo` exits 0 after an evaluation error** (limits and `assert(false)` included). Check what OpenSCAD's exit code is and match it.
