@@ -28,7 +28,7 @@ pub enum Value {
     Number(f64),
     Str(Str),
     Vector(Vector),
-    Range(Rc<Range>),
+    Range(RangeRef),
     Function(Rc<FunctionValue>),
 }
 
@@ -214,7 +214,8 @@ impl Value {
     }
 
     pub fn range(begin: f64, step: f64, end: f64) -> Value {
-        Value::Range(Rc::new(Range { begin, step, end }))
+        crate::limits::live::charge(crate::limits::live::BOX);
+        Value::Range(RangeRef(Rc::new(RangeData(Range { begin, step, end }))))
     }
 }
 
@@ -240,14 +241,19 @@ struct StrData {
     bytes: Box<[u8]>,
 }
 
-/// A large string counts towards the evaluator's memory estimate while it
-/// lives (see `crate::limits::live`).
+/// A string counts towards the evaluator's memory estimate while it lives
+/// (see `crate::limits::live`), whatever its length: a million short
+/// strings are as much memory as one long one.
 impl Drop for StrData {
     fn drop(&mut self) {
-        if self.bytes.len() >= crate::limits::live::STR_MIN {
-            crate::limits::live::credit(self.bytes.len() as u64);
-        }
+        crate::limits::live::credit(str_bytes(self.bytes.len()));
     }
+}
+
+/// Bytes a string of `len` bytes counts for.
+#[inline(always)]
+fn str_bytes(len: usize) -> u64 {
+    crate::limits::live::BOX + len as u64
 }
 
 impl Str {
@@ -256,9 +262,7 @@ impl Str {
     }
 
     pub fn from_vec(bytes: Vec<u8>) -> Self {
-        if bytes.len() >= crate::limits::live::STR_MIN {
-            crate::limits::live::charge(bytes.len() as u64);
-        }
+        crate::limits::live::charge(str_bytes(bytes.len()));
         Str(Rc::new(StrData {
             chars: Cell::new(usize::MAX),
             bytes: bytes.into_boxed_slice(),
@@ -312,24 +316,23 @@ pub struct Vector(Rc<Vec<Value>>);
 
 impl Vector {
     pub fn empty() -> Self {
-        Vector(Rc::new(Vec::new()))
+        Vector::from(Vec::new())
     }
 
     pub fn as_slice(&self) -> &[Value] {
         &self.0
     }
 
-    /// Mutable access, copying the elements if they are shared.
-    pub fn make_mut(&mut self) -> &mut Vec<Value> {
-        Rc::make_mut(&mut self.0)
-    }
-
     /// This list to append to in place, when this is the only reference
     /// (see [`Growable`]); otherwise the list back.
     pub fn into_growable(mut self) -> Result<Growable, Vector> {
         match Rc::get_mut(&mut self.0) {
-            // Its count moves with the elements: `self` drops empty.
-            Some(v) => Ok(Growable(std::mem::take(v))),
+            // The elements' count moves with them; `self` drops empty and
+            // takes its box's share with it.
+            Some(v) => Ok(Growable {
+                charged: slots_bytes(v.len()),
+                items: std::mem::take(v),
+            }),
             None => Err(self),
         }
     }
@@ -340,7 +343,7 @@ impl Vector {
             Some(v) => {
                 // They leave the count with the list; whoever builds a new
                 // list from them counts them again.
-                credit_list(v);
+                crate::limits::live::credit(slots_bytes(v.len()));
                 std::mem::take(v)
             }
             None => (*self.0).clone(),
@@ -349,9 +352,9 @@ impl Vector {
 }
 
 /// A list being built or appended to, with its share of the memory
-/// estimate kept current as it grows (see [`list_bytes`]), so appending one
-/// element costs one element's accounting rather than a pass over the
-/// whole list.
+/// estimate kept nearly current as it grows (see [`list_bytes`]): charged
+/// in batches of [`GROWABLE_BATCH`] bytes, so appending one element costs
+/// an add and a compare rather than a thread-local access each.
 ///
 /// This is what makes `concat(acc, [x])` and `[each acc, x]` linear in a
 /// tail-recursive accumulator: when the evaluator hands over the only
@@ -359,36 +362,47 @@ impl Vector {
 /// in place. Values are immutable in the language, so that is only done
 /// when nothing else can see the list.
 #[derive(Debug, Default)]
-pub struct Growable(Vec<Value>);
+pub struct Growable {
+    items: Vec<Value>,
+    /// Bytes of `items` charged so far: a multiple of the slot size, and
+    /// at most `slots_bytes(items.len())`.
+    charged: u64,
+}
+
+/// How far a [`Growable`] may run ahead of its charge. Small, because a
+/// deep recursion can hold one unfinished list per frame: a thousand
+/// frames each 1 KiB behind are only a megabyte uncounted.
+const GROWABLE_BATCH: u64 = 1024;
 
 impl Growable {
     pub fn with_capacity(n: usize) -> Growable {
-        Growable(Vec::with_capacity(n))
+        Growable {
+            items: Vec::with_capacity(n),
+            charged: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.items.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.items.is_empty()
     }
 
     /// Room for `n` more elements, growing geometrically (as `Vec` does),
     /// so a list appended to one element at a time is not copied each time.
     pub fn reserve(&mut self, n: usize) {
-        self.0.reserve(n);
+        self.items.reserve(n);
     }
 
+    #[inline]
     pub fn push(&mut self, v: Value) {
-        use crate::limits::live::LIST_MIN;
-        self.0.push(v);
-        let n = self.0.len();
-        if n > LIST_MIN {
-            crate::limits::live::charge(item_bytes(&self.0[n - 1]));
-        } else if n == LIST_MIN {
-            // The list starts to count: all of it, once.
-            crate::limits::live::charge(large_list_bytes(&self.0));
+        self.items.push(v);
+        let b = slots_bytes(self.items.len());
+        if b - self.charged >= GROWABLE_BATCH {
+            crate::limits::live::charge(b - self.charged);
+            self.charged = b;
         }
     }
 
@@ -398,60 +412,39 @@ impl Growable {
         }
     }
 
-    /// The list, still counted (its `Drop` credits it).
+    /// The list, counted in full (its `Drop` credits it).
     pub fn finish(mut self) -> Vector {
-        Vector(Rc::new(std::mem::take(&mut self.0)))
+        let items = std::mem::take(&mut self.items);
+        crate::limits::live::charge(list_bytes(items.len()) - self.charged);
+        self.charged = 0;
+        Vector(Rc::new(items))
     }
 }
 
 /// A list dropped unfinished (an error while building it) leaves the count.
 impl Drop for Growable {
     fn drop(&mut self) {
-        credit_list(&self.0);
+        crate::limits::live::credit(self.charged);
     }
 }
 
-/// Bytes a list counts for towards the evaluator's memory estimate
-/// (`crate::limits::live`): large lists only, with the small lists and
-/// strings they hold (a path of a million `[x, y, z]` points is 16 bytes
-/// of outer list per point but about 120 with each point's own vector).
-/// Values never change once in a list, so this is the same number when
-/// the list is built and when it is freed.
+/// Bytes `n` value slots count for.
 #[inline(always)]
-fn list_bytes(items: &[Value]) -> u64 {
-    if items.len() < crate::limits::live::LIST_MIN {
-        return 0;
-    }
-    large_list_bytes(items)
+fn slots_bytes(n: usize) -> u64 {
+    n as u64 * crate::limits::live::SLOT
 }
 
-/// [`list_bytes`] of a list long enough to count. Out of line: every list
-/// is built and dropped through `list_bytes`, and nearly all are short.
-#[inline(never)]
-fn large_list_bytes(items: &[Value]) -> u64 {
-    items.iter().map(item_bytes).sum()
-}
-
-/// One element's share of [`list_bytes`] (of a list long enough to count):
-/// its slot, and a small list or string it holds.
-fn item_bytes(v: &Value) -> u64 {
-    use crate::limits::live::{LIST_MIN, STR_MIN};
-    const SLOT: u64 = std::mem::size_of::<Value>() as u64;
-    // An `Rc` allocation (counts and header) with the allocator's rounding.
-    const BOX: u64 = 64;
-    match v {
-        Value::Vector(inner) if inner.len() < LIST_MIN => SLOT + BOX + SLOT * inner.len() as u64,
-        Value::Str(t) if t.as_bytes().len() < STR_MIN => SLOT + BOX + t.as_bytes().len() as u64,
-        _ => SLOT,
-    }
-}
-
+/// Bytes a list of `n` elements counts for towards the evaluator's memory
+/// estimate (`crate::limits::live`): its box and its slots. The lists and
+/// strings it holds count for themselves when they are made, so a list
+/// holding the same small list a million times counts that list once, as
+/// it is allocated once. Every list counts, however short (the `live`
+/// module describes the program that counting only long ones let through).
+/// A list's length never changes once it is shared, so this is the same
+/// number when the list is built and when it is freed.
 #[inline(always)]
-fn credit_list(items: &[Value]) {
-    let b = list_bytes(items);
-    if b > 0 {
-        crate::limits::live::credit(b);
-    }
+fn list_bytes(n: usize) -> u64 {
+    crate::limits::live::BOX + slots_bytes(n)
 }
 
 /// Frees nested vectors with a loop instead of recursion. A tail-recursive
@@ -465,7 +458,7 @@ impl Drop for Vector {
         let Some(items) = Rc::get_mut(&mut self.0) else {
             return;
         };
-        credit_list(items);
+        crate::limits::live::credit(list_bytes(items.len()));
         if !items.iter().any(|v| matches!(v, Value::Vector(_))) {
             return;
         }
@@ -476,7 +469,9 @@ impl Drop for Vector {
                     && let Some(inner) = Rc::get_mut(&mut inner.0)
                     && !inner.is_empty()
                 {
-                    credit_list(inner);
+                    // The slots leave the count here; the emptied list's
+                    // own drop, at the end of this block, credits its box.
+                    crate::limits::live::credit(slots_bytes(inner.len()));
                     pending.push(std::mem::take(inner));
                 }
             }
@@ -485,11 +480,9 @@ impl Drop for Vector {
 }
 
 impl From<Vec<Value>> for Vector {
+    #[inline]
     fn from(v: Vec<Value>) -> Self {
-        let b = list_bytes(&v);
-        if b > 0 {
-            crate::limits::live::charge(b);
-        }
+        crate::limits::live::charge(list_bytes(v.len()));
         Vector(Rc::new(v))
     }
 }
@@ -498,6 +491,28 @@ impl std::ops::Deref for Vector {
     type Target = [Value];
     fn deref(&self) -> &[Value] {
         &self.0
+    }
+}
+
+/// A shared [`Range`], counted towards the evaluator's memory estimate
+/// while it lives: a list of three million ranges is 200 MB, most of it
+/// the ranges' own allocations, which the list's slots do not cover.
+#[derive(Clone, Debug)]
+pub struct RangeRef(Rc<RangeData>);
+
+#[derive(Debug)]
+struct RangeData(Range);
+
+impl Drop for RangeData {
+    fn drop(&mut self) {
+        crate::limits::live::credit(crate::limits::live::BOX);
+    }
+}
+
+impl std::ops::Deref for RangeRef {
+    type Target = Range;
+    fn deref(&self) -> &Range {
+        &self.0.0
     }
 }
 
@@ -632,6 +647,26 @@ pub struct FunctionValue {
     pub(crate) ctx: Rc<Ctx>,
 }
 
+/// Bytes a function literal counts for towards the memory estimate: its
+/// own allocation and the context it keeps alive. Each evaluation of a
+/// literal inside a loop captures that iteration's context, so a list of
+/// three million of them measured 760 MB, about 250 bytes each, where the
+/// list's slots alone count 16.
+const FUNCTION_BYTES: u64 = 256;
+
+impl FunctionValue {
+    pub(crate) fn new(unit: u32, expr: ExprId, ctx: Rc<Ctx>) -> FunctionValue {
+        crate::limits::live::charge(FUNCTION_BYTES);
+        FunctionValue { unit, expr, ctx }
+    }
+}
+
+impl Drop for FunctionValue {
+    fn drop(&mut self) {
+        crate::limits::live::credit(FUNCTION_BYTES);
+    }
+}
+
 impl fmt::Debug for FunctionValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "FunctionValue(unit {}, expr {})", self.unit, self.expr.0)
@@ -682,12 +717,21 @@ mod tests {
         assert!(!Value::vector(vec![]).to_bool());
     }
 
+    /// What `v` adds to the memory estimate when nothing in it is shared.
+    fn owned_bytes(v: &Value) -> u64 {
+        match v {
+            Value::Vector(x) => list_bytes(x.len()) + x.iter().map(owned_bytes).sum::<u64>(),
+            Value::Str(s) => str_bytes(s.as_bytes().len()),
+            _ => 0,
+        }
+    }
+
     #[test]
     fn a_list_grown_in_place_is_counted_as_one_built_whole() {
         // The memory estimate must not drift: a list appended to through
-        // `Growable` counts what `list_bytes` of the final list says, and
-        // leaves the count when freed, however it was built. Unit tests run
-        // on their own threads, so the thread-local count is this test's.
+        // `Growable` counts what building it whole counts, and leaves the
+        // count when freed, however it was built. Unit tests run on their
+        // own threads, so the thread-local count is this test's.
         use crate::limits::live;
         live::reset();
         let item = |i: usize| match i % 3 {
@@ -696,20 +740,20 @@ mod tests {
             _ => Value::str(b"abc"),
         };
         let mut g = Growable::with_capacity(0);
-        let mut v = Vector::empty();
         for i in 0..3000 {
             g.push(item(i));
             if i % 500 == 0 {
-                v = g.finish();
-                assert_eq!(live::get(), list_bytes(&v), "at {i}");
+                let v = g.finish();
+                assert_eq!(
+                    live::get(),
+                    owned_bytes(&Value::Vector(v.clone())),
+                    "at {i}"
+                );
                 g = v.into_growable().expect("the only reference");
-                v = Vector::empty();
             }
         }
         let whole = Vector::from((0..3000).map(item).collect::<Vec<_>>());
-        let one = list_bytes(&whole);
-        assert!(one > 0);
-        assert_eq!(live::get(), 2 * one);
+        let one = owned_bytes(&Value::Vector(whole.clone()));
         drop(whole);
         let kept = g.finish();
         assert_eq!(live::get(), one);
@@ -718,14 +762,38 @@ mod tests {
         let kept = kept.into_growable().expect_err("shared");
         drop(other);
         assert_eq!(live::get(), one);
-        drop(kept);
-        drop(v);
+        // Taken apart and rebuilt, it counts once too.
+        let rebuilt = Vector::from(kept.into_vec());
+        assert_eq!(live::get(), one);
+        drop(rebuilt);
         assert_eq!(live::get(), 0);
         // Dropped unfinished (an error while building).
         let mut g = Growable::with_capacity(0);
         g.extend((0..2000).map(item));
         assert!(live::get() > 0);
         drop(g);
+        assert_eq!(live::get(), 0);
+    }
+
+    #[test]
+    fn small_lists_count_and_sharing_is_free() {
+        // The fuzzer's program: a tree of two-element lists sharing their
+        // halves costs one list a level, but materialised (as `-t` does)
+        // it is 2^depth lists, and every one of them must count.
+        use crate::limits::live;
+        live::reset();
+        let mut t = Value::vector(vec![Value::Number(1.0)]);
+        for _ in 0..10 {
+            t = Value::vector(vec![t.clone(), t]);
+        }
+        let shared = live::get();
+        assert_eq!(shared, list_bytes(1) + 10 * list_bytes(2));
+        let neg = crate::ops::neg(&t).unwrap();
+        assert_eq!(live::get() - shared, owned_bytes(&neg));
+        assert!(owned_bytes(&neg) > 1024 * list_bytes(1));
+        // Freed (iteratively, however it nests), it all leaves the count.
+        drop(neg);
+        drop(t);
         assert_eq!(live::get(), 0);
     }
 }

@@ -80,6 +80,14 @@ impl Evaluator<'_> {
                 if self.print_stack_exhausted(depth) {
                     return Err(Exhausted);
                 }
+                // A list whose halves are shared prints as 2^depth
+                // elements, so the text can pass the memory limit long
+                // before any value does. Past it, printing stops quietly
+                // (every level returns here at once) and the evaluator
+                // reports the limit instead of the cut text.
+                if crate::limits::live::passes(out.len() as u64) {
+                    return Ok(());
+                }
                 out.push(b'[');
                 for (i, e) in items.iter().enumerate() {
                     if i > 0 {

@@ -452,5 +452,9 @@ fn run(
     let memo = memo.map(|m| memo::MemoRun::new(m, main, main_uses, libraries, &main_dir, options));
     let mut ev = eval::Evaluator::new(main, main_uses, libraries, main_dir, options.clone(), out);
     ev.memo = memo;
-    ev.run()
+    let evaluation = ev.run();
+    // The memory limit belongs to this request (`Evaluator::new` armed it):
+    // what the thread does next must not trip its guard.
+    limits::live::disarm();
+    evaluation
 }

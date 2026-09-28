@@ -20,8 +20,8 @@
 //!   allocation-heavy points, not a measurement of the process (the
 //!   workspace forbids the `unsafe` a counting global allocator needs, and
 //!   a process-wide count cannot tell concurrent requests apart). The
-//!   evaluator counts the large lists and strings alive on its thread,
-//!   every node it builds and every message it prints ([`live`]); the
+//!   evaluator counts every list and string alive on its thread, every
+//!   node it builds and every message it prints ([`live`]); the
 //!   geometry stage counts the bytes of the results computed and not yet
 //!   used by their parents (the geometry cache has its own budget).
 //! - **Time** ([`Limits::time`]) is checked against the host's clock at
@@ -542,41 +542,183 @@ impl Guard {
     }
 }
 
-/// The evaluator's estimate of its live memory: bytes of large lists and
-/// strings alive on this thread, nodes built and messages printed.
+/// The evaluator's estimate of its live memory: bytes of every list and
+/// string alive on this thread, and messages printed (nodes are counted by
+/// the evaluator from its node counter).
 ///
 /// Values are `Rc`-based and never leave the evaluation thread, so a
 /// thread-local count is exact about *which* request they belong to. The
-/// count starts at zero with each evaluation ([`live::reset`]).
+/// count starts at zero with each evaluation ([`live::arm`]).
+///
+/// Every list and string counts, however small. Counting only large ones
+/// (as this once did, from 1,024 elements) let a program build a tree of
+/// two-element lists sharing their halves, which costs nothing, and then
+/// materialise it element-wise (`-t`, `t + t`, `str(t)`), which allocates
+/// 2^depth small lists: 1.1 GB under a 64 MiB limit before an outside
+/// guard killed it. Charging is one thread-local add and compare, next to
+/// an allocation that costs far more.
+///
+/// The memory limit also fires *from* a charge. An element-wise operator
+/// or the value printer runs as one Rust call that the evaluator's
+/// periodic checks never interrupt, so the charge that first passes the
+/// limit trips the request's [`Guard`] at once: that records the limit
+/// and raises the interrupt flag the evaluator already polls at every
+/// call, so noticing costs its hot path nothing. The loops that
+/// materialise values ask [`live::over`] and stop, and the evaluator
+/// reports the limit with the usual `resource-limit` error.
 pub mod live {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+
+    use super::Guard;
+
+    /// The count and the thresholds it is compared with, in one
+    /// thread-local so a charge is one access.
+    struct Count {
+        live: Cell<u64>,
+        /// The memory limit (`u64::MAX` without one).
+        limit: Cell<u64>,
+        /// Where the next charge trips the guard: the limit, until it has
+        /// been tripped once (then `u64::MAX`, so a flood of charges past
+        /// the limit does not lock the guard each time).
+        trip_at: Cell<u64>,
+        /// Bytes the evaluator counts itself ([`beside`]).
+        beside: Cell<u64>,
+        /// The limit was passed during this evaluation.
+        passed: Cell<bool>,
+    }
 
     thread_local! {
-        static LIVE: Cell<u64> = const { Cell::new(0) };
+        static COUNT: Count = const {
+            Count {
+                live: Cell::new(0),
+                limit: Cell::new(u64::MAX),
+                trip_at: Cell::new(u64::MAX),
+                beside: Cell::new(0),
+                passed: Cell::new(false),
+            }
+        };
+        /// The guard of the evaluation running on this thread, if it has
+        /// a memory limit. Only read on the cold path.
+        static GUARD: RefCell<Option<Arc<Guard>>> = const { RefCell::new(None) };
     }
 
-    /// Lists with at least this many elements are counted; smaller ones
-    /// are the evaluator's everyday churn and cost nothing to track.
-    pub const LIST_MIN: usize = 1024;
-    /// Strings of at least this many bytes are counted.
-    pub const STR_MIN: usize = 16 * 1024;
+    /// Bytes of one value slot in a list.
+    pub const SLOT: u64 = std::mem::size_of::<crate::value::Value>() as u64;
+    /// An `Rc` allocation's counts and header with the allocator's
+    /// rounding: what a list or string costs before its first element.
+    pub const BOX: u64 = 64;
 
+    /// Start counting an evaluation on this thread from zero, against the
+    /// memory limit of `guard` (none without one). Values of an earlier
+    /// evaluation on this thread are gone or are not this request's to
+    /// count.
+    pub fn arm(guard: Option<&Arc<Guard>>) {
+        let guard = guard.filter(|g| g.limits().memory.is_some());
+        let limit = guard.and_then(|g| g.limits().memory).unwrap_or(u64::MAX);
+        COUNT.with(|c| {
+            c.live.set(0);
+            c.limit.set(limit);
+            c.trip_at.set(limit);
+            c.beside.set(0);
+            c.passed.set(false);
+        });
+        GUARD.with(|g| *g.borrow_mut() = guard.cloned());
+    }
+
+    /// Stop comparing with the limit of the evaluation [`arm`] started,
+    /// so nothing done on this thread afterwards (dropping the results,
+    /// another request) can trip that request's guard.
+    pub fn disarm() {
+        COUNT.with(|c| {
+            c.limit.set(u64::MAX);
+            c.trip_at.set(u64::MAX);
+            c.beside.set(0);
+            c.passed.set(false);
+        });
+        GUARD.with(|g| *g.borrow_mut() = None);
+    }
+
+    /// `bytes` more alive; trips the memory limit when the count passes
+    /// it.
     #[inline]
     pub fn charge(bytes: u64) {
-        LIVE.with(|l| l.set(l.get().saturating_add(bytes)));
+        COUNT.with(|c| {
+            let n = c.live.get().saturating_add(bytes);
+            c.live.set(n);
+            if n > c.trip_at.get() {
+                trip(c, n);
+            }
+        });
     }
 
+    /// The count has passed the limit: record it on the guard and raise
+    /// the request's interrupt flag.
+    #[cold]
+    #[inline(never)]
+    fn trip(c: &Count, n: u64) {
+        c.trip_at.set(u64::MAX);
+        c.passed.set(true);
+        let total = n.saturating_add(c.beside.get());
+        GUARD.with(|g| {
+            if let Some(g) = &*g.borrow()
+                && let Some(e) = g.memory_exceeds(total, "the evaluation")
+            {
+                g.trip(e);
+            }
+        });
+    }
+
+    /// `bytes` no longer alive.
     #[inline]
     pub fn credit(bytes: u64) {
-        LIVE.with(|l| l.set(l.get().saturating_sub(bytes)));
+        COUNT.with(|c| c.live.set(c.live.get().saturating_sub(bytes)));
+    }
+
+    /// Whether the memory limit has been passed during this evaluation:
+    /// what a loop that materialises values checks to stop early.
+    #[inline]
+    pub fn over() -> bool {
+        COUNT.with(|c| c.passed.get())
+    }
+
+    /// Whether `extra` bytes on top of the count (a buffer being filled
+    /// that is not a value yet, like the text of a value being printed)
+    /// pass the limit. When they do, the limit trips as a charge would.
+    #[inline]
+    pub fn passes(extra: u64) -> bool {
+        COUNT.with(|c| {
+            if c.passed.get() {
+                return true;
+            }
+            let n = c.live.get().saturating_add(extra);
+            if n > c.limit.get().saturating_sub(c.beside.get()) {
+                trip(c, n);
+                return true;
+            }
+            false
+        })
+    }
+
+    /// `bytes` the evaluator counts itself (the nodes it has built) on top
+    /// of the values: the next charge trips once the two together pass
+    /// the limit. Called at the evaluator's periodic limit checks.
+    pub fn beside(bytes: u64) {
+        COUNT.with(|c| {
+            c.beside.set(bytes);
+            if !c.passed.get() && c.limit.get() != u64::MAX {
+                c.trip_at.set(c.limit.get().saturating_sub(bytes));
+            }
+        });
     }
 
     pub fn get() -> u64 {
-        LIVE.with(Cell::get)
+        COUNT.with(|c| c.live.get())
     }
 
+    /// Zero the count (unarmed).
     pub fn reset() {
-        LIVE.with(|l| l.set(0));
+        COUNT.with(|c| c.live.set(0));
     }
 }
 

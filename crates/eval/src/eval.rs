@@ -281,6 +281,15 @@ const NODE_BYTES: u64 = 512;
 /// memory estimate: a few milliseconds of evaluation at most.
 const LIMIT_TICKS: u32 = 4096;
 
+/// Estimated bytes of one printed message besides three copies of its
+/// text, for the memory limit: a host keeps each as a diagnostic, an
+/// output record and JSON. Measured through `neoscad mcp`: 200,000 echoes
+/// hold 69 MB, and 200,000 warnings (which carry a location and a file)
+/// about 300 MB besides their nodes.
+fn message_bytes(located: bool) -> u64 {
+    if located { 1536 } else { 256 }
+}
+
 /// Where a `--hardwarnings` run stands. OpenSCAD throws a
 /// `HardWarningException` from `PRINT` itself, right after printing the
 /// first warning (`printutils.cc:125-130`); the exception is an
@@ -375,7 +384,7 @@ impl<'a> Evaluator<'a> {
         let caps = Caps::of(opts.guard.as_deref().map(crate::limits::Guard::limits));
         // Values of an earlier evaluation on this thread are gone or are
         // not this request's to count.
-        crate::limits::live::reset();
+        crate::limits::live::arm(opts.guard.as_ref());
         let marker = 0u8;
         let stack_base = std::ptr::addr_of!(marker) as usize;
         let stack_limit = crate::recursion::stack_limit(opts.stack_limit, stack_base);
@@ -458,7 +467,7 @@ impl<'a> Evaluator<'a> {
 
     pub fn check_interrupt(&mut self) -> R<()> {
         if self.interrupted() {
-            return Err(Unwind::new(UnwindKind::Interrupted, 0));
+            return self.stop();
         }
         if self.opts.guard.is_some() {
             self.limit_ticks = self.limit_ticks.wrapping_add(1);
@@ -479,6 +488,7 @@ impl<'a> Evaluator<'a> {
         let Some(g) = self.opts.guard.clone() else {
             return Ok(());
         };
+        crate::limits::live::beside(self.node_bytes());
         let e = if g.over_time() {
             Some(g.time_exceeded())
         } else {
@@ -489,6 +499,51 @@ impl<'a> Evaluator<'a> {
             return self.check_hard();
         }
         Ok(())
+    }
+
+    /// The interrupt flag is up: a cancellation, or the memory limit,
+    /// which `crate::limits::live` trips from inside the allocation that
+    /// passed it (an interrupt costs the hot path nothing to notice, where
+    /// asking the count at every call would not). The limit is reported
+    /// like any other, with the call sites that led to it.
+    #[cold]
+    #[inline(never)]
+    fn stop(&mut self) -> R<()> {
+        if self.limit.get() == Hard::Off && crate::limits::live::over() {
+            self.memory_passed(None);
+            if self.limit.get() != Hard::Off {
+                return self.check_hard();
+            }
+        }
+        Err(Unwind::new(UnwindKind::Interrupted, 0))
+    }
+
+    /// Report the memory limit if a value just made passed it (see
+    /// [`Evaluator::stop`]); it is raised at the next check. For the end
+    /// of an element-wise operator, one uninterruptible piece of work that
+    /// may have stopped early at the limit.
+    #[inline]
+    fn check_memory(&mut self, loc: Option<Loc>) {
+        if crate::limits::live::over() && self.limit.get() == Hard::Off {
+            self.memory_passed(loc);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn memory_passed(&mut self, loc: Option<Loc>) {
+        let Some(g) = self.opts.guard.clone() else {
+            return;
+        };
+        // What the guard recorded when the limit tripped, or the estimate
+        // now (printing a value passes the limit without making one).
+        let e = g
+            .exceeded()
+            .filter(|e| e.limit == crate::limits::Limit::Memory)
+            .or_else(|| g.memory_exceeds(self.live_bytes(), "the evaluation"));
+        if let Some(e) = e {
+            self.limit_exceeded(loc, e);
+        }
     }
 
     /// A limit passed: print it at `loc` with its hint, record it on the
@@ -811,8 +866,13 @@ impl<'a> Evaluator<'a> {
     /// so they are counted from the node counter rather than charged one by
     /// one on a hot path.
     fn live_bytes(&self) -> u64 {
+        crate::limits::live::get().saturating_add(self.node_bytes())
+    }
+
+    /// The nodes' share of [`Evaluator::live_bytes`].
+    fn node_bytes(&self) -> u64 {
         let nodes = (self.node_index as u64).saturating_sub(1);
-        crate::limits::live::get().saturating_add(nodes.saturating_mul(NODE_BYTES))
+        nodes.saturating_mul(NODE_BYTES)
     }
 
     pub fn next_node_index(&mut self) -> usize {
@@ -869,7 +929,7 @@ impl<'a> Evaluator<'a> {
 
     /// Print a replayed message as [`Evaluator::emit_hinted`] printed it.
     pub(crate) fn replay_message(&mut self, m: &Message<'_>) {
-        crate::limits::live::charge(3 * m.text.len() as u64);
+        crate::limits::live::charge(message_bytes(m.diag.span.is_some()) + 3 * m.text.len() as u64);
         self.out.message(m);
     }
 
@@ -913,9 +973,23 @@ impl<'a> Evaluator<'a> {
         {
             return;
         }
+        // Text printed after the memory limit passed may have been cut
+        // short by it (the value printer stops there): the limit is
+        // printed instead.
+        if code != DiagCode::ResourceLimit
+            && self.limit.get() == Hard::Off
+            && crate::limits::live::over()
+        {
+            self.memory_passed(loc);
+            if self.limit.get() != Hard::Off {
+                return;
+            }
+        }
         // A host keeps what was printed (as bytes, a record and JSON), so
-        // an echo in a long loop is memory like any value.
-        crate::limits::live::charge(3 * text.len() as u64);
+        // an echo in a long loop is memory like any value, and so is a
+        // million short warnings: each is a diagnostic and a record with
+        // their own allocations besides the text.
+        crate::limits::live::charge(message_bytes(loc.is_some()) + 3 * text.len() as u64);
         let mut diag = Diagnostic::new(code, severity, String::from_utf8_lossy(text).into_owned())
             .with_base(PathBase::MainFileDir);
         if let Some(h) = hint {
@@ -1313,11 +1387,11 @@ impl<'a> Evaluator<'a> {
             }
             ExprKind::Function(..) => {
                 self.register_capture(ctx);
-                Ok(Value::Function(Rc::new(FunctionValue {
-                    unit: u,
-                    expr: id,
-                    ctx: ctx.clone(),
-                })))
+                Ok(Value::Function(Rc::new(FunctionValue::new(
+                    u,
+                    id,
+                    ctx.clone(),
+                ))))
             }
             ExprKind::Let(args, body) => {
                 let region = self.units[u as usize].res.expr[id.0 as usize];
@@ -1360,6 +1434,11 @@ impl<'a> Evaluator<'a> {
     /// `Expression::checkUndef`: print why an operator gave `undef`.
     #[inline(never)]
     fn check_undef(&mut self, r: ops::OpResult, u: u32, span: Span) -> Value {
+        // An element-wise operator stops at the memory limit with a partial
+        // result (`ops::map_vec`), which must not be used.
+        if !matches!(r, Ok(Value::Number(_) | Value::Bool(_))) {
+            self.check_memory(Some(Loc { unit: u, span }));
+        }
         match r {
             Ok(v) => v,
             Err(why) => {

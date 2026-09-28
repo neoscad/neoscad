@@ -593,7 +593,7 @@ removes it)". The limits, and the defaults of `serve` and `mcp`:
 | Name | Default | What |
 |---|---|---|
 | `time` | 60 (s) | Wall time, checked at evaluator calls and loop iterations, before every geometry node, and in primitive and extrusion loops. One kernel operation (a boolean) is not interrupted. |
-| `memory` | 4096 (MiB; `4G` also works) | An estimate, not a measurement: the large lists and strings the evaluator holds, every node and message it makes, and the geometry results the render holds, weighted for the kernel's working copies (each counts until its parent has used it; the geometry cache has its own budget). On the benchmark models it runs from about the process's peak RSS to 8 times below it (BOSL2's fractal_tree: 1.96 GB real, under 512 MiB estimated), so the count limits, not this, are what stop a runaway primitive. |
+| `memory` | 4096 (MiB; `4G` also works) | An estimate, not a measurement: every list, string, range and function value the evaluator holds (however small; the limit trips from the allocation that passes it), every node and message it makes, and the geometry results the render holds, weighted for the kernel's working copies (each counts until its parent has used it; the geometry cache has its own budget). On the benchmark models it runs from about the process's peak RSS to 8 times below it (BOSL2's fractal_tree: 1.96 GB real, under 512 MiB estimated), so the count limits, not this, are what stop a runaway primitive. |
 | `fragments` | 10,000 | Segments of one circle, sphere, cylinder, `rotate_extrude` or round `offset`. |
 | `slices` | 10,000 | Slices of one `linear_extrude`. |
 | `list` | 10,000,000 | Elements of one list (checked as a comprehension grows, and before `concat`). |

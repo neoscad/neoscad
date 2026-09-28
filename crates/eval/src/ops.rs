@@ -161,7 +161,28 @@ fn vec_less(x: &Vector, y: &Vector) -> Result<bool, Why> {
 
 // --- arithmetic -----------------------------------------------------------
 
+/// `f` over the elements of `v`, as a new list.
+///
+/// Element-wise operators recurse into nested lists in one Rust call that
+/// the evaluator's checks cannot interrupt, and a list whose halves are
+/// shared (`t = [t, t]` a few dozen times) costs nothing until an operator
+/// like `-t` copies it into 2^depth lists. So once the memory limit has
+/// passed (see `crate::limits::live`, which trips it as the lists are
+/// made), this stops with `undef`, and the evaluator reports the limit as
+/// soon as the operator returns.
+#[inline]
+fn map_vec(v: &[Value], f: impl FnMut(&Value) -> Value) -> Value {
+    if crate::limits::live::over() {
+        return Value::Undef;
+    }
+    Value::vector(v.iter().map(f).collect())
+}
+
 fn zip_with(x: &Vector, y: &Vector, f: impl Fn(&Value, &Value) -> OpResult) -> Value {
+    // As `map_vec`.
+    if crate::limits::live::over() {
+        return Value::Undef;
+    }
     Value::vector(x.iter().zip(y.iter()).map(|(p, q)| elem(f(p, q))).collect())
 }
 
@@ -184,7 +205,7 @@ pub fn sub(a: &Value, b: &Value) -> OpResult {
 /// Vector times number, element by element (`multvecnum`: the element is
 /// always the left operand).
 fn mul_vec_num(v: &Vector, n: &Value, warn: &mut Vec<String>) -> Value {
-    Value::vector(v.iter().map(|e| elem(mul(e, n, warn))).collect())
+    map_vec(v, |e| elem(mul(e, n, warn)))
 }
 
 /// Matrix times vector (`multmatvec`).
@@ -354,12 +375,8 @@ fn mul_vectors(x: &Vector, y: &Vector, warn: &mut Vec<String>) -> OpResult {
 pub fn div(a: &Value, b: &Value) -> OpResult {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x / y)),
-        (Value::Vector(v), Value::Number(_)) => {
-            Ok(Value::vector(v.iter().map(|e| elem(div(e, b))).collect()))
-        }
-        (Value::Number(_), Value::Vector(v)) => {
-            Ok(Value::vector(v.iter().map(|e| elem(div(a, e))).collect()))
-        }
+        (Value::Vector(v), Value::Number(_)) => Ok(map_vec(v, |e| elem(div(e, b)))),
+        (Value::Number(_), Value::Vector(v)) => Ok(map_vec(v, |e| elem(div(a, e)))),
         _ => Err(undefined_op(a, "/", b)),
     }
 }
@@ -426,7 +443,7 @@ pub fn bitwise(a: &Value, b: &Value, op: Bitwise) -> OpResult {
 pub fn neg(a: &Value) -> OpResult {
     match a {
         Value::Number(x) => Ok(Value::Number(-x)),
-        Value::Vector(v) => Ok(Value::vector(v.iter().map(|e| elem(neg(e))).collect())),
+        Value::Vector(v) => Ok(map_vec(v, |e| elem(neg(e)))),
         _ => Err(Why::new(format!(
             "undefined operation (-{})",
             a.type_name()
