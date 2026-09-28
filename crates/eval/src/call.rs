@@ -8,7 +8,7 @@ use lang::diag::DiagCode;
 use crate::builtins::functions::Builtin;
 use crate::builtins::modules::BuiltinModule;
 use crate::context::{Ctx, CtxKind, ScopeRef, Vars};
-use crate::eval::{Evaluator, Step};
+use crate::eval::{Evaluator, Mode, NO_BASE, Owner, Step};
 use crate::message::{Loc, R, UnwindKind};
 use crate::resolve::{BUILTIN_REGION, Cand, NO_SLOT, Region};
 use crate::sym::Sym;
@@ -477,15 +477,22 @@ impl<'a> Evaluator<'a> {
         // (Pushing `ctx` itself would not do: it need not be on the stack,
         // and its `$` variables would then become visible to the
         // arguments.)
+        //
+        // Register instances the steps open (tail `let`s, pure frames; see
+        // `Evaluator::regs`) sit above `regs` with their saved bases above
+        // `saves`, and die with the step, as its context would.
         let slot = self.push(self.placeholder.clone());
+        let regs = self.regs.len();
+        let saves = self.reg_saves.len();
         let mut cur: Option<Rc<Ctx>> = None;
+        let mut mode = Mode::Entry;
         let mut unit = u;
         let mut expr = Some(id);
         let mut call = (u, id);
         let mut depth: u32 = 0;
         let result = loop {
-            let entry = cur.is_none();
-            match self.simplify(unit, expr, cur.as_ref().unwrap_or(ctx), entry) {
+            let step = self.simplify(unit, expr, cur.as_ref().unwrap_or(ctx), mode);
+            let c = match step {
                 // A warning from the callee itself (an unknown function, a
                 // builtin's argument check) is raised inside OpenSCAD's
                 // `FunctionCall::evaluate`, so it is traced as its caller.
@@ -511,6 +518,19 @@ impl<'a> Evaluator<'a> {
                         // see.
                         debug_assert_eq!(self.stack.len(), slot + 2);
                         self.stack.swap_remove(slot);
+                        // A `let` that needs a context is never inside a
+                        // register region, so only a call can find
+                        // register instances of the step to end here.
+                        debug_assert!(c.is_some() || self.regs.len() == regs);
+                        self.reg_unwind(saves, regs);
+                        // A body that could have had a pure frame keeps
+                        // this one in its context: its register references
+                        // must find it by the chain walk, not in an outer
+                        // pure call's registers.
+                        if self.regions[nc.region as usize].reg() {
+                            self.frame_in_ctx(nc.region);
+                        }
+                        mode = Mode::Ctx;
                         // The replaced step's context dies here unless a
                         // function literal captured it; if it does die,
                         // its allocation serves the next call or `let`.
@@ -518,35 +538,54 @@ impl<'a> Evaluator<'a> {
                             Ctx::recycle(old, &mut self.ctx_pool);
                         }
                     }
-                    if let Some(c) = c {
-                        call = c;
-                        let hit_limit = depth == 1_000_000;
-                        depth += 1;
-                        let err = if hit_limit {
-                            let loc = expr
-                                .map(|e| self.expr_loc(unit, e))
-                                .unwrap_or(self.expr_loc(c.0, c.1));
-                            let mut t = b"Recursion detected calling function '".to_vec();
-                            t.extend_from_slice(&self.call_name(c.0, c.1));
-                            t.push(b'\'');
-                            self.error(Some(loc), DiagCode::RecursionLimit, t);
-                            Some(self.unwind(UnwindKind::Recursion))
-                        } else {
-                            self.check_interrupt().err()
-                        };
-                        if let Some(mut e) = err {
-                            self.trace_call(&mut e, call);
-                            break Err(e);
-                        }
+                    c
+                }
+                Ok(Step::Pure {
+                    unit: nu,
+                    expr: ne,
+                    ctx: nc,
+                    call: c,
+                    region,
+                    base,
+                }) => {
+                    unit = nu;
+                    expr = Some(ne);
+                    self.enter_pure(slot, regs, saves, region, base);
+                    mode = Mode::Pure;
+                    if let Some(old) = cur.replace(nc) {
+                        Ctx::recycle(old, &mut self.ctx_pool);
                     }
+                    Some(c)
                 }
                 Err(mut e) => {
+                    self.trace_call(&mut e, call);
+                    break Err(e);
+                }
+            };
+            if let Some(c) = c {
+                call = c;
+                let hit_limit = depth == 1_000_000;
+                depth += 1;
+                let err = if hit_limit {
+                    let loc = expr
+                        .map(|e| self.expr_loc(unit, e))
+                        .unwrap_or(self.expr_loc(c.0, c.1));
+                    let mut t = b"Recursion detected calling function '".to_vec();
+                    t.extend_from_slice(&self.call_name(c.0, c.1));
+                    t.push(b'\'');
+                    self.error(Some(loc), DiagCode::RecursionLimit, t);
+                    Some(self.unwind(UnwindKind::Recursion))
+                } else {
+                    self.check_interrupt().err()
+                };
+                if let Some(mut e) = err {
                     self.trace_call(&mut e, call);
                     break Err(e);
                 }
             }
         };
         self.truncate(slot);
+        self.reg_unwind(saves, regs);
         if let Some(c) = cur {
             Ctx::recycle(c, &mut self.ctx_pool);
         }
@@ -606,10 +645,11 @@ impl<'a> Evaluator<'a> {
         self.trace(e, loc, t);
     }
 
-    /// `simplify_function_body`: one step of the tail-call loop. `entry`:
-    /// `ctx` is the caller's context, not one of the loop's own, and its
-    /// `$` variables are not copied (see `eval_call`).
-    fn simplify(&mut self, u: u32, expr: Option<ExprId>, ctx: &Rc<Ctx>, entry: bool) -> R<Step> {
+    /// `simplify_function_body`: one step of the tail-call loop, in `ctx`
+    /// of kind `mode`. Only a context of the loop's own ([`Mode::Ctx`])
+    /// has `$` variables to copy into the next one: the caller's is not
+    /// copied (see `eval_call`), and a pure frame has none.
+    fn simplify(&mut self, u: u32, expr: Option<ExprId>, ctx: &Rc<Ctx>, mode: Mode) -> R<Step> {
         let Some(id) = expr else {
             return Ok(Step::Done(Value::Undef));
         };
@@ -640,9 +680,13 @@ impl<'a> Evaluator<'a> {
             }
             ExprKind::Let(args, body) => {
                 let region = self.units[u as usize].res.expr[id.0 as usize];
+                if self.regions[region as usize].reg() {
+                    self.tail_let_regs(u, args, e.span, region, ctx)?;
+                    return Ok(next(Some(*body)));
+                }
                 let c = self.new_ctx(ctx, CtxKind::Plain, region);
                 self.push(c.clone());
-                if !entry {
+                if mode == Mode::Ctx {
                     self.copy_config(ctx, &c);
                 }
                 self.sequential_assign(u, args, e.span, &c)?;
@@ -654,83 +698,123 @@ impl<'a> Evaluator<'a> {
                 })
             }
             ExprKind::Call(callee, args) => {
-                let loc = Loc {
-                    unit: u,
-                    span: e.span,
-                };
-                let callable = match &ast.expr(*callee).kind {
-                    ExprKind::Var(n) => {
-                        let s = self.units[u as usize].sym(*n);
-                        match self.units[u as usize].res.expr[id.0 as usize] {
-                            0 => {
-                                if !self.syms.is_config(s) {
-                                    self.stats.fallbacks += 1;
-                                }
-                                self.lookup_function(ctx, s, loc)?
-                            }
-                            r => self.find_function(u, r - 1, ctx, s, loc)?,
-                        }
-                    }
-                    _ => {
-                        let v = self.eval(u, *callee, ctx)?;
-                        match v {
-                            Value::Function(f) => Some(Callable::Literal(f)),
-                            other => {
-                                let t = format!("Can't call function on {}", other.type_name());
-                                self.warn(loc, DiagCode::UnknownFunction, t);
-                                None
-                            }
-                        }
-                    }
-                };
-                let (fu, params, body, defining, region): (u32, &'a [Param], ExprId, Rc<Ctx>, u32) =
-                    match callable {
-                        None => return Ok(Step::Done(Value::Undef)),
-                        Some(Callable::Builtin(b)) => {
-                            let v = self.call_builtin(b, u, id, args, ctx)?;
-                            return Ok(Step::Done(v));
-                        }
-                        Some(Callable::User {
-                            ctx: dctx,
-                            unit,
-                            scope: scope_id,
-                            index,
-                        }) => {
-                            let scope: &'a lang::ast::Scope =
-                                self.units[unit as usize].scopes[scope_id as usize].scope;
-                            let f = &scope.functions[index as usize];
-                            let region = self.function_region(unit, scope_id, index);
-                            (unit, &f.params, f.body, dctx, region)
-                        }
-                        Some(Callable::Literal(f)) => {
-                            let fast: &'a Ast = self.units[f.unit as usize].ast;
-                            match &fast.expr(f.expr).kind {
-                                ExprKind::Function(params, body) => {
-                                    let region =
-                                        self.units[f.unit as usize].res.expr[f.expr.0 as usize];
-                                    (f.unit, params.as_slice(), *body, f.ctx.clone(), region)
-                                }
-                                _ => return Ok(Step::Done(Value::Undef)),
-                            }
-                        }
-                    };
-                // `defining` is this call's own reference (the lookup
-                // cloned it), so it becomes the body's parent as it is.
-                let body_ctx = self.new_ctx_in(defining, CtxKind::Plain, region);
-                self.push(body_ctx.clone());
-                if !entry {
-                    self.copy_config(ctx, &body_ctx);
+                // A call that is always a builtin, as `find_function` would
+                // answer it, evaluated here rather than through
+                // `simplify_call`: a recursion through a builtin in tail
+                // position (`max(0, f(n - 1))`) would hold that frame too.
+                if let Some(b) = self.static_builtin(u, id) {
+                    return Ok(Step::Done(self.call_builtin(b, u, id, args, ctx)?));
                 }
-                self.call_frame(u, id, args, ctx, entry, loc, fu, params, &body_ctx)?;
-                Ok(Step::Next {
-                    unit: fu,
-                    expr: Some(body),
-                    ctx: Some(body_ctx),
-                    call: Some((u, id)),
-                })
+                self.simplify_call(u, id, e, callee, args, ctx, mode)
             }
             _ => Ok(Step::Done(self.eval(u, id, ctx)?)),
         }
+    }
+
+    /// [`Self::simplify`] of a call: look the callee up, then evaluate a
+    /// builtin, or bind a user function's frame (in a context, or in
+    /// registers when the frame can be pure). Out of line: `simplify` is
+    /// on every level of a recursion through a tail-call loop, and this
+    /// branch's locals would all be part of its frame.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn simplify_call(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        e: &'a lang::ast::Expr,
+        callee: &ExprId,
+        args: &'a [Arg],
+        ctx: &Rc<Ctx>,
+        mode: Mode,
+    ) -> R<Step> {
+        let ast: &'a Ast = self.units[u as usize].ast;
+        let loc = Loc {
+            unit: u,
+            span: e.span,
+        };
+        let callable = match &ast.expr(*callee).kind {
+            ExprKind::Var(n) => {
+                let s = self.units[u as usize].sym(*n);
+                match self.units[u as usize].res.expr[id.0 as usize] {
+                    0 => {
+                        if !self.syms.is_config(s) {
+                            self.stats.fallbacks += 1;
+                        }
+                        self.lookup_function(ctx, s, loc)?
+                    }
+                    r => self.find_function(u, r - 1, ctx, s, loc)?,
+                }
+            }
+            _ => {
+                let v = self.eval(u, *callee, ctx)?;
+                match v {
+                    Value::Function(f) => Some(Callable::Literal(f)),
+                    other => {
+                        let t = format!("Can't call function on {}", other.type_name());
+                        self.warn(loc, DiagCode::UnknownFunction, t);
+                        None
+                    }
+                }
+            }
+        };
+        let (fu, params, body, defining, region): (u32, &'a [Param], ExprId, Rc<Ctx>, u32) =
+            match callable {
+                None => return Ok(Step::Done(Value::Undef)),
+                Some(Callable::Builtin(b)) => {
+                    let v = self.call_builtin(b, u, id, args, ctx)?;
+                    return Ok(Step::Done(v));
+                }
+                Some(Callable::User {
+                    ctx: dctx,
+                    unit,
+                    scope: scope_id,
+                    index,
+                }) => {
+                    let scope: &'a lang::ast::Scope =
+                        self.units[unit as usize].scopes[scope_id as usize].scope;
+                    let f = &scope.functions[index as usize];
+                    let region = self.function_region(unit, scope_id, index);
+                    (unit, &f.params, f.body, dctx, region)
+                }
+                Some(Callable::Literal(f)) => {
+                    let fast: &'a Ast = self.units[f.unit as usize].ast;
+                    match &fast.expr(f.expr).kind {
+                        ExprKind::Function(params, body) => {
+                            let region = self.units[f.unit as usize].res.expr[f.expr.0 as usize];
+                            (f.unit, params.as_slice(), *body, f.ctx.clone(), region)
+                        }
+                        _ => return Ok(Step::Done(Value::Undef)),
+                    }
+                }
+            };
+        // A pure frame: the callee's body needs no context of its
+        // own (`Region::reg`), and this call binds nothing but its
+        // parameters, positionally, so `bind_user` could print
+        // nothing and put nothing in a name map. A tail call also
+        // needs the dying context to have no `$` variables, which
+        // the frame would have copied.
+        if self.regions[region as usize].reg()
+            && args.len() <= params.len()
+            && args.iter().all(|a| a.name.is_none())
+            && (mode != Mode::Ctx || !ctx.vars.borrow().has_config)
+        {
+            return self.pure_frame(u, id, args, ctx, mode, fu, params, body, defining, region);
+        }
+        // `defining` is this call's own reference (the lookup
+        // cloned it), so it becomes the body's parent as it is.
+        let body_ctx = self.new_ctx_in(defining, CtxKind::Plain, region);
+        self.push(body_ctx.clone());
+        if mode == Mode::Ctx {
+            self.copy_config(ctx, &body_ctx);
+        }
+        self.call_frame(u, id, args, ctx, mode, loc, fu, params, &body_ctx)?;
+        Ok(Step::Next {
+            unit: fu,
+            expr: Some(body),
+            ctx: Some(body_ctx),
+            call: Some((u, id)),
+        })
     }
 
     /// A user call's arguments, evaluated and bound into `body_ctx`. Out
@@ -744,7 +828,7 @@ impl<'a> Evaluator<'a> {
         id: ExprId,
         args: &'a [Arg],
         ctx: &Rc<Ctx>,
-        entry: bool,
+        mode: Mode,
         loc: Loc,
         fu: u32,
         params: &'a [Param],
@@ -759,7 +843,7 @@ impl<'a> Evaluator<'a> {
         // and slots.
         let mut argv = self.arg_pool.pop().unwrap_or_default();
         let r = if self.accumulates(u, id, args) {
-            self.eval_args_moving(u, args, ctx, entry, &mut argv)
+            self.eval_args_moving(u, id, args, ctx, mode, &mut argv)
         } else {
             self.eval_args_into(u, args, ctx, &mut argv)
         };
@@ -769,6 +853,130 @@ impl<'a> Evaluator<'a> {
         self.arg_pool.push(argv);
         self.apply_frame(body_ctx, frame?);
         Ok(())
+    }
+
+    /// A call into a pure frame (see `simplify`): the arguments are
+    /// evaluated and bound as [`Self::bind_positional`] binds them, but
+    /// into registers on top rather than into a context's slots, and the
+    /// body will be evaluated in the defining context. The registers are
+    /// placed above everything the caller has live, since the arguments
+    /// can read the dying step's registers; `eval_call` moves them down
+    /// once that step is gone ([`Self::enter_pure`]).
+    ///
+    /// Nothing observable differs from a frame context: the `$` lookup
+    /// finds nothing in such a context (no `$` parameter or argument, no
+    /// copied `$` variables), no lexical lookup from the body can reach it
+    /// except through a register, and nothing can capture it.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn pure_frame(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        args: &'a [Arg],
+        ctx: &Rc<Ctx>,
+        mode: Mode,
+        fu: u32,
+        params: &'a [Param],
+        body: ExprId,
+        defining: Rc<Ctx>,
+        region: u32,
+    ) -> R<Step> {
+        let mut argv = self.arg_pool.pop().unwrap_or_default();
+        let r = if self.accumulates(u, id, args) {
+            self.eval_args_moving(u, id, args, ctx, mode, &mut argv)
+        } else {
+            self.eval_args_into(u, args, ctx, &mut argv)
+        };
+        if let Err(e) = r {
+            argv.clear();
+            self.arg_pool.push(argv);
+            return Err(e);
+        }
+        let base = self.regs.len();
+        let n = argv.len();
+        self.regs
+            .resize(base + self.regions[region as usize].len(), None);
+        for (k, a) in argv.drain(..).enumerate() {
+            let slot = self.regions[region as usize].binds[k] as usize;
+            self.regs[base + slot] = Some(a.value);
+        }
+        self.arg_pool.push(argv);
+        for (k, p) in params.iter().enumerate().skip(n) {
+            let i = base + self.regions[region as usize].binds[k] as usize;
+            if self.regs[i].is_none() {
+                let v = match p.default {
+                    Some(d) => match self.eval(fu, d, &defining) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // The bound values die here, as the unapplied
+                            // frame does in `call_frame`.
+                            self.regs.truncate(base);
+                            return Err(e);
+                        }
+                    },
+                    None => Value::Undef,
+                };
+                self.regs[i] = Some(v);
+            }
+        }
+        Ok(Step::Pure {
+            unit: fu,
+            expr: body,
+            ctx: defining,
+            call: (u, id),
+            region,
+            base: base as u32,
+        })
+    }
+
+    /// A tail `let` in registers: it lives until the step is replaced
+    /// (`eval_call`), as its context would. It binds no `$` variable, and
+    /// the ones it would copy stay visible in the step's context, which
+    /// keeps the loop's slot. Out of line, as `pure_frame` is.
+    #[inline(never)]
+    fn tail_let_regs(
+        &mut self,
+        u: u32,
+        args: &'a [Arg],
+        span: lang::source::Span,
+        region: u32,
+        ctx: &Rc<Ctx>,
+    ) -> R<()> {
+        let old = self.reg_open(region);
+        self.reg_saves.push((region, old));
+        self.assign_regs(u, args, span, region, ctx)
+    }
+
+    /// A function body that could have had a pure frame, bound in a
+    /// context for this call: its register references must find it by the
+    /// chain walk, not in an outer pure call's registers.
+    #[inline(never)]
+    fn frame_in_ctx(&mut self, region: u32) {
+        let old = std::mem::replace(&mut self.reg_base[region as usize], NO_BASE);
+        self.reg_saves.push((region, old));
+    }
+
+    /// `eval_call`'s move into a pure frame bound at `base`: the previous
+    /// step's context leaves the loop's stack slot (the frame has no
+    /// context, and the slot then holds the empty placeholder, as seen by
+    /// `$` lookups), its register instances die, and the new frame's
+    /// registers move down in their place.
+    #[inline(never)]
+    fn enter_pure(&mut self, slot: usize, regs: usize, saves: usize, region: u32, base: u32) {
+        debug_assert_eq!(self.stack.len(), slot + 1);
+        // After a first or a pure step the slot already holds it.
+        if !Rc::ptr_eq(&self.stack[slot], &self.placeholder) {
+            self.stack[slot] = self.placeholder.clone();
+        }
+        if self.reg_saves.len() > saves {
+            self.reg_restore(saves);
+        }
+        if base as usize > regs {
+            self.regs.drain(regs..base as usize);
+        }
+        let old = std::mem::replace(&mut self.reg_base[region as usize], regs as u32);
+        self.reg_saves.push((region, old));
     }
 
     /// Before a tail call's arguments are evaluated, move the accumulator
@@ -797,13 +1005,14 @@ impl<'a> Evaluator<'a> {
     fn eval_args_moving(
         &mut self,
         u: u32,
+        id: ExprId,
         args: &'a [Arg],
         ctx: &Rc<Ctx>,
-        entry: bool,
+        mode: Mode,
         out: &mut Vec<ArgVal>,
     ) -> R<()> {
         let mark = self.moved.len();
-        self.move_accumulators(u, args, ctx, entry);
+        self.move_accumulators(u, id, args, ctx, mode);
         let r = self.eval_args_into(u, args, ctx, out);
         self.moved.truncate(mark);
         r
@@ -833,29 +1042,85 @@ impl<'a> Evaluator<'a> {
         yes
     }
 
-    fn move_accumulators(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>, entry: bool) {
+    /// The move test with registers (see [`Evaluator::regs`]) is the
+    /// tree-walker's test on the contexts registers replace:
+    ///
+    /// - a register instance around a tail call is the loop's own (a tail
+    ///   `let` or the pure frame: every scope around a tail call is on its
+    ///   tail path), held by nothing else, so it passes, and a binding in
+    ///   one can be moved;
+    /// - otherwise the walk starts from the first real context, and its
+    ///   bar is the one that context would have had with the register
+    ///   contexts above it: in [`Mode::Ctx`] the loop's context, held by
+    ///   its slot and `cur` (as when it was the innermost one); in
+    ///   [`Mode::Pure`] the defining context, held by one owner besides
+    ///   `cur` (as when the frame context held it), which is the entry
+    ///   bar;
+    /// - in [`Mode::Entry`] the caller's context would have been the
+    ///   register one, which its maker and the context stack both hold
+    ///   (or the loop slot and `cur`, for a pure frame): the test fails,
+    ///   so nothing is moved ([`Self::entry_blocked`]).
+    fn move_accumulators(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        args: &'a [Arg],
+        ctx: &Rc<Ctx>,
+        mode: Mode,
+    ) {
         for a in args {
-            let Some(s) = self.accumulator(u, a.expr) else {
+            let Some((s, var)) = self.accumulator(u, a.expr) else {
                 continue;
             };
             if self.syms.is_config(s) || self.uses(u, args, s) != 1 {
                 continue;
             }
-            let Some(owner) = private_binder(ctx, s, entry, &self.regions) else {
+            if mode == Mode::Entry && self.entry_blocked(u, id) {
+                continue;
+            }
+            let in_reg = match self.units[u as usize].res.var(var).cands() {
+                Some(r) => self.reg_binding(self.units[u as usize].res.cands(r)),
+                None => None,
+            };
+            if let Some(i) = in_reg {
+                debug_assert!(mode != Mode::Entry, "blocked above");
+                let value = self.regs[i].as_mut().map(std::mem::take);
+                self.moved.push(crate::eval::Moved {
+                    owner: Owner::Reg(i),
+                    sym: s,
+                    value,
+                });
+                continue;
+            }
+            let Some(owner) = private_binder(ctx, s, mode != Mode::Ctx, &self.regions) else {
                 continue;
             };
             let value = owner.take_local(s, &self.regions);
             self.moved.push(crate::eval::Moved {
-                owner: Rc::as_ptr(&owner),
+                owner: Owner::Ctx(Rc::as_ptr(&owner)),
                 sym: s,
                 value,
             });
         }
     }
 
+    /// Whether a non-tail call's accumulators stay put because the scope
+    /// the call is in is a register region: the tree-walker's context
+    /// there would never pass `private_binder`'s entry bar (see
+    /// [`Self::move_accumulators`]), while the context the call now gets,
+    /// the first real one outside, might.
+    #[cold]
+    fn entry_blocked(&self, u: u32, id: ExprId) -> bool {
+        self.units[u as usize]
+            .res
+            .acc_env
+            .get(&id.0)
+            .is_some_and(|&r| self.regions[r as usize].reg())
+    }
+
     /// The variable `acc` of an argument `concat(acc, ...)` or
-    /// `[each acc, ...]`.
-    fn accumulator(&self, u: u32, e: ExprId) -> Option<Sym> {
+    /// `[each acc, ...]`, and its reference.
+    fn accumulator(&self, u: u32, e: ExprId) -> Option<(Sym, ExprId)> {
         let unit = &self.units[u as usize];
         let ast: &Ast = unit.ast;
         let var = match &ast.expr(e).kind {
@@ -876,7 +1141,7 @@ impl<'a> Evaluator<'a> {
             _ => return None,
         };
         match ast.expr(var).kind {
-            ExprKind::Var(n) => Some(unit.sym(n)),
+            ExprKind::Var(n) => Some((unit.sym(n), var)),
             _ => None,
         }
     }
@@ -999,6 +1264,21 @@ impl<'a> Evaluator<'a> {
         {
             return Ok(Some(Callable::Builtin(b)));
         }
+        // A variable holding a function literal, in a register: registers
+        // are the innermost candidates, and as in a context, a value that
+        // is not a function lets the search go on.
+        let res = &self.units[u as usize].res;
+        for cand in res.cands(fr.cands) {
+            let Cand::Reg { region, slot } = *cand else {
+                break;
+            };
+            let base = self.reg_base[region as usize];
+            if base != NO_BASE
+                && let Some(Value::Function(f)) = &self.regs[base as usize + slot as usize]
+            {
+                return Ok(Some(Callable::Literal(f.clone())));
+            }
+        }
         let mut c: &Rc<Ctx> = ctx;
         loop {
             if c.region == BUILTIN_REGION
@@ -1027,7 +1307,7 @@ impl<'a> Evaluator<'a> {
                             index,
                         }));
                     }
-                    Cand::Slot { slot, .. } => {
+                    Cand::Slot { slot, .. } | Cand::Reg { slot, .. } => {
                         if let Some(Value::Function(f)) = c.slot(slot) {
                             return Ok(Some(Callable::Literal(f)));
                         }
@@ -1107,7 +1387,7 @@ impl<'a> Evaluator<'a> {
                             index,
                         }));
                     }
-                    Cand::Slot { .. } | Cand::Extra { .. } => {}
+                    Cand::Slot { .. } | Cand::Reg { .. } | Cand::Extra { .. } => {}
                 }
             }
             match &c.parent {

@@ -81,9 +81,21 @@ pub(crate) struct Region {
     /// Whether call arguments bind here (function and module bodies), so a
     /// named argument that is not a parameter can bind any name.
     pub params: bool,
+    /// Whether this region's variables live in registers rather than in a
+    /// context (see [`Region::reg`] and the module docs, "Registers").
+    reg: bool,
 }
 
 impl Region {
+    /// Whether the evaluator keeps this region's variables in registers
+    /// (`Evaluator::regs`) instead of a context: an expression `let`, a
+    /// comprehension `for` variable, or a function body (a *pure frame*,
+    /// when the call allows it) that nothing inside can see as a context.
+    #[inline]
+    pub fn reg(&self) -> bool {
+        self.reg
+    }
+
     /// The slot of `s`, if this region binds it.
     pub fn slot_of(&self, s: Sym) -> Option<u32> {
         match &self.index {
@@ -157,6 +169,7 @@ impl<'s> RegionBuilder<'s> {
             index: self.index,
             binds: self.binds.into(),
             params,
+            reg: false,
         }
     }
 }
@@ -170,6 +183,13 @@ impl<'s> RegionBuilder<'s> {
 pub(crate) enum Cand {
     /// The variable in this slot of a context of `region`, when set.
     Slot { region: u32, slot: u32 },
+    /// [`Cand::Slot`] of a region whose variables live in registers
+    /// ([`Region::reg`]): register `slot` of the region's live instance
+    /// (`Evaluator::reg_base`), or, for a function body bound as a context
+    /// (a call that could not have a pure frame), the slot of that context
+    /// as for `Slot`. Registers are always the innermost candidates, so a
+    /// lookup tries them first and then walks the chain.
+    Reg { region: u32, slot: u32 },
     /// A named argument that is not a parameter, in the name map of a
     /// function or module body context of `region`.
     Extra { region: u32 },
@@ -186,6 +206,7 @@ impl Cand {
     pub fn region(&self) -> u32 {
         match *self {
             Cand::Slot { region, .. }
+            | Cand::Reg { region, .. }
             | Cand::Extra { region }
             | Cand::Def { region, .. }
             | Cand::Use { region, .. } => region,
@@ -266,6 +287,13 @@ pub(crate) struct UnitRes {
     /// the scope defining it, recorded when that scope is resolved.
     fn_env: Vec<Box<[u32]>>,
     mod_env: Vec<Box<[u32]>>,
+    /// Per call with an accumulator-shaped argument (`concat(acc, ...)`,
+    /// `[each acc, ...]`; see `Evaluator::move_accumulators`): the region
+    /// of the innermost scope around the call. A non-tail call's move test
+    /// looks at the context the call is evaluated in, and when that scope
+    /// is a register region the tree-walker's context there would have
+    /// been one the test always rejects (see `Evaluator::entry_moves`).
+    pub acc_env: HashMap<u32, u32, FxBuild>,
     pub stats: Stats,
 }
 
@@ -396,6 +424,10 @@ struct Resolver<'r, 't, 'a> {
     res: &'r mut UnitRes,
     exprs: Vec<(ExprId, u32)>,
     scopes: Vec<(u32, u32)>,
+    /// The first candidate this run adds: [`Resolver::run`] turns the
+    /// slots of register regions among them into [`Cand::Reg`] once every
+    /// region of the definition is known.
+    cand_start: usize,
 }
 
 impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
@@ -405,6 +437,7 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
         regions: &'r mut Vec<Region>,
         res: &'r mut UnitRes,
     ) -> Self {
+        let cand_start = res.cands.len();
         Resolver {
             t,
             unit: &t.units[u as usize],
@@ -412,6 +445,7 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
             res,
             exprs: Vec::new(),
             scopes: Vec::new(),
+            cand_start,
         }
     }
 }
@@ -458,6 +492,9 @@ pub(crate) fn resolve_function(
         }
     }
     let region = r.params_region(&f.params);
+    // A body can have a pure frame unless a parameter is a `$` name, which
+    // every call binds in the frame's name map (see `Region::reg`).
+    r.regions[region as usize].reg = !r.regions[region as usize].binds.contains(&NO_SLOT);
     r.res.fn_region[scope as usize][index as usize] = region;
     let body_env = r.env(region, None, false, Some(env));
     r.exprs.push((f.body, body_env));
@@ -575,6 +612,66 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
                 break;
             }
         }
+        // Only now is every region of the definition final: a trigger
+        // (see `materialize`) can come after a reference in the worklist.
+        // Earlier runs' candidates never name this run's regions, and this
+        // run never materializes theirs (a definition's register regions
+        // are all inside its own body), so theirs stay right.
+        for c in &mut self.res.cands[self.cand_start..] {
+            if let Cand::Slot { region, slot } = *c
+                && self.regions[region as usize].reg
+            {
+                *c = Cand::Reg { region, slot };
+            }
+        }
+    }
+
+    /// A register region (`Region::reg`) whose contexts something needs,
+    /// with every register region around it: a function literal captures
+    /// its context chain, a `$` binding is looked up through the context
+    /// stack, and a C-style `for` evaluates by name (`lc_for_c`). The
+    /// regions around must follow so that a context's parent chain has no
+    /// register region in it: lookups try registers first and then walk
+    /// the chain, which is only the tree-walker's order when registers
+    /// are always the innermost bindings.
+    ///
+    /// The walk stops at the first region that is not a register one:
+    /// everything outside it is not one either, because it was either
+    /// materialized by the same rule or is a statement scope, and no
+    /// expression region encloses a statement scope.
+    fn materialize(&mut self, mut env: u32) {
+        loop {
+            let e = self.res.envs[env as usize];
+            let r = &mut self.regions[e.region as usize];
+            if !r.reg {
+                return;
+            }
+            r.reg = false;
+            match e.parent {
+                Some(p) => env = p,
+                None => return,
+            }
+        }
+    }
+
+    /// Whether `e` is an argument [`Evaluator::move_accumulators`] may move
+    /// from (`call::accumulator`'s shape; being wrong only costs a map
+    /// entry).
+    fn accumulator_shaped(&self, e: ExprId) -> bool {
+        let ast = self.unit.ast;
+        match &ast.expr(e).kind {
+            ExprKind::Call(callee, args) => {
+                matches!(ast.expr(*callee).kind, ExprKind::Var(n) if ast.name(n) == "concat")
+                    && args.first().is_some_and(|a| {
+                        a.name.is_none() && matches!(ast.expr(a.expr).kind, ExprKind::Var(_))
+                    })
+            }
+            ExprKind::Vector(items) => items.first().is_some_and(|&i| {
+                matches!(ast.expr(i).kind, ExprKind::LcEach(x)
+                    if matches!(ast.expr(x).kind, ExprKind::Var(_)))
+            }),
+            _ => false,
+        }
     }
 
     /// The statements of scope `sid`, whose own environment is `env`.
@@ -683,21 +780,33 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
                     }
                     _ => self.exprs.push((*callee, env)),
                 }
+                if args.iter().any(|a| self.accumulator_shaped(a.expr)) {
+                    let region = self.res.envs[env as usize].region;
+                    self.res.acc_env.insert(id.0, region);
+                }
                 push_args(&mut self.exprs, args, env);
             }
             ExprKind::Function(params, body) => {
+                // The literal captures the context it is made in.
+                self.materialize(env);
                 for p in params {
                     if let Some(d) = p.default {
                         self.exprs.push((d, env));
                     }
                 }
                 let r = self.params_region(params);
+                self.regions[r as usize].reg = !self.regions[r as usize].binds.contains(&NO_SLOT);
                 self.res.expr[id.0 as usize] = r;
                 let e = self.env(r, None, false, Some(env));
                 self.exprs.push((*body, e));
             }
             ExprKind::Let(args, body) | ExprKind::LcLet(args, body) => {
                 let r = self.args_region(args);
+                if self.binds_special(args) {
+                    self.materialize(env);
+                } else {
+                    self.regions[r as usize].reg = true;
+                }
                 self.res.expr[id.0 as usize] = r;
                 let e = self.env(r, None, false, Some(env));
                 push_args(&mut self.exprs, args, e);
@@ -705,6 +814,19 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
             }
             ExprKind::LcFor(args, body) => {
                 let (first, e) = self.for_regions(args, env);
+                // Variable `k` binds in region `first + k`, inside the ones
+                // before it: a `$` variable keeps its own region and those
+                // outside it as contexts.
+                let special = args.iter().rposition(|a| {
+                    a.name
+                        .is_some_and(|n| self.t.syms.is_config(self.unit.sym(n)))
+                });
+                if special.is_some() {
+                    self.materialize(env);
+                }
+                for k in 0..args.len() {
+                    self.regions[first as usize + k].reg = special.is_none_or(|j| k > j);
+                }
                 self.res.expr[id.0 as usize] = first;
                 self.exprs.push((*body, e));
             }
@@ -714,6 +836,8 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
                 incr,
                 body,
             } => {
+                // Evaluated by name, in contexts (see `lc_for_c`).
+                self.materialize(env);
                 let first = self.args_region(init);
                 let next = self.args_region(incr);
                 debug_assert_eq!(next, first + 1);
@@ -729,6 +853,15 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
                 self.exprs.extend(body.map(|b| (b, env)));
             }
         }
+    }
+
+    /// Whether a `let` binds a `$` name, which lives in its context's name
+    /// map for the dynamic lookup to find.
+    fn binds_special(&self, args: &[Arg]) -> bool {
+        args.iter().any(|a| {
+            a.name
+                .is_some_and(|n| self.t.syms.is_config(self.unit.sym(n)))
+        })
     }
 
     /// The variable candidates of `s` in `e`'s region, pushed.
@@ -868,5 +1001,6 @@ pub(crate) fn builtin_region(pi: Sym) -> Region {
         index: None,
         binds: Box::new([0]),
         params: false,
+        reg: false,
     }
 }

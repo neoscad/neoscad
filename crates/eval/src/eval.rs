@@ -233,6 +233,24 @@ pub(crate) struct Evaluator<'a> {
     pub arg_pool: Vec<Vec<crate::call::ArgVal>>,
     /// Dead contexts for new ones to reuse (see [`Ctx::recycle`]).
     pub ctx_pool: Vec<Rc<Ctx>>,
+    /// The registers: the variables of every live instance of a register
+    /// region ([`Region::reg`]), innermost last. An instance takes
+    /// `regions[r].len()` consecutive registers from the top when it opens
+    /// and gives them back when it closes, so a `let`, a comprehension
+    /// variable or a pure call frame costs no context allocation, no
+    /// reference counting and no link in the chain walks.
+    pub regs: Vec<Option<Value>>,
+    /// Per region: the first register of its live instance, or
+    /// [`NO_BASE`]. Only the innermost instance of a region is ever read:
+    /// a reference inside a register region is evaluated only while the
+    /// instance around it is the newest one, since nothing that could run
+    /// it later or from inside a newer instance (a function literal made
+    /// in it) is allowed in one (`resolve::Resolver::materialize`).
+    pub reg_base: Vec<u32>,
+    /// Bases replaced by instances that the tail-call loop owns (the tail
+    /// `let`s and pure frames of the step being evaluated), to restore
+    /// when the step is replaced or the loop ends: (region, base).
+    pub reg_saves: Vec<(u32, u32)>,
     /// Reuse of top-level statements from an earlier evaluation (see
     /// [`crate::memo`]), when the host keeps a memo.
     pub(crate) memo: Option<crate::memo::MemoRun<'a>>,
@@ -243,12 +261,24 @@ pub(crate) struct Evaluator<'a> {
 /// A variable's value moved out of its frame, to be handed to the one read
 /// of it in a tail call's arguments.
 pub(crate) struct Moved {
-    /// The frame it was bound in: only a read that resolves to this binding
-    /// takes it.
-    pub owner: *const Ctx,
+    /// The binding it was moved out of: only a read that resolves to this
+    /// binding takes it.
+    pub owner: Owner,
     pub sym: Sym,
     pub value: Option<Value>,
 }
+
+/// Where a variable is bound, for [`Moved`]: a context, or a register.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Owner {
+    Ctx(*const Ctx),
+    Reg(usize),
+}
+
+/// [`Evaluator::reg_base`] of a region with no live register instance: not
+/// open, or a function body bound as a context for this call, whose
+/// [`Cand::Reg`] candidates are then found by the chain walk.
+pub(crate) const NO_BASE: u32 = u32::MAX;
 
 /// Resource limits as numbers for the checks on hot paths; `usize::MAX`
 /// (and so on) when unlimited. See [`crate::limits`].
@@ -319,6 +349,29 @@ pub(crate) enum Step {
         ctx: Option<Rc<Ctx>>,
         call: Option<(u32, ExprId)>,
     },
+    /// A call into a pure frame (see `Evaluator::pure_frame`): its body is
+    /// evaluated in the callee's defining context `ctx`, with the frame's
+    /// variables in the registers of `region` from `base`.
+    Pure {
+        unit: u32,
+        expr: ExprId,
+        ctx: Rc<Ctx>,
+        call: (u32, ExprId),
+        region: u32,
+        base: u32,
+    },
+}
+
+/// What the context a tail-call step is evaluated in is (see
+/// `Evaluator::eval_call`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// The loop's first step: the caller's context, borrowed.
+    Entry,
+    /// The loop's own context: a call frame or `let` it made.
+    Ctx,
+    /// A pure frame's defining context: the frame is in registers.
+    Pure,
 }
 
 impl<'a> Evaluator<'a> {
@@ -425,6 +478,9 @@ impl<'a> Evaluator<'a> {
             stats: crate::resolve::Stats::default(),
             arg_pool: Vec::new(),
             ctx_pool: Vec::new(),
+            regs: Vec::new(),
+            reg_base: vec![NO_BASE; 2],
+            reg_saves: Vec::new(),
             placeholder: Ctx::new(None, CtxKind::Plain, crate::resolve::NONE_REGION, 0),
             memo: None,
             rec: None,
@@ -691,34 +747,108 @@ impl<'a> Evaluator<'a> {
     pub fn find_var(&self, u: u32, r: Ref, s: Sym, ctx: &Ctx) -> Option<Value> {
         let found = self.find_binding(u, r, s, ctx);
         // Debug builds check every resolved lookup against the by-name
-        // walk it replaces: they must stop at the same context.
+        // walk it replaces: they must stop at the same context. A value
+        // found in a register has no context to compare (the walk cannot
+        // see registers, and no context between could bind the name:
+        // registers are the innermost bindings).
         #[cfg(debug_assertions)]
-        assert_eq!(
-            found.as_ref().map(|(c, _)| std::ptr::from_ref(*c)),
-            ctx.binder(s, &self.regions),
-            "resolved lookup of {} disagrees with the scope chain",
-            self.name(s)
-        );
+        if !matches!(found, Some((None, _))) {
+            assert_eq!(
+                found.as_ref().and_then(|(c, _)| c.map(std::ptr::from_ref)),
+                ctx.binder(s, &self.regions),
+                "resolved lookup of {} disagrees with the scope chain",
+                self.name(s)
+            );
+        }
         found.map(|(_, v)| v)
     }
 
+    /// The register a resolved reference's live binding is in: the first
+    /// set one of its register candidates (`None`: none is set, so the
+    /// binding, if any, is in a context).
     #[inline]
-    fn find_binding<'c>(&self, u: u32, r: Ref, s: Sym, ctx: &'c Ctx) -> Option<(&'c Ctx, Value)> {
+    pub(crate) fn reg_binding(&self, cands: &[Cand]) -> Option<usize> {
+        for cand in cands {
+            let Cand::Reg { region, slot } = *cand else {
+                break;
+            };
+            let base = self.reg_base[region as usize];
+            if base != NO_BASE {
+                let i = base as usize + slot as usize;
+                if self.regs[i].is_some() {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// A resolved lookup: the value, and the context it was found in
+    /// (`None`: a register).
+    #[inline]
+    fn find_binding<'c>(
+        &self,
+        u: u32,
+        r: Ref,
+        s: Sym,
+        ctx: &'c Ctx,
+    ) -> Option<(Option<&'c Ctx>, Value)> {
         let cands = self.units[u as usize].res.cands(r);
         // Most names have one binding that can see them (a parameter, a
         // `let`, a global): a tighter loop for those.
-        if let [Cand::Slot { region, slot }] = *cands {
-            let mut c = ctx;
-            loop {
-                if c.region == region
-                    && let Some(v) = c.slot(slot)
-                {
-                    return Some((c, v));
+        match *cands {
+            [Cand::Slot { region, slot }] => {
+                let mut c = ctx;
+                loop {
+                    if c.region == region
+                        && let Some(v) = c.slot(slot)
+                    {
+                        return Some((Some(c), v));
+                    }
+                    c = c.parent.as_deref()?;
                 }
-                c = c.parent.as_deref()?;
+            }
+            [Cand::Reg { region, slot }] => {
+                let base = self.reg_base[region as usize];
+                if base != NO_BASE {
+                    return self.regs[base as usize + slot as usize]
+                        .clone()
+                        .map(|v| (None, v));
+                }
+            }
+            [] => return None,
+            _ => {}
+        }
+        self.find_binding_slow(cands, s, ctx)
+    }
+
+    /// [`Self::find_binding`] for a name with several candidates. Out of
+    /// line, so that its locals are not part of the frame of `eval_expr`,
+    /// which every level of a recursion holds.
+    #[inline(never)]
+    fn find_binding_slow<'c>(
+        &self,
+        cands: &[Cand],
+        s: Sym,
+        ctx: &'c Ctx,
+    ) -> Option<(Option<&'c Ctx>, Value)> {
+        // Registers first: they are the innermost candidates. A chain walk
+        // is needed after them only for a region bound as a context (a
+        // function body with a non-pure frame) or for candidates beyond.
+        let mut walk = false;
+        for cand in cands {
+            let Cand::Reg { region, slot } = *cand else {
+                walk = true;
+                break;
+            };
+            let base = self.reg_base[region as usize];
+            if base == NO_BASE {
+                walk = true;
+            } else if let Some(v) = &self.regs[base as usize + slot as usize] {
+                return Some((None, v.clone()));
             }
         }
-        if cands.is_empty() {
+        if !walk {
             return None;
         }
         let mut c = ctx;
@@ -729,14 +859,14 @@ impl<'a> Evaluator<'a> {
                     continue;
                 }
                 match *cand {
-                    Cand::Slot { slot, .. } => {
+                    Cand::Slot { slot, .. } | Cand::Reg { slot, .. } => {
                         if let Some(v) = c.slot(slot) {
-                            return Some((c, v));
+                            return Some((Some(c), v));
                         }
                     }
                     Cand::Extra { .. } => {
                         if let Some(v) = c.vars.borrow().get(s) {
-                            return Some((c, v.clone()));
+                            return Some((Some(c), v.clone()));
                         }
                     }
                     Cand::Def { .. } | Cand::Use { .. } => {}
@@ -757,6 +887,7 @@ impl<'a> Evaluator<'a> {
         crate::resolve::resolve_root(&t, u, &mut regions, &mut res);
         self.regions = regions;
         self.units[u as usize].res = res;
+        self.reg_base.resize(self.regions.len(), NO_BASE);
     }
 
     /// The body region of function `index` of scope `scope`, resolving the
@@ -778,6 +909,7 @@ impl<'a> Evaluator<'a> {
         let r = crate::resolve::resolve_function(&t, u, scope, index, &mut regions, &mut res);
         self.regions = regions;
         self.units[u as usize].res = res;
+        self.reg_base.resize(self.regions.len(), NO_BASE);
         r
     }
 
@@ -801,6 +933,7 @@ impl<'a> Evaluator<'a> {
         let r = crate::resolve::resolve_module(&t, u, scope, index, &mut regions, &mut res);
         self.regions = regions;
         self.units[u as usize].res = res;
+        self.reg_base.resize(self.regions.len(), NO_BASE);
         r
     }
 
@@ -832,6 +965,45 @@ impl<'a> Evaluator<'a> {
     pub fn new_ctx_in(&mut self, parent: Rc<Ctx>, kind: CtxKind, region: u32) -> Rc<Ctx> {
         let n = self.regions[region as usize].len();
         Ctx::reuse(&mut self.ctx_pool, Some(parent), kind, region, n)
+    }
+
+    /// Open an instance of register region `region` (see [`Self::regs`]):
+    /// its registers, unset, on top. Returns the base it replaces, for
+    /// [`Self::reg_close`].
+    #[inline]
+    pub fn reg_open(&mut self, region: u32) -> u32 {
+        let base = self.regs.len();
+        let n = self.regions[region as usize].len();
+        self.regs.resize(base + n, None);
+        std::mem::replace(&mut self.reg_base[region as usize], base as u32)
+    }
+
+    /// Close the instance [`Self::reg_open`] opened, dropping its values
+    /// where dropping its context would have.
+    #[inline]
+    pub fn reg_close(&mut self, region: u32, old: u32) {
+        let base = self.reg_base[region as usize] as usize;
+        self.regs.truncate(base);
+        self.reg_base[region as usize] = old;
+    }
+
+    /// Restore the bases saved in [`Self::reg_saves`] above `mark`, newest
+    /// first, and drop the registers above `regs`: the end of a tail-call
+    /// step's register instances.
+    #[inline]
+    pub fn reg_unwind(&mut self, mark: usize, regs: usize) {
+        if self.reg_saves.len() > mark {
+            self.reg_restore(mark);
+        }
+        self.regs.truncate(regs);
+    }
+
+    #[inline(never)]
+    pub fn reg_restore(&mut self, mark: usize) {
+        while self.reg_saves.len() > mark {
+            let (region, old) = self.reg_saves.pop().expect("above the mark");
+            self.reg_base[region as usize] = old;
+        }
     }
 
     /// Set a variable by name: in its slot when the context's region has
@@ -1140,6 +1312,8 @@ impl<'a> Evaluator<'a> {
             self.warn(l, DiagCode::Evaluation, "More than one Root Modifier (!)");
         }
         self.truncate(0);
+        // Every register instance is closed on every path, errors included.
+        debug_assert!(self.regs.is_empty() && self.reg_saves.is_empty());
         self.release_cycles();
         let reuse = self
             .memo
@@ -1304,7 +1478,7 @@ impl<'a> Evaluator<'a> {
                     // check, which keeps it off the common path.
                     if v.is_undef()
                         && !self.moved.is_empty()
-                        && let Some(m) = self.take_moved(ctx, s)
+                        && let Some(m) = self.take_moved(u, id, ctx, s)
                     {
                         return Ok(m);
                     }
@@ -1395,6 +1569,16 @@ impl<'a> Evaluator<'a> {
             }
             ExprKind::Let(args, body) => {
                 let region = self.units[u as usize].res.expr[id.0 as usize];
+                if self.regions[region as usize].reg() {
+                    // Inline: a recursion through a `let` holds this frame
+                    // at every level, and a helper would add one.
+                    let old = self.reg_open(region);
+                    let r = self
+                        .assign_regs(u, args, e.span, region, ctx)
+                        .and_then(|_| self.eval(u, *body, ctx));
+                    self.reg_close(region, old);
+                    return r;
+                }
                 let c = self.new_ctx(ctx, CtxKind::Plain, region);
                 let mark = self.push(c.clone());
                 let r = self
@@ -1714,11 +1898,18 @@ impl<'a> Evaluator<'a> {
     /// The value moved out for this read of `s`, if it resolves to a
     /// binding [`Evaluator::move_accumulators`] moved.
     #[inline(never)]
-    fn take_moved(&mut self, ctx: &Ctx, s: Sym) -> Option<Value> {
+    fn take_moved(&mut self, u: u32, id: ExprId, ctx: &Ctx, s: Sym) -> Option<Value> {
         if !self.moved.iter().any(|m| m.sym == s && m.value.is_some()) {
             return None;
         }
-        let owner = ctx.binder(s, &self.regions)?;
+        let in_reg = match self.units[u as usize].res.var(id).cands() {
+            Some(r) => self.reg_binding(self.units[u as usize].res.cands(r)),
+            None => None,
+        };
+        let owner = match in_reg {
+            Some(i) => Owner::Reg(i),
+            None => Owner::Ctx(ctx.binder(s, &self.regions)?),
+        };
         self.moved
             .iter_mut()
             .rev()
@@ -1785,6 +1976,14 @@ impl<'a> Evaluator<'a> {
             } => self.lc_for_c(u, id, e.span, (init, *cond, incr, *body), ctx, out),
             ExprKind::LcLet(args, body) => {
                 let region = self.units[u as usize].res.expr[id.0 as usize];
+                if self.regions[region as usize].reg() {
+                    let old = self.reg_open(region);
+                    let r = self
+                        .assign_regs(u, args, e.span, region, ctx)
+                        .and_then(|_| self.eval_element(u, *body, ctx, out));
+                    self.reg_close(region, old);
+                    return r;
+                }
                 let c = self.new_ctx(ctx, CtxKind::Plain, region);
                 let mark = self.push(c.clone());
                 let r = self
@@ -1904,6 +2103,9 @@ impl<'a> Evaluator<'a> {
             .name
             .map_or(self.k.empty, |n| self.units[u as usize].sym(n));
         let values = self.eval(u, first.expr, ctx)?;
+        if self.regions[region as usize].reg() {
+            return self.for_each_reg(u, rest, region, loc, ctx, op, &values);
+        }
         // The variable's slot, looked up once rather than per iteration.
         let slot = self.regions[region as usize]
             .binds
@@ -1911,7 +2113,7 @@ impl<'a> Evaluator<'a> {
             .copied()
             .unwrap_or(NO_SLOT);
         let config = self.syms.is_config(name);
-        let mut iterate = |ev: &mut Self, v: Value| -> R<()> {
+        self.iterate_over(&values, loc, |ev, v| {
             ev.check_interrupt()?;
             let c = match slot {
                 NO_SLOT => ev.iteration_vars(ctx, region, name, config, v),
@@ -1924,8 +2126,55 @@ impl<'a> Evaluator<'a> {
             // it (a function literal); the next iteration reuses it.
             Ctx::recycle(c, &mut ev.ctx_pool);
             r
-        };
-        match &values {
+        })
+    }
+
+    /// [`Self::for_each`] for a variable in a register region: one
+    /// register for the whole loop, set per iteration, and the body
+    /// evaluated in `ctx` itself. Out of line, as `iteration_vars` is.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn for_each_reg(
+        &mut self,
+        u: u32,
+        rest: &'a [Arg],
+        region: u32,
+        loc: Loc,
+        ctx: &Rc<Ctx>,
+        op: &mut dyn FnMut(&mut Self, &Rc<Ctx>) -> R<()>,
+        values: &Value,
+    ) -> R<()> {
+        debug_assert_eq!(self.regions[region as usize].binds.first(), Some(&0));
+        let old = self.reg_open(region);
+        let i = self.reg_base[region as usize] as usize;
+        let r = self.iterate_over(values, loc, |ev, v| {
+            ev.check_interrupt()?;
+            ev.regs[i] = Some(v);
+            // The last variable calls the body itself: a recursion through
+            // a comprehension holds this frame at every level, and the
+            // extra `for_each` frame would cost wasm32 stack depth.
+            let r = if rest.is_empty() {
+                op(ev, ctx)
+            } else {
+                ev.for_each(u, rest, crate::resolve::next_region(region), loc, ctx, op)
+            };
+            // The iteration's value dies here, where its context would.
+            ev.regs[i] = None;
+            r
+        });
+        self.reg_close(region, old);
+        r
+    }
+
+    /// `f` with each value a `for` iterates over `values`.
+    #[inline]
+    fn iterate_over(
+        &mut self,
+        values: &Value,
+        loc: Loc,
+        mut f: impl FnMut(&mut Self, Value) -> R<()>,
+    ) -> R<()> {
+        match values {
             Value::Range(r) => {
                 let n = r.num_values();
                 if n >= 1_000_000 {
@@ -1936,22 +2185,22 @@ impl<'a> Evaluator<'a> {
                     );
                 } else {
                     for x in r.iter() {
-                        iterate(self, Value::Number(x))?;
+                        f(self, Value::Number(x))?;
                     }
                 }
             }
             Value::Vector(v) => {
                 for x in v.iter() {
-                    iterate(self, x.clone())?;
+                    f(self, x.clone())?;
                 }
             }
             Value::Str(s) => {
                 for c in crate::utf8::chars(s.as_bytes()) {
-                    iterate(self, Value::str(c))?;
+                    f(self, Value::str(c))?;
                 }
             }
             Value::Undef => {}
-            other => iterate(self, other.clone())?,
+            other => f(self, other.clone())?,
         }
         Ok(())
     }
@@ -1991,11 +2240,7 @@ impl<'a> Evaluator<'a> {
         for (k, a) in args.iter().enumerate() {
             let v = self.eval(u, a.expr, target)?;
             match a.name {
-                None => {
-                    let mut t = b"Assignment without variable name ".to_vec();
-                    self.write_echo_nothrow(&v, &mut t);
-                    self.warn(loc, DiagCode::Evaluation, t);
-                }
+                None => self.unnamed_assignment(loc, &v),
                 Some(n) => {
                     let s = self.units[u as usize].sym(n);
                     let slot = self.regions[target.region as usize]
@@ -2008,13 +2253,7 @@ impl<'a> Evaluator<'a> {
                         i => target.has_slot(i),
                     };
                     if duplicate {
-                        let mut t = format!(
-                            "Ignoring duplicate variable assignment {} = ",
-                            self.quote_sym(s)
-                        )
-                        .into_bytes();
-                        self.write_echo_nothrow(&v, &mut t);
-                        self.warn(loc, DiagCode::Overwrite, t);
+                        self.duplicate_assignment(loc, s, &v);
                     } else if slot == NO_SLOT {
                         let config = self.syms.is_config(s);
                         target.vars.borrow_mut().set(s, v, config);
@@ -2026,6 +2265,60 @@ impl<'a> Evaluator<'a> {
             }
         }
         Ok(())
+    }
+
+    /// [`Self::sequential_assign`] into the registers of `region`'s
+    /// instance, just opened: each argument is evaluated in `ctx` with the
+    /// registers bound so far visible, as the new context's would be. A
+    /// register region binds no `$` name, so every named binder has a
+    /// register, and a duplicate is one already set.
+    pub fn assign_regs(
+        &mut self,
+        u: u32,
+        args: &'a [Arg],
+        span: Span,
+        region: u32,
+        ctx: &Rc<Ctx>,
+    ) -> R<()> {
+        let loc = Loc { unit: u, span };
+        for (k, a) in args.iter().enumerate() {
+            let v = self.eval(u, a.expr, ctx)?;
+            match a.name {
+                None => self.unnamed_assignment(loc, &v),
+                Some(n) => {
+                    let slot = self.regions[region as usize].binds[k];
+                    debug_assert_ne!(slot, NO_SLOT, "a register region binds no `$` name");
+                    let i = self.reg_base[region as usize] as usize + slot as usize;
+                    if self.regs[i].is_some() {
+                        let s = self.units[u as usize].sym(n);
+                        self.duplicate_assignment(loc, s, &v);
+                    } else {
+                        self.regs[i] = Some(v);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn unnamed_assignment(&mut self, loc: Loc, v: &Value) {
+        let mut t = b"Assignment without variable name ".to_vec();
+        self.write_echo_nothrow(v, &mut t);
+        self.warn(loc, DiagCode::Evaluation, t);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn duplicate_assignment(&mut self, loc: Loc, s: Sym, v: &Value) {
+        let mut t = format!(
+            "Ignoring duplicate variable assignment {} = ",
+            self.quote_sym(s)
+        )
+        .into_bytes();
+        self.write_echo_nothrow(v, &mut t);
+        self.warn(loc, DiagCode::Overwrite, t);
     }
 
     /// `echo(...)`: print the evaluated arguments.

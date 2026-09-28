@@ -238,6 +238,67 @@ echo([for (a = [[1],[2]]) b(2, a)]);"#;
 }
 
 #[test]
+fn register_variables_and_pure_frames_keep_the_scoping_rules() {
+    // `let` and comprehension variables, and the parameters of calls that
+    // bind only positional arguments, live in registers rather than
+    // contexts (`Evaluator::regs`). These are the rules that could tell
+    // the difference: a binding that reads the outer one of its own name
+    // (its register is unset yet), a duplicate, the same `let` live in
+    // two activations at once, a variable that is not a function letting
+    // the function search go on, `$` variables seen through a pure frame
+    // (from a tail call, a non-tail call and a tail `let`), one function
+    // called both with a pure frame and with named arguments, `is_undef`
+    // of a register, accumulators in registers, an unnamed `let`
+    // argument. Expected lines are the nightly's.
+    let src = r#"x = 10;
+echo(let(x = x + 1, y = x * 2, x = 5) [x, y]);
+echo([for (i = [0 : 2]) let(i = i * 2) i], [for (i = [1 : 2], j = [0 : i]) [i, j]]);
+function f(n) = n == 0 ? 0 : let(a = n) a + f(n - 1) * 10 + a;
+echo(f(3));
+function sq(v) = v * v;
+h = function(v) v + 100;
+echo(let(g = h) g(2), let(sq = 3) sq(4), let(sq = h) sq(4));
+function ap(fn, v) = fn(v);
+echo(ap(function(y) y * 3, 2), ap(h, 1));
+function dy() = $v;
+function p(v) = dy();
+function t($v) = p(1);
+function t2($v) = 1 + p(1);
+function t3($v) = let(k = 2) p(k);
+echo(t(7), t2(7), t3(7));
+function g(a, b = 1) = a <= 0 ? b : g(a - 1, b * 2) + g(b = b, a = a - 1);
+echo(g(3));
+echo(let(u = undef) is_undef(u), let(a = 1, b = is_undef(c) ? a : c, c = 2) [b, c]);
+function m(n, acc) = let(k = n * 2) n == 0 ? acc : m(n - 1, [each acc, k]);
+echo(m(3, [0]));
+function m2(n, acc) = let(t = acc) n == 0 ? [t, acc] : m2(n - 1, concat(t, [n]));
+echo(m2(2, [9]));
+echo(let(1) 2);
+function lc(n) = [for (i = [0 : n]) let(j = i) if (j % 2 == 0) lc2(j)];
+function lc2(k) = let(j = k + 1) [j, k];
+echo(lc(3));"#;
+    assert_eq!(
+        run(src),
+        [
+            "WARNING: Ignoring duplicate variable assignment \"x\" = 5 @2",
+            "ECHO: [11, 22]",
+            "ECHO: [0, 2, 4], [[1, 0], [1, 1], [2, 0], [2, 1], [2, 2]]",
+            "ECHO: 246",
+            "ECHO: 102, 16, 104",
+            "ECHO: 6, 101",
+            "ECHO: 7, 8, 7",
+            "ECHO: 27",
+            "ECHO: true, [1, 2]",
+            "ECHO: [0, 6, 4, 2]",
+            "ECHO: [[9, 2, 1], [9, 2, 1]]",
+            "WARNING: Assignment without variable name 1 @24",
+            "ECHO: 2",
+            "ECHO: [[1, 0], [3, 2]]",
+        ]
+    );
+}
+
+#[test]
 fn a_non_tail_call_never_moves_its_callers_accumulator() {
     // `len1(concat(acc, [0]))` is not a tail call: it is evaluated in the
     // context of `t`'s tail-call loop, which reads `acc` again afterwards.
