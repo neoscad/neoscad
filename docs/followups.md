@@ -372,9 +372,16 @@ lead them, come roughly in order of user impact.
   stdout (an invalid transform, a `<use>` href that is not `#id`). (5c)
 - OBJ: `f 1  2 3` (two separators in a row) crashes OpenSCAD with an
   uncaught `bad_lexical_cast`; the empty word is skipped here. (5c)
-- `import()` of `.nef3` needs CGAL's Nef reader and still reports
-  "import() is not implemented"; only preview tests (tier 4) use it. The
-  experimental `import()` function (JSON) is not implemented either. (5c)
+- `.nef3` import (`io::nef3`) meshes the file as the Manifold backend
+  does, without CGAL. Facets with holes are ear-clipped by Manifold's
+  triangulator rather than libtess2, so diagonals can differ (vertex
+  sets, counts, volume and bounds match the nightly). Not done: CGAL's
+  consistency checks beyond index ranges (a file whose pointers are
+  wrong but in range imports as whatever its facet cycles say; OpenSCAD
+  may crash or hang on it), and shalfloop facet cycles, which have no
+  edges and give no polygon. CGAL's own stderr block ("CGAL warning:
+  check violation!") before OpenSCAD's messages is not reproduced.
+- The experimental `import()` function (JSON) is not implemented. (5c)
 
 ## macOS app
 - A viewport frame holds the main thread for about 2.6 ms (p50; p95
@@ -661,9 +668,6 @@ lead them, come roughly in order of user impact.
   compares the very same triangles there). The values pass every
   highlight case; a `#` object within that offset behind a surface would
   show through it. (6b)
-- The preview of a model with a `.nef3` import fails like its render
-  (`import()` of `.nef3` is not implemented): the two
-  `preview-manifold_nef3_*` cases. (6b)
 - With `--csglimit` exceeded, OpenSCAD's preview draws nothing (the
   normaliser gives up on the whole term), and so does neoscad's. For the
   GUI and snapshots the real boolean of the unnormalised term would be a

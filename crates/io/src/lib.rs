@@ -9,7 +9,9 @@
 //! - [`dxf`]: DXF entities joined into paths (`DxfData.cc`), which also
 //!   serves `dxf_dim()`/`dxf_cross()` in the evaluator;
 //! - [`svg`]: a port of OpenSCAD's own `libsvg` plus `import_svg.cc`;
-//! - [`surface`]: `.dat` and PNG heightmaps (`SurfaceNode.cc`).
+//! - [`surface`]: `.dat` and PNG heightmaps (`SurfaceNode.cc`);
+//! - [`nef3`]: CGAL's `Nef_polyhedron_3` text form (`import_nef.cc`), read
+//!   without CGAL into the faces OpenSCAD's Manifold backend makes of it.
 //!
 //! Writers: STL, OFF, OBJ, SVG, DXF, 3MF, VRML ([`wrl`]), POV-Ray
 //! ([`pov`]) and PDF ([`pdf`]) (`export_*.cc`).
@@ -25,6 +27,7 @@
 pub mod color;
 pub mod dxf;
 pub mod mesh;
+pub mod nef3;
 pub mod obj;
 pub mod off;
 pub mod pdf;

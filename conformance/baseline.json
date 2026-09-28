@@ -660,6 +660,8 @@
     "preview-manifold_module_recursion",
     "preview-manifold_modulevariables",
     "preview-manifold_multiple-layers",
+    "preview-manifold_nef3_broken",
+    "preview-manifold_nef3_cube",
     "preview-manifold_nothing-decimal-comma-separated",
     "preview-manifold_nullspace-2d",
     "preview-manifold_nullspace-difference",

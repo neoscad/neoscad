@@ -203,3 +203,46 @@ fn many_coloured_meshes_export_identically_every_time() {
         assert!(export() == first, "run {run} exported different bytes");
     }
 }
+
+/// `.nef3`: facets with holes become outward triangles in the scheme's
+/// front colour, `center` is ignored as in OpenSCAD, and a file CGAL would
+/// reject is OpenSCAD's warning plus CGAL's text and an empty mesh.
+#[test]
+fn nef3_imports_tessellate_holes_and_report_cgal_failures() {
+    let hole: &[u8] = include_bytes!("../../io/tests/data/square-hole.nef3");
+    let files = fs(&[("/mem/h.nef3", hole), ("/mem/bad.nef3", b"Selective Nef\n")]);
+    let (g, msgs) = render(
+        &Renderer::new(),
+        files.clone(),
+        "import(\"h.nef3\", center=true);",
+    );
+    assert!(msgs.is_empty(), "{msgs:?}");
+    let Some(Geometry::PolySet(ps)) = g else {
+        panic!("expected a mesh")
+    };
+    // A 4 x 4 x 4 cube with a 2 x 2 hole through it, as the nightly
+    // meshes it: 16 vertices, 32 triangles.
+    assert_eq!((ps.vertices.len(), ps.faces.len()), (16, 32));
+    assert!(ps.triangular);
+    let volume: f64 = ps
+        .faces
+        .iter()
+        .map(|f| {
+            let [a, b, c] = [0, 1, 2].map(|k| ps.vertices[f[k] as usize]);
+            (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                / 6.0
+        })
+        .sum();
+    assert!((volume - 48.0).abs() < 1e-9, "{volume}");
+    assert_eq!(ps.bounds(), Some(([-2.0; 3], [2.0; 3])));
+    let (g, msgs) = render(&Renderer::new(), files, "import(\"bad.nef3\");");
+    assert!(g.is_some_and(|g| g.dimension() == 3 && g.is_empty()));
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(
+        msgs[0],
+        "Some(Warning): Failure trying to import '/mem/bad.nef3', import() at line 1 @0"
+    );
+    assert!(msgs[1].starts_with("None: CGAL ERROR: warning condition failed!"));
+    assert!(msgs[1].contains("Explanation: SNC_io_parser::read: no SNC header."));
+}

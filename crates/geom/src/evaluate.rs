@@ -1253,12 +1253,6 @@ impl Ctx<'_> {
     }
 
     fn compute(&self, n: &Node) -> Result<Out, Unsupported> {
-        let unsupported = |what: &'static str| {
-            Err(Unsupported {
-                what,
-                loc: loc_of(n),
-            })
-        };
         let leaf = |g: Geometry| {
             Ok(Out {
                 geom: Some(g),
@@ -1459,7 +1453,6 @@ impl Ctx<'_> {
                 out.geom = out.geom.map(|g| self.part(n, g, name, &mut out.msgs));
                 Ok(out)
             }
-            NodeKind::Import(i) if i.kind == "nef3" => unsupported("import"),
             NodeKind::Import(i) => Ok(self.import(n, i)),
             NodeKind::Text(t) => Ok(self.text(n, t)),
         }
