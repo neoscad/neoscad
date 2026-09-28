@@ -1,5 +1,11 @@
 # Audit: final (v0.1 readiness)
 
+> **Status (2026-09-28):** findings 3 and 4 are fixed in the commit after
+> this audit (`conformance bosl2-corpus` regenerates the corpus byte for
+> byte; printing stops at the string limit, 131 MB instead of more than 2 GB).
+> The BOSL2 corpus is 3,569 `.scad` files once 28 stray scratch files
+> left by an earlier agent are removed; the 3597 counts below include them.
+
 Audited at `ef73578` (clean tree) on an Apple M4 Pro (14 cores, 48 GB),
 macOS 27.0, against the reference nightly 2026.09.23
 (`--backend=manifold`). All numbers are from that machine. Every run was

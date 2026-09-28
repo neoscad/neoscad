@@ -402,9 +402,9 @@ impl<'a> Evaluator<'a> {
                     let s = self.units[mu as usize].sym(p.name);
                     let v = self.try_lookup(mctx, s).unwrap_or_default();
                     let start = t.len();
-                    if self.write_quoted(&v, &mut t).is_err() {
+                    if let Err(e) = self.write_quoted(&v, &mut t) {
                         t.truncate(start);
-                        self.log_exhausted();
+                        self.print_failed(e, "a trace");
                         t.extend_from_slice(b"...");
                     }
                 }

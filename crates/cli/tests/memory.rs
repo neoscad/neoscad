@@ -3,6 +3,9 @@
 //! one-shot `-o x.echo` run and `neoscad mcp`'s `render` each stop with a
 //! `resource-limit` error, holding at most about three times the limit.
 //!
+//! Printing a shared list stops at the string limit the same way, under
+//! the agent surface's default limits (no `--limit` at all).
+//!
 //! Each server or run is watched from here: its resident memory is sampled
 //! every few milliseconds, and it is killed past 1 GB so a regression fails
 //! the test instead of filling the machine's swap.
@@ -243,6 +246,86 @@ fn mcp_render_stops_at_the_memory_limit() {
         // The server carries on: a model under the limit renders.
         let r = s.tool("render", json!({"source": "cube(1);"}));
         assert_eq!(r["structuredContent"]["exit_code"], 0, "{name}: {r}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Values that print as 2^40 elements from a few lists: printing them
+/// stops at the 64 MiB string limit (the audit's `echo(str(t(40)))` built
+/// 2 GB of text in 3.3 s through MCP before the limit was checked).
+fn printing_programs() -> Vec<(&'static str, String, &'static str)> {
+    let t = "function t(n) = n == 0 ? [1] : let (c = t(n - 1)) [c, c];\n";
+    vec![
+        ("str", format!("{t}echo(str(t(40)));"), "str()"),
+        ("echo", format!("{t}echo(t(40));"), "echo()"),
+        ("assert", format!("{t}assert(false, t(40));"), "a message"),
+    ]
+}
+
+/// What printing may hold: the 64 MiB text (and the vector doubling it
+/// grows by), besides the binary's own.
+const MAX_PRINT_RSS_MB: u64 = 400;
+
+#[test]
+fn mcp_printing_stops_at_the_string_limit() {
+    let dir = scratch("mcp-print");
+    for (name, src, what) in printing_programs() {
+        let mut s = Mcp::start(&dir, &[]);
+        let watch = Watch::new(s.child.id());
+        let t0 = std::time::Instant::now();
+        let r = s.tool("render", json!({"source": src}));
+        let peak = watch.take_peak();
+        assert!(
+            t0.elapsed().as_secs_f64() < 10.0,
+            "{name}: {:?}",
+            t0.elapsed()
+        );
+        let d = &r["structuredContent"]["diagnostics"][0];
+        assert_eq!(d["code"], "resource-limit", "{name}: {r}");
+        let msg = d["message"].as_str().unwrap();
+        assert!(
+            msg.contains(&format!("{what} would make at least"))
+                && msg.contains("over the string limit of 67,108,864"),
+            "{name}: {d}"
+        );
+        assert!(peak <= MAX_PRINT_RSS_MB, "{name}: {peak} MB resident");
+        let r = s.tool("render", json!({"source": "echo(str([1, 2]));"}));
+        assert_eq!(r["structuredContent"]["exit_code"], 0, "{name}: {r}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_one_shot_run_stops_printing_at_the_string_limit() {
+    let dir = scratch("cli-print");
+    for (i, (name, src, what)) in printing_programs().into_iter().enumerate() {
+        let file = dir.join(format!("p{i}.scad"));
+        let echo = dir.join(format!("p{i}.echo"));
+        std::fs::write(&file, src).unwrap();
+        // A one-shot run has no limits unless asked, as OpenSCAD has none.
+        let mut child = Command::new(BIN)
+            .arg(&file)
+            .arg("-o")
+            .arg(&echo)
+            .args(["--limit", "string=67108864"])
+            .current_dir(&dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let watch = Watch::new(child.id());
+        let status = child.wait().unwrap();
+        let peak = watch.take_peak();
+        drop(watch);
+        let out = std::fs::read_to_string(&echo).unwrap_or_default();
+        assert!(status.code().is_some(), "{name}: {status:?}\n{out}");
+        assert!(
+            out.starts_with(&format!(
+                "ERROR: Resource limit exceeded: {what} would make at least"
+            )) && out.contains("over the string limit of 67,108,864"),
+            "{name}: {out}"
+        );
+        assert!(peak <= MAX_PRINT_RSS_MB, "{name}: {peak} MB resident");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

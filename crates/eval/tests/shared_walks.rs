@@ -1,5 +1,6 @@
 //! Walks over values whose lists and strings are shared: `==`, `<` and
-//! the rest on lists, and `chr()`.
+//! the rest on lists, `chr()`, and printing (`str()`, `echo()`, messages
+//! and traces).
 //!
 //! A tail-recursive function doubling a list (`f([v, v], n - 1)`) builds a
 //! tree with 2^n paths in n steps and almost no memory. Walking it path by
@@ -433,4 +434,189 @@ fn a_long_comparison_stops_when_cancelled() {
         after < Duration::from_secs(2),
         "stopped {after:?} after the cancel"
     );
+}
+
+/// Evaluate `src` under `limits` (on a clock that `clock` answers).
+fn run_limited(src: &str, limits: Limits, clock: Option<Clock>) -> (Vec<String>, Arc<Guard>) {
+    let flag = Arc::new(AtomicBool::new(false));
+    let guard = Arc::new(Guard::new(limits, flag.clone(), clock));
+    let opts = Options {
+        guard: Some(guard.clone()),
+        interrupt: Some(flag),
+        ..Options::default()
+    };
+    let t0 = Instant::now();
+    let (lines, ev) = evaluate(src, &opts, |_| {});
+    let dt = t0.elapsed().as_secs_f64();
+    assert!(dt < 5.0, "took {dt:.1} s");
+    assert!(ev.aborted, "{lines:?}");
+    (lines.into_iter().map(|(_, s)| s).collect(), guard)
+}
+
+const STRING_1K: Limits = Limits {
+    string: Some(1000),
+    ..Limits::NONE
+};
+
+#[test]
+fn printing_stops_at_the_string_limit() {
+    // `f([1], 40)` prints as 2^40 elements (terabytes). Each way of
+    // printing it stops just past the 1,000-byte limit and reports it
+    // (with the length reached, "at least"): before, the text was built
+    // whole (or up to the memory limit) and the string limit applied only
+    // afterwards, to `str()`'s result. Messages and traces print `...`.
+    let over = |what: &str, n: &str| {
+        format!(
+            "ERROR: Resource limit exceeded: {what} would make at least {n} bytes of string, \
+             over the string limit of 1,000"
+        )
+    };
+    for (src, want) in [
+        (
+            "echo(str(f([1], 40)));",
+            vec![
+                over("str()", "1,001") + " @2",
+                "TRACE: called by 'str' @2".into(),
+                "TRACE: called by 'echo' @2".into(),
+            ],
+        ),
+        (
+            "echo(len(str(\"ab\", f([1], 40))));",
+            vec![
+                over("str()", "1,003") + " @2",
+                "TRACE: called by 'str' @2".into(),
+                "TRACE: called by 'len' @2".into(),
+                "TRACE: called by 'echo' @2".into(),
+            ],
+        ),
+        (
+            "echo(a = 1, b = f([1], 40));",
+            vec![
+                over("echo()", "1,012") + " @2",
+                "TRACE: called by 'echo' @2".into(),
+            ],
+        ),
+        (
+            "assert(false, f([1], 40));",
+            vec![
+                over("a message", "1,027"),
+                "ERROR: Assertion 'false' failed: ... @2".into(),
+                "TRACE: called by 'assert' @2".into(),
+            ],
+        ),
+        (
+            "module m(v) { assert(false); }\nm(f([1], 40));",
+            vec![
+                "ERROR: Assertion 'false' failed @2".into(),
+                "TRACE: called by 'assert' @2".into(),
+                over("a trace", "1,016"),
+                "TRACE: call of 'm(v = ...)' @2".into(),
+                "TRACE: called by 'm' @3".into(),
+            ],
+        ),
+    ] {
+        let (lines, guard) = run_limited(&format!("{TREE}{src}"), STRING_1K, None);
+        assert_eq!(lines, want, "{src}");
+        assert_eq!(guard.exceeded().map(|e| e.limit), Some(Limit::String));
+    }
+}
+
+#[test]
+fn printing_under_the_string_limit_is_unchanged() {
+    // `str([s])` is `["` + s + `"]`: 996 bytes of `s` make exactly the
+    // limit and print; 997 make one byte more, which `str()` reports with
+    // the exact length (the text was complete), as it always did.
+    let s = |n: usize| format!("s = chr([for (i = [1:{n}]) 97]);\n");
+    let fits = format!("{}echo(len(str([s])), len(str(s, s)) > 1000);", s(996));
+    let (lines, ev) = evaluate(
+        &fits,
+        &Options {
+            guard: Some(Arc::new(Guard::new(
+                Limits {
+                    string: Some(2000),
+                    ..Limits::NONE
+                },
+                Arc::new(AtomicBool::new(false)),
+                None,
+            ))),
+            ..Options::default()
+        },
+        |_| {},
+    );
+    assert!(!ev.aborted, "{lines:?}");
+    assert_eq!(lines[0].1, "ECHO: 1000, true");
+    let (lines, _) = run_limited(&format!("{}echo(len(str([s])));", s(997)), STRING_1K, None);
+    assert!(
+        lines[0].starts_with(
+            "ERROR: Resource limit exceeded: str() would make 1,001 bytes of string, over the string limit of 1,000"
+        ),
+        "{lines:?}"
+    );
+    // A string within the limit echoes whole, though the echo's text
+    // (quoted) is two bytes longer: the limit bounds each printed value's
+    // own text, and this one is a string that already exists.
+    let src = format!("{}echo(s);", s(1000));
+    let (lines, ev) = evaluate(
+        &src,
+        &Options {
+            guard: Some(Arc::new(Guard::new(
+                STRING_1K,
+                Arc::new(AtomicBool::new(false)),
+                None,
+            ))),
+            ..Options::default()
+        },
+        |_| {},
+    );
+    assert!(!ev.aborted, "{lines:?}");
+    assert_eq!(lines[0].1.len(), "ECHO: \"\"".len() + 1000);
+    // Shared lists under the limit print exactly as before (the nightly's
+    // `-o x.echo` output).
+    assert_eq!(
+        run(
+            &format!("{TREE}echo(f([1, \"a\"], 2), str(f([[]], 2)));"),
+            5.0
+        ),
+        [
+            "ECHO: [[[1, \"a\"], [1, \"a\"]], [[1, \"a\"], [1, \"a\"]]], \"[[[[]], [[]]], [[[]], [[]]]]\""
+        ]
+    );
+}
+
+#[test]
+fn printing_stops_at_the_time_limit() {
+    // No string or memory limit: only the time limit can stop printing
+    // `f([1], 40)`, and printing asks the clock every 4,096 elements. The
+    // clock reads zero for its first few calls (the evaluation up to the
+    // echo) and then far past the deadline.
+    let calls = Arc::new(AtomicU64::new(0));
+    let clock: Clock = {
+        let calls = calls.clone();
+        Arc::new(move || {
+            if calls.fetch_add(1, Ordering::Relaxed) < 8 {
+                0.0
+            } else {
+                1e12
+            }
+        })
+    };
+    let limits = Limits {
+        time: Some(10.0),
+        ..Limits::NONE
+    };
+    for src in ["echo(f([1], 40));", "echo(str(f([1], 40)));"] {
+        calls.store(0, Ordering::Relaxed);
+        let (lines, guard) = run_limited(&format!("{TREE}{src}"), limits, Some(clock.clone()));
+        assert!(
+            lines[0].starts_with(
+                "ERROR: Resource limit exceeded: the request ran longer than the time limit of 10 s"
+            ),
+            "{src}: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("ECHO")),
+            "{src}: {lines:?}"
+        );
+        assert_eq!(guard.exceeded().map(|e| e.limit), Some(Limit::Time));
+    }
 }

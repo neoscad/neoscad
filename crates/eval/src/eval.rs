@@ -2345,18 +2345,35 @@ impl<'a> Evaluator<'a> {
                 text.extend_from_slice(self.name(n).as_bytes());
                 text.extend_from_slice(b" = ");
             }
-            if self.write_echo_checked(&a.value, &mut text).is_err() {
-                let msg = "Stack exhausted while trying to convert a vector to EchoString";
-                let mut e = self.unwind(UnwindKind::EchoStack);
-                if let Some(p) = e.log(Pending {
-                    severity: Severity::Error,
-                    code: DiagCode::RecursionLimit,
-                    text: msg.into(),
-                    loc: None,
-                }) {
-                    self.emit_pending(p);
+            match self.write_echo_checked(&a.value, &mut text) {
+                Ok(()) => {}
+                // The text is not printed: the limit (or the cancel or
+                // time limit) is raised here instead.
+                Err(crate::print::Exhausted::Long(n)) => {
+                    let loc = args.get(i).map(|a| Loc {
+                        unit: u,
+                        span: a.span,
+                    });
+                    self.printed_too_long(n, loc, "echo()");
+                    return self.check_hard();
                 }
-                return Err(e);
+                Err(crate::print::Exhausted::Stopped) => {
+                    self.check_limits(None)?;
+                    return self.check_interrupt();
+                }
+                Err(crate::print::Exhausted::Stack) => {
+                    let msg = "Stack exhausted while trying to convert a vector to EchoString";
+                    let mut e = self.unwind(UnwindKind::EchoStack);
+                    if let Some(p) = e.log(Pending {
+                        severity: Severity::Error,
+                        code: DiagCode::RecursionLimit,
+                        text: msg.into(),
+                        loc: None,
+                    }) {
+                        self.emit_pending(p);
+                    }
+                    return Err(e);
+                }
             }
         }
         self.emit(Severity::Echo, DiagCode::Echo, &text, None);

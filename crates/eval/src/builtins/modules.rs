@@ -17,6 +17,7 @@ use crate::eval::Evaluator;
 use crate::fma::mul_add;
 use crate::message::{Loc, R};
 use crate::node::{self, CsgOp, Discretizer, LinearExtrude, Matrix, Node, NodeKind, OffsetJoin};
+use crate::print::Exhausted;
 use crate::sym::{FxBuild, Sym, Syms};
 use crate::trig::{cos_degrees, sin_degrees};
 use crate::value::{MAX_RANGE_STEPS, Type, Value};
@@ -574,7 +575,9 @@ impl<'a> Evaluator<'a> {
                         }
                         other => {
                             let mut t = b"Bad parameter type (".to_vec();
-                            let _ = self.write_string(other, &mut t);
+                            if let Err(e @ Exhausted::Long(_)) = self.write_string(other, &mut t) {
+                                self.print_failed(e, "a message");
+                            }
                             t.extend_from_slice(
                                 b") for children, only accept: empty, number, vector, range.",
                             );
@@ -1094,10 +1097,12 @@ impl<'a> Evaluator<'a> {
         matches!(self.get(p, "center"), Value::Bool(true))
     }
 
-    /// `Value::toString` as bytes.
-    fn string_of(&self, v: &Value) -> Vec<u8> {
+    /// `Value::toString` as bytes (a file or layer name).
+    fn string_of(&mut self, v: &Value) -> Vec<u8> {
         let mut out = Vec::new();
-        let _ = self.write_string(v, &mut out);
+        if let Err(e @ Exhausted::Long(_)) = self.write_string(v, &mut out) {
+            self.print_failed(e, "a file or layer name");
+        }
         out
     }
 

@@ -40,6 +40,7 @@ nightly with `--backend=cgal` and `--backend=manifold`.
     scripts/apple/build-editor.sh                  # CodeMirror bundle -> apple/Editor/web/dist (needs node 18+)
     (cd apple/Editor/web && npm test && npm run corpus)  # grammar tests; corpus = 0 error nodes
     ./target/release/neoscad lsp --stdio            # language server (crates/lsp), for any LSP editor
+    ./target/release/conformance bosl2-corpus [--check]  # BOSL2 doc examples + tests -> .reference/BOSL2/{examples_x,tests_x}
     ./target/release/conformance video               # progress video from progress/
     scripts/apple/release.sh [--no-smoke]            # DMG + CLI tarball in dist/ (docs/release.md)
     scripts/agent-eval/run.py --help                  # agent-loop eval (uses claude -p; costs credits)

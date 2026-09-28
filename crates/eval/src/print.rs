@@ -14,6 +14,14 @@
 //! Printing a deeply nested vector recurses; like OpenSCAD it checks the
 //! stack at each level and fails with "Stack exhausted" instead of
 //! overflowing.
+//!
+//! Lists share their elements, so a list built as `c = t(n - 1); [c, c]`
+//! is small in memory but prints as 2^n elements. Printing therefore
+//! stops as soon as one value's text passes the string limit (nothing
+//! can use more: `str()` could only fail, and a message that long is
+//! useless), and polls the cancel flag and the time limit as it goes.
+//! Before this, `echo(str(t(40)))` built gigabytes of text under the
+//! agent limits before the string limit was ever checked.
 
 use lang::ast::ExprKind;
 use lang::number::write_number;
@@ -21,9 +29,28 @@ use lang::number::write_number;
 use crate::eval::Evaluator;
 use crate::value::{Range, Value};
 
-/// The stack ran out while printing.
-#[derive(Debug)]
-pub(crate) struct Exhausted;
+/// Why printing a value stopped before the end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Exhausted {
+    /// The stack ran out (OpenSCAD's "Stack exhausted" error).
+    Stack,
+    /// The value's text passed the string limit: the output would have
+    /// been at least this many bytes (the buffer's whole length).
+    Long(usize),
+    /// Cancelled, or past the time limit; the next check raises it.
+    Stopped,
+}
+
+/// How many list elements printing visits between looks at the cancel
+/// flag and the clock (as `chr()` does).
+const POLL_STEPS: u64 = 4096;
+
+/// One value's printing: where its text must end, and the elements
+/// visited so far.
+struct Walk {
+    end: usize,
+    steps: u64,
+}
 
 pub(crate) fn push_number(out: &mut Vec<u8>, n: f64) {
     let mut s = String::new();
@@ -61,24 +88,54 @@ impl Evaluator<'_> {
             || self.frames.saturating_add(depth) >= self.opts.frame_limit
     }
 
-    /// `tostream_visitor`: nested values.
-    fn write_nested(&self, v: &Value, out: &mut Vec<u8>) -> Result<(), Exhausted> {
-        self.write_nested_at(v, out, 0)
+    /// Whether printing should stop for a cancel or the time limit.
+    fn print_stopped(&self) -> bool {
+        self.interrupted()
+            || self
+                .opts
+                .guard
+                .as_deref()
+                .is_some_and(crate::limits::Guard::over_time)
     }
 
-    fn write_nested_at(&self, v: &Value, out: &mut Vec<u8>, depth: u32) -> Result<(), Exhausted> {
+    /// `tostream_visitor`: nested values. The text this adds to `out` is
+    /// at most the string limit (plus one element's worth).
+    fn write_nested(&self, v: &Value, out: &mut Vec<u8>) -> Result<(), Exhausted> {
+        let mut w = Walk {
+            end: out.len().saturating_add(self.caps.string),
+            steps: 0,
+        };
+        self.write_nested_at(v, out, 0, &mut w)
+    }
+
+    fn write_nested_at(
+        &self,
+        v: &Value,
+        out: &mut Vec<u8>,
+        depth: u32,
+        w: &mut Walk,
+    ) -> Result<(), Exhausted> {
         match v {
             Value::Undef => out.extend_from_slice(b"undef"),
             Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
             Value::Number(n) => push_number(out, *n),
             Value::Str(s) => {
+                // Checked before the copy: a list of one long string
+                // repeated would otherwise copy it once more past the end.
+                // A string printed on its own is exempt: it is a value
+                // that already fits the limit, and `echo(s)` of one at the
+                // limit must print it (quoted, so two bytes longer).
+                let n = out.len().saturating_add(s.as_bytes().len() + 2);
+                if depth > 0 && n > w.end {
+                    return Err(Exhausted::Long(n));
+                }
                 out.push(b'"');
                 out.extend_from_slice(s.as_bytes());
                 out.push(b'"');
             }
             Value::Vector(items) => {
                 if self.print_stack_exhausted(depth) {
-                    return Err(Exhausted);
+                    return Err(Exhausted::Stack);
                 }
                 // A list whose halves are shared prints as 2^depth
                 // elements, so the text can pass the memory limit long
@@ -90,10 +147,17 @@ impl Evaluator<'_> {
                 }
                 out.push(b'[');
                 for (i, e) in items.iter().enumerate() {
+                    if out.len() > w.end {
+                        return Err(Exhausted::Long(out.len()));
+                    }
+                    w.steps += 1;
+                    if w.steps.is_multiple_of(POLL_STEPS) && self.print_stopped() {
+                        return Err(Exhausted::Stopped);
+                    }
                     if i > 0 {
                         out.extend_from_slice(b", ");
                     }
-                    self.write_nested_at(e, out, depth + 1)?;
+                    self.write_nested_at(e, out, depth + 1, w)?;
                 }
                 out.push(b']');
             }
@@ -137,10 +201,39 @@ impl Evaluator<'_> {
     /// logs before it throws), so this does too.
     pub fn write_echo_nothrow(&mut self, v: &Value, out: &mut Vec<u8>) {
         let start = out.len();
-        if self.write_nested(v, out).is_err() {
+        if let Err(e) = self.write_nested(v, out) {
             out.truncate(start);
             out.extend_from_slice(b"...");
-            self.log_exhausted();
+            self.print_failed(e, "a message");
+        }
+    }
+
+    /// Report why printing a value stopped, where the text is dropped
+    /// (replaced by `...` or not printed at all): stack exhaustion as
+    /// OpenSCAD logs it, the string limit as made by `what`. A cancel or
+    /// the time limit is left to the next check, which raises it.
+    pub(crate) fn print_failed(&mut self, e: Exhausted, what: &str) {
+        match e {
+            Exhausted::Stack => self.log_exhausted(),
+            Exhausted::Long(n) => self.printed_too_long(n, None, what),
+            Exhausted::Stopped => {}
+        }
+    }
+
+    /// The string limit, passed by text of at least `n` bytes that
+    /// printing stopped building.
+    pub(crate) fn printed_too_long(
+        &mut self,
+        n: usize,
+        loc: Option<crate::message::Loc>,
+        what: &str,
+    ) {
+        let Some(g) = self.opts.guard.clone() else {
+            return;
+        };
+        if let Some(mut e) = g.exceeds(crate::limits::Limit::String, n as f64, what) {
+            e.at_least = true;
+            self.limit_exceeded(loc, e);
         }
     }
 

@@ -403,17 +403,39 @@ pub fn mesh_check(neo: &MeshStats, other: &MeshStats) -> Option<String> {
 }
 
 /// Split BOSL2's `.scadtest` files into one `.scad` per test, with the
-/// flags that decide its outcome. The format is a TOML subset: `[[test]]`
-/// tables of `name = "..."`, `script = '''...'''` and boolean flags.
+/// flags that decide its outcome.
 fn split_scadtests(dir: &Path, out: &Path) -> Result<Vec<(PathBuf, TestFlags)>, String> {
+    fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let mut tests = Vec::new();
+    for (file, t) in read_scadtests(dir)? {
+        // The scripts include `<../std.scad>` relative to tests/; through
+        // the library path they find the same files as `<BOSL2/...>`.
+        let script = t.script.replace("include <../", "include <BOSL2/");
+        let script = script.replace("use <../", "use <BOSL2/");
+        let path = out.join(file);
+        fs::write(&path, script).map_err(|e| e.to_string())?;
+        tests.push((path, t.flags));
+    }
+    Ok(tests)
+}
+
+/// Every test of BOSL2's `.scadtest` files in `dir`, in file order, each
+/// with its file name: `<file stem without test_>__<name>.scad`. The
+/// format is a TOML subset: `[[test]]` tables of `name = "..."`,
+/// `script = '''...'''` and boolean flags.
+///
+/// Two tests can share a name (`test_utility` has two `test_segs`); the
+/// second is `..._2.scad`, as the audit's extraction named it, so that it
+/// does not overwrite the first.
+pub(crate) fn read_scadtests(dir: &Path) -> Result<Vec<(String, ScadTest)>, String> {
     let mut files: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "scadtest"))
         .collect();
     files.sort();
-    fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    let mut tests = Vec::new();
+    let mut tests: Vec<(String, ScadTest)> = Vec::new();
+    let mut taken = std::collections::HashSet::new();
     for f in files {
         let stem = f
             .file_stem()
@@ -421,30 +443,32 @@ fn split_scadtests(dir: &Path, out: &Path) -> Result<Vec<(PathBuf, TestFlags)>, 
             .unwrap_or_default();
         let text = fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
         for t in parse_scadtest(&text) {
-            // The scripts include `<../std.scad>` relative to tests/; through
-            // the library path they find the same files as `<BOSL2/...>`.
-            let script = t.script.replace("include <../", "include <BOSL2/");
-            let script = script.replace("use <../", "use <BOSL2/");
-            let path = out.join(format!("{stem}__{}.scad", t.name));
-            fs::write(&path, script).map_err(|e| e.to_string())?;
-            tests.push((path, t.flags));
+            let mut file = format!("{stem}__{}.scad", t.name);
+            let mut k = 2;
+            while !taken.insert(file.clone()) {
+                file = format!("{stem}__{}_{k}.scad", t.name);
+                k += 1;
+            }
+            tests.push((file, t));
         }
     }
     Ok(tests)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct TestFlags {
+pub(crate) struct TestFlags {
     expect_success: bool,
     assert_no_echoes: bool,
     assert_no_warnings: bool,
 }
 
 #[derive(Debug)]
-struct ScadTest {
-    name: String,
-    script: String,
+pub(crate) struct ScadTest {
+    pub name: String,
+    pub script: String,
     flags: TestFlags,
+    /// Every key but `script`, with its raw value, in the file's order.
+    pub keys: Vec<(String, String)>,
 }
 
 fn parse_scadtest(text: &str) -> Vec<ScadTest> {
@@ -456,6 +480,7 @@ fn parse_scadtest(text: &str) -> Vec<ScadTest> {
             out.push(ScadTest {
                 name: String::new(),
                 script: String::new(),
+                keys: Vec::new(),
                 flags: TestFlags {
                     expect_success: true,
                     assert_no_echoes: true,
@@ -468,6 +493,9 @@ fn parse_scadtest(text: &str) -> Vec<ScadTest> {
         let Some((key, value)) = l.split_once(" = ") else {
             continue;
         };
+        if key != "script" {
+            t.keys.push((key.to_string(), value.to_string()));
+        }
         match (key, value) {
             ("name", v) => t.name = v.trim_matches('"').to_string(),
             ("script", "'''") => {

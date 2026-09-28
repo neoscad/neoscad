@@ -12,6 +12,8 @@
 //!   on a corpus of inputs.
 //! - `conformance bench` times neoscad against reference binaries on
 //!   `conformance/bench.json`; `conformance bench-chart` draws a result.
+//! - `conformance bosl2-corpus` writes BOSL2's documentation examples and
+//!   tests out as `.scad` files for `diff`.
 //! - `conformance video` stitches the recorded snapshots, benchmarks and
 //!   agent eval into a progress video.
 //!
@@ -20,6 +22,7 @@
 mod bench;
 mod bench_cache;
 mod bench_chart;
+mod bosl2_corpus;
 mod cmake;
 mod ctx;
 mod diff;
@@ -222,6 +225,17 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Write BOSL2's documentation examples and tests as `.scad` files
+    /// (`examples_x/` and `tests_x/` in the BOSL2 checkout), the corpus
+    /// for `diff --library-path .reference .reference/BOSL2`.
+    Bosl2Corpus {
+        /// The BOSL2 checkout (default: .reference/BOSL2).
+        #[arg(long)]
+        bosl2: Option<PathBuf>,
+        /// Only compare with the files there; exit 1 if any differs.
+        #[arg(long)]
+        check: bool,
+    },
     /// Render the progress video: one scene per snapshot in
     /// progress/index.jsonl, with benchmark and agent-eval interludes,
     /// encoded to H.264 by ffmpeg.
@@ -409,6 +423,10 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
         Cmd::BenchChart { file, latest, out } => {
             bench_chart::command(&ctx, file.as_deref(), latest, out.as_deref())
         }
+        Cmd::Bosl2Corpus { bosl2, check } => bosl2_corpus::command(
+            &bosl2.unwrap_or_else(|| ctx.repo.join(".reference/BOSL2")),
+            check,
+        ),
         Cmd::Video { .. } => unreachable!("handled before the reference is required"),
     }
 }

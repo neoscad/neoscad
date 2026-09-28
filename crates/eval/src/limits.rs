@@ -262,6 +262,11 @@ pub struct Exceeded {
     pub asked: f64,
     /// What asked, e.g. `sphere()` or `rands()`.
     pub what: String,
+    /// `asked` is only how far the work got before it stopped, not what it
+    /// would have made: printing a list whose elements are shared stops
+    /// at the string limit rather than build text that can be exponentially
+    /// longer, so the full length is never known.
+    pub at_least: bool,
     /// Where, when the geometry stage found it (the evaluator prints its
     /// own at the call).
     pub at: Option<At>,
@@ -309,8 +314,9 @@ impl Exceeded {
                 self.what
             ),
             l => format!(
-                "Resource limit exceeded: {} would make {} {}, over the {} limit of {max}",
+                "Resource limit exceeded: {} would make {}{} {}, over the {} limit of {max}",
                 self.what,
+                if self.at_least { "at least " } else { "" },
                 fmt_num(self.asked),
                 match l {
                     Limit::Fragments => "fragments",
@@ -471,6 +477,7 @@ impl Guard {
             max: self.limits.time.unwrap_or(0.0),
             asked: 0.0,
             what: String::new(),
+            at_least: false,
             at: None,
         }
     }
@@ -484,6 +491,7 @@ impl Guard {
             max,
             asked,
             what: what.to_string(),
+            at_least: false,
             at: None,
         })
     }
@@ -532,6 +540,7 @@ impl Guard {
             max: mib(max),
             asked: mib(bytes),
             what: what.to_string(),
+            at_least: false,
             at: None,
         })
     }

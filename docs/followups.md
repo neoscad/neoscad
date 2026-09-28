@@ -855,6 +855,6 @@ lead them, come roughly in order of user impact.
 - The six PDF cases need a PDF rasteriser (Ghostscript or poppler), which
   CI would need too. (5f)
 
-- **`str()`/`echo()` of shared lists overshoot the string limit** (`docs/audits/final.md` finding 4): fix in progress.
-- **The BOSL2 3597-file corpus had no generator** (`docs/audits/final.md` finding 3): fix in progress.
 - **Library crates touch the host file system for message paths** (`lang/src/diag.rs` `weakly_canonical`: `current_dir()`, `canonicalize()`; `eval::Options::default()` uses `StdFs`). Owner decision: route through `FileSystem`, or reword the CLAUDE.md rule to allow host-called helpers.
+
+- Printing checks the string limit per value, so separate arguments of one `echo` can each reach the limit; string-limit errors raised inside `assert`/messages carry no location (the assertion error right after does).

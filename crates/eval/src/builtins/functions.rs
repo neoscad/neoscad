@@ -11,6 +11,7 @@ use crate::context::Ctx;
 use crate::eval::Evaluator;
 use crate::fma::{mul_add, mul_sub_mul};
 use crate::message::{Loc, R, UnwindKind};
+use crate::print::Exhausted;
 use crate::rng::hash_float;
 use crate::sym::{FxBuild, Sym, Syms};
 use crate::trig;
@@ -318,9 +319,21 @@ impl<'a> Evaluator<'a> {
             Str => {
                 let mut out = Vec::new();
                 for x in a.iter() {
-                    if self.write_string(&x.value, &mut out).is_err() {
-                        self.log_exhausted();
-                        return Err(self.unwind(UnwindKind::EchoStack));
+                    match self.write_string(&x.value, &mut out) {
+                        Ok(()) => {}
+                        Err(Exhausted::Stack) => {
+                            self.log_exhausted();
+                            return Err(self.unwind(UnwindKind::EchoStack));
+                        }
+                        Err(Exhausted::Long(n)) => {
+                            self.printed_too_long(n, Some(loc), "str()");
+                            return Ok(Value::Undef);
+                        }
+                        Err(Exhausted::Stopped) => {
+                            self.check_limits(Some(loc))?;
+                            self.check_interrupt()?;
+                            return Ok(Value::Undef);
+                        }
                     }
                     // Each argument is bounded by the limits already, so
                     // the text built so far is at most one over them.
@@ -508,8 +521,10 @@ impl<'a> Evaluator<'a> {
         let frame = self.bind_builtin(a, loc, &[], &syms, true);
         let get = |i: usize| frame.get(syms[i]).cloned();
         let mut raw = Vec::new();
-        if let Some(f) = get(0) {
-            let _ = self.write_string(&f, &mut raw);
+        if let Some(f) = get(0)
+            && let Err(e @ Exhausted::Long(_)) = self.write_string(&f, &mut raw)
+        {
+            self.print_failed(e, &format!("{fname}()"));
         }
         let file = self.lookup_file_bytes(&raw, loc);
         let (mut xo, mut yo) = (0.0, 0.0);

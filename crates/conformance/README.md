@@ -29,9 +29,35 @@ any test listed in `conformance/baseline.json` no longer passes.
 | `image-compare EXPECTED ACTUAL` | Compares two PNGs with the port of OpenSCAD's `tests/image_compare.py`; exit 0 when they match. |
 | `images` | Surveys neoscad's own renderer: draws every PNG case neoscad draws itself (tier 3's direct `--render` images and all of tier 4: render mode, OpenCSG previews, throwntogether, `--view`) and scores it under tier 4's rules (see "Tier 4" below), printing per kind how many pass each rule and the distribution of the perceptual score. Takes `--filter`, `-v` (list cases failing both rules), `--jobs`, `--timeout` (default 30) and `--binary`. A diagnostic only: it touches neither the baseline nor tier 3's results. Images go to `target/conformance/images/`. |
 | `diff [PATHS...]` | Differential test: runs a reference OpenSCAD (`--binary-ref`, default the pinned nightly) and neoscad on every `.scad` under `PATHS` (default: the reference's `tests/data/scad`, `examples`, `libraries/MCAD`) and compares exit status, the output (`--format ast`, `echo` or `csg`; an `.echo` file holds every message, so it is compared even when both runs fail; `csg` ignores `timestamp = N` and owns no stderr messages, which `ast` and `echo` already cover) and the diagnostics that format covers. `--library-path DIR` (repeatable) puts a library directory before the reference's `libraries/` in `OPENSCADPATH` for both binaries, so a library's own files and examples run unmodified (`--library-path .reference` for `include <BOSL2/...>`). `--binary` sets neoscad, `--jobs` the parallelism, `--timeout` the per-run limit (default 60 s); `-v` lists every mismatch. Prints the match rate and mismatches by category; the full list goes to `target/conformance/diff-<format>.json`. |
+| `bosl2-corpus` | Writes BOSL2's documentation examples and tests out as `.scad` files for `diff`; see "BOSL2 corpus" below. `--bosl2 DIR` (default `.reference/BOSL2`), `--check` (compare only; exit 1 on a difference). |
 | `bench` | Times neoscad against the reference binaries on `conformance/bench.json`; see "Benchmarks" below. `--only IDS`, `--refs IDS`, `--quick`, `--runs N`, `--timeout S`, `--binary PATH`, and the cache flags `--fresh-refs`, `--fresh-ref ID`, `--refs-max-age DAYS`, `--seed-refs FILE`. |
 | `bench-chart [FILE\|--latest] [--out PATH]` | Draws a benchmark result as a 1920x1080 PNG (default: next to the result). |
 | `video` | Renders the progress video from `progress/`; see "Progress video" below. |
+
+## BOSL2 corpus
+
+    git clone https://github.com/BelfrySCAD/BOSL2.git .reference/BOSL2
+    ./target/release/conformance bosl2-corpus
+    ./target/release/conformance diff --format echo --library-path .reference .reference/BOSL2
+
+BOSL2 documents itself in comments and tests itself with
+`tests/*.scadtest` tables, neither of which OpenSCAD can run directly.
+`bosl2-corpus` writes them as files beside the library (`src/bosl2_corpus.rs`):
+
+- `examples_x/<file>__NNN.scad`: every `// Example` block of the top-level
+  library files, except `NORENDER` ones and blocks with no code, numbered
+  per file, after the file's `// Includes:` lines and an include of the
+  file itself; `ex__<name>.scad`, each file of `examples/`; and
+  `meta.json`, each block's tags and title.
+- `tests_x/<file>__<test>.scad`: every `[[test]]` script (a repeated name
+  gets `_2`), and `meta.json` with each test's name and flags.
+
+Includes become `<../...>`, so the files run in place. The rules
+reproduce the corpus the engine-milestone audit extracted by hand, byte for
+byte: at BOSL2 `9948313`, 2,516 examples, the 10 `examples/` files and 976
+tests. Files already in those directories that it doesn't generate are
+listed, never deleted. The `diff` above then runs every `.scad` under
+`.reference/BOSL2`: the corpus, the library's own files and `examples/`.
 
 ## Benchmarks
 
