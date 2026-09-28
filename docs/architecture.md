@@ -19,9 +19,9 @@ Library choices were checked in `docs/audits/phase0.md`.
 |---|---|---|
 | Core | Rust | Native speed, first-class WASM, safe parallelism; one core for CLI, app, web, LSP |
 | Parser | Hand-written recursive descent, lossless CST | Error recovery and good diagnostics; the same tree serves the formatter and LSP |
-| Evaluator | Tree-walking interpreter → CSG tree, content-hash cache per subtree | A one-line edit re-evaluates only the subtrees it touched |
-| 3D kernel | `manifold-rust` (pure-Rust port of Manifold; its parity claims must be checked against the Manifold C API in native test builds) | Same algorithm as OpenSCAD's default backend, with a clean `wasm32` build (the C++ binding needs patches for WASM) |
-| 2D kernel | `clipper2-rust` (pure-Rust Clipper2) | OpenSCAD's `offset()` depends on Clipper2's exact arc steps and join types; `i_overlay` differs visibly |
+| Evaluator | Tree-walking interpreter → node (CSG) tree, with names resolved ahead of time; per-statement reuse across edits in the session | One engine, exact to OpenSCAD's run-time scoping; see "Evaluator performance" |
+| 3D kernel | `manifold-rust` (pure-Rust port of Manifold v3.5.0; OpenSCAD pins v3.5.2), vendored with patches (`vendor/README.md`) | Same algorithm as OpenSCAD's default backend, with a clean `wasm32` build (the C++ binding needs patches for WASM) |
+| 2D kernel | `clipper2-rust` 1.2.0 (pure-Rust Clipper2), vendored with a rounding patch (`vendor/README.md`) | OpenSCAD's `offset()` depends on Clipper2's exact arc steps and join types; `i_overlay` differs visibly |
 | Text | `crates/text`: `harfrust` (shaping, with `hb_ft`-exact font functions) + `skrifa` (hinted outlines), plus a port of fontconfig name matching over an in-memory font database | No FreeType or fontconfig; portable to WASM. Glyph outlines are byte-identical to the nightly |
 | I/O | `crates/io`: STL, OFF, OBJ, 3MF (zip + quick-xml), DXF, SVG (a port of OpenSCAD's libsvg), PDF | `usvg` turns arcs into f32 Béziers and keeps strokes as paint, so it can't reproduce OpenSCAD's `$fn`-dependent flattening or its stroke outlines |
 | Renderer | wgpu — Metal on macOS, WebGPU on web, offscreen for snapshots | One renderer for the GUI, the web and agent snapshots |
@@ -29,26 +29,53 @@ Library choices were checked in `docs/audits/phase0.md`.
 
 ### Crates
 
-`lang` (lexer, parser, CST/AST, diagnostics) · `eval` (values, builtins,
-modules → CSG tree, resource limits) · `geom` (kernels, extrude, hull,
-minkowski, offset) · `text` (fonts, shaping, outlines) · `io`
-(import/export; sits below `eval` and `geom`) · `render` (wgpu) ·
-`session` (the long-lived core holding documents and warm caches; the
-one API every client uses) · `docs` (builtin reference and doc
-comments) · `fmt` (the formatter) · `assets` (bundled fonts and MCAD) ·
-`cli` (the `neoscad` binary; accepts OpenSCAD's CLI flags so OpenSCAD's
-tests can drive it, and hosts `neoscad serve` and the MCP server,
-`neoscad mcp`, in `crates/cli/src/mcp/`) · `conformance` (test harness)
-· `wasm-check` (a wasm32 build of the pipeline run in node by
-`scripts/wasm-check.sh`) · `lsp` (the language server over a session,
-transport-agnostic: the app's editor through `crates/ffi`, other editors
-through `neoscad lsp --stdio`) · `ffi` (the app's UniFFI bridge).
+The workspace is every directory under `crates/` (`Cargo.toml`,
+`members = ["crates/*"]`), bottom up:
+
+- **Libraries** (no `std::fs`, `std::env` or clock; WASM-compatible):
+  `lang` (lexer, lossless CST, AST, diagnostics, the `FileSystem` trait,
+  include fragments) · `io` (import/export formats; below `eval`, which
+  reads DXF and imports) · `text` (fonts, shaping, glyph outlines) ·
+  `eval` (values, builtins, scoping, name resolution, resource limits,
+  the statement memo → node tree) · `geom` (primitives, kernels, CSG
+  evaluation, the geometry cache) · `render` (wgpu: OpenSCAD's images,
+  previews, snapshots, the app's viewport) · `docs` (builtin reference
+  and doc comments) · `fmt` (the formatter; package `neoscad-fmt`, lib
+  `scadfmt`) · `assets` (bundled Liberation fonts and MCAD) · `session`
+  (the long-lived core every client drives) · `lsp` (the language
+  server over a session, transport-agnostic).
+- **Hosts** (may touch the platform): `cli` (the `neoscad` binary:
+  OpenSCAD's flags plus `serve`, `mcp`, `lsp`, `snapshot`, `check`,
+  `measure`, `test`, `fmt` and `docs`) · `ffi` (the app's UniFFI
+  bridge) · `conformance` (test harness, benchmarks, progress video).
+- **Tooling:** `wasm-check` (a wasm32 build of the pipeline, run in node
+  by `scripts/wasm-check.sh`) · `uniffi-bindgen` (the Swift bindings
+  generator pinned to `ffi`'s UniFFI, run by
+  `scripts/apple/build-core.sh`).
+
 Planned, not yet a crate: a wasm-bindgen package for the web app (phase
 9).
 
 Rule: no rendering or app logic lives in a UI layer. The renderer is Rust;
 the app core API is the `session` API, which `neoscad serve` exposes as
 JSON-RPC (`docs/serve-protocol.md`).
+
+### Clients and the session
+
+One `session::Session` (documents with unsaved text, parse and fragment
+caches, geometry caches per renderer, each document's last CSG products
+and statement memo, cancellation) sits under every long-lived client:
+
+| Client | Where | Transport | Limits |
+|---|---|---|---|
+| `neoscad serve` | `crates/cli/src/serve.rs` | JSON-RPC over stdio or a per-user Unix socket (`docs/serve-protocol.md`) | `Limits::AGENT`, `--limit` |
+| One-shot CLI | `crates/cli/src/client.rs`, `delegate.rs` | Hands exports, snapshots, `check` and `measure` to a running socket server as `cli.*` requests unless `--no-server`/`NEOSCAD_NO_SERVER`; otherwise runs in-process (`run.rs`, which does not use `Session` for plain exports) | none, as OpenSCAD; `--limit` opts in |
+| `neoscad mcp` | `crates/cli/src/mcp/` | MCP over stdio (`docs/mcp.md`); calls serve's `Local` in-process, not a socket | `Limits::AGENT`, `--limit` |
+| `neoscad lsp --stdio` | `crates/cli/src/lsp.rs` over `crates/lsp` | LSP over stdio, its own session, debounced diagnostics | `Limits::AGENT`, `--limit` |
+| macOS app | `crates/ffi` | UniFFI; the `lsp` server runs in-process per window over the app's session | `Limits::AGENT` (`ffi/src/host.rs`); Quick Look 5 s / 512 MiB |
+
+Every host catches a panicking request (`serve`, `mcp` and `lsp` per
+request, `ffi`'s `guarded` per call) and keeps its session; see "Panics".
 
 ## Agent surface
 
@@ -57,15 +84,13 @@ JSON-RPC (`docs/serve-protocol.md`).
   are linked delay-init (`crates/cli/build.rs`), so a run that draws
   nothing does not initialize them; this needs a macOS 15 deployment
   target, which `neoscad` and the app both use.
-- **`neoscad serve`** keeps the geometry cache warm so a one-line edit
-  re-renders in milliseconds. The CLI, GUI and MCP server are its clients.
-  Implemented in 7a: `crates/session` (documents, parse and geometry
-  caches with budgets, cancellation) behind JSON-RPC over stdio or a
-  per-user Unix socket (`docs/serve-protocol.md`); the command line's
-  exports and snapshots use a running server automatically. Across edits
-  the session also replays each top-level statement whose inputs did not
-  change (`crates/eval/src/memo.rs`), so an edit to one part of a heavy
-  model evaluates only that part, with output identical to a full run.
+- **`neoscad serve`** keeps the caches warm so a one-line edit
+  re-renders in milliseconds. The command line and the MCP server are its
+  clients; the app drives the same session API through `crates/ffi`
+  (see "Clients and the session"). Across edits the session replays each
+  top-level statement whose inputs did not change (`eval::memo`), so an
+  edit to one part of a heavy model evaluates only that part, with output
+  identical to a full run.
 - **`--format json` everywhere:** diagnostics with spans and stable codes,
   echo output, timings, geometry stats (volume, bbox, manifold, triangle
   count, component count). Terse by default — never an unrequested mesh dump.
@@ -153,28 +178,125 @@ JSON-RPC (`docs/serve-protocol.md`).
   solids in the core for sections, distances and picking; findings,
   section outlines and picked points are drawn over the model as the
   viewport's annotations.
-- **Web:** the same core compiled to WASM and run in a worker, the same wgpu
-  renderer on WebGPU, and CodeMirror 6.
+- **Web** (phase 9, deferred): the same core compiled to WASM and run in
+  a worker, the same wgpu renderer on WebGPU, and CodeMirror 6.
 - **Project definition:** XcodeGen `project.yml`; the generated `.xcodeproj`
   is a build output, never hand-edited. Xcode's JSON format (`.xcproj`) only
   becomes the default in Xcode 27.2 (beta), and XcodeGen can't emit it yet.
   Revisit when both land (`docs/audits/macos-prep.md`).
-- **Resource limits:** the app, `serve` and `mcp` enforce per-request time
-  and memory limits, configurable. The OpenSCAD-compatible one-shot CLI
-  stays unlimited, as OpenSCAD is. Implemented (hardening H4) as
-  `eval::limits`: `session::Config::limits` (and a request's
-  `Run::limits`) set time, estimated memory, and caps on fragments,
-  slices, list and string sizes, `rands()` counts and triangles; `serve`
-  and `mcp` start from `Limits::AGENT` and take `--limit NAME=VALUE`,
-  and the command line takes `--limit` too. Checks are cooperative and
-  come before the big allocations; see `docs/cli-json.md`, "Resource
-  limits".
-- **Panics:** the core runs inside the app's process, so release builds
-  unwind (`panic = "unwind"`) and requests catch panics. A bug in one render
-  must not take down the app and its unsaved work. This costs 5–8% on
-  evaluation-heavy models.
 - **Written twice:** only the thin UI around the editor and viewport (panels,
   customizer, console).
+
+## Resource limits
+
+OpenSCAD has no limits, so the one-shot command line has none either
+unless `--limit NAME=VALUE` is given. Every host that runs code it did
+not write — `serve`, `mcp`, `lsp --stdio` and the app — starts from
+`Limits::AGENT` (`crates/eval/src/limits.rs`): 60 s, 4 GiB of estimated
+memory, 10,000 fragments per primitive and slices per extrusion, 10
+million list elements, 64 MiB strings, 10 million `rands()` numbers
+and 10 million triangles per result. `session::Config::limits` sets a
+session's, and a request's `limits` its own. A trip is an ordinary
+result with a `resource-limit` diagnostic, not a crash.
+
+- **Counts** are checked before the allocation they guard, so
+  `sphere(10, $fn=1e5)` fails before it builds a vertex.
+- **Memory** is an estimate, not a measurement (the workspace forbids
+  the `unsafe` a counting allocator needs). Since `b78a9b9` every list,
+  string, range and function value the evaluator creates is charged
+  when made and credited when dropped, on one thread-local counter; the
+  charge that passes the limit raises the interrupt flag the evaluator
+  already polls, and element-wise operators and the printer stop early
+  once over, instead of growing to gigabytes. Nodes, messages and in-flight geometry results are
+  counted too; kernel working memory and the caches (own budgets) are
+  not.
+- **Time** is checked at evaluator calls and loop iterations and before
+  each geometry node; one long kernel operation runs to its end.
+
+Details: `docs/cli-json.md` ("Resource limits"); open gaps in
+`docs/followups.md` ("Serve and session").
+
+## Panics
+
+Release builds unwind (`panic = "unwind"` in `Cargo.toml`; Cargo cannot
+set it per binary). The core runs inside the app's process, and a
+server's warm caches outlive requests, so a bug in one request must not
+take down the app with its unsaved work, or a server with every client's
+caches.
+
+The cost, measured A/B against `abort` in `docs/audits/unwind.md`: 5–7%
+on evaluation-bound BOSL2 models, up to 12% on call-heavy code, nothing
+at cold start, about 1% on geometry-bound runs, and 2.5 MB of binary.
+After D1 (`cd7d5c7`, fewer `Rc<Ctx>` clones per call) the gap is 5–9%;
+D2 (drop shims) measured 3–7% slower and was reverted. An `abort` build
+for the one-shot CLI alone would mean shipping two binaries, since
+`serve`, `mcp` and `lsp` are subcommands of `neoscad`; that is an open
+product decision. This supersedes the "0–1.5%" in
+`docs/audits/performance.md`.
+
+## Determinism
+
+Output is byte-identical at any thread count; anything parallel needs a
+determinism test (`CLAUDE.md`).
+
+- **Geometry** (`crates/geom/src/evaluate.rs`): children render on rayon,
+  but Manifold original IDs come from blocks reserved in tree order
+  (re-rendered with larger blocks on overflow), messages travel with
+  results in child order, and runs sharing an ID are ordered by
+  geometry. Small chain-shaped trees skip the pool and must match a
+  pooled render at 1, 2 and 8 threads (`crates/geom/tests/render.rs`).
+- **Cache keys** are exact: a node's key is its own result, including
+  a group whose empty sibling still sends its child through a 2D union
+  (`dc7153b`).
+- **Evaluation** is single-threaded. Unseeded `rands()` starts from a
+  seed the host passes in (`eval::Options::rng_seed`). Statement reuse
+  (`eval::memo`) must give output identical to a fresh evaluation; a
+  randomized harness checks it (`crates/eval/tests/incremental.rs`).
+- **Platform:** multiply-adds fuse on aarch64 only, as OpenSCAD's
+  builds do (`eval::fma`). wasm32's maths functions differ from macOS
+  libm in the last bit, and PNGs differ between GPUs at edge pixels;
+  see `docs/followups.md` ("WASM", "Rendering").
+
+## Evaluator performance
+
+One engine, the tree-walker, made cheaper where profiles showed the
+cost: allocation, reference counting and context-chain walks rather
+than dispatch (`docs/audits/bytecode-vm.md`, "Recommendation").
+
+- **Name resolution ahead of time** (`970f630`, `eval::resolve`): each
+  scope is a region, ordinary variables live in slots, and each
+  reference resolves lazily to candidate (region, slot) pairs or a
+  pre-looked-up builtin. Lookups still walk the chain but only compare
+  region ids and index slots, which keeps OpenSCAD's run-time scoping exact;
+  `$` names stay dynamic. −19% to −27% on BOSL2 evaluation.
+- **Include fragments** (`4d877c7`, `lang::fragment`): in the session an
+  included file is parsed and lowered once and spliced into each new
+  program; a served BOSL2 edit went from 34 to 23 ms.
+- **Statement reuse across edits** (`0f4b8e8`, `eval::memo`): each
+  top-level statement is fingerprinted by its AST and text, the
+  top-level names it transitively reads, top-level `$` values and the
+  options; a match replays its node subtree and messages. Top-level
+  assignments always run; `rands`, imports, errors and limits always
+  re-evaluate. Budgeted at 128 MiB per memo and 256 MiB per session;
+  the one-shot CLI does not use it. A hero carrier edit re-renders in
+  294 ms instead of 1,894.
+- **The call path** (`bd4e4f0`, `cd7d5c7`, `197a35e`): a one-flag limit
+  check, linear `concat`/`each` accumulation by moving a uniquely held
+  accumulator, borrowed contexts on tail calls (D1), and T1–T5 from the
+  VM spike (builtin names skip the context walk, pooled argument
+  vectors, a positional binding fast path, a direct builtin call, and
+  up to 256 recycled contexts): 1.07–1.10× on BOSL2 models.
+- **In progress:** porting the spike's register and pure-frame analyses
+  (`compile.rs`'s `scan`, `exec.rs`'s `pure_bindable` on branch
+  `mr/vm-spike`) into the tree-walker, so `let` and comprehension
+  variables and positional-only calls need no heap context; estimated
+  1.2–1.35× on BOSL2 evaluation in total. The spike's fuzzer and `vm_ab`
+  are its oracle; the VM itself is then deleted. A second engine was
+  rejected as a standing tax on every semantic change
+  (`docs/audits/bytecode-vm.md`, "Recommendation").
+
+Geometry-side work is in `docs/audits/performance.md` (O1–O12, each with
+its status).
 
 ## Validation
 
@@ -260,24 +382,38 @@ ffmpeg.
 2. **`lang`** (done): tier 0.
 3. **`eval`** (done): tier 1.
 4. **CSG tree** (done): tier 2.
-5. **`geom`, `io`, `text`** (done): tiers 3 and 5, 1,103 runnable cases in all. Audited in `docs/audits/engine-milestone.md`.
+5. **`geom`, `io`, `text`** (done): tiers 3 and 5, 1,103 runnable cases
+   then. Audited in `docs/audits/engine-milestone.md`; its findings were
+   fixed in hardening H1–H3 (`3a10e6b`, `496a74d`, `8581f5a`) and
+   `31fd199`. The baseline is now 1,719 passing cases.
 6. **`render` + `snapshot`** (done): tier 4. 6a: the `render` crate
    (wgpu, OpenSCAD's camera, colour schemes and lighting) and `--render`
    PNG export. 6b: previews (OpenCSG from real booleans on the CSG
    products, throwntogether, `%`/`#`), view options and `neoscad
    snapshot`.
-7. **`serve`, JSON output, MCP.** 7a (done): `crates/session`,
-   `neoscad serve`, `--format json` everywhere, incremental re-render,
-   snapshot lighting and the `edit_loop` benchmark. 7b: `check`,
-   `measure`, `test`, `fmt`, `docs`, `part()` (7b-1 done: `part()`,
-   `check`, `measure`, snapshot parts and issues, and a server that
-   survives a panicking request). 7c (done): the MCP server and an
-   agent-loop eval pilot.
-8. **macOS app.** 8a–8e (done): viewport, CodeMirror editor and the
-   language server (`crates/lsp`, also `neoscad lsp --stdio`) too. 8a+8b: XcodeGen project, NSDocument app, `crates/ffi` (UniFFI) and the `NeoSCADCore` framework. Plan: `docs/audits/macos-prep.md`.
+7. **`serve`, JSON output, MCP** (done). 7a: `crates/session`, `neoscad
+   serve`, `--format json` everywhere, incremental re-render and the
+   `edit_loop` benchmark. 7b-1: `part()`, `check`, `measure`, and a
+   server that survives a panicking request. 7b-2: `test`, `fmt`,
+   `docs`. 7c: the MCP server and an agent-loop eval pilot. Hardened
+   after `docs/audits/agent-surface.md` (H4, `508d1d0`).
+8. **macOS app** (done, 8a–8j; plan in `docs/audits/macos-prep.md`).
+   8a+8b: XcodeGen project, NSDocument app, `crates/ffi` and the
+   `NeoSCADCore` framework. 8c: the Metal viewport. 8d: the CodeMirror
+   editor. 8e: the language server (`crates/lsp`, also `neoscad lsp
+   --stdio`). 8f: the document loop. 8g: resource limits, already in
+   place from H4 (the app runs under `Limits::AGENT`). 8h: Quick Look extensions. 8i:
+   panels, export and App Intents. 8j: release plumbing
+   (`docs/release.md`; the Developer ID path has not run yet).
 9. **WASM web app** (deferred by the owner, 2026-09-26). The library crates
    stay WASM-compatible, checked by `scripts/wasm-check.sh`, so it can be
    picked up later.
+
+**Performance** (after phase 8, `docs/audits/performance.md`): its
+opportunities O1–O10 are done, O11 and O12 are not (status at the top of
+the audit). Evaluator work since: `unwind.md` D1 (done), the VM spike's
+T1–T5 (done) and the register/pure-frame port (in progress); see
+"Evaluator performance".
 
 The agent CLI (phases 1–7) comes before any GUI, because the conformance
 harness drives it anyway.

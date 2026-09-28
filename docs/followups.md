@@ -1,34 +1,163 @@
 # Follow-ups
 
-Deferred items found along the way, with where they came from. Remove an
-entry when it is done.
+Deferred items found along the way, with where they came from (a phase
+such as 5b or 8f, a hardening step H1–H4, or an audit finding such as
+O4). Remove an entry when it is done. Sections, and the entries that
+lead them, come roughly in order of user impact.
+
+## Serve and session
+- **Exponential-time walks over shared value trees: a time DoS for
+  serve, MCP and the app. Fix pending merge** (`dea59f6`, branch
+  `worktree-agent-a60c524a0f99f8c76`: linear, stoppable digests,
+  comparisons and `chr()`). Found while fixing the memory limit
+  (`b78a9b9`). `memo.rs` `var_digest`/`value_digest` hash a top-level
+  variable's shared tree with no time check: through MCP, `t = f([1],
+  26)` takes 3.4 s and depth 28 takes 13.4 s, and deeper trees run far
+  past the 60 s limit. `ops::equals`/`compare` walk shared trees the
+  same way.
+- Statement reuse across edits (O3, `crates/eval/src/memo.rs`) keys each
+  top-level statement on the names it mentions, followed through
+  top-level definitions by name alone. A local binder that shares a
+  top-level variable's name (BOSL2's `mod`, `base`, `r` parameters) makes
+  that variable an input of every statement reaching the code, so editing
+  it re-evaluates more than it must. The resolver (`eval::resolve`) knows
+  which references a lexical binder captures; using it would narrow the
+  key. Two more limits of the first version: top-level assignments always
+  run again (in the hero, its `planetary_gears()` call is part of the
+  32 ms a carrier edit still evaluates), and a statement is the unit of
+  reuse, so an edit inside the hero's plinth statement still costs the
+  whole isosurface.
+- The statement-reuse harness's opt-in full-corpus shard `1/4`
+  (`crates/eval/tests/incremental.rs`) exceeds its default 4096 MB RSS
+  cap (peaks vary by run: 4.2–4.9 GB around `vnf__015`/`v6.scad`) and
+  passes at 8192 MB. Raise the default for full-corpus runs, or reset the
+  session per file.
+- A one-line edit re-parses the main file. Since `4d877c7` an include
+  between top-level statements of a file that parses on its own
+  (`include <BOSL2/std.scad>`) is parsed and lowered once and spliced
+  into each new program (`lang::fragment`, the session's
+  `FragmentStore`); with the evaluator work since, the served BOSL2
+  edit (`edit_loop`) takes about 18 ms, from 34.
+  What is still redone on every edit: the main file's own parse; the
+  splice, which copies each fragment's tokens and syntax tree into the
+  new program (`Cst::splice`) and renumbers a copy of its AST, rather
+  than sharing them; every include that is not a whole top-level unit
+  (inside a module body or an expression, mid-statement, after a syntax
+  error, or of a file with errors of its own), which is spliced as
+  tokens and parsed again, as before; and whole-program evaluation,
+  which is now most of an edit.
+  One-shot command-line runs parse everything, as there is nothing to
+  reuse. An incremental parser for the main file is not started. (7a,
+  `4d877c7`)
+- The command line's own export path (`crates/cli/src/run.rs`) does not
+  go through `session::Session`; the session re-implements its steps for
+  served exports and shares only the encoder (`session::export`). That
+  served and direct runs agree is checked by
+  `crates/cli/tests/serve.rs` (files and stderr for 3D and 2D formats,
+  warnings, errors, `--format json` and snapshots), not guaranteed by
+  construction (PNG exports: the server renders on the session and draws
+  with the command line's `png` module). Moving `run.rs` onto the
+  session would also bring echo, AST, CSG and param exports, `--animate`
+  and `--hardwarnings` to the server, which run in-process today. (7a)
+- A served run's render summary reports the server's `Geometries in
+  cache` count and times, which differ from a fresh process's. (7a)
+- Cancellation (and the time limit) stops the evaluator at the next
+  call or loop iteration, the geometry evaluator before the next node,
+  and primitives and extrusions at their next ring or slice; one long
+  kernel operation (a big boolean, a hull, minkowski) runs to its end.
+  `neoscad mcp` exits 2 s after the end of input whatever is running.
+  (7a, H4)
+- The memory limit is an estimate kept at the allocation-heavy points
+  (`eval::limits`), not a measurement: every evaluator value (each
+  list, string, range and function literal, charged when made since
+  `b78a9b9`), nodes and messages, and the geometry results a render holds until
+  their parents use them. A kernel operation's own working memory (a
+  boolean's intermediate meshes), the geometry cache (its own budget),
+  the check's rays and the snapshot's drawing are not counted; the
+  triangle limit bounds their inputs. Geometry results are weighted 6x
+  their cache cost for the kernel's working copies, calibrated on the
+  benchmark models; still, BOSL2's fractal_tree peaks at 1.96 GB real
+  against under 512 MiB estimated (its evaluation alone is 451 MB). A
+  host-side RSS probe (Linux `/proc/self/statm`; macOS needs
+  `task_info`, i.e. `unsafe` or a crate) would make the limit real. A
+  process-wide budget for the app's several documents (one
+  memory-pressure hook) is still to do. (H4)
+- When several parallel geometry siblings pass a count limit, the
+  earliest in the source that recorded one is reported; a sibling that
+  stopped (on the others' trip) before its own check never records, so
+  which one is named can vary between runs. One over-limit node is
+  reported the same every time (`crates/session/tests/session.rs`). The
+  time and memory limits depend on timing by nature. (H4)
+- The one-shot command line applies `--limit` to evaluation and mesh
+  and PNG geometry; `neoscad check`, `measure`, `snapshot` and `test`
+  have no `--limit` (they are unlimited, as the command line is). (H4)
+- The session keeps up to four renderers (one per colour scheme and
+  font set in use, since geometry keys include neither), each with its
+  own geometry budget, so the worst case is four budgets. (7a)
+- Unix sockets only; a Windows server would need a named pipe. The
+  default socket path must fit `SUN_LEN` (104 bytes on macOS); a long
+  `$TMPDIR` or `$XDG_RUNTIME_DIR` would need `NEOSCAD_SOCKET`. (7a)
+- `progress` notifications report stages, not fractions of the work.
+  (7a)
+- Fix hints are a table by code plus "did you mean" over the program's
+  and OpenSCAD's builtin names (`session::diag`, the builtin list copied
+  from the reference's `Builtins::init` registrations). Scoped names
+  (a module's parameters and local variables) are not candidates. (7a)
+- The snapshot headlight's direction, ambient and diffuse terms were
+  chosen by eye on a bracket (`render::Lighting::Headlight`); no test
+  pins its images. (7a)
+- Cached geometry replays its messages in a warm render only when the
+  pattern of first occurrences below it is the same as when it was
+  computed; otherwise the node is computed again from its children's
+  cached results (`geom::RenderOptions::replay`). Correct, but a cached
+  subtree whose earlier twin was edited away is recomputed once. (7a)
+- A geometry cache hit is used only if the fragment, slice and triangle
+  counts its subtree asked for are within the request's limits
+  (`geom::evaluate`'s `Demand`), and a document's last product is reused
+  only under the same limits; otherwise the node is computed again and
+  refused where a cold render refuses it, so lowering the limits cannot
+  let a warm cache pass a model a cold one stops. Results computed
+  without limits have no recorded demand and are computed again once
+  under limits. Memory and time are not re-checked on a hit (it
+  allocates and takes nothing). (8f)
 
 ## Performance
-- CLI cold start is about 0.7 ms lower with the GPU frameworks linked
-  delay-init (`crates/cli/build.rs`), but not yet at the audit's 3 ms
-  target. What is left: the first rayon use starts the whole global pool
-  (about 0.27 ms of a `cube(1)` export; `RAYON_NUM_THREADS=1` removes it),
-  which a small model never needs; the delay-init frameworks are still
-  mapped and bound (about 0.3 ms, measured on a C program linking the
-  same ones), which only a `dlopen`ed renderer or a helper binary would
-  save; and mimalloc's start-up, about 0.1-0.2 ms. (O1, R2)
+- **Evaluator: the VM spike's register and pure-frame port** (in
+  progress). T1–T5 from `docs/audits/bytecode-vm.md` §5 are in. What is
+  left is its step 2: move the prototype's register analysis
+  (`compile.rs`'s `scan`) and pure-frame rule (`exec.rs`'s
+  `pure_bindable`, branch `mr/vm-spike`) into the tree-walker, as a
+  per-call register window in `eval_call`, `eval_cold`'s `let` and
+  `for_each`; estimated 1.2–1.35× on BOSL2 evaluation in total. The
+  branch's fuzzer and `vm_ab` are the oracle; delete the VM afterwards.
+- **`panic = "unwind"` costs 5–9% on evaluation-bound models** after D1
+  (`docs/audits/unwind.md`; D2's `extern "C"` drop shims measured 3–7%
+  slower and were reverted). Winning it back for the one-shot CLI means
+  an `abort` build shipped beside the unwinding one, since `serve`,
+  `mcp` and `lsp` are subcommands of the same binary; a product
+  decision. Related: timings move ±2–5% with the layout of `Evaluator`,
+  more than many micro-optimisations. Group its hot scalar fields
+  (`frames`, `pending`, stack bounds, `limit_ticks`, `hard`/`limit`) in
+  one 64-byte-aligned block, and replace the `placeholder` context
+  (`eval_call` clones it to reserve a frame slot, `call.rs:480`); removing
+  it measured about −2.5% instructions on fib and −1.4% on isosurface.
 - Deep union trees and the level-4 Menger sponge render slower than the
-  nightly (3.0 s vs 1.8 s and 1.3 s vs 0.7 s). Total CPU is the same, but
-  the nightly spreads the work across cores better. The gap is structural:
-  OpenSCAD's Manifold operators are lazy, so nested unions flatten into one
-  `BatchUnion` over every leaf, whose pairwise rounds TBB runs in parallel;
-  here each node is evaluated (and cached) eagerly, and manifold-rust runs
-  each round's four booleans one after another. Running those rounds on
-  rayon (tried in 5b, same output) gained only 5-8%, so it was dropped; a
-  real fix needs lazy solids across cache boundaries. (5a, 5b)
-- OFF export spends most of its time in `lang::number::fmt_g`: a
-  1M-triangle `linear_extrude(twist=720, slices=2000)` takes 0.55 s, of
-  which the geometry is 0.06 s (the nightly: 0.41 s and 0.12 s). (5b)
-- manifold-rust's `triangulate` is slow on a shape with thousands of holes:
-  `linear_extrude(5)` of a 71x71 grid of circles takes 1.0 s against the
-  nightly's 0.7 s, nearly all of the difference in the cap triangulation.
-  (5b)
-
+  nightly (at `df6731d`: Menger 4 2.87 s against 2.01 s, with less CPU in
+  total). The nightly spreads the work across cores better. The gap is
+  structural: OpenSCAD's Manifold operators are lazy, so nested unions
+  flatten into one `BatchUnion` over every leaf, whose pairwise rounds
+  TBB runs in parallel; here each node is evaluated (and cached)
+  eagerly, and manifold-rust runs each round's four booleans one after
+  another. Running those rounds on rayon (tried in 5b, same output)
+  gained only 5-8%, so it was dropped; a real fix needs lazy solids
+  across cache boundaries. (5a, 5b)
+- Many `text()` nodes side by side render slower than the nightly: 200
+  lines of 125 characters took 2.85 s against 1.63 s at `df6731d`, with
+  byte-identical SVGs, and `9b89400` cut 31% of that; extruded, 64 s
+  against 31.5 s before `9b89400`'s 35%. Shaping and outlines are not
+  the cost; nearly all of it is the single-threaded top-level 2D union
+  of the 200 results in clipper2-rust's `execute_internal` (and, 3D, the
+  cap triangulation). (5e)
 - Resolved variable lookups (O4, `crates/eval/src/resolve.rs`) still walk
   the context chain, comparing each context's region with the reference's
   candidates, rather than hopping a fixed (depth, slot). Fixed addressing
@@ -49,46 +178,20 @@ entry when it is done.
   vector's allocation per call, `let` and loop iteration, measured 2-4%
   slower on the BOSL2 models: every context grows. Worth retrying with a
   smaller `Value` or a slab of contexts. (O4)
-- The wasm32 frame budget's calibration in `crates/eval/src/recursion.rs`
-  (budget depths at most 63% of where V8 overflows) is stale: at 9b89400
-  `module-children` reaches 206 of V8's 214 and `function-lc` 199 of 326
-  (`scripts/wasm-check.sh --depths --all-programs`, with and without
-  `--frames=4000000000`). After O4, V8 overflows `function-lc` at 353
-  and `module-children` still at 214. (O4)
-
-- Many `text()` nodes side by side render slower than the nightly: 200
-  lines of 125 characters take 2.25 s against 1.05 s (30 lines: 0.36 s
-  against 0.26 s), with byte-identical SVGs. Shaping and outlines are not
-  the cost (one `text()` of 3,750 glyphs takes 0.70 s in both); nearly
-  all of it is the single-threaded top-level 2D union of the 200 results
-  in clipper2-rust's `execute_internal`. (5e)
-
-## Fonts
-- Fontconfig's system configuration is not consulted, so names the
-  nightly resolves to installed system fonts render in the matching
-  Liberation font instead (on this Mac `Arial`, `Helvetica`, `Courier
-  New` and `Times New Roman` are system fonts for the nightly; here they
-  are the metric-compatible Liberation Sans, Mono and Serif). No test
-  depends on it. (5e)
-- `use <font.ttf>` registers the font (in the CLI, from the programs'
-  `uses`), but `lang` still also treats the file as a library and parses
-  the font as OpenSCAD source, and a missing font file does not print
-  OpenSCAD's "Can't read font with path '...'" error
-  (`SourceFile::registerUse`). Both belong in `lang`. (5e)
-- The font-name matcher (`crates/text/src/pattern.rs`) ranks on charset,
-  family, style, slant, weight and width. It leaves out fontconfig's
-  language coverage and every value after the first for weight, slant and
-  width, and matches a weight range by its midpoint. Every font name in
-  the test suite resolves as in the nightly. (5e)
-- The experimental `textmetrics()` and `fontmetrics()` functions can now
-  be built on the `text` crate (`TextMetrics`/`FontMetrics` in
-  `FreetypeRenderer.cc` use the same shaping). (5e)
-- Cubic glyph segments (CFF fonts) are flattened with `powf(3.0)` like
-  the C++ `std::pow`; that matches on macOS because both call the system
-  libm, but a WASM libm may round a cube differently in the last bit. No
-  test font is CFF. (5e)
+- CLI cold start is 2.9-3.0 ms (`db54307`, `docs/audits/unwind.md`).
+  What is left to take: the delay-init GPU frameworks are still mapped
+  and bound (about 0.3 ms, measured on a C program linking the same
+  ones), which only a `dlopen`ed renderer or a helper binary would save
+  (O12); mimalloc's start-up, about 0.1-0.2 ms; and the rayon pool, which
+  a render that is not a small chain still starts. (O1, R2)
+- Identical parallel siblings are each computed (performance audit
+  O11): an in-flight map from key to a shared result would compute them
+  once. Needs a determinism test for message replay and ID blocks.
 
 ## Parity
+- `-o x.echo` exits 0 after an evaluation error (limits and
+  `assert(false)` included). Check what OpenSCAD's exit code is and
+  match it.
 - `manifold-rust` 0.13.1 ports Manifold v3.5.0; OpenSCAD pins v3.5.2.
   (5a)
 - `vendor/manifold-rust` patches `collapse_edge`, whose clean-up after a
@@ -265,335 +368,6 @@ entry when it is done.
   "import() is not implemented"; only preview tests (tier 4) use it. The
   experimental `import()` function (JSON) is not implemented either. (5c)
 
-## Rendering
-- Previews draw each CSG product's visible surface from real Manifold
-  booleans (`geom::csg::product_meshes`), not OpenCSG's image-space CSG,
-  so image-space artefacts are not reproduced: z-fighting where a
-  positive and a negative face are coplanar, holes from a `convexity` set
-  too low, and whatever OpenCSG makes of a mesh that is not a closed
-  solid. `preview-manifold_polyhedron-tests` fails on the last: OpenCSG
-  draws a subtraction from an inside-out octahedron as nothing and one
-  with a single flipped face as a partial shape, while Manifold repairs
-  both. (6b)
-- A preview's `#` objects are drawn with a small depth offset
-  (`DrawState::bias`, constant -2, slope -0.5) so that they show on the
-  cut faces they make, whose triangles the boolean re-split (OpenCSG
-  compares the very same triangles there). The values pass every
-  highlight case; a `#` object within that offset behind a surface would
-  show through it. (6b)
-- `--view edges` in render mode splits quads along other diagonals than
-  OpenSCAD's libtess2 (`PolySetUtils::tessellate_faces`), and a Manifold
-  result's triangles follow manifold-rust's triangulation, so interior
-  edge lines differ: `render-view-edges-manifold_cube10` and both
-  `*-view-edges-manifold_render-preserve-colors` fail on those lines
-  alone. Same root as "Faces with more than three vertices" under
-  Parity. (6b)
-- The preview of a model with a `.nef3` import fails like its render
-  (`import()` of `.nef3` is not implemented): the two
-  `preview-manifold_nef3_*` cases. (6b)
-- With `--csglimit` exceeded, OpenSCAD's preview draws nothing (the
-  normaliser gives up on the whole term), and so does neoscad's. For the
-  GUI and snapshots the real boolean of the unnormalised term would be a
-  better fallback; not done, to stay with OpenSCAD. (6b)
-- The render summary after a PNG preview reports 0 geometry cache
-  entries (`CsgTree::build` does not return the renderer's count). (6b)
-- `.term` export still prints "No top-level CSG object"; `geom::csg`
-  now builds OpenSCAD's CSG terms, so `CSGNode::dump` could be ported on
-  top of it. (6b)
-- Preview speed (best of 3, wall, this machine): at most `--render`'s
-  time on the benchmark models, and 1.5-4.5x faster than the nightly's
-  OpenCSG preview, except `csg_spheres` (380 ms against the nightly's
-  273: one product of a cube minus 125 spheres is one big boolean,
-  which OpenCSG never computes) and `text_30lines` (550 against 486, as
-  in render mode). (6b)
-- PNG export needs a GPU adapter (Metal, Vulkan, Direct3D 12). Without
-  one it fails with "no GPU adapter"; a headless Linux CI runner would
-  need a software Vulkan driver (lavapipe), or neoscad a CPU rasteriser.
-  The PNG tests in `crates/render/tests/offscreen.rs` skip without one.
-  (6a)
-- Determinism: the same scene gives the same PNG bytes on one machine
-  (checked with two devices on one GPU in `offscreen.rs`), but
-  rasterisation rules differ between GPUs and drivers at the pixel level
-  (edge pixels, depth ties between coplanar faces). Only Metal on an
-  Apple M4 Pro has been measured: 318 of 320 render-mode images pass
-  `image_compare` against OpenSCAD's goldens, 206 pixel-identical. Other
-  GPUs are unverified. (6a)
-- The first PNG export after a reboot or driver update pays for Metal's
-  shader compilation (about 0.5 s on this machine; the system caches it
-  after that, and a warm export costs about 18 ms over the geometry). (6a)
-- The two render-mode images that fail both tier 4 rules,
-  `render-manifold_issue964` and `issue1061`, are polyhedra with
-  non-planar quads: `PolySet::tessellate` ear-clips them along other
-  diagonals than OpenSCAD's libtess2 (see "Faces with more than three
-  vertices" under Parity), so the shading of those faces differs. The
-  renderer draws what `geom` hands it. Their preview and throwntogether
-  cases fail the same way. (6a, 6b)
-- Colour schemes are only the built-in and vendored ones; OpenSCAD also
-  reads `color-schemes/render/*.json` from the user's configuration
-  directory. The app can pass such files to `render::scheme::parse`. (6a)
-- OpenSCAD's `PolySetRenderer` draws nothing (and logs an error) for a
-  result holding both 3D and 2D parts; `geom` never returns such a
-  result, so the case is not handled. (6a)
-
-## Serve and session
-- Statement reuse across edits (O3, `crates/eval/src/memo.rs`) keys each
-  top-level statement on the names it mentions, followed through
-  top-level definitions by name alone. A local binder that shares a
-  top-level variable's name (BOSL2's `mod`, `base`, `r` parameters) makes
-  that variable an input of every statement reaching the code, so editing
-  it re-evaluates more than it must. The resolver (`eval::resolve`) knows
-  which references a lexical binder captures; using it would narrow the
-  key. Two more limits of the first version: top-level assignments always
-  run again (in the hero, its `planetary_gears()` call is part of the
-  32 ms a carrier edit still evaluates), and a statement is the unit of
-  reuse, so an edit inside the hero's plinth statement still costs the
-  whole isosurface.
-- A one-line edit re-parses the main file. Since `4d877c7` an include
-  between top-level statements of a file that parses on its own
-  (`include <BOSL2/std.scad>`) is parsed and lowered once and spliced
-  into each new program (`lang::fragment`, the session's
-  `FragmentStore`); with the evaluator work since, the served BOSL2
-  edit (`edit_loop`) takes about 18 ms, from 34.
-  What is still redone on every edit: the main file's own parse; the
-  splice, which copies each fragment's tokens and syntax tree into the
-  new program (`Cst::splice`) and renumbers a copy of its AST, rather
-  than sharing them; every include that is not a whole top-level unit
-  (inside a module body or an expression, mid-statement, after a syntax
-  error, or of a file with errors of its own), which is spliced as
-  tokens and parsed again, as before; and whole-program evaluation,
-  which is now most of an edit.
-  One-shot command-line runs parse everything, as there is nothing to
-  reuse. An incremental parser for the main file is not started. (7a,
-  `4d877c7`)
-- The command line's own export path (`crates/cli/src/run.rs`) does not
-  go through `session::Session`; the session re-implements its steps for
-  served exports and shares only the encoder (`session::export`). That
-  served and direct runs agree is checked by
-  `crates/cli/tests/serve.rs` (files and stderr for 3D and 2D formats,
-  warnings, errors, `--format json` and snapshots), not guaranteed by
-  construction (PNG exports: the server renders on the session and draws
-  with the command line's `png` module). Moving `run.rs` onto the
-  session would also bring echo, AST, CSG and param exports, `--animate`
-  and `--hardwarnings` to the server, which run in-process today. (7a)
-- A served run's render summary reports the server's `Geometries in
-  cache` count and times, which differ from a fresh process's. (7a)
-- Cancellation (and the time limit) stops the evaluator at the next
-  call or loop iteration, the geometry evaluator before the next node,
-  and primitives and extrusions at their next ring or slice; one long
-  kernel operation (a big boolean, a hull, minkowski) runs to its end.
-  `neoscad mcp` exits 2 s after the end of input whatever is running.
-  (7a, H4)
-- The memory limit is an estimate kept at the allocation-heavy points
-  (`eval::limits`), not a measurement: all evaluator values (every list, string, range and function literal since b78a9b9),
-  nodes and messages, and the geometry results a render holds until
-  their parents use them. A kernel operation's own working memory (a
-  boolean's intermediate meshes), the geometry cache (its own budget),
-  the check's rays and the snapshot's drawing are not counted; the
-  triangle limit bounds their inputs. Geometry results are weighted 6x
-  their cache cost for the kernel's working copies, calibrated on the
-  benchmark models; still, BOSL2's fractal_tree peaks at 1.96 GB real
-  against under 512 MiB estimated (its evaluation alone is 451 MB). A
-  host-side RSS probe (Linux `/proc/self/statm`; macOS needs
-  `task_info`, i.e. `unsafe` or a crate) would make the limit real. A
-  process-wide budget for the app's several documents (one
-  memory-pressure hook) is still to do. (H4)
-- When several parallel geometry siblings pass a count limit, the
-  earliest in the source that recorded one is reported; a sibling that
-  stopped (on the others' trip) before its own check never records, so
-  which one is named can vary between runs. One over-limit node is
-  reported the same every time (`crates/session/tests/session.rs`). The
-  time and memory limits depend on timing by nature. (H4)
-- The one-shot command line applies `--limit` to evaluation and mesh
-  and PNG geometry; `neoscad check`, `measure`, `snapshot` and `test`
-  have no `--limit` (they are unlimited, as the command line is). (H4)
-- The release profile unwinds so the server can answer a panicking
-  request with -32603 and carry on (7b-1). That costs the one-shot
-  command line 5-8% on evaluation-bound BOSL2 models (fractal_tree
-  5.87 -> 6.33 s best of 5) and 2 MB of binary; cold start and
-  geometry-bound models are unchanged. Cargo cannot set `panic` per
-  binary; a separate `abort` profile for the benchmarked one-shot binary,
-  or finding what in the evaluator unwinding tables slow down, would win
-  it back. (7b-1)
-- The session keeps up to four renderers (one per colour scheme and
-  font set in use, since geometry keys include neither), each with its
-  own geometry budget, so the worst case is four budgets. (7a)
-- Unix sockets only; a Windows server would need a named pipe. The
-  default socket path must fit `SUN_LEN` (104 bytes on macOS); a long
-  `$TMPDIR` or `$XDG_RUNTIME_DIR` would need `NEOSCAD_SOCKET`. (7a)
-- `progress` notifications report stages, not fractions of the work.
-  (7a)
-- Fix hints are a table by code plus "did you mean" over the program's
-  and OpenSCAD's builtin names (`session::diag`, the builtin list copied
-  from the reference's `Builtins::init` registrations). Scoped names
-  (a module's parameters and local variables) are not candidates. (7a)
-- The snapshot headlight's direction, ambient and diffuse terms were
-  chosen by eye on a bracket (`render::Lighting::Headlight`); no test
-  pins its images. (7a)
-- Cached geometry replays its messages in a warm render only when the
-  pattern of first occurrences below it is the same as when it was
-  computed; otherwise the node is computed again from its children's
-  cached results (`geom::RenderOptions::replay`). Correct, but a cached
-  subtree whose earlier twin was edited away is recomputed once. (7a)
-- A geometry cache hit is used only if the fragment, slice and triangle
-  counts its subtree asked for are within the request's limits
-  (`geom::evaluate`'s `Demand`), and a document's last product is reused
-  only under the same limits; otherwise the node is computed again and
-  refused where a cold render refuses it, so lowering the limits cannot
-  let a warm cache pass a model a cold one stops. Results computed
-  without limits have no recorded demand and are computed again once
-  under limits. Memory and time are not re-checked on a hit (it
-  allocates and takes nothing). (8f)
-
-## Parts, check and measure
-- A part's solid is its subtree's geometry: a part under a `difference()`
-  that cuts it is measured uncut (its `context` is only set for the
-  operations that change a part as a whole: subtracting it,
-  intersecting, hull, minkowski, resize, 2D). Measuring "what of the
-  model belongs to the part" would need the model's faces by part plus
-  closing the cut. (7b-1)
-- Face attribution survives booleans, transforms and `color()` (over
-  several parts the IDs are kept instead of collapsed, which changes
-  only how an export groups triangles); `hull()`, `minkowski()` and
-  2D operations make new solids and drop the parts inside them. (7b-1)
-- Wall thickness is sampled along face normals from fixed points per
-  face (up to 16 on large faces, at most 400,000 rays); a wall whose
-  sides are not parallel measures thicker than its narrowest point, and
-  a narrow feature in the middle of a big face between samples can be
-  missed. A medial-axis or sphere-probe estimate would be exact. Knife
-  edges formed by two faces sharing a corner are skipped; the feather
-  edges a `difference()` leaves where a curved cut meets a face are
-  reported (correctly thin, but many). (7b-1)
-- Overhangs do not recognise bridges (a flat span supported at both
-  ends); they are reported as overhangs. (7b-1)
-- Checks run serially (about 150 ms for a 220k-triangle model). Rays are
-  independent, so they could run on rayon with a deterministic merge.
-  (7b-1)
-- `snapshot --issues` uses the default check settings from the command
-  line (the server's `issues` takes any). Markers are drawn whether or
-  not the model hides the point from that view. (7b-1)
-- `measure --section` cuts the model or one part; a per-part breakdown
-  of a model section is not reported. (7b-1)
-
-## Tooling: fmt, test, docs
-- `session::diag`'s "did you mean" pools are hand-copied lists of
-  OpenSCAD's builtin modules and functions; `eval::builtins()` (7b-2)
-  now lists the evaluator's own tables and could replace them. (7b-2)
-- `neoscad fmt` keeps what OpenSCAD's customizer reads at the top of a
-  file (before the first `{`): there an assignment with a trailing `//`
-  comment is never wrapped (it can run past the width), assignments
-  sharing a line keep sharing it, and indented `//` comments keep their
-  indent. A narrower rule (only lines whose annotations would change)
-  would format more of those headers. (7b-2)
-- Formatter layout limits: binary chains break all or nothing (no
-  filling); only a lone vector argument hugs its parentheses (no
-  "last argument" hugging of a trailing vector or function literal); a
-  `//` comment inside an expression ends the line there, and block
-  comments are kept verbatim, not re-indented; blank lines are kept
-  between list items as between statements. (7b-2)
-- `neoscad fmt` refuses files that need `--enable` to parse (the
-  unicode-identifier tests); it has no `--enable`. It rewrites files in
-  place (no temporary file and rename) and never goes through a running
-  server. (7b-2)
-- `neoscad test` runs in-process; unlike `check` and `measure` it does
-  not hand its work to a running `neoscad serve` (a `cli.test`), so a
-  command-line run starts cold. Each test re-parses its file (a test's
-  program is changed, so it skips the parse cache; included files still
-  come from the lex cache). (7b-2)
-- `@expect parts` checks that the named parts exist, not that they are
-  the only ones; there are no expectations on echo output (tests use
-  `assert()`), on 2D contour counts, or on `measure --between`
-  distances. (7b-2)
-- `neoscad docs --in` prints a user definition's parameters as the
-  `.ast` dump does (`r = 1`), builtins as written in `builtins.toml`
-  (`r=1`); it follows `use`d libraries one level, not the libraries they
-  use. Experimental builtins (`roof`, `textmetrics`, ...) have no
-  entries, only a note that they are not enabled. (7b-2)
-
-## MCP and the agent eval
-- `neoscad mcp` implements MCP 2026-07-28 statelessly plus the legacy
-  `initialize` handshake, and only the core: no `subscriptions/listen`,
-  no progress notifications (a long render sends nothing until it
-  ends), no logging, no MRTR (`input_required`), no completions. The
-  client's `roots` capability is not read either: the roots are the
-  working directory and `--root`s given at start. (7c)
-- Claude Code (2.1.283) shows the model the JSON of `structuredContent`
-  instead of the text summary when a result has both, so the text is
-  what other clients see. If a client shows both, a result costs about
-  twice its tokens; a flag to send only one would fix that. (7c)
-- Inline `source` is one document per `base_dir` (`inline.scad`), so
-  inline calls take turns rather than running in parallel, and while
-  one runs it shadows a real `inline.scad` in that directory. (7c)
-- `notifications/cancelled` does not reach an MCP `snapshot` call: the
-  tool calls the session directly, not through the server's request
-  table that `$/cancelRequest` looks up. The end of input still stops
-  it (`Session::cancel_all`). (H4)
-- `neoscad serve --socket PATH` in a shared directory binds and then
-  makes the socket 0600, a short window harmless under the default
-  umask 022 (connecting needs write permission); binding under a
-  tightened umask needs nix's `fs` feature. (H4)
-- The snapshot sheet's header line runs under the legend at the MCP
-  default size (768 px) when `issues` adds check counts. (7c)
-- Tool-description token counts are estimates from byte counts (6,069
-  bytes of compact JSON as a client receives the list, 5,498 as the
-  test measures it); no tokenizer was run. The test's 5,500-byte guard
-  has 2 bytes to spare. (7c, H4)
-- The pilot is n = 1 per cell (`docs/agent-eval.md`); a real comparison
-  needs several runs per task and condition, more tasks, and a second
-  model. (7c)
-- The agent eval's graders can only express geometry through `@expect`
-  on derived solids (intersections with probes plus a 1 mm³ marker, so
-  "no overlap" measures 1 instead of failing as an empty model). An
-  `@expect empty` or `@expect volume-between` would make them plainer.
-  (7c)
-
-## WASM
-- Recursion on wasm32 stops at a frame budget calibrated for V8's default
-  stack in node 18 (`eval::recursion`): function depth 498 and module
-  depth 249 for the simplest recursions, against 52,417 and 13,046
-  natively and the nightly's 9,190 and 7,043. Without the budget V8
-  overflows at 1,076 and 527. Raising it needs smaller wasm frames: per
-  level, rendering's walk over the node tree costs about four times an
-  expression's stack, and list comprehensions twice. Only node 18 was
-  measured; browsers (and workers, which may have less stack) are
-  unverified. (H2)
-- Operations over a whole value other than printing and freeing it
-  (comparing with `==` or `<`, `ops::equals` and the ordering) recurse
-  once per level of vector nesting. Nesting deeper than the budget can only be built by tail
-  recursion (`f(n, acc) = ... f(n - 1, [acc])`), and comparing such a
-  value can overflow a WASM engine's stack; natively it needs a far deeper
-  value, and the nightly crashes even on `len()` of one. (H2)
-- A wasm32 build must be linked with `-C link-arg=-zstack-size=8388608`
-  (`eval::recursion::WASM_STACK_SIZE`; `crates/wasm-check/build.rs` does
-  this). With rustc's default 1 MiB, recursion stops earlier, still
-  cleanly. The release `wasm_check.wasm` is 38 MB, of which all but
-  9.0 MB are DWARF line tables (the release profile keeps them); 4.3 MB
-  of the rest is the bundled fonts and MCAD. (H2)
-- Rust's wasm32 maths functions differ from macOS libm in the last bit
-  (engine milestone audit, finding 6.5), so WASM output is not
-  byte-identical to native. Decide whether to accept that or use one libm
-  everywhere. (H2)
-
-## Determinism
-- manifold-rust's `Slice` starts each loop from a `HashSet` iteration, so
-  the raw polygon order varies; `projection(cut=true)` output is canonical
-  only because Clipper's union reorders it. (5b)
-- manifold-rust's `compose_meshes` does not give each composed copy its own
-  mesh IDs as C++ `Compose` does (`csg_tree.cpp:386-395`); `batch` in
-  `manifold_geom.rs` renumbers colliding operands first. Report upstream,
-  then drop the workaround. (5b)
-
-## Structure
-- `docs/architecture.md` lists text under `geom` and A5 proposed `fontdb`
-  for font discovery; 5e added a `text` crate (the evaluator's
-  `textmetrics()` needs shaping and sits below `geom`) with its own small
-  font index instead of `fontdb`. (5e)
-- `docs/architecture.md` still lists `usvg` for SVG; 5c ported OpenSCAD's
-  `libsvg` instead (see `crates/io/src/svg/mod.rs` for why). (5c)
-- The tier 3 baseline needs the pinned nightly installed as its renderer.
-  CI would need it too. (5a)
-- The six PDF cases need a PDF rasteriser (Ghostscript or poppler), which
-  CI would need too. (5f)
-
 ## macOS app
 - A viewport frame holds the main thread for about 2.6 ms (p50; p95
   3.3 ms) at 60 Hz, nearly all of it `-[CAMetalLayer nextDrawable]`
@@ -622,8 +396,8 @@ entry when it is done.
   114 to 52 MB: its two 4x MSAA buffers (colour and depth, 61 MB at
   1280x1520 pixels) are memoryless now (`TRANSIENT_ATTACHMENT`). 125
   spheres: 834 to 121 MB, from the allocator's cache of freed large
-  blocks (338 MB "Malloc Large (empty)", now off through the app's
-  `LSEnvironment`) and the upload's staging copy of the vertex data
+  blocks (338 MB "Malloc Large (empty)"; 8f turned it off with
+  `MallocLargeCache=0`, which mimalloc has since replaced, `b7e9941`) and the upload's staging copy of the vertex data
   (57 MB, now freed after the upload). The six windows: 731 to 257 MB.
   What remains per window is mostly the model's vertex buffer, about
   20 MB of malloc (parse caches, the language server's index), the
@@ -863,11 +637,249 @@ entry when it is done.
   (the WASM section's 38 MB is from H2); the language server's share was
   not measured. (8e)
 
-- **Evaluator layout sensitivity.** Moving or removing fields in `Evaluator` shifts timings by ±2–5%, which is larger than many micro-optimisations. Group the hot scalar fields (`frames`, `pending`, stack bounds, `limit_ticks`, `hard`/`limit`) into one 64-byte-aligned block, then drop the unused `placeholder` field (worth about −2.5% instructions on fib and −1.4% on isosurface). The unwind-vs-abort gap is still 5–9% after D1 (`docs/audits/unwind.md`). D2 (`extern "C"` drop shims) measured 3–7% slower and was reverted.
-- **Incremental harness RSS cap.** The opt-in full-corpus shard `1/4` exceeds the default 4096 MB cap on HEAD as well (peaks vary by run: 4.2–4.9 GB around `vnf__015`/`v6.scad`). It passes at 8192 MB. Raise the default for full-corpus runs, or reset the session per file.
+## Rendering
+- Previews draw each CSG product's visible surface from real Manifold
+  booleans (`geom::csg::product_meshes`), not OpenCSG's image-space CSG,
+  so image-space artefacts are not reproduced: z-fighting where a
+  positive and a negative face are coplanar, holes from a `convexity` set
+  too low, and whatever OpenCSG makes of a mesh that is not a closed
+  solid. `preview-manifold_polyhedron-tests` fails on the last: OpenCSG
+  draws a subtraction from an inside-out octahedron as nothing and one
+  with a single flipped face as a partial shape, while Manifold repairs
+  both. (6b)
+- A preview's `#` objects are drawn with a small depth offset
+  (`DrawState::bias`, constant -2, slope -0.5) so that they show on the
+  cut faces they make, whose triangles the boolean re-split (OpenCSG
+  compares the very same triangles there). The values pass every
+  highlight case; a `#` object within that offset behind a surface would
+  show through it. (6b)
+- `--view edges` in render mode splits quads along other diagonals than
+  OpenSCAD's libtess2 (`PolySetUtils::tessellate_faces`), and a Manifold
+  result's triangles follow manifold-rust's triangulation, so interior
+  edge lines differ: `render-view-edges-manifold_cube10` and both
+  `*-view-edges-manifold_render-preserve-colors` fail on those lines
+  alone. Same root as "Faces with more than three vertices" under
+  Parity. (6b)
+- The preview of a model with a `.nef3` import fails like its render
+  (`import()` of `.nef3` is not implemented): the two
+  `preview-manifold_nef3_*` cases. (6b)
+- With `--csglimit` exceeded, OpenSCAD's preview draws nothing (the
+  normaliser gives up on the whole term), and so does neoscad's. For the
+  GUI and snapshots the real boolean of the unnormalised term would be a
+  better fallback; not done, to stay with OpenSCAD. (6b)
+- The render summary after a PNG preview reports 0 geometry cache
+  entries (`CsgTree::build` does not return the renderer's count). (6b)
+- `.term` export still prints "No top-level CSG object"; `geom::csg`
+  now builds OpenSCAD's CSG terms, so `CSGNode::dump` could be ported on
+  top of it. (6b)
+- Preview speed (best of 3, wall, this machine): at most `--render`'s
+  time on the benchmark models, and 1.5-4.5x faster than the nightly's
+  OpenCSG preview, except `csg_spheres` (380 ms against the nightly's
+  273: one product of a cube minus 125 spheres is one big boolean,
+  which OpenCSG never computes) and `text_30lines` (550 against 486, as
+  in render mode). (6b)
+- PNG export needs a GPU adapter (Metal, Vulkan, Direct3D 12). Without
+  one it fails with "no GPU adapter"; a headless Linux CI runner would
+  need a software Vulkan driver (lavapipe), or neoscad a CPU rasteriser.
+  The PNG tests in `crates/render/tests/offscreen.rs` skip without one.
+  (6a)
+- Determinism: the same scene gives the same PNG bytes on one machine
+  (checked with two devices on one GPU in `offscreen.rs`), but
+  rasterisation rules differ between GPUs and drivers at the pixel level
+  (edge pixels, depth ties between coplanar faces). Only Metal on an
+  Apple M4 Pro has been measured: 318 of 320 render-mode images pass
+  `image_compare` against OpenSCAD's goldens, 206 pixel-identical. Other
+  GPUs are unverified. (6a)
+- The first PNG export after a reboot or driver update pays for Metal's
+  shader compilation (about 0.5 s on this machine; the system caches it
+  after that, and a warm export costs about 18 ms over the geometry). (6a)
+- The two render-mode images that fail both tier 4 rules,
+  `render-manifold_issue964` and `issue1061`, are polyhedra with
+  non-planar quads: `PolySet::tessellate` ear-clips them along other
+  diagonals than OpenSCAD's libtess2 (see "Faces with more than three
+  vertices" under Parity), so the shading of those faces differs. The
+  renderer draws what `geom` hands it. Their preview and throwntogether
+  cases fail the same way. (6a, 6b)
+- Colour schemes are only the built-in and vendored ones; OpenSCAD also
+  reads `color-schemes/render/*.json` from the user's configuration
+  directory. The app can pass such files to `render::scheme::parse`. (6a)
+- OpenSCAD's `PolySetRenderer` draws nothing (and logs an error) for a
+  result holding both 3D and 2D parts; `geom` never returns such a
+  result, so the case is not handled. (6a)
 
-- **Memory limit blind spot (found by the VM fuzzer).** The evaluator's memory estimate ignores lists shorter than 1,024 elements (`crates/eval/src/limits.rs`, `value.rs` list accounting). A program that builds an exponentially shared tree of small lists, then materialises it element-wise (e.g. with unary minus), passed 1.1 GB under `--limit memory=64` on the plain tree-walker. This matters for serve, MCP and the app, which rely on `Limits::AGENT`. Account small lists too (e.g. in batches), or cap total live list elements.
-- **Evaluator speedups from the VM spike** (`docs/audits/bytecode-vm.md`, prototype on branch `mr/vm-spike`): land T1–T5 (compile-time builtins, reused arg vectors, a positional binding fast path, a direct builtin call path, recycled contexts; 1.02–1.11×). Then port the VM's register and pure-frame analyses into the tree-walker (an estimated 1.2–1.35× with one engine), using the branch's fuzzer and `vm_ab` as the oracle.
+## Parts, check and measure
+- A part's solid is its subtree's geometry: a part under a `difference()`
+  that cuts it is measured uncut (its `context` is only set for the
+  operations that change a part as a whole: subtracting it,
+  intersecting, hull, minkowski, resize, 2D). Measuring "what of the
+  model belongs to the part" would need the model's faces by part plus
+  closing the cut. (7b-1)
+- Face attribution survives booleans, transforms and `color()` (over
+  several parts the IDs are kept instead of collapsed, which changes
+  only how an export groups triangles); `hull()`, `minkowski()` and
+  2D operations make new solids and drop the parts inside them. (7b-1)
+- Wall thickness is sampled along face normals from fixed points per
+  face (up to 16 on large faces, at most 400,000 rays); a wall whose
+  sides are not parallel measures thicker than its narrowest point, and
+  a narrow feature in the middle of a big face between samples can be
+  missed. A medial-axis or sphere-probe estimate would be exact. Knife
+  edges formed by two faces sharing a corner are skipped; the feather
+  edges a `difference()` leaves where a curved cut meets a face are
+  reported (correctly thin, but many). (7b-1)
+- Overhangs do not recognise bridges (a flat span supported at both
+  ends); they are reported as overhangs. (7b-1)
+- Checks run serially (about 150 ms for a 220k-triangle model). Rays are
+  independent, so they could run on rayon with a deterministic merge.
+  (7b-1)
+- `snapshot --issues` uses the default check settings from the command
+  line (the server's `issues` takes any). Markers are drawn whether or
+  not the model hides the point from that view. (7b-1)
+- `measure --section` cuts the model or one part; a per-part breakdown
+  of a model section is not reported. (7b-1)
 
-- **Exponential-time walks over shared value trees (time DoS for serve, MCP and the app).** Found while fixing the memory limit (`b78a9b9`). `memo.rs` `var_digest`/`value_digest` hash a top-level variable's shared tree with no time check: through MCP, `t = f([1], 26)` takes 3.4 s and depth 28 takes 13.4 s, and deeper trees run far past the 60 s limit. `ops::equals`/`compare` walk shared trees the same way. Fix: memoise by `Rc` pointer while walking, and add interrupt/time checks.
-- **`-o x.echo` exits 0 after an evaluation error** (limits and `assert(false)` included). Check what OpenSCAD's exit code is and match it.
+## MCP and the agent eval
+- `neoscad mcp` implements MCP 2026-07-28 statelessly plus the legacy
+  `initialize` handshake, and only the core: no `subscriptions/listen`,
+  no progress notifications (a long render sends nothing until it
+  ends), no logging, no MRTR (`input_required`), no completions. The
+  client's `roots` capability is not read either: the roots are the
+  working directory and `--root`s given at start. (7c)
+- Claude Code (2.1.283) shows the model the JSON of `structuredContent`
+  instead of the text summary when a result has both, so the text is
+  what other clients see. If a client shows both, a result costs about
+  twice its tokens; a flag to send only one would fix that. (7c)
+- Inline `source` is one document per `base_dir` (`inline.scad`), so
+  inline calls take turns rather than running in parallel, and while
+  one runs it shadows a real `inline.scad` in that directory. (7c)
+- `notifications/cancelled` does not reach an MCP `snapshot` call: the
+  tool calls the session directly, not through the server's request
+  table that `$/cancelRequest` looks up. The end of input still stops
+  it (`Session::cancel_all`). (H4)
+- `neoscad serve --socket PATH` in a shared directory binds and then
+  makes the socket 0600, a short window harmless under the default
+  umask 022 (connecting needs write permission); binding under a
+  tightened umask needs nix's `fs` feature. (H4)
+- The snapshot sheet's header line runs under the legend at the MCP
+  default size (768 px) when `issues` adds check counts. (7c)
+- Tool-description token counts are estimates from byte counts (6,069
+  bytes of compact JSON as a client receives the list, 5,498 as the
+  test measures it); no tokenizer was run. The test's 5,500-byte guard
+  has 2 bytes to spare. (7c, H4)
+- The pilot is n = 1 per cell (`docs/agent-eval.md`); a real comparison
+  needs several runs per task and condition, more tasks, and a second
+  model. (7c)
+- The agent eval's graders can only express geometry through `@expect`
+  on derived solids (intersections with probes plus a 1 mm³ marker, so
+  "no overlap" measures 1 instead of failing as an empty model). An
+  `@expect empty` or `@expect volume-between` would make them plainer.
+  (7c)
+
+## Tooling: fmt, test, docs
+- `session::diag`'s "did you mean" pools are hand-copied lists of
+  OpenSCAD's builtin modules and functions; `eval::builtins()` (7b-2)
+  now lists the evaluator's own tables and could replace them. (7b-2)
+- `neoscad fmt` keeps what OpenSCAD's customizer reads at the top of a
+  file (before the first `{`): there an assignment with a trailing `//`
+  comment is never wrapped (it can run past the width), assignments
+  sharing a line keep sharing it, and indented `//` comments keep their
+  indent. A narrower rule (only lines whose annotations would change)
+  would format more of those headers. (7b-2)
+- Formatter layout limits: binary chains break all or nothing (no
+  filling); only a lone vector argument hugs its parentheses (no
+  "last argument" hugging of a trailing vector or function literal); a
+  `//` comment inside an expression ends the line there, and block
+  comments are kept verbatim, not re-indented; blank lines are kept
+  between list items as between statements. (7b-2)
+- `neoscad fmt` refuses files that need `--enable` to parse (the
+  unicode-identifier tests); it has no `--enable`. It rewrites files in
+  place (no temporary file and rename) and never goes through a running
+  server. (7b-2)
+- `neoscad test` runs in-process; unlike `check` and `measure` it does
+  not hand its work to a running `neoscad serve` (a `cli.test`), so a
+  command-line run starts cold. Each test re-parses its file (a test's
+  program is changed, so it skips the parse cache; included files still
+  come from the lex cache). (7b-2)
+- `@expect parts` checks that the named parts exist, not that they are
+  the only ones; there are no expectations on echo output (tests use
+  `assert()`), on 2D contour counts, or on `measure --between`
+  distances. (7b-2)
+- `neoscad docs --in` prints a user definition's parameters as the
+  `.ast` dump does (`r = 1`), builtins as written in `builtins.toml`
+  (`r=1`); it follows `use`d libraries one level, not the libraries they
+  use. Experimental builtins (`roof`, `textmetrics`, ...) have no
+  entries, only a note that they are not enabled. (7b-2)
+
+## Fonts
+- Fontconfig's system configuration is not consulted, so names the
+  nightly resolves to installed system fonts render in the matching
+  Liberation font instead (on this Mac `Arial`, `Helvetica`, `Courier
+  New` and `Times New Roman` are system fonts for the nightly; here they
+  are the metric-compatible Liberation Sans, Mono and Serif). No test
+  depends on it. (5e)
+- `use <font.ttf>` registers the font (in the CLI, from the programs'
+  `uses`), but `lang` still also treats the file as a library and parses
+  the font as OpenSCAD source, and a missing font file does not print
+  OpenSCAD's "Can't read font with path '...'" error
+  (`SourceFile::registerUse`). Both belong in `lang`. (5e)
+- The font-name matcher (`crates/text/src/pattern.rs`) ranks on charset,
+  family, style, slant, weight and width. It leaves out fontconfig's
+  language coverage and every value after the first for weight, slant and
+  width, and matches a weight range by its midpoint. Every font name in
+  the test suite resolves as in the nightly. (5e)
+- The experimental `textmetrics()` and `fontmetrics()` functions can now
+  be built on the `text` crate (`TextMetrics`/`FontMetrics` in
+  `FreetypeRenderer.cc` use the same shaping). (5e)
+- Cubic glyph segments (CFF fonts) are flattened with `powf(3.0)` like
+  the C++ `std::pow`; that matches on macOS because both call the system
+  libm, but a WASM libm may round a cube differently in the last bit. No
+  test font is CFF. (5e)
+
+## Determinism
+- manifold-rust's `Slice` starts each loop from a `HashSet` iteration, so
+  the raw polygon order varies; `projection(cut=true)` output is canonical
+  only because Clipper's union reorders it. (5b)
+- manifold-rust's `compose_meshes` does not give each composed copy its own
+  mesh IDs as C++ `Compose` does (`csg_tree.cpp:386-395`); `batch` in
+  `manifold_geom.rs` renumbers colliding operands first. Report upstream,
+  then drop the workaround. (5b)
+
+## WASM
+- Recursion on wasm32 stops at a frame budget calibrated for V8's default
+  stack in node 18 (`eval::recursion`): function depth 498 and module
+  depth 249 for the simplest recursions, against 52,417 and 13,046
+  natively and the nightly's 9,190 and 7,043. Without the budget V8
+  overflows at 1,076 and 527. Raising it needs smaller wasm frames: per
+  level, rendering's walk over the node tree costs about four times an
+  expression's stack, and list comprehensions twice. Only node 18 was
+  measured; browsers (and workers, which may have less stack) are
+  unverified. (H2)
+- The frame budget's calibration in `crates/eval/src/recursion.rs`
+  (budget depths at most 63% of where V8 overflows) is stale: at
+  `9b89400` `module-children` reaches 206 of V8's 214 and `function-lc`
+  199 of 326 (`scripts/wasm-check.sh --depths --all-programs`, with and
+  without `--frames=4000000000`). After O4, V8 overflows `function-lc`
+  at 353 and `module-children` still at 214. (O4)
+- **Fix pending merge** (`dea59f6`, branch
+  `worktree-agent-a60c524a0f99f8c76`, makes the comparisons iterative).
+  Operations over a whole value other than printing and freeing it
+  (comparing with `==` or `<`, `ops::equals` and the ordering) recurse
+  once per level of vector nesting. Nesting deeper than the budget can only be built by tail
+  recursion (`f(n, acc) = ... f(n - 1, [acc])`), and comparing such a
+  value can overflow a WASM engine's stack; natively it needs a far deeper
+  value, and the nightly crashes even on `len()` of one. (H2)
+- A wasm32 build must be linked with `-C link-arg=-zstack-size=8388608`
+  (`eval::recursion::WASM_STACK_SIZE`; `crates/wasm-check/build.rs` does
+  this). With rustc's default 1 MiB, recursion stops earlier, still
+  cleanly. The release `wasm_check.wasm` is 38 MB, of which all but
+  9.0 MB are DWARF line tables (the release profile keeps them); 4.3 MB
+  of the rest is the bundled fonts and MCAD. (H2)
+- Rust's wasm32 maths functions differ from macOS libm in the last bit
+  (engine milestone audit, finding 6.5), so WASM output is not
+  byte-identical to native. Decide whether to accept that or use one libm
+  everywhere. (H2)
+
+## Structure
+- The tier 3 baseline needs the pinned nightly installed as its renderer.
+  CI would need it too. (5a)
+- The six PDF cases need a PDF rasteriser (Ghostscript or poppler), which
+  CI would need too. (5f)

@@ -1,5 +1,36 @@
 # Audit: performance (after phase 8)
 
+> **Status (2026-09-28).** The body below is the audit as written at
+> `df6731d`; it is not updated.
+>
+> - **Superseded: the unwind finding.** B1, §1.2's conclusion ("abort
+>   no longer helps"), §3's `panic=unwind` row and "Decisions" item 3
+>   say unwind costs 0–1.5%. `docs/audits/unwind.md` (at `970f630`)
+>   measured 5–7% on evaluation-bound BOSL2 models and up to 12% on
+>   call-heavy code, once `bd4e4f0` had removed the limits' hot-path cost
+>   that masked it. After D1 (`cd7d5c7`) the gap is 5–9%; D2 was measured
+>   slower and reverted. Release builds still unwind.
+> - **Opportunities:**
+>   - O1 mimalloc: done, `b7e9941` (also removed the app's
+>     `MallocLargeCache=0`).
+>   - O2 include fragments: done, `4d877c7`; the off-path `Program` free
+>     in `db54307`.
+>   - O3 statement reuse: done, `0f4b8e8`.
+>   - O4 static names: done for call sites and slots, `970f630`; fixed
+>     (depth, slot) addressing is not (`docs/followups.md`).
+>   - O5 STL/OFF writing and O6 cache keys: done, `e1a2b63`.
+>   - O7 (R1) and O8 (R3, `concat`/`each`): done, `bd4e4f0`.
+>   - O9 manifold-rust hole triangulation and O10 clipper2-rust rounding:
+>     done, `9b89400`.
+>   - O11 duplicate parallel subtrees: not done.
+>   - O12 cold start: frameworks linked delay-init instead, `b7e9941`;
+>     small chain-shaped renders skip the thread pool, `db54307`
+>     (cold start 2.9 ms median). A `dlopen`ed renderer is not done.
+>   - O13 (lazy booleans, GPU CSG preview, a parallel evaluator): not
+>     started. Evaluator work after this audit is in
+>     `docs/audits/bytecode-vm.md` and `docs/architecture.md`
+>     ("Evaluator performance").
+
 Audited at `df6731d` (clean tree), release build (`lto = "thin"`,
 `codegen-units = 1`, `panic = "unwind"`), on an M4 Pro (10 performance +
 4 efficiency cores, 48 GB), macOS 27.0, on AC power. The reference is the

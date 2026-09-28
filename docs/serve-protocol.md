@@ -2,7 +2,9 @@
 
 `neoscad serve` is a long-lived process that holds one
 `session::Session` (`crates/session`): open documents, parsed files,
-the geometry cache and the last CSG products, all warm. It answers
+the geometry cache, the last CSG products and each document's
+top-level statements' evaluation (reused on the next request when
+their inputs did not change; output is identical), all warm. It answers
 [JSON-RPC 2.0](https://www.jsonrpc.org/specification) requests. The
 command line, the MCP server (`docs/mcp.md`, which calls these methods
 in-process) and the apps are its clients; the
