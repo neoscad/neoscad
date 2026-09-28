@@ -416,12 +416,32 @@ impl ManifoldGeometry {
     /// relation tables change, one for one, so the geometry, the triangle
     /// order within runs and the colours stay as they were.
     pub fn tag_part(&mut self, name: &Arc<str>, ids: &dyn IdSource) {
-        let mut old = self.ids();
-        old.extend(self.id_to_color.keys().copied());
-        old.extend(self.subtracted.iter().copied());
+        let old = self.all_ids();
+        if old.is_empty() {
+            return;
+        }
+        let first = ids.reserve(old.len() as u32);
+        let map: BTreeMap<u32, u32> = old.iter().copied().zip(first..).collect();
+        // A part entry for an ID the solid no longer carries is dropped.
+        self.parts.retain(|id, _| old.contains(id));
+        self.relabel(&map);
+        for &id in map.values() {
+            self.parts.entry(id).or_insert_with(|| name.clone());
+        }
+    }
+
+    /// Every original ID the solid carries anywhere: its bookkeeping
+    /// (colours, subtracted faces, its own ID) and the kernel's relation
+    /// tables (`parts` is keyed by these same IDs). A renumbering must
+    /// cover all of them, or the solid would keep a stale ID in one table
+    /// and lose a colour or a part.
+    pub fn all_ids(&self) -> BTreeSet<u32> {
+        let mut all = self.ids();
+        all.extend(self.id_to_color.keys().copied());
+        all.extend(self.subtracted.iter().copied());
         if !self.manifold.is_empty() {
             let imp = self.manifold.as_impl();
-            old.extend(
+            all.extend(
                 imp.mesh_relation
                     .mesh_id_transform
                     .values()
@@ -429,11 +449,15 @@ impl ManifoldGeometry {
                     .map(|r| r.original_id as u32),
             );
         }
-        if old.is_empty() {
-            return;
-        }
-        let first = ids.reserve(old.len() as u32);
-        let map: BTreeMap<u32, u32> = old.iter().copied().zip(first..).collect();
+        all
+    }
+
+    /// Replace original IDs by `map` (IDs it does not name stay). The mesh
+    /// is not rebuilt: only the IDs in its relation tables change, one for
+    /// one, so the geometry, the triangle order within runs and the colours
+    /// stay as they were. Every ID is mapped at once, so `map` may permute
+    /// IDs, but no two IDs may end up the same.
+    pub fn relabel(&mut self, map: &BTreeMap<u32, u32>) {
         let to = |id: u32| map.get(&id).copied().unwrap_or(id);
         let to_i = |id: i32| {
             if id < 0 { id } else { to(id as u32) as i32 }
@@ -453,12 +477,9 @@ impl ManifoldGeometry {
         self.id_to_color = self.id_to_color.iter().map(|(&i, c)| (to(i), *c)).collect();
         self.subtracted = self.subtracted.iter().map(|&i| to(i)).collect();
         self.own_id = self.own_id.map(to);
-        self.parts = old
-            .iter()
-            .map(|&i| {
-                let owner = self.parts.get(&i).cloned().unwrap_or_else(|| name.clone());
-                (to(i), owner)
-            })
+        self.parts = std::mem::take(&mut self.parts)
+            .into_iter()
+            .map(|(i, owner)| (to(i), owner))
             .collect();
     }
 

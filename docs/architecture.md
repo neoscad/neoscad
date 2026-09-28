@@ -245,6 +245,11 @@ determinism test (`CLAUDE.md`).
   results in child order, and runs sharing an ID are ordered by
   geometry. Small chain-shaped trees skip the pool and must match a
   pooled render at 1, 2 and 8 threads (`crates/geom/tests/render.rs`).
+- **Warm equals cold**: a render keeps an earlier render's ID block only
+  if it still comes after every block placed before it in tree order,
+  and a cache hit's IDs are rebased onto this render's blocks, so a
+  warm session's exports match a fresh one's byte for byte whatever it
+  rendered before (`crates/session/tests/warm_export.rs`).
 - **Cache keys** are exact: a node's key is its own result, including
   a group whose empty sibling still sends its child through a 2D union
   (`dc7153b`).

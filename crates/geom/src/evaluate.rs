@@ -34,7 +34,7 @@
 //! output: runs sharing an original ID are ordered by geometry
 //! (`canonical_mesh`), and built hulls are retagged from a block.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -238,7 +238,31 @@ struct Entry {
     cost: usize,
     stamp: u64,
     replay: Replay,
+    /// Where each original ID in `geom` came from; see [`IdRef`].
+    ids: IdTable,
 }
+
+/// One original ID of a cached solid and the block it was drawn from:
+/// (subtree key, slot) and the offset in the block. `None` would be an ID
+/// from Manifold's global counter, which no result keeps today (a 3D
+/// `minkowski` draws its hulls' IDs there but gives its sum a fresh ID from
+/// its own block, and a block that overflows empties the cache); such an
+/// ID is left as it is.
+///
+/// The same subtree can be given different blocks in different renders
+/// (see [`Renderer::prepare`]), so a hit's IDs are rebased onto this
+/// render's blocks before it is used; this table says how. Without it a
+/// warm session's output depended on what it had rendered before: IDs
+/// decide the order of a solid's triangle runs, and a block kept from an
+/// earlier variant sat out of tree order, so exporting the same file warm
+/// and cold gave the same triangles in a different order (the T2 pilot).
+#[derive(Debug, Clone, Copy)]
+struct IdRef {
+    id: u32,
+    block: Option<((Key, u32), u32)>,
+}
+
+type IdTable = Arc<[IdRef]>;
 
 /// The messages a cached node printed when it was computed as the first
 /// node with its key, so that a later render in which it is again the
@@ -347,17 +371,27 @@ pub struct CacheStats {
 }
 
 impl Cache {
-    fn get(&mut self, k: Key) -> Option<(Option<Geometry>, Replay)> {
+    fn get(&mut self, k: Key) -> Option<(Option<Geometry>, Replay, IdTable)> {
         let e = self.entries.get_mut(&k)?;
         self.order.remove(&e.stamp);
         self.clock += 1;
         e.stamp = self.clock;
         self.order.insert(self.clock, k);
-        Some((e.geom.clone(), e.replay.clone()))
+        Some((e.geom.clone(), e.replay.clone(), e.ids.clone()))
     }
 
-    fn insert(&mut self, k: Key, g: Option<Geometry>, mut replay: Replay) {
-        let cost = g.as_ref().map_or(0, cost_of) + 64;
+    /// Store a hit's geometry rebased onto the current blocks, so the next
+    /// render that keeps those blocks uses it as it is. IDs map one for
+    /// one, so the cost is unchanged.
+    fn rebased(&mut self, k: Key, g: Option<Geometry>, ids: IdTable) {
+        if let Some(e) = self.entries.get_mut(&k) {
+            e.geom = g;
+            e.ids = ids;
+        }
+    }
+
+    fn insert(&mut self, k: Key, g: Option<Geometry>, mut replay: Replay, ids: IdTable) {
+        let cost = g.as_ref().map_or(0, cost_of) + 64 + ids.len() * size_of::<IdRef>();
         if let Some(old) = self.entries.remove(&k) {
             self.bytes -= old.cost;
             self.order.remove(&old.stamp);
@@ -375,6 +409,7 @@ impl Cache {
                 cost,
                 stamp: self.clock,
                 replay,
+                ids,
             },
         );
         self.order.insert(self.clock, k);
@@ -545,6 +580,9 @@ struct Ctx<'a> {
     /// ID blocks by (subtree key, slot): slot `i` for the conversion of
     /// child `i`, [`OWN`] for the node's own use (colouring a solid).
     blocks: HashMap<(Key, u32), (u32, u32)>,
+    /// The same blocks as (first ID, (subtree key, slot), size), in
+    /// ascending order of first ID, which is the order they were placed.
+    owners: Vec<(u32, (Key, u32), u32)>,
     /// Blocks that ran out during this render.
     overflow: Overflow,
     /// With resource limits: the bytes each computed node's result was
@@ -963,12 +1001,15 @@ impl Renderer {
             first: vec![false; len],
             pattern: vec![0; len],
             blocks: HashMap::new(),
+            owners: Vec::new(),
             overflow: Mutex::new(HashMap::new()),
             charged: Mutex::new(HashMap::new()),
             demand: Mutex::new(HashMap::new()),
         };
         {
             let mut seen = HashSet::new();
+            // One past the last ID of the blocks placed so far.
+            let mut end = 0;
             let mut visited = vec![false; len];
             let mut memo = vec![None; len];
             let mut ids = self
@@ -999,12 +1040,27 @@ impl Renderer {
                 seen.insert(h);
                 ctx.first[n.index] = first;
                 for slot in std::iter::once(OWN).chain(0..n.children.len() as u32) {
-                    let size = needs.get(&(h, slot)).map_or(BLOCK, |&n| n.max(BLOCK));
-                    let b = ids.entry((h, slot)).or_insert((0, 0));
-                    if b.1 < size {
+                    let k = (h, slot);
+                    if ctx.blocks.contains_key(&k) {
+                        // A second node with this key: the same computation,
+                        // the same IDs.
+                        continue;
+                    }
+                    let size = needs.get(&k).map_or(BLOCK, |&n| n.max(BLOCK));
+                    let b = ids.entry(k).or_insert((0, 0));
+                    // A block from an earlier render is kept only if it
+                    // comes after every block placed so far in this one.
+                    // A fresh render reserves its blocks in this order, so
+                    // its IDs rise in tree order; a block kept out of that
+                    // order (a subtree that sat later in an earlier
+                    // variant) would put its runs before its tree-order
+                    // predecessors' and change the output's triangle order.
+                    if b.1 < size || b.0 < end {
                         *b = (Manifold::reserve_ids(size), size);
                     }
-                    ctx.blocks.insert((h, slot), *b);
+                    end = b.0 + b.1;
+                    ctx.blocks.insert(k, *b);
+                    ctx.owners.push((b.0, k, b.1));
                 }
                 stack.extend(n.children.iter().rev().map(|c| (c, Some((h, first)))));
             }
@@ -1162,25 +1218,25 @@ impl Ctx<'_> {
         // was computed without limits, so its demand is unknown) is
         // computed again; see [`Demand`].
         let cached = match (&self.opts.guard, cached) {
-            (Some(g), Some((geom, replay))) => match replay.demand {
+            (Some(g), Some((geom, replay, ids))) => match replay.demand {
                 Some(d) if d.allowed(g) => {
                     self.demand
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(n.index, d);
-                    Some((geom, replay))
+                    Some((geom, replay, ids))
                 }
                 _ => None,
             },
             (_, c) => c,
         };
-        if let Some((geom, replay)) = cached {
+        if let Some((geom, replay, ids)) = cached {
             if !first || self.opts.replay.is_none() {
                 // A later copy, or a host that keeps OpenSCAD's rule: the
                 // cache answers silently.
                 self.r.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(Out {
-                    geom,
+                    geom: self.rebase(h, geom, &ids),
                     msgs: Vec::new(),
                 });
             }
@@ -1190,7 +1246,7 @@ impl Ctx<'_> {
             {
                 self.r.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(Out {
-                    geom,
+                    geom: self.rebase(h, geom, &ids),
                     msgs: msgs.to_vec(),
                 });
             }
@@ -1225,6 +1281,7 @@ impl Ctx<'_> {
             out.msgs.clear();
             None
         };
+        let ids = self.id_table(out.geom.as_ref());
         self.r
             .cache
             .lock()
@@ -1238,8 +1295,71 @@ impl Ctx<'_> {
                     epoch: self.opts.replay.unwrap_or(0),
                     demand,
                 },
+                ids,
             );
         Ok(out)
+    }
+
+    /// Where each original ID of a result computed in this render came
+    /// from: every ID drawn for it is in one of this render's blocks (a
+    /// child from the cache was rebased onto them first).
+    fn id_table(&self, geom: Option<&Geometry>) -> IdTable {
+        let Some(Geometry::Manifold(m)) = geom else {
+            return Arc::new([]);
+        };
+        m.all_ids()
+            .into_iter()
+            .map(|id| {
+                let at = self.owners.partition_point(|o| o.0 <= id);
+                IdRef {
+                    id,
+                    block: at
+                        .checked_sub(1)
+                        .map(|i| self.owners[i])
+                        .filter(|&(first, _, size)| id - first < size)
+                        .map(|(first, k, _)| (k, id - first)),
+                }
+            })
+            .collect()
+    }
+
+    /// A cached result with its IDs moved onto this render's blocks: each
+    /// to the same offset in the block its (subtree key, slot) has now,
+    /// which is the ID a fresh render gives it. The output, which follows
+    /// the IDs' order, is then the fresh render's. A result whose blocks
+    /// are unchanged (a render of the same model, or the part of an edited
+    /// one before the edit) is returned as it is.
+    fn rebase(&self, h: Key, geom: Option<Geometry>, ids: &IdTable) -> Option<Geometry> {
+        let Some(Geometry::Manifold(m)) = &geom else {
+            return geom;
+        };
+        let map: BTreeMap<u32, u32> = ids
+            .iter()
+            .filter_map(|r| {
+                let (k, off) = r.block?;
+                let &(first, size) = self.blocks.get(&k)?;
+                (off < size && first + off != r.id).then_some((r.id, first + off))
+            })
+            .collect();
+        if map.is_empty() {
+            return geom;
+        }
+        let mut m = ManifoldGeometry::clone(m);
+        m.relabel(&map);
+        let table: IdTable = ids
+            .iter()
+            .map(|r| IdRef {
+                id: map.get(&r.id).copied().unwrap_or(r.id),
+                block: r.block,
+            })
+            .collect();
+        let geom = Some(Geometry::Manifold(Arc::new(m)));
+        self.r
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rebased(h, geom.clone(), table);
+        geom
     }
 
     /// Children's results in order, evaluated in parallel when enabled.
