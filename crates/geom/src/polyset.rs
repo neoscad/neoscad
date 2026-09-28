@@ -8,6 +8,7 @@ use manifold_rust::types::PolyVert;
 
 use crate::Matrix;
 use crate::color::Color;
+use crate::libtess2::Tessellator;
 
 /// A 3D polygon mesh.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -186,11 +187,9 @@ impl PolySet {
     /// Like OpenSCAD it drops faces with fewer than three vertices (with the
     /// warning "PolySet has degenerate polygons"), removes consecutive
     /// vertices that coincide in `float` precision, drops vertices no face
-    /// uses, and keeps each face's colour on its triangles. OpenSCAD
-    /// triangulates with libtess2; this projects each face onto the plane
-    /// of its Newell normal and ear-clips it with Manifold's triangulator,
-    /// which gives the same surface for planar faces but may choose other
-    /// diagonals (and so other shading) for non-planar ones.
+    /// uses, keeps each face's colour on its triangles, and splits larger
+    /// faces with libtess2 ([`crate::libtess2`]), so the diagonals, the
+    /// triangle order and each triangle's first vertex match OpenSCAD's.
     pub fn tessellate(&self, warnings: &mut Warnings) -> PolySet {
         let mut out = PolySet {
             convex: self.convex,
@@ -206,56 +205,71 @@ impl PolySet {
         let f32v = |i: u32| self.vertices[i as usize].map(|c| c as f32);
         let mut degenerate = 0;
         let mut used = vec![false; self.vertices.len()];
-        let mut polygons: Vec<(Vec<u32>, i32)> = Vec::with_capacity(self.faces.len());
+        // The cleaned faces, back to back: (start, length, colour).
+        let mut idx: Vec<u32> = Vec::with_capacity(self.faces.iter().map(Vec::len).sum());
+        let mut polygons: Vec<(usize, usize, i32)> = Vec::with_capacity(self.faces.len());
         for (i, face) in self.faces.iter().enumerate() {
             if face.len() < 3 {
                 degenerate += 1;
                 continue;
             }
-            let mut cur: Vec<u32> = Vec::with_capacity(face.len());
+            let start = idx.len();
+            // The last kept vertex in `float`, carried rather than recast.
+            let mut last: Option<[f32; 3]> = None;
             for &ind in face {
-                if cur.last().is_none_or(|&b| f32v(ind) != f32v(b)) {
-                    cur.push(ind);
+                let v = f32v(ind);
+                if last != Some(v) {
+                    idx.push(ind);
+                    last = Some(v);
                 }
             }
-            let head = f32v(cur[0]);
-            while cur.last().is_some_and(|&b| f32v(b) == head) {
-                cur.pop();
+            let head = f32v(idx[start]);
+            while idx.len() > start && f32v(idx[idx.len() - 1]) == head {
+                idx.pop();
             }
-            if cur.len() < 3 {
+            if idx.len() - start < 3 {
+                idx.truncate(start);
                 continue;
             }
-            for &ind in &cur {
+            for &ind in &idx[start..] {
                 used[ind as usize] = true;
             }
-            polygons.push((
-                cur,
-                if has_colors {
-                    self.color_indices[i]
-                } else {
-                    -1
-                },
-            ));
+            let color = if has_colors {
+                self.color_indices[i]
+            } else {
+                -1
+            };
+            polygons.push((start, idx.len() - start, color));
         }
         let mut map = vec![u32::MAX; self.vertices.len()];
+        let mut verts: Vec<[f32; 3]> = Vec::with_capacity(self.vertices.len());
+        out.vertices.reserve(self.vertices.len());
         for (i, v) in self.vertices.iter().enumerate() {
             if used[i] {
                 map[i] = out.vertices.len() as u32;
                 out.vertices.push(*v);
+                verts.push(v.map(|c| c as f32));
             }
+        }
+        for i in &mut idx {
+            *i = map[*i as usize];
         }
         if has_colors {
             out.colors = self.colors.clone();
         }
-        for (face, color) in polygons {
-            let face: Vec<u32> = face.iter().map(|&i| map[i as usize]).collect();
-            let tris = if face.len() == 3 {
-                vec![[face[0], face[1], face[2]]]
+        out.faces.reserve(idx.len());
+        let mut tess = Tessellator::new();
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for (start, len, color) in polygons {
+            let face = &idx[start..start + len];
+            tris.clear();
+            if len == 3 {
+                tris.push([face[0], face[1], face[2]]);
             } else {
-                triangulate_face(&out.vertices, &face)
-            };
-            for t in tris {
-                out.faces.push(t.to_vec());
+                tess.tessellate_polygon(&verts, face, &mut tris);
+            }
+            for t in &tris {
+                out.faces.push(vec![t[0], t[1], t[2]]);
                 if has_colors {
                     out.color_indices.push(color);
                 }
@@ -274,7 +288,9 @@ impl PolySet {
     /// vertices are closer than that apart (`issue1138.scad`, 2e-7) into a
     /// non-manifold one; minkowski() reads its operands the CGAL way.
     /// Faces with fewer than three vertices are dropped; colours are not
-    /// kept.
+    /// kept. Larger faces are ear-clipped rather than put through libtess2:
+    /// CGAL takes them whole, so there is no OpenSCAD triangle order to
+    /// match, and the minkowski pieces are convex hulls of the points.
     pub fn triangulate_faces(&self) -> PolySet {
         let mut out = PolySet {
             vertices: self.vertices.clone(),
@@ -349,7 +365,11 @@ pub fn newell(pts: &[[f64; 3]]) -> [f64; 3] {
     n
 }
 
-/// Triangulate one face (vertex indices into `verts`), keeping its winding.
+/// Triangulate one face (vertex indices into `verts`), keeping its
+/// winding, by projecting it onto the plane of its Newell normal and
+/// ear-clipping it with Manifold's triangulator. Only
+/// [`PolySet::triangulate_faces`] uses this; [`PolySet::tessellate`] uses
+/// libtess2.
 fn triangulate_face(verts: &[[f64; 3]], face: &[u32]) -> Vec<[u32; 3]> {
     let pts: Vec<[f64; 3]> = face.iter().map(|&i| verts[i as usize]).collect();
     let n = newell(&pts);

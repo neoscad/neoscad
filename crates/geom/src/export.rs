@@ -3,10 +3,10 @@
 //! (`src/RenderStatistic.cc`).
 //!
 //! STL, OBJ and 3MF need triangles, so meshes are tessellated here first
-//! (`PolySetUtils::tessellate_faces`). Triangulations of non-triangular
-//! faces can differ from OpenSCAD's (libtess2 there, ear clipping here;
-//! see `PolySet::tessellate`), so files of meshes with quads or larger
-//! faces describe the same surface with possibly different diagonals.
+//! (`PolySetUtils::tessellate_faces`), with a port of the libtess2 that
+//! OpenSCAD uses (see `PolySet::tessellate`): quads and larger faces get
+//! OpenSCAD's diagonals, triangle order and first vertices. STL facet
+//! normals can still differ in the last bits (`docs/followups.md`).
 
 use crate::Geometry;
 use crate::color::{Color, Scheme};

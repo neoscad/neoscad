@@ -446,3 +446,47 @@ fn a_chain_renders_as_a_tree_does_at_any_thread_count() {
         );
     }
 }
+
+/// Tessellation (libtess2, `PolySet::tessellate`) runs inside parallel
+/// subtrees and on export; its output must not depend on the thread
+/// count. The model has every kind of face it handles differently:
+/// quads flat and not, caps flat on an axis and rotated, concave caps, and
+/// a self-intersecting polyhedron face.
+#[test]
+fn tessellated_export_is_identical_at_any_thread_count() {
+    let src = "
+for (i = [0:5]) translate([i * 12, 0, 0]) rotate([i * 17, i * 29, 0]) {
+    cylinder(r1 = 4, r2 = 2, h = 5, $fn = 7 + 9 * i);
+    translate([0, 10, 0]) linear_extrude(3, twist = 30 * i)
+        polygon([for (k = [0:9]) let(r = k % 2 ? 1.5 : 4) [r * cos(36 * k), r * sin(36 * k)]]);
+}
+translate([0, 30, 0]) polyhedron(
+    [[0,0,0],[10,0,0],[10,10,1],[0,10,0],[5,5,8],[2,8,0.5]],
+    [[0,1,2,3],[0,4,1],[1,4,2],[2,4,3],[3,4,0],[3,5,0,1]]);
+";
+    // STL export tessellates the result; the polyhedron alone stays a
+    // PolySet of polygons until then.
+    let solo = "rotate([20, 30, 40]) polyhedron(
+    [[0,0,0],[10,0,0],[10,10,1],[0,10,0],[5,5,8],[2,8,0.5]],
+    [[0,1,2,3],[0,4,1],[1,4,2],[2,4,3],[3,4,0],[3,5,0,1]]);";
+    let stl = |src: &str| {
+        let (g, _) = render_with(&Renderer::new(), src, false);
+        let ps =
+            geom::export::as_polyset(&g.expect("geometry"), &geom::color::CORNFIELD).expect("3D");
+        geom::export::stl(&ps, true, &mut Vec::new())
+    };
+    let first = (stl(src), stl(solo));
+    for threads in [1, 2, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .stack_size(eval::DEFAULT_THREAD_STACK)
+            .build()
+            .unwrap();
+        for _ in 0..3 {
+            assert!(
+                pool.install(|| (stl(src), stl(solo))) == first,
+                "export differs on {threads} threads"
+            );
+        }
+    }
+}

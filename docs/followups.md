@@ -113,6 +113,20 @@ lead them, come roughly in order of user impact.
   allocates and takes nothing). (8f)
 
 ## Performance
+- `PolySet::tessellate` with the libtess2 port, against the ear clipper
+  it replaced (e4f3a15), in-process with mimalloc as the binaries link
+  it: 600k flat quads 0.020 s against 0.038, 600k non-planar quads 0.031
+  against 0.038, 60k 8-64-gons 0.028 against 0.029, 60k stars 0.63 s
+  against 0.80, a `$fn=2048` sphere 0.118 against 0.134. Whole models are
+  at parity: median of 21-41 interleaved runs within ±1%, except
+  `csg_spheres` (+1.2% wall with 0.7% fewer instructions; its profile is
+  Manifold's booleans, now on OpenSCAD's triangles, and the tessellator is
+  not among its top functions).
+  Instructions are lower for quads but higher for n-gons (+9%) and stars
+  (+48%). The margin on n-gons is thin: caps flat on an axis take
+  `Convex::tessellate_axis_aligned`, rotated ones two more passes, and
+  non-convex ones the full sweep, whose O(n^2) `make_face` walks are
+  upstream's. (libtess2 port)
 - **`panic = "unwind"` costs 5–9% on evaluation-bound models** after D1
   (`docs/audits/unwind.md`; D2's `extern "C"` drop shims measured 3–7%
   slower and were reverted). Winning it back for the one-shot CLI means
@@ -224,12 +238,26 @@ lead them, come roughly in order of user impact.
   reproduced. Messages that come from OpenSCAD itself ("Minkowski
   hard-crashed, falling back to Nef operation.", then the fallback's
   conversion warnings) are. (5d)
-- Faces with more than three vertices are split by ear clipping, where
-  OpenSCAD uses libtess2 (`PolySetUtils.cc:152`). The surface is the same,
-  but STL/OBJ bytes differ for quads. 2D shapes are not affected: with
-  `USE_MANIFOLD_TRIANGULATOR` (on by default, `CMakeLists.txt:42`) OpenSCAD
-  triangulates them with Manifold's `Triangulate` as neoscad does, and
-  extrusion caps match the nightly byte for byte. (5a, 5b)
+- `PolySet::triangulate_faces`, which minkowski() reads its operands
+  through (the CGAL-style read, no vertex merging), still splits faces by
+  ear clipping; OpenSCAD's `createSurfaceMeshFromPolySet` hands CGAL the
+  faces as they are, so there is no libtess2 order to match there.
+  `PolySet::tessellate` (export, display, conversion to Manifold) uses
+  the libtess2 port (`crates/geom/src/libtess2`). 2D shapes never went
+  through libtess2: with `USE_MANIFOLD_TRIANGULATOR` (on by default,
+  `CMakeLists.txt:42`) OpenSCAD triangulates them with Manifold's
+  `Triangulate` as neoscad does. (5a, 5b)
+- STL facet normals differ from the nightly's in the last bits on 42 of
+  the 167 3D test models it exports (`tests/data/scad/3D`), with every
+  other byte identical: `io::stl` computes `(p1 - p0) x (p2 - p0)` and its
+  length unfused, where the arm64 nightly's Eigen code fuses some of the
+  multiply-adds. Fusing the three cross-product components
+  (`a1.mul_add(b2, -(a2 * b1))`, ...) and the squared norm
+  (`n2.mul_add(n2, n1.mul_add(n1, n0 * n0))`) was tried: it fixes 11 of
+  the 42 (58 to 69 identical), so Eigen's evaluation order for the rest
+  is something else; find it (build `export_stl.cc`'s three lines against
+  Homebrew's Eigen with Apple clang `-O3` and compare) before changing
+  `io::stl`. (libtess2 port)
 - Results of Manifold booleans can list the same triangles in a different
   order, or rotate a triangle's vertices, compared with the nightly (for
   example `rotate_extrude-tests.scad`, `issue1105.scad`); a few differ in
@@ -625,20 +653,14 @@ lead them, come roughly in order of user impact.
   solid. `preview-manifold_polyhedron-tests` fails on the last: OpenCSG
   draws a subtraction from an inside-out octahedron as nothing and one
   with a single flipped face as a partial shape, while Manifold repairs
-  both. (6b)
+  both. It still fails with the libtess2 port, which splits its faces as
+  OpenSCAD does: the difference is the CSG, not the triangles. (6b)
 - A preview's `#` objects are drawn with a small depth offset
   (`DrawState::bias`, constant -2, slope -0.5) so that they show on the
   cut faces they make, whose triangles the boolean re-split (OpenCSG
   compares the very same triangles there). The values pass every
   highlight case; a `#` object within that offset behind a surface would
   show through it. (6b)
-- `--view edges` in render mode splits quads along other diagonals than
-  OpenSCAD's libtess2 (`PolySetUtils::tessellate_faces`), and a Manifold
-  result's triangles follow manifold-rust's triangulation, so interior
-  edge lines differ: `render-view-edges-manifold_cube10` and both
-  `*-view-edges-manifold_render-preserve-colors` fail on those lines
-  alone. Same root as "Faces with more than three vertices" under
-  Parity. (6b)
 - The preview of a model with a `.nef3` import fails like its render
   (`import()` of `.nef3` is not implemented): the two
   `preview-manifold_nef3_*` cases. (6b)
@@ -672,13 +694,6 @@ lead them, come roughly in order of user impact.
 - The first PNG export after a reboot or driver update pays for Metal's
   shader compilation (about 0.5 s on this machine; the system caches it
   after that, and a warm export costs about 18 ms over the geometry). (6a)
-- `issue964` and `issue1061` (render mode now passes; their preview and
-  throwntogether cases still fail) are polyhedra with
-  non-planar quads: `PolySet::tessellate` ear-clips them along other
-  diagonals than OpenSCAD's libtess2 (see "Faces with more than three
-  vertices" under Parity), so the shading of those faces differs. The
-  renderer draws what `geom` hands it. Their preview and throwntogether
-  cases fail the same way. (6a, 6b)
 - Colour schemes are only the built-in and vendored ones; OpenSCAD also
   reads `color-schemes/render/*.json` from the user's configuration
   directory. The app can pass such files to `render::scheme::parse`. (6a)
@@ -754,6 +769,23 @@ lead them, come roughly in order of user impact.
   (7c)
 
 ## Tooling: fmt, test, docs
+- `NOTICE` (the SGI Free Software License B for the libtess2 port) must
+  ship with the binaries, which contain the port: `scripts/apple/release.sh`
+  copies only `LICENSE` into the CLI tarball (`release.sh:370`), and the
+  app bundle's only licence file found is the editor's
+  `THIRD-PARTY-LICENSES.txt` (`apple/project.yml:135`). (libtess2 port)
+- The libtess2 port was checked against an oracle that is not in the
+  repository: OpenSCAD's `src/ext/libtess2/Source/*.c` built with Apple
+  clang `-O3 -DNDEBUG`, and a C++17 harness (`-O3`, Homebrew's Boost and
+  Eigen) that includes `GeometryUtils.cc`'s tessellation code verbatim
+  (from `stdAlloc` to the end of `tessellatePolygonWithHoles`), replays
+  `PolySetUtils::tessellate_faces`, flags reads of `vindices[TESS_UNDEF]`,
+  and `_exit`s on a signal or after 5 s per case. Cases where upstream
+  crashes, hangs, or answers differently under `MallocPreScribble` are
+  excluded. The expected triangles in `crates/geom/src/libtess2/tests.rs`
+  came from it. Checking it in (under `scripts/`, built on demand) would
+  let the next change to `libtess2` rerun the comparison instead of
+  rebuilding it. (libtess2 port)
 - `session::diag`'s "did you mean" pools are hand-copied lists of
   OpenSCAD's builtin modules and functions; `eval::builtins()` (7b-2)
   now lists the evaluator's own tables and could replace them. (7b-2)

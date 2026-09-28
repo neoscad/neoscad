@@ -30,6 +30,7 @@ pub mod extrude;
 pub mod fragments;
 pub mod hull;
 mod import;
+pub mod libtess2;
 pub mod manifold_geom;
 pub mod minkowski;
 pub mod polygon2d;

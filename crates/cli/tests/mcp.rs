@@ -222,7 +222,13 @@ fn every_tool_round_trips() {
     let t = text(&r);
     assert!(t.contains("3D bbox 20 x 20 x 10 mm"), "{t}");
     assert!(t.contains("volume 1084 mm³"), "{t}");
-    assert_eq!(r["structuredContent"]["geometry"]["volume"], 1084.0);
+    // Manifold sums the volume over the triangles, so the last bit
+    // depends on how the cubes' faces were split (libtess2's diagonals
+    // since the port: 1083.9999999999998).
+    let volume = r["structuredContent"]["geometry"]["volume"]
+        .as_f64()
+        .unwrap();
+    assert!((volume - 1084.0).abs() < 1e-9, "{volume}");
     // The export's directory is made for it.
     let r = s.tool(
         "render",
