@@ -79,6 +79,23 @@ def tool_versions(args):
     return v
 
 
+_VIEWER = None
+
+
+def viewer_path():
+    """A copy of view_stl.py outside the repository. The sandbox denies
+    reading the repository, so an agent that opened the script to learn its
+    options got a permission error (two wasted calls per CadQuery run in
+    the pilot, cad-20260928T202850Z). The copy is readable; running it is
+    exempted from the sandbox as before."""
+    global _VIEWER
+    if _VIEWER is None:
+        d = Path(tempfile.mkdtemp(prefix="cad-tools-")).resolve()
+        _VIEWER = d / "view_stl.py"
+        shutil.copy2(HERE / "view_stl.py", _VIEWER)
+    return _VIEWER
+
+
 def prompt_for(task, cond, args):
     t, c = SPEC["tasks"][task], SPEC["conditions"][cond]
     parts = t["parts"]
@@ -88,7 +105,7 @@ def prompt_for(task, cond, args):
         how_export=c["how_export"],
         stls=", ".join(f"out/{p}.stl" for p in parts),
     ), c["briefing"].format(openscad=args.openscad, python=args.python,
-                            viewer=f"{args.python} {HERE / 'view_stl.py'}")
+                            viewer=f"{args.python} {viewer_path()}")
 
 
 def sandbox_settings(cond, args, writable=()):
@@ -121,7 +138,7 @@ def sandbox_settings(cond, args, writable=()):
         # CadQuery's VTK viewer gets no OpenGL context in the sandbox, so
         # the one image path is view_stl.py (which refuses paths outside
         # the working directory), exempted the same way.
-        viewer = f"{args.python} {HERE / 'view_stl.py'}"
+        viewer = f"{args.python} {viewer_path()}"
         sandbox_extra["excludedCommands"] = [viewer, viewer + ":*"]
     return {
         "sandbox": {
