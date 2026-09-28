@@ -1,6 +1,7 @@
 //! OpenSCAD's use of libtess2: `GeometryUtils::tessellatePolygonWithHoles`
-//! (`GeometryUtils.cc`) for the one-contour faces `tessellate_faces`
-//! passes it.
+//! (`GeometryUtils.cc`), for the one-contour faces `tessellate_faces`
+//! passes it and for the facets with holes that
+//! `createPolySetFromNefPolyhedron3` (`cgalutils.cc`) passes it.
 //!
 //! Around the tessellator it cleans the face by index (repeated vertices,
 //! null ears, non-finite points), keeps triangles as they are, and after
@@ -25,6 +26,10 @@ pub struct Tessellator {
     counts: FastCounts,
     dict: EdgeDict,
     face: Vec<u32>,
+    /// A cycle being cleaned, and the contour lengths within `face`, for
+    /// [`Tessellator::tessellate_polygon_with_holes`].
+    cycle: Vec<u32>,
+    lens: Vec<usize>,
     pts: Vec<[f32; 3]>,
     /// Always run the full sweep (see [`Tessellator::set_fast_paths`]).
     full_sweep_only: bool,
@@ -101,6 +106,63 @@ impl Tessellator {
         self.face = f;
     }
 
+    /// `tessellatePolygonWithHoles(vertices, faces, triangles, nullptr)`:
+    /// appends the triangles of the polygon whose outline is `faces[0]`
+    /// and whose other contours are holes to `out`. Each contour is
+    /// cleaned as a lone face is; nothing comes out if the outline has
+    /// fewer than three points left, and holes that collapse are dropped.
+    /// libtess2 fills by the odd rule, but the repair after it flips a
+    /// triangle whose edge runs against a contour's, so holes should wind
+    /// against the outline, as a Nef facet's do; one winding with it gets
+    /// refilled by `triangulateLoops`, as upstream does.
+    pub fn tessellate_polygon_with_holes(
+        &mut self,
+        verts: &[[f32; 3]],
+        faces: &[Vec<u32>],
+        out: &mut Vec<[u32; 3]>,
+    ) {
+        match faces {
+            [] => return,
+            // The same steps as for a face of a mesh, fast paths included.
+            [f] => return self.tessellate_polygon(verts, f, out),
+            _ => {}
+        }
+        let mut flat = std::mem::take(&mut self.face);
+        let mut cycle = std::mem::take(&mut self.cycle);
+        flat.clear();
+        self.lens.clear();
+        for (k, face) in faces.iter().enumerate() {
+            cycle.clear();
+            cycle.extend_from_slice(face);
+            clean(verts, &mut cycle);
+            if cycle.len() < 3 {
+                if k == 0 {
+                    // Upstream returns before looking at the holes.
+                    break;
+                }
+                continue;
+            }
+            flat.extend_from_slice(&cycle);
+            self.lens.push(cycle.len());
+        }
+        if !self.lens.is_empty() {
+            self.pts.clear();
+            self.pts.extend(flat.iter().map(|&i| verts[i as usize]));
+            if self.lens.len() == 1 {
+                // Every hole collapsed: upstream hands libtess2 the outline
+                // alone, which is the lone-face case (a triangle passes
+                // straight through there, as it does upstream).
+                self.tessellate_clean(verts, &flat, out);
+            } else {
+                let lens = std::mem::take(&mut self.lens);
+                self.sweep(verts, &flat, &lens, out);
+                self.lens = lens;
+            }
+        }
+        self.face = flat;
+        self.cycle = cycle;
+    }
+
     /// The rest of `tessellatePolygonWithHoles`, for a cleaned face whose
     /// points are in `self.pts`.
     fn tessellate_clean(&mut self, verts: &[[f32; 3]], f: &[u32], out: &mut Vec<[u32; 3]>) {
@@ -127,14 +189,23 @@ impl Tessellator {
             }
         }
 
-        self.tess.begin(self.pts.iter().copied());
+        self.sweep(verts, f, &[f.len()], out);
+    }
+
+    /// libtess2 and the repairs after it, for cleaned contours whose
+    /// points are in `self.pts`: `f` holds the contours' indices back to
+    /// back (upstream's `allindices`) and `lens` their lengths.
+    fn sweep(&mut self, verts: &[[f32; 3]], f: &[u32], lens: &[usize], out: &mut Vec<[u32; 3]>) {
+        self.tess.begin(&self.pts, lens);
         if !self.tess.tesselate() {
             return;
         }
         // Every edge of the polygon, which the triangles must reproduce.
         // Only the counts matter unless loops are left over (below).
         self.counts.reset(f.len());
-        add_face(&mut self.counts, f);
+        for c in contours(f, lens) {
+            add_face(&mut self.counts, c);
+        }
         let tris_before = out.len();
         let elements = &self.tess.elements;
         let vindices = &self.tess.vertex_indices;
@@ -177,7 +248,9 @@ impl Tessellator {
             // makes depends on the order of upstream's hash map, which
             // depends on its whole history: replay it in the libc++ map.
             self.dict.edges.reset();
-            add_face(&mut self.dict, f);
+            for c in contours(f, lens) {
+                add_face(&mut self.dict, c);
+            }
             for t in &out[tris_before..] {
                 remove_triangle(&mut self.dict, t.map(|x| x as i32));
             }
@@ -190,6 +263,15 @@ impl Tessellator {
                 .all(|&x| (x as usize) < verts.len())
         );
     }
+}
+
+/// The contours of `f`, split at the lengths in `lens`.
+fn contours<'a>(f: &'a [u32], lens: &'a [usize]) -> impl Iterator<Item = &'a [u32]> + 'a {
+    lens.iter().scan(0usize, move |start, &n| {
+        let c = &f[*start..*start + n];
+        *start += n;
+        Some(c)
+    })
 }
 
 /// Push the points of `face` onto `pts`, and return whether [`clean`]

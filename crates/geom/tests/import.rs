@@ -224,6 +224,21 @@ fn nef3_imports_tessellate_holes_and_report_cgal_failures() {
     // meshes it: 16 vertices, 32 triangles.
     assert_eq!((ps.vertices.len(), ps.faces.len()), (16, 32));
     assert!(ps.triangular);
+    // The very triangles of the nightly's OFF export of this import
+    // (`--backend=manifold`), in its order: each facet goes through
+    // libtess2 with its hole as a second contour, as OpenSCAD's
+    // `tessellatePolygonWithHoles` does, so the diagonals match too.
+    #[rustfmt::skip]
+    let nightly: [[u32; 3]; 32] = [
+        [0, 2, 3], [2, 0, 1], [3, 8, 0], [3, 7, 8], [7, 4, 6], [4, 7, 3],
+        [9, 0, 8], [6, 0, 9], [6, 5, 0], [5, 6, 4], [1, 14, 2], [1, 13, 14],
+        [13, 10, 12], [10, 13, 1], [15, 2, 14], [12, 2, 15], [12, 11, 2],
+        [11, 12, 10], [10, 4, 11], [4, 10, 5], [2, 4, 3], [4, 2, 11],
+        [10, 0, 5], [0, 10, 1], [14, 8, 15], [8, 14, 9], [6, 12, 7],
+        [12, 6, 13], [12, 8, 7], [8, 12, 15], [14, 6, 9], [6, 14, 13],
+    ];
+    let got: Vec<[u32; 3]> = ps.faces.iter().map(|f| [f[0], f[1], f[2]]).collect();
+    assert_eq!(got, nightly);
     let volume: f64 = ps
         .faces
         .iter()

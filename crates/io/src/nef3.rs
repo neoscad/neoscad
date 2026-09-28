@@ -13,7 +13,8 @@
 //! and mark, a volume's mark, and a shalfedge's halfedge and facet-cycle
 //! successor. Everything else is still read with CGAL's syntax and index
 //! checks, because a file CGAL rejects must be rejected here too, with the
-//! same message: OpenSCAD's result for it is empty.
+//! same message (only the header's path differs, see [`CGAL_HEADER`]):
+//! OpenSCAD's result for it is empty.
 //!
 //! No CGAL and no rational arithmetic: a vertex's coordinate is only ever
 //! used as `CGAL::to_double(hx / hw)`, which is exact division truncated
@@ -25,10 +26,14 @@ use std::collections::HashMap;
 
 use crate::Message;
 
-/// The path of `SNC_io_parser.h` compiled into the nightly OpenSCAD, which
-/// CGAL's exception text names. Kept verbatim so a failed import prints
-/// what the nightly prints and echo diffs against it stay clean.
-const CGAL_HEADER: &str = "/Users/distiller/libraries/install/include/CGAL/Nef_3/SNC_io_parser.h";
+/// The header CGAL's exception text names in its `File:` line. OpenSCAD
+/// prints the absolute path the header had on the machine that built it;
+/// that path is an accident of one build (another build prints another),
+/// and naming a directory on someone else's machine would send a reader
+/// looking for a file that is not there. The header's path within CGAL,
+/// with the line below it, still points at the check that failed. No
+/// regression test compares this text: `nef3_broken` only has images.
+const CGAL_HEADER: &str = "CGAL/Nef_3/SNC_io_parser.h";
 
 /// One halffacet that faces empty space: its boundary cycles as indices
 /// into [`Faces::vertices`]. CGAL does not order the cycles (the outer one
@@ -1044,7 +1049,9 @@ mod tests {
             "Failure trying to import 't.nef3', import() at line 1"
         );
         assert!(m[1].starts_with("CGAL ERROR: warning condition failed!\nExpr: false\n"));
-        assert!(m[1].contains("\nLine: 1482\n"));
+        // CGAL's header, by its path within CGAL rather than the build
+        // machine's absolute path the nightly prints.
+        assert!(m[1].contains("\nFile: CGAL/Nef_3/SNC_io_parser.h\nLine: 1482\n"));
         assert_eq!(explanation(&m), "SNC_io_parser::read: error in edge line");
         // Cases checked against the nightly: a bad mark is the next line's
         // error, a bad header count its own, and a truncated file fails in

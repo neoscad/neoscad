@@ -10,8 +10,8 @@
 //! follows upstream operation for operation: the same mesh edits in the
 //! same order, the same event-queue tie-breaking, `f32` arithmetic with
 //! the multiply-adds fused where clang fuses them. Only the subset
-//! OpenSCAD uses is ported: one contour per call, the odd winding rule, an
-//! automatically computed normal, and `TESS_CONSTRAINED_DELAUNAY_TRIANGLES`
+//! OpenSCAD uses is ported: the odd winding rule, an automatically
+//! computed normal, and `TESS_CONSTRAINED_DELAUNAY_TRIANGLES`
 //! output (triangles, refined by edge flips).
 //!
 //! libtess2 is under the SGI Free Software License B (version 2.0), which
@@ -281,35 +281,42 @@ impl Tess {
         self.fuel.get() == 0 || self.broken()
     }
 
-    /// `tessAddContour` for one contour, on a fresh mesh.
-    fn begin(&mut self, pts: impl Iterator<Item = [f32; 3]>) {
+    /// `tessAddContour` for each contour in turn, on a fresh mesh: `pts`
+    /// holds the contours' points back to back and `lens` their lengths.
+    /// Points are numbered across contours in the order they come, as
+    /// upstream's `vertexIndexCounter` numbers them, so an output vertex
+    /// maps back to its position in `pts`.
+    fn begin(&mut self, pts: &[[f32; 3]], lens: &[usize]) {
         self.new_mesh();
         self.r.reset(&[]);
         // A polygon that broke must not leave the flag set: every traversal
         // checks it, and the contour below would be built wrong.
         self.broken.set(false);
-        // Building the contour takes a bounded number of steps.
+        // Building the contours takes a bounded number of steps.
         self.fuel.set(u64::MAX);
-        let mut e = NIL;
-        let mut n: u64 = 0;
-        for (i, c) in pts.enumerate() {
-            n += 1;
-            if e == NIL {
-                // A self-loop: one vertex, one edge.
-                e = self.mesh_make_edge();
-                self.mesh_splice(e, e ^ 1);
-            } else {
-                // A new vertex and edge right after e around the face.
-                self.mesh_split_edge(e);
-                e = self.lnext(e);
+        let mut i = 0usize;
+        for &len in lens {
+            let mut e = NIL;
+            for &c in &pts[i..i + len] {
+                if e == NIL {
+                    // A self-loop: one vertex, one edge.
+                    e = self.mesh_make_edge();
+                    self.mesh_splice(e, e ^ 1);
+                } else {
+                    // A new vertex and edge right after e around the face.
+                    self.mesh_split_edge(e);
+                    e = self.lnext(e);
+                }
+                let o = self.org(e);
+                self.v[o].coords = c;
+                self.v[o].idx = i as i32;
+                // A CCW contour adds +1 to the winding of what it encloses.
+                self.e[e].winding = 1;
+                self.e[e ^ 1].winding = -1;
+                i += 1;
             }
-            let o = self.org(e);
-            self.v[o].coords = c;
-            self.v[o].idx = i as i32;
-            // A CCW contour adds +1 to the winding of what it encloses.
-            self.e[e].winding = 1;
-            self.e[e ^ 1].winding = -1;
         }
+        let n = i as u64;
         self.fuel.set(1_000_000 + 1000 * n * n);
     }
 

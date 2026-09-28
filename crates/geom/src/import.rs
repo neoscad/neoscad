@@ -16,13 +16,10 @@ use std::path::Path;
 use eval::node::{Discretizer, Import};
 use io::Message;
 
-use manifold_rust::linalg::Vec2;
-use manifold_rust::polygon::triangulate_idx;
-use manifold_rust::types::PolyVert;
-
 use crate::color::Scheme;
+use crate::libtess2::Tessellator;
 use crate::polygon2d::Polygon2d;
-use crate::polyset::{PolySet, newell};
+use crate::polyset::PolySet;
 use crate::{Geometry, RenderOptions, clipper, fragments};
 
 /// A node's `$fn`/`$fa`/`$fs` as the readers ask for them.
@@ -237,11 +234,25 @@ pub(crate) fn import(
 /// front colour when their halffacet is marked and its back colour when
 /// not, which is what the nightly's OFF export of an imported `.nef3`
 /// carries.
+///
+/// Facets go through libtess2 as upstream's
+/// `GeometryUtils::tessellatePolygonWithHoles` hands them over: the
+/// cycles as contours, odd winding, no normal (upstream distrusts the Nef
+/// plane, `cgalutils.cc:379`), and the vertices in `float`, which the
+/// reader already rounded them to. Another triangulator would fill the
+/// same region with other diagonals, and the exported triangles would
+/// differ from OpenSCAD's.
 fn nef3_polyset(f: io::nef3::Faces, scheme: &Scheme, msgs: &mut Vec<Message>) -> PolySet {
+    // Exact: the reader stores `float` values widened to `f64`.
+    let verts32: Vec<[f32; 3]> = f.vertices.iter().map(|v| v.map(|c| c as f32)).collect();
+    let mut tess = Tessellator::new();
+    let mut tris = Vec::new();
     let mut faces: Vec<Vec<u32>> = Vec::new();
     let mut color_indices = Vec::new();
     for facet in &f.facets {
-        for t in tessellate_with_holes(&f.vertices, &facet.cycles) {
+        tris.clear();
+        tess.tessellate_polygon_with_holes(&verts32, &facet.cycles, &mut tris);
+        for t in &tris {
             faces.push(t.to_vec());
             color_indices.push(if facet.mark { 0 } else { 1 });
         }
@@ -263,100 +274,6 @@ fn nef3_polyset(f: io::nef3::Faces, scheme: &Scheme, msgs: &mut Vec<Message>) ->
         convex: None,
         triangular: true,
     }
-}
-
-/// `GeometryUtils::tessellatePolygonWithHoles` without a normal: clean the
-/// cycles as OpenSCAD does (repeated indices, "null ears" such as 23 24 23,
-/// and non-finite vertices go; nothing comes out when the first cycle has
-/// fewer than three vertices left, and holes that collapse are dropped),
-/// pass a lone triangle through, and triangulate the rest. OpenSCAD hands
-/// the cycles to libtess2 with the odd winding rule; this projects them
-/// onto the plane of their summed Newell normal and ear-clips them with
-/// Manifold's triangulator, which fills the same region (a hole winds
-/// opposite to its outline in a Nef facet) but may pick other diagonals.
-/// Triangles keep the cycles' orientation.
-fn tessellate_with_holes(verts: &[[f64; 3]], cycles: &[Vec<u32>]) -> Vec<[u32; 3]> {
-    let mut clean: Vec<Vec<u32>> = cycles.to_vec();
-    for face in &mut clean {
-        let mut i = 0usize;
-        while face.len() >= 3 && i < face.len() {
-            let n = face.len();
-            if face[i] == face[(i + 1) % n] {
-                face.remove(i);
-            } else if face[(i + n - 1) % n] == face[(i + 1) % n] {
-                if i == 0 {
-                    face.drain(0..2);
-                    // The C++ decrements an unsigned 0 here, which ends its
-                    // loop: the rest of this cycle is left as it is.
-                    break;
-                }
-                face.drain(i - 1..i + 1);
-                i -= 1;
-            } else if verts[face[i] as usize].iter().any(|c| !c.is_finite()) {
-                face.remove(i);
-            } else {
-                i += 1;
-            }
-        }
-    }
-    if clean.first().is_none_or(|c| c.len() < 3) {
-        return Vec::new();
-    }
-    let first = clean.remove(0);
-    clean.retain(|c| c.len() >= 3);
-    clean.insert(0, first);
-    if clean.len() == 1 && clean[0].len() == 3 {
-        return vec![[clean[0][0], clean[0][1], clean[0][2]]];
-    }
-    let mut n = [0.0; 3];
-    for c in &clean {
-        let pts: Vec<[f64; 3]> = c.iter().map(|&i| verts[i as usize]).collect();
-        let m = newell(&pts);
-        for k in 0..3 {
-            n[k] += m[k];
-        }
-    }
-    // Drop the axis the face is most perpendicular to, flipping one kept
-    // axis when the normal points down it so outlines stay
-    // counter-clockwise, as `PolySet::tessellate` projects.
-    let axis = (0..3)
-        .max_by(|&a, &b| n[a].abs().total_cmp(&n[b].abs()))
-        .unwrap_or(2);
-    let (u, v) = match axis {
-        0 => (1, 2),
-        1 => (2, 0),
-        _ => (0, 1),
-    };
-    let flip = n[axis] < 0.0;
-    let flat: Vec<u32> = clean.iter().flatten().copied().collect();
-    let mut k = 0;
-    let polys: Vec<Vec<PolyVert>> = clean
-        .iter()
-        .map(|c| {
-            c.iter()
-                .map(|&i| {
-                    let p = verts[i as usize];
-                    let x = if flip { -p[u] } else { p[u] };
-                    k += 1;
-                    PolyVert {
-                        pos: Vec2::new(x, p[v]),
-                        idx: k - 1,
-                    }
-                })
-                .collect()
-        })
-        .collect();
-    let tris: Vec<[u32; 3]> = triangulate_idx(&polys, -1.0, true)
-        .iter()
-        .map(|t| [t.x, t.y, t.z].map(|j| flat[j as usize]))
-        .collect();
-    if tris.is_empty() {
-        // No area (every point collinear): fan the outline so its
-        // neighbours still find its edges.
-        let c = &clean[0];
-        return (1..c.len() - 1).map(|j| [c[0], c[j], c[j + 1]]).collect();
-    }
-    tris
 }
 
 /// `SurfaceNode::createGeometry`.

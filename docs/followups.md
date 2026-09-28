@@ -373,9 +373,12 @@ lead them, come roughly in order of user impact.
 - OBJ: `f 1  2 3` (two separators in a row) crashes OpenSCAD with an
   uncaught `bad_lexical_cast`; the empty word is skipped here. (5c)
 - `.nef3` import (`io::nef3`) meshes the file as the Manifold backend
-  does, without CGAL. Facets with holes are ear-clipped by Manifold's
-  triangulator rather than libtess2, so diagonals can differ (vertex
-  sets, counts, volume and bounds match the nightly). Not done: CGAL's
+  does, without CGAL. Facets, holed or not, go through the libtess2 port
+  as upstream's `tessellatePolygonWithHoles` takes them; OFF exports of
+  nine fixtures (holes, cavities, rotated text, a 27 MB sphere) match
+  the nightly byte for byte. A failed read names CGAL's header as
+  `CGAL/Nef_3/SNC_io_parser.h`, not the build machine's absolute path
+  the nightly prints. Not done: CGAL's
   consistency checks beyond index ranges (a file whose pointers are
   wrong but in range imports as whatever its facet cycles say; OpenSCAD
   may crash or hang on it), and shalfloop facet cycles, which have no

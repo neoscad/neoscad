@@ -325,3 +325,58 @@ fn a_broken_polygon_does_not_affect_the_next() {
         assert_eq!(out, want);
     }
 }
+
+/// Holes: a contour inside the outline and winding against it (as a Nef
+/// facet's holes do) is cut out, holes that clean down to fewer than
+/// three points are dropped, and an outline that does leaves nothing, as
+/// in `tessellatePolygonWithHoles`. With every hole gone the outline
+/// comes out as a lone face would. (A hole winding with the outline is
+/// cut out by libtess2 too, but upstream's repair then flips the
+/// triangles along it and refills the hole from its edges; that is kept.)
+#[test]
+fn holes_are_cut_and_collapsed_ones_dropped() {
+    let verts: [[f32; 3]; 8] = [
+        [0.0, 0.0, 0.0],
+        [4.0, 0.0, 0.0],
+        [4.0, 4.0, 0.0],
+        [0.0, 4.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 3.0, 0.0],
+        [3.0, 3.0, 0.0],
+        [3.0, 1.0, 0.0],
+    ];
+    let area = |tris: &[[u32; 3]]| -> f32 {
+        tris.iter()
+            .map(|t| {
+                let [a, b, c] = t.map(|i| verts[i as usize]);
+                ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2.0
+            })
+            .sum()
+    };
+    let outline = vec![0, 1, 2, 3];
+    let mut out = Vec::new();
+    Tessellator::new().tessellate_polygon_with_holes(
+        &verts,
+        &[outline.clone(), vec![4, 5, 6, 7]],
+        &mut out,
+    );
+    assert_eq!(out.len(), 8, "{out:?}");
+    assert_eq!(area(&out), 12.0);
+    let mut lone = Vec::new();
+    Tessellator::new().tessellate_polygon(&verts, &outline, &mut lone);
+    out.clear();
+    // A hole of one repeated point cleans away.
+    Tessellator::new().tessellate_polygon_with_holes(
+        &verts,
+        &[outline.clone(), vec![4, 4, 4]],
+        &mut out,
+    );
+    assert_eq!(out, lone);
+    out.clear();
+    Tessellator::new().tessellate_polygon_with_holes(
+        &verts,
+        &[vec![0, 1, 0], vec![4, 5, 6, 7]],
+        &mut out,
+    );
+    assert!(out.is_empty(), "{out:?}");
+}
