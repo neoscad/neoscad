@@ -13,6 +13,8 @@ barb_len = 25;
 channel = 8;
 rings = false;
 hand = 1;
+skirt = "none";
+skirt_dz = 0;
 $fn = 64;
 
 function prof(s) = let(f = s / pitch - floor(s / pitch))
@@ -35,12 +37,28 @@ module thread() {
     polyhedron(pts, concat(side, bottom, top));
 }
 
+root_r = major / 2 - depth;
+hex_r = af / 2 / cos(30);
+skirt_z = thread_len + skirt_dz;
+flange_z = skirt == "none" ? thread_len : skirt_z + hex_r - root_r;
+
+module skirt() {
+    if (skirt == "cone")
+        translate([0, 0, skirt_z]) cylinder(r1 = root_r, r2 = hex_r, h = flange_z - skirt_z + 0.01);
+    else if (skirt == "hull")
+        hull() {
+            translate([0, 0, skirt_z]) cylinder(r = root_r, h = 0.01);
+            translate([0, 0, flange_z]) cylinder(r = hex_r, h = 0.01, $fn = 6);
+        }
+}
+
 difference() {
     union() {
         thread();
-        translate([0, 0, thread_len - 0.01]) cylinder(d = af / cos(30), h = flange + 0.02, $fn = 6);
+        skirt();
+        translate([0, 0, flange_z - 0.01]) cylinder(d = af / cos(30), h = flange + 0.02, $fn = 6);
         for (k = [0:2])
-            translate([0, 0, thread_len + flange + k * barb_len / 3 - 0.01])
+            translate([0, 0, flange_z + flange + k * barb_len / 3 - 0.01])
                 cylinder(d1 = 14, d2 = 12, h = barb_len / 3 + 0.01);
     }
     translate([0, 0, -1]) cylinder(d = channel, h = 100);

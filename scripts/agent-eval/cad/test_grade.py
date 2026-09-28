@@ -134,6 +134,27 @@ class Synthetic(unittest.TestCase):
         self.assertEqual(t["nonmanifold_edges"], 1)
         self.assertFalse(t["clean"])
 
+    def test_collapsed_sliver_is_not_a_component(self):
+        # A sliver 3e-9 wide in the exporter's doubles (as where a
+        # Clipper-snapped 13.200000002980232 meets a cube face at 13.2)
+        # welds to a zero-area face through float32. It is degenerate, but
+        # not a second body.
+        tris = voxels([(0, 0, 0)])
+        a, b = tris[0][0], tris[0][1]
+        tris.append((a, b, (b[0], b[1] + 3e-9, b[2])))
+        p = TMP / "sliver.stl"
+        with open(p, "w") as f:
+            f.write("solid t\n")
+            for tri in tris:
+                f.write(" facet normal 0 0 0\n  outer loop\n")
+                for v in tri:
+                    f.write(f"   vertex {v[0]!r} {v[1]!r} {v[2]!r}\n")
+                f.write("  endloop\n endfacet\n")
+            f.write("endsolid t\n")
+        t = sm.topology(*sm.load_stl(p))
+        self.assertEqual((t["degenerate_faces"], t["components"], t["genus"]), (1, 1, 0))
+        self.assertTrue(t["clean"], t["reasons"])
+
     def test_off_bed(self):
         t = topo(voxels([(0, 0, 0)], offset=(0, 0, 0.5)))
         self.assertFalse(t["on_bed"])
@@ -215,6 +236,20 @@ class References(unittest.TestCase):
         self.assertFails(self.ref("T3", ["hand=-1"], "t3-lh"), "right-hand")
         self.assertFails(self.ref("T3", ["pitch=1.5"], "t3-pitch"), "pitch")
         self.assertFails(self.ref("T3", ["af=32"], "t3-af"), "across flats")
+        # A 45-degree skirt under the flange is the thread's neighbour, not
+        # thread: its first mm are narrower than the flange test's radius,
+        # and counting them failed length, major and pitch on all three
+        # correct threads of pilot cad-20260928T202850Z. These are those
+        # pilot meshes' shapes: a cone from the root (NeoSCAD's agent), a
+        # hull of root circle and hexagon (OpenSCAD's), and a cone starting
+        # 1 mm inside the thread (CadQuery's).
+        for defs, tag in ((['skirt="cone"'], "t3-cone"), (['skirt="hull"'], "t3-hull"),
+                          (['skirt="cone"', "skirt_dz=-1"], "t3-overlap")):
+            g = self.ref("T3", defs, tag)
+            self.assertTrue(g["pass"], (tag, g["failed_gates"]))
+            length = next(c for c in g["checks"] if c["name"].startswith("thread 12 long"))["value"]
+            self.assertGreater(length["free_end_to_flange"], 13, tag)
+        self.assertFails(self.ref("T3", ['skirt="cone"', "thread_len=10"], "t3-short"), "12 long")
 
 
 T0_SCAD = "difference() { cube([20, 10, 4]); translate([10, 5, -1]) cylinder(d = 3, h = 6, $fn = 64); }\n"

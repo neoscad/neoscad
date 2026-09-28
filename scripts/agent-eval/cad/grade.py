@@ -571,14 +571,56 @@ def grade_t3(parts):
     thread_side = min(sides, key=lambda s: abs(rmax(sides[s]) - 12))
     barb_side = "high" if thread_side == "low" else "low"
 
+    # Where the thread ends. The flange test above (mean radius >= 13.5)
+    # does not find the flange's underside: the 45-degree overhang rule
+    # makes a printable design put a cone, or a hull from the thread root
+    # to the hexagon, under the flange, and its first 2-3 mm are narrower
+    # than 13.5. Counting that cone as thread added its height to the
+    # length, its radius to the major diameter and its steady rise to the
+    # pitch autocorrelation, so correct 12 mm threads failed all three (all
+    # three conditions of pilot cad-20260928T202850Z). The spec asks for a
+    # thread 12 long, so measure the thread itself: walking from the free
+    # end toward the flange, a level is threaded while its groove is open,
+    # i.e. one of the four directions still reaches within 30% of the depth
+    # of the root radius. A cone springing from the root closes it within
+    # 0.3 of the depth above the thread's end, so a shallow cone reads up
+    # to about 0.6 mm long (the pilot's hull skirt: 12.57 for a 12.0
+    # thread). Four directions a quarter pitch apart always see an open
+    # groove on an ISO-like profile: the part of it within 30% of the
+    # depth of the root is over a third of a pitch wide.
+    side = sides[thread_side]
+    rmin4 = {i: min(R[d][i] for d in R) for i in side}
+    walk = side if thread_side == "low" else side[::-1]
+    run = []
+    if side:
+        root = sorted(rmin4.values())[int(0.02 * (len(side) - 1))]
+        # The half nearest the free end is thread (a cone under the flange
+        # is a few mm; the thread is 12), so it gives the crest radius.
+        near = sorted(R[d][i] for i in walk[: max(1, len(walk) // 2)] for d in R)
+        depth = near[int(0.98 * (len(near) - 1))] - root
+        # Stacked rings have no direction in the groove at a ring's crest,
+        # so a closed level only ends the thread once the groove has stayed
+        # closed for more than 1.6 mm (0.8 of the 2 mm pitch; a ring's
+        # crest closes it for up to two thirds of a pitch, by the width
+        # argument above), and the thread then ends at the last open level.
+        last = None
+        for k, i in enumerate(walk):
+            if rmin4[i] <= root + 0.3 * depth:
+                last = k
+            elif last is not None and abs(zs[i] - zs[walk[last]]) > 1.6:
+                break
+        run = walk[: last + 1] if last is not None else []
+    free_end = p.bmin[2] if thread_side == "low" else p.bmax[2]
+    thread_len = abs(zs[run[-1]] - free_end) if run else 0.0
+
     # Thread: radius along four fixed directions as a function of z. A
     # helix shifts the profile by P/4 per quarter turn (right-hand: the
     # +90 degree direction lags by +P/4); stacked rings do not shift it.
-    ti = sides[thread_side]
+    ti = sorted(run)
     margin = int(0.5 / step)
     ti = ti[margin:-margin] if len(ti) > 2 * margin + 10 else ti
-    out.append(check("thread 12 long (+-1, flange face to end)", within(spans[thread_side], 11, 13),
-                     r3(spans[thread_side]), 12))
+    out.append(check("thread 12 long (+-1, free end to where the groove closes)", within(thread_len, 11, 13),
+                     {"thread": r3(thread_len), "free_end_to_flange": r3(spans[thread_side])}, 12))
     if len(ti) < int(4 / step):
         out.append(check("M24x2 helical thread", False, None, None, note="thread side too short to sample"))
     else:

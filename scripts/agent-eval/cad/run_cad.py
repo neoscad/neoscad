@@ -542,8 +542,8 @@ def run_one(task, cond, rep, args, rundir):
         "guard": {"peak_mb": g.peak_mb, "killed": g.killed},
         "lines_of_code": loc["lines"], "sources": loc["files"],
         "stray_stls": sorted({e["path"] for e in w.events if not e["path"].startswith("out/")}),
-        "version_detail": [{k: v[k] for k in ("n", "t", "changed", "tool_error", "clean", "pass", "wrong",
-                                                "failed_gates")} for v in vers],
+        "version_detail": [{k: v[k] for k in ("n", "t", "changed", "state", "tool_error", "clean", "pass",
+                                                "wrong", "failed_gates")} for v in vers],
         **{k: s[k] for k in ("tool_calls", "tools", "cad_tool_calls", "all_error_results", "turns", "tokens",
                              "tokens_total", "tokens_excl_cache_reads", "cost_usd", "api_ms", "stop", "is_error")},
         "final_message": s["final_message"][:4000],
@@ -557,22 +557,81 @@ def run_one(task, cond, rep, args, rundir):
     return run
 
 
+def history_states(keep, detail, parts):
+    """Each version's {part: history copy}, rebuilt for a record written
+    before version_detail kept `state`: the copies of out/<part>.stl in
+    arrival order, repeats of the same bytes dropped (as versions_from
+    does), are handed to the versions in order, one per part each version
+    changed. None when the counts disagree."""
+    wanted = {f"out__{p}.stl": p for p in parts}
+    arrivals, last = [], {}
+    for f in sorted((keep / "history").iterdir()):
+        part = wanted.get(f.name.split("-", 1)[-1])
+        if part is None:
+            continue
+        h = hashlib.sha1(f.read_bytes()).hexdigest()
+        if last.get(part) != h:
+            last[part] = h
+            arrivals.append((part, f.name))
+    if len(arrivals) != sum(len(v["changed"]) for v in detail):
+        return None
+    states, state, it = [], {}, iter(arrivals)
+    for v in detail:
+        for want in v["changed"]:
+            part, copy = next(it)
+            if part != want:
+                return None
+            state[part] = copy
+        states.append(dict(state))
+    return states
+
+
 def regrade(name, args):
+    """Grades a record's saved STLs again (every version and the final
+    parts) with the current grader. The original record and its grade
+    files are left as they were: the new record goes alongside as
+    <name>-regrade-<ts>.json, with each run's grades in
+    <name>/<run>/regrade-<ts>/, so a grader fix can be checked against
+    what was published."""
     path = args.out / f"{name}.json"
     record = json.loads(path.read_text())
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for r in record["runs"]:
         keep = args.out / name / f"{r['task']}-{r['condition']}-{r['rep']}"
+        out = keep / f"regrade-{ts}"
+        out.mkdir()
         parts = SPEC["tasks"][r["task"]]["parts"]
+        detail = r.get("version_detail", [])
+        states = ([v["state"] for v in detail] if all("state" in v for v in detail)
+                  else history_states(keep, detail, parts))
+        r["grade_at_run"] = {k: r.get(k) for k in ("pass", "clean", "failed_gates", "gates",
+                                                    "silent_wrong_versions")}
+        r["grade_at_run"]["version_detail"] = [dict(v) for v in detail]
+        if states is None:
+            log(f"{r['task']} {r['condition']} #{r['rep']}: history does not match the versions; "
+                "version grades kept as recorded")
+            r["versions_regraded"] = False
+        else:
+            for i, (v, st) in enumerate(zip(detail, states), 1):
+                gr = grade_files(r["task"], {p: str(keep / "history" / c) for p, c in st.items()}, keep)
+                present_ok = all(gr.get("parts", {}).get(p, {}).get("clean") for p in st)
+                v.update(state=st, clean=gr.get("clean"), failed_gates=gr.get("failed_gates"),
+                         wrong=(not present_ok) or (len(st) == len(parts) and not gr.get("pass")))
+                v["pass"] = gr.get("pass")
+                (out / f"grade-v{i:02d}.json").write_text(json.dumps(gr, indent=1))
+            r["silent_wrong_versions"] = sum(1 for v in detail if v["wrong"] and not v["tool_error"])
+            r["versions_regraded"] = True
         g = grade_files(r["task"], {p: str(keep / "work" / "out" / f"{p}.stl") for p in parts}, keep)
-        r.setdefault("grade_at_run", {"pass": r["pass"], "clean": r["clean"], "failed_gates": r["failed_gates"]})
         if g.get("pass") != r["pass"]:
             log(f"{r['task']} {r['condition']} #{r['rep']}: {r['pass']} -> {g.get('pass')}")
         r["pass"], r["clean"], r["failed_gates"] = g.get("pass"), g.get("clean"), g.get("failed_gates")
         r["gates"] = f"{g.get('gates_passed')}/{g.get('gates_total')}"
-        (keep / "grade-final.json").write_text(json.dumps(g, indent=1))
-    record["regraded"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path.write_text(json.dumps(record, indent=1))
-    log(f"regraded {path}")
+        (out / "grade-final.json").write_text(json.dumps(g, indent=1))
+    record["regraded"] = ts
+    record["regraded_from"] = path.name
+    new = args.out / f"{name}-regrade-{ts}.json"
+    new.write_text(json.dumps(record, indent=1))
+    log(f"regraded {path} -> {new}")
 
 
 def main():

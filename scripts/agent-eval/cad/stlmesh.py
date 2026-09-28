@@ -137,9 +137,20 @@ def topology(verts, tris, bed_tol=0.01):
         return {"triangles": 0, "clean": False, "reasons": ["empty mesh"]}
     edges = {}
     degenerate = 0
+    # Faces whose corners weld to two points or one. STL stores float32
+    # corners, so a sliver a few nanometres wide in the exporter's doubles
+    # collapses on reading (OpenSCAD and NeoSCAD both write such slivers
+    # where a 2D shape's Clipper-snapped edge, on a 2^-26 grid, meets a 3D
+    # face at the unsnapped coordinate). A collapsed face has no area, no
+    # volume and, as it is skipped here, no edges: it is counted in
+    # `degenerate_faces` but is not a component, which it used to be (one
+    # "component" each: the 17 components of pilot
+    # cad-20260928T202850Z's T2 lid, a single watertight body).
+    collapsed = set()
     for fi, t in enumerate(tris):
         if t[0] == t[1] or t[1] == t[2] or t[0] == t[2]:
             degenerate += 1
+            collapsed.add(fi)
             continue
         nx, ny, nz = face_normal(verts, t)
         if nx * nx + ny * ny + nz * nz < 1e-24:
@@ -156,10 +167,10 @@ def topology(verts, tris, bed_tol=0.01):
     for e in edges.values():
         for f, _ in e[1:]:
             uf.union(e[0][0], f)
-    comp_of = [uf.find(i) for i in range(n)]
     comps = {}
-    for i, c in enumerate(comp_of):
-        comps.setdefault(c, []).append(i)
+    for i in range(n):
+        if i not in collapsed:
+            comps.setdefault(uf.find(i), []).append(i)
 
     # Orientation: propagate across manifold edges. Two faces sharing an
     # edge are consistent when they traverse it in opposite directions.
@@ -225,7 +236,7 @@ def topology(verts, tris, bed_tol=0.01):
         elif uz < -cos45 and min(verts[i][2] for i in t) > zmin + 0.1:
             overhang_area += a
     used = {i for t in tris for i in t}
-    V, E, F = len(used), len(edges), n
+    V, E, F = len(used), len(edges), n - len(collapsed)
     watertight = boundary == 0 and nonmanifold == 0
     genus = None
     if watertight and len(comps) == 1:
