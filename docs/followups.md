@@ -6,15 +6,6 @@ O4). Remove an entry when it is done. Sections, and the entries that
 lead them, come roughly in order of user impact.
 
 ## Serve and session
-- **Exponential-time walks over shared value trees: a time DoS for
-  serve, MCP and the app. Fix pending merge** (`dea59f6`, branch
-  `worktree-agent-a60c524a0f99f8c76`: linear, stoppable digests,
-  comparisons and `chr()`). Found while fixing the memory limit
-  (`b78a9b9`). `memo.rs` `var_digest`/`value_digest` hash a top-level
-  variable's shared tree with no time check: through MCP, `t = f([1],
-  26)` takes 3.4 s and depth 28 takes 13.4 s, and deeper trees run far
-  past the 60 s limit. `ops::equals`/`compare` walk shared trees the
-  same way.
 - Statement reuse across edits (O3, `crates/eval/src/memo.rs`) keys each
   top-level statement on the names it mentions, followed through
   top-level definitions by name alone. A local binder that shares a
@@ -859,14 +850,6 @@ lead them, come roughly in order of user impact.
   199 of 326 (`scripts/wasm-check.sh --depths --all-programs`, with and
   without `--frames=4000000000`). After O4, V8 overflows `function-lc`
   at 353 and `module-children` still at 214. (O4)
-- **Fix pending merge** (`dea59f6`, branch
-  `worktree-agent-a60c524a0f99f8c76`, makes the comparisons iterative).
-  Operations over a whole value other than printing and freeing it
-  (comparing with `==` or `<`, `ops::equals` and the ordering) recurse
-  once per level of vector nesting. Nesting deeper than the budget can only be built by tail
-  recursion (`f(n, acc) = ... f(n - 1, [acc])`), and comparing such a
-  value can overflow a WASM engine's stack; natively it needs a far deeper
-  value, and the nightly crashes even on `len()` of one. (H2)
 - A wasm32 build must be linked with `-C link-arg=-zstack-size=8388608`
   (`eval::recursion::WASM_STACK_SIZE`; `crates/wasm-check/build.rs` does
   this). With rustc's default 1 MiB, recursion stops earlier, still
