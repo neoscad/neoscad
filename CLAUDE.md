@@ -1,7 +1,8 @@
 # NeoSCAD
 
 A ground-up reimplementation of OpenSCAD (language, features, test suite)
-on a modern stack. macOS client first, WebAssembly web build close behind.
+on a modern stack. macOS client first. The web app is deferred (phase 9), but
+the library crates stay WASM-clean.
 Humans and AI coding agents are both first-class users. See
 `docs/architecture.md` for the stack, validation and build order.
 
@@ -39,6 +40,8 @@ nightly with `--backend=cgal` and `--backend=manifold`.
     scripts/apple/build-editor.sh                  # CodeMirror bundle -> apple/Editor/web/dist (needs node 18+)
     (cd apple/Editor/web && npm test && npm run corpus)  # grammar tests; corpus = 0 error nodes
     ./target/release/neoscad lsp --stdio            # language server (crates/lsp), for any LSP editor
+    ./target/release/conformance video               # progress video from progress/
+    scripts/apple/release.sh [--no-smoke]            # DMG + CLI tarball in dist/ (docs/release.md)
     scripts/agent-eval/run.py --help                  # agent-loop eval (uses claude -p; costs credits)
     ./target/release/conformance manifest [--check]  # after updating .reference
     ./target/release/conformance diff --format ast|echo|csg [PATHS]  # vs the nightly
@@ -52,8 +55,9 @@ against the nightly, which is how the harness itself is checked.
 
 - Library crates never touch `std::fs`, `std::env` or the clock. Files go
   through `lang`'s `FileSystem`; seeds, paths and limits come in through
-  `Options`. Only the host crates (`crates/cli`, `crates/ffi`,
-  `crates/conformance`) and test code may use them directly. This is what keeps the WASM build honest.
+  `Options`. Only non-library crates (`cli`, `ffi`, `conformance`, `wasm-check`,
+  `uniffi-bindgen`) and test code may use them directly.
+  `docs/architecture.md` has the limits, panics and determinism policies. This is what keeps the WASM build honest.
 - Output must be byte-identical at any thread count; add a determinism test
   for anything parallel.
 - `assets/` is vendored upstream content (Liberation fonts, MCAD); see
