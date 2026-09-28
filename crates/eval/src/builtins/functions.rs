@@ -9,6 +9,7 @@ use lang::diag::DiagCode;
 use crate::call::ArgVal;
 use crate::context::Ctx;
 use crate::eval::Evaluator;
+use crate::features::{Feature, Features};
 use crate::fma::{mul_add, mul_sub_mul};
 use crate::message::{Loc, R, UnwindKind};
 use crate::print::Exhausted;
@@ -16,7 +17,7 @@ use crate::rng::hash_float;
 use crate::sym::{FxBuild, Sym, Syms};
 use crate::trig;
 use crate::utf8;
-use crate::value::{Growable, MAX_RANGE_STEPS, Type, Value};
+use crate::value::{FunctionValue, Growable, MAX_RANGE_STEPS, ObjectBuilder, Str, Type, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Builtin {
@@ -60,7 +61,8 @@ pub(crate) enum Builtin {
     IsFunction,
     DxfDim,
     DxfCross,
-    // Experimental: registered so a call says it is not enabled.
+    // Experimental: a call warns that it is not enabled unless its
+    // feature is on (see `enabled`).
     TextMetrics,
     FontMetrics,
     IsObject,
@@ -70,17 +72,31 @@ pub(crate) enum Builtin {
 }
 
 impl Builtin {
-    /// Experimental functions are known but disabled (no `--enable`).
-    pub fn enabled(self) -> bool {
-        !matches!(
-            self,
-            Builtin::TextMetrics
-                | Builtin::FontMetrics
-                | Builtin::IsObject
-                | Builtin::Object
-                | Builtin::HasKey
-                | Builtin::Import
-        )
+    /// Experimental functions are known but disabled unless their feature
+    /// is on (`--enable`), as in OpenSCAD: `is_object` goes with
+    /// `textmetrics` there, not with `object`.
+    #[inline]
+    pub fn enabled(self, f: Features) -> bool {
+        match self {
+            Builtin::TextMetrics | Builtin::FontMetrics | Builtin::IsObject => {
+                f.has(Feature::TextMetrics)
+            }
+            Builtin::Object | Builtin::HasKey => f.has(Feature::ObjectFunction),
+            Builtin::Import => f.has(Feature::ImportFunction),
+            _ => true,
+        }
+    }
+
+    /// The feature that enables it, for an experimental function.
+    pub fn feature(self) -> Option<Feature> {
+        match self {
+            Builtin::TextMetrics | Builtin::FontMetrics | Builtin::IsObject => {
+                Some(Feature::TextMetrics)
+            }
+            Builtin::Object | Builtin::HasKey => Some(Feature::ObjectFunction),
+            Builtin::Import => Some(Feature::ImportFunction),
+            _ => None,
+        }
     }
 }
 
@@ -209,6 +225,9 @@ impl<'a> Evaluator<'a> {
         ctx: &Rc<Ctx>,
     ) -> R<Value> {
         let loc = self.expr_loc(u, call);
+        if b == Builtin::Object {
+            return self.object_function(u, args, ctx, loc);
+        }
         if b == Builtin::IsUndef {
             if args.len() != 1 {
                 self.arg_count_warning("is_undef", args.len(), "1", loc);
@@ -305,6 +324,7 @@ impl<'a> Evaluator<'a> {
             }
             Len => match (a.len(), a.first().map(|x| &x.value)) {
                 (1, Some(Value::Vector(v))) => Value::Number(v.len() as f64),
+                (1, Some(Value::Object(o))) => Value::Number(o.len() as f64),
                 _ => {
                     if self.check("len", a, loc, &[Type::Str]) {
                         let s = a[0].value.as_str().map_or(0, |s| s.char_count());
@@ -504,9 +524,22 @@ impl<'a> Evaluator<'a> {
             IsString => self.is_type(a, loc, "is_string", |v| matches!(v, Value::Str(_))),
             IsFunction => self.is_type(a, loc, "is_function", |v| matches!(v, Value::Function(_))),
             DxfDim | DxfCross => self.dxf(b == DxfDim, std::mem::take(a), loc),
-            IsUndef | TextMetrics | FontMetrics | IsObject | Object | HasKey | Import => {
-                Value::Undef
+            IsObject => self.is_type(a, loc, "is_object", |v| matches!(v, Value::Object(_))),
+            HasKey => {
+                if self.check("has_key", a, loc, &[Type::Object, Type::Str]) {
+                    match (&a[0].value, &a[1].value) {
+                        (Value::Object(o), Value::Str(k)) => Value::Bool(o.contains(k.as_bytes())),
+                        _ => Value::Undef,
+                    }
+                } else {
+                    Value::Undef
+                }
             }
+            TextMetrics => self.metrics(std::mem::take(a), loc, false),
+            FontMetrics => self.metrics(std::mem::take(a), loc, true),
+            Import => self.import_function(std::mem::take(a), loc),
+            // Evaluated from their unevaluated arguments in `call_builtin`.
+            IsUndef | Object => Value::Undef,
         })
     }
 
@@ -649,6 +682,203 @@ impl<'a> Evaluator<'a> {
         let t = format!("Can't find cross in '{raw_s}', layer '{layer}'!");
         self.warn(loc, DiagCode::InvalidArgument, t);
         Value::Undef
+    }
+
+    /// `builtin_object`: named arguments set their key; an unnamed one
+    /// copies an object's entries, or applies a list of `[key, value]`
+    /// (set) and `[key]` (delete) entries. Arguments are evaluated one at
+    /// a time and the first bad one ends the call, with the rest never
+    /// evaluated, as in OpenSCAD.
+    #[inline(never)]
+    fn object_function(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>, loc: Loc) -> R<Value> {
+        let ast = self.units[u as usize].ast;
+        let mut b = ObjectBuilder::new();
+        for (n, a) in args.iter().enumerate() {
+            let v = self.eval(u, a.expr, ctx)?;
+            match a.name {
+                Some(name) => b.set(Str::new(ast.name(name).as_bytes()), v),
+                None => {
+                    if let Err(e) = object_unnamed(&mut b, &v, n) {
+                        self.warn(loc, DiagCode::InvalidArgument, e);
+                        return Ok(Value::Undef);
+                    }
+                }
+            }
+        }
+        Ok(Value::Object(b.finish(|f| self.is_method_literal(f))))
+    }
+
+    /// Whether a function literal has a parameter named `this`, which
+    /// makes it a method when stored in an object (see `value::Object`).
+    fn is_method_literal(&self, f: &FunctionValue) -> bool {
+        let ast = self.units[f.unit as usize].ast;
+        match &ast.expr(f.expr).kind {
+            ExprKind::Function(params, _) => params.iter().any(|p| ast.name(p.name) == "this"),
+            _ => false,
+        }
+    }
+
+    /// `textmetrics()` and `fontmetrics()` (`builtin_textmetrics`,
+    /// `builtin_fontmetrics`): `text()`'s parameter handling, then the
+    /// measurements `text()` would draw with, as an object.
+    fn metrics(&mut self, a: Vec<ArgVal>, loc: Loc, font_only: bool) -> Value {
+        // The result depends on font files, which no fingerprint covers.
+        self.untracked();
+        let t = self.text_params(a, loc, font_only);
+        let db =
+            self.opts.fonts.clone().unwrap_or_else(|| {
+                std::sync::Arc::new(text::FontDb::with_fs(self.opts.fs.clone()))
+            });
+        let num = Value::Number;
+        let pair = |x: [f64; 2]| Value::vector(vec![Value::Number(x[0]), Value::Number(x[1])]);
+        let object = |entries: Vec<(&str, Value)>| {
+            let mut b = ObjectBuilder::new();
+            for (k, v) in entries {
+                b.set(Str::new(k.as_bytes()), v);
+            }
+            Value::Object(b.finish(|_| false))
+        };
+        if font_only {
+            let (m, msgs) = text::font_metrics(&db, &t.font, t.size);
+            self.text_messages(msgs, loc);
+            let Some(m) = m else {
+                return Value::Undef;
+            };
+            return object(vec![
+                (
+                    "nominal",
+                    object(vec![
+                        ("ascent", num(m.nominal_ascent)),
+                        ("descent", num(m.nominal_descent)),
+                    ]),
+                ),
+                (
+                    "max",
+                    object(vec![
+                        ("ascent", num(m.max_ascent)),
+                        ("descent", num(m.max_descent)),
+                    ]),
+                ),
+                ("interline", num(m.interline)),
+                (
+                    "font",
+                    object(vec![
+                        ("family", Value::str(m.family.as_bytes())),
+                        ("style", Value::str(m.style.as_bytes())),
+                    ]),
+                ),
+            ]);
+        }
+        let (script, direction) = crate::text_props::resolve(&t);
+        let p = text::Params {
+            text: &t.text,
+            size: t.size,
+            spacing: t.spacing,
+            font: &t.font,
+            direction,
+            language: &t.language,
+            script: &script,
+            halign: &t.halign,
+            valign: &t.valign,
+            segments: text::segments_for(None),
+        };
+        let (m, msgs) = text::text_metrics(&db, &p);
+        self.text_messages(msgs, loc);
+        let Some(m) = m else {
+            return Value::Undef;
+        };
+        object(vec![
+            ("position", pair(m.position)),
+            ("size", pair(m.size)),
+            ("ascent", num(m.ascent)),
+            ("descent", num(m.descent)),
+            ("offset", pair(m.offset)),
+            ("advance", pair(m.advance)),
+        ])
+    }
+
+    /// The font and shaping messages of a metrics call, at the call.
+    fn text_messages(&mut self, msgs: Vec<text::Message>, loc: Loc) {
+        for m in msgs {
+            match m.level {
+                text::Level::Warning => self.warn(loc, DiagCode::InvalidArgument, m.text),
+                // OpenSCAD prints `FONT-WARNING:` lines with no location,
+                // a message group the evaluator's output has no severity
+                // for; only an unparseable font name gives one, and its
+                // "Can't get font" warning follows it regardless.
+                text::Level::FontWarning => {}
+            }
+        }
+    }
+
+    /// `import()` as a function (`builtin_import`): a JSON file's values.
+    fn import_function(&mut self, a: Vec<ArgVal>, loc: Loc) -> Value {
+        // Reads a file, whose content no fingerprint covers.
+        self.untracked();
+        let file_sym = self.syms.intern("file");
+        let type_sym = self.syms.intern("type");
+        let frame = self.bind_builtin(a, loc, &[], &[file_sym, type_sym], true);
+        // `Parameters::get(name, "")`: a string, or empty.
+        let string = |s| match frame.get(s) {
+            Some(Value::Str(x)) => x.as_bytes().to_vec(),
+            _ => Vec::new(),
+        };
+        let raw = string(file_sym);
+        let mut ty = string(type_sym);
+        let file = self.lookup_file_bytes(&raw, loc);
+        let raw = String::from_utf8_lossy(&raw).into_owned();
+        if ty.is_empty() {
+            let ext = extension(&file).to_ascii_lowercase();
+            if ext == ".json" {
+                ty = b"json".to_vec();
+            } else if ext.is_empty() {
+                let t = format!("No file extension or type while trying to import '{raw}'");
+                self.warn(loc, DiagCode::InvalidArgument, t);
+                return Value::Undef;
+            } else {
+                let t =
+                    format!("Unsupported file extension '{ext}' while trying to import '{raw}'");
+                self.warn(loc, DiagCode::InvalidArgument, t);
+                return Value::Undef;
+            }
+        }
+        if ty != b"json" {
+            let t = format!(
+                "Unsupported file type '{}' while trying to import '{raw}'",
+                String::from_utf8_lossy(&ty)
+            );
+            self.warn(loc, DiagCode::InvalidArgument, t);
+            return Value::Undef;
+        }
+        // `std::ifstream` opens a directory and reads nothing from it.
+        let fs = self.opts.fs.clone();
+        let path = std::path::Path::new(&file);
+        let bytes = if file.is_empty() {
+            None
+        } else if fs.is_dir(path) {
+            Some(Vec::new())
+        } else {
+            fs.read(path).ok()
+        };
+        let Some(bytes) = bytes else {
+            self.warn(
+                loc,
+                DiagCode::InvalidArgument,
+                format!("Could not read file '{file}'"),
+            );
+            return Value::Undef;
+        };
+        match crate::json::parse(&bytes) {
+            Ok(v) => v,
+            Err(crate::json::Failed::Parse(e)) => {
+                let mut t = format!("Failed to parse file '{file}': ").into_bytes();
+                t.extend_from_slice(&e);
+                self.warn(loc, DiagCode::InvalidArgument, t);
+                Value::Undef
+            }
+            // The evaluator's next check reports the limit.
+            Err(crate::json::Failed::Memory) => Value::Undef,
+        }
     }
 
     /// `lookup_file`: a path relative to the calling file's directory.
@@ -1144,4 +1374,76 @@ struct ChrWalk {
     warnings: u32,
     /// Gave up: past a limit, or cancelled.
     stopped: bool,
+}
+
+/// `builtin_object_unnamed`: apply one unnamed argument of `object()`, or
+/// OpenSCAD's message for why it cannot be.
+fn object_unnamed(b: &mut ObjectBuilder, v: &Value, arg: usize) -> Result<(), String> {
+    const HELP: &str = "In an unnamed list, entries must be [key,value] to set or [key] to \
+                        delete. The key must be <string>.";
+    let prior_args = format!("Argument {arg} ");
+    match v {
+        Value::Object(o) => {
+            b.extend_from(o);
+            Ok(())
+        }
+        Value::Vector(items) => {
+            for (i, member) in items.iter().enumerate() {
+                let prior = format!("Element {i} ");
+                let Value::Vector(entry) = member else {
+                    let t = member.type_name();
+                    return Err(format!(
+                        "object( {prior_args}[{prior}<{t}>] ) Entry type is not a list, it is <{t}>. {HELP}"
+                    ));
+                };
+                match entry.len() {
+                    1 | 2 => {
+                        let Value::Str(key) = &entry[0] else {
+                            let t = entry[0].type_name();
+                            let es = if entry.len() == 1 { "" } else { ",value" };
+                            return Err(format!(
+                                "object({prior_args}[{prior}[<{t}>{es}]]) The key of the entry is not <string> but <{t}>. {HELP}"
+                            ));
+                        };
+                        if entry.len() == 1 {
+                            b.del(key.as_bytes());
+                        } else {
+                            b.set(key.clone(), entry[1].clone());
+                        }
+                    }
+                    0 => {
+                        return Err(format!(
+                            "object({prior_args}[{prior}[]]) Entry is empty. {HELP}"
+                        ));
+                    }
+                    n => {
+                        return Err(format!(
+                            "object({prior_args}[{prior}[...]]) Entry length is {n}, must be 1 [key] or 2 [key,value]. {HELP}"
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        other => {
+            let t = other.type_name();
+            Err(format!(
+                "object({prior_args}<{t}>) An unnamed argument must be either <object> or <list>, it is <{t}>. "
+            ))
+        }
+    }
+}
+
+/// `std::filesystem::path::extension`, with its dot: empty for a name
+/// without one, a name that is only a leading dot (`.bashrc`), `.` and
+/// `..`, and a path ending in a separator.
+fn extension(path: &str) -> &str {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if name == "." || name == ".." {
+        return "";
+    }
+    match name.rfind('.') {
+        Some(0) | None => "",
+        Some(i) => &name[i..],
+    }
 }

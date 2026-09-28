@@ -1536,6 +1536,12 @@ impl<'a> Evaluator<'a> {
                     (Value::Vector(_), "x") | (Value::Range(_), "begin") => 0.0,
                     (Value::Vector(_), "y") | (Value::Range(_), "step") => 1.0,
                     (Value::Vector(_), "z") | (Value::Range(_), "end") => 2.0,
+                    (Value::Object(o), _) => return Ok(o.get(name.as_bytes())),
+                    (Value::Vector(_), _)
+                        if self.opts.features.has(crate::Feature::VectorSwizzle) =>
+                    {
+                        return Ok(swizzle(&v, name));
+                    }
                     _ => return Ok(Value::Undef),
                 };
                 Ok(ops::index(&v, &Value::Number(i)))
@@ -2211,6 +2217,12 @@ impl<'a> Evaluator<'a> {
                     f(self, Value::str(c))?;
                 }
             }
+            // An object iterates over its keys.
+            Value::Object(o) => {
+                for k in o.keys() {
+                    f(self, Value::Str(k.clone()))?;
+                }
+            }
             Value::Undef => {}
             other => f(self, other.clone())?,
         }
@@ -2408,5 +2420,33 @@ impl<'a> Evaluator<'a> {
         }
         self.error(Some(loc), DiagCode::AssertionFailed, text);
         Err(self.unwind(UnwindKind::Assertion))
+    }
+}
+
+/// `MemberLookup` on a list with `vector-swizzle` on, for the names other
+/// than `x`, `y` and `z` (which work without it): two to four letters all
+/// from `xyzw` or all from `rgba` make a list of those elements (`undef`
+/// past the end), and `w`, `r`, `g`, `b` and `a` alone are elements 3, 0,
+/// 1, 2 and 3. Anything else, mixed sets included (`v.xr`), is `undef`
+/// (`Expression.cc`, `re_swizzle_validation`).
+fn swizzle(v: &Value, name: &str) -> Value {
+    let index = |c: u8| match c {
+        b'x' | b'r' => 0.0,
+        b'y' | b'g' => 1.0,
+        b'z' | b'b' => 2.0,
+        _ => 3.0,
+    };
+    let b = name.as_bytes();
+    let all_in = |set: &[u8]| b.iter().all(|c| set.contains(c));
+    if (2..=4).contains(&b.len()) && (all_in(b"xyzw") || all_in(b"rgba")) {
+        return Value::vector(
+            b.iter()
+                .map(|&c| ops::index(v, &Value::Number(index(c))))
+                .collect(),
+        );
+    }
+    match name {
+        "w" | "r" | "g" | "b" | "a" => ops::index(v, &Value::Number(index(b[0]))),
+        _ => Value::Undef,
     }
 }

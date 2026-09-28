@@ -153,8 +153,9 @@ struct Cli {
 
     /// `part` turns on neoscad's `part("name") { ... }` extension (named
     /// parts for `check` and `measure`). OpenSCAD's experimental features
-    /// are accepted for compatibility: neoscad implements none of them,
-    /// and says so for each one named.
+    /// `textmetrics`, `object-function`, `import-function` and
+    /// `vector-swizzle` work as in OpenSCAD; the others are accepted for
+    /// compatibility, with a warning for each one named.
     #[arg(long, value_name = "FEATURE", action = ArgAction::Append)]
     enable: Vec<String>,
 
@@ -375,22 +376,6 @@ pub fn rich_diagnostics() -> bool {
     }
 }
 
-/// OpenSCAD's experimental features (`Feature.cc`), in its order.
-const FEATURES: &[&str] = &[
-    "roof",
-    "input-driver-dbus",
-    "lazy-union",
-    "vertex-object-renderers-indexing",
-    "textmetrics",
-    "import-function",
-    "object-function",
-    "predictible-output",
-    "vector-swizzle",
-    "discretization-by-error",
-    "ai-features",
-    "unicode-identifiers",
-];
-
 /// neoscad's own `--enable` feature: the `part("name") { ... }` module
 /// (`eval::Options::parts`). Only this exact name turns it on; `--enable
 /// all` means OpenSCAD's experiments and leaves it off, so a program run
@@ -402,32 +387,47 @@ pub fn parts_enabled(names: &[String]) -> bool {
     names.iter().any(|n| n == PART_FEATURE)
 }
 
+/// OpenSCAD's experimental features `--enable` turns on (`all` is every
+/// one of them), as the one set every host passes on
+/// (`eval::Options::features`).
+pub fn features(names: &[String]) -> eval::Features {
+    eval::Features::from_names(names)
+}
+
 /// `--enable`: OpenSCAD switches the named features on (`all` switches on
-/// every one and ends the list) and warns about unknown names. neoscad has
-/// none of them, so a known name gets a warning instead of silently doing
-/// nothing; an unknown one gets OpenSCAD's own warning. Like OpenSCAD's,
-/// these are warnings (dropped by `--quiet`), not errors.
-fn enable_warnings(names: &[String]) -> Vec<String> {
+/// every one and ends the list) and warns about unknown names. A feature
+/// neoscad implements is switched on silently, as in OpenSCAD; one it
+/// does not gets a warning instead of silently doing nothing, and an
+/// unknown one gets OpenSCAD's own warning. Like OpenSCAD's, these are
+/// warnings (dropped by `--quiet`), not errors.
+pub fn enable_warnings(names: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for name in names {
         if name == PART_FEATURE {
             continue;
         }
         if name == "all" {
-            out.push(
-                "WARNING: --enable all: no experimental feature is supported by neoscad; ignoring it."
-                    .to_string(),
-            );
+            let missing: Vec<&str> = eval::Feature::ALL
+                .iter()
+                .filter(|f| !f.supported())
+                .map(|f| f.name())
+                .collect();
+            if !missing.is_empty() {
+                out.push(format!(
+                    "WARNING: --enable all: experimental features not supported by neoscad are ignored: {}.",
+                    missing.join(", ")
+                ));
+            }
             break;
         }
-        if FEATURES.contains(&name.as_str()) {
-            out.push(format!(
+        match eval::Feature::from_name(name) {
+            Some(f) if f.supported() => {}
+            Some(_) => out.push(format!(
                 "WARNING: Experimental feature '{name}' is not supported by neoscad; ignoring it."
-            ));
-        } else {
-            out.push(format!(
+            )),
+            None => out.push(format!(
                 "WARNING: Ignoring request to enable unknown feature '{name}'."
-            ));
+            )),
         }
     }
     out
@@ -780,6 +780,7 @@ fn served_export(
         rich: rich_diagnostics(),
         seed: options.rng_seed,
         parts: options.parts,
+        enable: &cli.enable,
         png: formats
             .iter()
             .all(|(id, _)| *id == "png")
@@ -832,6 +833,7 @@ fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
         hardwarnings: cli.hardwarnings,
         rng_seed: host::entropy_seed(),
         parts: parts_enabled(&cli.enable),
+        features: features(&cli.enable),
         ..Default::default()
     };
     if let Some(d) = cli.trace_depth {
@@ -962,6 +964,8 @@ mod tests {
             w(&["roof"]),
             ["WARNING: Experimental feature 'roof' is not supported by neoscad; ignoring it."]
         );
+        // Implemented features are switched on without a word.
+        assert!(w(&["textmetrics", "object-function", "vector-swizzle"]).is_empty());
         // `all` ends the list, as in OpenSCAD.
         assert_eq!(w(&["all", "foo"]).len(), 1);
     }

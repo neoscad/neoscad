@@ -151,14 +151,22 @@ impl Session {
                 .into_iter()
                 .find(|b| b.name == *name && b.status == eval::BuiltinStatus::Experimental);
             let mut msg = match experimental {
-                Some(b) => format!(
-                    "'{name}' is an experimental OpenSCAD builtin {}, not enabled in neoscad",
-                    match b.kind {
+                Some(b) => {
+                    let kind = match b.kind {
                         eval::BuiltinKind::Module => "module",
                         eval::BuiltinKind::Function => "function",
                         eval::BuiltinKind::Variable => "variable",
+                    };
+                    match eval::builtin_feature(name, b.kind).filter(|f| f.supported()) {
+                        Some(f) => format!(
+                            "'{name}' is an experimental OpenSCAD builtin {kind}, off unless enabled with `--enable {}` (as in OpenSCAD)",
+                            f.name()
+                        ),
+                        None => format!(
+                            "'{name}' is an experimental OpenSCAD builtin {kind}, not enabled in neoscad"
+                        ),
                     }
-                ),
+                }
                 None => format!(
                     "no builtin{} named '{name}'",
                     if req.file.is_some() {

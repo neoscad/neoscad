@@ -380,8 +380,17 @@ fn evaluate<W: Write>(
             uses: &lib.uses,
         })
         .collect();
+    // `textmetrics()` measures with the fonts `text()` renders with: the
+    // bundled ones and the program's `use`d font files.
+    let fonts = options.features.has(eval::Feature::TextMetrics).then(|| {
+        let used = std::iter::once(&l.program)
+            .chain(l.libraries.iter().filter_map(|lib| lib.program.as_ref()))
+            .flat_map(|p| p.ast.uses.iter());
+        std::sync::Arc::new(l.host.fonts(used))
+    });
     let options = Options {
         fs: l.host.fs.clone(),
+        fonts: fonts.or_else(|| options.fonts.clone()),
         ..options.clone()
     };
     // `main` runs this on a thread with `eval::DEFAULT_THREAD_STACK`.

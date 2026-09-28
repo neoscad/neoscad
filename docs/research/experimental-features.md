@@ -20,19 +20,19 @@ or benchmarked.
   supported by neoscad" (`crates/cli/src/main.rs`); the experimental
   builtins return `Undef`; `roof` is registered as disabled.
   `docs/architecture.md` lists experimental features as deferred.
-- **There is no object value type** (`crates/eval/src/value.rs`).
-  `textmetrics`, `fontmetrics`, `is_object`, `object`, `has_key` and
-  `import()` all need one.
+- **The object value type now exists** (`Value::Object` in
+  `crates/eval/src/value.rs`), for `textmetrics`, `fontmetrics`,
+  `is_object`, `object`, `has_key` and `import()`; see Status.
 
 ## Per feature
 
 | Feature | Cases (tiers) | Unlocks | Effort | Notes | Recommendation |
 |---|---|---|---|---|---|
 | predictible-output | 27 (3) | 26 (27 with lazy-union) | **S** | Sorts vertices and faces before export (`src/io/export.cc:317-372`), in the STL/OBJ/3MF/POV/OFF/WRL writers. A Python port matched the expected STLs triangle for triangle (STL only checked) | **Now** |
-| textmetrics (+`is_object`) | 9 (1–4) | 6 (3 are CGAL-skipped) | M with objects | BOSL2 `path_text(textmetrics=true)`; `crates/text` can supply the metrics | **Now** |
-| object-function | 2 (1) | 2 | S after objects | `object()`, `has_key()` | **Now, with textmetrics** |
-| import-function | 2 (1) | 2 | S after objects | `import()` of JSON: data-driven models, useful for agents | **Now, with textmetrics** |
-| vector-swizzle | 1 (1) | 1 | S | `v.xy`-style member access (`Expression.cc:385-410`) | **Now** |
+| textmetrics (+`is_object`) | 9 (1–4) | 6 (3 are CGAL-skipped) | M with objects | BOSL2 `path_text(textmetrics=true)`; `crates/text` can supply the metrics | **Done** |
+| object-function | 2 (1) | 2 | S after objects | `object()`, `has_key()` | **Done** |
+| import-function | 2 (1) | 2 | S after objects | `import()` of JSON: data-driven models, useful for agents | **Done** |
+| vector-swizzle | 1 (1) | 1 | S | `v.xy`-style member access (`Expression.cc:385-410`) | **Done** |
 | discretization-by-error | 4 (2–3) | 4 | S–M | The `$fe` circle formula, a helix-slice rule, and `$fe` in dumps | Later |
 | unicode-identifiers | 2 (1) | 2 | S–M | UAX #31 tables plus NFC | Later |
 | lazy-union | 53 (2–4) | 53 | M–L | Top-level children are not unioned: exports carry overlapping shells and the CSG dump changes. Overlaps NeoSCAD's `part()` | Later, **owner decision** |
@@ -53,3 +53,25 @@ or benchmarked.
 Whether any feature is close to stabilising upstream (shallow checkout, no
 issue search); library use beyond BOSL2 and MCAD; WASM and determinism for
 the candidate crates; predictible-output for OBJ, 3MF and POV.
+
+## Status: objects, textmetrics, object-function, import-function, vector-swizzle
+
+Built behind their `--enable` flags exactly as the nightly gates them
+(`is_object` goes with `textmetrics`); off, each builtin still warns
+"Experimental builtin function '...' is not enabled" and returns undef,
+and `v.xy` is undef. The flag set is `eval::Features`
+(`crates/eval/src/features.rs`), carried by `eval::Options::features`,
+`session::Config`/`Run::features`, the command line and `serve`
+requests (`"enable": [...]`), `neoscad mcp --enable`, and the app's
+`DocumentRequest`/`RunOptions` `enable`.
+
+- All 11 runnable cases pass (tiers 1–4); 3 more are CGAL-only.
+- `crates/eval/tests/experimental.rs` compares echo and warning output
+  line for line with the nightly for objects (formatting, equality,
+  methods and `this`, every `object()` warning), text and font metrics
+  across fonts, alignments and directions, JSON (values, key order,
+  numbers, nlohmann's error texts), swizzles, and the features off.
+- BOSL2 `path_text(..., textmetrics=true)` dumps the same `.csg` as the
+  nightly.
+- Differences left are in `docs/followups.md` (the `FONT-WARNING` line,
+  `import()` dependency tracking, how methods are bound).

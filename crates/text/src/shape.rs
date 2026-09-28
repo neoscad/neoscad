@@ -129,6 +129,13 @@ struct UnhintedMetrics {
 }
 
 impl FaceState {
+    /// Font units in 26.6 at FreeType's size: `FT_MulFix(units,
+    /// size->metrics.y_scale)`. The unhinted scale, which FreeType keeps in
+    /// `size->metrics` even for a font whose hinting rounds the ppem.
+    pub(crate) fn scale_y(&self, units: i64) -> i64 {
+        ft_mul_fix(units, self.y_scale)
+    }
+
     pub fn new(font: &FontRef<'_>) -> FaceState {
         let upem = i64::from(font.head().map_or(1000, |h| h.units_per_em())).max(1);
         let x_scale = ft_div_fix(PIXEL_SIZE, upem);
@@ -543,6 +550,119 @@ pub fn shape(
         .collect();
     let horizontal = matches!(dir, Direction::LeftToRight | Direction::RightToLeft);
     (glyphs, horizontal)
+}
+
+/// The face-wide values FreeType fills in when it opens a face
+/// (`sfnt_load_face` in `sfobjs.c`), in font units.
+pub(crate) struct FaceMetrics {
+    pub ascender: i64,
+    pub descender: i64,
+    pub height: i64,
+    pub y_min: i64,
+    pub y_max: i64,
+    pub family: String,
+    pub style: String,
+}
+
+/// `FT_Face`'s `ascender`, `descender`, `height`, `bbox` and names: the
+/// `hhea` metrics, or `OS/2`'s when `hhea` has none; `head`'s box; the
+/// names as `sfnt_load_face` picks them.
+pub(crate) fn face_metrics(font: &FontRef<'_>) -> FaceMetrics {
+    let (mut ascender, mut descender, mut height) = (0, 0, 0);
+    if let Ok(h) = font.hhea() {
+        ascender = i64::from(h.ascender().to_i16());
+        descender = i64::from(h.descender().to_i16());
+        height = ascender - descender + i64::from(h.line_gap().to_i16());
+    }
+    if ascender == 0
+        && descender == 0
+        && let Ok(os2) = font.os2()
+    {
+        if os2.s_typo_ascender() != 0 || os2.s_typo_descender() != 0 {
+            ascender = i64::from(os2.s_typo_ascender());
+            descender = i64::from(os2.s_typo_descender());
+            height = ascender - descender + i64::from(os2.s_typo_line_gap());
+        } else {
+            // FreeType casts both to `FT_Short` first.
+            ascender = i64::from(os2.us_win_ascent() as i16);
+            descender = -i64::from(os2.us_win_descent() as i16);
+            height = ascender - descender;
+        }
+    }
+    let (y_min, y_max) = font
+        .head()
+        .map_or((0, 0), |h| (i64::from(h.y_min()), i64::from(h.y_max())));
+    // A WWS font (`fsSelection` bit 8) names its family by the WWS names
+    // first; otherwise the typographic names come first.
+    let wws = font
+        .os2()
+        .is_ok_and(|o| o.fs_selection().bits() & (1 << 8) != 0);
+    let pick = |ids: &[u16]| ids.iter().find_map(|&id| face_name(font, id));
+    let (family, style) = if wws {
+        (pick(&[21, 16, 1]), pick(&[22, 17, 2]))
+    } else {
+        (pick(&[16, 1]), pick(&[17, 2]))
+    };
+    FaceMetrics {
+        ascender,
+        descender,
+        height,
+        y_min,
+        y_max,
+        family: family.unwrap_or_default(),
+        style: style.unwrap_or_default(),
+    }
+}
+
+/// `tt_face_get_name`: an English Windows name if there is one (else any
+/// Windows name in a Unicode or symbol encoding, unless an Apple English
+/// one exists), then an Apple name (English, then Roman), then a Unicode
+/// platform one; FreeType turns it into ASCII, every character outside
+/// 32..=127 becoming `?`, and stops at a NUL.
+fn face_name(font: &FontRef<'_>, id: u16) -> Option<String> {
+    let name = font.name().ok()?;
+    let data = name.string_data();
+    let (mut win, mut is_english) = (None, false);
+    let (mut apple_english, mut apple_roman, mut unicode) = (None, None, None);
+    for rec in name.name_record() {
+        if rec.name_id().to_u16() != id || rec.length() == 0 {
+            continue;
+        }
+        let english = rec.language_id() & 0x3FF == 0x009;
+        match rec.platform_id() {
+            0 | 2 => unicode = Some(rec),
+            1 => {
+                if rec.language_id() == 0 {
+                    apple_english = Some(rec);
+                } else if rec.encoding_id() == 0 {
+                    apple_roman = Some(rec);
+                }
+            }
+            3 if (win.is_none() || english) && matches!(rec.encoding_id(), 0 | 1 | 10) => {
+                is_english = english;
+                win = Some(rec);
+            }
+            _ => {}
+        }
+    }
+    let apple = apple_english.or(apple_roman);
+    let rec = match win {
+        Some(w) if !(apple.is_some() && !is_english) => w,
+        _ => apple.or(unicode)?,
+    };
+    let s = rec.string(data).ok()?;
+    Some(
+        s.chars()
+            .take_while(|&c| c != '\0')
+            .map(|c| {
+                if (' '..='\u{7f}').contains(&c) {
+                    c
+                } else {
+                    '?'
+                }
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]

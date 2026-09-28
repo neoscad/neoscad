@@ -32,7 +32,10 @@ shape):
 Flags: `--root DIR` (repeatable), `--cache-mb N` (the geometry cache
 budget, as for `serve`), `--log FILE` (append every message received
 and sent, for debugging a client), `--limit NAME=VALUE` (repeatable:
-change a resource limit; see "Safety").
+change a resource limit; see "Safety"), `--enable FEATURE` (repeatable:
+one of OpenSCAD's experimental features for every call, as the command
+line's `--enable`: `textmetrics`, `object-function`, `import-function`,
+`vector-swizzle`; off by default, as in OpenSCAD).
 
 ## Protocol
 

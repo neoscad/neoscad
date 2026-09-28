@@ -40,8 +40,11 @@ mod call;
 mod context;
 pub mod dump;
 mod eval;
+pub mod features;
+pub use features::{Feature, Features};
 pub mod fma;
 mod inst;
+mod json;
 pub mod limits;
 mod memo;
 pub use memo::{MEMO_BUDGET, Memo, ReuseStats};
@@ -216,6 +219,14 @@ pub struct Options {
     /// warning; on, it is a builtin that a program's own `part` module
     /// still shadows (see [`node::NodeKind::Part`]).
     pub parts: bool,
+    /// OpenSCAD's experimental features (`--enable`); none by default, as
+    /// in OpenSCAD. See [`features`].
+    pub features: Features,
+    /// The fonts `textmetrics()` and `fontmetrics()` measure with: the same
+    /// set `text()` renders with (the bundled fonts and the program's
+    /// `use`d font files). Only read with [`Feature::TextMetrics`] on;
+    /// without it they find no font and warn "Can't get font".
+    pub fonts: Option<Arc<text::FontDb>>,
 }
 
 impl Default for Options {
@@ -237,6 +248,8 @@ impl Default for Options {
             guard: None,
             hardwarnings: false,
             parts: false,
+            features: Features::NONE,
+            fonts: None,
         }
     }
 }
@@ -316,7 +329,7 @@ pub fn builtins() -> Vec<BuiltinName> {
     out.extend(builtins::functions::ALL.iter().map(|(n, b)| BuiltinName {
         name: n,
         kind: Function,
-        status: status(b.enabled()),
+        status: status(b.enabled(Features::NONE)),
     }));
     out.extend(BUILTIN_VARIABLES.iter().map(|n| BuiltinName {
         name: n,
@@ -324,6 +337,21 @@ pub fn builtins() -> Vec<BuiltinName> {
         status: BuiltinStatus::Stable,
     }));
     out
+}
+
+/// The experimental feature (`--enable`) a builtin needs, if it is an
+/// experimental one: `textmetrics` for `textmetrics`, `fontmetrics` and
+/// `is_object`, `object-function` for `object` and `has_key`,
+/// `import-function` for the function `import`, `roof` for the module.
+pub fn builtin_feature(name: &str, kind: BuiltinKind) -> Option<Feature> {
+    match kind {
+        BuiltinKind::Function => builtins::functions::ALL
+            .iter()
+            .find(|(n, _)| *n == name)
+            .and_then(|(_, b)| b.feature()),
+        BuiltinKind::Module => (name == "roof").then_some(Feature::Roof),
+        BuiltinKind::Variable => None,
+    }
 }
 
 /// Run `f` on a thread with `bytes` of stack and wait for it.

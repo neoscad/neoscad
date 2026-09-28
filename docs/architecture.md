@@ -373,7 +373,10 @@ ffmpeg.
 
 - In: the stable OpenSCAD language, builtins, import/export formats and the
   customizer.
-- Deferred: PythonSCAD and OpenSCAD's experimental features.
+- Deferred: PythonSCAD and most of OpenSCAD's experimental features.
+  Implemented behind their `--enable` flags, as in OpenSCAD: objects with
+  `textmetrics`, `object-function` and `import-function` (JSON), and
+  `vector-swizzle` (`docs/research/experimental-features.md`).
 
 ## Build order
 

@@ -121,6 +121,9 @@ pub struct Config {
     /// neoscad's `part()` extension for every request (`--enable part`);
     /// a request can also turn it on alone ([`Run::parts`]).
     pub parts: bool,
+    /// OpenSCAD's experimental features for every request (`--enable`);
+    /// a request can add its own ([`Run::features`]).
+    pub features: eval::Features,
     /// Every request's resource limits ([`eval::limits`]), unless it says
     /// otherwise ([`Run::limits`]). [`Limits::NONE`] (the default) is
     /// OpenSCAD's behaviour, for the one-shot command line; a host that
@@ -170,6 +173,7 @@ impl Config {
             #[cfg(feature = "gpu")]
             gpu: None,
             parts: false,
+            features: eval::Features::NONE,
             limits: Limits::NONE,
             reuse_evaluation: true,
         }
@@ -237,6 +241,9 @@ pub struct Run {
     /// neoscad's `part("name") { ... }` extension (`--enable part`), on
     /// for this request; see `eval::Options::parts`.
     pub parts: bool,
+    /// OpenSCAD's experimental features (`--enable`) for this request, on
+    /// top of [`Config::features`]; see `eval::Options::features`.
+    pub features: eval::Features,
     /// Run only this module of the main file: its top-level
     /// instantiations are replaced by one call, `entry();`, while its
     /// assignments, definitions, includes and `use`s stay. This is how
@@ -300,6 +307,7 @@ impl Run {
             supersede: true,
             progress: None,
             parts: false,
+            features: eval::Features::NONE,
             entry: None,
             limits: None,
             text: None,
@@ -1384,6 +1392,11 @@ impl Session {
                 uses: &lib.uses,
             })
             .collect();
+        let features = run.features.union(self.cfg.features);
+        // `textmetrics()` measures with the fonts `text()` renders with.
+        let fonts = features
+            .has(eval::Feature::TextMetrics)
+            .then(|| self.fonts_for(&loaded.used(), &*pipe.fs).1);
         let options = eval::Options {
             preview,
             camera: run.camera,
@@ -1392,6 +1405,8 @@ impl Session {
             interrupt: Some(job.flag.clone()),
             guard: job.limits.clone(),
             parts: run.parts || self.cfg.parts,
+            features,
+            fonts,
             ..eval::Options::default()
         };
         let ev = if self.cfg.reuse_evaluation {

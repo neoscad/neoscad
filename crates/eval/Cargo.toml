@@ -13,7 +13,11 @@ name = "eval"
 io = { package = "neoscad-io", path = "../io" }
 lang = { package = "neoscad-lang", path = "../lang" }
 sha2.workspace = true
+text = { package = "neoscad-text", path = "../text" }
 unicode-script.workspace = true
+
+[dev-dependencies]
+assets = { package = "neoscad-assets", path = "../assets" }
 
 [lints]
 workspace = true

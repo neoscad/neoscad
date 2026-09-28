@@ -25,6 +25,7 @@ fn request(mode: RenderMode) -> DocumentRequest {
         mode,
         overrides: Vec::new(),
         parts: false,
+        enable: Vec::new(),
     }
 }
 
@@ -441,4 +442,39 @@ fn the_parts_toggle_reaches_the_documents_run() {
     };
     assert!(unknown(false));
     assert!(!unknown(true));
+}
+
+#[test]
+fn enabled_features_reach_the_documents_run() {
+    // OpenSCAD's experimental features by their `--enable` names: off, a
+    // call warns that it is not enabled; on, it works, as in OpenSCAD.
+    let c = Core::new(CoreConfig {
+        resource_dir: None,
+        test_hooks: true,
+    })
+    .unwrap();
+    let doc = "/NeoSCAD-ffi-document-enable/model.scad".to_string();
+    c.open(
+        doc.clone(),
+        Some("echo(object(a = 1), textmetrics(\"x\").advance);".into()),
+    )
+    .unwrap();
+    let console = |enable: &[&str]| {
+        let mut req = request(RenderMode::Preview);
+        req.enable = enable.iter().map(|s| s.to_string()).collect();
+        let r = c.run_document(doc.clone(), req, None, None, None).unwrap();
+        r.console.iter().map(|l| l.text.clone()).collect::<Vec<_>>()
+    };
+    let off = console(&[]);
+    assert!(
+        off.iter()
+            .any(|l| l.contains("Experimental builtin function 'object' is not enabled")),
+        "{off:?}"
+    );
+    let on = console(&["object-function", "textmetrics"]);
+    assert!(
+        on.iter()
+            .any(|l| l.starts_with("ECHO: { a = 1; }, [") && !l.contains("undef")),
+        "{on:?}"
+    );
 }

@@ -291,6 +291,8 @@ pub struct TestRequest {
     /// `--enable part` for every test (a test with `@expect parts` has it
     /// anyway).
     pub parts: bool,
+    /// OpenSCAD's experimental features (`--enable`) for every test.
+    pub features: eval::Features,
     /// Threads to run tests on (at least 1; wasm32 runs them in turn).
     pub jobs: usize,
 }
@@ -370,7 +372,13 @@ impl Session {
     }
 
     /// Run one test.
-    pub fn run_test(&self, case: &TestCase, parts: bool, cwd: &Path) -> Result<Value, Cancelled> {
+    pub fn run_test(
+        &self,
+        case: &TestCase,
+        parts: bool,
+        features: eval::Features,
+        cwd: &Path,
+    ) -> Result<Value, Cancelled> {
         let started = self.now();
         let mut out = json!({
             "id": case.id(),
@@ -407,6 +415,7 @@ impl Session {
         run.entry = Some(case.name.clone());
         run.supersede = false;
         run.parts = parts || wants_parts;
+        run.features = features;
         let render = expects.iter().any(|(_, e)| e.renders());
         let (exit_code, log, model) = if render {
             let scheme = render::ColorScheme::cornfield();
@@ -472,7 +481,7 @@ impl Session {
             }
         };
         let results = run_all(&cases, req.jobs.max(1), |c| {
-            self.run_test(c, req.parts, &cwd)
+            self.run_test(c, req.parts, req.features, &cwd)
         });
         let results: Vec<Value> = results.into_iter().collect::<Result<_, _>>()?;
         let passed = results.iter().filter(|r| r["ok"] == json!(true)).count();

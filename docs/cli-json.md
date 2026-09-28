@@ -499,8 +499,8 @@ structured blocks (`// Module:`, `// Synopsis:`, `// Usage:`,
 lines of the description and the arguments; `--full` shows the whole
 block. No name: a compact index (with `--in`, the file's definitions).
 An unknown name exits 1 with "did you mean" (the diagnostics' matcher),
-or says the name is an experimental OpenSCAD builtin neoscad does not
-enable.
+or says the name is an experimental OpenSCAD builtin, naming the
+`--enable` flag that turns it on (or that neoscad does not have it).
 
 With `--format json`:
 

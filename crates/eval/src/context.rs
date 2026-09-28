@@ -238,8 +238,11 @@ impl Ctx {
         self.parent.clone()
     }
 
-    /// The value in slot `i`, if set.
-    #[inline]
+    /// The value in slot `i`, if set. Always inlined: it is on every
+    /// variable read, and the compiler stops inlining it by itself once
+    /// `Value`'s clone has more variants to handle (the object variant
+    /// cost 1-3% more instructions on call-heavy code that way).
+    #[inline(always)]
     pub fn slot(&self, i: u32) -> Option<Value> {
         self.slots.borrow().get(i as usize).and_then(Option::clone)
     }

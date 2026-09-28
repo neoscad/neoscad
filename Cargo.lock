@@ -961,8 +961,10 @@ dependencies = [
 name = "neoscad-eval"
 version = "0.1.0"
 dependencies = [
+ "neoscad-assets",
  "neoscad-io",
  "neoscad-lang",
+ "neoscad-text",
  "sha2",
  "unicode-script",
 ]

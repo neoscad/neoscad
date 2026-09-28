@@ -24,6 +24,7 @@ fn parts() -> RunOptions {
     RunOptions {
         overrides: Vec::new(),
         parts: true,
+        enable: Vec::new(),
     }
 }
 
@@ -108,6 +109,7 @@ fn customizer_values_reach_the_check() {
             value: crate::ParameterValue::Number { value: 0.3 },
         }],
         parts: false,
+        enable: Vec::new(),
     };
     let r = c.check(doc, defaults(), run, None).unwrap();
     assert_eq!(r.min_wall, Some(0.3), "{}", r.text);
@@ -349,6 +351,7 @@ fn a_panel_request_does_not_cancel_the_documents_run() {
                 mode: RenderMode::Render,
                 overrides: Vec::new(),
                 parts: false,
+                enable: Vec::new(),
             },
             None,
             None,

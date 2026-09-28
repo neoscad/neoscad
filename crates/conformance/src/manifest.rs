@@ -510,6 +510,18 @@ fn tier_of(r: &Registration) -> u8 {
     }
 }
 
+/// OpenSCAD's experimental features neoscad implements (its `--enable`
+/// accepts them as OpenSCAD does, `eval::Feature::supported`). Their
+/// cases run like any other, under the rules below. The harness keeps its
+/// own list rather than asking the evaluator, so that pointing it at the
+/// nightly (`--binary`) checks the same cases.
+const SUPPORTED_FEATURES: &[&str] = &[
+    "textmetrics",
+    "object-function",
+    "import-function",
+    "vector-swizzle",
+];
+
 /// Why a registration is out of scope, if it is. The first matching rule
 /// wins, so each skipped test is counted under one reason.
 fn skip_reason(r: &Registration) -> Option<String> {
@@ -521,12 +533,13 @@ fn skip_reason(r: &Registration) -> Option<String> {
                     .flatten()
             })
         });
-        return Some(match feature {
-            Some(f) => format!("experimental feature ({f})"),
+        match feature {
+            Some(f) if SUPPORTED_FEATURES.contains(&f.as_str()) => {}
+            Some(f) => return Some(format!("experimental feature ({f})")),
             // Registered EXPERIMENTAL without an --enable flag
             // (offcolorpngtest, 3mfcolorpngtest): colour export/import.
-            None => "experimental registration".into(),
-        });
+            None => return Some("experimental registration".into()),
+        }
     }
     let cgal_args = r.test_args.iter().any(|a| a == "--backend=cgal");
     if r.group.contains("cgal") || cgal_args {

@@ -86,6 +86,9 @@ pub struct RunOptions {
     /// neoscad's `part()` extension (`--enable part`).
     #[uniffi(default = false)]
     pub parts: bool,
+    /// OpenSCAD's experimental features, as `--enable` names them.
+    #[uniffi(default = [])]
+    pub enable: Vec<String>,
 }
 
 impl Core {
@@ -101,6 +104,7 @@ impl Core {
         let mut run = self.run(path)?;
         run.supersede = false;
         run.parts = options.parts;
+        run.features = eval::Features::from_names(&options.enable);
         run.defines = options
             .overrides
             .iter()

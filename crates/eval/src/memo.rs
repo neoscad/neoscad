@@ -372,6 +372,7 @@ fn global_key(
         u8::from(o.check_parameter_ranges),
         u8::from(o.parts),
     ]);
+    h.update(o.features.bits().to_le_bytes());
     f(&mut h, o.time);
     for x in o.camera.vpt.iter().chain(&o.camera.vpr) {
         f(&mut h, *x);
@@ -887,12 +888,16 @@ impl<'a> Evaluator<'a> {
 /// shared, so equal values built differently digest equal, and a statement
 /// replays when a variable is recomputed to the same value. The tags keep
 /// the forms apart (4 a list written out, 6 a list's digest, 3 a string
-/// written out, 7 a string's digest).
+/// written out, 7 a string's digest, 8 an object's digest).
+///
+/// Objects are always hashed on their own (tag 9, then each key and value
+/// in order), by their address: they share their values as lists do, and
+/// a tree of objects whose fields are one object is as cheap to build.
 fn value_digest(v: &Value, h: &mut Sha256) -> bool {
     let mut done = Done::default();
     match v {
         Value::Vector(items) if own_list(items) => {
-            let Some(d) = tree_digest(items, &mut done) else {
+            let Some(d) = tree_digest(Part::List(items), &mut done) else {
                 return false;
             };
             h.update([6]);
@@ -910,13 +915,35 @@ const OWN_LIST: usize = 16;
 const OWN_STR: usize = 64;
 
 /// The digests of the parts hashed on their own, by the address of their
-/// elements or bytes: no two live lists or strings share one, and every
-/// part is alive for the whole walk, inside the value being hashed.
+/// elements or bytes (an object's by its own address): no two live lists,
+/// strings or objects share one, and every part is alive for the whole
+/// walk, inside the value being hashed.
 type Done = HashMap<usize, [u8; 32], FxBuild>;
 
 /// Whether a list is hashed on its own.
 fn own_list(items: &[Value]) -> bool {
-    items.len() >= OWN_LIST || items.iter().any(|v| matches!(v, Value::Vector(_)))
+    items.len() >= OWN_LIST
+        || items
+            .iter()
+            .any(|v| matches!(v, Value::Vector(_) | Value::Object(_)))
+}
+
+/// Hash a string: inline when short, by its own digest when long.
+fn str_digest(b: &[u8], h: &mut Sha256, done: &mut Done) {
+    if b.len() >= OWN_STR {
+        let d = done.entry(b.as_ptr() as usize).or_insert_with(|| {
+            let mut h = Sha256::new();
+            h.update((b.len() as u64).to_le_bytes());
+            h.update(b);
+            h.finalize().into()
+        });
+        h.update([7]);
+        h.update(*d);
+    } else {
+        h.update([3]);
+        h.update((b.len() as u64).to_le_bytes());
+        h.update(b);
+    }
 }
 
 /// Hash a value that is not a list hashed on its own: a short list of
@@ -929,23 +956,7 @@ fn plain_digest(v: &Value, h: &mut Sha256, done: &mut Done) -> bool {
             h.update([2]);
             h.update(x.to_bits().to_le_bytes());
         }
-        Value::Str(s) => {
-            let b = s.as_bytes();
-            if b.len() >= OWN_STR {
-                let d = done.entry(b.as_ptr() as usize).or_insert_with(|| {
-                    let mut h = Sha256::new();
-                    h.update((b.len() as u64).to_le_bytes());
-                    h.update(b);
-                    h.finalize().into()
-                });
-                h.update([7]);
-                h.update(*d);
-            } else {
-                h.update([3]);
-                h.update((b.len() as u64).to_le_bytes());
-                h.update(b);
-            }
-        }
+        Value::Str(s) => str_digest(s.as_bytes(), h, done),
         Value::Vector(items) => {
             h.update([4]);
             h.update((items.len() as u64).to_le_bytes());
@@ -962,55 +973,91 @@ fn plain_digest(v: &Value, h: &mut Sha256, done: &mut Done) -> bool {
             }
         }
         Value::Function(_) => return false,
+        // Only a top-level value gets here: a list holding an object is
+        // hashed on its own, and its walk takes the object.
+        Value::Object(o) => {
+            let Some(d) = tree_digest(Part::Object(o), done) else {
+                return false;
+            };
+            h.update([8]);
+            h.update(d);
+        }
     }
     true
 }
 
-/// The digest of a list hashed on its own (see [`value_digest`]): its
-/// length, then its elements, each list among them that is hashed on its
-/// own by its digest. Iterative, as values can nest deeper than the stack
-/// allows.
-fn tree_digest(root: &Vector, done: &mut Done) -> Option<[u8; 32]> {
+/// A part hashed on its own: a list, or an object.
+#[derive(Clone, Copy)]
+enum Part<'v> {
+    List(&'v Vector),
+    Object(&'v crate::value::Object),
+}
+
+/// The digest of a part hashed on its own (see [`value_digest`]): a list's
+/// length then its elements, an object's length then its keys and values,
+/// each list or object among them by its digest. Iterative, as values can
+/// nest deeper than the stack allows.
+fn tree_digest(root: Part<'_>, done: &mut Done) -> Option<[u8; 32]> {
     struct Frame<'v> {
         items: &'v [Value],
+        /// An object's keys, one per item.
+        keys: Option<&'v [crate::value::Str]>,
+        id: usize,
         i: usize,
         h: Sha256,
     }
-    fn open(items: &[Value]) -> Frame<'_> {
+    fn open(p: Part<'_>) -> Frame<'_> {
         let mut h = Sha256::new();
-        h.update([4]);
+        let (items, keys, id, tag) = match p {
+            Part::List(v) => (v.as_slice(), None, v.as_slice().as_ptr() as usize, 4),
+            Part::Object(o) => (o.values(), Some(o.keys()), o.addr(), 9),
+        };
+        h.update([tag]);
         h.update((items.len() as u64).to_le_bytes());
-        Frame { items, i: 0, h }
+        Frame {
+            items,
+            keys,
+            id,
+            i: 0,
+            h,
+        }
     }
-    let mut stack = vec![open(root.as_slice())];
+    let mut stack = vec![open(root)];
     loop {
         let top = stack.last_mut().expect("a frame");
         let Some(v) = top.items.get(top.i) else {
             let f = stack.pop().expect("a frame");
+            let object = f.keys.is_some();
             let d: [u8; 32] = f.h.finalize().into();
-            done.insert(f.items.as_ptr() as usize, d);
+            done.insert(f.id, d);
             let Some(parent) = stack.last_mut() else {
                 return Some(d);
             };
-            parent.h.update([6]);
+            parent.h.update([if object { 8 } else { 6 }]);
             parent.h.update(d);
             continue;
         };
+        if let Some(keys) = top.keys {
+            str_digest(keys[top.i].as_bytes(), &mut top.h, done);
+        }
         top.i += 1;
-        match v {
+        let (part, id, tag) = match v {
             Value::Vector(items) if own_list(items) => {
-                if let Some(d) = done.get(&(items.as_slice().as_ptr() as usize)) {
-                    top.h.update([6]);
-                    top.h.update(d);
-                } else {
-                    stack.push(open(items.as_slice()));
-                }
+                (Part::List(items), items.as_slice().as_ptr() as usize, 6)
             }
+            Value::Object(o) => (Part::Object(o), o.addr(), 8),
             v => {
                 if !plain_digest(v, &mut top.h, done) {
                     return None;
                 }
+                continue;
             }
+        };
+        if let Some(d) = done.get(&id) {
+            top.h.update([tag]);
+            top.h.update(d);
+        } else {
+            stack.push(open(part));
         }
     }
 }

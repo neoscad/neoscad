@@ -1711,6 +1711,39 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// `FreetypeRenderer::Params` for `textmetrics()` (`text()`'s
+    /// parameters) or `fontmetrics()` (`size`, `font` and `em` only, though
+    /// the type checks cover every `text()` parameter passed, as the
+    /// shared `Params` constructor checks them all).
+    pub(crate) fn text_params(
+        &mut self,
+        args: Vec<ArgVal>,
+        loc: Loc,
+        font_only: bool,
+    ) -> node::Text {
+        let (req, opt, caller): (&[&str], &[&str], &'static str) = if font_only {
+            (&["size", "font", "em"], &[], "fontmetrics")
+        } else {
+            (
+                &["text", "size", "font"],
+                &[
+                    "direction",
+                    "language",
+                    "script",
+                    "halign",
+                    "valign",
+                    "spacing",
+                    "em",
+                ],
+                "textmetrics",
+            )
+        };
+        let p = self.params(args, loc, req, opt, caller);
+        let t = self.text(&p);
+        self.end(p);
+        t
+    }
+
     fn text(&mut self, p: &Params) -> node::Text {
         let disc = self.discretizer_quiet(p);
         for (n, t) in [
@@ -1730,8 +1763,10 @@ impl<'a> Evaluator<'a> {
         let em = self.get(p, "em");
         let size = if em.is_defined() {
             if self.get(p, "size").is_defined() {
+                // Logged by `FreetypeRenderer::Params`' constructor, before
+                // it is given the call's location: no location.
                 let t = format!("{}: \"size\" ignored when \"em\" is set", p.caller);
-                self.warn(p.loc, DiagCode::ArgumentMismatch, t);
+                self.warn_noloc(DiagCode::ArgumentMismatch, t);
             }
             em.to_f64() * 72.0 / 100.0
         } else {

@@ -793,3 +793,31 @@ fn library_indexes_are_short_by_default() {
     let t = text(&r);
     assert!(t.contains("big/all.scad: part0 _helper0()"), "{t}");
 }
+
+#[test]
+fn enable_turns_on_openscads_experimental_features_for_every_call() {
+    // Off by default, as in OpenSCAD: the call warns and gives undef.
+    let dir = scratch("enable-off");
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("evaluate", json!({"source": "echo(object(a = 1));"}));
+    let t = text(&r);
+    assert!(
+        t.contains("Experimental builtin function 'object' is not enabled"),
+        "{t}"
+    );
+    // `neoscad mcp --enable ...` turns them on for every call.
+    let dir = scratch("enable-on");
+    let mut s = Mcp::start(
+        &dir,
+        &["--enable", "object-function", "--enable", "vector-swizzle"],
+    );
+    let r = s.tool(
+        "evaluate",
+        json!({"source": "echo(object(a = 1), [1, 2, 3].zy);"}),
+    );
+    assert!(
+        text(&r).contains("ECHO: { a = 1; }, [3, 2]"),
+        "{}",
+        text(&r)
+    );
+}

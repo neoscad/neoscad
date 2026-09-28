@@ -12,7 +12,7 @@ use crate::eval::{Evaluator, Mode, NO_BASE, Owner, Step};
 use crate::message::{Loc, R, UnwindKind};
 use crate::resolve::{BUILTIN_REGION, Cand, NO_SLOT, Region};
 use crate::sym::Sym;
-use crate::value::{FunctionValue, Value};
+use crate::value::{FunctionValue, Object, Value};
 
 /// A user call's bound arguments: the callee region's slots, and the
 /// `$` names and other names the region has no slot for.
@@ -240,6 +240,25 @@ impl<'a> Evaluator<'a> {
         if let Some(f) = self.bind_positional(args, unit, params, defining, region) {
             return f;
         }
+        self.bind_general(args, loc, unit, params, defining, region, None)
+    }
+
+    /// [`Self::bind_user`] past its positional shortcut. `this`: the call
+    /// is of a method (see `value::Object`), whose `this` parameter is its
+    /// object whatever the arguments say, and whose default is then not
+    /// evaluated (`Parameters::parse` with `#THIS` in the defining
+    /// context).
+    #[allow(clippy::too_many_arguments)]
+    fn bind_general(
+        &mut self,
+        args: &mut Vec<ArgVal>,
+        loc: Loc,
+        unit: u32,
+        params: &'a [Param],
+        defining: &Rc<Ctx>,
+        region: u32,
+        this: Option<&Object>,
+    ) -> R<Frame> {
         let warn = self.opts.check_parameters;
         // A cheap clone (reference count), so the closure does not borrow
         // `self` while warnings need it mutably.
@@ -305,6 +324,13 @@ impl<'a> Evaluator<'a> {
             };
             let config = self.syms.is_config(name);
             f.set(slot, name, a.value, config);
+        }
+        if let Some(o) = this {
+            let this_sym = self.syms.intern("this");
+            if let Some(k) = (0..n_params).find(|&k| psym(k) == this_sym) {
+                let slot = self.param_slot(region, k);
+                f.set(slot, this_sym, Value::Object(o.clone()), false);
+            }
         }
         for (k, p) in params.iter().enumerate() {
             let s = psym(k);
@@ -613,7 +639,7 @@ impl<'a> Evaluator<'a> {
         if fr.cands.len != 0 {
             return None;
         }
-        fr.builtin.filter(|b| b.enabled())
+        fr.builtin.filter(|b| b.enabled(self.opts.features))
     }
 
     /// [`Self::eval_call`]'s one step for a [`Self::static_builtin`] call:
@@ -778,6 +804,9 @@ impl<'a> Evaluator<'a> {
                     (unit, &f.params, f.body, dctx, region)
                 }
                 Some(Callable::Literal(f)) => {
+                    if f.this.is_some() {
+                        return self.method_call(u, id, args, ctx, mode, loc, &f);
+                    }
                     let fast: &'a Ast = self.units[f.unit as usize].ast;
                     match &fast.expr(f.expr).kind {
                         ExprKind::Function(params, body) => {
@@ -808,10 +837,58 @@ impl<'a> Evaluator<'a> {
         if mode == Mode::Ctx {
             self.copy_config(ctx, &body_ctx);
         }
-        self.call_frame(u, id, args, ctx, mode, loc, fu, params, &body_ctx)?;
+        self.call_frame(u, id, args, ctx, mode, loc, fu, params, &body_ctx, None)?;
         Ok(Step::Next {
             unit: fu,
             expr: Some(body),
+            ctx: Some(body_ctx),
+            call: Some((u, id)),
+        })
+    }
+
+    /// [`Self::simplify_call`] of a method (a function literal read from an
+    /// object; see `value::Object`): always in a context of its own, as
+    /// its `this` parameter is bound by name. Out of line, so the common
+    /// call pays nothing for methods, which only `--enable
+    /// object-function` can make.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn method_call(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        args: &'a [Arg],
+        ctx: &Rc<Ctx>,
+        mode: Mode,
+        loc: Loc,
+        f: &FunctionValue,
+    ) -> R<Step> {
+        let fast: &'a Ast = self.units[f.unit as usize].ast;
+        let ExprKind::Function(params, body) = &fast.expr(f.expr).kind else {
+            return Ok(Step::Done(Value::Undef));
+        };
+        let region = self.units[f.unit as usize].res.expr[f.expr.0 as usize];
+        let body_ctx = self.new_ctx_in(f.ctx.clone(), CtxKind::Plain, region);
+        self.push(body_ctx.clone());
+        if mode == Mode::Ctx {
+            self.copy_config(ctx, &body_ctx);
+        }
+        let fu = f.unit;
+        self.call_frame(
+            u,
+            id,
+            args,
+            ctx,
+            mode,
+            loc,
+            fu,
+            params,
+            &body_ctx,
+            f.this.as_ref(),
+        )?;
+        Ok(Step::Next {
+            unit: fu,
+            expr: Some(*body),
             ctx: Some(body_ctx),
             call: Some((u, id)),
         })
@@ -833,6 +910,7 @@ impl<'a> Evaluator<'a> {
         fu: u32,
         params: &'a [Param],
         body_ctx: &Ctx,
+        this: Option<&Object>,
     ) -> R<()> {
         // Defaults are evaluated in the defining context: the body's parent.
         let defining = body_ctx
@@ -847,8 +925,18 @@ impl<'a> Evaluator<'a> {
         } else {
             self.eval_args_into(u, args, ctx, &mut argv)
         };
-        let frame =
-            r.and_then(|()| self.bind_user(&mut argv, loc, fu, params, defining, body_ctx.region));
+        let frame = r.and_then(|()| match this {
+            None => self.bind_user(&mut argv, loc, fu, params, defining, body_ctx.region),
+            Some(o) => self.bind_general(
+                &mut argv,
+                loc,
+                fu,
+                params,
+                defining,
+                body_ctx.region,
+                Some(o),
+            ),
+        });
         argv.clear();
         self.arg_pool.push(argv);
         self.apply_frame(body_ctx, frame?);
@@ -1260,7 +1348,7 @@ impl<'a> Evaluator<'a> {
         // other builtin calls take `eval_call`'s direct path instead.
         if fr.cands.len == 0
             && let Some(b) = fr.builtin
-            && b.enabled()
+            && b.enabled(self.opts.features)
         {
             return Ok(Some(Callable::Builtin(b)));
         }
@@ -1284,7 +1372,7 @@ impl<'a> Evaluator<'a> {
             if c.region == BUILTIN_REGION
                 && let Some(b) = fr.builtin
             {
-                if b.enabled() {
+                if b.enabled(self.opts.features) {
                     return Ok(Some(Callable::Builtin(b)));
                 }
                 let t = format!(
@@ -1413,7 +1501,7 @@ impl<'a> Evaluator<'a> {
             CtxKind::Plain => Ok(self.var_function(c, s)),
             CtxKind::Builtin => {
                 if let Some(&b) = self.builtin_fns.get(&s) {
-                    if b.enabled() {
+                    if b.enabled(self.opts.features) {
                         return Ok(Some(Callable::Builtin(b)));
                     }
                     let t = format!(

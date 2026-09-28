@@ -384,7 +384,18 @@ lead them, come roughly in order of user impact.
   may crash or hang on it), and shalfloop facet cycles, which have no
   edges and give no polygon. CGAL's own stderr block ("CGAL warning:
   check violation!") before OpenSCAD's messages is not reproduced.
-- The experimental `import()` function (JSON) is not implemented. (5c)
+- The experimental `import()` function (JSON, `--enable
+  import-function`) does not record the file for `-d` dependency output
+  or `-m` (OpenSCAD's `handle_dep`); the file is read whole, so a huge
+  one costs its size in memory before the limit stops the values it
+  becomes. Paths in its messages are the calling file's directory joined
+  with the name, as given (OpenSCAD makes them absolute). (experimental
+  features)
+- Experimental objects: OpenSCAD makes a method (a stored function with
+  a `this` parameter) when an object is built, through a context cycle
+  its garbage collector breaks; neoscad binds it when read
+  (`value::Object`), with the same results in every case the nightly was
+  checked on. (experimental features)
 
 ## macOS app
 - A viewport frame holds the main thread for about 2.6 ms (p50; p95
@@ -837,7 +848,8 @@ lead them, come roughly in order of user impact.
   `.ast` dump does (`r = 1`), builtins as written in `builtins.toml`
   (`r=1`); it follows `use`d libraries one level, not the libraries they
   use. Experimental builtins (`roof`, `textmetrics`, ...) have no
-  entries, only a note that they are not enabled. (7b-2)
+  entries, only a note naming the `--enable` flag that turns them on
+  (or that neoscad lacks it). (7b-2)
 
 ## Fonts
 - Fontconfig's system configuration is not consulted, so names the
@@ -856,9 +868,15 @@ lead them, come roughly in order of user impact.
   language coverage and every value after the first for weight, slant and
   width, and matches a weight range by its midpoint. Every font name in
   the test suite resolves as in the nightly. (5e)
-- The experimental `textmetrics()` and `fontmetrics()` functions can now
-  be built on the `text` crate (`TextMetrics`/`FontMetrics` in
-  `FreetypeRenderer.cc` use the same shaping). (5e)
+- `textmetrics()` and `fontmetrics()` (`--enable textmetrics`) do not
+  print OpenSCAD's `FONT-WARNING: Could not parse font '...'` line for an
+  unparseable font name (the evaluator's messages have no severity for
+  that message group); its "Can't get font" warning does print. The
+  names `fontmetrics()` reports follow FreeType's `tt_face_get_name`
+  (English Windows names, else Apple, else Unicode; non-ASCII as `?`),
+  checked on the Liberation fonts only. `--enable textmetrics` also marks
+  the statements that call them as not reusable across edits (fonts are
+  files no fingerprint covers). (experimental features)
 - Cubic glyph segments (CFF fonts) are flattened with `powf(3.0)` like
   the C++ `std::pow`; that matches on macOS because both call the system
   libm, but a WASM libm may round a cube differently in the last bit. No

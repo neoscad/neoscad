@@ -82,6 +82,14 @@ struct Args {
     /// triangles (1e7).
     #[arg(long = "limit", value_name = "NAME=VALUE", action = clap::ArgAction::Append)]
     limit: Vec<String>,
+
+    /// Turn on one of OpenSCAD's experimental features for every call, as
+    /// the command line's --enable does (repeatable): textmetrics,
+    /// object-function, import-function, vector-swizzle. Off by default,
+    /// as in OpenSCAD. (A server-wide flag rather than a tool argument, so
+    /// it costs the agent's context nothing.)
+    #[arg(long = "enable", value_name = "FEATURE", action = clap::ArgAction::Append)]
+    enable: Vec<String>,
 }
 
 /// Run `neoscad mcp` with the arguments after `mcp`.
@@ -120,6 +128,10 @@ pub fn main(args: Vec<OsString>) -> u8 {
     if let Some(mb) = a.cache_mb {
         cfg.geometry_budget = mb << 20;
     }
+    for w in crate::enable_warnings(&a.enable) {
+        eprintln!("neoscad mcp: {w}");
+    }
+    cfg.features = crate::features(&a.enable);
     // An agent's generated code is exactly what one runaway `$fn` comes
     // from: the agent limits are on unless the user changes them.
     cfg.limits = match crate::limits::from_flags(session::Limits::AGENT, &a.limit) {

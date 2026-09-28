@@ -161,6 +161,32 @@ impl Evaluator<'_> {
                 }
                 out.push(b']');
             }
+            Value::Object(o) => {
+                // `tostream_visitor` on an object: `{ key = value; ... }`,
+                // keys raw and values as inside a list. Objects share
+                // their values as lists do, so the same stops apply.
+                if self.print_stack_exhausted(depth) {
+                    return Err(Exhausted::Stack);
+                }
+                if crate::limits::live::passes(out.len() as u64) {
+                    return Ok(());
+                }
+                out.extend_from_slice(b"{ ");
+                for (k, e) in o.keys().iter().zip(o.values()) {
+                    if out.len() > w.end {
+                        return Err(Exhausted::Long(out.len()));
+                    }
+                    w.steps += 1;
+                    if w.steps.is_multiple_of(POLL_STEPS) && self.print_stopped() {
+                        return Err(Exhausted::Stopped);
+                    }
+                    out.extend_from_slice(k.as_bytes());
+                    out.extend_from_slice(b" = ");
+                    self.write_nested_at(e, out, depth + 1, w)?;
+                    out.extend_from_slice(b"; ");
+                }
+                out.push(b'}');
+            }
             Value::Range(r) => push_range(out, r),
             Value::Function(f) => {
                 let ast = self.units[f.unit as usize].ast;

@@ -74,6 +74,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
         cwd: Some(std::env::current_dir().unwrap_or_default()),
         filter: a.filter,
         parts: crate::parts_enabled(&a.enable),
+        features: crate::features(&a.enable),
         jobs: jobs.max(1),
     };
     let report = match session.test(&req) {

@@ -402,6 +402,15 @@ fn check_full(
 /// Run each version of a program in turn through one memo, checking each
 /// against a full evaluation, and return the reuse of each.
 fn versions(files: &[(&str, &str)], versions: &[&str]) -> Vec<eval::ReuseStats> {
+    versions_with(files, versions, &Options::default())
+}
+
+/// [`versions`] with evaluation options.
+fn versions_with(
+    files: &[(&str, &str)],
+    versions: &[&str],
+    opts: &Options,
+) -> Vec<eval::ReuseStats> {
     let dir = scratch_dir();
     for (name, text) in files {
         std::fs::write(dir.join(name), text).unwrap();
@@ -409,7 +418,6 @@ fn versions(files: &[(&str, &str)], versions: &[&str]) -> Vec<eval::ReuseStats> 
     let host = Host::new();
     let path = dir.join("main.scad");
     let mut memo = Memo::new();
-    let opts = Options::default();
     let stats = versions
         .iter()
         .enumerate()
@@ -423,7 +431,7 @@ fn versions(files: &[(&str, &str)], versions: &[&str]) -> Vec<eval::ReuseStats> 
             } else {
                 v
             };
-            check(&host, &path, text, &opts, &mut memo)
+            check(&host, &path, text, opts, &mut memo)
                 .unwrap_or_else(|e| panic!("version {i}: {e}\n--- program ---\n{text}"))
         })
         .collect();
@@ -505,6 +513,48 @@ fn values_digest_by_content_and_shared_trees_digest_fast() {
             (1, 1),
             (2, 0),
             (1, 1)
+        ]
+    );
+}
+
+#[test]
+fn objects_digest_by_content_and_shared_trees_digest_fast() {
+    // As for lists: an object tree of depth 40 whose fields are one object
+    // digests in linear time, an equal object built another way replays,
+    // and key order is content (objects with their keys in another order
+    // are not equal).
+    let tree = "function f(v, n) = n == 0 ? v : f(object(a=v, b=v), n - 1);\n";
+    let v = |t: &str| format!("{tree}t = {t};\ncube(len(t));\nsphere(1);");
+    let versions_text = [
+        v("f(object(z=1), 40)"),
+        v("f(object(z=1), 40)"),
+        v("f(object(z=2), 40)"),
+        v("object(a=1, b=[1, \"x\"])"),
+        v("object(object(a=1), [[\"b\", [1, \"x\"]]])"),
+        v("object(b=[1, \"x\"], a=1)"),
+        v("[object(k=[for (i = [0:19]) i])]"),
+        v("[object(k=[each [0:9], each [10:19]])]"),
+    ];
+    let texts: Vec<&str> = versions_text.iter().map(String::as_str).collect();
+    let opts = Options {
+        features: eval::Features::from_names(&["object-function"]),
+        ..Options::default()
+    };
+    let t0 = std::time::Instant::now();
+    let s = versions_with(&[], &texts, &opts);
+    assert!(t0.elapsed().as_secs_f64() < 20.0, "{:?}", t0.elapsed());
+    let reuse: Vec<_> = s.iter().map(|s| (s.reused, s.recorded)).collect();
+    assert_eq!(
+        reuse,
+        [
+            (0, 2),
+            (2, 0),
+            (1, 1),
+            (1, 1),
+            (2, 0),
+            (1, 1),
+            (1, 1),
+            (2, 0)
         ]
     );
 }

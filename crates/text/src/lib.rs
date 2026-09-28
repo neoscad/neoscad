@@ -78,12 +78,37 @@ pub fn segments_for(circle_segments: Option<i32>) -> u32 {
     (s / 8 + 1).max(2) as u32
 }
 
-/// A shaped string: `FreetypeRenderer::ShapeResults`.
+/// A shaped string: `FreetypeRenderer::ShapeResults`. The extents are in
+/// em-relative units (FreeType's size over [`SCALE`]); all zero, offsets
+/// included, when no glyph has ink.
 struct ShapeResults {
     face: Arc<fontdb::Face>,
     glyphs: Vec<(shape::Shaped, Arc<outline::Glyph>)>,
     x_offset: f64,
     y_offset: f64,
+    ascent: f64,
+    descent: f64,
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
+    advance_x: f64,
+    advance_y: f64,
+}
+
+/// `a * b + c` as OpenSCAD's own build rounds a multiply feeding an add in
+/// one expression: fused on `aarch64`, plain elsewhere. The evaluator's
+/// `eval::fma` explains the policy; this crate sits below it.
+#[inline]
+fn mul_add(a: f64, b: f64, c: f64) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        a.mul_add(b, c)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        a * b + c
+    }
 }
 
 fn warn(out: &mut Vec<Message>, text: String) {
@@ -93,12 +118,14 @@ fn warn(out: &mut Vec<Message>, text: String) {
     });
 }
 
-fn shape_results(db: &FontDb, p: &Params<'_>, msgs: &mut Vec<Message>) -> Option<ShapeResults> {
-    let face = match db.lookup(p.font) {
-        Ok(f) => f,
+/// `FreetypeRenderer::Params::get_font_face`: the face `font` names, or
+/// its messages.
+fn font_face(db: &FontDb, font: &str, msgs: &mut Vec<Message>) -> Option<Arc<fontdb::Face>> {
+    match db.lookup(font) {
+        Ok(f) => Some(f),
         Err(e) => {
             if e == LookupError::Parse {
-                let t = p.font.trim();
+                let t = font.trim();
                 let lookup = if t.is_empty() {
                     "Liberation Sans:style=Regular"
                 } else {
@@ -109,10 +136,14 @@ fn shape_results(db: &FontDb, p: &Params<'_>, msgs: &mut Vec<Message>) -> Option
                     text: format!("Could not parse font '{lookup}'"),
                 });
             }
-            warn(msgs, format!("Can't get font {}", p.font));
-            return None;
+            warn(msgs, format!("Can't get font {font}"));
+            None
         }
-    };
+    }
+}
+
+fn shape_results(db: &FontDb, p: &Params<'_>, msgs: &mut Vec<Message>) -> Option<ShapeResults> {
+    let face = font_face(db, p.font, msgs)?;
     let font = face.font()?;
     let state = face.state.get_or_init(|| FaceState::new(&font));
     let features = pattern::parse(if p.font.trim().is_empty() {
@@ -154,6 +185,7 @@ fn shape_results(db: &FontDb, p: &Params<'_>, msgs: &mut Vec<Message>) -> Option
     let mut descent = f64::MAX;
     let (mut advance_x, mut advance_y) = (0.0, 0.0);
     let (mut left, mut right) = (f64::MAX, f64::MIN);
+    let (mut bottom, mut top) = (f64::MAX, f64::MIN);
     for (s, g) in &glyphs {
         let bbox = g.cbox.unwrap_or_default().grid_fit();
         // Glyphs without ink leave the extents alone.
@@ -161,11 +193,16 @@ fn shape_results(db: &FontDb, p: &Params<'_>, msgs: &mut Vec<Message>) -> Option
             ascent = ascent.max(bbox.y_max as f64 / SCALE);
             descent = descent.min(bbox.y_min as f64 / SCALE);
             let gxoff = f64::from(s.x_offset) / SCALE;
+            let gyoff = f64::from(s.y_offset) / SCALE;
             left = left.min(advance_x + gxoff + bbox.x_min as f64 / SCALE);
             right = right.max(advance_x + gxoff + bbox.x_max as f64 / SCALE);
+            top = top.max(advance_y + gyoff + bbox.y_max as f64 / SCALE);
+            bottom = bottom.min(advance_y + gyoff + bbox.y_min as f64 / SCALE);
         }
-        advance_x += f64::from(s.x_advance) / SCALE * p.spacing;
-        advance_y += f64::from(s.y_advance) / SCALE * p.spacing;
+        // `advance_x += glyph.get_x_advance() * params.spacing`: one
+        // expression, so clang fuses it where the target can.
+        advance_x = mul_add(f64::from(s.x_advance) / SCALE, p.spacing, advance_x);
+        advance_y = mul_add(f64::from(s.y_advance) / SCALE, p.spacing, advance_y);
     }
     let (mut x_offset, mut y_offset) = (0.0, 0.0);
     // Right and left start out reversed; if they still are, there was no
@@ -221,13 +258,95 @@ fn shape_results(db: &FontDb, p: &Params<'_>, msgs: &mut Vec<Message>) -> Option
                 }
             };
         }
+    } else {
+        (left, right, top, bottom, ascent, descent) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     }
     Some(ShapeResults {
         face: face.clone(),
         glyphs,
         x_offset,
         y_offset,
+        ascent,
+        descent,
+        left,
+        right,
+        top,
+        bottom,
+        advance_x,
+        advance_y,
     })
+}
+
+/// `FreetypeRenderer::TextMetrics`: what `textmetrics()` returns, in the
+/// units `text()` draws in. All zero but the advance for text without
+/// ink (only spaces).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TextMetrics {
+    /// The ink's bounding box: its lower left corner and its size.
+    pub position: [f64; 2],
+    pub size: [f64; 2],
+    pub ascent: f64,
+    pub descent: f64,
+    /// Where `halign` and `valign` move the text.
+    pub offset: [f64; 2],
+    pub advance: [f64; 2],
+}
+
+/// Measure `p.text` as `text()` would lay it out; `None` (with the
+/// messages) when the font cannot be had.
+pub fn text_metrics(db: &FontDb, p: &Params<'_>) -> (Option<TextMetrics>, Vec<Message>) {
+    let mut msgs = Vec::new();
+    let Some(sr) = shape_results(db, p, &mut msgs) else {
+        return (None, msgs);
+    };
+    let z = p.size;
+    let m = TextMetrics {
+        position: [(sr.x_offset + sr.left) * z, (sr.y_offset + sr.bottom) * z],
+        size: [(sr.right - sr.left) * z, (sr.top - sr.bottom) * z],
+        ascent: sr.ascent * z,
+        descent: sr.descent * z,
+        offset: [sr.x_offset * z, sr.y_offset * z],
+        advance: [sr.advance_x * z, sr.advance_y * z],
+    };
+    (Some(m), msgs)
+}
+
+/// `FreetypeRenderer::FontMetrics`: what `fontmetrics()` returns.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FontMetrics {
+    pub nominal_ascent: f64,
+    pub nominal_descent: f64,
+    pub max_ascent: f64,
+    pub max_descent: f64,
+    pub interline: f64,
+    /// FreeType's `family_name` and `style_name`.
+    pub family: String,
+    pub style: String,
+}
+
+/// The metrics of the face `font` names at `size`; `None` (with the
+/// messages) when it cannot be had.
+pub fn font_metrics(db: &FontDb, font: &str, size: f64) -> (Option<FontMetrics>, Vec<Message>) {
+    let mut msgs = Vec::new();
+    let Some(face) = font_face(db, font, &mut msgs) else {
+        return (None, msgs);
+    };
+    let Some(f) = face.font() else {
+        return (None, msgs);
+    };
+    let state = face.state.get_or_init(|| FaceState::new(&f));
+    let v = shape::face_metrics(&f);
+    let scaled = |units: i64| state.scale_y(units) as f64 / SCALE * size;
+    let m = FontMetrics {
+        nominal_ascent: scaled(v.ascender),
+        nominal_descent: scaled(v.descender),
+        max_ascent: scaled(v.y_max),
+        max_descent: scaled(v.y_min),
+        interline: scaled(v.height),
+        family: v.family,
+        style: v.style,
+    };
+    (Some(m), msgs)
 }
 
 fn halign_warning(v: &str) -> String {

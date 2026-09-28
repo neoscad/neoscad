@@ -129,6 +129,11 @@ pub struct DocumentRequest {
     /// accept the same text without warning that `part` is unknown.
     #[uniffi(default = false)]
     pub parts: bool,
+    /// OpenSCAD's experimental features, as `--enable` names them
+    /// (`textmetrics`, `object-function`, ...); off by default, as in
+    /// OpenSCAD.
+    #[uniffi(default = [])]
+    pub enable: Vec<String>,
 }
 
 /// What a console line is.
@@ -536,6 +541,7 @@ impl Core {
             run.text = Some(text.clone());
             run.defines = request.overrides.iter().filter_map(define).collect();
             run.parts = request.parts;
+            run.features = eval::Features::from_names(&request.enable);
             let (scheme, generation) = match &viewport {
                 Some(v) => {
                     let generation = v.requests.fetch_add(1, Ordering::SeqCst) + 1;

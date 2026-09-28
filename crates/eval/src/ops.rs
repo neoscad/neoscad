@@ -20,7 +20,7 @@ use lang::ast::BinaryOp;
 use crate::fma::mul_add;
 use crate::limits::Guard;
 use crate::sym::FxBuild;
-use crate::value::{Str, Type, Value, Vector};
+use crate::value::{Object, Str, Type, Value, Vector};
 
 /// Why an operation produced `undef`: messages joined with `"\n\t"` when
 /// printed.
@@ -141,11 +141,15 @@ impl<'a> Stop<'a> {
     }
 }
 
-/// Two lists being walked side by side, and the next index.
+/// Two lists (or two objects' values) being walked side by side, and the
+/// next index.
 struct Pair<'v> {
     x: &'v [Value],
     y: &'v [Value],
     i: usize,
+    /// The first object, when these are two objects' values: its methods
+    /// are never equal to the other's (see [`Object::is_method`]).
+    object: Option<&'v Object>,
 }
 
 impl<'v> Pair<'v> {
@@ -154,7 +158,23 @@ impl<'v> Pair<'v> {
             x: x.as_slice(),
             y: y.as_slice(),
             i: 0,
+            object: None,
         }
+    }
+
+    fn objects(x: &'v Object, y: &'v Object) -> Self {
+        Pair {
+            x: x.values(),
+            y: y.values(),
+            i: 0,
+            object: Some(x),
+        }
+    }
+
+    /// Whether the elements last returned are methods of two different
+    /// objects (the walk never enters an object paired with itself).
+    fn at_method(&self) -> bool {
+        self.object.is_some_and(|o| o.is_method(self.i - 1))
     }
 
     /// The pair's identity for [`Walk`]'s memory: the lists' element
@@ -186,9 +206,9 @@ struct Walk<'v, 's> {
 }
 
 impl<'v, 's> Walk<'v, 's> {
-    fn new(x: &'v Vector, y: &'v Vector, stop: Stop<'s>) -> Self {
+    fn new(top: Pair<'v>, stop: Stop<'s>) -> Self {
         Walk {
-            top: Pair::new(x, y),
+            top,
             stack: Vec::new(),
             done: HashSet::default(),
             steps: 0,
@@ -215,11 +235,42 @@ impl<'v, 's> Walk<'v, 's> {
     /// Walk into a pair of lists, unless it is one already walked to the
     /// end undecided.
     fn enter(&mut self, x: &'v Vector, y: &'v Vector) {
-        let p = Pair::new(x, y);
+        self.enter_pair(Pair::new(x, y));
+    }
+
+    fn enter_pair(&mut self, p: Pair<'v>) {
         if self.steps >= MEMO_AFTER && self.done.contains(&p.key()) {
             return;
         }
         self.stack.push(std::mem::replace(&mut self.top, p));
+    }
+
+    /// Walk into two different objects for `==`, unless they are a pair
+    /// already walked to the end undecided; false when their keys already
+    /// tell them apart. The keys are compared here, before the values, and
+    /// count as steps as the values do.
+    fn enter_objects(&mut self, x: &'v Object, y: &'v Object) -> bool {
+        if x.len() != y.len() {
+            return false;
+        }
+        let p = Pair::objects(x, y);
+        if self.steps >= MEMO_AFTER && self.done.contains(&p.key()) {
+            return true;
+        }
+        if !self.keys_equal(x, y) {
+            return false;
+        }
+        self.stack.push(std::mem::replace(&mut self.top, p));
+        true
+    }
+
+    /// Whether two objects have the same keys in the same order
+    /// (`ObjectType::operator==` compares them by position).
+    fn keys_equal(&mut self, x: &Object, y: &Object) -> bool {
+        x.keys().iter().zip(y.keys()).all(|(a, b)| {
+            self.steps += 1 + (a.as_bytes().len() / LONG_STR) as u64;
+            a.as_bytes() == b.as_bytes()
+        })
     }
 
     /// The innermost pair of lists ran out undecided: remember it, and go
@@ -280,8 +331,27 @@ pub fn equals(a: &Value, b: &Value) -> bool {
 pub fn equals_in(a: &Value, b: &Value, stop: Stop<'_>) -> Result<bool, Stopped> {
     match (a, b) {
         (Value::Vector(x), Value::Vector(y)) => vectors_equal(x, y, stop),
+        (Value::Object(x), Value::Object(y)) => objects_equal(x, y, stop),
         _ => Ok(scalars_equal(a, b)),
     }
+}
+
+/// `ObjectType::operator==`: the same object, or the same number of
+/// entries with equal keys and values position by position (so key order
+/// matters). Unlike a list, an object is equal to itself even when it
+/// holds a NaN, as OpenSCAD compares their addresses first.
+fn objects_equal(x: &Object, y: &Object, stop: Stop<'_>) -> Result<bool, Stopped> {
+    if Object::ptr_eq(x, y) {
+        return Ok(true);
+    }
+    if x.len() != y.len() {
+        return Ok(false);
+    }
+    let mut w = Walk::new(Pair::objects(x, y), stop);
+    if !w.keys_equal(x, y) {
+        return Ok(false);
+    }
+    walk_equal(w)
 }
 
 /// `==` on anything but two lists.
@@ -306,7 +376,12 @@ fn vectors_equal(x: &Vector, y: &Vector, stop: Stop<'_>) -> Result<bool, Stopped
     if x.len() != y.len() {
         return Ok(false);
     }
-    let mut w = Walk::new(x, y, stop);
+    walk_equal(Walk::new(Pair::new(x, y), stop))
+}
+
+/// The `==` walk from its first pair: lists and objects nested in each
+/// other, element by element.
+fn walk_equal(mut w: Walk<'_, '_>) -> Result<bool, Stopped> {
     loop {
         match w.next()? {
             None => {
@@ -319,6 +394,16 @@ fn vectors_equal(x: &Vector, y: &Vector, stop: Stop<'_>) -> Result<bool, Stopped
                     return Ok(false);
                 }
                 w.enter(p, q);
+            }
+            Some((Value::Object(p), Value::Object(q))) => {
+                if !Object::ptr_eq(p, q) && !w.enter_objects(p, q) {
+                    return Ok(false);
+                }
+            }
+            Some((Value::Function(p), Value::Function(q))) => {
+                if !Rc::ptr_eq(p, q) || w.top.at_method() {
+                    return Ok(false);
+                }
             }
             Some((Value::Str(p), Value::Str(q))) => {
                 if w.strings(p, q).is_ne() {
@@ -424,6 +509,10 @@ fn compare_scalars(a: &Value, b: &Value, op: Cmp) -> Result<bool, Why> {
             "operation undefined (function {} function)",
             op.symbol()
         ))),
+        (Value::Object(_), Value::Object(_)) => Err(Why::new(format!(
+            "operation undefined (object {} object)",
+            op.symbol()
+        ))),
         _ => Err(undefined_op(a, op.symbol(), b)),
     }
 }
@@ -451,7 +540,7 @@ enum Order {
 /// on the two types), which is why OpenSCAD's `y[i] < x[i]` never has an
 /// undefined result to discard.
 fn vector_order(x: &Vector, y: &Vector, stop: Stop<'_>) -> Result<Result<Order, Why>, Stopped> {
-    let mut w = Walk::new(x, y, stop);
+    let mut w = Walk::new(Pair::new(x, y), stop);
     loop {
         let (p, q) = match w.next()? {
             Some(pq) => pq,
@@ -827,7 +916,7 @@ fn to_index(d: f64) -> u32 {
 /// never printed by OpenSCAD, so none is kept.
 pub fn index(a: &Value, i: &Value) -> Value {
     let Value::Number(d) = i else {
-        return Value::Undef;
+        return index_by_key(a, i);
     };
     let i = to_index(*d) as usize;
     match a {
@@ -839,6 +928,15 @@ pub fn index(a: &Value, i: &Value) -> Value {
             2 => Value::Number(r.end),
             _ => Value::Undef,
         },
+        _ => Value::Undef,
+    }
+}
+
+/// `o["key"]`: an object's value (a method bound to it), or `undef`.
+#[inline(never)]
+fn index_by_key(a: &Value, i: &Value) -> Value {
+    match (a, i) {
+        (Value::Object(o), Value::Str(k)) => o.get(k.as_bytes()),
         _ => Value::Undef,
     }
 }

@@ -580,6 +580,8 @@ fn run_of(
             .get("parts")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+    // OpenSCAD's experimental features, by the same names.
+    run.features = crate::features(&enable);
     if params
         .get("progress")
         .and_then(Value::as_bool)
@@ -746,6 +748,9 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
             if run.parts {
                 p["parts"] = json!(true);
             }
+            if let Some(e) = params.get("enable") {
+                p["enable"] = e.clone();
+            }
             let out = crate::snapshot::execute(s, &p, &cwd, run.progress.clone());
             let summary: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
             if out.exit_code != 0 && summary.is_null() {
@@ -866,6 +871,7 @@ fn test_method(s: &session::Session, params: &Value) -> Reply {
                 .get("parts")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+        features: crate::features(&enable),
         jobs: jobs.max(1),
     };
     let r = s.test(&req).map_err(cancelled)?;

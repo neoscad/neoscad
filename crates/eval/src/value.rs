@@ -1,8 +1,8 @@
 //! OpenSCAD values.
 //!
 //! A [`Value`] is 16 bytes and cheap to clone: numbers and booleans are
-//! inline, strings, vectors and function literals are reference counted,
-//! and a range is kept lazy as `(begin, step, end)`. Values never borrow the
+//! inline, strings, vectors, objects and function literals are reference
+//! counted, and a range is kept lazy as `(begin, step, end)`. Values never borrow the
 //! AST (a function literal names its expression by unit and id), so they
 //! carry no lifetime and could later be cached across evaluations.
 //!
@@ -11,9 +11,10 @@
 //! prints them as a warning), so here operators return them separately
 //! (see `ops`) and a stored `Undef` carries nothing.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::fmt;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use lang::ast::ExprId;
 
@@ -30,6 +31,9 @@ pub enum Value {
     Vector(Vector),
     Range(RangeRef),
     Function(Rc<FunctionValue>),
+    /// OpenSCAD's experimental `ObjectType`: only the experimental
+    /// features make one (`object()`, `textmetrics()`, JSON `import()`).
+    Object(Object),
 }
 
 /// The value kinds, named as OpenSCAD names them in messages.
@@ -42,6 +46,7 @@ pub enum Type {
     Vector,
     Range,
     Function,
+    Object,
 }
 
 impl Type {
@@ -54,6 +59,7 @@ impl Type {
             Type::Vector => "vector",
             Type::Range => "range",
             Type::Function => "function",
+            Type::Object => "object",
         }
     }
 }
@@ -68,6 +74,7 @@ impl Value {
             Value::Vector(_) => Type::Vector,
             Value::Range(_) => Type::Range,
             Value::Function(_) => Type::Function,
+            Value::Object(_) => Type::Object,
         }
     }
 
@@ -92,6 +99,7 @@ impl Value {
             Value::Str(s) => !s.is_empty(),
             Value::Vector(v) => !v.is_empty(),
             Value::Range(_) | Value::Function(_) => true,
+            Value::Object(o) => !o.is_empty(),
         }
     }
 
@@ -454,26 +462,60 @@ fn list_bytes(n: usize) -> u64 {
 /// beyond that, but in a WASM engine at a few thousand. (The nightly
 /// crashes on such a value even natively.)
 impl Drop for Vector {
+    // Out of line, as it was while it did its own loop: inlined into every
+    // value's drop glue it made the evaluator's small hot functions too
+    // big to inline themselves (1-4% more instructions on fib, a tail
+    // loop and nested `for`s).
+    #[inline(never)]
     fn drop(&mut self) {
         let Some(items) = Rc::get_mut(&mut self.0) else {
             return;
         };
         crate::limits::live::credit(list_bytes(items.len()));
-        if !items.iter().any(|v| matches!(v, Value::Vector(_))) {
+        if !items.iter().any(nests) {
             return;
         }
-        let mut pending = vec![std::mem::take(items)];
-        while let Some(mut items) = pending.pop() {
-            for v in items.drain(..) {
-                if let Value::Vector(mut inner) = v
-                    && let Some(inner) = Rc::get_mut(&mut inner.0)
-                    && !inner.is_empty()
-                {
-                    // The slots leave the count here; the emptied list's
-                    // own drop, at the end of this block, credits its box.
-                    crate::limits::live::credit(slots_bytes(inner.len()));
-                    pending.push(std::mem::take(inner));
+        drop_nested(std::mem::take(items));
+    }
+}
+
+/// Whether dropping `v` may free values nested inside it (see
+/// [`drop_nested`]).
+#[inline(always)]
+fn nests(v: &Value) -> bool {
+    matches!(v, Value::Vector(_) | Value::Object(_))
+}
+
+/// Drop `items` and every list and object they hold alone, with a loop
+/// instead of recursion (see `Drop for Vector`): an object nesting a list
+/// nesting an object a million levels deep is as easy to build as nested
+/// lists.
+fn drop_nested(items: Vec<Value>) {
+    let mut pending = vec![items];
+    while let Some(mut items) = pending.pop() {
+        for v in items.drain(..) {
+            match v {
+                Value::Vector(mut inner) => {
+                    if let Some(inner) = Rc::get_mut(&mut inner.0)
+                        && !inner.is_empty()
+                    {
+                        // The slots leave the count here; the emptied
+                        // list's own drop, at the end of this arm, credits
+                        // its box.
+                        crate::limits::live::credit(slots_bytes(inner.len()));
+                        pending.push(std::mem::take(inner));
+                    }
                 }
+                Value::Object(mut o) => {
+                    // The object's own drop credits everything it was
+                    // charged, whatever its values have become.
+                    if let Some(d) = Rc::get_mut(&mut o.0)
+                        && d.values.iter().any(nests)
+                    {
+                        pending.push(std::mem::take(&mut d.values));
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -639,12 +681,284 @@ pub fn next_after(x: f64, toward: f64) -> f64 {
     f64::from_bits(if up { bits + 1 } else { bits - 1 })
 }
 
+/// OpenSCAD's experimental `ObjectType`: string keys in insertion order,
+/// each with a value, shared on clone like a list.
+///
+/// A function stored in an object whose literal has a `this` parameter is
+/// a *method*: called through the object (`o.f()`, `o["f"]()`), its
+/// `this` is the object. OpenSCAD makes the method when the object is
+/// built, giving the function a context that holds the object, which is a
+/// reference cycle its garbage collector breaks. Here the object keeps the
+/// plain function and binds it when it is read ([`Object::get`]), so
+/// nothing refers back to the object: what reads the method holds the
+/// object, never the other way round. The bound function is remembered
+/// weakly, so reading `o.f` twice gives the same function while either is
+/// alive (`o.f == o.f` is true in OpenSCAD, as functions are equal only to
+/// themselves). Everything else OpenSCAD's form can show is the same:
+/// copying an object into another (`object(o)`) rebinds its methods to the
+/// copy, which is why two copies are never equal when they hold one (see
+/// [`Object::is_method`]).
+#[derive(Clone)]
+pub struct Object(Rc<ObjectData>);
+
+pub(crate) struct ObjectData {
+    keys: Vec<Str>,
+    pub(crate) values: Vec<Value>,
+    /// Key to position, once there are more than [`INDEX_AFTER`] keys:
+    /// `object()` of a 100,000-entry list, then random access to it, is
+    /// one of OpenSCAD's tests.
+    index: Option<HashMap<Key, u32, KeyHash>>,
+    /// The methods' positions, ascending, each with its bound form while
+    /// something holds it.
+    methods: Vec<(u32, RefCell<Weak<FunctionValue>>)>,
+    /// What this object added to the memory estimate, credited on drop.
+    charged: u64,
+}
+
+/// Keys hash with SipHash under fixed keys: deterministic (so a WASM build
+/// needs no entropy), and not trivially collided by a JSON file's keys,
+/// which an agent's model may read from anywhere.
+type KeyHash = std::hash::BuildHasherDefault<std::collections::hash_map::DefaultHasher>;
+
+/// Objects with at most this many keys are searched in order.
+const INDEX_AFTER: usize = 8;
+
+/// A key in an object's index, compared and hashed by its bytes. (A
+/// `Str`'s only interior mutability is its cached character count, which
+/// neither hashing nor comparison reads, hence the `mutable_key_type`
+/// allowances where the index is built and read.)
+#[derive(Debug)]
+struct Key(Str);
+
+impl PartialEq for Key {
+    fn eq(&self, o: &Key) -> bool {
+        self.0.as_bytes() == o.0.as_bytes()
+    }
+}
+
+impl Eq for Key {}
+
+impl std::hash::Hash for Key {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0.as_bytes().hash(h);
+    }
+}
+
+impl std::borrow::Borrow<[u8]> for Key {
+    fn borrow(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+#[allow(clippy::mutable_key_type)]
+fn index_of(keys: &[Str]) -> HashMap<Key, u32, KeyHash> {
+    keys.iter()
+        .enumerate()
+        .map(|(i, k)| (Key(k.clone()), i as u32))
+        .collect()
+}
+
+#[allow(clippy::mutable_key_type)]
+fn find_in(keys: &[Str], index: Option<&HashMap<Key, u32, KeyHash>>, key: &[u8]) -> Option<usize> {
+    match index {
+        Some(m) => m.get(key).map(|&i| i as usize),
+        None => keys.iter().position(|k| k.as_bytes() == key),
+    }
+}
+
+/// Bytes an object of `n` entries (and `methods` methods) counts for: its
+/// box, a value and a key slot per entry, and its index when it has one.
+/// The keys and values count for themselves, as a list's elements do.
+fn object_bytes(n: usize, methods: usize) -> u64 {
+    let index = if n > INDEX_AFTER { n as u64 * 32 } else { 0 };
+    crate::limits::live::BOX
+        + n as u64 * (crate::limits::live::SLOT + 8)
+        + index
+        + methods as u64 * 24
+}
+
+impl Drop for ObjectData {
+    fn drop(&mut self) {
+        crate::limits::live::credit(self.charged);
+        if self.values.iter().any(nests) {
+            drop_nested(std::mem::take(&mut self.values));
+        }
+    }
+}
+
+impl Object {
+    pub fn len(&self) -> usize {
+        self.0.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.values.is_empty()
+    }
+
+    /// The keys, in order.
+    pub fn keys(&self) -> &[Str] {
+        &self.0.keys
+    }
+
+    /// The values as stored, in key order (methods unbound).
+    pub fn values(&self) -> &[Value] {
+        &self.0.values
+    }
+
+    pub fn ptr_eq(a: &Object, b: &Object) -> bool {
+        Rc::ptr_eq(&a.0, &b.0)
+    }
+
+    /// The object's identity while it lives, for walks that remember what
+    /// they have seen (`memo`'s digests).
+    pub fn addr(&self) -> usize {
+        Rc::as_ptr(&self.0) as usize
+    }
+
+    fn find(&self, key: &[u8]) -> Option<usize> {
+        find_in(&self.0.keys, self.0.index.as_ref(), key)
+    }
+
+    pub fn contains(&self, key: &[u8]) -> bool {
+        self.find(key).is_some()
+    }
+
+    /// Whether the value at `i` is a method (see [`Object`]). Two objects
+    /// that are not the same object never hold equal methods: OpenSCAD
+    /// makes each object its own.
+    pub fn is_method(&self, i: usize) -> bool {
+        self.0
+            .methods
+            .binary_search_by_key(&(i as u32), |m| m.0)
+            .is_ok()
+    }
+
+    /// `o[key]`: the value, a method bound to this object, or `undef`.
+    pub fn get(&self, key: &[u8]) -> Value {
+        let Some(i) = self.find(key) else {
+            return Value::Undef;
+        };
+        let v = &self.0.values[i];
+        if let Value::Function(f) = v
+            && let Ok(m) = self.0.methods.binary_search_by_key(&(i as u32), |m| m.0)
+        {
+            let cell = &self.0.methods[m].1;
+            if let Some(b) = cell.borrow().upgrade() {
+                return Value::Function(b);
+            }
+            let b = Rc::new(FunctionValue::bound(f, self.clone()));
+            *cell.borrow_mut() = Rc::downgrade(&b);
+            return Value::Function(b);
+        }
+        v.clone()
+    }
+}
+
+impl fmt::Debug for Object {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(self.0.keys.iter().zip(self.0.values.iter()))
+            .finish()
+    }
+}
+
+/// An object being built: `ObjectType::set` and `del` on a fresh object.
+#[derive(Default, Debug)]
+pub struct ObjectBuilder {
+    keys: Vec<Str>,
+    values: Vec<Value>,
+    /// Kept current while it has one; a deletion drops it, as OpenSCAD's
+    /// `del` clears its map, and the next search rebuilds it.
+    index: Option<HashMap<Key, u32, KeyHash>>,
+}
+
+impl ObjectBuilder {
+    pub fn new() -> ObjectBuilder {
+        ObjectBuilder::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    fn find(&mut self, key: &[u8]) -> Option<usize> {
+        if self.index.is_none() && self.keys.len() > INDEX_AFTER {
+            self.index = Some(index_of(&self.keys));
+        }
+        find_in(&self.keys, self.index.as_ref(), key)
+    }
+
+    /// Set `key`: an existing key keeps its position.
+    pub fn set(&mut self, key: Str, value: Value) {
+        match self.find(key.as_bytes()) {
+            Some(i) => self.values[i] = value,
+            None => {
+                if let Some(m) = &mut self.index {
+                    m.insert(Key(key.clone()), self.keys.len() as u32);
+                }
+                self.keys.push(key);
+                self.values.push(value);
+            }
+        }
+    }
+
+    /// Remove `key`, if present; later keys move up.
+    pub fn del(&mut self, key: &[u8]) {
+        if let Some(i) = self.find(key) {
+            self.keys.remove(i);
+            self.values.remove(i);
+            self.index = None;
+        }
+    }
+
+    /// Every entry of `o`, in its order (`object(o)`).
+    pub fn extend_from(&mut self, o: &Object) {
+        for (k, v) in o.0.keys.iter().zip(o.0.values.iter()) {
+            self.set(k.clone(), v.clone());
+        }
+    }
+
+    /// The object. `is_method` says which stored functions are methods (a
+    /// literal with a `this` parameter; see [`Object`]).
+    pub fn finish(self, is_method: impl Fn(&FunctionValue) -> bool) -> Object {
+        let methods: Vec<(u32, RefCell<Weak<FunctionValue>>)> = self
+            .values
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| matches!(v, Value::Function(f) if is_method(f)))
+            .map(|(i, _)| (i as u32, RefCell::new(Weak::new())))
+            .collect();
+        let n = self.values.len();
+        let index = match self.index {
+            Some(m) => Some(m),
+            None if n > INDEX_AFTER => Some(index_of(&self.keys)),
+            None => None,
+        };
+        let charged = object_bytes(n, methods.len());
+        crate::limits::live::charge(charged);
+        Object(Rc::new(ObjectData {
+            keys: self.keys,
+            values: self.values,
+            index,
+            methods,
+            charged,
+        }))
+    }
+}
+
 /// A function literal: its expression and the context it closed over.
 pub struct FunctionValue {
     pub(crate) unit: u32,
     /// The `ExprKind::Function` expression.
     pub(crate) expr: ExprId,
     pub(crate) ctx: Rc<Ctx>,
+    /// A method's object (see [`Object`]): a call binds its `this`
+    /// parameter to it.
+    pub(crate) this: Option<Object>,
 }
 
 /// Bytes a function literal counts for towards the memory estimate: its
@@ -657,7 +971,23 @@ const FUNCTION_BYTES: u64 = 256;
 impl FunctionValue {
     pub(crate) fn new(unit: u32, expr: ExprId, ctx: Rc<Ctx>) -> FunctionValue {
         crate::limits::live::charge(FUNCTION_BYTES);
-        FunctionValue { unit, expr, ctx }
+        FunctionValue {
+            unit,
+            expr,
+            ctx,
+            this: None,
+        }
+    }
+
+    /// `f` as a method of `this`.
+    fn bound(f: &FunctionValue, this: Object) -> FunctionValue {
+        crate::limits::live::charge(FUNCTION_BYTES);
+        FunctionValue {
+            unit: f.unit,
+            expr: f.expr,
+            ctx: f.ctx.clone(),
+            this: Some(this),
+        }
     }
 }
 
@@ -772,6 +1102,47 @@ mod tests {
         g.extend((0..2000).map(item));
         assert!(live::get() > 0);
         drop(g);
+        assert_eq!(live::get(), 0);
+    }
+
+    #[test]
+    fn objects_count_and_free_everything() {
+        // An object counts its box, slots and index while it lives; its
+        // keys and values count for themselves. Everything leaves the
+        // count when the last reference goes, bound methods included, and
+        // however deep objects and lists nest in each other (freed with a
+        // loop: a recursive drop would overflow the stack).
+        use crate::limits::live;
+        live::reset();
+        let mut b = ObjectBuilder::new();
+        for i in 0..20 {
+            b.set(
+                Str::new(format!("k{i}").as_bytes()),
+                Value::vector(vec![Value::Number(1.0); 3]),
+            );
+        }
+        b.del(b"k3");
+        let o = b.finish(|_| false);
+        assert_eq!(o.len(), 19);
+        assert!(o.contains(b"k19") && !o.contains(b"k3"));
+        assert!(live::get() > object_bytes(19, 0));
+        let copy = Value::Object(o.clone());
+        drop(o);
+        drop(copy);
+        assert_eq!(live::get(), 0);
+        let mut v = Value::Number(0.0);
+        for i in 0..200_000 {
+            let mut b = ObjectBuilder::new();
+            b.set(Str::new(b"a"), v);
+            let o = Value::Object(b.finish(|_| false));
+            v = if i % 2 == 0 {
+                Value::vector(vec![o])
+            } else {
+                o
+            };
+        }
+        assert!(live::get() > 0);
+        drop(v);
         assert_eq!(live::get(), 0);
     }
 
