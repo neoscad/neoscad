@@ -2,8 +2,9 @@
 # Render the hero video: apple/Icon/hero.scad driven through one full $t
 # cycle by neoscad's --animate, framed and captioned like the still
 # (scripts/apple/build-hero.sh), as a seamless 1920x1080, 30 fps loop.
-# Output in apple/Icon/build/hero-video/: hero-gearbox.webm (AV1) and
-# hero-gearbox.mp4 (H.264), no audio.
+# Output in apple/Icon/build/hero-video/: hero-gearbox.mp4 (the page's
+# loop) and hero-share.mp4 (a short clip for link previews), H.264, no
+# audio.
 #
 # The caption's render times are read from build-hero.sh's times.txt,
 # not measured again: the video shows the same model at $t = 0, and those
@@ -114,19 +115,27 @@ fi
 # looping hero and each keyframe costs about as much as a second of
 # motion. No audio track: the page autoplays it muted.
 #
-# Two files: AV1 in WebM, the smaller at equal quality, which the page
-# offers first to browsers that can decode it, and H.264 in MP4 (with
-# faststart, so playback starts before the download ends) for the rest.
-# The loop is two minutes long, so the CRFs decide the download size;
-# these are the highest found that keep tooth edges clean at 1080p
-# (luma SSIM about 0.99 against the frames for both).
-yuv=(-vf "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
-     -g $((20 * fps)))
-ffmpeg -v error -y -framerate "$fps" -i "$work/frame%05d.png" -an "${yuv[@]}" \
-    -c:v libx264 -preset slow -tune animation -crf 30 -movflags +faststart \
-    "$out/hero-gearbox.mp4"
-ffmpeg -v error -y -framerate "$fps" -i "$work/frame%05d.png" -an "${yuv[@]}" \
-    -c:v libsvtav1 -preset 6 -crf 46 -svtav1-params tune=0:svt-log-level=1 \
-    "$out/hero-gearbox.webm"
-ls -l "$out"/hero-gearbox.*
+# Two H.264 MP4s, the one codec every browser and link preview plays
+# (with faststart, so playback starts before the download ends):
+# - hero-gearbox.mp4, the whole 1080p loop for the page. CRF 32: a spike
+#   over CRF 23-35, 720p and VP9/AV1 found 32 the highest with tooth edges
+#   and the caption indistinguishable from the frames (luma SSIM 0.989),
+#   about 7.4 MB for the two minutes; AV1 was no smaller at that quality,
+#   so it isn't worth a second file.
+# - hero-share.mp4, the page's og:video: one sun turn (frames / sun_turns,
+#   4.8 s), which link previews such as Messages autoplay muted and loop.
+#   Everything but the planets' holes comes round in one sun turn (they
+#   step 2.4 degrees at the seam). 1280x720 at CRF 28 keeps the caption
+#   legible for about 270 KB.
+yuv="scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
+ffmpeg -v error -y -framerate "$fps" -i "$work/frame%05d.png" -an -vf "$yuv" \
+    -g $((20 * fps)) -c:v libx264 -profile:v high -preset slow -tune animation -crf 32 \
+    -movflags +faststart "$out/hero-gearbox.mp4"
+turns="$(sed -n 's|^sun_turns = \([0-9]*\);.*|\1|p' "$scad" | head -1)"
+share=$((frames / turns))
+ffmpeg -v error -y -framerate "$fps" -i "$work/frame%05d.png" -frames:v "$share" -an \
+    -vf "scale=w=1280:h=720:flags=lanczos,$yuv" \
+    -g "$share" -c:v libx264 -profile:v high -preset slow -tune animation -crf 28 \
+    -movflags +faststart "$out/hero-share.mp4"
+ls -l "$out"/hero-gearbox.mp4 "$out"/hero-share.mp4
 echo "build-hero-video: $out"
