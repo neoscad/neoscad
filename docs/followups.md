@@ -23,7 +23,7 @@ lead them, come roughly in order of user impact.
   cap (peaks vary by run: 4.2–4.9 GB around `vnf__015`/`v6.scad`) and
   passes at 8192 MB. Raise the default for full-corpus runs, or reset the
   session per file.
-- A one-line edit re-parses the main file. Since `b189929` an include
+- A one-line edit re-parses the main file. Since `9dbb98b` an include
   between top-level statements of a file that parses on its own
   (`include <BOSL2/std.scad>`) is parsed and lowered once and spliced
   into each new program (`lang::fragment`, the session's
@@ -39,7 +39,7 @@ lead them, come roughly in order of user impact.
   which is now most of an edit.
   One-shot command-line runs parse everything, as there is nothing to
   reuse. An incremental parser for the main file is not started. (7a,
-  `b189929`)
+  `9dbb98b`)
 - The command line's own export path (`crates/cli/src/run.rs`) does not
   go through `session::Session`; the session re-implements its steps for
   served exports and shares only the encoder (`session::export`). That
@@ -61,7 +61,7 @@ lead them, come roughly in order of user impact.
 - The memory limit is an estimate kept at the allocation-heavy points
   (`eval::limits`), not a measurement: every evaluator value (each
   list, string, range and function literal, charged when made since
-  `0fdda54`), nodes and messages, and the geometry results a render holds until
+  `88de26e`), nodes and messages, and the geometry results a render holds until
   their parents use them. A kernel operation's own working memory (a
   boolean's intermediate meshes), the geometry cache (its own budget),
   the check's rays and the snapshot's drawing are not counted; the
@@ -114,7 +114,7 @@ lead them, come roughly in order of user impact.
 
 ## Performance
 - `PolySet::tessellate` with the libtess2 port, against the ear clipper
-  it replaced (7b117d1), in-process with mimalloc as the binaries link
+  it replaced (ff714c3), in-process with mimalloc as the binaries link
   it: 600k flat quads 0.020 s against 0.038, 600k non-planar quads 0.031
   against 0.038, 60k 8-64-gons 0.028 against 0.029, 60k stars 0.63 s
   against 0.80, a `$fn=2048` sphere 0.118 against 0.134. Whole models are
@@ -139,7 +139,7 @@ lead them, come roughly in order of user impact.
   (`eval_call` clones it to reserve a frame slot, `call.rs:480`); removing
   it measured about −2.5% instructions on fib and −1.4% on isosurface.
 - Deep union trees and the level-4 Menger sponge render slower than the
-  nightly (at `c1af708`: Menger 4 2.87 s against 2.01 s, with less CPU in
+  nightly (at `26888d7`: Menger 4 2.87 s against 2.01 s, with less CPU in
   total). The nightly spreads the work across cores better. The gap is
   structural: OpenSCAD's Manifold operators are lazy, so nested unions
   flatten into one `BatchUnion` over every leaf, whose pairwise rounds
@@ -149,9 +149,9 @@ lead them, come roughly in order of user impact.
   gained only 5-8%, so it was dropped; a real fix needs lazy solids
   across cache boundaries. (5a, 5b)
 - Many `text()` nodes side by side render slower than the nightly: 200
-  lines of 125 characters took 2.85 s against 1.63 s at `c1af708`, with
-  byte-identical SVGs, and `e7b51fc` cut 31% of that; extruded, 64 s
-  against 31.5 s before `e7b51fc`'s 35%. Shaping and outlines are not
+  lines of 125 characters took 2.85 s against 1.63 s at `26888d7`, with
+  byte-identical SVGs, and `83aa1af` cut 31% of that; extruded, 64 s
+  against 31.5 s before `83aa1af`'s 35%. Shaping and outlines are not
   the cost; nearly all of it is the single-threaded top-level 2D union
   of the 200 results in clipper2-rust's `execute_internal` (and, 3D, the
   cap triangulation). (5e)
@@ -175,7 +175,7 @@ lead them, come roughly in order of user impact.
   vector's allocation per call, `let` and loop iteration, measured 2-4%
   slower on the BOSL2 models: every context grows. Worth retrying with a
   smaller `Value` or a slab of contexts. (O4)
-- CLI cold start is 2.9-3.0 ms (`5f10ad2`, `docs/audits/unwind.md`).
+- CLI cold start is 2.9-3.0 ms (`f89bf0e`, `docs/audits/unwind.md`).
   What is left to take: the delay-init GPU frameworks are still mapped
   and bound (about 0.3 ms, measured on a C program linking the same
   ones), which only a `dlopen`ed renderer or a helper binary would save
@@ -403,7 +403,7 @@ lead them, come roughly in order of user impact.
   lists `-0` and `0` corners as separate vertices on the axis, so faces
   may collapse once they merge; whether the nightly drops them on import
   or in `tessellate_faces` was not investigated. Flag-independent (HEAD
-  `e38e7e4` does the same). Found checking `predictible-output`.
+  `7f6c216` does the same). Found checking `predictible-output`.
 - `predictible-output` sorts coloured faces with a stable sort where
   upstream's `std::sort` leaves equal faces of different colours in an
   unspecified order; only a mesh with duplicate faces can show it.
@@ -437,7 +437,7 @@ lead them, come roughly in order of user impact.
   1280x1520 pixels) are memoryless now (`TRANSIENT_ATTACHMENT`). 125
   spheres: 834 to 121 MB, from the allocator's cache of freed large
   blocks (338 MB "Malloc Large (empty)"; 8f turned it off with
-  `MallocLargeCache=0`, which mimalloc has since replaced, `96a73c9`) and the upload's staging copy of the vertex data
+  `MallocLargeCache=0`, which mimalloc has since replaced, `6b64480`) and the upload's staging copy of the vertex data
   (57 MB, now freed after the upload). The six windows: 731 to 257 MB.
   What remains per window is mostly the model's vertex buffer, about
   20 MB of malloc (parse caches, the language server's index), the
@@ -889,7 +889,7 @@ lead them, come roughly in order of user impact.
   test measures it); no tokenizer was run. The test's 5,500-byte guard
   has 12 bytes to spare. (7c, H4, CAD pilot fix)
 - `crates/cli/tests/mcp.rs`'s `the_end_of_input_cancels_running_calls_and_exits`
-  fails at 9f81201 and at the docs-only commit before it (and with the CAD
+  fails at 583b466 and at the docs-only commit before it (and with the CAD
   pilot fix) when run
   alone or with the other MCP tests: the server exits after about
   2.47 s, the 2 s grace, rather than cancelling the evaluation within
@@ -1015,7 +1015,7 @@ lead them, come roughly in order of user impact.
   unverified. (H2)
 - The frame budget's calibration in `crates/eval/src/recursion.rs`
   (budget depths at most 63% of where V8 overflows) is stale: at
-  `e7b51fc` `module-children` reaches 206 of V8's 214 and `function-lc`
+  `83aa1af` `module-children` reaches 206 of V8's 214 and `function-lc`
   199 of 326 (`scripts/wasm-check.sh --depths --all-programs`, with and
   without `--frames=4000000000`). After O4, V8 overflows `function-lc`
   at 353 and `module-children` still at 214. (O4)
@@ -1039,7 +1039,7 @@ lead them, come roughly in order of user impact.
   headless shell has `navigator.gpu` but no adapter.
 - **The core is 4.41 MB gzipped**, over the plan's 4 MB target
   (`opt-level = "s"` would reach about 4.05 MB and run 10–15% slower;
-  see `85ea8f1`). The WebGPU viewer is 184 KB and the lazy WebGL build
+  see `ca3c080`). The WebGPU viewer is 184 KB and the lazy WebGL build
   1.10 MB gzipped. Whether GitHub Pages compresses `.wasm` is unverified.
 - **View All fits the bounding sphere vertically**, as OpenSCAD's
   `Camera::viewAll` does, so a portrait view pane (the demo's middle

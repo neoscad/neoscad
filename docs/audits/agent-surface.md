@@ -1,7 +1,7 @@
 # Audit: the agent surface (phase 7)
 
 Scope: `crates/session`, `neoscad serve`, `neoscad mcp`, and `check`,
-`measure`, `test`, `fmt`, `docs` and `snapshot`. Audited at `8669474`
+`measure`, `test`, `fmt`, `docs` and `snapshot`. Audited at `60bf799`
 (clean tree), release build, on macOS 27.0 (arm64, 48 GB). The reference
 was the nightly `/Applications/OpenSCAD.app` (2026.09.23, `--backend=manifold`).
 Repros use a small MCP driver (`scripts` were not changed): it spawns

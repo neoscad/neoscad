@@ -1,18 +1,18 @@
 # Engine milestone audit: what the passing suite doesn't prove
 
 > **Status (2026-09-28).** The body is the audit as written; it is not
-> updated. Findings 1, 2, 3 and 7 were fixed in `bbd1096` (H1);
-> findings 4 and 6, and "fix before phases 6–9" items 1–4, in `d6264bd`
+> updated. Findings 1, 2, 3 and 7 were fixed in `17a31e4` (H1);
+> findings 4 and 6, and "fix before phases 6–9" items 1–4, in `f3cd896`
 > (H2); finding 5, the stale `issue5216` limit, `diff --library-path`
-> and `-O export-3mf` in `794254f` (H3); item 5 (determinism) with
-> `abff052` and workarounds for the two upstream issues, still logged in
+> and `-O export-3mf` in `85eb08d` (H3); item 5 (determinism) with
+> `101f8f1` and workarounds for the two upstream issues, still logged in
 > `docs/followups.md` ("Determinism"). The doc drift is fixed and the two
 > "Structure" followups are removed. Of "can wait": the OFF `fmt_g` and
 > many-holes items no longer hold (`docs/audits/performance.md` §3);
 > eager unions, `text()` unions and system fontconfig names are still
 > open in `docs/followups.md`.
 
-Audited at b2d175c against the nightly 2026.09.23 (git 28fe66bc, the same commit as `.reference/openscad`) on an M4 Pro running macOS 27.0.
+Audited at c4bafc7 against the nightly 2026.09.23 (git 28fe66bc, the same commit as `.reference/openscad`) on an M4 Pro running macOS 27.0.
 
 ## Firm ground
 

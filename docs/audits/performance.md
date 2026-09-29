@@ -1,37 +1,37 @@
 # Audit: performance (after phase 8)
 
 > **Status (2026-09-28).** The body below is the audit as written at
-> `c1af708`; it is not updated.
+> `26888d7`; it is not updated.
 >
 > - **Superseded: the unwind finding.** B1, §1.2's conclusion ("abort
 >   no longer helps"), §3's `panic=unwind` row and "Decisions" item 3
->   say unwind costs 0–1.5%. `docs/audits/unwind.md` (at `d0d20de`)
+>   say unwind costs 0–1.5%. `docs/audits/unwind.md` (at `b4ec6bd`)
 >   measured 5–7% on evaluation-bound BOSL2 models and up to 12% on
->   call-heavy code, once `9d2a7ec` had removed the limits' hot-path cost
->   that masked it. After D1 (`7734b77`) the gap is 5–9%; D2 was measured
+>   call-heavy code, once `cbcf7ed` had removed the limits' hot-path cost
+>   that masked it. After D1 (`a948259`) the gap is 5–9%; D2 was measured
 >   slower and reverted. Release builds still unwind.
 > - **Opportunities:**
->   - O1 mimalloc: done, `96a73c9` (also removed the app's
+>   - O1 mimalloc: done, `6b64480` (also removed the app's
 >     `MallocLargeCache=0`).
->   - O2 include fragments: done, `b189929`; the off-path `Program` free
->     in `5f10ad2`.
->   - O3 statement reuse: done, `263af54`.
->   - O4 static names: done for call sites and slots, `d0d20de`; fixed
+>   - O2 include fragments: done, `9dbb98b`; the off-path `Program` free
+>     in `f89bf0e`.
+>   - O3 statement reuse: done, `a1b9179`.
+>   - O4 static names: done for call sites and slots, `b4ec6bd`; fixed
 >     (depth, slot) addressing is not (`docs/followups.md`).
->   - O5 STL/OFF writing and O6 cache keys: done, `ca5a488`.
->   - O7 (R1) and O8 (R3, `concat`/`each`): done, `9d2a7ec`.
+>   - O5 STL/OFF writing and O6 cache keys: done, `560f825`.
+>   - O7 (R1) and O8 (R3, `concat`/`each`): done, `cbcf7ed`.
 >   - O9 manifold-rust hole triangulation and O10 clipper2-rust rounding:
->     done, `e7b51fc`.
+>     done, `83aa1af`.
 >   - O11 duplicate parallel subtrees: not done.
->   - O12 cold start: frameworks linked delay-init instead, `96a73c9`;
->     small chain-shaped renders skip the thread pool, `5f10ad2`
+>   - O12 cold start: frameworks linked delay-init instead, `6b64480`;
+>     small chain-shaped renders skip the thread pool, `f89bf0e`
 >     (cold start 2.9 ms median). A `dlopen`ed renderer is not done.
 >   - O13 (lazy booleans, GPU CSG preview, a parallel evaluator): not
 >     started. Evaluator work after this audit is in
 >     `docs/audits/bytecode-vm.md` and `docs/architecture.md`
 >     ("Evaluator performance").
 
-Audited at `c1af708` (clean tree), release build (`lto = "thin"`,
+Audited at `26888d7` (clean tree), release build (`lto = "thin"`,
 `codegen-units = 1`, `panic = "unwind"`), on an M4 Pro (10 performance +
 4 efficiency cores, 48 GB), macOS 27.0, on AC power. The reference is the
 nightly `/Applications/OpenSCAD.app` (2026.09.23, `--backend=manifold`).
@@ -71,8 +71,8 @@ bucket. `sample` could not attach to runs this short.
 
 | # | Finding | Size | Affects |
 |---|---|---|---|
-| R1 | Evaluation got 4–9% slower. The cause is now the resource-limits commit `54abe3e`, **not** `panic = "unwind"` | isosurface +6.8%, fractal_tree +6.6%, screws +4.5% | every BOSL2 model, every client |
-| R2 | Cold start rose from 2.8 to 4.3 ms, because the CLI now links Metal, QuartzCore and Foundation (`7d48d9e`) | +1.3 ms per process | one-shot CLI, `eval_only` (+1.3 s over 976 processes), small models |
+| R1 | Evaluation got 4–9% slower. The cause is now the resource-limits commit `3ae32d5`, **not** `panic = "unwind"` | isosurface +6.8%, fractal_tree +6.6%, screws +4.5% | every BOSL2 model, every client |
+| R2 | Cold start rose from 2.8 to 4.3 ms, because the CLI now links Metal, QuartzCore and Foundation (`2711afc`) | +1.3 ms per process | one-shot CLI, `eval_only` (+1.3 s over 976 processes), small models |
 | R3 | `concat(acc, [x])` and `[each acc, x]` accumulation is O(n²). OpenSCAD's is O(n) | 20k elements: 521 ms against 59 ms | tail-recursive accumulators (some BOSL2 path and string code, and user code) |
 | B1 | The brief's "panic=unwind costs 5–8%" (`docs/architecture.md:164-167`, `docs/followups.md:356-363`) no longer holds | 0–1.5% at HEAD | documentation, and the decision about an `abort` profile |
 | H1 | In the hero, evaluation is 67% of wall time, all on one core. BOSL2's `isosurface()` is 87% of that | 2.47 s of 3.69 s | heavy BOSL2 models, the edit loop on them |
@@ -111,16 +111,16 @@ the binary is the same, so a change there is noise.
 
 A best-of-3 bench run is too noisy for the small models: `ex_menger`'s
 control moved as much as neoscad did. So every model over 3% was re-timed
-as an interleaved A/B against a fresh release build of `d6264bd` (5–7
+as an interleaved A/B against a fresh release build of `f3cd896` (5–7
 runs):
 
-| Model | `d6264bd` | HEAD | Δ | Cause |
+| Model | `f3cd896` | HEAD | Δ | Cause |
 |---|---|---|---|---|
 | bosl_isosurface__006 | 1.239 s | 1.353 s | +9.2% | R1 |
 | bosl_screws__001 | 274 ms | 289 ms | +5.4% | R1 |
 | bosl_spring_handle | 353 ms | 372 ms | +5.5% | R1 |
 | bosl_gears__003 | 66.9 ms | 70.4 ms | +5.3% | R1 (about 3%) + R2 (1.3 ms) |
-| bosl_fractal_tree | 5.81 s (`55d53b8`) | 6.19 s | +6.6% | R1 |
+| bosl_fractal_tree | 5.81 s (`ab912d2`) | 6.19 s | +6.6% | R1 |
 | csg_deep_union | 50.0 ms | 52.1 ms | +4.2% | R2 (1.3 ms) + 0.8 ms unexplained |
 | mink_convex | 24.4 ms | 26.6 ms | +9.1% | R2 + about 0.9 ms |
 | mink_nonconvex | 13.5 ms | 15.5 ms | +14.9% | R2 + about 0.7 ms |
@@ -133,17 +133,17 @@ runs):
 Release builds at each commit, interleaved, 5 runs, isosurface model
 (`bosl_isosurface__006`; screws agrees):
 
-| Build | isosurface | vs `55d53b8` |
+| Build | isosurface | vs `ab912d2` |
 |---|---|---|
-| `d6264bd` (panic=abort) | 1235 ms | — |
-| `794254f` | 1244 ms | +0.7% |
-| `55d53b8` (7a, abort) | 1235–1251 ms | 0 |
-| `b5b5f8f` (7b-1, **unwind**) | 1364–1376 ms | +10.0% |
-| `b5b5f8f` rebuilt with `panic=abort` | 1253 ms | +0.1% |
-| `502d157` (unwind) | 1361–1369 ms | +9.3% |
-| `502d157` with abort | 1267 ms | +1.8% |
-| `54abe3e` (H4 limits, unwind) | 1327–1337 ms | +7.3% |
-| `54abe3e` with abort | 1362 ms | **+9.3%** |
+| `f3cd896` (panic=abort) | 1235 ms | — |
+| `85eb08d` | 1244 ms | +0.7% |
+| `ab912d2` (7a, abort) | 1235–1251 ms | 0 |
+| `4a43517` (7b-1, **unwind**) | 1364–1376 ms | +10.0% |
+| `4a43517` rebuilt with `panic=abort` | 1253 ms | +0.1% |
+| `45df7db` (unwind) | 1361–1369 ms | +9.3% |
+| `45df7db` with abort | 1267 ms | +1.8% |
+| `3ae32d5` (H4 limits, unwind) | 1327–1337 ms | +7.3% |
+| `3ae32d5` with abort | 1362 ms | **+9.3%** |
 | HEAD (unwind) | 1320–1335 ms | +6.3–6.8% |
 | HEAD with abort | 1349–1356 ms | +8.3–8.7% |
 
@@ -151,13 +151,13 @@ What this shows:
 
 - **At 7b-1, unwind did cost about 8–10%,** exactly as documented, and
   building with abort removed it.
-- **Since the resource limits (`54abe3e`), abort no longer helps.** At
+- **Since the resource limits (`3ae32d5`), abort no longer helps.** At
   HEAD, unwind and abort are within 2% of each other on isosurface, screws
   (`+5.3%` against `+3.5%`), gears and fractal_tree (6.19 s against
-  6.10 s). Both sit 5–9% above `55d53b8`. The cost moved from the
+  6.10 s). Both sit 5–9% above `ab912d2`. The cost moved from the
   unwinding tables to the limits' hot-path checks. Both show up as the
   same kind of code-generation cost in the evaluator's innermost loop.
-- **The profile agrees.** Comparing `55d53b8` with HEAD-abort on
+- **The profile agrees.** Comparing `ab912d2` with HEAD-abort on
   isosurface, `branch<Value, Box<Unwind>>` (the `?` on every `eval`)
   goes from 2.5% to 5.7% self. `eval` is no longer inlined (2.7% self),
   and `eval_args` doubles (1.2% to 2.4%). The added work per expression is
@@ -173,11 +173,11 @@ What this shows:
 
 ### 1.3 R2: cold start
 
-`--version` alone takes 2.0 ms at `d6264bd` and 3.3 ms at HEAD. Timed at
-each commit, `cold_start` steps from 3.3 to 4.7 ms at `7d48d9e` (the
+`--version` alone takes 2.0 ms at `f3cd896` and 3.3 ms at HEAD. Timed at
+each commit, `cold_start` steps from 3.3 to 4.7 ms at `2711afc` (the
 render crate). `otool -L` shows that the HEAD binary links QuartzCore,
 CoreGraphics, Metal, Foundation, CoreFoundation and libobjc, while
-`d6264bd`'s links only libSystem. So the cost is dyld loading those
+`f3cd896`'s links only libSystem. So the cost is dyld loading those
 frameworks at every launch, including runs that never draw.
 
 ### 1.4 App-side numbers
@@ -360,7 +360,7 @@ What the numbers show:
 
 **The icon builder's note** was that hoisting `path()` out of a
 per-vertex loop cut a model from 4.0 s to 2.8 s. The per-vertex version
-was never committed (`git diff 369bb2e c1af708 -- apple/Icon/concept-c.scad`
+was never committed (`git diff cf020d8 26888d7 -- apple/Icon/concept-c.scad`
 shows only the hoisted one), so the 4.0 s run cannot be reproduced. A
 reconstruction (`micro/28` against `29`: 540 × 72 vertices, with and
 without a `path()` per vertex) costs 869 ns per `path()` call here
@@ -384,7 +384,7 @@ Best of 3 unless noted, interleaved with the nightly.
 | Preview of cube − 125 spheres (`:268-273`) | 356 ms (1.04 s CPU) | 253 ms | 75–300 ms is the real boolean (`union_tree` of the 125 spheres, then the product), 11 cores for 50 ms then 1–4. OpenCSG never computes it. Drawing is about 40 ms |
 | BOSL2 edit-loop include re-parse (`:304`) | serve: 33.4 ms median; parse 15.3, evaluate 17.1, geometry 0.6 | nightly cold 172 ms | Over 300 edits: `Session::load` 44% (`lower` 20%, `parse` 12.8%, include `splice` 8%), evaluation 39% (the model's own `cuboid`/`cyl`/`prismoid` module bodies, not BOSL2's constants: an include-only file evaluates in ≈0), dropping the previous `Program`/`Ast` 5.7% |
 | `panic=unwind` cost (`:356`) | 0–1.5% at HEAD (isosurface −2%, screws +1.8%, fractal_tree +1.5%) | — | See 1.2. The documented 5–8% was true at 7b-1 |
-| CLI cold start (`architecture.md:54`) | 4.1–4.3 ms | 46 ms | +1.3 ms since `7d48d9e` (R2). Still 10× under the nightly |
+| CLI cold start (`architecture.md:54`) | 4.1–4.3 ms | 46 ms | +1.3 ms since `2711afc` (R2). Still 10× under the nightly |
 
 ## 4. Opportunities, ranked by expected wall time saved in realistic use
 
@@ -691,8 +691,8 @@ O3 takes 2.9 s to about 0.3 s.
 
 ## Checked and found fine
 
-- **8f and the GPU gate (`4845d35`, `07872ed`)** have no measurable cost
-  on the CLI. `4845d35` and HEAD are within 1% on isosurface and screws.
+- **8f and the GPU gate (`b0a82df`, `559da46`)** have no measurable cost
+  on the CLI. `b0a82df` and HEAD are within 1% on isosurface and screws.
   The edit-loop snapshot numbers match 7a (45.5 against 44 ms served,
   73.4 against 74 ms cold).
 - **Output is deterministic under every experiment.** mimalloc, the bits

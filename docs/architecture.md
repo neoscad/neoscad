@@ -207,7 +207,7 @@ result with a `resource-limit` diagnostic, not a crash.
 - **Counts** are checked before the allocation they guard, so
   `sphere(10, $fn=1e5)` fails before it builds a vertex.
 - **Memory** is an estimate, not a measurement (the workspace forbids
-  the `unsafe` a counting allocator needs). Since `0fdda54` every list,
+  the `unsafe` a counting allocator needs). Since `88de26e` every list,
   string, range and function value the evaluator creates is charged
   when made and credited when dropped, on one thread-local counter; the
   charge that passes the limit raises the interrupt flag the evaluator
@@ -232,7 +232,7 @@ caches.
 The cost, measured A/B against `abort` in `docs/audits/unwind.md`: 5–7%
 on evaluation-bound BOSL2 models, up to 12% on call-heavy code, nothing
 at cold start, about 1% on geometry-bound runs, and 2.5 MB of binary.
-After D1 (`7734b77`, fewer `Rc<Ctx>` clones per call) the gap is 5–9%;
+After D1 (`a948259`, fewer `Rc<Ctx>` clones per call) the gap is 5–9%;
 D2 (drop shims) measured 3–7% slower and was reverted. An `abort` build
 for the one-shot CLI alone would mean shipping two binaries, since
 `serve`, `mcp` and `lsp` are subcommands of `neoscad`; that is an open
@@ -257,7 +257,7 @@ determinism test (`CLAUDE.md`).
   rendered before (`crates/session/tests/warm_export.rs`).
 - **Cache keys** are exact: a node's key is its own result, including
   a group whose empty sibling still sends its child through a 2D union
-  (`ec0ff7d`).
+  (`5e8ef61`).
 - **Evaluation** is single-threaded. Unseeded `rands()` starts from a
   seed the host passes in (`eval::Options::rng_seed`). Statement reuse
   (`eval::memo`) must give output identical to a fresh evaluation; a
@@ -273,16 +273,16 @@ One engine, the tree-walker, made cheaper where profiles showed the
 cost: allocation, reference counting and context-chain walks rather
 than dispatch (`docs/audits/bytecode-vm.md`, "Recommendation").
 
-- **Name resolution ahead of time** (`d0d20de`, `eval::resolve`): each
+- **Name resolution ahead of time** (`b4ec6bd`, `eval::resolve`): each
   scope is a region, ordinary variables live in slots, and each
   reference resolves lazily to candidate (region, slot) pairs or a
   pre-looked-up builtin. Lookups still walk the chain but only compare
   region ids and index slots, which keeps OpenSCAD's run-time scoping exact;
   `$` names stay dynamic. −19% to −27% on BOSL2 evaluation.
-- **Include fragments** (`b189929`, `lang::fragment`): in the session an
+- **Include fragments** (`9dbb98b`, `lang::fragment`): in the session an
   included file is parsed and lowered once and spliced into each new
   program; a served BOSL2 edit went from 34 to 23 ms.
-- **Statement reuse across edits** (`263af54`, `eval::memo`): each
+- **Statement reuse across edits** (`a1b9179`, `eval::memo`): each
   top-level statement is fingerprinted by its AST and text, the
   top-level names it transitively reads, top-level `$` values and the
   options; a match replays its node subtree and messages. Top-level
@@ -290,13 +290,13 @@ than dispatch (`docs/audits/bytecode-vm.md`, "Recommendation").
   re-evaluate. Budgeted at 128 MiB per memo and 256 MiB per session;
   the one-shot CLI does not use it. A hero carrier edit re-renders in
   294 ms instead of 1,894.
-- **The call path** (`9d2a7ec`, `7734b77`, `54572bc`): a one-flag limit
+- **The call path** (`cbcf7ed`, `a948259`, `d137102`): a one-flag limit
   check, linear `concat`/`each` accumulation by moving a uniquely held
   accumulator, borrowed contexts on tail calls (D1), and T1–T5 from the
   VM spike (builtin names skip the context walk, pooled argument
   vectors, a positional binding fast path, a direct builtin call, and
   up to 256 recycled contexts): 1.07–1.10× on BOSL2 models.
-- **Registers and pure frames** (`5d97bf1`): the spike's register
+- **Registers and pure frames** (`37ca8eb`): the spike's register
   analysis and pure-frame rule, ported into the tree-walker. `let`,
   comprehension variables and positional-only calls need no heap context
   when nothing can capture them: 1.08–1.16× on BOSL2 models (the spike
@@ -398,8 +398,8 @@ ffmpeg.
 4. **CSG tree** (done): tier 2.
 5. **`geom`, `io`, `text`** (done): tiers 3 and 5, 1,103 runnable cases
    then. Audited in `docs/audits/engine-milestone.md`; its findings were
-   fixed in hardening H1–H3 (`bbd1096`, `d6264bd`, `794254f`) and
-   `abff052`. The baseline is now 1,719 passing cases.
+   fixed in hardening H1–H3 (`17a31e4`, `f3cd896`, `85eb08d`) and
+   `101f8f1`. The baseline is now 1,719 passing cases.
 6. **`render` + `snapshot`** (done): tier 4. 6a: the `render` crate
    (wgpu, OpenSCAD's camera, colour schemes and lighting) and `--render`
    PNG export. 6b: previews (OpenCSG from real booleans on the CSG
@@ -410,7 +410,7 @@ ffmpeg.
    `edit_loop` benchmark. 7b-1: `part()`, `check`, `measure`, and a
    server that survives a panicking request. 7b-2: `test`, `fmt`,
    `docs`. 7c: the MCP server and an agent-loop eval pilot. Hardened
-   after `docs/audits/agent-surface.md` (H4, `54abe3e`).
+   after `docs/audits/agent-surface.md` (H4, `3ae32d5`).
 8. **macOS app** (done, 8a–8j; plan in `docs/audits/macos-prep.md`).
    8a+8b: XcodeGen project, NSDocument app, `crates/ffi` and the
    `NeoSCADCore` framework. 8c: the Metal viewport. 8d: the CodeMirror
@@ -431,7 +431,7 @@ ffmpeg.
 **Performance** (after phase 8, `docs/audits/performance.md`): its
 opportunities O1–O10 are done, O11 and O12 are not (status at the top of
 the audit). Evaluator work since: `unwind.md` D1 (done), the VM spike's
-T1–T5 (done) and the register/pure-frame port (done, `5d97bf1`); see
+T1–T5 (done) and the register/pure-frame port (done, `37ca8eb`); see
 "Evaluator performance".
 
 The agent CLI (phases 1–7) comes before any GUI, because the conformance

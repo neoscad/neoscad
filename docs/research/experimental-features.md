@@ -46,7 +46,7 @@ or benchmarked. Status lines added since then are marked **Status**.
 - **CGAL-only cases with backend-neutral goldens:** 117 cases (42 distinct
   inputs; 80 cases have no active case on the same input). Some were
   CGAL-only because Manifold mode couldn't import `.nef3`, which NeoSCAD
-  now can (`505c10c`). A per-input audit may find cases worth running.
+  now can (`6dc0adb`). A per-input audit may find cases worth running.
 - **Upstream Bugs (63) and disabled-upstream (37):** not examined.
 
 ## Not verified

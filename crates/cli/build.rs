@@ -63,7 +63,7 @@ const DELAY_INIT_MIN_MACOS: u32 = 15;
 /// runs their initializers, and those of everything they pull in (about
 /// 400, in SkyLight, CoreDisplay, Network and the Swift runtime among
 /// others), only when the process first calls into them. Linking the
-/// renderer (`7d48d9e`) made every run pay for those initializers, 1.3 ms
+/// renderer (`2711afc`) made every run pay for those initializers, 1.3 ms
 /// of a cold start that had been 2.8 ms (performance audit, R2), although
 /// only PNG export and snapshots draw. With delay-init, `neoscad
 /// --version` runs only libSystem's, the C++ runtime's and its own

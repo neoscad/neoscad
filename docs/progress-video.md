@@ -80,7 +80,7 @@ binary, beside OpenSCAD's expected PNGs. Each milestone is a full release
 build of the workspace (minutes, and gigabytes of target directory unless
 one directory is shared and rebuilt in turn), and the early milestones have
 no renderer at all (`neoscad` gained PNG export in the render crate, commit
-7d48d9e), so most of the grid would be empty. It was left as a followup
+2711afc), so most of the grid would be empty. It was left as a followup
 rather than built into the default path. A cheaper variant: record the
 showcase renders at `run --record` time from now on (as the architecture's
 "Progress recording" plans), and have the video read them from the

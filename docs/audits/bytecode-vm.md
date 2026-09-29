@@ -1,4 +1,4 @@
-# Audit: a bytecode VM for the evaluator (spike at `7734b77`)
+# Audit: a bytecode VM for the evaluator (spike at `a948259`)
 
 The question: is a bytecode compiler plus VM for expressions and function
 bodies worth building? A prototype was built behind an off-by-default
@@ -124,7 +124,7 @@ with no new dependencies, and builds and passes for wasm32 (§4.5).
 - **Configurations.** All measured on the `neoscad` CLI, exporting `.echo`
   (parse and evaluate only), with `OPENSCADPATH=.reference` and
   `NEOSCAD_NO_SERVER=1`:
-  - *base*: HEAD (`7734b77`) built unchanged;
+  - *base*: HEAD (`a948259`) built unchanged;
   - *off*: this tree with the switch off;
   - *tgt*: HEAD plus the targeted changes T1–T5 of §5, built from a
     scratch copy with its own target directory;
