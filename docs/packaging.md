@@ -37,8 +37,9 @@ pushes), so every CI path is unverified until the first tag.
 | Mechanism | Decision | Status |
 |---|---|---|
 | macOS DMG (app) + CLI tarball | Exists (`scripts/apple/release.sh`) | Now ships `LICENSE`, `NOTICE` and `licenses/` (fix 3). In CI as `.github/workflows/publish-macos-app.yml`, signed from `NEOSCAD_*` secrets. **Universal** (arm64 + x86_64, as OpenSCAD's nightly DMG), owner decision 2026-09-29: the app, its core and the CLI (`docs/release.md`, "Universal"); Debug builds stay arm64 |
-| CLI archives, 6 targets | **Now** | Built: cargo-dist 0.33.0 (`[workspace.metadata.dist]`, `.github/workflows/release.yml`). macOS arm64/x86_64 as two archives: cargo-dist 0.33.0 cannot make a universal one (`universal2-apple-darwin` is a FIXME in its `cargo-dist/src/config/v1/mod.rs:416` and `src/tasks.rs:438`, "Lipo(LipoStep)"), so only the DMG's CLI is universal, Linux x86_64/aarch64 (glibc 2.28, manylinux_2_28 containers), Windows x86_64/aarch64; `.tar.xz`/`.zip` with `.sha256`. `dist plan` lists all of them; `dist build` of the Linux aarch64 archive ran in Docker |
-| Shell / PowerShell installers | **Now** | Built (cargo-dist); install to `CARGO_HOME` |
+| CLI archives, 4 targets (6 with Windows) | **Now** | Built: cargo-dist 0.33.0 (`[workspace.metadata.dist]`, `.github/workflows/release.yml`). macOS arm64/x86_64 as two archives: cargo-dist 0.33.0 cannot make a universal one (`universal2-apple-darwin` is a FIXME in its `cargo-dist/src/config/v1/mod.rs:416` and `src/tasks.rs:438`, "Lipo(LipoStep)"), so only the DMG's CLI is universal, Linux x86_64/aarch64 (glibc 2.28, manylinux_2_28 containers); `.tar.xz` with `.sha256`. Windows x86_64/aarch64 (`.zip`) is withheld, see below. `dist plan` lists the four; `dist build` of the Linux aarch64 archive ran in Docker |
+| Shell installer | **Now** | Built (cargo-dist); installs to `CARGO_HOME` |
+| PowerShell installer | Withheld with Windows | cargo-dist's, off until Windows returns to releases |
 | Homebrew tap: formula | **Now** | Built: cargo-dist generates `neoscad.rb` and pushes it to `neoscad/homebrew-tap` (needs `HOMEBREW_TAP_TOKEN`) |
 | Homebrew tap: cask (app) | **Now**, after Developer ID | Template: `packaging/homebrew/neoscad-app.rb`, filled by `scripts/release/fill-manifests.sh`; add to the tap only once the DMG is notarized |
 | Linux musl static tarball | **No** (owner decision 2026-09-29) | Not built. It would be portable, but PNG export needs Vulkan or GL loaded with `dlopen`, which a static musl binary cannot do; the glibc 2.28 archives already run on every current distribution |
@@ -50,9 +51,9 @@ pushes), so every CI path is unverified until the first tag.
 | Snap | Later/never | Strict confinement conflicts with MCP roots; reserve the name only |
 | AUR `neoscad-bin` | Template now | `packaging/aur/PKGBUILD`, filled per release into `neoscad-package-manifests.tar.gz`; a maintainer pushes it to the AUR |
 | Nix flake | Template now | `flake.nix` + `flake.lock` (`buildRustPackage` with rust-overlay's 1.98.1 from `rust-toolchain.toml`). Evaluated in `nixos/nix` (derivation `neoscad-0.1.0`); not built |
-| Windows x86_64/aarch64 zip | **Now** | Built (cargo-dist), CI only (see "Needs the owner", `cargo xwin`) |
-| MSI | **Now**, unsigned | Built (cargo-dist + `crates/cli/wix/main.wxs`, with the licence files hand-added; `allow-dirty = ["msi"]`). Adds `bin` to PATH. Unsigned: SmartScreen will warn |
-| winget / Scoop | Templates now | `packaging/winget/` (portable zip, schema 1.10.0) and `packaging/scoop/neoscad.json`, filled per release; submitting needs the owner's fork (winget) or a bucket |
+| Windows x86_64/aarch64 zip | **Withheld from releases** until Authenticode signing (owner decision 2026-09-29) | CI builds and tests Windows on every PR and release (`ci.yml`); releases carry no Windows files. Restore via the `installers` comment in `Cargo.toml`'s `[workspace.metadata.dist]`. Local builds need `cargo xwin` (see "Needs the owner") |
+| MSI | Withheld with Windows; unsigned when it returns | `crates/cli/wix/main.wxs` is kept (licence files hand-added; restore `allow-dirty = ["msi"]` with it). Adds `bin` to PATH. Unsigned, SmartScreen would warn |
+| winget / Scoop | Templates kept; withheld with Windows | `packaging/winget/` (portable zip, schema 1.10.0) and `packaging/scoop/neoscad.json`. `fill-manifests.sh` skips them while the release has no Windows checksums and fills them again once it does; submitting needs the owner's fork (winget) or a bucket |
 | Chocolatey | Never, unless asked | OpenSCAD isn't there officially |
 | `cargo install` (crates.io) | Later, **blocked** | Fix 2. The name reservation is prepared at `packaging/crates-io-placeholder/` (`cargo package --list` checked; not published) |
 | `cargo binstall` | After fix 2 | binstall starts from the crate's crates.io metadata, so the placeholder alone does not make it work (unverified) |
@@ -73,7 +74,7 @@ arm64 Mac.
 | `ci.yml` | PRs, pushes to main, and as the release's plan job | fmt, licence copies, `dist generate --check` and `dist plan`; clippy, tests and conformance on macOS arm64 (`macos-15`), Linux x86_64 (`ubuntu-22.04`) and aarch64 (`ubuntu-22.04-arm`); the Windows build and CLI/lang tests (`windows-2025`, including the user library path and `neoscad serve` on a named pipe); `wasm-check.sh` |
 | `release.yml` | version tags | cargo-dist, generated: see `docs/release.md` |
 | `publish-macos-app.yml` | called by `release.yml` | `release.sh` signed and notarized; attaches the DMG |
-| `publish-packages.yml` | called by `release.yml` | `.deb`/`.rpm`, vendored source, filled manifests, the ghcr.io image |
+| `publish-packages.yml` | called by `release.yml` | `.deb`/`.rpm`, vendored source, filled manifests (AUR only while Windows is withheld), the ghcr.io image |
 
 cargo-dist was kept: its macOS signing is not used, and the app job fits
 as a custom publish job, so nothing had to be hand-written around it.
@@ -220,8 +221,9 @@ Nothing here was pushed, published, signed up for or accepted.
   Connect API key, stored as the `NEOSCAD_*` secrets
   (`docs/release.md`); until then the app job uploads nothing.
 - **Windows Authenticode** (SSL.com eSigner or Azure Artifact Signing;
-  cargo-dist supports both) before promoting the MSI or submitting to
-  winget.
+  cargo-dist supports both, unverified here). Releases ship no Windows
+  files until it is set up (owner decision 2026-09-29); then restore them
+  as the `installers` comment in `Cargo.toml` says.
 - **Name reservations:** `cargo publish` in
   `packaging/crates-io-placeholder/` (prepared, `neoscad` 0.0.1); npm
   `neoscad`/`@neoscad`; Snap; Docker Hub. The ghcr.io package appears on

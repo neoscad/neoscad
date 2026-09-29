@@ -26,7 +26,9 @@ NeoSCAD is pre-release. As of the final v0.1 audit
 ## Platforms and install
 
 - **macOS** (Apple silicon): the app and the `neoscad` command line.
-- **Linux** and **Windows** (x86_64 and ARM64): the command line.
+- **Linux** and **Windows** (x86_64 and ARM64): the command line. Release
+  builds leave Windows out until they can be code-signed; build it from
+  source there.
 - **Browser:** a WebAssembly demo at <https://neoscad.org/try>.
 
 Release builds are coming soon; see <https://neoscad.org/download.html>

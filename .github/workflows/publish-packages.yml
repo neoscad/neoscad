@@ -8,7 +8,10 @@
 #   cargo-dist already attaches the plain source.tar.gz;
 # - filled package-manager manifests (scripts/release/fill-manifests.sh):
 #   the AUR PKGBUILD, the Scoop manifest and the winget manifests, attached
-#   for a maintainer to submit (nothing here pushes to those registries);
+#   for a maintainer to submit (nothing here pushes to those registries).
+#   Scoop and winget need the Windows zips, which releases leave out until
+#   they can be signed (owner decision 2026-09-29), so the script skips
+#   them when the release has none;
 # - the ghcr.io/neoscad/neoscad image (packaging/docker/Dockerfile), for
 #   linux/amd64 and linux/arm64.
 name: Packages
