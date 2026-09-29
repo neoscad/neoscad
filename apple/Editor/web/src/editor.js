@@ -23,6 +23,7 @@ import {
   history,
   historyKeymap,
   indentWithTab,
+  isolateHistory,
   redo,
   redoDepth,
   selectAll,
@@ -43,8 +44,9 @@ import {
   search,
   searchKeymap,
 } from "@codemirror/search";
-import { Compartment, EditorState } from "@codemirror/state";
+import { Compartment, EditorState, StateEffect, StateField } from "@codemirror/state";
 import {
+  Decoration,
   EditorView,
   crosshairCursor,
   drawSelection,
@@ -134,6 +136,45 @@ const changeReporter = EditorView.updateListener.of((update) => {
   }
 });
 
+// --- Edits an AI agent made (the web demo's agent bridge) ------------------
+//
+// The text an agent inserted stays marked until the user next changes the
+// document, or a few seconds pass, so they can see what changed without
+// diffing it in their head; the marks move with the text like any
+// decoration. Undo takes the whole agent edit back in one step.
+
+const addAgentMarks = StateEffect.define();
+const clearAgentMarks = StateEffect.define();
+const agentMark = Decoration.mark({ class: "cm-agent-edit" });
+const agentMarks = StateField.define({
+  create: () => Decoration.none,
+  update(marks, tr) {
+    marks = marks.map(tr.changes);
+    // A change of the user's own ends the highlight: it has been seen.
+    if (tr.docChanged && !tr.isUserEvent("input.agent")) marks = Decoration.none;
+    for (const e of tr.effects) {
+      if (e.is(clearAgentMarks)) marks = Decoration.none;
+      else if (e.is(addAgentMarks)) {
+        marks = marks.update({ add: e.value.map(([from, to]) => agentMark.range(from, to)), sort: true });
+      }
+    }
+    return marks;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+const agentTheme = EditorView.baseTheme({
+  ".cm-agent-edit": {
+    backgroundColor: "rgba(106, 92, 242, 0.16)",
+    boxShadow: "inset 0 -2px 0 rgba(208, 79, 196, 0.75)",
+    borderRadius: "2px",
+  },
+  "&dark .cm-agent-edit": {
+    backgroundColor: "rgba(143, 132, 255, 0.22)",
+    boxShadow: "inset 0 -2px 0 rgba(236, 127, 220, 0.8)",
+  },
+});
+let agentTimer = null;
+
 /// Keys of the app's menu that carry no modifier: F5 (Preview) and F6
 /// (Render). The editor forwards them itself rather than relying on WebKit
 /// to hand an unmodified key the page did not use back to the menu. A key
@@ -177,6 +218,8 @@ function extensions() {
     themeSlot.of(currentTheme()),
     fontSlot.of(fontTheme(fontSize)),
     appKeys,
+    agentMarks,
+    agentTheme,
     keymap.of([
       ...closeBracketsKeymap,
       ...defaultKeymap,
@@ -329,6 +372,58 @@ window.NeoSCADEditor = {
       scrollIntoView: true,
     });
     return historyState();
+  },
+
+  /// An AI agent's edits, applied as one undoable step and highlighted
+  /// (the web demo's agent bridge, web/src/agent/). `edits` are `{from,
+  /// to, insert}` with positions `[line, character]` (0-based lines,
+  /// UTF-16 columns, as LSP counts) in the current text; the page has
+  /// already checked that the agent saw this text. The user's selection
+  /// stays where it was (moved by the edit), and the view scrolls to the
+  /// first change. The marks clear after `ms`, or when the user types.
+  agentEdit(edits, ms = 8000) {
+    const doc = view.state.doc;
+    const pos = ([l, c]) => {
+      const line = doc.line(Math.min(Math.max(l + 1, 1), doc.lines));
+      return Math.min(line.from + c, line.to);
+    };
+    const changes = view.state.changes(
+      edits.map((e) => ({ from: pos(e.from), to: pos(e.to), insert: e.insert })),
+    );
+    const marks = [];
+    changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
+      if (toB > fromB) marks.push([fromB, toB]);
+    });
+    const first = marks[0]?.[0] ?? changes.mapPos(pos(edits[0].from));
+    view.dispatch({
+      changes,
+      effects: [
+        clearAgentMarks.of(null),
+        addAgentMarks.of(marks),
+        EditorView.scrollIntoView(first, { y: "center" }),
+      ],
+      userEvent: "input.agent",
+      annotations: isolateHistory.of("full"),
+    });
+    clearTimeout(agentTimer);
+    agentTimer = setTimeout(() => view.dispatch({ effects: clearAgentMarks.of(null) }), ms);
+    return { ...historyState(), marks: marks.length };
+  },
+
+  /// The main selection as `{anchor, head}`, each `[line, character]`
+  /// (0-based line, UTF-16 column).
+  selectionPositions() {
+    const s = view.state.selection.main;
+    const at = (o) => {
+      const line = view.state.doc.lineAt(o);
+      return [line.number - 1, o - line.from];
+    };
+    return { anchor: at(s.anchor), head: at(s.head) };
+  },
+
+  /// How many agent marks are showing (for tests).
+  agentMarks() {
+    return view.state.field(agentMarks).size;
   },
 
   /// Place the cursor (UTF-16 offset).

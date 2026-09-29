@@ -800,13 +800,23 @@ impl Viewer {
     /// The current view drawn offscreen at `width` by `height` pixels,
     /// without the grid and annotations (File > Export's image): a promise
     /// of `{width, height, rgba}` (`rgba` a `Uint8Array`, top row first).
-    pub fn image(&self, width: u32, height: u32) -> Result<js_sys::Promise, JsError> {
-        let mut copy = self
-            .shared
-            .view
-            .borrow()
-            .copy_for_image(width, height)
-            .map_err(js_error)?;
+    /// With `shown` true the grid and annotations are kept, as on screen:
+    /// what an agent connected to the page captures (`view_capture`,
+    /// docs/mcp.md), where the marks it placed are the point.
+    pub fn image(
+        &self,
+        width: u32,
+        height: u32,
+        shown: Option<bool>,
+    ) -> Result<js_sys::Promise, JsError> {
+        let view = self.shared.view.borrow();
+        let mut copy = if shown.unwrap_or(false) {
+            view.copy_as_shown(width, height)
+        } else {
+            view.copy_for_image(width, height)
+        }
+        .map_err(js_error)?;
+        drop(view);
         let gpu = copy.gpu().clone();
         Ok(wasm_bindgen_futures::future_to_promise(async move {
             // WebGL maps buffers only when the device is polled (WebGPU

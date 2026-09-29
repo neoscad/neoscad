@@ -1,0 +1,66 @@
+<!doctype html>
+<!--
+  The relay window of `neoscad mcp --browser` (bridge.rs, served at /relay).
+  A browser that will not let the https page open ws://127.0.0.1 (WebKit's
+  mixed-content rule, or Chrome's Local Network Access when the user said
+  no) can still open this page in a window: it is on the bridge's own
+  origin, so its WebSocket is allowed, and it passes messages between the
+  socket and the page that opened it with postMessage. It talks to that
+  page only if the page is on PAGE_ORIGIN (filled in by the server), and
+  sends to that origin only, so no other site can use it.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>NeoSCAD agent connection</title>
+<style>
+  body { font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 1rem 1.2rem; }
+  h1 { font-size: 1rem; margin: 0 0 0.4rem; background: linear-gradient(90deg, #07707c, #5a48e0 50%, #a3308f); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  @media (prefers-color-scheme: dark) { h1 { background-image: linear-gradient(90deg, #4fd8e6, #8f84ff 50%, #ec7fdc); } }
+  p { margin: 0.3rem 0; }
+  #state[data-state="open"] { color: #1a7f37; }
+  #state[data-state="closed"] { color: #d92d20; }
+  @media (prefers-color-scheme: dark) { #state[data-state="open"] { color: #4ac26b; } #state[data-state="closed"] { color: #ff6b61; } }
+  button { font: inherit; margin-top: 0.5rem; }
+</style>
+</head>
+<body>
+<h1>NeoSCAD agent connection</h1>
+<p id="state">Connecting…</p>
+<p>Keep this window open while your agent works in the NeoSCAD page. Close it to disconnect.</p>
+<button id="stop" type="button">Disconnect</button>
+<script>
+"use strict";
+const PAGE_ORIGIN = "__PAGE_ORIGIN__";
+const page = window.opener;
+const token = location.hash.slice(1);
+history.replaceState(null, "", location.pathname);
+const state = document.getElementById("state");
+const show = (text, s) => { state.textContent = text; state.dataset.state = s; };
+const tell = (msg) => { if (page && !page.closed) page.postMessage({ neoscadRelay: 1, ...msg }, PAGE_ORIGIN); };
+let ws = null;
+if (!page) {
+  show("Open this window from the NeoSCAD page's “Connect your AI agent” panel.", "closed");
+} else {
+  ws = new WebSocket("ws://" + location.host + "/ws?token=" + encodeURIComponent(token));
+  ws.onopen = () => { show("Connected. Your agent can now work in the page.", "open"); tell({ event: "open" }); };
+  ws.onmessage = (e) => tell({ event: "message", data: e.data });
+  ws.onclose = (e) => {
+    show("Disconnected" + (e.reason ? ": " + e.reason : "") + ". You can close this window.", "closed");
+    tell({ event: "close", code: e.code, reason: e.reason });
+  };
+  ws.onerror = () => tell({ event: "error" });
+  window.addEventListener("message", (e) => {
+    if (e.source !== page || e.origin !== PAGE_ORIGIN || !e.data || e.data.neoscadRelay !== 1) return;
+    if (e.data.event === "send" && ws.readyState === WebSocket.OPEN) ws.send(String(e.data.data));
+    else if (e.data.event === "close") { ws.close(1000, "disconnected in the page"); window.close(); }
+  });
+  // The page went away (closed, or navigated elsewhere): so does the link.
+  setInterval(() => { if (page.closed && ws.readyState <= WebSocket.OPEN) { ws.close(1000, "the page closed"); window.close(); } }, 1000);
+}
+document.getElementById("stop").onclick = () => { if (ws) ws.close(1000, "disconnected in the relay window"); window.close(); };
+</script>
+</body>
+</html>

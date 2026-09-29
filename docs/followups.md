@@ -1115,6 +1115,29 @@ lead them, come roughly in order of user impact.
   installed here); `build-view.sh` takes only a binary in `WASM_OPT`.
 - The render crate's `overlay::small_axes_clip` is dead code in the
   wasm32 builds (a compiler warning in `build-core.sh`'s output).
+- **The agent bridge in real Safari and Edge is unverified**
+  (`docs/agent-bridge.md`, "Browsers"): Playwright's WebKit 26.6 and
+  Chrome 154 were tested as neoscad.org, but not Safari 27 (automating it
+  needs `safaridriver --enable`) or Edge (not installed). Check the relay
+  window in Safari, and whether Chrome's LNA prompt text matches the
+  dialog's hint ("reach apps or devices on this computer"). The https
+  emulation is a scratch script; making it an opt-in e2e (a self-signed
+  cert and a CONNECT proxy in `serve.mjs`) would keep the matrix checked.
+- **The bridge's link changes with every `neoscad mcp` start** (a new
+  port and token), so a bookmarked or reloaded link from an earlier
+  session fails and the user asks the agent again. A `--browser-port` and
+  a token kept per user (in the user's config directory) would make one
+  link last, at the cost of a long-lived key on disk.
+- **The model tools on the page's text run natively**, with the files
+  the CLI can read. A page example that uses BOSL2 evaluates only if
+  BOSL2 is on the native library path, while the page fetches its own
+  copy. Shipping BOSL2 with the CLI (as MCAD is), or falling back to the
+  page's own engine for those runs, would close the gap.
+- **The agent's edits and the user's typing race only at version
+  granularity:** an edit made on version N is refused once the user has
+  typed. Rebasing a small edit over concurrent typing (as the editor's
+  collaborative extensions do) would refuse less, at the cost of edits
+  the agent did not see.
 
 ## Windows
 

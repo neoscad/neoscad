@@ -940,6 +940,30 @@ impl Viewport {
         Ok(v)
     }
 
+    /// Like [`Viewport::copy_for_image`], but as the user sees the view:
+    /// the grid and the annotations are kept. This is what an agent
+    /// connected to the web demo captures (`view_capture`), and the marks
+    /// it placed with `view_annotate` are exactly what it needs to see
+    /// again; the export image leaves them out because they are not the
+    /// model's. The pixels-per-point scale follows the size asked for, so
+    /// a capture smaller than the canvas keeps its lines and markers in
+    /// proportion instead of drawing them at the screen's thickness.
+    pub fn copy_as_shown(&self, width: u32, height: u32) -> Result<Viewport, Error> {
+        let mut v = Viewport::new(self.gpu.clone(), self.scheme.clone())?;
+        let scale = if self.width > 0 {
+            self.scale * f64::from(width) / f64::from(self.width)
+        } else {
+            self.scale
+        };
+        v.attach_texture(width, height, scale);
+        v.camera = self.camera;
+        v.settings = self.settings;
+        v.model = self.model.clone();
+        v.annotations = self.annotations.clone();
+        v.fitted = true;
+        Ok(v)
+    }
+
     /// Look at `point`, keeping the rotation and the distance: how the
     /// check panel brings a finding to the middle of the view.
     pub fn look_at(&mut self, point: [f64; 3]) {

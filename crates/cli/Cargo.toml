@@ -60,6 +60,15 @@ render = { package = "neoscad-render", path = "../render" }
 session = { package = "neoscad-session", path = "../session" }
 serde_json.workspace = true
 text = { package = "neoscad-text", path = "../text" }
+# `neoscad mcp --browser` (src/mcp/bridge.rs): the WebSocket the web
+# demo's tab connects to. tungstenite is synchronous (no async runtime,
+# like the rest of this crate); "handshake" is only for the
+# Sec-WebSocket-Accept key and the tests' client, since the server reads
+# the request itself to check its Host, Origin and token first. getrandom
+# for the pairing token (the OS's generator; already in the build).
+# Both are MIT OR Apache-2.0.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+getrandom = "0.4"
 
 # The global allocator (see `main.rs`). Native only: the WASM build keeps
 # Rust's default allocator, and never builds this crate anyway.

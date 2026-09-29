@@ -236,6 +236,20 @@ fn annotations_draw_over_the_model_and_stay_out_of_the_image() {
     let image = copy.read_pixels_blocking().unwrap();
     assert_eq!((image.width, image.height), (160, 120));
     assert_eq!(foreground(&image, &scheme), 0);
+    // The view as shown keeps them (an agent's capture of the marks it
+    // placed), at the same size and at half of it.
+    let mut shown = vp.copy_as_shown(160, 120).unwrap();
+    let image = shown.read_pixels_blocking().unwrap();
+    assert_eq!(image.rgba, marked.rgba);
+    let mut half = vp.copy_as_shown(80, 60).unwrap();
+    let image = half.read_pixels_blocking().unwrap();
+    assert_eq!((image.width, image.height), (80, 60));
+    let red = image
+        .rgba
+        .chunks(4)
+        .filter(|p| p[0] > 200 && p[1] < 80 && p[2] < 80)
+        .count();
+    assert!(red > 10, "red {red}");
 }
 
 /// View All fits both directions of the view at its current size, and an

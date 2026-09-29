@@ -27,3 +27,20 @@ test("panels collapse into tabs under the view", async ({ page }) => {
   await expect(page.locator("#console")).toBeVisible();
   await expect(page.getByTestId("render-summary")).toContainText("Previewed");
 });
+
+test("the agent button fits the phone's top bar, and its dialog says it needs a desktop", async ({ page }) => {
+  await page.goto("/try/#example=sign");
+  await page.waitForSelector("html[data-ready]");
+  const button = page.getByTestId("agent-button");
+  await expect(button).toBeVisible();
+  const box = await button.boundingBox();
+  expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize().width);
+  if (shots) await page.screenshot({ path: `${shots}/phone-agent-button.png` });
+  await button.click();
+  const dialog = page.getByTestId("agent-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".agent-phone")).toBeVisible();
+  const d = await dialog.boundingBox();
+  expect(d.width).toBeLessThanOrEqual(page.viewportSize().width + 1);
+  if (shots) await page.screenshot({ path: `${shots}/phone-agent-dialog.png` });
+});

@@ -10,6 +10,7 @@
 // Runs go through the engine client, which coalesces them and respawns
 // the worker when one is cancelled or crashes.
 
+import { parseConnect, stripConnect } from "./agent/link.js";
 import { setEditorHandler, loadEditor } from "./editor-host.js";
 import { createEngine, ensureLibraries } from "./engine/index.js";
 import { EngineError, EngineRestarted } from "./engine/client.js";
@@ -34,6 +35,7 @@ import { loadExampleText, loadManifest } from "./examples.js";
 import { CustomizerModel } from "./model/customizer.js";
 import { applyTheme, loadSite } from "./site.js";
 import { Store } from "./store.js";
+import { AgentPanel } from "./ui/agent.js";
 import { CheckPanel, checkOptions, findingMarker } from "./ui/check.js";
 import { ConsolePanel, describe } from "./ui/console.js";
 import { CustomizerPanel } from "./ui/customizer.js";
@@ -72,6 +74,17 @@ class App {
     this.build = { engine: "mock", view: "none", version: "dev", ...this.build };
 
     this.doc = null; // {example, path, text, version, parts, customizer}
+    // The document's revision for a connected agent (ui/agent.js): every
+    // change of the text and every switch of example counts, so an edit
+    // made on text the agent read earlier is refused.
+    this.revision = 1;
+    this.running = null; // the run in progress, for whenIdle()
+    // An agent's connect link (`#connect=PORT.KEY`, from `neoscad mcp
+    // --browser`) is read, then taken out of the address bar at once: it
+    // is a key, and should not stay in the history or a shared URL.
+    const hash = location.hash;
+    const connectLink = parseConnect(hash);
+    if (connectLink) history.replaceState(null, "", location.pathname + location.search + stripConnect(hash));
     this.tabs = []; // library files open read-only: {path, text}
     this.activeTab = null; // null: the document
     this.previewTimer = null;
@@ -116,10 +129,15 @@ class App {
       return;
     }
     this.fillExamples();
-    const wanted = new URLSearchParams(location.hash.slice(1)).get("example");
+    const wanted = new URLSearchParams(hash.slice(1)).get("example");
     const id = [wanted, this.settings.example, this.manifest.default].find((x) => this.manifest.examples.some((e) => e.id === x));
     await this.openExample(id);
     document.documentElement.dataset.ready = "true";
+    // Connect an agent: the link this page was opened with, or this tab's
+    // link from before a reload (quietly: its agent may be gone).
+    const link = connectLink ?? AgentPanel.saved();
+    if (connectLink && new URLSearchParams(hash.slice(1)).get("via") === "relay") this.agent.offerRelay(connectLink);
+    else if (link) this.agent.connect(link, { quiet: !connectLink });
   }
 
   // --- Layout -----------------------------------------------------------
@@ -150,11 +168,13 @@ class App {
       { testid: "export-menu" },
     );
     const viewMenu = new Menu("View", () => this.viewItems(), { testid: "view-menu" });
+    this.agent = new AgentPanel(this);
 
     clear(
       $("#topbar"),
       h("a", { class: "home", id: "home-link", href: "https://neoscad.org/" }, "← neoscad.org"),
       h("nav", { class: "site-nav", id: "site-nav", "aria-label": "Site" }),
+      this.agent.button,
       h(
         "div",
         { class: "tools" },
@@ -223,6 +243,7 @@ class App {
 
   applySite(site) {
     applyTheme(site);
+    this.agent.setSite(site);
     const home = $("#home-link");
     home.href = site.home;
     home.textContent = `← ${new URL(site.home).host || site.name}`;
@@ -380,6 +401,8 @@ class App {
     this.saveSettings({ example: id });
     history.replaceState(null, "", `#example=${encodeURIComponent(id)}`);
     clearTimeout(this.previewTimer);
+    this.previewTimer = null;
+    this.revision += 1;
 
     const original = await loadExampleText(example);
     const text = this.store.exampleText(id) ?? original;
@@ -441,6 +464,7 @@ class App {
         const d = this.doc;
         d.text = applyEdits(d.text, m.edits);
         d.version = m.version;
+        this.revision += 1;
         this.engine.edit(d.path, m.edits).catch(() => {});
         this.store.setExampleText(d.example.id, d.text, d.original);
         this.schedulePreview();
@@ -465,7 +489,24 @@ class App {
 
   schedulePreview() {
     clearTimeout(this.previewTimer);
-    this.previewTimer = setTimeout(() => this.run("preview"), PREVIEW_DELAY_MS);
+    this.previewTimer = setTimeout(() => {
+      this.previewTimer = null;
+      this.run("preview");
+    }, PREVIEW_DELAY_MS);
+  }
+
+  /// Resolves when no preview is waiting to start and no run is going:
+  /// an agent's capture after its edit should show the edited model. Gives
+  /// up after a minute (a run that long has its own cancel).
+  async whenIdle() {
+    const until = performance.now() + 60000;
+    while ((this.previewTimer || this.running) && performance.now() < until) {
+      // Always through a timer: a preview that is only scheduled has no
+      // promise yet, and racing an already-settled one would spin here
+      // without ever letting its timer fire.
+      const tick = new Promise((r) => setTimeout(r, 50));
+      await (this.running ? Promise.race([this.running.catch(() => {}), tick]) : tick);
+    }
   }
 
   customizerChanged() {
@@ -585,8 +626,19 @@ class App {
   }
 
   async run(mode) {
+    const run = this.runOnce(mode);
+    this.running = run;
+    try {
+      await run;
+    } finally {
+      if (this.running === run) this.running = null;
+    }
+  }
+
+  async runOnce(mode) {
     if (!this.doc) return;
     clearTimeout(this.previewTimer);
+    this.previewTimer = null;
     const d = this.doc;
     this.lastMode = mode;
     this.editor.lspSync();

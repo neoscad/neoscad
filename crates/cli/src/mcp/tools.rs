@@ -17,12 +17,16 @@
 //! server's parameters and summarise what comes back.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{Value, json};
 
+use super::bridge::Bridge;
 use super::roots::Roots;
 use crate::serve::Local;
+
+mod browser;
+pub use browser::NAMES as BROWSER_NAMES;
 
 /// The tools, in the order `tools/list` gives them.
 pub const NAMES: &[&str] = &[
@@ -213,6 +217,9 @@ pub struct Tools {
     /// Inline source is one document per base directory; calls using it
     /// take turns, so one call's text never replaces another's mid-run.
     inline: Mutex<()>,
+    /// The web page's bridge (`--browser`), whose tools are listed and
+    /// whose page is the model when a call gives neither path nor source.
+    browser: Option<Arc<Bridge>>,
 }
 
 impl std::fmt::Debug for Tools {
@@ -227,18 +234,38 @@ struct Model<'a> {
     path: PathBuf,
     base: PathBuf,
     opened: Vec<PathBuf>,
-    /// For a mesh `path`, the `import()` it was rendered as.
-    imported: Option<String>,
+    /// For a mesh `path`, the `import()` it was rendered as; for the web
+    /// page's text, its file and version.
+    label: Label,
+    /// The web page's customizer values (as `-D` assignments) and its
+    /// `part()` switch, so a tool sees the model the user is looking at
+    /// rather than the text's defaults.
+    defines: Vec<String>,
+    parts: bool,
     _turn: Option<MutexGuard<'a, ()>>,
 }
 
 impl Tools {
-    pub fn new(local: Local, roots: Roots) -> Tools {
+    pub fn new(local: Local, roots: Roots, browser: Option<Arc<Bridge>>) -> Tools {
         Tools {
             local,
             roots,
             inline: Mutex::new(()),
+            browser,
         }
+    }
+
+    /// The tools this server lists: the browser's too with `--browser`.
+    pub fn list(&self) -> Vec<Value> {
+        let mut tools = list();
+        if self.browser.is_some() {
+            tools.extend(browser::list());
+        }
+        tools
+    }
+
+    pub fn knows(&self, name: &str) -> bool {
+        NAMES.contains(&name) || (self.browser.is_some() && BROWSER_NAMES.contains(&name))
     }
 
     pub fn cancel(&self, id: &Value) {
@@ -259,6 +286,12 @@ impl Tools {
         // server keeps its caches, as `neoscad serve` does.
         let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             check_args(name, args)?;
+            if BROWSER_NAMES.contains(&name) {
+                return match &self.browser {
+                    Some(b) => self.browser_tool(b, name, args),
+                    None => Err(format!("unknown tool '{name}'")),
+                };
+            }
             match name {
                 "evaluate" => self.evaluate(id, args),
                 "render" => self.render(id, args),
@@ -411,7 +444,12 @@ impl Tools {
         let base = self.base(args)?;
         match (str_arg(args, "source"), self.readable(&base, args, "path")?) {
             (Some(_), Some(_)) => Err("give either path or source, not both".into()),
-            (None, None) => Err("give path (a .scad file) or source (OpenSCAD text)".into()),
+            // With a web page connected, its text is the model: what the
+            // user is looking at is what the agent asks about.
+            (None, None) => match &self.browser {
+                Some(b) => self.page_model(b, base, inline),
+                None => Err("give path (a .scad file) or source (OpenSCAD text)".into()),
+            },
             // A mesh file is rendered as its import. Given to the parser,
             // `check out/base.stl` failed with a syntax error on the STL's
             // first line (the T2 transcript audit), which reads as a bug in
@@ -433,7 +471,9 @@ impl Tools {
                     opened: vec![doc.clone()],
                     path: doc,
                     base,
-                    imported: Some(call),
+                    label: Label::Import(call),
+                    defines: Vec::new(),
+                    parts: false,
                     _turn: Some(turn),
                 })
             }
@@ -441,7 +481,9 @@ impl Tools {
                 path,
                 base,
                 opened: Vec::new(),
-                imported: None,
+                label: Label::None,
+                defines: Vec::new(),
+                parts: false,
                 _turn: None,
             }),
             (Some(src), None) => {
@@ -457,7 +499,9 @@ impl Tools {
                     opened: vec![path.clone()],
                     path,
                     base,
-                    imported: None,
+                    label: Label::None,
+                    defines: Vec::new(),
+                    parts: false,
                     _turn: Some(turn),
                 })
             }
@@ -475,7 +519,8 @@ impl Tools {
         json!({
             "path": m.path,
             "cwd": m.base,
-            "parts": bool_arg(args, "parts"),
+            "parts": bool_arg(args, "parts") || m.parts,
+            "defines": m.defines,
             "supersede": false,
         })
     }
@@ -491,14 +536,14 @@ impl Tools {
     fn evaluate(&self, id: &Value, args: &Value) -> Reply {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
-        let imported = m.imported.clone();
+        let imported = m.label.clone();
         let r = self.run(id, "evaluate", &self.params(&m, args));
         self.done(m);
         let r = r?;
         let mut text = status(&r);
         push_log(&mut text, &r);
-        Ok(label_import(
-            imported.as_deref(),
+        Ok(label(
+            &imported,
             finish(args, text, terse_log(&r, &main), r),
         ))
     }
@@ -506,7 +551,7 @@ impl Tools {
     fn render(&self, id: &Value, args: &Value) -> Reply {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
-        let imported = m.imported.clone();
+        let imported = m.label.clone();
         let export = match self.writable(&m.base, args, "export", EXPORT_FORMATS) {
             Ok(e) => e,
             Err(e) => {
@@ -546,13 +591,13 @@ impl Tools {
             s["output"] = r["output"].clone();
             s["bytes"] = r["bytes"].clone();
         }
-        Ok(label_import(imported.as_deref(), finish(args, text, s, r)))
+        Ok(label(&imported, finish(args, text, s, r)))
     }
 
     fn snapshot(&self, args: &Value) -> Reply {
         let mut m = self.model(args, INLINE)?;
         let main = m.path.clone();
-        let imported = m.imported.clone();
+        let imported = m.label.clone();
         let output = match self.writable(&m.base, args, "output", &["png"]) {
             Ok(o) => o,
             Err(e) => {
@@ -585,7 +630,8 @@ impl Tools {
             "diff": diff,
             "highlight": args.get("highlight").cloned().unwrap_or(json!([])),
             "issues": bool_arg(args, "issues"),
-            "parts": bool_arg(args, "parts"),
+            "parts": bool_arg(args, "parts") || m.parts,
+            "defines": m.defines,
             "supersede": false,
         });
         if let Some(o) = &output {
@@ -658,7 +704,7 @@ impl Tools {
                 "findings": terse_findings(&i["findings"]),
             });
         }
-        let mut out = label_import(imported.as_deref(), finish(args, text, s, r));
+        let mut out = label(&imported, finish(args, text, s, r));
         out.png = snap.png;
         Ok(out)
     }
@@ -666,7 +712,7 @@ impl Tools {
     fn check(&self, id: &Value, args: &Value) -> Reply {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
-        let imported = m.imported.clone();
+        let imported = m.label.clone();
         let mut p = self.params(&m, args);
         for k in ["bed", "nozzle", "min_wall", "max_overhang"] {
             if let Some(v) = args.get(k) {
@@ -689,8 +735,8 @@ impl Tools {
                 "echo": d["echo"],
             });
             push_log(&mut text, &log);
-            return Ok(label_import(
-                imported.as_deref(),
+            return Ok(label(
+                &imported,
                 finish(args, text, terse_log(&log, &main), r),
             ));
         }
@@ -728,13 +774,13 @@ impl Tools {
             "findings": terse_findings(&r["findings"]),
             "truncated": r["truncated"],
         });
-        Ok(label_import(imported.as_deref(), finish(args, text, s, r)))
+        Ok(label(&imported, finish(args, text, s, r)))
     }
 
     fn measure(&self, id: &Value, args: &Value) -> Reply {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
-        let imported = m.imported.clone();
+        let imported = m.label.clone();
         let mut p = self.params(&m, args);
         for k in ["part", "between", "section", "axis", "center", "profile"] {
             if let Some(v) = args.get(k) {
@@ -796,7 +842,7 @@ impl Tools {
         if let Some(e) = s.get("error").and_then(Value::as_str) {
             s["error"] = json!(crate::serve::param_names(e));
         }
-        Ok(label_import(imported.as_deref(), finish(args, text, s, r)))
+        Ok(label(&imported, finish(args, text, s, r)))
     }
 
     fn test(&self, id: &Value, args: &Value) -> Reply {
@@ -903,6 +949,9 @@ impl Tools {
             });
         }
         let Some(path) = self.readable(&base, args, "path")? else {
+            if let Some(b) = &self.browser {
+                return self.format_page(b, id, &base, check, bool_arg(args, "diff"));
+            }
             return Err("give path (a .scad file) or source".into());
         };
         if !check && !self.roots.can_write(&path) {
@@ -994,14 +1043,37 @@ fn scad_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// A result for a mesh `path`, labelled with the `import()` it was
-/// rendered as: first in the text, and as `imported` in the structured
-/// content (the full JSON's too, with `verbose`).
-fn label_import(imported: Option<&str>, mut out: Out) -> Out {
-    if let Some(call) = imported {
-        out.text = format!("path is a mesh file: rendered as `{call}`\n{}", out.text);
-        if let Some(o) = out.structured.as_object_mut() {
-            o.insert("imported".into(), json!(call));
+/// What a result says about where its model came from, when that is not
+/// simply the `path` or `source` given.
+#[derive(Debug, Clone, Default)]
+enum Label {
+    #[default]
+    None,
+    /// A mesh `path`, rendered as this `import()`.
+    Import(String),
+    /// The connected web page's text (no `path` or `source`), at this
+    /// version: the agent needs the version for `editor_edit`, and should
+    /// never mistake the page's text for a file of its own.
+    Page { file: String, version: u64 },
+}
+
+/// A result labelled with where its model came from: first in the text,
+/// and in the structured content (the full JSON's too, with `verbose`).
+/// A mesh `path` is labelled with the `import()` it was rendered as.
+fn label(l: &Label, mut out: Out) -> Out {
+    match l {
+        Label::None => {}
+        Label::Import(call) => {
+            out.text = format!("path is a mesh file: rendered as `{call}`\n{}", out.text);
+            if let Some(o) = out.structured.as_object_mut() {
+                o.insert("imported".into(), json!(call));
+            }
+        }
+        Label::Page { file, version } => {
+            out.text = format!("the web page's {file} (version {version})\n{}", out.text);
+            if let Some(o) = out.structured.as_object_mut() {
+                o.insert("page".into(), json!({"file": file, "version": version}));
+            }
         }
     }
     out
@@ -1022,7 +1094,8 @@ fn make_dir(p: &Path) -> Result<(), String> {
 /// silently treated as absent (`"parts": "true"` gave "no part 'a'" with
 /// no reason), which is the least actionable answer an agent can get.
 fn check_args(name: &str, args: &Value) -> Result<(), String> {
-    let tools = list();
+    let mut tools = list();
+    tools.extend(browser::list());
     let Some(tool) = tools.iter().find(|t| t["name"] == name) else {
         return Ok(());
     };
@@ -1044,11 +1117,13 @@ fn check_args(name: &str, args: &Value) -> Result<(), String> {
         "string" => v.is_string(),
         "boolean" => v.is_boolean(),
         "number" => v.is_number(),
+        "integer" => v.is_u64(),
         "array" => v.is_array(),
+        "object" => v.is_object(),
         _ => true,
     };
     let a = |ty: &str| match ty {
-        "array" | "object" => format!("an {ty}"),
+        "array" | "object" | "integer" => format!("an {ty}"),
         t => format!("a {t}"),
     };
     for (k, v) in obj {

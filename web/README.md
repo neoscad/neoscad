@@ -37,6 +37,7 @@ E2E against a bundle synced into a copy of the website (the real engine;
 | `src/engine/mock-*.js`, `fixtures.js` | The mock engine for `npm run build` and the unit tests; it speaks the real wire, packed scenes included. |
 | `src/view/index.js` | The 3D view: the WebGPU-only viewer (`view/`), the WebGL2 build (`view-webgl/`, fetched only when WebGPU is missing or fails), else `canvas2d.js`, with a notice. |
 | `src/ui/`, `src/model/` | Panels, and the customizer's logic. |
+| `src/agent/`, `src/ui/agent.js` | "Connect your AI agent": the page's end of `neoscad mcp --browser` (a WebSocket to 127.0.0.1, directly or through the relay window), its answers to the agent's tools, and the dialog. Design and browser matrix: `docs/agent-bridge.md`. |
 | `examples/` | The picker's examples (`README.md` there has their sources and licences). |
 | `e2e/` | Playwright: `app.spec.js` (either engine), `real.spec.js` (the wasm core and viewer: backends, schemes, picking, every example's timings, the heavy example's cancel), `phone.spec.js`. |
 
@@ -55,4 +56,9 @@ Things the page does because of the wire:
 
 E2E options: `E2E_DIR` (the bundle to serve), `E2E_SITE` (a copy of the
 website to serve at the root), `E2E_SHOTS` (a directory for screenshots
-and `timings.json`), `E2E_OUT` (Playwright's output directory).
+and `timings.json`), `E2E_OUT` (Playwright's output directory),
+`NEOSCAD_BIN` (a `neoscad` built from this checkout, for `agent.spec.js`,
+which skips without it; `E2E_BRIDGE_LOG=1` shows its stderr and the
+page's console). `agent.spec.js` runs in Firefox and WebKit too:
+`npx playwright install firefox webkit`, then
+`npx playwright test agent --project chromium --project firefox --project webkit`.

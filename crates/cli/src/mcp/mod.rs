@@ -21,6 +21,7 @@
 //! line is synchronous threads (`rmcp` needs tokio), and `rmcp` 3.4.1
 //! (2026-09-23) still defaults to 2025-11-25.
 
+mod bridge;
 pub mod roots;
 mod tools;
 
@@ -52,6 +53,9 @@ const TTL_MS: u64 = 3_600_000;
 /// Guidance for the model, sent once per session (legacy `initialize`,
 /// `server/discover`); the tool descriptions carry the rest.
 const INSTRUCTIONS: &str = "NeoSCAD is an OpenSCAD-compatible modeller. Iterate on inline `source` (no files needed): `evaluate` for errors and echo, `render` for size and volume, `snapshot` to see it, `check` for printability before you finish. Write the final model to a file yourself.";
+
+/// What `--browser` adds to [`INSTRUCTIONS`].
+const BROWSER_INSTRUCTIONS: &str = " The user may have NeoSCAD's web page open: browser_connect gives the link that connects it. Once it is connected, work on the page's text rather than files: omit path and source to use it, change it with editor_edit (the user sees each change), look with view_capture and point with view_annotate.";
 
 const EXIT_ERROR: u8 = 1;
 
@@ -91,6 +95,22 @@ pub(crate) struct Args {
     /// it costs the agent's context nothing.)
     #[arg(long = "enable", value_name = "FEATURE", action = clap::ArgAction::Append)]
     enable: Vec<String>,
+
+    /// Let the NeoSCAD web page (neoscad.org/try) connect, so the agent
+    /// can work on the text open there and see its 3D view: listens on
+    /// 127.0.0.1 (a free port) for a tab with the random token of the
+    /// link the browser_connect tool gives.
+    #[arg(long)]
+    browser: bool,
+
+    /// The page the connect link opens, whose origin alone may connect
+    /// (default https://neoscad.org/try/; a local copy for development).
+    #[arg(long = "browser-url", value_name = "URL", requires = "browser")]
+    browser_url: Option<String>,
+
+    /// Open the connect link in the default browser at startup.
+    #[arg(long, requires = "browser")]
+    open: bool,
 }
 
 /// Run `neoscad mcp` with the arguments after `mcp`.
@@ -144,8 +164,37 @@ pub fn main(args: Vec<OsString>) -> u8 {
             return EXIT_ERROR;
         }
     };
+    let bridge = if a.browser {
+        let page = a.browser_url.as_deref().unwrap_or(bridge::DEFAULT_PAGE);
+        match bridge::Bridge::start(page) {
+            Ok(b) => {
+                // stderr: stdout carries only MCP messages. Clients keep
+                // it in their logs; the agent gets the link from
+                // browser_connect.
+                eprintln!("neoscad mcp: connect the web page with {}", b.link());
+                if a.open
+                    && let Err(e) = bridge::open_in_browser(&b.link())
+                {
+                    eprintln!("neoscad mcp: {e}");
+                }
+                Some(b)
+            }
+            Err(e) => {
+                eprintln!("neoscad mcp: {e}");
+                return EXIT_ERROR;
+            }
+        }
+    } else {
+        None
+    };
     let server = Arc::new(Server {
-        tools: tools::Tools::new(crate::serve::Local::new(cfg), roots),
+        instructions: if bridge.is_some() {
+            format!("{INSTRUCTIONS}{BROWSER_INSTRUCTIONS}")
+        } else {
+            INSTRUCTIONS.to_string()
+        },
+        bridge: bridge.clone(),
+        tools: tools::Tools::new(crate::serve::Local::new(cfg), roots, bridge),
         out: Mutex::new(Box::new(std::io::stdout())),
         log: a.log.and_then(|p| {
             std::fs::OpenOptions::new()
@@ -164,6 +213,10 @@ pub fn main(args: Vec<OsString>) -> u8 {
 
 struct Server {
     tools: tools::Tools,
+    instructions: String,
+    /// The web page's bridge, told the client's name for the page's
+    /// "connected to" line.
+    bridge: Option<Arc<bridge::Bridge>>,
     out: Mutex<Box<dyn Write + Send>>,
     log: Option<Mutex<std::fs::File>>,
     /// Requests the client cancelled: their answers are not sent
@@ -320,6 +373,15 @@ fn notification(server: &Server, method: &str, params: &Value) {
     }
 }
 
+/// Remember the client's name (`clientInfo`) for the web page's status
+/// line, when there is a page to tell.
+fn note_client(server: &Server, info: Option<&Value>) {
+    let name = info.and_then(|i| i.get("title").or_else(|| i.get("name")));
+    if let (Some(b), Some(n)) = (&server.bridge, name.and_then(Value::as_str)) {
+        b.set_client(n);
+    }
+}
+
 fn server_info() -> Value {
     json!({"name": "neoscad", "title": "NeoSCAD", "version": env!("CARGO_PKG_VERSION")})
 }
@@ -367,26 +429,33 @@ fn request(server: &Server, id: &Value, method: &str, params: &Value) -> Result<
             .and_then(Value::as_str)
             .unwrap_or_default();
         let version = LEGACY.iter().find(|v| **v == asked).unwrap_or(&LEGACY[0]);
+        note_client(server, params.get("clientInfo"));
         return Ok(json!({
             "protocolVersion": version,
             "capabilities": capabilities(),
             "serverInfo": server_info(),
-            "instructions": INSTRUCTIONS,
+            "instructions": server.instructions,
         }));
     }
     let modern = era(params)?;
+    if modern {
+        note_client(
+            server,
+            params["_meta"].get("io.modelcontextprotocol/clientInfo"),
+        );
+    }
     let mut result = match method {
         "ping" => json!({}),
         "server/discover" => json!({
             "supportedVersions": [MODERN],
             "capabilities": capabilities(),
-            "instructions": INSTRUCTIONS,
+            "instructions": server.instructions,
         }),
-        "tools/list" => json!({"tools": tools::list()}),
+        "tools/list" => json!({"tools": server.tools.list()}),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            if !tools::NAMES.contains(&name) {
+            if !server.tools.knows(name) {
                 return Err(Failure::new(
                     code::INVALID_PARAMS,
                     format!("Unknown tool: {name}"),

@@ -18,6 +18,8 @@
 //   camera() -> {vpt, vpr, vpd, vpf}  setFileView({vpt?, vpr?, vpd?, vpf?})
 //   rayAt(x, y) -> {origin, direction}  resize()  dispose()  schemes  kind
 //   onPick = (ray) => ...
+//   image(width, height) -> Promise<{width, height, rgba}>   (wasm only; the
+//   canvas fallback's 2D canvas is copied instead)
 //
 // Annotations are the viewer's shape: lines `{points: [[x,y,z], ...],
 // closed, color}` and markers `{point, label, color, bboxMin?, bboxMax?}`,
@@ -138,6 +140,10 @@ function wrapWasm(mod, v, canvas) {
     camera: () => v.camera(),
     setFileView: (view) => v.setFileView(view),
     rayAt: (x, y) => v.rayAt(x, y),
+    // The view as shown (grid and annotations too), drawn offscreen: an
+    // agent's capture (agent/page.js). A WebGPU or WebGL canvas cannot be
+    // read back once presented, so the canvas itself is never copied.
+    image: (width, height) => v.image(width, height, true),
     resize: () => v.resize(),
     dispose: () => v.free(),
     canvas,

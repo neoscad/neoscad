@@ -35,7 +35,9 @@ and sent, for debugging a client), `--limit NAME=VALUE` (repeatable:
 change a resource limit; see "Safety"), `--enable FEATURE` (repeatable:
 one of OpenSCAD's experimental features for every call, as the command
 line's `--enable`: `textmetrics`, `object-function`, `import-function`,
-`vector-swizzle`; off by default, as in OpenSCAD).
+`vector-swizzle`; off by default, as in OpenSCAD), `--browser` (let the
+web page connect; see "The web page" below) with `--browser-url URL` and
+`--open`.
 
 ## Protocol
 
@@ -285,11 +287,75 @@ output's directory is created.
   `resource-limit` error that names the limit and the flag that raises
   it; `neoscad mcp --limit fragments=50000` (or `=off`) does.
 - **No network** and **no command execution:** the tools evaluate
-  OpenSCAD, which has neither.
+  OpenSCAD, which has neither. The one exception is `--browser`'s
+  listener on 127.0.0.1, which accepts only the web page's origin with
+  the link's 128-bit key (`docs/agent-bridge.md`, "Security"), and
+  `browser_connect`'s `open`, which runs the system's URL opener on the
+  link.
 - Writes happen only through `render`'s `export`, `snapshot`'s `output`
   and `format` on a `path`.
 - Resources: `neoscad://docs` (the builtin index) and the template
   `neoscad://docs/{name}`. No prompts.
+
+## The web page (`--browser`)
+
+`neoscad mcp --browser` also lets the NeoSCAD web page
+(neoscad.org/try) connect, so an agent works on the text the user has
+open there, and sees and points at its 3D view. The design, the security
+model and the browsers as tested are in `docs/agent-bridge.md`; the code
+is `crates/cli/src/mcp/bridge.rs` (the bridge),
+`crates/cli/src/mcp/tools/browser.rs` (the tools) and `web/src/agent/`
+(the page's side). Setup:
+
+```sh
+claude mcp add neoscad -- neoscad mcp --browser
+```
+
+The server listens on 127.0.0.1 (a free port) from the start. The agent
+calls `browser_connect` for the link (`https://neoscad.org/try/#connect=
+PORT.KEY`) and gives it to the user, who opens it or pastes it into the
+page's "Connect your AI agent" dialog. `--open` opens it in the default
+browser at startup, and `browser_connect`'s `open: true` does from a call
+(off by default: an MCP host starts the server with every session, and a
+tab opening each time would be a surprise). `--browser-url URL` names
+another copy of the page, whose origin is then the only one allowed (a
+local build: `--browser-url http://127.0.0.1:8123/try/`). The link is also
+on stderr.
+
+Once a page is connected, **`evaluate`, `render`, `snapshot`, `check` and
+`measure` given neither `path` nor `source` use the page's text**, with
+its customizer values (as `-D` assignments) and its `part()` switch, under
+the page's file name in `base_dir`; the result starts with `the web page's
+gears.scad (version 12)` and has `"page": {"file", "version"}`. `format`
+with neither reformats the page's text in place (one undoable edit, or
+with `check` says what would change). `test` and `docs` do not use it.
+Without `--browser` none of this is listed or costs context.
+
+| Tool | What it does | Arguments |
+|---|---|---|
+| `browser_connect` | the link, and whether (and how) a page is connected | `open` |
+| `editor_read` | the text with numbered lines, its `version`, the selection, customizer values, the last run's summary, errors and warnings | |
+| `editor_edit` | changes the text as one undoable step, highlighted in the editor; refuses a stale `version` | `version` (required), `edits`: `[{old, new}]` (unique match) or `[{at: [line, col, end_line, end_col], new}]`; or `text` (all of it) |
+| `editor_reveal` | selects and scrolls to a place, to show the user | `at` `[line, col?, end_line?, end_col?]` or `text` |
+| `view_camera` | gets or sets the camera (`$vpt`, `$vpr`, `$vpd`, `$vpf`) | `vpt`, `vpr`, `vpd`, `view` (top ... diagonal; `iso` too), `fit` |
+| `view_capture` | a PNG of the view as the user sees it: their camera, the grid, the agent's marks; after any pending preview | `size` (longest side, default 768, 64 to 2048) |
+| `view_annotate` | markers and lines in the view, replacing the agent's earlier ones; none clears | `markers` `[{point, label, color}]`, `lines` `[{points, closed, color}]` |
+| `console_read` | the console of the last preview or render | |
+
+Positions are 1-based lines and 1-based **byte** columns, as every
+diagnostic here gives them; the editor counts UTF-16 units, and the two
+meet only through `lang::source`. A stale version, an `old` that occurs
+twice, overlapping edits, a column inside a character, and an edit the
+user rejects (the page's "Ask me before applying" switch) are `isError`
+results that say what to do next. With no page connected, the page tools
+answer with how to connect.
+
+The browser tools add 2,396 bytes to the tool list as the model sees it
+(`[name, description, input schema]`, compact JSON; 2,967 with the keys and
+annotations a client receives, roughly 600 to 850 tokens). The model tools
+stay at 5,488. `crates/cli/src/mcp/tools/browser.rs` keeps the browser
+tools under 2,600 and each description under 300; the instructions gain
+one sentence.
 
 ## Smoke test
 

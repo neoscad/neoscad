@@ -6,7 +6,9 @@
 
   The policy: scripts, workers and wasm only from this origin (wasm needs
   'wasm-unsafe-eval'); CodeMirror writes style elements, hence inline
-  styles; downloads are blob: URLs.
+  styles; downloads are blob: URLs. The only other connection allowed is a
+  WebSocket to this computer's loopback address, any port: the agent
+  bridge of `neoscad mcp --browser` (src/agent/, which checks the token).
 -->
 <html lang="en">
   <head>
@@ -14,7 +16,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'none'"
     />
     <meta name="color-scheme" content="light dark" />
     <meta name="neoscad-site" content="../site.json" />

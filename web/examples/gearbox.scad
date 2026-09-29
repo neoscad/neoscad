@@ -1,5 +1,6 @@
 // NeoSCAD hero model: a BOSL2 planetary gearbox.
 // camera: 0,0,-14,64,0,24,390
+// loop: 120 s (the video's length, one $t cycle; see sun_turns)
 //
 // Herringbone sun, four herringbone planets and a herringbone ring gear,
 // all laid out by BOSL2's planetary_gears() so the teeth really mesh, on
@@ -7,6 +8,10 @@
 // train. Heavy on purpose (helical tooth surfaces, many booleans), to
 // time a full render against OpenSCAD. Needs BOSL2 on OPENSCADPATH
 // (.reference/BOSL2); scripts/apple/build-hero.sh sets it.
+//
+// Animated by $t (scripts/apple/build-hero-video.sh renders the frames);
+// at the default $t = 0 every rotation below is zero and the model is
+// the still that build-hero.sh times.
 
 include <BOSL2/std.scad>
 include <BOSL2/gears.scad>
@@ -23,8 +28,29 @@ sun = g[0];
 ring = g[1];
 planets = g[2];
 
+// Motion: the carrier (with its pins), the plinth and the cutaway stay
+// still. The sun turns by `spin`; each planet turns about its own pin by
+// -spin * S / P and the ring by -spin * S / R (S, P, R the tooth counts
+// 21, 25, 71), which is what keeps every tooth pair rolling on its pitch
+// circle, so the gears mesh in every frame, not just at $t = 0. The
+// phases come from planetary_gears() (each gear_spin), unchanged.
+//
+// One $t cycle must end in exactly the starting pose or the video's loop
+// jumps. The keyed bore makes the sun return only after whole turns; a
+// planet (25 teeth, six holes, gcd 1) only after whole turns too, and a
+// planet turns 21/25 of a turn per sun turn, so the shortest cycle is 25
+// sun turns (21 planet turns, 525 ring teeth). Any fewer and the planets'
+// holes, or the key, visibly snap at the loop point. The one thing that
+// does not come round is the faceting of the ring's outer wall (a 96-gon,
+// which 525 teeth don't turn by whole facets): at the loop point, in a
+// 120 s loop, its flat shading steps 1.3 degrees instead of a frame's
+// usual 0.74, which does not show.
+sun_turns = 25;
+spin = 360 * sun_turns * $t;
+
 // Sun: a herringbone gear on a hub, with a keyed bore.
 color("#ff5a6e")
+zrot(spin)
 difference() {
     union() {
         spur_gear(mod = mod, teeth = sun[1], profile_shift = sun[2], helical = helical,
@@ -39,6 +65,7 @@ difference() {
 color("#18b3cc")
 for (i = idx(planets[4]))
     move(planets[4][i])
+    zrot(-spin * sun[1] / planets[1])
     difference() {
         spur_gear(mod = mod, teeth = planets[1], profile_shift = planets[2], helical = -helical,
                   herringbone = true, thickness = thick, gear_spin = planets[3][i], shaft_diam = 6);
@@ -46,9 +73,12 @@ for (i = idx(planets[4]))
     }
 
 // Ring: a herringbone ring gear with a quarter cut away (the octant-style
-// cut the icon concepts use), so the train inside is visible.
+// cut the icon concepts use), so the train inside is visible. The ring
+// turns inside the difference, so the window stays put while the teeth
+// run past it.
 color("#4b3fd1")
 difference() {
+    zrot(-spin * sun[1] / ring[1])
     ring_gear(mod = mod, teeth = ring[1], profile_shift = ring[2], helical = helical,
               herringbone = true, thickness = thick, gear_spin = ring[3], backing = 7);
     cutaway();
