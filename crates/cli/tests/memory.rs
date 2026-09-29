@@ -25,14 +25,22 @@ const BIN: &str = env!("CARGO_BIN_EXE_neoscad");
 const MAX_RSS_MB: u64 = 3 * 64 + 32;
 
 /// Whether a watched peak is within `max`. Where memory can be read
-/// ([`rss_mb`]) the peak must also be above zero: a reader that found
-/// nothing would otherwise pass every bound.
+/// ([`rss_mb`] finds this process's own), the peak must also be above
+/// zero: a reader that found nothing would otherwise pass every bound.
 fn resident_within(peak: u64, max: u64) -> bool {
-    if cfg!(unix) {
+    if rss_readable() {
         (1..=max).contains(&peak)
     } else {
         peak <= max
     }
+}
+
+/// Whether [`rss_mb`] can read memory here, probed on this test process.
+/// Windows has no reader, and a build sandbox may have no `ps` (Nix on
+/// macOS): there the limits' errors are checked but memory is not.
+fn rss_readable() -> bool {
+    static READABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *READABLE.get_or_init(|| rss_mb(std::process::id()) > 0)
 }
 
 /// How long one `render` through MCP may take to stop at a limit, in the
@@ -105,7 +113,14 @@ fn rss_mb(pid: u32) -> u64 {
             })
             .map_or(0, |kb| kb / 1024);
     }
-    Command::new("ps")
+    // By absolute path on macOS, where a build sandbox's PATH (Nix's) may
+    // leave `ps` out although the system has it.
+    let ps = if cfg!(target_os = "macos") {
+        "/bin/ps"
+    } else {
+        "ps"
+    };
+    Command::new(ps)
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
         .ok()
