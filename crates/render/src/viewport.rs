@@ -460,6 +460,13 @@ pub struct Viewport {
     /// Whether View All has run for a model yet: the first model is fitted,
     /// later ones keep the camera the user chose.
     fitted: bool,
+    /// The box View All last fitted, while the camera is still that fit
+    /// (nothing has moved it since). A resize fits it again, so the fit
+    /// follows the view's shape: a browser pane laid out after the first
+    /// model arrived, or a window made narrower, would otherwise keep a
+    /// fit made for the old aspect and cut a wide model off at the sides.
+    /// Any other camera change ends it.
+    auto_fit: Option<([f64; 3], [f64; 3])>,
     dirty: bool,
 }
 
@@ -488,6 +495,7 @@ impl Viewport {
             empty,
             generation: 0,
             fitted: false,
+            auto_fit: None,
             dirty: true,
         })
     }
@@ -628,6 +636,9 @@ impl Viewport {
         if width == 0 || height == 0 {
             return;
         }
+        if let Some(bbox) = self.auto_fit {
+            self.fit(Some(bbox));
+        }
         let device = &self.gpu.device;
         let Some(a) = &mut self.attached else {
             return;
@@ -732,7 +743,7 @@ impl Viewport {
         }
         self.generation = generation;
         if !self.fitted && model.bbox.is_some() {
-            self.camera.view_all_centered(model.bbox);
+            self.fit(model.bbox);
             self.fitted = true;
         }
         self.model = Some(model);
@@ -829,6 +840,28 @@ impl Viewport {
     /// Change the camera; the next frame shows it.
     pub fn with_camera(&mut self, f: impl FnOnce(&mut Camera)) {
         f(&mut self.camera);
+        self.auto_fit = None;
+        self.dirty = true;
+    }
+
+    /// Draw the next frame even though nothing changed, leaving the
+    /// camera alone (so a View All fit still follows resizes).
+    pub fn redraw(&mut self) {
+        self.dirty = true;
+    }
+
+    /// View All for `bbox` at the view's current shape
+    /// ([`Camera::view_all_to_fit`], not OpenSCAD's vertical-only
+    /// [`Camera::view_all`]: this is an interactive view, and a portrait
+    /// one would cut a wide model off). The camera takes the drawable size
+    /// first, as the stored camera's own size is whatever it was made
+    /// with; an unsized view fits as a square, and the first resize fits
+    /// again.
+    fn fit(&mut self, bbox: BoundingBox) {
+        self.camera.pixel_width = self.width;
+        self.camera.pixel_height = self.height;
+        self.camera.view_all_to_fit(bbox);
+        self.auto_fit = bbox;
         self.dirty = true;
     }
 
@@ -848,10 +881,10 @@ impl Viewport {
     }
 
     /// View > View All: fit the model shown (or the default distance for
-    /// none).
+    /// none), in both directions of the view.
     pub fn view_all(&mut self) {
         let bbox = self.model.as_ref().and_then(|m| m.bbox);
-        self.with_camera(|c| c.view_all_centered(bbox));
+        self.fit(bbox);
     }
 
     /// A standard view: OpenSCAD's rotation for it, keeping the centre and
@@ -919,7 +952,13 @@ impl Viewport {
     }
 
     pub fn set_projection(&mut self, projection: Projection) {
+        let auto_fit = self.auto_fit;
         self.with_camera(|c| c.projection = projection);
+        // A portrait fit depends on the projection, so an untouched View
+        // All is made again for the new one rather than dropped.
+        if auto_fit.is_some() {
+            self.fit(auto_fit);
+        }
     }
 
     // --- Frames -------------------------------------------------------------

@@ -793,7 +793,7 @@ impl Viewer {
 
     /// Draw the next frame even if nothing changed.
     pub fn redraw(&self) {
-        self.shared.view.borrow_mut().with_camera(|_| {});
+        self.shared.view.borrow_mut().redraw();
         self.shared.schedule();
     }
 

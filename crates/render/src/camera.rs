@@ -10,7 +10,7 @@
 //! from the command line reaches the matrices without a round trip through
 //! the user-space values, which would move the angles by an ulp.
 
-use io::trig::{atan2_degrees, sin_degrees, tan_degrees};
+use io::trig::{atan_degrees, atan2_degrees, sin_degrees, tan_degrees};
 
 /// `DEFAULT_DISTANCE`, `DEFAULT_FOV` and the default image size
 /// (`Camera.cc:14-17`).
@@ -318,6 +318,49 @@ impl Camera {
         self.autocenter = true;
         self.view_all(bbox);
     }
+
+    /// An interactive viewer's View All: [`Camera::view_all_centered`],
+    /// then moved back further if the image is taller than wide, so the
+    /// bounding sphere fits the narrower of the two fields of view at the
+    /// camera's pixel size (which the caller sets to the viewer's size
+    /// first).
+    ///
+    /// OpenSCAD fits the vertical field of view only. That is right for a
+    /// landscape or square image, where the horizontal field is the wider
+    /// one, and it is what `--viewall` images must keep doing to match
+    /// OpenSCAD's pixels, so [`Camera::view_all`] is left alone. But a
+    /// portrait viewer (a phone, or a tall browser pane) then shows only
+    /// the middle of a wide model: /try's CSG example, three shapes side
+    /// by side, showed one of them. For an aspect of 1 or more this gives
+    /// exactly `view_all_centered`'s distance, so the app and OpenSCAD's
+    /// GUI still agree there.
+    ///
+    /// - Perspective: the sphere fits a frustum side at half-angle `h`
+    ///   when `distance * sin(h) >= radius`; the horizontal half-angle is
+    ///   `atan(tan(fov / 2) * aspect)`, so the distance is
+    ///   `radius / sin(min(fov / 2, horizontal))`.
+    /// - Orthogonal: the view is `distance * tan(fov / 2)` high and
+    ///   `aspect` times that wide ([`Camera::gl_matrices`]). OpenSCAD's
+    ///   distance leaves the height `radius / cos(fov / 2)`, a little
+    ///   margin; dividing the distance by the aspect gives the width the
+    ///   same margin.
+    ///
+    /// A size with no aspect (zero or unset) fits as a square would.
+    pub fn view_all_to_fit(&mut self, bbox: BoundingBox) {
+        self.view_all_centered(bbox);
+        let aspect = self.aspect_ratio();
+        if bbox.is_none() || !aspect.is_finite() || aspect <= 0.0 || aspect >= 1.0 {
+            return;
+        }
+        let half = self.fov / 2.0;
+        self.viewer_distance *= match self.projection {
+            Projection::Perspective => {
+                let horizontal = atan_degrees(tan_degrees(half) * aspect);
+                sin_degrees(half) / sin_degrees(horizontal)
+            }
+            Projection::Orthogonal => 1.0 / aspect,
+        };
+    }
 }
 
 /// Between the screen and the model, for the app's pointer (picking a
@@ -542,6 +585,105 @@ mod tests {
         assert!((c.viewer_distance - r / sin_degrees(11.25)).abs() < 1e-12);
         c.view_all(None);
         assert_eq!((c.vpt(), c.viewer_distance), ([0.0; 3], DEFAULT_DISTANCE));
+    }
+
+    /// The largest NDC |x| and |y| of points on the bounding sphere
+    /// `view_all_to_fit` fits (about the box's centre, which it looks at),
+    /// and of the box's corners.
+    fn fitted_extents(c: &Camera, lo: [f64; 3], hi: [f64; 3]) -> ([f64; 2], [f64; 2]) {
+        let centre: [f64; 3] = std::array::from_fn(|i| (lo[i] + hi[i]) / 2.0);
+        let r = norm(std::array::from_fn(|i| hi[i] - lo[i])) / 2.0;
+        let extent = |points: &mut dyn Iterator<Item = [f64; 3]>| {
+            points.fold([0.0f64; 2], |m, p| {
+                let s = c.project(p).expect("in front of the eye");
+                [m[0].max(s[0].abs()), m[1].max(s[1].abs())]
+            })
+        };
+        // A Fibonacci sphere: dense enough that the largest sample is
+        // within a fraction of a percent of the silhouette.
+        let n = 20_000;
+        let mut sphere = (0..n).map(|k| {
+            let z = 1.0 - 2.0 * (f64::from(k) + 0.5) / f64::from(n);
+            let t = f64::from(k) * std::f64::consts::PI * (3.0 - 5f64.sqrt());
+            let s = (1.0 - z * z).sqrt();
+            let d = [s * t.cos(), s * t.sin(), z];
+            std::array::from_fn(|i| centre[i] + r * d[i])
+        });
+        let mut corners = (0..8)
+            .map(|k: u32| std::array::from_fn(|i| if (k >> i) & 1 == 1 { hi[i] } else { lo[i] }));
+        (extent(&mut sphere), extent(&mut corners))
+    }
+
+    #[test]
+    fn view_all_to_fit_fits_the_narrower_field_of_view() {
+        // Three shapes in a row along x, as /try's CSG example.
+        let (lo, hi) = ([-34.0, -10.0, -10.0], [34.0, 10.0, 10.0]);
+        let half = DEFAULT_FOV / 2.0;
+        for projection in [Projection::Perspective, Projection::Orthogonal] {
+            for (w, h) in [(553, 851), (375, 812), (1280, 900), (512, 512), (900, 1280)] {
+                let sized = Camera {
+                    projection,
+                    pixel_width: w,
+                    pixel_height: h,
+                    ..Camera::default()
+                };
+                let mut c = sized;
+                c.view_all_to_fit(Some((lo, hi)));
+                let fitted = c.viewer_distance;
+                let (sphere, corners) = fitted_extents(&c, lo, hi);
+                let what = format!("{projection:?} {w}x{h}");
+                // Everything is on screen both ways.
+                for e in [sphere, corners] {
+                    assert!(e[0] <= 1.0 + 1e-9 && e[1] <= 1.0 + 1e-9, "{what}: {e:?}");
+                }
+                // The sphere reaches across the narrower axis: to its edge
+                // (perspective), or to OpenSCAD's `cos(fov / 2)` margin
+                // (orthogonal, see `view_all_to_fit`).
+                let narrow = if w < h { sphere[0] } else { sphere[1] };
+                let reach = match projection {
+                    Projection::Perspective => 1.0,
+                    Projection::Orthogonal => io::trig::cos_degrees(half),
+                };
+                assert!((narrow - reach).abs() < 2e-3, "{what}: {narrow} vs {reach}");
+                // No farther than needed: a little closer and the sphere
+                // leaves the screen.
+                c.viewer_distance = 0.97 * fitted;
+                let (closer, _) = fitted_extents(&c, lo, hi);
+                assert!(closer[0].max(closer[1]) > 1.0, "{what}: {closer:?}");
+                // Landscape and square keep OpenSCAD's own distance.
+                let mut openscad = sized;
+                openscad.view_all_centered(Some((lo, hi)));
+                if w >= h {
+                    assert_eq!(fitted, openscad.viewer_distance, "{what}");
+                } else {
+                    assert!(fitted > openscad.viewer_distance, "{what}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn view_all_to_fit_without_a_size_fits_as_a_square() {
+        let bbox = Some(([0.0; 3], [10.0; 3]));
+        for (w, h) in [(0, 0), (0, 100), (100, 0)] {
+            let sized = Camera {
+                pixel_width: w,
+                pixel_height: h,
+                ..Camera::default()
+            };
+            let (mut c, mut openscad) = (sized, sized);
+            c.view_all_to_fit(bbox);
+            openscad.view_all_centered(bbox);
+            assert_eq!(c, openscad);
+        }
+        // No model: the default distance, whatever the shape.
+        let mut c = Camera {
+            pixel_width: 100,
+            pixel_height: 400,
+            ..Camera::default()
+        };
+        c.view_all_to_fit(None);
+        assert_eq!(c.viewer_distance, DEFAULT_DISTANCE);
     }
 
     #[test]

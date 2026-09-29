@@ -238,6 +238,57 @@ fn annotations_draw_over_the_model_and_stay_out_of_the_image() {
     assert_eq!(foreground(&image, &scheme), 0);
 }
 
+/// View All fits both directions of the view at its current size, and an
+/// untouched fit follows resizes until the camera is moved.
+#[test]
+fn view_all_fits_the_view_shape_and_follows_resizes() {
+    let Some(gpu) = gpu() else { return };
+    let scheme = ColorScheme::cornfield();
+    let model = Arc::new(gpu.upload(&Scene::new(Some(&cube10()), &scheme)).unwrap());
+    let fitted = |w: u32, h: u32| {
+        let mut c = render::Camera {
+            pixel_width: w,
+            pixel_height: h,
+            ..render::Camera::default()
+        };
+        c.view_all_to_fit(Some(([0.0; 3], [10.0; 3])));
+        c.viewer_distance
+    };
+    let square = fitted(100, 100);
+    let tall = fitted(100, 300);
+    assert!(tall > square);
+
+    // The model arrives before the view has a size: it fits as a square,
+    // then again at the size the view is given.
+    let mut vp = Viewport::new(gpu.clone(), scheme.clone()).unwrap();
+    assert!(vp.set_model(model.clone(), 1));
+    assert_eq!(vp.camera().viewer_distance, square);
+    vp.attach_texture(100, 300, 1.0);
+    assert_eq!(vp.camera().viewer_distance, tall);
+    // A wider view (the fit is OpenSCAD's there) and back.
+    vp.resize(300, 100, 1.0);
+    assert_eq!(vp.camera().viewer_distance, square);
+    vp.resize(100, 300, 1.0);
+    assert_eq!(vp.camera().viewer_distance, tall);
+    // A redraw is not a camera move.
+    vp.redraw();
+    vp.resize(100, 100, 1.0);
+    assert_eq!(vp.camera().viewer_distance, square);
+
+    // Once the camera moves, a resize leaves it where the user put it;
+    // View All fits (and follows) again.
+    vp.orbit(10.0, 0.0);
+    vp.resize(100, 300, 1.0);
+    assert_eq!(vp.camera().viewer_distance, square);
+    vp.view_all();
+    assert_eq!(vp.camera().viewer_distance, tall);
+    vp.resize(100, 100, 1.0);
+    assert_eq!(vp.camera().viewer_distance, square);
+    vp.with_camera(|c| c.zoom_by(2.0));
+    vp.resize(100, 300, 1.0);
+    assert_eq!(vp.camera().viewer_distance, square / 2.0);
+}
+
 #[test]
 fn an_image_of_the_view_shows_the_model_from_the_same_camera() {
     let Some(gpu) = gpu() else { return };

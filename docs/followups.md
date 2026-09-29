@@ -1057,10 +1057,6 @@ lead them, come roughly in order of user impact.
   (`opt-level = "s"` would reach about 4.05 MB and run 10–15% slower;
   see `ca3c080`). The WebGPU viewer is 184 KB and the lazy WebGL build
   1.10 MB gzipped. Whether GitHub Pages compresses `.wasm` is unverified.
-- **View All fits the bounding sphere vertically**, as OpenSCAD's
-  `Camera::viewAll` does, so a portrait view pane (the demo's middle
-  column at desktop widths) crops wide models such as box-lid. Consider
-  fitting to the narrower side on the web, or a wider default pane.
 - **The canvas fallback draws only colour-writing draws**: a preview's
   image-space CSG primitives (subtracted and intersected shapes) are left
   out, so previews of differences show only what is kept. It shows only
