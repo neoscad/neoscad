@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "default": "csg",
+  "examples": [
+    {
+      "id": "csg",
+      "title": "CSG",
+      "file": "CSG.scad",
+      "source": "OpenSCAD examples/Basics/CSG.scad",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "sign",
+      "title": "Sign (customizer)",
+      "file": "sign.scad",
+      "source": "OpenSCAD examples/Parametric/sign.scad",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "geb",
+      "title": "GEB",
+      "file": "GEB.scad",
+      "source": "OpenSCAD examples/Advanced/GEB.scad",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "menger",
+      "title": "Menger sponge",
+      "file": "example024.scad",
+      "source": "OpenSCAD examples/Old/example024.scad",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "gear",
+      "title": "Helical gear (BOSL2)",
+      "file": "helical-gear.scad",
+      "source": "BOSL2 gears.scad, spur_gear() \"Helical Gear\" example",
+      "license": "BSD-2-Clause",
+      "libraries": ["BOSL2"]
+    },
+    {
+      "id": "box-lid",
+      "title": "Box and lid (parts)",
+      "file": "box-lid.scad",
+      "source": "NeoSCAD web demo",
+      "license": "CC0-1.0",
+      "parts": true
+    },
+    {
+      "id": "threaded-ring",
+      "title": "Threaded ring (icon)",
+      "file": "threaded-ring.scad",
+      "source": "NeoSCAD apple/Icon/concept-c.scad",
+      "license": "GPL-2.0-or-later",
+      "note": "The app icon's model takes a few seconds to render. Press Preview (F5) or Render (F6) to run it.",
+      "autorun": false
+    },
+    {
+      "id": "gearbox",
+      "title": "Planetary gearbox (BOSL2)",
+      "file": "gearbox.scad",
+      "source": "NeoSCAD apple/Icon/hero.scad",
+      "license": "GPL-2.0-or-later",
+      "libraries": ["BOSL2"],
+      "heavy": true,
+      "note": "Heavy: about 5 s and 700 MB of memory in the browser. Press Preview (F5) or Render (F6) to run it."
+    }
+  ]
+}

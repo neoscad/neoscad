@@ -1,0 +1,36 @@
+// Playwright against a built bundle served under /try/ (serve.mjs), as the
+// website serves it. Build first (`npm run build`, or scripts/web/build.sh
+// and E2E_DIR=../dist/web/neoscad-web-...). Chromium only for now: it is the
+// browser cached locally (~/Library/Caches/ms-playwright); add WebKit when
+// its build is installed (`npx playwright install webkit`).
+//
+// Needs Node 20 or newer (Playwright 1.63's requirement), unlike the unit
+// tests, which run on 18.
+
+import { defineConfig, devices } from "@playwright/test";
+
+const port = Number(process.env.E2E_PORT ?? 8123);
+const dir = process.env.E2E_DIR ?? "dist";
+
+export default defineConfig({
+  testDir: "e2e",
+  timeout: 30000,
+  workers: 1,
+  reporter: [["list"]],
+  outputDir: process.env.E2E_OUT ?? "test-results",
+  use: {
+    baseURL: `http://127.0.0.1:${port}`,
+    acceptDownloads: true,
+  },
+  webServer: {
+    // E2E_SITE: a copy of the website to serve at the root (its site.json
+    // and theme.css) instead of serve.mjs's stand-ins.
+    command: `node serve.mjs --dir ${JSON.stringify(dir)} --port ${port}${process.env.E2E_SITE ? ` --site ${JSON.stringify(process.env.E2E_SITE)}` : ""}`,
+    url: `http://127.0.0.1:${port}/try/`,
+    reuseExistingServer: false,
+  },
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1400, height: 860 } }, testIgnore: /phone\.spec/ },
+    { name: "phone", use: { ...devices["Pixel 7"] }, testMatch: /phone\.spec/ },
+  ],
+});

@@ -2,6 +2,18 @@
 // can test it (test/bridge.test.js). The protocol itself is described in
 // apple/App/Editor/EditorController.swift, the other end.
 
+/// The other end of `post()`: the macOS app's WebKit message handler,
+/// unless the page that embeds the editor set `window.NeoSCADHost` before
+/// the bundle ran (the web demo, web/src/editor-host.js). Both have the
+/// same shape, `postMessage(message)` returning a promise of the reply.
+/// The injected host wins so that the demo, opened in some other WebKit
+/// shell that happens to register an `editor` handler, never talks to it.
+/// Null when there is neither (a page opened on its own): posts are
+/// dropped.
+export function editorHost(win) {
+  return win.NeoSCADHost ?? win.webkit?.messageHandlers?.editor ?? null;
+}
+
 /// A transaction's changes as the edits Swift applies: `[from, to, insert]`
 /// in UTF-16 offsets, each to the text the previous one left. They come
 /// from the change set's original coordinates, last change first, so an

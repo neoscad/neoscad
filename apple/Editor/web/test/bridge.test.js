@@ -10,6 +10,7 @@ import {
   Versions,
   changesToEdits,
   editKind,
+  editorHost,
   lintDiagnostics,
   lspTransport,
 } from "../src/bridge.js";
@@ -118,4 +119,14 @@ test("the LSP transport routes messages both ways", () => {
   t.receive("ignored");
   assert.deepEqual(sent, [{ type: "lsp", message: '{"jsonrpc":"2.0","id":1,"method":"initialize"}' }]);
   assert.deepEqual(got, ['{"jsonrpc":"2.0","id":1,"result":{}}']);
+});
+
+test("the host is the injected one, else the app's handler, else none", () => {
+  const app = { postMessage: async () => "app" };
+  const web = { postMessage: async () => "web" };
+  const webkit = { messageHandlers: { editor: app } };
+  assert.equal(editorHost({ webkit }), app);
+  assert.equal(editorHost({ webkit, NeoSCADHost: web }), web);
+  assert.equal(editorHost({ NeoSCADHost: web }), web);
+  assert.equal(editorHost({}), null);
 });

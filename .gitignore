@@ -6,3 +6,8 @@ progress/
 dist/
 .cache/
 __pycache__/
+
+# The web demo (web/): Playwright output. node_modules/ and dist/ (web/dist,
+# dist/web) are covered above.
+web/test-results/
+web/playwright-report/

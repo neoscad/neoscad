@@ -1,6 +1,8 @@
 // The NeoSCAD editor: CodeMirror 6 with OpenSCAD support, in the macOS
 // app's web view. The app is the other end of every message; the protocol
-// is described in apple/App/Editor/EditorController.swift.
+// is described in apple/App/Editor/EditorController.swift. The web demo
+// (web/) bundles this same file and plays the app's part through an
+// injected host (see `handler` below).
 //
 // Who owns the text: CodeMirror, while editing. It holds the selection and
 // the undo history, and every change goes to the app as it happens, in
@@ -54,7 +56,7 @@ import {
   lineNumbers,
   rectangularSelection,
 } from "@codemirror/view";
-import { Versions, changesToEdits, editKind, lspTransport } from "./bridge.js";
+import { Versions, changesToEdits, editKind, editorHost, lspTransport } from "./bridge.js";
 import { goToDefinition, languageClient } from "./language.js";
 import { builtinHighlighter } from "./lang/builtins.js";
 import { openscad } from "./lang/openscad.js";
@@ -62,7 +64,7 @@ import { fontTheme, themes } from "./theme.js";
 
 // --- The channel to the app -----------------------------------------------
 
-const handler = window.webkit?.messageHandlers?.editor;
+const handler = editorHost(window);
 
 /// Send a message to the app; its reply, or null outside the app.
 function post(message) {

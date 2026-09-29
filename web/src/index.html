@@ -1,0 +1,51 @@
+<!doctype html>
+<!--
+  The NeoSCAD web demo. Every URL here is relative, so the bundle works
+  unpacked under any path (/try/ on neoscad.org). The site's site.json and
+  theme.css are found through the neoscad-site meta tag (web/src/site.js).
+
+  The policy: scripts, workers and wasm only from this origin (wasm needs
+  'wasm-unsafe-eval'); CodeMirror writes style elements, hence inline
+  styles; downloads are blob: URLs.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="neoscad-site" content="../site.json" />
+    <title>Try NeoSCAD</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <header id="topbar" class="topbar"></header>
+    <div id="banner" class="banner" role="note" hidden></div>
+    <main id="workspace" class="workspace">
+      <section id="pane-left" class="pane-left" aria-label="Source">
+        <div id="editor-tabs" class="editor-tabs" role="tablist"></div>
+        <div id="editor" class="editor"></div>
+        <div id="split-console" class="splitter splitter-h" role="separator" aria-orientation="horizontal"></div>
+        <section id="console" class="console" aria-label="Console"></section>
+      </section>
+      <div id="split-left" class="splitter splitter-v" role="separator" aria-orientation="vertical"></div>
+      <section id="pane-view" class="pane-view" aria-label="3D view">
+        <canvas id="viewport" data-testid="viewport"></canvas>
+        <div id="view-notice" class="view-notice" role="note" data-testid="view-notice" hidden></div>
+      </section>
+      <nav id="mobile-tabs" class="mobile-tabs" role="tablist" aria-label="Panels"></nav>
+      <div id="split-right" class="splitter splitter-v" role="separator" aria-orientation="vertical"></div>
+      <aside id="inspector" class="inspector" aria-label="Inspector">
+        <div id="inspector-tabs" class="segmented" role="tablist"></div>
+        <section id="panel-customizer" class="panel" role="tabpanel" data-testid="customizer"></section>
+        <section id="panel-check" class="panel" role="tabpanel" data-testid="check" hidden></section>
+        <section id="panel-measure" class="panel" role="tabpanel" data-testid="measure" hidden></section>
+      </aside>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

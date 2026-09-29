@@ -1,0 +1,21 @@
+{
+  "name": "neoscad-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The NeoSCAD web demo's front end: the editor, console, 3D view and inspector around the wasm engine in a worker.",
+  "license": "GPL-2.0-or-later",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.js",
+    "serve": "node serve.mjs",
+    "e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "esbuild": "0.28.2"
+  }
+}
