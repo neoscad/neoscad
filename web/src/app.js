@@ -138,6 +138,12 @@ class App {
     const link = connectLink ?? AgentPanel.saved();
     if (connectLink && new URLSearchParams(hash.slice(1)).get("via") === "relay") this.agent.offerRelay(connectLink);
     else if (link) this.agent.connect(link, { quiet: !connectLink });
+    // `#agent` (the home page's "Connect your AI agent" link) opens the
+    // setup dialog, and is taken out of the address bar like a link.
+    else if (hash === "#agent") {
+      history.replaceState(null, "", location.pathname + location.search);
+      this.agent.open();
+    }
   }
 
   // --- Layout -----------------------------------------------------------

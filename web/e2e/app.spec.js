@@ -235,3 +235,10 @@ test("a BOSL2 example fetches the library once, then runs", async ({ page }) => 
   expect(fetched).toEqual([200]);
   await shot(page, "desktop-gear");
 });
+
+test("#agent opens the Connect your AI agent dialog", async ({ page }) => {
+  await open(page, "#agent");
+  await expect(page.getByTestId("agent-dialog")).toBeVisible();
+  // Taken out of the address bar, as a connect link is.
+  expect(new URL(page.url()).hash).toBe("");
+});
