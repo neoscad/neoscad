@@ -1129,7 +1129,15 @@ fn terse_geometry(g: &Value, diags: &Value) -> Value {
     if g["pinched"].is_object() {
         g["pinched"]["fix"] = json!(pinch_fix(diags));
     }
+    if g["stl_precision"].is_object() {
+        g["stl_precision"]["fix"] = json!(stl_fix(&g["stl_precision"]));
+    }
     g
+}
+
+/// What to do about edges that break only at an STL's 32-bit precision.
+fn stl_fix(p: &Value) -> String {
+    session::check::stl_precision_fix(p["spacing"].as_f64().unwrap_or(0.0))
 }
 
 /// What to do about pinched edges. Booleans with an inside-out or partly
@@ -1173,6 +1181,24 @@ fn geometry_line_of(g: &Value, diags: &Value) -> String {
             if n == 1 { "" } else { "s" },
             vec_of(&g["pinched"]["point"]),
             pinch_fix(diags)
+        ));
+    }
+    // Slicers read an STL as 32-bit floats, which can merge vertices that
+    // are distinct in the solid (`session::mesh::weld`).
+    let p = &g["stl_precision"];
+    if p.is_object() {
+        let e = p["nonmanifold_edges"].as_u64().unwrap_or(0);
+        let what = match p["collapsed_faces"].as_u64().unwrap_or(0) {
+            0 => "vertices a hair apart merge".to_string(),
+            1 => "1 triangle collapses".to_string(),
+            n => format!("{n} triangles collapse"),
+        };
+        line.push_str(&format!(
+            "\nnot manifold as an STL: {what} at 32-bit precision (as slicers read it), leaving \
+             {e} edge{} shared by other than two faces, the first at {}: {}",
+            if e == 1 { "" } else { "s" },
+            vec_of(&p["point"]),
+            stl_fix(p)
         ));
     }
     line

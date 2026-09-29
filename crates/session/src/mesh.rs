@@ -224,6 +224,11 @@ impl Mesh {
         bad_edges(&self.verts, self.tris.iter().copied())
     }
 
+    /// Both welds of [`weld`]: by exact and by `f32` position.
+    pub fn weld(&self) -> Weld {
+        weld(&self.verts, self.tris.iter().copied())
+    }
+
     pub fn part_name(&self, t: usize) -> Option<&Arc<str>> {
         self.part[t].map(|i| &self.part_names[i as usize])
     }
@@ -297,6 +302,33 @@ pub struct BadEdges {
     pub bbox: Aabb,
 }
 
+/// What rounding the corners to `f32`, as a slicer reads an STL, does to
+/// a mesh beyond what merging exact positions does ([`weld`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StlPrecision {
+    /// Triangles two or more of whose corners become one point.
+    pub collapsed_faces: usize,
+    /// Edges shared by other than two faces at `f32`, beyond those of the
+    /// exact weld.
+    pub nonmanifold_edges: usize,
+    /// The midpoint of the first such edge, or the centroid of the first
+    /// collapsed face when there is none (model coordinates).
+    pub at: V3,
+    /// The box around the bad edges, or around the collapsed faces when
+    /// there are no bad edges.
+    pub bbox: Aabb,
+}
+
+/// The two ways a file reader can merge a mesh's corners ([`weld`]).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Weld {
+    /// By exact position, as an ASCII STL keeps it ([`bad_edges`]).
+    pub exact: Option<BadEdges>,
+    /// By `f32`-rounded position, as a binary STL stores it and as slicers
+    /// parse either kind: only what that adds to `exact`.
+    pub f32: Option<StlPrecision>,
+}
+
 /// The edges an STL reader finds used by other than two faces.
 ///
 /// Manifold's own status cannot see these: where two pieces touch along
@@ -309,57 +341,160 @@ pub struct BadEdges {
 /// watertightness test this way.
 ///
 /// Vertices merge by exact position, which is what an ASCII STL keeps
-/// (each coordinate is written in its shortest exact form); a binary STL
-/// rounds to `f32` and can merge more. A triangle that collapses when
-/// its corners merge is skipped, as a reader dropping degenerate facets
-/// would. Two sorts, no hashing, so it stays a small part of a render:
-/// the same approach as `PolySet::is_outward_solid`.
+/// (each coordinate is written in its shortest exact form). A triangle
+/// that collapses when its corners merge is skipped, as a reader dropping
+/// degenerate facets would. [`weld`] also merges by `f32` position.
 ///
 /// The mesh must be a valid Manifold solid's (every edge paired by vertex
 /// index): then only merged positions can unpair edges, and a mesh with
 /// no two vertices at one position is answered after the first sort.
-pub fn bad_edges(verts: &[V3], tris: impl Iterator<Item = [u32; 3]>) -> Option<BadEdges> {
-    // Canonical vertex per position: the lowest index at that position.
-    // Keys made once (a comparison that rebuilt them cost twice as much);
-    // -0 and 0 are one position.
-    let mut keys: Vec<([u64; 3], u32)> = verts
+pub fn bad_edges(verts: &[V3], tris: impl Iterator<Item = [u32; 3]> + Clone) -> Option<BadEdges> {
+    weld(verts, tris).exact
+}
+
+/// Merge a valid solid's corners by exact position ([`bad_edges`]) and by
+/// `f32`-rounded position.
+///
+/// The second is what a slicer sees. Binary STL stores `f32`, and slicers
+/// parse ASCII STL into `f32` too, so two vertices that are distinct in
+/// `f64` but round to one `f32` become one point: the triangles between
+/// them collapse, and where a collapse is not a clean edge contraction the
+/// edges around it end up with one face or three. A finely tessellated
+/// twisted thread in the CAD pilot (205,294 triangles) checked manifold
+/// by exact position and had 738 non-manifold edges in its STL.
+///
+/// One sort does both: positions equal in `f64` are equal in `f32`, so
+/// the vertices are sorted by their `f32` key and each group of one `f32`
+/// position (almost always a single vertex) is split by exact position.
+/// With no group of two, which is almost every model, neither weld can
+/// change an edge and the answer is known after that one sort of 16-byte
+/// keys (the exact-only weld it replaced sorted 32-byte keys). Serial and
+/// deterministic.
+pub fn weld(verts: &[V3], tris: impl Iterator<Item = [u32; 3]> + Clone) -> Weld {
+    // -0 and 0 are one position in either precision.
+    let mut keys: Vec<([u32; 3], u32)> = verts
         .iter()
         .enumerate()
         .map(|(i, p)| {
             (
-                p.map(|c| if c == 0.0 { 0u64 } else { c.to_bits() }),
+                p.map(|c| {
+                    let f = c as f32;
+                    if f == 0.0 { 0u32 } else { f.to_bits() }
+                }),
                 i as u32,
             )
         })
         .collect();
     keys.sort_unstable();
-    let mut canon: Vec<u32> = (0..verts.len() as u32).collect();
-    let mut shared = vec![false; verts.len()];
-    let mut merged = false;
-    for w in keys.windows(2) {
-        if w[0].0 == w[1].0 {
-            canon[w[1].1 as usize] = canon[w[0].1 as usize];
-            shared[w[0].1 as usize] = true;
-            shared[w[1].1 as usize] = true;
-            merged = true;
+    if !keys.windows(2).any(|w| w[0].0 == w[1].0) {
+        return Weld::default();
+    }
+    // Canonical vertex per position (the lowest index there, as the sort
+    // puts it first in its group), for each precision, and which vertices
+    // share a position with another.
+    let n = verts.len();
+    let mut canon32: Vec<u32> = (0..n as u32).collect();
+    let mut canon64 = canon32.clone();
+    let mut shared32 = vec![false; n];
+    let mut shared64 = vec![false; n];
+    let (mut merged64, mut only32) = (false, false);
+    let exact = |i: u32| verts[i as usize].map(|c| if c == 0.0 { 0u64 } else { c.to_bits() });
+    let mut group: Vec<([u64; 3], u32)> = Vec::new();
+    let mut i = 0;
+    while i < keys.len() {
+        let mut j = i + 1;
+        while j < keys.len() && keys[j].0 == keys[i].0 {
+            j += 1;
+        }
+        if j - i > 1 {
+            let first = keys[i].1;
+            for k in &keys[i..j] {
+                canon32[k.1 as usize] = first;
+                shared32[k.1 as usize] = true;
+            }
+            group.clear();
+            group.extend(keys[i..j].iter().map(|k| (exact(k.1), k.1)));
+            group.sort_unstable();
+            for w in group.windows(2) {
+                if w[0].0 == w[1].0 {
+                    canon64[w[1].1 as usize] = canon64[w[0].1 as usize];
+                    shared64[w[0].1 as usize] = true;
+                    shared64[w[1].1 as usize] = true;
+                    merged64 = true;
+                } else {
+                    only32 = true;
+                }
+            }
+        }
+        i = j;
+    }
+    let ex = merged64.then(|| count_welded(verts, tris.clone(), &canon64, &shared64));
+    let mut out = Weld {
+        exact: ex.as_ref().and_then(|w| w.bad),
+        f32: None,
+    };
+    if only32 {
+        let w = count_welded(verts, tris, &canon32, &shared32);
+        let (base_edges, base_collapsed) = ex
+            .as_ref()
+            .map_or((0, 0), |e| (e.bad.map_or(0, |b| b.edges), e.collapsed));
+        let edges = w.bad.map_or(0, |b| b.edges).saturating_sub(base_edges);
+        let collapsed = w.collapsed.saturating_sub(base_collapsed);
+        if edges > 0 {
+            let b = w.bad.expect("edges counted");
+            out.f32 = Some(StlPrecision {
+                collapsed_faces: collapsed,
+                nonmanifold_edges: edges,
+                at: b.at,
+                bbox: b.bbox,
+            });
+        } else if collapsed > 0 {
+            out.f32 = Some(StlPrecision {
+                collapsed_faces: collapsed,
+                nonmanifold_edges: 0,
+                at: w.collapsed_at,
+                bbox: w.collapsed_box,
+            });
         }
     }
-    // Without merged vertices the edges are the solid's own, which a
-    // valid Manifold result pairs by construction: nothing to count, and
-    // the edge sort (most of the cost) is skipped for almost every model.
-    if !merged {
-        return None;
-    }
-    // Likewise an edge between two vertices that merged with nothing: its
-    // faces are the solid's own. Only edges at a shared position are
-    // counted, so even a pinched million-triangle mesh sorts a handful.
+    out
+}
+
+/// What one weld of [`weld`] does to the triangles.
+struct Welded {
+    bad: Option<BadEdges>,
+    collapsed: usize,
+    collapsed_at: V3,
+    collapsed_box: Aabb,
+}
+
+fn count_welded(
+    verts: &[V3],
+    tris: impl Iterator<Item = [u32; 3]>,
+    canon: &[u32],
+    shared: &[bool],
+) -> Welded {
+    // An edge between two vertices that merged with nothing has the
+    // solid's own faces, which a valid Manifold result pairs: only edges
+    // at a shared position are counted, so even a pinched
+    // million-triangle mesh sorts a handful.
     let mut edges: Vec<u64> = Vec::new();
+    let mut collapsed = 0usize;
+    let mut collapsed_at = None;
+    let mut collapsed_box = Aabb::EMPTY;
     for t in tris {
         if !t.iter().any(|&v| shared[v as usize]) {
             continue;
         }
         let [a, b, c] = t.map(|v| canon[v as usize]);
         if a == b || b == c || c == a {
+            // Skipped, as a reader dropping degenerate facets would.
+            collapsed += 1;
+            let p = t.map(|v| verts[v as usize]);
+            collapsed_at.get_or_insert(scale(add(add(p[0], p[1]), p[2]), 1.0 / 3.0));
+            for q in p {
+                collapsed_box.grow(q);
+            }
             continue;
         }
         for (k, (u, v)) in [(a, b), (b, c), (c, a)].into_iter().enumerate() {
@@ -387,13 +522,31 @@ pub fn bad_edges(verts: &[V3], tris: impl Iterator<Item = [u32; 3]>) -> Option<B
         }
         i = j;
     }
-    let e = first?;
-    let (u, v) = ((e >> 32) as usize, (e & 0xffff_ffff) as usize);
-    Some(BadEdges {
-        edges: count,
-        at: scale(add(verts[u], verts[v]), 0.5),
-        bbox,
-    })
+    let bad = first.map(|e| {
+        let (u, v) = ((e >> 32) as usize, (e & 0xffff_ffff) as usize);
+        BadEdges {
+            edges: count,
+            at: scale(add(verts[u], verts[v]), 0.5),
+            bbox,
+        }
+    });
+    Welded {
+        bad,
+        collapsed,
+        collapsed_at: collapsed_at.unwrap_or([0.0; 3]),
+        collapsed_box,
+    }
+}
+
+/// How far apart `f32` values are at the largest coordinate of a box: the
+/// finest detail an STL of it can hold there.
+pub fn f32_spacing(b: &Aabb) -> f64 {
+    let m = b.lo.iter().chain(&b.hi).fold(0f64, |m, c| m.max(c.abs()));
+    let x = (m as f32).max(f32::MIN_POSITIVE);
+    if !x.is_finite() {
+        return f64::INFINITY;
+    }
+    f64::from(f32::from_bits(x.to_bits() + 1)) - f64::from(x)
 }
 
 /// A bounding volume hierarchy over a mesh's triangles.
@@ -787,6 +940,47 @@ mod tests {
         // The other faces at that corner keep the original index, so by
         // index the split breaks edges; by position it is whole.
         assert_eq!(c.bad_edges(), None);
+    }
+
+    #[test]
+    fn f32_rounding_merges_what_exact_positions_keep_apart() {
+        // Two 100 mm cubes 1e-7 apart: distinct in f64, one face at f32
+        // (whose spacing at 200 is about 1.5e-5), so that face's edges
+        // have four faces in an STL.
+        let m = join(
+            cube([0.0; 3], 100.0),
+            &cube([100.0 + 1e-7, 0.0, 0.0], 100.0),
+        );
+        let w = m.weld();
+        assert_eq!(w.exact, None);
+        let p = w.f32.unwrap();
+        assert_eq!(p.collapsed_faces, 0);
+        // The square's four sides and its diagonal (each cube splits it
+        // along the same diagonal, so the two diagonals merge).
+        assert!(p.nonmanifold_edges >= 4, "{p:?}");
+        assert!((p.at[0] - 100.0).abs() < 1e-6, "{p:?}");
+        // A millimetre apart, nothing merges at either precision.
+        let m = join(cube([0.0; 3], 100.0), &cube([101.0, 0.0, 0.0], 100.0));
+        assert_eq!(m.weld(), Weld::default());
+        // A cube whose corner is split in two 1e-9 apart: exact keeps the
+        // halves apart, f32 merges them back, and nothing breaks.
+        let mut c = cube([0.0; 3], 100.0);
+        let v = c.tris[0][0];
+        let mut q = c.verts[v as usize];
+        q[0] += 1e-9;
+        c.verts.push(q);
+        c.tris[0][0] = (c.verts.len() - 1) as u32;
+        assert_eq!(c.weld().f32, None);
+    }
+
+    #[test]
+    fn f32_spacing_at_a_parts_size() {
+        let b = Aabb {
+            lo: [-17.0, -15.0, 0.0],
+            hi: [17.0, 15.0, 48.0],
+        };
+        // 48 is in [32, 64): 2^5 * 2^-23.
+        assert_eq!(f32_spacing(&b), 2f64.powi(-18));
     }
 
     #[test]

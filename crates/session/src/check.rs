@@ -10,7 +10,9 @@
 //!   part's); a mesh result that was never through a boolean has its open
 //!   and over-shared edges counted; and a valid solid is welded by vertex
 //!   position, as an STL reader sees it, to find edges pinched where two
-//!   pieces touch ([`crate::mesh::bad_edges`]).
+//!   pieces touch ([`crate::mesh::bad_edges`]); and by `f32` position,
+//!   as a slicer reads an STL, to find faces that collapse and edges that
+//!   break only there ([`crate::mesh::weld`], the `stl-precision` finding).
 //! - **components:** pieces whose triangles share no vertex. A piece
 //!   whose lowest point is above the model's lowest point (by more than
 //!   [`CheckSettings::bed_tolerance`]) is an unsupported island.
@@ -125,7 +127,7 @@ pub struct Finding {
     /// `floating`, `thin-wall`, `overhang`, `bed-fit`, `tiny-feature`,
     /// `parts-intersect`, `part-not-manifold`, `off-bed`, and for input
     /// meshes `polyhedron-inside-out`, `polyhedron-flipped-faces`,
-    /// `polyhedron-open`, `polyhedron-not-manifold`.
+    /// `polyhedron-open`, `polyhedron-not-manifold`; `stl-precision`.
     pub code: &'static str,
     pub message: String,
     /// Where: the worst point, and the box of the whole problem.
@@ -185,6 +187,80 @@ impl Finding {
 
 fn mm(x: f64) -> String {
     render::snapshot::number(x)
+}
+
+/// The `stl-precision` finding: what saving the solid as STL does to it.
+///
+/// A warning when rounding to `f32` leaves edges with other than two
+/// faces: slicers then see an open or non-manifold mesh (the CAD pilot's
+/// grader rejected a twisted thread this way, while the exact weld said
+/// manifold). Faces that merely collapse, with every edge still paired,
+/// are info: a slicer drops a zero-area facet and the rest is still a
+/// closed manifold, which is also what any mesh with a Clipper-snapped
+/// sliver gives, so a warning there would be noise.
+fn stl_precision(p: &crate::mesh::StlPrecision, bbox: &Aabb) -> Finding {
+    let ulp = crate::mesh::f32_spacing(bbox);
+    let n = p.collapsed_faces;
+    let tri = if n == 1 { "triangle" } else { "triangles" };
+    // In scientific notation: `mm` rounds to a tenth of a micron, and the
+    // spacing is a few thousandths of one on a part of centimetres.
+    let stored = format!("32-bit floats hold this part's coordinates to about {ulp:.1e} mm");
+    let broken = p.nonmanifold_edges > 0;
+    let message = if broken {
+        let e = p.nonmanifold_edges;
+        // Two faces a hair apart merge without any triangle collapsing.
+        let what = if n == 0 {
+            "vertices a hair apart merge".to_string()
+        } else {
+            format!("{n} {tri} collapse")
+        };
+        format!(
+            "{what} when saved as STL (32-bit floats, as slicers read it), leaving {e} \
+             edge{} shared by other than two faces: the file is not manifold for a slicer, \
+             though the solid is ({stored})",
+            if e == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "{n} {tri} collapse to zero area when saved as STL (32-bit floats); slicers drop \
+             them and the mesh stays closed ({stored})"
+        )
+    };
+    Finding {
+        level: if broken { Level::Warning } else { Level::Info },
+        code: "stl-precision",
+        message,
+        point: p.at,
+        bbox: p.bbox,
+        part: None,
+        fix: stl_precision_fix(ulp),
+        value: Some(if broken {
+            p.nonmanifold_edges as f64
+        } else {
+            n as f64
+        }),
+        limit: None,
+    }
+}
+
+/// What to do about triangles that collapse in an STL (the
+/// `stl-precision` finding, and `render`'s note), given the `f32` spacing
+/// at the part's coordinates.
+///
+/// Surfaces that lie on each other come first: in the CAD pilot's
+/// twisted thread the 738 broken edges came from a core cylinder at
+/// exactly the thread's root radius, not from the thread's 360-point
+/// section. Moving the core 0.05 inward left none; coarsening the section
+/// to 90 points did too, and coarsening only the slices did not.
+pub fn stl_precision_fix(ulp: f64) -> String {
+    format!(
+        "slivers this thin come from surfaces lying on or grazing each other (such as a core \
+         cylinder at exactly a thread's root radius) or from very fine tessellation: overlap \
+         or separate coincident surfaces by 0.01 or more, or coarsen the tessellation there \
+         (lower `$fn`, fewer points per section); keep neighbouring vertices more than about \
+         {:.1e} mm apart",
+        100.0 * ulp
+    )
 }
 
 /// Everything a check found, before it is JSON.
@@ -340,11 +416,14 @@ fn analyze_solid(
     let bbox = mesh.bbox();
     // What a file of the solid would show: Manifold keeps a vertex per
     // piece where two pieces touch, which its own status cannot see.
-    let pinched = if solid.is_valid() {
-        mesh.bad_edges()
+    // Slicers read an STL's corners as `f32`, which can merge vertices
+    // that are distinct here: `stl` is what that adds.
+    let weld = if solid.is_valid() {
+        mesh.weld()
     } else {
-        None
+        crate::mesh::Weld::default()
     };
+    let (pinched, stl) = (weld.exact, weld.f32);
     let manifold = solid.is_valid() && open_edges == 0 && shared_edges == 0 && pinched.is_none();
     lap(&mut a, "manifold");
     for i in inputs {
@@ -626,6 +705,10 @@ fn analyze_solid(
     }
     out.extend(intersections(parts));
     lap(&mut a, "parts");
+
+    if let Some(p) = stl {
+        out.push(stl_precision(&p, &bbox));
+    }
 
     let (vol, area, centroid) = mesh.mass();
     a.model = json!({

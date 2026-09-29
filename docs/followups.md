@@ -803,6 +803,17 @@ lead them, come roughly in order of user impact.
   not the model hides the point from that view. (7b-1)
 - `measure --section` cuts the model or one part; a per-part breakdown
   of a model section is not reported. (7b-1)
+- `stl-precision` welds the whole model's mesh at 32-bit precision, not
+  each part's; a part exported alone could break where the model does
+  not (or the reverse). It models a reader that welds exactly by `f32`
+  position; slicers that weld with a tolerance (PrusaSlicer's repair,
+  admesh) merge more, so a clean result is not a guarantee for them.
+  Nor does it catch faces that stay distinct in `f32` but flip or go
+  near-zero in area (the grader counts those as degenerate: 4013 on the
+  pilot's thread against 2998 collapsed). NeoSCAD's exporters write the
+  mesh as is: snapping vertices to `f32` and re-welding before an STL
+  export would fix these files, but changes output OpenSCAD's
+  regression tests compare, so it would need to be opt-in.
 
 ## MCP and the agent eval
 - `neoscad mcp` implements MCP 2026-07-28 statelessly plus the legacy

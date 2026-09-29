@@ -89,7 +89,12 @@ pub fn geometry(g: &Geometry, scheme: &geom::color::Scheme) -> Value {
     let m = solid(g);
     let ps = m.to_polyset(scheme);
     let (lo, hi) = m.bounds().unwrap_or(([0.0; 3], [0.0; 3]));
-    let pinched = if m.is_valid() { pinched(&ps) } else { None };
+    let weld = if m.is_valid() {
+        weld(&ps)
+    } else {
+        crate::mesh::Weld::default()
+    };
+    let pinched = weld.exact;
     let mut v = json!({
         "dimensions": 3,
         "bbox": bbox(&lo, &hi),
@@ -103,7 +108,33 @@ pub fn geometry(g: &Geometry, scheme: &geom::color::Scheme) -> Value {
     if let Some(p) = pinched {
         v["pinched"] = pinched_json(&p);
     }
+    if let Some(p) = weld.f32.filter(|p| p.nonmanifold_edges > 0) {
+        v["stl_precision"] = stl_precision_json(&p, &crate::mesh::Aabb { lo, hi });
+    }
     v
+}
+
+/// Both welds of a valid solid's mesh ([`crate::mesh::weld`]): by exact
+/// position ([`pinched`]) and by `f32` position, as a slicer reads an STL.
+pub fn weld(ps: &PolySet) -> crate::mesh::Weld {
+    crate::mesh::weld(
+        &ps.vertices,
+        ps.faces
+            .iter()
+            .filter(|f| f.len() == 3)
+            .map(|f| [f[0], f[1], f[2]]),
+    )
+}
+
+/// The `stl_precision` object: what rounding to `f32` breaks, where, and
+/// the `f32` spacing at the model's largest coordinate (`bbox`).
+pub fn stl_precision_json(p: &crate::mesh::StlPrecision, bbox: &crate::mesh::Aabb) -> Value {
+    json!({
+        "collapsed_faces": p.collapsed_faces,
+        "nonmanifold_edges": p.nonmanifold_edges,
+        "point": p.at.map(round6),
+        "spacing": round6(crate::mesh::f32_spacing(bbox)),
+    })
 }
 
 /// Edges of a valid solid's mesh that a file of it would show shared by

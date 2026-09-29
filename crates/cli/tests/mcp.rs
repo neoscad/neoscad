@@ -353,6 +353,32 @@ fn every_tool_round_trips() {
         "{g}"
     );
 
+    // render: faces 1e-7 apart are one face in an STL, read as 32-bit
+    // floats, though the solid is two clean pieces.
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(100); translate([100 + 1e-7, 0, 0]) cube(100);"}),
+    );
+    let t = text(&r);
+    assert!(
+        t.contains("not manifold as an STL: vertices a hair apart merge at 32-bit precision"),
+        "{t}"
+    );
+    let g = &r["structuredContent"]["geometry"];
+    assert_eq!(g["manifold"], true, "{g}");
+    assert!(
+        g["stl_precision"]["nonmanifold_edges"].as_u64().unwrap() > 0,
+        "{g}"
+    );
+    assert_eq!(g["stl_precision"]["point"][0], 100.0, "{g}");
+    assert!(
+        g["stl_precision"]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("coincident"),
+        "{g}"
+    );
+
     // test: inline test source against a model file.
     let r = s.tool(
         "test",

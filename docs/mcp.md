@@ -90,7 +90,7 @@ full JSON result.
 | Tool | What it answers | Extra arguments |
 |---|---|---|
 | `evaluate` | errors and warnings with fix hints, `echo()` output; no geometry | |
-| `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch), components; optionally writes the model | `export` (a file; format from its extension; `.stl` is ASCII STL), `overwrite` |
+| `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch, and edges an STL breaks at 32-bit precision), components; optionally writes the model | `export` (a file; format from its extension; `.stl` is ASCII STL), `overwrite` |
 | `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `dims`, `preview`, `output` (also save the PNG; a `.png` name), `overwrite` |
 | `check` | printability findings, each with location and fix; the description asks for the spec's minimum wall as `min_wall` | `bed`, `nozzle`, `min_wall`, `max_overhang` |
 | `measure` | model and part bbox, volume, centroid; distance between parts, or the overlap's pieces; sections with each contour's area, bbox, hole and radii; a radius profile with crests and pitch | `part`, `between`, `section`, `axis` (`x`/`y`/`z`, default z), `center` (`[a, b]`, the axis's position, default `[0, 0]`), `profile` (`[from, to, step]` along the axis) |
@@ -154,7 +154,15 @@ the text, `Fix: as #id`) instead. `measure` asked for a `section`,
 it). A pinched solid (two pieces touching along an edge: Manifold says
 valid, an STL of it is not manifold) reads `NOT manifold` with a line
 saying how many edges and where the first is, and the geometry's
-`pinched` carries the `fix`. A `polyhedron()` or imported mesh that
+`pinched` carries the `fix`. Slicers read an STL's coordinates as
+32-bit floats, and a solid finely tessellated or with surfaces lying on
+each other can have vertices that are distinct in 64 bits and one point
+in 32: then the solid reads `manifold` but a line `not manifold as an
+STL: N triangles collapse at 32-bit precision (as slicers read it),
+leaving E edges ...` follows, with the first edge and the fix, and the
+geometry carries `stl_precision` (`docs/cli-json.md`). It is computed
+on every 3D render (no measurable cost: one sort of the vertices, the
+same one the pinch check needs). A `polyhedron()` or imported mesh that
 does not bound a solid is a warning at its call in `evaluate`,
 `render`, `snapshot` and `check` (codes `polyhedron-inside-out`,
 `polyhedron-flipped-faces`, `polyhedron-open`,

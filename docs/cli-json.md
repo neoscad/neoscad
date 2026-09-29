@@ -185,7 +185,20 @@ else is the same for the same input.
   significant digits). Two pieces touching along an edge (a rib ending
   exactly on a rim, two cubes sharing an edge) do this: Manifold keeps
   a vertex for each piece and reports no error, but a file of the
-  result is not manifold. `components` counts the pieces whose faces
+  result is not manifold. When rounding the corners to 32-bit floats
+  (as binary STL stores them and slicers read either kind of STL)
+  leaves edges shared by other than two faces that the exact weld does
+  not, `"stl_precision": {"collapsed_faces": int, "nonmanifold_edges":
+  int, "point": [x, y, z], "spacing": double}` is added and `manifold`
+  is unchanged: the solid is manifold, a slicer's reading of its STL is
+  not. `collapsed_faces` counts triangles two of whose corners become
+  one point, `nonmanifold_edges` the edges beyond the exact weld's,
+  `point` the midpoint of the first, and `spacing` the gap between
+  32-bit floats at the model's largest coordinate (mm). Slivers from
+  surfaces lying on each other (a core cylinder at exactly a thread's
+  root radius) or very fine tessellation do this. Faces that only
+  collapse, with every edge still paired, are left out here (see the
+  `stl-precision` finding). `components` counts the pieces whose faces
   share no vertex. 2D:
 
   ```json
@@ -408,6 +421,7 @@ Codes and how each is found:
 | `tiny-feature` | warning | A piece whose largest extent is under two nozzle widths. |
 | `parts-intersect` | warning | Two parts (neither nested in the other, both reaching the model as themselves) whose solids overlap: `value` is the overlap volume, by a boolean intersection. |
 | `part-not-manifold` | error | A part's own solid is not valid, or is pinched. |
+| `stl-precision` | warning, or info when no edge breaks | A valid solid's corners welded by 32-bit float position, as a slicer reads an STL (binary STL stores `f32`; slicers parse ASCII STL into `f32` too), beyond what the exact weld merges. A warning when that leaves edges shared by other than two faces: the solid checks manifold but its STL does not (the CAD pilot's twisted thread: 2998 triangles collapse and 738 edges break, the grader's count). `value` is the number of such edges, `point` the midpoint of the first, `bbox` the box around them. Info when triangles only collapse and every edge still pairs: a slicer drops the zero-area facets and the rest is closed, which Clipper-snapped slivers also give (3 of the 532 reference inputs), so it is not a warning; `value` is then the count and `point` the first one's centroid. The message gives the 32-bit spacing at the model's largest coordinate; the fix says to overlap or separate coincident surfaces by 0.01 or more, or coarsen the tessellation, keeping vertices more than 100 times that spacing apart. |
 | `off-bed` | info | The model's lowest point is not at z = 0. |
 | `polyhedron-inside-out`, `polyhedron-flipped-faces`, `polyhedron-open`, `polyhedron-not-manifold` | warning | A `polyhedron()` or imported mesh that does not bound a solid: the diagnostics of the same codes (see "Input meshes" under "Diagnostics"), as findings. The message ends with the call as `file:line`; `point` is in the model's coordinates. When a winding problem is among them, a `not-manifold` finding's fix says to fix that one first (`fix #1 first: an inside-out or partly flipped polyhedron is the likely cause, ...`) instead of to overlap the parts: booleans with an inside-out mesh leave pinched edges. |
 
@@ -770,3 +784,9 @@ have them.
   `polyhedron-open` and `polyhedron-not-manifold` ("Input meshes");
   they come first among `check`'s findings, and a `not-manifold`
   finding's fix points to a winding problem when there is one.
+- After the CAD run cad-20260929T024448Z (a twisted thread that checked
+  manifold, and whose STL had 738 non-manifold edges at 32-bit
+  precision): the `geometry` object's `stl_precision` (render,
+  snapshot, and the `--format json` report of an export) and the
+  `check` finding `stl-precision`. Both are additive; OpenSCAD's
+  console text is unchanged.

@@ -830,3 +830,88 @@ fn the_pilots_inside_out_thread_is_named_before_the_pinch() {
     let fix = pinch[0]["fix"].as_str().unwrap();
     assert!(fix.starts_with("fix #1 first: an inside-out"), "{fix}");
 }
+
+/// The CAD pilot's twisted thread (run cad-20260929T024448Z): a 360-point
+/// section in a twisted `linear_extrude`, unioned with a core cylinder at
+/// exactly the thread's root radius.
+const T3_TWISTED: &str = include_str!("data/pilot_t3_twisted_thread.scad");
+
+#[test]
+fn edges_that_break_only_at_stl_precision_are_a_warning() {
+    // Manifold by exact position; the grader's weld of its STL found 738
+    // non-manifold edges, and so does the f32 weld.
+    let v = check(T3_TWISTED, false, CheckSettings::default());
+    assert_eq!(v["model"]["manifold"], true, "{v}");
+    let f = findings(&v, "stl-precision");
+    assert_eq!(f.len(), 1, "{v}");
+    assert_eq!(f[0]["severity"], "warning");
+    assert_eq!(f[0]["value"], 738.0, "{}", f[0]);
+    let msg = f[0]["message"].as_str().unwrap();
+    assert!(msg.contains("2998 triangles collapse"), "{msg}");
+    // 48 mm is the largest coordinate: f32 spacing 2^-18 there.
+    assert!(msg.contains("3.8e-6 mm"), "{msg}");
+    assert!(
+        f[0]["fix"].as_str().unwrap().contains("coincident"),
+        "{}",
+        f[0]
+    );
+    // The first bad edge is on the thread's root radius.
+    let p: Vec<f64> = f[0]["location"]["point"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap())
+        .collect();
+    assert!(close(p[0].hypot(p[1]), 10.5732, 0.01), "{p:?}");
+    // Render's geometry carries it.
+    let s = session(&[("m.scad", T3_TWISTED)]);
+    let scheme = render::ColorScheme::cornfield();
+    let r = s
+        .render(&Run::new("m.scad"), session::Mode::Render, &scheme)
+        .unwrap();
+    let g = r.geometry_json(&scheme.geometry_scheme());
+    assert_eq!(g["manifold"], true, "{g}");
+    assert_eq!(g["stl_precision"]["nonmanifold_edges"], 738, "{g}");
+    assert_eq!(g["stl_precision"]["collapsed_faces"], 2998, "{g}");
+    assert_eq!(
+        g["stl_precision"]["spacing"],
+        serde_json::json!(session::stats::round6(2f64.powi(-18))),
+        "{g}"
+    );
+}
+
+#[test]
+fn faces_a_hair_apart_merge_at_stl_precision() {
+    // Two 100 mm cubes 1e-7 apart: two pieces here, one face with four
+    // triangles on each edge in an STL (f32 spacing at 200 is 1.5e-5).
+    let v = check(
+        "cube(100); translate([100 + 1e-7, 0, 0]) cube(100);",
+        false,
+        CheckSettings::default(),
+    );
+    let f = findings(&v, "stl-precision");
+    assert_eq!(f.len(), 1, "{v}");
+    assert_eq!(f[0]["severity"], "warning");
+    assert!(
+        f[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("vertices a hair apart merge"),
+        "{}",
+        f[0]
+    );
+    // A normal model, curved and booleaned, has nothing to report.
+    let ok = check(
+        "difference() { sphere(20, $fn = 96); cylinder(r = 5, h = 50, center = true, $fn = 64); }",
+        false,
+        CheckSettings::default(),
+    );
+    assert!(findings(&ok, "stl-precision").is_empty(), "{ok}");
+    let s = session(&[("m.scad", "cube(10); sphere(7);")]);
+    let scheme = render::ColorScheme::cornfield();
+    let r = s
+        .render(&Run::new("m.scad"), session::Mode::Render, &scheme)
+        .unwrap();
+    let g = r.geometry_json(&scheme.geometry_scheme());
+    assert!(g.get("stl_precision").is_none(), "{g}");
+}
