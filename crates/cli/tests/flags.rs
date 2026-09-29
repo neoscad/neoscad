@@ -37,10 +37,16 @@ fn dependency_file_lists_inputs_includes_uses_and_imports() {
         "include <sub/b.scad>\nuse <sub/u 1.scad>\nbm(); um();\nsurface(\"missing.dat\");\n",
     )
     .unwrap();
-    let out = neoscad(&d, &["-d", "a.d", "-o", "a.off", "a.scad"]);
+    // Run in the canonical directory, so that files found by include (which
+    // are canonicalised) and files named relative to the input (which are
+    // not) share one prefix: on macOS the temporary directory is behind the
+    // `/var` link, on Windows under an 8.3 short name (`RUNNER~1`).
+    let root = lang::paths::plain(d.canonicalize().unwrap());
+    let out = neoscad(&root, &["-d", "a.d", "-o", "a.off", "a.scad"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    let root = d.canonicalize().unwrap();
-    let r = root.to_string_lossy();
+    // Every entry `/`-separated, as OpenSCAD's `generic_string()`, on
+    // Windows too.
+    let r = root.to_string_lossy().replace('\\', "/");
     // The nightly writes the same five entries, in hash order.
     assert_eq!(
         std::fs::read_to_string(d.join("a.d")).unwrap(),
@@ -49,8 +55,13 @@ fn dependency_file_lists_inputs_includes_uses_and_imports() {
         )
     );
 
-    // `-m` runs for the missing imported file, with it quoted.
-    let out = neoscad(&d, &["-m", "echo MAKE", "-o", "a.off", "a.scad"]);
+    // `-m` runs for the missing imported file, with it quoted. The command
+    // goes through `sh`, which a Windows machine may not have.
+    if Command::new("sh").args(["-c", "true"]).status().is_err() {
+        eprintln!("skipped -m: no sh");
+        return;
+    }
+    let out = neoscad(&root, &["-m", "echo MAKE", "-o", "a.off", "a.scad"]);
     assert_eq!(text(&out.stdout), format!("MAKE {r}/missing.dat\n"));
 }
 

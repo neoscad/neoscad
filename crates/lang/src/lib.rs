@@ -28,6 +28,7 @@ pub mod dump;
 pub mod fragment;
 pub mod loader;
 pub mod number;
+pub mod paths;
 pub mod source;
 pub mod syntax;
 pub mod vfs;

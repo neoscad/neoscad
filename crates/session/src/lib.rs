@@ -1639,15 +1639,11 @@ impl Session {
                         if let Some(l) = &u.loc
                             && let Some(sources) = loaded.unit_sources(l.unit)
                         {
-                            let rel = lang::diag::relative_path(
+                            let rel = lang::diag::relative_display(
                                 sources.path(l.span.file),
                                 &pipe.paths.main_dir,
                             );
-                            line.push_str(&format!(
-                                " (in file {}, line {})",
-                                rel.display(),
-                                l.line
-                            ));
+                            line.push_str(&format!(" (in file {rel}, line {})", l.line));
                         }
                         pipe.con.print_unfiltered(line.as_bytes());
                         return Err(Stop::Exit(EXIT_NOT_IMPLEMENTED));

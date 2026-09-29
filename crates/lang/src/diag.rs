@@ -269,8 +269,8 @@ impl Diagnostic {
                 PathBase::WorkingDir => cwd,
                 PathBase::MainFileDir => main_dir,
             };
-            let rel = relative_path(sources.path(span.file), base);
-            s.push_str(&format!(" in file {}, line {}", rel.display(), self.line));
+            let rel = relative_display(sources.path(span.file), base);
+            s.push_str(&format!(" in file {rel}, line {}", self.line));
         }
         s
     }
@@ -305,6 +305,13 @@ pub fn relative_path(path: &Path, base: &Path) -> PathBuf {
     out
 }
 
+/// [`relative_path`] as OpenSCAD prints one in a message: `/`-separated on
+/// every host (`fs_uncomplete(..).generic_string()`, `AST.cc`), so output
+/// and the tests that compare it are the same on Windows as elsewhere.
+pub fn relative_display(path: &Path, base: &Path) -> String {
+    crate::loader::generic(&relative_path(path, base))
+}
+
 /// Canonicalise the longest existing prefix and append the rest lexically.
 fn weakly_canonical(path: &Path) -> PathBuf {
     let abs = if path.is_absolute() {
@@ -318,7 +325,10 @@ fn weakly_canonical(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     loop {
         if let Ok(c) = existing.canonicalize() {
-            let mut out = c;
+            // Plain, so a base that exists (verbatim from `canonicalize`
+            // on Windows) and a path that does not (lexical, plain) still
+            // share their leading components.
+            let mut out = crate::paths::plain(c);
             for r in rest.iter().rev() {
                 out.push(r);
             }

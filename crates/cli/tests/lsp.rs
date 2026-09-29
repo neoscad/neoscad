@@ -15,7 +15,8 @@ fn scratch(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("nslsp-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    d.canonicalize().unwrap()
+    // Plain, not `\\?\` verbatim on Windows, as a client names files.
+    lang::paths::plain(d.canonicalize().unwrap())
 }
 
 struct Lsp {
@@ -25,8 +26,12 @@ struct Lsp {
     next: u64,
 }
 
+/// An editor's URI for `p`: `file:///tmp/x.scad`, or on Windows
+/// `file:///C:/Users/x.scad` (RFC 8089).
 fn uri(p: &std::path::Path) -> String {
-    format!("file://{}", p.display()).replace(' ', "%20")
+    let s = p.to_string_lossy().replace('\\', "/");
+    let slash = if s.starts_with('/') { "" } else { "/" };
+    format!("file://{slash}{s}").replace(' ', "%20")
 }
 
 impl Lsp {

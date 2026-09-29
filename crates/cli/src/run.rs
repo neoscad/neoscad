@@ -672,8 +672,8 @@ fn render_frame<W: Write>(
         if let Some(l) = &u.loc
             && let Some(sources) = unit_sources(loaded, l.unit)
         {
-            let rel = lang::diag::relative_path(sources.path(l.span.file), &paths.main_dir);
-            line.push_str(&format!(" (in file {}, line {})", rel.display(), l.line));
+            let rel = lang::diag::relative_display(sources.path(l.span.file), &paths.main_dir);
+            line.push_str(&format!(" (in file {rel}, line {})", l.line));
         }
         // Past `--quiet`, as the `eprintln!` it replaces was; recorded for
         // `--format json`.

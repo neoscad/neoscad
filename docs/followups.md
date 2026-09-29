@@ -1090,6 +1090,29 @@ lead them, come roughly in order of user impact.
 - The render crate's `overlay::small_axes_clip` is dead code in the
   wasm32 builds (a compiler warning in `build-core.sh`'s output).
 
+## Windows
+
+Found fixing the first CI run's Windows failures, which removed the
+verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
+`-d` files and doc indexes `/`-separated.
+
+- 8.3 short names (`C:\Users\RUNNER~1`) are not expanded. A working
+  directory given in short form makes files named relative to the input
+  (imports) print short while included files (canonicalised) print long,
+  so a `-d` file can name one directory both ways; OpenSCAD does the same
+  (`lookup_file` uses `fs::absolute`, not `canonical`). `neoscad mcp`'s
+  roots are canonical, so an absolute path a client spells in short form
+  is refused (`roots::resolve` follows links but does not expand short
+  names).
+- `-m` runs its command through `sh -c` on every host; OpenSCAD's
+  `system()` uses `cmd.exe` on Windows. Without `sh` on `PATH` (Git for
+  Windows puts one there) `-m` fails, and `tests/flags.rs` skips its `-m`
+  check.
+- The language server refuses `file://server/share/...` (UNC) URIs, on
+  Windows too.
+- `cargo test -p neoscad-cli -p neoscad-lang` is only run on Windows by
+  CI; the other crates' tests (`session`, `lsp`, `eval`) are not run there.
+
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.
   CI would need it too. (5a)

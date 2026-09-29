@@ -172,9 +172,12 @@ impl Viewport {
     #[uniffi::constructor]
     pub fn new(color_scheme: String) -> Result<Arc<Viewport>, CoreError> {
         guarded(|| {
+            // The argument is checked before the device is sought, so a bad
+            // scheme name is `InvalidArgument` on every host rather than a
+            // `Failed` for the missing GPU where there is none.
+            let scheme = scheme(&color_scheme)?;
             let gpu = host::viewport_gpu().map_err(|message| CoreError::Failed { message })?;
-            let inner = render::viewport::Viewport::new(gpu.clone(), scheme(&color_scheme)?)
-                .map_err(failed)?;
+            let inner = render::viewport::Viewport::new(gpu.clone(), scheme).map_err(failed)?;
             Ok(Arc::new(Viewport {
                 gpu,
                 inner: Mutex::new(inner),

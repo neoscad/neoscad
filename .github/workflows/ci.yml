@@ -97,10 +97,10 @@ jobs:
           if [ "$RUNNER_OS" = macOS ]; then
             cargo test --locked --no-fail-fast
           else
-            # neoscad-ffi is the macOS app's core and ships nowhere else;
-            # off Apple, viewport::tests::an_unknown_scheme_is_refused
-            # fails (Viewport::new has no Metal device to reach the scheme
-            # check), so it is left out here (docs/packaging.md, follow-ups).
+            # neoscad-ffi is the macOS app's core and ships nowhere else, so
+            # it is left out here. (Its tests do pass on Linux without a GPU;
+            # clippy above still checks it, with its Metal-only tests and
+            # their fixtures compiled out.)
             cargo test --locked --no-fail-fast --workspace --exclude neoscad-ffi
           fi
 

@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use lang::diag::{DiagCode, Diagnostic, PathBase, Severity, relative_path};
+use lang::diag::{DiagCode, Diagnostic, PathBase, Severity, relative_display};
 use lang::source::{SourceMap, Span};
 
 /// One message, in the order OpenSCAD prints it.
@@ -42,10 +42,8 @@ impl Message<'_> {
         out.extend_from_slice(b": ");
         out.extend_from_slice(self.text);
         if let (Some(span), Some(sources)) = (self.diag.span, self.sources) {
-            let rel = relative_path(sources.path(span.file), main_dir);
-            out.extend_from_slice(
-                format!(" in file {}, line {}", rel.display(), self.diag.line).as_bytes(),
-            );
+            let rel = relative_display(sources.path(span.file), main_dir);
+            out.extend_from_slice(format!(" in file {rel}, line {}", self.diag.line).as_bytes());
         }
         out
     }
@@ -379,9 +377,7 @@ impl<W: Write> Console<W> {
         {
             return p.clone();
         }
-        let p = relative_path(sources.path(span.file), base)
-            .display()
-            .to_string();
+        let p = relative_display(sources.path(span.file), base);
         self.paths
             .push(((addr, file, base.to_path_buf()), p.clone()));
         p

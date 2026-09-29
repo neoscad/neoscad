@@ -133,17 +133,19 @@ impl Session {
         // Files as a reader finds them: under the working directory
         // relative to it, a library's relative to its library directory
         // (`BOSL2/affine.scad`, not sixty bytes of `../`), anything else
-        // relative to the working directory after all.
+        // relative to the working directory after all. `/`-separated on
+        // every host, as OpenSCAD prints relative paths, so an index reads
+        // (and is asked about) the same on Windows.
         let rel = |p: &Path| {
             if let Ok(r) = p.strip_prefix(&cwd) {
-                return r.display().to_string();
+                return lang::loader::generic(r);
             }
             for dir in &self.cfg.libs.0 {
                 if let Ok(r) = p.strip_prefix(crate::normal(&cwd.join(dir))) {
-                    return r.display().to_string();
+                    return lang::loader::generic(r);
                 }
             }
-            lang::diag::relative_path(p, &cwd).display().to_string()
+            lang::diag::relative_display(p, &cwd)
         };
         let Some(name) = &req.name else {
             let main = req.file.as_ref().map(|f| crate::normal(&cwd.join(f)));

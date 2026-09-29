@@ -103,7 +103,9 @@ pub fn main(args: Vec<OsString>) -> u8 {
             return if e.use_stderr() { EXIT_ERROR } else { 0 };
         }
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
+    // A parent can start us in a verbatim (`\\?\`) directory on Windows;
+    // `--root ../x` joined onto that would not fold its `..`.
+    let cwd = lang::paths::plain(std::env::current_dir().unwrap_or_default());
     let mut write = vec![cwd.clone()];
     write.extend(a.roots.iter().map(|r| cwd.join(r)));
     // Libraries and fonts are readable wherever they are: the unrestricted

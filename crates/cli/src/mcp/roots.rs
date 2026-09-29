@@ -32,7 +32,13 @@ impl Roots {
     /// are dropped (they cannot contain anything).
     pub fn new(write: &[PathBuf], read: &[PathBuf]) -> Roots {
         let canon = |v: &[PathBuf]| -> Vec<PathBuf> {
-            let mut out: Vec<PathBuf> = v.iter().filter_map(|p| p.canonicalize().ok()).collect();
+            // Plain (no `\\?\` on Windows): the paths judged against a root
+            // are built by joining onto it or come from a client, and a
+            // verbatim root would contain none of them (lang::paths).
+            let mut out: Vec<PathBuf> = v
+                .iter()
+                .filter_map(|p| p.canonicalize().ok().map(lang::paths::plain))
+                .collect();
             out.dedup();
             out
         };

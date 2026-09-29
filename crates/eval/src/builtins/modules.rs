@@ -1680,9 +1680,7 @@ impl<'a> Evaluator<'a> {
         if let Value::Number(d) = self.get(p, "dpi") {
             if d < 0.001 {
                 let src = &self.units[loc.unit as usize].program.sources;
-                let rel = lang::diag::relative_path(src.path(loc.span.file), &self.main_dir)
-                    .display()
-                    .to_string();
+                let rel = lang::diag::relative_display(src.path(loc.span.file), &self.main_dir);
                 let mut t = b"Invalid dpi value giving, using default of ".to_vec();
                 self.write_echo_nothrow(&origin_v, &mut t);
                 t.extend_from_slice(

@@ -29,15 +29,24 @@ pub fn set_make_command(cmd: Option<String>) {
 
 /// `handle_dep`: record `path` once. Returns whether it was new.
 pub fn add(path: &str) -> bool {
+    // `/`-separated, as `handle_dep` writes `generic_string()`: make reads
+    // a `\` before a space or `#` as an escape, and one spelling per file
+    // keeps a file reached under two separators from being listed twice.
     // make treats a space as a separator, so OpenSCAD escapes it (and only
     // it) as `\ `.
-    let dep = path.replace(' ', "\\ ");
+    let dep = spelling(path).replace(' ', "\\ ");
     let mut deps = DEPS.lock().expect("dependency list");
     if deps.contains(&dep) {
         return false;
     }
     deps.push(dep);
     true
+}
+
+/// A dependency as the `-d` file and the `-m` command see it: `/`-separated
+/// on Windows, unchanged elsewhere.
+fn spelling(path: &str) -> String {
+    lang::loader::generic(Path::new(path))
 }
 
 /// The files a parsed program read: its own sources after the main file
@@ -79,6 +88,10 @@ fn run_make(file: &str) {
     let Some(cmd) = MAKE_COMMAND.lock().expect("make command").clone() else {
         return;
     };
+    // The file as the `-d` file spells it, so that a make rule written from
+    // that file matches the target asked for. (OpenSCAD passes the path as
+    // found, `\`-separated on Windows; elsewhere the two are the same.)
+    let file = spelling(file);
     let line = format!("{cmd} '{}'", file.replace('\'', "'\\''"));
     match std::process::Command::new("sh")
         .arg("-c")

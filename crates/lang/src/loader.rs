@@ -90,7 +90,9 @@ impl FileSystem for StdFs {
         path.is_dir()
     }
     fn canonicalize(&self, path: &Path) -> Option<PathBuf> {
-        path.canonicalize().ok()
+        // Without `\\?\` on Windows, so found includes compare equal to
+        // (and print like) every other path (see `crate::paths`).
+        path.canonicalize().ok().map(crate::paths::plain)
     }
     fn metadata(&self, path: &Path) -> Option<Metadata> {
         let m = std::fs::metadata(path).ok()?;

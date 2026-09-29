@@ -4,10 +4,17 @@
 //! drawables. Skipped with a note when there is no GPU.
 
 use super::*;
-use crate::{CoreConfig, CoreError};
+#[cfg(target_vendor = "apple")]
+use crate::CoreConfig;
+use crate::CoreError;
 
+// The fixtures below serve only the tests that draw into a Metal layer,
+// which exist only on Apple targets; elsewhere they would be dead code and
+// fail `clippy -D warnings`.
+#[cfg(target_vendor = "apple")]
 const DOC: &str = "/NeoSCAD-ffi-viewport-test/model.scad";
 
+#[cfg(target_vendor = "apple")]
 fn core(text: &str) -> Arc<Core> {
     let c = Core::new(CoreConfig {
         resource_dir: None,
@@ -29,6 +36,7 @@ fn viewport() -> Option<Arc<Viewport>> {
 }
 
 /// Settings with nothing but the model, so "not background" means model.
+#[cfg(target_vendor = "apple")]
 fn bare(v: &Viewport) {
     v.set_settings(ViewportSettings {
         axes: false,
@@ -43,6 +51,7 @@ fn bare(v: &Viewport) {
 }
 
 /// Pixels that are not Cornfield's background (#ffffe5).
+#[cfg(target_vendor = "apple")]
 fn foreground(image: &ViewportImage) -> usize {
     image
         .rgba

@@ -101,7 +101,7 @@ lavapipe/llvmpipe and poppler), from this tree:
 |---|---|---|
 | `cargo build --release -p neoscad-cli -p neoscad-conformance` | pass (48 s) | pass (1 min 52 s) |
 | `cargo test -p neoscad-cli` | 74 passed | not run |
-| `cargo test --workspace --no-fail-fast` | 614 passed, 1 failed: `neoscad-ffi`'s `viewport::tests::an_unknown_scheme_is_refused` (see follow-ups) | not run |
+| `cargo test --workspace --no-fail-fast` | 614 passed, 1 failed: `neoscad-ffi`'s `viewport::tests::an_unknown_scheme_is_refused` (since fixed: `Viewport::new` checks the scheme before it looks for a GPU) | not run |
 | conformance, tiers 0-2, 4, 5 | 1,001 of 1,001 baseline passes | 1,001 of 1,001 |
 | tier 3, mesh identical to macOS's | 734 of 772 | 724 of 772 |
 | tier 3, differing mesh drawn by the macOS nightly | 38 of 38 pass | 48 of 48 pass |
@@ -240,10 +240,6 @@ Nothing here was pushed, published, signed up for or accepted.
 
 ## Follow-ups
 
-- `neoscad-ffi`'s `viewport::tests::an_unknown_scheme_is_refused` fails
-  off Apple: `Viewport::new` fails on the missing Metal device before it
-  checks the scheme, so the test's `InvalidArgument` never comes. CI's
-  Linux job excludes `neoscad-ffi`, which ships only in the macOS app.
 - Tier 3 on Linux in CI needs an OpenSCAD renderer there (an x86_64
   AppImage nightly, or the `openscad/openscad` image), or the image cache
   approach above made reproducible.

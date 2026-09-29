@@ -14,7 +14,8 @@ fn scratch(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("nsmcp-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    d.canonicalize().unwrap()
+    // Plain, not `\\?\` verbatim on Windows, as a client names files.
+    lang::paths::plain(d.canonicalize().unwrap())
 }
 
 struct Mcp {
@@ -1007,12 +1008,15 @@ fn mesh_paths_quiet_info_and_touching_parts() {
     }
     let r = s.tool("render", json!({"path": "out/box.stl"}));
     assert_eq!(r["structuredContent"]["geometry"]["volume"], 1000.0, "{r}");
-    // Upper case, and verbose's full JSON, are labelled too.
-    std::fs::copy(dir.join("out/box.stl"), dir.join("out/BOX.STL")).unwrap();
-    let r = s.tool("check", json!({"path": "out/BOX.STL", "verbose": true}));
+    // Upper case, and verbose's full JSON, are labelled too. Another name,
+    // not `BOX.STL`: on a case-insensitive file system (Windows, macOS by
+    // default) that is `box.stl` itself, and copying a file onto itself
+    // fails on Windows with a sharing violation (os error 32).
+    std::fs::copy(dir.join("out/box.stl"), dir.join("out/UPPER.STL")).unwrap();
+    let r = s.tool("check", json!({"path": "out/UPPER.STL", "verbose": true}));
     assert_eq!(
         r["structuredContent"]["imported"],
-        "import(\"out/BOX.STL\");"
+        "import(\"out/UPPER.STL\");"
     );
     // A .scad path is still a model.
     std::fs::write(dir.join("m.scad"), "cube(1);\n").unwrap();

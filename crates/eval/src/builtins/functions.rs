@@ -592,9 +592,7 @@ impl<'a> Evaluator<'a> {
         } else {
             fs.read(path).ok()
         };
-        let display = lang::diag::relative_path(path, &self.main_dir)
-            .display()
-            .to_string();
+        let display = lang::diag::relative_display(path, &self.main_dir);
         let mut warnings = Vec::new();
         let req = io::dxf::Request {
             file: &file,
