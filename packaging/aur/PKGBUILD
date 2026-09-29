@@ -1,12 +1,17 @@
 # Template for the AUR package neoscad-bin: the release's prebuilt Linux
-# binaries. scripts/release/fill-manifests.sh replaces @VERSION@ and the
-# @SHA256_...@ placeholders from a release's checksums; the filled file is
+# binaries. scripts/release/fill-manifests.sh replaces the version and
+# checksum placeholders from a release's checksums; the filled file is
 # attached to the GitHub Release, and a maintainer pushes it (with
 # `makepkg --printsrcinfo > .SRCINFO`) to ssh://aur@aur.archlinux.org/neoscad-bin.git.
 #
 # Maintainer: The NeoSCAD contributors <packages@neoscad.org>
 pkgname=neoscad-bin
-pkgver=@VERSION@
+# pkgver is the release version without its hyphen (0.1.0-rc.1 becomes
+# 0.1.0rc.1): makepkg rejects a pkgver with a hyphen, and vercmp sorts
+# 0.1.0rc.1 before 0.1.0 as the prerelease it is. The download URL needs
+# the tag itself, hence _tag.
+pkgver=@PKGVER@
+_tag=v@VERSION@
 pkgrel=1
 pkgdesc='OpenSCAD-compatible programmable solid CAD (command line, MCP and language servers)'
 arch=('x86_64' 'aarch64')
@@ -19,7 +24,7 @@ optdepends=('vulkan-swrast: PNG export without a GPU (lavapipe)'
             'mesa: PNG export through OpenGL (llvmpipe)')
 provides=('neoscad')
 conflicts=('neoscad')
-_base="https://github.com/neoscad/neoscad/releases/download/v${pkgver}"
+_base="https://github.com/neoscad/neoscad/releases/download/${_tag}"
 source_x86_64=("${_base}/neoscad-cli-x86_64-unknown-linux-gnu.tar.xz")
 source_aarch64=("${_base}/neoscad-cli-aarch64-unknown-linux-gnu.tar.xz")
 sha256sums_x86_64=('@SHA256_X86_64_UNKNOWN_LINUX_GNU@')

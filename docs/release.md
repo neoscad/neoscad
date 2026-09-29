@@ -37,6 +37,9 @@ Everything goes to `dist/` (gitignored), which each run empties first:
 `Cargo.toml`; it becomes `CFBundleShortVersionString` (passed to
 `xcodebuild` as `MARKETING_VERSION`) and is what `neoscad --version`
 prints (`env!("CARGO_PKG_VERSION")`, `crates/cli/src/main.rs:464`).
+`CFBundleShortVersionString` must be numeric `x.y.z`, so a prerelease
+such as `0.1.0-rc.1` goes there as `0.1.0`; the DMG's file and volume
+names, and the About panel's "NeoSCAD core" line, keep the full version.
 `<build>` is `git rev-list --count HEAD` and becomes `CFBundleVersion`
 (`CURRENT_PROJECT_VERSION`), so it only grows along main. The script
 checks both in the built `Info.plist` and the CLI's output. A tree with
@@ -266,7 +269,14 @@ Pushing a tag such as `v0.1.0` runs, in order:
    `ghcr.io/neoscad/neoscad` image).
 6. **announce**.
 
-A prerelease tag (`v0.2.0-beta.1`) skips the publish jobs.
+A prerelease tag (`v0.2.0-beta.1`) makes a GitHub prerelease and skips
+the publish jobs, unless `publish-prereleases = true` is set in
+`[workspace.metadata.dist]` (set only for the `v0.1.0-rc.1` rehearsal,
+then removed). With it set, a prerelease publishes everything:
+the tap's `neoscad` formula moves to it (Homebrew has no prerelease
+channel), and the image is pushed as `:<version>` but not `:latest`.
+The `.deb` and `.rpm` carry `0.1.0~rc.1` so they sort before `0.1.0`
+(nfpm does this), and the AUR `pkgver` drops the hyphen (`0.1.0rc.1`).
 
 | Secret | Used by |
 |---|---|

@@ -16,9 +16,10 @@
 # both slices, and the CLI's x86_64 slice runs under Rosetta when it is
 # installed.
 #
-# <version> is the Cargo workspace version (CFBundleShortVersionString and
-# `neoscad --version`); <build> is `git rev-list --count HEAD`
-# (CFBundleVersion), so every commit on main gets a larger build number.
+# <version> is the Cargo workspace version (`neoscad --version`, the file
+# names, and CFBundleShortVersionString without any prerelease suffix);
+# <build> is `git rev-list --count HEAD` (CFBundleVersion), so every commit
+# on main gets a larger build number.
 #
 # Signing is chosen by the environment; nothing is prompted for or stored:
 #
@@ -111,6 +112,13 @@ fi
 
 version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 [ -n "$version" ] || die "no version in Cargo.toml's [workspace.package]"
+# CFBundleShortVersionString must be three period-separated integers, so a
+# prerelease (0.1.0-rc.1) ships as 0.1.0 there. The full version stays in
+# the DMG's name, its volume name and the About panel's "NeoSCAD core"
+# line (the core's own version), so an rc build is still identifiable.
+marketing_version=${version%%-*}
+[[ "$marketing_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "version $version does not start with a numeric x.y.z for CFBundleShortVersionString"
 build_number=$(git rev-list --count HEAD)
 commit=$(git rev-parse --short=12 HEAD)
 dirty=no
@@ -167,7 +175,7 @@ if ! xcodebuild \
     -project apple/NeoSCAD.xcodeproj -scheme NeoSCAD -configuration Release \
     -destination generic/platform=macOS \
     -derivedDataPath "$work/DerivedData" -archivePath "$archive" \
-    MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$build_number" \
+    MARKETING_VERSION="$marketing_version" CURRENT_PROJECT_VERSION="$build_number" \
     "${sign_settings[@]}" \
     archive >"$log" 2>&1; then
     grep -E 'error:|\*\* ARCHIVE' "$log" | sort -u >&2 || tail -40 "$log" >&2
@@ -267,8 +275,8 @@ if [ -n "$(find "$app" -name '*.dSYM' -print -quit)" ]; then
 fi
 shipped_version=$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")
 shipped_build=$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")
-[ "$shipped_version" = "$version" ] && [ "$shipped_build" = "$build_number" ] ||
-    die "Info.plist says $shipped_version ($shipped_build), expected $version ($build_number)"
+[ "$shipped_version" = "$marketing_version" ] && [ "$shipped_build" = "$build_number" ] ||
+    die "Info.plist says $shipped_version ($shipped_build), expected $marketing_version ($build_number)"
 
 # The dSYMs must match what ships, or a crash report cannot be symbolicated
 # with them: the UUIDs of each binary and its dSYM agree.

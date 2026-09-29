@@ -6,7 +6,8 @@
 # SUMS_DIR holds cargo-dist's per-archive checksum files
 # (neoscad-cli-<target>.<ext>.sha256, "HASH *NAME"). Each fills the
 # placeholder @SHA256_<TARGET>@, the target upper-cased with `-` as `_`
-# (@SHA256_X86_64_PC_WINDOWS_MSVC@). @VERSION@ is VERSION. The Homebrew
+# (@SHA256_X86_64_PC_WINDOWS_MSVC@). @VERSION@ is VERSION, and @PKGVER@
+# is VERSION without hyphens (see below). The Homebrew
 # cask for the app is filled too when NEOSCAD_BUILD (the DMG's build
 # number) and NEOSCAD_DMG_SHA256 are set.
 #
@@ -29,7 +30,9 @@ out=$3
 root=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p "$out"
 
-subst=(-e "s|@VERSION@|$version|g")
+# @PKGVER@ is the AUR's pkgver: makepkg rejects a hyphen there, and
+# without it a prerelease still sorts first (vercmp: 0.1.0rc.1 < 0.1.0).
+subst=(-e "s|@VERSION@|$version|g" -e "s|@PKGVER@|${version//-/}|g")
 windows=0
 shopt -s nullglob
 for f in "$sums"/neoscad-cli-*.sha256; do

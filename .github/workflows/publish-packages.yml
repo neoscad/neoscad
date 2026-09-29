@@ -92,6 +92,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      PRERELEASE: ${{ fromJson(inputs.plan).announcement_is_prerelease }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -106,7 +107,14 @@ jobs:
       - name: Build and push
         run: |
           version=${TAG#v}
+          tags=(-t "ghcr.io/neoscad/neoscad:$version")
+          # `latest` is what a bare `docker pull ghcr.io/neoscad/neoscad`
+          # gets, so a prerelease (published only when the release config's
+          # `publish-prereleases` is set) must not move it off the last
+          # stable release.
+          if [[ "$PRERELEASE" != true ]]; then
+            tags+=(-t ghcr.io/neoscad/neoscad:latest)
+          fi
           docker buildx build --platform linux/amd64,linux/arm64 \
             -f packaging/docker/Dockerfile --build-arg NEOSCAD_VERSION="$version" \
-            -t "ghcr.io/neoscad/neoscad:$version" -t ghcr.io/neoscad/neoscad:latest \
-            --push packaging/docker
+            "${tags[@]}" --push packaging/docker
