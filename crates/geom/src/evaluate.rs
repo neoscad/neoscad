@@ -736,6 +736,24 @@ impl Renderer {
         r
     }
 
+    /// The cached result of a leaf node (a primitive or an import) of a
+    /// tree rendered with `keys`, if the cache still holds it; nothing is
+    /// computed and the entry's age is not touched. For a host that wants
+    /// to look at what the render read (an imported mesh) without reading
+    /// it again. Groups are not leaves: their key is not their result's
+    /// (see `cache_key`).
+    pub fn cached_leaf(&self, n: &Node, keys: &Keys) -> Option<Geometry> {
+        if !n.children.is_empty() || matches!(n.kind, NodeKind::Root | NodeKind::Group { .. }) {
+            return None;
+        }
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .get(&keys.get(n))
+            .and_then(|e| e.geom.clone())
+    }
+
     /// Change the cache budget, evicting at once if it is now over.
     pub fn set_budget(&self, bytes: usize) {
         let mut c = self

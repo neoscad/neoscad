@@ -471,6 +471,59 @@ fn file_access_stays_inside_the_roots() {
 }
 
 #[test]
+fn inside_out_polyhedra_are_named_in_render_evaluate_and_check() {
+    // A cube polyhedron with its faces counter-clockwise seen from
+    // outside (OpenSCAD wants clockwise), subtracted from a slab: the
+    // difference comes out with pinched edges, and the polyhedron, not
+    // the pinch's usual "overlap them", is what to fix.
+    let dir = scratch("inside-out");
+    let src = "P = [[0,0,0],[4,0,0],[4,4,0],[0,4,0],[0,0,4],[4,0,4],[4,4,4],[0,4,4]];\n\
+               difference() { cube([6,6,2]); polyhedron(P, [[3,2,1,0],[0,1,5,4],[4,5,6,7],[1,2,6,5],[2,3,7,6],[3,0,4,7]]); }\n";
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("render", json!({"source": src}));
+    let t = text(&r);
+    assert!(
+        t.contains(
+            "warning inline.scad:2:31: this polyhedron is inside out: all 6 faces point inward"
+        ),
+        "{t}"
+    );
+    let sc = &r["structuredContent"];
+    let d = &sc["diagnostics"][0];
+    assert_eq!(d["code"], "polyhedron-inside-out", "{sc}");
+    assert_eq!(d["severity"], "warning");
+    assert_eq!(d["line"], 2);
+    assert!(d["hint"].as_str().unwrap().contains("clockwise"), "{d}");
+    // The pinched edges point to the polyhedron.
+    let fix = sc["geometry"]["pinched"]["fix"].as_str().unwrap();
+    assert!(
+        fix.starts_with("fix the polyhedron-inside-out warning (line 2) first"),
+        "{fix}"
+    );
+    assert!(t.contains(fix), "{t}");
+    // evaluate says so without building geometry.
+    let r = s.tool("evaluate", json!({"source": src}));
+    assert_eq!(
+        r["structuredContent"]["diagnostics"][0]["code"], "polyhedron-inside-out",
+        "{r}"
+    );
+    // check lists it first.
+    let r = s.tool("check", json!({"source": src}));
+    let f = &r["structuredContent"]["findings"];
+    assert_eq!(f[0]["code"], "polyhedron-inside-out", "{f}");
+    assert!(text(&r).contains("Fix: fix #1 first"), "{}", text(&r));
+    // Fixed, all of it goes away.
+    let fixed = src.replace(
+        "[[3,2,1,0],[0,1,5,4],[4,5,6,7],[1,2,6,5],[2,3,7,6],[3,0,4,7]]",
+        "[[0,1,2,3],[4,5,1,0],[7,6,5,4],[5,6,2,1],[6,7,3,2],[7,4,0,3]]",
+    );
+    let r = s.tool("render", json!({"source": fixed}));
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["diagnostics"], json!([]), "{sc}");
+    assert_eq!(sc["geometry"]["manifold"], true, "{sc}");
+}
+
+#[test]
 fn parallel_calls_on_one_file_both_answer() {
     // An agent's parallel calls are both wanted: unlike an editor's, a
     // newer one must not cancel an older one on the same document.

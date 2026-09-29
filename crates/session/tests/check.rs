@@ -598,3 +598,235 @@ fn overlaps_are_listed_piece_by_piece() {
         "{b}"
     );
 }
+
+/// A unit cube as a polyhedron, faces clockwise seen from outside (the
+/// OpenSCAD manual's order), with the faces listed in `faces`.
+fn cube_poly(faces: &str) -> String {
+    format!(
+        "polyhedron([[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1]],\n  {faces});\n"
+    )
+}
+
+const CUBE_FACES: &str = "[[0,1,2,3],[4,5,1,0],[7,6,5,4],[5,6,2,1],[6,7,3,2],[7,4,0,3]]";
+const CUBE_INSIDE_OUT: &str = "[[3,2,1,0],[0,1,5,4],[4,5,6,7],[1,2,6,5],[2,3,7,6],[3,0,4,7]]";
+
+/// The NeoSCAD-only diagnostics about input meshes of `src`, from
+/// evaluation and from a render, and the render's console text.
+fn mesh_diags(src: &str) -> (Vec<Value>, Vec<Value>, String) {
+    let s = session(&[("m.scad", src)]);
+    let pick = |v: Vec<Value>| -> Vec<Value> {
+        v.into_iter()
+            .filter(|d| d["code"].as_str().unwrap().starts_with("polyhedron-"))
+            .collect()
+    };
+    let e = s.evaluate(&Run::new("m.scad"), false).unwrap();
+    let scheme = render::ColorScheme::cornfield();
+    let r = s
+        .render(&Run::new("m.scad"), session::Mode::Render, &scheme)
+        .unwrap();
+    (
+        pick(e.log.diagnostics_json()),
+        pick(r.log.diagnostics_json()),
+        String::from_utf8(r.log.stderr).unwrap(),
+    )
+}
+
+#[test]
+fn a_correct_polyhedron_has_no_mesh_findings() {
+    let src = cube_poly(CUBE_FACES);
+    let (e, r, _) = mesh_diags(&src);
+    assert!(e.is_empty() && r.is_empty(), "{e:?} {r:?}");
+    let v = check(&src, false, CheckSettings::default());
+    assert!(
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| !f["code"].as_str().unwrap().starts_with("polyhedron-")),
+        "{v}"
+    );
+    // Mirrored, OpenSCAD reverses the faces with the points: still right.
+    let (e, _, _) = mesh_diags(&format!("mirror([1,0,0]) {src}"));
+    assert!(e.is_empty(), "{e:?}");
+}
+
+#[test]
+fn an_inside_out_polyhedron_is_reported_with_its_fix() {
+    let src = cube_poly(CUBE_INSIDE_OUT);
+    let (e, r, stderr) = mesh_diags(&src);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(e, r);
+    let d = &e[0];
+    assert_eq!(d["code"], "polyhedron-inside-out");
+    assert_eq!(d["severity"], "warning");
+    assert_eq!(d["line"], 1);
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("inside out: all 6 faces point inward"),
+        "{d}"
+    );
+    let h = &d["hints"][0];
+    assert!(h["message"].as_str().unwrap().contains("clockwise"), "{h}");
+    // The faces are written out, so the fix is an exact edit: each face's
+    // indices reversed, in place.
+    assert_eq!(h["replace"]["text"], CUBE_FACES);
+    assert_eq!(h["replace"]["span"]["start"]["line"], 2);
+    // Never on the console: OpenSCAD prints nothing about it.
+    assert!(!stderr.contains("inside out"), "{stderr}");
+    // `check` lists it first, as a warning.
+    let v = check(&src, false, CheckSettings::default());
+    assert_eq!(v["findings"][0]["code"], "polyhedron-inside-out", "{v}");
+    assert_eq!(v["findings"][0]["severity"], "warning");
+    assert!(
+        v["findings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("(m.scad:1)"),
+        "{v}"
+    );
+    // Reversing the faces with a list comprehension is the fix the hint
+    // gives for faces that are computed; no edit is offered for those.
+    let computed = format!(
+        "f = {CUBE_INSIDE_OUT};\npolyhedron([[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1]], [for (x = f) x]);\n"
+    );
+    let (e, _, _) = mesh_diags(&computed);
+    assert_eq!(e[0]["code"], "polyhedron-inside-out");
+    assert!(e[0]["hints"][0].get("replace").is_none(), "{e:?}");
+    let fixed = format!(
+        "f = {CUBE_INSIDE_OUT};\npolyhedron([[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1]], [for (x = f) [for (i = [len(x) - 1:-1:0]) x[i]]]);\n"
+    );
+    assert!(mesh_diags(&fixed).0.is_empty());
+    // Mirroring twice does not turn it outward: each mirror reverses the
+    // faces with the points (checked against OpenSCAD's export too).
+    let (e, _, _) = mesh_diags(&format!("mirror([1,0,0]) mirror([1,0,0]) {src}"));
+    assert_eq!(e[0]["code"], "polyhedron-inside-out");
+}
+
+#[test]
+fn a_flipped_face_is_located_in_the_model() {
+    // The fourth face (x = 1) reversed, and the cube moved.
+    let faces = "[[0,1,2,3],[4,5,1,0],[7,6,5,4],[1,2,6,5],[6,7,3,2],[7,4,0,3]]";
+    let src = format!("translate([3,0,0]) {}", cube_poly(faces));
+    let (e, r, _) = mesh_diags(&src);
+    assert_eq!(e, r);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(e[0]["code"], "polyhedron-flipped-faces");
+    let m = e[0]["message"].as_str().unwrap();
+    assert!(
+        m.contains("1 of this polyhedron's 6 faces points inward") && m.contains("[4, 0.5, 0.5]"),
+        "{m}"
+    );
+    assert_eq!(
+        e[0]["hints"][0]["replace"]["text"],
+        "[[0,1,2,3],[4,5,1,0],[7,6,5,4],[5,6,2,1],[6,7,3,2],[7,4,0,3]]"
+    );
+    let v = check(&src, false, CheckSettings::default());
+    let f = findings(&v, "polyhedron-flipped-faces");
+    assert_eq!(
+        f[0]["location"]["point"],
+        serde_json::json!([4.0, 0.5, 0.5])
+    );
+}
+
+#[test]
+fn an_open_polyhedron_is_reported() {
+    let src = cube_poly("[[0,1,2,3],[4,5,1,0],[7,6,5,4],[5,6,2,1],[6,7,3,2]]");
+    let (e, _, _) = mesh_diags(&src);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(e[0]["code"], "polyhedron-open");
+    assert!(
+        e[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("4 edges are used by only one face"),
+        "{e:?}"
+    );
+    let v = check(&src, false, CheckSettings::default());
+    assert_eq!(findings(&v, "polyhedron-open").len(), 1, "{v}");
+}
+
+#[test]
+fn an_inside_out_import_is_reported() {
+    // An ASCII STL of the unit cube with every facet's corners reversed.
+    let mut stl = String::from("solid c\n");
+    let p = [
+        [0, 0, 0],
+        [1, 0, 0],
+        [1, 1, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [1, 0, 1],
+        [1, 1, 1],
+        [0, 1, 1],
+    ];
+    // Clockwise from outside: inside out as an STL.
+    for f in [
+        [0, 1, 2, 3],
+        [4, 5, 1, 0],
+        [7, 6, 5, 4],
+        [5, 6, 2, 1],
+        [6, 7, 3, 2],
+        [7, 4, 0, 3],
+    ] {
+        for t in [[f[0], f[1], f[2]], [f[0], f[2], f[3]]] {
+            stl.push_str("facet normal 0 0 0\nouter loop\n");
+            for v in t {
+                let q = p[v];
+                stl.push_str(&format!("vertex {} {} {}\n", q[0], q[1], q[2]));
+            }
+            stl.push_str("endloop\nendfacet\n");
+        }
+    }
+    stl.push_str("endsolid c\n");
+    let s = session(&[("m.scad", "import(\"c.stl\");\n"), ("c.stl", &stl)]);
+    let scheme = render::ColorScheme::cornfield();
+    let r = s
+        .render(&Run::new("m.scad"), session::Mode::Render, &scheme)
+        .unwrap();
+    let d: Vec<Value> = r
+        .log
+        .diagnostics_json()
+        .into_iter()
+        .filter(|d| d["code"] == "polyhedron-inside-out")
+        .collect();
+    assert_eq!(d.len(), 1, "{:?}", r.log.diagnostics_json());
+    assert!(
+        d[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("the mesh imported from 'c.stl' is inside out"),
+        "{d:?}"
+    );
+}
+
+const T3_INSIDE_OUT: &str = include_str!("data/pilot_t3_inside_out.scad");
+
+#[test]
+fn the_pilots_inside_out_thread_is_named_before_the_pinch() {
+    let (e, r, stderr) = mesh_diags(T3_INSIDE_OUT);
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(e, r);
+    assert_eq!(e[0]["code"], "polyhedron-inside-out");
+    // The polyhedron() call in thread_groove().
+    assert_eq!(e[0]["line"], 99);
+    assert!(
+        e[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("signed volume is -1716.14 mm³"),
+        "{e:?}"
+    );
+    // Computed faces: the hint's text, no edit.
+    assert!(e[0]["hints"][0].get("replace").is_none());
+    assert!(!stderr.contains("polyhedron"), "{stderr}");
+    // `check`: the inside-out polyhedron first; the pinched edges it
+    // caused point back to it instead of saying to overlap the parts.
+    let v = check(T3_INSIDE_OUT, false, CheckSettings::default());
+    assert_eq!(v["findings"][0]["code"], "polyhedron-inside-out", "{v}");
+    let pinch = findings(&v, "not-manifold");
+    assert_eq!(pinch.len(), 1, "{v}");
+    let fix = pinch[0]["fix"].as_str().unwrap();
+    assert!(fix.starts_with("fix #1 first: an inside-out"), "{fix}");
+}

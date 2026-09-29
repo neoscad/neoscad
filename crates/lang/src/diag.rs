@@ -113,6 +113,16 @@ pub enum DiagCode {
     InputNotFound,
     /// An output file cannot be written (`Can't write to ...`).
     OutputNotWritable,
+    /// NeoSCAD's own (never printed on the console): a `polyhedron()` or
+    /// imported mesh whose faces all point inward.
+    PolyhedronInsideOut,
+    /// NeoSCAD's own: some faces of a mesh wound against the rest.
+    PolyhedronFlippedFaces,
+    /// NeoSCAD's own: a mesh with edges used by only one face.
+    PolyhedronOpen,
+    /// NeoSCAD's own: a mesh with edges used by more than two faces, or
+    /// that cannot be wound consistently.
+    PolyhedronNotManifold,
 }
 
 impl DiagCode {
@@ -154,6 +164,10 @@ impl DiagCode {
             DiagCode::ResourceLimit => "resource-limit",
             DiagCode::InputNotFound => "input-not-found",
             DiagCode::OutputNotWritable => "output-not-writable",
+            DiagCode::PolyhedronInsideOut => "polyhedron-inside-out",
+            DiagCode::PolyhedronFlippedFaces => "polyhedron-flipped-faces",
+            DiagCode::PolyhedronOpen => "polyhedron-open",
+            DiagCode::PolyhedronNotManifold => "polyhedron-not-manifold",
         }
     }
 }

@@ -29,11 +29,16 @@
 //! - **bed fit**, **tiny features** (pieces smaller than two extrusion
 //!   widths) and **intersecting parts** (overlap volume by a boolean
 //!   intersection of the two parts' solids).
+//! - **input meshes:** each `polyhedron()` and imported mesh that is
+//!   inside out, partly flipped, open or not manifold
+//!   ([`crate::orient`]), listed first: they are what the other findings
+//!   of a broken boolean come from.
 
 use std::collections::HashMap;
 
 use geom::Geometry;
 use geom::manifold_geom::{ManifoldGeometry, OpType};
+use lang::diag::DiagCode;
 use serde_json::{Value, json};
 
 use crate::mesh::{Aabb, Bvh, Mesh, V3, add, dot, scale};
@@ -118,7 +123,9 @@ pub struct Finding {
     pub level: Level,
     /// Stable: `not-3d`, `empty`, `not-closed`, `not-manifold`,
     /// `floating`, `thin-wall`, `overhang`, `bed-fit`, `tiny-feature`,
-    /// `parts-intersect`, `part-not-manifold`, `off-bed`.
+    /// `parts-intersect`, `part-not-manifold`, `off-bed`, and for input
+    /// meshes `polyhedron-inside-out`, `polyhedron-flipped-faces`,
+    /// `polyhedron-open`, `polyhedron-not-manifold`.
     pub code: &'static str,
     pub message: String,
     /// Where: the worst point, and the box of the whole problem.
@@ -183,7 +190,8 @@ fn mm(x: f64) -> String {
 /// Everything a check found, before it is JSON.
 #[derive(Debug, Clone, Default)]
 pub struct Analysis {
-    /// Sorted: errors first, then by code order of the checks.
+    /// Sorted: input mesh problems (`polyhedron-*`) first, then errors,
+    /// then by code order of the checks.
     pub findings: Vec<Finding>,
     /// Per code, findings left out past [`CheckSettings::max_findings`].
     pub truncated: Vec<(&'static str, usize)>,
@@ -207,6 +215,57 @@ pub struct Analysis {
 pub fn analyze(
     geometry: Option<&Geometry>,
     parts: &[Part],
+    s: &CheckSettings,
+    now: &dyn Fn() -> f64,
+) -> Analysis {
+    analyze_with(geometry, parts, &[], s, now)
+}
+
+/// [`analyze`], with the problems of the model's input meshes
+/// ([`Rendered::inputs`](crate::Rendered::inputs)) as findings too. When a
+/// winding problem is among them, a not-manifold finding points to it: an
+/// inside-out mesh is what made the booleans pinch, and the pinch's own
+/// advice (overlap the parts) would send the reader the wrong way, as it
+/// did an agent in the CAD pilot.
+pub fn analyze_with(
+    geometry: Option<&Geometry>,
+    parts: &[Part],
+    inputs: &[crate::orient::InputIssue],
+    s: &CheckSettings,
+    now: &dyn Fn() -> f64,
+) -> Analysis {
+    let mut a = analyze_solid(geometry, parts, inputs, s, now);
+    link_to_winding(&mut a.findings);
+    a
+}
+
+/// The fix of a not-manifold finding when a winding problem of an input
+/// mesh (finding `id`) is the likely cause.
+pub fn pinch_from_winding(id: &str) -> String {
+    format!(
+        "fix {id} first: an inside-out or partly flipped polyhedron is the likely cause, since \
+         booleans with it go wrong; if these edges remain after that, overlap the parts that \
+         touch by at least 0.01 or separate them"
+    )
+}
+
+fn link_to_winding(findings: &mut [Finding]) {
+    let Some(i) = findings.iter().position(|f| {
+        f.code == DiagCode::PolyhedronInsideOut.as_str()
+            || f.code == DiagCode::PolyhedronFlippedFaces.as_str()
+    }) else {
+        return;
+    };
+    let fix = pinch_from_winding(&format!("#{}", i + 1));
+    for f in findings.iter_mut().filter(|f| f.code == "not-manifold") {
+        f.fix = fix.clone();
+    }
+}
+
+fn analyze_solid(
+    geometry: Option<&Geometry>,
+    parts: &[Part],
+    inputs: &[crate::orient::InputIssue],
     s: &CheckSettings,
     now: &dyn Fn() -> f64,
 ) -> Analysis {
@@ -288,6 +347,22 @@ pub fn analyze(
     };
     let manifold = solid.is_valid() && open_edges == 0 && shared_edges == 0 && pinched.is_none();
     lap(&mut a, "manifold");
+    for i in inputs {
+        out.push(Finding {
+            level: Level::Warning,
+            code: i.code.as_str(),
+            message: match &i.call {
+                Some(c) => format!("{} ({c})", i.message),
+                None => i.message.clone(),
+            },
+            point: i.point,
+            bbox: Aabb::point(i.point),
+            part: None,
+            fix: i.fix.clone(),
+            value: None,
+            limit: None,
+        });
+    }
     if let Some(p) = pinched {
         out.push(Finding {
             level: Level::Error,
@@ -568,8 +643,10 @@ pub fn analyze(
     });
     a.parts = part_json;
 
-    // Errors first, then in check order; truncate per code.
-    out.sort_by_key(|f| f.level);
+    // Problems of the input meshes first (the cause comes before the
+    // effects it has on the result), then errors, then in check order;
+    // truncate per code.
+    out.sort_by_key(|f| (!f.code.starts_with("polyhedron-"), f.level));
     for f in &out {
         a.counts[f.level as usize] += 1;
     }
@@ -1280,7 +1357,13 @@ impl Session {
         }
         let t = self.now();
         let clock = || self.now();
-        let analysis = analyze(model.geometry.as_ref(), &parts, &req.settings, &clock);
+        let analysis = analyze_with(
+            model.geometry.as_ref(),
+            &parts,
+            &model.inputs,
+            &req.settings,
+            &clock,
+        );
         let check_ms = self.now() - t;
         let count = |l: Level| analysis.counts[l as usize];
         let errors = count(Level::Error);

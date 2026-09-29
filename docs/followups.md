@@ -778,6 +778,21 @@ lead them, come roughly in order of user impact.
   pieces touching at a single point (tip to tip) are not found. A
   vertex whose faces form more than one fan after welding would be the
   test. (CAD pilot fix)
+- Input mesh warnings (`session::orient`, the `polyhedron-*` codes)
+  judge a closed shell's outside by its signed volume, and a shell whose
+  bounding box lies strictly inside another's is taken for a cavity. An
+  inside-out shell nested in a correct one therefore passes as a cavity,
+  and a real cavity whose box pokes out of its host's box (never, for a
+  true cavity) would be misjudged; a ray-parity test of one point would
+  settle both. Corners weld by exact position, so a gap Manifold's merge
+  closes (`issue5135-good.scad`, 2e-12) is reported as open; right for a
+  lone polyhedron, which exports open, noise under a boolean. Points
+  under `resize()` are in the child's own coordinates. Minkowski
+  operands are reported although a convex one is only hulled (harmless
+  inside out). `evaluate` (and the language server) re-analyses each
+  polyhedron on every run, with no memo: about 30 ms for a 360,000-face
+  polyhedron. The CLI's own `--format json` export runs report them;
+  the plain console never does. (inside-out polyhedron diagnostics)
 - Overhangs do not recognise bridges (a flat span supported at both
   ends); they are reported as overhangs. (7b-1)
 - Checks run serially (about 150 ms for a 220k-triangle model). Rays are

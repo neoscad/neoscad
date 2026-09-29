@@ -493,7 +493,7 @@ impl Tools {
         let r = r?;
         let mut text = status(&r);
         text.push('\n');
-        text.push_str(&geometry_line(&r["geometry"]));
+        text.push_str(&geometry_line_of(&r["geometry"], &r["diagnostics"]));
         if let Some(out) = &export
             && r["exit_code"] == 0
         {
@@ -501,7 +501,7 @@ impl Tools {
         }
         push_log(&mut text, &r);
         let mut s = terse_log(&r, &main);
-        s["geometry"] = terse_geometry(&r["geometry"]);
+        s["geometry"] = terse_geometry(&r["geometry"], &r["diagnostics"]);
         if export.is_some() {
             s["output"] = r["output"].clone();
             s["bytes"] = r["bytes"].clone();
@@ -572,7 +572,10 @@ impl Tools {
                 text.push_str(&format!("; saved {}", o.display()));
             }
             text.push('\n');
-            text.push_str(&geometry_line(&r["geometry"]));
+            text.push_str(&geometry_line_of(
+                &r["geometry"],
+                &r["diagnostics"]["items"],
+            ));
         }
         if let Some(d) = r.get("diff") {
             text.push_str(&format!(
@@ -598,7 +601,7 @@ impl Tools {
         push_log(&mut text, &log);
         let mut s = json!({
             "exit_code": snap.exit_code,
-            "geometry": terse_geometry(&r["geometry"]),
+            "geometry": terse_geometry(&r["geometry"], &r["diagnostics"]["items"]),
             "views": r["views"],
             "size": r["size"],
             "diagnostics": terse_diags(&log["diagnostics"], &main),
@@ -1121,15 +1124,45 @@ fn status(r: &Value) -> String {
 
 /// The geometry object as a terse result carries it: a pinched edge gets
 /// the fix, so the structured content says what to do on its own.
-fn terse_geometry(g: &Value) -> Value {
+fn terse_geometry(g: &Value, diags: &Value) -> Value {
     let mut g = g.clone();
     if g["pinched"].is_object() {
-        g["pinched"]["fix"] = json!(session::check::PINCH_FIX);
+        g["pinched"]["fix"] = json!(pinch_fix(diags));
     }
     g
 }
 
+/// What to do about pinched edges. Booleans with an inside-out or partly
+/// flipped polyhedron leave them too, and there the usual advice (overlap
+/// the parts) is wrong: an agent in the CAD pilot followed it for about
+/// 90 turns. So when the diagnostics report such a polyhedron, the fix
+/// points to that warning first.
+fn pinch_fix(diags: &Value) -> String {
+    let winding = diags.as_array().into_iter().flatten().find(|d| {
+        matches!(
+            d["code"].as_str(),
+            Some("polyhedron-inside-out" | "polyhedron-flipped-faces")
+        )
+    });
+    match winding {
+        Some(d) => session::check::pinch_from_winding(&format!(
+            "the {} warning{}",
+            d["code"].as_str().unwrap_or(""),
+            d["line"]
+                .as_u64()
+                .map_or(String::new(), |l| format!(" (line {l})"))
+        )),
+        None => session::check::PINCH_FIX.to_string(),
+    }
+}
+
 fn geometry_line(g: &Value) -> String {
+    geometry_line_of(g, &Value::Null)
+}
+
+/// [`geometry_line`], with the diagnostics a pinched edge's fix may point
+/// to.
+fn geometry_line_of(g: &Value, diags: &Value) -> String {
     let mut line = geometry_summary(g);
     // Manifold's status cannot see two pieces touching along an edge; an
     // STL of it can (`session::stats::pinched`).
@@ -1139,7 +1172,7 @@ fn geometry_line(g: &Value) -> String {
             "\nnot manifold as a file: {n} edge{} shared by more than two faces, the first at {}: {}",
             if n == 1 { "" } else { "s" },
             vec_of(&g["pinched"]["point"]),
-            session::check::PINCH_FIX
+            pinch_fix(diags)
         ));
     }
     line

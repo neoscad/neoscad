@@ -385,7 +385,8 @@ as on the bed), at most 10 findings per code.
 - `FINDING`: `{"id": int, "severity": "error"|"warning"|"info", "code",
   "message", "part": name|null, "location": {"point": [x, y, z],
   "bbox": BBOX}, "fix", "value": number|null, "limit": number|null}`.
-  `id`s count from 1 in order: errors first. `value` is what was
+  `id`s count from 1 in order: problems of the input meshes
+  (`polyhedron-*`) first, since they cause others, then errors. `value` is what was
   measured (mm, mm², mm³ or degrees, as the message says) and `limit`
   what it broke. Numbers are rounded to 0.1 µm.
 - `counts` are before truncation; `truncated` counts, per code, the
@@ -408,6 +409,7 @@ Codes and how each is found:
 | `parts-intersect` | warning | Two parts (neither nested in the other, both reaching the model as themselves) whose solids overlap: `value` is the overlap volume, by a boolean intersection. |
 | `part-not-manifold` | error | A part's own solid is not valid, or is pinched. |
 | `off-bed` | info | The model's lowest point is not at z = 0. |
+| `polyhedron-inside-out`, `polyhedron-flipped-faces`, `polyhedron-open`, `polyhedron-not-manifold` | warning | A `polyhedron()` or imported mesh that does not bound a solid: the diagnostics of the same codes (see "Input meshes" under "Diagnostics"), as findings. The message ends with the call as `file:line`; `point` is in the model's coordinates. When a winding problem is among them, a `not-manifold` finding's fix says to fix that one first (`fix #1 first: an inside-out or partly flipped polyhedron is the likely cause, ...`) instead of to overlap the parts: booleans with an inside-out mesh leave pinched edges. |
 
 Accuracy: on the synthetic models of `crates/session/tests/check.rs`
 the thickness of a 0.3 and a 0.5 mm wall, a 200 mm² overhang, a 45°
@@ -636,6 +638,47 @@ Codes a run's failure itself can have, besides the evaluator's:
   (`ERROR: Can't write to ...`).
 - `resource-limit`: the run passed one of the resource limits (below).
 
+## Input meshes
+
+NeoSCAD's own warnings, which OpenSCAD does not print: each
+`polyhedron()` and each imported mesh (in the form the render read it)
+is looked at on its own (`crates/session/src/orient.rs`), and each
+problem is a warning at the call that made the mesh. They are in the
+JSON (the run object with `--format json`, the server's and MCP
+results, the editor's diagnostics) and never on stderr, so the console
+text stays OpenSCAD's word for word; their `text` is the line as it
+would print. OpenSCAD itself says at most `PolySet -> Manifold
+conversion failed: NotManifold` without where or why, and nothing at
+all for an inside-out mesh, which converts as a solid of negative
+volume and makes every boolean with it go wrong.
+
+| Code | When | Message says |
+|---|---|---|
+| `polyhedron-inside-out` | closed, consistently wound, every face pointing inward (negative signed volume) | how many faces and the signed volume |
+| `polyhedron-flipped-faces` | some faces wound against the others | how many of how many and where the first one's centroid is; on a closed mesh which faces point *inward* (the side that makes the volume positive, so when most faces are wrong the few right ones are not blamed), on an open one the minority |
+| `polyhedron-open` | edges used by one face only | how many and the first one's midpoint |
+| `polyhedron-not-manifold` | edges used by more than two faces, or a surface that cannot be wound consistently | how many and where |
+
+Corners are compared by exact position, as a file reader would. Two
+pieces that touch only through points of their own at one position
+(two cubes sharing an edge, each with its own vertices) are neither
+open nor non-manifold here, since Manifold takes them by index; the
+pinched-edge check covers what a file of the result shows. A closed
+shell inside another (by bounding box) is a cavity and should face
+inward. Points are in the model's coordinates (the call's transforms
+applied; `resize()` is not). A call is reported once per code however
+many times it is instantiated, and at most 10 calls are reported.
+`hull()` children (which use only the points) and `%` subtrees are
+skipped; imported meshes are looked at in a render only. The hint says
+how to fix it: OpenSCAD wants each face's points clockwise seen from
+outside (`PolyhedronNode::createGeometry` reverses them,
+`src/core/primitives.cc:399-414`), so an inside-out polyhedron's faces
+are counter-clockwise and each list must be reversed. When the call's
+`faces` argument is written out as lists of numbers, the hint also
+carries `replace`: the same text with the offending faces' indices
+reversed in place. (Mirroring twice does not help: each mirror
+reverses the faces along with the points.)
+
 ## Resource limits
 
 `neoscad serve`, `neoscad mcp` and (later) the app run models that
@@ -721,3 +764,9 @@ have them.
   `overhang` findings and their `value` is the sum; `measure` adds
   `--axis`, `--center` and `--profile`, the section's `axis`, `center`
   and `outlines`, and `between`'s `overlap_pieces` and `pieces`.
+- After the CAD validation round's T3 (an agent spent about 95 turns on
+  an inside-out thread sweep): the diagnostic codes and `check` findings
+  `polyhedron-inside-out`, `polyhedron-flipped-faces`,
+  `polyhedron-open` and `polyhedron-not-manifold` ("Input meshes");
+  they come first among `check`'s findings, and a `not-manifold`
+  finding's fix points to a winding problem when there is one.

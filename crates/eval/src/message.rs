@@ -222,6 +222,12 @@ impl<W: Write> Console<W> {
         self
     }
 
+    /// Whether lines are being recorded (see [`Console::record`]): a host
+    /// that only prints skips work whose result only the records keep.
+    pub fn recording(&self) -> bool {
+        self.records.is_some()
+    }
+
     /// The lines recorded so far (see [`Console::record`]).
     /// The records so far, leaving them in place (a host that reports a
     /// request's messages before it ends).
@@ -394,6 +400,36 @@ impl<W: Write> Console<W> {
         }
         if self.emit(Some(d.severity), &line) {
             self.located(d, &line, d.message.clone(), sources);
+        }
+    }
+
+    /// Record a NeoSCAD-only diagnostic without printing it: the tool view
+    /// ([`Console::records`]) gets it, the console text does not. OpenSCAD
+    /// has no such message, and the conformance suite compares what is
+    /// printed word for word, so an extra line there would fail tests that
+    /// OpenSCAD passes. `text` is the line as it would print.
+    pub fn note(&mut self, d: &Diagnostic, sources: &SourceMap, cwd: &Path) {
+        if self.records.is_none() || (self.quiet && d.severity != Severity::Error) {
+            return;
+        }
+        let mut line = format!("{}: {}", d.severity.openscad_label(), d.message).into_bytes();
+        if let Some(span) = d.span {
+            let base = match d.base {
+                PathBase::WorkingDir => cwd.to_path_buf(),
+                PathBase::MainFileDir => self.main_dir.clone(),
+            };
+            let p = self.path_of(sources, span, &base);
+            line.extend_from_slice(format!(" in file {}, line {}", p, d.line).as_bytes());
+        }
+        if let Some(r) = &mut self.records {
+            r.push(Logged {
+                severity: Some(d.severity),
+                code: Some(d.code),
+                text: String::from_utf8_lossy(&line).into_owned(),
+                message: d.message.clone(),
+                location: d.span.map(|sp| location(sources, sp, d.line)),
+                hints: logged_hints(d, sources),
+            });
         }
     }
 }

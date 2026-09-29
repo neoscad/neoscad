@@ -60,6 +60,7 @@ pub mod format;
 pub mod measure;
 pub mod mesh;
 pub mod modeltest;
+pub mod orient;
 mod parse;
 pub mod parts;
 pub mod snapshot;
@@ -453,6 +454,10 @@ pub struct Rendered {
     /// are among them under their paths. A host that re-runs a document
     /// when its inputs change on disk watches these.
     pub files: Vec<PathBuf>,
+    /// Polyhedra and imported meshes that do not bound a solid (also in
+    /// the log as NeoSCAD-only warnings): what `check` reports and what a
+    /// pinched result is likely to come from.
+    pub inputs: Vec<orient::InputIssue>,
 }
 
 impl Rendered {
@@ -690,6 +695,16 @@ impl Loaded {
             .map(|p| &p.sources)
     }
 
+    /// The program of evaluation unit `unit` (see [`Loaded::unit_sources`]).
+    fn unit_program(&self, unit: u32) -> Option<&Program> {
+        if unit == 0 {
+            return Some(&self.program);
+        }
+        self.libs
+            .get(unit as usize - 1)
+            .and_then(|lib| lib.program.as_deref())
+    }
+
     /// The `use`d files of the program and its libraries (fonts among
     /// them).
     fn used(&self) -> Vec<String> {
@@ -711,6 +726,8 @@ struct Pipe {
     programs: Vec<Arc<Program>>,
     /// The files as this request sees them, noting what it found.
     fs: Arc<docfs::Recorder>,
+    /// Problems with the input meshes (`orient`), as reported.
+    inputs: Vec<orient::InputIssue>,
 }
 
 /// The core. See the crate documentation.
@@ -732,7 +749,17 @@ pub struct Session {
     ids: AtomicU64,
     requests: AtomicU64,
     cancelled: AtomicU64,
+    /// Each input mesh's analysis (`orient::analyze`) by its node's key,
+    /// so a warm render of a large polyhedron does not look at it again.
+    orient: Mutex<OrientMemo>,
 }
+
+/// Input mesh analyses by node key, oldest first; at most [`ORIENT_MEMO`].
+type OrientMemo = std::collections::VecDeque<(u128, Arc<Option<orient::MeshIssues>>)>;
+
+/// Meshes whose analysis is kept. An entry is small (a flipped face list
+/// at most), and a model rarely has more distinct polyhedra than this.
+const ORIENT_MEMO: usize = 64;
 
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -783,6 +810,7 @@ impl Session {
             jobs: Mutex::new(HashMap::new()),
             products: Mutex::new(HashMap::new()),
             memos: Mutex::new(Vec::new()),
+            orient: Mutex::new(OrientMemo::new()),
             ids: AtomicU64::new(0),
             requests: AtomicU64::new(0),
             cancelled: AtomicU64::new(0),
@@ -1237,6 +1265,7 @@ impl Session {
             timings: Timings::default(),
             programs: Vec::new(),
             fs: Arc::new(docfs::Recorder::new(self.fs.clone())),
+            inputs: Vec::new(),
         }
     }
 
@@ -1464,6 +1493,55 @@ impl Session {
         }
     }
 
+    /// Look at the model's polyhedra and imported meshes (`orient`) and
+    /// log each problem as a NeoSCAD-only warning at the call that made
+    /// the mesh, with a fix, and an exact edit when the faces are written
+    /// out. `keys` (when the tree has them) lets a mesh's analysis be
+    /// reused from an earlier request.
+    fn report_inputs(
+        &self,
+        pipe: &mut Pipe,
+        loaded: &Loaded,
+        top: &eval::Node,
+        import_mesh: &dyn Fn(&eval::Node) -> Option<Arc<geom::polyset::PolySet>>,
+        keys: Option<&eval::dump::Keys>,
+    ) {
+        let mut memo = |n: &eval::Node, f: &dyn Fn() -> Option<orient::MeshIssues>| {
+            let Some(keys) = keys else {
+                return Arc::new(f());
+            };
+            let k = keys.get(n);
+            let hit = self
+                .orient
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, r)| r.clone());
+            if let Some(r) = hit {
+                return r;
+            }
+            let r = Arc::new(f());
+            let mut m = self
+                .orient
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if m.len() == ORIENT_MEMO {
+                m.pop_front();
+            }
+            m.push_back((k, r.clone()));
+            r
+        };
+        pipe.inputs = orient::report(
+            &mut pipe.con,
+            top,
+            import_mesh,
+            &mut memo,
+            &|u| loaded.unit_program(u),
+            &pipe.paths.cwd,
+        );
+    }
+
     /// Build the geometry (or the preview's products) of an evaluated
     /// program, reusing the document's last products when the tree, its
     /// sources and the renderer are the same.
@@ -1572,6 +1650,14 @@ impl Session {
             return Err(self.interrupted(pipe, loaded, job));
         }
         self.print_messages(pipe, loaded, &product.messages);
+        // Imported meshes are looked at in the form the render read them,
+        // from the cache it just filled; an entry already evicted is
+        // skipped rather than read again.
+        let import_mesh = |n: &eval::Node| match renderer.cached_leaf(n, &keys) {
+            Some(geom::Geometry::PolySet(ps)) => Some(ps),
+            _ => None,
+        };
+        self.report_inputs(pipe, loaded, top, &import_mesh, Some(&keys));
         pipe.timings.geometry = self.now() - t;
         Ok((product, renderer.stats().entries))
     }
@@ -1611,10 +1697,11 @@ impl Session {
                 Err(Stop::Cancelled) => return Err(self.cancelled()),
                 Err(Stop::Exit(c)) => (c, None, false),
                 Ok(ev) => {
-                    let tree = csg.then(|| {
-                        let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
-                        eval::dump::csg(top, &pipe.paths.main_dir, &*pipe.fs)
-                    });
+                    let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+                    // Polyhedra only: imported meshes are read when
+                    // geometry is built.
+                    self.report_inputs(&mut pipe, &loaded, top, &|_| None, None);
+                    let tree = csg.then(|| eval::dump::csg(top, &pipe.paths.main_dir, &*pipe.fs));
                     (0, tree, ev.aborted)
                 }
             },
@@ -1710,6 +1797,7 @@ impl Session {
             cache_entries: 0,
             timings: Timings::default(),
             files: Vec::new(),
+            inputs: Vec::new(),
         };
         let step = (|| {
             let loaded = self.load(&mut pipe, run)?;
@@ -1745,6 +1833,7 @@ impl Session {
             Ok(()) => {}
         }
         out.files = pipe.fs.files();
+        out.inputs = std::mem::take(&mut pipe.inputs);
         (out.log, out.timings) = self.finish(pipe);
         Ok((out, parts))
     }

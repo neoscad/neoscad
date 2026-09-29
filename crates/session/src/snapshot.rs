@@ -432,7 +432,13 @@ impl Session {
             let t = self.now();
             let analysis = req.issues.as_ref().map(|settings| {
                 let clock = || self.now();
-                crate::check::analyze(model.geometry.as_ref(), &parts, settings, &clock)
+                crate::check::analyze_with(
+                    model.geometry.as_ref(),
+                    &parts,
+                    &model.inputs,
+                    settings,
+                    &clock,
+                )
             });
             let mesh = analysis
                 .as_ref()

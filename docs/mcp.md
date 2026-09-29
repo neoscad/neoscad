@@ -154,7 +154,30 @@ the text, `Fix: as #id`) instead. `measure` asked for a `section`,
 it). A pinched solid (two pieces touching along an edge: Manifold says
 valid, an STL of it is not manifold) reads `NOT manifold` with a line
 saying how many edges and where the first is, and the geometry's
-`pinched` carries the `fix`. `format` with `check` says how many lines
+`pinched` carries the `fix`. A `polyhedron()` or imported mesh that
+does not bound a solid is a warning at its call in `evaluate`,
+`render`, `snapshot` and `check` (codes `polyhedron-inside-out`,
+`polyhedron-flipped-faces`, `polyhedron-open`,
+`polyhedron-not-manifold`; `docs/cli-json.md`, "Input meshes"), with
+the fix as its `hint`; `check` lists them first among its findings.
+OpenSCAD says nothing about an inside-out mesh, and the booleans with it
+leave pinched edges, so when such a warning is present the pinch's fix
+points to it (`fix the polyhedron-inside-out warning (line 12) first:
+...`) instead of saying to overlap the parts. In the CAD validation
+round an agent followed the overlap advice for about 90 turns before it
+computed the thread's signed volume (-1716 mm³) itself. For example,
+`render` of a cube polyhedron with its faces counter-clockwise,
+subtracted from a slab:
+
+```text
+ok: 1 warning
+3D bbox 6 x 6 x 2 mm at [0, 0, 0]..[6, 6, 2], volume 104 mm³, area 184 mm², NOT manifold, 1 component, 42 triangles
+not manifold as a file: 8 edges shared by more than two faces, the first at [0, 0, 1]: fix the polyhedron-inside-out warning (line 2) first: an inside-out or partly flipped polyhedron is the likely cause, since booleans with it go wrong; if these edges remain after that, overlap the parts that touch by at least 0.01 or separate them
+warning inline.scad:2:31: this polyhedron is inside out: all 6 faces point inward (its signed volume is -64 mm³); booleans with it give wrong results (OpenSCAD wants each face's points in clockwise order seen from outside the solid; these are counter-clockwise. Reverse every face's point list, e.g. `faces = [for (f = faces) [for (i = [len(f) - 1:-1:0]) f[i]]]`)
+```
+
+When the faces are written out as numbers, the diagnostic's hint also
+carries the exact edit (`verbose: true`, and the editor's quick fix). `format` with `check` says how many lines
 would change (`diff: true` returns the diff). **The structured content must stand on
 its own:** Claude Code shows the model the JSON of `structuredContent`
 in place of the text when a result has both (observed in the smoke test

@@ -716,6 +716,23 @@ fn render_frame<W: Write>(
     } else {
         None
     };
+    // NeoSCAD's own findings on the input meshes, for `--format json`
+    // only: they are never printed, so a run that only prints (every
+    // conformance run) skips the work.
+    if con.recording() && (rendered.is_some() || tree.is_some()) {
+        let import_mesh = |n: &eval::Node| match renderer.cached_leaf(n, &keys) {
+            Some(geom::Geometry::PolySet(ps)) => Some(ps),
+            _ => None,
+        };
+        session::orient::report(
+            con,
+            top,
+            &import_mesh,
+            &mut |_, f| std::sync::Arc::new(f()),
+            &|u| unit_program(loaded, u),
+            &paths.cwd,
+        );
+    }
     let cache_entries = rendered.as_ref().map_or(0, |r| r.cache_entries);
     // `if (!root_geom) root_geom = std::make_shared<PolySet>(3);`
     let root = rendered.and_then(|r| r.geometry);
@@ -1039,6 +1056,16 @@ pub fn iso8601_now() -> String {
         rem / 60 % 60,
         rem % 60
     )
+}
+
+/// The program of evaluation unit `unit` (see [`unit_sources`]).
+fn unit_program(l: &Loaded, unit: u32) -> Option<&Program> {
+    if unit == 0 {
+        return Some(&l.program);
+    }
+    l.libraries
+        .get(unit as usize - 1)
+        .and_then(|lib| lib.program.as_ref())
 }
 
 /// The source map of evaluation unit `unit`: 0 is the main program, `1 + i`
