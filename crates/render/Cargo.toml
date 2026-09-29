@@ -19,6 +19,9 @@ io = { package = "neoscad-io", path = "../io" }
 # `fmt_g`, for the scale markers' numbers as OpenSCAD prints them.
 lang = { package = "neoscad-lang", path = "../lang" }
 png.workspace = true
+# The packed scene's metadata crosses a web worker boundary as JSON
+# (`packed`).
+serde.workspace = true
 serde_json.workspace = true
 # Default features: Metal, Vulkan, Direct3D 12, GLES and WebGPU, each
 # compiled only where it exists, and WGSL shaders.

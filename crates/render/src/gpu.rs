@@ -30,6 +30,7 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::{self, Camera};
 use crate::overlay::{LINE_VERTEX_SIZE, LineVertex, Overlay};
+use crate::packed::{InvalidPacked, PackedScene};
 use crate::scene::{
     CsgOp, Cull, Depth, Draw, DrawState, EDGE_SEGMENT_SIZE, FACE_VERTEX_SIZE, ImageCsgDraws, Scene,
 };
@@ -98,6 +99,55 @@ impl SceneBuffers {
 }
 
 impl SceneBuffers {
+    /// Upload a packed scene ([`crate::packed`]): its bytes are copied into
+    /// the buffers as they are, so the result is what [`SceneBuffers::upload`]
+    /// makes of the scene it was packed from. It is checked first
+    /// ([`PackedScene::validate`]), as it may come from another program.
+    pub fn upload_packed(
+        device: &wgpu::Device,
+        packed: &PackedScene,
+    ) -> Result<SceneBuffers, PackedUploadError> {
+        packed.validate().map_err(PackedUploadError::Invalid)?;
+        let max = device.limits().max_buffer_size;
+        let face_vertices = packed.face_vertex_count();
+        let edge_segments = packed.edge_segment_count();
+        let bytes = (packed.faces.len() as u64).max(packed.edges.len() as u64);
+        let too_many = u32::try_from(face_vertices.max(edge_segments)).is_err();
+        if bytes > max || too_many {
+            return Err(PackedUploadError::TooLarge(TooLarge { bytes, max }));
+        }
+        let faces = mapped_buffer(
+            device,
+            "neoscad faces",
+            face_vertices,
+            packed
+                .faces
+                .as_chunks::<FACE_VERTEX_SIZE>()
+                .0
+                .iter()
+                .copied(),
+        );
+        let edges = mapped_buffer(
+            device,
+            "neoscad outlines",
+            edge_segments,
+            packed
+                .edges
+                .as_chunks::<EDGE_SEGMENT_SIZE>()
+                .0
+                .iter()
+                .copied(),
+        );
+        Ok(SceneBuffers {
+            faces,
+            draws: packed.meta.draws.clone(),
+            image_csg: packed.meta.image_csg.clone(),
+            edges,
+            edge_segments: edge_segments as u32,
+            edge_color: packed.meta.edge_color,
+        })
+    }
+
     /// Whether the scene has an image-space CSG product, whose frame is
     /// several render passes: the frame's colour and depth buffers must
     /// then keep their contents between passes.
@@ -114,6 +164,43 @@ pub struct TooLarge {
     pub max: u64,
 }
 
+/// Why a packed scene was not uploaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackedUploadError {
+    Invalid(InvalidPacked),
+    TooLarge(TooLarge),
+}
+
+#[cfg(test)]
+impl SceneBuffers {
+    /// The draws, image-space products, outline count and edge colour a
+    /// frame uses, for tests that compare two uploads.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn shape(&self) -> (&[Draw], &[ImageCsgDraws], u32, [f32; 4]) {
+        (
+            &self.draws,
+            &self.image_csg,
+            self.edge_segments,
+            self.edge_color,
+        )
+    }
+
+    /// The face and outline vertex buffers, for tests that read them back.
+    pub(crate) fn vertex_buffers(&self) -> (Option<&wgpu::Buffer>, Option<&wgpu::Buffer>) {
+        (self.faces.as_ref(), self.edges.as_ref())
+    }
+}
+
+/// Vertex buffers are only ever drawn from. The equivalence test of
+/// packed and unpacked uploads (in `packed.rs`) reads them back, which
+/// needs `COPY_SRC`; only this crate's own test build adds it, so the app
+/// and the exporter never carry the flag.
+#[cfg(not(test))]
+const VERTEX_USAGE: wgpu::BufferUsages = wgpu::BufferUsages::VERTEX;
+#[cfg(test)]
+const VERTEX_USAGE: wgpu::BufferUsages =
+    wgpu::BufferUsages::VERTEX.union(wgpu::BufferUsages::COPY_SRC);
+
 /// A vertex buffer of `count` items of `N` bytes, written from `items`
 /// while mapped. `None` for no items (a zero-sized buffer cannot be bound).
 fn mapped_buffer<const N: usize>(
@@ -128,7 +215,7 @@ fn mapped_buffer<const N: usize>(
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: (count * N) as wgpu::BufferAddress,
-        usage: wgpu::BufferUsages::VERTEX,
+        usage: VERTEX_USAGE,
         mapped_at_creation: true,
     });
     {

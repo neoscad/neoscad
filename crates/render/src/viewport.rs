@@ -1,8 +1,9 @@
 //! An interactive view: a model on the GPU, a camera the user moves, the
 //! view options, and a target to draw into. The macOS app draws into a
 //! `CAMetalLayer` surface (made from the layer in `crates/ffi`, the only
-//! place that touches the raw layer), the web app will draw into a canvas
-//! surface, and tests draw into a texture and read it back. Everything
+//! place that touches the raw layer), the web app draws into a canvas
+//! surface (`crates/web-view`, with [`Gpu::with_surface`] and models from
+//! [`Gpu::upload_packed`]), and tests draw into a texture and read it back. Everything
 //! here is target-agnostic: a [`Viewport`] takes a finished
 //! `wgpu::Surface` or makes its own texture.
 //!
@@ -30,9 +31,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::Lighting;
 use crate::camera::{BoundingBox, Camera, Projection};
-use crate::gpu::{DEPTH_FORMAT, FrameParams, Renderer, SceneBuffers};
+use crate::gpu::{DEPTH_FORMAT, FrameParams, PackedUploadError, Renderer, SceneBuffers};
 use crate::offscreen::{Error, Gate, Readback};
 use crate::overlay::{self, ViewOptions};
+use crate::packed::PackedScene;
 use crate::scene::Scene;
 use crate::scheme::ColorScheme;
 use crate::{Image, snapshot};
@@ -77,6 +79,41 @@ impl Gpu {
     pub async fn new(backends: wgpu::Backends) -> Result<Gpu, Error> {
         let (instance, adapter, device, queue) =
             crate::offscreen::open_device(backends, "neoscad viewport").await?;
+        Ok(Gpu {
+            instance,
+            adapter,
+            device,
+            queue,
+            gate: Gate::default(),
+            renderers: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Open a GPU that can present to `surface`, made from `instance`
+    /// (which chose the backends). A browser needs this rather than
+    /// [`Gpu::new`]: WebGL has no adapter apart from the canvas's own GL
+    /// context, so the adapter must be asked for with the surface, and on
+    /// WebGPU asking with it costs nothing. Pass the surface on to
+    /// [`Viewport::attach_surface`].
+    pub async fn with_surface(
+        instance: wgpu::Instance,
+        surface: &wgpu::Surface<'static>,
+    ) -> Result<Gpu, Error> {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(surface),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| Error::NoAdapter(e.to_string()))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("neoscad viewport"),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| Error::Device(e.to_string()))?;
         Ok(Gpu {
             instance,
             adapter,
@@ -154,6 +191,34 @@ impl Gpu {
                 bytes: t.bytes,
                 max: t.max,
             })?;
+        self.release_staging();
+        Ok(Model {
+            buffers,
+            bbox: scene.bounding_box(),
+        })
+    }
+
+    /// [`Gpu::upload`] for a scene packed elsewhere (a web worker built
+    /// it; see [`crate::packed`]): the same buffers, from its bytes. A
+    /// packed scene that does not hold together is refused
+    /// ([`Error::InvalidScene`]) before anything is uploaded.
+    pub fn upload_packed(&self, packed: &PackedScene) -> Result<Model, Error> {
+        let buffers = SceneBuffers::upload_packed(&self.device, packed).map_err(|e| match e {
+            PackedUploadError::Invalid(e) => Error::InvalidScene(e.to_string()),
+            PackedUploadError::TooLarge(t) => Error::SceneTooLarge {
+                bytes: t.bytes,
+                max: t.max,
+            },
+        })?;
+        self.release_staging();
+        Ok(Model {
+            buffers,
+            bbox: packed.meta.bbox,
+        })
+    }
+
+    /// Free the staging copies an upload left (see [`Gpu::upload`]).
+    fn release_staging(&self) {
         // The buffers were written through staging copies of the same
         // size, which wgpu frees only once the copy into them has run and
         // the device is polled again. An idle view submits nothing more,
@@ -163,7 +228,8 @@ impl Gpu {
         // main one) frees the staging at once. The wait is on this
         // submission only and bounded: freeing the staging early is an
         // economy, and a device that does not finish must not hang the
-        // upload (the model is usable either way).
+        // upload (the model is usable either way). A browser's main thread
+        // cannot block on the GPU, so the web build does not wait.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let submitted = self.gate.submit(&self.queue, std::iter::empty());
@@ -172,10 +238,6 @@ impl Gpu {
                 timeout: Some(crate::offscreen::READBACK_WAIT),
             });
         }
-        Ok(Model {
-            buffers,
-            bbox: scene.bounding_box(),
-        })
     }
 }
 
@@ -545,6 +607,11 @@ impl Viewport {
     /// The drawable size in pixels.
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Pixels per point.
+    pub fn scale(&self) -> f64 {
+        self.scale
     }
 
     /// A new drawable size (`width` by `height` pixels, `scale` pixels per

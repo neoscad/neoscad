@@ -30,10 +30,19 @@
 //!   with [`hershey`] numbers, crosshairs) for a camera; edges are a
 //!   shader mode.
 //! - [`snapshot`] lays out and annotates contact sheets.
+//! - [`packed`] flattens a scene into bytes that cross a thread (a web
+//!   worker) and upload as they are (`Gpu::upload_packed`).
+
+// On the web, wgpu's handles are neither `Send` nor `Sync` (a browser's
+// GPU objects belong to one thread), so the `Arc`s that share pipelines and
+// models between the app's threads natively are merely shared pointers
+// there. The code is the same on both; only the lint differs.
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 pub mod camera;
 pub mod hershey;
 pub mod overlay;
+pub mod packed;
 pub mod preview;
 pub mod scene;
 pub mod scheme;
@@ -49,6 +58,7 @@ pub mod viewport;
 pub use camera::{Camera, Projection};
 
 pub use overlay::{Overlay, ViewOptions};
+pub use packed::{PackedMeta, PackedScene};
 pub use preview::Previewer;
 pub use scene::Scene;
 pub use scheme::ColorScheme;

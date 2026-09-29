@@ -1,0 +1,77 @@
+[package]
+name = "neoscad-web-view"
+description = "NeoSCAD's 3D view for the browser: the renderer's viewport on a canvas (WebGPU, or WebGL2 where WebGPU is missing), driven by pointer and wheel events, showing scenes packed in a web worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "web_view"
+# `cdylib` is the module the page loads (through wasm-bindgen's glue);
+# `rlib` lets the native tests reach the host-neutral parts (input
+# gestures, the JSON shapes).
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["webgl"]
+# wgpu's WebGL2 backend as a fallback where `navigator.gpu` is missing or
+# gives no adapter. It adds wgpu-core and naga's GLSL writer to the module
+# (see scripts/web/build-view.sh for the sizes with and without it).
+webgl = ["wgpu/webgl"]
+
+[dependencies]
+render = { package = "neoscad-render", path = "../render" }
+serde.workspace = true
+serde_json.workspace = true
+
+# The browser side exists only on wasm32; a native build (the workspace's
+# `cargo test` and clippy) compiles the host-neutral modules alone.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "30" }
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "AddEventListenerOptions",
+    "console",
+    "CssStyleDeclaration",
+    "DomRect",
+    "Element",
+    "EventTarget",
+    "HtmlCanvasElement",
+    "MediaQueryList",
+    "MediaQueryListEvent",
+    "Navigator",
+    "PointerEvent",
+    "MouseEvent",
+    "ResizeObserver",
+    "ResizeObserverBoxOptions",
+    "ResizeObserverEntry",
+    "ResizeObserverOptions",
+    "ResizeObserverSize",
+    "WheelEvent",
+    "Window",
+] }
+
+# The demo's fixtures (`examples/pack_fixtures.rs`) are built natively,
+# through the session the web worker runs.
+[dev-dependencies]
+assets = { package = "neoscad-assets", path = "../assets" }
+lang = { package = "neoscad-lang", path = "../lang" }
+session = { package = "neoscad-session", path = "../session" }
+text = { package = "neoscad-text", path = "../text" }
+
+# The workspace lints, except that `unsafe_code` is `deny` rather than
+# `forbid`: wasm-bindgen's generated exports contain unsafe blocks, which
+# `forbid` would reject even where the macro allows them. This crate
+# writes no unsafe code of its own.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"

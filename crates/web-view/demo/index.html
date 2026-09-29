@@ -1,0 +1,127 @@
+<!doctype html>
+<!--
+  A test page for the 3D view alone (crates/web-view), not the product UI
+  (that is web/). It loads packed scenes written natively by
+  `examples/pack_fixtures.rs` and shows them as the web worker's would be.
+
+    scripts/web/build-view.sh --demo
+    python3 -m http.server -d target/web-view 8000   # then open /?backend=auto
+
+  `?backend=webgpu|webgl|auto` picks the backend, `?fixture=NAME` the model.
+  `window.demo` exposes the viewer and a `ready` promise for scripted tests.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NeoSCAD web view: test page</title>
+<style>
+  html, body { margin: 0; height: 100%; font: 13px -apple-system, system-ui, sans-serif; }
+  body { display: grid; grid-template-rows: auto 1fr auto; }
+  header, footer { padding: 6px 8px; background: #eee; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #view { width: 100%; height: 100%; display: block; min-height: 0; }
+  main { min-height: 0; position: relative; }
+  footer { font-family: ui-monospace, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <select id="fixture"></select>
+  <span>|</span>
+  <button data-view="top">Top</button><button data-view="bottom">Bottom</button>
+  <button data-view="left">Left</button><button data-view="right">Right</button>
+  <button data-view="front">Front</button><button data-view="back">Back</button>
+  <button data-view="diagonal">Diagonal</button>
+  <button id="viewall">View All</button><button id="reset">Reset</button>
+  <span>|</span>
+  <label><input type="checkbox" data-setting="axes">Axes</label>
+  <label><input type="checkbox" data-setting="scales">Scales</label>
+  <label><input type="checkbox" data-setting="grid">Grid</label>
+  <label><input type="checkbox" data-setting="edges">Edges</label>
+  <label><input type="checkbox" data-setting="crosshairs">Crosshairs</label>
+  <label><input type="checkbox" data-setting="orthographic">Ortho</label>
+  <label><input type="checkbox" id="headlight">Headlight</label>
+  <label><input type="checkbox" id="annotate">Annotations</label>
+  <select id="scheme"></select>
+</header>
+<main><canvas id="view"></canvas></main>
+<footer id="status">loading…</footer>
+<script type="module">
+import init, { Viewer } from './pkg/web_view.js';
+
+const status = document.getElementById('status');
+const params = new URLSearchParams(location.search);
+const say = (s) => { status.textContent = s; };
+
+async function fetchBytes(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  return new Uint8Array(await r.arrayBuffer());
+}
+
+let generation = 0;
+async function load(viewer, name) {
+  const [faces, edges, meta] = await Promise.all([
+    fetchBytes(`fixtures/${name}.faces.bin`),
+    fetchBytes(`fixtures/${name}.edges.bin`),
+    fetch(`fixtures/${name}.meta.json`).then((r) => r.text()),
+  ]);
+  viewer.setModel(faces, edges, meta, ++generation);
+  viewer.viewAll();
+  return { faces: faces.length, edges: edges.length };
+}
+
+const ready = (async () => {
+  await init();
+  const canvas = document.getElementById('view');
+  const viewer = await Viewer.create(canvas, { backend: params.get('backend') || 'auto' });
+  const info = () => `${viewer.backend} · ${viewer.adapter} · ${viewer.samples}x samples · ${canvas.width}x${canvas.height} px`;
+
+  const index = await fetch('fixtures/index.json').then((r) => r.json());
+  const pick = document.getElementById('fixture');
+  for (const f of index) pick.add(new Option(`${f.name} (${f.faceBytes} B)`, f.name));
+  pick.value = params.get('fixture') || index[0].name;
+  pick.onchange = async () => { await load(viewer, pick.value); say(info()); };
+  await load(viewer, pick.value);
+
+  const schemes = document.getElementById('scheme');
+  for (const s of Viewer.colorSchemes()) schemes.add(new Option(s, s));
+  schemes.value = viewer.colorScheme();
+  // A scheme's face colours are baked into the packed scene, so only the
+  // background and lines change here; the product asks its worker again.
+  schemes.onchange = () => viewer.setColorScheme(schemes.value);
+
+  for (const b of document.querySelectorAll('[data-view]')) b.onclick = () => viewer.setView(b.dataset.view);
+  document.getElementById('viewall').onclick = () => viewer.viewAll();
+  document.getElementById('reset').onclick = () => viewer.resetView();
+
+  const settings = viewer.settings();
+  for (const box of document.querySelectorAll('[data-setting]')) {
+    box.checked = settings[box.dataset.setting];
+    box.onchange = () => viewer.setSettings({ [box.dataset.setting]: box.checked });
+  }
+  const headlight = document.getElementById('headlight');
+  headlight.onchange = () => viewer.setSettings({ lighting: headlight.checked ? 'headlight' : 'openscad' });
+
+  const annotate = document.getElementById('annotate');
+  annotate.onchange = () => viewer.setAnnotations(annotate.checked ? {
+    lines: [{ points: [[-10, -10, 0], [10, -10, 0], [10, 10, 0], [-10, 10, 0]], closed: true, color: [1, 0, 0] }],
+    markers: [{ point: [0, 0, 10], label: '1', color: [0, 0.4, 1] }],
+  } : {});
+
+  viewer.onClick((x, y) => {
+    const ray = viewer.rayAt(x, y);
+    const f = (v) => v.map((n) => n.toFixed(2)).join(', ');
+    say(`${info()} · click ${x}, ${y} → origin [${f(ray.origin)}] dir [${f(ray.direction)}]`);
+  });
+  viewer.onCameraChange((c) => {
+    say(`${info()} · vpr [${c.vpr.map((n) => n.toFixed(1))}] vpd ${c.vpd.toFixed(1)}`);
+  });
+  say(info());
+  return viewer;
+})();
+
+window.demo = { ready, load: async (name) => load(await ready, name) };
+ready.catch((e) => say(`no 3D view: ${e.message ?? e}`));
+</script>
+</body>
+</html>

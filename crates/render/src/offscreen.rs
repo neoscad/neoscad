@@ -37,18 +37,21 @@ pub enum Error {
     /// The model's vertices would need a bigger buffer than the device
     /// allows.
     SceneTooLarge { bytes: u64, max: u64 },
+    /// A packed scene ([`crate::packed`]) that does not hold together.
+    InvalidScene(String),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::NoAdapter(e) => write!(f, "no GPU adapter for offscreen rendering ({e})"),
+            Error::NoAdapter(e) => write!(f, "no GPU adapter ({e})"),
             Error::Device(e) => write!(f, "cannot create a GPU device ({e})"),
             Error::Readback(e) => write!(f, "cannot read the rendered image back ({e})"),
             Error::SceneTooLarge { bytes, max } => write!(
                 f,
                 "the model needs a {bytes}-byte vertex buffer; the GPU allows {max} bytes"
             ),
+            Error::InvalidScene(e) => write!(f, "{e}"),
             Error::Size { width, height, max } => {
                 write!(
                     f,

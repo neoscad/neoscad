@@ -34,6 +34,7 @@ use geom::Geometry;
 use geom::color::Color;
 use geom::polygon2d::Polygon2d;
 use geom::polyset::PolySet;
+use serde::{Deserialize, Serialize};
 
 use crate::camera::BoundingBox;
 use crate::scheme::ColorScheme;
@@ -48,7 +49,7 @@ pub const FACE_VERTEX_SIZE: usize = 44;
 pub const EDGE_SEGMENT_SIZE: usize = 24;
 
 /// Which faces are not drawn (`glCullFace`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Cull {
     None,
     /// Front faces (counter-clockwise on screen) are culled: only back
@@ -60,7 +61,7 @@ pub enum Cull {
 
 /// The depth test (`glDepthFunc`); depth is always written when the test
 /// passes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Depth {
     Less,
     LessEqual,
@@ -69,7 +70,7 @@ pub enum Depth {
 }
 
 /// Fixed-function state for one run of surfaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DrawState {
     pub cull: Cull,
     pub depth: Depth,
@@ -99,7 +100,7 @@ impl DrawState {
 }
 
 /// A range of [`Scene::face_vertices`] drawn with one state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Draw {
     pub first: u32,
     pub count: u32,
@@ -123,7 +124,7 @@ pub struct Surface {
 
 /// Which part a primitive plays in an image-space CSG product
 /// (`OpenCSG::Operation`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CsgOp {
     Intersection,
     Subtraction,
@@ -149,14 +150,14 @@ struct ImageProduct {
 
 /// An image-space product's vertex ranges, for the GPU: its primitives
 /// in the order given, each with its ID (from 1; 0 marks no primitive).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageCsgDraws {
     /// Draws of [`Scene::draws`] that come before the product.
     pub at_draw: usize,
     pub primitives: Vec<ImageCsgPrimitive>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageCsgPrimitive {
     pub first: u32,
     pub count: u32,
