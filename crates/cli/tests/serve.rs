@@ -1,6 +1,7 @@
 //! `neoscad serve` end to end: the JSON-RPC protocol over stdio
 //! (docs/serve-protocol.md), and the command line as a client of a socket
-//! server, whose outputs must be the ones a local run makes.
+//! (on Windows, named pipe) server, whose outputs must be the ones a local
+//! run makes.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -310,6 +311,34 @@ fn comparable(stderr: &[u8]) -> String {
         .collect()
 }
 
+/// Where a test's server listens: a socket in its directory, or on
+/// Windows a named pipe named after the directory (unique per test and
+/// process, as the directory is).
+fn address(dir: &Path) -> PathBuf {
+    if cfg!(windows) {
+        let name = dir.file_name().unwrap().to_string_lossy();
+        PathBuf::from(format!(r"\\.\pipe\{name}"))
+    } else {
+        dir.join("s.sock")
+    }
+}
+
+/// Whether a server answers at `socket`. Asked through `serve --status`
+/// rather than by looking for a file, which a named pipe is not.
+fn listening(dir: &Path, socket: &Path) -> bool {
+    neoscad(dir, Some(socket), &["serve", "--status"])
+        .status
+        .success()
+}
+
+fn wait_for_server(dir: &Path, socket: &Path) {
+    let t = Instant::now();
+    while !listening(dir, socket) && t.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(listening(dir, socket), "the server did not start");
+}
+
 fn served_requests(dir: &Path, socket: &Path) -> u64 {
     let o = neoscad(
         dir,
@@ -347,7 +376,7 @@ fn served_outputs_are_the_direct_ones() {
     for (name, src, _) in models {
         std::fs::write(d.join(name), src).unwrap();
     }
-    let socket = d.join("s.sock");
+    let socket = address(&d);
     let mut server = Command::new(BIN)
         .args(["serve", "--socket"])
         .arg(&socket)
@@ -359,11 +388,7 @@ fn served_outputs_are_the_direct_ones() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let t = Instant::now();
-    while !socket.exists() && t.elapsed() < Duration::from_secs(20) {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(socket.exists(), "the server did not start");
+    wait_for_server(&d, &socket);
     let mut expected_requests = 0;
     for (name, _, formats) in models {
         for f in *formats {
@@ -522,7 +547,10 @@ fn served_outputs_are_the_direct_ones() {
     assert!(stop.status.success());
     let status = server.wait().unwrap();
     assert!(status.success());
-    assert!(!socket.exists(), "the socket is removed on exit");
+    assert!(!listening(&d, &socket), "the server is gone");
+    if cfg!(unix) {
+        assert!(!socket.exists(), "the socket is removed on exit");
+    }
 }
 
 /// A request that panics is answered with an internal error, and the
@@ -712,7 +740,7 @@ fn versions_limits_and_missing_files_over_stdio() {
 
 #[test]
 #[cfg(unix)]
-fn the_socket_never_replaces_a_file_and_the_command_line_stays_unlimited() {
+fn the_socket_never_replaces_a_file() {
     let d = scratch("sock");
     // `--socket notes.txt` deleted the notes (finding 7).
     std::fs::write(d.join("notes.txt"), "precious notes").unwrap();
@@ -730,9 +758,14 @@ fn the_socket_never_replaces_a_file_and_the_command_line_stays_unlimited() {
         std::fs::read_to_string(d.join("notes.txt")).unwrap(),
         "precious notes"
     );
-    // The server has the agent limits; the command line's requests to it
-    // are unlimited, as the command line is in its own process.
-    let socket = d.join("s.sock");
+}
+
+/// The server has the agent limits; the command line's requests to it
+/// are unlimited, as the command line is in its own process.
+#[test]
+fn the_command_line_stays_unlimited_when_served() {
+    let d = scratch("unlimited");
+    let socket = address(&d);
     let mut server = Command::new(BIN)
         .args(["serve", "--socket"])
         .arg(&socket)
@@ -744,10 +777,7 @@ fn the_socket_never_replaces_a_file_and_the_command_line_stays_unlimited() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let t = Instant::now();
-    while !socket.exists() && t.elapsed() < Duration::from_secs(20) {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_for_server(&d, &socket);
     std::fs::write(d.join("fine.scad"), "circle(r=1, $fn=20000);").unwrap();
     let before = served_requests(&d, &socket);
     let o = neoscad(&d, Some(&socket), &["fine.scad", "-o", "fine.svg"]);
@@ -776,6 +806,43 @@ fn the_socket_never_replaces_a_file_and_the_command_line_stays_unlimited() {
         String::from_utf8_lossy(&o.stderr)
     );
     assert!(!d.join("limited.svg").exists());
+    let _ = neoscad(&d, Some(&socket), &["serve", "--stop"]);
+    let _ = server.wait();
+}
+
+/// A second server at an address in use is refused, and leaves the first
+/// one serving.
+#[test]
+fn a_second_server_at_the_same_address_is_refused() {
+    let d = scratch("twice");
+    let socket = address(&d);
+    let mut server = Command::new(BIN)
+        .args(["serve", "--socket"])
+        .arg(&socket)
+        .args(["--idle-timeout", "60"])
+        .current_dir(&d)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_server(&d, &socket);
+    // With a short idle timeout, so a second server that wrongly starts
+    // ends the test instead of hanging it.
+    let second = Command::new(BIN)
+        .args(["serve", "--socket"])
+        .arg(&socket)
+        .args(["--idle-timeout", "1"])
+        .current_dir(&d)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(second.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("already listening"),
+        "{second:?}"
+    );
+    assert!(listening(&d, &socket));
     let _ = neoscad(&d, Some(&socket), &["serve", "--stop"]);
     let _ = server.wait();
 }

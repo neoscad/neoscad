@@ -36,12 +36,12 @@ pushes), so every CI path is unverified until the first tag.
 
 | Mechanism | Decision | Status |
 |---|---|---|
-| macOS DMG (app) + CLI tarball | Exists (`scripts/apple/release.sh`) | Now ships `LICENSE`, `NOTICE` and `licenses/` (fix 3). In CI as `.github/workflows/publish-macos-app.yml`, signed from `NEOSCAD_*` secrets. arm64 only |
-| CLI archives, 6 targets | **Now** | Built: cargo-dist 0.33.0 (`[workspace.metadata.dist]`, `.github/workflows/release.yml`). macOS arm64/x86_64, Linux x86_64/aarch64 (glibc 2.28, manylinux_2_28 containers), Windows x86_64/aarch64; `.tar.xz`/`.zip` with `.sha256`. `dist plan` lists all of them; `dist build` of the Linux aarch64 archive ran in Docker |
+| macOS DMG (app) + CLI tarball | Exists (`scripts/apple/release.sh`) | Now ships `LICENSE`, `NOTICE` and `licenses/` (fix 3). In CI as `.github/workflows/publish-macos-app.yml`, signed from `NEOSCAD_*` secrets. **Universal** (arm64 + x86_64, as OpenSCAD's nightly DMG), owner decision 2026-09-29: the app, its core and the CLI (`docs/release.md`, "Universal"); Debug builds stay arm64 |
+| CLI archives, 6 targets | **Now** | Built: cargo-dist 0.33.0 (`[workspace.metadata.dist]`, `.github/workflows/release.yml`). macOS arm64/x86_64 as two archives: cargo-dist 0.33.0 cannot make a universal one (`universal2-apple-darwin` is a FIXME in its `cargo-dist/src/config/v1/mod.rs:416` and `src/tasks.rs:438`, "Lipo(LipoStep)"), so only the DMG's CLI is universal, Linux x86_64/aarch64 (glibc 2.28, manylinux_2_28 containers), Windows x86_64/aarch64; `.tar.xz`/`.zip` with `.sha256`. `dist plan` lists all of them; `dist build` of the Linux aarch64 archive ran in Docker |
 | Shell / PowerShell installers | **Now** | Built (cargo-dist); install to `CARGO_HOME` |
 | Homebrew tap: formula | **Now** | Built: cargo-dist generates `neoscad.rb` and pushes it to `neoscad/homebrew-tap` (needs `HOMEBREW_TAP_TOKEN`) |
 | Homebrew tap: cask (app) | **Now**, after Developer ID | Template: `packaging/homebrew/neoscad-app.rb`, filled by `scripts/release/fill-manifests.sh`; add to the tap only once the DMG is notarized |
-| Linux musl static tarball | Later, optional | Not built. Portable, but PNG won't work (no dlopen); label it |
+| Linux musl static tarball | **No** (owner decision 2026-09-29) | Not built. It would be portable, but PNG export needs Vulkan or GL loaded with `dlopen`, which a static musl binary cannot do; the glibc 2.28 archives already run on every current distribution |
 | `.deb` / `.rpm` release assets | **Now** | Built: nfpm (`packaging/nfpm.yaml`, `scripts/release/linux-packages.sh`); aarch64 packages built in Docker, checked with `dpkg-deb --info`/`--contents` and `rpm -qip`/`-qlp`, installed and run in `debian:bookworm-slim` and `fedora:42`. In CI: `publish-packages.yml`, from the release's glibc 2.28 binaries |
 | Signed apt/rpm repo | Later | Needs a GPG key and hosting (OpenSCAD uses OBS) |
 | Official Debian/Fedora | Not now | Distro Rust is too old (1.96 vs 1.98) and every crate would need packaging |
@@ -64,11 +64,13 @@ pushes), so every CI path is unverified until the first tag.
 
 `rust-toolchain.toml` pins 1.98.1 (with rustfmt, clippy and the wasm32
 target: pinning installs a separate toolchain without `stable`'s targets,
-and `scripts/wasm-check.sh` silently skips when wasm32 is missing).
+and `scripts/wasm-check.sh` silently skips when wasm32 is missing), and
+x86_64-apple-darwin, which the universal macOS app and CLI build on an
+arm64 Mac.
 
 | Workflow | Runs | What |
 |---|---|---|
-| `ci.yml` | PRs, pushes to main, and as the release's plan job | fmt, licence copies, `dist generate --check` and `dist plan`; clippy, tests and conformance on macOS arm64 (`macos-15`), Linux x86_64 (`ubuntu-22.04`) and aarch64 (`ubuntu-22.04-arm`); the Windows build and CLI/lang tests (`windows-2025`, including the user library path); `wasm-check.sh` |
+| `ci.yml` | PRs, pushes to main, and as the release's plan job | fmt, licence copies, `dist generate --check` and `dist plan`; clippy, tests and conformance on macOS arm64 (`macos-15`), Linux x86_64 (`ubuntu-22.04`) and aarch64 (`ubuntu-22.04-arm`); the Windows build and CLI/lang tests (`windows-2025`, including the user library path and `neoscad serve` on a named pipe); `wasm-check.sh` |
 | `release.yml` | version tags | cargo-dist, generated: see `docs/release.md` |
 | `publish-macos-app.yml` | called by `release.yml` | `release.sh` signed and notarized; attaches the DMG |
 | `publish-packages.yml` | called by `release.yml` | `.deb`/`.rpm`, vendored source, filled manifests, the ghcr.io image |
@@ -180,8 +182,25 @@ invalid or not set" on every device open when that variable is missing
    are unchanged. The `~/.fonts` directory in `host.rs` stays on `HOME`
    everywhere, as OpenSCAD's `FontCache` reads `HOME` on every platform
    (`src/FontCache.cc`). Checked only by the CI Windows job.
-5. **Serve sockets are Unix-only.** Documented in
-   `docs/serve-protocol.md` ("Platforms"). Named pipes remain a decision.
+5. **Serve sockets on Windows.** Done (owner decision 2026-09-29):
+   `neoscad serve --socket` listens on a named pipe,
+   `\\.\pipe\neoscad-<SID>` by default, and the command line hands
+   exports to it as it does to a Unix socket
+   (`crates/cli/src/transport.rs`; `docs/serve-protocol.md`,
+   "Platforms"). The pipe is `interprocess` 2.4.4's synchronous listener
+   (no async runtime); its security descriptor makes the user the owner
+   and grants no one else access, and a client talks only to a pipe its
+   own user owns (pipe names are global, so another user could create it
+   first). That check needs Win32 calls no maintained crate wraps safely,
+   so `neoscad-cli`'s `unsafe_code` lint is `deny` instead of the
+   workspace's `forbid`, lifted only in the Windows-only
+   `crates/cli/src/transport/win.rs`. Checked here with `cargo clippy
+   --target x86_64-pc-windows-msvc -p neoscad-cli --all-targets
+   --no-default-features --features bundled-assets -- -D warnings` in
+   `rust:1.98.1` (clean); mimalloc's C build needs MSVC, hence the new
+   default `mimalloc` feature that check turns off. Run only by CI's
+   Windows job (unit tests, the served-output tests, a release-binary
+   serve step).
 6. **Output depends on the architecture and libm.** CI runs conformance
    on Linux x86_64 and aarch64; the local results are above.
 
@@ -216,8 +235,8 @@ Nothing here was pushed, published, signed up for or accepted.
   should also happen locally (`cargo xwin`); CI does not need it.
 - A GPG release key, if signed tarballs or apt/rpm repositories are
   wanted; OBS or self-hosted repositories.
-- Decisions: musl without PNG; universal or x86_64 macOS app; Windows
-  named pipes; publishing the kernel forks (fix 2).
+- Decisions: publishing the kernel forks (fix 2). (Settled 2026-09-29:
+  no musl build; a universal macOS app; named pipes on Windows.)
 
 ## Follow-ups
 
@@ -238,10 +257,16 @@ Nothing here was pushed, published, signed up for or accepted.
   debug-info artifact would restore file and line for crash reports.
 - The Docker image is 573 MB, most of it Mesa's LLVM; a Vulkan-only or
   GL-only variant would be smaller.
+- The universal CLI's x86_64 slice writes last-digit float differences
+  from the arm64 slice (a small cube-minus-sphere-and-text STL: 2,019 of its lines differ),
+  as Linux x86_64 does against aarch64 ("Linux results" above); both
+  pass conformance.
 
 ## Not yet verified
 
 Anything on GitHub's runners (all four workflows); Windows at all
-(compile, tests, WARP, paths, MSI); macOS x86_64; the manylinux_2_28
-builds and their glibc floor; musl dlopen behaviour; the Nix build; Scoop
+(compile, tests, WARP, paths, MSI, named pipes); macOS x86_64 on an
+Intel CPU (the universal CLI's x86_64 slice passed conformance, 1,773 of
+1,773, under Rosetta only); the manylinux_2_28
+builds and their glibc floor; the Nix build; Scoop
 and Snap review rules.

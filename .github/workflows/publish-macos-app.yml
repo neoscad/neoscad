@@ -95,8 +95,11 @@ jobs:
           TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
         run: |
           cd dist
-          # The DMG, its symbols and build record; the CLI tarball release.sh
-          # also makes duplicates cargo-dist's aarch64-apple-darwin archive.
+          # The DMG (universal), its symbols and build record. The universal
+          # CLI tarball release.sh also makes stays out: cargo-dist 0.33.0
+          # cannot build a universal2 archive, so the release's macOS CLIs
+          # are its aarch64- and x86_64-apple-darwin archives, which the
+          # installers and the Homebrew formula point at.
           files=(NeoSCAD-*.dmg NeoSCAD-*-dSYMs.zip)
           shasum -a 256 "${files[@]}" > NeoSCAD-macos-app.sha256
           cp BUILDINFO.txt NeoSCAD-macos-app-BUILDINFO.txt

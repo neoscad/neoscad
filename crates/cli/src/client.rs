@@ -18,36 +18,17 @@ use serde_json::{Value, json};
 
 use crate::outcome::Outcome;
 use crate::rpc;
+use crate::transport;
 
-/// Environment variable naming the socket (instead of the default).
-pub const SOCKET_ENV: &str = "NEOSCAD_SOCKET";
 /// Environment variable that turns the client off, like `--no-server`.
 pub const NO_SERVER_ENV: &str = "NEOSCAD_NO_SERVER";
 
-/// The per-user default socket: `$NEOSCAD_SOCKET`, else
-/// `$XDG_RUNTIME_DIR/neoscad/serve.sock`, else
-/// `<temp dir>/neoscad-<uid>/serve.sock` (on macOS the temp dir is
-/// already per user).
+/// The per-user default address: `$NEOSCAD_SOCKET`, else on Unix
+/// `$XDG_RUNTIME_DIR/neoscad/serve.sock` or
+/// `<temp dir>/neoscad-<uid>/serve.sock`, on Windows the named pipe
+/// `\\.\pipe\neoscad-<SID>` ([`transport::default_address`]).
 pub fn default_socket() -> PathBuf {
-    if let Some(p) = std::env::var_os(SOCKET_ENV).filter(|p| !p.is_empty()) {
-        return PathBuf::from(p);
-    }
-    if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR").filter(|p| !p.is_empty()) {
-        return PathBuf::from(d).join("neoscad").join("serve.sock");
-    }
-    std::env::temp_dir()
-        .join(format!("neoscad-{}", uid()))
-        .join("serve.sock")
-}
-
-#[cfg(unix)]
-fn uid() -> u32 {
-    nix::unistd::getuid().as_raw()
-}
-
-#[cfg(not(unix))]
-fn uid() -> u32 {
-    0
+    transport::default_address()
 }
 
 /// Whether the client should try the server at all.
@@ -109,7 +90,8 @@ pub enum CallError {
     Rpc(i64, String),
     /// The connection failed part-way.
     Io(String),
-    /// The socket is not one this user's server made (see [`trusted`]).
+    /// The socket is not one this user's server made (see
+    /// [`transport::connect`]).
     Untrusted(String),
 }
 
@@ -125,22 +107,18 @@ impl std::fmt::Display for CallError {
 }
 
 /// Call `method` on the server at `socket` and wait for its result,
-/// skipping notifications.
-#[cfg(unix)]
+/// skipping notifications. Nothing is sent until the transport has checked
+/// that the server is this user's ([`transport::connect`]).
 pub fn call(socket: &std::path::Path, method: &str, params: Value) -> Result<Value, CallError> {
     use std::io::BufReader;
-    use std::os::unix::net::UnixStream;
-    if !socket.exists() {
-        return Err(CallError::NoServer);
-    }
-    trusted(socket).map_err(CallError::Untrusted)?;
-    let stream = UnixStream::connect(socket).map_err(|_| CallError::NoServer)?;
-    let mut w = stream
-        .try_clone()
-        .map_err(|e| CallError::Io(e.to_string()))?;
+    let conn = transport::connect(socket).map_err(|e| match e {
+        transport::ConnectError::NoServer => CallError::NoServer,
+        transport::ConnectError::Untrusted(m) => CallError::Untrusted(m),
+    })?;
+    let mut w = conn.writer;
     rpc::write(&mut w, &rpc::request(1, method, params))
         .map_err(|e| CallError::Io(e.to_string()))?;
-    let mut r = BufReader::new(stream);
+    let mut r = BufReader::new(conn.reader);
     loop {
         let msg = rpc::read(&mut r)
             .map_err(|e| CallError::Io(e.to_string()))?
@@ -158,64 +136,16 @@ pub fn call(socket: &std::path::Path, method: &str, params: Value) -> Result<Val
     }
 }
 
-/// Whether `socket` is this user's server's, before anything is sent to
-/// it: the client sends its working directory, environment (`HOME`,
-/// library and font paths) and command line, and prints what comes back.
-/// The socket must be a socket owned by this user, in a directory that is
-/// this user's and not writable by group or others (or a sticky one, like
-/// `/tmp`, where no one else can replace a socket that is ours).
-///
-/// Without this, on Linux without `XDG_RUNTIME_DIR` another local user
-/// could create `/tmp/neoscad-<uid>/` first, listen there, and receive a
-/// victim's paths and environment and forge their output (the
-/// agent-surface audit's finding 8). The server checks the default
-/// directory's owner when it starts; the client now checks too, on every
-/// platform, and refuses (running in-process) otherwise.
-#[cfg(unix)]
-pub fn trusted(socket: &std::path::Path) -> Result<(), String> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let me = uid();
-    let s = std::fs::symlink_metadata(socket).map_err(|e| format!("{}: {e}", socket.display()))?;
-    if !s.file_type().is_socket() {
-        return Err(format!("{} is not a socket", socket.display()));
-    }
-    if s.uid() != me {
-        return Err(format!("{} belongs to another user", socket.display()));
-    }
-    let dir = socket
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."));
-    let d = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let private = d.uid() == me && d.mode() & 0o022 == 0;
-    let sticky = d.mode() & 0o1000 != 0;
-    if !(private || sticky) {
-        return Err(format!(
-            "{} is writable by other users or not this user's; not trusting the socket in it",
-            dir.display()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub fn trusted(_socket: &std::path::Path) -> Result<(), String> {
-    Err("Unix sockets are not available here".into())
-}
-
-#[cfg(not(unix))]
-pub fn call(_socket: &std::path::Path, _method: &str, _params: Value) -> Result<Value, CallError> {
-    Err(CallError::NoServer)
-}
-
 /// The socket of a server the command line may use: `None` without one
-/// (checked first, so a run with no server pays one `stat`).
+/// (checked first, so a run with no server pays one `stat`; on Windows,
+/// where a pipe cannot be looked for without connecting, [`call`] finds
+/// out).
 pub fn available(no_server: bool) -> Option<PathBuf> {
     if !wanted(no_server) {
         return None;
     }
     let socket = default_socket();
-    (socket.exists() && trusted(&socket).is_ok()).then_some(socket)
+    transport::may_be_listening(&socket).then_some(socket)
 }
 
 /// Run a command-line method (`cli.export`, `cli.snapshot`) on the server
@@ -231,36 +161,4 @@ pub fn run(socket: &std::path::Path, method: &str, mut params: Value) -> Option<
     call(socket, method, params)
         .ok()
         .and_then(|v| Outcome::from_json(&v))
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn only_a_private_directorys_socket_is_trusted() {
-        let d = std::env::temp_dir().join(format!("nstrust-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let sock = d.join("s.sock");
-        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(trusted(&sock).is_ok());
-        // Anyone could have put it there.
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(
-            trusted(&sock)
-                .unwrap_err()
-                .contains("writable by other users")
-        );
-        // Sticky (like /tmp): no one else can replace a socket that is ours.
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o1777)).unwrap();
-        assert!(trusted(&sock).is_ok());
-        // Not a socket at all.
-        std::fs::write(d.join("f"), "x").unwrap();
-        assert!(trusted(&d.join("f")).unwrap_err().contains("not a socket"));
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _ = std::fs::remove_dir_all(&d);
-    }
 }

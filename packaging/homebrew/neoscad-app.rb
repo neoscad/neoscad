@@ -15,7 +15,6 @@ cask "neoscad-app" do
   desc "OpenSCAD-compatible programmable solid CAD"
   homepage "https://neoscad.org/"
 
-  depends_on arch: :arm64
   depends_on macos: ">= :sequoia"
 
   app "NeoSCAD.app"

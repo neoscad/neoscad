@@ -32,8 +32,14 @@ path = "src/main.rs"
 # Compile the Liberation fonts and the MCAD library into the binary (about
 # 4.3 MB), so the default font and `include <MCAD/...>` work with nothing
 # installed, as they do in OpenSCAD, which ships them as resources.
-default = ["bundled-assets"]
+default = ["bundled-assets", "mimalloc"]
 bundled-assets = ["dep:assets"]
+# mimalloc as the global allocator (`main.rs`). A feature only so that a
+# cross-target `cargo check` can leave out its C build: checking the
+# Windows code from macOS or Linux has no MSVC compiler or Windows SDK
+# headers for mimalloc's sources (docs/serve-protocol.md, "Platforms").
+# Every shipped build keeps it.
+mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 assets = { package = "neoscad-assets", path = "../assets", optional = true }
@@ -48,19 +54,48 @@ session = { package = "neoscad-session", path = "../session" }
 serde_json.workspace = true
 text = { package = "neoscad-text", path = "../text" }
 
-# The server's socket: the user id for the default per-user path and the
-# directory's ownership check, through nix's safe wrapper (the workspace
-# forbids unsafe code).
 # The global allocator (see `main.rs`). Native only: the WASM build keeps
 # Rust's default allocator, and never builds this crate anyway.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-mimalloc.workspace = true
+mimalloc = { workspace = true, optional = true }
 
+# The server's socket: the user id for the default per-user path and the
+# directory's ownership check, through nix's safe wrapper.
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["user"] }
 
-[lints]
-workspace = true
+# The server's named pipe on Windows (src/transport.rs): interprocess's
+# synchronous pipe listener (overlapped I/O underneath, so a connection's
+# reader and its request threads' writer do not block each other; no async
+# runtime) and its SDDL security descriptor. windows-sys, already in the
+# build through interprocess, for the calls the pipe's access check needs
+# (src/transport/win.rs).
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "2.4.4", default-features = false }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+# The workspace's lints, written out because one differs: `unsafe_code` is
+# `deny` rather than the workspace's `forbid`, since `forbid` cannot be
+# lifted for a single module and the named pipe's access check needs Win32
+# calls that no maintained crate wraps safely (the current user's SID, and
+# the owner of the pipe a client connected to). `src/transport/win.rs`,
+# compiled on Windows only, is the one module that allows it; everything
+# else here still refuses `unsafe`. Keep the rest in step with
+# `[workspace.lints]`.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
 
 [dev-dependencies]
 png.workspace = true

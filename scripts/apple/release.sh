@@ -2,12 +2,19 @@
 # Cuts a release of the macOS app and the `neoscad` command-line tool
 # (docs/release.md; docs/audits/macos-prep.md, 8j). Writes to dist/:
 #
-#   NeoSCAD-<version>-<build>.dmg                 the app and an Applications link
-#   neoscad-<version>-<build>-macos-arm64.tar.gz  the CLI and its licences
-#   neoscad                                       the same CLI, bare
-#   NeoSCAD-<version>-<build>-dSYMs.zip           debug symbols (app, core, CLI)
-#   BUILDINFO.txt                                 what was built, how, and checked
-#   SHA256SUMS                                    of everything above
+#   NeoSCAD-<version>-<build>.dmg                     the app and an Applications link
+#   neoscad-<version>-<build>-macos-universal.tar.gz  the CLI and its licences
+#   neoscad                                           the same CLI, bare
+#   NeoSCAD-<version>-<build>-dSYMs.zip               debug symbols (app, core, CLI)
+#   BUILDINFO.txt                                     what was built, how, and checked
+#   SHA256SUMS                                        of everything above
+#
+# The app and the CLI are universal (arm64 + x86_64), as OpenSCAD's macOS
+# DMG is: the Rust core and the CLI are built for both targets and joined
+# with lipo, and the archive builds the Swift for both (the Release
+# configuration's ARCHS, apple/project.yml). Every Mach-O is checked for
+# both slices, and the CLI's x86_64 slice runs under Rosetta when it is
+# installed.
 #
 # <version> is the Cargo workspace version (CFBundleShortVersionString and
 # `neoscad --version`); <build> is `git rev-list --count HEAD`
@@ -112,7 +119,18 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     echo "release: warning: the tree has uncommitted changes; build $build_number is not exactly $commit" >&2
 fi
 name=NeoSCAD-$version-$build_number
-cli_name=neoscad-$version-$build_number-macos-arm64
+cli_name=neoscad-$version-$build_number-macos-universal
+# What ships: every Mach-O in the app and the CLI carries both.
+archs=(arm64 x86_64)
+# Whether a Mach-O holds every architecture in `archs`. One `lipo
+# -verify_arch` per architecture: given several, Xcode 27's lipo takes the
+# rest for input files and fails.
+has_archs() {
+    local arch
+    for arch in "${archs[@]}"; do
+        lipo "$1" -verify_arch "$arch" || return 1
+    done
+}
 
 target_dir=${CARGO_TARGET_DIR:-$root/target}
 export CARGO_TARGET_DIR=$target_dir
@@ -134,8 +152,8 @@ mkdir -p "$work" "$dist" "$app_stage" "$cli_stage" "$dsym_stage"
 
 # --- The app ----------------------------------------------------------------
 
-say "Core, editor bundle and project"
-scripts/apple/build-core.sh
+say "Core (${archs[*]}), editor bundle and project"
+scripts/apple/build-core.sh --universal
 scripts/apple/build-editor.sh
 (cd apple && xcodegen generate --spec project.yml --quiet)
 
@@ -221,13 +239,18 @@ say "Verify the app"
 codesign --verify --deep --strict --verbose=2 "$app"
 # Every Mach-O must carry the hardened runtime, or notarization refuses the
 # whole submission; and none may carry get-task-allow (a debug build's
-# entitlement, which notarization also refuses).
+# entitlement, which notarization also refuses). Each must also hold every
+# architecture: a thin framework or extension inside a universal app
+# launches on one kind of Mac and fails to load on the other.
 while IFS= read -r macho; do
     flags=$(codesign -dv "$macho" 2>&1 | sed -n 's/.*flags=\(0x[0-9a-f]*\)(\(.*\)).*/\2/p')
     case $flags in
         *runtime*) ;;
         *) die "no hardened runtime on ${macho#"$app"/} (flags: ${flags:-none})" ;;
     esac
+    has_archs "$macho" ||
+        die "${macho#"$app"/} is $(lipo -archs "$macho"), not ${archs[*]}"
+    echo "${macho#"$app"/}: $(lipo -archs "$macho")"
 done < <(find "$app" -type f -perm -u+x -print | while IFS= read -r f; do
     if file -b "$f" | grep -q Mach-O; then echo "$f"; fi
 done)
@@ -252,10 +275,12 @@ shipped_build=$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")
 for dsym in "$archive"/dSYMs/*.dSYM; do
     ditto "$dsym" "$dsym_stage/$(basename "$dsym")"
 done
+# One UUID per architecture; sorted, as a universal binary and its dSYM
+# need not list their slices in the same order.
 check_uuid() {
     local binary=$1 dsym=$2 want got
-    want=$(dwarfdump --uuid "$binary" | awk '{ print $2 }')
-    got=$(dwarfdump --uuid "$dsym" | awk '{ print $2 }')
+    want=$(dwarfdump --uuid "$binary" | awk '{ print $2 }' | sort | tr '\n' ' ')
+    got=$(dwarfdump --uuid "$dsym" | awk '{ print $2 }' | sort | tr '\n' ' ')
     [ -n "$want" ] && [ "$want" = "$got" ] || die "dSYM $dsym ($got) does not match $binary ($want)"
 }
 check_uuid "$app/Contents/MacOS/NeoSCAD" "$dsym_stage/NeoSCAD.app.dSYM"
@@ -329,8 +354,8 @@ echo "$dmg_spctl"
 
 # --- The CLI ----------------------------------------------------------------
 
-say "CLI (neoscad, arm64)"
-# The same clean environment and target triple as build-core.sh, so the
+say "CLI (neoscad, ${archs[*]})"
+# The same clean environment and target triples as build-core.sh, so the
 # CLI shares the core's compiled dependencies and its deployment target,
 # and a release build leaves the developer's target/release alone.
 cargo_env=(env -i
@@ -341,28 +366,53 @@ cargo_env=(env -i
     TERM="${TERM:-dumb}")
 if [ -n "${RUSTUP_HOME:-}" ]; then cargo_env+=(RUSTUP_HOME="$RUSTUP_HOME"); fi
 if [ -n "${CARGO_HOME:-}" ]; then cargo_env+=(CARGO_HOME="$CARGO_HOME"); fi
-"${cargo_env[@]}" cargo build --quiet --release --target aarch64-apple-darwin \
-    -p neoscad-cli --bin neoscad
-built=$target_dir/aarch64-apple-darwin/release/neoscad
 cli=$cli_stage/neoscad
-cp "$built" "$cli"
-# The symbols first, then strip the copy that ships: the symbol table and
-# the line tables' debug map only serve a debugger or a crash
-# symbolicator, and the dSYM serves both. rustc writes the dSYM itself
-# when the profile has debug info (split-debuginfo "packed", macOS's
-# default); dsymutil makes one when it has not.
-if [ -d "$built.dSYM" ]; then
-    ditto "$built.dSYM" "$dsym_stage/neoscad.dSYM"
-else
-    dsymutil "$cli" -o "$dsym_stage/neoscad.dSYM"
-fi
+thin=()
+for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+    "${cargo_env[@]}" cargo build --quiet --release --target "$triple" \
+        -p neoscad-cli --bin neoscad
+    built=$target_dir/$triple/release/neoscad
+    # The symbols first, then strip the copy that ships: the symbol table
+    # and the line tables' debug map only serve a debugger or a crash
+    # symbolicator, and the dSYM serves both. rustc writes the dSYM itself
+    # when the profile has debug info (split-debuginfo "packed", macOS's
+    # default); dsymutil makes one when it has not.
+    mkdir -p "$work/cli-$triple"
+    if [ -d "$built.dSYM" ]; then
+        ditto "$built.dSYM" "$work/cli-$triple/neoscad.dSYM"
+    else
+        dsymutil "$built" -o "$work/cli-$triple/neoscad.dSYM"
+    fi
+    thin+=("$built")
+done
+lipo -create "${thin[@]}" -output "$cli"
+# One dSYM for the universal binary: the arm64 bundle, with its DWARF file
+# replaced by both architectures' joined, which is what Xcode's own
+# universal dSYMs are.
+dwarf=Contents/Resources/DWARF/neoscad
+ditto "$work/cli-aarch64-apple-darwin/neoscad.dSYM" "$dsym_stage/neoscad.dSYM"
+lipo -create "$work/cli-aarch64-apple-darwin/neoscad.dSYM/$dwarf" \
+    "$work/cli-x86_64-apple-darwin/neoscad.dSYM/$dwarf" -output "$dsym_stage/neoscad.dSYM/$dwarf"
+rm -rf "$work"/cli-*-apple-darwin
 strip -x "$cli"
+has_archs "$cli" || die "the CLI is $(lipo -archs "$cli"), not ${archs[*]}"
 check_uuid "$cli" "$dsym_stage/neoscad.dSYM"
 codesign --force --options runtime $timestamp --identifier org.neoscad.neoscad \
     --sign "$sign_id" "$cli"
 codesign --verify --strict --verbose=2 "$cli"
 cli_version=$("$cli" --version)
 [ "$cli_version" = "neoscad $version" ] || die "the CLI says '$cli_version', expected 'neoscad $version'"
+# The x86_64 slice, under Rosetta when this Mac has it (arm64 Macs without
+# it cannot run x86_64 code at all; that is a skip, not a failure).
+if [ "$(uname -m)" = x86_64 ] || arch -x86_64 /usr/bin/true 2>/dev/null; then
+    x86_version=$(arch -x86_64 "$cli" --version)
+    [ "$x86_version" = "neoscad $version" ] ||
+        die "the CLI's x86_64 slice says '$x86_version', expected 'neoscad $version'"
+    x86_run="x86_64 slice ran ($([ "$(uname -m)" = x86_64 ] && echo natively || echo under Rosetta))"
+else
+    x86_run="x86_64 slice not run (no Rosetta)"
+fi
+echo "CLI: $(lipo -archs "$cli"); $x86_run"
 if [ -n "$notary" ]; then
     # A bare Mach-O cannot hold a stapled ticket; Gatekeeper finds the
     # notarization online on first run.
@@ -396,6 +446,7 @@ oneline() { sed -e "s|$work/||g" -e "s|$dist/||g" <<<"$1" | tr '\n' ' '; }
     echo "signing:       $mode"
     echo "notarized:     $([ -n "$notary" ] && echo "yes ($notary)" || echo no)"
     echo "app size:      $((app_bytes / 1024)) MB unpacked"
+    echo "architectures: ${archs[*]} (every Mach-O in the app, and the CLI; $x86_run)"
     echo
     echo "codesign --verify --deep --strict: passed; hardened runtime on every Mach-O"
     echo "spctl (app):   $(oneline "$app_spctl")"

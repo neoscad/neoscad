@@ -39,9 +39,10 @@ options:
 
 settings:
   base:
-    # arm64 only: the Rust core is built for aarch64-apple-darwin alone,
-    # and a new target defaults to arm64 + x86_64, whose x86_64 link would
-    # fail (docs/audits/macos-prep.md, "arm64 only").
+    # Debug: arm64 alone, so everyday builds and `xcodebuild test` compile
+    # the Rust core once. Written out because a new target defaults to
+    # arm64 + x86_64, and scripts/apple/build-core.sh builds the core for
+    # exactly the ARCHS it is given.
     ARCHS: arm64
     ONLY_ACTIVE_ARCH: YES
     MARKETING_VERSION: 0.1.0
@@ -54,6 +55,13 @@ settings:
     ENABLE_HARDENED_RUNTIME: YES
     DEAD_CODE_STRIPPING: YES
     ENABLE_USER_SCRIPT_SANDBOXING: NO
+  configs:
+    # Release (the archive scripts/apple/release.sh ships): a universal
+    # app, arm64 + x86_64, as OpenSCAD's macOS DMG is. The Rust core is
+    # built for both and joined with lipo (build-core.sh).
+    Release:
+      ARCHS: arm64 x86_64
+      ONLY_ACTIVE_ARCH: NO
 
 targets:
   NeoSCADCore:
@@ -330,8 +338,12 @@ aggregateTargets:
         script: exec "${SRCROOT}/../scripts/apple/build-core.sh"
         inputFileLists:
           - $(SRCROOT)/build/core-inputs.xcfilelist
+        # The configuration's own stamp: Debug builds the core for arm64
+        # and Release for arm64 + x86_64, so a Release build after a Debug
+        # one must run the phase even when no input changed.
         outputFiles:
           - $(SRCROOT)/build/core.stamp
+          - $(SRCROOT)/build/core-$(CONFIGURATION).stamp
           - $(SRCROOT)/Core/Generated/neoscad_ffi.swift
           - $(SRCROOT)/build/NeoSCADCore.xcframework/Info.plist
         basedOnDependencyAnalysis: true

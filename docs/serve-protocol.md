@@ -47,6 +47,18 @@ change would get a new `protocol` number; there has been none.
     Only a socket is ever removed: any other file at the path (a
     mistyped `--socket notes.txt`) makes the server refuse to start and
     leaves the file alone.
+- **Windows named pipe** (`neoscad serve --socket [NAME]`): the same
+  option and the same stream, over a pipe. `NAME` is `\\.\pipe\NAME` or
+  a bare name, which gets that prefix; without it the pipe is
+  `$NEOSCAD_SOCKET` (likewise prefixed) if set, else
+  `\\.\pipe\neoscad-<SID>`, named by the user's security identifier as
+  the Unix default is by the uid. The pipe's security descriptor makes
+  the user its owner and grants access to that user alone (the default
+  one would let Everyone read); remote clients are refused. A pipe that
+  exists already, a running server's or anyone else's, makes the new
+  server refuse to start ("a server is already listening"), and nothing
+  is left behind to clean up: a pipe goes when its server exits.
+- For either:
   - `--idle-timeout SECS` (default 1800, 0 for never): the server exits
     when it has had no connection and no request for that long.
   - `neoscad serve --status [--format json]` prints the running server's
@@ -54,17 +66,22 @@ change would get a new `protocol` number; there has been none.
     when no server answers.
   - `--cache-mb N` sets the geometry cache budget (MiB, per colour scheme
     and font set; default 200, OpenSCAD's two default cache sizes).
-- `--limit NAME=VALUE` (repeatable, both transports) changes one of the
+- `--limit NAME=VALUE` (repeatable, every transport) changes one of the
   resource limits every request runs under; see "Resource limits".
 
 **Platforms.** stdio works everywhere, and so do `neoscad mcp` and
-`neoscad lsp`, which use it. The socket transport is Unix-only (macOS,
-Linux, the BSDs). On Windows `neoscad serve --socket` fails at once with
-"Unix sockets are not available here; use `neoscad serve` on stdio"
-(`crates/cli/src/serve.rs`, the `cfg(not(unix))` `listen`), `--status`
-and `--stop` find no server, and the command line never tries a server:
-every run is in-process, with the same output. Named pipes, the Windows
-equivalent, are a later decision (`docs/packaging.md`).
+`neoscad lsp`, which use it. `--socket` is a Unix socket on macOS, Linux
+and the BSDs and a named pipe on Windows (`crates/cli/src/transport.rs`;
+the pipe is interprocess's synchronous listener, with no async runtime).
+Elsewhere `--socket` fails at once and the command line runs everything
+in-process. The Windows code is checked with
+`cargo clippy --target x86_64-pc-windows-msvc -p neoscad-cli
+--all-targets --no-default-features --features bundled-assets` (in the
+`rust:1.98.1` Docker image: mimalloc's C sources need MSVC and the
+Windows SDK, which a check off Windows does not have, hence the
+`mimalloc` feature), and run by CI's Windows job: the transport's unit
+tests, the served-output tests over a pipe, and the release binary
+serving an export.
 
 ## Framing
 
@@ -415,7 +432,10 @@ conformance harness sets it). Before it sends anything (its working
 directory, environment and command line) the client checks the socket:
 it must be a socket owned by the user, in a directory that is the
 user's and not writable by group or others (or a sticky one such as
-`/tmp`). Otherwise the command runs in-process, on every platform. The output is the command's own: the same
+`/tmp`). On Windows it opens the pipe (at identification level only, so
+the pipe's server cannot act as the client) and checks that the pipe's
+owner is the user: pipe names are global, and another user could create
+the pipe first. Otherwise the command runs in-process. The output is the command's own: the same
 files and the same stderr, except the render summary's `Geometries in
 cache` count and times, which are the (warm) server's. Runs the server
 cannot take (dependency files, `-m`, parameter sets, `--animate`,

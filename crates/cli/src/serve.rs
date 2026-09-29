@@ -1,15 +1,16 @@
 //! `neoscad serve`: a long-lived process holding a [`session::Session`],
-//! answering JSON-RPC 2.0 over stdio or a Unix socket
-//! (`docs/serve-protocol.md`).
+//! answering JSON-RPC 2.0 over stdio, a Unix socket or a Windows named
+//! pipe (`docs/serve-protocol.md`).
 //!
 //! - `neoscad serve` speaks on stdin/stdout (an editor or MCP host starts
 //!   it as a child) and ends at the end of input or on `exit`.
-//! - `neoscad serve --socket [PATH]` listens on a Unix socket, by default
-//!   the per-user one the command line looks for ([`client::default_socket`]),
-//!   so `neoscad IN -o OUT` and `neoscad snapshot` use it automatically.
-//!   The socket's directory is made user-only (0700) and the socket 0600;
-//!   there is no network listener. It exits after `--idle-timeout`
-//!   seconds with no connection and no request.
+//! - `neoscad serve --socket [PATH]` listens on a Unix socket (on Windows,
+//!   a named pipe), by default the per-user one the command line looks for
+//!   ([`client::default_socket`]), so `neoscad IN -o OUT` and
+//!   `neoscad snapshot` use it automatically. Either is restricted to the
+//!   user who started it ([`crate::transport`]); there is no network
+//!   listener. It exits after `--idle-timeout` seconds with no connection
+//!   and no request.
 //! - `neoscad serve --status` and `--stop` ask the socket's server.
 //!
 //! Requests that change documents (`open`, `update`, `close`) are handled
@@ -45,7 +46,8 @@ const EXIT_ERROR: u8 = 1;
 )]
 struct Args {
     /// Listen on a Unix socket instead of stdio: PATH, or without it the
-    /// per-user default that the command line looks for.
+    /// per-user default that the command line looks for. On Windows, a
+    /// named pipe: NAME or \\.\pipe\NAME.
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
     socket: Option<String>,
 
@@ -90,7 +92,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
     };
     let socket = match a.socket.as_deref() {
         None | Some("") => client::default_socket(),
-        Some(p) => PathBuf::from(p),
+        Some(p) => crate::transport::from_arg(p),
     };
     if a.status {
         return status(&socket, a.format.as_deref() == Some("json"));
@@ -215,7 +217,7 @@ impl Server {
 
     fn shutdown(&self) -> ! {
         if let Some(s) = &self.socket {
-            let _ = std::fs::remove_file(s);
+            crate::transport::remove(s);
         }
         std::process::exit(0)
     }
@@ -1094,59 +1096,8 @@ fn cli(server: &Server, method: &str, params: &Value) -> Reply {
 }
 
 /// Listen on `path` until `shutdown` or the idle timeout.
-#[cfg(unix)]
 fn listen(server: Arc<Server>, path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-    use std::os::unix::net::{UnixListener, UnixStream};
-
-    let dir = path
-        .parent()
-        .ok_or_else(|| format!("no directory in socket path {}", path.display()))?;
-    if !dir.exists() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    }
-    // The socket is how anyone talks to this user's server. The default
-    // one lives in a directory that must be this user's alone; a socket
-    // placed elsewhere on purpose is only made user-only itself.
-    if path == client::default_socket() {
-        let meta = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let uid = nix::unistd::getuid().as_raw();
-        if meta.uid() != uid {
-            return Err(format!("{} belongs to another user", dir.display()));
-        }
-        if meta.mode() & 0o077 != 0 {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("cannot make {} private: {e}", dir.display()))?;
-        }
-    }
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        use std::os::unix::fs::FileTypeExt;
-        // Only a socket is ever replaced: `--socket notes.txt` (or
-        // `--socket model.scad`) deleted the file as a "stale socket" (the
-        // agent-surface audit's finding 7).
-        if !meta.file_type().is_socket() {
-            return Err(format!(
-                "{} exists and is not a socket; refusing to replace it (choose another --socket path)",
-                path.display()
-            ));
-        }
-        if UnixStream::connect(path).is_ok() {
-            return Err(format!(
-                "a server is already listening at {}",
-                path.display()
-            ));
-        }
-        // Left by a server that did not exit cleanly.
-        std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    }
-    let listener = UnixListener::bind(path)
-        .map_err(|e| format!("cannot listen at {}: {e}", path.display()))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let listener = crate::transport::Listener::bind(path)?;
     eprintln!(
         "neoscad serve: listening at {} (protocol {PROTOCOL_VERSION}, pid {})",
         path.display(),
@@ -1172,21 +1123,24 @@ fn listen(server: Arc<Server>, path: &Path) -> Result<(), String> {
             }
         });
     }
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        let Ok(write) = stream.try_clone() else {
-            continue;
+    loop {
+        let conn = match listener.accept() {
+            Ok(c) => c,
+            Err(_) => {
+                // A client that went away mid-connect. Pause, so an error
+                // that repeats (a pipe instance Windows will not create)
+                // cannot spin a core.
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
         };
         let s = server.clone();
         std::thread::spawn(move || {
-            let w: Box<dyn Write + Send> = Box::new(write);
-            connection(s, BufReader::new(stream), Arc::new(Mutex::new(w)));
+            connection(
+                s,
+                BufReader::new(conn.reader),
+                Arc::new(Mutex::new(conn.writer)),
+            );
         });
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn listen(_server: Arc<Server>, _path: &Path) -> Result<(), String> {
-    Err("Unix sockets are not available here; use `neoscad serve` on stdio".into())
 }

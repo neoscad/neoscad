@@ -11,8 +11,14 @@ below and `docs/packaging.md`.
     scripts/apple/release.sh --no-smoke   # the same without launching the app
     scripts/apple/smoke-release.sh DMG CLI [VERSION]   # the smoke test alone
 
-Both are arm64 only, like the app (`apple/project.yml`, `ARCHS: arm64`;
-the audit's "arm64 only").
+The app and the CLI are universal, arm64 + x86_64, as OpenSCAD's macOS
+DMG is ("Universal, macOS 11+" in `docs/packaging.md`): the Release
+configuration builds `ARCHS = arm64 x86_64` (`apple/project.yml`),
+`build-core.sh --universal` builds the Rust core for
+`aarch64-apple-darwin` and `x86_64-apple-darwin` and joins them with
+`lipo`, and the CLI is two cargo builds joined the same way. Debug builds
+stay arm64 only, so everyday builds and `xcodebuild test` compile the core
+once. The x86_64 target is pinned in `rust-toolchain.toml`.
 
 ## Artifacts
 
@@ -21,7 +27,7 @@ Everything goes to `dist/` (gitignored), which each run empties first:
 | File | What |
 |---|---|
 | `NeoSCAD-<version>-<build>.dmg` | the app, an `Applications` link and a `Licenses` folder; HFS+, zlib |
-| `neoscad-<version>-<build>-macos-arm64.tar.gz` | the CLI, `LICENSE`, `NOTICE` and `licenses/` |
+| `neoscad-<version>-<build>-macos-universal.tar.gz` | the CLI (arm64 + x86_64), `LICENSE`, `NOTICE` and `licenses/` |
 | `neoscad` | the same CLI, bare |
 | `NeoSCAD-<version>-<build>-dSYMs.zip` | `NeoSCAD.app.dSYM`, `NeoSCADCore.framework.dSYM`, `neoscad.dSYM` |
 | `BUILDINFO.txt` | version, commit, dirty flag, toolchains, signing mode, Gatekeeper verdicts |
@@ -83,8 +89,9 @@ will not use):
 
 ## What the script does
 
-1. **Core and editor.** `scripts/apple/build-core.sh` (cargo release
-   profile: thin LTO, `debug = "line-tables-only"`) and
+1. **Core and editor.** `scripts/apple/build-core.sh --universal` (cargo
+   release profile: thin LTO, `debug = "line-tables-only"`; both
+   architectures, one universal static library in the XCFramework) and
    `scripts/apple/build-editor.sh`, then `xcodegen generate`.
 2. **Archive.** `xcodebuild archive`, Release, in a fresh DerivedData
    under `apple/build/release` (the Swift side is always a clean build;
@@ -107,7 +114,8 @@ will not use):
      the runtime. A Developer ID build must not carry the exception; the
      script fails if it does.
 4. **Verify** (both modes): `codesign --verify --deep --strict`; the
-   hardened-runtime flag on every Mach-O in the bundle; no
+   hardened-runtime flag and both architectures (`lipo -verify_arch`,
+   one architecture per call) on every Mach-O in the bundle; no
    `get-task-allow`; no dSYM inside the app; `Info.plist` versions; each
    dSYM's UUID equals its binary's. Then `spctl -a -vv -t exec`.
 5. **Notarize** (with a profile): the app is zipped, submitted with
@@ -121,10 +129,14 @@ will not use):
    automation access. The steps are reproducible; the image's bytes are
    not (hdiutil writes times and a UUID), so compare builds by their
    contents, not their checksums.
-7. **CLI**: `cargo build --release --target aarch64-apple-darwin -p
-   neoscad-cli` in the same clean environment as `build-core.sh` (shared
-   dependencies, `MACOSX_DEPLOYMENT_TARGET=15.0`, and the developer's
-   `target/release` untouched); `dsymutil`, `strip -x`, signed with the
+7. **CLI**: `cargo build --release -p neoscad-cli` for
+   `aarch64-apple-darwin` and `x86_64-apple-darwin` in the same clean
+   environment as `build-core.sh` (shared dependencies,
+   `MACOSX_DEPLOYMENT_TARGET=15.0`, and the developer's `target/release`
+   untouched), joined with `lipo -create`; one dSYM whose DWARF file is
+   the two architectures' joined likewise; `strip -x`; `--version` from
+   each slice, the x86_64 one under Rosetta when it is installed (a skip,
+   recorded in `BUILDINFO.txt`, when not); signed with the
    hardened runtime and the identifier `org.neoscad.neoscad`; tarball
    with root ownership and no AppleDouble files. The tarball and the DMG
    carry `LICENSE`, `NOTICE` and `licenses/` from
@@ -161,6 +173,27 @@ never calls the UniFFI C functions directly), and strips locals
 The Debug app is 28 MB. The CLI goes from 18.3 MB to 15.7 MB by
 `strip -x`.
 
+**Universal (2026-09-29).** An x86_64 slice beside every arm64 one
+roughly doubles each binary. Measured on one ad-hoc `release.sh
+--no-smoke` build (build 99), against the same build's arm64 slices
+thinned out with `lipo -thin` (and a DMG made from them the same way):
+
+| | arm64 | universal |
+|---|---|---|
+| NeoSCADCore binary | 14.3 MB | 29.7 MB (x86_64 15.4 MB) |
+| NeoSCAD.app, unpacked | 18.6 MiB | 35.0 MiB |
+| DMG | 11.6 MB | 19.8 MB |
+| CLI, bare | 16.7 MB | 34.9 MB (x86_64 18.2 MB) |
+| CLI tarball | 7.9 MB | 16.4 MB |
+| dSYM zip | (not measured) | 79 MB |
+| core static library in the XCFramework | 333 MB | 667 MB |
+
+(Files in MB, bytes / 10^6; the app by `du -sk` and the NeoSCADCore
+slices by `lipo -detailed_info`, in MiB.) The DMG grows by 8.1 MB (70%),
+the CLI tarball by 8.5 MB. The build also needs a second Rust target
+directory (`target/x86_64-apple-darwin`, 2.3 GB for the core and the
+CLI).
+
 ### Debug symbols
 
 No dSYM ships in the app or the tarball (the script fails if one is in
@@ -170,7 +203,7 @@ with the zip of the same build:
 
     unzip NeoSCAD-0.1.0-37-dSYMs.zip -d syms
     atos -o syms/NeoSCADCore.framework.dSYM/Contents/Resources/DWARF/NeoSCADCore \
-         -arch arm64 -l <load address> <address>
+         -arch arm64 -l <load address> <address>   # -arch x86_64 for an Intel Mac's report
 
 (or drop the dSYMs next to the `.ips` file and open it in Console or
 Xcode). The stripped CLI's own panic backtraces lose function names; the
@@ -178,7 +211,7 @@ panic message and location are unaffected.
 
 ## The CLI, and MCP
 
-    tar -xzf neoscad-0.1.0-37-macos-arm64.tar.gz
+    tar -xzf neoscad-0.1.0-99-macos-universal.tar.gz
     install -m 755 neoscad ~/.local/bin/     # or /usr/local/bin, or any dir on PATH
     neoscad --version
     claude mcp add neoscad -- neoscad mcp
@@ -275,6 +308,15 @@ It checks a window exists, not what it shows; the render's picture is
 checked by the app tests and the conformance suite, not here.
 
 ## Not verified
+
+- An Intel Mac. The universal CLI's x86_64 slice passed the conformance
+  suite under Rosetta (1,773 of 1,773, `conformance run --binary` with a
+  wrapper running `arch -x86_64 dist/neoscad`), but Rosetta is not an
+  Intel CPU (the Linux x86_64 notes in `docs/packaging.md` say the same),
+  its output differs from arm64's in last digits as Linux x86_64's does,
+  and the app's x86_64 slice was only launched from the DMG under
+  Rosetta (`arch -x86_64`; running and translated after 8 s, 58 MB
+  footprint), not used.
 
 - Everything under "The cross-platform release" on GitHub: the runners,
   the manylinux containers, the Windows and x86_64 macOS builds, the

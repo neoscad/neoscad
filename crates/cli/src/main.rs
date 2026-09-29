@@ -62,6 +62,7 @@ mod run;
 mod serve;
 mod snapshot;
 mod summary;
+mod transport;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -74,7 +75,7 @@ use clap::{ArgAction, Parser};
 /// performance audit's O1, mimalloc makes allocation-heavy models 7-15%
 /// faster and cuts peak RSS by about a fifth. Allocation order never reaches
 /// results, so output is unchanged. The WASM build keeps Rust's allocator.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "mimalloc", not(target_arch = "wasm32")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

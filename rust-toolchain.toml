@@ -9,8 +9,15 @@
 # `stable`, and scripts/wasm-check.sh skips (exit 0) when the target is
 # missing: without this line the WASM check silently stopped running.
 # cargo-dist adds the release targets itself.
+#
+# x86_64-apple-darwin is listed for the same reason: the macOS app and the
+# CLI in its DMG are universal (arm64 + x86_64, as OpenSCAD's macOS DMG
+# is), built on an arm64 Mac by scripts/apple/build-core.sh and
+# release.sh, which would otherwise fail on the pinned toolchain until
+# someone ran `rustup target add`. Elsewhere it is one extra standard
+# library download, never built against.
 [toolchain]
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]
-targets = ["wasm32-unknown-unknown"]
+targets = ["wasm32-unknown-unknown", "x86_64-apple-darwin"]
 profile = "minimal"

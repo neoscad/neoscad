@@ -6,7 +6,8 @@
 # - test: clippy, cargo test and the conformance suite on macOS arm64,
 #   Linux x86_64 and Linux aarch64 (output depends on the architecture and
 #   the platform's libm, so each is its own output path);
-# - windows: the CLI builds and its tests pass (x86_64);
+# - windows: the CLI builds and its tests pass (x86_64), and serves over a
+#   named pipe;
 # - wasm: scripts/wasm-check.sh.
 name: CI
 
@@ -149,6 +150,35 @@ jobs:
           $info = & target\release\neoscad.exe --info
           $line = $info | Select-String '^User Library Path: '
           if ("$line" -ne "User Library Path: $want") { throw "got '$line', want '$want'" }
+      # `cargo test` above already runs the transport's unit tests and the
+      # served-output tests over a pipe; this is the release binary as a
+      # user runs it: `serve --socket` on the default pipe (named by
+      # NEOSCAD_SOCKET here, so parallel jobs cannot meet), an export the
+      # command line hands to it, then `--stop`.
+      - name: neoscad serve on a named pipe, with the command line as its client
+        shell: pwsh
+        run: |
+          $env:NEOSCAD_SOCKET = "neoscad-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $exe = Resolve-Path target\release\neoscad.exe
+          $server = Start-Process -FilePath $exe -ArgumentList 'serve', '--socket', '--idle-timeout', '120' -PassThru -NoNewWindow
+          $deadline = (Get-Date).AddSeconds(30)
+          do {
+            Start-Sleep -Milliseconds 200
+            & $exe serve --status
+          } until ($LASTEXITCODE -eq 0 -or (Get-Date) -gt $deadline)
+          if ($LASTEXITCODE -ne 0) { throw "the server did not start" }
+          $before = (& $exe serve --status --format json | ConvertFrom-Json).stats.requests
+          Set-Content -Path "$env:RUNNER_TEMP\cube.scad" -Value 'cube(10);'
+          & $exe "$env:RUNNER_TEMP\cube.scad" -o "$env:RUNNER_TEMP\cube.stl"
+          if ($LASTEXITCODE -ne 0) { throw "the export failed" }
+          if (-not (Test-Path "$env:RUNNER_TEMP\cube.stl")) { throw "no cube.stl" }
+          $after = (& $exe serve --status --format json | ConvertFrom-Json).stats.requests
+          if ($after -le $before) { throw "the export was not served ($before -> $after requests)" }
+          & $exe serve --stop
+          if (-not $server.WaitForExit(30000)) { throw "the server did not stop" }
+          & $exe serve --status
+          if ($LASTEXITCODE -eq 0) { throw "a server still answers after --stop" }
+          $global:LASTEXITCODE = 0
 
   wasm:
     runs-on: ubuntu-22.04
