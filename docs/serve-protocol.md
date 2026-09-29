@@ -26,7 +26,7 @@ change would get a new `protocol` number; there has been none.
 
 | `protocol` | Changes |
 |---|---|
-| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. Parsing each included file once (`4d877c7`) added `stats`' `parse_cache.fragment_files` and `fragment_bytes`. `enable` now also takes OpenSCAD's experimental features (`textmetrics`, `object-function`, `import-function`, `vector-swizzle`, and on `export`/`cli.export` `predictible-output`). |
+| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. Parsing each included file once (`4d877c7`) added `stats`' `parse_cache.fragment_files` and `fragment_bytes`. `enable` now also takes OpenSCAD's experimental features (`textmetrics`, `object-function`, `import-function`, `vector-swizzle`, and on `export`/`cli.export` `predictible-output`). The `docs` method's `file_arg` was added after the CAD run cad-20260929T031249Z. |
 
 ## Transports
 
@@ -316,7 +316,9 @@ Reference text (`neoscad docs`; `docs/cli-json.md`). Params: `name`
 the libraries it `use`s), `cwd`, `full`, `brief` (bool: a short index
 for an agent's context: `_private` names left out, and when the
 included and used files define more than 100 names, each file with its
-count instead of its names; `neoscad mcp` sends it). Result: the command's JSON plus
+count instead of its names; `neoscad mcp` sends it), `file_arg` (how
+the client names its file argument in the hint for an unknown name;
+default `` `file` ``; `neoscad mcp` sends its `path`). Result: the command's JSON plus
 `text`, the text the command prints. An unknown name is a result with
 `exit_code` 1 and `did_you_mean`.
 

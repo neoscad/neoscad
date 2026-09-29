@@ -116,4 +116,11 @@ fn docs_answers_and_suggests() {
     let o = neoscad(&d, &["docs", "$fn", "--format", "json"], None);
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["entries"][0]["kind"], "variable");
+    // Nothing close: the hint names the command line's flag.
+    let o = neoscad(&d, &["docs", "thread"], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        text(&o.stderr),
+        "neoscad docs: no builtin named 'thread'; for your own or a library's code add --in FILE\n"
+    );
 }

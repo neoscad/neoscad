@@ -24,10 +24,15 @@
 //!   larger reading stands: a sliver's tilted normal no longer turns a
 //!   twisted extrusion's end caps into walls. A wall is measured exactly
 //!   where its two sides are parallel and overestimated where they are
-//!   not, and a feature narrower than the sample spacing on a large face
-//!   can be missed.
+//!   not, so the faces that could hold the thinnest reading are sampled
+//!   again near their corners, which finds a tapered rim's edge; the
+//!   model's `min_wall` is still the thinnest *sample* (`sampled`), and a
+//!   feature narrower than the sample spacing on a large face can be
+//!   missed.
 //! - **overhangs:** downward faces steeper than the limit from vertical,
-//!   excluding faces on the bed, grouped into connected regions.
+//!   excluding faces on the bed, grouped into connected regions; a
+//!   finding points at its steepest faces and names their heights, and
+//!   the area steeper than the limit plus 15° apart.
 //! - **bed fit**, **tiny features** (pieces smaller than two extrusion
 //!   widths) and **intersecting parts** (overlap volume by a boolean
 //!   intersection of the two parts' solids).
@@ -721,7 +726,9 @@ fn analyze_solid(
         "centroid": v4(centroid),
         "bbox": bbox4(&bbox),
         "triangles": mesh.tris.len(),
-        "min_wall": min_wall.map(|(d, p, part)| json!({"thickness": r4(d), "point": v4(p), "part": part})),
+        // `sampled`: the thinnest of the readings taken, which the true
+        // thinnest can be a little under (see `walls`).
+        "min_wall": min_wall.map(|(d, p, part)| json!({"thickness": r4(d), "point": v4(p), "part": part, "sampled": true})),
         "overhang_area": r4(over_area),
     });
     a.parts = part_json;
@@ -918,6 +925,16 @@ struct Thin {
     hit: u32,
 }
 
+/// How far inside a corner (towards the centroid) a corner sample is, as
+/// a fraction of the nozzle, and at most a tenth of the way. A distance,
+/// not only a fraction: a bore's faces after a difference run the part's
+/// whole height, and a tenth of the way from the rim is millimetres from
+/// it.
+const CORNER_INSET: f64 = 0.1;
+
+/// Faces sampled again near their corners, at least (see `walls`).
+const MAX_CORNER_FACES: usize = 128;
+
 /// How parallel a wall's two sides must be: the cosine of 45°.
 const WALL_COS: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
@@ -940,76 +957,158 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
     let mut seams: Vec<(V3, u32)> = Vec::new();
     let mut thin: Vec<Thin> = Vec::new();
     let mut thinnest: Option<(f64, V3, u32)> = None;
-    for t in (0..n).step_by(stride) {
+    // One reading from `p` on face `t`: the thickness, the face the ray
+    // left through, the ray's direction, and a contact seam it passed.
+    let read = |t: usize,
+                p: V3,
+                thinnest: Option<f64>,
+                corner: bool|
+     -> Option<(f64, u32, V3, Option<V3>)> {
         let normal = mesh.normal(t);
-        if normal == [0.0; 3] {
+        let d = scale(normal, -1.0);
+        // Faces sharing a corner with this one are not across a wall
+        // from it: at a sharp edge the neighbour is hit at once, and
+        // every knife edge and sliver would measure zero.
+        let corners = mesh.tris[t];
+        let near = |h: u32| mesh.tris[h as usize].iter().any(|v| corners.contains(v));
+        let (h, hit) = bvh.ray(mesh, p, d, tmin, 2.0 * diag, near)?;
+        // A wall's two sides face away from each other. The far face
+        // must look within 45° of the ray's way (it is where the ray
+        // leaves the solid, roughly parallel to this face); anything
+        // else is a corner or a slope, not a wall, and an entering hit
+        // means the mesh is inconsistent here. Either way the sample
+        // says nothing.
+        if dot(mesh.normal(hit as usize), d) < WALL_COS {
+            return None;
+        }
+        let (mut h, mut hit) = (h, hit);
+        let mut seam = None;
+        if h < seam_eps {
+            // An exit this close is usually not the far side of a
+            // wall but a contact seam: two pieces that touch (coils
+            // of a spring, a lid on a box) keep both their surfaces,
+            // and the ray leaves the neighbour's copy at once. Look
+            // past it: if the ray next leaves through another face
+            // facing its way, the material goes on and the wall is
+            // that far; the seam itself is not a wall (it measured
+            // "0 mm" with the fix "thicken it", which an agent would
+            // obey). Nothing further, or an entering face, and it is
+            // a thin sliver after all.
+            let first = hit;
+            if let Some((h2, hit2)) = bvh.ray(mesh, p, d, h + tmin.max(1e-9), 2.0 * diag, |x| {
+                near(x) || x == first
+            }) && dot(mesh.normal(hit2 as usize), d) >= WALL_COS
+            {
+                seam = Some(add(p, scale(d, h / 2.0)));
+                (h, hit) = (h2, hit2);
+            }
+        }
+        // A thin reading is measured again in the layer plane (see
+        // `in_layer`), and so is one that would be the thinnest yet,
+        // so the model's `min_wall` is always a measured one: a
+        // sliver's 0.8 mm under a 20 mm twisted square read as a
+        // wall below a 1.2 mm spec.
+        if h < s.min_wall || thinnest.is_none_or(|x| h < x) {
+            match in_layer(mesh, bvh, p, normal, tmin, diag, &near) {
+                Layer::Across(h2, hit2, d2) if h2 > h => return Some((h2, hit2, d2, seam)),
+                // Near a corner, a layer's ray that leaves through a face
+                // not across from it, or through one it may not hit (a
+                // neighbour sharing the corner), has run out through the
+                // wall's end (a leaning plate's bottom), and the reading
+                // along the normal is the plate's thickness, not its
+                // width in the layer: the sample says nothing the
+                // middle's did not.
+                Layer::Across(_, hit2, d2)
+                    if corner && dot(mesh.normal(hit2 as usize), d2) < WALL_COS =>
+                {
+                    return None;
+                }
+                Layer::Nothing if corner => return None,
+                Layer::Flat if in_plane(mesh.normal(hit as usize)).is_some() => return None,
+                _ => {}
+            }
+        }
+        Some((h, hit, d, seam))
+    };
+    let mut keep = |t: usize,
+                    p: V3,
+                    (h, hit, d, seam): (f64, u32, V3, Option<V3>),
+                    thinnest: &mut Option<(f64, V3, u32)>| {
+        if let Some(q) = seam {
+            seams.push((q, t as u32));
+        }
+        let mid = add(p, scale(d, h / 2.0));
+        if thinnest.is_none_or(|(x, _, _)| h < x) {
+            *thinnest = Some((h, mid, t as u32));
+        }
+        if h < s.min_wall {
+            thin.push(Thin {
+                mid,
+                thickness: h,
+                tri: t as u32,
+                hit,
+            });
+        }
+    };
+    // Each face's thinnest reading, for the second pass.
+    let mut least: Vec<(u32, f64)> = Vec::new();
+    for t in (0..n).step_by(stride) {
+        if mesh.normal(t) == [0.0; 3] {
             continue;
         }
-        let d = scale(normal, -1.0);
+        let mut lo = f64::INFINITY;
         for p in samples(mesh, t, cell) {
-            // Faces sharing a corner with this one are not across a wall
-            // from it: at a sharp edge the neighbour is hit at once, and
-            // every knife edge and sliver would measure zero.
-            let corners = mesh.tris[t];
-            let near = |h: u32| mesh.tris[h as usize].iter().any(|v| corners.contains(v));
-            let Some((h, hit)) = bvh.ray(mesh, p, d, tmin, 2.0 * diag, near) else {
-                continue;
-            };
-            // A wall's two sides face away from each other. The far face
-            // must look within 45° of the ray's way (it is where the ray
-            // leaves the solid, roughly parallel to this face); anything
-            // else is a corner or a slope, not a wall, and an entering hit
-            // means the mesh is inconsistent here. Either way the sample
-            // says nothing.
-            if dot(mesh.normal(hit as usize), d) < WALL_COS {
-                continue;
+            if let Some(r) = read(t, p, thinnest.map(|x| x.0), false) {
+                lo = lo.min(r.0);
+                keep(t, p, r, &mut thinnest);
             }
-            let (mut h, mut hit) = (h, hit);
-            if h < seam_eps {
-                // An exit this close is usually not the far side of a
-                // wall but a contact seam: two pieces that touch (coils
-                // of a spring, a lid on a box) keep both their surfaces,
-                // and the ray leaves the neighbour's copy at once. Look
-                // past it: if the ray next leaves through another face
-                // facing its way, the material goes on and the wall is
-                // that far; the seam itself is not a wall (it measured
-                // "0 mm" with the fix "thicken it", which an agent would
-                // obey). Nothing further, or an entering face, and it is
-                // a thin sliver after all.
-                let first = hit;
-                if let Some((h2, hit2)) = bvh.ray(mesh, p, d, h + tmin.max(1e-9), 2.0 * diag, |x| {
-                    near(x) || x == first
-                }) && dot(mesh.normal(hit2 as usize), d) >= WALL_COS
-                {
-                    seams.push((add(p, scale(d, h / 2.0)), t as u32));
-                    (h, hit) = (h2, hit2);
-                }
-            }
-            // A thin reading is measured again in the layer plane (see
-            // `in_layer`), and so is one that would be the thinnest yet,
-            // so the model's `min_wall` is always a measured one: a
-            // sliver's 0.8 mm under a 20 mm twisted square read as a
-            // wall below a 1.2 mm spec.
-            let (h, hit, d) = if h < s.min_wall || thinnest.is_none_or(|(x, _, _)| h < x) {
-                match in_layer(mesh, bvh, p, normal, tmin, diag, &near) {
-                    Layer::Across(h2, hit2, d2) if h2 > h => (h2, hit2, d2),
-                    Layer::Flat if in_plane(mesh.normal(hit as usize)).is_some() => continue,
-                    _ => (h, hit, d),
-                }
-            } else {
-                (h, hit, d)
-            };
-            let mid = add(p, scale(d, h / 2.0));
-            if thinnest.is_none_or(|(x, _, _)| h < x) {
-                thinnest = Some((h, mid, t as u32));
-            }
-            if h < s.min_wall {
-                thin.push(Thin {
-                    mid,
-                    thickness: h,
-                    tri: t as u32,
-                    hit,
-                });
+        }
+        if lo.is_finite() {
+            least.push((t as u32, lo));
+        }
+    }
+    // Second pass, near the corners. A reading from a face's middle is
+    // exact where the wall's sides are parallel and too thick where the
+    // wall tapers: the barb tip of run cad-20260929T031249Z's adapter,
+    // 1.2 mm at its rim, read 1.39 from its faces' centroids, and the
+    // agent reported 1.39 as the part's thinnest wall. A wall's sides are within 45° of each other,
+    // so across a face the wall thins by at most about the distance from
+    // its middle to its corners: the faces that could hold a reading
+    // under the thinnest yet are sampled again, a little inside each
+    // corner (on the corner itself, the neighbours that share it would be
+    // in the way), most promising first, and at most `MAX_CORNER_FACES`
+    // of them or one in 128, which keeps the pass a few percent of the
+    // check's time. This sharpens `min_wall`; the thin-wall findings are
+    // the first pass's, plus any corner reading under the minimum.
+    let reach = |t: usize| {
+        let [a, b, c] = mesh.corners(t);
+        let mid = scale(add(add(a, b), c), 1.0 / 3.0);
+        [a, b, c]
+            .iter()
+            .map(|&v| crate::mesh::dist(v, mid))
+            .fold(0.0, f64::max)
+    };
+    let mut maybe: Vec<(f64, u32)> = least
+        .iter()
+        .map(|&(t, lo)| (lo - reach(t as usize), t))
+        .filter(|&(x, _)| thinnest.is_some_and(|(h, _, _)| x < h))
+        .collect();
+    maybe.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    maybe.truncate(MAX_CORNER_FACES.max(n / 128));
+    for (bound, t) in maybe {
+        if thinnest.is_some_and(|(h, _, _)| bound >= h) {
+            break;
+        }
+        let t = t as usize;
+        let [a, b, c] = mesh.corners(t);
+        let mid = scale(add(add(a, b), c), 1.0 / 3.0);
+        for v in [a, b, c] {
+            let to_mid = add(mid, scale(v, -1.0));
+            let len = crate::mesh::norm(to_mid);
+            let inset = (0.1 * len).min(CORNER_INSET * s.nozzle);
+            let p = add(v, scale(to_mid, inset / len.max(1e-300)));
+            if let Some(r) = read(t, p, thinnest.map(|x| x.0), true) {
+                keep(t, p, r, &mut thinnest);
             }
         }
     }
@@ -1223,13 +1322,19 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
             }
         }
     }
+    // Faces steeper than this are reported apart from the rest: an agent
+    // given "550 mm² at up to 90°" could not tell a 41 mm² ledge from the
+    // 60° thread flanks around it, and swept `max_overhang` to find it.
+    let steep = (s.max_overhang + 15.0).min(89.0);
+    let steep_sin = steep.to_radians().sin();
     struct Region {
         area: f64,
         b: Aabb,
-        weighted: V3,
-        worst: f64,
+        /// Each face's angle from vertical (degrees), area and index.
+        faces: Vec<(f64, f64, usize)>,
+        steep_area: f64,
+        steep_b: Aabb,
         parts: HashMap<u32, f64>,
-        tris: Vec<usize>,
     }
     let mut regions: Vec<Region> = Vec::new();
     let mut slot: HashMap<usize, usize> = HashMap::new();
@@ -1240,22 +1345,25 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
             regions.push(Region {
                 area: 0.0,
                 b: Aabb::EMPTY,
-                weighted: [0.0; 3],
-                worst: 0.0,
+                faces: Vec::new(),
+                steep_area: 0.0,
+                steep_b: Aabb::EMPTY,
                 parts: HashMap::new(),
-                tris: Vec::new(),
             });
             regions.len() - 1
         });
         let reg = &mut regions[k];
-        reg.tris.push(t);
         let a = mesh.area(t);
         total += a;
         reg.area += a;
         reg.b = reg.b.union(&mesh.tri_box(t));
-        reg.weighted = add(reg.weighted, scale(mesh.centroid(t), a));
-        let angle = (-mesh.normal(t)[2]).clamp(-1.0, 1.0).asin().to_degrees();
-        reg.worst = reg.worst.max(angle);
+        let down = -mesh.normal(t)[2];
+        reg.faces
+            .push((down.clamp(-1.0, 1.0).asin().to_degrees(), a, t));
+        if down > steep_sin + 1e-9 {
+            reg.steep_area += a;
+            reg.steep_b = reg.steep_b.union(&mesh.tri_box(t));
+        }
         if let Some(p) = mesh.part[t] {
             *reg.parts.entry(p).or_insert(0.0) += a;
         }
@@ -1273,71 +1381,136 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
     };
     // Nearby regions of one part are one finding, as thin walls are: the
     // undersides of a gear's teeth or a thread's flanks listed one by one
-    // were most of a check's text. Largest first, so each merged finding
-    // is placed on its largest region.
+    // were most of a check's text. Largest first.
     let diag = crate::mesh::norm(mesh.bbox().size());
     let reach = (4.0 * s.min_wall).max(0.05 * diag);
-    let mut merged: Vec<(usize, Aabb, f64, f64, usize)> = Vec::new();
+    struct Merged {
+        regions: Vec<usize>,
+        b: Aabb,
+        area: f64,
+        steep_area: f64,
+        steep_b: Aabb,
+    }
+    let mut merged: Vec<Merged> = Vec::new();
     for (i, r) in regions.iter().enumerate() {
         match merged
             .iter_mut()
-            .find(|m| owner(&regions[m.0]) == owner(r) && m.1.gap(&r.b) <= reach)
+            .find(|m| owner(&regions[m.regions[0]]) == owner(r) && m.b.gap(&r.b) <= reach)
         {
             Some(m) => {
-                m.1 = m.1.union(&r.b);
-                m.2 += r.area;
-                m.3 = m.3.max(r.worst);
-                m.4 += 1;
+                m.regions.push(i);
+                m.b = m.b.union(&r.b);
+                m.area += r.area;
+                m.steep_area += r.steep_area;
+                m.steep_b = m.steep_b.union(&r.steep_b);
             }
-            None => merged.push((i, r.b, r.area, r.worst, 1)),
+            None => merged.push(Merged {
+                regions: vec![i],
+                b: r.b,
+                area: r.area,
+                steep_area: r.steep_area,
+                steep_b: r.steep_b,
+            }),
         }
     }
     let findings = merged
         .iter()
-        .map(|&(i, b, area, worst, places)| {
-            let r = &regions[i];
-            let part = owner(r).map(|p| mesh.part_names[p as usize].to_string());
+        .map(|m| {
+            let part =
+                owner(&regions[m.regions[0]]).map(|p| mesh.part_names[p as usize].to_string());
+            let (worst, at) = steepest(
+                m.regions
+                    .iter()
+                    .flat_map(|&i| regions[i].faces.iter().copied()),
+                min_area,
+            );
+            // The steep part is named apart only when it is more than a
+            // speck and not the whole finding.
+            let steep_note = if m.steep_area >= min_area && m.steep_area < m.area - 1e-9 {
+                format!(
+                    "; {} mm² of it steeper than {}° ({})",
+                    mm(m.steep_area),
+                    mm(steep),
+                    z_range(&m.steep_b)
+                )
+            } else {
+                String::new()
+            };
             Finding {
                 level: Level::Warning,
                 code: "overhang",
                 message: format!(
-                    "{} mm² faces down{} at up to {}° from vertical (limit {}°)",
-                    mm(area),
-                    if places > 1 {
-                        format!(" in {places} places")
+                    "{} mm² faces down{} at up to {}° from vertical (limit {}°), {}{}",
+                    mm(m.area),
+                    if m.regions.len() > 1 {
+                        format!(" in {} places", m.regions.len())
                     } else {
                         String::new()
                     },
                     mm(worst.round()),
-                    mm(s.max_overhang)
+                    mm(s.max_overhang),
+                    z_range(&m.b),
+                    steep_note,
                 ),
-                // On the surface: the region's face nearest its centroid
-                // (the centroid of a curved region is off it, inside a
-                // ring under a coil, say).
-                point: {
-                    let c = scale(r.weighted, 1.0 / r.area.max(1e-300));
-                    r.tris
-                        .iter()
-                        .map(|&t| mesh.centroid(t))
-                        .min_by(|a, b| {
-                            crate::mesh::dist(*a, c).total_cmp(&crate::mesh::dist(*b, c))
-                        })
-                        .unwrap_or(c)
-                },
-                bbox: b,
+                // On the steepest faces, which the "up to" angle is about:
+                // the largest region's middle put a 90° ledge's finding on
+                // a 60° flank 5 mm below it, and the agent swept
+                // `max_overhang` to find the ledge. A face's centroid is on
+                // the surface, unlike a curved region's.
+                point: mesh.centroid(at),
+                bbox: m.b,
                 part,
                 fix: format!(
                     "add support, chamfer it to {}° or less, or reorient the model; a short \
                      flat span between two walls may bridge instead",
                     mm(s.max_overhang)
                 ),
-                value: Some(area),
+                value: Some(m.area),
                 limit: Some(s.max_overhang),
             }
         })
         .collect();
     let tris = over.iter().map(|&t| t as u32).collect();
     (findings, tris, total)
+}
+
+/// An overhang's "up to" angle and the face to point at: the steepest
+/// faces that together cover `min_area` (the speck size below which a
+/// region is not reported at all), the angle the last of them reaches,
+/// and the largest of them. The single steepest face is often a sliver
+/// where a thread meets its chamfer (0.06 mm² at 88° on the CAD pilot's
+/// adapter, whose flanks are 60°), which is no place to send a reader.
+fn steepest(faces: impl Iterator<Item = (f64, f64, usize)>, min_area: f64) -> (f64, usize) {
+    let mut faces: Vec<(f64, f64, usize)> = faces.collect();
+    faces.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then(b.1.total_cmp(&a.1))
+            .then(a.2.cmp(&b.2))
+    });
+    let (mut area, mut angle, mut at) = (0.0, 0.0, (0.0, 0));
+    for &(g, a, t) in &faces {
+        if a > at.0 {
+            at = (a, t);
+        }
+        angle = g;
+        area += a;
+        if area >= min_area {
+            break;
+        }
+    }
+    (angle, at.1)
+}
+
+/// "z 6.2 to 11.9", or "z 11.9" for a flat box. The heights go in an
+/// overhang's text because an agent reads the text, not the bbox that
+/// only `verbose` returns.
+fn z_range(b: &Aabb) -> String {
+    let (lo, hi) = (mm(b.lo[2]), mm(b.hi[2]));
+    if lo == hi {
+        format!("z {lo}")
+    } else {
+        format!("z {lo} to {hi}")
+    }
 }
 
 /// Pairs of parts whose solids overlap (neither nested in the other, both
@@ -1518,7 +1691,7 @@ pub fn text(summary: &Value) -> String {
             if m["components"] == json!(1) { "" } else { "s" }
         ));
         if let Some(w) = m["min_wall"]["thickness"].as_f64() {
-            out.push_str(&format!(", thinnest wall {} mm", mm(w)));
+            out.push_str(&format!(", thinnest wall about {} mm (sampled)", mm(w)));
         }
         out.push(')');
     }

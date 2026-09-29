@@ -467,12 +467,15 @@ fn dimensions(
             number(size[1]),
             number(size[2])
         );
+        // Right-aligned above the grid step's label: centred on the
+        // bottom edge, a long size ran into "grid 10 mm" on a narrow
+        // panel.
         c.text(
             &text,
-            ox + f64::from(cam.pixel_width) / 2.0,
-            oy + f64::from(cam.pixel_height) - 12.0,
+            ox + f64::from(cam.pixel_width) - 8.0,
+            oy + f64::from(cam.pixel_height) - 26.0,
             14.0,
-            Align::Center,
+            Align::Right,
             INK,
             false,
         );

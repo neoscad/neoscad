@@ -404,43 +404,7 @@ pub fn profile(m: &ManifoldGeometry, axis: Axis, p: Profile) -> Value {
     let (mut all_lo, mut all_hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for k in 0..p.samples() {
         let h = p.from + k as f64 * p.step;
-        let loops: Vec<Vec<[f64; 2]>> = if moved.is_empty() {
-            Vec::new()
-        } else {
-            moved
-                .manifold
-                .slice(h)
-                .to_polygons()
-                .iter()
-                .map(|l| l.iter().map(|v| [v.x - c[0], v.y - c[1]]).collect())
-                .collect()
-        };
-        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-        let mut far: Option<f64> = None;
-        for l in &loops {
-            let n = l.len();
-            if n < 3 {
-                continue;
-            }
-            let signed: f64 = (0..n)
-                .map(|i| l[i][0] * l[(i + 1) % n][1] - l[(i + 1) % n][0] * l[i][1])
-                .sum();
-            for i in 0..n {
-                let (a, b) = (l[i], l[(i + 1) % n]);
-                // Where the boundary crosses the +u half-line: the
-                // outermost crossing is the surface's radius on that side.
-                if (a[1] > 0.0) != (b[1] > 0.0) {
-                    let x = a[0] + (b[0] - a[0]) * (0.0 - a[1]) / (b[1] - a[1]);
-                    if x >= 0.0 {
-                        far = Some(far.map_or(x, |f: f64| f.max(x)));
-                    }
-                }
-                if signed > 0.0 {
-                    hi = hi.max(a[0].hypot(a[1]));
-                    lo = lo.min(segment_to_origin(a, b));
-                }
-            }
-        }
+        let (lo, hi, far) = slice_radii(&moved, c, h);
         if lo.is_finite() {
             all_lo = all_lo.min(lo);
             all_hi = all_hi.max(hi);
@@ -452,8 +416,15 @@ pub fn profile(m: &ManifoldGeometry, axis: Axis, p: Profile) -> Value {
             side.push((h, f));
         }
     }
-    let crests = crests(&side, p.step);
-    let pitch = pitch(&crests, p.step);
+    let found = crests(&side, p.step);
+    let far = |h: f64| slice_radii(&moved, c, h).2;
+    let refined: Vec<Crest> = if found.len() <= MAX_REFINED {
+        found.iter().map(|x| refine(&far, &side, x)).collect()
+    } else {
+        found.iter().map(|x| x.sampled(&side)).collect()
+    };
+    let at: Vec<f64> = refined.iter().map(|x| x.at).collect();
+    let pitch = pitch(&refined, p.step);
     json!({
         "axis": axis.name(),
         "center": c.map(r6),
@@ -461,20 +432,223 @@ pub fn profile(m: &ManifoldGeometry, axis: Axis, p: Profile) -> Value {
         "to": r6(p.to),
         "step": r6(p.step),
         "radius": if all_lo.is_finite() { json!([r6(all_lo), r6(all_hi)]) } else { Value::Null },
-        "crests": crests.iter().take(100).map(|&z| r6(z)).collect::<Vec<_>>(),
+        "crests": at.iter().take(100).map(|&z| r6(z)).collect::<Vec<_>>(),
         "pitch": pitch.map(|(x, _, _)| r6(x)),
         "pitch_span": pitch.map(|(_, a, b)| [r6(a), r6(b)]),
         "bands": bands,
     })
 }
 
+/// At height `h` of a solid whose axis is z (at `c`): the nearest and
+/// farthest distance of the outer contours from the axis (infinite when
+/// there are none), and the outermost crossing of the boundary with the
+/// +u half-line (the surface's radius on that side).
+fn slice_radii(moved: &ManifoldGeometry, c: [f64; 2], h: f64) -> (f64, f64, Option<f64>) {
+    let loops: Vec<Vec<[f64; 2]>> = if moved.is_empty() {
+        Vec::new()
+    } else {
+        moved
+            .manifold
+            .slice(h)
+            .to_polygons()
+            .iter()
+            .map(|l| l.iter().map(|v| [v.x - c[0], v.y - c[1]]).collect())
+            .collect()
+    };
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut far: Option<f64> = None;
+    for l in &loops {
+        let n = l.len();
+        if n < 3 {
+            continue;
+        }
+        let signed: f64 = (0..n)
+            .map(|i| l[i][0] * l[(i + 1) % n][1] - l[(i + 1) % n][0] * l[i][1])
+            .sum();
+        for i in 0..n {
+            let (a, b) = (l[i], l[(i + 1) % n]);
+            // Where the boundary crosses the +u half-line: the
+            // outermost crossing is the surface's radius on that side.
+            if (a[1] > 0.0) != (b[1] > 0.0) {
+                let x = a[0] + (b[0] - a[0]) * (0.0 - a[1]) / (b[1] - a[1]);
+                if x >= 0.0 {
+                    far = Some(far.map_or(x, |f: f64| f.max(x)));
+                }
+            }
+            if signed > 0.0 {
+                hi = hi.max(a[0].hypot(a[1]));
+                lo = lo.min(segment_to_origin(a, b));
+            }
+        }
+    }
+    (lo, hi, far)
+}
+
+/// Crests refined between the samples, at most this many (each takes
+/// `GOLDEN_STEPS + 4 * BISECT_STEPS`, 72, slices); past it they stay at
+/// their samples.
+const MAX_REFINED: usize = 100;
+
+/// Steps of the search for a crest's top: its bracket, two samples wide,
+/// shrinks to 0.618^16, about a two-thousandth.
+const GOLDEN_STEPS: usize = 16;
+
+/// Halvings of a flank's bracket (up to half a pitch): to 1/16384 of it,
+/// a ten-thousandth of a millimetre on a 3 mm flank.
+const BISECT_STEPS: usize = 14;
+
+/// A crest as the samples found it: its level run `i..=j` of `side`, and
+/// the lowest samples between it and its neighbours on each side.
+#[derive(Debug, Clone, Copy)]
+struct Found {
+    i: usize,
+    j: usize,
+    valley: [usize; 2],
+}
+
+impl Found {
+    fn sampled(&self, side: &[(f64, f64)]) -> Crest {
+        Crest {
+            at: (side[self.i].0 + side[self.j].0) / 2.0,
+            radius: side[self.i].1,
+            rise: side[self.i].1 - side[self.valley[0]].1.max(side[self.valley[1]].1),
+            width: side[self.j].0 - side[self.i].0,
+            cut: false,
+        }
+    }
+}
+
+/// A crest: its height along the axis, radius, how far it rises above
+/// the higher of its valleys, the width of its top, and whether a flank
+/// ran into the end of the range.
+#[derive(Debug, Clone, Copy)]
+struct Crest {
+    at: f64,
+    radius: f64,
+    rise: f64,
+    width: f64,
+    cut: bool,
+}
+
+/// Refine a crest found at the samples to its top's middle, between the
+/// samples: the barb's middle crest, flat from 34.81 to 35.18, was "35.2"
+/// at a 0.4 step, and a thread's crests moved by a step with the phase of
+/// the range.
+///
+/// The top's height is the maximum of the side's radius near the crest
+/// (a golden-section search between the crest's neighbouring samples).
+/// Each flank is then crossed at two levels, a tenth and a fifth of the
+/// crest's height above its higher valley below the top, and extended in
+/// a line to the top's height: that is where the flank meets the top,
+/// whatever the facets do on the top itself (a helical thread's crest,
+/// cut by the half-line between its facets, ripples by a hundredth of a
+/// millimetre, and so the top's own edges would wander), and exact for
+/// straight flanks, which a barb's steep and shallow ones are.
+fn refine(far: &dyn Fn(f64) -> Option<f64>, side: &[(f64, f64)], x: &Found) -> Crest {
+    let r = |h: f64| far(h).unwrap_or(f64::NEG_INFINITY);
+    let sampled = x.sampled(side);
+    let (a, b) = (
+        side[x.i.saturating_sub(1)].0,
+        side[(x.j + 1).min(side.len() - 1)].0,
+    );
+    // Golden-section search for the top.
+    let g = (5f64.sqrt() - 1.0) / 2.0;
+    let (mut lo, mut hi) = (a, b);
+    let (mut p, mut q) = (hi - g * (hi - lo), lo + g * (hi - lo));
+    let (mut rp, mut rq) = (r(p), r(q));
+    for _ in 0..GOLDEN_STEPS {
+        if rp >= rq {
+            hi = q;
+            (q, rq) = (p, rp);
+            p = hi - g * (hi - lo);
+            rp = r(p);
+        } else {
+            lo = p;
+            (p, rp) = (q, rq);
+            q = lo + g * (hi - lo);
+            rq = r(q);
+        }
+    }
+    let (top_h, top) = if rp.max(rq) > sampled.radius {
+        if rp >= rq { (p, rp) } else { (q, rq) }
+    } else {
+        (sampled.at, sampled.radius)
+    };
+    let low = side[x.valley[0]].1.max(side[x.valley[1]].1);
+    let rise = top - low;
+    if rise.is_nan() || rise <= 0.0 {
+        return sampled;
+    }
+    // Where the flank from `top_h` towards `end` crosses `level`, or
+    // `None` when it stays above it all the way (the range ends first).
+    let cross = |end: f64, level: f64| -> Option<f64> {
+        if r(end) >= level {
+            return None;
+        }
+        let (mut inside, mut out) = (top_h, end);
+        for _ in 0..BISECT_STEPS {
+            let m = (inside + out) / 2.0;
+            if r(m) >= level {
+                inside = m;
+            } else {
+                out = m;
+            }
+        }
+        Some((inside + out) / 2.0)
+    };
+    let (l1, l2) = (top - 0.1 * rise, top - 0.2 * rise);
+    let edge = |end: f64| -> Option<f64> {
+        let (x1, x2) = (cross(end, l1)?, cross(end, l2)?);
+        // The line through the two crossings, at the top's height.
+        Some(x1 + (x1 - x2))
+    };
+    let (left, right) = (edge(side[x.valley[0]].0), edge(side[x.valley[1]].0));
+    match (left, right) {
+        // At a sharp crest the two edges meet at its tip, a little
+        // crossed by the halvings' precision.
+        (Some(l), Some(rr)) if l <= rr + 0.01 * (b - a) => Crest {
+            at: (l + rr) / 2.0,
+            radius: top,
+            rise,
+            width: (rr - l).max(0.0),
+            cut: false,
+        },
+        _ => Crest {
+            cut: true,
+            ..sampled
+        },
+    }
+}
+
+/// Whether an end crest of a run is not like the rest: cut short by the
+/// end of the range, lower than the others (a chamfer's), or narrower or
+/// wider on top (a thread's last crest, half as wide where the flange
+/// starts). `run` has at least three crests.
+fn odd_end(run: &[Crest], x: &Crest, step: f64) -> bool {
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let radius = median(run.iter().map(|x| x.radius).collect());
+    let rise = median(run.iter().map(|x| x.rise).collect());
+    let width = median(run.iter().map(|x| x.width).collect());
+    // A tenth of the crests' height: well over the hundredth of a
+    // millimetre a helical crest's radius ripples by between facets.
+    x.cut
+        || x.radius < radius - 0.1 * rise
+        || (x.width - width).abs() > (0.25 * width).max(0.1 * step)
+}
+
 /// A thread's pitch from its crests: the mean spacing of the longest run
 /// of evenly spaced crests (each gap within a tenth of the run's first, or
 /// a step), with the first and last crest of the run. A median over every
 /// gap mixes a thread with the barbs above it (4.8 for the pilot's M24x2
-/// adapter, whose thread crests are 2 apart).
-fn pitch(crests: &[f64], step: f64) -> Option<(f64, f64, f64)> {
-    let gaps: Vec<f64> = crests.windows(2).map(|w| w[1] - w[0]).collect();
+/// adapter, whose thread crests are 2 apart). An end crest of the run
+/// that is not like the others is left out: the M24x2 adapter of run
+/// cad-20260929T031249Z, whose last thread crest is half as wide where
+/// the flange starts and 0.06 closer to the one before, gave 1.98.
+fn pitch(crests: &[Crest], step: f64) -> Option<(f64, f64, f64)> {
+    let gaps: Vec<f64> = crests.windows(2).map(|w| w[1].at - w[0].at).collect();
     let mut best: Option<(usize, usize)> = None;
     let mut i = 0;
     while i < gaps.len() {
@@ -489,17 +663,31 @@ fn pitch(crests: &[f64], step: f64) -> Option<(f64, f64, f64)> {
         i = j + 1;
     }
     let (i, j) = best?;
-    let (a, b) = (crests[i], crests[j + 1]);
-    Some(((b - a) / (j + 1 - i) as f64, a, b))
+    // The run's crests are `i..=j + 1`.
+    let run = &crests[i..=j + 1];
+    let (mut a, mut b) = (0, run.len() - 1);
+    if run.len() >= 3 {
+        if odd_end(run, &run[0], step) {
+            a += 1;
+        }
+        if odd_end(run, &run[b], step) {
+            b -= 1;
+        }
+    }
+    if b <= a {
+        return None;
+    }
+    let (first, last) = (run[a].at, run[b].at);
+    Some(((last - first) / (b - a) as f64, first, last))
 }
 
-/// The heights of the local maxima of a radius sampled along an axis, a
-/// plateau's at its middle. A crest must rise above the lowest sample
-/// between it and the neighbouring maximum on each side by more than a
-/// hundredth of the radius's range (and a micron), so facet noise on a
-/// smooth wall is not a crest. A gap in the samples (the side is empty
-/// there) ends a run: a maximum next to one is not a crest.
-fn crests(side: &[(f64, f64)], step: f64) -> Vec<f64> {
+/// The local maxima of a radius sampled along an axis. A crest must rise
+/// above the lowest sample between it and the neighbouring maximum on
+/// each side by more than a hundredth of the radius's range (and a
+/// micron), so facet noise on a smooth wall is not a crest. A gap in the
+/// samples (the side is empty there) ends a run: a maximum next to one is
+/// not a crest.
+fn crests(side: &[(f64, f64)], step: f64) -> Vec<Found> {
     let (lo, hi) = side
         .iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &(_, r)| {
@@ -525,11 +713,10 @@ fn crests(side: &[(f64, f64)], step: f64) -> Vec<f64> {
     }
     // Prominence against the valleys between neighbouring maxima (or the
     // ends of the run of joined samples).
-    let valley = |from: usize, to: usize| -> f64 {
-        side[from..=to]
-            .iter()
-            .map(|&(_, r)| r)
-            .fold(f64::INFINITY, f64::min)
+    let valley = |from: usize, to: usize| -> usize {
+        (from..=to)
+            .min_by(|&a, &b| side[a].1.total_cmp(&side[b].1))
+            .unwrap_or(from)
     };
     let mut out = Vec::new();
     for (k, &(i, j)) in peaks.iter().enumerate() {
@@ -548,8 +735,13 @@ fn crests(side: &[(f64, f64)], step: f64) -> Vec<f64> {
             }
         }
         let r = side[i].1;
-        if r - valley(start, i) > tol && r - valley(j, end) > tol {
-            out.push((side[i].0 + side[j].0) / 2.0);
+        let (vl, vr) = (valley(start, i), valley(j, end));
+        if r - side[vl].1 > tol && r - side[vr].1 > tol {
+            out.push(Found {
+                i,
+                j,
+                valley: [vl, vr],
+            });
         }
     }
     out

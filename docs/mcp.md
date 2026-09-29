@@ -151,7 +151,16 @@ check 4 decimals and measure 6), and the text uses the same numbers;
 text: a later finding of the same code and fix has `"fix_as": id` (in
 the text, `Fix: as #id`) instead. `measure` asked for a `section`,
 `profile` or `between` leaves out the `model` block (`render` gives
-it). A pinched solid (two pieces touching along an edge: Manifold says
+it). `check`'s first line gives the thinnest wall as "about N mm
+(sampled)": it is the thinnest sample, and the true wall can be a
+little thinner (`model.min_wall.sampled`). An `overhang` finding's
+point is on its steepest faces, and its message names the heights it
+spans and the area steeper than `max_overhang` + 15°, with theirs
+("553.74 mm² faces down at up to 90° ..., z 0 to 11.94; 41.1 mm² of it
+steeper than 60° (z 11.9)"), since findings carry no bbox here: an
+agent swept `max_overhang` to find a ledge the point was 5 mm from.
+`docs` of an unknown name, with nothing close, says to add `path` (the
+tool's argument, not the command line's `--in`). A pinched solid (two pieces touching along an edge: Manifold says
 valid, an STL of it is not manifold) reads `NOT manifold` with a line
 saying how many edges and where the first is, and the geometry's
 `pinched` carries the `fix`. Slicers read an STL's coordinates as

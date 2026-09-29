@@ -420,6 +420,14 @@ fn every_tool_round_trips() {
     assert!(r.get("structuredContent").is_none(), "{r}");
     let r = s.tool("docs", json!({"path": "box.scad"}));
     assert!(text(&r).contains("box"), "{}", text(&r));
+    // Not found: the hint names the tool's argument; an MCP client has
+    // no `--in` flag.
+    let r = s.tool("docs", json!({"name": "thread"}));
+    assert!(
+        text(&r).ends_with("add `path` (the file that defines or includes it)"),
+        "{}",
+        text(&r)
+    );
 
     // verbose: the server's whole result.
     let r = s.tool("render", json!({"path": "box.scad", "verbose": true}));

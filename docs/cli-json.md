@@ -388,10 +388,12 @@ as on the bed), at most 10 findings per code.
 
 - `MODEL` (3D): `{"dimensions": 3, "manifold", "components",
   "floating", "volume", "area", "centroid", "bbox", "triangles",
-  "min_wall": {"thickness", "point", "part"}|null, "overhang_area"}`;
-  `{"dimensions": 2}` for a 2D model, `null` for an empty one.
-  `min_wall` is the thinnest wall any sample measured (after the
-  layer-plane measurement below). `manifold` is false for a pinched
+  "min_wall": {"thickness", "point", "part", "sampled": true}|null,
+  "overhang_area"}`; `{"dimensions": 2}` for a 2D model, `null` for an
+  empty one. `min_wall` is the thinnest wall any sample measured (after
+  the layer-plane measurement and the corner samples below); `sampled`
+  says so: the true thinnest wall can be a little under it (the text
+  says "thinnest wall about 1.21 mm (sampled)"). `manifold` is false for a pinched
   solid too (see the snapshot's `geometry`).
 - `PART`: `{"name", "instances", "context", "dimensions", "manifold",
   "components", "volume", "area", "bbox"}` for each part's own solid.
@@ -414,9 +416,9 @@ Codes and how each is found:
 | `not-closed` | error | A mesh result (a lone polyhedron) with edges on one face only. |
 | `not-manifold` | error | Manifold reports an error or kept the solid as a triangle soup, or edges are shared by more than two faces. Also a pinched solid: Manifold calls it valid, but once corners at the same position are merged (as an STL reader does) edges have more than two faces. Then `value` is the number of such edges, `point` the midpoint of the first and `bbox` the box around all of them, and the fix says that two parts touch along an edge or at a point there and to overlap them by at least 0.01 or separate them. |
 | `floating` | error | A connected piece (triangles sharing vertices) whose lowest point is more than `bed_tolerance` above the model's lowest point. `point` is the piece's centre. The message says what is under it, straight down from its lowest points: another piece it rests on (within `bed_tolerance`), another piece N mm below, or nothing. |
-| `thin-wall` | error below `nozzle`, else warning below `min_wall` | From points on every face (the centroid, or 4 or 16 points on faces larger than (4 × `min_wall`)²) a ray goes inward along the face's normal to where it leaves the solid, ignoring faces that share a corner with the start (so knife edges do not measure zero) and exits through faces more than 45° from parallel (corners and slopes are not walls). A reading under `min_wall` (or under the thinnest so far) is measured again in the layer plane, along the face's normal projected onto XY, and the larger of the two is the wall: FDM lays a wall as perimeters in each layer, so the width that matters is the width in the layer, and the projected normal is exactly the in-layer normal of the outline the face cuts, however the face is tilted. (The slivers of a twisted `linear_extrude` tilt their normals up to 76°; along them a solid 20 mm square measured walls of 0.17–0.25 mm at its end caps.) A flat face has no layer direction: its reading counts only when the far side is flat too (a plate, a floor); through a sloped face it is a wedge where a slope meets a cap, not a wall. Thin faces that share an edge, or face each other across a wall, are one place; places of one part and severity within max(4 × `min_wall`, 5% of the model's diagonal) are one finding ("walls at N places"), located at its thinnest point. An exit closer than min(0.01 mm, 1e-4 of the diagonal) behind which the ray leaves through another face facing its way is a contact seam (two pieces that touch keep both surfaces), not a wall: the wall is measured to that second exit, and the seams are one `touching-surfaces` finding. |
+| `thin-wall` | error below `nozzle`, else warning below `min_wall` | From points on every face (the centroid, or 4 or 16 points on faces larger than (4 × `min_wall`)²) a ray goes inward along the face's normal to where it leaves the solid, ignoring faces that share a corner with the start (so knife edges do not measure zero) and exits through faces more than 45° from parallel (corners and slopes are not walls). A reading under `min_wall` (or under the thinnest so far) is measured again in the layer plane, along the face's normal projected onto XY, and the larger of the two is the wall: FDM lays a wall as perimeters in each layer, so the width that matters is the width in the layer, and the projected normal is exactly the in-layer normal of the outline the face cuts, however the face is tilted. (The slivers of a twisted `linear_extrude` tilt their normals up to 76°; along them a solid 20 mm square measured walls of 0.17–0.25 mm at its end caps.) A flat face has no layer direction: its reading counts only when the far side is flat too (a plate, a floor); through a sloped face it is a wedge where a slope meets a cap, not a wall. A reading from a face's middle is too thick where a wall tapers (a barb's 1.2 mm rim read 1.39), so the faces whose readings could hide one thinner than the thinnest so far (reading minus the distance from the face's middle to its farthest corner) are measured again from just inside each corner (a tenth of the way, at most 0.1 × `nozzle`), most promising first, at most max(128, one in 128 of the faces); near a corner, a layer-plane ray that leaves through a face not across from it (a plate's end) makes no reading. Thin faces that share an edge, or face each other across a wall, are one place; places of one part and severity within max(4 × `min_wall`, 5% of the model's diagonal) are one finding ("walls at N places"), located at its thinnest point. An exit closer than min(0.01 mm, 1e-4 of the diagonal) behind which the ray leaves through another face facing its way is a contact seam (two pieces that touch keep both surfaces), not a wall: the wall is measured to that second exit, and the seams are one `touching-surfaces` finding. |
 | `touching-surfaces` | info | Surfaces of pieces that touch with no gap (coils of a spring, a lid on its box): they print fused. `value` is 0; the message gives the area. The fix: leave a gap of at least the nozzle if they should be separate, overlap them a little if they should be one. |
-| `overhang` | warning | Faces pointing down more than `max_overhang` from vertical, except faces within `bed_tolerance` of the lowest point, grouped into regions by shared edges; regions under (2 × `nozzle`)² are ignored. Regions of one part within max(4 × `min_wall`, 5% of the model's diagonal) of each other are one finding ("in N places"), as thin walls are. `value` is the finding's area, the message its steepest angle; `point` is on its largest region. |
+| `overhang` | warning | Faces pointing down more than `max_overhang` from vertical, except faces within `bed_tolerance` of the lowest point, grouped into regions by shared edges; regions under (2 × `nozzle`)² are ignored. Regions of one part within max(4 × `min_wall`, 5% of the model's diagonal) of each other are one finding ("in N places"), as thin walls are. `value` is the finding's area. The message gives the steepest angle (that of the steepest faces covering (2 × `nozzle`)², so a sliver does not set it), the heights the finding spans ("z 0 to 11.94"), and, when only part of it is steeper than `max_overhang` + 15° (at most 89°), that area and its heights ("41.1 mm² of it steeper than 60° (z 11.9)"). `point` is on the steepest faces (the centroid of the largest of them), not on the largest region: a 90° ledge's finding pointed at a 60° thread flank 5 mm below it. |
 | `bed-fit` | error, or warning when turning it 90° about z fits | With `--bed`: the bounding box against the bed. |
 | `tiny-feature` | warning | A piece whose largest extent is under two nozzle widths. |
 | `parts-intersect` | warning | Two parts (neither nested in the other, both reaching the model as themselves) whose solids overlap: `value` is the overlap volume, by a boolean intersection. |
@@ -498,11 +500,16 @@ there are).
   turned, so there these are its minor and major radius; over a barb
   they are its root and crest. `crests` are the local maxima of the
   outer surface's radius on one side (the half-plane from the axis
-  towards the first of `axes`, +x for z), at most 100, and `pitch` the
-  mean spacing of the longest run of evenly spaced crests
-  (`pitch_span`: its first and last crest). The pilot's M24x2 adapter
-  gives pitch 2 over crests 2..10 and radii 10.64..11.64 in the
-  thread.
+  towards the first of `axes`, +x for z), at most 100, each at the
+  middle of its top, found between the samples (the flanks crossed at
+  two levels below the top and extended to it; up to 100 crests are
+  refined, about 70 more cuts each), not at the sample that hit it.
+  `pitch` is the mean spacing of the longest run of evenly spaced
+  crests, leaving out an end crest of the run that is cut off by the
+  range, lower than the others, or narrower or wider on top
+  (`pitch_span`: the first and last crest fitted). The pilot's M24x2
+  adapter gives pitch 2 over crests 2..10 and radii 10.64..11.64 in
+  the thread.
 
 # `neoscad fmt`
 
@@ -577,7 +584,9 @@ structured blocks (`// Module:`, `// Synopsis:`, `// Usage:`,
 `// Arguments:` ...) are shown compactly: synopsis, usage, the first
 lines of the description and the arguments; `--full` shows the whole
 block. No name: a compact index (with `--in`, the file's definitions).
-An unknown name exits 1 with "did you mean" (the diagnostics' matcher),
+An unknown name exits 1 with "did you mean" (the diagnostics' matcher)
+or, with nothing close and no `--in`, a hint to add `--in FILE` (the
+server's `docs` says `file`, the MCP tool `path`),
 or says the name is an experimental OpenSCAD builtin, naming the
 `--enable` flag that turns it on (or that neoscad does not have it).
 
@@ -790,3 +799,15 @@ have them.
   snapshot, and the `--format json` report of an export) and the
   `check` finding `stl-precision`. Both are additive; OpenSCAD's
   console text is unchanged.
+- After the CAD run cad-20260929T031249Z
+  (`docs/research/t3-transcript-audit.md`): an `overhang` finding's
+  `point` is on its steepest faces, and its message adds the heights it
+  spans and the area steeper than `max_overhang` + 15°; its "up to"
+  angle is that of the steepest (2 × `nozzle`)² of faces, not of a
+  sliver. `min_wall` adds `sampled` (additive) and is sampled near the
+  corners of the faces that could be thinnest, so a tapered rim reads
+  close to its edge (1.21 for 1.2, was 1.39); findings' thin-wall
+  values can be lower for the same reason. A profile's `crests` are
+  refined between samples, and `pitch` leaves out odd end crests of
+  its run (the adapter's 1.98 is now 2.00). `docs`' not-found hint
+  names the caller's file argument.

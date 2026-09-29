@@ -664,7 +664,7 @@ impl Tools {
                 size_of(&model["bbox"]),
                 model["min_wall"]["thickness"]
                     .as_f64()
-                    .map_or("-".into(), |t| format!("{} mm", num(t)))
+                    .map_or("-".into(), |t| format!("about {} mm (sampled)", num(t)))
             ));
         }
         text.push_str(&findings_text(&r["counts"], &r["findings"]));
@@ -897,7 +897,8 @@ impl Tools {
             id,
             "docs",
             &json!({"name": str_arg(args, "name"), "file": file, "cwd": base,
-                    "full": bool_arg(args, "full"), "brief": !bool_arg(args, "verbose")}),
+                    "full": bool_arg(args, "full"), "brief": !bool_arg(args, "verbose"),
+                    "file_arg": "`path` (the file that defines or includes it)"}),
         )?;
         Ok(Out {
             text: r["text"].as_str().unwrap_or("").trim_end().to_string(),

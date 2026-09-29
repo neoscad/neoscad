@@ -795,6 +795,27 @@ lead them, come roughly in order of user impact.
   the plain console never does. (inside-out polyhedron diagnostics)
 - Overhangs do not recognise bridges (a flat span supported at both
   ends); they are reported as overhangs. (7b-1)
+- Corner samples of wall thickness (T3 audit fix) cover at most
+  max(128, one in 128) faces, the most promising first, to stay within
+  about 5% of `check`'s time (A/B over the examples and features:
+  +3.8% in total, +4% on the run's adapter). A model with many faces
+  that could each hide the thinnest wall can still report a
+  `min_wall` above the truth, which is why it carries `sampled`. The
+  corner readings also lower some thin-wall findings' values and add
+  thin-wall findings near the ends of tapering walls (a `surface()`
+  heightmap's base gained four at 0.6 mm): real, but a different list
+  than before for the same model. (T3 audit fix)
+- An overhang's "steeper than" split uses one fixed threshold,
+  `max_overhang` + 15° (60° by default). A thread's flanks at exactly
+  60° are not "steeper", so a ledge among 61° flanks would be reported
+  together with them; a per-angle histogram would say more, in more
+  text. (T3 audit fix)
+- A profile's crests are refined with about 70 more cuts each (up to
+  100 crests, then left at their samples): on a mesh where a cut takes
+  a millisecond, 100 crests add about 7 s. The end-crest test (cut off,
+  lower by a tenth of the crest height, or a top width off by a quarter)
+  is tuned on the two T3 adapters and could drop a real end crest of
+  an irregular profile from the pitch fit. (T3 audit fix)
 - Checks run serially (about 150 ms for a 220k-triangle model). Rays are
   independent, so they could run on rayon with a deterministic merge.
   (7b-1)
@@ -859,6 +880,11 @@ lead them, come roughly in order of user impact.
   (7c)
 
 ## Tooling: fmt, test, docs
+- The builtin index's footer (`crates/docs/src/lib.rs`, "--in FILE for
+  a file's own modules and functions") still names the command line's
+  flag when the MCP `docs` tool returns the index; the not-found hint
+  names the caller's argument (`DocsRequest::file_arg`) but the index
+  does not. (T3 audit fix)
 - `NOTICE` (the SGI Free Software License B for the libtess2 port) must
   ship with the binaries, which contain the port: `scripts/apple/release.sh`
   copies only `LICENSE` into the CLI tarball (`release.sh:370`), and the

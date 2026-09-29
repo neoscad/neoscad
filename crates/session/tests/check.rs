@@ -371,6 +371,71 @@ fn checks_are_deterministic() {
 /// end touches the rim where the core cylinder meets the flange's cone.
 const T3: &str = include_str!("data/pilot_t3_adapter.scad");
 
+/// The T3 part of agent-eval run `cad-20260929T031249Z/T3-neoscad-1`:
+/// an intermediate source with a 41 mm² ledge at z = 11.9 among 60°
+/// thread flanks, and the final one, whose barb tapers to a 1.2 mm rim.
+const T3_LEDGE: &str = include_str!("data/t3_ledge.scad");
+const T3_ADAPTER: &str = include_str!("data/t3_adapter.scad");
+
+#[test]
+fn an_overhang_points_at_its_steepest_faces() {
+    // "553.74 mm² at up to 90°" pointed at a 60° flank at z = 6.7; the
+    // agent swept `max_overhang` to find the ledge.
+    let spec = CheckSettings {
+        min_wall: 1.2,
+        ..CheckSettings::default()
+    };
+    let v = check(T3_LEDGE, false, spec);
+    let o = findings(&v, "overhang");
+    assert_eq!(o.len(), 1, "{v}");
+    let z = o[0]["location"]["point"][2].as_f64().unwrap();
+    assert!(close(z, 11.9, 1e-3), "{v}");
+    let m = o[0]["message"].as_str().unwrap();
+    assert!(m.contains("up to 90°"), "{m}");
+    assert!(m.contains("z 0 to 11.94"), "{m}");
+    assert!(
+        m.contains("41.1 mm² of it steeper than 60° (z 11.9)"),
+        "{m}"
+    );
+    // The final part's flanks are 60°, none steeper: no steep note.
+    let v = check(T3_ADAPTER, false, spec);
+    let o = findings(&v, "overhang");
+    assert_eq!(o.len(), 1, "{v}");
+    let m = o[0]["message"].as_str().unwrap();
+    assert!(m.contains("up to 60°") && !m.contains("steeper"), "{m}");
+    // The pilot's part said "up to 88°" of 0.06 mm² of slivers where its
+    // thread meets the chamfer; its flanks are 60°.
+    let v = check(T3, false, spec);
+    let o = findings(&v, "overhang");
+    assert_eq!(o.len(), 1, "{v}");
+    let m = o[0]["message"].as_str().unwrap();
+    assert!(m.contains("up to 60°") && !m.contains("steeper"), "{m}");
+}
+
+#[test]
+fn a_tapered_rim_is_measured_near_its_edge() {
+    let wall = |src: &str, spec: CheckSettings| {
+        let v = check(src, false, spec);
+        assert_eq!(v["model"]["min_wall"]["sampled"], true, "{v}");
+        v["model"]["min_wall"]["thickness"].as_f64().unwrap()
+    };
+    // A cone's rim 1.2 mm thick around a bore: the faces' centroids,
+    // a third of the way down, read 2.13.
+    let cone = "difference() { cylinder(h=10, r1=5, r2=2.2, $fn=64); \
+                translate([0,0,-1]) cylinder(r=1, h=12, $fn=64); }";
+    let t = wall(cone, CheckSettings::default());
+    assert!(close(t, 1.2, 0.05), "{t}");
+    // The run's barb tip, 1.2 mm at its rim, read 1.39.
+    let t = wall(
+        T3_ADAPTER,
+        CheckSettings {
+            min_wall: 1.2,
+            ..CheckSettings::default()
+        },
+    );
+    assert!(close(t, 1.2, 0.05), "{t}");
+}
+
 #[test]
 fn twisted_extrusions_have_no_false_thin_walls() {
     // Slivers of a fast twist tilt their normals up to 76°, and rays
@@ -547,8 +612,15 @@ fn profiles_give_a_threads_diameters_and_pitch() {
     });
     let p = &v["profile"];
     // Pitch 2 from the crests along +x, over the thread.
-    assert!(close(p["pitch"].as_f64().unwrap(), 2.0, 1e-6), "{p}");
-    assert_eq!(p["pitch_span"], serde_json::json!([2.0, 10.0]), "{p}");
+    assert!(close(p["pitch"].as_f64().unwrap(), 2.0, 1e-4), "{p}");
+    assert!(
+        close(p["pitch_span"][0].as_f64().unwrap(), 2.0, 1e-3),
+        "{p}"
+    );
+    assert!(
+        close(p["pitch_span"][1].as_f64().unwrap(), 10.0, 1e-3),
+        "{p}"
+    );
     // In the thread, the outer contour spans minor to major radius: the
     // grader's 23.28 major diameter.
     let band = p["bands"][60].as_array().unwrap();
@@ -570,6 +642,39 @@ fn profiles_give_a_threads_diameters_and_pitch() {
     // Too many samples is refused.
     assert!(session::measure::Profile::new(0.0, 100.0, 0.01).is_err());
     assert!(session::measure::Profile::new(1.0, 0.0, 0.1).is_err());
+}
+
+#[test]
+fn crests_are_refined_between_samples_and_cut_ends_left_out() {
+    let crests = |from: f64, to: f64, step: f64| {
+        let v = measure(T3_ADAPTER, |r| {
+            r.profile = Some(session::measure::Profile::new(from, to, step).unwrap());
+        });
+        v["profile"].clone()
+    };
+    // The run's barb: flat tops 0.4 wide at 27.6, 35.0 and 42.4, which a
+    // 0.4 step put at 27.6, 35.2 and 42.4.
+    let p = crests(24.4, 49.4, 0.4);
+    let at: Vec<f64> = p["crests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap())
+        .collect();
+    assert_eq!(at.len(), 3, "{p}");
+    for (x, want) in at.iter().zip([27.6, 35.0, 42.4]) {
+        assert!(close(*x, want, 0.05), "{at:?}");
+    }
+    // The thread: its last crest is half as wide where the flange starts,
+    // and fitted in, the pitch was 1.98.
+    for (from, to, step) in [(0.0, 12.0, 0.1), (0.0, 49.0, 0.1), (0.05, 12.0, 0.3)] {
+        let p = crests(from, to, step);
+        assert!(close(p["pitch"].as_f64().unwrap(), 2.0, 1e-3), "{p}");
+        assert!(
+            close(p["pitch_span"][1].as_f64().unwrap(), 10.0, 1e-3),
+            "{p}"
+        );
+    }
 }
 
 #[test]

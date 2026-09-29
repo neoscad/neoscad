@@ -28,6 +28,11 @@ pub struct DocsRequest {
     /// names the agent will look up one at a time anyway). A name asked
     /// for is answered whatever its spelling.
     pub brief: bool,
+    /// How the caller spells the file argument, for the hint when a name
+    /// is not found: `None` is the command line's `--in FILE`. An MCP
+    /// client told to "add --in FILE" has no such flag (its argument is
+    /// `path`), as the T3 agent of run cad-20260929T031249Z found.
+    pub file_arg: Option<String>,
 }
 
 /// In a brief index, the included and used files' names are listed only
@@ -184,7 +189,10 @@ impl Session {
             if let Some(h) = &hint {
                 msg.push_str(&format!("; did you mean '{h}'?"));
             } else if req.file.is_none() {
-                msg.push_str("; for your own or a library's code add --in FILE");
+                msg.push_str(&format!(
+                    "; for your own or a library's code add {}",
+                    req.file_arg.as_deref().unwrap_or("--in FILE")
+                ));
             }
             return DocsResult {
                 exit_code: 1,

@@ -635,6 +635,10 @@ fn format_docs_and_test_are_served() {
     assert_eq!(r["entries"][0]["signature"], "cube(size=1, center=false)");
     let r = s.result("docs", json!({"name": "m", "file": p}));
     assert_eq!(r["entries"][0]["signature"], "module m()", "{r}");
+    // Not found: the hint names the request's parameter, not a flag.
+    let r = s.result("docs", json!({"name": "thread"}));
+    assert_eq!(r["exit_code"], 1, "{r}");
+    assert!(r["error"].as_str().unwrap().ends_with("add `file`"), "{r}");
     // `test`: the document's buffer is what runs.
     let t = d.join("m_test.scad");
     std::fs::write(&t, "// @expect volume 8\nmodule test_c() cube(2);\n").unwrap();

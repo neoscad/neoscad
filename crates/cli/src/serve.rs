@@ -841,6 +841,9 @@ fn docs_method(s: &session::Session, params: &Value) -> Reply {
             .get("brief")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        // A request names its file with `file`; a client that wraps the
+        // method (the MCP server's `path`) says how its own users do.
+        file_arg: Some(str_param(params, "file_arg").unwrap_or_else(|| "`file`".into())),
     });
     Ok(merge(r.json, json!({"text": r.text})))
 }
