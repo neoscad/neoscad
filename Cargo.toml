@@ -5,7 +5,9 @@ members = ["crates/*"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.1.0"
+# The release rehearsal: tag v0.1.0-rc.1 runs every release job for real.
+# Back to "0.1.0" (with `publish-prereleases` below) for the release.
+version = "0.1.0-rc.1"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-2.0-or-later"
@@ -122,6 +124,12 @@ formula = "neoscad"
 # source, filled package manifests and ghcr.io image
 # (.github/workflows/publish-packages.yml).
 publish-jobs = ["homebrew", "./publish-macos-app", "./publish-packages"]
+# For the v0.1.0-rc.1 rehearsal only: cargo-dist skips every publish job
+# (the tap's formula, the DMG, the packages and the image) for a
+# prerelease tag unless this is set, and the rehearsal exists to run them.
+# Remove it for v0.1.0: Homebrew has no prerelease channel, so with it set
+# any later prerelease tag would replace the tap's stable `neoscad` formula.
+publish-prereleases = true
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
