@@ -3,7 +3,7 @@
 # (docs/release.md; docs/audits/macos-prep.md, 8j). Writes to dist/:
 #
 #   NeoSCAD-<version>-<build>.dmg                 the app and an Applications link
-#   neoscad-<version>-<build>-macos-arm64.tar.gz  the CLI and its licence
+#   neoscad-<version>-<build>-macos-arm64.tar.gz  the CLI and its licences
 #   neoscad                                       the same CLI, bare
 #   NeoSCAD-<version>-<build>-dSYMs.zip           debug symbols (app, core, CLI)
 #   BUILDINFO.txt                                 what was built, how, and checked
@@ -305,6 +305,10 @@ dmg_root=$work/dmg
 mkdir -p "$dmg_root"
 ditto "$app" "$dmg_root/NeoSCAD.app"
 ln -s /Applications "$dmg_root/Applications"
+# The licences travel with the app (the fonts' OFL, MCAD's LGPL and the
+# vendored kernels' notices require it): LICENSE, NOTICE and licenses/ in
+# a folder beside it.
+"$root/scripts/release/licenses.sh" "$dmg_root/Licenses"
 dmg=$dist/$name.dmg
 # HFS+ and zlib: mountable on every macOS the app supports. No background
 # image or window layout: those need Finder scripting (a prompt for
@@ -367,12 +371,14 @@ if [ -n "$notary" ]; then
 fi
 cli_spctl=$(spctl -a -vv -t exec "$cli" 2>&1 || true)
 echo "$cli_spctl"
-cp "$root/LICENSE" "$cli_stage/LICENSE"
+# LICENSE, NOTICE and licenses/ (scripts/release/licenses.sh), as every
+# NeoSCAD artifact carries them.
+"$root/scripts/release/licenses.sh" "$cli_stage"
 cp "$cli" "$dist/neoscad"
 # Owner and group normalised, and no AppleDouble files for the extended
 # attributes, so the tarball unpacks the same for anyone.
 COPYFILE_DISABLE=1 tar -C "$cli_stage" --uid 0 --gid 0 --uname root --gname wheel \
-    -czf "$dist/$cli_name.tar.gz" neoscad LICENSE
+    -czf "$dist/$cli_name.tar.gz" neoscad LICENSE NOTICE licenses
 
 # --- Symbols, record and checksums -----------------------------------------
 

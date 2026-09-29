@@ -171,13 +171,7 @@ pub fn info() -> String {
         "Resource Path: {}\n",
         host::resource_path().display()
     ));
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    if let Some(h) = &home {
-        let user = if cfg!(target_os = "macos") {
-            h.join("Documents/OpenSCAD/libraries")
-        } else {
-            h.join(".local/share/OpenSCAD/libraries")
-        };
+    if let Some(user) = lang::loader::LibraryPath::user_dir() {
         s.push_str(&format!("User Library Path: {}\n", user.display()));
     }
     let env = |k: &str| {

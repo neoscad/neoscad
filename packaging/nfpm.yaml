@@ -1,0 +1,72 @@
+# .deb and .rpm packages of the `neoscad` CLI, built by nfpm
+# (https://nfpm.goreleaser.com) from a Linux release binary:
+#
+#   NEOSCAD_VERSION=0.1.0 NEOSCAD_ARCH=arm64 \
+#     nfpm package -f packaging/nfpm.yaml -p deb -t dist/
+#
+# Run from a directory holding `stage/`: the binary (stage/neoscad) and
+# what scripts/release/licenses.sh writes (LICENSE, NOTICE, licenses/).
+# nfpm expands environment variables in fields such as version and arch,
+# but not in file sources, hence the fixed relative paths.
+#
+# scripts/release/linux-packages.sh does this in Docker. NEOSCAD_ARCH is
+# nfpm's GOARCH-style name (amd64, arm64); nfpm maps it to x86_64/aarch64
+# for the .rpm. The binary is self-contained (fonts and MCAD embedded) and
+# needs only glibc 2.28; PNG export also needs a Vulkan or OpenGL driver,
+# which Mesa provides without a GPU, hence the recommendations.
+name: neoscad
+arch: ${NEOSCAD_ARCH}
+platform: linux
+version: ${NEOSCAD_VERSION}
+version_schema: semver
+release: 1
+section: graphics
+priority: optional
+maintainer: The NeoSCAD contributors <packages@neoscad.org>
+vendor: NeoSCAD
+homepage: https://neoscad.org
+license: GPL-2.0-or-later
+description: |-
+  OpenSCAD-compatible programmable solid CAD, reimplemented.
+  neoscad reads OpenSCAD's language and command-line flags and exports STL,
+  3MF, OFF, VRML, SVG, DXF, PDF and PNG. It also runs as a JSON-RPC
+  server (neoscad serve), a Model Context Protocol server for AI agents
+  (neoscad mcp) and a language server (neoscad lsp).
+
+contents:
+  - src: stage/neoscad
+    dst: /usr/bin/neoscad
+    file_info:
+      mode: 0755
+  - src: stage/LICENSE
+    dst: /usr/share/doc/neoscad/LICENSE
+  - src: stage/NOTICE
+    dst: /usr/share/doc/neoscad/NOTICE
+  - src: stage/licenses/
+    dst: /usr/share/doc/neoscad/licenses/
+    type: tree
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.28)
+    recommends:
+      # lavapipe (Vulkan) and llvmpipe (EGL): PNG export without a GPU.
+      - mesa-vulkan-drivers | libegl1
+      - libvulkan1
+  rpm:
+    depends:
+      - glibc >= 2.28
+    recommends:
+      - mesa-vulkan-drivers
+      - vulkan-loader
+
+rpm:
+  group: Applications/Engineering
+  summary: OpenSCAD-compatible programmable solid CAD
+  compression: zstd
+
+deb:
+  compression: xz
+  fields:
+    Bugs: https://github.com/neoscad/neoscad/issues

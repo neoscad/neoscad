@@ -1,0 +1,34 @@
+# Template for the AUR package neoscad-bin: the release's prebuilt Linux
+# binaries. scripts/release/fill-manifests.sh replaces @VERSION@ and the
+# @SHA256_...@ placeholders from a release's checksums; the filled file is
+# attached to the GitHub Release, and a maintainer pushes it (with
+# `makepkg --printsrcinfo > .SRCINFO`) to ssh://aur@aur.archlinux.org/neoscad-bin.git.
+#
+# Maintainer: The NeoSCAD contributors <packages@neoscad.org>
+pkgname=neoscad-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='OpenSCAD-compatible programmable solid CAD (command line, MCP and language servers)'
+arch=('x86_64' 'aarch64')
+url='https://neoscad.org'
+license=('GPL-2.0-or-later')
+depends=('glibc' 'gcc-libs')
+# PNG export needs a Vulkan or OpenGL driver; these are Mesa's software
+# renderers, enough on a machine without a GPU.
+optdepends=('vulkan-swrast: PNG export without a GPU (lavapipe)'
+            'mesa: PNG export through OpenGL (llvmpipe)')
+provides=('neoscad')
+conflicts=('neoscad')
+_base="https://github.com/neoscad/neoscad/releases/download/v${pkgver}"
+source_x86_64=("${_base}/neoscad-cli-x86_64-unknown-linux-gnu.tar.xz")
+source_aarch64=("${_base}/neoscad-cli-aarch64-unknown-linux-gnu.tar.xz")
+sha256sums_x86_64=('@SHA256_X86_64_UNKNOWN_LINUX_GNU@')
+sha256sums_aarch64=('@SHA256_AARCH64_UNKNOWN_LINUX_GNU@')
+
+package() {
+  cd "neoscad-cli-${CARCH}-unknown-linux-gnu"
+  install -Dm755 neoscad "${pkgdir}/usr/bin/neoscad"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 NOTICE "${pkgdir}/usr/share/licenses/${pkgname}/NOTICE"
+  install -Dm644 -t "${pkgdir}/usr/share/licenses/${pkgname}/licenses" licenses/*
+}

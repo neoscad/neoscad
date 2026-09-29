@@ -139,17 +139,49 @@ impl LibraryPath {
                 });
             }
         }
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            let user = if cfg!(target_os = "macos") {
-                home.join("Documents/OpenSCAD/libraries")
-            } else {
-                home.join(".local/share/OpenSCAD/libraries")
-            };
+        if let Some(user) = Self::user_dir() {
             dirs.push(user);
         }
         Self(dirs)
     }
+
+    /// The per-user library directory, `PlatformUtils::userLibraryPath()`
+    /// (`PlatformUtils.cc`, `userPath`): `<documents>/OpenSCAD/libraries`,
+    /// where the documents directory is `~/Documents` on macOS
+    /// (`PlatformUtils-mac.mm`), `$HOME/.local/share` on other Unix systems
+    /// (`PlatformUtils-posix.cc`, `documentsPath`), and the shell's
+    /// Documents folder on Windows (`PlatformUtils-win.cc`). `None` when
+    /// that base cannot be found (no `HOME`, or no known folder).
+    pub fn user_dir() -> Option<PathBuf> {
+        let base = if cfg!(windows) {
+            windows_documents()?
+        } else {
+            let home = PathBuf::from(std::env::var_os("HOME")?);
+            if cfg!(target_os = "macos") {
+                home.join("Documents")
+            } else {
+                home.join(".local/share")
+            }
+        };
+        Some(base.join("OpenSCAD").join("libraries"))
+    }
+}
+
+/// The Windows Documents folder. OpenSCAD asks the shell for
+/// `CSIDL_PERSONAL` (`PlatformUtils-win.cc`, `documentsPath`), whose
+/// current name is `FOLDERID_Documents`; `dirs` makes that known-folder
+/// call without `unsafe` in this crate. `%USERPROFILE%\Documents` is not
+/// equivalent: it is wrong whenever the folder is redirected (OneDrive's
+/// Documents backup does this by default on Windows 11), and libraries a
+/// user installed for OpenSCAD would then not be found.
+#[cfg(windows)]
+fn windows_documents() -> Option<PathBuf> {
+    dirs::document_dir()
+}
+
+#[cfg(not(windows))]
+fn windows_documents() -> Option<PathBuf> {
+    None
 }
 
 /// A `use` directive after resolution.
@@ -739,6 +771,32 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    /// `PlatformUtils::userLibraryPath()`: `<documents>/OpenSCAD/libraries`,
+    /// with documents at `~/Documents` on macOS and `~/.local/share` on
+    /// other Unix systems. (Windows' known folder is checked by CI's
+    /// Windows job against PowerShell's `MyDocuments`.)
+    #[test]
+    fn the_user_library_dir_is_openscads() {
+        let Some(dir) = LibraryPath::user_dir() else {
+            return;
+        };
+        assert!(dir.ends_with("OpenSCAD/libraries"), "{}", dir.display());
+        if cfg!(unix)
+            && let Some(home) = std::env::var_os("HOME")
+        {
+            let docs = if cfg!(target_os = "macos") {
+                "Documents"
+            } else {
+                ".local/share"
+            };
+            assert_eq!(
+                dir,
+                PathBuf::from(home).join(docs).join("OpenSCAD/libraries")
+            );
+        }
+        assert_eq!(LibraryPath::from_env().0.last(), Some(&dir));
+    }
 
     /// In-memory files for tests; directories are implied by file paths.
     struct MemFs(HashMap<PathBuf, Vec<u8>>);

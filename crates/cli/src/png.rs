@@ -144,19 +144,44 @@ pub fn with_view(mut cam: Camera, view: &eval::Camera) -> Camera {
 pub fn offscreen() -> Result<&'static Offscreen, String> {
     static DEVICE: OnceLock<Result<Offscreen, String>> = OnceLock::new();
     DEVICE
-        .get_or_init(|| Offscreen::new_blocking(wgpu_backends()).map_err(|e| e.to_string()))
+        .get_or_init(open_offscreen)
         .as_ref()
         .map_err(Clone::clone)
 }
 
-/// Metal alone on Apple platforms, which saves probing for a Vulkan
-/// loader on every cold start; the primary backends elsewhere.
-fn wgpu_backends() -> render::offscreen::Backends {
+/// Open the GPU device on the first backends that offer one.
+///
+/// Apple platforms use Metal alone, which saves probing for a Vulkan loader
+/// on every cold start. Elsewhere the primary backends (Vulkan, Direct3D 12)
+/// come first, then OpenGL: a headless Linux server or container often has
+/// Mesa's llvmpipe GL driver (EGL) but no Vulkan ICD, and without the GL
+/// retry `-o x.png` failed there although the machine could render.
+fn open_offscreen() -> Result<Offscreen, String> {
+    use render::offscreen::Backends;
     if cfg!(target_vendor = "apple") {
-        render::offscreen::Backends::METAL
-    } else {
-        render::offscreen::Backends::PRIMARY
+        return Offscreen::new_blocking(Backends::METAL).map_err(|e| e.to_string());
     }
+    let primary = match Offscreen::new_blocking(Backends::PRIMARY) {
+        Ok(o) => return Ok(o),
+        Err(e) => e,
+    };
+    Offscreen::new_blocking(Backends::GL).map_err(|gl| no_gpu_message(&primary, &gl))
+}
+
+/// Both failures, and on Linux and the BSDs what to install: a software
+/// renderer is enough, so a machine without a GPU needs only Mesa's
+/// packages, which the bare error would not tell anyone.
+fn no_gpu_message(primary: &render::offscreen::Error, gl: &render::offscreen::Error) -> String {
+    let mut s = format!("{primary}; OpenGL: {gl}");
+    if cfg!(all(unix, not(target_vendor = "apple"))) {
+        s.push_str(
+            ". PNG export needs a Vulkan or OpenGL driver; without a GPU, install \
+             Mesa's software renderers (Debian/Ubuntu: mesa-vulkan-drivers or \
+             libegl1 libgl1-mesa-dri; Fedora: mesa-vulkan-drivers or mesa-dri-drivers; \
+             Arch: vulkan-swrast or mesa)",
+        );
+    }
+    s
 }
 
 /// Draw `geometry` (the render result; `None` when empty) as a PNG, and

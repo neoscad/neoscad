@@ -11,5 +11,11 @@ name = "lang"
 
 [dependencies]
 
+# The Windows Documents known folder, for the user library directory
+# (`LibraryPath::user_dir`); a safe wrapper, since the workspace forbids
+# `unsafe`. Windows only: every other platform derives it from `HOME`.
+[target.'cfg(windows)'.dependencies]
+dirs = "7"
+
 [lints]
 workspace = true

@@ -57,6 +57,15 @@ change would get a new `protocol` number; there has been none.
 - `--limit NAME=VALUE` (repeatable, both transports) changes one of the
   resource limits every request runs under; see "Resource limits".
 
+**Platforms.** stdio works everywhere, and so do `neoscad mcp` and
+`neoscad lsp`, which use it. The socket transport is Unix-only (macOS,
+Linux, the BSDs). On Windows `neoscad serve --socket` fails at once with
+"Unix sockets are not available here; use `neoscad serve` on stdio"
+(`crates/cli/src/serve.rs`, the `cfg(not(unix))` `listen`), `--status`
+and `--stop` find no server, and the command line never tries a server:
+every run is in-process, with the same output. Named pipes, the Windows
+equivalent, are a later decision (`docs/packaging.md`).
+
 ## Framing
 
 LSP's: every message is a header, a blank line and a UTF-8 JSON body.

@@ -1,0 +1,16 @@
+# The toolchain every build uses: local, CI, cargo-dist's release jobs and
+# the Docker scripts. Output is compared byte for byte against OpenSCAD's,
+# and a compiler upgrade can change floating-point code generation, so it
+# moves deliberately (with a full conformance run), not whenever rustup
+# updates stable.
+#
+# wasm32 is listed because pinning makes rustup install a separate
+# `1.98.1` toolchain beside `stable`, without the targets added to
+# `stable`, and scripts/wasm-check.sh skips (exit 0) when the target is
+# missing: without this line the WASM check silently stopped running.
+# cargo-dist adds the release targets itself.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

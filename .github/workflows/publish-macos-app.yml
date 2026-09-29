@@ -1,0 +1,112 @@
+# The macOS app: scripts/apple/release.sh builds, signs, notarizes and
+# smoke-tests the DMG, and this job attaches it to the GitHub Release that
+# cargo-dist's release.yml created. It runs as one of that workflow's
+# publish jobs (`publish-jobs` in Cargo.toml's [workspace.metadata.dist]),
+# after the release exists and before it is announced, because a release
+# made with the workflow token cannot trigger a separate workflow.
+#
+# cargo-dist's own macOS signing is not used: it signs a bare binary, while
+# the app needs its hardened-runtime entitlements, notarization and a
+# stapled DMG, which release.sh already does and checks.
+#
+# Secrets (repository settings, all optional as a set):
+#   NEOSCAD_DEVELOPER_ID_P12           base64 of the "Developer ID Application" .p12
+#   NEOSCAD_DEVELOPER_ID_P12_PASSWORD  its password
+#   NEOSCAD_SIGN_IDENTITY              the identity's name or SHA-1
+#   NEOSCAD_TEAM_ID                    the Apple team id
+#   NEOSCAD_NOTARY_KEY                 an App Store Connect API key (.p8 contents)
+#   NEOSCAD_NOTARY_KEY_ID              its key id
+#   NEOSCAD_NOTARY_ISSUER              its issuer id
+# Without them the app is built ad-hoc signed and smoke-tested, and nothing
+# is uploaded: an ad-hoc DMG fails Gatekeeper on every other Mac.
+#
+# workflow_dispatch runs the same build as a dry run (no upload).
+name: macOS app
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  app:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      HAVE_SIGNING: ${{ secrets.NEOSCAD_DEVELOPER_ID_P12 != '' && secrets.NEOSCAD_NOTARY_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # release.sh numbers the build with `git rev-list --count HEAD`.
+          fetch-depth: 0
+
+      - name: Tools
+        run: |
+          brew install xcodegen
+          rustup show active-toolchain
+          node --version
+
+      - name: Signing keychain
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          P12: ${{ secrets.NEOSCAD_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.NEOSCAD_DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NEOSCAD_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NEOSCAD_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NEOSCAD_NOTARY_ISSUER }}
+        run: |
+          kc="$RUNNER_TEMP/neoscad.keychain-db"
+          kc_pass=$(uuidgen)
+          security create-keychain -p "$kc_pass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kc_pass" "$kc"
+          # The default keychain, so release.sh's `security find-identity`
+          # and notarytool's --keychain-profile find what is stored here.
+          security list-keychains -d user -s "$kc"
+          security default-keychain -s "$kc"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/id.p12"
+          security import "$RUNNER_TEMP/id.p12" -k "$kc" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kc_pass" "$kc" >/dev/null
+          rm "$RUNNER_TEMP/id.p12"
+          printf '%s' "$NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool store-credentials neoscad-notary \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
+          rm "$RUNNER_TEMP/notary.p8"
+
+      - name: Build, sign, notarize, smoke-test
+        env:
+          NEOSCAD_SIGN_IDENTITY: ${{ env.HAVE_SIGNING == 'true' && secrets.NEOSCAD_SIGN_IDENTITY || '' }}
+          NEOSCAD_TEAM_ID: ${{ secrets.NEOSCAD_TEAM_ID }}
+          NEOSCAD_NOTARY_PROFILE: ${{ env.HAVE_SIGNING == 'true' && 'neoscad-notary' || '' }}
+        run: scripts/apple/release.sh
+
+      - name: Attach to the release
+        if: env.HAVE_SIGNING == 'true' && inputs.plan != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
+        run: |
+          cd dist
+          # The DMG, its symbols and build record; the CLI tarball release.sh
+          # also makes duplicates cargo-dist's aarch64-apple-darwin archive.
+          files=(NeoSCAD-*.dmg NeoSCAD-*-dSYMs.zip)
+          shasum -a 256 "${files[@]}" > NeoSCAD-macos-app.sha256
+          cp BUILDINFO.txt NeoSCAD-macos-app-BUILDINFO.txt
+          gh release upload "$TAG" "${files[@]}" NeoSCAD-macos-app.sha256 \
+            NeoSCAD-macos-app-BUILDINFO.txt --repo "$GITHUB_REPOSITORY"
+
+      - name: Unsigned build
+        if: env.HAVE_SIGNING != 'true'
+        run: echo "::warning::No Developer ID secrets; the app was built ad-hoc signed and not uploaded."
+
+      - name: Remove the keychain
+        if: always() && env.HAVE_SIGNING == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/neoscad.keychain-db" || true

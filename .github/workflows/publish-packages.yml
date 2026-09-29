@@ -1,0 +1,109 @@
+# What a release adds beyond cargo-dist's archives and installers, once the
+# GitHub Release exists (a cargo-dist publish job: `publish-jobs` in
+# Cargo.toml's [workspace.metadata.dist]):
+#
+# - .deb and .rpm for Linux x86_64 and aarch64, wrapped by nfpm
+#   (packaging/nfpm.yaml) around the release's own glibc 2.28 binaries;
+# - the vendored-dependency source tarball (scripts/release/source-tarballs.sh);
+#   cargo-dist already attaches the plain source.tar.gz;
+# - filled package-manager manifests (scripts/release/fill-manifests.sh):
+#   the AUR PKGBUILD, the Scoop manifest and the winget manifests, attached
+#   for a maintainer to submit (nothing here pushes to those registries);
+# - the ghcr.io/neoscad/neoscad image (packaging/docker/Dockerfile), for
+#   linux/amd64 and linux/arm64.
+name: Packages
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  NFPM_IMAGE: goreleaser/nfpm:v2.47.0
+
+jobs:
+  packages:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Version
+        run: echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Release archives and checksums
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/release" \
+            --pattern '*.sha256' --pattern 'neoscad-cli-*-unknown-linux-gnu.tar.xz'
+
+      - name: .deb and .rpm
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkg"
+          for pair in x86_64:amd64 aarch64:arm64; do
+            triple=${pair%%:*}-unknown-linux-gnu
+            arch=${pair##*:}
+            work=$RUNNER_TEMP/nfpm-$arch
+            mkdir -p "$work"
+            tar -xJf "$RUNNER_TEMP/release/neoscad-cli-$triple.tar.xz" -C "$work"
+            mv "$work/neoscad-cli-$triple" "$work/stage"
+            cp packaging/nfpm.yaml "$work/"
+            for fmt in deb rpm; do
+              docker run --rm -v "$work:/work" -v "$RUNNER_TEMP/pkg:/out" -w /work \
+                -e NEOSCAD_VERSION="$VERSION" -e NEOSCAD_ARCH="$arch" \
+                "$NFPM_IMAGE" package -f nfpm.yaml -p "$fmt" -t /out/
+            done
+          done
+          cd "$RUNNER_TEMP/pkg"
+          for f in *.deb *.rpm; do sha256sum "$f" > "$f.sha256"; done
+          docker run --rm -v "$PWD:/out:ro" debian:bookworm-slim \
+            sh -c 'for f in /out/*.deb; do dpkg-deb --info "$f"; done'
+
+      - name: Vendored source tarball
+        run: scripts/release/source-tarballs.sh "$RUNNER_TEMP/source"
+
+      - name: Package-manager manifests
+        run: scripts/release/fill-manifests.sh "$VERSION" "$RUNNER_TEMP/release" "$RUNNER_TEMP/manifests"
+
+      - name: Attach to the release
+        run: |
+          cd "$RUNNER_TEMP"
+          (cd manifests && tar -czf ../neoscad-package-manifests.tar.gz ./*)
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
+            pkg/*.deb pkg/*.rpm pkg/*.sha256 \
+            "source/neoscad-$VERSION-vendor.tar.gz" \
+            neoscad-package-manifests.tar.gz
+
+  image:
+    needs: packages
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        run: |
+          version=${TAG#v}
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            -f packaging/docker/Dockerfile --build-arg NEOSCAD_VERSION="$version" \
+            -t "ghcr.io/neoscad/neoscad:$version" -t ghcr.io/neoscad/neoscad:latest \
+            --push packaging/docker

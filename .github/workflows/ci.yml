@@ -1,0 +1,163 @@
+# Tests on every pull request and push to main, and the gate a release
+# passes before cargo-dist builds anything (release.yml calls this workflow
+# as a plan job: `plan-jobs` in Cargo.toml's [workspace.metadata.dist]).
+#
+# - lint: rustfmt, the licence copies, the release config;
+# - test: clippy, cargo test and the conformance suite on macOS arm64,
+#   Linux x86_64 and Linux aarch64 (output depends on the architecture and
+#   the platform's libm, so each is its own output path);
+# - windows: the CLI builds and its tests pass (x86_64);
+# - wasm: scripts/wasm-check.sh.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow_ref }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: cargo fmt --all --check
+      - run: scripts/release/licenses.sh --check
+      - name: Release workflow matches its config
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/axodotdev/cargo-dist/releases/download/v0.33.0/cargo-dist-installer.sh | sh
+          dist generate --mode=ci --check
+          dist plan --output-format=json > /dev/null
+
+  test:
+    name: test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-15
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+          - name: Linux aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          # lavapipe (Vulkan) and llvmpipe (EGL/GL): software GPUs for PNG
+          # export; poppler for the PDF export cases.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers libvulkan1 libegl1 libgles2 libgl1-mesa-dri poppler-utils
+          # Mesa's Vulkan device-select layer asks Wayland for the default
+          # GPU, and without XDG_RUNTIME_DIR libwayland prints an error line
+          # on every GPU open (packaging/docker/build.Dockerfile).
+          if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+            mkdir -p "$RUNNER_TEMP/xdg"
+            chmod 700 "$RUNNER_TEMP/xdg"
+            echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg" >> "$GITHUB_ENV"
+          fi
+
+      - name: macOS packages
+        if: runner.os == 'macOS'
+        run: |
+          # The OpenSCAD nightly draws tier 3's meshes; poppler rasterises PDFs.
+          brew install poppler
+          brew install --cask openscad@snapshot
+          app=$(find /Applications -maxdepth 1 -name 'OpenSCAD*.app' | head -1)
+          echo "OPENSCAD_RENDERER=$app/Contents/MacOS/OpenSCAD" >> "$GITHUB_ENV"
+
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: cargo test
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            cargo test --locked --no-fail-fast
+          else
+            # neoscad-ffi is the macOS app's core and ships nowhere else;
+            # off Apple, viewport::tests::an_unknown_scheme_is_refused
+            # fails (Viewport::new has no Metal device to reach the scheme
+            # check), so it is left out here (docs/packaging.md, follow-ups).
+            cargo test --locked --no-fail-fast --workspace --exclude neoscad-ffi
+          fi
+
+      - name: OpenSCAD reference
+        uses: actions/cache@v6
+        with:
+          path: .reference/openscad
+          key: openscad-${{ hashFiles('conformance/manifest.json') }}
+      - run: scripts/release/fetch-reference.sh
+
+      - run: cargo build --locked --release -p neoscad-cli -p neoscad-conformance
+      - run: target/release/conformance manifest --check
+
+      - name: Conformance
+        run: |
+          if [ -n "${OPENSCAD_RENDERER:-}" ]; then
+            target/release/conformance run --renderer "$OPENSCAD_RENDERER"
+          else
+            # Tier 3 needs the OpenSCAD nightly to draw neoscad's meshes, and
+            # there is none for Linux aarch64; every other tier runs, and
+            # the baseline gates what runs (docs/packaging.md, "Linux").
+            target/release/conformance run --tier 0 --tier 1 --tier 2 --tier 4 --tier 5
+          fi
+
+      - name: PNG export on the OpenGL fallback
+        if: runner.os == 'Linux'
+        run: |
+          echo 'cube(10); sphere(8);' > "$RUNNER_TEMP/smoke.scad"
+          VK_ICD_FILENAMES=/nonexistent.json VK_DRIVER_FILES=/nonexistent.json \
+            target/release/neoscad "$RUNNER_TEMP/smoke.scad" -o "$RUNNER_TEMP/smoke.png"
+          VK_ICD_FILENAMES=/nonexistent.json VK_DRIVER_FILES=/nonexistent.json \
+            target/release/neoscad --info | grep -E '^GPU'
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release -p neoscad-cli
+      - run: cargo test --locked --no-fail-fast -p neoscad-cli -p neoscad-lang
+      - name: The user library directory is Documents\OpenSCAD\libraries
+        shell: pwsh
+        run: |
+          $want = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'OpenSCAD\libraries'
+          $info = & target\release\neoscad.exe --info
+          $line = $info | Select-String '^User Library Path: '
+          if ("$line" -ne "User Library Path: $want") { throw "got '$line', want '$want'" }
+
+  wasm:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: scripts/wasm-check.sh

@@ -5,6 +5,24 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# The one package cargo-dist ships (the workspace default is `dist = false`;
+# see [workspace.metadata.dist] in the root Cargo.toml).
+[package.metadata.dist]
+dist = true
+
+# The MSI (written by `dist generate` to wix/main.wxs). The GUIDs identify
+# the product across upgrades: never change them. LICENSE installs beside
+# the binary, with no click-through page (the GPL needs none); NOTICE and
+# licenses/ are hand-added to main.wxs (hence `allow-dirty = ["msi"]`).
+[package.metadata.wix]
+upgrade-guid = "B8763D68-FA75-4E47-B0AA-0423F21CE7DD"
+path-guid = "2D8756D7-4A09-48A6-AD12-20F2C29E529B"
+license = "../../LICENSE"
+eula = false
 
 [[bin]]
 name = "neoscad"

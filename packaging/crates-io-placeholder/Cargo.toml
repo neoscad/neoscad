@@ -1,0 +1,19 @@
+# The crates.io name reservation for NeoSCAD. Prepared, not published:
+# the owner publishes it (`cargo publish` from this directory, with their
+# crates.io token) to hold the name `neoscad` until the real CLI can be
+# published (docs/packaging.md, fix 2).
+[package]
+name = "neoscad"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-2.0-or-later"
+description = "Name reservation for NeoSCAD, an OpenSCAD-compatible programmable CAD tool (neoscad.org). The real command-line tool will be published under this name."
+repository = "https://github.com/neoscad/neoscad"
+homepage = "https://neoscad.org"
+readme = "README.md"
+keywords = ["cad", "openscad", "3d-printing"]
+categories = ["graphics", "command-line-utilities"]
+
+# Not a member of the NeoSCAD workspace this directory sits in.
+[workspace]
