@@ -360,7 +360,19 @@ ECHO: { nominal = { ascent = 9.05278; descent = -2.11918; }; max = { ascent = 9.
 ECHO: { nominal = { ascent = 12.5733; descent = -2.9433; }; max = { ascent = 13.6109; descent = -4.2114; }; interline = 15.9709; font = { family = "Liberation Sans"; style = "Regular"; }; }
 ECHO: true, false, false
 ECHO: 71.2506, 72.5639, 12.5888"#;
-    assert_lines(&run(src, &["textmetrics"], &[]), expected);
+    // The advance adds each glyph's `advance * spacing` in one expression,
+    // which OpenSCAD's arm64 build fuses and its x86_64 build does not
+    // (`eval::fma`). For "abc" at spacing 1.5 that lands either side of a
+    // rounding boundary: the nightly's arm64 slice echoes 37.5062 and its
+    // x86_64 slice, run under Rosetta on the same program, 37.5061.
+    // neoscad follows the platform, so each architecture gets its own
+    // slice's answer; every other line is the same on both.
+    let expected = if cfg!(target_arch = "aarch64") {
+        expected.to_string()
+    } else {
+        expected.replace("advance = [37.5062, 0]", "advance = [37.5061, 0]")
+    };
+    assert_lines(&run(src, &["textmetrics"], &[]), &expected);
 }
 
 #[test]

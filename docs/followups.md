@@ -871,6 +871,11 @@ lead them, come roughly in order of user impact.
   instead of the text summary when a result has both, so the text is
   what other clients see. If a client shows both, a result costs about
   twice its tokens; a flag to send only one would fix that. (7c)
+- `crates/cli/tests/memory.rs` times each MCP render only after the reply
+  arrives, and `Mcp::tool` reads it with no deadline: a server that spun
+  without growing (so the 1 GB watch never kills it) would hang the test
+  rather than fail it. Its time bound is 60 s since the Linux x86_64 CI
+  runner took 11 and 14 s where an M-series Mac takes 2 s.
 - Inline `source` is one document per `base_dir` (`inline.scad`), so
   inline calls take turns rather than running in parallel, and while
   one runs it shadows a real `inline.scad` in that directory. (7c)
@@ -1002,6 +1007,17 @@ lead them, come roughly in order of user impact.
   mesh IDs as C++ `Compose` does (`csg_tree.cpp:386-395`); `batch` in
   `manifold_geom.rs` renumbers colliding operands first. Report upstream,
   then drop the workaround. (5b)
+- The libtess2 port's broken-mesh path (`arena.rs`) has no known input
+  where multiply-adds are not fused (x86_64, wasm32): 3 million random
+  polygons searched under Rosetta broke none, so
+  `a_broken_polygon_does_not_affect_the_next` sets the flag by hand there
+  and only aarch64 runs a real break end to end. A longer search (or
+  upstream libtess2's own crash reports) could supply an x86_64 input.
+- Tests whose expected numbers came from arm64 runs fail on x86_64 when
+  those numbers sit on a rounding boundary (`textmetrics` advance,
+  `stl-precision` counts); the Linux x86_64 CI job is the only place that
+  shows it. Where the nightly has an x86_64 slice, take the x86_64
+  expectation from it (`arch -x86_64`), as `tests/experimental.rs` does.
 
 ## WASM
 - Recursion on wasm32 stops at a frame budget calibrated for V8's default
@@ -1112,6 +1128,15 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   Windows too.
 - `cargo test -p neoscad-cli -p neoscad-lang` is only run on Windows by
   CI; the other crates' tests (`session`, `lsp`, `eval`) are not run there.
+- `neoscad mcp`'s `roots::resolve` makes a verbatim path and a verbatim
+  symlink target plain (Rust's `read_link` answers `\\?\` for absolute
+  targets), so both are judged like their plain spelling. The path case
+  is in `roots_refuse_escapes`; the symlink case has no Windows test
+  (creating a symlink there needs Developer Mode or an elevated token).
+- `crates/cli/tests/memory.rs` runs on Windows but reads no memory there
+  (it uses `/proc` or `ps`), so its resident bounds and its 1 GB kill
+  guard do nothing on that job; only the limits' errors are checked.
+  `tasklist`/`taskkill` or `GetProcessMemoryInfo` would cover it.
 
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.

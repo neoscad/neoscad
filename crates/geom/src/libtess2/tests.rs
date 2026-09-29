@@ -285,6 +285,14 @@ fn the_fast_path_agrees_with_the_full_sweep() {
 /// yields nothing, and leaves nothing behind: the next polygon comes out
 /// as from a fresh tessellator. The broken flag of the dictionary arena
 /// once survived into the next polygon and emptied it.
+///
+/// The polygon below breaks the mesh only where multiply-adds fuse
+/// (`geom::fma`: aarch64). Rounded twice, as on x86_64 and wasm32, it
+/// tessellates into eight triangles, and no breaking input is known
+/// there: a search of 3 million random polygons (grids of several steps,
+/// tilted planes, several contours, scales from 1e-30 to 3e7) under
+/// Rosetta found none. So the whole path is checked on aarch64, and on
+/// every platform the flag is also set by hand before the next polygon.
 #[test]
 fn a_broken_polygon_does_not_affect_the_next() {
     let broken: [[f32; 3]; 10] = [
@@ -315,7 +323,10 @@ fn a_broken_polygon_does_not_affect_the_next() {
         t.set_fast_paths(fast);
         let mut out = Vec::new();
         t.tessellate_polygon(&broken, &face(10), &mut out);
-        assert!(out.is_empty(), "the broken polygon produced {out:?}");
+        if cfg!(target_arch = "aarch64") {
+            assert!(out.is_empty(), "the broken polygon produced {out:?}");
+        }
+        out.clear();
         t.tessellate_polygon(&next, &face(8), &mut out);
         let mut fresh = Tessellator::new();
         fresh.set_fast_paths(fast);
@@ -324,6 +335,19 @@ fn a_broken_polygon_does_not_affect_the_next() {
         assert!(!want.is_empty());
         assert_eq!(out, want);
     }
+    // The flag a break leaves set, set by hand: the next polygon starts
+    // clean and comes out as from a fresh tessellator.
+    let run = |poisoned: bool| {
+        let mut t = super::Tess::default();
+        if poisoned {
+            t.broken.set(true);
+        }
+        t.begin(&next, &[8]);
+        assert!(t.tesselate(), "poisoned: {poisoned}");
+        assert!(!t.failed(), "poisoned: {poisoned}");
+        (t.elements.clone(), t.vertex_indices.clone())
+    };
+    assert_eq!(run(true), run(false));
 }
 
 /// Holes: a contour inside the outline and winding against it (as a Nef

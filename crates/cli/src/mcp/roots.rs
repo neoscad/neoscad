@@ -104,7 +104,11 @@ const MAX_LINKS: u32 = 40;
 /// finding 2). A link loop resolves to an empty path, which no root
 /// contains.
 pub fn resolve(p: &Path) -> PathBuf {
-    let p = session::normal(p);
+    // Roots are plain (see `Roots::new`), and a verbatim `\\?\C:\...`
+    // spelling of a path inside one shares none of its components, so it
+    // would be refused. `plain` only rewrites a verbatim path whose plain
+    // spelling names the same file; any other stays verbatim and outside.
+    let p = session::normal(&lang::paths::plain(p.to_path_buf()));
     let mut todo: std::collections::VecDeque<std::ffi::OsString> =
         std::collections::VecDeque::new();
     let mut out = PathBuf::new();
@@ -130,6 +134,11 @@ pub fn resolve(p: &Path) -> PathBuf {
                 let Ok(target) = std::fs::read_link(&next) else {
                     return PathBuf::new();
                 };
+                // Windows' `read_link` gives an absolute target in the
+                // verbatim form (it turns the reparse point's `\??\` into
+                // `\\?\`), so a link to elsewhere inside a root would
+                // resolve outside it.
+                let target = lang::paths::plain(target);
                 if hops > MAX_LINKS {
                     return PathBuf::new();
                 }
@@ -243,8 +252,18 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("secret.scad"), "cube(1);").unwrap();
         let roots = Roots::new(std::slice::from_ref(&inside), &[]);
-        let inside = inside.canonicalize().unwrap();
+        // Plain, as the roots are and as paths joined onto the working
+        // directory or sent by a client are. On Windows `canonicalize`
+        // answers `\\?\C:\...`, where `/` is no separator: joined onto
+        // that, `new/deep/model.stl` would be one (invalid) file name.
+        let verbatim = inside.canonicalize().unwrap();
+        let inside = lang::paths::plain(verbatim.clone());
         assert!(roots.can_write(&inside.join("new/deep/model.stl")));
+        // A verbatim spelling of a path inside is the same file, and is
+        // judged as its plain one; `..` inside one is not folded by
+        // Windows, so that stays outside.
+        assert!(roots.can_write(&verbatim.join("new").join("model.stl")));
+        assert!(!roots.can_read(&verbatim.join("..").join("outside").join("secret.scad")));
         assert!(!roots.can_read(&inside.join("../outside/secret.scad")));
         assert!(!roots.can_write(Path::new("/etc/x")));
         // A symlink inside a root that points out of it is outside.

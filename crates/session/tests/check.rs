@@ -1018,15 +1018,33 @@ const T3_TWISTED: &str = include_str!("data/pilot_t3_twisted_thread.scad");
 #[test]
 fn edges_that_break_only_at_stl_precision_are_a_warning() {
     // Manifold by exact position; the grader's weld of its STL found 738
-    // non-manifold edges, and so does the f32 weld.
+    // non-manifold edges (2998 collapsed triangles), and so does the f32
+    // weld on aarch64, where the grader ran. The counts come from slivers
+    // a few f32 steps wide, so the mesh's last bits decide them, and those
+    // follow the platform's multiply-add rounding (`eval::fma`): on x86_64
+    // the mesh is as manifold but welds to 714 edges and 3094 triangles
+    // (Linux CI and Rosetta alike). So the exact counts are checked on
+    // aarch64, and what holds everywhere is checked everywhere: hundreds
+    // of broken edges, more collapsed triangles than that, and `check`
+    // and `render` reporting the same counts.
     let v = check(T3_TWISTED, false, CheckSettings::default());
     assert_eq!(v["model"]["manifold"], true, "{v}");
     let f = findings(&v, "stl-precision");
     assert_eq!(f.len(), 1, "{v}");
     assert_eq!(f[0]["severity"], "warning");
-    assert_eq!(f[0]["value"], 738.0, "{}", f[0]);
+    let edges = f[0]["value"].as_f64().unwrap() as u64;
     let msg = f[0]["message"].as_str().unwrap();
-    assert!(msg.contains("2998 triangles collapse"), "{msg}");
+    let collapsed: u64 = msg
+        .split(" triangles collapse")
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("{msg}"));
+    if cfg!(target_arch = "aarch64") {
+        assert_eq!((edges, collapsed), (738, 2998), "{msg}");
+    }
+    assert!((100..2000).contains(&edges), "{msg}");
+    assert!(collapsed > edges, "{msg}");
+    assert!(msg.contains(&format!("leaving {edges} edges")), "{msg}");
     // 48 mm is the largest coordinate: f32 spacing 2^-18 there.
     assert!(msg.contains("3.8e-6 mm"), "{msg}");
     assert!(
@@ -1050,8 +1068,8 @@ fn edges_that_break_only_at_stl_precision_are_a_warning() {
         .unwrap();
     let g = r.geometry_json(&scheme.geometry_scheme());
     assert_eq!(g["manifold"], true, "{g}");
-    assert_eq!(g["stl_precision"]["nonmanifold_edges"], 738, "{g}");
-    assert_eq!(g["stl_precision"]["collapsed_faces"], 2998, "{g}");
+    assert_eq!(g["stl_precision"]["nonmanifold_edges"], edges, "{g}");
+    assert_eq!(g["stl_precision"]["collapsed_faces"], collapsed, "{g}");
     assert_eq!(
         g["stl_precision"]["spacing"],
         serde_json::json!(session::stats::round6(2f64.powi(-18))),

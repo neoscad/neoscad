@@ -24,6 +24,28 @@ const BIN: &str = env!("CARGO_BIN_EXE_neoscad");
 /// times the limit, and the binary's own 30 MB or so.
 const MAX_RSS_MB: u64 = 3 * 64 + 32;
 
+/// Whether a watched peak is within `max`. Where memory can be read
+/// ([`rss_mb`]) the peak must also be above zero: a reader that found
+/// nothing would otherwise pass every bound.
+fn resident_within(peak: u64, max: u64) -> bool {
+    if cfg!(unix) {
+        (1..=max).contains(&peak)
+    } else {
+        peak <= max
+    }
+}
+
+/// How long one `render` through MCP may take to stop at a limit, in the
+/// debug build the tests run. Stopping takes work in proportion to the
+/// limit, not to the value: printing up to 64 MiB takes about 2 s on an
+/// Apple M-series core, and took 11 and 14 s on CI's Linux x86_64 runner
+/// with the other tests of this file running beside it (a 10 s bound
+/// failed there). A limit checked too late shows up as memory past
+/// [`MAX_RSS_MB`] (a value built whole is hundreds of megabytes) or, for
+/// the 2^40-element prints, as a walk that takes hours; this bound only
+/// has to tell that apart from a slow machine.
+const MAX_SECONDS: f64 = 60.0;
+
 const TREE: &str = "function f(p, n) = n == 0 ? p : f([p, p], n - 1);\n";
 
 fn programs() -> Vec<(&'static str, String)> {
@@ -65,8 +87,24 @@ fn scratch(name: &str) -> PathBuf {
     d.canonicalize().unwrap()
 }
 
-/// `pid`'s resident memory, from `ps` (0 once it has exited).
+/// `pid`'s resident memory (0 once it has exited): `VmRSS` from `/proc`
+/// on Linux, `ps` elsewhere. Each watch samples every 5 ms and the tests
+/// run side by side, so `ps` would be forked hundreds of times a second
+/// on a CI runner with a few cores, taking CPU from the servers whose
+/// response time is being measured.
+///
+/// Windows has neither (CI's Windows job runs these tests too), so there
+/// every reading is 0: the limits' errors are checked, memory is not.
 fn rss_mb(pid: u32) -> u64 {
+    if cfg!(target_os = "linux") {
+        return std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|s| {
+                let line = s.lines().find(|l| l.starts_with("VmRSS:"))?;
+                line.split_whitespace().nth(1)?.parse::<u64>().ok()
+            })
+            .map_or(0, |kb| kb / 1024);
+    }
     Command::new("ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
@@ -158,7 +196,10 @@ fn a_one_shot_run_stops_at_the_memory_limit() {
                 && out.contains("memory limit of 64 MiB"),
             "{name}: {out}"
         );
-        assert!(peak <= MAX_RSS_MB, "{name}: {peak} MB resident");
+        assert!(
+            resident_within(peak, MAX_RSS_MB),
+            "{name}: {peak} MB resident"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -227,7 +268,7 @@ fn mcp_render_stops_at_the_memory_limit() {
         let r = s.tool("render", json!({"source": src}));
         let peak = watch.take_peak();
         assert!(
-            t0.elapsed().as_secs_f64() < 10.0,
+            t0.elapsed().as_secs_f64() < MAX_SECONDS,
             "{name}: {:?}",
             t0.elapsed()
         );
@@ -242,7 +283,10 @@ fn mcp_render_stops_at_the_memory_limit() {
                 .contains("memory limit of 64 MiB"),
             "{name}: {d}"
         );
-        assert!(peak <= MAX_RSS_MB, "{name}: {peak} MB resident");
+        assert!(
+            resident_within(peak, MAX_RSS_MB),
+            "{name}: {peak} MB resident"
+        );
         // The server carries on: a model under the limit renders.
         let r = s.tool("render", json!({"source": "cube(1);"}));
         assert_eq!(r["structuredContent"]["exit_code"], 0, "{name}: {r}");
@@ -276,7 +320,7 @@ fn mcp_printing_stops_at_the_string_limit() {
         let r = s.tool("render", json!({"source": src}));
         let peak = watch.take_peak();
         assert!(
-            t0.elapsed().as_secs_f64() < 10.0,
+            t0.elapsed().as_secs_f64() < MAX_SECONDS,
             "{name}: {:?}",
             t0.elapsed()
         );
@@ -288,7 +332,10 @@ fn mcp_printing_stops_at_the_string_limit() {
                 && msg.contains("over the string limit of 67,108,864"),
             "{name}: {d}"
         );
-        assert!(peak <= MAX_PRINT_RSS_MB, "{name}: {peak} MB resident");
+        assert!(
+            resident_within(peak, MAX_PRINT_RSS_MB),
+            "{name}: {peak} MB resident"
+        );
         let r = s.tool("render", json!({"source": "echo(str([1, 2]));"}));
         assert_eq!(r["structuredContent"]["exit_code"], 0, "{name}: {r}");
     }
@@ -325,7 +372,10 @@ fn a_one_shot_run_stops_printing_at_the_string_limit() {
             )) && out.contains("over the string limit of 67,108,864"),
             "{name}: {out}"
         );
-        assert!(peak <= MAX_PRINT_RSS_MB, "{name}: {peak} MB resident");
+        assert!(
+            resident_within(peak, MAX_PRINT_RSS_MB),
+            "{name}: {peak} MB resident"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
