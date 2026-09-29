@@ -108,15 +108,10 @@ cargo-dist-version = "0.33.0"
 ci = "github"
 dist = false
 precise-builds = true
-# Windows is withheld from releases until Authenticode signing is set up
-# (owner decision 2026-09-29): an unsigned .exe or .msi meets SmartScreen
-# warnings. CI still builds and tests Windows (ci.yml). To restore it, add
-# "powershell" and "msi" back here, the two `*-pc-windows-msvc` targets
-# below and `allow-dirty = ["msi"]` at the end of this table, then run
-# `dist generate`. The WiX source (crates/cli/wix/main.wxs), the Windows
-# runners below and the Scoop and winget templates (packaging/) are kept
-# for that.
-installers = ["shell", "homebrew"]
+# Windows builds (the zips and MSIs) ship unsigned: no paid Authenticode
+# (owner decision 2026-09-29). Checksums and GitHub artifact attestations
+# let users verify them; see docs/release.md, "Windows is unsigned".
+installers = ["shell", "powershell", "homebrew", "msi"]
 tap = "neoscad/homebrew-tap"
 formula = "neoscad"
 # Once the release exists: the signed app DMG
@@ -135,9 +130,8 @@ targets = [
     "x86_64-apple-darwin",
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
-    # Withheld pending signing (see `installers` above):
-    # "aarch64-pc-windows-msvc",
-    # "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-pc-windows-msvc",
 ]
 install-path = "CARGO_HOME"
 # A release builds nothing until CI (tests and conformance on every
@@ -152,9 +146,9 @@ github-attestations = true
 # does not depend on auto-detection.
 auto-includes = false
 include = ["LICENSE", "NOTICE", "packaging/licenses/"]
-# When the MSI comes back (see `installers` above), restore
-# `allow-dirty = ["msi"]` here: crates/cli/wix/main.wxs carries hand-added
-# licence files (see there), so `dist generate` must not rewrite it.
+# crates/cli/wix/main.wxs carries hand-added licence files (see there), so
+# `dist generate` must not rewrite it.
+allow-dirty = ["msi"]
 
 # Linux binaries are built in manylinux_2_28 containers so they run on
 # glibc 2.28 and later (Debian 10, RHEL 8); built on the runner's Ubuntu
@@ -164,8 +158,6 @@ include = ["LICENSE", "NOTICE", "packaging/licenses/"]
 global = "ubuntu-22.04"
 aarch64-apple-darwin = "macos-15"
 x86_64-apple-darwin = "macos-15"
-# The Windows runners are unused while Windows is withheld from releases
-# (see `installers` above).
 x86_64-pc-windows-msvc = "windows-2025"
 aarch64-pc-windows-msvc = "windows-11-arm"
 
