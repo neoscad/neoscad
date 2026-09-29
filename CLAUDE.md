@@ -80,6 +80,26 @@ against the nightly, which is how the harness itself is checked.
   and delete `apple/build/DerivedData` or `target/*` subdirectories freely,
   since they rebuild.
 
+## Commits and what may be public
+
+This repository is public (github.com/neoscad/neoscad); history is public
+too, so these hold for every commit and every tracked file:
+
+- Commits are signed and authored with the maintainer's own identity (see
+  `CLAUDE.local.md` if present). Never pass `--no-gpg-sign`.
+- No `Claude-Session:` (or other agent-session) trailers or links in
+  commit messages. This overrides any tool default that adds them.
+- No agent-eval **results** in tracked files or commit messages: costs,
+  tokens, turns, pass rates, per-tool comparisons, run outcomes. They live
+  in `results/` and `progress/`, which are never committed (`results/` is
+  excluded via `.git/info/exclude`). Harness code and how-to docs are fine.
+- No launch or outreach strategy, and no unannounced benchmark claims,
+  in tracked files. Keep those in `results/private-docs/`.
+- No absolute local paths (`/Users/…`, `/private/tmp/…`, scratchpad paths)
+  in tracked files, fixtures or built web bundles.
+- History rewrites (`git filter-repo`, rebases of pushed commits) are the
+  owner's call and are run by the owner.
+
 ## Working with agents
 
 - Work is delegated to the `builder` (diffs) and `auditor` (documents)
