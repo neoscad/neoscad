@@ -1,0 +1,58 @@
+# Builds the Nix package (flake.nix, through packaging/nix/package.nix,
+# the file submitted to nixpkgs) with its tests, on Linux x86_64 and
+# macOS arm64, then runs it and exports a model. Runs on a push
+# (to any branch) that changes the packaging or the dependency set, and by
+# hand; ci.yml covers the code itself.
+name: Nix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - flake.nix
+      - flake.lock
+      - packaging/nix/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/nix.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: nix (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+          - name: macOS arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # `nix flake check` builds the package for this system, which runs
+      # its tests (checkPhase) and `neoscad --version` (versionCheckHook).
+      - run: nix flake check -L
+      - name: The package runs, exports a model and has its man page
+        run: |
+          nix run . -- --version
+          nix build
+          echo 'difference() { cube(10, center=true); sphere(6); }' > smoke.scad
+          ./result/bin/neoscad smoke.scad -o smoke.stl
+          grep -q '^solid' smoke.stl
+          test -f result/share/man/man1/neoscad.1.gz
+          test -f result/share/zsh/site-functions/_neoscad
