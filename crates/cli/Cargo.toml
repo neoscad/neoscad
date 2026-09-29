@@ -44,6 +44,13 @@ mimalloc = ["dep:mimalloc"]
 [dependencies]
 assets = { package = "neoscad-assets", path = "../assets", optional = true }
 clap.workspace = true
+# `neoscad generate` (src/generate.rs): the manual page and the shell
+# completion scripts, from the same clap definitions as `--help`; roff is
+# what clap_mangen writes with, for the page's own sections. All three are
+# MIT OR Apache-2.0.
+clap_complete = "4.6.11"
+clap_mangen = "0.3.3"
+roff = "1.1.1"
 lang = { package = "neoscad-lang", path = "../lang" }
 eval = { package = "neoscad-eval", path = "../eval" }
 geom = { package = "neoscad-geom", path = "../geom" }

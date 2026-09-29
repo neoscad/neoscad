@@ -33,6 +33,17 @@ sha256sums_aarch64=('@SHA256_AARCH64_UNKNOWN_LINUX_GNU@')
 package() {
   cd "neoscad-cli-${CARCH}-unknown-linux-gnu"
   install -Dm755 neoscad "${pkgdir}/usr/bin/neoscad"
+  # The archive carries no man page or completions; the binary writes them
+  # (`neoscad generate`), as it does for the .deb and .rpm. makepkg
+  # compresses the man page.
+  ./neoscad generate man > neoscad.1
+  ./neoscad generate completions bash > neoscad.bash
+  ./neoscad generate completions zsh > _neoscad
+  ./neoscad generate completions fish > neoscad.fish
+  install -Dm644 neoscad.1 "${pkgdir}/usr/share/man/man1/neoscad.1"
+  install -Dm644 neoscad.bash "${pkgdir}/usr/share/bash-completion/completions/neoscad"
+  install -Dm644 _neoscad "${pkgdir}/usr/share/zsh/site-functions/_neoscad"
+  install -Dm644 neoscad.fish "${pkgdir}/usr/share/fish/vendor_completions.d/neoscad.fish"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm644 NOTICE "${pkgdir}/usr/share/licenses/${pkgname}/NOTICE"
   install -Dm644 -t "${pkgdir}/usr/share/licenses/${pkgname}/licenses" licenses/*

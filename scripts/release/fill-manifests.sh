@@ -17,11 +17,11 @@
 # Fails, naming them, if any placeholder is left unfilled, so a missing
 # archive cannot produce a manifest that points at nothing.
 #
-# Scoop and winget install the Windows zips, which releases leave out
-# until they can be Authenticode-signed (owner decision 2026-09-29; see
-# `installers` in Cargo.toml's [workspace.metadata.dist]). With no Windows
-# checksum in SUMS_DIR at all, those two are skipped with a note rather
-# than failed; with only one of the two, they still fail as above.
+# Scoop and winget install the Windows zips (unsigned; see Cargo.toml's
+# [workspace.metadata.dist]). A release built without Windows targets has
+# no Windows checksum in SUMS_DIR at all: those two are then skipped with
+# a note rather than failed; with only one of the two, they still fail as
+# above.
 set -euo pipefail
 
 [[ $# -eq 3 ]] || { sed -n '4p' "$0" >&2; exit 2; }

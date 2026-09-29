@@ -44,7 +44,7 @@ const EXIT_ERROR: u8 = 1;
     name = "neoscad serve",
     about = "Keep NeoSCAD's caches warm and answer JSON-RPC requests (docs/serve-protocol.md)"
 )]
-struct Args {
+pub(crate) struct Args {
     /// Listen on a Unix socket instead of stdio: PATH, or without it the
     /// per-user default that the command line looks for. On Windows, a
     /// named pipe: NAME or \\.\pipe\NAME.

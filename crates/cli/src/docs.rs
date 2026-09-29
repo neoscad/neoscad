@@ -19,7 +19,7 @@ const EXIT_ERROR: u8 = 1;
     about = "Reference for builtins, and for the modules and functions of a file (--in)",
     version
 )]
-struct Args {
+pub(crate) struct Args {
     /// A builtin, or a module or function of --in FILE; none for an index.
     name: Option<String>,
 

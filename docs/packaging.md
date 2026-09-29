@@ -39,16 +39,16 @@ pushes), so every CI path is unverified until the first tag.
 | macOS DMG (app) + CLI tarball | Exists (`scripts/apple/release.sh`) | Now ships `LICENSE`, `NOTICE` and `licenses/` (fix 3). In CI as `.github/workflows/publish-macos-app.yml`, signed from `NEOSCAD_*` secrets. **Universal** (arm64 + x86_64, as OpenSCAD's nightly DMG), owner decision 2026-09-29: the app, its core and the CLI (`docs/release.md`, "Universal"); Debug builds stay arm64 |
 | CLI archives, 6 targets | **Now** | Built: cargo-dist 0.33.0 (`[workspace.metadata.dist]`, `.github/workflows/release.yml`). macOS arm64/x86_64 as two archives: cargo-dist 0.33.0 cannot make a universal one (`universal2-apple-darwin` is a FIXME in its `cargo-dist/src/config/v1/mod.rs:416` and `src/tasks.rs:438`, "Lipo(LipoStep)"), so only the DMG's CLI is universal, Linux x86_64/aarch64 (glibc 2.28, manylinux_2_28 containers), Windows x86_64/aarch64; `.tar.xz`/`.zip` with `.sha256`. `dist plan` lists all of them; `dist build` of the Linux aarch64 archive ran in Docker |
 | Shell / PowerShell installers | **Now** | Built (cargo-dist); install to `CARGO_HOME` |
-| Homebrew tap: formula | **Now** | Built: cargo-dist generates `neoscad.rb` and pushes it to `neoscad/homebrew-tap` (needs `HOMEBREW_TAP_TOKEN`) |
+| Homebrew tap: formula | **Now** | Built: cargo-dist generates `neoscad.rb` and pushes it to `neoscad/homebrew-tap` (needs `HOMEBREW_TAP_TOKEN`). No man page or completions: cargo-dist 0.33.0's formula template (`cargo-dist/templates/installer/homebrew.rb.j2`) installs the binary and puts any other archive file in `pkgshare`, with no hook for either, and the archives carry neither (see "Man page and completions" below) |
 | Homebrew tap: cask (app) | **Now**, after Developer ID | `brew install --cask neoscad/tap/neoscad-app`. `publish-macos-app.yml` fills `packaging/homebrew/neoscad-app.rb` from the attached notarized DMG (`scripts/release/fill-cask.sh`), installs it from the local tap clone and checks Gatekeeper, and only then pushes it to `neoscad/homebrew-tap` as `Casks/neoscad-app.rb` (needs `HOMEBREW_TAP_TOKEN`). Only with the Developer ID secrets set: no notarized DMG, no cask. No `binary` stanza (the app bundle has no CLI), so it does not conflict with the `neoscad` formula. The filled template passes `brew style` and `brew audit --cask --strict` (Homebrew 7.0.1); `--new`'s online checks wait for a real release |
 | Linux musl static tarball | **No** (owner decision 2026-09-29) | Not built. It would be portable, but PNG export needs Vulkan or GL loaded with `dlopen`, which a static musl binary cannot do; the glibc 2.28 archives already run on every current distribution |
-| `.deb` / `.rpm` release assets | **Now** | Built: nfpm (`packaging/nfpm.yaml`, `scripts/release/linux-packages.sh`); aarch64 packages built in Docker, checked with `dpkg-deb --info`/`--contents` and `rpm -qip`/`-qlp`, installed and run in `debian:bookworm-slim` and `fedora:42`. In CI: `publish-packages.yml`, from the release's glibc 2.28 binaries |
+| `.deb` / `.rpm` release assets | **Now** | Built: nfpm (`packaging/nfpm.yaml`, `scripts/release/linux-packages.sh`), with the man page and bash, zsh and fish completions. In CI: `publish-packages.yml`, from the release's glibc 2.28 binaries, then installed with apt or dnf and run in Debian 10 and 12, Ubuntu 22.04 and 24.04, Rocky Linux 8 and Fedora (`scripts/release/package-smoke.sh`, on an x86_64 and an arm64 runner) before they are attached. Locally (2026-09-29): aarch64 packages around a `manylinux_2_28_aarch64` build (newest symbol `GLIBC_2.28`) passed that smoke test in all six; `man -w`, zsh's `compinit` and fish's `complete -C` found the installed files in Debian 12 and Fedora |
 | Signed apt/rpm repo | Later | Needs a GPG key and hosting (OpenSCAD uses OBS) |
 | Official Debian/Fedora | Not now | Distro Rust is too old (1.96 vs 1.98) and every crate would need packaging |
 | AppImage | Never | Adds nothing over a single binary |
 | Flatpak | Never for a CLI | Flathub doesn't accept console software |
 | Snap | Later/never | Strict confinement conflicts with MCP roots; reserve the name only |
-| AUR `neoscad-bin` | Template now | `packaging/aur/PKGBUILD`, filled per release into `neoscad-package-manifests.tar.gz`; a maintainer pushes it to the AUR |
+| AUR `neoscad-bin` | Template now | `packaging/aur/PKGBUILD`, filled per release into `neoscad-package-manifests.tar.gz`; a maintainer pushes it to the AUR. Its `package()` writes the man page and completions with the downloaded binary; that function ran in a Debian container on an aarch64 stage (not under `makepkg`) |
 | Nix flake | Template now | `flake.nix` + `flake.lock` (`buildRustPackage` with rust-overlay's 1.98.1 from `rust-toolchain.toml`). Evaluated in `nixos/nix` (derivation `neoscad-0.1.0`); not built |
 | Windows x86_64/aarch64 zip | **Now** | Built (cargo-dist), CI only (see "Needs the owner", `cargo xwin`) |
 | MSI | **Now**, unsigned | Built (cargo-dist + `crates/cli/wix/main.wxs`, with the licence files hand-added; `allow-dirty = ["msi"]`). Adds `bin` to PATH. Unsigned: SmartScreen will warn |
@@ -73,7 +73,7 @@ arm64 Mac.
 | `ci.yml` | PRs, pushes to main, and as the release's plan job | fmt, licence copies, `dist generate --check` and `dist plan`; clippy, tests and conformance on macOS arm64 (`macos-15`), Linux x86_64 (`ubuntu-22.04`) and aarch64 (`ubuntu-22.04-arm`); the Windows build and CLI/lang tests (`windows-2025`, including the user library path and `neoscad serve` on a named pipe); `wasm-check.sh` |
 | `release.yml` | version tags | cargo-dist, generated: see `docs/release.md` |
 | `publish-macos-app.yml` | called by `release.yml` | `release.sh` signed and notarized; attaches the DMG |
-| `publish-packages.yml` | called by `release.yml` | `.deb`/`.rpm`, vendored source, filled manifests, the ghcr.io image |
+| `publish-packages.yml` | called by `release.yml` | `.deb`/`.rpm` (with the man page and completions), their install smoke test on x86_64 and arm64, vendored source, filled manifests, the ghcr.io image |
 
 cargo-dist was kept: its macOS signing is not used, and the app job fits
 as a custom publish job, so nothing had to be hand-written around it.
@@ -145,6 +145,31 @@ model. With neither, the error names both backends and Mesa's packages.
 Mesa's Vulkan device-select layer prints "error: XDG_RUNTIME_DIR is
 invalid or not set" on every device open when that variable is missing
 (containers, services); the Docker images and CI set it.
+
+## Man page and completions
+
+`neoscad generate man` prints neoscad(1) and `neoscad generate
+completions bash|zsh|fish|elvish|powershell` a completion script
+(`crates/cli/src/generate.rs`), both from the clap definitions that parse
+the command line, so they cannot drift from `--help`; unit tests check
+that every subcommand and flag appears in each and that the output is
+deterministic. The page follows OpenSCAD's `doc/openscad.1.in` (NAME,
+SYNOPSIS, DESCRIPTION, OPTIONS, examples), with the subcommands in a
+COMMANDS section of the same page.
+
+They are generated at packaging time rather than committed:
+`scripts/release/man-completions.sh` runs the release's x86_64 binary in
+`publish-packages.yml` (the output does not depend on the architecture)
+and nfpm installs the files at `/usr/share/man/man1/neoscad.1.gz`,
+`/usr/share/bash-completion/completions/neoscad`,
+`/usr/share/zsh/vendor-completions/_neoscad` (.deb) or
+`/usr/share/zsh/site-functions/_neoscad` (.rpm), and
+`/usr/share/fish/vendor_completions.d/neoscad.fish`. The AUR package
+generates them in `package()`. The cargo-dist archives do not carry
+them: `include` takes only files that exist when `dist plan` runs, which
+would mean committing generated files and checking them in CI on every
+flag change. Users of the Homebrew formula, the archives, the
+installers and the MSI run `neoscad generate` themselves.
 
 ## Portability fixes, in priority order
 
@@ -264,7 +289,10 @@ Nothing here was pushed, published, signed up for or accepted.
 
 ## Not yet verified
 
-Anything on GitHub's runners (all four workflows); Windows at all
+Anything on GitHub's runners (all four workflows), including the package
+smoke test's matrix and the x86_64 packages, which were not built or
+installed locally (only their file names were checked); the AUR package
+under `makepkg` and `namcap`; Windows at all
 (compile, tests, WARP, paths, MSI, named pipes); macOS x86_64 on an
 Intel CPU (the universal CLI's x86_64 slice passed conformance, 1,773 of
 1,773, under Rosetta only); the manylinux_2_28

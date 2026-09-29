@@ -3,7 +3,10 @@
 # Cargo.toml's [workspace.metadata.dist]):
 #
 # - .deb and .rpm for Linux x86_64 and aarch64, wrapped by nfpm
-#   (packaging/nfpm.yaml) around the release's own glibc 2.28 binaries;
+#   (packaging/nfpm.yaml) around the release's own glibc 2.28 binaries,
+#   with the man page and shell completions `neoscad generate` writes,
+#   and installed and run in each supported distribution on both
+#   architectures (the `smoke` job) before anything is attached;
 # - the vendored-dependency source tarball (scripts/release/source-tarballs.sh);
 #   cargo-dist already attaches the plain source.tar.gz;
 # - filled package-manager manifests (scripts/release/fill-manifests.sh):
@@ -49,7 +52,7 @@ jobs:
 
       - name: .deb and .rpm
         run: |
-          mkdir -p "$RUNNER_TEMP/pkg"
+          mkdir -p "$RUNNER_TEMP/out/pkg"
           for pair in x86_64:amd64 aarch64:arm64; do
             triple=${pair%%:*}-unknown-linux-gnu
             arch=${pair##*:}
@@ -58,30 +61,89 @@ jobs:
             tar -xJf "$RUNNER_TEMP/release/neoscad-cli-$triple.tar.xz" -C "$work"
             mv "$work/neoscad-cli-$triple" "$work/stage"
             cp packaging/nfpm.yaml "$work/"
+          done
+          # The man page and completions, from the x86_64 binary (the one
+          # this runner can execute): they come from the clap definitions
+          # alone, so the aarch64 packages get the same files.
+          scripts/release/man-completions.sh "$RUNNER_TEMP/nfpm-amd64/stage/neoscad" "$RUNNER_TEMP/generated"
+          for arch in amd64 arm64; do
+            work=$RUNNER_TEMP/nfpm-$arch
+            cp -R "$RUNNER_TEMP/generated/." "$work/stage/"
             for fmt in deb rpm; do
-              docker run --rm -v "$work:/work" -v "$RUNNER_TEMP/pkg:/out" -w /work \
+              docker run --rm -v "$work:/work" -v "$RUNNER_TEMP/out/pkg:/out" -w /work \
                 -e NEOSCAD_VERSION="$VERSION" -e NEOSCAD_ARCH="$arch" \
                 "$NFPM_IMAGE" package -f nfpm.yaml -p "$fmt" -t /out/
             done
           done
-          cd "$RUNNER_TEMP/pkg"
+          cd "$RUNNER_TEMP/out/pkg"
           for f in *.deb *.rpm; do sha256sum "$f" > "$f.sha256"; done
           docker run --rm -v "$PWD:/out:ro" debian:bookworm-slim \
-            sh -c 'for f in /out/*.deb; do dpkg-deb --info "$f"; done'
+            sh -c 'for f in /out/*.deb; do dpkg-deb --info "$f"; dpkg-deb --contents "$f"; done'
 
       - name: Vendored source tarball
-        run: scripts/release/source-tarballs.sh "$RUNNER_TEMP/source"
+        run: scripts/release/source-tarballs.sh "$RUNNER_TEMP/out/source"
 
       - name: Package-manager manifests
-        run: scripts/release/fill-manifests.sh "$VERSION" "$RUNNER_TEMP/release" "$RUNNER_TEMP/manifests"
+        run: |
+          scripts/release/fill-manifests.sh "$VERSION" "$RUNNER_TEMP/release" "$RUNNER_TEMP/manifests"
+          (cd "$RUNNER_TEMP/manifests" && tar -czf "$RUNNER_TEMP/out/neoscad-package-manifests.tar.gz" ./*)
 
+      # Attached only after the smoke tests pass (the `attach` job).
+      - uses: actions/upload-artifact@v7
+        with:
+          name: neoscad-linux-packages
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          # Only a hand-off between this workflow's jobs; the release
+          # keeps the files.
+          retention-days: 7
+
+  # Install each package in the distributions it claims to support, with
+  # their package managers, and run it. One job per architecture, on a
+  # runner that executes it natively (emulated, dnf alone takes minutes);
+  # within a job the distributions run in parallel containers
+  # (scripts/release/package-smoke.sh), which is faster than a job per
+  # distribution, whose runner start-up would cost more than the test.
+  smoke:
+    needs: packages
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: neoscad-linux-packages
+          path: ${{ runner.temp }}/out
+      - name: Install and run
+        run: scripts/release/package-smoke.sh --arch "${{ matrix.arch }}" "$RUNNER_TEMP/out/pkg"
+
+  attach:
+    needs: [packages, smoke]
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: neoscad-linux-packages
+          path: ${{ runner.temp }}/out
       - name: Attach to the release
         run: |
-          cd "$RUNNER_TEMP"
-          (cd manifests && tar -czf ../neoscad-package-manifests.tar.gz ./*)
+          cd "$RUNNER_TEMP/out"
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
             pkg/*.deb pkg/*.rpm pkg/*.sha256 \
-            "source/neoscad-$VERSION-vendor.tar.gz" \
+            "source/neoscad-${TAG#v}-vendor.tar.gz" \
             neoscad-package-manifests.tar.gz
 
   image:

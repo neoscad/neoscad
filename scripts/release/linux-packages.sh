@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build the Linux release binary (the `dist` profile) in Docker and wrap it
-# as .deb and .rpm with nfpm (packaging/nfpm.yaml), then print each
-# package's metadata from dpkg-deb and rpm as a check. Output: dist/linux/.
+# as .deb and .rpm with nfpm (packaging/nfpm.yaml), print each package's
+# metadata from dpkg-deb and rpm, and install and run them
+# (scripts/release/package-smoke.sh, as the release workflow does, in the
+# distributions this build's glibc allows). Output: dist/linux/.
 #
 #   scripts/release/linux-packages.sh [--platform linux/arm64|linux/amd64]
 #
@@ -38,6 +40,11 @@ rm -rf "$stage"
 mkdir -p "$stage" "$out"
 "$repo/scripts/release/licenses.sh" "$stage"
 cp "$bin" "$stage/neoscad"
+# The man page and completions come from the Linux binary, so they are
+# generated where it runs.
+docker run --rm --memory 1g ${platform_args[@]+"${platform_args[@]}"} \
+    -v "$repo/scripts/release:/scripts:ro" -v "$stage:/stage" debian:bookworm-slim \
+    /scripts/man-completions.sh /stage/neoscad /stage
 
 for fmt in deb rpm; do
     docker run --rm --memory 1g -v "$repo/packaging/nfpm.yaml:/work/nfpm.yaml:ro" \
@@ -52,3 +59,7 @@ docker run --rm --memory 1g -v "$out:/out:ro" debian:bookworm-slim \
 docker run --rm --memory 1g -v "$out:/out:ro" fedora:42 \
     sh -c 'for f in /out/*.rpm; do rpm -qip "$f"; rpm -qlp "$f"; rpm -qp --requires --recommends "$f"; done'
 ls -l "$out"
+# Only where a bookworm build runs: Debian 10 and Rocky Linux 8 have glibc
+# 2.28, too old for this binary, though not for the release's.
+"$repo/scripts/release/package-smoke.sh" --arch "$arch" "$out" \
+    debian:12 ubuntu:24.04 fedora:latest

@@ -29,7 +29,7 @@ const DEBOUNCE: Duration = Duration::from_millis(250);
     name = "neoscad lsp",
     about = "The OpenSCAD language server for editors (Language Server Protocol)"
 )]
-struct Args {
+pub(crate) struct Args {
     /// Talk over stdin and stdout (the only transport, and the default).
     #[arg(long)]
     stdio: bool,

@@ -4,8 +4,9 @@
 #   NEOSCAD_VERSION=0.1.0 NEOSCAD_ARCH=arm64 \
 #     nfpm package -f packaging/nfpm.yaml -p deb -t dist/
 #
-# Run from a directory holding `stage/`: the binary (stage/neoscad) and
-# what scripts/release/licenses.sh writes (LICENSE, NOTICE, licenses/).
+# Run from a directory holding `stage/`: the binary (stage/neoscad), what
+# scripts/release/licenses.sh writes (LICENSE, NOTICE, licenses/) and what
+# scripts/release/man-completions.sh writes (neoscad.1.gz, completions/).
 # nfpm expands environment variables in fields such as version and arch,
 # but not in file sources, hence the fixed relative paths.
 #
@@ -45,6 +46,22 @@ contents:
   - src: stage/licenses/
     dst: /usr/share/doc/neoscad/licenses/
     type: tree
+  # neoscad(1) and the completion scripts, in the directories each
+  # distribution's man, bash-completion, zsh and fish packages read. zsh's
+  # differs: Debian's zsh reads vendor-completions, Fedora's and RHEL's
+  # site-functions.
+  - src: stage/neoscad.1.gz
+    dst: /usr/share/man/man1/neoscad.1.gz
+  - src: stage/completions/neoscad.bash
+    dst: /usr/share/bash-completion/completions/neoscad
+  - src: stage/completions/_neoscad
+    dst: /usr/share/zsh/vendor-completions/_neoscad
+    packager: deb
+  - src: stage/completions/_neoscad
+    dst: /usr/share/zsh/site-functions/_neoscad
+    packager: rpm
+  - src: stage/completions/neoscad.fish
+    dst: /usr/share/fish/vendor_completions.d/neoscad.fish
 
 overrides:
   deb:

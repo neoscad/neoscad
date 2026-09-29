@@ -23,7 +23,7 @@ const EXIT_ERROR: u8 = 1;
     about = "Format OpenSCAD files: comments kept, the program unchanged (checked on every file)",
     version
 )]
-struct Args {
+pub(crate) struct Args {
     /// Files or directories (searched for .scad files); default: the
     /// current directory. With --stdin, at most one: the name the text is
     /// configured and reported under.

@@ -677,6 +677,15 @@ lead them, come roughly in order of user impact.
   not measured. (8e)
 
 ## Rendering
+- `neoscad-ffi`'s `viewport::tests::the_shared_device_survives_concurrent_use`
+  failed once on CI's macOS arm64 runner (2026-09-29, run 36632690616,
+  passing on every run before): a panic inside wgpu-core 30.0.1
+  (`device/resource.rs:948`, "If the queue is empty, the current submission
+  index (2772) should be at least the wait submission index (2774)"). It
+  looks like a race between one thread waiting on a submission and another
+  submitting on the shared device. In the app a request that panics is
+  reported, not fatal, but it would drop that render. Reproduce with the
+  test in a loop, then check wgpu's issues and newer releases.
 - Previews draw a CSG product's visible surface from real Manifold
   booleans (`geom::csg::product_meshes`) when every leaf bounds a solid
   (`PolySet::is_outward_solid`), so those products do not show OpenCSG's

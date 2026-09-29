@@ -60,7 +60,7 @@ const EXIT_ERROR: u8 = 1;
     name = "neoscad mcp",
     about = "Serve NeoSCAD's tools to an AI agent over the Model Context Protocol (stdio; docs/mcp.md)"
 )]
-struct Args {
+pub(crate) struct Args {
     /// Allow reading and writing under DIR (repeatable). The working
     /// directory is always allowed; library and font directories are
     /// readable.

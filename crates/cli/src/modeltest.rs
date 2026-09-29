@@ -20,7 +20,7 @@ const EXIT_ERROR: u8 = 1;
     about = "Run model tests: `module test_*()` in *_test.scad / test_*.scad files, with `// @expect` lines",
     version
 )]
-struct Args {
+pub(crate) struct Args {
     /// Test files, or directories searched for them; default: the
     /// current directory.
     paths: Vec<String>,

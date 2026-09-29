@@ -26,6 +26,9 @@
 //! ([`serve`]) keeps a session's caches warm behind JSON-RPC; exports and
 //! snapshots use a running one automatically ([`client`], [`delegate`]).
 //! `neoscad lsp --stdio` ([`lsp`]) is the language server for editors.
+//! `neoscad generate` ([`generate`]) prints the manual page and shell
+//! completions, from these same clap definitions; [`SUBCOMMANDS`] lists
+//! every subcommand for both dispatch and generation.
 //! `--format json` prints one JSON object for the run ([`report`]).
 //!
 //! Cold start is a tracked benchmark (docs/architecture.md, "Agent surface"),
@@ -46,6 +49,7 @@ mod deps;
 mod docs;
 mod export_options;
 mod format;
+mod generate;
 mod host;
 mod info;
 mod limits;
@@ -293,48 +297,87 @@ struct Cli {
     no_server: bool,
 }
 
+/// One of neoscad's own subcommands: the word that selects it, the function
+/// that runs it on the arguments after that word, and its clap definition.
+pub(crate) struct Subcommand {
+    pub name: &'static str,
+    pub run: fn(Vec<std::ffi::OsString>) -> u8,
+    pub command: fn() -> clap::Command,
+}
+
+/// neoscad's own subcommands, in the order the manual page lists them.
+///
+/// This one table both dispatches them (`main`) and describes them to
+/// `neoscad generate` (the manual page and the shell completions), so a
+/// subcommand cannot be added to one without the other: when the dispatch
+/// was a `match` of its own, nothing tied it to a second list, and the
+/// generated documentation would have silently lost any command added
+/// later.
+pub(crate) const SUBCOMMANDS: &[Subcommand] = {
+    use clap::CommandFactory;
+    &[
+        Subcommand {
+            name: "check",
+            run: check::main,
+            command: check::Args::command,
+        },
+        Subcommand {
+            name: "measure",
+            run: measure::main,
+            command: measure::Args::command,
+        },
+        Subcommand {
+            name: "snapshot",
+            run: snapshot::main,
+            command: snapshot::Args::command,
+        },
+        Subcommand {
+            name: "fmt",
+            run: format::main,
+            command: format::Args::command,
+        },
+        Subcommand {
+            name: "test",
+            run: modeltest::main,
+            command: modeltest::Args::command,
+        },
+        Subcommand {
+            name: "docs",
+            run: docs::main,
+            command: docs::Args::command,
+        },
+        Subcommand {
+            name: "serve",
+            run: serve::main,
+            command: serve::Args::command,
+        },
+        Subcommand {
+            name: "mcp",
+            run: mcp::main,
+            command: mcp::Args::command,
+        },
+        Subcommand {
+            name: "lsp",
+            run: lsp::main,
+            command: lsp::Args::command,
+        },
+        Subcommand {
+            name: "generate",
+            run: generate::main,
+            command: generate::Args::command,
+        },
+    ]
+};
+
 fn main() -> ExitCode {
-    // `neoscad snapshot ...` is neoscad's own command, with its own flags;
-    // everything else is OpenSCAD's command line.
+    // `neoscad snapshot ...` and the rest of `SUBCOMMANDS` are neoscad's
+    // own commands, each with its own flags; everything else is OpenSCAD's
+    // command line.
     let mut args = std::env::args_os();
-    match args.nth(1) {
-        Some(a) if a == "snapshot" => {
-            let rest: Vec<std::ffi::OsString> = args.collect();
-            return ExitCode::from(snapshot::main(rest));
-        }
-        Some(a) if a == "check" => {
-            let rest: Vec<std::ffi::OsString> = args.collect();
-            return ExitCode::from(check::main(rest));
-        }
-        Some(a) if a == "measure" => {
-            let rest: Vec<std::ffi::OsString> = args.collect();
-            return ExitCode::from(measure::main(rest));
-        }
-        Some(a) if a == "fmt" => {
-            let rest: Vec<std::ffi::OsString> = args.collect();
-            return ExitCode::from(format::main(rest));
-        }
-        Some(a) if a == "test" => {
-            let rest: Vec<std::ffi::OsString> = args.collect();
-            return ExitCode::from(modeltest::main(rest));
-        }
-        Some(a) if a == "docs" => {
-            let rest: Vec<std::ffi::OsString> = args.collect();
-            return ExitCode::from(docs::main(rest));
-        }
-        Some(a) if a == "lsp" => {
-            let rest: Vec<std::ffi::OsString> = args.collect();
-            return ExitCode::from(lsp::main(rest));
-        }
-        Some(a) if a == "mcp" => {
-            let rest: Vec<std::ffi::OsString> = args.collect();
-            return ExitCode::from(mcp::main(rest));
-        }
-        Some(a) if a == "serve" => {
-            let rest: Vec<std::ffi::OsString> = args.collect();
-            return ExitCode::from(serve::main(rest));
-        }
-        _ => {}
+    if let Some(first) = args.nth(1)
+        && let Some(sub) = SUBCOMMANDS.iter().find(|s| first == s.name)
+    {
+        return ExitCode::from((sub.run)(args.collect()));
     }
     // OpenSCAD answers every command-line error (an unknown option, a
     // repeated single-valued one such as `--export-format`) with its usage
@@ -358,6 +401,10 @@ fn main() -> ExitCode {
     eval::with_stack(eval::DEFAULT_THREAD_STACK, move || run_cli(cli))
 }
 
+/// The environment variable [`rich_diagnostics`] reads (named here for
+/// the manual page's ENVIRONMENT section too).
+pub const DIAGNOSTICS_ENV: &str = "NEOSCAD_DIAGNOSTICS";
+
 /// Whether human-readable diagnostics on stderr get the source line and a
 /// caret under the span.
 ///
@@ -371,7 +418,7 @@ fn main() -> ExitCode {
 /// should use `--format json`, which carries them as data.
 pub fn rich_diagnostics() -> bool {
     use std::io::IsTerminal;
-    match std::env::var("NEOSCAD_DIAGNOSTICS").as_deref() {
+    match std::env::var(DIAGNOSTICS_ENV).as_deref() {
         Ok("openscad") => false,
         Ok("rich") => true,
         _ => std::io::stderr().is_terminal(),

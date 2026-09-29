@@ -26,7 +26,7 @@ const EXIT_ERROR: u8 = 1;
              overhangs, bed fit, tiny features and intersecting parts",
     version
 )]
-struct Args {
+pub(crate) struct Args {
     /// The model.
     model: String,
 

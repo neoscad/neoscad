@@ -25,7 +25,7 @@ const EXIT_ERROR: u8 = 1;
              distances and cross-sections",
     version
 )]
-struct Args {
+pub(crate) struct Args {
     /// The model.
     model: String,
 

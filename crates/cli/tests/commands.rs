@@ -1,5 +1,5 @@
-//! `neoscad fmt`, `neoscad test` and `neoscad docs` as commands: exit
-//! codes, what they write, and their JSON.
+//! `neoscad fmt`, `neoscad test`, `neoscad docs` and `neoscad generate` as
+//! commands: exit codes, what they write, and their JSON.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -123,4 +123,30 @@ fn docs_answers_and_suggests() {
         text(&o.stderr),
         "neoscad docs: no builtin named 'thread'; for your own or a library's code add --in FILE\n"
     );
+}
+
+/// The packages run exactly these commands (scripts/release/man-completions.sh,
+/// packaging/aur/PKGBUILD); what they print is checked by `generate`'s
+/// unit tests.
+#[test]
+fn generate_prints_the_man_page_and_completions() {
+    let d = scratch("generate");
+    let o = neoscad(&d, &["generate", "man"], None);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    assert!(text(&o.stdout).contains("\n.TH NEOSCAD 1 "));
+    for (shell, start) in [
+        ("bash", "_neoscad() {"),
+        ("zsh", "#compdef neoscad"),
+        ("fish", "# Print an optspec"),
+    ] {
+        let o = neoscad(&d, &["generate", "completions", shell], None);
+        assert_eq!(o.status.code(), Some(0), "{shell}: {}", text(&o.stderr));
+        let out = text(&o.stdout);
+        assert!(out.starts_with(start), "{shell}");
+        assert!(out.contains("generate"), "{shell}");
+    }
+    // An unknown shell is a usage error, with OpenSCAD's status 1.
+    let o = neoscad(&d, &["generate", "completions", "tcsh"], None);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stderr).contains("possible values"));
 }

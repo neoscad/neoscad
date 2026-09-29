@@ -26,7 +26,7 @@ const EXIT_ERROR: u8 = 1;
     about = "Draw a model's standard views as one PNG contact sheet",
     version
 )]
-struct Args {
+pub(crate) struct Args {
     /// The model.
     model: String,
 

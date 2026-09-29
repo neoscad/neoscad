@@ -256,8 +256,12 @@ such as `v0.1.0` runs, in order:
    pushed to `neoscad/homebrew-tap`; with no secrets it builds ad hoc and uploads and pushes
    nothing);
    `publish-packages.yml` (`.deb` and `.rpm` for both Linux
-   architectures, the vendored-dependency tarball, the filled AUR, Scoop
-   and winget manifests in `neoscad-package-manifests.tar.gz`, and the
+   architectures, with the man page and shell completions the x86_64
+   binary generates, installed with apt or dnf and run in Debian 10 and
+   12, Ubuntu 22.04 and 24.04, Rocky Linux 8 and Fedora on an x86_64 and
+   an arm64 runner, and attached only if all twelve pass; the
+   vendored-dependency tarball, the filled AUR, Scoop and winget
+   manifests in `neoscad-package-manifests.tar.gz`, and the
    `ghcr.io/neoscad/neoscad` image).
 6. **announce**.
 
@@ -292,10 +296,15 @@ Mesa's software renderers):
     scripts/release/linux-docker.sh conformance --cached-renderer
     scripts/release/linux-docker.sh png-smoke             # lavapipe, llvmpipe, no driver
     scripts/release/linux-docker.sh --platform linux/amd64 build   # emulated
-    scripts/release/linux-packages.sh                     # .deb and .rpm in dist/linux
+    scripts/release/linux-packages.sh                     # .deb and .rpm in dist/linux, smoke-tested
+    scripts/release/package-smoke.sh DIR [IMAGE...]       # install and run DIR's packages
     scripts/release/source-tarballs.sh                    # dist/source
     scripts/release/fill-manifests.sh VERSION SUMS_DIR OUT_DIR
     scripts/release/fill-cask.sh VERSION dist/NeoSCAD-*.dmg OUT_FILE   # the app's cask
+
+`linux-packages.sh` builds on Debian bookworm (glibc 2.36), so it
+smoke-tests only in Debian 12, Ubuntu 24.04 and Fedora; Debian 10 and
+Rocky Linux 8 need the release's `manylinux_2_28` build.
 
 Windows builds happen only in CI: a local cross-build (`cargo xwin`)
 would accept the Microsoft CRT and SDK licence, which is the owner's to
@@ -336,7 +345,10 @@ checked by the app tests and the conformance suite, not here.
 
 - Everything under "The cross-platform release" on GitHub: the runners,
   the manylinux containers, the Windows and x86_64 macOS builds, the
-  MSIs, the Homebrew pushes and the publish jobs. The cask template
+  MSIs, the Homebrew pushes and the publish jobs (the package smoke
+  test ran locally on arm64 only, around a local `manylinux_2_28`
+  build; its x86_64 half and the artifact hand-off between the
+  packages, smoke and attach jobs are untested). The cask template
   passes `brew style` and `brew audit --cask --strict` locally (Homebrew
   7.0.1, filled with a stand-in DMG); its URL, checksum and `livecheck`
   meet a real release for the first time on the first tag.
