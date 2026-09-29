@@ -434,16 +434,26 @@ def grade_t2(parts):
                      note="slots: through-openings at least twice as long as wide, grouped by size (+-0.2)"))
 
     # Lid lip clearance: rings of the lid above its plate, measured with
-    # rays at 9 positions x 4 levels, against the base's cavity (lip inside)
-    # or outer wall (skirt outside).
+    # rays at 9 positions per axis on levels 0.2 mm apart, against the
+    # base's cavity (lip inside) or outer wall (skirt outside). Each level
+    # takes the median over positions, so snap bumps on part of the
+    # perimeter do not count. The lip passes when some band of it at least
+    # 0.6 mm (three 0.2 mm layers) tall is at 0.2 per side on both axes:
+    # that band is what locates the lid. A median over the whole height
+    # failed the OpenSCAD lid of cad-20260928T231444Z, whose lip is
+    # relieved 0.8 per side to clear the base's snap barbs and has a 1 mm
+    # catch band at exactly 0.2 (clearance 1.0 over most of the height).
     res = {0: [], 1: []}
     widths = {0: [], 1: []}
+    per_level = []
     kind = None
     if plate_t is not None and lid.bmax[2] - (lid.bmin[2] + plate_t) > 0.8:
         z0 = lid.bmin[2] + plate_t
         Lx, Ly = lid.bmax[0] - lid.bmin[0], lid.bmax[1] - lid.bmin[1]
         cx, cy = (lid.bmin[0] + lid.bmax[0]) / 2, (lid.bmin[1] + lid.bmax[1]) / 2
-        for z in lin(z0 + 0.4, lid.bmax[2] - 0.3, 4):
+        zl = lin(z0 + 0.2, lid.bmax[2] - 0.2, max(2, min(40, int((lid.bmax[2] - z0 - 0.4) / 0.2) + 1)))
+        for z in zl:
+            lvl = {0: [], 1: []}
             for axis, other, c, L in ((0, 1, cy, Ly), (1, 0, cx, Lx)):
                 along = lid.bmax[axis] - lid.bmin[axis]
                 # Match the lid axis to the base axis of the nearest size.
@@ -463,18 +473,35 @@ def grade_t2(parts):
                     outside = [r for r in rings if r[3] - r[2] > outd]
                     if inside:
                         r = inside[0]
-                        res[axis].append((cavd - (r[1] - r[0])) / 2)
+                        lvl[axis].append((cavd - (r[1] - r[0])) / 2)
                         widths[axis].append(r[1] - r[0])
                         kind = kind or "lip inside the walls"
                     elif outside:
                         r = outside[-1]
-                        res[axis].append(((r[3] - r[2]) - outd) / 2)
+                        lvl[axis].append(((r[3] - r[2]) - outd) / 2)
                         widths[axis].append(r[3] - r[2])
                         kind = kind or "skirt outside the walls"
-    cl = [sm.median(res[0]), sm.median(res[1])]
-    out.append(check("lid lip clearance 0.2 per side (+-0.05)", all(within(c, 0.15, 0.25) for c in cl),
-                     {"clearance_per_axis": r3(cl), "kind": kind, "lid_plate": r3(plate_t)}, 0.2,
-                     note="median over positions, so local snap bumps do not count"))
+            for axis in (0, 1):
+                res[axis] += lvl[axis]
+            per_level.append((z, sm.median(lvl[0]), sm.median(lvl[1])))
+    dz = (per_level[1][0] - per_level[0][0]) if len(per_level) > 1 else 0
+    band, best = [], []
+    for z, c0, c1 in per_level:
+        if within(c0, 0.15, 0.25) and within(c1, 0.15, 0.25):
+            band.append((z, c0, c1))
+            best = max(best, band, key=len)
+        else:
+            band = []
+    band_mm = len(best) * dz
+    cl = [sm.median([b[1] for b in best]), sm.median([b[2] for b in best])] if best else \
+        [sm.median(res[0]), sm.median(res[1])]
+    out.append(check("lid lip clearance 0.2 per side (+-0.05)", band_mm >= 0.6 - 1e-6,
+                     {"clearance_per_axis": r3(cl), "band_mm": r3(band_mm),
+                      "band_z_from_plate": r3([best[0][0] - z0, best[-1][0] - z0]) if best else None,
+                      "median_over_height": r3([sm.median(res[0]), sm.median(res[1])]),
+                      "kind": kind, "lid_plate": r3(plate_t)}, 0.2,
+                     note="some band of the lip at least 0.6 mm tall at 0.2 per side on both axes; "
+                          "median over positions per level, so local snap bumps do not count"))
     spread = [max(w) - min(w) for w in widths.values() if w]
     out.append(check("snap features on the lip", None, {"lip_width_spread": r3(spread)}, None, gate=False,
                      note="whether snaps work cannot be judged from a mesh; a spread over ~0.3 mm "
@@ -541,88 +568,124 @@ def grade_t3(parts):
                      through and closed_levels == 0 and within(dch, 7.8, 8.2),
                      {"median_diameter": r3(dch), "levels_closed": closed_levels, "axis_line_clear": through}, 8))
 
+    # Segments along the axis, told apart by their radial profile rather
+    # than by where they sit. The spec never states the order of thread,
+    # flange and barb, and the validation round cad-20260928T231444Z had a
+    # correct part built flange-down (hex, thread, barb from the bed up):
+    # the grader assumed the thread and the barb lay on opposite sides of
+    # the flange, found no barb, and failed five gates on a part that met
+    # every stated number. Each level is hex (mean radius >= 13.5, wider
+    # than any M24 thread), thread-like (some direction reaches radius 9,
+    # beyond any barb for a 12 ID hose, whose gate allows 8) or barb-like.
     Rmean = [sum(R[d][i] for d in R) / 4 for i in range(len(zs))]
-    fl = [i for i, r in enumerate(Rmean) if r >= 13.5]
-    if not fl:
-        out.append(check("hex flange found", False, r3(max(Rmean)), 15,
+    rmax4 = [max(R[d][i] for d in R) for i in range(len(zs))]
+    rmin4 = [min(R[d][i] for d in R) for i in range(len(zs))]
+    labels = ["H" if Rmean[i] >= 13.5 else "T" if rmax4[i] >= 9 else "B" for i in range(len(zs))]
+    runs = []  # [label, first index, last index]
+    for i, lab in enumerate(labels):
+        if runs and runs[-1][0] == lab:
+            runs[-1][2] = i
+        else:
+            runs.append([lab, i, i])
+
+    def longest(lab):
+        rs = [r for r in runs if r[0] == lab]
+        return max(rs, key=lambda r: r[2] - r[1]) if rs else None
+
+    def edge_lo(i):
+        return max(p.bmin[2], zs[i] - step / 2)
+
+    def edge_hi(i):
+        return min(p.bmax[2], zs[i] + step / 2)
+
+    # Hex: the longest run of hex levels, sectioned every 0.25 mm. Only
+    # levels with full corners (corners/flats of a regular hexagon,
+    # 2/sqrt3 = 1.1547) count toward the across-flats median: a flange
+    # whose corners are chamfered by a printable cone underneath, as on a
+    # hex nut, is still 30 across flats (the CadQuery part of
+    # cad-20260928T231444Z had 42-degree chamfered corners over 2.5 of its
+    # 7.7 mm and failed a median of corners/flats over the whole flange).
+    # A cylinder or a 12-gon never shows full hexagon corners.
+    hx = longest("H")
+    fl = (zs[hx[1]], zs[hx[2]]) if hx else None
+    if not hx:
+        out.append(check("hex flange 30 across flats (+-0.2)", False, r3(max(Rmean)), 30,
                          note="no level wider than the thread (mean radius >= 13.5)"))
-        return out
-    f0, f1 = zs[fl[0]], zs[fl[-1]]
-    afs, ratios = [], []
-    for z in lin(f0 + 0.2, f1 - 0.2, 8):
-        loops, _ = p.section(2, z)
-        outer, _ = classify_loops(loops)
-        if outer:
-            mn, mx = sm.width_range(max(outer, key=sm.poly_area), 180)
-            afs.append(mn)
-            ratios.append(mx / mn)
-    af, ratio = sm.median(afs), sm.median(ratios)
-    # A regular hexagon's corners are 2/sqrt3 = 1.1547 times its flats.
-    out.append(check("hex flange 30 across flats (+-0.2)", within(af, 29.8, 30.2) and within(ratio, 1.13, 1.18),
-                     {"across_flats": r3(af), "corners_over_flats": r3(ratio), "flange_thickness": r3(f1 - f0)}, 30))
+    else:
+        f0, f1 = fl
+        levels = lin(f0 + 0.1, f1 - 0.1, max(2, min(60, int((f1 - f0) / 0.25))))
+        per = []
+        for z in levels:
+            loops, _ = p.section(2, z)
+            outer, _ = classify_loops(loops)
+            if outer:
+                mn, mx = sm.width_range(max(outer, key=sm.poly_area), 180)
+                per.append((mn, mx / mn))
+        full = [(a, r) for a, r in per if 1.13 <= r <= 1.18]
+        af = sm.median([a for a, _ in full])
+        full_mm = len(full) * (f1 - f0) / max(1, len(levels))
+        # At least 0.5 mm of full-cornered hexagon: two sampled levels, so
+        # one stray section cannot make a round flange pass.
+        out.append(check("hex flange 30 across flats (+-0.2)", len(full) >= 2 and within(af, 29.8, 30.2),
+                         {"across_flats": r3(af), "corners_over_flats": r3(sm.median([r for _, r in full])),
+                          "full_hexagon_mm": r3(full_mm), "flange_thickness": r3(f1 - f0),
+                          "corners_over_flats_all_levels": r3(sm.median([r for _, r in per]))}, 30,
+                         note="across flats over the levels whose corners are a regular hexagon's "
+                              "(corners/flats 1.13-1.18); chamfered corners elsewhere are allowed"))
 
-    sides = {"low": [i for i, z in enumerate(zs) if z < f0 - 0.1],
-             "high": [i for i, z in enumerate(zs) if z > f1 + 0.1]}
-    spans = {"low": f0 - p.bmin[2], "high": p.bmax[2] - f1}
-
-    def rmax(idx):
-        return sorted(max(R[d][i] for d in R) for i in idx)[int(0.95 * (len(idx) - 1))] if idx else 0
-
-    thread_side = min(sides, key=lambda s: abs(rmax(sides[s]) - 12))
-    barb_side = "high" if thread_side == "low" else "low"
-
-    # Where the thread ends. The flange test above (mean radius >= 13.5)
-    # does not find the flange's underside: the 45-degree overhang rule
-    # makes a printable design put a cone, or a hull from the thread root
-    # to the hexagon, under the flange, and its first 2-3 mm are narrower
-    # than 13.5. Counting that cone as thread added its height to the
-    # length, its radius to the major diameter and its steady rise to the
-    # pitch autocorrelation, so correct 12 mm threads failed all three (all
-    # three conditions of pilot cad-20260928T202850Z). The spec asks for a
-    # thread 12 long, so measure the thread itself: walking from the free
-    # end toward the flange, a level is threaded while its groove is open,
-    # i.e. one of the four directions still reaches within 30% of the depth
-    # of the root radius. A cone springing from the root closes it within
-    # 0.3 of the depth above the thread's end, so a shallow cone reads up
-    # to about 0.6 mm long (the pilot's hull skirt: 12.57 for a 12.0
-    # thread). Four directions a quarter pitch apart always see an open
-    # groove on an ISO-like profile: the part of it within 30% of the
-    # depth of the root is over a third of a pitch wide.
-    side = sides[thread_side]
-    rmin4 = {i: min(R[d][i] for d in R) for i in side}
-    walk = side if thread_side == "low" else side[::-1]
+    # Thread: the longest run of thread-like levels. Within it a level is
+    # threaded while its groove is open: one of the four directions (a
+    # quarter pitch apart, so one always looks into the groove of an
+    # ISO-like profile) reaches within 30% of the depth of the root. A
+    # cone or hull under the flange springs from the root and closes the
+    # groove within 0.3 of the depth, so it is not thread (counting it
+    # failed length, major diameter and pitch on all three correct threads
+    # of pilot cad-20260928T202850Z). The crest radius is the 80th
+    # percentile over levels of the widest direction: a helix shows its
+    # crest in some direction at nearly every level, stacked rings only on
+    # their crest flats (1/8 of a pitch), and a 45-degree cone from the
+    # crest to the 13.5 hex test spans under 2 mm, so neither the rings
+    # nor a cone's wider levels move it far from the crest. The thread is the longest cluster of open levels,
+    # where a cluster only ends once the groove has stayed closed for more
+    # than 1.6 mm (0.8 of the pitch): stacked rings close it at each
+    # ring's crest for up to two thirds of a pitch, and must reach the
+    # helical check below rather than be cut into pieces here.
+    tr = longest("T")
     run = []
-    if side:
-        root = sorted(rmin4.values())[int(0.02 * (len(side) - 1))]
-        # The half nearest the free end is thread (a cone under the flange
-        # is a few mm; the thread is 12), so it gives the crest radius.
-        near = sorted(R[d][i] for i in walk[: max(1, len(walk) // 2)] for d in R)
-        depth = near[int(0.98 * (len(near) - 1))] - root
-        # Stacked rings have no direction in the groove at a ring's crest,
-        # so a closed level only ends the thread once the groove has stayed
-        # closed for more than 1.6 mm (0.8 of the 2 mm pitch; a ring's
-        # crest closes it for up to two thirds of a pitch, by the width
-        # argument above), and the thread then ends at the last open level.
-        last = None
-        for k, i in enumerate(walk):
-            if rmin4[i] <= root + 0.3 * depth:
-                last = k
-            elif last is not None and abs(zs[i] - zs[walk[last]]) > 1.6:
-                break
-        run = walk[: last + 1] if last is not None else []
-    free_end = p.bmin[2] if thread_side == "low" else p.bmax[2]
-    thread_len = abs(zs[run[-1]] - free_end) if run else 0.0
+    if tr:
+        side = list(range(tr[1], tr[2] + 1))
+        root = sorted(rmin4[i] for i in side)[int(0.02 * (len(side) - 1))]
+        depth = sorted(rmax4[i] for i in side)[int(0.8 * (len(side) - 1))] - root
+        open_ = [i for i in side if rmin4[i] <= root + 0.3 * depth]
+        clusters = []
+        for i in open_:
+            if clusters and zs[i] - zs[clusters[-1][-1]] <= 1.6:
+                clusters[-1].append(i)
+            else:
+                clusters.append([i])
+        if clusters:
+            c = max(clusters, key=lambda c: zs[c[-1]] - zs[c[0]])
+            run = list(range(c[0], c[-1] + 1))
+    thread_span = (edge_lo(run[0]), edge_hi(run[-1])) if run else None
+    thread_len = thread_span[1] - thread_span[0] if run else 0.0
 
     # Thread: radius along four fixed directions as a function of z. A
     # helix shifts the profile by P/4 per quarter turn (right-hand: the
     # +90 degree direction lags by +P/4); stacked rings do not shift it.
-    ti = sorted(run)
+    ti = list(run)
     margin = int(0.5 / step)
     ti = ti[margin:-margin] if len(ti) > 2 * margin + 10 else ti
-    out.append(check("thread 12 long (+-1, free end to where the groove closes)", within(thread_len, 11, 13),
-                     {"thread": r3(thread_len), "free_end_to_flange": r3(spans[thread_side])}, 12))
+    out.append(check("thread 12 long (+-1, extent of the open groove)", within(thread_len, 11, 13),
+                     {"thread": r3(thread_len), "span": r3(thread_span),
+                      "thread_like_levels": r3((zs[tr[1]], zs[tr[2]])) if tr else None}, 12))
+    thread_names = ("thread major diameter 24 (-0.6/+0.1)", "pitch 2 (+-0.1)",
+                    "real helical thread (not stacked rings), depth >= 0.8", "right-hand thread")
     if len(ti) < int(4 / step):
-        out.append(check("M24x2 helical thread", False, None, None, note="thread side too short to sample"))
+        # Each thread gate fails on its own, so a part without a usable
+        # thread has as many gates as one with it (the round above counted
+        # 7 gates for this part and 10 for the others).
+        for name in thread_names:
+            out.append(check(name, False, None, None, note="no thread 4 mm long to sample"))
     else:
         prof = {d: [R[d][i] for i in ti] for d in R}
         allr = sorted(r for d in prof for r in prof[d])
@@ -631,7 +694,7 @@ def grade_t3(parts):
         amp = (major - minor) / 2
         # +0.1/-0.6: printed M24 external threads are usually made slightly
         # undersize for fit (ISO 6g major is 23.62..23.96).
-        out.append(check("thread major diameter 24 (-0.6/+0.1)", within(major, 23.4, 24.1), r3(major), 24))
+        out.append(check(thread_names[0], within(major, 23.4, 24.1), r3(major), 24))
         out.append(check("thread minor diameter", None if amp < 0.3 else True, r3(minor), 21.55, gate=False,
                          note="ISO M24x2 external minor d3 = 21.546; information only"))
         # Pitch: the first autocorrelation peak of one direction's profile.
@@ -647,7 +710,7 @@ def grade_t3(parts):
             if ac[L] >= ac[L - 1] and ac[L] >= ac[L + 1] and ac[L] > 0.3:
                 pitch = L * step
                 break
-        out.append(check("pitch 2 (+-0.1)", within(pitch, 1.9, 2.1), r3(pitch), 2,
+        out.append(check(thread_names[1], within(pitch, 1.9, 2.1), r3(pitch), 2,
                          note="first autocorrelation peak of the radius profile along one direction"))
         P = pitch or 2
         maxlag = int(P / 2 / step)
@@ -655,34 +718,79 @@ def grade_t3(parts):
         f = {d: lags[d][0] * step / P for d in lags}  # in turns of pitch
         helical = (amp >= 0.8 and 0.15 <= abs(f[90]) <= 0.35 and 0.15 <= abs(f[270]) <= 0.35
                    and f[90] * f[270] < 0 and abs(f[180]) >= 0.35)
-        out.append(check("real helical thread (not stacked rings), depth >= 0.8",
+        out.append(check(thread_names[2],
                          helical, {"depth": r3(amp), "shift_per_quarter_turn_in_pitches":
                                    {d: r3(f[d]) for d in f}, "correlations": {d: r3(lags[d][1]) for d in lags}},
                          {"90": 0.25, "180": 0.5, "270": -0.25},
                          note="profile shift between directions; ISO M24x2 depth is 1.23"))
-        out.append(check("right-hand thread", helical and f[90] > 0 if helical else None,
+        out.append(check(thread_names[3], helical and f[90] > 0 if helical else None,
                          r3(f[90]), 0.25, note="M threads are right-hand unless marked LH"))
 
-    # Barb: three peaks of the mean radius on the barb side.
-    bi = sides[barb_side]
-    out.append(check("barb 25 long (+-1, flange face to end)", within(spans[barb_side], 24, 26),
-                     r3(spans[barb_side]), 25))
-    prof = [Rmean[i] for i in bi]
-    w = int(0.6 / step)
+    # Barb: the longest run of barb-like levels, measured from the feature
+    # it springs from (the hex face or the thread's end, whichever is
+    # nearer; anything between, such as a chamfer or collar, is the barb's
+    # stem) to the next feature or the part's end on its other side.
+    br = longest("B")
+    if br:
+        z0, z1 = zs[br[1]], zs[br[2]]
+        below = [z for z in ((fl[1] + step / 2) if fl and fl[1] < z0 else None,
+                             thread_span[1] if thread_span and thread_span[1] <= z0 else None) if z is not None]
+        above = [z for z in ((fl[0] - step / 2) if fl and fl[0] > z1 else None,
+                             thread_span[0] if thread_span and thread_span[0] >= z1 else None) if z is not None]
+        b_lo = max(below) if below else p.bmin[2]
+        b_hi = min(above) if above else p.bmax[2]
+        barb_len = b_hi - b_lo
+    else:
+        barb_len = None
+    out.append(check("barb 25 long (+-1, from the hex face or thread end to its end)", within(barb_len, 24, 26),
+                     r3(barb_len), 25))
+
+    # Barbs: plateaus of the mean radius that stand 0.3 above the lowest
+    # point on each side before the profile rises higher again (their
+    # prominence). A side with no samples (the barb run ends at the crest)
+    # is not counted. The earlier rule, 0.3 above anything within 3 mm,
+    # took a plain stem ending in a tip chamfer for three more barbs (the
+    # OpenSCAD part of cad-20260928T231444Z: three 13.39 crests plus three
+    # 11.6 "peaks" on the plain stem next to the 10.4 tip).
     peaks = []
-    for i in range(len(prof)):
-        seg = prof[max(0, i - w):i + w + 1]
-        wide = prof[max(0, i - int(3 / step)):i + int(3 / step) + 1]
-        if prof[i] >= max(seg) and prof[i] - min(wide) >= 0.3:
-            z = zs[bi[i]]
-            if not peaks or z - peaks[-1][0] > 1.0:
-                peaks.append((z, 2 * prof[i]))
+    prof = [Rmean[i] for i in range(br[1], br[2] + 1)] if br else []
+    j = 0
+    while j < len(prof):
+        k = j
+        while k + 1 < len(prof) and abs(prof[k + 1] - prof[j]) <= 1e-3:
+            k += 1
+        top = prof[j]
+        if (j == 0 or prof[j - 1] < top) and (k == len(prof) - 1 or prof[k + 1] < top):
+            sides_min = []
+            for rng in (range(j - 1, -1, -1), range(k + 1, len(prof))):
+                lowest = None
+                for q in rng:
+                    if prof[q] > top:
+                        break
+                    lowest = prof[q] if lowest is None else min(lowest, prof[q])
+                if lowest is not None:
+                    sides_min.append(lowest)
+            prom = top - max(sides_min) if sides_min else 0
+            z = zs[br[1] + (j + k) // 2]
+            if prom >= 0.3 and (not peaks or z - peaks[-1][0] > 1.0):
+                peaks.append((z, 2 * top))
+        j = k + 1
     shank = 2 * min(prof) if prof else None
     out.append(check("three barbs", len(peaks) == 3, {"peaks": [r3(d) for _, d in peaks], "shank": r3(shank)}, 3,
-                     note="local maxima of the mean radius standing 0.3 mm above their surroundings"))
+                     note="plateaus of the mean radius with a prominence of 0.3 mm"))
     out.append(check("barbs grip a 12 ID hose (peak dia 12.5..16)",
                      bool(peaks) and all(12.5 <= d <= 16 for _, d in peaks), [r3(d) for _, d in peaks], "12.5..16",
                      note="the spec gives the hose, not the barb size; this range is typical for 12 ID"))
+
+    # The order of the segments, information only. The spec states none;
+    # a thread between the hex and the barb has no free end to screw into
+    # a fitting, which the grader reports but does not judge.
+    seg = {"hex": fl and (fl[0] + fl[1]) / 2, "thread": thread_span and sum(thread_span) / 2,
+           "barb": br and (zs[br[1]] + zs[br[2]]) / 2}
+    order = [k for k in sorted((k for k in seg if seg[k] is not None), key=lambda k: seg[k])]
+    free = bool(thread_span) and (thread_span[0] - p.bmin[2] < 0.5 or p.bmax[2] - thread_span[1] < 0.5)
+    out.append(check("layout", None, {"order_along_axis": order, "thread_at_a_free_end": free}, None, gate=False,
+                     note="the spec does not order the segments; not judged"))
     return out
 
 

@@ -228,6 +228,12 @@ class References(unittest.TestCase):
         self.assertFails(self.ref("T2", ["vents=4"], "t2-vents"), "vent")
         # The reference's lip follows the cavity, so only the cavity fails.
         self.assertFails(self.ref("T2", ["clear=0.2"], "t2-cav"), "cavity")
+        # A lip relieved 0.8 per side for snap clearance, with a 1 mm catch
+        # band at 0.2, is located by that band (cad-20260928T231444Z's
+        # OpenSCAD lid); relieved with its band at 0.4, it still fails.
+        g = self.ref("T2", ["lip_relief=0.8"], "t2-relief")
+        self.assertTrue(g["pass"], g["failed_gates"])
+        self.assertFails(self.ref("T2", ["lip_relief=0.8", "lip_clear=0.4"], "t2-relief-wide"), "clearance")
 
     def test_t3(self):
         g = self.ref("T3")
@@ -248,8 +254,35 @@ class References(unittest.TestCase):
             g = self.ref("T3", defs, tag)
             self.assertTrue(g["pass"], (tag, g["failed_gates"]))
             length = next(c for c in g["checks"] if c["name"].startswith("thread 12 long"))["value"]
-            self.assertGreater(length["free_end_to_flange"], 13, tag)
+            self.assertGreater(length["thread_like_levels"][1] - length["thread_like_levels"][0], 13, tag)
         self.assertFails(self.ref("T3", ['skirt="cone"', "thread_len=10"], "t3-short"), "12 long")
+
+    def test_t3_layouts(self):
+        # The spec states no order of thread, flange and barb. Flange-down
+        # (hex, thread, barb: cad-20260928T231444Z's NeoSCAD part) passes,
+        # upright or turned over, and its wrong variants still fail.
+        hx = ['order="hex-thread-barb"']
+        for defs, tag in ((hx, "t3-htb"), (["flip=true"], "t3-flip")):
+            g = self.ref("T3", defs, tag)
+            self.assertTrue(g["pass"], (tag, g["failed_gates"]))
+        layout = next(c for c in self.ref("T3", hx, "t3-htb")["checks"] if c["name"] == "layout")["value"]
+        self.assertEqual(layout["order_along_axis"], ["hex", "thread", "barb"])
+        self.assertFalse(layout["thread_at_a_free_end"])
+        self.assertFails(self.ref("T3", hx + ["thread_len=10"], "t3-htb-short"), "12 long")
+        self.assertFails(self.ref("T3", hx + ["barb_len=20"], "t3-htb-barb"), "barb 25")
+        self.assertFails(self.ref("T3", hx + ["pitch=1.5"], "t3-htb-pitch"), "pitch")
+        self.assertFails(self.ref("T3", hx + ["af=32"], "t3-htb-af"), "across flats")
+        self.assertFails(self.ref("T3", hx + ["rings=true"], "t3-htb-rings"), "helical", "right-hand")
+        # Corners chamfered over 5 of the flange's 8 mm (CadQuery's part
+        # there) are still a 30 hex; a round flange is not.
+        g = self.ref("T3", ["hex_cham=5"], "t3-cham")
+        self.assertTrue(g["pass"], g["failed_gates"])
+        self.assertFails(self.ref("T3", ["hex_cham=16"], "t3-round"), "across flats")
+        # A plain stem and tip chamfer after the barbs is not three more
+        # barbs (OpenSCAD's part there); two barbs are not three.
+        g = self.ref("T3", ["barb_stem=5"], "t3-stem")
+        self.assertTrue(g["pass"], g["failed_gates"])
+        self.assertFails(self.ref("T3", ["barb_stem=5", "barbs=2"], "t3-two"), "three barbs")
 
 
 T0_SCAD = "difference() { cube([20, 10, 4]); translate([10, 5, -1]) cylinder(d = 3, h = 6, $fn = 64); }\n"

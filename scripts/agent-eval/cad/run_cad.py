@@ -297,7 +297,7 @@ def account(lines, cond, args):
     """Tool calls with arrival times, CAD-tool errors, tokens and cost."""
     calls = {}
     order = []
-    result = {}
+    results = []
     for t, line in lines:
         try:
             m = json.loads(line)
@@ -321,17 +321,11 @@ def account(lines, cond, args):
                     if call["cad_error"]:
                         call["error_text"] = text[:2000]
         elif m.get("type") == "result":
-            result = m
+            results.append(m)
     tools = {}
     for i in order:
         n = calls[i]["name"].removeprefix("mcp__neoscad__")
         tools[n] = tools.get(n, 0) + 1
-    usage = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
-    for u in (result.get("modelUsage") or {}).values():
-        usage["input"] += u.get("inputTokens", 0)
-        usage["cache_read"] += u.get("cacheReadInputTokens", 0)
-        usage["cache_write"] += u.get("cacheCreationInputTokens", 0)
-        usage["output"] += u.get("outputTokens", 0)
     cad_calls = [calls[i] for i in order if calls[i].get("cad")]
     return {
         "calls": [dict(calls[i], id=i) for i in order],
@@ -341,16 +335,44 @@ def account(lines, cond, args):
             "cad_tool_calls": len(cad_calls),
             "cad_tool_errors": sum(1 for c in cad_calls if c.get("cad_error")),
             "all_error_results": sum(1 for i in order if calls[i].get("is_error")),
-            "turns": result.get("num_turns"),
-            "tokens": usage,
-            "tokens_total": sum(usage.values()),
-            "tokens_excl_cache_reads": usage["input"] + usage["cache_write"] + usage["output"],
-            "cost_usd": result.get("total_cost_usd"),
-            "api_ms": result.get("duration_api_ms"),
-            "stop": result.get("subtype"),
-            "is_error": result.get("is_error"),
-            "final_message": result.get("result") or "",
+            **result_summary(results),
         },
+    }
+
+
+def result_summary(results):
+    """Turns, tokens, cost and the final message from the stream's result
+    events. A session can emit more than one: when a background command
+    the agent started finishes after its report, Claude Code wakes it for
+    a short follow-up turn with a result of its own (`origin`
+    task-notification). That result's `num_turns` counts only the
+    follow-up, while its `modelUsage`, `total_cost_usd` and
+    `duration_api_ms` are the session's running totals. Taking the last
+    result's figures as the run's recorded T3 CadQuery in
+    cad-20260928T231444Z as 2 turns (it took 44) and its follow-up note
+    as the final message, so turns are summed, totals come from the last
+    result, and the report is the last result that answered the prompt."""
+    last = results[-1] if results else {}
+    usage = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+    for u in (last.get("modelUsage") or {}).values():
+        usage["input"] += u.get("inputTokens", 0)
+        usage["cache_read"] += u.get("cacheReadInputTokens", 0)
+        usage["cache_write"] += u.get("cacheCreationInputTokens", 0)
+        usage["output"] += u.get("outputTokens", 0)
+    answers = [r for r in results if not r.get("origin")] or results
+    report = answers[-1] if answers else {}
+    return {
+        "turns": sum(r.get("num_turns") or 0 for r in results) if results else None,
+        "tokens": usage,
+        "tokens_total": sum(usage.values()),
+        "tokens_excl_cache_reads": usage["input"] + usage["cache_write"] + usage["output"],
+        "cost_usd": last.get("total_cost_usd"),
+        "api_ms": last.get("duration_api_ms"),
+        "stop": last.get("subtype"),
+        "is_error": last.get("is_error"),
+        "final_message": report.get("result") or "",
+        "result_events": len(results),
+        "followup_messages": [r.get("result") or "" for r in results if r is not report],
     }
 
 
@@ -562,8 +584,10 @@ def run_one(task, cond, rep, args, rundir):
         "version_detail": [{k: v[k] for k in ("n", "t", "changed", "state", "tool_error", "clean", "pass",
                                                 "wrong", "failed_gates")} for v in vers],
         **{k: s[k] for k in ("tool_calls", "tools", "cad_tool_calls", "all_error_results", "turns", "tokens",
-                             "tokens_total", "tokens_excl_cache_reads", "cost_usd", "api_ms", "stop", "is_error")},
+                             "tokens_total", "tokens_excl_cache_reads", "cost_usd", "api_ms", "stop", "is_error",
+                             "result_events")},
         "final_message": s["final_message"][:4000],
+        "followup_messages": [m[:2000] for m in s["followup_messages"]],
         "workdir": str(workdir),
     }
     log(f"  {'PASS' if run['pass'] else 'FAIL'} clean={run['clean']} gates {run['gates']} "
@@ -603,6 +627,34 @@ def history_states(keep, detail, parts):
     return states
 
 
+def reaccount(r, keep):
+    """Re-derives a run's result-event figures (turns, tokens, cost, final
+    message) from its saved transcript with the current result_summary,
+    so a regrade also carries accounting fixes. Tool calls and tool errors
+    are left as recorded; the old figures go to r["account_at_run"]."""
+    path = keep / "transcript.jsonl"
+    if not path.exists():
+        return
+    results = []
+    for line in path.read_text().splitlines():
+        try:
+            m = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(m, dict) and m.get("type") == "result":
+            results.append(m)
+    s = result_summary(results)
+    keys = ("turns", "tokens", "tokens_total", "tokens_excl_cache_reads", "cost_usd", "api_ms", "stop",
+            "is_error", "result_events")
+    changed = {k: r[k] for k in keys + ("final_message",)
+               if k in r and r[k] != (s[k][:4000] if k == "final_message" else s[k])}
+    if changed:
+        r["account_at_run"] = changed
+    r.update({k: s[k] for k in keys})
+    r["final_message"] = s["final_message"][:4000]
+    r["followup_messages"] = [m[:2000] for m in s["followup_messages"]]
+
+
 def regrade(name, args):
     """Grades a record's saved STLs again (every version and the final
     parts) with the current grader. The original record and its grade
@@ -622,8 +674,9 @@ def regrade(name, args):
         states = ([v["state"] for v in detail] if all("state" in v for v in detail)
                   else history_states(keep, detail, parts))
         r["grade_at_run"] = {k: r.get(k) for k in ("pass", "clean", "failed_gates", "gates",
-                                                    "silent_wrong_versions")}
+                                                    "silent_wrong_versions", "final_failed_checks")}
         r["grade_at_run"]["version_detail"] = [dict(v) for v in detail]
+        reaccount(r, keep)
         if states is None:
             log(f"{r['task']} {r['condition']} #{r['rep']}: history does not match the versions; "
                 "version grades kept as recorded")
@@ -643,6 +696,7 @@ def regrade(name, args):
             log(f"{r['task']} {r['condition']} #{r['rep']}: {r['pass']} -> {g.get('pass')}")
         r["pass"], r["clean"], r["failed_gates"] = g.get("pass"), g.get("clean"), g.get("failed_gates")
         r["gates"] = f"{g.get('gates_passed')}/{g.get('gates_total')}"
+        r["final_failed_checks"] = len(g.get("failed_gates") or []) + (0 if g.get("clean") else 1)
         (out / "grade-final.json").write_text(json.dumps(g, indent=1))
     record["regraded"] = ts
     record["regraded_from"] = path.name

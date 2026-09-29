@@ -3,6 +3,12 @@
 // whose radius at angle a and height z is a profile of z - P*a/360.
 // `rings = true` makes the stacked-ring fake the spec bans (the profile of
 // z alone); `hand = -1` a left-hand thread; `pitch`, `af` for more variants.
+// `order = "hex-thread-barb"` stacks the segments flange-down, as the
+// NeoSCAD agent did in cad-20260928T231444Z (the spec states no order);
+// `hex_cham` chamfers the flange's lower corners with a cone over that
+// height (CadQuery's part there); `barb_stem` ends the barb in a plain
+// stem of that length with a 0.6 tip chamfer (OpenSCAD's part there);
+// `barbs` sets their number; `flip = true` turns the part over.
 pitch = 2;
 major = 23.8;
 depth = 1.2;
@@ -15,6 +21,11 @@ rings = false;
 hand = 1;
 skirt = "none";
 skirt_dz = 0;
+order = "thread-hex-barb";
+hex_cham = 0;
+barb_stem = 0;
+barbs = 3;
+flip = false;
 $fn = 64;
 
 function prof(s) = let(f = s / pitch - floor(s / pitch))
@@ -52,14 +63,45 @@ module skirt() {
         }
 }
 
-difference() {
+module hex(h) {
+    intersection() {
+        cylinder(d = af / cos(30), h = h, $fn = 6);
+        // A cone from the inscribed circle to the corners over hex_cham.
+        if (hex_cham > 0)
+            union() {
+                cylinder(r1 = af / 2, r2 = hex_r, h = hex_cham);
+                translate([0, 0, hex_cham - 0.01]) cylinder(r = hex_r + 1, h = h);
+            }
+    }
+}
+
+module barbs() {
+    teeth = barb_len - barb_stem;
+    for (k = [0:barbs - 1])
+        translate([0, 0, k * teeth / barbs - 0.01]) cylinder(d1 = 14, d2 = 12, h = teeth / barbs + 0.01);
+    if (barb_stem > 0) {
+        translate([0, 0, teeth - 0.01]) cylinder(d = 12, h = barb_stem - 0.6 + 0.01);
+        translate([0, 0, barb_len - 0.6 - 0.01]) cylinder(d1 = 12, d2 = 10.4, h = 0.61);
+    }
+}
+
+height = (order == "hex-thread-barb" ? flange + thread_len : flange_z + flange) + barb_len;
+
+// Turned over by a rotation (not a mirror), so the thread stays right-hand.
+if (flip) translate([0, 0, height]) rotate([180, 0, 0]) adapter(); else adapter();
+
+module adapter() difference() {
     union() {
-        thread();
-        skirt();
-        translate([0, 0, flange_z - 0.01]) cylinder(d = af / cos(30), h = flange + 0.02, $fn = 6);
-        for (k = [0:2])
-            translate([0, 0, flange_z + flange + k * barb_len / 3 - 0.01])
-                cylinder(d1 = 14, d2 = 12, h = barb_len / 3 + 0.01);
+        if (order == "hex-thread-barb") {
+            hex(flange + 0.01);
+            translate([0, 0, flange]) thread();
+            translate([0, 0, flange + thread_len]) barbs();
+        } else {
+            thread();
+            skirt();
+            translate([0, 0, flange_z - 0.01]) hex(flange + 0.02);
+            translate([0, 0, flange_z + flange]) barbs();
+        }
     }
     translate([0, 0, -1]) cylinder(d = channel, h = 100);
 }
