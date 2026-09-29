@@ -976,3 +976,86 @@ fn enable_turns_on_openscads_experimental_features_for_every_call() {
         text(&r)
     );
 }
+
+/// Findings from the T2 transcript audit, end to end: a mesh `path` is
+/// imported rather than parsed, an info-level `stl-precision` finding
+/// carries no fix in a terse result, and a zero-volume intersection says
+/// the parts only touch.
+#[test]
+fn mesh_paths_quiet_info_and_touching_parts() {
+    let dir = scratch("t2-audit");
+    let mut s = Mcp::start(&dir, &[]);
+    // Export a mesh, then give each model tool its path.
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    let r = s.tool(
+        "render",
+        json!({"source": "cube([10, 20, 5]);", "export": "out/box.stl"}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    for tool in ["render", "check", "measure", "snapshot"] {
+        let r = s.tool(tool, json!({"path": "out/box.stl"}));
+        assert_eq!(r["isError"], false, "{tool}: {r}");
+        let t = text(&r);
+        assert!(
+            t.starts_with("path is a mesh file: rendered as `import(\"out/box.stl\");`"),
+            "{tool}: {t}"
+        );
+        assert_eq!(
+            r["structuredContent"]["imported"], "import(\"out/box.stl\");",
+            "{tool}: {r}"
+        );
+    }
+    let r = s.tool("render", json!({"path": "out/box.stl"}));
+    assert_eq!(r["structuredContent"]["geometry"]["volume"], 1000.0, "{r}");
+    // Upper case, and verbose's full JSON, are labelled too.
+    std::fs::copy(dir.join("out/box.stl"), dir.join("out/BOX.STL")).unwrap();
+    let r = s.tool("check", json!({"path": "out/BOX.STL", "verbose": true}));
+    assert_eq!(
+        r["structuredContent"]["imported"],
+        "import(\"out/BOX.STL\");"
+    );
+    // A .scad path is still a model.
+    std::fs::write(dir.join("m.scad"), "cube(1);\n").unwrap();
+    let r = s.tool("render", json!({"path": "m.scad"}));
+    assert!(r["structuredContent"].get("imported").is_none(), "{r}");
+
+    // Faces that only collapse at STL precision: info, no action, no fix
+    // in the terse result (verbose keeps it).
+    let src = "cube(10); translate([0,0,10-1e-7]) cube([5,5,5]);";
+    let r = s.tool("check", json!({"source": src}));
+    let f = &r["structuredContent"]["findings"][0];
+    assert_eq!(f["code"], "stl-precision", "{r}");
+    assert_eq!(f["severity"], "info", "{r}");
+    assert!(f.get("fix").is_none() && f.get("fix_as").is_none(), "{f}");
+    let t = text(&r);
+    assert!(t.contains("so no action is needed"), "{t}");
+    assert!(!t.contains("Fix:"), "{t}");
+    let r = s.tool("check", json!({"source": src, "verbose": true}));
+    let f = &r["structuredContent"]["findings"][0];
+    assert!(f["fix"].as_str().unwrap().contains("coincident"), "{f}");
+
+    // A plug seated in its hole: the intersection is the faces where they
+    // touch, with no volume. The pinch's fix says so, instead of "overlap
+    // them".
+    let plug = "intersection() {\n\
+        difference() { cube([10, 10, 5]); translate([2, 2, 2]) cube([6, 6, 5]); }\n\
+        translate([2, 2, 2]) cube([6, 6, 6]);\n}\n";
+    let r = s.tool("render", json!({"source": plug}));
+    let g = &r["structuredContent"]["geometry"];
+    assert_eq!(g["volume"], 0.0, "{g}");
+    let fix = g["pinched"]["fix"].as_str().unwrap();
+    assert!(
+        fix.starts_with("the parts only touch (no overlap)"),
+        "{fix}"
+    );
+    assert!(text(&r).contains(fix), "{}", text(&r));
+    // A real part's pinch keeps the usual advice.
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(10); translate([10,10,0]) cube(10);"}),
+    );
+    let fix = r["structuredContent"]["geometry"]["pinched"]["fix"]
+        .as_str()
+        .unwrap();
+    assert!(fix.starts_with("two parts touch along an edge"), "{fix}");
+}

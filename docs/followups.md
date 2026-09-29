@@ -835,6 +835,30 @@ lead them, come roughly in order of user impact.
   mesh as is: snapping vertices to `f32` and re-welding before an STL
   export would fix these files, but changes output OpenSCAD's
   regression tests compare, so it would need to be opt-in.
+- `measure between` works only on two `part()`s of one model. An
+  assembly check wants two files, each rendered with its own top-level
+  `$fn`/`$fa`/`$fs` and an optional transform (T2 audit #1, the full
+  version; only the `use-special-variables` hint was done). Resting
+  parts always read "touching, 0", so `between` should also give the
+  smallest gap between faces *not* in contact (the lip clearance), and
+  take a list of moves (a lift sweep: overlap volume at each offset,
+  for snap engagement) (T2 audit #7).
+- `check` reports every flat downward span as an `overhang`; a span
+  between two walls prints as a bridge. Classify those as bridges, with
+  the span's length, and warn only past a bridging limit (T2 audit #8).
+- The `use-special-variables` hint is left out for a variable that a
+  calling file assigns *anywhere*, which is conservative (a
+  `cylinder($fn = 8)` elsewhere hides it); it covers module calls, not
+  functions of the used file that read `$fn`; and it is given at the
+  first call into each file only. (T2 audit fixes)
+- The "the parts only touch" fix is given for a pinched zero-volume
+  result. Parts that touch on whole faces usually intersect to nothing
+  at all, and an empty result says only "empty": telling that apart
+  from parts that are far apart would need the operands' distance.
+  (T2 audit fixes)
+- The MCP tools import a mesh `path`; `neoscad check out.stl` on the
+  command line still parses it as OpenSCAD and fails with a syntax
+  error. (T2 audit fixes)
 
 ## MCP and the agent eval
 - `neoscad mcp` implements MCP 2026-07-28 statelessly plus the legacy
@@ -876,8 +900,9 @@ lead them, come roughly in order of user impact.
 - The agent eval's graders can only express geometry through `@expect`
   on derived solids (intersections with probes plus a 1 mm³ marker, so
   "no overlap" measures 1 instead of failing as an empty model). An
-  `@expect empty` or `@expect volume-between` would make them plainer.
-  (7c)
+  empty model now measures volume 0 (T2 audit fixes), so the marker is
+  no longer needed; an `@expect volume-between` would still make them
+  plainer. (7c)
 
 ## Tooling: fmt, test, docs
 - The builtin index's footer (`crates/docs/src/lib.rs`, "--in FILE for

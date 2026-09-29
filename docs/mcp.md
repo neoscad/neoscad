@@ -85,7 +85,15 @@ source's `include`s resolve (default: the server's working directory).
 Inline source is evaluated as `inline.scad` in `base_dir` (messages name
 it so) and removed afterwards. `parts: true` turns on the `part()`
 extension (`docs/cli-json.md`), and `verbose: true` returns the server's
-full JSON result.
+full JSON result. A `path` ending in `.stl`, `.off`, `.obj` or `.3mf`
+(any case) is a mesh, not OpenSCAD: `evaluate`, `render`, `snapshot`,
+`check` and `measure` run `import("<path as given>");` in its place
+(as `inline-import.scad` in `base_dir`), and say so: the text starts
+with ``path is a mesh file: rendered as `import("out/base.stl");` ``
+and the structured content (the full JSON too, with `verbose`) has
+`"imported": "import(\"out/base.stl\");"`. Parsed as OpenSCAD, the
+STL's first line was a syntax error, which an agent in the T2
+transcript audit read as a problem in its model.
 
 | Tool | What it answers | Extra arguments |
 |---|---|---|
@@ -192,6 +200,43 @@ ok: 1 warning
 not manifold as a file: 8 edges shared by more than two faces, the first at [0, 0, 1]: fix the polyhedron-inside-out warning (line 2) first: an inside-out or partly flipped polyhedron is the likely cause, since booleans with it go wrong; if these edges remain after that, overlap the parts that touch by at least 0.01 or separate them
 warning inline.scad:2:31: this polyhedron is inside out: all 6 faces point inward (its signed volume is -64 mm³); booleans with it give wrong results (OpenSCAD wants each face's points in clockwise order seen from outside the solid; these are counter-clockwise. Reverse every face's point list, e.g. `faces = [for (f = faces) [for (i = [len(f) - 1:-1:0]) f[i]]]`)
 ```
+
+A pinch in a result with no volume (under a millionth of a millimetre
+times its area) is parts that only touch: an `intersection()` of a lid
+seated on its base is the faces where they meet. Its `pinched` object
+has `"touch_only": true` and the fix says `the parts only touch (no
+overlap): this zero-volume result is the faces where they meet, so
+nothing interferes; overlap them by at least 0.01 only if they should
+be one solid` (`check`'s `not-manifold` finding has the same fix). The
+usual advice ("overlap them") misled an agent inside an interference
+probe; a real part's pinch keeps it.
+
+An info-level `stl-precision` finding (faces collapse at 32-bit
+precision, every edge still paired) says `so no action is needed`, and
+a terse result gives it no `fix` or `fix_as` (in the text, no `Fix:`);
+`verbose` keeps the fix. Its fix text read as an instruction, and an
+agent spent turns on it. A wall within 0.001 mm of `min_wall` (or of
+`nozzle`) is not under it: a floor modelled at exactly 1.2 mm read
+"1.2 mm thick, under the 1.2 mm minimum". A wall that is under by less
+than the hundredth the message rounds to is given to the
+ten-thousandth ("1.1986 mm thick, under the 1.2 mm minimum").
+
+A module from a `use`d file whose top sets `$fn`, `$fa` or `$fs` runs
+without those values: special variables come from the caller, in
+OpenSCAD as here (the 2026.09.23 nightly echoes `$fn = 0` from such a
+module, and the file's plain variables normally). Every NeoSCAD run of
+the T2 audit's enclosure measured coarse circles through a harness file
+this way. So `evaluate` and every tool that renders add a NeoSCAD-only
+warning at the first call into such a file, code
+`use-special-variables`, never printed on the console:
+
+```text
+warning asm_check.scad:5:18: `$fn = 64` at the top of base.scad doesn't apply to its modules when the file is used (OpenSCAD behaviour: special variables come from the caller) (pass `$fn` in the call (`base_part($fn = ...)`) or set it in this file)
+```
+
+A variable is left out when the call (or a call it is made from) passes
+it, or when the calling file assigns it anywhere; `@expect no-warnings`
+ignores this warning.
 
 When the faces are written out as numbers, the diagnostic's hint also
 carries the exact edit (`verbose: true`, and the editor's quick fix). `format` with `check` says how many lines

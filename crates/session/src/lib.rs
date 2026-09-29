@@ -65,6 +65,7 @@ mod parse;
 pub mod parts;
 pub mod snapshot;
 pub mod stats;
+mod usehint;
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -1470,6 +1471,14 @@ impl Session {
         if ev.interrupted || job.stopped() {
             return Err(Stop::Cancelled);
         }
+        let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+        usehint::report(
+            &mut pipe.con,
+            top,
+            loaded.libs.len(),
+            &|u| loaded.unit_program(u),
+            &pipe.paths.cwd,
+        );
         Ok(ev)
     }
 

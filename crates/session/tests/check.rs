@@ -515,6 +515,48 @@ fn real_thin_walls_are_still_found() {
     );
 }
 
+/// A wall modelled at exactly the minimum is not under it (the T2
+/// transcript audit: "a wall 1.2 mm thick, under the 1.2 mm minimum"),
+/// and one a few thousandths under still is, with its thickness given to
+/// enough digits to read as under.
+#[test]
+fn a_wall_at_exactly_the_minimum_passes() {
+    let at = |min_wall: f64, src: &str| {
+        check(
+            src,
+            false,
+            CheckSettings {
+                min_wall,
+                ..CheckSettings::default()
+            },
+        )
+    };
+    let v = at(
+        1.2,
+        "difference() { cube([20,20,10]); translate([1.2,1.2,1.2]) cube([17.6,17.6,10]); }",
+    );
+    assert!(findings(&v, "thin-wall").is_empty(), "{v}");
+    // A wall exactly at the nozzle width is a warning, not an error.
+    let v = at(
+        0.8,
+        "difference() { cube([20,20,10]); translate([0.4,0.4,0.4]) cube([19.2,19.2,10]); }",
+    );
+    let t = findings(&v, "thin-wall");
+    assert_eq!(t.len(), 1, "{v}");
+    assert_eq!(t[0]["severity"], "warning", "{v}");
+    let v = at(
+        1.2,
+        "difference() { cube([20,20,10]); translate([1.197,1.197,1.197]) cube([17.606,17.606,10]); }",
+    );
+    let t = findings(&v, "thin-wall");
+    assert_eq!(t.len(), 1, "{v}");
+    let m = t[0]["message"].as_str().unwrap();
+    assert!(
+        m.contains("1.197 mm thick, under the 1.2 mm minimum"),
+        "{m}"
+    );
+}
+
 #[test]
 fn pinched_edges_are_not_manifold() {
     // Two cubes sharing an edge: Manifold keeps a vertex for each and
@@ -573,6 +615,38 @@ fn pinched_edges_are_not_manifold() {
     // And measure's model.
     let m = measure(T3, |_| {});
     assert_eq!(m["model"]["manifold"], false, "{m}");
+    // A real solid's pinch is not parts that only touch.
+    assert!(g["pinched"].get("touch_only").is_none(), "{g}");
+}
+
+/// A plug seated in its hole touches it on five faces: their intersection
+/// is those faces, with no volume, pinched where they fold. That is parts
+/// that only touch, not a solid to repair (the T2 transcript audit: "NOT
+/// manifold, pinched ... overlap them" inside an interference probe).
+#[test]
+fn a_zero_volume_intersection_says_the_parts_only_touch() {
+    const PLUG: &str = "intersection() {\n\
+        difference() { cube([10, 10, 5]); translate([2, 2, 2]) cube([6, 6, 5]); }\n\
+        translate([2, 2, 2]) cube([6, 6, 6]);\n}\n";
+    let v = check(PLUG, false, CheckSettings::default());
+    let f = findings(&v, "not-manifold");
+    assert_eq!(f.len(), 1, "{v}");
+    assert_eq!(f[0]["fix"], session::check::TOUCH_FIX, "{v}");
+    assert!(
+        session::check::TOUCH_FIX.starts_with("the parts only touch (no overlap)"),
+        "{}",
+        session::check::TOUCH_FIX
+    );
+    let s = session(&[("m.scad", PLUG)]);
+    let scheme = render::ColorScheme::cornfield();
+    let r = s
+        .render(&Run::new("m.scad"), session::Mode::Render, &scheme)
+        .unwrap();
+    let g = r.geometry_json(&scheme.geometry_scheme());
+    assert_eq!(g["volume"], 0.0, "{g}");
+    assert_eq!(g["pinched"]["touch_only"], true, "{g}");
+    let m = measure(PLUG, |_| {});
+    assert_eq!(m["model"]["pinched"]["touch_only"], true, "{m}");
 }
 
 #[test]
@@ -983,6 +1057,32 @@ fn edges_that_break_only_at_stl_precision_are_a_warning() {
         serde_json::json!(session::stats::round6(2f64.powi(-18))),
         "{g}"
     );
+}
+
+/// Faces that only collapse, every edge still paired, are info that needs
+/// no action: the message says so, and short reports leave the fix out
+/// (an agent in the T2 transcript audit read it as an instruction).
+#[test]
+fn collapsed_faces_alone_need_no_action() {
+    let v = check(
+        "cube(10); translate([0,0,10-1e-7]) cube([5,5,5]);",
+        false,
+        CheckSettings::default(),
+    );
+    let f = findings(&v, "stl-precision");
+    assert_eq!(f.len(), 1, "{v}");
+    assert_eq!(f[0]["severity"], "info");
+    let msg = f[0]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("the mesh stays closed, so no action is needed"),
+        "{msg}"
+    );
+    // The full JSON keeps the fix; the text report does not print it.
+    assert!(f[0]["fix"].as_str().unwrap().contains("coincident"));
+    assert!(!session::check::fix_shown(f[0]));
+    let text = session::check::text(&v);
+    assert!(text.contains("no action is needed"), "{text}");
+    assert!(!text.contains("coincident"), "{text}");
 }
 
 #[test]

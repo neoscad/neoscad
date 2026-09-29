@@ -916,7 +916,8 @@ impl Session {
                 };
                 v["manifold"] = json!(solid.is_valid() && pinched.is_none());
                 if let Some(p) = pinched {
-                    v["pinched"] = stats::pinched_json(&p);
+                    let (vol, area, _) = mesh.mass();
+                    v["pinched"] = stats::pinched_json(&p, vol, area);
                 }
                 v
             }

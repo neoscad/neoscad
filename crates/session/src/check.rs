@@ -104,6 +104,13 @@ impl CheckSettings {
 pub const PINCH_FIX: &str = "two parts touch along an edge or at a point here; overlap them by at \
                              least 0.01 or separate them";
 
+/// The fix for pinched edges of a result with no volume
+/// ([`stats::touch_only`]): the parts only touch, so there is no overlap to
+/// remove, and the overlap advice of [`PINCH_FIX`] is for joining them.
+pub const TOUCH_FIX: &str = "the parts only touch (no overlap): this zero-volume result is the \
+                             faces where they meet, so nothing interferes; overlap them by at \
+                             least 0.01 only if they should be one solid";
+
 /// How bad a finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
@@ -228,7 +235,7 @@ fn stl_precision(p: &crate::mesh::StlPrecision, bbox: &Aabb) -> Finding {
     } else {
         format!(
             "{n} {tri} collapse to zero area when saved as STL (32-bit floats); slicers drop \
-             them and the mesh stays closed ({stored})"
+             them and the mesh stays closed, so no action is needed ({stored})"
         )
     };
     Finding {
@@ -246,6 +253,15 @@ fn stl_precision(p: &crate::mesh::StlPrecision, bbox: &Aabb) -> Finding {
         }),
         limit: None,
     }
+}
+
+/// Whether a finding's fix is shown in a short report (the MCP tools'
+/// terse results, `neoscad check`'s text). The info-level `stl-precision`
+/// finding needs no action, and its fix ("overlap or separate coincident
+/// surfaces ...") read as an instruction: an agent in the T2 transcript
+/// audit spent turns chasing it. The fix stays in the full JSON.
+pub fn fix_shown(finding: &Value) -> bool {
+    !(finding["code"] == "stl-precision" && finding["severity"] == "info")
 }
 
 /// What to do about triangles that collapse in an STL (the
@@ -448,6 +464,7 @@ fn analyze_solid(
         });
     }
     if let Some(p) = pinched {
+        let (volume, area, _) = mesh.mass();
         out.push(Finding {
             level: Level::Error,
             code: "not-manifold",
@@ -460,7 +477,12 @@ fn analyze_solid(
             point: p.at,
             bbox: p.bbox,
             part: None,
-            fix: PINCH_FIX.into(),
+            fix: if stats::touch_only(volume, area) {
+                TOUCH_FIX
+            } else {
+                PINCH_FIX
+            }
+            .into(),
             value: Some(p.edges as f64),
             limit: None,
         });
@@ -942,6 +964,35 @@ const WALL_COS: f64 = std::f64::consts::FRAC_1_SQRT_2;
 /// are strided (a mesh this dense samples finely anyway).
 const MAX_RAYS: usize = 400_000;
 
+/// How far under a limit (the minimum wall, the nozzle) a wall must
+/// measure before it counts as under it, in mm. A wall modelled at exactly
+/// the minimum measures a hair either side of it (a ray's hit is computed
+/// in floating point, and `20 - 18.8` is not `1.2`): compared strictly, a
+/// 1.2 mm floor read "1.2 mm thick, under the 1.2 mm minimum" and an agent
+/// in the T2 transcript audit spent turns thickening walls that met the
+/// spec. A micron is far below what any FDM printer resolves (layers and
+/// perimeters are tenths of a millimetre), so no printable difference
+/// hides in it, while a faceted cylinder's wall (1.1986 mm for 1.2 mm at
+/// `$fn = 64`) is still under.
+const WALL_TOLERANCE: f64 = 1e-3;
+
+/// Whether a wall `h` thick is under `limit` ([`WALL_TOLERANCE`]).
+fn under(h: f64, limit: f64) -> bool {
+    h < limit - WALL_TOLERANCE
+}
+
+/// A thickness as a thin-wall message gives it: to the hundredth, or to
+/// the ten-thousandth when the hundredth would read as the limit itself
+/// ("1.2 mm thick, under the 1.2 mm minimum" for 1.1986).
+fn thickness(h: f64, limit: f64) -> String {
+    let short = mm(h);
+    if short != mm(limit) {
+        return short;
+    }
+    let s = format!("{h:.4}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 type Walls = (Vec<Finding>, Vec<u32>, Option<(f64, V3, Option<String>)>);
 
 fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
@@ -1008,7 +1059,7 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
         // so the model's `min_wall` is always a measured one: a
         // sliver's 0.8 mm under a 20 mm twisted square read as a
         // wall below a 1.2 mm spec.
-        if h < s.min_wall || thinnest.is_none_or(|x| h < x) {
+        if under(h, s.min_wall) || thinnest.is_none_or(|x| h < x) {
             match in_layer(mesh, bvh, p, normal, tmin, diag, &near) {
                 Layer::Across(h2, hit2, d2) if h2 > h => return Some((h2, hit2, d2, seam)),
                 // Near a corner, a layer's ray that leaves through a face
@@ -1041,7 +1092,7 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
         if thinnest.is_none_or(|(x, _, _)| h < x) {
             *thinnest = Some((h, mid, t as u32));
         }
-        if h < s.min_wall {
+        if under(h, s.min_wall) {
             thin.push(Thin {
                 mid,
                 thickness: h,
@@ -1196,7 +1247,7 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
     // hole. Clusters are in thinnest-first order, so each merged finding
     // keeps its thinnest place.
     let reach = (4.0 * s.min_wall).max(0.05 * diag);
-    let level = |c: &Cluster| thin[c.first].thickness < s.nozzle;
+    let level = |c: &Cluster| under(thin[c.first].thickness, s.nozzle);
     let mut merged: Vec<(Cluster, usize)> = Vec::new();
     for c in clusters {
         let at = merged
@@ -1216,7 +1267,8 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
         .iter()
         .map(|(c, places)| {
             let x = &thin[c.first];
-            let error = x.thickness < s.nozzle;
+            let error = under(x.thickness, s.nozzle);
+            let limit = if error { s.nozzle } else { s.min_wall };
             Finding {
                 level: if error { Level::Error } else { Level::Warning },
                 code: "thin-wall",
@@ -1227,7 +1279,7 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
                     } else {
                         "a wall".to_string()
                     },
-                    mm(x.thickness),
+                    thickness(x.thickness, limit),
                     if error {
                         format!(", thinner than the {} mm nozzle", mm(s.nozzle))
                     } else {
@@ -1245,7 +1297,7 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
                     mm(s.nozzle)
                 ),
                 value: Some(x.thickness),
-                limit: Some(if error { s.nozzle } else { s.min_wall }),
+                limit: Some(limit),
             }
         })
         .collect();
@@ -1716,7 +1768,9 @@ pub fn text(summary: &Value) -> String {
             out.push_str(&format!(" in part '{part}'"));
         }
         out.push('\n');
-        out.push_str(&format!("    fix: {}\n", f["fix"].as_str().unwrap_or("")));
+        if fix_shown(f) {
+            out.push_str(&format!("    fix: {}\n", f["fix"].as_str().unwrap_or("")));
+        }
     }
     for (code, n) in summary["truncated"].as_object().into_iter().flatten() {
         out.push_str(&format!("    ... and {n} more {code}\n"));

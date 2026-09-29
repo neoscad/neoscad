@@ -569,6 +569,15 @@ impl<'a> Facts<'a> {
         self.model.and_then(|(g, _)| g.as_ref())
     }
 
+    /// The model rendered to nothing. It measures volume 0, area 0 and 0
+    /// components: `@expect volume 0` on an `intersection()` whose parts do
+    /// not meet is how an agent asks "no interference", and failing it with
+    /// "got an empty model" (the T2 transcript audit) sent it hunting. A
+    /// box or `manifold` has no answer here and still fails.
+    fn empty(&self) -> bool {
+        self.model.is_some() && self.geometry().is_none_or(Geometry::is_empty)
+    }
+
     /// Volume, area, bbox and validity of a 3D model.
     fn solid(&self) -> Option<Solid> {
         *self.solid.get_or_init(|| {
@@ -614,6 +623,7 @@ impl<'a> Facts<'a> {
     fn judge(&self, e: &Expect, log: &crate::Log) -> Judged {
         let what = || -> String {
             match self.geometry() {
+                _ if self.empty() => "an empty model".into(),
                 None => "an empty model".into(),
                 Some(Geometry::Polygon2d(_)) => "a 2D model".into(),
                 Some(_) => "a 3D model".into(),
@@ -625,6 +635,24 @@ impl<'a> Facts<'a> {
             actual: json!(what()),
             shown: (shown, what()),
         };
+        // What an amount reads as: an empty model's is 0, said so, and a
+        // solid with no volume is faces pressed together, which is what
+        // parts that only touch intersect to.
+        let amount = |x: f64| -> String {
+            if self.empty() {
+                format!("{} ({})", num(x), what())
+            } else if self
+                .solid()
+                .is_some_and(|s| crate::stats::touch_only(s.volume, s.area))
+            {
+                format!(
+                    "{} (a zero-volume result: faces where parts only touch)",
+                    num(x)
+                )
+            } else {
+                num(x)
+            }
+        };
         match e {
             Expect::Volume(a) | Expect::Area(a) => {
                 let x = match e {
@@ -634,12 +662,12 @@ impl<'a> Facts<'a> {
                         .map(|s| s.area)
                         .or_else(|| self.flat().map(|f| f.2)),
                 };
-                match x {
+                match x.or_else(|| self.empty().then_some(0.0)) {
                     Some(x) => Judged {
                         ok: a.allows(x),
                         expected: a.json(),
                         actual: json!(r6(x)),
-                        shown: (a.show(), num(r6(x))),
+                        shown: (a.show(), amount(r6(x))),
                     },
                     None => lacking(a.json(), a.show()),
                 }
@@ -695,15 +723,21 @@ impl<'a> Facts<'a> {
                 }
                 None => lacking(json!(true), "manifold".into()),
             },
-            Expect::Components(n) => match self.solid() {
-                Some(s) => Judged {
-                    ok: s.components == *n,
-                    expected: json!(n),
-                    actual: json!(s.components),
-                    shown: (n.to_string(), s.components.to_string()),
-                },
-                None => lacking(json!(n), n.to_string()),
-            },
+            Expect::Components(n) => {
+                let got = match self.solid() {
+                    Some(s) => Some(s.components),
+                    None => self.empty().then_some(0),
+                };
+                match got {
+                    Some(c) => Judged {
+                        ok: c == *n,
+                        expected: json!(n),
+                        actual: json!(c),
+                        shown: (n.to_string(), amount(c as f64)),
+                    },
+                    None => lacking(json!(n), n.to_string()),
+                }
+            }
             Expect::Check { warnings_too } => {
                 let a = self.analysis();
                 let bad: Vec<&crate::check::Finding> = a
@@ -757,8 +791,12 @@ impl<'a> Facts<'a> {
                 let w: Vec<String> = log
                     .lines
                     .iter()
+                    // The `use`d-file hint describes what OpenSCAD does,
+                    // which the model may rely on; it is not a warning
+                    // OpenSCAD gives.
                     .filter(|l| {
                         matches!(l.severity, Some(Severity::Warning | Severity::Deprecated))
+                            && l.code != Some(lang::diag::DiagCode::UseSpecialVariables)
                     })
                     .map(|l| l.message.clone())
                     .collect();

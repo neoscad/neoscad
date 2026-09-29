@@ -117,6 +117,34 @@ fn comments_stay_where_they_were() {
         fmt("for (i = [1:3])\n// note\n{\ncube(i);\n}\n"),
         "for (i = [1:3])\n// note\n{\n    cube(i);\n}\n"
     );
+    // A `//` comment after a call's `)` stays there and leaves the call on
+    // one line: `linear_extrude(5) // c` was broken into
+    // `linear_extrude(\n    5\n) // c` (the T2 transcript audit).
+    assert_eq!(
+        fmt("linear_extrude(5) // c\n    square(3);\n"),
+        "linear_extrude(5) // c\n    square(3);\n"
+    );
+    assert_eq!(
+        fmt("translate([1,2,3]) // move it\ncube(2);\n"),
+        "translate([1, 2, 3]) // move it\n    cube(2);\n"
+    );
+    assert_eq!(
+        fmt("for (i=[0:3]) // each\ntranslate([i,0,0]) cube(1);\n"),
+        "for (i = [0:3]) // each\n    translate([i, 0, 0]) cube(1);\n"
+    );
+    assert_eq!(
+        fmt("rotate([0,0,45]) // spin\n{\ncube(1);\n}\n"),
+        "rotate([0, 0, 45]) // spin\n{\n    cube(1);\n}\n"
+    );
+    assert_eq!(
+        fmt("module m(a, b) // two\n{\n}\nx = [1, 2] // pair\n;\n"),
+        "module m(a, b) // two\n{}\nx = [1, 2] // pair\n;\n"
+    );
+    // A comment inside the brackets still breaks them.
+    assert_eq!(
+        fmt("cube([1, // x\n2, 3]);\n"),
+        "cube([\n    1, // x\n    2, 3\n]);\n"
+    );
     // Trailing blanks of comments go, except where the customizer reads
     // them (see below).
     assert_eq!(fmt("module m() {} // x  \n"), "module m() {} // x\n");

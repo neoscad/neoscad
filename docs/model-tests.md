@@ -89,8 +89,15 @@ vector      := "[" NUMBER ("," NUMBER)* "]"
   `components` the pieces sharing no vertex (`check`'s count), and
   `manifold` requires Manifold to accept the solid and `check` to find no
   `not-manifold` or `not-closed` problem. A 2D model has `area` and a
-  2-number `bbox`; a volume expected of a 2D or empty model fails with
-  "got a 2D model" or "got an empty model".
+  2-number `bbox`; a volume expected of a 2D model fails with "got a 2D
+  model". An empty model (an `intersection()` whose parts do not meet)
+  measures volume 0, area 0 and 0 components, so `@expect volume 0`
+  asks "no interference" whether the parts are apart or only touch; a
+  failure says `got 0 (an empty model)`, and a zero-volume result (the
+  faces where parts only touch) says so after its count. `bbox` and
+  `manifold` of an empty model still fail with "got an empty model".
+  `no-warnings` does not count the `use-special-variables` hint
+  (`docs/cli-json.md`).
 - **`check clean`** runs `neoscad check` with its defaults (0.4 mm nozzle,
   0.8 mm minimum wall, 45° overhangs, no bed) and requires no error or
   warning finding; **`check no-error`** allows warnings (overhangs, thin
@@ -159,8 +166,8 @@ newline; fields are only ever added):
   bool; `components`: counts; `check`: `[]` and the offending findings
   (`{"severity", "code", "message", "fix"}`); `parts`: the names expected
   and the parts found; `no-warnings`: `[]` and the warnings. When the
-  model has nothing to measure `actual` says so: `"an empty model"`,
-  `"a 2D model"`.
+  model has nothing to measure `actual` says so: `"an empty model"`
+  (for `bbox` and `manifold`), `"a 2D model"`.
 - `DIAG` is the diagnostic object of `docs/cli-json.md`.
 - A request that could not start (a path that does not exist) is
   `{"schema": 1, "exit_code": 1, "error": "...", "counts": ..., "tests": []}`.

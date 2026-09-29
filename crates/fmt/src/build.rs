@@ -262,12 +262,22 @@ impl<'a> Builder<'a> {
 
     /// The token itself and the comments after it on its line.
     fn tail(&mut self, t: TokenRef<'_>, v: &mut Vec<Doc>) {
+        self.bare(t, v);
+        self.trailing(t, v);
+    }
+
+    /// The token's text alone; [`Self::trailing`] gives its comments.
+    fn bare(&mut self, t: TokenRef<'_>, v: &mut Vec<Doc>) {
         self.emitted += 1;
         v.push(Doc::Text(text_of(
             self.file,
             t.token().start,
             t.token().end(),
         )));
+    }
+
+    /// The comments after `t` on its line.
+    fn trailing(&mut self, t: TokenRef<'_>, v: &mut Vec<Doc>) {
         let trailing = self.gap(t).trailing.clone();
         for c in trailing {
             match c.kind {
@@ -609,7 +619,8 @@ impl<'a> Builder<'a> {
             && args[0].children().last().map(|e| e.kind()) == Some(SyntaxKind::VectorExpr)
             && args[0].tokens().next().is_none()
             && !self.has_comments(lp)
-            && !self.has_comments(rp);
+            // A comment after the `)` stays after it (see `list_with`).
+            && self.gap(rp).leading.is_empty();
         self.list(lp, items, rp, hug)
     }
 
@@ -670,16 +681,23 @@ impl<'a> Builder<'a> {
         let g = self.gap(close).clone();
         self.comments(&g.leading, g.nl_before, true, false, &mut close_lead);
         let mut close_doc = Vec::new();
-        self.tail(close, &mut close_doc);
+        self.bare(close, &mut close_doc);
         let close_doc = Doc::Concat(close_doc);
+        // A `//` comment after the closing bracket ends the line after the
+        // list, not inside it: in the group, its line break would break the
+        // list too, and `linear_extrude(5) // c` became
+        // `linear_extrude(\n    5\n) // c` (the T2 transcript audit).
+        let mut after = Vec::new();
+        self.trailing(close, &mut after);
+        let after = Doc::Concat(after);
         if items.is_empty() && close_lead.is_empty() {
-            return Doc::Concat(vec![open, close_doc]);
+            return Doc::Concat(vec![open, close_doc, after]);
         }
         if hug && close_lead.is_empty() {
             return Doc::Concat(
                 std::iter::once(open)
                     .chain(items)
-                    .chain(std::iter::once(close_doc))
+                    .chain([close_doc, after])
                     .collect(),
             );
         }
@@ -695,7 +713,7 @@ impl<'a> Builder<'a> {
         } else {
             Doc::Concat(body)
         };
-        Doc::group(Doc::Concat(vec![
+        let group = Doc::group(Doc::Concat(vec![
             open,
             Doc::NoBlank,
             Doc::indent(Doc::Concat(vec![
@@ -705,7 +723,8 @@ impl<'a> Builder<'a> {
             ])),
             Doc::SoftLine,
             close_doc,
-        ]))
+        ]));
+        Doc::Concat(vec![group, after])
     }
 
     fn list(&mut self, open: TokenRef<'_>, items: Vec<Doc>, close: TokenRef<'_>, hug: bool) -> Doc {

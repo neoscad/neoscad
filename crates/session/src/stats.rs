@@ -106,7 +106,7 @@ pub fn geometry(g: &Geometry, scheme: &geom::color::Scheme) -> Value {
         "components": components(&ps),
     });
     if let Some(p) = pinched {
-        v["pinched"] = pinched_json(&p);
+        v["pinched"] = pinched_json(&p, m.manifold.volume(), m.manifold.surface_area());
     }
     if let Some(p) = weld.f32.filter(|p| p.nonmanifold_edges > 0) {
         v["stl_precision"] = stl_precision_json(&p, &crate::mesh::Aabb { lo, hi });
@@ -151,9 +151,28 @@ pub fn pinched(ps: &PolySet) -> Option<crate::mesh::BadEdges> {
     )
 }
 
-/// The `pinched` object: how many edges, and the first one's midpoint.
-pub fn pinched_json(p: &crate::mesh::BadEdges) -> Value {
-    json!({"edges": p.edges, "point": p.at.map(round6)})
+/// The `pinched` object: how many edges, and the first one's midpoint;
+/// `touch_only` when the solid has no volume ([`touch_only`]).
+pub fn pinched_json(p: &crate::mesh::BadEdges, volume: f64, area: f64) -> Value {
+    let mut v = json!({"edges": p.edges, "point": p.at.map(round6)});
+    if touch_only(volume, area) {
+        v["touch_only"] = json!(true);
+    }
+    v
+}
+
+/// Whether a solid with surface is nothing but faces pressed together: its
+/// volume is under a millionth of a millimetre times its area (a real
+/// part's volume is about a third of its thickness times its area, so a
+/// wall a micron thick is still hundreds of times over).
+///
+/// That is what `intersection()` of two parts that only touch gives: the
+/// faces where they meet, pinched where they fold. The pinch's usual fix
+/// ("overlap them by at least 0.01") is wrong there: an agent in the T2
+/// transcript audit was probing for interference, and the answer was that
+/// there was none.
+pub fn touch_only(volume: f64, area: f64) -> bool {
+    area > 0.0 && volume.abs() <= 1e-6 * area
 }
 
 /// Six significant digits, as the tools print numbers.

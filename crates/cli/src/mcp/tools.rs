@@ -42,6 +42,12 @@ const MAX_LINES: usize = 20;
 const INLINE: &str = "inline.scad";
 const INLINE_PREVIOUS: &str = "inline-previous.scad";
 const INLINE_TEST: &str = "inline_test.scad";
+/// The document a mesh `path` is imported through ([`Tools::model`]).
+const INLINE_IMPORT: &str = "inline-import.scad";
+
+/// Mesh files a model tool's `path` may name: they are imported, not
+/// parsed as OpenSCAD.
+const MESH_FORMATS: &[&str] = &["stl", "off", "obj", "3mf"];
 
 fn model_props() -> Value {
     json!({
@@ -221,6 +227,8 @@ struct Model<'a> {
     path: PathBuf,
     base: PathBuf,
     opened: Vec<PathBuf>,
+    /// For a mesh `path`, the `import()` it was rendered as.
+    imported: Option<String>,
     _turn: Option<MutexGuard<'a, ()>>,
 }
 
@@ -404,10 +412,36 @@ impl Tools {
         match (str_arg(args, "source"), self.readable(&base, args, "path")?) {
             (Some(_), Some(_)) => Err("give either path or source, not both".into()),
             (None, None) => Err("give path (a .scad file) or source (OpenSCAD text)".into()),
+            // A mesh file is rendered as its import. Given to the parser,
+            // `check out/base.stl` failed with a syntax error on the STL's
+            // first line (the T2 transcript audit), which reads as a bug in
+            // the model rather than the wrong kind of file.
+            (None, Some(path)) if is_mesh(&path) => {
+                // As given: the import resolves beside the document, in
+                // `base_dir`, where `path` was resolved too.
+                let given = str_arg(args, "path").unwrap_or_default();
+                let call = format!("import(\"{}\");", scad_string(given));
+                let turn = self
+                    .inline
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let doc = base.join(INLINE_IMPORT);
+                self.local
+                    .session()
+                    .open(&doc, Some(call.clone().into_bytes()));
+                Ok(Model {
+                    opened: vec![doc.clone()],
+                    path: doc,
+                    base,
+                    imported: Some(call),
+                    _turn: Some(turn),
+                })
+            }
             (None, Some(path)) => Ok(Model {
                 path,
                 base,
                 opened: Vec::new(),
+                imported: None,
                 _turn: None,
             }),
             (Some(src), None) => {
@@ -423,6 +457,7 @@ impl Tools {
                     opened: vec![path.clone()],
                     path,
                     base,
+                    imported: None,
                     _turn: Some(turn),
                 })
             }
@@ -456,17 +491,22 @@ impl Tools {
     fn evaluate(&self, id: &Value, args: &Value) -> Reply {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
+        let imported = m.imported.clone();
         let r = self.run(id, "evaluate", &self.params(&m, args));
         self.done(m);
         let r = r?;
         let mut text = status(&r);
         push_log(&mut text, &r);
-        Ok(finish(args, text, terse_log(&r, &main), r))
+        Ok(label_import(
+            imported.as_deref(),
+            finish(args, text, terse_log(&r, &main), r),
+        ))
     }
 
     fn render(&self, id: &Value, args: &Value) -> Reply {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
+        let imported = m.imported.clone();
         let export = match self.writable(&m.base, args, "export", EXPORT_FORMATS) {
             Ok(e) => e,
             Err(e) => {
@@ -506,12 +546,13 @@ impl Tools {
             s["output"] = r["output"].clone();
             s["bytes"] = r["bytes"].clone();
         }
-        Ok(finish(args, text, s, r))
+        Ok(label_import(imported.as_deref(), finish(args, text, s, r)))
     }
 
     fn snapshot(&self, args: &Value) -> Reply {
         let mut m = self.model(args, INLINE)?;
         let main = m.path.clone();
+        let imported = m.imported.clone();
         let output = match self.writable(&m.base, args, "output", &["png"]) {
             Ok(o) => o,
             Err(e) => {
@@ -617,7 +658,7 @@ impl Tools {
                 "findings": terse_findings(&i["findings"]),
             });
         }
-        let mut out = finish(args, text, s, r);
+        let mut out = label_import(imported.as_deref(), finish(args, text, s, r));
         out.png = snap.png;
         Ok(out)
     }
@@ -625,6 +666,7 @@ impl Tools {
     fn check(&self, id: &Value, args: &Value) -> Reply {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
+        let imported = m.imported.clone();
         let mut p = self.params(&m, args);
         for k in ["bed", "nozzle", "min_wall", "max_overhang"] {
             if let Some(v) = args.get(k) {
@@ -647,7 +689,10 @@ impl Tools {
                 "echo": d["echo"],
             });
             push_log(&mut text, &log);
-            return Ok(finish(args, text, terse_log(&log, &main), r));
+            return Ok(label_import(
+                imported.as_deref(),
+                finish(args, text, terse_log(&log, &main), r),
+            ));
         }
         let mut text = String::new();
         let model = &r["model"];
@@ -683,12 +728,13 @@ impl Tools {
             "findings": terse_findings(&r["findings"]),
             "truncated": r["truncated"],
         });
-        Ok(finish(args, text, s, r))
+        Ok(label_import(imported.as_deref(), finish(args, text, s, r)))
     }
 
     fn measure(&self, id: &Value, args: &Value) -> Reply {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
+        let imported = m.imported.clone();
         let mut p = self.params(&m, args);
         for k in ["part", "between", "section", "axis", "center", "profile"] {
             if let Some(v) = args.get(k) {
@@ -750,7 +796,7 @@ impl Tools {
         if let Some(e) = s.get("error").and_then(Value::as_str) {
             s["error"] = json!(crate::serve::param_names(e));
         }
-        Ok(finish(args, text, s, r))
+        Ok(label_import(imported.as_deref(), finish(args, text, s, r)))
     }
 
     fn test(&self, id: &Value, args: &Value) -> Reply {
@@ -934,6 +980,31 @@ fn check_text(diff: &str, full: bool) -> String {
         "not formatted: {n} line{} would change (diff: true shows them)",
         if n == 1 { "" } else { "s" }
     )
+}
+
+/// Whether `p` names a mesh file ([`MESH_FORMATS`]).
+fn is_mesh(p: &Path) -> bool {
+    p.extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .is_some_and(|e| MESH_FORMATS.contains(&e.as_str()))
+}
+
+/// `s` as the inside of an OpenSCAD string literal.
+fn scad_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// A result for a mesh `path`, labelled with the `import()` it was
+/// rendered as: first in the text, and as `imported` in the structured
+/// content (the full JSON's too, with `verbose`).
+fn label_import(imported: Option<&str>, mut out: Out) -> Out {
+    if let Some(call) = imported {
+        out.text = format!("path is a mesh file: rendered as `{call}`\n{}", out.text);
+        if let Some(o) = out.structured.as_object_mut() {
+            o.insert("imported".into(), json!(call));
+        }
+    }
+    out
 }
 
 /// Create an output's directory (inside the roots: `writable` resolved
@@ -1128,7 +1199,8 @@ fn status(r: &Value) -> String {
 fn terse_geometry(g: &Value, diags: &Value) -> Value {
     let mut g = g.clone();
     if g["pinched"].is_object() {
-        g["pinched"]["fix"] = json!(pinch_fix(diags));
+        let fix = pinch_fix(&g, diags);
+        g["pinched"]["fix"] = json!(fix);
     }
     if g["stl_precision"].is_object() {
         g["stl_precision"]["fix"] = json!(stl_fix(&g["stl_precision"]));
@@ -1145,8 +1217,9 @@ fn stl_fix(p: &Value) -> String {
 /// flipped polyhedron leave them too, and there the usual advice (overlap
 /// the parts) is wrong: an agent in the CAD pilot followed it for about
 /// 90 turns. So when the diagnostics report such a polyhedron, the fix
-/// points to that warning first.
-fn pinch_fix(diags: &Value) -> String {
+/// points to that warning first. A result with no volume is parts that
+/// only touch (`touch_only`), where there is nothing to overlap.
+fn pinch_fix(g: &Value, diags: &Value) -> String {
     let winding = diags.as_array().into_iter().flatten().find(|d| {
         matches!(
             d["code"].as_str(),
@@ -1154,6 +1227,7 @@ fn pinch_fix(diags: &Value) -> String {
         )
     });
     match winding {
+        None if g["pinched"]["touch_only"] == true => session::check::TOUCH_FIX.to_string(),
         Some(d) => session::check::pinch_from_winding(&format!(
             "the {} warning{}",
             d["code"].as_str().unwrap_or(""),
@@ -1181,7 +1255,7 @@ fn geometry_line_of(g: &Value, diags: &Value) -> String {
             "\nnot manifold as a file: {n} edge{} shared by more than two faces, the first at {}: {}",
             if n == 1 { "" } else { "s" },
             vec_of(&g["pinched"]["point"]),
-            pinch_fix(diags)
+            pinch_fix(g, diags)
         ));
     }
     // Slicers read an STL as 32-bit floats, which can merge vertices that
@@ -1459,6 +1533,9 @@ fn terse_findings(findings: &Value) -> Value {
                     "message": f["message"], "part": f["part"],
                     "point": f["location"]["point"],
                 });
+                if !session::check::fix_shown(f) {
+                    return t;
+                }
                 match same_fix_as(list, i) {
                     Some(id) => t["fix_as"] = id.clone(),
                     None => t["fix"] = f["fix"].clone(),
@@ -1484,11 +1561,12 @@ fn findings_text(counts: &Value, findings: &Value) -> String {
     let list = findings.as_array().map_or(&[][..], Vec::as_slice);
     for (i, f) in list.iter().enumerate() {
         let fix = match same_fix_as(list, i) {
-            Some(id) => format!("as #{id}"),
-            None => f["fix"].as_str().unwrap_or("").to_string(),
+            _ if !session::check::fix_shown(f) => String::new(),
+            Some(id) => format!(" Fix: as #{id}"),
+            None => format!(" Fix: {}", f["fix"].as_str().unwrap_or("")),
         };
         text.push_str(&format!(
-            "\n#{} {} {}{}: {} at {}. Fix: {fix}",
+            "\n#{} {} {}{}: {} at {}.{fix}",
             f["id"],
             f["severity"].as_str().unwrap_or(""),
             f["code"].as_str().unwrap_or(""),

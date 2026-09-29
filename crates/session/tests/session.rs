@@ -576,3 +576,75 @@ fn edits_reuse_unchanged_statements_and_answer_as_a_full_evaluation() {
         assert_eq!(format!("{:?}", a.log.lines), format!("{:?}", b.log.lines));
     }
 }
+
+/// A `use`d file's top-level `$fn` never reaches its modules (OpenSCAD:
+/// special variables come from the caller). NeoSCAD says so at the call,
+/// in the tool view only: the console, which the conformance suite
+/// compares with OpenSCAD's, is unchanged.
+#[test]
+fn a_used_files_top_level_fn_is_named_at_the_call() {
+    let fs = Arc::new(MemFs::new());
+    fs.insert(
+        "/doc/part.scad",
+        b"$fn = 64;\n$fs = 0.5;\nw = 7;\nmodule part() cylinder(r = w, h = 1);\n".to_vec(),
+    );
+    let files = [
+        (
+            "a.scad",
+            "use <part.scad>\nechoed = 1;\ntranslate([1, 0, 0]) part();\npart();\n",
+        ),
+        // Passed in the call, or set in the calling file: nothing to say
+        // about that variable.
+        ("b.scad", "use <part.scad>\npart($fn = 32, $fs = 1);\n"),
+        (
+            "c.scad",
+            "use <part.scad>\n$fn = 32;\nmodule m() { $fs = 1; part(); }\nm();\n",
+        ),
+        ("d.scad", "use <part.scad>\n$fn = 32;\npart();\n"),
+        // Included, the assignments are the file's own and apply.
+        ("e.scad", "include <part.scad>\npart();\n"),
+    ];
+    for (name, src) in files {
+        fs.insert(format!("/doc/{name}"), src.as_bytes().to_vec());
+    }
+    let s = session(&fs);
+    let hints = |input: &str| {
+        let r = s.evaluate(&Run::new(input), false).unwrap();
+        assert_eq!(r.exit_code, 0);
+        assert!(
+            r.log.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&r.log.stderr)
+        );
+        r.log
+            .diagnostics_json()
+            .into_iter()
+            .filter(|d| d["code"] == "use-special-variables")
+            .collect::<Vec<_>>()
+    };
+    let a = hints("a.scad");
+    assert_eq!(a.len(), 1, "one hint per used file: {a:?}");
+    assert_eq!(a[0]["severity"], "warning");
+    assert_eq!(a[0]["line"], 3, "{a:?}");
+    assert_eq!(
+        a[0]["message"],
+        "`$fn = 64` and `$fs = 0.5` at the top of part.scad don't apply to its modules when \
+         the file is used (OpenSCAD behaviour: special variables come from the caller)"
+    );
+    assert_eq!(
+        a[0]["hints"][0]["message"],
+        "pass `$fn` and `$fs` in the call (`part($fn = ...)`) or set them in this file"
+    );
+    assert!(hints("b.scad").is_empty());
+    assert!(hints("c.scad").is_empty());
+    let d = hints("d.scad");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(
+        d[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("`$fs = 0.5` at the top of part.scad doesn't apply"),
+        "{d:?}"
+    );
+    assert!(hints("e.scad").is_empty());
+}

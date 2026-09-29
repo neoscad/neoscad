@@ -139,3 +139,64 @@ fn files_that_do_not_parse_fail() {
     assert_eq!(v["exit_code"], 1);
     assert_eq!(v["tests"][0]["failures"][0]["kind"], "file");
 }
+
+/// An empty result measures volume 0, area 0 and 0 components, as parts
+/// that only touch do (the T2 transcript audit: `@expect volume 0` on an
+/// intersection that left nothing failed with "got an empty model").
+/// Expectations with no answer for nothing (a box, `manifold`) still fail.
+#[test]
+fn an_empty_model_measures_zero() {
+    let s = mem_session(&[(
+        "a_test.scad",
+        "// @expect volume 0 +-0.001\n\
+         // @expect area 0\n\
+         // @expect components 0\n\
+         module test_apart() intersection() { cube(1); translate([5, 0, 0]) cube(1); }\n\
+         // @expect volume 0 +-0.001\n\
+         module test_faces_touch() intersection() { cube(1); translate([1, 0, 0]) cube(1); }\n\
+         // @expect volume 1\n\
+         module test_wrong() intersection() { cube(1); translate([5, 0, 0]) cube(1); }\n\
+         // @expect bbox [1, 1, 1]\n\
+         // @expect manifold\n\
+         module test_box() intersection() { cube(1); translate([5, 0, 0]) cube(1); }\n\
+         // @expect volume 0 +-0.001\n\
+         // @expect components 0\n\
+         module test_plug() intersection() {\n\
+             difference() { cube([10, 10, 5]); translate([2, 2, 2]) cube([6, 6, 5]); }\n\
+             translate([2, 2, 2]) cube([6, 6, 6]);\n\
+         }\n",
+    )]);
+    let v = run(&s, &[], 1);
+    let t = |name: &str| -> Value {
+        v["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(t("test_apart")["ok"], true, "{v}");
+    assert_eq!(t("test_faces_touch")["ok"], true, "{v}");
+    assert_eq!(
+        t("test_wrong")["failures"][0]["message"],
+        "@expect volume 1: expected 1, got 0 (an empty model)",
+        "{v}"
+    );
+    let b = t("test_box");
+    assert_eq!(b["failures"].as_array().unwrap().len(), 2, "{v}");
+    assert_eq!(
+        b["failures"][0]["message"],
+        "@expect bbox [1, 1, 1]: expected [1, 1, 1]±1e-06, got an empty model",
+        "{v}"
+    );
+    // A plug seated in its hole touches it on five faces: the intersection
+    // is those faces, with no volume, and its pieces say what they are.
+    let p = t("test_plug");
+    assert_eq!(p["expectations"][0]["ok"], true, "{v}");
+    assert_eq!(
+        p["failures"][0]["message"],
+        "@expect components 0: expected 0, got 2 (a zero-volume result: faces where parts only touch)",
+        "{v}"
+    );
+}

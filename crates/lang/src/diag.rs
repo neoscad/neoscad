@@ -123,6 +123,10 @@ pub enum DiagCode {
     /// NeoSCAD's own: a mesh with edges used by more than two faces, or
     /// that cannot be wound consistently.
     PolyhedronNotManifold,
+    /// NeoSCAD's own: a `use`d file sets `$fn`, `$fa` or `$fs` at its top,
+    /// which its modules never see (special variables come from the
+    /// caller).
+    UseSpecialVariables,
 }
 
 impl DiagCode {
@@ -168,6 +172,7 @@ impl DiagCode {
             DiagCode::PolyhedronFlippedFaces => "polyhedron-flipped-faces",
             DiagCode::PolyhedronOpen => "polyhedron-open",
             DiagCode::PolyhedronNotManifold => "polyhedron-not-manifold",
+            DiagCode::UseSpecialVariables => "use-special-variables",
         }
     }
 }
