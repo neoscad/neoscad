@@ -45,7 +45,14 @@ final class MeasureModel {
     var pickDistance: Double? {
         guard picks.count == 2 else { return nil }
         let (a, b) = (picks[0], picks[1])
-        return sqrt((0..<3).map { (a[$0] - b[$0]) * (a[$0] - b[$0]) }.reduce(0, +))
+        // Summed in a loop: Xcode 26's type checker times out on the
+        // map/reduce form of this one expression.
+        var sum = 0.0
+        for i in 0..<3 {
+            let d: Double = a[i] - b[i]
+            sum += d * d
+        }
+        return sum.squareRoot()
     }
 
     /// The bounding box of what the section cuts.
@@ -82,6 +89,11 @@ extension SectionAxis {
 /// A number of millimetres (or their squares and cubes) for the panel.
 func mm(_ x: Double) -> String {
     x.formatted(.number.precision(.fractionLength(0...3)))
+}
+
+/// A box's extent per axis (max minus min).
+func extent(_ min: [Double], _ max: [Double]) -> [Double] {
+    zip(max, min).map { (hi: Double, lo: Double) -> Double in hi - lo }
 }
 
 func vector(_ v: [Double]) -> String {
@@ -151,7 +163,7 @@ struct MeasureView: View {
                     }
                 } else if let g = r.model2d {
                     row("Area", "\(mm(g.area)) mm²")
-                    row("Size", vector(zip(g.bboxMax, g.bboxMin).map { $0 - $1 }) + " mm")
+                    row("Size", vector(extent(g.bboxMin, g.bboxMax)) + " mm")
                     row("Contours", "\(g.contours ?? 0)")
                 } else if r.exitCode != 0 {
                     Text("The model did not render" + (firstError(r.console).map { ": \($0)" } ?? "."))
@@ -169,7 +181,7 @@ struct MeasureView: View {
     @ViewBuilder private func stats(_ s: SolidStats) -> some View {
         row("Volume", "\(mm(s.volume)) mm³")
         row("Area", "\(mm(s.area)) mm²")
-        row("Size", vector(zip(s.bboxMax, s.bboxMin).map { $0 - $1 }) + " mm")
+        row("Size", vector(extent(s.bboxMin, s.bboxMax)) + " mm")
         row("Box", vector(s.bboxMin) + " – " + vector(s.bboxMax))
         row("Centroid", vector(s.centroid))
     }

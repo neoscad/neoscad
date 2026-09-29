@@ -278,7 +278,7 @@ public enum QuickLookPage {
         let noteList =
             notes.isEmpty
             ? ""
-            : "<ul class=\"notes\">" + notes.map { "<li>\(escape($0))</li>" }.joined() + "</ul>"
+            : "<ul class=\"notes\">\(notes.map { (n: String) -> String in "<li>\(escape(n))</li>" }.joined())</ul>"
         return """
             <!DOCTYPE html>
             <html><head><meta charset="utf-8"><title>\(escape(title))</title>

@@ -241,7 +241,11 @@ enum Annotation {
             case .info: [40, 90, 190]
             }
         // Unselected markers fade, so the chosen one stands out.
-        return c.map { $0 / 255 } + [selected ? 1 : 0.55]
+        // Typed step by step: literal arithmetic with `+` and a ternary is
+        // slow for Xcode 26's type checker.
+        let alpha: Float = selected ? 1 : 0.55
+        let rgb: [Float] = c.map { (v: Float) -> Float in v / 255 }
+        return rgb + [alpha]
     }
 
     /// The twelve edges of a box.
