@@ -162,11 +162,38 @@ The caption on `apple/Icon/build/hero/hero.png` is written from these
 measurements every time the script runs, and they are also saved to
 `times.txt`. They are never typed in by hand.
 
+### Hero video
+
+`hero.scad` also turns with `$t`. The carrier, its pins, the plinth and
+the cutaway stay still; the sun turns, each planet turns the other way
+about its pin at 21/25 of the sun's rate, and the ring at 21/71 of it,
+so the teeth mesh in every frame. At `$t = 0` nothing turns and the
+model is exactly the still: the same STL, byte for byte, so the timed
+render is unchanged.
+
+One `$t` cycle is 25 turns of the sun. That is the shortest cycle after
+which every part is back where it started: the sun's keyed bore needs
+whole turns, and so does a planet (25 teeth, six holes), which makes 21
+turns for every 25 of the sun. (The ring's teeth come round too; the
+facets of its outer wall don't quite, by less than one frame's motion;
+`hero.scad` has the numbers.) At the `// loop:` length in the model's
+header, 120 s, the sun turns about once every five seconds.
+
+`scripts/apple/build-hero-video.sh` renders the cycle with
+`neoscad --animate`, 30 frames per second of loop, sharded across
+processes, puts every frame through the still's matte, backdrop and
+caption steps (at 2x supersampling rather than 3x), and encodes
+`apple/Icon/build/hero-video/hero-gearbox.webm` (AV1) and `.mp4`
+(H.264), 1920x1080. The last frame is the one before `$t = 1`, so the
+video loops without a repeated frame. The caption reuses `times.txt`
+rather than timing again.
+
 ## Regenerating
 
 ```sh
 scripts/apple/build-icon.sh a        # or b, c, or any .scad with camera/tile headers
 scripts/apple/build-hero.sh [RUNS]   # default 3; needs .reference/BOSL2 and the nightly
+scripts/apple/build-hero-video.sh [JOBS]   # default 8; needs build-hero.sh's times.txt and ffmpeg
 ```
 
 Both scripts use `target/release/neoscad`. From a worktree, they use the

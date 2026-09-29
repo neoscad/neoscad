@@ -1,6 +1,6 @@
 // icon-tool: the image steps of the icon and hero pipeline
-// (scripts/apple/build-icon.sh, scripts/apple/build-hero.sh), in plain
-// CoreGraphics so the pipeline needs nothing beyond Xcode.
+// (scripts/apple/build-icon.sh, build-hero.sh, build-hero-video.sh), in
+// plain CoreGraphics so the pipeline needs nothing beyond Xcode.
 //
 //   icon-tool matte DARK.png LIGHT.png LIGHT_GREY OUT.png
 //   icon-tool resize IN.png SIZE OUT.png            (square; SIZE px)
