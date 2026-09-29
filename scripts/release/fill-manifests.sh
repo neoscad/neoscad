@@ -7,12 +7,13 @@
 # (neoscad-cli-<target>.<ext>.sha256, "HASH *NAME"). Each fills the
 # placeholder @SHA256_<TARGET>@, the target upper-cased with `-` as `_`
 # (@SHA256_X86_64_PC_WINDOWS_MSVC@). @VERSION@ is VERSION, and @PKGVER@
-# is VERSION without hyphens (see below). The Homebrew
-# cask for the app is filled too when NEOSCAD_BUILD (the DMG's build
-# number) and NEOSCAD_DMG_SHA256 are set.
+# is VERSION without hyphens (see below). The app's Homebrew cask is not
+# here: it needs the DMG, and scripts/release/fill-cask.sh fills it in the
+# macOS app job (.github/workflows/publish-macos-app.yml), which pushes it
+# to the tap.
 #
-# Writes to OUT_DIR: PKGBUILD (AUR neoscad-bin), neoscad.json (Scoop),
-# the three NeoSCAD.NeoSCAD*.yaml (winget) and neoscad-app.rb (cask).
+# Writes to OUT_DIR: PKGBUILD (AUR neoscad-bin), neoscad.json (Scoop) and
+# the three NeoSCAD.NeoSCAD*.yaml (winget).
 # Fails, naming them, if any placeholder is left unfilled, so a missing
 # archive cannot produce a manifest that points at nothing.
 #
@@ -60,10 +61,6 @@ if [[ $windows -eq 1 ]]; then
     )
 else
     echo "no Windows archives in $sums: skipping the Scoop and winget manifests" >&2
-fi
-if [[ -n "${NEOSCAD_BUILD:-}" && -n "${NEOSCAD_DMG_SHA256:-}" ]]; then
-    subst+=(-e "s|@BUILD@|$NEOSCAD_BUILD|g" -e "s|@SHA256_DMG@|$NEOSCAD_DMG_SHA256|g")
-    templates+=(packaging/homebrew/neoscad-app.rb)
 fi
 
 status=0

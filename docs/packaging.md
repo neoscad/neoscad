@@ -40,7 +40,7 @@ pushes), so every CI path is unverified until the first tag.
 | CLI archives, 6 targets | **Now** | Built: cargo-dist 0.33.0 (`[workspace.metadata.dist]`, `.github/workflows/release.yml`). macOS arm64/x86_64 as two archives: cargo-dist 0.33.0 cannot make a universal one (`universal2-apple-darwin` is a FIXME in its `cargo-dist/src/config/v1/mod.rs:416` and `src/tasks.rs:438`, "Lipo(LipoStep)"), so only the DMG's CLI is universal, Linux x86_64/aarch64 (glibc 2.28, manylinux_2_28 containers), Windows x86_64/aarch64; `.tar.xz`/`.zip` with `.sha256`. `dist plan` lists all of them; `dist build` of the Linux aarch64 archive ran in Docker |
 | Shell / PowerShell installers | **Now** | Built (cargo-dist); install to `CARGO_HOME` |
 | Homebrew tap: formula | **Now** | Built: cargo-dist generates `neoscad.rb` and pushes it to `neoscad/homebrew-tap` (needs `HOMEBREW_TAP_TOKEN`) |
-| Homebrew tap: cask (app) | **Now**, after Developer ID | Template: `packaging/homebrew/neoscad-app.rb`, filled by `scripts/release/fill-manifests.sh`; add to the tap only once the DMG is notarized |
+| Homebrew tap: cask (app) | **Now**, after Developer ID | `brew install --cask neoscad/tap/neoscad-app`. `publish-macos-app.yml` fills `packaging/homebrew/neoscad-app.rb` from the attached notarized DMG (`scripts/release/fill-cask.sh`), installs it from the local tap clone and checks Gatekeeper, and only then pushes it to `neoscad/homebrew-tap` as `Casks/neoscad-app.rb` (needs `HOMEBREW_TAP_TOKEN`). Only with the Developer ID secrets set: no notarized DMG, no cask. No `binary` stanza (the app bundle has no CLI), so it does not conflict with the `neoscad` formula. The filled template passes `brew style` and `brew audit --cask --strict` (Homebrew 7.0.1); `--new`'s online checks wait for a real release |
 | Linux musl static tarball | **No** (owner decision 2026-09-29) | Not built. It would be portable, but PNG export needs Vulkan or GL loaded with `dlopen`, which a static musl binary cannot do; the glibc 2.28 archives already run on every current distribution |
 | `.deb` / `.rpm` release assets | **Now** | Built: nfpm (`packaging/nfpm.yaml`, `scripts/release/linux-packages.sh`); aarch64 packages built in Docker, checked with `dpkg-deb --info`/`--contents` and `rpm -qip`/`-qlp`, installed and run in `debian:bookworm-slim` and `fedora:42`. In CI: `publish-packages.yml`, from the release's glibc 2.28 binaries |
 | Signed apt/rpm repo | Later | Needs a GPG key and hosting (OpenSCAD uses OBS) |
@@ -215,7 +215,9 @@ Nothing here was pushed, published, signed up for or accepted.
 - **Push** the repository to `github.com/neoscad/neoscad` and enable
   Actions; the first PR runs `ci.yml`, the first tag `release.yml`.
 - **Create `neoscad/homebrew-tap`** and a token with write access to it,
-  stored as the `HOMEBREW_TAP_TOKEN` secret.
+  stored as the `HOMEBREW_TAP_TOKEN` secret. The formula and the app's
+  cask both push with it. Give the tap a first commit (a README) so it
+  has a default branch to push to.
 - **Apple:** a Developer ID Application certificate and an App Store
   Connect API key, stored as the `NEOSCAD_*` secrets
   (`docs/release.md`); until then the app job uploads nothing.
@@ -266,5 +268,6 @@ Anything on GitHub's runners (all four workflows); Windows at all
 (compile, tests, WARP, paths, MSI, named pipes); macOS x86_64 on an
 Intel CPU (the universal CLI's x86_64 slice passed conformance, 1,773 of
 1,773, under Rosetta only); the manylinux_2_28
-builds and their glibc floor; the Nix build; Scoop
+builds and their glibc floor; the Homebrew cask's push, install and
+livecheck; the Nix build; Scoop
 and Snap review rules.

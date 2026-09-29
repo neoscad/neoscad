@@ -20,6 +20,11 @@
 # Without them the app is built ad-hoc signed and smoke-tested, and nothing
 # is uploaded: an ad-hoc DMG fails Gatekeeper on every other Mac.
 #
+# With them, a release also pushes the app's Homebrew cask
+# (packaging/homebrew/neoscad-app.rb) to neoscad/homebrew-tap, using
+#   HOMEBREW_TAP_TOKEN                 the token cargo-dist's formula push uses
+# (release.yml passes every secret to this workflow: `secrets: inherit`).
+#
 # workflow_dispatch runs the same build as a dry run (no upload).
 name: macOS app
 
@@ -114,6 +119,67 @@ jobs:
           cp BUILDINFO.txt NeoSCAD-macos-app-BUILDINFO.txt
           gh release upload "$TAG" "${files[@]}" NeoSCAD-macos-app.sha256 \
             NeoSCAD-macos-app-BUILDINFO.txt --repo "$GITHUB_REPOSITORY"
+
+      # The cask goes to the same tap as cargo-dist's `neoscad` formula
+      # (release.yml's publish-homebrew-formula job), and only from here:
+      # this is the one job that knows the DMG's build number and checksum,
+      # and it runs only once the notarized DMG is on the release, so the
+      # cask can never point at a missing or unsigned file.
+      #
+      # A prerelease publishes it too when `publish-prereleases` is set, as
+      # it does the formula: Homebrew casks have no prerelease channel, so
+      # the tap's one `neoscad-app` moves to the prerelease.
+      - name: Homebrew cask
+        if: env.HAVE_SIGNING == 'true' && inputs.plan != ''
+        env:
+          TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          version=${TAG#v}
+          dmgs=(dist/NeoSCAD-*.dmg)
+          [[ ${#dmgs[@]} -eq 1 ]] || { echo "::error::expected one DMG in dist/, found ${dmgs[*]}"; exit 1; }
+          # Cloned straight into Homebrew's tap directory, so `brew style`
+          # and `brew install` below see the new cask as neoscad/tap's
+          # (Homebrew refuses a cask file outside a tap). The token goes in
+          # a per-command header rather than the remote URL, so it is not
+          # left in the clone's config.
+          auth=$(printf 'x-access-token:%s' "$TAP_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          header="http.https://github.com/.extraheader=AUTHORIZATION: basic $auth"
+          tap="$(brew --repository)/Library/Taps/neoscad/homebrew-tap"
+          rm -rf "$tap"
+          git -c "$header" clone --quiet https://github.com/neoscad/homebrew-tap.git "$tap"
+          scripts/release/fill-cask.sh "$version" "${dmgs[0]}" "$tap/Casks/neoscad-app.rb"
+          brew style --cask neoscad/tap/neoscad-app
+
+          # What a user runs, against the release's real download, before
+          # anything is pushed (the tap is only ever given a cask that
+          # installs): the checksum must match, and the installed
+          # (quarantined) copy must pass Gatekeeper, which is what got
+          # OpenSCAD's cask disabled.
+          brew install --cask neoscad/tap/neoscad-app
+          spctl -a -vv -t exec /Applications/NeoSCAD.app
+          brew uninstall --cask neoscad-app
+
+          cd "$tap"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/neoscad-app.rb
+          if git diff --cached --quiet; then
+            echo "Casks/neoscad-app.rb is already current"
+          else
+            git commit --quiet -m "neoscad-app $(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/neoscad-app.rb)"
+            # The formula job pushes to the same tap at about the same
+            # time; a push that loses that race is rebased and retried.
+            for attempt in 1 2 3; do
+              git -c "$header" push --quiet && break
+              [[ $attempt -lt 3 ]] || exit 1
+              sleep 10
+              git -c "$header" pull --quiet --rebase
+            done
+          fi
+
 
       - name: Unsigned build
         if: env.HAVE_SIGNING != 'true'

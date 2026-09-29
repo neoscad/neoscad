@@ -248,9 +248,13 @@ such as `v0.1.0` runs, in order:
    (unsigned); GitHub artifact attestations.
 4. **host**: the GitHub Release.
 5. **publish**: the `neoscad` formula pushed to `neoscad/homebrew-tap`;
-   `publish-macos-app.yml` (this document's `release.sh` on `macos-15`,
-   signed and notarized from the `NEOSCAD_*` secrets, and the DMG and
-   dSYMs attached; with no secrets it builds ad hoc and uploads nothing);
+   `publish-macos-app.yml` (this document's `release.sh` on `macos-26` with Xcode 26.6,
+   signed and notarized from the `NEOSCAD_*` secrets, the DMG and
+   dSYMs attached, and the app's cask `neoscad-app` filled from that DMG
+   (`scripts/release/fill-cask.sh`), installed from the local tap clone
+   with `brew install --cask` and checked with `spctl`, and only then
+   pushed to `neoscad/homebrew-tap`; with no secrets it builds ad hoc and uploads and pushes
+   nothing);
    `publish-packages.yml` (`.deb` and `.rpm` for both Linux
    architectures, the vendored-dependency tarball, the filled AUR, Scoop
    and winget manifests in `neoscad-package-manifests.tar.gz`, and the
@@ -261,14 +265,15 @@ A prerelease tag (`v0.2.0-beta.1`) makes a GitHub prerelease and skips
 the publish jobs, unless `publish-prereleases = true` is set in
 `[workspace.metadata.dist]` (set only for the `v0.1.0-rc.1` rehearsal,
 then removed). With it set, a prerelease publishes everything:
-the tap's `neoscad` formula moves to it (Homebrew has no prerelease
-channel), and the image is pushed as `:<version>` but not `:latest`.
+the tap's `neoscad` formula and `neoscad-app` cask move to it (Homebrew
+has no prerelease channel for either: a tap holds one version of each,
+and `brew upgrade` takes whatever it holds), and the image is pushed as `:<version>` but not `:latest`.
 The `.deb` and `.rpm` carry `0.1.0~rc.1` so they sort before `0.1.0`
 (nfpm does this), and the AUR `pkgver` drops the hyphen (`0.1.0rc.1`).
 
 | Secret | Used by |
 |---|---|
-| `HOMEBREW_TAP_TOKEN` | the formula push: a token with write access to `neoscad/homebrew-tap` |
+| `HOMEBREW_TAP_TOKEN` | the formula and cask pushes: a token with write access to `neoscad/homebrew-tap` (the app job gets it through release.yml's `secrets: inherit`) |
 | `NEOSCAD_DEVELOPER_ID_P12`, `NEOSCAD_DEVELOPER_ID_P12_PASSWORD` | the app job: the Developer ID Application certificate (base64 .p12) |
 | `NEOSCAD_SIGN_IDENTITY`, `NEOSCAD_TEAM_ID` | the app job, as the local variables above |
 | `NEOSCAD_NOTARY_KEY`, `NEOSCAD_NOTARY_KEY_ID`, `NEOSCAD_NOTARY_ISSUER` | the app job: an App Store Connect API key for `notarytool` |
@@ -290,6 +295,7 @@ Mesa's software renderers):
     scripts/release/linux-packages.sh                     # .deb and .rpm in dist/linux
     scripts/release/source-tarballs.sh                    # dist/source
     scripts/release/fill-manifests.sh VERSION SUMS_DIR OUT_DIR
+    scripts/release/fill-cask.sh VERSION dist/NeoSCAD-*.dmg OUT_FILE   # the app's cask
 
 Windows builds happen only in CI: a local cross-build (`cargo xwin`)
 would accept the Microsoft CRT and SDK licence, which is the owner's to
@@ -330,7 +336,10 @@ checked by the app tests and the conformance suite, not here.
 
 - Everything under "The cross-platform release" on GitHub: the runners,
   the manylinux containers, the Windows and x86_64 macOS builds, the
-  MSIs, the Homebrew push and the publish jobs.
+  MSIs, the Homebrew pushes and the publish jobs. The cask template
+  passes `brew style` and `brew audit --cask --strict` locally (Homebrew
+  7.0.1, filled with a stand-in DMG); its URL, checksum and `livecheck`
+  meet a real release for the first time on the first tag.
 
 - The Developer ID path: `-exportArchive`, notarization, stapling and an
   accepting Gatekeeper have never run, since no Developer ID identity or
