@@ -36,9 +36,14 @@ permissions:
 
 jobs:
   app:
-    runs-on: macos-15
+    # macos-15's default Xcode (16.4) is too old for the app's Swift 6
+    # concurrency checks; macos-26 has Xcode 26.6, the newest hosted one
+    # (development uses Xcode 27, which hosted runners don't offer yet).
+    # Pinned, so an image update can't change the toolchain unannounced.
+    runs-on: macos-26
     timeout-minutes: 90
     env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       HAVE_SIGNING: ${{ secrets.NEOSCAD_DEVELOPER_ID_P12 != '' && secrets.NEOSCAD_NOTARY_KEY != '' }}
     steps:
       - uses: actions/checkout@v7
@@ -49,6 +54,7 @@ jobs:
 
       - name: Tools
         run: |
+          xcodebuild -version
           brew install xcodegen
           rustup show active-toolchain
           node --version

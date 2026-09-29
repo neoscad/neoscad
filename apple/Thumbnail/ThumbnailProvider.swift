@@ -38,7 +38,9 @@ final class ThumbnailProvider: QLThumbnailProvider {
             log.info(
                 "thumbnail \(url.lastPathComponent, privacy: .private) at \(pixels, privacy: .public) px: \(result.png?.count ?? 0, privacy: .public) PNG bytes, \(Date().timeIntervalSince(start), format: .fixed(precision: 2), privacy: .public) s, timed out \(result.timedOut, privacy: .public), \(result.unreadable.count, privacy: .public) unreadable files, notes: \(result.notes.joined(separator: " | "), privacy: .private)"
             )
-            guard let png = result.png, let image = Self.image(png) else {
+            // `ThumbnailProvider`, not `Self`: a dynamic `Self` captured by
+            // the task is a non-Sendable metatype to Xcode 26's compiler.
+            guard let png = result.png, let image = ThumbnailProvider.image(png) else {
                 reply.value(nil, ThumbnailError(notes: result.notes))
                 return
             }
