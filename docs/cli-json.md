@@ -796,7 +796,7 @@ have them.
 - `--enable=predictible-output` sorts exported meshes ("Sorted
   exports"); `--info`'s `Features` line lists the experimental features
   neoscad implements.
-- After the CAD pilot (`docs/research/pilot-mcp-transcripts.md`):
+- After the first CAD comparison runs (`docs/agent-eval.md`):
   `manifold` is false for a pinched solid, with `pinched` added (the
   `geometry` object, `measure`'s model, `check`'s model and parts, and
   a `not-manifold` finding at the first pinched edge); thin walls are
@@ -806,8 +806,8 @@ have them.
   `overhang` findings and their `value` is the sum; `measure` adds
   `--axis`, `--center` and `--profile`, the section's `axis`, `center`
   and `outlines`, and `between`'s `overlap_pieces` and `pieces`.
-- After the CAD validation round's T3 (an agent spent about 95 turns on
-  an inside-out thread sweep): the diagnostic codes and `check` findings
+- After a CAD validation run whose T3 part was an inside-out thread
+  sweep: the diagnostic codes and `check` findings
   `polyhedron-inside-out`, `polyhedron-flipped-faces`,
   `polyhedron-open` and `polyhedron-not-manifold` ("Input meshes");
   they come first among `check`'s findings, and a `not-manifold`
@@ -818,8 +818,7 @@ have them.
   snapshot, and the `--format json` report of an export) and the
   `check` finding `stl-precision`. Both are additive; OpenSCAD's
   console text is unchanged.
-- After the CAD run cad-20260929T031249Z
-  (`docs/research/t3-transcript-audit.md`): an `overhang` finding's
+- After the CAD run cad-20260929T031249Z: an `overhang` finding's
   `point` is on its steepest faces, and its message adds the heights it
   spans and the area steeper than `max_overhang` + 15°; its "up to"
   angle is that of the steepest (2 × `nozzle`)² of faces, not of a
@@ -830,8 +829,7 @@ have them.
   refined between samples, and `pitch` leaves out odd end crests of
   its run (the adapter's 1.98 is now 2.00). `docs`' not-found hint
   names the caller's file argument.
-- After the T2 run cad-20260929T042719Z
-  (`docs/research/t2-transcript-audit.md`): thin walls within 0.001 mm
+- After the T2 run cad-20260929T042719Z: thin walls within 0.001 mm
   of a limit are not under it; an info-level `stl-precision` finding
   says no action is needed; `pinched` adds `touch_only` for a
   zero-volume result, with its own fix; the diagnostic code

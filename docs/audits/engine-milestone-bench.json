@@ -12,7 +12,7 @@
  "binaries": {
   "neoscad": {
    "version": "neoscad 0.1.0",
-   "commit": "1e5c75b5af64f3a7f3c69edbf5590a94778692a3",
+   "commit": "b2d175cd106db0b5b9b10b9232ef42c7fddf4e6d",
    "build": "cargo build --release (thin LTO, codegen-units=1), arm64 native",
    "args": []
   },

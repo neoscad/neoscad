@@ -1215,8 +1215,8 @@ fn stl_fix(p: &Value) -> String {
 
 /// What to do about pinched edges. Booleans with an inside-out or partly
 /// flipped polyhedron leave them too, and there the usual advice (overlap
-/// the parts) is wrong: an agent in the CAD pilot followed it for about
-/// 90 turns. So when the diagnostics report such a polyhedron, the fix
+/// the parts) is wrong there, and an agent that follows it goes in
+/// circles. So when the diagnostics report such a polyhedron, the fix
 /// points to that warning first. A result with no volume is parts that
 /// only touch (`touch_only`), where there is nothing to overlap.
 fn pinch_fix(g: &Value, diags: &Value) -> String {

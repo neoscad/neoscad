@@ -37,9 +37,12 @@ gitignored and only exists where the runs were recorded.
    `bench-chart` (whose footer carries the geometric means). Runs with no
    geometric mean (an edit-loop-only run) are left out, and a quick run is
    dropped when a full run lands on the same snapshot.
-4. **Agent-eval interlude:** the latest `progress/agent-eval/*.json` that
-   ran both conditions, as a table of MCP (A) against Bash (B) per task,
-   labelled "pilot, n=1".
+4. **Agent-eval interlude** (only with `--agent-eval`): the latest
+   `progress/agent-eval/*.json` that ran both conditions, as a table of
+   MCP (A) against Bash (B) per task, labelled "pilot, n=1". It is off by
+   default because agent-eval results are not published; without the
+   flag the eval records are not read at all, so the default video is
+   safe to post.
 5. **End card:** final passes and per-tier passes, the newest full
    benchmark's geometric-mean speedups, the commit count up to the last
    snapshot (`git rev-list --count`) and the snapshot count.
@@ -48,14 +51,26 @@ Scenes are joined by 0.5 s cross-fades. `--hold` (default 2 s) sets how long
 a snapshot stays after its transition; interludes hold twice that, the
 title 1.5 times and the end card 2.5 times.
 
+## Rewritten history
+
+`progress/` records the commit of every run. The repository's history was
+rewritten with `git filter-repo` before it was published, so those
+commits no longer exist, and a snapshot's manifest cannot be read at its
+recorded commit. `--commit-map FILE` (default: `.git/filter-repo/commit-map`
+when it exists) translates each recorded id, in snapshots, benchmarks and
+the eval, to its rewritten commit, which is also what the captions show.
+Without a map, a checkout that only has the rewritten history cannot
+render snapshots whose manifest differs from the working tree's.
+
 ## Encoding
 
 Frames are PNGs written in parallel to `--frames-dir` (kept) or a temporary
 directory (deleted). A held frame is drawn once and hard-linked for its
 repeats. ffmpeg then encodes `libx264`, `yuv420p`, CRF 20, preset medium,
 with a fixed thread count (x264's output depends on it), `bitexact` flags
-and no metadata. The run of 2026-09-26 (19 snapshots, one benchmark and one
-agent-eval interlude) gave 2,154 frames, 71.8 s and 4.2 MB, in about 8 s.
+and no metadata. The run of 2026-09-26 (19 snapshots, one benchmark
+interlude, and the agent-eval interlude, then on by default) gave 2,154
+frames, 71.8 s and 4.2 MB, in about 8 s.
 
 ## Not done: `--showcase`
 
@@ -65,7 +80,7 @@ binary, beside OpenSCAD's expected PNGs. Each milestone is a full release
 build of the workspace (minutes, and gigabytes of target directory unless
 one directory is shared and rebuilt in turn), and the early milestones have
 no renderer at all (`neoscad` gained PNG export in the render crate, commit
-9336b1c), so most of the grid would be empty. It was left as a followup
+7d48d9e), so most of the grid would be empty. It was left as a followup
 rather than built into the default path. A cheaper variant: record the
 showcase renders at `run --record` time from now on (as the architecture's
 "Progress recording" plans), and have the video read them from the

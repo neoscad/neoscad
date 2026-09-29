@@ -52,6 +52,10 @@ if [ ! -x "$bindgen" ] || [ "$("$bindgen" --version)" != "wasm-bindgen $version"
     cargo install --quiet wasm-bindgen-cli --version "$version" --locked --root "$tools"
 fi
 
+# No local paths in the module (scripts/web/remap-paths.sh).
+# shellcheck source=scripts/web/remap-paths.sh
+source "$root/scripts/web/remap-paths.sh"
+neoscad_remap_paths
 cargo build --quiet --profile web --target wasm32-unknown-unknown -p neoscad-web
 wasm=$target_dir/wasm32-unknown-unknown/web/neoscad_web.wasm
 

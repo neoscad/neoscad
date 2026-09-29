@@ -8,9 +8,9 @@
 //! without saying where or why. A mesh that is closed and consistently
 //! wound but inside out converts without a word, as a solid of negative
 //! volume, and every boolean with it goes wrong: pieces vanish, others
-//! float, and the result's edges are pinched. In the CAD pilot an agent
-//! spent about 95 turns on such a thread sweep, misled by a pinched-edge
-//! hint, before it computed the signed volume itself.
+//! float, and the result's edges are pinched. A pinched-edge hint alone
+//! sends an agent after the wrong cause: on such a thread sweep, the
+//! signed volume is what shows the fault.
 //!
 //! These findings are NeoSCAD's own: they go into the structured
 //! diagnostics (the JSON, the server, the editor) and `check`, never into

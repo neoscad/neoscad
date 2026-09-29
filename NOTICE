@@ -1,6 +1,10 @@
 NeoSCAD is licensed under the GNU General Public License, version 2 or
-later (see LICENSE). It contains code ported from the following third-party
-software, whose notices follow. Vendored crates are described in
+later (see LICENSE). Binaries that include Apache-2.0-only dependencies
+such as manifold-rust are distributed under GPL version 3 or later, since
+the FSF deems Apache-2.0 compatible with GPLv3 but not with GPLv2.
+
+NeoSCAD contains code ported from the following third-party software, whose
+notices follow. Vendored crates are described in
 vendor/README.md, and vendored fonts and libraries in assets/README.md.
 
 ------------------------------------------------------------------------------

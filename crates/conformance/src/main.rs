@@ -14,8 +14,8 @@
 //!   `conformance/bench.json`; `conformance bench-chart` draws a result.
 //! - `conformance bosl2-corpus` writes BOSL2's documentation examples and
 //!   tests out as `.scad` files for `diff`.
-//! - `conformance video` stitches the recorded snapshots, benchmarks and
-//!   agent eval into a progress video.
+//! - `conformance video` stitches the recorded snapshots and benchmarks
+//!   (and, with `--agent-eval`, the agent eval) into a progress video.
 //!
 //! See crates/conformance/README.md.
 
@@ -237,8 +237,8 @@ enum Cmd {
         check: bool,
     },
     /// Render the progress video: one scene per snapshot in
-    /// progress/index.jsonl, with benchmark and agent-eval interludes,
-    /// encoded to H.264 by ffmpeg.
+    /// progress/index.jsonl, with benchmark interludes, encoded to H.264 by
+    /// ffmpeg.
     Video {
         /// Output file (default: progress/video/progress.mp4).
         #[arg(long)]
@@ -259,6 +259,16 @@ enum Cmd {
         /// The ffmpeg to encode with.
         #[arg(long, default_value = "ffmpeg")]
         ffmpeg: PathBuf,
+        /// Add the agent-eval interlude (its results table). Off by
+        /// default: agent-eval results are not published, and the default
+        /// video must be safe to post.
+        #[arg(long)]
+        agent_eval: bool,
+        /// A `git filter-repo` commit map, to read the commits recorded in
+        /// progress/ as their rewritten ids (default:
+        /// .git/filter-repo/commit-map when it exists).
+        #[arg(long)]
+        commit_map: Option<PathBuf>,
     },
 }
 
@@ -281,6 +291,8 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
         frames_dir,
         progress,
         ffmpeg,
+        agent_eval,
+        commit_map,
     } = cmd
     {
         let opts = video::VideoOptions {
@@ -290,6 +302,8 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             frames_dir,
             progress,
             ffmpeg,
+            agent_eval,
+            commit_map,
         };
         return video::command(&Ctx::repo_only()?, &opts);
     }

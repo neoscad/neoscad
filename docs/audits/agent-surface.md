@@ -1,7 +1,7 @@
 # Audit: the agent surface (phase 7)
 
 Scope: `crates/session`, `neoscad serve`, `neoscad mcp`, and `check`,
-`measure`, `test`, `fmt`, `docs` and `snapshot`. Audited at `3a95ebb`
+`measure`, `test`, `fmt`, `docs` and `snapshot`. Audited at `8669474`
 (clean tree), release build, on macOS 27.0 (arm64, 48 GB). The reference
 was the nightly `/Applications/OpenSCAD.app` (2026.09.23, `--backend=manifold`).
 Repros use a small MCP driver (`scripts` were not changed): it spawns
@@ -185,7 +185,7 @@ if at all, as an `info` finding named `touching-surfaces`.
 Related, and worded wrongly rather than computed wrongly: `floating`
 says "with nothing under it" whenever a component's lowest point is
 above the model's lowest point, even when it rests on another component.
-The agent-eval pilot hit this with a lid on a box (`docs/agent-eval.md`).
+An agent-eval run hit this with a lid on a box.
 Either test for support by another component within `bed_tolerance`, or
 say "is a separate piece starting N mm above the bed".
 
@@ -227,8 +227,8 @@ error inline.scad:1: Parser error: syntax error (look just before this point ...
 
 The command line's JSON has the column (`span.start.column`), and so
 does the terminal excerpt. For one-line inline sources, which is how
-agents iterate, the line number carries no information. The pilot's
-`&lt;` failures (`docs/agent-eval.md`) were this case.
+agents iterate, the line number carries no information. An agent's
+HTML-escaped `&lt;` syntax errors in an agent-eval run were this case.
 
 **Suggested change.** Keep `column` (the span start) in the terse
 diagnostic, and in the text say `inline.scad:1:10`. Include the

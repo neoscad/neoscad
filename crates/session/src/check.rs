@@ -900,8 +900,8 @@ fn in_plane(n: V3) -> Option<V3> {
 ///   of a fast twist the surface itself is a shallow helical ramp. A ray
 ///   along such a normal runs down or up into the end cap: "8 walls 0.17
 ///   mm thick" on a solid 20 mm square, every layer of which is a full
-///   square. The agent-eval pilot's T3 agent rewrote a thread to escape
-///   these and broke its major diameter.
+///   square. An agent that believes these readings rewrites a sound
+///   thread to escape them and breaks its major diameter.
 /// - A dome's top faces are nearly flat and a layer near the top is a
 ///   small disc; there the reading along the normal, through the dome, is
 ///   the larger and stands.

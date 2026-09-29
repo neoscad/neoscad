@@ -1,5 +1,5 @@
 {
- "_comment": "Agent CAD comparison (docs/agent-eval.md, 'CAD comparison'; plan in docs/future/agent-cad-comparison.md). T1-T3 specs are ModelRift's wording as published at https://modelrift.com/blog/cadquery-vs-openscad/ (retrieved 2026-09-28); T0 is the harness's plumbing check, not part of the comparison.",
+ "_comment": "Agent CAD comparison (docs/agent-eval.md, 'CAD comparison'). T1-T3 specs are ModelRift's wording as published at https://modelrift.com/blog/cadquery-vs-openscad/ (retrieved 2026-09-28); T0 is the harness's plumbing check, not part of the comparison.",
  "tasks": {
   "T0": {
    "title": "plumbing check",

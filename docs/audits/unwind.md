@@ -1,6 +1,6 @@
-# Audit: the cost of `panic = "unwind"` (at `970f630`)
+# Audit: the cost of `panic = "unwind"` (at `d0d20de`)
 
-This compares two scratch worktrees at `970f630` that differ only in
+This compares two scratch worktrees at `d0d20de` that differ only in
 `[profile.release] panic`. Each had its own target directory. The runs
 were interleaved A/B on an M4 Pro. Echo and STL output was byte-identical
 between the builds.
@@ -10,8 +10,8 @@ between the builds.
 - **Unwind costs 5–7% again on evaluation-bound BOSL2 models, and 6–12%
   on call-heavy code.** A second session reproduced it within 0.5
   points. This contradicts `docs/audits/performance.md` §1.2/§4.3 ("0–1.5%
-  at HEAD", measured at `df6731d`). The likely reason (not bisected):
-  `bd4e4f0` removed the resource-limit hot-path cost that had masked this
+  at HEAD", measured at `c1af708`). The likely reason (not bisected):
+  `9d2a7ec` removed the resource-limit hot-path cost that had masked this
   one.
 - **Nothing measurable at cold start, and about 1% on geometry-bound
   runs.** The abort binary is 2.5 MB smaller (18.6 MB vs 16.1 MB).

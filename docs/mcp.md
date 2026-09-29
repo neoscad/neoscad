@@ -188,9 +188,9 @@ the fix as its `hint`; `check` lists them first among its findings.
 OpenSCAD says nothing about an inside-out mesh, and the booleans with it
 leave pinched edges, so when such a warning is present the pinch's fix
 points to it (`fix the polyhedron-inside-out warning (line 12) first:
-...`) instead of saying to overlap the parts. In the CAD validation
-round an agent followed the overlap advice for about 90 turns before it
-computed the thread's signed volume (-1716 mm³) itself. For example,
+...`) instead of saying to overlap the parts: on an inside-out thread
+sweep, the overlap advice sends an agent in circles, and the signed
+volume is what shows the fault. For example,
 `render` of a cube polyhedron with its faces counter-clockwise,
 subtracted from a slab:
 
@@ -224,9 +224,8 @@ ten-thousandth ("1.1986 mm thick, under the 1.2 mm minimum").
 A module from a `use`d file whose top sets `$fn`, `$fa` or `$fs` runs
 without those values: special variables come from the caller, in
 OpenSCAD as here (the 2026.09.23 nightly echoes `$fn = 0` from such a
-module, and the file's plain variables normally). Every NeoSCAD run of
-the T2 audit's enclosure measured coarse circles through a harness file
-this way. So `evaluate` and every tool that renders add a NeoSCAD-only
+module, and the file's plain variables normally). An agent's harness
+file that `use`s its parts measures coarse circles this way. So `evaluate` and every tool that renders add a NeoSCAD-only
 warning at the first call into such a file, code
 `use-special-variables`, never printed on the console:
 
@@ -294,7 +293,7 @@ output's directory is created.
 
 ## Smoke test
 
-Run once, 2026-09-26, Claude Code 2.1.283, `--model sonnet`:
+A quick check that a client can reach the server and see an image:
 
 ```sh
 claude -p "Use the neoscad snapshot tool on this model: cube(10); Then tell me in one sentence what you see and the volume." \
@@ -302,10 +301,9 @@ claude -p "Use the neoscad snapshot tool on this model: cube(10); Then tell me i
   --allowedTools mcp__neoscad__snapshot --output-format stream-json --verbose
 ```
 
-The server connected, the model called `snapshot` with
-`{"source": "cube(10);"}`, received the image and the summary, and
-answered "It's a simple 10×10×10 mm cube sitting on the origin corner,
-with a volume of 1000 mm³." Two turns, $0.060, 3.9 s.
+The model should call `snapshot` with `{"source": "cube(10);"}`,
+receive the image and the summary, and describe a 10 mm cube with a
+volume of 1000 mm³.
 
 ## Agent-loop eval
 

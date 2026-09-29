@@ -7,10 +7,15 @@
 //! a side panel with per-tier pass counts and a line chart of total passes
 //! over time. Moving from one snapshot to the next, cell colours, counters
 //! and the chart's head are interpolated, so gains read as motion rather
-//! than a cut. Benchmark runs (`progress/bench`) and the agent-loop eval
-//! (`progress/agent-eval`) appear as interludes after the snapshot they
-//! belong to; a title card opens and an end card with the final totals
-//! closes.
+//! than a cut. Benchmark runs (`progress/bench`) appear as interludes
+//! after the snapshot they belong to, and so does the agent-loop eval
+//! (`progress/agent-eval`) when `--agent-eval` asks for it; a title card
+//! opens and an end card with the final totals closes.
+//!
+//! The agent-eval interlude is off by default because its table (pass
+//! counts, tool calls, cost and time per condition) is a run result, and
+//! the project does not publish agent-eval results: a video made with the
+//! default options is safe to post.
 //!
 //! Frames are 1920x1080 PNGs written in parallel, then encoded by ffmpeg.
 //! Every frame is a pure function of the recorded data and the frame's
@@ -62,6 +67,82 @@ pub struct VideoOptions {
     /// The recorded data (default: the repository's `progress/`).
     pub progress: Option<PathBuf>,
     pub ffmpeg: PathBuf,
+    /// Include the agent-eval interlude. Off by default: it shows eval
+    /// results, which are not published (see the module comment).
+    pub agent_eval: bool,
+    /// A `git filter-repo` commit map (`old new` per line). Default: the
+    /// repository's `.git/filter-repo/commit-map` when there is one.
+    pub commit_map: Option<PathBuf>,
+}
+
+/// Recorded commit ids translated to rewritten history.
+///
+/// `progress/` records the commit each run was made at. When the history
+/// is rewritten (the repository went through `git filter-repo` before it
+/// was published), those commits no longer exist: the manifest a snapshot
+/// needs cannot be read at its commit, so the video fails, and the
+/// captions would show ids nobody can look up. filter-repo leaves a map of
+/// old to new ids; with it, every recorded id is read as its new commit.
+/// A commit filter-repo pruned (mapped to all zeros) keeps its old id.
+#[derive(Debug, Default)]
+struct CommitMap(std::collections::HashMap<String, String>);
+
+impl CommitMap {
+    fn parse(text: &str) -> CommitMap {
+        let pairs = text.lines().filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let (old, new) = (words.next()?, words.next()?);
+            let hex = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit());
+            (hex(old) && hex(new) && new.bytes().any(|b| b != b'0'))
+                .then(|| (old.to_string(), new.to_string()))
+        });
+        CommitMap(pairs.collect())
+    }
+
+    fn load(ctx: &Ctx, path: Option<&Path>) -> Result<CommitMap, String> {
+        let path = match path {
+            Some(p) => p.to_path_buf(),
+            None => {
+                let Some(dir) = git(&ctx.repo, &["rev-parse", "--git-common-dir"]) else {
+                    return Ok(CommitMap::default());
+                };
+                let p = ctx.repo.join(dir).join("filter-repo/commit-map");
+                if !p.is_file() {
+                    return Ok(CommitMap::default());
+                }
+                p
+            }
+        };
+        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(CommitMap::parse(&text))
+    }
+
+    /// The rewritten id of a full recorded id, if it was rewritten.
+    fn get(&self, sha: &str) -> Option<&str> {
+        self.0.get(sha).map(String::as_str)
+    }
+
+    /// The rewritten commit's subject. Subjects can name other commits,
+    /// and filter-repo rewrote those ids in the messages too, so the
+    /// recorded subject may cite an id that no longer exists.
+    fn subject(ctx: &Ctx, new: &str) -> Option<String> {
+        git(&ctx.repo, &["log", "-1", "--format=%s", new])
+    }
+
+    /// Point a bench or eval record's `sha`, `short_sha` and `subject` at
+    /// the rewritten commit.
+    fn rewrite_doc(&self, ctx: &Ctx, doc: &mut Value) {
+        if let Some(new) = doc["sha"].as_str().and_then(|s| self.get(s)) {
+            let new = new.to_string();
+            if doc.get("subject").is_some()
+                && let Some(subject) = Self::subject(ctx, &new)
+            {
+                doc["subject"] = Value::String(subject);
+            }
+            doc["short_sha"] = Value::String(new[..7].to_string());
+            doc["sha"] = Value::String(new);
+        }
+    }
 }
 
 /// A progress snapshot, reduced to what its frames need.
@@ -142,7 +223,8 @@ pub fn command(ctx: &Ctx, opts: &VideoOptions) -> Result<u8, String> {
         return Err("--hold must be positive".into());
     }
     let progress = opts.progress.clone().unwrap_or_else(|| ctx.progress_dir());
-    let data = load(ctx, &progress)?;
+    let map = CommitMap::load(ctx, opts.commit_map.as_deref())?;
+    let data = load(ctx, &progress, opts.agent_eval, &map)?;
     let plan = plan(&data, opts.fps, opts.hold);
     let frames: usize = plan.iter().map(|p| p.1).sum();
 
@@ -228,7 +310,7 @@ fn json_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn load(ctx: &Ctx, progress: &Path) -> Result<Data, String> {
+fn load(ctx: &Ctx, progress: &Path, agent_eval: bool, map: &CommitMap) -> Result<Data, String> {
     let index = progress.join("index.jsonl");
     let text = fs::read_to_string(&index).map_err(|e| format!("{}: {e}", index.display()))?;
     let mut snaps = Vec::new();
@@ -239,12 +321,26 @@ fn load(ctx: &Ctx, progress: &Path) -> Result<Data, String> {
             continue;
         };
         let dir = progress.join(name);
-        let sb = Scoreboard::load(&dir.join("scoreboard.json"))?;
+        let mut sb = Scoreboard::load(&dir.join("scoreboard.json"))?;
         let meta = read_json(&dir.join("meta.json"))?;
+        let rewritten = map.get(&sb.sha).map(str::to_string);
+        if let Some(new) = &rewritten {
+            sb.sha = new.clone();
+        }
         let cells = grid::cells_for(ctx, &sb).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let short = meta["short_sha"]
-            .as_str()
-            .map_or_else(|| sb.sha.chars().take(7).collect(), str::to_string);
+        let recorded_subject = meta["subject"].as_str().unwrap_or_default().to_string();
+        let (short, subject) = match &rewritten {
+            Some(new) => (
+                new[..7].to_string(),
+                CommitMap::subject(ctx, new).unwrap_or(recorded_subject),
+            ),
+            None => (
+                meta["short_sha"]
+                    .as_str()
+                    .map_or_else(|| sb.sha.chars().take(7).collect(), str::to_string),
+                recorded_subject,
+            ),
+        };
         let time = parse_time(&sb.timestamp)
             .ok_or_else(|| format!("{}: bad timestamp {:?}", dir.display(), sb.timestamp))?;
         snaps.push(Snap {
@@ -252,7 +348,7 @@ fn load(ctx: &Ctx, progress: &Path) -> Result<Data, String> {
             when: fmt_when(time),
             label: format!("{}{}", short, if sb.dirty { "-DIRTY" } else { "" }),
             sha: sb.sha.clone(),
-            subject: meta["subject"].as_str().unwrap_or_default().to_string(),
+            subject,
             cells,
         });
     }
@@ -262,7 +358,8 @@ fn load(ctx: &Ctx, progress: &Path) -> Result<Data, String> {
 
     let mut benches: Vec<Bench> = Vec::new();
     for path in json_files(&progress.join("bench")) {
-        let doc = read_json(&path)?;
+        let mut doc = read_json(&path)?;
+        map.rewrite_doc(ctx, &mut doc);
         // A run that timed no models (an edit-loop-only run, say) draws an
         // empty chart and has no geometric mean: nothing to show.
         let has_geomean = doc["geomean_speedup"]
@@ -285,12 +382,19 @@ fn load(ctx: &Ctx, progress: &Path) -> Result<Data, String> {
     benches.retain(|b| b.doc["quick"].as_bool() != Some(true) || !full_at.contains(&b.at));
 
     // The latest eval that ran both conditions; a single-condition rerun
-    // has nothing to compare.
-    let eval = json_files(&progress.join("agent-eval"))
+    // has nothing to compare. Not even read unless asked for, so a default
+    // video cannot pick up a result.
+    let eval_files = if agent_eval {
+        json_files(&progress.join("agent-eval"))
+    } else {
+        Vec::new()
+    };
+    let eval = eval_files
         .into_iter()
         .rev()
         .find_map(|path| {
-            let doc = read_json(&path).ok()?;
+            let mut doc = read_json(&path).ok()?;
+            map.rewrite_doc(ctx, &mut doc);
             let runs = doc["runs"].as_array()?;
             let has = |c: &str| runs.iter().any(|r| r["condition"] == c);
             (has("A") && has("B")).then_some(doc)
@@ -1130,6 +1234,23 @@ mod tests {
             snaps,
             commits: Some(42),
         }
+    }
+
+    #[test]
+    fn commit_maps_translate_recorded_ids() {
+        let old = "1".repeat(40);
+        let new = "2".repeat(40);
+        let pruned = "3".repeat(40);
+        let text = format!("old new\n{old} {new}\n{pruned} {}\n", "0".repeat(40));
+        let map = CommitMap::parse(&text);
+        assert_eq!(map.get(&old), Some(new.as_str()));
+        // A pruned commit and an unknown one keep their recorded ids.
+        assert_eq!(map.get(&pruned), None);
+        assert_eq!(map.get("abc"), None);
+        let mut doc = json!({ "sha": old, "short_sha": "1111111" });
+        map.rewrite_doc(&Ctx::repo_only().unwrap(), &mut doc);
+        assert_eq!(doc["sha"], json!(new));
+        assert_eq!(doc["short_sha"], json!("2222222"));
     }
 
     #[test]

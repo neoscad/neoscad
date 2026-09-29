@@ -7,8 +7,15 @@
 > left by an earlier agent are removed, and all 3,569 match the nightly's
 > echo output (verified after the fix; the 3597 counts below include the
 > strays).
+>
+> **Status (2026-09-29):** the 10 conformance failures below no longer
+> fail, and more cases run: `conformance run` at `5c0a523` gives **1,773
+> pass, 0 fail, 1,485 skip** (3,258 total), and `conformance/baseline.json`
+> lists 1,773 ids. The other figures are as audited. Commit ids here were
+> rewritten when the history was cleaned before publication; ids of
+> local `progress/` files keep their original names.
 
-Audited at `ef73578` (clean tree) on an Apple M4 Pro (14 cores, 48 GB),
+Audited at `242f701` (clean tree) on an Apple M4 Pro (14 cores, 48 GB),
 macOS 27.0, against the reference nightly 2026.09.23
 (`--backend=manifold`). All numbers are from that machine. Every run was
 bounded (a 2 GB RSS watchdog on the MCP runs; `-j 8` on the suites).
@@ -17,7 +24,7 @@ bounded (a 2 GB RSS watchdog on the MCP runs; `-j 8` on the suites).
 
 | Dimension | Rating | Done | Partial or missing |
 |---|---|---|---|
-| Language, features and tests | **Done within scope** | 1,719/1,729 in-scope conformance cases; BOSL2 3597/3597 echo, 976/976 tests; MCAD and fonts bundled | 1,529 skips (1,309 CGAL-only by scope, 117 experimental, 63 upstream `Bugs`, 37 disabled upstream). 10 image fails (5 non-planar-quad tessellation, 3 `--view edges`, 2 `.nef3` import). GUI: no Animate panel, customizer partial. PythonSCAD deferred. |
+| Language, features and tests | **Done within scope** | 1,773/1,773 in-scope conformance cases at `5c0a523` (1,719/1,729 when audited); BOSL2 3597/3597 echo, 976/976 tests; MCAD and fonts bundled | 1,529 skips (1,309 CGAL-only by scope, 117 experimental, 63 upstream `Bugs`, 37 disabled upstream). 10 image fails (5 non-planar-quad tessellation, 3 `--view edges`, 2 `.nef3` import). GUI: no Animate panel, customizer partial. PythonSCAD deferred. |
 | Fastest | **Done, with caveats** | ~2.8× on heavy models; 3.7× geometric mean over 14 models including startup; served part edits 0.25–0.3 s; BOSL2 eval-only suite 29.7 s vs 153.6 s | Slower than the nightly on deep unions, Menger level 4 and many `text()` nodes. Unwind costs 5–9% on evaluation. |
 | Best UX for people and agents | **Partial** | MCP, serve, JSON everywhere, check/measure/snapshot, fix hints, `Limits::AGENT`, LSP | Agent eval is n=1 per cell (anecdote). No human user testing. The memory limit is an estimate (real RSS 2–4×). No LSP setup page. |
 | macOS client first | **Partial** | App builds and 80 XCTests pass; Quick Look, panels, export, App Intents; release script | Not Developer ID signed or notarized (`spctl` rejects all artifacts). `dist/` was 29 commits stale. No person has looked at the app; clean-machine checklist unchecked; Shortcuts/Siri unverified; arm64 only. |
@@ -27,7 +34,7 @@ bounded (a 2 GB RSS watchdog on the MCP runs; `-j 8` on the suites).
 
 | Check | Result |
 |---|---|
-| `conformance run -j 8` | **1,719 pass**, 10 fail, 1,529 skip (3,258 total); all baseline ids pass |
+| `conformance run -j 8` | **1,719 pass**, 10 fail, 1,529 skip (3,258 total); all baseline ids pass. At `5c0a523`: **1,773 pass**, 0 fail, 1,485 skip |
 | `cargo test --no-fail-fast` | 545 passed, 0 failed, 2 ignored |
 | `cargo fmt --check`, `clippy -D warnings` | clean |
 | `scripts/wasm-check.sh` | 18/18 ok; wasm 46,265,248 bytes |
@@ -55,7 +62,7 @@ bounded (a 2 GB RSS watchdog on the MCP runs; `-j 8` on the suites).
    startup-bound models (high: public claim).** 7 of 14 models finish in
    under 0.13 s; cold start is 2.4 ms vs 45.5 ms. Subtracting cold start
    gives 2.77×; the four models over 0.3 s give 2.77×; the hero gives
-   2.79×. Reference timings come from the cache (measured at `b1d6bd0`,
+   2.79×. Reference timings come from the cache (measured at `352c718`,
    binary SHA-pinned), not interleaved with the NeoSCAD runs. Headline
    "about 2.8× on heavy models (3.7× geometric mean over 14 models, wall
    time including startup, M4 Pro)"; avoid a bare "3.7×".
@@ -72,11 +79,11 @@ bounded (a 2 GB RSS watchdog on the MCP runs; `-j 8` on the suites).
    tree passes 2 GB within 3.3 s under default limits through MCP. With
    `--limit memory=512M` it stops at about 1 GB. `print.rs` checks only the
    memory limit while writing; the 64 MiB string limit is applied after
-   the text is built. `chr()` already stops in the walk (`f8c8971`).
+   the text is built. `chr()` already stops in the walk (`3f74ec6`).
 5. **Docs contradicted HEAD (low).** The register/pure-frame port was
    still "in progress" in `architecture.md` and followups (it landed in
-   `1ca570e` at 1.08–1.16×). There were several stale followups, and
-   `launch-channels.md` quoted a superseded bench.
+   `5d97bf1` at 1.08–1.16×). There were several stale followups, and
+   a planning note (since removed) quoted a superseded bench.
 6. **Library crates touch the host file system outside `FileSystem` (low;
    WASM unaffected).** `lang/src/diag.rs` `weakly_canonical` calls
    `current_dir()` and `canonicalize()` for message paths, and

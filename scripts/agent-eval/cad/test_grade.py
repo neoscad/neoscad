@@ -244,11 +244,10 @@ class References(unittest.TestCase):
         self.assertFails(self.ref("T3", ["af=32"], "t3-af"), "across flats")
         # A 45-degree skirt under the flange is the thread's neighbour, not
         # thread: its first mm are narrower than the flange test's radius,
-        # and counting them failed length, major and pitch on all three
-        # correct threads of pilot cad-20260928T202850Z. These are those
-        # pilot meshes' shapes: a cone from the root (NeoSCAD's agent), a
-        # hull of root circle and hexagon (OpenSCAD's), and a cone starting
-        # 1 mm inside the thread (CadQuery's).
+        # and counting them failed length, major and pitch on correct
+        # threads. These are shapes agents really made: a cone from the
+        # root, a hull of root circle and hexagon, and a cone starting 1 mm
+        # inside the thread.
         for defs, tag in ((['skirt="cone"'], "t3-cone"), (['skirt="hull"'], "t3-hull"),
                           (['skirt="cone"', "skirt_dz=-1"], "t3-overlap")):
             g = self.ref("T3", defs, tag)

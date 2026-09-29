@@ -46,6 +46,10 @@ if grep -q '^\[profile\.web\]' Cargo.toml; then
 else
     profile=release
 fi
+# No local paths in the module (scripts/web/remap-paths.sh).
+# shellcheck source=scripts/web/remap-paths.sh
+source scripts/web/remap-paths.sh
+root=$PWD target_dir=$target neoscad_remap_paths
 echo "build-view: cargo build --profile $profile ${features[*]+"${features[*]}"}"
 cargo build --quiet --profile "$profile" --target wasm32-unknown-unknown \
     -p neoscad-web-view ${features[@]+"${features[@]}"}

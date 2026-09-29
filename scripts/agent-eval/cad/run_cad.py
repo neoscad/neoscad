@@ -85,9 +85,8 @@ _VIEWER = None
 def viewer_path():
     """A copy of view_stl.py outside the repository. The sandbox denies
     reading the repository, so an agent that opened the script to learn its
-    options got a permission error (two wasted calls per CadQuery run in
-    the pilot, cad-20260928T202850Z). The copy is readable; running it is
-    exempted from the sandbox as before."""
+    options got a permission error and wasted calls on it. The copy is
+    readable; running it is exempted from the sandbox as before."""
     global _VIEWER
     if _VIEWER is None:
         d = Path(tempfile.mkdtemp(prefix="cad-tools-")).resolve()
@@ -348,9 +347,9 @@ def result_summary(results):
     task-notification). That result's `num_turns` counts only the
     follow-up, while its `modelUsage`, `total_cost_usd` and
     `duration_api_ms` are the session's running totals. Taking the last
-    result's figures as the run's recorded T3 CadQuery in
-    cad-20260928T231444Z as 2 turns (it took 44) and its follow-up note
-    as the final message, so turns are summed, totals come from the last
+    result's figures as the run's once recorded a long run as the
+    follow-up's few turns and its follow-up note as the final message,
+    so turns are summed, totals come from the last
     result, and the report is the last result that answered the prompt."""
     last = results[-1] if results else {}
     usage = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}

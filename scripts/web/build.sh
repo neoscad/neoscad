@@ -3,7 +3,8 @@
 #
 #   dist/web/neoscad-web-<version>-<sha>/     the self-contained bundle
 #   dist/web/neoscad-web-<version>-<sha>.tar.gz
-#   dist/web/neoscad-web-<version>-<sha>-source.tar.gz   (git archive of HEAD)
+#   dist/web/neoscad-web-<version>-<sha>-source.tar.gz   (git archive of HEAD,
+#       for a release to attach; SOURCE.txt points at the repository)
 #   dist/web/SHA256SUMS
 #
 # The bundle holds index.html, app.js, app.css, the examples, bosl2.tar.gz
@@ -50,6 +51,40 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then dirty="-dirty";
 name="neoscad-web-$version-$sha$dirty"
 dist=$root/dist/web
 out=$dist/$name
+
+# Archive timestamps: the commit's time (or SOURCE_DATE_EPOCH), so that
+# the same commit gives the same tarball bytes.
+epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct HEAD)}
+
+# repro_tar ARCHIVE DIR PATH...: a gzipped tar of the PATHs under DIR that
+# depends only on their contents. Plain `tar -czf` records the builder's
+# user and group names and ids, every file's local mtime, macOS extended
+# attributes and readdir order, and gzip records the time; a published
+# archive would then name the builder and change hash with every build.
+# Here entries are sorted, owned by root:root (0:0), stamped $epoch, and
+# gzip gets -n. This sets the mtimes of the files themselves, so DIR must
+# be a copy this script owns. bsdtar (macOS) and GNU tar spell it
+# differently.
+repro_tar() {
+    local archive=$1 dir=$2
+    shift 2
+    local list
+    list=$(mktemp)
+    (cd "$dir" && find "$@" -print | LC_ALL=C sort) >"$list"
+    (cd "$dir" && node -e '
+        const fs = require("fs");
+        const t = Number(process.argv[1]);
+        for (const f of fs.readFileSync(0, "utf8").split("\n").filter(Boolean)) fs.lutimesSync(f, t, t);
+    ' "$epoch" <"$list")
+    if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+        (cd "$dir" && tar --no-recursion --format=ustar --owner=root:0 --group=root:0 \
+            --mtime="@$epoch" -cf - -T "$list")
+    else
+        (cd "$dir" && COPYFILE_DISABLE=1 tar --no-recursion --format ustar --uid 0 --gid 0 \
+            --uname root --gname root --no-xattrs --no-acls --no-fflags -cf - -T "$list")
+    fi | gzip -n -9 >"$archive"
+    rm -f "$list"
+}
 
 if [ -f "$HOME/.cargo/env" ] && ! command -v cargo >/dev/null 2>&1; then
     # shellcheck disable=SC1091
@@ -107,8 +142,13 @@ fi
 
 if [ -n "$bosl2" ]; then
     # Only the library: its .scad files and licence, not its docs, tests
-    # or images. COPYFILE_DISABLE keeps macOS's ._ files out of the tar.
-    (cd "$bosl2/.." && COPYFILE_DISABLE=1 tar -czf "$out/bosl2.tar.gz" BOSL2/LICENSE BOSL2/*.scad)
+    # or images. Copied first, because repro_tar stamps the files it packs
+    # and the reference checkout is not ours to touch.
+    bosl2_stage=$(mktemp -d)
+    mkdir "$bosl2_stage/BOSL2"
+    cp "$bosl2/LICENSE" "$bosl2"/*.scad "$bosl2_stage/BOSL2/"
+    repro_tar "$out/bosl2.tar.gz" "$bosl2_stage" BOSL2
+    rm -rf "$bosl2_stage"
 else
     echo "warning: no .reference/BOSL2, so bosl2.tar.gz is missing and the BOSL2 examples will fail" >&2
 fi
@@ -169,7 +209,7 @@ fi
 rm "$out/THIRD-PARTY-LICENSES-web.txt"
 
 # --- The GPL source offer --------------------------------------------------
-source_url=${NEOSCAD_SOURCE_URL:-"(the NeoSCAD repository; not yet public)"}
+source_url=${NEOSCAD_SOURCE_URL:-"https://github.com/neoscad/neoscad/tree/$full_sha"}
 cat > "$out/SOURCE.txt" <<EOF
 NeoSCAD web demo $version, built from commit $full_sha$dirty.
 
@@ -180,15 +220,14 @@ code of this build, including the scripts used to build it
 
     $source_url
 
-It is also published beside this bundle as $name-source.tar.gz.
-If you cannot obtain it there, write to the NeoSCAD project, which will
-provide it for three years from the date of this build, for no more than
-the cost of distribution.
+If you cannot obtain it there, write to source@neoscad.org, and the
+NeoSCAD project will provide it for three years from the date of this
+build, for no more than the cost of distribution.
 EOF
 
 # --- Archives and checksums ------------------------------------------------
 git archive --format=tar.gz --prefix="$name-source/" -o "$dist/$name-source.tar.gz" HEAD
-(cd "$dist" && COPYFILE_DISABLE=1 tar -czf "$name.tar.gz" "$name")
+repro_tar "$dist/$name.tar.gz" "$dist" "$name"
 (cd "$dist" && shasum -a 256 "$name.tar.gz" "$name-source.tar.gz" > SHA256SUMS)
 
 # --- Sizes ------------------------------------------------------------------

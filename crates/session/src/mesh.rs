@@ -336,9 +336,9 @@ pub struct Weld {
 /// sharing an edge), its result keeps a separate vertex for each piece at
 /// the same position, so every edge it knows of has two faces. An STL has
 /// no vertex identities; a reader merges corners by position, and then
-/// that edge has four faces and the file is not manifold. The agent-eval
-/// pilot's T3 part passed `check` as manifold and failed the grader's
-/// watertightness test this way.
+/// that edge has four faces and the file is not manifold. Without this
+/// weld, a part like that passes `check` as manifold while its exported
+/// STL fails any watertightness test.
 ///
 /// Vertices merge by exact position, which is what an ASCII STL keeps
 /// (each coordinate is written in its shortest exact form). A triangle

@@ -6,10 +6,9 @@
 //! top of its own file are never in effect for it. OpenSCAD does this
 //! (checked against the 2026.09.23 nightly: a used file with `$fn = 64`
 //! and `w = 7` at its top echoes `$fn = 0, w = 7` from its module), and so
-//! does NeoSCAD, silently. In the T2 transcript audit every NeoSCAD run of
-//! a two-part enclosure hit it: a harness file `use`d both parts, measured
-//! their default-tessellated circles, and reported a 0.0056 mm³ "clash"
-//! that the agent spent 139 s chasing.
+//! does NeoSCAD, silently. An agent modelling a two-part enclosure hit it:
+//! a harness file `use`d both parts, measured their default-tessellated
+//! circles, and reported a tiny "clash" that was not in the model.
 //!
 //! The hint is recorded with [`eval::Console::note`]: in the tool view
 //! (JSON, MCP, the LSP) and never on the console, since OpenSCAD prints

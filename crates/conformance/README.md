@@ -217,17 +217,23 @@ images of successive snapshots can be stitched into a video.
 ## Progress video
 
     ./target/release/conformance video [--out FILE.mp4] [--fps 30] [--hold 2] [--frames-dir DIR]
-                                       [--progress DIR] [--ffmpeg PATH]
+                                       [--progress DIR] [--ffmpeg PATH] [--agent-eval]
+                                       [--commit-map FILE]
 
 Draws one 1920x1080 scene per snapshot in `progress/index.jsonl` (the grid,
 a caption with time, sha and subject, per-tier pass counts and a chart of
-total passes over time, interpolated between snapshots), benchmark and
-agent-eval interludes, and title and end cards, then encodes H.264
+total passes over time, interpolated between snapshots), benchmark
+interludes, and title and end cards, then encodes H.264
 (`yuv420p`, CRF 20) with ffmpeg. The default output is
 `progress/video/progress.mp4`; frames go to a temporary directory unless
 `--frames-dir` keeps them. `--progress` reads another checkout's
 `progress/` (from a worktree, the main tree's); no reference checkout is
-needed. The same data gives the same file. Details, and the unbuilt
+needed. `--agent-eval` adds the agent-eval results interlude; it is off
+by default because those results are not published. `progress/` records
+commit ids from before the history was rewritten for publication;
+`--commit-map` (default `.git/filter-repo/commit-map` when present) reads
+them as the rewritten commits, for the manifests and the captions. The
+same data gives the same file. Details, and the unbuilt
 `--showcase` mode, are in `docs/progress-video.md`.
 
 ## How the manifest is built

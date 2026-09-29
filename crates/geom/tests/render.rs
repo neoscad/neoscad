@@ -170,7 +170,7 @@ fn output_is_deterministic_and_cache_hits_are_silent() {
 /// depended on thread scheduling. Whether two sibling copies share mesh
 /// IDs depended on which thread computed first (a cache hit shares them),
 /// and manifold-rust's union of disjoint parts merged copies that shared
-/// IDs into one run. At 736bcc1 about one render in six came out in a
+/// IDs into one run. At 489ea83 about one render in six came out in a
 /// different order.
 #[test]
 fn copies_of_a_cached_solid_export_identically_every_time() {

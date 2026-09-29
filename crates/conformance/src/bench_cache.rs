@@ -35,7 +35,7 @@ pub(crate) const METHOD_VERSION: u32 = 1;
 /// `crates/conformance/src/bench.rs` and `conformance/bench.json` are
 /// unchanged from it to the commit that added the cache. Seeding accepts
 /// only runs measured at or after it. Move it with [`METHOD_VERSION`].
-pub(crate) const METHOD_SINCE: &str = "49cf1c01cbff7f6c8a84b391f0cd7552f8e98c21";
+pub(crate) const METHOD_SINCE: &str = "55d53b8c31ee7a8ba934519439c79ee3f470a999";
 
 /// Environment variables the bench removes from every run.
 pub(crate) const UNSET_ENV: [&str; 2] = ["NEOSCAD_FONT_DIR", "OPENSCAD_FONT_PATH"];
