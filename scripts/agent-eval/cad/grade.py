@@ -782,15 +782,20 @@ def grade_t3(parts):
                      bool(peaks) and all(12.5 <= d <= 16 for _, d in peaks), [r3(d) for _, d in peaks], "12.5..16",
                      note="the spec gives the hose, not the barb size; this range is typical for 12 ID"))
 
-    # The order of the segments, information only. The spec states none;
-    # a thread between the hex and the barb has no free end to screw into
-    # a fitting, which the grader reports but does not judge.
+    # Thread at one end, barb at the other, hex between them. The spec does
+    # not spell the order out, but "hose-barb adapter" implies it: the thread
+    # must have a free end to screw into a port and the barb one to take the
+    # hose. A thread between the hex and the barb (cad-20260928T231444Z's
+    # NeoSCAD part) screws in only by burying the barb. Our reading; the
+    # post says so.
     seg = {"hex": fl and (fl[0] + fl[1]) / 2, "thread": thread_span and sum(thread_span) / 2,
            "barb": br and (zs[br[1]] + zs[br[2]]) / 2}
     order = [k for k in sorted((k for k in seg if seg[k] is not None), key=lambda k: seg[k])]
     free = bool(thread_span) and (thread_span[0] - p.bmin[2] < 0.5 or p.bmax[2] - thread_span[1] < 0.5)
-    out.append(check("layout", None, {"order_along_axis": order, "thread_at_a_free_end": free}, None, gate=False,
-                     note="the spec does not order the segments; not judged"))
+    usable = order in (["thread", "hex", "barb"], ["barb", "hex", "thread"])
+    out.append(check("layout: thread and barb at opposite ends, hex between", usable,
+                     {"order_along_axis": order, "thread_at_a_free_end": free}, "thread, hex, barb",
+                     note="implied by 'hose-barb adapter', not stated by the spec"))
     return out
 
 

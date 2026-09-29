@@ -258,21 +258,23 @@ class References(unittest.TestCase):
         self.assertFails(self.ref("T3", ['skirt="cone"', "thread_len=10"], "t3-short"), "12 long")
 
     def test_t3_layouts(self):
-        # The spec states no order of thread, flange and barb. Flange-down
-        # (hex, thread, barb: cad-20260928T231444Z's NeoSCAD part) passes,
-        # upright or turned over, and its wrong variants still fail.
+        # A thread between the hex and the barb (cad-20260928T231444Z's
+        # NeoSCAD part) meets every stated number but has no free end, so it
+        # fails the layout gate and only that. Upright or turned over, the
+        # usable order passes, and the stacked part's other checks still work.
         hx = ['order="hex-thread-barb"']
-        for defs, tag in ((hx, "t3-htb"), (["flip=true"], "t3-flip")):
-            g = self.ref("T3", defs, tag)
-            self.assertTrue(g["pass"], (tag, g["failed_gates"]))
-        layout = next(c for c in self.ref("T3", hx, "t3-htb")["checks"] if c["name"] == "layout")["value"]
+        g = self.ref("T3", ["flip=true"], "t3-flip")
+        self.assertTrue(g["pass"], g["failed_gates"])
+        g = self.ref("T3", hx, "t3-htb")
+        self.assertFails(g, "layout")
+        layout = next(c for c in g["checks"] if c["name"].startswith("layout"))["value"]
         self.assertEqual(layout["order_along_axis"], ["hex", "thread", "barb"])
         self.assertFalse(layout["thread_at_a_free_end"])
-        self.assertFails(self.ref("T3", hx + ["thread_len=10"], "t3-htb-short"), "12 long")
-        self.assertFails(self.ref("T3", hx + ["barb_len=20"], "t3-htb-barb"), "barb 25")
-        self.assertFails(self.ref("T3", hx + ["pitch=1.5"], "t3-htb-pitch"), "pitch")
-        self.assertFails(self.ref("T3", hx + ["af=32"], "t3-htb-af"), "across flats")
-        self.assertFails(self.ref("T3", hx + ["rings=true"], "t3-htb-rings"), "helical", "right-hand")
+        self.assertFails(self.ref("T3", hx + ["thread_len=10"], "t3-htb-short"), "12 long", "layout")
+        self.assertFails(self.ref("T3", hx + ["barb_len=20"], "t3-htb-barb"), "barb 25", "layout")
+        self.assertFails(self.ref("T3", hx + ["pitch=1.5"], "t3-htb-pitch"), "pitch", "layout")
+        self.assertFails(self.ref("T3", hx + ["af=32"], "t3-htb-af"), "across flats", "layout")
+        self.assertFails(self.ref("T3", hx + ["rings=true"], "t3-htb-rings"), "helical", "right-hand", "layout")
         # Corners chamfered over 5 of the flange's 8 mm (CadQuery's part
         # there) are still a 30 hex; a round flange is not.
         g = self.ref("T3", ["hex_cham=5"], "t3-cham")
