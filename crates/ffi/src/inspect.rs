@@ -22,18 +22,23 @@
 //! (`docs/cli-json.md`, "check" and "measure"), as the other results do
 //! (`types.rs`): the panels show the numbers `neoscad check` and
 //! `neoscad measure` print, rounded the same way.
+//!
+//! The shaping is `crates/client`'s (`inspect.rs`), shared with the web
+//! worker; its records are declared to UniFFI here as remote types. This
+//! file adds the app's half: cancel tokens, progress listeners, writing
+//! exports to disk, snapshots and the viewport's annotations.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
 
-use geom::Geometry;
-use geom::manifold_geom::ManifoldGeometry;
-use serde_json::Value;
-use session::check::{CheckRequest, CheckSettings};
-use session::measure::Plane;
-use session::mesh::{Bvh, Mesh};
 use session::snapshot::{SnapshotError, SnapshotRequest};
+
+pub use client::{
+    BetweenResult, CheckFinding, CheckOptions, CheckReport, ExportOptions, FindingSeverity,
+    PartStats, RunOptions, SectionAxis, SectionResult, SolidStats, ThreeMfColorMode,
+    ThreeMfMaterial, TruncatedFindings,
+};
 
 use crate::{
     Core, CoreError, Diagnostic, ExportResult, GeometryStats, ParameterOverride, SnapshotOptions,
@@ -78,7 +83,7 @@ pub trait ProgressListener: Send + Sync {
 }
 
 /// What a detached request runs with besides the document's text.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct RunOptions {
     /// The customizer's values, as the document's runs pass them.
     #[uniffi(default = [])]
@@ -101,29 +106,18 @@ impl Core {
         cancel: Option<&Arc<CancelToken>>,
         progress: Option<Arc<dyn ProgressListener>>,
     ) -> Result<session::Run, CoreError> {
-        let mut run = self.run(path)?;
-        run.supersede = false;
-        run.parts = options.parts;
-        run.features = eval::Features::from_names(&options.enable);
-        run.defines = options
-            .overrides
-            .iter()
-            .filter_map(crate::document::define)
-            .collect();
-        run.interrupt = cancel.map(|c| c.flag.clone());
-        if let Some(p) = progress {
-            run.progress = Some(Arc::new(move |s: session::Stage| {
-                p.stage(s.name().to_string())
-            }));
-        }
-        Ok(run)
+        let progress = progress.map(|p| -> session::Progress {
+            Arc::new(move |s: session::Stage| p.stage(s.name().to_string()))
+        });
+        self.client
+            .detached(path, options, cancel.map(|c| c.flag.clone()), progress)
     }
 }
 
 // --- Check ------------------------------------------------------------------
 
 /// What `check` counts as a problem (`docs/cli-json.md`, "check").
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct CheckOptions {
     /// mm; walls thinner than this are errors.
     pub nozzle: f64,
@@ -138,59 +132,15 @@ pub struct CheckOptions {
     pub max_findings: u32,
 }
 
-impl From<CheckSettings> for CheckOptions {
-    fn from(s: CheckSettings) -> Self {
-        CheckOptions {
-            nozzle: s.nozzle,
-            min_wall: s.min_wall,
-            max_overhang: s.max_overhang,
-            bed: s.bed.map(|b| b.to_vec()),
-            bed_tolerance: s.bed_tolerance,
-            max_findings: u32::try_from(s.max_findings).unwrap_or(u32::MAX),
-        }
-    }
-}
-
-impl CheckOptions {
-    fn to_session(&self) -> Result<CheckSettings, CoreError> {
-        let bad = |what: &str| CoreError::InvalidArgument {
-            message: format!("check: {what}"),
-        };
-        let positive = |x: f64| x.is_finite() && x > 0.0;
-        if !positive(self.nozzle) || !positive(self.min_wall) {
-            return Err(bad("the nozzle and the minimum wall must be positive"));
-        }
-        if !(self.max_overhang.is_finite() && (0.0..=90.0).contains(&self.max_overhang)) {
-            return Err(bad("the maximum overhang must be 0 to 90 degrees"));
-        }
-        if !(self.bed_tolerance.is_finite() && self.bed_tolerance >= 0.0) {
-            return Err(bad("the bed tolerance must not be negative"));
-        }
-        let bed = match &self.bed {
-            None => None,
-            Some(b) if b.len() == 3 && b.iter().all(|&x| positive(x)) => Some([b[0], b[1], b[2]]),
-            Some(_) => return Err(bad("the bed is three positive sizes, width, depth, height")),
-        };
-        Ok(CheckSettings {
-            bed,
-            nozzle: self.nozzle,
-            min_wall: self.min_wall,
-            max_overhang: self.max_overhang,
-            bed_tolerance: self.bed_tolerance,
-            max_findings: self.max_findings as usize,
-        })
-    }
-}
-
 /// `check`'s defaults (a 0.4 mm nozzle, 0.8 mm walls, 45°, no bed), so the
 /// app does not keep a second copy of them.
 #[uniffi::export]
 pub fn default_check_options() -> Result<CheckOptions, CoreError> {
-    guarded(|| Ok(CheckSettings::default().into()))
+    guarded(|| Ok(CheckOptions::default()))
 }
 
 /// How bad a finding is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[uniffi::remote(Enum)]
 pub enum FindingSeverity {
     Error,
     Warning,
@@ -198,7 +148,7 @@ pub enum FindingSeverity {
 }
 
 /// One problem `check` found (`FINDING` in `docs/cli-json.md`).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct CheckFinding {
     /// From 1, errors first; `snapshot --issues` numbers its markers so.
     pub id: u32,
@@ -218,14 +168,14 @@ pub struct CheckFinding {
 }
 
 /// Findings of one code left out past `max_findings`.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct TruncatedFindings {
     pub code: String,
     pub count: u32,
 }
 
 /// The result of [`Core::check`].
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct CheckReport {
     /// 0 when nothing is an error; 1 for errors, or when the model failed
     /// to load, evaluate or render (then `failed`, and no findings).
@@ -250,37 +200,6 @@ pub struct CheckReport {
     pub console: String,
 }
 
-fn f64s(v: &Value) -> Option<Vec<f64>> {
-    v.as_array()
-        .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect())
-}
-
-fn u32_of(v: &Value) -> u32 {
-    v.as_u64()
-        .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX))
-}
-
-fn finding(f: &Value) -> CheckFinding {
-    let loc = &f["location"];
-    CheckFinding {
-        id: u32_of(&f["id"]),
-        severity: match f["severity"].as_str() {
-            Some("error") => FindingSeverity::Error,
-            Some("warning") => FindingSeverity::Warning,
-            _ => FindingSeverity::Info,
-        },
-        code: f["code"].as_str().unwrap_or_default().to_string(),
-        message: f["message"].as_str().unwrap_or_default().to_string(),
-        part: f["part"].as_str().map(str::to_string),
-        point: f64s(&loc["point"]).unwrap_or_default(),
-        bbox_min: f64s(&loc["bbox"]["min"]),
-        bbox_max: f64s(&loc["bbox"]["max"]),
-        fix: f["fix"].as_str().unwrap_or_default().to_string(),
-        value: f["value"].as_f64(),
-        limit: f["limit"].as_f64(),
-    }
-}
-
 #[uniffi::export]
 impl Core {
     /// Check a document for FDM printing (`neoscad check`): its current
@@ -293,44 +212,10 @@ impl Core {
         cancel: Option<Arc<CancelToken>>,
     ) -> Result<CheckReport, CoreError> {
         guarded(|| {
-            let settings = options.to_session()?;
+            // The options are checked before the path, as they always were.
+            options.to_session()?;
             let run = self.detached(&path, &run, cancel.as_ref(), None)?;
-            let c = self.session.check(&CheckRequest { run, settings })?;
-            let s = &c.summary;
-            let failed = s["failed"] == Value::Bool(true);
-            Ok(CheckReport {
-                exit_code: c.exit_code,
-                failed,
-                errors: u32_of(&s["counts"]["errors"]),
-                warnings: u32_of(&s["counts"]["warnings"]),
-                info: u32_of(&s["counts"]["info"]),
-                findings: s["findings"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(finding)
-                    .collect(),
-                truncated: s["truncated"]
-                    .as_object()
-                    .into_iter()
-                    .flatten()
-                    .map(|(code, n)| TruncatedFindings {
-                        code: code.clone(),
-                        count: u32_of(n),
-                    })
-                    .collect(),
-                min_wall: s["model"]["min_wall"]["thickness"].as_f64(),
-                parts: s["parts"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|p| p["name"].as_str().map(str::to_string))
-                    .collect(),
-                text: session::check::text(s),
-                summary_json: s.to_string(),
-                diagnostics: types::diagnostics(&c.log),
-                console: types::console(&c.log),
-            })
+            self.client.check(run, &options)
         })
     }
 }
@@ -339,7 +224,7 @@ impl Core {
 
 /// Volume, area, box and centre of mass of a solid (`SOLID` in
 /// `docs/cli-json.md`, "measure").
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct SolidStats {
     /// mm³, and mm² of surface.
     pub volume: f64,
@@ -351,20 +236,8 @@ pub struct SolidStats {
     pub triangles: u64,
 }
 
-fn solid_stats(m: &ManifoldGeometry) -> Option<SolidStats> {
-    let v = session::measure::solid_json(m);
-    Some(SolidStats {
-        volume: v["volume"].as_f64()?,
-        area: v["area"].as_f64()?,
-        bbox_min: f64s(&v["bbox"]["min"])?,
-        bbox_max: f64s(&v["bbox"]["max"])?,
-        centroid: f64s(&v["centroid"])?,
-        triangles: v["triangles"].as_u64().unwrap_or(0),
-    })
-}
-
 /// One part's own solid.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct PartStats {
     /// Dotted for nested parts (`lid.hinge`).
     pub name: String,
@@ -395,43 +268,17 @@ pub struct MeasureResult {
     pub console: String,
 }
 
-/// A solid, with its mesh and hierarchy for picking made on first use.
-struct Solid {
-    geometry: ManifoldGeometry,
-    picking: OnceLock<(Mesh, Bvh)>,
-}
-
-impl Solid {
-    fn new(geometry: ManifoldGeometry) -> Solid {
-        Solid {
-            geometry,
-            picking: OnceLock::new(),
-        }
-    }
-}
-
-/// A measured model's solids: the model's and each part's. Sections and
-/// distances work from these, so the measure panel's slider cuts the same
-/// solid again without evaluating or rendering the document.
-#[derive(uniffi::Object)]
+/// A measured model's solids: the model's and each part's
+/// ([`client::Measurement`]). Sections and distances work from these, so
+/// the measure panel's slider cuts the same solid again without
+/// evaluating or rendering the document.
+#[derive(Debug, uniffi::Object)]
 pub struct Measurement {
-    model: Option<Solid>,
-    parts: Vec<(String, Option<Solid>)>,
-}
-
-impl std::fmt::Debug for Measurement {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Measurement")
-            .field(
-                "parts",
-                &self.parts.iter().map(|p| &p.0).collect::<Vec<_>>(),
-            )
-            .finish_non_exhaustive()
-    }
+    inner: client::Measurement,
 }
 
 /// An axis-aligned cutting plane's axis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[uniffi::remote(Enum)]
 pub enum SectionAxis {
     X,
     Y,
@@ -439,7 +286,7 @@ pub enum SectionAxis {
 }
 
 /// A cross-section (`section` in `docs/cli-json.md`, "measure").
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct SectionResult {
     /// `z=5`.
     pub plane: String,
@@ -457,7 +304,7 @@ pub struct SectionResult {
 }
 
 /// The distance between two parts (`between` in `docs/cli-json.md`).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct BetweenResult {
     pub a: String,
     pub b: String,
@@ -472,48 +319,11 @@ pub struct BetweenResult {
     pub point_b: Option<Vec<f64>>,
 }
 
-impl Measurement {
-    fn solid(&self, part: Option<&str>) -> Result<&Solid, CoreError> {
-        let missing = |what: String| CoreError::InvalidArgument { message: what };
-        match part {
-            None => self
-                .model
-                .as_ref()
-                .ok_or_else(|| missing("the model is not a solid".into())),
-            Some(name) => match self.parts.iter().find(|(n, _)| n == name) {
-                Some((_, Some(s))) => Ok(s),
-                Some((_, None)) => Err(missing(format!("part '{name}' is not a solid"))),
-                None => Err(missing(if self.parts.is_empty() {
-                    format!("no part '{name}': the model has no parts (they need parts enabled)")
-                } else {
-                    format!(
-                        "no part '{name}' (parts: {})",
-                        self.parts
-                            .iter()
-                            .map(|p| p.0.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                })),
-            },
-        }
-    }
-}
-
-fn point3(v: &[f64], what: &str) -> Result<[f64; 3], CoreError> {
-    match v {
-        [x, y, z] if v.iter().all(|c| c.is_finite()) => Ok([*x, *y, *z]),
-        _ => Err(CoreError::InvalidArgument {
-            message: format!("{what} must be three finite numbers"),
-        }),
-    }
-}
-
 #[uniffi::export]
 impl Measurement {
     /// The parts measured, in the model's order.
     pub fn part_names(&self) -> Result<Vec<String>, CoreError> {
-        guarded(|| Ok(self.parts.iter().map(|p| p.0.clone()).collect()))
+        guarded(|| Ok(self.inner.part_names()))
     }
 
     /// Cut the model (or `part`'s solid) with the plane `axis = offset`.
@@ -523,52 +333,12 @@ impl Measurement {
         offset: f64,
         part: Option<String>,
     ) -> Result<SectionResult, CoreError> {
-        guarded(|| {
-            if !offset.is_finite() {
-                return Err(CoreError::InvalidArgument {
-                    message: "the section's offset must be finite".into(),
-                });
-            }
-            let plane = match axis {
-                SectionAxis::X => Plane::X(offset),
-                SectionAxis::Y => Plane::Y(offset),
-                SectionAxis::Z => Plane::Z(offset),
-            };
-            let solid = self.solid(part.as_deref())?;
-            let (v, poly) = session::measure::section(&solid.geometry, plane);
-            Ok(SectionResult {
-                plane: plane.name(),
-                area: v["area"].as_f64().unwrap_or(0.0),
-                perimeter: v["perimeter"].as_f64().unwrap_or(0.0),
-                contours: u32_of(&v["contours"]),
-                bbox_min: f64s(&v["bbox"]["min"]),
-                bbox_max: f64s(&v["bbox"]["max"]),
-                outline: poly
-                    .outlines
-                    .iter()
-                    .map(|o| o.vertices.iter().flat_map(|p| plane.to_model(*p)).collect())
-                    .collect(),
-            })
-        })
+        guarded(|| self.inner.section(axis, offset, part.as_deref()))
     }
 
     /// The smallest distance between two parts, or their overlap.
     pub fn between(&self, a: String, b: String) -> Result<BetweenResult, CoreError> {
-        guarded(|| {
-            let (sa, sb) = (self.solid(Some(&a))?, self.solid(Some(&b))?);
-            let v = session::measure::between(&sa.geometry, &sb.geometry);
-            let points = v["points"].as_array();
-            Ok(BetweenResult {
-                distance: v["distance"].as_f64(),
-                touching: v["touching"] == Value::Bool(true),
-                overlapping: v["overlapping"] == Value::Bool(true),
-                overlap_volume: v["overlap_volume"].as_f64().unwrap_or(0.0),
-                point_a: points.and_then(|p| p.first()).and_then(f64s),
-                point_b: points.and_then(|p| p.get(1)).and_then(f64s),
-                a,
-                b,
-            })
-        })
+        guarded(|| self.inner.between(a, b))
     }
 
     /// Where a ray (from `origin` along `direction`, model coordinates)
@@ -579,28 +349,7 @@ impl Measurement {
         origin: Vec<f64>,
         direction: Vec<f64>,
     ) -> Result<Option<Vec<f64>>, CoreError> {
-        guarded(|| {
-            let o = point3(&origin, "the ray's origin")?;
-            let d = point3(&direction, "the ray's direction")?;
-            let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            if n == 0.0 {
-                return Err(CoreError::InvalidArgument {
-                    message: "the ray's direction must not be zero".into(),
-                });
-            }
-            let d = d.map(|c| c / n);
-            let Some(solid) = &self.model else {
-                return Ok(None);
-            };
-            let (mesh, bvh) = solid.picking.get_or_init(|| {
-                let mesh = Mesh::of_solid(&solid.geometry);
-                let bvh = Bvh::new(&mesh);
-                (mesh, bvh)
-            });
-            Ok(bvh
-                .ray(mesh, o, d, 0.0, f64::INFINITY, |_| false)
-                .map(|(t, _)| vec![o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]]))
-        })
+        guarded(|| self.inner.pick(&origin, &direction))
     }
 }
 
@@ -617,58 +366,18 @@ impl Core {
     ) -> Result<MeasureResult, CoreError> {
         guarded(|| {
             let run = self.detached(&path, &run, cancel.as_ref(), None)?;
-            let scheme = render::ColorScheme::cornfield();
-            let (model, parts) = self.session.render_parts(&run, &scheme)?;
-            let mut out = MeasureResult {
-                exit_code: model.exit_code,
-                model: None,
-                components: None,
-                manifold: None,
-                model_2d: None,
-                parts: Vec::new(),
-                measurement: None,
-                diagnostics: types::diagnostics(&model.log),
-                console: types::console(&model.log),
-            };
-            if model.exit_code != 0 {
-                return Ok(out);
-            }
-            let solid = match &model.geometry {
-                None => None,
-                Some(g @ Geometry::Polygon2d(_)) => {
-                    out.model_2d = Some(types::geometry_stats(g, &scheme.geometry_scheme()));
-                    None
-                }
-                Some(g) => {
-                    let solid = session::stats::solid(g);
-                    out.model = solid_stats(&solid);
-                    let mesh = Mesh::of_solid(&solid);
-                    out.components = Some(mesh.components().1 as u64);
-                    // As `check` says it: two pieces touching along an
-                    // edge are not manifold in a file.
-                    out.manifold = Some(solid.is_valid() && mesh.bad_edges().is_none());
-                    Some(Solid::new(solid))
-                }
-            };
-            out.parts = parts
-                .iter()
-                .map(|p| PartStats {
-                    name: p.name.clone(),
-                    instances: u32::try_from(p.instances).unwrap_or(u32::MAX),
-                    context: p.context.map(str::to_string),
-                    solid: p.solid.as_ref().and_then(solid_stats),
-                })
-                .collect();
-            if solid.is_some() || !parts.is_empty() {
-                out.measurement = Some(Arc::new(Measurement {
-                    model: solid,
-                    parts: parts
-                        .into_iter()
-                        .map(|p| (p.name, p.solid.map(Solid::new)))
-                        .collect(),
-                }));
-            }
-            Ok(out)
+            let (r, m) = self.client.measure(run)?;
+            Ok(MeasureResult {
+                exit_code: r.exit_code,
+                model: r.model,
+                components: r.components,
+                manifold: r.manifold,
+                model_2d: r.model_2d,
+                parts: r.parts,
+                measurement: m.map(|inner| Arc::new(Measurement { inner })),
+                diagnostics: r.diagnostics,
+                console: r.console,
+            })
         })
     }
 }
@@ -676,7 +385,7 @@ impl Core {
 // --- Export -----------------------------------------------------------------
 
 /// `export-3mf/color-mode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[uniffi::remote(Enum)]
 pub enum ThreeMfColorMode {
     /// The model's own colours, over the default one.
     Model,
@@ -687,7 +396,7 @@ pub enum ThreeMfColorMode {
 }
 
 /// `export-3mf/material-type`: where the colours go.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[uniffi::remote(Enum)]
 pub enum ThreeMfMaterial {
     /// A colour group.
     Color,
@@ -697,7 +406,7 @@ pub enum ThreeMfMaterial {
 
 /// How to write an export: OpenSCAD's `-O` options the app offers, each
 /// `None` for OpenSCAD's default.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct ExportOptions {
     /// OpenSCAD's format id (`stl` for ASCII STL, `binstl`, `3mf`, `obj`,
     /// `off`, `wrl`, `pov`, `svg`, `dxf`, `pdf`); `None` to go by the
@@ -766,44 +475,14 @@ impl Core {
                     message: format!("the output path must be absolute (got '{output}')"),
                 });
             }
-            let id = options.format.clone().unwrap_or_else(|| {
-                target
-                    .extension()
-                    .map(|e| e.to_string_lossy().to_lowercase())
-                    .unwrap_or_default()
-            });
-            let fmt = session::export::Format::from_id(&id).ok_or_else(|| {
-                CoreError::InvalidArgument {
-                    message: format!(
-                        "unknown export format '{id}' (stl, binstl, off, obj, 3mf, wrl, pov, svg, dxf or pdf)"
-                    ),
-                }
-            })?;
+            let fmt = client::export_format(options.format.as_deref(), &output)?;
             let run = self.detached(&path, &run, cancel.as_ref(), progress)?;
-            let scheme = render::ColorScheme::cornfield();
-            let mut settings = crate::export_settings(&run, scheme.geometry_scheme());
-            apply_threemf(&mut settings, &options, &scheme);
-            let req = session::ExportRequest {
-                run,
-                outputs: vec![(output.clone(), fmt)],
-                force: false,
-                scheme,
-                settings,
-            };
             let mut sink = AtomicFile { bytes: 0 };
-            let r = self.session.export(&req, &mut sink)?;
-            Ok(ExportResult {
-                exit_code: r.exit_code,
-                format: fmt.id().to_string(),
-                bytes: sink.bytes,
-                geometry: r
-                    .geometry
-                    .as_ref()
-                    .map(|g| types::geometry_stats(g, &req.scheme.geometry_scheme())),
-                diagnostics: types::diagnostics(&r.log),
-                console: types::console(&r.log),
-                timings: r.timings.into(),
-            })
+            let mut r =
+                self.client
+                    .export(run, &output, fmt, &options, crate::iso8601_now(), &mut sink)?;
+            r.bytes = sink.bytes;
+            Ok(r)
         })
     }
 
@@ -827,7 +506,7 @@ impl Core {
             req.views = options.views;
             req.dims = options.dims;
             req.preview = options.preview;
-            let s = self.session.snapshot(&req).map_err(|e| match e {
+            let s = self.session().snapshot(&req).map_err(|e| match e {
                 SnapshotError::Cancelled => CoreError::Cancelled,
                 SnapshotError::Failed(message) => CoreError::Failed { message },
             })?;
@@ -839,43 +518,6 @@ impl Core {
                 console: types::console(&s.log),
             })
         })
-    }
-}
-
-/// The 3MF options into the encoder's settings, the colour resolved as
-/// the command line resolves `export-3mf/color` (a name it cannot parse
-/// warns and falls back to the default colour).
-fn apply_threemf(
-    settings: &mut session::export::Settings,
-    options: &ExportOptions,
-    scheme: &render::ColorScheme,
-) {
-    use io::threemf::{ColorMode, MaterialType};
-    let t = &mut settings.threemf;
-    if let Some(m) = options.threemf_color_mode {
-        t.color_mode = match m {
-            ThreeMfColorMode::Model => ColorMode::Model,
-            ThreeMfColorMode::NoColor => ColorMode::None,
-            ThreeMfColorMode::SelectedOnly => ColorMode::SelectedOnly,
-        };
-    }
-    if let Some(m) = options.threemf_material {
-        t.material_type = match m {
-            ThreeMfMaterial::Color => MaterialType::Color,
-            ThreeMfMaterial::BaseMaterial => MaterialType::BaseMaterial,
-        };
-    }
-    if t.color_mode == ColorMode::SelectedOnly {
-        let name = options.threemf_color.as_deref().unwrap_or("#f9d72c");
-        t.color = Some(match eval::parse_color(name) {
-            Some(c) => io::Color(c),
-            None => {
-                settings.threemf_warning = Some(format!(
-                    "Unable to parse color \"{name}\", reverting to default color."
-                ));
-                scheme.geometry_scheme().face_front
-            }
-        });
     }
 }
 
@@ -937,7 +579,7 @@ impl Viewport {
                 .iter()
                 .map(|m| {
                     Ok(render::viewport::AnnotationMarker {
-                        point: point3(&m.point, "a marker's point")?,
+                        point: client::point3(&m.point, "a marker's point")?,
                         label: m.label.clone(),
                         color: rgba(&m.color),
                     })
@@ -963,7 +605,7 @@ impl Viewport {
     /// Look at `point` (keeping the rotation and the distance).
     pub fn look_at(&self, point: Vec<f64>) -> Result<(), CoreError> {
         guarded(|| {
-            let p = point3(&point, "the point")?;
+            let p = client::point3(&point, "the point")?;
             self.lock().look_at(p);
             Ok(())
         })

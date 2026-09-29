@@ -306,28 +306,6 @@ fn parameter_sets_round_trip_through_openscads_file() {
 }
 
 #[test]
-fn numbers_print_as_cpp_streams_do() {
-    assert_eq!(g(43.0, 16), "43");
-    assert_eq!(g(0.1, 16), "0.1");
-    assert_eq!(g(1.0 / 3.0, 16), "0.3333333333333333");
-    assert_eq!(g(1.0 / 3.0, 6), "0.333333");
-    assert_eq!(g(1e21, 16), "1e+21");
-    assert_eq!(g(-2.5e-7, 6), "-2.5e-07");
-    assert_eq!(
-        literal(&ParameterValue::Number { value: 0.1 }).unwrap(),
-        "0.1"
-    );
-    assert_eq!(
-        literal(&ParameterValue::Vector {
-            value: vec![1.0, 2.5]
-        })
-        .unwrap(),
-        "[1, 2.5]"
-    );
-    assert!(literal(&ParameterValue::Number { value: f64::NAN }).is_none());
-}
-
-#[test]
 fn the_files_view_moves_the_camera_when_it_changes() {
     let Ok(v) = Viewport::new("Cornfield".into()) else {
         eprintln!("skipped: no GPU");

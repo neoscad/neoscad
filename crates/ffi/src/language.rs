@@ -50,29 +50,14 @@ impl Core {
     /// jumped to. Not UTF-8 text is decoded lossily; the view is
     /// read-only.
     pub fn read_file(&self, path: String) -> Result<String, CoreError> {
-        guarded(|| {
-            let p = self.doc_path(&path)?;
-            let bytes = self.session.fs().read(&p).map_err(|e| CoreError::Failed {
-                message: format!("cannot read '{}': {e}", p.display()),
-            })?;
-            Ok(String::from_utf8_lossy(&bytes).into_owned())
-        })
+        guarded(|| self.client.read_file(&path))
     }
 
     /// The library directories, in search order (`OPENSCADPATH`, the
     /// user's library folder, the bundled libraries): a file under one is
     /// a library the editor shows read-only.
     pub fn library_dirs(&self) -> Result<Vec<String>, CoreError> {
-        guarded(|| {
-            Ok(self
-                .session
-                .config()
-                .libs
-                .0
-                .iter()
-                .map(|p| session::normal(p).to_string_lossy().into_owned())
-                .collect())
-        })
+        guarded(|| Ok(self.client.library_dirs()))
     }
 }
 
@@ -84,7 +69,7 @@ impl LanguageServer {
     pub fn handle(&self, message: String) -> Result<Vec<String>, CoreError> {
         guarded(|| {
             Ok(eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
-                self.server.handle(&self.core.session, &message)
+                self.server.handle(self.core.session(), &message)
             }))
         })
     }
@@ -100,13 +85,9 @@ impl LanguageServer {
     /// the evaluations; a change meanwhile stops a stale one.
     pub fn publish_diagnostics(&self) -> Result<Vec<String>, CoreError> {
         guarded(|| {
-            let limits = *self
-                .core
-                .limits
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let limits = self.core.client.current_limits();
             self.server.set_limits(Some(limits));
-            Ok(self.server.publish_diagnostics(&self.core.session))
+            Ok(self.server.publish_diagnostics(self.core.session()))
         })
     }
 }

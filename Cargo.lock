@@ -967,6 +967,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "neoscad-client"
+version = "0.1.0"
+dependencies = [
+ "neoscad-assets",
+ "neoscad-eval",
+ "neoscad-geom",
+ "neoscad-io",
+ "neoscad-lang",
+ "neoscad-render",
+ "neoscad-session",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "neoscad-conformance"
 version = "0.1.0"
 dependencies = [
@@ -1007,9 +1022,8 @@ version = "0.1.0"
 dependencies = [
  "mimalloc",
  "neoscad-assets",
+ "neoscad-client",
  "neoscad-eval",
- "neoscad-geom",
- "neoscad-io",
  "neoscad-lang",
  "neoscad-lsp",
  "neoscad-render",
@@ -1131,6 +1145,24 @@ dependencies = [
  "neoscad-session",
  "neoscad-text",
  "serde_json",
+]
+
+[[package]]
+name = "neoscad-web"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "neoscad-assets",
+ "neoscad-client",
+ "neoscad-eval",
+ "neoscad-lang",
+ "neoscad-lsp",
+ "neoscad-render",
+ "neoscad-session",
+ "neoscad-text",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

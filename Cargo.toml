@@ -64,6 +64,21 @@ codegen-units = 1
 panic = "unwind"
 debug = "line-tables-only"
 
+# The browser demo's wasm32 core (`scripts/web/build-core.sh`, crates/web).
+# Size is download time there, so no debug info (37.6 MB of a 48.6 MB
+# release module was DWARF), symbols stripped and whole-program LTO.
+# Panics abort: wasm32-unknown-unknown cannot unwind, so a panic traps the
+# instance either way, and the page respawns the worker
+# (docs/web-protocol.md, "Crashes, cancelling and respawning"); `abort`
+# also drops the unwinding tables.
+[profile.web]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true
+
 # Full debug info made `target/debug` about 21 GB and filled the disk. Line
 # tables still give file:line backtraces; dependencies carry none.
 [profile.dev]

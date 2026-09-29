@@ -43,7 +43,7 @@ mod viewport;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use session::{Run, Session};
 
@@ -97,12 +97,12 @@ pub fn default_limits() -> Result<ResourceLimits, CoreError> {
 }
 
 /// One session: documents with their unsaved text, warm parse and geometry
-/// caches, and the limits every request runs under. The app keeps one for
-/// the whole process, so every window shares the caches.
+/// caches, and the limits every request runs under (a [`client::Client`],
+/// which holds what the web worker shares). The app keeps one for the
+/// whole process, so every window shares the caches.
 #[derive(uniffi::Object)]
 pub struct Core {
-    session: Session,
-    limits: Mutex<session::Limits>,
+    client: client::Client,
     test_hooks: bool,
     /// Analysed library files, shared by every window's language server.
     lsp_cache: Arc<lsp::Cache>,
@@ -111,37 +111,26 @@ pub struct Core {
 impl std::fmt::Debug for Core {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Core")
-            .field("session", &self.session)
+            .field("client", &self.client)
             .finish_non_exhaustive()
     }
 }
 
 impl Core {
-    /// A request on `path`: named by its absolute path, with its directory
-    /// as the working directory (so messages name the file as `neoscad`
-    /// run in that directory does), superseding older requests on the
-    /// same document (an editor's requests go stale with every edit), and
-    /// under the core's current limits.
-    fn run(&self, path: &str) -> Result<Run, CoreError> {
-        let doc = self.doc_path(path)?;
-        let mut run = Run::new(doc.to_string_lossy());
-        run.cwd = doc.parent().map(Path::to_path_buf);
-        run.supersede = true;
-        run.limits = Some(*self.limits.lock().unwrap_or_else(PoisonError::into_inner));
-        Ok(run)
+    fn session(&self) -> &Session {
+        &self.client.session
     }
 
-    /// `path` made absolute. A relative path would resolve against the
-    /// app's working directory (`/` for a launched app), which is never
-    /// what the caller meant.
+    /// A request on `path` ([`client::Client::run`]): named by its
+    /// absolute path, in its directory, superseding older requests on the
+    /// same document, under the core's current limits.
+    fn run(&self, path: &str) -> Result<Run, CoreError> {
+        self.client.run(path)
+    }
+
+    /// `path` made absolute ([`client::Client::doc_path`]).
     fn doc_path(&self, path: &str) -> Result<PathBuf, CoreError> {
-        let p = PathBuf::from(path);
-        if !p.is_absolute() {
-            return Err(CoreError::InvalidArgument {
-                message: format!("document paths must be absolute (got '{path}')"),
-            });
-        }
-        Ok(session::normal(&p))
+        self.client.doc_path(path)
     }
 }
 
@@ -153,10 +142,8 @@ impl Core {
     pub fn new(config: CoreConfig) -> Result<Arc<Core>, CoreError> {
         guarded(|| {
             let cfg = host::config(config.resource_dir.as_deref());
-            let limits = cfg.limits;
             Ok(Arc::new(Core {
-                session: Session::new(cfg),
-                limits: Mutex::new(limits),
+                client: client::Client::new(cfg),
                 test_hooks: config.test_hooks,
                 lsp_cache: Arc::new(lsp::Cache::new()),
             }))
@@ -169,55 +156,29 @@ impl Core {
     /// of its path sees (includes of it too); without, tracked but read
     /// from disk.
     pub fn open(&self, path: String, text: Option<String>) -> Result<DocInfo, CoreError> {
-        guarded(|| {
-            let doc = self.doc_path(&path)?;
-            Ok(self.session.open(&doc, text.map(String::into_bytes)).into())
-        })
+        guarded(|| self.client.open(&path, text))
     }
 
     /// Replace a document's whole text (opening it if needed). Requests
     /// still running on the old text are cancelled.
     pub fn update(&self, path: String, text: String) -> Result<DocInfo, CoreError> {
-        guarded(|| {
-            let doc = self.doc_path(&path)?;
-            Ok(self.session.update(&doc, text.into_bytes()).into())
-        })
+        guarded(|| self.client.update(&path, text))
     }
 
     /// Apply edits (UTF-8 byte offsets) to a document's current text.
     pub fn edit(&self, path: String, edits: Vec<TextEdit>) -> Result<DocInfo, CoreError> {
-        guarded(|| {
-            let doc = self.doc_path(&path)?;
-            let edits: Vec<session::TextEdit> = edits
-                .into_iter()
-                .map(|e| session::TextEdit {
-                    start: usize::try_from(e.start).unwrap_or(usize::MAX),
-                    end: usize::try_from(e.end).unwrap_or(usize::MAX),
-                    text: e.text,
-                })
-                .collect();
-            self.session
-                .edit(&doc, &edits)
-                .map(Into::into)
-                .map_err(|message| CoreError::InvalidArgument { message })
-        })
+        guarded(|| self.client.edit(&path, edits))
     }
 
     /// Forget a document: its buffer, its last products and any request
     /// running on it. Whether it was open.
     pub fn close(&self, path: String) -> Result<bool, CoreError> {
-        guarded(|| {
-            let doc = self.doc_path(&path)?;
-            Ok(self.session.close(&doc))
-        })
+        guarded(|| self.client.close(&path))
     }
 
     /// Stop every request running on a document. How many there were.
     pub fn cancel(&self, path: String) -> Result<u32, CoreError> {
-        guarded(|| {
-            let doc = self.doc_path(&path)?;
-            Ok(u32::try_from(self.session.cancel(&doc)).unwrap_or(u32::MAX))
-        })
+        guarded(|| self.client.cancel(&path))
     }
 
     // --- Limits -------------------------------------------------------------
@@ -225,43 +186,23 @@ impl Core {
     /// Replace the limits of every later request (running ones keep
     /// theirs).
     pub fn set_limits(&self, limits: ResourceLimits) -> Result<(), CoreError> {
-        guarded(|| {
-            let l = limits.to_session()?;
-            *self.limits.lock().unwrap_or_else(PoisonError::into_inner) = l;
-            Ok(())
-        })
+        guarded(|| self.client.set_limits(limits))
     }
 
     pub fn limits(&self) -> Result<ResourceLimits, CoreError> {
-        guarded(|| Ok((*self.limits.lock().unwrap_or_else(PoisonError::into_inner)).into()))
+        guarded(|| Ok(self.client.limits()))
     }
 
     // --- Operations ---------------------------------------------------------
 
     /// Parse and evaluate: diagnostics and `echo()` output.
     pub fn evaluate(&self, path: String) -> Result<Evaluation, CoreError> {
-        guarded(|| {
-            let run = self.run(&path)?;
-            let r = self.session.evaluate(&run, false)?;
-            Ok(Evaluation {
-                exit_code: r.exit_code,
-                aborted: r.aborted,
-                diagnostics: types::diagnostics(&r.log),
-                echo: r.log.echo(),
-                console: types::console(&r.log),
-                timings: r.timings.into(),
-            })
-        })
+        guarded(|| self.client.evaluate(&path))
     }
 
     /// Evaluate and build: geometry statistics and diagnostics.
     pub fn render(&self, path: String, mode: RenderMode) -> Result<RenderResult, CoreError> {
-        guarded(|| {
-            let run = self.run(&path)?;
-            let scheme = render::ColorScheme::cornfield();
-            let r = self.session.render(&run, mode.into(), &scheme)?;
-            Ok(render_result(&r, &scheme))
-        })
+        guarded(|| self.client.render(&path, mode))
     }
 
     /// A contact-sheet PNG of the model (`neoscad snapshot`).
@@ -281,7 +222,7 @@ impl Core {
             req.views = options.views;
             req.dims = options.dims;
             req.preview = options.preview;
-            let s = self.session.snapshot(&req).map_err(|e| match e {
+            let s = self.session().snapshot(&req).map_err(|e| match e {
                 session::snapshot::SnapshotError::Cancelled => CoreError::Cancelled,
                 session::snapshot::SnapshotError::Failed(message) => CoreError::Failed { message },
             })?;
@@ -313,42 +254,18 @@ impl Core {
                     message: format!("the output path must be absolute (got '{output}')"),
                 });
             }
-            let id = format.unwrap_or_else(|| {
-                target
-                    .extension()
-                    .map(|e| e.to_string_lossy().to_lowercase())
-                    .unwrap_or_default()
-            });
-            let fmt = session::export::Format::from_id(&id).ok_or_else(|| {
-                CoreError::InvalidArgument {
-                    message: format!(
-                        "unknown export format '{id}' (stl, binstl, off, obj, 3mf, wrl, pov, svg, dxf or pdf)"
-                    ),
-                }
-            })?;
-            let scheme = render::ColorScheme::cornfield();
-            let settings = export_settings(&run, scheme.geometry_scheme());
-            let req = session::ExportRequest {
-                run,
-                outputs: vec![(output.clone(), fmt)],
-                force: false,
-                scheme,
-                settings,
-            };
+            let fmt = client::export_format(format.as_deref(), &output)?;
             let mut sink = Files { bytes: 0 };
-            let r = self.session.export(&req, &mut sink)?;
-            Ok(ExportResult {
-                exit_code: r.exit_code,
-                format: fmt.id().to_string(),
-                bytes: sink.bytes,
-                geometry: r
-                    .geometry
-                    .as_ref()
-                    .map(|g| types::geometry_stats(g, &req.scheme.geometry_scheme())),
-                diagnostics: types::diagnostics(&r.log),
-                console: types::console(&r.log),
-                timings: r.timings.into(),
-            })
+            let mut r = self.client.export(
+                run,
+                &output,
+                fmt,
+                &client::ExportOptions::default(),
+                iso8601_now(),
+                &mut sink,
+            )?;
+            r.bytes = sink.bytes;
+            Ok(r)
         })
     }
 
@@ -370,44 +287,12 @@ impl Core {
 
 /// What `render` (and `render_into`) report about a finished render.
 fn render_result(r: &session::Rendered, scheme: &render::ColorScheme) -> RenderResult {
-    RenderResult {
-        exit_code: r.exit_code,
-        diagnostics: types::diagnostics(&r.log),
-        echo: r.log.echo(),
-        console: types::console(&r.log),
-        geometry: r
-            .geometry
-            .as_ref()
-            .map(|g| types::geometry_stats(g, &scheme.geometry_scheme())),
-        cache_entries: r.cache_entries as u64,
-        timings: r.timings.into(),
-    }
-}
-
-/// The encoder settings at OpenSCAD's defaults (no `-O` options): the
-/// command line's `encode_settings` with an empty option list.
-fn export_settings(run: &Run, scheme: geom::color::Scheme) -> session::export::Settings {
-    session::export::Settings {
-        scheme,
-        svg: io::svg::SvgStyle::default(),
-        pdf: io::pdf::PdfOptions::default(),
-        pdf_warnings: Vec::new(),
-        threemf: io::threemf::Options::default(),
-        threemf_warning: None,
-        title: Path::new(&run.input)
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        source_path: run.input.clone(),
-        creation_date: iso8601_now(),
-        pov_camera: None,
-        predictible_output: run.features.has(eval::Feature::PredictibleOutput),
-    }
+    client::render_result(r, scheme)
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` now, for the dates PDF and 3MF files record
 /// (Howard Hinnant's `civil_from_days`, as the command line computes it).
-fn iso8601_now() -> String {
+pub(crate) fn iso8601_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs()) as i64;

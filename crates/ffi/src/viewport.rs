@@ -439,7 +439,7 @@ impl Core {
             let run = self.run(&path)?;
             let generation = viewport.requests.fetch_add(1, Ordering::SeqCst) + 1;
             let scheme = viewport.lock().scheme().clone();
-            let r = self.session.render(&run, mode.into(), &scheme)?;
+            let r = self.session().render(&run, mode.into(), &scheme)?;
             let scene = match (&r.tree, &r.geometry) {
                 (Some(tree), _) => Some(render::preview::scene(
                     tree,

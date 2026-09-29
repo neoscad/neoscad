@@ -15,9 +15,10 @@ crate-type = ["staticlib", "lib"]
 
 [dependencies]
 assets = { package = "neoscad-assets", path = "../assets" }
+# The host-neutral glue (runs, console lines, customizer, check, measure,
+# export), shared with the web worker; its records cross as remote types.
+client = { package = "neoscad-client", path = "../client" }
 eval = { package = "neoscad-eval", path = "../eval" }
-geom = { package = "neoscad-geom", path = "../geom" }
-io = { package = "neoscad-io", path = "../io" }
 lang = { package = "neoscad-lang", path = "../lang" }
 lsp = { package = "neoscad-lsp", path = "../lsp" }
 render = { package = "neoscad-render", path = "../render" }

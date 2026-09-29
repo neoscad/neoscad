@@ -28,15 +28,20 @@
 //! document's own text (the main file's annotated top-level assignments),
 //! and its parameter sets are OpenSCAD's JSON files beside the model
 //! ([`Core::parameter_sets`], [`Core::save_parameter_set`]).
+//!
+//! The host-neutral half (the run's request, console positions, the
+//! customizer and parameter set files) is `crates/client`'s, shared with
+//! the web worker; its records are declared to UniFFI here as remote
+//! types. This file adds the app's half: the language server's hand-over,
+//! the viewport, the disk.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use lang::customizer::Parameters;
-use lang::customizer::params::{EnumValue, ParamKind};
-use lang::source::SourceFile;
+pub use client::{
+    ConsoleKind, ConsoleLine, DocumentRequest, Parameter, ParameterControl, ParameterGroup,
+    ParameterOption, ParameterOverride, ParameterValue, SourceRange,
+};
 
 use crate::{
     CameraState, Core, CoreError, LanguageServer, RenderMode, RenderResult, Viewport, guarded,
@@ -44,7 +49,7 @@ use crate::{
 
 /// A customizer value: what a control edits, and what the run passes as
 /// `name = value` after the text.
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[uniffi::remote(Enum)]
 pub enum ParameterValue {
     Bool { value: bool },
     Number { value: f64 },
@@ -53,14 +58,14 @@ pub enum ParameterValue {
 }
 
 /// One customizer value to run with.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct ParameterOverride {
     pub name: String,
     pub value: ParameterValue,
 }
 
 /// One entry of a dropdown: the label shown and the value it stands for.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct ParameterOption {
     pub label: String,
     pub value: ParameterValue,
@@ -68,7 +73,7 @@ pub struct ParameterOption {
 
 /// The control for a parameter, as OpenSCAD's customizer picks it
 /// (`ParameterWidget::createParameterWidget`).
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[uniffi::remote(Enum)]
 pub enum ParameterControl {
     Checkbox,
     /// A number with both a minimum and a maximum.
@@ -98,7 +103,7 @@ pub enum ParameterControl {
 }
 
 /// One customizer parameter.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct Parameter {
     pub name: String,
     pub description: String,
@@ -111,14 +116,14 @@ pub struct Parameter {
 /// Parameters of the "Global" group appear in every group, and those of
 /// "Hidden" in none, as in OpenSCAD's customizer
 /// (`ParameterWidget::getParameterGroups`).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct ParameterGroup {
     pub name: String,
     pub parameters: Vec<Parameter>,
 }
 
 /// What a document run does.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct DocumentRequest {
     pub mode: RenderMode,
     /// Customizer values, appended to the text as `-D` assignments are.
@@ -137,7 +142,7 @@ pub struct DocumentRequest {
 }
 
 /// What a console line is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[uniffi::remote(Enum)]
 pub enum ConsoleKind {
     Error,
     Warning,
@@ -150,7 +155,7 @@ pub enum ConsoleKind {
 
 /// A span of a file in editor positions: 0-based lines and UTF-16
 /// columns, the end exclusive.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct SourceRange {
     pub path: String,
     pub start_line: u32,
@@ -160,7 +165,7 @@ pub struct SourceRange {
 }
 
 /// One console line: the text OpenSCAD prints, and where it points.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct ConsoleLine {
     pub kind: ConsoleKind,
     pub text: String,
@@ -198,325 +203,6 @@ pub trait DocumentListener: Send + Sync {
     fn language(&self, messages: Vec<String>);
 }
 
-/// A value as OpenSCAD source (a literal).
-fn literal(v: &ParameterValue) -> Option<String> {
-    let number = |x: f64| x.is_finite().then(|| format!("{x}"));
-    Some(match v {
-        ParameterValue::Bool { value } => value.to_string(),
-        ParameterValue::Number { value } => number(*value)?,
-        ParameterValue::Text { value } => {
-            let mut s = String::with_capacity(value.len() + 2);
-            s.push('"');
-            for c in value.chars() {
-                match c {
-                    '"' => s.push_str("\\\""),
-                    '\\' => s.push_str("\\\\"),
-                    '\n' => s.push_str("\\n"),
-                    '\r' => s.push_str("\\r"),
-                    '\t' => s.push_str("\\t"),
-                    c => s.push(c),
-                }
-            }
-            s.push('"');
-            s
-        }
-        ParameterValue::Vector { value } => {
-            let items: Option<Vec<String>> = value.iter().map(|&x| number(x)).collect();
-            format!("[{}]", items?.join(", "))
-        }
-    })
-}
-
-/// A parameter name as an identifier the parser takes back: anything
-/// else would put arbitrary text after the model.
-fn identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c == '$' || c == '_' || c.is_alphabetic())
-        && chars.all(|c| c == '_' || c.is_alphanumeric())
-}
-
-/// The `-D` assignment of an override.
-pub(crate) fn define(o: &ParameterOverride) -> Option<String> {
-    identifier(&o.name).then_some(())?;
-    Some(format!("{}={}", o.name, literal(&o.value)?))
-}
-
-fn enum_value(v: &EnumValue) -> ParameterValue {
-    match v {
-        EnumValue::Number(x) => ParameterValue::Number { value: *x },
-        EnumValue::String(s) => ParameterValue::Text {
-            value: String::from_utf8_lossy(s).into_owned(),
-        },
-    }
-}
-
-fn parameter(p: &lang::customizer::params::Parameter) -> Parameter {
-    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-    let (control, default_value) = match &p.kind {
-        ParamKind::Bool { default, .. } => (
-            ParameterControl::Checkbox,
-            ParameterValue::Bool { value: *default },
-        ),
-        ParamKind::String {
-            default, max_len, ..
-        } => (
-            ParameterControl::Text {
-                max_length: max_len.map(|m| u32::try_from(m).unwrap_or(u32::MAX)),
-            },
-            ParameterValue::Text {
-                value: text(default),
-            },
-        ),
-        ParamKind::Number {
-            default,
-            min,
-            max,
-            step,
-            ..
-        } => (
-            match (min, max) {
-                (Some(min), Some(max)) => ParameterControl::Slider {
-                    min: *min,
-                    max: *max,
-                    step: *step,
-                },
-                _ => ParameterControl::SpinBox {
-                    min: *min,
-                    max: *max,
-                    step: *step,
-                },
-            },
-            ParameterValue::Number { value: *default },
-        ),
-        ParamKind::Vector {
-            default,
-            min,
-            max,
-            step,
-            ..
-        } => (
-            ParameterControl::Vector {
-                min: *min,
-                max: *max,
-                step: *step,
-            },
-            ParameterValue::Vector {
-                value: default.clone(),
-            },
-        ),
-        ParamKind::Enum { default, items, .. } => (
-            ParameterControl::Dropdown {
-                options: items
-                    .iter()
-                    .map(|i| ParameterOption {
-                        label: i.key.clone(),
-                        value: enum_value(&i.value),
-                    })
-                    .collect(),
-            },
-            items
-                .get(*default)
-                .map(|i| enum_value(&i.value))
-                .unwrap_or(ParameterValue::Number { value: 0.0 }),
-        ),
-    };
-    Parameter {
-        name: p.name.clone(),
-        description: p.description.clone(),
-        control,
-        default_value,
-    }
-}
-
-/// A parameter's current value, as a set file stores it: a string, as
-/// Boost's property tree writes every value (`ParameterSets::writeFile`):
-/// numbers with 16 significant digits, vectors as OpenSCAD's stream
-/// prints them (6), text as it is.
-fn set_value(p: &lang::customizer::params::Parameter) -> String {
-    let g16 = |x: f64| g(x, 16);
-    let g6 = |x: f64| g(x, 6);
-    match &p.kind {
-        ParamKind::Bool { value, .. } => value.to_string(),
-        ParamKind::String { value, .. } => String::from_utf8_lossy(value).into_owned(),
-        ParamKind::Number { value, .. } => g16(*value),
-        ParamKind::Vector { value, .. } => format!(
-            "[{}]",
-            value.iter().map(|&x| g6(x)).collect::<Vec<_>>().join(", ")
-        ),
-        ParamKind::Enum { index, items, .. } => match items.get(*index).map(|i| &i.value) {
-            Some(EnumValue::Number(x)) => g16(*x),
-            Some(EnumValue::String(s)) => String::from_utf8_lossy(s).into_owned(),
-            None => String::new(),
-        },
-    }
-}
-
-/// A parameter's value as the customizer edits it.
-fn current(p: &lang::customizer::params::Parameter) -> ParameterValue {
-    match &p.kind {
-        ParamKind::Bool { value, .. } => ParameterValue::Bool { value: *value },
-        ParamKind::String { value, .. } => ParameterValue::Text {
-            value: String::from_utf8_lossy(value).into_owned(),
-        },
-        ParamKind::Number { value, .. } => ParameterValue::Number { value: *value },
-        ParamKind::Vector { value, .. } => ParameterValue::Vector {
-            value: value.clone(),
-        },
-        ParamKind::Enum { index, items, .. } => items
-            .get(*index)
-            .map(|i| enum_value(&i.value))
-            .unwrap_or(ParameterValue::Number { value: 0.0 }),
-    }
-}
-
-/// C++ `ostream << double` at `precision` significant digits (`%g`):
-/// how Boost's property tree (16 digits) and OpenSCAD's vector export (the
-/// stream's default 6) write numbers into parameter set files.
-fn g(v: f64, precision: usize) -> String {
-    if !v.is_finite() {
-        return if v.is_nan() {
-            "nan".into()
-        } else if v < 0.0 {
-            "-inf".into()
-        } else {
-            "inf".into()
-        };
-    }
-    if v == 0.0 {
-        return if v.is_sign_negative() { "-0" } else { "0" }.into();
-    }
-    let p = precision.max(1);
-    let e = format!("{v:.*e}", p - 1);
-    let (mant, exp) = e.split_once('e').unwrap_or((&e, "0"));
-    let x: i32 = exp.parse().unwrap_or(0);
-    let trim = |s: &str| -> String {
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            s.to_string()
-        }
-    };
-    if x >= -4 && x < p as i32 {
-        let decimals = (p as i32 - 1 - x).max(0) as usize;
-        trim(&format!("{v:.decimals$}"))
-    } else {
-        let sign = if x < 0 { '-' } else { '+' };
-        format!("{}e{sign}{:02}", trim(mant), x.abs())
-    }
-}
-
-/// JSON string contents with the escapes JSON needs.
-fn json_string(s: &str) -> String {
-    serde_json::Value::String(s.to_string()).to_string()
-}
-
-impl Core {
-    /// A document's text as the session reads it now: its buffer, or the
-    /// file.
-    fn text_now(&self, doc: &Path) -> Result<Arc<[u8]>, CoreError> {
-        if let Some(t) = self.session.buffer_text(doc) {
-            return Ok(t);
-        }
-        self.session
-            .fs()
-            .read(doc)
-            .map(Arc::from)
-            .map_err(|e| CoreError::Failed {
-                message: format!("cannot read '{}': {e}", doc.display()),
-            })
-    }
-
-    /// The customizer parameters of `doc`'s text, with the values
-    /// `overrides` give (validated and clamped as a parameter set's are).
-    fn customizer(
-        &self,
-        doc: &Path,
-        overrides: &[(String, String)],
-    ) -> Result<Parameters, CoreError> {
-        let text = self.text_now(doc)?;
-        let program = lang::parse_file_annotated(doc.to_path_buf(), text.to_vec());
-        let mut params = Parameters::from_ast(&program.ast, &mut Vec::new());
-        if !overrides.is_empty() {
-            let set = lang::customizer::ParameterSet {
-                name: String::new(),
-                values: overrides
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            lang::customizer::json::JsonNode {
-                                data: v.clone(),
-                                children: Vec::new(),
-                            },
-                        )
-                    })
-                    .collect(),
-            };
-            params.import(&set);
-        }
-        Ok(params)
-    }
-}
-
-/// An override as a parameter set file's string.
-fn override_string(v: &ParameterValue) -> String {
-    match v {
-        ParameterValue::Bool { value } => value.to_string(),
-        ParameterValue::Number { value } => g(*value, 16),
-        ParameterValue::Text { value } => value.clone(),
-        ParameterValue::Vector { value } => format!(
-            "[{}]",
-            value
-                .iter()
-                .map(|&x| g(x, 16))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
-}
-
-/// Editor positions of the session's located lines, reading each file
-/// once: the document from the text the run read, others through the
-/// session.
-struct Positions<'a> {
-    core: &'a Core,
-    doc: PathBuf,
-    text: Arc<[u8]>,
-    files: HashMap<PathBuf, Option<SourceFile>>,
-}
-
-impl Positions<'_> {
-    fn range(&mut self, l: &eval::Location) -> Option<SourceRange> {
-        let path = session::normal(&l.file);
-        let src = self
-            .files
-            .entry(path.clone())
-            .or_insert_with(|| {
-                let text = if path == self.doc {
-                    self.text.to_vec()
-                } else {
-                    self.core.session.fs().read(&path).ok()?
-                };
-                Some(SourceFile::new(path.clone(), text))
-            })
-            .as_ref()?;
-        let at = |(line, col): (u32, u32)| {
-            src.utf16_position(src.line_start(line) + col.saturating_sub(1))
-        };
-        let (start_line, start_character) = at(l.start);
-        let (end_line, end_character) = at(l.end);
-        Some(SourceRange {
-            path: path.to_string_lossy().into_owned(),
-            start_line,
-            start_character,
-            end_line,
-            end_character,
-        })
-    }
-}
-
 #[uniffi::export]
 impl Core {
     /// Run a document once for everything its window shows (see the
@@ -533,15 +219,10 @@ impl Core {
         listener: Option<Arc<dyn DocumentListener>>,
     ) -> Result<DocumentResult, CoreError> {
         guarded(|| {
-            let doc = self.doc_path(&path)?;
-            let mut run = self.run(&path)?;
-            // The text the run reads, fixed now: the markers are published
-            // for exactly this text, whatever edits arrive meanwhile.
-            let text = self.text_now(&doc)?;
-            run.text = Some(text.clone());
-            run.defines = request.overrides.iter().filter_map(define).collect();
-            run.parts = request.parts;
-            run.features = eval::Features::from_names(&request.enable);
+            // The text the run reads is fixed now: the markers are
+            // published for exactly this text, whatever edits arrive
+            // meanwhile.
+            let (mut run, doc, text) = self.client.document_run(&path, &request)?;
             let (scheme, generation) = match &viewport {
                 Some(v) => {
                     let generation = v.requests.fetch_add(1, Ordering::SeqCst) + 1;
@@ -575,9 +256,9 @@ impl Core {
                 let (doc, text) = (doc.clone(), text.clone());
                 run.on_evaluated = Some(Arc::new(move |log: &session::Log| {
                     let diags = log.diagnostics_json();
-                    let out = ls
-                        .server
-                        .supply(&ls.core.session, &doc, text.clone(), diags.clone());
+                    let out =
+                        ls.server
+                            .supply(ls.core.session(), &doc, text.clone(), diags.clone());
                     *published
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(diags);
@@ -586,7 +267,7 @@ impl Core {
                     }
                 }));
             }
-            let r = self.session.render(&run, request.mode.into(), &scheme)?;
+            let r = self.session().render(&run, request.mode.into(), &scheme)?;
             let language = match &language {
                 Some(l) => {
                     let diags = r.log.diagnostics_json();
@@ -597,7 +278,7 @@ impl Core {
                     if early.as_ref() == Some(&diags) {
                         Vec::new()
                     } else {
-                        l.server.supply(&self.session, &doc, text.clone(), diags)
+                        l.server.supply(self.session(), &doc, text.clone(), diags)
                     }
                 }
                 None => Vec::new(),
@@ -625,37 +306,14 @@ impl Core {
                     shown = v.lock().set_model(Arc::new(model), generation);
                 }
             }
-            let mut positions = Positions {
-                core: self,
-                doc: doc.clone(),
-                text,
-                files: HashMap::new(),
-            };
-            let console = r
-                .log
-                .lines
-                .iter()
-                .map(|l| ConsoleLine {
-                    kind: match l.severity {
-                        Some(lang::diag::Severity::Error) => ConsoleKind::Error,
-                        Some(lang::diag::Severity::Warning) => ConsoleKind::Warning,
-                        Some(lang::diag::Severity::Deprecated) => ConsoleKind::Deprecated,
-                        Some(lang::diag::Severity::Echo) => ConsoleKind::Echo,
-                        Some(lang::diag::Severity::Trace) => ConsoleKind::Trace,
-                        None => ConsoleKind::Info,
-                    },
-                    text: l.text.clone(),
-                    location: l.location.as_ref().and_then(|at| positions.range(at)),
-                })
-                .collect();
-            // Only files another program can change: not the document
-            // (the app writes it itself, and a save must not re-run it),
-            // not other open documents (their buffers are what runs read),
-            // and not what exists only in memory (the bundled MCAD).
-            let files = r
-                .files
-                .iter()
-                .filter(|f| **f != doc && self.session.buffer_text(f).is_none() && f.is_file())
+            let console = self.client.console_lines(&r.log, &doc, text);
+            // Only files another program can change (see
+            // `Client::run_files`), and only those on disk: not what
+            // exists only in memory (the bundled MCAD).
+            let files = self
+                .client
+                .run_files(&r, &doc)
+                .filter(|f| f.is_file())
                 .map(|f| f.to_string_lossy().into_owned())
                 .collect();
             Ok(DocumentResult {
@@ -672,53 +330,14 @@ impl Core {
     /// The customizer's groups for a document's current text (see
     /// [`ParameterGroup`]).
     pub fn parameters(&self, path: String) -> Result<Vec<ParameterGroup>, CoreError> {
-        guarded(|| {
-            let doc = self.doc_path(&path)?;
-            let params = self.customizer(&doc, &[])?;
-            let mut groups: Vec<ParameterGroup> = Vec::new();
-            let mut global = Vec::new();
-            for p in &params.params {
-                match p.group.as_str() {
-                    "Hidden" => {}
-                    "Global" => global.push(parameter(p)),
-                    g => match groups.iter_mut().find(|x| x.name == g) {
-                        Some(x) => x.parameters.push(parameter(p)),
-                        None => groups.push(ParameterGroup {
-                            name: g.to_string(),
-                            parameters: vec![parameter(p)],
-                        }),
-                    },
-                }
-            }
-            if groups.is_empty() {
-                if !global.is_empty() {
-                    groups.push(ParameterGroup {
-                        name: "Global".into(),
-                        parameters: global,
-                    });
-                }
-            } else {
-                for g in &mut groups {
-                    g.parameters.extend(global.iter().cloned());
-                }
-            }
-            Ok(groups)
-        })
+        guarded(|| self.client.parameters(&path))
     }
 
     /// The names of the parameter sets in `json_path` (OpenSCAD's file
     /// beside the model, `model.json`), in the file's order. No file is no
     /// sets.
     pub fn parameter_sets(&self, json_path: String) -> Result<Vec<String>, CoreError> {
-        guarded(|| {
-            let p = self.doc_path(&json_path)?;
-            if !self.session.fs().exists(&p) {
-                return Ok(Vec::new());
-            }
-            let sets = lang::customizer::read_parameter_sets(&*self.session.fs(), &p)
-                .map_err(|d| CoreError::Failed { message: d.message })?;
-            Ok(sets.into_iter().map(|s| s.name).collect())
-        })
+        guarded(|| self.client.parameter_sets(&json_path))
     }
 
     /// The document's parameters with the set `name` of `json_path`
@@ -732,28 +351,7 @@ impl Core {
         json_path: String,
         name: String,
     ) -> Result<Vec<ParameterOverride>, CoreError> {
-        guarded(|| {
-            let doc = self.doc_path(&path)?;
-            let p = self.doc_path(&json_path)?;
-            let sets = lang::customizer::read_parameter_sets(&*self.session.fs(), &p)
-                .map_err(|d| CoreError::Failed { message: d.message })?;
-            let set =
-                sets.iter()
-                    .find(|s| s.name == name)
-                    .ok_or_else(|| CoreError::InvalidArgument {
-                        message: format!("no parameter set '{name}' in '{json_path}'"),
-                    })?;
-            let mut params = self.customizer(&doc, &[])?;
-            params.import(set);
-            Ok(params
-                .params
-                .iter()
-                .map(|p| ParameterOverride {
-                    name: p.name.clone(),
-                    value: current(p),
-                })
-                .collect())
-        })
+        guarded(|| self.client.apply_parameter_set(&path, &json_path, &name))
     }
 
     /// Save the document's parameters, with `values` over their defaults,
@@ -769,52 +367,14 @@ impl Core {
         values: Vec<ParameterOverride>,
     ) -> Result<(), CoreError> {
         guarded(|| {
-            let doc = self.doc_path(&path)?;
             let target = self.doc_path(&json_path)?;
-            let overrides: Vec<(String, String)> = values
-                .iter()
-                .map(|o| (o.name.clone(), override_string(&o.value)))
-                .collect();
-            // Unnamed parameters keep their defaults: import resets them.
-            let params = self.customizer(&doc, &overrides)?;
-            let mine: Vec<(String, String)> = params
-                .params
-                .iter()
-                .map(|p| (p.name.clone(), set_value(p)))
-                .collect();
-            let mut sets: Vec<(String, Vec<(String, String)>)> = if target.is_file() {
-                lang::customizer::read_parameter_sets(&*self.session.fs(), &target)
-                    .map_err(|d| CoreError::Failed { message: d.message })?
-                    .into_iter()
-                    .map(|s| {
-                        let values = s.values.into_iter().map(|(k, v)| (k, v.data)).collect();
-                        (s.name, values)
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            match sets.iter_mut().find(|(n, _)| *n == name) {
-                Some(s) => s.1 = mine,
-                None => sets.push((name, mine)),
-            }
-            // Boost's `write_json` layout: four spaces, `"key": "value"`.
-            let mut out =
-                String::from("{\n    \"fileFormatVersion\": \"1\",\n    \"parameterSets\": {\n");
-            for (i, (set, values)) in sets.iter().enumerate() {
-                out.push_str(&format!("        {}: {{\n", json_string(set)));
-                for (j, (k, v)) in values.iter().enumerate() {
-                    let comma = if j + 1 < values.len() { "," } else { "" };
-                    out.push_str(&format!(
-                        "            {}: {}{comma}\n",
-                        json_string(k),
-                        json_string(v)
-                    ));
-                }
-                let comma = if i + 1 < sets.len() { "," } else { "" };
-                out.push_str(&format!("        }}{comma}\n"));
-            }
-            out.push_str("    }\n}\n");
+            let out = self.client.parameter_set_file(
+                &path,
+                &json_path,
+                &name,
+                &values,
+                target.is_file(),
+            )?;
             std::fs::write(&target, out).map_err(|e| CoreError::Failed {
                 message: format!(
                     "Cannot open Parameter Set '{}' for writing: {e}",
@@ -827,10 +387,7 @@ impl Core {
     /// How many requests are running on a document (the app's tests check
     /// that closing a window stops its work).
     pub fn running(&self, path: String) -> Result<u32, CoreError> {
-        guarded(|| {
-            let doc = self.doc_path(&path)?;
-            Ok(u32::try_from(self.session.running(&doc)).unwrap_or(u32::MAX))
-        })
+        guarded(|| self.client.running(&path))
     }
 }
 

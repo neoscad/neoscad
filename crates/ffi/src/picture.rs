@@ -76,7 +76,7 @@ impl Core {
             }
             let run = self.run(&path)?;
             let scheme = render::ColorScheme::cornfield();
-            let r = self.session.render(&run, mode.into(), &scheme)?;
+            let r = self.session().render(&run, mode.into(), &scheme)?;
             let geometry = r
                 .geometry
                 .as_ref()

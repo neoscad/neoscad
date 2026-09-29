@@ -3,6 +3,8 @@
 //! requests do not cancel the document's own runs.
 
 use super::*;
+use serde_json::Value;
+
 use crate::{CoreConfig, DocumentRequest, RenderMode};
 
 fn core(text: &str) -> (Arc<Core>, String) {

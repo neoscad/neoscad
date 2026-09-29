@@ -1,0 +1,50 @@
+[package]
+name = "neoscad-web"
+description = "The browser demo's worker core: one session, the language server and an in-memory file system behind the web worker protocol (docs/web-protocol.md), built for wasm32 with wasm-bindgen by scripts/web/build-core.sh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "neoscad_web"
+# `cdylib` is the module the worker loads; `rlib` lets the native tests
+# drive the same protocol handlers.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+assets = { package = "neoscad-assets", path = "../assets" }
+client = { package = "neoscad-client", path = "../client" }
+eval = { package = "neoscad-eval", path = "../eval" }
+lang = { package = "neoscad-lang", path = "../lang" }
+lsp = { package = "neoscad-lsp", path = "../lsp" }
+# The CPU side only: the worker builds scenes and packs them; the page's
+# viewer (crates/web-view) owns the GPU.
+render = { package = "neoscad-render", path = "../render", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+session = { package = "neoscad-session", path = "../session", default-features = false }
+text = { package = "neoscad-text", path = "../text" }
+
+# The bindings exist only in the wasm32 build; the native build (tests)
+# drives `Worker` directly. Versions as in Cargo.lock (wgpu's WebGPU
+# backend already uses them), which pins the wasm-bindgen CLI that
+# scripts/web/build-core.sh installs.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.106"
+wasm-bindgen = "=0.2.129"
+
+# The workspace lints, except that `unsafe_code` is `deny` rather than
+# `forbid`: `#[wasm_bindgen]` expands to `#[no_mangle]` exports and unsafe
+# blocks inside our crate, which `forbid` would reject with no way to
+# allow them in `src/wasm.rs` alone. The crate has no unsafe code of its
+# own.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
