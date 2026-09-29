@@ -53,8 +53,11 @@ The workspace is every directory under `crates/` (`Cargo.toml`,
   generator pinned to `ffi`'s UniFFI, run by
   `scripts/apple/build-core.sh`).
 
-Planned, not yet a crate: a wasm-bindgen package for the web app (phase
-9).
+The web demo (phase 9) adds `client` (host-neutral document, check,
+measure and export glue shared by `ffi` and `web`), `web` (the worker
+core, wasm-bindgen) and `web-view` (the browser viewer, wasm-bindgen);
+its front end is `web/` (`docs/web-demo-plan.md`,
+`docs/web-protocol.md`).
 
 Rule: no rendering or app logic lives in a UI layer. The renderer is Rust;
 the app core API is the `session` API, which `neoscad serve` exposes as
@@ -178,8 +181,10 @@ request, `ffi`'s `guarded` per call) and keeps its session; see "Panics".
   solids in the core for sections, distances and picking; findings,
   section outlines and picked points are drawn over the model as the
   viewport's annotations.
-- **Web** (phase 9, deferred): the same core compiled to WASM and run in
-  a worker, the same wgpu renderer on WebGPU, and CodeMirror 6.
+- **Web** (phase 9): the same core compiled to WASM and run in a module
+  worker (`crates/web`), the same wgpu renderer on WebGPU in the page
+  (`crates/web-view`, with a lazily loaded WebGL2 build), and the app's
+  CodeMirror 6 editor (`web/`).
 - **Project definition:** XcodeGen `project.yml`; the generated `.xcodeproj`
   is a build output, never hand-edited. Xcode's JSON format (`.xcproj`) only
   becomes the default in Xcode 27.2 (beta), and XcodeGen can't emit it yet.
@@ -414,9 +419,14 @@ ffmpeg.
    place from H4 (the app runs under `Limits::AGENT`). 8h: Quick Look extensions. 8i:
    panels, export and App Intents. 8j: release plumbing
    (`docs/release.md`; the Developer ID path has not run yet).
-9. **WASM web app** (deferred by the owner, 2026-09-26). The library crates
-   stay WASM-compatible, checked by `scripts/wasm-check.sh`, so it can be
-   picked up later.
+9. **WASM web app** (the demo works end to end, 2026-09-29; plan in
+   `docs/web-demo-plan.md`). The core in a worker (`crates/web`, protocol
+   in `docs/web-protocol.md`), the WebGPU viewer with a lazy WebGL2
+   fallback (`crates/web-view`), and the front end (`web/`), bundled by
+   `scripts/web/build.sh` and synced into the website's `/try/`. Tested
+   by node unit tests and Playwright (Chromium) against the real engine;
+   open items in `docs/followups.md` ("Web demo"). The library crates
+   stay WASM-compatible, checked by `scripts/wasm-check.sh`.
 
 **Performance** (after phase 8, `docs/audits/performance.md`): its
 opportunities O1–O10 are done, O11 and O12 are not (status at the top of

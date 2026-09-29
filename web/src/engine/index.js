@@ -10,7 +10,6 @@
 
 import { EngineClient } from "./client.js";
 import { LIB_ROOT, usesLibrary } from "./protocol.js";
-import { untar } from "./tar.js";
 
 export function workerURL(engine, base = import.meta.url) {
   return new URL(engine === "wasm" ? "./core/worker.js" : "./mock-worker.js", base);
@@ -20,16 +19,17 @@ export function createEngine(build, base = import.meta.url) {
   const url = workerURL(build.engine, base);
   return new EngineClient({
     spawn: () => new Worker(url, { type: "module", name: "neoscad-engine" }),
-    // The plan's worker limits: Limits::AGENT with a 1 GiB memory cap.
-    initOptions: { limits: "agent", memoryBytes: 1 << 30 },
+    // One seed per page load, kept across respawns: unseeded rands()
+    // differ between visits, as between app launches, but a respawn does
+    // not change the model on screen.
+    seed: Date.now() >>> 0,
   });
 }
 
 /// Libraries fetched on first use rather than shipped in the core: each
-/// is a gzipped tar beside the bundle whose paths start with its name.
+/// is a gzipped tar beside the bundle whose paths start with its name,
+/// unpacked by the worker under the library directory.
 export const LAZY_LIBRARIES = [{ name: "BOSL2", archive: "bosl2.tar.gz" }];
-
-const TEXT = /\.(scad|txt|md|json)$|(^|\/)LICENSE$/;
 
 /// Fetch and add the lazy libraries `text` includes that the engine does
 /// not have yet. `onProgress(name)` is told before each fetch. Resolves to
@@ -37,26 +37,21 @@ const TEXT = /\.(scad|txt|md|json)$|(^|\/)LICENSE$/;
 export async function ensureLibraries(engine, text, { base = import.meta.url, onProgress = () => {} } = {}) {
   const added = [];
   for (const lib of LAZY_LIBRARIES) {
-    if (!usesLibrary(text, lib.name)) continue;
-    if (engine.hasFile(`${LIB_ROOT}/${lib.name}/.loaded`)) continue;
+    if (!usesLibrary(text, lib.name) || engine.hasLibrary(lib.name)) continue;
     onProgress(lib.name);
     const res = await fetch(new URL(`./${lib.archive}`, base));
     if (!res.ok) throw new Error(`${lib.archive}: HTTP ${res.status}`);
-    const gz = res.body.pipeThrough(new DecompressionStream("gzip"));
-    const data = new Uint8Array(await new Response(gz).arrayBuffer());
-    const dec = new TextDecoder();
-    const files = untar(data)
-      .filter((f) => f.path.startsWith(`${lib.name}/`))
-      .map((f) =>
-        TEXT.test(f.path)
-          ? { path: `${LIB_ROOT}/${f.path}`, text: dec.decode(f.bytes) }
-          : // Copied out of the archive's buffer: posting a view would
-            // clone the whole archive once per file.
-            { path: `${LIB_ROOT}/${f.path}`, bytes: f.bytes.slice().buffer },
-      );
-    files.push({ path: `${LIB_ROOT}/${lib.name}/.loaded`, text: "" });
-    await engine.addFiles(files);
+    // Gunzipped here (the worker takes a plain ustar archive); a server
+    // that already decoded it (Content-Encoding) hands over the tar.
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const tar = bytes[0] === 0x1f && bytes[1] === 0x8b ? await gunzip(bytes) : bytes.buffer;
+    await engine.addFiles({ tar, root: LIB_ROOT }, lib.name);
     added.push(lib.name);
   }
   return added;
+}
+
+async function gunzip(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Response(stream).arrayBuffer();
 }

@@ -1,14 +1,13 @@
-// Canned geometry for the mock engine: a packed scene and the exports made
-// from it. The packed scene's layout is the draft the front end assumes
-// from render::packed (builder B), to reconcile when that lands:
+// Canned geometry for the mock engine: boxes, packed as the worker packs
+// its scenes (render::packed; docs/web-protocol.md, "PackedScene"), and
+// the exports made from them.
 //
-//   {version: 0, bbox: {min: [x,y,z], max: [x,y,z]},
-//    meshes: [{positions: Float32Array (xyz per vertex),
-//              normals: Float32Array (xyz per vertex),
-//              indices: Uint32Array (three per triangle),
-//              color: [r, g, b, a] in 0..1, or null for the scheme's}]}
+// The mock keeps its models as meshes of boxes ({positions, normals,
+// indices, color}); `packScene` writes them in the wire's form, so the
+// viewer and the tests see exactly what the real worker sends:
 //
-// Every buffer is transferable (`sceneTransfer`).
+//   {faces: ArrayBuffer (44 bytes a vertex), edges: ArrayBuffer (24 bytes a
+//    segment), meta: JSON text {draws, image_csg, bbox, edge_color}}
 
 /// A box from `min` to `max` with flat normals (24 vertices, 12 triangles).
 export function boxMesh(min, max, color = null) {
@@ -36,9 +35,9 @@ export function boxMesh(min, max, color = null) {
   return { positions, normals, indices, color };
 }
 
-/// The mock's scene: a box whose size follows the text's length, so an
+/// The mock's model: a box whose size follows the text's length, so an
 /// edit visibly changes the view, and a second one per `part(` found.
-export function mockScene(text, mode) {
+export function mockModel(text, mode) {
   const s = 10 + Math.min(20, text.length / 200);
   const meshes = [boxMesh([-s, -s, 0], [s, s, s], mode === "preview" ? [0.98, 0.84, 0.17, 1] : null)];
   const parts = (text.match(/\bpart\s*\(/g) ?? []).length;
@@ -47,20 +46,51 @@ export function mockScene(text, mode) {
     meshes.push(boxMesh([x, -5, 0], [x + 10, 5, 6], [0.42, 0.36, 0.95, 1]));
   }
   const maxX = parts ? s + 4 + parts * 12 - 2 : s;
-  return { version: 0, bbox: { min: [-s, -s, 0], max: [maxX, s, s] }, meshes };
+  return { bbox: { min: [-s, -s, 0], max: [maxX, s, s] }, meshes };
 }
 
-export function sceneTransfer(scene) {
-  const out = [];
-  for (const m of scene?.meshes ?? []) {
-    for (const b of [m.positions, m.normals, m.indices]) if (b) out.push(b.buffer);
+/// Bytes of one face vertex and one edge segment (render::packed's
+/// FACE_VERTEX_SIZE and EDGE_SEGMENT_SIZE).
+export const FACE_VERTEX_SIZE = 44;
+export const EDGE_SEGMENT_SIZE = 24;
+
+/// A model as the wire's packed scene: every triangle's three vertices
+/// (position, normal, colour, barycentric bytes), one opaque draw over all
+/// of them, no 2D edges. Uncoloured meshes take Cornfield's face colour,
+/// as the worker bakes the scheme in.
+export function packScene(model) {
+  const tris = model.meshes.reduce((n, m) => n + m.indices.length / 3, 0);
+  const faces = new ArrayBuffer(tris * 3 * FACE_VERTEX_SIZE);
+  const view = new DataView(faces);
+  let at = 0;
+  for (const m of model.meshes) {
+    const color = m.color ?? [0.976, 0.843, 0.173, 1];
+    for (let t = 0; t < m.indices.length; t += 3) {
+      for (let k = 0; k < 3; k++) {
+        const i = m.indices[t + k] * 3;
+        const floats = [
+          m.positions[i], m.positions[i + 1], m.positions[i + 2],
+          m.normals[i], m.normals[i + 1], m.normals[i + 2],
+          ...color,
+        ];
+        floats.forEach((f, j) => view.setFloat32(at + j * 4, f, true));
+        view.setUint8(at + 40 + k, 1);
+        at += FACE_VERTEX_SIZE;
+      }
+    }
   }
-  return out;
+  const meta = {
+    draws: [{ first: 0, count: tris * 3, state: { cull: "None", depth: "Less", color_write: true, bias: false } }],
+    image_csg: [],
+    bbox: [model.bbox.min, model.bbox.max],
+    edge_color: [1, 0, 0, 1],
+  };
+  return { faces, edges: new ArrayBuffer(0), meta: JSON.stringify(meta) };
 }
 
-function triangles(scene) {
+function triangles(model) {
   const out = [];
-  for (const m of scene.meshes) {
+  for (const m of model.meshes) {
     for (let t = 0; t < m.indices.length; t += 3) {
       const tri = [];
       for (let k = 0; k < 3; k++) {

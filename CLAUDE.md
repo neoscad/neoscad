@@ -1,8 +1,8 @@
 # NeoSCAD
 
 A ground-up reimplementation of OpenSCAD (language, features, test suite)
-on a modern stack. macOS client first. The web app is deferred (phase 9), but
-the library crates stay WASM-clean.
+on a modern stack. macOS client first; a WebAssembly demo (`web/`, served at neoscad.org/try)
+keeps the library crates WASM-clean.
 Humans and AI coding agents are both first-class users. See
 `docs/architecture.md` for the stack, validation and build order.
 
@@ -43,6 +43,11 @@ nightly with `--backend=cgal` and `--backend=manifold`.
     ./target/release/conformance bosl2-corpus [--check]  # BOSL2 doc examples + tests -> .reference/BOSL2/{examples_x,tests_x}
     ./target/release/conformance video               # progress video from progress/
     scripts/apple/release.sh [--no-smoke]            # DMG + CLI tarball in dist/ (docs/release.md)
+    scripts/web/build-core.sh                         # wasm engine core -> dist/web-core
+    scripts/web/build-view.sh --no-webgl --out dist/web-view/webgpu   # viewer (and without --no-webgl -> dist/web-view/webgl)
+    scripts/web/build.sh                              # package the /try bundle -> dist/web/ (doesn't build)
+    scripts/web/sync-website.sh dist/web/neoscad-web-<ver>-<sha>.tar.gz [SITE]   # into ../neoscad-website/try
+    (cd web && npm test) && node crates/web/test/run.mjs   # web unit tests + wasm core
     scripts/agent-eval/run.py --help                  # agent-loop eval (uses claude -p; costs credits)
     ./target/release/conformance manifest [--check]  # after updating .reference
     ./target/release/conformance diff --format ast|echo|csg [PATHS]  # vs the nightly
@@ -57,7 +62,7 @@ against the nightly, which is how the harness itself is checked.
 - Library crates never touch `std::fs`, `std::env` or the clock. Files go
   through `lang`'s `FileSystem`; seeds, paths and limits come in through
   `Options`. Only non-library crates (`cli`, `ffi`, `conformance`, `wasm-check`,
-  `uniffi-bindgen`) and test code may use them directly.
+  `uniffi-bindgen`, `web`, `web-view`) and test code may use them directly.
   `docs/architecture.md` has the limits, panics and determinism policies. This is what keeps the WASM build honest.
 - Output must be byte-identical at any thread count; add a determinism test
   for anything parallel.

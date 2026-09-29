@@ -11,6 +11,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 const port = Number(process.env.E2E_PORT ?? 8123);
 const dir = process.env.E2E_DIR ?? "dist";
+// E2E_URL: a server already running (the website under `python3 -m
+// http.server`, say) whose /try/ is the bundle; serve.mjs is not started.
+const external = process.env.E2E_URL ?? null;
 
 export default defineConfig({
   testDir: "e2e",
@@ -19,18 +22,26 @@ export default defineConfig({
   reporter: [["list"]],
   outputDir: process.env.E2E_OUT ?? "test-results",
   use: {
-    baseURL: `http://127.0.0.1:${port}`,
+    baseURL: external ?? `http://127.0.0.1:${port}`,
     acceptDownloads: true,
   },
-  webServer: {
+  webServer: external ? undefined : {
     // E2E_SITE: a copy of the website to serve at the root (its site.json
     // and theme.css) instead of serve.mjs's stand-ins.
     command: `node serve.mjs --dir ${JSON.stringify(dir)} --port ${port}${process.env.E2E_SITE ? ` --site ${JSON.stringify(process.env.E2E_SITE)}` : ""}`,
     url: `http://127.0.0.1:${port}/try/`,
     reuseExistingServer: false,
   },
+  // `channel: "chromium"` runs the full Chromium in the new headless mode:
+  // it gives WebGPU a real (Metal) adapter, where the default headless
+  // shell has `navigator.gpu` but no adapter, so the WebGPU viewer would
+  // never be the one tested.
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1400, height: 860 } }, testIgnore: /phone\.spec/ },
-    { name: "phone", use: { ...devices["Pixel 7"] }, testMatch: /phone\.spec/ },
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"], channel: "chromium", viewport: { width: 1400, height: 860 } },
+      testIgnore: /phone\.spec/,
+    },
+    { name: "phone", use: { ...devices["Pixel 7"], channel: "chromium" }, testMatch: /phone\.spec/ },
   ],
 });

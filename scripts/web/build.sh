@@ -9,19 +9,29 @@
 # The bundle holds index.html, app.js, app.css, the examples, bosl2.tar.gz
 # (fetched by the page on first `include <BOSL2/...>`), build.json,
 # THIRD-PARTY-LICENSES.txt and SOURCE.txt, plus the engine and the viewer
-# when they have been built:
+# when they have been built (this script packages them; it does not build
+# them):
 #
-#   core/  the wasm core and its module worker (core/worker.js), from
-#          scripts/web/build-core.sh; its output directory is
-#          $NEOSCAD_WEB_CORE, default target/web/core
-#   view/  the WebGPU viewer (view/neoscad_web_view.js and its wasm), from
-#          scripts/web/build-view.sh; $NEOSCAD_WEB_VIEW, default
-#          target/web/view
+#   core/        the wasm core and its module worker (core/worker.js):
+#                scripts/web/build-core.sh, which writes dist/web-core
+#                ($NEOSCAD_WEB_CORE)
+#   view/        the WebGPU-only viewer (view/web_view.js and its wasm):
+#                scripts/web/build-view.sh --no-webgl --out dist/web-view/webgpu
+#                ($NEOSCAD_WEB_VIEW)
+#   view-webgl/  the viewer with wgpu's WebGL2 backend, which the page
+#                fetches only when WebGPU is missing or fails:
+#                scripts/web/build-view.sh --out dist/web-view/webgl
+#                ($NEOSCAD_WEB_VIEW_WEBGL)
 #
 # Without a core the bundle uses the mock worker, and the page says so in
 # a banner; without a viewer it draws with its canvas fallback. Every URL
 # in the bundle is relative, so it can be unpacked under any path (the
 # website's /try/: scripts/web/sync-website.sh).
+#
+# THIRD-PARTY-LICENSES.txt covers the npm packages in app.js, the Rust
+# crates in both wasm modules (from `cargo metadata`, through
+# scripts/web/rust-licenses.mjs), the embedded fonts, MCAD and colour
+# schemes, NeoSCAD's NOTICE, and BOSL2.
 #
 # Node 18 or newer. `npm ci` runs (in apple/Editor/web and web) only when
 # a lockfile is newer than its node_modules: the only step that needs the
@@ -41,8 +51,14 @@ name="neoscad-web-$version-$sha$dirty"
 dist=$root/dist/web
 out=$dist/$name
 
-core=${NEOSCAD_WEB_CORE:-$root/target/web/core}
-view=${NEOSCAD_WEB_VIEW:-$root/target/web/view}
+if [ -f "$HOME/.cargo/env" ] && ! command -v cargo >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "$HOME/.cargo/env"
+fi
+
+core=${NEOSCAD_WEB_CORE:-$root/dist/web-core}
+view=${NEOSCAD_WEB_VIEW:-$root/dist/web-view/webgpu}
+view_webgl=${NEOSCAD_WEB_VIEW_WEBGL:-$root/dist/web-view/webgl}
 
 # BOSL2: the reference checkout, which is gitignored and so lives only in
 # the main checkout; a worktree finds it through the shared git directory.
@@ -62,15 +78,32 @@ npm_ci "$root/apple/Editor/web"
 npm_ci "$root/web"
 
 engine=mock
-if [ -f "$core/worker.js" ]; then engine=wasm; fi
+if [ -f "$core/worker.js" ] && [ -f "$core/neoscad_web_bg.wasm" ]; then
+    engine=wasm
+else
+    echo "warning: no core in $core (scripts/web/build-core.sh), so the bundle uses the mock engine" >&2
+fi
 viewer=none
-if [ -f "$view/neoscad_web_view.js" ]; then viewer=wasm; fi
+if [ -f "$view/web_view.js" ] && [ -f "$view_webgl/web_view.js" ]; then
+    viewer=wasm
+else
+    echo "warning: no viewer in $view and $view_webgl (scripts/web/build-view.sh), so the page draws with its canvas fallback" >&2
+fi
 
 rm -rf "$out" "$out.tar.gz"
 (cd "$root/web" && node build.mjs --out "$out" --engine "$engine" --view "$viewer" --version "$version" --sha "$sha$dirty")
 
-if [ "$engine" = wasm ]; then cp -R "$core" "$out/core"; fi
-if [ "$viewer" = wasm ]; then cp -R "$view" "$out/view"; fi
+if [ "$engine" = wasm ]; then
+    mkdir "$out/core"
+    # package.json only lets node import the glue (crates/web/test); the
+    # browser needs the module, its glue and the worker.
+    cp "$core/worker.js" "$core/neoscad_web.js" "$core/neoscad_web_bg.wasm" "$out/core/"
+fi
+if [ "$viewer" = wasm ]; then
+    mkdir "$out/view" "$out/view-webgl"
+    cp "$view/web_view.js" "$view/web_view_bg.wasm" "$out/view/"
+    cp "$view_webgl/web_view.js" "$view_webgl/web_view_bg.wasm" "$out/view-webgl/"
+fi
 
 if [ -n "$bosl2" ]; then
     # Only the library: its .scad files and licence, not its docs, tests
@@ -90,19 +123,19 @@ fi
     echo "The front end bundles these npm packages (app.js):"
     echo
     cat "$out/THIRD-PARTY-LICENSES-web.txt"
-    if [ -f "$out/core/THIRD-PARTY-LICENSES.txt" ]; then
+    if [ "$engine" = wasm ] || [ "$viewer" = wasm ]; then
         echo
         echo "------------------------------------------------------------------------"
-        echo "The engine (core/) includes:"
+        echo "The engine (core/) and the viewer (view/, view-webgl/) are compiled from"
+        echo "NeoSCAD's Rust source and these crates:"
         echo
-        cat "$out/core/THIRD-PARTY-LICENSES.txt"
-    fi
-    if [ -f "$out/view/THIRD-PARTY-LICENSES.txt" ]; then
+        cargo metadata --format-version 1 --locked --filter-platform wasm32-unknown-unknown |
+            node "$root/scripts/web/rust-licenses.mjs" neoscad-web neoscad-web-view
         echo
         echo "------------------------------------------------------------------------"
-        echo "The viewer (view/) includes:"
+        echo "NeoSCAD's NOTICE (code ported from other projects):"
         echo
-        cat "$out/view/THIRD-PARTY-LICENSES.txt"
+        cat "$root/NOTICE"
     fi
     if [ "$engine" = wasm ]; then
         echo
@@ -157,6 +190,14 @@ EOF
 git archive --format=tar.gz --prefix="$name-source/" -o "$dist/$name-source.tar.gz" HEAD
 (cd "$dist" && COPYFILE_DISABLE=1 tar -czf "$name.tar.gz" "$name")
 (cd "$dist" && shasum -a 256 "$name.tar.gz" "$name-source.tar.gz" > SHA256SUMS)
+
+# --- Sizes ------------------------------------------------------------------
+echo "sizes (raw, gzip -9):"
+(cd "$out" && find . -type f ! -path './examples/*' | sort | while read -r f; do
+    printf '  %-34s %10s %10s\n' "${f#./}" "$(wc -c <"$f" | tr -d ' ')" "$(gzip -9 -c "$f" | wc -c | tr -d ' ')"
+done)
+printf '  %-34s %10s %10s\n' "examples/ (all)" "$(cat "$out"/examples/* | wc -c | tr -d ' ')" \
+    "$(cat "$out"/examples/* | gzip -9 | wc -c | tr -d ' ')"
 
 echo "bundle:   $out ($engine engine, $viewer view)"
 echo "tarball:  $dist/$name.tar.gz"

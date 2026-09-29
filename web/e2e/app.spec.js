@@ -1,31 +1,14 @@
 // The page in a browser, served under /try/ with whichever engine the
-// build has (the mock until the wasm core lands). Checks the layout, the
-// site contract, examples, the editor loop, the console, the customizer
-// and its persistence, downloads, F5, the check and measure panels, and a
-// respawn. Set E2E_SHOTS=DIR to save screenshots there.
+// build has: the wasm core in a release bundle (scripts/web/build.sh), the
+// mock in `npm run build`. Checks the layout, the site contract, examples,
+// the editor loop, the console, the customizer and its persistence,
+// downloads, F5, the check and measure panels, and a respawn after a
+// crash. real.spec.js adds what only the wasm core and viewer can show.
+// Set E2E_SHOTS=DIR to save screenshots there.
 
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
-
-const shots = process.env.E2E_SHOTS;
-const shot = async (page, name) => {
-  if (shots) await page.screenshot({ path: `${shots}/${name}.png` });
-};
-
-async function open(page, hash = "") {
-  const failed = [];
-  page.on("response", (r) => {
-    if (r.status() >= 400) failed.push(`${r.status()} ${r.url()}`);
-  });
-  const errors = [];
-  page.on("pageerror", (e) => errors.push(e.message));
-  await page.goto(`/try/${hash}`);
-  await page.waitForSelector("html[data-ready]");
-  return { failed, errors };
-}
-
-const summary = (page) => page.getByTestId("render-summary");
-const editorText = (page) => page.evaluate(() => window.NeoSCADEditor.text().text);
+import { editorText, engineKind, expectDrawn, open, shot, stlTriangles, summary } from "./helpers.js";
 
 test("the layout, the site contract and a first preview", async ({ page }) => {
   const { failed, errors } = await open(page);
@@ -43,22 +26,13 @@ test("the layout, the site contract and a first preview", async ({ page }) => {
   // E2E_SITE the website's own (whose nav ends in "Try it" too).
   await expect(page.locator("#site-nav a").last()).toHaveText("Try it");
   await expect(page.locator("#site-nav a[aria-current=page]")).toHaveText("Try it");
-  if (!process.env.E2E_SITE) {
+  if (!process.env.E2E_SITE && !process.env.E2E_URL) {
     await expect(page.locator("#site-nav a")).toHaveText(["Home", "Try it"]);
     const accent = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--ns-accent").trim());
     expect(accent).toBe("rgb(1, 2, 3)");
   }
-  // A drawn view, or the message saying why there is none.
-  const drawn = await page.evaluate(() => {
-    const c = document.getElementById("viewport");
-    const d = c.getContext("2d")?.getImageData(0, 0, c.width, c.height).data;
-    if (!d) return null;
-    const seen = new Set();
-    for (let i = 0; i < d.length; i += 4 * 97) seen.add(`${d[i]},${d[i + 1]},${d[i + 2]}`);
-    return seen.size;
-  });
-  if (drawn === null) await expect(page.getByTestId("view-notice")).toBeVisible();
-  else expect(drawn).toBeGreaterThan(3);
+  // A drawn view (sampled from the screen, whichever backend drew it).
+  await expectDrawn(page);
   expect(failed).toEqual([]);
   expect(errors).toEqual([]);
   await shot(page, "desktop-csg");
@@ -116,8 +90,9 @@ test("Export downloads a file named after the example", async ({ page }) => {
   await page.getByTestId("export-menu").click();
   const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("menuitem", { name: "STL…" }).click()]);
   expect(download.suggestedFilename()).toBe("CSG.stl");
-  const text = readFileSync(await download.path(), "utf8");
-  expect(text.startsWith("solid") || text.length > 84).toBeTruthy();
+  const triangles = stlTriangles(readFileSync(await download.path()));
+  expect(triangles).toBeGreaterThan(10);
+  console.log(`CSG.stl: ${triangles} triangles`);
   await page.getByTestId("export-menu").click();
   const [threemf] = await Promise.all([page.waitForEvent("download"), page.getByRole("menuitem", { name: "3MF…" }).click()]);
   expect(threemf.suggestedFilename()).toBe("CSG.3mf");
@@ -141,13 +116,20 @@ test("F5 previews instead of reloading, F6 and Mod-Enter render", async ({ page 
 
 test("console lines jump to their source", async ({ page }) => {
   await open(page);
-  const line = page.locator(".console-line.kind-echo").first();
-  await expect(line).toContainText("ECHO:");
+  await expect(summary(page)).toContainText("Previewed");
+  // An echo has no source position (OpenSCAD prints none); a warning does.
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.type("\ncube(size = nosuch);");
+  const line = page.locator(".console-line.kind-warning").first();
+  await expect(line).toContainText("nosuch");
   await line.click();
   const [from, to] = await page.evaluate(() => window.NeoSCADEditor.state().selection);
   const text = await editorText(page);
-  expect(text.slice(from, to)).toMatch(/^echo\(/);
+  expect(from).toBeLessThan(to);
+  expect(text.slice(from, to)).toContain("nosuch");
   // Filters by kind.
+  await expect(page.locator(".console-line.kind-echo")).toHaveCount(1);
   await page.getByRole("button", { name: /^Echo \d+/ }).click();
   await expect(page.locator(".console-line.kind-echo")).toHaveCount(0);
 });
@@ -156,14 +138,16 @@ test("check lists findings and selecting one marks it", async ({ page }) => {
   await open(page, "#example=box-lid");
   await page.getByRole("tab", { name: "Check" }).click();
   const panel = page.getByTestId("check");
+  // The box's 2 mm walls pass the default 0.8 mm; a 3 mm minimum fails them.
+  await panel.getByLabel("Min wall").fill("3");
+  await panel.getByLabel("Min wall").press("Tab");
   await panel.getByRole("button", { name: "Check", exact: true }).click();
   await expect(panel.getByTestId("check-summary")).toBeVisible();
   const findings = panel.locator(".finding");
-  const n = await findings.count();
-  if (n) {
-    await findings.first().click();
-    await expect(findings.first()).toHaveAttribute("aria-pressed", "true");
-  }
+  await expect(findings.first()).toBeVisible();
+  console.log(`box-lid check: ${await findings.count()} findings; first: ${await findings.first().innerText()}`);
+  await findings.first().click();
+  await expect(findings.first()).toHaveAttribute("aria-pressed", "true");
   await shot(page, "desktop-check");
 });
 
@@ -183,15 +167,48 @@ test("measure shows the model, its parts, a section and a distance", async ({ pa
 });
 
 test("a crashed engine restarts and the page carries on", async ({ page }) => {
+  // The wasm core has no way to crash on purpose, so its glue is given
+  // one: after an `e2eArmTrap` request, the next run traps (throws the
+  // RuntimeError a panic or an OOM throws). The worker's own catch, its
+  // `crashed` reply and message, and the page's respawn and replay are the
+  // real ones. The mock traps on a `// mock:crash` line instead.
+  await page.route("**/core/neoscad_web.js", async (route) => {
+    const res = await route.fetch();
+    const body =
+      (await res.text()) +
+      `
+let __trap = false;
+const __handle = Engine.prototype.handle;
+Engine.prototype.handle = function (json, buffers) {
+  if (json.includes('"type":"e2eArmTrap"')) {
+    __trap = true;
+    return [JSON.stringify({ id: JSON.parse(json).id, ok: true, result: {} })];
+  }
+  if (__trap && json.includes('"type":"run"')) throw new WebAssembly.RuntimeError("unreachable (e2e:trap)");
+  return __handle.call(this, json, buffers);
+};
+`;
+    await route.fulfill({ response: res, body });
+  });
   await open(page);
-  test.skip((await page.evaluate(() => window.NeoSCADWeb.build.engine)) !== "mock", "needs the mock's crash marker");
-  await page.locator(".cm-content").click();
-  await page.keyboard.press("ControlOrMeta+End");
-  await page.keyboard.type("\n// mock:crash");
-  await expect(page.getByTestId("engine-status")).toHaveText("engine restarted");
-  // Take the marker out again: the new worker runs the next preview.
-  for (let i = 0; i < "// mock:crash".length; i++) await page.keyboard.press("Backspace");
   await expect(summary(page)).toContainText("Previewed");
+  const mock = (await engineKind(page)) === "mock";
+  if (mock) {
+    await page.locator(".cm-content").click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.type("\n// mock:crash");
+  } else {
+    await page.evaluate(() => window.NeoSCADWeb.engine.request({ type: "e2eArmTrap" }));
+    await page.getByTestId("preview").click();
+  }
+  await expect(page.getByTestId("engine-status")).toHaveText("engine restarted");
+  await expect(page.getByTestId("engine-status")).toHaveAttribute("title", /crashed: .*(unreachable|mock:crash)/);
+  expect(await page.evaluate(() => window.NeoSCADWeb.engine.restarts)).toBe(1);
+  if (mock) for (let i = 0; i < "// mock:crash".length; i++) await page.keyboard.press("Backspace");
+  else await page.getByTestId("preview").click();
+  // The new worker, given the document again, runs the next preview.
+  await expect(summary(page)).toContainText("Previewed");
+  await expectDrawn(page);
 });
 
 test("dark mode uses the dark tokens", async ({ browser }) => {

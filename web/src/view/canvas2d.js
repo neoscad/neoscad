@@ -1,6 +1,6 @@
-// A software 3D view on a 2D canvas: the fallback when there is no
-// WebGPU viewer (the build has none yet, or the browser has no WebGPU),
-// and the mock build's view. Flat-shaded triangles in depth order, with
+// A software 3D view on a 2D canvas: the fallback when neither the WebGPU
+// nor the WebGL2 viewer starts (or the build has none), and the mock
+// build's view. It draws the worker's packed scenes (`unpack`). Flat-shaded triangles in depth order, with
 // the View menu's edges, axes, orthographic toggle and presets, orbit /
 // pan / zoom, and the check and measure panels' annotations.
 //
@@ -61,6 +61,47 @@ const mulT = (m, p) => [
   m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2],
 ];
 
+/// Bytes of a face vertex and an edge segment (render::packed).
+const FACE_VERTEX_SIZE = 44;
+const EDGE_SEGMENT_SIZE = 24;
+
+/// A packed scene (`{faces, edges, meta}`, docs/web-protocol.md) as
+/// triangles `{v: [p, p, p], n: normal | null, color}`, 2D edge segments,
+/// the edge colour, the box and the triangle count. Triangles past
+/// `MAX_TRIANGLES` are counted but not unpacked.
+export function unpack(scene) {
+  const out = { tris: [], edges: [], edgeColor: "#ff0000", bbox: null, count: 0 };
+  if (!scene) return out;
+  const meta = typeof scene.meta === "string" ? JSON.parse(scene.meta) : scene.meta;
+  const faces = new DataView(scene.faces);
+  const f32 = (at) => faces.getFloat32(at, true);
+  const draws = (meta.draws ?? []).filter((d) => d.state?.color_write !== false);
+  out.count = draws.reduce((n, d) => n + Math.floor(d.count / 3), 0);
+  if (out.count <= MAX_TRIANGLES) {
+    for (const d of draws) {
+      for (let t = 0; t + 2 < d.count; t += 3) {
+        const at = (d.first + t) * FACE_VERTEX_SIZE;
+        if (at + 3 * FACE_VERTEX_SIZE > scene.faces.byteLength) break;
+        const v = [0, 1, 2].map((k) => [f32(at + k * FACE_VERTEX_SIZE), f32(at + k * FACE_VERTEX_SIZE + 4), f32(at + k * FACE_VERTEX_SIZE + 8)]);
+        const n = [f32(at + 12), f32(at + 16), f32(at + 20)];
+        const color = [f32(at + 24), f32(at + 28), f32(at + 32), f32(at + 36)];
+        out.tris.push({ v, n: n[0] || n[1] || n[2] ? n : null, color });
+      }
+    }
+  }
+  const edges = new DataView(scene.edges ?? new ArrayBuffer(0));
+  for (let at = 0; at + EDGE_SEGMENT_SIZE <= edges.byteLength; at += EDGE_SEGMENT_SIZE) {
+    const e = (i) => edges.getFloat32(at + i * 4, true);
+    out.edges.push([[e(0), e(1), e(2)], [e(3), e(4), e(5)]]);
+  }
+  if (meta.edge_color) {
+    const [r, g, b] = meta.edge_color.map((x) => Math.round(255 * x));
+    out.edgeColor = `rgb(${r},${g},${b})`;
+  }
+  if (meta.bbox) out.bbox = { min: meta.bbox[0], max: meta.bbox[1] };
+  return out;
+}
+
 export class Canvas2DViewer {
   constructor(canvas) {
     this.kind = "canvas2d";
@@ -72,6 +113,8 @@ export class Canvas2DViewer {
     this.vpt = [0, 0, 0];
     this.vpd = 140;
     this.tris = null;
+    this.edges2d = [];
+    this.edgeColor = "#ff0000";
     this.bbox = null;
     this.tooLarge = false;
     this.annotations = { markers: [], lines: [] };
@@ -84,37 +127,19 @@ export class Canvas2DViewer {
 
   // --- The viewer API (web/src/view/index.js) ---
 
+  /// A packed scene (render::packed, as the worker sends it): the face
+  /// vertices of each draw that writes colour, in their baked colours.
+  /// Depth-only draws and image-space CSG primitives (a preview's
+  /// subtracted and intersected shapes) are left out: this view has no
+  /// depth buffer to compose them in.
   setScene(scene) {
-    const tris = [];
-    let count = 0;
-    for (const m of scene?.meshes ?? []) count += m.indices.length / 3;
+    const { tris, bbox, edges, edgeColor, count } = unpack(scene);
     this.tooLarge = count > MAX_TRIANGLES;
-    const min = [Infinity, Infinity, Infinity];
-    const max = [-Infinity, -Infinity, -Infinity];
-    for (const m of scene?.meshes ?? []) {
-      const p = m.positions;
-      for (let i = 0; i < p.length; i += 3) {
-        for (let k = 0; k < 3; k++) {
-          min[k] = Math.min(min[k], p[i + k]);
-          max[k] = Math.max(max[k], p[i + k]);
-        }
-      }
-      if (this.tooLarge) continue;
-      for (let t = 0; t < m.indices.length; t += 3) {
-        const v = [0, 1, 2].map((k) => {
-          const i = m.indices[t + k] * 3;
-          return [p[i], p[i + 1], p[i + 2]];
-        });
-        const e1 = v[1].map((x, k) => x - v[0][k]);
-        const e2 = v[2].map((x, k) => x - v[0][k]);
-        const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
-        const len = Math.hypot(...n) || 1;
-        tris.push({ v, n: n.map((x) => x / len), color: m.color });
-      }
-    }
     const first = this.bbox === null;
-    this.tris = tris;
-    this.bbox = min[0] <= max[0] ? { min, max } : null;
+    this.tris = this.tooLarge ? [] : tris;
+    this.edges2d = edges;
+    this.edgeColor = edgeColor;
+    this.bbox = bbox;
     if (first && this.bbox) this.viewAll();
     this.redraw();
   }
@@ -155,7 +180,12 @@ export class Canvas2DViewer {
   }
 
   camera() {
-    return { vpt: [...this.vpt], vpr: [...this.vpr], vpd: this.vpd };
+    return { vpt: [...this.vpt], vpr: [...this.vpr], vpd: this.vpd, vpf: 22.5 };
+  }
+
+  /// The `$vp*` the program assigned (only those it did).
+  setFileView(v) {
+    this.setCamera(v);
   }
 
   setCamera(c) {
@@ -247,7 +277,8 @@ export class Canvas2DViewer {
       ctx.lineJoin = "round";
       for (const { p, t } of drawn) {
         const c = t.color ?? scheme.face;
-        const lit = 0.35 + 0.65 * Math.abs(t.n[0] * eyeDir[0] + t.n[1] * eyeDir[1] + t.n[2] * eyeDir[2]);
+        // A zero normal marks an unlit vertex (render::packed).
+        const lit = t.n ? 0.35 + 0.65 * Math.abs(t.n[0] * eyeDir[0] + t.n[1] * eyeDir[1] + t.n[2] * eyeDir[2]) : 1;
         const rgb = `rgb(${[0, 1, 2].map((k) => Math.round(255 * Math.min(1, c[k] * lit))).join(",")})`;
         ctx.beginPath();
         ctx.moveTo(p[0][0], p[0][1]);
@@ -264,6 +295,18 @@ export class Canvas2DViewer {
       }
     } else if (this.tooLarge && this.bbox) {
       this.drawBox(this.bbox.min, this.bbox.max, m, metrics, scheme.edge);
+    }
+    if (this.edges2d.length) {
+      ctx.strokeStyle = this.edgeColor;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (const [a, b] of this.edges2d) {
+        const pa = this.project(a, m, metrics);
+        const pb = this.project(b, m, metrics);
+        ctx.moveTo(pa[0], pa[1]);
+        ctx.lineTo(pb[0], pb[1]);
+      }
+      ctx.stroke();
     }
 
     if (this.settings.axes) {
@@ -295,10 +338,7 @@ export class Canvas2DViewer {
     }
 
     for (const line of this.annotations.lines) {
-      const pts = [];
-      for (let i = 0; i + 2 < line.points.length; i += 3) {
-        pts.push(this.project([line.points[i], line.points[i + 1], line.points[i + 2]], m, metrics));
-      }
+      const pts = (line.points ?? []).map((p) => this.project(p, m, metrics));
       if (pts.length < 2) continue;
       ctx.strokeStyle = line.color ?? "#e0f";
       ctx.lineWidth = 2;
@@ -310,6 +350,7 @@ export class Canvas2DViewer {
     }
     for (const mk of this.annotations.markers) {
       if (mk.bboxMin && mk.bboxMax) this.drawBox(mk.bboxMin, mk.bboxMax, m, metrics, mk.color ?? "#e0f");
+      if (mk.point?.length !== 3) continue;
       const p = this.project(mk.point, m, metrics);
       ctx.fillStyle = mk.color ?? "#e0f";
       ctx.beginPath();

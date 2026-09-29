@@ -4,8 +4,8 @@ The browser demo (`docs/web-demo-plan.md`) runs NeoSCAD in one module
 worker: evaluation, geometry, check and measure, export and the language
 server. The page talks to it with `postMessage` only. This document is the
 contract between the worker (`crates/web`, its reference glue
-`crates/web/js/worker.js`) and the page (`web/`), which is built against a
-mock of it; change both sides together and record the change here.
+`crates/web/js/worker.js`) and the page (`web/`, whose mock engine speaks
+it too); change both sides together and record the change here.
 
 The worker is single-threaded and runs one request at a time, in the
 order they arrive. A request that is running cannot be interrupted from
@@ -438,4 +438,6 @@ node without a worker:
 - `addFiles`' `ArrayBuffer`s go to Rust as the `buffers` argument in the
   same way (`{ "$buffer": n }` in the request), and strings as they are.
 
-`web/src/worker.js` (the front end's) may copy or adapt it.
+The front end (`web/`) ships it unchanged as `core/worker.js` and speaks
+this protocol through `web/src/engine/protocol.js` and `client.js`; its
+mock (`web/src/engine/mock-core.js`) answers in the same shapes.

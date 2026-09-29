@@ -4,8 +4,8 @@
 //                  [--version V] [--sha S]
 //
 // DIR (default web/dist) gets index.html, app.js, app.css, the mock
-// worker, the examples, build.json and the front end's third-party
-// licences. scripts/web/build.sh calls this, then adds the wasm core and
+// worker (for `--engine mock` only), the examples, build.json and the
+// front end's third-party licences. scripts/web/build.sh calls this, then adds the wasm core and
 // viewer, BOSL2 and the release files; `npm run build` alone gives a
 // mock build for development (`npm run serve`).
 //
@@ -63,7 +63,12 @@ const common = {
 
 const app = await esbuild.build({
   ...common,
-  entryPoints: { app: join(root, "src/app.js"), "mock-worker": join(root, "src/engine/mock-worker.js") },
+  // The mock worker only in a mock build: a release bundle has the wasm
+  // core's own worker (core/worker.js) and nothing canned.
+  entryPoints: {
+    app: join(root, "src/app.js"),
+    ...(build.engine === "mock" ? { "mock-worker": join(root, "src/engine/mock-worker.js") } : {}),
+  },
   outdir: out,
 });
 

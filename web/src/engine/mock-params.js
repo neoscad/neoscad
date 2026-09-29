@@ -14,9 +14,17 @@
 //
 // Only literal values count, and only top-level assignments before the
 // first module or function, as in OpenSCAD's customizer. The shapes it
-// returns are the wire's draft (snake_case keys, `kind`-tagged controls,
-// plain values), so the front end's normalisers see what the worker is
-// expected to send.
+// returns are the wire's (docs/web-protocol.md, `parameters`: camelCase,
+// `kind`-tagged controls and values), so the front end's normalisers see
+// what the worker sends.
+
+/// A plain value as the wire's tagged `ParameterValue`.
+function tagged(v) {
+  if (typeof v === "boolean") return { kind: "bool", value: v };
+  if (typeof v === "number") return { kind: "number", value: v };
+  if (Array.isArray(v)) return { kind: "vector", value: v };
+  return { kind: "text", value: String(v) };
+}
 
 function literal(src) {
   const s = src.trim();
@@ -51,9 +59,9 @@ function controlFor(value, hint) {
     if (body.includes(",")) {
       const options = body.split(",").map((part) => {
         const m = part.match(/^\s*([^:]+?)\s*:\s*(.+?)\s*$/);
-        if (m && typeof value === "number") return { label: m[2], value: optionValue(m[1], value) };
+        if (m && typeof value === "number") return { label: m[2], value: tagged(optionValue(m[1], value)) };
         const v = optionValue(part, value);
-        return { label: String(v), value: v };
+        return { label: String(v), value: tagged(v) };
       });
       return { kind: "dropdown", options };
     }
@@ -66,10 +74,10 @@ function controlFor(value, hint) {
   }
   if (typeof value === "string") {
     const n = Number(h);
-    return { kind: "text", max_length: h && Number.isInteger(n) && n > 0 ? n : null };
+    return { kind: "text", maxLength: h && Number.isInteger(n) && n > 0 ? n : null };
   }
   const step = Number(h);
-  return { kind: "spin_box", min: null, max: null, step: h && Number.isFinite(step) && step > 0 ? step : null };
+  return { kind: "spinBox", min: null, max: null, step: h && Number.isFinite(step) && step > 0 ? step : null };
 }
 
 export function parseParameters(text) {
@@ -100,7 +108,7 @@ export function parseParameters(text) {
             name: a[1],
             description,
             control: controlFor(value, a[3]),
-            default_value: value,
+            defaultValue: tagged(value),
           });
         }
         description = "";

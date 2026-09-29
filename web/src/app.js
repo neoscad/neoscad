@@ -12,18 +12,20 @@
 
 import { setEditorHandler, loadEditor } from "./editor-host.js";
 import { createEngine, ensureLibraries } from "./engine/index.js";
-import { EngineRestarted } from "./engine/client.js";
+import { EngineError, EngineRestarted } from "./engine/client.js";
 import {
   EXPORT_FORMATS,
+  ErrorKind,
   Requests,
   applyEdits,
   betweenResult,
   checkReport,
   docPath,
   fileURI,
+  fileViewChanged,
   measureResult,
-  overrides,
   parameterGroups,
+  runOptions,
   runResult,
   sectionResult,
   uriPath,
@@ -84,12 +86,19 @@ class App {
     setEditorHandler((m) => this.editorMessage(m));
     this.editor = await loadEditor();
 
-    const { viewer, notice } = await createViewer($("#viewport"), { view: this.build.view });
+    const { viewer, canvas, notice } = await createViewer($("#viewport"), {
+      view: this.build.view,
+      scheme: this.settings.view.scheme,
+    });
     this.viewer = viewer;
+    // A scheme saved by a build whose viewer knew more schemes than this
+    // one (the canvas fallback knows a few) falls back to Cornfield.
+    if (!viewer.schemes.includes(this.settings.view.scheme)) this.settings.view.scheme = "Cornfield";
     this.viewer.setSettings(this.settings.view);
     this.viewer.onPick = (ray) => this.pick(ray);
+    document.documentElement.dataset.view = viewer.kind;
     if (notice) this.viewNotice(notice);
-    new ResizeObserver(() => this.viewer.resize()).observe($("#viewport"));
+    new ResizeObserver(() => this.viewer.resize()).observe(canvas);
 
     if (this.build.engine === "mock") {
       this.banner(
@@ -378,6 +387,8 @@ class App {
     // mark (it never shrinks), so the next one starts in a fresh worker.
     if (previous?.example.heavy) await this.engine.restart("freeing the heavy example's memory").catch(() => {});
     if (previous) this.engine.close(previous.path);
+    this.measurement = null;
+    this.fileView = null;
 
     const path = docPath(example.file);
     this.doc = {
@@ -430,7 +441,7 @@ class App {
         const d = this.doc;
         d.text = applyEdits(d.text, m.edits);
         d.version = m.version;
-        this.engine.edit(d.path, m.version, m.edits, d.text).catch(() => {});
+        this.engine.edit(d.path, m.edits).catch(() => {});
         this.store.setExampleText(d.example.id, d.text, d.original);
         this.schedulePreview();
         return null;
@@ -510,7 +521,7 @@ class App {
     let i = this.tabs.findIndex((t) => t.path === path);
     if (i < 0) {
       try {
-        const r = await this.engine.request(Requests.read(path));
+        const r = await this.engine.request(Requests.readFile(path));
         this.tabs.push({ path, text: r.text });
         i = this.tabs.length - 1;
       } catch (e) {
@@ -569,8 +580,8 @@ class App {
     }
   }
 
-  overrides() {
-    return overrides(this.doc.customizer.values);
+  runOptions() {
+    return runOptions(this.doc.customizer.values, this.doc.parts);
   }
 
   async run(mode) {
@@ -583,23 +594,47 @@ class App {
     if (!(await this.libraries())) return;
     let raw;
     try {
-      raw = await this.engine.run(Requests.run(d.path, mode, this.overrides(), d.parts));
+      raw = await this.engine.run(
+        Requests.run({
+          path: d.path,
+          mode,
+          values: d.customizer.values,
+          parts: d.parts,
+          // The view the model is shown in, for `$vpt` and friends, and the
+          // scheme its face colours are baked in (the viewer cannot
+          // recolour a packed scene).
+          camera: this.viewer.camera(),
+          colorScheme: this.settings.view.scheme,
+        }),
+      );
     } catch (e) {
       this.fail(e);
       return;
     }
     if (raw?.superseded || this.doc !== d) return;
     const r = runResult(raw);
+    this.lastRun = { mode, timings: r.timings, exitCode: r.exitCode };
     this.console.summaryTitle = r.timings
       ? `Parse ${r.timings.parseMs?.toFixed(1)} ms, evaluate ${r.timings.evaluateMs?.toFixed(1)} ms, geometry ${r.timings.geometryMs?.toFixed(1)} ms`
       : "";
     this.console.setLines(r.console);
     this.console.setSummary(describe(r, mode), r.exitCode === 0 ? "done" : "failed");
     for (const m of r.language) this.editor.lspReceive(m);
-    if (r.scene) this.viewer.setScene(r.scene);
-    if (r.fileView) this.viewer.setCamera(r.fileView);
-    if (r.parameters) this.setParameters(r.parameters);
-    else this.refreshParameters();
+    // A failed run with nothing to draw keeps the last model on screen, as
+    // the app does while the text is mid-edit; a successful empty one
+    // clears it.
+    if (r.scene || r.exitCode === 0) {
+      try {
+        this.viewer.setScene(r.scene);
+      } catch (e) {
+        this.console.setSummary(`The view could not show the model: ${e.message ?? e}`, "failed");
+      }
+    }
+    // The view follows the file's `$vp*` only when they change, so a live
+    // preview does not undo the user's orbit.
+    if (r.fileView && fileViewChanged(r.fileView, this.fileView)) this.viewer.setFileView(r.fileView);
+    this.fileView = r.fileView;
+    this.refreshParameters();
   }
 
   async refreshParameters() {
@@ -630,10 +665,15 @@ class App {
     this.console.setSummary(`Exporting ${f.label}…`, "running");
     if (!(await this.libraries())) return;
     try {
-      const r = await this.engine.request(Requests.export(d.path, format, this.overrides(), d.parts));
+      const r = await this.engine.request(Requests.export(d.path, format, this.runOptions()));
+      if (r.exitCode !== 0 || !r.data) {
+        const why = (r.console ?? "").trim().split("\n").pop() || `exit code ${r.exitCode}`;
+        this.console.setSummary(`Export failed: ${why}`, "failed");
+        return;
+      }
       const name = `${d.example.file.replace(/\.scad$/, "")}.${f.ext}`;
-      download(r.bytes, name, f.mime);
-      this.console.setSummary(`Exported ${name} (${r.bytes.byteLength} bytes).`, "done");
+      download(r.data, name, r.mime);
+      this.console.setSummary(`Exported ${name} (${r.bytes} bytes).`, "done");
     } catch (e) {
       this.fail(e);
     }
@@ -645,7 +685,12 @@ class App {
     this.check.setRunning();
     if (!(await this.libraries())) return this.check.setError("A library did not load.");
     try {
-      const r = await this.engine.request(Requests.check(d.path, this.overrides(), d.parts, checkOptions(this.check.settings)));
+      await this.engine.ready;
+      // The wire's CheckOptions has no per-field defaults: the panel's
+      // settings go over the worker's own.
+      const options = { ...this.engine.defaults?.checkOptions };
+      for (const [k, v] of Object.entries(checkOptions(this.check.settings))) if (v !== undefined) options[k] = v;
+      const r = await this.engine.request(Requests.check(d.path, this.runOptions(), options));
       if (this.doc === d) this.check.setReport(checkReport(r));
     } catch (e) {
       this.check.setError(e instanceof EngineRestarted ? "The engine restarted during the check." : e.message);
@@ -659,8 +704,13 @@ class App {
     this.viewer.setAnnotations(null);
     if (!(await this.libraries())) return this.measure.setError("A library did not load.");
     try {
-      const r = await this.engine.request(Requests.measure(d.path, this.overrides(), d.parts));
-      if (this.doc === d) this.measure.setResult(measureResult(r));
+      const r = await this.engine.request(Requests.measure(d.path, this.runOptions()));
+      if (this.doc !== d) return;
+      // The handle section, between and pick name; the worker keeps only
+      // the latest, and a respawn forgets it.
+      this.measurement = r.measurement ?? null;
+      this.measurementWorker = this.engine.restarts;
+      this.measure.setResult(measureResult(r));
     } catch (e) {
       this.measure.setError(e instanceof EngineRestarted ? "The engine restarted during the measurement." : e.message);
     }
@@ -672,21 +722,21 @@ class App {
       return;
     }
     try {
-      const r = sectionResult(await this.engine.request(Requests.section(axis, offset, target)));
+      const r = sectionResult(await this.engine.request(Requests.section(this.measurementHandle(), axis, offset, target)));
       this.measure.setSection(r);
-      this.viewer.setAnnotations({ lines: (r.outline ?? []).map((points) => ({ points, closed: true, color: "#d04fc4" })) });
+      this.viewer.setAnnotations({ lines: r.outline.map((points) => ({ points, closed: true, color: "#d04fc4" })) });
     } catch (e) {
-      this.measure.setError(e.message);
+      this.measureFailed(e);
     }
   }
 
   async between(a, b) {
     try {
-      const r = betweenResult(await this.engine.request(Requests.between(a, b)));
+      const r = betweenResult(await this.engine.request(Requests.between(this.measurementHandle(), a, b)));
       this.measure.setBetween(r);
       if (r.pointA && r.pointB) {
         this.viewer.setAnnotations({
-          lines: [{ points: [...r.pointA, ...r.pointB], color: "#d04fc4" }],
+          lines: [{ points: [r.pointA, r.pointB], color: "#d04fc4" }],
           markers: [
             { point: r.pointA, label: "A", color: "#6a5cf2" },
             { point: r.pointB, label: "B", color: "#6a5cf2" },
@@ -694,23 +744,40 @@ class App {
         });
       }
     } catch (e) {
-      this.measure.setError(e.message);
+      this.measureFailed(e);
+    }
+  }
+
+  /// The latest measurement's handle, or an error saying to measure
+  /// (again: a respawned worker has none).
+  measurementHandle() {
+    if (this.measurement == null || this.measurementWorker !== this.engine.restarts) {
+      throw new Error("Measure again: the engine restarted since the last measurement.");
+    }
+    return this.measurement;
+  }
+
+  measureFailed(e) {
+    if (e instanceof EngineError && e.kind === ErrorKind.invalidArgument && /measurement/.test(e.message)) {
+      this.measure.setError("The measurement is out of date: measure again.");
+    } else {
+      this.measure.setError(e instanceof EngineRestarted ? "The engine restarted: measure again." : e.message);
     }
   }
 
   async pick(ray) {
     if (!this.measure.picking || !ray) return;
     try {
-      const r = await this.engine.request(Requests.pick(ray.origin, ray.direction));
+      const r = await this.engine.request(Requests.pick(this.measurementHandle(), ray.origin, ray.direction));
       if (!r?.point) return;
       this.measure.addPick(r.point);
       const picks = this.measure.picks;
       this.viewer.setAnnotations({
         markers: picks.map((p, i) => ({ point: p, label: i ? "B" : "A", color: "#6a5cf2" })),
-        lines: picks.length === 2 ? [{ points: [...picks[0], ...picks[1]], color: "#6a5cf2" }] : [],
+        lines: picks.length === 2 ? [{ points: [picks[0], picks[1]], color: "#6a5cf2" }] : [],
       });
     } catch (e) {
-      this.fail(e);
+      this.measureFailed(e);
     }
   }
 
@@ -755,9 +822,14 @@ class App {
   }
 
   setView(change) {
+    const scheme = this.settings.view.scheme;
     this.settings.view = { ...this.settings.view, ...change };
     this.viewer.setSettings(this.settings.view);
     this.saveSettings({ view: this.settings.view });
+    // The worker bakes the scheme's face colours into the scene, so a new
+    // scheme is a new run (in the mode last run; the viewer has already
+    // changed the background and lines).
+    if (this.settings.view.scheme !== scheme && this.doc && this.lastMode) this.run(this.lastMode);
   }
 }
 

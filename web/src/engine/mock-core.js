@@ -1,29 +1,39 @@
-// The mock engine: the worker protocol (protocol.js) answered with canned
-// results, so the front end can be built and tested before the wasm core
-// (crates/web) exists. It keeps the documents' text, reads customizer
-// parameters roughly (mock-params.js), turns `echo(...)` calls into
-// console lines with locations (for click-to-jump), and returns a packed
-// scene of boxes (fixtures.js).
+// The mock engine: the worker protocol (docs/web-protocol.md) answered with
+// canned results, for developing the page without building the wasm core
+// (`npm run build`) and for the unit tests. It speaks the real wire: the
+// request names and fields, camelCase results, tagged parameter values, a
+// packed scene, error kinds and the `crashed` message. It keeps the
+// documents' text, reads customizer parameters roughly (mock-params.js),
+// turns `echo(...)` calls into console lines with locations (for
+// click-to-jump), and draws boxes (fixtures.js).
 //
 // Two markers in a document's text drive the failure paths in tests:
 //   // mock:slow=MS   the run busy-waits MS milliseconds (cancel, stale runs)
-//   // mock:crash     the run throws, which the worker reports as fatal
+//   // mock:crash     the run traps, which the worker reports as `crashed`
 //
 // It is plain logic with no worker globals, so node tests use it directly
 // and mock-worker.js wraps it.
 
-import { boxMesh, mockScene, off, sceneTransfer, stl, svg, threeMF } from "./fixtures.js";
+import { mockModel, off, packScene, stl, svg, threeMF, boxMesh } from "./fixtures.js";
 import { parseParameters } from "./mock-params.js";
-import { applyEdits } from "./protocol.js";
+import { offsetAt, positionAt } from "./protocol.js";
+import { untar } from "./tar.js";
 
-export const MOCK_VERSION = "mock-0";
+export const MOCK_VERSION = "0.0.0-mock";
 
-/// UTF-16 line/character of an offset.
-function position(text, at) {
-  const before = text.slice(0, at);
-  const line = before.split("\n").length - 1;
-  return { line, character: at - (before.lastIndexOf("\n") + 1) };
-}
+const MIME = { stl: "model/stl", binstl: "model/stl", "3mf": "model/3mf", off: "text/plain", svg: "image/svg+xml" };
+
+const CHECK_DEFAULTS = { nozzle: 0.4, minWall: 0.8, maxOverhang: 45, bed: null, bedTolerance: 0.5, maxFindings: 50 };
+const LIMITS = {
+  timeSeconds: 60,
+  memoryBytes: 1 << 30,
+  fragments: 10000,
+  slices: 10000,
+  list: 10000000,
+  string: 67108864,
+  rands: 10000000,
+  triangles: 10000000,
+};
 
 function busyWait(ms) {
   const end = Date.now() + ms;
@@ -32,33 +42,68 @@ function busyWait(ms) {
   }
 }
 
+/// An `ok: false` reply's error.
+export class MockError extends Error {
+  constructor(kind, message) {
+    super(message);
+    this.kind = kind;
+  }
+}
+
+/// A failure that kills the instance, as a wasm trap does.
+export class MockCrash extends Error {}
+
+const invalid = (m) => new MockError("invalidArgument", m);
+
 export class MockCore {
   constructor() {
     this.files = new Map();
-    this.lastScene = null;
-    this.lastPath = null;
+    this.versions = new Map();
+    this.model = null;
+    this.measurement = 0;
+    this.initialised = false;
+    this.lspOpen = new Set();
   }
 
-  /// One request: `{result, transfer}`, or a thrown Error for `ok: false`.
-  /// `notify(msg)` sends a message with no id (language server output).
-  handle(msg, notify = () => {}) {
+  /// One request: `{result, transfer}`, or a thrown MockError (`ok:
+  /// false`) or MockCrash (the instance traps).
+  handle(msg) {
+    if (msg.type === "init") {
+      if (this.initialised) throw invalid("the worker is already initialised");
+      this.initialised = true;
+      return { result: { version: MOCK_VERSION, limits: LIMITS, libraryDirs: ["/neoscad/libraries"] } };
+    }
+    if (!this.initialised) throw invalid(`'${msg.type}' before 'init'`);
     switch (msg.type) {
-      case "init":
-        return { result: { engine: "mock", version: MOCK_VERSION, protocol: 0, features: ["part"] } };
+      case "defaults":
+        return { result: { checkOptions: CHECK_DEFAULTS, limits: LIMITS } };
+      case "stats":
+        return { result: { memoryBytes: 16 << 20 } };
       case "open":
+        if (msg.text != null) this.files.set(msg.path, msg.text);
+        else if (!this.files.has(msg.path)) throw new MockError("failed", `no such file: ${msg.path}`);
+        return { result: this.docInfo(msg.path) };
+      case "update":
         this.files.set(msg.path, msg.text);
-        return { result: {} };
+        return { result: this.docInfo(msg.path) };
       case "edit": {
-        const old = this.files.get(msg.path) ?? "";
-        this.files.set(msg.path, msg.text ?? applyEdits(old, msg.edits ?? []));
-        return { result: {} };
+        let text = this.text(msg.path);
+        for (const e of msg.edits ?? []) {
+          const a = offsetAt(text, e.start);
+          const b = offsetAt(text, e.end);
+          if (b < a) throw invalid("an edit's end is before its start");
+          text = text.slice(0, a) + e.text + text.slice(b);
+        }
+        this.files.set(msg.path, text);
+        return { result: this.docInfo(msg.path) };
       }
+      case "close":
+        return { result: { closed: this.files.delete(msg.path) } };
       case "addFiles":
-        for (const f of msg.files ?? []) this.files.set(f.path, f.text ?? f.bytes);
-        return { result: { added: (msg.files ?? []).length } };
-      case "read": {
+        return { result: { added: this.addFiles(msg) } };
+      case "readFile": {
         const f = this.files.get(msg.path);
-        if (f === undefined) throw new Error(`no such file: ${msg.path}`);
+        if (f === undefined) throw new MockError("failed", `no such file: ${msg.path}`);
         return { result: { text: typeof f === "string" ? f : new TextDecoder().decode(f) } };
       }
       case "parameters":
@@ -70,18 +115,20 @@ export class MockCore {
       case "measure":
         return { result: this.measure(msg) };
       case "section":
+        this.requireMeasurement(msg.measurement);
         return {
           result: {
             plane: `${msg.axis}=${msg.offset}`,
             area: 400,
             perimeter: 80,
             contours: 1,
-            bbox_min: [-10, -10, msg.offset],
-            bbox_max: [10, 10, msg.offset],
+            bboxMin: [-10, -10, msg.offset],
+            bboxMax: [10, 10, msg.offset],
             outline: [[-10, -10, msg.offset, 10, -10, msg.offset, 10, 10, msg.offset, -10, 10, msg.offset]],
           },
         };
       case "between":
+        this.requireMeasurement(msg.measurement);
         return {
           result: {
             a: msg.a,
@@ -89,29 +136,54 @@ export class MockCore {
             distance: 4,
             touching: false,
             overlapping: false,
-            overlap_volume: 0,
-            point_a: [10, 0, 3],
-            point_b: [14, 0, 3],
+            overlapVolume: 0,
+            pointA: [10, 0, 3],
+            pointB: [14, 0, 3],
           },
         };
       case "pick":
-        return { result: { point: [0, 0, 10], part: null } };
+        this.requireMeasurement(msg.measurement);
+        return { result: { point: [0, 0, 10] } };
       case "export":
         return this.export(msg);
-      case "cancel":
-        return { result: {} };
       case "lsp":
-        this.lsp(msg.message, notify);
-        return null;
+        return { result: { messages: this.lsp(msg.message) } };
       default:
-        throw new Error(`unknown request: ${msg.type}`);
+        throw invalid(`unknown request type '${msg.type}'`);
     }
+  }
+
+  docInfo(path) {
+    const version = (this.versions.get(path) ?? 0) + 1;
+    this.versions.set(path, version);
+    const t = this.files.get(path);
+    return { path, version, length: typeof t === "string" ? new TextEncoder().encode(t).length : null };
   }
 
   text(path) {
     const t = this.files.get(path);
-    if (typeof t !== "string") throw new Error(`not open: ${path}`);
+    if (typeof t !== "string") throw new MockError("failed", `not open: ${path}`);
     return t;
+  }
+
+  requireMeasurement(m) {
+    if (m !== this.measurement || !m) throw invalid(`measurement ${m} is not the latest; measure again`);
+  }
+
+  addFiles(msg) {
+    let n = 0;
+    for (const f of msg.files ?? []) {
+      this.files.set(f.path, typeof f.data === "string" ? f.data : new Uint8Array(f.data));
+      n += 1;
+    }
+    if (msg.tar) {
+      const root = msg.root ?? "/neoscad/libraries";
+      for (const f of untar(new Uint8Array(msg.tar))) {
+        this.files.set(`${root}/${f.path}`, new TextDecoder().decode(f.bytes));
+        n += 1;
+      }
+    }
+    return n;
   }
 
   run(msg) {
@@ -122,68 +194,88 @@ export class MockCore {
     const console = [
       { kind: "info", text: "Mock engine: this build has no wasm core, so results are canned.", location: null },
     ];
+    const echo = [];
     const re = /echo\s*\(([^;]*)\)\s*;/g;
     for (let m; (m = re.exec(text)); ) {
-      const a = position(text, m.index);
-      const b = position(text, m.index + m[0].length);
+      const a = positionAt(text, m.index);
+      const b = positionAt(text, m.index + m[0].length);
+      const line = `ECHO: ${m[1].trim()}`;
+      echo.push(line);
       console.push({
         kind: "echo",
-        text: `ECHO: ${m[1].trim()}`,
-        location: {
-          path: msg.path,
-          start_line: a.line,
-          start_character: a.character,
-          end_line: b.line,
-          end_character: b.character,
-        },
+        text: line,
+        location: { path: msg.path, startLine: a.line, startCharacter: a.character, endLine: b.line, endCharacter: b.character },
+      });
+    }
+    // An argument naming a variable the text never assigns: OpenSCAD's
+    // "unknown variable" warning, with the position a real one carries.
+    const known = new Set(["true", "false", "undef", "PI"]);
+    for (const m of text.matchAll(/^\s*([A-Za-z_]\w*)\s*=/gm)) known.add(m[1]);
+    for (const m of text.matchAll(/\(\s*[A-Za-z_]\w*\s*=\s*([A-Za-z_]\w*)\s*\)/g)) {
+      if (known.has(m[1])) continue;
+      const at = m.index + m[0].lastIndexOf(m[1]);
+      const a = positionAt(text, at);
+      const b = positionAt(text, at + m[1].length);
+      console.push({
+        kind: "warning",
+        text: `WARNING: Ignoring unknown variable "${m[1]}" in file ${msg.path.split("/").pop()}, line ${a.line + 1}`,
+        location: { path: msg.path, startLine: a.line, startCharacter: a.character, endLine: b.line, endCharacter: b.character },
       });
     }
     if (/\bpart\s*\(/.test(text) && !msg.parts) {
       console.push({ kind: "warning", text: "WARNING: Ignoring unknown module 'part'", location: null });
     }
-    const scene = mockScene(text, msg.mode);
-    this.lastScene = mockScene(text, msg.mode);
-    this.lastPath = msg.path;
-    const b = scene.bbox;
+    const model = mockModel(text, msg.mode);
+    this.model = model;
+    const b = model.bbox;
     const geometry =
       msg.mode === "preview"
         ? null
         : {
             dimensions: 3,
-            bbox_min: b.min,
-            bbox_max: b.max,
+            bboxMin: b.min,
+            bboxMax: b.max,
             area: 2400,
             volume: 8000,
-            triangles: scene.meshes.length * 12,
-            vertices: scene.meshes.length * 8,
+            triangles: model.meshes.length * 12,
+            vertices: model.meshes.length * 8,
             manifold: true,
-            components: scene.meshes.length,
-            contours: null,
+            components: model.meshes.length,
           };
     const ms = 1 + (slow ? Number(slow[1]) : 0);
+    const scene = msg.scene === false ? null : packScene(model);
+    const vp = text.match(/^\s*\$vpr\s*=\s*\[([^\]]*)\]\s*;/m);
     return {
       result: {
         render: {
-          exit_code: 0,
+          exitCode: 0,
+          diagnostics: [],
+          echo,
+          console: console.map((l) => l.text).join("\n"),
           geometry,
-          timings: { parse_ms: 0.1, evaluate_ms: 0.4, geometry_ms: ms - 0.5, total_ms: ms },
+          cacheEntries: 0,
+          timings: { parseMs: 0.1, evaluateMs: 0.4, geometryMs: ms - 0.5, totalMs: ms },
         },
         console,
+        files: [],
         language: [],
         scene,
+        fileView: vp ? { vpr: vp[1].split(",").map(Number) } : null,
       },
-      transfer: sceneTransfer(scene),
+      transfer: scene ? [scene.faces, scene.edges] : [],
     };
   }
 
   parts(msg) {
     const text = this.text(msg.path);
-    return msg.parts ? [...text.matchAll(/\bpart\s*\(\s*"([^"]+)"/g)].map((m) => m[1]) : [];
+    return msg.run?.parts ? [...text.matchAll(/\bpart\s*\(\s*"([^"]+)"/g)].map((m) => m[1]) : [];
   }
 
   check(msg) {
+    const options = msg.options ?? CHECK_DEFAULTS;
+    if (!(options.nozzle > 0) || !(options.minWall > 0)) throw invalid("the nozzle and wall must be positive");
     return {
-      exit_code: 0,
+      exitCode: 0,
       failed: false,
       errors: 0,
       warnings: 1,
@@ -196,8 +288,8 @@ export class MockCore {
           message: "Wall 0.6 mm thick (the minimum is 0.8 mm)",
           part: this.parts(msg)[0] ?? null,
           point: [5, 0, 2],
-          bbox_min: [4, -2, 0],
-          bbox_max: [6, 2, 4],
+          bboxMin: [4, -2, 0],
+          bboxMax: [6, 2, 4],
           fix: "Thicken the wall to at least 0.8 mm.",
           value: 0.6,
           limit: 0.8,
@@ -209,17 +301,20 @@ export class MockCore {
           message: "Overhang of 50° over 12 mm²",
           part: null,
           point: [0, 0, 10],
-          bbox_min: [-3, -3, 10],
-          bbox_max: [3, 3, 10],
+          bboxMin: [-3, -3, 10],
+          bboxMax: [3, 3, 10],
           fix: "Chamfer the edge to 45° or add support.",
           value: 50,
           limit: 45,
         },
       ],
       truncated: [],
-      min_wall: 0.6,
+      minWall: 0.6,
       parts: this.parts(msg),
       text: "check: 1 warning, 1 note",
+      summaryJson: "{}",
+      diagnostics: [],
+      console: "",
     };
   }
 
@@ -227,47 +322,63 @@ export class MockCore {
     const solid = {
       volume: 8000,
       area: 2400,
-      bbox_min: [-10, -10, 0],
-      bbox_max: [10, 10, 20],
+      bboxMin: [-10, -10, 0],
+      bboxMax: [10, 10, 20],
       centroid: [0, 0, 10],
       triangles: 12,
     };
+    this.measurement += 1;
     return {
-      exit_code: 0,
+      exitCode: 0,
       model: solid,
       components: 1,
       manifold: true,
-      model_2d: null,
+      model2d: null,
       parts: this.parts(msg).map((name) => ({ name, instances: 1, context: null, solid })),
+      measurement: this.measurement,
+      diagnostics: [],
+      console: "",
     };
   }
 
   export(msg) {
-    const scene = this.lastScene ?? { meshes: [boxMesh([0, 0, 0], [10, 10, 10])] };
-    const make = { stl: () => stl(scene), off: () => off(scene), svg, "3mf": () => threeMF(scene) }[msg.format];
-    if (!make) throw new Error(`unknown export format: ${msg.format}`);
+    const model = this.model ?? { meshes: [boxMesh([0, 0, 0], [10, 10, 10])] };
+    const make = { stl: () => stl(model), off: () => off(model), svg, "3mf": () => threeMF(model) }[msg.format];
+    if (!make) throw invalid(`unknown export format: ${msg.format}`);
     const bytes = make();
-    return { result: { format: msg.format, bytes: bytes.buffer }, transfer: [bytes.buffer] };
+    const data = bytes.buffer;
+    return {
+      result: {
+        exitCode: 0,
+        format: msg.format,
+        bytes: data.byteLength,
+        mime: MIME[msg.format],
+        data,
+        geometry: null,
+        diagnostics: [],
+        console: "",
+        timings: { parseMs: 0, evaluateMs: 0, geometryMs: 0, totalMs: 1 },
+      },
+      transfer: [data],
+    };
   }
 
   /// Enough of a language server for the editor's client to initialise
   /// and not wait on its requests: `initialize` gets capabilities, any
   /// other request a null result, notifications nothing.
-  lsp(message, notify) {
+  lsp(message) {
     let m;
     try {
       m = JSON.parse(message);
     } catch {
-      return;
+      throw invalid("not JSON-RPC");
     }
-    if (m.id === undefined || m.method === undefined) return;
+    if (m.method === "textDocument/didOpen") this.lspOpen.add(m.params.textDocument.uri);
+    if (m.id === undefined || m.method === undefined) return [];
     const result =
       m.method === "initialize"
         ? { capabilities: { positionEncoding: "utf-16", textDocumentSync: { openClose: true, change: 2 } } }
         : null;
-    notify({ type: "lsp", message: JSON.stringify({ jsonrpc: "2.0", id: m.id, result }) });
+    return [JSON.stringify({ jsonrpc: "2.0", id: m.id, result })];
   }
 }
-
-/// A failure that kills the instance, as a wasm trap does.
-export class MockCrash extends Error {}

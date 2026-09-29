@@ -1029,6 +1029,66 @@ lead them, come roughly in order of user impact.
   byte-identical to native. Decide whether to accept that or use one libm
   everywhere. (H2)
 
+## Web demo
+- **Browsers other than Chromium are untested.** Only Playwright's
+  Chromium is installed; WebKit and Firefox (their WebGPU, the WebGL2
+  fallback, module workers, `DecompressionStream`) and the worker's stack
+  depth per browser (see "WASM") are unverified. The e2e runs the full
+  Chromium (`channel: "chromium"`, Metal adapter); Playwright's default
+  headless shell has `navigator.gpu` but no adapter.
+- **The core is 4.41 MB gzipped**, over the plan's 4 MB target
+  (`opt-level = "s"` would reach about 4.05 MB and run 10–15% slower;
+  see `ef33721`). The WebGPU viewer is 184 KB and the lazy WebGL build
+  1.10 MB gzipped. Whether GitHub Pages compresses `.wasm` is unverified.
+- **View All fits the bounding sphere vertically**, as OpenSCAD's
+  `Camera::viewAll` does, so a portrait view pane (the demo's middle
+  column at desktop widths) crops wide models such as box-lid. Consider
+  fitting to the narrower side on the web, or a wider default pane.
+- **The canvas fallback draws only colour-writing draws**: a preview's
+  image-space CSG primitives (subtracted and intersected shapes) are left
+  out, so previews of differences show only what is kept. It shows only
+  when neither WebGPU nor WebGL2 starts.
+- **The heavy example uses 937 MB of wasm memory** (`stats` after
+  preview and render), close to the worker's 1 GiB limit; the page
+  respawns the worker when leaving it. Its render reports "this
+  polyhedron is not closed: 238364 edges are used by only one face" in
+  BOSL2's `vnf.scad` line 1615 (`session::orient`, a NeoSCAD diagnostic
+  that is not in the CLI's console); check whether the app reports it
+  natively too and whether it is a false positive on BOSL2's isosurface
+  VNF. wasm gives 269,960 triangles against the CLI's 269,948 (wasm32
+  maths, see "WASM").
+- **A flaky e2e:** "examples switch, and edits persist" lost the typed
+  space of `// edited` (the editor held `//edited`) in 2 of 5 full-suite
+  runs against the website under `python3 -m http.server`; it passed in
+  all runs under `serve.mjs`, and in 0 of 20 isolated repeats did it
+  fail. The key events reach CodeMirror in order when it passes; the
+  cause is unknown (a keystroke landing while the autorun preview's
+  replies, the customizer refresh or a language-server answer arrive is
+  the suspect). A user could lose a keystroke the same way.
+- **The threaded ring's preview takes 3.8 s to show for 1.8 s of engine
+  time** (`timings.totalMs`); the render shows in 3.8 s for 3.7 s. The
+  difference is outside `timings`: packing the preview scene (image-CSG
+  products) and the reply's JSON and transfer. Measure it in the worker.
+- **Echo lines have no source location** (OpenSCAD prints none), so
+  clicking one does nothing; the console-jump e2e uses a warning.
+- **No crash hook in the core:** the crash e2e patches the glue
+  (`core/neoscad_web.js`) so a run throws the RuntimeError a trap throws.
+  A real panic or OOM trap in a browser is not exercised.
+- **`build.sh` packages, it does not build** the core and viewers
+  (`dist/web-core`, `dist/web-view/{webgpu,webgl}`), and it does not
+  check that they are newer than the Rust source.
+- **THIRD-PARTY-LICENSES.txt lists build-time crates too**
+  (`scripts/web/rust-licenses.mjs` walks normal dependencies, which
+  includes proc macros such as `proc-macro2` and `quote` that are not in
+  the modules): over-inclusive, not missing anything.
+- **Language requests queue behind a run** in the single worker (hover
+  and completion wait for a long render); a separate LSP worker is in the
+  plan's deferred list.
+- **wasm-opt** was run through a Docker wrapper (binaryen is not
+  installed here); `build-view.sh` takes only a binary in `WASM_OPT`.
+- The render crate's `overlay::small_axes_clip` is dead code in the
+  wasm32 builds (a compiler warning in `build-core.sh`'s output).
+
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.
   CI would need it too. (5a)

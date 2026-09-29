@@ -3,8 +3,10 @@
 
 import { MockCore, MockCrash } from "../src/engine/mock-core.js";
 
-/// A Worker over MockCore. Replies arrive asynchronously, as a worker's
-/// do. With `hold` set, requests wait until `release()`: a long run.
+/// A Worker over MockCore, with mock-worker.js's envelope (the real glue's:
+/// a `crashed` reply and message when an instance traps, and `crashed`
+/// replies after). Replies arrive asynchronously, as a worker's do. With
+/// `hold` set, runs wait until `release()`: a long run.
 export class FakeWorker {
   constructor({ hold = false } = {}) {
     this.core = new MockCore();
@@ -13,6 +15,7 @@ export class FakeWorker {
     this.hold = hold;
     this.held = [];
     this.received = [];
+    this.crashed = false;
   }
 
   addEventListener(type, fn) {
@@ -36,13 +39,21 @@ export class FakeWorker {
   }
 
   answer(msg) {
+    if (this.crashed) {
+      this.emit("message", { id: msg.id, ok: false, error: { kind: "crashed", message: "respawn" } });
+      return;
+    }
     try {
-      const out = this.core.handle(msg, (n) => this.emit("message", n));
-      if (msg.id == null || out === null) return;
+      const out = this.core.handle(msg);
       this.emit("message", { id: msg.id, ok: true, result: out.result });
     } catch (e) {
-      if (e instanceof MockCrash) this.emit("message", { type: "fatal", message: e.message });
-      else this.emit("message", { id: msg.id, ok: false, error: { message: e.message } });
+      if (e instanceof MockCrash) {
+        this.crashed = true;
+        this.emit("message", { id: msg.id, ok: false, error: { kind: "crashed", message: e.message } });
+        this.emit("message", { type: "crashed", message: e.message });
+      } else {
+        this.emit("message", { id: msg.id, ok: false, error: { kind: e.kind ?? "failed", message: e.message } });
+      }
     }
   }
 
