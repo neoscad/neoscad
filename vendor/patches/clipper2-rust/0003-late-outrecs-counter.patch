@@ -1,0 +1,82 @@
+NeoSCAD patch to clipper2-rust 1.2.0 (crates.io): ClipperBase::late_outrecs,
+the number of output records the last Clipper64::execute_tree created after
+its sweep (in process_horz_joins and fix_self_intersects). It changes no
+output; NeoSCAD's banded union (union_by_bands in crates/geom/src/clipper.rs)
+reads it to tell whether its result is exactly the full union's.
+
+Upstream: none intended; it exists only for NeoSCAD's banded union and
+stays a local patch.
+
+Apply from the crate root on top of 0001 and 0002: patch -p1 < this file.
+See vendor/README.md ("The split-off counter").
+
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -398,6 +398,16 @@
+     pub intersect_nodes: Vec<IntersectNode>,
+     pub horz_seg_list: Vec<HorzSegment>,
+     pub horz_join_list: Vec<HorzJoin>,
++
++    /// NeoSCAD patch (see NeoSCAD's vendor/README.md): the number of
++    /// outrecs the last `Clipper64::execute_tree` split off after its sweep
++    /// (in `process_horz_joins` and `fix_self_intersects`). Split-off
++    /// outrecs go to the end of `outrec_list` whatever part of the plane
++    /// they are in, so a caller that unions separate bands of input one by
++    /// one and concatenates the results in sweep order gets exactly one
++    /// full union's order only when no band but the last has any.
++    pub late_outrecs: usize,
++    sweep_outrecs: usize,
+ 
+     // 'static boxed FnMut mirrors C++ std::function, which has no borrow
+     // semantics either; callers capture external state via move closures.
+@@ -436,6 +446,8 @@
+             intersect_nodes: Vec::new(),
+             horz_seg_list: Vec::new(),
+             horz_join_list: Vec::new(),
++            late_outrecs: 0,
++            sweep_outrecs: 0,
+ 
+             #[cfg(feature = "using_z")]
+             z_callback: None,
+@@ -3478,6 +3490,7 @@
+         self.fillrule = fillrule;
+         self.using_polytree = use_polytrees;
+         self.reset();
++        self.sweep_outrecs = 0; // NeoSCAD patch: see `late_outrecs`.
+ 
+         if ct == ClipType::NoClip {
+             return true;
+@@ -3516,12 +3529,19 @@
+             }
+         }
+ 
++        // NeoSCAD patch: see `late_outrecs`.
++        self.sweep_outrecs = self.outrec_list.len();
+         if self.succeeded {
+             self.process_horz_joins();
+         }
+ 
+         self.succeeded
+     }
++
++    /// NeoSCAD patch: records `late_outrecs` once the tree is built.
++    pub(crate) fn count_late_outrecs(&mut self) {
++        self.late_outrecs = self.outrec_list.len().saturating_sub(self.sweep_outrecs);
++    }
+ }
+ 
+ // ============================================================================
+--- a/src/engine_public.rs
++++ b/src/engine_public.rs
+@@ -370,8 +370,11 @@
+         polytree.clear();
+         open_paths.clear();
+ 
++        self.base.late_outrecs = 0;
+         if self.base.execute_internal(clip_type, fill_rule, true) {
+             self.build_tree64(polytree, open_paths);
++            // NeoSCAD patch (see NeoSCAD's vendor/README.md)
++            self.base.count_late_outrecs();
+         }
+         self.base.clean_up();
+         self.base.succeeded

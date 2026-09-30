@@ -1,0 +1,61 @@
+NeoSCAD patch to clipper2-rust 1.2.0 (crates.io): nearbyint_f64 calls
+f64::round_ties_even (one instruction on arm64 and wasm32) instead of a
+software round-half-even, which was 16% of a large 2D union. Bit-identical
+for finite input; non-finite input still gives NaN. rust-version goes from
+1.70 to 1.77, the release that stabilised round_ties_even. Test:
+crates/geom/tests/kernel_patches.rs.
+
+Upstream: not yet filed; a draft issue is in vendor/README.md ("Upstream
+drafts").
+
+Apply from the crate root: patch -p1 < this file.
+See vendor/README.md ("The rounding patch").
+
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -11,7 +11,7 @@
+ 
+ [package]
+ edition = "2021"
+-rust-version = "1.70"
++rust-version = "1.77"
+ name = "clipper2-rust"
+ version = "1.2.0"
+ authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
+--- a/src/core.rs
++++ b/src/core.rs
+@@ -1598,22 +1598,21 @@
+ }
+ 
+ /// Banker's rounding (round half to even), matching C++ nearbyint() behavior.
+-/// MSRV 1.70 does not have f64::round_ties_even(), so we implement it manually.
++///
++/// NeoSCAD patch (see NeoSCAD's vendor/README.md): `round_ties_even` is one
++/// instruction (`frintn` on arm64, `f64.nearest` on wasm32) where the
++/// software version it replaces (trunc, compare, `%`) was 16% of a large
++/// `top_x`-heavy union. For finite `x` the two agree bit for bit, the sign
++/// of zero included. The old code turned ±∞ into NaN (`∞ - ∞`), and `top_x`
++/// could reach this with ∞ (a horizontal edge's `dx` is ±`f64::MAX`), where
++/// NaN casts to 0 but ∞ to `i64::MAX` and overflows the add; so non-finite
++/// input keeps giving NaN.
+ #[inline]
+ pub fn nearbyint_f64(x: f64) -> f64 {
+-    let trunc = x.trunc();
+-    let frac = x - trunc;
+-    if frac.abs() < 0.5 {
+-        trunc
+-    } else if frac.abs() > 0.5 {
+-        trunc + frac.signum()
++    if x.is_finite() {
++        x.round_ties_even()
+     } else {
+-        // Exactly 0.5: round to nearest even
+-        if trunc % 2.0 == 0.0 {
+-            trunc
+-        } else {
+-            trunc + frac.signum()
+-        }
++        f64::NAN
+     }
+ }
+ 

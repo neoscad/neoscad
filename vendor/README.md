@@ -1,5 +1,63 @@
 # Vendored dependencies
 
+## The convention
+
+Each directory `vendor/<crate>` is a crates.io release with local changes,
+used through `[patch.crates-io]` in the root `Cargo.toml`. It must be
+exactly:
+
+1. the release's `.crate`, whose SHA-256 is the checksum in the crates.io
+   index (what `Cargo.lock` records for a registry dependency);
+2. minus the paths listed in `vendor/patches/<crate>/removed`, if that
+   file exists (for files a patch cannot delete, such as a binary);
+3. plus `vendor/patches/<crate>/0001-*.patch`, `0002-*.patch`, … applied
+   in order from the crate root with `patch -p1`, each hunk at its exact
+   position (no offset, no fuzz).
+
+One patch per logical change, each starting with a short header: what it
+changes, why, its upstream status, and the section of this file that has
+the evidence. In the tree, each change to source is also marked with a
+`NeoSCAD patch` comment.
+
+`scripts/vendor-check.sh` rebuilds each tree that way (downloading the
+`.crate` and checking its checksum) and compares it with `vendor/<crate>`
+byte for byte, CRLF line endings included; CI runs it in the lint job.
+It fails on any difference, on a patch that does not apply exactly, on
+a `removed` entry the release does not have, and on a vendored crate
+without a `vendor/patches/<crate>` directory.
+
+**Changing a vendored crate.** Edit `vendor/<crate>`, then put the edit in
+a patch:
+
+- a new change: create the next file, say
+  `vendor/patches/<crate>/0004-short-name.patch`, holding only its header
+  (no line of it may start with `--- `), then run
+  `scripts/vendor-check.sh --refresh <crate>`. That rewrites the body of
+  the crate's last patch with the difference between the release plus
+  every earlier patch and the vendored tree, and checks the crate;
+- more work on the last change: edit, and `--refresh` again;
+- a fix to an earlier patch: `--refresh` only rewrites the last one, so
+  edit that patch by hand (or rebuild the series: apply the patches up to
+  it in a scratch copy of the release, make the fix there, and diff with
+  `scripts/vendor-check.sh --diff OLD NEW`), then check that the later
+  patches still apply exactly.
+
+`--refresh` and `--diff` write plain `diff -u` output, so GNU diff (Linux)
+and BSD diff (macOS) can choose different but equivalent hunks; the check
+compares trees, not patch bytes, and accepts either.
+
+**When upstream releases a change.** Move the crate to the new release:
+download it, apply the series in order, and for each patch that no
+longer applies, check whether the release already has the change. If it
+does, delete that patch file (and its section here) and renumber the
+patches after it so the series stays `0001` onward; if it does not,
+regenerate the patch against the new release. Then replace
+`vendor/<crate>` with the new release's tree plus the remaining patches,
+update any `=` pin on the crate in the workspace's `Cargo.toml` files,
+and run the check. When no patch is left, drop
+`vendor/<crate>`, `vendor/patches/<crate>` and its `[patch.crates-io]`
+line.
+
 ## manifold-rust 0.13.1, patched
 
 A copy of the crates.io release (`.cargo_vcs_info.json` gives the upstream
@@ -10,8 +68,23 @@ bug fix in `src/edge_op.rs`, a speed fix in `src/polygon_earclip.rs`, and
 parallel boolean kernels in `src/par.rs` and its callers (below). Drop the
 copy once upstream has all three.
 
+The series, in `vendor/patches/manifold-rust/`:
+
+| Patch | Change |
+|---|---|
+| `removed` | `.gitmodules` (a submodule the `.crate` does not ship) and `README_HERO.png` (the README's 257 KiB screenshot) are left out; neither is used by the build |
+| `0001-edge-collapse-crease.patch` | the edge-collapse fix (`src/edge_op.rs`) |
+| `0002-keyhole-loop-visitor.patch` | the keyhole speed patch (`src/polygon_earclip.rs`) |
+| `0003-parallel-booleans.patch` | the parallel boolean kernels |
+
+The first vendoring (`17a31e4`) left the two files out without a
+recorded reason; they could as well be restored, which would empty
+`removed`. crates.io has had a newer release, 0.15.0, since 2026-09-29;
+it has not been compared with this series.
+
 Its source files use CRLF line endings; keep them when editing (a tool
-that rewrites them as LF turns every line into a diff).
+that rewrites them as LF turns every line into a diff). The patches
+carry the CRs in their lines, so keep those too.
 
 ### The edge-collapse bug
 
@@ -98,10 +171,9 @@ stages parallel, each in a way whose output is the sequential output, so
 the result is byte-identical at any thread count and to 0.13.1's. Every
 site goes through a helper in `src/par.rs` with a sequential twin for
 builds without the `parallel` feature (the WASM build's pool runs on the
-calling thread either way). The change is also kept as a patch file,
-`vendor/patches/manifold-rust/0003-parallel-booleans.patch`, which
-applies (`patch -p1` from the crate root) on top of the two changes
-above; those two have no patch file yet. By site:
+calling thread either way). The patch is
+`vendor/patches/manifold-rust/0003-parallel-booleans.patch`, on top of
+0001 and 0002. By site:
 
 - **`batch_boolean` rounds** (`csg_tree.rs`): a round's up to four pairs
   are picked first, then run side by side (C++ `csg_tree.cpp:451-479` in
@@ -185,6 +257,19 @@ and `rust-version` raised from 1.70 to 1.77 in `Cargo.toml` (the release
 that stabilised `f64::round_ties_even`; the workspace needs 1.98 anyway).
 Drop the copy once upstream has the fixes; the counter exists only for
 neoscad's banded union and would stay a local patch.
+
+The series, in `vendor/patches/clipper2-rust/` (nothing is removed):
+
+| Patch | Change |
+|---|---|
+| `0001-nearbyint-round-ties-even.patch` | the rounding patch (`src/core.rs`) and the `rust-version` it needs (`Cargo.toml`) |
+| `0002-sweep-shortcuts.patch` | the two sweep shortcuts (`src/engine.rs`) |
+| `0003-late-outrecs-counter.patch` | the split-off counter (`src/engine.rs`, `src/engine_public.rs`) |
+
+The shortcuts and the counter were committed together (`4fe4459`) and
+split into 0002 and 0003 afterwards; the tree between them (shortcuts
+without the counter) compiles (`cargo check --lib`) but was never tested
+or benchmarked on its own.
 
 ### The rounding patch
 
@@ -314,11 +399,8 @@ build (`crates/web-view`'s default `webgl` feature). The WebGPU-only web
 builds do not compile wgpu-core at all; the browser implements WebGPU.
 
 It carries one change, upstream's own fix, marked `NeoSCAD patch` in
-`src/device/resource.rs`. The change is also kept as a patch file,
-`vendor/patches/wgpu-core/0001-maintain-queue-empty-race.patch`: the
-vendored tree is exactly the pristine crate plus that patch
-(`patch -p1` from the crate root), so the copy can be checked or rebuilt
-from the `.crate`.
+`src/device/resource.rs`, and its series is that one patch,
+`vendor/patches/wgpu-core/0001-maintain-queue-empty-race.patch`.
 
 Being a path dependency, its compiler warnings are no longer capped the
 way a registry crate's are, so every build now shows one from upstream

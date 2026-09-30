@@ -2,7 +2,8 @@
 # passes before cargo-dist builds anything (release.yml calls this workflow
 # as a plan job: `plan-jobs` in Cargo.toml's [workspace.metadata.dist]).
 #
-# - lint: rustfmt, the licence copies, the release config;
+# - lint: rustfmt, the licence copies, the vendored crates' patch series
+#   (scripts/vendor-check.sh), the release config;
 # - test: clippy, cargo test and the conformance suite on macOS arm64,
 #   Linux x86_64 and Linux aarch64 (output depends on the architecture and
 #   the platform's libm, so each is its own output path);
@@ -38,6 +39,8 @@ jobs:
           persist-credentials: false
       - run: cargo fmt --all --check
       - run: scripts/release/licenses.sh --check
+      - name: Vendored crates are their releases plus vendor/patches
+        run: scripts/vendor-check.sh
       - name: Release workflow matches its config
         run: |
           curl --proto '=https' --tlsv1.2 -LsSf \

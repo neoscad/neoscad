@@ -3,9 +3,10 @@ stages of a boolean in parallel, with output identical to the sequential
 code at any thread count (batch_boolean rounds, edge-flag and orbit
 scans, the result assembly's edge maps, face2tri's writes, the sorts).
 
-Apply from the crate root, on top of the two earlier changes (the
-edge-collapse fix and the keyhole speed-up, which have no patch file
-yet): patch -p1 < this file. The crate's sources use CRLF line endings.
+Upstream: not reported.
+
+Apply from the crate root on top of 0001 and 0002: patch -p1 < this file.
+The crate's sources use CRLF line endings.
 See vendor/README.md ("The parallel boolean patch").
 
 --- a/src/boolean3_kernels.rs
