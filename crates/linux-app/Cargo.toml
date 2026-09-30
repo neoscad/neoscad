@@ -1,0 +1,51 @@
+[package]
+name = "neoscad-linux-app"
+description = "The NeoSCAD desktop app for Linux: GTK 4 and libadwaita around the Rust core (`client`), the CodeMirror editor in WebKitGTK and the wgpu viewport (docs/linux-app.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# The host logic that is not GTK glue (the editor bridge, the editor's
+# resources, the document runs, window titles, export plumbing) is the
+# library, which builds and tests on every platform, so the macOS and
+# Windows workspace builds check it too. The app itself needs GTK 4.14,
+# libadwaita 1.5 and WebKitGTK 6.0 development files, which only a Linux
+# machine has: it is behind the `gtk` feature, off by default, so
+# `cargo build`, `cargo clippy --all-targets` and `cargo test` of the
+# workspace never look for them (docs/linux-app.md, "Building").
+[lib]
+name = "linux_app"
+
+[[bin]]
+name = "neoscad-gtk"
+path = "src/main.rs"
+required-features = ["gtk"]
+
+[features]
+default = []
+gtk = ["dep:gtk", "dep:adw", "dep:webkit6", "dep:mimalloc"]
+
+[dependencies]
+assets = { package = "neoscad-assets", path = "../assets" }
+client = { package = "neoscad-client", path = "../client" }
+eval = { package = "neoscad-eval", path = "../eval" }
+lang = { package = "neoscad-lang", path = "../lang" }
+# With the GPU: the viewport draws with wgpu (Vulkan, else GL).
+render = { package = "neoscad-render", path = "../render" }
+serde_json.workspace = true
+session = { package = "neoscad-session", path = "../session" }
+text = { package = "neoscad-text", path = "../text" }
+# The app binary's global allocator, as for `neoscad` and the macOS
+# app's core.
+mimalloc = { workspace = true, optional = true }
+
+# GTK 4.14 (Ubuntu 24.04's; FileDialog is 4.10), libadwaita 1.5
+# (AlertDialog; ToolbarView is 1.4) and WebKitGTK 6.0.
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"], optional = true }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"], optional = true }
+webkit6 = { version = "0.6", optional = true }
+
+[lints]
+workspace = true

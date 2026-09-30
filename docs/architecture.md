@@ -47,7 +47,10 @@ The workspace is every directory under `crates/` (`Cargo.toml`,
 - **Hosts** (may touch the platform): `cli` (the `neoscad` binary:
   OpenSCAD's flags plus `serve`, `mcp`, `lsp`, `snapshot`, `check`,
   `measure`, `test`, `fmt`, `docs` and `bench`) · `ffi` (the app's UniFFI
-  bridge) · `conformance` (test harness, benchmarks, progress video) ·
+  bridge) · `linux-app` (package `neoscad-linux-app`: the GTK desktop
+  app, `docs/linux-app.md`; the window needs its `gtk` feature, the rest
+  builds everywhere) · `conformance` (test harness, benchmarks, progress
+  video) ·
   `bench-core` (package `neoscad-bench-core`: the benchmark timing, the
   bench kit, the community result schema and the official-release check
   that `neoscad bench` and `conformance bench` share;
@@ -103,6 +106,7 @@ and statement memo, cancellation) sits under every long-lived client:
 | `neoscad lsp --stdio` | `crates/cli/src/lsp.rs` over `crates/lsp` | LSP over stdio, its own session, debounced diagnostics | `Limits::AGENT`, `--limit` |
 | macOS app | `crates/ffi` | UniFFI; the `lsp` server runs in-process per window over the app's session | `Limits::AGENT` (`ffi/src/host.rs`); Quick Look 5 s / 512 MiB |
 | Windows app | `crates/ffi` (as a DLL) | UniFFI through uniffi-bindgen-cs's C#; the `lsp` server in-process per window | `Limits::AGENT` (`ffi/src/host.rs`) |
+| Linux app | `crates/linux-app` | Rust calls to `client` in-process, runs on a worker thread (`gio::spawn_blocking`, which also catches a panicking run); no language server yet | `Limits::AGENT` (`linux-app/src/host.rs`) |
 
 Every host catches a panicking request (`serve`, `mcp` and `lsp` per
 request, `ffi`'s `guarded` per call) and keeps its session; see "Panics".
@@ -195,6 +199,15 @@ request, `ffi`'s `guarded` per call) and keeps its session; see "Panics".
   `DispatcherQueueTimer`. Its non-UI host logic (`windows/NeoSCAD.Host`)
   is plain .NET and tested on Linux too. Milestone 1: one window, edit,
   preview, render, export; packaging and the panels are next.
+- **Linux: GTK 4 and libadwaita** (`crates/linux-app`,
+  `docs/linux-app.md`): a Rust host that calls `client`, `session` and
+  `render` directly (no UniFFI). The editor is the macOS app's CodeMirror
+  bundle in a WebKitGTK 6 web view, over the same message protocol; the
+  document loop is `client::DocumentLoop` with one GLib timer; the wgpu
+  viewport (Vulkan, else GL) draws into a texture that GTK composites,
+  because GTK 4 gives a widget no native window to put a surface in.
+  Milestone 1: editing with live preview, the view, the console, files,
+  examples, STL and PNG export, light and dark.
 - **The document loop** (8f, `crates/ffi/src/document.rs`,
   `apple/App/Document/DocumentLoop.swift`): each pause in typing (and
   each customizer edit, or change on disk to a file the model read) runs

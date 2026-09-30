@@ -1276,6 +1276,20 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   generator pin (`$BindgenRev` in `scripts/windows/build-core.ps1`, an
   open uniffi-bindgen-cs pull request) should move to a release.
 
+## Linux
+
+- The Linux app (milestone 1, `docs/linux-app.md`) was run only on
+  Ubuntu 24.04 in Docker (arm64, Xvfb, Mesa lavapipe), never on a
+  Wayland session or a real GPU, and never with the portal's file
+  chooser: check fractional scaling (`GdkSurface::scale`), Wayland input
+  and the dialogs on a GNOME desktop. Its milestone 2 list (language
+  server, panels, file watching, dmabuf view, the other exports,
+  GSettings, Flatpak) is in that document ("Next").
+- Its view copies each changed frame from the GPU (`view.rs`); a large
+  window at 4K on a slow bus may show it. `GdkDmabufTexture` is the fix.
+- After orbiting, lavapipe drew striped black marks near the origin
+  (the axis dashes or scale ticks?). Check whether a real GPU does too.
+
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.
   CI would need it too. (5a)

@@ -9,6 +9,8 @@
 #   the platform's libm, so each is its own output path);
 # - windows: the CLI builds and its tests pass (x86_64), and serves over a
 #   named pipe;
+# - linux-app: the GTK desktop app builds, its tests pass, and it runs
+#   headless;
 # - wasm: scripts/wasm-check.sh.
 name: CI
 
@@ -182,6 +184,42 @@ jobs:
           & $exe serve --status
           if ($LASTEXITCODE -eq 0) { throw "a server still answers after --stop" }
           $global:LASTEXITCODE = 0
+
+  # The Linux desktop app (crates/linux-app, docs/linux-app.md): clippy and
+  # tests with GTK, then a headless run that opens a model, previews it
+  # and previews it again after typing in the editor. Ubuntu 24.04 is the
+  # first LTS with GTK 4.14, libadwaita 1.5 and WebKitGTK 6.0; the `test`
+  # jobs above build the crate without its `gtk` feature, so they need
+  # none of these packages.
+  linux-app:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
+            mesa-vulkan-drivers libvulkan1 libegl1 libgl1-mesa-dri \
+            xvfb xauth dbus-daemon xdotool
+          # As in the test job: Mesa's Vulkan device-select layer wants it.
+          mkdir -p "$RUNNER_TEMP/xdg"
+          chmod 700 "$RUNNER_TEMP/xdg"
+          echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg" >> "$GITHUB_ENV"
+      - run: cargo clippy --locked -p neoscad-linux-app --features gtk --all-targets -- -D warnings
+      - run: cargo test --locked -p neoscad-linux-app --features gtk
+      - run: cargo build --locked -p neoscad-linux-app --features gtk
+      - name: The editor bundle
+        run: scripts/apple/build-editor.sh
+      - name: The app previews a model and follows typing, headless
+        run: TYPE=1 linux/smoke.sh target/debug/neoscad-gtk web/examples/CSG.scad
 
   wasm:
     runs-on: ubuntu-22.04
