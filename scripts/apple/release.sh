@@ -299,11 +299,24 @@ check_uuid "$app/Contents/Frameworks/NeoSCADCore.framework/NeoSCADCore" \
 
 # Submit, wait, and fail with Apple's log unless accepted.
 notarize() {
-    local file=$1 out id status
-    out=$(xcrun notarytool submit "$file" --keychain-profile "$notary" --wait \
+    local file=$1 out id status tries=0
+    # Submit, then wait on the submission id separately: `submit --wait`
+    # gives up the moment the network drops (a CI runner lost its
+    # connection 1h45m into Apple's queue on v0.1.1), while the submission
+    # carries on at Apple. A failed wait is retried (up to 8 times, 60 s
+    # apart); only an answer from Apple ends it.
+    out=$(xcrun notarytool submit "$file" --keychain-profile "$notary" \
         --output-format plist)
     id=$(plutil -extract id raw - <<<"$out")
-    status=$(plutil -extract status raw - <<<"$out")
+    echo "submitted $(basename "$file") for notarization ($id)"
+    until out=$(xcrun notarytool wait "$id" --keychain-profile "$notary" \
+        --output-format plist 2>/dev/null) &&
+        status=$(plutil -extract status raw - <<<"$out" 2>/dev/null); do
+        tries=$((tries + 1))
+        [ "$tries" -le 8 ] || die "lost contact with the notary service (submission $id)"
+        echo "notarytool wait failed (try $tries); retrying in 60 s" >&2
+        sleep 60
+    done
     if [ "$status" != Accepted ]; then
         xcrun notarytool log "$id" --keychain-profile "$notary" >&2 || true
         die "notarization of $(basename "$file") ended $status (submission $id)"
