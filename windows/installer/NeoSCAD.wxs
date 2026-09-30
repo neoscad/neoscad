@@ -64,7 +64,7 @@
     <Property Id="ARPPRODUCTICON" Value="NeoSCAD.ico" />
     <Property Id="ARPHELPLINK" Value="https://neoscad.org" />
     <Property Id="ARPURLINFOABOUT" Value="https://neoscad.org" />
-    <Property Id="ARPNOMODIFY" Value="1" />
+    <!-- ARPNOMODIFY comes from WixUI_Minimal, which sets it itself. -->
 
     <!--
       What .scad opens with before this install. The default is taken only

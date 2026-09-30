@@ -29,11 +29,15 @@ def best(result):
 
 
 def main(argv):
-    args = [a for a in argv if not a.startswith("--")]
+    # Remove --out and its value by position: str(Path(value)) need not
+    # equal the value (Windows turns / into \\), so it can't be looked up.
+    argv = list(argv)
     out = None
     if "--out" in argv:
-        out = Path(argv[argv.index("--out") + 1])
-        args.remove(str(out))
+        i = argv.index("--out")
+        out = Path(argv[i + 1])
+        del argv[i : i + 2]
+    args = [a for a in argv if not a.startswith("--")]
     if len(args) != 2:
         sys.exit(__doc__)
     plain_doc, pgo_doc = (json.loads(Path(a).read_text()) for a in args)
