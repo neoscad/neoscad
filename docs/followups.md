@@ -1137,6 +1137,13 @@ lead them, come roughly in order of user impact.
   everywhere. (H2)
 
 ## Web demo
+- Consider "Connect your AI agent" (the `neoscad mcp --browser` bridge,
+  docs/agent-bridge.md) for the native apps too: macOS, and the Linux and
+  Windows apps being built (owner, 2026-09-30: weigh its value first, don't
+  build yet). Questions: what an agent gains from the live app (the open
+  buffer, the 3D view as shown, markers) over file-based `neoscad mcp`;
+  whether the same bridge or a local socket suits a native app; one shared
+  core implementation for all three.
 - **Browsers other than Chromium are untested.** Only Playwright's
   Chromium is installed; WebKit and Firefox (their WebGPU, the WebGL2
   fallback, module workers, `DecompressionStream`) and the worker's stack
