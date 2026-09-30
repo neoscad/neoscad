@@ -15,5 +15,15 @@
          (native/<rid>/neoscad_ffi.dll) and, for the tests off Windows,
          scripts/windows/docker-test.sh its .so. -->
     <NeoScadNativeDir>$(MSBuildThisFileDirectory)native\</NeoScadNativeDir>
+    <!-- The workspace version (Cargo.toml's [workspace.package] version),
+         so a release bump in one place reaches the app's exe (NeoSCAD.App
+         sets Version from it) and the MSI (scripts/windows/build-msi.ps1
+         reads the same line). A hand-kept copy here went stale on bumps.
+         NeoScadVersionPrefix is its numeric part: file versions and MSI
+         product versions take only numbers, so "0.2.0-beta.1" becomes
+         0.2.0 there and stays whole in the informational version. -->
+    <NeoScadCargoToml>$([System.IO.File]::ReadAllText($([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)', '..', 'Cargo.toml'))))</NeoScadCargoToml>
+    <NeoScadVersion>$([System.Text.RegularExpressions.Regex]::Match($(NeoScadCargoToml), '(?&lt;=\[workspace\.package\]\s*\nversion\s*=\s*")[^"]+').Value)</NeoScadVersion>
+    <NeoScadVersionPrefix>$([System.Text.RegularExpressions.Regex]::Match($(NeoScadVersion), '^\d+\.\d+\.\d+').Value)</NeoScadVersionPrefix>
   </PropertyGroup>
 </Project>

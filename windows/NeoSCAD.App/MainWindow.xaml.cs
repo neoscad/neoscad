@@ -26,6 +26,11 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1400, 900));
+        // The title bar and taskbar icon. The exe's embedded icon
+        // (ApplicationIcon) is what Explorer and the Start menu show; an
+        // unpackaged WinUI window does not take it from there by itself.
+        var icon = Path.Combine(AppContext.BaseDirectory, "Assets", "NeoSCAD.ico");
+        if (File.Exists(icon)) AppWindow.SetIcon(icon);
 
         var queue = DispatcherQueue;
         var core = CoreService.Shared;
@@ -100,6 +105,7 @@ public sealed partial class MainWindow : Window
             AppLog.Write("editor start threw", x);
         }
         if (editor.Error is { } e) ShowError(EditorError, e);
+        if (editor.RuntimeMissing) await OfferWebViewDownloadAsync();
         AppLog.Write($"startup: {startup}");
         switch (startup)
         {
@@ -114,6 +120,41 @@ public sealed partial class MainWindow : Window
                 break;
         }
         Title = document.Title;
+    }
+
+    /// <summary>
+    /// No WebView2 runtime: say so in a dialog with a button that opens
+    /// Microsoft's download page, since the pane's text alone is easy to
+    /// miss and a link in a TextBlock cannot be clicked.
+    /// </summary>
+    async Task OfferWebViewDownloadAsync()
+    {
+        try
+        {
+            // The window's content may not be loaded yet: this runs from the
+            // constructor, and without a runtime nothing above awaited.
+            if (Root.XamlRoot is null)
+            {
+                var loaded = new TaskCompletionSource();
+                Root.Loaded += (_, _) => loaded.TrySetResult();
+                await loaded.Task;
+            }
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Root.XamlRoot,
+                Title = WebViewRuntime.MissingTitle,
+                Content = new TextBlock { Text = WebViewRuntime.MissingMessage, TextWrapping = TextWrapping.Wrap },
+                PrimaryButtonText = "Download WebView2",
+                CloseButtonText = "Not now",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+                await Windows.System.Launcher.LaunchUriAsync(new Uri(WebViewRuntime.DownloadUrl));
+        }
+        catch (Exception x)
+        {
+            AppLog.Write("webview2 download offer failed", x);
+        }
     }
 
     RenderMode LastMode() => document.LoopState().LastMode ?? RenderMode.Preview;

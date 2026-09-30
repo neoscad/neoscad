@@ -1,0 +1,200 @@
+# The Windows app's MSI (windows/installer/NeoSCAD.wxs,
+# scripts/windows/build-msi.ps1; docs/windows-app.md, "Installer"), built
+# and then tested the way a user meets it, on each architecture's own
+# runner:
+#
+#   1. build the core, the binding and the editor bundle, publish the app
+#      self-contained and build the unsigned MSI; upload it;
+#   2. install it silently (msiexec /qn) and check the files, the Start
+#      menu shortcut, the Add or remove programs entry and the .scad
+#      association in the registry;
+#   3. launch the installed exe with --log and screenshot its window
+#      (scripts/windows/launch-screenshot.ps1), then open a .scad file the
+#      way Explorer does (ShellExecute) and check the installed exe got it;
+#   4. uninstall silently and check that the files and keys are gone.
+#
+# On demand only, for now: the release pipeline does not run it yet (see
+# docs/release.md, "Next: the Windows app in the release").
+name: Windows installer
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-installer-${{ github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  msi:
+    name: msi (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-app-${{ matrix.arch }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: The core's DLL, the C# binding and the editor bundle
+        shell: pwsh
+        run: scripts/windows/build-core.ps1 -Arch ${{ matrix.arch }}
+
+      - name: Build the MSI
+        id: build
+        shell: pwsh
+        run: scripts/windows/build-msi.ps1 -Arch ${{ matrix.arch }} -Out dist/windows
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: neoscad-windows-${{ matrix.arch }}-msi
+          path: dist/windows/*.msi
+          if-no-files-found: error
+
+      - name: Install silently
+        shell: pwsh
+        env:
+          MSI: ${{ steps.build.outputs.msi }}
+        run: |
+          New-Item -ItemType Directory -Force -Path installer-test | Out-Null
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/i', "`"$env:MSI`"", '/qn', '/norestart', '/l*v', "`"$PWD\installer-test\install.log`""
+          if ($p.ExitCode -ne 0) { throw "msiexec /i exited $($p.ExitCode) (installer-test/install.log)" }
+
+      # Everything a user would see of the install, checked by name. The
+      # version is the workspace version's numeric part, as build-msi.ps1
+      # gives the MSI and Directory.Build.props the exe.
+      - name: Check the install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cargo = Get-Content -Raw Cargo.toml
+          $version = [regex]::Match($cargo, '(?<=\[workspace\.package\]\s*\nversion\s*=\s*")[^"]+').Value
+          $numeric = [regex]::Match($version, '^\d+\.\d+\.\d+').Value
+          $dir = Join-Path $env:ProgramFiles 'NeoSCAD'
+          $exe = Join-Path $dir 'NeoSCAD.exe'
+          foreach ($f in $exe, "$dir\Editor\editor.html", "$dir\Assets\NeoSCAD.ico", "$dir\LICENSE", "$dir\NOTICE",
+                         "$dir\licenses\README.md", "$dir\licenses\third-party\README.txt") {
+            if (-not (Test-Path $f)) { throw "missing after install: $f" }
+          }
+          $fileVersion = (Get-Item $exe).VersionInfo.FileVersion
+          if ($fileVersion -ne "$numeric.0") { throw "NeoSCAD.exe's file version is $fileVersion, expected $numeric.0" }
+          Get-Content "$dir\licenses\third-party\README.txt" | Write-Host
+
+          $shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\NeoSCAD.lnk'
+          if (-not (Test-Path $shortcut)) { throw "no Start menu shortcut at $shortcut" }
+
+          $arp = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
+            Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and $_.DisplayName -eq 'NeoSCAD' }
+          if (@($arp).Count -ne 1) { throw "expected one 'NeoSCAD' uninstall entry, found $(@($arp).Count)" }
+          if ($arp.DisplayVersion -ne $numeric) { throw "uninstall entry's version is $($arp.DisplayVersion), expected $numeric" }
+          if (-not $arp.DisplayIcon) { throw "uninstall entry has no DisplayIcon (ARPPRODUCTICON)" }
+          Write-Host "uninstall entry: $($arp.PSChildName) $($arp.DisplayVersion), icon $($arp.DisplayIcon)"
+
+          $classes = 'HKLM:\SOFTWARE\Classes'
+          $expect = @{
+            '.scad' = 'NeoSCAD.scad'
+            'NeoSCAD.scad' = 'OpenSCAD model'
+            'NeoSCAD.scad\DefaultIcon' = "$exe,0"
+            'NeoSCAD.scad\shell\open\command' = "`"$exe`" `"%1`""
+          }
+          foreach ($key in $expect.Keys) {
+            $value = (Get-Item -LiteralPath "$classes\$key").GetValue('')
+            if ($value -ne $expect[$key]) { throw "$key is '$value', expected '$($expect[$key])'" }
+            Write-Host "$key = $value"
+          }
+          $progids = Get-Item -LiteralPath "$classes\.scad\OpenWithProgids"
+          if ($progids.GetValueNames() -notcontains 'NeoSCAD.scad') { throw ".scad\OpenWithProgids lacks NeoSCAD.scad" }
+          $types = Get-Item -LiteralPath "$classes\Applications\NeoSCAD.exe\SupportedTypes"
+          if ($types.GetValueNames() -notcontains '.scad') { throw "Applications\NeoSCAD.exe\SupportedTypes lacks .scad" }
+
+      - name: Launch the installed app, log and screenshot
+        shell: pwsh
+        run: |
+          scripts/windows/launch-screenshot.ps1 -Exe "$env:ProgramFiles\NeoSCAD\NeoSCAD.exe" -Out installer-test `
+            -Name neoscad-windows-${{ matrix.arch }}-installed
+
+      # What a double-click in Explorer does: ShellExecute on the file,
+      # which follows .scad to the ProgId's open command. The installed exe
+      # must start with the file's path as its argument.
+      - name: Open a .scad file through the association
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $model = Join-Path $env:RUNNER_TEMP 'association test.scad'
+          Set-Content -Path $model -Value 'cube(10);'
+          Start-Process -FilePath $model
+          $exe = Join-Path $env:ProgramFiles 'NeoSCAD\NeoSCAD.exe'
+          $found = $null
+          foreach ($i in 1..40) {
+            $found = Get-CimInstance Win32_Process -Filter "Name = 'NeoSCAD.exe'" |
+              Where-Object { $_.ExecutablePath -eq $exe -and $_.CommandLine -like "*$model*" }
+            if ($found) { break }
+            Start-Sleep -Milliseconds 250
+          }
+          if (-not $found) { throw "opening $model did not start $exe with it" }
+          Write-Host "started: $($found.CommandLine)"
+          Start-Sleep -Seconds 5
+          $found | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+      - name: Uninstall silently, and check it is gone
+        shell: pwsh
+        env:
+          MSI: ${{ steps.build.outputs.msi }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-Process NeoSCAD -ErrorAction SilentlyContinue | Stop-Process -Force
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/x', "`"$env:MSI`"", '/qn', '/norestart', '/l*v', "`"$PWD\installer-test\uninstall.log`""
+          if ($p.ExitCode -ne 0) { throw "msiexec /x exited $($p.ExitCode) (installer-test/uninstall.log)" }
+          $left = @()
+          $dir = Join-Path $env:ProgramFiles 'NeoSCAD'
+          if (Test-Path $dir) { $left += "${dir}: $((Get-ChildItem -Recurse $dir | Select-Object -First 10 -ExpandProperty FullName) -join ', ')" }
+          $shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\NeoSCAD.lnk'
+          if (Test-Path $shortcut) { $left += $shortcut }
+          $classes = 'HKLM:\SOFTWARE\Classes'
+          foreach ($key in 'NeoSCAD.scad', 'Applications\NeoSCAD.exe') {
+            if (Test-Path -LiteralPath "$classes\$key") { $left += "$classes\$key" }
+          }
+          if (Test-Path -LiteralPath "$classes\.scad") {
+            $scad = Get-Item -LiteralPath "$classes\.scad"
+            if ($scad.GetValue('') -eq 'NeoSCAD.scad') { $left += '.scad default = NeoSCAD.scad' }
+            if (Test-Path -LiteralPath "$classes\.scad\OpenWithProgids") {
+              if ((Get-Item -LiteralPath "$classes\.scad\OpenWithProgids").GetValueNames() -contains 'NeoSCAD.scad') {
+                $left += '.scad\OpenWithProgids\NeoSCAD.scad'
+              }
+            }
+          }
+          $arp = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
+            Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and $_.DisplayName -eq 'NeoSCAD' }
+          if ($arp) { $left += "uninstall entry $($arp.PSChildName)" }
+          if ($left) { throw "left after uninstall:`n$($left -join "`n")" }
+          Write-Host "uninstalled: no files, shortcut, registry keys or uninstall entry left"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: neoscad-windows-${{ matrix.arch }}-installer-test
+          path: installer-test/
+          if-no-files-found: warn

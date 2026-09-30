@@ -21,7 +21,15 @@
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <SelfContained>true</SelfContained>
-    <Version>0.1.1</Version>
+    <!-- From Cargo.toml (Directory.Build.props). -->
+    <Version>$(NeoScadVersion)</Version>
+    <FileVersion>$(NeoScadVersionPrefix).0</FileVersion>
+    <AssemblyVersion>$(NeoScadVersionPrefix).0</AssemblyVersion>
+    <Product>NeoSCAD</Product>
+    <Company>The NeoSCAD contributors</Company>
+    <!-- Explorer, the Start menu and the taskbar read the exe's icon;
+         scripts/windows/make-icon.py builds it from the macOS icon's art. -->
+    <ApplicationIcon>Assets\NeoSCAD.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -39,6 +47,17 @@
     <Content Include="..\..\apple\Editor\web\dist\*.*" Link="Editor\%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <!-- Also beside the exe, for AppWindow.SetIcon (MainWindow): a window's
+       title bar icon is set from a file, not from the exe's resources. -->
+  <ItemGroup>
+    <Content Include="Assets\NeoSCAD.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="NeoScadCheckVersion" BeforeTargets="Build">
+    <Error Condition="'$(NeoScadVersionPrefix)' == ''"
+           Text="No version found in Cargo.toml's [workspace.package] (Directory.Build.props reads it)." />
+  </Target>
 
   <Target Name="NeoScadCheckEditor" BeforeTargets="Build">
     <Warning Condition="!Exists('..\..\apple\Editor\web\dist\editor.html')"

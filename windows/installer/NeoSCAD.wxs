@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Windows app's installer: an unsigned, per-machine MSI built with
+  WiX 5 (docs/windows-app.md, "Installer"). scripts/windows/build-msi.ps1
+  publishes the app (self-contained: .NET and the Windows App SDK runtime
+  ship inside it), stages the licence files beside it and runs
+
+    wix build windows/installer/NeoSCAD.wxs -arch x64|arm64
+      -d Version=<numeric workspace version> -bindpath app=<staged app>
+
+  Why WiX 5 rather than the CLI's WiX 3 (crates/cli/wix/main.wxs): the
+  published app is a few hundred files in nested folders, and WiX 5's
+  Files element harvests a folder at build time. WiX 3 would need heat.exe
+  and an XSLT to take the exe out of the harvest (it carries the shortcut
+  and the file association). WiX 5 comes from NuGet as a .NET tool, the
+  same on x64 and arm64. Not WiX 6 or later: from v6 the toolset requires
+  accepting the Open Source Maintenance Fee EULA.
+
+  Why per-machine: one install in Program Files for every account, where
+  only administrators can write, so the runtime that ships inside the app
+  cannot be altered by a user-level process; it is also what the CLI's
+  MSI and OpenSCAD's own Windows installer do. The cost is a UAC prompt,
+  which for an unsigned MSI names an unknown publisher.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!--
+    UpgradeCode is the product's identity across versions: never change
+    it (the CLI's MSI has its own, B8763D68-...). Every build gets a new
+    ProductCode, so installing any other version is a major upgrade that
+    removes the one before.
+  -->
+  <Package Name="NeoSCAD"
+           Manufacturer="The NeoSCAD contributors"
+           Version="$(var.Version)"
+           UpgradeCode="1A80E3D5-D728-4B83-A3A9-02CE00C5AA8D"
+           Scope="perMachine"
+           Language="1033"
+           Compressed="yes">
+    <SummaryInformation Description="NeoSCAD, a programmer's solid 3D CAD modeller (OpenSCAD-compatible)" />
+
+    <!--
+      The old version is removed after the new one's files are costed but
+      before they are installed, so no file of the old version survives
+      (the app's runtime folders change between .NET versions).
+      Installing an older version over a newer one is refused.
+    -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Add or remove programs: the icon, links, and no Modify button
+         (there are no optional features to modify). -->
+    <Icon Id="NeoSCAD.ico" SourceFile="!(bindpath.app)\Assets\NeoSCAD.ico" />
+    <Property Id="ARPPRODUCTICON" Value="NeoSCAD.ico" />
+    <Property Id="ARPHELPLINK" Value="https://neoscad.org" />
+    <Property Id="ARPURLINFOABOUT" Value="https://neoscad.org" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <!--
+      What .scad opens with before this install. The default is taken only
+      when nothing else (OpenSCAD, say) holds it, or when it is our own
+      from a previous version: on a major upgrade the old version's value
+      is still there when this search runs, and refusing it then would
+      lose the association on every upgrade.
+    -->
+    <Property Id="SCADHANDLER">
+      <RegistrySearch Id="ScadHandlerSearch" Root="HKLM" Key="Software\Classes\.scad" Type="raw" />
+    </Property>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="NeoSCAD" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="NeoSCAD" AllowAbsent="no">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="Executable" />
+      <ComponentRef Id="ScadProgId" />
+      <ComponentRef Id="ScadDefault" />
+    </Feature>
+
+    <!--
+      Everything build-msi.ps1 staged: the published app (runtime, Windows
+      App SDK, core DLL, editor bundle, icon) and LICENSE, NOTICE and
+      licenses\. Component GUIDs are derived from each file's path, so they
+      stay the same across versions. The exe is authored below instead.
+    -->
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="!(bindpath.app)\**">
+        <Exclude Files="!(bindpath.app)\NeoSCAD.exe" />
+      </Files>
+    </ComponentGroup>
+
+    <!--
+      The exe, with the Start menu shortcut. The shortcut is advertised so
+      it can live on the exe's own component, keyed by the file (the ICE
+      rules ask a non-advertised shortcut's component for a registry key
+      path instead); its icon comes from the Icon table, as advertised
+      shortcuts' icons must.
+    -->
+    <Component Id="Executable" Directory="INSTALLFOLDER">
+      <File Id="NeoSCADExe" Source="!(bindpath.app)\NeoSCAD.exe" KeyPath="yes">
+        <Shortcut Id="StartMenuShortcut"
+                  Directory="ProgramMenuFolder"
+                  Name="NeoSCAD"
+                  Description="Create and edit OpenSCAD models"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="NeoSCAD.ico"
+                  Advertise="yes" />
+      </File>
+    </Component>
+
+    <!--
+      The .scad file type. NeoSCAD.scad is the ProgId: its icon is the
+      exe's (index 0, the ApplicationIcon), and it opens a file as
+      `NeoSCAD.exe "<path>"`, which StartupAction.Parse reads as the file
+      to open. OpenWithProgids and SupportedTypes put NeoSCAD in "Open
+      with" even when another app is the default. All under HKLM, as the
+      install is per-machine; the ProgId's key goes whole on uninstall.
+    -->
+    <Component Id="ScadProgId" Directory="INSTALLFOLDER" Guid="D5245E3D-650F-4C71-8501-D1429581F392">
+      <RegistryKey Root="HKLM" Key="Software\Classes\NeoSCAD.scad" ForceDeleteOnUninstall="yes">
+        <RegistryValue Type="string" Value="OpenSCAD model" KeyPath="yes" />
+        <RegistryValue Name="FriendlyTypeName" Type="string" Value="OpenSCAD model" />
+        <RegistryValue Key="DefaultIcon" Type="string" Value="[#NeoSCADExe],0" />
+        <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[#NeoSCADExe]&quot; &quot;%1&quot;" />
+      </RegistryKey>
+      <RegistryValue Root="HKLM" Key="Software\Classes\.scad\OpenWithProgids" Name="NeoSCAD.scad" Type="string" Value="" />
+      <RegistryKey Root="HKLM" Key="Software\Classes\Applications\NeoSCAD.exe" ForceDeleteOnUninstall="yes">
+        <RegistryValue Name="FriendlyAppName" Type="string" Value="NeoSCAD" />
+        <RegistryValue Key="SupportedTypes" Name=".scad" Type="string" Value="" />
+      </RegistryKey>
+    </Component>
+
+    <!-- .scad's default, taken only when free or already ours (see SCADHANDLER). -->
+    <Component Id="ScadDefault" Directory="INSTALLFOLDER" Guid="77AC8D89-1DA5-4073-8EC2-32AE7E7FF72E"
+               Condition="NOT SCADHANDLER OR SCADHANDLER = &quot;NeoSCAD.scad&quot;">
+      <RegistryValue Root="HKLM" Key="Software\Classes\.scad" Type="string" Value="NeoSCAD.scad" KeyPath="yes" />
+    </Component>
+  </Package>
+</Wix>

@@ -9,7 +9,9 @@ through `crates/ffi` (`docs/architecture.md`, "`client` is the port
 boundary"; `docs/audits/shared-core.md`).
 
 This is **milestone 1**: one window per process that edits, previews,
-renders and exports a model. What it does not do yet is listed under
+renders and exports a model. Milestone 2 has begun with packaging: an
+unsigned MSI per architecture, with an app icon and the `.scad`
+association (see "Installer"). What it does not do yet is listed under
 "Next".
 
 ## Layout
@@ -21,11 +23,16 @@ renders and exports a model. What it does not do yet is listed under
 | `windows/NeoSCAD.Host/` | Host logic that is not UI, tested on any OS: `DocumentSession` (the window's loop, text copy, dirty state, save, export), `EditorSync` and `EditorProtocol` (the editor bridge), `EditorPage` (what the editor's origin serves), `LanguageBridge` (the in-process language server), `StartupAction`, `AppLog` (the `--log` file), `PanelScale` (the viewport's display-scale arithmetic). `net10.0` |
 | `windows/NeoSCAD.App/` | The WinUI 3 app: `MainWindow` (menus, panes, pickers, dialogs), `Editor/EditorHost.cs` (WebView2), `Viewport/ViewportPanel.cs` (the `SwapChainPanel`), `WinUiHost.cs` (DispatcherQueue timer and dispatcher). `net10.0-windows10.0.19041.0`, unpackaged, self-contained |
 | `windows/NeoSCAD.Tests/` | xUnit tests of `NeoSCAD.Host` and of the binding against the real core. `net10.0` |
+| `windows/installer/NeoSCAD.wxs` | The MSI's WiX 5 source (see "Installer") |
+| `windows/NeoSCAD.App/Assets/NeoSCAD.ico` | The app icon, built by `scripts/windows/make-icon.py` and committed |
 | `windows/uniffi.toml` | uniffi-bindgen-cs settings (namespace `NeoSCAD.Native`, public types, `NeoScad` for the free functions) |
 | `scripts/windows/build-core.ps1` | The core's DLL, the binding and the editor bundle, before `dotnet build` |
 | `scripts/windows/docker-test.sh` | The binding and host tests on Linux in Docker (from a Mac) |
 | `scripts/windows/launch-screenshot.ps1` | Launch the built app with `--log`, capture its window, check it stayed up (CI) |
+| `scripts/windows/build-msi.ps1` | Publish the app, stage its licences, build the MSI |
+| `scripts/windows/make-icon.py` | The multi-size `.ico` from the macOS icon's art |
 | `.github/workflows/windows-app.yml` | CI: build, test, launch, screenshot and log |
+| `.github/workflows/windows-installer.yml` | CI, on demand: build both MSIs, install, check, launch, uninstall |
 
 ## Build on Windows
 
@@ -46,6 +53,88 @@ not link a dylib), puts `neoscad_ffi.dll` in `windows/native/<rid>/`,
 generates the binding from that DLL, and builds the CodeMirror bundle in
 `apple/Editor/web/dist`, which the app copies to `Editor\` beside the
 executable.
+
+## Installer
+
+`pwsh scripts/windows/build-msi.ps1 [-Arch x64|arm64]`, after
+`build-core.ps1`, writes `dist/windows/NeoSCAD-<version>-windows-<arch>.msi`:
+an unsigned, per-machine MSI for each architecture. It runs `dotnet
+publish` (self-contained), stages the licence files beside the app, and
+runs `wix build` on `windows/installer/NeoSCAD.wxs`.
+
+- **WiX 5.0.2**, a .NET tool the script installs into `dist/windows/tools`.
+  The CLI's MSI uses WiX 3.14.1 through cargo-dist, but the app is a
+  few hundred files in nested folders. WiX 5's `Files` element harvests
+  a folder at build time; it is absent from WiX 4.0.5 and present in 5.0.2
+  (`HarvestFilesCommand.cs` in wixtoolset/wix at `v5.0.2`). WiX 3 would need
+  `heat.exe` plus an XSLT to keep the exe out of the harvest, since the exe
+  carries the shortcut. WiX 6 and later require accepting the Open Source
+  Maintenance Fee EULA (the wixtoolset/wix README at `v6.0.0`; not at
+  `v5.0.2`). The tool comes from NuGet on x64 and arm64 alike, with no
+  hashed zip download (`.github/build-setup.yml`).
+- **MSI, not MSIX.** An MSIX installs only if it is signed with a
+  certificate the PC trusts, and the owner does not buy Authenticode
+  certificates (`docs/release.md`, "Windows is unsigned"). Double-clicking
+  the MSI shows SmartScreen's warning, then UAC names an unknown
+  publisher.
+- **Per-machine**, into `Program Files\NeoSCAD`. Only administrators can
+  write there, so the .NET and Windows App SDK runtime inside the app can't
+  be changed by a user-level process. The CLI's MSI (`InstallScope='perMachine'`)
+  and OpenSCAD's own installer (which registers `.scad` under `HKCR`,
+  `cmake/nsis/mingw-file-association.nsh:159` in the reference checkout)
+  are per-machine too. The cost is the UAC prompt.
+- **No dialogs.** The package has no UI sequence: a double-click installs
+  with Windows Installer's progress bar. A licence page would need WiX's
+  UI extension and an RTF of the GPL.
+- **Upgrades.** The `UpgradeCode` (`1A80E3D5-…`, not the CLI's) is fixed.
+  Every build has a new ProductCode, so any other version is a major
+  upgrade that removes the old one first. A downgrade is refused.
+- **Version.** `Cargo.toml`'s `[workspace.package] version` sets the MSI's
+  ProductVersion (its numeric part, `-d Version=`) and the exe's version.
+  `windows/Directory.Build.props` reads the same line for `Version`,
+  `FileVersion` (`0.1.1.0`) and `AssemblyVersion`.
+- **Start menu:** an advertised shortcut, `NeoSCAD`, with the app icon.
+- **Icon.** `NeoSCAD.ico` has 16 to 64 px as 32-bit DIBs and 256 px as
+  PNG. It is cropped to the ring from `apple/App/AppIcon.icon/Assets/art.png`,
+  because that layer is framed at 72% for macOS's mask. The icon is set on
+  the exe (`ApplicationIcon`), on the window (`AppWindow.SetIcon`, from
+  `Assets\NeoSCAD.ico` beside the exe) and on the uninstall entry
+  (`ARPPRODUCTICON`).
+- **`.scad`.** The ProgId `NeoSCAD.scad` ("OpenSCAD model") uses the exe's
+  icon and opens `"NeoSCAD.exe" "%1"`, which `StartupAction.Parse` takes as
+  the file to open. NeoSCAD is listed under `.scad\OpenWithProgids` and
+  `Applications\NeoSCAD.exe\SupportedTypes`, so it appears in "Open with"
+  whatever the default is. `.scad`'s default value is set only when it is
+  empty or already `NeoSCAD.scad`, so an OpenSCAD association is never
+  taken over, and uninstalling can't remove one. A choice the user
+  made in Windows (`UserChoice`) wins over all of this. Not registered:
+  `App Paths` (the Run box would then start the app for `neoscad`, the
+  CLI's name) and Default Apps capabilities.
+- **Licences.** The MSI installs `LICENSE`, `NOTICE` and
+  `packaging/licenses/` beside the app. It also installs
+  `licenses/third-party/<package>-<version>/`: the licence and notice
+  files of every NuGet package the app was restored from, taken from
+  `obj/project.assets.json`. That covers the .NET runtime pack (MIT, with
+  its third-party notices) and the Windows App SDK (Microsoft's licence
+  and its `NOTICE.txt`), both redistributed inside the self-contained app.
+  The script fails if either is missing. See "Licence questions" below.
+- **WebView2** is not bundled. It is part of Windows 11 and of current
+  Windows 10. Before starting the editor, the app asks
+  `CoreWebView2Environment.GetAvailableBrowserVersionString()`
+  (`NeoSCAD.Host/WebViewRuntime.cs`). If no runtime is installed, the
+  editor pane explains, and a dialog offers "Download WebView2", which
+  opens <https://developer.microsoft.com/microsoft-edge/webview2/>. The
+  rest of the window works without it.
+
+**Licence questions for the owner.** The Windows App SDK's licence
+(`license.txt` in the `Microsoft.WindowsAppSDK` 2.5.1 package, section 3)
+allows redistributing the files it binplaces, self-contained included.
+It also requires distributors to "require distributors and external end
+users to agree to terms that protect it and Microsoft at least as much as
+this agreement". The MSI has no licence page, so nothing asks users to
+agree to anything. Is shipping the terms in `licenses/third-party/`
+enough? And do they sit with the GPL-2.0-or-later app? That is the
+owner's call, not settled here.
 
 ## Bindings
 
@@ -229,6 +318,30 @@ display:
 - keyboard accelerators while WebView2 has focus;
 - file dialogs and export through the UI.
 
+**The installer** (September 2026) was checked off Windows only; no MSI
+has been built yet:
+- `scripts/windows/make-icon.py` ran on the Mac, and its `.ico` decodes to
+  the eight sizes, drawn and looked at;
+- `docker-test.sh` passes 58 of 58 tests, the new `WebViewRuntimeTests`
+  among them;
+- the app's C# type-checks against Windows App SDK 2.5.1 in the Linux
+  .NET SDK, with stand-ins for the XAML fields; an unknown member in
+  that build fails it, so the check is real;
+- MSBuild evaluates `Version` 0.1.1 and `FileVersion` 0.1.1.0 from
+  `Cargo.toml`;
+- `build-msi.ps1`'s licence staging ran under pwsh on a Linux restore
+  of the app for `win-x64`;
+- PowerShell parses `build-msi.ps1` and the new workflow's scripts;
+- `NeoSCAD.wxs` is well-formed XML, and WiX 5.0.2's compiler on Linux
+  raised no schema errors. It did stop at two path errors that look like
+  Linux artefacts: WiX warns that it "only supports Windows" and
+  that behaviour after the warning is undefined;
+- `actionlint` 1.7.12 passes on the workflow.
+
+Unverified until `windows-installer.yml` runs: the MSI build itself (ICE
+validation included), install, the shortcut, the uninstall entry, the
+association, launching from `.scad`, and uninstall.
+
 ### Why not the scheme
 
 The macOS and Linux apps serve the bundle from `neoscad-editor://app/`.
@@ -248,8 +361,12 @@ rewrites it to `script-src 'self'` when serving.
   a crisp model at 125%, 150% and 200%, a frame that fills the panel
   exactly, moving the window between monitors of different scales, and
   the `view: attached` / `view: rescaled` lines in the `--log` file.
-- Packaging: MSIX (and/or an MSI via the existing WiX setup), an app
-  icon, file association for `.scad`, signing with the release keys.
+- The installer (see "Installer"): run `windows-installer.yml` and look
+  at its screenshots; then add it to the release (`docs/release.md`, "Next:
+  the Windows app in the release"). Settle the licence questions above.
+  Check by hand what CI can't: SmartScreen and UAC on a downloaded MSI,
+  the Explorer icon of a `.scad` file, and the no-WebView2 dialog on a
+  Windows 10 without the runtime.
 - Multiple windows (one `DocumentSession` each), recent files, autosave.
 - The panels: customizer, check, measure (all in `client` already).
 - File watching (`FileSystemWatcher` on the run's `files`, into

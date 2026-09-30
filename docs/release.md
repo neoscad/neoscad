@@ -413,3 +413,65 @@ still block unsigned programs). Every file can be checked against `sha256.sum`, 
 origin with `gh attestation verify <file> -R neoscad/neoscad` (GitHub
 artifact attestations, `github-attestations = true`). The SignPath
 Foundation offers free signing to open-source projects if that changes.
+
+## Next: the Windows app in the release
+
+The app's MSIs (`docs/windows-app.md`, "Installer") are built and tested
+by `.github/workflows/windows-installer.yml`, which runs on demand only.
+To make it a publish job, once a dispatched run has passed on both
+architectures and its screenshots look right:
+
+1. In `windows-installer.yml`, add a `workflow_call` trigger beside
+   `workflow_dispatch`, with the input cargo-dist passes to every publish
+   job:
+
+   ```yaml
+   on:
+     workflow_call:
+       inputs:
+         plan:
+           required: true
+           type: string
+     workflow_dispatch: {}
+   ```
+
+   Give the workflow the permissions it will need to attach and attest:
+   `contents: write`, `id-token: write`, `attestations: write`.
+2. At the end of the `msi` job, after "Uninstall silently, and check it is
+   gone", add two steps. Placing them there means only an MSI that
+   installed, launched, opened a file and uninstalled gets attached.
+   Both steps are conditioned on `inputs.plan != ''`, so a dispatched run
+   stays a dry run.
+
+   ```yaml
+      - name: Attest
+        if: inputs.plan != ''
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/windows/*.msi
+
+      - name: Attach to the release
+        if: inputs.plan != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
+        run: |
+          $msi = Get-Item dist/windows/*.msi
+          if ($msi.Name -notlike "NeoSCAD-$($env:TAG.TrimStart('v'))-windows-*.msi") { throw "$($msi.Name) does not match $env:TAG" }
+          $sum = "NeoSCAD-windows-${{ matrix.arch }}-msi.sha256"
+          "$((Get-FileHash -Algorithm SHA256 $msi).Hash.ToLowerInvariant())  $($msi.Name)" | Set-Content -Encoding ascii $sum
+          gh release upload $env:TAG $msi.FullName $sum --repo $env:GITHUB_REPOSITORY
+   ```
+
+3. In the root `Cargo.toml`, add `"./windows-installer"` to
+   `publish-jobs`. Then add its permissions under
+   `[workspace.metadata.dist.github-custom-job-permissions]`:
+   `windows-installer = { contents = "write", id-token = "write", attestations = "write" }`.
+4. Run `dist generate --mode=ci` to regenerate `release.yml`, which gets
+   a `custom-windows-installer` job and a matching `announce` condition.
+   Check it with `dist generate --check` (CI's lint job runs the same) and
+   `dist plan`.
+5. Update this document: add the job to step 5 of "The cross-platform
+   release" and the MSIs to the unsigned files in "Windows is unsigned".
+   Mark the Windows app's first release run under "Not verified".

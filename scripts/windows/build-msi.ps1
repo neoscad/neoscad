@@ -1,0 +1,136 @@
+# Builds the Windows app's MSI (windows/installer/NeoSCAD.wxs;
+# docs/windows-app.md, "Installer"), after scripts/windows/build-core.ps1:
+#
+#   pwsh scripts/windows/build-msi.ps1 [-Arch x64|arm64] [-Out DIR]
+#
+#   1. `dotnet publish` the app, self-contained, into DIR/stage-<arch>/app;
+#   2. stage LICENSE, NOTICE and packaging/licenses beside it, and under
+#      licenses/third-party/ the licence and notice files of every NuGet
+#      package the app was restored from (the .NET runtime pack and the
+#      Windows App SDK among them, both of which ship inside the app);
+#   3. `wix build` (WiX 5.0.2, installed as a .NET tool into DIR/tools)
+#      -> DIR/NeoSCAD-<version>-windows-<arch>.msi
+#
+# The version is Cargo.toml's workspace version, as for the exe
+# (windows/Directory.Build.props); the MSI's ProductVersion takes only its
+# numeric part. The MSI is not signed (docs/release.md, "Windows is
+# unsigned").
+
+[CmdletBinding()]
+param(
+    [ValidateSet("x64", "arm64")]
+    [string]$Arch = $(if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }),
+    [string]$Out = "dist/windows"
+)
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+# Pinned: WiX 6 and later require accepting the Open Source Maintenance Fee
+# EULA (their README, "Open Source Maintenance Fee"); 5.0.2 is the last v5.
+$WixVersion = "5.0.2"
+
+$repo = Resolve-Path (Join-Path $PSScriptRoot "../..")
+$rid = "win-$Arch"
+$platform = if ($Arch -eq "arm64") { "ARM64" } else { "x64" }
+New-Item -ItemType Directory -Force -Path $Out | Out-Null
+$Out = Resolve-Path $Out
+
+$cargo = Get-Content -Raw (Join-Path $repo "Cargo.toml")
+$match = [regex]::Match($cargo, '(?<=\[workspace\.package\]\s*\nversion\s*=\s*")[^"]+')
+if (-not $match.Success) { throw "no version in Cargo.toml's [workspace.package]" }
+$version = $match.Value
+$numeric = [regex]::Match($version, '^\d+\.\d+\.\d+').Value
+Write-Host "NeoSCAD $version ($numeric) for $rid"
+
+# 1. The app. A clean stage each time: a file left from an earlier build
+# would be harvested into the MSI.
+$stage = Join-Path $Out "stage-$Arch"
+if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+$app = Join-Path $stage "app"
+$project = Join-Path $repo "windows/NeoSCAD.App/NeoSCAD.App.csproj"
+dotnet publish $project -c Release -r $rid -p:Platform=$platform -p:NeoScadRid=$rid -o $app
+if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }
+if (-not (Test-Path (Join-Path $app "NeoSCAD.exe"))) { throw "publish made no NeoSCAD.exe" }
+if (-not (Test-Path (Join-Path $app "Editor/editor.html"))) {
+    throw "the editor bundle is missing from the publish (run build-core.ps1 without -SkipEditor)"
+}
+# Debug symbols stay out of the installer; the CI artifacts keep the build.
+Get-ChildItem -Recurse -Path $app -Filter *.pdb | Remove-Item -Force
+
+# 2. Licences. NeoSCAD's own, as in every other artifact
+# (packaging/licenses/README.md), then the packages'.
+Copy-Item (Join-Path $repo "LICENSE"), (Join-Path $repo "NOTICE") $app
+$licenses = Join-Path $app "licenses"
+Copy-Item -Recurse (Join-Path $repo "packaging/licenses") $licenses
+$thirdParty = Join-Path $licenses "third-party"
+New-Item -ItemType Directory -Force -Path $thirdParty | Out-Null
+
+# The restore's record of every package, including the runtime pack a
+# self-contained publish downloads (downloadDependencies). Each package's
+# licence and notice files sit at its root in the NuGet folder. Copying
+# them all, build-only packages included, errs on the side of a notice too
+# many; the Windows App SDK's own terms require keeping Microsoft's notices.
+$assets = Get-Content -Raw (Join-Path $repo "windows/NeoSCAD.App/obj/project.assets.json") | ConvertFrom-Json
+$folders = @($assets.packageFolders.PSObject.Properties.Name)
+# A runtime pack that came with the SDK is in its packs folder instead,
+# as packs/<Name>/<version>; the NuGet folders use lower case.
+$packs = Join-Path (Split-Path -Parent (Get-Command dotnet).Source) "packs"
+$packages = [System.Collections.Generic.SortedDictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($p in $assets.libraries.PSObject.Properties) {
+    if ($p.Value.type -ne "package") { continue }
+    $packages[$p.Value.path] = $p.Name
+}
+foreach ($framework in $assets.project.frameworks.PSObject.Properties) {
+    if (-not ($framework.Value.PSObject.Properties.Name -contains "downloadDependencies")) { continue }
+    # Only the two packs that end up in the app: the runtime and the
+    # apphost NeoSCAD.exe is made from. The SDK also downloads packs the
+    # app never ships (ASP.NET Core, Windows Desktop, the build machine's
+    # own RID), whose notices would only mislead.
+    $shipped = "Microsoft.NETCore.App.Runtime.$rid", "Microsoft.NETCore.App.Host.$rid"
+    foreach ($d in $framework.Value.downloadDependencies) {
+        if ($shipped -notcontains $d.name) { continue }
+        $v = $d.version.Trim("[", "]").Split(",")[0].Trim()
+        $packages["$($d.name.ToLowerInvariant())/$v"] = "$($d.name)/$v"
+    }
+}
+$index = @("Licence and notice files of the NuGet packages NeoSCAD for Windows was built from",
+    "(scripts/windows/build-msi.ps1). The .NET runtime and the Windows App SDK",
+    "are redistributed inside the app; see each folder.", "")
+$licencePattern = '^(license|licence|notice|third-?party-?notices)([._-].*)?$'
+foreach ($entry in $packages.GetEnumerator()) {
+    $dir = $null
+    $candidates = @($folders | ForEach-Object { Join-Path $_ $entry.Key }) + @(Join-Path $packs $entry.Value)
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { $dir = $candidate; break }
+    }
+    if (-not $dir) { throw "package $($entry.Value) is not in $($candidates -join ', ')" }
+    $files = @(Get-ChildItem -File -Path $dir | Where-Object { $_.Name -match $licencePattern })
+    if ($files.Count -eq 0) { continue }
+    $target = Join-Path $thirdParty ($entry.Value -replace '/', '-')
+    New-Item -ItemType Directory -Force -Path $target | Out-Null
+    foreach ($file in $files) { Copy-Item $file.FullName $target }
+    $index += "$($entry.Value): $(($files | ForEach-Object Name) -join ', ')"
+}
+# Nothing from the Windows App SDK or the runtime pack means the layout
+# of the NuGet folder or of project.assets.json changed; fail rather than
+# ship without the notices.
+foreach ($required in "Microsoft.WindowsAppSDK/", "Microsoft.NETCore.App.Runtime.$rid/") {
+    if (-not ($index | Where-Object { $_.StartsWith($required, [StringComparison]::OrdinalIgnoreCase) })) {
+        throw "no licence files were found for $required*"
+    }
+}
+Set-Content -Path (Join-Path $thirdParty "README.txt") -Value $index -Encoding utf8
+
+# 3. The MSI.
+$tools = Join-Path $Out "tools"
+$wix = Join-Path $tools "wix.exe"
+if (-not (Test-Path $wix)) {
+    dotnet tool install wix --version $WixVersion --tool-path $tools
+    if ($LASTEXITCODE -ne 0) { throw "installing WiX $WixVersion failed" }
+}
+$msi = Join-Path $Out "NeoSCAD-$version-windows-$Arch.msi"
+& $wix build (Join-Path $repo "windows/installer/NeoSCAD.wxs") -arch $Arch -d "Version=$numeric" `
+    -bindpath "app=$app" -o $msi
+if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
+Write-Host "built $msi"
+if ($env:GITHUB_OUTPUT) { "msi=$msi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8 }

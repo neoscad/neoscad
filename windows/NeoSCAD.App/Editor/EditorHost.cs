@@ -46,6 +46,12 @@ public sealed class EditorHost
     /// <summary>Why the editor did not start (no WebView2 runtime, no bundle).</summary>
     public string? Error { get; private set; }
 
+    /// <summary>
+    /// No WebView2 runtime is installed: the window offers the download
+    /// (<see cref="WebViewRuntime"/>) rather than only showing <see cref="Error"/>.
+    /// </summary>
+    public bool RuntimeMissing { get; private set; }
+
     public EditorHost(WebView2 view, DocumentSession document)
     {
         this.view = view;
@@ -74,6 +80,17 @@ public sealed class EditorHost
             if (e.Exception is { } x) AppLog.Write("editor: CoreWebView2Initialized failed", x);
             else AppLog.Write("editor: CoreWebView2Initialized");
         };
+        // Asked first, because without a runtime CreateWithOptionsAsync fails
+        // with a bare COM error that tells the user nothing they can act on.
+        var runtime = WebViewRuntime.Installed(() => CoreWebView2Environment.GetAvailableBrowserVersionString());
+        if (runtime is null)
+        {
+            RuntimeMissing = true;
+            Error = WebViewRuntime.MissingMessage;
+            AppLog.Write("editor: no WebView2 runtime is installed");
+            return;
+        }
+        AppLog.Write($"editor: WebView2 runtime {runtime}");
         try
         {
             var options = new CoreWebView2EnvironmentOptions();
