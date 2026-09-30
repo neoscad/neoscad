@@ -9,6 +9,12 @@
 //! drawn last, over everything (`glDepthFunc(GL_ALWAYS)`). The negative
 //! half of each axis, and its ticks, are stippled
 //! (`glLineStipple(3, 0xAAAA)`: three pixels off, three on).
+//!
+//! Each frame, [`clip_to_view`] cuts the model-space lines (axes, which
+//! run to their points at infinity, ticks, labels, the app's grid and
+//! annotations) to the view before they are uploaded. The GPU would clip
+//! them to the same image; lavapipe instead fills a line whose end projects
+//! far off screen as an area (docs/audits/viewport-stripes.md).
 
 use crate::camera::{self, Camera, look_at_from_minus_y, mul, ortho, rotation, translation};
 use crate::hershey::{self, Align};
@@ -436,6 +442,121 @@ pub(crate) fn small_axes_clip(camera: &Camera) -> camera::Mat4 {
     ))
 }
 
+/// How far past the viewport's edges [`clip_to_view`] lets a line run, as
+/// a multiple of the half-width and half-height (clip-space `|x|, |y| <=
+/// CLIP_GUARD * w`). Cutting a line exactly at the edge would put its new
+/// end on the pixel boundary, where float rounding in the GPU's transform
+/// could gain or lose the last pixel and change images on drivers that
+/// needed no help. Twice the size keeps every cut end at least half a
+/// viewport off screen, so the GPU still makes the visible cut itself,
+/// while ends stay within about a thousand pixels of the image: lavapipe
+/// was measured clean with ends 12k px off screen and broken at 36k px.
+/// A power of two, so `CLIP_GUARD * w` rounds nothing.
+const CLIP_GUARD: f64 = 2.0;
+
+/// `lines` (vertex pairs, as drawn) with each [`Space::Model`] segment cut
+/// to the part in front of the camera and within a guard band around the
+/// viewport ([`CLIP_GUARD`]), for the frame's `clip_from_model` (depth
+/// 0..1). Segments wholly outside are dropped; other spaces pass through.
+///
+/// The GPU clips these lines anyway, so on a conformant driver the image
+/// is the same. This exists because Mesa's lavapipe does not: a segment
+/// whose end projects tens of thousands of pixels off screen (an axis
+/// running to its point at infinity towards the camera, `w = 0`, or a grid
+/// line grazing the eye) is filled as an area instead of drawn as a line
+/// (docs/audits/viewport-stripes.md). The cut ends are interpolated in the
+/// model's homogeneous coordinates, which are linear in the same parameter
+/// as clip coordinates, so a `w = 0` end becomes a finite point on the same
+/// line. Each vertex keeps its `start` (the uncut first point), so the
+/// stipple pattern of a dashed line stays where it was.
+pub fn clip_to_view(lines: &[LineVertex], clip_from_model: &camera::Mat4) -> Vec<LineVertex> {
+    debug_assert!(lines.len().is_multiple_of(2), "lines are vertex pairs");
+    let mut out = Vec::with_capacity(lines.len());
+    for pair in lines.as_chunks::<2>().0 {
+        let [a, b] = *pair;
+        if a.space != Space::Model || b.space != Space::Model {
+            out.extend_from_slice(pair);
+            continue;
+        }
+        let pa = a.position.map(f64::from);
+        let pb = b.position.map(f64::from);
+        let Some((t0, t1)) = clip_segment(pa, pb, clip_from_model) else {
+            continue;
+        };
+        // Uncut ends keep their exact bits, so a segment that was already
+        // inside reaches the GPU unchanged.
+        let a_pos = if t0 > 0.0 {
+            lerp(pa, pb, t0)
+        } else {
+            a.position
+        };
+        let b_pos = if t1 < 1.0 {
+            lerp(pa, pb, t1)
+        } else {
+            b.position
+        };
+        out.push(LineVertex {
+            position: a_pos,
+            ..a
+        });
+        out.push(LineVertex {
+            position: b_pos,
+            ..b
+        });
+    }
+    out
+}
+
+/// The parameter range `t0 < t1` (0..1, from `a` to `b`) of the segment
+/// between homogeneous points `a` and `b` that is in front of the near
+/// plane and inside the guard band, by Liang–Barsky against five planes;
+/// `None` if no part is. A segment that is NaN anywhere is kept whole, as
+/// every comparison with NaN fails.
+fn clip_segment(a: [f64; 4], b: [f64; 4], clip_from_model: &camera::Mat4) -> Option<(f64, f64)> {
+    let to_clip = |p: [f64; 4]| -> [f64; 4] {
+        std::array::from_fn(|r| (0..4).map(|k| clip_from_model[r][k] * p[k]).sum())
+    };
+    // Signed distances inside each plane: the four sides of the guard band
+    // and the near plane (z >= 0 in a 0..1 depth range). The far plane is
+    // left to the GPU: nothing near it projects far off screen. Together
+    // the side planes force `w >= 0`, and `w > 0` wherever the band has any
+    // width, so a point behind the eye or at infinity is never an end.
+    let planes = |c: [f64; 4]| {
+        let g = CLIP_GUARD * c[3];
+        [g + c[0], g - c[0], g + c[1], g - c[1], c[2]]
+    };
+    let (fa, fb) = (planes(to_clip(a)), planes(to_clip(b)));
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for (da, db) in fa.into_iter().zip(fb) {
+        if da < 0.0 && db < 0.0 {
+            return None;
+        }
+        if da < 0.0 {
+            t0 = t0.max(da / (da - db));
+        } else if db < 0.0 {
+            t1 = t1.min(da / (da - db));
+        }
+    }
+    (t0 < t1).then_some((t0, t1))
+}
+
+/// The point a fraction `t` of the way from `a` to `b` in homogeneous
+/// coordinates, divided through by its `w` where that is positive and the
+/// result finite. Where `b` is at infinity the interpolated `w` is `1 - t`,
+/// which loses relative precision in f32 as `t` nears 1; dividing in f64
+/// first keeps the point on the line to full f32 precision. A negative `w`
+/// is kept: dividing by it would flip the sign of the clip-space `w` too,
+/// and the GPU would then clip the point as behind the eye.
+fn lerp(a: [f64; 4], b: [f64; 4], t: f64) -> [f32; 4] {
+    let p: [f64; 4] = std::array::from_fn(|i| a[i] + t * (b[i] - a[i]));
+    let affine = [p[0] / p[3], p[1] / p[3], p[2] / p[3], 1.0].map(|x| x as f32);
+    if p[3] > 0.0 && affine.iter().all(|x| x.is_finite()) {
+        affine
+    } else {
+        p.map(|x| x as f32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,5 +645,176 @@ mod tests {
         let first = fine[0].position;
         assert!((first[0] - first[0].round()).abs() < 1e-4);
         assert_eq!(fine.len(), out.len());
+    }
+
+    /// The audit's failing view: perspective, distance 140, tilted 60
+    /// degrees, turned so an axis points towards the eye at some `rz`.
+    fn towards_eye(rz: f64, projection: camera::Projection) -> (Camera, camera::Mat4) {
+        let c = Camera {
+            object_rot: [60.0, 0.0, rz],
+            viewer_distance: 140.0,
+            projection,
+            pixel_width: 710,
+            pixel_height: 520,
+            ..Camera::default()
+        };
+        let m = c.gl_matrices().clip_from_model_zero_to_one();
+        (c, m)
+    }
+
+    fn model_line(a: [f64; 4], b: [f64; 4]) -> Vec<LineVertex> {
+        let mut out = Vec::new();
+        Pen {
+            out: &mut out,
+            space: Space::Model,
+            color: [0.0, 0.0, 0.0, 1.0],
+            stipple: true,
+        }
+        .line4(a, b);
+        out
+    }
+
+    fn to_clip(m: &camera::Mat4, p: [f32; 4]) -> [f64; 4] {
+        std::array::from_fn(|r| (0..4).map(|k| m[r][k] * f64::from(p[k])).sum())
+    }
+
+    /// Every vertex of `clipped` is in front of the eye and inside the
+    /// guard band, keeps its segment's first point as `start`, and lies on
+    /// its original segment (within f32 rounding).
+    fn assert_clipped(original: &[LineVertex], clipped: &[LineVertex], m: &camera::Mat4) {
+        for v in clipped.iter().filter(|v| v.space == Space::Model) {
+            let c = to_clip(m, v.position);
+            let tol = 1e-5 * c[3].abs().max(1.0);
+            assert!(c[3] > 0.0, "{v:?} {c:?}");
+            assert!(c[2] >= -tol, "{v:?} {c:?}");
+            for x in [c[0], c[1]] {
+                assert!(x.abs() <= CLIP_GUARD * c[3] + tol, "{v:?} {c:?}");
+            }
+            // On one of the original segments that start where it does:
+            // collinear in homogeneous model space, so the 3x3 minors of
+            // (a, b, p) vanish, relative to the points' sizes.
+            let p = v.position.map(f64::from);
+            let size = |q: [f64; 4]| q.iter().map(|x| x.abs()).fold(0.0, f64::max);
+            let on = |seg: &[LineVertex]| {
+                let (a, b) = (
+                    seg[0].position.map(f64::from),
+                    seg[1].position.map(f64::from),
+                );
+                let scale = size(a) * size(b) * size(p);
+                [(0, 1, 3), (0, 2, 3), (1, 2, 3), (0, 1, 2)]
+                    .into_iter()
+                    .all(|(i, j, k)| {
+                        let det = a[i] * (b[j] * p[k] - b[k] * p[j])
+                            - a[j] * (b[i] * p[k] - b[k] * p[i])
+                            + a[k] * (b[i] * p[j] - b[j] * p[i]);
+                        det.abs() <= 1e-5 * scale
+                    })
+            };
+            assert!(
+                original
+                    .chunks(2)
+                    .any(|s| s[0].position == v.start && on(s)),
+                "{v:?} is on no original segment starting at its start"
+            );
+        }
+    }
+
+    #[test]
+    fn clip_keeps_lines_inside_bit_for_bit() {
+        let (_, m) = towards_eye(320.0, camera::Projection::Perspective);
+        let lines = model_line([1.0, 2.0, 3.0, 1.0], [-4.5, 0.25, 7.0, 1.0]);
+        assert_eq!(clip_to_view(&lines, &m), lines);
+    }
+
+    #[test]
+    fn clip_cuts_a_line_crossing_one_side() {
+        let (_, m) = towards_eye(0.0, camera::Projection::Perspective);
+        // From the origin along +X, far past the right edge.
+        let lines = model_line([0.0, 0.0, 0.0, 1.0], [1e5, 0.0, 0.0, 1.0]);
+        let out = clip_to_view(&lines, &m);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], lines[0]);
+        let c = to_clip(&m, out[1].position);
+        assert!((c[0] - CLIP_GUARD * c[3]).abs() < 1e-4 * c[3], "{c:?}");
+        assert!(out[1].position[0] < 1e5 && out[1].position[3] == 1.0);
+        assert_clipped(&lines, &out, &m);
+    }
+
+    #[test]
+    fn clip_cuts_both_ends_crossing_several_planes() {
+        let (_, m) = towards_eye(30.0, camera::Projection::Perspective);
+        // Diagonally through the view centre and out on both sides.
+        let lines = model_line([-1e5, -7e4, -3e4, 1.0], [1e5, 7e4, 3e4, 1.0]);
+        let out = clip_to_view(&lines, &m);
+        assert_eq!(out.len(), 2);
+        assert_ne!(out[0].position, lines[0].position);
+        assert_ne!(out[1].position, lines[1].position);
+        assert_eq!(out[1].start, lines[0].position);
+        assert_clipped(&lines, &out, &m);
+    }
+
+    #[test]
+    fn clip_drops_lines_outside_or_behind_the_eye() {
+        let (c, m) = towards_eye(0.0, camera::Projection::Perspective);
+        // Far off to one side, parallel to the view.
+        let side = model_line([5e3, 0.0, 0.0, 1.0], [5e3, 10.0, 0.0, 1.0]);
+        assert!(clip_to_view(&side, &m).is_empty());
+        // Behind the eye: beyond it, on the line from the origin.
+        let eye = camera::invert(&c.gl_matrices().modelview).unwrap();
+        let eye = [eye[0][3], eye[1][3], eye[2][3]];
+        let behind = |s: f64| [eye[0] * s, eye[1] * s, eye[2] * s, 1.0];
+        let lines = model_line(behind(1.5), behind(3.0));
+        assert!(clip_to_view(&lines, &m).is_empty());
+        // From the origin through the eye to behind it: only the front
+        // part is kept, and nothing reaches w <= 0.
+        let through = model_line([0.0, 0.0, 0.0, 1.0], behind(2.0));
+        let out = clip_to_view(&through, &m);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], through[0]);
+        assert_ne!(out[1].position, through[1].position);
+        assert_clipped(&through, &out, &m);
+    }
+
+    #[test]
+    fn clip_ends_axes_at_infinity_at_a_finite_point() {
+        let view = ViewOptions {
+            axes: true,
+            scales: true,
+            ..Default::default()
+        };
+        for projection in [
+            camera::Projection::Perspective,
+            camera::Projection::Orthogonal,
+        ] {
+            for rz in [0.0, 40.0, 220.0, 300.0, 320.0, 340.0] {
+                let (c, m) = towards_eye(rz, projection);
+                let o = overlay(&c, &ColorScheme::cornfield(), &view, false);
+                let out = clip_to_view(&o.before, &m);
+                assert_clipped(&o.before, &out, &m);
+                // Every axis is kept and still starts at the origin, and
+                // none still ends at infinity: every w = 0 end was cut.
+                for axis in out.chunks(2).take(6) {
+                    assert_eq!(axis[0].position, [0.0, 0.0, 0.0, 1.0]);
+                    assert_eq!(axis[1].position[3], 1.0, "{projection:?} {rz}");
+                }
+                // The small axes are in their own space, untouched.
+                assert_eq!(clip_to_view(&o.after, &m), o.after);
+            }
+        }
+    }
+
+    #[test]
+    fn clip_keeps_the_grid_within_the_band_at_grazing_angles() {
+        for rx in [60.0, 85.0, 89.0, 91.0, 120.0] {
+            let (mut c, _) = towards_eye(25.0, camera::Projection::Perspective);
+            c.object_rot[0] = rx;
+            c.viewer_distance = 20.0;
+            let m = c.gl_matrices().clip_from_model_zero_to_one();
+            let mut g = Vec::new();
+            grid(&mut g, &c, [0.0; 4]);
+            let out = clip_to_view(&g, &m);
+            assert!(out.len() <= g.len() && out.len().is_multiple_of(2));
+            assert_clipped(&g, &out, &m);
+        }
     }
 }

@@ -655,11 +655,18 @@ impl Renderer {
                 v.iter().map(LineVertex::bytes),
             )
         };
-        let (before, behind, after) = (
-            lines(&overlay.before),
-            lines(&overlay.behind),
-            lines(&overlay.after),
+        // Model-space lines are cut to the view on the CPU first, for
+        // lavapipe, which fills a line whose end projects far off screen
+        // (an axis running to infinity towards the eye) as an area. The
+        // draws below use the cut lists' counts: segments wholly outside
+        // are gone.
+        let clip = |v: &[LineVertex]| crate::overlay::clip_to_view(v, &frame.clip_from_model);
+        let (before_v, behind_v, after_v) = (
+            clip(&overlay.before),
+            clip(&overlay.behind),
+            clip(&overlay.after),
         );
+        let (before, behind, after) = (lines(&before_v), lines(&behind_v), lines(&after_v));
         let behind_pipeline = behind.as_ref().map(|_| self.lines_behind());
         let pipelines: Vec<(Draw, Arc<wgpu::RenderPipeline>)> = scene
             .draws
@@ -747,7 +754,7 @@ impl Renderer {
                 if let Some(b) = &before {
                     pass.set_pipeline(&self.lines_tested);
                     pass.set_vertex_buffer(0, b.slice(..));
-                    pass.draw(0..overlay.before.len() as u32, 0..1);
+                    pass.draw(0..before_v.len() as u32, 0..1);
                 }
             }
             if let Some(faces) = &scene.faces {
@@ -772,12 +779,12 @@ impl Renderer {
             if let (Some(b), Some(p)) = (&behind, behind_pipeline) {
                 pass.set_pipeline(p);
                 pass.set_vertex_buffer(0, b.slice(..));
-                pass.draw(0..overlay.behind.len() as u32, 0..1);
+                pass.draw(0..behind_v.len() as u32, 0..1);
             }
             if let Some(a) = &after {
                 pass.set_pipeline(&self.lines_over);
                 pass.set_vertex_buffer(0, a.slice(..));
-                pass.draw(0..overlay.after.len() as u32, 0..1);
+                pass.draw(0..after_v.len() as u32, 0..1);
             }
         }
     }

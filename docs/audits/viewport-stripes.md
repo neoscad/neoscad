@@ -4,6 +4,43 @@ Audit of the striped black "staircase hatching" seen near the origin after
 orbiting `web/examples/CSG.scad` in the Linux app (crates/linux-app) under
 Xvfb in Docker, rendering with wgpu on Mesa lavapipe.
 
+## Status
+
+**Fixed** in `crates/render` by the CPU clip proposed below, with one
+change. `overlay::clip_to_view` runs in `Renderer::draw` (`gpu.rs`) on all
+three line lists every frame, and the draws use the clipped counts. It
+uses Liang–Barsky against the near plane (`z >= 0`) and four side planes,
+and keeps each vertex's `start`. The change: the side planes are a guard
+band at twice the viewport (`|x|, |y| <= 2w`, `CLIP_GUARD`), not its
+edges. A cut end then lies at least half a viewport off screen, so the GPU
+still makes the visible cut. An end cut exactly at the edge would sit on a
+pixel boundary, where rounding could change the last pixel on correct
+drivers. Band ends are still within about a thousand pixels of the image,
+far inside the range lavapipe drew cleanly (12k px). Cut ends are divided
+through by `w` in f64, so a `w = 0` end becomes an ordinary finite point
+on the same line.
+
+Checked after the fix:
+
+- **lavapipe (CLI PNG, the same Docker setup).** 104 views: the audit's
+  orbits (`rz` 220, 300, 320, 340, 40, near top-down), top-down, bottom-up,
+  grazing and off-centre cameras, at distances 3, 20, 140 and 1000, in
+  both projections. No stripes or filled areas remain, and the dashed axes
+  that lavapipe dropped near top-down are drawn. What still differs from
+  Metal is a few hundred pixels per view, along lines and model edges, and
+  the counts are the same before and after the fix in views the bug never
+  touched. These are the two rasterizers' ordinary line and edge rules.
+  In the audit's view (`rz = 320`, distance 140) the fix takes the
+  differences from 4560 pixels to 375.
+- **Metal.** The same 104 views are byte-identical before and after the
+  fix except two exact top-down perspective views (`object_rot = [0,0,0]`),
+  where 28 and 55 pixels differ on one row. There the +Z axis points
+  straight at the eye, so its image should be a single point. What is
+  drawn instead is a short line whose length is rounding noise in `x / w`
+  near the near plane, and the cut changes that noise.
+- **Conformance.** `conformance run`, all tiers: 1773 passed, 0 failed,
+  as before.
+
 ## Verdict
 
 - **It is a lavapipe rasterization defect, triggered by our input.** The

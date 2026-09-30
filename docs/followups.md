@@ -1287,8 +1287,11 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   GSettings, Flatpak) is in that document ("Next").
 - Its view copies each changed frame from the GPU (`view.rs`); a large
   window at 4K on a slow bus may show it. `GdkDmabufTexture` is the fix.
-- After orbiting, lavapipe drew striped black marks near the origin
-  (the axis dashes or scale ticks?). Check whether a real GPU does too.
+- After orbiting, lavapipe drew striped black marks near the origin.
+  Fixed by clipping overlay lines on the CPU
+  (`docs/audits/viewport-stripes.md`). Still open there: DX12 and
+  hardware Vulkan were never run in the failing orbit, and the Mesa
+  defect is unreported.
 
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.
