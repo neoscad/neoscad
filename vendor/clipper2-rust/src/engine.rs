@@ -399,6 +399,16 @@ pub struct ClipperBase {
     pub horz_seg_list: Vec<HorzSegment>,
     pub horz_join_list: Vec<HorzJoin>,
 
+    /// NeoSCAD patch (see NeoSCAD's vendor/README.md): the number of
+    /// outrecs the last `Clipper64::execute_tree` split off after its sweep
+    /// (in `process_horz_joins` and `fix_self_intersects`). Split-off
+    /// outrecs go to the end of `outrec_list` whatever part of the plane
+    /// they are in, so a caller that unions separate bands of input one by
+    /// one and concatenates the results in sweep order gets exactly one
+    /// full union's order only when no band but the last has any.
+    pub late_outrecs: usize,
+    sweep_outrecs: usize,
+
     // 'static boxed FnMut mirrors C++ std::function, which has no borrow
     // semantics either; callers capture external state via move closures.
     #[cfg(feature = "using_z")]
@@ -436,6 +446,8 @@ impl ClipperBase {
             intersect_nodes: Vec::new(),
             horz_seg_list: Vec::new(),
             horz_join_list: Vec::new(),
+            late_outrecs: 0,
+            sweep_outrecs: 0,
 
             #[cfg(feature = "using_z")]
             z_callback: None,
@@ -1663,16 +1675,27 @@ impl ClipperBase {
 
     /// Copy AEL to SEL and update curr_x for top_y
     /// Direct port from clipper.engine.cpp AdjustCurrXAndCopyToSEL (line 2113)
-    fn adjust_curr_x_and_copy_to_sel(&mut self, top_y: i64) {
+    ///
+    /// NeoSCAD patch (see NeoSCAD's vendor/README.md): also returns whether
+    /// any edge's new `curr_x` is less than its left neighbour's, i.e.
+    /// whether the merge sort in `build_intersect_list` has anything to do.
+    fn adjust_curr_x_and_copy_to_sel(&mut self, top_y: i64) -> bool {
         let mut e_opt = self.actives;
         self.sel = e_opt;
+        let mut prev_x = i64::MIN;
+        let mut out_of_order = false;
         while let Some(e_idx) = e_opt {
-            self.active_arena[e_idx].prev_in_sel = self.active_arena[e_idx].prev_in_ael;
-            self.active_arena[e_idx].next_in_sel = self.active_arena[e_idx].next_in_ael;
-            self.active_arena[e_idx].jump = self.active_arena[e_idx].next_in_sel;
-            self.active_arena[e_idx].curr_x = top_x(&self.active_arena[e_idx], top_y);
-            e_opt = self.active_arena[e_idx].next_in_ael;
+            let e = &mut self.active_arena[e_idx];
+            e.prev_in_sel = e.prev_in_ael;
+            e.next_in_sel = e.next_in_ael;
+            e.jump = e.next_in_ael;
+            let x = top_x(e, top_y);
+            e.curr_x = x;
+            out_of_order |= x < prev_x;
+            prev_x = x;
+            e_opt = e.next_in_ael;
         }
+        out_of_order
     }
 
     // ---- Trim horizontal ----
@@ -2569,7 +2592,20 @@ impl ClipperBase {
             return false;
         }
 
-        self.adjust_curr_x_and_copy_to_sel(top_y);
+        // NeoSCAD patch (see NeoSCAD's vendor/README.md): when the edges are
+        // still in x order at top_y, no two of them cross in this scanbeam,
+        // and the merge sort below would compare every pair of neighbouring
+        // runs, record no intersection and leave the order as it is (it only
+        // acts on a strict `<`). Skipping it returns the same `false`
+        // (`intersect_nodes` is always empty here: `do_intersections` clears
+        // it after each use), and the SEL and `jump` links it would have
+        // rearranged are dead: `do_top_of_scanbeam` resets `sel` before
+        // anything reads them again. In a union of many disjoint glyph
+        // outlines almost every scanbeam is like this, and the sort was the
+        // largest cost of the whole union.
+        if !self.adjust_curr_x_and_copy_to_sel(top_y) {
+            return false;
+        }
 
         let mut left_opt = self.sel;
         // Check if we have a jump
@@ -2642,10 +2678,20 @@ impl ClipperBase {
 
     /// Do intersections
     /// Direct port from clipper.engine.cpp DoIntersections (line 2347)
-    fn do_intersections(&mut self, top_y: i64) {
+    ///
+    /// NeoSCAD patch (see NeoSCAD's vendor/README.md): returns whether every
+    /// active edge's `curr_x` is now `top_x(e, top_y)`, which is so when
+    /// `build_intersect_list` got as far as `adjust_curr_x_and_copy_to_sel`
+    /// (there are at least two edges) and no intersection then moved an
+    /// edge's `curr_x` to its intersection point.
+    fn do_intersections(&mut self, top_y: i64) -> bool {
         if self.build_intersect_list(top_y) {
             self.process_intersect_list();
             self.intersect_nodes.clear();
+            false
+        } else {
+            self.actives
+                .is_some_and(|a| self.active_arena[a].next_in_ael.is_some())
         }
     }
 
@@ -2688,7 +2734,16 @@ impl ClipperBase {
 
     /// Process the top of a scanbeam
     /// Direct port from clipper.engine.cpp DoTopOfScanbeam (line 2708)
-    fn do_top_of_scanbeam(&mut self, y: i64) {
+    ///
+    /// NeoSCAD patch (see NeoSCAD's vendor/README.md): `curr_x_fresh` is
+    /// `do_intersections`' result for the same `y`. When it is true, an edge
+    /// that does not end at `y` already has `curr_x == top_x(e, y)`: its
+    /// `bot`, `top` and `dx` have not changed since that was computed (this
+    /// loop only rewrites the edge it is on, and `do_maxima`'s
+    /// `intersect_edges` and `split` leave edge geometry alone), so the
+    /// assignment would store the same value, and skipping it saves one
+    /// `top_x` per edge per scanbeam.
+    fn do_top_of_scanbeam(&mut self, y: i64, curr_x_fresh: bool) {
         self.sel = None;
         let mut e_opt = self.actives;
         while let Some(e_idx) = e_opt {
@@ -2707,7 +2762,7 @@ impl ClipperBase {
                         self.push_horz(e_idx);
                     }
                 }
-            } else {
+            } else if !curr_x_fresh {
                 self.active_arena[e_idx].curr_x = top_x(&self.active_arena[e_idx], y);
             }
             e_opt = self.active_arena[e_idx].next_in_ael;
@@ -3435,6 +3490,7 @@ impl ClipperBase {
         self.fillrule = fillrule;
         self.using_polytree = use_polytrees;
         self.reset();
+        self.sweep_outrecs = 0; // NeoSCAD patch: see `late_outrecs`.
 
         if ct == ClipType::NoClip {
             return true;
@@ -3465,19 +3521,26 @@ impl ClipperBase {
                 None => break,
             }
 
-            self.do_intersections(y);
-            self.do_top_of_scanbeam(y);
+            let curr_x_fresh = self.do_intersections(y);
+            self.do_top_of_scanbeam(y, curr_x_fresh);
 
             while let Some(e) = self.pop_horz() {
                 self.do_horizontal(e);
             }
         }
 
+        // NeoSCAD patch: see `late_outrecs`.
+        self.sweep_outrecs = self.outrec_list.len();
         if self.succeeded {
             self.process_horz_joins();
         }
 
         self.succeeded
+    }
+
+    /// NeoSCAD patch: records `late_outrecs` once the tree is built.
+    pub(crate) fn count_late_outrecs(&mut self) {
+        self.late_outrecs = self.outrec_list.len().saturating_sub(self.sweep_outrecs);
     }
 }
 

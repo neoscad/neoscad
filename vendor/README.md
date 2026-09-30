@@ -89,10 +89,13 @@ A copy of the crates.io release (`.cargo_vcs_info.json` gives the upstream
 commit), used through `[patch.crates-io]` in the root `Cargo.toml`, not a
 workspace member, like manifold-rust. Both neoscad (`crates/geom`,
 `crates/io`) and manifold-rust depend on it, and the patch applies to
-both. It carries two changes: `nearbyint_f64` in `src/core.rs`, marked
-`NeoSCAD patch`, and `rust-version` raised from 1.70 to 1.77 in
-`Cargo.toml` (the release that stabilised `f64::round_ties_even`; the
-workspace needs 1.98 anyway). Drop the copy once upstream has the fix.
+both. It carries four changes, each marked `NeoSCAD patch` in the
+source: `nearbyint_f64` in `src/core.rs`; two sweep shortcuts and a
+split-off counter in `src/engine.rs` and `src/engine_public.rs` (below);
+and `rust-version` raised from 1.70 to 1.77 in `Cargo.toml` (the release
+that stabilised `f64::round_ties_even`; the workspace needs 1.98 anyway).
+Drop the copy once upstream has the fixes; the counter exists only for
+neoscad's banded union and would stay a local patch.
 
 ### The rounding patch
 
@@ -139,6 +142,76 @@ Interleaved A/B, best of 7 (3 for the 200-line extrude), M4 Pro:
 With only the clipper2-rust patch (best of 5), the 2D text is −31% (all
 of the gain), the extruded 50 lines −6% and the hole grid 0%: the
 keyhole patch is the extrusions' gain, the rounding patch the 2D one.
+
+### The sweep shortcuts
+
+After the rounding patch, a Time Profiler trace of the 200-line 2D text
+union (`xcrun xctrace`, 2,925 samples) put 62% of the whole run inside
+`build_intersect_list`: 39% in its own merge sort, 9% in `top_x`, 6% in
+`adjust_curr_x_and_copy_to_sel`. At every scanbeam it recomputes each
+active edge's x at the beam's top and merge-sorts the list by it, to find
+the edges that crossed. In a union of glyph outlines that do not overlap,
+almost no beam has a crossing, and the sort (`log2 n` passes over a few
+hundred edges) runs to find nothing.
+
+- `adjust_curr_x_and_copy_to_sel` now also reports whether any edge's new
+  x is less than its left neighbour's. If none is, `build_intersect_list`
+  returns `false` before the sort. The sort only records an intersection
+  (and only moves an edge) on a strict `<` between runs of a list that is
+  already in order, so it would have returned `false` too, with
+  `intersect_nodes` empty (it always is on entry: `do_intersections`
+  clears it after each use). The SEL and `jump` links the sort would have
+  rearranged are dead: `do_top_of_scanbeam` sets `sel` to `None` before
+  anything reads them again.
+- When that happens, `do_top_of_scanbeam` does not recompute `top_x` for
+  edges that do not end at the scanline: `do_intersections` returns
+  whether every edge's `curr_x` is still the value just computed for the
+  same `y`, and the loop only rewrites the edge it is on (`do_maxima`'s
+  `intersect_edges` and `split` leave edge geometry alone), so the store
+  would write the same value.
+
+The first is −44% wall and −49% CPU on the 200-line text, the second a
+further 1–3% of CPU. Two other ideas were measured and dropped: a
+`repr(C, align(64))` `Active` with the fields the sweep reads in one
+cache line (under 1%, within noise), and copying the SEL only when the
+list is out of order (no gain).
+
+### The split-off counter
+
+`ClipperBase::late_outrecs` is the number of output records the last
+`Clipper64::execute_tree` created after its sweep, in `process_horz_joins`
+and `fix_self_intersects`. It changes no output; `crates/geom`'s banded
+union (`union_by_bands` in `crates/geom/src/clipper.rs`) reads it to
+decide whether its result is exactly the full union's (see that function
+and `docs/audits/slow-cases.md` §2).
+
+### Evidence that the sweep shortcuts change no output
+
+Release builds of `6d73727` and of this patch set (the shortcuts and the
+banded union together), exporting all 527 `.scad` files under
+`.reference/openscad/tests/data/scad`, 16 adversarial 2D models (rows of
+shapes that touch exactly or are 0.001 apart, nested holes, L shapes whose
+boxes overlap but which do not touch, 6,400 tiny circles, 3,600 squares
+that touch, diamonds that meet at vertices, self-intersecting polygons,
+rotated and touching lines of text, rectangles that join and split, text
+under `offset()`, and extruded text) and the 200-line text: 671
+exports (2D to SVG and DXF, 3D to OFF), every output file byte-identical,
+at the default thread count and with `RAYON_NUM_THREADS` 1 and 3. Two
+reference files' console output differs between any two runs of the
+unpatched build as well (`docs/followups.md`, Determinism). Conformance is
+1,773 passes and 0 failures before and after. The crate's own tests pass
+(406, or 426 with `using_z`, run in a copy outside the workspace).
+
+Interleaved A/B, M4 Pro, load average 5–9 (another build on the
+machine), best of 5 (1 for the 200-line extrude). "Sweep" is the two
+shortcuts alone; "all" adds the banded union:
+
+| Model | Before | Sweep | All | Nightly |
+|---|---|---|---|---|
+| 200 lines of text, 2D, to SVG | 1.667 s (2.95 s CPU) | 0.938 s (1.48 s CPU) | 0.491 s (1.55 s CPU) | 1.414 s |
+| 50 lines of text, 2D, to SVG | 0.125 s | 0.085 s | 0.055 s | 0.152 s |
+| 50 lines of text, `linear_extrude(2)` | 0.388 s | | 0.319 s | 0.457 s |
+| 200 lines of text, `linear_extrude(2)` | 39.4 s | | 36.3 s | 31.0 s |
 
 ## Upstream drafts
 
@@ -189,3 +262,27 @@ these as issues, with the diff of the vendored file as the patch.
 > horizontal edge, where `∞ as i64` would overflow the following add), and
 > makes the union about 30% faster end to end. It needs `rust-version =
 > "1.77"`.
+
+### clipper2-rust: the intersection sort runs when nothing crossed
+
+> **Title:** Skip `build_intersect_list`'s merge sort when the active
+> edges are still in order
+>
+> At every scanbeam, `build_intersect_list` (`src/engine.rs`) recomputes
+> each active edge's x at the top of the beam and merge-sorts the edges by
+> it to find the ones that crossed. When no edge crossed, the list is
+> already sorted and the sort records nothing, but it still makes
+> `log2 n` passes. In a union of many shapes that do not overlap (200
+> lines of glyph outlines) that was 39% of the run by itself.
+>
+> Suggested fix: have `adjust_curr_x_and_copy_to_sel` return whether any
+> new `curr_x` is less than its left neighbour's, and return `false`
+> from `build_intersect_list` when none is. The sort only acts on a
+> strict `<`, `intersect_nodes` is empty on entry, and the SEL links it
+> would rearrange are reset by `do_top_of_scanbeam` before they are read,
+> so the result is the same. In that case `do_top_of_scanbeam` can also
+> skip recomputing `top_x` for edges that do not end at the scanline, since
+> their `curr_x` already holds it. Output is byte-identical on every
+> OpenSCAD test model we export and on 2D stress models (671 exports),
+> and the 2D union is about twice as fast. C++ Clipper2 has the same
+> sort (`ClipperBase::BuildIntersectList`) and could take the same check.

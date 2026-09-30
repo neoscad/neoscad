@@ -370,8 +370,11 @@ impl Clipper64 {
         polytree.clear();
         open_paths.clear();
 
+        self.base.late_outrecs = 0;
         if self.base.execute_internal(clip_type, fill_rule, true) {
             self.build_tree64(polytree, open_paths);
+            // NeoSCAD patch (see NeoSCAD's vendor/README.md)
+            self.base.count_late_outrecs();
         }
         self.base.clean_up();
         self.base.succeeded

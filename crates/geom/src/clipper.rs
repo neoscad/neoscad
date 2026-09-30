@@ -177,20 +177,126 @@ fn apply_paths(paths: &[Paths64], op: Op2) -> Polygon2d {
         }
         return from_tree(&tree);
     }
-    for (i, p) in paths.iter().enumerate() {
+    if op == Op2::Union
+        && let Some(out) = union_by_bands(paths)
+    {
+        return out;
+    }
+    let indices: Vec<usize> = (0..paths.len()).collect();
+    run(paths, &indices, op, &mut tree);
+    from_tree(&tree)
+}
+
+/// One Clipper run over the children `indices` of `paths`: the first child
+/// of the operation is the subject and every other child a clip, as
+/// `ClipperUtils::apply` adds them. Returns Clipper's success flag and how
+/// many output records it split off after the sweep (see `union_by_bands`).
+fn run(paths: &[Paths64], indices: &[usize], op: Op2, tree: &mut PolyTree64) -> (bool, usize) {
+    let mut c = clipper();
+    for &i in indices {
         if i == 0 {
-            c.add_subject(p);
+            c.add_subject(&paths[i]);
         } else {
-            c.add_clip(p);
+            c.add_clip(&paths[i]);
         }
     }
-    c.execute_tree(
-        op.clip_type(),
-        FillRule::NonZero,
-        &mut tree,
-        &mut Paths64::new(),
-    );
-    from_tree(&tree)
+    let ok = c.execute_tree(op.clip_type(), FillRule::NonZero, tree, &mut Paths64::new());
+    (ok, c.base.late_outrecs)
+}
+
+/// A union of children that fall into two or more separate horizontal
+/// bands, as one union per band, or `None` to run the one full union.
+///
+/// Clipper sweeps a scanline from the largest y to the smallest, and a
+/// union's output order is the order in which the sweep creates its output
+/// records. When no child's y-range overlaps or touches another band's,
+/// the scanline never holds edges of two bands at once, so the full
+/// union's sweep is each band's sweep in turn, identical step for step,
+/// and its output is the bands' outputs concatenated from the top band
+/// down. So this is byte-identical to the full union, which is what makes
+/// it usable at all: SVG and DXF exports are compared byte for byte with
+/// OpenSCAD's, which runs the full union (`GeometryEvaluator.cc:694`).
+/// Children that are separate in x but share y are not split off: their
+/// output records interleave in the full sweep, and no per-part result
+/// says how.
+///
+/// One exception breaks the concatenation: after the sweep, Clipper splits
+/// some records in two (touching or self-intersecting outlines), and the
+/// new record goes to the end of the whole list, after every band. So a
+/// band other than the lowest that split anything off (the vendored
+/// clipper2-rust's `late_outrecs`) makes this give up and return `None`.
+///
+/// The gain is that bands are independent: in a render of many lines of
+/// `text()` the top-level union of 200 lines was half the run, one thread
+/// sweeping every line in turn, and here each line is its own band.
+fn union_by_bands(paths: &[Paths64]) -> Option<Polygon2d> {
+    // (min y, max y, child) for every child with points, in integer units
+    // so that "touching" means exactly what it means to the sweep.
+    let mut spans: Vec<(i64, i64, usize)> = paths
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let mut ys = p.iter().flatten().map(|pt| pt.y);
+            let first = ys.next()?;
+            let (lo, hi) = ys.fold((first, first), |(lo, hi), y| (lo.min(y), hi.max(y)));
+            Some((lo, hi, i))
+        })
+        .collect();
+    if spans.len() < 2 {
+        return None;
+    }
+    // Bands from the top down: sort by max y, largest first, and start a
+    // new band when a child's top is below the current band's bottom.
+    // A child whose top is at or above the current band's bottom shares a
+    // scanline with it (touching counts: the sweep handles both at that y).
+    spans.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
+    let mut bands: Vec<(Vec<usize>, i64)> = Vec::new();
+    for &(lo, hi, i) in &spans {
+        match bands.last_mut() {
+            Some((band, bottom)) if hi >= *bottom => {
+                band.push(i);
+                *bottom = (*bottom).min(lo);
+            }
+            _ => bands.push((vec![i], lo)),
+        }
+    }
+    if bands.len() < 2 {
+        return None;
+    }
+    for (band, _) in &mut bands {
+        // Children keep their order within a band: it decides which is the
+        // subject, and the local minima's tie order.
+        band.sort_unstable();
+    }
+    let solve = |(band, _): &(Vec<usize>, i64)| {
+        let mut tree = PolyTree64::new();
+        let (ok, late) = run(paths, band, Op2::Union, &mut tree);
+        (ok, late, from_tree(&tree))
+    };
+    #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+    let results: Vec<(bool, usize, Polygon2d)> = {
+        use rayon::prelude::*;
+        bands.par_iter().map(solve).collect()
+    };
+    #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
+    let results: Vec<(bool, usize, Polygon2d)> = bands.iter().map(solve).collect();
+    // The lowest band's late records come last in the full union too.
+    let last = results.len() - 1;
+    if results
+        .iter()
+        .enumerate()
+        .any(|(i, (ok, late, _))| !ok || (i != last && *late != 0))
+    {
+        return None;
+    }
+    let mut out = Polygon2d {
+        outlines: Vec::new(),
+        sanitized: true,
+    };
+    for (_, _, p) in results {
+        out.outlines.extend(p.outlines);
+    }
+    Some(out)
 }
 
 /// `ClipperUtils::applyProjection`: the union of meshes projected face by
@@ -322,6 +428,160 @@ mod tests {
         p.sanitized = false;
         let s = sanitize(&p);
         assert!((area(&s) - 12.0).abs() < 1e-9);
+    }
+
+    /// The full union `apply_paths` runs when `union_by_bands` declines.
+    fn full_union(paths: &[Paths64]) -> Polygon2d {
+        let indices: Vec<usize> = (0..paths.len()).collect();
+        let mut tree = PolyTree64::new();
+        run(paths, &indices, Op2::Union, &mut tree);
+        from_tree(&tree)
+    }
+
+    /// Bit-for-bit equality (`PartialEq` on f64 would let -0.0 == 0.0 by).
+    fn same_bits(a: &Polygon2d, b: &Polygon2d) -> bool {
+        a.outlines.len() == b.outlines.len()
+            && a.outlines.iter().zip(&b.outlines).all(|(x, y)| {
+                x.positive == y.positive
+                    && x.vertices.len() == y.vertices.len()
+                    && x.vertices.iter().zip(&y.vertices).all(|(p, q)| {
+                        p[0].to_bits() == q[0].to_bits() && p[1].to_bits() == q[1].to_bits()
+                    })
+            })
+    }
+
+    /// A small deterministic generator (no test dependency needed).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn below(&mut self, n: i64) -> i64 {
+            (self.next() % n as u64) as i64
+        }
+    }
+
+    fn rect(x0: i64, y0: i64, x1: i64, y1: i64, ccw: bool) -> Path64 {
+        let mut p = vec![
+            Point64::new(x0, y0),
+            Point64::new(x1, y0),
+            Point64::new(x1, y1),
+            Point64::new(x0, y1),
+        ];
+        if !ccw {
+            p.reverse();
+        }
+        p
+    }
+
+    /// One child: rectangles on a coarse grid (shared and touching edges,
+    /// which is what makes Clipper join and split records after its sweep),
+    /// a ring with a hole, a random star, or a self-intersecting polygon,
+    /// inside the box whose corner is (x, y) and whose height is `h`.
+    fn child(rng: &mut Lcg, x: i64, y: i64, h: i64) -> Paths64 {
+        let g = h / 4;
+        match rng.below(5) {
+            0 | 1 => (0..1 + rng.below(4))
+                .map(|_| {
+                    let (a, b) = (rng.below(4), rng.below(4));
+                    let (c, d) = (rng.below(4), rng.below(4));
+                    let (x0, x1) = (a.min(c), a.max(c) + 1);
+                    let (y0, y1) = (b.min(d), b.max(d) + 1);
+                    rect(x + x0 * g, y + y0 * g, x + x1 * g, y + y1 * g, true)
+                })
+                .collect(),
+            2 => vec![
+                rect(x, y, x + h, y + h, true),
+                rect(x + g, y + g, x + h - g, y + h - g, false),
+            ],
+            3 => {
+                let n = 3 + rng.below(9);
+                let (cx, cy, r) = (x + h / 2, y + h / 2, h / 2);
+                vec![
+                    (0..n)
+                        .map(|k| {
+                            let t = k as f64 * std::f64::consts::TAU / n as f64;
+                            let rr = (r / 4 + rng.below(r - r / 4 + 1)) as f64;
+                            Point64::new(cx + (rr * t.cos()) as i64, cy + (rr * t.sin()) as i64)
+                        })
+                        .collect(),
+                ]
+            }
+            _ => vec![
+                (0..4 + rng.below(6))
+                    .map(|_| Point64::new(x + rng.below(h + 1), y + rng.below(h + 1)))
+                    .collect(),
+            ],
+        }
+    }
+
+    /// Whenever `union_by_bands` takes a union, its result is bit-identical
+    /// to the one full union's, outline order and start points included.
+    /// The layouts are adversarial: rows that touch exactly, children that
+    /// overlap in x but not y and the reverse, nested holes, many tiny
+    /// shapes, self-intersecting children, and grid rectangles whose joins
+    /// split records after the sweep.
+    #[test]
+    fn bands_match_full_union() {
+        let mut rng = Lcg(0x5eed);
+        let (mut composed, mut declined) = (0, 0);
+        for case in 0..4000 {
+            let h: i64 = [8, 40, 4000, 1 << 27][case % 4];
+            // Rows exactly `pitch` apart touch when pitch == h.
+            let pitch = h + [0, 1, h / 2, -h / 4][rng.below(4) as usize];
+            let rows = 1 + rng.below(6);
+            let n = 2 + rng.below(if case % 10 == 0 { 60 } else { 12 }) as usize;
+            let paths: Vec<Paths64> = (0..n)
+                .map(|_| {
+                    let row = rng.below(rows);
+                    let x = rng.below(6) * h / 2;
+                    let jitter = if rng.below(4) == 0 {
+                        rng.below(3) - 1
+                    } else {
+                        0
+                    };
+                    if rng.below(20) == 0 {
+                        Paths64::new()
+                    } else {
+                        child(&mut rng, x, row * pitch + jitter, h)
+                    }
+                })
+                .collect();
+            let full = full_union(&paths);
+            match union_by_bands(&paths) {
+                Some(bands) => {
+                    composed += 1;
+                    assert!(same_bits(&bands, &full), "case {case}: {paths:?}");
+                }
+                None => declined += 1,
+            }
+        }
+        // The test only means something if both paths were taken often.
+        assert!(composed > 1000 && declined > 200, "{composed} {declined}");
+    }
+
+    /// The bands run on rayon's pool; the concatenation is in band order,
+    /// so the result is the full union's on any number of threads.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn bands_are_the_same_on_any_thread_count() {
+        let mut rng = Lcg(7);
+        let paths: Vec<Paths64> = (0..300)
+            .map(|i| child(&mut rng, (i % 7) * 900, (i / 7) * 1100, 1000))
+            .collect();
+        let full = full_union(&paths);
+        for threads in [1, 2, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let bands = pool.install(|| union_by_bands(&paths)).expect("bands");
+            assert!(same_bits(&bands, &full), "differs on {threads} threads");
+        }
     }
 
     #[test]

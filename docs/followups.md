@@ -148,13 +148,24 @@ lead them, come roughly in order of user impact.
   another. Running those rounds on rayon (tried in 5b, same output)
   gained only 5-8%, so it was dropped; a real fix needs lazy solids
   across cache boundaries. (5a, 5b)
-- Many `text()` nodes side by side render slower than the nightly: 200
-  lines of 125 characters took 2.85 s against 1.63 s at `26888d7`, with
-  byte-identical SVGs, and `83aa1af` cut 31% of that; extruded, 64 s
-  against 31.5 s before `83aa1af`'s 35%. Shaping and outlines are not
-  the cost; nearly all of it is the single-threaded top-level 2D union
-  of the 200 results in clipper2-rust's `execute_internal` (and, 3D, the
-  cap triangulation). (5e)
+- Extruded text is still slower than the nightly at scale: 200 lines of
+  125 characters under `linear_extrude(2)` took 36.3 s against 31.0 s
+  (one run each, loaded machine), though 50 lines are faster (0.32 s
+  against 0.46 s). The 2D union is no longer the cost (the 2D case is
+  0.49 s against 1.41 s, `docs/audits/slow-cases.md` §2); earlier
+  profiles put the extruded cost in the cap triangulation. Profile the
+  200-line extrusion before changing anything. (5e)
+- The banded 2D union (`union_by_bands`, `crates/geom/src/clipper.rs`)
+  only splits children whose y-ranges are separate. Children separate in
+  x but sharing y (a row of shapes, one line of text's glyphs) still run
+  one serial union, because their output records interleave by y in
+  Clipper's sweep and byte parity with OpenSCAD's order would be lost.
+  Accepting a canonical, different order there (an owner decision; SVG
+  and DXF parity tests compare order) would let any disjoint clusters run
+  in parallel. It also falls back to the full union, having done the
+  bands' work, when a band other than the lowest splits a record after
+  its sweep; no model tried so far does, but such a model pays about
+  twice. (slow-cases §2)
 - Resolved variable lookups (O4, `crates/eval/src/resolve.rs`) still walk
   the context chain, comparing each context's region with the reference's
   candidates, rather than hopping a fixed (depth, slot). Fixed addressing
@@ -1010,6 +1021,13 @@ lead them, come roughly in order of user impact.
   test font is CFF. (5e)
 
 ## Determinism
+- Console output of two reference models varies between runs of one
+  build (seen at `6d73727` and after): `svg/id-layer-selection-test.scad`
+  prints a different set of `import() filter ... did not match` warnings
+  each run, and `misc/empty-shape-tests.scad` sometimes omits its
+  `Unsupported file format` error for `import("")`. The exported files are
+  identical. Probably diagnostics from parallel child evaluation being
+  deduplicated or collected in scheduling order. (slow-cases §2 sweep)
 - manifold-rust's `Slice` starts each loop from a `HashSet` iteration, so
   the raw polygon order varies; `projection(cut=true)` output is canonical
   only because Clipper's union reorders it. (5b)
