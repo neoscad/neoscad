@@ -1,0 +1,7 @@
+# Sources the binaries embed (include_str!/include_bytes!: the examples in
+# crates/client, the fonts and libraries in crates/assets) are checked out
+# exactly as committed, so a Windows checkout with core.autocrlf builds the
+# same bytes as every other platform. Without this the Windows app showed
+# its examples with a CR at the end of every line.
+web/examples/** -text
+assets/** -text
