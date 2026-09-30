@@ -63,10 +63,10 @@ line.
 A copy of the crates.io release (`.cargo_vcs_info.json` gives the upstream
 commit), used through `[patch.crates-io]` in the root `Cargo.toml`. It is
 not a workspace member, so the workspace's lints, formatting and tests do
-not apply to it. It carries three changes, each marked `NeoSCAD patch`: a
-bug fix in `src/edge_op.rs`, a speed fix in `src/polygon_earclip.rs`, and
-parallel boolean kernels in `src/par.rs` and its callers (below). Drop the
-copy once upstream has all three.
+not apply to it. It carries four changes, each marked `NeoSCAD patch`: a
+bug fix in `src/edge_op.rs`, two speed fixes in `src/polygon_earclip.rs`,
+and parallel boolean kernels in `src/par.rs` and its callers (below). Drop
+the copy once upstream has all four.
 
 The series, in `vendor/patches/manifold-rust/`:
 
@@ -76,6 +76,7 @@ The series, in `vendor/patches/manifold-rust/`:
 | `0001-edge-collapse-crease.patch` | the edge-collapse fix (`src/edge_op.rs`) |
 | `0002-keyhole-loop-visitor.patch` | the keyhole speed patch (`src/polygon_earclip.rs`) |
 | `0003-parallel-booleans.patch` | the parallel boolean kernels |
+| `0004-keyhole-ring-boxes.patch` | the keyhole ring-box patch (`src/polygon_earclip.rs`) |
 
 The first vendoring (`17a31e4`) left the two files out without a
 recorded reason; they could as well be restored, which would empty
@@ -159,6 +160,48 @@ keeps manifold-rust's behaviour, not C++'s.
 
 `crates/geom/tests/kernel_patches.rs` pins the triangles, in order, of a
 24×24 grid of octagonal holes, hashed with the unpatched copy.
+
+### The keyhole ring-box patch
+
+The keyhole speed patch made each walk cheaper but left the quadratic
+shape: every hole still walked every outer ring twice, once in each
+bridge search. C++ Manifold does the same (`CutKeyhole` and
+`FindCloserBridge` loop over all of `outers_`,
+`src/polygon.cpp:723-724, 772-773` in
+`.reference/openscad/submodules/manifold`), and OpenSCAD triangulates a
+2D shape's caps in one call over all its outlines
+(`src/geometry/linear_extrude.cc:64`, `Polygon2d::tessellate`). So 200
+lines of `linear_extrude`d text, one shape of about 30,000 rings, took
+about 34 s in both tools, over 90% of it in the two searches.
+
+The patch keeps a bounding box per outer ring, taken in `find_start` and
+grown by the hole's box each time a hole is joined in (the joined verts
+are copies of verts already in one box or the other; clipping only
+removes verts). Before walking a ring, each search asks whether any vert
+in the box could pass its tests:
+
+- `cut_keyhole` takes a connector only where `vert_interp_y2x` is finite,
+  which needs an edge with one end at or below start.y + eps and the
+  other at or above start.y − eps. A ring wholly above or below that band
+  is skipped.
+- `find_closer_bridge` takes a vert only if it is right of start.x − eps,
+  on the `above` side of start.y, and not clearly outside the line from
+  start to the current connector (`ccw`, which counts as collinear
+  anything within eps/2 times its longer vector). All three are linear in
+  the vert's position, so the box's corners bound them.
+
+Skipping a ring that cannot supply a connector leaves the connector, the
+ring order and so the triangles exactly as they were. The margins (twice
+epsilon, plus a relative 1e-9 far above the comparisons' rounding) only
+make the tests more permissive. The searches also track which ring the
+connector came from, so the right box is grown.
+
+`crates/geom/tests/kernel_patches.rs` pins the triangles of a grid of
+glyph-like outer rings with holes and islands, hashed before the patch.
+Every 3D model in `tests/data/scad` and `examples` (301 STL exports), and
+the 50- and 200-line text extrusions at 1 and 14 threads, export
+byte-identical STL before and after. The 200-line extrusion went from
+33.6 to 2.7 s (`docs/audits/slow-cases.md` §2).
 
 ### The parallel boolean patch
 
@@ -473,6 +516,26 @@ these as issues, with the diff of the vendored file as the patch.
 > degenerate outer rings.) With the restore, output is byte-identical on
 > every OpenSCAD test model we export (392 files), and triangulation-heavy exports are
 > 17–35% faster end to end.
+
+### manifold-rust: every hole walks every outer ring
+
+> **Title:** Triangulating many separate polygons with holes is quadratic
+> in the number of rings
+>
+> `EarClip::cut_keyhole` and `find_closer_bridge` walk every ring in
+> `outers` for every hole, as C++ Manifold does. For one polygon with
+> many holes that is needed, but for many separate polygons (a page of
+> text is about 30,000 rings) almost every ring is far from the hole:
+> 200 lines of extruded text spent over 90% of 34 s in these walks.
+>
+> Suggested fix: keep a `Rect` per outer ring (from `find_start`, grown by
+> the hole's box on each `join_polygons`), and skip a ring whose box
+> cannot contain a qualifying vert: for `cut_keyhole`, a ring wholly above
+> or below start.y ± eps; for `find_closer_bridge`, a box left of
+> start.x − eps, on the wrong side of start.y, or wholly outside the line
+> from start to the connector (checked at the corners, since the test is
+> linear). With margins above rounding, the output is unchanged; on the
+> text model the run is 12 times faster.
 
 ### clipper2-rust: `nearbyint_f64` in software
 

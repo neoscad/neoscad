@@ -68,6 +68,71 @@ fn earclip_many_holes_is_unchanged() {
     assert_eq!(fnv(&tris), 0xb444_9c9b_cd61_b83e, "hash {:#x}", fnv(&tris));
 }
 
+/// The bounding-box patch lets the two bridge searches skip an outer ring
+/// that cannot hold the bridge, so it must matter which ring each hole is
+/// cut into. Text is the case it was written for: many outer rings, each
+/// with a hole or two, on rows that share y-ranges. A 12x9 grid of
+/// "glyphs" (squares with one or two octagonal holes, an island inside
+/// some holes, and rows offset by a quarter so rings overlap in y and
+/// holes see several candidate rings to their right), triangulated with
+/// both a fixed and the automatic epsilon. Coordinates are exact binary
+/// fractions; the hashes were taken with the vendored copy before the
+/// patch.
+#[test]
+fn earclip_many_outers_is_unchanged() {
+    let octagon = |cx: f64, cy: f64, r: f64, hole: bool| -> Vec<Vec2> {
+        let pts = [
+            (1.0, -0.5),
+            (0.5, -1.0),
+            (-0.5, -1.0),
+            (-1.0, -0.5),
+            (-1.0, 0.5),
+            (-0.5, 1.0),
+            (0.5, 1.0),
+            (1.0, 0.5),
+        ];
+        let mut ring: Vec<Vec2> = pts
+            .iter()
+            .map(|&(x, y)| Vec2::new(cx + r * x, cy + r * y))
+            .collect();
+        if !hole {
+            ring.reverse();
+        }
+        ring
+    };
+    let mut polys = Vec::new();
+    for row in 0..9 {
+        for col in 0..12 {
+            let x0 = 5.0 * f64::from(col) + if row % 2 == 1 { 1.25 } else { 0.0 };
+            let y0 = 3.75 * f64::from(row) + 0.25 * f64::from(col % 3);
+            let (w, h) = (4.0, 4.5);
+            polys.push(vec![
+                Vec2::new(x0, y0),
+                Vec2::new(x0 + w, y0),
+                Vec2::new(x0 + w, y0 + h),
+                Vec2::new(x0, y0 + h),
+            ]);
+            let two = (row + col) % 3 == 0;
+            if two {
+                polys.push(octagon(x0 + 2.0, y0 + 1.25, 0.75, true));
+                polys.push(octagon(x0 + 2.0, y0 + 3.25, 0.75, true));
+            } else {
+                polys.push(octagon(x0 + 2.0, y0 + 2.25, 1.5, true));
+                if col % 2 == 0 {
+                    polys.push(octagon(x0 + 2.0, y0 + 2.25, 0.5, false));
+                }
+            }
+        }
+    }
+    let fixed = triangulate(&polys, 1e-9, true);
+    let auto = triangulate(&polys, -1.0, true);
+    // The two epsilons happen to pick the same triangles here.
+    for tris in [&fixed, &auto] {
+        assert_eq!(tris.len(), 1872);
+        assert_eq!(fnv(tris), 0x57ad_354c_2a93_a394, "hash {:#x}", fnv(tris));
+    }
+}
+
 /// clipper2-rust's `nearbyint_f64` as released in 1.2.0, before the patch
 /// replaced it with `round_ties_even`.
 fn nearbyint_unpatched(x: f64) -> f64 {

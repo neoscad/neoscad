@@ -83,6 +83,10 @@ pub(super) struct EarClip {
     polygon: Vec<Vert>,
     holes: Vec<usize>,
     outers: Vec<usize>,
+    /// NeoSCAD patch (see vendor/README.md): a box around every vert ever
+    /// in each outer ring, parallel to `outers`, grown as holes are joined
+    /// in, so the bridge searches can skip rings that cannot hold a bridge.
+    outer_bbox: Vec<Rect>,
     simples: Vec<usize>,
     hole2bbox: HashMap<usize, Rect>,
     ears_queue: std::collections::BinaryHeap<EarEntry>,
@@ -100,6 +104,7 @@ impl EarClip {
             polygon: Vec::with_capacity(num_vert + 2 * polys.len()),
             holes: Vec::new(),
             outers: Vec::new(),
+            outer_bbox: Vec::new(),
             simples: Vec::new(),
             hole2bbox: HashMap::new(),
             ears_queue: std::collections::BinaryHeap::new(),
@@ -545,6 +550,7 @@ impl EarClip {
             self.simples.push(start);
             if area > min_area {
                 self.outers.push(start);
+                self.outer_bbox.push(bbox);
             }
         }
     }
@@ -561,6 +567,18 @@ impl EarClip {
             0
         };
         let mut connector: usize = INVALID;
+        let mut ring: usize = INVALID;
+        // NeoSCAD patch: a ring whose verts all lie above or below the
+        // horizontal ray from `start` has no edge for which
+        // `vert_interp_y2x` is finite (that needs one end at or below
+        // start.y + eps and the other at or above start.y - eps), so it
+        // cannot change the connector and is skipped. Without this every
+        // hole walked every outer ring: 200 lines of extruded text (30,000
+        // rings) spent 90% of their time here and in `find_closer_bridge`.
+        // The margin is twice epsilon plus a relative term far above the
+        // rounding of those comparisons, so no ring that could qualify is
+        // ever skipped and the bridges, and triangles, are unchanged.
+        let slack = 2.0 * self.epsilon.abs() + 1e-9 * (1.0 + start_pos.y.abs());
 
         // Port of the C++ CheckEdge lambda: take `edge` as the new connector
         // when the horizontal ray from `start` crosses it (finite x), `start`
@@ -573,8 +591,12 @@ impl EarClip {
         // ring used to be skipped whole, so the connector is restored if the
         // walk stops part-way; that keeps the bridges, and so the triangles,
         // exactly as before.
-        for &outer_start in &self.outers {
-            let before = connector;
+        for (k, &outer_start) in self.outers.iter().enumerate() {
+            let rb = &self.outer_bbox[k];
+            if rb.min.y > start_pos.y + slack || rb.max.y < start_pos.y - slack {
+                continue;
+            }
+            let before = (connector, ring);
             let complete = self.for_each_loop_vert(outer_start, |edge| {
                 let x = self.vert_interp_y2x(edge, start_pos, on_top);
                 if x.is_finite()
@@ -593,10 +615,11 @@ impl EarClip {
                         }))
                 {
                     connector = edge;
+                    ring = k;
                 }
             });
             if !complete {
-                connector = before;
+                (connector, ring) = before;
             }
         }
 
@@ -605,12 +628,18 @@ impl EarClip {
             return;
         }
 
-        connector = self.find_closer_bridge(start, connector);
+        let (connector, ring) = self.find_closer_bridge(start, connector, ring);
         self.join_polygons(start, connector);
+        // NeoSCAD patch: the hole's verts are now part of that ring.
+        let rb = &mut self.outer_bbox[ring];
+        rb.union_point(bbox.min);
+        rb.union_point(bbox.max);
     }
 
     /// Refine keyhole connector: find any reflex vert closer to start.
-    fn find_closer_bridge(&self, start: usize, edge: usize) -> usize {
+    /// NeoSCAD patch: also takes and returns the index in `outers` of the
+    /// ring holding the connector, so `cut_keyhole` can grow its box.
+    fn find_closer_bridge(&self, start: usize, edge: usize, edge_ring: usize) -> (usize, usize) {
         let start_pos = self.polygon[start].pos;
         let edge_right = self.polygon[edge].right;
         let mut connector = if self.polygon[edge].pos.x < start_pos.x {
@@ -624,7 +653,7 @@ impl EarClip {
         };
 
         if (self.polygon[connector].pos.y - start_pos.y).abs() <= self.epsilon {
-            return connector;
+            return (connector, edge_ring);
         }
         let above: f64 = if self.polygon[connector].pos.y > start_pos.y {
             1.0
@@ -633,9 +662,45 @@ impl EarClip {
         };
 
         // NeoSCAD patch: in place, and all-or-nothing per ring, as in
-        // `cut_keyhole`.
-        for &outer_start in &self.outers {
-            let before = connector;
+        // `cut_keyhole`. A vert qualifies only if it lies right of
+        // start.x - eps, on the `above` side of start.y -+ eps, and not
+        // clearly outside the line from start to the current connector
+        // (`inside` is `ccw`, which calls anything within eps/2 times the
+        // longer of its two vectors collinear). Each test is linear in the
+        // vert's position, so a ring whose box fails one of them at every
+        // corner has no vert that passes and is skipped. The box test uses
+        // the connector the walk would start with (it changes only inside
+        // a ring that is walked), with margins well above rounding, so the
+        // result is unchanged.
+        let eps = self.epsilon.abs();
+        let slack = 2.0 * eps + 1e-9 * (1.0 + start_pos.x.abs() + start_pos.y.abs());
+        let mut ring = edge_ring;
+        for (k, &outer_start) in self.outers.iter().enumerate() {
+            let rb = &self.outer_bbox[k];
+            if rb.max.x < start_pos.x - slack
+                || (above > 0.0 && rb.max.y < start_pos.y - slack)
+                || (above < 0.0 && rb.min.y > start_pos.y + slack)
+            {
+                continue;
+            }
+            let v2 = self.polygon[connector].pos - start_pos;
+            let len2 = (v2.x * v2.x + v2.y * v2.y).sqrt();
+            let mut best = f64::NEG_INFINITY;
+            let mut dist = len2;
+            for c in [
+                Vec2::new(rb.min.x, rb.min.y),
+                Vec2::new(rb.max.x, rb.min.y),
+                Vec2::new(rb.min.x, rb.max.y),
+                Vec2::new(rb.max.x, rb.max.y),
+            ] {
+                let v1 = c - start_pos;
+                best = best.max(above * (v1.x * v2.y - v1.y * v2.x));
+                dist = dist.max((v1.x * v1.x + v1.y * v1.y).sqrt());
+            }
+            if best < -(dist * eps + 1e-9 * dist * len2) {
+                continue;
+            }
+            let before = (connector, ring);
             let complete = self.for_each_loop_vert(outer_start, |vert| {
                 let inside = above
                     * ccw(start_pos, self.polygon[vert].pos, self.polygon[connector].pos, self.epsilon) as f64;
@@ -649,14 +714,15 @@ impl EarClip {
                     && self.vert_is_reflex(vert)
                 {
                     connector = vert;
+                    ring = k;
                 }
             });
             if !complete {
-                connector = before;
+                (connector, ring) = before;
             }
         }
 
-        connector
+        (connector, ring)
     }
 
     /// Create a keyhole between hole `start` and outer polygon `connector`.

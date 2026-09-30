@@ -155,13 +155,14 @@ lead them, come roughly in order of user impact.
   suspects are rayon's spin-waiting and the `batch_boolean` pairs, which
   go parallel whatever the mesh size. Worth a size threshold on the pairs
   and a profile under load. (`slow-cases.md` §1.1)
-- Extruded text is still slower than the nightly at scale: 200 lines of
-  125 characters under `linear_extrude(2)` took 36.3 s against 31.0 s
-  (one run each, loaded machine), though 50 lines are faster (0.32 s
-  against 0.46 s). The 2D union is no longer the cost (the 2D case is
-  0.49 s against 1.41 s, `docs/audits/slow-cases.md` §2); earlier
-  profiles put the extruded cost in the cap triangulation. Profile the
-  200-line extrusion before changing anything. (5e)
+- The ear clipper's bridge searches still scan every outer ring's box
+  once per hole (the ring-box patch, `vendor/README.md`, only skips the
+  walk), and `find_closer_bridge`'s wedge test admits rings up and to the
+  right of the hole. On 200 lines of extruded text, now 2.7 s against the
+  nightly's 32.3 s (`docs/audits/slow-cases.md` §2.1), that search is
+  still about 1 s. An index of the boxes sorted by y, and a tighter bound
+  on the wedge, would cut most of it. Low priority: the nightly is 12×
+  slower here.
 - The banded 2D union (`union_by_bands`, `crates/geom/src/clipper.rs`)
   only splits children whose y-ranges are separate. Children separate in
   x but sharing y (a row of shapes, one line of text's glyphs) still run

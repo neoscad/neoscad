@@ -15,6 +15,7 @@ recorded unloaded numbers, not today's absolutes. Models are the ones in
 |---|---|---|---|
 | Menger level 4 (`examples/Old/example024.scad`, `n=4`) | 2.87 s (8.2 s CPU) vs 2.01 s (14.4 s CPU) | 3.81–3.95 s (7.5 CPU) vs 3.80–5.11 s (12.5 CPU) | Real, ~1.4× slower. Cause: manifold-rust runs its boolean kernels serially. **Fixed** by the parallel boolean patch (§1.1): 1.59 s (8.3 CPU) vs 2.29 s |
 | 200 lines × 125 chars of `text()`, 2D to SVG | 2.85 vs 1.63 s, then −31% from the rounding patch ≈ 1.97 vs 1.63 s | 2.24–2.26 s (3.2 CPU) vs 2.07–2.31 s (1.8 CPU) | Real, ~1.2× slower. Cause: one single-threaded Clipper union of 30,140 contours in the pure-Rust port. **Fixed** (§2, Results): 0.49 s (1.55 CPU) vs 1.41 s, same SVG |
+| The same 200 lines under `linear_extrude(2)`, to STL | 36.3 vs 31.0 s (one run each, loaded) | 33.6 vs 32.3 s (best of 3, quiet) | Real, 1.04× slower. Cause: the cap triangulation walks every outer ring for every hole, as the nightly does. **Fixed** (§2.1): 2.7 s vs 32.3 s, same STL |
 | Deep unions | none recorded | flat 800 cubes: 0.036 vs 0.134 s (bench, 2026-09-28); nested 256 spheres: 0.24 vs 0.57 s | **Not reproduced.** neoscad is 2–4× faster on both union shapes tried |
 
 Two corrections to the written record, both verified against the source:
@@ -271,7 +272,54 @@ Evidence that the output is the full union's, byte for byte:
 50 lines: 0.125 → 0.055 s (nightly 0.152 s). Extruded, 50 lines: 0.388
 → 0.319 s (nightly 0.457 s); 200 lines, one run each: 39.4 → 36.3 s
 against the nightly's 31.0 s. That remaining gap was not profiled here;
-option 3 attributes the extruded case to triangulation.
+option 3 attributes the extruded case to triangulation (§2.1 confirms it).
+
+### 2.1 Extruded text: the keyhole ring-box patch
+
+**Model.** The same 200 lines inside one `linear_extrude(2)`, exported to
+STL (811 MB, about 3.5M triangles). Release build of `e15eef7`, quiet M4 Pro.
+
+**Profile** (`xcrun xctrace` Time Profiler, 34,113 one-millisecond
+samples). 94% was `Polygon2d::tessellate` → `manifold_rust::polygon::triangulate`
+on one thread: the extrusion triangulates its caps in one call over all
+30,000 outlines, and the ear clipper's `cut_keyhole` and
+`find_closer_bridge` walk every outer ring for every hole
+(`for_each_loop_vert` 31% self, `index` 21%, `vert_interp_y2x` 12%,
+`clipped` 12%). The 2D union, extrusion and export were the other 6%.
+This is not a port overhead: the nightly does exactly the same work.
+OpenSCAD tessellates the whole shape in one call
+(`src/geometry/linear_extrude.cc:64`), and C++ Manifold's `CutKeyhole` and
+`FindCloserBridge` loop over all of `outers_`
+(`submodules/manifold/src/polygon.cpp:723-724, 772-773`), which is why
+both tools took about 33 s, and why the 50-line model is 12 times cheaper, not
+4.
+
+**Change.** `vendor/patches/manifold-rust/0004-keyhole-ring-boxes.patch`
+keeps a bounding box per outer ring and skips, in each search, a ring
+whose box cannot hold a vert that passes that search's tests. Skipped
+rings are ones the walk would have taken nothing from, so the bridges
+and triangles are unchanged (reasoning and margins in `vendor/README.md`,
+"The keyhole ring-box patch").
+
+**Identity.** The STL of the 200-line model is byte-identical before and
+after, at the default thread count and `RAYON_NUM_THREADS=1`, and so is
+the 50-line one. All 301 3D models in `tests/data/scad` and `examples`
+export byte-identical STL. A new test in
+`crates/geom/tests/kernel_patches.rs` pins the triangles of a grid of
+glyph-like rings with holes and islands, hashed before the patch.
+Conformance: 1,773 passes, 0 failures after (as before), at both thread
+counts.
+
+| 200 lines of text, `linear_extrude(2)`, to STL (best of 3, interleaved) | Wall |
+|---|---|
+| `e15eef7` | 33.59 s |
+| keyhole ring boxes | **2.70 s** |
+| nightly | 32.32 s |
+
+50 lines: 2.97 → 1.10 s (one run each). After the patch, 3,437 samples:
+triangulation is 41% (1.4 s, most of it `find_closer_bridge`, whose
+wedge test still admits rings to the upper right of the hole), the 2D
+Clipper union 33%, STL formatting 23%.
 
 ## 3. Deep unions: not reproduced
 
@@ -312,3 +360,5 @@ owner remembers the original model, one interleaved run settles it.
 4. ~~`rayon::join` in `batch_boolean` rounds (§1, option 2).~~ Done, §1.1.
 5. ~~Parallel kernels in manifold-rust (§1, option 1).~~ Done, §1.1, which
    also plans what is left.
+6. ~~Extruded text (§2, option 3).~~ Done, §2.1: 12× faster, now well
+   ahead of the nightly.
