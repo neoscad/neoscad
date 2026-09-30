@@ -1,0 +1,4 @@
+# The repository's Sponsor button. Givebutter isn't one of GitHub's
+# built-in platforms, so it is a custom link; neoscad.org/donate redirects
+# to the same campaign.
+custom: ["https://givebutter.com/neoscad"]

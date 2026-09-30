@@ -65,6 +65,13 @@ builds the library crates for wasm32 and runs them in Node.
 `CLAUDE.md` lists every build, test and benchmark command, and
 `docs/architecture.md` describes the design.
 
+## Support
+
+NeoSCAD is free and open source. If it's useful to you, you can support
+its development at [givebutter.com/neoscad](https://givebutter.com/neoscad).
+Donations pay for what shipping it costs: the Apple Developer Program for
+the signed macOS app, the domain, and time on the engine and the apps.
+
 ## Licence
 
 NeoSCAD is licensed under the GNU General Public License, version 2 or
