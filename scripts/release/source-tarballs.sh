@@ -13,8 +13,9 @@
 # Unpack both into the same directory, then
 # `cargo build --release --offline --locked -p neoscad-cli`: the vendor
 # tarball's .cargo/config.toml points crates.io at cargo-vendor/. (The
-# tree's own vendor/ holds the patched manifold-rust and clipper2-rust,
-# which are path dependencies and so already in the source tarball.)
+# tree's own vendor/ holds the patched manifold-rust, clipper2-rust and
+# wgpu-core, which are path dependencies and so already in the source
+# tarball.)
 #
 # The files come from `git ls-files` (tracked, plus untracked files that
 # are not ignored), so a tag's clean checkout gives exactly the tag; a

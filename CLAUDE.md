@@ -68,7 +68,9 @@ against the nightly, which is how the harness itself is checked.
   for anything parallel.
 - `assets/` is vendored upstream content (Liberation fonts, MCAD); see
   `assets/README.md` for sources and the update procedure.
-- `vendor/manifold-rust` carries a local patch; see `vendor/README.md`.
+- `vendor/` holds patched copies of manifold-rust, clipper2-rust and
+  wgpu-core (`[patch.crates-io]`); each change is also a file in
+  `vendor/patches/<crate>/`. See `vendor/README.md`.
 
 - Editor positions are UTF-16, converted only through `lang::source`; don't
   write another conversion.

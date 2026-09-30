@@ -275,8 +275,8 @@ and builds `package.nix` through `packaging/nix/local.nix`: `src` is the
 tree (only the files the build and its tests read), and the crates come
 from `Cargo.lock` through `importCargoLock`, so no hash needs updating
 when dependencies change. `Cargo.lock` has no git dependencies (the
-patched manifold-rust and clipper2-rust are path dependencies under
-`vendor/`), so neither route needs `outputHashes`. `nix-build
+patched manifold-rust, clipper2-rust and wgpu-core are path dependencies
+under `vendor/`), so neither route needs `outputHashes`. `nix-build
 packaging/nix` does the same without flakes. The flake drops
 x86_64-darwin: nixpkgs 26.11, and so nixos-unstable, no longer supports
 it and throws on evaluation.

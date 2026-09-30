@@ -688,16 +688,12 @@ lead them, come roughly in order of user impact.
   not measured. (8e)
 
 ## Rendering
-- GPU readbacks (`Readback::wait_mapped` in `crates/render/src/offscreen.rs`)
-  and the viewport's staging release wait for their submission with no
-  timeout, so a wedged GPU blocks the requesting thread instead of failing
-  it after 10 s. They did wait in bounded slices, but in wgpu-core 30.0.1
-  a timed `poll(Wait)` that expires while another thread polls or submits
-  on the same device can panic on a defensive assert
-  (`device/resource.rs:948`); that is what failed CI run 36632690616.
-  gfx-rs/wgpu#9958 fixes the assert on trunk (not in 30.0.1 or the `v30`
-  branch as of 2026-09-29). When a wgpu release carries it, bring the
-  bounded wait back.
+- `vendor/wgpu-core` is crates.io wgpu-core 30.0.1 with gfx-rs/wgpu#9958
+  applied, the fix for a panic when a timed `poll(Wait)` expires while
+  another thread polls the same device (CI run 36632690616). It is what
+  lets GPU readbacks and the staging release wait for at most 10 s again.
+  When a wgpu release carries #9958, move to it and drop the copy (see
+  `vendor/README.md`); until then, a wgpu upgrade means re-vendoring.
 - Previews draw a CSG product's visible surface from real Manifold
   booleans (`geom::csg::product_meshes`) when every leaf bounds a solid
   (`PolySet::is_outward_solid`), so those products do not show OpenCSG's

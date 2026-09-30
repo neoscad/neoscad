@@ -5,7 +5,7 @@
 #   nix build .#neoscad            # the flake, with its locked nixpkgs
 #
 # The crates come from Cargo.lock through importCargoLock, which needs no
-# cargoHash: every dependency is from crates.io (the two patched ones are
+# cargoHash: every dependency is from crates.io (the patched ones are
 # path dependencies under vendor/) and none is a git dependency. The
 # version is the workspace's, so versionCheckHook checks the binary that
 # was actually built rather than package.nix's release number.

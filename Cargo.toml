@@ -32,11 +32,13 @@ sha2 = "0.10"
 unicode-script = "0.5"
 
 # manifold-rust with a fix for an edge-collapse bug that fills concave
-# corners after a union, and clipper2-rust with a faster rounding function
+# corners after a union, clipper2-rust with a faster rounding function, and
+# wgpu-core with upstream's fix for a panic when threads poll one device
 # (see vendor/README.md).
 [patch.crates-io]
 manifold-rust = { path = "vendor/manifold-rust" }
 clipper2-rust = { path = "vendor/clipper2-rust" }
+wgpu-core = { path = "vendor/wgpu-core" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

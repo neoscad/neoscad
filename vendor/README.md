@@ -213,6 +213,66 @@ shortcuts alone; "all" adds the banded union:
 | 50 lines of text, `linear_extrude(2)` | 0.388 s | | 0.319 s | 0.457 s |
 | 200 lines of text, `linear_extrude(2)` | 39.4 s | | 36.3 s | 31.0 s |
 
+## wgpu-core 30.0.1, patched
+
+A copy of the crates.io release (`.cargo_vcs_info.json` gives the upstream
+commit, `40f4a34e`), extracted from the `.crate` whose SHA-256 matched
+`Cargo.lock` (`14c018fc…`), with no file left out. It is used through
+`[patch.crates-io]` in the root `Cargo.toml` and is not a workspace
+member, like the others. Every build that compiles wgpu-core uses it: the
+native renderer (`crates/render`, `crates/ffi`) and the web viewer's WebGL
+build (`crates/web-view`'s default `webgl` feature). The WebGPU-only web
+builds do not compile wgpu-core at all; the browser implements WebGPU.
+
+It carries one change, upstream's own fix, marked `NeoSCAD patch` in
+`src/device/resource.rs`. The change is also kept as a patch file,
+`vendor/patches/wgpu-core/0001-maintain-queue-empty-race.patch`: the
+vendored tree is exactly the pristine crate plus that patch
+(`patch -p1` from the crate root), so the copy can be checked or rebuilt
+from the `.crate`.
+
+Being a path dependency, its compiler warnings are no longer capped the
+way a registry crate's are, so every build now shows one from upstream
+code: an unfulfilled `expect(unused)` in `src/lock/ranked.rs:83`. It is
+left alone to keep the copy equal to the release plus the fix; it is not
+an error under `cargo clippy -- -D warnings`, which only lints workspace
+members.
+
+### The poll race
+
+`Device::maintain`, which every `Device::poll` runs, waits on the fence,
+reads the fence value, and later asks the queue to retire finished
+submissions, which reports whether the queue is now empty. Nothing holds
+a lock across those steps. When a timed `poll(Wait)` times out and another
+thread's poll (or the maintain inside `Queue::submit`) retires every
+submission in between, this poll sees an empty queue with a fence value
+below its target and trips a defensive assert ("If the queue is empty,
+the current submission index (N) should be at least the wait submission
+index (N+1)", line 948 of the release's `device/resource.rs`). NeoSCAD's
+readbacks wait in 50 ms slices on a device shared between threads, so any
+slice that expired under load could panic: CI run 36632690616 failed that
+way, and `the_shared_device_survives_concurrent_use` (in `crates/ffi`)
+failed 14 times in 300 runs on a Mac with every core busy. The stopgap
+(`4d2222a`) waited with no timeout, so a wedged GPU blocked the thread.
+
+### The patch
+
+gfx-rs/wgpu#9958 (https://github.com/gfx-rs/wgpu/pull/9958), merged to
+trunk as `385520f72f5bbb614fec957ed31f3f6d19076a3f` on 2026-08-07, applied
+unchanged: its `wgpu-core/src/device/resource.rs` diff applies cleanly to
+30.0.1 (its `CHANGELOG.md` line is not part of the crate). `maintain` keeps
+the wait's outcome and reports `QueueEmpty` only when the wait did not time
+out; a timed-out wait then reports `WaitSucceeded` or `Timeout` from the
+fence value it read, and the assert only runs where the fence was read
+after a successful wait. `Readback::wait_mapped` and `release_staging`
+(`crates/render`) wait for at most 10 s again.
+
+Drop the copy, the patch file and the `[patch.crates-io]` line once a
+wgpu release carries #9958. As of 2026-09-29 none does: crates.io's
+newest is 30.0.1 (2026-08-22), and the `v30` branch does not contain the
+commit. Until then, upgrading wgpu means re-vendoring the new wgpu-core
+with the patch applied (or dropping it, if the release has the fix).
+
 ## Upstream drafts
 
 Both crates are Lars Brubaker's ports. Their `main` branches, fetched
