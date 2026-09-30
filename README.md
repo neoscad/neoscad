@@ -30,8 +30,10 @@ NeoSCAD is pre-release. As of the final v0.1 audit
   builds are unsigned; verify them with `gh attestation verify`.
 - **Browser:** a WebAssembly demo at <https://neoscad.org/try>.
 
-Release builds are coming soon; see <https://neoscad.org/download.html>
-for their status. Until then, build from source.
+Releases: <https://github.com/neoscad/neoscad/releases>, with every way to
+install on <https://neoscad.org/download.html>. For example
+`brew install neoscad/tap/neoscad` (the command line) or
+`brew install --cask neoscad/tap/neoscad-app` (the macOS app).
 
 ## Build from source
 
