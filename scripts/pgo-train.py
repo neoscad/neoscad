@@ -105,6 +105,14 @@ def main():
     print(f"pgo-train: {len(jobs)} runs, {len(odd)} unexpected exits")
     for c, f in odd[:20]:
         print(f"  {c}: {f}")
+    # A few odd exits are noise; most of them means the instrumented
+    # binary itself is broken, and its profile with it. On Windows ARM64
+    # every run died with 0xC0000005 (access violation) and llvm-profdata
+    # then failed with "no profile can be merged"; stopping here names the
+    # cause instead.
+    if len(odd) > len(jobs) // 2:
+        sys.exit(f"pgo-train: {len(odd)} of {len(jobs)} runs exited abnormally; "
+                 "the instrumented binary does not work on this target")
     serve(neoscad, models, out, env)
 
 

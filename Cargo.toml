@@ -112,8 +112,10 @@ precise-builds = true
 # (owner decision 2026-09-29). Checksums and GitHub artifact attestations
 # let users verify them; see docs/release.md, "Windows is unsigned".
 installers = ["shell", "powershell", "homebrew", "msi"]
-# The windows-11-arm image has no WiX, which the aarch64 MSI needs; this
-# step list (relative to .github/workflows) installs WiX 3.14.1 there.
+# Steps run before `dist build` in each build job (relative to
+# .github/workflows): WiX 3.14.1 on the windows-11-arm image, which lacks
+# it, and the PGO training and optimised build with its depth guard
+# (docs/release.md, "PGO builds").
 github-build-setup = "../build-setup.yml"
 tap = "neoscad/homebrew-tap"
 formula = "neoscad"

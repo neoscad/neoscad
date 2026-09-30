@@ -223,42 +223,37 @@ lead them, come roughly in order of user impact.
   `fractal_tree`'s 290k nodes, whose single-child spine stays serial.
   Carrying each memo entry's per-node hashes and shifting them by the
   replay's index offset (P4(b)) would skip replayed subtrees entirely.
-- **PGO in releases.** `scripts/pgo.sh` makes the CLI 6–7% faster on
-  the bench and held-out models with identical exports
-  (`perf-opportunities.md` P2), but no release uses it. What it would
-  take, in order:
-  1. Done: the recursion-depth guard. PGO's larger evaluator frames cut
-     the depth reached in the then 48 MiB stack budget (module recursion
-     52,399 to 34,353 frames against the nightly's 30,261).
-     `conformance depth --binary PATH` now fails any build below 1.25
-     times the nightly's depth on `recursion-test-module`, `-vector`,
-     `-function3` and `recursion.rs`'s two plain recursions, and
-     `DEFAULT_STACK_LIMIT` went to 64 MiB for every native build, which
-     puts the PGO build at 1.51 times (45,813 frames).
-  2. The macOS DMG: `scripts/apple/release.sh` builds the CLI and the
-     app core on an arm64 Mac, so the aarch64 slice can run
-     `pgo.sh`'s steps directly; the x86_64 slice needs its instrumented
-     binary run under Rosetta. The app core is `neoscad-ffi`, a
-     different crate graph: whether the CLI's profile matches its
-     functions (symbol hashes depend on features and crate metadata) is
-     untested; check with `-Cllvm-args=-pgo-warn-mismatch`, or train
-     through the ffi.
-  3. cargo-dist's build jobs. First dispatch `.github/workflows/pgo.yml`
-     (PGO on five release targets beside the plain build, with the
-     depth guard, a conformance subset and a quick bench; nothing released), then,
-     if the numbers hold, add the `.github/build-setup.yml` step written
-     out in `docs/release.md`, "PGO builds". Answered from sources:
-     `dist build` keeps an inherited `RUSTFLAGS` and appends to it
-     (cargo-dist 0.33.0 `build/cargo.rs`); the manylinux_2_28 images
-     have CPython under `/opt/python` but, by their build scripts, no
-     bare `python3` on `PATH` (the workflow and the step name the
-     interpreter); the 1.98.1 profiler runtime ships for all six targets,
-     `aarch64-pc-windows-msvc` included. Still open: everything on the
-     runners (`pgo.yml` has not run), and `x86_64-apple-darwin`, which
-     skips PGO unless its instrumented binary is trained under Rosetta
-     on `macos-15`. A profile is only valid for the commit and compiler
-     it was made with, so it is trained in the same job, never
-     committed.
+- **PGO in releases.** `scripts/pgo.sh` makes the CLI faster on the
+  bench and held-out models with identical exports
+  (`perf-opportunities.md` P2). The cargo-dist release adopts it on
+  macOS arm64, Linux x86_64 and aarch64 and Windows x86_64
+  (`docs/release.md`, "PGO builds"). What is left:
+  1. Unverified until a tag runs it: the release job itself (its
+     `.github/build-setup.yml` step, and whether `dist build` finds the
+     step's optimised build fresh; compare the SHA-256 the step logs with
+     `neoscad-executables.sha256sums`), and a `pgo.yml` rerun with the
+     bench fixes, for Windows x86_64's first numbers.
+  2. `aarch64-pc-windows-msvc` ships a plain build: its instrumented
+     binary crashed on every training run (`0xC0000005`) and
+     `llvm-profdata` rejected the raw profile ("symbol name is empty"),
+     the error rust-lang/rust#150123 reports. Retry when that issue
+     moves, by putting the target back in `pgo.yml`'s matrix and then in
+     `build-setup.yml`'s list.
+  3. `x86_64-apple-darwin` ships a plain build: it is cross-built on the
+     arm64 `macos-15` runner, so training would need Rosetta.
+  4. The macOS DMG (`scripts/apple/release.sh`,
+     `publish-macos-app.yml`) has no PGO, deliberately, for now. The
+     aarch64 slice could run `pgo.sh`'s steps directly; the x86_64 slice
+     needs its instrumented binary run under Rosetta. The app core is
+     `neoscad-ffi`, a different crate graph: whether the CLI's profile
+     matches its functions (symbol hashes depend on features and crate
+     metadata) is untested; check with `-Cllvm-args=-pgo-warn-mismatch`,
+     or train through the ffi. Until then the DMG's CLI stays plain too,
+     so the app's CLI and core are built alike.
+  Done: the recursion-depth guard (`conformance depth --binary PATH`,
+  1.25 times the nightly's depth; `DEFAULT_STACK_LIMIT` 64 MiB), which
+  every PGO build in `pgo.yml`'s first run passed (module recursion 1.42
+  to 1.55 times) and which the release step runs on the binary it ships.
 - The web core gained nothing from `simd128` autovectorisation
   (`perf-opportunities.md` P7, within 2% on six kernel-bound models,
   identical output). A kernel gain there needs hand-written `v128` code;

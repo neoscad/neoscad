@@ -14,9 +14,13 @@
 #   4. build again with -Cprofile-use, same profile settings as the
 #      normal build (thin LTO, one codegen unit).
 #
-#   scripts/pgo.sh [--profile release|dist]
+#   scripts/pgo.sh [--profile release|dist] [--profile-only]
 #
-# Prints the path of the optimised binary. Needs `rustup component add
+# Prints the path of the optimised binary; with --profile-only, stops
+# after step 3 and prints the path of the merged .profdata instead, for a
+# caller that makes the optimised build itself (the release build,
+# .github/build-setup.yml, builds it exactly as `dist build` will so that
+# the binary it checks is the one dist ships). Needs `rustup component add
 # llvm-tools-preview` (for the toolchain in rust-toolchain.toml), Python 3
 # ($PYTHON, else python3, else python), and .reference with BOSL2's
 # tests_x/examples_x (`conformance bosl2-corpus`). Host target only: the
@@ -40,10 +44,12 @@ if [ -f "$HOME/.cargo/env" ] && ! command -v cargo >/dev/null 2>&1; then
 fi
 
 profile=release
+profile_only=false
 while [ $# -gt 0 ]; do
     case "$1" in
         --profile) profile=$2; shift 2 ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        --profile-only) profile_only=true; shift ;;
+        -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
         *) echo "pgo.sh: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -87,6 +93,10 @@ RUSTFLAGS="${RUSTFLAGS:-} -Cprofile-generate=$raw" CARGO_TARGET_DIR="$work/gen" 
 echo "pgo.sh: training" >&2
 "$python" scripts/pgo-train.py "$work/gen/$host/$profile/neoscad$exe" "$work/train" >&2
 "$profdata_tool" merge -o "$profdata" "$raw"
+if $profile_only; then
+    echo "$profdata"
+    exit 0
+fi
 
 echo "pgo.sh: optimised build ($profile)" >&2
 RUSTFLAGS="${RUSTFLAGS:-} -Cprofile-use=$profdata" CARGO_TARGET_DIR="$work/use" \

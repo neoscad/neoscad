@@ -25,13 +25,28 @@
 # the PGO binary and its profile) and the job summary. The later steps run
 # even when an earlier check failed, so a failing target still reports.
 #
-# Unverified until the first dispatch: all of it on GitHub's runners. It
-# was only run locally, on macOS arm64. In particular: the Windows jobs
-# (pgo.sh under Git Bash, the training's `neoscad serve` over pipes, and
-# conformance, which CI has never run on Windows, so tiers 0-2 there are
-# recorded but not gated), and bench's machine description off macOS.
-# x86_64-apple-darwin is left out: it is cross-built on the arm64 runner,
-# so its instrumented binary would have to be trained under Rosetta.
+# The first dispatch (2026-09-30) ran it on GitHub's runners. Every PGO
+# binary passed the depth guard, and each target's conformance subset gave
+# the same counts for both builds. Two things failed there and are fixed:
+# the bench opened no model on Windows (its canonical \\?\ roots took a
+# `/`; crates/conformance/src/bench.rs, `expand`), and in the Linux
+# containers it stopped at the edit loop, which needs a GPU adapter,
+# before writing any result (the loop is now skipped with a note). The
+# Windows conformance subset stays recorded but not gated: its failures
+# are the plain build's too.
+#
+# Left out:
+# - x86_64-apple-darwin: cross-built on the arm64 runner, so its
+#   instrumented binary would have to be trained under Rosetta;
+# - aarch64-pc-windows-msvc: every instrumented run crashed with
+#   0xC0000005 (access violation), and llvm-profdata rejected the one raw
+#   profile left ("malformed instrumentation profile data: symbol name is
+#   empty"), the error rust-lang/rust#150123 reports for coverage
+#   instrumentation on that target. Releases build it without PGO
+#   (docs/release.md, "PGO builds"). To try it again, add it back below:
+#     - target: aarch64-pc-windows-msvc
+#       runner: windows-11-arm
+#       container: ""
 name: PGO
 
 on:
@@ -55,9 +70,6 @@ jobs:
             container: quay.io/pypa/manylinux_2_28_aarch64
           - target: x86_64-pc-windows-msvc
             runner: windows-2025
-            container: ""
-          - target: aarch64-pc-windows-msvc
-            runner: windows-11-arm
             container: ""
           - target: aarch64-apple-darwin
             runner: macos-15
@@ -190,11 +202,19 @@ jobs:
             local f
             f=$("$CONFORMANCE" bench --quick --refs neoscad --binary "$1" | tee "$OUT/bench-$2.log" \
               | sed -n 's/^wrote //p' | tail -n 1)
+            if [ -z "$f" ]; then return 0; fi
             if [ "$RUNNER_OS" = Windows ]; then cygpath -u "$f"; else echo "$f"; fi
           }
           for round in 1 2; do
             plain=$(bench "$PLAIN_BIN" "plain-$round")
             pgo=$(bench "$PGO_BIN" "pgo-$round")
+            # bench prints `wrote PATH` only once it has a result. Without
+            # one, name the run and its log rather than let cp fail on an
+            # empty name, as the first dispatch's Linux and Windows jobs did.
+            if [ -z "$plain" ] || [ -z "$pgo" ]; then
+              echo "a bench in round $round wrote no result; see $OUT/bench-*-$round.log" >&2
+              exit 1
+            fi
             cp "$plain" "$OUT/bench-plain-$round.json"
             cp "$pgo" "$OUT/bench-pgo-$round.json"
             "$PYTHON" scripts/pgo-compare.py "$OUT/bench-plain-$round.json" "$OUT/bench-pgo-$round.json" \

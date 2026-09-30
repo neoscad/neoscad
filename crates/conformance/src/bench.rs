@@ -540,12 +540,26 @@ fn binary_info(bin: &Path, r: &RefConfig) -> Value {
 }
 
 /// The `{REF}`/`{BOSL2}` form of a model path.
+///
+/// The rest of the path is pushed one `/`-separated component at a time
+/// rather than pasted onto the root as text: on Windows `Ctx`'s roots are
+/// canonical `\\?\D:\...` paths, which Windows takes literally, so a `/`
+/// left in one is part of a file name and every model fails to open
+/// ("The filename, directory name, or volume label syntax is incorrect",
+/// os error 123), as the first `pgo.yml` run's Windows bench did.
 fn expand(ctx: &Ctx, cfg: &Config, p: &str) -> PathBuf {
     let bosl = cfg
         .libraries
         .get("BOSL2")
         .map(|l| ctx.repo.join(&l.path))
         .unwrap_or_default();
+    for (key, root) in [("{REF}", ctx.ref_root.as_path()), ("{BOSL2}", &bosl)] {
+        if let Some(rest) = p.strip_prefix(key) {
+            let mut out = root.to_path_buf();
+            out.extend(rest.split('/').filter(|c| !c.is_empty()));
+            return out;
+        }
+    }
     PathBuf::from(
         p.replace("{REF}", &ctx.ref_root.to_string_lossy())
             .replace("{BOSL2}", &bosl.to_string_lossy()),
@@ -893,8 +907,19 @@ pub fn bench(ctx: &Ctx, opts: &BenchOptions) -> Result<u8, String> {
         };
         let expand_file = |f: &str| expand(ctx, &cfg, f);
         let missing = |req: &[String]| missing_library(ctx, &cfg, req);
-        let v = crate::edit_loop::run(el, &ctx_el, &expand_file, &missing)?;
-        extra.insert("edit_loop".into(), v);
+        // A failure here is recorded like a missing library, not returned:
+        // the edit loop draws snapshots, which a machine without a GPU
+        // adapter (a CI container) cannot, and returning the error threw
+        // away every model already timed without writing a result.
+        match crate::edit_loop::run(el, &ctx_el, &expand_file, &missing) {
+            Ok(v) => {
+                extra.insert("edit_loop".into(), v);
+            }
+            Err(why) => {
+                eprintln!("note: skipping edit_loop: {why}");
+                skipped_models.insert("edit_loop".into(), why);
+            }
+        }
     }
 
     // The record.
@@ -1667,6 +1692,39 @@ pub fn latest(ctx: &Ctx) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_splits_model_paths_into_components() {
+        // Ctx's roots are canonical, which on Windows means verbatim
+        // `\\?\` paths, where a `/` is not a separator: the model path must
+        // arrive as separate components or no model opens there.
+        let root = PathBuf::from(if cfg!(windows) { r"\\?\C:\r" } else { "/r" });
+        let ctx = Ctx {
+            repo: root.clone(),
+            ref_root: root.join(".reference").join("openscad"),
+        };
+        let cfg: Config = serde_json::from_str(include_str!("../../../conformance/bench.json"))
+            .expect("bench.json parses");
+        let p = expand(&ctx, &cfg, "{REF}/examples/Basics/CSG.scad");
+        assert_eq!(
+            p,
+            ctx.ref_root
+                .join("examples")
+                .join("Basics")
+                .join("CSG.scad")
+        );
+        let tail: Vec<_> = p.components().rev().take(3).collect();
+        assert_eq!(tail.len(), 3);
+        assert!(
+            tail.iter()
+                .all(|c| !c.as_os_str().to_string_lossy().contains('/'))
+        );
+        let bosl = cfg.libraries["BOSL2"].path.clone();
+        assert_eq!(
+            expand(&ctx, &cfg, "{BOSL2}/tests"),
+            root.join(bosl).join("tests")
+        );
+    }
 
     #[test]
     fn stl_stats_of_a_cube() {

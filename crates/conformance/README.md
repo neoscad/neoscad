@@ -103,7 +103,9 @@ neoscad is skipped with a note.
   run went through it), `cli_cold` (the same commands, no server) and
   `nightly_cold` (the nightly exporting STL and a 1024x1024 `--render`
   PNG, one view where a snapshot draws four). `--only edit_loop` runs it
-  alone.
+  alone. Where it cannot run (no GPU adapter for the snapshots, as in a
+  CI container) it is listed under `skipped_models` with the reason and
+  the rest of the result is still written.
 - **Environment:** the working directory is `target/conformance/bench`,
   `OPENSCADPATH` is `.reference` (which holds BOSL2), and
   `NEOSCAD_FONT_DIR`/`OPENSCAD_FONT_PATH` are unset, so each binary uses

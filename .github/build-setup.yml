@@ -3,7 +3,8 @@
 # [workspace.metadata.dist]; the path is relative to .github/workflows).
 # It lives outside .github/workflows because GitHub would try to run a
 # bare step list there as a workflow. Edit this file, then run
-# `dist generate --mode=ci` to copy it into release.yml.
+# `dist generate --mode=ci` to copy it into release.yml. Two steps: WiX
+# on Windows ARM64, then the PGO build and its depth guard.
 #
 # The Windows ARM64 runner image (windows-11-arm) has no WiX Toolset, so
 # the v0.1.0-rc.1 release failed building the aarch64 MSI with "The
@@ -40,3 +41,87 @@
     $banner = & (Join-Path $bin 'candle.exe') -? | Out-String
     if ($banner -notmatch 'Toolset Compiler') { throw "candle.exe did not run:`n$banner" }
     exit 0
+
+# PGO (docs/release.md, "PGO builds"): train on this runner, make the
+# optimised build exactly as `dist build` will, check it with the
+# recursion-depth guard, and hand the profile to `dist build` through
+# RUSTFLAGS.
+#
+# The optimised build goes into dist's own target directory, with the
+# arguments and RUSTFLAGS of dist's cargo invocation (cargo-dist 0.33.0,
+# src/build/cargo.rs: `cargo build --profile dist
+# --message-format=json-render-diagnostics --target T --package P`, and
+# RUSTFLAGS as inherited plus ` -Ctarget-feature=+crt-static` on MSVC).
+# Cargo then finds it fresh and `dist build` packages this very binary, so
+# the guard checks what ships. The guard is there because PGO inlines more
+# into the recursive evaluator, whose frames grow, so a PGO build recurses
+# less deep than a plain one; falling short of 1.25 times OpenSCAD's depth
+# fails the job before anything is packaged. The binary's SHA-256 is
+# logged so it can be matched against the release's
+# neoscad-executables.sha256sums.
+#
+# Only the targets whose PGO build .github/workflows/pgo.yml has checked.
+# Left out, and shipped as plain builds: x86_64-apple-darwin, cross-built
+# on the arm64 macos-15 runner, which cannot train it natively; and
+# aarch64-pc-windows-msvc, whose instrumented binary crashed on every
+# training run (see pgo.yml).
+#
+# Python for the training, as pgo.yml gets it off the containers (the
+# manylinux images have their own under /opt/python).
+- name: Python for the PGO training
+  if: ${{ !matrix.container && contains(fromJson('["aarch64-apple-darwin","x86_64-pc-windows-msvc"]'), join(matrix.targets, ',')) }}
+  uses: actions/setup-python@v7
+  with:
+    python-version: "3.12"
+- name: PGO profile, optimised build and depth guard
+  if: contains(fromJson('["aarch64-apple-darwin","x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu","x86_64-pc-windows-msvc"]'), join(matrix.targets, ','))
+  shell: bash
+  run: |
+    set -euo pipefail
+    target='${{ join(matrix.targets, ',') }}'
+    channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+    rustup toolchain install "$channel" --profile minimal --component llvm-tools-preview
+    host=$(rustc -vV | sed -n 's/^host: //p')
+    # The training runs the instrumented binary, so it must be this host's.
+    [ "$host" = "$target" ] || { echo "PGO: host $host cannot train $target" >&2; exit 1; }
+    exe=
+    if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
+    # manylinux has no bare python3 on PATH, and on Windows python3 may be
+    # the Microsoft Store stub, so PYTHON names the interpreter.
+    if [ -x /opt/python/cp312-cp312/bin/python ]; then
+      PYTHON=/opt/python/cp312-cp312/bin/python
+    else
+      PYTHON=$(command -v python)
+    fi
+    export PYTHON
+    "$PYTHON" --version
+
+    # What the training runs: OpenSCAD at the manifest's commit, BOSL2 at
+    # the bench kit's, and BOSL2's tests and examples extracted.
+    scripts/release/fetch-reference.sh
+    commit=$(sed -n 's/^BOSL2_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' scripts/release/bench-kit.sh)
+    [ -n "$commit" ] || { echo "PGO: no BOSL2_COMMIT in bench-kit.sh" >&2; exit 1; }
+    git init -q .reference/BOSL2
+    git -C .reference/BOSL2 remote add origin https://github.com/BelfrySCAD/BOSL2.git
+    git -C .reference/BOSL2 fetch -q --depth 1 origin "$commit"
+    git -C .reference/BOSL2 checkout -q --detach FETCH_HEAD
+    cargo build --locked --release -p neoscad-conformance
+    "target/release/conformance$exe" bosl2-corpus
+
+    # dist adds crt-static on MSVC; the instrumented build needs it too,
+    # or its IR (and so the profile's function hashes) differs from the
+    # build the profile feeds.
+    crt=
+    if [ "$RUNNER_OS" = Windows ]; then crt=" -Ctarget-feature=+crt-static"; fi
+    profdata=$(RUSTFLAGS="${crt# }" scripts/pgo.sh --profile dist --profile-only | tail -n 1)
+    [ -f "$profdata" ] || { echo "PGO: no profile at '$profdata'" >&2; exit 1; }
+
+    # dist's --message-format is left out: it is not part of cargo's
+    # fingerprint, and here the diagnostics should reach the log as text.
+    RUSTFLAGS="-Cprofile-use=$profdata$crt" cargo build --locked --profile dist \
+      --target "$target" --package neoscad-cli
+    bin=target/$target/dist/neoscad$exe
+    sha256sum "$bin" 2> /dev/null || shasum -a 256 "$bin"
+    "target/release/conformance$exe" depth --binary "$bin"
+
+    echo "RUSTFLAGS=-Cprofile-use=$profdata" >> "$GITHUB_ENV"

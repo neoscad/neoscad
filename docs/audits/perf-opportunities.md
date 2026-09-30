@@ -181,16 +181,22 @@ while another agent was timing on the machine, so ±10%).
   of any build (1.25 times the nightly's), and `DEFAULT_STACK_LIMIT` is
   64 MiB, which puts this PGO build's module recursion at 45,813 frames
   (1.51 times the nightly's). `.github/workflows/pgo.yml` builds and
-  measures PGO on five release targets, by hand; `release.md`, "PGO
-  builds", has the steps that would adopt it.
-- **Releases (not done):** see `followups.md`, "Performance". cargo-dist
-  0.33 has no PGO option that could be found in this checkout (whether
-  it has one upstream is unverified). The only hook is
-  `github-build-setup`, whose steps run before `dist build`
-  (`release.yml:138` to `:176`), so it could train and export
-  `RUSTFLAGS=-Cprofile-use=…`, which is simple only on the native
-  targets: `x86_64-apple-darwin` is cross-built on the arm64 `macos-15`
-  runner, so its instrumented binary would need Rosetta there.
+  measures PGO on the release targets that ship it, by hand; `release.md`,
+  "PGO builds", describes the release's own PGO step.
+- **Releases (2026-09-30):** adopted in the cargo-dist release on
+  macOS arm64, Linux x86_64 and aarch64 and Windows x86_64, through the
+  only hook cargo-dist 0.33 offers, `github-build-setup` (steps before
+  `dist build`): train, build as dist will, run the depth guard, export
+  `RUSTFLAGS=-Cprofile-use=…` (`release.md`, "PGO builds"). In
+  `pgo.yml`'s first run every PGO binary passed the depth guard, the
+  conformance counts matched the plain build's, and the quick bench's
+  geometric mean (PGO / plain) was 0.90 and 0.83 on macOS arm64 (two
+  rounds), 0.91 on Linux x86_64 and 0.93 on Linux aarch64 (one round,
+  from the job log); Windows x86_64 is not yet measured. Plain builds:
+  `x86_64-apple-darwin` (cross-built, would need Rosetta to train),
+  `aarch64-pc-windows-msvc` (the instrumented binary crashed on every
+  run), and the macOS DMG's CLI and app core (`followups.md`, "PGO in
+  releases").
 
 ### P3. A persistent parse-and-lower cache for the one-shot command line
 
@@ -377,7 +383,8 @@ fractal_tree or the edit loop. Do P1 first, which shares the machinery.
    (S) *Tried: identical output, no speed-up; not landed.*
 4. P2: a `cargo pgo` build for macOS arm64, measured interleaved against
    HEAD on the bench models. (M) *Measured: 6–7%; `scripts/pgo.sh`
-   landed, release integration in `followups.md`.*
+   landed; in the cargo-dist release on four targets, the rest in
+   `followups.md`.*
 5. P1: a gated prototype for modules without children, measured on
    fractal_tree and checked by `incremental.rs`'s harness. (L)
 6. P3: serialise `lang::fragment` keyed on content hash and build id,
