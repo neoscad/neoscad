@@ -42,10 +42,12 @@ pub mod dump;
 mod eval;
 pub mod features;
 pub use features::{Feature, Features};
+mod callmemo;
 pub mod fma;
 mod inst;
 mod json;
 pub mod limits;
+pub use callmemo::CallStats;
 mod memo;
 pub use memo::{MEMO_BUDGET, Memo, ReuseStats};
 pub mod message;
@@ -219,6 +221,10 @@ pub struct Options {
     /// warning; on, it is a builtin that a program's own `part` module
     /// still shadows (see [`node::NodeKind::Part`]).
     pub parts: bool,
+    /// Replay repeated module calls within an evaluation instead of
+    /// evaluating them again (see `callmemo`). The output is the same
+    /// either way; off is for comparing the two.
+    pub call_memo: bool,
     /// OpenSCAD's experimental features (`--enable`); none by default, as
     /// in OpenSCAD. See [`features`].
     pub features: Features,
@@ -248,6 +254,7 @@ impl Default for Options {
             guard: None,
             hardwarnings: false,
             parts: false,
+            call_memo: true,
             features: Features::NONE,
             fonts: None,
         }
@@ -406,6 +413,8 @@ pub struct Evaluation {
     pub resolution: ResolveStats,
     /// How [`evaluate_incremental`] used its memo (all zero otherwise).
     pub reuse: ReuseStats,
+    /// How repeated module calls were reused within this evaluation.
+    pub calls: CallStats,
 }
 
 /// Which of `$vpt`, `$vpr`, `$vpd` and `$vpf` a program assigned at its

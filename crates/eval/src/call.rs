@@ -476,6 +476,7 @@ impl<'a> Evaluator<'a> {
             return Err(self.unwind(UnwindKind::Recursion));
         }
         self.check_interrupt()?;
+        self.work += 1;
         // A frame for the frame budget (see `crate::recursion`); tail
         // calls below reuse it, as they reuse the native stack.
         self.frames += crate::recursion::CALL_FRAMES;
@@ -1310,9 +1311,12 @@ impl<'a> Evaluator<'a> {
             for i in (0..self.stack.len()).rev() {
                 let c = self.stack[i].clone();
                 if let Some(f) = self.local_function(&c, s, loc)? {
+                    // A function value cannot key a call (`crate::callmemo`).
+                    self.cm.unkeyable(i);
                     return Ok(Some(f));
                 }
             }
+            self.cm.unkeyable(0);
         } else {
             let mut cur = Some(ctx.clone());
             while let Some(c) = cur {
@@ -1573,9 +1577,11 @@ impl<'a> Evaluator<'a> {
             for i in (0..self.stack.len()).rev() {
                 let c = self.stack[i].clone();
                 if let Some(m) = self.local_module(&c, s, loc)? {
+                    self.cm.unkeyable(i);
                     return Ok(Some(m));
                 }
             }
+            self.cm.unkeyable(0);
         } else {
             let mut cur = Some(ctx.clone());
             while let Some(c) = cur {

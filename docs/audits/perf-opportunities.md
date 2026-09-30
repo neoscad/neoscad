@@ -1,5 +1,9 @@
 # Audit: performance opportunities not yet taken (at `e15eef7`)
 
+> **Status (2026-09-30).** P1 is done (`eval::callmemo`). Each item with
+> a **Status** line records what became of it; the rest is the audit as
+> written.
+
 Scope: what is left after `docs/audits/performance.md` (O1–O12 done except
 O11 and the `dlopen`ed renderer, per its status block), `slow-cases.md`
 (Menger, text, banded 2D unions), `unwind.md`, `bytecode-vm.md`, and
@@ -57,6 +61,63 @@ while another agent was timing on the machine, so ±10%).
   order, memory. Output must equal a fresh evaluation; the randomised
   harness in `crates/eval/tests/incremental.rs` extends to it. Parity:
   none, the tree is identical by construction. **Effort:** L.
+- **Status: done** (`crates/eval/src/callmemo.rs`, whose module comment
+  lists every input a call can observe and how each is covered). What
+  differed from the plan above:
+  - Keying on the values of the `$` names a call reads found nothing to
+    reuse: BOSL2 redefines `translate`, `rotate`, `scale` and
+    `multmatrix` to track `$transform = $transform * m`
+    (`transforms.scad:1569-1612`), so every `tree()` reads a different
+    `$transform` (each call read 20 `$` names from outside it, and no
+    call replayed). A name read only as the left operand of `$v = $v * e`
+    is now keyed on its shape (a numeric r×c matrix), since `*`'s
+    result shape and warnings depend on nothing else (`ops.rs:717-814`);
+    any other read of it, inside the call or out, keys it on value.
+  - `$` reads are recorded as the call runs (the dynamic lookup notes
+    those found below the call's frame, or unbound) rather than taken
+    from the definitions' syntax, so builtins' `$fn` reads count too.
+  - The key is the definition, the call's name, the whole bound frame
+    (so `$parent_modules`, the depth, is in it) and the definition's
+    context (the main file's by identity; a used library's, remade at
+    each lookup, by its variables). Only calls without children and
+    modules defined at a file's top level take part.
+  - Cost control: a key's first call is only noted (recording costs a
+    node copy and a check per `$` read), its second is recorded, later
+    ones replay; frames or `$` values over 4,096 values are not keyed
+    (digesting `vnf_polyhedron`'s VNF made a model with 30 such lookups
+    8% slower); a module that has not repeated after 64 lookups stops
+    being keyed; 64 MiB of entries.
+  - The recursion limit: a replay is allowed only at no more native
+    stack and frames than where it was recorded, which needs no hook on
+    the hot recursion checks. (The first version recorded the peak at
+    every check and searched a list on every `$` read: fractal_tree's
+    evaluation took 0.46 s instead of 0.09.)
+- **Measured** (M4 Pro, shared with another agent's builds, load 2–3.5;
+  interleaved against `3b977e7`, best of runs): fractal_tree render
+  3.42 → 0.61 s (0.18×), its evaluation (`-o echo`) 2.84 → 0.091 s.
+  BOSL2 corpus (3,505 examples and tests): 44,852 replays in 108,416
+  lookups, 701 files with at least one. Everything else within noise:
+  the other 13 bench models 0.99–1.03, except `mink_nonconvex` (1.07 at
+  10 ms; 1.00 re-run) and `text_30lines` (1.22 in the bench; 1.005 over
+  11 interleaved direct runs, and it has no user modules); `eval_only`
+  1.016 (its two base runs differ by 6%); a BOSL2 model whose one heavy
+  call never repeats, 1.01; the served BOSL2 edit unchanged (8–13 ms in
+  both builds, bimodal). Native module recursion goes 0.8% less deep:
+  the trace of `recursion-test-module.scad` excludes 52,399 frames
+  against 52,839. wasm's frame-limited depths are unchanged (249
+  modules, 498 functions).
+- **Identity:** `crates/eval/tests/call_memo.rs` runs each hazard with
+  the memo on and off (tree with indices and origins, `.csg`, messages
+  with locations, flags); removing the recursion, memory or shape-upgrade
+  guard fails a test. Conformance 1,773/0 at default and
+  `RAYON_NUM_THREADS=1`. An A/B export sweep against `3b977e7` (echo,
+  csg, stl, and off or svg/dxf; output bytes, exit code, console) over
+  the bench models, OpenSCAD's tests and examples and the BOSL2 corpus:
+  14,524 of 14,542 exports identical. Of the other 18, 9 differ between
+  two runs of the baseline too (unseeded `rands`, the import-warning and
+  cache-count races in `followups.md`, "Determinism"), 8 print the
+  excluded-frame count above, and one STL passed the sweep's 2 GB guard
+  in both builds.
 
 ### P2. Profile-guided optimisation of the release and dist builds
 
@@ -246,7 +307,8 @@ fractal_tree or the edit loop. Do P1 first, which shares the machinery.
 - The shares of key hashing (P4) and PNG encoding (P6) in warm times: no
   profiling was run. The gains of P2 and P7 on this codebase.
 - Whether `$` reads in BOSL2's attach code keep P1's hit rate near 2 keys
-  per depth (`distributors.scad` mentions `$idx` 64 times).
+  per depth (`distributors.scad` mentions `$idx` 64 times). Answered by
+  P1's status: `$transform` would have made it zero.
 
 ## Recommended next steps
 

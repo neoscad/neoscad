@@ -262,6 +262,9 @@ determinism test (`CLAUDE.md`).
   seed the host passes in (`eval::Options::rng_seed`). Statement reuse
   (`eval::memo`) must give output identical to a fresh evaluation; a
   randomized harness checks it (`crates/eval/tests/incremental.rs`).
+  So must call reuse within an evaluation (`eval::callmemo`), which
+  every test in `crates/eval/tests/call_memo.rs` runs with the memo on
+  and off and compares.
 - **Platform:** multiply-adds fuse on aarch64 only, as OpenSCAD's
   builds do (`eval::fma`). wasm32's maths functions differ from macOS
   libm in the last bit, and PNGs differ between GPUs at edge pixels;
@@ -290,6 +293,22 @@ than dispatch (`docs/audits/bytecode-vm.md`, "Recommendation").
   re-evaluate. Budgeted at 128 MiB per memo and 256 MiB per session;
   the one-shot CLI does not use it. A hero carrier edit re-renders in
   294 ms instead of 1,894.
+- **Call reuse within an evaluation** (`eval::callmemo`): a user
+  module call without children whose inputs repeat replays the subtree
+  and messages its first evaluation recorded. The key is the
+  definition, the bound frame after argument binding, and the
+  definition's context (the main file's by identity, a used library's
+  by its variables); the `$` names the call read from outside are
+  recorded as it runs and checked at each later call, by value, or by
+  shape when only BOSL2's `$transform = $transform * m` pattern read
+  them. `rands`, file reads, `part()`, deprecations, errors, `$`-named
+  functions and `parent_module()` reaching a caller keep a call (and
+  the calls around it) from being kept; a replay is refused deeper in
+  the stack than it was recorded, or where a fresh evaluation could
+  pass the memory limit. A key is recorded at its second call; 64 MiB
+  of entries per evaluation, freed at its end; on in every host, off
+  with `--hardwarnings`. `fractal_tree` renders in 0.61 s instead of
+  3.4 (`docs/audits/perf-opportunities.md`, P1).
 - **The call path** (`cbcf7ed`, `a948259`, `d137102`): a one-flag limit
   check, linear `concat`/`each` accumulation by moving a uniquely held
   accumulator, borrowed contexts on tail calls (D1), and T1–T5 from the

@@ -484,6 +484,9 @@ impl<'a> Evaluator<'a> {
                     self.warn(loc, DiagCode::InvalidArgument, t);
                     return Ok(Value::Undef);
                 }
+                // The name found belongs to a caller, which a memoised
+                // call's key does not see (`crate::callmemo`).
+                self.cm.module_read((s - 1 - n) as usize);
                 let name = self.module_names[(s - 1 - n) as usize];
                 Value::str(self.name(name).as_bytes())
             }

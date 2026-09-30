@@ -92,9 +92,9 @@ use crate::{Library, Options};
 
 /// 128 bits of SHA-256: a collision would show a stale model, so the key
 /// is a cryptographic hash rather than a fast one.
-type Digest = [u8; 16];
+pub(crate) type Digest = [u8; 16];
 
-fn digest(h: Sha256) -> Digest {
+pub(crate) fn digest(h: Sha256) -> Digest {
     let d = h.finalize();
     let mut out = [0; 16];
     out.copy_from_slice(&d[..16]);
@@ -278,7 +278,7 @@ struct Entry {
 
 /// Estimated bytes of a recorded result: its nodes (with the point lists
 /// polyhedra and polygons carry) and its messages.
-fn entry_bytes(node: Option<&Node>, messages: &[Recorded]) -> usize {
+pub(crate) fn entry_bytes(node: Option<&Node>, messages: &[Recorded]) -> usize {
     let mut n = messages
         .iter()
         .map(|m| 2 * m.text.len() + 256)
@@ -301,6 +301,7 @@ fn entry_bytes(node: Option<&Node>, messages: &[Recorded]) -> usize {
 }
 
 /// A message as the evaluator printed it.
+#[derive(Clone)]
 pub(crate) struct Recorded {
     /// The unit its location is in, if it has one.
     pub unit: Option<u32>,
@@ -893,7 +894,7 @@ impl<'a> Evaluator<'a> {
 /// Objects are always hashed on their own (tag 9, then each key and value
 /// in order), by their address: they share their values as lists do, and
 /// a tree of objects whose fields are one object is as cheap to build.
-fn value_digest(v: &Value, h: &mut Sha256) -> bool {
+pub(crate) fn value_digest(v: &Value, h: &mut Sha256) -> bool {
     let mut done = Done::default();
     match v {
         Value::Vector(items) if own_list(items) => {

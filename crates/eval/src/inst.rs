@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use lang::ast::{Instantiation, Scope};
+use lang::ast::{BinaryOp, ExprKind, Instantiation, Scope};
 use lang::diag::DiagCode;
 
 use crate::call::Instantiable;
@@ -81,7 +81,22 @@ impl<'a> Evaluator<'a> {
                 // stops without an "assignment to" trace.
                 self.check_hard()?;
             }
-            match self.eval(sr.unit, a.expr, ctx) {
+            // `$v = $v * e` reads `$v` only to make the next `$v`, which a
+            // recorded call may key on by shape (`callmemo::Dep::Shape`).
+            let armed = self.cm.active.get()
+                && self.syms.is_config(s)
+                && matches!(ast.expr(a.expr).kind,
+                    ExprKind::Binary(BinaryOp::Multiply, l, _)
+                        if matches!(ast.expr(l).kind,
+                            ExprKind::Var(n) if self.units[sr.unit as usize].sym(n) == s));
+            if armed {
+                self.cm.arm(s);
+            }
+            let r = self.eval(sr.unit, a.expr, ctx);
+            if armed {
+                self.cm.disarm();
+            }
+            match r {
                 Ok(v) => self.set_bound(ctx, base + k, s, v),
                 Err(mut e) => {
                     let q = self.quote_sym(s);
@@ -214,6 +229,7 @@ impl<'a> Evaluator<'a> {
         // through `if`, `for` or `children()` nests those too, and each
         // becomes a level of the node tree that rendering walks later.
         self.frames += crate::recursion::STATEMENT_FRAMES;
+        self.work += 1;
         let r = self.instantiate_frame(sr, i, ctx);
         self.frames -= crate::recursion::STATEMENT_FRAMES;
         r
@@ -338,6 +354,17 @@ impl<'a> Evaluator<'a> {
         self.set_bound(&mctx, last, sc, Value::Number(n_children as f64));
         self.set_var(&mctx, sp, Value::Number(self.module_names.len() as f64));
         self.bind_module(args, loc, mu, &def.params, dctx, &mctx)?;
+        // Reuse a repeated call (see `crate::callmemo`): only one without
+        // children, whose `children()` then depends on nothing outside it.
+        // Out of line, so the frame every level of a recursive module holds
+        // stays as small as it was: the native stack decides how deep
+        // modules can recurse.
+        if self.cm.on
+            && n_children == 0
+            && let Some(node) = self.call_enter((mu, def_scope.scope, index), dctx, &mctx, (sr, i))
+        {
+            return Ok(Some(*node));
+        }
         let mark = self.push(mctx.clone());
         let r = (|| {
             self.init_scope(&mctx, body)?;
@@ -359,6 +386,12 @@ impl<'a> Evaluator<'a> {
             }
         })();
         self.truncate(mark);
+        // A recording this call started sits at its stack index (and the
+        // ones its body started have ended); kept in the memo, not in a
+        // local, for the same reason as above.
+        if self.cm.recording_at(mark) {
+            self.call_end(r.as_ref().ok().and_then(Option::as_ref));
+        }
         r
     }
 

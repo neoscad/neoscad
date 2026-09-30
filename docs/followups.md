@@ -113,6 +113,21 @@ lead them, come roughly in order of user impact.
   allocates and takes nothing). (8f)
 
 ## Performance
+- **Call reuse (`eval::callmemo`) leaves out calls with children.** A
+  call's `children()` runs the caller's syntax in the caller's context,
+  so keying it needs the children scope and every variable that context
+  can reach; BOSL2's transform and attach modules all take children, so
+  only leaf and recursive modules replay today. Also not covered: modules
+  defined inside other modules (their definition context is a module
+  frame), and `$` names read by the `$v = $v * e` pattern anywhere but
+  a statement assignment (a `let` or a named argument `f($v = $v * m)`
+  keys on the value). The memo lives for one evaluation; carrying
+  entries across edits would need `Memo`'s positional anchors. A replay
+  is refused at more native stack or frames than its recording had (a
+  call recorded at the top level never replays inside a `let` or
+  `for`); recording the peak at each recursion check instead cost 5x on
+  fractal_tree's evaluation, so a cheaper hook would be needed. Calls
+  whose arguments hold more than 4,096 values are never keyed.
 - `PolySet::tessellate` with the libtess2 port, against the ear clipper
   it replaced (ff714c3), in-process with mimalloc as the binaries link
   it: 600k flat quads 0.020 s against 0.038, 600k non-planar quads 0.031
@@ -1041,6 +1056,9 @@ lead them, come roughly in order of user impact.
   `Unsupported file format` error for `import("")`. The exported files are
   identical. Probably diagnostics from parallel child evaluation being
   deduplicated or collected in scheduling order. (slow-cases §2 sweep)
+  Also `BOSL2/examples_x/shapes2d__122.scad`: its render summary says
+  "Geometries in cache: 46" in about four runs of five and 45 otherwise
+  (seen at `3b977e7`; the SVG is identical). (P1 sweep)
 - manifold-rust's `Slice` starts each loop from a `HashSet` iteration, so
   the raw polygon order varies; `projection(cut=true)` output is canonical
   only because Clipper's union reorders it. (5b)

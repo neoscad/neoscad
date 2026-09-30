@@ -595,6 +595,8 @@ pub mod live {
         beside: Cell<u64>,
         /// The limit was passed during this evaluation.
         passed: Cell<bool>,
+        /// The highest count since [`set_high`] (see [`high`]).
+        high: Cell<u64>,
     }
 
     thread_local! {
@@ -605,6 +607,7 @@ pub mod live {
                 trip_at: Cell::new(u64::MAX),
                 beside: Cell::new(0),
                 passed: Cell::new(false),
+                high: Cell::new(0),
             }
         };
         /// The guard of the evaluation running on this thread, if it has
@@ -655,6 +658,9 @@ pub mod live {
         COUNT.with(|c| {
             let n = c.live.get().saturating_add(bytes);
             c.live.set(n);
+            if n > c.high.get() {
+                c.high.set(n);
+            }
             if n > c.trip_at.get() {
                 trip(c, n);
             }
@@ -701,6 +707,9 @@ pub mod live {
                 return true;
             }
             let n = c.live.get().saturating_add(extra);
+            if n > c.high.get() {
+                c.high.set(n);
+            }
             if n > c.limit.get().saturating_sub(c.beside.get()) {
                 trip(c, n);
                 return true;
@@ -723,6 +732,18 @@ pub mod live {
 
     pub fn get() -> u64 {
         COUNT.with(|c| c.live.get())
+    }
+
+    /// The highest count (with any buffer [`passes`] asked about) since
+    /// the last [`set_high`]: what a recorded call's replay must still
+    /// have room for under the memory limit (`crate::callmemo`).
+    pub fn high() -> u64 {
+        COUNT.with(|c| c.high.get())
+    }
+
+    /// Restart [`high`] from `bytes`.
+    pub fn set_high(bytes: u64) {
+        COUNT.with(|c| c.high.set(bytes));
     }
 
     /// Zero the count (unarmed).

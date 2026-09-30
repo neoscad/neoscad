@@ -256,6 +256,12 @@ pub(crate) struct Evaluator<'a> {
     pub(crate) memo: Option<crate::memo::MemoRun<'a>>,
     /// The top-level statement being recorded for the memo, if one is.
     pub(crate) rec: Option<Box<crate::memo::Recording>>,
+    /// Reuse of repeated module calls within this evaluation (see
+    /// [`crate::callmemo`]).
+    pub(crate) cm: crate::callmemo::CallMemo,
+    /// Steps taken: statement instantiations and user function calls, a
+    /// measure of what a call cost for [`crate::callmemo`].
+    pub work: u64,
 }
 
 /// A variable's value moved out of its frame, to be handed to the one read
@@ -305,7 +311,7 @@ impl Caps {
 /// the parent's children, with allocator overhead. Measured: a million
 /// `cube(1)` nodes in two nested loops peak at 337 MB, three million in
 /// three at 1.49 GB (about 500 bytes each).
-const NODE_BYTES: u64 = 512;
+pub(crate) const NODE_BYTES: u64 = 512;
 
 /// How many evaluator checks pass between looks at the clock and the
 /// memory estimate: a few milliseconds of evaluation at most.
@@ -484,6 +490,8 @@ impl<'a> Evaluator<'a> {
             placeholder: Ctx::new(None, CtxKind::Plain, crate::resolve::NONE_REGION, 0),
             memo: None,
             rec: None,
+            cm: crate::callmemo::CallMemo::new(opts.call_memo && !opts.hardwarnings),
+            work: 0,
             opts,
         }
     }
@@ -712,15 +720,36 @@ impl<'a> Evaluator<'a> {
 
     /// `EvaluationSession::try_lookup_special_variable`.
     pub fn lookup_special(&self, s: Sym) -> Option<Value> {
-        for c in self.stack.iter().rev() {
+        for (j, c) in self.stack.iter().enumerate().rev() {
             let vars = c.vars.borrow();
             if vars.has_config
                 && let Some(v) = vars.get(s)
             {
+                // A call being recorded depends on what it reads from
+                // outside itself (see `crate::callmemo`).
+                if self.cm.active.get() {
+                    self.cm.read(s, Some(j), Some(v));
+                }
                 return Some(v.clone());
             }
         }
+        if self.cm.active.get() {
+            self.cm.read(s, None, None);
+        }
         None
+    }
+
+    /// [`Evaluator::lookup_special`] without noting the read: the value
+    /// a recorded call's entry is keyed on, looked up again at its site.
+    pub(crate) fn lookup_special_quiet(&self, s: Sym) -> Option<Value> {
+        self.stack.iter().rev().find_map(|c| {
+            let vars = c.vars.borrow();
+            if vars.has_config {
+                vars.get(s).cloned()
+            } else {
+                None
+            }
+        })
     }
 
     /// `Context::try_lookup_variable`, by name.
@@ -1084,7 +1113,7 @@ impl<'a> Evaluator<'a> {
 
     /// The most memory seen while recording, with `bytes` about to be
     /// allocated: a replay must not skip over a memory limit.
-    fn track_peak(&mut self, bytes: u64) {
+    pub(crate) fn track_peak(&mut self, bytes: u64) {
         let live = self.live_bytes().saturating_add(bytes);
         if let Some(r) = &mut self.rec {
             r.peak = r.peak.max(live);
@@ -1094,9 +1123,33 @@ impl<'a> Evaluator<'a> {
     /// Something happened that a statement's fingerprint does not cover
     /// (see `crate::memo`): the statement being recorded is not kept.
     pub(crate) fn untracked(&mut self) {
+        self.cm.impure += 1;
         if let Some(r) = &mut self.rec {
             r.untrack();
         }
+    }
+
+    /// Print a message a replayed call printed when it ran, recording it
+    /// wherever [`Evaluator::emit_hinted`] would have.
+    pub(crate) fn replay_recorded(&mut self, m: crate::memo::Recorded) {
+        if let Some(r) = &mut self.rec
+            && !r.untracked
+        {
+            r.record(m.clone());
+        }
+        if self.cm.active.get() {
+            self.cm.log.push(m.clone());
+        }
+        let sources = m.unit.map(|u| &self.units[u as usize].program.sources);
+        let msg = Message {
+            diag: m.diag,
+            text: &m.text,
+            sources,
+        };
+        crate::limits::live::charge(
+            message_bytes(msg.diag.span.is_some()) + 3 * msg.text.len() as u64,
+        );
+        self.out.message(&msg);
     }
 
     /// Print a replayed message as [`Evaluator::emit_hinted`] printed it.
@@ -1178,6 +1231,13 @@ impl<'a> Evaluator<'a> {
             && !r.untracked
         {
             r.record(crate::memo::Recorded {
+                unit: loc.map(|l| l.unit),
+                diag: diag.clone(),
+                text: text.to_vec(),
+            });
+        }
+        if self.cm.active.get() {
+            self.cm.log.push(crate::memo::Recorded {
                 unit: loc.map(|l| l.unit),
                 diag: diag.clone(),
                 text: text.to_vec(),
@@ -1281,6 +1341,7 @@ impl<'a> Evaluator<'a> {
         self.resolve_root(0);
         let region = self.units[0].res.scope_region[0];
         let file = self.new_ctx(&b, CtxKind::File(scope), region);
+        self.cm.main_file = Some(file.clone());
         let mark = self.push(file.clone());
         let result = self
             .init_scope(&file, scope)
@@ -1312,6 +1373,9 @@ impl<'a> Evaluator<'a> {
             self.warn(l, DiagCode::Evaluation, "More than one Root Modifier (!)");
         }
         self.truncate(0);
+        // The call memo holds node copies and the file's context; neither
+        // is needed past this point.
+        let calls = std::mem::take(&mut self.cm).stats;
         // Every register instance is closed on every path, errors included.
         debug_assert!(self.regs.is_empty() && self.reg_saves.is_empty());
         self.release_cycles();
@@ -1322,6 +1386,7 @@ impl<'a> Evaluator<'a> {
             .unwrap_or_default();
         Evaluation {
             reuse,
+            calls,
             root,
             aborted,
             interrupted,
