@@ -177,6 +177,12 @@ while another agent was timing on the machine, so ±10%).
   `DEFAULT_STACK_LIMIT` promises, but the module margin shrinks from 73%
   to 13%. The conformance suite cannot see this (OpenSCAD's expected
   files are cut to one frame).
+- **Since (2026-09-30):** `conformance depth` guards the recursion depth
+  of any build (1.25 times the nightly's), and `DEFAULT_STACK_LIMIT` is
+  64 MiB, which puts this PGO build's module recursion at 45,813 frames
+  (1.51 times the nightly's). `.github/workflows/pgo.yml` builds and
+  measures PGO on five release targets, by hand; `release.md`, "PGO
+  builds", has the steps that would adopt it.
 - **Releases (not done):** see `followups.md`, "Performance". cargo-dist
   0.33 has no PGO option that could be found in this checkout (whether
   it has one upstream is unverified). The only hook is

@@ -322,6 +322,91 @@ Windows builds happen only in CI: a local cross-build (`cargo xwin`)
 would accept the Microsoft CRT and SDK licence, which is the owner's to
 accept.
 
+### PGO builds (not adopted)
+
+A profile-guided build (`scripts/pgo.sh`) makes the CLI 6-7% faster on
+macOS arm64 (`docs/audits/perf-opportunities.md`, P2). Releases do not
+use it yet. `.github/workflows/pgo.yml`, run by hand, builds it on five
+release targets next to the plain build and records the depth guard,
+a conformance subset and a quick bench for both; its first runs decide
+whether to adopt it. Every build, PGO or not, has to pass the
+recursion-depth guard, `conformance depth --binary PATH`: at least 1.25
+times OpenSCAD's depth on its recursion tests (`crates/conformance/src/depth.rs`).
+
+What cargo-dist 0.33.0 does with an inherited `RUSTFLAGS`, from its
+source (`cargo-dist/src/build/cargo.rs`, tag `v0.33.0`): it reads
+`RUSTFLAGS` from the environment, appends its own flags
+(`-Ctarget-feature=+crt-static` on MSVC, as `msvc-crt-static` defaults
+to on), and passes the result to `cargo build --profile dist --target
+TRIPLE`. So a `RUSTFLAGS` that a setup step writes to `$GITHUB_ENV`
+reaches the build, and `--target` keeps it off build scripts and proc
+macros, as `pgo.sh` does.
+
+To adopt it, append these steps to `.github/build-setup.yml` (they run
+in `build-local-artifacts` before `dist build`; then `dist generate
+--mode=ci`), after the WiX step:
+
+```yaml
+# PGO (docs/release.md, "PGO builds"): train on this runner and hand the
+# profile to `dist build` through RUSTFLAGS. x86_64-apple-darwin is
+# cross-built on the arm64 macos-15 runner, whose host binary cannot train
+# it, so it ships without PGO.
+- name: PGO profile
+  if: "!contains(join(matrix.targets, ','), 'x86_64-apple-darwin')"
+  shell: bash
+  run: |
+    channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+    rustup toolchain install "$channel" --profile minimal --component llvm-tools-preview
+    # manylinux has no python3 on PATH; on Windows, python3 may be the
+    # Microsoft Store stub. pgo.sh finds python3 itself elsewhere.
+    if [ -x /opt/python/cp312-cp312/bin/python ]; then
+      export PYTHON=/opt/python/cp312-cp312/bin/python
+    elif [ "$RUNNER_OS" = Windows ]; then
+      PYTHON=$(command -v python); export PYTHON
+    fi
+    scripts/release/fetch-reference.sh
+    commit=$(sed -n 's/^BOSL2_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' scripts/release/bench-kit.sh)
+    git init -q .reference/BOSL2
+    git -C .reference/BOSL2 remote add origin https://github.com/BelfrySCAD/BOSL2.git
+    git -C .reference/BOSL2 fetch -q --depth 1 origin "$commit"
+    git -C .reference/BOSL2 checkout -q --detach FETCH_HEAD
+    cargo build --locked --release -p neoscad-conformance
+    target/release/conformance bosl2-corpus
+    # The instrumented build must see the flags dist adds, or its IR (and
+    # so the profile's function hashes) differs from the build it feeds.
+    if [ "$RUNNER_OS" = Windows ]; then export RUSTFLAGS="-Ctarget-feature=+crt-static"; fi
+    scripts/pgo.sh --profile dist > "$RUNNER_TEMP/pgo-path.txt"
+    profdata=target/pgo/neoscad.profdata
+    if [ "$RUNNER_OS" = Windows ]; then profdata=$(cygpath -m "$PWD/$profdata"); else profdata=$PWD/$profdata; fi
+    # The guard runs on the trained binary: the optimised build dist makes
+    # next uses the same profile, flags and compiler.
+    target/release/conformance depth --binary "$(tail -n 1 "$RUNNER_TEMP/pgo-path.txt")"
+    echo "RUSTFLAGS=-Cprofile-use=$profdata" >> "$GITHUB_ENV"
+```
+
+Then, in `release.yml`'s build job after `dist build`, the depth guard on
+what ships (a step cargo-dist has no hook for, so it would go in a
+`post-build` job or in `publish-packages.yml`, which already unpacks
+every archive): `conformance depth --binary <unpacked neoscad>`.
+
+Cost per target: three more builds (`conformance`, and `pgo.sh`'s
+instrumented and optimised `neoscad`) plus the training, about 1,350
+short runs: more than doubling each build job. `pgo.sh`'s optimised
+build is only there for the guard; checking dist's own binary instead
+would save it. A profile is only
+valid for the commit and compiler that made it, so it is trained in the
+same job and never committed.
+
+Open until `pgo.yml` has run: whether the instrumented binary and the
+training work on each runner (the Windows jobs above all: `pgo.sh` under
+Git Bash, `neoscad serve` over pipes), the gain on each target, and
+whether a `release`-profile profile (which `pgo.yml` trains) and a
+`dist` one differ enough to matter. Verified from sources rather than by
+a run: the 1.98.1 `rust-std` of all six targets ships
+`libprofiler_builtins` (the runtime `-Cprofile-generate` links), and
+`llvm-tools-preview` exists for all five build hosts, Windows ARM64
+included (`channel-rust-1.98.1.toml`).
+
 ## Smoke test
 
 `scripts/apple/smoke-release.sh`, run by the release script:

@@ -1,0 +1,225 @@
+# Profile-guided (PGO) builds of the neoscad CLI on the release targets,
+# run by hand, to answer whether releases should ship them
+# (docs/followups.md, "PGO in releases"; docs/audits/perf-opportunities.md,
+# P2). Not part of any release: cargo-dist's release.yml is untouched, and
+# the steps that would adopt PGO there are in docs/release.md, "PGO
+# builds".
+#
+# Each target, on the runner (and for Linux the manylinux_2_28 container)
+# its release build uses:
+#
+#   1. the plain release build, and `conformance` (for the corpus, the
+#      depth guard, the suite and the bench);
+#   2. OpenSCAD at conformance/manifest.json's commit and BOSL2 at
+#      scripts/release/bench-kit.sh's, which the training runs;
+#   3. scripts/pgo.sh: the instrumented build, the training
+#      (scripts/pgo-train.py, about 1,350 bounded runs) and the optimised
+#      build;
+#   4. `conformance depth` on both binaries: the PGO build must recurse at
+#      least 1.25 times as deep as OpenSCAD, which is what fails the job;
+#   5. a conformance subset on both binaries (tiers 0-2; on the Mac 4-5 too);
+#   6. `conformance bench --quick` on both, twice, interleaved, compared by
+#      scripts/pgo-compare.py.
+#
+# Everything lands in the `pgo-<target>` artifact (the numbers, the logs,
+# the PGO binary and its profile) and the job summary. The later steps run
+# even when an earlier check failed, so a failing target still reports.
+#
+# Unverified until the first dispatch: all of it on GitHub's runners. It
+# was only run locally, on macOS arm64. In particular: the Windows jobs
+# (pgo.sh under Git Bash, the training's `neoscad serve` over pipes, and
+# conformance, which CI has never run on Windows, so tiers 0-2 there are
+# recorded but not gated), and bench's machine description off macOS.
+# x86_64-apple-darwin is left out: it is cross-built on the arm64 runner,
+# so its instrumented binary would have to be trained under Rosetta.
+name: PGO
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pgo:
+    name: pgo (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            container: ""
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            container: ""
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            container: ""
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || null }}
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    env:
+      OUT: pgo-out
+    steps:
+      - name: Enable Windows long paths
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust in the container
+        if: matrix.container != ''
+        run: |
+          if ! command -v cargo > /dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Toolchain with llvm-tools
+        run: |
+          # The pinned toolchain (rust-toolchain.toml), with llvm-profdata
+          # from the same LLVM as its rustc: pgo.sh merges the raw
+          # profiles with it, and another LLVM's would reject them.
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component llvm-tools-preview
+          rustc -vV
+
+      # The manylinux images put CPython under /opt/python (and versioned
+      # python3.N in /usr/local/bin) but, going by their build scripts, no
+      # bare python3 on PATH; the runners get one from setup-python. Git
+      # Bash on Windows may find the Microsoft Store's python3 stub first,
+      # so PYTHON names the interpreter explicitly everywhere.
+      - uses: actions/setup-python@v7
+        if: matrix.container == ''
+        with:
+          python-version: "3.12"
+      - name: Python
+        run: |
+          if [ -n "${{ matrix.container }}" ]; then
+            py=/opt/python/cp312-cp312/bin/python
+          else
+            py=$(command -v python)
+          fi
+          "$py" --version
+          echo "PYTHON=$py" >> "$GITHUB_ENV"
+
+      - name: OpenSCAD and BOSL2 references
+        run: |
+          scripts/release/fetch-reference.sh
+          # BOSL2 at the commit the bench kit pins, so the training and
+          # the bench's BOSL2 models are the same code on every target.
+          commit=$(sed -n 's/^BOSL2_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' scripts/release/bench-kit.sh)
+          [ -n "$commit" ] || { echo "no BOSL2_COMMIT in bench-kit.sh" >&2; exit 1; }
+          git init -q .reference/BOSL2
+          git -C .reference/BOSL2 remote add origin https://github.com/BelfrySCAD/BOSL2.git
+          git -C .reference/BOSL2 fetch -q --depth 1 origin "$commit"
+          git -C .reference/BOSL2 checkout -q --detach FETCH_HEAD
+
+      - name: Plain release build
+        run: |
+          start=$SECONDS
+          cargo build --locked --release -p neoscad-cli -p neoscad-conformance
+          mkdir -p "$OUT"
+          echo "plain release build: $((SECONDS - start)) s" >> "$OUT/timings.txt"
+          # Absolute paths (bench resolves --binary from its own working
+          # directory), and on Windows in C:/... form, since conformance
+          # is a native program that cannot read Git Bash's /d/a/... paths.
+          root=$PWD exe=
+          if [ "$RUNNER_OS" = Windows ]; then root=$(cygpath -m "$PWD") exe=.exe; fi
+          echo "PLAIN_BIN=$root/target/release/neoscad$exe" >> "$GITHUB_ENV"
+          echo "CONFORMANCE=$root/target/release/conformance$exe" >> "$GITHUB_ENV"
+
+      - name: BOSL2 corpus for the training
+        run: '"$CONFORMANCE" bosl2-corpus'
+
+      - name: PGO build (instrumented build, training, optimised build)
+        run: |
+          start=$SECONDS
+          scripts/pgo.sh --profile release > "$OUT/pgo-path.txt" 2> >(tee "$OUT/pgo.log" >&2)
+          echo "pgo.sh (two builds and the training): $((SECONDS - start)) s" >> "$OUT/timings.txt"
+          bin=$(tail -n 1 "$OUT/pgo-path.txt")
+          test -x "$bin"
+          echo "PGO_BIN=$bin" >> "$GITHUB_ENV"
+          cp "$bin" "$OUT/"
+          cp target/pgo/neoscad.profdata "$OUT/"
+
+      - name: Recursion depth, plain
+        if: ${{ !cancelled() && env.PLAIN_BIN != '' }}
+        run: '"$CONFORMANCE" depth --binary "$PLAIN_BIN" --json "$OUT/depth-plain.json" | tee "$OUT/depth-plain.txt"'
+      - name: Recursion depth, PGO (the gate)
+        if: ${{ !cancelled() && env.PGO_BIN != '' }}
+        run: '"$CONFORMANCE" depth --binary "$PGO_BIN" --json "$OUT/depth-pgo.json" | tee "$OUT/depth-pgo.txt"'
+
+      # Tiers 0-2 are the text cases (echo, AST, CSG, exports compared as
+      # text), 364 of them; tier 3 needs the OpenSCAD nightly to draw
+      # meshes, and tiers 4 and 5 run where CI runs them without it (the
+      # Mac, whose GPU draws tier 4), not in the containers, which have no
+      # software GPU. The baseline gates the ids that run.
+      - name: Conformance subset, plain
+        if: ${{ !cancelled() && env.PLAIN_BIN != '' }}
+        continue-on-error: ${{ runner.os == 'Windows' }}
+        run: |
+          tiers=(--tier 0 --tier 1 --tier 2)
+          if [ "$RUNNER_OS" = macOS ]; then tiers+=(--tier 4 --tier 5); fi
+          "$CONFORMANCE" run --binary "$PLAIN_BIN" "${tiers[@]}" | tee "$OUT/conformance-plain.txt"
+      - name: Conformance subset, PGO
+        if: ${{ !cancelled() && env.PGO_BIN != '' }}
+        continue-on-error: ${{ runner.os == 'Windows' }}
+        run: |
+          tiers=(--tier 0 --tier 1 --tier 2)
+          if [ "$RUNNER_OS" = macOS ]; then tiers+=(--tier 4 --tier 5); fi
+          "$CONFORMANCE" run --binary "$PGO_BIN" "${tiers[@]}" | tee "$OUT/conformance-pgo.txt"
+
+      - name: Quick bench, plain against PGO
+        if: ${{ !cancelled() && env.PGO_BIN != '' }}
+        run: |
+          # Interleaved, two rounds, on the same runner: a shared runner's
+          # noise is large next to a 5% gain, and the second round shows
+          # how large.
+          # Prints the result file bench wrote (a C:\... path on Windows).
+          bench() {
+            local f
+            f=$("$CONFORMANCE" bench --quick --refs neoscad --binary "$1" | tee "$OUT/bench-$2.log" \
+              | sed -n 's/^wrote //p' | tail -n 1)
+            if [ "$RUNNER_OS" = Windows ]; then cygpath -u "$f"; else echo "$f"; fi
+          }
+          for round in 1 2; do
+            plain=$(bench "$PLAIN_BIN" "plain-$round")
+            pgo=$(bench "$PGO_BIN" "pgo-$round")
+            cp "$plain" "$OUT/bench-plain-$round.json"
+            cp "$pgo" "$OUT/bench-pgo-$round.json"
+            "$PYTHON" scripts/pgo-compare.py "$OUT/bench-plain-$round.json" "$OUT/bench-pgo-$round.json" \
+              --out "$OUT/bench-compare-$round.md"
+          done
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "## PGO, ${{ matrix.target }}"
+            echo
+            for f in timings.txt depth-plain.txt depth-pgo.txt; do
+              [ -f "$OUT/$f" ] && { echo "### $f"; echo '```'; cat "$OUT/$f"; echo '```'; }
+            done
+            for f in conformance-plain.txt conformance-pgo.txt; do
+              [ -f "$OUT/$f" ] && { echo "### $f"; echo '```'; tail -n 5 "$OUT/$f"; echo '```'; }
+            done
+            for f in "$OUT"/bench-compare-*.md; do
+              [ -f "$f" ] && { echo "### $(basename "$f")"; cat "$f"; echo; }
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: pgo-${{ matrix.target }}
+          path: pgo-out/
+          retention-days: 30

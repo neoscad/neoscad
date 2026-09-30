@@ -227,12 +227,14 @@ lead them, come roughly in order of user impact.
   the bench and held-out models with identical exports
   (`perf-opportunities.md` P2), but no release uses it. What it would
   take, in order:
-  1. A recursion-depth guard first: PGO's larger evaluator frames cut
-     the depth reached in the 48 MiB stack budget (module recursion
-     52,399 to 34,353 frames against the nightly's 30,261), and nothing
-     checks it. A test that the shipped binary's
-     `recursion-test-module` / `-function3` depths stay above
-     OpenSCAD's, or a larger `DEFAULT_STACK_LIMIT` for PGO builds.
+  1. Done: the recursion-depth guard. PGO's larger evaluator frames cut
+     the depth reached in the then 48 MiB stack budget (module recursion
+     52,399 to 34,353 frames against the nightly's 30,261).
+     `conformance depth --binary PATH` now fails any build below 1.25
+     times the nightly's depth on `recursion-test-module`, `-vector`,
+     `-function3` and `recursion.rs`'s two plain recursions, and
+     `DEFAULT_STACK_LIMIT` went to 64 MiB for every native build, which
+     puts the PGO build at 1.51 times (45,813 frames).
   2. The macOS DMG: `scripts/apple/release.sh` builds the CLI and the
      app core on an arm64 Mac, so the aarch64 slice can run
      `pgo.sh`'s steps directly; the x86_64 slice needs its instrumented
@@ -241,19 +243,22 @@ lead them, come roughly in order of user impact.
      functions (symbol hashes depend on features and crate metadata) is
      untested; check with `-Cllvm-args=-pgo-warn-mismatch`, or train
      through the ffi.
-  3. cargo-dist's build jobs: steps in `.github/build-setup.yml` (run
-     before `dist build`) that clone `.reference` (OpenSCAD and BOSL2),
-     build `conformance` for `bosl2-corpus`, run the instrumented build
-     and training, and append `RUSTFLAGS=-Cprofile-use=…` to
-     `$GITHUB_ENV`. Unverified: that `dist build` keeps an inherited
-     `RUSTFLAGS` rather than replacing it, that the manylinux_2_28
-     containers have `python3` on `PATH`, that the profiler runtime
-     ships for `aarch64-pc-windows-msvc`, and Rosetta on `macos-15` for
-     the cross-built `x86_64-apple-darwin` (or it skips PGO). Cost: one
-     more full release build plus about 1,350 short runs per target,
-     roughly doubling each build job. A profile is only valid for the
-     commit and compiler it was made with, so it is trained in the same
-     job, never committed.
+  3. cargo-dist's build jobs. First dispatch `.github/workflows/pgo.yml`
+     (PGO on five release targets beside the plain build, with the
+     depth guard, a conformance subset and a quick bench; nothing released), then,
+     if the numbers hold, add the `.github/build-setup.yml` step written
+     out in `docs/release.md`, "PGO builds". Answered from sources:
+     `dist build` keeps an inherited `RUSTFLAGS` and appends to it
+     (cargo-dist 0.33.0 `build/cargo.rs`); the manylinux_2_28 images
+     have CPython under `/opt/python` but, by their build scripts, no
+     bare `python3` on `PATH` (the workflow and the step name the
+     interpreter); the 1.98.1 profiler runtime ships for all six targets,
+     `aarch64-pc-windows-msvc` included. Still open: everything on the
+     runners (`pgo.yml` has not run), and `x86_64-apple-darwin`, which
+     skips PGO unless its instrumented binary is trained under Rosetta
+     on `macos-15`. A profile is only valid for the commit and compiler
+     it was made with, so it is trained in the same job, never
+     committed.
 - The web core gained nothing from `simd128` autovectorisation
   (`perf-opportunities.md` P7, within 2% on six kernel-bound models,
   identical output). A kernel gain there needs hand-written `v128` code;
@@ -1127,8 +1132,8 @@ lead them, come roughly in order of user impact.
 ## WASM
 - Recursion on wasm32 stops at a frame budget calibrated for V8's default
   stack in node 18 (`eval::recursion`): function depth 498 and module
-  depth 249 for the simplest recursions, against 52,417 and 13,046
-  natively and the nightly's 9,190 and 7,043. Without the budget V8
+  depth 249 for the simplest recursions, against 110,361 and 16,842
+  natively and the nightly's 9,192 and 7,052. Without the budget V8
   overflows at 1,076 and 527. Raising it needs smaller wasm frames: per
   level, rendering's walk over the node tree costs about four times an
   expression's stack, and list comprehensions twice. Only node 18 was

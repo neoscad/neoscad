@@ -6,6 +6,8 @@
 //!   with `--record` writes a progress snapshot.
 //! - `conformance grid` renders snapshots' `grid.png` from their data.
 //! - `conformance showcase` checks the showcase list.
+//! - `conformance depth` checks that a built binary recurses deeper than
+//!   OpenSCAD (the recursion-depth guard for release and PGO builds).
 //! - `conformance images` surveys neoscad's renderer on every render-mode
 //!   PNG case.
 //! - `conformance diff` compares neoscad with a reference OpenSCAD binary
@@ -25,6 +27,7 @@ mod bench_chart;
 mod bosl2_corpus;
 mod cmake;
 mod ctx;
+mod depth;
 mod diff;
 mod edit_loop;
 mod geometry;
@@ -115,6 +118,20 @@ enum Cmd {
         /// Re-render snapshots that already have a grid.png.
         #[arg(long)]
         force: bool,
+    },
+    /// The recursion-depth guard: fail unless the binary recurses at least
+    /// 1.25 times as deep as OpenSCAD on its recursion tests. For any
+    /// build (release, PGO, a downloaded release archive).
+    Depth {
+        /// Binary under test (default: target/release/neoscad).
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        /// Per-run timeout in seconds.
+        #[arg(long, default_value_t = 120.0)]
+        timeout: f64,
+        /// Also write the results as JSON here.
+        #[arg(long)]
+        json: Option<PathBuf>,
     },
     /// Check that every showcase input and expected image exists.
     Showcase,
@@ -345,6 +362,21 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             out,
             force,
         } => grid::command(&ctx, &dirs, all, out.as_deref(), force),
+        Cmd::Depth {
+            binary,
+            timeout,
+            json,
+        } => {
+            if timeout.is_nan() || timeout <= 0.0 {
+                return Err("--timeout must be positive".into());
+            }
+            let opts = depth::DepthOptions {
+                binary,
+                timeout: Duration::from_secs_f64(timeout),
+                json,
+            };
+            depth::depth(&ctx, &opts)
+        }
         Cmd::Showcase => Ok(u8::from(showcase::check(&ctx)? > 0)),
         Cmd::Images {
             filter,

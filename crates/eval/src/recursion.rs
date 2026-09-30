@@ -39,12 +39,15 @@
 //! Reachable depths of `function f(n) = n == 0 ? 0 : 1 + f(n - 1);` and
 //! `module m(n) { if (n > 0) m(n - 1); else cube(1); }`, as the deepest
 //! `n` that evaluates without an error (wasm32: and renders), measured
-//! with `crates/wasm-check/run.js --depths` and by bisection natively:
+//! with `crates/wasm-check/run.js --depths` and by bisection natively
+//! (`conformance depth` bisects the native ones for any binary; macOS
+//! arm64 here):
 //!
 //! | | function | module |
 //! |---|---|---|
-//! | OpenSCAD nightly 2026.09.23, native | 9,190 | 7,043 |
-//! | neoscad, native | 52,417 | 13,046 |
+//! | OpenSCAD nightly 2026.09.23, native | 9,192 | 7,052 |
+//! | neoscad, native | 110,361 | 16,842 |
+//! | neoscad, native, PGO build (`scripts/pgo.sh`) | 54,465 | 11,183 |
 //! | neoscad, wasm32 in node 18 | 498 | 249 |
 //! | wasm32 without the budget: V8 overflows at | 1,076 | 527 |
 //!
@@ -61,8 +64,18 @@
 /// The default [`crate::Options::stack_limit`]. Rust frames for one
 /// OpenSCAD call are larger than OpenSCAD's own, so this is scaled up from
 /// OpenSCAD's 8 MiB so programs recurse at least as deep as they do there.
+///
+/// It was 48 MiB until a profile-guided build (`scripts/pgo.sh`) inlined
+/// more into the evaluator: its frames grew by half, and module recursion
+/// cleared the nightly by only 13% (`recursion-test-module`, 34,353
+/// excluded frames against 30,261) and 19% (the table's module, 8,387),
+/// under the 25% margin `conformance depth` holds every build to, since
+/// frame sizes move with the target, compiler and profile. At 64 MiB the
+/// PGO build clears it by 51% and 59%. The stack is only touched when a
+/// program recurses that deep: a runaway recursion to the limit peaks at
+/// about 85 MB and 0.02 s (macOS arm64).
 #[cfg(not(target_arch = "wasm32"))]
-pub const DEFAULT_STACK_LIMIT: usize = 48 << 20;
+pub const DEFAULT_STACK_LIMIT: usize = 64 << 20;
 
 /// The default [`crate::Options::stack_limit`] on wasm32: the linked stack
 /// ([`WASM_STACK_SIZE`]) less the reserve. The frame budget is reached
