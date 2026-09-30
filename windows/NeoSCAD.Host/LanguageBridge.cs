@@ -48,6 +48,7 @@ public sealed class LanguageBridge
     public void Send(string message)
     {
         if (stopped) return;
+        if (AppLog.Enabled) AppLog.Write($"lsp: page -> server {Clip(message)}");
         if (server is null)
         {
             if (JsonRpc.NotFoundReply(message) is { } reply) Deliver(reply);
@@ -64,14 +65,20 @@ public sealed class LanguageBridge
                     output = server.Handle(message);
                     pending = server.DiagnosticsPending();
                 }
-                catch (CoreException)
+                catch (Exception e)
                 {
+                    // The page's request then times out; the log says why.
+                    AppLog.Write($"lsp: the server failed on {Clip(message)}", e);
                     return;
                 }
                 ui.Post(() =>
                 {
                     if (stopped) return;
-                    foreach (var m in output) Deliver(m);
+                    foreach (var m in output)
+                    {
+                        if (AppLog.Enabled) AppLog.Write($"lsp: server -> page {Clip(m)}");
+                        Deliver(m);
+                    }
                     if (pending) diagnosticsTimer.Start(Debounce, PublishDiagnostics);
                 });
             }, TaskScheduler.Default);
@@ -113,6 +120,9 @@ public sealed class LanguageBridge
         stopped = true;
         diagnosticsTimer.Stop();
     }
+
+    /// <summary>The start of a message, for the log.</summary>
+    static string Clip(string message) => message.Length <= 160 ? message : message[..160] + "…";
 }
 
 public static class JsonRpc

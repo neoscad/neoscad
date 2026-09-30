@@ -1,11 +1,11 @@
 # The Windows app (windows/, docs/windows-app.md), milestone 1: builds the
 # core's DLL and the C# binding (scripts/windows/build-core.ps1), runs the
 # host-logic and binding tests, builds the WinUI app, launches it on one
-# of the core's examples and uploads a screenshot for a person to look at.
+# of the core's examples and uploads a screenshot of its window and its
+# diagnostic log (scripts/windows/launch-screenshot.ps1) for a person to
+# look at.
 #
-# Non-blocking while the app is new (`continue-on-error`): a red job here
-# does not fail a pull request. Runs only when something the app is built
-# from changes, and on demand.
+# Runs only when something the app is built from changes, and on demand.
 name: Windows app
 
 on:
@@ -44,7 +44,6 @@ env:
 jobs:
   app:
     name: app (${{ matrix.arch }})
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -85,33 +84,19 @@ jobs:
           -r win-${{ matrix.arch }} -p:Platform=${{ matrix.platform }}
           -p:NeoScadRid=win-${{ matrix.arch }}
 
-      # Launch on an example, give it time to start WebView2 and run the
-      # preview, check it is still running (it did not crash on start),
-      # photograph the screen and close it. The screenshot is for people:
-      # nothing here checks what it shows.
-      - name: Launch and take a screenshot
+      # Launch on the default example with the diagnostic log on, check it
+      # is still running after 25 s (it did not crash on start), photograph
+      # its window alone (PrintWindow, so a console or the first-run privacy
+      # screen on top does not hide it) and close it. The screenshot and the
+      # log are for people: nothing here checks what they show.
+      - name: Launch, log and screenshot
         shell: pwsh
         run: |
           $exe = Get-ChildItem -Recurse -Filter NeoSCAD.exe windows/NeoSCAD.App/bin/${{ matrix.platform }}/Release |
             Select-Object -First 1
           if (-not $exe) { throw "no NeoSCAD.exe was built" }
-          $app = Start-Process -FilePath $exe.FullName -ArgumentList '--example', 'gear' -PassThru
-          Start-Sleep -Seconds 25
-          $alive = -not $app.HasExited
-          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          New-Item -ItemType Directory -Force -Path screenshots | Out-Null
-          $bitmap.Save("screenshots/neoscad-windows-${{ matrix.arch }}.png", [System.Drawing.Imaging.ImageFormat]::Png)
-          $graphics.Dispose()
-          $bitmap.Dispose()
-          if ($alive) {
-            Stop-Process -Id $app.Id -Force
-          } else {
-            throw "NeoSCAD.exe exited within 25 s (exit code $($app.ExitCode))"
-          }
+          scripts/windows/launch-screenshot.ps1 -Exe $exe.FullName -Out screenshots `
+            -Name neoscad-windows-${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v7
         if: always()

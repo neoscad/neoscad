@@ -1,15 +1,19 @@
 // Serves the editor's page and script (apple/Editor/web/dist, copied next
-// to the app as Editor\) under a scheme of the app's own,
-// `neoscad-editor://app/editor.html`, as the macOS app does
-// (apple/App/Editor/EditorSchemeHandler.swift). The bundle is the same
-// file; only who serves it differs.
+// to the app as Editor\) at `https://app.neoscad.example/editor.html`,
+// answered by the app itself: the macOS and Linux apps serve the same
+// bundle from a scheme of their own, `neoscad-editor://app/`
+// (apple/App/Editor/EditorSchemeHandler.swift).
 //
-// A custom scheme rather than a file URL or a virtual host mapped to the
-// folder: the page gets a stable origin of its own, nothing can reach the
-// network, and each response carries headers, so the page gets a
-// Content-Security-Policy that admits the bundled script and nothing
-// else. The page's own <meta> policy says `script-src neoscad-editor:`, so
-// a page served from any other origin would not even run its script.
+// Not that scheme here: WebView2 under WinUI 3 never raised
+// WebResourceRequested for it, registered or not, with any filter pattern
+// or source kind (CI logs, September 2026: every navigation ended
+// ConnectionAborted with no request seen). Requests for an https origin
+// reach the handler before any network; `.example` is reserved (RFC 2606),
+// so the name resolves nowhere if one ever escaped. Every response carries
+// headers, so the page gets a Content-Security-Policy that admits the
+// bundled script and nothing else. The page's own <meta> policy names the
+// other apps' scheme (`script-src neoscad-editor:`); served here it is
+// rewritten to `'self'`, or the page would refuse its own script.
 // Styles need a nonce: CodeMirror writes its theme as <style> elements at
 // run time, and a fresh nonce for each load is how the policy tells them
 // from injected ones.
@@ -27,8 +31,13 @@ public sealed record EditorResponse(byte[] Body, string ContentType, IReadOnlyDi
 
 public static class EditorPage
 {
-    public const string Scheme = "neoscad-editor";
-    public const string PageUrl = Scheme + "://app/editor.html";
+    /// <summary>The origin the page and its script are served from.</summary>
+    public const string Origin = "https://app.neoscad.example";
+    public const string PageUrl = Origin + "/editor.html";
+
+    /// <summary>The page's <meta> script policy as the other apps serve it, and what it becomes here.</summary>
+    const string SchemeScriptPolicy = "script-src neoscad-editor:";
+    const string ScriptPolicy = "script-src 'self'";
 
     /// <summary>
     /// The policy for a page whose styles carry <paramref name="nonce"/>.
@@ -38,7 +47,7 @@ public static class EditorPage
     /// </summary>
     public static string ContentSecurityPolicy(string nonce) => string.Join("; ",
         "default-src 'none'",
-        $"script-src {Scheme}:",
+        ScriptPolicy,
         $"style-src 'nonce-{nonce}'",
         "img-src data:",
         "base-uri 'none'",
@@ -70,14 +79,13 @@ public static class EditorPage
     }
 
     /// <summary>
-    /// The file name a request URI asks for, or null when it is not the
-    /// scheme's `app` host.
+    /// The file name a request URI asks for, or null when it is not on
+    /// <see cref="Origin"/>.
     /// </summary>
     public static string? FileName(string uri)
     {
         if (!Uri.TryCreate(uri, UriKind.Absolute, out var u)
-            || !string.Equals(u.Scheme, Scheme, StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(u.Host, "app", StringComparison.OrdinalIgnoreCase))
+            || !string.Equals(u.GetLeftPart(UriPartial.Authority), Origin, StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }
@@ -106,7 +114,9 @@ public static class EditorPage
         if (type.StartsWith("text/html", StringComparison.Ordinal))
         {
             var n = (nonce ?? NewNonce)();
-            body = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(body).Replace("NONCE_PLACEHOLDER", n));
+            body = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(body)
+                .Replace("NONCE_PLACEHOLDER", n)
+                .Replace(SchemeScriptPolicy, ScriptPolicy));
             headers["Content-Security-Policy"] = ContentSecurityPolicy(n);
         }
         headers["Content-Length"] = body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -120,6 +130,11 @@ public static class EditorPage
     /// `chrome.webview.postMessage` returns nothing, so this wraps it in
     /// the promise-returning shape the bundle expects; the app never
     /// replies with a value (the macOS handler returns nil too).
+    ///
+    /// It also reports what would otherwise leave a blank pane with no
+    /// trace: the document it ran in, script errors, rejected promises and
+    /// policy violations (a script or style the page's policy refused)
+    /// arrive as `log` messages, which the app writes to its log.
     /// </summary>
     public const string HostScript = """
         (() => {
@@ -131,6 +146,18 @@ public static class EditorPage
               return Promise.resolve(null);
             },
           };
+          const log = (level, message) => {
+            try { view.postMessage({ type: "log", level, message: String(message) }); } catch (_) {}
+          };
+          log("info", "host script in " + location.href);
+          addEventListener("error", (e) =>
+            log("error", `${e.message} (${e.filename}:${e.lineno}:${e.colno})`));
+          addEventListener("unhandledrejection", (e) =>
+            log("error", "unhandled rejection: " + (e.reason && e.reason.stack || e.reason)));
+          addEventListener("securitypolicyviolation", (e) =>
+            log("error", `policy refused ${e.blockedURI || "inline"} (${e.effectiveDirective})`));
+          addEventListener("DOMContentLoaded", () =>
+            log("info", "DOMContentLoaded; NeoSCADEditor " + (window.NeoSCADEditor ? "present" : "missing")));
         })();
         """;
 }

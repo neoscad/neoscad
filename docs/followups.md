@@ -1151,6 +1151,11 @@ lead them, come roughly in order of user impact.
   byte-identical to native. Decide whether to accept that or use one libm
   everywhere. (H2)
 
+- `cargo clippy --target wasm32-unknown-unknown -p neoscad-render -p
+  neoscad-web-view` fails with "field `sizes` is never read" at
+  `crates/eval/src/dump.rs:862`. `scripts/wasm-check.sh` does not run
+  clippy for wasm32, so nothing catches it.
+
 ## Web demo
 - Consider "Connect your AI agent" (the `neoscad mcp --browser` bridge,
   docs/agent-bridge.md) for the native apps too: macOS, and the Linux and
@@ -1268,11 +1273,10 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   (it uses `/proc` or `ps`), so its resident bounds and its 1 GB kill
   guard do nothing on that job; only the limits' errors are checked.
   `tasklist`/`taskkill` or `GetProcessMemoryInfo` would cover it.
-- The Windows app (milestone 1, `docs/windows-app.md`) was written
-  without a Windows machine: its XAML, launch, WebView2 scheme and
-  `SwapChainPanel` drawing are first exercised by
-  `.github/workflows/windows-app.yml`, which is `continue-on-error` until
-  green. Its milestone 2 list is in that document ("Next"); the
+- The Windows app (milestone 1, `docs/windows-app.md`) has only run on CI
+  runners (`.github/workflows/windows-app.yml`, screenshots and a
+  `--log` as artifacts). High-DPI sharpness, accelerators in the editor
+  and the file dialogs need a real Windows machine. Its milestone 2 list is in that document ("Next"); the
   generator pin (`$BindgenRev` in `scripts/windows/build-core.ps1`, an
   open uniffi-bindgen-cs pull request) should move to a release.
 

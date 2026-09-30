@@ -62,14 +62,45 @@ public sealed partial class MainWindow : Window
 
         BuildExamplesMenu();
         if (core is null) Status.Text = $"The core did not start: {CoreService.Error}";
+        AppLog.Write(core is null ? $"core did not start: {CoreService.Error}" : "core started");
+        if (view.Error is { } noView) AppLog.Write($"no 3D view: {noView}");
+        if (AppLog.Enabled) StartHeartbeat(queue);
 
         _ = StartAsync(startup);
     }
 
+    /// <summary>
+    /// For the log: a line from the UI thread every 5 s for the first 30 s,
+    /// so a run whose window froze (a stuck WebView2 callback, say) shows
+    /// where the lines stop.
+    /// </summary>
+    static void StartHeartbeat(Microsoft.UI.Dispatching.DispatcherQueue queue)
+    {
+        var beats = 0;
+        var timer = queue.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(5);
+        timer.Tick += (t, _) =>
+        {
+            AppLog.Write("UI thread alive");
+            if (++beats == 6) t.Stop();
+        };
+        timer.Start();
+    }
+
     async Task StartAsync(StartupAction startup)
     {
-        await editor.StartAsync();
+        try
+        {
+            await editor.StartAsync();
+        }
+        catch (Exception x)
+        {
+            // This task is discarded by the constructor, so an exception
+            // here would be lost and the window left half started.
+            AppLog.Write("editor start threw", x);
+        }
         if (editor.Error is { } e) ShowError(EditorError, e);
+        AppLog.Write($"startup: {startup}");
         switch (startup)
         {
             case StartupAction.OpenFile(var path):
@@ -95,8 +126,20 @@ public sealed partial class MainWindow : Window
 
     // --- Status and console -------------------------------------------------------
 
+    bool reportedFirstResult;
+
     void ShowReport()
     {
+        if (!reportedFirstResult && document.Report is RunReport.Rendered or RunReport.Failed)
+        {
+            reportedFirstResult = true;
+            AppLog.Write(document.Report switch
+            {
+                RunReport.Rendered r => $"first result: {r.Mode}, {r.Summary}",
+                RunReport.Failed f => $"first result: failed, {f.Message}",
+                _ => "",
+            });
+        }
         Status.Text = document.Report switch
         {
             RunReport.Running r => r.Mode == RenderMode.Render ? "Rendering…" : "Previewing…",

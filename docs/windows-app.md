@@ -18,13 +18,14 @@ renders and exports a model. What it does not do yet is listed under
 |---|---|
 | `windows/NeoSCAD.sln` | The solution: the four projects below |
 | `windows/NeoSCAD.Bindings/` | The generated C# binding of `crates/ffi` (`Generated/neoscad_ffi.cs`, not checked in) and the core's native library for the platform, copied to every project that references it. `net10.0` |
-| `windows/NeoSCAD.Host/` | Host logic that is not UI, tested on any OS: `DocumentSession` (the window's loop, text copy, dirty state, save, export), `EditorSync` and `EditorProtocol` (the editor bridge), `EditorPage` (what the editor's scheme serves), `LanguageBridge` (the in-process language server), `StartupAction`. `net10.0` |
+| `windows/NeoSCAD.Host/` | Host logic that is not UI, tested on any OS: `DocumentSession` (the window's loop, text copy, dirty state, save, export), `EditorSync` and `EditorProtocol` (the editor bridge), `EditorPage` (what the editor's origin serves), `LanguageBridge` (the in-process language server), `StartupAction`, `AppLog` (the `--log` file), `PanelScale` (the viewport's display-scale arithmetic). `net10.0` |
 | `windows/NeoSCAD.App/` | The WinUI 3 app: `MainWindow` (menus, panes, pickers, dialogs), `Editor/EditorHost.cs` (WebView2), `Viewport/ViewportPanel.cs` (the `SwapChainPanel`), `WinUiHost.cs` (DispatcherQueue timer and dispatcher). `net10.0-windows10.0.19041.0`, unpackaged, self-contained |
 | `windows/NeoSCAD.Tests/` | xUnit tests of `NeoSCAD.Host` and of the binding against the real core. `net10.0` |
 | `windows/uniffi.toml` | uniffi-bindgen-cs settings (namespace `NeoSCAD.Native`, public types, `NeoScad` for the free functions) |
 | `scripts/windows/build-core.ps1` | The core's DLL, the binding and the editor bundle, before `dotnet build` |
 | `scripts/windows/docker-test.sh` | The binding and host tests on Linux in Docker (from a Mac) |
-| `.github/workflows/windows-app.yml` | CI: build, test, launch, screenshot |
+| `scripts/windows/launch-screenshot.ps1` | Launch the built app with `--log`, capture its window, check it stayed up (CI) |
+| `.github/workflows/windows-app.yml` | CI: build, test, launch, screenshot and log |
 
 ## Build on Windows
 
@@ -34,7 +35,7 @@ SDK; the WebView2 runtime (part of Windows 11, and of Edge on Windows 10).
     pwsh scripts/windows/build-core.ps1            # -Arch arm64 on ARM
     dotnet test windows/NeoSCAD.Tests/NeoSCAD.Tests.csproj -c Release
     dotnet build windows/NeoSCAD.App/NeoSCAD.App.csproj -c Release -r win-x64 -p:Platform=x64
-    windows\NeoSCAD.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\NeoSCAD.exe [FILE | --example ID]
+    windows\NeoSCAD.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\NeoSCAD.exe [FILE | --example ID] [--log LOGFILE]
 
 Or open `windows/NeoSCAD.sln` in Visual Studio 2022+ with the "WinUI
 application development" workload, after `build-core.ps1`.
@@ -92,14 +93,14 @@ The same shape as the macOS app, with Windows parts:
 |---|---|---|
 | Shell | SwiftUI/AppKit, NSDocument | WinUI 3, one `MainWindow` per process, `DocumentSession` |
 | Document loop | `DocumentLoop.swift` + core `DocumentController` | `DocumentSession` + the same controller; `DispatcherQueueTimer` for the 150 ms pause |
-| Editor | CodeMirror bundle in WKWebView, `neoscad-editor:` scheme handler | the same bundle in WebView2, a registered `neoscad-editor:` scheme answered by `WebResourceRequested` |
+| Editor | CodeMirror bundle in WKWebView, `neoscad-editor:` scheme handler | the same bundle in WebView2, served from `https://app.neoscad.example` and answered by `WebResourceRequested` (see "Why not the scheme") |
 | Editor messages | `webkit.messageHandlers.editor` | `window.NeoSCADHost` (set by a document-created script) over `chrome.webview.postMessage` |
 | 3D view | wgpu Metal into a `CAMetalLayer` | wgpu Direct3D 12 into a `SwapChainPanel` |
 | Language features | `crates/lsp` in-process | the same, `LanguageBridge` |
 | Dirty state | NSDocument change count | edits minus undos; title `*name - NeoSCAD` |
 
 **The viewport surface.** `Viewport::attach_swap_chain_panel(panel, w, h,
-scale, readable)` (`crates/ffi/src/viewport.rs`) makes a wgpu surface from
+scale_x, scale_y, readable)` (`crates/ffi/src/viewport.rs`) makes a wgpu surface from
 the panel's `ISwapChainPanelNative` pointer
 (`wgpu::SurfaceTargetUnsafe::SwapChainPanel`); `crates/ffi/src/layer.rs`
 states the pointer contract, and `host.rs` opens the GPU on DX12 on
@@ -110,6 +111,33 @@ declares, and draws on `CompositionTarget.Rendering` when
 `needs_draw()`. A child HWND was the other option; a `SwapChainPanel`
 composes with XAML (rounded corners, Mica, overlays) and has no airspace
 problem.
+
+**Display scaling.** A `SwapChainPanel` shows its swap chain one buffer
+pixel per DIP unless told otherwise, so a swap chain sized in DIPs is
+stretched (blurry at 150%) and one sized in pixels overflows the panel.
+The app passes the panel's size in DIPs with its `CompositionScaleX` and
+`CompositionScaleY`, on attach and on every `SizeChanged` and
+`CompositionScaleChanged` (`resize_swap_chain_panel`). The core sizes the
+swap chain in physical pixels (DIPs times scale, truncated) and, after
+every configure of the surface, sets the ratio of DIPs to buffer pixels
+on it with `IDXGISwapChain2::SetMatrixTransform`: about the inverse
+scale, exact when the buffer was rounded or clamped to the largest
+texture. "Every configure" matters because wgpu-hal's configure can make
+a new swap chain; attaching, resizing and the reconfigures in
+`render::viewport::Viewport::draw` all run the hook
+(`render::viewport::OnConfigure`, installed by
+`attach_surface_with`). The swap chain is reached through
+`wgpu::Surface::as_hal::<Dx12>()` and wgpu-hal's
+`dx12::Surface::swap_chain()`; the DXGI call is `layer.rs`'s
+`set_swap_chain_scale`, with its safety notes. The `windows` crate it
+uses is the version wgpu-hal already builds. The renderer's one scale is
+`CompositionScaleX`, so pointer deltas stay in DIPs across and are scaled
+by `scaleY / scaleX` down (`PanelScale.PointerDelta`; the same when the
+two agree, as they do without a stretching transform above the panel).
+With `--log`, the log has the DIP size, both scales, the swap chain's
+pixels and the transform set (or the error `SetMatrixTransform` met,
+from `Viewport::swap_chain_transform`) on attach and on every scale
+change.
 
 **The editor bridge** is the macOS protocol unchanged (documented at the
 top of `apple/App/Editor/EditorController.swift` and in
@@ -123,6 +151,27 @@ literal. The page's Content-Security-Policy header is the macOS app's.
 a result is shown only while `DocumentController.IsCurrent` holds. Quick
 document calls (`update`, `edit`, `close`) stay on the UI thread so edits
 reach the session in order.
+
+## Diagnostics
+
+`--log FILE` appends one timestamped line per start-up event
+(`NeoSCAD.Host/AppLog.cs`): the WebView2 environment and
+`CoreWebView2Initialized` (with its exception), each navigation
+(`NavigationStarting`, `ContentLoading`, `NavigationCompleted` with its
+`WebErrorStatus`), each request the editor's origin answers, the
+language server's messages and failures, an external-scheme launch, `ProcessFailed`, the page's script errors, rejected promises
+and policy violations (reported by `EditorPage.HostScript`), the
+editor's `ready`, the view's attach, the first render result, a UI-thread
+heartbeat for the first 30 s, and unhandled exceptions. Lines are
+flushed as written, so a killed process keeps them.
+
+CI runs `scripts/windows/launch-screenshot.ps1`: it launches the app on
+the default example (`csg`) with `--log`, sizes its window to 1400×900,
+captures that window alone with `PrintWindow(PW_RENDERFULLCONTENT)` (a
+screen grab showed the runner's console over it on x64, and the first-run
+privacy screen over everything on `windows-11-arm`), prints the log into
+the job output, and uploads the PNG and the log as
+`neoscad-windows-<arch>-screenshot`.
 
 ## Testing off Windows
 
@@ -165,20 +214,40 @@ against Windows App SDK 2.5.1 in the Linux .NET SDK (with stand-ins for
 the XAML-generated fields; the XAML compiler and PRI tools only run on
 Windows). `actionlint` passes on the workflow.
 
-Not verified (no Windows machine): the XAML, the app launching,
-WebView2 serving the custom scheme and running the host script before the
-bundle (the page's policy is not expected to block a document-created
-script), the `SwapChainPanel` surface drawing, DX12 device creation on
-the runners (Windows Server 2025 and `windows-11-arm`; WARP if there is
-no GPU), keyboard accelerators while WebView2 has focus, and the
-workflow itself. The first CI run is the test; the job is
-`continue-on-error` until it is green.
+Verified in CI (September 2026, `windows-2025` x64 and `windows-11-arm`):
+- the app builds and launches;
+- WebView2 serves the editor, and the text loads without CRs;
+- the language server answers;
+- the `SwapChainPanel` draws with DX12, and the swap-chain transform is set;
+- the csg example previews.
+
+Screenshots and logs are the run's artifacts.
+
+Not verified, because the runners run at 100% scaling with no real
+display:
+- that the view is sharp above 100% (see "Display scaling");
+- keyboard accelerators while WebView2 has focus;
+- file dialogs and export through the UI.
+
+### Why not the scheme
+
+The macOS and Linux apps serve the bundle from `neoscad-editor://app/`.
+WebView2 under WinUI 3 never raised `WebResourceRequested` for that
+scheme, even though it was registered with `CoreWebView2CustomSchemeRegistration`. Every
+navigation ended `ConnectionAborted` with no request seen, for every
+filter pattern and source kind tried. So Windows serves an `https` origin
+the app answers itself, as Microsoft's own guidance for local content
+does. `.example` is reserved (RFC 2606), so the name resolves nowhere.
+The page's `<meta>` policy names the other apps' scheme; `EditorPage`
+rewrites it to `script-src 'self'` when serving.
 
 ## Next (milestone 2)
 
-- Crisp HiDPI: size the swap chain in physical pixels and set the inverse
-  composition scale (`IDXGISwapChain2::SetMatrixTransform` through
-  `wgpu::Surface::as_hal`), then pass the real scale.
+- Check display scaling on real hardware (see "Display scaling"): the
+  change was written and cross-checked off Windows, never run. Look for
+  a crisp model at 125%, 150% and 200%, a frame that fills the panel
+  exactly, moving the window between monitors of different scales, and
+  the `view: attached` / `view: rescaled` lines in the `--log` file.
 - Packaging: MSIX (and/or an MSI via the existing WiX setup), an app
   icon, file association for `.scad`, signing with the release keys.
 - Multiple windows (one `DocumentSession` each), recent files, autosave.

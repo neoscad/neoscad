@@ -13,16 +13,18 @@ public class EditorPageTests
     public void ThePolicyAdmitsOnlyTheBundleAndNoncedStyles()
     {
         Assert.Equal(
-            "default-src 'none'; script-src neoscad-editor:; style-src 'nonce-abc'; img-src data:; base-uri 'none'; form-action 'none'",
+            "default-src 'none'; script-src 'self'; style-src 'nonce-abc'; img-src data:; base-uri 'none'; form-action 'none'",
             EditorPage.ContentSecurityPolicy("abc"));
     }
 
     [Theory]
-    [InlineData("neoscad-editor://app/editor.html", "editor.html")]
-    [InlineData("neoscad-editor://app/editor.js", "editor.js")]
-    [InlineData("neoscad-editor://other/editor.js", null)]
-    [InlineData("https://app/editor.js", null)]
-    public void OnlyTheAppHostOfTheSchemeIsServed(string uri, string? name)
+    [InlineData("https://app.neoscad.example/editor.html", "editor.html")]
+    [InlineData("https://app.neoscad.example/editor.js", "editor.js")]
+    [InlineData("https://other.neoscad.example/editor.js", null)]
+    [InlineData("http://app.neoscad.example/editor.js", null)]
+    [InlineData("https://app.neoscad.example:8443/editor.js", null)]
+    [InlineData("neoscad-editor://app/editor.js", null)]
+    public void OnlyTheAppOriginIsServed(string uri, string? name)
     {
         Assert.Equal(name, EditorPage.FileName(uri));
     }
@@ -47,17 +49,19 @@ public class EditorPageTests
         var dir = Directory.CreateTempSubdirectory("neoscad-editor-").FullName;
         try
         {
-            File.WriteAllText(Path.Combine(dir, "editor.html"), "<style nonce=\"NONCE_PLACEHOLDER\"></style>");
+            File.WriteAllText(Path.Combine(dir, "editor.html"),
+                "<meta content=\"script-src neoscad-editor:; x\"><style nonce=\"NONCE_PLACEHOLDER\"></style>");
             File.WriteAllText(Path.Combine(dir, "editor.js"), "NONCE_PLACEHOLDER");
             var page = EditorPage.Respond(dir, EditorPage.PageUrl, () => "n1")!;
-            Assert.Equal("<style nonce=\"n1\"></style>", Encoding.UTF8.GetString(page.Body));
+            Assert.Equal("<meta content=\"script-src 'self'; x\"><style nonce=\"n1\"></style>",
+                Encoding.UTF8.GetString(page.Body));
             Assert.Contains("'nonce-n1'", page.Headers["Content-Security-Policy"]);
             Assert.Equal("no-store", page.Headers["Cache-Control"]);
             // Only the page is rewritten; scripts are served as they are.
-            var script = EditorPage.Respond(dir, "neoscad-editor://app/editor.js", () => "n2")!;
+            var script = EditorPage.Respond(dir, EditorPage.Origin + "/editor.js", () => "n2")!;
             Assert.Equal("NONCE_PLACEHOLDER", Encoding.UTF8.GetString(script.Body));
             Assert.False(script.Headers.ContainsKey("Content-Security-Policy"));
-            Assert.Null(EditorPage.Respond(dir, "neoscad-editor://app/missing.js"));
+            Assert.Null(EditorPage.Respond(dir, EditorPage.Origin + "/missing.js"));
         }
         finally
         {

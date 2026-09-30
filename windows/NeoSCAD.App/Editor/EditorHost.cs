@@ -3,9 +3,8 @@
 // of apple/App/Editor/EditorController.swift and EditorSchemeHandler.swift;
 // the protocol is described in NeoSCAD.Host/EditorProtocol.cs.
 //
-// Serving. The page loads from `neoscad-editor://app/editor.html`, a scheme
-// registered with the WebView2 environment and answered from the app's
-// Editor\ folder by WebResourceRequested (NeoSCAD.Host/EditorPage.cs
+// Serving. The page loads from `https://app.neoscad.example/editor.html`,
+// answered from the app's Editor\ folder by WebResourceRequested (NeoSCAD.Host/EditorPage.cs
 // decides what is served, with the Content-Security-Policy header). Every
 // other request is refused, and navigation away from the page is
 // cancelled, so the page never reaches the network.
@@ -16,10 +15,20 @@
 // `chrome.webview.postMessage`. The app calls the page's
 // `window.NeoSCADEditor` with ExecuteScriptAsync, every argument a JSON
 // literal.
+//
+// Diagnostics. Every step of the start-up goes to AppLog (on with
+// `--log FILE`): the environment, CoreWebView2Initialized with its
+// exception, each navigation with its WebErrorStatus, each request
+// answered, an external-scheme launch, a failed page process, the page's
+// own script errors and policy violations (EditorPage.HostScript) and the
+// ready message. It is how the custom scheme was found never to reach the
+// handler (EditorPage.cs).
 
+using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
 using NeoSCAD.Host;
+using Windows.Storage.Streams;
 
 namespace NeoSCAD.App.Editor;
 
@@ -45,37 +54,53 @@ public sealed class EditorHost
         sync.RequestText = RequestText;
         document.TextLoaded += text => _ = Load(text);
         document.LanguageSyncRequested += () => _ = Call(EditorScript.LspSync());
-        if (document.Language is { } language) language.Deliver = m => _ = Call(EditorScript.LspReceive(m));
+        // Not gated on `ready`: the page's client sends `initialize` before
+        // the editor says ready, and its answer arrives in between (CI logs:
+        // a reply dropped there made the first request time out).
+        if (document.Language is { } language) language.Deliver = m => _ = Call(EditorScript.LspReceive(m), whenReady: false);
     }
 
     public async Task StartAsync()
     {
+        AppLog.Write($"editor: bundle {bundle}");
         if (!File.Exists(Path.Combine(bundle, "editor.html")))
         {
             Error = "The editor's files are missing (build apple/Editor/web first).";
+            AppLog.Write($"editor: {Error}");
             return;
         }
+        view.CoreWebView2Initialized += (_, e) =>
+        {
+            if (e.Exception is { } x) AppLog.Write("editor: CoreWebView2Initialized failed", x);
+            else AppLog.Write("editor: CoreWebView2Initialized");
+        };
         try
         {
             var options = new CoreWebView2EnvironmentOptions();
-            // The scheme is a standard one with its own origin
-            // (`neoscad-editor://app`), so the page and its script share it
-            // and the policy's `script-src neoscad-editor:` admits the bundle.
-            options.CustomSchemeRegistrations.Add(new CoreWebView2CustomSchemeRegistration(EditorPage.Scheme)
-            {
-                // A Win32 BOOL in the WinRT projection (an int), not a bool.
-                TreatAsSecure = 1,
-                HasAuthorityComponent = true,
-            });
-            var env = await CoreWebView2Environment.CreateWithOptionsAsync(null, UserDataFolder(), options);
+            var folder = UserDataFolder();
+            AppLog.Write($"editor: creating the WebView2 environment, user data {folder}");
+            var env = await CoreWebView2Environment.CreateWithOptionsAsync(null, folder, options);
+            AppLog.Write($"editor: environment {env.BrowserVersionString}, user data {env.UserDataFolder}");
             await view.EnsureCoreWebView2Async(env);
         }
         catch (Exception e) when (e is System.Runtime.InteropServices.COMException or FileNotFoundException)
         {
             Error = $"The editor needs the WebView2 runtime: {e.Message}";
+            AppLog.Write("editor: WebView2 did not start", e);
+            return;
+        }
+        catch (Exception e)
+        {
+            // Anything else (an unwritable user-data folder, an environment
+            // that does not match one already running) used to vanish:
+            // MainWindow discards StartAsync's task, so the pane stayed
+            // white with no message. Now it is shown and logged.
+            Error = $"The editor did not start: {e.Message}";
+            AppLog.Write("editor: WebView2 did not start", e);
             return;
         }
         var core = view.CoreWebView2;
+        AppLog.Write($"editor: CoreWebView2 ready, browser process {core.BrowserProcessId}");
         var settings = core.Settings;
         // Cut, copy and paste stay on the context menu; the browser's own
         // keys (reload, find, print), zoom and status bar would each act on
@@ -85,16 +110,36 @@ public sealed class EditorHost
         settings.IsStatusBarEnabled = false;
         settings.AreBrowserAcceleratorKeysEnabled = false;
         settings.IsZoomControlEnabled = false;
-        core.AddWebResourceRequestedFilter($"{EditorPage.Scheme}:*", CoreWebView2WebResourceContext.All);
+        // Requests for the page's origin, from any frame or worker.
+        core.AddWebResourceRequestedFilter($"{EditorPage.Origin}/*", CoreWebView2WebResourceContext.All,
+            CoreWebView2WebResourceRequestSourceKinds.All);
         core.WebResourceRequested += OnResourceRequested;
         core.NavigationStarting += (_, e) =>
         {
-            if (!e.Uri.StartsWith(EditorPage.Scheme + ":", StringComparison.OrdinalIgnoreCase)) e.Cancel = true;
+            if (!e.Uri.StartsWith(EditorPage.Origin + "/", StringComparison.OrdinalIgnoreCase)) e.Cancel = true;
+            AppLog.Write($"editor: NavigationStarting {e.NavigationId} {e.Uri}{(e.Cancel ? " (cancelled)" : "")}");
+        };
+        core.ContentLoading += (_, e) =>
+            AppLog.Write($"editor: ContentLoading {e.NavigationId}{(e.IsErrorPage ? " (an error page)" : "")}");
+        core.DOMContentLoaded += (_, e) => AppLog.Write($"editor: DOMContentLoaded {e.NavigationId}");
+        core.NavigationCompleted += (_, e) => AppLog.Write(
+            $"editor: NavigationCompleted {e.NavigationId} success={e.IsSuccess} " +
+            $"status={e.WebErrorStatus} http={e.HttpStatusCode}");
+        // A navigation to a scheme the environment does not know becomes an
+        // external launch rather than a page, which leaves the pane white:
+        // logged, because that is what a lost scheme registration looks
+        // like, and refused, because the editor never starts a program.
+        core.LaunchingExternalUriScheme += (_, e) =>
+        {
+            AppLog.Write($"editor: LaunchingExternalUriScheme {e.Uri} (refused)");
+            e.Cancel = true;
         };
         core.NewWindowRequested += (_, e) => e.Handled = true;
         core.WebMessageReceived += (_, e) => Receive(e.WebMessageAsJson);
-        core.ProcessFailed += (_, _) =>
+        core.ProcessFailed += (_, e) =>
         {
+            AppLog.Write($"editor: ProcessFailed {e.ProcessFailedKind} reason={e.Reason} " +
+                         $"exit={e.ExitCode} {e.ProcessDescription}");
             // The page's process died: the document's copy of the text is
             // complete, so reload; `ready` shows the text again. Only the
             // undo history is lost.
@@ -103,24 +148,61 @@ public sealed class EditorHost
             core.Navigate(EditorPage.PageUrl);
         };
         await core.AddScriptToExecuteOnDocumentCreatedAsync(EditorPage.HostScript);
+        AppLog.Write($"editor: navigating to {EditorPage.PageUrl}");
         core.Navigate(EditorPage.PageUrl);
+        _ = ReportIfNotReady();
+    }
+
+    /// <summary>Log once if the page has not said `ready` 15 s after the first navigation.</summary>
+    async Task ReportIfNotReady()
+    {
+        await Task.Delay(TimeSpan.FromSeconds(15));
+        if (!ready) AppLog.Write("editor: no ready message 15 s after navigating");
     }
 
     static string UserDataFolder() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NeoSCAD", "WebView2");
 
-    void OnResourceRequested(CoreWebView2 sender, CoreWebView2WebResourceRequestedEventArgs e)
+    /// <summary>
+    /// Answer a request for the scheme from the bundle. The body goes in a
+    /// Windows Runtime InMemoryRandomAccessStream, filled under a deferral,
+    /// rather than a managed MemoryStream behind AsRandomAccessStream:
+    /// WebView2 reads the body after the handler returns, and that managed
+    /// wrapper is the one ingredient of a WinUI 3 report of this same
+    /// handler hanging the app (MicrosoftEdge/WebView2Feedback#806).
+    /// </summary>
+    async void OnResourceRequested(CoreWebView2 sender, CoreWebView2WebResourceRequestedEventArgs e)
     {
-        var response = EditorPage.Respond(bundle, e.Request.Uri);
-        var env = view.CoreWebView2.Environment;
-        if (response is null)
+        var uri = e.Request.Uri;
+        AppLog.Write($"editor: request {uri} ({e.RequestedSourceKind})");
+        var deferral = e.GetDeferral();
+        try
         {
-            e.Response = env.CreateWebResourceResponse(null, 404, "Not Found", "");
-            return;
+            var response = EditorPage.Respond(bundle, uri);
+            var env = sender.Environment;
+            if (response is null)
+            {
+                AppLog.Write($"editor: request {uri} -> 404");
+                e.Response = env.CreateWebResourceResponse(null, 404, "Not Found", "");
+                return;
+            }
+            var headers = string.Join("\r\n", response.Headers.Select(h => $"{h.Key}: {h.Value}"));
+            var stream = new InMemoryRandomAccessStream();
+            await stream.WriteAsync(response.Body.AsBuffer());
+            stream.Seek(0);
+            e.Response = env.CreateWebResourceResponse(stream, 200, "OK", headers);
+            AppLog.Write($"editor: request {uri} -> 200, {response.Body.Length} bytes {response.ContentType}");
         }
-        var headers = string.Join("\r\n", response.Headers.Select(h => $"{h.Key}: {h.Value}"));
-        var stream = new MemoryStream(response.Body).AsRandomAccessStream();
-        e.Response = env.CreateWebResourceResponse(stream, 200, "OK", headers);
+        catch (Exception x)
+        {
+            // An exception out of an async void handler would take the app
+            // down; the page gets no response instead, and the log says why.
+            AppLog.Write($"editor: request {uri} failed", x);
+        }
+        finally
+        {
+            deferral.Complete();
+        }
     }
 
     void Receive(string json)
@@ -128,6 +210,7 @@ public sealed class EditorHost
         switch (EditorMessage.Parse(json))
         {
             case EditorMessage.Ready:
+                AppLog.Write("editor: ready");
                 ready = true;
                 _ = Load(document.Text);
                 break;
@@ -142,6 +225,7 @@ public sealed class EditorHost
                 break;
             case EditorMessage.Log l:
                 System.Diagnostics.Debug.WriteLine($"editor {l.Level}: {l.Text}");
+                AppLog.Write($"editor page {l.Level}: {l.Text}");
                 break;
             default:
                 break;
@@ -155,6 +239,7 @@ public sealed class EditorHost
         sync.LoadSent();
         var reply = await Call(EditorScript.Load(text, document.LanguageUri, false));
         if (reply is not null && EditorReply.Version(reply) is { } v) sync.Loaded(v);
+        AppLog.Write($"editor: text loaded ({text.Length} UTF-16 units), reply {(reply is null ? "none" : "received")}");
     }
 
     async void RequestText()
@@ -165,9 +250,9 @@ public sealed class EditorHost
         sync.Resynced(t.Version);
     }
 
-    async Task<string?> Call(string script)
+    async Task<string?> Call(string script, bool whenReady = true)
     {
-        if (!ready || view.CoreWebView2 is null) return null;
+        if ((whenReady && !ready) || view.CoreWebView2 is null) return null;
         try
         {
             return await view.CoreWebView2.ExecuteScriptAsync(script);
@@ -175,6 +260,7 @@ public sealed class EditorHost
         catch (Exception e) when (e is System.Runtime.InteropServices.COMException or InvalidOperationException)
         {
             System.Diagnostics.Debug.WriteLine($"editor call failed: {e.Message}");
+            AppLog.Write("editor: call failed", e);
             return null;
         }
     }
