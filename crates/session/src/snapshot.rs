@@ -95,7 +95,8 @@ const FLOATING: Color = Color([0.62, 0.36, 0.85, 1.0]);
 /// The most legend entries the header has room for.
 const LEGEND_MAX: usize = 8;
 
-fn marker_color(l: Level) -> [u8; 3] {
+/// A finding's marker colour, shared with the apps' 3D view (`client::overlay`).
+pub fn marker_color(l: Level) -> [u8; 3] {
     match l {
         Level::Error => [190, 20, 20],
         Level::Warning => [200, 110, 0],

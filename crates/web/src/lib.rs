@@ -420,6 +420,14 @@ impl Worker {
             "defaults" => Ok(json!({
                 "checkOptions": CheckOptions::default(),
                 "limits": ResourceLimits::from(WEB_LIMITS),
+                // The tables every app shows, from the core
+                // (`docs/web-protocol.md`, "defaults").
+                "tables": {
+                    "consoleGroups": client::console_groups(),
+                    "printerPresets": client::printer_presets(),
+                    "exportFormats": client::export_formats(),
+                    "previewDelayMs": client::DEFAULT_PREVIEW_DELAY_MS,
+                },
             })),
             "stats" => Ok(json!({ "memoryBytes": memory_bytes() })),
             "open" => {
@@ -637,8 +645,13 @@ impl State {
             .run_files(&rendered, &doc)
             .map(|f| f.to_string_lossy().into_owned())
             .collect();
+        let render = client::render_result(&rendered, &scheme);
         Ok(json!({
-            "render": client::render_result(&rendered, &scheme),
+            // The console's summary line and its tooltip, worded by the
+            // core as every app words them (`client::describe_render`).
+            "summary": client::describe_render(&render, request.mode),
+            "timingsText": client::describe_timings(&render.timings),
+            "render": render,
             "console": c.console_lines(&rendered.log, &doc, text),
             "files": files,
             "language": language,

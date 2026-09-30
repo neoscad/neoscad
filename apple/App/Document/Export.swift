@@ -19,67 +19,49 @@ import NeoSCADCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// What File > Export can write.
+/// What File > Export can write. The cases are this app's stored names
+/// (`export.format` in the user defaults); what each one is (title, core
+/// format id, extension, dimension) is the core's table
+/// (`export_formats`), shared with every other host.
 enum ExportFormat: String, CaseIterable, Identifiable {
     case binaryStl, asciiStl, threeMF, obj, off, svg, dxf, pdf, viewImage, snapshot
 
     var id: String { rawValue }
 
-    var title: String {
-        switch self {
-        case .binaryStl: "STL (binary)"
-        case .asciiStl: "STL (ASCII)"
-        case .threeMF: "3MF"
-        case .obj: "OBJ"
-        case .off: "OFF"
-        case .svg: "SVG"
-        case .dxf: "DXF"
-        case .pdf: "PDF"
-        case .viewImage: "PNG image of the view"
-        case .snapshot: "PNG snapshot sheet"
-        }
-    }
-
-    /// The core's format id (`--export-format`); `nil` for the images.
-    var coreID: String? {
+    /// The core table's id for this entry.
+    var coreKey: String {
         switch self {
         case .binaryStl: "binstl"
         case .asciiStl: "stl"
         case .threeMF: "3mf"
-        case .obj: "obj"
-        case .off: "off"
-        case .svg: "svg"
-        case .dxf: "dxf"
-        case .pdf: "pdf"
-        case .viewImage, .snapshot: nil
+        case .viewImage: "view-image"
+        default: rawValue
         }
     }
 
-    var fileExtension: String {
-        switch self {
-        case .binaryStl, .asciiStl: "stl"
-        case .threeMF: "3mf"
-        case .obj: "obj"
-        case .off: "off"
-        case .svg: "svg"
-        case .dxf: "dxf"
-        case .pdf: "pdf"
-        case .viewImage, .snapshot: "png"
-        }
+    init?(coreKey: String) {
+        guard let f = Self.allCases.first(where: { $0.coreKey == coreKey }) else { return nil }
+        self = f
     }
+
+    private static let table: [String: ExportFormatInfo] = Dictionary(
+        ((try? exportFormats()) ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+
+    private var info: ExportFormatInfo? { Self.table[coreKey] }
+
+    var title: String { info?.title ?? rawValue }
+
+    /// The core's format id (`--export-format`); `nil` for the images.
+    var coreID: String? { info?.kind == .geometry ? coreKey : nil }
+
+    var fileExtension: String { info?.extension ?? "png" }
 
     var contentType: UTType {
         UTType(filenameExtension: fileExtension) ?? .data
     }
 
     /// The model's dimension the format needs (`nil`: any, for images).
-    var dimension: Int? {
-        switch self {
-        case .svg, .dxf, .pdf: 2
-        case .viewImage, .snapshot: nil
-        default: 3
-        }
-    }
+    var dimension: Int? { info?.dimension.map(Int.init) }
 }
 
 /// The export's settings, as the panel's accessory edits them; the app
@@ -103,7 +85,7 @@ struct ExportSettings: Equatable {
 
     static func load(_ d: UserDefaults = .standard) -> ExportSettings {
         var s = ExportSettings()
-        if let f = d.string(forKey: "export.format").flatMap(ExportFormat.init) { s.format = f }
+        if let f = d.string(forKey: "export.format").flatMap(ExportFormat.init(rawValue:)) { s.format = f }
         switch d.string(forKey: "export.3mf.colorMode") {
         case "none": s.threeMFColorMode = .noColor
         case "selected-only": s.threeMFColorMode = .selectedOnly
@@ -146,15 +128,11 @@ enum ExportOutcome: Equatable {
     /// console's error lines (every line when there is no `ERROR:` line,
     /// such as "Current top level object is not a 3D object.").
     static func of(_ r: ExportResult, to url: URL) -> ExportOutcome {
-        if r.exitCode == 0 { return .written(url, bytes: r.bytes) }
-        let lines = r.console.split(separator: "\n").map(String.init)
-        let errors = lines.filter { $0.hasPrefix("ERROR") }
-        let reason = (errors.isEmpty ? lines.filter { !$0.hasPrefix("WARNING") } : errors)
-            .suffix(6).joined(separator: "\n")
+        guard let reason = (try? exportFailureReason(result: r)) ?? nil else {
+            return .written(url, bytes: r.bytes)
+        }
         return .failed(
-            ExportAlert(
-                title: "“\(url.lastPathComponent)” was not exported",
-                message: reason.isEmpty ? "The export failed (exit code \(r.exitCode))." : reason))
+            ExportAlert(title: "“\(url.lastPathComponent)” was not exported", message: reason))
     }
 
     static func of(_ error: Error, to url: URL) -> ExportOutcome {
@@ -170,10 +148,12 @@ extension SCADDocument {
     /// render was 2D and it is a 3D format (or the other way round).
     func initialExportSettings() -> ExportSettings {
         var s = ExportSettings.load()
-        if case .rendered(let r, _) = model.report, let g = r.geometry,
-            let want = s.format.dimension, Int(g.dimensions) != want
+        var last: UInt32?
+        if case .rendered(let r, _) = model.report, let g = r.geometry { last = UInt32(g.dimensions) }
+        if let key = try? suggestExportFormat(preferred: s.format.coreKey, lastDimensions: last),
+            let f = ExportFormat(coreKey: key)
         {
-            s.format = g.dimensions == 2 ? .svg : .binaryStl
+            s.format = f
         }
         return s
     }

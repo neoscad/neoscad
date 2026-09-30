@@ -197,6 +197,34 @@ diagnostics: `crates/lsp` behind `LanguageServer`; Swift relays strings.
 Run cancellation and supersession: `session`. Annotation drawing,
 `look_at`, `ray_at`: Rust.
 
+## Status (2026-09-30)
+
+- Step 1, tables and strings: done. `client/src/present.rs`
+  (`describe_render`, `describe_timings`, `console_group(s)`,
+  `export_formats`, `export_failure_reason`, `suggest_export_format`,
+  `printer_presets`, `PrinterSettings` with `apply_preset`, `validated`,
+  `check_options`, `check_summary`, `first_error`); Swift switched.
+- Step 2, customizer and paths: done (`edit_parameter` with
+  `ParameterEdit`, `format_number`, `snap_to_step`, `parameter_set_path`,
+  `Client::untitled_path`, `color_scheme_names`,
+  `DEFAULT_PREVIEW_DELAY_MS` = 150).
+- Examples (owner decision, added): done. `client/src/examples.rs` embeds
+  `web/examples/` and its manifest; File > Examples in the macOS app.
+- Step 3, `edit_utf16`: done. `lang::source::byte_offset_of_utf16`,
+  `client/src/text.rs` (`Client::edit_utf16`, `EditorText`);
+  `TextOffsets.swift` and its tests deleted, the tests ported to Rust.
+- Step 4, the view's overlay: done. `client/src/overlay.rs`
+  (`view_overlay`, `pick_distance`, `section_range`),
+  `Viewport::set_overlay`; `between_text` and `mm()` stay in Swift
+  (locale-formatted numbers).
+- Step 5, `DocumentController`: done. `client/src/document_loop.rs`,
+  `ffi/src/controller.rs` with `DocumentObserver`; `DocumentLoop.swift`
+  keeps the timer. The web page's loop is not switched (followups).
+- Step 6, preview: done. `client/src/preview.rs`,
+  `Core::preview_picture`, `preview_html`; `QuickLook.swift` keeps the
+  watchdog.
+- Step 7 (C# bindgen CI) and step 8's owner decisions: not started here.
+
 ## Recommended extraction plan
 
 Each step is one builder task: add to `client` + `ffi`, regenerate the

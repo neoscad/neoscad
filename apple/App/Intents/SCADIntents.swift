@@ -44,12 +44,10 @@ enum IntentExportFormat: String, AppEnum {
     ]
 
     var coreID: String { self == .threemf ? "3mf" : rawValue }
+    /// From the core's table (`export_formats`). The display names above
+    /// stay literals: App Intents reads them at build time.
     var fileExtension: String {
-        switch self {
-        case .stl, .binstl: "stl"
-        case .threemf: "3mf"
-        default: rawValue
-        }
+        ((try? exportFormats()) ?? []).first { $0.id == coreID }?.extension ?? rawValue
     }
 }
 

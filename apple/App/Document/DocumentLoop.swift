@@ -3,7 +3,7 @@
 // read, the document runs once, and that one run feeds everything the
 // window shows:
 //
-//   edit -> (pause, `previewDelay`) -> Core.runDocument:
+//   edit -> (pause, the loop's delay) -> Core.runDocument:
 //     evaluate -> the diagnostics to the editor's language server, which
 //        publishes them as the markers (for the page's version with this
 //        text), before any geometry is built
@@ -19,6 +19,11 @@
 // starts), a finished-but-stale upload is skipped by the core, and a stale
 // result is not shown here.
 //
+// When to run, which run is current and what the customizer has edited is
+// the core's `DocumentController` (`crates/client/src/document_loop.rs`,
+// shared with the Linux and Windows apps); this file keeps the timer and
+// makes the core calls the controller's plans ask for.
+//
 // Memory. A run's evaluation and geometry can allocate hundreds of
 // megabytes, all freed when it ends; the app's Info.plist turns off the
 // allocator's cache of freed large blocks so that they go back to the
@@ -31,11 +36,28 @@ extension SCADDocument {
     /// A run once typing pauses; each keystroke restarts the wait.
     func schedulePreview() {
         guard !isClosed else { return }
+        try? loop.schedule(nowMs: Self.nowMs())
+        armTimer()
+    }
+
+    /// The host's one timer: sleep until the loop's next due run, then run
+    /// what is due (or sleep again if the wait was restarted meanwhile).
+    func armTimer() {
         pendingPreview?.cancel()
+        guard let due = (try? loop.nextDueMs()) ?? nil else {
+            pendingPreview = nil
+            return
+        }
+        let now = Self.nowMs()
+        let wait = due > now ? due - now : 0
         pendingPreview = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: Self.previewDelay)
-            guard !Task.isCancelled else { return }
-            self?.run(.preview)
+            try? await Task.sleep(for: .milliseconds(wait))
+            guard !Task.isCancelled, let self else { return }
+            if let mode = (try? self.loop.due(nowMs: Self.nowMs())) ?? nil {
+                self.run(mode)
+            } else {
+                self.armTimer()
+            }
         }
     }
 
@@ -53,17 +75,16 @@ extension SCADDocument {
             return
         }
         let path = fileURL?.path ?? untitledPath
-        if let old = corePath, old != path {
+        guard let plan = (try? loop.beginRun(mode: mode, path: path)) ?? nil else { return }
+        if let old = plan.close {
             // Saved under a new name: the old buffer would shadow the file
             // that is still on disk at the old path.
             _ = try? engine.close(old)
-            coreInSync = false
         }
-        corePath = path
-        if !coreInSync {
+        if plan.sendText {
             do {
                 try engine.update(path, text: model.text)
-                coreInSync = true
+                try loop.textSent()
             } catch let e as CoreError {
                 model.report = .failed(e.message)
                 return
@@ -77,14 +98,12 @@ extension SCADDocument {
         // client's own pause.
         model.editor.syncLanguage()
         renderTask?.cancel()
-        requestCount += 1
-        lastMode = mode
         model.report = .running(mode)
         let model = self.model
         let viewport = model.viewport
         let language = languageServer
-        let request = DocumentRequest(
-            mode: mode, overrides: overrides, parts: model.partsEnabled)
+        let request = plan.request
+        let loop = self.loop
         renderTask = Task { @MainActor [weak self] in
             do {
                 // The evaluation's markers arrive before the geometry is
@@ -97,7 +116,8 @@ extension SCADDocument {
                 let r = try await engine.runDocument(
                     path, request: request, viewport: viewport.viewport, language: language,
                     early: early)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, (try? loop.isCurrent(generation: plan.generation)) == true
+                else { return }
                 if r.shown { viewport.view?.requestFrame() }
                 model.editor.languageClient?.deliverPublications(r.language)
                 model.console = r.console
@@ -121,14 +141,11 @@ extension SCADDocument {
     /// another editor, a regenerated import): run the last mode again.
     func filesChanged() {
         guard !isClosed else { return }
-        if lastMode == .render { run(.render) } else { schedulePreview() }
+        if let mode = (try? loop.filesChanged(nowMs: Self.nowMs())) ?? nil { run(mode) } else { armTimer() }
     }
 
     /// The customizer's values as the core takes them, in a stable order.
-    var overrides: [ParameterOverride] {
-        model.parameterValues.map { ParameterOverride(name: $0.key, value: $0.value) }
-            .sorted { $0.name < $1.name }
-    }
+    var overrides: [ParameterOverride] { (try? loop.overrides()) ?? [] }
 
     // MARK: The customizer
 
@@ -142,17 +159,18 @@ extension SCADDocument {
             guard let groups = try? await engine.parameters(path), !Task.isCancelled,
                 let self, !self.isClosed
             else { return }
-            let names = Set(groups.flatMap { $0.parameters.map(\.name) })
             if self.model.parameterGroups != groups { self.model.parameterGroups = groups }
-            let kept = self.model.parameterValues.filter { names.contains($0.key) }
-            if kept.count != self.model.parameterValues.count { self.model.parameterValues = kept }
+            // Values of parameters that are gone are dropped by the loop,
+            // whose observer updates the model.
+            _ = try? self.loop.parametersRead(groups: groups)
         }
     }
 
     /// The parameter sets file of this document: OpenSCAD's, `name.json`
     /// beside `name.scad` (`ParameterWidget::getJsonFile`).
     var parameterSetsURL: URL? {
-        fileURL?.deletingPathExtension().appendingPathExtension("json")
+        guard let path = fileURL?.path, let json = try? parameterSetPath(docPath: path) else { return nil }
+        return URL(fileURLWithPath: json)
     }
 
     func refreshParameterSets() {
@@ -183,21 +201,11 @@ extension SCADDocument {
     }
 
     func setParameter(_ name: String, _ value: ParameterValue?) {
-        if let value {
-            guard model.parameterValues[name] != value else { return }
-            model.parameterValues[name] = value
-        } else {
-            guard model.parameterValues.removeValue(forKey: name) != nil else { return }
-        }
-        model.selectedParameterSet = nil
-        schedulePreview()
+        if (try? loop.setParameter(name: name, value: value, nowMs: Self.nowMs())) == true { armTimer() }
     }
 
     func resetParameters() {
-        model.selectedParameterSet = nil
-        guard !model.parameterValues.isEmpty else { return }
-        model.parameterValues = [:]
-        schedulePreview()
+        if (try? loop.resetParameters(nowMs: Self.nowMs())) == true { armTimer() }
     }
 
     /// Apply a set as OpenSCAD's `-p file -P name` does (values checked
@@ -209,14 +217,9 @@ extension SCADDocument {
         do {
             let values = try engine.core.applyParameterSet(
                 path: path, jsonPath: url.path, name: name)
-            let defaults = Dictionary(
-                model.parameterGroups.flatMap(\.parameters).map { ($0.name, $0.defaultValue) },
-                uniquingKeysWith: { a, _ in a })
-            var edited: [String: ParameterValue] = [:]
-            for v in values where defaults[v.name] != v.value { edited[v.name] = v.value }
-            model.parameterValues = edited
-            model.selectedParameterSet = name
-            schedulePreview()
+            try loop.parameterSetApplied(
+                name: name, values: values, groups: model.parameterGroups, nowMs: Self.nowMs())
+            armTimer()
         } catch let e as CoreError {
             model.report = .failed(e.message)
         } catch {}

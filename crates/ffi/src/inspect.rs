@@ -37,7 +37,7 @@ use session::snapshot::{SnapshotError, SnapshotRequest};
 pub use client::{
     BetweenResult, CheckFinding, CheckOptions, CheckReport, ExportOptions, FindingSeverity,
     PartStats, RunOptions, SectionAxis, SectionResult, SolidStats, ThreeMfColorMode,
-    ThreeMfMaterial, TruncatedFindings,
+    ThreeMfMaterial, TruncatedFindings, ViewLine, ViewMarker,
 };
 
 use crate::{
@@ -526,7 +526,7 @@ impl Core {
 /// A polyline for [`Viewport::set_annotations`]: points flattened
 /// (`x0, y0, z0, x1, ...`) in model coordinates, and an RGBA colour
 /// (0 to 1 each).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct ViewLine {
     pub points: Vec<f64>,
     pub closed: bool,
@@ -534,7 +534,7 @@ pub struct ViewLine {
 }
 
 /// A marked point for [`Viewport::set_annotations`].
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct ViewMarker {
     pub point: Vec<f64>,
     pub label: String,

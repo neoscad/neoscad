@@ -292,8 +292,12 @@ CheckReport  = { exitCode, failed: bool, errors: u32, warnings: u32, info: u32,
   diagnostics: [Diagnostic], console: string }
 ```
 
-`{ type: "defaults" }` returns `{ checkOptions: CheckOptions, limits: ResourceLimits }`
-(the worker's default limits) so the page does not copy the defaults.
+`{ type: "defaults" }` returns `{ checkOptions: CheckOptions, limits: ResourceLimits,
+tables: { consoleGroups, printerPresets, exportFormats, previewDelayMs } }`
+(the worker's default limits, and the tables every app shows, from
+`client`'s `present.rs`) so the page does not copy them. A `run` result
+also carries `summary` (the console's one-line summary, as
+`client::describe_render` words it) and `timingsText` (its tooltip).
 `options` are validated (positive nozzle and wall, overhang 0 to 90,
 three positive bed sizes) before anything runs: `invalidArgument`
 otherwise.

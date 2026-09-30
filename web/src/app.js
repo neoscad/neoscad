@@ -37,13 +37,17 @@ import { applyTheme, loadSite } from "./site.js";
 import { Store } from "./store.js";
 import { AgentPanel } from "./ui/agent.js";
 import { CheckPanel, checkOptions, findingMarker } from "./ui/check.js";
-import { ConsolePanel, describe } from "./ui/console.js";
+import { ConsolePanel } from "./ui/console.js";
 import { CustomizerPanel } from "./ui/customizer.js";
 import { clear, download, h } from "./ui/dom.js";
 import { MeasurePanel } from "./ui/measure.js";
 import { Menu } from "./ui/menu.js";
 import { createViewer } from "./view/index.js";
 
+// The page's own pause, not the core's default (150 ms, `client::
+// DEFAULT_PREVIEW_DELAY_MS`, which the desktop apps use): the one worker
+// cannot interrupt a run, so a run started too eagerly holds up the run
+// for the next keystroke.
 const PREVIEW_DELAY_MS = 300;
 const INSPECTOR_TABS = [
   ["customizer", "Customizer"],
@@ -672,11 +676,9 @@ class App {
     if (raw?.superseded || this.doc !== d) return;
     const r = runResult(raw);
     this.lastRun = { mode, timings: r.timings, exitCode: r.exitCode };
-    this.console.summaryTitle = r.timings
-      ? `Parse ${r.timings.parseMs?.toFixed(1)} ms, evaluate ${r.timings.evaluateMs?.toFixed(1)} ms, geometry ${r.timings.geometryMs?.toFixed(1)} ms`
-      : "";
+    this.console.summaryTitle = r.timingsText;
     this.console.setLines(r.console);
-    this.console.setSummary(describe(r, mode), r.exitCode === 0 ? "done" : "failed");
+    this.console.setSummary(r.summary, r.exitCode === 0 ? "done" : "failed");
     for (const m of r.language) this.editor.lspReceive(m);
     // A failed run with nothing to draw keeps the last model on screen, as
     // the app does while the text is mid-edit; a successful empty one

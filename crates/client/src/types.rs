@@ -53,6 +53,20 @@ impl std::fmt::Display for CoreError {
 
 impl std::error::Error for CoreError {}
 
+impl CoreError {
+    /// The error as a sentence for the user, as the apps word it (the
+    /// macOS app's `CoreError.message`): the command line's `Display` form
+    /// is for logs.
+    pub fn user_message(&self) -> String {
+        match self {
+            CoreError::Cancelled => "Cancelled by a newer request.".into(),
+            CoreError::InvalidArgument { message } => format!("Invalid argument: {message}"),
+            CoreError::Failed { message } => message.clone(),
+            CoreError::Panicked { message } => format!("Internal error in the core: {message}"),
+        }
+    }
+}
+
 impl From<session::Cancelled> for CoreError {
     fn from(_: session::Cancelled) -> Self {
         CoreError::Cancelled

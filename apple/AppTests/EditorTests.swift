@@ -563,7 +563,7 @@ struct EditorBenchmark {
         try engine.open("/NeoSCAD-bench/copy.scad", text: model.text)
         for i in 0..<200 {
             let t = clock.now
-            let edits = try model.applyEditorEdits([UTF16Edit(from: middle + i, to: middle + i, insert: "z")])
+            let edits = try model.applyEditorEdits([Utf16Edit(from: UInt64(middle + i), to: UInt64(middle + i), insert: "z")])
             let t1 = clock.now
             try engine.edit("/NeoSCAD-bench/copy.scad", edits: edits)
             let d = clock.now - t

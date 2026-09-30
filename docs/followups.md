@@ -483,6 +483,21 @@ lead them, come roughly in order of user impact.
   unspecified order; only a mesh with duplicate faces can show it.
 
 ## macOS app
+
+- Shared core, left after `docs/audits/shared-core.md` steps 1-6: the
+  web page still keeps its own console filter list, printer presets,
+  customizer snap/clamp (`web/src/model/customizer.js`), measure overlay
+  and document loop, because the page cannot call the worker's core
+  synchronously; `defaults.tables` and each run's `summary` now carry the
+  core's versions, so switching them is page work. The page keeps its
+  300 ms pause (the core default is 150 ms). The preview's unreadable
+  files are still parsed out of message text: the loader's diagnostics
+  have no structured path. The printer presets' build volumes are still
+  unchecked against the makers' spec sheets. Two examples need BOSL2,
+  which the macOS app does not bundle (`Example.libraries` says so; the
+  menu lists them anyway). The C# bindings are not generated in CI yet
+  (audit step 7), and `ffi` still pins uniffi 0.32.2 against
+  bindgen-cs's 0.31.
 - A viewport frame holds the main thread for about 2.6 ms (p50; p95
   3.3 ms) at 60 Hz, nearly all of it `-[CAMetalLayer nextDrawable]`
   waiting for a free drawable; encoding is 0.14 ms. `Immediate` present

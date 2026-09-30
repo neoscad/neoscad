@@ -70,6 +70,9 @@ enum MainMenu {
         let recentItem = item("Open Recent", nil)
         recentItem.submenu = recent
         m.addItem(recentItem)
+        let examples = item("Examples", nil)
+        examples.submenu = ExampleMenu.shared.menu()
+        m.addItem(examples)
         m.addItem(.separator())
         m.addItem(item("Close", #selector(NSWindow.performClose(_:)), "w"))
         m.addItem(item("Save…", #selector(NSDocument.save(_:)), "s"))

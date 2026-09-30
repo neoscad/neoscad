@@ -16,7 +16,13 @@
 //! creation date, where an export's bytes go) is passed in.
 
 mod document;
+mod document_loop;
+mod examples;
 mod inspect;
+mod overlay;
+mod present;
+mod preview;
+mod text;
 mod types;
 
 use std::path::PathBuf;
@@ -25,7 +31,13 @@ use std::sync::{Mutex, PoisonError};
 use session::{Run, Session};
 
 pub use document::*;
+pub use document_loop::*;
+pub use examples::*;
 pub use inspect::*;
+pub use overlay::*;
+pub use present::*;
+pub use preview::*;
+pub use text::*;
 pub use types::*;
 
 /// One session and the limits every request runs under: the state a
@@ -206,3 +218,6 @@ impl Client {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod shared_tests;

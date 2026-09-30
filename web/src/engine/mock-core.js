@@ -76,7 +76,7 @@ export class MockCore {
     if (!this.initialised) throw invalid(`'${msg.type}' before 'init'`);
     switch (msg.type) {
       case "defaults":
-        return { result: { checkOptions: CHECK_DEFAULTS, limits: LIMITS } };
+        return { result: { checkOptions: CHECK_DEFAULTS, limits: LIMITS, tables: { previewDelayMs: 150 } } };
       case "stats":
         return { result: { memoryBytes: 16 << 20 } };
       case "open":
@@ -245,8 +245,13 @@ export class MockCore {
     const ms = 1 + (slow ? Number(slow[1]) : 0);
     const scene = msg.scene === false ? null : packScene(model);
     const vp = text.match(/^\s*\$vpr\s*=\s*\[([^\]]*)\]\s*;/m);
+    const timings = { parseMs: 0.1, evaluateMs: 0.4, geometryMs: ms - 0.5, totalMs: ms };
     return {
       result: {
+        // The real worker's words come from the core (describe_render);
+        // the mock's are near enough for the page's tests.
+        summary: msg.mode === "preview" ? `Previewed in ${ms.toFixed(1)} ms.` : `Rendered in ${ms.toFixed(1)} ms.`,
+        timingsText: `total ${ms.toFixed(1)} ms`,
         render: {
           exitCode: 0,
           diagnostics: [],
@@ -254,7 +259,7 @@ export class MockCore {
           console: console.map((l) => l.text).join("\n"),
           geometry,
           cacheEntries: 0,
-          timings: { parseMs: 0.1, evaluateMs: 0.4, geometryMs: ms - 0.5, totalMs: ms },
+          timings,
         },
         console,
         files: [],

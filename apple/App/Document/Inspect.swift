@@ -24,10 +24,9 @@ extension SCADDocument {
         }
         let path = fileURL?.path ?? untitledPath
         if corePath != path || !coreInSync {
-            if let old = corePath, old != path { _ = try? engine.close(old) }
-            corePath = path
+            if let old = try loop.setPath(path: path) { _ = try? engine.close(old) }
             try engine.update(path, text: model.text)
-            coreInSync = true
+            try loop.textSent()
         }
         return (engine, path)
     }
@@ -41,6 +40,7 @@ extension SCADDocument {
     func setParts(_ on: Bool) {
         guard model.partsEnabled != on else { return }
         model.partsEnabled = on
+        _ = try? loop.setParts(on: on)
         if let mode = lastMode { run(mode) } else { schedulePreview() }
     }
 
@@ -188,80 +188,17 @@ extension SCADDocument {
 
     // MARK: The view's annotations
 
-    /// Draw what the panels show into the view: every located finding's
-    /// numbered marker (the selected one with its box), the section's
-    /// outline, the closest points between two parts and the picked
-    /// points.
+    /// Draw what the panels show into the view: the core builds the lines
+    /// and markers from the panels' state (`Viewport.set_overlay`, shared
+    /// with every host): every located finding's numbered marker (the
+    /// selected one with its box), the section's outline, the closest
+    /// points between two parts and the picked points.
     func updateAnnotations() {
-        var lines: [ViewLine] = []
-        var markers: [ViewMarker] = []
-        let check = model.check
-        for f in check.report?.findings ?? [] where f.point.count == 3 && f.severity != .info {
-            let selected = f.id == check.selected
-            let color = Annotation.color(f.severity, selected: selected)
-            markers.append(ViewMarker(point: f.point, label: "\(f.id)", color: color))
-            if selected, let lo = f.bboxMin, let hi = f.bboxMax {
-                lines += Annotation.box(lo, hi, color: color)
-            }
-        }
         let m = model.measure
-        if let s = m.section {
-            for c in s.outline {
-                lines.append(ViewLine(points: c, closed: true, color: Annotation.section))
-            }
-        }
-        if let b = m.between, let pa = b.pointA, let pb = b.pointB {
-            lines.append(ViewLine(points: pa + pb, closed: false, color: Annotation.distance))
-            markers.append(ViewMarker(point: pa, label: b.a, color: Annotation.distance))
-            markers.append(ViewMarker(point: pb, label: b.b, color: Annotation.distance))
-        }
-        for (i, p) in m.picks.enumerated() {
-            markers.append(ViewMarker(point: p, label: i == 0 ? "A" : "B", color: Annotation.pick))
-        }
-        if m.picks.count == 2 {
-            lines.append(ViewLine(points: m.picks[0] + m.picks[1], closed: false, color: Annotation.pick))
-        }
-        model.viewport.perform { try $0.setAnnotations(lines: lines, markers: markers) }
-    }
-}
-
-/// The annotations' colours: the snapshot's marker colours for findings
-/// (`crates/session/src/snapshot.rs`, `marker_color`), and colours of
-/// their own for the measure panel.
-enum Annotation {
-    static let section: [Float] = [0.0, 0.62, 0.85, 1]
-    static let distance: [Float] = [0.58, 0.40, 0.74, 1]
-    static let pick: [Float] = [0.10, 0.60, 0.20, 1]
-
-    static func color(_ s: FindingSeverity, selected: Bool) -> [Float] {
-        let c: [Float] =
-            switch s {
-            case .error: [190, 20, 20]
-            case .warning: [200, 110, 0]
-            case .info: [40, 90, 190]
-            }
-        // Unselected markers fade, so the chosen one stands out.
-        // Typed step by step: literal arithmetic with `+` and a ternary is
-        // slow for Xcode 26's type checker.
-        let alpha: Float = selected ? 1 : 0.55
-        let rgb: [Float] = c.map { (v: Float) -> Float in v / 255 }
-        return rgb + [alpha]
-    }
-
-    /// The twelve edges of a box.
-    static func box(_ lo: [Double], _ hi: [Double], color: [Float]) -> [ViewLine] {
-        guard lo.count == 3, hi.count == 3 else { return [] }
-        func p(_ i: Int) -> [Double] {
-            [i & 1 == 0 ? lo[0] : hi[0], i & 2 == 0 ? lo[1] : hi[1], i & 4 == 0 ? lo[2] : hi[2]]
-        }
-        let bottom = [0, 1, 3, 2].flatMap(p)
-        let top = [4, 5, 7, 6].flatMap(p)
-        var out = [
-            ViewLine(points: bottom, closed: true, color: color),
-            ViewLine(points: top, closed: true, color: color),
-        ]
-        for i in 0..<4 { out.append(ViewLine(points: p(i) + p(i + 4), closed: false, color: color)) }
-        return out
+        let state = OverlayState(
+            findings: model.check.report?.findings ?? [], selected: model.check.selected,
+            section: m.section, between: m.between, picks: m.picks)
+        model.viewport.perform { try $0.setOverlay(state: state) }
     }
 }
 
@@ -273,6 +210,5 @@ func describe(_ error: Error) -> String {
 /// The first error line of a failed request's console: why it failed,
 /// for the panel to say (the document's own console keeps its run's).
 func firstError(_ console: String) -> String? {
-    console.split(separator: "\n").first { $0.hasPrefix("ERROR") || $0.contains("Parser error") }
-        .map(String.init)
+    (try? NeoSCADCore.firstError(console: console)) ?? nil
 }

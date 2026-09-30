@@ -14,25 +14,10 @@
 import NeoSCADCore
 import SwiftUI
 
-/// A printer's numbers for `check`.
-struct PrinterPreset: Identifiable, Hashable {
-    let id: String
-    let name: String
-    let nozzle: Double
-    /// Width, depth, height in mm.
-    let bed: [Double]
-
-    /// Build volumes as the makers publish them, written from memory and
-    /// not checked against their spec sheets in this change (a followup);
-    /// every one ships with a 0.4 mm nozzle. Custom covers anything else.
-    static let all: [PrinterPreset] = [
-        PrinterPreset(id: "prusa-mk4", name: "Prusa MK4", nozzle: 0.4, bed: [250, 210, 220]),
-        PrinterPreset(id: "prusa-mini", name: "Prusa MINI+", nozzle: 0.4, bed: [180, 180, 180]),
-        PrinterPreset(id: "bambu-x1", name: "Bambu Lab X1 / P1", nozzle: 0.4, bed: [256, 256, 256]),
-        PrinterPreset(id: "bambu-a1-mini", name: "Bambu Lab A1 mini", nozzle: 0.4, bed: [180, 180, 180]),
-        PrinterPreset(id: "ender-3", name: "Creality Ender-3", nozzle: 0.4, bed: [220, 220, 250]),
-        PrinterPreset(id: "voron-350", name: "Voron 2.4 (350)", nozzle: 0.4, bed: [350, 350, 340]),
-    ]
+/// A printer's numbers for `check`: the core's presets (`printer_presets`),
+/// shared with every other host.
+extension PrinterPreset: Identifiable {
+    static let all: [PrinterPreset] = (try? printerPresets()) ?? []
 
     static func named(_ id: String) -> PrinterPreset? { all.first { $0.id == id } }
 }
@@ -52,50 +37,62 @@ struct CheckSettingsValues: Equatable {
 
     /// `check`'s own defaults (no bed), from the core.
     static var defaults: CheckSettingsValues {
-        let d = (try? defaultCheckOptions())
-            ?? CheckOptions(
-                nozzle: 0.4, minWall: 0.8, maxOverhang: 45, bed: nil, bedTolerance: 0.05,
-                maxFindings: 10)
-        return CheckSettingsValues(
-            preset: custom, nozzle: d.nozzle, minWall: d.minWall, maxOverhang: d.maxOverhang,
-            useBed: false, bed: [220, 220, 250])
+        CheckSettingsValues(
+            (try? defaultPrinterSettings())
+                ?? PrinterSettings(
+                    preset: custom, nozzle: 0.4, minWall: 0.8, maxOverhang: 45, useBed: false,
+                    bed: [220, 220, 250]))
+    }
+
+    init(_ s: PrinterSettings) {
+        self.init(
+            preset: s.preset, nozzle: s.nozzle, minWall: s.minWall, maxOverhang: s.maxOverhang,
+            useBed: s.useBed, bed: s.bed)
+    }
+
+    init(preset: String, nozzle: Double, minWall: Double, maxOverhang: Double, useBed: Bool, bed: [Double]) {
+        self.preset = preset
+        self.nozzle = nozzle
+        self.minWall = minWall
+        self.maxOverhang = maxOverhang
+        self.useBed = useBed
+        self.bed = bed
+    }
+
+    var core: PrinterSettings {
+        PrinterSettings(
+            preset: preset, nozzle: nozzle, minWall: minWall, maxOverhang: maxOverhang,
+            useBed: useBed, bed: bed)
     }
 
     /// Take a preset's nozzle and bed; walls follow as two perimeters.
     mutating func apply(_ p: PrinterPreset) {
-        preset = p.id
-        nozzle = p.nozzle
-        minWall = 2 * p.nozzle
-        useBed = true
-        bed = p.bed
+        if let s = try? applyPrinterPreset(settings: core, id: p.id) { self = CheckSettingsValues(s) }
     }
 
     /// What the core runs with. The bed tolerance and the findings per
     /// code stay `check`'s defaults.
     var options: CheckOptions {
-        let d = (try? defaultCheckOptions())
-        return CheckOptions(
-            nozzle: nozzle, minWall: minWall, maxOverhang: maxOverhang,
-            bed: useBed ? bed : nil, bedTolerance: d?.bedTolerance ?? 0.05,
-            maxFindings: d?.maxFindings ?? 10)
+        (try? printerCheckOptions(settings: core))
+            ?? CheckOptions(
+                nozzle: nozzle, minWall: minWall, maxOverhang: maxOverhang,
+                bed: useBed ? bed : nil, bedTolerance: 0.05, maxFindings: 10)
     }
 
     // MARK: Persistence
 
     static func load(_ defaults: UserDefaults = .standard) -> CheckSettingsValues {
+        // The stored values as they are; the core puts each one out of its
+        // bounds back to the default.
         var v = Self.defaults
         if let p = defaults.string(forKey: "check.preset") { v.preset = p }
         let number = { (key: String) in defaults.object(forKey: key) as? Double }
-        if let x = number("check.nozzle"), x > 0 { v.nozzle = x }
-        if let x = number("check.minWall"), x > 0 { v.minWall = x }
-        if let x = number("check.maxOverhang"), (0...90).contains(x) { v.maxOverhang = x }
+        if let x = number("check.nozzle") { v.nozzle = x }
+        if let x = number("check.minWall") { v.minWall = x }
+        if let x = number("check.maxOverhang") { v.maxOverhang = x }
         v.useBed = defaults.bool(forKey: "check.useBed")
-        if let b = defaults.array(forKey: "check.bed") as? [Double], b.count == 3,
-            b.allSatisfy({ $0 > 0 })
-        {
-            v.bed = b
-        }
-        return v
+        if let b = defaults.array(forKey: "check.bed") as? [Double] { v.bed = b }
+        return (try? validatedPrinterSettings(settings: v.core)).map(CheckSettingsValues.init) ?? Self.defaults
     }
 
     func save(_ defaults: UserDefaults = .standard) {
@@ -262,14 +259,7 @@ struct CheckView: View {
     }
 
     private func summary(_ r: CheckReport) -> String {
-        if r.failed {
-            return "The model did not render" + (firstError(r.console).map { ": \($0)" } ?? ".")
-        }
-        var s = "\(r.errors) errors, \(r.warnings) warnings, \(r.info) info"
-        if let w = r.minWall { s += " · thinnest wall \(w.formatted()) mm" }
-        let more = r.truncated.reduce(0) { $0 + Int($1.count) }
-        if more > 0 { s += " · \(more) more not listed" }
-        return s
+        (try? checkSummary(report: r)) ?? ""
     }
 }
 

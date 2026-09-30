@@ -63,6 +63,27 @@ core, wasm-bindgen) and `web-view` (the browser viewer, wasm-bindgen);
 its front end is `web/` (`docs/web-demo-plan.md`,
 `docs/web-protocol.md`).
 
+`client` is the port boundary: whatever a desktop or web front end does
+that is not drawing widgets lives there, and each host only wraps it
+(`docs/audits/shared-core.md`). Besides the document, check, measure and
+export glue it holds the panels' tables and sentences (`present.rs`:
+console summary and filter groups, export formats, printer presets and
+the check summary, the customizer's snap/clamp/`%g` edit rules, untitled
+and parameter-set paths, colour scheme names), the editor's UTF-16 edits
+(`text.rs`, converting only through `lang::source`), the 3D view's
+overlay for findings, sections, distances and picks (`overlay.rs`), the
+document loop's state machine (`document_loop.rs`: debounce, supersede,
+in-sync, last mode, parameter pruning; the host passes "now" and keeps
+one timer), the file-manager preview's notes and page (`preview.rs`) and
+the examples, embedded from `web/examples/` (`examples.rs`). `ffi`
+exports them to UniFFI as free functions, synchronous objects
+(`EditorText`, `DocumentController` with a `with_foreign`
+`DocumentObserver`) and records, in shapes `uniffi-bindgen-cs` (uniffi
+0.31) also takes; the web worker sends the tables in `defaults` and the
+summary with each run (`docs/web-protocol.md`). What stays in a host:
+windows, menus, persistence keys, file watching, the GPU surface, the
+editor's web view, timers and watchdogs, and locale-formatted numbers.
+
 Rule: no rendering or app logic lives in a UI layer. The renderer is Rust;
 the app core API is the `session` API, which `neoscad serve` exposes as
 JSON-RPC (`docs/serve-protocol.md`).

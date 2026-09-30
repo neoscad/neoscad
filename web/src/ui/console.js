@@ -4,7 +4,7 @@
 // text filter, a collapse toggle, and click-to-jump for lines that point
 // into a file.
 
-import { clear, fmt, h } from "./dom.js";
+import { clear, h } from "./dom.js";
 
 export const FILTERS = [
   { id: "errors", title: "Errors", kinds: ["error", "trace"], icon: "✖" },
@@ -12,23 +12,6 @@ export const FILTERS = [
   { id: "echo", title: "Echo", kinds: ["echo"], icon: "›" },
   { id: "other", title: "Other", kinds: ["info"], icon: "i" },
 ];
-
-/// The one-line summary of a run (ConsoleView.describe).
-export function describe(r, mode) {
-  const ms = r.timings ? `${fmt(r.timings.totalMs ?? 0, 1)} ms` : "";
-  if (mode === "preview") return r.exitCode === 0 ? `Previewed in ${ms}.` : `Preview failed (${ms}).`;
-  if (r.exitCode !== 0) return `Render failed (${ms}).`;
-  const g = r.geometry;
-  if (!g) return `Rendered in ${ms}: empty result.`;
-  const size = g.bboxMax.map((x, i) => fmt(x - g.bboxMin[i])).join(" × ");
-  const parts = [`${g.dimensions}D`, `bbox ${size}`];
-  if (g.volume != null) parts.push(`volume ${fmt(g.volume)}`);
-  parts.push(`area ${fmt(g.area)}`);
-  if (g.triangles != null) parts.push(`${g.triangles} triangles`);
-  if (g.components != null) parts.push(`${g.components} component${g.components === 1 ? "" : "s"}`);
-  if (g.manifold != null) parts.push(g.manifold ? "manifold" : "not manifold");
-  return `Rendered in ${ms}: ${parts.join(", ")}`;
-}
 
 export class ConsolePanel {
   constructor(root, { onJump }) {

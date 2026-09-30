@@ -34,7 +34,7 @@ final class DocumentModel {
     /// editor has its own copy), and observing it would cost a SwiftUI
     /// update per keystroke.
     var text: String {
-        get { storage }
+        get { (try? storage.text()) ?? "" }
         set {
             setStorage(newValue)
             textReplaced?()
@@ -74,26 +74,25 @@ final class DocumentModel {
     /// What the panels ask of their document (set by it).
     @ObservationIgnored var actions = DocumentActions()
 
-    @ObservationIgnored private var storage = ""
-    /// The text's length in UTF-16 units, kept with each edit: counting a
-    /// long text's UTF-16 units anew for each keystroke is a scan of it.
-    @ObservationIgnored private(set) var utf16Length = 0
+    /// The document's copy of the text, edited in the editor's UTF-16
+    /// offsets by the core (`EditorText`, `crates/client/src/text.rs`),
+    /// which keeps its UTF-16 length with each edit and hands the edits
+    /// back in the UTF-8 offsets `Core.edit` takes.
+    @ObservationIgnored private let storage = EditorText(text: "")
+    /// The text's length in UTF-16 units.
+    var utf16Length: Int { Int((try? storage.utf16Length()) ?? 0) }
+    /// The text's length in UTF-8 bytes (the core's `DocInfo.length`).
+    var byteLength: UInt64 { get throws { try storage.byteLength() } }
 
     private func setStorage(_ text: String) {
-        storage = text
-        // Native UTF-8, so byte offsets into it are arithmetic, not scans
-        // (a string bridged from the web view is UTF-16 inside).
-        storage.makeContiguousUTF8()
-        utf16Length = storage.utf16.count
+        try? storage.replace(text: text)
     }
 
     /// Apply the editor's edits (UTF-16 offsets) and return them in the
     /// core's UTF-8 offsets. Throws if they do not fit this text, which is
     /// then out of step until `replaceWithEditorText`.
-    func applyEditorEdits(_ edits: [UTF16Edit]) throws -> [TextEdit] {
-        let out = try TextOffsets.apply(edits, to: &storage)
-        for e in edits { utf16Length += e.insert.utf16.count - (e.to - e.from) }
-        return out
+    func applyEditorEdits(_ edits: [Utf16Edit]) throws -> [TextEdit] {
+        try storage.apply(edits: edits)
     }
 
     /// Take the editor's whole text, after the copies disagreed.
@@ -148,24 +147,36 @@ enum RenderReport {
 final class SCADDocument: NSDocument {
     let model = DocumentModel()
 
+    /// The document loop's state machine, from the core
+    /// (`DocumentController`, `crates/client/src/document_loop.rs`): when
+    /// to run, which run is current, whether the core's copy of the text
+    /// is the document's, the customizer's edited values. This file keeps
+    /// only the timer (`pendingPreview`) and the text.
+    let loop = DocumentController(delayMs: nil)
+    /// Mirrors the loop's state into the model (the customizer's values).
+    private lazy var loopObserver = LoopObserver(self)
+
     /// The path the core knows this document by, once it has run: the
     /// file's, or for an untitled document one of its own (see
     /// `untitledPath`).
-    var corePath: String?
+    var corePath: String? { (try? loop.state())?.path }
     /// Whether the core's copy of the text is the document's: edits are
     /// forwarded only then, and the next run sends the whole text
     /// otherwise.
-    var coreInSync = false
+    var coreInSync: Bool {
+        get { (try? loop.state())?.inSync ?? false }
+        set { _ = try? (newValue ? loop.textSent() : loop.textReplaced()) }
+    }
     /// The run in flight (the app tests await it).
     var renderTask: Task<Void, Never>?
     /// How many runs were started (the app tests count them, so a key that
     /// reached two handlers would show).
-    var requestCount = 0
-    /// The run waiting for typing (or a customizer drag) to pause.
+    var requestCount: Int { Int((try? loop.state())?.requestCount ?? 0) }
+    /// The host's timer: armed for the loop's next due run.
     var pendingPreview: Task<Void, Never>?
     /// What the last run built, so a scheme change or a file change on
     /// disk runs it again.
-    var lastMode: RenderMode?
+    var lastMode: RenderMode? { (try? loop.state())?.lastMode ?? nil }
     /// The customizer's parse of the text, in flight.
     var parameterTask: Task<Void, Never>?
     /// The check, measurement and export in flight (Document/Inspect.swift,
@@ -178,18 +189,21 @@ final class SCADDocument: NSDocument {
     /// The editor's language server: markers come from this document's
     /// runs (`hostDiagnostics`), which hand it their diagnostics.
     private(set) var languageServer: LanguageServer?
+    /// Whether a new text (a file read, an example) runs at once; off
+    /// while a heavy example is loaded, which waits for Preview or Render.
+    var runsWhenTextIsReplaced = true
     /// Set by `close`: nothing more runs.
     private(set) var isClosed = false
 
-    /// How long typing must pause before the document runs again. The
-    /// run is the markers' source too, so this is also how soon they
-    /// follow typing (the language server's own debounce was 150 ms).
-    static let previewDelay: Duration = .milliseconds(150)
+    /// Milliseconds on a monotonic clock: the "now" the loop schedules
+    /// against (its delay is the core's `default_preview_delay_ms`).
+    static func nowMs() -> UInt64 { DispatchTime.now().uptimeNanoseconds / 1_000_000 }
 
     override init() {
         super.init()
         hasUndoManager = false
         MainActor.assumeIsolated {
+            try? loop.setObserver(observer: loopObserver)
             model.textReplaced = { [weak self] in self?.textReplaced() }
             model.viewport.onSchemeChange = { [weak self] in self?.rerender() }
             let editor = model.editor
@@ -247,19 +261,13 @@ final class SCADDocument: NSDocument {
             ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory())
         let shown: String = displayName ?? ""
-        let base = shown.isEmpty ? "Untitled" : shown
-        var name = base
-        var n = 1
-        while true {
-            let path = dir.appendingPathComponent("\(name).scad").path
-            if !Self.untitledPaths.contains(path) && !FileManager.default.fileExists(atPath: path) {
-                Self.untitledPaths.insert(path)
-                untitledPathChosen = path
-                return path
-            }
-            n += 1
-            name = "\(base) \(n)"
-        }
+        let path =
+            (try? CoreService.shared.get().core.untitledPath(
+                dir: dir.path, base: shown, taken: Array(Self.untitledPaths)))
+            ?? dir.appendingPathComponent("\(shown.isEmpty ? "Untitled" : shown).scad").path
+        Self.untitledPaths.insert(path)
+        untitledPathChosen = path
+        return path
     }
     private var untitledPathChosen: String?
 
@@ -319,13 +327,13 @@ final class SCADDocument: NSDocument {
     private func textReplaced() {
         model.editor.load(model.text)
         coreInSync = false
-        schedulePreview()
+        if runsWhenTextIsReplaced { schedulePreview() }
     }
 
     /// One editor transaction: apply it to the document's copy, count it
     /// for NSDocument, and forward it to the core. False if it does not
     /// fit the copy, which the editor then replaces.
-    private func editorChanged(_ edits: [UTF16Edit], kind: EditKind, length: Int) -> Bool {
+    private func editorChanged(_ edits: [Utf16Edit], kind: EditKind, length: Int) -> Bool {
         let coreEdits: [TextEdit]
         do {
             coreEdits = try model.applyEditorEdits(edits)
@@ -338,7 +346,7 @@ final class SCADDocument: NSDocument {
             do {
                 let info = try engine.edit(path, edits: coreEdits)
                 // The byte count is a cheap check that both copies agree.
-                if info.length != UInt64(model.text.utf8.count) { coreInSync = false }
+                if info.length != (try? model.byteLength) { coreInSync = false }
             } catch {
                 coreInSync = false
             }
@@ -507,6 +515,7 @@ final class SCADDocument: NSDocument {
     /// language client, and the core's buffer.
     override func close() {
         isClosed = true
+        try? loop.close()
         pendingPreview?.cancel()
         pendingPreview = nil
         renderTask?.cancel()
@@ -525,5 +534,31 @@ final class SCADDocument: NSDocument {
             Self.untitledPaths.remove(p)
         }
         super.close()
+    }
+}
+
+/// Carries the loop's state to the document's model on the main thread
+/// (the loop calls it on the thread that changed it, which is the main
+/// thread here: every loop call is made from it).
+final class LoopObserver: DocumentObserver, @unchecked Sendable {
+    private weak var document: SCADDocument?
+
+    init(_ document: SCADDocument) { self.document = document }
+
+    func stateChanged(state: DocumentState) {
+        let apply = { @MainActor [weak document] in
+            guard let model = document?.model else { return }
+            let values = Dictionary(
+                state.overrides.map { ($0.name, $0.value) }, uniquingKeysWith: { a, _ in a })
+            if model.parameterValues != values { model.parameterValues = values }
+            if model.selectedParameterSet != state.selectedSet {
+                model.selectedParameterSet = state.selectedSet
+            }
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { apply() }
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated { apply() } }
+        }
     }
 }

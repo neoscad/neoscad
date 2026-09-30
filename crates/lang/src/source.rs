@@ -196,6 +196,56 @@ pub fn utf16_len(bytes: &[u8]) -> u32 {
         .sum()
 }
 
+/// Why a flat UTF-16 offset has no byte offset in a text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Utf16OffsetError {
+    /// The offset is past the end of the text.
+    OutOfRange(u64),
+    /// The offset falls between the two halves of a surrogate pair. An
+    /// editor never sends one for text it shares with us, so this means
+    /// the two copies disagree; editing there would leave half a
+    /// character behind.
+    SplitsCharacter(u64),
+}
+
+/// The byte offset of a flat UTF-16 offset (how CodeMirror, and every
+/// JavaScript, WebView2 or GTK text model that counts code units, names a
+/// position) into `bytes`. Bytes that are not UTF-8 count one unit each, as
+/// in [`utf16_len`], so the two stay inverse on any text.
+///
+/// Positions convert only here and in [`SourceFile`] (`CLAUDE.md`): the
+/// macOS app once carried its own copy of this in Swift, and each port
+/// would have added another that disagreed on some edge.
+pub fn byte_offset_of_utf16(bytes: &[u8], offset: u64) -> Result<usize, Utf16OffsetError> {
+    let mut units = 0u64;
+    let mut at = 0usize;
+    for chunk in bytes.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            if units == offset {
+                return Ok(at);
+            }
+            let n = c.len_utf16() as u64;
+            if units + n > offset {
+                return Err(Utf16OffsetError::SplitsCharacter(offset));
+            }
+            units += n;
+            at += c.len_utf8();
+        }
+        for _ in chunk.invalid() {
+            if units == offset {
+                return Ok(at);
+            }
+            units += 1;
+            at += 1;
+        }
+    }
+    if units == offset {
+        Ok(at)
+    } else {
+        Err(Utf16OffsetError::OutOfRange(offset))
+    }
+}
+
 /// Every file taking part in one parse: the main file and everything it
 /// includes.
 #[derive(Debug, Default)]
@@ -252,6 +302,27 @@ impl SourceMap {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn flat_utf16_offsets_map_to_bytes() {
+        let t = "a\u{1F600}b\u{6F22}".as_bytes();
+        assert_eq!(byte_offset_of_utf16(t, 0), Ok(0));
+        assert_eq!(byte_offset_of_utf16(t, 1), Ok(1));
+        assert_eq!(
+            byte_offset_of_utf16(t, 2),
+            Err(Utf16OffsetError::SplitsCharacter(2))
+        );
+        assert_eq!(byte_offset_of_utf16(t, 3), Ok(5));
+        assert_eq!(byte_offset_of_utf16(t, 5), Ok(9));
+        assert_eq!(
+            byte_offset_of_utf16(t, 6),
+            Err(Utf16OffsetError::OutOfRange(6))
+        );
+        // Invalid bytes count one unit each, as utf16_len counts them.
+        let bad = b"x\xffy";
+        assert_eq!(utf16_len(bad), 3);
+        assert_eq!(byte_offset_of_utf16(bad, 2), Ok(2));
+    }
     use super::*;
 
     #[test]

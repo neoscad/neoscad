@@ -121,9 +121,14 @@ private struct ParameterRow: View {
 
     private var value: ParameterValue { model.value(of: parameter) }
 
-    private func set(_ v: ParameterValue) {
-        model.actions.setParameter(parameter.name, v == parameter.defaultValue ? nil : v)
+    /// A control's edit, as the core turns it into an override (snapped,
+    /// clamped, cut to length; `nil` when it is the text's own value).
+    private func edit(_ e: ParameterEdit) {
+        let v = (try? editParameter(parameter: parameter, current: value, edit: e)) ?? nil
+        model.actions.setParameter(parameter.name, v)
     }
+
+    private func set(_ v: ParameterValue) { edit(.set(value: v)) }
 
     private var number: Double {
         if case .number(let x) = value { return x }
@@ -143,21 +148,19 @@ private struct ParameterRow: View {
         case .slider(let min, let max, let step):
             HStack {
                 Slider(
-                    value: Binding(get: { number }, set: { set(.number(value: snap($0, step, min))) }),
+                    value: Binding(get: { number }, set: { edit(.slide(value: $0)) }),
                     in: min...Swift.max(min, max))
-                NumberField(value: number, step: step) { set(.number(value: $0)) }
+                NumberField(value: number, step: step) { edit(.type(value: $0)) }
                     .frame(width: 70)
             }
         case .spinBox(let min, let max, let step):
             HStack {
-                NumberField(value: number, step: step) {
-                    set(.number(value: clamp($0, min, max)))
-                }
+                NumberField(value: number, step: step) { edit(.type(value: $0)) }
                 .frame(width: 90)
                 Stepper(
                     "",
-                    onIncrement: { set(.number(value: clamp(number + (step ?? 1), min, max))) },
-                    onDecrement: { set(.number(value: clamp(number - (step ?? 1), min, max))) }
+                    onIncrement: { edit(.step(up: true)) },
+                    onDecrement: { edit(.step(up: false)) }
                 )
                 .labelsHidden()
             }
@@ -166,10 +169,7 @@ private struct ParameterRow: View {
                 parameter.name,
                 text: Binding(
                     get: { if case .text(let s) = value { return s } else { return "" } },
-                    set: { s in
-                        let t = maxLength.map { String(decoding: s.utf8.prefix(Int($0)), as: UTF8.self) } ?? s
-                        set(.text(value: t))
-                    })
+                    set: { s in set(.text(value: s)) })
             )
             .labelsHidden()
             .textFieldStyle(.roundedBorder)
@@ -181,9 +181,7 @@ private struct ParameterRow: View {
             HStack(spacing: 4) {
                 ForEach(items.indices, id: \.self) { i in
                     NumberField(value: items[i], step: step) { x in
-                        var v = items
-                        v[i] = clamp(x, min, max)
-                        set(.vector(value: v))
+                        edit(.item(index: UInt32(i), value: x))
                     }
                 }
             }
@@ -202,25 +200,6 @@ private struct ParameterRow: View {
         }
     }
 
-    /// A slider's value on its step grid (OpenSCAD's slider moves in
-    /// steps from the minimum).
-    private func snap(_ x: Double, _ step: Double?, _ min: Double) -> Double {
-        guard let step, step > 0 else { return x }
-        let n = ((x - min) / step).rounded()
-        // Keep the decimals of the step: 0.1 steps give 0.3, not
-        // 0.30000000000000004.
-        let decimals = max(0, -Int(floor(log10(step))) + 1)
-        let v = min + n * step
-        let scale = pow(10, Double(Swift.min(decimals, 12)))
-        return (v * scale).rounded() / scale
-    }
-
-    private func clamp(_ x: Double, _ min: Double?, _ max: Double?) -> Double {
-        var v = x
-        if let min { v = Swift.max(v, min) }
-        if let max { v = Swift.min(v, max) }
-        return v
-    }
 }
 
 /// A number typed into a field: committed on Return or when the field
@@ -253,6 +232,6 @@ private struct NumberField: View {
     }
 
     static func format(_ x: Double) -> String {
-        String(format: "%g", x)
+        (try? formatNumber(value: x)) ?? String(x)
     }
 }

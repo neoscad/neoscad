@@ -82,7 +82,7 @@ final class EditorController: NSObject {
     /// Apply one transaction's edits to the document's copy, which then has
     /// `length` UTF-16 units. False if they do not fit it: the copies
     /// disagree and the editor's whole text replaces the document's.
-    var applyChanges: (_ edits: [UTF16Edit], _ kind: EditKind, _ length: Int) -> Bool = {
+    var applyChanges: (_ edits: [Utf16Edit], _ kind: EditKind, _ length: Int) -> Bool = {
         _, _, _ in false
     }
     /// Replace the document's copy with the editor's text (after a
@@ -337,15 +337,15 @@ final class EditorController: NSObject {
             resync()
             return
         }
-        var edits: [UTF16Edit] = []
+        var edits: [Utf16Edit] = []
         for e in raw {
             guard e.count == 3, let from = e[0] as? Int, let to = e[1] as? Int,
-                let insert = e[2] as? String
+                let insert = e[2] as? String, from >= 0, to >= 0
             else {
                 resync()
                 return
             }
-            edits.append(UTF16Edit(from: from, to: to, insert: insert))
+            edits.append(Utf16Edit(from: UInt64(from), to: UInt64(to), insert: insert))
         }
         let kind = EditKind(rawValue: m["kind"] as? String ?? "") ?? .edit
         if applyChanges(edits, kind, length) {

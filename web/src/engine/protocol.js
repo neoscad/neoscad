@@ -236,6 +236,9 @@ export function runResult(r) {
   return {
     exitCode: render.exitCode ?? 0,
     geometry: render.geometry ?? null,
+    // The console's summary line and tooltip, worded by the core.
+    summary: r?.summary ?? "",
+    timingsText: r?.timingsText ?? "",
     timings: render.timings ?? null,
     console: consoleLines(r?.console),
     language: r?.language ?? [],

@@ -42,36 +42,16 @@ final class MeasureModel {
     @ObservationIgnored var sectionGeneration = 0
 
     /// The distance between the two picked points.
-    var pickDistance: Double? {
-        guard picks.count == 2 else { return nil }
-        let (a, b) = (picks[0], picks[1])
-        // Summed in a loop: Xcode 26's type checker times out on the
-        // map/reduce form of this one expression.
-        var sum = 0.0
-        for i in 0..<3 {
-            let d: Double = a[i] - b[i]
-            sum += d * d
-        }
-        return sum.squareRoot()
-    }
+    var pickDistance: Double? { (try? NeoSCADCore.pickDistance(picks: picks)) ?? nil }
 
-    /// The bounding box of what the section cuts.
-    var targetBox: (min: [Double], max: [Double])? {
-        guard let r = result else { return nil }
-        let solid =
-            target.flatMap { name in r.parts.first { $0.name == name }?.solid } ?? r.model
-        guard let s = solid else { return nil }
-        return (s.bboxMin, s.bboxMax)
-    }
-
-    /// The slider's range along the section's axis: the box, a hair
-    /// inside so the ends still cut something.
+    /// The slider's range along the section's axis: the target's box (the
+    /// core's `section_range`).
     var offsetRange: ClosedRange<Double> {
-        guard let b = targetBox else { return 0...1 }
-        let i = axis.index
-        let (lo, hi) = (b.min[i], b.max[i])
-        guard hi > lo else { return lo...(lo + 1) }
-        return lo...hi
+        guard let r = result,
+            let b = try? sectionRange(model: r.model, parts: r.parts, axis: axis, part: target),
+            b.count == 2
+        else { return 0...1 }
+        return b[0]...b[1]
     }
 }
 

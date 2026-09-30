@@ -111,48 +111,28 @@ struct ConsoleView: View {
         }
     }
 
-    /// One line: time, then the geometry's numbers (a preview has none:
-    /// it builds the CSG products, not one mesh).
+    /// One line: time, then the geometry's numbers (the core's
+    /// `describe_render`, which every host shows).
     static func describe(_ r: RenderResult, mode: RenderMode = .render) -> String {
-        let ms = String(format: "%.1f ms", r.timings.totalMs)
-        if mode == .preview {
-            return r.exitCode == 0 ? "Previewed in \(ms)." : "Preview failed (\(ms))."
-        }
-        guard r.exitCode == 0 else { return "Render failed (\(ms))." }
-        guard let g = r.geometry else { return "Rendered in \(ms): empty result." }
-        let size = zip(g.bboxMax, g.bboxMin).map { fmt($0 - $1) }.joined(separator: " × ")
-        var parts = ["\(g.dimensions)D", "bbox \(size)"]
-        if let v = g.volume { parts.append("volume \(fmt(v))") }
-        parts.append("area \(fmt(g.area))")
-        if let t = g.triangles { parts.append("\(t) triangles") }
-        if let c = g.components { parts.append("\(c) component\(c == 1 ? "" : "s")") }
-        if let m = g.manifold { parts.append(m ? "manifold" : "not manifold") }
-        return "Rendered in \(ms): " + parts.joined(separator: ", ")
+        (try? describeRender(result: r, mode: mode)) ?? ""
     }
 
     /// The stages' times, for the summary's tooltip.
     static func timings(_ t: Timings) -> String {
-        String(
-            format: "Parse %.1f ms, evaluate %.1f ms, geometry %.1f ms; total %.1f ms",
-            t.parseMs, t.evaluateMs, t.geometryMs, t.totalMs)
-    }
-
-    private static func fmt(_ x: Double) -> String {
-        String(format: "%g", x)
+        (try? describeTimings(timings: t)) ?? ""
     }
 }
 
-/// The console's filters: what kinds of line each shows.
-enum ConsoleFilter: CaseIterable {
-    case errors, warnings, echo, other
+/// The console's filters: the core's groups (`console_groups`), with the
+/// symbols this platform draws them with.
+typealias ConsoleFilter = ConsoleGroup
+
+extension ConsoleGroup {
+    /// The groups in the order the core lists them.
+    static let allCases: [ConsoleGroup] = ((try? consoleGroups()) ?? []).map(\.group)
 
     var title: String {
-        switch self {
-        case .errors: "Errors"
-        case .warnings: "Warnings"
-        case .echo: "Echo"
-        case .other: "Other"
-        }
+        ((try? consoleGroups()) ?? []).first { $0.group == self }?.title ?? ""
     }
 
     var symbol: String {
@@ -165,12 +145,7 @@ enum ConsoleFilter: CaseIterable {
     }
 
     func matches(_ kind: ConsoleKind) -> Bool {
-        switch self {
-        case .errors: kind == .error || kind == .trace
-        case .warnings: kind == .warning || kind == .deprecated
-        case .echo: kind == .echo
-        case .other: kind == .info
-        }
+        (try? consoleGroup(kind: kind)) == self
     }
 }
 
