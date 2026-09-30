@@ -151,12 +151,13 @@ does not clip it.
 - The model has 134,537 vertices and 269,894 facets.
 
 Measured by `scripts/apple/build-hero.sh`, best of 3 wall-clock runs of
-a full render to STL, on an Apple M4 Pro (14 cores), 2026-09-26:
+a full render to STL, on an Apple M4 Pro (14 cores), 2026-09-28 (the
+numbers on the site's hero; `times.txt`):
 
 | | Best of 3 |
 |-|-|
-| neoscad 0.1.0 (`target/release`) | 3.66 s |
-| OpenSCAD nightly 2026.09.23, `--backend=manifold` | 6.05 s |
+| neoscad 0.1.0 (`target/release`) | 2.09 s |
+| OpenSCAD nightly 2026.09.23, `--backend=manifold` | 5.85 s |
 
 The caption on `apple/Icon/build/hero/hero.png` is written from these
 measurements every time the script runs, and they are also saved to
