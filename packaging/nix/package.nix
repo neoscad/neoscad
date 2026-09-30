@@ -17,7 +17,7 @@
 
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "neoscad";
-  version = "0.1.0";
+  version = "0.2.0";
   __structuredAttrs = true;
 
   src = fetchFromGitHub {
