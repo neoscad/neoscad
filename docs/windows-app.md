@@ -30,9 +30,11 @@ association (see "Installer"). What it does not do yet is listed under
 | `scripts/windows/docker-test.sh` | The binding and host tests on Linux in Docker (from a Mac) |
 | `scripts/windows/launch-screenshot.ps1` | Launch the built app with `--log`, capture its window, check it stayed up (CI) |
 | `scripts/windows/build-msi.ps1` | Publish the app, stage its licences, build the MSI |
+| `scripts/windows/licence-rtf.ps1` | The installer licence page's RTF (preamble, GPL, Windows App SDK licence), dot-sourced by `build-msi.ps1` |
+| `scripts/windows/test-scripts.ps1` | Parse every `.ps1` here and check the licence page's RTF; any OS with pwsh, no build |
 | `scripts/windows/make-icon.py` | The multi-size `.ico` from the macOS icon's art |
 | `.github/workflows/windows-app.yml` | CI: build, test, launch, screenshot and log |
-| `.github/workflows/windows-installer.yml` | CI, on demand: build both MSIs, install, check, launch, uninstall |
+| `.github/workflows/windows-installer.yml` | CI, on demand and as a release publish job: build both MSIs, install, check, launch, uninstall; in a release, attest and attach them |
 
 ## Build on Windows
 
@@ -89,7 +91,11 @@ runs `wix build` on `windows/installer/NeoSCAD.wxs`.
   - NeoSCAD's GPL;
   - the Windows App SDK's licence, taken from the package that was built with.
 
-  A silent install (`msiexec /qn`) shows no pages.
+  `scripts/windows/licence-rtf.ps1` writes it. Everything outside
+  printable ASCII becomes an RTF escape (`\uN?`), and CRLF from a Windows
+  checkout is folded. `scripts/windows/test-scripts.ps1` checks the result
+  on any OS: all three sections present, escapes, balanced braces. The
+  workflow runs it before building. A silent install (`msiexec /qn`) shows no pages.
 - **Upgrades.** The `UpgradeCode` (`1A80E3D5-…`, not the CLI's) is fixed.
   Every build has a new ProductCode, so any other version is a major
   upgrade that removes the old one first. A downgrade is refused.
@@ -365,8 +371,9 @@ rewrites it to `script-src 'self'` when serving.
   exactly, moving the window between monitors of different scales, and
   the `view: attached` / `view: rescaled` lines in the `--log` file.
 - The installer (see "Installer"): run `windows-installer.yml` and look
-  at its screenshots; then add it to the release (`docs/release.md`, "Next:
-  the Windows app in the release"). Settle the licence questions above.
+  at its screenshots. It is a release publish job (`docs/release.md`,
+  "The cross-platform release"), not yet run in a release. Settle the
+  licence questions above.
   Check by hand what CI can't: SmartScreen and UAC on a downloaded MSI,
   the Explorer icon of a `.scad` file, and the no-WebView2 dialog on a
   Windows 10 without the runtime.

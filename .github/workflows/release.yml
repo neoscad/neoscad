@@ -460,6 +460,21 @@ jobs:
       "contents": "write"
       "id-token": "write"
 
+  custom-windows-installer:
+    needs:
+      - plan
+      - host
+    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
+    uses: ./.github/workflows/windows-installer.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+    # publish jobs get escalated permissions
+    permissions:
+      "attestations": "write"
+      "contents": "write"
+      "id-token": "write"
+
   announce:
     needs:
       - plan
@@ -468,10 +483,11 @@ jobs:
       - custom-publish-macos-app
       - custom-publish-packages
       - custom-flatpak
+      - custom-windows-installer
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') && (needs.custom-publish-macos-app.result == 'skipped' || needs.custom-publish-macos-app.result == 'success') && (needs.custom-publish-packages.result == 'skipped' || needs.custom-publish-packages.result == 'success') && (needs.custom-flatpak.result == 'skipped' || needs.custom-flatpak.result == 'success') }}
+    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') && (needs.custom-publish-macos-app.result == 'skipped' || needs.custom-publish-macos-app.result == 'success') && (needs.custom-publish-packages.result == 'skipped' || needs.custom-publish-packages.result == 'success') && (needs.custom-flatpak.result == 'skipped' || needs.custom-flatpak.result == 'success') && (needs.custom-windows-installer.result == 'skipped' || needs.custom-windows-installer.result == 'success') }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -135,43 +135,14 @@ $sdkLicence = if ($sdkFolder) {
     Get-ChildItem -File -Path $sdkFolder.FullName | Where-Object { $_.Name -match '^licen[cs]e' } | Select-Object -First 1
 }
 if (-not $sdkLicence) { throw "the Windows App SDK's licence file was not staged" }
-function ConvertTo-RtfText([string] $text) {
-    $b = [System.Text.StringBuilder]::new()
-    foreach ($c in $text.Replace("`r`n", "`n").ToCharArray()) {
-        switch ($c) {
-            '\' { [void]$b.Append('\\') }
-            '{' { [void]$b.Append('\{') }
-            '}' { [void]$b.Append('\}') }
-            "`n" { [void]$b.Append("\par`n") }
-            default {
-                if ([int]$c -lt 128) { [void]$b.Append($c) }
-                else {
-                    # RTF's \u takes a signed 16-bit code unit.
-                    $n = [int]$c
-                    if ($n -gt 32767) { $n -= 65536 }
-                    [void]$b.Append("\u${n}?")
-                }
-            }
-        }
-    }
-    $b.ToString()
-}
-$preamble = @"
-NeoSCAD $version for Windows
-
-NeoSCAD is free software, licensed under the GNU General Public License, version 2 or (at your option) any later version; its text follows. The source code is at https://github.com/neoscad/neoscad.
-
-NeoSCAD for Windows includes the Microsoft .NET runtime (MIT licence) and the Microsoft Windows App SDK, redistributed under Microsoft's terms, which also follow. By installing NeoSCAD you agree to the Windows App SDK licence terms below as they apply to those components. The licences and notices of every included component are installed in the licenses folder next to the app.
-"@
-$rtf = "{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fswiss Segoe UI;}{\f1\fmodern Consolas;}}\fs18`n" +
-    "\b " + (ConvertTo-RtfText $preamble.Split("`n")[0]) + "\b0\par`n" +
-    (ConvertTo-RtfText ($preamble.Substring($preamble.IndexOf("`n") + 1))) + "\par`n" +
-    "\b GNU General Public License\b0\par\f1\fs16`n" +
-    (ConvertTo-RtfText (Get-Content -Raw (Join-Path $repo "LICENSE"))) + "\par\f0\fs18`n" +
-    "\b Microsoft Windows App SDK\b0\par\f1\fs16`n" +
-    (ConvertTo-RtfText (Get-Content -Raw $sdkLicence.FullName)) + "}"
+# The RTF itself comes from licence-rtf.ps1, which test-scripts.ps1
+# checks off Windows too.
+. (Join-Path $PSScriptRoot "licence-rtf.ps1")
+$rtf = New-LicenceRtf -Version $version -Gpl (Get-Content -Raw (Join-Path $repo "LICENSE")) `
+    -SdkLicence (Get-Content -Raw $sdkLicence.FullName)
 $licenceRtf = Join-Path $Out "License.rtf"
 [System.IO.File]::WriteAllText($licenceRtf, $rtf, [System.Text.Encoding]::ASCII)
+Write-Host "licence page: $licenceRtf ($($rtf.Length) bytes)"
 
 # 3. The MSI.
 $tools = Join-Path $Out "tools"

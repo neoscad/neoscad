@@ -3,29 +3,52 @@
 # and then tested the way a user meets it, on each architecture's own
 # runner:
 #
-#   1. build the core, the binding and the editor bundle, publish the app
-#      self-contained and build the unsigned MSI; upload it;
-#   2. install it silently (msiexec /qn) and check the files, the Start
+#   1. check the Windows scripts (scripts/windows/test-scripts.ps1: they
+#      parse, and the licence page's RTF holds what it must);
+#   2. build the core, the binding and the editor bundle, publish the app
+#      self-contained and build the unsigned MSI; upload it as an artifact;
+#   3. install it silently (msiexec /qn) and check the files, the Start
 #      menu shortcut, the Add or remove programs entry and the .scad
 #      association in the registry;
-#   3. launch the installed exe with --log and screenshot its window
+#   4. launch the installed exe with --log and screenshot its window
 #      (scripts/windows/launch-screenshot.ps1), then open a .scad file the
 #      way Explorer does (ShellExecute) and check the installed exe got it;
-#   4. uninstall silently and check that the files and keys are gone.
+#   5. uninstall silently and check that the files and keys are gone;
+#   6. in a release only: attest the MSI and attach it, with its .sha256,
+#      to the GitHub Release.
 #
-# On demand only, for now: the release pipeline does not run it yet (see
-# docs/release.md, "Next: the Windows app in the release").
+# It runs as one of release.yml's publish jobs (`publish-jobs` in
+# Cargo.toml's [workspace.metadata.dist]; docs/release.md, "The
+# cross-platform release"), after the release exists and before it is
+# announced; so for a prerelease only when `publish-prereleases` is set,
+# like the other publish jobs. Only an MSI that passed steps 3 to 5 is
+# attached. workflow_dispatch runs the same build and tests as a dry run:
+# the MSIs are workflow artifacts, and nothing is attested or attached.
 name: Windows installer
 
 on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write
+  # For the MSIs' GitHub artifact attestations (the "Attest" step below);
+  # release.yml grants them to this job through Cargo.toml's
+  # github-custom-job-permissions.
+  id-token: write
+  attestations: write
 
+# A dispatched run replaces an earlier dispatched run of the same commit,
+# but a release's run is never cancelled, least of all by a dispatch made
+# while it runs: the event name keeps them in separate groups (called from
+# release.yml, github.event_name is the release's own `push`).
 concurrency:
-  group: windows-installer-${{ github.sha }}
-  cancel-in-progress: true
+  group: windows-installer-${{ github.event_name }}-${{ github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -59,6 +82,10 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
+      - name: Check the Windows scripts and the licence page
+        shell: pwsh
+        run: scripts/windows/test-scripts.ps1
+
       - name: The core's DLL, the C# binding and the editor bundle
         shell: pwsh
         run: scripts/windows/build-core.ps1 -Arch ${{ matrix.arch }}
@@ -71,7 +98,10 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: neoscad-windows-${{ matrix.arch }}-msi
-          path: dist/windows/*.msi
+          # With the licence page's RTF, to read what the installer shows.
+          path: |
+            dist/windows/*.msi
+            dist/windows/License.rtf
           if-no-files-found: error
 
       - name: Install silently
@@ -197,6 +227,45 @@ jobs:
           if ($arp) { $left += "uninstall entry $($arp.PSChildName)" }
           if ($left) { throw "left after uninstall:`n$($left -join "`n")" }
           Write-Host "uninstalled: no files, shortcut, registry keys or uninstall entry left"
+
+      # A GitHub artifact attestation (build provenance) for the MSI, as
+      # cargo-dist's "Attest" step gives the archives and
+      # publish-macos-app.yml the DMG: `gh attestation verify <file>
+      # -R neoscad/neoscad`. The MSI is unsigned (docs/release.md, "Windows
+      # is unsigned"), so this and the checksum are how a user checks it.
+      # These two steps come after the uninstall check, so only an MSI
+      # that passed every step above is attested and attached.
+      - name: Attest
+        if: inputs.plan != ''
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/windows/*.msi
+
+      - name: Attach to the release
+        if: inputs.plan != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = @(Get-Item dist/windows/*.msi)
+          if ($msi.Count -ne 1) { throw "expected one MSI in dist/windows, found $($msi.Count)" }
+          $msi = $msi[0]
+          # The name carries the workspace version, which is the tag's
+          # without its v; a mismatch means the tag and Cargo.toml disagree.
+          $expected = "NeoSCAD-$($env:TAG.TrimStart('v'))-windows-${env:ARCH}.msi"
+          if ($msi.Name -ne $expected) { throw "$($msi.Name) is not $expected (tag $env:TAG)" }
+          # `sha256sum` format with an LF, as cargo-dist's .sha256 beside
+          # each archive, so `sha256sum -c` checks it on any platform.
+          $sum = "$($msi.FullName).sha256"
+          $hash = (Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText($sum, "$hash  $($msi.Name)`n", [System.Text.Encoding]::ASCII)
+          # --clobber: re-running a failed release's job replaces what an
+          # earlier attempt attached, rather than failing on it.
+          gh release upload $env:TAG $msi.FullName $sum --clobber --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
 
       - uses: actions/upload-artifact@v7
         if: always()

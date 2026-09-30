@@ -284,7 +284,15 @@ such as `v0.1.0` runs, in order:
    blocks the release; the aarch64 one is `continue-on-error` until it
    has passed, and a release without it ships x86_64 alone with a
    warning. The job dates the metainfo's `<release>` for the version the
-   day it builds, and fails a stable release that has none.
+   day it builds, and fails a stable release that has none;
+   `windows-installer.yml` (the Windows app's MSIs,
+   `NeoSCAD-<version>-windows-x64.msi` on `windows-2025` and
+   `NeoSCAD-<version>-windows-arm64.msi` on `windows-11-arm`, each with
+   its `.sha256`: built by `scripts/windows/build-msi.ps1`
+   (`docs/windows-app.md`, "Installer"), installed silently, checked,
+   launched, opened a `.scad` through the association, uninstalled and
+   checked again, and only then attested and attached; unsigned, like
+   the CLI's MSIs from step 3, which are a separate installer).
 6. **announce**.
 
 A prerelease tag (`v0.2.0-beta.1`) makes a GitHub prerelease and skips
@@ -468,6 +476,9 @@ checked by the app tests and the conformance suite, not here.
 - That `-exportArchive` accepts an archive whose Quick Look extensions
   (8h) are sandboxed without extra export options.
 - The DMG and app on another Mac: see the checklist.
+- The Windows app's MSIs as a release publish job: attesting and
+  attaching them have never run (dispatched runs skip both), nor has the
+  job under `release.yml`'s `workflow_call`.
 
 ## Clean-machine checklist
 
@@ -500,75 +511,37 @@ published files, downloaded through a browser so they are quarantined:
 
 ## Windows is unsigned
 
-Windows zips and MSIs are not Authenticode-signed (owner decision
+Windows zips and MSIs (the CLI's, and the app's
+`NeoSCAD-<version>-windows-<arch>.msi`) are not Authenticode-signed (owner decision
 2026-09-29: no paid signing service). Double-clicking a downloaded `.exe`
 or `.msi` shows SmartScreen's "Windows protected your PC"; **More info →
 Run anyway** proceeds. The PowerShell installer (`irm … | iex`), winget and
 Scoop install without that prompt, and running `neoscad` from a terminal
 normally doesn't show it (Windows 11's Smart App Control, where enabled, may
-still block unsigned programs). Every file can be checked against `sha256.sum`, and its
+still block unsigned programs). Every file can be checked against `sha256.sum` (the app's MSIs,
+attached after it is made, against their own `.sha256`), and its
 origin with `gh attestation verify <file> -R neoscad/neoscad` (GitHub
 artifact attestations, `github-attestations = true`). The SignPath
 Foundation offers free signing to open-source projects if that changes.
 
-## Next: the Windows app in the release
+## The Windows app in the release
 
-The app's MSIs (`docs/windows-app.md`, "Installer") are built and tested
-by `.github/workflows/windows-installer.yml`, which runs on demand only.
-To make it a publish job, once a dispatched run has passed on both
-architectures and its screenshots look right:
+`.github/workflows/windows-installer.yml` is a publish job
+(`"./windows-installer"` in `publish-jobs`, with `contents`, `id-token`
+and `attestations` write in `github-custom-job-permissions`), so
+`release.yml` has a `custom-windows-installer` job that `announce` waits
+for. Like the other publish jobs it runs for a prerelease only when
+`publish-prereleases` is set.
 
-1. In `windows-installer.yml`, add a `workflow_call` trigger beside
-   `workflow_dispatch`, with the input cargo-dist passes to every publish
-   job:
+Dispatching the workflow by hand (`gh workflow run windows-installer.yml`)
+runs the same build and install test as a dry run. The MSIs and the
+licence page's RTF become workflow artifacts. Nothing is attested or
+attached, because both steps need the release's `plan` input.
 
-   ```yaml
-   on:
-     workflow_call:
-       inputs:
-         plan:
-           required: true
-           type: string
-     workflow_dispatch: {}
-   ```
-
-   Give the workflow the permissions it will need to attach and attest:
-   `contents: write`, `id-token: write`, `attestations: write`.
-2. At the end of the `msi` job, after "Uninstall silently, and check it is
-   gone", add two steps. Placing them there means only an MSI that
-   installed, launched, opened a file and uninstalled gets attached.
-   Both steps are conditioned on `inputs.plan != ''`, so a dispatched run
-   stays a dry run.
-
-   ```yaml
-      - name: Attest
-        if: inputs.plan != ''
-        uses: actions/attest@v4
-        with:
-          subject-path: dist/windows/*.msi
-
-      - name: Attach to the release
-        if: inputs.plan != ''
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
-        run: |
-          $msi = Get-Item dist/windows/*.msi
-          if ($msi.Name -notlike "NeoSCAD-$($env:TAG.TrimStart('v'))-windows-*.msi") { throw "$($msi.Name) does not match $env:TAG" }
-          $sum = "NeoSCAD-windows-${{ matrix.arch }}-msi.sha256"
-          "$((Get-FileHash -Algorithm SHA256 $msi).Hash.ToLowerInvariant())  $($msi.Name)" | Set-Content -Encoding ascii $sum
-          gh release upload $env:TAG $msi.FullName $sum --repo $env:GITHUB_REPOSITORY
-   ```
-
-3. In the root `Cargo.toml`, add `"./windows-installer"` to
-   `publish-jobs`. Then add its permissions under
-   `[workspace.metadata.dist.github-custom-job-permissions]`:
-   `windows-installer = { contents = "write", id-token = "write", attestations = "write" }`.
-4. Run `dist generate --mode=ci` to regenerate `release.yml`, which gets
-   a `custom-windows-installer` job and a matching `announce` condition.
-   Check it with `dist generate --check` (CI's lint job runs the same) and
-   `dist plan`.
-5. Update this document: add the job to step 5 of "The cross-platform
-   release" and the MSIs to the unsigned files in "Windows is unsigned".
-   Mark the Windows app's first release run under "Not verified".
+Before the build, the job runs `scripts/windows/test-scripts.ps1`, which
+parses every script in `scripts/windows` and checks the licence page's
+RTF. Being plain pwsh, it runs anywhere, e.g. in the
+`mcr.microsoft.com/dotnet/sdk` image, which ships pwsh for arm64. Don't
+use `mcr.microsoft.com/powershell:latest` for this on an Apple Silicon
+Mac: that tag has only amd64 and 32-bit arm images, and pwsh under
+emulation produced wrong output and crashes.
