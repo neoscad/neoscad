@@ -21,6 +21,11 @@
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <SelfContained>true</SelfContained>
+    <!-- The app's resource index (NeoSCAD.pri, with the compiled XAML) for
+         an unpackaged app. `dotnet build` made it without this, but
+         `dotnet publish`, which the MSI installs, left it out, and the
+         installed app then failed at start with "XAML parsing failed". -->
+    <EnableMsixTooling>true</EnableMsixTooling>
     <!-- From Cargo.toml (Directory.Build.props). -->
     <Version>$(NeoScadVersion)</Version>
     <FileVersion>$(NeoScadVersionPrefix).0</FileVersion>

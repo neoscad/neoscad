@@ -52,6 +52,11 @@ $project = Join-Path $repo "windows/NeoSCAD.App/NeoSCAD.App.csproj"
 dotnet publish $project -c Release -r $rid -p:Platform=$platform -p:NeoScadRid=$rid -o $app
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }
 if (-not (Test-Path (Join-Path $app "NeoSCAD.exe"))) { throw "publish made no NeoSCAD.exe" }
+# Without its resource index the app can't load its XAML and exits at
+# start (XamlParseException); a publish once left it out.
+if (-not (Test-Path (Join-Path $app "NeoSCAD.pri"))) {
+    throw "publish made no NeoSCAD.pri (EnableMsixTooling in NeoSCAD.App.csproj)"
+}
 if (-not (Test-Path (Join-Path $app "Editor/editor.html"))) {
     throw "the editor bundle is missing from the publish (run build-core.ps1 without -SkipEditor)"
 }
