@@ -128,8 +128,12 @@ Set-Content -Path (Join-Path $thirdParty "README.txt") -Value $index -Encoding u
 # to terms protecting it and Microsoft at least as much as it does. Beside
 # the MSI, not in the app folder, so the harvest doesn't install it twice
 # (the same texts are under licenses\).
-$sdkLicence = Get-ChildItem -File -Path (Join-Path $thirdParty "Microsoft.WindowsAppSDK-*") |
-    Where-Object { $_.Name -match '^licen[cs]e' } | Select-Object -First 1
+# The package's own folder (Microsoft.WindowsAppSDK-<version>), not
+# .Base/.Runtime/.WinUI: a wildcard path would match the folder itself.
+$sdkFolder = Get-ChildItem -Directory -Path $thirdParty -Filter "Microsoft.WindowsAppSDK-*" | Select-Object -First 1
+$sdkLicence = if ($sdkFolder) {
+    Get-ChildItem -File -Path $sdkFolder.FullName | Where-Object { $_.Name -match '^licen[cs]e' } | Select-Object -First 1
+}
 if (-not $sdkLicence) { throw "the Windows App SDK's licence file was not staged" }
 function ConvertTo-RtfText([string] $text) {
     $b = [System.Text.StringBuilder]::new()
