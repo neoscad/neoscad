@@ -68,7 +68,10 @@ listed, never deleted. The `diff` above then runs every `.scad` under
     ./target/release/conformance bench-chart --latest  # progress/bench/<same name>.png
 
 `conformance/bench.json` lists the models (the engine milestone audit's
-14), the reference binaries and the method's constants. Every model is
+14), the reference binaries and the method's constants. The same models,
+packed by `scripts/release/bench-kit.sh`, are the community benchmark's
+kit, and `neoscad bench` times them with the same code
+(`crates/bench-core/src/timing.rs`; `docs/community-bench.md`). Every model is
 exported to ASCII STL by each reference, one run after another: neoscad
 (`target/release/neoscad`, or `--binary`), the nightly with
 `--backend=manifold` and with `--backend=cgal`, and OpenSCAD 2021.01

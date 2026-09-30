@@ -46,8 +46,12 @@ The workspace is every directory under `crates/` (`Cargo.toml`,
   server over a session, transport-agnostic).
 - **Hosts** (may touch the platform): `cli` (the `neoscad` binary:
   OpenSCAD's flags plus `serve`, `mcp`, `lsp`, `snapshot`, `check`,
-  `measure`, `test`, `fmt` and `docs`) · `ffi` (the app's UniFFI
-  bridge) · `conformance` (test harness, benchmarks, progress video).
+  `measure`, `test`, `fmt`, `docs` and `bench`) · `ffi` (the app's UniFFI
+  bridge) · `conformance` (test harness, benchmarks, progress video) ·
+  `bench-core` (package `neoscad-bench-core`: the benchmark timing, the
+  bench kit, the community result schema and the official-release check
+  that `neoscad bench` and `conformance bench` share;
+  `docs/community-bench.md`).
 - **Tooling:** `wasm-check` (a wasm32 build of the pipeline, run in node
   by `scripts/wasm-check.sh`) · `uniffi-bindgen` (the Swift bindings
   generator pinned to `ffi`'s UniFFI, run by

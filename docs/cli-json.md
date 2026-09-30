@@ -617,6 +617,12 @@ for structured blocks, synopsis, usage and arguments unless `--full`;
 Model tests; the command, the `@expect` grammar and the JSON are in
 `docs/model-tests.md`.
 
+# `neoscad bench`
+
+The community benchmark; `--json FILE` writes a result in its own
+versioned schema (`bench/result.schema.json`). The command, the schema
+and how results are submitted are in `docs/community-bench.md`.
+
 # Diagnostics
 
 Every diagnostic in JSON output (the run object above, the snapshot

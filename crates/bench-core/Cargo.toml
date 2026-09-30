@@ -1,0 +1,40 @@
+[package]
+name = "neoscad-bench-core"
+description = "Benchmark timing, bench kit and community result schema shared by `neoscad bench` and `conformance bench`"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# A tool crate, like crates/conformance: it spawns and times processes,
+# reads the kit from disk and asks the OS about the machine, so it uses
+# std::fs, std::process and the clock directly. No library crate may
+# depend on it, so the WASM build never sees it.
+[lib]
+name = "bench_core"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+# The kit is a .tar.gz: flate2, with the same pure-Rust backend as
+# crates/io (so nothing new is linked into `neoscad`), inflates it, and
+# `kit.rs` reads the ustar entries itself.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+# Each run's CPU time comes from `getrusage` of the waited-for child,
+# through nix's safe wrapper (the workspace forbids unsafe code). Wrapping
+# runs in /usr/bin/time instead would add about 1.5 ms of process start to
+# every wall time, half of neoscad's cold start.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["resource"] }
+
+[dev-dependencies]
+# The result schema test's `pattern` checks.
+regex.workspace = true
+
+[lints]
+workspace = true

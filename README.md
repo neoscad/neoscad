@@ -22,6 +22,8 @@ NeoSCAD is pre-release. As of the final v0.1 audit
 - **Speed:** about 2.8× faster than the OpenSCAD nightly (Manifold
   backend) on heavy models. The method and the numbers are in
   `docs/audits/final.md` and on <https://neoscad.org/benchmarks.html>.
+  To time a release on your own machine, against your own OpenSCAD, and
+  share the result, run `neoscad bench` (`docs/community-bench.md`).
 
 ## Platforms and install
 

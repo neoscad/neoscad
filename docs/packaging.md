@@ -50,6 +50,7 @@ pushes), so every CI path is unverified until the first tag.
 | Snap | Later/never | Strict confinement conflicts with MCP roots; reserve the name only |
 | AUR `neoscad-bin` | Template now | `packaging/aur/PKGBUILD`, filled per release into `neoscad-package-manifests.tar.gz`; a maintainer pushes it to the AUR. Its `package()` writes the man page and completions with the downloaded binary; that function ran in a Debian container on an aarch64 stage (not under `makepkg`) |
 | Nix flake + nixpkgs | **Now** (flake); nixpkgs: submission prepared for 0.1.0, the owner opens the PR | `packaging/nix/package.nix` is the nixpkgs package (`pkgs/by-name/ne/neoscad`: `buildRustPackage`, `fetchFromGitHub` at `v${version}`, `cargoHash`, tests on, `versionCheckHook`, Vulkan loader and libGL on the RPATH for wgpu); `flake.nix` builds that same file from the tree (`packaging/nix/local.nix`) with nixpkgs' own Rust 1.98.1, no rust-overlay. Built in `nixos/nix` with the sandbox on and its tests run (552 pass): on aarch64-linux both ways (the flake, and package.nix itself through `fetchCargoVendor` with only `src` swapped), on x86_64-linux (emulated) through the flake. Man page and completions installed; see "Nix" below. CI: `.github/workflows/nix.yml` (Linux x86_64, macOS arm64). Submitting: "Submitting to nixpkgs" below |
+| Bench kit | **Now** | `neoscad-bench-kit-<version>.tar.gz` and `.sha256` (about 1 MB: bench.json's models, BOSL2 at a pinned commit, their licences) and `neoscad-executables.sha256sums`, attached by `publish-packages.yml`'s `bench-kit` job for `neoscad bench` (`docs/community-bench.md`); `scripts/release/bench-kit.sh` builds the kit reproducibly |
 | Windows x86_64/aarch64 zip | **Now** | Built (cargo-dist), CI only (see "Needs the owner", `cargo xwin`) |
 | MSI | **Now**, unsigned | Built (cargo-dist + `crates/cli/wix/main.wxs`, with the licence files hand-added; `allow-dirty = ["msi"]`). Adds `bin` to PATH. Unsigned: SmartScreen will warn. WiX 3.14.1 comes preinstalled on `windows-2025` (x86_64) but not on `windows-11-arm`, so the v0.1.0-rc.1 aarch64 MSI failed ("candle could not be found"); `.github/build-setup.yml` (cargo-dist's `github-build-setup`) now installs the same WiX from its release zip, sha256-pinned, on the ARM64 runner only. 3.14 is the first WiX 3 that builds ARM64 MSIs |
 | Scoop | **Now** (own bucket) | `scoop bucket add neoscad https://github.com/neoscad/scoop-bucket`, then `scoop install neoscad`. The bucket went live 2026-09-29 with v0.1.0's manifest, filled from `packaging/scoop/neoscad.json` by `scripts/release/fill-manifests.sh` with the release's own `.sha256` files; the filled manifest passes Scoop's `schema.json` (ajv) and its URLs resolve. From then on `publish-packages.yml`'s `scoop` job pushes each release's manifest to the bucket as `bucket/neoscad.json` (needs `SCOOP_BUCKET_TOKEN`; without it the job warns and skips). The zips have no top-level folder, so no `extract_dir`. `checkver` names the repository (`{"github": …}`): the bare `"github"` form reads the `homepage`, which is neoscad.org, and Scoop's `bin/checkver.ps1` rejects a non-GitHub homepage there. The main Scoop buckets (`extras`) are a later submission |
@@ -385,6 +386,13 @@ Nothing here was pushed, published, signed up for or accepted.
   the release's `scoop` job needs a fine-grained token, resource owner
   `neoscad`, repository access only `neoscad/scoop-bucket`, permission
   Contents: read and write, stored as that repository secret here.
+- **`BENCHMARKS_TOKEN`:** create `neoscad/benchmarks` (with a first
+  commit, so it has a default branch), then a fine-grained token,
+  resource owner `neoscad`, repository access only `neoscad/benchmarks`,
+  permission Contents: read and write, stored as that repository secret
+  here. The release's `baseline-submit` job commits each release's
+  baseline with it (`docs/community-bench.md`); without it the job warns
+  and skips.
 - **Apple:** a Developer ID Application certificate and an App Store
   Connect API key, stored as the `NEOSCAD_*` secrets
   (`docs/release.md`); until then the app job uploads nothing.

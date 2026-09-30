@@ -1072,6 +1072,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "neoscad-bench-core"
+version = "0.1.1"
+dependencies = [
+ "flate2",
+ "nix",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "neoscad-cli"
 version = "0.1.1"
 dependencies = [
@@ -1082,6 +1094,7 @@ dependencies = [
  "interprocess",
  "mimalloc",
  "neoscad-assets",
+ "neoscad-bench-core",
  "neoscad-eval",
  "neoscad-geom",
  "neoscad-io",
@@ -1119,7 +1132,7 @@ version = "0.1.1"
 dependencies = [
  "clap",
  "flate2",
- "nix",
+ "neoscad-bench-core",
  "png",
  "rayon",
  "regex",

@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/neoscad/neoscad/blob/main/bench/result.schema.json",
+  "title": "neoscad community benchmark result",
+  "description": "What `neoscad bench --json` writes and `neoscad bench --submit` submits (docs/community-bench.md). Schema 1. crates/bench-core/src/result.rs is the writer; its tests check it against this file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "source", "neoscad", "kit", "method", "machine", "threads", "openscad", "cold_start", "models", "skipped", "started_at", "finished_at"],
+  "properties": {
+    "schema": { "const": 1 },
+    "source": {
+      "description": "`user` for anyone's run; `ci-baseline` for the release workflow's own runs, accepted only from that workflow's commits, never from an issue.",
+      "enum": ["user", "ci-baseline"]
+    },
+    "neoscad": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "target", "sha256", "official", "official_check"],
+      "properties": {
+        "version": { "type": "string", "description": "The binary's version, e.g. 0.1.1." },
+        "target": { "type": "string", "description": "Rust target triple, e.g. aarch64-apple-darwin." },
+        "sha256": { "$ref": "#/$defs/sha256", "description": "SHA-256 of the executable that ran." },
+        "official": { "type": "boolean", "description": "Whether sha256 is the release's published executable for target (neoscad-executables.sha256sums). Re-checked on submission." },
+        "official_check": { "enum": ["matched", "mismatch", "target-not-listed", "unavailable"] }
+      }
+    },
+    "kit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "archive_sha256", "content_sha256", "neoscad_commit", "bosl2_commit", "openscad_commit"],
+      "properties": {
+        "version": { "type": "string" },
+        "archive_sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }], "description": "SHA-256 of neoscad-bench-kit-<version>.tar.gz; null when run from an unpacked directory." },
+        "content_sha256": { "$ref": "#/$defs/sha256", "description": "Digest of the unpacked kit's files (bench_core::kit::content_sha256)." },
+        "neoscad_commit": { "type": "string" },
+        "bosl2_commit": { "type": "string" },
+        "openscad_commit": { "type": "string" }
+      }
+    },
+    "method": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "runs", "cold_start_runs", "single_run_over_s", "timeout_s", "quick"],
+      "properties": {
+        "version": { "type": "integer", "minimum": 1, "description": "bench_core::timing::METHOD_VERSION: results with different versions were timed differently." },
+        "runs": { "type": "integer", "minimum": 1 },
+        "cold_start_runs": { "type": "integer", "minimum": 1 },
+        "single_run_over_s": { "type": "number" },
+        "timeout_s": { "type": "number" },
+        "quick": { "type": "boolean" }
+      }
+    },
+    "machine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "os_version", "arch", "cpu", "hardware_model", "cores_logical", "cores_physical", "cores_performance", "cores_efficiency", "memory_bytes", "on_battery", "load_before", "load_after", "translated"],
+      "properties": {
+        "os": { "type": "string", "description": "macos, linux or windows." },
+        "os_version": { "type": ["string", "null"] },
+        "arch": { "type": "string", "description": "aarch64 or x86_64." },
+        "cpu": { "type": ["string", "null"] },
+        "hardware_model": { "type": ["string", "null"], "description": "A Mac's model identifier, e.g. Mac15,6." },
+        "cores_logical": { "type": "integer", "minimum": 1 },
+        "cores_physical": { "type": ["integer", "null"] },
+        "cores_performance": { "type": ["integer", "null"] },
+        "cores_efficiency": { "type": ["integer", "null"] },
+        "memory_bytes": { "type": ["integer", "null"] },
+        "on_battery": { "type": ["boolean", "null"] },
+        "load_before": { "$ref": "#/$defs/load" },
+        "load_after": { "$ref": "#/$defs/load" },
+        "translated": { "type": ["boolean", "null"], "description": "An x86_64 binary under Rosetta 2." }
+      }
+    },
+    "threads": { "type": "integer", "minimum": 1 },
+    "openscad": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "backend", "args"],
+          "properties": {
+            "version": { "type": "string", "description": "The last line of `openscad --version`." },
+            "backend": { "enum": ["manifold", "cgal"] },
+            "args": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      ]
+    },
+    "cold_start": { "$ref": "#/$defs/pair" },
+    "models": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/pair" }
+    },
+    "skipped": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "started_at": { "$ref": "#/$defs/utc" },
+    "finished_at": { "$ref": "#/$defs/utc" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "utc": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
+    "load": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+      ]
+    },
+    "pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["neoscad", "openscad"],
+      "properties": {
+        "neoscad": { "$ref": "#/$defs/measurement" },
+        "openscad": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/measurement" }] }
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rc", "timed_out", "runs_s", "best_s", "cpu_s"],
+      "properties": {
+        "rc": { "oneOf": [{ "type": "integer" }, { "enum": ["timeout", "signal"] }], "description": "The last run's exit code, or timeout/signal." },
+        "timed_out": { "type": "boolean" },
+        "runs_s": { "type": "array", "items": { "type": ["number", "null"] }, "description": "Every run's wall time in seconds; null for a run that timed out." },
+        "best_s": { "type": ["number", "null"], "description": "Best wall time; null when a run failed." },
+        "cpu_s": { "type": "array", "items": { "type": "number" }, "description": "CPU time of each completed run (0 on Windows)." }
+      }
+    }
+  }
+}

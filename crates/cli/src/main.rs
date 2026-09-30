@@ -42,6 +42,7 @@
 // linker's output.
 #![allow(linker_messages)]
 
+mod bench;
 mod check;
 mod client;
 mod delegate;
@@ -360,6 +361,11 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = {
             name: "lsp",
             run: lsp::main,
             command: lsp::Args::command,
+        },
+        Subcommand {
+            name: "bench",
+            run: bench::main,
+            command: bench::Args::command,
         },
         Subcommand {
             name: "generate",

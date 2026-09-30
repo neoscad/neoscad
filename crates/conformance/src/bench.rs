@@ -25,11 +25,12 @@
 //! and a table is printed. `conformance bench-chart` draws a result file.
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, File, OpenOptions};
+use std::ffi::OsStr;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -115,33 +116,14 @@ pub struct BenchOptions {
     pub seed_refs: Vec<PathBuf>,
 }
 
-/// One process run.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Run {
-    /// Exit code; `None` for a timeout (or death by signal).
-    pub(crate) code: Option<i32>,
-    pub(crate) timed_out: bool,
-    pub(crate) wall_s: f64,
-    pub(crate) cpu_s: f64,
-}
+/// One process run (the timing itself is shared with `neoscad bench`, in
+/// crates/bench-core, so both measure the same way).
+pub(crate) use bench_core::timing::Run;
+use bench_core::timing::round;
 
-/// User plus system time of every waited-for child so far.
-fn children_cpu_s() -> f64 {
-    #[cfg(unix)]
-    {
-        use nix::sys::resource::{UsageWho, getrusage};
-        if let Ok(u) = getrusage(UsageWho::RUSAGE_CHILDREN) {
-            let t = |tv: nix::sys::time::TimeVal| tv.tv_sec() as f64 + tv.tv_usec() as f64 / 1e6;
-            return t(u.user_time()) + t(u.system_time());
-        }
-    }
-    0.0
-}
-
-/// Run `cmd` in `cwd`, timing it. The child is polled with short sleeps
-/// (at most 1 ms, far less for short runs) so the measured wall time is
-/// within a small fraction of the process's; its stderr goes to
-/// `stderr_to` for diagnosis.
+/// Run `cmd` in `cwd`, timing it (`bench_core::timing::time_run`); its
+/// stderr goes to `stderr_to` for diagnosis. Never answered by a running
+/// server.
 fn time_run(
     cmd: &[String],
     cwd: &Path,
@@ -162,58 +144,21 @@ pub(crate) fn time_run_with(
     stderr_to: &Path,
     allow_server: bool,
 ) -> Result<Run, String> {
-    let err = File::create(stderr_to).map_err(|e| format!("{}: {e}", stderr_to.display()))?;
-    let mut c = Command::new(&cmd[0]);
-    c.args(&cmd[1..])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(err)
-        .env_remove("NEOSCAD_FONT_DIR")
-        .env_remove("OPENSCAD_FONT_PATH");
-    if !allow_server {
-        // Cold runs are cold: never answered by a running server.
-        c.env(crate::geometry::NO_SERVER_VAR, "1");
-    }
-    for (k, v) in env {
-        c.env(k, v);
-    }
-    let cpu0 = children_cpu_s();
-    let start = Instant::now();
-    let mut child = c.spawn().map_err(|e| format!("{}: {e}", cmd[0]))?;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let wall_s = start.elapsed().as_secs_f64();
-                return Ok(Run {
-                    code: status.code(),
-                    timed_out: false,
-                    wall_s,
-                    cpu_s: children_cpu_s() - cpu0,
-                });
-            }
-            Ok(None) => {
-                let e = start.elapsed();
-                if e > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok(Run {
-                        code: None,
-                        timed_out: true,
-                        wall_s: e.as_secs_f64(),
-                        cpu_s: children_cpu_s() - cpu0,
-                    });
-                }
-                // Poll at about 1% of the elapsed time, 50 us to 1 ms.
-                let nap = (e / 100).clamp(Duration::from_micros(50), Duration::from_millis(1));
-                std::thread::sleep(nap);
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    }
+    bench_core::timing::time_run(cmd, cwd, &run_env(env, allow_server), timeout, stderr_to)
 }
 
-/// Best-of-N timing of one command: the audit's method.
+/// `env` for a run: cold runs are cold, never answered by a running server.
+fn run_env<'a>(env: &[(&'a str, &'a Path)], allow_server: bool) -> Vec<(&'a str, &'a OsStr)> {
+    let mut out: Vec<(&str, &OsStr)> = Vec::new();
+    if !allow_server {
+        out.push((crate::geometry::NO_SERVER_VAR, OsStr::new("1")));
+    }
+    out.extend(env.iter().map(|(k, v)| (*k, v.as_os_str())));
+    out
+}
+
+/// Best-of-N timing of one command (`bench_core::timing::measure`, the
+/// audit's method), in this crate's result layout.
 fn measure(
     cmd: &[String],
     cwd: &Path,
@@ -223,50 +168,21 @@ fn measure(
     timeout: Duration,
     stderr_to: &Path,
 ) -> Result<Value, String> {
-    let mut walls: Vec<Value> = Vec::new();
-    let mut cpus: Vec<Value> = Vec::new();
-    let mut rc = json!(null);
-    let mut best: Option<f64> = None;
-    for _ in 0..runs.max(1) {
-        let r = time_run(cmd, cwd, env, timeout, stderr_to)?;
-        if r.timed_out {
-            rc = json!("timeout");
-            walls.push(json!(null));
-            break;
-        }
-        walls.push(json!(round(r.wall_s, 4)));
-        cpus.push(json!(round(r.cpu_s, 3)));
-        match r.code {
-            Some(0) => {
-                rc = json!(0);
-                best = Some(best.map_or(r.wall_s, |b: f64| b.min(r.wall_s)));
-            }
-            Some(c) => {
-                rc = json!(c);
-                best = None;
-                break;
-            }
-            None => {
-                rc = json!("signal");
-                best = None;
-                break;
-            }
-        }
-        if r.wall_s > single_over {
-            break;
-        }
-    }
+    let m = bench_core::timing::measure(
+        cmd,
+        cwd,
+        &run_env(env, false),
+        runs,
+        single_over,
+        timeout,
+        stderr_to,
+    )?;
     Ok(json!({
-        "rc": rc,
-        "runs_s": walls,
-        "best_s": best.map(|b| round(b, 4)),
-        "cpu_s_of_runs": cpus,
+        "rc": m.rc,
+        "runs_s": m.runs_s,
+        "best_s": m.best_s,
+        "cpu_s_of_runs": m.cpu_s,
     }))
-}
-
-fn round(x: f64, places: i32) -> f64 {
-    let f = 10f64.powi(places);
-    (x * f).round() / f
 }
 
 /// What the audit's `meshstat.py` measures in an STL file.

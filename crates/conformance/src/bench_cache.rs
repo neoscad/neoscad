@@ -23,22 +23,19 @@ use crate::ctx::git;
 /// The cache file's own layout.
 pub(crate) const CACHE_SCHEMA: u32 = 1;
 
-/// The version of the timing method: how a run is spawned, polled and
-/// timed (`time_run`, `measure`), the environment it gets, and how
-/// `eval_only` decides a pass. Every key carries it, so bumping it
-/// invalidates the whole cache. Bump it with any change to that code;
-/// otherwise old results measured a different way would be compared with
-/// new ones as if they were alike.
-pub(crate) const METHOD_VERSION: u32 = 1;
+/// The version of the timing method (crates/bench-core, `timing.rs`).
+/// Every key carries it, so bumping it invalidates the whole cache.
+pub(crate) use bench_core::timing::METHOD_VERSION;
 
 /// The first commit whose timing code is [`METHOD_VERSION`]'s:
 /// `crates/conformance/src/bench.rs` and `conformance/bench.json` are
-/// unchanged from it to the commit that added the cache. Seeding accepts
+/// unchanged from it to the commit that added the cache (the timing code
+/// has since moved, unchanged, to crates/bench-core). Seeding accepts
 /// only runs measured at or after it. Move it with [`METHOD_VERSION`].
 pub(crate) const METHOD_SINCE: &str = "ab912d216135e794b0e2e78fd2b5af8e7029757a";
 
 /// Environment variables the bench removes from every run.
-pub(crate) const UNSET_ENV: [&str; 2] = ["NEOSCAD_FONT_DIR", "OPENSCAD_FONT_PATH"];
+pub(crate) use bench_core::timing::UNSET_ENV;
 
 /// Which cached results a run may use.
 #[derive(Debug, Default, Clone)]

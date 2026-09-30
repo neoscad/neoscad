@@ -43,6 +43,11 @@ mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 assets = { package = "neoscad-assets", path = "../assets", optional = true }
+# `neoscad bench` (src/bench.rs): the timing, kit, result schema and
+# official-release check it shares with `conformance bench`. Everything it
+# links (serde, sha2, flate2's pure-Rust backend, nix) is already in this
+# binary, so it adds only its own code.
+bench-core = { package = "neoscad-bench-core", path = "../bench-core" }
 clap.workspace = true
 # `neoscad generate` (src/generate.rs): the manual page and the shell
 # completion scripts, from the same clap definitions as `--help`; roff is

@@ -40,6 +40,13 @@ fn main() {
         .unwrap_or_else(|| "rustc (unknown version)".into());
     println!("cargo:rustc-env=NEOSCAD_RUSTC_VERSION={version}");
 
+    // `neoscad bench` records the target triple and looks up this
+    // target's executable in the release's checksum list
+    // (crates/bench-core/src/official.rs); cargo names it only to build
+    // scripts.
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".into());
+    println!("cargo:rustc-env=NEOSCAD_TARGET={target}");
+
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         delay_gpu_frameworks();
     }

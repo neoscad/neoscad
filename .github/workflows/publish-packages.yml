@@ -17,7 +17,12 @@
 #   write on that repository, which release.yml passes here through
 #   `secrets: inherit`). Nothing here pushes to the AUR or winget;
 # - the ghcr.io/neoscad/neoscad image (packaging/docker/Dockerfile), for
-#   linux/amd64 and linux/arm64.
+#   linux/amd64 and linux/arm64;
+# - the bench kit and the executables' checksums `neoscad bench` needs
+#   (the `bench-kit` job), then the release baseline: the release's own
+#   binaries benchmarked on four runners and committed to
+#   neoscad/benchmarks (`baseline`, `baseline-submit`, with the
+#   BENCHMARKS_TOKEN secret; docs/community-bench.md).
 name: Packages
 
 on:
@@ -251,3 +256,206 @@ jobs:
           docker buildx build --platform linux/amd64,linux/arm64 \
             -f packaging/docker/Dockerfile --build-arg NEOSCAD_VERSION="$version" \
             "${tags[@]}" --push packaging/docker
+
+  # The bench kit `neoscad bench` times (scripts/release/bench-kit.sh:
+  # conformance/bench.json's models, BOSL2 at its pinned commit, OpenSCAD's
+  # examples at conformance/manifest.json's commit), and the SHA-256 of the
+  # `neoscad` executable inside every archive, which a run compares its own
+  # executable with to tell an official release binary from a self-built
+  # one (crates/bench-core/src/official.rs). cargo-dist's checksums cannot
+  # serve for that: they hash the archives. Attached at once rather than by
+  # `attach`, since the baseline below needs both on the release and
+  # neither depends on the Linux packages' smoke tests.
+  bench-kit:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Reference checkout
+        run: scripts/release/fetch-reference.sh
+
+      - name: Kit
+        run: scripts/release/bench-kit.sh --out "$RUNNER_TEMP/kit"
+
+      - name: Executable checksums
+        run: |
+          archives=$RUNNER_TEMP/archives
+          mkdir -p "$archives"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$archives" \
+            --pattern 'neoscad-cli-*.tar.xz' --pattern 'neoscad-cli-*.zip' --pattern 'neoscad-cli-*.sha256'
+          sums=$RUNNER_TEMP/kit/neoscad-executables.sha256sums
+          : >"$sums"
+          cd "$archives"
+          for a in neoscad-cli-*.tar.xz neoscad-cli-*.zip; do
+            [[ -f "$a" ]] || continue
+            # Each archive is first checked against cargo-dist's own
+            # checksum ("HASH *NAME"), so the list vouches for what the
+            # release publishes and nothing else.
+            [[ "$(sha256sum "$a" | cut -d' ' -f1)" == "$(cut -d' ' -f1 "$a.sha256")" ]] \
+              || { echo "::error::$a does not match $a.sha256"; exit 1; }
+            triple=${a#neoscad-cli-}
+            triple=${triple%.tar.xz}
+            triple=${triple%.zip}
+            dir=$RUNNER_TEMP/unpacked/$triple
+            mkdir -p "$dir"
+            case "$a" in
+              *.zip) unzip -q "$a" -d "$dir" ;;
+              *) tar -xJf "$a" -C "$dir" ;;
+            esac
+            exe=$(find "$dir" -type f \( -name neoscad -o -name neoscad.exe \) | head -n 1)
+            [[ -n "$exe" ]] || { echo "::error::no neoscad executable in $a"; exit 1; }
+            echo "$(sha256sum "$exe" | cut -d' ' -f1)  $triple/$(basename "$exe")" >>"$sums"
+          done
+          LC_ALL=C sort -k2 -o "$sums" "$sums"
+          cat "$sums"
+          [[ -s "$sums" ]] || { echo "::error::no archives on the release"; exit 1; }
+
+      - name: Attach to the release
+        run: |
+          cd "$RUNNER_TEMP/kit"
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            neoscad-bench-kit-*.tar.gz neoscad-bench-kit-*.tar.gz.sha256 neoscad-executables.sha256sums
+
+  # The release baseline: the release's own binaries, downloaded from the
+  # release like anyone's, timed on the kit on GitHub's runners (no
+  # OpenSCAD), so every version shown on neoscad.org has a result from the
+  # same four machine types. A failure here must not fail the release
+  # (release.yml's `announce` waits for this workflow), hence
+  # continue-on-error.
+  baseline:
+    needs: bench-kit
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Release binary and kit
+        run: |
+          version=${TAG#v}
+          case "$TARGET" in
+            *windows*) archive=neoscad-cli-$TARGET.zip ;;
+            *) archive=neoscad-cli-$TARGET.tar.xz ;;
+          esac
+          kit=neoscad-bench-kit-$version.tar.gz
+          dl=$RUNNER_TEMP/dl
+          mkdir -p "$dl/bin"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$dl" \
+            --pattern "$archive" --pattern "$archive.sha256" --pattern "$kit" --pattern "$kit.sha256"
+          cd "$dl"
+          sum() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+          for f in "$archive" "$kit"; do
+            [[ "$(sum "$f")" == "$(cut -d' ' -f1 "$f.sha256")" ]] \
+              || { echo "::error::$f does not match $f.sha256"; exit 1; }
+          done
+          case "$archive" in
+            *.zip) (cd bin && pwsh -NoProfile -Command "Expand-Archive -LiteralPath ../$archive -DestinationPath .") ;;
+            *) tar -xJf "$archive" -C bin ;;
+          esac
+          exe=$(find "$dl/bin" -type f \( -name neoscad -o -name neoscad.exe \) | head -n 1)
+          [[ -n "$exe" ]] || { echo "::error::no neoscad executable in $archive"; exit 1; }
+          echo "NEOSCAD=$exe" >>"$GITHUB_ENV"
+          echo "KIT=$dl/$kit" >>"$GITHUB_ENV"
+
+      # The binary checks itself against the release's
+      # neoscad-executables.sha256sums, as a user's run does; a baseline
+      # that is not `official` is not submitted.
+      - name: Bench
+        run: |
+          "$NEOSCAD" bench --no-openscad --source ci-baseline --kit "$KIT" \
+            --json "$RUNNER_TEMP/ci-baseline-$TARGET.json"
+          jq -e '.neoscad.official' "$RUNNER_TEMP/ci-baseline-$TARGET.json" >/dev/null \
+            || { echo "::error::the release binary did not verify as official"; exit 1; }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-baseline-${{ matrix.target }}
+          path: ${{ runner.temp }}/ci-baseline-${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # The baselines go to neoscad/benchmarks as results/<version>/
+  # ci-baseline-<target>.json, committed directly (issues are for users'
+  # results), with the BENCHMARKS_TOKEN secret: a fine-grained token with
+  # Contents read and write on neoscad/benchmarks only, which release.yml
+  # passes here through `secrets: inherit`. Without it, or when no baseline
+  # finished, the job warns and skips. Whatever baselines finished are
+  # committed: one runner's failure should not withhold the others.
+  baseline-submit:
+    needs: baseline
+    if: ${{ !cancelled() }}
+    continue-on-error: true
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      BENCHMARKS_TOKEN: ${{ secrets.BENCHMARKS_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bench-baseline-*
+          path: ${{ runner.temp }}/results
+          merge-multiple: true
+      - name: Commit to neoscad/benchmarks
+        run: |
+          if [[ -z "$BENCHMARKS_TOKEN" ]]; then
+            echo "::warning::No BENCHMARKS_TOKEN secret; the release baseline was not submitted to neoscad/benchmarks."
+            exit 0
+          fi
+          version=${TAG#v}
+          shopt -s nullglob
+          results=("$RUNNER_TEMP"/results/ci-baseline-*.json)
+          if [[ ${#results[@]} -eq 0 ]]; then
+            echo "::warning::No baseline finished; nothing to submit."
+            exit 0
+          fi
+          auth=$(printf 'x-access-token:%s' "$BENCHMARKS_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          header="http.https://github.com/.extraheader=AUTHORIZATION: basic $auth"
+          repo=$RUNNER_TEMP/benchmarks
+          git -c "$header" clone --quiet --depth 1 https://github.com/neoscad/benchmarks.git "$repo"
+          mkdir -p "$repo/results/$version"
+          for f in "${results[@]}"; do
+            # Only what the workflow itself measured: schema 1, this
+            # version, an official binary, marked ci-baseline.
+            jq -e --arg v "$version" \
+              '.schema == 1 and .source == "ci-baseline" and .neoscad.version == $v and .neoscad.official' \
+              "$f" >/dev/null || { echo "::warning::$(basename "$f") is not a valid baseline; skipped"; continue; }
+            cp "$f" "$repo/results/$version/"
+          done
+          cd "$repo"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add results
+          if git diff --cached --quiet; then
+            echo "results/$version is already current"
+            exit 0
+          fi
+          git commit --quiet -m "neoscad $version: release baseline"
+          for attempt in 1 2 3; do
+            git -c "$header" push --quiet && break
+            [[ $attempt -lt 3 ]] || exit 1
+            sleep 10
+            git -c "$header" pull --quiet --rebase
+          done

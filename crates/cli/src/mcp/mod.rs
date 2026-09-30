@@ -22,6 +22,9 @@
 //! (2026-09-23) still defaults to 2025-11-25.
 
 mod bridge;
+
+/// Also what `neoscad bench --submit` opens its issue link with.
+pub(crate) use bridge::open_in_browser;
 pub mod roots;
 mod tools;
 

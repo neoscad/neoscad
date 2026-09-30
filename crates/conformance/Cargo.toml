@@ -12,6 +12,8 @@ name = "conformance"
 path = "src/main.rs"
 
 [dependencies]
+# `conformance bench` times through the same code as `neoscad bench`.
+bench-core = { package = "neoscad-bench-core", path = "../bench-core" }
 clap.workspace = true
 png.workspace = true
 rayon.workspace = true
@@ -23,13 +25,6 @@ sha2.workspace = true
 # with the same pure-Rust deflate backend as crates/io.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
-
-# `conformance bench` reports each run's CPU time from `getrusage` of the
-# waited-for child, through nix's safe wrapper (the workspace forbids
-# unsafe code). Wrapping runs in /usr/bin/time instead would add about
-# 1.5 ms of process start to every wall time, half of neoscad's cold start.
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["resource"] }
 
 [lints]
 workspace = true
