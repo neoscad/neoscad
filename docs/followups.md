@@ -1316,8 +1316,9 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   for the first time on the v0.2.0 tag. Install a bundle on a GNOME
   desktop and try the sandbox: the file chooser portal, includes beside a model
   (`--filesystem=home`), WebKit's own sandbox inside Flatpak, and the
-  GPU view through `--device=dri`. Flathub submission is the owner's
-  call (steps in that document).
+  GPU view through `--device=dri`. Flathub is not an option for this
+  manifest: its rules forbid AI-generated manifests and AI-written
+  submissions (docs/linux-app.md, "Flathub: not submitted").
 - The Flatpak builds with the SDK's rust-stable (1.98.0 in 26.08), not
   the pinned 1.98.1 (`rust-toolchain.toml`), since the extension has no
   rustup. If output must match the other builds exactly, install the

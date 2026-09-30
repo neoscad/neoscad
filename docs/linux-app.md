@@ -307,7 +307,7 @@ Choices:
   portal's one-file grant does not cover. OpenSCAD's own Flathub
   manifest (flathub/org.openscad.OpenSCAD) has `--filesystem=home` too.
   flatpak-builder-lint reports this as `finish-args-home-filesystem-access`,
-  which needs an exception on Flathub (below).
+  which would need an exception on Flathub (not submitted: see "Flathub: not submitted").
 - **The `.scad` type** is `application/x-openscad`, OpenSCAD's own name
   (`resources/icons/openscad.xml` in its repository), so a system with
   both apps has one type; it is a subclass of `text/plain`.
@@ -369,37 +369,24 @@ is built from the tagged commit in `flatpak.yml`, called by
 `release.yml` as a publish job (`docs/release.md`); it is not on
 Flathub.
 
-### Submitting to Flathub
+### Flathub: not submitted
 
-Not done; submitting is the owner's call. The steps, from Flathub's
-submission documentation (docs.flathub.org, "Submission"):
+Flathub's requirements (docs.flathub.org, "Requirements", checked
+2026-09-30) rule out submitting this manifest:
 
-1. Wait for `flatpak.yml` to pass, install its bundle, and try the app:
-   open, edit, save, go to a definition in MCAD, export an STL, and a
-   model that includes a file beside it (the home permission).
-2. Check that the metainfo's `<releases>` starts with the version being
-   shipped and its real date (the release commit sets it:
-   `docs/release.md`, "Cutting one"), and that the tag exists.
-3. Fork github.com/flathub/flathub, branch from `new-pr`, and add at the
-   root: the manifest, with its `dir` source replaced by
-   `type: git`, `url: https://github.com/neoscad/neoscad.git`, the tag
-   and its commit; `cargo-sources.json` and `node-sources.json` from
-   `generate-sources.sh` at that tag; and a `flathub.json` if the build
-   should be limited to some architectures (both x86_64 and aarch64 are
-   expected to work).
-4. Before opening it, build and lint with Flathub's own tools:
-   `flatpak run --command=flatpak-builder-lint org.flatpak.Builder
-   manifest org.neoscad.NeoSCAD.yml` (and `repo repo` after a build).
-   Open the pull request against `new-pr`, titled "Add
-   org.neoscad.NeoSCAD", and ask in it for the
-   `finish-args-home-filesystem-access` exception, giving the reason
-   above. The app id's domain must be the project's: Flathub may ask for
-   a token at `https://neoscad.org/.well-known/org.flathub.VerifiedApps.txt`
-   (docs.flathub.org, "Requirements"), which the website repository
-   would serve.
-5. Comment `bot, build` to have Flathub's builder try it; after review a
-   repository `flathub/org.neoscad.NeoSCAD` is made, and releases are
-   pull requests there that update the tag, commit and generated sources.
+- "Flathub manifests must not contain AI-generated or AI-assisted
+  content". `linux/flatpak/` was written with an AI agent.
+- AI tools must not open or automate submission pull requests, or write
+  their descriptions, commit messages or replies.
+- AI-generated code in the application must be disclosed, and NeoSCAD is
+  largely written with AI tools.
+- Breaking these rules can mean rejection and a permanent ban.
+
+So the Flatpak is distributed as a bundle on each GitHub release
+("Install from the release", above) rather than through Flathub. A
+Flathub listing would need a manifest the owner writes by hand, a pull
+request the owner opens, and the disclosure. That's the owner's decision
+to revisit, not a step to automate.
 
 ## Next
 
