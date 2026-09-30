@@ -215,16 +215,21 @@ In `neoscad/benchmarks`:
 
 ```
 results/<version>/ci-baseline-<target>.json   the release baseline (below)
-results/<version>/<issue number>.json          accepted submissions (proposed)
+results/<version>/<issue number>.json          accepted submissions
 ```
 
-The summary neoscad.org shows per version (proposed): the baselines as a
-table per target; for submissions, one row per result with OS, CPU,
+The repo's `summary.json` (rebuilt on every change; format in its
+README) is what https://neoscad.org/community.html shows per version:
+the baselines as a table per target; for submissions, one row per result with OS, CPU,
 cores and memory, neoscad's geometric mean over the models, and, where
 the result has OpenSCAD, the geometric mean speedup over the models
 both finished (`BenchResult::summary` computes it the same way), with the
 OpenSCAD version and backend. Only results whose `kit.version` is the
-version shown and whose `method.version` matches are compared.
+version shown and whose `method.version` matches are compared, and speedup
+aggregates are kept apart per OpenSCAD backend (Manifold, CGAL) and per
+quick or full run. Validation (the `validate` workflow there) re-checks
+the release, the executable's hash, the kit and the schema at the
+release's tag, and rejects identifying strings.
 
 ## The release baseline
 
