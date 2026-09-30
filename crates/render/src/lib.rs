@@ -126,6 +126,13 @@ pub fn fit_camera(camera: &mut Camera, scene: &Scene) {
 /// forces `LCT_RGB`; OpenSCAD also clears the framebuffer's alpha to
 /// opaque before reading it, so nothing is lost). The encoding is
 /// deterministic: the same pixels always give the same bytes.
+///
+/// Compressed with `png`'s fast setting (fdeflate, adaptive filters)
+/// rather than its default (zlib level 6): on 1024x1024 snapshots and
+/// renders that took the encode from 4.5-8 ms to 1.5-1.7 ms, most of the
+/// fixed cost a snapshot adds to a render, for files 1.4-2.1 times as
+/// large (still under about 100 KB). Nothing compares PNG bytes with
+/// OpenSCAD's (images are compared as pixels), so only the size changes.
 pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
     for p in rgba.as_chunks::<4>().0 {
@@ -136,6 +143,7 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
         let mut encoder = png::Encoder::new(&mut out, width, height);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
         let mut writer = encoder
             .write_header()
             .expect("writing a PNG header to memory cannot fail");

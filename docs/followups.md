@@ -203,6 +203,15 @@ lead them, come roughly in order of user impact.
 - Identical parallel siblings are each computed (performance audit
   O11): an in-flight map from key to a shared result would compute them
   once. Needs a determinism test for message replay and ID blocks.
+- Geometry keys are still recomputed for the whole tree on every render,
+  now in parallel (`perf-opportunities.md` P4(a)): about 20 ms for
+  `fractal_tree`'s 290k nodes, whose single-child spine stays serial.
+  Carrying each memo entry's per-node hashes and shifting them by the
+  replay's index offset (P4(b)) would skip replayed subtrees entirely.
+- The web core gained nothing from `simd128` autovectorisation
+  (`perf-opportunities.md` P7, within 2% on six kernel-bound models,
+  identical output). A kernel gain there needs hand-written `v128` code;
+  relaxed SIMD would give up bit-identical results.
 
 ## Parity
 - `manifold-rust` 0.13.1 ports Manifold v3.5.0; OpenSCAD pins v3.5.2.

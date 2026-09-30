@@ -1144,6 +1144,7 @@ dependencies = [
  "neoscad-io",
  "neoscad-lang",
  "neoscad-text",
+ "rayon",
  "sha2",
  "unicode-script",
 ]

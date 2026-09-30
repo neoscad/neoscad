@@ -107,6 +107,20 @@ while another agent was timing on the machine, so ±10%).
   remains is a share of its 294 ms warm re-render and of edits on
   VNF-heavy BOSL2. **Risk:** low (a 1-thread equality test).
   **Effort:** S for (a), M for (b).
+- **Status: (a) done.** Siblings under a node of 512 or more nodes are
+  hashed with `par_iter` when the pool has more than one thread (native
+  only; wasm32 stays serial and does not link rayon). Hashes go in
+  per-node slots of relaxed atomics, and imported files are stat'ed in
+  the serial pre-pass, since `FileSystem` is not `Sync`. `Keys::new`
+  alone, best of 5, three interleaved rounds, load 2.2-3.8 on 14 cores:
+  `fractal_tree` (290,655 nodes) 46.3 -> 19.8 ms, a 10,000-cell grid of
+  unions (50,102 nodes) 16.6 -> 2.5 ms; at `RAYON_NUM_THREADS=1` 47.1 ->
+  48.2 and 16.6 -> 16.8 ms. The fractal tree gains least because its
+  top is a chain of single-child nodes hashed in turn. Nothing for the
+  edit loop: the BOSL2 gear is 98 nodes (0.04 ms of keys), so the bench's
+  `edit_loop` does not move. Every key is equal at 1, 4 and 13 threads
+  (`dump::tests::keys_are_the_same_at_any_thread_count`), and so are the
+  root keys of the three models. (b) is not done.
 
 ### P5. Overlap evaluation with geometry, statement by statement
 
@@ -137,6 +151,20 @@ while another agent was timing on the machine, so ±10%).
   after render), thumbnails, QuickLook. **Risk:** none to parity: PNGs
   are not byte-compared with OpenSCAD's (they differ between GPUs,
   `followups.md` "Rendering") and stay deterministic. **Effort:** S.
+- **Status: done** (`Compression::Fast`: fdeflate, adaptive filters).
+  Encode alone, best of 7, 1024x1024: a BOSL2 gear snapshot 8.07 ->
+  1.72 ms at 71 -> 101 KB, the CSG example's snapshot 5.55 -> 1.50 ms at
+  37 -> 80 KB, its `-o x.png` render 4.53 -> 1.48 ms at 28 -> 53 KB;
+  decoded pixels equal, bytes the same on every encode. Level 1 with the
+  Up filter was similar (1.35-1.88 ms, 47-104 KB); level 3 saved only a
+  quarter of the time. Served `edit_loop`, best of 10 edits, three
+  interleaved rounds each, load 2.3-6.5: BOSL2 snapshot 20.8 -> 17.9 ms,
+  CSG snapshot 10.2 -> 6.2 ms (renders unchanged at 12.3 and 1.0 ms), so
+  a snapshot's cost over a render went from about 9 ms to 5-6. The only
+  byte comparison of PNGs (`render/tests/offscreen.rs`,
+  `same_input_same_png_bytes`) compares NeoSCAD with itself. The
+  `StreamWriter` without the RGBA-to-RGB copy was not tried: the copy is
+  inside the 1.5 ms.
 
 ### P7. wasm: enable `simd128` for the web profile
 
@@ -153,6 +181,20 @@ while another agent was timing on the machine, so ±10%).
 - **Risk:** low for results (simd128 has no FMA, so arithmetic stays
   IEEE-exact; keep `relaxed-simd` off). Browser support was not looked
   up. **Effort:** S.
+- **Status: tried, no gain, not landed.** The web core built with
+  `-Ctarget-feature=+simd128` (no wasm-opt: binaryen was not installed,
+  for either build) is 45 KB smaller and its exports are byte-identical
+  (binary STL and OFF of the CSG example, a minkowski, a sphere-studded
+  difference, extruded text, an offset 2D union and a 200-sphere hull),
+  and `crates/web/test/run.mjs` passes. Cold render in node 18, best of
+  5 interleaved processes, load 7.7-8.3: 15.7 / 16.0 ms, 3.3 / 3.3,
+  329.7 / 324.7, 7.1 / 7.1, 6.8 / 6.7, 210.1 / 209.7 (without / with),
+  and the BOSL2 gear 94 / 94 ms: within 2%, so the kernel's hot loops do
+  not autovectorise usefully. Support, from the WebAssembly feature
+  table: Chrome 91, Firefox 89, Safari 16.4, Node 16.4; a Safari before
+  16.4 would fail to load the module. Worth revisiting only with
+  hand-written `v128` kernels or relaxed SIMD, which gives up
+  bit-identical results.
 
 ### P8. Cache hits that deep-copy a mesh to relabel IDs
 
@@ -209,10 +251,11 @@ fractal_tree or the edit loop. Do P1 first, which shares the machinery.
 ## Recommended next steps
 
 1. P6: time `encode_png` on a 1024² snapshot; `Compression::Fast` if it
-   is most of the 9 ms. (S)
+   is most of the 9 ms. (S) *Done; see its status.*
 2. P4(a): `rayon::join` over sibling subtrees in `Keys::new`, with a
-   1-thread equality test. (S)
-3. P7: build the web core with `+simd128`; diff outputs against native. (S)
+   1-thread equality test. (S) *Done; see its status.*
+3. P7: build the web core with `+simd128`; diff outputs against native.
+   (S) *Tried: identical output, no speed-up; not landed.*
 4. P2: a `cargo pgo` build for macOS arm64, measured interleaved against
    HEAD on the bench models. (M)
 5. P1: a gated prototype for modules without children, measured on

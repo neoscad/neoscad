@@ -34,10 +34,12 @@
 //!   exact texts would be equal, up to SHA-256 collisions and the empty
 //!   groups the text also ignores.
 
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use lang::loader::FileSystem;
+use lang::loader::{FileSystem, Metadata};
 use lang::number::fmt_g;
 use sha2::{Digest as _, Sha256};
 
@@ -707,25 +709,38 @@ const NUM: u8 = 0xFF;
 
 impl Keys {
     /// Keys for `root`'s tree; imported files are stat'ed through `fs`.
+    ///
+    /// Sibling subtrees are hashed on rayon's pool (natively; wasm32 has
+    /// one thread). Each node's hash depends only on its own subtree and
+    /// goes in its node's slot, so the keys are the same at any thread
+    /// count and in any schedule.
     pub fn new(root: &Node, fs: &dyn FileSystem) -> Keys {
         fn max_index(n: &Node) -> usize {
             n.children.iter().map(max_index).fold(n.index, usize::max)
         }
         let len = max_index(root) + 1;
-        let mut counts = vec![0u32; len];
-        content_counts(root, &mut counts);
-        let mut b = KeyBuilder {
-            w: Writer {
-                out: Vec::new(),
-                style: Style::Key,
-                base: Path::new(""),
-                fs,
-            },
-            counts: &counts,
-            hashes: vec![[0; 32]; len],
+        let mut survey = Survey {
+            counts: vec![0; len],
+            sizes: vec![0; len],
+            stats: Stats::default(),
+            fs,
         };
-        b.hash(root);
-        Keys { hashes: b.hashes }
+        survey.walk(root);
+        let hashes: Vec<Slot> = (0..len).map(|_| Slot::default()).collect();
+        let shared = Shared {
+            counts: &survey.counts,
+            sizes: &survey.sizes,
+            stats: &survey.stats,
+            hashes: &hashes,
+            #[cfg(not(target_arch = "wasm32"))]
+            threads: rayon::current_num_threads(),
+        };
+        shared.builder().hash(root);
+        Keys {
+            // An index no node has (the tree need not use every one)
+            // keeps the zero hash; `get` is never asked for it.
+            hashes: hashes.into_iter().map(|h| h.get()).collect(),
+        }
     }
 
     /// The key of the subtree rooted at `node`, which must belong to the
@@ -742,18 +757,81 @@ fn is_group(n: &Node) -> bool {
     matches!(n.kind, NodeKind::Root | NodeKind::Group { .. })
 }
 
-/// `GroupNodeChecker`: for each group, how many children have content (a
-/// non-group node, or a group with such a child). Returns whether `n` has
-/// content.
-fn content_counts(n: &Node, counts: &mut [u32]) -> bool {
-    let mut c = 0;
-    for ch in &n.children {
-        if content_counts(ch, counts) {
-            c += 1;
+/// One serial pass over the tree before hashing, collecting what the
+/// hashing threads need to read.
+struct Survey<'a> {
+    /// `GroupNodeChecker`: for each group, how many children have content
+    /// (a non-group node, or a group with such a child).
+    counts: Vec<u32>,
+    /// Each subtree's node count, which decides where hashing is worth
+    /// splitting across threads.
+    sizes: Vec<usize>,
+    /// `FileSystem` is not `Sync`, so imported files are stat'ed here, on
+    /// the caller's thread.
+    stats: Stats,
+    fs: &'a dyn FileSystem,
+}
+
+impl Survey<'_> {
+    /// Returns whether `n` has content.
+    fn walk(&mut self, n: &Node) -> bool {
+        let file = match &n.kind {
+            NodeKind::Surface { file, .. } => Some(file),
+            NodeKind::Import(i) => Some(&i.file),
+            _ => None,
+        };
+        if let Some(f) = file
+            && !f.is_empty()
+            && !self.stats.0.contains_key(f)
+        {
+            let m = self.fs.metadata(Path::new(f));
+            self.stats.0.insert(f.clone(), m);
         }
+        let mut c = 0;
+        let mut size = 1;
+        for ch in &n.children {
+            if self.walk(ch) {
+                c += 1;
+            }
+            size += self.sizes[ch.index];
+        }
+        self.counts[n.index] = c;
+        self.sizes[n.index] = size;
+        !is_group(n) || c > 0
     }
-    counts[n.index] = c;
-    !is_group(n) || c > 0
+}
+
+/// The time and size of every file the tree imports, taken before any
+/// hashing starts. A key label asks nothing else of the file system
+/// (`.csg` paths, the only other use, are not written in keys), so this
+/// stands in for it.
+#[derive(Default)]
+struct Stats(HashMap<String, Option<Metadata>>);
+
+impl FileSystem for Stats {
+    fn read(&self, _: &Path) -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+    fn exists(&self, _: &Path) -> bool {
+        false
+    }
+    fn is_dir(&self, _: &Path) -> bool {
+        false
+    }
+    fn canonicalize(&self, _: &Path) -> Option<PathBuf> {
+        None
+    }
+    fn metadata(&self, path: &Path) -> Option<Metadata> {
+        // A label that stats a file `Survey::walk` did not look for would get
+        // "no such file", and its key would silently lose the file's
+        // time and size (edits to it would hit the stale cache entry).
+        // A new node kind that names a file must be added there.
+        debug_assert!(
+            path.to_str().is_some_and(|p| self.0.contains_key(p)),
+            "a key label stat'ed a file Survey::walk missed: {path:?}"
+        );
+        path.to_str().and_then(|p| self.0.get(p).copied()).flatten()
+    }
 }
 
 /// `%` and `#` of a node as one byte, as its parent sees them.
@@ -773,16 +851,95 @@ fn modifier_bits(n: &Node) -> u8 {
 /// 32 bytes per child).
 struct KeyBuilder<'a> {
     w: Writer<'a>,
+    s: Shared<'a>,
+}
+
+/// What every hashing thread reads, and the slots they fill: each node's
+/// exactly once, by the one thread that hashes its subtree.
+#[derive(Clone, Copy)]
+struct Shared<'a> {
     counts: &'a [u32],
-    hashes: Vec<Digest>,
+    sizes: &'a [usize],
+    stats: &'a Stats,
+    hashes: &'a [Slot],
+    /// The pool's size: with one thread, splitting only adds overhead.
+    #[cfg(not(target_arch = "wasm32"))]
+    threads: usize,
+}
+
+/// A node whose subtree has at least this many nodes hashes its children
+/// on the pool. Below it a task costs more than the hashing it would
+/// spread (a node's label and SHA-256 take about a microsecond).
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_MIN_NODES: usize = 512;
+
+impl<'a> Shared<'a> {
+    fn builder(self) -> KeyBuilder<'a> {
+        KeyBuilder {
+            w: Writer {
+                out: Vec::new(),
+                style: Style::Key,
+                base: Path::new(""),
+                fs: self.stats,
+            },
+            s: self,
+        }
+    }
+
+    fn hash_of(&self, n: &Node) -> Digest {
+        self.hashes[n.index].get()
+    }
+}
+
+/// One node's hash, writable from whichever thread hashes that node.
+/// Relaxed atomics compile to plain loads and stores; the ordering comes
+/// from the tree: a slot is written once, by the thread that hashes its
+/// subtree, and read afterwards by its parent, either on the same thread
+/// or after rayon's `for_each` returns, which synchronises with every
+/// task it ran. (A `OnceLock` per node costs a compare-and-swap per node,
+/// which showed on one thread.)
+#[derive(Default)]
+struct Slot([AtomicU64; 4]);
+
+impl Slot {
+    fn set(&self, d: Digest) {
+        for (a, w) in self.0.iter().zip(d.as_chunks::<8>().0) {
+            a.store(u64::from_le_bytes(*w), Ordering::Relaxed);
+        }
+    }
+
+    fn get(&self) -> Digest {
+        let mut d = [0; 32];
+        for (a, w) in self.0.iter().zip(d.as_chunks_mut::<8>().0) {
+            *w = a.load(Ordering::Relaxed).to_le_bytes();
+        }
+        d
+    }
 }
 
 impl KeyBuilder<'_> {
     fn hash(&mut self, n: &Node) -> Digest {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.s.threads > 1 && n.children.len() > 1 && self.s.sizes[n.index] >= PARALLEL_MIN_NODES
+        {
+            use rayon::prelude::*;
+            let s = self.s;
+            n.children.par_iter().for_each_init(
+                || s.builder(),
+                |b, c| {
+                    b.hash(c);
+                },
+            );
+        } else {
+            for c in &n.children {
+                self.hash(c);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
         for c in &n.children {
             self.hash(c);
         }
-        let d = if is_group(n) && self.counts[n.index] <= 1 {
+        let d = if is_group(n) && self.s.counts[n.index] <= 1 {
             self.transparent(n)
         } else {
             self.w.out.clear();
@@ -794,11 +951,11 @@ impl KeyBuilder<'_> {
             h.update((n.children.len() as u64).to_le_bytes());
             for c in &n.children {
                 h.update([modifier_bits(c)]);
-                h.update(self.hashes[c.index]);
+                h.update(self.s.hash_of(c));
             }
             h.finalize().into()
         };
-        self.hashes[n.index] = d;
+        self.s.hashes[n.index].set(d);
         d
     }
 
@@ -821,15 +978,15 @@ impl KeyBuilder<'_> {
         let content = n
             .children
             .iter()
-            .find(|c| !is_group(c) || self.counts[c.index] > 0);
+            .find(|c| !is_group(c) || self.s.counts[c.index] > 0);
         match content {
             None => Sha256::digest([TAG_EMPTY]).into(),
             Some(c) => match modifier_bits(c) {
-                0 => self.hashes[c.index],
+                0 => self.s.hash_of(c),
                 m => {
                     let mut h = Sha256::new();
                     h.update([TAG_MODS, m]);
-                    h.update(self.hashes[c.index]);
+                    h.update(self.s.hash_of(c));
                     h.finalize().into()
                 }
             },
@@ -1011,5 +1168,55 @@ mod tests {
             lexically_normal(Path::new("/a/b/../c/./d")),
             Path::new("/a/c/d")
         );
+    }
+
+    /// `Keys::new` hashes sibling subtrees on rayon's pool. Every key
+    /// (not only the root's) must be the same on one thread, where it
+    /// never splits, and on several, where it splits at every level of
+    /// this tree: wide levels, a deep chain, repeated subtrees (equal
+    /// keys under different indices), single-child groups (whose key is
+    /// their child's) and `%`/`#` on children.
+    #[test]
+    fn keys_are_the_same_at_any_thread_count() {
+        fn tree(next: &mut usize, depth: u32) -> Node {
+            let index = *next;
+            *next += 2;
+            if depth == 0 {
+                return cube((index % 7) as f64, index);
+            }
+            let width = if depth.is_multiple_of(2) { 2 } else { 9 };
+            let mut children: Vec<Node> = (0..width).map(|_| tree(next, depth - 1)).collect();
+            if depth == 3 {
+                children[0].origin.as_mut().unwrap().tag_background = true;
+                children[1].origin.as_mut().unwrap().tag_highlight = true;
+            }
+            let kind = match depth % 3 {
+                0 => NodeKind::Group { name: None },
+                1 => NodeKind::Csg(CsgOp::Union),
+                _ => NodeKind::Csg(CsgOp::Difference),
+            };
+            let n = node(kind, index + 1, children);
+            // A single-child group above each subtree: transparent keys.
+            node(NodeKind::Group { name: None }, index, vec![n])
+        }
+        let mut next = 1;
+        let root = Node {
+            kind: NodeKind::Root,
+            children: (0..3).map(|_| tree(&mut next, 6)).collect(),
+            origin: None,
+            index: 0,
+        };
+        let keys = |threads: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| Keys::new(&root, &StdFs))
+                .hashes
+        };
+        let one = keys(1);
+        assert!(root.children.iter().all(|c| one[c.index] != [0; 32]));
+        assert_eq!(one, keys(4));
+        assert_eq!(one, keys(13));
     }
 }

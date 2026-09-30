@@ -16,6 +16,12 @@ sha2.workspace = true
 text = { package = "neoscad-text", path = "../text" }
 unicode-script.workspace = true
 
+# Geometry keys hash sibling subtrees on rayon's pool (`dump::Keys`).
+# wasm32-unknown-unknown has no threads, so it hashes serially and does not
+# link rayon at all.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon.workspace = true
+
 [dev-dependencies]
 assets = { package = "neoscad-assets", path = "../assets" }
 
