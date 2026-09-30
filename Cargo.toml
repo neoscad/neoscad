@@ -7,7 +7,7 @@ exclude = ["vendor"]
 [workspace.package]
 # The release rehearsal: tag v0.1.0-rc.N runs every release job for real.
 # Back to "0.1.0" (with `publish-prereleases` below) for the release.
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-2.0-or-later"
