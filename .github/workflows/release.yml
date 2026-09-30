@@ -135,6 +135,29 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Install WiX Toolset 3.14.1 on Windows ARM64"
+        if: "runner.os == 'Windows' && runner.arch == 'ARM64'"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'wix314-binaries.zip'
+          Invoke-WebRequest -Uri 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip' -OutFile $zip
+          $expected = '6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31'
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "wix314-binaries.zip sha256 is $actual, expected $expected" }
+          # cargo-wix looks for %WIX%\bin\candle.exe (and light.exe), so the
+          # tools go in a bin folder under the directory WIX names.
+          $wix = Join-Path $env:RUNNER_TEMP 'wix314'
+          $bin = Join-Path $wix 'bin'
+          Expand-Archive -LiteralPath $zip -DestinationPath $bin
+          "WIX=$wix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          # Run candle once so a missing .NET runtime fails here, by name,
+          # rather than as an opaque WiX error after the whole Rust build. The
+          # hash already pins the version; this only checks the tool starts.
+          $banner = & (Join-Path $bin 'candle.exe') -? | Out-String
+          if ($banner -notmatch 'Toolset Compiler') { throw "candle.exe did not run:`n$banner" }
+          exit 0
+        shell: "pwsh"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

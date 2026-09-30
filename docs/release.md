@@ -245,7 +245,9 @@ such as `v0.1.0` runs, in order:
    `LICENSE`, `NOTICE` and `licenses/`, with a `.sha256` beside it.
 3. **global**: shell and PowerShell installers, the Homebrew formula,
    `sha256.sum` and the source tarball; MSIs for both Windows targets
-   (unsigned); GitHub artifact attestations.
+   (unsigned; built by WiX 3.14.1, which `windows-2025` has preinstalled
+   and `.github/build-setup.yml` installs on `windows-11-arm`, whose image
+   has none); GitHub artifact attestations.
 4. **host**: the GitHub Release.
 5. **publish**: the `neoscad` formula pushed to `neoscad/homebrew-tap`;
    `publish-macos-app.yml` (this document's `release.sh` on `macos-26` with Xcode 26.6,
@@ -267,7 +269,7 @@ such as `v0.1.0` runs, in order:
 
 A prerelease tag (`v0.2.0-beta.1`) makes a GitHub prerelease and skips
 the publish jobs, unless `publish-prereleases = true` is set in
-`[workspace.metadata.dist]` (set only for the `v0.1.0-rc.1` rehearsal,
+`[workspace.metadata.dist]` (set only for the `v0.1.0-rc.N` rehearsals,
 then removed). With it set, a prerelease publishes everything:
 the tap's `neoscad` formula and `neoscad-app` cask move to it (Homebrew
 has no prerelease channel for either: a tap holds one version of each,

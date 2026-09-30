@@ -5,9 +5,9 @@ members = ["crates/*"]
 exclude = ["vendor"]
 
 [workspace.package]
-# The release rehearsal: tag v0.1.0-rc.1 runs every release job for real.
+# The release rehearsal: tag v0.1.0-rc.N runs every release job for real.
 # Back to "0.1.0" (with `publish-prereleases` below) for the release.
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-2.0-or-later"
@@ -112,6 +112,9 @@ precise-builds = true
 # (owner decision 2026-09-29). Checksums and GitHub artifact attestations
 # let users verify them; see docs/release.md, "Windows is unsigned".
 installers = ["shell", "powershell", "homebrew", "msi"]
+# The windows-11-arm image has no WiX, which the aarch64 MSI needs; this
+# step list (relative to .github/workflows) installs WiX 3.14.1 there.
+github-build-setup = "../build-setup.yml"
 tap = "neoscad/homebrew-tap"
 formula = "neoscad"
 # Once the release exists: the signed app DMG
@@ -119,7 +122,7 @@ formula = "neoscad"
 # source, filled package manifests and ghcr.io image
 # (.github/workflows/publish-packages.yml).
 publish-jobs = ["homebrew", "./publish-macos-app", "./publish-packages"]
-# For the v0.1.0-rc.1 rehearsal only: cargo-dist skips every publish job
+# For the v0.1.0-rc.N rehearsals only: cargo-dist skips every publish job
 # (the tap's formula, the DMG, the packages and the image) for a
 # prerelease tag unless this is set, and the rehearsal exists to run them.
 # Remove it for v0.1.0: Homebrew has no prerelease channel, so with it set
