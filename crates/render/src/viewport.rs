@@ -226,16 +226,18 @@ impl Gpu {
         // 125 spheres, phase 8f). Submitting the copies now and waiting
         // for them (a few milliseconds, on the uploading thread, never the
         // main one) frees the staging at once. The wait is on this
-        // submission only and bounded: freeing the staging early is an
-        // economy, and a device that does not finish must not hang the
-        // upload (the model is usable either way). A browser's main thread
-        // cannot block on the GPU, so the web build does not wait.
+        // submission only, and has no timeout: in wgpu-core 30.0.1 a timed
+        // wait that expires while another thread polls or submits can
+        // panic (see `Readback::wait_mapped`, gfx-rs/wgpu#9958), and a
+        // GPU that cannot finish a copy would stall the model's first
+        // frame anyway. A browser's main thread cannot block on the GPU,
+        // so the web build does not wait.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let submitted = self.gate.submit(&self.queue, std::iter::empty());
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: Some(submitted),
-                timeout: Some(crate::offscreen::READBACK_WAIT),
+                timeout: None,
             });
         }
     }

@@ -677,15 +677,16 @@ lead them, come roughly in order of user impact.
   not measured. (8e)
 
 ## Rendering
-- `neoscad-ffi`'s `viewport::tests::the_shared_device_survives_concurrent_use`
-  failed once on CI's macOS arm64 runner (2026-09-29, run 36632690616,
-  passing on every run before): a panic inside wgpu-core 30.0.1
-  (`device/resource.rs:948`, "If the queue is empty, the current submission
-  index (2772) should be at least the wait submission index (2774)"). It
-  looks like a race between one thread waiting on a submission and another
-  submitting on the shared device. In the app a request that panics is
-  reported, not fatal, but it would drop that render. Reproduce with the
-  test in a loop, then check wgpu's issues and newer releases.
+- GPU readbacks (`Readback::wait_mapped` in `crates/render/src/offscreen.rs`)
+  and the viewport's staging release wait for their submission with no
+  timeout, so a wedged GPU blocks the requesting thread instead of failing
+  it after 10 s. They did wait in bounded slices, but in wgpu-core 30.0.1
+  a timed `poll(Wait)` that expires while another thread polls or submits
+  on the same device can panic on a defensive assert
+  (`device/resource.rs:948`); that is what failed CI run 36632690616.
+  gfx-rs/wgpu#9958 fixes the assert on trunk (not in 30.0.1 or the `v30`
+  branch as of 2026-09-29). When a wgpu release carries it, bring the
+  bounded wait back.
 - Previews draw a CSG product's visible surface from real Manifold
   booleans (`geom::csg::product_meshes`) when every leaf bounds a solid
   (`PolySet::is_outward_solid`), so those products do not show OpenCSG's

@@ -406,9 +406,8 @@ impl Readback {
     /// The pixels, top row first and unpadded, once `submitted` (the
     /// submission that recorded [`Readback::copy`]) has finished.
     ///
-    /// Natively this drives the device itself until this buffer is mapped,
-    /// and gives up with [`Error::Readback`] after [`READBACK_WAIT`]
-    /// rather than block for ever. It does not trust the map callback
+    /// Natively this drives the device itself until this buffer is mapped
+    /// (see `Readback::wait_mapped`). It does not trust the map callback
     /// alone: on a device shared between threads, whichever thread polls
     /// first collects every finished mapping, and wgpu-core 30.0.1 drops
     /// the callbacks it collected, unrun, when `Surface::configure`'s wait
@@ -455,18 +454,31 @@ impl Readback {
         Ok(rgba)
     }
 
-    /// Poll the device, waiting on `submitted` a slice at a time, until the
-    /// buffer is mapped, the mapping fails, or [`READBACK_WAIT`] has been
-    /// spent waiting.
+    /// Wait for `submitted` to finish, then report whether the buffer is
+    /// mapped.
     ///
-    /// Each round is `poll(Wait)` on this submission, then two checks: the
-    /// callback's result, and whether the buffer is mapped. A successful
-    /// wait triages the submission and maps the buffer under the queue's
-    /// lifetime lock, so once the GPU is done the second check passes even
-    /// if another thread took (or lost) the callback. The budget is counted
-    /// in poll slices rather than read from a clock (library crates never
-    /// read the clock); a slice that returns early means the submission is
-    /// done, and then the next check succeeds.
+    /// The wait has no timeout, on purpose. On a device polled from more
+    /// than one thread, a `poll(Wait)` that times out in wgpu-core 30.0.1
+    /// can panic: `Device::maintain` reads the fence, and if another
+    /// thread's poll or submit then retires every submission before this
+    /// one looks at the queue, it finds the queue empty with its stale
+    /// fence value below the target and trips a defensive assert
+    /// (`device/resource.rs:948`, "If the queue is empty, the current
+    /// submission index (83) should be at least the wait submission index
+    /// (84)"). This readback used to wait in 50 ms slices, so any slice
+    /// that expired under load was a chance to panic; the concurrency test
+    /// in `neoscad-ffi` failed that way on CI, and in 14 of 300 runs on a
+    /// Mac with every core kept busy. A wait that succeeds reads the fence
+    /// only after it reached the target, so the assert holds. Upstream
+    /// fixed the assert in gfx-rs/wgpu#9958 (unreleased as of wgpu
+    /// 30.0.1); once a release carries it, a bounded wait is safe again.
+    /// Until then a wedged GPU blocks this thread, as `Surface::configure`
+    /// (which also waits without a timeout) would already.
+    ///
+    /// After a successful wait this buffer is mapped even if another
+    /// thread's poll took (or lost) the callback: that poll triaged the
+    /// submission and mapped the buffer under the queue's lifetime lock,
+    /// which this poll takes after it.
     #[cfg(not(target_arch = "wasm32"))]
     fn wait_mapped(
         &self,
@@ -474,30 +486,22 @@ impl Readback {
         submitted: &wgpu::SubmissionIndex,
         rx: &Receiver,
     ) -> Result<(), Error> {
-        let slices = READBACK_WAIT.as_millis() / READBACK_SLICE.as_millis();
-        for _ in 0..slices {
-            match device.poll(wgpu::PollType::Wait {
+        device
+            .poll(wgpu::PollType::Wait {
                 submission_index: Some(submitted.clone()),
-                timeout: Some(READBACK_SLICE),
-            }) {
-                Ok(_) | Err(wgpu::PollError::Timeout) => {}
-                Err(e) => return Err(Error::Readback(e.to_string())),
-            }
-            match rx.try_recv() {
-                Some(Ok(())) => return Ok(()),
-                // A callback that reports failure (or was dropped) may
-                // still have left the buffer mapped; the check below says.
-                Some(Err(e)) if !self.is_mapped() => return Err(Error::Readback(e)),
-                _ => {}
-            }
-            if self.is_mapped() {
-                return Ok(());
-            }
+                timeout: None,
+            })
+            .map_err(|e| Error::Readback(e.to_string()))?;
+        match rx.try_recv() {
+            Some(Ok(())) => Ok(()),
+            // A callback that reports failure (or was dropped) may still
+            // have left the buffer mapped; the check below says.
+            Some(Err(e)) if !self.is_mapped() => Err(Error::Readback(e)),
+            _ if self.is_mapped() => Ok(()),
+            _ => Err(Error::Readback(
+                "the GPU finished but the buffer was not mapped".into(),
+            )),
         }
-        Err(Error::Readback(format!(
-            "the GPU did not finish within {} s",
-            READBACK_WAIT.as_secs()
-        )))
     }
 
     /// Whether the buffer's mapping has completed. Asking for the range of
@@ -508,18 +512,6 @@ impl Readback {
         self.buffer.slice(..).get_mapped_range().is_ok()
     }
 }
-
-/// How long a readback waits for the GPU before it reports an error: far
-/// longer than any image takes (an 8192-pixel export draws in well under
-/// a second), short enough that a wedged device fails a request instead of
-/// hanging the app or a test run.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) const READBACK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// One `poll(Wait)` of a readback: short, so a mapping that completed on
-/// another thread is noticed promptly.
-#[cfg(not(target_arch = "wasm32"))]
-const READBACK_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Keeps `Surface::configure` from running while another thread submits
 /// on the same device. A configure waits for the queue to drain and fails
