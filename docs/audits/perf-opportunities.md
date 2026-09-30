@@ -1,6 +1,8 @@
 # Audit: performance opportunities not yet taken (at `e15eef7`)
 
-> **Status (2026-09-30).** P1 is done (`eval::callmemo`). Each item with
+> **Status (2026-09-30).** P1 is done (`eval::callmemo`). P2 is measured
+> (6–7% faster, identical output except recursion depth) with a local
+> script; releases do not use it yet. Each item with
 > a **Status** line records what became of it; the rest is the audit as
 > written.
 
@@ -134,6 +136,55 @@ while another agent was timing on the machine, so ±10%).
   less on kernel-bound models. Every workload except wasm.
 - **Risk:** none to output (FP unchanged). CI complexity: six dist
   targets need per-target profiles or PGO on macOS only. **Effort:** M.
+- **Status: measured, 6–7% faster; local script landed, releases not
+  yet.** `scripts/pgo.sh` builds `neoscad` instrumented, trains it with
+  `scripts/pgo-train.py` (every bench model to STL, four as PNGs, the
+  977 BOSL2 tests to `.echo`, every 8th BOSL2 doc example, OpenSCAD's
+  `examples/Basics` and `Functions`, `snapshot`/`check`/`measure`, a
+  served edit loop: 1,354 runs) and rebuilds with `-Cprofile-use`, same
+  thin LTO and codegen units; 110 s in all on an M4 Pro. Measured on
+  macOS arm64 at 7c4ebc0 against the plain release build, interleaved
+  processes, best of 5 (then of 3 twice), load 4–9 (XProtect was
+  scanning the new binaries):
+  - Bench models, ratio PGO / release: fractal_tree 0.93–0.97,
+    isosurface 0.88–0.89, screws 0.89–0.92, spring_handle 0.92–0.93,
+    gears 0.94–0.97, csg_deep_union 0.92–0.95, csg_spheres 0.95–0.96,
+    menger 0.89–0.91, extrude_twist 0.94–0.96, import_stl 0.92–0.93,
+    text_30lines 0.94 (1.04 once; 0.944 over 11 direct runs), the
+    minkowskis 0.95–0.98, cold start 0.98–1.00, `eval_only` 0.94–0.95.
+    Geometric mean over the models of 30 ms or more: 0.933, 0.928, 0.939.
+  - Held out (not in the training run): the other eight BOSL2
+    `examples/` 0.87–0.97, every 16th odd-numbered BOSL2 doc example
+    (158 exports summed) 0.91, 200 of `tests/data/scad` to `.echo`
+    0.97–0.98, OpenSCAD's `examples/Old`, `Advanced`, `Parametric`
+    0.90–1.01. Geometric mean 0.939, 0.933, 0.935. The worst single
+    ratio, example018 at 1.03–1.06 on a 12 ms run, is 0.963 over 21
+    direct runs.
+  - `lto = "fat"` gains nothing here: 0.994 alone, and 0.989 with the
+    thin-LTO profile. Not pursued.
+- **Identity:** `conformance run --binary` gives 1,773 passed, 0 failed
+  with the PGO binary. Of 3,325 exports (bench models to STL and
+  `--render` PNG; every `tests/data/scad` file to `.echo`, STL and CSG;
+  every 4th odd-numbered BOSL2 doc example to STL and `.echo`; the BOSL2
+  tests to `.echo`), 3,321 are byte-identical and exit codes all match.
+  The other four print how deep recursion got before the stack budget
+  (`recursion.rs`'s 48 MiB): PGO inlines more into the recursive
+  evaluator, so its frames are larger. `recursion-test-function3`
+  excludes 40,825 frames instead of 82,745, `recursion-test-module` and
+  `-vector` 34,353 instead of 52,399, and `issue4172` prints 11 fewer
+  nested vectors. The nightly excludes 9,170 and 30,261 frames, so a
+  PGO build still recurses at least as deep as OpenSCAD, which is what
+  `DEFAULT_STACK_LIMIT` promises, but the module margin shrinks from 73%
+  to 13%. The conformance suite cannot see this (OpenSCAD's expected
+  files are cut to one frame).
+- **Releases (not done):** see `followups.md`, "Performance". cargo-dist
+  0.33 has no PGO option that could be found in this checkout (whether
+  it has one upstream is unverified). The only hook is
+  `github-build-setup`, whose steps run before `dist build`
+  (`release.yml:138` to `:176`), so it could train and export
+  `RUSTFLAGS=-Cprofile-use=…`, which is simple only on the native
+  targets: `x86_64-apple-darwin` is cross-built on the arm64 `macos-15`
+  runner, so its instrumented binary would need Rosetta there.
 
 ### P3. A persistent parse-and-lower cache for the one-shot command line
 
@@ -305,7 +356,7 @@ fractal_tree or the edit loop. Do P1 first, which shares the machinery.
 ## Not verified
 
 - The shares of key hashing (P4) and PNG encoding (P6) in warm times: no
-  profiling was run. The gains of P2 and P7 on this codebase.
+  profiling was run. (P2 and P7 have since been measured.)
 - Whether `$` reads in BOSL2's attach code keep P1's hit rate near 2 keys
   per depth (`distributors.scad` mentions `$idx` 64 times). Answered by
   P1's status: `$transform` would have made it zero.
@@ -319,7 +370,8 @@ fractal_tree or the edit loop. Do P1 first, which shares the machinery.
 3. P7: build the web core with `+simd128`; diff outputs against native.
    (S) *Tried: identical output, no speed-up; not landed.*
 4. P2: a `cargo pgo` build for macOS arm64, measured interleaved against
-   HEAD on the bench models. (M)
+   HEAD on the bench models. (M) *Measured: 6–7%; `scripts/pgo.sh`
+   landed, release integration in `followups.md`.*
 5. P1: a gated prototype for modules without children, measured on
    fractal_tree and checked by `incremental.rs`'s harness. (L)
 6. P3: serialise `lang::fragment` keyed on content hash and build id,
