@@ -1,0 +1,12 @@
+# Build output of the .NET projects.
+bin/
+obj/
+*.user
+.vs/
+# Generated from crates/ffi by scripts/windows/build-core.ps1 (like
+# apple/Core/Generated): the C# binding and the core's DLL.
+NeoSCAD.Bindings/Generated/
+native/
+# The editor bundle, copied from apple/Editor/web/dist at build time.
+NeoSCAD.App/Editor/dist/
+TestResults/

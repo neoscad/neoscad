@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A document window: menu bar, then the editor (left) beside the 3D view
+  over the console (right), and a status line. Mica behind it all, the
+  system's light or dark theme throughout (the view's colour scheme
+  follows it too; ViewportPanel.cs).
+-->
+<Window
+    x:Class="NeoSCAD.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="NeoSCAD">
+  <Window.SystemBackdrop>
+    <MicaBackdrop />
+  </Window.SystemBackdrop>
+
+  <Grid x:Name="Root">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <MenuBar Grid.Row="0">
+      <MenuBarItem Title="File">
+        <MenuFlyoutItem Text="New" Click="OnNew">
+          <MenuFlyoutItem.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control" Key="N" />
+          </MenuFlyoutItem.KeyboardAccelerators>
+        </MenuFlyoutItem>
+        <MenuFlyoutItem Text="Open…" Click="OnOpen">
+          <MenuFlyoutItem.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control" Key="O" />
+          </MenuFlyoutItem.KeyboardAccelerators>
+        </MenuFlyoutItem>
+        <MenuFlyoutSubItem x:Name="ExamplesMenu" Text="Examples" />
+        <MenuFlyoutSeparator />
+        <MenuFlyoutItem Text="Save" Click="OnSave">
+          <MenuFlyoutItem.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control" Key="S" />
+          </MenuFlyoutItem.KeyboardAccelerators>
+        </MenuFlyoutItem>
+        <MenuFlyoutItem Text="Save As…" Click="OnSaveAs">
+          <MenuFlyoutItem.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control,Shift" Key="S" />
+          </MenuFlyoutItem.KeyboardAccelerators>
+        </MenuFlyoutItem>
+        <MenuFlyoutSeparator />
+        <MenuFlyoutItem Text="Export STL…" Click="OnExportStl" />
+        <MenuFlyoutItem Text="Export Image…" Click="OnExportImage" />
+        <MenuFlyoutSeparator />
+        <MenuFlyoutItem Text="Exit" Click="OnExit" />
+      </MenuBarItem>
+      <MenuBarItem Title="Design">
+        <MenuFlyoutItem Text="Preview" Click="OnPreview">
+          <MenuFlyoutItem.KeyboardAccelerators>
+            <KeyboardAccelerator Key="F5" />
+          </MenuFlyoutItem.KeyboardAccelerators>
+        </MenuFlyoutItem>
+        <MenuFlyoutItem Text="Render" Click="OnRender">
+          <MenuFlyoutItem.KeyboardAccelerators>
+            <KeyboardAccelerator Key="F6" />
+          </MenuFlyoutItem.KeyboardAccelerators>
+        </MenuFlyoutItem>
+      </MenuBarItem>
+      <MenuBarItem Title="View">
+        <MenuFlyoutItem Text="View All" Click="OnViewAll" />
+        <MenuFlyoutItem Text="Reset View" Click="OnResetView" />
+        <MenuFlyoutSeparator />
+        <MenuFlyoutItem Text="Top" Tag="Top" Click="OnPreset" />
+        <MenuFlyoutItem Text="Bottom" Tag="Bottom" Click="OnPreset" />
+        <MenuFlyoutItem Text="Left" Tag="Left" Click="OnPreset" />
+        <MenuFlyoutItem Text="Right" Tag="Right" Click="OnPreset" />
+        <MenuFlyoutItem Text="Front" Tag="Front" Click="OnPreset" />
+        <MenuFlyoutItem Text="Back" Tag="Back" Click="OnPreset" />
+        <MenuFlyoutItem Text="Diagonal" Tag="Diagonal" Click="OnPreset" />
+      </MenuBarItem>
+    </MenuBar>
+
+    <Grid Grid.Row="1" Padding="8,0,8,0" ColumnSpacing="8">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" MinWidth="240" />
+        <ColumnDefinition Width="*" MinWidth="240" />
+      </Grid.ColumnDefinitions>
+
+      <Border Grid.Column="0" CornerRadius="{StaticResource OverlayCornerRadius}"
+              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+        <Grid>
+          <WebView2 x:Name="EditorView" />
+          <TextBlock x:Name="EditorError" Visibility="Collapsed" Margin="16"
+                     TextWrapping="Wrap" Style="{ThemeResource BodyTextBlockStyle}" />
+        </Grid>
+      </Border>
+
+      <Grid Grid.Column="1" RowSpacing="8">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="3*" />
+          <RowDefinition Height="*" MinHeight="96" />
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" CornerRadius="{StaticResource OverlayCornerRadius}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+          <Grid>
+            <SwapChainPanel x:Name="ViewPanel" />
+            <TextBlock x:Name="ViewError" Visibility="Collapsed" Margin="16"
+                       TextWrapping="Wrap" Style="{ThemeResource BodyTextBlockStyle}" />
+          </Grid>
+        </Border>
+        <Border Grid.Row="1" CornerRadius="{StaticResource OverlayCornerRadius}"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+          <ListView x:Name="ConsoleList" SelectionMode="None" Padding="0,4,0,4" />
+        </Border>
+      </Grid>
+    </Grid>
+
+    <TextBlock x:Name="Status" Grid.Row="2" Margin="12,6,12,8"
+               Style="{ThemeResource CaptionTextBlockStyle}"
+               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+  </Grid>
+</Window>

@@ -1268,6 +1268,13 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   (it uses `/proc` or `ps`), so its resident bounds and its 1 GB kill
   guard do nothing on that job; only the limits' errors are checked.
   `tasklist`/`taskkill` or `GetProcessMemoryInfo` would cover it.
+- The Windows app (milestone 1, `docs/windows-app.md`) was written
+  without a Windows machine: its XAML, launch, WebView2 scheme and
+  `SwapChainPanel` drawing are first exercised by
+  `.github/workflows/windows-app.yml`, which is `continue-on-error` until
+  green. Its milestone 2 list is in that document ("Next"); the
+  generator pin (`$BindgenRev` in `scripts/windows/build-core.ps1`, an
+  open uniffi-bindgen-cs pull request) should move to a release.
 
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.

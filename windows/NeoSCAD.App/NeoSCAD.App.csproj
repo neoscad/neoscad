@@ -1,0 +1,47 @@
+<!--
+  The Windows app: WinUI 3 (Windows App SDK), unpackaged and self-contained
+  for milestone 1 (MSIX packaging is next; docs/windows-app.md). Build
+  after scripts/windows/build-core.ps1:
+
+    dotnet build windows/NeoSCAD.App -c Release -r win-x64 -p:Platform=x64
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>NeoSCAD.App</RootNamespace>
+    <AssemblyName>NeoSCAD</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <!-- Unpackaged, with the Windows App SDK runtime copied beside the app,
+         so it runs from its build folder with nothing installed first. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <Version>0.1.1</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NeoSCAD.Host\NeoSCAD.Host.csproj" />
+  </ItemGroup>
+
+  <!-- The CodeMirror bundle, shared with the macOS app and the web demo
+       (apple/Editor/web/dist, built by build-core.ps1), served from
+       Editor\ beside the executable (Editor/EditorHost.cs). -->
+  <ItemGroup>
+    <Content Include="..\..\apple\Editor\web\dist\*.*" Link="Editor\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="NeoScadCheckEditor" BeforeTargets="Build">
+    <Warning Condition="!Exists('..\..\apple\Editor\web\dist\editor.html')"
+             Text="The editor bundle is missing (apple/Editor/web/dist): run scripts/windows/build-core.ps1; the app will show an error in place of the editor." />
+  </Target>
+</Project>

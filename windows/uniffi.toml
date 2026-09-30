@@ -1,0 +1,13 @@
+# uniffi-bindgen-cs's settings for the C# binding of crates/ffi
+# (scripts/windows/build-core.ps1 passes it with --config). Kept here, not
+# in crates/ffi, so the Swift generator's input stays as it was.
+[bindings.csharp]
+# The binding's namespace; the app's own code is NeoSCAD.Host and NeoSCAD.App.
+namespace = "NeoSCAD.Native"
+# The library P/Invoke loads: neoscad_ffi.dll on Windows (libneoscad_ffi.so
+# for the tests in scripts/windows/docker-test.sh).
+cdylib_name = "neoscad_ffi"
+# Public: NeoSCAD.App uses the binding from another assembly.
+access_modifier = "public"
+# The free functions (examples(), format_number(), ...): NeoScad.Examples().
+global_methods_class_name = "NeoScad"

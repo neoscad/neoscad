@@ -1,0 +1,19 @@
+<!--
+  Settings every project in windows/ shares. The generated binding is
+  compiled with its own relaxed warnings (NeoSCAD.Core.csproj); everything
+  written by hand builds with warnings as errors, as the Rust side does with
+  clippy's -D warnings.
+-->
+<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <!-- Where scripts/windows/build-core.ps1 puts the core's DLL
+         (native/<rid>/neoscad_ffi.dll) and, for the tests off Windows,
+         scripts/windows/docker-test.sh its .so. -->
+    <NeoScadNativeDir>$(MSBuildThisFileDirectory)native\</NeoScadNativeDir>
+  </PropertyGroup>
+</Project>

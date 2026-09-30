@@ -1,0 +1,121 @@
+# The Windows app (windows/, docs/windows-app.md), milestone 1: builds the
+# core's DLL and the C# binding (scripts/windows/build-core.ps1), runs the
+# host-logic and binding tests, builds the WinUI app, launches it on one
+# of the core's examples and uploads a screenshot for a person to look at.
+#
+# Non-blocking while the app is new (`continue-on-error`): a red job here
+# does not fail a pull request. Runs only when something the app is built
+# from changes, and on demand.
+name: Windows app
+
+on:
+  pull_request:
+    paths:
+      - "windows/**"
+      - "crates/ffi/**"
+      - "crates/client/**"
+      - "apple/Editor/web/**"
+      - "scripts/windows/**"
+      - ".github/workflows/windows-app.yml"
+  push:
+    branches: [main]
+    paths:
+      - "windows/**"
+      - "crates/ffi/**"
+      - "crates/client/**"
+      - "apple/Editor/web/**"
+      - "scripts/windows/**"
+      - ".github/workflows/windows-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-app-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  app:
+    name: app (${{ matrix.arch }})
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            platform: x64
+          - arch: arm64
+            runner: windows-11-arm
+            platform: ARM64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-app-${{ matrix.arch }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: The core's DLL, the C# binding and the editor bundle
+        shell: pwsh
+        run: scripts/windows/build-core.ps1 -Arch ${{ matrix.arch }}
+
+      - name: Host logic and binding tests (against the real core)
+        shell: pwsh
+        run: dotnet test windows/NeoSCAD.Tests/NeoSCAD.Tests.csproj -c Release -p:NeoScadRid=win-${{ matrix.arch }}
+
+      - name: Build the app
+        shell: pwsh
+        run: >
+          dotnet build windows/NeoSCAD.App/NeoSCAD.App.csproj -c Release
+          -r win-${{ matrix.arch }} -p:Platform=${{ matrix.platform }}
+          -p:NeoScadRid=win-${{ matrix.arch }}
+
+      # Launch on an example, give it time to start WebView2 and run the
+      # preview, check it is still running (it did not crash on start),
+      # photograph the screen and close it. The screenshot is for people:
+      # nothing here checks what it shows.
+      - name: Launch and take a screenshot
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter NeoSCAD.exe windows/NeoSCAD.App/bin/${{ matrix.platform }}/Release |
+            Select-Object -First 1
+          if (-not $exe) { throw "no NeoSCAD.exe was built" }
+          $app = Start-Process -FilePath $exe.FullName -ArgumentList '--example', 'gear' -PassThru
+          Start-Sleep -Seconds 25
+          $alive = -not $app.HasExited
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          New-Item -ItemType Directory -Force -Path screenshots | Out-Null
+          $bitmap.Save("screenshots/neoscad-windows-${{ matrix.arch }}.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          $graphics.Dispose()
+          $bitmap.Dispose()
+          if ($alive) {
+            Stop-Process -Id $app.Id -Force
+          } else {
+            throw "NeoSCAD.exe exited within 25 s (exit code $($app.ExitCode))"
+          }
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: neoscad-windows-${{ matrix.arch }}-screenshot
+          path: screenshots/
+          if-no-files-found: warn

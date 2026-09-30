@@ -224,6 +224,11 @@ Run cancellation and supersession: `session`. Annotation drawing,
   `Core::preview_picture`, `preview_html`; `QuickLook.swift` keeps the
   watchdog.
 - Step 7 (C# bindgen CI) and step 8's owner decisions: not started here.
+  Step 7 since done with the Windows app (`docs/windows-app.md`,
+  "Bindings"): `ffi` stays on 0.32.2 and the C# generator is pinned to
+  uniffi-bindgen-cs's 0.32 pull request; its CI job generates the
+  binding. Of the unverified points above, `#[uniffi(default = [])]`
+  comes out as a C# default of `null` (worked around in the host).
 
 ## Recommended extraction plan
 

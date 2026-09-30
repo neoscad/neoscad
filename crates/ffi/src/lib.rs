@@ -67,7 +67,10 @@ uniffi::setup_scaffolding!();
 /// the system malloc. Nothing allocated on one side is freed on the other:
 /// UniFFI hands buffers back to Rust to free. It also made the app's
 /// `MallocLargeCache=0` launch environment moot (`apple/project.yml`): the
-/// core's large buffers no longer pass through the system allocator.
+/// core's large buffers no longer pass through the system allocator. The
+/// Windows app's DLL is the same: .NET frees nothing the core allocated.
+/// Off only for cross-checking the Windows build (Cargo.toml).
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

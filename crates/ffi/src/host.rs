@@ -73,8 +73,8 @@ fn entropy_seed() -> u32 {
 /// in the process. Until phase 8f it opened a Metal device of its own,
 /// because `Offscreen` dropped the instance a window surface needs; one
 /// device serves both now, so the app pays for one set of queues,
-/// pipeline caches and driver allocations. Metal only: this crate is
-/// built for macOS. `picture` draws on it too.
+/// pipeline caches and driver allocations. Metal on macOS, Direct3D 12 on
+/// Windows ([`VIEWPORT_BACKENDS`]). `picture` draws on it too.
 pub(crate) fn offscreen() -> Result<&'static Offscreen, String> {
     static DEVICE: OnceLock<Result<Offscreen, String>> = OnceLock::new();
     DEVICE
@@ -83,13 +83,23 @@ pub(crate) fn offscreen() -> Result<&'static Offscreen, String> {
         .map_err(Clone::clone)
 }
 
+/// The graphics API the window surfaces need: a `CAMetalLayer` takes
+/// Metal and a `SwapChainPanel` Direct3D 12 (`layer.rs`). Elsewhere (the
+/// core's tests off macOS and Windows) whatever wgpu supports first.
+#[cfg(target_vendor = "apple")]
+const VIEWPORT_BACKENDS: Backends = Backends::METAL;
+#[cfg(windows)]
+const VIEWPORT_BACKENDS: Backends = Backends::DX12;
+#[cfg(not(any(target_vendor = "apple", windows)))]
+const VIEWPORT_BACKENDS: Backends = Backends::PRIMARY;
+
 /// The GPU the viewports (and snapshots) draw on, opened on first use and
 /// shared by every window and by the background uploads for them. It keeps
 /// the instance it was opened on, which a window surface must come from.
 pub fn viewport_gpu() -> Result<Arc<render::viewport::Gpu>, String> {
     static GPU: OnceLock<Result<Arc<render::viewport::Gpu>, String>> = OnceLock::new();
     GPU.get_or_init(|| {
-        render::viewport::Gpu::new_blocking(Backends::METAL)
+        render::viewport::Gpu::new_blocking(VIEWPORT_BACKENDS)
             .map(Arc::new)
             .map_err(|e| e.to_string())
     })

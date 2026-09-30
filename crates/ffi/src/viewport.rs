@@ -215,6 +215,34 @@ impl Viewport {
         })
     }
 
+    /// Draw into a WinUI 3 `SwapChainPanel` from now on: `panel` is the
+    /// address of its `ISwapChainPanelNative` interface (see `layer.rs`
+    /// for the contract: live for the call, on the UI thread), `width` by
+    /// `height` in the panel's device-independent pixels at `scale`
+    /// physical pixels each. The Windows app's counterpart of
+    /// [`Viewport::attach_layer`]; on other platforms an error.
+    pub fn attach_swap_chain_panel(
+        &self,
+        panel: u64,
+        width: f64,
+        height: f64,
+        scale: f64,
+        readable: bool,
+    ) -> Result<(), CoreError> {
+        guarded(|| {
+            let surface = layer::surface_from_swap_chain_panel(self.gpu.instance(), panel)?;
+            self.lock()
+                .attach_surface(
+                    surface,
+                    Self::pixels(width, scale),
+                    Self::pixels(height, scale),
+                    scale,
+                    readable,
+                )
+                .map_err(failed)
+        })
+    }
+
     /// Stop drawing and release the layer. Whether one was attached.
     pub fn detach(&self) -> Result<bool, CoreError> {
         guarded(|| Ok(self.lock().detach()))

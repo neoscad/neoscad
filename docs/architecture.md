@@ -78,8 +78,9 @@ one timer), the file-manager preview's notes and page (`preview.rs`) and
 the examples, embedded from `web/examples/` (`examples.rs`). `ffi`
 exports them to UniFFI as free functions, synchronous objects
 (`EditorText`, `DocumentController` with a `with_foreign`
-`DocumentObserver`) and records, in shapes `uniffi-bindgen-cs` (uniffi
-0.31) also takes; the web worker sends the tables in `defaults` and the
+`DocumentObserver`) and records, which Swift and `uniffi-bindgen-cs`
+(the Windows app's C#, pinned to its uniffi 0.32 build;
+`docs/windows-app.md`, "Bindings") both take; the web worker sends the tables in `defaults` and the
 summary with each run (`docs/web-protocol.md`). What stays in a host:
 windows, menus, persistence keys, file watching, the GPU surface, the
 editor's web view, timers and watchdogs, and locale-formatted numbers.
@@ -101,6 +102,7 @@ and statement memo, cancellation) sits under every long-lived client:
 | `neoscad mcp` | `crates/cli/src/mcp/` | MCP over stdio (`docs/mcp.md`); calls serve's `Local` in-process, not a socket | `Limits::AGENT`, `--limit` |
 | `neoscad lsp --stdio` | `crates/cli/src/lsp.rs` over `crates/lsp` | LSP over stdio, its own session, debounced diagnostics | `Limits::AGENT`, `--limit` |
 | macOS app | `crates/ffi` | UniFFI; the `lsp` server runs in-process per window over the app's session | `Limits::AGENT` (`ffi/src/host.rs`); Quick Look 5 s / 512 MiB |
+| Windows app | `crates/ffi` (as a DLL) | UniFFI through uniffi-bindgen-cs's C#; the `lsp` server in-process per window | `Limits::AGENT` (`ffi/src/host.rs`) |
 
 Every host catches a panicking request (`serve`, `mcp` and `lsp` per
 request, `ffi`'s `guarded` per call) and keeps its session; see "Panics".
@@ -182,6 +184,17 @@ request, `ffi`'s `guarded` per call) and keeps its session; see "Panics".
   server per window (sharing the session and its cache of analysed
   library files). Go to definition opens the user's own files as documents
   and library files (BOSL2, the bundled MCAD) read-only in a tab.
+- **Windows: the same hybrid** (`windows/`, `docs/windows-app.md`). A
+  WinUI 3 shell in C# (Windows App SDK, Fluent controls, Mica) calls the
+  same core through UniFFI's C# binding (uniffi-bindgen-cs), loaded as
+  `neoscad_ffi.dll`. The wgpu viewport draws with Direct3D 12 into a XAML
+  `SwapChainPanel` (`Viewport::attach_swap_chain_panel`, `ffi/src/layer.rs`);
+  the editor is the same CodeMirror bundle in WebView2, served under the
+  same `neoscad-editor:` scheme and speaking the same bridge protocol;
+  the document loop is the core's `DocumentController` with a
+  `DispatcherQueueTimer`. Its non-UI host logic (`windows/NeoSCAD.Host`)
+  is plain .NET and tested on Linux too. Milestone 1: one window, edit,
+  preview, render, export; packaging and the panels are next.
 - **The document loop** (8f, `crates/ffi/src/document.rs`,
   `apple/App/Document/DocumentLoop.swift`): each pause in typing (and
   each customizer edit, or change on disk to a file the model read) runs

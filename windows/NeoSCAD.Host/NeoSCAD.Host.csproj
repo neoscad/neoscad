@@ -1,0 +1,15 @@
+<!--
+  The Windows app's logic that is not UI: the document loop's host side,
+  the editor bridge's protocol and page serving, the language server
+  bridge. Plain net10.0 so NeoSCAD.Tests runs it on any OS; the WinUI
+  project (NeoSCAD.App) adds only windows, controls and their wiring.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>NeoSCAD.Host</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\NeoSCAD.Bindings\NeoSCAD.Bindings.csproj" />
+  </ItemGroup>
+</Project>

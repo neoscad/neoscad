@@ -1,6 +1,6 @@
 [package]
 name = "neoscad-ffi"
-description = "The NeoSCAD core for the macOS app: a UniFFI bridge over `session::Session` (native only; not part of the WASM build)"
+description = "The NeoSCAD core for the macOS and Windows apps: a UniFFI bridge over `session::Session` (native only; not part of the WASM build)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,9 +9,21 @@ publish = false
 
 [lib]
 name = "neoscad_ffi"
-# `staticlib` is what the app links (through the XCFramework that
-# scripts/apple/build-core.sh makes); `lib` is for `cargo test`.
+# `staticlib` is what the macOS app links (through the XCFramework that
+# scripts/apple/build-core.sh makes); `lib` is for `cargo test`. The
+# Windows app loads a DLL, which scripts/windows/build-core.ps1 asks for
+# with `cargo rustc --crate-type cdylib`, so macOS builds do not link a
+# dylib nobody uses.
 crate-type = ["staticlib", "lib"]
+
+[features]
+default = ["mimalloc"]
+# mimalloc as the core's global allocator (`lib.rs`). A feature only so
+# that `cargo clippy --target x86_64-pc-windows-msvc -p neoscad-ffi` can
+# run off Windows: mimalloc's C sources need MSVC and the Windows SDK
+# headers, which a cross check does not have (as for `neoscad-cli`,
+# docs/serve-protocol.md, "Platforms"). Every app build keeps it on.
+mimalloc = ["dep:mimalloc"]
 
 [dependencies]
 assets = { package = "neoscad-assets", path = "../assets" }
@@ -26,7 +38,7 @@ serde_json.workspace = true
 session = { package = "neoscad-session", path = "../session" }
 text = { package = "neoscad-text", path = "../text" }
 # The global allocator of the app's core (see `lib.rs`).
-mimalloc.workspace = true
+mimalloc = { workspace = true, optional = true }
 uniffi = { version = "=0.32.2", default-features = false }
 # The window surface for the viewport: `SurfaceTargetUnsafe` (the same
 # wgpu the renderer uses; no second copy is built).
