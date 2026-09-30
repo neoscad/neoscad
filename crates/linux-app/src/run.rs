@@ -1,15 +1,17 @@
 //! A document run and the exports, off the GTK main thread: what
 //! `Core::run_document` and `Core::export_file` do for the macOS app
 //! (`crates/ffi/src/document.rs`, `inspect.rs`), over the same `client`
-//! calls, minus UniFFI and the language server (not in this milestone).
+//! calls, minus UniFFI.
 //!
 //! The window's loop (`client::DocumentLoop`) decides when to run and
 //! whether a result is still current; this module only runs.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use client::{Client, ConsoleLine, CoreError, RenderMode, RenderResult, RunPlan};
+
+use crate::language::Language;
 
 /// The `$vpt`, `$vpr`, `$vpd` and `$vpf` a file assigned (`None` for those
 /// it did not): OpenSCAD's GUI moves its camera to them after a run.
@@ -34,17 +36,46 @@ pub struct RunOutput {
 /// Run `plan` on `client`: evaluate and build the document as its request
 /// asks, seen from `camera` (the program reads the view it is shown in,
 /// as in OpenSCAD's GUI), and upload what it built to `gpu`.
+///
+/// With `language`, the run's diagnostics become the editor's markers
+/// (`crates/ffi/src/document.rs` does the same for the macOS app): the
+/// evaluation's go to the server as soon as it ends, before the geometry
+/// stage (which a large preview can spend seconds in), and the finished
+/// run's again only if the geometry stage added to them. Both are
+/// delivered through the server's sink from this thread, in that order,
+/// so a later publication never arrives before an earlier one.
 pub fn run_document(
     client: &Client,
     plan: &RunPlan,
     camera: eval::Camera,
     scheme: &render::ColorScheme,
     gpu: Option<&render::viewport::Gpu>,
+    language: Option<&Language>,
 ) -> Result<RunOutput, CoreError> {
     let (mut run, doc, text) = client.document_run(&plan.path, &plan.request)?;
     run.camera = camera;
     let mode = plan.request.mode;
+    let published: Arc<Mutex<Option<Vec<serde_json::Value>>>> = Arc::default();
+    if let Some(ls) = language {
+        let (ls, published) = (ls.clone(), published.clone());
+        let (doc, text) = (doc.clone(), text.clone());
+        run.on_evaluated = Some(Arc::new(move |log: &session::Log| {
+            let diags = log.diagnostics_json();
+            ls.supply(&doc, text.clone(), diags.clone());
+            *published.lock().unwrap_or_else(PoisonError::into_inner) = Some(diags);
+        }));
+    }
     let r = client.session.render(&run, mode.into(), scheme)?;
+    if let Some(ls) = language {
+        let diags = r.log.diagnostics_json();
+        let early = published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if early.as_ref() != Some(&diags) {
+            ls.supply(&doc, text.clone(), diags);
+        }
+    }
     let scene = match (&r.tree, &r.geometry) {
         (Some(tree), _) => Some(render::preview::scene(
             tree,
@@ -184,8 +215,15 @@ mod tests {
         l.schedule(0);
         let mode = l.due(1_000).unwrap();
         let plan = l.begin_run(mode, path).unwrap();
-        let out =
-            run_document(&c, &plan, camera(), &render::ColorScheme::cornfield(), None).unwrap();
+        let out = run_document(
+            &c,
+            &plan,
+            camera(),
+            &render::ColorScheme::cornfield(),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(out.render.exit_code, 0);
         assert!(l.is_current(out.generation));
         assert!(
@@ -209,8 +247,15 @@ mod tests {
         c.open(path, Some("cube(3);".into())).unwrap();
         let mut l = DocumentLoop::new(0);
         let plan = l.begin_run(RenderMode::Render, path).unwrap();
-        let out =
-            run_document(&c, &plan, camera(), &render::ColorScheme::cornfield(), None).unwrap();
+        let out = run_document(
+            &c,
+            &plan,
+            camera(),
+            &render::ColorScheme::cornfield(),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(
             out.summary.contains("3D, bbox 3 × 3 × 3"),
             "{}",
@@ -232,5 +277,63 @@ mod tests {
         assert_eq!(std::fs::metadata(&stl).unwrap().len(), r.bytes);
         assert!(!dir.join(".m.stl.neoscad-export").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A run with the editor's server: the diagnostics become markers for
+    /// the client's version with the text the run read.
+    #[test]
+    fn a_runs_diagnostics_become_the_editors_markers() {
+        use crate::language::{self, tests as lt};
+        use serde_json::json;
+        let c = lt::client();
+        let (ls, rx) = lt::server_over(c.clone());
+        ls.send(lt::msg(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"capabilities": {}}}),
+        ));
+        lt::next(&rx);
+        let path = "/nonexistent-neoscad-linux-app/lsp.scad";
+        let uri = language::document_uri(path);
+        let text = "echo(nope); cube(1);";
+        ls.send(lt::msg(
+            json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "openscad", "version": 4, "text": text}}}),
+        ));
+        // The worker answers in order: once this is answered, didOpen
+        // has been handled.
+        ls.send(lt::msg(
+            json!({"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover",
+            "params": {"textDocument": {"uri": uri}, "position": {"line": 0, "character": 13}}}),
+        ));
+        assert_eq!(lt::next(&rx)[0]["id"], 2);
+        c.open(path, Some(text.into())).unwrap();
+        let mut l = DocumentLoop::new(0);
+        let plan = l.begin_run(RenderMode::Preview, path).unwrap();
+        run_document(
+            &c,
+            &plan,
+            camera(),
+            &render::ColorScheme::cornfield(),
+            None,
+            Some(&ls),
+        )
+        .unwrap();
+        let out = lt::next(&rx);
+        assert_eq!(out[0]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(out[0]["params"]["uri"], uri);
+        assert_eq!(out[0]["params"]["version"], 4);
+        let diags = out[0]["params"]["diagnostics"].as_array().unwrap();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d["message"].as_str().unwrap_or("").contains("nope")),
+            "{diags:?}"
+        );
+        // A preview adds no geometry warnings: one publication, not two.
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err()
+        );
+        ls.stop();
     }
 }

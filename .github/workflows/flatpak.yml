@@ -1,0 +1,62 @@
+# The Linux app's Flatpak (linux/flatpak/org.neoscad.NeoSCAD.yml,
+# docs/linux-app.md "Flatpak"): generates the offline cargo and npm
+# sources from the lock files, builds the app in the GNOME 51 SDK the way
+# Flathub does (no network during the build), and uploads the bundle as
+# an artifact to install with `flatpak install --user neoscad.flatpak`.
+#
+# Not blocking: the manifest, the metainfo and the desktop file were
+# validated when this was added (appstreamcli, desktop-file-validate,
+# flatpak-builder --show-manifest, flatpak-builder-lint), but the build
+# itself had not yet run to the end anywhere. Make it blocking once it has
+# passed here.
+#
+# Runs only when something the Flatpak is built from changes, and on
+# demand.
+name: Flatpak
+
+on:
+  pull_request:
+    paths:
+      - "linux/**"
+      - "crates/linux-app/**"
+      - "apple/Editor/web/**"
+      - "Cargo.lock"
+      - ".github/workflows/flatpak.yml"
+  push:
+    branches: [main]
+    paths:
+      - "linux/**"
+      - "crates/linux-app/**"
+      - "apple/Editor/web/**"
+      - "Cargo.lock"
+      - ".github/workflows/flatpak.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flatpak-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  flatpak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    continue-on-error: true
+    # Flathub's image with flatpak-builder and the GNOME 51 runtime and
+    # SDK; flatpak-builder's sandbox needs the privileges.
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Offline sources from the lock files
+        run: linux/flatpak/generate-sources.sh
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: linux/flatpak/org.neoscad.NeoSCAD.yml
+          bundle: neoscad.flatpak
+          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock', 'apple/Editor/web/package-lock.json') }}

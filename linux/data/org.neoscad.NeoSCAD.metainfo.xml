@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The Linux app's AppStream metadata (docs/linux-app.md, "Flatpak"). -->
+<component type="desktop-application">
+  <id>org.neoscad.NeoSCAD</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0-or-later</project_license>
+
+  <name>NeoSCAD</name>
+  <summary>Model solid 3D objects in code</summary>
+  <developer id="org.neoscad">
+    <name>The NeoSCAD Developers</name>
+  </developer>
+
+  <description>
+    <p>
+      NeoSCAD is a new implementation of the OpenSCAD language. You
+      describe a model in code, and NeoSCAD previews it as you type and
+      renders it for printing or machining. Your existing .scad files and
+      libraries, such as BOSL2 and MCAD, run as they are.
+    </p>
+    <ul>
+      <li>An editor with completion, hover documentation, go to definition and markers for errors and warnings</li>
+      <li>A live 3D preview after each pause in typing</li>
+      <li>A console whose messages jump to the line they are about</li>
+      <li>Export to STL and PNG</li>
+      <li>The MCAD library built in</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">org.neoscad.NeoSCAD.desktop</launchable>
+
+  <url type="homepage">https://neoscad.org</url>
+  <url type="bugtracker">https://github.com/neoscad/neoscad/issues</url>
+  <url type="vcs-browser">https://github.com/neoscad/neoscad</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>A model in the editor and its preview</caption>
+      <image>https://raw.githubusercontent.com/neoscad/neoscad/main/linux/data/screenshots/window.png</image>
+    </screenshot>
+  </screenshots>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#c8d1f2</color>
+    <color type="primary" scheme_preference="dark">#1f2238</color>
+  </branding>
+
+  <content_rating type="oars-1.1"/>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <keywords>
+    <keyword>OpenSCAD</keyword>
+    <keyword>CAD</keyword>
+    <keyword>3D</keyword>
+    <keyword>CSG</keyword>
+    <keyword>STL</keyword>
+  </keywords>
+
+  <releases>
+    <!-- The first release that ships the Linux app goes above this one
+         (docs/linux-app.md, "Submitting to Flathub"). -->
+    <release version="0.1.1" date="2026-09-30"/>
+  </releases>
+</component>

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Runs the Linux app headless and checks it works end to end: it opens a
 # model and previews it (the document loop, the core, the wgpu view on
-# Mesa's software Vulkan), and with the editor bundle, typing in the
-# editor previews the edited text again (the editor bridge). CI's
+# Mesa's software Vulkan). With the editor bundle, the language server
+# answers the page's `initialize` with real capabilities and a model with
+# a warning shows markers in the editor (the page counts them), and with
+# TYPE=1 typing in the editor previews the edited text again (the editor
+# bridge). CI's
 # linux-app job runs it; docs/linux-app.md shows how to run it in Docker
 # from macOS.
 #
@@ -96,6 +99,35 @@ launch() {
     sleep 1
 }
 
+# The language server: a model with a warning, whose run's diagnostics
+# must reach the page as markers. The app logs the capabilities the page's
+# `initialize` got and, after each publication, the page's own count of
+# its markers (`NeoSCADEditor.state()`).
+lsp_check() {
+    local log=$work/lsp.log
+    printf 'use <MCAD/regular_shapes.scad>\noctagon(5);\necho(no_such_variable);\n' \
+        >"$work/warning.scad"
+    dbus-run-session -- "$bin" "$work/warning.scad" >"$log" 2>&1 &
+    launcher=$!
+    wait_for "run 1 (Preview)" "$log" 300
+    wait_for "lsp: server -> page reply .*capabilities .*completionProvider" "$log" 60
+    wait_for "editor: [1-9][0-9]* markers, language server connected" "$log" 60
+    if [ "${TYPE:-}" = 1 ]; then
+        # Go to definition (F12) on `octagon`, at the start of line 2:
+        # MCAD's file opens read-only in a library viewer.
+        xdotool mousemove 300 500 click 1
+        sleep 0.5
+        xdotool key ctrl+Home Down F12
+        wait_for "library viewer: .*MCAD/regular_shapes.scad" "$log" 60
+    fi
+    grep "lsp: server -> page\|editor: .* markers\|definition at\|library viewer" "$log"
+    pkill -x "$name" || true
+    sleep 1
+}
+
+if [ -f "$NEOSCAD_EDITOR_DIR/editor.html" ]; then
+    lsp_check
+fi
 launch light
 if [ -n "${SHOTS:-}" ]; then
     launch dark

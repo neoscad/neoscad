@@ -186,11 +186,13 @@ jobs:
           $global:LASTEXITCODE = 0
 
   # The Linux desktop app (crates/linux-app, docs/linux-app.md): clippy and
-  # tests with GTK, then a headless run that opens a model, previews it
-  # and previews it again after typing in the editor. Ubuntu 24.04 is the
-  # first LTS with GTK 4.14, libadwaita 1.5 and WebKitGTK 6.0; the `test`
-  # jobs above build the crate without its `gtk` feature, so they need
-  # none of these packages.
+  # tests with GTK, then a headless run that opens a model, previews it,
+  # shows the language server's markers in the editor, goes to a
+  # definition in MCAD, and previews again after typing in the editor.
+  # Ubuntu 24.04 is the first LTS with GTK 4.14, libadwaita 1.5 and
+  # WebKitGTK 6.0; the `test` jobs above build the crate without its `gtk`
+  # feature, so they need none of these packages. The Flatpak is built by
+  # flatpak.yml.
   linux-app:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -218,7 +220,7 @@ jobs:
       - run: cargo build --locked -p neoscad-linux-app --features gtk
       - name: The editor bundle
         run: scripts/apple/build-editor.sh
-      - name: The app previews a model and follows typing, headless
+      - name: The app previews a model, shows markers and follows typing, headless
         run: TYPE=1 linux/smoke.sh target/debug/neoscad-gtk web/examples/CSG.scad
 
   wasm:

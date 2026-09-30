@@ -4,6 +4,7 @@
 
 mod console;
 mod editor;
+mod library;
 mod viewport;
 mod window;
 
@@ -17,7 +18,9 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 
 use client::Client;
+use linux_app::language::{self, Language, Sink, Target};
 
+use library::LibraryViewer;
 pub use window::Window;
 
 /// The application id: the D-Bus name, the desktop file's name and the
@@ -37,8 +40,18 @@ pub struct Shared {
     /// window would be a cycle), so without this the window's state would
     /// be dropped as soon as it was shown. A window leaves on destroy.
     windows: RefCell<Vec<Rc<Window>>>,
+    /// The read-only library files shown (one viewer per file), owned as
+    /// the windows are.
+    viewers: RefCell<Vec<Rc<LibraryViewer>>>,
+    /// Analysed library files, shared by every editor's language server,
+    /// so BOSL2 is indexed once per process.
+    lsp_cache: Arc<lsp::Cache>,
     /// Where the editor bundle is, found once.
     pub editor_dir: Option<PathBuf>,
+    /// `G_MESSAGES_DEBUG` names this app: the bridge also asks the page
+    /// how many markers it shows after each publication, for the log
+    /// (linux/smoke.sh checks it). Off, that is one call saved per run.
+    pub debug: bool,
 }
 
 impl std::fmt::Debug for Shared {
@@ -61,6 +74,37 @@ impl Shared {
         self.windows
             .borrow_mut()
             .retain(|w| !std::ptr::eq(Rc::as_ptr(w), window.as_ptr()));
+    }
+
+    /// A library viewer was destroyed.
+    pub fn forget_viewer(&self, viewer: &Weak<LibraryViewer>) {
+        self.viewers
+            .borrow_mut()
+            .retain(|v| !std::ptr::eq(Rc::as_ptr(v), viewer.as_ptr()));
+    }
+
+    /// A language server for one editor page, whose messages reach
+    /// `deliver` on the main thread in the order the server gave them.
+    /// The worker's answers and a run's markers come from other threads;
+    /// a channel read by one main-loop future keeps them in order, which
+    /// a main-context callback per message would not promise.
+    pub fn language(&self, deliver: impl Fn(String) + 'static) -> Language {
+        let (tx, mut rx) = futures_channel::mpsc::unbounded::<Vec<String>>();
+        let sink: Sink = Arc::new(move |m| {
+            let _ = tx.unbounded_send(m);
+        });
+        let ls = Language::start(self.client.clone(), self.lsp_cache.clone(), sink);
+        glib::spawn_future_local(async move {
+            use futures_util::StreamExt;
+            // Ends when every sender is gone: the server stopped and its
+            // last run finished.
+            while let Some(batch) = rx.next().await {
+                for m in batch {
+                    deliver(m);
+                }
+            }
+        });
+        ls
     }
 
     /// A path for a new untitled document named after `base`, in the home
@@ -95,7 +139,11 @@ pub fn run() -> glib::ExitCode {
             client: Arc::new(Client::new(linux_app::host::config())),
             started: Instant::now(),
             windows: RefCell::default(),
+            viewers: RefCell::default(),
+            lsp_cache: Arc::new(lsp::Cache::new()),
             editor_dir,
+            debug: std::env::var("G_MESSAGES_DEBUG")
+                .is_ok_and(|v| v.split([',', ' ']).any(|d| d == "neoscad" || d == "all")),
         });
         install_actions(app, &sh);
         *s.borrow_mut() = Some(sh);
@@ -145,8 +193,9 @@ fn target_window(app: &adw::Application, sh: &Rc<Shared>) -> Rc<Window> {
         .unwrap_or_else(|| new_window(app, sh))
 }
 
-/// Open the file at `path`, or show why it cannot be.
-pub fn open_path(app: &adw::Application, sh: &Rc<Shared>, path: PathBuf) {
+/// Open the file at `path`, or show why it cannot be; the window that
+/// shows it.
+pub fn open_path(app: &adw::Application, sh: &Rc<Shared>, path: PathBuf) -> Option<Rc<Window>> {
     // Already open: bring its window forward.
     if let Some(w) = sh
         .windows()
@@ -154,7 +203,7 @@ pub fn open_path(app: &adw::Application, sh: &Rc<Shared>, path: PathBuf) {
         .find(|w| w.file().as_deref() == Some(path.as_path()))
     {
         w.widget().present();
-        return;
+        return Some(w);
     }
     let text = std::fs::read(&path)
         .map_err(|e| e.to_string())
@@ -165,6 +214,7 @@ pub fn open_path(app: &adw::Application, sh: &Rc<Shared>, path: PathBuf) {
             let w = target_window(app, sh);
             w.replace_document(linux_app::document::Document::from_file(path, text), true);
             w.widget().present();
+            Some(w)
         }
         Err(e) => {
             let w = app
@@ -180,7 +230,59 @@ pub fn open_path(app: &adw::Application, sh: &Rc<Shared>, path: PathBuf) {
                     w
                 });
             w.toast(&format!("Could not open {}: {e}", path.display()));
+            None
         }
+    }
+}
+
+/// Go to a definition in another file (the editor's `open` message): a
+/// file of the user's own opens as a document, a library file read-only
+/// in a viewer (`language::target` has the rule), at the 0-based line
+/// and UTF-16 column. Why not, for the window it was reached from to
+/// say.
+pub fn open_location(
+    app: &adw::Application,
+    sh: &Rc<Shared>,
+    uri: &str,
+    line: u64,
+    character: u64,
+) -> Result<(), String> {
+    let dirs = sh.client.library_dirs();
+    let writable = |p: &std::path::Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && !m.permissions().readonly())
+    };
+    let target = language::target(uri, &dirs, writable);
+    glib::g_debug!("neoscad", "definition at {line}:{character} in {target:?}");
+    match target {
+        Some(Target::Document(path)) => {
+            // `open_path` shows its own message if the file cannot be
+            // read.
+            if let Some(w) = open_path(app, sh, path) {
+                w.reveal_at(line, character);
+            }
+            Ok(())
+        }
+        Some(Target::Library(path)) => {
+            let existing = sh
+                .viewers
+                .borrow()
+                .iter()
+                .find(|v| v.path() == path.as_path())
+                .cloned();
+            let v = match existing {
+                Some(v) => v,
+                None => {
+                    let v = LibraryViewer::new(app, sh.clone(), path.clone(), &dirs)
+                        .map_err(|e| format!("Could not show {}: {e}", path.display()))?;
+                    sh.viewers.borrow_mut().push(v.clone());
+                    v
+                }
+            };
+            v.widget().present();
+            v.reveal_at(line, character);
+            Ok(())
+        }
+        None => Err(format!("Could not open {uri}: not a file")),
     }
 }
 

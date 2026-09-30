@@ -1614,6 +1614,8 @@ dependencies = [
 name = "neoscad-linux-app"
 version = "0.1.1"
 dependencies = [
+ "futures-channel",
+ "futures-util",
  "gtk4",
  "libadwaita",
  "mimalloc",
@@ -1621,6 +1623,7 @@ dependencies = [
  "neoscad-client",
  "neoscad-eval",
  "neoscad-lang",
+ "neoscad-lsp",
  "neoscad-render",
  "neoscad-session",
  "neoscad-text",

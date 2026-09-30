@@ -2,6 +2,9 @@
 //! console, and the document loop that ties them (`client::DocumentLoop`:
 //! the host keeps one GLib timer and passes "now"; the loop decides when
 //! to run, what to send the core, and whether a result is current).
+//!
+//! Each window's editor has a language server of its own
+//! (`linux_app::language`), whose markers come from the window's runs.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -16,6 +19,7 @@ use webkit6::prelude::WebViewExt;
 use client::{CoreError, DocumentLoop, RenderMode, SourceRange};
 use linux_app::bridge::{self, ChangeOutcome, EditorBridge, Incoming};
 use linux_app::document::{self, Document};
+use linux_app::language::{self, Language};
 use linux_app::run::{self, FileView};
 use linux_app::view::ViewCanvas;
 
@@ -56,6 +60,11 @@ struct State {
     /// The file's `$vp*` last applied: the view moves only when the file
     /// asks for a different one, not back after every keystroke.
     file_view: Option<FileView>,
+    /// The editor's language server (none without the editor bundle).
+    language: Option<Language>,
+    /// A position to show once the editor has the text (a definition
+    /// this window was opened for).
+    reveal: Option<(u64, u64)>,
 }
 
 /// A window action's handler.
@@ -171,6 +180,7 @@ impl Window {
             let path = doc.core_path();
             let mut lp = DocumentLoop::new(client::DEFAULT_PREVIEW_DELAY_MS);
             lp.set_path(&path);
+            let language = web.as_ref().map(|_| start_language(&shared2, me.clone()));
             Window {
                 win,
                 title,
@@ -186,6 +196,8 @@ impl Window {
                     lp,
                     timer: None,
                     file_view: None,
+                    language,
+                    reveal: None,
                 }),
             }
         })
@@ -227,7 +239,14 @@ impl Window {
                     "the editor's web process ended ({reason:?}); reloading"
                 );
                 if let Some(w) = me.upgrade() {
-                    w.st.borrow_mut().bridge.page_lost();
+                    let mut st = w.st.borrow_mut();
+                    st.bridge.page_lost();
+                    // The new page's client initializes again, and a
+                    // server answers `initialize` once: start a new one.
+                    if let Some(old) = st.language.take() {
+                        old.stop();
+                    }
+                    st.language = Some(start_language(&w.shared, Rc::downgrade(&w)));
                 }
                 web.load_uri(linux_app::resources::PAGE_URL);
             });
@@ -336,32 +355,91 @@ impl Window {
     }
 
     /// Show the document's text in the editor (which clears its undo
-    /// history, as reading a file does).
+    /// history, as reading a file does), under the URI its language
+    /// server knows it by.
     fn load_editor(self: &Rc<Self>) {
-        let text = {
+        let (text, uri) = {
             let mut st = self.st.borrow_mut();
             if !st.bridge.is_ready() {
                 return; // `ready` loads the current text
             }
             st.bridge.load_sent();
-            st.doc.text.text()
+            let uri = st
+                .language
+                .as_ref()
+                .map(|_| language::document_uri(&st.doc.core_path()));
+            (st.doc.text.text(), uri)
         };
-        // No URI: without a language server (milestone 2) the page's
-        // language client stays idle.
         self.call(
             "load",
-            &[json!(text), Value::Null, json!(false)],
+            &[json!(text), json!(uri), json!(false)],
             |w, state| {
                 w.st.borrow_mut().bridge.history(&state);
+                w.flush_reveal();
             },
         );
+    }
+
+    /// Put the cursor at a 0-based line and UTF-16 column (a definition
+    /// this window was opened or brought forward for), now or once the
+    /// editor has the text: a window just opened has not loaded it yet.
+    pub fn reveal_at(self: &Rc<Self>, line: u64, character: u64) {
+        self.st.borrow_mut().reveal = Some((line, character));
+        self.flush_reveal();
+    }
+
+    fn flush_reveal(self: &Rc<Self>) {
+        let at = {
+            let mut st = self.st.borrow_mut();
+            if st.bridge.version().is_none() {
+                return; // the load's answer reveals it
+            }
+            st.reveal.take()
+        };
+        if let Some((line, character)) = at {
+            self.call("reveal", &[json!(line), json!(character)], |_, _| {});
+        }
+    }
+
+    /// A message from the language server for the page. Not gated on
+    /// `ready`: the page's client sends `initialize` before the editor
+    /// says ready, and dropping that answer makes its first request time
+    /// out (the Windows app's bug, fixed in its `EditorHost`).
+    fn deliver(self: &Rc<Self>, message: String) {
+        let publication =
+            self.shared.debug && message.contains("\"textDocument/publishDiagnostics\"");
+        glib::g_debug!(
+            "neoscad",
+            "lsp: server -> page {}",
+            language::describe(&message)
+        );
+        self.call("lspReceive", &[json!(message)], move |w, _| {
+            // For the log (and linux/smoke.sh): what the page shows after
+            // a publication, which proves the markers arrived, not only
+            // that they were sent.
+            if publication {
+                w.call("state", &[], |_, s| {
+                    glib::g_debug!(
+                        "neoscad",
+                        "editor: {} markers, language server {}",
+                        s.get("diagnostics").and_then(Value::as_u64).unwrap_or(0),
+                        if s.get("lsp") == Some(&json!(true)) {
+                            "connected"
+                        } else {
+                            "not connected"
+                        }
+                    );
+                });
+            }
+        });
     }
 
     fn on_message(self: &Rc<Self>, m: &Value) {
         let Some(msg) = bridge::parse(m) else { return };
         // Every message but the per-keystroke `changes`, for following
-        // the bridge with G_MESSAGES_DEBUG=neoscad.
-        if !matches!(msg, Incoming::Changes(_)) {
+        // the bridge with G_MESSAGES_DEBUG=neoscad (`lsp` messages are
+        // logged with what they carry, below).
+        if !matches!(msg, Incoming::Changes(_) | Incoming::Lsp(_)) {
             glib::g_debug!(
                 "neoscad",
                 "editor: {}",
@@ -380,14 +458,35 @@ impl Window {
                 _ => {}
             },
             Incoming::Lsp(message) => {
-                if let Some(reply) = bridge::no_language_server_reply(&message) {
-                    self.call("lspReceive", &[json!(reply)], |_, _| {});
+                glib::g_debug!(
+                    "neoscad",
+                    "lsp: page -> server {}",
+                    language::describe(&message)
+                );
+                let ls = self.st.borrow().language.clone();
+                match ls {
+                    Some(ls) => ls.send(message),
+                    None => {
+                        if let Some(reply) = language::not_found_reply(&message) {
+                            self.deliver(reply);
+                        }
+                    }
                 }
             }
-            Incoming::Open { uri, .. } => {
-                self.toast(&format!(
-                    "Opening definitions in other files comes later ({uri})."
-                ));
+            Incoming::Open {
+                uri,
+                line,
+                character,
+            } => {
+                let app = self
+                    .win
+                    .application()
+                    .and_then(|a| a.downcast::<adw::Application>().ok());
+                if let Some(app) = app
+                    && let Err(e) = super::open_location(&app, &self.shared, &uri, line, character)
+                {
+                    self.toast(&e);
+                }
             }
             Incoming::Log { message } => glib::g_warning!("neoscad", "editor: {message}"),
             Incoming::Unknown(t) => glib::g_warning!("neoscad", "editor: unknown message {t}"),
@@ -510,6 +609,13 @@ impl Window {
             }
             plan
         };
+        let ls = self.st.borrow().language.clone();
+        // The page's client sends its changes half a second after typing
+        // stops; this run's markers are published for the version that
+        // carries its text, so have the client send it now.
+        if ls.is_some() && self.st.borrow().bridge.is_ready() {
+            self.call("lspSync", &[], |_, _| {});
+        }
         let (camera, scheme) = match self.view.canvas.borrow().as_ref() {
             Some(c) => (c.run_camera(), c.viewport.scheme().clone()),
             None => (
@@ -533,7 +639,7 @@ impl Window {
         let me = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let out = gio::spawn_blocking(move || {
-                run::run_document(&client, &plan, camera, &scheme, gpu.as_deref())
+                run::run_document(&client, &plan, camera, &scheme, gpu.as_deref(), ls.as_ref())
             })
             .await;
             if let Some(w) = me.upgrade() {
@@ -648,13 +754,22 @@ impl Window {
             self.toast(&format!("Could not save {}: {e}", path.display()));
             return false;
         }
-        let old = {
+        let (old, uri) = {
             let mut st = self.st.borrow_mut();
             st.doc.saved_to(path.clone());
-            st.lp.set_path(&path.to_string_lossy())
+            let old = st.lp.set_path(&path.to_string_lossy());
+            let uri = (old.is_some() && st.language.is_some() && st.bridge.is_ready())
+                .then(|| language::document_uri(&st.doc.core_path()));
+            (old, uri)
         };
         if let Some(old) = old {
             let _ = self.shared.client.close(&old);
+        }
+        // Saved under a new name: the page's client closes the old URI
+        // and opens the new one, so the server's markers and the run's
+        // diagnostics agree on the path again.
+        if let Some(uri) = uri {
+            self.call("setURI", &[json!(uri)], |_, _| {});
         }
         let uri = gio::File::for_path(&path).uri();
         gtk::RecentManager::default().add_item(&uri);
@@ -826,10 +941,22 @@ impl Window {
                 t.remove();
             }
             st.lp.close();
+            if let Some(ls) = st.language.take() {
+                ls.stop();
+            }
             st.doc.core_path()
         };
         let _ = self.shared.client.close(&path);
     }
+}
+
+/// The window's language server, delivering to its page.
+fn start_language(shared: &Rc<Shared>, me: Weak<Window>) -> Language {
+    shared.language(move |m| {
+        if let Some(w) = me.upgrade() {
+            w.deliver(m);
+        }
+    })
 }
 
 fn file_name(path: &str) -> String {

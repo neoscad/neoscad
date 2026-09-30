@@ -1,0 +1,89 @@
+# The Linux app (crates/linux-app) as a Flatpak, on the GNOME runtime,
+# which carries GTK 4, libadwaita and WebKitGTK 6. docs/linux-app.md
+# ("Flatpak") has how to build it and how to submit it to Flathub.
+#
+# Flathub builds offline, so every crate and npm package is a source of
+# its own, generated from the lock files by flatpak-builder-tools:
+#
+#   linux/flatpak/generate-sources.sh   # -> cargo-sources.json, node-sources.json
+#
+# The generated files are not committed (they change with every lock
+# file change, and Flathub keeps its own copy beside its manifest); CI
+# generates them before it builds.
+app-id: org.neoscad.NeoSCAD
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node24
+command: neoscad-gtk
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # The 3D view draws with wgpu on the GPU (Vulkan, else GL).
+  - --device=dri
+  # A model reads the files beside it and under the user's library
+  # folder (`include`, `use`, `import`, fonts), which the file chooser
+  # portal's one-file grant does not cover; exports are written beside
+  # the model. OpenSCAD's own Flatpak asks for the same.
+  - --filesystem=home
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node24/bin
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+modules:
+  - name: neoscad
+    buildsystem: simple
+    build-options:
+      env:
+        # The vendored crates (cargo-sources.json writes cargo/config).
+        CARGO_HOME: /run/build/neoscad/cargo
+        CARGO_NET_OFFLINE: 'true'
+        # The npm cache node-sources.json fills, and esbuild's binary for
+        # this architecture (its install script would otherwise fetch it).
+        npm_config_cache: /run/build/neoscad/flatpak-node/npm-cache
+        npm_config_offline: 'true'
+        XDG_CACHE_HOME: /run/build/neoscad/flatpak-node/cache
+        ESBUILD_BINARY_PATH: /run/build/neoscad/flatpak-node/cache/esbuild/bin/esbuild-current
+    build-commands:
+      # The editor bundle (scripts/apple/build-editor.sh without its
+      # Xcode bookkeeping), where the app looks beside its binary.
+      - cd apple/Editor/web && npm ci --offline --no-audit --no-fund
+      - cd apple/Editor/web && node build.mjs
+      - install -Dm644 -t /app/share/neoscad/editor apple/Editor/web/dist/*
+      # The app. The rust-stable extension has no rustup, so
+      # rust-toolchain.toml's pin does not apply (docs/linux-app.md).
+      - cargo --offline build --release -p neoscad-linux-app --features gtk
+      - install -Dm755 -t /app/bin target/release/neoscad-gtk
+      # Desktop integration.
+      - install -Dm644 -t /app/share/applications linux/data/org.neoscad.NeoSCAD.desktop
+      - install -Dm644 -t /app/share/metainfo linux/data/org.neoscad.NeoSCAD.metainfo.xml
+      - install -Dm644 linux/data/org.neoscad.NeoSCAD.mime.xml /app/share/mime/packages/org.neoscad.NeoSCAD.xml
+      - |
+        for size in 32 48 64 128 256 512; do
+          install -Dm644 -t /app/share/icons/hicolor/${size}x${size}/apps \
+            linux/data/icons/hicolor/${size}x${size}/apps/org.neoscad.NeoSCAD.png
+        done
+      - install -Dm644 -t /app/share/licenses/org.neoscad.NeoSCAD LICENSE NOTICE
+    sources:
+      # This checkout. For Flathub this becomes a `git` source with the
+      # release's tag and commit (docs/linux-app.md).
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .reference
+          - .flatpak-builder
+          - apple/build
+          - apple/Editor/web/node_modules
+          - apple/Editor/web/dist
+          - dist
+          - progress
+          - results
+          - web/node_modules
+      - cargo-sources.json
+      - node-sources.json

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The .scad file type. The name is OpenSCAD's own (its
+  resources/icons/openscad.xml), so a system with both apps has one type
+  that either opens. A model is plain text, so text editors offer to open
+  it too.
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-openscad">
+    <comment>OpenSCAD model</comment>
+    <sub-class-of type="text/plain"/>
+    <glob pattern="*.scad"/>
+  </mime-type>
+</mime-info>

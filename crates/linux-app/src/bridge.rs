@@ -238,31 +238,6 @@ impl EditorBridge {
     }
 }
 
-/// The reply to a language-server message when there is no server (this
-/// milestone). `initialize` succeeds with no capabilities, so the page's
-/// client settles and asks for nothing more (an error there surfaces in
-/// the page as an unhandled promise rejection); any other request gets
-/// JSON-RPC's "method not found", so the client never waits for an answer
-/// that is not coming, as `EditorController.languageServerMessage` answers
-/// before its server starts; a notification gets nothing.
-pub fn no_language_server_reply(message: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(message).ok()?;
-    let id = v.get("id")?;
-    let reply = match v.get("method")?.as_str() {
-        Some("initialize") => serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {"capabilities": {}},
-        }),
-        _ => serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {"code": -32601, "message": "No language server yet"},
-        }),
-    };
-    Some(reply.to_string())
-}
-
 /// A script calling `NeoSCADEditor.<function>` with `args`, spliced as
 /// JSON literals so no text is ever interpreted as code (WebKitGTK's
 /// `call_async_javascript_function` takes its arguments as a GVariant
@@ -399,25 +374,6 @@ mod tests {
         );
         assert!(matches!(out, ChangeOutcome::Applied { .. }), "{out:?}");
         assert_eq!(text.text(), "cube(10);\nsphere(3);");
-    }
-
-    #[test]
-    fn without_a_server_initialize_succeeds_and_other_requests_fail() {
-        let init =
-            no_language_server_reply(r#"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#).unwrap();
-        let v: Value = serde_json::from_str(&init).unwrap();
-        assert_eq!(v["id"], 0);
-        assert_eq!(v["result"]["capabilities"], json!({}));
-        let reply =
-            no_language_server_reply(r#"{"jsonrpc":"2.0","id":7,"method":"textDocument/hover"}"#)
-                .unwrap();
-        let v: Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(v["id"], 7);
-        assert_eq!(v["error"]["code"], -32601);
-        assert_eq!(
-            no_language_server_reply(r#"{"jsonrpc":"2.0","method":"initialized"}"#),
-            None
-        );
     }
 
     #[test]

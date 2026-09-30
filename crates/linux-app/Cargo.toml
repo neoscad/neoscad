@@ -25,13 +25,16 @@ required-features = ["gtk"]
 
 [features]
 default = []
-gtk = ["dep:gtk", "dep:adw", "dep:webkit6", "dep:mimalloc"]
+gtk = ["dep:gtk", "dep:adw", "dep:webkit6", "dep:mimalloc", "dep:futures-channel", "dep:futures-util"]
 
 [dependencies]
 assets = { package = "neoscad-assets", path = "../assets" }
 client = { package = "neoscad-client", path = "../client" }
 eval = { package = "neoscad-eval", path = "../eval" }
 lang = { package = "neoscad-lang", path = "../lang" }
+# The editor's language server, in process (docs/linux-app.md, "The
+# language server").
+lsp = { package = "neoscad-lsp", path = "../lsp" }
 # With the GPU: the viewport draws with wgpu (Vulkan, else GL).
 render = { package = "neoscad-render", path = "../render" }
 serde_json.workspace = true
@@ -46,6 +49,10 @@ mimalloc = { workspace = true, optional = true }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"], optional = true }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"], optional = true }
 webkit6 = { version = "0.6", optional = true }
+# The language server's answers, from its worker thread to the main loop
+# in order (already in the tree through glib).
+futures-channel = { version = "0.3", optional = true }
+futures-util = { version = "0.3", optional = true }
 
 [lints]
 workspace = true

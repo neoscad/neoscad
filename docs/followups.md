@@ -1286,9 +1286,28 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   Ubuntu 24.04 in Docker (arm64, Xvfb, Mesa lavapipe), never on a
   Wayland session or a real GPU, and never with the portal's file
   chooser: check fractional scaling (`GdkSurface::scale`), Wayland input
-  and the dialogs on a GNOME desktop. Its milestone 2 list (language
-  server, panels, file watching, dmabuf view, the other exports,
-  GSettings, Flatpak) is in that document ("Next").
+  and the dialogs on a GNOME desktop. The rest of its milestone 2 list
+  (panels, file watching, dmabuf view, the other exports, GSettings) is
+  in that document ("Next").
+- The Flatpak (`linux/flatpak/`, `docs/linux-app.md` "Flatpak") has not
+  been built to the end anywhere: disk space ruled out a local build
+  when it was added, so `flatpak.yml` is `continue-on-error`. Once it
+  passes, make it blocking, install the bundle on a GNOME desktop and
+  try the sandbox: the file chooser portal, includes beside a model
+  (`--filesystem=home`), WebKit's own sandbox inside Flatpak, and the
+  GPU view through `--device=dri`. Flathub submission is the owner's
+  call (steps in that document).
+- The Flatpak builds with the SDK's rust-stable (1.98.0 in 26.08), not
+  the pinned 1.98.1 (`rust-toolchain.toml`), since the extension has no
+  rustup. If output must match the other builds exactly, install the
+  pinned toolchain from static.rust-lang.org archives in the manifest
+  instead (a source per architecture).
+- Language server, Linux app: go to definition is F12 only; the page's
+  mouse binding is Command+click (macOS). A Ctrl+click on Linux would
+  have to be added to `apple/Editor/web/src/language.js` for all hosts.
+  A library viewer's own "open" of a user's file works, but nothing
+  closes a viewer when the window that opened it closes (the macOS app
+  shows viewers as tabs of that window).
 - Its view copies each changed frame from the GPU (`view.rs`); a large
   window at 4K on a slow bus may show it. `GdkDmabufTexture` is the fix.
 - After orbiting, lavapipe drew striped black marks near the origin.

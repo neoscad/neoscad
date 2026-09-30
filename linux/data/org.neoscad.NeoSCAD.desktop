@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=NeoSCAD
+GenericName=Solid 3D CAD Modeller
+Comment=Model solid 3D objects in the OpenSCAD language
+Exec=neoscad-gtk %F
+Icon=org.neoscad.NeoSCAD
+Terminal=false
+StartupNotify=true
+DBusActivatable=false
+MimeType=application/x-openscad;
+Categories=Graphics;3DGraphics;Engineering;
+Keywords=3d;solid;geometry;csg;model;stl;openscad;cad;

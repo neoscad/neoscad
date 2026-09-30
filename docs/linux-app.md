@@ -6,8 +6,9 @@ around the same Rust core, following the GNOME HIG. It is Rust through
 and through, so it calls `crates/client`, `session` and `render` directly;
 there is no UniFFI layer as there is for Swift (`crates/ffi`).
 
-This page covers milestone 1: what it does, how it is put together, how
-to build and run it, and what comes next.
+This page covers milestone 1 and the first two items of milestone 2 (the
+language server and the Flatpak): what the app does, how it is put
+together, how to build, package and run it, and what comes next.
 
 ## What milestone 1 does
 
@@ -53,6 +54,24 @@ to build and run it, and what comes next.
   Ctrl+Shift+S, Ctrl+Shift+E (Export STL), Ctrl+W, Ctrl+Q, F5, F6,
   Ctrl+Shift+V (View All). Editing keys are left to CodeMirror.
 
+## What milestone 2 adds
+
+- **Language features**: the editor's `@codemirror/lsp-client` talks to
+  the core's language server (`crates/lsp`) in process, one server per
+  window: completion, hover, signature help, rename, references,
+  formatting, code actions, and markers for the document's errors and
+  warnings, which come from the window's own runs.
+- **Go to definition** (F12; the page's other binding is Command+click,
+  made for macOS, and a Ctrl+click binding is a follow-up): a
+  definition in the same file moves the cursor; one in a file of the
+  user's own opens that file in a window (or brings its window forward)
+  at the definition; one in a library (MCAD, BOSL2, anything under a
+  library directory or not writable) opens read-only in a library viewer,
+  which has its own language server, so hover and go to definition work
+  inside library code too.
+- **Flatpak**: a manifest on the GNOME 51 runtime, with the desktop file,
+  AppStream metadata, icons and the `.scad` file type ("Flatpak" below).
+
 ## How it is put together
 
 The crate is a library plus a binary. The library (`src/*.rs`) is the host
@@ -63,11 +82,13 @@ logic that is not GTK glue, and builds and is tested on every platform:
 | `bridge.rs` | The editor protocol's state machine: message parsing, versions, applying changes to the host's copy (`client::EditorText`), resyncs, the scripts sent to the page |
 | `resources.rs` | The `neoscad-editor:` scheme: which files are served, the per-load CSP nonce, where the bundle is looked for |
 | `host.rs` | The session configuration (disk plus MCAD in memory, library path, fonts, clock, seed, limits) and the GPU |
+| `language.rs` | The editor's language server on a worker thread, where a definition opens (document or library), messages described for the log |
 | `document.rs` | A window's document: path, text, edited state (undo-aware), titles |
 | `run.rs` | A document run and an export, off the main thread |
 | `view.rs` | The viewport drawing into a texture, device pixel sizes, drag mapping |
 
-The window (`src/app/`) is compiled only with the `gtk` feature.
+The window (`src/app/`) is compiled only with the `gtk` feature;
+`app/library.rs` is the read-only library viewer.
 
 ### The editor bridge
 
@@ -84,9 +105,58 @@ and a fresh style nonce per load, as `EditorSchemeHandler.swift` serves
 it. Navigation away from that scheme is refused, and if the web process
 ends the page is reloaded and shows the document's text again.
 
-There is no language server yet: the page's LSP client is answered by a
-stub (`initialize` with no capabilities, other requests "method not
-found"), so markers, completion and hover come in milestone 2.
+### The language server
+
+The contract is the macOS app's (`apple/App/Editor/LanguageClient.swift`)
+and the Windows app's (`windows/NeoSCAD.Host/LanguageBridge.cs`); the
+Linux app calls `crates/lsp` directly rather than through `crates/ffi`.
+
+- **One server per editor page.** Each window, and each library viewer,
+  has a `linux_app::language::Language`: an `lsp::Server` over the
+  process's one session, sharing one `lsp::Cache` of analysed library
+  files, so BOSL2 is indexed once per process. When the web process ends
+  and the page reloads, the window starts a new server, since the new
+  page's client sends `initialize` again.
+- **In order, off the main thread.** The page's `lsp` messages go to the
+  server's worker thread (with the evaluator's stack, since parsing
+  recurses) through a channel, and are handled one at a time. Answers go
+  to a sink that feeds a `futures-channel` queue; one main-loop future
+  reads it and calls `NeoSCADEditor.lspReceive`, so answers reach the
+  page in the order the server gave them.
+- **Before `ready`.** Answers are delivered whether or not the page has
+  said `ready`: the page's client sends `initialize` first, and dropping
+  that answer makes its first request time out (the Windows app's bug
+  until `EditorHost` stopped gating it).
+- **Markers from the document's runs.** The server is made with
+  `host_diagnostics`, so it never evaluates. `run::run_document` hands
+  it each run's diagnostics with the exact text the run read
+  (`lsp::Server::supply`): the evaluation's before the geometry stage,
+  and the finished run's again only if the geometry stage added to them
+  (as `crates/ffi/src/document.rs` does). Both go through the same sink,
+  so they stay in order. The markers are published for the client's
+  version with that text; if the client has not sent it yet, `handle`
+  publishes them when it does. Before each run the window calls
+  `NeoSCADEditor.lspSync()` so the client sends that version now rather
+  than after its own half-second pause. A `host_diagnostics` server never
+  has diagnostics pending, so unlike the other apps there is no debounce
+  timer.
+- **URIs.** A document's URI is its core path as a `file://` URI
+  (`lsp::uri::from_path`), passed with `load`; Save As under a new name
+  calls `setURI`, so the page's client closes the old URI and opens the
+  new one.
+- **Where a definition opens** (`language::target`, the macOS app's rule
+  from `LibraryViewer.swift`): a writable file on disk outside the
+  library directories opens as a document; anything else opens read-only
+  in a library viewer, its text read through the core (the bundled MCAD
+  is only in memory). There is one viewer per file. A position waits
+  until the page has loaded the text.
+
+With `G_MESSAGES_DEBUG=neoscad`, each message is logged in a line
+(`lsp: page -> server textDocument/hover #3`, `lsp: server -> page reply
+#1: capabilities …`). After each diagnostics publication the window also
+logs the markers the page itself counts (`editor: 2 markers, language
+server connected`, from `NeoSCADEditor.state()`), which `linux/smoke.sh`
+checks.
 
 ### The viewport
 
@@ -145,8 +215,10 @@ and need none of those packages; that keeps the macOS and Windows builds
 and the existing Linux CI jobs unchanged.
 
 The app finds the editor bundle in `$NEOSCAD_EDITOR_DIR`, else
-`../share/neoscad/editor` or `editor` beside the binary, else the
-checkout's `apple/Editor/web/dist` when run from `target/`.
+`../share/neoscad/editor` or `editor` beside the binary (the Flatpak's
+`/app/share/neoscad/editor`), else the checkout's `apple/Editor/web/dist`
+when run from `target/`. The fonts, MCAD and colour schemes are compiled
+into the binary (`crates/assets`), so nothing else needs installing.
 `NEOSCAD_EDITOR_INSPECT=1` turns on the web inspector and copies the
 page's console to stdout. `G_MESSAGES_DEBUG=neoscad` logs each run and
 the bridge's messages.
@@ -172,37 +244,153 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
 ### Tests
 
 - `cargo test -p neoscad-linux-app` (any platform): the bridge, the
-  resources, titles and edited state, runs and exports without a GPU.
-- `linux/smoke.sh BIN [MODEL]` (Linux, Xvfb): opens the model and waits
-  for its preview; with `TYPE=1` it types into the editor and waits for
-  the second preview; with `SHOTS=DIR` it saves light and dark
-  screenshots. It kills the app above 2 GB of memory.
+  resources, titles and edited state, runs and exports without a GPU,
+  the language server (real capabilities, answers in order, nothing after
+  stop, a run's diagnostics published as markers for the client's
+  version) and where a definition opens.
+- `linux/smoke.sh BIN [MODEL]` (Linux, Xvfb): with the editor bundle, it
+  first opens a model with a warning and waits for `initialize`'s real
+  capabilities and for the page to count its markers, and with `TYPE=1`
+  presses F12 on an MCAD module and waits for the library viewer. Then
+  it opens MODEL and waits for its preview; with `TYPE=1` it types into
+  the editor and waits for the second preview; with `SHOTS=DIR` it saves
+  light and dark screenshots. It kills the app above 2 GB of memory.
 - CI's `linux-app` job (ubuntu-24.04) runs clippy and the tests with the
   `gtk` feature, builds the editor bundle and runs the smoke test with
   typing.
+
+## Flatpak
+
+| File | What |
+|---|---|
+| `linux/flatpak/org.neoscad.NeoSCAD.yml` | The manifest: GNOME 51 runtime, the rust-stable and node24 SDK extensions, one module |
+| `linux/flatpak/generate-sources.sh` | Writes `cargo-sources.json` and `node-sources.json` from the lock files (not committed) |
+| `linux/data/org.neoscad.NeoSCAD.desktop` | The desktop file (`MimeType=application/x-openscad;`) |
+| `linux/data/org.neoscad.NeoSCAD.metainfo.xml` | AppStream metadata |
+| `linux/data/org.neoscad.NeoSCAD.mime.xml` | The `.scad` type for shared-mime-info |
+| `linux/data/icons/hicolor/*/apps/org.neoscad.NeoSCAD.png` | 32 to 512 px, from `apple/App/AppIcon.icon/Assets/art.png` by `linux/data/icons/generate.sh` |
+| `linux/data/screenshots/window.png` | The metainfo's screenshot (a `linux/smoke.sh` `SHOTS` capture, trimmed) |
+| `.github/workflows/flatpak.yml` | CI: generate the sources, build the bundle, upload it |
+
+Choices:
+
+- **Runtime.** `org.gnome.Platform` 51, the current stable one (what
+  Flathub's GNOME apps, such as org.gnome.TextEditor, build on). It
+  carries GTK 4, libadwaita and WebKitGTK 6, so the manifest has no
+  library modules.
+- **Offline cargo.** `flatpak-cargo-generator.py` from
+  flatpak-builder-tools (pinned to a commit in `generate-sources.sh`)
+  turns `Cargo.lock` into one archive source per crate plus a
+  `cargo/config` that replaces crates.io with them; the build sets
+  `CARGO_HOME` to that directory and runs `cargo --offline`. The patched
+  crates under `vendor/` are path dependencies of the checkout.
+- **Offline npm: generated sources, not a prebuilt bundle.** The editor
+  bundle is built in the Flatpak from `apple/Editor/web`, with
+  `flatpak-node-generator npm` turning `package-lock.json` (the 11
+  dependencies, `@lezer/generator` and esbuild: 47 packages with their
+  own dependencies and esbuild's per-platform binaries) into npm cache
+  entries, and `npm ci --offline`. Flathub
+  asks for apps to be built from source, and a committed or downloaded
+  minified bundle would be a second copy of the editor to keep in step
+  with its source. esbuild is a native binary per platform; the
+  generator's sources place this architecture's, and
+  `ESBUILD_BINARY_PATH` points at it.
+- **Toolchain.** The rust-stable extension of the 26.08 SDK is Rust
+  1.98.0; it has no rustup, so `rust-toolchain.toml` (1.98.1) does not
+  apply. The workspace's `rust-version` is 1.98, so it builds; the
+  byte-for-byte conformance output is checked with the pinned toolchain
+  on the other platforms, not in the Flatpak (see `docs/followups.md`).
+- **Permissions.** Wayland with X11 fallback, IPC, `--device=dri` for
+  the GPU view, and `--filesystem=home`: a model reads the files beside
+  it and in the user's library folder (`include`, `use`, `import`,
+  fonts), and exports are written beside it, which the file chooser
+  portal's one-file grant does not cover. OpenSCAD's own Flathub
+  manifest (flathub/org.openscad.OpenSCAD) has `--filesystem=home` too.
+  flatpak-builder-lint reports this as `finish-args-home-filesystem-access`,
+  which needs an exception on Flathub (below).
+- **The `.scad` type** is `application/x-openscad`, OpenSCAD's own name
+  (`resources/icons/openscad.xml` in its repository), so a system with
+  both apps has one type; it is a subclass of `text/plain`.
+- **Icons.** The icon art is the shape on transparency, which is how a
+  GNOME app icon looks; the PNGs are committed so the build needs no
+  image tools.
+
+### Building it
+
+The generated sources first (python3 with venv, and network), then
+flatpak-builder with Flathub as the remote for the runtime and
+extensions:
+
+    linux/flatpak/generate-sources.sh
+    flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    flatpak-builder --user --install-deps-from=flathub --force-clean \
+        --repo=linux/flatpak/repo linux/flatpak/build-dir linux/flatpak/org.neoscad.NeoSCAD.yml
+    flatpak build-bundle linux/flatpak/repo neoscad.flatpak org.neoscad.NeoSCAD
+    flatpak install --user neoscad.flatpak && flatpak run org.neoscad.NeoSCAD
+
+The SDK, the two extensions and a release build of the app take about
+10 GB. CI's `flatpak.yml` does the same in Flathub's `gnome-51` image
+and uploads `neoscad.flatpak`. It is `continue-on-error`: when it was
+added, the manifest, metainfo, desktop file and MIME file had been
+validated (below) but no build had run to the end, locally or in CI.
+Make it blocking once it has passed.
+
+What was checked when this was added, in an Ubuntu 24.04 container:
+`appstreamcli validate --no-net` (AppStream 1.0.2) passes;
+`desktop-file-validate` passes; `update-mime-database` maps `*.scad` to
+`application/x-openscad`; `flatpak-builder --show-manifest` reads the
+manifest with both generated source files; `flatpak-builder-lint
+manifest` reports only `finish-args-home-filesystem-access`, and
+`flatpak-builder-lint appstream` only that the screenshot's URL does not
+exist yet (it does once `linux/data/screenshots/window.png` is on
+`main`).
+
+### Submitting to Flathub
+
+Not done; submitting is the owner's call. The steps, from Flathub's
+submission documentation (docs.flathub.org, "Submission"):
+
+1. Wait for `flatpak.yml` to pass, install its bundle, and try the app:
+   open, edit, save, go to a definition in MCAD, export an STL, and a
+   model that includes a file beside it (the home permission).
+2. Add a `<release>` for the version being shipped at the top of the
+   metainfo's `<releases>`, with its date, and tag that version.
+3. Fork github.com/flathub/flathub, branch from `new-pr`, and add at the
+   root: the manifest, with its `dir` source replaced by
+   `type: git`, `url: https://github.com/neoscad/neoscad.git`, the tag
+   and its commit; `cargo-sources.json` and `node-sources.json` from
+   `generate-sources.sh` at that tag; and a `flathub.json` if the build
+   should be limited to some architectures (both x86_64 and aarch64 are
+   expected to work).
+4. Before opening it, build and lint with Flathub's own tools:
+   `flatpak run --command=flatpak-builder-lint org.flatpak.Builder
+   manifest org.neoscad.NeoSCAD.yml` (and `repo repo` after a build).
+   Open the pull request against `new-pr`, titled "Add
+   org.neoscad.NeoSCAD", and ask in it for the
+   `finish-args-home-filesystem-access` exception, giving the reason
+   above. The app id's domain must be the project's: Flathub may ask for
+   a token at `https://neoscad.org/.well-known/org.flathub.VerifiedApps.txt`
+   (docs.flathub.org, "Requirements"), which the website repository
+   would serve.
+5. Comment `bot, build` to have Flathub's builder try it; after review a
+   repository `flathub/org.neoscad.NeoSCAD` is made, and releases are
+   pull requests there that update the tag, commit and generated sources.
 
 ## Next
 
 Milestone 2, in order:
 
-1. **Language features**: a `crates/lsp` server per window over the
-   shared session, as `LanguageClient.swift` does, with the run's
-   diagnostics handed to it (`lsp::Options::host_diagnostics`); go to
-   definition opening the user's files and library files read-only.
-2. **Customizer, check and measure panels**: `AdwPreferencesGroup`-style
+1. **Customizer, check and measure panels**: `AdwPreferencesGroup`-style
    side panels over `client`'s parameter groups, `edit_parameter`,
    parameter sets, `check` and `measure`, with the view's overlay
    (`client::view_overlay`).
-3. **File watching**: re-run when an include or import changes on disk
+2. **File watching**: re-run when an include or import changes on disk
    (`GFileMonitor` over the run's files, `DocumentLoop::files_changed`).
-4. **Zero-copy view**: export the frame as a dmabuf (Vulkan external
+3. **Zero-copy view**: export the frame as a dmabuf (Vulkan external
    memory) into a `GdkDmabufTexture`, falling back to the copy.
-5. **The rest of File > Export** (3MF, OBJ, OFF, SVG, DXF, PDF, the
+4. **The rest of File > Export** (3MF, OBJ, OFF, SVG, DXF, PDF, the
    snapshot sheet), with a progress toast and cancellation.
-6. **Settings**: GSettings for the style, the editor's font size, window
+5. **Settings**: GSettings for the style, the editor's font size, window
    size and pane positions.
-7. **Packaging**: a Flatpak manifest (GNOME runtime, which carries GTK,
-   libadwaita and WebKitGTK), the desktop file, AppStream metadata and
-   icon under `org.neoscad.NeoSCAD`, the editor bundle installed to
-   `share/neoscad/editor`; then a GNOME thumbnailer from
-   `client::preview`.
+6. **Packaging**: the Flatpak's first full build in CI, then Flathub
+   (above); a GNOME thumbnailer from `client::preview`.
