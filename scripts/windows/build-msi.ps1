@@ -8,7 +8,8 @@
 #      licenses/third-party/ the licence and notice files of every NuGet
 #      package the app was restored from (the .NET runtime pack and the
 #      Windows App SDK among them, both of which ship inside the app);
-#   3. `wix build` (WiX 5.0.2, installed as a .NET tool into DIR/tools)
+#   3. `wix build` (WiX 5.0.2, installed as a .NET tool into DIR/tools),
+#      with a licence page (WixUI_Minimal) generated as DIR/License.rtf
 #      -> DIR/NeoSCAD-<version>-windows-<arch>.msi
 #
 # The version is Cargo.toml's workspace version, as for the exe
@@ -121,6 +122,53 @@ foreach ($required in "Microsoft.WindowsAppSDK/", "Microsoft.NETCore.App.Runtime
 }
 Set-Content -Path (Join-Path $thirdParty "README.txt") -Value $index -Encoding utf8
 
+# The installer's licence page (WixUI_Minimal): what the user agrees to
+# before installing. NeoSCAD's GPL, then the Windows App SDK's licence,
+# whose section 3.b.ii requires that end users of a redistribution agree
+# to terms protecting it and Microsoft at least as much as it does. Beside
+# the MSI, not in the app folder, so the harvest doesn't install it twice
+# (the same texts are under licenses\).
+$sdkLicence = Get-ChildItem -File -Path (Join-Path $thirdParty "Microsoft.WindowsAppSDK-*") |
+    Where-Object { $_.Name -match '^licen[cs]e' } | Select-Object -First 1
+if (-not $sdkLicence) { throw "the Windows App SDK's licence file was not staged" }
+function ConvertTo-RtfText([string] $text) {
+    $b = [System.Text.StringBuilder]::new()
+    foreach ($c in $text.Replace("`r`n", "`n").ToCharArray()) {
+        switch ($c) {
+            '\' { [void]$b.Append('\\') }
+            '{' { [void]$b.Append('\{') }
+            '}' { [void]$b.Append('\}') }
+            "`n" { [void]$b.Append("\par`n") }
+            default {
+                if ([int]$c -lt 128) { [void]$b.Append($c) }
+                else {
+                    # RTF's \u takes a signed 16-bit code unit.
+                    $n = [int]$c
+                    if ($n -gt 32767) { $n -= 65536 }
+                    [void]$b.Append("\u$n?")
+                }
+            }
+        }
+    }
+    $b.ToString()
+}
+$preamble = @"
+NeoSCAD $version for Windows
+
+NeoSCAD is free software, licensed under the GNU General Public License, version 2 or (at your option) any later version; its text follows. The source code is at https://github.com/neoscad/neoscad.
+
+NeoSCAD for Windows includes the Microsoft .NET runtime (MIT licence) and the Microsoft Windows App SDK, redistributed under Microsoft's terms, which also follow. By installing NeoSCAD you agree to the Windows App SDK licence terms below as they apply to those components. The licences and notices of every included component are installed in the licenses folder next to the app.
+"@
+$rtf = "{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fswiss Segoe UI;}{\f1\fmodern Consolas;}}\fs18`n" +
+    "\b " + (ConvertTo-RtfText $preamble.Split("`n")[0]) + "\b0\par`n" +
+    (ConvertTo-RtfText ($preamble.Substring($preamble.IndexOf("`n") + 1))) + "\par`n" +
+    "\b GNU General Public License\b0\par\f1\fs16`n" +
+    (ConvertTo-RtfText (Get-Content -Raw (Join-Path $repo "LICENSE"))) + "\par\f0\fs18`n" +
+    "\b Microsoft Windows App SDK\b0\par\f1\fs16`n" +
+    (ConvertTo-RtfText (Get-Content -Raw $sdkLicence.FullName)) + "}"
+$licenceRtf = Join-Path $Out "License.rtf"
+[System.IO.File]::WriteAllText($licenceRtf, $rtf, [System.Text.Encoding]::ASCII)
+
 # 3. The MSI.
 $tools = Join-Path $Out "tools"
 $wix = Join-Path $tools "wix.exe"
@@ -128,9 +176,19 @@ if (-not (Test-Path $wix)) {
     dotnet tool install wix --version $WixVersion --tool-path $tools
     if ($LASTEXITCODE -ne 0) { throw "installing WiX $WixVersion failed" }
 }
+# The licence page's dialogs. `wix extension add` caches the extension
+# under .wix\ in the current directory, where `wix build -ext` looks.
 $msi = Join-Path $Out "NeoSCAD-$version-windows-$Arch.msi"
-& $wix build (Join-Path $repo "windows/installer/NeoSCAD.wxs") -arch $Arch -d "Version=$numeric" `
-    -bindpath "app=$app" -o $msi
-if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
+Push-Location $Out
+try {
+    & $wix extension add "WixToolset.UI.wixext/$WixVersion"
+    if ($LASTEXITCODE -ne 0) { throw "adding WixToolset.UI.wixext $WixVersion failed" }
+    & $wix build (Join-Path $repo "windows/installer/NeoSCAD.wxs") -arch $Arch -d "Version=$numeric" `
+        -d "LicenceRtf=$licenceRtf" -ext WixToolset.UI.wixext -bindpath "app=$app" -o $msi
+    if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
+}
+finally {
+    Pop-Location
+}
 Write-Host "built $msi"
 if ($env:GITHUB_OUTPUT) { "msi=$msi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8 }

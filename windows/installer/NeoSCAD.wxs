@@ -22,7 +22,8 @@
   MSI and OpenSCAD's own Windows installer do. The cost is a UAC prompt,
   which for an unsigned MSI names an unknown publisher.
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <!--
     UpgradeCode is the product's identity across versions: never change
     it (the CLI's MSI has its own, B8763D68-...). Every build gets a new
@@ -46,6 +47,16 @@
     -->
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!--
+      One page: the licence agreement, then Install. The text
+      (scripts/windows/build-msi.ps1 writes it) is NeoSCAD's GPL and the
+      Windows App SDK's licence, whose section 3.b.ii requires end users
+      of a redistribution to agree to terms protecting it and Microsoft.
+      A silent install (msiexec /qn) shows no pages.
+    -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenceRtf)" />
 
     <!-- Add or remove programs: the icon, links, and no Modify button
          (there are no optional features to modify). -->

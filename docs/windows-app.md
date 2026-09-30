@@ -83,9 +83,13 @@ runs `wix build` on `windows/installer/NeoSCAD.wxs`.
   and OpenSCAD's own installer (which registers `.scad` under `HKCR`,
   `cmake/nsis/mingw-file-association.nsh:159` in the reference checkout)
   are per-machine too. The cost is the UAC prompt.
-- **No dialogs.** The package has no UI sequence: a double-click installs
-  with Windows Installer's progress bar. A licence page would need WiX's
-  UI extension and an RTF of the GPL.
+- **One page: the licence.** `WixUI_Minimal` (WiX's UI extension) shows
+  a licence agreement, then Install. `build-msi.ps1` writes its RTF:
+  - a preamble;
+  - NeoSCAD's GPL;
+  - the Windows App SDK's licence, taken from the package that was built with.
+
+  A silent install (`msiexec /qn`) shows no pages.
 - **Upgrades.** The `UpgradeCode` (`1A80E3D5-…`, not the CLI's) is fixed.
   Every build has a new ProductCode, so any other version is a major
   upgrade that removes the old one first. A downgrade is refused.
@@ -126,15 +130,14 @@ runs `wix build` on `windows/installer/NeoSCAD.wxs`.
   opens <https://developer.microsoft.com/microsoft-edge/webview2/>. The
   rest of the window works without it.
 
-**Licence questions for the owner.** The Windows App SDK's licence
-(`license.txt` in the `Microsoft.WindowsAppSDK` 2.5.1 package, section 3)
-allows redistributing the files it binplaces, self-contained included.
-It also requires distributors to "require distributors and external end
-users to agree to terms that protect it and Microsoft at least as much as
-this agreement". The MSI has no licence page, so nothing asks users to
-agree to anything. Is shipping the terms in `licenses/third-party/`
-enough? And do they sit with the GPL-2.0-or-later app? That is the
-owner's call, not settled here.
+**The Windows App SDK's terms.** Its licence (`license.txt` in the
+`Microsoft.WindowsAppSDK` package, section 3) allows redistributing the
+files it binplaces, including in a self-contained app. It also requires
+distributors to "require distributors and external end users to agree to
+terms that protect it and Microsoft at least as much as this agreement".
+The installer's licence page is how users agree (owner decision,
+2026-09-30). It presents the SDK's licence alongside the GPL, and the
+agreement covers those components.
 
 ## Bindings
 
