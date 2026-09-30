@@ -64,8 +64,12 @@
   </keywords>
 
   <releases>
-    <!-- The first release that ships the Linux app goes above this one
-         (docs/linux-app.md, "Submitting to Flathub"). -->
+    <!-- Newest first. The first release that ships the Linux app.
+         Its date is a placeholder until the release commit sets the real
+         one: a release's Flatpak job (.github/workflows/flatpak.yml)
+         dates the bundle's copy the day it builds, and fails a stable
+         release that has no entry here (docs/release.md). -->
+    <release version="0.2.0" date="2026-09-30"/>
     <release version="0.1.1" date="2026-09-30"/>
   </releases>
 </component>

@@ -1,20 +1,29 @@
 # The Linux app's Flatpak (linux/flatpak/org.neoscad.NeoSCAD.yml,
 # docs/linux-app.md "Flatpak"): generates the offline cargo and npm
 # sources from the lock files, builds the app in the GNOME 51 SDK the way
-# Flathub does (no network during the build), and uploads the bundle as
-# an artifact to install with `flatpak install --user neoscad.flatpak`.
+# Flathub does (no network during the build), and uploads a single-file
+# bundle per architecture as an artifact, to install with
+# `flatpak install --user <file>`. The bundle names Flathub as its runtime
+# repository, so installing it pulls org.gnome.Platform from there.
 #
-# Not blocking: the manifest, the metainfo and the desktop file were
-# validated when this was added (appstreamcli, desktop-file-validate,
-# flatpak-builder --show-manifest, flatpak-builder-lint), but the build
-# itself had not yet run to the end anywhere. Make it blocking once it has
-# passed here.
+# It runs when something the Flatpak is built from changes, on demand, and
+# in a release as one of cargo-dist's publish jobs (`publish-jobs` in
+# Cargo.toml's [workspace.metadata.dist]): release.yml calls it with the
+# plan once the GitHub Release exists, and the `release` job then attests
+# the bundles and attaches them as NeoSCAD-<version>-linux-<arch>.flatpak.
 #
-# Runs only when something the Flatpak is built from changes, and on
-# demand.
+# x86_64 is blocking: its build has passed on main. aarch64 builds natively
+# on the ubuntu-24.04-arm runner (no QEMU) and is continue-on-error until
+# it has passed too; a release whose aarch64 build failed ships the x86_64
+# bundle alone, with a warning, rather than holding the whole release.
 name: Flatpak
 
 on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
   pull_request:
     paths:
       - "linux/**"
@@ -35,28 +44,121 @@ on:
 permissions:
   contents: read
 
+# A release commit is usually both a push to main and the tagged commit,
+# so the group carries the ref as well as the commit: otherwise the main
+# run and the release's call would share a group and cancel each other.
 concurrency:
-  group: flatpak-${{ github.event.pull_request.number || github.sha }}
+  group: flatpak-${{ github.event.pull_request.number || format('{0}-{1}', github.ref, github.sha) }}
   cancel-in-progress: true
 
 jobs:
   flatpak:
-    runs-on: ubuntu-24.04
+    name: flatpak (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
-    continue-on-error: true
-    # Flathub's image with flatpak-builder and the GNOME 51 runtime and
-    # SDK; flatpak-builder's sandbox needs the privileges.
+    continue-on-error: ${{ matrix.arch == 'aarch64' }}
+    defaults:
+      run:
+        shell: bash
+    # Flathub's image (multi-arch) with flatpak-builder and the GNOME 51
+    # runtime and SDK; flatpak-builder's sandbox needs the privileges.
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
+    env:
+      TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      # The release's file name, and for a release the metainfo's entry for
+      # its version dated today, so the bundle's AppStream data (what GNOME
+      # Software shows) names the version being shipped. A stable release
+      # without its own <release> entry fails here, before the long build:
+      # the bundle would otherwise present itself as the previous version.
+      - name: Bundle name and release date
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          metainfo=linux/data/org.neoscad.NeoSCAD.metainfo.xml
+          if [ -z "$TAG" ]; then
+            echo "BUNDLE=NeoSCAD-${GITHUB_SHA:0:7}-linux-$ARCH.flatpak" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          version=${TAG#v}
+          echo "BUNDLE=NeoSCAD-$version-linux-$ARCH.flatpak" >> "$GITHUB_ENV"
+          if grep -q "<release version=\"$version\"" "$metainfo"; then
+            sed -i "s|<release version=\"$version\" date=\"[^\"]*\"|<release version=\"$version\" date=\"$(date -u +%F)\"|" "$metainfo"
+            grep "<release version=\"$version\"" "$metainfo"
+          else
+            case $version in
+              *-*) echo "::warning::$metainfo has no <release> for prerelease $version; the bundle lists the previous release." ;;
+              *) echo "::error::$metainfo has no <release version=\"$version\">; add one (docs/release.md)."; exit 1 ;;
+            esac
+          fi
+
       - name: Offline sources from the lock files
         run: linux/flatpak/generate-sources.sh
+
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           manifest-path: linux/flatpak/org.neoscad.NeoSCAD.yml
-          bundle: neoscad.flatpak
+          arch: ${{ matrix.arch }}
+          bundle: ${{ env.BUNDLE }}
+          artifact-name: ${{ env.BUNDLE }}
+          # Written into the bundle as its runtime repository (flatpak
+          # build-bundle --runtime-repo): `flatpak install` adds Flathub
+          # and pulls org.gnome.Platform from it.
+          repository-url: https://dl.flathub.org/repo/flathub.flatpakrepo
           cache-key: flatpak-builder-${{ hashFiles('Cargo.lock', 'apple/Editor/web/package-lock.json') }}
+
+  release:
+    needs: flatpak
+    if: inputs.plan != ''
+    runs-on: ubuntu-24.04
+    # Granted by release.yml through Cargo.toml's
+    # github-custom-job-permissions: the upload, and a GitHub artifact
+    # attestation per bundle as the other release files have.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: NeoSCAD-*-linux-*.flatpak
+          merge-multiple: true
+          path: ${{ runner.temp }}/flatpak
+
+      - name: Checksums
+        run: |
+          cd "$RUNNER_TEMP/flatpak"
+          version=${TAG#v}
+          [ -f "NeoSCAD-$version-linux-x86_64.flatpak" ] \
+            || { echo "::error::no x86_64 bundle"; exit 1; }
+          [ -f "NeoSCAD-$version-linux-aarch64.flatpak" ] \
+            || echo "::warning::no aarch64 bundle (its build failed); the release gets x86_64 only."
+          for f in NeoSCAD-*.flatpak; do sha256sum "$f" > "$f.sha256"; done
+          ls -l
+
+      - name: Attest
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ runner.temp }}/flatpak/NeoSCAD-*.flatpak
+
+      - name: Attach to the release
+        run: |
+          cd "$RUNNER_TEMP/flatpak"
+          gh release upload "$TAG" NeoSCAD-*.flatpak NeoSCAD-*.flatpak.sha256 --repo "$GITHUB_REPOSITORY"

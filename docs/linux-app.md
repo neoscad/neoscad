@@ -270,7 +270,7 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
 | `linux/data/org.neoscad.NeoSCAD.mime.xml` | The `.scad` type for shared-mime-info |
 | `linux/data/icons/hicolor/*/apps/org.neoscad.NeoSCAD.png` | 32 to 512 px, from `apple/App/AppIcon.icon/Assets/art.png` by `linux/data/icons/generate.sh` |
 | `linux/data/screenshots/window.png` | The metainfo's screenshot (a `linux/smoke.sh` `SHOTS` capture, trimmed) |
-| `.github/workflows/flatpak.yml` | CI: generate the sources, build the bundle, upload it |
+| `.github/workflows/flatpak.yml` | CI: generate the sources, build a bundle per architecture, upload it; in a release, attest the bundles and attach them |
 
 Choices:
 
@@ -329,11 +329,13 @@ extensions:
     flatpak install --user neoscad.flatpak && flatpak run org.neoscad.NeoSCAD
 
 The SDK, the two extensions and a release build of the app take about
-10 GB. CI's `flatpak.yml` does the same in Flathub's `gnome-51` image
-and uploads `neoscad.flatpak`. It is `continue-on-error`: when it was
-added, the manifest, metainfo, desktop file and MIME file had been
-validated (below) but no build had run to the end, locally or in CI.
-Make it blocking once it has passed.
+10 GB. CI's `flatpak.yml` does the same in Flathub's `gnome-51` image,
+for x86_64 on `ubuntu-24.04` and aarch64 natively on `ubuntu-24.04-arm`
+(the image is multi-arch; no QEMU), and uploads
+`NeoSCAD-<commit>-linux-<arch>.flatpak` as an artifact. The x86_64 build
+is blocking (it first passed on main on 2026-09-30); aarch64 is
+`continue-on-error` until it has passed. The same workflow is a release
+publish job ("Install from the release" below).
 
 What was checked when this was added, in an Ubuntu 24.04 container:
 `appstreamcli validate --no-net` (AppStream 1.0.2) passes;
@@ -345,6 +347,28 @@ manifest` reports only `finish-args-home-filesystem-access`, and
 exist yet (it does once `linux/data/screenshots/window.png` is on
 `main`).
 
+### Install from the release
+
+Every release from v0.2.0 attaches `NeoSCAD-<version>-linux-x86_64.flatpak`
+and, when its build passed, `NeoSCAD-<version>-linux-aarch64.flatpak`,
+each with a `.sha256` and a GitHub artifact attestation:
+
+    sha256sum -c NeoSCAD-<version>-linux-x86_64.flatpak.sha256
+    gh attestation verify NeoSCAD-<version>-linux-x86_64.flatpak -R neoscad/neoscad
+    flatpak install --user NeoSCAD-<version>-linux-x86_64.flatpak
+    flatpak run org.neoscad.NeoSCAD
+
+The bundle names Flathub as its runtime repository (`flatpak
+build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo`),
+so installing it offers to add Flathub if no remote has the runtime, and
+pulls `org.gnome.Platform` 51 from there. The bundle carries no
+repository of its own for the app (no `--repo-url`), so `flatpak update`
+does not reach the next release: install its bundle the same way (with
+`--reinstall` if flatpak reports the app as already installed). The bundle
+is built from the tagged commit in `flatpak.yml`, called by
+`release.yml` as a publish job (`docs/release.md`); it is not on
+Flathub.
+
 ### Submitting to Flathub
 
 Not done; submitting is the owner's call. The steps, from Flathub's
@@ -353,8 +377,9 @@ submission documentation (docs.flathub.org, "Submission"):
 1. Wait for `flatpak.yml` to pass, install its bundle, and try the app:
    open, edit, save, go to a definition in MCAD, export an STL, and a
    model that includes a file beside it (the home permission).
-2. Add a `<release>` for the version being shipped at the top of the
-   metainfo's `<releases>`, with its date, and tag that version.
+2. Check that the metainfo's `<releases>` starts with the version being
+   shipped and its real date (the release commit sets it:
+   `docs/release.md`, "Cutting one"), and that the tag exists.
 3. Fork github.com/flathub/flathub, branch from `new-pr`, and add at the
    root: the manifest, with its `dir` source replaced by
    `type: git`, `url: https://github.com/neoscad/neoscad.git`, the tag
@@ -392,5 +417,5 @@ Milestone 2, in order:
    snapshot sheet), with a progress toast and cancellation.
 5. **Settings**: GSettings for the style, the editor's font size, window
    size and pane positions.
-6. **Packaging**: the Flatpak's first full build in CI, then Flathub
-   (above); a GNOME thumbnailer from `client::preview`.
+6. **Packaging**: Flathub (above; the release already attaches
+   bundles); a GNOME thumbnailer from `client::preview`.

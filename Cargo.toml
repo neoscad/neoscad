@@ -120,8 +120,9 @@ formula = "neoscad"
 # Once the release exists: the signed app DMG
 # (.github/workflows/publish-macos-app.yml), and the .deb/.rpm, vendored
 # source, filled package manifests and ghcr.io image
-# (.github/workflows/publish-packages.yml).
-publish-jobs = ["homebrew", "./publish-macos-app", "./publish-packages"]
+# (.github/workflows/publish-packages.yml), and the Linux app's Flatpak
+# bundles (.github/workflows/flatpak.yml).
+publish-jobs = ["homebrew", "./publish-macos-app", "./publish-packages", "./flatpak"]
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -172,6 +173,8 @@ container = { image = "quay.io/pypa/manylinux_2_28_aarch64", host = "aarch64-unk
 # OIDC token and attestation writes.
 publish-macos-app = { contents = "write", id-token = "write", attestations = "write" }
 publish-packages = { contents = "write", packages = "write" }
+# The Flatpak job uploads its bundles and attests them.
+flatpak = { contents = "write", id-token = "write", attestations = "write" }
 
 [workspace.metadata.dist.min-glibc-version]
 "*" = "2.28"

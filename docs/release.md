@@ -271,7 +271,18 @@ such as `v0.1.0` runs, in order:
    executable in every archive, which `neoscad bench` checks itself
    against; then the release baseline, the release's own binaries
    benchmarked on four runners and committed to `neoscad/benchmarks`,
-   never failing the release: `docs/community-bench.md`).
+   never failing the release: `docs/community-bench.md`);
+   `flatpak.yml` (the Linux app, `docs/linux-app.md` "Flatpak"):
+   `NeoSCAD-<version>-linux-x86_64.flatpak` and
+   `NeoSCAD-<version>-linux-aarch64.flatpak`, each with a `.sha256` and
+   an artifact attestation, single-file bundles built in Flathub's
+   `gnome-51` image on `ubuntu-24.04` and natively on `ubuntu-24.04-arm`,
+   whose runtime repository is Flathub, so `flatpak install --user
+   <file>` pulls `org.gnome.Platform` 51 from there. The x86_64 build
+   blocks the release; the aarch64 one is `continue-on-error` until it
+   has passed, and a release without it ships x86_64 alone with a
+   warning. The job dates the metainfo's `<release>` for the version the
+   day it builds, and fails a stable release that has none.
 6. **announce**.
 
 A prerelease tag (`v0.2.0-beta.1`) makes a GitHub prerelease and skips
@@ -294,8 +305,13 @@ The `.deb` and `.rpm` carry `0.1.0~rc.1` so they sort before `0.1.0`
 | `NEOSCAD_SIGN_IDENTITY`, `NEOSCAD_TEAM_ID` | the app job, as the local variables above |
 | `NEOSCAD_NOTARY_KEY`, `NEOSCAD_NOTARY_KEY_ID`, `NEOSCAD_NOTARY_ISSUER` | the app job: an App Store Connect API key for `notarytool` |
 
-Cutting one: bump `version`, commit, check that `dist plan` lists what you
-expect, then `git tag v<version> && git push origin v<version>`. The
+Cutting one: bump `version`; add (or date) the version's `<release
+version="…" date="YYYY-MM-DD"/>` at the top of `<releases>` in
+`linux/data/org.neoscad.NeoSCAD.metainfo.xml`, with the release day, so
+the tagged source says what the Flatpak says (the Flatpak job refuses a
+stable tag without that entry); commit, check that `dist plan` lists
+what you expect, then `git tag v<version> && git push origin
+v<version>`. The
 workflows have been linted (actionlint 1.7.12) and `dist plan` and a
 local `dist build` of the Linux aarch64 archive have run, but no workflow
 has run on GitHub yet: the first tag is their test.
@@ -448,7 +464,10 @@ checked by the app tests and the conformance suite, not here.
   packages, smoke and attach jobs are untested). The cask template
   passes `brew style` and `brew audit --cask --strict` locally (Homebrew
   7.0.1, filled with a stand-in DMG); its URL, checksum and `livecheck`
-  meet a real release for the first time on the first tag.
+  meet a real release for the first time on the first tag. The
+  Flatpak's x86_64 build has passed in `flatpak.yml` on main; its
+  aarch64 build, the bundle naming, attestation and upload are first
+  exercised by a dispatch (build only) and the first tag.
 
 - The Developer ID path: `-exportArchive`, notarization, stapling and an
   accepting Gatekeeper have never run, since no Developer ID identity or

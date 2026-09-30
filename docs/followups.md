@@ -1312,11 +1312,14 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   and the dialogs on a GNOME desktop. The rest of its milestone 2 list
   (panels, file watching, dmabuf view, the other exports, GSettings) is
   in that document ("Next").
-- The Flatpak (`linux/flatpak/`, `docs/linux-app.md` "Flatpak") has not
-  been built to the end anywhere: disk space ruled out a local build
-  when it was added, so `flatpak.yml` is `continue-on-error`. Once it
-  passes, make it blocking, install the bundle on a GNOME desktop and
-  try the sandbox: the file chooser portal, includes beside a model
+- The Flatpak (`linux/flatpak/`, `docs/linux-app.md` "Flatpak") builds
+  on x86_64 in `flatpak.yml`, which is now blocking there and a release
+  publish job. Its aarch64 build (`ubuntu-24.04-arm`, native) is
+  `continue-on-error` until it has passed: once it has, drop that and
+  the release job's missing-aarch64 warning, so a release cannot ship
+  without it. The release path (bundle naming, attestation, upload) runs
+  for the first time on the v0.2.0 tag. Install a bundle on a GNOME
+  desktop and try the sandbox: the file chooser portal, includes beside a model
   (`--filesystem=home`), WebKit's own sandbox inside Flatpak, and the
   GPU view through `--device=dri`. Flathub submission is the owner's
   call (steps in that document).
