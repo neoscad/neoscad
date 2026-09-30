@@ -121,9 +121,14 @@ pub fn nonce() -> String {
 mod tests {
     use super::*;
 
-    fn bundle() -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("neoscad-linux-app-res-{}", std::process::id()));
+    /// A bundle of its own for each test: tests run in parallel, and one
+    /// rewriting a shared folder's `editor.js` while another read it gave
+    /// that one an empty file (CI, Linux aarch64).
+    fn bundle(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "neoscad-linux-app-res-{}-{test}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("editor.html"),
@@ -137,7 +142,7 @@ mod tests {
 
     #[test]
     fn serves_the_page_with_a_fresh_nonce_and_its_policy() {
-        let dir = bundle();
+        let dir = bundle("page");
         let r = resolve(&dir, PAGE_URL, "abc").unwrap();
         assert_eq!(r.content_type, "text/html; charset=utf-8");
         assert_eq!(
@@ -154,7 +159,7 @@ mod tests {
 
     #[test]
     fn refuses_anything_outside_the_bundle() {
-        let dir = bundle();
+        let dir = bundle("outside");
         for uri in [
             "neoscad-editor://app/../editor.html",
             "neoscad-editor://app/sub/editor.js",
@@ -179,7 +184,11 @@ mod tests {
         assert!(c.contains(&PathBuf::from("/w/target/wt/debug/../share/neoscad/editor")));
         assert!(c.contains(&PathBuf::from("/w/apple/Editor/web/dist")));
         assert!(c.contains(&PathBuf::from("/w/target/apple/Editor/web/dist")));
-        assert_eq!(find_editor_dir(&[bundle()]), Some(bundle()));
+        let dir = bundle("find");
+        assert_eq!(
+            find_editor_dir(std::slice::from_ref(&dir)),
+            Some(dir.clone())
+        );
         assert_eq!(find_editor_dir(&[PathBuf::from("/nonexistent")]), None);
     }
 
