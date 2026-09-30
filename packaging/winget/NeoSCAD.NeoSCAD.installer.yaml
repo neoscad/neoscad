@@ -2,7 +2,7 @@
 # hashes). The portable zips cargo-dist makes, not the MSI: the MSI is not
 # Authenticode-signed yet, and winget's validation flags unsigned
 # installers (docs/packaging.md).
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 PackageIdentifier: NeoSCAD.NeoSCAD
 PackageVersion: "@VERSION@"
 InstallerType: zip
@@ -20,4 +20,4 @@ Installers:
     InstallerUrl: https://github.com/neoscad/neoscad/releases/download/v@VERSION@/neoscad-cli-aarch64-pc-windows-msvc.zip
     InstallerSha256: "@SHA256_AARCH64_PC_WINDOWS_MSVC@"
 ManifestType: installer
-ManifestVersion: 1.10.0
+ManifestVersion: 1.12.0

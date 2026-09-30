@@ -263,8 +263,9 @@ such as `v0.1.0` runs, in order:
    12, Ubuntu 22.04 and 24.04, Rocky Linux 8 and Fedora on an x86_64 and
    an arm64 runner, and attached only if all twelve pass; the
    vendored-dependency tarball, the filled AUR, Scoop and winget
-   manifests in `neoscad-package-manifests.tar.gz`, and the
-   `ghcr.io/neoscad/neoscad` image).
+   manifests in `neoscad-package-manifests.tar.gz`, the Scoop manifest
+   also pushed to the bucket `neoscad/scoop-bucket` as
+   `bucket/neoscad.json`, and the `ghcr.io/neoscad/neoscad` image).
 6. **announce**.
 
 A prerelease tag (`v0.2.0-beta.1`) makes a GitHub prerelease and skips
@@ -273,13 +274,15 @@ the publish jobs, unless `publish-prereleases = true` is set in
 then removed). With it set, a prerelease publishes everything:
 the tap's `neoscad` formula and `neoscad-app` cask move to it (Homebrew
 has no prerelease channel for either: a tap holds one version of each,
-and `brew upgrade` takes whatever it holds), and the image is pushed as `:<version>` but not `:latest`.
+and `brew upgrade` takes whatever it holds), as does the Scoop bucket's
+`neoscad` (one manifest per app, likewise), and the image is pushed as `:<version>` but not `:latest`.
 The `.deb` and `.rpm` carry `0.1.0~rc.1` so they sort before `0.1.0`
 (nfpm does this), and the AUR `pkgver` drops the hyphen (`0.1.0rc.1`).
 
 | Secret | Used by |
 |---|---|
 | `HOMEBREW_TAP_TOKEN` | the formula and cask pushes: a token with write access to `neoscad/homebrew-tap` (the app job gets it through release.yml's `secrets: inherit`) |
+| `SCOOP_BUCKET_TOKEN` | `publish-packages.yml`'s `scoop` job, which pushes `bucket/neoscad.json` to `neoscad/scoop-bucket`: a fine-grained token, resource owner `neoscad`, only that repository, Contents read and write (through `secrets: inherit`, as above). Without it the job warns and the bucket stays on the previous release |
 | `NEOSCAD_DEVELOPER_ID_P12`, `NEOSCAD_DEVELOPER_ID_P12_PASSWORD` | the app job: the Developer ID Application certificate (base64 .p12) |
 | `NEOSCAD_SIGN_IDENTITY`, `NEOSCAD_TEAM_ID` | the app job, as the local variables above |
 | `NEOSCAD_NOTARY_KEY`, `NEOSCAD_NOTARY_KEY_ID`, `NEOSCAD_NOTARY_ISSUER` | the app job: an App Store Connect API key for `notarytool` |

@@ -11,7 +11,11 @@
 #   cargo-dist already attaches the plain source.tar.gz;
 # - filled package-manager manifests (scripts/release/fill-manifests.sh):
 #   the AUR PKGBUILD, the Scoop manifest and the winget manifests, attached
-#   for a maintainer to submit (nothing here pushes to those registries);
+#   for a maintainer to submit; the Scoop manifest is also pushed to the
+#   bucket neoscad/scoop-bucket (the `scoop` job, with the
+#   SCOOP_BUCKET_TOKEN secret: a fine-grained token with Contents read and
+#   write on that repository, which release.yml passes here through
+#   `secrets: inherit`). Nothing here pushes to the AUR or winget;
 # - the ghcr.io/neoscad/neoscad image (packaging/docker/Dockerfile), for
 #   linux/amd64 and linux/arm64.
 name: Packages
@@ -145,6 +149,76 @@ jobs:
             pkg/*.deb pkg/*.rpm pkg/*.sha256 \
             "source/neoscad-${TAG#v}-vendor.tar.gz" \
             neoscad-package-manifests.tar.gz
+
+  # The filled Scoop manifest goes to the bucket, neoscad/scoop-bucket, as
+  # bucket/neoscad.json. It needs only the `packages` job's manifest, not the
+  # Linux smoke tests: it points at the Windows zips, which the `host` job
+  # attached before this workflow started, so a Linux packaging failure
+  # should not hold Windows users on an older version.
+  #
+  # A prerelease reaches here only when `publish-prereleases` is set (see
+  # release.yml's `if` on this workflow), and then publishes too, as the
+  # Homebrew formula and cask do: a bucket holds one manifest per app, and
+  # Scoop has no prerelease channel.
+  scoop:
+    needs: packages
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: neoscad-linux-packages
+          path: ${{ runner.temp }}/out
+      - name: Push to neoscad/scoop-bucket
+        run: |
+          if [[ -z "$BUCKET_TOKEN" ]]; then
+            echo "::warning::No SCOOP_BUCKET_TOKEN secret; the Scoop bucket was not updated."
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/manifests"
+          tar -xzf "$RUNNER_TEMP/out/neoscad-package-manifests.tar.gz" -C "$RUNNER_TEMP/manifests"
+          manifest=$RUNNER_TEMP/manifests/neoscad.json
+          # fill-manifests.sh leaves the Scoop manifest out, with a note,
+          # when the release has no Windows archives: nothing to publish.
+          if [[ ! -f "$manifest" ]]; then
+            echo "::warning::No Scoop manifest in this release (no Windows archives); the bucket was not updated."
+            exit 0
+          fi
+          # A manifest that doesn't parse, or names another version, would
+          # break `scoop install` for everyone until the next release.
+          jq -e --arg v "${TAG#v}" '.version == $v' "$manifest" >/dev/null \
+            || { echo "::error::$manifest is not valid JSON for version ${TAG#v}"; exit 1; }
+
+          # The token goes in a per-command header rather than the remote
+          # URL, so it is not left in the clone's config.
+          auth=$(printf 'x-access-token:%s' "$BUCKET_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          header="http.https://github.com/.extraheader=AUTHORIZATION: basic $auth"
+          bucket=$RUNNER_TEMP/scoop-bucket
+          git -c "$header" clone --quiet https://github.com/neoscad/scoop-bucket.git "$bucket"
+          mkdir -p "$bucket/bucket"
+          cp "$manifest" "$bucket/bucket/neoscad.json"
+
+          cd "$bucket"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/neoscad.json
+          if git diff --cached --quiet; then
+            echo "bucket/neoscad.json is already current"
+            exit 0
+          fi
+          git commit --quiet -m "neoscad ${TAG#v}"
+          # Nothing else pushes to the bucket from a release, but a
+          # maintainer's push can land in between; a push that loses that
+          # race is rebased and retried.
+          for attempt in 1 2 3; do
+            git -c "$header" push --quiet && break
+            [[ $attempt -lt 3 ]] || exit 1
+            sleep 10
+            git -c "$header" pull --quiet --rebase
+          done
 
   image:
     needs: packages

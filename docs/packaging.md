@@ -52,7 +52,8 @@ pushes), so every CI path is unverified until the first tag.
 | Nix flake + nixpkgs | **Now** (flake); nixpkgs after the tag | `packaging/nix/package.nix` is the nixpkgs package (`pkgs/by-name/ne/neoscad`: `buildRustPackage`, `fetchFromGitHub` at `v${version}`, `cargoHash`, tests on, `versionCheckHook`, Vulkan loader and libGL on the RPATH for wgpu); `flake.nix` builds that same file from the tree (`packaging/nix/local.nix`) with nixpkgs' own Rust 1.98.1, no rust-overlay. Built in `nixos/nix` with the sandbox on and its tests run (552 pass): on aarch64-linux both ways (the flake, and package.nix itself through `fetchCargoVendor` with only `src` swapped), on x86_64-linux (emulated) through the flake. Man page and completions installed; see "Nix" below. CI: `.github/workflows/nix.yml` (Linux x86_64, macOS arm64). Submitting: "Submitting to nixpkgs" below |
 | Windows x86_64/aarch64 zip | **Now** | Built (cargo-dist), CI only (see "Needs the owner", `cargo xwin`) |
 | MSI | **Now**, unsigned | Built (cargo-dist + `crates/cli/wix/main.wxs`, with the licence files hand-added; `allow-dirty = ["msi"]`). Adds `bin` to PATH. Unsigned: SmartScreen will warn. WiX 3.14.1 comes preinstalled on `windows-2025` (x86_64) but not on `windows-11-arm`, so the v0.1.0-rc.1 aarch64 MSI failed ("candle could not be found"); `.github/build-setup.yml` (cargo-dist's `github-build-setup`) now installs the same WiX from its release zip, sha256-pinned, on the ARM64 runner only. 3.14 is the first WiX 3 that builds ARM64 MSIs |
-| winget / Scoop | Templates now | `packaging/winget/` (portable zip, schema 1.10.0) and `packaging/scoop/neoscad.json`, filled per release; submitting needs the owner's fork (winget) or a bucket |
+| Scoop | **Now** (own bucket) | `scoop bucket add neoscad https://github.com/neoscad/scoop-bucket`, then `scoop install neoscad`. The bucket went live 2026-09-29 with v0.1.0's manifest, filled from `packaging/scoop/neoscad.json` by `scripts/release/fill-manifests.sh` with the release's own `.sha256` files; the filled manifest passes Scoop's `schema.json` (ajv) and its URLs resolve. From then on `publish-packages.yml`'s `scoop` job pushes each release's manifest to the bucket as `bucket/neoscad.json` (needs `SCOOP_BUCKET_TOKEN`; without it the job warns and skips). The zips have no top-level folder, so no `extract_dir`. `checkver` names the repository (`{"github": …}`): the bare `"github"` form reads the `homepage`, which is neoscad.org, and Scoop's `bin/checkver.ps1` rejects a non-GitHub homepage there. The main Scoop buckets (`extras`) are a later submission |
+| winget | Template now | `packaging/winget/` (portable zip, schema 1.10.0), filled per release; submitting needs the owner's fork of winget-pkgs |
 | Chocolatey | Never, unless asked | OpenSCAD isn't there officially |
 | `cargo install` (crates.io) | Later, **blocked** | Fix 2. The name reservation is prepared at `packaging/crates-io-placeholder/` (`cargo package --list` checked; not published) |
 | `cargo binstall` | After fix 2 | binstall starts from the crate's crates.io metadata, so the placeholder alone does not make it work (unverified) |
@@ -347,6 +348,10 @@ Nothing here was pushed, published, signed up for or accepted.
   stored as the `HOMEBREW_TAP_TOKEN` secret. The formula and the app's
   cask both push with it. Give the tap a first commit (a README) so it
   has a default branch to push to.
+- **`SCOOP_BUCKET_TOKEN`:** `neoscad/scoop-bucket` exists (with v0.1.0);
+  the release's `scoop` job needs a fine-grained token, resource owner
+  `neoscad`, repository access only `neoscad/scoop-bucket`, permission
+  Contents: read and write, stored as that repository secret here.
 - **Apple:** a Developer ID Application certificate and an App Store
   Connect API key, stored as the `NEOSCAD_*` secrets
   (`docs/release.md`); until then the app job uploads nothing.
@@ -363,7 +368,7 @@ Nothing here was pushed, published, signed up for or accepted.
   and the PKGBUILD is a placeholder: create it or change it. The MSI and
   formula credit "The NeoSCAD contributors" (`authors`).
 - **Submissions** (each release): AUR `neoscad-bin` (an AUR account and
-  SSH key), a winget-pkgs fork for PRs, a Scoop bucket, nixpkgs ("Submitting to
+  SSH key), a winget-pkgs fork for PRs, nixpkgs ("Submitting to
   nixpkgs" below).
 - **Consent to the Microsoft CRT/SDK licence** only if Windows builds
   should also happen locally (`cargo xwin`); CI does not need it.
@@ -402,5 +407,7 @@ under `makepkg` and `namcap`; Windows at all
 Intel CPU (the universal CLI's x86_64 slice passed conformance, 1,773 of
 1,773, under Rosetta only); the manylinux_2_28
 builds and their glibc floor; the Homebrew cask's push, install and
-livecheck; the Nix build on Darwin (and on real x86_64); Scoop
-and Snap review rules.
+livecheck; the Nix build on Darwin (and on real x86_64); `scoop install`
+from the bucket (no Windows machine here) and the bucket push from CI;
+Scoop's `checkver`/`autoupdate` (read from its source, not run); Snap
+review rules.
