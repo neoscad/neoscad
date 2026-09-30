@@ -258,10 +258,8 @@ hashes stay `lib.fakeHash` until the tag exists. Choices:
   process the program starts). On NixOS the drivers come from
   `/run/opengl-driver`.
 - **Tests run** for every workspace crate the CLI is built from. Tests
-  that need a GPU or the `.reference` checkout skip themselves, except
-  three, which `checkFlags` skips: `every_tool_round_trips` and
-  `mesh_paths_quiet_info_and_touching_parts` (`crates/cli/tests/mcp.rs`)
-  draw a snapshot and fail without a GPU adapter; on Darwin,
+  that need a GPU or the `.reference` checkout skip themselves. On
+  Darwin `checkFlags` skips one more,
   `gpu_frameworks_are_not_initialized_at_launch`
   (`crates/cli/tests/flags.rs`), because `crates/cli/build.rs` asks for
   delay-init only for a deployment target of macOS 15 or later and

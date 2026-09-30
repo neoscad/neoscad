@@ -87,6 +87,21 @@ fn text(r: &Value) -> String {
     r["content"][0]["text"].as_str().unwrap_or("").to_string()
 }
 
+/// Whether a snapshot `r` failed only because this machine has no GPU to
+/// draw with, printing why. A snapshot needs a GPU adapter and a build
+/// sandbox or CI runner often has none; like the CLI's own PNG tests
+/// (`tests/flags.rs`), the drawing part of a test then skips instead of
+/// failing, while the parts that need no GPU still run. Any other failure
+/// is left to the caller's assertions, so a real snapshot bug still fails.
+fn no_gpu(r: &Value) -> bool {
+    let t = text(r);
+    let missing = r["isError"] == true && t.contains("GPU");
+    if missing {
+        eprintln!("skipped a snapshot: {t}");
+    }
+    missing
+}
+
 fn modern() -> Value {
     json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28",
            "io.modelcontextprotocol/clientCapabilities": {}})
@@ -242,42 +257,45 @@ fn every_tool_round_trips() {
             .starts_with(b"solid")
     );
 
-    // snapshot: a PNG image, the summary, and a diff.
+    // snapshot: a PNG image, the summary, and a diff. Without a GPU the
+    // snapshot calls are skipped and the other tools still checked.
     let r = s.tool(
         "snapshot",
         json!({"path": "box.scad", "diff_source": "cube([20, 20, 10]);", "size": "256x256"}),
     );
-    assert_eq!(r["content"][1]["type"], "image");
-    assert_eq!(r["content"][1]["mimeType"], "image/png");
-    assert!(
-        r["content"][1]["data"]
-            .as_str()
-            .unwrap()
-            .starts_with("iVBORw0KGgo")
-    );
-    let t = text(&r);
-    assert!(
-        t.contains("diff: added 0 mm³ (green), removed 2916 mm³ (red)"),
-        "{t}"
-    );
-    assert_eq!(r["structuredContent"]["size"], json!([256, 256]));
-    // Saved only when asked.
-    assert!(!dir.join("box-snapshot.png").exists());
-    let r = s.tool(
-        "snapshot",
-        json!({"path": "box.scad", "size": "128x128", "output": "s.png"}),
-    );
-    assert!(text(&r).contains("saved "), "{}", text(&r));
-    assert!(dir.join("s.png").exists());
+    if !no_gpu(&r) {
+        assert_eq!(r["content"][1]["type"], "image");
+        assert_eq!(r["content"][1]["mimeType"], "image/png");
+        assert!(
+            r["content"][1]["data"]
+                .as_str()
+                .unwrap()
+                .starts_with("iVBORw0KGgo")
+        );
+        let t = text(&r);
+        assert!(
+            t.contains("diff: added 0 mm³ (green), removed 2916 mm³ (red)"),
+            "{t}"
+        );
+        assert_eq!(r["structuredContent"]["size"], json!([256, 256]));
+        // Saved only when asked.
+        assert!(!dir.join("box-snapshot.png").exists());
+        let r = s.tool(
+            "snapshot",
+            json!({"path": "box.scad", "size": "128x128", "output": "s.png"}),
+        );
+        assert!(text(&r).contains("saved "), "{}", text(&r));
+        assert!(dir.join("s.png").exists());
 
-    // Issues on the sheet come back as terse findings (no bboxes).
-    let r = s.tool(
-        "snapshot",
-        json!({"source": "cube(10); translate([0, 0, 20]) cube(2);", "issues": true, "size": "128x128"}),
-    );
-    let f = &r["structuredContent"]["issues"]["findings"][0];
-    assert_eq!(f["code"], "floating", "{r}");
-    assert!(f.get("location").is_none() && f["point"].is_array(), "{f}");
+        // Issues on the sheet come back as terse findings (no bboxes).
+        let r = s.tool(
+            "snapshot",
+            json!({"source": "cube(10); translate([0, 0, 20]) cube(2);", "issues": true, "size": "128x128"}),
+        );
+        let f = &r["structuredContent"]["issues"]["findings"][0];
+        assert_eq!(f["code"], "floating", "{r}");
+        assert!(f.get("location").is_none() && f["point"].is_array(), "{f}");
+    }
 
     // check: findings with locations and fixes.
     let r = s.tool(
@@ -995,6 +1013,9 @@ fn mesh_paths_quiet_info_and_touching_parts() {
     assert_eq!(r["isError"], false, "{r}");
     for tool in ["render", "check", "measure", "snapshot"] {
         let r = s.tool(tool, json!({"path": "out/box.stl"}));
+        if tool == "snapshot" && no_gpu(&r) {
+            continue;
+        }
         assert_eq!(r["isError"], false, "{tool}: {r}");
         let t = text(&r);
         assert!(

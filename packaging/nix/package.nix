@@ -39,8 +39,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   # Every workspace crate the CLI is built from. Tests that need the
   # OpenSCAD reference checkout, or a GPU to draw with (the build sandbox
-  # has none), skip themselves when it is missing; checkFlags lists the few
-  # that do not.
+  # has none), skip themselves when it is missing; checkFlags lists the
+  # platform checks the nixpkgs build cannot meet.
   cargoTestFlags = [
     "--package"
     "neoscad-cli"
@@ -66,14 +66,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
     "neoscad-render"
   ];
 
-  checkFlags = [
-    # These draw a snapshot through the MCP server and, unlike the CLI's
-    # own PNG tests, fail rather than skip when there is no GPU adapter,
-    # which the build sandbox never has.
-    "--skip=every_tool_round_trips"
-    "--skip=mesh_paths_quiet_info_and_touching_parts"
-  ]
-  ++ lib.optionals stdenv.hostPlatform.isDarwin [
+  checkFlags = lib.optionals stdenv.hostPlatform.isDarwin [
     # Checks that the Metal frameworks are delay-initialized, which the
     # CLI's build script only arranges for a deployment target of macOS 15
     # or later (crates/cli/build.rs); nixpkgs builds for an older one.

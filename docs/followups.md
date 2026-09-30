@@ -870,11 +870,6 @@ lead them, come roughly in order of user impact.
   error. (T2 audit fixes)
 
 ## MCP and the agent eval
-- `crates/cli/tests/mcp.rs`'s `every_tool_round_trips` and
-  `mesh_paths_quiet_info_and_touching_parts` fail without a GPU adapter
-  instead of skipping themselves as the CLI's PNG tests do; the Nix
-  package (`packaging/nix/package.nix`) skips them with `checkFlags`.
-  Make them skip on their own, then drop those flags.
 - `neoscad mcp` implements MCP 2026-07-28 statelessly plus the legacy
   `initialize` handshake, and only the core: no `subscriptions/listen`,
   no progress notifications (a long render sends nothing until it
