@@ -38,6 +38,11 @@ on:
 
 permissions:
   contents: write
+  # For the DMG's GitHub artifact attestation (the "Attest" step below);
+  # release.yml grants them to this job through Cargo.toml's
+  # github-custom-job-permissions.
+  id-token: write
+  attestations: write
 
 jobs:
   app:
@@ -101,6 +106,20 @@ jobs:
           NEOSCAD_TEAM_ID: ${{ secrets.NEOSCAD_TEAM_ID }}
           NEOSCAD_NOTARY_PROFILE: ${{ env.HAVE_SIGNING == 'true' && 'neoscad-notary' || '' }}
         run: scripts/apple/release.sh
+
+      # A GitHub artifact attestation (build provenance) for what is
+      # uploaded, as cargo-dist's own "Attest" step gives the archives:
+      # `gh attestation verify <file> -R neoscad/neoscad`. It records the
+      # final bytes (the DMG is already signed, notarized and stapled by
+      # release.sh) and changes nothing in them, so Gatekeeper's check of
+      # the notarization is unaffected.
+      - name: Attest
+        if: env.HAVE_SIGNING == 'true' && inputs.plan != ''
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/NeoSCAD-*.dmg
+            dist/NeoSCAD-*-dSYMs.zip
 
       - name: Attach to the release
         if: env.HAVE_SIGNING == 'true' && inputs.plan != ''

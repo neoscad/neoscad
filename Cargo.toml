@@ -167,7 +167,10 @@ runner = "ubuntu-22.04-arm"
 container = { image = "quay.io/pypa/manylinux_2_28_aarch64", host = "aarch64-unknown-linux-musl" }
 
 [workspace.metadata.dist.github-custom-job-permissions]
-publish-macos-app = { contents = "write" }
+# The app job also attests the notarized DMG (GitHub artifact
+# attestations, like cargo-dist's own "Attest" step for the archives): an
+# OIDC token and attestation writes.
+publish-macos-app = { contents = "write", id-token = "write", attestations = "write" }
 publish-packages = { contents = "write", packages = "write" }
 
 [workspace.metadata.dist.min-glibc-version]
