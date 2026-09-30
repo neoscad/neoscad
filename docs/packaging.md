@@ -49,7 +49,7 @@ pushes), so every CI path is unverified until the first tag.
 | Flatpak | Never for a CLI | Flathub doesn't accept console software |
 | Snap | Later/never | Strict confinement conflicts with MCP roots; reserve the name only |
 | AUR `neoscad-bin` | Template now | `packaging/aur/PKGBUILD`, filled per release into `neoscad-package-manifests.tar.gz`; a maintainer pushes it to the AUR. Its `package()` writes the man page and completions with the downloaded binary; that function ran in a Debian container on an aarch64 stage (not under `makepkg`) |
-| Nix flake + nixpkgs | **Now** (flake); nixpkgs after the tag | `packaging/nix/package.nix` is the nixpkgs package (`pkgs/by-name/ne/neoscad`: `buildRustPackage`, `fetchFromGitHub` at `v${version}`, `cargoHash`, tests on, `versionCheckHook`, Vulkan loader and libGL on the RPATH for wgpu); `flake.nix` builds that same file from the tree (`packaging/nix/local.nix`) with nixpkgs' own Rust 1.98.1, no rust-overlay. Built in `nixos/nix` with the sandbox on and its tests run (552 pass): on aarch64-linux both ways (the flake, and package.nix itself through `fetchCargoVendor` with only `src` swapped), on x86_64-linux (emulated) through the flake. Man page and completions installed; see "Nix" below. CI: `.github/workflows/nix.yml` (Linux x86_64, macOS arm64). Submitting: "Submitting to nixpkgs" below |
+| Nix flake + nixpkgs | **Now** (flake); nixpkgs: submission prepared for 0.1.0, the owner opens the PR | `packaging/nix/package.nix` is the nixpkgs package (`pkgs/by-name/ne/neoscad`: `buildRustPackage`, `fetchFromGitHub` at `v${version}`, `cargoHash`, tests on, `versionCheckHook`, Vulkan loader and libGL on the RPATH for wgpu); `flake.nix` builds that same file from the tree (`packaging/nix/local.nix`) with nixpkgs' own Rust 1.98.1, no rust-overlay. Built in `nixos/nix` with the sandbox on and its tests run (552 pass): on aarch64-linux both ways (the flake, and package.nix itself through `fetchCargoVendor` with only `src` swapped), on x86_64-linux (emulated) through the flake. Man page and completions installed; see "Nix" below. CI: `.github/workflows/nix.yml` (Linux x86_64, macOS arm64). Submitting: "Submitting to nixpkgs" below |
 | Windows x86_64/aarch64 zip | **Now** | Built (cargo-dist), CI only (see "Needs the owner", `cargo xwin`) |
 | MSI | **Now**, unsigned | Built (cargo-dist + `crates/cli/wix/main.wxs`, with the licence files hand-added; `allow-dirty = ["msi"]`). Adds `bin` to PATH. Unsigned: SmartScreen will warn. WiX 3.14.1 comes preinstalled on `windows-2025` (x86_64) but not on `windows-11-arm`, so the v0.1.0-rc.1 aarch64 MSI failed ("candle could not be found"); `.github/build-setup.yml` (cargo-dist's `github-build-setup`) now installs the same WiX from its release zip, sha256-pinned, on the ARM64 runner only. 3.14 is the first WiX 3 that builds ARM64 MSIs |
 | Scoop | **Now** (own bucket) | `scoop bucket add neoscad https://github.com/neoscad/scoop-bucket`, then `scoop install neoscad`. The bucket went live 2026-09-29 with v0.1.0's manifest, filled from `packaging/scoop/neoscad.json` by `scripts/release/fill-manifests.sh` with the release's own `.sha256` files; the filled manifest passes Scoop's `schema.json` (ajv) and its URLs resolve. From then on `publish-packages.yml`'s `scoop` job pushes each release's manifest to the bucket as `bucket/neoscad.json` (needs `SCOOP_BUCKET_TOKEN`; without it the job warns and skips). The zips have no top-level folder, so no `extract_dir`. `checkver` names the repository (`{"github": …}`): the bare `"github"` form reads the `homepage`, which is neoscad.org, and Scoop's `bin/checkver.ps1` rejects a non-GitHub homepage there. The main Scoop buckets (`extras`) are a later submission |
@@ -244,7 +244,8 @@ conventions (its `doc/languages-frameworks/rust.section.md`):
 `buildRustPackage (finalAttrs: ...)`, `fetchFromGitHub` with
 `tag = "v${finalAttrs.version}"`, `cargoHash` (vendored by
 `fetchCargoVendor`), `versionCheckHook` and `nix-update-script`. Both
-hashes stay `lib.fakeHash` until the tag exists. Choices:
+hashes here are `lib.fakeHash`; the copy submitted to nixpkgs carries
+the tag's (see "Submitting to nixpkgs"). Choices:
 
 - **Only the CLI** is built (`--package neoscad-cli`); the fonts and MCAD
   are compiled in.
@@ -300,27 +301,45 @@ Darwin was evaluated only: there is no Nix on the build Mac, so
 
 ## Submitting to nixpkgs
 
-After the `v0.1.0` tag is pushed, in a fork of `NixOS/nixpkgs`, on a
-branch from `master`:
+Prepared on 2026-09-30 against nixpkgs master; the owner opens the PR
+(nixpkgs' AI policy wants a human submitter). In a fork of
+`NixOS/nixpkgs`, on a branch from `master`:
 
-1. **Maintainer entry**, in its own commit `maintainers: add <handle>`:
-   an entry in `maintainers/maintainer-list.nix` (alphabetical) with
-   `name`, `github`, `githubId` (`gh api users/<handle> --jq .id`) and
-   `email`.
+1. **Maintainer entry**, in its own commit `maintainers: add
+   mattrobmattrob`, before the package commit: `name`, `github`,
+   `githubId` (`gh api users/<handle> --jq .id`: 5728070), `email`, and
+   `keys` with the GPG fingerprint that signs the owner's commits. The
+   list is sorted case-insensitively and CI's `keep-sorted` checks it,
+   so the entry goes between `mattpolzin` and `MattSturgeon`. With `keys`
+   set, reviewers check that the commit adding the entry is signed by
+   that key (`maintainers/README.md`), so sign it.
 2. **The package:** copy `packaging/nix/package.nix` to
    `pkgs/by-name/ne/neoscad/package.nix`, set `maintainers = with
-   lib.maintainers; [ <handle> ];` and drop the first comment (it
-   describes this repository). `version` is already `"0.1.0"`.
-3. **Hashes:** `nix-update neoscad --version 0.1.0` fills `hash` and
-   `cargoHash`. By hand: `nix-prefetch-github neoscad neoscad --rev
-   v0.1.0` gives `hash`, then `nix-build -A neoscad` with `cargoHash =
-   lib.fakeHash` fails and prints the right one after `got:`. (The rc.1
-   tree's `Cargo.lock` gave `sha256-vLN3oi4oS4FRfcc2Eamj5ripq8fLVc62dM/OC6bMCaE=`;
-   the vendored directory includes `Cargo.lock`, whose workspace
-   versions the release bump changes, so recompute it for the tag.)
-4. **Build and check:** `nix-build -A neoscad` (the tests run in it),
-   `./result/bin/neoscad --version` and an export, `nix fmt`, and
-   `nixpkgs-review rev HEAD`.
+   lib.maintainers; [ mattrobmattrob ];`, drop the first comment (it
+   describes this repository) and add `__structuredAttrs = true;` after
+   `version`: nixpkgs-vet (NPV-166) rejects a new package without it.
+   (The repository copy does not have it yet; the flake builds and passes
+   its tests with it, checked on aarch64-linux.)
+3. **Hashes** for `v0.1.0`: `hash =
+   "sha256-bswis0Rs4byKli6mKRHMMd5jF4Tp9yLcDPsjfUsARtE="` (`nix-prefetch-url
+   --unpack` of the tag's archive and a build with `lib.fakeHash` agree),
+   `cargoHash = "sha256-q53t1IFqxyOqR6rk7sDogXl+BWe+mzRzRVx4LD8G+is="`
+   (a build of `neoscad.cargoDeps` with `lib.fakeHash`, reading the hash
+   after `got:`). `fetchCargoVendor` needs nothing for `vendor/`: the
+   patched crates are path dependencies inside `src` and build from it.
+   `nix-update neoscad --version <v>` recomputes both.
+4. **Checks**, in `nixos/nix` with `sandbox = true` (`--privileged`):
+   `nix-build -A neoscad` (the tests run in it), `./result/bin/neoscad
+   --version` and an export, `nix-build lib/tests/maintainers.nix`,
+   `nix-build ci -A fmt.check` (treefmt: nixfmt, keep-sorted,
+   editorconfig), `bash ci/nixpkgs-vet.sh master "$PWD"` (the path makes
+   it compare against the local `master` rather than fetch one) and
+   `nixpkgs-review`. `nixpkgs-review rev HEAD` fetches the newest master
+   at depth 1 and cannot merge a shallow clone's commits into it
+   ("refusing to merge unrelated histories"); in a shallow clone, stage
+   the changes on the clone's `master` and run `nixpkgs-review wip
+   --staged`. The package has no `passthru.tests`; `versionCheckHook`
+   runs the binary in `installCheckPhase`.
 5. **Commit** `neoscad: init at 0.1.0` (nixpkgs' `pkgs/README.md` commit
    convention) and open the PR with that title. The template's checklist
    asks which platforms it was built on (x86_64-linux, aarch64-linux,
@@ -328,15 +347,29 @@ branch from `master`:
    tried, and that the PR follows the automation/AI policy.
 6. **Automation/AI policy** (nixpkgs `CONTRIBUTING.md`): the submitter
    must have reviewed and understood everything submitted. Content an
-   LLM tool produced (as `package.nix` was) must be disclosed with an
-   `Assisted-by:` trailer on each such commit, naming at least the tool
-   and the model with its version (`Co-authored-by:` does not count),
-   and separately in the PR description. `nix-update` needs no
-   disclosure.
-7. **Later releases:** `nix-shell maintainers/scripts/update.nix
+   LLM tool produced must be disclosed with an `Assisted-by:` trailer on
+   each such commit, naming at least the tool and the model with its
+   version (`Co-authored-by:` does not count), and separately in the PR
+   description; review comments a tool drafted need their own
+   disclosure. nixpkgs' history uses the form `Assisted-by: Claude Code
+   (claude-opus-5)`. `nix-update` needs no disclosure.
+7. **`meta.license`** is left as the list above; the PR asks reviewers
+   whether they want only `gpl2Plus`.
+8. **Later releases:** `nix-shell maintainers/scripts/update.nix
    --argstr package neoscad` runs `passthru.updateScript` (nix-update);
    the commit is `neoscad: 0.1.0 -> 0.1.1`. Keep this repository's
    `package.nix` in step with what nixpkgs merged.
+
+Checked on 2026-09-30 in `nixos/nix` (Nix 2.35.2, `sandbox = true`),
+nixpkgs master `a6b7c86f` (`47b46870` for `nixpkgs-review`), with the
+submitted `package.nix`:
+
+| | aarch64-linux (native) | x86_64-linux (emulated) |
+|---|---|---|
+| `nix-build -A neoscad`, tests in the build | pass: 570 passed, 1 ignored; 4 min on 8 cores | pass: the same 570 (with `filter-syscalls = false`, since seccomp cannot load under emulation); 8.5 min |
+| `--version`, STL and OFF export, an MCAD model, man page and completions, RPATH | pass | `--version`, an STL export, man page and completions: pass |
+| `nixpkgs-review wip --staged` (4.0.0) | 1 package added, 1 built | not run |
+| nixpkgs-vet, `fmt.check`, `lib/tests/maintainers.nix` | pass (nixpkgs-vet first failed on NPV-166, fixed by `__structuredAttrs`) | |
 
 ## Needs the owner
 

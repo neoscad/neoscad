@@ -18,6 +18,7 @@
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "neoscad";
   version = "0.1.0";
+  __structuredAttrs = true;
 
   src = fetchFromGitHub {
     owner = "neoscad";
