@@ -39,8 +39,13 @@ git ls-files -z --cached --others --exclude-standard |
 # Owner and group normalised, so the archive unpacks the same for anyone;
 # no extended attributes (macOS's bsdtar stores com.apple.provenance,
 # which GNU tar warns about on every file).
-tar_args=(--uid 0 --gid 0 --uname root --gname root --no-xattrs)
-if tar --version | grep -q bsdtar; then tar_args+=(--no-mac-metadata); fi
+# GNU tar (the release runner's) and bsdtar (macOS) spell ownership
+# differently: GNU tar has no --uid/--gid.
+if tar --version | grep -q 'GNU tar'; then
+    tar_args=(--owner=root:0 --group=root:0 --numeric-owner --no-xattrs)
+else
+    tar_args=(--uid 0 --gid 0 --uname root --gname root --no-xattrs --no-mac-metadata)
+fi
 COPYFILE_DISABLE=1 tar -C "$work" "${tar_args[@]}" -czf "$out/$name.tar.gz" "$name"
 
 # Vendor from the unpacked copy, so the lockfile and manifests are exactly
