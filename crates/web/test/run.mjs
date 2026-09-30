@@ -207,5 +207,21 @@ await test('runaway recursion is an error, not a crash', 5000, () => {
     console.log(`     ${r.render.console.trim().split('\n')[0]}`);
 });
 
+// The Menger example at depth 5: its normalised difference is a chain of
+// 14,044 holes, whose recursive walk overflowed V8's stack ("Maximum call
+// stack size exceeded") within 100 ms; and its one product's boolean is the
+// depth-5 sponge itself, past what a preview computes, so it is drawn
+// thrown together with a warning instead of running out of memory.
+await test('menger depth 5 preview is thrown together, not a crash', 5000, () => {
+    const menger = join(root, 'web/examples/example024.scad');
+    if (!existsSync(menger)) return 'no web/examples/example024.scad';
+    const text = readFileSync(menger, 'utf8').replace(/^n\s*=\s*\d+;/m, 'n=5;');
+    assert.match(text, /^n=5;/m);
+    ok('open', { path: '/doc/menger.scad', text });
+    const r = ok('run', { path: '/doc/menger.scad', mode: 'preview' });
+    assert.match(r.render.console, /WARNING: The CSG products have 14045 elements to combine/, r.render.console);
+    assert.ok(JSON.parse(r.scene.meta).draws.length > 0);
+});
+
 console.log(failures ? `web core: ${failures} failed` : 'web core: all passed');
 process.exit(failures ? 1 : 0);

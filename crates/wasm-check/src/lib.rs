@@ -90,7 +90,14 @@ pub fn run_with(
         let limit = geom::csg::DEFAULT_TERM_LIMIT;
         match geom::csg::CsgTree::build(top, &geom::Renderer::new(), &keys, ro, limit) {
             Err(u) => con.print(None, format!("{}() is not implemented", u.what).as_bytes()),
-            Ok(t) => con.print(None, preview_line(&t).as_bytes()),
+            Ok(t) => {
+                for m in &t.messages {
+                    let label = m.severity.map_or("", |s| s.openscad_label());
+                    let sep = if label.is_empty() { "" } else { ": " };
+                    con.print(m.severity, format!("{label}{sep}{}", m.text).as_bytes());
+                }
+                con.print(None, preview_line(&t).as_bytes());
+            }
         }
         drop(con);
         return String::from_utf8_lossy(&out).into_owned();

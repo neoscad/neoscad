@@ -16,7 +16,31 @@
 import init, { Engine, lastPanic } from './neoscad_web.js';
 
 let engine = null;
+let memory = null;
 let crashed = false;
+
+// What a trap with no panic message was, for the page to show. A panic
+// records its message before it aborts, so an `unreachable` trap without
+// one is Rust aborting on a failed allocation: the model needed more
+// memory than the instance could grow to. Kernel working memory is not
+// counted against the memory limit, so this is how such a model ends.
+// "engine restarted: crashed: unreachable" told the user nothing.
+function trapMessage(e) {
+    const raw = String(e && e.message ? e.message : e);
+    if (e instanceof RangeError && /call stack/i.test(raw)) {
+        return `the engine's stack overflowed (${raw})`;
+    }
+    if (/unreachable/i.test(raw)) {
+        let size = '';
+        try {
+            size = ` at ${Math.round(memory.buffer.byteLength / (1 << 20))} MiB`;
+        } catch (_) {
+            // No memory to read.
+        }
+        return `the engine ran out of memory${size}; the model needs more than the browser gives it`;
+    }
+    return raw;
+}
 
 // Every `ArrayBuffer` or typed array inside `value`, replaced by
 // { $buffer: n } with the buffer at `buffers[n]`: how buffers reach Rust
@@ -49,7 +73,8 @@ function insertBuffers(value, buffers) {
 // Load the module (`module` defaults to the .wasm beside this file; node
 // passes its bytes) and make the engine.
 export async function start(module = new URL('./neoscad_web_bg.wasm', import.meta.url)) {
-    await init({ module_or_path: module });
+    const exports = await init({ module_or_path: module });
+    memory = exports.memory;
     engine = new Engine();
 }
 
@@ -73,7 +98,7 @@ export function handle(request) {
     } catch (e) {
         // A trap (a panic, out of memory, the engine's stack exhausted).
         crashed = true;
-        let message = String(e && e.message ? e.message : e);
+        let message = trapMessage(e);
         try {
             message = lastPanic() || message;
         } catch (_) {

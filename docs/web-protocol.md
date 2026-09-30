@@ -408,8 +408,10 @@ The page owns the worker's life:
 - **Crash.** A panic aborts on wasm32, and running out of memory or of the
   engine's stack traps. The glue catches the trap, replies to the request
   with `error.kind: "crashed"`, and posts `{ type: "crashed", message }`
-  (the panic message when there was one); the instance is unusable after
-  that. The page terminates it and respawns.
+  (the panic message when there was one; otherwise "the engine ran out of
+  memory at N MiB" for an `unreachable` trap, which is how Rust aborts on
+  a failed allocation, or "the engine's stack overflowed" for V8's
+  `RangeError`); the instance is unusable after that. The page terminates it and respawns.
 - **Respawn** ("engine restarted"): the new worker starts empty. The page
   replays, in order: `init` (same `limits` and `seed`), every `addFiles`
   (from its kept copies), `open` of each document with its current text,

@@ -51,6 +51,21 @@ pub const NO_COLOR: Color = Color([-1.0; 4]);
 /// `CSGTreeNormalizer`'s default limit (`RenderSettings::openCSGTermLimit`).
 pub const DEFAULT_TERM_LIMIT: usize = 100_000;
 
+/// The most leaves the preview puts through real booleans (the leaves of
+/// every product of more than one leaf); past it the whole preview is
+/// drawn thrown together, with a warning ([`CsgTree::booleans`]).
+///
+/// OpenSCAD never computes a product: OpenCSG draws it in image space, so
+/// its preview only gives up past `openCSGLimit` elements (100,000, where
+/// the GUI switches to thrown together). A boolean costs far more, and
+/// grows with its result rather than its leaf count: the Menger sponge
+/// example at depth 5 is one product of 14,045 leaves, which OpenSCAD
+/// previews in 20 s, but whose boolean is the depth-5 sponge itself:
+/// minutes and 12 GB natively, and past the web demo's memory. At depth 4
+/// (1,757 leaves) it takes 4 s natively and 30 s in the web demo, and is
+/// still drawn.
+pub const BOOLEAN_LIMIT: usize = 10_000;
+
 /// One leaf of the CSG expression (`CSGLeaf`).
 #[derive(Debug)]
 pub struct Leaf {
@@ -255,6 +270,47 @@ impl TermNode {
     }
 }
 
+thread_local! {
+    /// What [`TermNode`]'s drop leaves in an operand it has taken out:
+    /// shared, so taking one costs a reference count, not an allocation.
+    static TAKEN: Term = empty_set();
+}
+
+/// Terms are chains as long as the model has operands: a union of the
+/// children of a `for` of thousands, or a difference of one solid and
+/// thousands of holes, which normalisation turns into
+/// `((x - a) - b) - ...`. The drop the compiler writes recurses once per
+/// link, and freeing the Menger sponge example at depth 5 (a chain of
+/// 14,044) overflowed V8's 1 MB stack in the web demo. This one takes the
+/// operands only it still owns onto a heap stack and frees them from
+/// there, so freeing a term needs the same stack at any length.
+impl Drop for TermNode {
+    fn drop(&mut self) {
+        fn take(slot: &mut Term, pending: &mut Vec<Term>) {
+            // A shared operand is not freed here, so it does not recurse.
+            if !slot.is_leaf() && Rc::strong_count(slot) == 1 && Rc::weak_count(slot) == 0 {
+                pending.push(std::mem::replace(slot, TAKEN.with(Rc::clone)));
+            }
+        }
+        let TermKind::Op(_, l, r) = &mut self.kind else {
+            return;
+        };
+        let mut pending = Vec::new();
+        take(l, &mut pending);
+        take(r, &mut pending);
+        while let Some(mut t) = pending.pop() {
+            if let Some(node) = Rc::get_mut(&mut t)
+                && let TermKind::Op(_, l, r) = &mut node.kind
+            {
+                take(l, &mut pending);
+                take(r, &mut pending);
+            }
+            // `t`'s operands are now shared placeholders or terms other
+            // owners keep, so its own drop returns at once.
+        }
+    }
+}
+
 fn merged(a: BoundingBox, b: BoundingBox) -> BoundingBox {
     match (a, b) {
         (None, b) => b,
@@ -331,6 +387,9 @@ pub struct CsgTree {
     pub background: Option<Products>,
     /// Geometry messages of the leaves and the normaliser's, in order.
     pub messages: Vec<Msg>,
+    /// Whether the preview may draw products from booleans: false past
+    /// [`BOOLEAN_LIMIT`], when it is drawn thrown together instead.
+    pub booleans: bool,
 }
 
 impl CsgTree {
@@ -388,8 +447,20 @@ impl CsgTree {
             count: 0,
             aborted: false,
         };
+        // OpenSCAD logs the abort where it happens, so it comes before
+        // the empty tree it leaves, and once per abandoned term.
+        let abort_msg = || Msg {
+            severity: Some(Severity::Warning),
+            text: format!(
+                "Normalized tree is growing past {limit} elements. Aborting normalization.\n"
+            ),
+            loc: None,
+        };
         let root = root.and_then(|t| {
             let n = normalizer.normalize(&t);
+            if normalizer.aborted {
+                messages.push(abort_msg());
+            }
             if n.is_none() {
                 messages.push(Msg {
                     severity: Some(Severity::Warning),
@@ -403,15 +474,6 @@ impl CsgTree {
                 p
             })
         });
-        if normalizer.aborted {
-            messages.push(Msg {
-                severity: Some(Severity::Warning),
-                text: format!(
-                    "Normalized tree is growing past {limit} elements. Aborting normalization.\n"
-                ),
-                loc: None,
-            });
-        }
         let mut compile = |terms: Vec<Term>| -> Option<Products> {
             if terms.is_empty() {
                 return None;
@@ -420,7 +482,11 @@ impl CsgTree {
             for t in terms {
                 // A term normalised to nothing is skipped (`import` of a
                 // null term would crash OpenSCAD; it never happens there).
-                if let Some(n) = normalizer.normalize(&t) {
+                let n = normalizer.normalize(&t);
+                if normalizer.aborted {
+                    messages.push(abort_msg());
+                }
+                if let Some(n) = n {
                     p.import(&n);
                 }
             }
@@ -428,11 +494,33 @@ impl CsgTree {
         };
         let highlights = compile(std::mem::take(&mut ev.highlights));
         let background = compile(std::mem::take(&mut ev.background));
+        // The leaves a boolean would take: a product of one leaf is drawn
+        // as it is.
+        let boolean_leaves: usize = [&root, &highlights, &background]
+            .into_iter()
+            .flatten()
+            .flat_map(|p| &p.products)
+            .map(|p| p.intersections.len() + p.subtractions.len())
+            .filter(|&n| n > 1)
+            .sum();
+        let booleans = boolean_leaves <= BOOLEAN_LIMIT;
+        if !booleans {
+            messages.push(Msg {
+                severity: Some(Severity::Warning),
+                text: format!(
+                    "The CSG products have {boolean_leaves} elements to combine, more than the \
+                     {BOOLEAN_LIMIT} a preview computes; drawing them thrown together. Render \
+                     to see the result."
+                ),
+                loc: None,
+            });
+        }
         Ok(CsgTree {
             root,
             highlights,
             background,
             messages,
+            booleans,
         })
     }
 
@@ -813,41 +901,79 @@ impl Normalizer {
         self.pass(root.clone())
     }
 
-    /// `normalizePass`, recursively: rewrite the top until no rule
-    /// applies, normalise the left operand, and repeat while the node is
-    /// not a union and still has an operation on the right or a union on
-    /// the left; then normalise the right operand. `None` once the limit
-    /// is passed: OpenSCAD then abandons the whole term.
-    fn pass(&mut self, node: Term) -> Option<Term> {
-        if node.is_leaf() {
-            return Some(node);
+    /// `normalizePass`: rewrite the top until no rule applies, normalise
+    /// the left operand, and repeat while the node is not a union and
+    /// still has an operation on the right or a union on the left; then
+    /// normalise the right operand. `None` once the limit is passed:
+    /// OpenSCAD then abandons the whole term.
+    ///
+    /// The recursion is kept on a heap stack, as OpenSCAD's is: the left
+    /// operand of a normalised difference of `n` holes is a chain `n`
+    /// long, and recursing down it overflowed V8's 1 MB stack in the web
+    /// demo on the Menger sponge at depth 5 (14,043 holes), well inside
+    /// the limit. The order of the work, and so the count, is the
+    /// recursive one's.
+    fn pass(&mut self, root: Term) -> Option<Term> {
+        /// A node waiting for the pass over one of its operands.
+        enum Waiting {
+            /// Its left operand; then it may be rewritten again.
+            Left(Term),
+            /// Its right operand; then it is done.
+            Right(Term),
         }
-        let mut node = node;
+        enum Step {
+            /// Normalise this term.
+            Enter(Term),
+            /// Rewrite this operation at the top and descend to its left.
+            Top(Term),
+            /// A normalised term, for the node waiting on it.
+            Done(Term),
+        }
+        let mut waiting: Vec<Waiting> = Vec::new();
+        let mut step = Step::Enter(root);
         loop {
-            while let Some(n) = match_and_replace(&node) {
-                node = n;
-            }
-            self.count += 1;
-            if self.count > self.limit {
-                self.aborted = true;
-                return None;
-            }
-            if node.is_leaf() {
-                return Some(node);
-            }
-            let (_, l, r) = op_parts(&node).expect("an operation");
-            let (l, r) = (l.clone(), r.clone());
-            let left = self.pass(l)?;
-            node = with_children(&node, left, r);
-            let (_, l, r) = op_parts(&node).expect("an operation");
-            if is_union(&node) || !(!r.is_leaf() || is_union(l)) {
-                break;
-            }
+            step = match step {
+                Step::Enter(node) if node.is_leaf() => Step::Done(node),
+                Step::Enter(node) => Step::Top(node),
+                Step::Top(mut node) => {
+                    while let Some(n) = match_and_replace(&node) {
+                        node = n;
+                    }
+                    self.count += 1;
+                    if self.count > self.limit {
+                        self.aborted = true;
+                        return None;
+                    }
+                    match op_parts(&node) {
+                        None => Step::Done(node),
+                        Some((_, l, _)) => {
+                            let l = l.clone();
+                            waiting.push(Waiting::Left(node));
+                            Step::Enter(l)
+                        }
+                    }
+                }
+                Step::Done(value) => match waiting.pop() {
+                    None => return Some(value),
+                    Some(Waiting::Left(node)) => {
+                        let (_, _, r) = op_parts(&node).expect("an operation");
+                        let node = with_children(&node, value, r.clone());
+                        let (_, l, r) = op_parts(&node).expect("an operation");
+                        if is_union(&node) || !(!r.is_leaf() || is_union(l)) {
+                            let r = r.clone();
+                            waiting.push(Waiting::Right(node));
+                            Step::Enter(r)
+                        } else {
+                            Step::Top(node)
+                        }
+                    }
+                    Some(Waiting::Right(node)) => {
+                        let (_, l, _) = op_parts(&node).expect("an operation");
+                        Step::Done(with_children(&node, l.clone(), value))
+                    }
+                },
+            };
         }
-        let (_, l, r) = op_parts(&node).expect("an operation");
-        let (l, r) = (l.clone(), r.clone());
-        let right = self.pass(r)?;
-        Some(with_children(&node, l, right))
     }
 }
 

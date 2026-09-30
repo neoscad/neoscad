@@ -153,3 +153,100 @@ fn product_meshes_are_the_same_at_any_thread_count() {
         assert_eq!(dump(product_meshes(jobs.clone(), &scheme)), parallel);
     }
 }
+
+/// The Menger sponge example (`examples/Old/example024.scad`) at depth 5.
+const MENGER_5: &str = "
+module menger() {
+  difference() {
+    cube(100, center=true);
+    for (v=[[0,0,0], [0,0,90], [0,90,0]])
+      rotate(v) menger_negative(side=100, maxside=100, level=5);
+  }
+}
+module menger_negative(side=1, maxside=1, level=1) {
+  l=side/3;
+  cube([maxside*1.1, l, l], center=true);
+  if (level > 1) {
+    for (i=[-1:1], j=[-1:1])
+      if (i || j)
+        translate([0, i*l, j*l])
+          menger_negative(side=l, maxside=maxside, level=level-1);
+  }
+}
+difference() {
+  rotate([45, atan(1/sqrt(2)), 0]) menger();
+  translate([0,0,-100]) cube(200, center=true);
+}
+";
+
+/// Normalising a difference of one solid and thousands of holes makes a
+/// chain of thousands of operations; the web demo's preview of this model
+/// overflowed V8's stack (about 1 MB) walking it recursively. Building the
+/// products, and dropping them, must not depend on the chain's length, so
+/// this runs on a stack far smaller than the one that overflowed.
+#[test]
+fn a_long_normalised_chain_needs_no_deep_stack() {
+    let products = std::thread::Builder::new()
+        .stack_size(256 << 10)
+        .spawn(|| {
+            let t = csg(MENGER_5);
+            let out = (shape(&t.root), t.booleans, t.messages.clone());
+            drop(t);
+            out
+        })
+        .unwrap()
+        .join()
+        .expect("no stack overflow");
+    let (products, booleans, messages) = products;
+    // OpenSCAD 2026.09.23: "Normalized CSG tree has 14045 elements".
+    assert_eq!(products, [(1, 14044)]);
+    // Its boolean is past what a preview computes: thrown together.
+    assert!(!booleans);
+    let texts: Vec<&str> = messages.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "The CSG products have 14045 elements to combine, more than the 10000 a preview \
+          computes; drawing them thrown together. Render to see the result."
+        ]
+    );
+}
+
+/// Past the normalisation limit OpenSCAD abandons the term, and warns of
+/// the abort before the empty tree it leaves.
+#[test]
+fn a_term_past_the_limit_is_abandoned_with_openscads_warnings() {
+    let path = PathBuf::from("/nonexistent/test.scad");
+    let src =
+        "difference() { cube(10); for (i = [0:20]) translate([i/3, 0, 0]) sphere(1); }\n\x03\n";
+    let program = lang::parse_file(path, src.as_bytes().to_vec());
+    let mut out = eval::Collect::default();
+    let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+        eval::evaluate(
+            &program,
+            &[],
+            &[],
+            PathBuf::from("/nonexistent"),
+            &eval::Options::default(),
+            &mut out,
+        )
+    });
+    let keys = eval::dump::Keys::new(&ev.root, &lang::loader::StdFs);
+    let t = CsgTree::build(
+        &ev.root,
+        &Renderer::new(),
+        &keys,
+        RenderOptions::default(),
+        5,
+    )
+    .expect("supported");
+    assert!(t.root.is_none());
+    let texts: Vec<&str> = t.messages.iter().map(|m| m.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "Normalized tree is growing past 5 elements. Aborting normalization.\n",
+            "CSG normalization resulted in an empty tree",
+        ]
+    );
+}

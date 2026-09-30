@@ -1162,6 +1162,24 @@ lead them, come roughly in order of user impact.
   clippy for wasm32, so nothing catches it.
 
 ## Web demo
+- **The preview's product booleans run outside the limits.**
+  `geom::csg::product_meshes` (called from `render::preview::scene`) checks
+  neither the interrupt flag nor the time or memory limit, so a product
+  under `geom::csg::BOOLEAN_LIMIT` can still run for minutes: before that
+  limit, the Menger example at depth 5 ran past 235 s and 2.5 GB in the
+  web core under a 60 s limit. Checking the interrupt between the
+  `union_tree` steps would bound it to one kernel operation.
+- **A preview recomputes what a render reuses.** The Menger example at
+  depth 4 previews in 28 s in the web core but renders in 8 s: the render
+  caches each `menger_negative` level (its subtrees are identical under
+  their `translate`), while the preview's product unions its 1,756 negatives
+  flat. Natively, with threads, the two are close (4.5 s and 3.8 s).
+- **Out of memory in the kernel still traps.** Kernel working memory is
+  not counted against the web core's 1 GiB limit, so a render like the
+  Menger example at depth 5 grows the instance until an allocation fails
+  and Rust aborts (`unreachable`). The worker now names it ("the engine
+  ran out of memory at N MiB"), but it is still a respawn, not a
+  `resource-limit` diagnostic.
 - Consider "Connect your AI agent" (the `neoscad mcp --browser` bridge,
   docs/agent-bridge.md) for the native apps too: macOS, and the Linux and
   Windows apps being built (owner, 2026-09-30: weigh its value first, don't

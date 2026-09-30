@@ -129,6 +129,13 @@ fn scaled_z(m: &Matrix) -> Matrix {
 
 /// The preview of `tree` in `scheme`'s colours.
 pub fn scene(tree: &CsgTree, scheme: &ColorScheme, previewer: Previewer) -> Scene {
+    // Past `geom::csg::BOOLEAN_LIMIT` the products' booleans would take
+    // minutes and gigabytes; the tree carries the warning that says so.
+    let previewer = if tree.booleans {
+        previewer
+    } else {
+        Previewer::ThrownTogether
+    };
     let throwntogether = previewer == Previewer::ThrownTogether;
     let mut scene = Scene::empty(scheme, tree.bounding_box(throwntogether));
     let lists = [
