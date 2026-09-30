@@ -110,8 +110,14 @@ jobs:
             Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and $_.DisplayName -eq 'NeoSCAD' }
           if (@($arp).Count -ne 1) { throw "expected one 'NeoSCAD' uninstall entry, found $(@($arp).Count)" }
           if ($arp.DisplayVersion -ne $numeric) { throw "uninstall entry's version is $($arp.DisplayVersion), expected $numeric" }
-          if (-not $arp.DisplayIcon) { throw "uninstall entry has no DisplayIcon (ARPPRODUCTICON)" }
-          Write-Host "uninstall entry: $($arp.PSChildName) $($arp.DisplayVersion), icon $($arp.DisplayIcon)"
+          # ARPPRODUCTICON is not written to the uninstall key as DisplayIcon:
+          # Windows Installer keeps it as the product's ProductIcon under
+          # Installer\Products, which is where Add or remove programs reads it.
+          $product = Get-ChildItem 'HKLM:\SOFTWARE\Classes\Installer\Products' |
+            Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.ProductName -eq 'NeoSCAD' }
+          if (@($product).Count -ne 1) { throw "expected one 'NeoSCAD' product under Installer\Products, found $(@($product).Count)" }
+          if (-not $product.ProductIcon) { throw "the product has no ProductIcon (ARPPRODUCTICON)" }
+          Write-Host "uninstall entry: $($arp.PSChildName) $($arp.DisplayVersion), icon $($product.ProductIcon)"
 
           $classes = 'HKLM:\SOFTWARE\Classes'
           $expect = @{
