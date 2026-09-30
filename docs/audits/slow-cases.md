@@ -11,9 +11,9 @@ recorded unloaded numbers, not today's absolutes. Models are the ones in
 
 ## Summary
 
-| Case | Recorded, unloaded (`performance.md:379-381`, `vendor/README.md:131-144`) | Today, loaded | Verdict |
+| Case | Recorded, unloaded (`performance.md:379-381`, `vendor/README.md:220-233`) | Today, loaded | Verdict |
 |---|---|---|---|
-| Menger level 4 (`examples/Old/example024.scad`, `n=4`) | 2.87 s (8.2 s CPU) vs 2.01 s (14.4 s CPU) | 3.81–3.95 s (7.5 CPU) vs 3.80–5.11 s (12.5 CPU) | Real, ~1.4× slower. Cause: manifold-rust runs its boolean kernels serially |
+| Menger level 4 (`examples/Old/example024.scad`, `n=4`) | 2.87 s (8.2 s CPU) vs 2.01 s (14.4 s CPU) | 3.81–3.95 s (7.5 CPU) vs 3.80–5.11 s (12.5 CPU) | Real, ~1.4× slower. Cause: manifold-rust runs its boolean kernels serially. **Fixed** by the parallel boolean patch (§1.1): 1.59 s (8.3 CPU) vs 2.29 s |
 | 200 lines × 125 chars of `text()`, 2D to SVG | 2.85 vs 1.63 s, then −31% from the rounding patch ≈ 1.97 vs 1.63 s | 2.24–2.26 s (3.2 CPU) vs 2.07–2.31 s (1.8 CPU) | Real, ~1.2× slower. Cause: one single-threaded Clipper union of 30,140 contours in the pure-Rust port. **Fixed** (§2, Results): 0.49 s (1.55 CPU) vs 1.41 s, same SVG |
 | Deep unions | none recorded | flat 800 cubes: 0.036 vs 0.134 s (bench, 2026-09-28); nested 256 spheres: 0.24 vs 0.57 s | **Not reproduced.** neoscad is 2–4× faster on both union shapes tried |
 
@@ -33,7 +33,7 @@ Two corrections to the written record, both verified against the source:
   "Lazy solids across cache boundaries" (`followups.md:150`) would not
   close the gap.
 - **The `nearbyint_f64` cost in the text case is fixed** (vendored
-  clipper2-rust, `vendor/README.md:86-118`); `performance.md:380` predates it.
+  clipper2-rust, `vendor/README.md:175-207`); `performance.md:380` predates it.
 
 ## 1. Menger sponge, level 4
 
@@ -79,6 +79,88 @@ recoverable by parallelism in either tool.
 3. **Do not pursue lazy cross-node solids.** The nightly does not have them
    either (correction above).
 
+### 1.1 Done: the parallel boolean patch
+
+Options 1 and 2 are in `vendor/manifold-rust` (`vendor/README.md`, "The
+parallel boolean patch", lists each site and why its output is the
+sequential one). A correction to the site count above: 0.13.1 already had
+parallel loops in `boolean3_kernels.rs` (the `intersect12` queries and
+the `winding03` ray casts) and in `face_op_triangulate.rs` (the per-face
+triangulations); the count looked at `boolean3.rs` only.
+
+**Profile first.** macOS `sample` of the unpatched build: of the samples
+inside manifold-rust's booleans, 44% were `collapse_colinear_edges`, most
+of it its flag scan (not its collapses), then `sort_geometry` 16% and
+`face2tri` 12%; `Boolean3::new` (broadphase and intersections) was 3%, so
+the broadphase is not the cost on this model. `MANIFOLD_TIMING=1` (the
+crate's stage timer, with sub-stage timers added for the measurement and
+removed after) then put the last difference (cube minus the three
+negatives, 8.6 million halfedges before simplification), on the build
+with steps A and B1 below, at 1.25 s alone on one core: intersections
+0.18 s (already parallel), assembly 0.30 s (0.23 s of it building the edge
+`BTreeMap`s), triangulation 0.28 s, simplification 0.40 s
+(`dedupe_edges`' scan 0.11 s, `split_pinched_verts` 0.06 s, the colinear
+collapses 0.14 s), sorting 0.09 s.
+
+**Steps, measured one after another** (interleaved, best of 5, M4 Pro,
+load average 5–9 from other work):
+
+| Step | Menger 4 | `csg_spheres` | hero |
+|---|---|---|---|
+| unpatched (`6d73727`) | 2.56 s | 0.57 s | 2.20 s |
+| A: `batch_boolean` pairs in parallel | 2.49 s (−2%) | 0.50 s (−8%) | 2.21 s (0%) |
+| B1: edge-flag scans in parallel | 2.10 s (−15%) | 0.48 s | 2.15 s |
+| B2: edge maps as sorted runs, parallel orbit scans, parallel `face2tri` writes | 1.70 s (−19%) | 0.47 s | 2.10 s |
+| B3: parallel `sort_geometry`, `intersect12` sort, `winding03` flags | 1.63 s (−1 to −5%) | 0.46 s | 2.16 s |
+| nightly `--backend=manifold` | 2.16 s | 1.16 s | 6.24 s |
+
+The parallel `face2tri` writes alone measured 1.47 against 1.51 s (best
+of 9). A last interleaved run of the finished patch against the
+unpatched build and the nightly (best of 5, load 8–18):
+
+| Model | Unpatched | Patched | Nightly |
+|---|---|---|---|
+| Menger level 4 | 2.62 s (7.0 s CPU) | 1.59 s (8.3 s CPU) | 2.29 s (14.8 s CPU) |
+| hero | 2.27 s | 2.16 s | 6.31 s |
+| `csg_spheres` | 0.57 s | 0.47 s | 1.16 s |
+| `csg_deep_union` | 0.058 s | 0.057 s | 0.173 s |
+
+Menger 4 is now 1.6 times faster than before and 1.4 times faster than
+the nightly. The hero is bound by evaluation, not booleans. CPU time goes
+up (Menger +19%, hero +34%, `csg_spheres` +70%, `csg_deep_union` 0.08 to
+0.19 s), most likely rayon workers spinning while they wait for work,
+which a busy machine pays for. In runs taken while another
+process kept every core busy (load average 80–120), the patched build was
+slower than the unpatched one on the hero (4.6 against 3.5 s, best of 5)
+and `csg_deep_union` (0.118 against 0.061 s, best of 15), and still
+faster on Menger 4 (3.5 against 3.8 s), presumably because a parallel
+step waits for workers the scheduler has no core for. Not investigated
+further; worth a look if the app is often run beside heavy work.
+
+**What is left, as a plan.** On the patched build the last difference
+takes about 0.85 s: intersections 0.19 s, assembly 0.09 s, triangulation
+0.2–0.3 s, simplification 0.31 s, sorting 0.05 s.
+
+1. **Edge collapses** (0.14 s of `collapse_colinear_edges`, most of the
+   0.05 s of `collapse_short_edges`): 5 million edges are flagged and
+   0.93 million collapse, one after another, as in C++. Parallelism is
+   out; a cheaper rejection path in `collapse_edge` for the 4 million
+   that do not collapse might take half. Gain up to 0.07 s; effort M;
+   the decisions must stay the same, so risk is low if only the order of
+   the checks changes.
+2. **`face2tri`'s ear clipping**: 0.44 s of CPU on one thread, 0.15 s
+   on 14, a poor speed-up for 300,000 independent faces. Profile the
+   parallel run for allocator contention (each face allocates its
+   polygons and result). Gain up to 0.1 s; effort M; output unaffected.
+3. **Assembly's partial and new edges** (0.04 s): serial because each
+   run bumps `face_ptr_r` in order. Per-face counts and a prefix sum would
+   give each run its slots up front. Gain 0.03 s; effort M.
+4. **`intersect12`'s per-edge result vectors** (a `Vec` per halfedge,
+   flattened serially in 0.014 s): count, prefix-sum and fill instead.
+   Gain 0.01–0.02 s; effort S.
+
+None of these is worth doing for the Menger gap alone, which is closed.
+
 ## 2. Many `text()` nodes
 
 **Model.** 200 `translate() text(125 chars, size=5)` lines, 2D, `-o .svg`.
@@ -93,7 +175,7 @@ The rest is one union of the 200 sanitized polygons: `crates/geom/src/clipper.rs
 job. Profile before the rounding patch (`performance.md:380`): 2.0 s serial
 in clipper2-rust's `execute_internal`: `build_intersect_list` 27%, `top_x`
 23%, `nearbyint_f64` 16%. The patch removed the last item (−31% on this
-model, `vendor/README.md:138`). Both tools do exactly one union; Clipper2 C++
+model, `vendor/README.md:227`). Both tools do exactly one union; Clipper2 C++
 is single-threaded as well. What remains is the port's constant factor
 (generic `T::from_f64` conversions in `top_x`, per-scanline `Vec` growth in
 `build_intersect_list`). A fresh profile could not be taken today (`sample`
@@ -222,10 +304,11 @@ owner remembers the original model, one interleaved run settles it.
 
 ## Recommended next steps
 
-1. Fix the website claim about deep unions (no evidence; §3). Trivial.
+1. Fix the website claim about deep unions (no evidence; §3) and, now,
+   about the Menger sponge (§1.1). Trivial.
 2. ~~Micro-optimise clipper2-rust's sweep (§2.2).~~ Done, §2 Results.
 3. ~~2D disjoint compose (§2.1).~~ Done for y-separated bands with byte
    parity, §2 Results; no owner decision was needed.
-4. `rayon::join` in `batch_boolean` rounds (§1.2): small, measured, safe.
-5. Parallel kernels in manifold-rust (§1.1): the real Menger fix, L effort,
-   needs the determinism proof re-run.
+4. ~~`rayon::join` in `batch_boolean` rounds (§1, option 2).~~ Done, §1.1.
+5. ~~Parallel kernels in manifold-rust (§1, option 1).~~ Done, §1.1, which
+   also plans what is left.

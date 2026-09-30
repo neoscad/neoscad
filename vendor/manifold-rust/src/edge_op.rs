@@ -1,7 +1,8 @@
 // edge_op.rs — Phase 7b: Edge collapse, degenerate removal, topology cleanup
 //
 // Ports src/edge_op.cpp from the Manifold C++ library.
-// All algorithms are sequential (rayon deferred to later).
+// The edge-flag and orbit scans run in parallel on large meshes (NeoSCAD
+// patch); the collapses, swaps and splits they feed stay sequential.
 
 use crate::linalg::{Vec2, Vec3, dot, dot2, length2_2};
 use crate::types::{next_halfedge, Halfedge};
@@ -508,9 +509,113 @@ pub fn recursive_edge_swap(
 // SplitPinchedVerts
 // -----------------------------------------------------------------------
 
+// NeoSCAD patch: parallel orbit scans for `split_pinched_verts` and
+// `dedupe_edges`.
+//
+// Both walk halfedge orbits (the halfedges leaving one vertex, stepping
+// `next_halfedge(paired_halfedge)`) in ascending index order, skipping any
+// halfedge an earlier walk already visited, so each orbit is handled once,
+// from its smallest eligible halfedge: its owner. On a large boolean that
+// scan was serial and visited every halfedge (0.11 s and 0.06 s of the
+// last Menger level-4 difference; C++ runs both in parallel above 1e4
+// halfedges, edge_op.cpp:722-796 and 903-924).
+//
+// When every orbit is a closed cycle the owners can be found without the
+// visited flags: a halfedge owns its orbit if its walk comes back to it
+// without meeting a smaller eligible halfedge. Walking from each halfedge
+// needs that guarantee, and gets it from `paired_halfedge` being an
+// involution (every pair in range and pairing back): then the step is
+// injective, so a walk either returns to its start or ends at a halfedge
+// with no pair. An orbit that ends that way is detected by its smallest
+// eligible halfedge, whose walk meets nothing smaller and so must reach
+// the end. In either failure (not an involution, or an open orbit) the
+// callers fall back to their original sequential scans, so the result is
+// the sequential one on every mesh.
+
+/// Halfedge count from which the orbit scans run in parallel
+/// (C++: `nbEdges > 1e4`).
+const ORBIT_PAR_THRESHOLD: usize = 10_001;
+
+/// The owner of every orbit that has an eligible halfedge, ascending, or
+/// `None` when an orbit is not a closed cycle or the halfedge count is
+/// below `threshold` (the caller then runs its sequential scan).
+fn orbit_owners<F>(halfedge: &[Halfedge], threshold: usize, eligible: F) -> Option<Vec<usize>>
+where
+    F: Fn(&Halfedge) -> bool + Sync + Send,
+{
+    let n = halfedge.len();
+    if n < threshold || !cfg!(feature = "parallel") {
+        return None;
+    }
+    let paired_back = crate::par::maybe_par_filter(n, threshold, |i| {
+        let p = halfedge[i].paired_halfedge;
+        p >= 0 && (p as usize >= n || halfedge[p as usize].paired_halfedge != i as i32)
+    });
+    if !paired_back.is_empty() {
+        return None;
+    }
+    // 0: not an owner, 1: owner, 2: the walk left the orbit open.
+    let role: Vec<u8> = crate::par::maybe_par_map(n, threshold, |i| {
+        if !eligible(&halfedge[i]) {
+            return 0;
+        }
+        let mut current = i;
+        loop {
+            let p = halfedge[current].paired_halfedge;
+            if p < 0 {
+                return 2;
+            }
+            current = next_halfedge(p) as usize;
+            if current >= n {
+                // Only if the count is not a multiple of 3; the sequential
+                // scans decide what that means.
+                return 2;
+            }
+            if current == i {
+                return 1;
+            }
+            if current < i && eligible(&halfedge[current]) {
+                return 0;
+            }
+        }
+    });
+    if role.contains(&2) {
+        return None;
+    }
+    Some((0..n).filter(|&i| role[i] == 1).collect())
+}
+
 /// Finds vertices where multiple halfedge cycles meet (pinched verts) and
 /// splits them into separate vertices — one per cycle.
 pub fn split_pinched_verts(mesh: &mut ManifoldImpl) {
+    // NeoSCAD patch: with the owners known (see `orbit_owners`), only the
+    // pinched orbits need walking, in the owners' order, which is the
+    // order the sequential scan below reaches them in.
+    if let Some(owners) = orbit_owners(&mesh.halfedge, ORBIT_PAR_THRESHOLD, |h| h.start_vert >= 0) {
+        let mut vert_processed = vec![false; mesh.vert_pos.len()];
+        for i in owners {
+            let vert = mesh.halfedge[i].start_vert as usize;
+            if vert_processed.get(vert) != Some(&true) {
+                if vert < vert_processed.len() {
+                    vert_processed[vert] = true;
+                }
+                continue;
+            }
+            let new_pos = mesh.vert_pos[vert];
+            mesh.vert_pos.push(new_pos);
+            let new_vert = (mesh.vert_pos.len() - 1) as i32;
+            let mut current = i;
+            loop {
+                let paired = mesh.halfedge[current].paired_halfedge;
+                current = next_halfedge(paired) as usize;
+                mesh.halfedge[current].start_vert = new_vert;
+                let curr_paired = mesh.halfedge[current].paired_halfedge;
+                mesh.halfedge[curr_paired as usize].end_vert = new_vert;
+                if current == i { break; }
+            }
+        }
+        return;
+    }
     let n_edges = mesh.halfedge.len();
     let mut vert_processed = vec![false; mesh.vert_pos.len()];
     let mut halfedge_processed = vec![false; n_edges];
@@ -707,74 +812,102 @@ pub fn dedupe_edges(mesh: &mut ManifoldImpl) {
     let max_iterations = mesh.halfedge.len(); // safety bound
     for _iteration in 0..max_iterations {
         let n_edges = mesh.halfedge.len();
-        let mut processed = vec![false; n_edges];
-        let mut duplicates: Vec<usize> = Vec::new();
-
-        for i in 0..n_edges {
-            if processed[i] { continue; }
-            let sv = mesh.halfedge[i].start_vert;
-            let ev = mesh.halfedge[i].end_vert;
-            if sv < 0 || ev < 0 { continue; }
-
-            // Track all endVerts seen in this vertex's orbit, keeping smallest edge idx.
-            // Uses ForVert traversal: current = next_halfedge(halfedge[current].paired_halfedge)
-            let mut end_verts: Vec<(i32, usize)> = Vec::new(); // (endVert, min_edge_idx)
-            // Process i itself first
-            processed[i] = true;
-            let c_ev0 = mesh.halfedge[i].end_vert;
-            if c_ev0 >= 0 { end_verts.push((c_ev0, i)); }
-            // Then orbit (with safety bound to prevent infinite loops)
-            let mut current = i;
-            let mut orbit_steps = 0;
-            loop {
-                let pair = mesh.halfedge[current].paired_halfedge;
-                if pair < 0 { break; }
-                current = next_halfedge(pair) as usize;
-                if current == i { break; }
-                orbit_steps += 1;
-                if orbit_steps > n_edges { break; } // safety
-                processed[current] = true;
-                let c_sv = mesh.halfedge[current].start_vert;
-                let c_ev = mesh.halfedge[current].end_vert;
-                if c_sv >= 0 && c_ev >= 0 {
-                    if let Some(entry) = end_verts.iter_mut().find(|(v, _)| *v == c_ev) {
-                        if current < entry.1 { entry.1 = current; }
-                    } else {
-                        end_verts.push((c_ev, current));
-                    }
-                }
+        // NeoSCAD patch: find the duplicates orbit by orbit in parallel
+        // when every orbit is a closed cycle (see `orbit_owners`), else
+        // with the original sequential scan. Both give the same list.
+        let valid = |h: &Halfedge| h.start_vert >= 0 && h.end_vert >= 0;
+        let duplicates: Vec<usize> = match orbit_owners(&mesh.halfedge, ORBIT_PAR_THRESHOLD, valid) {
+            Some(owners) => {
+                let m: &ManifoldImpl = mesh;
+                crate::par::maybe_par_map(owners.len(), ORBIT_PAR_THRESHOLD / 8, |k| {
+                    let mut dups = Vec::new();
+                    dedupe_orbit(m, owners[k], n_edges, |_| {}, &mut dups);
+                    dups
+                })
+                .concat()
             }
-
-            // Second pass: find edges that aren't the minimum for their endVert
-            let c_ev0 = mesh.halfedge[i].end_vert;
-            if c_ev0 >= 0 {
-                if let Some(&(_, min_edge)) = end_verts.iter().find(|(v, _)| *v == c_ev0) {
-                    if min_edge != i { duplicates.push(i); }
+            None => {
+                let mut processed = vec![false; n_edges];
+                let mut duplicates: Vec<usize> = Vec::new();
+                for i in 0..n_edges {
+                    if processed[i] { continue; }
+                    if !valid(&mesh.halfedge[i]) { continue; }
+                    dedupe_orbit(mesh, i, n_edges, |c| processed[c] = true, &mut duplicates);
                 }
+                duplicates
             }
-            current = i;
-            orbit_steps = 0;
-            loop {
-                let pair = mesh.halfedge[current].paired_halfedge;
-                if pair < 0 { break; }
-                current = next_halfedge(pair) as usize;
-                if current == i { break; }
-                orbit_steps += 1;
-                if orbit_steps > n_edges { break; } // safety
-                let c_ev = mesh.halfedge[current].end_vert;
-                if c_ev >= 0 {
-                    if let Some(&(_, min_edge)) = end_verts.iter().find(|(v, _)| *v == c_ev) {
-                        if min_edge != current {
-                            duplicates.push(current);
-                        }
-                    }
-                }
-            }
-        }
+        };
 
         if duplicates.is_empty() { break; }
         for &dup in &duplicates {
             dedupe_edge(mesh, dup);
+        }
+    }
+}
+
+/// The duplicate edges of the orbit (the halfedges leaving one vertex)
+/// walked from `i`, appended to `duplicates` in walk order: every halfedge
+/// whose end vertex another halfedge of the orbit, with a smaller index,
+/// also ends at. `mark` sees each halfedge the walk visits after `i`.
+fn dedupe_orbit(
+    mesh: &ManifoldImpl,
+    i: usize,
+    n_edges: usize,
+    mut mark: impl FnMut(usize),
+    duplicates: &mut Vec<usize>,
+) {
+    // Track all endVerts seen in this vertex's orbit, keeping smallest edge idx.
+    // Uses ForVert traversal: current = next_halfedge(halfedge[current].paired_halfedge)
+    let mut end_verts: Vec<(i32, usize)> = Vec::new(); // (endVert, min_edge_idx)
+    // Process i itself first
+    mark(i);
+    let c_ev0 = mesh.halfedge[i].end_vert;
+    if c_ev0 >= 0 { end_verts.push((c_ev0, i)); }
+    // Then orbit (with safety bound to prevent infinite loops)
+    let mut current = i;
+    let mut orbit_steps = 0;
+    loop {
+        let pair = mesh.halfedge[current].paired_halfedge;
+        if pair < 0 { break; }
+        current = next_halfedge(pair) as usize;
+        if current == i { break; }
+        orbit_steps += 1;
+        if orbit_steps > n_edges { break; } // safety
+        mark(current);
+        let c_sv = mesh.halfedge[current].start_vert;
+        let c_ev = mesh.halfedge[current].end_vert;
+        if c_sv >= 0 && c_ev >= 0 {
+            if let Some(entry) = end_verts.iter_mut().find(|(v, _)| *v == c_ev) {
+                if current < entry.1 { entry.1 = current; }
+            } else {
+                end_verts.push((c_ev, current));
+            }
+        }
+    }
+
+    // Second pass: find edges that aren't the minimum for their endVert
+    let c_ev0 = mesh.halfedge[i].end_vert;
+    if c_ev0 >= 0 {
+        if let Some(&(_, min_edge)) = end_verts.iter().find(|(v, _)| *v == c_ev0) {
+            if min_edge != i { duplicates.push(i); }
+        }
+    }
+    current = i;
+    orbit_steps = 0;
+    loop {
+        let pair = mesh.halfedge[current].paired_halfedge;
+        if pair < 0 { break; }
+        current = next_halfedge(pair) as usize;
+        if current == i { break; }
+        orbit_steps += 1;
+        if orbit_steps > n_edges { break; } // safety
+        let c_ev = mesh.halfedge[current].end_vert;
+        if c_ev >= 0 {
+            if let Some(&(_, min_edge)) = end_verts.iter().find(|(v, _)| *v == c_ev) {
+                if min_edge != current {
+                    duplicates.push(current);
+                }
+            }
         }
     }
 }
@@ -811,11 +944,15 @@ pub fn remove_degenerates(mesh: &mut ManifoldImpl, first_new_vert: i32) {
     calculate_vert_normals(mesh);
 }
 
+/// NeoSCAD patch: halfedge count from which the edge-flag scans below run
+/// in parallel. C++ `FlagStore::run` switches at `n > 1e5`
+/// (edge_op.cpp:90); the output is the same either side of it.
+const FLAG_PAR_THRESHOLD: usize = 100_001;
+
 /// Collapses edges shorter than epsilon_ when at least one endpoint is new.
 pub fn collapse_short_edges(mesh: &mut ManifoldImpl, first_new_vert: i32) {
     let mut scratch = Vec::with_capacity(10);
     let n = mesh.halfedge.len();
-    let mut flagged: Vec<usize> = Vec::new();
 
     // Per #1671: outside a Boolean (first_new_vert == 0) collapse only up to
     // epsilon to avoid error stacking; in a Boolean we only touch new verts, so
@@ -823,22 +960,22 @@ pub fn collapse_short_edges(mesh: &mut ManifoldImpl, first_new_vert: i32) {
     // restricts new->old edges (old verts only move by epsilon).
     let tol = if first_new_vert == 0 { mesh.epsilon } else { mesh.tolerance };
 
-    for i in 0..n {
-        let h = &mesh.halfedge[i];
-        if h.paired_halfedge < 0 { continue; }
-        if h.start_vert < first_new_vert && h.end_vert < first_new_vert { continue; }
-        if h.start_vert < 0 || h.end_vert < 0 { continue; }
-        let delta = mesh.vert_pos[h.end_vert as usize] - mesh.vert_pos[h.start_vert as usize];
+    // NeoSCAD patch: flag in parallel (see `par::maybe_par_filter`).
+    let m: &ManifoldImpl = mesh;
+    let flagged = crate::par::maybe_par_filter(n, FLAG_PAR_THRESHOLD, |i| {
+        let h = &m.halfedge[i];
+        if h.paired_halfedge < 0 { return false; }
+        if h.start_vert < first_new_vert && h.end_vert < first_new_vert { return false; }
+        if h.start_vert < 0 || h.end_vert < 0 { return false; }
+        let delta = m.vert_pos[h.end_vert as usize] - m.vert_pos[h.start_vert as usize];
         let len_sq = dot(delta, delta);
         let max_len = if h.end_vert < first_new_vert {
             tol * tol
         } else {
-            mesh.epsilon * mesh.epsilon
+            m.epsilon * m.epsilon
         };
-        if len_sq < max_len {
-            flagged.push(i);
-        }
-    }
+        len_sq < max_len
+    });
 
     for &i in &flagged {
         scratch.clear();
@@ -852,56 +989,54 @@ pub fn collapse_colinear_edges(mesh: &mut ManifoldImpl, first_new_vert: i32) {
     let mut scratch = Vec::with_capacity(10);
     loop {
         let n = mesh.halfedge.len();
-        let mut flagged: Vec<usize> = Vec::new();
 
-        for i in 0..n {
-            let h = &mesh.halfedge[i];
-            if h.paired_halfedge < 0 || h.start_vert < first_new_vert { continue; }
-            if h.start_vert < 0 { continue; }
-            if mesh.mesh_relation.tri_ref.is_empty() { continue; }
-            if i / 3 >= mesh.mesh_relation.tri_ref.len() { continue; }
+        // NeoSCAD patch: flag in parallel (see `par::maybe_par_filter`).
+        // On a large boolean this scan, repeated until nothing collapses,
+        // was the largest single cost of the result assembly.
+        let m: &ManifoldImpl = mesh;
+        let flagged = crate::par::maybe_par_filter(n, FLAG_PAR_THRESHOLD, |i| {
+            let h = &m.halfedge[i];
+            if h.paired_halfedge < 0 || h.start_vert < first_new_vert { return false; }
+            if h.start_vert < 0 { return false; }
+            if m.mesh_relation.tri_ref.is_empty() { return false; }
+            if i / 3 >= m.mesh_relation.tri_ref.len() { return false; }
 
-            let ref0 = mesh.mesh_relation.tri_ref[i / 3];
-            let mut current = next_halfedge(mesh.halfedge[i].paired_halfedge) as usize;
-            if current >= mesh.halfedge.len() { continue; }
-            let mut ref1 = if current / 3 < mesh.mesh_relation.tri_ref.len() {
-                mesh.mesh_relation.tri_ref[current / 3]
+            let ref0 = m.mesh_relation.tri_ref[i / 3];
+            let mut current = next_halfedge(m.halfedge[i].paired_halfedge) as usize;
+            if current >= m.halfedge.len() { return false; }
+            let mut ref1 = if current / 3 < m.mesh_relation.tri_ref.len() {
+                m.mesh_relation.tri_ref[current / 3]
             } else {
-                continue
+                return false;
             };
             let mut ref1_updated = !ref0.same_face(&ref1);
 
-            let mut is_redundant = true;
-            let max_orbit = mesh.halfedge.len(); // orbit can't exceed total halfedges
+            let max_orbit = m.halfedge.len(); // orbit can't exceed total halfedges
             let mut orbit_count = 0;
             while current != i {
                 orbit_count += 1;
                 if orbit_count > max_orbit {
-                    is_redundant = false;
-                    break;
+                    return false;
                 }
                 // FlagEdge traversal: current = NextHalfedge(halfedge[current].pairedHalfedge)
-                let pair = mesh.halfedge[current].paired_halfedge;
-                if pair < 0 { is_redundant = false; break; }
+                let pair = m.halfedge[current].paired_halfedge;
+                if pair < 0 { return false; }
                 current = next_halfedge(pair) as usize;
-                if current >= mesh.halfedge.len() { is_redundant = false; break; }
+                if current >= m.halfedge.len() { return false; }
                 let tri = current / 3;
-                if tri >= mesh.mesh_relation.tri_ref.len() { is_redundant = false; break; }
-                let ref_cur = mesh.mesh_relation.tri_ref[tri];
+                if tri >= m.mesh_relation.tri_ref.len() { return false; }
+                let ref_cur = m.mesh_relation.tri_ref[tri];
                 if !ref_cur.same_face(&ref0) && !ref_cur.same_face(&ref1) {
                     if !ref1_updated {
                         ref1 = ref_cur;
                         ref1_updated = true;
                     } else {
-                        is_redundant = false;
-                        break;
+                        return false;
                     }
                 }
             }
-            if is_redundant {
-                flagged.push(i);
-            }
-        }
+            true
+        });
 
         if flagged.is_empty() { break; }
         let mut num_collapsed = 0;
@@ -920,50 +1055,49 @@ pub fn swap_degenerates(mesh: &mut ManifoldImpl, first_new_vert: i32) {
     if mesh.face_normal.is_empty() { return; }
 
     let n = mesh.halfedge.len();
-    let mut flagged: Vec<usize> = Vec::new();
 
-    for i in 0..n {
-        let h = &mesh.halfedge[i];
-        if h.paired_halfedge < 0 { continue; }
+    // NeoSCAD patch: flag in parallel (see `par::maybe_par_filter`).
+    let m: &ManifoldImpl = mesh;
+    let flagged = crate::par::maybe_par_filter(n, FLAG_PAR_THRESHOLD, |i| {
+        let h = &m.halfedge[i];
+        if h.paired_halfedge < 0 { return false; }
         // Skip edges where all 4 involved verts are old
         let tri0edge = tri_of(i);
         let pair = h.paired_halfedge as usize;
         let tri1edge = tri_of(pair);
-        if mesh.halfedge[i].start_vert < first_new_vert
-            && mesh.halfedge[i].end_vert < first_new_vert
-            && mesh.halfedge[next_halfedge(i as i32) as usize].end_vert < first_new_vert
-            && mesh.halfedge[next_halfedge(pair as i32) as usize].end_vert < first_new_vert
+        if m.halfedge[i].start_vert < first_new_vert
+            && m.halfedge[i].end_vert < first_new_vert
+            && m.halfedge[next_halfedge(i as i32) as usize].end_vert < first_new_vert
+            && m.halfedge[next_halfedge(pair as i32) as usize].end_vert < first_new_vert
         {
-            continue;
+            return false;
         }
         let tri = i / 3;
-        if tri >= mesh.face_normal.len() { continue; }
-        let proj = get_axis_aligned_projection(mesh.face_normal[tri]);
+        if tri >= m.face_normal.len() { return false; }
+        let proj = get_axis_aligned_projection(m.face_normal[tri]);
         let mut v = [Vec2::new(0.0, 0.0); 3];
         for j in 0..3 {
-            let sv = mesh.halfedge[tri0edge[j]].start_vert;
-            if sv >= 0 && (sv as usize) < mesh.vert_pos.len() {
-                v[j] = proj.apply(mesh.vert_pos[sv as usize]);
+            let sv = m.halfedge[tri0edge[j]].start_vert;
+            if sv >= 0 && (sv as usize) < m.vert_pos.len() {
+                v[j] = proj.apply(m.vert_pos[sv as usize]);
             }
         }
-        if ccw(v[0], v[1], v[2], mesh.tolerance) > 0 || !is_01_longest(v[0], v[1], v[2]) {
-            continue;
+        if ccw(v[0], v[1], v[2], m.tolerance) > 0 || !is_01_longest(v[0], v[1], v[2]) {
+            return false;
         }
         // Switch to the neighbor's projection — C++ projects the PAIR
         // triangle's verts (pairTriEdge), not tri0's.
         let tri_p = pair / 3;
-        if tri_p >= mesh.face_normal.len() { continue; }
-        let proj_p = get_axis_aligned_projection(mesh.face_normal[tri_p]);
+        if tri_p >= m.face_normal.len() { return false; }
+        let proj_p = get_axis_aligned_projection(m.face_normal[tri_p]);
         for j in 0..3 {
-            let sv = mesh.halfedge[tri1edge[j]].start_vert;
-            if sv >= 0 && (sv as usize) < mesh.vert_pos.len() {
-                v[j] = proj_p.apply(mesh.vert_pos[sv as usize]);
+            let sv = m.halfedge[tri1edge[j]].start_vert;
+            if sv >= 0 && (sv as usize) < m.vert_pos.len() {
+                v[j] = proj_p.apply(m.vert_pos[sv as usize]);
             }
         }
-        if ccw(v[0], v[1], v[2], mesh.tolerance) > 0 || is_01_longest(v[0], v[1], v[2]) {
-            flagged.push(i);
-        }
-    }
+        ccw(v[0], v[1], v[2], m.tolerance) > 0 || is_01_longest(v[0], v[1], v[2])
+    });
 
     let mut visited = vec![-1i32; n];
     let mut edge_swap_stack: Vec<i32> = Vec::new();

@@ -431,7 +431,17 @@ fn batch_boolean(
     // C++ processes up to 4 pairs per round (for its parallel lane), pushing
     // the results back only at the end of the round — even in sequential
     // builds. The round structure changes which meshes pair up, so mirror it.
-    let mut tmp: Vec<MeshEntry> = Vec::new();
+    //
+    // NeoSCAD patch: the round's pairs run side by side, as the C++
+    // `tbb::task_group` does (csg_tree.cpp:451-479). The pairs are chosen
+    // before any of them runs and the results go back in pair order with
+    // the serials the sequential loop gave them, so the heap, and every
+    // later pairing, is the same at any thread count. Each boolean is a
+    // pure function of its two operands; the only shared state it touches
+    // is the mesh-ID counter, whose values the kernel compares only for
+    // equality (the embedder orders output runs by original ID, not mesh
+    // ID, for the same reason: parallel subtrees already race on it).
+    let mut pairs: Vec<(MeshEntry, MeshEntry)> = Vec::with_capacity(4);
     while heap.len() > 1 {
         // Once-per-round check, matching C++ BatchBoolean's per-iteration gate
         // (csg_tree.cpp:460).
@@ -444,12 +454,15 @@ fn batch_boolean(
             }
             let a = heap.pop().unwrap();
             let b = heap.pop().unwrap();
-            let result = simple_boolean(&a.0, &b.0, op, token);
-            tmp.push(MeshEntry(result, next_serial));
-            next_serial += 1;
+            pairs.push((a, b));
         }
-        for entry in tmp.drain(..) {
-            heap.push(entry);
+        let results = crate::par::maybe_par_map(pairs.len(), 2, |i| {
+            simple_boolean(&pairs[i].0 .0, &pairs[i].1 .0, op, token)
+        });
+        pairs.clear();
+        for result in results {
+            heap.push(MeshEntry(result, next_serial));
+            next_serial += 1;
         }
     }
 

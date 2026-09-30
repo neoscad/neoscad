@@ -5,9 +5,13 @@
 A copy of the crates.io release (`.cargo_vcs_info.json` gives the upstream
 commit), used through `[patch.crates-io]` in the root `Cargo.toml`. It is
 not a workspace member, so the workspace's lints, formatting and tests do
-not apply to it. It carries two changes, each marked `NeoSCAD patch`: a
-bug fix in `src/edge_op.rs` and a speed fix in `src/polygon_earclip.rs`
-(below). Drop the copy once upstream has both.
+not apply to it. It carries three changes, each marked `NeoSCAD patch`: a
+bug fix in `src/edge_op.rs`, a speed fix in `src/polygon_earclip.rs`, and
+parallel boolean kernels in `src/par.rs` and its callers (below). Drop the
+copy once upstream has all three.
+
+Its source files use CRLF line endings; keep them when editing (a tool
+that rewrites them as LF turns every line into a diff).
 
 ### The edge-collapse bug
 
@@ -82,6 +86,91 @@ keeps manifold-rust's behaviour, not C++'s.
 
 `crates/geom/tests/kernel_patches.rs` pins the triangles, in order, of a
 24×24 grid of octagonal holes, hashed with the unpatched copy.
+
+### The parallel boolean patch
+
+0.13.1 runs most of a boolean on one thread, where C++ Manifold runs it
+under TBB. On the level-4 Menger sponge the last two differences (the
+cube minus the union of the three rotated negatives, about 300,000 faces)
+ran alone for over a second while the other cores idled
+(`docs/audits/slow-cases.md` §1). The patch makes the large serial
+stages parallel, each in a way whose output is the sequential output, so
+the result is byte-identical at any thread count and to 0.13.1's. Every
+site goes through a helper in `src/par.rs` with a sequential twin for
+builds without the `parallel` feature (the WASM build's pool runs on the
+calling thread either way). The change is also kept as a patch file,
+`vendor/patches/manifold-rust/0003-parallel-booleans.patch`, which
+applies (`patch -p1` from the crate root) on top of the two changes
+above; those two have no patch file yet. By site:
+
+- **`batch_boolean` rounds** (`csg_tree.rs`): a round's up to four pairs
+  are picked first, then run side by side (C++ `csg_tree.cpp:451-479` in
+  Manifold 3.5.2), and the results go back on the heap in pair order with
+  the serials the sequential loop gave them. The one shared state a boolean touches is the
+  mesh-ID counter; the kernel compares mesh IDs only for equality, and
+  neoscad orders output runs by original ID for the same reason
+  (`crates/geom/src/manifold_geom.rs`, `canonical_mesh`).
+- **Edge-flag scans** of `collapse_short_edges`, `collapse_colinear_edges`
+  and `swap_degenerates` (`edge_op.rs`): the flags are tested in parallel
+  above 100,000 halfedges (C++ `FlagStore::run`, `edge_op.cpp:54-97`) and
+  collected in index order; the collapses and swaps stay sequential, as
+  in C++.
+- **Orbit scans** of `split_pinched_verts` and `dedupe_edges`: the
+  sequential scan handles each vertex orbit from its smallest eligible
+  halfedge, skipping halfedges an earlier orbit visited. Above 10,000
+  halfedges each halfedge instead walks its own orbit in parallel and
+  owns it if it comes back to itself without meeting a smaller eligible
+  one. That gives the same owners only if every orbit is a closed cycle,
+  so it first checks that `paired_halfedge` is an involution (then the
+  step is injective and a walk either closes or ends at a missing pair;
+  an open orbit is seen by its smallest eligible halfedge) and falls back
+  to the sequential scan otherwise. The owners' work (the pinched-vertex
+  splits, in owner order; the duplicate lists, concatenated in owner
+  order) is then the sequential scan's. C++ uses atomics here
+  (`edge_op.cpp:722-796, 903-924`) and sorts the duplicates, which would
+  change the order the port applies them in.
+- **Edge maps of the result assembly** (`boolean_result.rs`): the
+  `BTreeMap<K, Vec<EdgePos>>` built one entry at a time became a list of
+  `(key, EdgePos)` in push order, stably sorted by key and cut into runs.
+  The consumers read keys in ascending order and each run in push order,
+  exactly as they read the map. This is a data-structure change more than
+  a parallel one: on the big Menger difference the map took 0.23 s and
+  the sort 0.04 s.
+- **`face2tri` writes** (`face_op_triangulate.rs`): each face writes only
+  its own output triangles and its own edges' `contour2tri` entries, so
+  fixed runs of 4,096 faces get disjoint slices of the arrays (by
+  `split_at_mut`) and write them in parallel. The per-face `HashMap` of
+  general triangulations became the `Vec` they were collected into.
+- **`sort_geometry`** (`sort.rs`) and the `intersect12` result sort
+  (`boolean3_kernels.rs`): Morton codes, face boxes and all gathers are
+  per-element maps; the sorts are stable sorts on integer keys, whose
+  result does not depend on the algorithm (`par::maybe_par_sort_by_key`).
+- **`winding03`**: the test for which edges to unite (forward, not cut)
+  runs in parallel; the unions stay sequential in index order, because
+  the union-find's roots depend on it and a component's winding number is
+  computed at its root.
+
+Not parallel, and serial in C++ too: the collapses themselves (on the
+Menger difference, 0.14 s of `collapse_edge` over 5 million flagged edges)
+and `recursive_edge_swap`.
+
+**Evidence of identical output.** Release builds before and after,
+exporting all 527 `.scad` files in `.reference/openscad/tests/data/scad`,
+13 benchmark models (all but `import_stl`), the hero model and Menger
+level 4, at the default thread count and at `RAYON_NUM_THREADS` 1 and 3:
+384 exported (273 OFF, 111 SVG), and every file is byte-identical to the
+unpatched build's. Conformance is 1,773 passing, 0 failing, at the
+default and at `RAYON_NUM_THREADS=1`. `crates/geom/tests/parallel_kernels.rs`
+renders two models large enough to take every parallel path above (a
+checkerboard of 256 edge-touching cubes for the orbit scans and
+`batch_boolean`, a sphere with 49 holes for the rest) on 1 and 8
+threads and checks the export against hashes taken with the unpatched
+copy.
+
+**Timings** (M4 Pro, 14 cores, interleaved, best of 5; the machine was
+shared, load average 5–9 unless noted): see `docs/audits/slow-cases.md`
+§1 for the tables. Menger level 4 went from 2.62 s to 1.59 s (the
+nightly: 2.29 s), `csg_spheres` from 0.57 to 0.47 s.
 
 ## clipper2-rust 1.2.0, patched
 

@@ -28,8 +28,6 @@
 // 8. Create properties via barycentric interpolation
 // 9. Finalize: simplify topology, sort geometry
 
-use std::collections::BTreeMap;
-
 use crate::impl_mesh::ManifoldImpl;
 use crate::linalg::{Vec3, dot};
 use crate::types::{Halfedge, TriRef};
@@ -49,6 +47,55 @@ pub(super) struct EdgePos {
 impl EdgePos {
     fn sort_key(&self) -> (OrderedF64, i32) {
         (OrderedF64(self.edge_pos), self.collision_id)
+    }
+}
+
+// NeoSCAD patch: the edge maps as sorted runs instead of a `BTreeMap` of
+// `Vec`s.
+//
+// `add_new_edge_verts` used to insert into `BTreeMap<K, Vec<EdgePos>>`,
+// one small `Vec` per edge or face pair; on a big boolean (the last
+// difference of a level-4 Menger sponge) that was 0.23 s of serial
+// allocation and tree walking, the largest part of assembly. The consumers
+// only ever walked the maps in ascending key order and each `Vec` in push
+// order, so the same data is a list of `(key, EdgePos)` in push order,
+// stably sorted by key and cut into runs. A stable sort keeps push order
+// within a key, so every run holds exactly the `Vec` the map held.
+
+/// `(key, EdgePos)` pairs in push order; see [`EdgeGroups::new`].
+pub(super) type EdgeList<K> = Vec<(K, EdgePos)>;
+
+/// Runs of `EdgePos` sharing a key, in ascending key order.
+pub(super) struct EdgeGroups<K> {
+    entries: Vec<(K, EdgePos)>,
+    /// `starts[g]..starts[g + 1]` is run `g` of `entries`.
+    starts: Vec<usize>,
+}
+
+impl<K: Ord + Copy + Send + Sync> EdgeGroups<K> {
+    pub(super) fn new(mut entries: EdgeList<K>) -> Self {
+        crate::par::maybe_par_sort_by_key(&mut entries, 10_000, |e| e.0);
+        let mut starts = Vec::new();
+        for i in 0..entries.len() {
+            if i == 0 || entries[i].0 != entries[i - 1].0 {
+                starts.push(i);
+            }
+        }
+        starts.push(entries.len());
+        Self { entries, starts }
+    }
+
+    /// Calls `f(key, run)` for every run in ascending key order. `run` is
+    /// a reused buffer holding the run's entries in push order, which `f`
+    /// may extend and reorder as it could the map's `Vec`.
+    fn for_each(&self, mut f: impl FnMut(K, &mut Vec<EdgePos>)) {
+        let mut run: Vec<EdgePos> = Vec::new();
+        for g in 0..self.starts.len() - 1 {
+            let (s, e) = (self.starts[g], self.starts[g + 1]);
+            run.clear();
+            run.extend(self.entries[s..e].iter().map(|x| x.1.clone()));
+            f(self.entries[s].0, &mut run);
+        }
     }
 }
 
@@ -203,8 +250,8 @@ pub(super) fn size_output(
 // ---------------------------------------------------------------------------
 
 pub(super) fn add_new_edge_verts(
-    edges_p: &mut BTreeMap<i32, Vec<EdgePos>>,
-    edges_new: &mut BTreeMap<(i32, i32), Vec<EdgePos>>,
+    edges_p: &mut EdgeList<i32>,
+    edges_new: &mut EdgeList<(i32, i32)>,
     p1q2: &[[i32; 2]],
     i12: &[i32],
     v12r: &[i32],
@@ -240,36 +287,33 @@ pub(super) fn add_new_edge_verts(
         let dir_left = direction ^ forward;
 
         // Add to edge P's map
-        let ep = edges_p.entry(edge_p).or_default();
         for j in 0..inclusion.abs() {
-            ep.push(EdgePos {
+            edges_p.push((edge_p, EdgePos {
                 edge_pos: 0.0,
                 vert: vert + j,
                 collision_id,
                 is_start: dir_p,
-            });
+            }));
         }
 
         // Add to right new edge
-        let er = edges_new.entry(key_right).or_default();
         for j in 0..inclusion.abs() {
-            er.push(EdgePos {
+            edges_new.push((key_right, EdgePos {
                 edge_pos: 0.0,
                 vert: vert + j,
                 collision_id,
                 is_start: dir_right,
-            });
+            }));
         }
 
         // Add to left new edge
-        let el = edges_new.entry(key_left).or_default();
         for j in 0..inclusion.abs() {
-            el.push(EdgePos {
+            edges_new.push((key_left, EdgePos {
                 edge_pos: 0.0,
                 vert: vert + j,
                 collision_id,
                 is_start: dir_left,
-            });
+            }));
         }
     }
 }
@@ -346,7 +390,7 @@ pub(super) fn append_partial_edges(
     out_r: &mut ManifoldImpl,
     whole_halfedge_p: &mut Vec<bool>,
     face_ptr_r: &mut Vec<i32>,
-    edges_p: &mut BTreeMap<i32, Vec<EdgePos>>,
+    edges_p: &EdgeGroups<i32>,
     halfedge_ref: &mut Vec<TriRef>,
     in_p: &ManifoldImpl,
     i03: &[i32],
@@ -354,7 +398,7 @@ pub(super) fn append_partial_edges(
     face_p2r: &[i32],
     forward: bool,
 ) {
-    for (&edge_p, edge_pos_p) in edges_p.iter_mut() {
+    edges_p.for_each(|edge_p, edge_pos_p| {
         edge_pos_p.sort_by_key(|e| e.sort_key());
 
         let halfedge = in_p.halfedge[edge_p as usize];
@@ -442,7 +486,7 @@ pub(super) fn append_partial_edges(
             out_r.halfedge[backward_edge as usize] = rev;
             halfedge_ref[backward_edge as usize] = backward_ref;
         });
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -452,12 +496,12 @@ pub(super) fn append_partial_edges(
 pub(super) fn append_new_edges(
     out_r: &mut ManifoldImpl,
     face_ptr_r: &mut Vec<i32>,
-    edges_new: &mut BTreeMap<(i32, i32), Vec<EdgePos>>,
+    edges_new: &EdgeGroups<(i32, i32)>,
     halfedge_ref: &mut Vec<TriRef>,
     face_pq2r: &[i32],
     num_face_p: usize,
 ) {
-    for (&(face_p, face_q), edge_pos) in edges_new.iter_mut() {
+    edges_new.for_each(|(face_p, face_q), edge_pos| {
         edge_pos.sort_by_key(|e| e.sort_key());
 
         // Compute bounding box to find longest dimension
@@ -525,7 +569,7 @@ pub(super) fn append_new_edges(
             out_r.halfedge[backward_edge as usize] = rev;
             halfedge_ref[backward_edge as usize] = backward_ref;
         });
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------

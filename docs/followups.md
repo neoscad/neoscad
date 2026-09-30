@@ -138,16 +138,23 @@ lead them, come roughly in order of user impact.
   one 64-byte-aligned block, and replace the `placeholder` context
   (`eval_call` clones it to reserve a frame slot, `call.rs:480`); removing
   it measured about −2.5% instructions on fib and −1.4% on isosurface.
-- Deep union trees and the level-4 Menger sponge render slower than the
-  nightly (at `26888d7`: Menger 4 2.87 s against 2.01 s, with less CPU in
-  total). The nightly spreads the work across cores better. The gap is
-  structural: OpenSCAD's Manifold operators are lazy, so nested unions
-  flatten into one `BatchUnion` over every leaf, whose pairwise rounds
-  TBB runs in parallel; here each node is evaluated (and cached)
-  eagerly, and manifold-rust runs each round's four booleans one after
-  another. Running those rounds on rayon (tried in 5b, same output)
-  gained only 5-8%, so it was dropped; a real fix needs lazy solids
-  across cache boundaries. (5a, 5b)
+- The level-4 Menger sponge is no longer slower than the nightly: the
+  parallel boolean patch in `vendor/manifold-rust` (`vendor/README.md`)
+  took it from 2.62 s to 1.59 s against the nightly's 2.29 s, byte for
+  byte the same output. (The earlier diagnosis here, that the nightly's
+  lazy operators flatten nested unions, was wrong:
+  `docs/audits/slow-cases.md` §1.) What is still serial in the last big
+  difference, and what taking it would need, is the plan at the end of
+  that section: the edge collapses themselves (serial in C++ too), the
+  per-face ear clipping's CPU cost, and `intersect12`'s per-edge result
+  vectors. Deep unions were not slower when re-measured (§3).
+- The parallel boolean patch costs CPU (hero +34%, `csg_spheres` +70%,
+  `csg_deep_union` 0.08 to 0.19 s) and, with every core busy with other
+  work, made the hero and `csg_deep_union` slower than before (4.6
+  against 3.5 s; 0.118 against 0.061 s), not faster. Unexplained;
+  suspects are rayon's spin-waiting and the `batch_boolean` pairs, which
+  go parallel whatever the mesh size. Worth a size threshold on the pairs
+  and a profile under load. (`slow-cases.md` §1.1)
 - Extruded text is still slower than the nightly at scale: 200 lines of
   125 characters under `linear_extrude(2)` took 36.3 s against 31.0 s
   (one run each, loaded machine), though 50 lines are faster (0.32 s

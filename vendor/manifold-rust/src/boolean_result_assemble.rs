@@ -1,8 +1,6 @@
 // Boolean result assembly — extracted from boolean_result.rs
 // Contains update_reference, create_properties, and boolean_result entry point
 
-use std::collections::BTreeMap;
-
 use crate::boolean3::Boolean3;
 use crate::cancel::{is_cancelled, CancelToken};
 use crate::edge_op::simplify_topology;
@@ -11,7 +9,7 @@ use crate::impl_mesh::{reserve_ids, ManifoldImpl};
 use crate::linalg::Vec3;
 use crate::types::{OpType, TriRef};
 
-use super::{EdgePos, abs_sum, exclusive_scan_abs,
+use super::{EdgeGroups, EdgeList, abs_sum, exclusive_scan_abs,
             size_output, add_new_edge_verts, append_partial_edges,
             append_new_edges, append_whole_edges};
 
@@ -392,9 +390,9 @@ pub fn boolean_result_with_token(
     }
 
     // Build edge maps
-    let mut edges_p: BTreeMap<i32, Vec<EdgePos>> = BTreeMap::new();
-    let mut edges_q: BTreeMap<i32, Vec<EdgePos>> = BTreeMap::new();
-    let mut edges_new: BTreeMap<(i32, i32), Vec<EdgePos>> = BTreeMap::new();
+    let mut edges_p: EdgeList<i32> = Vec::new();
+    let mut edges_q: EdgeList<i32> = Vec::new();
+    let mut edges_new: EdgeList<(i32, i32)> = Vec::new();
 
     add_new_edge_verts(
         &mut edges_p,
@@ -416,6 +414,10 @@ pub fn boolean_result_with_token(
         false,
         bool3.xv12.p1q2.len(),
     );
+
+    let edges_p = EdgeGroups::new(edges_p);
+    let edges_q = EdgeGroups::new(edges_q);
+    let edges_new = EdgeGroups::new(edges_new);
 
     // C++ clears v12R/v21R here (after AddNewEdgeVerts); drop the counterparts
     // so the large scans don't ride through the rest of the pipeline.
@@ -468,7 +470,7 @@ pub fn boolean_result_with_token(
         &mut out_r,
         &mut whole_halfedge_p,
         &mut face_ptr_r,
-        &mut edges_p,
+        &edges_p,
         &mut halfedge_ref,
         in_p,
         &i03,
@@ -480,7 +482,7 @@ pub fn boolean_result_with_token(
         &mut out_r,
         &mut whole_halfedge_q,
         &mut face_ptr_r,
-        &mut edges_q,
+        &edges_q,
         &mut halfedge_ref,
         in_q,
         &i30,
@@ -500,7 +502,7 @@ pub fn boolean_result_with_token(
     append_new_edges(
         &mut out_r,
         &mut face_ptr_r,
-        &mut edges_new,
+        &edges_new,
         &mut halfedge_ref,
         &face_pq2r,
         in_p.num_tri(),

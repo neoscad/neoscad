@@ -33,6 +33,121 @@ where
     (0..n).map(f).collect()
 }
 
+// NeoSCAD patch: the indices in `0..n` for which `pred` holds, in
+// ascending order, testing `pred` in parallel when `n >= threshold`.
+//
+// This is the flag half of C++ `FlagStore::run_par` (edge_op.cpp:54-84),
+// which tests edges into thread-local lists and then sorts the indices so
+// the collapses run in ascending order. rayon's `collect` into a `Vec`
+// keeps the sequential order of a filtered range by itself, so no sort is
+// needed and the list is exactly the one the sequential loop builds.
+// `pred` must only read: callers mutate the mesh once the list is done.
+#[cfg(feature = "parallel")]
+pub fn maybe_par_filter<F>(n: usize, threshold: usize, pred: F) -> Vec<usize>
+where
+    F: Fn(usize) -> bool + Sync + Send,
+{
+    use rayon::prelude::*;
+    if n >= threshold {
+        (0..n).into_par_iter().filter(|&i| pred(i)).collect()
+    } else {
+        (0..n).filter(|&i| pred(i)).collect()
+    }
+}
+
+/// Sequential fallback: identical output to the parallel version.
+#[cfg(not(feature = "parallel"))]
+pub fn maybe_par_filter<F>(n: usize, _threshold: usize, pred: F) -> Vec<usize>
+where
+    F: Fn(usize) -> bool,
+{
+    (0..n).filter(|&i| pred(i)).collect()
+}
+
+// NeoSCAD patch: a stable sort by key, in parallel when
+// `v.len() >= threshold`. A stable sort's result is fully determined by
+// the keys and the input order (equal keys keep their order), so rayon's
+// stable merge sort and the standard library's give the same slice.
+// `key` must be a total order (no floats with NaN): with an inconsistent
+// order the two algorithms may disagree.
+#[cfg(feature = "parallel")]
+pub fn maybe_par_sort_by_key<T, K, F>(v: &mut [T], threshold: usize, key: F)
+where
+    T: Send,
+    K: Ord,
+    F: Fn(&T) -> K + Sync,
+{
+    use rayon::prelude::*;
+    if v.len() >= threshold {
+        v.par_sort_by_key(key);
+    } else {
+        v.sort_by_key(key);
+    }
+}
+
+/// Sequential fallback: identical output to the parallel version.
+#[cfg(not(feature = "parallel"))]
+pub fn maybe_par_sort_by_key<T, K, F>(v: &mut [T], _threshold: usize, key: F)
+where
+    K: Ord,
+    F: Fn(&T) -> K,
+{
+    v.sort_by_key(key);
+}
+
+// NeoSCAD patch: run `f` on every item, in parallel when
+// `items.len() >= threshold`. For items that each own disjoint output
+// (slices cut with `split_at_mut`, say), so the order they run in cannot
+// change what is written.
+#[cfg(feature = "parallel")]
+pub fn maybe_par_for_each<T, F>(items: Vec<T>, threshold: usize, f: F)
+where
+    T: Send,
+    F: Fn(T) + Sync + Send,
+{
+    use rayon::prelude::*;
+    if items.len() >= threshold {
+        items.into_par_iter().for_each(f);
+    } else {
+        items.into_iter().for_each(f);
+    }
+}
+
+/// Sequential fallback: identical output to the parallel version.
+#[cfg(not(feature = "parallel"))]
+pub fn maybe_par_for_each<T, F>(items: Vec<T>, _threshold: usize, f: F)
+where
+    F: Fn(T),
+{
+    items.into_iter().for_each(f);
+}
+
+// NeoSCAD patch: apply `f` to every element in place, in parallel when
+// `v.len() >= threshold`. `f` sees only its own element, so the result
+// does not depend on the order.
+#[cfg(feature = "parallel")]
+pub fn maybe_par_for_each_mut<T, F>(v: &mut [T], threshold: usize, f: F)
+where
+    T: Send,
+    F: Fn(&mut T) + Sync + Send,
+{
+    use rayon::prelude::*;
+    if v.len() >= threshold {
+        v.par_iter_mut().for_each(f);
+    } else {
+        v.iter_mut().for_each(f);
+    }
+}
+
+/// Sequential fallback: identical output to the parallel version.
+#[cfg(not(feature = "parallel"))]
+pub fn maybe_par_for_each_mut<T, F>(v: &mut [T], _threshold: usize, f: F)
+where
+    F: Fn(&mut T),
+{
+    v.iter_mut().for_each(f);
+}
+
 /// [`maybe_par_map`] with cooperative cancellation: `None` means the token was
 /// cancelled and the (necessarily incomplete) results were discarded.
 ///
