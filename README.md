@@ -69,6 +69,8 @@ builds the library crates for wasm32 and runs them in Node.
 
 NeoSCAD is free and open source. If it's useful to you, you can support
 its development at [givebutter.com/neoscad](https://givebutter.com/neoscad).
+Donations go to [The Ned Workshop](https://nedworkshop.org/), a 501(c)(3)
+nonprofit, and are tax-deductible in the US to the extent the law allows.
 Donations pay for what shipping it costs: the Apple Developer Program for
 the signed macOS app, the domain, and time on the engine and the apps.
 
