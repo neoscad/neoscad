@@ -245,3 +245,24 @@ keeps only the latest commit, and static deltas trade space for speed
 - Pages rate limiting under Flatpak's per-object pull pattern.
 - The WiX same-version behaviour (finding 5): taken from WiX's docs, not
   run on Windows.
+
+## Decisions (owner, 2026-09-30)
+
+- **Default:** the apps check for updates automatically, about once a day,
+  with a setting to turn it off. The check is a plain request for the
+  signed feed and sends nothing identifying.
+- **Release candidates:** opt-in only. A "Receive release candidates"
+  setting switches an app to the rc feed; everyone else gets stable.
+- **Flatpak repository:** a new repository on GitHub Pages, not the
+  website repository.
+- **Windows:** silent after one UAC prompt. The app shows "Update
+  available", then Install, then runs `msiexec /qn` and restarts on the
+  new version. The licence was accepted at first install.
+- **Command line:** an automatic notice. `neoscad` occasionally prints that
+  a newer release exists, only in an interactive terminal: never when
+  output is piped or redirected, never in CI (`CI` set), and never when
+  `NEOSCAD_NO_UPDATE_CHECK` is set. It uses the same signed feed and never
+  downloads or installs anything. Package managers still do the updating.
+- **Keys:** the Sparkle EdDSA key, the feed's minisign key and the Flatpak
+  GPG key are kept in the owner's password manager. The GitHub secrets
+  hold working copies.
