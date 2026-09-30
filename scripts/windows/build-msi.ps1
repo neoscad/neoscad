@@ -149,7 +149,7 @@ function ConvertTo-RtfText([string] $text) {
                     # RTF's \u takes a signed 16-bit code unit.
                     $n = [int]$c
                     if ($n -gt 32767) { $n -= 65536 }
-                    [void]$b.Append("\u$n?")
+                    [void]$b.Append("\u${n}?")
                 }
             }
         }
