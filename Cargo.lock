@@ -1567,6 +1567,7 @@ dependencies = [
  "serde_json",
  "uniffi",
  "wgpu",
+ "windows",
 ]
 
 [[package]]

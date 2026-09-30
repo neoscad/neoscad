@@ -162,6 +162,75 @@ fn a_layer_attached_without_readable_cannot_be_read() {
     assert!(v.read_pixels().is_err());
 }
 
+/// The configure hook the `SwapChainPanel` path relies on runs after
+/// every configure, with the configuration applied: on attach and on each
+/// resize. Checked on a Metal surface, the one real surface `cargo test`
+/// can make; the DXGI call inside the Windows hook is not run here.
+#[cfg(target_vendor = "apple")]
+#[test]
+fn the_configure_hook_runs_after_every_configure() {
+    let Some(v) = viewport() else { return };
+    let (_layer, addr) = metal::layer();
+    let surface = layer::surface_from_layer(v.gpu.instance(), addr).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let hook = render::viewport::OnConfigure::new(move |_, config| {
+        log.lock().unwrap().push((config.width, config.height));
+    });
+    let mut inner = v.lock();
+    inner
+        .attach_surface_with(surface, 30, 20, 1.5, false, Some(hook))
+        .unwrap();
+    inner.resize(45, 12, 1.5);
+    // A zero size configures nothing, so the hook does not run.
+    inner.resize(0, 12, 1.5);
+    assert_eq!(*seen.lock().unwrap(), [(30, 20), (45, 12)]);
+}
+
+#[test]
+fn a_panel_scale_is_sane() {
+    assert_eq!(sane_scale(1.5), 1.5);
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(sane_scale(bad), 1.0, "{bad}");
+    }
+}
+
+/// The swap chain's transform maps its buffer onto the panel's DIPs: the
+/// inverse of the composition scale when the size divides evenly, the
+/// exact ratio when the buffer was rounded down or clamped.
+#[test]
+fn the_swap_chain_scale_maps_the_buffer_onto_the_panel() {
+    // 800 x 600 DIPs at 150%: a 1200 x 900 buffer, shown at 2/3.
+    let (x, y) = swap_chain_scale((800.0, 600.0), (1200, 900)).unwrap();
+    assert!((x - 2.0 / 3.0).abs() < 1e-6 && (y - 2.0 / 3.0).abs() < 1e-6);
+    // Buffer size as `attach_swap_chain_panel` computes it, per axis.
+    let px = (Viewport::pixels(333.5, 1.25), Viewport::pixels(100.0, 1.75));
+    assert_eq!(px, (416, 175));
+    let (x, y) = swap_chain_scale((333.5, 100.0), px).unwrap();
+    assert!((f64::from(x) * 416.0 - 333.5).abs() < 1e-3);
+    assert!((f64::from(y) * 175.0 - 100.0).abs() < 1e-3);
+    // Clamped to a 16384-pixel texture: stretched to fill the panel.
+    let (x, _) = swap_chain_scale((20000.0, 10.0), (16384, 20)).unwrap();
+    assert!((f64::from(x) * 16384.0 - 20000.0).abs() < 1e-1);
+    // No size, no transform.
+    assert_eq!(swap_chain_scale((0.0, 10.0), (0, 10)), None);
+    assert_eq!(swap_chain_scale((10.0, f64::NAN), (10, 10)), None);
+}
+
+/// Off Windows a panel cannot be attached, and resizing a viewport that
+/// has none is harmless; no transform has been set.
+#[cfg(not(windows))]
+#[test]
+fn a_swap_chain_panel_needs_windows() {
+    let Some(v) = viewport() else { return };
+    assert!(
+        v.attach_swap_chain_panel(1, 10.0, 10.0, 1.5, 1.5, false)
+            .is_err()
+    );
+    v.resize_swap_chain_panel(10.0, 10.0, 1.5, 1.5).unwrap();
+    assert_eq!(v.swap_chain_transform().unwrap(), "none");
+}
+
 /// Frame times on a moderate model (`csg_spheres` from
 /// `conformance/bench.json`: a cube minus 125 spheres at `$fn = 48`), in
 /// the app's window size. Ignored by default; run with

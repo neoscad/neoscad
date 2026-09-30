@@ -4,8 +4,9 @@
 // apple/App/Viewport/MetalView.swift.
 //
 // The camera lives in Rust (render::camera): this class sends pointer
-// deltas in device-independent pixels and never holds a camera of its
-// own, so the view cannot drift from exports and snapshots.
+// deltas in device-independent pixels (PanelScale.PointerDelta) and never
+// holds a camera of its own, so the view cannot drift from exports and
+// snapshots.
 //
 //   left drag           orbit
 //   right/middle drag   pan (the model follows the pointer)
@@ -15,12 +16,16 @@
 // the UI thread; a frame is drawn only when the core says one is due (a
 // camera move, a new model), so an idle view costs a flag check.
 //
-// Scale. The swap chain is sized in device-independent pixels, one buffer
-// pixel per DIP, which the panel shows at its natural size; at 150%
-// display scaling the compositor stretches it. Sizing it in physical
-// pixels needs the inverse scale set on the swap chain
-// (IDXGISwapChain2::SetMatrixTransform), which wgpu does not do:
-// milestone 2 (docs/windows-app.md).
+// Scale. The core sizes the swap chain in physical pixels (DIPs times the
+// panel's CompositionScaleX/Y) and sets the inverse scale on it
+// (IDXGISwapChain2::SetMatrixTransform, crates/ffi/src/layer.rs) after
+// every configure, so frames are drawn at the display's resolution and
+// shown at the panel's size. Without the transform a panel shows one
+// buffer pixel per DIP: a DIP-sized buffer was stretched and blurred at
+// 150%, a pixel-sized one would overflow the panel. The scale changes
+// with the display, the system setting and zoom transforms above the
+// panel, which CompositionScaleChanged reports, so both it and
+// SizeChanged resize.
 
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
@@ -58,7 +63,8 @@ public sealed class ViewportPanel
         this.panel = panel;
         panel.Loaded += (_, _) => Attach();
         panel.Unloaded += (_, _) => Detach();
-        panel.SizeChanged += (_, _) => Resize();
+        panel.SizeChanged += (_, _) => Resize("size");
+        panel.CompositionScaleChanged += (_, _) => Resize("scale");
         panel.PointerPressed += OnPressed;
         panel.PointerMoved += OnMoved;
         panel.PointerReleased += OnReleased;
@@ -121,7 +127,8 @@ public sealed class ViewportPanel
             Marshal.ThrowExceptionForHR(Marshal.QueryInterface(unknown, in iid, out var native));
             try
             {
-                v.AttachSwapChainPanel((ulong)native.ToInt64(), panel.ActualWidth, panel.ActualHeight, 1.0, false);
+                v.AttachSwapChainPanel((ulong)native.ToInt64(), panel.ActualWidth, panel.ActualHeight,
+                    panel.CompositionScaleX, panel.CompositionScaleY, false);
                 attached = true;
             }
             finally
@@ -133,6 +140,7 @@ public sealed class ViewportPanel
         {
             Error = CoreErrors.Describe(e);
         }
+        AppLog.Write(attached ? $"view: attached {Describe()}" : $"view: not attached: {Error}");
         if (attached) CompositionTarget.Rendering += OnRendering;
     }
 
@@ -150,7 +158,7 @@ public sealed class ViewportPanel
         }
     }
 
-    void Resize()
+    void Resize(string why)
     {
         if (!attached)
         {
@@ -159,11 +167,35 @@ public sealed class ViewportPanel
         }
         try
         {
-            viewport?.Resize(panel.ActualWidth, panel.ActualHeight, 1.0);
+            viewport?.ResizeSwapChainPanel(panel.ActualWidth, panel.ActualHeight,
+                panel.CompositionScaleX, panel.CompositionScaleY);
         }
-        catch (CoreException)
+        catch (CoreException e)
         {
+            AppLog.Write($"view: resize ({why})", e);
+            return;
         }
+        // Scale changes are rare and worth a line; a window drag resizes
+        // at every step and would flood the log.
+        if (why == "scale") AppLog.Write($"view: rescaled {Describe()}");
+    }
+
+    /// <summary>The panel's size and scale, the swap chain's pixels and its transform, for the log.</summary>
+    string Describe()
+    {
+        double w = panel.ActualWidth, h = panel.ActualHeight;
+        double sx = panel.CompositionScaleX, sy = panel.CompositionScaleY;
+        var (pw, ph) = PanelScale.Pixels(w, h, sx, sy);
+        string transform;
+        try
+        {
+            transform = viewport?.SwapChainTransform() ?? "none";
+        }
+        catch (CoreException e)
+        {
+            transform = CoreErrors.Describe(e);
+        }
+        return $"{w}x{h} DIPs, composition scale {sx} x {sy}, swap chain {pw}x{ph} px, transform {transform}";
     }
 
     void OnRendering(object? sender, object e)
@@ -222,7 +254,10 @@ public sealed class ViewportPanel
     {
         if (last is not { } from) return;
         var to = e.GetCurrentPoint(panel).Position;
-        double dx = to.X - from.X, dy = to.Y - from.Y;
+        // Positions are in DIPs, whatever the display scale; the core wants
+        // its viewport's points (PanelScale).
+        var (dx, dy) = PanelScale.PointerDelta(to.X - from.X, to.Y - from.Y,
+            panel.CompositionScaleX, panel.CompositionScaleY);
         last = to;
         if (panning) Perform(v => v.Pan(dx, dy));
         else Perform(v => v.Orbit(dx, dy));

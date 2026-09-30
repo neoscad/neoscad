@@ -123,6 +123,43 @@ pub struct Viewport {
     /// generation (`document.rs`, `apply_file_view`).
     #[allow(clippy::type_complexity)]
     pub(crate) file_view: Mutex<Option<(FileView, u64)>>,
+    /// A `SwapChainPanel`'s size in DIPs and the last transform set on its
+    /// swap chain, shared with the surface's configure hook
+    /// ([`Viewport::attach_swap_chain_panel`]).
+    panel: Arc<Mutex<PanelState>>,
+}
+
+/// What the configure hook of a `SwapChainPanel` surface needs, and what it
+/// did last (for the app's log).
+#[derive(Debug, Default)]
+struct PanelState {
+    /// The panel's size in device-independent pixels.
+    dips: (f64, f64),
+    /// The scale last set on the swap chain, or why none could be.
+    transform: Option<Result<(f32, f32), String>>,
+}
+
+/// A scale factor as XAML reports it, or 1 for one that cannot be (zero,
+/// negative, NaN: a panel not yet in a window reports 0).
+fn sane_scale(scale: f64) -> f64 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// The swap chain's transform for a panel `dips` large whose buffer is
+/// `buffer` pixels: the ratio per axis, so the buffer covers the panel
+/// exactly. It is the inverse of the composition scale up to the whole
+/// pixels the buffer is rounded to, and it stays right when the buffer is
+/// clamped to the device's largest texture (the frame is stretched to
+/// fill the panel rather than cover part of it). `None` for an empty size.
+fn swap_chain_scale(dips: (f64, f64), buffer: (u32, u32)) -> Option<(f32, f32)> {
+    let axis = |dips: f64, px: u32| {
+        (dips.is_finite() && dips > 0.0 && px > 0).then(|| (dips / f64::from(px)) as f32)
+    };
+    Some((axis(dips.0, buffer.0)?, axis(dips.1, buffer.1)?))
 }
 
 /// The `$vpt`, `$vpr`, `$vpd` and `$vpf` a file assigned (`None` for
@@ -138,6 +175,10 @@ impl std::fmt::Debug for Viewport {
 impl Viewport {
     pub(crate) fn lock(&self) -> MutexGuard<'_, render::viewport::Viewport> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn panel_state(&self) -> MutexGuard<'_, PanelState> {
+        self.panel.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// A size in points at `scale` as whole pixels, as wgpu-hal measures a
@@ -183,6 +224,7 @@ impl Viewport {
                 inner: Mutex::new(inner),
                 requests: AtomicU64::new(0),
                 file_view: Mutex::new(None),
+                panel: Arc::default(),
             }))
         })
     }
@@ -218,28 +260,90 @@ impl Viewport {
     /// Draw into a WinUI 3 `SwapChainPanel` from now on: `panel` is the
     /// address of its `ISwapChainPanelNative` interface (see `layer.rs`
     /// for the contract: live for the call, on the UI thread), `width` by
-    /// `height` in the panel's device-independent pixels at `scale`
-    /// physical pixels each. The Windows app's counterpart of
-    /// [`Viewport::attach_layer`]; on other platforms an error.
+    /// `height` in the panel's device-independent pixels, at the panel's
+    /// `CompositionScaleX` and `CompositionScaleY` physical pixels a DIP.
+    /// The Windows app's counterpart of [`Viewport::attach_layer`]; on
+    /// other platforms an error.
+    ///
+    /// The swap chain is made in physical pixels, so frames are drawn at
+    /// the display's resolution, and after every configure the inverse
+    /// scale is set on it (`layer::set_swap_chain_scale`), so the
+    /// compositor shows it at the panel's size. Without that transform a
+    /// panel shows its buffer one pixel per DIP: sized in DIPs the frame
+    /// was stretched and blurred at 150% display scaling, and sized in
+    /// pixels without it the frame would overflow the panel.
+    ///
+    /// Camera moves stay in DIPs as the pointer reports them, with one
+    /// exception the app handles: the viewport's one scale is `scale_x`,
+    /// so a vertical delta is `dy * scale_y / scale_x` of its points.
     pub fn attach_swap_chain_panel(
         &self,
         panel: u64,
         width: f64,
         height: f64,
-        scale: f64,
+        scale_x: f64,
+        scale_y: f64,
         readable: bool,
     ) -> Result<(), CoreError> {
         guarded(|| {
             let surface = layer::surface_from_swap_chain_panel(self.gpu.instance(), panel)?;
+            let (sx, sy) = (sane_scale(scale_x), sane_scale(scale_y));
+            *self.panel_state() = PanelState {
+                dips: (width, height),
+                transform: None,
+            };
+            let state = self.panel.clone();
+            let hook = render::viewport::OnConfigure::new(move |surface, config| {
+                let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
+                let Some((x, y)) = swap_chain_scale(state.dips, (config.width, config.height))
+                else {
+                    return;
+                };
+                state.transform = Some(layer::set_swap_chain_scale(surface, x, y).map(|()| (x, y)));
+            });
             self.lock()
-                .attach_surface(
+                .attach_surface_with(
                     surface,
-                    Self::pixels(width, scale),
-                    Self::pixels(height, scale),
-                    scale,
+                    Self::pixels(width, sx),
+                    Self::pixels(height, sy),
+                    sx,
                     readable,
+                    Some(hook),
                 )
                 .map_err(failed)
+        })
+    }
+
+    /// The panel's new size in DIPs and its composition scale (after the
+    /// panel's `SizeChanged` or `CompositionScaleChanged`): the swap
+    /// chain is resized in physical pixels and its transform set again.
+    pub fn resize_swap_chain_panel(
+        &self,
+        width: f64,
+        height: f64,
+        scale_x: f64,
+        scale_y: f64,
+    ) -> Result<(), CoreError> {
+        guarded(|| {
+            let (sx, sy) = (sane_scale(scale_x), sane_scale(scale_y));
+            // Before the resize, whose configure reads it.
+            self.panel_state().dips = (width, height);
+            self.lock()
+                .resize(Self::pixels(width, sx), Self::pixels(height, sy), sx);
+            Ok(())
+        })
+    }
+
+    /// What the last configure of a `SwapChainPanel` surface set on its
+    /// swap chain, for the app's log: "0.6667 x 0.6667", the error it met,
+    /// or "none" before the first configure.
+    pub fn swap_chain_transform(&self) -> Result<String, CoreError> {
+        guarded(|| {
+            Ok(match &self.panel_state().transform {
+                Some(Ok((x, y))) => format!("{x:.4} x {y:.4}"),
+                Some(Err(e)) => e.clone(),
+                None => "none".into(),
+            })
         })
     }
 

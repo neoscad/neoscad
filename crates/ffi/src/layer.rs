@@ -133,6 +133,65 @@ pub(crate) fn surface_from_swap_chain_panel(
     })
 }
 
+/// Show the swap chain behind `surface` scaled by `x` and `y`
+/// (`IDXGISwapChain2::SetMatrixTransform`), so that a buffer sized in
+/// physical pixels covers its `SwapChainPanel` exactly rather than
+/// `1 / x` times it.
+///
+/// # Why it is sound
+///
+/// 1. **`as_hal`.** Its contract (`wgpu-30.0.1/src/api/surface.rs:224-231`)
+///    is about the hal resource: it must not be destroyed while wgpu
+///    still uses it, and wgpu-hal's own rules hold. Nothing here destroys
+///    anything: `dx12::Surface::swap_chain` returns a clone of the COM
+///    pointer, an `AddRef` (`wgpu-hal-30.0.1/src/dx12/mod.rs:650-652`),
+///    released when `chain` drops at the end of the call, and the guard
+///    is dropped with it. `None` (not a DX12 surface, or not configured
+///    yet) is a no-op.
+/// 2. **`SetMatrixTransform`.** It reads one `DXGI_MATRIX_3X2_F` through
+///    the pointer, which is a local that outlives the call. On a swap
+///    chain that was not made for composition it fails with
+///    `DXGI_ERROR_INVALID_CALL`, an error returned rather than undefined
+///    behaviour; wgpu-hal makes a panel's with
+///    `CreateSwapChainForComposition` (`:1542-1552`).
+/// 3. **Threads.** Called from the configure that `Viewport::resize` or
+///    `Viewport::draw` makes, on the panel's UI thread (point 4 of
+///    [`surface_from_swap_chain_panel`]), while the viewport's lock is
+///    held, so no present on this swap chain runs at the same time.
+#[cfg(windows)]
+pub(crate) fn set_swap_chain_scale(
+    surface: &wgpu::Surface<'_>,
+    x: f32,
+    y: f32,
+) -> Result<(), String> {
+    use windows::Win32::Graphics::Dxgi::DXGI_MATRIX_3X2_F;
+    // SAFETY: point 1 above: only the swap chain's COM pointer is cloned
+    // out of the guard, and nothing is destroyed.
+    let hal = unsafe { surface.as_hal::<wgpu::hal::api::Dx12>() }
+        .ok_or_else(|| "not a Direct3D 12 surface".to_string())?;
+    let chain = hal
+        .swap_chain()
+        .ok_or_else(|| "the surface has no swap chain yet".to_string())?;
+    let matrix = DXGI_MATRIX_3X2_F {
+        _11: x,
+        _22: y,
+        ..Default::default()
+    };
+    // SAFETY: point 2 above: `matrix` is live for the call, which only
+    // reads it.
+    unsafe { chain.SetMatrixTransform(&matrix) }.map_err(|e| format!("SetMatrixTransform: {e}"))
+}
+
+/// Only Windows has DXGI swap chains.
+#[cfg(not(windows))]
+pub(crate) fn set_swap_chain_scale(
+    _surface: &wgpu::Surface<'_>,
+    _x: f32,
+    _y: f32,
+) -> Result<(), String> {
+    Err("a swap chain transform needs Windows".into())
+}
+
 /// Only Windows has XAML's `SwapChainPanel`.
 #[cfg(not(windows))]
 pub(crate) fn surface_from_swap_chain_panel(

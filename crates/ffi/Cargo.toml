@@ -44,6 +44,14 @@ uniffi = { version = "=0.32.2", default-features = false }
 # wgpu the renderer uses; no second copy is built).
 wgpu = "30"
 
+[target.'cfg(windows)'.dependencies]
+# `IDXGISwapChain2::SetMatrixTransform` on the `SwapChainPanel`'s swap
+# chain, for the inverse of the display scale (`layer.rs`). The version
+# wgpu-hal's DX12 backend already builds (it hands out the swap chain as
+# this crate's `IDXGISwapChain3`), so this adds no second copy, only the
+# `Dxgi` feature it enables too.
+windows = { version = "0.62", default-features = false, features = ["Win32_Graphics_Dxgi"] }
+
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 # The viewport tests draw into a real `CAMetalLayer` (not in a window), so
 # the unsafe surface path runs under `cargo test`. Already in the build

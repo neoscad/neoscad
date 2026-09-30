@@ -1,7 +1,9 @@
 //! An interactive view: a model on the GPU, a camera the user moves, the
 //! view options, and a target to draw into. The macOS app draws into a
 //! `CAMetalLayer` surface (made from the layer in `crates/ffi`, the only
-//! place that touches the raw layer), the web app draws into a canvas
+//! place that touches the raw layer), the Windows app into a
+//! `SwapChainPanel` surface (made there too, with an [`OnConfigure`] step
+//! for the display scale), the web app draws into a canvas
 //! surface (`crates/web-view`, with [`Gpu::with_surface`] and models from
 //! [`Gpu::upload_packed`]), and tests draw into a texture and read it back. Everything
 //! here is target-agnostic: a [`Viewport`] takes a finished
@@ -410,13 +412,48 @@ pub enum Drawn {
     Deferred,
 }
 
+/// A host's step after each configure of a window surface, given the
+/// surface and its configuration as just applied.
+///
+/// Some platforms need more than wgpu's configure to show a surface
+/// right, and a configure can remake the platform's swap chain, dropping
+/// whatever was set on the old one. The Windows app is the case in point:
+/// a `SwapChainPanel`'s swap chain is sized in physical pixels, and the
+/// compositor shows it at its natural size (so at 150% display scaling a
+/// frame drawn for the panel would cover 150% of it) unless the inverse of
+/// the panel's scale is set on that swap chain (`crates/ffi`, `layer.rs`).
+/// wgpu has no such setting, so the host reaches the swap chain through
+/// `wgpu::Surface::as_hal` in the hook. It runs after every configure:
+/// attaching, a resize, and the reconfigures [`Viewport::draw`] makes for
+/// an outdated or suboptimal surface; a setting made only on attach would
+/// be lost with a swap chain remade later.
+pub struct OnConfigure(Box<ConfigureFn>);
+
+type ConfigureFn = dyn Fn(&wgpu::Surface<'static>, &wgpu::SurfaceConfiguration) + Send;
+
+impl OnConfigure {
+    pub fn new(
+        f: impl Fn(&wgpu::Surface<'static>, &wgpu::SurfaceConfiguration) + Send + 'static,
+    ) -> OnConfigure {
+        OnConfigure(Box::new(f))
+    }
+}
+
+impl std::fmt::Debug for OnConfigure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OnConfigure")
+    }
+}
+
 /// Where a viewport draws.
 #[derive(Debug)]
 enum Target {
-    /// A window surface, configured to the viewport's size.
+    /// A window surface, configured to the viewport's size, with the
+    /// host's step after each configure.
     Surface {
         surface: wgpu::Surface<'static>,
         config: wgpu::SurfaceConfiguration,
+        on_configure: Option<OnConfigure>,
     },
     /// A texture of the viewport's size (tests and headless use); `None`
     /// until the viewport has a size.
@@ -520,6 +557,21 @@ impl Viewport {
         scale: f64,
         readable: bool,
     ) -> Result<(), Error> {
+        self.attach_surface_with(surface, width, height, scale, readable, None)
+    }
+
+    /// [`Viewport::attach_surface`], running `on_configure` after every
+    /// configure of the surface, the first one (made here) included; see
+    /// [`OnConfigure`].
+    pub fn attach_surface_with(
+        &mut self,
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+        scale: f64,
+        readable: bool,
+        on_configure: Option<OnConfigure>,
+    ) -> Result<(), Error> {
         self.attached = None;
         let caps = surface.get_capabilities(&self.gpu.adapter);
         // Linear 8-bit colour: OpenSCAD writes its colours to the
@@ -569,7 +621,11 @@ impl Viewport {
         };
         let samples = self.gpu.samples_for(format);
         self.attached = Some(Attached {
-            target: Target::Surface { surface, config },
+            target: Target::Surface {
+                surface,
+                config,
+                on_configure,
+            },
             format,
             samples,
             renderer: self.gpu.renderer(format, samples),
@@ -649,10 +705,14 @@ impl Viewport {
         let max = device.limits().max_texture_dimension_2d;
         let (w, h) = (width.min(max), height.min(max));
         match &mut a.target {
-            Target::Surface { surface, config } => {
+            Target::Surface {
+                surface,
+                config,
+                on_configure,
+            } => {
                 config.width = w;
                 config.height = h;
-                self.gpu.gate.configure(surface, device, config);
+                configure(&self.gpu, surface, config, on_configure.as_ref());
             }
             Target::Texture(t) => {
                 *t = Some(texture(
@@ -1014,18 +1074,22 @@ impl Viewport {
             return Ok(Drawn::Idle);
         };
         match &a.target {
-            Target::Surface { surface, config } => {
+            Target::Surface {
+                surface,
+                config,
+                on_configure,
+            } => {
                 let texture = match surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t) => t,
                     wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
                         // Still drawable; reconfigure for the next frame.
-                        self.gpu.gate.configure(surface, &self.gpu.device, config);
+                        configure(&self.gpu, surface, config, on_configure.as_ref());
                         t
                     }
                     wgpu::CurrentSurfaceTexture::Timeout
                     | wgpu::CurrentSurfaceTexture::Occluded => return Ok(Drawn::Deferred),
                     wgpu::CurrentSurfaceTexture::Outdated => {
-                        self.gpu.gate.configure(surface, &self.gpu.device, config);
+                        configure(&self.gpu, surface, config, on_configure.as_ref());
                         return Ok(Drawn::Deferred);
                     }
                     wgpu::CurrentSurfaceTexture::Lost => {
@@ -1075,7 +1139,9 @@ impl Viewport {
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
         );
         let submitted = match &a.target {
-            Target::Surface { surface, config } => {
+            Target::Surface {
+                surface, config, ..
+            } => {
                 if !config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
                     return Err(Error::Readback(
                         "the surface was attached without `readable`".into(),
@@ -1199,6 +1265,20 @@ fn texture(
         usage,
         view_formats: &[],
     })
+}
+
+/// Configure `surface` (with no submission in flight, see [`Gate`]), then
+/// run the host's step for it.
+fn configure(
+    gpu: &Gpu,
+    surface: &wgpu::Surface<'static>,
+    config: &wgpu::SurfaceConfiguration,
+    on_configure: Option<&OnConfigure>,
+) {
+    gpu.gate.configure(surface, &gpu.device, config);
+    if let Some(hook) = on_configure {
+        (hook.0)(surface, config);
+    }
 }
 
 fn surface_status(s: &wgpu::CurrentSurfaceTexture) -> &'static str {
