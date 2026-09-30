@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.0-rc.1"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-2.0-or-later"
@@ -142,6 +142,9 @@ install-path = "CARGO_HOME"
 plan-jobs = ["./ci"]
 pr-run-mode = "skip"
 github-attestations = true
+# Only while rehearsing a release with rc tags: the prerelease runs the
+# publish jobs too (docs/release.md). Removed again for the real tag.
+publish-prereleases = true
 # LICENSE, NOTICE and the licences of what the binary embeds
 # (scripts/release/licenses.sh), named explicitly so the archive layout
 # does not depend on auto-detection.
