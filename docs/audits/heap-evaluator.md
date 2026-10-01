@@ -579,3 +579,116 @@ against the extra CI time on six targets.
   worker) comes later, as its own step after stage 2.
 - **Fat LTO for releases** is decided separately, from a measurement on
   today's evaluator.
+
+## Fat LTO measured (v0.2.1 code)
+
+The §4.5 measurement, run on 2026-10-01 at `f136256` (the v0.2.1 code)
+on an Apple M4 Pro (14 cores, 48 GB, macOS 27.0, on AC power). It
+replaces the "Fat LTO's build cost and run-time effect" line under
+"Not verified".
+
+**Builds.** Each variant was built cold into its own target directory,
+one at a time, with the release profile and `CARGO_PROFILE_RELEASE_LTO`
+set to `thin` or `fat`. The PGO variants ran `scripts/pgo.sh` under the
+same variable, so each **retrained**: a profile is valid only for the IR
+that was instrumented, and with fat LTO in `Cargo.toml` CI would also
+train a fat instrumented build. The two profiles did differ (7.8 MB thin,
+8.2 MB fat), so one profile for both would not have measured what CI
+would ship. Build time is one wall-clock run under `/usr/bin/time -l`.
+Peak memory is the largest single process (`maximum resident set
+size`). Sizes are the `release` binaries as built, with `strip -S` in
+brackets (close to `dist`'s `strip = "debuginfo"`).
+
+**Checks.**
+- `conformance run --binary`: 1773/0 for all four variants.
+- `conformance depth --binary`: every variant passed the 1.25× guard.
+
+**Speed.** `conformance bench --refs neoscad --binary`, full model set,
+5 interleaved rounds (thin, fat, PGO + thin, PGO + fat per round). Each
+run started only when the 1-minute load was below 3; the actual range
+was 1.65–2.92, with no thermal warnings. Each model's speed is the best
+of the 5 rounds' bests (each of those is best of 3), divided by thin's.
+The geomean is taken over the 11 models of 30 ms or more, the same as
+`scripts/pgo-compare.py`. The range in brackets is the per-round paired
+geomean.
+
+| Variant | Build | Peak mem | Binary (stripped) | Depth: module / function | Geomean vs thin |
+|---|---:|---:|---:|---:|---:|
+| thin (as shipped) | 43 s | 2.3 GB | 21.2 MB (20.2) | 65,507 (2.16×) / 110,361 (12.01×) | 1 |
+| fat | 98 s | 3.9 GB | 19.2 MB (18.5) | 65,507 (2.16×) / 107,531 (11.70×) | **0.995** (0.992–1.009) |
+| PGO + thin | 116 s (49 instr. + 27 train + 40 opt.) | 3.1 GB | 20.3 MB (19.3) | 39,919 (1.32×) / 55,181 (6.00×) | **0.932** (0.928–0.938) |
+| PGO + fat | 266 s (147 instr. + 26 train + 93 opt.) | 6.7 GB | 18.7 MB (17.9) | 39,919 (1.32×) / 52,422 (5.70×) | **0.935** (0.928–0.955) |
+
+The depth columns are `recursion-test-module` and `function-add`.
+OpenSCAD's depths there are 30,261 and 9,192.
+
+**Per model.**
+- Fat against thin, plain: every model is between 0.973 and 1.011,
+  inside the ±3% layout band of §4.4.
+- PGO + fat against PGO + thin: 1.004 overall. The largest differences
+  are `bosl_isosurface__006` (1.013), `bosl_fractal_tree` (0.979) and
+  `mink_convex` (1.057; 22 ms, below the floor).
+- The PGO gain is all PGO's. Both PGO variants gain the most on
+  `bosl_isosurface__006` (0.878 thin, 0.890 fat) and `ex_menger` (0.890,
+  0.896), then `text_30lines` and `bosl_screws__001` (about 0.91–0.93).
+- `eval_only` (BOSL2's 976 tests, summed): thin 30.35–31.03 s, fat
+  30.01–30.39 s, PGO + thin 28.83–31.42 s, PGO + fat 28.82–31.88 s.
+  Fat is about 1% faster than thin, PGO about 5%, and fat adds nothing
+  under PGO.
+- The served edit loop (BOSL2 render 9.1 ms, PGO 8.7 ms) and cold start
+  (2.7–2.9 ms) are the same under thin and fat.
+
+**Depth.** Fat LTO leaves module recursion where it was. Function
+recursion is about 3% shallower plain (110,361 to 107,531) and 5% under
+PGO (55,181 to 52,422), still more than 5.7× OpenSCAD's. The gating
+case is PGO's module depth: 1.32× on this machine either way, against
+1.42–1.55× in CI's PGO run (`docs/release.md`, "PGO builds").
+
+**App core.** `neoscad-ffi` was measured with a throwaway harness
+outside the workspace. It is a binary depending on `neoscad-ffi` by
+path, with the workspace's `[patch.crates-io]`, `Cargo.lock` and release
+profile. It times `Core::render` (`RenderMode::Render`) per bench model,
+with a fresh `Core` for every run, best of 3, over 3 interleaved rounds.
+- Build: 46 s and 2.0 GB thin, 93 s and 3.4 GB fat.
+- Geomean, fat against thin: **0.998** over 7 models of 30 ms or more
+  (rounds 1.002, 1.000, 0.997).
+- Not measured: the two BOSL2 `file` models opened from disk rendered
+  in under 1 ms. Their `include <BOSL2/...>` did not resolve without
+  the CLI bench's library path, so they fall under the floor and are
+  excluded.
+- Not measured: `import_stl`. It needs generated inputs and was
+  skipped.
+
+**Cost in CI terms.** These are scaled from this machine, not measured
+on runners. Fat LTO made each build about 2.3× as long and used
+1.7–2.1× the peak memory. Most of the extra is the serial fat-LTO link.
+The worst case is the instrumented build: 49 s became 147 s, because
+fat LTO there optimises the instrumented IR as one module.
+
+Release jobs take about 8–18 min per target. The `pgo.sh` part is 5–14
+min of that, and a plain build is 2.5–6.5 min. Scaling the build share
+by 2.3× gives:
+- about +3–9 min on each plain target (`x86_64-apple-darwin`,
+  `aarch64-pc-windows-msvc`);
+- about +7–18 min on each of the four PGO targets, about 15–30 min per
+  job.
+
+Runners with fewer cores lose less of thin LTO's parallelism, so the
+real ratio there may be lower. That is unverified. The fat
+instrumented build's 6.7 GB peak would need checking against each
+runner's memory; that was not checked here.
+
+**Recommendation: keep thin LTO for releases, plain and PGO.**
+- On the current evaluator fat LTO is parity: 0.995 plain and 1.004
+  under PGO, with the app core at 0.998.
+- Its only clear gain is size: about 2 MB (8–9%) off each binary.
+- Against that it costs 2.3× the build time, which is minutes per target
+  and up to a doubling of the PGO jobs. It also needs up to twice the
+  peak memory, and costs a little function-recursion depth.
+- PGO stays the lever, at 0.93.
+- Untested: fat optimised builds using a profile trained on a thin
+  instrumented build. That would avoid the 147 s instrumented build, but
+  the two profiles differ, and the speed result above gives no reason to
+  try.
+- `[profile.web]` stays fat. There size is the point, and no PGO is
+  involved.
