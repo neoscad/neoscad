@@ -564,3 +564,18 @@ against the extra CI time on six targets.
 - Whether a CLI PGO profile applies usefully to `neoscad-ffi`.
 - The heap frame size. The native per-level sizes in §0.5 are derived
   from depth, not instrumented.
+
+## Decisions (owner, 2026-10-01)
+
+- **The bar for stage 2:** a slowdown of up to about 5% under PGO + thin
+  LTO is acceptable for a fully stack-independent evaluator. Past that,
+  stages 0-1 ship alone and calls stay native, bounded by the counted
+  limit.
+- **The counted limit** lives in `Limits`, as `--limit depth=N` alongside
+  memory and time. Its default is set high enough to stay above today's
+  native depths (2.16x OpenSCAD's for modules), and it's identical in
+  every build and browser.
+- **Resumable evaluation on the web** (cancel without restarting the
+  worker) comes later, as its own step after stage 2.
+- **Fat LTO for releases** is decided separately, from a measurement on
+  today's evaluator.
