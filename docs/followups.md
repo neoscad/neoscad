@@ -1196,6 +1196,17 @@ lead them, come roughly in order of user impact.
   job catches the next one.
 
 ## Web demo
+
+- **Deep user recursion still overflows evaluation in WebKit.** The render
+  walk is iterative now (it overflowed Safari on the BOSL2 examples), but
+  the evaluator recurses per module call, and JavaScriptCore's frames
+  for it are far bigger than V8's. A `module m(n)` chain previews at
+  depth 30 and crashes at 40 in WebKit; Chromium and Firefox reach 200
+  and stop cleanly. The wasm32 frame budget (`DEFAULT_FRAME_LIMIT`, 2000,
+  `crates/eval/src/recursion.rs`) was calibrated against V8. Either
+  recalibrate it against JSC (a smaller wasm budget gives a clean
+  recursion error instead of a crash), or make evaluation independent of
+  stack depth. `eval::dump::Keys::new` also still recurses.
 - **Done: the preview's product booleans run under the limits.**
   `geom::csg::product_meshes_until` checks a `geom::csg::Stop` (the
   request's interrupt flag and limits guard) before every kernel

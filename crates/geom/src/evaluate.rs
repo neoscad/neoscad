@@ -568,6 +568,45 @@ fn is_chain(top: &Node) -> bool {
     false
 }
 
+#[cfg(all(test, feature = "parallel", not(target_arch = "wasm32")))]
+#[path = "evaluate/small_stack_tests.rs"]
+mod small_stack_tests;
+
+/// Whether computing `n` takes its children's results. The primitives
+/// ignore any children they were given, and so does the walk: evaluating
+/// them could fail or warn where OpenSCAD does neither. The match is
+/// exhaustive so a new kind has to be placed on one side.
+fn uses_children(n: &Node) -> bool {
+    match &n.kind {
+        NodeKind::Cube { .. }
+        | NodeKind::Sphere { .. }
+        | NodeKind::Cylinder { .. }
+        | NodeKind::Polyhedron { .. }
+        | NodeKind::Square { .. }
+        | NodeKind::Circle { .. }
+        | NodeKind::Polygon { .. }
+        | NodeKind::Surface { .. }
+        | NodeKind::Import(_)
+        | NodeKind::Text(_) => false,
+        NodeKind::Root
+        | NodeKind::Group { .. }
+        | NodeKind::Render { .. }
+        | NodeKind::IntersectionFor
+        | NodeKind::Csg(_)
+        | NodeKind::Fill
+        | NodeKind::Color { .. }
+        | NodeKind::Transform { .. }
+        | NodeKind::Offset { .. }
+        | NodeKind::LinearExtrude(_)
+        | NodeKind::RotateExtrude { .. }
+        | NodeKind::Projection { .. }
+        | NodeKind::Minkowski { .. }
+        | NodeKind::Hull
+        | NodeKind::Resize { .. }
+        | NodeKind::Part { .. } => true,
+    }
+}
+
 /// Per-render context.
 struct Ctx<'a> {
     r: &'a Renderer,
@@ -598,6 +637,10 @@ struct Ctx<'a> {
     /// node index), its own checks and its children's merged when it is
     /// cached.
     demand: Mutex<HashMap<usize, Demand>>,
+    /// Whether a node's children run side by side on the pool (with the
+    /// `parallel` feature, off wasm32). A test turns it off to walk a tree
+    /// the way wasm32 does, entirely on its own small stack.
+    parallel: bool,
 }
 
 /// A result's weight in the memory limit's estimate, as a multiple of
@@ -927,23 +970,15 @@ impl Renderer {
             for (i, t) in tops.iter().enumerate() {
                 owner.insert(t.index, i);
             }
-            fn walk(
-                n: &Node,
-                enclosing: usize,
-                owner: &HashMap<usize, usize>,
-                depth: &mut [usize],
-            ) {
-                let mut enclosing = enclosing;
+            // Iterative, as every walk of the tree here is (see
+            // `Ctx::node`): only the maximum matters, not the order.
+            let mut stack: Vec<(&Node, usize)> = tops.iter().map(|t| (*t, 0)).collect();
+            while let Some((n, mut enclosing)) = stack.pop() {
                 if let Some(&i) = owner.get(&n.index) {
                     depth[i] = depth[i].max(enclosing);
                     enclosing += 1;
                 }
-                for c in &n.children {
-                    walk(c, enclosing, owner, depth);
-                }
-            }
-            for t in tops {
-                walk(t, 0, &owner, &mut depth);
+                stack.extend(n.children.iter().map(|c| (c, enclosing)));
             }
         }
         let mut outs: Vec<Option<Out>> = (0..tops.len()).map(|_| None).collect();
@@ -1013,8 +1048,16 @@ impl Renderer {
     /// parallel. A node reached again under a later top (a nested top) is
     /// not revisited, so it keeps the flags of its first, tree-order visit.
     fn prepare<'a>(&'a self, tops: &[&Node], keys: &Keys, opts: &'a RenderOptions) -> Ctx<'a> {
-        fn max_index(n: &Node) -> usize {
-            n.children.iter().map(max_index).fold(n.index, usize::max)
+        // The walks here are iterative, as `Ctx::node` is: a recursive
+        // one needs stack in proportion to the tree's depth.
+        fn max_index(top: &Node) -> usize {
+            let mut max = 0;
+            let mut stack = vec![top];
+            while let Some(n) = stack.pop() {
+                max = max.max(n.index);
+                stack.extend(&n.children);
+            }
+            max
         }
         let len = tops.iter().map(|t| max_index(t)).max().unwrap_or(0) + 1;
         let mut ctx = Ctx {
@@ -1028,6 +1071,7 @@ impl Renderer {
             overflow: Mutex::new(HashMap::new()),
             charged: Mutex::new(HashMap::new()),
             demand: Mutex::new(HashMap::new()),
+            parallel: cfg!(all(feature = "parallel", not(target_arch = "wasm32"))),
         };
         {
             let mut seen = HashSet::new();
@@ -1088,18 +1132,28 @@ impl Renderer {
                 stack.extend(n.children.iter().rev().map(|c| (c, Some((h, first)))));
             }
         }
-        fn pattern(n: &Node, first: &[bool], out: &mut [u64], done: &mut [bool]) -> u64 {
-            if done[n.index] {
-                return out[n.index];
+        // Each node's flag hashed with its children's patterns, in
+        // post-order: a node is seen once on the way down, and again
+        // (`ready`) when its children are done.
+        fn pattern(top: &Node, first: &[bool], out: &mut [u64], done: &mut [bool]) {
+            let mut stack = vec![(top, false)];
+            while let Some((n, ready)) = stack.pop() {
+                if done[n.index] {
+                    continue;
+                }
+                if !ready {
+                    stack.push((n, true));
+                    stack.extend(n.children.iter().rev().map(|c| (c, false)));
+                    continue;
+                }
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                first[n.index].hash(&mut h);
+                for c in &n.children {
+                    out[c.index].hash(&mut h);
+                }
+                out[n.index] = h.finish();
+                done[n.index] = true;
             }
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            first[n.index].hash(&mut h);
-            for c in &n.children {
-                pattern(c, first, out, done).hash(&mut h);
-            }
-            out[n.index] = h.finish();
-            done[n.index] = true;
-            out[n.index]
         }
         let mut done = vec![false; len];
         for t in tops {
@@ -1227,7 +1281,87 @@ impl Ctx<'_> {
     }
 
     /// Evaluate one node, from the cache when possible.
-    fn node(&self, n: &Node) -> Result<Out, Unsupported> {
+    ///
+    /// The walk keeps the nodes waiting for their children on a heap
+    /// stack instead of recursing once per level. Each level of a
+    /// recursive walk cost about 2 KiB of native stack, and far more as
+    /// wasm under JavaScriptCore, whose frames for these large functions
+    /// are much bigger than V8's: Safari's worker overflowed rendering a
+    /// BOSL2 gear whose tree is only 77 levels deep, where Chromium and
+    /// Firefox rendered it. Now the stack the walk needs does not depend on
+    /// the tree's depth. The order everything happens in is the
+    /// recursion's: a node is looked up in the cache on the way down, its
+    /// children are evaluated in order (in parallel where
+    /// [`Ctx::kids_in_parallel`] says so), and the first error ends the
+    /// walk.
+    fn node(&self, top: &Node) -> Result<Out, Unsupported> {
+        /// A node whose children are being evaluated, with the results
+        /// of those done so far.
+        struct Waiting<'n> {
+            n: &'n Node,
+            outs: Vec<Out>,
+        }
+        let mut waiting: Vec<Waiting<'_>> = Vec::new();
+        let mut next = top;
+        loop {
+            let mut done = match self.lookup(next)? {
+                Some(out) => out,
+                None if !uses_children(next) || next.children.is_empty() => {
+                    self.finish(next, Vec::new())?
+                }
+                None => match self.kids_in_parallel(next) {
+                    Some(kids) => self.finish(next, kids?)?,
+                    None => {
+                        waiting.push(Waiting {
+                            n: next,
+                            outs: Vec::with_capacity(next.children.len()),
+                        });
+                        next = &next.children[0];
+                        continue;
+                    }
+                },
+            };
+            // Hand the result to its parent; a parent with all its
+            // children done is finished in turn, up to one that still has a
+            // child to start, or the top.
+            loop {
+                let Some(w) = waiting.last_mut() else {
+                    return Ok(done);
+                };
+                w.outs.push(done);
+                if let Some(c) = w.n.children.get(w.outs.len()) {
+                    next = c;
+                    break;
+                }
+                let w = waiting.pop().expect("the parent just updated");
+                done = self.finish(w.n, w.outs)?;
+            }
+        }
+    }
+
+    /// The children's results of a node with more than one child,
+    /// evaluated side by side on the pool. Each child's own walk is
+    /// [`Ctx::node`]'s, so the stack grows only at nodes with several
+    /// children, and the pool's threads have
+    /// [`eval::DEFAULT_THREAD_STACK`].
+    #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+    fn kids_in_parallel(&self, n: &Node) -> Option<Result<Vec<Out>, Unsupported>> {
+        use rayon::prelude::*;
+        (self.parallel && n.children.len() > 1)
+            .then(|| n.children.par_iter().map(|c| self.node(c)).collect())
+    }
+
+    /// Without the pool, children are always evaluated in order by the
+    /// walk itself.
+    #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
+    fn kids_in_parallel(&self, _n: &Node) -> Option<Result<Vec<Out>, Unsupported>> {
+        let _ = self.parallel;
+        None
+    }
+
+    /// The start of evaluating `n`: its result from the cache, or `None`
+    /// when it must be computed (after its children).
+    fn lookup(&self, n: &Node) -> Result<Option<Out>, Unsupported> {
         let h = self.hashes[n.index];
         let first = self.first[n.index];
         let pattern = self.pattern[n.index];
@@ -1258,20 +1392,20 @@ impl Ctx<'_> {
                 // A later copy, or a host that keeps OpenSCAD's rule: the
                 // cache answers silently.
                 self.r.hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(Out {
+                return Ok(Some(Out {
                     geom: self.rebase(h, geom, &ids),
                     msgs: Vec::new(),
-                });
+                }));
             }
             if let Some(msgs) = replay.msgs
                 && replay.pattern == pattern
                 && (msgs.is_empty() || Some(replay.epoch) == self.opts.replay)
             {
                 self.r.hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(Out {
+                return Ok(Some(Out {
                     geom: self.rebase(h, geom, &ids),
                     msgs: msgs.to_vec(),
-                });
+                }));
             }
             // The messages a fresh render would print here are not known:
             // compute the node again, from its children's cached results.
@@ -1280,7 +1414,17 @@ impl Ctx<'_> {
             return Err(Unsupported::interrupted());
         }
         self.r.misses.fetch_add(1, Ordering::Relaxed);
-        let mut out = self.compute(n)?;
+        Ok(None)
+    }
+
+    /// The end of evaluating `n`, which [`Ctx::lookup`] did not find in
+    /// the cache: compute it from its children's results `kids` (empty for
+    /// a node that does not use its children), check it and cache it.
+    fn finish(&self, n: &Node, kids: Vec<Out>) -> Result<Out, Unsupported> {
+        let h = self.hashes[n.index];
+        let first = self.first[n.index];
+        let pattern = self.pattern[n.index];
+        let mut out = self.compute(n, kids)?;
         if let Some(g) = &self.opts.guard {
             self.check_result(n, g, out.geom.as_ref())?;
         }
@@ -1385,17 +1529,7 @@ impl Ctx<'_> {
         geom
     }
 
-    /// Children's results in order, evaluated in parallel when enabled.
-    fn children(&self, n: &Node) -> Result<Vec<Out>, Unsupported> {
-        #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
-        if n.children.len() > 1 {
-            use rayon::prelude::*;
-            return n.children.par_iter().map(|c| self.node(c)).collect();
-        }
-        n.children.iter().map(|c| self.node(c)).collect()
-    }
-
-    fn compute(&self, n: &Node) -> Result<Out, Unsupported> {
+    fn compute(&self, n: &Node, kids: Vec<Out>) -> Result<Out, Unsupported> {
         let leaf = |g: Geometry| {
             Ok(Out {
                 geom: Some(g),
@@ -1455,15 +1589,15 @@ impl Ctx<'_> {
                 leaf(leaf_2d(primitives::polygon(points, paths)))
             }
             NodeKind::Root | NodeKind::Group { .. } | NodeKind::Render { .. } => {
-                self.apply(n, Op::Union)
+                self.apply(n, Op::Union, kids)
             }
-            NodeKind::IntersectionFor => self.apply(n, Op::Intersection),
-            NodeKind::Csg(CsgOp::Union) => self.apply(n, Op::Union),
-            NodeKind::Csg(CsgOp::Intersection) => self.apply(n, Op::Intersection),
-            NodeKind::Csg(CsgOp::Difference) => self.apply(n, Op::Difference),
-            NodeKind::Fill => self.apply(n, Op::Fill),
+            NodeKind::IntersectionFor => self.apply(n, Op::Intersection, kids),
+            NodeKind::Csg(CsgOp::Union) => self.apply(n, Op::Union, kids),
+            NodeKind::Csg(CsgOp::Intersection) => self.apply(n, Op::Intersection, kids),
+            NodeKind::Csg(CsgOp::Difference) => self.apply(n, Op::Difference, kids),
+            NodeKind::Fill => self.apply(n, Op::Fill, kids),
             NodeKind::Color { rgba } => {
-                let mut out = self.apply(n, Op::Union)?;
+                let mut out = self.apply(n, Op::Union, kids)?;
                 out.geom = out.geom.map(|g| self.color(n, g, Color(*rgba)));
                 Ok(out)
             }
@@ -1471,19 +1605,18 @@ impl Ctx<'_> {
                 if matrix.iter().flatten().any(|v| !v.is_finite()) {
                     // The children are still evaluated (and report their own
                     // messages) before the transform gives up on them.
-                    let mut msgs: Vec<Msg> =
-                        self.children(n)?.into_iter().flat_map(|o| o.msgs).collect();
+                    let mut msgs: Vec<Msg> = kids.into_iter().flat_map(|o| o.msgs).collect();
                     msgs.push(warn(n, "Transformation matrix contains Not-a-Number and/or Infinity - removing object."));
                     return Ok(Out { geom: None, msgs });
                 }
-                let mut out = self.apply(n, Op::Union)?;
+                let mut out = self.apply(n, Op::Union, kids)?;
                 out.geom = out.geom.map(|g| transform(g, matrix, &mut out.msgs));
                 Ok(out)
             }
             NodeKind::Offset {
                 delta, join, disc, ..
             } => {
-                let (poly, msgs) = self.children_2d_union(n)?;
+                let (poly, msgs) = self.children_2d_union(n, kids)?;
                 if *join == OffsetJoin::Round && poly.is_some() {
                     fragments(disc, delta.abs(), &|f| f, "offset()")?;
                 }
@@ -1513,7 +1646,7 @@ impl Ctx<'_> {
                 Ok(Out { geom, msgs })
             }
             NodeKind::LinearExtrude(e) => {
-                let (poly, msgs) = self.children_2d_union(n)?;
+                let (poly, msgs) = self.children_2d_union(n, kids)?;
                 let geom = match poly {
                     Some(p) => {
                         if self.opts.guard.is_some() && e.height[2] > 0.0 {
@@ -1537,7 +1670,7 @@ impl Ctx<'_> {
             NodeKind::RotateExtrude {
                 angle, start, disc, ..
             } => {
-                let (poly, mut msgs) = self.children_2d_union(n)?;
+                let (poly, mut msgs) = self.children_2d_union(n, kids)?;
                 if let Some(p) = &poly
                     && self.opts.guard.is_some()
                     && *angle != 0.0
@@ -1573,13 +1706,13 @@ impl Ctx<'_> {
                 };
                 Ok(Out { geom, msgs })
             }
-            NodeKind::Projection { cut, .. } => self.projection(n, *cut),
-            NodeKind::Minkowski { .. } => self.minkowski(n),
-            NodeKind::Hull => self.hull(n),
+            NodeKind::Projection { cut, .. } => self.projection(n, *cut, kids),
+            NodeKind::Minkowski { .. } => self.minkowski(n, kids),
+            NodeKind::Hull => self.hull(n, kids),
             NodeKind::Resize {
                 newsize, autosize, ..
             } => {
-                let mut out = self.apply(n, Op::Union)?;
+                let mut out = self.apply(n, Op::Union, kids)?;
                 out.geom = out
                     .geom
                     .map(|g| resize(g, *newsize, *autosize, &mut out.msgs));
@@ -1592,7 +1725,7 @@ impl Ctx<'_> {
                 ..
             } => Ok(self.surface(n, file, *center, *invert)),
             NodeKind::Part { name } => {
-                let mut out = self.apply(n, Op::Union)?;
+                let mut out = self.apply(n, Op::Union, kids)?;
                 out.geom = out.geom.map(|g| self.part(n, g, name, &mut out.msgs));
                 Ok(out)
             }
@@ -1766,15 +1899,14 @@ impl Ctx<'_> {
 
     /// The children's results paired with their nodes, and their messages
     /// in child order.
-    fn items<'n>(&self, n: &'n Node) -> Result<(Items<'n>, Vec<Msg>), Unsupported> {
-        let results = self.children(n)?;
+    fn items<'n>(&self, n: &'n Node, results: Vec<Out>) -> (Items<'n>, Vec<Msg>) {
         let mut msgs = Vec::new();
         let mut items: Items<'n> = Vec::with_capacity(results.len());
         for (c, o) in n.children.iter().zip(results) {
             msgs.extend(o.msgs);
             items.push((c, o.geom));
         }
-        Ok((items, msgs))
+        (items, msgs)
     }
 
     /// `isValidDim` over the children (`GeometryEvaluator.cc:114-125`): the
@@ -1798,8 +1930,8 @@ impl Ctx<'_> {
     }
 
     /// `applyToChildren` (`GeometryEvaluator.cc:128-139`).
-    fn apply(&self, n: &Node, op: Op) -> Result<Out, Unsupported> {
-        let (items, mut msgs) = self.items(n)?;
+    fn apply(&self, n: &Node, op: Op, kids: Vec<Out>) -> Result<Out, Unsupported> {
+        let (items, mut msgs) = self.items(n, kids);
         let geom = match Self::dim(&items, &mut msgs) {
             2 => self.apply_2d(&items, op, &mut msgs),
             3 => self.apply_3d(n, &items, op, &mut msgs),
@@ -1999,8 +2131,12 @@ impl Ctx<'_> {
     /// The children of a 2D-only operation (offset, the extrusions) as one
     /// shape: `applyToChildren2D(node, UNION)` called directly, so there is
     /// no mixing check, only a warning per 3D child.
-    fn children_2d_union(&self, n: &Node) -> Result<(Option<Polygon2d>, Vec<Msg>), Unsupported> {
-        let (items, mut msgs) = self.items(n)?;
+    fn children_2d_union(
+        &self,
+        n: &Node,
+        kids: Vec<Out>,
+    ) -> Result<(Option<Polygon2d>, Vec<Msg>), Unsupported> {
+        let (items, mut msgs) = self.items(n, kids);
         let geom = self.apply_2d(&items, Op::Union, &mut msgs);
         let poly = match geom {
             Some(Geometry::Polygon2d(p)) => Some(Arc::unwrap_or_clone(p)),
@@ -2011,8 +2147,8 @@ impl Ctx<'_> {
 
     /// `hull()`: `applyHull2D`, or `applyHull3D` for the Manifold backend,
     /// which hulls even a single child (`GeometryEvaluator.cc:150-154`).
-    fn hull(&self, n: &Node) -> Result<Out, Unsupported> {
-        let (items, mut msgs) = self.items(n)?;
+    fn hull(&self, n: &Node, kids: Vec<Out>) -> Result<Out, Unsupported> {
+        let (items, mut msgs) = self.items(n, kids);
         let geom = match Self::dim(&items, &mut msgs) {
             2 => {
                 let children = self.collect_2d(&items, &mut msgs);
@@ -2042,8 +2178,8 @@ impl Ctx<'_> {
     /// `applyToChildren3D` (`GeometryEvaluator.cc:164-174`), where one child
     /// passes through before empty children are dropped, and one non-empty
     /// child passes through after.
-    fn minkowski(&self, n: &Node) -> Result<Out, Unsupported> {
-        let (items, mut msgs) = self.items(n)?;
+    fn minkowski(&self, n: &Node, kids: Vec<Out>) -> Result<Out, Unsupported> {
+        let (items, mut msgs) = self.items(n, kids);
         let geom = match Self::dim(&items, &mut msgs) {
             2 => {
                 let children = self.collect_2d(&items, &mut msgs);
@@ -2104,8 +2240,8 @@ impl Ctx<'_> {
     /// (`GeometryEvaluator.cc:845-907`): union the 3D children, then slice
     /// at z = 0 or take the outline from above, and sanitize. With no 3D
     /// geometry a cut gives nothing and a projection an empty shape.
-    fn projection(&self, n: &Node, cut: bool) -> Result<Out, Unsupported> {
-        let (items, mut msgs) = self.items(n)?;
+    fn projection(&self, n: &Node, cut: bool, kids: Vec<Out>) -> Result<Out, Unsupported> {
+        let (items, mut msgs) = self.items(n, kids);
         let solid = self.apply_3d(n, &items, Op::Union, &mut msgs);
         let Some(solid) = solid else {
             let geom = (!cut).then(|| Geometry::Polygon2d(Arc::new(Polygon2d::default())));
