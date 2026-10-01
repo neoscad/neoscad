@@ -5,17 +5,22 @@
 # answers the page's `initialize` with real capabilities and a model with
 # a warning shows markers in the editor (the page counts them), and with
 # TYPE=1 typing in the editor previews the edited text again (the editor
-# bridge). CI's
+# bridge) and the side panels are driven from the keyboard: a customizer
+# edit runs the model again with the text unchanged, a check finds a known
+# problem and marks it in the view, a measurement reports the volume,
+# Export Again writes an STL beside the model, and rewriting a used file
+# on disk runs the model again (file watching). CI's
 # linux-app job runs it; docs/linux-app.md shows how to run it in Docker
 # from macOS.
 #
 #   linux/smoke.sh BIN [MODEL]
 #
 # Environment:
-#   SHOTS=DIR   also save screenshots (light.png, typed.png, dark.png;
-#               needs ImageMagick's `import`)
-#   TYPE=1      type into the editor and require a second preview (needs
-#               the editor bundle and xdotool)
+#   SHOTS=DIR   also save screenshots (light.png, typed.png, dark.png,
+#               and with TYPE=1 customizer-, check- and measure-light.png
+#               and -dark.png; needs ImageMagick's `import`)
+#   TYPE=1      type into the editor and require a second preview, and
+#               drive the panels (needs the editor bundle and xdotool)
 #
 # Needs Xvfb, dbus-run-session and a Vulkan or GL driver (mesa-vulkan-
 # drivers). The app is killed if it takes more than 2 GB of memory or
@@ -125,8 +130,97 @@ lsp_check() {
     sleep 1
 }
 
+# The side panels, from the keyboard, in colour scheme $1. The model has
+# customizer parameters, a plate thinner than check's 0.4 mm nozzle (a
+# known error) and a used file beside it, which is rewritten at the end.
+panels_check() {
+    local log=$work/panels-$1.log model=$work/plate.scad
+    cat >"$model" <<'EOF'
+use <extra.scad>
+/* [Plate] */
+// Add a rim around the plate
+rim = false;
+// The plate's thickness
+thickness = 0.2; // [0.2:0.1:3]
+size = 30;
+cube([size, size, thickness]);
+if (rim) translate([0, 0, thickness]) difference() {
+    cube([size, size, 2]);
+    translate([1, 1, -1]) cube([size - 2, size - 2, 4]);
+}
+extra();
+EOF
+    printf 'module extra() translate([40, 0, 0]) cube(4);\n' >"$work/extra.scad"
+    local before
+    before=$(md5sum <"$model")
+    ADW_DEBUG_COLOR_SCHEME=prefer-$1 dbus-run-session -- "$bin" "$model" >"$log" 2>&1 &
+    launcher=$!
+    wait_for "run 1 (Preview)" "$log" 300
+    wait_for "watch: 1 files in 1 directories" "$log" 30
+    # Alt+1: the customizer, its first parameter (the `rim` switch)
+    # focused; Space turns it on, and the model runs with rim = true
+    # while the text stays as it was.
+    xdotool key alt+1
+    wait_for "panels: customizer shown (focus true)" "$log" 30
+    xdotool key space
+    wait_for "customizer: rim = true" "$log" 30
+    wait_for "run 2 (Preview)" "$log" 120
+    wait_for "document: 1 customizer values, text unchanged" "$log" 30
+    if [ "$(md5sum <"$model")" != "$before" ]; then
+        echo "the customizer changed the file" >&2
+        return 1
+    fi
+    sleep 2
+    shot "customizer-$1"
+    # Alt+2: the check panel, its Check button focused; Enter checks, the
+    # first finding takes the focus and Enter marks it in the view.
+    xdotool key alt+2
+    wait_for "panels: check shown (focus true)" "$log" 30
+    xdotool key Return
+    wait_for "check: [1-9][0-9]* findings ([1-9][0-9]* errors" "$log" 180
+    sleep 1
+    xdotool key Return
+    wait_for "check: finding [0-9]* selected" "$log" 30
+    wait_for "overlay: [1-9][0-9]* markers, [1-9][0-9]* lines" "$log" 30
+    sleep 2
+    shot "check-$1"
+    # Alt+3: measure.
+    xdotool key alt+3
+    wait_for "panels: measure shown (focus true)" "$log" 30
+    xdotool key Return
+    wait_for "measure: Volume" "$log" 180
+    sleep 2
+    shot "measure-$1"
+    if [ "$1" = light ]; then
+        # Export Again (Ctrl+Shift+E): a 3D model's suggestion is binary
+        # STL, named after the model, beside it; Enter saves.
+        xdotool key ctrl+shift+e
+        sleep 3
+        xdotool key Return
+        wait_for "export: Exported plate.stl" "$log" 120
+        test -s "$work/plate.stl"
+    fi
+    # Another program saves the used file (a write to a temporary file
+    # renamed over it, as editors save): the model runs again.
+    local runs
+    runs=$(grep -c "run [0-9]* (Preview)" "$log")
+    printf 'module extra() translate([40, 0, 0]) sphere(4);\n' >"$work/extra.scad.tmp"
+    mv "$work/extra.scad.tmp" "$work/extra.scad"
+    wait_for "watch: .*extra.scad changed" "$log" 30
+    wait_for "run $((runs + 1)) (Preview)" "$log" 120
+    grep "customizer:\|document:\|panels:\|check:\|overlay:\|measure:\|export:\|watch:" "$log"
+    pkill -x "$name" || true
+    sleep 1
+}
+
 if [ -f "$NEOSCAD_EDITOR_DIR/editor.html" ]; then
     lsp_check
+fi
+if [ "${TYPE:-}" = 1 ]; then
+    panels_check light
+    if [ -n "${SHOTS:-}" ]; then
+        panels_check dark
+    fi
 fi
 launch light
 if [ -n "${SHOTS:-}" ]; then

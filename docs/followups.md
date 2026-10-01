@@ -1407,8 +1407,34 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   Wayland session or a real GPU, and never with the portal's file
   chooser: check fractional scaling (`GdkSurface::scale`), Wayland input
   and the dialogs on a GNOME desktop. The rest of its milestone 2 list
-  (panels, file watching, dmabuf view, the other exports, GSettings) is
-  in that document ("Next").
+  (dmabuf view, GSettings, packaging) is in that document ("Next").
+- Linux app panels (milestone 2, `docs/linux-app.md` "What milestone 2
+  adds"), what the macOS panels have and these do not yet:
+  - Measure: point-to-point distance and the model's volume, area and
+    size only. The section (axis, offset slider, outline) and the
+    distance between two parts (`Measurement::section`, `between`,
+    `client::section_range`) are in the core and drawn by the overlay
+    already; they need the panel's controls.
+  - Check: a printer preset or check's defaults; no custom numbers (nozzle,
+    walls, overhang, bed) and no "Auto" re-check after each render.
+    The choice is not kept between runs of the app (GSettings, "Next" 5).
+  - Export: no options dialog (3MF colour mode and material, the image
+    and snapshot sizes: the view image is the view's size, the snapshot
+    1024 × 1024). The core offers no AMF, so neither does the app.
+  - The document itself changing on disk (another editor saving it) is
+    not noticed: only the files its runs read are watched
+    (`Client::run_files` leaves the document out, since the app writes
+    it). A "reload?" banner, as GNOME Text Editor shows, is the fix.
+  - The parts toggle (`DocumentLoop::set_parts`) has no control yet;
+    only examples that need parts turn it on.
+  - linux/smoke.sh drives the customizer, check, measure and Export
+    Again from the keyboard, but not picking points (a click at a
+    position in the view) or parameter sets; both are unit-tested
+    (`linux_app::inspect`, `linux_app::customizer`).
+- `linux/Dockerfile` has no SVG loader for gdk-pixbuf (`librsvg2-common`,
+  a recommend that `--no-install-recommends` leaves out), so Adwaita's
+  symbolic icons draw as "missing image" in its screenshots; desktops,
+  CI's runner and the Flatpak runtime have it. Add it to the image.
 - The Flatpak (`linux/flatpak/`, `docs/linux-app.md` "Flatpak") builds
   on x86_64 in `flatpak.yml`, which is now blocking there and a release
   publish job. Its aarch64 build (`ubuntu-24.04-arm`, native) is

@@ -6,9 +6,10 @@ around the same Rust core, following the GNOME HIG. It is Rust through
 and through, so it calls `crates/client`, `session` and `render` directly;
 there is no UniFFI layer as there is for Swift (`crates/ffi`).
 
-This page covers milestone 1 and the first two items of milestone 2 (the
-language server and the Flatpak): what the app does, how it is put
-together, how to build, package and run it, and what comes next.
+This page covers milestone 1 and milestone 2 so far (the language
+server, the Flatpak, the side panels, file watching and the rest of File
+> Export): what the app does, how it is put together, how to build,
+package and run it, and what comes next.
 
 ## What milestone 1 does
 
@@ -43,7 +44,7 @@ together, how to build, package and run it, and what comes next.
 - **Export**: binary STL (detached from the document's runs, so typing
   does not cancel it, with the core's atomic write) and a PNG of the view
   (without the grid, as the macOS app's). Titles and extensions come from
-  `client::export_formats()`.
+  `client::export_formats()`. Milestone 2 adds the other formats.
 - **Style**: follows the system's light or dark preference through
   `AdwStyleManager`, or forced from the menu's Style submenu. The editor
   follows through `prefers-color-scheme`, and the view switches between
@@ -51,8 +52,10 @@ together, how to build, package and run it, and what comes next.
   model again in the new colours.
 - **Shortcuts**: a `GtkShortcutController` on the window, in the capture
   phase so the web view does not take them first: Ctrl+N, Ctrl+O, Ctrl+S,
-  Ctrl+Shift+S, Ctrl+Shift+E (Export STL), Ctrl+W, Ctrl+Q, F5, F6,
-  Ctrl+Shift+V (View All). Editing keys are left to CodeMirror.
+  Ctrl+Shift+S, Ctrl+Shift+E (Export STL; Export Again since milestone
+  2), Ctrl+W, Ctrl+Q, F5, F6, Ctrl+Shift+V (View All), and since
+  milestone 2 F9 and Alt+1 to Alt+3 (the side panels; CodeMirror binds no
+  Alt+digit). Editing keys are left to CodeMirror.
 
 ## What milestone 2 adds
 
@@ -71,6 +74,53 @@ together, how to build, package and run it, and what comes next.
   inside library code too.
 - **Flatpak**: a manifest on the GNOME 51 runtime, with the desktop file,
   AppStream metadata, icons and the `.scad` file type ("Flatpak" below).
+- **Side panels**: an `AdwOverlaySplitView` at the window's end, shown
+  and hidden by the header bar's sidebar button or F9, over a stack of
+  three panels; Alt+1, Alt+2 and Alt+3 open one and put the keyboard in
+  it. The panels ask the window for what they need and are shown its
+  state; the logic is in the library (`customizer.rs`, `inspect.rs`).
+  - **Customizer**: one `AdwPreferencesGroup` per customizer group, a
+    row per parameter with OpenSCAD's control for it (a switch row, a
+    slider with a number field, a spin row, an entry row, a field per
+    vector element, a combo row). As in the macOS app, an edit never
+    changes the text: the value goes through `client::edit_parameter`
+    (snapped to a slider's step, clamped, cut to length, dropped when it
+    equals the text's) into the `DocumentLoop`, and the document runs
+    again with the edited values as `-D`-style assignments. Each edited
+    row has a button back to the text's value; Reset drops them all.
+    Parameter sets are OpenSCAD's JSON file beside a saved model: the
+    dropdown applies one as `-p file -P name` does, Save writes the
+    current values as a set (an `AdwAlertDialog` asks its name).
+  - **Check**: `client::check` on the text as it is, with the customizer's
+    values, for a printer preset or check's defaults. The summary line
+    (`client::check_summary`) over the findings, each with its severity
+    icon, message, code and fix. Activating a finding marks it in the
+    view (its numbered ring and box, `client::view_overlay`) and turns
+    the view to it; activating it again clears the mark.
+  - **Measure**: `client::measure` (volume, area, size), then Pick Points:
+    clicks in the view (a click, not a drag: GTK denies the click gesture
+    once the pointer moves) pick points on the solid
+    (`Measurement::pick` along `Viewport::ray_at`), and two give their
+    distance, drawn in the view.
+  Check and measure run detached from the document loop: typing does not
+  cancel them, and a newer one of the same kind cancels the older.
+- **File watching**: the files the last run read that another program
+  could change (`Client::run_files`: includes, used files, imports and
+  fonts on disk; not the document, and not the bundled MCAD) are watched
+  through a `GFileMonitor` on each of their directories, as the macOS
+  app watches with FSEvents: editors save by renaming a new file over
+  the old one, which a monitor of the file itself can lose. A burst of
+  events (100 ms) becomes one `DocumentLoop::files_changed`: a preview
+  after the pause, or a render at once if the last run was a render.
+- **Export**: File > Export lists every entry of `client::export_formats()`
+  (binary and ASCII STL, 3MF, OBJ, OFF, SVG, DXF, PDF, a PNG of the view,
+  the snapshot sheet); Export Again (Ctrl+Shift+E) uses the last format,
+  or SVG for a 2D model and STL for a 3D one
+  (`client::suggest_export_format`). The save dialog starts beside the
+  model. An export runs detached, with the customizer's values, under a
+  toast that names its stage (`session::Progress`) and has a Cancel
+  button; success is a toast, a failure an alert with the core's reason
+  (`client::export_failure_reason`), never silence.
 
 ## How it is put together
 
@@ -84,11 +134,15 @@ logic that is not GTK glue, and builds and is tested on every platform:
 | `host.rs` | The session configuration (disk plus MCAD in memory, library path, fonts, clock, seed, limits) and the GPU |
 | `language.rs` | The editor's language server on a worker thread, where a definition opens (document or library), messages described for the log |
 | `document.rs` | A window's document: path, text, edited state (undo-aware), titles |
-| `run.rs` | A document run and an export, off the main thread |
+| `run.rs` | A document run (with the files it read) and the exports (every format, the snapshot sheet, progress and cancel), off the main thread |
 | `view.rs` | The viewport drawing into a texture, device pixel sizes, drag mapping |
+| `customizer.rs` | The customizer's values, edits, field ranges and parameter sets on disk |
+| `inspect.rs` | Check and measure requests, the overlay as the viewport's annotations, picked points, the panels' text |
+| `watch.rs` | Which files a window watches, by directory |
 
 The window (`src/app/`) is compiled only with the `gtk` feature;
-`app/library.rs` is the read-only library viewer.
+`app/library.rs` is the read-only library viewer, `app/customizer.rs` and
+`app/inspect.rs` the side panels' widgets.
 
 ### The editor bridge
 
@@ -244,17 +298,31 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
 ### Tests
 
 - `cargo test -p neoscad-linux-app` (any platform): the bridge, the
-  resources, titles and edited state, runs and exports without a GPU,
-  the language server (real capabilities, answers in order, nothing after
+  resources, titles and edited state, runs and exports without a GPU
+  (every geometry format, a 2D model to a 3D format saying why, a
+  cancelled export leaving the old file, the stages reported), the
+  language server (real capabilities, answers in order, nothing after
   stop, a run's diagnostics published as markers for the client's
-  version) and where a definition opens.
+  version), where a definition opens, the customizer (each control,
+  edits snapped, clamped, cut and dropped, sets saved and applied), check
+  (a thin plate's error, its marker and box) and measure (two picks ten
+  millimetres apart), and the files a run reads and watches.
 - `linux/smoke.sh BIN [MODEL]` (Linux, Xvfb): with the editor bundle, it
   first opens a model with a warning and waits for `initialize`'s real
   capabilities and for the page to count its markers, and with `TYPE=1`
   presses F12 on an MCAD module and waits for the library viewer. Then
   it opens MODEL and waits for its preview; with `TYPE=1` it types into
   the editor and waits for the second preview; with `SHOTS=DIR` it saves
-  light and dark screenshots. It kills the app above 2 GB of memory.
+  light and dark screenshots. With `TYPE=1` it also opens a model with
+  customizer parameters, a known check error and a used file, and from
+  the keyboard: Alt+1 and Space turn a switch on (a new run, the file
+  unchanged), Alt+2 and Enter check (an error found) and Enter marks the
+  first finding (the overlay's box), Alt+3 and Enter measure,
+  Ctrl+Shift+E and Enter export an STL beside the model; then it renames
+  a new version of the used file over it and waits for the run that
+  follows. With `SHOTS` that runs in both styles and saves
+  `customizer-`, `check-` and `measure-light.png` and `-dark.png`. It
+  kills the app above 2 GB of memory.
 - CI's `linux-app` job (ubuntu-24.04) runs clippy and the tests with the
   `gtk` feature, builds the editor bundle and runs the smoke test with
   typing.
@@ -392,16 +460,13 @@ to revisit, not a step to automate.
 
 Milestone 2, in order:
 
-1. **Customizer, check and measure panels**: `AdwPreferencesGroup`-style
-   side panels over `client`'s parameter groups, `edit_parameter`,
-   parameter sets, `check` and `measure`, with the view's overlay
-   (`client::view_overlay`).
-2. **File watching**: re-run when an include or import changes on disk
-   (`GFileMonitor` over the run's files, `DocumentLoop::files_changed`).
+1. Done: the customizer, check and measure panels (what they still lack
+   against the macOS app is in docs/followups.md, "Linux").
+2. Done: file watching.
 3. **Zero-copy view**: export the frame as a dmabuf (Vulkan external
    memory) into a `GdkDmabufTexture`, falling back to the copy.
-4. **The rest of File > Export** (3MF, OBJ, OFF, SVG, DXF, PDF, the
-   snapshot sheet), with a progress toast and cancellation.
+4. Done: the rest of File > Export, with a progress toast and
+   cancellation (no options dialog yet: docs/followups.md, "Linux").
 5. **Settings**: GSettings for the style, the editor's font size, window
    size and pane positions.
 6. **Packaging**: Flathub (above; the release already attaches

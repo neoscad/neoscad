@@ -6,7 +6,8 @@
 //! The window's loop (`client::DocumentLoop`) decides when to run and
 //! whether a result is still current; this module only runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use client::{Client, ConsoleLine, CoreError, RenderMode, RenderResult, RunPlan};
@@ -31,6 +32,9 @@ pub struct RunOutput {
     /// GPU or when the run built nothing to show (a failed evaluation).
     pub model: Option<Arc<render::viewport::Model>>,
     pub file_view: Option<FileView>,
+    /// The files the run read that another program could change, on this
+    /// disk: what the window watches (`crate::watch`).
+    pub files: Vec<PathBuf>,
 }
 
 /// Run `plan` on `client`: evaluate and build the document as its request
@@ -94,6 +98,7 @@ pub fn run_document(
         a.vpf.then_some(c.vpf),
     ));
     let render = client::render_result(&r, scheme);
+    let files = crate::watch::on_disk(client.run_files(&r, &doc));
     Ok(RunOutput {
         generation: plan.generation,
         mode,
@@ -102,6 +107,7 @@ pub fn run_document(
         render,
         model,
         file_view,
+        files,
     })
 }
 
@@ -144,16 +150,20 @@ pub fn write_atomic(target: &Path, data: &[u8]) -> std::io::Result<u64> {
 
 /// Export the document at `path` to `output` in the core's format `id`
 /// (`binstl`, `3mf`, ...), detached from the document's runs (typing does
-/// not cancel it) and with the customizer's values.
+/// not cancel it) and with the customizer's values. `interrupt` stops it
+/// (the result is then `CoreError::Cancelled`, and a file already at
+/// `output` is left as it was); `progress` hears each stage as it starts.
 pub fn export_file(
     client: &Client,
     path: &str,
     output: &str,
     id: &str,
     options: &client::RunOptions,
+    interrupt: Option<Arc<AtomicBool>>,
+    progress: Option<session::Progress>,
 ) -> Result<client::ExportResult, CoreError> {
     let format = client::export_format(Some(id), output)?;
-    let run = client.detached(path, options, None, None)?;
+    let run = client.detached(path, options, interrupt, progress)?;
     let mut sink = AtomicFile::default();
     let export_options = client::ExportOptions {
         format: Some(id.to_string()),
@@ -169,6 +179,72 @@ pub fn export_file(
     )?;
     r.bytes = sink.bytes;
     Ok(r)
+}
+
+/// A contact sheet of standard views (`neoscad snapshot`) of the document,
+/// `width` by `height` pixels, written to `output`, detached like
+/// [`export_file`]. The bytes written, or why nothing was: the model's
+/// first error, or the core's reason (no GPU, a cancel).
+pub fn snapshot_file(
+    client: &Client,
+    path: &str,
+    output: &Path,
+    (width, height): (u32, u32),
+    options: &client::RunOptions,
+    interrupt: Option<Arc<AtomicBool>>,
+) -> Result<u64, CoreError> {
+    use session::snapshot::{SnapshotError, SnapshotRequest};
+    let run = client.detached(path, options, interrupt, None)?;
+    let mut req = SnapshotRequest::new(run, output.to_string_lossy());
+    req.size = (width, height);
+    let s = client.session.snapshot(&req).map_err(|e| match e {
+        SnapshotError::Cancelled => CoreError::Cancelled,
+        SnapshotError::Failed(message) => CoreError::Failed { message },
+    })?;
+    let png = match (s.exit_code, s.png) {
+        (0, Some(png)) => png,
+        _ => {
+            return Err(CoreError::Failed {
+                message: client::first_error(&client::console(&s.log))
+                    .unwrap_or_else(|| "The model did not render.".into()),
+            });
+        }
+    };
+    write_atomic(output, &png).map_err(|e| CoreError::Failed {
+        message: format!("Can't write to '{}': {e}", output.display()),
+    })
+}
+
+/// An export's stage as its progress toast says it (the macOS app's
+/// export sheet says the same).
+pub fn stage_label(stage: session::Stage) -> &'static str {
+    match stage {
+        session::Stage::Parse => "Reading the files",
+        session::Stage::Evaluate => "Evaluating",
+        session::Stage::Geometry => "Building the geometry and writing",
+        session::Stage::Draw => "Drawing",
+    }
+}
+
+/// The message for a finished export of `output`: what was written, or
+/// why nothing was (the core's reason, never silence). `Ok` for a toast,
+/// `Err` for an alert.
+pub fn export_message(
+    output: &Path,
+    r: &Result<client::ExportResult, CoreError>,
+) -> Option<Result<String, String>> {
+    let name = output.file_name().map_or_else(
+        || output.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    Some(match r {
+        Err(CoreError::Cancelled) => return None,
+        Err(e) => Err(e.to_string()),
+        Ok(r) => match client::export_failure_reason(r) {
+            None => Ok(format!("Exported {name} ({} bytes)", r.bytes)),
+            Some(why) => Err(why),
+        },
+    })
 }
 
 #[cfg(test)]
@@ -260,6 +336,8 @@ mod tests {
             stl.to_str().unwrap(),
             "binstl",
             &client::RunOptions::default(),
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(r.exit_code, 0, "{}", r.console);
@@ -267,6 +345,128 @@ mod tests {
         assert_eq!(r.bytes, 84 + 12 * 50);
         assert_eq!(std::fs::metadata(&stl).unwrap().len(), r.bytes);
         assert!(!dir.join(".m.stl.neoscad-export").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Every geometry format File > Export offers writes a file of a model
+    /// of its dimension, reporting its stages; the wrong dimension fails
+    /// with the core's reason; a cancelled export leaves the old file.
+    #[test]
+    fn every_export_format_writes_or_says_why_not() {
+        let c = client();
+        let dir =
+            std::env::temp_dir().join(format!("neoscad-linux-app-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let solid = dir.join("solid.scad");
+        let flat = dir.join("flat.scad");
+        let (solid, flat) = (solid.to_str().unwrap(), flat.to_str().unwrap());
+        c.open(solid, Some("cube(3);".into())).unwrap();
+        c.open(flat, Some("square(3);".into())).unwrap();
+        let geometry: Vec<_> = client::export_formats()
+            .into_iter()
+            .filter(|f| f.kind == client::ExportKind::Geometry)
+            .collect();
+        assert!(geometry.len() >= 8, "{geometry:?}");
+        for f in &geometry {
+            let doc = if f.dimension == Some(2) { flat } else { solid };
+            let out = dir.join(format!("out-{}.{}", f.id, f.extension));
+            let stages: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+            let s = stages.clone();
+            let progress: session::Progress = Arc::new(move |st| {
+                s.lock().unwrap().push(stage_label(st));
+            });
+            let r = export_file(
+                &c,
+                doc,
+                out.to_str().unwrap(),
+                &f.id,
+                &client::RunOptions::default(),
+                None,
+                Some(progress),
+            );
+            let message = export_message(&out, &r).unwrap();
+            assert!(message.is_ok(), "{}: {message:?}", f.id);
+            assert!(std::fs::metadata(&out).unwrap().len() > 0, "{}", f.id);
+            assert!(
+                stages.lock().unwrap().contains(&"Evaluating"),
+                "{}: {:?}",
+                f.id,
+                stages.lock().unwrap()
+            );
+        }
+        // A square to a 3D format: the reason, not silence.
+        let out = dir.join("square.3mf");
+        let r = export_file(
+            &c,
+            flat,
+            out.to_str().unwrap(),
+            "3mf",
+            &client::RunOptions::default(),
+            None,
+            None,
+        );
+        let why = export_message(&out, &r).unwrap().unwrap_err();
+        assert!(why.contains("3D"), "{why}");
+        // Cancelled before it starts: nothing is reported and the file
+        // from before is still there.
+        let out = dir.join("out-binstl.stl");
+        let before = std::fs::read(&out).unwrap();
+        let r = export_file(
+            &c,
+            solid,
+            out.to_str().unwrap(),
+            "binstl",
+            &client::RunOptions::default(),
+            Some(Arc::new(AtomicBool::new(true))),
+            None,
+        );
+        assert!(export_message(&out, &r).is_none(), "{r:?}");
+        assert_eq!(std::fs::read(&out).unwrap(), before);
+        // Without a GPU the snapshot says why it made nothing.
+        let png = dir.join("sheet.png");
+        let r = snapshot_file(
+            &c,
+            solid,
+            &png,
+            (256, 256),
+            &client::RunOptions::default(),
+            None,
+        );
+        assert!(r.is_err() && !png.exists(), "{r:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A run reports the included files on disk, which the window
+    /// watches, and not the document itself.
+    #[test]
+    fn a_run_names_its_included_files() {
+        let c = client();
+        let dir =
+            std::env::temp_dir().join(format!("neoscad-linux-app-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let inc = dir.join("inc.scad");
+        std::fs::write(&inc, "module part() cube(1);").unwrap();
+        let doc = dir.join("main.scad");
+        let path = doc.to_str().unwrap();
+        c.open(path, Some("include <inc.scad>\npart();".into()))
+            .unwrap();
+        let mut l = DocumentLoop::new(0);
+        let plan = l.begin_run(RenderMode::Preview, path).unwrap();
+        let out = run_document(
+            &c,
+            &plan,
+            camera(),
+            &render::ColorScheme::cornfield(),
+            None,
+            None,
+        )
+        .unwrap();
+        // The core names files by their real path (macOS's temporary
+        // folder is a symlink into /private).
+        assert_eq!(out.files, [inc.canonicalize().unwrap()]);
+        // The include changes on disk: the loop schedules a preview.
+        assert_eq!(l.files_changed(10), None);
+        assert!(l.next_due_ms().is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -3,7 +3,9 @@
 //! About, Quit) and their shortcuts.
 
 mod console;
+mod customizer;
 mod editor;
+mod inspect;
 mod library;
 mod viewport;
 mod window;
@@ -456,17 +458,22 @@ pub fn main_menu() -> gio::Menu {
     save.append_item(&item("Save As…", "win.save-as", Some("<Control><Shift>s")));
     menu.append_section(None, &save);
 
-    // File > Export's two formats this milestone offers, titled from the
-    // core's table (`client::export_formats`).
+    // File > Export: every format of the core's table
+    // (`client::export_formats`), and Export Again in the last one (or
+    // one that fits the model's dimension).
     let export = gio::Menu::new();
-    for (id, action, accel) in [
-        ("binstl", "win.export-stl", Some("<Control><Shift>e")),
-        ("view-image", "win.export-png", None),
-    ] {
-        if let Some(f) = client::export_format_info(id) {
-            export.append_item(&item(&format!("Export {}…", f.title), action, accel));
-        }
+    let formats = gio::Menu::new();
+    for f in client::export_formats() {
+        let i = gio::MenuItem::new(Some(&format!("{}…", f.title)), None);
+        i.set_action_and_target_value(Some("win.export"), Some(&f.id.to_variant()));
+        formats.append_item(&i);
     }
+    export.append_submenu(Some("Export"), &formats);
+    export.append_item(&item(
+        "Export Again…",
+        "win.export-again",
+        Some("<Control><Shift>e"),
+    ));
     menu.append_section(None, &export);
 
     let design = gio::Menu::new();
@@ -475,6 +482,15 @@ pub fn main_menu() -> gio::Menu {
     design.append_item(&item("View All", "win.view-all", Some("<Control><Shift>v")));
     design.append_item(&item("Reset View", "win.reset-view", None));
     menu.append_section(None, &design);
+
+    // The side panels.
+    let panels = gio::Menu::new();
+    panels.append_item(&item("Show Panels", "win.toggle-panels", Some("F9")));
+    panels.append_item(&item("Customizer", "win.show-customizer", Some("<Alt>1")));
+    panels.append_item(&item("Check", "win.show-check", Some("<Alt>2")));
+    panels.append_item(&item("Measure", "win.show-measure", Some("<Alt>3")));
+    panels.append_item(&item("Reset Parameters", "win.reset-parameters", None));
+    menu.append_section(None, &panels);
 
     let style = gio::Menu::new();
     for (label, v) in [
@@ -507,11 +523,17 @@ pub fn shortcuts() -> gtk::ShortcutController {
         ("<Control>q", "app.quit"),
         ("<Control>s", "win.save"),
         ("<Control><Shift>s", "win.save-as"),
-        ("<Control><Shift>e", "win.export-stl"),
+        ("<Control><Shift>e", "win.export-again"),
         ("<Control>w", "window.close"),
         ("F5", "win.preview"),
         ("F6", "win.render"),
         ("<Control><Shift>v", "win.view-all"),
+        // The side panels. Alt+digit, which CodeMirror leaves alone (this
+        // controller is in the capture phase, ahead of the editor).
+        ("F9", "win.toggle-panels"),
+        ("<Alt>1", "win.show-customizer"),
+        ("<Alt>2", "win.show-check"),
+        ("<Alt>3", "win.show-measure"),
     ] {
         c.add_shortcut(gtk::Shortcut::new(
             gtk::ShortcutTrigger::parse_string(trigger),

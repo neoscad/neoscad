@@ -5,10 +5,18 @@
 //!
 //! Each window's editor has a language server of its own
 //! (`linux_app::language`), whose markers come from the window's runs.
+//!
+//! The side panels (customizer, check, measure) share an
+//! `AdwOverlaySplitView` at the window's end, toggled from the header bar
+//! (F9) or opened on one panel (Alt+1, Alt+2, Alt+3). The files the last
+//! run read are watched (`GFileMonitor` per directory, `linux_app::watch`)
+//! and a change runs the document again.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use adw::prelude::*;
@@ -16,16 +24,23 @@ use gtk::{gio, glib};
 use serde_json::{Value, json};
 use webkit6::prelude::WebViewExt;
 
-use client::{CoreError, DocumentLoop, RenderMode, SourceRange};
+use client::{
+    CheckReport, CoreError, DocumentLoop, ExportFormatInfo, ExportKind, Measurement, OverlayState,
+    ParameterGroup, PrinterSettings, RenderMode, RunOptions, SourceRange,
+};
 use linux_app::bridge::{self, ChangeOutcome, EditorBridge, Incoming};
 use linux_app::document::{self, Document};
 use linux_app::language::{self, Language};
 use linux_app::run::{self, FileView};
 use linux_app::view::ViewCanvas;
+use linux_app::watch::WatchSet;
+use linux_app::{customizer, inspect};
 
 use super::Shared;
 use super::console::Console;
+use super::customizer::{self as customizer_panel, Customizer};
 use super::editor;
+use super::inspect::{CheckPanel, MeasurePanel, Request as InspectRequest};
 use super::viewport::ViewWidget;
 
 /// The colour scheme pair of the macOS app (`ViewportController.swift`):
@@ -41,6 +56,12 @@ pub struct Window {
     view: ViewWidget,
     console: Console,
     spinner: gtk::Spinner,
+    /// The side panels and which one is shown.
+    split: adw::OverlaySplitView,
+    panels: gtk::Stack,
+    customizer: Rc<Customizer>,
+    check: Rc<CheckPanel>,
+    measure: Rc<MeasurePanel>,
     shared: Rc<Shared>,
     st: RefCell<State>,
 }
@@ -65,6 +86,30 @@ struct State {
     /// A position to show once the editor has the text (a definition
     /// this window was opened for).
     reveal: Option<(u64, u64)>,
+
+    /// The customizer's parameters of the latest run's text, the sets
+    /// beside the document and the set shown (until a value is edited).
+    groups: Vec<ParameterGroup>,
+    set_names: Vec<String>,
+    shown_set: Option<String>,
+    /// What the check and measure panels draw in the view.
+    overlay: OverlayState,
+    printer: PrinterSettings,
+    check_stop: Option<Arc<AtomicBool>>,
+    measurement: Option<Measurement>,
+    measure_stop: Option<Arc<AtomicBool>>,
+    picking: bool,
+    /// The files the last run read, their directories' monitors, and the
+    /// pause that gathers a burst of changes (an editor's save is several
+    /// events) into one run.
+    watch: WatchSet,
+    monitors: Vec<gio::FileMonitor>,
+    watch_timer: Option<glib::SourceId>,
+    /// The export running, File > Export's last format, and the last
+    /// run's dimension (Export Again suggests a format that fits it).
+    export_stop: Option<Arc<AtomicBool>>,
+    last_export: String,
+    last_dimensions: Option<u32>,
 }
 
 /// A window action's handler.
@@ -105,6 +150,11 @@ impl Window {
                 .tooltip_text("Main menu")
                 .build(),
         );
+        let panel_toggle = gtk::ToggleButton::builder()
+            .icon_name("sidebar-show-right-symbolic")
+            .tooltip_text("Customizer, check and measure (F9)")
+            .build();
+        header.pack_end(&panel_toggle);
         let render = gtk::Button::builder()
             .label("Render")
             .action_name("win.render")
@@ -165,8 +215,23 @@ impl Window {
                 .shrink_end_child(false)
                 .position(560)
                 .build();
+            let (side, panels, customizer, check, measure) = side_panels(me);
+            let split_view = adw::OverlaySplitView::builder()
+                .content(&split)
+                .sidebar(&side)
+                .sidebar_position(gtk::PackType::End)
+                .show_sidebar(false)
+                .min_sidebar_width(300.0)
+                .max_sidebar_width(420.0)
+                .sidebar_width_fraction(0.3)
+                .build();
+            split_view
+                .bind_property("show-sidebar", &panel_toggle, "active")
+                .bidirectional()
+                .sync_create()
+                .build();
             let toasts = adw::ToastOverlay::new();
-            toasts.set_child(Some(&split));
+            toasts.set_child(Some(&split_view));
             let toolbar = adw::ToolbarView::new();
             toolbar.add_top_bar(&header);
             toolbar.set_content(Some(&toasts));
@@ -189,6 +254,11 @@ impl Window {
                 view,
                 console,
                 spinner,
+                split: split_view,
+                panels,
+                customizer,
+                check,
+                measure,
                 shared: shared2,
                 st: RefCell::new(State {
                     doc,
@@ -198,6 +268,21 @@ impl Window {
                     file_view: None,
                     language,
                     reveal: None,
+                    groups: Vec::new(),
+                    set_names: Vec::new(),
+                    shown_set: None,
+                    overlay: OverlayState::default(),
+                    printer: PrinterSettings::default(),
+                    check_stop: None,
+                    measurement: None,
+                    measure_stop: None,
+                    picking: false,
+                    watch: WatchSet::default(),
+                    monitors: Vec::new(),
+                    watch_timer: None,
+                    export_stop: None,
+                    last_export: "binstl".into(),
+                    last_dimensions: None,
                 }),
             }
         })
@@ -205,15 +290,25 @@ impl Window {
     }
 
     fn setup(self: Rc<Self>) -> Rc<Self> {
-        let actions: [(&str, Action); 8] = [
+        let actions: [(&str, Action); 14] = [
             ("save", |w| w.save(None)),
             ("save-as", |w| w.save_as(None)),
-            ("export-stl", Window::export_stl),
-            ("export-png", Window::export_png),
+            ("export-again", Window::export_again),
             ("preview", |w| w.run(RenderMode::Preview)),
             ("render", |w| w.run(RenderMode::Render)),
             ("view-all", |w| w.camera(|v| v.view_all())),
             ("reset-view", |w| w.camera(|v| v.reset_view())),
+            ("toggle-panels", |w| {
+                w.split.set_show_sidebar(!w.split.shows_sidebar());
+            }),
+            ("show-customizer", |w| w.show_panel("customizer")),
+            ("show-check", |w| w.show_panel("check")),
+            ("show-measure", |w| w.show_panel("measure")),
+            ("check", |w| w.run_check()),
+            ("measure", |w| w.run_measure()),
+            ("reset-parameters", |w| {
+                w.customize(customizer_panel::Request::Reset);
+            }),
         ];
         for (name, f) in actions {
             let a = gio::SimpleAction::new(name, None);
@@ -225,6 +320,16 @@ impl Window {
             });
             self.win.add_action(&a);
         }
+        // File > Export's formats, by the core's id.
+        let export = gio::SimpleAction::new("export", Some(glib::VariantTy::STRING));
+        let me = Rc::downgrade(&self);
+        export.connect_activate(move |_, p| {
+            if let (Some(w), Some(id)) = (me.upgrade(), p.and_then(|p| p.str().map(str::to_string)))
+            {
+                w.export(&id);
+            }
+        });
+        self.win.add_action(&export);
         let (me, shared) = (Rc::downgrade(&self), self.shared.clone());
         self.win.connect_destroy(move |_| shared.forget(&me));
         // The web content process ended (a crash, or the system reclaimed
@@ -325,8 +430,18 @@ impl Window {
             let path = st.doc.core_path();
             let old = st.lp.set_path(&path);
             st.lp.text_replaced();
+            // The panels described the old document: its edited values,
+            // findings, solids and picks mean nothing for this one.
+            st.lp.parameters_read(&[]);
+            st.groups.clear();
+            st.set_names.clear();
+            st.shown_set = None;
+            st.overlay = OverlayState::default();
+            st.measurement = None;
             old
         };
+        self.show_parameters();
+        self.update_overlay();
         if let Some(old) = old {
             let _ = self.shared.client.close(&old);
         }
@@ -699,12 +814,542 @@ impl Window {
         self.view.queue();
         self.console.set_summary(&out.summary);
         self.console.set_lines(&out.console, &path);
+        {
+            let mut st = self.st.borrow_mut();
+            st.last_dimensions = out
+                .render
+                .geometry
+                .as_ref()
+                .map(|g| u32::from(g.dimensions));
+            // For the log (linux/smoke.sh): a customizer edit runs the
+            // document with its values and leaves the text alone.
+            glib::g_debug!(
+                "neoscad",
+                "document: {} customizer values, text {}",
+                st.lp.overrides().len(),
+                if st.doc.is_dirty() {
+                    "edited"
+                } else {
+                    "unchanged"
+                }
+            );
+        }
+        self.watch_files(out.files);
+        self.refresh_parameters();
     }
 
     fn camera(&self, f: impl FnOnce(&mut render::viewport::Viewport)) {
         if let Some(c) = self.view.canvas.borrow_mut().as_mut() {
             f(&mut c.viewport);
         }
+    }
+
+    // --- The side panels ----------------------------------------------------
+
+    /// Show the side panel `name` and put the keyboard in it: its first
+    /// control (the customizer's first parameter, the check's and the
+    /// measure's button). Once the panel is on screen: a widget that is
+    /// not yet mapped does not take the focus.
+    fn show_panel(self: &Rc<Self>, name: &str) {
+        self.split.set_show_sidebar(true);
+        self.panels.set_visible_child_name(name);
+        let (me, name) = (Rc::downgrade(self), name.to_string());
+        glib::idle_add_local_once(move || {
+            let Some(w) = me.upgrade() else { return };
+            let focused = match name.as_str() {
+                "customizer" => w.customizer.focus_first(),
+                "check" => w.check.focus_run(),
+                _ => w.measure.focus_run(),
+            };
+            glib::g_debug!("neoscad", "panels: {name} shown (focus {focused})");
+        });
+    }
+
+    /// What a detached request (check, measure, export) runs with: the
+    /// customizer's values and the parts toggle, as the document's runs.
+    fn run_options(&self, st: &State) -> RunOptions {
+        RunOptions {
+            overrides: st.lp.overrides(),
+            parts: st.lp.parts(),
+            enable: Vec::new(),
+        }
+    }
+
+    /// Set (or with `None` drop) one edited value, and run after the
+    /// pause if it changed. `value` is `None` for a parameter the text no
+    /// longer has.
+    fn set_parameter(self: &Rc<Self>, name: &str, value: Option<Option<client::ParameterValue>>) {
+        let Some(v) = value else { return };
+        let now = self.shared.now_ms();
+        let changed = {
+            let mut st = self.st.borrow_mut();
+            let changed = st.lp.set_parameter(name, v.clone(), now);
+            if changed {
+                glib::g_debug!("neoscad", "{}", customizer::describe_edit(name, v.as_ref()));
+                st.shown_set = None;
+            }
+            changed
+        };
+        if changed {
+            self.arm_timer();
+        }
+    }
+
+    /// A customizer control's request.
+    fn customize(self: &Rc<Self>, r: customizer_panel::Request) {
+        use customizer_panel::Request as R;
+        match r {
+            R::Edit(name, edit) => {
+                let value = {
+                    let st = self.st.borrow();
+                    customizer::apply_edit(&st.groups, &st.lp.overrides(), &name, edit)
+                };
+                self.set_parameter(&name, value);
+            }
+            R::Revert(name) => self.set_parameter(&name, Some(None)),
+            R::Reset => {
+                let now = self.shared.now_ms();
+                let changed = {
+                    let mut st = self.st.borrow_mut();
+                    st.shown_set = None;
+                    st.lp.reset_parameters(now)
+                };
+                if changed {
+                    glib::g_debug!("neoscad", "customizer: every value back to the text's");
+                    self.arm_timer();
+                }
+            }
+            R::ApplySet(name) => self.apply_set(name),
+            R::SaveSet => self.save_set(),
+        }
+        self.show_parameters();
+    }
+
+    /// Put the customizer in step with the window's state.
+    fn show_parameters(&self) {
+        let st = self.st.borrow();
+        let overrides = st.lp.overrides();
+        self.customizer.show(&st.groups, &overrides);
+        self.customizer.show_sets(
+            st.doc.file().is_some(),
+            &st.set_names,
+            st.shown_set.as_deref(),
+            !st.groups.is_empty(),
+        );
+    }
+
+    /// Read the parameters of the text the last run read (off the main
+    /// thread: a long file takes a moment to parse), dropping edited
+    /// values of parameters that are gone, and the sets beside the file.
+    fn refresh_parameters(self: &Rc<Self>) {
+        let client = self.shared.client.clone();
+        let path = self.core_path();
+        let me = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let p = path.clone();
+            let r = gio::spawn_blocking(move || client.parameters(&p)).await;
+            let (Some(w), Ok(Ok(groups))) = (me.upgrade(), r) else {
+                return;
+            };
+            let file = {
+                let mut st = w.st.borrow_mut();
+                if st.doc.core_path() != path {
+                    return; // another document since
+                }
+                st.lp.parameters_read(&groups);
+                st.groups = groups;
+                st.doc.file().map(Path::to_path_buf)
+            };
+            let names =
+                customizer::set_names(&w.shared.client, file.as_deref()).unwrap_or_else(|e| {
+                    glib::g_warning!("neoscad", "parameter sets: {e}");
+                    Vec::new()
+                });
+            w.st.borrow_mut().set_names = names;
+            w.show_parameters();
+        });
+    }
+
+    /// Apply the parameter set `name` (OpenSCAD's `-p file -P name`).
+    fn apply_set(self: &Rc<Self>, name: String) {
+        let Some(file) = self.file() else { return };
+        let path = match self.sync_core() {
+            Ok(p) => p,
+            Err(e) => return self.toast(&e.to_string()),
+        };
+        match customizer::apply_set(&self.shared.client, &path, &file, &name) {
+            Ok(values) => {
+                let now = self.shared.now_ms();
+                {
+                    let mut st = self.st.borrow_mut();
+                    let groups = st.groups.clone();
+                    st.lp.parameter_set_applied(&name, values, &groups, now);
+                    glib::g_debug!("neoscad", "customizer: set {name} applied");
+                    st.shown_set = Some(name);
+                }
+                self.arm_timer();
+            }
+            Err(e) => self.toast(&e),
+        }
+    }
+
+    /// Ask for a name and save the edited values as that set.
+    fn save_set(self: &Rc<Self>) {
+        let Some(file) = self.file() else { return };
+        let json = customizer::sets_file(&file);
+        let suggested = {
+            let st = self.st.borrow();
+            customizer::suggested_set_name(st.shown_set.as_deref(), &st.set_names)
+        };
+        let me = Rc::downgrade(self);
+        customizer_panel::ask_set_name(
+            &self.win,
+            &file_name(&json.to_string_lossy()),
+            &suggested,
+            move |name| {
+                let Some(w) = me.upgrade() else { return };
+                let path = match w.sync_core() {
+                    Ok(p) => p,
+                    Err(e) => return w.toast(&e.to_string()),
+                };
+                let values = w.st.borrow().lp.overrides();
+                let client = w.shared.client.clone();
+                match customizer::save_set(&client, &path, &file, &name, &values) {
+                    Ok(_) => {
+                        let names = customizer::set_names(&client, Some(&file)).unwrap_or_default();
+                        {
+                            let mut st = w.st.borrow_mut();
+                            st.set_names = names;
+                            st.shown_set = Some(name.clone());
+                        }
+                        w.show_parameters();
+                        w.toast(&format!("Saved the parameter set “{name}”"));
+                    }
+                    Err(e) => w.toast(&e),
+                }
+            },
+        );
+    }
+
+    /// A check or measure panel's request.
+    fn inspect(self: &Rc<Self>, r: InspectRequest) {
+        match r {
+            InspectRequest::Check => self.run_check(),
+            InspectRequest::Printer(id) => {
+                self.st.borrow_mut().printer = if id == client::CUSTOM_PRINTER {
+                    PrinterSettings::default()
+                } else {
+                    PrinterSettings::default().apply_preset(&id)
+                };
+            }
+            InspectRequest::SelectFinding(id) => self.select_finding(id),
+            InspectRequest::Measure => self.run_measure(),
+            InspectRequest::Picking(on) => self.set_picking(on),
+            InspectRequest::ClearPicks => {
+                let picking = {
+                    let mut st = self.st.borrow_mut();
+                    st.overlay.picks.clear();
+                    st.picking
+                };
+                self.measure.show_picks(&[], picking);
+                self.update_overlay();
+            }
+        }
+    }
+
+    /// `check` on the text as it is now, with the customizer's values; a
+    /// newer check stops this one.
+    fn run_check(self: &Rc<Self>) {
+        let path = match self.sync_core() {
+            Ok(p) => p,
+            Err(e) => return self.check.show_error(&e.to_string()),
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let (options, printer) = {
+            let mut st = self.st.borrow_mut();
+            if let Some(old) = st.check_stop.replace(stop.clone()) {
+                old.store(true, Ordering::Relaxed);
+            }
+            (self.run_options(&st), st.printer.clone())
+        };
+        self.check.set_running(true);
+        let client = self.shared.client.clone();
+        let me = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let s = stop.clone();
+            let r = gio::spawn_blocking(move || {
+                inspect::check(&client, &path, &options, &printer, Some(s))
+            })
+            .await;
+            let Some(w) = me.upgrade() else { return };
+            match r {
+                // A newer check took over; it reports.
+                Ok(Err(CoreError::Cancelled)) => {}
+                Ok(Ok(report)) => w.check_done(report),
+                Ok(Err(e)) => w.check.show_error(&e.to_string()),
+                Err(_) => w.check.show_error("The check panicked (a bug in NeoSCAD)."),
+            }
+            let mut st = w.st.borrow_mut();
+            if st
+                .check_stop
+                .as_ref()
+                .is_some_and(|x| Arc::ptr_eq(x, &stop))
+            {
+                st.check_stop = None;
+            }
+        });
+    }
+
+    fn check_done(self: &Rc<Self>, report: CheckReport) {
+        glib::g_debug!(
+            "neoscad",
+            "check: {} findings ({})",
+            report.findings.len(),
+            client::check_summary(&report)
+        );
+        let selected = {
+            let mut st = self.st.borrow_mut();
+            let selected = st
+                .overlay
+                .selected
+                .filter(|s| report.findings.iter().any(|f| f.id == *s));
+            st.overlay.findings = report.findings.clone();
+            st.overlay.selected = selected;
+            selected
+        };
+        self.check.show_report(&report, selected);
+        self.update_overlay();
+    }
+
+    /// A finding activated: marked in the view (or unmarked, activated
+    /// again), and the view turned to it.
+    fn select_finding(self: &Rc<Self>, id: u32) {
+        let (selected, point) = {
+            let mut st = self.st.borrow_mut();
+            let selected = inspect::toggle_selection(&st.overlay.findings, st.overlay.selected, id);
+            st.overlay.selected = selected;
+            let point = selected
+                .and_then(|s| st.overlay.findings.iter().find(|f| f.id == s))
+                .and_then(|f| client::point3(&f.point, "a finding").ok());
+            (selected, point)
+        };
+        glib::g_debug!(
+            "neoscad",
+            "check: finding {id} {}",
+            if selected.is_some() {
+                "selected"
+            } else {
+                "cleared"
+            }
+        );
+        if let Some(p) = point {
+            self.camera(|v| v.look_at(p));
+        }
+        self.check.select(selected);
+        self.update_overlay();
+    }
+
+    /// `measure` on the text as it is now; a newer measurement stops this
+    /// one, and the picked points (on the old solids) are forgotten.
+    fn run_measure(self: &Rc<Self>) {
+        let path = match self.sync_core() {
+            Ok(p) => p,
+            Err(e) => return self.measure.show_error(&e.to_string()),
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let options = {
+            let mut st = self.st.borrow_mut();
+            if let Some(old) = st.measure_stop.replace(stop.clone()) {
+                old.store(true, Ordering::Relaxed);
+            }
+            self.run_options(&st)
+        };
+        self.measure.set_running(true);
+        let client = self.shared.client.clone();
+        let me = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let s = stop.clone();
+            let r =
+                gio::spawn_blocking(move || inspect::measure(&client, &path, &options, Some(s)))
+                    .await;
+            let Some(w) = me.upgrade() else { return };
+            match r {
+                Ok(Err(CoreError::Cancelled)) => {}
+                Ok(Ok((report, measurement))) => {
+                    let solid = report.model.is_some() && measurement.is_some();
+                    glib::g_debug!(
+                        "neoscad",
+                        "measure: {}",
+                        inspect::measure_text(&report).replace('\n', "; ")
+                    );
+                    let picking = {
+                        let mut st = w.st.borrow_mut();
+                        st.measurement = measurement;
+                        st.overlay.picks.clear();
+                        st.picking && solid
+                    };
+                    w.measure.show_report(&report, solid);
+                    w.measure.show_picks(&[], picking);
+                    w.update_overlay();
+                }
+                Ok(Err(e)) => w.measure.show_error(&e.to_string()),
+                Err(_) => w
+                    .measure
+                    .show_error("The measurement panicked (a bug in NeoSCAD)."),
+            }
+            let mut st = w.st.borrow_mut();
+            if st
+                .measure_stop
+                .as_ref()
+                .is_some_and(|x| Arc::ptr_eq(x, &stop))
+            {
+                st.measure_stop = None;
+            }
+        });
+    }
+
+    /// Picking on: a click in the view picks the surface point under it.
+    fn set_picking(self: &Rc<Self>, on: bool) {
+        self.st.borrow_mut().picking = on;
+        let me = Rc::downgrade(self);
+        self.view.set_click_handler(on.then(|| {
+            Box::new(move |x, y| {
+                if let Some(w) = me.upgrade() {
+                    w.pick(x, y);
+                }
+            }) as Box<dyn Fn(f64, f64)>
+        }));
+        let picks = self.st.borrow().overlay.picks.clone();
+        self.measure.show_picks(&picks, on);
+    }
+
+    /// The surface point under `(x, y)` (points from the view's top
+    /// left), if the ray meets the measured solid.
+    fn pick(self: &Rc<Self>, x: f64, y: f64) {
+        let ray = self
+            .view
+            .canvas
+            .borrow()
+            .as_ref()
+            .and_then(|c| c.viewport.ray_at(x, y));
+        let Some((origin, direction)) = ray else {
+            return;
+        };
+        let picks = {
+            let mut st = self.st.borrow_mut();
+            let hit = st
+                .measurement
+                .as_ref()
+                .and_then(|m| m.pick(&origin, &direction).ok().flatten());
+            let Some(hit) = hit else { return };
+            inspect::add_pick(&mut st.overlay.picks, hit);
+            st.overlay.picks.clone()
+        };
+        glib::g_debug!(
+            "neoscad",
+            "measure: {}",
+            inspect::picks_text(&picks).replace('\n', "; ")
+        );
+        self.measure.show_picks(&picks, true);
+        self.update_overlay();
+    }
+
+    /// Draw the panels' state in the view.
+    fn update_overlay(&self) {
+        let a = inspect::annotations(&self.st.borrow().overlay);
+        glib::g_debug!(
+            "neoscad",
+            "overlay: {} markers, {} lines",
+            a.markers.len(),
+            a.lines.len()
+        );
+        self.camera(|v| v.set_annotations(a));
+        self.view.queue();
+    }
+
+    // --- Watching the files a run read --------------------------------------
+
+    /// Watch `files` (the last run's) from now on. The monitors are made
+    /// again only when the directories change.
+    fn watch_files(self: &Rc<Self>, files: Vec<PathBuf>) {
+        let n = files.len();
+        let dirs = {
+            let mut st = self.st.borrow_mut();
+            if !st.watch.set(files) {
+                return;
+            }
+            for m in st.monitors.drain(..) {
+                m.cancel();
+            }
+            st.watch.directories()
+        };
+        let mut monitors = Vec::new();
+        for dir in &dirs {
+            match gio::File::for_path(dir)
+                .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+            {
+                Ok(m) => {
+                    let me = Rc::downgrade(self);
+                    m.connect_changed(move |_, file, other, event| {
+                        if let Some(w) = me.upgrade() {
+                            w.file_event(file, other, event);
+                        }
+                    });
+                    monitors.push(m);
+                }
+                Err(e) => glib::g_warning!("neoscad", "cannot watch {}: {e}", dir.display()),
+            }
+        }
+        glib::g_debug!("neoscad", "watch: {n} files in {} directories", dirs.len());
+        self.st.borrow_mut().monitors = monitors;
+    }
+
+    /// A directory monitor's event: a watched file written, replaced
+    /// (renamed over: `other` is the new name) or removed runs the
+    /// document again, once for a burst of events.
+    fn file_event(
+        self: &Rc<Self>,
+        file: &gio::File,
+        other: Option<&gio::File>,
+        event: gio::FileMonitorEvent,
+    ) {
+        use gio::FileMonitorEvent as E;
+        // CHANGED comes many times while a file is written; the hint
+        // after the last write is the one to act on.
+        if !matches!(
+            event,
+            E::ChangesDoneHint | E::Created | E::Deleted | E::Renamed | E::MovedIn | E::MovedOut
+        ) {
+            return;
+        }
+        let mut st = self.st.borrow_mut();
+        let hit = [Some(file), other]
+            .into_iter()
+            .flatten()
+            .filter_map(|f| f.path())
+            .find(|p| st.watch.concerns(p));
+        let Some(path) = hit else { return };
+        glib::g_debug!("neoscad", "watch: {} changed ({event:?})", path.display());
+        if st.watch_timer.is_some() {
+            return;
+        }
+        let me = Rc::downgrade(self);
+        st.watch_timer = Some(glib::timeout_add_local_once(
+            Duration::from_millis(100),
+            move || {
+                let Some(w) = me.upgrade() else { return };
+                let now = w.shared.now_ms();
+                let mode = {
+                    let mut st = w.st.borrow_mut();
+                    st.watch_timer = None;
+                    st.lp.files_changed(now)
+                };
+                match mode {
+                    Some(m) => w.run(m),
+                    None => w.arm_timer(),
+                }
+            },
+        ));
     }
 
     // --- Files --------------------------------------------------------------
@@ -789,54 +1434,144 @@ impl Window {
         Ok(path)
     }
 
-    fn export_stl(self: &Rc<Self>) {
-        let Some(format) = client::export_format_info("binstl") else {
+    /// File > Export in the format `id` (the core's table): a save
+    /// dialog, then the export with a progress toast.
+    fn export(self: &Rc<Self>, id: &str) {
+        let Some(format) = client::export_format_info(id) else {
             return;
         };
+        self.st.borrow_mut().last_export = id.to_string();
+        if format.kind == ExportKind::ViewImage {
+            return self.export_png();
+        }
         let name = document::export_name(&self.st.borrow().doc.name(), &format.extension);
         let dialog = gtk::FileDialog::builder()
             .title(format!("Export {}", format.title))
             .modal(true)
             .initial_name(name)
             .build();
+        // Beside the model, as its other files are; without a portal the
+        // chooser would otherwise start in the working directory.
+        if let Some(dir) = self.file().as_deref().and_then(Path::parent) {
+            dialog.set_initial_folder(Some(&gio::File::for_path(dir)));
+        }
         let me = Rc::downgrade(self);
         dialog.save(Some(&self.win), gio::Cancellable::NONE, move |r| {
-            let (Some(w), Some(out)) = (me.upgrade(), r.ok().and_then(|f| f.path())) else {
-                return;
-            };
-            let path = match w.sync_core() {
-                Ok(p) => p,
-                Err(e) => return w.toast(&e.to_string()),
-            };
-            let options = {
-                let st = w.st.borrow();
-                client::RunOptions {
-                    overrides: st.lp.overrides(),
-                    parts: st.lp.parts(),
-                    enable: Vec::new(),
+            if let (Some(w), Some(out)) = (me.upgrade(), r.ok().and_then(|f| f.path())) {
+                w.start_export(format, out);
+            }
+        });
+    }
+
+    /// Export again in the last format, or one that fits the model's
+    /// dimension (a 2D model to SVG, a 3D one to STL).
+    fn export_again(self: &Rc<Self>) {
+        let id = {
+            let st = self.st.borrow();
+            client::suggest_export_format(&st.last_export, st.last_dimensions)
+        };
+        self.export(&id);
+    }
+
+    /// Export to `out` off the main thread, detached from the document's
+    /// runs (typing does not cancel it), with a toast that says the stage
+    /// and has a Cancel button. A newer export cancels this one. Success
+    /// is a toast; a failure is an alert with the core's reason, never
+    /// silence (docs/audits/agent-surface.md, finding 5).
+    fn start_export(self: &Rc<Self>, format: ExportFormatInfo, out: PathBuf) {
+        let path = match self.sync_core() {
+            Ok(p) => p,
+            Err(e) => return self.toast(&e.to_string()),
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let options = {
+            let mut st = self.st.borrow_mut();
+            if let Some(old) = st.export_stop.replace(stop.clone()) {
+                old.store(true, Ordering::Relaxed);
+            }
+            self.run_options(&st)
+        };
+        let name = file_name(&out.to_string_lossy());
+        let toast = adw::Toast::builder()
+            .title(format!("Exporting {name}…"))
+            .timeout(0)
+            .button_label("Cancel")
+            .priority(adw::ToastPriority::High)
+            .build();
+        let s = stop.clone();
+        toast.connect_button_clicked(move |_| s.store(true, Ordering::Relaxed));
+        self.toasts.add_toast(toast.clone());
+        let (tx, mut rx) = futures_channel::mpsc::unbounded::<session::Stage>();
+        let progress: session::Progress = Arc::new(move |stage| {
+            let _ = tx.unbounded_send(stage);
+        });
+        let (t, n) = (toast.clone(), name.clone());
+        glib::spawn_future_local(async move {
+            use futures_util::StreamExt;
+            while let Some(stage) = rx.next().await {
+                t.set_title(&format!("Exporting {n}: {}…", run::stage_label(stage)));
+            }
+        });
+        glib::g_debug!("neoscad", "export: {} to {name}", format.id);
+        let client = self.shared.client.clone();
+        let me = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let o = out.clone();
+            let s = stop.clone();
+            let r = gio::spawn_blocking(move || match format.kind {
+                ExportKind::Snapshot => {
+                    match run::snapshot_file(&client, &path, &o, (1024, 1024), &options, Some(s)) {
+                        Ok(n) => Some(Ok(format!(
+                            "Exported {} ({n} bytes)",
+                            file_name(&o.to_string_lossy())
+                        ))),
+                        Err(CoreError::Cancelled) => None,
+                        Err(e) => Some(Err(e.to_string())),
+                    }
                 }
-            };
-            let client = w.shared.client.clone();
-            let id = format.id.clone();
-            let me = Rc::downgrade(&w);
-            glib::spawn_future_local(async move {
-                let output = out.to_string_lossy().into_owned();
-                let o = output.clone();
-                let r = gio::spawn_blocking(move || {
-                    run::export_file(&client, &path, &o, &id, &options)
-                })
-                .await;
-                let Some(w) = me.upgrade() else { return };
-                let message = match r {
-                    Ok(Ok(r)) => match client::export_failure_reason(&r) {
-                        None => format!("Exported {} ({} bytes)", file_name(&output), r.bytes),
-                        Some(why) => format!("Export failed: {why}"),
-                    },
-                    Ok(Err(e)) => format!("Export failed: {e}"),
-                    Err(_) => "Export failed (a bug in NeoSCAD).".into(),
-                };
-                w.toast(&message);
-            });
+                _ => run::export_message(
+                    &o,
+                    &run::export_file(
+                        &client,
+                        &path,
+                        &o.to_string_lossy(),
+                        &format.id,
+                        &options,
+                        Some(s),
+                        Some(progress),
+                    ),
+                ),
+            })
+            .await
+            .unwrap_or_else(|_| Some(Err("The export panicked (a bug in NeoSCAD).".into())));
+            toast.dismiss();
+            let Some(w) = me.upgrade() else { return };
+            {
+                let mut st = w.st.borrow_mut();
+                if st
+                    .export_stop
+                    .as_ref()
+                    .is_some_and(|x| Arc::ptr_eq(x, &stop))
+                {
+                    st.export_stop = None;
+                }
+            }
+            match r {
+                Some(Ok(message)) => {
+                    glib::g_debug!("neoscad", "export: {message}");
+                    w.toast(&message);
+                }
+                Some(Err(why)) => {
+                    glib::g_debug!("neoscad", "export: {name} failed: {why}");
+                    let alert = adw::AlertDialog::new(
+                        Some(&format!("“{name}” Was Not Exported")),
+                        Some(&why),
+                    );
+                    alert.add_response("close", "_Close");
+                    alert.present(Some(&w.win));
+                }
+                None => w.toast(&format!("Export of {name} cancelled")),
+            }
         });
     }
 
@@ -940,6 +1675,23 @@ impl Window {
             if let Some(t) = st.timer.take() {
                 t.remove();
             }
+            if let Some(t) = st.watch_timer.take() {
+                t.remove();
+            }
+            for m in st.monitors.drain(..) {
+                m.cancel();
+            }
+            st.watch.clear();
+            for stop in [
+                st.check_stop.take(),
+                st.measure_stop.take(),
+                st.export_stop.take(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                stop.store(true, Ordering::Relaxed);
+            }
             st.lp.close();
             if let Some(ls) = st.language.take() {
                 ls.stop();
@@ -964,4 +1716,56 @@ fn file_name(path: &str) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string())
+}
+
+/// The side panels: a view switcher over the customizer, check and
+/// measure pages, each panel asking `me` for what it needs.
+#[allow(clippy::type_complexity)]
+fn side_panels(
+    me: &Weak<Window>,
+) -> (
+    adw::ToolbarView,
+    gtk::Stack,
+    Rc<Customizer>,
+    Rc<CheckPanel>,
+    Rc<MeasurePanel>,
+) {
+    let m = me.clone();
+    let customizer = Customizer::new(move |r| {
+        if let Some(w) = m.upgrade() {
+            w.customize(r);
+        }
+    });
+    let ask = |me: &Weak<Window>| {
+        let m = me.clone();
+        move |r| {
+            if let Some(w) = m.upgrade() {
+                w.inspect(r);
+            }
+        }
+    };
+    let check = CheckPanel::new(ask(me));
+    let measure = MeasurePanel::new(ask(me));
+    // A stack switcher (linked buttons with titles), not libadwaita's view
+    // switcher: that one always draws an icon beside each title, and in a
+    // 300-pixel sidebar it cuts "Customizer" short.
+    let stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .vexpand(true)
+        .build();
+    stack.add_titled(&customizer.root, Some("customizer"), "Customizer");
+    stack.add_titled(&check.root, Some("check"), "Check");
+    stack.add_titled(&measure.root, Some("measure"), "Measure");
+    let switcher = gtk::StackSwitcher::builder()
+        .stack(&stack)
+        .hexpand(true)
+        .halign(gtk::Align::Center)
+        .build();
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    bar.add_css_class("toolbar");
+    bar.append(&switcher);
+    let side = adw::ToolbarView::new();
+    side.add_top_bar(&bar);
+    side.set_content(Some(&stack));
+    (side, stack, customizer, check, measure)
 }

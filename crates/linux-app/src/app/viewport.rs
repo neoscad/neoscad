@@ -20,9 +20,15 @@ use linux_app::view::{Drag, ViewCanvas, apply_drag, drag_for, zoom};
 /// The widget and the canvas it shows.
 pub struct ViewWidget {
     pub root: gtk::Overlay,
+    area: gtk::DrawingArea,
     picture: gtk::Picture,
     pub canvas: Rc<RefCell<Option<ViewCanvas>>>,
+    /// A click (not a drag) at a point of the view, in points from its
+    /// top left: the measure panel's picking.
+    on_click: ClickHandler,
 }
+
+type ClickHandler = Rc<RefCell<Option<Box<dyn Fn(f64, f64)>>>>;
 
 impl std::fmt::Debug for ViewWidget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,12 +70,22 @@ impl ViewWidget {
         let canvas = Rc::new(RefCell::new(canvas));
         let w = ViewWidget {
             root,
+            area: area.clone(),
             picture,
             canvas,
+            on_click: Rc::default(),
         };
         w.connect_input(&area);
         w.connect_frames(&area);
         w
+    }
+
+    /// Picking on (`Some`: clicks go to the handler, under a crosshair)
+    /// or off.
+    pub fn set_click_handler(&self, handler: Option<Box<dyn Fn(f64, f64)>>) {
+        self.area
+            .set_cursor_from_name(handler.as_ref().map(|_| "crosshair"));
+        *self.on_click.borrow_mut() = handler;
     }
 
     /// Draw on the next frame (the model or the camera changed).
@@ -136,6 +152,22 @@ impl ViewWidget {
         let s = state;
         drag.connect_drag_end(move |_, _, _| *s.borrow_mut() = None);
         area.add_controller(drag);
+
+        // A click with the primary button: GTK denies the click gesture
+        // once the pointer moves past the drag threshold, so an orbit
+        // never picks a point, and the drag above sees the click as a
+        // drag of nothing.
+        let click = gtk::GestureClick::new();
+        click.set_button(gdk::BUTTON_PRIMARY);
+        let handler = self.on_click.clone();
+        click.connect_released(move |_, n, x, y| {
+            if n == 1
+                && let Some(h) = handler.borrow().as_ref()
+            {
+                h(x, y);
+            }
+        });
+        area.add_controller(click);
 
         // The wheel and touchpad scrolling zoom (a wheel notch is 1).
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
