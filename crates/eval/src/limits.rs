@@ -292,11 +292,17 @@ pub struct At {
 }
 
 fn fmt_num(x: f64) -> String {
-    if x >= 1e15 || x.fract() != 0.0 {
-        format!("{x:.3e}")
-            .replace(".000e", "e")
-            .trim_end_matches('0')
-            .to_string()
+    if x >= 1e15 {
+        // Trim the mantissa's zeros, not the exponent's: "1.500e15" is
+        // "1.5e15", "1.000e15" is "1e15".
+        let s = format!("{x:.3e}");
+        let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        format!("{mantissa}e{exp}")
+    } else if x.fract() != 0.0 {
+        // Up to three decimals, without trailing zeros: 3.05, not 3.050.
+        let s = format!("{x:.3}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
     } else {
         // Thousands separators: "100,000 fragments" reads at a glance.
         let s = format!("{}", x as u64);
@@ -813,6 +819,16 @@ pub mod live {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbers_read_plainly() {
+        assert_eq!(fmt_num(3.053), "3.053");
+        assert_eq!(fmt_num(3.05), "3.05");
+        assert_eq!(fmt_num(0.5), "0.5");
+        assert_eq!(fmt_num(100000.0), "100,000");
+        assert_eq!(fmt_num(1e15), "1e15");
+        assert_eq!(fmt_num(1.5e15), "1.5e15");
+    }
 
     #[test]
     fn flags_parse_and_refuse() {
