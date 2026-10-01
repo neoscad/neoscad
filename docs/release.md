@@ -261,7 +261,8 @@ such as `v0.1.0` runs, in order:
    `macos-26` with Xcode 26.6, signed from the `NEOSCAD_*` secrets: it
    builds and smoke-tests the app, submits it to Apple without waiting
    and records the submission on the release, which stays a prerelease
-   until the scheduled `macos-notarize.yml` (every 15 minutes) has attached the notarized DMG
+   until `macos-notarize.yml` (which it starts, and which then restarts
+   itself about every 15 minutes) has attached the notarized DMG
    and pushed the cask; see "The macOS app after the release" below;
    with no secrets it builds ad hoc and uploads and holds nothing);
    `publish-packages.yml` (`.deb` and `.rpm` for both Linux
@@ -475,16 +476,19 @@ universal CLI, because its tarball isn't published. A local
          {"tag": "v0.3.0", "prerelease": false, "stage": "app-submitted",
           "app_submission": "<uuid>", "dmg_submission": null,
           "artifact_run": "<run id>", "artifact": "macos-app-v0.3.0",
-          "updated": "<UTC time>"}
+          "updated": "<UTC time>", "chain_started": "<UTC time>"}
 
      It's a release asset because later runs of another workflow must
      read it and rewrite it, and an artifact can't be rewritten. It's
      uploaded last, so it never names an artifact that doesn't exist
-     yet. The job takes as long as the build, not Apple's queue.
-2. **Every hour** (`:23`), `.github/workflows/macos-notarize.yml` runs.
-   A Linux job looks for releases among the last 20 that carry a state
-   record in `app-submitted` or `dmg-submitted`. Most hours there are
-   none, and the macOS job is skipped. For each pending release, a
+     yet. Then the job starts `macos-notarize.yml` with a
+     `repository_dispatch` (event type `macos-notarize`). It takes as
+     long as the build, not Apple's queue.
+2. **About every 15 minutes while a release is pending**,
+   `.github/workflows/macos-notarize.yml` runs (the chain is described
+   below). A Linux job looks for releases among the last 20 that carry
+   a state record in `app-submitted` or `dmg-submitted`. When there are
+   none, the run ends there. For each pending release, a
    `macos-26` job with the same signing secrets checks out the tag, asks
    `notarytool info` for the stage's submission, and moves the release
    on by at most one stage:
@@ -516,9 +520,58 @@ universal CLI, because its tarball isn't published. A local
    Every step can be repeated. Uploads use `--clobber`, the cask push
    does nothing when the cask is current, and the state is rewritten
    only after what it names exists. A run that dies part-way leaves the
-   state where it was, and the next hour redoes that stage (at worst one
+   state where it was, and the next run redoes that stage (at worst one
    more DMG submission). The concurrency group `macos-notarize` keeps
    two runs from advancing a release at once.
+
+**The chain.** GitHub's cron is best effort. On 2026-10-01 an hourly
+cron ran once in four hours, and after it moved to every 15 minutes
+(`8,23,38,53 * * * *`) no scheduled run fired for at least 45 minutes,
+so v0.2.1-rc.2 and v0.2.1 sat for that long after Apple had accepted
+them. So the workflow keeps itself going, and the cron is only a
+backstop:
+
+- The release's `app` job starts the first run as soon as it has
+  recorded `app-submitted`.
+- Each run that found a pending release ends with a `next` job (Linux).
+  `next` reads every state record again, sleeps 15 minutes, and sends a
+  `repository_dispatch` for a new untagged run, which checks every
+  pending release. If a run of the workflow is already queued or
+  waiting (the cron's, or one started by hand), `next` dispatches
+  nothing and leaves the chain to that run. With the workflow-wide
+  concurrency group, at most one run goes and one waits, so a
+  re-dispatch never makes a second, parallel chain. Even if two
+  dispatches raced, GitHub would cancel the older waiting run.
+- The wait is a `sleep` in a Linux job because GitHub has no delayed
+  dispatch. An environment wait timer would need repository settings
+  and would hold the group just the same. Actions minutes are free in
+  this public repository, so the sleeping job costs nothing. While a
+  release is pending, each check is a few minutes of Linux and macOS
+  runner time, about four times an hour.
+- A `repository_dispatch` and not `gh workflow run`, because the `app`
+  job runs inside `release.yml`, which cargo-dist generates and which
+  grants its publish jobs `contents: write` but not `actions: write`.
+  The dispatches endpoint needs only `contents: write`, and GitHub lets
+  the `GITHUB_TOKEN` start runs with either dispatch event.
+- **Bound**: when a release is still pending 48 hours after its
+  `chain_started` (`updated` for a record written before that field
+  existed), `next` adds `chain_stopped` to its state, opens or comments
+  on an issue titled "macOS notarization stalled for `<tag>`", and stops
+  dispatching for it. The cron and runs started by hand still check it,
+  and it is finished normally if Apple answers.
+
+**Stopping the chain.** Cancel the run whose `next` job is sleeping
+(`gh run cancel <run id>`). `next` runs only if the run wasn't
+cancelled, so no new run is dispatched. The cron still advances the
+release. To stop everything, also run
+`gh workflow disable macos-notarize.yml`, and later `enable` it.
+
+**Restarting it.** Any run that finds a pending release starts the
+chain again (`gh workflow run macos-notarize.yml`, or just wait for
+the cron). After the 48-hour bound, run
+`gh workflow run macos-notarize.yml -f tag=<tag> -f restart=true`.
+That run resets `chain_started` to now and removes `chain_stopped`.
+Re-running the release's `app` job also writes a new `chain_started`.
 
 **Watching it.** The release's assets show the stage
 (`gh release download <tag> -p macos-app-state.json -O -`). The
@@ -526,16 +579,19 @@ universal CLI, because its tarball isn't published. A local
 and Apple's answer. `xcrun notarytool history` lists the submissions.
 
 **Forcing it.** Running "macOS notarization" from the Actions tab
-(`gh workflow run macos-notarize.yml [-f tag=v0.3.0]`) checks now
-instead of at the next hour, for one tag or for every pending release.
-It can't skip Apple: a stage still in progress stays put.
+(`gh workflow run macos-notarize.yml [-f tag=v0.3.0]`) checks for one
+tag or for every pending release. If the chain's `next` job is
+sleeping, the new run waits for it (up to 15 minutes), because they
+share the concurrency group. To check at once, cancel the sleeping run
+first; the new run carries the chain on. It can't skip Apple: a stage
+still in progress stays put.
 
 **After a rejection**, read the issue's log, fix the cause on main and
 cut a new patch release. Re-running the release's own `app` job for the
 same tag (from the release run, "Re-run jobs") rebuilds from the tagged
 commit and rewrites the state to `app-submitted`, which only helps when
 the rejection was Apple's error, not the build's. Don't re-run it while
-a scheduled run is advancing that tag. To publish a release without its
+a `macos-notarize.yml` run is advancing that tag. To publish a release without its
 app, run `gh release edit <tag> --prerelease=false --latest` and
 `gh release delete-asset <tag> macos-app-state.json`.
 
@@ -547,7 +603,7 @@ the app, the DMG and the CLI in one run and waits for each.
 
 The download page on neoscad.org links each file by version
 (`/releases/download/v<version>/…`), not through `releases/latest`.
-Update its DMG link only once the scheduled job has attached the DMG.
+Update its DMG link only once `macos-notarize.yml` has attached the DMG.
 Before then, the link returns 404.
 
 ## The update feed
@@ -612,7 +668,7 @@ it as soon as it is published:
    installer), so Macs keep their current version until then.
 2. Once `macos-notarize.yml` has attached the DMG, its `feed` job runs the
    same workflow, and the feed gets `macos` and the next serial. The `feed`
-   job runs after every scheduled run that found a pending release. When
+   job runs after every run that found a pending release. When
    nothing changed, it pushes nothing.
 
 If notarization fails, the feed stays without `macos` until a later

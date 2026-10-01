@@ -180,22 +180,34 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # `chain_started` starts the clock on macos-notarize.yml's 48-hour
+          # bound for re-dispatching itself; a re-run of this job restarts it.
           jq -n --arg tag "$TAG" --argjson prerelease "$PRERELEASE" \
             --arg id "$(tr -d '[:space:]' < dist/notary-app.id)" \
             --arg run "$GITHUB_RUN_ID" --arg artifact "macos-app-$TAG" \
             --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{tag: $tag, prerelease: $prerelease, stage: "app-submitted",
               app_submission: $id, dmg_submission: null,
-              artifact_run: $run, artifact: $artifact, updated: $updated}' \
+              artifact_run: $run, artifact: $artifact, updated: $updated,
+              chain_started: $updated}' \
             > "$RUNNER_TEMP/macos-app-state.json"
           cat "$RUNNER_TEMP/macos-app-state.json"
           gh release upload "$TAG" "$RUNNER_TEMP/macos-app-state.json" --clobber \
             --repo "$GITHUB_REPOSITORY"
+          # Starts macos-notarize.yml's chain now rather than waiting for
+          # its cron, which GitHub runs late or not at all. A
+          # repository_dispatch, because it needs only `contents: write`;
+          # release.yml gives this job no `actions` permission, which
+          # `gh workflow run` needs. A failure here loses nothing: the
+          # state is recorded and the cron is the backstop.
+          if ! gh api "repos/$GITHUB_REPOSITORY/dispatches" -f event_type=macos-notarize; then
+            echo "::warning::could not start macos-notarize.yml; its cron will find $TAG"
+          fi
           {
             echo "### macOS app submitted for notarization"
-            echo "Submission \`$(cat dist/notary-app.id)\`. The scheduled **macOS notarization**"
-            echo "workflow (macos-notarize.yml) staples it, notarizes the DMG, attaches it,"
-            echo "pushes the cask and then promotes $TAG."
+            echo "Submission \`$(cat dist/notary-app.id)\`. The **macOS notarization** workflow"
+            echo "(macos-notarize.yml, started now, then every 15 minutes or so) staples it,"
+            echo "notarizes the DMG, attaches it, pushes the cask and then promotes $TAG."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Unsigned build
