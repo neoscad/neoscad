@@ -36,7 +36,8 @@ use std::sync::Arc;
 
 use geom::Matrix;
 use geom::color::Color;
-use geom::csg::{ChainObject, CsgTree, FLAG_HIGHLIGHT, ProductJob, Products, Stop};
+use geom::csg::{ChainObject, CsgTree, FLAG_HIGHLIGHT, Negative, ProductJob, Products, Stop};
+
 use geom::polyset::PolySet;
 
 use crate::scene::{CsgOp, CsgPrimitive, Cull, Depth, DrawState, Scene, Surface};
@@ -176,9 +177,16 @@ pub fn scene_until(
 /// A leaf mesh coloured for a product boolean: moved into model
 /// coordinates, every face in the colour it is drawn in.
 fn job_mesh(obj: &ChainObject, matrix: &Matrix, color: Color, force: bool) -> Option<PolySet> {
+    let mut ps = coloured(obj, color, force)?;
+    ps.transform(matrix);
+    Some(ps)
+}
+
+/// A leaf mesh, in its own coordinates, with every face in the colour it
+/// is drawn in.
+fn coloured(obj: &ChainObject, color: Color, force: bool) -> Option<PolySet> {
     let mesh = obj.leaf.mesh.as_ref()?;
     let mut ps = PolySet::clone(mesh);
-    ps.transform(matrix);
     if force || ps.color_indices.is_empty() {
         ps.set_color(color);
     } else {
@@ -310,8 +318,16 @@ fn opencsg(
                     }
                     for obj in &neg {
                         let color = negative_color(obj, *pass, scheme);
+                        // Placed, not moved: copies of a repeated subtree
+                        // share one union (`geom::csg::Negative`).
                         job.negatives
-                            .extend(job_mesh(obj, &negative_matrix(obj), color, true));
+                            .extend(coloured(obj, color, true).map(|ps| Negative {
+                                mesh: Arc::new(ps),
+                                matrix: Some(negative_matrix(obj)),
+                                tint: color,
+                                slab: obj.leaf.dim == 2,
+                                chain: obj.leaf.chain.clone(),
+                            }));
                     }
                     jobs.push(job);
                     pending.push(Pending {

@@ -10,7 +10,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
+use manifold_rust::cancel::CancelToken;
 use manifold_rust::impl_mesh::ManifoldImpl;
 use manifold_rust::linalg::{Mat3x4, Vec3};
 use manifold_rust::manifold::Manifold;
@@ -42,6 +44,41 @@ impl IdSource for GlobalIds {
     fn reserve(&self, count: u32) -> u32 {
         Manifold::reserve_ids(count)
     }
+}
+
+/// The token a request's kernel operations run under, so one long
+/// boolean stops on a cancel or a passed limit instead of running to its
+/// end: on wasm32 a boolean that grows past the address space traps the
+/// instance, which only a stop inside the operation prevents.
+///
+/// The token is over `interrupt` itself (a cancel sets it, and so does
+/// the guard when a limit passes), and asks `guard` for the limits only
+/// it can see, the clock and the measured memory, at every check. What a
+/// boolean allocates between two looks is what a memory limit overshoots
+/// by, so none is skipped: the kernel checks at its stage boundaries and
+/// every few thousand items of its long loops, about 600,000 times in the
+/// Menger sponge's depth-5 render, which is milliseconds of clock reads
+/// (and why a host's memory probe must be cheap). `None` when nothing can
+/// stop the request, so an unlimited render runs the kernel's
+/// uncancellable path. A cancelled operation's result is empty with
+/// [`Error::Cancelled`] ([`ManifoldGeometry::is_cancelled`]); callers turn
+/// it into an interruption and never cache it.
+pub fn kernel_token(
+    interrupt: Option<&Arc<AtomicBool>>,
+    guard: Option<&Arc<eval::limits::Guard>>,
+) -> Option<CancelToken> {
+    if interrupt.is_none() && guard.is_none() {
+        return None;
+    }
+    let flag = interrupt.cloned().unwrap_or_default();
+    let token = CancelToken::from_flag(flag);
+    Some(match guard {
+        None => token,
+        Some(g) => {
+            let g = g.clone();
+            token.with_check(Arc::new(move || g.stopped()))
+        }
+    })
 }
 
 /// A solid with the colour state OpenSCAD's `ManifoldGeometry` carries.
@@ -114,6 +151,12 @@ impl ManifoldGeometry {
 
     pub fn is_empty(&self) -> bool {
         self.manifold.is_empty()
+    }
+
+    /// The result of a kernel operation its token cancelled: empty, and
+    /// not the operation's answer, so it must not be used or cached.
+    pub fn is_cancelled(&self) -> bool {
+        self.manifold.status() == Error::Cancelled
     }
 
     /// A proper 2-manifold: Manifold reported no error and did not have to
@@ -242,6 +285,17 @@ impl ManifoldGeometry {
 
     /// `ManifoldGeometry::binOp` (`ManifoldGeometry.cc:263-289`).
     pub fn boolean(&self, rhs: &ManifoldGeometry, op: OpType) -> ManifoldGeometry {
+        self.boolean_until(rhs, op, None)
+    }
+
+    /// [`ManifoldGeometry::boolean`] under `token` ([`kernel_token`]); a
+    /// cancelled one is [`ManifoldGeometry::is_cancelled`].
+    pub fn boolean_until(
+        &self,
+        rhs: &ManifoldGeometry,
+        op: OpType,
+        token: Option<&CancelToken>,
+    ) -> ManifoldGeometry {
         // The exact engine needs manifold operands; a soup from the repair
         // path goes through the robust engine instead.
         let engine = if self.manifold.as_impl().is_soup || rhs.manifold.as_impl().is_soup {
@@ -249,7 +303,9 @@ impl ManifoldGeometry {
         } else {
             BooleanEngine::Exact
         };
-        let manifold = self.manifold.boolean_with_engine(&rhs.manifold, op, engine);
+        let manifold =
+            self.manifold
+                .boolean_with_engine_and_progress(&rhs.manifold, op, engine, token, None);
         self.combine_ids(rhs, op, manifold)
     }
 
@@ -268,6 +324,17 @@ impl ManifoldGeometry {
     /// order. Soup operands (from the repair path) need the robust engine,
     /// which the tree does not use, so they fold pairwise.
     pub fn batch(op: OpType, parts: Vec<ManifoldGeometry>) -> Option<ManifoldGeometry> {
+        Self::batch_until(op, parts, None)
+    }
+
+    /// [`ManifoldGeometry::batch`] under `token` ([`kernel_token`]): the
+    /// kernel checks it between its rounds and inside each boolean, and a
+    /// cancelled batch is [`ManifoldGeometry::is_cancelled`].
+    pub fn batch_until(
+        op: OpType,
+        parts: Vec<ManifoldGeometry>,
+        token: Option<&CancelToken>,
+    ) -> Option<ManifoldGeometry> {
         use manifold_rust::csg_tree::CsgNode;
         let mut it = parts.into_iter();
         let first = it.next()?;
@@ -278,7 +345,14 @@ impl ManifoldGeometry {
         let soup =
             first.manifold.as_impl().is_soup || rest.iter().any(|p| p.manifold.as_impl().is_soup);
         if soup {
-            return Some(rest.iter().fold(first, |acc, p| acc.boolean(p, op)));
+            let mut acc = first;
+            for p in &rest {
+                acc = acc.boolean_until(p, op, token);
+                if acc.is_cancelled() {
+                    break;
+                }
+            }
+            return Some(acc);
         }
         let mut ids = first.clone();
         for p in &rest {
@@ -306,7 +380,8 @@ impl ManifoldGeometry {
                 CsgNode::leaf(imp)
             })
             .collect();
-        ids.manifold = Manifold::from_impl(CsgNode::op_n(op, leaves).evaluate());
+        ids.manifold = Manifold::from_impl(CsgNode::op_n(op, leaves).evaluate_with_token(token));
+
         Some(ids)
     }
 

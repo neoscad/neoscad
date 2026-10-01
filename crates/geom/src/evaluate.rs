@@ -641,6 +641,10 @@ struct Ctx<'a> {
     /// `parallel` feature, off wasm32). A test turns it off to walk a tree
     /// the way wasm32 does, entirely on its own small stack.
     parallel: bool,
+    /// The token the kernel's booleans run under
+    /// ([`crate::manifold_geom::kernel_token`]), `None` without an
+    /// interrupt flag or limits.
+    token: Option<manifold_rust::cancel::CancelToken>,
 }
 
 /// A result's weight in the memory limit's estimate, as a multiple of
@@ -1072,6 +1076,7 @@ impl Renderer {
             charged: Mutex::new(HashMap::new()),
             demand: Mutex::new(HashMap::new()),
             parallel: cfg!(all(feature = "parallel", not(target_arch = "wasm32"))),
+            token: crate::manifold_geom::kernel_token(opts.interrupt.as_ref(), opts.guard.as_ref()),
         };
         {
             let mut seen = HashSet::new();
@@ -1425,6 +1430,17 @@ impl Ctx<'_> {
         let first = self.first[n.index];
         let pattern = self.pattern[n.index];
         let mut out = self.compute(n, kids)?;
+        // A kernel operation the token cancelled returned an empty solid,
+        // not its answer; cached, it would be the answer of every later
+        // render of this subtree. The flag is sticky, so a result computed
+        // as the request stopped is dropped too, which costs nothing: the
+        // request is over.
+        if self.token.as_ref().is_some_and(|t| t.is_cancelled()) {
+            return Err(Unsupported {
+                what: INTERRUPTED,
+                loc: loc_of(n),
+            });
+        }
         if let Some(g) = &self.opts.guard {
             self.check_result(n, g, out.geom.as_ref())?;
         }
@@ -1777,7 +1793,7 @@ impl Ctx<'_> {
                     parts.push(m);
                 }
             }
-            ManifoldGeometry::batch(Op::Union.manifold(), parts)
+            ManifoldGeometry::batch_until(Op::Union.manifold(), parts, self.token.as_ref())
                 .map(|m| m.to_polyset(&self.opts.scheme))
                 .unwrap_or_default()
         };
@@ -2036,7 +2052,8 @@ impl Ctx<'_> {
             };
             parts.push(m);
         }
-        ManifoldGeometry::batch(op.manifold(), parts).map(|m| Geometry::Manifold(Arc::new(m)))
+        ManifoldGeometry::batch_until(op.manifold(), parts, self.token.as_ref())
+            .map(|m| Geometry::Manifold(Arc::new(m)))
     }
 
     /// `createManifoldFromGeometry`, for child `slot` of `n`. OpenSCAD

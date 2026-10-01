@@ -63,11 +63,11 @@ line.
 A copy of the crates.io release (`.cargo_vcs_info.json` gives the upstream
 commit), used through `[patch.crates-io]` in the root `Cargo.toml`. It is
 not a workspace member, so the workspace's lints, formatting and tests do
-not apply to it. It carries five changes, each marked `NeoSCAD patch`: a
+not apply to it. It carries six changes, each marked `NeoSCAD patch`: a
 bug fix in `src/edge_op.rs`, two speed fixes in `src/polygon_earclip.rs`,
-parallel boolean kernels in `src/par.rs` and its callers, and a size
-threshold for one of them (below). Drop the copy once upstream has them
-all.
+parallel boolean kernels in `src/par.rs` and its callers, a size
+threshold for one of them, and cancellation a host can drive (below).
+Drop the copy once upstream has them all.
 
 The series, in `vendor/patches/manifold-rust/`:
 
@@ -79,6 +79,7 @@ The series, in `vendor/patches/manifold-rust/`:
 | `0003-parallel-booleans.patch` | the parallel boolean kernels |
 | `0004-keyhole-ring-boxes.patch` | the keyhole ring-box patch (`src/polygon_earclip.rs`) |
 | `0005-batch-round-threshold.patch` | `batch_boolean` rounds of under 10,000 vertices run their pairs serially (`src/csg_tree.rs`; see the parallel boolean patch) |
+| `0006-cancel-token-over-a-flag.patch` | a `CancelToken` over a caller's flag, polling a caller's check; checks inside `AddNewEdgeVerts` (`src/cancel.rs`, `src/boolean_result*.rs`; see the cancellation patch) |
 
 The first vendoring (`17a31e4`) left the two files out without a
 recorded reason; they could as well be restored, which would empty
@@ -293,6 +294,43 @@ copy.
 shared, load average 5–9 unless noted): see `docs/audits/slow-cases.md`
 §1 for the tables. Menger level 4 went from 2.62 s to 1.59 s (the
 nightly: 2.29 s), `csg_spheres` from 0.57 to 0.47 s.
+
+### The cancellation patch
+
+manifold-rust ports Manifold's cooperative cancellation (`src/cancel.rs`:
+a token checked between a boolean's stages, inside its long loops and
+between `csg_tree`'s batch rounds), but `CancelToken::new` makes its own
+flag, and the token knows only that flag. A request's cancel is the
+host's flag, and its time and memory limits are only known to the
+request's guard (the clock, and on wasm32 the counting allocator's
+peak). So:
+
+- `CancelToken::from_flag` makes a token over an existing
+  `Arc<AtomicBool>`, and `with_check` adds a condition polled at every
+  check; once it is true the flag is set, so the answer is sticky as
+  before. `geom::manifold_geom::kernel_token` builds the request's token:
+  its interrupt flag, and the guard's `stopped()` as the check. Without
+  a token (`None`, every unlimited render) nothing is polled.
+- `AddNewEdgeVerts` (`src/boolean_result.rs`, called from
+  `src/boolean_result_assemble.rs`) checks the token every 16,384
+  intersections, and between the three sorts after it, and its three
+  lists are reserved at their final size (the sum of the inclusions'
+  magnitudes) instead of grown by doubling. In the Menger sponge at
+  depth 5 (`examples/Old/example024.scad`, `n=5`) the last union grew a
+  wasm instance from under 1 GiB past 2 GB within this one step, before
+  any check ran; the last doubling of the new-edge list alone copied
+  a buffer into one twice its size.
+
+The content and order of the lists are unchanged (a capacity is not
+content), and an uncancelled token changes no output:
+`crates/geom/tests/kernel_cancel.rs` compares a render with a token that
+never fires against one without, on 1 and 8 threads, and checks that a
+cancel lands inside one boolean (a boolean of two dense spheres stops
+within milliseconds of the cancel, where it ran 140 ms in all) and that
+a cancelled, empty result is never cached. In the web core, the Menger
+sponge's depth-5 render under the 1 GiB limit now stops with a
+`resource-limit` error at a measured peak of about 1.4 to 1.7 GiB, and
+the engine lives on (`crates/web/test/run.mjs`).
 
 ## clipper2-rust 1.2.0, patched
 

@@ -394,7 +394,20 @@ pub fn boolean_result_with_token(
     let mut edges_q: EdgeList<i32> = Vec::new();
     let mut edges_new: EdgeList<(i32, i32)> = Vec::new();
 
-    add_new_edge_verts(
+    // NeoSCAD patch: the lists are allocated at their final size, which
+    // the inclusions give, and the token is checked inside. Grown by
+    // doubling, the last reallocation of `edges_new` alone (a copy from
+    // one buffer into one twice its size) took 0.8 s and a gigabyte in the
+    // Menger sponge at depth 5, with no check able to run in between; now
+    // the allocation comes first, and the loop's first check sees it.
+    let count = |inclusions: &[i32]| -> usize {
+        inclusions.iter().map(|x| x.unsigned_abs() as usize).sum()
+    };
+    let (n12, n21) = (count(&i12), count(&i21));
+    edges_p.reserve_exact(n12);
+    edges_q.reserve_exact(n21);
+    edges_new.reserve_exact(2 * (n12 + n21));
+    if add_new_edge_verts(
         &mut edges_p,
         &mut edges_new,
         &bool3.xv12.p1q2,
@@ -403,8 +416,8 @@ pub fn boolean_result_with_token(
         &in_p.halfedge,
         true,
         0,
-    );
-    add_new_edge_verts(
+        token,
+    ) || add_new_edge_verts(
         &mut edges_q,
         &mut edges_new,
         &bool3.xv21.p1q2,
@@ -413,10 +426,24 @@ pub fn boolean_result_with_token(
         &in_q.halfedge,
         false,
         bool3.xv12.p1q2.len(),
-    );
+        token,
+    ) {
+        return crate::boolean3::cancelled_impl();
+    }
 
+    // NeoSCAD patch: each sort takes a buffer as large as its list, so a
+    // limit passed while the lists grew stops here, not after the sorts.
+    if is_cancelled(token) {
+        return crate::boolean3::cancelled_impl();
+    }
     let edges_p = EdgeGroups::new(edges_p);
+    if is_cancelled(token) {
+        return crate::boolean3::cancelled_impl();
+    }
     let edges_q = EdgeGroups::new(edges_q);
+    if is_cancelled(token) {
+        return crate::boolean3::cancelled_impl();
+    }
     let edges_new = EdgeGroups::new(edges_new);
 
     // C++ clears v12R/v21R here (after AddNewEdgeVerts); drop the counterparts

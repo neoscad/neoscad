@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use eval::dump::Keys;
 use eval::node::{CsgOp, Node, NodeKind};
 use lang::diag::Severity;
+use manifold_rust::cancel::CancelToken;
 use manifold_rust::types::OpType;
 
 use crate::color::{Color, Scheme};
@@ -86,6 +87,41 @@ pub struct Leaf {
     pub index: usize,
     /// The mesh's bounding box moved by `matrix` (its eight corners).
     pub bbox: BoundingBox,
+    /// The leaf's place in the tree: its own link and its ancestors'
+    /// (`None` for the empty set). A preview product uses it to compute
+    /// a union of negatives that a repeated subtree contributes once.
+    pub chain: Option<Arc<Chain>>,
+}
+
+/// One node on the way from the top of the tree to a leaf: shared by
+/// every leaf below it, so a tree costs one link per node.
+#[derive(Debug)]
+pub struct Chain {
+    /// `Node::index`.
+    pub index: usize,
+    /// The node's subtree key (`Keys::get`): equal keys, equal subtrees.
+    pub key: u128,
+    /// The node's position among its parent's children.
+    pub pos: u32,
+    /// The node's own transform (the identity for anything but a
+    /// transform): the subtree's geometry in its parent's coordinates is
+    /// this times its children's.
+    pub own: Matrix,
+    pub parent: Option<Arc<Chain>>,
+}
+
+impl Drop for Chain {
+    // Iterative, as `TermNode`'s: a recursive drop of a deep chain takes a
+    // frame per link, and BOSL2 nests nodes deeply.
+    fn drop(&mut self) {
+        let mut next = self.parent.take();
+        while let Some(p) = next {
+            match Arc::try_unwrap(p) {
+                Ok(mut c) => next = c.parent.take(),
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 impl Leaf {
@@ -97,6 +133,7 @@ impl Leaf {
             color: NO_COLOR,
             index: 0,
             bbox: None,
+            chain: None,
         }
     }
 
@@ -418,6 +455,7 @@ impl CsgTree {
         }
         let mut ev = TreeEvaluator {
             geometry: &geometry,
+            keys,
             scheme,
             highlights: Vec::new(),
             background: Vec::new(),
@@ -426,9 +464,10 @@ impl CsgTree {
         let state = State {
             matrix: crate::IDENTITY,
             color: NO_COLOR,
+            chain: None,
         };
         // `buildCSGTree`.
-        let mut root = match ev.visit(top, &state) {
+        let mut root = match ev.visit(top, &state, 0) {
             Visited::Pruned => None,
             Visited::Term(t) => t,
         };
@@ -582,10 +621,12 @@ fn collect_leaves<'n>(n: &'n Node, out: &mut Vec<&'n Node>) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct State {
     matrix: Matrix,
     color: Color,
+    /// The parent's link.
+    chain: Option<Arc<Chain>>,
 }
 
 enum Visited {
@@ -596,6 +637,7 @@ enum Visited {
 
 struct TreeEvaluator<'a> {
     geometry: &'a HashMap<usize, Option<Geometry>>,
+    keys: &'a Keys,
     scheme: Scheme,
     highlights: Vec<Term>,
     background: Vec<Term>,
@@ -607,8 +649,19 @@ fn mul(a: &Matrix, b: &Matrix) -> Matrix {
 }
 
 impl TreeEvaluator<'_> {
-    fn visit(&mut self, n: &Node, state: &State) -> Visited {
-        let mut state = *state;
+    fn visit(&mut self, n: &Node, state: &State, pos: u32) -> Visited {
+        let mut state = state.clone();
+        let own = match &n.kind {
+            NodeKind::Transform { matrix, .. } => *matrix,
+            _ => crate::IDENTITY,
+        };
+        state.chain = Some(Arc::new(Chain {
+            index: n.index,
+            key: self.keys.get(n),
+            pos,
+            own,
+            parent: state.chain.take(),
+        }));
         match &n.kind {
             NodeKind::Transform { matrix, .. } => {
                 if prunes(n) {
@@ -636,7 +689,8 @@ impl TreeEvaluator<'_> {
         let children: Vec<Option<Term>> = n
             .children
             .iter()
-            .filter_map(|c| match self.visit(c, &state) {
+            .enumerate()
+            .filter_map(|(i, c)| match self.visit(c, &state, i as u32) {
                 Visited::Pruned => None,
                 Visited::Term(t) => Some(t),
             })
@@ -708,6 +762,7 @@ impl TreeEvaluator<'_> {
             color: state.color,
             index: n.index,
             bbox,
+            chain: state.chain.clone(),
         }
     }
 
@@ -1020,13 +1075,60 @@ fn match_and_replace(node: &Term) -> Option<Term> {
     None
 }
 
-/// One product for [`product_meshes`]: its positive and negative leaves as
-/// meshes in model coordinates, every face already in the colour it should
-/// be drawn in.
+/// One product for [`product_meshes`]: its positive leaves as meshes in
+/// model coordinates and its negative leaves placed, every face already in
+/// the colour it should be drawn in.
 #[derive(Debug, Clone, Default)]
 pub struct ProductJob {
     pub positives: Vec<PolySet>,
-    pub negatives: Vec<PolySet>,
+    pub negatives: Vec<Negative>,
+}
+
+/// A negative leaf of a product: its mesh where the leaf is, and where
+/// it came from in the tree, so copies of a repeated subtree can share
+/// one union ([`crate::shared`]).
+#[derive(Debug, Clone)]
+pub struct Negative {
+    /// The mesh, coloured, in the leaf's own coordinates.
+    pub mesh: Arc<PolySet>,
+    /// Leaf to model coordinates (`None`: `mesh` is in model coordinates).
+    pub matrix: Option<Matrix>,
+    /// The colour every face was given (negatives are drawn in one).
+    pub tint: Color,
+    /// A 2D leaf's slab, stretched in z by 1.1 (`matrix` includes it).
+    pub slab: bool,
+    /// [`Leaf::chain`]; `None` keeps this product's union flat.
+    pub chain: Option<Arc<Chain>>,
+}
+
+impl From<PolySet> for Negative {
+    /// A mesh in model coordinates, with no place in a tree.
+    fn from(ps: PolySet) -> Negative {
+        Negative {
+            mesh: Arc::new(ps),
+            matrix: None,
+            tint: NO_COLOR,
+            slab: false,
+            chain: None,
+        }
+    }
+}
+
+/// Whether [`product_meshes`] unions `negatives` by the subtrees they came
+/// from, computing a repeated one once, rather than flat.
+pub fn shares_subtrees(negatives: &[Negative]) -> bool {
+    crate::shared::Plan::new(negatives).is_some()
+}
+
+impl Negative {
+    /// The mesh in model coordinates.
+    pub fn placed(&self) -> PolySet {
+        let mut ps = PolySet::clone(&self.mesh);
+        if let Some(m) = &self.matrix {
+            ps.transform(m);
+        }
+        ps
+    }
 }
 
 /// What stops a preview's booleans early: the request's interrupt flag (a
@@ -1060,7 +1162,7 @@ impl Stop {
         self.guard.as_ref().and_then(|g| g.exceeded())
     }
 
-    fn check(&self) -> Result<(), Unsupported> {
+    pub(crate) fn check(&self) -> Result<(), Unsupported> {
         if self.stopped() {
             Err(Unsupported::interrupted())
         } else {
@@ -1068,11 +1170,26 @@ impl Stop {
         }
     }
 
+    /// The token for the kernel operations themselves
+    /// ([`crate::manifold_geom::kernel_token`]), so one long boolean stops
+    /// inside, not only before the next.
+    fn token(&self) -> Option<CancelToken> {
+        crate::manifold_geom::kernel_token(self.interrupt.as_ref(), self.guard.as_ref())
+    }
+
+    /// `geom` held ([`Stop::hold`]), unless its operation was cancelled.
+    fn hold_result(&self, geom: ManifoldGeometry) -> Result<Held<'_>, Unsupported> {
+        if geom.is_cancelled() {
+            return Err(Unsupported::interrupted());
+        }
+        self.hold(geom)
+    }
+
     /// `geom`, counted against the memory limit while it is alive: the
     /// leaves converted for a product and the partial unions are the
     /// preview's working memory, which the render stage's estimate never
     /// sees. Passing the limit trips the guard and stops the preview.
-    fn hold(&self, geom: ManifoldGeometry) -> Result<Held<'_>, Unsupported> {
+    pub(crate) fn hold(&self, geom: ManifoldGeometry) -> Result<Held<'_>, Unsupported> {
         let bytes = match &self.guard {
             Some(g) if g.limits().memory.is_some() => {
                 crate::evaluate::KERNEL_FACTOR * crate::evaluate::solid_cost(&geom) as u64
@@ -1096,16 +1213,21 @@ impl Stop {
 }
 
 /// A solid charged to the memory limit until it is dropped.
-struct Held<'s> {
+pub(crate) struct Held<'s> {
     geom: Option<ManifoldGeometry>,
     bytes: u64,
     stop: &'s Stop,
 }
 
 impl Held<'_> {
+    /// The solid, still held.
+    pub(crate) fn get(&self) -> Option<&ManifoldGeometry> {
+        self.geom.as_ref()
+    }
+
     /// The solid, for an operation; the charge stays until `self` drops,
     /// so an operation's operands count while it runs.
-    fn take(&mut self) -> ManifoldGeometry {
+    pub(crate) fn take(&mut self) -> ManifoldGeometry {
         self.geom.take().unwrap_or_default()
     }
 }
@@ -1142,26 +1264,17 @@ pub fn product_meshes_until(
     stop: &Stop,
 ) -> Result<Vec<Option<PolySet>>, Unsupported> {
     // A conversion takes one ID per colour group and one for a repair.
-    let need = |ps: &PolySet| {
-        let mut colours: Vec<[u32; 4]> = ps
-            .color_indices
-            .iter()
-            .filter_map(|&ci| usize::try_from(ci).ok())
-            .filter_map(|ci| ps.colors.get(ci))
-            .map(Color::key)
-            .collect();
-        colours.sort_unstable();
-        colours.dedup();
-        colours.len() as u32 + 2
-    };
     let firsts: Vec<u32> = jobs
         .iter()
         .map(|j| {
-            let n: u32 = j.positives.iter().chain(&j.negatives).map(need).sum();
+            let n: u32 = j.positives.iter().map(need).sum::<u32>()
+                + j.negatives.iter().map(|n| need(&n.mesh)).sum::<u32>();
             manifold_rust::manifold::Manifold::reserve_ids(n.max(1))
         })
         .collect();
-    let solve = |(job, first): (ProductJob, u32)| product_mesh(job, first, scheme, stop);
+    let token = stop.token();
+    let solve =
+        |(job, first): (ProductJob, u32)| product_mesh(job, first, scheme, stop, token.as_ref());
     let work: Vec<(ProductJob, u32)> = jobs.into_iter().zip(firsts).collect();
     #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
     {
@@ -1172,8 +1285,23 @@ pub fn product_meshes_until(
     work.into_iter().map(solve).collect()
 }
 
+/// The IDs converting `ps` takes: one per colour group and one for a
+/// repair.
+fn need(ps: &PolySet) -> u32 {
+    let mut colours: Vec<[u32; 4]> = ps
+        .color_indices
+        .iter()
+        .filter_map(|&ci| usize::try_from(ci).ok())
+        .filter_map(|ci| ps.colors.get(ci))
+        .map(Color::key)
+        .collect();
+    colours.sort_unstable();
+    colours.dedup();
+    colours.len() as u32 + 2
+}
+
 /// IDs handed out in order from a reserved range.
-struct Range(Cell<u32>);
+pub(crate) struct Range(pub(crate) Cell<u32>);
 
 impl IdSource for Range {
     fn reserve(&self, count: u32) -> u32 {
@@ -1188,6 +1316,7 @@ fn product_mesh(
     first: u32,
     scheme: &Scheme,
     stop: &Stop,
+    token: Option<&CancelToken>,
 ) -> Result<Option<PolySet>, Unsupported> {
     stop.check()?;
     let ids = Range(Cell::new(first));
@@ -1216,20 +1345,41 @@ fn product_mesh(
         .iter()
         .map(&mut convert)
         .collect::<Result<Vec<_>, _>>()?;
-    let negatives = job
-        .negatives
-        .iter()
-        .map(&mut convert)
-        .collect::<Result<Vec<_>, _>>()?;
-    let Some(mut pos) = batch(OpType::Intersect, positives, stop)? else {
+    // Copies of a repeated subtree (the Menger sponge's 1,755 negatives
+    // are 585 leaves of one subtree, three times) are unioned once and
+    // moved, as a render reuses its cached subtree; anything else is one
+    // flat union, as before.
+    let negatives = match crate::shared::Plan::new(&job.negatives) {
+        Some(plan) => {
+            // Within the product's range, after the positives: a union
+            // converts only its own meshes, so the copies take none.
+            let firsts: Vec<u32> = plan
+                .needs(&job.negatives, need)
+                .into_iter()
+                .map(|n| ids.reserve(n))
+                .collect();
+            plan.union(&job.negatives, &firsts, stop, token)?
+                .into_iter()
+                .collect()
+        }
+
+        None => job
+            .negatives
+            .iter()
+            .map(|n| convert(&n.placed()))
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    let Some(mut pos) = batch(OpType::Intersect, positives, stop, token)? else {
         return Ok(None);
     };
-    let solid = match union_tree(negatives, stop)? {
+    let solid = match union_tree(negatives, stop, token)? {
         None => pos,
         Some(mut neg) => {
             stop.check()?;
-            let d = pos.take().boolean(&neg.take(), OpType::Subtract);
-            stop.hold(d)?
+            let d = pos
+                .take()
+                .boolean_until(&neg.take(), OpType::Subtract, token);
+            stop.hold_result(d)?
         }
     };
     let solid = solid.geom.as_ref().filter(|s| !s.is_empty());
@@ -1237,18 +1387,19 @@ fn product_mesh(
 }
 
 /// [`ManifoldGeometry::batch`] over held solids, after a check.
-fn batch<'s>(
+pub(crate) fn batch<'s>(
     op: OpType,
     mut parts: Vec<Held<'s>>,
     stop: &'s Stop,
+    token: Option<&CancelToken>,
 ) -> Result<Option<Held<'s>>, Unsupported> {
     if parts.len() == 1 {
         return Ok(parts.pop());
     }
     stop.check()?;
     let geoms = parts.iter_mut().map(Held::take).collect();
-    ManifoldGeometry::batch(op, geoms)
-        .map(|g| stop.hold(g))
+    ManifoldGeometry::batch_until(op, geoms, token)
+        .map(|g| stop.hold_result(g))
         .transpose()
 }
 
@@ -1264,24 +1415,32 @@ const UNION_LEAF: usize = 16;
 /// of the model in parallel. The tree's shape depends only on the count,
 /// so the result does not depend on the thread count. `stop` is checked
 /// before every batch and join.
-fn union_tree<'s>(
+pub(crate) fn union_tree<'s>(
     mut parts: Vec<Held<'s>>,
     stop: &'s Stop,
+    token: Option<&CancelToken>,
 ) -> Result<Option<Held<'s>>, Unsupported> {
     if parts.len() <= UNION_LEAF {
-        return batch(OpType::Add, parts, stop);
+        return batch(OpType::Add, parts, stop, token);
     }
     let right = parts.split_off(parts.len() / 2);
     #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
-    let (a, b) = rayon::join(|| union_tree(parts, stop), || union_tree(right, stop));
+    let (a, b) = rayon::join(
+        || union_tree(parts, stop, token),
+        || union_tree(right, stop, token),
+    );
     #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
-    let (a, b) = (union_tree(parts, stop), union_tree(right, stop));
+    let (a, b) = (
+        union_tree(parts, stop, token),
+        union_tree(right, stop, token),
+    );
     match (a?, b?) {
         (Some(mut a), Some(mut b)) => {
             stop.check()?;
-            let u = a.take().boolean(&b.take(), OpType::Add);
-            Ok(Some(stop.hold(u)?))
+            let u = a.take().boolean_until(&b.take(), OpType::Add, token);
+            Ok(Some(stop.hold_result(u)?))
         }
+
         (a, b) => Ok(a.or(b)),
     }
 }
@@ -1306,6 +1465,7 @@ mod tests {
             color: NO_COLOR,
             index: 0,
             bbox,
+            chain: None,
         }))
     }
 
@@ -1394,7 +1554,7 @@ mod tests {
         let out = product_meshes(
             vec![ProductJob {
                 positives: vec![a],
-                negatives: vec![b],
+                negatives: vec![b.into()],
             }],
             &crate::color::CORNFIELD,
         );

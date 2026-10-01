@@ -103,9 +103,21 @@ use std::sync::Arc;
 /// let result = a.boolean_with_token(&b, OpType::Add, Some(&token));
 /// assert_eq!(result.status(), Error::Cancelled);
 /// ```
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct CancelToken {
     flag: Arc<AtomicBool>,
+    // NeoSCAD patch: a condition polled with the flag (see `with_check`).
+    check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+// NeoSCAD patch: `Debug` by hand, since the check is a closure.
+impl std::fmt::Debug for CancelToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancelToken")
+            .field("flag", &self.flag)
+            .field("check", &self.check.is_some())
+            .finish()
+    }
 }
 
 impl CancelToken {
@@ -113,7 +125,24 @@ impl CancelToken {
     pub fn new() -> Self {
         Self {
             flag: Arc::new(AtomicBool::new(false)),
+            check: None,
         }
+    }
+
+    /// NeoSCAD patch: a token over a flag the caller already has (a
+    /// request's interrupt flag), so a cancel of the request reaches the
+    /// kernel without a thread to copy one flag into the other.
+    pub fn from_flag(flag: Arc<AtomicBool>) -> Self {
+        Self { flag, check: None }
+    }
+
+    /// NeoSCAD patch: this token, also cancelled once `check` returns
+    /// `true` (a time or memory limit passed). Every cancellation point
+    /// polls it, from any thread, so it must be cheap and thread-safe;
+    /// once it fires, the flag is set and stays set.
+    pub fn with_check(mut self, check: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.check = Some(check);
+        self
     }
 
     /// Request cancellation. Callable from any thread, including while another
@@ -129,7 +158,17 @@ impl CancelToken {
     /// Whether cancellation has been requested.
     #[inline]
     pub fn is_cancelled(&self) -> bool {
-        self.flag.load(Ordering::Relaxed)
+        if self.flag.load(Ordering::Relaxed) {
+            return true;
+        }
+        // NeoSCAD patch: poll the check, and make its answer sticky.
+        match &self.check {
+            Some(c) if c() => {
+                self.flag.store(true, Ordering::Relaxed);
+                true
+            }
+            _ => false,
+        }
     }
 }
 

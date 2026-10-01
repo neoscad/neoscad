@@ -1,0 +1,183 @@
+NeoSCAD patch to manifold-rust 0.13.1 (crates.io): a CancelToken can be
+made over an existing flag (CancelToken::from_flag) and can poll a
+condition with it (with_check), so a request's interrupt flag and its
+time and memory limits stop a boolean from inside; and the largest step
+of a boolean's result assembly, AddNewEdgeVerts, allocates its lists at
+their final size and checks the token as it fills them and between its
+sorts. Without a token nothing changes, and with one that never fires
+the output is unchanged. Tests: crates/geom/tests/kernel_cancel.rs and
+crates/web/test/run.mjs (the Menger sponge at depth 5 under 1 GiB).
+
+Apply from the crate root on top of 0005: patch -p1 < this file. The
+crate's sources use CRLF line endings.
+See vendor/README.md ("The cancellation patch").
+--- a/src/boolean_result.rs
++++ b/src/boolean_result.rs
+@@ -248,6 +248,13 @@
+ // ---------------------------------------------------------------------------
+ // AddNewEdgeVerts — populate edge maps with intersection vertices
+ // ---------------------------------------------------------------------------
++
++// NeoSCAD patch: `token` is checked every `NEW_EDGE_CHECK` intersections,
++// and `true` returned once it is cancelled. This loop and its lists are a
++// boolean's largest step between two of its phase checks: in the Menger
++// sponge at depth 5 it took 0.8 s and grew the process by 1.3 GB, past a
++// wasm instance's memory, before the next check could see the limit.
++const NEW_EDGE_CHECK: usize = 1 << 14;
+ 
+ pub(super) fn add_new_edge_verts(
+     edges_p: &mut EdgeList<i32>,
+@@ -258,8 +265,12 @@
+     halfedge_p: &[Halfedge],
+     forward: bool,
+     offset: usize,
+-) {
++    token: Option<&crate::cancel::CancelToken>,
++) -> bool {
+     for i in 0..p1q2.len() {
++        if i % NEW_EDGE_CHECK == 0 && crate::cancel::is_cancelled(token) {
++            return true;
++        }
+         let edge_p = p1q2[i][if forward { 0 } else { 1 }];
+         let face_q = p1q2[i][if forward { 1 } else { 0 }];
+         let vert = v12r[i];
+@@ -316,6 +327,7 @@
+             }));
+         }
+     }
++    false
+ }
+ 
+ // ---------------------------------------------------------------------------
+--- a/src/boolean_result_assemble.rs
++++ b/src/boolean_result_assemble.rs
+@@ -394,7 +394,20 @@
+     let mut edges_q: EdgeList<i32> = Vec::new();
+     let mut edges_new: EdgeList<(i32, i32)> = Vec::new();
+ 
+-    add_new_edge_verts(
++    // NeoSCAD patch: the lists are allocated at their final size, which
++    // the inclusions give, and the token is checked inside. Grown by
++    // doubling, the last reallocation of `edges_new` alone (a copy from
++    // one buffer into one twice its size) took 0.8 s and a gigabyte in the
++    // Menger sponge at depth 5, with no check able to run in between; now
++    // the allocation comes first, and the loop's first check sees it.
++    let count = |inclusions: &[i32]| -> usize {
++        inclusions.iter().map(|x| x.unsigned_abs() as usize).sum()
++    };
++    let (n12, n21) = (count(&i12), count(&i21));
++    edges_p.reserve_exact(n12);
++    edges_q.reserve_exact(n21);
++    edges_new.reserve_exact(2 * (n12 + n21));
++    if add_new_edge_verts(
+         &mut edges_p,
+         &mut edges_new,
+         &bool3.xv12.p1q2,
+@@ -403,8 +416,8 @@
+         &in_p.halfedge,
+         true,
+         0,
+-    );
+-    add_new_edge_verts(
++        token,
++    ) || add_new_edge_verts(
+         &mut edges_q,
+         &mut edges_new,
+         &bool3.xv21.p1q2,
+@@ -413,10 +426,24 @@
+         &in_q.halfedge,
+         false,
+         bool3.xv12.p1q2.len(),
+-    );
++        token,
++    ) {
++        return crate::boolean3::cancelled_impl();
++    }
+ 
++    // NeoSCAD patch: each sort takes a buffer as large as its list, so a
++    // limit passed while the lists grew stops here, not after the sorts.
++    if is_cancelled(token) {
++        return crate::boolean3::cancelled_impl();
++    }
+     let edges_p = EdgeGroups::new(edges_p);
++    if is_cancelled(token) {
++        return crate::boolean3::cancelled_impl();
++    }
+     let edges_q = EdgeGroups::new(edges_q);
++    if is_cancelled(token) {
++        return crate::boolean3::cancelled_impl();
++    }
+     let edges_new = EdgeGroups::new(edges_new);
+ 
+     // C++ clears v12R/v21R here (after AddNewEdgeVerts); drop the counterparts
+--- a/src/cancel.rs
++++ b/src/cancel.rs
+@@ -103,19 +103,48 @@
+ /// let result = a.boolean_with_token(&b, OpType::Add, Some(&token));
+ /// assert_eq!(result.status(), Error::Cancelled);
+ /// ```
+-#[derive(Clone, Debug, Default)]
++#[derive(Clone, Default)]
+ pub struct CancelToken {
+     flag: Arc<AtomicBool>,
++    // NeoSCAD patch: a condition polled with the flag (see `with_check`).
++    check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+ }
+ 
++// NeoSCAD patch: `Debug` by hand, since the check is a closure.
++impl std::fmt::Debug for CancelToken {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("CancelToken")
++            .field("flag", &self.flag)
++            .field("check", &self.check.is_some())
++            .finish()
++    }
++}
++
+ impl CancelToken {
+     /// A fresh, uncancelled token.
+     pub fn new() -> Self {
+         Self {
+             flag: Arc::new(AtomicBool::new(false)),
++            check: None,
+         }
+     }
+ 
++    /// NeoSCAD patch: a token over a flag the caller already has (a
++    /// request's interrupt flag), so a cancel of the request reaches the
++    /// kernel without a thread to copy one flag into the other.
++    pub fn from_flag(flag: Arc<AtomicBool>) -> Self {
++        Self { flag, check: None }
++    }
++
++    /// NeoSCAD patch: this token, also cancelled once `check` returns
++    /// `true` (a time or memory limit passed). Every cancellation point
++    /// polls it, from any thread, so it must be cheap and thread-safe;
++    /// once it fires, the flag is set and stays set.
++    pub fn with_check(mut self, check: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
++        self.check = Some(check);
++        self
++    }
++
+     /// Request cancellation. Callable from any thread, including while another
+     /// thread is inside an operation holding a clone of this token.
+     ///
+@@ -129,7 +158,17 @@
+     /// Whether cancellation has been requested.
+     #[inline]
+     pub fn is_cancelled(&self) -> bool {
+-        self.flag.load(Ordering::Relaxed)
++        if self.flag.load(Ordering::Relaxed) {
++            return true;
++        }
++        // NeoSCAD patch: poll the check, and make its answer sticky.
++        match &self.check {
++            Some(c) if c() => {
++                self.flag.store(true, Ordering::Relaxed);
++                true
++            }
++            _ => false,
++        }
+     }
+ }
+ 

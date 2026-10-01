@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use geom::color::Color;
 use geom::csg::{
-    CsgTree, DEFAULT_TERM_LIMIT, ProductJob, Products, Stop, product_meshes, product_meshes_until,
+    CsgTree, DEFAULT_TERM_LIMIT, Negative, ProductJob, Products, Stop, product_meshes,
+    product_meshes_until,
 };
 use geom::{RenderOptions, Renderer};
 
@@ -137,7 +138,7 @@ fn product_meshes_are_the_same_at_any_thread_count() {
                 negatives: p
                     .subtractions
                     .iter()
-                    .map(|o| mesh(o, Color([0.0, 1.0, 0.0, 1.0])))
+                    .map(|o| mesh(o, Color([0.0, 1.0, 0.0, 1.0])).into())
                     .collect(),
             }
         })
@@ -183,6 +184,141 @@ difference() {
   translate([0,0,-100]) cube(200, center=true);
 }
 ";
+
+/// The Menger sponge at depth 3 as the preview hands it to
+/// [`product_meshes`]: each negative placed, with its chain when
+/// `chains`.
+fn menger_jobs(chains: bool) -> Vec<ProductJob> {
+    let t = csg(&MENGER_5.replace("level=5", "level=3"));
+    let tint = Color([0.0, 1.0, 0.0, 1.0]);
+    t.root
+        .expect("products")
+        .products
+        .iter()
+        .map(|p| ProductJob {
+            positives: p
+                .intersections
+                .iter()
+                .map(|o| {
+                    let mut ps = (**o.leaf.mesh.as_ref().expect("mesh")).clone();
+                    ps.transform(&o.leaf.matrix);
+                    ps.set_color(Color([1.0, 1.0, 0.0, 1.0]));
+                    ps
+                })
+                .collect(),
+            negatives: p
+                .subtractions
+                .iter()
+                .map(|o| {
+                    let mut ps = (**o.leaf.mesh.as_ref().expect("mesh")).clone();
+                    ps.set_color(tint);
+                    Negative {
+                        mesh: Arc::new(ps),
+                        matrix: Some(o.leaf.matrix),
+                        tint,
+                        slab: false,
+                        chain: if chains { o.leaf.chain.clone() } else { None },
+                    }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// The surface area and box of a mesh, for comparing two unions of the
+/// same solid computed in different orders.
+fn measure(ps: &geom::polyset::PolySet) -> (f64, [f64; 3], [f64; 3]) {
+    let mut area = 0.0;
+    for f in &ps.faces {
+        let p = |i: usize| ps.vertices[f[i] as usize];
+        for k in 1..f.len().saturating_sub(1) {
+            let (a, b, c) = (p(0), p(k), p(k + 1));
+            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            area += 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        }
+    }
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for v in &ps.vertices {
+        for k in 0..3 {
+            lo[k] = lo[k].min(v[k]);
+            hi[k] = hi[k].max(v[k]);
+        }
+    }
+    (area, lo, hi)
+}
+
+/// The Menger sponge's negatives are copies of one subtree: the preview
+/// unions each copy once and moves it, as a render reuses its cache. The
+/// mesh is the same at any thread count, and the same solid as the flat
+/// union of every negative (whose triangles differ: the unions run in
+/// another order).
+#[test]
+fn repeated_subtrees_share_one_union_at_any_thread_count() {
+    let shared = menger_jobs(true);
+    assert_eq!(shared.len(), 1);
+    assert!(geom::csg::shares_subtrees(&shared[0].negatives));
+    assert!(!geom::csg::shares_subtrees(
+        &menger_jobs(false)[0].negatives
+    ));
+    let scheme = geom::color::CORNFIELD;
+    let dump = |out: &[Option<geom::polyset::PolySet>]| format!("{out:?}");
+    let run = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| product_meshes(menger_jobs(true), &scheme))
+    };
+    let one = run(1);
+    assert_eq!(dump(&run(8)), dump(&one), "1 and 8 threads");
+    let flat = product_meshes(menger_jobs(false), &scheme);
+    let (a, lo, hi) = measure(one[0].as_ref().expect("a solid"));
+    let (fa, flo, fhi) = measure(flat[0].as_ref().expect("a solid"));
+    assert!(
+        (a - fa).abs() < 1e-6 * fa,
+        "area {a} against the flat union's {fa}"
+    );
+    for k in 0..3 {
+        assert!((lo[k] - flo[k]).abs() < 1e-9 && (hi[k] - fhi[k]).abs() < 1e-9);
+    }
+}
+
+/// A subtree repeated with a leaf pruned from one copy is not the same
+/// subtree: only the copies with the same leaves share a union.
+#[test]
+fn copies_with_different_leaves_do_not_share() {
+    let jobs = menger_jobs(true);
+    let mut negatives = jobs[0].negatives.clone();
+    // Drop one leaf of one copy (the box pruning a normaliser can do).
+    negatives.remove(5);
+    let scheme = geom::color::CORNFIELD;
+    let pruned = ProductJob {
+        positives: jobs[0].positives.clone(),
+        negatives: negatives.clone(),
+    };
+    let flat = ProductJob {
+        positives: jobs[0].positives.clone(),
+        negatives: negatives
+            .into_iter()
+            .map(|n| geom::csg::Negative { chain: None, ..n })
+            .collect(),
+    };
+    let s = product_meshes(vec![pruned], &scheme);
+    let f = product_meshes(vec![flat], &scheme);
+    let (a, ..) = measure(s[0].as_ref().expect("a solid"));
+    let (fa, ..) = measure(f[0].as_ref().expect("a solid"));
+    assert!(
+        (a - fa).abs() < 1e-6 * fa,
+        "area {a} against the flat union's {fa}"
+    );
+}
 
 /// Normalising a difference of one solid and thousands of holes makes a
 /// chain of thousands of operations; the web demo's preview of this model
@@ -271,7 +407,7 @@ fn slow_job() -> ProductJob {
                 [0.0, 0.0, 1.0, z],
                 [0.0, 0.0, 0.0, 1.0],
             ]);
-            negatives.push(c);
+            negatives.push(c.into());
         }
     }
     ProductJob {

@@ -249,6 +249,13 @@ pub(super) fn size_output(
 // AddNewEdgeVerts — populate edge maps with intersection vertices
 // ---------------------------------------------------------------------------
 
+// NeoSCAD patch: `token` is checked every `NEW_EDGE_CHECK` intersections,
+// and `true` returned once it is cancelled. This loop and its lists are a
+// boolean's largest step between two of its phase checks: in the Menger
+// sponge at depth 5 it took 0.8 s and grew the process by 1.3 GB, past a
+// wasm instance's memory, before the next check could see the limit.
+const NEW_EDGE_CHECK: usize = 1 << 14;
+
 pub(super) fn add_new_edge_verts(
     edges_p: &mut EdgeList<i32>,
     edges_new: &mut EdgeList<(i32, i32)>,
@@ -258,8 +265,12 @@ pub(super) fn add_new_edge_verts(
     halfedge_p: &[Halfedge],
     forward: bool,
     offset: usize,
-) {
+    token: Option<&crate::cancel::CancelToken>,
+) -> bool {
     for i in 0..p1q2.len() {
+        if i % NEW_EDGE_CHECK == 0 && crate::cancel::is_cancelled(token) {
+            return true;
+        }
         let edge_p = p1q2[i][if forward { 0 } else { 1 }];
         let face_q = p1q2[i][if forward { 1 } else { 0 }];
         let vert = v12r[i];
@@ -316,6 +327,7 @@ pub(super) fn add_new_edge_verts(
             }));
         }
     }
+    false
 }
 
 // ---------------------------------------------------------------------------

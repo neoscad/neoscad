@@ -264,5 +264,23 @@ await test('a preview past its time limit stops with the limit', 10000, () => {
     }
 });
 
+// The Menger example at depth 5 renders to a last union that, on its own,
+// grows past the 1 GiB limit (it ran on past 2 GB, then trapped). The
+// kernel checks the limit inside the boolean (`geom::manifold_geom::
+// kernel_token`), so the render stops with a resource-limit error and the
+// engine lives on.
+await test('one boolean past the memory limit is a resource-limit error', 30000, () => {
+    const menger = join(root, 'web/examples/example024.scad');
+    if (!existsSync(menger)) return 'no web/examples/example024.scad';
+    const text = readFileSync(menger, 'utf8').replace(/^n\s*=\s*\d+;/m, 'n=5;');
+    ok('open', { path: '/doc/menger5.scad', text });
+    const r = ok('run', { path: '/doc/menger5.scad', mode: 'render' });
+    assert.equal(r.render.exitCode, 1);
+    assert.match(r.render.console, /ERROR: Resource limit exceeded: .* over the memory limit of 1,024 MiB \(measured\)/, r.render.console);
+    ok('open', { path: '/doc/after.scad', text: 'cube(1);' });
+    assert.equal(ok('run', { path: '/doc/after.scad', mode: 'render' }).render.exitCode, 0);
+    console.log(`     ${r.render.console.split('\n').find((l) => l.includes('measured'))}`);
+});
+
 console.log(failures ? `web core: ${failures} failed` : 'web core: all passed');
 process.exit(failures ? 1 : 0);

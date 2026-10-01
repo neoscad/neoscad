@@ -34,6 +34,7 @@ pub mod minkowski;
 pub mod polygon2d;
 pub mod polyset;
 pub mod primitives;
+mod shared;
 
 use std::sync::Arc;
 
