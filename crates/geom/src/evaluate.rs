@@ -568,6 +568,17 @@ fn is_chain(top: &Node) -> bool {
     false
 }
 
+/// How many parallel splits of the render walk may nest. A split runs
+/// its children's walks inside rayon's `map` on the stack of the thread
+/// that split, so a tree that branches at every level (a recursive module
+/// that adds a leaf beside its recursive call) nested once per level and
+/// could overflow even the pool's large stacks. Past this many splits the
+/// children are walked in order, which gives the same result: the output
+/// is the same at any thread count. By then the pool has long had more
+/// tasks than threads.
+#[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+const PARALLEL_MAX_NESTING: u32 = 64;
+
 #[cfg(all(test, feature = "parallel", not(target_arch = "wasm32")))]
 #[path = "evaluate/small_stack_tests.rs"]
 mod small_stack_tests;
@@ -1300,6 +1311,12 @@ impl Ctx<'_> {
     /// [`Ctx::kids_in_parallel`] says so), and the first error ends the
     /// walk.
     fn node(&self, top: &Node) -> Result<Out, Unsupported> {
+        self.walk(top, 0)
+    }
+
+    /// [`Ctx::node`] inside `nesting` parallel splits (see
+    /// [`PARALLEL_MAX_NESTING`]).
+    fn walk(&self, top: &Node, nesting: u32) -> Result<Out, Unsupported> {
         /// A node whose children are being evaluated, with the results
         /// of those done so far.
         struct Waiting<'n> {
@@ -1314,7 +1331,7 @@ impl Ctx<'_> {
                 None if !uses_children(next) || next.children.is_empty() => {
                     self.finish(next, Vec::new())?
                 }
-                None => match self.kids_in_parallel(next) {
+                None => match self.kids_in_parallel(next, nesting) {
                     Some(kids) => self.finish(next, kids?)?,
                     None => {
                         waiting.push(Waiting {
@@ -1345,21 +1362,25 @@ impl Ctx<'_> {
     }
 
     /// The children's results of a node with more than one child,
-    /// evaluated side by side on the pool. Each child's own walk is
-    /// [`Ctx::node`]'s, so the stack grows only at nodes with several
-    /// children, and the pool's threads have
+    /// evaluated side by side on the pool, unless `nesting` splits already
+    /// enclose this one. Each child's own walk is [`Ctx::walk`]'s, so the
+    /// stack grows only at the splits, and the pool's threads have
     /// [`eval::DEFAULT_THREAD_STACK`].
     #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
-    fn kids_in_parallel(&self, n: &Node) -> Option<Result<Vec<Out>, Unsupported>> {
+    fn kids_in_parallel(&self, n: &Node, nesting: u32) -> Option<Result<Vec<Out>, Unsupported>> {
         use rayon::prelude::*;
-        (self.parallel && n.children.len() > 1)
-            .then(|| n.children.par_iter().map(|c| self.node(c)).collect())
+        (self.parallel && n.children.len() > 1 && nesting < PARALLEL_MAX_NESTING).then(|| {
+            n.children
+                .par_iter()
+                .map(|c| self.walk(c, nesting + 1))
+                .collect()
+        })
     }
 
     /// Without the pool, children are always evaluated in order by the
     /// walk itself.
     #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
-    fn kids_in_parallel(&self, _n: &Node) -> Option<Result<Vec<Out>, Unsupported>> {
+    fn kids_in_parallel(&self, _n: &Node, _nesting: u32) -> Option<Result<Vec<Out>, Unsupported>> {
         let _ = self.parallel;
         None
     }

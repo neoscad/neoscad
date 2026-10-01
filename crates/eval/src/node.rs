@@ -202,7 +202,15 @@ pub struct Origin {
     pub tag_background: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// A node of the evaluated tree.
+///
+/// `Clone`, `PartialEq` and `Drop` are written by hand, without recursion:
+/// the derived ones take a native frame per level, and a recursive module
+/// builds a tree as deep as the evaluator allows (65,507 levels natively).
+/// Copying, comparing or freeing such a tree could overflow the stack after
+/// the evaluation itself had succeeded, and on wasm32 these walks were part
+/// of what a statement costs in frames (`recursion::STATEMENT_FRAMES`).
+#[derive(Debug)]
 pub struct Node {
     pub kind: NodeKind,
     pub children: Vec<Node>,
@@ -213,37 +221,121 @@ pub struct Node {
 }
 
 impl Node {
+    /// A copy of this node's own fields, with no children yet.
+    fn shallow_clone(&self) -> Node {
+        Node {
+            kind: self.kind.clone(),
+            children: Vec::with_capacity(self.children.len()),
+            origin: self.origin.clone(),
+            index: self.index,
+        }
+    }
+
+    /// Whether the nodes' own fields and child counts are equal.
+    fn shallow_eq(&self, other: &Node) -> bool {
+        self.kind == other.kind
+            && self.children.len() == other.children.len()
+            && self.origin == other.origin
+            && self.index == other.index
+    }
+
+    /// Whether every child is a leaf, so that a walk over this node goes
+    /// one level deep at most and needs no stack of its own.
+    fn shallow(&self) -> bool {
+        self.children.iter().all(|c| c.children.is_empty())
+    }
+}
+
+impl Clone for Node {
+    /// Copies the tree bottom-up from an explicit stack. Each entry is a
+    /// node being copied with the copy so far, whose `children` count says
+    /// how many of the node's children are done; a finished copy goes into
+    /// its parent's.
+    fn clone(&self) -> Node {
+        if self.shallow() {
+            let mut n = self.shallow_clone();
+            n.children
+                .extend(self.children.iter().map(Node::shallow_clone));
+            return n;
+        }
+        let mut stack: Vec<(&Node, Node)> = vec![(self, self.shallow_clone())];
+        loop {
+            let (src, copy) = stack.last_mut().expect("the top is popped last");
+            if let Some(c) = src.children.get(copy.children.len()) {
+                if c.children.is_empty() {
+                    copy.children.push(c.shallow_clone());
+                } else {
+                    stack.push((c, c.shallow_clone()));
+                }
+                continue;
+            }
+            let (_, done) = stack.pop().expect("just looked at it");
+            match stack.last_mut() {
+                Some((_, parent)) => parent.children.push(done),
+                None => return done,
+            }
+        }
+    }
+}
+
+impl PartialEq for Node {
+    /// Compares the trees pair by pair from an explicit stack. The answer
+    /// is the derived comparison's: only the order in which different
+    /// nodes' fields are compared differs, and comparing has no effects.
+    fn eq(&self, other: &Node) -> bool {
+        let mut stack: Vec<(&Node, &Node)> = vec![(self, other)];
+        while let Some((a, b)) = stack.pop() {
+            if !a.shallow_eq(b) {
+                return false;
+            }
+            stack.extend(a.children.iter().zip(&b.children));
+        }
+        true
+    }
+}
+
+impl Drop for Node {
+    /// Frees the tree from an explicit stack: each descendant's children
+    /// are moved onto the stack before the descendant itself is dropped,
+    /// so no drop below this one has a subtree to recurse into.
+    fn drop(&mut self) {
+        if self.shallow() {
+            return;
+        }
+        let mut stack = std::mem::take(&mut self.children);
+        while let Some(mut n) = stack.pop() {
+            stack.append(&mut n.children);
+        }
+    }
+}
+
+impl Node {
     /// OpenSCAD's `find_root_tag`: the first node instantiated with `!`,
-    /// and the origin of a second, different one if there is.
+    /// and the origin of a second, different one if there is. The search
+    /// is a pre-order walk over the descendants, from an explicit stack
+    /// for the reason [`Node`] gives.
     pub fn find_root_tag(&self) -> (Option<&Node>, Option<&Origin>) {
         let mut found: Option<&Node> = None;
-        let mut next: Option<&Origin> = None;
-        fn walk<'n>(n: &'n Node, found: &mut Option<&'n Node>, next: &mut Option<&'n Origin>) {
-            for c in &n.children {
-                if next.is_some() {
-                    return;
-                }
-                if let Some(o) = &c.origin
-                    && o.tag_root
-                {
-                    match found {
-                        None => *found = Some(c),
-                        Some(f) => {
-                            let same = f
-                                .origin
-                                .as_ref()
-                                .is_some_and(|fo| fo.span == o.span && fo.unit == o.unit);
-                            if !same {
-                                *next = Some(o);
-                                return;
-                            }
+        let mut stack: Vec<&Node> = self.children.iter().rev().collect();
+        while let Some(c) = stack.pop() {
+            if let Some(o) = &c.origin
+                && o.tag_root
+            {
+                match found {
+                    None => found = Some(c),
+                    Some(f) => {
+                        let same = f
+                            .origin
+                            .as_ref()
+                            .is_some_and(|fo| fo.span == o.span && fo.unit == o.unit);
+                        if !same {
+                            return (found, Some(o));
                         }
                     }
                 }
-                walk(c, found, next);
             }
+            stack.extend(c.children.iter().rev());
         }
-        walk(self, &mut found, &mut next);
-        (found, next)
+        (found, None)
     }
 }

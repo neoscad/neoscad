@@ -88,12 +88,18 @@ fn mul(a: &Matrix, b: &Matrix) -> Matrix {
 /// Every part node under `top`, in tree order. Background (`%`) subtrees
 /// are skipped: they are not part of the rendered model.
 pub fn find(top: &Node) -> Vec<Found<'_>> {
-    fn walk<'n>(n: &'n Node, m: Matrix, ctx: Option<&'static str>, out: &mut Vec<Found<'n>>) {
+    // A pre-order walk from an explicit stack, children pushed in reverse
+    // so they come off in order: a recursive module makes a tree as deep
+    // as the evaluator allows, and a walk that recursed per level could
+    // overflow after the evaluation itself had succeeded.
+    let mut out = Vec::new();
+    let mut stack: Vec<(&Node, Matrix, Option<&'static str>)> =
+        vec![(top, eval::node::IDENTITY, None)];
+    while let Some((n, m, ctx)) = stack.pop() {
         if n.origin.as_ref().is_some_and(|o| o.tag_background) {
-            return;
+            continue;
         }
         let mut m = m;
-        let mut child_ctx: Box<dyn Fn(usize) -> Option<&'static str>> = Box::new(move |_| ctx);
         match &n.kind {
             NodeKind::Part { name } => out.push(Found {
                 node: n,
@@ -102,33 +108,29 @@ pub fn find(top: &Node) -> Vec<Found<'_>> {
                 context: ctx,
             }),
             NodeKind::Transform { matrix, .. } => m = mul(&m, matrix),
-            NodeKind::Csg(CsgOp::Difference) => {
-                child_ctx = Box::new(move |i| {
-                    if i == 0 {
-                        ctx
-                    } else {
-                        ctx.or(Some("difference"))
-                    }
-                });
-            }
+            _ => {}
+        }
+        // The context the `i`-th child is in: the innermost operation
+        // that makes a part inside it no longer a part of the model.
+        let child_ctx = |i: usize| match &n.kind {
+            NodeKind::Csg(CsgOp::Difference) if i == 0 => ctx,
+            NodeKind::Csg(CsgOp::Difference) => ctx.or(Some("difference")),
             NodeKind::Csg(CsgOp::Intersection) | NodeKind::IntersectionFor => {
-                child_ctx = Box::new(move |_| ctx.or(Some("intersection")));
+                ctx.or(Some("intersection"))
             }
-            NodeKind::Hull => child_ctx = Box::new(move |_| ctx.or(Some("hull"))),
-            NodeKind::Minkowski { .. } => child_ctx = Box::new(move |_| ctx.or(Some("minkowski"))),
-            NodeKind::Resize { .. } => child_ctx = Box::new(move |_| ctx.or(Some("resize"))),
+            NodeKind::Hull => ctx.or(Some("hull")),
+            NodeKind::Minkowski { .. } => ctx.or(Some("minkowski")),
+            NodeKind::Resize { .. } => ctx.or(Some("resize")),
             NodeKind::Projection { .. }
             | NodeKind::LinearExtrude(_)
             | NodeKind::RotateExtrude { .. }
-            | NodeKind::Offset { .. } => child_ctx = Box::new(move |_| ctx.or(Some("2d"))),
-            _ => {}
-        }
-        for (i, c) in n.children.iter().enumerate() {
-            walk(c, m, child_ctx(i), out);
+            | NodeKind::Offset { .. } => ctx.or(Some("2d")),
+            _ => ctx,
+        };
+        for (i, c) in n.children.iter().enumerate().rev() {
+            stack.push((c, m, child_ctx(i)));
         }
     }
-    let mut out = Vec::new();
-    walk(top, eval::node::IDENTITY, None, &mut out);
     out
 }
 

@@ -89,19 +89,38 @@ pub fn csg(top: &Node, doc_dir: &Path, fs: &dyn FileSystem) -> String {
 }
 
 impl Writer<'_> {
-    fn csg_node(&mut self, n: &Node, depth: usize) {
-        self.modifiers(n);
-        (0..depth).for_each(|_| self.out.push(b'\t'));
-        self.label(n);
-        if n.children.is_empty() {
-            self.out.extend_from_slice(b";\n");
-        } else {
-            self.out.extend_from_slice(b" {\n");
-            for c in &n.children {
-                self.csg_node(c, depth + 1);
+    /// One node's lines and its subtree's, at `depth` tabs. The walk keeps
+    /// its pending work on a heap stack rather than recursing per level: a
+    /// recursive module makes a tree as deep as the evaluator allows, and
+    /// the dump ran after the evaluation had succeeded, on whatever stack
+    /// was left (on wasm32 it was part of a statement's frame cost).
+    fn csg_node(&mut self, top: &Node, depth: usize) {
+        enum Step<'n> {
+            /// A node's opening line, then its children.
+            Open(&'n Node, usize),
+            /// The `}` that ends a node with children.
+            Close(usize),
+        }
+        let mut stack = vec![Step::Open(top, depth)];
+        while let Some(step) = stack.pop() {
+            match step {
+                Step::Open(n, depth) => {
+                    self.modifiers(n);
+                    (0..depth).for_each(|_| self.out.push(b'\t'));
+                    self.label(n);
+                    if n.children.is_empty() {
+                        self.out.extend_from_slice(b";\n");
+                    } else {
+                        self.out.extend_from_slice(b" {\n");
+                        stack.push(Step::Close(depth));
+                        stack.extend(n.children.iter().rev().map(|c| Step::Open(c, depth + 1)));
+                    }
+                }
+                Step::Close(depth) => {
+                    (0..depth).for_each(|_| self.out.push(b'\t'));
+                    self.out.extend_from_slice(b"}\n");
+                }
             }
-            (0..depth).for_each(|_| self.out.push(b'\t'));
-            self.out.extend_from_slice(b"}\n");
         }
     }
 
@@ -714,9 +733,21 @@ impl Keys {
     /// one thread). Each node's hash depends only on its own subtree and
     /// goes in its node's slot, so the keys are the same at any thread
     /// count and in any schedule.
+    ///
+    /// None of the walks recurses per level of the tree (the survey and
+    /// the hashing keep their pending nodes on the heap), so a tree as
+    /// deep as the evaluator can make is keyed on any stack. Only the
+    /// parallel hashing nests, once per branch point it splits at, and
+    /// [`PARALLEL_MAX_NESTING`] bounds that.
     pub fn new(root: &Node, fs: &dyn FileSystem) -> Keys {
-        fn max_index(n: &Node) -> usize {
-            n.children.iter().map(max_index).fold(n.index, usize::max)
+        fn max_index(top: &Node) -> usize {
+            let mut max = 0;
+            let mut stack = vec![top];
+            while let Some(n) = stack.pop() {
+                max = max.max(n.index);
+                stack.extend(&n.children);
+            }
+            max
         }
         let len = max_index(root) + 1;
         let mut survey = Survey {
@@ -736,7 +767,7 @@ impl Keys {
             #[cfg(not(target_arch = "wasm32"))]
             threads: rayon::current_num_threads(),
         };
-        shared.builder().hash(root);
+        shared.builder().hash(root, 0);
         Keys {
             // An index no node has (the tree need not use every one)
             // keeps the zero hash; `get` is never asked for it.
@@ -774,31 +805,47 @@ struct Survey<'a> {
 }
 
 impl Survey<'_> {
-    /// Returns whether `n` has content.
-    fn walk(&mut self, n: &Node) -> bool {
-        let file = match &n.kind {
-            NodeKind::Surface { file, .. } => Some(file),
-            NodeKind::Import(i) => Some(&i.file),
-            _ => None,
-        };
-        if let Some(f) = file
-            && !f.is_empty()
-            && !self.stats.0.contains_key(f)
-        {
-            let m = self.fs.metadata(Path::new(f));
-            self.stats.0.insert(f.clone(), m);
-        }
-        let mut c = 0;
-        let mut size = 1;
-        for ch in &n.children {
-            if self.walk(ch) {
-                c += 1;
+    /// Fills `counts` and `sizes` for every node under `top`, and stats
+    /// imported files in tree order. Files are stat'ed on the way down
+    /// (pre-order); the counts and sizes are filled in reverse pre-order,
+    /// which reaches every node after all of its descendants.
+    fn walk(&mut self, top: &Node) {
+        let mut order: Vec<&Node> = Vec::new();
+        let mut stack = vec![top];
+        while let Some(n) = stack.pop() {
+            let file = match &n.kind {
+                NodeKind::Surface { file, .. } => Some(file),
+                NodeKind::Import(i) => Some(&i.file),
+                _ => None,
+            };
+            if let Some(f) = file
+                && !f.is_empty()
+                && !self.stats.0.contains_key(f)
+            {
+                let m = self.fs.metadata(Path::new(f));
+                self.stats.0.insert(f.clone(), m);
             }
-            size += self.sizes[ch.index];
+            order.push(n);
+            stack.extend(n.children.iter().rev());
         }
-        self.counts[n.index] = c;
-        self.sizes[n.index] = size;
-        !is_group(n) || c > 0
+        for n in order.into_iter().rev() {
+            let mut c = 0;
+            let mut size = 1;
+            for ch in &n.children {
+                if self.has_content(ch) {
+                    c += 1;
+                }
+                size += self.sizes[ch.index];
+            }
+            self.counts[n.index] = c;
+            self.sizes[n.index] = size;
+        }
+    }
+
+    /// `GroupNodeChecker`'s answer for a node already surveyed: a
+    /// non-group, or a group with a child that has content.
+    fn has_content(&self, n: &Node) -> bool {
+        !is_group(n) || self.counts[n.index] > 0
     }
 }
 
@@ -878,6 +925,16 @@ struct Shared<'a> {
 #[cfg(not(target_arch = "wasm32"))]
 const PARALLEL_MIN_NODES: usize = 512;
 
+/// How many parallel splits may nest. Each split runs its children's
+/// hashing inside rayon's `for_each` on the stack of the thread that
+/// split, so a tree branching at every level (a recursive module that adds
+/// a leaf beside its recursive call) nested once per level and overflowed
+/// the pool's threads. Past this many splits the hashing goes on serially,
+/// which changes no key: each node's hash depends only on its subtree. By
+/// then the pool has long had more tasks than threads.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_MAX_NESTING: u32 = 64;
+
 impl<'a> Shared<'a> {
     fn builder(self) -> KeyBuilder<'a> {
         KeyBuilder {
@@ -923,27 +980,42 @@ impl Slot {
 }
 
 impl KeyBuilder<'_> {
-    fn hash(&mut self, n: &Node) -> Digest {
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.s.threads > 1 && n.children.len() > 1 && self.s.sizes[n.index] >= PARALLEL_MIN_NODES
-        {
-            use rayon::prelude::*;
-            let s = self.s;
-            n.children.par_iter().for_each_init(
-                || s.builder(),
-                |b, c| {
-                    b.hash(c);
-                },
-            );
-        } else {
-            for c in &n.children {
-                self.hash(c);
+    /// Hashes every node under `top`, children before parents, keeping the
+    /// nodes that wait for their children on a heap stack. `nesting` is how
+    /// many parallel splits this call runs inside (see
+    /// [`PARALLEL_MAX_NESTING`]).
+    fn hash(&mut self, top: &Node, nesting: u32) {
+        // A node, and whether its children are hashed already.
+        let mut stack: Vec<(&Node, bool)> = vec![(top, false)];
+        while let Some((n, ready)) = stack.pop() {
+            if ready || n.children.is_empty() {
+                self.own(n);
+                continue;
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.s.threads > 1
+                && nesting < PARALLEL_MAX_NESTING
+                && n.children.len() > 1
+                && self.s.sizes[n.index] >= PARALLEL_MIN_NODES
+            {
+                use rayon::prelude::*;
+                let s = self.s;
+                n.children
+                    .par_iter()
+                    .for_each_init(|| s.builder(), |b, c| b.hash(c, nesting + 1));
+                self.own(n);
+                continue;
+            }
+            #[cfg(target_arch = "wasm32")]
+            let _ = nesting;
+            stack.push((n, true));
+            stack.extend(n.children.iter().rev().map(|c| (c, false)));
         }
-        #[cfg(target_arch = "wasm32")]
-        for c in &n.children {
-            self.hash(c);
-        }
+    }
+
+    /// `n`'s hash from its label and its children's hashes, which are
+    /// done.
+    fn own(&mut self, n: &Node) {
         let d = if is_group(n) && self.s.counts[n.index] <= 1 {
             self.transparent(n)
         } else {
@@ -961,7 +1033,6 @@ impl KeyBuilder<'_> {
             h.finalize().into()
         };
         self.s.hashes[n.index].set(d);
-        d
     }
 
     /// A group with at most one child that has content takes that child's

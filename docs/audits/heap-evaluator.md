@@ -692,3 +692,121 @@ runner's memory; that was not checked here.
   try.
 - `[profile.web]` stays fat. There size is the point, and no PGO is
   involved.
+
+## Stage 0 done
+
+Measured on 2026-10-01 against `83882f6` (base) on the same Apple M4
+Pro, plain release (thin LTO) and PGO + thin LTO (`scripts/pgo.sh`,
+retrained per side), as the owner's reduced matrix allows for stage 0.
+No `heap-eval` feature: stage 0 is unconditional.
+
+**What changed.** Every walk over the finished node tree keeps its
+pending nodes on the heap:
+- `Node`'s `Clone`, `PartialEq` and `Drop` are hand-written and
+  iterative (`node.rs`), as is `find_root_tag`. `Debug` stays derived
+  (a followup).
+- The `.csg` dump (`dump.rs`, `csg_node`) and the keys: `max_index`, the
+  survey (pre-order for the file stats, reverse pre-order for counts and
+  sizes) and the hashing (post-order).
+- The parallel walks. The key hashing and the render walk
+  (`geom/src/evaluate.rs`) still split at branch points, but at most
+  `PARALLEL_MAX_NESTING` (64) splits deep; past that a subtree is walked
+  serially, which changes no key and no result. Before, a tree that
+  branches at every level nested a rayon split per level.
+- Also: the preview's `CsgTree::build` (`collect_leaves`, `visit`),
+  `session`'s `parts::find` and the `use` hint's walk.
+- The memo and call-memo node walks (`memo.rs`, `callmemo.rs`) were
+  already iterative.
+
+**Tests.** `crates/eval/tests/deep_tree.rs` builds 100,000-level trees
+directly (a chain, and a comb that branches at every level). On a
+128 KiB thread they clone, compare, drop, find the root tag and are keyed,
+and a 5,000-level chain dumps. The comb's keys are the same on 1 and 8
+threads. `geom`'s small-stack tests render both shapes at 100,000 levels
+on a 96 KiB thread and match a parallel render, and the chain previews.
+On the base code each of the five eval tests overflows. With the render
+nesting cap removed, the parallel render of the comb overflows too.
+
+**Output.** All identical:
+- conformance 1773/0, at default threads and with `RAYON_NUM_THREADS=1`;
+- `conformance diff --binary-ref <base> --binary <stage 0>` with BOSL2 as
+  a library path, echo and csg:
+  - BOSL2 `examples_x`, `tests_x` and `examples`: 3512 files each, all
+    identical except `isosurface__022` in csg, which calls unseeded
+    `rands()` and differs between two runs of the base binary too;
+  - the OpenSCAD examples: 50/50;
+  - the bench model files: 9/9;
+- the bench models' STL and console, base against stage 0, at 1 and 8
+  threads: 13 models, all identical (`import_stl` skipped), and each
+  model's STL is the same at 1 and 8 threads.
+
+**Checks.** `cargo fmt`, `clippy -D warnings`, `cargo test` (workspace),
+`scripts/wasm-check.sh --depths` and `node crates/web/test/run.mjs` pass.
+
+**Speed.** `conformance bench --refs neoscad`, full set, 8 interleaved
+rounds of base plain, stage 0 plain, base PGO, stage 0 PGO. Each run
+started at a 1-minute load below 3; the load seen across runs was
+1.6–4.0, with no thermal warnings. The ratio is stage 0's best over
+base's best across all rounds; the geomean is over the 11 models of 30 ms
+or more.
+
+| Model | Plain | PGO + thin |
+|---|---:|---:|
+| bosl_fractal_tree | 1.022 | 0.979 |
+| bosl_gears__003 | 0.996 | 0.980 |
+| bosl_isosurface__006 | 1.022 | 1.005 |
+| bosl_screws__001 | 1.001 | 0.988 |
+| bosl_spring_handle | 1.002 | 1.008 |
+| csg_deep_union | 0.984 | 1.030 |
+| csg_spheres | 0.983 | 1.011 |
+| ex_menger | 1.001 | 0.996 |
+| extrude_twist | 0.979 | 0.994 |
+| import_stl | 1.015 | 0.986 |
+| text_30lines | 0.986 | 1.028 |
+| **Geomean** | **0.999** | **1.000** |
+| Per-round paired geomean | 0.986–1.025 | 0.981–1.027 |
+
+- Every model is inside the ±3% layout band (§4.4): parity.
+- Over the first 3 rounds alone, the geomeans were 0.997 plain and 1.015
+  PGO. The PGO rounds then spread on both sides of 1 (0.981–1.017).
+- `eval_only` (BOSL2's 976 tests, summed), median of 8: plain 31.50 s
+  base, 31.72 s stage 0 (best 31.03, 31.10). PGO: 29.60 s and 29.67 s
+  (best 29.11, 29.26).
+- Served edit loop, BOSL2 render, best: plain 9.3 and 9.2 ms, PGO 8.6
+  and 8.7 ms. Cold start: 2.8 ms in all four.
+
+**Depth.** `conformance depth`:
+- Plain: modules went from 65,507 to 66,021 (2.18×), `module-if` from
+  21,842 to 22,072, and functions stayed at 110,361.
+- PGO: unchanged at 39,919 (1.32×) and 55,181.
+
+The evaluator's own frames decide these. They moved a little in the
+plain build because inlining changed around the new `Drop`.
+
+**Web.** The wasm core and the `/try` bundle were built with the default
+scripts (no `wasm-opt`), and served locally.
+- The probe programs (`modT`, `mod`, `fn`, `child`, `lc`, `expr`, `nest`)
+  reach the same depths before and after in Chromium (166, 249, 327, 206,
+  135→137, 924→925, 623) and Firefox (166, 249, 498, 206, 165, 1749,
+  623). In WebKit they are within one or two levels: 39→38, 81, 66→68,
+  65→67, 24, 105, 93→96.
+- In WebKit the worker's probed statement weight is 6080 both times.
+- All 8 `/try` examples preview and render in all three browsers. So do
+  the deep probe examples, which end in a result or OpenSCAD's recursion
+  error and never crash.
+
+**The gain on wasm is zero, not the one §1.3 and the summary expected.**
+- In node 22 with no frame budget (`run.js --depths --all-programs
+  --frames=1000000000`), V8 overflows at the same depth before and after:
+  module 1,611, function 1,712, `module-transforms` 489,
+  `module-children` 793. `function-lc` ends in the recursion error at
+  523 and 521.
+- The walks over the finished tree run after the evaluation has
+  unwound, and per level they cost less than instantiation, so they
+  never set the limit. The "4 frames per statement" is instantiation's
+  weight, and a conservative one: a module level costs about what a
+  function level does (1,611 against 1,712 levels), yet it is charged 8
+  frames to a function's 4. That is a followup, not stage 0.
+- What stage 0 does buy is the point of §1.3. Once stages 1–2 lift the
+  evaluator's limit, the tree it builds can be dumped, keyed, rendered,
+  previewed, copied and freed at any depth, on any thread.

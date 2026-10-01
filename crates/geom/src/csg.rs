@@ -608,16 +608,20 @@ fn prunes(n: &Node) -> bool {
 }
 
 /// Every node the evaluator asks the geometry evaluator about, children
-/// before parents (the traversal's postfix order).
-fn collect_leaves<'n>(n: &'n Node, out: &mut Vec<&'n Node>) {
-    if prunes(n) {
-        return;
-    }
-    for c in &n.children {
-        collect_leaves(c, out);
-    }
-    if !matches!(role(n), Role::Op(_)) {
-        out.push(n);
+/// before parents (the traversal's postfix order). The walk keeps its
+/// pending nodes on a heap stack, as [`TreeEvaluator::visit`] does.
+fn collect_leaves<'n>(top: &'n Node, out: &mut Vec<&'n Node>) {
+    // A node, and whether its children are collected already.
+    let mut stack: Vec<(&Node, bool)> = vec![(top, false)];
+    while let Some((n, done)) = stack.pop() {
+        if done {
+            if !matches!(role(n), Role::Op(_)) {
+                out.push(n);
+            }
+        } else if !prunes(n) {
+            stack.push((n, true));
+            stack.extend(n.children.iter().rev().map(|c| (c, false)));
+        }
     }
 }
 
@@ -649,7 +653,60 @@ fn mul(a: &Matrix, b: &Matrix) -> Matrix {
 }
 
 impl TreeEvaluator<'_> {
-    fn visit(&mut self, n: &Node, state: &State, pos: u32) -> Visited {
+    /// `buildCSGTree`'s walk over the subtree under `top`, the `pos`-th
+    /// child of a node whose state is `state`.
+    ///
+    /// The nodes waiting for their children's terms are kept on a heap
+    /// stack rather than recursing per level: a recursive module makes a
+    /// tree as deep as the evaluator allows, and the preview walked it on
+    /// whatever stack the evaluation had left. The order of everything is
+    /// the recursion's: a node is entered (its state, or the warning that
+    /// prunes it) before its children, and finished after them.
+    fn visit(&mut self, top: &Node, state: &State, pos: u32) -> Visited {
+        /// A node whose children are being visited: its state, the index
+        /// of the next child, and the terms of those not pruned.
+        struct Waiting<'n> {
+            n: &'n Node,
+            state: State,
+            next: usize,
+            kids: Vec<Option<Term>>,
+        }
+        let mut waiting: Vec<Waiting<'_>> = Vec::new();
+        let mut enter = Some((top, pos));
+        loop {
+            if let Some((n, pos)) = enter.take() {
+                let parent = waiting.last().map_or(state, |w| &w.state);
+                match self.enter(n, parent, pos) {
+                    Some(state) => waiting.push(Waiting {
+                        n,
+                        state,
+                        next: 0,
+                        kids: Vec::with_capacity(n.children.len()),
+                    }),
+                    // A pruned node is left out of its parent's terms.
+                    None if waiting.is_empty() => return Visited::Pruned,
+                    None => {}
+                }
+            }
+            let w = waiting.last_mut().expect("a node is waiting");
+            if let Some(c) = w.n.children.get(w.next) {
+                enter = Some((c, w.next as u32));
+                w.next += 1;
+                continue;
+            }
+            let w = waiting.pop().expect("just looked at it");
+            let t = self.finish(w.n, &w.state, w.kids);
+            match waiting.last_mut() {
+                Some(parent) => parent.kids.push(t),
+                None => return Visited::Term(t),
+            }
+        }
+    }
+
+    /// The start of visiting `n`, the `pos`-th child of a node whose state
+    /// is `state`: `n`'s own state, or `None` (and the warning) for a
+    /// transform that prunes it.
+    fn enter(&mut self, n: &Node, state: &State, pos: u32) -> Option<State> {
         let mut state = state.clone();
         let own = match &n.kind {
             NodeKind::Transform { matrix, .. } => *matrix,
@@ -675,7 +732,7 @@ impl TreeEvaluator<'_> {
                             base: lang::diag::PathBase::MainFileDir,
                         }),
                     });
-                    return Visited::Pruned;
+                    return None;
                 }
                 state.matrix = mul(&state.matrix, matrix);
             }
@@ -686,23 +743,18 @@ impl TreeEvaluator<'_> {
             }
             _ => {}
         }
-        let children: Vec<Option<Term>> = n
-            .children
-            .iter()
-            .enumerate()
-            .filter_map(|(i, c)| match self.visit(c, &state, i as u32) {
-                Visited::Pruned => None,
-                Visited::Term(t) => Some(t),
-            })
-            .collect();
+        Some(state)
+    }
+
+    /// The end of visiting `n`, with its state and the terms of its
+    /// children that were not pruned.
+    fn finish(&mut self, n: &Node, state: &State, children: Vec<Option<Term>>) -> Option<Term> {
         let (highlight, background) = n
             .origin
             .as_ref()
             .map_or((false, false), |o| (o.tag_highlight, o.tag_background));
         match role(n) {
-            Role::Op(op) => {
-                Visited::Term(self.apply_to_children(children, op, highlight, background))
-            }
+            Role::Op(op) => self.apply_to_children(children, op, highlight, background),
             Role::Leaf | Role::AdvLeaf => {
                 if matches!(role(n), Role::AdvLeaf) {
                     // `applyBackgroundAndHighlight`.
@@ -716,7 +768,7 @@ impl TreeEvaluator<'_> {
                     }
                 }
                 let t = match self.geometry.get(&n.index) {
-                    Some(Some(g)) => leaf_term(Arc::new(self.leaf(n, g, &state))),
+                    Some(Some(g)) => leaf_term(Arc::new(self.leaf(n, g, state))),
                     _ => empty_set(),
                 };
                 if highlight {
@@ -725,7 +777,7 @@ impl TreeEvaluator<'_> {
                 if background {
                     t.set(FLAG_BACKGROUND);
                 }
-                Visited::Term(Some(t))
+                Some(t)
             }
         }
     }

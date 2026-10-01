@@ -170,6 +170,20 @@ lead them, come roughly in order of user impact.
   - interleaved runs on a quiet machine.
 
   Conformance and BOSL2 output must stay byte-identical.
+
+  Design and staged plan: `docs/audits/heap-evaluator.md`. Stage 0 (the
+  walks over the finished node tree made iterative) is done; its numbers
+  are in that file's "Stage 0 done".
+- **The geometry pool's stack is still sized from the evaluator's**
+  (`geom/src/evaluate.rs`, `pool()`: `eval::DEFAULT_THREAD_STACK`, 80
+  MiB of address space per thread). Since heap-evaluator stage 0 the
+  render walk nests at most `PARALLEL_MAX_NESTING` (64) parallel splits
+  deep, whatever the tree's depth, so the walk no longer needs it. The
+  kernels' own stack needs (Manifold, Clipper2) were not measured, which
+  is what a smaller pool stack would have to check first.
+- **`Node`'s `Debug` is still derived, so recursive.** `{:?}` of a tree
+  as deep as the evaluator allows would overflow; only tests and debug
+  output print nodes that way today.
 - **Call reuse (`eval::callmemo`) gains little from calls with
   children.** They are keyed now (the children's scope, and the variables
   their mentioned names reach in every context around them), and the
@@ -1219,6 +1233,15 @@ lead them, come roughly in order of user impact.
   expression's stack, and list comprehensions twice. Only node 18 was
   measured; browsers (and workers, which may have less stack) are
   unverified. (H2)
+
+  The rendering-walk part is stale. Since heap-evaluator stage 0 no walk
+  over the finished tree recurses per level, and V8's overflow depths did
+  not move (node 22, no budget: module 1,611 and function 1,712 levels,
+  before and after), so a module level's stack is instantiation's. Per
+  level a module recursion costs about what a function recursion does
+  (1,712 / 1,611 = 1.06), yet the default weights charge it 8 frames
+  against 4. `STATEMENT_FRAMES` could be halved for node and other wasm
+  hosts; browsers set their own weights from the worker's probe.
 - The frame budget's calibration in `crates/eval/src/recursion.rs`
   (budget depths at most 63% of where V8 overflows) is stale: at
   `83aa1af` `module-children` reaches 206 of V8's 214 and `function-lc`

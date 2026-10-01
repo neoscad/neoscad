@@ -301,10 +301,13 @@ pub const CALL_FRAMES: u32 = 2;
 pub const COMPREHENSION_FRAMES: u32 = 4;
 
 /// Frames a statement instantiation holds. Each nested statement is also a
-/// level of the node tree, which rendering, the cache keys and freeing the
-/// tree walk recursively after evaluation; per level that walk costs about
-/// four times the stack of evaluating an expression, and it is what limits
-/// recursive modules on WASM.
+/// level of the node tree, but the walks over the finished tree (the dump,
+/// the cache keys, rendering, copying and freeing it) keep their pending
+/// nodes on the heap and add no stack per level: what limits recursive
+/// modules on WASM is instantiation itself. Making those walks iterative
+/// left V8's overflow depths unchanged (1,611 module levels, 1,712
+/// function levels in node 22 without a budget), so this weight is
+/// conservative: a module level costs about what a function level does.
 ///
 /// The weights only matter where the frame budget is finite (wasm32);
 /// they were measured there, as V8 stack per level of the recursions in
@@ -314,9 +317,9 @@ pub const STATEMENT_FRAMES: u32 = 4;
 
 /// The linear-memory stack a wasm32 build of neoscad should be linked
 /// with: `-C link-arg=-zstack-size=8388608` (rustc's default is 1 MiB).
-/// The evaluator stays safe with less, but recursion then stops sooner,
-/// and the geometry walk over a deep tree, which has no check of its own,
-/// needs the room too. `crates/wasm-check/build.rs` links this way.
+/// The evaluator stays safe with less, but recursion then stops sooner.
+/// (The walks over the finished node tree no longer need stack in
+/// proportion to its depth.) `crates/wasm-check/build.rs` links this way.
 pub const WASM_STACK_SIZE: usize = 8 << 20;
 
 /// Linear-memory stack kept free below the measured limit on wasm32, for

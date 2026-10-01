@@ -76,8 +76,7 @@ pub fn report<'a, W: std::io::Write>(
         return;
     }
     let mut calls: Vec<Call> = Vec::new();
-    let mut chain: Vec<&Node> = Vec::new();
-    walk(top, &settings, &mut chain, &mut calls);
+    walk(top, &settings, &mut calls);
     for call in calls {
         let (Some(lib), Some(caller)) = (program(call.lib), program(call.unit)) else {
             continue;
@@ -141,38 +140,45 @@ struct Call {
 /// Find the first call into each used file of `settings`, in tree order.
 /// A node built by the file's code whose parent was built elsewhere marks
 /// the parent as the call.
-fn walk<'n>(
-    n: &'n Node,
-    settings: &HashMap<u32, Vec<Setting>>,
-    chain: &mut Vec<&'n Node>,
-    calls: &mut Vec<Call>,
-) {
-    let unit = n.origin.as_ref().map(|o| o.unit);
-    for c in &n.children {
+///
+/// The walk keeps its path on a heap stack rather than recursing per
+/// level: a recursive module makes a tree as deep as the evaluator allows,
+/// and this runs after the evaluation has succeeded.
+fn walk(top: &Node, settings: &HashMap<u32, Vec<Setting>>, calls: &mut Vec<Call>) {
+    // The nodes from `top` down to the one being walked, each with the
+    // index of its next child; the entries below the last are that node's
+    // ancestors, the chain a call is made from.
+    let mut path: Vec<(&Node, usize)> = vec![(top, 0)];
+    while let Some((n, next)) = path.last_mut() {
+        let n = *n;
+        let Some(c) = n.children.get(*next) else {
+            path.pop();
+            continue;
+        };
+        *next += 1;
+        let unit = n.origin.as_ref().map(|o| o.unit);
         if let (Some(o), Some(parent)) = (&c.origin, n.origin.as_ref())
             && Some(o.unit) != unit
             && settings.contains_key(&o.unit)
             && !calls.iter().any(|k| k.lib == o.unit)
         {
-            let mut path: Vec<(u32, Span)> = chain
+            let mut chain: Vec<(u32, Span)> = path[..path.len() - 1]
                 .iter()
-                .filter_map(|a| a.origin.as_ref())
+                .filter_map(|(a, _)| a.origin.as_ref())
                 .map(|a| (a.unit, a.span))
                 .filter(|&(u, _)| u != o.unit)
                 .collect();
-            path.push((parent.unit, parent.span));
+            chain.push((parent.unit, parent.span));
             calls.push(Call {
                 lib: o.unit,
                 unit: parent.unit,
                 span: parent.span,
                 line: parent.line,
                 module: parent.name.clone(),
-                chain: path,
+                chain,
             });
         }
-        chain.push(n);
-        walk(c, settings, chain, calls);
-        chain.pop();
+        path.push((c, 0));
     }
 }
 
