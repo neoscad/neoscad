@@ -38,8 +38,9 @@ wasm-bindgen = "=0.2.129"
 # The workspace lints, except that `unsafe_code` is `deny` rather than
 # `forbid`: `#[wasm_bindgen]` expands to `#[no_mangle]` exports and unsafe
 # blocks inside our crate, which `forbid` would reject with no way to
-# allow them in `src/wasm.rs` alone. The crate has no unsafe code of its
-# own.
+# allow them in `src/wasm.rs` alone. The crate's one unsafe code of its
+# own is `src/heap.rs` (wasm32 only), the counting global allocator the
+# memory limit measures with, which allows it for that module.
 [lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"

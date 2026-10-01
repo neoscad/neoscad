@@ -423,7 +423,9 @@ The page owns the worker's life:
   `stats` request) respawning returns it to the browser.
 
 ```js
-{ type: "stats" } → { memoryBytes: u64 }   // the wasm memory's current size
+{ type: "stats" } → { memoryBytes: u64,   // the wasm memory's current size
+                      heapBytes: u64 }    // bytes allocated and not freed; the memory
+                                         // limit measures each request's peak of it
 ```
 
 ## Reference glue

@@ -73,7 +73,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub use eval::limits::{Exceeded, Limit, Limits};
+pub use eval::limits::{Exceeded, Limit, Limits, MemoryProbe};
 use eval::{Console, Logged};
 use lang::Program;
 use lang::diag::{DiagCode, Diagnostic, Severity};
@@ -137,6 +137,13 @@ pub struct Config {
     /// default; the result is the same either way, so turning it off is for
     /// comparing against full evaluations.
     pub reuse_evaluation: bool,
+    /// The host's measurement of the memory in use, checked against each
+    /// request's memory limit besides the estimate
+    /// ([`eval::limits::Guard::with_probe`]). It measures the whole
+    /// process, so the memory limit becomes a budget shared by every
+    /// document and request the host runs. None (the default) keeps the
+    /// estimate alone, which is the same on every machine.
+    pub memory_probe: Option<MemoryProbe>,
 }
 
 impl std::fmt::Debug for Config {
@@ -178,6 +185,7 @@ impl Config {
             features: eval::Features::NONE,
             limits: Limits::NONE,
             reuse_evaluation: true,
+            memory_probe: None,
         }
     }
 }
@@ -1047,11 +1055,10 @@ impl Session {
             .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         let limits = run.limits.unwrap_or(self.cfg.limits);
         let limits = (!limits.is_none()).then(|| {
-            Arc::new(eval::limits::Guard::new(
-                limits,
-                flag.clone(),
-                self.cfg.clock.clone(),
-            ))
+            Arc::new(
+                eval::limits::Guard::new(limits, flag.clone(), self.cfg.clock.clone())
+                    .with_probe(self.cfg.memory_probe.clone()),
+            )
         });
         self.jobs
             .lock()

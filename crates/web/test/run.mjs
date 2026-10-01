@@ -207,6 +207,28 @@ await test('runaway recursion is an error, not a crash', 5000, () => {
     console.log(`     ${r.render.console.trim().split('\n')[0]}`);
 });
 
+// The memory limit measures (the wasm build's counting allocator, heap.rs)
+// as well as estimates: the heavy example's BOSL2 evaluation and kernel
+// working memory are mostly outside the estimate, so under a 256 MiB
+// limit it is the measurement that stops it, with a resource-limit error
+// (unmeasured, it ran on to about 860 MiB). The engine is still usable
+// afterwards.
+await test('the measured memory limit is a resource-limit error', 30000, () => {
+    if (!existsSync(join(root, '.reference/BOSL2/std.scad'))) return 'no .reference/BOSL2';
+    const path = '/doc/gearbox.scad';
+    ok('open', { path, text: readFileSync(join(root, 'web/examples/gearbox.scad'), 'utf8') });
+    ok('setLimits', { limits: { ...init.limits, memoryBytes: 256 * 2 ** 20 } });
+    const r = ok('run', { path, mode: 'render' });
+    assert.equal(r.render.exitCode, 1);
+    assert.match(r.render.console, /ERROR: Resource limit exceeded: .* over the memory limit of 256 MiB \(measured\)/, r.render.console);
+    const stats = ok('stats');
+    assert.ok(stats.heapBytes > 0 && stats.heapBytes < stats.memoryBytes, JSON.stringify(stats));
+    ok('setLimits', { limits: init.limits });
+    ok('open', { path: '/doc/after.scad', text: 'cube(1);' });
+    assert.equal(ok('run', { path: '/doc/after.scad', mode: 'render' }).render.exitCode, 0);
+    console.log(`     ${r.render.console.split('\n').find((l) => l.includes('measured'))}`);
+});
+
 // The Menger example at depth 5: its normalised difference is a chain of
 // 14,044 holes, whose recursive walk overflowed V8's stack ("Maximum call
 // stack size exceeded") within 100 ms; and its one product's boolean is the

@@ -8,7 +8,7 @@
 
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
-import { editorText, engineKind, expectDrawn, open, shot, stlTriangles, summary } from "./helpers.js";
+import { editorText, engineKind, expectDrawn, open, settleCursor, shot, stlTriangles, summary } from "./helpers.js";
 
 test("the layout, the site contract and a first preview", async ({ page }) => {
   const { failed, errors } = await open(page);
@@ -49,6 +49,7 @@ test("examples switch, and edits persist until Reset example", async ({ page }) 
   // Type at the start of the document.
   await page.locator(".cm-content").click();
   await page.keyboard.press("ControlOrMeta+Home");
+  await settleCursor(page, 0);
   await page.keyboard.type("// edited\n");
   await expect.poll(() => editorText(page)).toMatch(/^\/\/ edited\n/);
   await page.waitForTimeout(400);
@@ -120,6 +121,7 @@ test("console lines jump to their source", async ({ page }) => {
   // An echo has no source position (OpenSCAD prints none); a warning does.
   await page.locator(".cm-content").click();
   await page.keyboard.press("ControlOrMeta+End");
+  await settleCursor(page, "end");
   await page.keyboard.type("\ncube(size = nosuch);");
   const line = page.locator(".console-line.kind-warning").first();
   await expect(line).toContainText("nosuch");
@@ -196,13 +198,14 @@ Engine.prototype.handle = function (json, buffers) {
   if (mock) {
     await page.locator(".cm-content").click();
     await page.keyboard.press("ControlOrMeta+End");
+    await settleCursor(page, "end");
     await page.keyboard.type("\n// mock:crash");
   } else {
     await page.evaluate(() => window.NeoSCADWeb.engine.request({ type: "e2eArmTrap" }));
     await page.getByTestId("preview").click();
   }
   await expect(page.getByTestId("engine-status")).toHaveText("engine restarted");
-  await expect(page.getByTestId("engine-status")).toHaveAttribute("title", /crashed: .*(unreachable|mock:crash)/);
+  await expect(page.getByTestId("engine-status")).toHaveAttribute("title", /crashed: .*(unreachable|out of memory|mock:crash)/);
   expect(await page.evaluate(() => window.NeoSCADWeb.engine.restarts)).toBe(1);
   if (mock) for (let i = 0; i < "// mock:crash".length; i++) await page.keyboard.press("Backspace");
   else await page.getByTestId("preview").click();

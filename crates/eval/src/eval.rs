@@ -556,7 +556,10 @@ impl<'a> Evaluator<'a> {
         let e = if g.over_time() {
             Some(g.time_exceeded())
         } else {
+            // The host's measurement too, when it gave one: the estimate
+            // misses what the allocator really holds.
             g.memory_exceeds(self.live_bytes(), "the evaluation")
+                .or_else(|| g.measured_over())
         };
         if let Some(e) = e {
             self.limit_exceeded(loc, e);

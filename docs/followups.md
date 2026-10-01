@@ -68,11 +68,28 @@ lead them, come roughly in order of user impact.
   triangle limit bounds their inputs. Geometry results are weighted 6x
   their cache cost for the kernel's working copies, calibrated on the
   benchmark models; still, BOSL2's fractal_tree peaks at 1.96 GB real
-  against under 512 MiB estimated (its evaluation alone is 451 MB). A
-  host-side RSS probe (Linux `/proc/self/statm`; macOS needs
-  `task_info`, i.e. `unsafe` or a crate) would make the limit real. A
-  process-wide budget for the app's several documents (one
-  memory-pressure hook) is still to do. (H4)
+  against under 512 MiB estimated (its evaluation alone is 451 MB).
+  **Measured where the host can (done for the web core):** a host may
+  hand the session a `MemoryProbe` (`session::Config::memory_probe`,
+  `Guard::with_probe`), checked against the memory limit wherever the
+  guard reads the clock (each geometry node and primitive ring, the
+  evaluator's limit ticks); a trip says "(measured)". The web core's
+  probe is its counting global allocator's peak since the request began
+  (`crates/web/src/heap.rs`); without a probe nothing changes. **Still to
+  do natively, with a plan:** (1) a probe per host binary, in its
+  non-library crate: macOS `proc_pid_rusage` `ri_phys_footprint` (what
+  Activity Monitor and `footprint` report; `unsafe` libc, so in `ffi`'s
+  unsafe module and `cli`), Linux `/proc/self/statm`, Windows
+  `GetProcessMemoryInfo` `PrivateUsage`; read at most every ~10 ms, as
+  `stopped()` runs per ring. (2) Since the probe measures the process,
+  the limit becomes the app's process-wide budget across documents, but
+  a budget also needs the caches (geometry, 200 MiB per renderer; parses)
+  to give memory back when it is near, or an idle app with many documents
+  would trip every run; and a trip names whichever request checked, not
+  the one that grew. Add the cache trim on a memory-pressure hook first,
+  then wire the probe in `ffi/src/host.rs` and `linux-app/src/host.rs`
+  (`serve`/`mcp` after, in `cli`). The one-shot CLI keeps no limit.
+  (H4)
 - When several parallel geometry siblings pass a count limit, the
   earliest in the source that recorded one is reported; a sibling that
   stopped (on the others' trip) before its own check never records, so
@@ -1225,12 +1242,25 @@ lead them, come roughly in order of user impact.
   The meshes change (the unions run in another order), so the preview
   images need re-checking; the Menger sponge should drop to about the
   render's time. Effort: M-L (`geom::csg` and `render::preview`).
-- **Out of memory in the kernel still traps.** Kernel working memory is
-  not counted against the web core's 1 GiB limit, so a render like the
-  Menger example at depth 5 grows the instance until an allocation fails
-  and Rust aborts (`unreachable`). The worker now names it ("the engine
-  ran out of memory at N MiB"), but it is still a respawn, not a
-  `resource-limit` diagnostic.
+- **Out of memory inside one kernel operation still traps.** The web
+  core now measures (see "Serve and session", the memory limit): growth
+  the estimate missed (BOSL2 evaluation, kernel working memory, the
+  cache) stops at the next node or ring with a `resource-limit`
+  "(measured)" error, and the worker lives on (`crates/web/test/run.mjs`:
+  the heavy example under 256 MiB). But one kernel operation runs to its
+  end, so a single boolean that needs the rest of the address space on
+  its own still traps: the Menger example at depth 5's render reaches its
+  last union of 20 depth-4 negatives well under 1 GiB and then grows past
+  2 GB inside it (stopped by the test's process guard; previously the
+  instance trapped). The fix is in the kernel: manifold-rust already
+  ports Manifold's cooperative cancellation (`vendor/manifold-rust/src/cancel.rs`,
+  `boolean_with_token`, checks in `csg_tree`'s batch rounds); it needs a
+  `CancelToken` over an existing flag (a vendor patch: `CancelToken::new`
+  makes its own), a token-taking batch entry, and `geom::manifold_geom`
+  passing the request's interrupt flag, with a cancelled (empty) result
+  never cached. The web allocator would then raise that flag when the live
+  count passes the limit. Left for the `geom` owner (another builder had
+  `geom` at the time).
 - Consider "Connect your AI agent" (the `neoscad mcp --browser` bridge,
   docs/agent-bridge.md) for the native apps too: macOS, and the Linux and
   Windows apps being built (owner, 2026-09-30: weigh its value first, don't
@@ -1261,14 +1291,19 @@ lead them, come roughly in order of user impact.
   natively too and whether it is a false positive on BOSL2's isosurface
   VNF. wasm gives 269,960 triangles against the CLI's 269,948 (wasm32
   maths, see "WASM").
-- **A flaky e2e:** "examples switch, and edits persist" lost the typed
-  space of `// edited` (the editor held `//edited`) in 2 of 5 full-suite
-  runs against the website under `python3 -m http.server`; it passed in
-  all runs under `serve.mjs`, and in 0 of 20 isolated repeats did it
-  fail. The key events reach CodeMirror in order when it passes; the
-  cause is unknown (a keystroke landing while the autorun preview's
-  replies, the customizer refresh or a language-server answer arrive is
-  the suspect). A user could lose a keystroke the same way.
+- ~~**A flaky e2e:** "examples switch, and edits persist" lost a typed
+  space~~ Fixed: under 6x CPU throttling a keystroke right after the click
+  and Cmd/Ctrl-Home landed at a stale cursor about once in 20 runs
+  ("/ edited" with a "/" in front, or the original "//edited"). The
+  editor's own `changes` messages show CodeMirror inserting at the stale
+  position with no page call in between, so the bridge is not losing keys;
+  the race is CodeMirror's reading of the DOM selection, and it needs the
+  next key within milliseconds of the cursor key under heavy load (it
+  persisted at 40 ms between keys only with the throttle). The specs now
+  wait for the cursor and two frames (`settleCursor` in `web/e2e/helpers.js`)
+  before typing: 0 of 40 throttled runs lost a key, and the full suite
+  passed 10 runs in a row. If users report lost keys, look at CodeMirror's
+  `DOMObserver` selection reads after `view.setState`.
 - **The threaded ring's preview takes 3.8 s to show for 1.8 s of engine
   time** (`timings.totalMs`); the render shows in 3.8 s for 3.7 s. The
   difference is outside `timings`: packing the preview scene (image-CSG

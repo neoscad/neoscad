@@ -23,6 +23,34 @@ export async function open(page, hash = "") {
 
 export const summary = (page) => page.getByTestId("render-summary");
 export const editorText = (page) => page.evaluate(() => window.NeoSCADEditor.text().text);
+/// Wait until the editor's cursor is at `pos` ("end" for the end of the
+/// document) and CodeMirror has caught up
+/// with the DOM, before typing after a click and a cursor key.
+///
+/// Typing at once raced CodeMirror's reading of the DOM selection: under
+/// load (the suite's other pages, or 6x CPU throttling, which reproduces it
+/// about once in 20) a keystroke right after the click and Cmd/Ctrl-Home
+/// was inserted at a stale cursor, so "// edited" came out as "//edited"
+/// or "/ edited" + "/" in front. The editor's own `changes` messages show
+/// it inserting at the stale position, so the page's bridge passed on
+/// what CodeMirror did; a person pausing as little as a frame after the
+/// cursor key does not hit it. Two frames and a task let the pending
+/// selection events run first.
+export async function settleCursor(page, pos) {
+  await expect
+    .poll(() =>
+      page.evaluate((pos) => {
+        const s = window.NeoSCADEditor.state();
+        const at = pos === "end" ? s.length : pos;
+        return s.selection[0] === at && s.selection[1] === at;
+      }, pos),
+    )
+    .toBe(true);
+  await page.evaluate(
+    () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 0)))),
+  );
+}
+
 export const engineKind = (page) => page.evaluate(() => window.NeoSCADWeb.build.engine);
 
 /// The 3D view's pixels as the screen shows them, whatever draws them

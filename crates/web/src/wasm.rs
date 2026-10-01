@@ -60,8 +60,9 @@ impl Engine {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Engine {
         let clock: crate::Clock = Arc::new(performance_now);
+        let probe: session::MemoryProbe = Arc::new(crate::heap::peak);
         Engine {
-            worker: Worker::new(Some(clock)),
+            worker: Worker::new(Some(clock)).with_probe(Some(probe)),
         }
     }
 
@@ -74,6 +75,8 @@ impl Engine {
             .iter()
             .map(|b| js_sys::Uint8Array::new(&b).to_vec())
             .collect();
+        // The memory probe reads this request's peak (`heap.rs`).
+        crate::heap::reset_peak();
         let reply = self.worker.handle(request, inputs);
         let out = js_sys::Array::new();
         out.push(&JsValue::from_str(&reply.json));

@@ -15,6 +15,8 @@
 //!   `/neoscad/libraries`) and fonts; the page adds BOSL2 with `addFiles`;
 //! - the clock: passed to [`Worker::new`] (`performance.now()` in the
 //!   browser), for timings and the time limit;
+//! - a measurement of memory in use, for the memory limit: passed to
+//!   [`Worker::with_probe`] (the wasm32 build's counting allocator);
 //! - the seed of unseeded `rands()` and the creation date of exports: from
 //!   the page's requests.
 //!
@@ -22,6 +24,8 @@
 //! runaway one is stopped by the page terminating the worker (see the
 //! protocol's "Crashes, cancelling and respawning").
 
+#[cfg(target_arch = "wasm32")]
+mod heap;
 mod tar;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
@@ -80,6 +84,7 @@ struct State {
 /// documentation).
 pub struct Worker {
     clock: Option<Clock>,
+    probe: Option<session::MemoryProbe>,
     state: Option<State>,
 }
 
@@ -329,7 +334,12 @@ impl session::ExportSink for Keep {
 /// The session configuration of the worker: files in memory with the
 /// bundled libraries and fonts over them, the clock, the seed and the
 /// limits.
-fn config(files: Arc<MemFs>, clock: Option<Clock>, seed: u32) -> session::Config {
+fn config(
+    files: Arc<MemFs>,
+    clock: Option<Clock>,
+    probe: Option<session::MemoryProbe>,
+    seed: u32,
+) -> session::Config {
     let base: Arc<dyn FileSystem + Send + Sync> = files;
     let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(base, LIBRARY_DIR));
     let mut cfg = session::Config::new(fs.clone(), LibraryPath(vec![PathBuf::from(LIBRARY_DIR)]));
@@ -350,6 +360,7 @@ fn config(files: Arc<MemFs>, clock: Option<Clock>, seed: u32) -> session::Config
     cfg.clock = clock;
     cfg.rng_seed = seed;
     cfg.limits = WEB_LIMITS;
+    cfg.memory_probe = probe;
     cfg
 }
 
@@ -358,7 +369,21 @@ impl Worker {
     /// enforces the time limit (without one, timings are 0 and there is
     /// no time limit).
     pub fn new(clock: Option<Clock>) -> Worker {
-        Worker { clock, state: None }
+        Worker {
+            clock,
+            probe: None,
+            state: None,
+        }
+    }
+
+    /// This worker, also measuring memory with `probe` against the
+    /// memory limit (`session::Config::memory_probe`). The wasm32 build
+    /// passes the instance's live heap (`heap.rs`): the estimate does not
+    /// count a geometry kernel's working memory, and a wasm32 allocation
+    /// that fails aborts the instance instead of returning an error.
+    pub fn with_probe(mut self, probe: Option<session::MemoryProbe>) -> Worker {
+        self.probe = probe;
+        self
     }
 
     /// Handle one request (`docs/web-protocol.md`): `request` is its JSON
@@ -429,7 +454,10 @@ impl Worker {
                     "previewDelayMs": client::DEFAULT_PREVIEW_DELAY_MS,
                 },
             })),
-            "stats" => Ok(json!({ "memoryBytes": memory_bytes() })),
+            "stats" => Ok(json!({
+                "memoryBytes": memory_bytes(),
+                "heapBytes": heap_bytes(),
+            })),
             "open" => {
                 let r: Open = fields(request)?;
                 Ok(to_json(&c.open(&r.path, r.text)?))
@@ -494,7 +522,12 @@ impl Worker {
             return Err(invalid("the worker is already initialised"));
         }
         let files = Arc::new(MemFs::new());
-        let client = Client::new(config(files.clone(), self.clock.clone(), r.seed));
+        let client = Client::new(config(
+            files.clone(),
+            self.clock.clone(),
+            self.probe.clone(),
+            r.seed,
+        ));
         if let Some(l) = r.limits {
             client.set_limits(l)?;
         }
@@ -529,6 +562,18 @@ fn memory_bytes() -> u64 {
     #[cfg(target_arch = "wasm32")]
     {
         core::arch::wasm32::memory_size(0) as u64 * 65_536
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
+}
+
+/// Bytes the instance has allocated and not freed (0 natively).
+fn heap_bytes() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        heap::live()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

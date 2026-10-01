@@ -265,7 +265,13 @@ result with a `resource-limit` diagnostic, not a crash.
   already polls, and element-wise operators and the printer stop early
   once over, instead of growing to gigabytes. Nodes, messages and in-flight geometry results are
   counted too; kernel working memory and the caches (own budgets) are
-  not.
+  not. A host that can measure also hands the session a `MemoryProbe`
+  (`session::Config::memory_probe`), checked against the same limit
+  wherever the time is: the web core's is its counting allocator's peak
+  for the request (`crates/web/src/heap.rs`, the one `unsafe` there, as
+  `GlobalAlloc` requires), so kernel growth the estimate misses stops at
+  the next node with a `resource-limit` error instead of trapping the
+  instance. Native hosts do not measure yet (`docs/followups.md`).
 - **Time** is checked at evaluator calls and loop iterations and before
   each geometry node; one long kernel operation runs to its end.
 

@@ -246,3 +246,43 @@ fn values_under_the_limit_are_untouched() {
     let echoes: Vec<_> = r.lines.iter().map(|(_, t)| t.as_str()).collect();
     assert_eq!(echoes, ["2, 2, 7164", "10000"]);
 }
+
+/// A host's measurement ([`eval::limits::MemoryProbe`]) trips the memory
+/// limit wherever the guard checks, as a measured limit; under the limit
+/// it changes nothing. It is how the web core catches the kernel's working
+/// memory, which the estimate cannot see.
+#[test]
+fn a_measured_probe_trips_the_memory_limit() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let used = Arc::new(AtomicU64::new(10 << 20));
+    let probe = {
+        let used = used.clone();
+        Arc::new(move || used.load(Ordering::Relaxed)) as eval::limits::MemoryProbe
+    };
+    let limits = Limits {
+        memory: Some(LIMIT),
+        ..Limits::NONE
+    };
+    let flag = Arc::new(AtomicBool::new(false));
+    let guard = Guard::new(limits, flag.clone(), None).with_probe(Some(probe));
+    assert!(!guard.stopped());
+    assert_eq!(guard.exceeded(), None);
+
+    used.store(LIMIT + (1 << 20), Ordering::Relaxed);
+    assert!(guard.stopped());
+    assert!(
+        flag.load(Ordering::Relaxed),
+        "the trip raises the interrupt"
+    );
+    let e = guard.exceeded().expect("a measured trip is recorded");
+    assert_eq!(e.limit, Limit::Memory);
+    assert!(e.measured);
+    assert_eq!(
+        e.message(),
+        "Resource limit exceeded: the engine uses 65 MiB of memory, over the memory limit of 64 MiB (measured)"
+    );
+
+    // Without a probe nothing is measured, whatever the process holds.
+    let plain = Guard::new(limits, Arc::new(AtomicBool::new(false)), None);
+    assert!(!plain.stopped());
+}

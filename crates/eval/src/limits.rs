@@ -43,6 +43,13 @@ use std::sync::{Arc, Mutex};
 /// read the clock themselves).
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 
+/// Bytes of memory the host measures in use: the process's footprint
+/// natively, the instance's live heap on wasm32. Only hosts can measure
+/// (it takes the operating system, or the allocator), so a library never
+/// makes one; a host hands it in with [`Guard::with_probe`]. It must be
+/// cheap: [`Guard::stopped`] calls it as often as it reads the clock.
+pub type MemoryProbe = Arc<dyn Fn() -> u64 + Send + Sync>;
+
 /// One kind of limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Limit {
@@ -267,6 +274,9 @@ pub struct Exceeded {
     /// at the string limit rather than build text that can be exponentially
     /// longer, so the full length is never known.
     pub at_least: bool,
+    /// A memory limit passed by the host's measurement ([`MemoryProbe`])
+    /// rather than by the estimate: `asked` is then the MiB in use.
+    pub measured: bool,
     /// Where, when the geometry stage found it (the evaluator prints its
     /// own at the call).
     pub at: Option<At>,
@@ -308,6 +318,11 @@ impl Exceeded {
         match self.limit {
             Limit::Time => format!(
                 "Resource limit exceeded: the request ran longer than the time limit of {max} s"
+            ),
+            Limit::Memory if self.measured => format!(
+                "Resource limit exceeded: {} uses {} MiB of memory, over the memory limit of {max} MiB (measured)",
+                self.what,
+                fmt_num(self.asked.ceil()),
             ),
             Limit::Memory => format!(
                 "Resource limit exceeded: {} needs more than the memory limit of {max} MiB (estimated)",
@@ -357,6 +372,7 @@ pub struct Guard {
     limits: Limits,
     interrupt: Arc<AtomicBool>,
     clock: Option<Clock>,
+    probe: Option<MemoryProbe>,
     /// The clock reading past which the request is out of time.
     deadline: f64,
     tripped: Mutex<Option<Exceeded>>,
@@ -387,11 +403,29 @@ impl Guard {
             limits,
             interrupt,
             clock,
+            probe: None,
             deadline,
             tripped: Mutex::new(None),
             geometry: AtomicU64::new(0),
             ticks: AtomicU32::new(0),
         }
+    }
+
+    /// This guard, also checking the memory limit against `probe`'s
+    /// measurement wherever it checks the time (every [`Guard::stopped`]),
+    /// besides the estimate it always keeps.
+    ///
+    /// The estimate cannot see a geometry kernel's working memory, and on
+    /// wasm32 an allocation that fails aborts the instance (a trap, and the
+    /// worker's respawn) instead of returning an error; measuring catches
+    /// such growth at the next node or ring and stops with a
+    /// `resource-limit` diagnostic. The measurement covers the whole
+    /// process, so in a host with several documents the limit is a budget
+    /// they share. It only ever stops a request, never changes what one
+    /// makes, so output under the limit is unaffected.
+    pub fn with_probe(mut self, probe: Option<MemoryProbe>) -> Guard {
+        self.probe = probe;
+        self
     }
 
     pub fn limits(&self) -> &Limits {
@@ -446,7 +480,28 @@ impl Guard {
             self.trip(self.time_exceeded());
             return true;
         }
+        if let Some(e) = self.measured_over() {
+            self.trip(e);
+            return true;
+        }
         false
+    }
+
+    /// The memory limit as passed by the probe's measurement, if a probe
+    /// was given and it reads over the limit (nothing is recorded).
+    pub fn measured_over(&self) -> Option<Exceeded> {
+        let max = self.limits.memory?;
+        let used = (self.probe.as_ref()?)();
+        let mib = |b: u64| b as f64 / (1u64 << 20) as f64;
+        (used > max).then(|| Exceeded {
+            limit: Limit::Memory,
+            max: mib(max),
+            asked: mib(used),
+            what: "the engine".to_string(),
+            at_least: false,
+            measured: true,
+            at: None,
+        })
     }
 
     /// [`Guard::stopped`], reading the clock only every 1,024th call (a
@@ -478,6 +533,7 @@ impl Guard {
             asked: 0.0,
             what: String::new(),
             at_least: false,
+            measured: false,
             at: None,
         }
     }
@@ -492,6 +548,7 @@ impl Guard {
             asked,
             what: what.to_string(),
             at_least: false,
+            measured: false,
             at: None,
         })
     }
@@ -541,6 +598,7 @@ impl Guard {
             asked: mib(bytes),
             what: what.to_string(),
             at_least: false,
+            measured: false,
             at: None,
         })
     }
