@@ -44,7 +44,14 @@ uniffi = { version = "=0.32.2", default-features = false }
 # wgpu the renderer uses; no second copy is built).
 wgpu = "30"
 
+# The memory limit's measurement (`memory.rs`, shared with crates/cli):
+# `proc_pid_rusage` on macOS, the page size on Linux, and on Windows the
+# process's private bytes. Both already in the build (wgpu, mimalloc).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
 # `IDXGISwapChain2::SetMatrixTransform` on the `SwapChainPanel`'s swap
 # chain, for the inverse of the display scale (`layer.rs`). The version
 # wgpu-hal's DX12 backend already builds (it hands out the swap chain as
@@ -61,8 +68,9 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["
 # The workspace's lints, written out because one differs: `unsafe_code` is
 # `deny` rather than the workspace's `forbid`, since `forbid` cannot be
 # lifted for a single module and the viewport must turn the app's
-# `CAMetalLayer` pointer into a wgpu surface. `src/layer.rs` is the only
-# module that allows it; everything else here still refuses `unsafe`.
+# `CAMetalLayer` pointer into a wgpu surface. `src/layer.rs` and `memory.rs`
+# (the process's memory, shared with crates/cli) are the modules that allow
+# it; everything else here still refuses `unsafe`.
 # UniFFI's `extern "C"` exports come from its macros, which the lint does
 # not look into. Keep the rest in step with `[workspace.lints]`.
 [lints.rust]

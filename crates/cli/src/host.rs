@@ -136,6 +136,11 @@ impl Host {
         let t0 = std::time::Instant::now();
         cfg.clock = Some(Arc::new(move || t0.elapsed().as_secs_f64() * 1000.0));
         cfg.rng_seed = seed;
+        // Measured memory for the memory limit (`crate::memory`); only a
+        // run with a memory limit reads it (`serve` and `mcp`, under the
+        // agent limits), so other runs are unchanged.
+        cfg.memory_probe = crate::memory::probe();
+        cfg.memory_release = crate::memory::release();
         cfg.gpu = Some(Arc::new(crate::png::offscreen));
         cfg
     }

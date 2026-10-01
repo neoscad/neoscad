@@ -14,6 +14,15 @@
 > lists 1,773 ids. The other figures are as audited. Commit ids here were
 > rewritten when the history was cleaned before publication; ids of
 > local `progress/` files keep their original names.
+>
+> **Status (2026-09-30):** "slower than the nightly on deep unions, Menger
+> level 4 and many `text()` nodes" (the Fastest row and next step 6) is
+> dated. `docs/audits/slow-cases.md` did not reproduce deep unions (2–4×
+> faster), and fixed the other two: Menger level 4 with parallel boolean
+> kernels in manifold-rust (`c26213e`; 1.59 s against the nightly's
+> 2.29 s), 2D text with the clipper2-rust changes (0.49 s against 1.41 s)
+> and extruded text with the cap triangulation (2.7 s against 32.3 s).
+> The rows below are as audited.
 
 Audited at `45dc30d` (clean tree) on an Apple M4 Pro (14 cores, 48 GB),
 macOS 27.0, against the reference nightly 2026.09.23

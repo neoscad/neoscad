@@ -2,8 +2,9 @@
 
 > **Status (2026-09-30).** P1 is done (`eval::callmemo`), calls with
 > children included. P2 is measured
-> (6–7% faster, identical output except recursion depth) with a local
-> script; releases do not use it yet. Each item with
+> (6–7% faster, identical output except recursion depth), and the
+> cargo-dist release uses it on four targets (`docs/release.md`, "PGO
+> builds"; what is left is in `docs/followups.md`). Each item with
 > a **Status** line records what became of it; the rest is the audit as
 > written.
 
@@ -172,7 +173,8 @@ while another agent was timing on the machine, so ±10%).
 - **Risk:** none to output (FP unchanged). CI complexity: six dist
   targets need per-target profiles or PGO on macOS only. **Effort:** M.
 - **Status: measured, 6–7% faster; local script landed, releases not
-  yet.** `scripts/pgo.sh` builds `neoscad` instrumented, trains it with
+  yet.** (2026-09-30: the release uses it on four targets since
+  `3fb9ef4`.) `scripts/pgo.sh` builds `neoscad` instrumented, trains it with
   `scripts/pgo-train.py` (every bench model to STL, four as PNGs, the
   977 BOSL2 tests to `.echo`, every 8th BOSL2 doc example, OpenSCAD's
   `examples/Basics` and `Functions`, `snapshot`/`check`/`measure`, a
@@ -421,6 +423,7 @@ fractal_tree or the edit loop. Do P1 first, which shares the machinery.
    landed; in the cargo-dist release on four targets, the rest in
    `followups.md`.*
 5. P1: a gated prototype for modules without children, measured on
-   fractal_tree and checked by `incremental.rs`'s harness. (L)
+   fractal_tree and checked by `incremental.rs`'s harness. (L) *Done,
+   calls with children included; see its status.*
 6. P3: serialise `lang::fragment` keyed on content hash and build id,
    behind a flag, measured on the cold BOSL2 edit. (M–L)

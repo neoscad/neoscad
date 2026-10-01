@@ -1486,6 +1486,7 @@ dependencies = [
  "clap_mangen",
  "getrandom",
  "interprocess",
+ "libc",
  "mimalloc",
  "neoscad-assets",
  "neoscad-bench-core",
@@ -1563,6 +1564,7 @@ dependencies = [
 name = "neoscad-ffi"
 version = "0.2.0"
 dependencies = [
+ "libc",
  "mimalloc",
  "neoscad-assets",
  "neoscad-client",
@@ -1577,6 +1579,7 @@ dependencies = [
  "uniffi",
  "wgpu",
  "windows",
+ "windows-sys",
 ]
 
 [[package]]

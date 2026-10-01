@@ -57,6 +57,7 @@ mod limits;
 mod lsp;
 mod mcp;
 mod measure;
+mod memory;
 mod modeltest;
 mod outcome;
 mod param_json;

@@ -38,6 +38,10 @@ mod host;
 mod inspect;
 mod language;
 mod layer;
+/// The process's measured memory, for the memory limit: the command
+/// line's module, compiled here too so both hosts measure alike.
+#[path = "../../cli/src/memory.rs"]
+mod memory;
 mod picture;
 mod shared;
 mod types;

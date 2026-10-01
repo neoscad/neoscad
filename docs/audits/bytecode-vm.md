@@ -1,5 +1,11 @@
 # Audit: a bytecode VM for the evaluator (spike at `a948259`)
 
+> **Status (2026-09-30).** The hybrid recommended below landed: the
+> call-path fixes T1–T5 in `d137102`, and the frame plan (registers for
+> `let` and `for` variables, pure frames for calls) in the tree-walker in
+> `37ca8eb`. The VM prototype is not in the tree. The rest is the audit as
+> written.
+
 The question: is a bytecode compiler plus VM for expressions and function
 bodies worth building? A prototype was built behind an off-by-default
 switch, checked against the tree-walker for exact output, and measured

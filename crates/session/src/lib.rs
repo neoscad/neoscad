@@ -58,6 +58,7 @@ pub mod docs;
 pub mod export;
 pub mod format;
 pub mod measure;
+pub mod memory;
 pub mod mesh;
 pub mod modeltest;
 pub mod orient;
@@ -94,6 +95,9 @@ pub const EXIT_NOT_IMPLEMENTED: u8 = 3;
 pub type FontProvider = Arc<dyn Fn(&[String]) -> text::FontDb + Send + Sync>;
 /// Milliseconds on any monotonic clock, for timings.
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
+/// Hands memory the process freed back to the system, so that the next
+/// [`MemoryProbe`] reading shows it ([`Config::memory_release`]).
+pub type MemoryRelease = Arc<dyn Fn() + Send + Sync>;
 /// Opens (once) the GPU snapshots draw on.
 #[cfg(feature = "gpu")]
 pub type GpuProvider =
@@ -141,9 +145,17 @@ pub struct Config {
     /// request's memory limit besides the estimate
     /// ([`eval::limits::Guard::with_probe`]). It measures the whole
     /// process, so the memory limit becomes a budget shared by every
-    /// document and request the host runs. None (the default) keeps the
-    /// estimate alone, which is the same on every machine.
+    /// document and request the host runs; before a reading over the
+    /// limit fails a request, the session evicts cached geometry and
+    /// measures again (see `memory.rs`). The probe is read at most every
+    /// 10 ms on [`Config::clock`]. None (the default) keeps the estimate
+    /// alone, which is the same on every machine.
     pub memory_probe: Option<MemoryProbe>,
+    /// Called after cached geometry is evicted under memory pressure and
+    /// before the probe is read again: a host whose allocator keeps freed
+    /// pages for a while (mimalloc purges after a second) returns them
+    /// here, or the reading would not show what eviction gave back.
+    pub memory_release: Option<MemoryRelease>,
 }
 
 impl std::fmt::Debug for Config {
@@ -186,6 +198,7 @@ impl Config {
             limits: Limits::NONE,
             reuse_evaluation: true,
             memory_probe: None,
+            memory_release: None,
         }
     }
 }
@@ -762,7 +775,9 @@ pub struct Session {
     lexed: parse::LexStore,
     fragments: parse::FragmentStore,
     /// By scheme and font set, most recently used last.
-    renderers: Mutex<Vec<(u64, Arc<geom::Renderer>)>>,
+    renderers: memory::Renderers,
+    /// The memory probe's last reading and the caches it evicts.
+    pressure: Arc<memory::Pressure>,
     fonts: Mutex<Vec<(u64, Arc<text::FontDb>)>>,
     docs: Mutex<HashMap<PathBuf, u64>>,
     jobs: Mutex<HashMap<PathBuf, Vec<Job>>>,
@@ -823,12 +838,14 @@ fn hash_of(x: impl Hash) -> u64 {
 
 impl Session {
     pub fn new(cfg: Config) -> Session {
+        let renderers = memory::Renderers::default();
         Session {
+            pressure: Arc::new(memory::Pressure::new(renderers.clone())),
+            renderers,
             fs: Arc::new(docfs::DocFs::new(cfg.fs.clone())),
             parse: Mutex::new(parse::ParseCache::new(cfg.parse_budget)),
             lexed: parse::LexStore::new(cfg.parse_budget / 4),
             fragments: parse::FragmentStore::new(cfg.parse_budget / 2),
-            renderers: Mutex::new(Vec::new()),
             fonts: Mutex::new(Vec::new()),
             docs: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
@@ -1055,9 +1072,21 @@ impl Session {
             .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         let limits = run.limits.unwrap_or(self.cfg.limits);
         let limits = (!limits.is_none()).then(|| {
+            let probe = limits
+                .memory
+                .zip(self.cfg.memory_probe.clone())
+                .map(|(limit, probe)| {
+                    memory::request_probe(
+                        self.pressure.clone(),
+                        probe,
+                        self.cfg.memory_release.clone(),
+                        self.cfg.clock.clone(),
+                        limit,
+                    )
+                });
             Arc::new(
                 eval::limits::Guard::new(limits, flag.clone(), self.cfg.clock.clone())
-                    .with_probe(self.cfg.memory_probe.clone()),
+                    .with_probe(probe),
             )
         });
         self.jobs

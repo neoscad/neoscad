@@ -352,8 +352,9 @@ owner remembers the original model, one interleaved run settles it.
 
 ## Recommended next steps
 
-1. Fix the website claim about deep unions (no evidence; §3) and, now,
-   about the Menger sponge (§1.1). Trivial.
+1. ~~Fix the website claim about deep unions (no evidence; §3) and, now,
+   about the Menger sponge (§1.1).~~ Done: the site now says it knows of
+   no model where neoscad is slower, and names these cases as faster.
 2. ~~Micro-optimise clipper2-rust's sweep (§2.2).~~ Done, §2 Results.
 3. ~~2D disjoint compose (§2.1).~~ Done for y-separated bands with byte
    parity, §2 Results; no owner decision was needed.

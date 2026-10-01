@@ -27,6 +27,7 @@ const DEFAULT_RESOURCES: &str = "/NeoSCAD.resources";
 /// - Fonts: the bundled Liberation fonts, `~/.fonts`, then any
 ///   `use <font.ttf>` of the program.
 /// - Limits: [`session::Limits::AGENT`]; see [`crate::types::ResourceLimits`].
+///   Memory is measured (the process's footprint) as well as estimated.
 pub fn config(resource_dir: Option<&str>) -> session::Config {
     let root = PathBuf::from(resource_dir.unwrap_or(DEFAULT_RESOURCES)).join("libraries");
     let mut libs = LibraryPath::from_env();
@@ -54,6 +55,11 @@ pub fn config(resource_dir: Option<&str>) -> session::Config {
     cfg.rng_seed = entropy_seed();
     cfg.gpu = Some(Arc::new(offscreen));
     cfg.limits = session::Limits::AGENT;
+    // The memory limit measured as well as estimated: the app's footprint
+    // (`crate::memory`), a budget its documents share, with cached geometry
+    // evicted before a request fails (`session::memory`).
+    cfg.memory_probe = crate::memory::probe();
+    cfg.memory_release = crate::memory::release();
     cfg
 }
 

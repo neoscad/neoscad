@@ -279,7 +279,7 @@ output's directory is created.
   output's directory is created only once every argument has been
   checked.
 - **Resource limits:** every call runs under the agent limits (60 s,
-  4 GiB estimated memory, 10,000 fragments per primitive, 10,000
+  4 GiB of memory (measured and estimated), 10,000 fragments per primitive, 10,000
   slices, 10 million list elements and `rands()` numbers, 64 MiB
   strings, 10 million triangles per result; `docs/cli-json.md`,
   "Resource limits"). A model that would pass one (`sphere(10,

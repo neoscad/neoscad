@@ -6,6 +6,11 @@
 //!   machine down. `--limit NAME=VALUE` changes one (`off` removes it).
 //! - The OpenSCAD-compatible command line starts unlimited, as OpenSCAD
 //!   is; `--limit` sets limits for that run (which then stays in-process).
+//! - The memory limit is measured as well as estimated where the platform
+//!   allows (`crate::memory`): a run stops with a "(measured)" error once
+//!   the process uses more than the limit, and in `serve` and `mcp` the
+//!   limit is a budget the whole server shares, cached geometry being
+//!   evicted before a request fails (`session::memory`).
 //! - A served request may carry a `limits` object. The command line never
 //!   sends one on its `cli.*` requests (a run with `--limit` is not
 //!   delegated), and the server fills in an explicit unlimited one
@@ -44,8 +49,12 @@ pub fn guard(limits: Limits) -> Option<(Arc<Guard>, Arc<AtomicBool>)> {
         return None;
     }
     let flag = Arc::new(AtomicBool::new(false));
+    let clock = clock();
+    // The memory limit measured too (`crate::memory`), read at most every
+    // 10 ms: a one-shot run has no caches worth evicting first.
+    let probe = crate::memory::probe().map(|p| session::memory::throttled(p, clock.clone()));
     Some((
-        Arc::new(Guard::new(limits, flag.clone(), Some(clock()))),
+        Arc::new(Guard::new(limits, flag.clone(), Some(clock)).with_probe(probe)),
         flag,
     ))
 }

@@ -75,21 +75,33 @@ lead them, come roughly in order of user impact.
   guard reads the clock (each geometry node and primitive ring, the
   evaluator's limit ticks); a trip says "(measured)". The web core's
   probe is its counting global allocator's peak since the request began
-  (`crates/web/src/heap.rs`); without a probe nothing changes. **Still to
-  do natively, with a plan:** (1) a probe per host binary, in its
-  non-library crate: macOS `proc_pid_rusage` `ri_phys_footprint` (what
-  Activity Monitor and `footprint` report; `unsafe` libc, so in `ffi`'s
-  unsafe module and `cli`), Linux `/proc/self/statm`, Windows
-  `GetProcessMemoryInfo` `PrivateUsage`; read at most every ~10 ms, as
-  `stopped()` runs per ring. (2) Since the probe measures the process,
-  the limit becomes the app's process-wide budget across documents, but
-  a budget also needs the caches (geometry, 200 MiB per renderer; parses)
-  to give memory back when it is near, or an idle app with many documents
-  would trip every run; and a trip names whichever request checked, not
-  the one that grew. Add the cache trim on a memory-pressure hook first,
-  then wire the probe in `ffi/src/host.rs` and `linux-app/src/host.rs`
-  (`serve`/`mcp` after, in `cli`). The one-shot CLI keeps no limit.
+  (`crates/web/src/heap.rs`); without a probe nothing changes.
+  **Natively** (`crates/cli/src/memory.rs`, compiled into `cli` and
+  `ffi`): the process's footprint on macOS (`ri_phys_footprint`), its
+  resident set on Linux (`/proc/self/statm`), its private bytes on
+  Windows, for `serve`, `mcp`, the one-shot `--limit memory=` and the
+  app. The session reads the probe at most every 10 ms, and before a
+  reading over the limit fails a request it evicts half of every
+  renderer's geometry cache, has mimalloc return freed pages
+  (`mi_collect`) and measures again, until under the limit or eviction
+  stops helping (`session::memory`). What is left:
+  - `linux-app/src/host.rs` does not set the probe yet (one line and
+    the module by path, as `ffi` does; not built here, which has no
+    GTK).
+  - Relief is reactive and covers the geometry caches only: parses,
+    statement memos, products and fonts are not trimmed, and nothing
+    listens for the system's memory-pressure notices (the app could
+    call `clear_caches` on one). Each session relieves its own caches;
+    no host runs two limited sessions in one process today.
+  - The trip goes to whichever request checked, not the one that grew,
+    and its message says "the engine uses N MiB" for the whole process.
+  - Linux's resident set leaves out swap (`smaps_rollup` has it, at the
+    cost of a walk of every mapping per read).
   (H4)
+- `eval::limits`'s `fmt_num` prints a fractional number as a broken
+  exponent: a memory limit of 3.05 MiB reads "3.053e MiB", and 2.5
+  "2.500e" (`{:.3e}` gives "3.053e0", and the trailing zeros trimmed
+  are the exponent's). Seen with a byte-sized limit in a test.
 - When several parallel geometry siblings pass a count limit, the
   earliest in the source that recorded one is reported; a sibling that
   stopped (on the others' trip) before its own check never records, so
@@ -263,25 +275,22 @@ lead them, come roughly in order of user impact.
   `fractal_tree`'s 290k nodes, whose single-child spine stays serial.
   Carrying each memo entry's per-node hashes and shifting them by the
   replay's index offset (P4(b)) would skip replayed subtrees entirely.
-- **PGO in releases.** `scripts/pgo.sh` makes the CLI faster on the
-  bench and held-out models with identical exports
-  (`perf-opportunities.md` P2). The cargo-dist release adopts it on
-  macOS arm64, Linux x86_64 and aarch64 and Windows x86_64
-  (`docs/release.md`, "PGO builds"). What is left:
-  1. Unverified until a tag runs it: the release job itself (its
-     `.github/build-setup.yml` step, and whether `dist build` finds the
-     step's optimised build fresh; compare the SHA-256 the step logs with
-     `neoscad-executables.sha256sums`), and a `pgo.yml` rerun with the
-     bench fixes, for Windows x86_64's first numbers.
-  2. `aarch64-pc-windows-msvc` ships a plain build: its instrumented
+- **PGO in releases.** The cargo-dist release builds `neoscad` with PGO
+  on macOS arm64, Linux x86_64 and aarch64 and Windows x86_64
+  (`docs/release.md`, "PGO builds"; the v0.2.0 release ran it, and `pgo.yml`
+  passed on all four after the bench fixes). Whether `dist build` packed
+  the step's optimised binary rather than rebuilding it (the SHA-256 the
+  step logs against `neoscad-executables.sha256sums`) has not been
+  compared. Left plain:
+  1. `aarch64-pc-windows-msvc` ships a plain build: its instrumented
      binary crashed on every training run (`0xC0000005`) and
      `llvm-profdata` rejected the raw profile ("symbol name is empty"),
      the error rust-lang/rust#150123 reports. Retry when that issue
      moves, by putting the target back in `pgo.yml`'s matrix and then in
      `build-setup.yml`'s list.
-  3. `x86_64-apple-darwin` ships a plain build: it is cross-built on the
+  2. `x86_64-apple-darwin` ships a plain build: it is cross-built on the
      arm64 `macos-15` runner, so training would need Rosetta.
-  4. The macOS DMG (`scripts/apple/release.sh`,
+  3. The macOS DMG (`scripts/apple/release.sh`,
      `publish-macos-app.yml`) has no PGO, deliberately, for now. The
      aarch64 slice could run `pgo.sh`'s steps directly; the x86_64 slice
      needs its instrumented binary run under Rosetta. The app core is
@@ -290,10 +299,8 @@ lead them, come roughly in order of user impact.
      metadata) is untested; check with `-Cllvm-args=-pgo-warn-mismatch`,
      or train through the ffi. Until then the DMG's CLI stays plain too,
      so the app's CLI and core are built alike.
-  Done: the recursion-depth guard (`conformance depth --binary PATH`,
-  1.25 times the nightly's depth; `DEFAULT_STACK_LIMIT` 64 MiB), which
-  every PGO build in `pgo.yml`'s first run passed (module recursion 1.42
-  to 1.55 times) and which the release step runs on the binary it ships.
+  The release step runs the recursion-depth guard (`conformance depth
+  --binary PATH`) on the binary it ships.
 - The web core gained nothing from `simd128` autovectorisation
   (`perf-opportunities.md` P7, within 2% on six kernel-bound models,
   identical output). A kernel gain there needs hand-written `v128` code;
@@ -535,9 +542,9 @@ lead them, come roughly in order of user impact.
   have no structured path. The printer presets' build volumes are still
   unchecked against the makers' spec sheets. Two examples need BOSL2,
   which the macOS app does not bundle (`Example.libraries` says so; the
-  menu lists them anyway). The C# bindings are not generated in CI yet
-  (audit step 7), and `ffi` still pins uniffi 0.32.2 against
-  bindgen-cs's 0.31.
+  menu lists them anyway). The C# bindings are generated in CI
+  (`windows-app.yml` runs `scripts/windows/build-core.ps1`), from an
+  unreleased uniffi-bindgen-cs for uniffi 0.32 (see "Windows").
 - A viewport frame holds the main thread for about 2.6 ms (p50; p95
   3.3 ms) at 60 Hz, nearly all of it `-[CAMetalLayer nextDrawable]`
   waiting for a free drawable; encoding is 0.14 ms. `Immediate` present
@@ -1057,11 +1064,13 @@ lead them, come roughly in order of user impact.
   flag when the MCP `docs` tool returns the index; the not-found hint
   names the caller's argument (`DocsRequest::file_arg`) but the index
   does not. (T3 audit fix)
-- `NOTICE` (the SGI Free Software License B for the libtess2 port) must
-  ship with the binaries, which contain the port: `scripts/apple/release.sh`
-  copies only `LICENSE` into the CLI tarball (`release.sh:370`), and the
-  app bundle's only licence file found is the editor's
-  `THIRD-PARTY-LICENSES.txt` (`apple/project.yml:135`). (libtess2 port)
+- `NOTICE` (the SGI Free Software License B for the libtess2 port) ships
+  beside the binaries: the CLI tarball and the DMG's `Licenses` folder
+  (`scripts/release/licenses.sh`, from `scripts/apple/release.sh`) and
+  the Windows installer, whose workflow checks for it. Inside
+  `NeoSCAD.app` itself there is still only the editor's
+  `THIRD-PARTY-LICENSES.txt`, so an app copied out of the DMG alone
+  leaves `NOTICE` behind. (libtess2 port)
 - The libtess2 port was checked against an oracle that is not in the
   repository: OpenSCAD's `src/ext/libtess2/Source/*.c` built with Apple
   clang `-O3 -DNDEBUG`, and a C++17 harness (`-O3`, Homebrew's Boost and
@@ -1481,11 +1490,9 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   shows viewers as tabs of that window).
 - Its view copies each changed frame from the GPU (`view.rs`); a large
   window at 4K on a slow bus may show it. `GdkDmabufTexture` is the fix.
-- After orbiting, lavapipe drew striped black marks near the origin.
-  Fixed by clipping overlay lines on the CPU
-  (`docs/audits/viewport-stripes.md`). Still open there: DX12 and
-  hardware Vulkan were never run in the failing orbit, and the Mesa
-  defect is unreported.
+- The viewport stripes are fixed (`c3690f7`,
+  `docs/audits/viewport-stripes.md`), but DX12 and hardware Vulkan were
+  never run in the failing orbit, and the Mesa defect is unreported.
 
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.

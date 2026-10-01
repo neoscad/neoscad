@@ -271,7 +271,15 @@ result with a `resource-limit` diagnostic, not a crash.
   for the request (`crates/web/src/heap.rs`, the one `unsafe` there, as
   `GlobalAlloc` requires), so kernel growth the estimate misses stops at
   the next node with a `resource-limit` error instead of trapping the
-  instance. Native hosts do not measure yet (`docs/followups.md`).
+  instance. Native hosts measure the process (`crates/cli/src/memory.rs`,
+  shared by `cli` and `ffi`: the footprint on macOS, the resident set on
+  Linux, private bytes on Windows), so in `serve`, `mcp` and the app the
+  limit is a budget the process shares. The session reads a probe at
+  most every 10 ms, and before a reading over the limit fails a request
+  it evicts cached geometry and has the allocator return freed pages,
+  then measures again (`session::memory`); the request that fails is the
+  one that checked, not necessarily the one that grew. Under the limit a
+  probe changes nothing.
 - **Time** is checked at evaluator calls and loop iterations and before
   each geometry node; one long kernel operation runs to its end.
 

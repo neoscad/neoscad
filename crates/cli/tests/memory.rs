@@ -309,6 +309,68 @@ fn mcp_render_stops_at_the_memory_limit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A model with a geometry node, so the limit is checked at least once.
+const SMALL: &str = "difference() { cube(2); sphere(1, $fn = 24); }\n";
+
+/// Whether this platform has a probe (`src/memory.rs`).
+const MEASURES: bool = cfg!(any(target_os = "macos", target_os = "linux", windows));
+
+#[test]
+fn a_one_shot_run_is_measured() {
+    // Every process holds more than a megabyte, so a run under a 1 MiB
+    // limit stops at its first check, by the measurement: the estimate
+    // of this model is a few kilobytes. Without the limit, or under a
+    // generous one, the output is the same file.
+    let dir = scratch("measured");
+    let file = dir.join("m.scad");
+    std::fs::write(&file, SMALL).unwrap();
+    let run = |limit: Option<&str>, out: &str| {
+        let mut c = Command::new(BIN);
+        c.arg(&file).arg("-o").arg(dir.join(out)).current_dir(&dir);
+        if let Some(l) = limit {
+            c.args(["--limit", l]);
+        }
+        c.output().unwrap()
+    };
+    let o = run(Some("memory=1M"), "low.stl");
+    let err = String::from_utf8_lossy(&o.stderr);
+    if MEASURES {
+        assert_eq!(o.status.code(), Some(1), "{err}");
+        assert!(
+            err.contains("over the memory limit of 1 MiB (measured)"),
+            "{err}"
+        );
+    }
+    assert!(run(None, "none.stl").status.success());
+    assert!(run(Some("memory=1G"), "high.stl").status.success());
+    assert_eq!(
+        std::fs::read(dir.join("none.stl")).unwrap(),
+        std::fs::read(dir.join("high.stl")).unwrap()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mcp_render_is_measured() {
+    // `neoscad mcp` (and `serve`, whose session it runs) measures the
+    // server process: under 1 MiB nothing renders, and under the agent
+    // limits (4 GiB) the same model does.
+    let dir = scratch("mcp-measured");
+    let mut s = Mcp::start(&dir, &["--limit", "memory=1M"]);
+    let r = s.tool("render", json!({"source": SMALL}));
+    let st = &r["structuredContent"];
+    if MEASURES {
+        assert_eq!(st["exit_code"], 1, "{r}");
+        let d = &st["diagnostics"][0];
+        assert_eq!(d["code"], "resource-limit", "{r}");
+        assert!(d["message"].as_str().unwrap().contains("(measured)"), "{d}");
+    }
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("render", json!({"source": SMALL}));
+    assert_eq!(r["structuredContent"]["exit_code"], 0, "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Values that print as 2^40 elements from a few lists: printing them
 /// stops at the 64 MiB string limit (the audit's `echo(str(t(40)))` built
 /// 2 GB of text in 3.3 s through MCP before the limit was checked).

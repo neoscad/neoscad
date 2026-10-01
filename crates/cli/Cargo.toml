@@ -89,19 +89,25 @@ mimalloc = { workspace = true, optional = true }
 # directory's ownership check, through nix's safe wrapper.
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["user"] }
+# The memory limit's measurement (src/memory.rs): `proc_pid_rusage` on
+# macOS, the page size on Linux. Already in the build through nix and
+# mimalloc.
+libc = "0.2"
 
 # The server's named pipe on Windows (src/transport.rs): interprocess's
 # synchronous pipe listener (overlapped I/O underneath, so a connection's
 # reader and its request threads' writer do not block each other; no async
 # runtime) and its SDDL security descriptor. windows-sys, already in the
 # build through interprocess, for the calls the pipe's access check needs
-# (src/transport/win.rs).
+# (src/transport/win.rs), and for the memory limit's measurement
+# (src/memory.rs, `ProcessStatus`).
 [target.'cfg(windows)'.dependencies]
 interprocess = { version = "2.4.4", default-features = false }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_System_ProcessStatus",
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
 ] }
@@ -111,7 +117,8 @@ windows-sys = { version = "0.61", features = [
 # lifted for a single module and the named pipe's access check needs Win32
 # calls that no maintained crate wraps safely (the current user's SID, and
 # the owner of the pipe a client connected to). `src/transport/win.rs`,
-# compiled on Windows only, is the one module that allows it; everything
+# compiled on Windows only, and `src/memory.rs` (the process's memory, a
+# system call on every platform) are the modules that allow it; everything
 # else here still refuses `unsafe`. Keep the rest in step with
 # `[workspace.lints]`.
 [lints.rust]
