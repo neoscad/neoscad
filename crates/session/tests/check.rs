@@ -131,6 +131,65 @@ fn a_floating_island_is_an_error() {
     assert_eq!(v["counts"]["errors"], 1);
 }
 
+/// A sealed hollow's inner surface is a shell of its own: it used to be
+/// reported as a piece floating 0.5 mm above the bed.
+#[test]
+fn a_sealed_cavity_is_not_a_floating_piece() {
+    let v = check(
+        "difference() { cube(20); translate([.5,.5,.5]) cube(19); }",
+        false,
+        CheckSettings::default(),
+    );
+    assert!(findings(&v, "floating").is_empty(), "{v}");
+    assert!(findings(&v, "tiny-feature").is_empty(), "{v}");
+    let c = findings(&v, "cavity");
+    assert_eq!(c.len(), 1, "{v}");
+    assert_eq!(c[0]["severity"], "info");
+    assert!(close(
+        c[0]["value"].as_f64().unwrap(),
+        19.0 * 19.0 * 19.0,
+        1e-6
+    ));
+    assert_eq!(
+        c[0]["location"]["bbox"]["min"],
+        serde_json::json!([0.5, 0.5, 0.5]),
+        "{v}"
+    );
+    assert_eq!(v["model"]["components"], 2);
+    assert_eq!(v["model"]["floating"], 0);
+    assert_eq!(v["model"]["cavities"], 1);
+    assert_eq!(v["counts"]["errors"], 0, "{v}");
+    // The model's volume is the shell's: the void is subtracted.
+    let vol = v["model"]["volume"].as_f64().unwrap();
+    assert!(close(vol, 8000.0 - 6859.0, 1e-6), "{vol}");
+}
+
+/// A piece inside a hollow is still a piece: a ball sealed in a box floats
+/// (it rests on nothing it is joined to), and the void around it is a
+/// cavity.
+#[test]
+fn a_piece_inside_a_cavity_still_floats() {
+    let v = check(
+        "difference() { cube(20); translate([1,1,1]) cube(18); }
+         translate([10,10,8]) cube(4, center = true);",
+        false,
+        CheckSettings::default(),
+    );
+    assert_eq!(findings(&v, "cavity").len(), 1, "{v}");
+    let f = findings(&v, "floating");
+    assert_eq!(f.len(), 1, "{v}");
+    assert!(close(f[0]["value"].as_f64().unwrap(), 6.0, 1e-9), "{v}");
+    // What is under it is the cavity's floor, 5 mm down.
+    assert!(
+        f[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("5 mm above the piece under it"),
+        "{v}"
+    );
+    assert_eq!(v["model"]["components"], 3);
+}
+
 /// Two closed boxes as one polyhedron (no boolean merges them) whose
 /// facing sides overlap by `overlap` mm along x: coils of a spring that
 /// fuse within Manifold's tolerance keep both surfaces the same way.

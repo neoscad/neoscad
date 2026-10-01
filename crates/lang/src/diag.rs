@@ -70,6 +70,10 @@ pub enum DiagCode {
     NewlineInUse,
     IncludeNotFound,
     LibraryNotFound,
+    /// `use <x.ttf>` (or `.otf`) naming a file that is not there:
+    /// OpenSCAD's `Can't read font with path '...'`, an error printed
+    /// without a location, after the `Can't open library` warning.
+    FontNotFound,
     /// A variable assigned twice in one scope; the later value wins.
     Reassignment,
     /// A customizer parameter value outside its declared range.
@@ -146,6 +150,7 @@ impl DiagCode {
             DiagCode::NewlineInUse => "newline-in-use",
             DiagCode::IncludeNotFound => "include-not-found",
             DiagCode::LibraryNotFound => "library-not-found",
+            DiagCode::FontNotFound => "font-not-found",
             DiagCode::Reassignment => "reassignment",
             DiagCode::ParameterRange => "parameter-range",
             DiagCode::ParameterFile => "parameter-file",

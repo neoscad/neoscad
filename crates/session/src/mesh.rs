@@ -236,6 +236,14 @@ impl Mesh {
     /// Volume, surface area and centre of mass (the centroid of the
     /// enclosed volume, by the divergence theorem over signed tetrahedra
     /// from the origin).
+    /// Triangle `t`'s share of a closed shell's signed volume (the
+    /// tetrahedron it spans with the origin): positive summed over a
+    /// shell wound outward, negative over one wound inward (a void).
+    pub fn signed_volume(&self, t: usize) -> f64 {
+        let [a, b, d] = self.corners(t);
+        dot(a, cross(b, d)) / 6.0
+    }
+
     pub fn mass(&self) -> (f64, f64, V3) {
         let (mut vol, mut area) = (0.0, 0.0);
         let mut c = [0.0; 3];

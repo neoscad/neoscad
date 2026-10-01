@@ -305,7 +305,9 @@ fn comparable(stderr: &[u8]) -> String {
     String::from_utf8_lossy(stderr)
         .lines()
         .filter(|l| {
-            !l.starts_with("Geometries in cache:") && !l.starts_with("Total rendering time:")
+            !l.starts_with("Geometries in cache:")
+                && !l.starts_with("Geometry cache size in bytes:")
+                && !l.starts_with("Total rendering time:")
         })
         .map(|l| format!("{l}\n"))
         .collect()

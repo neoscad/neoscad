@@ -97,8 +97,16 @@ runs `wix build` on `windows/installer/NeoSCAD.wxs`.
   on any OS: all three sections present, escapes, balanced braces. The
   workflow runs it before building. A silent install (`msiexec /qn`) shows no pages.
 - **Upgrades.** The `UpgradeCode` (`1A80E3D5-…`, not the CLI's) is fixed.
-  Every build has a new ProductCode, so any other version is a major
-  upgrade that removes the old one first. A downgrade is refused.
+  Every build has a new ProductCode, so installing any other build is a
+  major upgrade that removes the old one first. A downgrade is refused.
+  The ProductVersion is only the numeric `x.y.z`, so a release and its
+  rcs (0.2.0-rc.1, 0.2.0) share one version; `<MajorUpgrade
+  AllowSameVersionUpgrades="yes">` makes a same-version build replace
+  the installed one instead of installing beside it as a second product
+  (WiX's default). MSI can't tell those builds apart, so whichever is
+  installed last wins, an rc after its release included. The setting
+  would draw ICE61's warning, but `wix build` runs no ICE validation
+  (that is `wix msi validate`, which the build doesn't run).
 - **Version.** `Cargo.toml`'s `[workspace.package] version` sets the MSI's
   ProductVersion (its numeric part, `-d Version=`) and the exe's version.
   `windows/Directory.Build.props` reads the same line for `Version`,

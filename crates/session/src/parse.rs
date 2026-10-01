@@ -480,11 +480,12 @@ pub fn main_program(
 /// they are freed here as before. Nothing observable depends on when a
 /// program is freed.
 fn retire(dead: Vec<Arc<Program>>) {
-    if dead.is_empty() {
-        return;
-    }
+    // The emptiness test sits inside the native block: on wasm32 an early
+    // `return` with nothing after it is clippy's `needless_return`.
+    #[cfg(target_arch = "wasm32")]
+    drop(dead);
     #[cfg(not(target_arch = "wasm32"))]
-    {
+    if !dead.is_empty() {
         use std::sync::OnceLock;
         use std::sync::mpsc::{Sender, channel};
         static DROPPER: OnceLock<Option<Sender<Vec<Arc<Program>>>>> = OnceLock::new();
@@ -508,6 +509,10 @@ fn retire(dead: Vec<Arc<Program>>) {
 /// `SourceFile::handleDependencies`: a used name as a library key, if the
 /// file exists (`lang::deps`).
 fn resolve(name: &str, dir: &Path, fs: &dyn FileSystem, libs: &LibraryPath) -> Option<String> {
+    // A font is registered, not loaded (`SourceFile::registerUse`).
+    if lang::loader::is_font_path(name) {
+        return None;
+    }
     let path = if Path::new(name).is_absolute() {
         PathBuf::from(name)
     } else {

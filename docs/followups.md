@@ -396,13 +396,13 @@ lead them, come roughly in order of user impact.
   Sans (same metrics, slightly different glyphs), and Cairo's object
   layout and compression are not reproduced. Cairo's path simplification
   is modelled only as far as its single-rectangle `re` output. (5f)
-- The render summary (stderr and `--summary-file`) has no geometry cache
-  size: `geom::Rendered` reports only the entry count, so the stderr
-  summary leaves out OpenSCAD's `Geometry cache size in bytes` line and
-  the two `CGAL ...` lines after it, and the JSON has `bytes` and
-  `max_size` null (`docs/cli-json.md`). `geom::Renderer::stats()` now
-  reports the byte total and budget (7a), so both can be filled; the
-  summary's text and JSON have not been changed yet. (H3)
+- Fixed (post-0.2.0): the render summary reports the geometry cache's
+  size from `geom::Renderer::stats()`: the stderr summary prints
+  OpenSCAD's `Geometry cache size in bytes` line and the two `CGAL ...`
+  lines (always 0), and the JSON's `bytes` and `max_size` are numbers.
+  The byte count is neoscad's estimate (496 for `cube(1)` against the
+  nightly's 856), and `max_size` is the one 200 MiB budget, with the
+  CGAL cache's at 0 (`docs/cli-json.md`). (H3)
 - `-d` lists dependencies in first-seen order where OpenSCAD uses hash
   order (same set). Files read by `dxf_dim()`/`dxf_cross()` are not
   listed, and `-m` does not run for them: the evaluator reads them
@@ -806,9 +806,14 @@ lead them, come roughly in order of user impact.
   better fallback; not done, to stay with OpenSCAD. (6b)
 - The render summary after a PNG preview reports 0 geometry cache
   entries (`CsgTree::build` does not return the renderer's count). (6b)
-- `.term` export still prints "No top-level CSG object"; `geom::csg`
-  now builds OpenSCAD's CSG terms, so `CSGNode::dump` could be ported on
-  top of it. (6b)
+- Not a gap (checked post-0.2.0): `.term` export prints "No top-level
+  CSG object" for every input, and so does OpenSCAD's. `openscad.cc`
+  builds the term with a `CSGTreeEvaluator` that has no geometry
+  evaluator, so every leaf is a null term (`CSGTreeEvaluator.cc`,
+  `visit(AbstractPolyNode)`); the nightly prints that line for
+  `cube(1);` and for a model with booleans, `#` and `%`, and all three
+  `csgterm` regression outputs are that line. Porting `CSGNode::dump`
+  would diverge from it. (6b)
 - Preview speed (best of 3, wall, this machine): at most `--render`'s
   time on the benchmark models, and 1.5-4.5x faster than the nightly's
   OpenCSG preview, except `csg_spheres` (380 ms against the nightly's
@@ -864,11 +869,12 @@ lead them, come roughly in order of user impact.
   layers thick; a separate "too few layers" check (vertical thickness
   under flat and shallow faces, excluding the bed's first layers) would
   cover it. (CAD pilot fix)
-- A sealed hollow (`difference() { cube(20); translate([.5,.5,.5])
-  cube(19); }`) reports its cavity's inner surface as a `floating`
-  piece: components are counted by shared vertices, and the cavity is a
-  shell of its own. A shell inside another is a void, not a piece.
-  (found in the CAD pilot fix)
+- Fixed (post-0.2.0): a sealed hollow (`difference() { cube(20);
+  translate([.5,.5,.5]) cube(19); }`) reported its cavity's inner
+  surface as a `floating` piece. A component wound inward inside one
+  wound outward is now a `cavity` (info) finding, counted in the model's
+  `cavities`, and is neither `floating` nor `tiny-feature`. (found in the
+  CAD pilot fix)
 - The `not-manifold` finding for a pinched solid counts edges only; two
   pieces touching at a single point (tip to tip) are not found. A
   vertex whose faces form more than one fan after welding would be the
@@ -1070,11 +1076,13 @@ lead them, come roughly in order of user impact.
   New` and `Times New Roman` are system fonts for the nightly; here they
   are the metric-compatible Liberation Sans, Mono and Serif). No test
   depends on it. (5e)
-- `use <font.ttf>` registers the font (in the CLI, from the programs'
-  `uses`), but `lang` still also treats the file as a library and parses
-  the font as OpenSCAD source, and a missing font file does not print
-  OpenSCAD's "Can't read font with path '...'" error
-  (`SourceFile::registerUse`). Both belong in `lang`. (5e)
+- Fixed (post-0.2.0): `use <font.ttf>` (or `.otf`, any case) is no
+  longer loaded as a library by `lang::deps` or the session's loader
+  (it stays in `uses`, where hosts register fonts from), and a missing
+  font prints OpenSCAD's `ERROR: Can't read font with path '...'` after
+  the `Can't open library` warning (`font-not-found`;
+  `SourceFile::registerUse`). Byte-identical to the nightly's `.echo`
+  and stderr. (5e)
 - The font-name matcher (`crates/text/src/pattern.rs`) ranks on charset,
   family, style, slant, weight and width. It leaves out fontconfig's
   language coverage and every value after the first for weight, slant and
@@ -1151,10 +1159,13 @@ lead them, come roughly in order of user impact.
   byte-identical to native. Decide whether to accept that or use one libm
   everywhere. (H2)
 
-- `cargo clippy --target wasm32-unknown-unknown -p neoscad-render -p
-  neoscad-web-view` fails with "field `sizes` is never read" at
-  `crates/eval/src/dump.rs:862`. `scripts/wasm-check.sh` does not run
-  clippy for wasm32, so nothing catches it.
+- Fixed (post-0.2.0): clippy for wasm32 failed on the unread `sizes`
+  field (`crates/eval/src/dump.rs`), a dead `small_axes_clip` without
+  the `gpu` feature (`crates/render/src/overlay.rs`) and a needless
+  `return` (`crates/session/src/parse.rs`). `scripts/wasm-check.sh` now
+  runs `clippy -D warnings` for wasm32 on each package it builds
+  (`neoscad-wasm-check`, `-render`, `-web`, `-web-view`), so CI's wasm
+  job catches the next one.
 
 ## Web demo
 - **The preview's product booleans run outside the limits.**

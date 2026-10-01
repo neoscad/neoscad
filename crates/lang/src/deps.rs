@@ -50,6 +50,10 @@ pub fn resolve_uses(root: &Program, fs: &dyn FileSystem, libs: &LibraryPath) -> 
 /// `SourceFile::handleDependencies`: a used name as a library key, if the
 /// file exists.
 fn resolve(name: &str, dir: &Path, fs: &dyn FileSystem, libs: &LibraryPath) -> Option<String> {
+    // A font is registered, not loaded (`SourceFile::registerUse`).
+    if crate::loader::is_font_path(name) {
+        return None;
+    }
     // Names that were not found while scanning are searched again.
     let path = if Path::new(name).is_absolute() {
         PathBuf::from(name)

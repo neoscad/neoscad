@@ -729,6 +729,7 @@ impl Keys {
         let hashes: Vec<Slot> = (0..len).map(|_| Slot::default()).collect();
         let shared = Shared {
             counts: &survey.counts,
+            #[cfg(not(target_arch = "wasm32"))]
             sizes: &survey.sizes,
             stats: &survey.stats,
             hashes: &hashes,
@@ -859,6 +860,10 @@ struct KeyBuilder<'a> {
 #[derive(Clone, Copy)]
 struct Shared<'a> {
     counts: &'a [u32],
+    /// Each subtree's node count, read only to decide whether to split
+    /// work across threads; wasm32 has no threads, and an unread field is
+    /// a clippy error there.
+    #[cfg(not(target_arch = "wasm32"))]
     sizes: &'a [usize],
     stats: &'a Stats,
     hashes: &'a [Slot],

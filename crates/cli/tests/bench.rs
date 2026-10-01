@@ -161,7 +161,11 @@ fn quick_run_writes_a_schema_1_result() {
         ("kit path", kit.to_str().unwrap()),
         ("binary path", BIN),
     ] {
-        if s.len() >= 3 {
+        // A hostname as short as a common word ("Mac", "box") also turns
+        // up in what the result must say ("macOS", "Mac16,8"), so it is
+        // only looked for from six characters; other values from three.
+        let min = if what.starts_with("hostname") { 6 } else { 3 };
+        if s.len() >= min {
             assert!(
                 !text.contains(s),
                 "the result contains the {what} '{s}':\n{text}"

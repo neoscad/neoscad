@@ -436,8 +436,8 @@ user's and not writable by group or others (or a sticky one such as
 the pipe's server cannot act as the client) and checks that the pipe's
 owner is the user: pipe names are global, and another user could create
 the pipe first. Otherwise the command runs in-process. The output is the command's own: the same
-files and the same stderr, except the render summary's `Geometries in
-cache` count and times, which are the (warm) server's. Runs the server
+files and the same stderr, except the render summary's geometry
+cache count and size and its times, which are the (warm) server's. Runs the server
 cannot take (dependency files, `-m`, parameter sets, `--animate`,
 `--summary-file`, `--hardwarnings`, `--limit`, the evaluation flags, echo, AST, CSG
 and param exports, and a run mixing PNG with other formats) and every

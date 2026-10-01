@@ -286,7 +286,7 @@ fn hint(d: &Logged, names: &Names) -> Option<String> {
         DiagCode::SyntaxError => {
             "look just before this point for a missing ';', ')', ']' or '}', or an unbalanced bracket"
         }
-        DiagCode::IncludeNotFound | DiagCode::LibraryNotFound => {
+        DiagCode::IncludeNotFound | DiagCode::LibraryNotFound | DiagCode::FontNotFound => {
             "paths are relative to the including file, then each library directory (OPENSCADPATH); check the name"
         }
         DiagCode::Reassignment => {

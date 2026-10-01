@@ -623,6 +623,11 @@ impl Loader<'_> {
     }
 
     fn use_(&mut self, file: FileId, tok: Token, global: u32) {
+        // `SourceFile::registerUse`: a `.ttf` or `.otf` is a font to
+        // register, never a library. It stays in `uses` (hosts register
+        // the fonts from there), but `deps` and the session's loader skip
+        // it, which kept a font from being parsed as OpenSCAD source.
+
         let parts = {
             let f = self.out.sources.get(file);
             directive_path(f.slice(tok.start, tok.end()), false)
@@ -646,6 +651,19 @@ impl Loader<'_> {
                     tok,
                     global,
                 );
+                if is_font_path(&name) {
+                    // No span: OpenSCAD logs it without a location, so
+                    // the line has no "in file" part. The sequence number
+                    // keeps it right after the warning.
+                    self.out.diags.push(
+                        Diagnostic::new(
+                            DiagCode::FontNotFound,
+                            Severity::Error,
+                            format!("Can't read font with path '{name}'"),
+                        )
+                        .with_seq(seq_for_token(global)),
+                    );
+                }
                 self.out.uses.push(UseRef {
                     token: global,
                     path: name,
@@ -674,6 +692,16 @@ impl Loader<'_> {
         }
         found
     }
+}
+
+/// Whether a `use`d name is a font file (`.ttf` or `.otf`, any case),
+/// which OpenSCAD registers as a font instead of loading as a library
+/// (`SourceFile::registerUse`).
+pub fn is_font_path(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"))
 }
 
 /// `find_valid_path` in parsersettings.cc: `local` relative to

@@ -27,8 +27,9 @@
   <!--
     UpgradeCode is the product's identity across versions: never change
     it (the CLI's MSI has its own, B8763D68-...). Every build gets a new
-    ProductCode, so installing any other version is a major upgrade that
-    removes the one before.
+    ProductCode, so installing another build is a major upgrade that
+    removes the one before (with AllowSameVersionUpgrades below, also a
+    build of the same version).
   -->
   <Package Name="NeoSCAD"
            Manufacturer="The NeoSCAD contributors"
@@ -44,8 +45,21 @@
       before they are installed, so no file of the old version survives
       (the app's runtime folders change between .NET versions).
       Installing an older version over a newer one is refused.
+
+      AllowSameVersionUpgrades: the ProductVersion is only the numeric
+      x.y.z (an MSI version has no pre-release part), so 0.2.0-rc.1,
+      0.2.0-rc.2 and 0.2.0 are all 0.2.0. With the default (no) MSI treats
+      a same-version build with a new ProductCode as a second product, and
+      the rc and the release were both left installed, side by side in
+      Apps & Features. With yes the newer build replaces the older; the
+      cost is that an rc installed after its release replaces it too
+      (MSI can't order them). `wix build` runs no ICE validation (that is
+      `wix msi validate`), so the ICE61 warning this setting draws, "This
+      product should remove only older versions of itself", is never
+      raised; it is the intended behaviour.
     -->
-    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <!--

@@ -38,6 +38,10 @@ impl Request {
 #[derive(Debug)]
 pub struct Facts<'a> {
     pub cache_entries: usize,
+    /// The geometry cache's estimated size and budget in bytes
+    /// (`geom::Renderer::stats`).
+    pub cache_bytes: usize,
+    pub cache_budget: usize,
     pub elapsed_ms: u128,
     /// The top-level result; `None` or empty prints no object section.
     pub geometry: Option<&'a Geometry>,
@@ -82,11 +86,16 @@ fn clock(ms: u128) -> String {
 
 /// The log form (`LogVisitor`).
 pub fn log_lines(req: &Request, f: &Facts<'_>) -> Vec<String> {
-    // `GeometryCache::print`. The cache size in bytes and the CGAL cache
-    // lines that follow it in OpenSCAD are not printed: `geom` does not
-    // report its cache's size (docs/followups.md).
+    // `GeometryCache::print`, then `CGALCache::print` (the nightly is built
+    // with CGAL, so it always prints both). neoscad has no CGAL cache, so
+    // its two lines are always zero, as the nightly's are with Manifold.
+    // The byte count is `geom`'s estimate, not OpenSCAD's `totalCost`, so
+    // it differs from the nightly's for the same model.
     let mut l = vec![
         format!("Geometries in cache: {}", f.cache_entries),
+        format!("Geometry cache size in bytes: {}", f.cache_bytes),
+        "CGAL Polyhedrons in cache: 0".to_string(),
+        "CGAL cache size in bytes: 0".to_string(),
         format!("Total rendering time: {}", clock(f.elapsed_ms)),
     ];
     if let Some(g) = f.geometry.filter(|g| !g.is_empty()) {
@@ -173,7 +182,6 @@ fn area(p: &geom::polygon2d::Polygon2d) -> f64 {
 /// A JSON value, printed as nlohmann's `dump()` prints it.
 #[derive(Debug, Clone)]
 enum Json {
-    Null,
     Bool(bool),
     Int(i128),
     Float(f64),
@@ -186,7 +194,6 @@ enum Json {
 impl Json {
     fn write(&self, out: &mut String) {
         match self {
-            Json::Null => out.push_str("null"),
             Json::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
             Json::Int(i) => out.push_str(&i.to_string()),
             Json::Float(x) => out.push_str(&nlohmann_double(*x)),
@@ -286,21 +293,26 @@ fn bbox_json(min: &[f64], max: &[f64]) -> Json {
 pub fn json(req: &Request, f: &Facts<'_>) -> String {
     let mut top: BTreeMap<&'static str, Json> = BTreeMap::new();
     if req.enabled("cache") {
-        // neoscad has one geometry cache and no CGAL cache. Its size in
-        // bytes and its budget are not reported by `geom` yet, so they are
-        // null; the CGAL cache is always empty (docs/cli-json.md).
-        let cache = |entries: usize, bytes: Option<i128>, max: Option<i128>| {
+        // neoscad has one geometry cache and no CGAL cache. Its budget is
+        // the sum of OpenSCAD's two default cache sizes, so the CGAL
+        // cache's `max_size` is 0 rather than the nightly's 100 MiB:
+        // reporting both would count the same memory twice
+        // (docs/cli-json.md).
+        let cache = |entries: usize, bytes: usize, max: usize| {
             Json::Object(BTreeMap::from([
                 ("entries", Json::Int(entries as i128)),
-                ("bytes", bytes.map_or(Json::Null, Json::Int)),
-                ("max_size", max.map_or(Json::Null, Json::Int)),
+                ("bytes", Json::Int(bytes as i128)),
+                ("max_size", Json::Int(max as i128)),
             ]))
         };
         top.insert(
             "cache",
             Json::Object(BTreeMap::from([
-                ("geometry_cache", cache(f.cache_entries, None, None)),
-                ("cgal_cache", cache(0, Some(0), Some(0))),
+                (
+                    "geometry_cache",
+                    cache(f.cache_entries, f.cache_bytes, f.cache_budget),
+                ),
+                ("cgal_cache", cache(0, 0, 0)),
             ])),
         );
     }
@@ -404,6 +416,8 @@ mod tests {
     fn cube_facts<'a>(g: &'a Geometry, camera: &'a eval::Camera) -> Facts<'a> {
         Facts {
             cache_entries: 1,
+            cache_bytes: 856,
+            cache_budget: 209_715_200,
             elapsed_ms: 0,
             geometry: Some(g),
             camera,
@@ -430,12 +444,13 @@ mod tests {
             json(&req(&["bounding-box", "bogus"]), &cube_facts(&g, &cam)),
             "null"
         );
-        // `--summary all`, apart from the cache byte counts neoscad does
-        // not know (null here, 856 and 104857600 in the nightly).
+        // `--summary all`; the nightly's geometry cache `max_size` is
+        // 104857600 and its CGAL cache's the same (neoscad's one budget
+        // covers both).
         assert_eq!(
             json(&req(&["all"]), &cube_facts(&g, &cam)),
             concat!(
-                r#"{"cache":{"cgal_cache":{"bytes":0,"entries":0,"max_size":0},"geometry_cache":{"bytes":null,"entries":1,"max_size":null}},"#,
+                r#"{"cache":{"cgal_cache":{"bytes":0,"entries":0,"max_size":0},"geometry_cache":{"bytes":856,"entries":1,"max_size":209715200}},"#,
                 r#""camera":{"distance":140.0,"fov":22.5,"rotation":[55.0,0.0,25.0],"translation":[0.0,0.0,0.0]},"#,
                 r#""geometry":{"bounding_box":{"max":[1.0,1.0,1.0],"min":[0.0,0.0,0.0],"size":[1.0,1.0,1.0]},"convex":true,"dimensions":3,"facets":6,"triangular":false},"#,
                 r#""time":{"hours":0,"milliseconds":0,"minutes":0,"seconds":0,"time":"0:00:00.000","total":0}}"#
@@ -451,12 +466,15 @@ mod tests {
             options: vec!["all".into()],
             file: None,
         };
-        // `--summary all -o x.stl` on `cube(1);`, nightly, less the cache
-        // byte lines.
+        // `--summary all -o x.stl` on `cube(1);`, nightly (the facts use
+        // its byte count).
         assert_eq!(
             log_lines(&req, &cube_facts(&g, &cam)),
             [
                 "Geometries in cache: 1",
+                "Geometry cache size in bytes: 856",
+                "CGAL Polyhedrons in cache: 0",
+                "CGAL cache size in bytes: 0",
                 "Total rendering time: 0:00:00.000",
                 "Top level object is a 3D object (PolySet):",
                 "   Convex:       yes",

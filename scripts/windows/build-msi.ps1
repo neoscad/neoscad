@@ -14,7 +14,8 @@
 #
 # The version is Cargo.toml's workspace version, as for the exe
 # (windows/Directory.Build.props); the MSI's ProductVersion takes only its
-# numeric part. The MSI is not signed (docs/release.md, "Windows is
+# numeric part (an rc and its release share it; NeoSCAD.wxs's MajorUpgrade
+# lets either replace the other). The MSI is not signed (docs/release.md, "Windows is
 # unsigned").
 
 [CmdletBinding()]

@@ -434,7 +434,10 @@ pub fn pixel_text(
 }
 
 /// The small axes' clip matrix for a 0..1 depth range, for the frame
-/// uniforms.
+/// uniforms. Only the GPU side reads it: without the `gpu` feature (the
+/// CPU-only renderer wasm-check and the web core build) it would be dead
+/// code, which `clippy -D warnings` rejects.
+#[cfg(feature = "gpu")]
 pub(crate) fn small_axes_clip(camera: &Camera) -> camera::Mat4 {
     camera::zero_to_one(&mul(
         &small_axes_projection(camera),

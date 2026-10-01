@@ -54,19 +54,25 @@ holds `null`. Otherwise it is an object with only the selected sections:
 {"cgal_cache": CACHE, "geometry_cache": CACHE}
 ```
 
-`CACHE` is `{"bytes": int|null, "entries": int, "max_size": int|null}`:
+`CACHE` is `{"bytes": int, "entries": int, "max_size": int}`:
 entries in the cache, their estimated size in bytes, and the cache's
 budget in bytes.
 
 - `geometry_cache.entries`: geometries in neoscad's cache after the
   render. The count follows neoscad's caching, which differs from the
   nightly's (it caches different intermediate nodes).
-- `geometry_cache.bytes` and `geometry_cache.max_size`: `null`, because
-  the `geom` crate does not report its cache's size or budget yet
-  (`docs/followups.md`). The nightly reports numbers here.
+- `geometry_cache.bytes`: the cache's estimated size after the render
+  (`geom::Renderer::stats`). It is neoscad's estimate of its own
+  geometry, so it differs from the nightly's for the same model (496
+  against 856 for `cube(1)`). 0 after a preview, which reports no
+  entries either.
+- `geometry_cache.max_size`: the cache's budget, 209715200 (200 MiB) by
+  default: the sum of OpenSCAD's two default cache sizes, since neoscad
+  has one cache where OpenSCAD has two.
 - `cgal_cache`: always `{"bytes":0,"entries":0,"max_size":0}`. neoscad has
-  no CGAL backend and so no CGAL cache. (The nightly's `max_size` is
-  104857600.)
+  no CGAL backend and so no CGAL cache; its 100 MiB are in the geometry
+  cache's budget. (The nightly's `max_size` here is 104857600, and its
+  geometry cache's is the same.)
 
 ## `time`
 
@@ -131,10 +137,11 @@ is the camera the image was drawn with, `--viewall` fitted
 `cube(1);`:
 
 ```json
-{"cache":{"cgal_cache":{"bytes":0,"entries":0,"max_size":0},"geometry_cache":{"bytes":null,"entries":1,"max_size":null}},"camera":{"distance":140.0,"fov":22.5,"rotation":[55.0,0.0,25.0],"translation":[0.0,0.0,0.0]},"geometry":{"bounding_box":{"max":[1.0,1.0,1.0],"min":[0.0,0.0,0.0],"size":[1.0,1.0,1.0]},"convex":true,"dimensions":3,"facets":6,"triangular":false},"time":{"hours":0,"milliseconds":0,"minutes":0,"seconds":0,"time":"0:00:00.000","total":0}}
+{"cache":{"cgal_cache":{"bytes":0,"entries":0,"max_size":0},"geometry_cache":{"bytes":496,"entries":1,"max_size":209715200}},"camera":{"distance":140.0,"fov":22.5,"rotation":[55.0,0.0,25.0],"translation":[0.0,0.0,0.0]},"geometry":{"bounding_box":{"max":[1.0,1.0,1.0],"min":[0.0,0.0,0.0],"size":[1.0,1.0,1.0]},"convex":true,"dimensions":3,"facets":6,"triangular":false},"time":{"hours":0,"milliseconds":0,"minutes":0,"seconds":0,"time":"0:00:00.000","total":0}}
 ```
 
-The nightly writes the same apart from the three cache byte fields.
+The nightly writes the same apart from the cache's byte count and
+budgets (`"bytes":856`, and 104857600 for both `max_size`s).
 
 # `neoscad snapshot --format json`
 
@@ -391,10 +398,12 @@ as on the bed), at most 10 findings per code.
 ```
 
 - `MODEL` (3D): `{"dimensions": 3, "manifold", "components",
-  "floating", "volume", "area", "centroid", "bbox", "triangles",
+  "floating", "cavities", "volume", "area", "centroid", "bbox", "triangles",
   "min_wall": {"thickness", "point", "part", "sampled": true}|null,
   "overhang_area"}`; `{"dimensions": 2}` for a 2D model, `null` for an
-  empty one. `min_wall` is the thinnest wall any sample measured (after
+  empty one. `components` counts connected surfaces, so a hollow's
+  inside is one of them; `cavities` says how many of them are (see the
+  `cavity` finding). `min_wall` is the thinnest wall any sample measured (after
   the layer-plane measurement and the corner samples below); `sampled`
   says so: the true thinnest wall can be a little under it (the text
   says "thinnest wall about 1.21 mm (sampled)"). `manifold` is false for a pinched
@@ -420,6 +429,7 @@ Codes and how each is found:
 | `not-closed` | error | A mesh result (a lone polyhedron) with edges on one face only. |
 | `not-manifold` | error | Manifold reports an error or kept the solid as a triangle soup, or edges are shared by more than two faces. Also a pinched solid: Manifold calls it valid, but once corners at the same position are merged (as an STL reader does) edges have more than two faces. Then `value` is the number of such edges, `point` the midpoint of the first and `bbox` the box around all of them, and the fix says that two parts touch along an edge or at a point there and to overlap them by at least 0.01 or separate them; when the result has no volume (`touch_only` above) it says the parts only touch (no overlap) instead. |
 | `floating` | error | A connected piece (triangles sharing vertices) whose lowest point is more than `bed_tolerance` above the model's lowest point. `point` is the piece's centre. The message says what is under it, straight down from its lowest points: another piece it rests on (within `bed_tolerance`), another piece N mm below, or nothing. |
+| `cavity` | info | The inside surface of a sealed void (`difference() { cube(20); translate([.5,.5,.5]) cube(19); }`): a component wound inward (negative signed volume; Manifold winds every shell it outputs outward from the material) whose box lies inside a component wound outward, in a valid solid. It is not a `floating` piece and has no `tiny-feature`; it is excluded from both. `value` is the void's volume, `point` its centre. The fix says FDM needs nothing if the hollow is intended, and resin or powder printing needs a drain hole. A piece sealed inside the void is still a piece (`floating`, resting on or above the void's floor). |
 | `thin-wall` | error below `nozzle`, else warning below `min_wall`, each by more than 0.001 mm (a wall modelled at the minimum measures a hair either side of it; the message gives the thickness to the ten-thousandth when the hundredth would read as the limit) | From points on every face (the centroid, or 4 or 16 points on faces larger than (4 × `min_wall`)²) a ray goes inward along the face's normal to where it leaves the solid, ignoring faces that share a corner with the start (so knife edges do not measure zero) and exits through faces more than 45° from parallel (corners and slopes are not walls). A reading under `min_wall` (or under the thinnest so far) is measured again in the layer plane, along the face's normal projected onto XY, and the larger of the two is the wall: FDM lays a wall as perimeters in each layer, so the width that matters is the width in the layer, and the projected normal is exactly the in-layer normal of the outline the face cuts, however the face is tilted. (The slivers of a twisted `linear_extrude` tilt their normals up to 76°; along them a solid 20 mm square measured walls of 0.17–0.25 mm at its end caps.) A flat face has no layer direction: its reading counts only when the far side is flat too (a plate, a floor); through a sloped face it is a wedge where a slope meets a cap, not a wall. A reading from a face's middle is too thick where a wall tapers (a barb's 1.2 mm rim read 1.39), so the faces whose readings could hide one thinner than the thinnest so far (reading minus the distance from the face's middle to its farthest corner) are measured again from just inside each corner (a tenth of the way, at most 0.1 × `nozzle`), most promising first, at most max(128, one in 128 of the faces); near a corner, a layer-plane ray that leaves through a face not across from it (a plate's end) makes no reading. Thin faces that share an edge, or face each other across a wall, are one place; places of one part and severity within max(4 × `min_wall`, 5% of the model's diagonal) are one finding ("walls at N places"), located at its thinnest point. An exit closer than min(0.01 mm, 1e-4 of the diagonal) behind which the ray leaves through another face facing its way is a contact seam (two pieces that touch keep both surfaces), not a wall: the wall is measured to that second exit, and the seams are one `touching-surfaces` finding. |
 | `touching-surfaces` | info | Surfaces of pieces that touch with no gap (coils of a spring, a lid on its box): they print fused. `value` is 0; the message gives the area. The fix: leave a gap of at least the nozzle if they should be separate, overlap them a little if they should be one. |
 | `overhang` | warning | Faces pointing down more than `max_overhang` from vertical, except faces within `bed_tolerance` of the lowest point, grouped into regions by shared edges; regions under (2 × `nozzle`)² are ignored. Regions of one part within max(4 × `min_wall`, 5% of the model's diagonal) of each other are one finding ("in N places"), as thin walls are. `value` is the finding's area. The message gives the steepest angle (that of the steepest faces covering (2 × `nozzle`)², so a sliver does not set it), the heights the finding spans ("z 0 to 11.94"), and, when only part of it is steeper than `max_overhang` + 15° (at most 89°), that area and its heights ("41.1 mm² of it steeper than 60° (z 11.9)"). `point` is on the steepest faces (the centroid of the largest of them), not on the largest region: a 90° ledge's finding pointed at a 60° thread flank 5 mm below it. |

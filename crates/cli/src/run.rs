@@ -734,6 +734,10 @@ fn render_frame<W: Write>(
         );
     }
     let cache_entries = rendered.as_ref().map_or(0, |r| r.cache_entries);
+    // A preview (no `rendered`) reports an empty cache, as its entry count
+    // already does; the budget is the renderer's either way.
+    let cache = renderer.stats();
+    let cache_bytes = if rendered.is_some() { cache.bytes } else { 0 };
     // `if (!root_geom) root_geom = std::make_shared<PolySet>(3);`
     let root = rendered.and_then(|r| r.geometry);
     if job.json
@@ -815,6 +819,8 @@ fn render_frame<W: Write>(
     // parts `--summary` asks for; or all of it as JSON to `--summary-file`.
     let facts = crate::summary::Facts {
         cache_entries,
+        cache_bytes,
+        cache_budget: cache.budget,
         elapsed_ms: started.elapsed().as_millis(),
         geometry: root.as_ref(),
         camera: &summary_camera,

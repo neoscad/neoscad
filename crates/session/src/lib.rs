@@ -448,6 +448,10 @@ pub struct Rendered {
     pub camera_assigned: eval::CameraAssigned,
     /// Entries in the geometry cache after the render.
     pub cache_entries: usize,
+    /// The geometry cache's estimated size and its budget after the
+    /// render, in bytes, for the render summary.
+    pub cache_bytes: usize,
+    pub cache_budget: usize,
     pub timings: Timings,
     /// Every file the request found (read, or asked the metadata of),
     /// sorted: the main file, its includes, the libraries it uses and
@@ -499,6 +503,10 @@ pub trait ExportSink {
 #[derive(Debug)]
 pub struct SummaryFacts<'a> {
     pub cache_entries: usize,
+    /// The geometry cache's estimated size and its budget, in bytes
+    /// (OpenSCAD's `Geometry cache size in bytes` and `max_size`).
+    pub cache_bytes: usize,
+    pub cache_budget: usize,
     /// From the start of geometry evaluation to the summary.
     pub elapsed_ms: f64,
     pub geometry: Option<&'a geom::Geometry>,
@@ -1564,7 +1572,7 @@ impl Session {
         scheme: &geom::color::Scheme,
         job: &JobGuard<'_>,
         csg_limit: usize,
-    ) -> Result<(Product, usize), Stop> {
+    ) -> Result<(Product, geom::CacheStats), Stop> {
         let t = self.now();
         let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
         let keys = eval::dump::Keys::new(&ev.root, &*pipe.fs);
@@ -1664,7 +1672,7 @@ impl Session {
         };
         self.report_inputs(pipe, loaded, top, &import_mesh, Some(&keys));
         pipe.timings.geometry = self.now() - t;
-        Ok((product, renderer.stats().entries))
+        Ok((product, renderer.stats()))
     }
 
     // --- Operations --------------------------------------------------------
@@ -1800,6 +1808,8 @@ impl Session {
             camera: run.camera,
             camera_assigned: eval::CameraAssigned::default(),
             cache_entries: 0,
+            cache_bytes: 0,
+            cache_budget: 0,
             timings: Timings::default(),
             files: Vec::new(),
             inputs: Vec::new(),
@@ -1813,7 +1823,7 @@ impl Session {
             out.camera = ev.camera;
             out.camera_assigned = ev.camera_assigned;
             run.stage(Stage::Geometry);
-            let (p, entries) = self.build(
+            let (p, cache) = self.build(
                 &mut pipe,
                 &loaded,
                 &ev,
@@ -1824,7 +1834,9 @@ impl Session {
             )?;
             out.geometry = p.geometry.filter(|g| !g.is_empty());
             out.tree = p.tree;
-            out.cache_entries = entries;
+            out.cache_entries = cache.entries;
+            out.cache_bytes = cache.bytes;
+            out.cache_budget = cache.budget;
             if want_parts {
                 let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
                 parts =
@@ -1914,7 +1926,7 @@ impl Session {
             let scheme = req.scheme.geometry_scheme();
             let mode = if req.force { Mode::Force } else { Mode::Render };
             run.stage(Stage::Geometry);
-            let (p, cache_entries) = self.build(
+            let (p, cache) = self.build(
                 &mut pipe,
                 &loaded,
                 &ev,
@@ -1970,7 +1982,9 @@ impl Session {
                 }
             }
             let facts = SummaryFacts {
-                cache_entries,
+                cache_entries: cache.entries,
+                cache_bytes: cache.bytes,
+                cache_budget: cache.budget,
                 elapsed_ms: self.now() - started,
                 geometry: root.as_ref(),
                 camera: &ev.camera,

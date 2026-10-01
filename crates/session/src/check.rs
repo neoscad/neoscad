@@ -136,7 +136,7 @@ impl Level {
 pub struct Finding {
     pub level: Level,
     /// Stable: `not-3d`, `empty`, `not-closed`, `not-manifold`,
-    /// `floating`, `thin-wall`, `overhang`, `bed-fit`, `tiny-feature`,
+    /// `floating`, `cavity`, `thin-wall`, `overhang`, `bed-fit`, `tiny-feature`,
     /// `parts-intersect`, `part-not-manifold`, `off-bed`, and for input
     /// meshes `polyhedron-inside-out`, `polyhedron-flipped-faces`,
     /// `polyhedron-open`, `polyhedron-not-manifold`; `stl-precision`.
@@ -529,17 +529,20 @@ fn analyze_solid(
     }
     let bed_z = bbox.lo[2];
 
-    // Components: floating islands and tiny pieces.
+    // Components: floating islands, tiny pieces and sealed cavities.
     let (comp_of, ncomp) = mesh.components();
     let mut comp_box = vec![Aabb::EMPTY; ncomp];
     let mut comp_part: Vec<HashMap<u32, f64>> = vec![HashMap::new(); ncomp];
+    let mut comp_volume = vec![0.0; ncomp];
     for (t, &c) in comp_of.iter().enumerate() {
         let c = c as usize;
         comp_box[c] = comp_box[c].union(&mesh.tri_box(t));
         if let Some(p) = mesh.part[t] {
             *comp_part[c].entry(p).or_insert(0.0) += mesh.area(t);
         }
+        comp_volume[c] += mesh.signed_volume(t);
     }
+    let cavity = cavities(&comp_volume, &comp_box, solid.is_valid());
     let owner = |m: &HashMap<u32, f64>| -> Option<String> {
         m.iter()
             .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(a.0)))
@@ -549,11 +552,43 @@ fn analyze_solid(
     let mut floating_comps = Vec::new();
     let tiny = 2.0 * s.nozzle;
     let lifted: Vec<u32> = (0..ncomp as u32)
-        .filter(|&c| comp_box[c as usize].lo[2] - bed_z > s.bed_tolerance)
+        .filter(|&c| !cavity[c as usize] && comp_box[c as usize].lo[2] - bed_z > s.bed_tolerance)
         .collect();
     let under = gaps_below(&mesh, &comp_of, &comp_box, &lifted, s.bed_tolerance);
+    let mut cavities_found = 0;
     for c in 0..ncomp {
         let b = comp_box[c];
+        if cavity[c] {
+            // The inside surface of a hollow: a shell of its own (it
+            // shares no vertex with the outside), so it was counted, and
+            // reported, as a floating piece. It prints as part of the
+            // solid around it; what matters is that it is sealed.
+            cavities_found += 1;
+            let size = b.size();
+            let volume = -comp_volume[c];
+            out.push(Finding {
+                level: Level::Info,
+                code: "cavity",
+                message: format!(
+                    "a sealed internal void of {} mm³ ({} x {} x {} mm), closed on every side",
+                    mm(volume),
+                    mm(size[0]),
+                    mm(size[1]),
+                    mm(size[2])
+                ),
+                point: b.center(),
+                bbox: b,
+                part: owner(&comp_part[c]),
+                fix: "nothing is needed for FDM if the hollow is intended (its ceiling prints as \
+                      a bridge or an overhang inside); for resin or powder printing add a drain \
+                      hole, since the void traps what it is printed from; fill it if the part \
+                      should be solid"
+                    .into(),
+                value: Some(r4(volume)),
+                limit: None,
+            });
+            continue;
+        }
         let lift = b.lo[2] - bed_z;
         if lift > s.bed_tolerance {
             floating += 1;
@@ -743,6 +778,7 @@ fn analyze_solid(
         "manifold": manifold,
         "components": ncomp,
         "floating": floating,
+        "cavities": cavities_found,
         "volume": r4(vol),
         "area": r4(area),
         "centroid": v4(centroid),
@@ -793,6 +829,25 @@ fn analyze_solid(
 /// straight down (`None`: nothing under them), for the pieces in `which`.
 /// Casts from up to 64 of each piece's vertices within `tol` of its
 /// bottom, found in one pass over the triangles.
+/// Which components are the inside surface of a sealed void: a closed
+/// shell wound inward (negative signed volume; Manifold winds every shell
+/// it outputs so that its normals point out of the material) whose box is
+/// inside another component's, wound outward. The box test keeps an
+/// inside-out lone shell (a mis-wound polyhedron that never went through a
+/// boolean) from passing as a void. Without a valid solid the windings
+/// mean nothing, so nothing is a cavity.
+fn cavities(volume: &[f64], boxes: &[Aabb], valid: bool) -> Vec<bool> {
+    let inside = |a: &Aabb, b: &Aabb| (0..3).all(|k| a.lo[k] >= b.lo[k] && a.hi[k] <= b.hi[k]);
+    (0..volume.len())
+        .map(|c| {
+            valid
+                && volume[c] < 0.0
+                && (0..volume.len())
+                    .any(|o| o != c && volume[o] > 0.0 && inside(&boxes[c], &boxes[o]))
+        })
+        .collect()
+}
+
 fn gaps_below(
     mesh: &Mesh,
     comp_of: &[u32],
@@ -1742,6 +1797,14 @@ pub fn text(summary: &Value) -> String {
             m["components"],
             if m["components"] == json!(1) { "" } else { "s" }
         ));
+        // A hollow box is two components (its inside is a shell of its
+        // own); saying which of them are voids keeps "2 components" from
+        // reading as two pieces.
+        match m["cavities"].as_u64() {
+            Some(1) => out.push_str(", 1 of them a sealed cavity"),
+            Some(n) if n > 1 => out.push_str(&format!(", {n} of them sealed cavities")),
+            _ => {}
+        }
         if let Some(w) = m["min_wall"]["thickness"].as_f64() {
             out.push_str(&format!(", thinnest wall about {} mm (sampled)", mm(w)));
         }

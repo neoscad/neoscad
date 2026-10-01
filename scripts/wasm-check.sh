@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds the pipeline for wasm32-unknown-unknown (crates/wasm-check, which
+# Lints the wasm32 builds with clippy (-D warnings), then builds the
+# pipeline for wasm32-unknown-unknown (crates/wasm-check, which
 # pulls in lang, eval, geom with default features, io, text and the bundled
 # assets) and runs its cases in node: primitives, a boolean, minkowski,
 # text in the bundled font, include <MCAD/...>, import() and dxf_dim() from
@@ -42,6 +43,16 @@ if [ ! -d "$(rustc --print sysroot)/lib/rustlib/wasm32-unknown-unknown" ]; then
     exit 0
 fi
 
+# Clippy for wasm32 as well as natively: code under `cfg(target_arch)` or
+# a feature the wasm builds leave off (threads, the GPU) can be dead or
+# unread only there, which the native `clippy -D warnings` never sees. Each
+# package separately, so each gets the features its own build uses (one
+# invocation would unify them, e.g. the GPU renderer into the session). The
+# workspace crates each pulls in are linted with it.
+for package in neoscad-wasm-check neoscad-render neoscad-web neoscad-web-view; do
+    cargo clippy --quiet --release --target wasm32-unknown-unknown -p "$package" -- -D warnings
+done
+echo "wasm-check: clippy is clean for wasm32"
 cargo build --quiet --release --target wasm32-unknown-unknown -p neoscad-wasm-check
 cargo build --quiet --release --target wasm32-unknown-unknown -p neoscad-render
 echo "wasm-check: neoscad-render (wgpu, WebGPU backend) builds for wasm32"

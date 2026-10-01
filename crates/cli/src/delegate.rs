@@ -6,7 +6,7 @@
 //! which follows the command line's own export step for step and encodes
 //! with the same function, so the files and messages are the ones a local
 //! run makes. Two things necessarily differ: the render summary's
-//! `Geometries in cache` count and times are the server's (its cache is
+//! cache figures and times are the server's (its cache is
 //! warm; that is the point), and unseeded `rands()` gets the client's
 //! seed, as a local run would.
 //!
@@ -140,6 +140,8 @@ impl session::ExportSink for Sink<'_> {
     ) -> bool {
         let f = crate::summary::Facts {
             cache_entries: facts.cache_entries,
+            cache_bytes: facts.cache_bytes,
+            cache_budget: facts.cache_budget,
             elapsed_ms: facts.elapsed_ms.max(0.0) as u128,
             geometry: facts.geometry,
             camera: facts.camera,
@@ -311,6 +313,8 @@ fn execute_png(
             let facts = crate::summary::Facts {
                 // A preview reports none, as the command line's does.
                 cache_entries: if r.tree.is_some() { 0 } else { r.cache_entries },
+                cache_bytes: if r.tree.is_some() { 0 } else { r.cache_bytes },
+                cache_budget: r.cache_budget,
                 elapsed_ms: started.elapsed().as_millis(),
                 geometry: r.geometry.as_ref(),
                 camera: &summary_camera,
