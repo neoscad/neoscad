@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use geom::manifold_geom::{GlobalIds, ManifoldGeometry, OpType, kernel_token};
@@ -77,42 +77,47 @@ fn operands() -> (ManifoldGeometry, ManifoldGeometry) {
     )
 }
 
-/// A cancel that lands inside one boolean stops it within a bounded time:
-/// the kernel looks at the request's flag between its stages and inside
-/// its long loops.
+/// A cancel that lands inside one boolean stops it there: the kernel looks
+/// at the token between its stages and inside its long loops. The cancel
+/// is triggered at a check count, not after a sleep: timed, a busy machine
+/// (a shared CI runner, Nix's sandbox) can let the boolean finish before
+/// the cancel or stall it after, which says nothing about the checks.
 #[test]
 fn a_cancel_stops_a_single_boolean() {
     let (a, b) = operands();
-    let started = Instant::now();
     let full = a.boolean(&b, OpType::Subtract);
-    let full_time = started.elapsed();
     assert!(!full.is_empty() && !full.is_cancelled());
 
-    // Best of three: on a shared CI runner one attempt can be descheduled
-    // for longer than the check interval, which says nothing about the
-    // checks themselves.
-    let mut best = None;
-    for _ in 0..3 {
-        let flag = Arc::new(AtomicBool::new(false));
-        let token = kernel_token(Some(&flag), None).expect("a token");
-        let canceller = std::thread::spawn(move || {
-            std::thread::sleep(full_time / 4);
-            flag.store(true, Ordering::Relaxed);
-            Instant::now()
-        });
-        let out = a.boolean_until(&b, OpType::Subtract, Some(&token));
-        let stopped = Instant::now();
-        let latency = stopped.saturating_duration_since(canceller.join().expect("canceller"));
-        eprintln!("one boolean {full_time:?}; stopped {latency:?} after the cancel");
-        assert!(out.is_cancelled() && out.is_empty());
-        best = Some(best.map_or(latency, |b: std::time::Duration| b.min(latency)));
-    }
-    let latency = best.expect("three attempts");
-    // Unchecked, it would run the remaining three quarters; checked, it
-    // stops at the next check, well before that.
+    // Count the checks a whole boolean makes, with a token that never fires.
+    let total = Arc::new(AtomicUsize::new(0));
+    let counter = total.clone();
+    let token = kernel_token(Some(&Arc::new(AtomicBool::new(false))), None)
+        .expect("a token")
+        .with_check(Arc::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+            false
+        }));
+    let uncancelled = a.boolean_until(&b, OpType::Subtract, Some(&token));
+    assert!(!uncancelled.is_cancelled() && !uncancelled.is_empty());
+    let total = total.load(Ordering::Relaxed);
+    assert!(total >= 4, "only {total} checks in a whole boolean");
+
+    // Fire at half of them: the boolean is stopped in the middle, and the
+    // kernel makes no more than a few checks after the token fires.
+    let fire_at = total / 2;
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counter = seen.clone();
+    let token = kernel_token(Some(&Arc::new(AtomicBool::new(false))), None)
+        .expect("a token")
+        .with_check(Arc::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed) + 1 >= fire_at
+        }));
+    let out = a.boolean_until(&b, OpType::Subtract, Some(&token));
+    assert!(out.is_cancelled() && out.is_empty());
+    let seen = seen.load(Ordering::Relaxed);
     assert!(
-        latency < full_time / 2,
-        "stopped {latency:?} after the cancel, of {full_time:?}"
+        seen < total,
+        "{seen} checks before stopping, of {total} in a whole boolean"
     );
 }
 
