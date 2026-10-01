@@ -1,7 +1,9 @@
 # Packaging NeoSCAD
 
 Scope: `neoscad` (the CLI, with `serve`, `mcp` and `lsp`) on every
-platform; the GUI on macOS only, for now. Checked on 2026-09-28 against
+platform; the GUI on macOS (DMG and Homebrew cask), and since 0.2.0 as
+previews on Windows (MSI, `docs/windows-app.md`) and Linux (Flatpak bundle,
+`docs/linux-app.md`). Checked on 2026-09-28 against
 https://openscad.org/downloads.html, its release/snapshot file lists and
 the registry APIs. Status updated 2026-09-29, when the "Now" items were
 built (GitHub org `neoscad`, repository `github.com/neoscad/neoscad`,
