@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.2.1
+
+### Fixed
+
+- **Safari:** the /try BOSL2 examples (gear, gearbox) render in WebKit.
+  The renderer's tree walk no longer uses one native stack frame per
+  level.
+- **Deep recursion never crashes the web engine.** Each browser's stack
+  is measured at start-up, and too-deep recursion stops with OpenSCAD's
+  recursion error. Fewer wasm frames per level give more depth in every
+  browser.
+- **Preview stops on Cancel and at its time and memory limits,** including
+  inside a single huge boolean. In the web demo, the Menger sponge at depth
+  5 gives a memory-limit error instead of crashing the engine.
+- **Measured memory limits:** the command line, `serve`, `mcp`, the macOS
+  app and the web measure memory instead of only estimating it, and shrink
+  their caches before failing a request.
+- **A call memo bug** replayed the wrong `echo` for calls whose children
+  only assign values.
+- **Check** reports a sealed internal void as a cavity, not a floating
+  piece, and pluralises its summary ("1 error").
+- **`use <font.ttf>`** no longer parses the font as a library, and a
+  missing font prints OpenSCAD's error.
+- **Windows:** an installed rc and its release now upgrade in place.
+
+### Faster
+
+- **A preview reuses repeated subtrees, as a render does:** the Menger
+  sponge at depth 4 previews in 1.4 s instead of 3.8 s natively, and in
+  8.5 s instead of 34 s on the web. A preview of a big repeated tree can
+  use about as much memory as its render.
+
+### New
+
+- **Windows and Linux apps:** Customizer, Check and Measure panels, file
+  watching, and every export format with progress and Cancel.
+- **The render summary** reports the geometry cache size, as OpenSCAD does.
+- **The groundwork for update checks:** a signed release feed, and a
+  once-a-day notice from `neoscad` in an interactive terminal (turn it off
+  with `NEOSCAD_NO_UPDATE_CHECK`; see docs/privacy.md). The feed goes live
+  once its signing key is set up.
+- **macOS releases no longer wait on Apple's notarization.** A release
+  stays a prerelease until its notarized DMG is attached by an hourly job.
+
 ## 0.2.0
 
 ### New

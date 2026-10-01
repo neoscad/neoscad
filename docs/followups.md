@@ -142,6 +142,34 @@ lead them, come roughly in order of user impact.
   allocates and takes nothing). (8f)
 
 ## Performance
+
+- **A stack-independent evaluator (owner decision, 2026-10-01: do it
+  after the 0.2.1 work).** Module and function evaluation on an explicit
+  heap stack, as the render walk is since 6c50a57, or further toward
+  the bytecode VM in `docs/audits/bytecode-vm.md` §6. Why:
+  - no recursion-depth limit in any browser (WebKit's large JSC frames
+    are why /try needs a probed budget) or natively;
+  - interruptible evaluation;
+  - PGO without the depth trade-off, so it could also go on the DMG's
+    core and Windows arm64.
+
+  The baseline, as of 34d69e2:
+  - native module depth is 65,507 (2.16× OpenSCAD's) at 64 MiB;
+  - WebKit stops m() through translate at about 30 levels, plain modules
+    at 80, functions at 60, comprehensions at 20; Chromium and Firefox at
+    150-300.
+
+  The audit measured the explicit stack alone at 0.95-1.08×, so
+  "no regression" is the bar. Benchmark every stage as a matrix:
+  - {current, heap evaluator} × {plain release (thin LTO), PGO
+    (retrained per evaluator)}, plus fat LTO if cheap;
+  - the macOS app core (neoscad-ffi) with PGO included;
+  - end-to-end edit-to-preview latency through client's DocumentController
+    and through the web worker, with the mesh copies timed separately;
+  - the serve edit_loop;
+  - interleaved runs on a quiet machine.
+
+  Conformance and BOSL2 output must stay byte-identical.
 - **Call reuse (`eval::callmemo`) gains little from calls with
   children.** They are keyed now (the children's scope, and the variables
   their mentioned names reach in every context around them), and the
