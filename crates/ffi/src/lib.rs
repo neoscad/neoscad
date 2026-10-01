@@ -41,6 +41,7 @@ mod layer;
 mod picture;
 mod shared;
 mod types;
+mod update;
 mod viewport;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -56,6 +57,7 @@ pub use language::*;
 pub use picture::*;
 pub use shared::*;
 pub use types::*;
+pub use update::*;
 pub use viewport::*;
 
 uniffi::setup_scaffolding!();

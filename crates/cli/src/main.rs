@@ -68,6 +68,7 @@ mod serve;
 mod snapshot;
 mod summary;
 mod transport;
+mod update;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -376,11 +377,24 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = {
 };
 
 fn main() -> ExitCode {
+    // The update notice (`update.rs`) checks in the background while the
+    // command runs and prints after it, never delaying it.
+    let notice = update::start(std::env::args_os().nth(1).as_deref());
+    let code = run_main();
+    update::finish(notice);
+    code
+}
+
+fn run_main() -> ExitCode {
     // `neoscad snapshot ...` and the rest of `SUBCOMMANDS` are neoscad's
     // own commands, each with its own flags; everything else is OpenSCAD's
     // command line.
     let mut args = std::env::args_os();
-    if let Some(first) = args.nth(1)
+    let first = args.nth(1);
+    if first.as_deref() == Some(std::ffi::OsStr::new(update::CHILD_ARG)) {
+        return ExitCode::from(update::child(args.collect()));
+    }
+    if let Some(first) = first
         && let Some(sub) = SUBCOMMANDS.iter().find(|s| first == s.name)
     {
         return ExitCode::from((sub.run)(args.collect()));

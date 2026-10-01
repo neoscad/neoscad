@@ -266,3 +266,49 @@ keeps only the latest commit, and static deltas trade space for speed
 - **Keys:** the Sparkle EdDSA key, the feed's minisign key and the Flatpak
   GPG key are kept in the owner's password manager. The GitHub secrets
   hold working copies.
+
+## Built so far, and next steps
+
+The shared foundation exists (`docs/release.md`, "The update feed"):
+
+- the feeds, `stable.json` and `rc.json`, written from the releases by
+  `scripts/release/update-feed.py`, signed with minisign and pushed to the
+  website by `update-feed.yml` (after `announce`, and again from
+  `macos-notarize.yml` once the DMG is attached);
+- the check, `client::update::check` (signature, channel, serial,
+  version, platform), and the apps' entry point `check_for_update` and
+  `update_feed_url` in `crates/ffi/src/update.rs`;
+- the CLI's notice (`crates/cli/src/update.rs`; `docs/privacy.md`).
+
+Nothing is live until the owner creates the minisign key, adds its public
+half to `RELEASE_KEYS`, and sets `UPDATE_FEED_MINISIGN_KEY`,
+`UPDATE_FEED_MINISIGN_KEY_PASSWORD` and `WEBSITE_TOKEN`.
+
+Next steps, in order:
+
+1. **Keys and the first live feed.** Create the key, add the public half
+   to `RELEASE_KEYS`, set the three secrets, then run `gh workflow run
+   update-feed.yml` and check
+   `https://neoscad.org/updates/v1/stable.json` and its `.minisig`.
+2. **Windows app.** Fetch the feed (`update_feed_url`) once a day and from
+   a menu item, and keep each channel's last serial in the settings. Call
+   `check_for_update` with `WindowsX64` or `WindowsArm64`. Show "Update
+   available", then on Install download the MSI to `%TEMP%`, check its
+   sha256 from the offer, run `msiexec /qn` after one UAC prompt and
+   restart. Add the settings "Check for updates automatically" and
+   "Receive release candidates". Fix finding 5 (`AllowSameVersionUpgrades`)
+   first.
+3. **macOS app.** Sparkle 2 with its own appcast and EdDSA key, as
+   recommended above, including `release.sh`'s re-signing of
+   `Autoupdate` (finding 3) and `auto_updates true` in the cask. The
+   shared feed's `macos` entry is then for other readers: the CLI, the
+   website, a future custom check.
+4. **Linux app.** The GPG-signed Flatpak repository on its own Pages site
+   (owner decision). GNOME Software and Discover then notify, and the app
+   needs no check of its own or network permission.
+5. **Website.** A privacy page from `docs/privacy.md`, and download links
+   that could read the feed instead of being edited by hand.
+6. **Later.** Each artifact's minimum OS version in the feed (the field
+   can be added to schema 1, since clients ignore unknown fields), and a
+   `verify_download(bytes, artifact)` helper in `client` once a Rust host
+   downloads installers.

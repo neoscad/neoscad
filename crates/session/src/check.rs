@@ -1771,6 +1771,24 @@ impl Session {
     }
 }
 
+/// A check's counts as words: "1 error, 2 warnings, 0 info". The app's
+/// check panel (`client::check_summary`) says the same, so the two read
+/// alike; "info" is a mass noun and stays as it is.
+pub fn counts(errors: u64, warnings: u64, info: u64) -> String {
+    let plural = |n: u64, one: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {one}s")
+        }
+    };
+    format!(
+        "{}, {}, {info} info",
+        plural(errors, "error"),
+        plural(warnings, "warning")
+    )
+}
+
 /// The human-readable report of a check: one line per finding and its
 /// fix, after a summary line.
 pub fn text(summary: &Value) -> String {
@@ -1782,9 +1800,10 @@ pub fn text(summary: &Value) -> String {
     }
     let c = &summary["counts"];
     let m = &summary["model"];
+    let n = |k: &str| c[k].as_u64().unwrap_or(0);
     out.push_str(&format!(
-        "check {input}: {} errors, {} warnings, {} info",
-        c["errors"], c["warnings"], c["info"]
+        "check {input}: {}",
+        counts(n("errors"), n("warnings"), n("info"))
     ));
     if m["dimensions"] == json!(3) {
         out.push_str(&format!(

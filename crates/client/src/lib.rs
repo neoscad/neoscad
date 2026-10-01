@@ -24,6 +24,7 @@ mod present;
 mod preview;
 mod text;
 mod types;
+pub mod update;
 
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};

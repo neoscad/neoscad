@@ -15,9 +15,16 @@ eval = { package = "neoscad-eval", path = "../eval" }
 geom = { package = "neoscad-geom", path = "../geom" }
 io = { package = "neoscad-io", path = "../io" }
 lang = { package = "neoscad-lang", path = "../lang" }
+# The update feed's signature (src/update.rs): Ed25519 minisign
+# verification in pure Rust with no dependencies of its own, so the check
+# builds for wasm32 like the rest of this crate. MIT.
+minisign-verify = "0.3.0"
 # Without the GPU, so the web worker builds it for wasm32; the app's core
 # turns the GPU on for itself (Cargo unifies the features).
 render = { package = "neoscad-render", path = "../render", default-features = false }
+# Release versions in the update feed, ordered with their prereleases
+# (0.3.0-rc.1 < 0.3.0). Already in the build; MIT OR Apache-2.0.
+semver = "1"
 serde.workspace = true
 serde_json.workspace = true
 session = { package = "neoscad-session", path = "../session", default-features = false }

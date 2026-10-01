@@ -374,17 +374,20 @@ fn copy(from: &Path, to: &Path) -> Result<(), String> {
 
 /// Fetch `url` with curl: `-f` so an HTTP error is an error, https only.
 fn fetch(url: &str) -> Result<Vec<u8>, String> {
+    curl(
+        url,
+        &["--proto", "=https", "--retry", "2", "--max-time", "300"],
+    )
+}
+
+/// `curl -fsSL` with `options` before `url`: the CLI's one HTTP client
+/// (here, and the update check in `update.rs`), so it links none and uses
+/// the system's proxies and certificates.
+pub(crate) fn curl(url: &str, options: &[&str]) -> Result<Vec<u8>, String> {
     let out = Command::new("curl")
-        .args([
-            "-fsSL",
-            "--proto",
-            "=https",
-            "--retry",
-            "2",
-            "--max-time",
-            "300",
-            url,
-        ])
+        .arg("-fsSL")
+        .args(options)
+        .arg(url)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("cannot run curl (needed to download from GitHub): {e}"))?;
@@ -398,7 +401,7 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
 }
 
 /// The user's cache directory for neoscad; `None` when the OS names none.
-fn cache_dir() -> Option<PathBuf> {
+pub(crate) fn cache_dir() -> Option<PathBuf> {
     let home = || std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos") {
         home().map(|h| h.join("Library/Caches/neoscad"))

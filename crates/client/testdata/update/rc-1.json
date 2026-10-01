@@ -1,0 +1,16 @@
+{
+  "artifacts": {
+    "linux-x86_64": {
+      "name": "NeoSCAD-0.4.0-rc.1-linux-x86_64.flatpak",
+      "sha256": "c1c362fe2859c8180fd5ece2bea536a0b4d72fb1f1c894997f8d69bd5d6895d6",
+      "size": 1000,
+      "url": "https://github.com/neoscad/neoscad/releases/download/v0.4.0-rc.1/NeoSCAD-0.4.0-rc.1-linux-x86_64.flatpak"
+    }
+  },
+  "channel": "rc",
+  "date": "2026-10-20",
+  "schema": 1,
+  "serial": 1,
+  "url": "https://github.com/neoscad/neoscad/releases/tag/v0.4.0-rc.1",
+  "version": "0.4.0-rc.1"
+}

@@ -220,7 +220,8 @@ mod tests {
         let (title, sub) = finding_text(f);
         assert!(title.starts_with(&format!("{}. ", f.id)), "{title}");
         assert!(sub.starts_with("Error · "), "{sub}");
-        assert!(client::check_summary(&r).contains("errors"));
+        // "1 error", "2 errors": the count and its noun, pluralised.
+        assert!(client::check_summary(&r).starts_with(&format!("{} error", r.errors)));
 
         // Every located finding is a marker; the selected one has a box.
         let state = OverlayState {

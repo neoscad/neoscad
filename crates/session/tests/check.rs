@@ -1197,3 +1197,27 @@ fn faces_a_hair_apart_merge_at_stl_precision() {
     let g = r.geometry_json(&scheme.geometry_scheme());
     assert!(g.get("stl_precision").is_none(), "{g}");
 }
+
+#[test]
+fn text_counts_are_pluralised() {
+    // "1 errors" read as a typo in the CLI's report and the app's panel.
+    assert_eq!(
+        session::check::counts(1, 2, 0),
+        "1 error, 2 warnings, 0 info"
+    );
+    assert_eq!(
+        session::check::counts(0, 1, 1),
+        "0 errors, 1 warning, 1 info"
+    );
+    let v = serde_json::json!({
+        "input": "a.scad",
+        "counts": {"errors": 1, "warnings": 1, "info": 3},
+        "model": {"dimensions": 2},
+        "findings": []
+    });
+    let text = session::check::text(&v);
+    assert!(
+        text.starts_with("check a.scad: 1 error, 1 warning, 3 info"),
+        "{text}"
+    );
+}

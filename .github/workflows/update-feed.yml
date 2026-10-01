@@ -1,0 +1,162 @@
+# The update feeds: https://neoscad.org/updates/v1/stable.json and rc.json,
+# each with a minisign signature (.minisig), which the apps and the CLI's
+# update notice read (crates/client/src/update.rs; docs/release.md, "The
+# update feed").
+#
+# Runs three ways, and does the same each time: derive both feeds from the
+# repository's releases (scripts/release/update-feed.py), sign the ones
+# that changed, and push them to the website repository neoscad/website.
+#
+# - from release.yml, after `announce` (`post-announce-jobs` in Cargo.toml's
+#   [workspace.metadata.dist]), when the publish jobs have attached the
+#   Windows MSIs and the Flatpaks;
+# - from macos-notarize.yml, after a run that advanced a release, so the
+#   DMG is listed once it is attached (a Mac is offered a release only
+#   when the feed has its DMG);
+# - by hand: `gh workflow run update-feed.yml`.
+#
+# Secrets (all optional; without one the job warns and skips what needs
+# it, and the feeds it wrote are kept as a workflow artifact to look at):
+#   UPDATE_FEED_MINISIGN_KEY           the minisign secret key file's text
+#   UPDATE_FEED_MINISIGN_KEY_PASSWORD  its password
+#   WEBSITE_TOKEN                      Contents read and write on neoscad/website
+name: Update feed
+
+on:
+  workflow_call:
+    inputs:
+      # release.yml passes cargo-dist's plan; the feeds come from the
+      # releases themselves, so it is only logged.
+      plan:
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  feed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The release and the notarize workflow can both get here at once; one
+    # at a time, so each sees the other's serial.
+    concurrency:
+      group: update-feed
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FEED_KEY: ${{ secrets.UPDATE_FEED_MINISIGN_KEY }}
+      FEED_KEY_PASSWORD: ${{ secrets.UPDATE_FEED_MINISIGN_KEY_PASSWORD }}
+      WEBSITE_TOKEN: ${{ secrets.WEBSITE_TOKEN }}
+      TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # The published feeds are the starting point: their serials go on
+      # from there, and an unchanged feed is not rewritten.
+      - name: The website
+        run: |
+          echo "Release: ${TAG:-(none: a hand-started or notarize run)}"
+          site=$RUNNER_TEMP/website
+          if [[ -n "$WEBSITE_TOKEN" ]]; then
+            auth=$(printf 'x-access-token:%s' "$WEBSITE_TOKEN" | base64 | tr -d '\n')
+            echo "::add-mask::$auth"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+              clone --quiet --depth 1 https://github.com/neoscad/website.git "$site"
+          else
+            echo "::warning::No WEBSITE_TOKEN secret; the feeds are written but not published."
+            git clone --quiet --depth 1 https://github.com/neoscad/website.git "$site" \
+              || mkdir -p "$site"
+          fi
+          mkdir -p "$site/updates/v1"
+
+      - name: Write the feeds
+        id: write
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=30" > "$RUNNER_TEMP/releases.json"
+          python3 scripts/release/update-feed.py --releases "$RUNNER_TEMP/releases.json" \
+            --feed-dir "$RUNNER_TEMP/website/updates/v1" > "$RUNNER_TEMP/changed.txt"
+          changed=$(tr '\n' ' ' < "$RUNNER_TEMP/changed.txt")
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          for f in $changed; do
+            echo "### $f" >> "$GITHUB_STEP_SUMMARY"
+            { echo '```json'; cat "$RUNNER_TEMP/website/updates/v1/$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done
+          [[ -n "$changed" ]] || echo "The feeds are current." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign
+        id: sign
+        if: steps.write.outputs.changed != ''
+        env:
+          CHANGED: ${{ steps.write.outputs.changed }}
+        run: |
+          if [[ -z "$FEED_KEY" ]]; then
+            echo "::warning::No UPDATE_FEED_MINISIGN_KEY secret; the feeds are not signed or published."
+            exit 0
+          fi
+          sudo apt-get install -y -qq minisign >/dev/null
+          umask 077
+          key=$RUNNER_TEMP/feed.key
+          printf '%s\n' "$FEED_KEY" > "$key"
+          # The secret's public half must be one the clients trust: a feed
+          # signed with any other key is refused by every install, which
+          # would look like "no updates" rather than an error.
+          printf '%s\n' "$FEED_KEY_PASSWORD" | minisign -R -s "$key" -p "$RUNNER_TEMP/feed.pub" >/dev/null
+          pub=$(sed -n 2p "$RUNNER_TEMP/feed.pub")
+          if ! grep -qF "\"$pub\"" crates/client/src/update.rs; then
+            rm -f "$key"
+            echo "::error::The UPDATE_FEED_MINISIGN_KEY's public key $pub is not in RELEASE_KEYS (crates/client/src/update.rs)."
+            exit 1
+          fi
+          cd "$RUNNER_TEMP/website/updates/v1"
+          for f in $CHANGED; do
+            comment="neoscad update feed: $(jq -r '"\(.channel) \(.version) serial \(.serial)"' "$f")"
+            printf '%s\n' "$FEED_KEY_PASSWORD" | minisign -S -s "$key" -m "$f" -t "$comment" >/dev/null
+            minisign -V -p "$RUNNER_TEMP/feed.pub" -m "$f"
+          done
+          rm -f "$key"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the feeds
+        if: steps.write.outputs.changed != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: update-feed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/website/updates/v1
+          retention-days: 30
+
+      - name: Push to neoscad/website
+        if: steps.sign.outputs.signed == 'true'
+        env:
+          CHANGED: ${{ steps.write.outputs.changed }}
+        run: |
+          if [[ -z "$WEBSITE_TOKEN" ]]; then
+            echo "::warning::No WEBSITE_TOKEN secret; the signed feeds were not published (they are in this run's artifact)."
+            exit 0
+          fi
+          auth=$(printf 'x-access-token:%s' "$WEBSITE_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          header="http.https://github.com/.extraheader=AUTHORIZATION: basic $auth"
+          cd "$RUNNER_TEMP/website"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          msg="Update feed:"
+          for f in $CHANGED; do
+            git add "updates/v1/$f" "updates/v1/$f.minisig"
+            msg+=" $(jq -r '"\(.channel) \(.version) (serial \(.serial))"' "updates/v1/$f")"
+          done
+          git commit --quiet -m "$msg"
+          # The website is also edited by hand; a push that loses that race
+          # is rebased (the feed files are only ever written here) and
+          # retried.
+          for attempt in 1 2 3; do
+            git -c "$header" push --quiet && break
+            [[ $attempt -lt 3 ]] || exit 1
+            sleep 10
+            git -c "$header" pull --quiet --rebase
+          done
+          echo "Published: $msg" | tee -a "$GITHUB_STEP_SUMMARY"

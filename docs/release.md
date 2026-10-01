@@ -299,6 +299,10 @@ such as `v0.1.0` runs, in order:
    checked again, and only then attested and attached; unsigned, like
    the CLI's MSIs from step 3, which are a separate installer).
 6. **announce**.
+7. **update feed** (`update-feed.yml`, a cargo-dist post-announce job):
+   the signed `stable.json` and `rc.json` on neoscad.org, from the
+   release's assets ("The update feed" below). It runs again from
+   `macos-notarize.yml` once the DMG is attached.
 
 A prerelease tag (`v0.2.0-beta.1`) makes a GitHub prerelease and skips
 the publish jobs, unless `publish-prereleases = true` is set in
@@ -319,6 +323,8 @@ The `.deb` and `.rpm` carry `0.1.0~rc.1` so they sort before `0.1.0`
 | `NEOSCAD_DEVELOPER_ID_P12`, `NEOSCAD_DEVELOPER_ID_P12_PASSWORD` | the app job and `macos-notarize.yml` (which signs the DMG): the Developer ID Application certificate (base64 .p12) |
 | `NEOSCAD_SIGN_IDENTITY`, `NEOSCAD_TEAM_ID` | the same two, as the local variables above |
 | `NEOSCAD_NOTARY_KEY`, `NEOSCAD_NOTARY_KEY_ID`, `NEOSCAD_NOTARY_ISSUER` | the same two: an App Store Connect API key for `notarytool` |
+| `UPDATE_FEED_MINISIGN_KEY`, `UPDATE_FEED_MINISIGN_KEY_PASSWORD` | `update-feed.yml` (from `release.yml` through `secrets: inherit`, and from `macos-notarize.yml`): the text of the minisign secret key file that signs the update feeds, and its password. Its public half must be in `RELEASE_KEYS` (`crates/client/src/update.rs`), or the job fails. Without it the job warns, and the feeds it wrote are kept only as the run's artifact ("The update feed" below) |
+| `WEBSITE_TOKEN` | `update-feed.yml`'s push of `updates/v1/` to `neoscad/website`: a fine-grained token, resource owner `neoscad`, only that repository, Contents read and write. Without it the job warns and nothing is published |
 
 Cutting one: bump `version`; add (or date) the version's `<release
 version="…" date="YYYY-MM-DD"/>` at the top of `<releases>` in
@@ -498,7 +504,9 @@ universal CLI, because its tarball isn't published. A local
      release then gets `gh release edit --prerelease=false --latest`
      (`--latest=false` if a newer full release was published in the
      meantime). An rc stays a prerelease. Last, the state record is
-     deleted, so the finished release carries no internal file.
+     deleted, so the finished release carries no internal file. The
+     workflow's `feed` job then adds the DMG to the update feeds ("The
+     update feed" below).
    - **In Progress** (or `notarytool` unreachable): nothing.
    - **Invalid or Rejected**: an issue titled "macOS notarization failed
      for `<tag>`" is opened, or commented on if one is already open,
@@ -541,6 +549,122 @@ The download page on neoscad.org links each file by version
 (`/releases/download/v<version>/…`), not through `releases/latest`.
 Update its DMG link only once the hourly job has attached the DMG.
 Before then, the link returns 404.
+
+## The update feed
+
+The apps and the CLI learn about new releases from two small signed files
+on the website, not from the GitHub API (whose unauthenticated limit is 60
+requests an hour per IP, and whose "latest" can't serve an rc channel;
+`docs/audits/auto-update.md`):
+
+    https://neoscad.org/updates/v1/stable.json   (+ stable.json.minisig)
+    https://neoscad.org/updates/v1/rc.json       (+ rc.json.minisig)
+
+    {
+      "schema": 1,
+      "channel": "stable",
+      "serial": 7,
+      "version": "0.3.0",
+      "date": "2026-10-01",
+      "url": "https://github.com/neoscad/neoscad/releases/tag/v0.3.0",
+      "artifacts": {
+        "macos":         {"name": "NeoSCAD-0.3.0-412.dmg", "url": "…", "sha256": "…", "size": 51234567},
+        "windows-x64":   {"name": "NeoSCAD-0.3.0-windows-x64.msi", …},
+        "windows-arm64": {…}, "linux-x86_64": {…}, "linux-aarch64": {…}
+      }
+    }
+
+- `stable.json` names the newest release whose tag has no prerelease
+  part, and `rc.json` the newest release of any kind. An rc therefore
+  goes to `rc.json` only, and a full release to both, so the rc channel
+  moves on to the final release.
+- `artifacts` lists the apps' installers that the release has so far: the
+  DMG, the two MSIs of `windows-installer.yml` and the two Flatpaks. It
+  never lists the CLI's archives or cargo-dist's CLI MSIs. Package
+  managers update the CLI, which only uses the version and URL.
+- `serial` goes up by one whenever the file changes. Clients refuse a
+  lower serial than one they have accepted, which stops replay of an old,
+  validly signed feed. They refuse a feed whose `channel` isn't the one
+  they asked for, and they never offer a version that isn't newer than
+  their own (`crates/client/src/update.rs`).
+- A change that old clients would misread goes to `/updates/v2/`. A v1
+  file always says `"schema": 1`, and clients ignore fields they don't
+  know.
+
+**How it's made.** `update-feed.yml` runs
+`scripts/release/update-feed.py` on the repository's last 30 releases
+(`gh api …/releases`) and the website's current feeds. It rewrites a feed
+only when what it says has changed, and never moves one to a lower
+version. Each sha256 is the asset's GitHub `digest`, or else the value in
+the `.sha256` file beside the asset. The job signs the changed files with
+`minisign -S` and checks them with `minisign -V`, then commits
+`updates/v1/` to `neoscad/website`. Every run derives everything again, so
+re-running it is safe.
+
+**When.** The feeds follow tags, not GitHub's prerelease flag. A full
+release is held as a prerelease until its DMG is notarized ("The macOS app
+after the release"), yet the Windows and Linux apps and the CLI hear about
+it as soon as it is published:
+
+1. After `announce`, `release.yml`'s `custom-update-feed` job publishes the
+   release without `macos`. A Mac app is offered a release only when the
+   feed has its DMG (a client given a platform needs that platform's
+   installer), so Macs keep their current version until then.
+2. Once `macos-notarize.yml` has attached the DMG, its `feed` job runs the
+   same workflow, and the feed gets `macos` and the next serial. The `feed`
+   job runs after every hourly run that found a pending release. When
+   nothing changed, it pushes nothing.
+
+If notarization fails, the feed stays without `macos` until a later
+release. An rc tag without `publish-prereleases` has no app installers
+(their publish jobs are skipped), so `rc.json` names it without
+installers. Only the version and URL reach the CLI, and the CLI follows
+`stable.json`. `gh workflow run update-feed.yml` runs it by hand.
+
+**Without the secrets** (the state until the owner creates the key), the
+job writes the feeds, warns that it can't sign or publish them, and
+uploads them as the run's artifact `update-feed-<run>-<attempt>`, so they
+can be checked. `RELEASE_KEYS` is empty, so every client refuses every
+feed and nothing is ever offered.
+
+**The key.** Create it once, offline:
+
+    minisign -G -p neoscad-update.pub -s neoscad-update.key    # with a password
+
+- The password manager holds the secret key file and its password; the
+  repository secrets `UPDATE_FEED_MINISIGN_KEY` (the file's text) and
+  `UPDATE_FEED_MINISIGN_KEY_PASSWORD` hold working copies.
+- The public key's second line (`RW…`) goes into `RELEASE_KEYS` in
+  `crates/client/src/update.rs`, and ships with the next release. The job
+  refuses to sign with a key whose public half isn't there.
+- Never commit the secret key. `crates/client/testdata/update/test.key`
+  is a throwaway key for the tests, and `RELEASE_KEYS` must never hold its
+  public half (a unit test checks).
+
+**Rotating the key.** Installed clients trust only the keys they were
+built with, so a new key must ship before the feed uses it:
+
+1. Make the new key. Add its public line to `RELEASE_KEYS` next to the old
+   one, and release.
+2. Wait until most installs have that release (or later), since older ones
+   stop seeing updates at the switch. Then replace the two secrets with
+   the new key. The next feed is signed with it.
+3. In a later release, remove the old key from `RELEASE_KEYS`.
+
+If the key leaks, do steps 1 and 2 at once and remove the old key in the
+same release. Installs that predate it then stop hearing about updates and
+need a manual update, which the release notes should say.
+
+**Testing it locally.** `scripts/release/test-update-feed.sh` writes a
+feed from fake releases, signs it with the test key and serves it on
+127.0.0.1. It then builds `neoscad` trusting the test key (the
+compile-time `NEOSCAD_UPDATE_TEST_PUBLIC_KEY`, never set for a release)
+and pointed at that server (`NEOSCAD_UPDATE_FEED_URL`). It checks that the
+notice appears once in a pseudo-terminal, and never when output is piped
+or redirected, with `CI` or `NEOSCAD_NO_UPDATE_CHECK` set, or for a
+tampered feed. `crates/client/testdata/update/make.sh` regenerates the
+unit tests' signed fixtures. `docs/privacy.md` says what the check sends
+and how to turn it off.
 
 ## Smoke test
 

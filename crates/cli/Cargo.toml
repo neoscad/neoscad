@@ -53,6 +53,11 @@ clap.workspace = true
 # completion scripts, from the same clap definitions as `--help`; roff is
 # what clap_mangen writes with, for the page's own sections. All three are
 # MIT OR Apache-2.0.
+# The update notice (src/update.rs): the signed feed's check, shared with
+# the apps. Named apart from this crate's own `client` module (the
+# serve client). Everything it links is already in this binary, apart
+# from minisign-verify (MIT, no dependencies).
+neoscad_client = { package = "neoscad-client", path = "../client" }
 clap_complete = "4.6.11"
 clap_mangen = "0.3.3"
 roff = "1.1.1"

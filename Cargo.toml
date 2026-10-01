@@ -126,6 +126,11 @@ formula = "neoscad"
 # bundles (.github/workflows/flatpak.yml), and the Windows app's MSIs
 # (.github/workflows/windows-installer.yml).
 publish-jobs = ["homebrew", "./publish-macos-app", "./publish-packages", "./flatpak", "./windows-installer"]
+# After `announce`, when every publish job above has attached its files:
+# the signed update feeds on neoscad.org (.github/workflows/update-feed.yml;
+# docs/release.md, "The update feed"). macos-notarize.yml runs it again
+# once the DMG lands.
+post-announce-jobs = ["./update-feed"]
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -180,6 +185,9 @@ publish-packages = { contents = "write", packages = "write" }
 flatpak = { contents = "write", id-token = "write", attestations = "write" }
 # The Windows app's MSIs are attested and attached like the DMG.
 windows-installer = { contents = "write", id-token = "write", attestations = "write" }
+# The feed job only reads the releases; it pushes to the website with its
+# own token (WEBSITE_TOKEN).
+update-feed = { contents = "read" }
 
 [workspace.metadata.dist.min-glibc-version]
 "*" = "2.28"

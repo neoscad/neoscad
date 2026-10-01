@@ -199,7 +199,7 @@ fn the_check_summary_line() {
     };
     assert_eq!(
         check_summary(&r),
-        "1 errors, 2 warnings, 0 info · thinnest wall 0.35 mm · 3 more not listed"
+        "1 error, 2 warnings, 0 info · thinnest wall 0.35 mm · 3 more not listed"
     );
     r.failed = true;
     assert_eq!(check_summary(&r), "The model did not render.");

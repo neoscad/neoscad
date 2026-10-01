@@ -1385,6 +1385,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "minisign-verify"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1483,6 +1489,7 @@ dependencies = [
  "mimalloc",
  "neoscad-assets",
  "neoscad-bench-core",
+ "neoscad-client",
  "neoscad-eval",
  "neoscad-geom",
  "neoscad-io",
@@ -1503,6 +1510,7 @@ dependencies = [
 name = "neoscad-client"
 version = "0.2.0"
 dependencies = [
+ "minisign-verify",
  "neoscad-assets",
  "neoscad-eval",
  "neoscad-geom",
@@ -1510,6 +1518,7 @@ dependencies = [
  "neoscad-lang",
  "neoscad-render",
  "neoscad-session",
+ "semver",
  "serde",
  "serde_json",
 ]

@@ -18,7 +18,8 @@
 #   dmg-submitted, DMG Accepted: staple and check the DMG (release.sh
 #     --staple-dmg), attest it and the dSYMs, attach them, push the cask
 #     after installing it, take the release out of prerelease (a full
-#     release; an rc stays one) and delete the state record.
+#     release; an rc stays one) and delete the state record. The `feed`
+#     job then lists the DMG in the update feeds (update-feed.yml).
 #   Invalid or Rejected: open or update an issue with Apple's log and
 #     record failed, which nothing here touches again.
 #   In Progress: nothing.
@@ -408,3 +409,17 @@ jobs:
       - name: Remove the keychain
         if: always() && env.HAVE_SIGNING == 'true'
         run: security delete-keychain "$RUNNER_TEMP/neoscad.keychain-db" || true
+
+  # The update feeds (update-feed.yml) list a release's DMG only once it is
+  # attached, and a Mac is offered a release only when its DMG is listed,
+  # so the feeds are rewritten after any run that advanced a release. It
+  # derives both feeds from the releases and changes nothing when they are
+  # current, so a run whose release only moved to dmg-submitted, or
+  # failed, costs a minute on Linux and pushes nothing.
+  feed:
+    needs: [find, advance]
+    if: always() && needs.find.outputs.tags != '[]' && needs.find.outputs.tags != ''
+    permissions:
+      contents: read
+    uses: ./.github/workflows/update-feed.yml
+    secrets: inherit

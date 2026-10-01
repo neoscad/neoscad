@@ -399,10 +399,7 @@ pub fn check_summary(r: &CheckReport) -> String {
             None => "The model did not render.".into(),
         };
     }
-    let mut s = format!(
-        "{} errors, {} warnings, {} info",
-        r.errors, r.warnings, r.info
-    );
+    let mut s = session::check::counts(r.errors.into(), r.warnings.into(), r.info.into());
     if let Some(w) = r.min_wall {
         s += &format!(" · thinnest wall {} mm", format_number(w));
     }

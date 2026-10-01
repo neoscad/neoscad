@@ -285,7 +285,7 @@ fn description() -> Roff {
 }
 
 fn environment() -> Roff {
-    let vars: [(&str, &str); 6] = [
+    let vars: [(&str, &str); 7] = [
         (
             "OPENSCADPATH",
             "Directories searched for include and use files, as in OpenSCAD \
@@ -307,6 +307,11 @@ fn environment() -> Roff {
         (
             crate::transport::ADDRESS_ENV,
             "The address of the neoscad serve socket, instead of the per-user default.",
+        ),
+        (
+            crate::update::NO_CHECK_ENV,
+            "Set to turn off the once-a-day check for a newer release. Its notice \
+             appears only when stdout and stderr are both terminals and CI is not set.",
         ),
         (
             crate::DIAGNOSTICS_ENV,
