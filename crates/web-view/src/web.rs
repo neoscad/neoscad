@@ -25,7 +25,8 @@
 //! Every change marks the viewport dirty and asks for one animation frame;
 //! a frame draws only if something changed (`Viewport::needs_draw`). An
 //! idle view costs nothing, and a burst of pointer events in one frame
-//! draws once.
+//! draws once. A resize is the exception: it clears the canvas, so it
+//! draws at once, before the browser paints (`Shared::measure`).
 
 // The viewport API shares its GPU and models through `Arc`s (the app's
 // threads need them); wgpu's handles are not `Send` in a browser, where
@@ -232,13 +233,27 @@ impl Shared {
             _ => css,
         };
         let (w, h) = (w.max(0.0) as u32, h.max(0.0) as u32);
-        {
+        let resized = {
             let mut v = self.view.borrow_mut();
-            if v.size() != (w, h) || v.scale() != dpr {
+            let changed = v.size() != (w, h) || v.scale() != dpr;
+            if changed {
                 v.resize(w, h, dpr);
             }
+            changed
+        };
+        // A new size is drawn now, not at the next animation frame.
+        // Resizing reconfigures the surface, which sets the canvas's
+        // width and height and so clears it; this runs from the resize
+        // observer (after layout, before paint), so a frame left for the
+        // next animation frame is one frame too late, and the cleared
+        // canvas is what gets painted. While a splitter is dragged the
+        // size changes every frame, so every painted frame was the
+        // cleared one: the view went blank for as long as the drag lasted.
+        if resized {
+            self.frame();
+        } else {
+            self.schedule();
         }
-        self.schedule();
     }
 
     fn apply(self: &Rc<Self>, action: Action) {

@@ -59,7 +59,13 @@ export const engineKind = (page) => page.evaluate(() => window.NeoSCADWeb.build.
 /// distinct colours in a sample, and the commonest one (`top`, the
 /// background in a drawn view, as "r,g,b" in steps of 8) and its share.
 export async function viewPixels(page) {
-  const png = await page.locator("#viewport").screenshot();
+  return pngPixels(page, await page.locator("#viewport").screenshot());
+}
+
+/// `viewPixels` for a PNG already taken (a page screenshot clipped to part
+/// of the view, say, where an element screenshot would wait for the view
+/// to stop moving).
+export async function pngPixels(page, png) {
   return page.evaluate(async (bytes) => {
     const bmp = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: "image/png" }));
     const c = new OffscreenCanvas(bmp.width, bmp.height);

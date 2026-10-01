@@ -7,7 +7,7 @@
 
 import { expect, test } from "@playwright/test";
 import { writeFileSync } from "node:fs";
-import { expectDrawn, open, shot, shots, summary, viewPixels } from "./helpers.js";
+import { expectDrawn, open, pngPixels, shot, shots, summary, viewPixels } from "./helpers.js";
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/try/build.json");
@@ -125,6 +125,67 @@ test("a drag orbits the view", async ({ page }) => {
   expect(after).not.toEqual(before);
   await page.mouse.wheel(0, -300);
 });
+
+// Dragging the editor's splitter resizes the view every frame. A resize
+// reconfigures the surface, which clears the canvas; the viewer used to
+// draw again only at the next animation frame, after the cleared canvas had
+// been painted, so for as long as the drag lasted every frame on screen was
+// blank. Screenshots taken while the width is still changing catch it (one
+// taken after the drag would not: by then the late frame has drawn).
+for (const backend of ["webgpu", "webgl"]) {
+  test(`the view stays drawn while the editor's splitter is dragged (${backend})`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1400, height: 860 } });
+    if (backend === "webgl") {
+      await context.addInitScript(() => {
+        delete Navigator.prototype.gpu;
+      });
+    }
+    const page = await context.newPage();
+    const { errors } = await open(page);
+    await expect(summary(page)).toContainText("Previewed");
+    const kind = await page.evaluate(() => document.documentElement.dataset.view);
+    test.skip(kind !== backend, `this browser's view is ${kind}`);
+    await expectDrawn(page);
+
+    // A real press on the splitter (it captures the pointer), then a move
+    // every animation frame, as a hand's drag delivers them, between 25%
+    // and 45% of the workspace.
+    const split = await page.locator("#split-left").boundingBox();
+    await page.mouse.move(split.x + split.width / 2, split.y + split.height / 2);
+    await page.mouse.down();
+    await page.evaluate(() => {
+      const el = document.querySelector("#split-left");
+      const w = document.querySelector("#workspace").getBoundingClientRect();
+      let i = 0;
+      window.__dragging = true;
+      const step = () => {
+        if (!window.__dragging) return;
+        i += 1;
+        const at = w.left + w.width * (0.25 + 0.2 * Math.abs(((i % 40) - 20) / 20));
+        el.dispatchEvent(new PointerEvent("pointermove", { clientX: at, clientY: w.top + 100, bubbles: true }));
+        requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
+    // The part of the view that the left pane never covers in that range.
+    const ws = await page.locator("#workspace").boundingBox();
+    const inspector = await page.locator("#split-right").boundingBox();
+    const x = Math.ceil(ws.x + ws.width * 0.46);
+    const clip = { x, y: ws.y + 40, width: Math.floor(inspector.x) - x, height: ws.height - 80 };
+    const during = [];
+    for (let k = 0; k < 4; k++) during.push(await pngPixels(page, await page.screenshot({ clip })));
+    await page.evaluate(() => {
+      window.__dragging = false;
+    });
+    await page.mouse.up();
+    // A blank canvas is one colour (the page behind it); a drawn one has
+    // the model's shading, the grid and the axes.
+    expect(during.map((p) => p.distinct > 12)).toEqual([true, true, true, true]);
+    await expectDrawn(page);
+    expect(errors).toEqual([]);
+    await context.close();
+  });
+}
 
 test("measure picks a point on the model through the viewer's ray", async ({ page }) => {
   await open(page, "#example=box-lid");
