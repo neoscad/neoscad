@@ -1,6 +1,7 @@
 # Audit: performance opportunities not yet taken (at `e15eef7`)
 
-> **Status (2026-09-30).** P1 is done (`eval::callmemo`). P2 is measured
+> **Status (2026-09-30).** P1 is done (`eval::callmemo`), calls with
+> children included. P2 is measured
 > (6–7% faster, identical output except recursion depth) with a local
 > script; releases do not use it yet. Each item with
 > a **Status** line records what became of it; the rest is the audit as
@@ -120,6 +121,40 @@ while another agent was timing on the machine, so ±10%).
   cache-count races in `followups.md`, "Determinism"), 8 print the
   excluded-frame count above, and one STL passed the sweep's 2 GB guard
   in both builds.
+- **Calls with children (later):** keyed too. The key adds the children's
+  scope (one call site's, so their nodes' origins are fixed) and, in
+  every context lexically around them out to the main file, the
+  variables of the names their syntax mentions, closed over the local
+  definitions those names reach; a module frame on that chain adds its
+  own children the same way, since a `children()` inside reaches them.
+  Their `$` reads need nothing new: children run above the call's frame,
+  so a `$` variable the module sets (BOSL2's `$parent_geom`, `$tag`) is
+  found inside the call and follows from the key, and one found below is
+  a dependency like any other. Children with no assignments and no
+  instantiations stay out of the key; before, children with assignments
+  only were left out too, and the memo printed one call site's `echo`
+  for another's. Such a call is recorded at its third call, never inside
+  another recording (its nodes hold its children's; fractal_tree's
+  evaluation took 17% longer before these two rules).
+  **Measured** (M4 Pro, load 3–20 from other builders, interleaved
+  against `9c67781`): BOSL2 corpus 45,321 replays in 376,573 lookups
+  against 43,373 in 106,102, 698 files with one against 694; its
+  evaluation 222.4 s against 223.8 summed over files. Bench models at
+  parity: `conformance bench` best of 3 per round, three rounds,
+  fractal_tree 0.621 against 0.620 s, isosurface 0.635/0.633, screws
+  0.174/0.172, spring_handle 0.215/0.213, `eval_only` 31.85/31.88 s;
+  gears 0.051/0.048 there and 0.122/0.123 over 11 interleaved runs. So
+  BOSL2's transforms are now reusable, but the models measured spend
+  their evaluation in functions or already replay at a childless call.
+  Identity: conformance 1,773/0 at default, 1 and 8 threads; csg and
+  console identical over 3,556 of 3,557 corpus, example and bench files
+  (the other prints MCAD's path, which follows the binary's location);
+  the five BOSL2 bench STLs byte-identical; `call_memo.rs` has a test
+  per channel (lexical, through a local module, a caller's children, a
+  `$` variable set inside or from outside, `parent_module`) and one at 1
+  and 8 threads. Leaving the children out of the key fails 8 of them;
+  skipping a module frame's children, or the closure over local
+  definitions, fails the tests written for each.
 
 ### P2. Profile-guided optimisation of the release and dist builds
 

@@ -1138,6 +1138,46 @@ fn anchored(
     })
 }
 
+/// What [`mentions`] walks.
+pub(crate) enum Mentioned<'x> {
+    Scope(&'x Scope),
+    Function(&'x lang::ast::FunctionDef),
+    Module(&'x lang::ast::ModuleDef),
+}
+
+/// Every name some syntax mentions as a variable, function or module
+/// ([`Walker::mention`]), nested scopes and definitions included, as
+/// symbols: everything evaluating it can look up lexically, since every
+/// lexical lookup is of a name written in the source. (`crate::callmemo`
+/// keys a call's children on the variables of these names.)
+pub(crate) fn mentions(ast: &Ast, syms: &[Sym], item: Mentioned<'_>) -> Vec<Sym> {
+    // Only the names are kept: the digest and the span checks, which need
+    // one file, go unused.
+    let mut w = Walker {
+        ast,
+        h: Sha256::new(),
+        names: Vec::new(),
+        seen: HashSet::new(),
+        file: FileId(0),
+        base: 0,
+        lo: 0,
+        hi: 0,
+        ok: true,
+    };
+    match item {
+        Mentioned::Scope(s) => w.scope(s),
+        Mentioned::Function(f) => {
+            w.params(&f.params);
+            w.expr(f.body);
+        }
+        Mentioned::Module(m) => {
+            w.params(&m.params);
+            w.scope(&m.body);
+        }
+    }
+    w.names.iter().map(|n| syms[n.0 as usize]).collect()
+}
+
 struct Walker<'x> {
     ast: &'x Ast,
     h: Sha256,

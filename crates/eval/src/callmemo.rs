@@ -35,8 +35,19 @@
 //!   `parent_module(n)` returning a caller's name: not keyed; a call that
 //!   does either is not kept. (`parent_module(n)` past the bottom of the
 //!   stack depends only on the depth, which is in the key);
-//! - `children()`: only calls without children are memoised, so it yields
-//!   nothing and depends on nothing outside;
+//! - `children()`: it evaluates the caller's syntax in the caller's
+//!   context, so the children's scope and every context lexically around
+//!   them are digested into the key (`CallMemo::children_digest`; a module
+//!   frame on the way adds its own children, which a `children()` inside
+//!   them reaches). The children scope is one call site's, so the origins
+//!   of the nodes they make are fixed by it too. What remains is dynamic:
+//!   their `$` reads. Children run above the call's frame on the stack, so
+//!   a `$` variable the module (or anything it calls) sets is found inside
+//!   the call, where its value is a function of the key and the call's
+//!   other dependencies (BOSL2's `$parent_geom`, `$attach_to`, `$tag`), and
+//!   one found below it is noted as a dependency like any other read.
+//!   Children with no assignments and no instantiations can observe nothing
+//!   and stay out of the key, as for a call without children;
 //! - anything [`Evaluator::untracked`] reports (`rands()`, file reads,
 //!   `import()`, `surface()`, `part()`, deprecation messages, font
 //!   metrics), an error message, a passed limit, or a message flood: the
@@ -67,12 +78,12 @@
 //! order of events, so reuse is deterministic.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use sha2::{Digest as _, Sha256};
 
-use crate::context::{Ctx, CtxKind};
+use crate::context::{Children, Ctx, CtxKind, ScopeRef};
 use crate::memo::{Digest, Recorded, digest, entry_bytes, value_digest};
 use crate::node::Node;
 use crate::sym::{FxBuild, Sym};
@@ -96,11 +107,26 @@ const MAX_PER_KEY: usize = 8;
 /// rarely repeats.
 const MAX_KEY_VALUES: usize = 4096;
 
+/// Contexts a call's children digest may walk ([`CallMemo::key`]): each is
+/// digested on every lookup of the call.
+const MAX_CHAIN: usize = 64;
+
 /// Messages a kept call may print (as [`crate::memo`]).
 const MAX_MESSAGES: usize = 10_000;
 
 /// A module definition: unit, scope and index.
 type DefId = (u32, u32, u32);
+
+/// Syntax whose names are cached: unit, scope, index (of a definition in
+/// the scope) and what it is.
+type MentionId = (u32, u32, u32, Mention);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Mention {
+    Scope,
+    Function,
+    Module,
+}
 
 /// A matrix's rows and columns (see [`Dep::Shape`]).
 type MatrixShape = (u32, u32);
@@ -111,8 +137,9 @@ pub(crate) struct CallMemo {
     /// The main file's context, which modules defined in it close over.
     pub main_file: Option<Rc<Ctx>>,
     table: HashMap<Digest, Vec<Entry>, FxBuild>,
-    /// Keys called at least once (see [`CallMemo::can_record`]).
-    seen: std::collections::HashSet<Digest, FxBuild>,
+    /// How often each key was called without replaying, up to 3 (see
+    /// [`CallMemo::can_record`]).
+    seen: HashMap<Digest, u8, FxBuild>,
     defs: HashMap<DefId, DefStats, FxBuild>,
     bytes: usize,
     /// Bumped by [`crate::eval::Evaluator::untracked`].
@@ -132,6 +159,9 @@ pub(crate) struct CallMemo {
     stamps: RefCell<Vec<Stamp>>,
     /// The names `opaque` has seen, to list those a recording read.
     opaque_names: RefCell<Vec<Sym>>,
+    /// The names each children scope and local definition mentions
+    /// ([`crate::memo::mentions`]).
+    mentions: HashMap<MentionId, Rc<[Sym]>, FxBuild>,
     pub stats: CallStats,
 }
 
@@ -364,7 +394,14 @@ impl CallMemo {
 
     /// The key of a call: its definition, name, definition context and
     /// bound frame; `None` when one of them cannot be digested.
-    pub fn key(&self, def: DefId, name: Sym, dctx: &Rc<Ctx>, mctx: &Ctx) -> Option<Digest> {
+    pub fn key(
+        &self,
+        def: DefId,
+        name: Sym,
+        dctx: &Rc<Ctx>,
+        mctx: &Ctx,
+        children: Option<&Digest>,
+    ) -> Option<Digest> {
         let mut h = Sha256::new();
         h.update(b"call");
         for x in [def.0, def.1, def.2, name.0] {
@@ -389,6 +426,13 @@ impl CallMemo {
         }
         h.update(mctx.region.to_le_bytes());
         frame_digest(mctx, &mut h)?;
+        match children {
+            None => h.update([0]),
+            Some(ch) => {
+                h.update([1]);
+                h.update(ch);
+            }
+        }
         Some(digest(h))
     }
 
@@ -406,9 +450,15 @@ impl CallMemo {
     /// key is recorded from its second call on: recording costs a copy of
     /// the call's nodes and a check on every `$` read while it runs, which
     /// a call made once (a model's one big `path_sweep`) would pay for
-    /// nothing.
-    pub fn can_record(&mut self, key: &Digest) -> bool {
-        if self.seen.insert(*key) {
+    /// nothing. A call with children waits for its third (`children`):
+    /// its nodes include its children's, often most of a model, and a
+    /// wrapper whose key repeats once tends to sit inside a call that is
+    /// itself replayed after that (each depth of fractal_tree recorded one
+    /// such copy and never replayed it, 4% of its evaluation).
+    pub fn can_record(&mut self, key: &Digest, children: bool) -> bool {
+        let calls = self.seen.entry(*key).or_insert(0);
+        *calls = (*calls + 1).min(3);
+        if *calls < if children { 3 } else { 2 } {
             return false;
         }
         self.bytes < BUDGET && self.table.get(key).is_none_or(|v| v.len() < MAX_PER_KEY)
@@ -630,6 +680,46 @@ fn frame_digest(c: &Ctx, h: &mut Sha256) -> Option<()> {
     Some(())
 }
 
+/// [`frame_digest`] of only the variables `keep` accepts (slots named by
+/// `slot_names`), counting what it digests against `budget`.
+fn frame_digest_of(
+    c: &Ctx,
+    slot_names: &[Sym],
+    keep: &dyn Fn(Sym) -> bool,
+    budget: &mut usize,
+    h: &mut Sha256,
+) -> Option<()> {
+    for (i, v) in c.slots.borrow().iter().enumerate() {
+        if let Some(v) = v
+            && slot_names.get(i).is_none_or(|&s| keep(s))
+        {
+            if !small(v, budget) {
+                return None;
+            }
+            h.update([1]);
+            h.update((i as u32).to_le_bytes());
+            if !value_digest(v, h) {
+                return None;
+            }
+        }
+    }
+    h.update([0]);
+    for (s, v) in c.vars.borrow().iter() {
+        if keep(*s) {
+            if !small(v, budget) {
+                return None;
+            }
+            h.update([2]);
+            h.update(s.0.to_le_bytes());
+            if !value_digest(v, h) {
+                return None;
+            }
+        }
+    }
+    h.update([0]);
+    Some(())
+}
+
 /// A value's shape if it is a matrix of numbers (at least one row, all of
 /// the same non-zero length): see [`Dep::Shape`].
 pub(crate) fn matrix_shape(v: &Value) -> Option<MatrixShape> {
@@ -731,13 +821,20 @@ impl crate::eval::Evaluator<'_> {
         def: DefId,
         dctx: &Rc<Ctx>,
         mctx: &Ctx,
-        at: (crate::context::ScopeRef, usize),
+        at: (ScopeRef, usize),
     ) -> Option<Box<Node>> {
         // Measured here for recording and replay alike, so the two are
         // comparable (see `replay_fits`).
         let stack = self.stack_used();
         let name = self.module_names[self.module_names.len() - 1];
-        match self.call_plan(def, name, dctx, mctx, stack) {
+        // Children with nothing to evaluate make `children()` observe
+        // nothing, so they are left out of the key; any assignment among
+        // them runs (and may print) when `children()` does.
+        let children = match &mctx.kind {
+            CtxKind::Module(_, ch) => self.children_observable(ch.scope).then_some(ch),
+            _ => None,
+        };
+        match self.call_plan(def, name, dctx, mctx, children, stack) {
             Plan::Plain => None,
             Plan::Replay(key, k) => Some(Box::new(self.call_replay(&key, k, def, at))),
             Plan::Record(key, def) => {
@@ -757,12 +854,23 @@ impl crate::eval::Evaluator<'_> {
         name: Sym,
         dctx: &Rc<Ctx>,
         mctx: &Ctx,
+        children: Option<&Children>,
         stack: usize,
     ) -> Plan {
         if self.cm.def_disabled(def) {
             return Plan::Plain;
         }
-        let Some(key) = self.cm.key(def, name, dctx, mctx) else {
+        let ch = match children {
+            None => None,
+            Some(ch) => {
+                let Some(d) = self.children_digest(ch) else {
+                    self.cm.def(def).refused += 1;
+                    return Plan::Plain;
+                };
+                Some(d)
+            }
+        };
+        let Some(key) = self.cm.key(def, name, dctx, mctx, ch.as_ref()) else {
             self.cm.def(def).refused += 1;
             return Plan::Plain;
         };
@@ -792,11 +900,218 @@ impl crate::eval::Evaluator<'_> {
                 };
             }
         }
-        if self.cm.can_record(&key) {
+        // A call with children inside a recording is not recorded itself.
+        // Its result holds its children's nodes, so each wrapper in a chain
+        // like BOSL2's `recolor() cylinder() attach() ...` would copy the
+        // same subtree again when it ends (fractal_tree's evaluation took
+        // 17% longer that way), and the recording around it already keeps
+        // the whole. It can still replay an entry recorded elsewhere.
+        if !(children.is_some() && self.cm.active.get())
+            && self.cm.can_record(&key, children.is_some())
+        {
             Plan::Record(key, def)
         } else {
             Plan::Plain
         }
+    }
+
+    /// Digest what a call's `children()` can observe besides `$` variables
+    /// (see the module comment): the children's scope, which is their
+    /// syntax and, being one call site's, every origin their nodes carry;
+    /// and, in every context lexically around them out to the main file,
+    /// the variables they can read. Those are the names their syntax
+    /// mentions ([`crate::memo::mentions`]), closed over the definitions
+    /// in those contexts that the names can reach (a module defined in a
+    /// module body reads that body's variables), since every lexical
+    /// lookup is of a name written somewhere. A variable no such name
+    /// reaches is left out: a `for` loop's variable that the children
+    /// never read would otherwise make each iteration's call distinct. A
+    /// used library's file context is digested whole, as in
+    /// [`CallMemo::key`].
+    ///
+    /// A module frame on the way adds its own children the same way, since
+    /// a `children()` among the children reaches them (BOSL2's `cuboid`
+    /// calls `attachable(...) { ...; children(); }`, whose children are
+    /// `cuboid`'s caller's), unless those can observe nothing: a recursive
+    /// module's frames each hold their caller's empty children, and
+    /// following them would walk the whole recursion.
+    ///
+    /// `None` when the walk passes [`MAX_CHAIN`] contexts or
+    /// [`MAX_KEY_VALUES`] values, or meets a function value among the
+    /// variables it digests.
+    fn children_digest(&mut self, ch: &Children) -> Option<Digest> {
+        let mut h = Sha256::new();
+        h.update(b"children");
+        let mut budget = MAX_KEY_VALUES;
+        let mut walked = 0;
+        let mut todo = vec![(ch.scope, ch.ctx.clone())];
+        while let Some((scope, ctx)) = todo.pop() {
+            h.update([2]);
+            h.update(scope.unit.to_le_bytes());
+            h.update(scope.scope.to_le_bytes());
+            // The chain out to the main file (or the builtin context).
+            let mut chain = Vec::new();
+            let mut c = Some(ctx);
+            while let Some(x) = c {
+                walked += 1;
+                if walked > MAX_CHAIN {
+                    return None;
+                }
+                let end = self
+                    .cm
+                    .main_file
+                    .as_ref()
+                    .is_some_and(|m| Rc::ptr_eq(m, &x))
+                    || matches!(x.kind, CtxKind::Builtin);
+                c = if end { None } else { x.parent.clone() };
+                chain.push(x);
+            }
+            let names = self.reachable_names(scope, &chain);
+            for c in &chain {
+                // The main file's variables are set before any statement
+                // runs, and the builtin context's before the main file's,
+                // so their identity is their content (see [`CallMemo::key`]).
+                if self.cm.main_file.as_ref().is_some_and(|m| Rc::ptr_eq(m, c)) {
+                    h.update([3]);
+                    continue;
+                }
+                let whole = match &c.kind {
+                    CtxKind::Builtin => {
+                        h.update([4]);
+                        continue;
+                    }
+                    CtxKind::Plain => {
+                        h.update([5]);
+                        false
+                    }
+                    CtxKind::File(sr) => {
+                        h.update([6]);
+                        h.update(sr.unit.to_le_bytes());
+                        h.update(sr.scope.to_le_bytes());
+                        true
+                    }
+                    CtxKind::Scope(sr) => {
+                        h.update([7]);
+                        h.update(sr.unit.to_le_bytes());
+                        h.update(sr.scope.to_le_bytes());
+                        false
+                    }
+                    CtxKind::Module(sr, inner) => {
+                        h.update([8]);
+                        h.update(sr.unit.to_le_bytes());
+                        h.update(sr.scope.to_le_bytes());
+                        if self.children_observable(inner.scope) {
+                            h.update([1]);
+                            todo.push((inner.scope, inner.ctx.clone()));
+                        } else {
+                            h.update([0]);
+                        }
+                        false
+                    }
+                };
+                h.update(c.region.to_le_bytes());
+                if whole {
+                    if !frame_small(c, &mut budget) {
+                        return None;
+                    }
+                    frame_digest(c, &mut h)?;
+                } else {
+                    let slot_names = &self.regions[c.region as usize].names;
+                    let keep = |s: Sym| names.contains(&s);
+                    frame_digest_of(c, slot_names, &keep, &mut budget, &mut h)?;
+                }
+            }
+            if chain.last().is_some_and(|c| c.parent.is_none()) {
+                h.update([9]);
+            }
+        }
+        Some(digest(h))
+    }
+
+    /// The names the children scope `scope` can read lexically from the
+    /// contexts in `chain`: what it mentions, plus what every definition in
+    /// those contexts' scopes that a name already found can call mentions,
+    /// to a fixed point.
+    fn reachable_names(&mut self, scope: ScopeRef, chain: &[Rc<Ctx>]) -> HashSet<Sym, FxBuild> {
+        let own = self.scope_names(scope);
+        let mut names: HashSet<Sym, FxBuild> = own.iter().copied().collect();
+        let scopes: Vec<ScopeRef> = chain
+            .iter()
+            .filter_map(|c| match &c.kind {
+                CtxKind::Scope(sr) | CtxKind::Module(sr, _) => Some(*sr),
+                _ => None,
+            })
+            .filter(|&sr| {
+                let s = self.scope(sr);
+                !s.functions.is_empty() || !s.modules.is_empty()
+            })
+            .collect();
+        loop {
+            let mut grew = false;
+            for &sr in &scopes {
+                let s = self.scope(sr);
+                let unit = &self.units[sr.unit as usize];
+                let mut called = Vec::new();
+                for (k, f) in s.functions.iter().enumerate() {
+                    if names.contains(&unit.sym(f.name)) {
+                        called.push((k as u32, false));
+                    }
+                }
+                for (k, m) in s.modules.iter().enumerate() {
+                    if names.contains(&unit.sym(m.name)) {
+                        called.push((k as u32, true));
+                    }
+                }
+                for (k, module) in called {
+                    for &n in self.def_names(sr, k, module).iter() {
+                        grew |= names.insert(n);
+                    }
+                }
+            }
+            if !grew {
+                return names;
+            }
+        }
+    }
+
+    /// [`crate::memo::mentions`] of a children scope, cached.
+    fn scope_names(&mut self, sr: ScopeRef) -> Rc<[Sym]> {
+        self.mentioned((sr.unit, sr.scope, 0, Mention::Scope))
+    }
+
+    /// [`crate::memo::mentions`] of definition `k` of scope `sr` (a module
+    /// or a function), cached.
+    fn def_names(&mut self, sr: ScopeRef, k: u32, module: bool) -> Rc<[Sym]> {
+        let kind = if module {
+            Mention::Module
+        } else {
+            Mention::Function
+        };
+        self.mentioned((sr.unit, sr.scope, k, kind))
+    }
+
+    fn mentioned(&mut self, id: MentionId) -> Rc<[Sym]> {
+        if let Some(v) = self.cm.mentions.get(&id) {
+            return v.clone();
+        }
+        let (unit, scope, k, kind) = id;
+        let s = self.scope(ScopeRef { unit, scope });
+        let item = match kind {
+            Mention::Scope => crate::memo::Mentioned::Scope(s),
+            Mention::Function => crate::memo::Mentioned::Function(&s.functions[k as usize]),
+            Mention::Module => crate::memo::Mentioned::Module(&s.modules[k as usize]),
+        };
+        let unit = &self.units[unit as usize];
+        let v: Rc<[Sym]> = crate::memo::mentions(unit.ast, &unit.syms, item).into();
+        self.cm.mentions.insert(id, v.clone());
+        v
+    }
+
+    /// Whether `children()` of this children scope can observe anything:
+    /// it runs the scope's assignments and instantiations, and nothing else.
+    fn children_observable(&self, s: ScopeRef) -> bool {
+        let s = self.scope(s);
+        !s.instantiations.is_empty() || !s.assignments.is_empty()
     }
 
     /// Whether a fresh evaluation of entry `k` would stay under the
@@ -879,7 +1194,7 @@ impl crate::eval::Evaluator<'_> {
         key: &Digest,
         k: usize,
         def: DefId,
-        (sr, i): (crate::context::ScopeRef, usize),
+        (sr, i): (ScopeRef, usize),
     ) -> Node {
         let rp = self.cm.take_replay(key, k, def);
         let mut node = rp.node;

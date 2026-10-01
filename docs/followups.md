@@ -130,11 +130,23 @@ lead them, come roughly in order of user impact.
   allocates and takes nothing). (8f)
 
 ## Performance
-- **Call reuse (`eval::callmemo`) leaves out calls with children.** A
-  call's `children()` runs the caller's syntax in the caller's context,
-  so keying it needs the children scope and every variable that context
-  can reach; BOSL2's transform and attach modules all take children, so
-  only leaf and recursive modules replay today. Also not covered: modules
+- **Call reuse (`eval::callmemo`) gains little from calls with
+  children.** They are keyed now (the children's scope, and the variables
+  their mentioned names reach in every context around them), and the
+  BOSL2 corpus replays 4.5% more calls (45,321 against 43,373), but
+  nothing measurable got faster: the bench's BOSL2 models spend their
+  evaluation in functions (`gears`, `isosurface`, `spring_handle` make
+  under 30 module lookups) or already replay at the recursive module
+  (`fractal_tree`), and the corpus's examples are small. What limits it:
+  a call with children is recorded only at its third call and never
+  inside another recording, since its nodes include its children's (each
+  wrapper of a `recolor() cylinder() attach()` chain copied the same
+  subtree, and fractal_tree's evaluation took 17% longer before both
+  rules); a traced sample of 600 corpus files had 9.4k lookups whose key
+  repeated against 24k whose call site and frame did, the rest differing
+  in a variable the children mention or in a `$` value; and the
+  per-definition give-up rule (`DefStats::disabled`) counts calls with
+  and without children together. Also not covered: modules
   defined inside other modules (their definition context is a module
   frame), and `$` names read by the `$v = $v * e` pattern anywhere but
   a statement assignment (a `let` or a named argument `f($v = $v * m)`

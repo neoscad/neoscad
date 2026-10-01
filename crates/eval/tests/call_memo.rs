@@ -161,15 +161,192 @@ fn unbound_dollar_variable_is_a_dependency() {
 }
 
 #[test]
-fn calls_with_children_are_not_memoised() {
+fn calls_with_children_key_on_the_children() {
     let src = format!(
         "module c() {{ {WORK} children(); }}
          c() cube(1); c() sphere(1); c() cube(1); c(); c(); c();
-         module d() {{ c() cube(2); }} d(); d(); d();"
+         module d() {{ c() cube(2); }} d(); d(); d();
+         for (i = [0:3]) c() cube(3);"
     );
     let (s, _) = same(&src);
-    // The third `c();` (no children) and the third `d()`.
+    // The third `c();` (no children), the third `d()`, and the loop's
+    // fourth `c() cube(3)` (a call with children is recorded at its third
+    // call): each `c() ...` above is its own call site, and children from
+    // different sites never share an entry. The loop's calls share one
+    // although `i` differs, since the children never mention it.
+    assert_eq!(s.hits, 3, "{s:?}");
+}
+
+#[test]
+fn children_reading_through_a_local_module_are_keyed_on_what_it_reads() {
+    // The children mention only `inner`, a module defined in `w`'s body
+    // that reads `w`'s parameter: `k` must be in the key. (`n` makes every
+    // `w` call distinct, so `c` is looked up each time rather than `w`
+    // replaying whole.) In the loop, the children pass `j` to `inner2` as
+    // an argument, so it is mentioned and keyed.
+    let src = format!(
+        "module c() {{ {WORK} children(); }}
+         module w(k, n) {{ module inner() {{ echo(k); }} c() inner(); }}
+         w(1, 0); w(1, 1); w(2, 2); w(1, 3); w(2, 4); w(2, 5); w(1, 6); w(2, 7);
+         module inner2(x) {{ echo(x); }}
+         for (j = [5, 6, 5, 6, 5, 6]) c() inner2(j);"
+    );
+    let (s, lines) = same(&src);
+    assert!(s.hits >= 2, "{s:?}");
+    let e = [
+        "1", "1", "2", "1", "2", "2", "1", "2", "5", "6", "5", "6", "5", "6",
+    ];
+    assert_eq!(echoed(&lines), e);
+}
+
+/// The last word of each echo, in order.
+fn echoed(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|l| l.starts_with("Echo "))
+        .map(|l| l.rsplit(' ').next().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[test]
+fn children_with_only_assignments_are_keyed() {
+    // `children()` runs the children's assignments even with nothing to
+    // instantiate, so the call sites differ. (The memo used to leave such
+    // children out of the key and print the second site's echo for the
+    // third and fourth.)
+    let src = format!(
+        r#"module foo() {{ {WORK} children(); }}
+           function f(x) = echo(x) x;
+           foo() {{ a = f(1); }} foo() {{ a = f(2); }} foo() {{ a = f(3); }} foo() {{ a = f(4); }}
+           for (i = [0, 0, 0, 0]) foo() {{ a = f(5); }}"#
+    );
+    let (s, lines) = same(&src);
+    assert_eq!(s.hits, 1, "{s:?}");
+    assert_eq!(echoed(&lines), ["1", "2", "3", "4", "5", "5", "5", "5"]);
+}
+
+#[test]
+fn children_see_the_caller_lexically() {
+    // The children read the caller's parameter and the loop variable, so
+    // calls differ exactly when those do.
+    let src = format!(
+        "module c() {{ {WORK} children(); }}
+         module w(x) {{ c() echo(x); }}
+         w(1); w(1); w(2); w(1); w(2); w(2);
+         for (i = [0, 0, 1, 0, 1, 1, 0, 1]) c() echo(i);"
+    );
+    let (s, lines) = same(&src);
+    // `w`'s third call of each argument, and the loop's fourth `c` call
+    // of each value of `i`.
+    assert_eq!(s.hits, 4, "{s:?}");
+    let e = [
+        "1", "1", "2", "1", "2", "2", "0", "0", "1", "0", "1", "1", "0", "1",
+    ];
+    assert_eq!(echoed(&lines), e);
+}
+
+#[test]
+fn children_reaching_the_callers_children_are_keyed_on_them() {
+    // `c`'s children are `{ children(); }` in `wrap`, which reach `site`'s
+    // `echo(k)`: the same syntax at every `c` call, told apart only by a
+    // frame two calls out. (`n` makes every `site` call distinct, so none
+    // replays whole and `c` is looked up each time.)
+    let src = format!(
+        "module c() {{ {WORK} children(); }}
+         module wrap() {{ c() children(); }}
+         module site(k, n) {{ wrap() echo(k); }}
+         site(1, 0); site(1, 1); site(2, 2); site(1, 3); site(2, 4); site(1, 5); site(2, 6); site(1, 7);"
+    );
+    let (s, lines) = same(&src);
+    assert!(s.hits >= 2, "{s:?}");
+    assert_eq!(echoed(&lines), ["1", "1", "2", "1", "2", "1", "2", "1"]);
+}
+
+#[test]
+fn a_child_reading_a_dollar_variable_the_module_sets() {
+    // `$v` is set inside the call and read only by the children: its value
+    // follows the call's argument, which is in the key.
+    let src = format!(
+        "module s(v) {{ $v = v; {WORK} children(); }}
+         for (k = [1, 1, 2, 1, 2, 2, 1, 2]) s(k) echo($v);"
+    );
+    let (s, lines) = same(&src);
     assert_eq!(s.hits, 2, "{s:?}");
+    assert_eq!(echoed(&lines), ["1", "1", "2", "1", "2", "2", "1", "2"]);
+}
+
+#[test]
+fn a_child_reading_a_dollar_variable_set_from_outside() {
+    // The module sets `$v` from `$w`, bound outside the call, and only the
+    // children read `$v`: the entry must depend on `$w`. A module between
+    // the call and the children that sets `$v` again wins.
+    let src = format!(
+        "module s() {{ $v = $w + 1; {WORK} children(); }}
+         module mid() {{ $v = 100; children(); }}
+         module run(w) {{ $w = w; s() echo($v); }}
+         module run2(w) {{ $w = w; s() mid() echo($v); }}
+         run(1); run(1); run(2); run(1); run(2); run(2);
+         run2(1); run2(1); run2(2); run2(1);"
+    );
+    let (s, lines) = same(&src);
+    assert!(s.hits >= 3, "{s:?}");
+    let e = ["2", "2", "3", "2", "3", "3", "100", "100", "100", "100"];
+    assert_eq!(echoed(&lines), e);
+}
+
+/// BOSL2's attach and tag pattern, cut down: `attachable` publishes the
+/// parent's size in `$parent_size`, `attach` places its children from it,
+/// `tag` sets `$tag`, and `show` keeps only its children with that tag.
+const ATTACH: &str = r#"
+    module attachable(size) {
+        $parent_size = size;
+        for (i = [0:39]) translate([i, 0, 0]) cube(1);
+        cube(size);
+        children();
+    }
+    module attach(f) { translate($parent_size * f) children(); }
+    module tag(t) { $tag = t; children(); }
+    module show(t) { if ($tag == t) children(); }
+    module part(s) { attachable(s) children(); }
+"#;
+
+#[test]
+fn attach_and_tag_children_see_the_parent() {
+    let src = format!(
+        r#"{ATTACH}
+           for (s = [1, 1, 2, 1, 2, 1, 2])
+             part(s) attach(1) tag("a") {{
+               show("a") cube($parent_size); show("b") sphere(s); echo($parent_size, $tag);
+             }}
+           for (t = ["a", "b", "a", "b", "a", "b", "a"])
+             part(3) tag(t) {{ show("a") cube(1); show("b") sphere(1); echo($tag); }}"#
+    );
+    let (s, lines) = same(&src);
+    assert!(s.hits >= 2, "{s:?}");
+    let (a, b) = ("\"a\"", "\"b\"");
+    let e = [a, a, a, a, a, a, a, a, b, a, b, a, b, a];
+    assert_eq!(echoed(&lines), e);
+}
+
+#[test]
+fn parent_module_and_dollar_children_in_children() {
+    // `parent_module(1)` in the children names the module that calls them,
+    // inside the call; `$children` there is the caller's, lexically.
+    // `parent_module(2)` there looks past the call, which is not kept.
+    let src = format!(
+        "module c() {{ {WORK} children(); }}
+         module a() {{ c() echo(parent_module(1), $children); }}
+         module b() {{ c() echo(parent_module(1), $children); }}
+         module via(n) {{ if (n == 0) a() cube(); else b() {{ cube(); sphere(); }} }}
+         for (n = [0, 0, 1, 0, 1, 1]) via(n);
+         module p() {{ c() echo(parent_module(2)); }}
+         module q() {{ p(); }} module r() {{ p(); }}
+         q(); r(); q(); r(); q(); r();"
+    );
+    let (s, lines) = same(&src);
+    assert!(s.hits >= 2, "{s:?}");
+    let e = &echoed(&lines)[6..];
+    assert_eq!(e, ["\"q\"", "\"r\"", "\"q\"", "\"r\"", "\"q\"", "\"r\""]);
 }
 
 #[test]
@@ -361,6 +538,41 @@ fn a_transform_that_is_not_a_matrix_keys_on_value() {
         "{lines:?}"
     );
     assert!(s.hits >= 3, "{s:?}");
+}
+
+#[test]
+fn recursion_with_children_skips_empty_children() {
+    // Each `r` frame holds its caller's children, which are empty: the key
+    // of `c`'s call inside does not follow them up the recursion, which
+    // would cost a walk of every frame above on every call.
+    let src = format!(
+        "module c() {{ {WORK} children(); }}
+         module r(d) {{ c() if (d > 0) r(d - 1); }}
+         r(3); r(3); r(3);"
+    );
+    let (s, _) = same(&src);
+    assert!(s.hits >= 1, "{s:?}");
+}
+
+#[test]
+fn calls_with_children_are_the_same_at_any_thread_count() {
+    // Evaluation is serial, but hosts run it on rayon pools of any size
+    // (and geometry keys hash on them): reuse must not depend on that.
+    let src = format!(
+        r#"{ATTACH}
+           module t(d) {{ part(d) attach(1) tag("a") if (d > 0) {{ t(d - 1); show("a") t(d - 1); }} }}
+           t(4); t(4);"#
+    );
+    let run = |n: usize| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .expect("pool");
+        pool.install(|| eval_with(&src, &Options::default()))
+    };
+    let one = run(1);
+    assert!(one.1.hits > 0, "{:?}", one.1);
+    assert_eq!(one, run(8));
 }
 
 #[test]

@@ -354,13 +354,11 @@ impl<'a> Evaluator<'a> {
         self.set_bound(&mctx, last, sc, Value::Number(n_children as f64));
         self.set_var(&mctx, sp, Value::Number(self.module_names.len() as f64));
         self.bind_module(args, loc, mu, &def.params, dctx, &mctx)?;
-        // Reuse a repeated call (see `crate::callmemo`): only one without
-        // children, whose `children()` then depends on nothing outside it.
-        // Out of line, so the frame every level of a recursive module holds
-        // stays as small as it was: the native stack decides how deep
-        // modules can recurse.
+        // Reuse a repeated call (see `crate::callmemo`), its children
+        // included in the key. Out of line, so the frame every level of a
+        // recursive module holds stays as small as it was: the native stack
+        // decides how deep modules can recurse.
         if self.cm.on
-            && n_children == 0
             && let Some(node) = self.call_enter((mu, def_scope.scope, index), dctx, &mctx, (sr, i))
         {
             return Ok(Some(*node));
