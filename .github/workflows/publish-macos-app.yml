@@ -193,7 +193,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY"
           {
             echo "### macOS app submitted for notarization"
-            echo "Submission \`$(cat dist/notary-app.id)\`. The hourly **macOS notarization**"
+            echo "Submission \`$(cat dist/notary-app.id)\`. The scheduled **macOS notarization**"
             echo "workflow (macos-notarize.yml) staples it, notarizes the DMG, attaches it,"
             echo "pushes the cask and then promotes $TAG."
           } >> "$GITHUB_STEP_SUMMARY"

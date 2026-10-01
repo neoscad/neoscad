@@ -36,9 +36,11 @@ name: macOS notarization
 
 on:
   schedule:
-    # Hourly, off the top of the hour, when GitHub's scheduler is busiest
-    # and delays or drops scheduled runs.
-    - cron: "23 * * * *"
+    # Every 15 minutes, off the quarter hours. GitHub's scheduler is best
+    # effort: with an hourly cron it ran once in four hours (2026-10-01).
+    # Most runs are only the Linux `find` job, which ends at once when no
+    # release is pending; the macOS job starts only when one is.
+    - cron: "8,23,38,53 * * * *"
   workflow_dispatch:
     inputs:
       tag:

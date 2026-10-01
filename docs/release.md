@@ -261,7 +261,7 @@ such as `v0.1.0` runs, in order:
    `macos-26` with Xcode 26.6, signed from the `NEOSCAD_*` secrets: it
    builds and smoke-tests the app, submits it to Apple without waiting
    and records the submission on the release, which stays a prerelease
-   until the hourly `macos-notarize.yml` has attached the notarized DMG
+   until the scheduled `macos-notarize.yml` (every 15 minutes) has attached the notarized DMG
    and pushed the cask; see "The macOS app after the release" below;
    with no secrets it builds ad hoc and uploads and holds nothing);
    `publish-packages.yml` (`.deb` and `.rpm` for both Linux
@@ -535,7 +535,7 @@ cut a new patch release. Re-running the release's own `app` job for the
 same tag (from the release run, "Re-run jobs") rebuilds from the tagged
 commit and rewrites the state to `app-submitted`, which only helps when
 the rejection was Apple's error, not the build's. Don't re-run it while
-an hourly run is advancing that tag. To publish a release without its
+a scheduled run is advancing that tag. To publish a release without its
 app, run `gh release edit <tag> --prerelease=false --latest` and
 `gh release delete-asset <tag> macos-app-state.json`.
 
@@ -547,7 +547,7 @@ the app, the DMG and the CLI in one run and waits for each.
 
 The download page on neoscad.org links each file by version
 (`/releases/download/v<version>/…`), not through `releases/latest`.
-Update its DMG link only once the hourly job has attached the DMG.
+Update its DMG link only once the scheduled job has attached the DMG.
 Before then, the link returns 404.
 
 ## The update feed
@@ -612,7 +612,7 @@ it as soon as it is published:
    installer), so Macs keep their current version until then.
 2. Once `macos-notarize.yml` has attached the DMG, its `feed` job runs the
    same workflow, and the feed gets `macos` and the next serial. The `feed`
-   job runs after every hourly run that found a pending release. When
+   job runs after every scheduled run that found a pending release. When
    nothing changed, it pushes nothing.
 
 If notarization fails, the feed stays without `macos` until a later
