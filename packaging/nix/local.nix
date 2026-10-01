@@ -35,6 +35,9 @@ let
       (root + "/examples")
       (root + "/packaging/licenses")
       (root + "/vendor")
+      # The examples the app core embeds (crates/client), which the CLI
+      # links since its update notice.
+      (root + "/web/examples")
     ];
   };
 in

@@ -177,7 +177,7 @@ EOF
     xdotool key alt+2
     wait_for "panels: check shown (focus true)" "$log" 30
     xdotool key Return
-    wait_for "check: [1-9][0-9]* findings ([1-9][0-9]* errors" "$log" 180
+    wait_for "check: [1-9][0-9]* findings ([1-9][0-9]* error" "$log" 180
     sleep 1
     xdotool key Return
     wait_for "check: finding [0-9]* selected" "$log" 30
