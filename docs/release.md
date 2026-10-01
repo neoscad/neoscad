@@ -9,6 +9,9 @@ below and `docs/packaging.md`.
 
     scripts/apple/release.sh              # build, sign, package, verify, smoke test
     scripts/apple/release.sh --no-smoke   # the same without launching the app
+    scripts/apple/release.sh --no-wait    # submit the app to Apple and stop (CI's first stage)
+    scripts/apple/release.sh --staple-app DIR   # once Accepted: staple, make and submit the DMG
+    scripts/apple/release.sh --staple-dmg DIR   # once Accepted: staple and check the DMG
     scripts/apple/smoke-release.sh DMG CLI [VERSION]   # the smoke test alone
 
 The app and the CLI are universal, arm64 + x86_64, as OpenSCAD's macOS
@@ -125,7 +128,9 @@ will not use):
    `notarytool submit --wait` and stapled, so a copy dragged out of the
    DMG opens offline; then the DMG is signed, submitted and stapled;
    the CLI is submitted in a zip. A rejection prints Apple's log and
-   fails the run.
+   fails the run. With `--no-wait` it submits only the app and stops,
+   and `--staple-app` and `--staple-dmg` pick up from there. That is
+   how CI runs it ("The macOS app after the release" below).
 6. **DMG**: `hdiutil create -srcfolder` of the app and an
    `/Applications` symlink, HFS+ and UDZO, then `hdiutil verify`. No
    background or icon layout: that needs Finder scripting, which asks for
@@ -252,13 +257,13 @@ such as `v0.1.0` runs, in order:
    has none); GitHub artifact attestations.
 4. **host**: the GitHub Release.
 5. **publish**: the `neoscad` formula pushed to `neoscad/homebrew-tap`;
-   `publish-macos-app.yml` (this document's `release.sh` on `macos-26` with Xcode 26.6,
-   signed and notarized from the `NEOSCAD_*` secrets, the DMG and
-   dSYMs attached, and the app's cask `neoscad-app` filled from that DMG
-   (`scripts/release/fill-cask.sh`), installed from the local tap clone
-   with `brew install --cask` and checked with `spctl`, and only then
-   pushed to `neoscad/homebrew-tap`; with no secrets it builds ad hoc and uploads and pushes
-   nothing);
+   `publish-macos-app.yml` (this document's `release.sh --no-wait` on
+   `macos-26` with Xcode 26.6, signed from the `NEOSCAD_*` secrets: it
+   builds and smoke-tests the app, submits it to Apple without waiting
+   and records the submission on the release, which stays a prerelease
+   until the hourly `macos-notarize.yml` has attached the notarized DMG
+   and pushed the cask; see "The macOS app after the release" below;
+   with no secrets it builds ad hoc and uploads and holds nothing);
    `publish-packages.yml` (`.deb` and `.rpm` for both Linux
    architectures, with the man page and shell completions the x86_64
    binary generates, installed with apt or dnf and run in Debian 10 and
@@ -308,12 +313,12 @@ The `.deb` and `.rpm` carry `0.1.0~rc.1` so they sort before `0.1.0`
 
 | Secret | Used by |
 |---|---|
-| `HOMEBREW_TAP_TOKEN` | the formula and cask pushes: a token with write access to `neoscad/homebrew-tap` (the app job gets it through release.yml's `secrets: inherit`) |
+| `HOMEBREW_TAP_TOKEN` | the formula and cask pushes: a token with write access to `neoscad/homebrew-tap` (the cask is pushed by `macos-notarize.yml`, which reads repository secrets directly) |
 | `SCOOP_BUCKET_TOKEN` | `publish-packages.yml`'s `scoop` job, which pushes `bucket/neoscad.json` to `neoscad/scoop-bucket`: a fine-grained token, resource owner `neoscad`, only that repository, Contents read and write (through `secrets: inherit`, as above). Without it the job warns and the bucket stays on the previous release |
 | `BENCHMARKS_TOKEN` | `publish-packages.yml`'s `baseline-submit` job, which commits the release baseline to `neoscad/benchmarks` as `results/<version>/ci-baseline-<target>.json`: a fine-grained token, resource owner `neoscad`, only that repository, Contents read and write (through `secrets: inherit`). Without it the job warns and nothing is submitted; the release is unaffected |
-| `NEOSCAD_DEVELOPER_ID_P12`, `NEOSCAD_DEVELOPER_ID_P12_PASSWORD` | the app job: the Developer ID Application certificate (base64 .p12) |
-| `NEOSCAD_SIGN_IDENTITY`, `NEOSCAD_TEAM_ID` | the app job, as the local variables above |
-| `NEOSCAD_NOTARY_KEY`, `NEOSCAD_NOTARY_KEY_ID`, `NEOSCAD_NOTARY_ISSUER` | the app job: an App Store Connect API key for `notarytool` |
+| `NEOSCAD_DEVELOPER_ID_P12`, `NEOSCAD_DEVELOPER_ID_P12_PASSWORD` | the app job and `macos-notarize.yml` (which signs the DMG): the Developer ID Application certificate (base64 .p12) |
+| `NEOSCAD_SIGN_IDENTITY`, `NEOSCAD_TEAM_ID` | the same two, as the local variables above |
+| `NEOSCAD_NOTARY_KEY`, `NEOSCAD_NOTARY_KEY_ID`, `NEOSCAD_NOTARY_ISSUER` | the same two: an App Store Connect API key for `notarytool` |
 
 Cutting one: bump `version`; add (or date) the version's `<release
 version="…" date="YYYY-MM-DD"/>` at the top of `<releases>` in
@@ -424,6 +429,119 @@ app. The Homebrew formula, the shell and PowerShell installers, the
 MSIs, the `.deb`/`.rpm` packages and the container image all take the
 cargo-dist archives, so they get PGO where the archive has it.
 
+## The macOS app after the release
+
+Apple's notary queue took 75 to 80 minutes per submission for the new
+Developer ID, and a runner's network dropped twice while waiting, which
+failed the release (owner decision, 2026-09-30). So the release does
+not wait for Apple. The app is finished afterwards, and the release
+stays a prerelease until it is, so `releases/latest` and every
+`/releases/latest/download/…` link stay on the last release that has an
+app. Everything else is published at release time as before: the
+formula, Scoop, the packages, the Flatpaks and the Windows MSIs. Only
+the DMG, its cask and the promotion wait.
+
+There are two submissions. The app zip comes first, so its ticket can
+be stapled to the `.app` and a copy dragged out of the DMG opens
+offline on first launch. The DMG follows. CI doesn't submit the
+universal CLI, because its tarball isn't published. A local
+`release.sh` run without `--no-wait` still submits it.
+
+1. **At release time**, `publish-macos-app.yml` runs as a publish job
+   (after cargo-dist's `host` job has created and published the
+   release):
+   - `hold` (Linux, starts in seconds) marks a full release as a
+     prerelease with `gh release edit --prerelease`. It then re-marks
+     the newest remaining full release `--latest`, because GitHub's docs
+     say that prereleases can't be latest but not what replaces one that
+     turns into a prerelease. An rc tag is a prerelease already and is
+     left alone. Without the signing secrets nothing is held, because no
+     app will come. Between `host` and `hold` the new release is latest
+     for the few seconds a runner takes to start. Closing that gap would
+     mean editing the generated `release.yml`.
+   - `app` runs `release.sh --no-wait`, which builds, signs and verifies
+     the app, smoke-tests it from an unnotarized DMG of the same app,
+     submits `NeoSCAD-<version>-<build>-app.zip` and stops. The zip,
+     `notary-app.id`, the dSYMs and `BUILDINFO.txt` are kept as the
+     workflow artifact `macos-app-<tag>` (30 days). Then the job uploads
+     the state record `macos-app-state.json` to the release:
+
+         {"tag": "v0.3.0", "prerelease": false, "stage": "app-submitted",
+          "app_submission": "<uuid>", "dmg_submission": null,
+          "artifact_run": "<run id>", "artifact": "macos-app-v0.3.0",
+          "updated": "<UTC time>"}
+
+     It's a release asset because later runs of another workflow must
+     read it and rewrite it, and an artifact can't be rewritten. It's
+     uploaded last, so it never names an artifact that doesn't exist
+     yet. The job takes as long as the build, not Apple's queue.
+2. **Every hour** (`:23`), `.github/workflows/macos-notarize.yml` runs.
+   A Linux job looks for releases among the last 20 that carry a state
+   record in `app-submitted` or `dmg-submitted`. Most hours there are
+   none, and the macOS job is skipped. For each pending release, a
+   `macos-26` job with the same signing secrets checks out the tag, asks
+   `notarytool info` for the stage's submission, and moves the release
+   on by at most one stage:
+   - **app Accepted**: `release.sh --staple-app` staples the app,
+     checks Gatekeeper, and makes the DMG
+     (`NeoSCAD-<version>-<build>.dmg`, the build number read from the
+     zip's name). It then signs the DMG, submits it without waiting and
+     keeps it as the artifact `macos-dmg-<tag>`. The state becomes
+     `dmg-submitted`.
+   - **DMG Accepted**: `release.sh --staple-dmg` staples the DMG and
+     checks it (`stapler validate`, `hdiutil verify`, `spctl` must
+     accept it). Then the job runs `actions/attest` on the DMG and
+     dSYMs; attaches the DMG, the dSYMs, `NeoSCAD-macos-app.sha256` and
+     `NeoSCAD-macos-app-BUILDINFO.txt`; and handles the cask as before:
+     filled by `fill-cask.sh`, `brew style`, installed from the local
+     tap, `spctl` on the installed app, and only then pushed. A full
+     release then gets `gh release edit --prerelease=false --latest`
+     (`--latest=false` if a newer full release was published in the
+     meantime). An rc stays a prerelease. Last, the state record is
+     deleted, so the finished release carries no internal file.
+   - **In Progress** (or `notarytool` unreachable): nothing.
+   - **Invalid or Rejected**: an issue titled "macOS notarization failed
+     for `<tag>`" is opened, or commented on if one is already open,
+     with `notarytool log`. The state becomes `failed`, which no run
+     touches again, and the release stays a prerelease without its app.
+
+   Every step can be repeated. Uploads use `--clobber`, the cask push
+   does nothing when the cask is current, and the state is rewritten
+   only after what it names exists. A run that dies part-way leaves the
+   state where it was, and the next hour redoes that stage (at worst one
+   more DMG submission). The concurrency group `macos-notarize` keeps
+   two runs from advancing a release at once.
+
+**Watching it.** The release's assets show the stage
+(`gh release download <tag> -p macos-app-state.json -O -`). The
+"macOS notarization" workflow's run summaries show each pending release
+and Apple's answer. `xcrun notarytool history` lists the submissions.
+
+**Forcing it.** Running "macOS notarization" from the Actions tab
+(`gh workflow run macos-notarize.yml [-f tag=v0.3.0]`) checks now
+instead of at the next hour, for one tag or for every pending release.
+It can't skip Apple: a stage still in progress stays put.
+
+**After a rejection**, read the issue's log, fix the cause on main and
+cut a new patch release. Re-running the release's own `app` job for the
+same tag (from the release run, "Re-run jobs") rebuilds from the tagged
+commit and rewrites the state to `app-submitted`, which only helps when
+the rejection was Apple's error, not the build's. Don't re-run it while
+an hourly run is advancing that tag. To publish a release without its
+app, run `gh release edit <tag> --prerelease=false --latest` and
+`gh release delete-asset <tag> macos-app-state.json`.
+
+**Locally**, the same three stages are `release.sh --no-wait`, then
+`--staple-app dist` and `--staple-dmg dist` once `xcrun notarytool info
+"$(cat dist/notary-app.id)"` (then `notary-dmg.id`) says Accepted. Each
+stage refuses to run before that. Plain `release.sh` still notarizes
+the app, the DMG and the CLI in one run and waits for each.
+
+The download page on neoscad.org links each file by version
+(`/releases/download/v<version>/…`), not through `releases/latest`.
+Update its DMG link only once the hourly job has attached the DMG.
+Before then, the link returns 404.
+
 ## Smoke test
 
 `scripts/apple/smoke-release.sh`, run by the release script:
@@ -473,6 +591,12 @@ checked by the app tests and the conformance suite, not here.
 - The Developer ID path: `-exportArchive`, notarization, stapling and an
   accepting Gatekeeper have never run, since no Developer ID identity or
   notary profile exists yet. The first signed run is its test.
+- The staged notarization ("The macOS app after the release"): the
+  hold, the state record, `macos-notarize.yml` and the promotion have
+  never run on GitHub. `release.sh --staple-app` and `--staple-dmg` ran
+  locally only against stand-ins for `notarytool`, `stapler`, `spctl`
+  and `codesign`, with a placeholder app. The first rc tag after the
+  change is their test.
 - That `-exportArchive` accepts an archive whose Quick Look extensions
   (8h) are sandboxed without extra export options.
 - The DMG and app on another Mac: see the checklist.

@@ -1,15 +1,26 @@
-# The macOS app: scripts/apple/release.sh builds, signs, notarizes and
-# smoke-tests the DMG, and this job attaches it to the GitHub Release that
-# cargo-dist's release.yml created. It runs as one of that workflow's
-# publish jobs (`publish-jobs` in Cargo.toml's [workspace.metadata.dist]),
-# after the release exists and before it is announced, because a release
-# made with the workflow token cannot trigger a separate workflow.
+# The macOS app, first half: scripts/apple/release.sh builds, signs and
+# smoke-tests the app and submits it for notarization without waiting;
+# .github/workflows/macos-notarize.yml finishes it hours later (staples
+# the app, makes and notarizes the DMG, attaches it, pushes the cask and
+# promotes the release). docs/release.md, "The macOS app after the
+# release", has the whole flow.
+#
+# Apple's notary queue took 75-80 minutes per submission for the new
+# Developer ID, and twice a runner's network dropped while waiting, which
+# failed the release. Nothing in the release waits on Apple now.
+#
+# This runs as one of release.yml's publish jobs (`publish-jobs` in
+# Cargo.toml's [workspace.metadata.dist]), after cargo-dist's host job has
+# created and published the GitHub Release, and before announce (which
+# changes nothing on the release), because a release made with the
+# workflow token cannot trigger a separate workflow.
 #
 # cargo-dist's own macOS signing is not used: it signs a bare binary, while
 # the app needs its hardened-runtime entitlements, notarization and a
 # stapled DMG, which release.sh already does and checks.
 #
-# Secrets (repository settings, all optional as a set):
+# Secrets (repository settings, all optional as a set; macos-notarize.yml
+# needs the same ones):
 #   NEOSCAD_DEVELOPER_ID_P12           base64 of the "Developer ID Application" .p12
 #   NEOSCAD_DEVELOPER_ID_P12_PASSWORD  its password
 #   NEOSCAD_SIGN_IDENTITY              the identity's name or SHA-1
@@ -17,15 +28,12 @@
 #   NEOSCAD_NOTARY_KEY                 an App Store Connect API key (.p8 contents)
 #   NEOSCAD_NOTARY_KEY_ID              its key id
 #   NEOSCAD_NOTARY_ISSUER              its issuer id
-# Without them the app is built ad-hoc signed and smoke-tested, and nothing
-# is uploaded: an ad-hoc DMG fails Gatekeeper on every other Mac.
+# Without them the app is built ad-hoc signed and smoke-tested, and the
+# release is left alone: an ad-hoc DMG fails Gatekeeper on every other Mac.
 #
-# With them, a release also pushes the app's Homebrew cask
-# (packaging/homebrew/neoscad-app.rb) to neoscad/homebrew-tap, using
-#   HOMEBREW_TAP_TOKEN                 the token cargo-dist's formula push uses
-# (release.yml passes every secret to this workflow: `secrets: inherit`).
-#
-# workflow_dispatch runs the same build as a dry run (no upload).
+# workflow_dispatch runs the same build as a dry run: with the secrets it
+# submits the app to Apple (a check of the submission), but records no
+# state, so nothing finishes it.
 name: macOS app
 
 on:
@@ -38,26 +46,56 @@ on:
 
 permissions:
   contents: write
-  # For the DMG's GitHub artifact attestation (the "Attest" step below);
-  # release.yml grants them to this job through Cargo.toml's
-  # github-custom-job-permissions.
-  id-token: write
-  attestations: write
 
 jobs:
+  # A full release stays a prerelease until its app is attached, so
+  # `releases/latest` (and every link to /releases/latest/download/...)
+  # stays on the last release that has one. cargo-dist's host job has
+  # already published the release, and marked it latest, by the time any
+  # publish job runs; this job is on Linux so it starts in seconds, which
+  # is as short as that window can be made without editing release.yml.
+  # macos-notarize.yml promotes it again. A prerelease tag (an rc) is a
+  # prerelease already and stays one.
+  hold:
+    if: inputs.plan != '' && !fromJson(inputs.plan || '{}').announcement_is_prerelease
+    runs-on: ubuntu-24.04
+    env:
+      HAVE_SIGNING: ${{ secrets.NEOSCAD_DEVELOPER_ID_P12 != '' && secrets.NEOSCAD_NOTARY_KEY != '' }}
+    steps:
+      - name: Hold the release as a prerelease
+        # Without signing no app will come, and the release is complete
+        # as it is.
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+        run: |
+          gh release edit "$TAG" --prerelease --repo "$GITHUB_REPOSITORY"
+          # GitHub's docs say prereleases cannot be latest, but not what
+          # becomes latest when the latest release turns into one; so name
+          # it: the newest full release that is left.
+          previous=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts \
+            --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')
+          if [[ -n "$previous" ]]; then
+            gh release edit "$previous" --latest --repo "$GITHUB_REPOSITORY"
+            echo "$TAG is a prerelease until its macOS app is attached; latest is $previous"
+          else
+            echo "$TAG is a prerelease until its macOS app is attached; there is no other full release"
+          fi
+
   app:
     # macos-15's default Xcode (16.4) is too old for the app's Swift 6
     # concurrency checks; macos-26 has Xcode 26.6, the newest hosted one
     # (development uses Xcode 27, which hosted runners don't offer yet).
     # Pinned, so an image update can't change the toolchain unannounced.
     runs-on: macos-26
-    # Two notarizations (the app, then the DMG) wait on Apple's queue, which
-    # held a new team's first submission for over two hours. Hosted jobs
-    # may run for 6 hours; standard runners are free for public repos.
-    timeout-minutes: 300
+    # The build and one upload to Apple; nothing waits on the notary queue.
+    timeout-minutes: 120
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       HAVE_SIGNING: ${{ secrets.NEOSCAD_DEVELOPER_ID_P12 != '' && secrets.NEOSCAD_NOTARY_KEY != '' }}
+      TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
+      PRERELEASE: ${{ inputs.plan && fromJson(inputs.plan).announcement_is_prerelease || false }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -100,105 +138,65 @@ jobs:
             --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
           rm "$RUNNER_TEMP/notary.p8"
 
-      - name: Build, sign, notarize, smoke-test
+      # Signed: build, smoke-test (from an unnotarized DMG of the same
+      # app), and submit the app zip without waiting. The CLI is not
+      # submitted: the release ships cargo-dist's archives, not release.sh's.
+      - name: Build, sign, smoke-test, submit
         env:
           NEOSCAD_SIGN_IDENTITY: ${{ env.HAVE_SIGNING == 'true' && secrets.NEOSCAD_SIGN_IDENTITY || '' }}
           NEOSCAD_TEAM_ID: ${{ secrets.NEOSCAD_TEAM_ID }}
           NEOSCAD_NOTARY_PROFILE: ${{ env.HAVE_SIGNING == 'true' && 'neoscad-notary' || '' }}
-        run: scripts/apple/release.sh
-
-      # A GitHub artifact attestation (build provenance) for what is
-      # uploaded, as cargo-dist's own "Attest" step gives the archives:
-      # `gh attestation verify <file> -R neoscad/neoscad`. It records the
-      # final bytes (the DMG is already signed, notarized and stapled by
-      # release.sh) and changes nothing in them, so Gatekeeper's check of
-      # the notarization is unaffected.
-      - name: Attest
-        if: env.HAVE_SIGNING == 'true' && inputs.plan != ''
-        uses: actions/attest@v4
-        with:
-          subject-path: |
-            dist/NeoSCAD-*.dmg
-            dist/NeoSCAD-*-dSYMs.zip
-
-      - name: Attach to the release
-        if: env.HAVE_SIGNING == 'true' && inputs.plan != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
         run: |
-          cd dist
-          # The DMG (universal), its symbols and build record. The universal
-          # CLI tarball release.sh also makes stays out: cargo-dist 0.33.0
-          # cannot build a universal2 archive, so the release's macOS CLIs
-          # are its aarch64- and x86_64-apple-darwin archives, which the
-          # installers and the Homebrew formula point at.
-          files=(NeoSCAD-*.dmg NeoSCAD-*-dSYMs.zip)
-          shasum -a 256 "${files[@]}" > NeoSCAD-macos-app.sha256
-          cp BUILDINFO.txt NeoSCAD-macos-app-BUILDINFO.txt
-          gh release upload "$TAG" "${files[@]}" NeoSCAD-macos-app.sha256 \
-            NeoSCAD-macos-app-BUILDINFO.txt --repo "$GITHUB_REPOSITORY"
-
-      # The cask goes to the same tap as cargo-dist's `neoscad` formula
-      # (release.yml's publish-homebrew-formula job), and only from here:
-      # this is the one job that knows the DMG's build number and checksum,
-      # and it runs only once the notarized DMG is on the release, so the
-      # cask can never point at a missing or unsigned file.
-      #
-      # A prerelease publishes it too when `publish-prereleases` is set, as
-      # it does the formula: Homebrew casks have no prerelease channel, so
-      # the tap's one `neoscad-app` moves to the prerelease.
-      - name: Homebrew cask
-        if: env.HAVE_SIGNING == 'true' && inputs.plan != ''
-        env:
-          TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-        run: |
-          version=${TAG#v}
-          dmgs=(dist/NeoSCAD-*.dmg)
-          [[ ${#dmgs[@]} -eq 1 ]] || { echo "::error::expected one DMG in dist/, found ${dmgs[*]}"; exit 1; }
-          # Cloned straight into Homebrew's tap directory, so `brew style`
-          # and `brew install` below see the new cask as neoscad/tap's
-          # (Homebrew refuses a cask file outside a tap). The token goes in
-          # a per-command header rather than the remote URL, so it is not
-          # left in the clone's config.
-          auth=$(printf 'x-access-token:%s' "$TAP_TOKEN" | base64 | tr -d '\n')
-          echo "::add-mask::$auth"
-          header="http.https://github.com/.extraheader=AUTHORIZATION: basic $auth"
-          tap="$(brew --repository)/Library/Taps/neoscad/homebrew-tap"
-          rm -rf "$tap"
-          git -c "$header" clone --quiet https://github.com/neoscad/homebrew-tap.git "$tap"
-          scripts/release/fill-cask.sh "$version" "${dmgs[0]}" "$tap/Casks/neoscad-app.rb"
-          brew style --cask neoscad/tap/neoscad-app
-
-          # What a user runs, against the release's real download, before
-          # anything is pushed (the tap is only ever given a cask that
-          # installs): the checksum must match, and the installed
-          # (quarantined) copy must pass Gatekeeper, which is what got
-          # OpenSCAD's cask disabled.
-          brew install --cask neoscad/tap/neoscad-app
-          spctl -a -vv -t exec /Applications/NeoSCAD.app
-          brew uninstall --cask neoscad-app
-
-          cd "$tap"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Casks/neoscad-app.rb
-          if git diff --cached --quiet; then
-            echo "Casks/neoscad-app.rb is already current"
+          if [[ "$HAVE_SIGNING" == true ]]; then
+            scripts/apple/release.sh --no-wait
           else
-            git commit --quiet -m "neoscad-app $(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/neoscad-app.rb)"
-            # The formula job pushes to the same tap at about the same
-            # time; a push that loses that race is rebased and retried.
-            for attempt in 1 2 3; do
-              git -c "$header" push --quiet && break
-              [[ $attempt -lt 3 ]] || exit 1
-              sleep 10
-              git -c "$header" pull --quiet --rebase
-            done
+            scripts/apple/release.sh
           fi
 
+      # What macos-notarize.yml resumes from: the submitted zip (the exact
+      # bytes Apple's ticket is for), its submission id, the dSYMs (they
+      # match only this build and cannot be regenerated) and BUILDINFO.
+      # 30 days is ample: the next stage normally takes it within hours.
+      - name: Keep the submitted app
+        if: env.HAVE_SIGNING == 'true' && env.TAG != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-app-${{ env.TAG }}
+          path: |
+            dist/NeoSCAD-*-app.zip
+            dist/notary-app.id
+            dist/NeoSCAD-*-dSYMs.zip
+            dist/BUILDINFO.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      # The state record, a release asset because it must be readable and
+      # rewritable by later runs of another workflow, which a workflow
+      # artifact is not. Written last, so a record never names an
+      # artifact that is not there yet. macos-notarize.yml deletes it once
+      # the app is attached.
+      - name: Record the pending notarization
+        if: env.HAVE_SIGNING == 'true' && env.TAG != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          jq -n --arg tag "$TAG" --argjson prerelease "$PRERELEASE" \
+            --arg id "$(tr -d '[:space:]' < dist/notary-app.id)" \
+            --arg run "$GITHUB_RUN_ID" --arg artifact "macos-app-$TAG" \
+            --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{tag: $tag, prerelease: $prerelease, stage: "app-submitted",
+              app_submission: $id, dmg_submission: null,
+              artifact_run: $run, artifact: $artifact, updated: $updated}' \
+            > "$RUNNER_TEMP/macos-app-state.json"
+          cat "$RUNNER_TEMP/macos-app-state.json"
+          gh release upload "$TAG" "$RUNNER_TEMP/macos-app-state.json" --clobber \
+            --repo "$GITHUB_REPOSITORY"
+          {
+            echo "### macOS app submitted for notarization"
+            echo "Submission \`$(cat dist/notary-app.id)\`. The hourly **macOS notarization**"
+            echo "workflow (macos-notarize.yml) staples it, notarizes the DMG, attaches it,"
+            echo "pushes the cask and then promotes $TAG."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Unsigned build
         if: env.HAVE_SIGNING != 'true'

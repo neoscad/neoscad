@@ -35,24 +35,59 @@
 #
 #   scripts/apple/release.sh              build, sign, package, verify, smoke test
 #   scripts/apple/release.sh --no-smoke   without the smoke test
+#
+# Notarizing in stages, as CI does (docs/release.md, "The macOS app after
+# the release"): Apple's queue held a new team's submissions for over an
+# hour each, so a release does not wait on it. Each stage ends with dist/
+# holding what the next one takes (DIR may be dist itself):
+#
+#   scripts/apple/release.sh --no-wait       build, sign, smoke-test; submit the
+#                                            app and stop. dist/ gets
+#                                            NeoSCAD-<version>-<build>-app.zip (the
+#                                            signed, unstapled app that was
+#                                            submitted) and notary-app.id; the CLI
+#                                            is not notarized
+#   scripts/apple/release.sh --staple-app DIR   once the app is Accepted: staple
+#                                            it, build and sign the DMG, submit
+#                                            it and stop (notary-dmg.id)
+#   scripts/apple/release.sh --staple-dmg DIR   once the DMG is Accepted: staple
+#                                            and check it; write SHA256SUMS
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD
 
 smoke=1
-for arg in "$@"; do
-    case $arg in
+wait=1
+resume=
+resume_dir=
+while [ $# -gt 0 ]; do
+    case $1 in
         --no-smoke) smoke=0 ;;
+        --no-wait) wait=0 ;;
+        --staple-app | --staple-dmg)
+            [ $# -ge 2 ] || {
+                echo "release: $1 needs the previous stage's directory" >&2
+                exit 2
+            }
+            resume=${1#--}
+            resume_dir=$2
+            shift
+            ;;
         -h | --help)
             sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
-            echo "release: unknown argument $arg" >&2
+            echo "release: unknown argument $1" >&2
             exit 2
             ;;
     esac
+    shift
 done
+if [ -n "$resume" ] && [ $wait = 0 ]; then
+    echo "release: --no-wait is for the build; --$resume never waits" >&2
+    exit 2
+fi
 
 say() { printf '\n==> %s\n' "$*"; }
 die() {
@@ -63,7 +98,9 @@ die() {
 # --- Preflight -------------------------------------------------------------
 
 [ "$(uname -s)" = Darwin ] || die "macOS only"
-for tool in xcodebuild xcodegen hdiutil codesign spctl ditto dsymutil shasum; do
+tools=(hdiutil codesign spctl ditto shasum plutil)
+if [ -z "$resume" ]; then tools+=(xcodebuild xcodegen dsymutil); fi
+for tool in "${tools[@]}"; do
     command -v "$tool" >/dev/null || die "$tool not found"
 done
 
@@ -109,6 +146,11 @@ if [ -n "$notary" ]; then
     xcrun notarytool history --keychain-profile "$notary" >/dev/null 2>&1 ||
         die "notarytool cannot use keychain profile '$notary' (xcrun notarytool store-credentials)"
 fi
+# The staged modes exist only to notarize; without a profile they would
+# build or package something that can never be finished.
+if [ -n "$resume" ] || [ $wait = 0 ]; then
+    [ -n "$notary" ] || die "--${resume:-no-wait} needs NEOSCAD_SIGN_IDENTITY and NEOSCAD_NOTARY_PROFILE"
+fi
 
 version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 [ -n "$version" ] || die "no version in Cargo.toml's [workspace.package]"
@@ -119,12 +161,19 @@ version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Carg
 marketing_version=${version%%-*}
 [[ "$marketing_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
     die "version $version does not start with a numeric x.y.z for CFBundleShortVersionString"
-build_number=$(git rev-list --count HEAD)
-commit=$(git rev-parse --short=12 HEAD)
-dirty=no
-if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-    dirty=yes
-    echo "release: warning: the tree has uncommitted changes; build $build_number is not exactly $commit" >&2
+# A resumed stage reads the build number from the previous stage's file
+# names instead: CI runs it from a checkout of the tag, whose history
+# `rev-list --count` need not see.
+if [ -z "$resume" ]; then
+    build_number=$(git rev-list --count HEAD)
+    commit=$(git rev-parse --short=12 HEAD)
+    dirty=no
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        dirty=yes
+        echo "release: warning: the tree has uncommitted changes; build $build_number is not exactly $commit" >&2
+    fi
+else
+    build_number=0
 fi
 name=NeoSCAD-$version-$build_number
 cli_name=neoscad-$version-$build_number-macos-universal
@@ -148,6 +197,182 @@ archive=$work/NeoSCAD.xcarchive
 app_stage=$work/app
 cli_stage=$work/cli
 dsym_stage=$work/dSYMs
+
+# --- Notarization and the DMG, shared by every mode -------------------------
+
+# Submit FILE for notarization and print the submission id, without
+# waiting for Apple's answer.
+notary_submit() {
+    local out id
+    out=$(xcrun notarytool submit "$1" --keychain-profile "$notary" --no-wait \
+        --output-format plist) || die "notarytool could not submit $(basename "$1")"
+    id=$(plutil -extract id raw - <<<"$out" 2>/dev/null) || id=
+    [ -n "$id" ] || die "notarytool gave no submission id for $(basename "$1")"
+    echo "$id"
+}
+
+# A submission's status: Accepted, In Progress, Invalid or Rejected.
+notary_status() {
+    local out
+    out=$(xcrun notarytool info "$1" --keychain-profile "$notary" --output-format plist) ||
+        return 1
+    plutil -extract status raw - <<<"$out"
+}
+
+# Submit, wait, and fail with Apple's log unless accepted.
+notarize() {
+    local file=$1 out id status tries=0
+    # Submit, then wait on the submission id separately: `submit --wait`
+    # gives up the moment the network drops (a CI runner lost its
+    # connection 1h45m into Apple's queue on v0.1.1), while the submission
+    # carries on at Apple. A failed wait is retried (up to 8 times, 60 s
+    # apart); only an answer from Apple ends it.
+    id=$(notary_submit "$file")
+    echo "submitted $(basename "$file") for notarization ($id)"
+    until out=$(xcrun notarytool wait "$id" --keychain-profile "$notary" \
+        --output-format plist 2>/dev/null) &&
+        status=$(plutil -extract status raw - <<<"$out" 2>/dev/null); do
+        tries=$((tries + 1))
+        [ "$tries" -le 8 ] || die "lost contact with the notary service (submission $id)"
+        echo "notarytool wait failed (try $tries); retrying in 60 s" >&2
+        sleep 60
+    done
+    if [ "$status" != Accepted ]; then
+        xcrun notarytool log "$id" --keychain-profile "$notary" >&2 || true
+        die "notarization of $(basename "$file") ended $status (submission $id)"
+    fi
+    echo "notarized $(basename "$file") ($id)"
+}
+
+# The DMG of the app at $1, written to $2 and signed with the identity
+# (left unsigned when ad hoc). The volume holds the app, an Applications
+# link and the licences: the fonts' OFL, MCAD's LGPL and the vendored
+# kernels' notices must travel with the app (LICENSE, NOTICE and
+# licenses/ in a folder beside it). HFS+ and zlib: mountable on every
+# macOS the app supports. No background image or window layout: those
+# need Finder scripting (a prompt for automation access), and the two
+# icons are the whole instruction.
+make_dmg() {
+    local app=$1 out=$2 dmg_root=$work/dmg
+    rm -rf "$dmg_root"
+    mkdir -p "$dmg_root"
+    ditto "$app" "$dmg_root/NeoSCAD.app"
+    ln -s /Applications "$dmg_root/Applications"
+    "$root/scripts/release/licenses.sh" "$dmg_root/Licenses"
+    hdiutil create -quiet -volname "NeoSCAD $version" -srcfolder "$dmg_root" \
+        -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$out"
+    if [ -n "$identity" ]; then
+        codesign --force --timestamp --sign "$sign_id" "$out"
+    fi
+}
+
+# spctl's verdicts on one line, without this checkout's paths.
+oneline() { sed -e "s|$work/||g" -e "s|$dist/||g" <<<"$1" | tr '\n' ' '; }
+
+# SHA256SUMS of everything in dist/ that ships (not the notary ids).
+write_sums() {
+    (cd "$dist" && find . -maxdepth 1 -type f ! -name SHA256SUMS ! -name '*.id' |
+        sed 's|^\./||' | LC_ALL=C sort | xargs shasum -a 256 >SHA256SUMS)
+}
+
+# --- Resuming: staple what Apple accepted, then submit or finish ------------
+
+if [ -n "$resume" ]; then
+    [ -d "$resume_dir" ] || die "no directory $resume_dir"
+    resume_dir=$(cd "$resume_dir" && pwd -P)
+    mkdir -p "$work"
+    case $resume_dir/ in
+        "$(cd "$work" && pwd -P)"/*) die "$resume_dir is inside $work, which this run empties" ;;
+    esac
+    # A copy first, so DIR may be dist/ itself, which is emptied next.
+    rm -rf "$work"
+    mkdir -p "$work"
+    ditto "$resume_dir" "$work/in"
+    rm -rf "$dist"
+    mkdir -p "$dist"
+    if [ "$resume" = staple-app ]; then
+        pattern='NeoSCAD-*-app.zip'
+        id_file=$work/in/notary-app.id
+    else
+        pattern='NeoSCAD-*.dmg'
+        id_file=$work/in/notary-dmg.id
+    fi
+    input=$(find "$work/in" -maxdepth 1 -name "$pattern" -print)
+    [ -n "$input" ] && [ "$(wc -l <<<"$input")" -eq 1 ] || die "expected one $pattern in $resume_dir"
+    name=$(basename "$input")
+    name=${name%-app.zip}
+    name=${name%.dmg}
+    # The build number is digits only, which also keeps it from swallowing
+    # part of a hyphenated prerelease version; and the version must be this
+    # checkout's, or the DMG's name and volume would disagree with the app.
+    build_number=${name##*-}
+    [[ "$build_number" =~ ^[0-9]+$ ]] && [ "$name" = "NeoSCAD-$version-$build_number" ] ||
+        die "$name is not NeoSCAD-$version-<build> (Cargo.toml's version is $version)"
+    [ -f "$id_file" ] || die "no $(basename "$id_file") in $resume_dir"
+    id=$(tr -d '[:space:]' <"$id_file")
+    # stapler would refuse an unaccepted file too, but less clearly.
+    status=$(notary_status "$id") || die "notarytool cannot read submission $id"
+    [ "$status" = Accepted ] || die "submission $id is $status, not Accepted"
+    # Everything else the previous stage made (the dSYMs, BUILDINFO, a
+    # local run's CLI) carries on; its inputs and stale sums do not.
+    for f in "$work"/in/*; do
+        case $(basename "$f") in
+            *-app.zip | *.id | SHA256SUMS) ;;
+            *) ditto "$f" "$dist/$(basename "$f")" ;;
+        esac
+    done
+    buildinfo=$dist/BUILDINFO.txt
+    stapled_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    if [ "$resume" = staple-app ]; then
+        say "Staple the app ($name; submission $id Accepted)"
+        mkdir -p "$app_stage"
+        ditto -x -k "$input" "$app_stage"
+        app=$app_stage/NeoSCAD.app
+        [ -d "$app" ] || die "$(basename "$input") holds no NeoSCAD.app"
+        # Stapled before it goes into the DMG, so a copy dragged out of the
+        # DMG opens offline on first launch.
+        xcrun stapler staple "$app"
+        xcrun stapler validate "$app"
+        app_spctl=$(spctl -a -vv -t exec "$app" 2>&1 || true)
+        echo "$app_spctl"
+        grep -q accepted <<<"$app_spctl" || die "Gatekeeper rejects the notarized app"
+
+        say "DMG"
+        dmg=$dist/$name.dmg
+        make_dmg "$app" "$dmg"
+        hdiutil verify -quiet "$dmg"
+        dmg_id=$(notary_submit "$dmg")
+        echo "$dmg_id" >"$dist/notary-dmg.id"
+        echo "submitted $(basename "$dmg") for notarization ($dmg_id); next: --staple-dmg once Accepted"
+        if [ -f "$buildinfo" ]; then
+            {
+                echo "notarized:     app $id (Accepted; stapled $stapled_at)"
+                echo "spctl (app):   $(oneline "$app_spctl")"
+            } >>"$buildinfo"
+        fi
+    else
+        say "Staple the DMG ($name; submission $id Accepted)"
+        dmg=$dist/$name.dmg
+        xcrun stapler staple "$dmg"
+        xcrun stapler validate "$dmg"
+        hdiutil verify -quiet "$dmg"
+        dmg_spctl=$(spctl -a -vv -t open --context context:primary-signature "$dmg" 2>&1 || true)
+        echo "$dmg_spctl"
+        grep -q accepted <<<"$dmg_spctl" || die "Gatekeeper rejects the notarized DMG"
+        if [ -f "$buildinfo" ]; then
+            {
+                echo "notarized:     DMG $id (Accepted; stapled $stapled_at)"
+                echo "spctl (dmg):   $(oneline "$dmg_spctl")"
+            } >>"$buildinfo"
+        fi
+    fi
+    write_sums
+    rm -rf "$work/in" "$work/dmg"
+    say "Done: $dist"
+    (cd "$dist" && ls -l)
+    exit 0
+fi
 
 say "NeoSCAD $version (build $build_number, $commit, dirty: $dirty); signing: $mode"
 
@@ -297,34 +522,8 @@ check_uuid "$app/Contents/Frameworks/NeoSCADCore.framework/NeoSCADCore" \
 
 # --- Notarization -------------------------------------------------------
 
-# Submit, wait, and fail with Apple's log unless accepted.
-notarize() {
-    local file=$1 out id status tries=0
-    # Submit, then wait on the submission id separately: `submit --wait`
-    # gives up the moment the network drops (a CI runner lost its
-    # connection 1h45m into Apple's queue on v0.1.1), while the submission
-    # carries on at Apple. A failed wait is retried (up to 8 times, 60 s
-    # apart); only an answer from Apple ends it.
-    out=$(xcrun notarytool submit "$file" --keychain-profile "$notary" \
-        --output-format plist)
-    id=$(plutil -extract id raw - <<<"$out")
-    echo "submitted $(basename "$file") for notarization ($id)"
-    until out=$(xcrun notarytool wait "$id" --keychain-profile "$notary" \
-        --output-format plist 2>/dev/null) &&
-        status=$(plutil -extract status raw - <<<"$out" 2>/dev/null); do
-        tries=$((tries + 1))
-        [ "$tries" -le 8 ] || die "lost contact with the notary service (submission $id)"
-        echo "notarytool wait failed (try $tries); retrying in 60 s" >&2
-        sleep 60
-    done
-    if [ "$status" != Accepted ]; then
-        xcrun notarytool log "$id" --keychain-profile "$notary" >&2 || true
-        die "notarization of $(basename "$file") ended $status (submission $id)"
-    fi
-    echo "notarized $(basename "$file") ($id)"
-}
-
-if [ -n "$notary" ]; then
+app_id=
+if [ -n "$notary" ] && [ $wait = 1 ]; then
     say "Notarize and staple the app"
     # The app on its own first, so its ticket can be stapled to it before
     # it goes into the DMG: a copy dragged out of the DMG then opens
@@ -333,13 +532,24 @@ if [ -n "$notary" ]; then
     notarize "$work/NeoSCAD.zip"
     xcrun stapler staple "$app"
     xcrun stapler validate "$app"
+elif [ -n "$notary" ]; then
+    say "Submit the app for notarization (no wait)"
+    # The zip that is submitted is the one that ships to the next stage:
+    # the ticket Apple issues is for these exact signatures, and
+    # --staple-app staples it to the app unpacked from this file.
+    ditto -c -k --keepParent "$app" "$dist/$name-app.zip"
+    app_id=$(notary_submit "$dist/$name-app.zip")
+    echo "$app_id" >"$dist/notary-app.id"
+    echo "submitted $name-app.zip for notarization ($app_id); next: --staple-app once Accepted"
 fi
 
 say "Gatekeeper assessment of the app"
 app_spctl=$(spctl -a -vv -t exec "$app" 2>&1 || true)
 echo "$app_spctl"
-if [ -n "$notary" ]; then
+if [ -n "$notary" ] && [ $wait = 1 ]; then
     grep -q accepted <<<"$app_spctl" || die "Gatekeeper rejects the notarized app"
+elif [ -n "$notary" ]; then
+    echo "(expected: not notarized yet; --staple-app checks Gatekeeper again once it is)"
 elif [ -z "$identity" ]; then
     echo "(expected: ad-hoc signatures are rejected; set NEOSCAD_SIGN_IDENTITY and NEOSCAD_NOTARY_PROFILE for a distributable build)"
 fi
@@ -347,31 +557,26 @@ fi
 # --- DMG --------------------------------------------------------------------
 
 say "DMG"
-dmg_root=$work/dmg
-mkdir -p "$dmg_root"
-ditto "$app" "$dmg_root/NeoSCAD.app"
-ln -s /Applications "$dmg_root/Applications"
-# The licences travel with the app (the fonts' OFL, MCAD's LGPL and the
-# vendored kernels' notices require it): LICENSE, NOTICE and licenses/ in
-# a folder beside it.
-"$root/scripts/release/licenses.sh" "$dmg_root/Licenses"
-dmg=$dist/$name.dmg
-# HFS+ and zlib: mountable on every macOS the app supports. No background
-# image or window layout: those need Finder scripting (a prompt for
-# automation access), and the two icons are the whole instruction.
-hdiutil create -quiet -volname "NeoSCAD $version" -srcfolder "$dmg_root" \
-    -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$dmg"
-if [ -n "$identity" ]; then
-    codesign --force --timestamp --sign "$sign_id" "$dmg"
+if [ $wait = 1 ]; then
+    dmg=$dist/$name.dmg
+    make_dmg "$app" "$dmg"
+    if [ -n "$notary" ]; then
+        notarize "$dmg"
+        xcrun stapler staple "$dmg"
+        xcrun stapler validate "$dmg"
+    fi
+    hdiutil verify -quiet "$dmg"
+    dmg_spctl=$(spctl -a -vv -t open --context context:primary-signature "$dmg" 2>&1 || true)
+    echo "$dmg_spctl"
+else
+    # The DMG that ships is made by --staple-app from the stapled app. This
+    # one, of the same app unstapled, is only for the smoke test below, so
+    # a broken build still fails here, minutes in, rather than hours later.
+    dmg=$work/$name-smoke.dmg
+    make_dmg "$app" "$dmg"
+    hdiutil verify -quiet "$dmg"
+    dmg_spctl="pending (release.sh --staple-app, then --staple-dmg)"
 fi
-if [ -n "$notary" ]; then
-    notarize "$dmg"
-    xcrun stapler staple "$dmg"
-    xcrun stapler validate "$dmg"
-fi
-hdiutil verify -quiet "$dmg"
-dmg_spctl=$(spctl -a -vv -t open --context context:primary-signature "$dmg" 2>&1 || true)
-echo "$dmg_spctl"
 
 # --- The CLI ----------------------------------------------------------------
 
@@ -434,7 +639,9 @@ else
     x86_run="x86_64 slice not run (no Rosetta)"
 fi
 echo "CLI: $(lipo -archs "$cli"); $x86_run"
-if [ -n "$notary" ]; then
+# Not in the staged (CI) flow: the release ships cargo-dist's CLI
+# archives, not this one, so a third submission would only add an hour.
+if [ -n "$notary" ] && [ $wait = 1 ]; then
     # A bare Mach-O cannot hold a stapled ticket; Gatekeeper finds the
     # notarization online on first run.
     ditto -c -k "$cli" "$work/neoscad.zip"
@@ -457,15 +664,21 @@ say "dSYMs, BUILDINFO, SHA256SUMS"
 (cd "$dsym_stage" && ditto -c -k --keepParent . "$dist/$name-dSYMs.zip")
 
 app_bytes=$(du -sk "$app" | cut -f1)
-# spctl's verdicts on one line, without this checkout's paths.
-oneline() { sed -e "s|$work/||g" -e "s|$dist/||g" <<<"$1" | tr '\n' ' '; }
+if [ -z "$notary" ]; then
+    notarized=no
+elif [ $wait = 1 ]; then
+    notarized="yes ($notary)"
+else
+    # The resumed stages append their own notarized and spctl lines.
+    notarized="app submitted ($app_id), not yet stapled; DMG and CLI not submitted"
+fi
 {
     echo "NeoSCAD $version, build $build_number"
     echo "commit:        $commit (uncommitted changes: $dirty)"
     echo "built:         $(date -u +%Y-%m-%dT%H:%M:%SZ) on macOS $(sw_vers -productVersion)"
     echo "toolchains:    $(xcodebuild -version | tr '\n' ' ')/ $("${cargo_env[@]}" rustc -V)"
     echo "signing:       $mode"
-    echo "notarized:     $([ -n "$notary" ] && echo "yes ($notary)" || echo no)"
+    echo "notarized:     $notarized"
     echo "app size:      $((app_bytes / 1024)) MB unpacked"
     echo "architectures: ${archs[*]} (every Mach-O in the app, and the CLI; $x86_run)"
     echo
@@ -474,8 +687,7 @@ oneline() { sed -e "s|$work/||g" -e "s|$dist/||g" <<<"$1" | tr '\n' ' '; }
     echo "spctl (dmg):   $(oneline "$dmg_spctl")"
     echo "spctl (cli):   $(oneline "$cli_spctl")"
 } >"$dist/BUILDINFO.txt"
-(cd "$dist" && shasum -a 256 "$name.dmg" "$cli_name.tar.gz" neoscad "$name-dSYMs.zip" \
-    BUILDINFO.txt >SHA256SUMS)
+write_sums
 
 if [ $smoke = 1 ]; then
     say "Smoke test"
@@ -484,7 +696,7 @@ fi
 
 # The next run starts from a fresh DerivedData anyway, and this one is
 # ~500 MB; the archive stays for Xcode's Organizer and for inspection.
-rm -rf "$work/DerivedData" "$dsym_stage"
+rm -rf "$work/DerivedData" "$dsym_stage" "$work/$name-smoke.dmg"
 
 say "Done: $dist"
 (cd "$dist" && ls -l)
