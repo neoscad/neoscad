@@ -135,6 +135,16 @@ impl<'a> Evaluator<'a> {
 
     /// `LocalScope::instantiateModules`: instantiate a scope's modules (or
     /// the ones at `indices`) into `out`.
+    ///
+    /// Inlined, like [`Self::instantiate_children`] and `with_children`:
+    /// each is a level of every recursion through statements, and in
+    /// JavaScriptCore's baseline wasm tier a frame costs about a kilobyte
+    /// of stack however little it holds, so a wrapper of its own made
+    /// WebKit's stack overflow sooner (see `crate::recursion`). Only in
+    /// optimised builds: unoptimised, an inlined callee's locals are not
+    /// shared with the caller's, so forcing it made a debug build's frames
+    /// so large that a 1,000-level module chain exhausted 64 MiB.
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn instantiate_scope(
         &mut self,
         sr: ScopeRef,
@@ -164,6 +174,7 @@ impl<'a> Evaluator<'a> {
 
     /// `Children::instantiate`: a new scope context for the children, whose
     /// assignments are evaluated each time.
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn instantiate_children(
         &mut self,
         children: &Children,
@@ -174,9 +185,12 @@ impl<'a> Evaluator<'a> {
             [children.scope.scope as usize];
         let c = self.new_ctx(&children.ctx, CtxKind::Scope(children.scope), region);
         let mark = self.push(c.clone());
-        let r = self
-            .init_scope(&c, children.scope)
-            .and_then(|_| self.instantiate_scope(children.scope, &c, out, indices));
+        // A `match`, not `and_then`: the closure was a wasm frame of its own
+        // at every level of a recursion through `children()`.
+        let r = match self.init_scope(&c, children.scope) {
+            Ok(()) => self.instantiate_scope(children.scope, &c, out, indices),
+            Err(e) => Err(e),
+        };
         self.truncate(mark);
         r
     }
@@ -228,10 +242,10 @@ impl<'a> Evaluator<'a> {
         // `crate::recursion`), builtin ones included: a module recursing
         // through `if`, `for` or `children()` nests those too, and each
         // becomes a level of the node tree that rendering walks later.
-        self.frames += crate::recursion::STATEMENT_FRAMES;
+        self.frames += self.weights.statement;
         self.work += 1;
         let r = self.instantiate_frame(sr, i, ctx);
-        self.frames -= crate::recursion::STATEMENT_FRAMES;
+        self.frames -= self.weights.statement;
         r
     }
 

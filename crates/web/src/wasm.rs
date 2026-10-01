@@ -47,6 +47,64 @@ pub fn last_panic() -> Option<String> {
     LAST_PANIC.lock().ok().and_then(|l| l.clone())
 }
 
+/// Sets the evaluator's frame budget for this instance (0: the default,
+/// `eval::recursion::DEFAULT_FRAME_LIMIT`), as the worker's stack probe
+/// measured it; see `eval::recursion::set_default_frame_limit`.
+#[wasm_bindgen(js_name = setFrameLimit)]
+pub fn set_frame_limit(limit: u32) {
+    eval::recursion::set_default_frame_limit(limit);
+}
+
+/// Sets the frame weights (statement, expression, call, comprehension,
+/// geometry;
+/// 0 counts nothing for a kind, 4294967295 keeps its default) the worker's
+/// stack probe calibrated; see
+/// `eval::recursion::set_frame_weights`.
+#[wasm_bindgen(js_name = setFrameWeights)]
+pub fn set_frame_weights(
+    statement: u32,
+    expression: u32,
+    call: u32,
+    comprehension: u32,
+    geometry: u32,
+) {
+    eval::recursion::set_frame_weights(eval::recursion::FrameWeights {
+        statement,
+        expression,
+        call,
+        comprehension,
+        geometry,
+    });
+}
+
+/// The frame weights in effect: `[statement, expression, call,
+/// comprehension, geometry]`.
+#[wasm_bindgen(js_name = frameWeights)]
+pub fn frame_weights() -> Vec<u32> {
+    let w = eval::recursion::frame_weights();
+    vec![
+        w.statement,
+        w.expression,
+        w.call,
+        w.comprehension,
+        w.geometry,
+    ]
+}
+
+/// The frame budget evaluations in this instance start with.
+#[wasm_bindgen(js_name = frameLimit)]
+pub fn frame_limit() -> u32 {
+    eval::recursion::default_frame_limit()
+}
+
+/// The frames in use at the evaluator's last recursion check. Read from an
+/// instance whose stack overflowed: it is a load of one static, so it
+/// touches nothing the trap could have left half-written.
+#[wasm_bindgen(js_name = framesAtLastCheck)]
+pub fn frames_at_last_check() -> u32 {
+    eval::recursion::frames_at_last_check()
+}
+
 /// The worker's engine: `handle` one request at a time.
 #[wasm_bindgen]
 #[derive(Debug)]

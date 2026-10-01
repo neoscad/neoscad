@@ -25,7 +25,13 @@
 //!   module, which leaves the instance unusable. The budget there,
 //!   [`DEFAULT_FRAME_LIMIT`], is calibrated so that a program at the limit
 //!   still evaluates, renders and frees its tree within V8's default
-//!   stack; natively the budget is unlimited.
+//!   stack; natively the budget is unlimited. Browsers differ far more
+//!   than that calibration covers (a WebKit worker's stack holds about a
+//!   fifth of the frames of node's), and disagree about which kind of
+//!   recursion is expensive, so the web worker probes its own engine at
+//!   start-up and sets a weight per kind of frame ([`FrameWeights`],
+//!   [`set_frame_weights`]) under one large budget
+//!   ([`set_default_frame_limit`]).
 //!
 //! On wasm32 the measured limit still guards the module's own stack in
 //! linear memory (Rust's "shadow stack", where locals whose address is
@@ -109,6 +115,174 @@ pub const DEFAULT_FRAME_LIMIT: u32 = 2_000;
 #[cfg(all(target_arch = "wasm32", debug_assertions))]
 pub const DEFAULT_FRAME_LIMIT: u32 = 600;
 
+/// The frame budget [`crate::Options::default`] starts from: on wasm32 the
+/// one [`set_default_frame_limit`] chose, if any, else
+/// [`DEFAULT_FRAME_LIMIT`].
+pub fn default_frame_limit() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        match wasm_host::FRAME_LIMIT.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => DEFAULT_FRAME_LIMIT,
+            n => n,
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    DEFAULT_FRAME_LIMIT
+}
+
+/// Sets the frame budget every later [`crate::Options::default`] starts
+/// from, for this instance (0 restores [`DEFAULT_FRAME_LIMIT`]).
+///
+/// A browser's engine decides how much native stack a wasm frame costs,
+/// and they differ by far more than any single default can cover:
+/// JavaScriptCore's baseline tier (BBQ) gives every frame of this code
+/// about a kilobyte, and a worker on macOS has about 512 KiB of stack, so
+/// a recursive module that stops cleanly at the default budget in V8
+/// overflowed WebKit's stack at a fifth of the depth, and the trap killed
+/// the instance. The web worker measures its engine once at start-up
+/// (`crates/web/js/worker.js`) and sets the budget here, with the weights
+/// ([`set_frame_weights`]) that make each kind of recursion stop at its
+/// share of the depth that engine's stack holds. It is a
+/// process-wide default rather than an option because every evaluation in
+/// the instance runs on the same stack, whichever API starts it.
+///
+/// wasm32 only: a native process measures its stack exactly, and a global
+/// here would leak between tests that run in parallel.
+#[cfg(target_arch = "wasm32")]
+pub fn set_default_frame_limit(limit: u32) {
+    wasm_host::FRAME_LIMIT.store(limit, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The frames in use at the last recursion check, on wasm32: what the web
+/// worker reads from an instance whose stack overflowed (the call is a
+/// load of a static, which is safe after the trap) to learn how many
+/// frames that engine's stack holds. Always 0 natively.
+pub fn frames_at_last_check() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        wasm_host::FRAMES_SEEN.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    0
+}
+
+/// Records `frames` for [`frames_at_last_check`]. A no-op natively, where
+/// the check is on the hot path of every call and nothing reads it.
+#[inline(always)]
+pub(crate) fn note_frames(frames: u32) {
+    #[cfg(target_arch = "wasm32")]
+    wasm_host::FRAMES_SEEN.store(frames, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = frames;
+}
+
+/// What one nested frame of each kind adds to the frame budget's count.
+///
+/// The defaults are [`STATEMENT_FRAMES`] and its neighbours: one set of
+/// weights, measured in V8. Engines disagree about which kind is
+/// expensive (in JavaScriptCore a function level costs more stack per
+/// default weight than a module level, in V8 a comprehension does), so on
+/// wasm32 the web worker measures each kind's depth in its own engine and
+/// sets weights that make each kind stop at a share of the depth its stack
+/// holds ([`set_frame_weights`]), under one large budget. A program that
+/// mixes kinds then sums its levels' real costs, and a module chain is not
+/// held to the depth of the most expensive kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameWeights {
+    /// A statement instantiation ([`STATEMENT_FRAMES`]).
+    pub statement: u32,
+    /// A nested expression ([`EXPRESSION_FRAMES`]).
+    pub expression: u32,
+    /// A function call ([`CALL_FRAMES`]).
+    pub call: u32,
+    /// A list comprehension element ([`COMPREHENSION_FRAMES`]).
+    pub comprehension: u32,
+    /// Extra for a builtin module's children (`translate() ...`), on top of
+    /// its statement's weight ([`GEOMETRY_FRAMES`]).
+    pub geometry: u32,
+}
+
+/// The weights natively, and on wasm32 until a host sets its own.
+pub const DEFAULT_WEIGHTS: FrameWeights = FrameWeights {
+    statement: STATEMENT_FRAMES,
+    expression: EXPRESSION_FRAMES,
+    call: CALL_FRAMES,
+    comprehension: COMPREHENSION_FRAMES,
+    geometry: GEOMETRY_FRAMES,
+};
+
+/// The weights an evaluation starts with: [`DEFAULT_WEIGHTS`], or on wasm32
+/// the ones [`set_frame_weights`] chose.
+pub fn frame_weights() -> FrameWeights {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let w = &wasm_host::WEIGHTS;
+        // Stored plus one, so that 0 means "not set" and a weight of 0
+        // (the probe counts one kind at a time) can still be set.
+        let get = |i: usize, d: u32| match w[i].load(Relaxed) {
+            0 => d,
+            n => n - 1,
+        };
+        FrameWeights {
+            statement: get(0, STATEMENT_FRAMES),
+            expression: get(1, EXPRESSION_FRAMES),
+            call: get(2, CALL_FRAMES),
+            comprehension: get(3, COMPREHENSION_FRAMES),
+            geometry: get(4, GEOMETRY_FRAMES),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    DEFAULT_WEIGHTS
+}
+
+/// Sets the weights every later evaluation in this instance counts frames
+/// with (a weight of 0 counts nothing for that kind; `u32::MAX` keeps its
+/// default). Like [`set_default_frame_limit`],
+/// process-wide and wasm32 only: one web worker is one instance, and every
+/// evaluation in it runs on the same engine stack.
+#[cfg(target_arch = "wasm32")]
+pub fn set_frame_weights(w: FrameWeights) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let v = [
+        w.statement,
+        w.expression,
+        w.call,
+        w.comprehension,
+        w.geometry,
+    ];
+    for (slot, n) in wasm_host::WEIGHTS.iter().zip(v) {
+        slot.store(n.wrapping_add(1), Relaxed);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+mod wasm_host {
+    use std::sync::atomic::AtomicU32;
+
+    /// [`super::set_default_frame_limit`]'s budget; 0 when none was set.
+    pub(super) static FRAME_LIMIT: AtomicU32 = AtomicU32::new(0);
+    /// [`super::frames_at_last_check`].
+    pub(super) static FRAMES_SEEN: AtomicU32 = AtomicU32::new(0);
+    /// [`super::set_frame_weights`]: statement, expression, call,
+    /// comprehension, geometry, each plus one; 0 for the default.
+    pub(super) static WEIGHTS: [AtomicU32; 5] = [
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+    ];
+}
+
+/// Extra frames a builtin module's children hold, on top of the statement's
+/// [`STATEMENT_FRAMES`]: 0 by default, where the V8 calibration counted
+/// every statement alike. In JavaScriptCore a `translate()` level costs
+/// about twice the stack of a user module or `children()` level
+/// (`geometry_module`'s frame), and the web worker's probe sets a weight
+/// for it so that the cheaper statements are not held to its depth.
+pub const GEOMETRY_FRAMES: u32 = 0;
+
 /// Frames an expression holds.
 pub const EXPRESSION_FRAMES: u32 = 1;
 
@@ -117,9 +291,14 @@ pub const EXPRESSION_FRAMES: u32 = 1;
 pub const CALL_FRAMES: u32 = 2;
 
 /// Frames a list comprehension element (`for`, `let`, `if`, `each`
-/// inside `[...]`) holds: its evaluation path is about twice as deep in
-/// Rust frames as an expression's.
-pub const COMPREHENSION_FRAMES: u32 = 2;
+/// inside `[...]`) holds: its evaluation path is about four times as deep
+/// in wasm frames as an expression's (`eval_element`, `eval_lc_frame`,
+/// `for_each` and the closure it calls). It was 2, which made a
+/// recursion through a comprehension the one that overflowed first per
+/// budgeted frame: V8 in a Chromium worker overflowed at 1,656 frames of
+/// the default 2,000. (In the browser the web worker's probe sets its own
+/// weights; this default is what node and other wasm hosts use.)
+pub const COMPREHENSION_FRAMES: u32 = 4;
 
 /// Frames a statement instantiation holds. Each nested statement is also a
 /// level of the node tree, which rendering, the cache keys and freeing the

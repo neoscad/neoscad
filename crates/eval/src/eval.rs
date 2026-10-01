@@ -182,6 +182,10 @@ pub(crate) struct Evaluator<'a> {
     /// Frames in use for [`Options::frame_limit`]: nested function calls
     /// and statement instantiations.
     pub frames: u32,
+    /// What each nested frame kind adds to [`Self::frames`]: the
+    /// constants in [`crate::recursion`], or on wasm32 the weights the
+    /// host calibrated for its engine ([`crate::recursion::frame_weights`]).
+    pub(crate) weights: crate::recursion::FrameWeights,
     pub main_dir: PathBuf,
     node_index: usize,
     pub builtin_ctx: Rc<Ctx>,
@@ -458,6 +462,7 @@ impl<'a> Evaluator<'a> {
             stack_base,
             stack_limit,
             frames: 0,
+            weights: crate::recursion::frame_weights(),
             main_dir,
             node_index: 1,
             builtin_ctx: Ctx::new(None, CtxKind::Builtin, BUILTIN_REGION, 1),
@@ -511,6 +516,7 @@ impl<'a> Evaluator<'a> {
     /// the stack measured, and the frame budget.
     #[inline]
     pub fn recursion_exhausted(&self) -> bool {
+        crate::recursion::note_frames(self.frames);
         self.stack_used() >= self.stack_limit || self.frames >= self.opts.frame_limit
     }
 
@@ -1518,9 +1524,9 @@ impl<'a> Evaluator<'a> {
         // A nested expression is a frame for the frame budget (see
         // `crate::recursion`): a recursive function whose body nests
         // deeply costs stack between its calls too.
-        self.frames += crate::recursion::EXPRESSION_FRAMES;
+        self.frames += self.weights.expression;
         let v = self.eval_expr(u, id, ctx);
-        self.frames -= crate::recursion::EXPRESSION_FRAMES;
+        self.frames -= self.weights.expression;
         let v = v?;
         self.check_hard()?;
         Ok(v)
@@ -1888,6 +1894,12 @@ impl<'a> Evaluator<'a> {
 
     /// One element of a vector literal: list comprehensions splice their
     /// values in (OpenSCAD's embedded vectors), anything else is one value.
+    ///
+    /// Inlined: a recursion through a comprehension passes through it twice
+    /// per level, and in JavaScriptCore's baseline wasm tier every frame
+    /// costs about a kilobyte of stack however little it holds (see
+    /// `crate::recursion`).
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn eval_element(
         &mut self,
         u: u32,
@@ -1931,9 +1943,9 @@ impl<'a> Evaluator<'a> {
         rest: &[ExprId],
         ctx: &Rc<Ctx>,
     ) -> R<Value> {
-        self.frames += crate::recursion::COMPREHENSION_FRAMES;
+        self.frames += self.weights.comprehension;
         let v = self.eval(u, x, ctx);
-        self.frames -= crate::recursion::COMPREHENSION_FRAMES;
+        self.frames -= self.weights.comprehension;
         let mut g = match v? {
             Value::Vector(v) => match v.into_growable() {
                 Ok(g) => g,
@@ -2007,9 +2019,9 @@ impl<'a> Evaluator<'a> {
     /// A list comprehension element holds frames of the frame budget, like
     /// an expression (see `crate::recursion`).
     fn eval_lc(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>, out: &mut Vec<Value>) -> R<()> {
-        self.frames += crate::recursion::COMPREHENSION_FRAMES;
+        self.frames += self.weights.comprehension;
         let r = self.eval_lc_frame(u, id, ctx, out);
-        self.frames -= crate::recursion::COMPREHENSION_FRAMES;
+        self.frames -= self.weights.comprehension;
         r
     }
 
@@ -2218,8 +2230,10 @@ impl<'a> Evaluator<'a> {
     /// [`Self::for_each`] for a variable in a register region: one
     /// register for the whole loop, set per iteration, and the body
     /// evaluated in `ctx` itself. Out of line, as `iteration_vars` is.
+    /// Inlined into `for_each`, for the reason `eval_element` is.
     #[allow(clippy::too_many_arguments)]
-    #[inline(never)]
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    #[cfg_attr(debug_assertions, inline(never))]
     fn for_each_reg(
         &mut self,
         u: u32,
@@ -2253,14 +2267,21 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `f` with each value a `for` iterates over `values`.
-    #[inline]
+    ///
+    /// `f` is called from one place, through an iterator borrowed as `dyn`,
+    /// so that it is inlined: called from one arm per kind of value, it
+    /// was a frame of its own at every level of a recursion through a
+    /// `for`, which costs wasm32 stack depth (see `eval_element`).
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    #[cfg_attr(debug_assertions, inline)]
     fn iterate_over(
         &mut self,
         values: &Value,
         loc: Loc,
         mut f: impl FnMut(&mut Self, Value) -> R<()>,
     ) -> R<()> {
-        match values {
+        let (mut range, mut vector, mut chars, mut keys, mut one);
+        let it: &mut dyn Iterator<Item = Value> = match values {
             Value::Range(r) => {
                 let n = r.num_values();
                 if n >= 1_000_000 {
@@ -2269,30 +2290,32 @@ impl<'a> Evaluator<'a> {
                         DiagCode::IterationLimit,
                         format!("Bad range parameter in for statement: too many elements ({n})"),
                     );
-                } else {
-                    for x in r.iter() {
-                        f(self, Value::Number(x))?;
-                    }
+                    return Ok(());
                 }
+                range = r.iter().map(Value::Number);
+                &mut range
             }
             Value::Vector(v) => {
-                for x in v.iter() {
-                    f(self, x.clone())?;
-                }
+                vector = v.iter().cloned();
+                &mut vector
             }
             Value::Str(s) => {
-                for c in crate::utf8::chars(s.as_bytes()) {
-                    f(self, Value::str(c))?;
-                }
+                chars = crate::utf8::chars(s.as_bytes()).map(Value::str);
+                &mut chars
             }
             // An object iterates over its keys.
             Value::Object(o) => {
-                for k in o.keys() {
-                    f(self, Value::Str(k.clone()))?;
-                }
+                keys = o.keys().iter().map(|k| Value::Str(k.clone()));
+                &mut keys
             }
-            Value::Undef => {}
-            other => f(self, other.clone())?,
+            Value::Undef => return Ok(()),
+            other => {
+                one = std::iter::once(other.clone());
+                &mut one
+            }
+        };
+        for v in it {
+            f(self, v)?;
         }
         Ok(())
     }

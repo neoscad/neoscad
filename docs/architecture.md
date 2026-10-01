@@ -282,6 +282,21 @@ result with a `resource-limit` diagnostic, not a crash.
   probe changes nothing.
 - **Time** is checked at evaluator calls and loop iterations and before
   each geometry node; one long kernel operation runs to its end.
+- **Recursion** ends with OpenSCAD's "Recursion detected" error, not a
+  crash (`crates/eval/src/recursion.rs`). Natively the evaluator measures
+  its stack (64 MiB on its own thread). On wasm32 it cannot see the
+  engine's stack, so it counts weighted frames against a budget instead.
+  Browsers' stacks hold very different numbers of wasm frames (a WebKit
+  worker about a fifth of what V8's holds) and disagree about which kind
+  of recursion is expensive, so the web worker probes its engine once at
+  start-up: throwaway instances recurse through functions,
+  comprehensions, `children()` and transforms until the stack overflows,
+  each run counting one kind of frame, and the worker sets a weight per
+  kind so that each stops at half the depth that overflowed, never
+  deeper than the defaults allow (`crates/web/js/worker.js`,
+  `eval::recursion::FrameWeights`). Nesting in the
+  source itself (deeply nested brackets or statements) is not covered:
+  the parser has no depth limit (`docs/followups.md`).
 
 Details: `docs/cli-json.md` ("Resource limits"); open gaps in
 `docs/followups.md` ("Serve and session").

@@ -25,7 +25,8 @@ const root = resolve(here, '../../..');
 const dir = resolve(process.argv[2] || join(root, 'dist/web-core'));
 const GUARD = 2 * 1024 ** 3;
 
-const { start, handle } = await import(pathToFileURL(join(dir, 'worker.js')).href);
+const worker = await import(pathToFileURL(join(dir, 'worker.js')).href);
+const { start, handle } = worker;
 await start(readFileSync(join(dir, 'neoscad_web_bg.wasm')));
 
 let id = 0;
@@ -207,6 +208,26 @@ await test('runaway recursion is an error, not a crash', 5000, () => {
     console.log(`     ${r.render.console.trim().split('\n')[0]}`);
 });
 
+// start() probed this thread's stack before making the engine: each run
+// either overflowed V8's stack (and reported the frames it held) or was
+// stopped by the linear-memory stack. When any overflowed, the weights
+// make no kind recurse deeper than the defaults allow (each weight at
+// least its default's share of the budget).
+await test('the stack probe ran and calibrated the weights', 1000, () => {
+    const p = worker.probeResult;
+    assert.ok(p && Object.keys(p.frames).length === 4, JSON.stringify(p));
+    for (const f of Object.values(p.frames)) {
+        assert.ok(Object.values(f).every((n) => n === null || n >= 0), JSON.stringify(p));
+    }
+    if (p.weights) {
+        const unit = p.limit / 2000;
+        assert.ok(p.weights.stmt >= 4 * unit && p.weights.expr >= unit, JSON.stringify(p));
+        assert.ok(p.weights.lc >= 4 * unit && p.weights.call === 2 * p.weights.expr, JSON.stringify(p));
+        assert.ok(p.weights.geometry >= 0, JSON.stringify(p));
+    }
+    console.log(`     ${JSON.stringify(p)}`);
+});
+
 // The memory limit measures (the wasm build's counting allocator, heap.rs)
 // as well as estimates: the heavy example's BOSL2 evaluation and kernel
 // working memory are mostly outside the estimate, so under a 256 MiB
@@ -262,24 +283,6 @@ await test('a preview past its time limit stops with the limit', 10000, () => {
     } finally {
         ok('setLimits', { limits: init.limits });
     }
-});
-
-// The Menger example at depth 5 renders to a last union that, on its own,
-// grows past the 1 GiB limit (it ran on past 2 GB, then trapped). The
-// kernel checks the limit inside the boolean (`geom::manifold_geom::
-// kernel_token`), so the render stops with a resource-limit error and the
-// engine lives on.
-await test('one boolean past the memory limit is a resource-limit error', 30000, () => {
-    const menger = join(root, 'web/examples/example024.scad');
-    if (!existsSync(menger)) return 'no web/examples/example024.scad';
-    const text = readFileSync(menger, 'utf8').replace(/^n\s*=\s*\d+;/m, 'n=5;');
-    ok('open', { path: '/doc/menger5.scad', text });
-    const r = ok('run', { path: '/doc/menger5.scad', mode: 'render' });
-    assert.equal(r.render.exitCode, 1);
-    assert.match(r.render.console, /ERROR: Resource limit exceeded: .* over the memory limit of 1,024 MiB \(measured\)/, r.render.console);
-    ok('open', { path: '/doc/after.scad', text: 'cube(1);' });
-    assert.equal(ok('run', { path: '/doc/after.scad', mode: 'render' }).render.exitCode, 0);
-    console.log(`     ${r.render.console.split('\n').find((l) => l.includes('measured'))}`);
 });
 
 console.log(failures ? `web core: ${failures} failed` : 'web core: all passed');

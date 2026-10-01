@@ -479,7 +479,7 @@ impl<'a> Evaluator<'a> {
         self.work += 1;
         // A frame for the frame budget (see `crate::recursion`); tail
         // calls below reuse it, as they reuse the native stack.
-        self.frames += crate::recursion::CALL_FRAMES;
+        self.frames += self.weights.call;
         // A call that can only ever reach a builtin makes one step and no
         // context, so it skips the loop and its stack slot. The checks
         // above and the frame charge are the loop's, in the same order, so
@@ -487,7 +487,7 @@ impl<'a> Evaluator<'a> {
         // before.
         if let Some(b) = self.static_builtin(u, id) {
             let r = self.direct_builtin(b, u, id, ctx);
-            self.frames -= crate::recursion::CALL_FRAMES;
+            self.frames -= self.weights.call;
             return r;
         }
         // The loop owns one stack slot, holding the context of the step
@@ -616,7 +616,7 @@ impl<'a> Evaluator<'a> {
         if let Some(c) = cur {
             Ctx::recycle(c, &mut self.ctx_pool);
         }
-        self.frames -= crate::recursion::CALL_FRAMES;
+        self.frames -= self.weights.call;
         result
     }
 

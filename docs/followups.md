@@ -1218,16 +1218,48 @@ lead them, come roughly in order of user impact.
 
 ## Web demo
 
-- **Deep user recursion still overflows evaluation in WebKit.** The render
-  walk is iterative now (it overflowed Safari on the BOSL2 examples), but
-  the evaluator recurses per module call, and JavaScriptCore's frames
-  for it are far bigger than V8's. A `module m(n)` chain previews at
-  depth 30 and crashes at 40 in WebKit; Chromium and Firefox reach 200
-  and stop cleanly. The wasm32 frame budget (`DEFAULT_FRAME_LIMIT`, 2000,
-  `crates/eval/src/recursion.rs`) was calibrated against V8. Either
-  recalibrate it against JSC (a smaller wasm budget gives a clean
-  recursion error instead of a crash), or make evaluation independent of
-  stack depth. `eval::dump::Keys::new` also still recurses.
+- **Done: deep user recursion ends cleanly in WebKit.** JavaScriptCore's
+  baseline wasm tier (BBQ) gives every frame of the evaluator about a
+  kilobyte however little it holds, and a WebKit worker on macOS has
+  about 512 KiB of stack (the jsc shell at `--maxPerThreadStackUsage=
+  524288` reproduces its depths), so the V8-calibrated budget let `m(40)`
+  overflow. Now:
+  - The web worker probes its engine at start-up (`crates/web/js/
+    worker.js`, 30-60 ms): throwaway instances recurse through a
+    function, a list comprehension, a `children()` chain and a module
+    through `translate` until the stack overflows, each run counting one
+    kind of frame, and the worker sets per-kind weights
+    (`eval::recursion::FrameWeights`, wasm32-only process-wide setters)
+    under a budget of 1,000,000 so each kind stops at half the depth that
+    overflowed, never deeper than the defaults. A geometry module's
+    children got a weight of their own (0 by default), since in JSC a
+    `translate()` level costs about twice a user module's.
+  - Fewer wasm frames per level: `instantiate_scope`,
+    `instantiate_children`, `with_children`, `eval_element`,
+    `for_each_reg` and `iterate_over`'s closure are inlined, and two
+    `and_then` closures on the statement path are `match`es. Per level in
+    JSC: a `children()` chain 3+ frames to 2, a module through `translate`
+    10 to 4, a comprehension 12 to 8, a function 3 (unchanged).
+  - Depths now (first n that stops with the recursion error; module
+    through `translate`, plain module, `children()`, function,
+    comprehension): WebKit 40/100/80/80/30, Chromium 200/300/300/500/150,
+    Firefox 200/300/300/500/200. All 8 /try examples render in all three;
+    the BOSL2 gearbox needs 77% of WebKit's calibrated budget.
+  Left:
+  - Recursion is still shallow in WebKit. A comprehension level is 8
+    wasm frames (`eval_lc_frame` twice, its `for` closure through `dyn
+    FnMut`, `for_each`, `eval_cold`, `eval_expr` twice, `eval_call`); a
+    function level 3. Fewer frames there is what raises it.
+  - The probe runs cold. With only BBQ, JSC reaches 67-78% of the depth
+    of a cold run, which the half covers; a warmer engine only goes
+    deeper.
+  - Nesting in the source is not limited: `echo(((...(1)...)))` with a
+    few hundred brackets, or a few hundred nested statements, overflows
+    the parser's recursion (`Parser::expr`/`unary`/`binary`) in WebKit
+    at about 200, Chromium at about 900 and Firefox at about 1,750,
+    before any budget applies; lowering, resolution and
+    `eval::dump::Keys::new` recurse over the same depth. It needs a
+    nesting limit in `lang`'s parser sized for the web.
 - **Done: the preview's product booleans run under the limits.**
   `geom::csg::product_meshes_until` checks a `geom::csg::Stop` (the
   request's interrupt flag and limits guard) before every kernel
@@ -1244,45 +1276,55 @@ lead them, come roughly in order of user impact.
   edit in the macOS app still waits for the old preview; `neoscad`'s
   PNG export (`cli/src/png.rs`) and `session`'s snapshots
   (`session/src/snapshot.rs`) still call the unlimited
-  `render::preview::scene`. (A single kernel operation is now
-  interrupted too: see below.)
-- **Done: a preview reuses what a render caches.** Each preview leaf
-  records its ancestors (`geom::csg::Chain`: node index, `Keys` key,
-  position, own transform; one `Arc` link per node), and a product's
-  negatives carry it (`geom::csg::Negative`). `geom::shared::Plan` puts
-  them back into that tree and decides, before any boolean runs, which
-  subtrees are equal (same key, same present leaves with the same tints,
-  children in the same classes); each class's union is computed once in
-  its own coordinates and moved (`ManifoldGeometry::transform`) for every
-  copy, unions of one height run in parallel, and IDs are reserved for
-  the conversions the classes make. A product without a repeated subtree
-  that has a union of its own keeps the flat union, byte for byte. The
-  Menger example at depth 4 (2026-10-01, load about 20): preview 3.8 s
-  to 1.5 s natively (render 1.7 s), 33.7 s to 8.5 s in the web core
-  (render 9.4 s). Its peak memory rose to the render's: 511 MB to 950 MB
-  of wasm memory, 750 MB to 1.5 GB RSS natively, since the three
-  rotated depth-4 negatives are now unioned whole, as the render does.
-  Of the suite only `example024` takes the shared path, and its preview
-  PNG is byte-identical; at depth 4, 4 of 262,144 pixels change.
-- **Done: a single huge boolean honours a cancel and the limits.**
-  manifold-rust patch 0006 (vendor/README.md, "The cancellation patch")
-  gives `CancelToken::from_flag` and `with_check`, and checks inside
-  `AddNewEdgeVerts`, whose lists it now allocates at their final size.
-  `geom::manifold_geom::kernel_token` makes the request's token (its
-  interrupt flag; the guard's `stopped()` as the check), used by the
-  render's batches and the preview's products (`batch_until`,
-  `boolean_until`); a cancelled result is an interruption and is never
-  cached. Nothing in `crates/web` changed: the guard already reads the
-  allocator's peak through the session's memory probe, and the check
-  asks it at every kernel check. The Menger example at depth 5's render
-  under 1 GiB now ends with a `resource-limit` "(measured)" error after
-  about 6 s, at a measured peak of 1.4 to 1.7 GiB, and the engine lives
-  on (`crates/web/test/run.mjs`). A native cancel lands inside one
-  boolean within milliseconds (`crates/geom/tests/kernel_cancel.rs`).
-  Left: the overshoot past the limit is what the kernel allocates
-  between two checks (here up to 0.7 GiB); the robust engine,
-  `simplify_topology` and `sort_geometry` are still only bracketed, not
-  checked inside; and the minkowski and hull paths take no token.
+  `render::preview::scene`. A single kernel operation is still not
+  interrupted (manifold-rust's `CancelToken` could be, but it owns its
+  flag and knows nothing of the clock).
+- **A preview recomputes what a render reuses.** The Menger example at
+  depth 4 previews in 28 s in the web core but renders in 8 s: the render
+  caches each `menger_negative` level (its subtrees are identical under
+  their `translate`), while the preview's product unions its 1,756
+  negatives flat. Natively (2026-09-30, load about 20) it is 10.6 s
+  against 3.4 s at the default thread count and 22.5 s against 6.2 s on
+  one thread. Not done; the plan:
+  1. Record, for each leaf `TreeEvaluator::visit` reaches, its chain of
+     ancestors (node index, the node's cache key from `Keys`, the
+     accumulated matrix there), shared as an `Arc` list so the cost is
+     one link per node.
+  2. Pass the negatives to `product_meshes` as leaf meshes with matrix,
+     colour and that chain, not as transformed `PolySet`s.
+  3. In `product_mesh`, group a product's negatives into the trie of
+     their ancestor chains and union bottom-up: a trie node's union is
+     the `union_tree` of its children's. Two trie nodes whose ancestors
+     have the same key, the same leaves in this product (pruning by box
+     can drop different leaves from two copies, so compare the leaf
+     lists, not just the key) and the same colours are one union moved
+     by `M_k * inverse(M_j)`: compute the first in order, transform it
+     (`ManifoldGeometry::transform`) for the rest. Deciding which are
+     equal before any boolean runs keeps it the same at any thread count.
+  4. IDs: a transformed copy keeps the first's original IDs, as a render's
+     cached subtree does; reserve the ranges for the distinct unions only.
+  The meshes change (the unions run in another order), so the preview
+  images need re-checking; the Menger sponge should drop to about the
+  render's time. Effort: M-L (`geom::csg` and `render::preview`).
+- **Out of memory inside one kernel operation still traps.** The web
+  core now measures (see "Serve and session", the memory limit): growth
+  the estimate missed (BOSL2 evaluation, kernel working memory, the
+  cache) stops at the next node or ring with a `resource-limit`
+  "(measured)" error, and the worker lives on (`crates/web/test/run.mjs`:
+  the heavy example under 256 MiB). But one kernel operation runs to its
+  end, so a single boolean that needs the rest of the address space on
+  its own still traps: the Menger example at depth 5's render reaches its
+  last union of 20 depth-4 negatives well under 1 GiB and then grows past
+  2 GB inside it (stopped by the test's process guard; previously the
+  instance trapped). The fix is in the kernel: manifold-rust already
+  ports Manifold's cooperative cancellation (`vendor/manifold-rust/src/cancel.rs`,
+  `boolean_with_token`, checks in `csg_tree`'s batch rounds); it needs a
+  `CancelToken` over an existing flag (a vendor patch: `CancelToken::new`
+  makes its own), a token-taking batch entry, and `geom::manifold_geom`
+  passing the request's interrupt flag, with a cancelled (empty) result
+  never cached. The web allocator would then raise that flag when the live
+  count passes the limit. Left for the `geom` owner (another builder had
+  `geom` at the time).
 - Consider "Connect your AI agent" (the `neoscad mcp --browser` bridge,
   docs/agent-bridge.md) for the native apps too: macOS, and the Linux and
   Windows apps being built (owner, 2026-09-30: weigh its value first, don't

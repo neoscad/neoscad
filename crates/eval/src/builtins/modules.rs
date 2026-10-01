@@ -360,7 +360,9 @@ impl<'a> Evaluator<'a> {
         self.eval_args(sr.unit, &inst.args, ctx)
     }
 
-    /// Instantiate children into `node` and return it.
+    /// Instantiate children into `node` and return it. Inlined for the
+    /// reason `instantiate_scope` is.
+    #[cfg_attr(not(debug_assertions), inline(always))]
     fn with_children(
         &mut self,
         mut node: Node,
@@ -392,6 +394,7 @@ impl<'a> Evaluator<'a> {
         // rather than at an `if` inside it. Natively the budget is
         // unlimited, and this never fires.
         let budget = self.opts.frame_limit;
+        crate::recursion::note_frames(self.frames);
         if self.frames >= budget.saturating_add(budget / 4) {
             return Err(self.builtin_recursion(sr, i));
         }
@@ -417,12 +420,14 @@ impl<'a> Evaluator<'a> {
                 let region = self.inst_res(sr, i).1;
                 let c = self.new_ctx(ctx, CtxKind::Plain, region);
                 let mark = self.push(c.clone());
-                let r = self
-                    .sequential_assign(sr.unit, &inst.args, inst.span, &c)
-                    .and_then(|_| {
+                // A `match`, not `and_then`, as in `instantiate_children`.
+                let r = match self.sequential_assign(sr.unit, &inst.args, inst.span, &c) {
+                    Ok(()) => {
                         let node = self.new_node(NodeKind::Group { name: None }, sr, i);
                         self.with_children(node, sr, i, &c)
-                    });
+                    }
+                    Err(e) => Err(e),
+                };
                 self.truncate(mark);
                 r
             }
@@ -1089,7 +1094,13 @@ impl<'a> Evaluator<'a> {
         if leaf {
             Ok(Some(node))
         } else {
-            self.with_children(node, sr, i, ctx)
+            // A geometry module's children cost more stack per level than
+            // other statements (this function's frame); the extra weight is
+            // 0 unless a host calibrated one (`crate::recursion::FrameWeights`).
+            self.frames += self.weights.geometry;
+            let r = self.with_children(node, sr, i, ctx);
+            self.frames -= self.weights.geometry;
+            r
         }
     }
 

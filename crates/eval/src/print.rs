@@ -85,7 +85,10 @@ impl Evaluator<'_> {
     /// nested value from overflowing a WASM engine's stack.
     fn print_stack_exhausted(&self, depth: u32) -> bool {
         self.stack_used() >= self.stack_limit().min(PRINT_STACK_LIMIT)
-            || self.frames.saturating_add(depth) >= self.opts.frame_limit
+            || self
+                .frames
+                .saturating_add(depth.saturating_mul(self.weights.expression))
+                >= self.opts.frame_limit
     }
 
     /// Whether printing should stop for a cancel or the time limit.
