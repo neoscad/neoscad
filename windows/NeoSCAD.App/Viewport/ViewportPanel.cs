@@ -57,6 +57,21 @@ public sealed class ViewportPanel
     bool attached;
     Windows.Foundation.Point? last;
     bool panning;
+    /// <summary>Where a left press started, while it has not moved far enough to be a drag.</summary>
+    Windows.Foundation.Point? click;
+
+    /// <summary>
+    /// How far (DIPs) a left press may move and still be a click: a hand
+    /// on a mouse wobbles a pixel or two, and that orbit is not a pick.
+    /// </summary>
+    const double ClickSlop = 4;
+
+    /// <summary>
+    /// A left click on the view (no drag), at its point in DIPs from the
+    /// panel's top left, the coordinates the core's `ray_at` takes: the
+    /// measure panel's pick. The orbit it began still happens.
+    /// </summary>
+    public event Action<double, double>? Click;
 
     public ViewportPanel(SwapChainPanel panel)
     {
@@ -68,7 +83,11 @@ public sealed class ViewportPanel
         panel.PointerPressed += OnPressed;
         panel.PointerMoved += OnMoved;
         panel.PointerReleased += OnReleased;
-        panel.PointerCaptureLost += (_, _) => last = null;
+        panel.PointerCaptureLost += (_, _) =>
+        {
+            last = null;
+            click = null;
+        };
         panel.PointerWheelChanged += OnWheel;
         panel.ActualThemeChanged += (_, _) => ApplyTheme();
     }
@@ -246,6 +265,7 @@ public sealed class ViewportPanel
         var props = p.Properties;
         panning = props.IsRightButtonPressed || props.IsMiddleButtonPressed;
         last = p.Position;
+        click = props.IsLeftButtonPressed ? p.Position : null;
         panel.CapturePointer(e.Pointer);
         e.Handled = true;
     }
@@ -254,6 +274,7 @@ public sealed class ViewportPanel
     {
         if (last is not { } from) return;
         var to = e.GetCurrentPoint(panel).Position;
+        if (click is { } c && Math.Abs(to.X - c.X) + Math.Abs(to.Y - c.Y) > ClickSlop) click = null;
         // Positions are in DIPs, whatever the display scale; the core wants
         // its viewport's points (PanelScale).
         var (dx, dy) = PanelScale.PointerDelta(to.X - from.X, to.Y - from.Y,
@@ -266,6 +287,11 @@ public sealed class ViewportPanel
 
     void OnReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (click is { } c)
+        {
+            click = null;
+            Click?.Invoke(c.X, c.Y);
+        }
         last = null;
         panel.ReleasePointerCapture(e.Pointer);
         e.Handled = true;

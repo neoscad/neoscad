@@ -87,8 +87,10 @@ jobs:
       # Launch on the default example with the diagnostic log on, check it
       # is still running after 25 s (it did not crash on start), photograph
       # its window alone (PrintWindow, so a console or the first-run privacy
-      # screen on top does not hide it) and close it. The screenshot and the
-      # log are for people: nothing here checks what they show.
+      # screen on top does not hide it) and close it. Then again on an
+      # example with parameters, with the customizer panel open (`--panel`).
+      # The screenshots and the logs are for people: nothing here checks
+      # what they show.
       - name: Launch, log and screenshot
         shell: pwsh
         run: |
@@ -97,6 +99,8 @@ jobs:
           if (-not $exe) { throw "no NeoSCAD.exe was built" }
           scripts/windows/launch-screenshot.ps1 -Exe $exe.FullName -Out screenshots `
             -Name neoscad-windows-${{ matrix.arch }}
+          scripts/windows/launch-screenshot.ps1 -Exe $exe.FullName -Out screenshots `
+            -Name neoscad-windows-${{ matrix.arch }}-customizer -Example box-lid -Panel customizer
 
       - uses: actions/upload-artifact@v7
         if: always()

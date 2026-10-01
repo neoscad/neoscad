@@ -11,8 +11,9 @@ public abstract record StartupAction
     /// `NeoSCAD.exe [FILE]` opens a file (as Explorer passes it);
     /// `--example ID` opens one of the core's examples (CI's screenshot
     /// uses it, so the picture shows a model rather than an empty window).
-    /// `--log FILE` is not an action (see <see cref="LogPath"/>); its
-    /// value is skipped, so the log file is never opened as a model.
+    /// `--log FILE` and `--panel NAME` are not actions (see <see
+    /// cref="LogPath"/> and <see cref="PanelName"/>); their values are
+    /// skipped, so the log file is never opened as a model.
     /// Other options are ignored.
     /// </summary>
     public static StartupAction Parse(IReadOnlyList<string> args)
@@ -20,7 +21,7 @@ public abstract record StartupAction
         for (var i = 0; i < args.Count; i++)
         {
             if (args[i] == "--example" && i + 1 < args.Count) return new OpenExample(args[i + 1]);
-            if (args[i] == LogOption)
+            if (args[i] == LogOption || args[i] == PanelOption)
             {
                 i++;
                 continue;
@@ -31,6 +32,23 @@ public abstract record StartupAction
     }
 
     const string LogOption = "--log";
+    const string PanelOption = "--panel";
+
+    /// <summary>The panels `--panel NAME` can open.</summary>
+    public static readonly IReadOnlyList<string> Panels = ["customizer", "check", "measure"];
+
+    /// <summary>
+    /// The side panel `--panel NAME` opens at start (customizer, check or
+    /// measure; CI's screenshot shows one this way), or null.
+    /// </summary>
+    public static string? PanelName(IReadOnlyList<string> args)
+    {
+        for (var i = 0; i + 1 < args.Count; i++)
+        {
+            if (args[i] == PanelOption && Panels.Contains(args[i + 1])) return args[i + 1];
+        }
+        return null;
+    }
 
     /// <summary>The file `--log FILE` names (NeoSCAD.Host's AppLog), or null.</summary>
     public static string? LogPath(IReadOnlyList<string> args)

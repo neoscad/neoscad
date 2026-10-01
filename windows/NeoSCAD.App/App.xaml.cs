@@ -32,7 +32,7 @@ public partial class App : Application
         // directory, as OpenSCAD's `<resources>/libraries`.
         CoreService.ResourceDirectory = AppContext.BaseDirectory;
         var startup = StartupAction.Parse(arguments);
-        window = new MainWindow(startup);
+        window = new MainWindow(startup, StartupAction.PanelName(arguments));
         window.Activate();
         AppLog.Write("window activated");
     }

@@ -1,13 +1,14 @@
 // A document window: wires the document's loop (NeoSCAD.Host's
-// DocumentSession) to the editor pane, the 3D view, the console and the
-// menus. Everything that is not a control lives in NeoSCAD.Host and is
-// tested there; this file is the glue.
+// DocumentSession) to the editor pane, the 3D view, the console, the side
+// panels (Panels/) and the menus. Everything that is not a control lives
+// in NeoSCAD.Host and is tested there; this file is the glue.
 
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using NeoSCAD.App.Editor;
+using NeoSCAD.App.Panels;
 using NeoSCAD.App.Viewport;
 using NeoSCAD.Host;
 using NeoSCAD.Native;
@@ -21,8 +22,16 @@ public sealed partial class MainWindow : Window
     readonly EditorHost editor;
     readonly ViewportPanel view;
     bool closing;
+    CustomizerPanel? customizer;
+    CheckPanel? checkPanel;
+    MeasurePanel? measurePanel;
+    /// <summary>The format Ctrl+Shift+E exports to: the last one chosen.</summary>
+    string lastExportFormat = "binstl";
+    /// <summary>A ContentDialog is showing (WinUI allows one at a time per window).</summary>
+    bool dialogShowing;
 
-    public MainWindow(StartupAction startup)
+    /// <param name="panel">A side panel to open at start (`--panel`), or null.</param>
+    public MainWindow(StartupAction startup, string? panel = null)
     {
         InitializeComponent();
         AppWindow.Resize(new Windows.Graphics.SizeInt32(1400, 900));
@@ -53,19 +62,21 @@ public sealed partial class MainWindow : Window
         view.SchemeChanged += () => document.Run(LastMode());
 
         editor = new EditorHost(EditorView, document);
-        editor.Command += name =>
-        {
-            if (name == "preview") document.Run(RenderMode.Preview);
-            else if (name == "render") document.Run(RenderMode.Render);
-        };
+        // F5 and F6 from the bundle's own keymap, and the menu's chords the
+        // page forwards while the editor has the focus (Shortcuts.cs).
+        editor.Command += Perform;
+        view.Click += (x, y) => document.PickAt(x, y);
 
         document.TitleChanged += () => Title = document.Title;
         document.ReportChanged += ShowReport;
+        document.ReportChanged += UpdateExportMenu;
         document.ConsoleChanged += ShowConsole;
         AppWindow.Closing += OnClosing;
         Closed += (_, _) => document.Dispose();
 
         BuildExamplesMenu();
+        BuildExportMenu();
+        if (panel is not null) ShowPanel(panel);
         if (core is null) Status.Text = $"The core did not start: {CoreService.Error}";
         AppLog.Write(core is null ? $"core did not start: {CoreService.Error}" : "core started");
         if (view.Error is { } noView) AppLog.Write($"no 3D view: {noView}");
@@ -311,35 +322,152 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    async void OnExportStl(object sender, RoutedEventArgs e)
+    // --- Export ---------------------------------------------------------------------
+
+    ExportFormatInfo[] exportFormats = [];
+
+    /// <summary>File > Export As: every format the core offers, in its order.</summary>
+    void BuildExportMenu()
     {
-        var picker = new FileSavePicker
+        try
         {
-            SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
-            SuggestedFileName = Path.GetFileNameWithoutExtension(document.DisplayName),
-        };
-        picker.FileTypeChoices.Add("STL mesh", [".stl"]);
-        InitializeWithWindow(picker);
-        if (await picker.PickSaveFileAsync() is not { } file) return;
-        Status.Text = "Exporting…";
-        var failure = await document.ExportAsync(file.Path, "stl");
-        Status.Text = failure ?? $"Exported {file.Name}";
+            exportFormats = NeoScad.ExportFormats();
+        }
+        catch (Exception e) when (e is CoreException or DllNotFoundException)
+        {
+            exportFormats = [];
+        }
+        foreach (var format in exportFormats)
+        {
+            var item = new MenuFlyoutItem { Text = $"{format.Title}…", Tag = format.Id };
+            item.Click += async (_, _) => await ExportAsync(format);
+            ExportMenu.Items.Add(item);
+        }
+        ExportMenu.IsEnabled = exportFormats.Length > 0;
+        UpdateExportMenu();
     }
 
-    async void OnExportImage(object sender, RoutedEventArgs e)
+    /// <summary>A 2D model's formats only for a 2D model, a 3D model's for a 3D one, once one rendered.</summary>
+    void UpdateExportMenu()
     {
+        var dims = document.LastDimensions;
+        foreach (var item in ExportMenu.Items.OfType<MenuFlyoutItem>())
+        {
+            var format = Array.Find(exportFormats, f => f.Id == (string)item.Tag);
+            item.IsEnabled = format?.Dimension is not { } d || dims is null || d == dims;
+        }
+        ExportAgainItem.Text = FormatFor(lastExportFormat) is { } f ? $"Export {f.Title}…" : "Export…";
+    }
+
+    ExportFormatInfo? FormatFor(string id) => Array.Find(exportFormats, f => f.Id == id);
+
+    /// <summary>Ctrl+Shift+E: the last format again, or the one that suits the model's dimension.</summary>
+    async void OnExportAgain(object sender, RoutedEventArgs e) => await ExportAgainAsync();
+
+    async Task ExportAgainAsync()
+    {
+        string id;
+        try
+        {
+            id = NeoScad.SuggestExportFormat(lastExportFormat, document.LastDimensions);
+        }
+        catch (CoreException)
+        {
+            id = lastExportFormat;
+        }
+        if (FormatFor(id) is { } format) await ExportAsync(format);
+    }
+
+    /// <summary>
+    /// Ask where, then export: geometry renders in full (with the
+    /// customizer's values) under a dialog that shows the stage and can
+    /// cancel; the view's image is taken at once.
+    /// </summary>
+    async Task ExportAsync(ExportFormatInfo format)
+    {
+        if (dialogShowing) return;
         var picker = new FileSavePicker
         {
-            SuggestedStartLocation = PickerLocationId.PicturesLibrary,
+            SuggestedStartLocation = format.Kind == ExportKind.Geometry
+                ? PickerLocationId.DocumentsLibrary
+                : PickerLocationId.PicturesLibrary,
             SuggestedFileName = Path.GetFileNameWithoutExtension(document.DisplayName),
         };
-        picker.FileTypeChoices.Add("PNG image", [".png"]);
+        picker.FileTypeChoices.Add(format.Title, ["." + format.Extension]);
         InitializeWithWindow(picker);
         if (await picker.PickSaveFileAsync() is not { } file) return;
-        var width = (uint)Math.Max(64, ViewPanel.ActualWidth * ViewPanel.CompositionScaleX);
-        var height = (uint)Math.Max(64, ViewPanel.ActualHeight * ViewPanel.CompositionScaleY);
-        var failure = await document.ExportImageAsync(file.Path, width, height);
+        lastExportFormat = format.Id;
+        UpdateExportMenu();
+        string? failure;
+        if (format.Kind == ExportKind.ViewImage)
+        {
+            var width = (uint)Math.Clamp(ViewPanel.ActualWidth * ViewPanel.CompositionScaleX, 64, 8192);
+            var height = (uint)Math.Clamp(ViewPanel.ActualHeight * ViewPanel.CompositionScaleY, 64, 8192);
+            failure = await document.ExportImageAsync(file.Path, width, height);
+        }
+        else
+        {
+            failure = await ExportWithProgressAsync(file.Path, file.Name, format);
+        }
         Status.Text = failure ?? $"Exported {file.Name}";
+        if (failure is not null) AppLog.Write($"export {format.Id} failed: {failure}");
+    }
+
+    async Task<string?> ExportWithProgressAsync(string path, string name, ExportFormatInfo format)
+    {
+        CancelToken cancel;
+        try
+        {
+            cancel = new CancelToken();
+        }
+        catch (CoreException e)
+        {
+            return CoreErrors.Describe(e);
+        }
+        using (cancel)
+        {
+            var stage = new TextBlock { Text = ExportText.Describe(null) };
+            var content = new StackPanel { Spacing = 12, MinWidth = 320 };
+            content.Children.Add(new ProgressBar { IsIndeterminate = true });
+            content.Children.Add(stage);
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Root.XamlRoot,
+                Title = $"Exporting {name}",
+                Content = content,
+                CloseButtonText = "Cancel",
+            };
+            var queue = DispatcherQueue;
+            Status.Text = $"Exporting {name}…";
+            var export = document.ExportAsync(path, format.Id,
+                s => queue.TryEnqueue(() => stage.Text = ExportText.Describe(s)), cancel);
+            // A quick export finishes before the dialog would flash up.
+            if (await Task.WhenAny(export, Task.Delay(400)) != export)
+            {
+                dialogShowing = true;
+                var shown = dialog.ShowAsync().AsTask();
+                var first = await Task.WhenAny(export, shown);
+                if (first == shown)
+                {
+                    // Cancel (or Esc): the core stops at its next check
+                    // and the export says so; nothing is left behind.
+                    try
+                    {
+                        cancel.Cancel();
+                    }
+                    catch (CoreException)
+                    {
+                    }
+                }
+                else
+                {
+                    dialog.Hide();
+                }
+                await shown;
+                dialogShowing = false;
+            }
+            return await export;
+        }
     }
 
     void OnExit(object sender, RoutedEventArgs e) => Close();
@@ -378,6 +506,103 @@ public sealed partial class MainWindow : Window
             Close();
         }
     }
+
+    // --- Edit ---------------------------------------------------------------------------
+
+    void OnUndo(object sender, RoutedEventArgs e) => editor.Perform(EditorScript.Undo());
+    void OnRedo(object sender, RoutedEventArgs e) => editor.Perform(EditorScript.Redo());
+    void OnSelectAll(object sender, RoutedEventArgs e) => editor.Perform(EditorScript.SelectAll());
+    void OnFind(object sender, RoutedEventArgs e) => editor.Perform(EditorScript.OpenSearch());
+
+    /// <summary>A command by name: the editor protocol's `command` message (Shortcuts.cs).</summary>
+    async void Perform(string name)
+    {
+        AppLog.Write($"command from the editor: {name}");
+        switch (name)
+        {
+            case Shortcuts.Preview: document.Run(RenderMode.Preview); break;
+            case Shortcuts.Render: document.Run(RenderMode.Render); break;
+            case Shortcuts.New: OnNew(this, new RoutedEventArgs()); break;
+            case Shortcuts.Open: OnOpen(this, new RoutedEventArgs()); break;
+            case Shortcuts.Save: await SaveAsync(); break;
+            case Shortcuts.SaveAs: await SaveAsAsync(); break;
+            case Shortcuts.Export: await ExportAgainAsync(); break;
+            case Shortcuts.Check: Check(); break;
+            case Shortcuts.Measure: Measure(); break;
+            case Shortcuts.Customizer: TogglePanel("customizer"); break;
+        }
+    }
+
+    // --- Panels ---------------------------------------------------------------------------
+
+    /// <summary>The panel shown in the pane, by its tag ("customizer", "check", "measure").</summary>
+    string? shownPanel;
+
+    void ShowPanel(string name)
+    {
+        UserControl panel = name switch
+        {
+            "check" => checkPanel ??= new CheckPanel(document),
+            "measure" => measurePanel ??= new MeasurePanel(document),
+            _ => customizer ??= new CustomizerPanel(document),
+        };
+        shownPanel = name;
+        PanelHost.Content = panel;
+        SidePanes.IsPaneOpen = true;
+        var tab = PanelTabs.Items.FirstOrDefault(i => (string)i.Tag == name);
+        if (tab is not null && PanelTabs.SelectedItem != tab) PanelTabs.SelectedItem = tab;
+        UpdatePanelItems();
+    }
+
+    void HidePanels()
+    {
+        SidePanes.IsPaneOpen = false;
+        shownPanel = null;
+        UpdatePanelItems();
+    }
+
+    /// <summary>The menu's toggle: show the panel, or hide the pane when it is the one showing.</summary>
+    void TogglePanel(string name)
+    {
+        if (SidePanes.IsPaneOpen && shownPanel == name) HidePanels();
+        else ShowPanel(name);
+    }
+
+    void UpdatePanelItems()
+    {
+        CustomizerItem.IsChecked = SidePanes.IsPaneOpen && shownPanel == "customizer";
+        CheckItem.IsChecked = SidePanes.IsPaneOpen && shownPanel == "check";
+        MeasureItem.IsChecked = SidePanes.IsPaneOpen && shownPanel == "measure";
+    }
+
+    void OnPanelItem(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string name }) TogglePanel(name);
+    }
+
+    void OnPanelTab(SelectorBar sender, SelectorBarSelectionChangedEventArgs e)
+    {
+        if (sender.SelectedItem is { Tag: string name } && name != shownPanel && SidePanes.IsPaneOpen) ShowPanel(name);
+    }
+
+    void OnClosePanels(object sender, RoutedEventArgs e) => HidePanels();
+
+    /// <summary>Design > Check: the check panel, checking now.</summary>
+    void Check()
+    {
+        ShowPanel("check");
+        _ = document.RunCheckAsync();
+    }
+
+    /// <summary>Design > Measure: the measure panel, measuring now.</summary>
+    void Measure()
+    {
+        ShowPanel("measure");
+        _ = document.RunMeasureAsync();
+    }
+
+    void OnCheck(object sender, RoutedEventArgs e) => Check();
+    void OnMeasure(object sender, RoutedEventArgs e) => Measure();
 
     // --- Design and View ----------------------------------------------------------
 

@@ -8,11 +8,13 @@ console's sentences, export formats and examples all come from `client`
 through `crates/ffi` (`docs/architecture.md`, "`client` is the port
 boundary"; `docs/audits/shared-core.md`).
 
-This is **milestone 1**: one window per process that edits, previews,
-renders and exports a model. Milestone 2 has begun with packaging: an
+**Milestone 1** is one window per process that edits, previews,
+renders and exports a model. **Milestone 2** added packaging (an
 unsigned MSI per architecture, with an app icon and the `.scad`
-association (see "Installer"). What it does not do yet is listed under
-"Next".
+association; see "Installer") and the panels: the customizer, check and
+measure, file watching, every export format the core offers, and the
+menu's shortcuts inside the editor (see "What milestone 2 covers"). What
+it does not do yet is listed under "Next".
 
 ## Layout
 
@@ -20,15 +22,16 @@ association (see "Installer"). What it does not do yet is listed under
 |---|---|
 | `windows/NeoSCAD.sln` | The solution: the four projects below |
 | `windows/NeoSCAD.Bindings/` | The generated C# binding of `crates/ffi` (`Generated/neoscad_ffi.cs`, not checked in) and the core's native library for the platform, copied to every project that references it. `net10.0` |
-| `windows/NeoSCAD.Host/` | Host logic that is not UI, tested on any OS: `DocumentSession` (the window's loop, text copy, dirty state, save, export), `EditorSync` and `EditorProtocol` (the editor bridge), `EditorPage` (what the editor's origin serves), `LanguageBridge` (the in-process language server), `StartupAction`, `AppLog` (the `--log` file), `PanelScale` (the viewport's display-scale arithmetic). `net10.0` |
-| `windows/NeoSCAD.App/` | The WinUI 3 app: `MainWindow` (menus, panes, pickers, dialogs), `Editor/EditorHost.cs` (WebView2), `Viewport/ViewportPanel.cs` (the `SwapChainPanel`), `WinUiHost.cs` (DispatcherQueue timer and dispatcher). `net10.0-windows10.0.19041.0`, unpackaged, self-contained |
+| `windows/NeoSCAD.Host/` | Host logic that is not UI, tested on any OS: `DocumentSession` (the window's loop, text copy, dirty state, save) and `DocumentSession.Panels.cs` (the customizer, check, measure, the view's overlay, export), `FileWatch` (the run's files on disk), `Shortcuts` (the chords the editor page forwards), `EditorSync` and `EditorProtocol` (the editor bridge), `EditorPage` (what the editor's origin serves, and the page's key script), `LanguageBridge` (the in-process language server), `StartupAction`, `AppLog` (the `--log` file), `PanelScale` (the viewport's display-scale arithmetic). `net10.0` |
+| `windows/NeoSCAD.App/` | The WinUI 3 app: `MainWindow` (menus, panes, pickers, dialogs), `Panels/` (`CustomizerPanel`, `CheckPanel`, `MeasurePanel`, built in code), `Editor/EditorHost.cs` (WebView2), `Viewport/ViewportPanel.cs` (the `SwapChainPanel`), `WinUiHost.cs` (DispatcherQueue timer and dispatcher). `net10.0-windows10.0.19041.0`, unpackaged, self-contained |
 | `windows/NeoSCAD.Tests/` | xUnit tests of `NeoSCAD.Host` and of the binding against the real core. `net10.0` |
 | `windows/installer/NeoSCAD.wxs` | The MSI's WiX 5 source (see "Installer") |
 | `windows/NeoSCAD.App/Assets/NeoSCAD.ico` | The app icon, built by `scripts/windows/make-icon.py` and committed |
 | `windows/uniffi.toml` | uniffi-bindgen-cs settings (namespace `NeoSCAD.Native`, public types, `NeoScad` for the free functions) |
 | `scripts/windows/build-core.ps1` | The core's DLL, the binding and the editor bundle, before `dotnet build` |
 | `scripts/windows/docker-test.sh` | The binding and host tests on Linux in Docker (from a Mac) |
-| `scripts/windows/launch-screenshot.ps1` | Launch the built app with `--log`, capture its window, check it stayed up (CI) |
+| `scripts/windows/docker-typecheck.sh` | The WinUI app's C# compiled against the Windows App SDK in Docker, with `xaml-standins.py` in place of the XAML compiler (see "Testing off Windows") |
+| `scripts/windows/launch-screenshot.ps1` | Launch the built app with `--log` (and `-Panel`, a side panel open), capture its window, check it stayed up (CI) |
 | `scripts/windows/build-msi.ps1` | Publish the app, stage its licences, build the MSI |
 | `scripts/windows/licence-rtf.ps1` | The installer licence page's RTF (preamble, GPL, Windows App SDK licence), dot-sourced by `build-msi.ps1` |
 | `scripts/windows/test-scripts.ps1` | Parse every `.ps1` here and check the licence page's RTF; any OS with pwsh, no build |
@@ -44,7 +47,7 @@ SDK; the WebView2 runtime (part of Windows 11, and of Edge on Windows 10).
     pwsh scripts/windows/build-core.ps1            # -Arch arm64 on ARM
     dotnet test windows/NeoSCAD.Tests/NeoSCAD.Tests.csproj -c Release
     dotnet build windows/NeoSCAD.App/NeoSCAD.App.csproj -c Release -r win-x64 -p:Platform=x64
-    windows\NeoSCAD.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\NeoSCAD.exe [FILE | --example ID] [--log LOGFILE]
+    windows\NeoSCAD.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\NeoSCAD.exe [FILE | --example ID] [--log LOGFILE] [--panel customizer|check|measure]
 
 Or open `windows/NeoSCAD.sln` in Visual Studio 2022+ with the "WinUI
 application development" workload, after `build-core.ps1`.
@@ -252,6 +255,75 @@ top of `apple/App/Editor/EditorController.swift` and in
 `NeoSCADEditor.load/text/lspReceive/lspSync` with every argument a JSON
 literal. The page's Content-Security-Policy header is the macOS app's.
 
+**The panels** sit in a `SplitView` pane on the window's right
+(`DisplayMode="Inline"`, so the editor and view narrow rather than being
+covered), with a `SelectorBar` for Customizer, Check and Measure and a
+close button. View > Customizer (Ctrl+Shift+P), Check Panel and Measure
+Panel toggle it; Design > Check (Ctrl+Shift+K) and Measure
+(Ctrl+Shift+M) open their panel and run at once, as the macOS menu
+does. The panels are built in code from the core's records rather than
+in XAML, since what they show is data.
+
+- *Customizer.* After every run (and on loading a text) the session
+  reads `Core.parameters` and gives each parameter its Fluent control:
+  `Slider` with a `NumberBox` for a range, a `NumberBox` with spin
+  buttons for a number, `ToggleSwitch`, `TextBox`, `ComboBox`, a row of
+  `NumberBox`es for a vector, in an `Expander` per group. Every edit goes
+  through the core's `edit_parameter` (snapped, clamped, cut to length;
+  the text's own value is no override) into the `DocumentController`'s
+  values, and the document previews again with them. **The text is not
+  edited**: OpenSCAD's customizer passes values as `-D`-style
+  assignments after the text, and so do all three apps. The controls are
+  rebuilt only when the parameters change (`ParameterShapes`), so a field
+  keeps its focus while values update. Parameter sets are OpenSCAD's
+  `name.json` beside the model (`apply_parameter_set`,
+  `save_parameter_set`); an untitled document has none.
+- *Check.* `Core.check` with the printer's `CheckOptions`
+  (`printer_check_options`, presets from `printer_presets`) and the
+  customizer's values, detached from the document loop. Findings list
+  severity, message, fix and part; selecting one sets the view's overlay
+  (`Viewport.set_overlay`: every finding's numbered marker, the selected
+  one's box) and turns the view to its point. "Check after each render"
+  runs it after F6, not after previews (a check renders too).
+- *Measure.* `Core.measure`: volume, area, size, centre of mass,
+  pieces and parts. With "Pick points" on, a click on the view (a left
+  press that moves under 4 DIPs; it still orbits by that much) casts
+  `Viewport.ray_at` into `Measurement.pick`; two picks give
+  `pick_distance`, both drawn in the overlay. A third starts a new pair.
+
+**File watching.** After each run, `FileWatch` watches the run's `files`
+(includes, uses, imports; the core leaves out the document itself and
+other open documents) with one `FileSystemWatcher` per folder, so an
+editor that saves by renaming a temporary file over the original is
+still seen. A burst of events becomes one `DocumentController.files_changed`
+100 ms later: the last render again, or a preview after the pause.
+
+**Export.** File > Export As lists `export_formats()` (binary and ASCII
+STL, 3MF, OBJ, OFF, SVG, DXF, PDF, the view as PNG, a snapshot sheet);
+a 3D model's formats are disabled after a 2D render and the other way
+round. Export… (Ctrl+Shift+E) repeats the last format, or the one that
+suits the model (`suggest_export_format`). Geometry goes through
+`Core.export_file` with the customizer's values and a `CancelToken`; a
+`ContentDialog` shows the stage (`ProgressListener`) with Cancel, after
+400 ms so a quick export does not flash one. The core writes through a
+temporary file, so a cancelled or failed export leaves the old file. The
+core has no AMF writer, so neither does the menu.
+
+**Shortcuts in the editor.** A WinUI `KeyboardAccelerator` sees only
+keys that reach XAML; keys typed in WebView2 do not, and WinUI 3's
+`WebView2` does not expose the controller's `AcceleratorKeyPressed`.
+So the page forwards them, as the bundle already does F5 and F6: a
+second document-created script (`EditorPage.KeyScript`) catches the
+chords in `Shortcuts.Forwarded` in the capture phase, before
+CodeMirror's keymap, and posts the protocol's `command` message. The
+menu's chord wins over an editor binding of the same chord, as on macOS
+(Ctrl+Shift+K checks rather than deleting a line). A test checks every
+forwarded chord is also a menu accelerator. The Edit menu (Undo, Redo,
+Select All, Find) calls `NeoSCADEditor.undo()` and friends for a mouse
+click; its keys are CodeMirror's own, so its items only show them
+(`KeyboardAcceleratorTextOverride`): a live Ctrl+Z accelerator would
+undo the editor while the focus is in a customizer field.
+
 **Threads.** Core calls that evaluate go to the thread pool
 (`CoreService.Run`); results come back through the `DispatcherQueue`, and
 a result is shown only while `DocumentController.IsCurrent` holds. Quick
@@ -277,7 +349,10 @@ captures that window alone with `PrintWindow(PW_RENDERFULLCONTENT)` (a
 screen grab showed the runner's console over it on x64, and the first-run
 privacy screen over everything on `windows-11-arm`), prints the log into
 the job output, and uploads the PNG and the log as
-`neoscad-windows-<arch>-screenshot`.
+`neoscad-windows-<arch>-screenshot`. It then does the same on the
+`box-lid` example (it has customizer parameters) with `--panel
+customizer`, as `neoscad-windows-<arch>-customizer.png`, so the pane is
+seen rendering with real controls.
 
 ## Testing off Windows
 
@@ -287,7 +362,17 @@ binding in `rust:<pinned toolchain>`, then runs `dotnet test` on
 binding's checksums, records, objects, a C#-implemented observer, the
 UTF-16 edits, and the document loop end to end (a pause runs a preview
 whose console reaches the session; save; STL export). The WinUI project
-needs Windows.
+needs Windows to build.
+
+`scripts/windows/docker-typecheck.sh` (after `docker-test.sh`, which
+generates the binding) compiles the app's C# against the Windows App
+SDK's reference assemblies in the same .NET container, as a library with
+`EnableWindowsTargeting`. The XAML compiler and `MakePri.exe` only run
+on Windows, so `scripts/windows/xaml-standins.py` writes what the XAML
+compiler would: a field per `x:Name`, `InitializeComponent`, and every
+handler the XAML names subscribed to its event, so a misnamed handler or
+a wrong signature fails the build (tried: `Click="OnPanelTab"` fails with
+CS0123). It does not check that the XAML loads, or its property names.
 
 The Rust side of the Windows path is checked with
 
@@ -309,6 +394,16 @@ in `rust:1.98.1` (`--no-default-features` turns off `ffi`'s new
   from the language server; title with the dirty state; light and dark
   following the system (the view switches between Cornfield and Tomorrow
   Night and re-runs, as on macOS); Mica.
+
+## What milestone 2 covers
+
+- The customizer, check and measure panels (see "Architecture", "The
+  panels"), with the overlay in the view.
+- File watching of the run's files.
+- File > Export As: every format the core offers, with progress and
+  Cancel; Export… (Ctrl+Shift+E) for the last one.
+- The menu's shortcuts while the editor has the focus; an Edit menu.
+- `--panel NAME` to open a panel at start.
 
 ## Verified, and not
 
@@ -355,6 +450,30 @@ has been built yet:
   that behaviour after the warning is undefined;
 - `actionlint` 1.7.12 passes on the workflow.
 
+**The panels** (September 2026) were checked off Windows only:
+- `docker-test.sh` passes 76 of 76 tests on linux-arm64, 18 of them new
+  (`PanelTests.cs`) against the real core: a run reads the parameters
+  and an edit previews with the override while the text stays as it was;
+  a parameter set saved beside the model is applied again; a check
+  finds a thin wall, uses the customizer's values, and a selected
+  finding reaches the overlay (`view_overlay`); measure gives a cube's
+  volume and two picks its height; changing an included file schedules
+  a preview, and a watch coalesces a burst and survives a
+  rename-over-save; export writes 3MF, OFF, OBJ and STL with their
+  stages and the customizer's values, SVG for 2D, refuses STL for 2D,
+  and a cancelled export writes nothing; every forwarded chord is a menu
+  accelerator in `MainWindow.xaml`;
+- `docker-typecheck.sh` compiles the app (warnings as errors) against
+  Windows App SDK 2.5.1;
+- `test-scripts.ps1` parses `launch-screenshot.ps1`; `actionlint`
+  1.7.12 passes on `windows-app.yml`.
+
+Not verified until CI or a Windows machine runs it: the XAML loading
+(the `SplitView`, `SelectorBar`, the menu's `KeyboardAcceleratorTextOverride`),
+how the panels look, slider dragging, picking in the view, the export
+dialog, the forwarded keys in WebView2, and `FileSystemWatcher` on NTFS
+(the test ran on Linux's inotify).
+
 Unverified until `windows-installer.yml` runs: the MSI build itself (ICE
 validation included), install, the shortcut, the uninstall entry, the
 association, launching from `.scad`, and uninstall.
@@ -385,13 +504,13 @@ rewrites it to `script-src 'self'` when serving.
   Check by hand what CI can't: SmartScreen and UAC on a downloaded MSI,
   the Explorer icon of a `.scad` file, and the no-WebView2 dialog on a
   Windows 10 without the runtime.
+- Look at the panels on CI's screenshot and on a real machine (see
+  "Verified, and not"), and try the shortcuts in the editor.
 - Multiple windows (one `DocumentSession` each), recent files, autosave.
-- The panels: customizer, check, measure (all in `client` already).
-- File watching (`FileSystemWatcher` on the run's `files`, into
-  `DocumentController.FilesChanged`).
-- Keyboard shortcuts from inside the editor (forward WebView2's
-  accelerator keys), Edit menu (undo/redo/find through `NeoSCADEditor`),
-  editor font size, go-to-definition opening files, library viewer.
+- What the macOS panels have and these lack (`docs/followups.md`,
+  "Windows"): sections and part distances in measure, the bed and a
+  stored printer in check, 3MF colour options, the parts toggle.
+- Editor font size, go-to-definition opening files, library viewer.
 - A UI smoke test (WinAppDriver or UI Automation) replacing the
   screenshot; make the CI job blocking.
 - Move `$BindgenRev` to an upstream uniffi-bindgen-cs release.

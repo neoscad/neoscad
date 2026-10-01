@@ -1393,12 +1393,21 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   (it uses `/proc` or `ps`), so its resident bounds and its 1 GB kill
   guard do nothing on that job; only the limits' errors are checked.
   `tasklist`/`taskkill` or `GetProcessMemoryInfo` would cover it.
-- The Windows app (milestone 1, `docs/windows-app.md`) has only run on CI
+- The Windows app (milestones 1 and 2, `docs/windows-app.md`) has only run on CI
   runners (`.github/workflows/windows-app.yml`, screenshots and a
-  `--log` as artifacts). High-DPI sharpness, accelerators in the editor
-  and the file dialogs need a real Windows machine. Its milestone 2 list is in that document ("Next"); the
+  `--log` as artifacts). High-DPI sharpness, the shortcuts forwarded from
+  the editor, the panels' interaction (dragging a slider, picking points
+  in the view, selecting a finding), the export progress dialog and its
+  Cancel, and the file dialogs need a real Windows machine. The rest of its milestone 2 list is in that document ("Next"); the
   generator pin (`$BindgenRev` in `scripts/windows/build-core.ps1`, an
   open uniffi-bindgen-cs pull request) should move to a release.
+- The Windows panels lack parts of the macOS ones: the measure panel's
+  sections and part-to-part distances (`Measurement.section`/`between`,
+  already in `crates/ffi`), the check panel's bed size and a stored
+  printer (macOS keeps it in UserDefaults), 3MF's colour options in
+  export, the parts toggle, and Cut/Copy/Paste in the Edit menu (the
+  editor's context menu has them; a page script cannot paste without a
+  user gesture). Each is host work only.
 
 ## Linux
 

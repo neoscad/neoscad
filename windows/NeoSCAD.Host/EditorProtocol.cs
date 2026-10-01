@@ -8,7 +8,9 @@
 //     {type: "ready"}
 //     {type: "changes", base, version, edits: [[from, to, insert]...], kind,
 //      length, undoDepth, redoDepth}      offsets in UTF-16 units
-//     {type: "command", name}             "preview" (F5), "render" (F6)
+//     {type: "command", name}             "preview" (F5), "render" (F6), and
+//                                         the menu chords the app's key
+//                                         script forwards (Shortcuts.cs)
 //     {type: "lsp", message}              JSON-RPC for the language server
 //     {type: "open", uri, line, character}
 //     {type: "log", level, message}
@@ -142,6 +144,13 @@ public static class EditorScript
     public static string Focus() => Call("focus");
     public static string LspSync() => Call("lspSync");
     public static string SetUri(string? uri) => Call("setURI", uri);
+
+    // The Edit menu, chosen with the mouse (keys reach CodeMirror's
+    // keymap directly; Shortcuts.cs).
+    public static string Undo() => Call("undo");
+    public static string Redo() => Call("redo");
+    public static string SelectAll() => Call("selectAll");
+    public static string OpenSearch() => Call("openSearch");
 }
 
 /// <summary>What the page's functions return, as ExecuteScriptAsync hands it back (JSON).</summary>

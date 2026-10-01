@@ -165,6 +165,9 @@ public sealed class EditorHost
             core.Navigate(EditorPage.PageUrl);
         };
         await core.AddScriptToExecuteOnDocumentCreatedAsync(EditorPage.HostScript);
+        // The menu's chords, forwarded from the page as `command` messages
+        // (NeoSCAD.Host/Shortcuts.cs says why WinUI's accelerators miss them).
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(EditorPage.KeyScript(Shortcuts.Forwarded));
         AppLog.Write($"editor: navigating to {EditorPage.PageUrl}");
         core.Navigate(EditorPage.PageUrl);
         _ = ReportIfNotReady();
@@ -283,4 +286,16 @@ public sealed class EditorHost
     }
 
     public void Focus() => _ = Call(EditorScript.Focus());
+
+    /// <summary>
+    /// An Edit menu command chosen with the mouse (<see
+    /// cref="EditorScript.Undo"/> and friends), then the focus back in the
+    /// editor, where the menu took it from.
+    /// </summary>
+    public async void Perform(string script)
+    {
+        await Call(script);
+        view.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
+        Focus();
+    }
 }

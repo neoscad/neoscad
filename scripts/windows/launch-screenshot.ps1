@@ -4,6 +4,11 @@
 # (.github/workflows/windows-app.yml); it works the same on a desktop.
 #
 #   pwsh scripts/windows/launch-screenshot.ps1 -Exe PATH -Out DIR -Name NAME
+#        [-Example ID] [-Panel customizer|check|measure]
+#
+# `-Panel` opens that side panel at start (the app's `--panel`), so the
+# picture shows it rendered: CI takes one of the customizer on an example
+# with parameters.
 #
 # Writes DIR/NAME.png (the window) and DIR/NAME.log (the app's --log
 # file, NeoSCAD.Host/AppLog.cs), and fails if the app exited early.
@@ -21,6 +26,7 @@ param(
     [Parameter(Mandatory)] [string] $Out,
     [Parameter(Mandatory)] [string] $Name,
     [string] $Example = "csg",
+    [string] $Panel = "",
     [int] $Seconds = 25,
     [int] $Width = 1400,
     [int] $Height = 900
@@ -108,7 +114,9 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $png = Join-Path (Resolve-Path $Out) "$Name.png"
 $log = Join-Path (Resolve-Path $Out) "$Name.log"
 
-$app = Start-Process -FilePath $Exe -ArgumentList '--example', $Example, '--log', "`"$log`"" -PassThru
+$arguments = @('--example', $Example, '--log', "`"$log`"")
+if ($Panel) { $arguments += @('--panel', $Panel) }
+$app = Start-Process -FilePath $Exe -ArgumentList $arguments -PassThru
 $started = Get-Date
 
 # The main window's handle appears once the window is created.

@@ -29,7 +29,7 @@ namespace NeoSCAD.Host;
 /// <summary>One response of the editor's scheme.</summary>
 public sealed record EditorResponse(byte[] Body, string ContentType, IReadOnlyDictionary<string, string> Headers);
 
-public static class EditorPage
+public static partial class EditorPage
 {
     /// <summary>The origin the page and its script are served from.</summary>
     public const string Origin = "https://app.neoscad.example";

@@ -28,7 +28,7 @@ public abstract record RunReport
     public sealed record Failed(string Message) : RunReport;
 }
 
-public sealed class DocumentSession : IDisposable
+public sealed partial class DocumentSession : IDisposable
 {
     public const string AppName = "NeoSCAD";
 
@@ -41,6 +41,7 @@ public sealed class DocumentSession : IDisposable
     int changeCount;
     string? untitledPath;
     CancellationTokenSource? runCancel;
+    readonly FileWatch watch;
     bool closed;
 
     /// <summary>Untitled paths in use by open windows (unique per process).</summary>
@@ -57,6 +58,7 @@ public sealed class DocumentSession : IDisposable
         this.clock = clock;
         DocumentsDirectory = documentsDirectory;
         loop = new DocumentController(null);
+        watch = new FileWatch(ui, FilesChanged);
     }
 
     // --- What the window shows ------------------------------------------------
@@ -142,6 +144,7 @@ public sealed class DocumentSession : IDisposable
         UntitledName = name;
         RunsWhenTextIsReplaced = autorun;
         Replace(text);
+        RefreshParameterSets();
     }
 
     /// <summary>An example from the core (File > Examples): untitled, named after its file.</summary>
@@ -162,6 +165,7 @@ public sealed class DocumentSession : IDisposable
         RunsWhenTextIsReplaced = true;
         if (old != FilePath) CloseInCore(loop.SetPath(FilePath));
         Replace(text);
+        RefreshParameterSets();
     }
 
     /// <summary>Write the text to <paramref name="path"/> (Save As when it differs from the current file).</summary>
@@ -177,6 +181,10 @@ public sealed class DocumentSession : IDisposable
             // sends it again under the new one and closes the old buffer,
             // which would otherwise shadow the file still at that path.
             CloseInCore(loop.SetPath(path));
+            // Parameter sets live beside the file (`name.json`), so a new
+            // name means a new list, and an untitled document gets its
+            // first one.
+            RefreshParameterSets();
         }
         changeCount = 0;
         TitleChanged?.Invoke();
@@ -206,6 +214,9 @@ public sealed class DocumentSession : IDisposable
         loop.TextReplaced();
         TextLoaded?.Invoke(text);
         TitleChanged?.Invoke();
+        // The customizer shows the new text's parameters now, not after a
+        // first run that an example marked not to autorun may never get.
+        RefreshParameters();
         if (RunsWhenTextIsReplaced) SchedulePreview();
     }
 
@@ -371,6 +382,11 @@ public sealed class DocumentSession : IDisposable
         Language?.DeliverPublications(r.Language);
         Console = r.Console;
         ConsoleChanged?.Invoke();
+        // The files this run read (includes, uses, imports; not the
+        // document itself, which this window writes) are watched from now
+        // on, and the customizer reads the parameters of the text that ran.
+        watch.Watch(r.Files ?? []);
+        RefreshParameters();
         string summary;
         try
         {
@@ -381,7 +397,33 @@ public sealed class DocumentSession : IDisposable
             summary = "";
         }
         SetReport(new RunReport.Rendered(r.Render, mode, summary));
+        // Auto check follows renders, not previews, as on macOS: a check
+        // renders the model itself, so after every pause in typing it
+        // would double the work.
+        if (mode == RenderMode.Render && CheckAfterRender) _ = RunCheckAsync();
     }
+
+    /// <summary>
+    /// A file the last run read changed on disk (an include saved by
+    /// another editor): the last render runs again now, or a preview after
+    /// the usual pause.
+    /// </summary>
+    public void FilesChanged()
+    {
+        if (closed) return;
+        AppLog.Write("a watched file changed");
+        try
+        {
+            if (loop.FilesChanged(clock.NowMs) is { } mode) Run(mode);
+            else ArmTimer();
+        }
+        catch (CoreException)
+        {
+        }
+    }
+
+    /// <summary>The files the last run read, as they are watched.</summary>
+    public IReadOnlyCollection<string> WatchedFiles => watch.Files;
 
     void SetReport(RunReport report)
     {
@@ -392,55 +434,14 @@ public sealed class DocumentSession : IDisposable
     /// <summary>The loop's state (tests, diagnostics).</summary>
     public DocumentState LoopState() => loop.State();
 
-    // --- Export -----------------------------------------------------------------
-
-    /// <summary>
-    /// Export the model to <paramref name="output"/> in <paramref
-    /// name="format"/> (an id from <c>NeoScad.ExportFormats()</c>, e.g.
-    /// "stl"): a full render of the current text, on the thread pool. The
-    /// core writes the file atomically. Returns why it failed, or null.
-    /// </summary>
-    public async Task<string?> ExportAsync(string output, string format)
-    {
-        if (core is null) return $"The core did not start: {CoreService.Error}";
-        var path = CorePath;
-        try
-        {
-            // The export reads the session's buffer, so it must hold the
-            // text as the editor shows it now, not as of the last run.
-            core.Update(path, storage.Text());
-            loop.TextSent();
-            var r = await CoreService.Run(() => core.Export(path, Path.GetFullPath(output), format));
-            return NeoScad.ExportFailureReason(r);
-        }
-        catch (CoreException e)
-        {
-            return CoreErrors.Describe(e);
-        }
-    }
-
-    /// <summary>The current view as a PNG file (File > Export > Image).</summary>
-    public async Task<string?> ExportImageAsync(string output, uint width, uint height)
-    {
-        if (Viewport is not { } v) return "There is no view to export.";
-        try
-        {
-            var png = await CoreService.Run(() => v.Image(width, height));
-            await File.WriteAllBytesAsync(output, png);
-            return null;
-        }
-        catch (CoreException e)
-        {
-            return CoreErrors.Describe(e);
-        }
-    }
-
     public void Dispose()
     {
         if (closed) return;
         closed = true;
         timer.Stop();
         runCancel?.Cancel();
+        watch.Dispose();
+        CancelPanels();
         Language?.Stop();
         try
         {

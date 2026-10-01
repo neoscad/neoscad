@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   A document window: menu bar, then the editor (left) beside the 3D view
-  over the console (right), and a status line. Mica behind it all, the
-  system's light or dark theme throughout (the view's colour scheme
-  follows it too; ViewportPanel.cs).
+  over the console (right), with the side panels (customizer, check,
+  measure) in a SplitView pane on the far right, and a status line. Mica
+  behind it all, the system's light or dark theme throughout (the view's
+  colour scheme follows it too; ViewportPanel.cs).
+
+  Every chord the editor page forwards (NeoSCAD.Host/Shortcuts.cs) is also
+  a KeyboardAccelerator here; NeoSCAD.Tests checks that they agree. The
+  Edit menu's keys are CodeMirror's own, so its items only show them
+  (KeyboardAcceleratorTextOverride): a live Ctrl+Z here would undo the
+  editor while the focus is in a customizer field.
 -->
 <Window
     x:Class="NeoSCAD.App.MainWindow"
@@ -46,10 +53,21 @@
           </MenuFlyoutItem.KeyboardAccelerators>
         </MenuFlyoutItem>
         <MenuFlyoutSeparator />
-        <MenuFlyoutItem Text="Export STL…" Click="OnExportStl" />
-        <MenuFlyoutItem Text="Export Image…" Click="OnExportImage" />
+        <MenuFlyoutItem x:Name="ExportAgainItem" Text="Export…" Click="OnExportAgain">
+          <MenuFlyoutItem.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control,Shift" Key="E" />
+          </MenuFlyoutItem.KeyboardAccelerators>
+        </MenuFlyoutItem>
+        <MenuFlyoutSubItem x:Name="ExportMenu" Text="Export As" />
         <MenuFlyoutSeparator />
         <MenuFlyoutItem Text="Exit" Click="OnExit" />
+      </MenuBarItem>
+      <MenuBarItem Title="Edit">
+        <MenuFlyoutItem Text="Undo" Click="OnUndo" KeyboardAcceleratorTextOverride="Ctrl+Z" />
+        <MenuFlyoutItem Text="Redo" Click="OnRedo" KeyboardAcceleratorTextOverride="Ctrl+Y" />
+        <MenuFlyoutSeparator />
+        <MenuFlyoutItem Text="Select All" Click="OnSelectAll" KeyboardAcceleratorTextOverride="Ctrl+A" />
+        <MenuFlyoutItem Text="Find…" Click="OnFind" KeyboardAcceleratorTextOverride="Ctrl+F" />
       </MenuBarItem>
       <MenuBarItem Title="Design">
         <MenuFlyoutItem Text="Preview" Click="OnPreview">
@@ -60,6 +78,17 @@
         <MenuFlyoutItem Text="Render" Click="OnRender">
           <MenuFlyoutItem.KeyboardAccelerators>
             <KeyboardAccelerator Key="F6" />
+          </MenuFlyoutItem.KeyboardAccelerators>
+        </MenuFlyoutItem>
+        <MenuFlyoutSeparator />
+        <MenuFlyoutItem Text="Check" Click="OnCheck">
+          <MenuFlyoutItem.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control,Shift" Key="K" />
+          </MenuFlyoutItem.KeyboardAccelerators>
+        </MenuFlyoutItem>
+        <MenuFlyoutItem Text="Measure" Click="OnMeasure">
+          <MenuFlyoutItem.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control,Shift" Key="M" />
           </MenuFlyoutItem.KeyboardAccelerators>
         </MenuFlyoutItem>
       </MenuBarItem>
@@ -74,44 +103,85 @@
         <MenuFlyoutItem Text="Front" Tag="Front" Click="OnPreset" />
         <MenuFlyoutItem Text="Back" Tag="Back" Click="OnPreset" />
         <MenuFlyoutItem Text="Diagonal" Tag="Diagonal" Click="OnPreset" />
+        <MenuFlyoutSeparator />
+        <ToggleMenuFlyoutItem x:Name="CustomizerItem" Text="Customizer" Tag="customizer" Click="OnPanelItem">
+          <ToggleMenuFlyoutItem.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control,Shift" Key="P" />
+          </ToggleMenuFlyoutItem.KeyboardAccelerators>
+        </ToggleMenuFlyoutItem>
+        <ToggleMenuFlyoutItem x:Name="CheckItem" Text="Check Panel" Tag="check" Click="OnPanelItem" />
+        <ToggleMenuFlyoutItem x:Name="MeasureItem" Text="Measure Panel" Tag="measure" Click="OnPanelItem" />
       </MenuBarItem>
     </MenuBar>
 
-    <Grid Grid.Row="1" Padding="8,0,8,0" ColumnSpacing="8">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="*" MinWidth="240" />
-        <ColumnDefinition Width="*" MinWidth="240" />
-      </Grid.ColumnDefinitions>
-
-      <Border Grid.Column="0" CornerRadius="{StaticResource OverlayCornerRadius}"
-              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-        <Grid>
-          <WebView2 x:Name="EditorView" />
-          <TextBlock x:Name="EditorError" Visibility="Collapsed" Margin="16"
-                     TextWrapping="Wrap" Style="{ThemeResource BodyTextBlockStyle}" />
-        </Grid>
-      </Border>
-
-      <Grid Grid.Column="1" RowSpacing="8">
-        <Grid.RowDefinitions>
-          <RowDefinition Height="3*" />
-          <RowDefinition Height="*" MinHeight="96" />
-        </Grid.RowDefinitions>
-        <Border Grid.Row="0" CornerRadius="{StaticResource OverlayCornerRadius}"
+    <SplitView x:Name="SidePanes" Grid.Row="1" PanePlacement="Right" DisplayMode="Inline"
+               IsPaneOpen="False" OpenPaneLength="360" PaneBackground="Transparent">
+      <SplitView.Pane>
+        <Border Margin="0,0,8,0" CornerRadius="{StaticResource OverlayCornerRadius}"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
           <Grid>
-            <SwapChainPanel x:Name="ViewPanel" />
-            <TextBlock x:Name="ViewError" Visibility="Collapsed" Margin="16"
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <SelectorBar x:Name="PanelTabs" SelectionChanged="OnPanelTab">
+                <SelectorBarItem Text="Customizer" Tag="customizer" />
+                <SelectorBarItem Text="Check" Tag="check" />
+                <SelectorBarItem Text="Measure" Tag="measure" />
+              </SelectorBar>
+              <Button Grid.Column="1" Margin="0,0,4,0" Click="OnClosePanels"
+                      Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="Hide the panels">
+                <FontIcon Glyph="&#xE711;" FontSize="12" />
+              </Button>
+            </Grid>
+            <ContentControl x:Name="PanelHost" Grid.Row="1" HorizontalContentAlignment="Stretch"
+                            VerticalContentAlignment="Stretch" />
+          </Grid>
+        </Border>
+      </SplitView.Pane>
+
+      <Grid Padding="8,0,8,0" ColumnSpacing="8">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" MinWidth="240" />
+          <ColumnDefinition Width="*" MinWidth="240" />
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0" CornerRadius="{StaticResource OverlayCornerRadius}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+          <Grid>
+            <WebView2 x:Name="EditorView" />
+            <TextBlock x:Name="EditorError" Visibility="Collapsed" Margin="16"
                        TextWrapping="Wrap" Style="{ThemeResource BodyTextBlockStyle}" />
           </Grid>
         </Border>
-        <Border Grid.Row="1" CornerRadius="{StaticResource OverlayCornerRadius}"
-                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-          <ListView x:Name="ConsoleList" SelectionMode="None" Padding="0,4,0,4" />
-        </Border>
+
+        <Grid Grid.Column="1" RowSpacing="8">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="3*" />
+            <RowDefinition Height="*" MinHeight="96" />
+          </Grid.RowDefinitions>
+          <Border Grid.Row="0" CornerRadius="{StaticResource OverlayCornerRadius}"
+                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+            <Grid>
+              <SwapChainPanel x:Name="ViewPanel" />
+              <TextBlock x:Name="ViewError" Visibility="Collapsed" Margin="16"
+                         TextWrapping="Wrap" Style="{ThemeResource BodyTextBlockStyle}" />
+            </Grid>
+          </Border>
+          <Border Grid.Row="1" CornerRadius="{StaticResource OverlayCornerRadius}"
+                  Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                  BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+            <ListView x:Name="ConsoleList" SelectionMode="None" Padding="0,4,0,4" />
+          </Border>
+        </Grid>
       </Grid>
-    </Grid>
+    </SplitView>
 
     <TextBlock x:Name="Status" Grid.Row="2" Margin="12,6,12,8"
                Style="{ThemeResource CaptionTextBlockStyle}"
