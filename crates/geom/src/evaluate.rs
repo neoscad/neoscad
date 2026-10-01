@@ -437,9 +437,14 @@ fn cost_of(g: &Geometry) -> usize {
         Geometry::PolySet(p) => {
             p.vertices.len() * 24 + p.faces.iter().map(|f| 24 + 4 * f.len()).sum::<usize>()
         }
-        Geometry::Manifold(m) => m.manifold.num_vert() * 48 + m.manifold.num_tri() * 112,
+        Geometry::Manifold(m) => solid_cost(m),
         Geometry::Polygon2d(p) => p.outlines.iter().map(|o| 24 + 16 * o.vertices.len()).sum(),
     }
+}
+
+/// [`cost_of`] a solid.
+pub(crate) fn solid_cost(m: &ManifoldGeometry) -> usize {
+    m.manifold.num_vert() * 48 + m.manifold.num_tri() * 112
 }
 
 /// IDs per block by default: enough for one conversion of a mesh with
@@ -603,7 +608,7 @@ struct Ctx<'a> {
 /// five benchmark models, whose peak RSS ran 4 to 10 times the
 /// unweighted estimate (BOSL2's fractal_tree: 1.96 GB against under 256
 /// MiB); weighted, the estimate is within about 1x to 4x of the peak.
-const KERNEL_FACTOR: u64 = 6;
+pub(crate) const KERNEL_FACTOR: u64 = 6;
 
 /// A node as a limit message names it: `sphere()`, `linear_extrude()`.
 fn node_what(n: &Node) -> String {

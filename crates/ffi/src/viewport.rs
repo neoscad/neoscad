@@ -575,17 +575,7 @@ impl Core {
             let generation = viewport.requests.fetch_add(1, Ordering::SeqCst) + 1;
             let scheme = viewport.lock().scheme().clone();
             let r = self.session().render(&run, mode.into(), &scheme)?;
-            let scene = match (&r.tree, &r.geometry) {
-                (Some(tree), _) => Some(render::preview::scene(
-                    tree,
-                    &scheme,
-                    render::Previewer::OpenCsg,
-                )),
-                (None, Some(g)) => Some(render::Scene::new(Some(g), &scheme)),
-                // An empty top level: show the empty view.
-                (None, None) if r.exit_code == 0 => Some(render::Scene::new(None, &scheme)),
-                (None, None) => None,
-            };
+            let scene = client::run_scene(&r, &scheme, render::Previewer::OpenCsg)?;
             if let Some(scene) = scene {
                 let model = viewport.gpu.upload(&scene).map_err(failed)?;
                 viewport.lock().set_model(Arc::new(model), generation);

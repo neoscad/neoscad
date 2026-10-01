@@ -39,7 +39,7 @@ function instance(files) {
       put(Buffer.from(src));
       try {
         e.run_input(seed >>> 0, (frames || 0) >>> 0,
-          preview === 'lsp' ? 6 : preview === 'test' ? 5 : preview === 'fmt' ? 4 : preview === 'check' ? 3
+          preview === 'stop' ? 7 : preview === 'lsp' ? 6 : preview === 'test' ? 5 : preview === 'fmt' ? 4 : preview === 'check' ? 3
             : preview === 'session' ? 2 : preview ? 1 : 0);
       } catch (x) {
         // A Rust panic leaves its message in the output before trapping.

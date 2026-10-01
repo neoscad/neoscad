@@ -698,3 +698,36 @@ impl Client {
         Ok(out)
     }
 }
+
+/// What a run draws: the preview of its CSG products, its rendered
+/// geometry, an empty view for an empty model, or nothing after an error.
+///
+/// The preview's product booleans run under the request's interrupt flag
+/// and limits (`Rendered::stop`), checked between kernel operations: a
+/// product under `geom::csg::BOOLEAN_LIMIT` can still take minutes, and
+/// before this it ignored both a cancel and the time limit. A limit
+/// passed there is [`CoreError::Failed`] with the limit's message and
+/// hint; a cancel is [`CoreError::Cancelled`].
+pub fn run_scene(
+    r: &session::Rendered,
+    scheme: &render::ColorScheme,
+    previewer: render::Previewer,
+) -> Result<Option<render::Scene>, CoreError> {
+    Ok(match (&r.tree, &r.geometry) {
+        (Some(tree), _) => Some(
+            render::preview::scene_until(tree, scheme, previewer, &r.stop).map_err(|_| match r
+                .stop
+                .exceeded()
+            {
+                Some(e) => CoreError::Failed {
+                    message: format!("{}. To fix: {}", e.message(), e.hint()),
+                },
+                None => CoreError::Cancelled,
+            })?,
+        ),
+        (None, Some(g)) => Some(render::Scene::new(Some(g), scheme)),
+        // An empty top level: show the empty view.
+        (None, None) if r.exit_code == 0 => Some(render::Scene::new(None, scheme)),
+        (None, None) => None,
+    })
+}

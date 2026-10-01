@@ -39,6 +39,32 @@ pub fn run_with(
     frame_limit: u32,
     preview: bool,
 ) -> String {
+    run_inner(files, src, seed, frame_limit, preview, false)
+}
+
+/// [`run_with`] as a preview whose booleans run under a one-second time
+/// limit on a clock that advances 100 ms each time it is read, so they
+/// pass the limit after a fixed number of checks: a preview that stops
+/// itself, on one thread, as the web core's does.
+pub fn run_preview_stopped(files: Arc<MemFs>, src: &[u8]) -> String {
+    run_inner(
+        files,
+        src,
+        0,
+        eval::recursion::DEFAULT_FRAME_LIMIT,
+        true,
+        true,
+    )
+}
+
+fn run_inner(
+    files: Arc<MemFs>,
+    src: &[u8],
+    seed: u32,
+    frame_limit: u32,
+    preview: bool,
+    stopped: bool,
+) -> String {
     let base: Arc<dyn FileSystem + Send + Sync> = files;
     let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(base, LIBRARY_DIR));
     let libs = LibraryPath(vec![PathBuf::from(LIBRARY_DIR)]);
@@ -96,7 +122,7 @@ pub fn run_with(
                     let sep = if label.is_empty() { "" } else { ": " };
                     con.print(m.severity, format!("{label}{sep}{}", m.text).as_bytes());
                 }
-                con.print(None, preview_line(&t).as_bytes());
+                con.print(None, preview_line(&t, stopped).as_bytes());
             }
         }
         drop(con);
@@ -419,9 +445,35 @@ fn scene_line(g: &geom::Geometry) -> String {
 
 /// What the preview would draw: products, the triangles of its scene
 /// (booleans included) and the distance `--viewall` fits.
-fn preview_line(t: &geom::csg::CsgTree) -> String {
+fn preview_line(t: &geom::csg::CsgTree, stopped: bool) -> String {
     let scheme = render::ColorScheme::cornfield();
-    let scene = render::preview::scene(t, &scheme, render::Previewer::OpenCsg);
+    let mut stop = geom::csg::Stop::default();
+    if stopped {
+        let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let clock: eval::limits::Clock = Arc::new(move || {
+            ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as f64 * 100.0
+        });
+        let limits = eval::limits::Limits {
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        stop.interrupt = Some(flag.clone());
+        stop.guard = Some(Arc::new(eval::limits::Guard::new(
+            limits,
+            flag,
+            Some(clock),
+        )));
+    }
+    let scene = match render::preview::scene_until(t, &scheme, render::Previewer::OpenCsg, &stop) {
+        Ok(scene) => scene,
+        Err(_) => {
+            return match stop.exceeded() {
+                Some(e) => format!("Preview stopped: {}", e.message()),
+                None => "Preview stopped: cancelled".to_string(),
+            };
+        }
+    };
     let mut camera = render::Camera {
         viewall: true,
         autocenter: true,
@@ -480,7 +532,8 @@ pub extern "C" fn add_file(name_len: usize) {
 /// when `preview` is 1; with `preview` 2, as a session case
 /// ([`run_session`]); with 3, as a check case ([`run_check`]); with 4
 /// formatted and with 5 as a test file ([`run_tooling`]); with 6 through
-/// the language server ([`run_lsp`]).
+/// the language server ([`run_lsp`]); with 7 as a preview that passes
+/// its time limit ([`run_preview_stopped`]).
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
@@ -502,7 +555,9 @@ pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
         n => n,
     };
     OUTPUT.lock().expect("output").clear();
-    let out = if preview == 6 {
+    let out = if preview == 7 {
+        run_preview_stopped(files, &src)
+    } else if preview == 6 {
         run_lsp(files, &src)
     } else if preview == 4 || preview == 5 {
         run_tooling(files, &src, preview == 5)
@@ -596,7 +651,9 @@ mod tests {
             let seed = c["seed"].as_u64().unwrap_or(0) as u32;
             let preview = c["preview"].as_bool().unwrap_or(false);
             let src = c["src"].as_str().unwrap().as_bytes();
-            let out = if c["session"] == "lsp" {
+            let out = if c["preview"] == "stop" {
+                run_preview_stopped(files, src)
+            } else if c["session"] == "lsp" {
                 run_lsp(files, src)
             } else if c["session"] == "fmt" || c["session"] == "test" {
                 run_tooling(files, src, c["session"] == "test")

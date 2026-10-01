@@ -25,6 +25,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use eval::dump::Keys;
 use eval::node::{CsgOp, Node, NodeKind};
@@ -1028,6 +1029,97 @@ pub struct ProductJob {
     pub negatives: Vec<PolySet>,
 }
 
+/// What stops a preview's booleans early: the request's interrupt flag (a
+/// cancel or a superseding edit) and its limits' guard (the time and
+/// memory limits). The default stops nothing.
+///
+/// A product under [`BOOLEAN_LIMIT`] can still take minutes: before that
+/// limit, the Menger example at depth 5 ran past 235 s and 2.5 GB in the
+/// web core under a 60 s time limit, because nothing looked at the clock
+/// once the products' booleans began. With a `Stop`, the booleans look
+/// between kernel operations, so a request overruns by at most one of them.
+#[derive(Clone, Default, Debug)]
+pub struct Stop {
+    pub interrupt: Option<Arc<AtomicBool>>,
+    pub guard: Option<Arc<eval::limits::Guard>>,
+}
+
+impl Stop {
+    /// Whether to stop: cancelled, a limit passed, or out of time (which
+    /// trips the guard's time limit, as the render stage does).
+    pub fn stopped(&self) -> bool {
+        self.interrupt
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+            || self.guard.as_ref().is_some_and(|g| g.stopped())
+    }
+
+    /// The limit that stopped the preview, if one did; `None` after a
+    /// stop means it was cancelled.
+    pub fn exceeded(&self) -> Option<eval::limits::Exceeded> {
+        self.guard.as_ref().and_then(|g| g.exceeded())
+    }
+
+    fn check(&self) -> Result<(), Unsupported> {
+        if self.stopped() {
+            Err(Unsupported::interrupted())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// `geom`, counted against the memory limit while it is alive: the
+    /// leaves converted for a product and the partial unions are the
+    /// preview's working memory, which the render stage's estimate never
+    /// sees. Passing the limit trips the guard and stops the preview.
+    fn hold(&self, geom: ManifoldGeometry) -> Result<Held<'_>, Unsupported> {
+        let bytes = match &self.guard {
+            Some(g) if g.limits().memory.is_some() => {
+                crate::evaluate::KERNEL_FACTOR * crate::evaluate::solid_cost(&geom) as u64
+            }
+            _ => 0,
+        };
+        // Built first, so the charge is credited back however this ends.
+        let held = Held {
+            geom: Some(geom),
+            bytes,
+            stop: self,
+        };
+        if let Some(g) = &self.guard
+            && bytes > 0
+            && g.charge_geometry(bytes, "the preview's booleans").is_err()
+        {
+            return Err(Unsupported::interrupted());
+        }
+        Ok(held)
+    }
+}
+
+/// A solid charged to the memory limit until it is dropped.
+struct Held<'s> {
+    geom: Option<ManifoldGeometry>,
+    bytes: u64,
+    stop: &'s Stop,
+}
+
+impl Held<'_> {
+    /// The solid, for an operation; the charge stays until `self` drops,
+    /// so an operation's operands count while it runs.
+    fn take(&mut self) -> ManifoldGeometry {
+        self.geom.take().unwrap_or_default()
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if let Some(g) = &self.stop.guard
+            && self.bytes > 0
+        {
+            g.credit_geometry(self.bytes);
+        }
+    }
+}
+
 /// The visible solid of each product: the intersection of its positives
 /// minus the union of its negatives, as a triangle mesh whose faces keep
 /// the colour of the leaf face they came from (Manifold's original IDs
@@ -1036,6 +1128,19 @@ pub struct ProductJob {
 /// beforehand, so the meshes are the same at any thread count. `scheme`
 /// colours only faces that lost their colour to a mesh repair.
 pub fn product_meshes(jobs: Vec<ProductJob>, scheme: &Scheme) -> Vec<Option<PolySet>> {
+    // Nothing sets a default `Stop`, so this never stops.
+    product_meshes_until(jobs, scheme, &Stop::default()).unwrap_or_default()
+}
+
+/// [`product_meshes`] that gives up with [`Unsupported::interrupted`] once
+/// `stop` says so (checked before each kernel operation), leaving the
+/// reason on `stop`'s guard ([`Stop::exceeded`]). The meshes it does
+/// return are [`product_meshes`]'s.
+pub fn product_meshes_until(
+    jobs: Vec<ProductJob>,
+    scheme: &Scheme,
+    stop: &Stop,
+) -> Result<Vec<Option<PolySet>>, Unsupported> {
     // A conversion takes one ID per colour group and one for a repair.
     let need = |ps: &PolySet| {
         let mut colours: Vec<[u32; 4]> = ps
@@ -1056,7 +1161,7 @@ pub fn product_meshes(jobs: Vec<ProductJob>, scheme: &Scheme) -> Vec<Option<Poly
             manifold_rust::manifold::Manifold::reserve_ids(n.max(1))
         })
         .collect();
-    let solve = |(job, first): (ProductJob, u32)| product_mesh(job, first, scheme);
+    let solve = |(job, first): (ProductJob, u32)| product_mesh(job, first, scheme, stop);
     let work: Vec<(ProductJob, u32)> = jobs.into_iter().zip(firsts).collect();
     #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
     {
@@ -1078,21 +1183,73 @@ impl IdSource for Range {
     }
 }
 
-fn product_mesh(job: ProductJob, first: u32, scheme: &Scheme) -> Option<PolySet> {
+fn product_mesh(
+    job: ProductJob,
+    first: u32,
+    scheme: &Scheme,
+    stop: &Stop,
+) -> Result<Option<PolySet>, Unsupported> {
+    stop.check()?;
     let ids = Range(Cell::new(first));
     let mut warnings = Vec::new();
     let mut convert = |ps: &PolySet| {
+        // A conversion is cheap next to a boolean; the clock is read
+        // every 1,024th (`Guard::poll`).
+        if stop
+            .interrupt
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+            || stop.guard.as_ref().is_some_and(|g| g.poll())
+        {
+            return Err(Unsupported::interrupted());
+        }
         let mut errors = Vec::new();
-        ManifoldGeometry::from_polyset(ps, &ids, &mut warnings, &mut errors)
+        stop.hold(ManifoldGeometry::from_polyset(
+            ps,
+            &ids,
+            &mut warnings,
+            &mut errors,
+        ))
     };
-    let positives: Vec<ManifoldGeometry> = job.positives.iter().map(&mut convert).collect();
-    let negatives: Vec<ManifoldGeometry> = job.negatives.iter().map(&mut convert).collect();
-    let pos = ManifoldGeometry::batch(OpType::Intersect, positives)?;
-    let solid = match union_tree(negatives) {
+    let positives = job
+        .positives
+        .iter()
+        .map(&mut convert)
+        .collect::<Result<Vec<_>, _>>()?;
+    let negatives = job
+        .negatives
+        .iter()
+        .map(&mut convert)
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(mut pos) = batch(OpType::Intersect, positives, stop)? else {
+        return Ok(None);
+    };
+    let solid = match union_tree(negatives, stop)? {
         None => pos,
-        Some(neg) => pos.boolean(&neg, OpType::Subtract),
+        Some(mut neg) => {
+            stop.check()?;
+            let d = pos.take().boolean(&neg.take(), OpType::Subtract);
+            stop.hold(d)?
+        }
     };
-    (!solid.is_empty()).then(|| solid.to_polyset(scheme))
+    let solid = solid.geom.as_ref().filter(|s| !s.is_empty());
+    Ok(solid.map(|s| s.to_polyset(scheme)))
+}
+
+/// [`ManifoldGeometry::batch`] over held solids, after a check.
+fn batch<'s>(
+    op: OpType,
+    mut parts: Vec<Held<'s>>,
+    stop: &'s Stop,
+) -> Result<Option<Held<'s>>, Unsupported> {
+    if parts.len() == 1 {
+        return Ok(parts.pop());
+    }
+    stop.check()?;
+    let geoms = parts.iter_mut().map(Held::take).collect();
+    ManifoldGeometry::batch(op, geoms)
+        .map(|g| stop.hold(g))
+        .transpose()
 }
 
 /// Operands a product's union of negatives handles in one batch; more are
@@ -1105,19 +1262,27 @@ const UNION_LEAF: usize = 16;
 /// holes normalises to one), and one batch unions them with Manifold's
 /// pairwise rounds one after another, where a render unions each subtree
 /// of the model in parallel. The tree's shape depends only on the count,
-/// so the result does not depend on the thread count.
-fn union_tree(mut parts: Vec<ManifoldGeometry>) -> Option<ManifoldGeometry> {
+/// so the result does not depend on the thread count. `stop` is checked
+/// before every batch and join.
+fn union_tree<'s>(
+    mut parts: Vec<Held<'s>>,
+    stop: &'s Stop,
+) -> Result<Option<Held<'s>>, Unsupported> {
     if parts.len() <= UNION_LEAF {
-        return ManifoldGeometry::batch(OpType::Add, parts);
+        return batch(OpType::Add, parts, stop);
     }
     let right = parts.split_off(parts.len() / 2);
     #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
-    let (a, b) = rayon::join(|| union_tree(parts), || union_tree(right));
+    let (a, b) = rayon::join(|| union_tree(parts, stop), || union_tree(right, stop));
     #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
-    let (a, b) = (union_tree(parts), union_tree(right));
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.boolean(&b, OpType::Add)),
-        (a, b) => a.or(b),
+    let (a, b) = (union_tree(parts, stop), union_tree(right, stop));
+    match (a?, b?) {
+        (Some(mut a), Some(mut b)) => {
+            stop.check()?;
+            let u = a.take().boolean(&b.take(), OpType::Add);
+            Ok(Some(stop.hold(u)?))
+        }
+        (a, b) => Ok(a.or(b)),
     }
 }
 

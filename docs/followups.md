@@ -166,10 +166,21 @@ lead them, come roughly in order of user impact.
 - The parallel boolean patch costs CPU (hero +34%, `csg_spheres` +70%,
   `csg_deep_union` 0.08 to 0.19 s) and, with every core busy with other
   work, made the hero and `csg_deep_union` slower than before (4.6
-  against 3.5 s; 0.118 against 0.061 s), not faster. Unexplained;
-  suspects are rayon's spin-waiting and the `batch_boolean` pairs, which
-  go parallel whatever the mesh size. Worth a size threshold on the pairs
-  and a profile under load. (`slow-cases.md` §1.1)
+  against 3.5 s; 0.118 against 0.061 s), not faster. (`slow-cases.md`
+  §1.1) **Partly done:** `batch_boolean` rounds now go parallel only
+  above 10,000 vertices (`vendor/patches/manifold-rust/0005-*`, output
+  unchanged, a determinism test in `crates/geom/tests/parallel_kernels.rs`).
+  Measured interleaved against the build before it, exporting STL (best
+  of 5 to 11, identical bytes every time): unloaded, all four models
+  within noise (`csg_deep_union` 0.076/0.082 s, hero 2.05/2.07 s, Menger
+  4 1.63/1.63 s); with one busy loop per core (load about 25-40), mixed
+  and within noise; with five per core (load to 150), `csg_spheres` 3.70
+  to 2.76 s, hero 11.5 to 10.5 s, `csg_deep_union` unchanged (0.138/0.143
+  s). The original 4.6-against-3.5 s regression was not reproduced (that
+  run had load 80-120 from one many-threaded process), so the pairs were
+  at most part of it. Left: a profile under that kind of load, and
+  rayon's spin-waiting (other sites, and `geom`'s own `rayon::join`s,
+  have no size threshold either).
 - The ear clipper's bridge searches still scan every outer ring's box
   once per hole (the ring-box patch, `vendor/README.md`, only skips the
   walk), and `find_closer_bridge`'s wedge test admits rings up and to the
@@ -1168,18 +1179,52 @@ lead them, come roughly in order of user impact.
   job catches the next one.
 
 ## Web demo
-- **The preview's product booleans run outside the limits.**
-  `geom::csg::product_meshes` (called from `render::preview::scene`) checks
-  neither the interrupt flag nor the time or memory limit, so a product
-  under `geom::csg::BOOLEAN_LIMIT` can still run for minutes: before that
-  limit, the Menger example at depth 5 ran past 235 s and 2.5 GB in the
-  web core under a 60 s limit. Checking the interrupt between the
-  `union_tree` steps would bound it to one kernel operation.
+- **Done: the preview's product booleans run under the limits.**
+  `geom::csg::product_meshes_until` checks a `geom::csg::Stop` (the
+  request's interrupt flag and limits guard) before every kernel
+  operation, counts the leaves and partial unions it holds against the
+  memory limit, and stops with the limit recorded on the guard.
+  `session::Rendered::stop` carries the request's flag and guard to the
+  host, and `client::run_scene` (web, the macOS app, the Linux app) draws
+  the preview under it: a limit is a `Failed` error with the limit's
+  message and hint, a cancel is `Cancelled`. In the web core, the Menger
+  example at depth 4 under a 3 s limit now stops after 4.4 s (it ran
+  about 28 s). Left: once `Session::render` returns, a newer request on
+  the document no longer sets the flag (only the host's own
+  `Run::interrupt` and the limits stop the preview), so a superseding
+  edit in the macOS app still waits for the old preview; `neoscad`'s
+  PNG export (`cli/src/png.rs`) and `session`'s snapshots
+  (`session/src/snapshot.rs`) still call the unlimited
+  `render::preview::scene`. A single kernel operation is still not
+  interrupted (manifold-rust's `CancelToken` could be, but it owns its
+  flag and knows nothing of the clock).
 - **A preview recomputes what a render reuses.** The Menger example at
   depth 4 previews in 28 s in the web core but renders in 8 s: the render
   caches each `menger_negative` level (its subtrees are identical under
-  their `translate`), while the preview's product unions its 1,756 negatives
-  flat. Natively, with threads, the two are close (4.5 s and 3.8 s).
+  their `translate`), while the preview's product unions its 1,756
+  negatives flat. Natively (2026-09-30, load about 20) it is 10.6 s
+  against 3.4 s at the default thread count and 22.5 s against 6.2 s on
+  one thread. Not done; the plan:
+  1. Record, for each leaf `TreeEvaluator::visit` reaches, its chain of
+     ancestors (node index, the node's cache key from `Keys`, the
+     accumulated matrix there), shared as an `Arc` list so the cost is
+     one link per node.
+  2. Pass the negatives to `product_meshes` as leaf meshes with matrix,
+     colour and that chain, not as transformed `PolySet`s.
+  3. In `product_mesh`, group a product's negatives into the trie of
+     their ancestor chains and union bottom-up: a trie node's union is
+     the `union_tree` of its children's. Two trie nodes whose ancestors
+     have the same key, the same leaves in this product (pruning by box
+     can drop different leaves from two copies, so compare the leaf
+     lists, not just the key) and the same colours are one union moved
+     by `M_k * inverse(M_j)`: compute the first in order, transform it
+     (`ManifoldGeometry::transform`) for the rest. Deciding which are
+     equal before any boolean runs keeps it the same at any thread count.
+  4. IDs: a transformed copy keeps the first's original IDs, as a render's
+     cached subtree does; reserve the ranges for the distinct unions only.
+  The meshes change (the unions run in another order), so the preview
+  images need re-checking; the Menger sponge should drop to about the
+  render's time. Effort: M-L (`geom::csg` and `render::preview`).
 - **Out of memory in the kernel still traps.** Kernel working memory is
   not counted against the web core's 1 GiB limit, so a render like the
   Menger example at depth 5 grows the instance until an allocation fails

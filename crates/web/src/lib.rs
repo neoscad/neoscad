@@ -599,12 +599,10 @@ impl State {
                 PreviewerIn::OpenCsg => render::Previewer::OpenCsg,
                 PreviewerIn::ThrownTogether => render::Previewer::ThrownTogether,
             };
-            let scene = match (&rendered.tree, &rendered.geometry) {
-                (Some(tree), _) => Some(render::preview::scene(tree, &scheme, previewer)),
-                (None, Some(g)) => Some(render::Scene::new(Some(g), &scheme)),
-                (None, None) if rendered.exit_code == 0 => Some(render::Scene::new(None, &scheme)),
-                (None, None) => None,
-            };
+            // Under the request's limits: the products' booleans of a big
+            // difference ran minutes past the time limit before they
+            // checked it.
+            let scene = client::run_scene(&rendered, &scheme, previewer)?;
             // The renderer's own packing (`render::packed`), which the
             // page's viewer (`crates/web-view`) reads back with
             // `PackedScene::from_parts`: the two byte arrays as

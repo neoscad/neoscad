@@ -405,6 +405,10 @@ impl Ord for MeshEntry {
     }
 }
 
+// NeoSCAD patch: vertices a `batch_boolean` round's operands need in all
+// before its pairs run in parallel.
+const PAR_ROUND_VERTS: usize = 10_000;
+
 fn batch_boolean(
     op: OpType,
     children: &mut Vec<CsgLeafNode>,
@@ -456,7 +460,21 @@ fn batch_boolean(
             let b = heap.pop().unwrap();
             pairs.push((a, b));
         }
-        let results = crate::par::maybe_par_map(pairs.len(), 2, |i| {
+        // NeoSCAD patch: only a round with enough work goes parallel (C++
+        // `autoPolicy`'s `kSeqThreshold`, 10,000 elements, counted here in
+        // vertices of all its operands). A union of hundreds of small
+        // solids is many rounds of small booleans, and on a machine whose
+        // cores are all busy a forked round can wait for a worker the
+        // scheduler has no core for: with five busy loops per core, 125
+        // spheres unioned in 2.8 s with this threshold against 3.7 s
+        // without. The pairs and their order are the same either way, so
+        // the output is too.
+        let work: usize = pairs
+            .iter()
+            .map(|(a, b)| a.0.num_vert() + b.0.num_vert())
+            .sum();
+        let threshold = if work >= PAR_ROUND_VERTS { 2 } else { usize::MAX };
+        let results = crate::par::maybe_par_map(pairs.len(), threshold, |i| {
             simple_boolean(&pairs[i].0 .0, &pairs[i].1 .0, op, token)
         });
         pairs.clear();

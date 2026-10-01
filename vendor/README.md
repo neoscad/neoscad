@@ -63,10 +63,11 @@ line.
 A copy of the crates.io release (`.cargo_vcs_info.json` gives the upstream
 commit), used through `[patch.crates-io]` in the root `Cargo.toml`. It is
 not a workspace member, so the workspace's lints, formatting and tests do
-not apply to it. It carries four changes, each marked `NeoSCAD patch`: a
+not apply to it. It carries five changes, each marked `NeoSCAD patch`: a
 bug fix in `src/edge_op.rs`, two speed fixes in `src/polygon_earclip.rs`,
-and parallel boolean kernels in `src/par.rs` and its callers (below). Drop
-the copy once upstream has all four.
+parallel boolean kernels in `src/par.rs` and its callers, and a size
+threshold for one of them (below). Drop the copy once upstream has them
+all.
 
 The series, in `vendor/patches/manifold-rust/`:
 
@@ -77,6 +78,7 @@ The series, in `vendor/patches/manifold-rust/`:
 | `0002-keyhole-loop-visitor.patch` | the keyhole speed patch (`src/polygon_earclip.rs`) |
 | `0003-parallel-booleans.patch` | the parallel boolean kernels |
 | `0004-keyhole-ring-boxes.patch` | the keyhole ring-box patch (`src/polygon_earclip.rs`) |
+| `0005-batch-round-threshold.patch` | `batch_boolean` rounds of under 10,000 vertices run their pairs serially (`src/csg_tree.rs`; see the parallel boolean patch) |
 
 The first vendoring (`17a31e4`) left the two files out without a
 recorded reason; they could as well be restored, which would empty
@@ -224,7 +226,12 @@ calling thread either way). The patch is
   the serials the sequential loop gave them. The one shared state a boolean touches is the
   mesh-ID counter; the kernel compares mesh IDs only for equality, and
   neoscad orders output runs by original ID for the same reason
-  (`crates/geom/src/manifold_geom.rs`, `canonical_mesh`).
+  (`crates/geom/src/manifold_geom.rs`, `canonical_mesh`). Since 0005 a
+  round goes parallel only when its operands have 10,000 vertices in all
+  (C++ `autoPolicy`'s `kSeqThreshold`): with five busy loops per core,
+  `csg_spheres` took 2.76 s against 3.70 s and the hero 10.5 against
+  11.5 s (best of 7); unloaded, and with one busy loop per core, the
+  difference was within noise (`docs/audits/slow-cases.md` §1.1).
 - **Edge-flag scans** of `collapse_short_edges`, `collapse_colinear_edges`
   and `swap_degenerates` (`edge_op.rs`): the flags are tested in parallel
   above 100,000 halfedges (C++ `FlagStore::run`, `edge_op.cpp:54-97`) and

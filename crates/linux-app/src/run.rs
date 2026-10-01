@@ -76,16 +76,7 @@ pub fn run_document(
             ls.supply(&doc, text.clone(), diags);
         }
     }
-    let scene = match (&r.tree, &r.geometry) {
-        (Some(tree), _) => Some(render::preview::scene(
-            tree,
-            scheme,
-            render::Previewer::OpenCsg,
-        )),
-        (None, Some(g)) => Some(render::Scene::new(Some(g), scheme)),
-        (None, None) if r.exit_code == 0 => Some(render::Scene::new(None, scheme)),
-        (None, None) => None,
-    };
+    let scene = client::run_scene(&r, scheme, render::Previewer::OpenCsg)?;
     let model = match (scene, gpu) {
         (Some(scene), Some(gpu)) => Some(Arc::new(gpu.upload(&scene).map_err(|e| {
             CoreError::Failed {

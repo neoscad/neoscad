@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use geom::Matrix;
 use geom::color::Color;
-use geom::csg::{ChainObject, CsgTree, FLAG_HIGHLIGHT, ProductJob, Products};
+use geom::csg::{ChainObject, CsgTree, FLAG_HIGHLIGHT, ProductJob, Products, Stop};
 use geom::polyset::PolySet;
 
 use crate::scene::{CsgOp, CsgPrimitive, Cull, Depth, DrawState, Scene, Surface};
@@ -129,6 +129,23 @@ fn scaled_z(m: &Matrix) -> Matrix {
 
 /// The preview of `tree` in `scheme`'s colours.
 pub fn scene(tree: &CsgTree, scheme: &ColorScheme, previewer: Previewer) -> Scene {
+    match scene_until(tree, scheme, previewer, &Stop::default()) {
+        Ok(scene) => scene,
+        // Nothing sets a default `Stop`.
+        Err(_) => Scene::empty(scheme, None),
+    }
+}
+
+/// [`scene`] for a host with limits or a cancel button: the products'
+/// booleans give up once `stop` says so, between kernel operations, with
+/// [`geom::Unsupported::interrupted`]. Which limit it was, if any, is on
+/// `stop` ([`Stop::exceeded`]); otherwise the request was cancelled.
+pub fn scene_until(
+    tree: &CsgTree,
+    scheme: &ColorScheme,
+    previewer: Previewer,
+    stop: &Stop,
+) -> Result<Scene, geom::Unsupported> {
     // Past `geom::csg::BOOLEAN_LIMIT` the products' booleans would take
     // minutes and gigabytes; the tree carries the warning that says so.
     let previewer = if tree.booleans {
@@ -144,7 +161,7 @@ pub fn scene(tree: &CsgTree, scheme: &ColorScheme, previewer: Previewer) -> Scen
         (Pass::Highlight, &tree.highlights),
     ];
     match previewer {
-        Previewer::OpenCsg => opencsg(&mut scene, &lists, scheme),
+        Previewer::OpenCsg => opencsg(&mut scene, &lists, scheme, stop)?,
         Previewer::ThrownTogether => {
             for (pass, list) in lists {
                 if let Some(p) = list {
@@ -153,7 +170,7 @@ pub fn scene(tree: &CsgTree, scheme: &ColorScheme, previewer: Previewer) -> Scen
             }
         }
     }
-    scene
+    Ok(scene)
 }
 
 /// A leaf mesh coloured for a product boolean: moved into model
@@ -219,7 +236,12 @@ struct Pending {
 }
 
 /// `OpenCSGRenderer::createCSGVBOProducts` and `draw`.
-fn opencsg(scene: &mut Scene, lists: &[(Pass, &Option<Products>); 3], scheme: &ColorScheme) {
+fn opencsg(
+    scene: &mut Scene,
+    lists: &[(Pass, &Option<Products>); 3],
+    scheme: &ColorScheme,
+    stop: &Stop,
+) -> Result<(), geom::Unsupported> {
     // `paintGL` starts with `GL_LESS`; each product leaves `GL_LEQUAL`.
     let mut depth = Depth::Less;
     let mut jobs: Vec<ProductJob> = Vec::new();
@@ -307,7 +329,7 @@ fn opencsg(scene: &mut Scene, lists: &[(Pass, &Option<Products>); 3], scheme: &C
         face_front: scheme.opencsg_face_front,
         face_back: scheme.opencsg_face_back,
     };
-    let meshes = geom::csg::product_meshes(jobs, &scheme_colors);
+    let meshes = geom::csg::product_meshes_until(jobs, &scheme_colors, stop)?;
     let mut solved: Vec<Option<(Arc<PolySet>, Depth, bool)>> = vec![None; slots.len()];
     for (p, m) in pending.iter().zip(meshes) {
         solved[p.at] = m.map(|m| (Arc::new(m), p.depth, p.bias));
@@ -347,6 +369,7 @@ fn opencsg(scene: &mut Scene, lists: &[(Pass, &Option<Products>); 3], scheme: &C
             (Slot::Boolean, None) => {}
         }
     }
+    Ok(())
 }
 
 /// A subtracted leaf's placement: 2D slabs are stretched in z.

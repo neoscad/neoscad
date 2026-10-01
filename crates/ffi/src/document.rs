@@ -288,16 +288,7 @@ impl Core {
             if let Some(v) = &viewport
                 && v.requests.load(Ordering::SeqCst) == generation
             {
-                let scene = match (&r.tree, &r.geometry) {
-                    (Some(tree), _) => Some(render::preview::scene(
-                        tree,
-                        &scheme,
-                        render::Previewer::OpenCsg,
-                    )),
-                    (None, Some(g)) => Some(render::Scene::new(Some(g), &scheme)),
-                    (None, None) if r.exit_code == 0 => Some(render::Scene::new(None, &scheme)),
-                    (None, None) => None,
-                };
+                let scene = client::run_scene(&r, &scheme, render::Previewer::OpenCsg)?;
                 if let Some(scene) = scene {
                     let model = v.gpu.upload(&scene).map_err(|e| CoreError::Failed {
                         message: e.to_string(),

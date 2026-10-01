@@ -3,9 +3,14 @@
 //! the product booleans come out the same at any thread count.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use geom::color::Color;
-use geom::csg::{CsgTree, DEFAULT_TERM_LIMIT, ProductJob, Products, product_meshes};
+use geom::csg::{
+    CsgTree, DEFAULT_TERM_LIMIT, ProductJob, Products, Stop, product_meshes, product_meshes_until,
+};
 use geom::{RenderOptions, Renderer};
 
 fn csg(src: &str) -> CsgTree {
@@ -248,5 +253,120 @@ fn a_term_past_the_limit_is_abandoned_with_openscads_warnings() {
             "Normalized tree is growing past 5 elements. Aborting normalization.\n",
             "CSG normalization resulted in an empty tree",
         ]
+    );
+}
+
+/// A product whose union of negatives takes many kernel operations: a
+/// slab minus a 20 x 20 grid of overlapping cubes (each overlaps its
+/// neighbours, so every union does real work).
+fn slow_job() -> ProductJob {
+    let mut negatives = Vec::new();
+    for i in 0..20 {
+        for j in 0..20 {
+            let mut c = geom::primitives::cube([1.3, 1.3, 1.3], false);
+            let z = 0.1 * f64::from((i + j) % 3);
+            c.transform(&[
+                [1.0, 0.0, 0.0, f64::from(i)],
+                [0.0, 1.0, 0.0, f64::from(j)],
+                [0.0, 0.0, 1.0, z],
+                [0.0, 0.0, 0.0, 1.0],
+            ]);
+            negatives.push(c);
+        }
+    }
+    ProductJob {
+        positives: vec![geom::primitives::cube([20.0, 20.0, 1.0], false)],
+        negatives,
+    }
+}
+
+fn guard(limits: eval::limits::Limits, clock: Option<eval::limits::Clock>) -> Stop {
+    let flag = Arc::new(AtomicBool::new(false));
+    Stop {
+        interrupt: Some(flag.clone()),
+        guard: Some(Arc::new(eval::limits::Guard::new(limits, flag, clock))),
+    }
+}
+
+/// A cancel that arrives while the products' booleans run stops them at
+/// the next kernel operation, not minutes later (the web demo's Menger
+/// preview at depth 5 once ran 235 s past its 60 s limit).
+#[test]
+fn a_cancelled_preview_stops_between_booleans() {
+    let stop = Stop {
+        interrupt: Some(Arc::new(AtomicBool::new(false))),
+        guard: None,
+    };
+    let flag = stop.interrupt.clone().expect("flag");
+    let scheme = geom::color::CORNFIELD;
+    let started = Instant::now();
+    product_meshes_until(vec![slow_job(); 8], &scheme, &stop).expect("not stopped");
+    let full = started.elapsed();
+    let started = Instant::now();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        flag.store(true, Ordering::Relaxed);
+    });
+    let out = product_meshes_until(vec![slow_job(); 8], &scheme, &stop);
+    canceller.join().expect("canceller");
+    let took = started.elapsed();
+    eprintln!("uncancelled {full:?}, cancelled after 20 ms: {took:?}");
+    assert!(out.is_err_and(|u| u.is_interrupted()));
+    assert!(stop.exceeded().is_none(), "a cancel is not a limit");
+    // A stopped run waits only for the kernel operations in flight.
+    assert!(took < full / 2, "took {took:?} of {full:?}");
+}
+
+/// Out of time mid-way (a clock that advances 100 ms per reading, under a
+/// one-second limit): the preview stops with the time limit recorded,
+/// as the render stage reports it.
+#[test]
+fn a_preview_past_its_time_limit_stops_with_the_limit() {
+    let ticks = Arc::new(AtomicU64::new(0));
+    let clock: eval::limits::Clock =
+        Arc::new(move || ticks.fetch_add(1, Ordering::Relaxed) as f64 * 100.0);
+    let limits = eval::limits::Limits {
+        time: Some(1.0),
+        ..Default::default()
+    };
+    let stop = guard(limits, Some(clock));
+    let out = product_meshes_until(vec![slow_job()], &geom::color::CORNFIELD, &stop);
+    assert!(out.is_err_and(|u| u.is_interrupted()));
+    let e = stop.exceeded().expect("a limit");
+    assert_eq!(e.limit, eval::limits::Limit::Time);
+}
+
+/// The leaves and partial unions count against the memory limit while
+/// they are alive, and are credited back however the preview ends.
+#[test]
+fn a_preview_past_its_memory_limit_stops_and_credits_what_it_held() {
+    let limits = eval::limits::Limits {
+        memory: Some(1 << 20),
+        ..Default::default()
+    };
+    let stop = guard(limits, None);
+    let out = product_meshes_until(vec![slow_job()], &geom::color::CORNFIELD, &stop);
+    assert!(out.is_err_and(|u| u.is_interrupted()));
+    let g = stop.guard.as_ref().expect("guard");
+    assert_eq!(
+        g.exceeded().expect("a limit").limit,
+        eval::limits::Limit::Memory
+    );
+    assert_eq!(g.geometry_bytes(), 0);
+
+    // Under a limit it fits, the meshes are the unlimited ones and every
+    // byte is credited back.
+    let limits = eval::limits::Limits {
+        memory: Some(1 << 30),
+        time: Some(1e6),
+        ..Default::default()
+    };
+    let stop = guard(limits, Some(Arc::new(|| 0.0)));
+    let scheme = geom::color::CORNFIELD;
+    let limited = product_meshes_until(vec![slow_job()], &scheme, &stop).expect("fits");
+    assert_eq!(stop.guard.as_ref().expect("guard").geometry_bytes(), 0);
+    assert_eq!(
+        format!("{limited:?}"),
+        format!("{:?}", product_meshes(vec![slow_job()], &scheme))
     );
 }

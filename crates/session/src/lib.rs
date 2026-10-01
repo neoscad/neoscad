@@ -441,6 +441,13 @@ pub struct Rendered {
     pub geometry: Option<geom::Geometry>,
     /// The preview's CSG products.
     pub tree: Option<Arc<geom::csg::CsgTree>>,
+    /// The request's interrupt flag and limits, for the host to draw
+    /// `tree` under (`render::preview::scene_until`): the products'
+    /// booleans are the preview's expensive part, and they run after this
+    /// returns. The time limit counts from the request's start. A newer
+    /// request on the document no longer sets the flag once this returns
+    /// (only the host's own `Run::interrupt` and the limits stop it).
+    pub stop: geom::csg::Stop,
     /// The file's view after `$vp*`.
     pub camera: eval::Camera,
     /// Which `$vp*` the file assigned itself (a GUI moves its view to
@@ -1805,6 +1812,10 @@ impl Session {
             log: Log::default(),
             geometry: None,
             tree: None,
+            stop: geom::csg::Stop {
+                interrupt: Some(job.flag.clone()),
+                guard: job.limits.clone(),
+            },
             camera: run.camera,
             camera_assigned: eval::CameraAssigned::default(),
             cache_entries: 0,
