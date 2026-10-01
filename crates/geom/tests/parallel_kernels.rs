@@ -101,6 +101,25 @@ fn large_difference_is_unchanged_at_any_thread_count() {
     );
 }
 
+/// `src` exports the same bytes on 1 and 8 threads. For models whose bytes
+/// differ by platform (spheres: `sin` and `cos` round differently in each
+/// platform's libm), where one pinned hash can't hold everywhere.
+fn check_agree(src: &str) {
+    let export = |threads| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .stack_size(eval::DEFAULT_THREAD_STACK)
+            .build()
+            .unwrap();
+        fnv(&pool.install(|| off(src)))
+    };
+    assert_eq!(
+        export(1),
+        export(8),
+        "1 and 8 threads export different bytes"
+    );
+}
+
 /// A union of 32 overlapping spheres of about 1,150 vertices each: its
 /// first `batch_boolean` rounds are under the 10,000 vertices a round
 /// needs to run its pairs in parallel and its later rounds over, so both
@@ -108,8 +127,5 @@ fn large_difference_is_unchanged_at_any_thread_count() {
 /// are all under it.)
 #[test]
 fn batch_rounds_above_and_below_the_parallel_threshold_agree() {
-    check(
-        "for (i = [0:31]) translate([i * 1.5, (i % 4) * 1.5, 0]) sphere(2, $fn = 48);",
-        0xa3f3_74fb_4662_bb3e,
-    );
+    check_agree("for (i = [0:31]) translate([i * 1.5, (i % 4) * 1.5, 0]) sphere(2, $fn = 48);");
 }
