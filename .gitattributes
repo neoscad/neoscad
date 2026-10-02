@@ -5,3 +5,5 @@
 # its examples with a CR at the end of every line.
 web/examples/** -text
 assets/** -text
+crates/cli/src/mcp/recipes.scad -text
+crates/cli/src/mcp/relay.html -text
