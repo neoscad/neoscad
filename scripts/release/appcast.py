@@ -16,6 +16,9 @@ changes; then "appcast.xml" is printed for the workflow to push.
 
 What it lists (docs/release.md, "The macOS app's updates"):
 
+Releases before FIRST_KEYED (0.3.0, the first app built with the update
+key) are never listed: their apps can't update themselves.
+
 - the newest release whose tag has no prerelease part and that has a DMG,
   in Sparkle's default channel, which every app sees;
 - the newest release of any kind that has a DMG, when it is a release
@@ -62,6 +65,12 @@ _spec.loader.exec_module(feed)
 
 BUNDLE_ID = "org.neoscad.NeoSCAD"
 RC_CHANNEL = "rc"  # UpdateSettings.releaseCandidateChannel
+# The first release whose app carries the update key (SUPublicEDKey):
+# earlier apps can't update themselves, and an appcast item for one would
+# offer every keyed app an update that drops the key, which Sparkle
+# refuses. Releases before it (0.3.0's release candidates count as 0.3.0
+# here) are left out of the appcast instead of failing it.
+FIRST_KEYED = "0.3.0-rc.1"
 SIGNATURE_MARK = b"<!-- sparkle-signatures:\n"
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 
@@ -89,6 +98,9 @@ def newest_with_dmg(releases, stable_only):
             continue
         v = feed.release_version(r)
         if v is None or (stable_only and feed.is_prerelease(v)) or dmg_asset(r) is None:
+            continue
+        key = feed.version_key(v)
+        if key is None or key < feed.version_key(FIRST_KEYED):
             continue
         if best is None or feed.version_key(v) > feed.version_key(feed.release_version(best)):
             best = r
