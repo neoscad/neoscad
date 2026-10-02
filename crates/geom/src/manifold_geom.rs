@@ -765,12 +765,15 @@ impl ManifoldGeometry {
 
     /// `ManifoldGeometry::slice`: the cross-section at z = 0, as
     /// `CrossSection(manifold.Slice()).ToPolygons()`. The result is
-    /// unsanitized; `projection(cut = true)` sanitizes it.
+    /// unsanitized; `projection(cut = true)` sanitizes it. The raw loops
+    /// come from the implementation, as in `project`: since manifold-rust
+    /// 0.15.0, `Manifold::slice` already runs the `CrossSection` union, and
+    /// a second one here would union the loops twice where C++ does it once.
     pub fn slice(&self) -> Polygon2d {
-        if self.is_empty() {
+        if self.is_empty() || self.manifold.as_impl().is_soup {
             return Polygon2d::default();
         }
-        positive_union(self.manifold.slice(0.0).to_polygons())
+        positive_union(self.manifold.as_impl().slice(0.0))
     }
 
     /// `ManifoldGeometry::project`: the outline seen from above, as

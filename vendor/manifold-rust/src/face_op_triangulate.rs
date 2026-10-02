@@ -29,7 +29,10 @@ fn write_local_triangles(
     first_tri: usize,
     triangles: &[[i32; 3]],
 ) {
-    debug_assert!(triangles.len() <= 2, "local face path only handles tris/quads");
+    debug_assert!(
+        triangles.len() <= 2,
+        "local face path only handles tris/quads"
+    );
     let first_out = 3 * first_tri as i32;
     // (start, end, out) — start/end are face-halfedge indices, out is the
     // output halfedge index.
@@ -114,7 +117,8 @@ fn write_general_triangulation(
             boundary >= 0 && (boundary as usize - edge_base) < contour2tri.len(),
             "contour edge index out of bounds"
         );
-        contour2tri[boundary as usize - edge_base] = first_out + edge.paired_halfedge - contour_end as i32;
+        contour2tri[boundary as usize - edge_base] =
+            first_out + edge.paired_halfedge - contour_end as i32;
     }
 }
 
@@ -219,15 +223,9 @@ pub fn face2tri_ct(
     let mut tri_normal = vec![Vec3::new(0.0, 0.0, 0.0); num_tri];
     let mut tri_ref = vec![TriRef::default(); num_tri];
 
-    // NeoSCAD patch: write the faces' triangles in parallel. Each face
-    // writes only its own triangles (`tri_offset[face]..` in the output
-    // arrays) and its own edges' `contour2tri` entries
-    // (`face_edge[face]..`), with values that depend on nothing but the
-    // face, so cutting the faces into fixed runs and giving each run its
-    // slices of the arrays writes exactly what the sequential loop wrote.
-    // The runs are fixed-size, so their bounds do not depend on the thread
-    // count. On a level-4 Menger sponge (one 300,000-face boolean at the
-    // end) this was 1-3% of the whole render.
+    // Write the faces' triangles in parallel, in fixed runs of faces. A face
+    // writes only its own triangles and `contour2tri` entries, from values that
+    // depend only on the face, so each run gets its own slices of the arrays.
     struct FaceRun<'a> {
         faces: std::ops::Range<usize>,
         halfedge: &'a mut [Halfedge],
@@ -255,14 +253,26 @@ pub fn face2tri_ct(
             contour_rest = cr;
             normal_rest = nr;
             ref_rest = rr;
-            runs.push(FaceRun { faces: f0..f1, halfedge: h, contour2tri: c, tri_normal: n, tri_ref: r });
+            runs.push(FaceRun {
+                faces: f0..f1,
+                halfedge: h,
+                contour2tri: c,
+                tri_normal: n,
+                tri_ref: r,
+            });
             f0 = f1;
         }
     }
     let face_halfedge_ref = &face_halfedge;
     let general_ref = &general;
     crate::par::maybe_par_for_each(runs, 2, |run| {
-        let FaceRun { faces, halfedge: new_halfedge, contour2tri, tri_normal, tri_ref } = run;
+        let FaceRun {
+            faces,
+            halfedge: new_halfedge,
+            contour2tri,
+            tri_normal,
+            tri_ref,
+        } = run;
         let face_halfedge = face_halfedge_ref;
         // Bases of this run's slices in the whole arrays.
         let tri_base = tri_offset[faces.start];
@@ -280,7 +290,11 @@ pub fn face2tri_ct(
 
             if num_edge == 3 {
                 // Single triangle — sort edges into correct winding order.
-                let mut tri_edge = [first_edge as i32, first_edge as i32 + 1, first_edge as i32 + 2];
+                let mut tri_edge = [
+                    first_edge as i32,
+                    first_edge as i32 + 1,
+                    first_edge as i32 + 2,
+                ];
                 let mut tri = [
                     face_halfedge[first_edge].start_vert,
                     face_halfedge[first_edge + 1].start_vert,
@@ -314,9 +328,12 @@ pub fn face2tri_ct(
                 let projection = get_axis_aligned_projection(normal);
                 let tri_ccw = |t: [i32; 3]| -> bool {
                     ccw(
-                        projection.apply(vert_pos_ref[face_halfedge[t[0] as usize].start_vert as usize]),
-                        projection.apply(vert_pos_ref[face_halfedge[t[1] as usize].start_vert as usize]),
-                        projection.apply(vert_pos_ref[face_halfedge[t[2] as usize].start_vert as usize]),
+                        projection
+                            .apply(vert_pos_ref[face_halfedge[t[0] as usize].start_vert as usize]),
+                        projection
+                            .apply(vert_pos_ref[face_halfedge[t[1] as usize].start_vert as usize]),
+                        projection
+                            .apply(vert_pos_ref[face_halfedge[t[2] as usize].start_vert as usize]),
                         epsilon,
                     ) >= 0
                 };
@@ -325,14 +342,8 @@ pub fn face2tri_ct(
                     assemble_halfedges(&face_halfedge[first_edge..last_edge], first_edge as i32);
                 let quad = &quad_loops[0]; // Should be exactly one loop
 
-                let tris0 = [
-                    [quad[0], quad[1], quad[2]],
-                    [quad[0], quad[2], quad[3]],
-                ];
-                let tris1 = [
-                    [quad[1], quad[2], quad[3]],
-                    [quad[0], quad[1], quad[3]],
-                ];
+                let tris0 = [[quad[0], quad[1], quad[2]], [quad[0], quad[2], quad[3]]];
+                let tris1 = [[quad[1], quad[2], quad[3]], [quad[0], quad[1], quad[3]]];
 
                 let choice = if !(tri_ccw(tris0[0]) && tri_ccw(tris0[1])) {
                     1
@@ -341,7 +352,11 @@ pub fn face2tri_ct(
                         - vert_pos_ref[face_halfedge[quad[2] as usize].start_vert as usize];
                     let diag1 = vert_pos_ref[face_halfedge[quad[1] as usize].start_vert as usize]
                         - vert_pos_ref[face_halfedge[quad[3] as usize].start_vert as usize];
-                    if length2(diag0) > length2(diag1) { 1 } else { 0 }
+                    if length2(diag0) > length2(diag1) {
+                        1
+                    } else {
+                        0
+                    }
                 } else {
                     0
                 };
@@ -393,7 +408,10 @@ pub fn face2tri_ct(
             continue;
         }
         let pair_tri = contour2tri[pair as usize];
-        debug_assert!(pair_tri >= 0, "boundary edge did not triangulate with its pair");
+        debug_assert!(
+            pair_tri >= 0,
+            "boundary edge did not triangulate with its pair"
+        );
         new_halfedge[tri_edge as usize].paired_halfedge = pair_tri;
     }
 

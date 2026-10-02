@@ -1,11 +1,13 @@
 //! The union of two touching parts of a BOSL2 `cubetruss` came out 7.3 mm³
 //! too large: after the boolean, manifold-rust's edge-collapse cleanup slid
 //! a vertex off the crease between two faces and filled a concave corner
-//! (C++ Manifold 3.5.2 does the same on these meshes). The fix is the
-//! patch in `vendor/manifold-rust` (see `vendor/README.md`). These are the
-//! two operands, cut down to the region around that corner, with every
-//! coordinate exact (`{:?}` of the f64): a header `3 <verts> <tris>
-//! <tolerance> 0`, then vertex lines, then triangle lines.
+//! (C++ Manifold 3.5.2 does the same on these meshes). manifold-rust
+//! 0.15.0 fixed it upstream, in `dedupe_edges`, and neoscad's own patch
+//! for it was dropped (see `vendor/README.md`); this test makes sure the
+//! fix stays. These are the two operands, cut down to the region around
+//! that corner, with every coordinate exact (`{:?}` of the f64): a header
+//! `3 <verts> <tris> <tolerance> 0`, then vertex lines, then triangle
+//! lines.
 
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::{MeshGL64, OpType};

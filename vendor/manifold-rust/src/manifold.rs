@@ -12,12 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// manifold.rs — the public `Manifold` handle: a thin, immutable wrapper over
+// `ManifoldImpl` (impl_mesh.rs) that ports the C++ `Manifold` API.
+//
+// This file owns the struct, its constructors and accessors, the geometric
+// queries, simplification, affine transforms and warps, property editing,
+// compose / decompose, and slice / project. The rest of the API lives in
+// child modules so they can reach the private `imp` field:
+// manifold_boolean.rs (booleans, plane splits, operator overloads),
+// manifold_robust.rs (robust-engine repair entry points),
+// manifold_meshgl.rs (MeshGL import/export), manifold_shape.rs (primitive
+// and extrusion constructors) and manifold_smooth.rs (normals, smoothing,
+// refinement).
+
 use crate::boolean3;
 use crate::cross_section::CrossSection;
-use crate::math;
 use crate::impl_mesh::ManifoldImpl;
-use crate::linalg::{mat4_to_mat3x4, normalize, scaling_matrix, translation_matrix, Mat3, Mat3x4, Vec3};
-use crate::types::{Error, OpType, RayHit};
+use crate::linalg::{mat4_to_mat3x4, scaling_matrix, translation_matrix, Mat3, Mat3x4, Vec3};
+use crate::types::{Error, RayHit};
 
 #[derive(Clone)]
 pub struct Manifold {
@@ -32,7 +44,9 @@ impl Default for Manifold {
 
 impl Manifold {
     pub fn new() -> Self {
-        Self { imp: ManifoldImpl::new() }
+        Self {
+            imp: ManifoldImpl::new(),
+        }
     }
 
     pub fn empty() -> Self {
@@ -58,19 +72,48 @@ impl Manifold {
         self.imp
     }
 
-    pub fn num_vert(&self) -> usize { self.imp.num_vert() }
-    pub fn num_tri(&self) -> usize { self.imp.num_tri() }
-    pub fn num_edge(&self) -> usize { self.imp.num_edge() }
-    pub fn num_prop(&self) -> usize { self.imp.num_prop }
-    pub fn num_prop_vert(&self) -> usize { self.imp.num_prop_vert() }
-    pub fn is_empty(&self) -> bool { self.imp.is_empty() }
-    pub fn status(&self) -> Error { self.imp.status }
-    pub fn volume(&self) -> f64 { self.imp.get_property(crate::properties::Property::Volume).abs() }
-    pub fn surface_area(&self) -> f64 { self.imp.get_property(crate::properties::Property::SurfaceArea) }
-    pub fn matches_tri_normals(&self) -> bool { self.imp.matches_tri_normals() }
-    pub fn num_degenerate_tris(&self) -> i32 { self.imp.num_degenerate_tris() }
-    pub fn get_tolerance(&self) -> f64 { self.imp.tolerance }
-    pub fn get_epsilon(&self) -> f64 { self.imp.epsilon }
+    pub fn num_vert(&self) -> usize {
+        self.imp.num_vert()
+    }
+    pub fn num_tri(&self) -> usize {
+        self.imp.num_tri()
+    }
+    pub fn num_edge(&self) -> usize {
+        self.imp.num_edge()
+    }
+    pub fn num_prop(&self) -> usize {
+        self.imp.num_prop
+    }
+    pub fn num_prop_vert(&self) -> usize {
+        self.imp.num_prop_vert()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.imp.is_empty()
+    }
+    pub fn status(&self) -> Error {
+        self.imp.status
+    }
+    pub fn volume(&self) -> f64 {
+        self.imp
+            .get_property(crate::properties::Property::Volume)
+            .abs()
+    }
+    pub fn surface_area(&self) -> f64 {
+        self.imp
+            .get_property(crate::properties::Property::SurfaceArea)
+    }
+    pub fn matches_tri_normals(&self) -> bool {
+        self.imp.matches_tri_normals()
+    }
+    pub fn num_degenerate_tris(&self) -> i32 {
+        self.imp.num_degenerate_tris()
+    }
+    pub fn get_tolerance(&self) -> f64 {
+        self.imp.tolerance
+    }
+    pub fn get_epsilon(&self) -> f64 {
+        self.imp.epsilon
+    }
 
     /// Port of C++ Manifold::Genus()
     pub fn genus(&self) -> i32 {
@@ -99,8 +142,12 @@ impl Manifold {
     /// Port of C++ Manifold::AsOriginal()
     /// Removes all mesh relations and recreates as an original mesh.
     pub fn as_original(&self) -> Self {
-        if let Some(e) = self.require_paired() { return e; }
-        if self.is_empty() { return self.clone(); }
+        if let Some(e) = self.require_paired() {
+            return e;
+        }
+        if self.is_empty() {
+            return self.clone();
+        }
         let mut out = self.imp.clone();
         out.initialize_original();
         out.set_normals_and_coplanar();
@@ -114,8 +161,12 @@ impl Manifold {
 
     /// Port of C++ Manifold::SetTolerance()
     pub fn set_tolerance(&self, tolerance: f64) -> Self {
-        if let Some(e) = self.require_paired() { return e; }
-        if self.is_empty() { return self.clone(); }
+        if let Some(e) = self.require_paired() {
+            return e;
+        }
+        if self.is_empty() {
+            return self.clone();
+        }
         let mut out = self.imp.clone();
         // Matches C++ SetTolerance: operate on the `tolerance` field (which
         // drives coplanar grouping in mark_coplanar), not `epsilon`. When
@@ -138,8 +189,12 @@ impl Manifold {
 
     /// Port of C++ Manifold::Simplify()
     pub fn simplify(&self, tolerance: f64) -> Self {
-        if let Some(e) = self.require_paired() { return e; }
-        if self.is_empty() { return self.clone(); }
+        if let Some(e) = self.require_paired() {
+            return e;
+        }
+        if self.is_empty() {
+            return self.clone();
+        }
         let mut out = self.imp.clone();
         // C++ uses tolerance_ (not epsilon_) throughout Simplify()
         let old_tolerance = out.tolerance;
@@ -161,7 +216,9 @@ impl Manifold {
 
     /// Port of C++ Manifold::WarpBatch()
     pub fn warp_batch<F: Fn(&mut [Vec3])>(&self, warp_fn: F) -> Self {
-        if let Some(e) = self.require_paired() { return e; }
+        if let Some(e) = self.require_paired() {
+            return e;
+        }
         if self.is_empty() {
             return self.clone();
         }
@@ -248,7 +305,9 @@ impl Manifold {
     /// Warp the mesh by applying a function to each vertex position.
     /// Does not check for self-intersection.
     pub fn warp<F: Fn(&mut Vec3)>(&self, warp_fn: F) -> Self {
-        if let Some(e) = self.require_paired() { return e; }
+        if let Some(e) = self.require_paired() {
+            return e;
+        }
         if self.is_empty() {
             return self.clone();
         }
@@ -273,279 +332,35 @@ impl Manifold {
         }
     }
 
-    /// Split this manifold into two using a cutter manifold.
-    /// Returns (intersection, difference).
-    pub fn split(&self, cutter: &Self) -> (Self, Self) {
-        let intersection = self.intersection(cutter);
-        let difference = self.difference(cutter);
-        (intersection, difference)
-    }
-
-    /// Split this manifold by a plane defined by a normal and offset from origin.
-    /// Returns (in direction of normal, opposite direction).
-    pub fn split_by_plane(&self, normal: Vec3, origin_offset: f64) -> (Self, Self) {
-        // Per C++ #1659: errored manifolds are empty, so the is_empty()
-        // early-return below would silently drop their status — guard first.
-        if self.imp.status != Error::NoError {
-            return (self.clone(), self.clone());
-        }
-        if self.is_empty() {
-            return (Self::empty(), Self::empty());
-        }
-        let halfspace = Self::halfspace(&self.imp.bbox, normal, origin_offset);
-        self.split(&halfspace)
-    }
-
-    /// Trim this manifold by a half-space, keeping only the part in the direction
-    /// of the normal vector.
-    pub fn trim_by_plane(&self, normal: Vec3, origin_offset: f64) -> Self {
-        if self.is_empty() {
-            return Self::empty();
-        }
-        let halfspace = Self::halfspace(&self.imp.bbox, normal, origin_offset);
-        self.intersection(&halfspace)
-    }
-
     /// Slice this manifold at the given Z height, returning the cross-section
-    /// as a CrossSection. Mirrors C++ `Manifold::Slice`.
+    /// as a CrossSection. C++ `Manifold::Slice` returns raw `Polygons`; this
+    /// is C++ `CrossSection(m.Slice(height))`, the Positive-union Polygons
+    /// constructor every C++ caller wraps them in.
     pub fn slice(&self, height: f64) -> CrossSection {
         if self.imp.is_soup || self.is_empty() {
-            return CrossSection::new(vec![]);
+            return CrossSection::default();
         }
-        let polys = self.imp.slice(height);
-        CrossSection::new(polys)
+        CrossSection::new(self.imp.slice(height))
     }
 
     /// Project this manifold onto the XY plane, returning the silhouette
-    /// as a CrossSection. Mirrors C++ `Manifold::Project`.
+    /// as a CrossSection. C++ `Manifold::Project` returns raw, often
+    /// self-overlapping `Polygons`; this is C++ `CrossSection(m.Project())`,
+    /// the Positive-union Polygons constructor its docs recommend.
     pub fn project(&self) -> CrossSection {
         if self.imp.is_soup || self.is_empty() {
-            return CrossSection::new(vec![]);
+            return CrossSection::default();
         }
-        let polys = self.imp.project();
-        CrossSection::from_polygons_fill(polys)
-    }
-
-    /// Apply batch boolean operations on a list of manifolds.
-    pub fn batch_boolean(manifolds: &[Self], op: OpType) -> Self {
-        if manifolds.is_empty() {
-            return Self::empty();
-        }
-        let mut result = manifolds[0].clone();
-        for m in &manifolds[1..] {
-            result = result.boolean(m, op);
-        }
-        result
-    }
-
-    /// Internal helper: create a halfspace (large cube) for plane splitting.
-    fn halfspace(bbox: &crate::types::Box, normal: Vec3, origin_offset: f64) -> Self {
-        let n = normalize(normal);
-        let cutter = Self::cube(Vec3::splat(2.0), true).translate(Vec3::new(1.0, 0.0, 0.0));
-        let center = bbox.center();
-        let size_len = (bbox.size().x * bbox.size().x + bbox.size().y * bbox.size().y + bbox.size().z * bbox.size().z).sqrt();
-        let dist = ((center.x - n.x * origin_offset).powi(2)
-            + (center.y - n.y * origin_offset).powi(2)
-            + (center.z - n.z * origin_offset).powi(2)).sqrt()
-            + 0.5 * size_len;
-        let cutter = cutter.scale(Vec3::splat(dist)).translate(Vec3::new(origin_offset, 0.0, 0.0));
-        let y_deg = -math::asin(n.z).to_degrees();
-        let z_deg = math::atan2(n.y, n.x).to_degrees();
-        cutter.rotate(0.0, y_deg, z_deg)
-    }
-
-    pub fn boolean(&self, other: &Self, op: OpType) -> Self {
-        self.boolean_with_engine(other, op, crate::types::BooleanConfig::default_engine())
-    }
-
-    /// True when two of this mesh's own triangles genuinely intersect —
-    /// they cross, they overlap, or they are coincident surface — rather
-    /// than merely sharing edges and vertices as every closed mesh does.
-    ///
-    /// Topologically manifold meshes can still be self-intersecting; those
-    /// inputs break the exact boolean engine's assumptions, so
-    /// [`crate::types::BooleanEngine::Auto`] routes them to the robust
-    /// engine. A mesh carrying non-finite positions (e.g. after a warp to
-    /// NaN) answers `true`, that being the safe verdict for geometry no
-    /// exact predicate can evaluate.
-    ///
-    /// The scan is a BVH self-query with an exact narrow phase; the verdict
-    /// is cached on the impl, so repeat queries (and the booleans that
-    /// consult it) are free until the geometry changes.
-    pub fn has_self_intersections(&self) -> bool {
-        crate::robust::soup::has_self_intersections(&self.imp)
-    }
-
-    /// Repair the winding of inside-out shells so every body reads as solid
-    /// material under the robust engine's {winding >= 1} semantics.
-    ///
-    /// Connected shells whose exact winding shows them inverted relative to
-    /// their nesting are rewound: outermost shells end up winding +1 and
-    /// cavity shells stay (or become) correctly inward-wound — legitimate
-    /// voids are preserved, unlike a blanket flip of negative-signed-volume
-    /// shells. Coincident/doubled sheets are deliberately left untouched;
-    /// the robust boolean's winding-stack arithmetic already handles them.
-    ///
-    /// Works standalone (no boolean required) on both manifold and
-    /// soup-backed impls; positions, properties, and mesh relations are
-    /// untouched, only triangle winding changes. Returns `self` unchanged
-    /// when nothing needs flipping.
-    pub fn repair_orientation(&self) -> Self {
-        if self.is_empty() {
-            return self.clone();
-        }
-        let tris = crate::robust::soup::impl_to_tris(&self.imp);
-        let plan = crate::robust::repair::plan_repair(&tris);
-        if plan.is_noop() {
-            return self.clone();
-        }
-        let mut out = self.imp.clone();
-        crate::robust::repair::apply_flips(&mut out, &plan.flip);
-        // Winding-only edit, but it rewrites halfedges in place; re-deriving
-        // the verdict keeps the invalidate-on-in-place-edit rule absolute.
-        out.invalidate_self_intersects();
-        Self::from_impl(out)
-    }
-
-    /// [`Manifold::boolean`] with an explicit engine choice, overriding the
-    /// process-global default set via
-    /// [`crate::types::BooleanConfig::set_default_engine`].
-    pub fn boolean_with_engine(
-        &self,
-        other: &Self,
-        op: OpType,
-        engine: crate::types::BooleanEngine,
-    ) -> Self {
-        Self::from_impl(boolean3::boolean_dispatch(&self.imp, &other.imp, op, engine, None))
-    }
-
-    /// [`Manifold::boolean_with_engine`] with cooperative cancellation.
-    pub fn boolean_with_engine_and_token(
-        &self,
-        other: &Self,
-        op: OpType,
-        engine: crate::types::BooleanEngine,
-        token: Option<&crate::cancel::CancelToken>,
-    ) -> Self {
-        Self::from_impl(boolean3::boolean_dispatch(&self.imp, &other.imp, op, engine, token))
-    }
-
-    /// [`Manifold::boolean_with_engine_and_token`] that also reports coarse
-    /// pipeline progress.
-    ///
-    /// Cancellation and progress travel together because callers that want one
-    /// almost always want the other (a UI showing a progress bar next to a
-    /// cancel button); pass `None` for either independently. `None` progress is
-    /// byte-for-byte the un-instrumented path — see [`crate::progress`] for the
-    /// phases reported and the throttling contract.
-    pub fn boolean_with_engine_and_progress(
-        &self,
-        other: &Self,
-        op: OpType,
-        engine: crate::types::BooleanEngine,
-        token: Option<&crate::cancel::CancelToken>,
-        progress: Option<&crate::progress::ProgressReporter>,
-    ) -> Self {
-        Self::from_impl(boolean3::boolean_dispatch_with_progress(
-            &self.imp, &other.imp, op, engine, token, progress,
-        ))
-    }
-
-    /// [`Manifold::boolean_with_engine`] with an explicit winding rule.
-    ///
-    /// [`crate::types::WindingRule::Nonzero`] treats inside-out geometry as
-    /// solid (`w != 0` rather than `w >= 1`), which keeps the inverted regions
-    /// of inconsistently wound scans instead of dropping them. The rule is a
-    /// robust-engine semantic: the exact engine ignores it, and `Auto` routes
-    /// to the robust engine whenever the rule is `Nonzero` (see
-    /// [`crate::boolean3::boolean_dispatch_full`]).
-    pub fn boolean_with_engine_and_rule(
-        &self,
-        other: &Self,
-        op: OpType,
-        engine: crate::types::BooleanEngine,
-        rule: crate::types::WindingRule,
-    ) -> Self {
-        self.boolean_with_engine_rule_and_progress(other, op, engine, rule, None, None)
-    }
-
-    /// The full per-call boolean path: engine, winding rule, cancellation, and
-    /// progress. Every other boolean entry point on `Manifold` is this one with
-    /// defaults filled in.
-    pub fn boolean_with_engine_rule_and_progress(
-        &self,
-        other: &Self,
-        op: OpType,
-        engine: crate::types::BooleanEngine,
-        rule: crate::types::WindingRule,
-        token: Option<&crate::cancel::CancelToken>,
-        progress: Option<&crate::progress::ProgressReporter>,
-    ) -> Self {
-        Self::from_impl(boolean3::boolean_dispatch_full(
-            &self.imp, &other.imp, op, engine, rule, token, progress,
-        ))
-    }
-
-    /// [`Manifold::batch_boolean`] with an explicit engine choice (pairwise
-    /// left fold, like `batch_boolean`).
-    pub fn batch_boolean_with_engine(
-        manifolds: &[Self],
-        op: OpType,
-        engine: crate::types::BooleanEngine,
-    ) -> Self {
-        if manifolds.is_empty() {
-            return Self::empty();
-        }
-        let mut result = manifolds[0].clone();
-        for m in &manifolds[1..] {
-            result = result.boolean_with_engine(m, op, engine);
-        }
-        result
-    }
-
-    pub fn union_with_engine(&self, other: &Self, engine: crate::types::BooleanEngine) -> Self {
-        self.boolean_with_engine(other, OpType::Add, engine)
-    }
-
-    pub fn difference_with_engine(&self, other: &Self, engine: crate::types::BooleanEngine) -> Self {
-        self.boolean_with_engine(other, OpType::Subtract, engine)
-    }
-
-    pub fn intersection_with_engine(&self, other: &Self, engine: crate::types::BooleanEngine) -> Self {
-        self.boolean_with_engine(other, OpType::Intersect, engine)
-    }
-
-    /// [`Manifold::boolean`] with cooperative cancellation.
-    ///
-    /// Pass `None` for the uncancellable behaviour of [`Manifold::boolean`] —
-    /// that path is unchanged and touches no atomics. With `Some(token)`, a
-    /// cancel requested from any thread (before or during the call) makes this
-    /// return an empty manifold whose [`Manifold::status`] is
-    /// [`Error::Cancelled`], mirroring the C++ `ExecutionContext` contract.
-    pub fn boolean_with_token(
-        &self,
-        other: &Self,
-        op: OpType,
-        token: Option<&crate::cancel::CancelToken>,
-    ) -> Self {
-        Self::from_impl(boolean3::boolean_with_token(&self.imp, &other.imp, op, token))
-    }
-
-    pub fn union(&self, other: &Self) -> Self {
-        self.boolean(other, OpType::Add)
-    }
-
-    pub fn difference(&self, other: &Self) -> Self {
-        self.boolean(other, OpType::Subtract)
-    }
-
-    pub fn intersection(&self, other: &Self) -> Self {
-        self.boolean(other, OpType::Intersect)
+        CrossSection::new(self.imp.project())
     }
 
     pub fn calculate_curvature(&self, gaussian_idx: i32, mean_idx: i32) -> Self {
-        if let Some(e) = self.require_paired() { return e; }
-        if self.is_empty() { return self.clone(); }
+        if let Some(e) = self.require_paired() {
+            return e;
+        }
+        if self.is_empty() {
+            return self.clone();
+        }
         let mut out = self.imp.clone();
         out.calculate_curvature(gaussian_idx, mean_idx);
         Self::from_impl(out)
@@ -559,8 +374,12 @@ impl Manifold {
     where
         F: Fn(&mut [f64], Vec3, &[f64]),
     {
-        if let Some(e) = self.require_paired() { return e; }
-        if self.is_empty() { return self.clone(); }
+        if let Some(e) = self.require_paired() {
+            return e;
+        }
+        if self.is_empty() {
+            return self.clone();
+        }
         let mut out = self.imp.clone();
         let old_num_prop = out.num_prop;
         let old_properties = out.properties.clone();
@@ -577,11 +396,13 @@ impl Manifold {
                     let vert = edge.start_vert as usize;
                     let prop_vert = edge.prop_vert as usize;
                     let pos = out.vert_pos[vert];
-                    let old_slice = if old_num_prop > 0 && prop_vert * old_num_prop < old_properties.len() {
-                        &old_properties[old_num_prop * prop_vert..old_num_prop * prop_vert + old_num_prop]
-                    } else {
-                        &[]
-                    };
+                    let old_slice =
+                        if old_num_prop > 0 && prop_vert * old_num_prop < old_properties.len() {
+                            &old_properties
+                                [old_num_prop * prop_vert..old_num_prop * prop_vert + old_num_prop]
+                        } else {
+                            &[]
+                        };
                     prop_func(
                         &mut out.properties[num_prop * prop_vert..num_prop * prop_vert + num_prop],
                         pos,
@@ -594,7 +415,6 @@ impl Manifold {
         out.num_prop = num_prop;
         Self::from_impl(out)
     }
-
 
     pub fn compose(parts: &[Self]) -> Self {
         let impls: Vec<_> = parts.iter().map(|m| m.imp.clone()).collect();
@@ -642,12 +462,19 @@ impl Manifold {
                 .filter(|&v| component_indices[v as usize] == comp)
                 .collect();
             let n_vert = vert_new2old.len();
-            if n_vert == 0 { continue; }
+            if n_vert == 0 {
+                continue;
+            }
 
-            imp.vert_pos = vert_new2old.iter().map(|&v| self.imp.vert_pos[v as usize]).collect();
+            imp.vert_pos = vert_new2old
+                .iter()
+                .map(|&v| self.imp.vert_pos[v as usize])
+                .collect();
             if !self.imp.vert_normal.is_empty() {
-                imp.vert_normal = vert_new2old.iter()
-                    .map(|&v| self.imp.vert_normal[v as usize]).collect();
+                imp.vert_normal = vert_new2old
+                    .iter()
+                    .map(|&v| self.imp.vert_normal[v as usize])
+                    .collect();
             }
 
             // Collect faces belonging to this component
@@ -658,7 +485,9 @@ impl Manifold {
                 })
                 .collect();
 
-            if face_new2old.is_empty() { continue; }
+            if face_new2old.is_empty() {
+                continue;
+            }
 
             // Copy full data from original, then gather_faces will filter
             imp.halfedge = self.imp.halfedge.clone();
@@ -693,77 +522,11 @@ impl Manifold {
     }
 }
 
-// Operator overloads: + for union, - for difference, ^ for intersection
-// Matches C++ operator+(Manifold), operator-(Manifold), operator^(Manifold)
+#[path = "manifold_boolean.rs"]
+mod boolean;
 
-impl std::ops::Add for Manifold {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self { self.union(&rhs) }
-}
-
-impl std::ops::Add<&Manifold> for Manifold {
-    type Output = Self;
-    fn add(self, rhs: &Self) -> Self { self.union(rhs) }
-}
-
-impl std::ops::Add<&Manifold> for &Manifold {
-    type Output = Manifold;
-    fn add(self, rhs: &Manifold) -> Manifold { self.union(rhs) }
-}
-
-impl std::ops::AddAssign for Manifold {
-    fn add_assign(&mut self, rhs: Self) { *self = self.union(&rhs); }
-}
-
-impl std::ops::AddAssign<&Manifold> for Manifold {
-    fn add_assign(&mut self, rhs: &Self) { *self = self.union(rhs); }
-}
-
-impl std::ops::Sub for Manifold {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self { self.difference(&rhs) }
-}
-
-impl std::ops::Sub<&Manifold> for Manifold {
-    type Output = Self;
-    fn sub(self, rhs: &Self) -> Self { self.difference(rhs) }
-}
-
-impl std::ops::Sub<&Manifold> for &Manifold {
-    type Output = Manifold;
-    fn sub(self, rhs: &Manifold) -> Manifold { self.difference(rhs) }
-}
-
-impl std::ops::SubAssign for Manifold {
-    fn sub_assign(&mut self, rhs: Self) { *self = self.difference(&rhs); }
-}
-
-impl std::ops::SubAssign<&Manifold> for Manifold {
-    fn sub_assign(&mut self, rhs: &Self) { *self = self.difference(rhs); }
-}
-
-impl std::ops::BitXor for Manifold {
-    type Output = Self;
-    fn bitxor(self, rhs: Self) -> Self { self.intersection(&rhs) }
-}
-
-impl std::ops::BitXor<&Manifold> for Manifold {
-    type Output = Self;
-    fn bitxor(self, rhs: &Self) -> Self { self.intersection(rhs) }
-}
-
-impl std::ops::BitXor<&Manifold> for &Manifold {
-    type Output = Manifold;
-    fn bitxor(self, rhs: &Manifold) -> Manifold { self.intersection(rhs) }
-}
-
-impl std::ops::BitXorAssign for Manifold {
-    fn bitxor_assign(&mut self, rhs: Self) { *self = self.intersection(&rhs); }
-}
-
-impl std::ops::BitXorAssign<&Manifold> for Manifold {
-    fn bitxor_assign(&mut self, rhs: &Self) { *self = self.intersection(rhs); }
-}
+#[path = "manifold_robust.rs"]
+mod robust;
 
 #[path = "manifold_meshgl.rs"]
 mod meshgl;

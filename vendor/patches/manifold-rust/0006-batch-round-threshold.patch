@@ -1,28 +1,31 @@
-NeoSCAD patch to manifold-rust 0.13.1 (crates.io): a batch_boolean round
+NeoSCAD patch to manifold-rust 0.15.0 (crates.io): a batch_boolean round
 runs its pairs in parallel only when its operands have 10,000 vertices in
 all (C++ autoPolicy's kSeqThreshold). With every core busy, a forked
 round of small booleans can wait for a worker the scheduler has no core
 for. The pairs, their order and so the output are unchanged. Test:
 crates/geom/tests/parallel_kernels.rs.
 
-Apply from the crate root on top of 0004: patch -p1 < this file. The
-crate's sources use CRLF line endings.
+Upstream: not proposed; a NeoSCAD policy.
+
+Apply from the crate root on top of 0005: patch -p1 < this file.
+The crate's older sources use CRLF line endings; files this series
+adds use LF.
 See vendor/README.md ("The parallel boolean patch").
 
 --- a/src/csg_tree.rs
 +++ b/src/csg_tree.rs
-@@ -405,6 +405,10 @@
+@@ -410,6 +410,10 @@
+             .then(self.1.cmp(&other.1))
      }
  }
- 
++
 +// NeoSCAD patch: vertices a `batch_boolean` round's operands need in all
 +// before its pairs run in parallel.
 +const PAR_ROUND_VERTS: usize = 10_000;
-+
+ 
  fn batch_boolean(
      op: OpType,
-     children: &mut Vec<CsgLeafNode>,
-@@ -456,7 +460,21 @@
+@@ -457,7 +461,25 @@
              let b = heap.pop().unwrap();
              pairs.push((a, b));
          }
@@ -40,7 +43,11 @@ See vendor/README.md ("The parallel boolean patch").
 +            .iter()
 +            .map(|(a, b)| a.0.num_vert() + b.0.num_vert())
 +            .sum();
-+        let threshold = if work >= PAR_ROUND_VERTS { 2 } else { usize::MAX };
++        let threshold = if work >= PAR_ROUND_VERTS {
++            2
++        } else {
++            usize::MAX
++        };
 +        let results = crate::par::maybe_par_map(pairs.len(), threshold, |i| {
              simple_boolean(&pairs[i].0 .0, &pairs[i].1 .0, op, token)
          });

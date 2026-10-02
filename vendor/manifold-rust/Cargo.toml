@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.77"
 name = "manifold-rust"
-version = "0.13.1"
+version = "0.15.0"
 authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
 build = false
 exclude = [

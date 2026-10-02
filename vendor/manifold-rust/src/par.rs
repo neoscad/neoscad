@@ -33,15 +33,10 @@ where
     (0..n).map(f).collect()
 }
 
-// NeoSCAD patch: the indices in `0..n` for which `pred` holds, in
-// ascending order, testing `pred` in parallel when `n >= threshold`.
-//
-// This is the flag half of C++ `FlagStore::run_par` (edge_op.cpp:54-84),
-// which tests edges into thread-local lists and then sorts the indices so
-// the collapses run in ascending order. rayon's `collect` into a `Vec`
-// keeps the sequential order of a filtered range by itself, so no sort is
-// needed and the list is exactly the one the sequential loop builds.
-// `pred` must only read: callers mutate the mesh once the list is done.
+/// The indices in `0..n` where `pred` holds, ascending, testing in parallel
+/// when `n >= threshold`: the flag half of C++ `FlagStore::run_par`
+/// (edge_op.cpp:54-84). rayon's `collect` keeps the order, so unlike C++ no
+/// sort is needed.
 #[cfg(feature = "parallel")]
 pub fn maybe_par_filter<F>(n: usize, threshold: usize, pred: F) -> Vec<usize>
 where
@@ -64,12 +59,9 @@ where
     (0..n).filter(|&i| pred(i)).collect()
 }
 
-// NeoSCAD patch: a stable sort by key, in parallel when
-// `v.len() >= threshold`. A stable sort's result is fully determined by
-// the keys and the input order (equal keys keep their order), so rayon's
-// stable merge sort and the standard library's give the same slice.
-// `key` must be a total order (no floats with NaN): with an inconsistent
-// order the two algorithms may disagree.
+/// A stable sort by key, in parallel when `v.len() >= threshold`. A stable
+/// sort is determined by the keys and input order, so rayon's gives the same
+/// slice, provided `key` is a total order.
 #[cfg(feature = "parallel")]
 pub fn maybe_par_sort_by_key<T, K, F>(v: &mut [T], threshold: usize, key: F)
 where
@@ -95,10 +87,8 @@ where
     v.sort_by_key(key);
 }
 
-// NeoSCAD patch: run `f` on every item, in parallel when
-// `items.len() >= threshold`. For items that each own disjoint output
-// (slices cut with `split_at_mut`, say), so the order they run in cannot
-// change what is written.
+/// Run `f` on every item, in parallel when `items.len() >= threshold`. Items
+/// must own disjoint output, so the run order cannot change what is written.
 #[cfg(feature = "parallel")]
 pub fn maybe_par_for_each<T, F>(items: Vec<T>, threshold: usize, f: F)
 where
@@ -122,9 +112,9 @@ where
     items.into_iter().for_each(f);
 }
 
-// NeoSCAD patch: apply `f` to every element in place, in parallel when
-// `v.len() >= threshold`. `f` sees only its own element, so the result
-// does not depend on the order.
+/// Apply `f` to every element in place, in parallel when `v.len() >=
+/// threshold`. `f` sees only its own element, so the result does not depend on
+/// the order.
 #[cfg(feature = "parallel")]
 pub fn maybe_par_for_each_mut<T, F>(v: &mut [T], threshold: usize, f: F)
 where
@@ -185,11 +175,23 @@ where
     if n >= threshold {
         (0..n)
             .into_par_iter()
-            .map(|i| if token.is_cancelled() { None } else { Some(f(i)) })
+            .map(|i| {
+                if token.is_cancelled() {
+                    None
+                } else {
+                    Some(f(i))
+                }
+            })
             .collect()
     } else {
         (0..n)
-            .map(|i| if token.is_cancelled() { None } else { Some(f(i)) })
+            .map(|i| {
+                if token.is_cancelled() {
+                    None
+                } else {
+                    Some(f(i))
+                }
+            })
             .collect()
     }
 }
@@ -209,6 +211,16 @@ where
         return Some(maybe_par_map(n, threshold, f));
     };
     (0..n)
-        .map(|i| if token.is_cancelled() { None } else { Some(f(i)) })
+        .map(|i| {
+            if token.is_cancelled() {
+                None
+            } else {
+                Some(f(i))
+            }
+        })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "par_tests.rs"]
+mod tests;

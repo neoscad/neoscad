@@ -371,7 +371,7 @@ lead them, come roughly in order of user impact.
   work, made the hero and `csg_deep_union` slower than before (4.6
   against 3.5 s; 0.118 against 0.061 s), not faster. (`slow-cases.md`
   §1.1) **Partly done:** `batch_boolean` rounds now go parallel only
-  above 10,000 vertices (`vendor/patches/manifold-rust/0005-*`, output
+  above 10,000 vertices (`vendor/patches/manifold-rust/0006-*`, output
   unchanged, a determinism test in `crates/geom/tests/parallel_kernels.rs`).
   Measured interleaved against the build before it, exporting STL (best
   of 5 to 11, identical bytes every time): unloaded, all four models
@@ -505,14 +505,16 @@ lead them, come roughly in order of user impact.
   fan-out is what makes the heavy models fast.
 
 ## Parity
-- `manifold-rust` 0.13.1 ports Manifold v3.5.0; OpenSCAD pins v3.5.2.
+- `manifold-rust` 0.15.0 ports Manifold v3.5.0 (with a few later
+  upstream fixes); OpenSCAD pins v3.5.2.
   (5a)
-- `vendor/manifold-rust` patches `collapse_edge`, whose clean-up after a
-  boolean could slide a vertex across a crease and fill a concave corner
-  (BOSL2 `cubetruss`, 7.3 mm³ too much; `vendor/README.md`). C++ Manifold
-  3.5.2 fails the same way. Report it to Manifold and manifold-rust with
-  the 35- and 28-vertex operands in `crates/geom/tests/data/collapse-crease-*.txt`
-  (union 328.29 instead of 314.49), then drop the copy. Separately, C++
+- `collapse_edge`'s clean-up after a boolean could slide a vertex across
+  a crease and fill a concave corner (BOSL2 `cubetruss`, 7.3 mm³ too
+  much; `vendor/README.md`). manifold-rust 0.15.0 fixed it (in
+  `dedupe_edges`) and neoscad's patch was dropped. C++ Manifold 3.5.2
+  fails the same way: report it to Manifold with the 35- and 28-vertex
+  operands in `crates/geom/tests/data/collapse-crease-*.txt` (union
+  328.29 instead of 314.49). Separately, C++
   3.5.2 built by hand (`-O2 -ffp-contract=off`, no TBB) crashed with
   SIGSEGV intersecting the larger cubetruss operand with some boxes; not
   investigated. (H1)

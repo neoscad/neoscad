@@ -9,15 +9,21 @@ use crate::impl_mesh::{reserve_ids, ManifoldImpl};
 use crate::linalg::Vec3;
 use crate::types::{OpType, TriRef};
 
-use super::{EdgeGroups, EdgeList, abs_sum, exclusive_scan_abs,
-            size_output, add_new_edge_verts, append_partial_edges,
-            append_new_edges, append_whole_edges};
+use super::{
+    abs_sum, add_new_edge_verts, append_new_edges, append_partial_edges, append_whole_edges,
+    exclusive_scan_abs, size_output, EdgeGroups, EdgeList,
+};
 
 // ---------------------------------------------------------------------------
 // UpdateReference -- map tri refs from input meshes to output
 // ---------------------------------------------------------------------------
 
-pub(super) fn update_reference(out_r: &mut ManifoldImpl, in_p: &ManifoldImpl, in_q: &ManifoldImpl, invert_q: bool) {
+pub(super) fn update_reference(
+    out_r: &mut ManifoldImpl,
+    in_p: &ManifoldImpl,
+    in_q: &ManifoldImpl,
+    invert_q: bool,
+) {
     let offset_q = reserve_ids(in_q.mesh_relation.mesh_id_transform.len() as u32) as i32;
 
     for tri_ref in out_r.mesh_relation.tri_ref.iter_mut() {
@@ -41,7 +47,10 @@ pub(super) fn update_reference(out_r: &mut ManifoldImpl, in_p: &ManifoldImpl, in
     for (&k, v) in &in_q.mesh_relation.mesh_id_transform {
         let mut rel = v.clone();
         rel.back_side ^= invert_q;
-        out_r.mesh_relation.mesh_id_transform.insert(k + offset_q, rel);
+        out_r
+            .mesh_relation
+            .mesh_id_transform
+            .insert(k + offset_q, rel);
     }
 }
 
@@ -49,7 +58,12 @@ pub(super) fn update_reference(out_r: &mut ManifoldImpl, in_p: &ManifoldImpl, in
 // CreateProperties -- barycentric interpolation of properties
 // ---------------------------------------------------------------------------
 
-pub(super) fn create_properties(out_r: &mut ManifoldImpl, in_p: &ManifoldImpl, in_q: &ManifoldImpl, invert_q: bool) {
+pub(super) fn create_properties(
+    out_r: &mut ManifoldImpl,
+    in_p: &ManifoldImpl,
+    in_q: &ManifoldImpl,
+    invert_q: bool,
+) {
     let num_prop_p = in_p.num_prop;
     let num_prop_q = in_q.num_prop;
     let num_prop = num_prop_p.max(num_prop_q);
@@ -86,7 +100,8 @@ pub(super) fn create_properties(out_r: &mut ManifoldImpl, in_p: &ManifoldImpl, i
         for i in 0..3 {
             let vert = out_r.halfedge[3 * tri + i].start_vert;
             if vert >= 0 && (vert as usize) < out_r.vert_pos.len() {
-                bary[3 * tri + i] = get_barycentric(out_r.vert_pos[vert as usize], tri_pos, out_r.epsilon);
+                bary[3 * tri + i] =
+                    get_barycentric(out_r.vert_pos[vert as usize], tri_pos, out_r.epsilon);
             }
         }
     }
@@ -107,9 +122,13 @@ pub(super) fn create_properties(out_r: &mut ManifoldImpl, in_p: &ManifoldImpl, i
     ];
 
     #[inline]
-    fn next3(i: usize) -> usize { (i + 1) % 3 }
+    fn next3(i: usize) -> usize {
+        (i + 1) % 3
+    }
     #[inline]
-    fn prev3(i: usize) -> usize { (i + 2) % 3 }
+    fn prev3(i: usize) -> usize {
+        (i + 2) % 3
+    }
 
     for tri in 0..num_tri {
         if out_r.halfedge[3 * tri].start_vert < 0 {
@@ -119,7 +138,11 @@ pub(super) fn create_properties(out_r: &mut ManifoldImpl, in_p: &ManifoldImpl, i
         let pq = ref_pq.mesh_id == 0;
         let pq_flag: i32 = if pq { 0 } else { 1 };
         let old_num_prop = if pq { num_prop_p } else { num_prop_q };
-        let properties = if pq { &in_p.properties } else { &in_q.properties };
+        let properties = if pq {
+            &in_p.properties
+        } else {
+            &in_q.properties
+        };
         let halfedge = if pq { &in_p.halfedge } else { &in_q.halfedge };
 
         // Per #1718: for Subtract, Q's triangles are flipped in the result, so
@@ -127,10 +150,8 @@ pub(super) fn create_properties(out_r: &mut ManifoldImpl, in_p: &ManifoldImpl, i
         // sign flip to point outward from the result's solid (into the cavity).
         // Check is per-source-triangle — in_q may itself be a mixed Boolean
         // result with only some meshIDs carrying normals.
-        let negate_normals = !pq
-            && invert_q
-            && old_num_prop >= 3
-            && in_q.tri_has_normals(ref_pq.face_id as usize);
+        let negate_normals =
+            !pq && invert_q && old_num_prop >= 3 && in_q.tri_has_normals(ref_pq.face_id as usize);
 
         for i in 0..3 {
             let vert = out_r.halfedge[3 * tri + i].start_vert;
@@ -213,7 +234,8 @@ pub(super) fn create_properties(out_r: &mut ManifoldImpl, in_p: &ManifoldImpl, i
                             }
                         }
                     }
-                    let mut val = uvw.x * old_props[0] + uvw.y * old_props[1] + uvw.z * old_props[2];
+                    let mut val =
+                        uvw.x * old_props[0] + uvw.y * old_props[1] + uvw.z * old_props[2];
                     if negate_normals && p < 3 {
                         val = -val;
                     }
@@ -389,25 +411,18 @@ pub fn boolean_result_with_token(
         return crate::boolean3::cancelled_impl();
     }
 
-    // Build edge maps
-    let mut edges_p: EdgeList<i32> = Vec::new();
-    let mut edges_q: EdgeList<i32> = Vec::new();
-    let mut edges_new: EdgeList<(i32, i32)> = Vec::new();
-
-    // NeoSCAD patch: the lists are allocated at their final size, which
-    // the inclusions give, and the token is checked inside. Grown by
-    // doubling, the last reallocation of `edges_new` alone (a copy from
-    // one buffer into one twice its size) took 0.8 s and a gigabyte in the
-    // Menger sponge at depth 5, with no check able to run in between; now
-    // the allocation comes first, and the loop's first check sees it.
+    // Build edge maps, sized up front rather than grown by doubling: each
+    // intersection adds |inclusion| entries to its edge's list and two to
+    // `edges_new`.
     let count = |inclusions: &[i32]| -> usize {
         inclusions.iter().map(|x| x.unsigned_abs() as usize).sum()
     };
     let (n12, n21) = (count(&i12), count(&i21));
-    edges_p.reserve_exact(n12);
-    edges_q.reserve_exact(n21);
-    edges_new.reserve_exact(2 * (n12 + n21));
-    if add_new_edge_verts(
+    let mut edges_p: EdgeList<i32> = Vec::with_capacity(n12);
+    let mut edges_q: EdgeList<i32> = Vec::with_capacity(n21);
+    let mut edges_new: EdgeList<(i32, i32)> = Vec::with_capacity(2 * (n12 + n21));
+
+    add_new_edge_verts(
         &mut edges_p,
         &mut edges_new,
         &bool3.xv12.p1q2,
@@ -417,7 +432,8 @@ pub fn boolean_result_with_token(
         true,
         0,
         token,
-    ) || add_new_edge_verts(
+    );
+    add_new_edge_verts(
         &mut edges_q,
         &mut edges_new,
         &bool3.xv21.p1q2,
@@ -427,12 +443,15 @@ pub fn boolean_result_with_token(
         false,
         bool3.xv12.p1q2.len(),
         token,
-    ) {
-        return crate::boolean3::cancelled_impl();
-    }
+    );
 
-    // NeoSCAD patch: each sort takes a buffer as large as its list, so a
-    // limit passed while the lists grew stops here, not after the sorts.
+    // C++ clears v12R/v21R here (after AddNewEdgeVerts); drop the counterparts
+    // so the large scans don't ride through the rest of the pipeline.
+    drop(v12r);
+    drop(v21r);
+
+    // Phase 3 (C++ boolean_result.cpp:869): after AddNewEdgeVerts, and between
+    // the edge-list sorts, which have no C++ counterpart.
     if is_cancelled(token) {
         return crate::boolean3::cancelled_impl();
     }
@@ -445,16 +464,6 @@ pub fn boolean_result_with_token(
         return crate::boolean3::cancelled_impl();
     }
     let edges_new = EdgeGroups::new(edges_new);
-
-    // C++ clears v12R/v21R here (after AddNewEdgeVerts); drop the counterparts
-    // so the large scans don't ride through the rest of the pipeline.
-    drop(v12r);
-    drop(v21r);
-
-    // Phase 3 (C++ boolean_result.cpp:869): after AddNewEdgeVerts.
-    if is_cancelled(token) {
-        return crate::boolean3::cancelled_impl();
-    }
 
     // Size output
     let (face_edge, face_pq2r) = size_output(

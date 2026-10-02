@@ -17,7 +17,9 @@ exactly:
 One patch per logical change, each starting with a short header: what it
 changes, why, its upstream status, and the section of this file that has
 the evidence. In the tree, each change to source is also marked with a
-`NeoSCAD patch` comment.
+`NeoSCAD patch` comment, except in a patch that is an upstream proposal
+taken verbatim (its header names the branch), where the marker would be
+the only difference from what upstream is asked to merge.
 
 `scripts/vendor-check.sh` rebuilds each tree that way (downloading the
 `.crate` and checking its checksum) and compares it with `vendor/<crate>`
@@ -58,88 +60,157 @@ and run the check. When no patch is left, drop
 `vendor/<crate>`, `vendor/patches/<crate>` and its `[patch.crates-io]`
 line.
 
-## manifold-rust 0.13.1, patched
+## manifold-rust 0.15.0, patched
 
 A copy of the crates.io release (`.cargo_vcs_info.json` gives the upstream
 commit), used through `[patch.crates-io]` in the root `Cargo.toml`. It is
 not a workspace member, so the workspace's lints, formatting and tests do
-not apply to it. It carries six changes, each marked `NeoSCAD patch`: a
-bug fix in `src/edge_op.rs`, two speed fixes in `src/polygon_earclip.rs`,
-parallel boolean kernels in `src/par.rs` and its callers, a size
-threshold for one of them, and cancellation a host can drive (below).
-Drop the copy once upstream has them all.
+not apply to it. It carries seven changes: two speed fixes in
+`src/polygon_earclip.rs`, parallel boolean kernels in `src/par.rs` and
+its callers, parallel `batch_boolean` rounds, cancellation checks inside
+the result assembly, a size threshold for the rounds, and a cancel token
+a host can drive (below). The first five are upstream proposals, each
+the `src/` part of one commit on a `neoscad/*` branch of a fork of
+larsbrubaker/manifold-rust, taken verbatim; the last two are NeoSCAD's
+own and are marked `NeoSCAD patch` in the source. Drop the copy once
+upstream has the five and the token API has another home.
 
 The series, in `vendor/patches/manifold-rust/`:
 
 | Patch | Change |
 |---|---|
 | `removed` | `.gitmodules` (a submodule the `.crate` does not ship) and `README_HERO.png` (the README's 257 KiB screenshot) are left out; neither is used by the build |
-| `0001-edge-collapse-crease.patch` | the edge-collapse fix (`src/edge_op.rs`) |
-| `0002-keyhole-loop-visitor.patch` | the keyhole speed patch (`src/polygon_earclip.rs`) |
-| `0003-parallel-booleans.patch` | the parallel boolean kernels |
-| `0004-keyhole-ring-boxes.patch` | the keyhole ring-box patch (`src/polygon_earclip.rs`) |
-| `0005-batch-round-threshold.patch` | `batch_boolean` rounds of under 10,000 vertices run their pairs serially (`src/csg_tree.rs`; see the parallel boolean patch) |
-| `0006-cancel-token-over-a-flag.patch` | a `CancelToken` over a caller's flag, polling a caller's check; checks inside `AddNewEdgeVerts` (`src/cancel.rs`, `src/boolean_result*.rs`; see the cancellation patch) |
+| `0001-keyhole-loop-visitor.patch` | the keyhole speed patch (`src/polygon_earclip.rs`); branch `neoscad/earclip-loop-visitor` |
+| `0002-keyhole-ring-boxes.patch` | the keyhole ring-box patch (`src/polygon_earclip.rs`); branch `neoscad/earclip-ring-boxes`, on top of the previous one |
+| `0003-parallel-booleans.patch` | the parallel boolean kernels (`src/par.rs`, `src/edge_op.rs`, the new `src/edge_op_orbits.rs`, and others); branch `neoscad/parallel-booleans` |
+| `0004-parallel-batch-rounds.patch` | `batch_boolean` runs each round's pairs in parallel (`src/csg_tree.rs`); branch `neoscad/parallel-batch-rounds` |
+| `0005-cancel-new-edge-verts.patch` | checks inside `AddNewEdgeVerts`, and its lists sized up front (`src/boolean_result*.rs`); branch `neoscad/cancel-new-edge-verts`, on top of `neoscad/parallel-booleans` |
+| `0006-batch-round-threshold.patch` | NeoSCAD's: `batch_boolean` rounds of under 10,000 vertices run their pairs serially (`src/csg_tree.rs`; see the parallel boolean patch) |
+| `0007-cancel-token-over-a-flag.patch` | NeoSCAD's: a `CancelToken` over a caller's flag, polling a caller's check (`src/cancel.rs`; see the cancellation patch) |
 
 The first vendoring (`17a31e4`) left the two files out without a
 recorded reason; they could as well be restored, which would empty
-`removed`. crates.io has had a newer release, 0.15.0, since 2026-09-29;
-it has not been compared with this series.
+`removed`.
 
-Its source files use CRLF line endings; keep them when editing (a tool
-that rewrites them as LF turns every line into a diff). The patches
-carry the CRs in their lines, so keep those too.
+Most of its source files use CRLF line endings; keep them when editing (a
+tool that rewrites them as LF turns every line into a diff). A few files
+new in 0.15.0 (`src/cross_section_tests.rs`, `src/impl_shapes.rs`, and
+others) use LF, and so do the files the series adds (`src/edge_op_orbits.rs`,
+`src/par_tests.rs`). The patches carry the CRs in their lines, so keep
+those too.
 
-### The edge-collapse bug
+### Moving from 0.13.1 to 0.15.0
+
+0.15.0 (upstream `a866917`, 35 commits after 0.13.1's `57be4a6`) is
+mostly a `cargo fmt` sweep over the whole crate (`cfa31bf`), which is
+why every 0.13.1 patch stopped applying. The changes that reach neoscad:
+
+- `dedupe_edges` skips a duplicate entry that an earlier repair in the
+  same pass already resolved (`4a99dc4`). Repairing the stale entry gave
+  the orbit a copy of the wrong vertex. This is what fixed the
+  edge-collapse bug below.
+- A mirrored mesh keeps each property with its corner (`7fe2593`,
+  `8e77334`, upstream Manifold's `422ab6fc`): the flip used to break
+  `prop_vert == start_vert` even with no properties.
+- `Impl::slice` interpolates as C++ does (`la::lerp`, `a52bb8e`) and
+  traces contours from the lowest-indexed triangle (a `BTreeSet`, not a
+  randomly seeded `HashSet`; `d3a5967`), and `Manifold::slice` now
+  returns the `CrossSection` union of the loops (`9ae04a5`). neoscad's
+  `ManifoldGeometry::slice` takes the raw loops from the implementation
+  instead and unions them once, as `project` already did.
+- The rest does not reach neoscad: `CrossSection` reworked to follow C++
+  (neoscad uses Clipper directly), `MeshGL::merge` (neoscad merges in
+  `manifold_geom.rs`), the centred cylinder's and `subdivide_impl`'s
+  stale caches (`fa18cc5`; neoscad builds its own meshes), the
+  `RebuildSolid` API, `manifold.rs` and `impl_mesh.rs` split into
+  smaller files, and .NET and wasm packaging. `edge_op`'s collapse code,
+  `polygon_earclip`, `csg_tree`, `par.rs`, the boolean kernels and
+  `cancel.rs` changed only in formatting.
+
+The `slice` change is the only one neoscad's code needed. Upstream
+`main` has one code change since 0.15.0 (`a69e579`, exact QuickHull
+visibility); it is not in a release.
+
+The 0.13.1 series became this one as follows:
+
+- the edge-collapse patch (`0001`) was dropped (below);
+- the keyhole patches (`0002`, `0004`) are now `0001` and `0002`, the
+  same code with comments reworded for upstream;
+- the parallel boolean patch (`0003`) is now `0003` and `0004`: the
+  kernels, and the batch rounds on their own. The orbit-scan helpers
+  moved to a new file, `src/edge_op_orbits.rs`, and the orbit scans and
+  `sort_geometry` now go parallel from 100,000 halfedges or elements
+  instead of 10,000 (the edge-flag scans already did);
+- the cancellation patch (`0006`) is now `0005`, the checks inside
+  `AddNewEdgeVerts` (now at every intersection, not every 16,384), and
+  `0007`, the token API;
+- the round threshold (`0005`) is now `0006`.
+
+The thresholds are upstream's choice: at 10,000 a fold of many small
+unions got slower on a busy 14-core machine. On neoscad's models the
+two settings measured the same. Interleaved, best of 9 under a load
+average of about 9: Menger level 4 1.342 s at 100,000 against 1.343 s
+at 10,000, and `csg_spheres` 0.361 against 0.363 s. On all 585 models
+below, the output is byte-identical to the 0.13.1-style series rebased
+by `rustfmt` onto 0.15.0, at 1, 4 and the default number of threads.
+
+What changed in output, against 0.3.0 (0.13.1 and six patches), on 585
+models that export a mesh or SVG (all of `tests/data/scad`, the bench
+models, `web/examples`, `BOSL2/examples` and every twelfth file of
+`BOSL2/examples_x`): 578 byte-identical and 7 different. In all 7 the
+volume is the same to 1e-10 or closer:
+
+- `web/examples/threaded-ring.scad` and BOSL2 `joiners__007` changed with
+  the `dedupe_edges` fix: the same output as 0.3.0's once it is disabled.
+  In the ring, one 3-triangle fan on each side has a different apex
+  (area +0.13 of 2,130 mm²); in the joiner only the triangle order changed.
+- `tests/data/scad/3D/issues/issue1138.scad` and BOSL2 `miscellaneous__004`,
+  `rounding__036`, `shapes3d__220` and `transforms__043` changed because
+  the edge-collapse patch was dropped: with it applied to 0.15.0 they are
+  byte-identical to 0.3.0's. The changes are in zero-area triangles or
+  are a different triangulation of the same flat region; triangle order
+  is all that changed in `issue1138` and `miscellaneous__004`.
+
+Conformance is 1,773 passing, 0 failing, at the default thread count and
+with `RAYON_NUM_THREADS=1`. Every one of those models exports
+byte-identical output at 1, 4 and the default number of threads.
+
+### The edge-collapse bug (fixed in 0.15.0)
 
 After a boolean, `simplify_topology` collapses "redundant" vertices: a new
 vertex whose triangles come from at most two original faces is merged
-into a neighbour. `collapse_edge` guards this with checks built from the
-stored face references and normals, and those can be wrong about the
-triangle in front of them:
+into a neighbour. In 0.13.1 the vertex could slide across a crease and
+change the solid. In BOSL2's `cubetruss` (docs/audits/engine-milestone.md,
+finding 3), a union of two parts that touch along faces filled a
+tetrahedral notch of 7.31 mm³. C++ Manifold 3.5.2 gave the same wrong
+result on the same operands.
 
-- a mesh built without face IDs (OpenSCAD's and neoscad's are) has
-  `face_id == -1` everywhere, so two different planar faces of one mesh
-  differ only in `coplanar_id`, and the "edge separates faces" test, which
-  compares `mesh_id` and `face_id`, lets the vertex leave the crease
-  between them;
-- `dedupe_edge` gives the triangles it adds a neighbour's reference and
-  normal, and the axis-aligned projection the remaining checks use can
-  turn a move along a face's normal into a point on a line.
-
-Either way the vertex slides across a crease and the solid changes. In
-BOSL2's `cubetruss` (docs/audits/engine-milestone.md, finding 3), a union of
-two parts that touch along faces filled a tetrahedral notch of 7.31 mm³:
-85024.0 instead of 85016.67. C++ Manifold 3.5.2 (the version OpenSCAD pins,
-built from `.reference/openscad/submodules/manifold`) gives the same wrong
-result on the same operands, so this is upstream behaviour, not a porting
-error. The nightly avoids it on that model only because its lazy CSG
-flattens the nested unions into one batch that never runs this boolean.
-
-### The edge-collapse patch
-
-Every triangle around the collapsing vertex (other than the two that
-disappear) must stay in its own plane: the volume the move sweeps
-(`(p_new - p_old) · ((p_last - p_old) × (p_next - p_old))`) must be at
-most `tol` times the longer edge squared. For a proper triangle that
-limits the vertex to about `tol` from the plane; sliver triangles, whose
-area is at rounding level, sweep next to nothing and pass as before. On
-the cubetruss model it rejects 8 collapses, all of them the notch; the
-rest of the mesh is unchanged.
-
+0.13.1 carried a patch (`0001-edge-collapse-crease.patch`, in git
+history) that refused any collapse that moved a surrounding triangle out
+of its own plane. 0.15.0 no longer needs it: the bad collapse followed a
+`dedupe_edge` repair of a stale duplicate, and 0.15.0 skips those.
 `crates/geom/tests/collapse_crease.rs` is the regression test: two
-operands of 35 and 28 vertices whose union, unpatched, is 328.29 instead
-of 314.49, in manifold-rust and in C++ Manifold 3.5.2 alike.
+operands whose union is 328.29 instead of 314.49 when the bug is present.
 
-Manifold's current `master` has rewritten `CollapseEdge` (it no longer
-has these checks); whether it still fails on these meshes is untested.
+- On 0.13.1 without the patch the test fails (328.29).
+- On 0.15.0 without the patch it passes.
+- On 0.15.0 with the stale-entry skip disabled (`dedupe_edges`) it fails
+  again (328.29).
+
+On the full cubetruss union, 0.15.0 with the patch and 0.15.0 without it
+export byte-identical STL. The volume is 0.3.0's (85016.58; 85023.90
+with neither fix). The area is 61960.35 mm², as the nightly's is, where
+0.3.0 gives 61977.45: 0.3.0's output has a two-sided sheet of two
+triangles, 8.55 mm² each. On 0.15.0 the patch still rejected a few
+collapses: these are the five models listed above, and none of them
+changes volume or area.
 
 ### The keyhole speed patch
 
 The ear clipper joins each hole to an outer ring through a keyhole.
 `cut_keyhole` and `find_closer_bridge` look for the bridge by walking every
-outer ring, once each per hole, and 0.13.1 did that by cloning `outers`
-and collecting each ring into a fresh `Vec` (`loop_verts`). Since each
+outer ring, once each per hole, and manifold-rust (0.13.1 and 0.15.0)
+does that by cloning `outers` and collecting each ring into a fresh `Vec` (`loop_verts`). Since each
 joined hole becomes part of its outer ring, the rings grow as holes are
 cut, and on a square with 5,041 circular holes the collecting was 60% of
 the run (docs/audits/performance.md, O9).
@@ -208,18 +279,20 @@ byte-identical STL before and after. The 200-line extrusion went from
 
 ### The parallel boolean patch
 
-0.13.1 runs most of a boolean on one thread, where C++ Manifold runs it
-under TBB. On the level-4 Menger sponge the last two differences (the
-cube minus the union of the three rotated negatives, about 300,000 faces)
-ran alone for over a second while the other cores idled
-(`docs/audits/slow-cases.md` §1). The patch makes the large serial
-stages parallel, each in a way whose output is the sequential output, so
-the result is byte-identical at any thread count and to 0.13.1's. Every
-site goes through a helper in `src/par.rs` with a sequential twin for
-builds without the `parallel` feature (the WASM build's pool runs on the
-calling thread either way). The patch is
-`vendor/patches/manifold-rust/0003-parallel-booleans.patch`, on top of
-0001 and 0002. By site:
+manifold-rust (0.13.1 and 0.15.0) runs most of a boolean on one thread,
+where C++ Manifold runs it under TBB. On the level-4 Menger sponge the
+last two differences (the cube minus the union of the three rotated
+negatives, about 300,000 faces) ran alone for over a second while the
+other cores idled (`docs/audits/slow-cases.md` §1). The patches make the
+large serial stages parallel, each in a way whose output is the
+sequential output, so the result is byte-identical at any thread count
+and to the unpatched crate's (measured on 0.13.1, below). Every site
+goes through a helper in `src/par.rs` with a sequential twin for builds
+without the `parallel` feature (the WASM build's pool runs on the
+calling thread either way). The kernels are
+`vendor/patches/manifold-rust/0003-parallel-booleans.patch`, the batch
+rounds `0004-parallel-batch-rounds.patch`, and the round threshold
+`0006-batch-round-threshold.patch`. By site:
 
 - **`batch_boolean` rounds** (`csg_tree.rs`): a round's up to four pairs
   are picked first, then run side by side (C++ `csg_tree.cpp:451-479` in
@@ -227,7 +300,7 @@ calling thread either way). The patch is
   the serials the sequential loop gave them. The one shared state a boolean touches is the
   mesh-ID counter; the kernel compares mesh IDs only for equality, and
   neoscad orders output runs by original ID for the same reason
-  (`crates/geom/src/manifold_geom.rs`, `canonical_mesh`). Since 0005 a
+  (`crates/geom/src/manifold_geom.rs`, `canonical_mesh`). With 0006 a
   round goes parallel only when its operands have 10,000 vertices in all
   (C++ `autoPolicy`'s `kSeqThreshold`): with five busy loops per core,
   `csg_spheres` took 2.76 s against 3.70 s and the hero 10.5 against
@@ -240,8 +313,8 @@ calling thread either way). The patch is
   in C++.
 - **Orbit scans** of `split_pinched_verts` and `dedupe_edges`: the
   sequential scan handles each vertex orbit from its smallest eligible
-  halfedge, skipping halfedges an earlier orbit visited. Above 10,000
-  halfedges each halfedge instead walks its own orbit in parallel and
+  halfedge, skipping halfedges an earlier orbit visited. Above 100,000
+  halfedges (10,000 on 0.13.1) each halfedge instead walks its own orbit in parallel and
   owns it if it comes back to itself without meeting a smaller eligible
   one. That gives the same owners only if every orbit is a closed cycle,
   so it first checks that `paired_halfedge` is an involution (then the
@@ -310,12 +383,20 @@ peak). So:
   check; once it is true the flag is set, so the answer is sticky as
   before. `geom::manifold_geom::kernel_token` builds the request's token:
   its interrupt flag, and the guard's `stopped()` as the check. Without
-  a token (`None`, every unlimited render) nothing is polled.
+  a token (`None`, every unlimited render) nothing is polled. This is
+  `0007-cancel-token-over-a-flag.patch`, NeoSCAD's own.
 - `AddNewEdgeVerts` (`src/boolean_result.rs`, called from
-  `src/boolean_result_assemble.rs`) checks the token every 16,384
-  intersections, and between the three sorts after it, and its three
-  lists are reserved at their final size (the sum of the inclusions'
-  magnitudes) instead of grown by doubling. In the Menger sponge at
+  `src/boolean_result_assemble.rs`) checks the token at every
+  intersection, and between the three sorts after it, and its three
+  lists are allocated at their final size (the sum of the inclusions'
+  magnitudes) instead of grown by doubling
+  (`0005-cancel-new-edge-verts.patch`, the upstream proposal). Upstream's
+  check is one atomic load; neoscad's also polls the guard, so under a
+  limit a check costs a clock read. NeoSCAD's earlier version of the
+  patch checked every 16,384 intersections instead: under `--limit
+  time=1000`, Menger level 4 took 1.41 s with this one against 1.36 s
+  with that one (best of 5, load average about 9), and without a limit
+  the two take the same time. In the Menger sponge at
   depth 5 (`examples/Old/example024.scad`, `n=5`) the last union grew a
   wasm instance from under 1 GiB past 2 GB within this one step, before
   any check ran; the last doubling of the new-edge list alone copied
@@ -328,9 +409,11 @@ never fires against one without, on 1 and 8 threads, and checks that a
 cancel lands inside one boolean (a boolean of two dense spheres stops
 within milliseconds of the cancel, where it ran 140 ms in all) and that
 a cancelled, empty result is never cached. In the web core, the Menger
-sponge's depth-5 render under the 1 GiB limit now stops with a
-`resource-limit` error at a measured peak of about 1.4 to 1.7 GiB, and
-the engine lives on (`crates/web/test/run.mjs`).
+sponge's depth-5 render under the 1 GiB limit stopped with a
+`resource-limit` error at a measured peak of about 1.4 to 1.7 GiB when
+the patch was written, and the engine lived on; `crates/web/test/run.mjs`
+now checks a measured memory limit on `web/examples/gearbox.scad`
+instead.
 
 ## clipper2-rust 1.2.0, patched
 
@@ -535,7 +618,11 @@ with the patch applied (or dropping it, if the release has the fix).
 ## Upstream drafts
 
 Both crates are Lars Brubaker's ports. Their `main` branches, fetched
-2026-09-27, still have the code these patches replace. The owner can send
+2026-09-27, still have the code these patches replace, and so do
+manifold-rust 0.15.0 and its `main` at `40f20c6` (2026-09-30). The two
+manifold-rust drafts below have since become the branches
+`neoscad/earclip-loop-visitor` and `neoscad/earclip-ring-boxes`
+(patches `0001` and `0002`). The owner can send
 these as issues, with the diff of the vendored file as the patch.
 
 ### manifold-rust: `EarClip` allocates every outer ring once per hole

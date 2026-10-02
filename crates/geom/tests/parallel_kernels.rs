@@ -74,9 +74,11 @@ fn check(src: &str, pinned: u64) {
 
 /// A 3D checkerboard of cubes that touch only along edges and at corners,
 /// unioned. Every boolean leaves duplicate edges and pinched vertices for
-/// `dedupe_edges` and `split_pinched_verts` to split (over 10,000
-/// halfedges, their parallel orbit scans), and the union of 256 children
-/// is a `batch_boolean` of many rounds of four pairs.
+/// `dedupe_edges` and `split_pinched_verts` to split, and the union of 256
+/// children is a `batch_boolean` of many rounds of four pairs. (Its
+/// meshes are under the 100,000 halfedges at which the orbit scans go
+/// parallel; the large difference and the sphere union below take that
+/// path.)
 #[test]
 fn checkerboard_union_is_unchanged_at_any_thread_count() {
     check(

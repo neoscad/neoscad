@@ -29,8 +29,8 @@ serde_json = "1"
 sha2 = "0.10"
 unicode-script = "0.5"
 
-# manifold-rust with a fix for an edge-collapse bug that fills concave
-# corners after a union, clipper2-rust with a faster rounding function, and
+# manifold-rust with parallel boolean kernels, faster hole bridging and
+# host-driven cancellation, clipper2-rust with a faster rounding function, and
 # wgpu-core with upstream's fix for a panic when threads poll one device
 # (see vendor/README.md).
 [patch.crates-io]

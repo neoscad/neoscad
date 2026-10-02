@@ -3,9 +3,9 @@
 // Ports src/sort.cpp from the Manifold C++ library.
 // The Collider is stubbed (Phase 10 will implement it fully).
 
+use crate::impl_mesh::ManifoldImpl;
 use crate::linalg::Vec3;
 use crate::types::Box as BBox;
-use crate::impl_mesh::ManifoldImpl;
 
 // -----------------------------------------------------------------------
 // Morton code (30-bit, 10 bits per axis)
@@ -13,11 +13,10 @@ use crate::impl_mesh::ManifoldImpl;
 
 const K_NO_CODE: u32 = 0xFFFF_FFFFu32;
 
-/// NeoSCAD patch: element count from which the passes below run in
-/// parallel (C++ `autoPolicy`'s default, `kSeqThreshold`, is 1e4). Every
-/// parallel pass here is a per-element map or in-place update, or a stable
-/// sort by an integer key, so its result is the sequential one.
-const PAR_THRESHOLD: usize = 10_000;
+/// Element count from which the passes below run in parallel; above C++'s
+/// `kSeqThreshold` (1e4), as they are cheap per element. Each is a per-element
+/// map or update or a stable integer-key sort, so the result is sequential's.
+const PAR_THRESHOLD: usize = 100_000;
 
 /// Spread the low 10 bits of v into bits 0,3,6,9,...,27 (every 3rd bit).
 /// This is the inverse of the interleaving needed for a 3D Morton code.
@@ -68,7 +67,9 @@ pub fn sort_verts(mesh: &mut ManifoldImpl) {
 
     // Build sorted index array (a stable sort, so equal codes keep index order)
     let mut vert_new2old: Vec<i32> = (0..num_vert as i32).collect();
-    crate::par::maybe_par_sort_by_key(&mut vert_new2old, PAR_THRESHOLD, |&v| vert_morton[v as usize]);
+    crate::par::maybe_par_sort_by_key(&mut vert_new2old, PAR_THRESHOLD, |&v| {
+        vert_morton[v as usize]
+    });
 
     // Find how many survive (NaN verts get K_NO_CODE, sort to end)
     let new_num_vert = vert_new2old.partition_point(|&v| vert_morton[v as usize] < K_NO_CODE);
@@ -207,9 +208,10 @@ pub fn gather_faces(mesh: &mut ManifoldImpl, face_new2old: &[usize]) {
         edge
     });
     if has_tangent {
-        mesh.halfedge_tangent = crate::par::maybe_par_map(3 * num_tri, PAR_THRESHOLD, |new_edge_idx| {
-            old_tangent[3 * face_new2old[new_edge_idx / 3] + new_edge_idx % 3]
-        });
+        mesh.halfedge_tangent =
+            crate::par::maybe_par_map(3 * num_tri, PAR_THRESHOLD, |new_edge_idx| {
+                old_tangent[3 * face_new2old[new_edge_idx / 3] + new_edge_idx % 3]
+            });
     }
 }
 
@@ -294,6 +296,40 @@ pub fn sort_geometry(mesh: &mut ManifoldImpl) {
     );
 }
 
+/// Counts faces whose true bounding box cannot find its own leaf in the mesh's
+/// cached collider.
+///
+/// A box always overlaps itself, so on a closed mesh with more than one face
+/// this is zero exactly when the collider was built from the geometry the mesh
+/// currently holds. Anything above zero means the impl is lying about itself:
+/// some site moved or added geometry without re-running `sort_geometry`, and the
+/// booleans that query this collider will silently miss real intersections
+/// before failing somewhere else entirely.
+///
+/// **It reports false misses, so only assert on it for meshes that avoid both
+/// cases.** Neither is a collider fault:
+/// - Faces with an unpaired halfedge — soup, or anything mid-`remove_degenerates`
+///   — get no box from `get_face_box_morton` (it returns `K_NO_CODE` and leaves
+///   the default empty box), and `collisions_with_boxes` skips empty queries.
+///   Every such face counts as a miss.
+/// - A mesh of 0 or 1 faces builds a collider with no internal nodes, and the
+///   query returns immediately. Its one face counts as a miss.
+///
+/// Test-only — production code never asks, because every site that changes
+/// geometry is supposed to finish with `sort_geometry`.
+#[cfg(test)]
+pub(crate) fn collider_self_misses(mesh: &ManifoldImpl) -> usize {
+    let (face_box, _) = get_face_box_morton(mesh);
+    let mut found_itself = vec![false; face_box.len()];
+    mesh.collider
+        .collisions_with_boxes(&face_box, false, |query_idx, leaf_idx| {
+            if query_idx == leaf_idx {
+                found_itself[query_idx] = true;
+            }
+        });
+    found_itself.iter().filter(|found| !**found).count()
+}
+
 // -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------
@@ -301,8 +337,8 @@ pub fn sort_geometry(mesh: &mut ManifoldImpl) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linalg::Mat3x4;
     use crate::impl_mesh::ManifoldImpl;
+    use crate::linalg::Mat3x4;
 
     #[test]
     fn test_spread_bits3() {
@@ -373,11 +409,18 @@ mod tests {
         assert_eq!(m.halfedge.len(), halfedge_count);
         // After sort, paired halfedges should still be valid
         for (i, edge) in m.halfedge.iter().enumerate() {
-            assert!(edge.paired_halfedge >= 0,
-                "halfedge {} has invalid paired_halfedge {}", i, edge.paired_halfedge);
+            assert!(
+                edge.paired_halfedge >= 0,
+                "halfedge {} has invalid paired_halfedge {}",
+                i,
+                edge.paired_halfedge
+            );
             let paired = &m.halfedge[edge.paired_halfedge as usize];
-            assert_eq!(paired.paired_halfedge, i as i32,
-                "halfedge {} paired -> {} but paired doesn't point back", i, edge.paired_halfedge);
+            assert_eq!(
+                paired.paired_halfedge, i as i32,
+                "halfedge {} paired -> {} but paired doesn't point back",
+                i, edge.paired_halfedge
+            );
         }
     }
 
@@ -387,9 +430,17 @@ mod tests {
         let n = m.vert_pos.len();
         // Identity permutation should not change anything
         let identity: Vec<i32> = (0..n as i32).collect();
-        let before: Vec<_> = m.halfedge.iter().map(|e| (e.start_vert, e.end_vert)).collect();
+        let before: Vec<_> = m
+            .halfedge
+            .iter()
+            .map(|e| (e.start_vert, e.end_vert))
+            .collect();
         reindex_verts(&mut m, &identity, n);
-        let after: Vec<_> = m.halfedge.iter().map(|e| (e.start_vert, e.end_vert)).collect();
+        let after: Vec<_> = m
+            .halfedge
+            .iter()
+            .map(|e| (e.start_vert, e.end_vert))
+            .collect();
         assert_eq!(before, after);
     }
 

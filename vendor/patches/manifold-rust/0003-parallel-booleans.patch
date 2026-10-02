@@ -1,24 +1,28 @@
-NeoSCAD patch to manifold-rust 0.13.1 (crates.io): run the large serial
+NeoSCAD patch to manifold-rust 0.15.0 (crates.io): run the large serial
 stages of a boolean in parallel, with output identical to the sequential
-code at any thread count (batch_boolean rounds, edge-flag and orbit
-scans, the result assembly's edge maps, face2tri's writes, the sorts).
+code at any thread count (edge-flag and orbit scans, the result
+assembly's edge maps, face2tri's writes, the sorts). Test:
+crates/geom/tests/parallel_kernels.rs.
 
-Upstream: not reported.
+Upstream: proposed as branch `neoscad/parallel-booleans`
+(commit 1623119) of a fork of larsbrubaker/manifold-rust, on top of its
+`main` at 40f20c6 (0.15.0 plus two QuickHull commits that touch none of
+these files). This patch is that commit's changes under src/, byte for
+byte apart from CRLF line endings; the branch also adds a benchmark
+under examples/, which is not vendored.
 
-Apply from the crate root on top of 0001 and 0002: patch -p1 < this file.
-The crate's sources use CRLF line endings.
+Apply from the crate root on top of 0002: patch -p1 < this file.
+The crate's older sources use CRLF line endings; files this series
+adds use LF.
 See vendor/README.md ("The parallel boolean patch").
 
 --- a/src/boolean3_kernels.rs
 +++ b/src/boolean3_kernels.rs
-@@ -412,24 +412,24 @@ pub(super) fn intersect12(
+@@ -433,24 +433,21 @@
      }
  
      // Sort by edge index for deterministic results
-+    //
-+    // NeoSCAD patch: the sort and the gathers run in parallel on large
-+    // results. The sort is stable on an integer key, and the gathers are
-+    // per-element, so the arrays are the sequential ones.
++    // (stable on integer keys, so the parallel sort keeps the sequential order)
      let mut indices: Vec<usize> = (0..result.p1q2.len()).collect();
      let sort_idx = if forward { 0 } else { 1 };
 -    indices.sort_by(|&a, &b| {
@@ -50,16 +54,13 @@ See vendor/README.md ("The parallel boolean patch").
  
      Some(result)
  }
-@@ -466,23 +466,27 @@ pub(super) fn winding03(
+@@ -487,23 +484,24 @@
      // instead of a modulo: C++ gets the same effect from `ctx == nullptr`
      // folding the check out of the loop entirely (parallel.h:427-430).
      let cancellable = token.is_some();
 -    for edge in 0..a.halfedge.len() {
-+    // NeoSCAD patch: the edges to unite (forward, and not cut by an
-+    // intersection) are found in parallel, then united one by one in index
-+    // order as before. The union-find's roots depend on the order of the
-+    // unions, and a component's winding number is computed at its root, so
-+    // the unions themselves stay sequential.
++    // Find the edges to unite in parallel, but unite them in index order: the
++    // union-find's roots, where windings are computed, depend on that order.
 +    let unbroken = crate::par::maybe_par_filter(a.halfedge.len(), 10_000, |edge| {
 +        let he = &a.halfedge[edge];
 +        // Check if this edge is broken (has an intersection)
@@ -99,23 +100,15 @@ See vendor/README.md ("The parallel boolean patch").
 -use std::collections::BTreeMap;
 -
  use crate::impl_mesh::ManifoldImpl;
- use crate::linalg::{Vec3, dot};
+ use crate::linalg::{dot, Vec3};
  use crate::types::{Halfedge, TriRef};
-@@ -52,6 +50,55 @@ impl EdgePos {
+@@ -52,6 +50,46 @@
      }
  }
  
-+// NeoSCAD patch: the edge maps as sorted runs instead of a `BTreeMap` of
-+// `Vec`s.
-+//
-+// `add_new_edge_verts` used to insert into `BTreeMap<K, Vec<EdgePos>>`,
-+// one small `Vec` per edge or face pair; on a big boolean (the last
-+// difference of a level-4 Menger sponge) that was 0.23 s of serial
-+// allocation and tree walking, the largest part of assembly. The consumers
-+// only ever walked the maps in ascending key order and each `Vec` in push
-+// order, so the same data is a list of `(key, EdgePos)` in push order,
-+// stably sorted by key and cut into runs. A stable sort keeps push order
-+// within a key, so every run holds exactly the `Vec` the map held.
++// The edge maps are `(key, EdgePos)` lists in push order, stably sorted by key
++// and cut into runs, in place of a `BTreeMap<K, Vec<EdgePos>>`. The consumers
++// read keys in ascending order and each run in push order, as with the map.
 +
 +/// `(key, EdgePos)` pairs in push order; see [`EdgeGroups::new`].
 +pub(super) type EdgeList<K> = Vec<(K, EdgePos)>;
@@ -140,9 +133,8 @@ See vendor/README.md ("The parallel boolean patch").
 +        Self { entries, starts }
 +    }
 +
-+    /// Calls `f(key, run)` for every run in ascending key order. `run` is
-+    /// a reused buffer holding the run's entries in push order, which `f`
-+    /// may extend and reorder as it could the map's `Vec`.
++    /// Calls `f(key, run)` for every run in ascending key order, `run` being a
++    /// reused buffer of its entries in push order that `f` may modify.
 +    fn for_each(&self, mut f: impl FnMut(K, &mut Vec<EdgePos>)) {
 +        let mut run: Vec<EdgePos> = Vec::new();
 +        for g in 0..self.starts.len() - 1 {
@@ -157,7 +149,7 @@ See vendor/README.md ("The parallel boolean patch").
  /// Wrapper for f64 that implements Ord (for sorting edge positions)
  #[derive(Clone, Copy, PartialEq)]
  struct OrderedF64(f64);
-@@ -203,8 +250,8 @@ pub(super) fn size_output(
+@@ -205,8 +243,8 @@
  // ---------------------------------------------------------------------------
  
  pub(super) fn add_new_edge_verts(
@@ -168,50 +160,71 @@ See vendor/README.md ("The parallel boolean patch").
      p1q2: &[[i32; 2]],
      i12: &[i32],
      v12r: &[i32],
-@@ -240,36 +287,33 @@ pub(super) fn add_new_edge_verts(
+@@ -242,36 +280,42 @@
          let dir_left = direction ^ forward;
  
          // Add to edge P's map
 -        let ep = edges_p.entry(edge_p).or_default();
          for j in 0..inclusion.abs() {
 -            ep.push(EdgePos {
-+            edges_p.push((edge_p, EdgePos {
-                 edge_pos: 0.0,
-                 vert: vert + j,
-                 collision_id,
-                 is_start: dir_p,
+-                edge_pos: 0.0,
+-                vert: vert + j,
+-                collision_id,
+-                is_start: dir_p,
 -            });
-+            }));
++            edges_p.push((
++                edge_p,
++                EdgePos {
++                    edge_pos: 0.0,
++                    vert: vert + j,
++                    collision_id,
++                    is_start: dir_p,
++                },
++            ));
          }
  
          // Add to right new edge
 -        let er = edges_new.entry(key_right).or_default();
          for j in 0..inclusion.abs() {
 -            er.push(EdgePos {
-+            edges_new.push((key_right, EdgePos {
-                 edge_pos: 0.0,
-                 vert: vert + j,
-                 collision_id,
-                 is_start: dir_right,
+-                edge_pos: 0.0,
+-                vert: vert + j,
+-                collision_id,
+-                is_start: dir_right,
 -            });
-+            }));
++            edges_new.push((
++                key_right,
++                EdgePos {
++                    edge_pos: 0.0,
++                    vert: vert + j,
++                    collision_id,
++                    is_start: dir_right,
++                },
++            ));
          }
  
          // Add to left new edge
 -        let el = edges_new.entry(key_left).or_default();
          for j in 0..inclusion.abs() {
 -            el.push(EdgePos {
-+            edges_new.push((key_left, EdgePos {
-                 edge_pos: 0.0,
-                 vert: vert + j,
-                 collision_id,
-                 is_start: dir_left,
+-                edge_pos: 0.0,
+-                vert: vert + j,
+-                collision_id,
+-                is_start: dir_left,
 -            });
-+            }));
++            edges_new.push((
++                key_left,
++                EdgePos {
++                    edge_pos: 0.0,
++                    vert: vert + j,
++                    collision_id,
++                    is_start: dir_left,
++                },
++            ));
          }
      }
  }
-@@ -346,7 +390,7 @@ pub(super) fn append_partial_edges(
+@@ -348,7 +392,7 @@
      out_r: &mut ManifoldImpl,
      whole_halfedge_p: &mut Vec<bool>,
      face_ptr_r: &mut Vec<i32>,
@@ -220,7 +233,7 @@ See vendor/README.md ("The parallel boolean patch").
      halfedge_ref: &mut Vec<TriRef>,
      in_p: &ManifoldImpl,
      i03: &[i32],
-@@ -354,7 +398,7 @@ pub(super) fn append_partial_edges(
+@@ -356,7 +400,7 @@
      face_p2r: &[i32],
      forward: bool,
  ) {
@@ -229,7 +242,7 @@ See vendor/README.md ("The parallel boolean patch").
          edge_pos_p.sort_by_key(|e| e.sort_key());
  
          let halfedge = in_p.halfedge[edge_p as usize];
-@@ -442,7 +486,7 @@ pub(super) fn append_partial_edges(
+@@ -444,7 +488,7 @@
              out_r.halfedge[backward_edge as usize] = rev;
              halfedge_ref[backward_edge as usize] = backward_ref;
          });
@@ -238,7 +251,7 @@ See vendor/README.md ("The parallel boolean patch").
  }
  
  // ---------------------------------------------------------------------------
-@@ -452,12 +496,12 @@ pub(super) fn append_partial_edges(
+@@ -454,12 +498,12 @@
  pub(super) fn append_new_edges(
      out_r: &mut ManifoldImpl,
      face_ptr_r: &mut Vec<i32>,
@@ -253,7 +266,7 @@ See vendor/README.md ("The parallel boolean patch").
          edge_pos.sort_by_key(|e| e.sort_key());
  
          // Compute bounding box to find longest dimension
-@@ -525,7 +569,7 @@ pub(super) fn append_new_edges(
+@@ -527,7 +571,7 @@
              out_r.halfedge[backward_edge as usize] = rev;
              halfedge_ref[backward_edge as usize] = backward_ref;
          });
@@ -273,16 +286,16 @@ See vendor/README.md ("The parallel boolean patch").
  use crate::boolean3::Boolean3;
  use crate::cancel::{is_cancelled, CancelToken};
  use crate::edge_op::simplify_topology;
-@@ -11,7 +9,7 @@ use crate::impl_mesh::{reserve_ids, ManifoldImpl};
- use crate::linalg::Vec3;
- use crate::types::{OpType, TriRef};
+@@ -13,7 +11,7 @@
  
--use super::{EdgePos, abs_sum, exclusive_scan_abs,
-+use super::{EdgeGroups, EdgeList, abs_sum, exclusive_scan_abs,
-             size_output, add_new_edge_verts, append_partial_edges,
-             append_new_edges, append_whole_edges};
+ use super::{
+     abs_sum, add_new_edge_verts, append_new_edges, append_partial_edges, append_whole_edges,
+-    exclusive_scan_abs, size_output, EdgePos,
++    exclusive_scan_abs, size_output, EdgeGroups, EdgeList,
+ };
  
-@@ -392,9 +390,9 @@ pub fn boolean_result_with_token(
+ // ---------------------------------------------------------------------------
+@@ -414,9 +412,9 @@
      }
  
      // Build edge maps
@@ -295,7 +308,7 @@ See vendor/README.md ("The parallel boolean patch").
  
      add_new_edge_verts(
          &mut edges_p,
-@@ -417,6 +415,10 @@ pub fn boolean_result_with_token(
+@@ -439,6 +437,10 @@
          bool3.xv12.p1q2.len(),
      );
  
@@ -306,7 +319,7 @@ See vendor/README.md ("The parallel boolean patch").
      // C++ clears v12R/v21R here (after AddNewEdgeVerts); drop the counterparts
      // so the large scans don't ride through the rest of the pipeline.
      drop(v12r);
-@@ -468,7 +470,7 @@ pub fn boolean_result_with_token(
+@@ -490,7 +492,7 @@
          &mut out_r,
          &mut whole_halfedge_p,
          &mut face_ptr_r,
@@ -315,7 +328,7 @@ See vendor/README.md ("The parallel boolean patch").
          &mut halfedge_ref,
          in_p,
          &i03,
-@@ -480,7 +482,7 @@ pub fn boolean_result_with_token(
+@@ -502,7 +504,7 @@
          &mut out_r,
          &mut whole_halfedge_q,
          &mut face_ptr_r,
@@ -324,7 +337,7 @@ See vendor/README.md ("The parallel boolean patch").
          &mut halfedge_ref,
          in_q,
          &i30,
-@@ -500,7 +502,7 @@ pub fn boolean_result_with_token(
+@@ -522,7 +524,7 @@
      append_new_edges(
          &mut out_r,
          &mut face_ptr_r,
@@ -333,48 +346,6 @@ See vendor/README.md ("The parallel boolean patch").
          &mut halfedge_ref,
          &face_pq2r,
          in_p.num_tri(),
---- a/src/csg_tree.rs
-+++ b/src/csg_tree.rs
-@@ -431,7 +431,17 @@ fn batch_boolean(
-     // C++ processes up to 4 pairs per round (for its parallel lane), pushing
-     // the results back only at the end of the round — even in sequential
-     // builds. The round structure changes which meshes pair up, so mirror it.
--    let mut tmp: Vec<MeshEntry> = Vec::new();
-+    //
-+    // NeoSCAD patch: the round's pairs run side by side, as the C++
-+    // `tbb::task_group` does (csg_tree.cpp:451-479). The pairs are chosen
-+    // before any of them runs and the results go back in pair order with
-+    // the serials the sequential loop gave them, so the heap, and every
-+    // later pairing, is the same at any thread count. Each boolean is a
-+    // pure function of its two operands; the only shared state it touches
-+    // is the mesh-ID counter, whose values the kernel compares only for
-+    // equality (the embedder orders output runs by original ID, not mesh
-+    // ID, for the same reason: parallel subtrees already race on it).
-+    let mut pairs: Vec<(MeshEntry, MeshEntry)> = Vec::with_capacity(4);
-     while heap.len() > 1 {
-         // Once-per-round check, matching C++ BatchBoolean's per-iteration gate
-         // (csg_tree.cpp:460).
-@@ -444,12 +454,15 @@ fn batch_boolean(
-             }
-             let a = heap.pop().unwrap();
-             let b = heap.pop().unwrap();
--            let result = simple_boolean(&a.0, &b.0, op, token);
--            tmp.push(MeshEntry(result, next_serial));
--            next_serial += 1;
-+            pairs.push((a, b));
-         }
--        for entry in tmp.drain(..) {
--            heap.push(entry);
-+        let results = crate::par::maybe_par_map(pairs.len(), 2, |i| {
-+            simple_boolean(&pairs[i].0 .0, &pairs[i].1 .0, op, token)
-+        });
-+        pairs.clear();
-+        for result in results {
-+            heap.push(MeshEntry(result, next_serial));
-+            next_serial += 1;
-         }
-     }
- 
 --- a/src/edge_op.rs
 +++ b/src/edge_op.rs
 @@ -1,7 +1,8 @@
@@ -382,46 +353,453 @@ See vendor/README.md ("The parallel boolean patch").
  //
  // Ports src/edge_op.cpp from the Manifold C++ library.
 -// All algorithms are sequential (rayon deferred to later).
-+// The edge-flag and orbit scans run in parallel on large meshes (NeoSCAD
-+// patch); the collapses, swaps and splits they feed stay sequential.
++// Edge-flag and orbit scans run in parallel on large meshes (`parallel`);
++// the collapses, swaps and splits stay sequential.
  
- use crate::linalg::{Vec2, Vec3, dot, dot2, length2_2};
+ use crate::face_op::{calculate_vert_normals, get_axis_aligned_projection};
+ use crate::impl_mesh::ManifoldImpl;
+@@ -9,6 +10,10 @@
+ use crate::polygon::ccw;
  use crate::types::{next_halfedge, Halfedge};
-@@ -508,9 +509,113 @@ pub fn recursive_edge_swap(
- // SplitPinchedVerts
- // -----------------------------------------------------------------------
  
-+// NeoSCAD patch: parallel orbit scans for `split_pinched_verts` and
-+// `dedupe_edges`.
-+//
-+// Both walk halfedge orbits (the halfedges leaving one vertex, stepping
-+// `next_halfedge(paired_halfedge)`) in ascending index order, skipping any
-+// halfedge an earlier walk already visited, so each orbit is handled once,
-+// from its smallest eligible halfedge: its owner. On a large boolean that
-+// scan was serial and visited every halfedge (0.11 s and 0.06 s of the
-+// last Menger level-4 difference; C++ runs both in parallel above 1e4
-+// halfedges, edge_op.cpp:722-796 and 903-924).
-+//
-+// When every orbit is a closed cycle the owners can be found without the
-+// visited flags: a halfedge owns its orbit if its walk comes back to it
-+// without meeting a smaller eligible halfedge. Walking from each halfedge
-+// needs that guarantee, and gets it from `paired_halfedge` being an
-+// involution (every pair in range and pairing back): then the step is
-+// injective, so a walk either returns to its start or ends at a halfedge
-+// with no pair. An orbit that ends that way is detected by its smallest
-+// eligible halfedge, whose walk meets nothing smaller and so must reach
-+// the end. In either failure (not an involution, or an open orbit) the
-+// callers fall back to their original sequential scans, so the result is
-+// the sequential one on every mesh.
++#[path = "edge_op_orbits.rs"]
++mod orbits;
++use orbits::{dedupe_orbit, orbit_owners, ORBIT_PAR_THRESHOLD};
 +
-+/// Halfedge count from which the orbit scans run in parallel
-+/// (C++: `nbEdges > 1e4`).
-+const ORBIT_PAR_THRESHOLD: usize = 10_001;
+ // -----------------------------------------------------------------------
+ // Private helpers (mirrors anonymous-namespace functions in edge_op.cpp)
+ // -----------------------------------------------------------------------
+@@ -523,6 +528,35 @@
+ /// Finds vertices where multiple halfedge cycles meet (pinched verts) and
+ /// splits them into separate vertices — one per cycle.
+ pub fn split_pinched_verts(mesh: &mut ManifoldImpl) {
++    // With the owners known (`orbit_owners`), walk only the pinched orbits, in
++    // the order the sequential scan below reaches them.
++    if let Some(owners) = orbit_owners(&mesh.halfedge, ORBIT_PAR_THRESHOLD, |h| h.start_vert >= 0) {
++        let mut vert_processed = vec![false; mesh.vert_pos.len()];
++        for i in owners {
++            let vert = mesh.halfedge[i].start_vert as usize;
++            if vert_processed.get(vert) != Some(&true) {
++                if vert < vert_processed.len() {
++                    vert_processed[vert] = true;
++                }
++                continue;
++            }
++            let new_pos = mesh.vert_pos[vert];
++            mesh.vert_pos.push(new_pos);
++            let new_vert = (mesh.vert_pos.len() - 1) as i32;
++            let mut current = i;
++            loop {
++                let paired = mesh.halfedge[current].paired_halfedge;
++                current = next_halfedge(paired) as usize;
++                mesh.halfedge[current].start_vert = new_vert;
++                let curr_paired = mesh.halfedge[current].paired_halfedge;
++                mesh.halfedge[curr_paired as usize].end_vert = new_vert;
++                if current == i {
++                    break;
++                }
++            }
++        }
++        return;
++    }
+     let n_edges = mesh.halfedge.len();
+     let mut vert_processed = vec![false; mesh.vert_pos.len()];
+     let mut halfedge_processed = vec![false; n_edges];
+@@ -781,92 +815,35 @@
+     let max_iterations = mesh.halfedge.len(); // safety bound
+     for _iteration in 0..max_iterations {
+         let n_edges = mesh.halfedge.len();
+-        let mut processed = vec![false; n_edges];
+-        let mut duplicates: Vec<usize> = Vec::new();
+-
+-        for i in 0..n_edges {
+-            if processed[i] {
+-                continue;
+-            }
+-            let sv = mesh.halfedge[i].start_vert;
+-            let ev = mesh.halfedge[i].end_vert;
+-            if sv < 0 || ev < 0 {
+-                continue;
+-            }
+-
+-            // Track all endVerts seen in this vertex's orbit, keeping smallest edge idx.
+-            // Uses ForVert traversal: current = next_halfedge(halfedge[current].paired_halfedge)
+-            let mut end_verts: Vec<(i32, usize)> = Vec::new(); // (endVert, min_edge_idx)
+-                                                               // Process i itself first
+-            processed[i] = true;
+-            let c_ev0 = mesh.halfedge[i].end_vert;
+-            if c_ev0 >= 0 {
+-                end_verts.push((c_ev0, i));
+-            }
+-            // Then orbit (with safety bound to prevent infinite loops)
+-            let mut current = i;
+-            let mut orbit_steps = 0;
+-            loop {
+-                let pair = mesh.halfedge[current].paired_halfedge;
+-                if pair < 0 {
+-                    break;
+-                }
+-                current = next_halfedge(pair) as usize;
+-                if current == i {
+-                    break;
+-                }
+-                orbit_steps += 1;
+-                if orbit_steps > n_edges {
+-                    break;
+-                } // safety
+-                processed[current] = true;
+-                let c_sv = mesh.halfedge[current].start_vert;
+-                let c_ev = mesh.halfedge[current].end_vert;
+-                if c_sv >= 0 && c_ev >= 0 {
+-                    if let Some(entry) = end_verts.iter_mut().find(|(v, _)| *v == c_ev) {
+-                        if current < entry.1 {
+-                            entry.1 = current;
+-                        }
+-                    } else {
+-                        end_verts.push((c_ev, current));
+-                    }
+-                }
+-            }
+-
+-            // Second pass: find edges that aren't the minimum for their endVert
+-            let c_ev0 = mesh.halfedge[i].end_vert;
+-            if c_ev0 >= 0 {
+-                if let Some(&(_, min_edge)) = end_verts.iter().find(|(v, _)| *v == c_ev0) {
+-                    if min_edge != i {
+-                        duplicates.push(i);
+-                    }
+-                }
++        // Orbit by orbit in parallel if every orbit is a closed cycle (see
++        // `orbit_owners`), else sequentially; both give the same list.
++        let valid = |h: &Halfedge| h.start_vert >= 0 && h.end_vert >= 0;
++        let duplicates: Vec<usize> = match orbit_owners(&mesh.halfedge, ORBIT_PAR_THRESHOLD, valid)
++        {
++            Some(owners) => {
++                let m: &ManifoldImpl = mesh;
++                crate::par::maybe_par_map(owners.len(), ORBIT_PAR_THRESHOLD / 8, |k| {
++                    let mut dups = Vec::new();
++                    dedupe_orbit(m, owners[k], n_edges, |_| {}, &mut dups);
++                    dups
++                })
++                .concat()
+             }
+-            current = i;
+-            orbit_steps = 0;
+-            loop {
+-                let pair = mesh.halfedge[current].paired_halfedge;
+-                if pair < 0 {
+-                    break;
+-                }
+-                current = next_halfedge(pair) as usize;
+-                if current == i {
+-                    break;
+-                }
+-                orbit_steps += 1;
+-                if orbit_steps > n_edges {
+-                    break;
+-                } // safety
+-                let c_ev = mesh.halfedge[current].end_vert;
+-                if c_ev >= 0 {
+-                    if let Some(&(_, min_edge)) = end_verts.iter().find(|(v, _)| *v == c_ev) {
+-                        if min_edge != current {
+-                            duplicates.push(current);
+-                        }
++            None => {
++                let mut processed = vec![false; n_edges];
++                let mut duplicates: Vec<usize> = Vec::new();
++                for i in 0..n_edges {
++                    if processed[i] {
++                        continue;
+                     }
++                    if !valid(&mesh.halfedge[i]) {
++                        continue;
++                    }
++                    dedupe_orbit(mesh, i, n_edges, |c| processed[c] = true, &mut duplicates);
+                 }
++                duplicates
+             }
+-        }
++        };
+ 
+         if duplicates.is_empty() {
+             break;
+@@ -950,11 +927,14 @@
+     calculate_vert_normals(mesh);
+ }
+ 
++/// Halfedge count from which the edge-flag scans run in parallel, as C++
++/// `FlagStore::run`'s `n > 1e5` (edge_op.cpp:90).
++const FLAG_PAR_THRESHOLD: usize = 100_001;
 +
-+/// The owner of every orbit that has an eligible halfedge, ascending, or
-+/// `None` when an orbit is not a closed cycle or the halfedge count is
-+/// below `threshold` (the caller then runs its sequential scan).
-+fn orbit_owners<F>(halfedge: &[Halfedge], threshold: usize, eligible: F) -> Option<Vec<usize>>
+ /// Collapses edges shorter than epsilon_ when at least one endpoint is new.
+ pub fn collapse_short_edges(mesh: &mut ManifoldImpl, first_new_vert: i32) {
+     let mut scratch = Vec::with_capacity(10);
+     let n = mesh.halfedge.len();
+-    let mut flagged: Vec<usize> = Vec::new();
+ 
+     // Per #1671: outside a Boolean (first_new_vert == 0) collapse only up to
+     // epsilon to avoid error stacking; in a Boolean we only touch new verts, so
+@@ -966,28 +946,28 @@
+         mesh.tolerance
+     };
+ 
+-    for i in 0..n {
+-        let h = &mesh.halfedge[i];
++    // Flag in parallel (see `par::maybe_par_filter`).
++    let m: &ManifoldImpl = mesh;
++    let flagged = crate::par::maybe_par_filter(n, FLAG_PAR_THRESHOLD, |i| {
++        let h = &m.halfedge[i];
+         if h.paired_halfedge < 0 {
+-            continue;
++            return false;
+         }
+         if h.start_vert < first_new_vert && h.end_vert < first_new_vert {
+-            continue;
++            return false;
+         }
+         if h.start_vert < 0 || h.end_vert < 0 {
+-            continue;
++            return false;
+         }
+-        let delta = mesh.vert_pos[h.end_vert as usize] - mesh.vert_pos[h.start_vert as usize];
++        let delta = m.vert_pos[h.end_vert as usize] - m.vert_pos[h.start_vert as usize];
+         let len_sq = dot(delta, delta);
+         let max_len = if h.end_vert < first_new_vert {
+             tol * tol
+         } else {
+-            mesh.epsilon * mesh.epsilon
++            m.epsilon * m.epsilon
+         };
+-        if len_sq < max_len {
+-            flagged.push(i);
+-        }
+-    }
++        len_sq < max_len
++    });
+ 
+     for &i in &flagged {
+         scratch.clear();
+@@ -1001,75 +981,68 @@
+     let mut scratch = Vec::with_capacity(10);
+     loop {
+         let n = mesh.halfedge.len();
+-        let mut flagged: Vec<usize> = Vec::new();
+-
+-        for i in 0..n {
+-            let h = &mesh.halfedge[i];
++
++        // Flag in parallel (see `par::maybe_par_filter`).
++        let m: &ManifoldImpl = mesh;
++        let flagged = crate::par::maybe_par_filter(n, FLAG_PAR_THRESHOLD, |i| {
++            let h = &m.halfedge[i];
+             if h.paired_halfedge < 0 || h.start_vert < first_new_vert {
+-                continue;
++                return false;
+             }
+             if h.start_vert < 0 {
+-                continue;
++                return false;
+             }
+-            if mesh.mesh_relation.tri_ref.is_empty() {
+-                continue;
++            if m.mesh_relation.tri_ref.is_empty() {
++                return false;
+             }
+-            if i / 3 >= mesh.mesh_relation.tri_ref.len() {
+-                continue;
++            if i / 3 >= m.mesh_relation.tri_ref.len() {
++                return false;
+             }
+ 
+-            let ref0 = mesh.mesh_relation.tri_ref[i / 3];
+-            let mut current = next_halfedge(mesh.halfedge[i].paired_halfedge) as usize;
+-            if current >= mesh.halfedge.len() {
+-                continue;
++            let ref0 = m.mesh_relation.tri_ref[i / 3];
++            let mut current = next_halfedge(m.halfedge[i].paired_halfedge) as usize;
++            if current >= m.halfedge.len() {
++                return false;
+             }
+-            let mut ref1 = if current / 3 < mesh.mesh_relation.tri_ref.len() {
+-                mesh.mesh_relation.tri_ref[current / 3]
++            let mut ref1 = if current / 3 < m.mesh_relation.tri_ref.len() {
++                m.mesh_relation.tri_ref[current / 3]
+             } else {
+-                continue;
++                return false;
+             };
+             let mut ref1_updated = !ref0.same_face(&ref1);
+ 
+-            let mut is_redundant = true;
+-            let max_orbit = mesh.halfedge.len(); // orbit can't exceed total halfedges
++            let max_orbit = m.halfedge.len(); // orbit can't exceed total halfedges
+             let mut orbit_count = 0;
+             while current != i {
+                 orbit_count += 1;
+                 if orbit_count > max_orbit {
+-                    is_redundant = false;
+-                    break;
++                    return false;
+                 }
+                 // FlagEdge traversal: current = NextHalfedge(halfedge[current].pairedHalfedge)
+-                let pair = mesh.halfedge[current].paired_halfedge;
++                let pair = m.halfedge[current].paired_halfedge;
+                 if pair < 0 {
+-                    is_redundant = false;
+-                    break;
++                    return false;
+                 }
+                 current = next_halfedge(pair) as usize;
+-                if current >= mesh.halfedge.len() {
+-                    is_redundant = false;
+-                    break;
++                if current >= m.halfedge.len() {
++                    return false;
+                 }
+                 let tri = current / 3;
+-                if tri >= mesh.mesh_relation.tri_ref.len() {
+-                    is_redundant = false;
+-                    break;
++                if tri >= m.mesh_relation.tri_ref.len() {
++                    return false;
+                 }
+-                let ref_cur = mesh.mesh_relation.tri_ref[tri];
++                let ref_cur = m.mesh_relation.tri_ref[tri];
+                 if !ref_cur.same_face(&ref0) && !ref_cur.same_face(&ref1) {
+                     if !ref1_updated {
+                         ref1 = ref_cur;
+                         ref1_updated = true;
+                     } else {
+-                        is_redundant = false;
+-                        break;
++                        return false;
+                     }
+                 }
+             }
+-            if is_redundant {
+-                flagged.push(i);
+-            }
+-        }
++            true
++        });
+ 
+         if flagged.is_empty() {
+             break;
+@@ -1094,56 +1067,55 @@
+     }
+ 
+     let n = mesh.halfedge.len();
+-    let mut flagged: Vec<usize> = Vec::new();
+ 
+-    for i in 0..n {
+-        let h = &mesh.halfedge[i];
++    // Flag in parallel (see `par::maybe_par_filter`).
++    let m: &ManifoldImpl = mesh;
++    let flagged = crate::par::maybe_par_filter(n, FLAG_PAR_THRESHOLD, |i| {
++        let h = &m.halfedge[i];
+         if h.paired_halfedge < 0 {
+-            continue;
++            return false;
+         }
+         // Skip edges where all 4 involved verts are old
+         let tri0edge = tri_of(i);
+         let pair = h.paired_halfedge as usize;
+         let tri1edge = tri_of(pair);
+-        if mesh.halfedge[i].start_vert < first_new_vert
+-            && mesh.halfedge[i].end_vert < first_new_vert
+-            && mesh.halfedge[next_halfedge(i as i32) as usize].end_vert < first_new_vert
+-            && mesh.halfedge[next_halfedge(pair as i32) as usize].end_vert < first_new_vert
++        if m.halfedge[i].start_vert < first_new_vert
++            && m.halfedge[i].end_vert < first_new_vert
++            && m.halfedge[next_halfedge(i as i32) as usize].end_vert < first_new_vert
++            && m.halfedge[next_halfedge(pair as i32) as usize].end_vert < first_new_vert
+         {
+-            continue;
++            return false;
+         }
+         let tri = i / 3;
+-        if tri >= mesh.face_normal.len() {
+-            continue;
++        if tri >= m.face_normal.len() {
++            return false;
+         }
+-        let proj = get_axis_aligned_projection(mesh.face_normal[tri]);
++        let proj = get_axis_aligned_projection(m.face_normal[tri]);
+         let mut v = [Vec2::new(0.0, 0.0); 3];
+         for j in 0..3 {
+-            let sv = mesh.halfedge[tri0edge[j]].start_vert;
+-            if sv >= 0 && (sv as usize) < mesh.vert_pos.len() {
+-                v[j] = proj.apply(mesh.vert_pos[sv as usize]);
++            let sv = m.halfedge[tri0edge[j]].start_vert;
++            if sv >= 0 && (sv as usize) < m.vert_pos.len() {
++                v[j] = proj.apply(m.vert_pos[sv as usize]);
+             }
+         }
+-        if ccw(v[0], v[1], v[2], mesh.tolerance) > 0 || !is_01_longest(v[0], v[1], v[2]) {
+-            continue;
++        if ccw(v[0], v[1], v[2], m.tolerance) > 0 || !is_01_longest(v[0], v[1], v[2]) {
++            return false;
+         }
+         // Switch to the neighbor's projection — C++ projects the PAIR
+         // triangle's verts (pairTriEdge), not tri0's.
+         let tri_p = pair / 3;
+-        if tri_p >= mesh.face_normal.len() {
+-            continue;
++        if tri_p >= m.face_normal.len() {
++            return false;
+         }
+-        let proj_p = get_axis_aligned_projection(mesh.face_normal[tri_p]);
++        let proj_p = get_axis_aligned_projection(m.face_normal[tri_p]);
+         for j in 0..3 {
+-            let sv = mesh.halfedge[tri1edge[j]].start_vert;
+-            if sv >= 0 && (sv as usize) < mesh.vert_pos.len() {
+-                v[j] = proj_p.apply(mesh.vert_pos[sv as usize]);
++            let sv = m.halfedge[tri1edge[j]].start_vert;
++            if sv >= 0 && (sv as usize) < m.vert_pos.len() {
++                v[j] = proj_p.apply(m.vert_pos[sv as usize]);
+             }
+         }
+-        if ccw(v[0], v[1], v[2], mesh.tolerance) > 0 || is_01_longest(v[0], v[1], v[2]) {
+-            flagged.push(i);
+-        }
+-    }
++        ccw(v[0], v[1], v[2], m.tolerance) > 0 || is_01_longest(v[0], v[1], v[2])
++    });
+ 
+     let mut visited = vec![-1i32; n];
+     let mut edge_swap_stack: Vec<i32> = Vec::new();
+--- a/src/edge_op_orbits.rs
++++ b/src/edge_op_orbits.rs
+@@ -0,0 +1,156 @@
++// edge_op_orbits.rs — vertex-orbit scans for `split_pinched_verts` and
++// `dedupe_edges` (edge_op.rs): the owner search that lets both run in
++// parallel, and the per-orbit duplicate search they share.
++
++use crate::impl_mesh::ManifoldImpl;
++use crate::types::{next_halfedge, Halfedge};
++
++// Both scans walk each vertex orbit (stepping `next_halfedge(paired_halfedge)`)
++// once, from its smallest eligible halfedge, its owner, using visited flags in
++// ascending order. C++ runs both in parallel (edge_op.cpp:722-796, 903-924).
++//
++// If every orbit is a closed cycle, a halfedge owns its orbit iff its walk
++// returns to it without meeting a smaller eligible halfedge. If
++// `paired_halfedge` is an involution the step is injective, so a walk either
++// returns to its start or reaches a halfedge with no pair, which an open
++// orbit's smallest eligible halfedge must do. Otherwise, or on an open orbit,
++// the callers fall back to their sequential scans.
++
++/// Halfedge count from which the orbit scans run in parallel. Above C++'s 1e4:
++/// every halfedge walks its own orbit, and below 100k that costs more than it saves.
++pub(super) const ORBIT_PAR_THRESHOLD: usize = 100_001;
++
++/// The owner of every orbit with an eligible halfedge, ascending, or `None`
++/// below `threshold` or if an orbit is not a closed cycle.
++pub(super) fn orbit_owners<F>(
++    halfedge: &[Halfedge],
++    threshold: usize,
++    eligible: F,
++) -> Option<Vec<usize>>
 +where
 +    F: Fn(&Halfedge) -> bool + Sync + Send,
 +{
@@ -449,8 +827,7 @@ See vendor/README.md ("The parallel boolean patch").
 +            }
 +            current = next_halfedge(p) as usize;
 +            if current >= n {
-+                // Only if the count is not a multiple of 3; the sequential
-+                // scans decide what that means.
++                // Count not a multiple of 3: leave it to the sequential scan.
 +                return 2;
 +            }
 +            if current == i {
@@ -467,142 +844,10 @@ See vendor/README.md ("The parallel boolean patch").
 +    Some((0..n).filter(|&i| role[i] == 1).collect())
 +}
 +
- /// Finds vertices where multiple halfedge cycles meet (pinched verts) and
- /// splits them into separate vertices — one per cycle.
- pub fn split_pinched_verts(mesh: &mut ManifoldImpl) {
-+    // NeoSCAD patch: with the owners known (see `orbit_owners`), only the
-+    // pinched orbits need walking, in the owners' order, which is the
-+    // order the sequential scan below reaches them in.
-+    if let Some(owners) = orbit_owners(&mesh.halfedge, ORBIT_PAR_THRESHOLD, |h| h.start_vert >= 0) {
-+        let mut vert_processed = vec![false; mesh.vert_pos.len()];
-+        for i in owners {
-+            let vert = mesh.halfedge[i].start_vert as usize;
-+            if vert_processed.get(vert) != Some(&true) {
-+                if vert < vert_processed.len() {
-+                    vert_processed[vert] = true;
-+                }
-+                continue;
-+            }
-+            let new_pos = mesh.vert_pos[vert];
-+            mesh.vert_pos.push(new_pos);
-+            let new_vert = (mesh.vert_pos.len() - 1) as i32;
-+            let mut current = i;
-+            loop {
-+                let paired = mesh.halfedge[current].paired_halfedge;
-+                current = next_halfedge(paired) as usize;
-+                mesh.halfedge[current].start_vert = new_vert;
-+                let curr_paired = mesh.halfedge[current].paired_halfedge;
-+                mesh.halfedge[curr_paired as usize].end_vert = new_vert;
-+                if current == i { break; }
-+            }
-+        }
-+        return;
-+    }
-     let n_edges = mesh.halfedge.len();
-     let mut vert_processed = vec![false; mesh.vert_pos.len()];
-     let mut halfedge_processed = vec![false; n_edges];
-@@ -707,70 +812,31 @@ pub fn dedupe_edges(mesh: &mut ManifoldImpl) {
-     let max_iterations = mesh.halfedge.len(); // safety bound
-     for _iteration in 0..max_iterations {
-         let n_edges = mesh.halfedge.len();
--        let mut processed = vec![false; n_edges];
--        let mut duplicates: Vec<usize> = Vec::new();
--
--        for i in 0..n_edges {
--            if processed[i] { continue; }
--            let sv = mesh.halfedge[i].start_vert;
--            let ev = mesh.halfedge[i].end_vert;
--            if sv < 0 || ev < 0 { continue; }
--
--            // Track all endVerts seen in this vertex's orbit, keeping smallest edge idx.
--            // Uses ForVert traversal: current = next_halfedge(halfedge[current].paired_halfedge)
--            let mut end_verts: Vec<(i32, usize)> = Vec::new(); // (endVert, min_edge_idx)
--            // Process i itself first
--            processed[i] = true;
--            let c_ev0 = mesh.halfedge[i].end_vert;
--            if c_ev0 >= 0 { end_verts.push((c_ev0, i)); }
--            // Then orbit (with safety bound to prevent infinite loops)
--            let mut current = i;
--            let mut orbit_steps = 0;
--            loop {
--                let pair = mesh.halfedge[current].paired_halfedge;
--                if pair < 0 { break; }
--                current = next_halfedge(pair) as usize;
--                if current == i { break; }
--                orbit_steps += 1;
--                if orbit_steps > n_edges { break; } // safety
--                processed[current] = true;
--                let c_sv = mesh.halfedge[current].start_vert;
--                let c_ev = mesh.halfedge[current].end_vert;
--                if c_sv >= 0 && c_ev >= 0 {
--                    if let Some(entry) = end_verts.iter_mut().find(|(v, _)| *v == c_ev) {
--                        if current < entry.1 { entry.1 = current; }
--                    } else {
--                        end_verts.push((c_ev, current));
--                    }
--                }
-+        // NeoSCAD patch: find the duplicates orbit by orbit in parallel
-+        // when every orbit is a closed cycle (see `orbit_owners`), else
-+        // with the original sequential scan. Both give the same list.
-+        let valid = |h: &Halfedge| h.start_vert >= 0 && h.end_vert >= 0;
-+        let duplicates: Vec<usize> = match orbit_owners(&mesh.halfedge, ORBIT_PAR_THRESHOLD, valid) {
-+            Some(owners) => {
-+                let m: &ManifoldImpl = mesh;
-+                crate::par::maybe_par_map(owners.len(), ORBIT_PAR_THRESHOLD / 8, |k| {
-+                    let mut dups = Vec::new();
-+                    dedupe_orbit(m, owners[k], n_edges, |_| {}, &mut dups);
-+                    dups
-+                })
-+                .concat()
-             }
--
--            // Second pass: find edges that aren't the minimum for their endVert
--            let c_ev0 = mesh.halfedge[i].end_vert;
--            if c_ev0 >= 0 {
--                if let Some(&(_, min_edge)) = end_verts.iter().find(|(v, _)| *v == c_ev0) {
--                    if min_edge != i { duplicates.push(i); }
-+            None => {
-+                let mut processed = vec![false; n_edges];
-+                let mut duplicates: Vec<usize> = Vec::new();
-+                for i in 0..n_edges {
-+                    if processed[i] { continue; }
-+                    if !valid(&mesh.halfedge[i]) { continue; }
-+                    dedupe_orbit(mesh, i, n_edges, |c| processed[c] = true, &mut duplicates);
-                 }
-+                duplicates
-             }
--            current = i;
--            orbit_steps = 0;
--            loop {
--                let pair = mesh.halfedge[current].paired_halfedge;
--                if pair < 0 { break; }
--                current = next_halfedge(pair) as usize;
--                if current == i { break; }
--                orbit_steps += 1;
--                if orbit_steps > n_edges { break; } // safety
--                let c_ev = mesh.halfedge[current].end_vert;
--                if c_ev >= 0 {
--                    if let Some(&(_, min_edge)) = end_verts.iter().find(|(v, _)| *v == c_ev) {
--                        if min_edge != current {
--                            duplicates.push(current);
--                        }
--                    }
--                }
--            }
--        }
-+        };
- 
-         if duplicates.is_empty() { break; }
-         for &dup in &duplicates {
-@@ -779,6 +845,73 @@ pub fn dedupe_edges(mesh: &mut ManifoldImpl) {
-     }
- }
- 
-+/// The duplicate edges of the orbit (the halfedges leaving one vertex)
-+/// walked from `i`, appended to `duplicates` in walk order: every halfedge
-+/// whose end vertex another halfedge of the orbit, with a smaller index,
-+/// also ends at. `mark` sees each halfedge the walk visits after `i`.
-+fn dedupe_orbit(
++/// Appends the duplicate edges of the orbit walked from `i`, in walk order:
++/// halfedges whose end vertex a smaller halfedge of the orbit also ends at.
++/// `mark` sees each halfedge the walk visits.
++pub(super) fn dedupe_orbit(
 +    mesh: &ManifoldImpl,
 +    i: usize,
 +    n_edges: usize,
@@ -612,26 +857,36 @@ See vendor/README.md ("The parallel boolean patch").
 +    // Track all endVerts seen in this vertex's orbit, keeping smallest edge idx.
 +    // Uses ForVert traversal: current = next_halfedge(halfedge[current].paired_halfedge)
 +    let mut end_verts: Vec<(i32, usize)> = Vec::new(); // (endVert, min_edge_idx)
-+    // Process i itself first
++                                                       // Process i itself first
 +    mark(i);
 +    let c_ev0 = mesh.halfedge[i].end_vert;
-+    if c_ev0 >= 0 { end_verts.push((c_ev0, i)); }
++    if c_ev0 >= 0 {
++        end_verts.push((c_ev0, i));
++    }
 +    // Then orbit (with safety bound to prevent infinite loops)
 +    let mut current = i;
 +    let mut orbit_steps = 0;
 +    loop {
 +        let pair = mesh.halfedge[current].paired_halfedge;
-+        if pair < 0 { break; }
++        if pair < 0 {
++            break;
++        }
 +        current = next_halfedge(pair) as usize;
-+        if current == i { break; }
++        if current == i {
++            break;
++        }
 +        orbit_steps += 1;
-+        if orbit_steps > n_edges { break; } // safety
++        if orbit_steps > n_edges {
++            break;
++        } // safety
 +        mark(current);
 +        let c_sv = mesh.halfedge[current].start_vert;
 +        let c_ev = mesh.halfedge[current].end_vert;
 +        if c_sv >= 0 && c_ev >= 0 {
 +            if let Some(entry) = end_verts.iter_mut().find(|(v, _)| *v == c_ev) {
-+                if current < entry.1 { entry.1 = current; }
++                if current < entry.1 {
++                    entry.1 = current;
++                }
 +            } else {
 +                end_verts.push((c_ev, current));
 +            }
@@ -642,18 +897,26 @@ See vendor/README.md ("The parallel boolean patch").
 +    let c_ev0 = mesh.halfedge[i].end_vert;
 +    if c_ev0 >= 0 {
 +        if let Some(&(_, min_edge)) = end_verts.iter().find(|(v, _)| *v == c_ev0) {
-+            if min_edge != i { duplicates.push(i); }
++            if min_edge != i {
++                duplicates.push(i);
++            }
 +        }
 +    }
 +    current = i;
 +    orbit_steps = 0;
 +    loop {
 +        let pair = mesh.halfedge[current].paired_halfedge;
-+        if pair < 0 { break; }
++        if pair < 0 {
++            break;
++        }
 +        current = next_halfedge(pair) as usize;
-+        if current == i { break; }
++        if current == i {
++            break;
++        }
 +        orbit_steps += 1;
-+        if orbit_steps > n_edges { break; } // safety
++        if orbit_steps > n_edges {
++            break;
++        } // safety
 +        let c_ev = mesh.halfedge[current].end_vert;
 +        if c_ev >= 0 {
 +            if let Some(&(_, min_edge)) = end_verts.iter().find(|(v, _)| *v == c_ev) {
@@ -664,224 +927,57 @@ See vendor/README.md ("The parallel boolean patch").
 +        }
 +    }
 +}
-+
- // -----------------------------------------------------------------------
- // CleanupTopology / SimplifyTopology / RemoveDegenerates
- // -----------------------------------------------------------------------
-@@ -811,11 +944,15 @@ pub fn remove_degenerates(mesh: &mut ManifoldImpl, first_new_vert: i32) {
-     calculate_vert_normals(mesh);
+--- a/src/edge_op_tests.rs
++++ b/src/edge_op_tests.rs
+@@ -124,3 +124,45 @@
+         .count();
+     assert_eq!(moved, 0, "a corner that moves changes the solid");
  }
- 
-+/// NeoSCAD patch: halfedge count from which the edge-flag scans below run
-+/// in parallel. C++ `FlagStore::run` switches at `n > 1e5`
-+/// (edge_op.cpp:90); the output is the same either side of it.
-+const FLAG_PAR_THRESHOLD: usize = 100_001;
 +
- /// Collapses edges shorter than epsilon_ when at least one endpoint is new.
- pub fn collapse_short_edges(mesh: &mut ManifoldImpl, first_new_vert: i32) {
-     let mut scratch = Vec::with_capacity(10);
-     let n = mesh.halfedge.len();
--    let mut flagged: Vec<usize> = Vec::new();
- 
-     // Per #1671: outside a Boolean (first_new_vert == 0) collapse only up to
-     // epsilon to avoid error stacking; in a Boolean we only touch new verts, so
-@@ -823,22 +960,22 @@ pub fn collapse_short_edges(mesh: &mut ManifoldImpl, first_new_vert: i32) {
-     // restricts new->old edges (old verts only move by epsilon).
-     let tol = if first_new_vert == 0 { mesh.epsilon } else { mesh.tolerance };
- 
--    for i in 0..n {
--        let h = &mesh.halfedge[i];
--        if h.paired_halfedge < 0 { continue; }
--        if h.start_vert < first_new_vert && h.end_vert < first_new_vert { continue; }
--        if h.start_vert < 0 || h.end_vert < 0 { continue; }
--        let delta = mesh.vert_pos[h.end_vert as usize] - mesh.vert_pos[h.start_vert as usize];
-+    // NeoSCAD patch: flag in parallel (see `par::maybe_par_filter`).
-+    let m: &ManifoldImpl = mesh;
-+    let flagged = crate::par::maybe_par_filter(n, FLAG_PAR_THRESHOLD, |i| {
-+        let h = &m.halfedge[i];
-+        if h.paired_halfedge < 0 { return false; }
-+        if h.start_vert < first_new_vert && h.end_vert < first_new_vert { return false; }
-+        if h.start_vert < 0 || h.end_vert < 0 { return false; }
-+        let delta = m.vert_pos[h.end_vert as usize] - m.vert_pos[h.start_vert as usize];
-         let len_sq = dot(delta, delta);
-         let max_len = if h.end_vert < first_new_vert {
-             tol * tol
-         } else {
--            mesh.epsilon * mesh.epsilon
-+            m.epsilon * m.epsilon
-         };
--        if len_sq < max_len {
--            flagged.push(i);
--        }
--    }
-+        len_sq < max_len
-+    });
- 
-     for &i in &flagged {
-         scratch.clear();
-@@ -852,56 +989,54 @@ pub fn collapse_colinear_edges(mesh: &mut ManifoldImpl, first_new_vert: i32) {
-     let mut scratch = Vec::with_capacity(10);
-     loop {
-         let n = mesh.halfedge.len();
--        let mut flagged: Vec<usize> = Vec::new();
--
--        for i in 0..n {
--            let h = &mesh.halfedge[i];
--            if h.paired_halfedge < 0 || h.start_vert < first_new_vert { continue; }
--            if h.start_vert < 0 { continue; }
--            if mesh.mesh_relation.tri_ref.is_empty() { continue; }
--            if i / 3 >= mesh.mesh_relation.tri_ref.len() { continue; }
--
--            let ref0 = mesh.mesh_relation.tri_ref[i / 3];
--            let mut current = next_halfedge(mesh.halfedge[i].paired_halfedge) as usize;
--            if current >= mesh.halfedge.len() { continue; }
--            let mut ref1 = if current / 3 < mesh.mesh_relation.tri_ref.len() {
--                mesh.mesh_relation.tri_ref[current / 3]
-+
-+        // NeoSCAD patch: flag in parallel (see `par::maybe_par_filter`).
-+        // On a large boolean this scan, repeated until nothing collapses,
-+        // was the largest single cost of the result assembly.
-+        let m: &ManifoldImpl = mesh;
-+        let flagged = crate::par::maybe_par_filter(n, FLAG_PAR_THRESHOLD, |i| {
-+            let h = &m.halfedge[i];
-+            if h.paired_halfedge < 0 || h.start_vert < first_new_vert { return false; }
-+            if h.start_vert < 0 { return false; }
-+            if m.mesh_relation.tri_ref.is_empty() { return false; }
-+            if i / 3 >= m.mesh_relation.tri_ref.len() { return false; }
-+
-+            let ref0 = m.mesh_relation.tri_ref[i / 3];
-+            let mut current = next_halfedge(m.halfedge[i].paired_halfedge) as usize;
-+            if current >= m.halfedge.len() { return false; }
-+            let mut ref1 = if current / 3 < m.mesh_relation.tri_ref.len() {
-+                m.mesh_relation.tri_ref[current / 3]
-             } else {
--                continue
-+                return false;
-             };
-             let mut ref1_updated = !ref0.same_face(&ref1);
- 
--            let mut is_redundant = true;
--            let max_orbit = mesh.halfedge.len(); // orbit can't exceed total halfedges
-+            let max_orbit = m.halfedge.len(); // orbit can't exceed total halfedges
-             let mut orbit_count = 0;
-             while current != i {
-                 orbit_count += 1;
-                 if orbit_count > max_orbit {
--                    is_redundant = false;
--                    break;
-+                    return false;
-                 }
-                 // FlagEdge traversal: current = NextHalfedge(halfedge[current].pairedHalfedge)
--                let pair = mesh.halfedge[current].paired_halfedge;
--                if pair < 0 { is_redundant = false; break; }
-+                let pair = m.halfedge[current].paired_halfedge;
-+                if pair < 0 { return false; }
-                 current = next_halfedge(pair) as usize;
--                if current >= mesh.halfedge.len() { is_redundant = false; break; }
-+                if current >= m.halfedge.len() { return false; }
-                 let tri = current / 3;
--                if tri >= mesh.mesh_relation.tri_ref.len() { is_redundant = false; break; }
--                let ref_cur = mesh.mesh_relation.tri_ref[tri];
-+                if tri >= m.mesh_relation.tri_ref.len() { return false; }
-+                let ref_cur = m.mesh_relation.tri_ref[tri];
-                 if !ref_cur.same_face(&ref0) && !ref_cur.same_face(&ref1) {
-                     if !ref1_updated {
-                         ref1 = ref_cur;
-                         ref1_updated = true;
-                     } else {
--                        is_redundant = false;
--                        break;
-+                        return false;
-                     }
-                 }
-             }
--            if is_redundant {
--                flagged.push(i);
--            }
--        }
-+            true
-+        });
- 
-         if flagged.is_empty() { break; }
-         let mut num_collapsed = 0;
-@@ -920,50 +1055,49 @@ pub fn swap_degenerates(mesh: &mut ManifoldImpl, first_new_vert: i32) {
-     if mesh.face_normal.is_empty() { return; }
- 
-     let n = mesh.halfedge.len();
--    let mut flagged: Vec<usize> = Vec::new();
- 
--    for i in 0..n {
--        let h = &mesh.halfedge[i];
--        if h.paired_halfedge < 0 { continue; }
-+    // NeoSCAD patch: flag in parallel (see `par::maybe_par_filter`).
-+    let m: &ManifoldImpl = mesh;
-+    let flagged = crate::par::maybe_par_filter(n, FLAG_PAR_THRESHOLD, |i| {
-+        let h = &m.halfedge[i];
-+        if h.paired_halfedge < 0 { return false; }
-         // Skip edges where all 4 involved verts are old
-         let tri0edge = tri_of(i);
-         let pair = h.paired_halfedge as usize;
-         let tri1edge = tri_of(pair);
--        if mesh.halfedge[i].start_vert < first_new_vert
--            && mesh.halfedge[i].end_vert < first_new_vert
--            && mesh.halfedge[next_halfedge(i as i32) as usize].end_vert < first_new_vert
--            && mesh.halfedge[next_halfedge(pair as i32) as usize].end_vert < first_new_vert
-+        if m.halfedge[i].start_vert < first_new_vert
-+            && m.halfedge[i].end_vert < first_new_vert
-+            && m.halfedge[next_halfedge(i as i32) as usize].end_vert < first_new_vert
-+            && m.halfedge[next_halfedge(pair as i32) as usize].end_vert < first_new_vert
-         {
--            continue;
-+            return false;
-         }
-         let tri = i / 3;
--        if tri >= mesh.face_normal.len() { continue; }
--        let proj = get_axis_aligned_projection(mesh.face_normal[tri]);
-+        if tri >= m.face_normal.len() { return false; }
-+        let proj = get_axis_aligned_projection(m.face_normal[tri]);
-         let mut v = [Vec2::new(0.0, 0.0); 3];
-         for j in 0..3 {
--            let sv = mesh.halfedge[tri0edge[j]].start_vert;
--            if sv >= 0 && (sv as usize) < mesh.vert_pos.len() {
--                v[j] = proj.apply(mesh.vert_pos[sv as usize]);
-+            let sv = m.halfedge[tri0edge[j]].start_vert;
-+            if sv >= 0 && (sv as usize) < m.vert_pos.len() {
-+                v[j] = proj.apply(m.vert_pos[sv as usize]);
-             }
-         }
--        if ccw(v[0], v[1], v[2], mesh.tolerance) > 0 || !is_01_longest(v[0], v[1], v[2]) {
--            continue;
-+        if ccw(v[0], v[1], v[2], m.tolerance) > 0 || !is_01_longest(v[0], v[1], v[2]) {
-+            return false;
-         }
-         // Switch to the neighbor's projection — C++ projects the PAIR
-         // triangle's verts (pairTriEdge), not tri0's.
-         let tri_p = pair / 3;
--        if tri_p >= mesh.face_normal.len() { continue; }
--        let proj_p = get_axis_aligned_projection(mesh.face_normal[tri_p]);
-+        if tri_p >= m.face_normal.len() { return false; }
-+        let proj_p = get_axis_aligned_projection(m.face_normal[tri_p]);
-         for j in 0..3 {
--            let sv = mesh.halfedge[tri1edge[j]].start_vert;
--            if sv >= 0 && (sv as usize) < mesh.vert_pos.len() {
--                v[j] = proj_p.apply(mesh.vert_pos[sv as usize]);
-+            let sv = m.halfedge[tri1edge[j]].start_vert;
-+            if sv >= 0 && (sv as usize) < m.vert_pos.len() {
-+                v[j] = proj_p.apply(m.vert_pos[sv as usize]);
-             }
-         }
--        if ccw(v[0], v[1], v[2], mesh.tolerance) > 0 || is_01_longest(v[0], v[1], v[2]) {
--            flagged.push(i);
--        }
--    }
-+        ccw(v[0], v[1], v[2], m.tolerance) > 0 || is_01_longest(v[0], v[1], v[2])
-+    });
- 
-     let mut visited = vec![-1i32; n];
-     let mut edge_swap_stack: Vec<i32> = Vec::new();
++/// `orbit_owners` must give each orbit's smallest eligible halfedge, as the
++/// sequential scans do, on cubes touching along edges, for two rules.
++#[cfg(feature = "parallel")]
++#[test]
++fn test_orbit_owners_match_the_sequential_scan() {
++    let cube = crate::manifold::Manifold::cube(Vec3::splat(1.0), false);
++    let mut model = crate::manifold::Manifold::empty();
++    for x in 0..4 {
++        for y in 0..4 {
++            for z in 0..4 {
++                if (x + y + z) % 2 == 0 {
++                    let at = Vec3::new(f64::from(x), f64::from(y), f64::from(z));
++                    model = model.union(&cube.translate(at));
++                }
++            }
++        }
++    }
++    let halfedge = &model.as_impl().halfedge;
++    let rules: [&(dyn Fn(&Halfedge) -> bool + Sync); 2] = [&|h| h.start_vert >= 0, &|h| {
++        h.start_vert >= 0 && h.end_vert % 3 != 0
++    }];
++    for eligible in rules {
++        let mut visited = vec![false; halfedge.len()];
++        let mut expected = Vec::new();
++        for i in 0..halfedge.len() {
++            if visited[i] || !eligible(&halfedge[i]) {
++                continue;
++            }
++            expected.push(i);
++            let mut current = i;
++            loop {
++                visited[current] = true;
++                current = next_halfedge(halfedge[current].paired_halfedge) as usize;
++                if current == i {
++                    break;
++                }
++            }
++        }
++        assert_eq!(orbit_owners(halfedge, 0, eligible), Some(expected));
++    }
++}
 --- a/src/face_op_triangulate.rs
 +++ b/src/face_op_triangulate.rs
-@@ -24,6 +24,7 @@ use super::{assemble_halfedges, get_axis_aligned_projection, project_polygons};
+@@ -24,6 +24,7 @@
  fn write_local_triangles(
      output: &mut [Halfedge],
      contour2tri: &mut [i32],
@@ -889,7 +985,7 @@ See vendor/README.md ("The parallel boolean patch").
      face_halfedge: &[Halfedge],
      first_tri: usize,
      triangles: &[[i32; 3]],
-@@ -40,12 +41,13 @@ fn write_local_triangles(
+@@ -43,12 +44,13 @@
              let start = tri[i];
              let end = tri[(i + 1) % 3];
              local_edges[num_edge] = [start, end, out];
@@ -907,7 +1003,7 @@ See vendor/README.md ("The parallel boolean patch").
              num_edge += 1;
          }
      }
-@@ -60,9 +62,9 @@ fn write_local_triangles(
+@@ -63,9 +65,9 @@
              }
          }
          if pair >= 0 {
@@ -919,7 +1015,7 @@ See vendor/README.md ("The parallel boolean patch").
          }
      }
  }
-@@ -74,6 +76,7 @@ fn write_local_triangles(
+@@ -77,6 +79,7 @@
  fn write_general_triangulation(
      output: &mut [Halfedge],
      contour2tri: &mut [i32],
@@ -927,7 +1023,7 @@ See vendor/README.md ("The parallel boolean patch").
      face_halfedge: &[Halfedge],
      first_tri: usize,
      triangulation: &HalfedgeTriangulation,
-@@ -83,7 +86,7 @@ fn write_general_triangulation(
+@@ -86,7 +89,7 @@
      let num_tri_halfedge = 3 * triangulation.num_tri();
  
      for local in 0..num_tri_halfedge {
@@ -936,7 +1032,7 @@ See vendor/README.md ("The parallel boolean patch").
          let edge = &triangulation.halfedges[contour_end + local];
          output[out].start_vert = face_halfedge[edge.start_vert as usize].start_vert;
          output[out].end_vert = face_halfedge[edge.end_vert as usize].start_vert;
-@@ -108,10 +111,10 @@ fn write_general_triangulation(
+@@ -111,10 +114,11 @@
          // the original face-halfedge index of the edge's start.
          let boundary = edge.end_vert;
          debug_assert!(
@@ -945,11 +1041,12 @@ See vendor/README.md ("The parallel boolean patch").
              "contour edge index out of bounds"
          );
 -        contour2tri[boundary as usize] = first_out + edge.paired_halfedge - contour_end as i32;
-+        contour2tri[boundary as usize - edge_base] = first_out + edge.paired_halfedge - contour_end as i32;
++        contour2tri[boundary as usize - edge_base] =
++            first_out + edge.paired_halfedge - contour_end as i32;
      }
  }
  
-@@ -183,9 +186,7 @@ pub fn face2tri_ct(
+@@ -186,9 +190,7 @@
          };
  
      let mut tri_offset = vec![0usize; face_edge.len()];
@@ -960,7 +1057,7 @@ See vendor/README.md ("The parallel boolean patch").
          let num_edge = (face_edge[face + 1] - face_edge[face]) as usize;
          if num_edge == 0 {
              continue;
-@@ -194,7 +195,6 @@ pub fn face2tri_ct(
+@@ -197,7 +199,6 @@
          tri_offset[face] = num_edge - 2;
          if let Some(t) = triangulation {
              tri_offset[face] = t.num_tri();
@@ -968,7 +1065,7 @@ See vendor/README.md ("The parallel boolean patch").
          }
      }
  
-@@ -219,115 +219,167 @@ pub fn face2tri_ct(
+@@ -222,121 +223,179 @@
      let mut tri_normal = vec![Vec3::new(0.0, 0.0, 0.0); num_tri];
      let mut tri_ref = vec![TriRef::default(); num_tri];
  
@@ -978,15 +1075,35 @@ See vendor/README.md ("The parallel boolean patch").
 -        let num_edge = last_edge - first_edge;
 -        if num_edge == 0 {
 -            continue;
-+    // NeoSCAD patch: write the faces' triangles in parallel. Each face
-+    // writes only its own triangles (`tri_offset[face]..` in the output
-+    // arrays) and its own edges' `contour2tri` entries
-+    // (`face_edge[face]..`), with values that depend on nothing but the
-+    // face, so cutting the faces into fixed runs and giving each run its
-+    // slices of the arrays writes exactly what the sequential loop wrote.
-+    // The runs are fixed-size, so their bounds do not depend on the thread
-+    // count. On a level-4 Menger sponge (one 300,000-face boolean at the
-+    // end) this was 1-3% of the whole render.
+-        }
+-        let normal = mesh.face_normal[face];
+-        let first_tri = tri_offset[face];
+-        let face_num_tri;
+-
+-        if num_edge == 3 {
+-            // Single triangle — sort edges into correct winding order.
+-            let mut tri_edge = [
+-                first_edge as i32,
+-                first_edge as i32 + 1,
+-                first_edge as i32 + 2,
+-            ];
+-            let mut tri = [
+-                face_halfedge[first_edge].start_vert,
+-                face_halfedge[first_edge + 1].start_vert,
+-                face_halfedge[first_edge + 2].start_vert,
+-            ];
+-            let mut ends = [
+-                face_halfedge[first_edge].end_vert,
+-                face_halfedge[first_edge + 1].end_vert,
+-                face_halfedge[first_edge + 2].end_vert,
+-            ];
+-            if ends[0] == tri[2] {
+-                tri_edge.swap(1, 2);
+-                tri.swap(1, 2);
+-                ends.swap(1, 2);
++    // Write the faces' triangles in parallel, in fixed runs of faces. A face
++    // writes only its own triangles and `contour2tri` entries, from values that
++    // depend only on the face, so each run gets its own slices of the arrays.
 +    struct FaceRun<'a> {
 +        faces: std::ops::Range<usize>,
 +        halfedge: &'a mut [Halfedge],
@@ -1014,35 +1131,26 @@ See vendor/README.md ("The parallel boolean patch").
 +            contour_rest = cr;
 +            normal_rest = nr;
 +            ref_rest = rr;
-+            runs.push(FaceRun { faces: f0..f1, halfedge: h, contour2tri: c, tri_normal: n, tri_ref: r });
++            runs.push(FaceRun {
++                faces: f0..f1,
++                halfedge: h,
++                contour2tri: c,
++                tri_normal: n,
++                tri_ref: r,
++            });
 +            f0 = f1;
-         }
--        let normal = mesh.face_normal[face];
--        let first_tri = tri_offset[face];
--        let face_num_tri;
--
--        if num_edge == 3 {
--            // Single triangle — sort edges into correct winding order.
--            let mut tri_edge = [first_edge as i32, first_edge as i32 + 1, first_edge as i32 + 2];
--            let mut tri = [
--                face_halfedge[first_edge].start_vert,
--                face_halfedge[first_edge + 1].start_vert,
--                face_halfedge[first_edge + 2].start_vert,
--            ];
--            let mut ends = [
--                face_halfedge[first_edge].end_vert,
--                face_halfedge[first_edge + 1].end_vert,
--                face_halfedge[first_edge + 2].end_vert,
--            ];
--            if ends[0] == tri[2] {
--                tri_edge.swap(1, 2);
--                tri.swap(1, 2);
--                ends.swap(1, 2);
++        }
 +    }
 +    let face_halfedge_ref = &face_halfedge;
 +    let general_ref = &general;
 +    crate::par::maybe_par_for_each(runs, 2, |run| {
-+        let FaceRun { faces, halfedge: new_halfedge, contour2tri, tri_normal, tri_ref } = run;
++        let FaceRun {
++            faces,
++            halfedge: new_halfedge,
++            contour2tri,
++            tri_normal,
++            tri_ref,
++        } = run;
 +        let face_halfedge = face_halfedge_ref;
 +        // Bases of this run's slices in the whole arrays.
 +        let tri_base = tri_offset[faces.start];
@@ -1071,22 +1179,41 @@ See vendor/README.md ("The parallel boolean patch").
 -            let projection = get_axis_aligned_projection(normal);
 -            let tri_ccw = |t: [i32; 3]| -> bool {
 -                ccw(
--                    projection.apply(mesh.vert_pos[face_halfedge[t[0] as usize].start_vert as usize]),
--                    projection.apply(mesh.vert_pos[face_halfedge[t[1] as usize].start_vert as usize]),
--                    projection.apply(mesh.vert_pos[face_halfedge[t[2] as usize].start_vert as usize]),
+-                    projection
+-                        .apply(mesh.vert_pos[face_halfedge[t[0] as usize].start_vert as usize]),
+-                    projection
+-                        .apply(mesh.vert_pos[face_halfedge[t[1] as usize].start_vert as usize]),
+-                    projection
+-                        .apply(mesh.vert_pos[face_halfedge[t[2] as usize].start_vert as usize]),
 -                    mesh.epsilon,
 -                ) >= 0
 -            };
+-
+-            let quad_loops =
+-                assemble_halfedges(&face_halfedge[first_edge..last_edge], first_edge as i32);
+-            let quad = &quad_loops[0]; // Should be exactly one loop
+-
+-            let tris0 = [[quad[0], quad[1], quad[2]], [quad[0], quad[2], quad[3]]];
+-            let tris1 = [[quad[1], quad[2], quad[3]], [quad[0], quad[1], quad[3]]];
 +            let normal = face_normal_ref[face];
 +            let first_tri = tri_offset[face];
 +            let face_num_tri;
  
--            let quad_loops =
--                assemble_halfedges(&face_halfedge[first_edge..last_edge], first_edge as i32);
--            let quad = &quad_loops[0]; // Should be exactly one loop
+-            let choice = if !(tri_ccw(tris0[0]) && tri_ccw(tris0[1])) {
+-                1
+-            } else if tri_ccw(tris1[0]) && tri_ccw(tris1[1]) {
+-                let diag0 = mesh.vert_pos[face_halfedge[quad[0] as usize].start_vert as usize]
+-                    - mesh.vert_pos[face_halfedge[quad[2] as usize].start_vert as usize];
+-                let diag1 = mesh.vert_pos[face_halfedge[quad[1] as usize].start_vert as usize]
+-                    - mesh.vert_pos[face_halfedge[quad[3] as usize].start_vert as usize];
+-                if length2(diag0) > length2(diag1) {
 +            if num_edge == 3 {
 +                // Single triangle — sort edges into correct winding order.
-+                let mut tri_edge = [first_edge as i32, first_edge as i32 + 1, first_edge as i32 + 2];
++                let mut tri_edge = [
++                    first_edge as i32,
++                    first_edge as i32 + 1,
++                    first_edge as i32 + 2,
++                ];
 +                let mut tri = [
 +                    face_halfedge[first_edge].start_vert,
 +                    face_halfedge[first_edge + 1].start_vert,
@@ -1120,44 +1247,67 @@ See vendor/README.md ("The parallel boolean patch").
 +                let projection = get_axis_aligned_projection(normal);
 +                let tri_ccw = |t: [i32; 3]| -> bool {
 +                    ccw(
-+                        projection.apply(vert_pos_ref[face_halfedge[t[0] as usize].start_vert as usize]),
-+                        projection.apply(vert_pos_ref[face_halfedge[t[1] as usize].start_vert as usize]),
-+                        projection.apply(vert_pos_ref[face_halfedge[t[2] as usize].start_vert as usize]),
++                        projection
++                            .apply(vert_pos_ref[face_halfedge[t[0] as usize].start_vert as usize]),
++                        projection
++                            .apply(vert_pos_ref[face_halfedge[t[1] as usize].start_vert as usize]),
++                        projection
++                            .apply(vert_pos_ref[face_halfedge[t[2] as usize].start_vert as usize]),
 +                        epsilon,
 +                    ) >= 0
 +                };
- 
--            let tris0 = [
--                [quad[0], quad[1], quad[2]],
--                [quad[0], quad[2], quad[3]],
--            ];
--            let tris1 = [
--                [quad[1], quad[2], quad[3]],
--                [quad[0], quad[1], quad[3]],
--            ];
++
 +                let quad_loops =
 +                    assemble_halfedges(&face_halfedge[first_edge..last_edge], first_edge as i32);
 +                let quad = &quad_loops[0]; // Should be exactly one loop
- 
--            let choice = if !(tri_ccw(tris0[0]) && tri_ccw(tris0[1])) {
--                1
--            } else if tri_ccw(tris1[0]) && tri_ccw(tris1[1]) {
--                let diag0 = mesh.vert_pos[face_halfedge[quad[0] as usize].start_vert as usize]
--                    - mesh.vert_pos[face_halfedge[quad[2] as usize].start_vert as usize];
--                let diag1 = mesh.vert_pos[face_halfedge[quad[1] as usize].start_vert as usize]
--                    - mesh.vert_pos[face_halfedge[quad[3] as usize].start_vert as usize];
--                if length2(diag0) > length2(diag1) { 1 } else { 0 }
--            } else {
++
++                let tris0 = [[quad[0], quad[1], quad[2]], [quad[0], quad[2], quad[3]]];
++                let tris1 = [[quad[1], quad[2], quad[3]], [quad[0], quad[1], quad[3]]];
++
++                let choice = if !(tri_ccw(tris0[0]) && tri_ccw(tris0[1])) {
+                     1
++                } else if tri_ccw(tris1[0]) && tri_ccw(tris1[1]) {
++                    let diag0 = vert_pos_ref[face_halfedge[quad[0] as usize].start_vert as usize]
++                        - vert_pos_ref[face_halfedge[quad[2] as usize].start_vert as usize];
++                    let diag1 = vert_pos_ref[face_halfedge[quad[1] as usize].start_vert as usize]
++                        - vert_pos_ref[face_halfedge[quad[3] as usize].start_vert as usize];
++                    if length2(diag0) > length2(diag1) {
++                        1
++                    } else {
++                        0
++                    }
+                 } else {
+                     0
+-                }
++                };
++
++                let chosen = if choice == 0 { &tris0 } else { &tris1 };
++                write_local_triangles(
++                    new_halfedge,
++                    contour2tri,
++                    (tri_base, edge_base),
++                    face_halfedge,
++                    first_tri,
++                    chosen,
++                );
++                face_num_tri = 2;
+             } else {
 -                0
 -            };
-+                let tris0 = [
-+                    [quad[0], quad[1], quad[2]],
-+                    [quad[0], quad[2], quad[3]],
-+                ];
-+                let tris1 = [
-+                    [quad[1], quad[2], quad[3]],
-+                    [quad[0], quad[1], quad[3]],
-+                ];
++                // General triangulation
++                let triangulation = general_ref[face]
++                    .as_ref()
++                    .expect("general face missing triangulation result");
++                write_general_triangulation(
++                    new_halfedge,
++                    contour2tri,
++                    (tri_base, edge_base),
++                    face_halfedge,
++                    first_tri,
++                    triangulation,
++                );
++                face_num_tri = triangulation.num_tri();
++            }
  
 -            let chosen = if choice == 0 { &tris0 } else { &tris1 };
 -            write_local_triangles(
@@ -1181,50 +1331,6 @@ See vendor/README.md ("The parallel boolean patch").
 -                triangulation,
 -            );
 -            face_num_tri = triangulation.num_tri();
--        }
-+                let choice = if !(tri_ccw(tris0[0]) && tri_ccw(tris0[1])) {
-+                    1
-+                } else if tri_ccw(tris1[0]) && tri_ccw(tris1[1]) {
-+                    let diag0 = vert_pos_ref[face_halfedge[quad[0] as usize].start_vert as usize]
-+                        - vert_pos_ref[face_halfedge[quad[2] as usize].start_vert as usize];
-+                    let diag1 = vert_pos_ref[face_halfedge[quad[1] as usize].start_vert as usize]
-+                        - vert_pos_ref[face_halfedge[quad[3] as usize].start_vert as usize];
-+                    if length2(diag0) > length2(diag1) { 1 } else { 0 }
-+                } else {
-+                    0
-+                };
-+
-+                let chosen = if choice == 0 { &tris0 } else { &tris1 };
-+                write_local_triangles(
-+                    new_halfedge,
-+                    contour2tri,
-+                    (tri_base, edge_base),
-+                    face_halfedge,
-+                    first_tri,
-+                    chosen,
-+                );
-+                face_num_tri = 2;
-+            } else {
-+                // General triangulation
-+                let triangulation = general_ref[face]
-+                    .as_ref()
-+                    .expect("general face missing triangulation result");
-+                write_general_triangulation(
-+                    new_halfedge,
-+                    contour2tri,
-+                    (tri_base, edge_base),
-+                    face_halfedge,
-+                    first_tri,
-+                    triangulation,
-+                );
-+                face_num_tri = triangulation.num_tri();
-+            }
- 
--        // WriteTriRefs
--        let ref_tri = halfedge_ref[first_edge];
--        for t in 0..face_num_tri {
--            tri_normal[first_tri + t] = normal;
--            tri_ref[first_tri + t] = ref_tri;
 +            // WriteTriRefs
 +            let ref_tri = halfedge_ref[first_edge];
 +            for t in 0..face_num_tri {
@@ -1232,26 +1338,29 @@ See vendor/README.md ("The parallel boolean patch").
 +                tri_ref[first_tri - tri_base + t] = ref_tri;
 +            }
          }
--    }
 +    });
  
+-        // WriteTriRefs
+-        let ref_tri = halfedge_ref[first_edge];
+-        for t in 0..face_num_tri {
+-            tri_normal[first_tri + t] = normal;
+-            tri_ref[first_tri + t] = ref_tri;
+-        }
+-    }
+-
      // Cross-face pairing: connect each face-boundary output halfedge to its
      // counterpart via the original assembly pairing.
+     for edge in 0..face_halfedge.len() {
 --- a/src/par.rs
 +++ b/src/par.rs
-@@ -33,6 +33,121 @@ where
+@@ -33,6 +33,111 @@
      (0..n).map(f).collect()
  }
  
-+// NeoSCAD patch: the indices in `0..n` for which `pred` holds, in
-+// ascending order, testing `pred` in parallel when `n >= threshold`.
-+//
-+// This is the flag half of C++ `FlagStore::run_par` (edge_op.cpp:54-84),
-+// which tests edges into thread-local lists and then sorts the indices so
-+// the collapses run in ascending order. rayon's `collect` into a `Vec`
-+// keeps the sequential order of a filtered range by itself, so no sort is
-+// needed and the list is exactly the one the sequential loop builds.
-+// `pred` must only read: callers mutate the mesh once the list is done.
++/// The indices in `0..n` where `pred` holds, ascending, testing in parallel
++/// when `n >= threshold`: the flag half of C++ `FlagStore::run_par`
++/// (edge_op.cpp:54-84). rayon's `collect` keeps the order, so unlike C++ no
++/// sort is needed.
 +#[cfg(feature = "parallel")]
 +pub fn maybe_par_filter<F>(n: usize, threshold: usize, pred: F) -> Vec<usize>
 +where
@@ -1274,12 +1383,9 @@ See vendor/README.md ("The parallel boolean patch").
 +    (0..n).filter(|&i| pred(i)).collect()
 +}
 +
-+// NeoSCAD patch: a stable sort by key, in parallel when
-+// `v.len() >= threshold`. A stable sort's result is fully determined by
-+// the keys and the input order (equal keys keep their order), so rayon's
-+// stable merge sort and the standard library's give the same slice.
-+// `key` must be a total order (no floats with NaN): with an inconsistent
-+// order the two algorithms may disagree.
++/// A stable sort by key, in parallel when `v.len() >= threshold`. A stable
++/// sort is determined by the keys and input order, so rayon's gives the same
++/// slice, provided `key` is a total order.
 +#[cfg(feature = "parallel")]
 +pub fn maybe_par_sort_by_key<T, K, F>(v: &mut [T], threshold: usize, key: F)
 +where
@@ -1305,10 +1411,8 @@ See vendor/README.md ("The parallel boolean patch").
 +    v.sort_by_key(key);
 +}
 +
-+// NeoSCAD patch: run `f` on every item, in parallel when
-+// `items.len() >= threshold`. For items that each own disjoint output
-+// (slices cut with `split_at_mut`, say), so the order they run in cannot
-+// change what is written.
++/// Run `f` on every item, in parallel when `items.len() >= threshold`. Items
++/// must own disjoint output, so the run order cannot change what is written.
 +#[cfg(feature = "parallel")]
 +pub fn maybe_par_for_each<T, F>(items: Vec<T>, threshold: usize, f: F)
 +where
@@ -1332,9 +1436,9 @@ See vendor/README.md ("The parallel boolean patch").
 +    items.into_iter().for_each(f);
 +}
 +
-+// NeoSCAD patch: apply `f` to every element in place, in parallel when
-+// `v.len() >= threshold`. `f` sees only its own element, so the result
-+// does not depend on the order.
++/// Apply `f` to every element in place, in parallel when `v.len() >=
++/// threshold`. `f` sees only its own element, so the result does not depend on
++/// the order.
 +#[cfg(feature = "parallel")]
 +pub fn maybe_par_for_each_mut<T, F>(v: &mut [T], threshold: usize, f: F)
 +where
@@ -1361,35 +1465,155 @@ See vendor/README.md ("The parallel boolean patch").
  /// [`maybe_par_map`] with cooperative cancellation: `None` means the token was
  /// cancelled and the (necessarily incomplete) results were discarded.
  ///
+@@ -115,3 +220,7 @@
+         })
+         .collect()
+ }
++
++#[cfg(test)]
++#[path = "par_tests.rs"]
++mod tests;
+--- a/src/par_tests.rs
++++ b/src/par_tests.rs
+@@ -0,0 +1,108 @@
++// par_tests.rs — the parallel sites must give the sequential output, on any
++// thread count.
++
++use crate::linalg::Vec3;
++use crate::manifold::Manifold;
++
++/// FNV-1a over the output mesh, less `run_original_id`, which comes from the
++/// process-wide ID counter.
++fn fingerprint(m: &Manifold) -> u64 {
++    let gl = m.get_mesh_gl64(-1);
++    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
++    let mut eat = |bytes: &[u8]| {
++        for &b in bytes {
++            h ^= u64::from(b);
++            h = h.wrapping_mul(0x0100_0000_01b3);
++        }
++    };
++    eat(&gl.num_prop.to_le_bytes());
++    for x in &gl.vert_properties {
++        eat(&x.to_bits().to_le_bytes());
++    }
++    for list in [
++        &gl.tri_verts,
++        &gl.merge_from_vert,
++        &gl.merge_to_vert,
++        &gl.run_index,
++        &gl.face_id,
++    ] {
++        eat(&(list.len() as u64).to_le_bytes());
++        for x in list {
++            eat(&x.to_le_bytes());
++        }
++    }
++    h
++}
++
++/// `f`'s fingerprint, on `threads` threads when the `parallel` feature is on.
++fn run_on(threads: usize, f: &(dyn Fn() -> Manifold + Sync)) -> u64 {
++    #[cfg(feature = "parallel")]
++    {
++        let pool = rayon::ThreadPoolBuilder::new()
++            .num_threads(threads)
++            .build()
++            .unwrap();
++        pool.install(|| fingerprint(&f()))
++    }
++    #[cfg(not(feature = "parallel"))]
++    {
++        let _ = threads;
++        fingerprint(&f())
++    }
++}
++
++/// Pins a union of 500 cubes touching along edges and corners, which leaves
++/// duplicate edges and pinched verts. Integer coordinates, so the hash holds
++/// on every platform.
++#[test]
++fn checkerboard_union_keeps_the_sequential_output() {
++    let model = || {
++        let cube = Manifold::cube(Vec3::splat(1.0), false);
++        let mut result = Manifold::empty();
++        for x in 0..10 {
++            for y in 0..10 {
++                for z in 0..10 {
++                    if (x + y + z) % 2 == 0 {
++                        let at = Vec3::new(f64::from(x), f64::from(y), f64::from(z));
++                        result = result.union(&cube.translate(at));
++                    }
++                }
++            }
++        }
++        result
++    };
++    for threads in [1, 8] {
++        assert_eq!(
++            run_on(threads, &model),
++            0x1d97_1ec0_be2b_3cfb,
++            "{threads} threads"
++        );
++    }
++}
++
++/// A difference large enough for every parallel path must match on 1 and 8
++/// threads. It goes through libm's `sin` and `cos`, so no hash is pinned.
++#[cfg(feature = "parallel")]
++#[test]
++fn large_difference_is_identical_at_any_thread_count() {
++    let model = || {
++        let mut cutters = Vec::new();
++        for i in -3..=3 {
++            for j in -3..=3 {
++                let c = Manifold::cylinder_centered(50.0, 2.0, 2.0, 64, true)
++                    .rotate(f64::from(i) * 9.0, f64::from(j) * 7.0, 0.0)
++                    .translate(Vec3::new(f64::from(i) * 5.5, f64::from(j) * 5.5, 0.0));
++                cutters.push(c);
++            }
++        }
++        let cutters = Manifold::batch_boolean(&cutters, crate::types::OpType::Add);
++        let result = Manifold::sphere(20.0, 224).difference(&cutters);
++        assert!(
++            3 * result.num_tri() > 100_000,
++            "{} triangles",
++            result.num_tri()
++        );
++        result
++    };
++    assert_eq!(run_on(1, &model), run_on(8, &model));
++}
 --- a/src/sort.rs
 +++ b/src/sort.rs
-@@ -4,7 +4,7 @@
- // The Collider is stubbed (Phase 10 will implement it fully).
+@@ -5,7 +5,7 @@
  
+ use crate::impl_mesh::ManifoldImpl;
  use crate::linalg::Vec3;
 -use crate::types::{Box as BBox, Halfedge};
 +use crate::types::Box as BBox;
- use crate::impl_mesh::ManifoldImpl;
  
  // -----------------------------------------------------------------------
-@@ -13,6 +13,12 @@ use crate::impl_mesh::ManifoldImpl;
+ // Morton code (30-bit, 10 bits per axis)
+@@ -13,6 +13,11 @@
  
  const K_NO_CODE: u32 = 0xFFFF_FFFFu32;
  
-+/// NeoSCAD patch: element count from which the passes below run in
-+/// parallel (C++ `autoPolicy`'s default, `kSeqThreshold`, is 1e4). Every
-+/// parallel pass here is a per-element map or in-place update, or a stable
-+/// sort by an integer key, so its result is the sequential one.
-+const PAR_THRESHOLD: usize = 10_000;
++/// Element count from which the passes below run in parallel; above C++'s
++/// `kSeqThreshold` (1e4), as they are cheap per element. Each is a per-element
++/// map or update or a stable integer-key sort, so the result is sequential's.
++const PAR_THRESHOLD: usize = 100_000;
 +
  /// Spread the low 10 bits of v into bits 0,3,6,9,...,27 (every 3rd bit).
  /// This is the inverse of the interleaving needed for a 3D Morton code.
  #[inline]
-@@ -56,13 +62,13 @@ pub fn sort_verts(mesh: &mut ManifoldImpl) {
+@@ -56,15 +61,15 @@
      let bbox = mesh.bbox;
  
      // Compute Morton code for each vertex
--    let vert_morton: Vec<u32> = mesh.vert_pos.iter()
+-    let vert_morton: Vec<u32> = mesh
+-        .vert_pos
+-        .iter()
 -        .map(|&p| morton_code(p, &bbox))
 -        .collect();
 +    let vert_pos = &mesh.vert_pos;
@@ -1400,11 +1624,13 @@ See vendor/README.md ("The parallel boolean patch").
 +    // Build sorted index array (a stable sort, so equal codes keep index order)
      let mut vert_new2old: Vec<i32> = (0..num_vert as i32).collect();
 -    vert_new2old.sort_by(|&a, &b| vert_morton[a as usize].cmp(&vert_morton[b as usize]));
-+    crate::par::maybe_par_sort_by_key(&mut vert_new2old, PAR_THRESHOLD, |&v| vert_morton[v as usize]);
++    crate::par::maybe_par_sort_by_key(&mut vert_new2old, PAR_THRESHOLD, |&v| {
++        vert_morton[v as usize]
++    });
  
      // Find how many survive (NaN verts get K_NO_CODE, sort to end)
      let new_num_vert = vert_new2old.partition_point(|&v| vert_morton[v as usize] < K_NO_CODE);
-@@ -71,19 +77,17 @@ pub fn sort_verts(mesh: &mut ManifoldImpl) {
+@@ -73,20 +78,17 @@
      reindex_verts(mesh, vert_new2old_trimmed, num_vert);
  
      // Permute vert positions (only surviving verts)
@@ -1421,7 +1647,8 @@ See vendor/README.md ("The parallel boolean patch").
      // Permute vert normals if present
      if mesh.vert_normal.len() == num_vert {
 -        let old_n = mesh.vert_normal.clone();
--        mesh.vert_normal.resize(new_num_vert, Vec3::new(0.0, 0.0, 0.0));
+-        mesh.vert_normal
+-            .resize(new_num_vert, Vec3::new(0.0, 0.0, 0.0));
 -        for (new_idx, &old_idx) in vert_new2old_trimmed.iter().enumerate() {
 -            mesh.vert_normal[new_idx] = old_n[old_idx as usize];
 -        }
@@ -1432,7 +1659,7 @@ See vendor/README.md ("The parallel boolean patch").
      }
  }
  
-@@ -95,16 +99,16 @@ pub fn reindex_verts(mesh: &mut ManifoldImpl, vert_new2old: &[i32], old_num_vert
+@@ -98,16 +100,16 @@
          vert_old2new[old_idx as usize] = new_idx as i32;
      }
      let has_prop = mesh.num_prop > 0;
@@ -1452,7 +1679,7 @@ See vendor/README.md ("The parallel boolean patch").
  }
  
  // -----------------------------------------------------------------------
-@@ -116,25 +120,22 @@ pub fn reindex_verts(mesh: &mut ManifoldImpl, vert_new2old: &[i32], old_num_vert
+@@ -119,25 +121,22 @@
  pub fn get_face_box_morton(mesh: &ManifoldImpl) -> (Vec<BBox>, Vec<u32>) {
      let num_tri = mesh.num_tri();
      let bbox = mesh.bbox;
@@ -1486,7 +1713,7 @@ See vendor/README.md ("The parallel boolean patch").
  }
  
  // -----------------------------------------------------------------------
-@@ -148,21 +149,18 @@ pub fn sort_faces(mesh: &mut ManifoldImpl, face_box: &mut Vec<BBox>, face_morton
+@@ -151,21 +150,18 @@
      let mut face_new2old: Vec<usize> = (0..num_tri).collect();
  
      // Stable sort by Morton code (removed tris get K_NO_CODE → sorted last)
@@ -1514,12 +1741,14 @@ See vendor/README.md ("The parallel boolean patch").
  
      gather_faces(mesh, &face_new2old);
  }
-@@ -174,20 +172,16 @@ pub fn gather_faces(mesh: &mut ManifoldImpl, face_new2old: &[usize]) {
+@@ -177,22 +173,16 @@
  
      // Permute tri_ref if present
      if mesh.mesh_relation.tri_ref.len() == old_num_tri {
 -        let old_tri_ref = mesh.mesh_relation.tri_ref.clone();
--        mesh.mesh_relation.tri_ref.resize(num_tri, Default::default());
+-        mesh.mesh_relation
+-            .tri_ref
+-            .resize(num_tri, Default::default());
 -        for (new_f, &old_f) in face_new2old.iter().enumerate() {
 -            mesh.mesh_relation.tri_ref[new_f] = old_tri_ref[old_f];
 -        }
@@ -1541,7 +1770,7 @@ See vendor/README.md ("The parallel boolean patch").
      }
  
      // Build faceOld2New for pairedHalfedge remapping
-@@ -197,32 +191,25 @@ pub fn gather_faces(mesh: &mut ManifoldImpl, face_new2old: &[usize]) {
+@@ -202,33 +192,26 @@
      }
  
      // Gather halfedges from old layout into new
@@ -1552,8 +1781,20 @@ See vendor/README.md ("The parallel boolean patch").
      let has_tangent = !old_tangent.is_empty();
  
 -    mesh.halfedge.resize(3 * num_tri, Halfedge::default());
--    if has_tangent {
--        mesh.halfedge_tangent.resize(3 * num_tri, Default::default());
++    mesh.halfedge = crate::par::maybe_par_map(3 * num_tri, PAR_THRESHOLD, |new_edge_idx| {
++        let old_edge_idx = 3 * face_new2old[new_edge_idx / 3] + new_edge_idx % 3;
++        let mut edge = old_halfedge[old_edge_idx];
++        // Remap pairedHalfedge
++        if edge.paired_halfedge >= 0 {
++            let paired_old_face = (edge.paired_halfedge / 3) as usize;
++            let offset = edge.paired_halfedge % 3;
++            edge.paired_halfedge = 3 * face_old2new[paired_old_face] + offset;
++        }
++        edge
++    });
+     if has_tangent {
+-        mesh.halfedge_tangent
+-            .resize(3 * num_tri, Default::default());
 -    }
 -
 -    for new_face in 0..num_tri {
@@ -1572,21 +1813,11 @@ See vendor/README.md ("The parallel boolean patch").
 -            if has_tangent {
 -                mesh.halfedge_tangent[new_edge_idx] = old_tangent[old_edge_idx];
 -            }
-+    mesh.halfedge = crate::par::maybe_par_map(3 * num_tri, PAR_THRESHOLD, |new_edge_idx| {
-+        let old_edge_idx = 3 * face_new2old[new_edge_idx / 3] + new_edge_idx % 3;
-+        let mut edge = old_halfedge[old_edge_idx];
-+        // Remap pairedHalfedge
-+        if edge.paired_halfedge >= 0 {
-+            let paired_old_face = (edge.paired_halfedge / 3) as usize;
-+            let offset = edge.paired_halfedge % 3;
-+            edge.paired_halfedge = 3 * face_old2new[paired_old_face] + offset;
-         }
-+        edge
-+    });
-+    if has_tangent {
-+        mesh.halfedge_tangent = crate::par::maybe_par_map(3 * num_tri, PAR_THRESHOLD, |new_edge_idx| {
-+            old_tangent[3 * face_new2old[new_edge_idx / 3] + new_edge_idx % 3]
-+        });
+-        }
++        mesh.halfedge_tangent =
++            crate::par::maybe_par_map(3 * num_tri, PAR_THRESHOLD, |new_edge_idx| {
++                old_tangent[3 * face_new2old[new_edge_idx / 3] + new_edge_idx % 3]
++            });
      }
  }
  

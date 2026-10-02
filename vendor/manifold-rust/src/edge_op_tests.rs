@@ -1,13 +1,23 @@
 use super::*;
-use crate::linalg::Mat3x4;
-use crate::impl_mesh::ManifoldImpl;
 use crate::face_op::set_normals_and_coplanar;
+use crate::impl_mesh::ManifoldImpl;
+use crate::linalg::Mat3x4;
 
 #[test]
 fn test_pair_up() {
     let mut halfedges = vec![
-        Halfedge { start_vert: 0, end_vert: 1, paired_halfedge: -1, prop_vert: 0 },
-        Halfedge { start_vert: 1, end_vert: 0, paired_halfedge: -1, prop_vert: 1 },
+        Halfedge {
+            start_vert: 0,
+            end_vert: 1,
+            paired_halfedge: -1,
+            prop_vert: 0,
+        },
+        Halfedge {
+            start_vert: 1,
+            end_vert: 0,
+            paired_halfedge: -1,
+            prop_vert: 1,
+        },
     ];
     pair_up(&mut halfedges, 0, 1);
     assert_eq!(halfedges[0].paired_halfedge, 1);
@@ -34,8 +44,125 @@ fn test_simplify_topology_noop_on_clean_mesh() {
     // After simplify, cube should still be 2-manifold (no degenerate edges)
     // (Some verts/edges may be removed, but topology must be valid)
     // Just check it's still 2-manifold where halfedges are valid
-    let valid = m.halfedge.iter().filter(|h| h.paired_halfedge >= 0).all(|h| {
-        h.paired_halfedge < m.halfedge.len() as i32
-    });
+    let valid = m
+        .halfedge
+        .iter()
+        .filter(|h| h.paired_halfedge >= 0)
+        .all(|h| h.paired_halfedge < m.halfedge.len() as i32);
     assert!(valid, "invalid paired halfedge after simplify");
+}
+
+/// Regression fixture shared with manifold-sharp (DedupeEdgesRegressionTests):
+/// 852 triangles cut from a 28060-triangle exact union right before
+/// DedupeEdges, within three vertex rings of its sixteen duplicate edges.
+/// Format: "numVert numTri", then one "x y z" per vertex, then one line per
+/// triangle of three (start, end, pair) halfedges, pair -1 where it fell
+/// outside the cut. Positions are round-trip formatted, so bit-exact.
+const DEDUPE_STALE_DUPLICATE: &str = include_str!("testdata/dedupe-stale-duplicate.txt");
+
+fn load_halfedge_fixture(text: &str) -> ManifoldImpl {
+    let mut lines = text.lines();
+    let header: Vec<usize> = lines
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    let (num_vert, num_tri) = (header[0], header[1]);
+    let mut m = ManifoldImpl::new();
+    for _ in 0..num_vert {
+        let p: Vec<f64> = lines
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        m.vert_pos.push(Vec3::new(p[0], p[1], p[2]));
+    }
+    for _ in 0..num_tri {
+        let p: Vec<i32> = lines
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        for k in 0..3 {
+            m.halfedge.push(Halfedge {
+                start_vert: p[3 * k],
+                end_vert: p[3 * k + 1],
+                paired_halfedge: p[3 * k + 2],
+                prop_vert: p[3 * k],
+            });
+        }
+    }
+    m
+}
+
+/// Splitting duplicated edges only relabels vertices and adds zero-area
+/// triangles, so no pre-existing triangle corner may change position. Before
+/// the stale-entry check, a duplicate already resolved by an earlier repair in
+/// the same pass was "repaired" again, relabelling an orbit to a copy of the
+/// wrong vertex: 16 corners jumped ~0.13 and a union lost 2.3e-5 of volume.
+#[test]
+fn test_dedupe_edges_never_moves_a_triangle_corner() {
+    let mut m = load_halfedge_fixture(DEDUPE_STALE_DUPLICATE);
+    let before: Vec<Vec3> = m
+        .halfedge
+        .iter()
+        .map(|h| m.vert_pos[h.start_vert as usize])
+        .collect();
+
+    dedupe_edges(&mut m);
+
+    let moved = before
+        .iter()
+        .enumerate()
+        .filter(|(h, p)| {
+            let after = m.vert_pos[m.halfedge[*h].start_vert as usize];
+            after.x != p.x || after.y != p.y || after.z != p.z
+        })
+        .count();
+    assert_eq!(moved, 0, "a corner that moves changes the solid");
+}
+
+/// `orbit_owners` must give each orbit's smallest eligible halfedge, as the
+/// sequential scans do, on cubes touching along edges, for two rules.
+#[cfg(feature = "parallel")]
+#[test]
+fn test_orbit_owners_match_the_sequential_scan() {
+    let cube = crate::manifold::Manifold::cube(Vec3::splat(1.0), false);
+    let mut model = crate::manifold::Manifold::empty();
+    for x in 0..4 {
+        for y in 0..4 {
+            for z in 0..4 {
+                if (x + y + z) % 2 == 0 {
+                    let at = Vec3::new(f64::from(x), f64::from(y), f64::from(z));
+                    model = model.union(&cube.translate(at));
+                }
+            }
+        }
+    }
+    let halfedge = &model.as_impl().halfedge;
+    let rules: [&(dyn Fn(&Halfedge) -> bool + Sync); 2] = [&|h| h.start_vert >= 0, &|h| {
+        h.start_vert >= 0 && h.end_vert % 3 != 0
+    }];
+    for eligible in rules {
+        let mut visited = vec![false; halfedge.len()];
+        let mut expected = Vec::new();
+        for i in 0..halfedge.len() {
+            if visited[i] || !eligible(&halfedge[i]) {
+                continue;
+            }
+            expected.push(i);
+            let mut current = i;
+            loop {
+                visited[current] = true;
+                current = next_halfedge(halfedge[current].paired_halfedge) as usize;
+                if current == i {
+                    break;
+                }
+            }
+        }
+        assert_eq!(orbit_owners(halfedge, 0, eligible), Some(expected));
+    }
 }

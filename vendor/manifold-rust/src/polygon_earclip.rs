@@ -1,12 +1,14 @@
 // EarClip triangulator — extracted from polygon.rs
 // Port of C++ ear-clipping algorithm with 2D KD-tree acceleration
 
-use std::collections::HashMap;
 use crate::linalg::Vec2;
 use crate::types::{PolyVert, PolygonsIdx, Rect, K_PRECISION};
+use std::collections::HashMap;
 
-use super::{ccw, determinant2x2, safe_normalize_2d, dot2d,
-            build_two_d_tree, query_two_d_tree, INVALID, K_BEST, IVec3Out};
+use super::{
+    build_two_d_tree, ccw, determinant2x2, dot2d, query_two_d_tree, safe_normalize_2d, IVec3Out,
+    INVALID, K_BEST,
+};
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -83,9 +85,8 @@ pub(super) struct EarClip {
     polygon: Vec<Vert>,
     holes: Vec<usize>,
     outers: Vec<usize>,
-    /// NeoSCAD patch (see vendor/README.md): a box around every vert ever
-    /// in each outer ring, parallel to `outers`, grown as holes are joined
-    /// in, so the bridge searches can skip rings that cannot hold a bridge.
+    /// Bounding box of each outer ring, parallel to `outers` and grown as
+    /// holes join, so the bridge searches can skip rings. Not in C++.
     outer_bbox: Vec<Rect>,
     simples: Vec<usize>,
     hole2bbox: HashMap<usize, Rect>,
@@ -169,21 +170,17 @@ impl EarClip {
         self.polygon[left].right_dir = safe_normalize_2d(dir);
     }
 
-    /// The unclipped verts of the polygon ring starting from `first`, in ring
-    /// order, or `None` if the ring is degenerate.
+    /// The unclipped verts of the ring starting from `first`, or `None` if
+    /// the ring is degenerate.
     fn loop_verts(&self, first: usize) -> Option<Vec<usize>> {
         let mut result = Vec::new();
-        self.for_each_loop_vert(first, |v| result.push(v)).then_some(result)
+        self.for_each_loop_vert(first, |v| result.push(v))
+            .then_some(result)
     }
 
-    /// NeoSCAD patch (see vendor/README.md): apply `f` to each unclipped vert
-    /// of the ring starting from `first`, in the order `loop_verts` returns
-    /// them, without collecting them. Returns `false` if the ring is
-    /// degenerate; `f` has then already seen the verts before the degenerate
-    /// one, so a caller that must match `loop_verts`'s all-or-nothing `None`
-    /// has to undo what `f` did. `cut_keyhole` and `find_closer_bridge` walk
-    /// every outer ring once per hole, and collecting each ring into a fresh
-    /// `Vec` was 60% of extruding a square with 5,041 holes.
+    /// Apply `f` to each vert `loop_verts` would return, without collecting
+    /// them, as C++ `Loop` does. Returns `false` if the ring is degenerate,
+    /// after `f` has already seen the verts before the degenerate one.
     fn for_each_loop_vert(&self, first: usize, mut f: impl FnMut(usize)) -> bool {
         let mut v = first;
         let mut cur_first = first;
@@ -232,7 +229,11 @@ impl EarClip {
         let mut center = tail;
         let mut last = center;
 
-        let v_stop = if to_left { self.polygon[v].right } else { self.polygon[v].left };
+        let v_stop = if to_left {
+            self.polygon[v].right
+        } else {
+            self.polygon[v].left
+        };
 
         loop {
             if next_l == next_r || tail == next_r || next_l == v_stop {
@@ -242,7 +243,11 @@ impl EarClip {
             let edge_l = self.polygon[next_l].pos - self.polygon[center].pos;
             let l2 = dot2d(edge_l, edge_l);
             if l2 <= p2 {
-                next_l = if to_left { self.polygon[next_l].left } else { self.polygon[next_l].right };
+                next_l = if to_left {
+                    self.polygon[next_l].left
+                } else {
+                    self.polygon[next_l].right
+                };
                 continue;
             }
 
@@ -258,7 +263,11 @@ impl EarClip {
             if lr2 <= p2 {
                 last = center;
                 center = next_l;
-                next_l = if to_left { self.polygon[next_l].left } else { self.polygon[next_l].right };
+                next_l = if to_left {
+                    self.polygon[next_l].left
+                } else {
+                    self.polygon[next_l].right
+                };
                 if next_l == next_r {
                     break;
                 }
@@ -273,8 +282,17 @@ impl EarClip {
                 self.epsilon,
             );
             if center != last {
-                convexity += ccw(self.polygon[last].pos, self.polygon[center].pos, self.polygon[next_l].pos, self.epsilon)
-                    + ccw(self.polygon[next_r].pos, self.polygon[center].pos, self.polygon[last].pos, self.epsilon);
+                convexity += ccw(
+                    self.polygon[last].pos,
+                    self.polygon[center].pos,
+                    self.polygon[next_l].pos,
+                    self.epsilon,
+                ) + ccw(
+                    self.polygon[next_r].pos,
+                    self.polygon[center].pos,
+                    self.polygon[last].pos,
+                    self.epsilon,
+                );
             }
             if convexity != 0 {
                 return convexity > 0;
@@ -282,7 +300,11 @@ impl EarClip {
 
             if l2 < r2 {
                 center = next_l;
-                next_l = if to_left { self.polygon[next_l].left } else { self.polygon[next_l].right };
+                next_l = if to_left {
+                    self.polygon[next_l].left
+                } else {
+                    self.polygon[next_l].right
+                };
             } else {
                 center = next_r;
                 next_r = self.polygon[next_r].right;
@@ -295,7 +317,12 @@ impl EarClip {
     fn vert_is_convex(&self, v: usize, epsilon: f64) -> bool {
         let left = self.polygon[v].left;
         let right = self.polygon[v].right;
-        ccw(self.polygon[left].pos, self.polygon[v].pos, self.polygon[right].pos, epsilon) >= 0
+        ccw(
+            self.polygon[left].pos,
+            self.polygon[v].pos,
+            self.polygon[right].pos,
+            epsilon,
+        ) >= 0
     }
 
     fn vert_is_reflex(&self, v: usize) -> bool {
@@ -332,11 +359,17 @@ impl EarClip {
         let eps = self.epsilon;
         let d = determinant2x2(unit, self.polygon[other].pos - self.polygon[v].pos);
         if d.abs() < eps {
-            let d_r = determinant2x2(unit, self.polygon[self.polygon[other].right].pos - self.polygon[v].pos);
+            let d_r = determinant2x2(
+                unit,
+                self.polygon[self.polygon[other].right].pos - self.polygon[v].pos,
+            );
             if d_r.abs() > eps {
                 return d_r;
             }
-            let d_l = determinant2x2(unit, self.polygon[self.polygon[other].left].pos - self.polygon[v].pos);
+            let d_l = determinant2x2(
+                unit,
+                self.polygon[self.polygon[other].left].pos - self.polygon[v].pos,
+            );
             if d_l.abs() > eps {
                 return d_l;
             }
@@ -348,9 +381,11 @@ impl EarClip {
     fn vert_cost(&self, v: usize, other: usize, open_side: Vec2) -> f64 {
         let left = self.polygon[v].left;
         let right = self.polygon[v].right;
-        let cost = self.vert_signed_dist(v, other, self.polygon[v].right_dir)
+        let cost = self
+            .vert_signed_dist(v, other, self.polygon[v].right_dir)
             .min(self.vert_signed_dist(left, other, self.polygon[left].right_dir));
-        let open_cost = determinant2x2(open_side, self.polygon[other].pos - self.polygon[right].pos);
+        let open_cost =
+            determinant2x2(open_side, self.polygon[other].pos - self.polygon[right].pos);
         cost.min(open_cost)
     }
 
@@ -368,10 +403,17 @@ impl EarClip {
         let radius = denom.sqrt() * 0.5;
         let open_side = safe_normalize_2d(open_side_vec);
 
-        let total_cost = dot2d(self.polygon[left].right_dir, self.polygon[v].right_dir) - 1.0 - self.epsilon;
+        let total_cost =
+            dot2d(self.polygon[left].right_dir, self.polygon[v].right_dir) - 1.0 - self.epsilon;
 
         // Folded ears: clip first
-        if ccw(self.polygon[v].pos, self.polygon[left].pos, self.polygon[right].pos, self.epsilon) == 0 {
+        if ccw(
+            self.polygon[v].pos,
+            self.polygon[left].pos,
+            self.polygon[right].pos,
+            self.epsilon,
+        ) == 0
+        {
             return total_cost;
         }
 
@@ -400,7 +442,8 @@ impl EarClip {
             {
                 let mut cost = self.vert_cost(v, test, open_side);
                 if cost < -self.epsilon {
-                    cost = Self::delaunay_cost(self.polygon[test].pos - center, scale, self.epsilon);
+                    cost =
+                        Self::delaunay_cost(self.polygon[test].pos - center, scale, self.epsilon);
                 }
                 if cost > tc {
                     tc = cost;
@@ -568,16 +611,9 @@ impl EarClip {
         };
         let mut connector: usize = INVALID;
         let mut ring: usize = INVALID;
-        // NeoSCAD patch: a ring whose verts all lie above or below the
-        // horizontal ray from `start` has no edge for which
-        // `vert_interp_y2x` is finite (that needs one end at or below
-        // start.y + eps and the other at or above start.y - eps), so it
-        // cannot change the connector and is skipped. Without this every
-        // hole walked every outer ring: 200 lines of extruded text (30,000
-        // rings) spent 90% of their time here and in `find_closer_bridge`.
-        // The margin is twice epsilon plus a relative term far above the
-        // rounding of those comparisons, so no ring that could qualify is
-        // ever skipped and the bridges, and triangles, are unchanged.
+        // A ring wholly above or below start.y -+ eps has no edge with a
+        // finite `vert_interp_y2x`, so it cannot take the connector. The
+        // margin only widens that test, so no ring that could is skipped.
         let slack = 2.0 * self.epsilon.abs() + 1e-9 * (1.0 + start_pos.y.abs());
 
         // Port of the C++ CheckEdge lambda: take `edge` as the new connector
@@ -585,12 +621,8 @@ impl EarClip {
         // lies inside THAT edge's wedge, and it beats the current connector —
         // either the crossing point is CCW of the connector edge, or (for any
         // non-CCW result) the vertical-ordering InsideEdge tie-break holds.
-        //
-        // NeoSCAD patch: walk each ring in place instead of cloning `outers`
-        // and collecting the ring (see `for_each_loop_vert`). A degenerate
-        // ring used to be skipped whole, so the connector is restored if the
-        // walk stops part-way; that keeps the bridges, and so the triangles,
-        // exactly as before.
+        // A degenerate ring is skipped whole, as `loop_verts` returning `None`
+        // skipped it, so the connector is restored if the walk stops part-way.
         for (k, &outer_start) in self.outers.iter().enumerate() {
             let rb = &self.outer_bbox[k];
             if rb.min.y > start_pos.y + slack || rb.max.y < start_pos.y - slack {
@@ -630,15 +662,14 @@ impl EarClip {
 
         let (connector, ring) = self.find_closer_bridge(start, connector, ring);
         self.join_polygons(start, connector);
-        // NeoSCAD patch: the hole's verts are now part of that ring.
+        // The hole's verts are now part of that ring.
         let rb = &mut self.outer_bbox[ring];
         rb.union_point(bbox.min);
         rb.union_point(bbox.max);
     }
 
     /// Refine keyhole connector: find any reflex vert closer to start.
-    /// NeoSCAD patch: also takes and returns the index in `outers` of the
-    /// ring holding the connector, so `cut_keyhole` can grow its box.
+    /// Also returns the `outers` index of the connector's ring.
     fn find_closer_bridge(&self, start: usize, edge: usize, edge_ring: usize) -> (usize, usize) {
         let start_pos = self.polygon[start].pos;
         let edge_right = self.polygon[edge].right;
@@ -646,7 +677,9 @@ impl EarClip {
             edge_right
         } else if self.polygon[edge_right].pos.x < start_pos.x {
             edge
-        } else if self.polygon[edge_right].pos.y - start_pos.y > start_pos.y - self.polygon[edge].pos.y {
+        } else if self.polygon[edge_right].pos.y - start_pos.y
+            > start_pos.y - self.polygon[edge].pos.y
+        {
             edge
         } else {
             edge_right
@@ -661,17 +694,10 @@ impl EarClip {
             -1.0
         };
 
-        // NeoSCAD patch: in place, and all-or-nothing per ring, as in
-        // `cut_keyhole`. A vert qualifies only if it lies right of
-        // start.x - eps, on the `above` side of start.y -+ eps, and not
-        // clearly outside the line from start to the current connector
-        // (`inside` is `ccw`, which calls anything within eps/2 times the
-        // longer of its two vectors collinear). Each test is linear in the
-        // vert's position, so a ring whose box fails one of them at every
-        // corner has no vert that passes and is skipped. The box test uses
-        // the connector the walk would start with (it changes only inside
-        // a ring that is walked), with margins well above rounding, so the
-        // result is unchanged.
+        // Degenerate rings are skipped whole, as in `cut_keyhole`. A vert must
+        // be right of start, on the `above` side and not outside start ->
+        // connector (`ccw`): all linear in position, so a ring whose box
+        // corners all fail one test is skipped. The margins only widen them.
         let eps = self.epsilon.abs();
         let slack = 2.0 * eps + 1e-9 * (1.0 + start_pos.x.abs() + start_pos.y.abs());
         let mut ring = edge_ring;
@@ -703,7 +729,12 @@ impl EarClip {
             let before = (connector, ring);
             let complete = self.for_each_loop_vert(outer_start, |vert| {
                 let inside = above
-                    * ccw(start_pos, self.polygon[vert].pos, self.polygon[connector].pos, self.epsilon) as f64;
+                    * ccw(
+                        start_pos,
+                        self.polygon[vert].pos,
+                        self.polygon[connector].pos,
+                        self.epsilon,
+                    ) as f64;
                 let vp = self.polygon[vert].pos;
                 let cp = self.polygon[connector].pos;
                 if vp.x > start_pos.x - self.epsilon
@@ -756,14 +787,24 @@ impl EarClip {
             let version = self.polygon[v].ear_version;
             let seq = self.ear_seq;
             self.ear_seq += 1;
-            self.ears_queue.push(EarEntry { cost: K_BEST, idx: v, version, seq });
+            self.ears_queue.push(EarEntry {
+                cost: K_BEST,
+                idx: v,
+                version,
+                seq,
+            });
         } else if self.vert_is_convex(v, 2.0 * self.epsilon) {
             let cost = self.vert_ear_cost(v, collider);
             self.polygon[v].cost = cost;
             let version = self.polygon[v].ear_version;
             let seq = self.ear_seq;
             self.ear_seq += 1;
-            self.ears_queue.push(EarEntry { cost, idx: v, version, seq });
+            self.ears_queue.push(EarEntry {
+                cost,
+                idx: v,
+                version,
+                seq,
+            });
         } else {
             self.polygon[v].cost = 1.0; // reflex, not an ear
         }
@@ -772,14 +813,22 @@ impl EarClip {
     /// Build a 2D KD-tree collider of all polygon verts for ear cost queries.
     fn vert_collider(&self, start: usize) -> IdxCollider {
         let verts = match self.loop_verts(start) {
-            None => return IdxCollider { points: Vec::new(), itr: Vec::new() },
+            None => {
+                return IdxCollider {
+                    points: Vec::new(),
+                    itr: Vec::new(),
+                }
+            }
             Some(v) => v,
         };
 
         let mut itr = Vec::with_capacity(verts.len());
         let mut points = Vec::with_capacity(verts.len());
         for (k, &v) in verts.iter().enumerate() {
-            points.push(PolyVert { pos: self.polygon[v].pos, idx: k as i32 });
+            points.push(PolyVert {
+                pos: self.polygon[v].pos,
+                idx: k as i32,
+            });
             itr.push(v);
         }
 

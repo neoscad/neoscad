@@ -1,4 +1,4 @@
-NeoSCAD patch to manifold-rust 0.13.1 (crates.io): the ear clipper's two
+NeoSCAD patch to manifold-rust 0.15.0 (crates.io): the ear clipper's two
 bridge searches (cut_keyhole, find_closer_bridge) visit each outer ring
 through for_each_loop_vert instead of cloning `outers` and collecting
 every ring into a new Vec once per hole, which was 60% of triangulating a
@@ -7,41 +7,42 @@ before a ring and restores it if the ring turns out to be degenerate, as
 loop_verts skipped such a ring whole. Test:
 crates/geom/tests/kernel_patches.rs.
 
-Upstream: not yet filed; a draft issue is in vendor/README.md ("Upstream
-drafts").
+Upstream: proposed as branch `neoscad/earclip-loop-visitor`
+(commit 2352adc) of a fork of larsbrubaker/manifold-rust, on top of its
+`main` at 40f20c6 (0.15.0 plus two QuickHull commits that touch none of
+these files). This patch is that commit's changes under src/, byte for
+byte apart from CRLF line endings; the branch also adds a benchmark
+under examples/, which is not vendored.
 
-Apply from the crate root on top of 0001: patch -p1 < this file. The
-crate's sources use CRLF line endings.
+Apply from the crate root after deleting the paths listed in `removed`: patch -p1 < this file.
+The crate's older sources use CRLF line endings; files this series
+adds use LF.
 See vendor/README.md ("The keyhole speed patch").
 
 --- a/src/polygon_earclip.rs
 +++ b/src/polygon_earclip.rs
-@@ -164,10 +164,22 @@
+@@ -166,10 +166,18 @@
          self.polygon[left].right_dir = safe_normalize_2d(dir);
      }
  
 -    /// Apply `f` to each unclipped vert in the polygon ring starting from `first`.
 -    /// Returns `Some(last_v)` on success (last_v == first), or `None` if degenerate.
-+    /// The unclipped verts of the polygon ring starting from `first`, in ring
-+    /// order, or `None` if the ring is degenerate.
++    /// The unclipped verts of the ring starting from `first`, or `None` if
++    /// the ring is degenerate.
      fn loop_verts(&self, first: usize) -> Option<Vec<usize>> {
          let mut result = Vec::new();
-+        self.for_each_loop_vert(first, |v| result.push(v)).then_some(result)
++        self.for_each_loop_vert(first, |v| result.push(v))
++            .then_some(result)
 +    }
 +
-+    /// NeoSCAD patch (see vendor/README.md): apply `f` to each unclipped vert
-+    /// of the ring starting from `first`, in the order `loop_verts` returns
-+    /// them, without collecting them. Returns `false` if the ring is
-+    /// degenerate; `f` has then already seen the verts before the degenerate
-+    /// one, so a caller that must match `loop_verts`'s all-or-nothing `None`
-+    /// has to undo what `f` did. `cut_keyhole` and `find_closer_bridge` walk
-+    /// every outer ring once per hole, and collecting each ring into a fresh
-+    /// `Vec` was 60% of extruding a square with 5,041 holes.
++    /// Apply `f` to each vert `loop_verts` would return, without collecting
++    /// them, as C++ `Loop` does. Returns `false` if the ring is degenerate,
++    /// after `f` has already seen the verts before the degenerate one.
 +    fn for_each_loop_vert(&self, first: usize, mut f: impl FnMut(usize)) -> bool {
          let mut v = first;
          let mut cur_first = first;
          loop {
-@@ -176,22 +188,22 @@
+@@ -178,22 +186,22 @@
                  if !self.clipped(cur_first) {
                      v = cur_first;
                      if self.polygon[v].right == self.polygon[v].left {
@@ -69,7 +70,7 @@ See vendor/README.md ("The keyhole speed patch").
      }
  
      // -----------------------------------------------------------------------
-@@ -555,13 +567,15 @@
+@@ -603,13 +611,11 @@
          // lies inside THAT edge's wedge, and it beats the current connector —
          // either the crossing point is CCW of the connector edge, or (for any
          // non-CCW result) the vertical-ordering InsideEdge tie-break holds.
@@ -80,19 +81,15 @@ See vendor/README.md ("The keyhole speed patch").
 -                Some(v) => v,
 -            };
 -            for &edge in &verts {
-+        //
-+        // NeoSCAD patch: walk each ring in place instead of cloning `outers`
-+        // and collecting the ring (see `for_each_loop_vert`). A degenerate
-+        // ring used to be skipped whole, so the connector is restored if the
-+        // walk stops part-way; that keeps the bridges, and so the triangles,
-+        // exactly as before.
++        // A degenerate ring is skipped whole, as `loop_verts` returning `None`
++        // skipped it, so the connector is restored if the walk stops part-way.
 +        for &outer_start in &self.outers {
 +            let before = connector;
 +            let complete = self.for_each_loop_vert(outer_start, |edge| {
                  let x = self.vert_interp_y2x(edge, start_pos, on_top);
                  if x.is_finite()
                      && self.vert_inside_edge(start, edge, true)
-@@ -580,6 +594,9 @@
+@@ -628,6 +634,9 @@
                  {
                      connector = edge;
                  }
@@ -102,7 +99,7 @@ See vendor/README.md ("The keyhole speed patch").
              }
          }
  
-@@ -615,13 +632,11 @@
+@@ -665,13 +674,10 @@
              -1.0
          };
  
@@ -113,15 +110,14 @@ See vendor/README.md ("The keyhole speed patch").
 -                Some(v) => v,
 -            };
 -            for &vert in &verts {
-+        // NeoSCAD patch: in place, and all-or-nothing per ring, as in
-+        // `cut_keyhole`.
++        // Degenerate rings are skipped whole, as in `cut_keyhole`.
 +        for &outer_start in &self.outers {
 +            let before = connector;
 +            let complete = self.for_each_loop_vert(outer_start, |vert| {
                  let inside = above
-                     * ccw(start_pos, self.polygon[vert].pos, self.polygon[connector].pos, self.epsilon) as f64;
-                 let vp = self.polygon[vert].pos;
-@@ -635,6 +650,9 @@
+                     * ccw(
+                         start_pos,
+@@ -690,6 +696,9 @@
                  {
                      connector = vert;
                  }
@@ -131,3 +127,69 @@ See vendor/README.md ("The keyhole speed patch").
              }
          }
  
+--- a/src/polygon_earclip_tests.rs
++++ b/src/polygon_earclip_tests.rs
+@@ -70,3 +70,63 @@
+         expected_area
+     );
+ }
++
++/// FNV-1a over a triangle list, pinning the triangles and their order.
++fn fnv(tris: &[IVec3Out]) -> u64 {
++    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
++    for t in tris {
++        for c in [t.x, t.y, t.z] {
++            for b in c.to_le_bytes() {
++                h ^= u64::from(b);
++                h = h.wrapping_mul(0x0100_0000_01b3);
++            }
++        }
++    }
++    h
++}
++
++fn octagon(cx: f64, cy: f64, r: f64, hole: bool) -> Vec<Vec2> {
++    let mut ring: Vec<Vec2> = [
++        (1.0, -0.5),
++        (0.5, -1.0),
++        (-0.5, -1.0),
++        (-1.0, -0.5),
++        (-1.0, 0.5),
++        (-0.5, 1.0),
++        (0.5, 1.0),
++        (1.0, 0.5),
++    ]
++    .iter()
++    .map(|&(x, y)| Vec2::new(cx + r * x, cy + r * y))
++    .collect();
++    if !hole {
++        ring.reverse();
++    }
++    ring
++}
++
++/// Pins the triangles of a 24x24 grid of octagonal holes, every other row
++/// shifted so the bridges run between holes rather than to the outer edge.
++#[test]
++fn keyholing_many_holes_keeps_its_triangles() {
++    let n = 24;
++    let size = 3.0 * f64::from(n) + 3.0;
++    let mut polys = vec![vec![
++        Vec2::new(0.0, 0.0),
++        Vec2::new(size, 0.0),
++        Vec2::new(size, size),
++        Vec2::new(0.0, size),
++    ]];
++    for i in 0..n {
++        for j in 0..n {
++            let cx = 3.0 * f64::from(i) + 2.0 + if j % 2 == 1 { 0.75 } else { 0.0 };
++            let cy = 3.0 * f64::from(j) + 2.0;
++            polys.push(octagon(cx, cy, 1.0, true));
++        }
++    }
++    let tris = crate::polygon::triangulate(&polys, 1e-9, true);
++    // Every vert is kept, so v + 2h - 2 triangles.
++    let verts = 4 + 8 * n * n;
++    assert_eq!(tris.len() as i32, verts + 2 * n * n - 2);
++    assert_eq!(fnv(&tris), 0xb444_9c9b_cd61_b83e, "hash {:#x}", fnv(&tris));
++}

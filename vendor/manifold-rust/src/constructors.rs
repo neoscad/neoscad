@@ -2,15 +2,14 @@
 //
 // Ports src/constructors.cpp from the Manifold C++ library.
 // Sphere() requires Subdivide() (Phase 15) and is omitted here.
-// Cube, Tetrahedron, Octahedron are in impl_mesh.rs.
+// Cube, Tetrahedron, Octahedron are in impl_shapes.rs.
 
-use crate::linalg::{Vec2, Vec3, IVec3, Mat3x4};
-use crate::types::{
-    Polygons, SimplePolygon, PolygonsIdx, SimplePolygonIdx, PolyVert,
-    cosd, sind, Quality,
-};
-use crate::polygon::{triangulate_idx, triangulate};
 use crate::impl_mesh::ManifoldImpl;
+use crate::linalg::{IVec3, Mat3x4, Vec2, Vec3};
+use crate::polygon::{triangulate, triangulate_idx};
+use crate::types::{
+    cosd, sind, PolyVert, Polygons, PolygonsIdx, Quality, SimplePolygon, SimplePolygonIdx,
+};
 
 // -----------------------------------------------------------------------
 // Extrude
@@ -84,18 +83,18 @@ pub fn extrude(
                 if i == n_div as usize && is_cone {
                     // Connect to apex; apex index = n_cross * n_div + j
                     let apex = n_cross * n_div as i32 + j;
-                    tri_verts.push(IVec3::new(
-                        apex,
-                        last_vert - n_cross,
-                        this_vert - n_cross,
-                    ));
+                    tri_verts.push(IVec3::new(apex, last_vert - n_cross, this_vert - n_cross));
                 } else {
                     let pos2 = poly[vert as usize];
                     let px = t00 * pos2.x + t10 * pos2.y;
                     let py = t01 * pos2.x + t11 * pos2.y;
                     vert_pos.push(Vec3::new(px, py, height * alpha));
                     tri_verts.push(IVec3::new(this_vert, last_vert, this_vert - n_cross));
-                    tri_verts.push(IVec3::new(last_vert, last_vert - n_cross, this_vert - n_cross));
+                    tri_verts.push(IVec3::new(
+                        last_vert,
+                        last_vert - n_cross,
+                        this_vert - n_cross,
+                    ));
                 }
             }
             j += 1;
@@ -176,8 +175,7 @@ pub fn revolve(
             // Add axis-crossing interpolated point
             if (poly[next].x < 0.0) != (poly[i].x < 0.0) {
                 let y = poly[next].y
-                    - poly[next].x * (poly[i].y - poly[next].y)
-                        / (poly[i].x - poly[next].x);
+                    - poly[next].x * (poly[i].y - poly[next].y) / (poly[i].x - poly[next].x);
                 clipped.push(Vec2::new(0.0, y));
             }
             i = next;
@@ -213,7 +211,11 @@ pub fn revolve(
 
     let d_phi = revolve_degrees / n_divisions as f64;
     // First and last slice are distinct if not a full revolution
-    let n_slices = if is_full_revolution { n_divisions } else { n_divisions + 1 };
+    let n_slices = if is_full_revolution {
+        n_divisions
+    } else {
+        n_divisions + 1
+    };
 
     for poly in polygons.iter() {
         let n_pos_verts: usize = poly.iter().filter(|p| p.x > 0.0).count();
@@ -235,7 +237,11 @@ pub fn revolve(
             }
 
             let curr = poly[poly_vert];
-            let prev = poly[if poly_vert == 0 { poly.len() - 1 } else { poly_vert - 1 }];
+            let prev = poly[if poly_vert == 0 {
+                poly.len() - 1
+            } else {
+                poly_vert - 1
+            }];
 
             // Index of the previous poly_vert's first position
             let prev_start_pos_index = start_pos_index
@@ -244,17 +250,17 @@ pub fn revolve(
                 } else {
                     0
                 })
-                + if prev.x == 0.0 { -1 } else { -(n_slices as i32) };
+                + if prev.x == 0.0 {
+                    -1
+                } else {
+                    -(n_slices as i32)
+                };
 
             for slice in 0..n_slices {
                 let phi = slice as f64 * d_phi;
                 // Only push a vertex when it's the first slice OR the vert is not on axis
                 if slice == 0 || curr.x > 0.0 {
-                    vert_pos.push(Vec3::new(
-                        curr.x * cosd(phi),
-                        curr.x * sind(phi),
-                        curr.y,
-                    ));
+                    vert_pos.push(Vec3::new(curr.x * cosd(phi), curr.x * sind(phi), curr.y));
                 }
 
                 if is_full_revolution || slice > 0 {
@@ -294,10 +300,18 @@ pub fn revolve(
     if !is_full_revolution {
         let front_tris = triangulate(&polygons, -1.0, false);
         for t in &front_tris {
-            tri_verts.push(IVec3::new(start_poses[t.x as usize], start_poses[t.y as usize], start_poses[t.z as usize]));
+            tri_verts.push(IVec3::new(
+                start_poses[t.x as usize],
+                start_poses[t.y as usize],
+                start_poses[t.z as usize],
+            ));
         }
         for t in &front_tris {
-            tri_verts.push(IVec3::new(end_poses[t.z as usize], end_poses[t.y as usize], end_poses[t.x as usize]));
+            tri_verts.push(IVec3::new(
+                end_poses[t.z as usize],
+                end_poses[t.y as usize],
+                end_poses[t.x as usize],
+            ));
         }
     }
 
@@ -358,7 +372,11 @@ pub fn cylinder(
         return cone;
     }
 
-    let scale = if radius_high >= 0.0 { radius_high / radius_low } else { 1.0 };
+    let scale = if radius_high >= 0.0 {
+        radius_high / radius_low
+    } else {
+        1.0
+    };
     let radius = radius_low.max(if radius_high >= 0.0 { radius_high } else { 0.0 });
     let n = if circular_segments > 2 {
         circular_segments
@@ -375,19 +393,41 @@ pub fn cylinder(
         ));
     }
 
-    let mut m = extrude(
-        &vec![circle],
-        height,
-        0,
-        0.0,
-        Vec2::new(scale, scale),
-    );
+    let mut m = extrude(&vec![circle], height, 0, 0.0, Vec2::new(scale, scale));
 
     if center {
         for v in m.vert_pos.iter_mut() {
             v.z -= height / 2.0;
         }
         m.calculate_bbox();
+
+        // extrude finished with sort_geometry, which is where the face BVH is
+        // built, so moving the vertices left the cached collider describing the
+        // pre-shift positions — a half-height out in Z. Every boolean against a
+        // centered cylinder then queried leaf boxes that could not overlap
+        // either cap fan, missed those intersections, and tripped pair_up's
+        // non-manifold assert. C++ v3.5.2 (constructors.cpp:155-157) has no such
+        // defect because it centers with `cylinder.Translate(...).AsOriginal()`,
+        // and Impl::Transform maintains the collider; centering in place here
+        // dropped that maintenance with it.
+        //
+        // Re-sorting is a repair rather than a change: Morton codes are computed
+        // relative to the bbox and a pure translation moves the bbox with the
+        // points, so the sort finds the order the mesh already has. Positions,
+        // halfedges and triangle indices come out bit-identical; only the cached
+        // BVH moves, from wrong to right. set_epsilon is deliberately NOT re-run,
+        // so epsilon stays exactly the value the un-centered mesh carried.
+        //
+        // What this deliberately does NOT do is adopt the C++'s output semantics.
+        // Centering in place leaves originalID at extrude's, keeps the -0.0 that
+        // cosd/sind put in x and y, and holds epsilon one ULP off what
+        // Impl::Transform would compute (its spectral norm for a translation
+        // comes back 0.9999999999999998, not 1.0). Those differences predate the
+        // collider repair above and are retained on purpose — see
+        // docs/CPP_DIVERGENCES.md entry 2, which also records that the cone
+        // branch below models AsOriginal faithfully and so disagrees with this
+        // one about originalID. Do not reconcile either half in isolation.
+        m.sort_geometry();
     }
     m
 }
@@ -408,6 +448,8 @@ fn lerp2(a: Vec2, b: Vec2, t: f64) -> Vec2 {
 mod tests {
     use super::*;
     use crate::linalg::Vec2;
+    use crate::manifold::Manifold;
+    use crate::types::Error;
 
     fn unit_square() -> Polygons {
         vec![vec![
@@ -487,6 +529,74 @@ mod tests {
         // Cone: radius_high = 0
         let m = cylinder(1.0, 1.0, 0.0, 8, false);
         assert!(m.is_2_manifold(), "cone cylinder is not 2-manifold");
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: the centered cylinder's cached collider.
+    //
+    // `cylinder`'s `center` branch edits vert_pos in place and used to refresh
+    // only the bbox, leaving the face BVH `extrude`'s sort_geometry had built
+    // describing the pre-shift positions. Every boolean against such a cylinder
+    // queried a collider a half-height out in Z, missed the intersections
+    // against both cap fans, and tripped pair_up's non-manifold assert.
+    // -------------------------------------------------------------------
+
+    /// Drilling an axis-aligned bore through a centered cube is about the most
+    /// ordinary thing this API is asked for, and it threw.
+    #[test]
+    fn centered_cylinder_is_usable_in_a_boolean() {
+        let cube = Manifold::cube(Vec3::new(2.0, 2.0, 2.0), true);
+        let bore = Manifold::cylinder_centered(4.0, 0.4, 0.4, 64, true);
+
+        let drilled = cube.difference(&bore);
+
+        assert_eq!(drilled.status(), Error::NoError);
+        assert_eq!(
+            drilled.num_tri(),
+            272,
+            "the same subtraction reached through a transform produces 272 triangles"
+        );
+    }
+
+    /// The cone branch is built on top of the centered cylinder — its first step
+    /// is `cylinder(h, radius_high, 0, n, true)` — so a stale collider there is
+    /// carried through `transform` into the cone.
+    #[test]
+    fn centered_cone_is_usable_in_a_boolean() {
+        let cube = Manifold::cube(Vec3::new(2.0, 2.0, 2.0), true);
+        let cone = Manifold::cylinder_centered(4.0, 0.0, 0.4, 64, true);
+
+        // The cone reaches the boolean through `transform`, which maps the
+        // collider's boxes rather than rebuilding them — so it faithfully
+        // carries forward whatever the inner centered cylinder handed it, stale
+        // or not. Assert the collider directly here too: without it nothing
+        // guards that gate, and the boolean below could start passing again for
+        // an unrelated reason while the cone still shipped a wrong BVH.
+        assert_eq!(
+            crate::sort::collider_self_misses(cone.as_impl()),
+            0,
+            "the cone's collider must survive the transform intact"
+        );
+
+        let drilled = cube.difference(&cone);
+
+        assert_eq!(drilled.status(), Error::NoError);
+        assert!(drilled.num_tri() > 0);
+    }
+
+    /// The root cause, pinned directly: a constructor must not hand back an impl
+    /// whose cached collider disagrees with its own vertex positions. With the
+    /// stale collider the bottom cap's true box sat at z = -2 while its leaf box
+    /// sat at z = 0, so it found nothing.
+    #[test]
+    fn centered_cylinder_collider_matches_its_vertex_positions() {
+        let m = cylinder(4.0, 0.4, 0.4, 64, true);
+
+        assert_eq!(
+            crate::sort::collider_self_misses(&m),
+            0,
+            "every face must overlap its own leaf box in the cached collider"
+        );
     }
 
     #[test]

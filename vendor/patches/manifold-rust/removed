@@ -1,4 +1,4 @@
-# Paths in the manifold-rust 0.13.1 .crate that the vendored copy leaves
+# Paths in the manifold-rust 0.15.0 .crate that the vendored copy leaves
 # out, deleted before the patches apply (scripts/vendor-check.sh). `patch`
 # cannot delete a binary file, so this list stands in for that part of a
 # patch. Neither is read by the build.

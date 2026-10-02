@@ -29,7 +29,7 @@
 // 9. Finalize: simplify topology, sort geometry
 
 use crate::impl_mesh::ManifoldImpl;
-use crate::linalg::{Vec3, dot};
+use crate::linalg::{dot, Vec3};
 use crate::types::{Halfedge, TriRef};
 
 // ---------------------------------------------------------------------------
@@ -50,17 +50,9 @@ impl EdgePos {
     }
 }
 
-// NeoSCAD patch: the edge maps as sorted runs instead of a `BTreeMap` of
-// `Vec`s.
-//
-// `add_new_edge_verts` used to insert into `BTreeMap<K, Vec<EdgePos>>`,
-// one small `Vec` per edge or face pair; on a big boolean (the last
-// difference of a level-4 Menger sponge) that was 0.23 s of serial
-// allocation and tree walking, the largest part of assembly. The consumers
-// only ever walked the maps in ascending key order and each `Vec` in push
-// order, so the same data is a list of `(key, EdgePos)` in push order,
-// stably sorted by key and cut into runs. A stable sort keeps push order
-// within a key, so every run holds exactly the `Vec` the map held.
+// The edge maps are `(key, EdgePos)` lists in push order, stably sorted by key
+// and cut into runs, in place of a `BTreeMap<K, Vec<EdgePos>>`. The consumers
+// read keys in ascending order and each run in push order, as with the map.
 
 /// `(key, EdgePos)` pairs in push order; see [`EdgeGroups::new`].
 pub(super) type EdgeList<K> = Vec<(K, EdgePos)>;
@@ -85,9 +77,8 @@ impl<K: Ord + Copy + Send + Sync> EdgeGroups<K> {
         Self { entries, starts }
     }
 
-    /// Calls `f(key, run)` for every run in ascending key order. `run` is
-    /// a reused buffer holding the run's entries in push order, which `f`
-    /// may extend and reorder as it could the map's `Vec`.
+    /// Calls `f(key, run)` for every run in ascending key order, `run` being a
+    /// reused buffer of its entries in push order that `f` may modify.
     fn for_each(&self, mut f: impl FnMut(K, &mut Vec<EdgePos>)) {
         let mut run: Vec<EdgePos> = Vec::new();
         for g in 0..self.starts.len() - 1 {
@@ -113,7 +104,9 @@ impl PartialOrd for OrderedF64 {
 
 impl Ord for OrderedF64 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -249,13 +242,6 @@ pub(super) fn size_output(
 // AddNewEdgeVerts — populate edge maps with intersection vertices
 // ---------------------------------------------------------------------------
 
-// NeoSCAD patch: `token` is checked every `NEW_EDGE_CHECK` intersections,
-// and `true` returned once it is cancelled. This loop and its lists are a
-// boolean's largest step between two of its phase checks: in the Menger
-// sponge at depth 5 it took 0.8 s and grew the process by 1.3 GB, past a
-// wasm instance's memory, before the next check could see the limit.
-const NEW_EDGE_CHECK: usize = 1 << 14;
-
 pub(super) fn add_new_edge_verts(
     edges_p: &mut EdgeList<i32>,
     edges_new: &mut EdgeList<(i32, i32)>,
@@ -266,10 +252,12 @@ pub(super) fn add_new_edge_verts(
     forward: bool,
     offset: usize,
     token: Option<&crate::cancel::CancelToken>,
-) -> bool {
+) {
     for i in 0..p1q2.len() {
-        if i % NEW_EDGE_CHECK == 0 && crate::cancel::is_cancelled(token) {
-            return true;
+        // As C++ AddNewEdgeVerts (boolean_result.cpp:276-280); the caller's
+        // check after the call discards the partial lists.
+        if crate::cancel::is_cancelled(token) {
+            return;
         }
         let edge_p = p1q2[i][if forward { 0 } else { 1 }];
         let face_q = p1q2[i][if forward { 1 } else { 0 }];
@@ -299,35 +287,43 @@ pub(super) fn add_new_edge_verts(
 
         // Add to edge P's map
         for j in 0..inclusion.abs() {
-            edges_p.push((edge_p, EdgePos {
-                edge_pos: 0.0,
-                vert: vert + j,
-                collision_id,
-                is_start: dir_p,
-            }));
+            edges_p.push((
+                edge_p,
+                EdgePos {
+                    edge_pos: 0.0,
+                    vert: vert + j,
+                    collision_id,
+                    is_start: dir_p,
+                },
+            ));
         }
 
         // Add to right new edge
         for j in 0..inclusion.abs() {
-            edges_new.push((key_right, EdgePos {
-                edge_pos: 0.0,
-                vert: vert + j,
-                collision_id,
-                is_start: dir_right,
-            }));
+            edges_new.push((
+                key_right,
+                EdgePos {
+                    edge_pos: 0.0,
+                    vert: vert + j,
+                    collision_id,
+                    is_start: dir_right,
+                },
+            ));
         }
 
         // Add to left new edge
         for j in 0..inclusion.abs() {
-            edges_new.push((key_left, EdgePos {
-                edge_pos: 0.0,
-                vert: vert + j,
-                collision_id,
-                is_start: dir_left,
-            }));
+            edges_new.push((
+                key_left,
+                EdgePos {
+                    edge_pos: 0.0,
+                    vert: vert + j,
+                    collision_id,
+                    is_start: dir_left,
+                },
+            ));
         }
     }
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -668,4 +664,3 @@ pub(super) fn append_whole_edges(
 #[path = "boolean_result_assemble.rs"]
 mod boolean_result_assemble;
 pub use boolean_result_assemble::{boolean_result, boolean_result_with_token};
-
