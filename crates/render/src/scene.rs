@@ -280,12 +280,42 @@ impl Scene {
         &self.surfaces
     }
 
+    /// Where each surface's vertices start in [`Scene::face_vertices`],
+    /// and whether they are its own; then where the image-space
+    /// primitives' vertices start.
+    ///
+    /// A surface with the same vertices as the one before it draws that
+    /// one's again instead of a copy: an OpenCSG product's depth pass and
+    /// colour pass are one mesh twice, and so are a transparent leaf's two
+    /// culled passes. Copies doubled a preview's vertex bytes, which the
+    /// web core packs and moves to the page and the page uploads (46 MB
+    /// for the threaded-ring example, now 23 MB). Not across an
+    /// image-space product, so a product's surfaces are always its own.
+    fn layout(&self) -> (Vec<(u32, bool)>, u32) {
+        let mut out: Vec<(u32, bool)> = Vec::with_capacity(self.surfaces.len());
+        let mut next = 0u32;
+        let mut breaks = self.products.iter().map(|p| p.at).peekable();
+        for (i, s) in self.surfaces.iter().enumerate() {
+            let mut split = false;
+            while breaks.next_if(|&at| at <= i).is_some() {
+                split = true;
+            }
+            match i.checked_sub(1) {
+                Some(j) if !split && same_vertices(&self.surfaces[j], s) => {
+                    out.push((out[j].0, false));
+                }
+                _ => {
+                    out.push((next, true));
+                    next += surface_vertex_count(s) as u32;
+                }
+            }
+        }
+        (out, next)
+    }
+
     /// Vertices [`Scene::face_vertices`] yields.
     pub fn face_vertex_count(&self) -> usize {
-        self.surfaces
-            .iter()
-            .map(surface_vertex_count)
-            .sum::<usize>()
+        self.layout().1 as usize
             + self
                 .products
                 .iter()
@@ -294,31 +324,42 @@ impl Scene {
                 .sum::<usize>()
     }
 
-    /// The draw calls: consecutive surfaces with the same state share one,
-    /// unless an image-space product comes between them.
+    /// The draw calls: consecutive surfaces with the same state and
+    /// consecutive vertices share one, unless an image-space product
+    /// comes between them.
     pub fn draws(&self) -> Vec<Draw> {
-        let mut out: Vec<Draw> = Vec::new();
-        let mut first = 0u32;
+        self.draws_by_surface()
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect()
+    }
+
+    /// [`Scene::draws`], each with the index of its first surface.
+    fn draws_by_surface(&self) -> Vec<(Draw, usize)> {
+        let (layout, _) = self.layout();
+        let mut out: Vec<(Draw, usize)> = Vec::new();
         let mut breaks = self.products.iter().map(|p| p.at).peekable();
-        for (i, s) in self.surfaces.iter().enumerate() {
+        for (i, (s, &(first, _))) in self.surfaces.iter().zip(&layout).enumerate() {
             let mut split = false;
             while breaks.next_if(|&at| at <= i).is_some() {
                 split = true;
             }
             let count = surface_vertex_count(s) as u32;
             match out.last_mut() {
-                Some(d) if !split && d.state == s.state && d.first + d.count == first => {
+                Some((d, _)) if !split && d.state == s.state && d.first + d.count == first => {
                     d.count += count
                 }
-                _ => out.push(Draw {
-                    first,
-                    count,
-                    state: s.state,
-                }),
+                _ => out.push((
+                    Draw {
+                        first,
+                        count,
+                        state: s.state,
+                    },
+                    i,
+                )),
             }
-            first += count;
         }
-        out.retain(|d| d.count > 0);
+        out.retain(|(d, _)| d.count > 0);
         out
     }
 
@@ -326,24 +367,16 @@ impl Scene {
     /// and their primitives' ranges of [`Scene::face_vertices`] (after
     /// every surface's).
     pub fn image_csg(&self) -> Vec<ImageCsgDraws> {
-        let draws = self.draws();
-        // The first vertex of each surface, and the end of the last one,
-        // where the primitives' vertices start.
-        let mut surface_first = Vec::with_capacity(self.surfaces.len() + 1);
-        let mut first = 0u32;
-        for s in &self.surfaces {
-            surface_first.push(first);
-            first += surface_vertex_count(s) as u32;
-        }
-        surface_first.push(first);
+        let draws = self.draws_by_surface();
+        // Where the primitives' vertices start.
+        let mut first = self.layout().1;
         self.products
             .iter()
             .map(|p| {
                 // `draws` never joins surfaces across a product, so the
-                // draws before it are exactly those starting before its
-                // first surface.
-                let start = surface_first[p.at];
-                let at_draw = draws.iter().take_while(|d| d.first < start).count();
+                // draws before it are exactly those of the surfaces before
+                // it.
+                let at_draw = draws.iter().take_while(|(_, i)| *i < p.at).count();
                 let primitives = p
                     .primitives
                     .iter()
@@ -386,9 +419,12 @@ impl Scene {
                 surface_vertices(&s).collect::<Vec<_>>()
             })
         });
+        let (layout, _) = self.layout();
         self.surfaces
             .iter()
-            .flat_map(surface_vertices)
+            .zip(layout)
+            .filter(|(_, (_, own))| *own)
+            .flat_map(|(s, _)| surface_vertices(s))
             .chain(primitives)
     }
 
@@ -447,6 +483,16 @@ pub(crate) fn merge(a: BoundingBox, b: BoundingBox) -> BoundingBox {
             std::array::from_fn(|k| ah[k].max(bh[k])),
         )),
     }
+}
+
+/// Whether two surfaces give the same vertices: [`surface_vertices`]
+/// reads only these fields (the draw state is not in the vertices).
+fn same_vertices(a: &Surface, b: &Surface) -> bool {
+    Arc::ptr_eq(&a.mesh, &b.mesh)
+        && a.matrix == b.matrix
+        && a.color == b.color
+        && a.force_color == b.force_color
+        && a.lit == b.lit
 }
 
 fn surface_vertex_count(s: &Surface) -> usize {
@@ -701,10 +747,11 @@ mod tests {
             ..Default::default()
         });
         let scheme = ColorScheme::cornfield();
-        let surface = || Surface {
+        // In different colours, so no surface repeats the one before it.
+        let surface = |red: f32| Surface {
             mesh: tri.clone(),
             matrix: None,
-            color: scheme.opencsg_face_front,
+            color: Color([red, 0.5, 0.5, 1.0]),
             force_color: true,
             lit: true,
             state: DrawState::DEFAULT,
@@ -715,13 +762,13 @@ mod tests {
             op,
         };
         let mut scene = Scene::empty(&scheme, None);
-        scene.push(surface());
+        scene.push(surface(0.0));
         scene.push_image_csg(vec![
             primitive(CsgOp::Intersection),
             primitive(CsgOp::Subtraction),
         ]);
-        scene.push(surface());
-        scene.push(surface());
+        scene.push(surface(0.5));
+        scene.push(surface(1.0));
         let draws = scene.draws();
         assert_eq!(
             draws.iter().map(|d| (d.first, d.count)).collect::<Vec<_>>(),
@@ -752,5 +799,55 @@ mod tests {
         assert_eq!(v.len(), 15);
         assert_eq!(floats(&v[9])[6], 1.0);
         assert_eq!(floats(&v[14])[6], 2.0);
+    }
+
+    /// An OpenCSG product's depth pass and colour pass are one mesh drawn
+    /// twice: the colour pass draws the depth pass's vertices again, and
+    /// the vertices are packed once. The same mesh after an image-space
+    /// product, or in another colour, gets its own.
+    #[test]
+    fn a_repeated_surface_draws_the_same_vertices() {
+        let tri = Arc::new(PolySet {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![vec![0, 1, 2]],
+            triangular: true,
+            ..Default::default()
+        });
+        let scheme = ColorScheme::cornfield();
+        let surface = |depth, color_write, color| Surface {
+            mesh: tri.clone(),
+            matrix: None,
+            color,
+            force_color: false,
+            lit: true,
+            state: DrawState {
+                cull: Cull::None,
+                depth,
+                color_write,
+                bias: false,
+            },
+        };
+        let front = scheme.opencsg_face_front;
+        let mut scene = Scene::empty(&scheme, None);
+        scene.push(surface(Depth::Less, false, front));
+        scene.push(surface(Depth::Equal, true, front));
+        scene.push_image_csg(vec![CsgPrimitive {
+            mesh: tri.clone(),
+            matrix: None,
+            op: CsgOp::Intersection,
+        }]);
+        scene.push(surface(Depth::Equal, true, front));
+        scene.push(surface(Depth::Equal, true, Color([1.0, 0.0, 0.0, 1.0])));
+        let draws = scene.draws();
+        assert_eq!(
+            draws.iter().map(|d| (d.first, d.count)).collect::<Vec<_>>(),
+            vec![(0, 3), (0, 3), (3, 6)]
+        );
+        assert!(!draws[0].state.color_write && draws[1].state.color_write);
+        let csg = scene.image_csg();
+        assert_eq!(csg[0].at_draw, 2);
+        assert_eq!(csg[0].primitives[0].first, 9);
+        assert_eq!(scene.face_vertex_count(), 12);
+        assert_eq!(scene.face_vertices().count(), 12);
     }
 }

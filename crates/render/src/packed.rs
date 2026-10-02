@@ -23,6 +23,10 @@
 //! end points (2 x 3 x f32). Both are exactly the bytes the GPU buffers
 //! hold, so a receiver copies them into a vertex buffer and nothing else.
 //!
+//! Draws may share a range: a surface drawn twice in a row in different
+//! states (an OpenCSG product's depth pass, then its colour pass) is
+//! packed once and both draws name it.
+//!
 //! On the web the two byte arrays travel as transferable `ArrayBuffer`s
 //! (moved, not copied, between the worker and the page) and `meta` as a
 //! JSON string of a few hundred bytes; [`PackedScene::from_parts`] puts

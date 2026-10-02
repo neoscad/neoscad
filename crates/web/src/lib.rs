@@ -474,7 +474,7 @@ impl Worker {
                 let r: PathOnly = fields(request)?;
                 Ok(json!({ "closed": c.close(&r.path)? }))
             }
-            "run" => state.run(fields(request)?, out),
+            "run" => state.run(fields(request)?, out, self.clock.as_ref()),
             "parameters" => {
                 let r: PathOnly = fields(request)?;
                 Ok(json!({ "groups": c.parameters(&r.path)? }))
@@ -601,7 +601,13 @@ impl State {
         c.update(&r.path, text)
     }
 
-    fn run(&mut self, r: Run, out: &mut Vec<Vec<u8>>) -> Result<Value, CoreError> {
+    fn run(
+        &mut self,
+        r: Run,
+        out: &mut Vec<Vec<u8>>,
+        clock: Option<&Clock>,
+    ) -> Result<Value, CoreError> {
+        let now = || clock.map_or(0.0, |c| c());
         let c = &self.client;
         let request = DocumentRequest {
             mode: r.mode,
@@ -639,6 +645,9 @@ impl State {
             text.clone(),
             rendered.log.diagnostics_json(),
         );
+        // The time the scene took, which the session's timings do not
+        // include (see below).
+        let mut scene_ms = 0.0;
         let scene = if r.scene {
             let previewer = match r.previewer {
                 PreviewerIn::OpenCsg => render::Previewer::OpenCsg,
@@ -647,12 +656,13 @@ impl State {
             // Under the request's limits: the products' booleans of a big
             // difference ran minutes past the time limit before they
             // checked it.
+            let started = now();
             let scene = client::run_scene(&rendered, &scheme, previewer)?;
             // The renderer's own packing (`render::packed`), which the
             // page's viewer (`crates/web-view`) reads back with
             // `PackedScene::from_parts`: the two byte arrays as
             // transferable buffers, the rest as its JSON text.
-            scene.map(|s| {
+            let packed = scene.map(|s| {
                 let p = s.pack();
                 let v = json!({
                     "faces": { "$buffer": out.len() },
@@ -662,7 +672,9 @@ impl State {
                 out.push(p.faces);
                 out.push(p.edges);
                 v
-            })
+            });
+            scene_ms = now() - started;
+            packed
         } else {
             None
         };
@@ -688,7 +700,15 @@ impl State {
             .run_files(&rendered, &doc)
             .map(|f| f.to_string_lossy().into_owned())
             .collect();
-        let render = client::render_result(&rendered, &scheme);
+        let mut render = client::render_result(&rendered, &scheme);
+        // A preview's scene is real geometry: each CSG product's boolean
+        // (`render::preview`, standing in for OpenCSG's image-space CSG).
+        // The session's timings end before it, so a threaded-ring preview
+        // said "Previewed in 615 ms" and showed its model 2.6 s later.
+        // Counted as geometry, the summary is the time the model took to
+        // appear (bar the page drawing it), as a render's is.
+        render.timings.geometry_ms += scene_ms;
+        render.timings.total_ms += scene_ms;
         Ok(json!({
             // The console's summary line and its tooltip, worded by the
             // core as every app words them (`client::describe_render`).

@@ -658,6 +658,17 @@ impl ManifoldGeometry {
         self.parts = owner.map(|o| BTreeMap::from([(id, o)])).unwrap_or_default();
     }
 
+    /// Every coloured face in `c`. For a copy of a solid converted from a
+    /// mesh whose faces are all one colour: it is then what converting the
+    /// same mesh in `c` gives, since a conversion gives each colour group
+    /// one ID and nothing else of the colour reaches the kernel
+    /// ([`Self::from_polyset`]).
+    pub(crate) fn recolor_uniform(&mut self, c: Color) {
+        for v in self.id_to_color.values_mut() {
+            *v = c;
+        }
+    }
+
     /// C++ `AsOriginal()` with an ID from `ids`: rebuild the mesh as one run.
     fn make_original(&mut self, ids: &dyn IdSource) -> u32 {
         if let Some(id) = self.own_id {

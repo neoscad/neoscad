@@ -22,7 +22,7 @@
 //! (`polygon2dToPolySet`), which is how previews show 2D shapes.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1242,9 +1242,16 @@ impl Stop {
     /// preview's working memory, which the render stage's estimate never
     /// sees. Passing the limit trips the guard and stops the preview.
     pub(crate) fn hold(&self, geom: ManifoldGeometry) -> Result<Held<'_>, Unsupported> {
+        self.hold_weighted(geom, crate::evaluate::KERNEL_FACTOR)
+    }
+
+    /// [`Stop::hold`] with the solid's estimated size times `factor`
+    /// rather than [`crate::evaluate::KERNEL_FACTOR`], which covers the
+    /// kernel's working copies while a solid is converted or operated on.
+    fn hold_weighted(&self, geom: ManifoldGeometry, factor: u64) -> Result<Held<'_>, Unsupported> {
         let bytes = match &self.guard {
             Some(g) if g.limits().memory.is_some() => {
-                crate::evaluate::KERNEL_FACTOR * crate::evaluate::solid_cost(&geom) as u64
+                factor * crate::evaluate::solid_cost(&geom) as u64
             }
             _ => 0,
         };
@@ -1325,9 +1332,11 @@ pub fn product_meshes_until(
         })
         .collect();
     let token = stop.token();
-    let solve =
-        |(job, first): (ProductJob, u32)| product_mesh(job, first, scheme, stop, token.as_ref());
-    let work: Vec<(ProductJob, u32)> = jobs.into_iter().zip(firsts).collect();
+    let shared = SharedNegatives::new(&jobs, stop)?;
+    let solve = |(i, (job, first)): (usize, (ProductJob, u32))| {
+        product_mesh(job, i, first, scheme, &shared, stop, token.as_ref())
+    };
+    let work: Vec<(usize, (ProductJob, u32))> = jobs.into_iter().zip(firsts).enumerate().collect();
     #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
     {
         use rayon::prelude::*;
@@ -1363,17 +1372,182 @@ impl IdSource for Range {
     }
 }
 
+/// The one colour every face of `ps` has (`None`: no colour), or `None`
+/// when its faces differ. Colours are compared as a conversion groups
+/// them ([`Color::key`]).
+fn uniform_color(ps: &PolySet) -> Option<Option<Color>> {
+    let color = |i: usize| {
+        let ci = ps.color_indices.get(i).copied().unwrap_or(-1);
+        usize::try_from(ci).ok().and_then(|ci| ps.colors.get(ci))
+    };
+    let first = color(0);
+    let key = first.map(Color::key);
+    (1..ps.faces.len())
+        .all(|i| color(i).map(Color::key) == key)
+        .then_some(first.copied())
+}
+
+/// A matrix bit for bit, for comparing and hashing.
+fn matrix_bits(m: &Option<Matrix>) -> Option<[[u64; 4]; 4]> {
+    m.map(|m| m.map(|row| row.map(f64::to_bits)))
+}
+
+/// Whether two negatives are the same solid in the same place, whatever
+/// their colours: what a conversion's geometry depends on.
+fn same_solid(a: &Negative, b: &Negative) -> bool {
+    matrix_bits(&a.matrix) == matrix_bits(&b.matrix) && a.mesh.same_shape(&b.mesh)
+}
+
+/// Negatives that more than one product subtracts by a flat union,
+/// converted once each, and which of them each product's negatives are.
+///
+/// One solid subtracted from many is common: a `difference()` whose first
+/// child is a union (a `for` of pieces) normalises to one product per
+/// piece, each minus every later child. The threaded-ring example is 36
+/// coloured wedges minus one 39,000-vertex channel. The channel is
+/// evaluated once per wedge and takes each wedge's colour, so its copies
+/// are equal meshes in different colours, not one mesh. Converting it 36
+/// times was 28 ms each natively and 60% of the preview's booleans; in the
+/// web core, which runs the products one after another, it was over a
+/// second of the time the preview took after it said "Previewed in".
+///
+/// Copies are matched by content: the same vertices, faces and
+/// placement, bit for bit, with every face in one colour (a subtracted
+/// leaf is drawn in one, so all are). A product takes a copy of the shared
+/// solid, moves its IDs onto those it would have drawn converting the mesh
+/// itself (`ManifoldGeometry::relabel`, as a render's cached subtree is
+/// rebased) and gives it its own colour. Its result, which Manifold orders
+/// by original ID, is then what converting its own mesh gave, at any
+/// thread count.
+struct SharedNegatives<'s> {
+    /// Each shared solid, with the IDs its conversion took (`0..count`).
+    solids: Vec<(Held<'s>, u32)>,
+    /// Per job, per negative: the shared solid it is a copy of.
+    of: Vec<Vec<Option<usize>>>,
+}
+
+impl<'s> SharedNegatives<'s> {
+    fn new(jobs: &[ProductJob], stop: &'s Stop) -> Result<SharedNegatives<'s>, Unsupported> {
+        // Classes of equal solids: a representative, whether its faces
+        // are coloured (an uncoloured conversion has no colour to
+        // replace), and how many negatives are copies of it.
+        struct Class<'j> {
+            rep: &'j Negative,
+            colored: bool,
+            uses: usize,
+        }
+        let mut classes: Vec<Class<'_>> = Vec::new();
+        let mut by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut of: Vec<Vec<Option<usize>>> = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            // Only the flat unions convert each negative where it is; a
+            // product with a plan (`crate::shared`) converts its own.
+            if crate::shared::Plan::new(&job.negatives).is_some() {
+                of.push(vec![None; job.negatives.len()]);
+                continue;
+            }
+            let mut mine = Vec::with_capacity(job.negatives.len());
+            for n in &job.negatives {
+                let Some(color) = uniform_color(&n.mesh) else {
+                    mine.push(None);
+                    continue;
+                };
+                let colored = color.is_some();
+                // Candidates by shape; placements are compared after.
+                let same = by_hash.entry(n.mesh.shape_hash()).or_default();
+                let found = same
+                    .iter()
+                    .copied()
+                    .find(|&c| classes[c].colored == colored && same_solid(classes[c].rep, n));
+                let c = found.unwrap_or_else(|| {
+                    classes.push(Class {
+                        rep: n,
+                        colored,
+                        uses: 0,
+                    });
+                    same.push(classes.len() - 1);
+                    classes.len() - 1
+                });
+                classes[c].uses += 1;
+                mine.push(Some(c));
+            }
+            of.push(mine);
+        }
+        // Only solids used more than once are converted here.
+        let mut index = vec![None; classes.len()];
+        let mut repeated = Vec::new();
+        for (c, class) in classes.iter().enumerate() {
+            if class.uses > 1 {
+                index[c] = Some(repeated.len());
+                repeated.push(class.rep);
+            }
+        }
+        for mine in &mut of {
+            for s in mine.iter_mut() {
+                *s = s.and_then(|c| index[c]);
+            }
+        }
+        let convert = |n: &&Negative| {
+            stop.check()?;
+            let ids = Range(Cell::new(0));
+            let (mut warnings, mut errors) = (Vec::new(), Vec::new());
+            let geom =
+                ManifoldGeometry::from_polyset(&n.placed(), &ids, &mut warnings, &mut errors);
+            // Charged as the finished solid it is: the kernel's working
+            // memory is charged on each product's copy, as it was on the
+            // product's own conversion.
+            Ok((stop.hold_weighted(geom, 1)?, ids.0.get()))
+        };
+        #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+        let solids = {
+            use rayon::prelude::*;
+            repeated
+                .par_iter()
+                .map(convert)
+                .collect::<Result<_, Unsupported>>()?
+        };
+        #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
+        let solids = repeated
+            .iter()
+            .map(convert)
+            .collect::<Result<_, Unsupported>>()?;
+        Ok(SharedNegatives { solids, of })
+    }
+
+    /// Negative `k` of job `job`, converted with IDs from `ids`, if it is
+    /// a copy of a shared solid.
+    fn get(
+        &self,
+        job: usize,
+        k: usize,
+        negative: &Negative,
+        ids: &Range,
+    ) -> Option<ManifoldGeometry> {
+        let (held, count) = &self.solids[self.of[job][k]?];
+        let first = ids.reserve(*count);
+        let mut geom = held.get()?.clone();
+        let map: BTreeMap<u32, u32> = (0..*count).map(|i| (i, first + i)).collect();
+        geom.relabel(&map);
+        if let Some(Some(c)) = uniform_color(&negative.mesh) {
+            geom.recolor_uniform(c);
+        }
+        Some(geom)
+    }
+}
+
 fn product_mesh(
     job: ProductJob,
+    index: usize,
     first: u32,
     scheme: &Scheme,
+    shared: &SharedNegatives<'_>,
     stop: &Stop,
     token: Option<&CancelToken>,
 ) -> Result<Option<PolySet>, Unsupported> {
     stop.check()?;
     let ids = Range(Cell::new(first));
     let mut warnings = Vec::new();
-    let mut convert = |ps: &PolySet| {
+    let polled = || {
         // A conversion is cheap next to a boolean; the clock is read
         // every 1,024th (`Guard::poll`).
         if stop
@@ -1384,6 +1558,10 @@ fn product_mesh(
         {
             return Err(Unsupported::interrupted());
         }
+        Ok(())
+    };
+    let mut convert = |ps: &PolySet| {
+        polled()?;
         let mut errors = Vec::new();
         stop.hold(ManifoldGeometry::from_polyset(
             ps,
@@ -1418,7 +1596,14 @@ fn product_mesh(
         None => job
             .negatives
             .iter()
-            .map(|n| convert(&n.placed()))
+            .enumerate()
+            .map(|(k, n)| match shared.get(index, k, n, &ids) {
+                Some(geom) => {
+                    polled()?;
+                    stop.hold(geom)
+                }
+                None => convert(&n.placed()),
+            })
             .collect::<Result<Vec<_>, _>>()?,
     };
     let Some(mut pos) = batch(OpType::Intersect, positives, stop, token)? else {
@@ -1617,5 +1802,77 @@ mod tests {
             .map(|&i| ps.colors[i as usize].key())
             .collect();
         assert_eq!(used.len(), 2, "outer faces red, cut faces green");
+    }
+
+    fn moved(mut ps: PolySet, x: f64, y: f64, z: f64) -> PolySet {
+        ps.transform(&[
+            [1.0, 0.0, 0.0, x],
+            [0.0, 1.0, 0.0, y],
+            [0.0, 0.0, 1.0, z],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        ps
+    }
+
+    /// A cutter several products subtract, as equal meshes in different
+    /// colours (a `for` of coloured pieces minus one solid), is converted
+    /// once; each product still comes out exactly as when its own copy is
+    /// converted, which is what a product alone does. An uncoloured copy
+    /// is not merged with the coloured ones.
+    #[test]
+    fn a_negative_many_products_subtract_is_converted_once() {
+        let colors = [
+            Color([1.0, 0.0, 0.0, 1.0]),
+            Color([0.0, 1.0, 0.0, 1.0]),
+            Color([0.0, 0.0, 1.0, 1.0]),
+        ];
+        let cutter = || {
+            moved(
+                crate::primitives::cube([12.0, 1.0, 1.0], false),
+                -1.0,
+                0.5,
+                0.5,
+            )
+        };
+        let mut jobs: Vec<ProductJob> = (0..3)
+            .map(|i| {
+                let mut a = moved(
+                    crate::primitives::cube([2.0; 3], false),
+                    3.0 * i as f64,
+                    0.0,
+                    0.0,
+                );
+                a.set_color(colors[i]);
+                let mut c = cutter();
+                c.set_color(colors[(i + 1) % 3]);
+                ProductJob {
+                    positives: vec![a],
+                    negatives: vec![c.into()],
+                }
+            })
+            .collect();
+        jobs.push(ProductJob {
+            positives: vec![moved(
+                crate::primitives::cube([2.0; 3], false),
+                9.0,
+                0.0,
+                0.0,
+            )],
+            negatives: vec![cutter().into()],
+        });
+        let stop = Stop::default();
+        let shared = SharedNegatives::new(&jobs, &stop).unwrap();
+        assert_eq!(shared.solids.len(), 1);
+        assert_eq!(
+            shared.of,
+            vec![vec![Some(0)], vec![Some(0)], vec![Some(0)], vec![None]]
+        );
+        let scheme = crate::color::CORNFIELD;
+        let together = format!("{:?}", product_meshes(jobs.clone(), &scheme));
+        let alone: Vec<Option<PolySet>> = jobs
+            .into_iter()
+            .flat_map(|j| product_meshes(vec![j], &scheme))
+            .collect();
+        assert_eq!(together, format!("{alone:?}"));
     }
 }

@@ -145,7 +145,9 @@ lead them, come roughly in order of user impact.
   fails now and then under heavy machine load** (load average ~40, seen
   2026-10-02): the core answers at about 1 s without `timedOut`, so it
   stopped for a reason other than the 1 s watchdog, before it. It passed
-  5 of 5 runs once the load eased; the note it returns was not captured.
+  5 of 5 runs once the load eased, and 6 of 6 run alone with only
+  `-only-testing:NeoSCADTests` under load, so it fails only next to the
+  app's tests; the note it returns was not captured.
   Next time it fails, print `r.notes` (the test's `#expect` comment) to
   see which limit tripped. Suspect the 512 MiB memory limit measured
   against the test process while parallel tests render.

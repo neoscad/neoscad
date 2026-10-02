@@ -190,6 +190,8 @@ the view, the editor's markers and (through `parameters`) the customizer.
   cacheEntries: 12, timings: Timings }
 
 Timings = { parseMs, evaluateMs, geometryMs, totalMs }
+  // a run's geometryMs and totalMs include building and packing its
+  // scene: a preview's CSG products are real booleans, often most of it
 
 GeometryStats = { dimensions: 2 | 3, bboxMin: [..], bboxMax: [..], area,
   volume?, triangles?, vertices?, manifold?, components?,  // 3D

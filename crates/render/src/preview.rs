@@ -258,13 +258,24 @@ fn opencsg(
     // a placeholder to be filled once all booleans are done in parallel.
     let mut slots: Vec<Slot> = Vec::new();
     // Whether each leaf mesh bounds a solid (`PolySet::is_outward_solid`),
-    // by mesh: a leaf may be in many products.
+    // by mesh: a leaf may be in many products. And by shape, since equal
+    // meshes are often not one: the threaded-ring example evaluates its
+    // 39,000-vertex channel once per wedge, and checking each of the 36
+    // copies took most of the time before the booleans began (180 ms
+    // natively, three times that in the web core).
     let mut solid: HashMap<*const PolySet, bool> = HashMap::new();
+    let mut by_shape: HashMap<u64, Vec<(Arc<PolySet>, bool)>> = HashMap::new();
     let mut is_solid = |obj: &ChainObject| {
         let mesh = obj.leaf.mesh.as_ref().expect("filtered");
-        *solid
-            .entry(Arc::as_ptr(mesh))
-            .or_insert_with(|| mesh.is_outward_solid())
+        *solid.entry(Arc::as_ptr(mesh)).or_insert_with(|| {
+            let same = by_shape.entry(mesh.shape_hash()).or_default();
+            if let Some((_, s)) = same.iter().find(|(m, _)| m.same_shape(mesh)) {
+                return *s;
+            }
+            let s = mesh.is_outward_solid();
+            same.push((mesh.clone(), s));
+            s
+        })
     };
     for (pass, list) in lists {
         let Some(products) = list else { continue };

@@ -309,6 +309,46 @@ impl PolySet {
         out
     }
 
+    /// Whether two meshes are the same shape: the same vertices, bit for
+    /// bit, the same faces and the same `convex` and `triangular` flags.
+    /// Colours are not compared. A model that builds one solid many times
+    /// (a module called in a loop) has a mesh per call, so a preview that
+    /// would do the same work for each copy finds them by this.
+    pub fn same_shape(&self, other: &PolySet) -> bool {
+        std::ptr::eq(self, other)
+            || (self.convex == other.convex
+                && self.triangular == other.triangular
+                && self.faces == other.faces
+                && self.vertices.len() == other.vertices.len()
+                && self
+                    .vertices
+                    .iter()
+                    .zip(&other.vertices)
+                    .all(|(a, b)| a.map(f64::to_bits) == b.map(f64::to_bits)))
+    }
+
+    /// A hash of what [`PolySet::same_shape`] compares, to find candidates
+    /// for it. Not the standard hasher: SipHash over a 39,000-vertex mesh
+    /// cost a third of the solidity check it was meant to save.
+    pub fn shape_hash(&self) -> u64 {
+        let mut h = Fold(0);
+        h.add(self.vertices.len() as u64);
+        for v in &self.vertices {
+            for c in v {
+                h.add(c.to_bits());
+            }
+        }
+        h.add(self.faces.len() as u64);
+        for f in &self.faces {
+            h.add(f.len() as u64);
+            for &i in f {
+                h.add(u64::from(i));
+            }
+        }
+        h.add(u64::from(self.triangular) | (self.convex.map_or(2, u64::from) << 1));
+        h.0
+    }
+
     /// Whether the faces bound a solid the way a boolean reads them: the
     /// mesh is closed with every face wound the same way (each directed
     /// edge used once and its reverse present, edges compared by vertex
@@ -523,6 +563,16 @@ fn triangulate_face(verts: &[[f64; 3]], face: &[u32]) -> Vec<[u32; 3]> {
             .collect();
     }
     out
+}
+
+/// A multiply-and-rotate fold of 64-bit words (FxHash's step), for
+/// [`PolySet::shape_hash`].
+struct Fold(u64);
+
+impl Fold {
+    fn add(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
 }
 
 #[cfg(test)]
