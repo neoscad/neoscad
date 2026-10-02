@@ -138,7 +138,7 @@ if [ -n "${CARGO_HOME:-}" ]; then cargo_env+=(CARGO_HOME="$CARGO_HOME"); fi
 cargo_env+=(CARGO_TARGET_DIR="$target_dir")
 
 for triple in "${triples[@]}"; do
-    "${cargo_env[@]}" cargo build --quiet --release --target "$triple" -p neoscad-ffi --lib
+    "${cargo_env[@]}" cargo build --quiet --release --target "$triple" -p neoscad-ffi --lib ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
 done
 "${cargo_env[@]}" cargo build --quiet --release -p neoscad-uniffi-bindgen
 

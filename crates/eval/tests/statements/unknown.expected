@@ -1,0 +1,13 @@
+WARNING: Ignoring unknown module 'nosuch' @2
+ECHO: 1
+-- aborted false interrupted false hard false
+-- csg
+group() {
+	cube(size = [2, 2, 2], center = false);
+}
+
+
+-- nodes
+0 1 Root
+1 2 Group
+2 4 Cube

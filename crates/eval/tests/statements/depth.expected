@@ -1,0 +1,32 @@
+ERROR: Recursion detected calling module 'r' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: call of 'r(...)' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: call of 'r(n = 48, s = "x")' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: call of 'r(n = 47, s = "x")' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: call of 'r(n = 46, s = "x")' @2
+TRACE:   *** Excluding 127 frames ***
+TRACE: called by 'translate' @2
+TRACE: call of 'r(n = 3, s = "x")' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: call of 'r(n = 2, s = "x")' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: call of 'r(n = 1, s = "x")' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: call of 'r(n = 0, s = "x")' @2
+TRACE: called by 'r' @3
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

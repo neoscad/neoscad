@@ -702,6 +702,25 @@ fn frame_budget_gives_the_recursion_errors() {
     );
     assert_eq!(lines, ["ECHO: 50"]);
 
+    // Statements spend the budget natively; on the heap evaluator they
+    // take no native stack, and the counted depth limit stops them.
+    #[cfg(feature = "heap-eval")]
+    let small = {
+        let limits = eval::limits::Limits {
+            depth: Some(40),
+            ..eval::limits::Limits::NONE
+        };
+        let flag = Arc::new(AtomicBool::new(false));
+        Options {
+            guard: Some(Arc::new(eval::limits::Guard::new(
+                limits,
+                flag.clone(),
+                None,
+            ))),
+            interrupt: Some(flag),
+            ..small
+        }
+    };
     let (lines, _) = run_with(
         "module m(n) { if (n > 0) translate([1, 0, 0]) m(n - 1); }\nm(1000);",
         &small,

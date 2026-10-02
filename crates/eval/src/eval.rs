@@ -266,6 +266,24 @@ pub(crate) struct Evaluator<'a> {
     /// Steps taken: statement instantiations and user function calls, a
     /// measure of what a call cost for [`crate::callmemo`].
     pub work: u64,
+    /// The heap evaluator's frames: the statements being instantiated,
+    /// innermost last (see [`crate::heap`]).
+    #[cfg(feature = "heap-eval")]
+    pub(crate) heap: Vec<crate::heap::Frame<'a>>,
+    /// The nodes of the builtins and module bodies whose children the heap
+    /// evaluator is instantiating, innermost last.
+    #[cfg(feature = "heap-eval")]
+    pub(crate) heap_nodes: Vec<Node>,
+    /// The heap evaluator's finished nodes, not yet collected by the
+    /// scope or loop they belong to (see [`crate::heap`]).
+    #[cfg(feature = "heap-eval")]
+    pub(crate) heap_out: Vec<Node>,
+    /// `children(index)`'s indices for the scopes running them.
+    #[cfg(feature = "heap-eval")]
+    pub(crate) heap_indices: Vec<Vec<usize>>,
+    /// The arguments of the `if`s whose children are running.
+    #[cfg(feature = "heap-eval")]
+    pub(crate) heap_args: Vec<Vec<crate::call::ArgVal>>,
 }
 
 /// A variable's value moved out of its frame, to be handed to the one read
@@ -297,6 +315,8 @@ pub(crate) struct Caps {
     pub list: usize,
     pub string: usize,
     pub rands: f64,
+    /// [`crate::limits::Limits::depth`], which always has a value.
+    pub depth: usize,
 }
 
 impl Caps {
@@ -306,6 +326,7 @@ impl Caps {
             list: n(l.and_then(|l| l.list)),
             string: n(l.and_then(|l| l.string)),
             rands: l.and_then(|l| l.rands).map_or(f64::INFINITY, |x| x as f64),
+            depth: n(Some(l.map_or(crate::limits::DEFAULT_DEPTH, |l| l.depth()))),
         }
     }
 }
@@ -497,6 +518,16 @@ impl<'a> Evaluator<'a> {
             rec: None,
             cm: crate::callmemo::CallMemo::new(opts.call_memo && !opts.hardwarnings),
             work: 0,
+            #[cfg(feature = "heap-eval")]
+            heap: Vec::new(),
+            #[cfg(feature = "heap-eval")]
+            heap_nodes: Vec::new(),
+            #[cfg(feature = "heap-eval")]
+            heap_out: Vec::new(),
+            #[cfg(feature = "heap-eval")]
+            heap_indices: Vec::new(),
+            #[cfg(feature = "heap-eval")]
+            heap_args: Vec::new(),
             opts,
         }
     }
@@ -518,6 +549,33 @@ impl<'a> Evaluator<'a> {
     pub fn recursion_exhausted(&self) -> bool {
         crate::recursion::note_frames(self.frames);
         self.stack_used() >= self.stack_limit || self.frames >= self.opts.frame_limit
+    }
+
+    /// Whether the user modules being instantiated have reached the
+    /// counted depth limit ([`crate::limits::Limits::depth`]): the limit
+    /// of a module recursion under the `heap-eval` feature, where
+    /// statements take no native stack.
+    #[inline]
+    pub fn depth_exhausted(&self) -> bool {
+        self.module_names.len() >= self.caps.depth
+    }
+
+    /// How deep a module call is, for the call memo, which replays a call
+    /// only where a fresh evaluation would not meet the recursion limit
+    /// sooner than the recorded one did (`callmemo::replay_fits`): the
+    /// native stack used, or under the heap evaluator, where every
+    /// statement starts on the same native stack, the user-module depth
+    /// that its limit counts.
+    #[inline]
+    pub fn memo_depth(&self) -> usize {
+        #[cfg(feature = "heap-eval")]
+        {
+            self.module_names.len()
+        }
+        #[cfg(not(feature = "heap-eval"))]
+        {
+            self.stack_used()
+        }
     }
 
     /// The measured stack limit alone (for printing, which has its own
@@ -2324,7 +2382,7 @@ impl<'a> Evaluator<'a> {
     /// `$` name). Out of line: `for_each` is on every level of a recursion
     /// through a comprehension.
     #[inline(never)]
-    fn iteration_vars(
+    pub(crate) fn iteration_vars(
         &mut self,
         ctx: &Rc<Ctx>,
         region: u32,

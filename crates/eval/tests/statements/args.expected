@@ -1,0 +1,11 @@
+ERROR: Assertion 'false' failed: "argument" @3
+TRACE: called by 'm' @3
+TRACE: call of 'n()' @3
+TRACE: called by 'n' @4
+TRACE: called by 'if' @4
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

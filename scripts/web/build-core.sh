@@ -56,7 +56,8 @@ fi
 # shellcheck source=scripts/web/remap-paths.sh
 source "$root/scripts/web/remap-paths.sh"
 neoscad_remap_paths
-cargo build --quiet --profile web --target wasm32-unknown-unknown -p neoscad-web
+# NEOSCAD_FEATURES (e.g. `heap-eval`): features of neoscad-web to build with.
+cargo build --quiet --profile web --target wasm32-unknown-unknown -p neoscad-web ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
 wasm=$target_dir/wasm32-unknown-unknown/web/neoscad_web.wasm
 
 rm -rf "$out"

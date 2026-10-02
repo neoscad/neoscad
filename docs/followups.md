@@ -173,7 +173,26 @@ lead them, come roughly in order of user impact.
 
   Design and staged plan: `docs/audits/heap-evaluator.md`. Stage 0 (the
   walks over the finished node tree made iterative) is done; its numbers
-  are in that file's "Stage 0 done".
+  are in that file's "Stage 0 done". Stage 1 (statements and module
+  instantiation on a heap stack, behind the `heap-eval` cargo feature,
+  with the counted `--limit depth=N`) is done; see "Stage 1 done" there.
+  Left from stage 1:
+  - the apps' `ResourceLimits` record (`crates/client/src/types.rs`)
+    does not carry `depth`, so the app always uses the default; adding it
+    changes the Swift, C# and Kotlin bindings;
+  - the heap frames are not charged to the memory estimate
+    (`limits::live`): at the default depth a module recursion holds about
+    100 MB of contexts and frames that `--limit memory` does not see;
+  - the evaluator's start, `Unit::add_scope` (`crates/eval/src/eval.rs`),
+    recurses on source nesting, like the parser. Natively the parser
+    overflows first; in a browser, with the frame budget no longer
+    stopping nested statements early, deeply nested source
+    (`translate() translate() ... cube()`) now reaches it: see "Stage 1
+    done" for the depths;
+  - which `--trace-usermodule-parameters` lines print `...` near the
+    recursion limit, and how much of a nested value a trace prints deep
+    in a module recursion, now follow the counted depth
+    (`print.rs`, `MODULE_LEVEL_STACK`) rather than the native stack.
 - **The geometry pool's stack is still sized from the evaluator's**
   (`geom/src/evaluate.rs`, `pool()`: `eval::DEFAULT_THREAD_STACK`, 80
   MiB of address space per thread). Since heap-evaluator stage 0 the

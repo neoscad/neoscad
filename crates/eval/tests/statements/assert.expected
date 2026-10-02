@@ -1,0 +1,17 @@
+ERROR: Assertion '(v < 3)' failed: "too big 3" @2
+TRACE: called by 'assert' @2
+TRACE: call of 'leaf(v = 3)' @2
+TRACE: called by 'leaf' @3
+TRACE: called by 'translate' @3
+TRACE: called by 'let' @3
+TRACE: called by 'for' @3
+TRACE: call of 'mid(n = 5)' @3
+TRACE: called by 'mid' @4
+TRACE: call of 'top()' @4
+TRACE: called by 'top' @5
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

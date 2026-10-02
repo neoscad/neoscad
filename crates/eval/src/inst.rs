@@ -5,12 +5,18 @@ use std::rc::Rc;
 use lang::ast::{BinaryOp, ExprKind, Instantiation, Scope};
 use lang::diag::DiagCode;
 
+#[cfg(not(feature = "heap-eval"))]
 use crate::call::Instantiable;
-use crate::context::{Children, Ctx, CtxKind, ScopeRef};
+#[cfg(not(feature = "heap-eval"))]
+use crate::context::{Children, CtxKind};
+use crate::context::{Ctx, ScopeRef};
 use crate::eval::Evaluator;
-use crate::message::{Loc, R, UnwindKind};
+#[cfg(not(feature = "heap-eval"))]
+use crate::message::UnwindKind;
+use crate::message::{Loc, R};
 use crate::node::{Node, NodeKind, Origin};
 use crate::sym::Sym;
+#[cfg(not(feature = "heap-eval"))]
 use crate::value::Value;
 
 impl<'a> Evaluator<'a> {
@@ -133,6 +139,7 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     /// `LocalScope::instantiateModules`: instantiate a scope's modules (or
     /// the ones at `indices`) into `out`.
     ///
@@ -172,6 +179,7 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     /// `Children::instantiate`: a new scope context for the children, whose
     /// assignments are evaluated each time.
     #[cfg_attr(not(debug_assertions), inline(always))]
@@ -235,6 +243,7 @@ impl<'a> Evaluator<'a> {
         self.units[sr.unit as usize].sym(self.inst(sr, i).name)
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     /// `ModuleInstantiation::evaluate`.
     pub fn instantiate(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
         self.check_interrupt()?;
@@ -249,6 +258,7 @@ impl<'a> Evaluator<'a> {
         r
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     #[inline(always)]
     fn instantiate_frame(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
         let name = self.inst_name(sr, i);
@@ -294,6 +304,7 @@ impl<'a> Evaluator<'a> {
         })
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     /// The frame budget ran out at a builtin module (see `builtin_module`).
     /// Kept out of line: `instantiate` is on every level of a recursion,
     /// and its frame should stay small.
@@ -306,6 +317,7 @@ impl<'a> Evaluator<'a> {
         self.unwind(UnwindKind::Recursion)
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     /// `UserModule::instantiate`.
     fn user_module(
         &mut self,
@@ -323,7 +335,7 @@ impl<'a> Evaluator<'a> {
             span: def.span,
         };
         let inst_name = self.inst_name(sr, i);
-        if self.recursion_exhausted() {
+        if self.recursion_exhausted() || self.depth_exhausted() {
             let t = format!(
                 "Recursion detected calling module '{}'",
                 self.name(inst_name)
@@ -337,6 +349,7 @@ impl<'a> Evaluator<'a> {
         r
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     fn user_module_inner(
         &mut self,
         dctx: &Rc<Ctx>,
@@ -411,7 +424,7 @@ impl<'a> Evaluator<'a> {
     /// bound frame is not part of the instantiation's stack frame, which
     /// every level of a recursive module holds.
     #[inline(never)]
-    fn bind_module(
+    pub(crate) fn bind_module(
         &mut self,
         mut args: Vec<crate::call::ArgVal>,
         loc: Loc,
@@ -426,7 +439,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `call of 'name(a = 1, b = "x")'` for a module's trace line.
-    fn module_call_text(
+    pub(crate) fn module_call_text(
         &mut self,
         mu: u32,
         def: &'a lang::ast::ModuleDef,
@@ -435,7 +448,7 @@ impl<'a> Evaluator<'a> {
         let ast = self.units[mu as usize].ast;
         let mut t = format!("call of '{}(", ast.name(def.name)).into_bytes();
         if !def.params.is_empty() {
-            if self.recursion_exhausted() {
+            if self.recursion_exhausted() || self.depth_exhausted() {
                 t.extend_from_slice(b"...");
             } else {
                 for (k, p) in def.params.iter().enumerate() {

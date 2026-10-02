@@ -810,3 +810,217 @@ scripts (no `wasm-opt`), and served locally.
 - What stage 0 does buy is the point of §1.3. Once stages 1–2 lift the
   evaluator's limit, the tree it builds can be dumped, keyed, rendered,
   previewed, copied and freed at any depth, on any thread.
+
+## Stage 1 done
+
+Measured on 2026-10-01 against `fa896a6` on the same Apple M4 Pro. This
+step is the plan's stages 1 and 2 (§3) together: the `heap-eval` switch
+and statements on the heap. The `may_call` bit of §3's stage 1 is left for
+the calls stage. "Base" below is this change built without the feature;
+"main" is `fa896a6`.
+
+**What changed.**
+- `crates/eval/src/heap.rs`, compiled only with the `heap-eval` cargo
+  feature of `neoscad-eval`. It covers module instantiation and its
+  scopes, user modules, `children()`, the control builtins (`echo`,
+  `assert`, `let`, `for`, `intersection_for`, `if`, `part`) and geometry
+  modules' children. They run in one loop over a stack of frames, and
+  each frame is the part of a native function that runs after its callee
+  returns. Expressions and function calls stay native: an expression
+  starts from the loop's own native frame at any module depth, so
+  statements add nothing to the frame budget.
+- The leaves are shared rather than copied: arguments, scope assignments,
+  binding, lookups, node construction and the call memo. A few helpers
+  were split out of `builtins/modules.rs` so both paths can call them
+  (`geometry_kind`, `geometry_params`, `is_leaf`, `children_select`,
+  `part_name`); so was `Range::iter_at`. They are `#[inline(always)]`, so
+  the default build's code is unchanged in shape.
+- The first version of the driver ran 10–20% more instructions than the
+  recursive evaluator on statement-heavy models. A sample showed the time
+  in the driver loop itself: a 248-byte node passed back in every result,
+  and a boxed frame per statement. Now:
+  - results are 32 bytes;
+  - finished nodes go onto one node stack, and each scope or loop takes
+    its own off the top, as one exactly sized vector;
+  - frames are at most 40 bytes and unboxed (a `for` loop's state
+    excepted);
+  - scopes run in place on the top of the stack.
+
+  Instructions retired against the base build, from an `echo` export, so
+  evaluation only:
+
+  | Model | Change |
+  |---|---:|
+  | 2.25 million `for` iterations of `let`, `if` and `translate` | −1.7% (wall −19%) |
+  | a binary tree of 131,000 module calls | +0.6% |
+  | 200 `children()` chains, 200 deep | −2.6% |
+  | BOSL2 `fractal_tree` | +1.4% |
+- **The counted limit.**
+  - `Limits::depth` (`--limit depth=N`, the JSON key `depth`) counts
+    nested user module calls. It always applies: `None` means
+    `DEFAULT_DEPTH`, which is 100,000, and it cannot be `off`.
+  - On the heap it is what stops a module recursion. The default build
+    checks it too, but there the 64 MiB stack stops first, at about
+    33,000 levels.
+  - `conformance depth` gives 199,977 trace lines (two per level) for
+    `recursion-test-module`, 6.61× OpenSCAD's, in both heap builds.
+    `module-if` reaches 99,999 levels. The default builds are unchanged,
+    the same as main: 66,021 plain and 39,919 PGO. Functions are where
+    they were: 110,355 plain and 55,177 PGO.
+  - A recursion to the limit holds about 100 MB: recursion-test-module's
+    peak RSS is 100 MB, against 88 MB natively.
+- **The call memo.** Under the feature, its replay rule (`replay_fits`)
+  compares module depth (`memo_depth`), not native stack bytes, since
+  every statement starts on the same native stack.
+- **Printing.** Under the feature, `print.rs` charges each nested module
+  level 2 KiB of virtual stack (`MODULE_LEVEL_STACK`, what a level holds
+  natively). Without that, printing deep in a module recursion had the
+  whole 8 MiB at every level. `recursion-test-vector` then traced each
+  level's ever deeper vector in full and took 76 s instead of 0.35 s
+  (0.44 s with the charge).
+- **Web.** A core built with the feature skips the worker's
+  module-recursion probes (`heapStatements()` in `crates/web/src/wasm.rs`):
+  - those probes only ran to the counted limit;
+  - in WebKit they took about 40 s at start-up, and /try requests timed
+    out.
+- The feature is forwarded by `neoscad-cli`, `neoscad-ffi`, `neoscad-web`
+  and `neoscad-wasm-check`. `scripts/pgo.sh`, `scripts/wasm-check.sh`,
+  `scripts/web/build-core.sh` and `scripts/apple/build-core.sh` take
+  `NEOSCAD_FEATURES=heap-eval`.
+
+**Tests.**
+- `crates/eval/tests/statements.rs` compares 20 programs' messages, `.csg`
+  dumps and node indices with expected files that the recursive
+  evaluator wrote. It covers:
+  - `$` variables through `children()`, `for` and `let`;
+  - children indices and chains;
+  - every kind of `for` value;
+  - errors in arguments, scope assignments, `for` ranges, `if`
+    conditions and `let`;
+  - `--hardwarnings`;
+  - the call memo on and off;
+  - `part()`;
+  - the depth limit with and without parameter traces;
+  - an interrupt in the middle of a recursion.
+
+  Both builds match all 20.
+- Under the feature, four kinds of module recursion reach 99,999 levels
+  and stop at 100,000 on a 128 KiB thread: plain, through `translate`,
+  through `children()` and through `for`/`let`.
+- `call_memo.rs` and `semantics.rs` keep their frame-budget tests for the
+  default build. Under the feature they check that statements leave the
+  budget to calls.
+
+**Output.** All with the feature on against base:
+- conformance 1773/0 for both builds, at default threads and with
+  `RAYON_NUM_THREADS=1`;
+- `conformance diff`, echo and csg, BOSL2 as a library path:
+  - the BOSL2 corpus: 3512/3512 echo, and 3511/3512 csg, where the one is
+    `isosurface__022` (unseeded `rands()`);
+  - the OpenSCAD examples: 50/50;
+  - the bench files: 9/9;
+- the bench models' STL and console at 1 and 8 threads: 13 models
+  identical, and each the same at both thread counts.
+
+**Checks.** All pass with the feature off and on:
+- `cargo fmt`;
+- `clippy -D warnings`;
+- `cargo test --workspace`;
+- `scripts/wasm-check.sh --depths`, which lints for wasm32 too;
+- `node crates/web/test/run.mjs`.
+
+**Speed.** Five interleaved rounds of main, base and heap, each plain and
+PGO + thin (each side retrained), with each run started at a 1-minute load
+below 3. The table is `conformance bench --refs neoscad`, full set: the
+best of the five rounds' bests, as a ratio.
+
+| Model | heap/base plain | heap/base PGO | base/main plain | base/main PGO |
+|---|---:|---:|---:|---:|
+| bosl_fractal_tree | 1.044 | 0.971 | 0.980 | 0.994 |
+| bosl_gears__003 | 1.004 | 0.987 | 0.994 | 1.000 |
+| bosl_isosurface__006 | 0.999 | 1.001 | 0.998 | 1.001 |
+| bosl_screws__001 | 0.991 | 0.988 | 1.004 | 1.004 |
+| bosl_spring_handle | 0.998 | 0.987 | 0.998 | 1.007 |
+| csg_deep_union | 1.010 | 1.013 | 1.005 | 1.021 |
+| csg_spheres | 0.996 | 1.017 | 0.991 | 0.997 |
+| ex_menger | 0.989 | 0.988 | 0.998 | 1.014 |
+| extrude_twist | 1.019 | 1.026 | 0.989 | 1.009 |
+| import_stl | 1.021 | 0.988 | 0.986 | 0.999 |
+| text_30lines | 1.010 | 0.995 | 1.021 | 0.993 |
+| **Geomean (11 models ≥ 30 ms)** | **1.007** | **0.996** | **0.997** | **1.004** |
+| Per-round paired geomean | 0.992–1.014 | 0.986–1.021 | 0.988–1.014 | 1.000–1.010 |
+
+- Every geomean is within ±2%: parity, for the heap build and for the
+  default build against main.
+- Three models are outside ±2% on one side only:
+  - `fractal_tree` plain, 1.044. It is 0.971 under PGO, and its
+    evaluation, measured alone, runs +1.4% more instructions. Its render
+    time moves by about ±3% between runs of one binary (stage 0 saw
+    0.979–1.022).
+  - `extrude_twist` under PGO, 1.026, and `import_stl` plain, 1.021.
+    Their time is geometry.
+- `eval_only` (BOSL2's 976 tests, summed), median of five:
+
+  | Build | Base | Heap |
+  |---|---:|---:|
+  | Plain | 30.59 s | 30.53 s |
+  | PGO | 29.03 s | 29.11 s |
+
+  Main: 30.66 s plain, 28.95 s PGO.
+- **The BOSL2 corpus**, echo, process time summed over its 3512 files,
+  one A/B run each:
+
+  | Run | Times |
+  |---|---|
+  | Plain | base 271.6 s, heap 270.3 s |
+  | PGO | base 259.8 s, heap 257.8 s |
+  | Main against base, plain | 276.9 s and 276.5 s |
+  | Main against base, PGO | 256.7 s and 256.2 s |
+- **The served edit loop** (`serve`, best and median):
+
+  | Build | BOSL2 render, base | BOSL2 render, heap |
+  |---|---|---|
+  | Plain | 9.3 / 9.8 ms | 9.2 / 9.9 ms |
+  | PGO | 8.8 / 9.3 ms | 8.7 / 9.4 ms |
+
+  Snapshots and the CSG case agree within 0.3 ms.
+- **The app core.** A throwaway harness drives `DocumentController` and
+  `Core::run_document` with no viewport, through the edit loop's cases:
+  20 edits per round, best of rounds and median of the round medians.
+  BOSL2 preview: 8.56/9.17 ms base, 8.55/9.07 ms heap. BOSL2 render:
+  8.58/9.00 ms base, 8.61/9.00 ms heap. CSG is under 1 ms on both.
+- **The web worker in node** (`profile.web`, fat LTO), timed from request
+  to result, with the copy of the mesh buffers timed separately:
+  - CSG preview: 3.85 ms base, 3.83 ms heap (median).
+  - A tree of 1,023 module calls, preview: 10.77 ms base, 10.72 ms heap.
+    Render: 150.1 ms base, 151.3 ms heap.
+  - The mesh copies: 0.01–0.13 ms either way.
+  - The first version of the driver was 7.5% slower on the tree preview.
+
+**Browsers.** The heap core, served locally with the default scripts:
+- Module recursion through `translate`, plain and through `children()`
+  evaluates at 99,999 levels and stops with OpenSCAD's recursion error
+  at 100,000. That holds in Chromium, WebKit and Firefox. In WebKit the
+  default core stops at 31, 54 and 44 levels.
+- Functions and comprehensions are where they were: WebKit 67/24,
+  Chromium 327/137, Firefox 499/166.
+- All 8 `/try` examples preview and render in all three browsers, and so
+  does the deep example.
+- **Source nesting does not improve.** `translate() translate() …
+  cube()` still overflows the engine at the same depth with and without
+  the feature: 187 in WebKit and 1,313 in Chromium. The cause is
+  `Unit::add_scope` and the parser, which recurse over the source. With
+  the feature, depths that the frame budget stopped early with a clean
+  error now evaluate: in WebKit from 150, in Chromium from 475.
+
+**Left for stage 2 (calls), and followups.**
+- Function calls, comprehensions and expressions on the heap, with the
+  `may_call` bit; the counted limit for functions; `library_context`.
+  WebKit's function depth (about 67) is still the browser limit.
+- The memory estimate does not charge the frames: about 100 MB at the
+  default depth.
+- The apps' `ResourceLimits` record does not carry `depth`.
+- `Unit::add_scope` recurses on source nesting (above).
+- Under the feature the frame budget's `statement` and `geometry`
+  weights, and the probes for them, are unused. They are deleted at
+  stage 5, with the default switched.

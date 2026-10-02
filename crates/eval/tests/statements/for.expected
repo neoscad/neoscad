@@ -1,0 +1,115 @@
+ECHO: "h"
+ECHO: "é"
+ECHO: "l"
+ECHO: "l"
+ECHO: "o"
+ECHO: 0, 0
+ECHO: 0, 1
+ECHO: 2, 2
+ECHO: 2, 3
+ECHO: 4, 4
+ECHO: 4, 5
+ECHO: 1
+ECHO: 2
+ECHO: 7
+ECHO: [1, 2]
+ECHO: [3]
+WARNING: begin is greater than the end, but step is positive @9
+WARNING: Bad range parameter in for statement: too many elements (2000001) @10
+ECHO: 0
+ECHO: 2
+ECHO: 4
+ECHO: 0, 5, "a"
+ECHO: 0, 5, "b"
+ECHO: 0, 6, "a"
+ECHO: 0, 6, "b"
+ECHO: 1, 5, "a"
+ECHO: 1, 5, "b"
+ECHO: 1, 6, "a"
+ECHO: 1, 6, "b"
+-- aborted false interrupted false hard false
+-- csg
+group();
+group();
+group();
+group();
+group();
+group();
+intersection() {
+	multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+		cube(size = [2, 2, 2], center = false);
+	}
+	multmatrix([[1, 0, 0, 1], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+		cube(size = [2, 2, 2], center = false);
+	}
+}
+group();
+group();
+group();
+group() {
+	cube(size = [0, 0, 0], center = false);
+	cube(size = [2, 2, 2], center = false);
+	cube(size = [4, 4, 4], center = false);
+}
+group() {
+	group() {
+		group() {
+			multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+				cube(size = [1, 1, 1], center = false);
+			}
+		}
+		group() {
+			multmatrix([[1, 0, 0, 1], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+				cube(size = [2, 2, 2], center = false);
+			}
+		}
+		group() {
+			multmatrix([[1, 0, 0, 2], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+				cube(size = [3, 3, 3], center = false);
+			}
+		}
+		group() {
+			multmatrix([[1, 0, 0, 3], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+				cube(size = [4, 4, 4], center = false);
+			}
+		}
+	}
+}
+group();
+
+
+-- nodes
+0 1 Root
+1 2 Group
+1 8 Group
+1 15 Group
+1 18 Group
+1 19 Group
+1 21 Group
+1 24 IntersectionFor
+2 25 Transform
+3 26 Cube
+2 27 Transform
+3 28 Cube
+1 29 Group
+1 30 Group
+1 31 Group
+1 32 Group
+2 34 Cube
+2 36 Cube
+2 38 Cube
+1 39 Group
+2 40 Group
+3 41 Group
+4 42 Transform
+5 43 Cube
+3 44 Group
+4 45 Transform
+5 46 Cube
+3 47 Group
+4 48 Transform
+5 49 Cube
+3 50 Group
+4 51 Transform
+5 52 Cube
+1 53 Group

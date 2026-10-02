@@ -86,9 +86,11 @@ mkdir -p "$raw"
 # `--target $host` keeps RUSTFLAGS off build scripts and proc macros:
 # without it they are instrumented too, write their own profiles into
 # $raw during the build and warn about value-profile counters.
+# NEOSCAD_FEATURES (e.g. `heap-eval`) builds both with those features of
+# neoscad-cli, so the profile is trained on the code it optimises.
 echo "pgo.sh: instrumented build ($profile)" >&2
 RUSTFLAGS="${RUSTFLAGS:-} -Cprofile-generate=$raw" CARGO_TARGET_DIR="$work/gen" \
-    cargo build --quiet --locked --profile "$profile" --target "$host" -p neoscad-cli
+    cargo build --quiet --locked --profile "$profile" --target "$host" -p neoscad-cli ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
 
 echo "pgo.sh: training" >&2
 "$python" scripts/pgo-train.py "$work/gen/$host/$profile/neoscad$exe" "$work/train" >&2
@@ -100,5 +102,5 @@ fi
 
 echo "pgo.sh: optimised build ($profile)" >&2
 RUSTFLAGS="${RUSTFLAGS:-} -Cprofile-use=$profdata" CARGO_TARGET_DIR="$work/use" \
-    cargo build --quiet --locked --profile "$profile" --target "$host" -p neoscad-cli
+    cargo build --quiet --locked --profile "$profile" --target "$host" -p neoscad-cli ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
 echo "$work/use/$host/$profile/neoscad$exe"

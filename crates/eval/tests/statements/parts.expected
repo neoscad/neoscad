@@ -1,0 +1,40 @@
+WARNING: Duplicate part name 'a.b' @2
+WARNING: part(name=3) needs a non-empty string name; treating it as a group @2
+-- aborted false interrupted false hard false
+-- csg
+part(name = "a") {
+	part(name = "a.b") {
+		cube(size = [1, 1, 1], center = false);
+	}
+	part(name = "a.b") {
+		cube(size = [2, 2, 2], center = false);
+	}
+	group() {
+		cube(size = [3, 3, 3], center = false);
+	}
+}
+group() {
+	part(name = "m") {
+		group() {
+			part(name = "m.n") {
+				sphere($fn = 0, $fa = 12, $fs = 2, r = 1);
+			}
+		}
+	}
+}
+
+
+-- nodes
+0 1 Root
+1 2 Part
+2 3 Part
+3 4 Cube
+2 5 Part
+3 6 Cube
+2 7 Group
+3 8 Cube
+1 9 Group
+2 10 Part
+3 11 Group
+4 12 Part
+5 13 Sphere

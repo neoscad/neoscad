@@ -13,6 +13,13 @@ name = "neoscad_web"
 # drive the same protocol handlers.
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# The heap evaluator (`neoscad-eval`'s `heap-eval`): statements run on
+# a heap stack, so module recursion is bounded by the counted depth limit
+# and not by the native stack. Off by default until it is proven
+# (docs/audits/heap-evaluator.md).
+heap-eval = ["eval/heap-eval"]
+
 [dependencies]
 assets = { package = "neoscad-assets", path = "../assets" }
 client = { package = "neoscad-client", path = "../client" }

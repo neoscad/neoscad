@@ -1,0 +1,12 @@
+ECHO: "before"
+ERROR: Assertion 'false' failed: "in children scope" @3
+TRACE: assignment to "z" @3
+TRACE: called by 'children' @2
+TRACE: call of 'c()' @2
+TRACE: called by 'c' @3
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

@@ -1,0 +1,11 @@
+ERROR: Assertion '(i < 1)' failed: "second" @2
+TRACE: called by 'for' @2
+TRACE: call of 'm()' @2
+TRACE: called by 'm' @3
+TRACE: called by 'translate' @3
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

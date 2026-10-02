@@ -1,0 +1,23 @@
+WARNING: Ignoring unknown variable "undefined_var" @2
+TRACE: called by 'echo' @2
+TRACE: called by 'if' @2
+TRACE: call of 'm(n = 0)' @2
+TRACE: called by 'm' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'if' @2
+TRACE: call of 'm(n = 1)' @2
+TRACE: called by 'm' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'if' @2
+TRACE: call of 'm(n = 2)' @2
+TRACE: called by 'm' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'if' @2
+TRACE: call of 'm(n = 3)' @2
+TRACE: called by 'm' @3
+-- aborted true interrupted false hard true
+-- csg
+
+
+-- nodes
+0 1 Root

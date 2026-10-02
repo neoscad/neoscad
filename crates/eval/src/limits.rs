@@ -61,10 +61,11 @@ pub enum Limit {
     String,
     Rands,
     Triangles,
+    Depth,
 }
 
 impl Limit {
-    pub const ALL: [Limit; 8] = [
+    pub const ALL: [Limit; 9] = [
         Limit::Time,
         Limit::Memory,
         Limit::Fragments,
@@ -73,6 +74,7 @@ impl Limit {
         Limit::String,
         Limit::Rands,
         Limit::Triangles,
+        Limit::Depth,
     ];
 
     /// The name `--limit NAME=VALUE` and the JSON `limits` object use.
@@ -86,6 +88,7 @@ impl Limit {
             Limit::String => "string",
             Limit::Rands => "rands",
             Limit::Triangles => "triangles",
+            Limit::Depth => "depth",
         }
     }
 
@@ -104,6 +107,7 @@ impl Limit {
             Limit::String => "bytes per string",
             Limit::Rands => "numbers per rands() call",
             Limit::Triangles => "triangles per result",
+            Limit::Depth => "nested module calls",
         }
     }
 }
@@ -130,7 +134,28 @@ pub struct Limits {
     /// Triangles (2D: vertices) of one geometry result, the final model
     /// included.
     pub triangles: Option<u64>,
+    /// User modules instantiated inside one another before evaluation
+    /// stops with OpenSCAD's "Recursion detected" error. Unlike the other
+    /// limits this one always applies: `None` is [`DEFAULT_DEPTH`], and it
+    /// cannot be turned off, because `module m() m();` must end in that
+    /// error rather than run until the memory is gone.
+    ///
+    /// A count rather than a measure of the native stack, so the depth is
+    /// the same in every build and browser. With the `heap-eval` feature
+    /// statements take no native stack and this is what stops a module
+    /// recursion; the default (recursive) evaluator also stops at the stack
+    /// limit of [`crate::recursion`], which it reaches first unless this
+    /// is set lower. Function calls are not counted yet.
+    pub depth: Option<u64>,
 }
+
+/// [`Limits::depth`]'s default: about three times the module depth the
+/// recursive evaluator reached natively (`conformance depth`: 66,021 trace
+/// lines, two per level, of `recursion-test-module`, 33,000 levels; 22,072
+/// levels through `if`), so no program that ran before stops now. Each
+/// level holds its context, node and driver frames on the heap, under a
+/// kilobyte, so the default costs at most about 100 MB.
+pub const DEFAULT_DEPTH: u64 = 100_000;
 
 impl Limits {
     /// Unlimited: OpenSCAD's behaviour, and the one-shot command line's.
@@ -143,6 +168,7 @@ impl Limits {
         string: None,
         rands: None,
         triangles: None,
+        depth: None,
     };
 
     /// The defaults of the agent and app surfaces (`serve`, `mcp`, the
@@ -166,6 +192,7 @@ impl Limits {
         string: Some(64 << 20),
         rands: Some(10_000_000),
         triangles: Some(10_000_000),
+        depth: None,
     };
 
     pub fn is_none(&self) -> bool {
@@ -182,7 +209,13 @@ impl Limits {
             Limit::String => self.string.map(|n| n as f64),
             Limit::Rands => self.rands.map(|n| n as f64),
             Limit::Triangles => self.triangles.map(|n| n as f64),
+            Limit::Depth => Some(self.depth.unwrap_or(DEFAULT_DEPTH) as f64),
         }
+    }
+
+    /// The counted depth limit in force ([`Limits::depth`]).
+    pub fn depth(&self) -> u64 {
+        self.depth.unwrap_or(DEFAULT_DEPTH)
     }
 
     /// Set limit `l` from a user's value: a number (seconds for `time`,
@@ -191,6 +224,11 @@ impl Limits {
     pub fn set(&mut self, l: Limit, value: &str) -> Result<(), String> {
         let v = value.trim();
         if matches!(v, "off" | "none" | "unlimited") {
+            if l == Limit::Depth {
+                return Err(format!(
+                    "limit depth cannot be off: a runaway recursion would never stop (the default is {DEFAULT_DEPTH})"
+                ));
+            }
             self.put(l, None);
             return Ok(());
         }
@@ -240,6 +278,8 @@ impl Limits {
             Limit::String => self.string = v.map(count),
             Limit::Rands => self.rands = v.map(count),
             Limit::Triangles => self.triangles = v.map(count),
+            // `None` is the default here, not unlimited (see `Limits::depth`).
+            Limit::Depth => self.depth = v.map(count),
         }
     }
 
@@ -339,6 +379,7 @@ impl Exceeded {
                     Limit::List => "list elements",
                     Limit::String => "bytes of string",
                     Limit::Rands => "random numbers",
+                    Limit::Depth => "nested module calls",
                     _ => "triangles",
                 },
                 l.key(),
@@ -356,6 +397,7 @@ impl Exceeded {
             }
             Limit::Rands => "ask rands() for fewer numbers",
             Limit::Triangles => "lower $fn or simplify the model",
+            Limit::Depth => "check the recursion's end condition",
             Limit::Memory => "simplify the model or lower $fn",
             Limit::Time => "simplify the model or lower $fn",
         };

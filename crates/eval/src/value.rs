@@ -601,21 +601,29 @@ impl Range {
 
     /// The values, as `RangeType::iterator` produces them.
     pub fn iter(&self) -> impl Iterator<Item = f64> + '_ {
-        let n =
-            if self.begin.is_nan() || self.end.is_nan() || self.step.is_nan() || self.step == 0.0 {
-                0
-            } else {
-                self.num_values()
-            };
-        (0..n).map(move |i| {
-            if i == 0 {
-                self.begin
-            } else {
-                // `begin_val + step_val * ++i_step`, fused on arm64 like
-                // the nightly (see `fma`).
-                crate::fma::mul_add(self.step, f64::from(i), self.begin)
-            }
-        })
+        (0..self.iter_len()).map(move |i| self.iter_at(i))
+    }
+
+    /// How many values [`Range::iter`] gives.
+    #[inline(always)]
+    pub fn iter_len(&self) -> u32 {
+        if self.begin.is_nan() || self.end.is_nan() || self.step.is_nan() || self.step == 0.0 {
+            0
+        } else {
+            self.num_values()
+        }
+    }
+
+    /// [`Range::iter`]'s value `i`.
+    #[inline(always)]
+    pub fn iter_at(&self, i: u32) -> f64 {
+        if i == 0 {
+            self.begin
+        } else {
+            // `begin_val + step_val * ++i_step`, fused on arm64 like
+            // the nightly (see `fma`).
+            crate::fma::mul_add(self.step, f64::from(i), self.begin)
+        }
     }
 
     fn cmp_key(&self) -> (f64, f64, u32) {

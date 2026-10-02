@@ -12,11 +12,15 @@ use std::rc::Rc;
 use lang::diag::DiagCode;
 
 use crate::call::ArgVal;
-use crate::context::{Children, Ctx, CtxKind, ScopeRef};
+#[cfg(not(feature = "heap-eval"))]
+use crate::context::Children;
+use crate::context::{Ctx, CtxKind, ScopeRef};
 use crate::eval::Evaluator;
 use crate::fma::mul_add;
 use crate::message::{Loc, R};
-use crate::node::{self, CsgOp, Discretizer, LinearExtrude, Matrix, Node, NodeKind, OffsetJoin};
+#[cfg(not(feature = "heap-eval"))]
+use crate::node::Node;
+use crate::node::{self, CsgOp, Discretizer, LinearExtrude, Matrix, NodeKind, OffsetJoin};
 use crate::print::Exhausted;
 use crate::sym::{FxBuild, Sym, Syms};
 use crate::trig::{cos_degrees, sin_degrees};
@@ -129,8 +133,8 @@ pub(crate) fn table(syms: &mut Syms, parts: bool) -> HashMap<Sym, BuiltinModule,
 /// A builtin's bound arguments (`Parameters`), on the context stack.
 pub(crate) struct Params {
     frame: Rc<Ctx>,
-    loc: Loc,
-    mark: usize,
+    pub(crate) loc: Loc,
+    pub(crate) mark: usize,
     caller: &'static str,
 }
 
@@ -185,7 +189,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `Parameters::parse(arguments, loc, required, optional)`, pushed.
-    fn params(
+    pub(crate) fn params(
         &mut self,
         args: Vec<ArgVal>,
         loc: Loc,
@@ -207,7 +211,7 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn end(&mut self, p: Params) {
+    pub(crate) fn end(&mut self, p: Params) {
         self.truncate(p.mark);
     }
 
@@ -343,7 +347,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `BuiltinModule::noChildren`.
-    fn no_children(&mut self, sr: ScopeRef, i: usize) {
+    pub(crate) fn no_children(&mut self, sr: ScopeRef, i: usize) {
         let cs = self.children_scope(sr, i);
         if !self.scope(cs).instantiations.is_empty() {
             let t = format!(
@@ -355,11 +359,12 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn inst_args(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Vec<ArgVal>> {
+    pub(crate) fn inst_args(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Vec<ArgVal>> {
         let inst = self.inst(sr, i);
         self.eval_args(sr.unit, &inst.args, ctx)
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     /// Instantiate children into `node` and return it. Inlined for the
     /// reason `instantiate_scope` is.
     #[cfg_attr(not(debug_assertions), inline(always))]
@@ -378,6 +383,7 @@ impl<'a> Evaluator<'a> {
         Ok(Some(node))
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     pub fn builtin_module(
         &mut self,
         b: BuiltinModule,
@@ -486,10 +492,29 @@ impl<'a> Evaluator<'a> {
     /// (see [`NodeKind::Part`]). A name that is not a non-empty string is
     /// a warning, and the children are kept as a plain group, so the
     /// geometry is the same either way.
+    #[cfg(not(feature = "heap-eval"))]
     fn part_module(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>, loc: Loc) -> R<Option<Node>> {
         let args = self.inst_args(sr, i, ctx)?;
         let p = self.params(args, loc, &["name"], &[], "part");
-        let name = match self.get(&p, "name") {
+        let Some(full) = self.part_name(&p, loc) else {
+            let node = self.new_node(NodeKind::Group { name: None }, sr, i);
+            let r = self.with_children(node, sr, i, ctx);
+            self.end(p);
+            return r;
+        };
+        let node = self.new_node(NodeKind::Part { name: full.clone() }, sr, i);
+        self.part_stack.push(full);
+        let r = self.with_children(node, sr, i, ctx);
+        self.part_stack.pop();
+        self.end(p);
+        r
+    }
+
+    /// A `part()`'s full dotted name, checked for duplicates, or `None`
+    /// (with a warning) when its name is not a non-empty string.
+    #[inline(always)]
+    pub(crate) fn part_name(&mut self, p: &Params, loc: Loc) -> Option<String> {
+        let name = match self.get(p, "name") {
             Value::Str(s) if !s.as_bytes().is_empty() => {
                 Some(String::from_utf8_lossy(s.as_bytes()).into_owned())
             }
@@ -500,13 +525,7 @@ impl<'a> Evaluator<'a> {
                 self.warn(loc, DiagCode::InvalidArgument, t);
                 None
             }
-        };
-        let Some(name) = name else {
-            let node = self.new_node(NodeKind::Group { name: None }, sr, i);
-            let r = self.with_children(node, sr, i, ctx);
-            self.end(p);
-            return r;
-        };
+        }?;
         let full = match self.part_stack.last() {
             Some(outer) => format!("{outer}.{name}"),
             None => name,
@@ -519,14 +538,10 @@ impl<'a> Evaluator<'a> {
             let t = format!("Duplicate part name '{full}'");
             self.warn(loc, DiagCode::DuplicatePart, t);
         }
-        let node = self.new_node(NodeKind::Part { name: full.clone() }, sr, i);
-        self.part_stack.push(full);
-        let r = self.with_children(node, sr, i, ctx);
-        self.part_stack.pop();
-        self.end(p);
-        r
+        Some(full)
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     /// `builtin_children`.
     fn children_module(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
         let loc = self.inst_loc(sr, i);
@@ -538,6 +553,7 @@ impl<'a> Evaluator<'a> {
         r
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     fn children_module_inner(
         &mut self,
         p: &Params,
@@ -545,11 +561,28 @@ impl<'a> Evaluator<'a> {
         i: usize,
         ctx: &Rc<Ctx>,
     ) -> R<Option<Node>> {
-        let loc = p.loc;
         let Some(children) = ctx.module_children() else {
             return Ok(None);
         };
         let size = self.scope(children.scope).instantiations.len();
+        let Some(indices) = self.children_select(p, size) else {
+            return Ok(None);
+        };
+        let mut node = self.new_node(NodeKind::Group { name: None }, sr, i);
+        self.instantiate_children(&children, &mut node.children, indices.as_deref())?;
+        Ok(Some(node))
+    }
+
+    /// The children `children(index)` instantiates out of `size`: `Some`
+    /// of all (`None`) or of these indices, or `None` (with a warning) for
+    /// none at all.
+    #[inline(always)]
+    pub(crate) fn children_select(
+        &mut self,
+        p: &Params,
+        size: usize,
+    ) -> Option<Option<Vec<usize>>> {
+        let loc = p.loc;
         let index = self.lookup_param(p, "index");
         let valid = |ev: &mut Self, n: i32| -> Option<usize> {
             if n < 0 || n as usize >= size {
@@ -565,10 +598,7 @@ impl<'a> Evaluator<'a> {
         };
         let indices: Option<Vec<usize>> = match index {
             None => None,
-            Some(Value::Number(x)) => match valid(self, x as i32) {
-                Some(k) => Some(vec![k]),
-                None => return Ok(None),
-            },
+            Some(Value::Number(x)) => Some(vec![valid(self, x as i32)?]),
             Some(Value::Vector(v)) => {
                 let mut ix = Vec::new();
                 for e in v.iter() {
@@ -598,7 +628,7 @@ impl<'a> Evaluator<'a> {
                     let t =
                         format!("Bad range parameter for children: too many elements ({steps})");
                     self.warn(loc, DiagCode::IterationLimit, t);
-                    return Ok(None);
+                    return None;
                 }
                 let mut ix = Vec::new();
                 for d in r.iter() {
@@ -613,14 +643,13 @@ impl<'a> Evaluator<'a> {
                 self.write_echo_nothrow(&other, &mut t);
                 t.extend_from_slice(b") for children, only accept: empty, number, vector, range");
                 self.warn(loc, DiagCode::InvalidArgument, t);
-                return Ok(None);
+                return None;
             }
         };
-        let mut node = self.new_node(NodeKind::Group { name: None }, sr, i);
-        self.instantiate_children(&children, &mut node.children, indices.as_deref())?;
-        Ok(Some(node))
+        Some(indices)
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     fn geometry_module(
         &mut self,
         b: BuiltinModule,
@@ -629,85 +658,18 @@ impl<'a> Evaluator<'a> {
         ctx: &Rc<Ctx>,
         loc: Loc,
     ) -> R<Option<Node>> {
-        use BuiltinModule as B;
         let args = self.inst_args(sr, i, ctx)?;
-        let leaf = matches!(
-            b,
-            B::Cube
-                | B::Sphere
-                | B::Cylinder
-                | B::Polyhedron
-                | B::Square
-                | B::Circle
-                | B::Polygon
-                | B::Surface
-                | B::Import
-                | B::Text
-        );
-        if leaf {
+        if is_leaf(b) {
             self.no_children(sr, i);
         }
-        let (req, opt, caller): (&[&str], &[&str], &'static str) = match b {
-            B::Group | B::Union | B::Difference | B::Intersection | B::Hull | B::Fill => {
-                (&[], &[], "")
-            }
-            B::Scale | B::Mirror | B::Translate => (&["v"], &[], ""),
-            B::Rotate => (&["a", "v"], &[], ""),
-            B::Multmatrix => (&["m"], &[], ""),
-            B::Color => (&["c", "alpha"], &[], ""),
-            B::Render => (&["convexity"], &[], ""),
-            B::Projection => (&["cut"], &["convexity"], ""),
-            B::Minkowski => (&["convexity"], &[], ""),
-            B::Resize => (&["newsize", "auto", "convexity"], &[], ""),
-            B::Offset => (&["r"], &["delta", "chamfer"], ""),
-            B::LinearExtrude => (
-                &[
-                    "height", "v", "scale", "center", "twist", "slices", "segments",
-                ],
-                &["convexity", "h"],
-                "linear_extrude",
-            ),
-            B::RotateExtrude => (&["angle", "start"], &["convexity", "a"], ""),
-            B::Cube | B::Square => (&["size", "center"], &[], ""),
-            B::Sphere | B::Circle => (&["r"], &["d"], ""),
-            B::Cylinder => (&["h", "r1", "r2", "center"], &["r", "d", "d1", "d2"], ""),
-            B::Polyhedron => (&["points", "faces", "convexity"], &[], ""),
-            B::Polygon => (&["points", "paths", "convexity"], &[], ""),
-            B::Surface => (&["file", "center", "convexity"], &["invert"], ""),
-            B::Import => (
-                &["file", "layer", "convexity", "origin", "scale"],
-                &[
-                    "width",
-                    "height",
-                    "filename",
-                    "layername",
-                    "center",
-                    "dpi",
-                    "id",
-                ],
-                "",
-            ),
-            B::Text => (
-                &["text", "size", "font"],
-                &[
-                    "direction",
-                    "language",
-                    "script",
-                    "halign",
-                    "valign",
-                    "spacing",
-                    "em",
-                ],
-                "text",
-            ),
-            _ => (&[], &[], ""),
-        };
+        let (req, opt, caller) = geometry_params(b);
         let p = self.params(args, loc, req, opt, caller);
         let r = self.geometry_node(b, &p, sr, i, ctx);
         self.end(p);
         r
     }
 
+    #[cfg(not(feature = "heap-eval"))]
     fn geometry_node(
         &mut self,
         b: BuiltinModule,
@@ -716,9 +678,28 @@ impl<'a> Evaluator<'a> {
         i: usize,
         ctx: &Rc<Ctx>,
     ) -> R<Option<Node>> {
+        let kind = self.geometry_kind(b, p);
+        let node = self.new_node(kind, sr, i);
+        if is_leaf(b) {
+            Ok(Some(node))
+        } else {
+            // A geometry module's children cost more stack per level than
+            // other statements (this function's frame); the extra weight is
+            // 0 unless a host calibrated one (`crate::recursion::FrameWeights`).
+            self.frames += self.weights.geometry;
+            let r = self.with_children(node, sr, i, ctx);
+            self.frames -= self.weights.geometry;
+            r
+        }
+    }
+
+    /// A geometry module's node kind from its bound arguments, with their
+    /// warnings.
+    #[inline(always)]
+    pub(crate) fn geometry_kind(&mut self, b: BuiltinModule, p: &Params) -> NodeKind {
         use BuiltinModule as B;
         let loc = p.loc;
-        let kind = match b {
+        match b {
             B::Group => NodeKind::Group { name: None },
             B::Union => NodeKind::Csg(CsgOp::Union),
             B::Difference => NodeKind::Csg(CsgOp::Difference),
@@ -1076,34 +1057,96 @@ impl<'a> Evaluator<'a> {
             }
             B::Text => NodeKind::Text(self.text(p)),
             _ => NodeKind::Group { name: None },
-        };
-        let node = self.new_node(kind, sr, i);
-        let leaf = matches!(
-            b,
-            B::Cube
-                | B::Sphere
-                | B::Cylinder
-                | B::Polyhedron
-                | B::Square
-                | B::Circle
-                | B::Polygon
-                | B::Surface
-                | B::Import
-                | B::Text
-        );
-        if leaf {
-            Ok(Some(node))
-        } else {
-            // A geometry module's children cost more stack per level than
-            // other statements (this function's frame); the extra weight is
-            // 0 unless a host calibrated one (`crate::recursion::FrameWeights`).
-            self.frames += self.weights.geometry;
-            let r = self.with_children(node, sr, i, ctx);
-            self.frames -= self.weights.geometry;
-            r
         }
     }
+}
 
+/// Whether geometry module `b` is a primitive, which takes no children.
+#[inline(always)]
+pub(crate) fn is_leaf(b: BuiltinModule) -> bool {
+    use BuiltinModule as B;
+    matches!(
+        b,
+        B::Cube
+            | B::Sphere
+            | B::Cylinder
+            | B::Polyhedron
+            | B::Square
+            | B::Circle
+            | B::Polygon
+            | B::Surface
+            | B::Import
+            | B::Text
+    )
+}
+
+/// Geometry module `b`'s required and optional parameters, and the caller
+/// name its argument warnings use.
+#[inline(always)]
+pub(crate) fn geometry_params(
+    b: BuiltinModule,
+) -> (
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static str,
+) {
+    use BuiltinModule as B;
+    match b {
+        B::Group | B::Union | B::Difference | B::Intersection | B::Hull | B::Fill => (&[], &[], ""),
+        B::Scale | B::Mirror | B::Translate => (&["v"], &[], ""),
+        B::Rotate => (&["a", "v"], &[], ""),
+        B::Multmatrix => (&["m"], &[], ""),
+        B::Color => (&["c", "alpha"], &[], ""),
+        B::Render => (&["convexity"], &[], ""),
+        B::Projection => (&["cut"], &["convexity"], ""),
+        B::Minkowski => (&["convexity"], &[], ""),
+        B::Resize => (&["newsize", "auto", "convexity"], &[], ""),
+        B::Offset => (&["r"], &["delta", "chamfer"], ""),
+        B::LinearExtrude => (
+            &[
+                "height", "v", "scale", "center", "twist", "slices", "segments",
+            ],
+            &["convexity", "h"],
+            "linear_extrude",
+        ),
+        B::RotateExtrude => (&["angle", "start"], &["convexity", "a"], ""),
+        B::Cube | B::Square => (&["size", "center"], &[], ""),
+        B::Sphere | B::Circle => (&["r"], &["d"], ""),
+        B::Cylinder => (&["h", "r1", "r2", "center"], &["r", "d", "d1", "d2"], ""),
+        B::Polyhedron => (&["points", "faces", "convexity"], &[], ""),
+        B::Polygon => (&["points", "paths", "convexity"], &[], ""),
+        B::Surface => (&["file", "center", "convexity"], &["invert"], ""),
+        B::Import => (
+            &["file", "layer", "convexity", "origin", "scale"],
+            &[
+                "width",
+                "height",
+                "filename",
+                "layername",
+                "center",
+                "dpi",
+                "id",
+            ],
+            "",
+        ),
+        B::Text => (
+            &["text", "size", "font"],
+            &[
+                "direction",
+                "language",
+                "script",
+                "halign",
+                "valign",
+                "spacing",
+                "em",
+            ],
+            "text",
+        ),
+        _ => (&[], &[], ""),
+    }
+}
+
+impl<'a> Evaluator<'a> {
     fn center(&mut self, p: &Params) -> bool {
         matches!(self.get(p, "center"), Value::Bool(true))
     }

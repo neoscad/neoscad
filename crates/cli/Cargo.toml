@@ -34,6 +34,11 @@ path = "src/main.rs"
 # installed, as they do in OpenSCAD, which ships them as resources.
 default = ["bundled-assets", "mimalloc"]
 bundled-assets = ["dep:assets"]
+# The heap evaluator (`neoscad-eval`'s `heap-eval`): statements run on
+# a heap stack, so module recursion is bounded by the counted depth limit
+# and not by the native stack. Off by default until it is proven
+# (docs/audits/heap-evaluator.md).
+heap-eval = ["eval/heap-eval"]
 # mimalloc as the global allocator (`main.rs`). A feature only so that a
 # cross-target `cargo check` can leave out its C build: checking the
 # Windows code from macOS or Linux has no MSVC compiler or Windows SDK

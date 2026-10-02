@@ -825,7 +825,7 @@ impl crate::eval::Evaluator<'_> {
     ) -> Option<Box<Node>> {
         // Measured here for recording and replay alike, so the two are
         // comparable (see `replay_fits`).
-        let stack = self.stack_used();
+        let stack = self.memo_depth();
         let name = self.module_names[self.module_names.len() - 1];
         // Children with nothing to evaluate make `children()` observe
         // nothing, so they are left out of the key; any assignment among

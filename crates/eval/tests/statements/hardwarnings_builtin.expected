@@ -1,0 +1,11 @@
+WARNING: cube(size=-1, ...) @2
+TRACE: called by 'cube' @2
+TRACE: call of 'm()' @2
+TRACE: called by 'm' @3
+TRACE: called by 'group' @3
+-- aborted true interrupted false hard true
+-- csg
+
+
+-- nodes
+0 1 Root

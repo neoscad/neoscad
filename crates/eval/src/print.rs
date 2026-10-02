@@ -76,7 +76,35 @@ fn push_range(out: &mut Vec<u8>, r: &Range) {
 /// (and output hundreds of MB) before failing.
 const PRINT_STACK_LIMIT: usize = (8 << 20) - (128 << 10);
 
+/// The native stack a level of module recursion holds in the recursive
+/// evaluator's plain release build: 64 MiB over its 33,000 levels of
+/// `recursion-test-module` (`conformance depth`), about 2 KiB.
+#[cfg(feature = "heap-eval")]
+const MODULE_LEVEL_STACK: usize = 2 << 10;
+
 impl Evaluator<'_> {
+    /// The native stack the user modules being instantiated stand for, for
+    /// printing: none natively, where they hold it themselves. The heap
+    /// evaluator's statements take no native stack, but printing deep in a
+    /// module recursion must still run out of room as it does natively and
+    /// in OpenSCAD, where module levels and printing share one stack: a
+    /// recursion that passes its parameter one vector deeper per call
+    /// (`recursion-test-vector`) otherwise prints every level's whole
+    /// value into its trace, quadratic in the depth (76 s, against 0.35 s
+    /// natively). Each level is charged what it holds natively, so printing
+    /// runs out of room about where it did, some 4,000 levels deep.
+    #[inline]
+    fn module_stack(&self) -> usize {
+        #[cfg(feature = "heap-eval")]
+        {
+            self.module_names.len() * MODULE_LEVEL_STACK
+        }
+        #[cfg(not(feature = "heap-eval"))]
+        {
+            0
+        }
+    }
+
     /// Whether printing a vector nested `depth` levels inside the value
     /// being printed must stop. Each level is also a frame of the frame
     /// budget ([`crate::recursion`]), on top of the frames the evaluation
@@ -84,7 +112,7 @@ impl Evaluator<'_> {
     /// so this is conservative, and it is what keeps printing a deeply
     /// nested value from overflowing a WASM engine's stack.
     fn print_stack_exhausted(&self, depth: u32) -> bool {
-        self.stack_used() >= self.stack_limit().min(PRINT_STACK_LIMIT)
+        self.stack_used() + self.module_stack() >= self.stack_limit().min(PRINT_STACK_LIMIT)
             || self
                 .frames
                 .saturating_add(depth.saturating_mul(self.weights.expression))

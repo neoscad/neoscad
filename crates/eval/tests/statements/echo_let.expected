@@ -1,0 +1,12 @@
+ECHO: "e"
+ERROR: Assertion 'false' failed: "let" @2
+TRACE: called by 'let' @2
+TRACE: called by 'echo' @2
+TRACE: call of 'm()' @2
+TRACE: called by 'm' @3
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

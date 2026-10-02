@@ -338,6 +338,9 @@ impl ResourceLimits {
             string: self.string,
             rands: self.rands,
             triangles: self.triangles,
+            // The counted depth limit keeps its default: the apps' limits
+            // record does not carry it yet (docs/followups.md).
+            depth: None,
         })
     }
 }

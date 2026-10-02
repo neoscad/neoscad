@@ -297,6 +297,12 @@ result with a `resource-limit` diagnostic, not a crash.
   `eval::recursion::FrameWeights`). Nesting in the
   source itself (deeply nested brackets or statements) is not covered:
   the parser has no depth limit (`docs/followups.md`).
+  A counted limit, `--limit depth=N` (`Limits::depth`, default 100,000
+  nested module calls, never off), applies in every build. Built with the
+  `heap-eval` feature, statements run on a heap stack
+  (`crates/eval/src/heap.rs`), so it alone stops a module recursion, at
+  the same depth on every target and browser; function calls still
+  recurse natively (`docs/audits/heap-evaluator.md`).
 
 Details: `docs/cli-json.md` ("Resource limits"); open gaps in
 `docs/followups.md` ("Serve and session").

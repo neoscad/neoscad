@@ -1,0 +1,32 @@
+ERROR: Recursion detected calling module 'r' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE:   *** Excluding 77 frames ***
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @2
+TRACE: called by 'translate' @2
+TRACE: called by 'r' @3
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

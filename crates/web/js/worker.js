@@ -14,7 +14,7 @@
 // drive it without a worker.
 
 import init, {
-    Engine, lastPanic, frameLimit, setFrameLimit, frameWeights, setFrameWeights,
+    Engine, lastPanic, frameLimit, setFrameLimit, frameWeights, setFrameWeights, heapStatements,
 } from './neoscad_web.js';
 
 let engine = null;
@@ -171,6 +171,12 @@ async function probeWeights(compiled) {
     const frames = {};
     for (const [i, [probe, kind, weights]] of RUNS.entries()) {
         frames[probe] ??= {};
+        // A core that runs statements on the heap has no module frames to
+        // measure: those probes would only recurse to its depth limit.
+        if (heapStatements() && (probe === 'children' || probe === 'transform')) {
+            frames[probe][kind] = null;
+            continue;
+        }
         frames[probe][kind] = await probeRun(compiled, i, PROBES[probe], weights);
     }
     const ms = typeof performance !== 'undefined' ? Math.round(performance.now() - t0) : 0;

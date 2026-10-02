@@ -105,6 +105,15 @@ pub fn frames_at_last_check() -> u32 {
     eval::recursion::frames_at_last_check()
 }
 
+/// Whether this core runs statements on the heap (the `heap-eval`
+/// feature): module recursion then takes no stack, and the worker's probes
+/// of it (`children`, `transform`) would only run to the counted depth
+/// limit, which in WebKit's cold tiers took 40 s at start-up.
+#[wasm_bindgen(js_name = heapStatements)]
+pub fn heap_statements() -> bool {
+    cfg!(feature = "heap-eval")
+}
+
 /// The worker's engine: `handle` one request at a time.
 #[wasm_bindgen]
 #[derive(Debug)]

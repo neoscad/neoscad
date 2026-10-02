@@ -41,6 +41,8 @@ mod context;
 pub mod dump;
 mod eval;
 pub mod features;
+#[cfg(feature = "heap-eval")]
+mod heap;
 pub use features::{Feature, Features};
 mod callmemo;
 pub mod fma;
