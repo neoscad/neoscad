@@ -296,9 +296,10 @@ The shared foundation exists (`docs/release.md`, "The update feed"):
   `--share=network` in the Flatpak (finding 4); the Flatpak repository
   below remains the way to updates without a download.
 
-Nothing is live until the owner creates the minisign key, adds its public
-half to `RELEASE_KEYS`, and sets `UPDATE_FEED_MINISIGN_KEY`,
-`UPDATE_FEED_MINISIGN_KEY_PASSWORD` and `WEBSITE_TOKEN`.
+The keys exist (2026-10-02): the minisign key's public half is in
+`RELEASE_KEYS`, and `UPDATE_FEED_MINISIGN_KEY`,
+`UPDATE_FEED_MINISIGN_KEY_PASSWORD` and `WEBSITE_TOKEN` are set. The
+first release after that publishes the first signed feeds.
 
 The macOS app's updater is built too (`docs/release.md`, "The macOS
 app's updates"), as recommended above with two departures:
@@ -315,21 +316,16 @@ that every Mach-O carries the team's signature; the `appcast` job in
 `update-feed.yml` with `scripts/release/appcast.py`; `auto_updates true` in
 the cask; and `scripts/apple/test-updates.sh`, which installs one local
 build over another from a signed local appcast. The public key is
-`NEOSCAD_SPARKLE_PUBLIC_KEY` in `apple/project.yml`. Until the owner sets
-it, apps have no updater, and `release.sh` refuses to notarize, so **no
-release can be published until the key exists**. The owner must:
-
-1. make the key (`generate_keys`, `docs/release.md`), keep it in the
-   password manager, and put the public half in `apple/project.yml`;
-2. set the secret `SPARKLE_ED_PRIVATE_KEY` (and `WEBSITE_TOKEN`, shared
-   with the feeds).
+`NEOSCAD_SPARKLE_PUBLIC_KEY` in `apple/project.yml` (Release builds only),
+set on 2026-10-02 with the secret `SPARKLE_ED_PRIVATE_KEY`; `release.sh`
+refuses to notarize a build without it.
 
 Next steps, in order:
 
-1. **Keys and the first live feed.** Create the key, add the public half
-   to `RELEASE_KEYS`, set the three secrets, then run `gh workflow run
-   update-feed.yml` and check
-   `https://neoscad.org/updates/v1/stable.json` and its `.minisig`.
+1. **The first live feed.** The keys and secrets are in place. The next
+   release's `update-feed` and `appcast` jobs publish the first signed
+   feeds; check `https://neoscad.org/updates/v1/stable.json`, its
+   `.minisig` and `updates/macos/appcast.xml`.
 2. **Windows app.** Built (above; finding 5 was already fixed by
    `AllowSameVersionUpgrades="yes"`). Left: run it on Windows against a
    test-signed feed and an older installed MSI, and look at the UAC

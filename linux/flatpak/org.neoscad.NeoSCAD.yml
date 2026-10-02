@@ -29,6 +29,12 @@ finish-args:
   # portal's one-file grant does not cover; exports are written beside
   # the model. OpenSCAD's own Flatpak asks for the same.
   - --filesystem=home
+  # The update check (crates/linux-app/src/app/update.rs): once a day, a
+  # GET of the signed feed on neoscad.org, and Main menu > Check for
+  # Updates. Without it the release bundles can't learn of a newer
+  # release: they carry no repository, so `flatpak update` doesn't reach
+  # one either (docs/linux-app.md, "Updates").
+  - --share=network
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node24/bin
 cleanup:
