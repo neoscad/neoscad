@@ -89,12 +89,19 @@ kept across respawns, so results differ between visits but stay stable
 while the page lives, as in the app). `limits` defaults to the agent
 limits with memory at 1 GiB (below). `init` again is `invalidArgument`.
 
-`ResourceLimits` (every field `null` for unlimited):
+`ResourceLimits` (every field but `depth` `null` for unlimited):
 
 ```js
 { timeSeconds: 60, memoryBytes: 1073741824, fragments: 10000, slices: 10000,
-  list: 10000000, string: 67108864, rands: 10000000, triangles: 10000000 }
+  list: 10000000, string: 67108864, rands: 10000000, triangles: 10000000,
+  depth: null }
 ```
+
+`depth` is how many user module calls (and, with the heap evaluator, user
+function calls) may be in progress inside one another before evaluation
+stops with OpenSCAD's "Recursion detected" error. It cannot be turned
+off: `null` (or leaving it out) is the default, 100,000, and 0 is
+`invalidArgument`.
 
 The time limit runs on `performance.now()`.
 

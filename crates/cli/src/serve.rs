@@ -274,17 +274,24 @@ fn connection(server: Arc<Server>, mut r: impl BufRead, w: Writer) {
                 let (server, w) = (server.clone(), w.clone());
                 let method = method.to_string();
                 server.active.fetch_add(1, Ordering::SeqCst);
-                std::thread::spawn(move || {
-                    let reply = answer(&id, || heavy(&server, &id, &method, &params, &w));
-                    send(&w, &reply);
-                    server
-                        .running
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .remove(&id.to_string());
-                    server.touch();
-                    server.active.fetch_sub(1, Ordering::SeqCst);
-                });
+                // The evaluator's stack: `format`, `docs` and `test` parse
+                // (and format) on this thread, recursing on the source's
+                // nesting, which a default thread's 2 MiB does not hold
+                // at the parser's limit. Evaluations make their own.
+                let spawned = std::thread::Builder::new()
+                    .stack_size(eval::DEFAULT_THREAD_STACK)
+                    .spawn(move || {
+                        let reply = answer(&id, || heavy(&server, &id, &method, &params, &w));
+                        send(&w, &reply);
+                        server
+                            .running
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&id.to_string());
+                        server.touch();
+                        server.active.fetch_sub(1, Ordering::SeqCst);
+                    });
+                spawned.expect("cannot spawn a request thread");
             }
         }
     }

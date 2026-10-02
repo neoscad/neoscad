@@ -263,6 +263,31 @@ pub(crate) struct Stacks<'a> {
     walk: Vec<(ExprId, bool)>,
 }
 
+impl Stacks<'_> {
+    /// Estimated bytes these stacks hold, for the memory limit
+    /// (`Evaluator::held_bytes`): every stack's elements, each call's
+    /// boxed state, and a small allocation per list being filled and per
+    /// argument vector (their values are counted where they are made).
+    /// O(1), so the evaluator's periodic limit check can afford it.
+    pub(crate) fn held_bytes(&self) -> u64 {
+        use crate::eval::held;
+        use crate::limits::live::BOX;
+        let call = std::mem::size_of::<CallSt<'static>>() as u64 + 16;
+        held(&self.frames)
+            + held(&self.outs)
+            + self.outs.len() as u64 * BOX
+            + held(&self.args)
+            + self.args.len() as u64 * BOX
+            + held(&self.calls)
+            + held(&self.call_pool)
+            + (self.calls.len() + self.call_pool.len()) as u64 * call
+            + held(&self.fors)
+            + held(&self.lets)
+            + held(&self.grow)
+            + held(&self.walk)
+    }
+}
+
 /// `eval_call`'s loop: its locals, and what its step waits for.
 pub(crate) struct CallSt<'a> {
     slot: usize,

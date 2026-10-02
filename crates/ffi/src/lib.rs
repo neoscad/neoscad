@@ -96,6 +96,51 @@ fn guarded<T>(f: impl FnOnce() -> Result<T, CoreError>) -> Result<T, CoreError> 
     }
 }
 
+/// A value that is freed on a thread with the evaluator's stack.
+///
+/// Parsed documents (the session's caches, a language server's documents)
+/// are trees as deep as the source is nested, and freeing one recurses on
+/// that depth. The app releases its objects from whatever thread it is on,
+/// often a dispatch queue (512 KiB): a release build freeing a language
+/// server with a document at the parser's nesting limit (5,000 levels)
+/// needed between 256 and 512 KiB, and a test build overflowed 512 KiB at
+/// its 2,500.
+pub(crate) struct FreedDeep<T: Send>(Option<T>);
+
+impl<T: Send> FreedDeep<T> {
+    pub(crate) fn new(value: T) -> FreedDeep<T> {
+        FreedDeep(Some(value))
+    }
+}
+
+impl<T: Send + std::fmt::Debug> std::fmt::Debug for FreedDeep<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T: Send> std::ops::Deref for FreedDeep<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.0.as_ref().expect("freed only on drop")
+    }
+}
+
+impl<T: Send> Drop for FreedDeep<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            // Not `eval::with_stack`, which panics (here: aborts) when no
+            // thread can be made: then the value is freed on this one, as
+            // before.
+            std::thread::scope(|s| {
+                let _ = std::thread::Builder::new()
+                    .stack_size(eval::DEFAULT_THREAD_STACK)
+                    .spawn_scoped(s, move || drop(value));
+            });
+        }
+    }
+}
+
 /// The version of the core (the workspace's), for the About panel and bug
 /// reports.
 #[uniffi::export]
@@ -115,10 +160,10 @@ pub fn default_limits() -> Result<ResourceLimits, CoreError> {
 /// whole process, so every window shares the caches.
 #[derive(uniffi::Object)]
 pub struct Core {
-    client: client::Client,
+    client: FreedDeep<client::Client>,
     test_hooks: bool,
     /// Analysed library files, shared by every window's language server.
-    lsp_cache: Arc<lsp::Cache>,
+    lsp_cache: FreedDeep<Arc<lsp::Cache>>,
 }
 
 impl std::fmt::Debug for Core {
@@ -156,9 +201,9 @@ impl Core {
         guarded(|| {
             let cfg = host::config(config.resource_dir.as_deref());
             Ok(Arc::new(Core {
-                client: client::Client::new(cfg),
+                client: FreedDeep::new(client::Client::new(cfg)),
                 test_hooks: config.test_hooks,
-                lsp_cache: Arc::new(lsp::Cache::new()),
+                lsp_cache: FreedDeep::new(Arc::new(lsp::Cache::new())),
             }))
         })
     }

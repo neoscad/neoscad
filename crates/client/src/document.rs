@@ -524,12 +524,29 @@ impl Client {
 
     /// The customizer parameters of `doc`'s text, with the values
     /// `overrides` give (validated and clamped as a parameter set's are).
+    ///
+    /// Parsing, lowering and freeing the syntax tree recurse on the
+    /// text's nesting, so they run on a thread with the evaluator's stack,
+    /// as `Session::render` and the hosts' language servers do: the macOS
+    /// app asks from a dispatch queue (512 KiB), which a document at the
+    /// parser's nesting limit overflowed (`tests.rs`,
+    /// `customizer_parses_deep_documents_on_a_small_stack`).
     fn customizer(
         &self,
         doc: &Path,
         overrides: &[(String, String)],
     ) -> Result<Parameters, CoreError> {
         let text = self.text_now(doc)?;
+        eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+            Self::parameters_of(doc, &text, overrides)
+        })
+    }
+
+    fn parameters_of(
+        doc: &Path,
+        text: &[u8],
+        overrides: &[(String, String)],
+    ) -> Result<Parameters, CoreError> {
         let program = lang::parse_file_annotated(doc.to_path_buf(), text.to_vec());
         let mut params = Parameters::from_ast(&program.ast, &mut Vec::new());
         if !overrides.is_empty() {

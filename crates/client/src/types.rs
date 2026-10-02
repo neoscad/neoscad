@@ -300,6 +300,15 @@ pub struct ResourceLimits {
     pub rands: Option<u64>,
     /// Triangles (2D: vertices) of one geometry result.
     pub triangles: Option<u64>,
+    /// User modules (with the heap evaluator, user function calls too)
+    /// in progress inside one another before evaluation stops with
+    /// OpenSCAD's "Recursion detected" error. Unlike the others, `None`
+    /// is the default (`eval::limits::DEFAULT_DEPTH`, 100,000), not
+    /// unlimited: this limit cannot be turned off, or `module m() m();`
+    /// would run until the memory is gone. Absent from a JSON request is
+    /// `None`, so the web worker's older pages still parse.
+    #[serde(default)]
+    pub depth: Option<u64>,
 }
 
 impl From<session::Limits> for ResourceLimits {
@@ -313,6 +322,7 @@ impl From<session::Limits> for ResourceLimits {
             string: l.string,
             rands: l.rands,
             triangles: l.triangles,
+            depth: l.depth,
         }
     }
 }
@@ -320,13 +330,19 @@ impl From<session::Limits> for ResourceLimits {
 impl ResourceLimits {
     /// The session's limits, or why these are not valid: a time that is
     /// not a positive, finite number of seconds would make every request
-    /// fail at once (or never time out), which is a caller's bug.
+    /// fail at once (or never time out), and a depth of 0 every module
+    /// call, which is a caller's bug.
     pub fn to_session(self) -> Result<session::Limits, CoreError> {
         if let Some(t) = self.time_seconds
             && !(t.is_finite() && t > 0.0)
         {
             return Err(CoreError::InvalidArgument {
                 message: format!("time_seconds must be a positive number (got {t})"),
+            });
+        }
+        if self.depth == Some(0) {
+            return Err(CoreError::InvalidArgument {
+                message: "depth must be at least 1 (None is the default)".into(),
             });
         }
         Ok(session::Limits {
@@ -338,9 +354,7 @@ impl ResourceLimits {
             string: self.string,
             rands: self.rands,
             triangles: self.triangles,
-            // The counted depth limit keeps its default: the apps' limits
-            // record does not carry it yet (docs/followups.md).
-            depth: None,
+            depth: self.depth,
         })
     }
 }

@@ -141,6 +141,15 @@ lead them, come roughly in order of user impact.
   under limits. Memory and time are not re-checked on a hit (it
   allocates and takes nothing). (8f)
 
+- **`aRunawayModelStopsAtTheDeadline` (apple/Tests/QuickLookTests.swift)
+  fails now and then under heavy machine load** (load average ~40, seen
+  2026-10-02): the core answers at about 1 s without `timedOut`, so it
+  stopped for a reason other than the 1 s watchdog, before it. It passed
+  5 of 5 runs once the load eased; the note it returns was not captured.
+  Next time it fails, print `r.notes` (the test's `#expect` comment) to
+  see which limit tripped. Suspect the 512 MiB memory limit measured
+  against the test process while parallel tests render.
+
 ## Performance
 
 - **A stack-independent evaluator (owner decision, 2026-10-01: do it
@@ -211,25 +220,41 @@ lead them, come roughly in order of user impact.
     recursive evaluator.
 
   Left from stage 1:
-  - the apps' `ResourceLimits` record (`crates/client/src/types.rs`)
-    does not carry `depth`, so the app always uses the default; adding it
-    changes the Swift, C# and Kotlin bindings;
-  - the heap frames are not charged to the memory estimate
-    (`limits::live`): at the default depth a module recursion holds about
-    100 MB of contexts and frames that `--limit memory` does not see (a
-    function recursion 41 MB, one through a comprehension 100 MB, since
-    stage 2);
-  - the evaluator's start, `Unit::add_scope` (`crates/eval/src/eval.rs`),
-    recurses on source nesting, like the parser and the lowering. The
-    parser's nesting limit (`lang::syntax::parser::NESTING_LIMIT`: 5,000
-    natively, 320 on wasm32) now bounds all three, and natively a
-    program at the limit evaluates on the evaluator's stack
-    (`crates/eval/tests/deep_source.rs`). It is still what sets that
-    limit: a release build overflowed 80 MiB at about 26,000 levels of
-    `translate()`, a test build between 3,600 and 3,800 (hence a native
-    test build's limit of 2,500), while parsing and lowering took 800
-    bytes a level. Iterative, it would let the limit rise towards
-    OpenSCAD's (its parser stops at 99,997 levels);
+  - Done: the apps' `ResourceLimits` record (`crates/client/src/types.rs`,
+    declared to UniFFI in `crates/ffi/src/types.rs`) carries `depth`
+    (`None` the default, 0 refused), so the Swift and C# bindings have
+    it (both are generated at build time; there is no Kotlin binding),
+    and the web protocol's `ResourceLimits` takes it too
+    (`docs/web-protocol.md`). Nothing in the apps sets it yet.
+    `web/src/engine/mock-core.js`'s limits object does not list it.
+  - Done: the heap frames are charged to the memory estimate
+    (`Evaluator::held_bytes`, read at the periodic limit check, O(1)):
+    contexts in use, the statement and expression frames and their side
+    stacks. The estimate's smallest passing `--limit memory` at 90,000
+    levels (release, no host probe) went from 87 MiB (nodes only) to
+    191 MiB for a module recursion through `if` (205 MB peak resident),
+    from 1 to 24 MiB for a function (38 MB) and from 1 to 54 MiB for a
+    function through a comprehension (92 MB); `crates/eval/tests/
+    memory_limit.rs`, `deep_recursions_count_their_frames`. The native
+    hosts' probe (`crates/cli/src/memory.rs`) measured them all along.
+  - Closed: the evaluator's start, `Unit::add_scope`
+    (`crates/eval/src/eval.rs`), recurses on source nesting, like the
+    parser and the lowering, and the parser's nesting limit
+    (`lang::syntax::parser::NESTING_LIMIT`: 5,000 natively, 320 on
+    wasm32) bounds all three. At the limit it fits with room: natively,
+    `Unit::new` on 4,990 levels of `translate()` overflowed a 1 MiB
+    thread and fit in 2 MiB (release), against the evaluator's 80 MiB
+    (`crates/eval/tests/deep_source.rs` evaluates every kind of nesting at
+    the limit on it); in node 18, `scripts/wasm-check.sh --depths` parses
+    and evaluates seven kinds of source nesting up to the limit (315
+    levels of `translate()` evaluate, 316 end in "Parser error: memory
+    exhausted") with no trap. By the native
+    measure `add_scope` would take about 10 MiB at 26,000 levels, so what
+    overflowed 80 MiB there was the evaluation, not `add_scope`. In
+    WebKit the parser overflows first (about 200 levels; see the WebKit
+    entry under the web core), so `add_scope` is not what any host's
+    limit is sized by. Iterative, it would only matter together with an
+    iterative parser and lowering;
   - which `--trace-usermodule-parameters` lines print `...` near the
     recursion limit, and how much of a nested value a trace prints deep
     in a module recursion, now follow the counted depth
@@ -411,15 +436,16 @@ lead them, come roughly in order of user impact.
   (`perf-opportunities.md` P7, within 2% on six kernel-bound models,
   identical output). A kernel gain there needs hand-written `v128` code;
   relaxed SIMD would give up bit-identical results.
-- **Nested list literals take memory with the square of their depth to
-  evaluate.** `x = [[[...1...]]];` peaked at 33 MB at 1,000 levels,
-  495 MB at 4,000 and 1.1 GB at 6,000 (`neoscad -o x.echo`, release),
-  and `--limit memory=1024` did not stop it; the `.ast` export of the
-  same file stays small, so it is the evaluator. The parser's nesting
-  limit (5,000) caps it, at about 750 MB by that trend; with no limit, 512,000 levels
-  had reached 6.4 GB when stopped. Other nestings (statements,
-  parentheses, operator chains, `let`, comprehensions) stayed under
-  60 MB at 8,000 levels.
+- **Fixed: nested list literals took memory with the square of their
+  depth to evaluate.** `x = [[[...1...]]];` peaked at 33 MB at 1,000
+  levels, 495 MB at 4,000 and 1.1 GB at 6,000 (`neoscad -o x.echo`,
+  release), and `--limit memory=1024` did not stop it. The cause was the
+  evaluator's start building every list literal's constant value
+  (`Unit::consts`, kept so hot loops do not rebuild literals) afresh,
+  copying each nested level once per level above it. `const_values`
+  now builds each once, sharing the inner lists, with a stack of its own:
+  4,000 levels peak at 9 MB and 4,900 (the parser's limit) at 10 MB,
+  the output unchanged.
 
 ## Parity
 - `manifold-rust` 0.13.1 ports Manifold v3.5.0; OpenSCAD pins v3.5.2.
@@ -883,14 +909,22 @@ lead them, come roughly in order of user impact.
   - The intents run on the app's shared core, whose limits are
     `Limits::AGENT` because nothing in the app changes them; a future
     limits preference would reach the intents too.
-- The customizer's parse runs on the caller's thread: `Core::parameters`
-  (`crates/ffi/src/document.rs`) calls `client`'s `customizer()`, which
-  parses and lowers the document with no `eval::with_stack` around it,
-  unlike `LanguageServer::handle`. A dispatch queue's thread has 512
-  KiB, and at the parser's nesting limit (5,000 levels of `translate()`)
-  parsing and lowering take 3.9 MB, so a deeply nested document can
-  overflow the app's stack there. The Linux and Windows apps call the
-  same `client` code.
+- Fixed: the customizer's parse ran on the caller's thread (a dispatch
+  queue's 512 KiB in the macOS app), and a document at the parser's
+  nesting limit overflowed it. `client`'s `customizer()` now parses on
+  the evaluator's stack, for every app. The audit of the other entry
+  points found three more that parse on the caller's stack, now on the
+  evaluator's too: `LanguageServer::publish_diagnostics` and the
+  diagnostics `run_document` hands the language server
+  (`lsp::Server::supply`), both of which parse the document for its
+  markers when `handle` has not (and the Linux app's `Language::supply`),
+  and `neoscad serve`'s request threads, where `format`, `docs` and
+  `test` parse (`format` overflowed 2 MiB at the limit). Freeing a
+  parsed document recurses too: a release build freeing a language
+  server at the limit needed between 256 and 512 KiB, so the core and
+  the language server free what they hold on a thread of their own
+  (`crates/ffi/src/lib.rs`, `FreedDeep`). Tested on a 512 KiB thread in
+  `crates/client/src/tests.rs` and `crates/ffi/src/tests.rs`.
 
 ## Language server
 - `neoscad lsp --stdio`'s diagnostics are the session's parse and
@@ -1267,12 +1301,16 @@ lead them, come roughly in order of user impact.
   entries, only a note naming the `--enable` flag that turns them on
   (or that neoscad lacks it). (7b-2)
 - `neoscad fmt` on deeply nested source needs memory with the square of
-  the depth, from the indentation: at the parser's limit (5,000 levels)
-  it peaked at 236 MB for `translate()` chains, 362 MB for blocks and
-  622 MB for nested comprehensions. It runs on the main thread (8 MiB),
-  not the evaluator's: at the limit that held in a release build, but
-  without the limit it overflowed between 8,000 and 10,000 levels of
-  `(`.
+  the depth, from the indentation. That is the output's own size, so it
+  cannot be linear: at 4,990 levels (the parser's limit) the output is
+  96 MB for blocks and 240 MB for `translate()` chains, each line
+  indented by its level, and formatting peaked at 358 MB and 859 MB
+  (release, macOS arm64). Where the rest of the peak (3.6 times the
+  output) goes was not measured; `fmt` also parses its output again to
+  check the program is unchanged. It runs on the main thread (8 MiB), not the
+  evaluator's: at the limit that held in a release build (a 2 MiB thread
+  overflowed), but without the limit it overflowed between 8,000 and
+  10,000 levels of `(`.
 
 ## Fonts
 - Fontconfig's system configuration is not consulted, so names the

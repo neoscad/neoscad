@@ -278,7 +278,13 @@ impl Core {
                     if early.as_ref() == Some(&diags) {
                         Vec::new()
                     } else {
-                        l.server.supply(self.session(), &doc, text.clone(), diags)
+                        // Publishing parses the document (and its
+                        // includes) for the markers' positions when the
+                        // server has not yet: the evaluator's stack, not
+                        // the caller's dispatch queue.
+                        eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+                            l.server.supply(self.session(), &doc, text.clone(), diags)
+                        })
                     }
                 }
                 None => Vec::new(),

@@ -71,9 +71,11 @@ pub struct SyntaxError {
 ///   overflowed between 8,000 and 10,000 levels of `(`;
 /// - with an evaluator's 80 MiB (`eval::DEFAULT_THREAD_STACK`), a program
 ///   overflowed at 26,000 levels of `translate()`, and at over 150,000 of
-///   `{` or `(`;
-/// - nested list literals take memory with the square of their depth to
-///   evaluate (1.1 GB at 6,000 levels).
+///   `{` or `(`; the evaluator's start (`Unit::add_scope`) took between 1
+///   and 2 MiB at this limit's 5,000 levels of `translate()`;
+/// - `neoscad fmt`'s output is quadratic in the depth (each line indented
+///   by its level): 240 MB for 5,000 levels of `translate()`, formatted
+///   in 860 MB.
 #[cfg(all(not(target_arch = "wasm32"), not(debug_assertions)))]
 pub const NESTING_LIMIT: u32 = 5_000;
 

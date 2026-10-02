@@ -136,6 +136,35 @@ fn limits_start_at_the_agent_defaults_and_can_be_lowered() {
     ));
 }
 
+/// The record carries the counted depth limit: `None` is the default, a
+/// number stops a recursion that deep with OpenSCAD's error, 0 is refused.
+#[test]
+fn the_depth_limit_reaches_the_evaluator() {
+    let c = core();
+    assert_eq!(c.limits().unwrap().depth, None);
+    with_text(
+        &c,
+        "module m(n) { if (n > 0) m(n - 1); else cube(1); }\nm(50);\n",
+    );
+    let r = c.render(DOC.into(), RenderMode::Render).unwrap();
+    assert!(!r.console.contains("Recursion detected"), "{}", r.console);
+    let mut low = c.limits().unwrap();
+    low.depth = Some(20);
+    c.set_limits(low).unwrap();
+    assert_eq!(c.limits().unwrap().depth, Some(20));
+    with_text(
+        &c,
+        "module m(n) { if (n > 0) m(n - 1); else sphere(1); }\nm(50);\n",
+    );
+    let r = c.render(DOC.into(), RenderMode::Render).unwrap();
+    assert!(r.console.contains("Recursion detected"), "{}", r.console);
+    low.depth = Some(0);
+    assert!(matches!(
+        c.set_limits(low),
+        Err(CoreError::InvalidArgument { .. })
+    ));
+}
+
 #[test]
 fn snapshots_are_png() {
     let c = core();
@@ -253,4 +282,72 @@ fn language_server_over_the_core() {
             .iter()
             .any(|d| path.starts_with(d.as_str()))
     );
+}
+
+/// Every entry point that parses runs on a thread with the evaluator's
+/// stack, so the app may call it from a dispatch queue (512 KiB) with a
+/// document nested as deep as the parser allows: the customizer, the
+/// document run with its markers, and the language server's handling and
+/// publishing; and freeing the language servers and the core, which hold
+/// the parsed document ([`FreedDeep`]). Each of these overflowed the
+/// caller's stack in a test build before it had a thread of its own.
+#[test]
+fn deep_documents_on_a_dispatch_queues_stack() {
+    let n = lang::syntax::parser::NESTING_LIMIT as usize - 10;
+    let text = format!(
+        "w = 2; // [1:10]\n{}cube(w);\n",
+        "translate([0, 0, 1]) ".repeat(n)
+    );
+    let c = core();
+    with_text(&c, &text);
+    let uri = format!("file://{DOC}");
+    let open = |ls: &LanguageServer| {
+        for m in [
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+                "textDocument": {"uri": uri, "languageId": "openscad", "version": 1, "text": text}}}),
+        ] {
+            ls.handle(m.to_string()).unwrap();
+        }
+    };
+    fn small<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+        std::thread::scope(|s| {
+            std::thread::Builder::new()
+                .stack_size(512 << 10)
+                .spawn_scoped(s, f)
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+    }
+    small(|| {
+        let groups = c.parameters(DOC.into()).unwrap();
+        assert_eq!(groups[0].parameters[0].name, "w");
+    });
+    // The server evaluates for its markers.
+    let ls = c.clone().language_server(false).unwrap();
+    small(|| {
+        open(&ls);
+        let pubs = ls.publish_diagnostics().unwrap();
+        assert!(pubs[0].contains("\"version\":1"), "{pubs:?}");
+        drop(ls);
+    });
+    // The document run hands its diagnostics to the server.
+    let ls = c.clone().language_server(true).unwrap();
+    small(|| {
+        open(&ls);
+        let request = DocumentRequest {
+            mode: RenderMode::Preview,
+            overrides: Vec::new(),
+            parts: false,
+            enable: Vec::new(),
+        };
+        let r = c
+            .run_document(DOC.into(), request, None, Some(ls.clone()), None)
+            .unwrap();
+        assert_eq!(r.render.exit_code, 0, "{:?}", r.console);
+        assert!(r.language[0].contains("\"version\":1"), "{:?}", r.language);
+        drop(ls);
+    });
+    small(move || drop(c));
 }

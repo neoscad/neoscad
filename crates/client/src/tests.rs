@@ -109,6 +109,38 @@ fn overrides_run_as_assignments_and_bad_ones_are_dropped() {
     assert!((g.volume.unwrap() - 27.0).abs() < 1e-9);
 }
 
+/// The customizer reads a document nested as deep as the parser allows
+/// from a thread with a dispatch queue's 512 KiB of stack, as the macOS
+/// app asks for it: parsing runs on a thread of its own
+/// (`Client::customizer`). On the caller's stack it overflowed.
+#[test]
+fn customizer_parses_deep_documents_on_a_small_stack() {
+    let n = lang::syntax::parser::NESTING_LIMIT as usize - 10;
+    let text = format!(
+        "w = 2; // [1:10]\n{}cube(w);\n",
+        "translate([0, 0, 1]) ".repeat(n)
+    );
+    let c = client();
+    c.open(DOC, Some(text)).unwrap();
+    let c = &c;
+    let (groups, saved) = std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(512 << 10)
+            .spawn_scoped(s, || {
+                let groups = c.parameters(DOC).unwrap();
+                let saved = c
+                    .parameter_set_file(DOC, "/doc/main.json", "a", &[], false)
+                    .unwrap();
+                (groups, saved)
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    });
+    assert_eq!(groups[0].parameters[0].name, "w");
+    assert!(saved.contains("\"w\": \"2\""), "{saved}");
+}
+
 /// The JSON shapes `docs/web-protocol.md` promises.
 #[test]
 fn records_serialise_as_the_web_protocol_says() {

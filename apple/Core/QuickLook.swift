@@ -37,7 +37,7 @@ public enum QuickLookRender {
         (try? previewLimits())
             ?? ResourceLimits(
                 timeSeconds: 5, memoryBytes: 512 << 20, fragments: nil, slices: nil,
-                list: nil, string: nil, rands: nil, triangles: nil)
+                list: nil, string: nil, rands: nil, triangles: nil, depth: nil)
     }
 
     /// How long a request may take in all, drawing included. A little over

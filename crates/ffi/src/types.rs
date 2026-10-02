@@ -274,6 +274,12 @@ pub struct ResourceLimits {
     pub rands: Option<u64>,
     /// Triangles (2D: vertices) of one geometry result.
     pub triangles: Option<u64>,
+    /// User modules (with the heap evaluator, user function calls too)
+    /// in progress inside one another before evaluation stops with
+    /// OpenSCAD's "Recursion detected" error. Unlike the others, `None`
+    /// is the default (100,000), not unlimited: this limit cannot be
+    /// turned off. 0 is an invalid argument.
+    pub depth: Option<u64>,
 }
 
 pub use client::{console, diagnostics, geometry_stats};

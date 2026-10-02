@@ -247,6 +247,44 @@ fn values_under_the_limit_are_untouched() {
     assert_eq!(echoes, ["2, 2, 7164", "10000"]);
 }
 
+/// The heap evaluator's frames and contexts count: a deep recursion holds
+/// a set per level (300 bytes for a function, which makes no node or
+/// value, 900 through a comprehension), so 90,000 levels pass a 16 MiB
+/// limit that the estimate did not see at all, while 1,000 levels stay
+/// well under it.
+#[cfg(feature = "heap-eval")]
+#[test]
+fn deep_recursions_count_their_frames() {
+    const SMALL: u64 = 16 << 20;
+    let programs = |n: u32| {
+        [
+            format!("function f(n) = n > 0 ? 1 + f(n - 1) : 0;\necho(f({n}));\n"),
+            format!("function g(n) = n > 0 ? [for (i = [0]) g(n - 1)][0] : 0;\necho(g({n}));\n"),
+        ]
+    };
+    for src in programs(90_000) {
+        let r = run(&src, SMALL, true);
+        assert_eq!(
+            r.exceeded.as_ref().map(|e| e.limit),
+            Some(Limit::Memory),
+            "{src}: {:?}",
+            r.lines
+        );
+        assert!(r.ev.aborted, "{src}");
+        let limit = r
+            .lines
+            .iter()
+            .find(|(c, _)| *c == DiagCode::ResourceLimit)
+            .unwrap_or_else(|| panic!("{src}: no resource-limit error in {:?}", r.lines));
+        assert!(limit.1.contains("memory limit of 16 MiB"), "{}", limit.1);
+    }
+    for src in programs(1_000) {
+        let r = run(&src, SMALL, true);
+        assert!(r.exceeded.is_none(), "{src}: {:?}", r.lines);
+        assert_eq!(r.lines.len(), 1, "{src}: {:?}", r.lines);
+    }
+}
+
 /// A host's measurement ([`eval::limits::MemoryProbe`]) trips the memory
 /// limit wherever the guard checks, as a measured limit; under the limit
 /// it changes nothing. It is how the web core catches the kernel's working

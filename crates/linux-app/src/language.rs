@@ -158,10 +158,15 @@ impl Language {
         if self.is_stopped() {
             return;
         }
-        let out = self
-            .inner
-            .server
-            .supply(&self.inner.client.session, path, text, diagnostics);
+        // Publishing parses the document (and its includes) for the
+        // markers' positions when the worker has not yet, so it needs the
+        // evaluator's stack as the worker's `handle` does; the caller is
+        // a run's thread.
+        let out = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+            self.inner
+                .server
+                .supply(&self.inner.client.session, path, text, diagnostics)
+        });
         if !out.is_empty() && !self.is_stopped() {
             (self.inner.sink)(out);
         }

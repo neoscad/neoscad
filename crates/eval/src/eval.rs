@@ -76,9 +76,7 @@ impl<'a> Unit<'a> {
             res: crate::resolve::UnitRes::default(),
         };
         u.add_scope(&ast.root);
-        u.consts = (0..ast.exprs.len())
-            .map(|i| const_value(ast, ExprId(i as u32)))
-            .collect();
+        u.consts = const_values(ast);
         u
     }
 
@@ -128,27 +126,65 @@ impl<'a> Unit<'a> {
     }
 }
 
-/// The value of an expression that is the same every time and prints no
-/// warnings: literals and vectors of them. Ranges are excluded because a
-/// literal backwards range warns each time it is evaluated.
-fn const_value(ast: &Ast, id: ExprId) -> Option<Value> {
-    match &ast.expr(id).kind {
-        ExprKind::String(s) => Some(Value::Str(Str::new(s))),
-        ExprKind::Vector(items) if !items.is_empty() => {
-            let mut out = Vec::with_capacity(items.len());
-            for &e in items {
-                out.push(match &ast.expr(e).kind {
-                    ExprKind::Undef => Value::Undef,
-                    ExprKind::Bool(b) => Value::Bool(*b),
-                    ExprKind::Number(n) => Value::Number(*n),
-                    ExprKind::String(_) | ExprKind::Vector(_) => const_value(ast, e)?,
-                    _ => return None,
-                });
-            }
-            Some(Value::vector(out))
+/// The value of every expression that is the same every time and prints
+/// no warnings: literals and non-empty vectors of them. Ranges are
+/// excluded because a literal backwards range warns each time it is
+/// evaluated.
+///
+/// A vector's value holds its nested vectors' own values (shared, not
+/// rebuilt), and the walk keeps its own stack. Building each expression's
+/// value from scratch copied every nested level once per level above it,
+/// so `[[[...1...]]]` took memory and time with the square of its depth
+/// (1.1 GB at 6,000 levels, which `--limit memory` did not see), and
+/// recursing on the nesting took native stack in proportion to it.
+fn const_values(ast: &Ast) -> Vec<Option<Value>> {
+    // Per expression: `None` not reached yet, `Some(c)` done, `c` its
+    // constant if it has one.
+    let mut done: Vec<Option<Option<Value>>> = vec![None; ast.exprs.len()];
+    let nests = |e: ExprId| matches!(ast.expr(e).kind, ExprKind::String(_) | ExprKind::Vector(_));
+    // An expression, and whether its items are done.
+    let mut todo: Vec<(ExprId, bool)> = Vec::new();
+    for i in 0..ast.exprs.len() {
+        if done[i].is_some() {
+            continue;
         }
-        _ => None,
+        todo.push((ExprId(i as u32), false));
+        while let Some((id, items_done)) = todo.pop() {
+            let slot = id.0 as usize;
+            if done[slot].is_some() {
+                continue;
+            }
+            let value = match &ast.expr(id).kind {
+                ExprKind::String(s) => Some(Value::Str(Str::new(s))),
+                ExprKind::Vector(items) if !items.is_empty() && !items_done => {
+                    todo.push((id, true));
+                    todo.extend(
+                        items
+                            .iter()
+                            .filter(|&&e| nests(e) && done[e.0 as usize].is_none())
+                            .map(|&e| (e, false)),
+                    );
+                    continue;
+                }
+                ExprKind::Vector(items) if !items.is_empty() => items
+                    .iter()
+                    .map(|&e| match &ast.expr(e).kind {
+                        ExprKind::Undef => Some(Value::Undef),
+                        ExprKind::Bool(b) => Some(Value::Bool(*b)),
+                        ExprKind::Number(n) => Some(Value::Number(*n)),
+                        ExprKind::String(_) | ExprKind::Vector(_) => {
+                            done[e.0 as usize].clone().flatten()
+                        }
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<Value>>>()
+                    .map(Value::vector),
+                _ => None,
+            };
+            done[slot] = Some(value);
+        }
     }
+    done.into_iter().map(Option::flatten).collect()
 }
 
 /// Symbols the evaluator refers to by name.
@@ -357,6 +393,18 @@ impl Caps {
 /// `cube(1)` nodes in two nested loops peak at 337 MB, three million in
 /// three at 1.49 GB (about 500 bytes each).
 pub(crate) const NODE_BYTES: u64 = 512;
+
+/// Estimated bytes of one context in use, for the memory limit: the
+/// `Rc` allocation of a [`Ctx`] with its counts, and a small slot vector.
+const CTX_BYTES: u64 = std::mem::size_of::<Ctx>() as u64 + 16 + 64;
+
+/// Bytes of a vector's elements in use. Its length rather than its
+/// capacity: a buffer's unused tail is not touched, so it is not resident
+/// either, and counting capacities overestimated a module recursion's
+/// memory by a quarter.
+pub(crate) fn held<T>(v: &[T]) -> u64 {
+    std::mem::size_of_val(v) as u64
+}
 
 /// How many evaluator checks pass between looks at the clock and the
 /// memory estimate: a few milliseconds of evaluation at most.
@@ -657,7 +705,7 @@ impl<'a> Evaluator<'a> {
         let Some(g) = self.opts.guard.clone() else {
             return Ok(());
         };
-        crate::limits::live::beside(self.node_bytes());
+        crate::limits::live::beside(self.node_bytes() + self.held_bytes());
         let e = if g.over_time() {
             Some(g.time_exceeded())
         } else {
@@ -1175,13 +1223,45 @@ impl<'a> Evaluator<'a> {
     /// so they are counted from the node counter rather than charged one by
     /// one on a hot path.
     fn live_bytes(&self) -> u64 {
-        crate::limits::live::get().saturating_add(self.node_bytes())
+        crate::limits::live::get()
+            .saturating_add(self.node_bytes())
+            .saturating_add(self.held_bytes())
     }
 
     /// The nodes' share of [`Evaluator::live_bytes`].
     fn node_bytes(&self) -> u64 {
         let nodes = (self.node_index as u64).saturating_sub(1);
         nodes.saturating_mul(NODE_BYTES)
+    }
+
+    /// The evaluator's own stacks' share of [`Evaluator::live_bytes`]: the
+    /// contexts in use and, with the heap evaluator, its statement and
+    /// expression frames, which a deep recursion holds one set of per
+    /// level. Uncounted, a module recursion at the default depth limit
+    /// held over 100 MB, and a function recursion (which makes no nodes)
+    /// 30 MB, that the estimate did not see. Measured per level at
+    /// 90,000 levels (release, peak resident memory less the estimate's
+    /// nodes): 1.2 KB for a module through `if` (two contexts, six
+    /// statement frames, two nodes being filled), 300 bytes for a
+    /// function and 900 for one through a comprehension.
+    ///
+    /// Read in O(1) at the periodic limit checks: the stacks' lengths, and
+    /// the contexts on the context stack less the references to the
+    /// shared placeholder that calls without a context of their own push.
+    fn held_bytes(&self) -> u64 {
+        let shared = Rc::strong_count(&self.placeholder).saturating_sub(1);
+        let contexts = self.stack.len().saturating_sub(shared) as u64;
+        let n =
+            contexts * CTX_BYTES + held(&self.stack) + held(&self.regs) + held(&self.module_names);
+        #[cfg(feature = "heap-eval")]
+        let n = n
+            + held(&self.heap)
+            + held(&self.heap_nodes)
+            + held(&self.heap_out)
+            + held(&self.heap_indices)
+            + held(&self.heap_args)
+            + self.xs.held_bytes();
+        n
     }
 
     pub fn next_node_index(&mut self) -> usize {
@@ -2690,5 +2770,56 @@ pub(crate) fn swizzle(v: &Value, name: &str) -> Value {
     match name {
         "w" | "r" | "g" | "b" | "a" => ops::index(v, &Value::Number(index(b[0]))),
         _ => Value::Undef,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn consts_of(src: &str) -> Vec<Option<Value>> {
+        let program = lang::parse_file(PathBuf::from("/t.scad"), src.as_bytes().to_vec());
+        assert!(!program.has_syntax_errors());
+        const_values(&program.ast)
+    }
+
+    /// A nested list literal's constant holds its inner lists' constants
+    /// rather than copies of them: copies made the constants of
+    /// `[[[...1...]]]` take memory with the square of its depth.
+    #[test]
+    fn nested_constants_share_their_items() {
+        // Parsing recurses on the nesting: the evaluator's stack.
+        crate::with_stack(crate::DEFAULT_THREAD_STACK, nested_constants);
+    }
+
+    fn nested_constants() {
+        let n = 2_000;
+        let consts = consts_of(&format!("x = {}1{};", "[".repeat(n), "]".repeat(n)));
+        let own = |v: &Value| v.as_vector().map(|v| v.as_slice().as_ptr());
+        let mut lists: Vec<*const Value> = consts.iter().flatten().filter_map(own).collect();
+        assert_eq!(lists.len(), n);
+        lists.sort();
+        // Each list's one item but the innermost's is one of the lists.
+        let items = consts
+            .iter()
+            .flatten()
+            .filter_map(|v| own(v.as_vector()?.first()?));
+        assert_eq!(
+            items
+                .inspect(|p| assert!(lists.binary_search(p).is_ok()))
+                .count(),
+            n - 1
+        );
+    }
+
+    /// What is constant: literal strings and non-empty vectors of
+    /// literals; not an empty vector, a range, or a vector holding one.
+    #[test]
+    fn constants_are_literal_values() {
+        let consts =
+            consts_of("a = [1, \"s\", [true, undef]]; b = []; c = [[]]; d = [1:2]; e = [d];");
+        let shown: Vec<String> = consts.iter().flatten().map(|v| format!("{v:?}")).collect();
+        // `"s"`, `[true, undef]` and `a`'s list.
+        assert_eq!(shown.len(), 3, "{shown:?}");
     }
 }

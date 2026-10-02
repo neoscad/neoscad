@@ -19,7 +19,7 @@ use crate::{Core, CoreError, guarded};
 #[derive(Debug, uniffi::Object)]
 pub struct LanguageServer {
     pub(crate) core: Arc<Core>,
-    pub(crate) server: lsp::Server,
+    pub(crate) server: crate::FreedDeep<lsp::Server>,
 }
 
 #[uniffi::export]
@@ -40,7 +40,10 @@ impl Core {
                 ..lsp::Options::default()
             };
             let server = lsp::Server::with_cache(options, self.lsp_cache.clone());
-            Ok(Arc::new(LanguageServer { core: self, server }))
+            Ok(Arc::new(LanguageServer {
+                core: self,
+                server: crate::FreedDeep::new(server),
+            }))
         })
     }
 
@@ -87,7 +90,13 @@ impl LanguageServer {
         guarded(|| {
             let limits = self.core.client.current_limits();
             self.server.set_limits(Some(limits));
-            Ok(self.server.publish_diagnostics(self.core.session()))
+            // The evaluation has its own thread, but turning diagnostics
+            // into markers parses the document and its includes when
+            // `handle` has not yet, which needs the evaluator's stack as
+            // much as `handle` does.
+            Ok(eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+                self.server.publish_diagnostics(self.core.session())
+            }))
         })
     }
 }
