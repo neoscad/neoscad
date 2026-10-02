@@ -109,8 +109,14 @@ transcript audit read as a problem in its model.
 | `docs` | a builtin's reference, or with `path` a file's definitions; no name: the index | `name`, `full`, `verbose` (the whole index) |
 
 The server's `instructions` (sent once, at discovery or `initialize`)
-say when to use which: iterate on inline source, `evaluate` for errors,
-`render` for numbers, `snapshot` to see, `check` before finishing. The
+say when to use which: after an edit, one `check` (with `min_wall`)
+gives errors, warnings, echo, geometry and printability, with no
+`evaluate` or `render` first; independent calls go in parallel;
+`measure` for exact numbers, `snapshot` when the shape is in doubt;
+`render`'s `export` reports what it wrote. They used to list
+`evaluate`, `render`, `snapshot` and `check` in turn, and agents ran
+them one turn each after every edit; a turn costs seconds of model time
+and a re-read of the whole context, a tool call milliseconds. The
 tool list is 5,488 bytes of compact JSON as `[name, description, input
 schema]` arrays, which is what `crates/cli/tests/mcp.rs` measures and
 keeps under 5,500 bytes (each description under 300). What a client
@@ -154,7 +160,10 @@ The structured content has the diagnostics without spans
 or full text but with `column` (where the span starts; in the text,
 `inline.scad:1:11`), `file` only for an included file, the geometry object of
 `docs/cli-json.md`, findings without their bboxes, at most 20
-diagnostics and 20 echo lines. Every non-integer number in it has 6
+diagnostics and 20 echo lines. `check`, `snapshot` and `measure` carry
+the model's diagnostics and, when it echoed anything, its `echo` too
+(`check` used to keep both to its text, so a `check` read as
+warning-free to an agent shown the structured content). Every non-integer number in it has 6
 significant digits (render and snapshot used to give Manifold's 17,
 check 4 decimals and measure 6), and the text uses the same numbers;
 `verbose` keeps full precision. A finding's `fix` appears once per

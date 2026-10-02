@@ -693,6 +693,7 @@ impl Tools {
             "size": r["size"],
             "diagnostics": terse_diags(&log["diagnostics"], &main),
         });
+        put_echo(&mut s, &log["echo"]);
         for k in ["diff", "parts"] {
             if let Some(v) = r.get(k) {
                 s[k] = v.clone();
@@ -766,14 +767,21 @@ impl Tools {
         let log =
             json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"]});
         push_log(&mut text, &log);
-        let s = json!({
+        // The model's own warnings and echo go in the structured content
+        // too, not only the text: Claude Code shows an agent the structured
+        // content in place of the text, so a `check` without them read as
+        // warning-free, and agents ran `evaluate` or `render` as well after
+        // every edit to see them.
+        let mut s = json!({
             "exit_code": r["exit_code"],
             "ok": r["ok"],
             "counts": r["counts"],
             "model": model,
             "findings": terse_findings(&r["findings"]),
             "truncated": r["truncated"],
+            "diagnostics": terse_diags(&log["diagnostics"], &main),
         });
+        put_echo(&mut s, &log["echo"]);
         Ok(label(&imported, finish(args, text, s, r)))
     }
 
@@ -839,6 +847,7 @@ impl Tools {
             }
         }
         s["diagnostics"] = terse_diags(&log["diagnostics"], &main);
+        put_echo(&mut s, &log["echo"]);
         if let Some(e) = s.get("error").and_then(Value::as_str) {
             s["error"] = json!(crate::serve::param_names(e));
         }
@@ -1533,6 +1542,15 @@ fn terse_log(r: &Value, main: &Path) -> Value {
         "diagnostics": terse_diags(&r["diagnostics"], main),
         "echo": r["echo"].as_array().map(|e| e.iter().take(MAX_LINES).cloned().collect::<Vec<_>>()),
     })
+}
+
+/// The echo lines (at most [`MAX_LINES`]) in a terse result that builds
+/// geometry. Left out when there are none, so a model without `echo()`
+/// pays nothing for it in every `check`, `snapshot` and `measure`.
+fn put_echo(s: &mut Value, echo: &Value) {
+    if let Some(e) = echo.as_array().filter(|e| !e.is_empty()) {
+        s["echo"] = json!(e.iter().take(MAX_LINES).cloned().collect::<Vec<_>>());
+    }
 }
 
 /// The diagnostics and echo lines under a summary, at most

@@ -55,7 +55,12 @@ const TTL_MS: u64 = 3_600_000;
 
 /// Guidance for the model, sent once per session (legacy `initialize`,
 /// `server/discover`); the tool descriptions carry the rest.
-const INSTRUCTIONS: &str = "NeoSCAD is an OpenSCAD-compatible modeller. Iterate on inline `source` (no files needed): `evaluate` for errors and echo, `render` for size and volume, `snapshot` to see it, `check` for printability before you finish. Write the final model to a file yourself.";
+///
+/// It steers an agent towards one `check` per edit. An agent pays for
+/// every turn in model time and in re-reading its whole context, while the
+/// tools answer in milliseconds, so the wording avoids reading as a ladder
+/// of separate calls (evaluate, then render, then snapshot, then check).
+const INSTRUCTIONS: &str = "NeoSCAD is an OpenSCAD-compatible modeller; every tool answers in milliseconds. After writing or editing a model, one `check` (with the spec's minimum wall as `min_wall`) reports its errors, warnings and echo, bbox, volume, manifold and printability findings, so there is no need to `evaluate` or `render` first. Call tools on independent files or questions in parallel. `measure` gives exact numbers (sections, distances); `snapshot` shows the shape when it is in doubt. `render` with `export` writes the file and reports its path and size. A model is a file you write (`path`) or inline `source`.";
 
 /// What `--browser` adds to [`INSTRUCTIONS`].
 const BROWSER_INSTRUCTIONS: &str = " The user may have NeoSCAD's web page open: browser_connect gives the link that connects it. Once it is connected, work on the page's text rather than files: omit path and source to use it, change it with editor_edit (the user sees each change), look with view_capture and point with view_annotate.";

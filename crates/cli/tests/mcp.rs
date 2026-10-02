@@ -577,6 +577,41 @@ fn inside_out_polyhedra_are_named_in_render_evaluate_and_check() {
 }
 
 #[test]
+fn check_snapshot_and_measure_carry_warnings_and_echo_in_structured_content() {
+    // Claude Code shows an agent the structured content in place of the
+    // text, so warnings and echo only in the text are invisible to it: a
+    // `check` read as warning-free and agents ran `render` as well to see
+    // them.
+    let dir = scratch("check-log");
+    let src = "echo(a = 1);\ncub(3);\ncube(10);\n";
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("check", json!({"source": src}));
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["diagnostics"][0]["code"], "unknown-module", "{sc}");
+    assert_eq!(sc["diagnostics"][0]["line"], 2, "{sc}");
+    assert_eq!(sc["echo"], json!(["ECHO: a = 1"]), "{sc}");
+    for (tool, args) in [
+        (
+            "snapshot",
+            json!({"source": src, "views": ["iso"], "size": "64x64"}),
+        ),
+        ("measure", json!({"source": src})),
+    ] {
+        let r = s.tool(tool, args);
+        assert_eq!(
+            r["structuredContent"]["echo"],
+            json!(["ECHO: a = 1"]),
+            "{tool}: {r}"
+        );
+    }
+    // Nothing echoed, no `echo` key: it would cost every call a few tokens.
+    let r = s.tool("check", json!({"source": "cube(10);"}));
+    let sc = &r["structuredContent"];
+    assert!(sc.get("echo").is_none(), "{sc}");
+    assert_eq!(sc["diagnostics"], json!([]), "{sc}");
+}
+
+#[test]
 fn parallel_calls_on_one_file_both_answer() {
     // An agent's parallel calls are both wanted: unlike an editor's, a
     // newer one must not cancel an older one on the same document.
