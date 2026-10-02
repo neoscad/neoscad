@@ -733,15 +733,10 @@ lead them, come roughly in order of user impact.
 
 - Updates (Sparkle; `docs/release.md`, "The macOS app's updates"), left
   after the first version:
-  - The owner hasn't created the EdDSA key yet. Until
-    `NEOSCAD_SPARKLE_PUBLIC_KEY` (`apple/project.yml`) and the secret
-    `SPARKLE_ED_PRIVATE_KEY` are set, `release.sh` refuses to notarize,
-    so the release's `app` job fails and the release stays a prerelease
-    without its app.
-  - The `appcast` job in `update-feed.yml` has passed actionlint only.
-    Its first real run is after the key exists. `appcast.py`'s
-    `--require-notarized` path (Gatekeeper on the DMG and the app) has
-    not run on a notarized DMG.
+  - Done since: the key exists (2026-10-02), the `appcast` job has run
+    for v0.3.0-rc.1, v0.3.0 and v0.3.1 with `--require-notarized` on
+    their notarized DMGs, and an installed 0.3.0 updated itself to 0.3.1
+    (docs/audits/auto-update.md, step 3).
   - The update dialog shows a heading and a link to the GitHub release,
     not the notes themselves. Sparkle could show the release body as
     HTML, embedded in the signed appcast; that needs Markdown to HTML in
