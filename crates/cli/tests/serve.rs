@@ -301,6 +301,26 @@ fn neoscad(dir: &Path, socket: Option<&Path>, args: &[&str]) -> Output {
 
 /// stderr without the render summary's cache count and time, which are
 /// the server's (warm) rather than a fresh process's.
+/// A 3MF file's entries, in order, with the `CreationDate` metadata's
+/// value masked.
+fn threemf_entries(bytes: Vec<u8>) -> Vec<(String, String)> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("a zip");
+    (0..zip.len())
+        .map(|i| {
+            let mut entry = zip.by_index(i).expect("an entry");
+            let mut text = String::new();
+            entry.read_to_string(&mut text).expect("UTF-8 text");
+            const DATE: &str = "<metadata name=\"CreationDate\" preserve=\"1\">";
+            if let Some(start) = text.find(DATE).map(|i| i + DATE.len())
+                && let Some(len) = text[start..].find('<')
+            {
+                text.replace_range(start..start + len, "*");
+            }
+            (entry.name().to_string(), text)
+        })
+        .collect()
+}
+
 fn comparable(stderr: &[u8]) -> String {
     String::from_utf8_lossy(stderr)
         .lines()
@@ -420,12 +440,13 @@ fn served_outputs_are_the_direct_ones() {
                     std::fs::read(d.join(&out_direct)).ok(),
                     std::fs::read(d.join(&out_served)).ok(),
                 );
-                // 3MF files carry a creation date; the rest must match
-                // byte for byte.
+                // 3MF files carry a creation date, and their entries are
+                // compressed, so a different date can change the file's
+                // length: compare the entries with the date masked.
                 if *f != "3mf" {
                     assert_eq!(x, y, "{what}");
                 } else {
-                    assert_eq!(x.map(|v| v.len()), y.map(|v| v.len()), "{what}");
+                    assert_eq!(x.map(threemf_entries), y.map(threemf_entries), "{what}");
                 }
                 let _ = std::fs::remove_file(d.join(&out_direct));
                 let _ = std::fs::remove_file(d.join(&out_served));

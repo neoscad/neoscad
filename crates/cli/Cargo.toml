@@ -132,3 +132,4 @@ todo = "warn"
 
 [dev-dependencies]
 png.workspace = true
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
