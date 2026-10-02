@@ -43,6 +43,42 @@ export function browserName(ua = "") {
   return "a browser";
 }
 
+/// The names of the permission that lets an https page reach 127.0.0.1,
+/// newest first: Chrome 145 split "local-network-access" (Chrome 142-144,
+/// still an alias) into "local-network" and "loopback-network", and only
+/// the loopback one matters for the bridge.
+export const LOOPBACK_PERMISSIONS = ["loopback-network", "local-network-access"];
+
+/// Whether the browser says it will refuse the page a connection to
+/// 127.0.0.1 (the user said no to Chrome's or Edge's prompt before). The
+/// direct attempt would then fail at once, and only after the page has
+/// shown "Connecting…" and told the user to choose Allow in a prompt that
+/// never comes. A name the browser does not know makes `query` throw
+/// (Firefox before 153, Safari), and no answer at all counts as not
+/// denied: the direct attempt is still the one to try.
+export async function loopbackDenied(permissions = globalThis.navigator?.permissions) {
+  for (const name of LOOPBACK_PERMISSIONS) {
+    try {
+      const status = await permissions.query({ name });
+      return status?.state === "denied";
+    } catch {
+      // Not this browser's name for it; try the next.
+    }
+  }
+  return false;
+}
+
+/// How to let the page connect directly next time, for Chrome and Edge
+/// (the browsers whose site settings have the switch), or null. Chrome 145
+/// renamed the setting "Local network access" to "Apps on device" when it
+/// split it.
+export function allowDirectHint(ua = "") {
+  if (!/Chrome\/|Edg\//.test(ua) || /Firefox\/|OPR\//.test(ua)) return null;
+  const major = Number(ua.match(/(?:Edg|Chrome)\/(\d+)/)?.[1] ?? 0);
+  const setting = major && major < 145 ? "Local network access" : "Apps on device";
+  return `To connect directly next time: click the icon at the left of the address bar, choose Site settings, and set “${setting}” to Allow.`;
+}
+
 /// A console line (the panels' `{kind, text, location}`) as the agent
 /// reads it: 1-based line, and the file only when it is not the document.
 export function agentLine(l, docPath) {

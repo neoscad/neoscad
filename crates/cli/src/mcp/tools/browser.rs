@@ -17,7 +17,7 @@ use lang::source::SourceFile;
 use serde_json::{Value, json};
 
 use super::{Label, Model, Out, Reply, Tools, bool_arg, check_text, num, scad_string, str_arg};
-use crate::mcp::bridge::{Bridge, NOT_CONNECTED, open_in_browser};
+use crate::mcp::bridge::{Bridge, MAX_WAIT, NOT_CONNECTED, open_in_browser};
 
 /// The browser tools, in the order `tools/list` gives them (after the
 /// model tools).
@@ -74,8 +74,9 @@ pub fn list() -> Vec<Value> {
     vec![
         tool(
             "browser_connect",
-            "A link that connects the user's NeoSCAD web page (neoscad.org/try); give it to them. Once connected, tools given no path or source use the page's text, and the editor, view and console tools act on the page.",
-            json!({"open": {"type": "boolean", "description": "Also open it in their browser"}}),
+            "A link that connects the user's NeoSCAD web page (neoscad.org/try); give it to them, then call again with wait_seconds to wait for the page rather than polling. Once connected, the editor, view and console tools act on the page.",
+            json!({"open": {"type": "boolean", "description": "Also open it in their browser"},
+                   "wait_seconds": {"type": "number", "description": "Wait up to this long (max 120) for the page"}}),
             true,
         ),
         tool(
@@ -382,19 +383,42 @@ fn connect(b: &Bridge, args: &Value) -> Reply {
     } else {
         String::new()
     };
-    let text = match b.tab() {
+    // Negative, NaN or missing is no wait; MAX_WAIT caps the rest, so a
+    // call cannot park a thread for ever.
+    let wait = args["wait_seconds"]
+        .as_f64()
+        .filter(|s| *s > 0.0)
+        .map_or(Duration::ZERO, |s| {
+            Duration::from_secs_f64(s.min(MAX_WAIT.as_secs_f64()))
+        });
+    let tab = if wait.is_zero() {
+        b.tab()
+    } else {
+        b.wait_for_tab(wait)
+    };
+    let text = match tab {
         Some(t) => format!(
             "Connected: the web page's {} in {} ({}). To connect another tab (it replaces this one), open: {link}{opened}",
             t.hello["file"].as_str().unwrap_or("document"),
             t.hello["browser"].as_str().unwrap_or("a browser"),
             if t.via == "relay" {
-                "through its connection window"
+                // Closing the relay window is how the user disconnects, so
+                // a window closed by mistake looks like a page that went
+                // away; saying so up front lets the agent warn them.
+                "through its connection window: tell the user to keep that small window open, since closing it disconnects"
             } else {
                 "directly"
             },
         ),
         None => format!(
-            "Not connected yet. Give the user this link to open in a desktop browser (Chrome, Edge, Firefox or Safari), or to paste into the page's \"Connect your AI agent\" panel: {link}{opened}"
+            "Not connected{}. Give the user this link to open in a desktop browser (Chrome, Edge, Firefox or Safari), or to paste into the page's \"Connect your AI agent\" panel: {link}{opened}\n\
+             If the page says it cannot reach neoscad directly, tell the user to click \"Open a connection window\" there. \
+             Then call browser_connect with wait_seconds (up to 120) to wait for the page instead of calling it repeatedly.",
+            if wait.is_zero() {
+                " yet".to_string()
+            } else {
+                format!(" after waiting {} s", wait.as_secs())
+            },
         ),
     };
     text_out(text)
@@ -875,6 +899,23 @@ mod tests {
         assert!(offset_of(&sf, text, 2, 7).unwrap_err().contains("inside"));
         assert!(offset_of(&sf, text, 4, 1).unwrap_err().contains("3 lines"));
         assert!(offset_of(&sf, text, 0, 1).is_err());
+    }
+
+    #[test]
+    fn connect_waits_when_asked_and_says_what_to_tell_the_user() {
+        let b = Bridge::start(crate::mcp::bridge::DEFAULT_PAGE).unwrap();
+        let text = connect(&b, &json!({})).unwrap().text;
+        assert!(text.starts_with("Not connected yet."), "{text}");
+        assert!(text.contains("Open a connection window"), "{text}");
+        assert!(text.contains("wait_seconds"), "{text}");
+        let start = std::time::Instant::now();
+        let text = connect(&b, &json!({"wait_seconds": 0.2})).unwrap().text;
+        assert!(start.elapsed() >= Duration::from_millis(200));
+        assert!(text.starts_with("Not connected after waiting"), "{text}");
+        // A negative wait is no wait.
+        let start = std::time::Instant::now();
+        connect(&b, &json!({"wait_seconds": -5})).unwrap();
+        assert!(start.elapsed() < Duration::from_millis(150));
     }
 
     #[test]

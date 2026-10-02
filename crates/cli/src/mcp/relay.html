@@ -14,7 +14,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>NeoSCAD agent connection</title>
+<title>NeoSCAD ↔ your agent — keep this window open</title>
 <style>
   body { font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 1rem 1.2rem; }
   h1 { font-size: 1rem; margin: 0 0 0.4rem; background: linear-gradient(90deg, #07707c, #5a48e0 50%, #a3308f); -webkit-background-clip: text; background-clip: text; color: transparent; }
@@ -27,9 +27,9 @@
 </style>
 </head>
 <body>
-<h1>NeoSCAD agent connection</h1>
+<h1>NeoSCAD ↔ your agent</h1>
 <p id="state">Connecting…</p>
-<p>Keep this window open while your agent works in the NeoSCAD page. Close it to disconnect.</p>
+<p><strong>Keep this window open</strong> while your agent works in the NeoSCAD page: it carries the connection. Close it to disconnect.</p>
 <button id="stop" type="button">Disconnect</button>
 <script>
 "use strict";
@@ -48,6 +48,10 @@ if (!page) {
   ws.onopen = () => { show("Connected. Your agent can now work in the page.", "open"); tell({ event: "open" }); };
   ws.onmessage = (e) => tell({ event: "message", data: e.data });
   ws.onclose = (e) => {
+    // The title is what a user sees of this window in the tab strip or
+    // window list: it must stop saying "keep open" once there is nothing
+    // to keep.
+    document.title = "NeoSCAD ↔ your agent — disconnected";
     show("Disconnected" + (e.reason ? ": " + e.reason : "") + ". You can close this window.", "closed");
     tell({ event: "close", code: e.code, reason: e.reason });
   };

@@ -27,17 +27,36 @@ user's computer, so that process is the bridge. The tools are in
    opens it with `open: true`, or the server with `--open`). The user
    opens it, or pastes it into the dialog of a tab already open.
 3. The page reads the fragment and takes it out of the address bar at
-   once. It opens `ws://127.0.0.1:PORT/ws?token=TOKEN`.
+   once. It opens `ws://127.0.0.1:PORT/ws?token=TOKEN`, unless the
+   browser already reports the loopback permission as `denied`
+   (`navigator.permissions.query` for `loopback-network`, Chrome 145 and
+   later, then `local-network-access`, Chrome 142-144; a name the browser
+   does not know throws and counts as not denied). A denied permission
+   would fail the attempt anyway, so the page goes straight to step 4.
 4. If the browser will not allow that (below), the dialog says so and
-   offers **a connection window**. That button opens
+   offers **a connection window**. In Chrome and Edge it also says how to
+   allow the direct way next time (the icon at the left of the address
+   bar, Site settings, "Apps on device", or "Local network access" before
+   Chrome 145, set to Allow). The button opens
    `http://127.0.0.1:PORT/relay#TOKEN` as a popup: a page of the bridge's
    own, whose WebSocket is same-origin. It passes messages to and from the
-   tab with `postMessage`.
+   tab with `postMessage`. Its title and text say to keep it open while
+   the agent works and that closing it disconnects.
 5. The bridge sends `welcome` (the MCP client's name, so the page says
    "Claude Code connected"). The page sends `hello` (its file and
    browser). From then on the bridge sends requests (`read`, `edit`,
    `reveal`, `camera`, `capture`, `annotate`, `console`) and the page
    answers.
+
+The agent does not need to poll while the user opens the link:
+`browser_connect` with `wait_seconds` (at most 120) blocks until a tab has
+connected and said hello, or the time runs out. Without a tab, the other
+page tools wait up to 5 s for one (a reload, or a user still in the
+connection window) before answering with how to connect. When the page
+is not connected, `browser_connect` tells the agent what to pass on: to
+click "Open a connection window" if the page says it cannot reach
+neoscad directly. Connected through the window, it says the user must
+keep that window open.
 
 A reload reconnects directly with the tab's last link (sessionStorage,
 per tab). If that fails it stays quiet: the agent may be gone. A link with
@@ -81,6 +100,13 @@ Verified with Playwright 1.63 on macOS, on 2026-09-29, two ways:
 - **Served from 127.0.0.1** (`web/e2e/agent.spec.js`): every tool, the
   relay, approvals, replacement, light and dark, in Chromium, Firefox and
   WebKit, against both the mock build and the real engine and viewer.
+  One Chromium test makes the page a public site
+  (`--ip-address-space-overrides=127.0.0.1:PORT=public`): headless
+  Chromium 153 denies the direct socket, after which
+  `navigator.permissions.query` reports `denied` for both
+  `loopback-network` and `local-network-access`, and the next link goes
+  straight to the connection window without a direct attempt. Real Chrome
+  after a person clicks "Block" was not checked.
 
 | Browser | Direct `ws://127.0.0.1` from https://neoscad.org | Connection window | Verified |
 |---|---|---|---|

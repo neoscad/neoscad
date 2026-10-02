@@ -333,7 +333,7 @@ Without `--browser` none of this is listed or costs context.
 
 | Tool | What it does | Arguments |
 |---|---|---|
-| `browser_connect` | the link, and whether (and how) a page is connected | `open` |
+| `browser_connect` | the link, and whether (and how) a page is connected; what to tell the user | `open`, `wait_seconds` (wait up to this long, at most 120, for a page to connect) |
 | `editor_read` | the text with numbered lines, its `version`, the selection, customizer values, the last run's summary, errors and warnings | |
 | `editor_edit` | changes the text as one undoable step, highlighted in the editor; refuses a stale `version` | `version` (required), `edits`: `[{old, new}]` (unique match) or `[{at: [line, col, end_line, end_col], new}]`; or `text` (all of it) |
 | `editor_reveal` | selects and scrolls to a place, to show the user | `at` `[line, col?, end_line?, end_col?]` or `text` |
@@ -348,11 +348,11 @@ meet only through `lang::source`. A stale version, an `old` that occurs
 twice, overlapping edits, a column inside a character, and an edit the
 user rejects (the page's "Ask me before applying" switch) are `isError`
 results that say what to do next. With no page connected, the page tools
-answer with how to connect.
+wait up to 5 s for one, then answer with how to connect.
 
-The browser tools add 2,396 bytes to the tool list as the model sees it
-(`[name, description, input schema]`, compact JSON; 2,967 with the keys and
-annotations a client receives, roughly 600 to 850 tokens). The model tools
+The browser tools add 2,510 bytes to the tool list as the model sees it
+(`[name, description, input schema]`, compact JSON; 3,081 with the keys and
+annotations a client receives, roughly 630 to 880 tokens). The model tools
 stay at 5,488. `crates/cli/src/mcp/tools/browser.rs` keeps the browser
 tools under 2,600 and each description under 300; the instructions gain
 one sentence.

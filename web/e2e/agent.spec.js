@@ -69,7 +69,10 @@ const connected = (page) => expect(page.locator("html")).toHaveAttribute("data-a
 
 test("an agent reads, edits, sees and points at the page", async ({ page, browserName }) => {
   const link = await agent.link();
+  // The agent waits for the page in one call instead of polling.
+  const waited = agent.text("browser_connect", { wait_seconds: 25 });
   const { errors } = await open(page, link.slice("/try/".length));
+  expect(await waited).toMatch(/^Connected: the web page's \S+\.scad/);
   await connected(page);
   // The key leaves the address bar.
   expect(page.url()).not.toContain("connect=");
@@ -190,4 +193,56 @@ test("the dialog explains, in light and dark", async ({ page, browserName }) => 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await shot(page, `agent-button-dark-${browserName}`);
+});
+
+// What Chrome does for neoscad.org once the user has said no to "Apps on
+// device": the page is made a public site (as the real one is), so the
+// socket to 127.0.0.1 goes through Local Network Access, and headless
+// Chromium answers its prompt with "deny". The first link fails and
+// offers the window with the hint; after that the browser reports the
+// permission denied, and the next link skips the doomed attempt.
+test("a refused local network permission goes straight to the window", async ({ playwright, baseURL, browserName }) => {
+  test.skip(browserName !== "chromium", "Local Network Access is Chromium's");
+  const port = new URL(baseURL).port;
+  const browser = await playwright.chromium.launch({
+    channel: "chromium",
+    args: [`--ip-address-space-overrides=127.0.0.1:${port}=public`],
+  });
+  try {
+    // One context: the refusal is remembered per site, across its tabs.
+    const context = await browser.newContext({ viewport: { width: 1400, height: 860 } });
+    const blocked = [];
+    const newPage = async () => {
+      const p = await context.newPage();
+      p.on("console", (m) => /LOCAL_NETWORK_ACCESS/.test(m.text()) && blocked.push(m.text()));
+      return p;
+    };
+    let page = await newPage();
+    const link = (await agent.link()).slice("/try/".length);
+    await open(page, link);
+    await expect(page.locator("html")).toHaveAttribute("data-agent", "failed", { timeout: 15000 });
+    expect(blocked.length).toBeGreaterThan(0);
+    await expect(page.getByTestId("agent-allow-hint")).toContainText("Site settings");
+    expect(await page.evaluate(() => navigator.permissions.query({ name: "loopback-network" }).then((s) => s.state))).toBe("denied");
+
+    // The next link (a new tab: the same URL again would only change the
+    // fragment): no direct attempt, the window at once.
+    blocked.length = 0;
+    page = await newPage();
+    await open(page, link);
+    await expect(page.locator("html")).toHaveAttribute("data-agent", "failed");
+    await expect(page.getByTestId("agent-open")).toBeVisible();
+    expect(blocked).toEqual([]);
+    const waited = agent.text("browser_connect", { wait_seconds: 25 });
+    const popupOpened = page.waitForEvent("popup");
+    await page.getByTestId("agent-open").click();
+    const popup = await popupOpened;
+    await expect(popup).toHaveTitle(/keep this window open/);
+    await connected(page);
+    const text = await waited;
+    expect(text).toContain("through its connection window");
+    expect(text).toContain("keep that small window open");
+  } finally {
+    await browser.close();
+  }
 });

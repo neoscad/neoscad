@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -58,6 +58,12 @@ const POLL: Duration = Duration::from_millis(15);
 const MAX_MESSAGE: usize = 32 << 20;
 /// The close code a replaced tab gets (4000-4999 are the application's).
 const REPLACED: u16 = 4001;
+/// How long a request waits for a tab when none is connected: the user
+/// may be reloading the page, or still on the way through its connection
+/// window, and failing at once leaves the agent nothing to do but retry.
+const TAB_GRACE: Duration = Duration::from_secs(5);
+/// The most `browser_connect` waits for a tab (its `wait_seconds`).
+pub const MAX_WAIT: Duration = Duration::from_secs(120);
 
 /// The answer to a tool call that needs a tab when none is connected.
 pub const NOT_CONNECTED: &str = "no NeoSCAD web page is connected: call browser_connect and give the user its link to open (or paste into the page's \"Connect your AI agent\" panel)";
@@ -74,6 +80,9 @@ pub struct Bridge {
     page: String,
     page_origin: String,
     tab: Mutex<Option<Arc<Tab>>>,
+    /// Signalled with `tab` held whenever a tab connects, says hello or
+    /// goes, for the calls waiting for one ([`Bridge::wait_for_tab`]).
+    tab_changed: Condvar,
     generation: AtomicU64,
     next_id: AtomicU64,
     /// The MCP client's name (`initialize`'s `clientInfo`), for the page's
@@ -120,6 +129,7 @@ impl Bridge {
             page,
             page_origin,
             tab: Mutex::new(None),
+            tab_changed: Condvar::new(),
             generation: AtomicU64::new(0),
             next_id: AtomicU64::new(1),
             client: Mutex::new(None),
@@ -152,11 +162,74 @@ impl Bridge {
         })
     }
 
+    /// Wait up to `timeout` for a tab that has said hello (so its file and
+    /// browser are known), and give it. A tab that connected but has not
+    /// said hello by then is given as it is; none at all is `None`.
+    ///
+    /// This is what `browser_connect`'s `wait_seconds` blocks on, so an
+    /// agent waiting for the user to open the link makes one call instead
+    /// of calling it over and over while the user finds the window.
+    pub fn wait_for_tab(&self, timeout: Duration) -> Option<TabInfo> {
+        let deadline = Instant::now() + timeout.min(MAX_WAIT);
+        let mut tab = lock(&self.tab);
+        loop {
+            // `hello` is only ever locked after `tab` here, and `incoming`
+            // never holds both, so this order cannot deadlock.
+            if let Some(t) = tab.as_ref()
+                && lock(&t.hello).get("type").is_some()
+            {
+                break;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            tab = self
+                .tab_changed
+                .wait_timeout(tab, left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        tab.as_ref().map(|t| TabInfo {
+            via: t.via,
+            hello: lock(&t.hello).clone(),
+        })
+    }
+
+    /// The connected tab, waiting up to `timeout` for one to connect.
+    fn wait_for_socket(&self, timeout: Duration) -> Option<Arc<Tab>> {
+        let deadline = Instant::now() + timeout;
+        let mut tab = lock(&self.tab);
+        loop {
+            if let Some(t) = tab.as_ref() {
+                return Some(t.clone());
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            tab = self
+                .tab_changed
+                .wait_timeout(tab, left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Tell the waiting calls that the tab changed. Takes `tab`'s lock so
+    /// a waiter that has just checked and not yet slept cannot miss it.
+    fn tab_changed(&self) {
+        let _tab = lock(&self.tab);
+        self.tab_changed.notify_all();
+    }
+
     /// Ask the tab to do `method` and wait up to `timeout` for its answer.
-    /// An `Err` is a sentence for the agent.
+    /// With no tab, wait a few seconds for one first (a reload, or a user
+    /// still opening the connection window). An `Err` is a sentence for
+    /// the agent.
     pub fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
-        let tab = lock(&self.tab)
-            .clone()
+        let tab = self
+            .wait_for_socket(TAB_GRACE.min(timeout))
             .ok_or_else(|| NOT_CONNECTED.to_string())?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
@@ -328,10 +401,14 @@ impl Bridge {
             "via": via,
         });
         let _ = tab.out.send(Outgoing::Text(welcome.to_string()));
-        if let Some(old) = lock(&self.tab).replace(tab.clone()) {
-            let _ = old
-                .out
-                .send(Outgoing::Close(REPLACED, "another tab connected"));
+        {
+            let mut current = lock(&self.tab);
+            if let Some(old) = current.replace(tab.clone()) {
+                let _ = old
+                    .out
+                    .send(Outgoing::Close(REPLACED, "another tab connected"));
+            }
+            self.tab_changed.notify_all();
         }
         if let Err(e) = self.pump(&mut ws, &tab, &rx) {
             eprintln!("neoscad mcp: the web page's connection ended: {e}");
@@ -343,6 +420,7 @@ impl Bridge {
                 .is_some_and(|t| t.generation == tab.generation)
             {
                 *current = None;
+                self.tab_changed.notify_all();
             }
         }
         // Dropping the senders ends every wait on this tab at once.
@@ -411,6 +489,7 @@ impl Bridge {
             let _ = tx.send(reply);
         } else if msg["type"] == "hello" {
             *lock(&tab.hello) = msg;
+            self.tab_changed();
         }
     }
 }
@@ -658,5 +737,74 @@ mod tests {
             .unwrap_err();
         assert!(e.contains("browser_connect"), "{e}");
         assert!(b.tab().is_none());
+        assert!(b.wait_for_tab(Duration::from_millis(20)).is_none());
+    }
+
+    /// A stand-in for the page: connects to `b` as the page's origin does.
+    fn fake_tab(b: &Bridge) -> WebSocket<TcpStream> {
+        use tungstenite::client::IntoClientRequest;
+        let mut req = format!("ws://127.0.0.1:{}/ws?token={}", b.port, b.token)
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "origin",
+            tungstenite::http::HeaderValue::from_static("https://neoscad.org"),
+        );
+        let stream = TcpStream::connect(("127.0.0.1", b.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        tungstenite::client::client(req, stream).unwrap().0
+    }
+
+    /// The next request the bridge sends a fake tab (skipping `welcome`).
+    fn next_request(ws: &mut WebSocket<TcpStream>) -> Value {
+        loop {
+            let m: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            if m.get("id").is_some() {
+                return m;
+            }
+        }
+    }
+
+    #[test]
+    fn waiting_for_a_tab_returns_when_it_says_hello() {
+        let b = Bridge::start(DEFAULT_PAGE).unwrap();
+        let b2 = b.clone();
+        let page = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let mut ws = fake_tab(&b2);
+            let hello = json!({"type": "hello", "file": "gears.scad", "browser": "Chrome 150"});
+            ws.send(Message::text(hello.to_string())).unwrap();
+            ws
+        });
+        let start = Instant::now();
+        let t = b.wait_for_tab(Duration::from_secs(20)).expect("a tab");
+        // It returned on the hello, not at the end of the wait.
+        assert!(start.elapsed() < Duration::from_secs(10));
+        assert_eq!(t.hello["file"], "gears.scad");
+        assert_eq!(t.via, "direct");
+        drop(page.join().unwrap());
+    }
+
+    #[test]
+    fn a_request_waits_briefly_for_a_tab_to_connect() {
+        let b = Bridge::start(DEFAULT_PAGE).unwrap();
+        let b2 = b.clone();
+        let page = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let mut ws = fake_tab(&b2);
+            let req = next_request(&mut ws);
+            assert_eq!(req["method"], "read");
+            let reply = json!({"id": req["id"], "result": {"text": "cube(1);"}});
+            ws.send(Message::text(reply.to_string())).unwrap();
+            // Keep the socket until the answer is read.
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let r = b
+            .request("read", json!({}), Duration::from_secs(15))
+            .unwrap();
+        assert_eq!(r["text"], "cube(1);");
+        page.join().unwrap();
     }
 }

@@ -8,9 +8,11 @@ import { test } from "node:test";
 import { AgentConnection, REPLACED } from "../src/agent/connection.js";
 import {
   agentLine,
+  allowDirectHint,
   browserName,
   captureSize,
   diagnostics,
+  loopbackDenied,
   parseConnect,
   relayURL,
   stripConnect,
@@ -176,4 +178,40 @@ test("a blocked popup says so", () => {
   const c = new AgentConnection({ handle: async () => ({}), win: { open: () => null } });
   c.connectRelay({ port: 6, token: TOKEN });
   assert.deepEqual([c.state.status, c.state.reason], ["failed", "popup-blocked"]);
+});
+
+test("a loopback permission the browser already denied skips the direct attempt", async () => {
+  // A stand-in for navigator.permissions that knows only `known` (others
+  // throw, as Firefox and Safari do for a name they do not know).
+  const perms = (known) => ({
+    asked: [],
+    async query({ name }) {
+      this.asked.push(name);
+      if (!(name in known)) throw new TypeError(`'${name}' is not a valid permission name`);
+      return { state: known[name] };
+    },
+  });
+  // Chrome 145 and later: the loopback permission decides.
+  assert.equal(await loopbackDenied(perms({ "loopback-network": "denied" })), true);
+  assert.equal(await loopbackDenied(perms({ "loopback-network": "prompt", "local-network-access": "denied" })), false);
+  // Chrome 142-144 knows only the older name.
+  const old = perms({ "local-network-access": "denied" });
+  assert.equal(await loopbackDenied(old), true);
+  assert.deepEqual(old.asked, ["loopback-network", "local-network-access"]);
+  assert.equal(await loopbackDenied(perms({ "local-network-access": "granted" })), false);
+  // Firefox and Safari: neither name, so try directly.
+  assert.equal(await loopbackDenied(perms({})), false);
+  // No permissions API at all (or a broken one).
+  assert.equal(await loopbackDenied(undefined), false);
+  assert.equal(await loopbackDenied({ query: async () => null }), false);
+});
+
+test("Chrome and Edge are told how to allow the direct way next time", () => {
+  const chrome = (v) => `Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/${v}.0.0.0 Safari/537.36`;
+  assert.match(allowDirectHint(chrome(150)), /Site settings, and set “Apps on device” to Allow/);
+  assert.match(allowDirectHint(chrome(143)), /“Local network access”/);
+  assert.match(allowDirectHint(`${chrome(150)} Edg/150.0.0.0`), /“Apps on device”/);
+  assert.equal(allowDirectHint("Mozilla/5.0 (Macintosh) Gecko/20100101 Firefox/155.0"), null);
+  assert.equal(allowDirectHint("Mozilla/5.0 AppleWebKit/605.1.15 Version/27.0 Safari/605.1.15"), null);
+  assert.equal(allowDirectHint(""), null);
 });

@@ -9,7 +9,7 @@
 // invitation.
 
 import { AgentConnection } from "../agent/connection.js";
-import { linkText, parseConnect } from "../agent/link.js";
+import { allowDirectHint, linkText, loopbackDenied, parseConnect } from "../agent/link.js";
 import { PageAgent } from "../agent/page.js";
 import { clear, h } from "./dom.js";
 
@@ -86,6 +86,9 @@ export class AgentPanel {
       hello: () => this.page.hello(),
       onChange: (s) => this.changed(s),
     });
+    /// Counts connection attempts, so a slow permission check cannot start
+    /// a connection the user has since replaced or cancelled.
+    this.attempt = 0;
     this.setup = this.store.get("agent.setup", "claude-code");
     this.downloadHref = "https://neoscad.org/download.html";
 
@@ -268,7 +271,8 @@ export class AgentPanel {
   /// Connect with a link (the page was opened with one, or a reload found
   /// this tab's last one). `quiet`: a reload's attempt, which does not open
   /// the dialog when it fails.
-  connect(link, { quiet = false } = {}) {
+  async connect(link, { quiet = false } = {}) {
+    const attempt = ++this.attempt;
     this.link = link;
     this.quiet = quiet;
     try {
@@ -276,15 +280,24 @@ export class AgentPanel {
     } catch {
       // Storage refused: a reload just forgets the link.
     }
-    this.conn.connectDirect(link);
+    // A browser that already says no (the user refused Chrome's prompt
+    // once) would fail the direct attempt anyway: offer the window at
+    // once instead of "Connecting…" and a prompt that never comes.
+    const denied = await loopbackDenied();
+    // Something else (another link, Disconnect, the window) came first.
+    if (attempt !== this.attempt) return;
+    if (denied) this.offerRelay(link, { quiet });
+    else this.conn.connectDirect(link);
   }
 
-  /// Skip the direct attempt and offer the connection window (a link with
-  /// `&via=relay`): for a browser known to block the direct way, and for
-  /// the tests, which serve the page from 127.0.0.1 where direct works.
-  offerRelay(link) {
+  /// Skip the direct attempt and offer the connection window: for a
+  /// browser that says it blocks the direct way, and for a link with
+  /// `&via=relay` (the tests, which serve the page from 127.0.0.1 where
+  /// direct works).
+  offerRelay(link, { quiet = false } = {}) {
+    this.attempt += 1;
     this.link = link;
-    this.quiet = false;
+    this.quiet = quiet;
     this.conn.set({ status: "failed", via: "direct", reason: "direct" });
   }
 
@@ -310,10 +323,12 @@ export class AgentPanel {
   }
 
   relay() {
+    this.attempt += 1;
     if (this.link) this.conn.connectRelay(this.link);
   }
 
   disconnect() {
+    this.attempt += 1;
     this.conn.disconnect();
     try {
       sessionStorage.removeItem(SESSION_KEY);
@@ -358,9 +373,15 @@ export class AgentPanel {
         break;
       case "failed":
         if (s.reason === "direct") {
+          const hint = allowDirectHint(navigator.userAgent);
           body = [
-            h("p", {}, "This browser did not let the page reach neoscad directly (Safari never does; Chrome and Edge do not once access to this computer's apps was refused). A small connection window works everywhere:"),
+            h(
+              "p",
+              {},
+              "This browser did not let the page reach neoscad directly. Safari never allows it, and Chrome and Edge block it once you've said no to reaching apps on this device. A small connection window works everywhere:",
+            ),
             relay(true),
+            hint && h("p", { class: "muted", "data-testid": "agent-allow-hint" }, hint),
             h("p", { class: "muted" }, "If that fails too, is your agent still running? Ask it for a fresh link."),
           ];
         } else if (s.reason === "popup-blocked") {
