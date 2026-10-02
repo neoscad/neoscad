@@ -488,10 +488,11 @@ impl<'a> Evaluator<'a> {
     /// [`Self::eval`] on the heap, for an expression that may call.
     #[inline(never)]
     pub(crate) fn heap_eval(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
-        // Started from native code: one native level of the frame budget,
+        // Started from native code: a native level of the frame budget,
         // so a chain of the rare shapes that stay native (see the module
-        // docs) is still counted.
-        self.frames += crate::recursion::CALL_FRAMES;
+        // docs) is still counted, at what this loop's large native frames
+        // cost (`HEAP_LOOP_FRAMES`).
+        self.frames += crate::recursion::HEAP_LOOP_FRAMES;
         let base = self.xs.frames.len();
         let mut next = self.x_value(u, id, ctx.clone());
         let r = loop {
@@ -509,7 +510,7 @@ impl<'a> Evaluator<'a> {
                 }
             };
         };
-        self.frames -= crate::recursion::CALL_FRAMES;
+        self.frames -= crate::recursion::HEAP_LOOP_FRAMES;
         self.hard(r)
     }
 

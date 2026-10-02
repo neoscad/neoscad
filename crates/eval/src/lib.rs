@@ -250,7 +250,7 @@ impl Default for Options {
             check_parameters: true,
             check_parameter_ranges: false,
             stack_limit: DEFAULT_STACK_LIMIT,
-            frame_limit: recursion::default_frame_limit(),
+            frame_limit: recursion::DEFAULT_FRAME_LIMIT,
             version: [2026.0, 9.0, 23.0],
             rng_seed: 0,
             fs: Arc::new(StdFs),

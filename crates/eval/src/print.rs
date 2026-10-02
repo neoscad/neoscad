@@ -103,16 +103,15 @@ impl Evaluator<'_> {
     }
 
     /// Whether printing a vector nested `depth` levels inside the value
-    /// being printed must stop. Each level is also a frame of the frame
-    /// budget ([`crate::recursion`]), on top of the frames the evaluation
-    /// holds: a printing level costs less stack than an evaluation frame,
-    /// so this is conservative, and it is what keeps printing a deeply
-    /// nested value from overflowing a WASM engine's stack.
+    /// being printed must stop. Each level also holds frames of the frame
+    /// budget ([`crate::recursion::PRINT_FRAMES`]), on top of the frames
+    /// the evaluation holds: it is what keeps printing a deeply nested
+    /// value from overflowing a WASM engine's stack.
     fn print_stack_exhausted(&self, depth: u32) -> bool {
         self.stack_used() + self.module_stack() >= self.stack_limit().min(PRINT_STACK_LIMIT)
             || self
                 .frames
-                .saturating_add(depth.saturating_mul(crate::recursion::EXPRESSION_FRAMES))
+                .saturating_add(depth.saturating_mul(crate::recursion::PRINT_FRAMES))
                 >= self.opts.frame_limit
     }
 

@@ -740,11 +740,17 @@ fn small_limits_give_the_recursion_errors() {
 
     // A range's bounds are evaluated natively, so a recursion through
     // them holds native stack per level, and the frame budget stops it at
-    // its call, far short of the depth limit.
+    // its call, far short of the depth limit. Each level starts a heap
+    // loop (`recursion::HEAP_LOOP_FRAMES`), so this uses the wasm32
+    // release budget, under which browsers reach 34-37 levels.
+    let wasm = Options {
+        frame_limit: 2_000,
+        ..Options::default()
+    };
     let range = "function f(n) = n == 0 ? 0 : len([for (i = [0 : f(n - 1)]) i]);";
-    let (lines, _) = run_with(&format!("{range}\necho(f(20));"), &budget);
+    let (lines, _) = run_with(&format!("{range}\necho(f(20));"), &wasm);
     assert_eq!(lines, ["ECHO: 20"]);
-    let (lines, ev) = run_with(&format!("{range}\necho(f(1000));"), &budget);
+    let (lines, ev) = run_with(&format!("{range}\necho(f(1000));"), &wasm);
     assert!(ev.aborted);
     assert_eq!(
         lines[0],

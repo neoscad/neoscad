@@ -36,7 +36,7 @@ without a copy; the page owns them afterwards.
 The worker also sends two unsolicited messages, which have no `id`:
 
 ```js
-{ type: "ready", version: "0.1.0", frameLimit, frameWeights, probe }  // send `init`
+{ type: "ready", version: "0.1.0" }        // the module loaded; send `init`
 { type: "crashed", message: "..." }        // the instance trapped; respawn
 ```
 
@@ -97,9 +97,9 @@ limits with memory at 1 GiB (below). `init` again is `invalidArgument`.
   depth: null }
 ```
 
-`depth` is how many user module calls (and, with the heap evaluator, user
-function calls) may be in progress inside one another before evaluation
-stops with OpenSCAD's "Recursion detected" error. It cannot be turned
+`depth` is how many user module and function calls may be in progress
+inside one another before evaluation stops with OpenSCAD's "Recursion
+detected" error. It cannot be turned
 off: `null` (or leaving it out) is the default, 100,000, and 0 is
 `invalidArgument`.
 
@@ -449,23 +449,15 @@ and `handle` too, which is how `crates/web/test/run.mjs` drives it in
 node without a worker:
 
 - it loads `neoscad_web.js` / `neoscad_web_bg.wasm` relative to itself,
-  probes the worker's stack (below), posts `ready`, and for each message
-  calls `Engine.handle(json, buffers)`;
-- the probe: before the engine starts, throwaway instances of the module
-  (each from a fresh copy of the glue, `neoscad_web.js?probe=N`) run deep
-  recursions (a function, a list comprehension, a `children()` chain, a
-  module through `translate`) with no frame budget until the engine's
-  stack overflows, each run counting one kind of frame (statement,
-  expression, comprehension, geometry module) and reading the count with
-  `framesAtLastCheck`. From those the worker sets a weight per kind
-  (`setFrameWeights`) under a budget of 1,000,000 (`setFrameLimit`) so
-  that each kind stops at half the depth that overflowed, and none deeper
-  than the defaults allow; deep recursion then ends with OpenSCAD's
-  recursion error in every browser rather than a trap. `ready` carries
-  the budget (`frameLimit`), the weights (`frameWeights`: statement,
-  expression, call, comprehension, geometry) and what the probe found
-  (`probe`: `frames` per probe and kind, or null; `weights`; `ms`).
-  `start(module, { probe: false })` skips it;
+  posts `ready`, and for each message calls `Engine.handle(json,
+  buffers)`;
+- deep recursion needs nothing from the worker: the evaluator runs
+  recursion on its own heap stack and stops it at the counted depth
+  limit (`ResourceLimits.depth`), the same in every browser. What still
+  recurses natively (a recursion through a range's bounds, say) is held
+  to the wasm32 frame budget, a constant
+  (`eval::recursion::DEFAULT_FRAME_LIMIT`), and ends with OpenSCAD's
+  recursion error rather than a trap;
 - the Rust side returns the reply as JSON text in which a buffer is
   `{ "$buffer": n }`, plus the buffers; the glue swaps each placeholder for
   its `ArrayBuffer` and lists them in the transfer list;

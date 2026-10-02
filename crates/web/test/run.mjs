@@ -27,8 +27,6 @@ const GUARD = 2 * 1024 ** 3;
 
 const worker = await import(pathToFileURL(join(dir, 'worker.js')).href);
 const { start, handle } = worker;
-// The same module instance the worker's glue loads (one URL, one module).
-const glue = await import(pathToFileURL(join(dir, 'neoscad_web.js')).href);
 await start(readFileSync(join(dir, 'neoscad_web_bg.wasm')));
 
 let id = 0;
@@ -102,6 +100,25 @@ assert.deepEqual(init.libraryDirs, ['/neoscad/libraries']);
 assert.equal(init.limits.memoryBytes, 2 ** 30);
 
 const example = (p) => join(root, '.reference/openscad/examples', p);
+
+// A recursion through a range's bounds is one of the shapes that still
+// recurse natively, each level starting a heap loop with large native
+// frames: the frame budget must stop it with the recursion error before
+// the engine's stack overflows, which would trap the instance. It runs
+// first, while the module is cold: V8's baseline frames are the larger,
+// and with the heap loop charged as a call this trapped here cold but
+// passed once warm. The engine answering afterwards shows it did not trap.
+await test("a recursion through a range's bounds is an error, not a trap", 5000, () => {
+    ok('open', {
+        path: '/doc/range.scad',
+        text: 'function f(n) = n == 0 ? 0 : len([for (i = [0 : f(n - 1)]) i]);\necho(f(100000));\n',
+    });
+    const r = ok('run', { path: '/doc/range.scad', mode: 'preview' }).render;
+    assert.match(r.console, /ERROR: Recursion detected calling function 'f'/, r.console);
+    ok('open', { path: '/doc/range.scad', text: 'cube(1);' });
+    assert.equal(ok('run', { path: '/doc/range.scad', mode: 'preview' }).render.exitCode, 0);
+    console.log(`     ${r.console.trim().split('\n')[0]}`);
+});
 
 await test('CSG.scad (render)', 2000, () => {
     if (!existsSync(example('Basics/CSG.scad'))) return 'no .reference/openscad';
@@ -210,35 +227,30 @@ await test('runaway recursion is an error, not a crash', 5000, () => {
     console.log(`     ${r.render.console.trim().split('\n')[0]}`);
 });
 
-// start() probed this thread's stack before making the engine: each run
-// either overflowed V8's stack (and reported the frames it held) or was
-// stopped by the linear-memory stack. When any overflowed, the weights
-// make no kind recurse deeper than the defaults allow (each weight at
-// least its default's share of the budget).
-await test('the stack probe ran and calibrated the weights', 1000, () => {
-    const p = worker.probeResult;
-    assert.ok(p && Object.keys(p.frames).length === 4, JSON.stringify(p));
-    for (const f of Object.values(p.frames)) {
-        assert.ok(Object.values(f).every((n) => n === null || n >= 0), JSON.stringify(p));
+// Recursion runs on the evaluator's heap stack, so function, module and
+// comprehension recursion reach the counted depth limit (99,999 levels;
+// the 100,000th call is the error) in the web core as natively.
+await test('deep recursion reaches the counted limit', 20000, () => {
+    const deep = {
+        function: (n) => `function f(n) = n == 0 ? 0 : 1 + f(n - 1);\necho(f(${n}));\n`,
+        module: (n) => `module m(n) { if (n > 0) m(n - 1); else cube(1); }\nm(${n});\n`,
+        comprehension: (n) =>
+            `function g(n) = n == 0 ? [] : [for (i = [0:0]) each g(n - 1)];\necho(len(g(${n})));\n`,
+    };
+    const run = (text) => {
+        ok('open', { path: '/doc/deep.scad', text });
+        return ok('run', { path: '/doc/deep.scad', mode: 'preview' }).render;
+    };
+    for (const [kind, text] of Object.entries(deep)) {
+        const t0 = performance.now();
+        const at = run(text(99999));
+        assert.equal(at.exitCode, 0, `${kind} at 99,999: ${at.console}`);
+        assert.doesNotMatch(at.console, /Recursion detected/, `${kind} at 99,999`);
+        const past = run(text(100000));
+        assert.match(past.console, /ERROR: Recursion detected calling (function|module) '[fgm]'/,
+            `${kind} at 100,000: ${past.console}`);
+        console.log(`     ${kind}: 99,999 ran, 100,000 stopped (${(performance.now() - t0).toFixed(0)} ms)`);
     }
-    // A heap core (`heapStatements()`) skips every probe. A recursive one
-    // overflows V8's stack in at least the function probe. A core that
-    // calls itself recursive while its evaluator runs on the heap gets
-    // neither: each probe runs to the depth limit instead (705 ms here,
-    // about 7 s in a WebKit worker, which held back the first preview).
-    const probed = Object.values(p.frames).flatMap((f) => Object.values(f));
-    if (glue.heapStatements()) {
-        assert.ok(probed.every((n) => n === null), JSON.stringify(p));
-    } else {
-        assert.ok(p.frames.fn.expr > 0, `no probe overflowed: ${JSON.stringify(p)}`);
-    }
-    if (p.weights) {
-        const unit = p.limit / 2000;
-        assert.ok(p.weights.stmt >= 4 * unit && p.weights.expr >= unit, JSON.stringify(p));
-        assert.ok(p.weights.lc >= 4 * unit && p.weights.call === 2 * p.weights.expr, JSON.stringify(p));
-        assert.ok(p.weights.geometry >= 0, JSON.stringify(p));
-    }
-    console.log(`     ${JSON.stringify(p)}`);
 });
 
 // The memory limit measures (the wasm build's counting allocator, heap.rs)

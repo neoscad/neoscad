@@ -22,15 +22,17 @@
 //!   [`DEFAULT_THREAD_STACK`] ([`crate::with_stack`]).
 //! - **A frame budget** ([`crate::Options::frame_limit`]), which measures
 //!   nothing: each nested expression, function call and list comprehension
-//!   element holds a few frames ([`EXPRESSION_FRAMES`] and the like), and
-//!   printing a nested vector one per level. On wasm32 the stack that
-//!   overflows first is one the module cannot measure: a WebAssembly
-//!   engine runs wasm functions on its own machine stack (about 1 MB in
-//!   V8), and overflowing it throws `RangeError: Maximum call stack size
-//!   exceeded` out of the module, which leaves the instance unusable. The
-//!   budget there, [`DEFAULT_FRAME_LIMIT`], is calibrated so that a native
-//!   recursion at the limit still evaluates within V8's default stack;
-//!   natively the budget is unlimited.
+//!   element holds a few frames ([`EXPRESSION_FRAMES`] and the like), a
+//!   heap loop started from native code many ([`HEAP_LOOP_FRAMES`]), and
+//!   printing a nested vector [`PRINT_FRAMES`] per level. On wasm32 the
+//!   stack that overflows first is one the module cannot measure: a
+//!   WebAssembly engine runs wasm functions on its own machine stack
+//!   (about 1 MB in V8), and overflowing it throws `RangeError: Maximum
+//!   call stack size exceeded` out of the module, which leaves the
+//!   instance unusable. The
+//!   budget there, [`DEFAULT_FRAME_LIMIT`], and the weights are constants
+//!   that keep every shape below within the smallest engine stack, a
+//!   WebKit worker's (about 512 KiB); natively the budget is unlimited.
 //!
 //! Both are checked at every function call (`Evaluator::call_exhausted`)
 //! and while printing a nested value. What they still guard:
@@ -115,8 +117,10 @@ pub const DEFAULT_FRAME_LIMIT: u32 = u32::MAX;
 /// --depths --all-programs --frames=4000000000` when every level of a
 /// recursion held native stack: the deepest each kind reached under this
 /// budget was at most 63% of the depth where V8 overflowed. It now only
-/// meets the shapes that still recurse natively, whose frames are the
-/// same expression and call frames it was calibrated on.
+/// meets the shapes that still recurse natively, and a heap loop's and a
+/// printing level's weights ([`HEAP_LOOP_FRAMES`], [`PRINT_FRAMES`]) are
+/// set so that this budget stops them short of a WebKit worker's stack,
+/// the smallest of the three engines'.
 #[cfg(all(target_arch = "wasm32", not(debug_assertions)))]
 pub const DEFAULT_FRAME_LIMIT: u32 = 2_000;
 
@@ -125,102 +129,6 @@ pub const DEFAULT_FRAME_LIMIT: u32 = 2_000;
 /// recursion it allowed reached at most 57% of V8's limit.
 #[cfg(all(target_arch = "wasm32", debug_assertions))]
 pub const DEFAULT_FRAME_LIMIT: u32 = 600;
-
-/// The frame budget [`crate::Options::default`] starts from: on wasm32 the
-/// one `set_default_frame_limit` (wasm32 only) chose, if any, else
-/// [`DEFAULT_FRAME_LIMIT`].
-pub fn default_frame_limit() -> u32 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        match FRAME_LIMIT.load(std::sync::atomic::Ordering::Relaxed) {
-            0 => DEFAULT_FRAME_LIMIT,
-            n => n,
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    DEFAULT_FRAME_LIMIT
-}
-
-/// Sets the frame budget every later [`crate::Options::default`] starts
-/// from, for this instance (0 restores [`DEFAULT_FRAME_LIMIT`]): for a
-/// host whose engine gives wasm frames more or less stack than V8. It is a
-/// process-wide default rather than an option because every evaluation in
-/// the instance runs on the same stack, whichever API starts it.
-///
-/// wasm32 only: a native process measures its stack exactly, and a global
-/// here would leak between tests that run in parallel.
-#[cfg(target_arch = "wasm32")]
-pub fn set_default_frame_limit(limit: u32) {
-    FRAME_LIMIT.store(limit, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// [`set_default_frame_limit`]'s budget; 0 when none was set.
-#[cfg(target_arch = "wasm32")]
-static FRAME_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Always 0. A shim for the web core's `framesAtLastCheck`, kept until
-/// `crates/web` drops it: the web worker read it from an instance whose
-/// stack its start-up probe had overflowed, to learn how many frames that
-/// engine's stack held. The probe never runs against the heap evaluator
-/// (see [`HEAP_EVAL`]), so nothing records frames any more.
-pub fn frames_at_last_check() -> u32 {
-    0
-}
-
-/// Always true: recursion runs on the heap and ends at the counted depth
-/// limit ([`crate::limits::Limits::depth`]), not at the frame budget.
-///
-/// A shim for the web core's `heapStatements`, kept until `crates/web`
-/// drops it: the web worker skips its stack probes when this is set. Those
-/// probes recurse until the stack overflows; on the heap they only stop at
-/// the depth limit, which took about 7 s at start-up in a WebKit worker.
-pub const HEAP_EVAL: bool = true;
-
-/// What one nested frame of each kind adds to the frame budget's count:
-/// the constants below. Statements add nothing, since they run on the
-/// heap.
-///
-/// The web worker used to measure each kind's depth in its own engine and
-/// set weights here; a shim keeps that API (`set_frame_weights`, wasm32
-/// only) until `crates/web` drops it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FrameWeights {
-    /// A statement instantiation: 0, statements take no native stack.
-    pub statement: u32,
-    /// A nested expression ([`EXPRESSION_FRAMES`]).
-    pub expression: u32,
-    /// A function call ([`CALL_FRAMES`]).
-    pub call: u32,
-    /// A list comprehension element ([`COMPREHENSION_FRAMES`]).
-    pub comprehension: u32,
-    /// Extra for a builtin module's children: 0, as for statements.
-    pub geometry: u32,
-}
-
-/// The weights every evaluation counts frames with.
-pub const DEFAULT_WEIGHTS: FrameWeights = FrameWeights {
-    statement: 0,
-    expression: EXPRESSION_FRAMES,
-    call: CALL_FRAMES,
-    comprehension: COMPREHENSION_FRAMES,
-    geometry: 0,
-};
-
-/// The weights every evaluation counts frames with: always
-/// [`DEFAULT_WEIGHTS`].
-pub fn frame_weights() -> FrameWeights {
-    DEFAULT_WEIGHTS
-}
-
-/// Accepted and ignored. A shim for the web core's `setFrameWeights`, kept
-/// until `crates/web` drops it: the weights tuned the frame budget per
-/// kind of recursion to a browser's stack, and recursion no longer reaches
-/// that budget. The frames that still do are the same expression and call
-/// frames in every kind, which [`DEFAULT_WEIGHTS`] counts.
-#[cfg(target_arch = "wasm32")]
-pub fn set_frame_weights(w: FrameWeights) {
-    let _ = w;
-}
 
 /// Frames an expression holds.
 pub const EXPRESSION_FRAMES: u32 = 1;
@@ -237,6 +145,27 @@ pub const CALL_FRAMES: u32 = 2;
 /// budgeted frame: V8 in a Chromium worker overflowed at 1,656 frames of
 /// the default 2,000.
 pub const COMPREHENSION_FRAMES: u32 = 4;
+
+/// Frames a nested heap loop holds: `heap_expr`'s `heap_eval`, which a
+/// call past the native call levels starts from native code, and which
+/// each level of a recursion through a shape that stays native (a
+/// range's bounds, `is_undef()`, a C-style `for`, a parameter default)
+/// starts again. Its native frames are large. When this was
+/// [`CALL_FRAMES`], the release budget let such a recursion run to
+/// 280-660 levels, and the web core trapped instead: measured without
+/// the weight (October 2026, Playwright's browsers on macOS arm64), a
+/// WebKit worker's stack overflowed at 57-60 levels, about 8 KiB a level,
+/// in its default tiers and with its interpreter or its optimising tier
+/// turned off; Chromium's at 223-280 and Firefox's at 393-724. At this
+/// weight [`DEFAULT_FRAME_LIMIT`] stops them at 34-37 levels in all three.
+pub const HEAP_LOOP_FRAMES: u32 = 64;
+
+/// Frames one level of printing a nested vector holds (`print.rs`).
+/// Measured as for [`HEAP_LOOP_FRAMES`], printing overflowed a WebKit
+/// worker's stack at a vector nested 518 deep (Chromium 2,618, Firefox
+/// 5,385), which the release budget allowed at one frame a level; at this
+/// weight it stops printing at 250.
+pub const PRINT_FRAMES: u32 = 8;
 
 /// The linear-memory stack a wasm32 build of neoscad should be linked
 /// with: `-C link-arg=-zstack-size=8388608` (rustc's default is 1 MiB).

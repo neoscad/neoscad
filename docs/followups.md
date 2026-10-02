@@ -203,8 +203,8 @@ lead them, come roughly in order of user impact.
   5 s late with the feature: the core's `heapStatements()` read the web
   crate's own feature, which was off while the evaluator's was on, so
   all eight stack probes ran against a heap evaluator to the depth
-  limit, about 7 s in a WebKit worker. It asks the evaluator,
-  `eval::recursion::HEAP_EVAL`, now always true.)
+  limit, about 7 s in a WebKit worker. The probe, its frame weights and
+  `heapStatements()` are gone now.)
   Left from stage 2:
   - the rare shapes that stay native and start a nested heap loop for a
     part that calls: ranges (`[0 : f(n - 1)]`), callees that are
@@ -223,28 +223,15 @@ lead them, come roughly in order of user impact.
     `docs/audits/heap-evaluator.md` §6), which a WebKit worker's stack
     may not hold. It is unmeasured there; natively it is fine;
   - `resolve::Stats` does not count the `may_call` share of a corpus;
-  - the web side of the frame weights and the stack probe, now dead
-    (`crates/web` was being changed by other work when the feature was
-    removed, so it was left alone). The evaluator keeps thin shims for
-    it in `eval::recursion`: `HEAP_EVAL` (true), `set_frame_weights`
-    (ignored), `frame_weights`/`DEFAULT_WEIGHTS`/`FrameWeights` (the
-    constants) and `frames_at_last_check` (0). To remove:
-    - `crates/web/src/wasm.rs`: `setFrameWeights`, `frameWeights`,
-      `framesAtLastCheck` and `heapStatements`, and `setFrameLimit` too
-      unless a host should still set the budget, with their docs (which
-      still name the `heap-eval` feature);
-    - `crates/web/js/worker.js`: the stack probe (`PROBES`, `RUNS`,
-      `probeRun`, `probeWeights` and their constants), `start()`'s
-      `probe` option and its `setFrameWeights`/`setFrameLimit` calls, the
-      `frameLimit`, `frameWeights` and `probe` fields of the `ready`
-      message, and the comment naming the feature;
-    - `crates/web/test/run.mjs`: "the stack probe ran and calibrated the
-      weights";
-    - `docs/web-protocol.md`: the `ready` message's fields and "the
-      probe";
-    - then the shims above, and `set_default_frame_limit` if
-      `setFrameLimit` went. The frame budget itself stays: it is the
-      wasm32 guard for what still recurses natively;
+  - a recursion through those shapes stops at 34-37 levels in every
+    browser, where Chromium's stack would hold 220-280 and Firefox's
+    390-720: each level starts a heap loop, whose native frames are
+    large (about 8 KiB a level in a WebKit worker), and the frame budget
+    charges one `eval::recursion::HEAP_LOOP_FRAMES` (64) so that it
+    stops them short of WebKit's 57-60. Smaller frames in `heap_eval`'s
+    loop, or no new loop per level, would let them go deeper. (Before
+    the weight they trapped in all three browsers and in a cold node
+    instance.)
   - the native stack is still sized for the recursive evaluator:
     `DEFAULT_STACK_LIMIT` is 64 MiB on a thread of 80 MiB
     (`with_stack`), though only the native call levels, the shapes
@@ -1486,25 +1473,29 @@ lead them, come roughly in order of user impact.
     comprehension): WebKit 40/100/80/80/30, Chromium 200/300/300/500/150,
     Firefox 200/300/300/500/200. All 8 /try examples render in all three;
     the BOSL2 gearbox needs 77% of WebKit's calibrated budget.
+  Since then the heap evaluator made recursion depth a count: function,
+  module, comprehension and `children()` recursion reach 99,999 levels
+  in all three browsers, and the probe and its per-kind weights are gone
+  from `crates/web`. What still recurses natively is held to the frame
+  budget with constant weights (`eval::recursion::HEAP_LOOP_FRAMES`,
+  `PRINT_FRAMES`) sized for WebKit's stack.
   Left:
-  - Recursion is still shallow in WebKit. A comprehension level is 8
-    wasm frames (`eval_lc_frame` twice, its `for` closure through `dyn
-    FnMut`, `for_each`, `eval_cold`, `eval_expr` twice, `eval_call`); a
-    function level 3. Fewer frames there is what raises it.
-  - The probe runs cold. With only BBQ, JSC reaches 67-78% of the depth
-    of a cold run, which the half covers; a warmer engine only goes
-    deeper.
-  - Nesting in the source is limited now, but the limit is sized for
-    V8, not WebKit: `lang::syntax::parser::NESTING_LIMIT` is 320 syntax
-    tree levels on wasm32 (60% of where node 18 first trapped, a
-    `translate()` chain at 542; past it the parse ends in OpenSCAD's
-    "Parser error: memory exhausted", and `wasm-check.sh --depths` checks
-    seven kinds of nesting for it). WebKit overflowed the parser at about
-    200 brackets and `translate()` chains at 187 levels, below that.
-    The limit is a constant: lowering it for WebKit means a wasm32-only
-    setter in `lang` like `eval::recursion::set_frame_weights`, fed by
-    the worker's start-up probe (`crates/web`), or a parser, lowering and
-    `Unit::add_scope` that do not recurse.
+  - Nesting in the source: `lang::syntax::parser::NESTING_LIMIT` is 320
+    syntax tree levels on wasm32, sized for V8 (past it the parse ends in
+    OpenSCAD's "Parser error: memory exhausted"; `wasm-check.sh --depths`
+    checks seven kinds of nesting for it), and WebKit's stack overflows
+    below it for some kinds. Measured October 2026 in Playwright's WebKit
+    on macOS arm64, parsing alone (the `parameters` request): one worker
+    taking nesting 4 levels deeper each run, so that its tiers warm up on
+    the way, overflowed at 88 levels of `[`, 108 of `(` and 88 of `max(`
+    (264 nodes); fresh workers at 140-160 of `[` and about 193-250 of
+    `translate()`. Blocks, `else if` and `+` chains reach the limit, and
+    Chromium and Firefox reach it for every kind. Nodes cost different
+    stack by kind (a `[` level is many parser frames, an `else if` level
+    few), so no one node limit fits: one safe for `[` with room (about
+    60) would refuse MCAD's `bitmap.scad`, 186 nodes of `else if`, which
+    parses in all three browsers now. A fix weighs nesting by kind, or
+    makes the parser, the lowering and `Unit::add_scope` iterative.
 - **Done: the preview's product booleans run under the limits.**
   `geom::csg::product_meshes_until` checks a `geom::csg::Stop` (the
   request's interrupt flag and limits guard) before every kernel
