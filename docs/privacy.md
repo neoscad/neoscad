@@ -76,7 +76,7 @@ time of the last check, and your choices, in the app's preferences
 update key (development builds) makes no update request at all.
 
 **The Windows and Linux apps** read the same feed as the command line. A
-build with no feed key (any build before 0.2.2) makes no update request
+build with no feed key (any build before 0.3.0) makes no update request
 at all.
 
 - **Windows:** Help > "Check for Updates Automatically" (on by default)

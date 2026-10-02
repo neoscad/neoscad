@@ -704,7 +704,7 @@ installers. Only the version and URL reach the CLI, and the CLI follows
 that it can't sign or publish them, and uploads them as the run's
 artifact `update-feed-<run>-<attempt>`, so they can be checked. The
 release key was created on 2026-10-02; its public half is in
-`RELEASE_KEYS`, and builds before 0.2.2 trust no key and so never offer
+`RELEASE_KEYS`, and builds before 0.3.0 trust no key and so never offer
 an update.
 
 **The key.** Create it once, offline:
