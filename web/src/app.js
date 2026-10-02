@@ -9,6 +9,10 @@
 // typing and each customizer edit runs a preview; Render (F6) renders.
 // Runs go through the engine client, which coalesces them and respawns
 // the worker when one is cancelled or crashes.
+//
+// A link can carry a model (`#code=`, share.js), which opens as a
+// document nothing saves; `#embed=1` starts the embed view (embed.js)
+// instead of this page; and in a frame from another origin neither starts.
 
 import { parseConnect, stripConnect } from "./agent/link.js";
 import { setEditorHandler, loadEditor } from "./editor-host.js";
@@ -42,7 +46,9 @@ import { CustomizerPanel } from "./ui/customizer.js";
 import { clear, download, h } from "./ui/dom.js";
 import { MeasurePanel } from "./ui/measure.js";
 import { Menu } from "./ui/menu.js";
-import { createViewer } from "./view/index.js";
+import { DEFAULT_VIEW, createViewer } from "./view/index.js";
+import { EmbedApp } from "./embed.js";
+import { ShareError, decodeSource, exampleHash, framing, parseShare, shareHash, stripShare } from "./share.js";
 
 // The page's own pause, not the core's default (150 ms, `client::
 // DEFAULT_PREVIEW_DELAY_MS`, which the desktop apps use): the one worker
@@ -59,10 +65,14 @@ const SETTINGS = {
   inspector: "customizer",
   inspectorShown: true,
   consoleCollapsed: false,
-  view: { axes: true, scales: false, grid: false, edges: false, crosshairs: false, orthographic: false, lighting: "openscad", scheme: "Cornfield" },
+  view: DEFAULT_VIEW,
   check: {},
   layout: { left: 34, right: 22, console: 30 },
 };
+
+/// The picker's value for the document a link opened (`#code=`): not an
+/// example id (those are words), so the two cannot be confused.
+const SHARED_ID = "#link";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -88,7 +98,16 @@ class App {
     // is a key, and should not stay in the history or a shared URL.
     const hash = location.hash;
     const connectLink = parseConnect(hash);
-    if (connectLink) history.replaceState(null, "", location.pathname + location.search + stripConnect(hash));
+    // A model in the link (`#code=`, share.js) is read, then taken out of
+    // the address bar too: it can be long, and a reload should not open it
+    // over the edits made to it since. It opens as a document of its own,
+    // which nothing saves: the visitor's examples and their edits stay as
+    // they were.
+    const share = parseShare(hash);
+    if (connectLink || share.code !== null) {
+      history.replaceState(null, "", location.pathname + location.search + stripShare(stripConnect(hash)));
+    }
+    this.shared = null; // {example, original, text, values}: the link's document
     this.tabs = []; // library files open read-only: {path, text}
     this.activeTab = null; // null: the document
     this.previewTimer = null;
@@ -132,10 +151,29 @@ class App {
       this.console.setSummary(`No examples: ${e.message}`, "failed");
       return;
     }
+    let shareFailed = null;
+    if (share.code !== null) {
+      try {
+        const text = await decodeSource(share.code);
+        this.shared = {
+          example: { id: SHARED_ID, shared: true, title: share.name, file: share.name, parts: false, heavy: false, autorun: true, note: "" },
+          original: text,
+          text,
+          values: {},
+        };
+      } catch (e) {
+        shareFailed = e instanceof ShareError ? e.message : `it could not be read (${e.message})`;
+      }
+    }
     this.fillExamples();
-    const wanted = new URLSearchParams(hash.slice(1)).get("example");
-    const id = [wanted, this.settings.example, this.manifest.default].find((x) => this.manifest.examples.some((e) => e.id === x));
-    await this.openExample(id);
+    if (this.shared) await this.openExample(SHARED_ID);
+    else {
+      const id = [share.example, this.settings.example, this.manifest.default].find((x) => this.manifest.examples.some((e) => e.id === x));
+      await this.openExample(id);
+    }
+    // In the banner: the console's summary would be overwritten by the
+    // example's own preview a moment later.
+    if (shareFailed) this.banner(`The link's model could not be opened: ${shareFailed}. This is the example you had open instead.`);
     document.documentElement.dataset.ready = "true";
     // Connect an agent: the link this page was opened with, or this tab's
     // link from before a reload (quietly: its agent may be gone).
@@ -170,11 +208,16 @@ class App {
 
     const exportMenu = new Menu(
       "Export",
-      () =>
-        Object.entries(EXPORT_FORMATS).map(([id, f]) => ({
+      () => [
+        ...Object.entries(EXPORT_FORMATS).map(([id, f]) => ({
           label: `${f.label}…`,
           run: () => this.export(id),
         })),
+        "-",
+        { heading: "Share" },
+        { label: "Copy link", run: () => this.copyLink() },
+        { label: "Copy embed link", run: () => this.copyLink({ embed: true }) },
+      ],
       { testid: "export-menu" },
     );
     const viewMenu = new Menu("View", () => this.viewItems(), { testid: "view-menu" });
@@ -189,7 +232,13 @@ class App {
         "div",
         { class: "tools" },
         this.exampleSelect,
-        h("button", { class: "quiet", title: "Forget your edits to this example", "data-testid": "reset-example", onclick: () => this.resetExample() }, "Reset example"),
+        // "Reset" beside the picker it applies to: the shorter label is
+        // part of what lets the bar fit one row from 1200 px.
+        h(
+          "button",
+          { class: "quiet", title: "Forget your edits to this example", "aria-label": "Reset example", "data-testid": "reset-example", onclick: () => this.resetExample() },
+          "Reset",
+        ),
         h("span", { class: "divider" }),
         h("button", { class: "primary", title: "Preview (F5)", "data-testid": "preview", onclick: () => this.run("preview") }, "Preview"),
         h("button", { title: "Render (F6, ⌘/Ctrl-Enter)", "data-testid": "render", onclick: () => this.run("render") }, "Render"),
@@ -344,9 +393,12 @@ class App {
     );
   }
 
+  /// A line in the banner under the top bar; a second one (a bad link's,
+  /// in a mock build) goes under the first rather than replacing it.
   banner(text) {
     const b = $("#banner");
-    b.textContent = text;
+    if (b.hidden) b.textContent = text;
+    else b.append(h("br"), text);
     b.hidden = false;
   }
 
@@ -397,25 +449,35 @@ class App {
   // --- Examples and the document -----------------------------------------
 
   fillExamples() {
+    // The link's document heads the list while the page is open, so
+    // trying an example does not lose it.
+    const shared = this.shared ? [h("option", { value: SHARED_ID }, `${this.shared.example.file} (from the link)`)] : [];
     clear(
       this.exampleSelect,
+      shared,
       this.manifest.examples.map((e) => h("option", { value: e.id }, e.heavy ? `${e.title} (heavy)` : e.title)),
     );
   }
 
   async openExample(id) {
-    const example = this.manifest.examples.find((e) => e.id === id);
+    const shared = id === SHARED_ID && this.shared;
+    const example = shared ? this.shared.example : this.manifest.examples.find((e) => e.id === id);
     if (!example) return;
     const previous = this.doc;
     this.exampleSelect.value = id;
-    this.saveSettings({ example: id });
-    history.replaceState(null, "", `#example=${encodeURIComponent(id)}`);
+    // The link's document is not saved, so it is neither the example a
+    // reload reopens nor in the address bar (which the link left).
+    if (shared) history.replaceState(null, "", location.pathname + location.search);
+    else {
+      this.saveSettings({ example: id });
+      history.replaceState(null, "", exampleHash(id));
+    }
     clearTimeout(this.previewTimer);
     this.previewTimer = null;
     this.revision += 1;
 
-    const original = await loadExampleText(example);
-    const text = this.store.exampleText(id) ?? original;
+    const original = shared ? this.shared.original : await loadExampleText(example);
+    const text = shared ? this.shared.text : (this.store.exampleText(id) ?? original);
     // A heavy example leaves the worker's wasm memory at its high-water
     // mark (it never shrinks), so the next one starts in a fresh worker.
     if (previous?.example.heavy) await this.engine.restart("freeing the heavy example's memory").catch(() => {});
@@ -430,8 +492,8 @@ class App {
       path,
       text,
       version: 0,
-      parts: this.store.get(`example.${id}.parts`, example.parts),
-      customizer: new CustomizerModel([], this.store.parameterValues(id)),
+      parts: shared ? example.parts : this.store.get(`example.${id}.parts`, example.parts),
+      customizer: new CustomizerModel([], shared ? this.shared.values : this.store.parameterValues(id)),
     };
     this.tabs = [];
     this.activeTab = null;
@@ -460,6 +522,13 @@ class App {
   resetExample() {
     if (!this.doc) return;
     const id = this.doc.example.id;
+    if (this.doc.example.shared) {
+      // Back to the text the link brought.
+      Object.assign(this.shared, { text: this.shared.original, values: {} });
+      this.shared.example.parts = false;
+      this.openExample(id);
+      return;
+    }
     this.store.resetExample(id);
     this.store.set(`example.${id}.parts`, null);
     // Reopen from the shipped text.
@@ -476,7 +545,8 @@ class App {
         d.version = m.version;
         this.revision += 1;
         this.engine.edit(d.path, m.edits).catch(() => {});
-        this.store.setExampleText(d.example.id, d.text, d.original);
+        if (d.example.shared) this.shared.text = d.text;
+        else this.store.setExampleText(d.example.id, d.text, d.original);
         this.schedulePreview();
         return null;
       }
@@ -521,14 +591,23 @@ class App {
 
   customizerChanged() {
     if (!this.doc) return;
-    this.store.setParameterValues(this.doc.example.id, this.doc.customizer.values);
+    this.keepValues();
     this.schedulePreview();
+  }
+
+  /// Keep the customizer's values: in storage for an example, only in
+  /// memory for the link's document.
+  keepValues() {
+    const d = this.doc;
+    if (d.example.shared) this.shared.values = { ...d.customizer.values };
+    else this.store.setParameterValues(d.example.id, d.customizer.values);
   }
 
   setParts(on) {
     if (!this.doc) return;
     this.doc.parts = on;
-    this.store.set(`example.${this.doc.example.id}.parts`, on === this.doc.example.parts ? null : on);
+    if (this.doc.example.shared) this.shared.example.parts = on;
+    else this.store.set(`example.${this.doc.example.id}.parts`, on === this.doc.example.parts ? null : on);
     this.check.setParts(on);
     this.measure.setParts(on);
     this.schedulePreview();
@@ -709,7 +788,7 @@ class App {
 
   setParameters(groups) {
     this.doc.customizer.setGroups(groups);
-    this.store.setParameterValues(this.doc.example.id, this.doc.customizer.values);
+    this.keepValues();
     this.customizer.render();
   }
 
@@ -736,6 +815,38 @@ class App {
       this.console.setSummary(`Exported ${name} (${r.bytes} bytes).`, "done");
     } catch (e) {
       this.fail(e);
+    }
+  }
+
+  /// A link that opens the document's text as it is now (share.js), or
+  /// with `embed` its embed view. Always the text itself, never
+  /// `#example=`: whoever opens the link may have edited that example in
+  /// their own browser, and would see their version instead. Customizer
+  /// values are not carried; they live in the visitor's storage.
+  async shareLink({ embed = false } = {}) {
+    const d = this.doc;
+    const hash = await shareHash(d.text, { name: d.example.file, embed });
+    return location.origin + location.pathname + location.search + hash;
+  }
+
+  async copyLink({ embed = false } = {}) {
+    if (!this.doc) return;
+    let link;
+    try {
+      link = await this.shareLink({ embed });
+    } catch (e) {
+      this.console.setSummary(`No link: ${e.message}.`, "failed");
+      return;
+    }
+    this.lastLink = link;
+    const what = embed ? "an embed link (for an iframe on a neoscad.org page)" : "a link to this model";
+    try {
+      await navigator.clipboard.writeText(link);
+      this.console.setSummary(`Copied ${what}, ${link.length} characters.`, "done");
+    } catch {
+      // No clipboard (an insecure origin, or the browser said no): the
+      // link to copy by hand.
+      window.prompt(`Copy ${what}:`, link);
     }
   }
 
@@ -893,12 +1004,39 @@ class App {
   }
 }
 
-const app = new App();
-window.NeoSCADWeb = app;
-app.start().catch((e) => {
-  console.error(e);
-  const b = document.getElementById("banner");
-  b.textContent = `The page failed to start: ${e.message}`;
-  b.hidden = false;
-  b.dataset.kind = "error";
-});
+/// The page in a frame from another site: nothing starts, and a link
+/// opens it in a tab of its own. The site is static (GitHub Pages), so it
+/// cannot send `frame-ancestors` or `X-Frame-Options` headers, and a meta
+/// tag cannot carry either; this check is what keeps another site from
+/// framing the page (its own blog frames the embed view, from this
+/// origin). A frame sandboxed without scripts gets an empty page.
+function refuseFrame() {
+  document.documentElement.classList.add("refused");
+  clear(
+    document.body,
+    h(
+      "p",
+      { class: "refused-note", "data-testid": "refused" },
+      "NeoSCAD can't be shown inside another site. ",
+      h("a", { href: location.href, target: "_blank", rel: "noopener" }, "Open it in NeoSCAD"),
+    ),
+  );
+}
+
+const share = parseShare(location.hash);
+if (framing(window) === "cross") refuseFrame();
+else if (share.embed) {
+  const embed = new EmbedApp();
+  window.NeoSCADEmbed = embed;
+  embed.start(share).catch((e) => embed.failed(e));
+} else {
+  const app = new App();
+  window.NeoSCADWeb = app;
+  app.start().catch((e) => {
+    console.error(e);
+    const b = document.getElementById("banner");
+    b.textContent = `The page failed to start: ${e.message}`;
+    b.hidden = false;
+    b.dataset.kind = "error";
+  });
+}

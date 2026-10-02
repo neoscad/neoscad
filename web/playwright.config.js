@@ -1,8 +1,8 @@
 // Playwright against a built bundle served under /try/ (serve.mjs), as the
 // website serves it. Build first (`npm run build`, or scripts/web/build.sh
 // and E2E_DIR=../dist/web/neoscad-web-...). Chromium for the app's specs;
-// the agent bridge's spec also runs in Firefox and WebKit (the projects
-// below; `npx playwright install firefox webkit`).
+// the agent bridge's and the links' specs also run in Firefox and WebKit
+// (the projects below; `npx playwright install firefox webkit`).
 //
 // Needs Node 20 or newer (Playwright 1.63's requirement), unlike the unit
 // tests, which run on 18.
@@ -43,19 +43,20 @@ export default defineConfig({
       testIgnore: /phone\.spec/,
     },
     { name: "phone", use: { ...devices["Pixel 7"], channel: "chromium" }, testMatch: /phone\.spec/ },
-    // The agent bridge must work in every desktop engine, so its spec runs
-    // in Firefox and WebKit too (`npx playwright install firefox webkit`;
-    // it needs NEOSCAD_BIN, and skips without it). The other specs are
+    // The agent bridge, and the links and embed view (share.spec), must
+    // work in every desktop engine, so their specs run in Firefox and
+    // WebKit too (`npx playwright install firefox webkit`; the agent's
+    // needs NEOSCAD_BIN, and skips without it). The other specs are
     // written against Chromium's WebGPU viewer.
     {
       name: "firefox",
       use: { ...devices["Desktop Firefox"], viewport: { width: 1400, height: 860 } },
-      testMatch: /agent\.spec/,
+      testMatch: /(agent|share)\.spec/,
     },
     {
       name: "webkit",
       use: { ...devices["Desktop Safari"], viewport: { width: 1400, height: 860 } },
-      testMatch: /agent\.spec/,
+      testMatch: /(agent|share)\.spec/,
     },
   ],
 });

@@ -9,6 +9,9 @@
   styles; downloads are blob: URLs. The only other connection allowed is a
   WebSocket to this computer's loopback address, any port: the agent
   bridge of `neoscad mcp --browser` (src/agent/, which checks the token).
+  Frames of this page are allowed from its own origin only, but that is
+  checked in app.js (framing() in src/share.js): `frame-ancestors` is
+  ignored in a meta tag, and the static site cannot send headers.
 -->
 <html lang="en">
   <head>

@@ -34,6 +34,19 @@
 
 import { Canvas2DViewer } from "./canvas2d.js";
 
+/// The view's settings before the visitor changes any (the page saves its
+/// own; the embed view always starts from these).
+export const DEFAULT_VIEW = {
+  axes: true,
+  scales: false,
+  grid: false,
+  edges: false,
+  crosshairs: false,
+  orthographic: false,
+  lighting: "openscad",
+  scheme: "Cornfield",
+};
+
 export const NO_3D =
   "This browser has neither WebGPU nor WebGL 2, so the 3D view is a simplified one (large models show only their box; " +
   "previews of differences show only what is kept). Everything else works as usual.";
