@@ -25,7 +25,10 @@ required-features = ["gtk"]
 
 [features]
 default = []
-gtk = ["dep:gtk", "dep:adw", "dep:webkit6", "mimalloc", "dep:futures-channel", "dep:futures-util"]
+gtk = ["dep:gtk", "dep:adw", "dep:webkit6", "heap-eval", "mimalloc", "dep:futures-channel", "dep:futures-util"]
+# The heap evaluator (`neoscad-eval`'s `heap-eval`), on with `gtk` as in
+# neoscad-cli and neoscad-ffi (docs/audits/heap-evaluator.md).
+heap-eval = ["eval/heap-eval"]
 # mimalloc as the app's allocator, on with `gtk`. A named feature, as in
 # neoscad-cli and neoscad-ffi: cargo-auditable (the Nix build) asks cargo
 # metadata for `mimalloc` across the workspace, which fails on a package

@@ -178,7 +178,20 @@ lead them, come roughly in order of user impact.
   with the counted `--limit depth=N`) is done; see "Stage 1 done" there.
   Stage 2 (function calls, comprehensions and `let`/`assert`/`echo` on
   the heap past 8 native call levels, with the counted limit covering
-  functions) is done; see "Stage 2 done". Left from stage 2:
+  functions) is done; see "Stage 2 done". The native crates (cli, ffi,
+  linux-app) turn the feature on by default; the web core does not yet.
+  Left from stage 2:
+  - **The web core with `heap-eval` delays WebKit's first preview by
+    about 5 s.** In WebKit (Playwright), the /try `threaded-ring`
+    example's Preview takes 8-9 s from the click against 3.3-3.5 s
+    without the feature, while the engine reports the same preview time
+    (~640 ms). So the extra time is spent in the worker outside
+    evaluation, and a language-server request queued behind it times out
+    ("Request timed out" page error). `gearbox` is slower the same way;
+    Chromium and Firefox were not compared. Find where the time goes
+    (wasm instantiation or compile of the larger module, the skipped
+    probe's replacement, `may_call`, a library load), fix it, then build
+    the web core with the feature.
   - the rare shapes that stay native and start a nested heap loop for a
     part that calls: ranges (`[0 : f(n - 1)]`), callees that are
     expressions (`f(x)(y)`), methods, C-style `for` comprehensions,
