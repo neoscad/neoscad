@@ -204,13 +204,13 @@ pub struct Origin {
 
 /// A node of the evaluated tree.
 ///
-/// `Clone`, `PartialEq` and `Drop` are written by hand, without recursion:
-/// the derived ones take a native frame per level, and a recursive module
-/// builds a tree as deep as the evaluator allows (65,507 levels natively).
-/// Copying, comparing or freeing such a tree could overflow the stack after
-/// the evaluation itself had succeeded, and on wasm32 these walks were part
-/// of what a statement costs in frames (`recursion::STATEMENT_FRAMES`).
-#[derive(Debug)]
+/// `Clone`, `PartialEq`, `Drop` and `Debug` are written by hand, without
+/// recursion: the derived ones take a native frame per level, and a
+/// recursive module builds a tree as deep as the evaluator allows (65,507
+/// levels natively). Copying, comparing, freeing or printing such a tree
+/// could overflow the stack after the evaluation itself had succeeded, and
+/// on wasm32 these walks were part of what a statement costs in frames
+/// (`recursion::STATEMENT_FRAMES`).
 pub struct Node {
     pub kind: NodeKind,
     pub children: Vec<Node>,
@@ -309,6 +309,153 @@ impl Drop for Node {
     }
 }
 
+impl std::fmt::Debug for Node {
+    /// Prints what `#[derive(Debug)]` would, byte for byte, in both the
+    /// plain and the alternate (`{:#?}`) form, from an explicit stack. Tests
+    /// compare trees through this text (`call_memo.rs`, `incremental.rs`),
+    /// so it elides nothing however deep the tree is.
+    ///
+    /// The node's own fields go through their derived `Debug`. In the
+    /// plain form they get this formatter, flags and all. The alternate
+    /// form indents every line of a field by its depth, as the derived
+    /// form's nested `PadAdapter`s do, so a field is written through
+    /// [`Indent`] with a formatter of its own, which keeps `#` and the
+    /// precision but no other flag.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pretty = f.alternate();
+        // The pending nodes, each with its depth in `Indent` levels and how
+        // many of its children are written.
+        let mut stack: Vec<(&Node, usize, usize)> = Vec::new();
+        debug_open(self, 0, f)?;
+        if self.children.is_empty() {
+            return debug_close(self, 0, f);
+        }
+        stack.push((self, 0, 0));
+        while let Some((n, depth, done)) = stack.last_mut() {
+            let (n, depth) = (*n, *depth);
+            if let Some(c) = n.children.get(*done) {
+                *done += 1;
+                let child = depth + 2;
+                if pretty {
+                    indent(f, child)?;
+                } else if *done > 1 {
+                    f.write_str(", ")?;
+                }
+                debug_open(c, child, f)?;
+                if c.children.is_empty() {
+                    debug_close(c, child, f)?;
+                    if pretty {
+                        f.write_str(",\n")?;
+                    }
+                } else {
+                    stack.push((c, child, 0));
+                }
+                continue;
+            }
+            if pretty {
+                indent(f, depth + 1)?;
+            }
+            f.write_str("]")?;
+            debug_close(n, depth, f)?;
+            stack.pop();
+            if pretty && !stack.is_empty() {
+                f.write_str(",\n")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `Node {`, its kind, and `children: ` with the list opened (`[]` when
+/// there are none).
+fn debug_open(n: &Node, depth: usize, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    if f.alternate() {
+        f.write_str("Node {\n")?;
+        indent(f, depth + 1)?;
+        f.write_str("kind: ")?;
+        debug_field(&n.kind, depth + 1, f)?;
+        f.write_str(",\n")?;
+        indent(f, depth + 1)?;
+        f.write_str("children: ")?;
+        f.write_str(if n.children.is_empty() { "[]" } else { "[\n" })
+    } else {
+        f.write_str("Node { kind: ")?;
+        std::fmt::Debug::fmt(&n.kind, f)?;
+        f.write_str(", children: ")?;
+        f.write_str(if n.children.is_empty() { "[]" } else { "[" })
+    }
+}
+
+/// The fields after `children`, and the closing brace.
+fn debug_close(n: &Node, depth: usize, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    if f.alternate() {
+        f.write_str(",\n")?;
+        indent(f, depth + 1)?;
+        f.write_str("origin: ")?;
+        debug_field(&n.origin, depth + 1, f)?;
+        f.write_str(",\n")?;
+        indent(f, depth + 1)?;
+        f.write_str("index: ")?;
+        debug_field(&n.index, depth + 1, f)?;
+        f.write_str(",\n")?;
+        indent(f, depth)?;
+        f.write_str("}")
+    } else {
+        f.write_str(", origin: ")?;
+        std::fmt::Debug::fmt(&n.origin, f)?;
+        f.write_str(", index: ")?;
+        std::fmt::Debug::fmt(&n.index, f)?;
+        f.write_str(" }")
+    }
+}
+
+/// A field in the alternate form, its later lines indented `depth` levels.
+fn debug_field(
+    v: &dyn std::fmt::Debug,
+    depth: usize,
+    f: &mut std::fmt::Formatter<'_>,
+) -> std::fmt::Result {
+    use std::fmt::Write;
+    let mut w = Indent {
+        out: f,
+        depth,
+        at_line_start: false,
+    };
+    match w.out.precision() {
+        Some(p) => write!(w, "{v:#.p$?}"),
+        None => write!(w, "{v:#?}"),
+    }
+}
+
+fn indent(f: &mut std::fmt::Formatter<'_>, depth: usize) -> std::fmt::Result {
+    for _ in 0..depth {
+        f.write_str("    ")?;
+    }
+    Ok(())
+}
+
+/// What `depth` nested `PadAdapter`s of the standard library do: four
+/// spaces per level before every line after the first, written when the
+/// line's first text is.
+struct Indent<'a, 'b> {
+    out: &'a mut std::fmt::Formatter<'b>,
+    depth: usize,
+    at_line_start: bool,
+}
+
+impl std::fmt::Write for Indent<'_, '_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for line in s.split_inclusive('\n') {
+            if self.at_line_start {
+                indent(self.out, self.depth)?;
+            }
+            self.at_line_start = line.ends_with('\n');
+            self.out.write_str(line)?;
+        }
+        Ok(())
+    }
+}
+
 impl Node {
     /// OpenSCAD's `find_root_tag`: the first node instantiated with `!`,
     /// and the origin of a second, different one if there is. The search
@@ -337,5 +484,98 @@ impl Node {
             stack.extend(c.children.iter().rev());
         }
         (found, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CsgOp, Node, NodeKind, Origin};
+    use lang::source::{FileId, Span};
+
+    /// What the derived `Debug` printed: the same fields under the same
+    /// name, so the two outputs can be compared byte for byte.
+    mod derived {
+        #[derive(Debug)]
+        #[allow(dead_code)] // read only through `Debug`
+        pub struct Node {
+            pub kind: super::NodeKind,
+            pub children: Vec<Node>,
+            pub origin: Option<Box<super::Origin>>,
+            pub index: usize,
+        }
+    }
+
+    fn mirror(n: &Node) -> derived::Node {
+        derived::Node {
+            kind: n.kind.clone(),
+            children: n.children.iter().map(mirror).collect(),
+            origin: n.origin.clone(),
+            index: n.index,
+        }
+    }
+
+    fn node(kind: NodeKind, index: usize, children: Vec<Node>) -> Node {
+        Node {
+            kind,
+            children,
+            origin: Some(Box::new(Origin {
+                name: format!("m{index}"),
+                unit: 0,
+                span: Span {
+                    file: FileId(0),
+                    start: index as u32,
+                    end: index as u32 + 3,
+                },
+                line: 1,
+                tag_root: index == 2,
+                tag_highlight: false,
+                tag_background: false,
+            })),
+            index,
+        }
+    }
+
+    fn sample() -> Node {
+        let leaf = |i| node(NodeKind::Group { name: None }, i, Vec::new());
+        let color = NodeKind::Color {
+            rgba: [0.1, 0.25, 1.0, 0.5],
+        };
+        Node {
+            kind: NodeKind::Root,
+            children: vec![
+                node(
+                    NodeKind::Csg(CsgOp::Union),
+                    1,
+                    vec![leaf(2), node(color, 3, vec![leaf(4)])],
+                ),
+                leaf(5),
+                node(NodeKind::IntersectionFor, 6, Vec::new()),
+            ],
+            origin: None,
+            index: 0,
+        }
+    }
+
+    #[test]
+    fn debug_prints_what_the_derived_debug_did() {
+        let trees = [
+            sample(),
+            node(NodeKind::Root, 0, Vec::new()),
+            node(NodeKind::Root, 0, vec![sample(), sample()]),
+        ];
+        for t in &trees {
+            let d = mirror(t);
+            assert_eq!(format!("{t:?}"), format!("{d:?}"));
+            assert_eq!(format!("{t:#?}"), format!("{d:#?}"));
+            assert_eq!(format!("{t:.1?}"), format!("{d:.1?}"));
+            assert_eq!(format!("{t:#.1?}"), format!("{d:#.1?}"));
+            // Inside other values' output, as in a failed `assert_eq!` of
+            // a vector or a struct.
+            assert_eq!(format!("{:#?}", [t, t]), format!("{:#?}", [&d, &d]));
+            assert_eq!(
+                format!("{:#?}", Some((1, t))),
+                format!("{:#?}", Some((1, &d)))
+            );
+        }
     }
 }

@@ -295,8 +295,11 @@ result with a `resource-limit` diagnostic, not a crash.
   kind so that each stops at half the depth that overflowed, never
   deeper than the defaults allow (`crates/web/js/worker.js`,
   `eval::recursion::FrameWeights`). Nesting in the
-  source itself (deeply nested brackets or statements) is not covered:
-  the parser has no depth limit (`docs/followups.md`).
+  source itself (deeply nested brackets or statements) ends with
+  OpenSCAD's "Parser error: memory exhausted" past a counted limit on
+  the syntax tree's depth (`lang::syntax::parser::NESTING_LIMIT`: 5,000
+  natively, 320 on wasm32), which bounds every later recursion over the
+  source; it is sized for V8, not yet for WebKit (`docs/followups.md`).
   A counted limit, `--limit depth=N` (`Limits::depth`, default 100,000
   nested module calls, never off), applies in every build. Built with the
   `heap-eval` feature, statements run on a heap stack

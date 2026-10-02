@@ -4,7 +4,10 @@
 //
 //   node run.js MODULE.wasm            check every case
 //   node run.js MODULE.wasm --depths   also find the deepest function and
-//                                      module recursion that still works
+//                                      module recursion, and source
+//                                      nesting, that still works
+//   --all-programs                     with --depths: the calibration
+//                                      programs too
 //   --frames=N                         run the depth search with frame
 //                                      budget N (to calibrate the default:
 //                                      a huge N finds where V8 traps)
@@ -126,14 +129,29 @@ const PROGRAMS = {
   'module-children': (n) => `module c(n) { if (n > 0) c(n - 1) children(); else children(); }\nc(${n}) cube(1);`,
   'function-nested': (n) => `function h(n) = n == 0 ? 0 : 1 + (1 + (1 + (1 + (1 + h(n - 1)))));\necho(h(${n}));`,
   'function-args': (n) => `function a(n, v) = n == 0 ? v : max(0, a(n - 1, [v[0] + 1, norm([1, 2, 3])]));\necho(a(${n}, [0, 0]));`,
+  // Nesting in the source rather than in a recursion: the parser, the
+  // lowering and everything after walk it recursively, and past the
+  // parser's nesting limit it must end in OpenSCAD's "memory exhausted"
+  // error rather than a trap.
+  'source-transforms': (n) => `${'translate([0, 0, 1]) '.repeat(n)}cube(1);`,
+  'source-blocks': (n) => `${'{'.repeat(n)}cube(1);${'}'.repeat(n)}`,
+  'source-else-if': (n) => `x = 1;\n${'if (x == 0) cube(1); else '.repeat(n)}sphere(1);`,
+  'source-parens': (n) => `echo(${'('.repeat(n)}1${')'.repeat(n)});`,
+  'source-lists': (n) => `echo(len(${'['.repeat(n)}1${']'.repeat(n)}));`,
+  'source-sum': (n) => `echo(${'1 + '.repeat(n)}1);`,
+  'source-calls': (n) => `echo(${'max('.repeat(n)}1${')'.repeat(n)});`,
 };
+
+// Run by `--depths` alone; `--all-programs` runs every program above.
+const DEFAULT_PROGRAMS = ['function', 'module', ...Object.keys(PROGRAMS).filter((k) => k.startsWith('source-'))];
 
 function depthOf(kind) {
   const src = PROGRAMS[kind];
   const works = (n) => {
     try {
       const out = instance([]).run(src(n), 0, frameLimit);
-      return { ok: !/ERROR/.test(out), trapped: false };
+      const error = out.split('\n').find((l) => /ERROR/.test(l));
+      return { ok: !error, trapped: false, message: error ? error.replace(/ in file .*/, '') : 'no error' };
     } catch (x) {
       return { ok: false, trapped: true, error: String(x) };
     }
@@ -144,13 +162,13 @@ function depthOf(kind) {
     if (works(mid).ok) lo = mid; else hi = mid;
   }
   const next = works(hi);
-  return `${kind}: ${lo} (at ${hi}: ${next.trapped ? 'TRAP ' + next.error : 'recursion error'})`;
+  return `${kind}: ${lo} (at ${hi}: ${next.trapped ? 'TRAP ' + next.error : next.message})`;
 }
 
 const frameFlag = flags.find((f) => f.startsWith('--frames='));
 const frameLimit = frameFlag ? Number(frameFlag.slice('--frames='.length)) : 0;
 if (flags.includes('--depths')) {
-  const kinds = flags.includes('--all-programs') ? Object.keys(PROGRAMS) : ['function', 'module'];
+  const kinds = flags.includes('--all-programs') ? Object.keys(PROGRAMS) : DEFAULT_PROGRAMS;
   for (const k of kinds) {
     const line = depthOf(k);
     console.log(`depth ${line}`);

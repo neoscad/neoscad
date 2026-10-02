@@ -28,6 +28,11 @@ const SMALL_STACK: usize = 128 << 10;
 /// Deeper than the evaluator's native module limit.
 const DEPTH: usize = 100_000;
 
+/// Levels of a tree printed with `{:#?}`, whose text grows with the square
+/// of the depth. The derived `Debug` overflowed [`SMALL_STACK`] at 200
+/// levels of a comb in a test build.
+const PRETTY_DEPTH: usize = 300;
+
 fn watch_memory() {
     static START: Once = Once::new();
     START.call_once(|| {
@@ -163,6 +168,23 @@ fn a_deep_tree_clones_compares_and_drops_on_a_small_stack() {
         // The tree itself is dropped on a small stack too.
         on_small_stack(move || drop(tree));
     }
+}
+
+#[test]
+fn a_deep_tree_prints_with_debug_on_a_small_stack() {
+    for (tree, nodes) in [(chain(DEPTH), DEPTH + 2), (comb(DEPTH), 2 * DEPTH + 2)] {
+        let text = on_small_stack(|| format!("{tree:?}"));
+        assert_eq!(text.matches("Node {").count(), nodes);
+        assert!(text.ends_with("origin: None, index: 0 }"));
+        on_small_stack(move || drop(tree));
+    }
+    // The alternate form indents each level eight spaces more than the
+    // last, so its text grows with the square of the depth; this one is
+    // about 7 MB.
+    let tree = comb(PRETTY_DEPTH);
+    let text = on_small_stack(|| format!("{tree:#?}"));
+    assert_eq!(text.matches("Node {").count(), 2 * PRETTY_DEPTH + 2);
+    assert!(text.ends_with("index: 0,\n}"));
 }
 
 #[test]

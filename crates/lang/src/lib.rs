@@ -266,19 +266,21 @@ fn finish(parsed: fragment::Parsed, main_path: &Path, annotate: bool) -> Program
                 (Span::new(main, n, n), sources.get(main).line_of(n))
             }
         };
-        diags.push(
-            Diagnostic::new(
-                DiagCode::SyntaxError,
-                Severity::Error,
+        // Past the nesting limit OpenSCAD's Bison stack is full, and it
+        // says "memory exhausted" rather than "syntax error".
+        let (message, hint) = if e.too_deep {
+            ("Parser error: memory exhausted", nesting_hint())
+        } else {
+            (
                 "Parser error: syntax error",
+                syntax_hint(&sources, span, toks.get(e.token as usize).is_none()),
             )
-            .at(span, line)
-            .with_seq(seq_for_token(e.token) + 1)
-            .with_hint(syntax_hint(
-                &sources,
-                span,
-                toks.get(e.token as usize).is_none(),
-            )),
+        };
+        diags.push(
+            Diagnostic::new(DiagCode::SyntaxError, Severity::Error, message)
+                .at(span, line)
+                .with_seq(seq_for_token(e.token) + 1)
+                .with_hint(hint),
         );
     }
     diags.extend(lower_diags);
@@ -297,6 +299,15 @@ fn finish(parsed: fragment::Parsed, main_path: &Path, annotate: bool) -> Program
         uses,
         diags,
     }
+}
+
+/// The fix hint of the nesting limit's error, which OpenSCAD's message
+/// ("memory exhausted") does not explain.
+fn nesting_hint() -> String {
+    format!(
+        "the program nests more than {} levels deep here (statements, brackets or a chain of operators): build deep structures with a recursive module or function, or a list, instead of writing out every level",
+        syntax::parser::NESTING_LIMIT
+    )
 }
 
 /// The fix hint of a syntax error: the offending token and where it is

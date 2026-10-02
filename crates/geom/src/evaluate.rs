@@ -1047,6 +1047,21 @@ impl Renderer {
     /// thread at once, a measurable share of a whole `cube(1)` run from
     /// the command line; [`is_chain`] keeps trees with nothing to run side
     /// by side from starting it at all.
+    ///
+    /// Its threads get the evaluator's stack, as the thread that walks a
+    /// chain does. The walk no longer needs it (it nests at most
+    /// [`PARALLEL_MAX_NESTING`] splits deep): with 128 KiB a thread every
+    /// conformance test passes and every bench model's STL is the same
+    /// (release build, macOS arm64), where 64 KiB crashed BOSL2's
+    /// `fractal_tree` and the `module_recursion` tests.
+    /// The kernels do: building and reading a Clipper2 polytree recurses
+    /// once per level of polygon nesting (`from_tree`'s walk, Clipper2's
+    /// `recursive_check_owners`), so the union of 3,000 concentric rings
+    /// needed over 512 KiB, 6,000 over 1 MiB and 12,000 (19 s to compute)
+    /// over 2 MiB. With the evaluator's 80 MiB that nesting is limited by
+    /// time rather than by a crash, the same on a pool thread as on the
+    /// walking thread; and the size is only reserved address space, of
+    /// which a thread touches what it uses.
     #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
     fn pool(&self) -> &rayon::ThreadPool {
         self.pool.get_or_init(|| {

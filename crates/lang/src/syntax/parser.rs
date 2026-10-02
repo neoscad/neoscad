@@ -27,12 +27,77 @@ use crate::syntax::SyntaxKind::{self, *};
 use crate::syntax::cst::{Builder, Cst};
 use crate::syntax::lexer::Token;
 
-/// A syntax error at a token. The message is always Bison's "syntax error".
+/// A syntax error at a token. The message is Bison's "syntax error", or
+/// "memory exhausted" when the input nests deeper than the parser's limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyntaxError {
     /// Index into the parsed token list; `tokens.len()` means end of input.
     pub token: u32,
+    /// The syntax tree would have been deeper than the nesting limit
+    /// ([`NESTING_LIMIT`]) at this token. Parsing stopped there: the rest of
+    /// the input is kept in the tree, unparsed, as trailing tokens of the
+    /// root.
+    pub too_deep: bool,
 }
+
+/// How deep the syntax tree may nest, counted in nodes from the root (a
+/// top-level `cube();` is 2 deep, its argument list 3; each level of
+/// `translate()`, `{`, `(` or `[` adds one, each `else if` two),
+/// before parsing stops with OpenSCAD's "memory exhausted" error.
+///
+/// Every stage after the parser walks the source's nesting recursively:
+/// the parser itself, the lowering to the AST, the AST's clone and drop,
+/// the evaluator's scopes and expressions, and the formatter. Bounding
+/// the tree here is what turns a nesting that would overflow one of them
+/// into a parse error. The bound is a count, not a
+/// measured stack, so a program parses or fails the same way on every
+/// thread, and it is the same for every host: a limit that varied would
+/// make an included file's cached parse ([`crate::fragment`]) depend on
+/// who parsed it first.
+///
+/// OpenSCAD's Bison parser has a stack of 200,000 entries (`YYMAXDEPTH` in
+/// `parser.y`) and stops with "memory exhausted" when a program fills it:
+/// the nightly does at 99,997 levels of `translate()` or of `{`, and
+/// parses 100,000 levels of `(`. Its evaluator crashed on far less: 10,000
+/// levels of `translate()`, 50,000 of `[`. The deepest file in BOSL2,
+/// MCAD and OpenSCAD's tests is 186 nodes deep (MCAD's `bitmap.scad`, an
+/// `else if` chain).
+///
+/// Natively the limit is 5,000 in an optimised build, set by the stages
+/// that run on a thread's own stack. Measured in a release build on macOS
+/// arm64:
+/// - the parser and lowering take up to 800 bytes a node (`translate()`),
+///   and the formatter more: `neoscad fmt`, on the main thread's 8 MiB,
+///   overflowed between 8,000 and 10,000 levels of `(`;
+/// - with an evaluator's 80 MiB (`eval::DEFAULT_THREAD_STACK`), a program
+///   overflowed at 26,000 levels of `translate()`, and at over 150,000 of
+///   `{` or `(`;
+/// - nested list literals take memory with the square of their depth to
+///   evaluate (1.1 GB at 6,000 levels).
+#[cfg(all(not(target_arch = "wasm32"), not(debug_assertions)))]
+pub const NESTING_LIMIT: u32 = 5_000;
+
+/// [`NESTING_LIMIT`] in an unoptimised native build, whose frames are
+/// several times larger: on 80 MiB its evaluation of nested `translate()`
+/// overflowed between 3,600 and 3,800 levels, and its parser and lowering
+/// took 17 MB for 5,000.
+#[cfg(all(not(target_arch = "wasm32"), debug_assertions))]
+pub const NESTING_LIMIT: u32 = 2_500;
+
+/// [`NESTING_LIMIT`] on wasm32, where the engine's own stack is what the
+/// recursive stages overflow: V8's is under 1 MiB, a WebKit worker's a
+/// fifth of that. Measured in node 18 with a release build
+/// (`crates/wasm-check/run.js --depths`), the first to trap was a chain
+/// of `translate()` levels evaluated and rendered: at 542 levels (577 in
+/// another run of the same module), where the frame budget
+/// (`eval::recursion`) stops such a chain only from about 625. Parsing,
+/// lowering and formatting it alone trapped at 1,194 levels. This is 60%
+/// of the 542, the margin the frame budget keeps from V8's limit. WebKit
+/// is not covered: a WebKit worker overflowed at 187 levels of
+/// `translate()` (`docs/audits/heap-evaluator.md`). Nor is an unoptimised
+/// wasm32 build, which was not measured.
+#[cfg(target_arch = "wasm32")]
+pub const NESTING_LIMIT: u32 = 320;
 
 #[derive(Debug)]
 pub struct Parse {
@@ -43,6 +108,12 @@ pub struct Parse {
 /// Parse a token stream (trivia included, as produced by the lexer or the
 /// include-splicing loader).
 pub fn parse(tokens: Vec<Token>) -> Parse {
+    parse_with_limit(tokens, NESTING_LIMIT)
+}
+
+/// [`parse`] with a nesting limit other than [`NESTING_LIMIT`]: at most
+/// `limit` nodes from the root to the deepest leaf.
+pub fn parse_with_limit(tokens: Vec<Token>, limit: u32) -> Parse {
     let mut kinds = Vec::with_capacity(tokens.len() / 2 + 1);
     let mut raw = Vec::with_capacity(tokens.len() / 2 + 1);
     for (i, t) in tokens.iter().enumerate() {
@@ -60,14 +131,17 @@ pub fn parse(tokens: Vec<Token>) -> Parse {
         pos: 0,
         events: Vec::with_capacity(tokens.len()),
         open: Vec::new(),
+        limit: limit as usize,
+        exhausted: false,
         errors: Vec::new(),
     };
     p.source_file();
     let errors = p
         .errors
         .iter()
-        .map(|&sig| SyntaxError {
+        .map(|&(sig, too_deep)| SyntaxError {
             token: p.raw[sig as usize],
+            too_deep,
         })
         .collect();
     let cst = build(tokens, p.events);
@@ -97,7 +171,12 @@ type PResult<T = ()> = Result<T, Stop>;
 struct Marker(u32);
 
 #[derive(Debug, Clone, Copy)]
-struct Done(u32);
+struct Done {
+    /// The node's start event.
+    start: u32,
+    /// Nodes from this one to its deepest leaf, itself included.
+    height: u32,
+}
 
 /// Whether an element inside `[...]` turned out to be a list-comprehension
 /// clause or a plain expression.
@@ -114,10 +193,17 @@ struct Parser {
     raw: Vec<u32>,
     pos: usize,
     events: Vec<Event>,
-    /// Start events of nodes not yet completed.
-    open: Vec<u32>,
-    /// Significant-token positions of recorded errors.
-    errors: Vec<u32>,
+    /// Nodes not yet completed: each one's start event, and the height of
+    /// its tallest completed child.
+    open: Vec<(u32, u32)>,
+    /// The deepest the tree may get ([`NESTING_LIMIT`]).
+    limit: usize,
+    /// The tree reached `limit`, and the input now ends at the token where
+    /// it did, so every open rule unwinds as it would at the end of input.
+    exhausted: bool,
+    /// Significant-token positions of recorded errors, and whether each is
+    /// the nesting limit's.
+    errors: Vec<(u32, bool)>,
 }
 
 impl Parser {
@@ -136,6 +222,12 @@ impl Parser {
     }
 
     fn bump(&mut self) {
+        // The rule whose node went past the nesting limit had already
+        // matched its first token, and bumps it after opening the node;
+        // the input ended there (`exhaust`), so the node stays empty.
+        if self.exhausted {
+            return;
+        }
         debug_assert!(self.cur() != Eof);
         self.events.push(Event::Token);
         self.pos += 1;
@@ -155,11 +247,36 @@ impl Parser {
     }
 
     fn error<T>(&mut self) -> PResult<T> {
-        self.errors.push(self.pos as u32);
+        // Once the nesting limit has cut the input short, the rules that
+        // unwind meet its end: that is not a second error.
+        if !self.exhausted {
+            self.errors.push((self.pos as u32, false));
+        }
         Err(Stop)
     }
 
+    /// The tree would be deeper than the limit: record the error and end
+    /// the input at the current token. Every rule then sees the end of
+    /// input, so the parse unwinds through the usual error paths without
+    /// going any deeper, and `build` puts the unparsed tokens at the end
+    /// of the root, as it does trailing trivia.
+    fn exhaust(&mut self) {
+        if !self.exhausted {
+            self.exhausted = true;
+            self.errors.push((self.pos as u32, true));
+            self.kinds.truncate(self.pos);
+            self.kinds.push(Eof);
+        }
+    }
+
     // --- markers --------------------------------------------------------
+
+    // Every recursive rule opens a node before it recurses, so checking the
+    // depth where nodes open bounds the parser's own recursion as well as
+    // the tree. A node that encloses a completed one (`precede`, as in a
+    // chain `a + b + c`, which the parser reads in a loop but every later
+    // stage walks as nested nodes) makes that subtree one deeper at once,
+    // so it checks the subtree's height too.
 
     fn start(&mut self) -> Marker {
         let pos = self.events.len() as u32;
@@ -167,25 +284,45 @@ impl Parser {
             kind: Tombstone,
             forward_parent: 0,
         });
-        self.open.push(pos);
+        self.open.push((pos, 0));
+        if self.open.len() > self.limit {
+            self.exhaust();
+        }
         Marker(pos)
     }
 
+    /// Close the top open node: its start event and height, which goes
+    /// into its parent's tallest child.
+    fn close(&mut self) -> (u32, u32) {
+        let (start, tallest) = self.open.pop().unwrap_or((0, 0));
+        let height = tallest + 1;
+        if let Some((_, t)) = self.open.last_mut() {
+            *t = (*t).max(height);
+        }
+        (start, height)
+    }
+
     fn complete(&mut self, m: Marker, kind: SyntaxKind) -> Done {
-        let top = self.open.pop();
-        debug_assert_eq!(top, Some(m.0), "markers complete in LIFO order");
+        let (start, height) = self.close();
+        debug_assert_eq!(start, m.0, "markers complete in LIFO order");
         if let Event::Start { kind: k, .. } = &mut self.events[m.0 as usize] {
             *k = kind;
         }
         self.events.push(Event::Finish);
-        Done(m.0)
+        Done { start: m.0, height }
     }
 
     /// Start a node that will enclose the already completed `d`.
     fn precede(&mut self, d: Done) -> Marker {
         let m = self.start();
-        if let Event::Start { forward_parent, .. } = &mut self.events[d.0 as usize] {
-            *forward_parent = m.0 - d.0;
+        if let Some((_, t)) = self.open.last_mut() {
+            *t = d.height;
+        }
+        if self.open.len() + d.height as usize > self.limit {
+            self.exhaust();
+        }
+        if let Event::Start { forward_parent, .. } = &mut self.events[d.start as usize] {
+            *forward_parent = m.0 - d.start;
         }
         m
     }
@@ -195,7 +332,7 @@ impl Parser {
     /// that closes the enclosing block.
     fn recover(&mut self, depth: usize, in_block: bool) {
         while self.open.len() > depth {
-            let pos = self.open.pop().unwrap_or(0) as usize;
+            let pos = self.close().0 as usize;
             if let Event::Start { kind, .. } = &mut self.events[pos]
                 && *kind == Tombstone
             {
@@ -906,6 +1043,79 @@ mod tests {
     fn recovers_and_reports_several_errors() {
         let (p, _) = parse_str("a = ;\nb = 2;\nc = (;\nmodule m() { x = ; y(); }\nz();");
         assert_eq!(p.errors.len(), 3);
+    }
+
+    /// The errors of `src` parsed with nesting limit `limit`, as (token
+    /// text, too deep).
+    fn errors_with_limit(src: &str, limit: u32) -> Vec<(std::string::String, bool)> {
+        let mut sm = SourceMap::new();
+        sm.add("t.scad".into(), src.as_bytes().to_vec());
+        let p = parse_with_limit(lex(src.as_bytes(), FileId(0)).tokens, limit);
+        assert_eq!(p.cst.text(&sm), src.as_bytes(), "lossless: {src}");
+        let toks = p.cst.tokens();
+        p.errors
+            .iter()
+            .map(|e| {
+                let at = match toks.get(e.token as usize) {
+                    Some(t) => {
+                        std::string::String::from_utf8_lossy(sm.get(t.file).slice(t.start, t.end()))
+                            .into_owned()
+                    }
+                    None => "<eof>".into(),
+                };
+                (at, e.too_deep)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nesting_past_the_limit_stops_the_parse() {
+        // SourceFile > Assignment > ParenExpr ... > Literal: `x = (1);` is
+        // 4 deep, and every `(` one more. The error is at the token where
+        // the node that is one too deep starts.
+        assert_eq!(errors_with_limit("x = (1);", 4), vec![]);
+        assert_eq!(errors_with_limit("x = ((1));", 4), vec![("1".into(), true)]);
+        // One error however much input follows, broken or not: the parse
+        // ends where the limit was reached.
+        assert_eq!(
+            errors_with_limit("x = ((((1)))); y = ; z = (((2)));", 5),
+            vec![("(".into(), true)]
+        );
+        // An earlier syntax error is still the first.
+        assert_eq!(
+            errors_with_limit("a = ; x = ((((1))));", 5),
+            vec![(";".into(), false), ("(".into(), true)]
+        );
+        // Statements: SourceFile > ModuleInst > ModuleInst > ... > ArgList.
+        assert_eq!(errors_with_limit("a() b() c();", 5), vec![]);
+        assert_eq!(
+            errors_with_limit("a() b() c() d();", 5),
+            vec![(")".into(), true)]
+        );
+        assert_eq!(errors_with_limit("{{{a();}}}", 4), vec![("a".into(), true)]);
+    }
+
+    /// A chain the parser reads in a loop (`1 + 1 + ...`, `f()()`,
+    /// `a[0][0]`) still makes nested nodes, which later stages walk
+    /// recursively, so it counts against the limit as it grows.
+    #[test]
+    fn chains_count_against_the_limit() {
+        // SourceFile > Assignment > BinaryExpr x2 > Literal.
+        assert_eq!(errors_with_limit("x = 1 + 2 + 3;", 5), vec![]);
+        assert_eq!(
+            errors_with_limit("x = 1 + 2 + 3 + 4;", 5),
+            vec![("+".into(), true)]
+        );
+        assert_eq!(
+            errors_with_limit("x = a[0][1][2][3];", 5),
+            vec![("[".into(), true)]
+        );
+        // A right-nested chain grows as the parser recurses.
+        assert_eq!(errors_with_limit("x = 1 ^ 2 ^ 3;", 5), vec![]);
+        assert_eq!(
+            errors_with_limit("x = 1 ^ 2 ^ 3 ^ 4;", 5),
+            vec![("^".into(), true)]
+        );
     }
 
     #[test]

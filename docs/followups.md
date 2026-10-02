@@ -224,25 +224,34 @@ lead them, come roughly in order of user impact.
     function recursion 41 MB, one through a comprehension 100 MB, since
     stage 2);
   - the evaluator's start, `Unit::add_scope` (`crates/eval/src/eval.rs`),
-    recurses on source nesting, like the parser. Natively the parser
-    overflows first; in a browser, with the frame budget no longer
-    stopping nested statements early, deeply nested source
-    (`translate() translate() ... cube()`) now reaches it: see "Stage 1
-    done" for the depths;
+    recurses on source nesting, like the parser and the lowering. The
+    parser's nesting limit (`lang::syntax::parser::NESTING_LIMIT`: 5,000
+    natively, 320 on wasm32) now bounds all three, and natively a
+    program at the limit evaluates on the evaluator's stack
+    (`crates/eval/tests/deep_source.rs`). It is still what sets that
+    limit: a release build overflowed 80 MiB at about 26,000 levels of
+    `translate()`, a test build between 3,600 and 3,800 (hence a native
+    test build's limit of 2,500), while parsing and lowering took 800
+    bytes a level. Iterative, it would let the limit rise towards
+    OpenSCAD's (its parser stops at 99,997 levels);
   - which `--trace-usermodule-parameters` lines print `...` near the
     recursion limit, and how much of a nested value a trace prints deep
     in a module recursion, now follow the counted depth
     (`print.rs`, `MODULE_LEVEL_STACK`) rather than the native stack.
-- **The geometry pool's stack is still sized from the evaluator's**
-  (`geom/src/evaluate.rs`, `pool()`: `eval::DEFAULT_THREAD_STACK`, 80
-  MiB of address space per thread). Since heap-evaluator stage 0 the
-  render walk nests at most `PARALLEL_MAX_NESTING` (64) parallel splits
-  deep, whatever the tree's depth, so the walk no longer needs it. The
-  kernels' own stack needs (Manifold, Clipper2) were not measured, which
-  is what a smaller pool stack would have to check first.
-- **`Node`'s `Debug` is still derived, so recursive.** `{:?}` of a tree
-  as deep as the evaluator allows would overflow; only tests and debug
-  output print nodes that way today.
+- **The geometry pool's stack stays at the evaluator's 80 MiB**
+  (`geom/src/evaluate.rs`, `pool()`), measured: the walk needs little
+  (with 128 KiB a thread the conformance suite passes and the bench
+  models' STL is unchanged; 64 KiB crashed BOSL2's `fractal_tree` and the
+  `module_recursion` tests), but Clipper2 polytrees are built and read
+  recursively per level of polygon nesting (`clipper::from_tree`,
+  Clipper2's `recursive_check_owners` and `poly_tree_to_paths64`'s
+  helpers), so a union of 3,000 / 6,000 / 12,000 concentric rings needed
+  over 512 KiB / 1 MiB / 2 MiB. Making those walks iterative (ours, and
+  a vendor patch for Clipper2's) is what would let the pool shrink to
+  about 1 MiB; the size is only reserved address space today. Not
+  measured: a chain is walked on the calling thread, and its kernels'
+  data-parallel loops run on rayon's global pool (`is_chain`), whose
+  threads have rayon's default stack size.
 - **Call reuse (`eval::callmemo`) gains little from calls with
   children.** They are keyed now (the children's scope, and the variables
   their mentioned names reach in every context around them), and the
@@ -406,6 +415,15 @@ lead them, come roughly in order of user impact.
   (`perf-opportunities.md` P7, within 2% on six kernel-bound models,
   identical output). A kernel gain there needs hand-written `v128` code;
   relaxed SIMD would give up bit-identical results.
+- **Nested list literals take memory with the square of their depth to
+  evaluate.** `x = [[[...1...]]];` peaked at 33 MB at 1,000 levels,
+  495 MB at 4,000 and 1.1 GB at 6,000 (`neoscad -o x.echo`, release),
+  and `--limit memory=1024` did not stop it; the `.ast` export of the
+  same file stays small, so it is the evaluator. The parser's nesting
+  limit (5,000) caps it, at about 750 MB by that trend; with no limit, 512,000 levels
+  had reached 6.4 GB when stopped. Other nestings (statements,
+  parentheses, operator chains, `let`, comprehensions) stayed under
+  60 MB at 8,000 levels.
 
 ## Parity
 - `manifold-rust` 0.13.1 ports Manifold v3.5.0; OpenSCAD pins v3.5.2.
@@ -869,6 +887,14 @@ lead them, come roughly in order of user impact.
   - The intents run on the app's shared core, whose limits are
     `Limits::AGENT` because nothing in the app changes them; a future
     limits preference would reach the intents too.
+- The customizer's parse runs on the caller's thread: `Core::parameters`
+  (`crates/ffi/src/document.rs`) calls `client`'s `customizer()`, which
+  parses and lowers the document with no `eval::with_stack` around it,
+  unlike `LanguageServer::handle`. A dispatch queue's thread has 512
+  KiB, and at the parser's nesting limit (5,000 levels of `translate()`)
+  parsing and lowering take 3.9 MB, so a deeply nested document can
+  overflow the app's stack there. The Linux and Windows apps call the
+  same `client` code.
 
 ## Language server
 - `neoscad lsp --stdio`'s diagnostics are the session's parse and
@@ -1244,6 +1270,13 @@ lead them, come roughly in order of user impact.
   use. Experimental builtins (`roof`, `textmetrics`, ...) have no
   entries, only a note naming the `--enable` flag that turns them on
   (or that neoscad lacks it). (7b-2)
+- `neoscad fmt` on deeply nested source needs memory with the square of
+  the depth, from the indentation: at the parser's limit (5,000 levels)
+  it peaked at 236 MB for `translate()` chains, 362 MB for blocks and
+  622 MB for nested comprehensions. It runs on the main thread (8 MiB),
+  not the evaluator's: at the limit that held in a release build, but
+  without the limit it overflowed between 8,000 and 10,000 levels of
+  `(`.
 
 ## Fonts
 - Fontconfig's system configuration is not consulted, so names the
@@ -1389,13 +1422,17 @@ lead them, come roughly in order of user impact.
   - The probe runs cold. With only BBQ, JSC reaches 67-78% of the depth
     of a cold run, which the half covers; a warmer engine only goes
     deeper.
-  - Nesting in the source is not limited: `echo(((...(1)...)))` with a
-    few hundred brackets, or a few hundred nested statements, overflows
-    the parser's recursion (`Parser::expr`/`unary`/`binary`) in WebKit
-    at about 200, Chromium at about 900 and Firefox at about 1,750,
-    before any budget applies; lowering, resolution and
-    `eval::dump::Keys::new` recurse over the same depth. It needs a
-    nesting limit in `lang`'s parser sized for the web.
+  - Nesting in the source is limited now, but the limit is sized for
+    V8, not WebKit: `lang::syntax::parser::NESTING_LIMIT` is 320 syntax
+    tree levels on wasm32 (60% of where node 18 first trapped, a
+    `translate()` chain at 542; past it the parse ends in OpenSCAD's
+    "Parser error: memory exhausted", and `wasm-check.sh --depths` checks
+    seven kinds of nesting for it). WebKit overflowed the parser at about
+    200 brackets and `translate()` chains at 187 levels, below that.
+    The limit is a constant: lowering it for WebKit means a wasm32-only
+    setter in `lang` like `eval::recursion::set_frame_weights`, fed by
+    the worker's start-up probe (`crates/web`), or a parser, lowering and
+    `Unit::add_scope` that do not recurse.
 - **Done: the preview's product booleans run under the limits.**
   `geom::csg::product_meshes_until` checks a `geom::csg::Stop` (the
   request's interrupt flag and limits guard) before every kernel

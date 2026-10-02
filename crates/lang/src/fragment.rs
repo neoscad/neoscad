@@ -344,6 +344,7 @@ pub(crate) fn parse(
             .iter()
             .map(|e| SyntaxError {
                 token: shift(e.token),
+                ..*e
             })
             .collect();
         let (cst, ranges) = if inserts.is_empty() {
