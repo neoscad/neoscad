@@ -7,7 +7,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
 
 use geom::manifold_geom::{GlobalIds, ManifoldGeometry, OpType, kernel_token};
 use geom::{Geometry, RenderOptions, Renderer};
@@ -121,6 +120,47 @@ fn a_cancel_stops_a_single_boolean() {
     );
 }
 
+/// A guard whose memory probe reads over its 1 GiB limit from its
+/// `fire_at`-th call on (never, with `usize::MAX`), counting its calls in
+/// `calls`. Stopping at a call count, not after a sleep, makes the stop
+/// land inside the boolean on any machine (a timed one let the boolean
+/// finish first on a fast Mac).
+fn probe_guard(calls: Arc<AtomicUsize>, fire_at: usize) -> Arc<eval::limits::Guard> {
+    let probe: eval::limits::MemoryProbe = Arc::new(move || {
+        if calls.fetch_add(1, Ordering::Relaxed) + 1 >= fire_at {
+            2 << 30
+        } else {
+            0
+        }
+    });
+    let limits = eval::limits::Limits {
+        memory: Some(1 << 30),
+        ..Default::default()
+    };
+    Arc::new(
+        eval::limits::Guard::new(limits, Arc::new(AtomicBool::new(false)), None)
+            .with_probe(Some(probe)),
+    )
+}
+
+/// The probe calls a whole render of `src` on `renderer` makes.
+fn probe_calls(renderer: &Renderer, src: &str) -> usize {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let guard = probe_guard(calls.clone(), usize::MAX);
+    let out = render(
+        renderer,
+        src,
+        RenderOptions {
+            guard: Some(guard),
+            ..Default::default()
+        },
+    );
+    assert!(out.is_ok(), "a whole render");
+    let n = calls.load(Ordering::Relaxed);
+    assert!(n >= 4, "only {n} probe calls in a whole render");
+    n
+}
+
 /// A render cancelled inside its boolean is interrupted, and the
 /// cancelled (empty) solid is not cached: the next render on the same
 /// renderer gives what a fresh one does.
@@ -136,27 +176,24 @@ fn a_cancelled_boolean_is_not_cached() {
         RenderOptions::default(),
     )
     .expect("operands");
-    let (a, b) = operands();
-    let started = Instant::now();
-    let _ = a.boolean(&b, OpType::Subtract);
-    let boolean_time = started.elapsed();
-    let flag = Arc::new(AtomicBool::new(false));
-    let canceller = {
-        let flag = flag.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(boolean_time / 4);
-            flag.store(true, Ordering::Relaxed);
-        })
-    };
+    // The same state on a second renderer gives the probe calls a whole
+    // render makes; stopping at half of them lands inside the boolean.
+    let counting = Renderer::new();
+    render(
+        &counting,
+        "sphere(10, $fn = 160); translate([1, 1, 1]) sphere(10, $fn = 160);",
+        RenderOptions::default(),
+    )
+    .expect("operands");
+    let total = probe_calls(&counting, ONE_BOOLEAN);
     let out = render(
         &r,
         ONE_BOOLEAN,
         RenderOptions {
-            interrupt: Some(flag),
+            guard: Some(probe_guard(Arc::new(AtomicUsize::new(0)), total / 2)),
             ..Default::default()
         },
     );
-    canceller.join().expect("canceller");
     assert!(out.is_err_and(|u| u.is_interrupted()));
     let again = render(&r, ONE_BOOLEAN, RenderOptions::default()).expect("again");
     assert_eq!(
@@ -171,39 +208,16 @@ fn a_cancelled_boolean_is_not_cached() {
 /// memory limit recorded as measured, as the web core reports it.
 #[test]
 fn a_measured_memory_limit_stops_a_single_boolean() {
-    let over = Arc::new(AtomicBool::new(false));
-    let probe: eval::limits::MemoryProbe = {
-        let over = over.clone();
-        Arc::new(move || {
-            if over.load(Ordering::Relaxed) {
-                2 << 30
-            } else {
-                0
-            }
-        })
-    };
-    let flag = Arc::new(AtomicBool::new(false));
-    let limits = eval::limits::Limits {
-        memory: Some(1 << 30),
-        ..Default::default()
-    };
-    let guard =
-        Arc::new(eval::limits::Guard::new(limits, flag.clone(), None).with_probe(Some(probe)));
-    // The boolean starts, then the "allocator" passes the limit.
-    let raiser = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        over.store(true, Ordering::Relaxed);
-    });
+    let total = probe_calls(&Renderer::new(), ONE_BOOLEAN);
+    let guard = probe_guard(Arc::new(AtomicUsize::new(0)), total / 2);
     let out = render(
         &Renderer::new(),
         ONE_BOOLEAN,
         RenderOptions {
-            interrupt: Some(flag),
             guard: Some(guard.clone()),
             ..Default::default()
         },
     );
-    raiser.join().expect("raiser");
     assert!(out.is_err_and(|u| u.is_interrupted()));
     let e = guard.exceeded().expect("a limit");
     assert_eq!(e.limit, eval::limits::Limit::Memory);
