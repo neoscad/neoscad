@@ -31,8 +31,13 @@ state=${NEOSCAD_DOCKER_DIR:-$repo/target/docker-windows}
 mkdir -p "$state/cargo" "$state/target" "$state/nuget"
 
 limits=(--memory 8g --memory-swap 8g)
+# NEOSCAD_UPDATE_TEST_PUBLIC_KEY, when set, is passed to both containers:
+# the core is then built trusting that key (crates/client/src/update.rs)
+# and UpdateTests checks the signed fixtures against the real core. Unset,
+# as in CI, those tests check only that the core refuses them.
+keyenv=(-e NEOSCAD_UPDATE_TEST_PUBLIC_KEY)
 
-docker run --rm ${platform[@]+"${platform[@]}"} "${limits[@]}" \
+docker run --rm ${platform[@]+"${platform[@]}"} "${limits[@]}" "${keyenv[@]}" \
     -v "$repo":/src -v "$state/cargo":/usr/local/cargo/registry \
     -v "$state/target":/target -e CARGO_TARGET_DIR=/target \
     -e RUSTUP_TOOLCHAIN="$toolchain" -w /src "rust:$toolchain-bookworm" bash -euo pipefail -c "
@@ -49,7 +54,7 @@ docker run --rm ${platform[@]+"${platform[@]}"} "${limits[@]}" \
         cp /target/release/libneoscad_ffi.so windows/native/\$rid/
     "
 
-docker run --rm ${platform[@]+"${platform[@]}"} "${limits[@]}" \
+docker run --rm ${platform[@]+"${platform[@]}"} "${limits[@]}" "${keyenv[@]}" \
     -v "$repo":/src -v "$state/nuget":/root/.nuget/packages -w /src \
     -e DOTNET_CLI_TELEMETRY_OPTOUT=1 -e DOTNET_NOLOGO=1 \
     mcr.microsoft.com/dotnet/sdk:10.0 \

@@ -1640,6 +1640,7 @@ dependencies = [
  "neoscad-session",
  "neoscad-text",
  "serde_json",
+ "soup3",
  "webkit6",
 ]
 

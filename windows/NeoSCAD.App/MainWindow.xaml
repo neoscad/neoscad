@@ -24,6 +24,7 @@
   <Grid x:Name="Root">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
@@ -112,9 +113,25 @@
         <ToggleMenuFlyoutItem x:Name="CheckItem" Text="Check Panel" Tag="check" Click="OnPanelItem" />
         <ToggleMenuFlyoutItem x:Name="MeasureItem" Text="Measure Panel" Tag="measure" Click="OnPanelItem" />
       </MenuBarItem>
+      <MenuBarItem Title="Help">
+        <MenuFlyoutItem Text="Check for Updates…" Click="OnCheckForUpdates" />
+        <MenuFlyoutSeparator />
+        <ToggleMenuFlyoutItem x:Name="AutoUpdateItem" Text="Check for Updates Automatically" Click="OnAutoUpdateToggle" />
+        <ToggleMenuFlyoutItem x:Name="RcUpdateItem" Text="Receive Release Candidates" Click="OnRcUpdateToggle" />
+      </MenuBarItem>
     </MenuBar>
 
-    <SplitView x:Name="SidePanes" Grid.Row="1" PanePlacement="Right" DisplayMode="Inline"
+    <!-- "Update available" (MainWindow.Updates.cs): Install downloads and
+         checks the MSI, then installs it silently after one UAC prompt and
+         restarts; closing the bar is "Later" for that version. -->
+    <InfoBar x:Name="UpdateBar" Grid.Row="1" Margin="8,0,8,8" IsOpen="False" Severity="Informational"
+             IsClosable="True" CloseButtonClick="OnUpdateLater">
+      <InfoBar.ActionButton>
+        <Button x:Name="UpdateButton" Content="Install" Click="OnUpdateInstall" />
+      </InfoBar.ActionButton>
+    </InfoBar>
+
+    <SplitView x:Name="SidePanes" Grid.Row="2" PanePlacement="Right" DisplayMode="Inline"
                IsPaneOpen="False" OpenPaneLength="360" PaneBackground="Transparent">
       <SplitView.Pane>
         <Border Margin="0,0,8,0" CornerRadius="{StaticResource OverlayCornerRadius}"
@@ -183,7 +200,7 @@
       </Grid>
     </SplitView>
 
-    <TextBlock x:Name="Status" Grid.Row="2" Margin="12,6,12,8"
+    <TextBlock x:Name="Status" Grid.Row="3" Margin="12,6,12,8"
                Style="{ThemeResource CaptionTextBlockStyle}"
                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
   </Grid>

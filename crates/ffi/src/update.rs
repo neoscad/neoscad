@@ -133,3 +133,11 @@ pub fn check_for_update(
 pub fn update_feed_url(channel: UpdateChannel) -> String {
     update::Channel::from(channel).feed_url(update::FEED_BASE_URL)
 }
+
+/// Whether this build trusts any feed key. Before the release key exists
+/// (and in any build without one) no feed can verify, so an app should
+/// make no update request at all rather than fetch a feed it must refuse.
+#[uniffi::export]
+pub fn update_check_available() -> bool {
+    !update::trusted_keys().is_empty()
+}

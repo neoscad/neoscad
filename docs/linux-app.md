@@ -139,10 +139,12 @@ logic that is not GTK glue, and builds and is tested on every platform:
 | `customizer.rs` | The customizer's values, edits, field ranges and parameter sets on disk |
 | `inspect.rs` | Check and measure requests, the overlay as the viewport's annotations, picked points, the panels' text |
 | `watch.rs` | Which files a window watches, by directory |
+| `update.rs` | The update check's settings, when a check is due, the feed's address, and the notice for each install type ("Updates") |
 
 The window (`src/app/`) is compiled only with the `gtk` feature;
 `app/library.rs` is the read-only library viewer, `app/customizer.rs` and
-`app/inspect.rs` the side panels' widgets.
+`app/inspect.rs` the side panels' widgets, `app/update.rs` the update
+check's fetch, banner and preferences.
 
 ### The editor bridge
 
@@ -306,7 +308,12 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
   version), where a definition opens, the customizer (each control,
   edits snapped, clamped, cut and dropped, sets saved and applied), check
   (a thin plate's error, its marker and box) and measure (two picks ten
-  millimetres apart), and the files a run reads and watches.
+  millimetres apart), the files a run reads and watches, and the update
+  check against the signed fixtures in `crates/client/testdata/update`
+  (the defaults, a day between checks, a Flatpak offered its
+  architecture's bundle and a source build the release page, a bad or
+  edited signature and a replayed serial refused, rc only when opted
+  in, Later).
 - `linux/smoke.sh BIN [MODEL]` (Linux, Xvfb): with the editor bundle, it
   first opens a model with a warning and waits for `initialize`'s real
   capabilities and for the page to count its markers, and with `TYPE=1`
@@ -326,6 +333,66 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
 - CI's `linux-app` job (ubuntu-24.04) runs clippy and the tests with the
   `gtk` feature, builds the editor bundle and runs the smoke test with
   typing.
+
+## Updates
+
+The app tells the user about a newer release (owner decisions of
+2026-09-30, `docs/audits/auto-update.md`): the shared signed feed,
+checked by `client::update::check`, the code the CLI uses.
+
+- **When.** Automatically, ten seconds after start-up and then on an
+  hourly tick, each time only if a day has passed since the last check
+  (`linux_app::update::Settings::due`). Main menu > Check for Updates
+  checks at once and says what it found, a failure included; the
+  automatic check is silent and only logs (`G_MESSAGES_DEBUG=neoscad`,
+  lines starting `update:`). A build with no trusted key (every build
+  until the release key exists, `RELEASE_KEYS` in
+  `crates/client/src/update.rs`) makes no request at all.
+- **What it fetches.** `https://neoscad.org/updates/v1/stable.json`, or
+  `rc.json` with "Receive release candidates" on, and its `.minisig`:
+  plain GETs through libsoup (already linked by WebKitGTK), no cookies,
+  User-Agent `neoscad` (`docs/privacy.md`). Each is read up to 64 KiB.
+  The feed's signature, channel, serial (kept per channel, so an old
+  feed can't be replayed) and version are checked before anything is
+  shown.
+- **What it shows.** An `AdwBanner` under the header bar of every
+  window, "NeoSCAD x.y.z is available", whose Details button opens a
+  dialog that depends on how the app was installed
+  (`linux_app::update::Install`, from `/.flatpak-info`):
+  - *Flatpak* (the only way the app is released): the release bundles
+    carry no repository, so `flatpak update` never sees the next
+    release. Download Bundle opens the new release's bundle for this
+    architecture (through the OpenURI portal, so the browser downloads
+    it and Software opens it), and the text gives
+    `flatpak install --user --reinstall NeoSCAD-x.y.z-linux-<arch>.flatpak`.
+    A release whose bundle for this architecture is missing (aarch64's
+    build may fail) is not offered until it is attached.
+  - *Anything else* (a source build): Open Release Page, and the advice
+    to update it the way it was installed. The `.deb`, `.rpm` and
+    tarballs carry only the command line, which has its own notice.
+
+  Later hides the banner and keeps automatic checks from showing that
+  version again; a newer one, or the menu's check, shows it.
+- **Preferences** (main menu, Ctrl+,): "Check for updates
+  automatically" (on by default) and "Receive release candidates" (off).
+  Switching the channel checks the other feed at once. They are stored
+  with the serials in `updates.json` under the user's configuration
+  directory (`~/.config/neoscad/`, or
+  `~/.var/app/org.neoscad.NeoSCAD/config/neoscad/` in the Flatpak).
+- **Off switches.** `NEOSCAD_NO_UPDATE_CHECK` set (as for the CLI), or
+  `CI` set, stops the automatic check for that run; CI's smoke test
+  never checks.
+- **Testing against a local feed.** `NEOSCAD_UPDATE_FEED_URL` names
+  another feed directory: https, or plain http to the loopback address.
+  The signature is still checked against the keys compiled in, so a test
+  builds the app with `NEOSCAD_UPDATE_TEST_PUBLIC_KEY` set to a
+  throwaway key's public line (read at compile time, never at run time),
+  as `scripts/release/test-update-feed.sh` does for the CLI.
+
+Once the Flatpak repository the audit recommends exists (owner decision:
+its own GitHub Pages site), installs from it are updated by `flatpak
+update` and GNOME Software, and the app's notice for them should say so
+instead of offering a bundle (`docs/followups.md`, "Linux").
 
 ## Flatpak
 
@@ -369,7 +436,8 @@ Choices:
   byte-for-byte conformance output is checked with the pinned toolchain
   on the other platforms, not in the Flatpak (see `docs/followups.md`).
 - **Permissions.** Wayland with X11 fallback, IPC, `--device=dri` for
-  the GPU view, and `--filesystem=home`: a model reads the files beside
+  the GPU view, `--share=network` for the update check alone ("Updates"
+  above; OpenSCAD files can't reach the network), and `--filesystem=home`: a model reads the files beside
   it and in the user's library folder (`include`, `use`, `import`,
   fonts), and exports are written beside it, which the file chooser
   portal's one-file grant does not cover. OpenSCAD's own Flathub
@@ -432,7 +500,8 @@ so installing it offers to add Flathub if no remote has the runtime, and
 pulls `org.gnome.Platform` 51 from there. The bundle carries no
 repository of its own for the app (no `--repo-url`), so `flatpak update`
 does not reach the next release: install its bundle the same way (with
-`--reinstall` if flatpak reports the app as already installed). The bundle
+`--reinstall` if flatpak reports the app as already installed). The app
+says when there is one ("Updates"). The bundle
 is built from the tagged commit in `flatpak.yml`, called by
 `release.yml` as a publish job (`docs/release.md`); it is not on
 Flathub.

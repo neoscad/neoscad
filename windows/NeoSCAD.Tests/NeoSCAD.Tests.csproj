@@ -20,4 +20,11 @@
   <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
+  <!-- The update feed's signed fixtures (crates/client/testdata/update), for
+       UpdateTests: the same files the Rust tests read, not a copy to keep
+       in step. -->
+  <ItemGroup>
+    <None Include="..\..\crates\client\testdata\update\*.json;..\..\crates\client\testdata\update\*.minisig;..\..\crates\client\testdata\update\test.pub"
+          Link="update\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

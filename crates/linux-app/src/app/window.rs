@@ -52,6 +52,9 @@ pub struct Window {
     win: adw::ApplicationWindow,
     title: adw::WindowTitle,
     toasts: adw::ToastOverlay,
+    /// "NeoSCAD x.y.z is available", under the header bar while the app
+    /// knows of a newer release (`super::update`).
+    banner: adw::Banner,
     web: Option<webkit6::WebView>,
     view: ViewWidget,
     console: Console,
@@ -232,8 +235,13 @@ impl Window {
                 .build();
             let toasts = adw::ToastOverlay::new();
             toasts.set_child(Some(&split_view));
+            let banner = adw::Banner::builder()
+                .button_label("Details")
+                .revealed(false)
+                .build();
             let toolbar = adw::ToolbarView::new();
             toolbar.add_top_bar(&header);
+            toolbar.add_top_bar(&banner);
             toolbar.set_content(Some(&toasts));
             let win = adw::ApplicationWindow::builder()
                 .application(app)
@@ -250,6 +258,7 @@ impl Window {
                 win,
                 title,
                 toasts,
+                banner,
                 web,
                 view,
                 console,
@@ -332,6 +341,13 @@ impl Window {
         self.win.add_action(&export);
         let (me, shared) = (Rc::downgrade(&self), self.shared.clone());
         self.win.connect_destroy(move |_| shared.forget(&me));
+        let me = Rc::downgrade(&self);
+        self.banner.connect_button_clicked(move |_| {
+            if let Some(w) = me.upgrade() {
+                super::update::show_details(&w.shared, w.widget().upcast_ref());
+            }
+        });
+        self.show_update(self.shared.updates.notice().as_ref());
         // The web content process ended (a crash, or the system reclaimed
         // it). The document's copy of the text is complete, so reload the
         // page: `ready` shows the text again; only the undo history is
@@ -411,6 +427,14 @@ impl Window {
 
     pub fn toast(&self, message: &str) {
         self.toasts.add_toast(adw::Toast::new(message));
+    }
+
+    /// Show the banner for a newer release, or hide it.
+    pub fn show_update(&self, notice: Option<&linux_app::update::Notice>) {
+        if let Some(n) = notice {
+            self.banner.set_title(&n.title());
+        }
+        self.banner.set_revealed(notice.is_some());
     }
 
     fn update_titles(&self) {

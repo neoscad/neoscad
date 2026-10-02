@@ -22,8 +22,8 @@ it does not do yet is listed under "Next".
 |---|---|
 | `windows/NeoSCAD.sln` | The solution: the four projects below |
 | `windows/NeoSCAD.Bindings/` | The generated C# binding of `crates/ffi` (`Generated/neoscad_ffi.cs`, not checked in) and the core's native library for the platform, copied to every project that references it. `net10.0` |
-| `windows/NeoSCAD.Host/` | Host logic that is not UI, tested on any OS: `DocumentSession` (the window's loop, text copy, dirty state, save) and `DocumentSession.Panels.cs` (the customizer, check, measure, the view's overlay, export), `FileWatch` (the run's files on disk), `Shortcuts` (the chords the editor page forwards), `EditorSync` and `EditorProtocol` (the editor bridge), `EditorPage` (what the editor's origin serves, and the page's key script), `LanguageBridge` (the in-process language server), `StartupAction`, `AppLog` (the `--log` file), `PanelScale` (the viewport's display-scale arithmetic). `net10.0` |
-| `windows/NeoSCAD.App/` | The WinUI 3 app: `MainWindow` (menus, panes, pickers, dialogs), `Panels/` (`CustomizerPanel`, `CheckPanel`, `MeasurePanel`, built in code), `Editor/EditorHost.cs` (WebView2), `Viewport/ViewportPanel.cs` (the `SwapChainPanel`), `WinUiHost.cs` (DispatcherQueue timer and dispatcher). `net10.0-windows10.0.19041.0`, unpackaged, self-contained |
+| `windows/NeoSCAD.Host/` | Host logic that is not UI, tested on any OS: `DocumentSession` (the window's loop, text copy, dirty state, save) and `DocumentSession.Panels.cs` (the customizer, check, measure, the view's overlay, export), `FileWatch` (the run's files on disk), `Shortcuts` (the chords the editor page forwards), `EditorSync` and `EditorProtocol` (the editor bridge), `EditorPage` (what the editor's origin serves, and the page's key script), `LanguageBridge` (the in-process language server), `StartupAction`, `AppLog` (the `--log` file), `PanelScale` (the viewport's display-scale arithmetic), `Updates` (the update check, the MSI's download and the install helper; see "Updates"). `net10.0` |
+| `windows/NeoSCAD.App/` | The WinUI 3 app: `MainWindow` (menus, panes, pickers, dialogs; `MainWindow.Updates.cs` the update bar and Help menu), `Panels/` (`CustomizerPanel`, `CheckPanel`, `MeasurePanel`, built in code), `Editor/EditorHost.cs` (WebView2), `Viewport/ViewportPanel.cs` (the `SwapChainPanel`), `WinUiHost.cs` (DispatcherQueue timer and dispatcher). `net10.0-windows10.0.19041.0`, unpackaged, self-contained |
 | `windows/NeoSCAD.Tests/` | xUnit tests of `NeoSCAD.Host` and of the binding against the real core. `net10.0` |
 | `windows/installer/NeoSCAD.wxs` | The MSI's WiX 5 source (see "Installer") |
 | `windows/NeoSCAD.App/Assets/NeoSCAD.ico` | The app icon, built by `scripts/windows/make-icon.py` and committed |
@@ -155,6 +155,77 @@ terms that protect it and Microsoft at least as much as this agreement".
 The installer's licence page is how users agree (owner decision,
 2026-09-30). It presents the SDK's licence alongside the GPL, and the
 agreement covers those components.
+
+## Updates
+
+The app installs new releases itself (owner decisions of 2026-09-30,
+`docs/audits/auto-update.md`): "Update available", then Install, then a
+silent `msiexec` after one UAC prompt, and the app starts again on the
+new version. `NeoSCAD.Host/Updates.cs` has the logic, tested off
+Windows; `MainWindow.Updates.cs` the bar and the menu.
+
+- **The check.** Ten seconds after start-up and then hourly, each time
+  only when a day has passed since the last check, the app GETs
+  `https://neoscad.org/updates/v1/stable.json` (or `rc.json`) and its
+  `.minisig` (`update_feed_url`) with `HttpClient`: no cookies, the
+  User-Agent `neoscad`, at most 64 KiB each. The core's
+  `check_for_update`, the code the CLI and the Linux app use, verifies the
+  minisign signature against the keys compiled into the core, the
+  channel, the serial (kept per channel in the settings, so an old
+  signed feed can't be replayed) and the version, and offers only a
+  release with this architecture's MSI (`WindowsX64` or `WindowsArm64`,
+  from `RuntimeInformation.ProcessArchitecture`). A build with no key
+  (`update_check_available()` false, every build until the release key
+  exists) makes no request. Automatic checks are silent; failures go to
+  the `--log` file as `update:` lines. Help > Check for Updates… says
+  what it found.
+- **The bar.** An `InfoBar` under the menu: "NeoSCAD x.y.z is available"
+  with Install. Closing it is "Later": automatic checks don't show that
+  version again (the menu's check does). A copy that isn't the MSI's
+  (not in `%ProgramFiles%\NeoSCAD`, such as a build folder) gets Release
+  Page instead of Install, since the MSI would not replace it.
+- **Install.** After the usual save prompt, the MSI is downloaded into a
+  new folder under `%TEMP%`, refused (and deleted) if it is larger or
+  smaller than the signed feed says or its SHA-256 differs. The app then
+  starts a hidden, unelevated Windows PowerShell (`-EncodedCommand`,
+  which the execution policy doesn't govern) and closes. The helper
+  waits for the app's process to end (an installer can't replace files
+  a running app holds), checks the hash again, runs
+  `msiexec /i <msi> /qn /norestart /l*v install.log` with `-Verb RunAs`
+  (the one UAC prompt), and starts the app again, the new version if
+  the install worked and the old one if the prompt was declined or the
+  install failed. Staying unelevated is what keeps the restarted app
+  from running as administrator. `MajorUpgrade` with
+  `AllowSameVersionUpgrades` (see "Installer") replaces the old version,
+  an rc by its release included.
+- **Settings.** Help > "Check for Updates Automatically" (on by default)
+  and "Receive Release Candidates" (off). Switching the channel checks
+  the other feed at once. They live with the serials in
+  `%LOCALAPPDATA%\NeoSCAD\updates.json`.
+- **Off switches and testing.** `NEOSCAD_NO_UPDATE_CHECK` or `CI` set
+  stops automatic checks (CI's launch test never checks).
+  `NEOSCAD_UPDATE_FEED_URL` points at another feed directory (https, or
+  http to the loopback address); the signature is still checked against
+  the core's keys, so a test feed needs a core built with
+  `NEOSCAD_UPDATE_TEST_PUBLIC_KEY` set to a throwaway key's public line.
+  `docker-test.sh` passes that variable through; set to the line of
+  `crates/client/testdata/update/test.pub`, `UpdateTests` checks the
+  signed fixtures against the real core.
+
+Checked off Windows only (October 2026): `docker-test.sh` passes 93 of
+93 on linux-arm64, with and without the test key (`UpdateTests`: the
+settings, the feed address, the request carrying nothing identifying,
+the core accepting the fixtures and refusing a feed signed by another
+key, an edited feed and a replayed serial, a download refused for a
+wrong size, checksum, scheme or name, and the helper's script); the
+host's `UpdateClient` with a real `HttpClient` against a loopback feed
+signed with a throwaway key offered the x64 MSI and refused the same
+feed signed by another key and edited after signing; and
+`docker-typecheck.sh` compiles the bar and the menu. Not run until CI or
+a Windows machine does: `TheInstallerScriptParsesInWindowsPowerShell`
+(skipped off Windows), the `InfoBar`, the download in the app, UAC,
+`msiexec /qn` over an installed copy, and the restart
+(`docs/followups.md`, "Windows").
 
 ## Bindings
 

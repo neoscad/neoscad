@@ -1,12 +1,13 @@
 //! The application: one core for the process, a window per document, the
 //! app-wide actions (New Window, Open, Examples, the colour scheme,
-//! About, Quit) and their shortcuts.
+//! Preferences, Check for Updates, About, Quit) and their shortcuts.
 
 mod console;
 mod customizer;
 mod editor;
 mod inspect;
 mod library;
+mod update;
 mod viewport;
 mod window;
 
@@ -50,6 +51,9 @@ pub struct Shared {
     lsp_cache: Arc<lsp::Cache>,
     /// Where the editor bundle is, found once.
     pub editor_dir: Option<PathBuf>,
+    /// The update check's settings and the newer release, if any
+    /// (`update.rs`).
+    updates: update::Updates,
     /// `G_MESSAGES_DEBUG` names this app: the bridge also asks the page
     /// how many markers it shows after each publication, for the log
     /// (linux/smoke.sh checks it). Off, that is one call saved per run.
@@ -144,10 +148,12 @@ pub fn run() -> glib::ExitCode {
             viewers: RefCell::default(),
             lsp_cache: Arc::new(lsp::Cache::new()),
             editor_dir,
+            updates: update::Updates::new(),
             debug: std::env::var("G_MESSAGES_DEBUG")
                 .is_ok_and(|v| v.split([',', ' ']).any(|d| d == "neoscad" || d == "all")),
         });
         install_actions(app, &sh);
+        update::start(&sh);
         *s.borrow_mut() = Some(sh);
     });
 
@@ -365,6 +371,20 @@ fn install_actions(app: &adw::Application, sh: &Rc<Shared>) {
     });
     app.add_action(&style);
 
+    let preferences = gio::SimpleAction::new("preferences", None);
+    let (a, s) = (app.downgrade(), sh.clone());
+    preferences.connect_activate(move |_, _| {
+        if let Some(app) = a.upgrade() {
+            update::preferences(&s, app.active_window().as_ref());
+        }
+    });
+    app.add_action(&preferences);
+
+    let check_updates = gio::SimpleAction::new("check-updates", None);
+    let s = sh.clone();
+    check_updates.connect_activate(move |_, _| update::check_now(&s));
+    app.add_action(&check_updates);
+
     let about = gio::SimpleAction::new("about", None);
     let a = app.downgrade();
     about.connect_activate(move |_, _| {
@@ -504,6 +524,12 @@ pub fn main_menu() -> gio::Menu {
     }
     let app = gio::Menu::new();
     app.append_submenu(Some("Style"), &style);
+    app.append_item(&item(
+        "Preferences",
+        "app.preferences",
+        Some("<Control>comma"),
+    ));
+    app.append_item(&item("Check for Updates", "app.check-updates", None));
     app.append_item(&item("About NeoSCAD", "app.about", None));
     app.append_item(&item("Quit", "app.quit", Some("<Control>q")));
     menu.append_section(None, &app);
@@ -521,6 +547,7 @@ pub fn shortcuts() -> gtk::ShortcutController {
         ("<Control>n", "app.new-window"),
         ("<Control>o", "app.open"),
         ("<Control>q", "app.quit"),
+        ("<Control>comma", "app.preferences"),
         ("<Control>s", "win.save"),
         ("<Control><Shift>s", "win.save-as"),
         ("<Control><Shift>e", "win.export-again"),

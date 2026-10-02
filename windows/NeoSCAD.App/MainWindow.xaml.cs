@@ -76,6 +76,7 @@ public sealed partial class MainWindow : Window
 
         BuildExamplesMenu();
         BuildExportMenu();
+        StartUpdates(); // MainWindow.Updates.cs
         if (panel is not null) ShowPanel(panel);
         if (core is null) Status.Text = $"The core did not start: {CoreService.Error}";
         AppLog.Write(core is null ? $"core did not start: {CoreService.Error}" : "core started");

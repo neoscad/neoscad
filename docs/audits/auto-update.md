@@ -278,7 +278,23 @@ The shared foundation exists (`docs/release.md`, "The update feed"):
 - the check, `client::update::check` (signature, channel, serial,
   version, platform), and the apps' entry point `check_for_update` and
   `update_feed_url` in `crates/ffi/src/update.rs`;
-- the CLI's notice (`crates/cli/src/update.rs`; `docs/privacy.md`).
+- the CLI's notice (`crates/cli/src/update.rs`; `docs/privacy.md`);
+- the Windows app's check, download and silent install
+  (`windows/NeoSCAD.Host/Updates.cs`, `windows/NeoSCAD.App/MainWindow.Updates.cs`;
+  `docs/windows-app.md`, "Updates"): the shared feed through
+  `check_for_update`, the MSI checked against the feed's size and
+  sha256, then an unelevated helper that waits for the app to exit,
+  runs `msiexec /i … /qn` after one UAC prompt and starts the app again.
+  Help has "Check for Updates…", "Check for Updates Automatically" and
+  "Receive Release Candidates". Built and unit-tested off Windows; not
+  yet run on Windows;
+- the Linux app's check and notice (`crates/linux-app/src/update.rs`,
+  `src/app/update.rs`; `docs/linux-app.md`, "Updates"): a banner and a
+  dialog that, for the Flatpak, offers the new bundle (the bundles carry
+  no repository, so `flatpak update` doesn't reach it) and otherwise
+  the release page, with the same two preferences. This needed
+  `--share=network` in the Flatpak (finding 4); the Flatpak repository
+  below remains the way to updates without a download.
 
 Nothing is live until the owner creates the minisign key, adds its public
 half to `RELEASE_KEYS`, and sets `UPDATE_FEED_MINISIGN_KEY`,
@@ -314,20 +330,21 @@ Next steps, in order:
    to `RELEASE_KEYS`, set the three secrets, then run `gh workflow run
    update-feed.yml` and check
    `https://neoscad.org/updates/v1/stable.json` and its `.minisig`.
-2. **Windows app.** Fetch the feed (`update_feed_url`) once a day and from
-   a menu item, and keep each channel's last serial in the settings. Call
-   `check_for_update` with `WindowsX64` or `WindowsArm64`. Show "Update
-   available", then on Install download the MSI to `%TEMP%`, check its
-   sha256 from the offer, run `msiexec /qn` after one UAC prompt and
-   restart. Add the settings "Check for updates automatically" and
-   "Receive release candidates". Fix finding 5 (`AllowSameVersionUpgrades`)
-   first.
-3. **macOS app.** Built (above); only the key is missing. The shared
-   feed's `macos` entry is for other readers: the CLI, the website, a
-   future custom check.
-4. **Linux app.** The GPG-signed Flatpak repository on its own Pages site
-   (owner decision). GNOME Software and Discover then notify, and the app
-   needs no check of its own or network permission.
+2. **Windows app.** Built (above; finding 5 was already fixed by
+   `AllowSameVersionUpgrades="yes"`). Left: run it on Windows against a
+   test-signed feed and an older installed MSI, and look at the UAC
+   prompt, SmartScreen (expected none for an `HttpClient` download) and
+   the restart (`docs/windows-app.md`, "Updates").
+3. **macOS app.** Built and keyed: the public EdDSA key is in
+   `apple/project.yml` (Release only) and `SPARKLE_ED_PRIVATE_KEY` is set.
+   Left: the `appcast` job's first real run, with `WEBSITE_TOKEN`. The
+   shared feed's `macos` entry is for other readers: the CLI, the website,
+   a future custom check.
+4. **Linux app.** The in-app notice is built (above). Still to do: the
+   GPG-signed Flatpak repository on its own Pages site (owner decision),
+   so GNOME Software, Discover and `flatpak update` update the app; the
+   app's notice should then tell installs from that repository to use
+   them rather than offering a bundle.
 5. **Website.** A privacy page from `docs/privacy.md`, and download links
    that could read the feed instead of being edited by hand.
 6. **Later.** Each artifact's minimum OS version in the feed (the field

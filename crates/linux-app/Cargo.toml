@@ -25,7 +25,16 @@ required-features = ["gtk"]
 
 [features]
 default = []
-gtk = ["dep:gtk", "dep:adw", "dep:webkit6", "heap-eval", "mimalloc", "dep:futures-channel", "dep:futures-util"]
+gtk = [
+    "dep:gtk",
+    "dep:adw",
+    "dep:webkit6",
+    "heap-eval",
+    "mimalloc",
+    "dep:futures-channel",
+    "dep:futures-util",
+    "dep:soup",
+]
 # The heap evaluator (`neoscad-eval`'s `heap-eval`), on with `gtk` as in
 # neoscad-cli and neoscad-ffi (docs/audits/heap-evaluator.md).
 heap-eval = ["eval/heap-eval"]
@@ -61,6 +70,10 @@ webkit6 = { version = "0.6", optional = true }
 # in order (already in the tree through glib).
 futures-channel = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true }
+# The update check's two GETs (src/app/update.rs): libsoup, which
+# WebKitGTK already links (webkit6 depends on this crate), so the app
+# gains no HTTP stack of its own and the Flatpak's runtime provides it.
+soup = { package = "soup3", version = "0.9", optional = true }
 
 [lints]
 workspace = true

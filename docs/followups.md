@@ -1597,9 +1597,31 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   export, the parts toggle, and Cut/Copy/Paste in the Edit menu (the
   editor's context menu has them; a page script cannot paste without a
   user gesture). Each is host work only.
+- The Windows app's update install (`docs/windows-app.md`, "Updates")
+  has never run on Windows: the download, the hidden PowerShell helper
+  (`-EncodedCommand`), the UAC prompt for `msiexec /qn`, the major
+  upgrade replacing the running copy's files after it exits, the
+  restart, and the InfoBar. Check them against an older installed MSI
+  and a test-signed local feed, and whether SmartScreen says anything
+  about the downloaded MSI (expected not: no Mark of the Web). A
+  declined UAC prompt starts the old version again; a failed install is
+  only in `install.log` beside the downloaded MSI in `%TEMP%`, and the
+  app says nothing about it after the restart.
 
 ## Linux
 
+- The Linux app's update notice (`docs/linux-app.md`, "Updates") offers
+  a Flatpak install the new bundle to download, because the bundles
+  carry no repository. Once the GPG-signed Flatpak repository exists
+  (`docs/audits/auto-update.md`, next step 4), installs from it should
+  be told to use `flatpak update` or Software instead (the origin is in
+  `/.flatpak-info`), and bundles built with `--repo-url` would move
+  bundle users there too. Until then the Flatpak has `--share=network`
+  for the check alone; the owner may prefer to drop it once the
+  repository makes the in-app check redundant for Flatpak users.
+- The Linux update check ran only in Docker (a faked `/.flatpak-info`,
+  a loopback feed, Xvfb): Download Bundle through the OpenURI portal and
+  Software opening the bundle were not tried in a real Flatpak.
 - The Linux app (milestone 1, `docs/linux-app.md`) was run only on
   Ubuntu 24.04 in Docker (arm64, Xvfb, Mesa lavapipe), never on a
   Wayland session or a real GPU, and never with the portal's file

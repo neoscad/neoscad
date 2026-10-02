@@ -75,5 +75,21 @@ time of the last check, and your choices, in the app's preferences
 (`~/Library/Preferences/org.neoscad.NeoSCAD.plist`). A build without the
 update key (development builds) makes no update request at all.
 
-The Windows and Linux apps don't check yet, so they make no update
-request.
+**The Windows and Linux apps** read the same feed as the command line. A
+build with no feed key (every build until the release key exists) makes
+no update request at all.
+
+- **Windows:** Help > "Check for Updates Automatically" (on by default)
+  and "Receive Release Candidates" (off); Help > "Check for Updates…"
+  works with the first off. The settings, the time of the last check and
+  the last feed serial are kept in `%LOCALAPPDATA%\NeoSCAD\updates.json`.
+  Install downloads the new MSI from GitHub Releases, which then sees
+  that request too; nothing is downloaded until you choose Install.
+- **Linux:** Preferences > Updates has the same two settings, and the main
+  menu "Check for Updates". They are kept in `updates.json` under
+  `~/.config/neoscad/` (`~/.var/app/org.neoscad.NeoSCAD/config/neoscad/`
+  in the Flatpak). The app only says that a release exists; downloading
+  it is up to you.
+
+Both send the same plain request as the command line, and neither checks
+automatically when `NEOSCAD_NO_UPDATE_CHECK` or `CI` is set.
