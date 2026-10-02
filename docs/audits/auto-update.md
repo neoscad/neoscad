@@ -284,6 +284,30 @@ Nothing is live until the owner creates the minisign key, adds its public
 half to `RELEASE_KEYS`, and sets `UPDATE_FEED_MINISIGN_KEY`,
 `UPDATE_FEED_MINISIGN_KEY_PASSWORD` and `WEBSITE_TOKEN`.
 
+The macOS app's updater is built too (`docs/release.md`, "The macOS
+app's updates"), as recommended above with two departures:
+
+- the appcast is at `https://neoscad.org/updates/macos/appcast.xml`, beside
+  the JSON feeds, not at `/appcast.xml`;
+- the rc channel is called `rc`, not `beta`, to match `rc.json` and the
+  setting's name.
+
+It is made of Sparkle 2.10.0 (still the newest release on 2026-10-01) in
+`apple/project.yml`; the menu item and Settings (`apple/App/Updates`);
+`release.sh` signing Sparkle's helpers explicitly (finding 3) and checking
+that every Mach-O carries the team's signature; the `appcast` job in
+`update-feed.yml` with `scripts/release/appcast.py`; `auto_updates true` in
+the cask; and `scripts/apple/test-updates.sh`, which installs one local
+build over another from a signed local appcast. The public key is
+`NEOSCAD_SPARKLE_PUBLIC_KEY` in `apple/project.yml`. Until the owner sets
+it, apps have no updater, and `release.sh` refuses to notarize, so **no
+release can be published until the key exists**. The owner must:
+
+1. make the key (`generate_keys`, `docs/release.md`), keep it in the
+   password manager, and put the public half in `apple/project.yml`;
+2. set the secret `SPARKLE_ED_PRIVATE_KEY` (and `WEBSITE_TOKEN`, shared
+   with the feeds).
+
 Next steps, in order:
 
 1. **Keys and the first live feed.** Create the key, add the public half
@@ -298,11 +322,9 @@ Next steps, in order:
    restart. Add the settings "Check for updates automatically" and
    "Receive release candidates". Fix finding 5 (`AllowSameVersionUpgrades`)
    first.
-3. **macOS app.** Sparkle 2 with its own appcast and EdDSA key, as
-   recommended above, including `release.sh`'s re-signing of
-   `Autoupdate` (finding 3) and `auto_updates true` in the cask. The
-   shared feed's `macos` entry is then for other readers: the CLI, the
-   website, a future custom check.
+3. **macOS app.** Built (above); only the key is missing. The shared
+   feed's `macos` entry is for other readers: the CLI, the website, a
+   future custom check.
 4. **Linux app.** The GPG-signed Flatpak repository on its own Pages site
    (owner decision). GNOME Software and Discover then notify, and the app
    needs no check of its own or network permission.

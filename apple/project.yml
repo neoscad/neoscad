@@ -14,6 +14,10 @@
 #   NeoSCADThumbnail  sandboxed Quick Look thumbnail extension, likewise
 #   NeoSCADTests  Swift tests of the core through the bindings
 #   NeoSCADAppTests  tests hosted in the app: documents, the Render command
+#
+# Packages: Sparkle, the app's updater (App/Updates; docs/release.md, "The
+# macOS app's updates"). Its public EdDSA key is the build setting
+# NEOSCAD_SPARKLE_PUBLIC_KEY in the NeoSCAD target below.
 name: NeoSCAD
 
 options:
@@ -36,6 +40,15 @@ options:
     icon:
       file: true
       buildPhase: resources
+
+# Sparkle 2, from its Swift package: a binary target whose URL and
+# checksum are pinned in the package's own manifest, so an exact version
+# here pins the framework's bytes. The generated project resolves it into
+# DerivedData's SourcePackages on the first build.
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
 
 settings:
   base:
@@ -124,6 +137,10 @@ targets:
       # app has been launched (or registered with lsregister).
       - target: NeoSCADQuickLook
       - target: NeoSCADThumbnail
+      # The updater (App/Updates). Embedded in Contents/Frameworks with its
+      # helpers (Autoupdate, Updater.app, the XPC services), which
+      # scripts/apple/release.sh signs explicitly.
+      - package: Sparkle
     # The editor bundle into Resources/Editor, where
     # App/Editor/EditorSchemeHandler.swift serves it from. A script rather
     # than a folder reference: Xcode decides whether to copy a folder
@@ -187,15 +204,47 @@ targets:
             LSItemContentTypes:
               - org.openscad.scad
             NSDocumentClass: SCADDocument
+        # Sparkle (App/Updates; docs/release.md, "The macOS app's
+        # updates"). Both values come from the build settings below. With
+        # no public key the app starts no updater at all: no menu item, no
+        # request, and Settings says the build doesn't update itself.
+        SUFeedURL: $(NEOSCAD_SPARKLE_FEED_URL)
+        SUPublicEDKey: $(NEOSCAD_SPARKLE_PUBLIC_KEY)
+        # The owner's decision (docs/audits/auto-update.md, "Decisions"):
+        # check about once a day (Sparkle's default interval) from the
+        # first launch, without Sparkle's second-launch permission prompt;
+        # Settings turns it off.
+        SUEnableAutomaticChecks: true
+        # The appcast must carry a valid EdDSA signature too, not only the
+        # DMG, so a tampered or replaced feed can't steer the app (to an
+        # old release's notes, say). And the DMG is checked before it is
+        # mounted, so a forged archive never reaches hdiutil.
+        SURequireSignedFeed: true
+        SUVerifyUpdateBeforeExtraction: true
     entitlements:
       path: App/NeoSCAD.entitlements
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.neoscad.NeoSCAD
         PRODUCT_NAME: NeoSCAD
+        # The appcast, written by update-feed.yml's `appcast` job.
+        NEOSCAD_SPARKLE_FEED_URL: https://neoscad.org/updates/macos/appcast.xml
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: App/NeoSCAD.entitlements
+      configs:
+        Release:
+          # THE UPDATE KEY. The public half of the Sparkle EdDSA key that
+          # signs the appcast and the DMGs (the secret SPARKLE_ED_PRIVATE_KEY;
+          # docs/release.md, "The macOS app's updates"): base64 of 32 bytes,
+          # as `generate_keys -p` prints it. Every installed app trusts only
+          # the key it was built with, so this changes only by the rotation
+          # procedure there. Release only: a Debug build has no key, so no
+          # updater (a development build must not offer to replace itself
+          # with a release). scripts/apple/release.sh refuses to notarize
+          # without it, and update-feed.yml refuses to sign with a key whose
+          # public half isn't this one.
+          NEOSCAD_SPARKLE_PUBLIC_KEY: "Q5thf+WQzftalpPYei0jsC2WlMNyAFdlorKCNT1joJI="
 
   # The Quick Look extensions (docs/audits/macos-prep.md, 8h). Sandboxed:
   # Quick Look grants each request the one file it is about. Both link

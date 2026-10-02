@@ -59,6 +59,21 @@ is then fetched or written.
 ### The apps
 
 The macOS, Windows and Linux apps check automatically, about once a day,
-using the same feed, and a setting turns that off (owner decision,
-`docs/audits/auto-update.md`, "Decisions"). That setting is not built yet;
-until it is, the apps make no update request at all.
+and a setting turns that off (owner decision,
+`docs/audits/auto-update.md`, "Decisions").
+
+**The macOS app** uses Sparkle, which reads its own signed file,
+`https://neoscad.org/updates/macos/appcast.xml`, instead of the JSON feed.
+It checks soon after the first launch and then about once a day. NeoSCAD >
+Settings… has "Check for updates automatically" (on) and "Receive release
+candidates" (off), and NeoSCAD > Check for Updates… checks at once either
+way. The request is a plain `GET` of that file with the User-Agent
+`neoscad`. Sparkle's system profile, which would add the Mac's model and
+OS version to the request, is off. When an update is offered and you
+accept it, the DMG is downloaded from GitHub Releases. Sparkle keeps the
+time of the last check, and your choices, in the app's preferences
+(`~/Library/Preferences/org.neoscad.NeoSCAD.plist`). A build without the
+update key (development builds) makes no update request at all.
+
+The Windows and Linux apps don't check yet, so they make no update
+request.

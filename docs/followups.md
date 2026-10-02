@@ -632,6 +632,32 @@ lead them, come roughly in order of user impact.
 
 ## macOS app
 
+- Updates (Sparkle; `docs/release.md`, "The macOS app's updates"), left
+  after the first version:
+  - The owner hasn't created the EdDSA key yet. Until
+    `NEOSCAD_SPARKLE_PUBLIC_KEY` (`apple/project.yml`) and the secret
+    `SPARKLE_ED_PRIVATE_KEY` are set, `release.sh` refuses to notarize,
+    so the release's `app` job fails and the release stays a prerelease
+    without its app.
+  - The `appcast` job in `update-feed.yml` has passed actionlint only.
+    Its first real run is after the key exists. `appcast.py`'s
+    `--require-notarized` path (Gatekeeper on the DMG and the app) has
+    not run on a notarized DMG.
+  - The update dialog shows a heading and a link to the GitHub release,
+    not the notes themselves. Sparkle could show the release body as
+    HTML, embedded in the signed appcast; that needs Markdown to HTML in
+    the job.
+  - No delta updates; each update is the whole DMG (the audit's "Later").
+  - Key rotation is written up but untried. It relies on Sparkle
+    accepting a new key when the new app's code signature matches the
+    old app's team (`SUUpdateValidator.m` in Sparkle 2.10.0).
+  - Sparkle's XPC services ship in the app but aren't used, because the
+    app isn't sandboxed. Sparkle documents removing them for such apps;
+    that would save a little size and two signatures.
+  - `scripts/apple/test-updates.sh` builds the app twice with
+    `release.sh` (about the cost of two releases' Swift and CLI builds)
+    and runs it on the developer's Mac only. CI doesn't run it.
+
 - Shared core, left after `docs/audits/shared-core.md` steps 1-6: the
   web page still keeps its own console filter list, printer presets,
   customizer snap/clamp (`web/src/model/customizer.js`), measure overlay

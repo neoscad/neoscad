@@ -12,7 +12,13 @@
 # No `binary` stanza and so no `conflicts_with formula: "neoscad"`: the app
 # bundle carries no command-line tool (the DMG's universal CLI ships
 # beside it, not inside it), so the cask and the formula install nothing
-# in common. No `auto_updates`: the app does not update itself.
+# in common.
+#
+# `auto_updates true`: the app updates itself with Sparkle (docs/release.md,
+# "The macOS app's updates"), so `brew upgrade` leaves it alone unless
+# given --greedy, and Homebrew and Sparkle don't both replace the app.
+# Every cask this template fills is for an app with the update key:
+# scripts/apple/release.sh refuses to notarize one without it.
 cask "neoscad-app" do
   version "@VERSION@,@BUILD@"
   sha256 "@SHA256_DMG@"
@@ -37,9 +43,11 @@ cask "neoscad-app" do
     end
   end
 
-  # apple/project.yml's deploymentTarget, macOS 15.0. A bare symbol is a
-  # minimum: current Homebrew (rubocop Homebrew/OSDependsOn) rewrites
-  # ">= :sequoia" to it and spells a maximum `depends_on maximum_macos:`.
+  # auto_updates: see the top. depends_on: apple/project.yml's
+  # deploymentTarget, macOS 15.0. A bare symbol is a minimum: current
+  # Homebrew (rubocop Homebrew/OSDependsOn) rewrites ">= :sequoia" to it
+  # and spells a maximum `depends_on maximum_macos:`.
+  auto_updates true
   depends_on macos: :sequoia
 
   app "NeoSCAD.app"
@@ -53,6 +61,7 @@ cask "neoscad-app" do
     "~/Library/Caches/org.neoscad.NeoSCAD",
     "~/Library/Containers/org.neoscad.NeoSCAD.QuickLook",
     "~/Library/Containers/org.neoscad.NeoSCAD.Thumbnail",
+    "~/Library/HTTPStorages/org.neoscad.NeoSCAD",
     "~/Library/Preferences/org.neoscad.NeoSCAD.plist",
     "~/Library/Saved Application State/org.neoscad.NeoSCAD.savedState",
     "~/Library/WebKit/org.neoscad.NeoSCAD",

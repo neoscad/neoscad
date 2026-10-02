@@ -33,6 +33,17 @@
 #                           staple the app, the DMG and the CLI.
 #   CARGO_TARGET_DIR        honoured, as build-core.sh does
 #
+# The app's updater (Sparkle; docs/release.md, "The macOS app's updates")
+# trusts the public EdDSA key NEOSCAD_SPARKLE_PUBLIC_KEY in
+# apple/project.yml. A notarized build refuses to start without it, since
+# an app shipped without a key can never be updated in place. For the
+# local end-to-end test (scripts/apple/test-updates.sh) only, and only for
+# ad-hoc builds:
+#
+#   NEOSCAD_TEST_SPARKLE_PUBLIC_KEY  a throwaway key instead of the project's
+#   NEOSCAD_TEST_SPARKLE_FEED_URL    a local appcast instead of neoscad.org
+#   NEOSCAD_TEST_BUILD_NUMBER        CFBundleVersion instead of the commit count
+#
 #   scripts/apple/release.sh              build, sign, package, verify, smoke test
 #   scripts/apple/release.sh --no-smoke   without the smoke test
 #
@@ -141,6 +152,36 @@ else
     # An ad-hoc signature has no certificate for a timestamp to vouch for.
     timestamp=--timestamp=none
 fi
+
+# The updater's key and feed. The test overrides make a build that trusts a
+# key the release workflow doesn't sign with, or reads a feed nobody else
+# can reach, so they are for ad-hoc builds only: a signed build is one that
+# might ship.
+test_key=${NEOSCAD_TEST_SPARKLE_PUBLIC_KEY:-}
+test_feed=${NEOSCAD_TEST_SPARKLE_FEED_URL:-}
+test_build=${NEOSCAD_TEST_BUILD_NUMBER:-}
+if [ -n "$test_key$test_feed$test_build" ]; then
+    [ -z "$identity" ] || die "the NEOSCAD_TEST_* variables are for ad-hoc test builds; unset them or NEOSCAD_SIGN_IDENTITY"
+    [ -z "$resume" ] || die "the NEOSCAD_TEST_* variables apply to the build, not to --$resume"
+fi
+sparkle_key=$(sed -n 's/^ *NEOSCAD_SPARKLE_PUBLIC_KEY: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' apple/project.yml)
+sparkle_key=${test_key:-$sparkle_key}
+if [ -n "$sparkle_key" ]; then
+    # Base64 of 32 bytes, as Sparkle's generate_keys prints it. The app
+    # treats anything else as no key (App/Updates/AppUpdater.swift), which
+    # would quietly ship an app that never updates.
+    key_bytes=$(base64 -d <<<"$sparkle_key" 2>/dev/null | wc -c | tr -d ' ')
+    [ "$key_bytes" = 32 ] || die "the Sparkle public key '$sparkle_key' is not base64 of 32 bytes"
+    updates="Sparkle, key $sparkle_key"
+elif [ -n "$notary" ] && [ -z "$resume" ]; then
+    die "NEOSCAD_SPARKLE_PUBLIC_KEY is empty in apple/project.yml: a notarized app without the update key could never update itself (docs/release.md, \"The macOS app's updates\")"
+else
+    updates="none (no NEOSCAD_SPARKLE_PUBLIC_KEY in apple/project.yml)"
+fi
+if [ -n "$test_feed" ]; then
+    updates="$updates, feed $test_feed (test)"
+fi
+
 if [ -n "$notary" ]; then
     # Fail before a long build, not after it, if the profile is missing.
     xcrun notarytool history --keychain-profile "$notary" >/dev/null 2>&1 ||
@@ -165,7 +206,8 @@ marketing_version=${version%%-*}
 # names instead: CI runs it from a checkout of the tag, whose history
 # `rev-list --count` need not see.
 if [ -z "$resume" ]; then
-    build_number=$(git rev-list --count HEAD)
+    build_number=${test_build:-$(git rev-list --count HEAD)}
+    [[ "$build_number" =~ ^[0-9]+$ ]] || die "the build number $build_number is not digits"
     commit=$(git rev-parse --short=12 HEAD)
     dirty=no
     if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
@@ -395,13 +437,16 @@ sign_settings=(CODE_SIGN_IDENTITY="$sign_id" CODE_SIGN_STYLE=Manual)
 if [ -n "$identity" ]; then
     sign_settings+=(DEVELOPMENT_TEAM="$team" OTHER_CODE_SIGN_FLAGS=--timestamp)
 fi
+update_settings=()
+if [ -n "$test_key" ]; then update_settings+=(NEOSCAD_SPARKLE_PUBLIC_KEY="$test_key"); fi
+if [ -n "$test_feed" ]; then update_settings+=(NEOSCAD_SPARKLE_FEED_URL="$test_feed"); fi
 log=$work/archive.log
 if ! xcodebuild \
     -project apple/NeoSCAD.xcodeproj -scheme NeoSCAD -configuration Release \
     -destination generic/platform=macOS \
     -derivedDataPath "$work/DerivedData" -archivePath "$archive" \
     MARKETING_VERSION="$marketing_version" CURRENT_PROJECT_VERSION="$build_number" \
-    "${sign_settings[@]}" \
+    "${sign_settings[@]}" ${update_settings[@]+"${update_settings[@]}"} \
     archive >"$log" 2>&1; then
     grep -E 'error:|\*\* ARCHIVE' "$log" | sort -u >&2 || tail -40 "$log" >&2
     die "xcodebuild archive failed; full log: $log"
@@ -412,18 +457,41 @@ grep -E '(warning|error):' "$log" | grep -v 'Metadata extraction skipped' | sort
 app=$app_stage/NeoSCAD.app
 entitlements=$root/apple/App/NeoSCAD.entitlements
 
+# Sparkle's framework, inside out, as Sparkle documents it
+# (sparkle-project.org/documentation/sandboxing, "Code Signing"): its two
+# XPC services, the bare `Autoupdate` executable and `Updater.app`, then
+# the framework. Autoupdate is why this is spelled out: it is neither a
+# bundle nor a dylib, so the generic loop below would leave it with the
+# ad-hoc signature Sparkle ships, and notarization refuses any executable
+# not signed with the Developer ID. Downloader.xpc keeps its entitlements
+# (its sandbox and network client); nothing here uses --deep, which would
+# re-sign the services with the wrong ones.
+sign_sparkle() {
+    local fw=$1/Contents/Frameworks/Sparkle.framework
+    local b=$fw/Versions/B
+    [ -x "$b/Autoupdate" ] && [ -d "$b/Updater.app" ] || die "no Sparkle.framework with Autoupdate and Updater.app in the app"
+    codesign --force --options runtime $timestamp --sign "$sign_id" "$b/XPCServices/Installer.xpc"
+    codesign --force --options runtime $timestamp --preserve-metadata=entitlements \
+        --sign "$sign_id" "$b/XPCServices/Downloader.xpc"
+    codesign --force --options runtime $timestamp --sign "$sign_id" "$b/Autoupdate"
+    codesign --force --options runtime $timestamp --sign "$sign_id" "$b/Updater.app"
+    codesign --force --options runtime $timestamp --sign "$sign_id" "$fw"
+}
+
 # Sign nested code inside out (a bundle's signature seals its contents'
 # signatures, so the inner ones must be final first), each with the
 # hardened runtime. Nested bundles keep the entitlements Xcode gave them
 # (the Quick Look extensions' sandbox); the app gets its own file.
 sign_app() {
     local bundle=$1 item
+    sign_sparkle "$bundle"
     while IFS= read -r item; do
         codesign --force --options runtime $timestamp --preserve-metadata=entitlements \
             --sign "$sign_id" "$item"
     done < <(find "$bundle/Contents" -depth \
         \( -name '*.framework' -o -name '*.dylib' -o -name '*.appex' -o -name '*.xpc' \
-        -o -name '*.app' \) -not -path '*/Versions/Current*' -print)
+        -o -name '*.app' \) -not -path '*/Versions/Current*' \
+        -not -path '*/Sparkle.framework*' -print)
     codesign --force --options runtime $timestamp --entitlements "$entitlements" \
         --sign "$sign_id" "$bundle"
 }
@@ -446,6 +514,14 @@ EOF
     xcodebuild -quiet -exportArchive -archivePath "$archive" \
         -exportPath "$work/export" -exportOptionsPlist "$options"
     ditto "$work/export/NeoSCAD.app" "$app"
+    # Xcode's export is documented to sign Sparkle's helpers itself; they
+    # are signed again anyway, the same way as the ad-hoc path, so the
+    # notarized app never depends on what one Xcode version's export
+    # does. The check below that every Mach-O carries the team's
+    # signature would catch a helper left behind either way.
+    sign_sparkle "$app"
+    codesign --force --options runtime $timestamp --entitlements "$entitlements" \
+        --sign "$sign_id" "$app"
 else
     say "Sign (ad hoc, hardened runtime)"
     ditto "$archive/Products/Applications/NeoSCAD.app" "$app"
@@ -483,6 +559,13 @@ while IFS= read -r macho; do
     esac
     has_archs "$macho" ||
         die "${macho#"$app"/} is $(lipo -archs "$macho"), not ${archs[*]}"
+    # Notarization refuses an executable signed by anyone else, and
+    # Sparkle ships its helpers signed ad hoc.
+    if [ -n "$identity" ]; then
+        macho_team=$(codesign -dv "$macho" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+        [ "$macho_team" = "$team" ] ||
+            die "${macho#"$app"/} is signed by team '${macho_team:-none}', not $team"
+    fi
     echo "${macho#"$app"/}: $(lipo -archs "$macho")"
 done < <(find "$app" -type f -perm -u+x -print | while IFS= read -r f; do
     if file -b "$f" | grep -q Mach-O; then echo "$f"; fi
@@ -502,6 +585,9 @@ shipped_version=$(plutil -extract CFBundleShortVersionString raw "$app/Contents/
 shipped_build=$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")
 [ "$shipped_version" = "$marketing_version" ] && [ "$shipped_build" = "$build_number" ] ||
     die "Info.plist says $shipped_version ($shipped_build), expected $marketing_version ($build_number)"
+shipped_key=$(plutil -extract SUPublicEDKey raw "$app/Contents/Info.plist" 2>/dev/null || true)
+[ "$shipped_key" = "$sparkle_key" ] ||
+    die "Info.plist's SUPublicEDKey is '$shipped_key', expected '$sparkle_key'"
 
 # The dSYMs must match what ships, or a crash report cannot be symbolicated
 # with them: the UUIDs of each binary and its dSYM agree.
@@ -681,6 +767,7 @@ fi
     echo "notarized:     $notarized"
     echo "app size:      $((app_bytes / 1024)) MB unpacked"
     echo "architectures: ${archs[*]} (every Mach-O in the app, and the CLI; $x86_run)"
+    echo "updates:       $updates"
     echo
     echo "codesign --verify --deep --strict: passed; hardened runtime on every Mach-O"
     echo "spctl (app):   $(oneline "$app_spctl")"

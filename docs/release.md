@@ -13,6 +13,7 @@ below and `docs/packaging.md`.
     scripts/apple/release.sh --staple-app DIR   # once Accepted: staple, make and submit the DMG
     scripts/apple/release.sh --staple-dmg DIR   # once Accepted: staple and check the DMG
     scripts/apple/smoke-release.sh DMG CLI [VERSION]   # the smoke test alone
+    scripts/apple/test-updates.sh [DIR]   # the updater end to end: two builds, a local appcast
 
 The app and the CLI are universal, arm64 + x86_64, as OpenSCAD's macOS
 DMG is ("Universal, macOS 11+" in `docs/packaging.md`): the Release
@@ -79,6 +80,12 @@ the notary credentials; the script only names them.
 | `NEOSCAD_TEAM_ID` | Its team. Read from the identity's `(TEAMID)` if unset. |
 | `NEOSCAD_NOTARY_PROFILE` | A `notarytool` keychain profile. With an identity: notarize and staple. Without one: an error. Checked with `notarytool history` before the build starts. |
 | `CARGO_TARGET_DIR` | Honoured, by `build-core.sh` too. |
+| `NEOSCAD_TEST_SPARKLE_PUBLIC_KEY`, `NEOSCAD_TEST_SPARKLE_FEED_URL`, `NEOSCAD_TEST_BUILD_NUMBER` | For `scripts/apple/test-updates.sh` only: a throwaway update key, a local appcast and a chosen `CFBundleVersion`. Refused with `NEOSCAD_SIGN_IDENTITY` set, so no signed build carries them ("The macOS app's updates" below). |
+
+A notarized build (`NEOSCAD_NOTARY_PROFILE` set) also needs the update key,
+`NEOSCAD_SPARKLE_PUBLIC_KEY` in `apple/project.yml`. The script refuses to
+start without it: an app published without a key could never update itself
+in place.
 
 One-time owner setup, not done yet (no Developer ID identity exists on the
 build Mac as of 8j; `security find-identity -v -p codesigning` lists two
@@ -106,10 +113,18 @@ will not use):
    - *Developer ID:* the archive is signed with the identity and a secure
      timestamp, then `xcodebuild -exportArchive` with a generated
      `ExportOptions.plist` (`method` `developer-id`, manual signing).
+     Sparkle's helpers are then signed again explicitly (below) and the
+     app after them.
    - *Ad hoc:* the app is copied out of the archive and re-signed inside
      out (nested frameworks, dylibs, app extensions and XPC services
      first, keeping their entitlements; the app last with
      `apple/App/NeoSCAD.entitlements`), all with `--options runtime`.
+     Sparkle's framework is signed first, in the order Sparkle documents:
+     `Installer.xpc`, `Downloader.xpc` (keeping its entitlements), the
+     bare `Autoupdate` executable, `Updater.app`, then the framework.
+     `Autoupdate` is neither a bundle nor a dylib, so the generic loop
+     would leave it with the ad-hoc signature Sparkle ships it with, and
+     notarization refuses that. Never `--deep`.
      Ad-hoc signing adds one entitlement,
      `com.apple.security.cs.disable-library-validation`: under the
      hardened runtime, library validation only loads libraries of the
@@ -122,8 +137,11 @@ will not use):
 4. **Verify** (both modes): `codesign --verify --deep --strict`; the
    hardened-runtime flag and both architectures (`lipo -verify_arch`,
    one architecture per call) on every Mach-O in the bundle; no
-   `get-task-allow`; no dSYM inside the app; `Info.plist` versions; each
-   dSYM's UUID equals its binary's. Then `spctl -a -vv -t exec`.
+   `get-task-allow`; no dSYM inside the app; `Info.plist` versions and
+   `SUPublicEDKey`; each dSYM's UUID equals its binary's. With Developer
+   ID, every Mach-O must carry the team's signature (`TeamIdentifier`),
+   which catches a Sparkle helper left signed ad hoc. Then
+   `spctl -a -vv -t exec`.
 5. **Notarize** (with a profile): the app is zipped, submitted with
    `notarytool submit --wait` and stapled, so a copy dragged out of the
    DMG opens offline; then the DMG is signed, submitted and stapled;
@@ -302,7 +320,8 @@ such as `v0.1.0` runs, in order:
 6. **announce**.
 7. **update feed** (`update-feed.yml`, a cargo-dist post-announce job):
    the signed `stable.json` and `rc.json` on neoscad.org, from the
-   release's assets ("The update feed" below). It runs again from
+   release's assets ("The update feed" below), and the macOS app's
+   Sparkle appcast ("The macOS app's updates"). It runs again from
    `macos-notarize.yml` once the DMG is attached.
 
 A prerelease tag (`v0.2.0-beta.1`) makes a GitHub prerelease and skips
@@ -325,7 +344,8 @@ The `.deb` and `.rpm` carry `0.1.0~rc.1` so they sort before `0.1.0`
 | `NEOSCAD_SIGN_IDENTITY`, `NEOSCAD_TEAM_ID` | the same two, as the local variables above |
 | `NEOSCAD_NOTARY_KEY`, `NEOSCAD_NOTARY_KEY_ID`, `NEOSCAD_NOTARY_ISSUER` | the same two: an App Store Connect API key for `notarytool` |
 | `UPDATE_FEED_MINISIGN_KEY`, `UPDATE_FEED_MINISIGN_KEY_PASSWORD` | `update-feed.yml` (from `release.yml` through `secrets: inherit`, and from `macos-notarize.yml`): the text of the minisign secret key file that signs the update feeds, and its password. Its public half must be in `RELEASE_KEYS` (`crates/client/src/update.rs`), or the job fails. Without it the job warns, and the feeds it wrote are kept only as the run's artifact ("The update feed" below) |
-| `WEBSITE_TOKEN` | `update-feed.yml`'s push of `updates/v1/` to `neoscad/website`: a fine-grained token, resource owner `neoscad`, only that repository, Contents read and write. Without it the job warns and nothing is published |
+| `WEBSITE_TOKEN` | `update-feed.yml`'s push of `updates/v1/` and `updates/macos/appcast.xml` to `neoscad/website`: a fine-grained token, resource owner `neoscad`, only that repository, Contents read and write. Without it the jobs warn and nothing is published |
+| `SPARKLE_ED_PRIVATE_KEY` | `update-feed.yml`'s `appcast` job: the text of the Sparkle EdDSA private key file (`generate_keys -x`), which signs the appcast and the DMGs ("The macOS app's updates" below). Its public half must be `NEOSCAD_SPARKLE_PUBLIC_KEY` in `apple/project.yml`, or the job fails. Without it the job warns and writes nothing |
 
 Cutting one: bump `version`; add (or date) the version's `<release
 version="…" date="YYYY-MM-DD"/>` at the top of `<releases>` in
@@ -721,6 +741,114 @@ or redirected, with `CI` or `NEOSCAD_NO_UPDATE_CHECK` set, or for a
 tampered feed. `crates/client/testdata/update/make.sh` regenerates the
 unit tests' signed fixtures. `docs/privacy.md` says what the check sends
 and how to turn it off.
+
+## The macOS app's updates
+
+The app updates itself with [Sparkle](https://sparkle-project.org) 2.10.0
+(`apple/project.yml`, `packages:`), following
+`docs/audits/auto-update.md` and the owner's decisions there: it checks
+about once a day from the first launch, with "Check for updates
+automatically" in Settings to turn that off; NeoSCAD > Check for
+Updates… checks at once; and "Receive release candidates" (off by
+default) lets the app see release candidates.
+
+    https://neoscad.org/updates/macos/appcast.xml
+
+The appcast is separate from the JSON feeds above because it is
+Sparkle's own format and signature, and Sparkle does the download, the
+verification, the install and the relaunch. It lists at most two items:
+
+- the newest release whose tag has no prerelease part and that has a
+  DMG, which every app sees;
+- the newest release of any kind with a DMG, when that is a release
+  candidate newer than the first, with `<sparkle:channel>rc</sparkle:channel>`.
+  Only apps with "Receive release candidates" on ask for that channel
+  (`App/Updates/AppUpdater.swift`).
+
+Sparkle orders items by `sparkle:version`, the app's `CFBundleVersion`
+(`git rev-list --count HEAD`, "Versions" above), so a final release
+always follows its candidates. `sparkle:shortVersionString` is the full
+version (`0.3.0-rc.1`), which is what the update dialog shows. The DMG is
+the notarized one attached to the release; there is no second archive and
+no delta.
+
+**Signatures.** One EdDSA (Ed25519) key signs both the appcast and each
+DMG. The app's `Info.plist` sets `SURequireSignedFeed` (the appcast must
+carry a valid signature, so a replaced appcast is ignored) and
+`SUVerifyUpdateBeforeExtraction` (the DMG's signature is checked before it
+is mounted), and Sparkle also checks that the new app's code signature is
+valid. The public half is in one place:
+
+    apple/project.yml, target NeoSCAD:  NEOSCAD_SPARKLE_PUBLIC_KEY: ""
+
+It becomes `SUPublicEDKey`. While it is empty (the state until the owner
+creates the key), the app has no updater at all: no menu item, no request,
+and Settings says the build doesn't update itself. Sparkle given no key
+would alert the user to "contact the developer", so the app never starts
+it. Development builds stay that way. The pipeline refuses to go on
+without it: `release.sh` won't build a notarized app with an empty key,
+and the `appcast` job fails when the key is empty or isn't the public
+half of its secret.
+
+**How it's made.** `update-feed.yml`'s `appcast` job runs on `macos-15`
+next to the JSON feeds' job, from the same three triggers (after
+`announce`, after `macos-notarize.yml` advanced a release, and by hand).
+`scripts/release/appcast.py` reads the last 30 releases. For each item it
+downloads the DMG, checks it against the asset's GitHub `digest`, checks
+that Gatekeeper accepts the DMG and the app in it (`--require-notarized`),
+and mounts it to read the app's own `CFBundleVersion`,
+`LSMinimumSystemVersion` and `SUPublicEDKey`. An app built without the key
+is refused, because Sparkle won't install an update that drops it. Then
+it signs the DMG with Sparkle's `sign_update` (from Sparkle's release,
+pinned by SHA-256 in `scripts/release/sparkle-tools.sh`), writes the
+appcast, and signs that last (the signature goes in a closing XML
+comment). Ed25519 signatures are deterministic, so an unchanged list of
+releases gives the same bytes, and nothing is pushed. A changed appcast
+goes to `updates/macos/appcast.xml` in `neoscad/website`, and is kept as
+the run's artifact `appcast-<run>-<attempt>`. The private key reaches
+`sign_update` on standard input only.
+
+The first run after a release finds no new DMG (it isn't attached until
+notarization), so Macs hear about a release once `macos-notarize.yml`
+has attached its DMG, as with the JSON feed.
+
+**The key.** Create it once, on a Mac, with Sparkle's tool:
+
+    scripts/release/sparkle-tools.sh .cache/sparkle      # gitignored
+    .cache/sparkle/bin/generate_keys --account neoscad    # prints the public key
+    .cache/sparkle/bin/generate_keys --account neoscad -x neoscad-sparkle.key
+
+- The password manager holds `neoscad-sparkle.key`. The repository secret
+  `SPARKLE_ED_PRIVATE_KEY` holds a working copy (the file's text). Then
+  delete the file. `generate_keys` also leaves the key in the login
+  keychain; remove it from there too if that Mac isn't the backup.
+- The public key goes in `NEOSCAD_SPARKLE_PUBLIC_KEY` in
+  `apple/project.yml`, and ships with the next release.
+  `xcrun swift scripts/release/sparkle-key.swift public < neoscad-sparkle.key`
+  prints it from the file too, which is how the `appcast` job checks the
+  secret.
+- Losing the private key strands every installed app: it then trusts no
+  appcast, and users must download the next release by hand.
+
+**Rotating the key.** Sparkle accepts an update signed with the old key
+whose app carries a new one (it checks that the new app's code signature
+matches the old app's team). So: put the new public key in
+`apple/project.yml` and release, with the appcast still signed by the old
+key. Once that release has been out long enough, replace the secret with
+the new key. Apps that skipped the transition release then need a manual
+update. Not tried yet.
+
+**Testing it locally.** `scripts/apple/test-updates.sh [WORK_DIR]` builds
+the app twice with `release.sh` (ad hoc, build numbers 1 and 2), trusting
+a throwaway key it makes with `sparkle-key.swift generate` and reading an
+appcast on `127.0.0.1`. It writes and signs that appcast with
+`appcast.py` from a fake release, serves it, and runs build 1 three
+times. A tampered appcast must be refused (the DMG is never requested).
+The real one must be offered (a second window). With automatic
+installation on, build 2 must be downloaded, verified, and installed in
+place when the app quits. It saves the `org.neoscad.NeoSCAD` preferences
+first and restores them, and refuses to run while any NeoSCAD is running.
+The key never enters the repository.
 
 ## Smoke test
 

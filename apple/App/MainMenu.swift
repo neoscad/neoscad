@@ -41,6 +41,15 @@ enum MainMenu {
         let name = ProcessInfo.processInfo.processName
         let m = NSMenu(title: name)
         m.addItem(item("About \(name)", #selector(AppDelegate.showAboutPanel(_:))))
+        // Only in a build that has an updater (one with the update key);
+        // Sparkle's controller is the target and enables it.
+        if let updater = AppUpdater.shared {
+            let check = item("Check for Updates…", AppUpdater.checkAction)
+            check.target = updater.menuTarget
+            m.addItem(check)
+        }
+        m.addItem(.separator())
+        m.addItem(item("Settings…", #selector(AppDelegate.showSettings(_:)), ","))
         m.addItem(.separator())
         let services = item("Services", nil)
         services.submenu = NSMenu(title: "Services")

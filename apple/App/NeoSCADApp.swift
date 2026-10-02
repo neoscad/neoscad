@@ -33,6 +33,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate()
+        // Sparkle's schedule (App/Updates/AppUpdater.swift). Not under
+        // XCTest: the hosted app tests must make no network request, and
+        // a check's window would sit over the documents they drive.
+        if NSClassFromString("XCTestCase") == nil {
+            AppUpdater.shared?.start()
+        }
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        SettingsWindowController.shared.show()
     }
 
     /// A new untitled document on launch without files to open, as a text

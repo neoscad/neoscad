@@ -6,6 +6,8 @@
 # Runs three ways, and does the same each time: derive both feeds from the
 # repository's releases (scripts/release/update-feed.py), sign the ones
 # that changed, and push them to the website repository neoscad/website.
+# The `appcast` job below does the same for the macOS app's Sparkle
+# appcast (scripts/release/appcast.py).
 #
 # - from release.yml, after `announce` (`post-announce-jobs` in Cargo.toml's
 #   [workspace.metadata.dist]), when the publish jobs have attached the
@@ -20,6 +22,7 @@
 #   UPDATE_FEED_MINISIGN_KEY           the minisign secret key file's text
 #   UPDATE_FEED_MINISIGN_KEY_PASSWORD  its password
 #   WEBSITE_TOKEN                      Contents read and write on neoscad/website
+#   SPARKLE_ED_PRIVATE_KEY             the appcast's EdDSA key (the `appcast` job)
 name: Update feed
 
 on:
@@ -153,6 +156,125 @@ jobs:
           # The website is also edited by hand; a push that loses that race
           # is rebased (the feed files are only ever written here) and
           # retried.
+          for attempt in 1 2 3; do
+            git -c "$header" push --quiet && break
+            [[ $attempt -lt 3 ]] || exit 1
+            sleep 10
+            git -c "$header" pull --quiet --rebase
+          done
+          echo "Published: $msg" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # The macOS app's Sparkle appcast, https://neoscad.org/updates/macos/appcast.xml
+  # (docs/release.md, "The macOS app's updates"). On macOS, because it
+  # mounts each DMG to read the app's build number and checks its
+  # signatures, and signs with Sparkle's own sign_update. The DMG is
+  # attached only by macos-notarize.yml, so the run after `announce` finds
+  # nothing new; the one from macos-notarize.yml lists it.
+  #
+  # Secrets (both optional; without one the job warns and publishes nothing):
+  #   SPARKLE_ED_PRIVATE_KEY  the private EdDSA key file's text (generate_keys -x)
+  #   WEBSITE_TOKEN           as above
+  appcast:
+    runs-on: macos-15
+    timeout-minutes: 30
+    concurrency:
+      group: update-appcast
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+      WEBSITE_TOKEN: ${{ secrets.WEBSITE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # The secret's public half must be the key the apps were built with
+      # (apple/project.yml), or every install would refuse the appcast,
+      # which looks like "no updates" rather than an error.
+      - name: The key
+        id: key
+        run: |
+          if [[ -z "$SPARKLE_ED_PRIVATE_KEY" ]]; then
+            echo "::warning::No SPARKLE_ED_PRIVATE_KEY secret; the appcast is not written."
+            exit 0
+          fi
+          want=$(sed -n 's/^ *NEOSCAD_SPARKLE_PUBLIC_KEY: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' apple/project.yml)
+          got=$(xcrun swift scripts/release/sparkle-key.swift public <<<"$SPARKLE_ED_PRIVATE_KEY")
+          if [[ -z "$want" ]]; then
+            echo "::error::NEOSCAD_SPARKLE_PUBLIC_KEY is empty in apple/project.yml; set it to $got"
+            exit 1
+          fi
+          if [[ "$got" != "$want" ]]; then
+            echo "::error::The SPARKLE_ED_PRIVATE_KEY's public key $got is not apple/project.yml's NEOSCAD_SPARKLE_PUBLIC_KEY ($want)."
+            exit 1
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Sparkle's tools
+        if: steps.key.outputs.ok == 'true'
+        run: scripts/release/sparkle-tools.sh "$RUNNER_TEMP/sparkle"
+
+      - name: The website
+        if: steps.key.outputs.ok == 'true'
+        run: |
+          site=$RUNNER_TEMP/website
+          if [[ -n "$WEBSITE_TOKEN" ]]; then
+            auth=$(printf 'x-access-token:%s' "$WEBSITE_TOKEN" | base64 | tr -d '\n')
+            echo "::add-mask::$auth"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+              clone --quiet --depth 1 https://github.com/neoscad/website.git "$site"
+          else
+            echo "::warning::No WEBSITE_TOKEN secret; the appcast is written but not published."
+            git clone --quiet --depth 1 https://github.com/neoscad/website.git "$site" \
+              || mkdir -p "$site"
+          fi
+          mkdir -p "$site/updates/macos"
+
+      - name: Write and sign the appcast
+        id: write
+        if: steps.key.outputs.ok == 'true'
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=30" > "$RUNNER_TEMP/releases.json"
+          python3 scripts/release/appcast.py --releases "$RUNNER_TEMP/releases.json" \
+            --appcast "$RUNNER_TEMP/website/updates/macos/appcast.xml" \
+            --sign-update "$RUNNER_TEMP/sparkle/bin/sign_update" \
+            --work "$RUNNER_TEMP/dmgs" --require-notarized > "$RUNNER_TEMP/appcast-changed.txt"
+          changed=$(tr -d '\n' < "$RUNNER_TEMP/appcast-changed.txt")
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          if [[ -n "$changed" ]]; then
+            { echo "### appcast.xml"; echo '```xml'; cat "$RUNNER_TEMP/website/updates/macos/appcast.xml"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The appcast is current." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Keep the appcast
+        if: steps.write.outputs.changed != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: appcast-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/website/updates/macos
+          retention-days: 30
+
+      - name: Push to neoscad/website
+        if: steps.write.outputs.changed != ''
+        run: |
+          if [[ -z "$WEBSITE_TOKEN" ]]; then
+            echo "::warning::No WEBSITE_TOKEN secret; the signed appcast was not published (it is in this run's artifact)."
+            exit 0
+          fi
+          auth=$(printf 'x-access-token:%s' "$WEBSITE_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$auth"
+          header="http.https://github.com/.extraheader=AUTHORIZATION: basic $auth"
+          cd "$RUNNER_TEMP/website"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add updates/macos/appcast.xml
+          msg="Appcast: $(sed -n 's|.*<sparkle:shortVersionString>\(.*\)</sparkle:shortVersionString>.*|\1|p' updates/macos/appcast.xml | tr '\n' ' ')"
+          git commit --quiet -m "$msg"
+          # The feed job above pushes to the same repository; a push that
+          # loses the race is rebased (the appcast is only written here)
+          # and retried.
           for attempt in 1 2 3; do
             git -c "$header" push --quiet && break
             [[ $attempt -lt 3 ]] || exit 1
