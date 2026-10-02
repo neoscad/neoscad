@@ -627,6 +627,9 @@ fn check_snapshot_and_measure_carry_warnings_and_echo_in_structured_content() {
         ("measure", json!({"source": src})),
     ] {
         let r = s.tool(tool, args);
+        if tool == "snapshot" && no_gpu(&r) {
+            continue;
+        }
         assert_eq!(
             r["structuredContent"]["echo"],
             json!(["ECHO: a = 1"]),
