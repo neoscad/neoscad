@@ -152,6 +152,21 @@ lead them, come roughly in order of user impact.
   see which limit tripped. Suspect the 512 MiB memory limit measured
   against the test process while parallel tests render.
 
+- **Preview product cache and wasm memory.** Since preview products are
+  cached in the renderer's geometry cache, a long /try session's wasm
+  memory peak is higher: threaded-ring then gearbox, eight previews in
+  one worker, peaked at 719-763 MiB against 505 MiB before, with the live
+  heap only 9-30 MiB higher (wasm memory never shrinks, so this looks
+  like fragmentation). The web limit is 1 GiB. If users hit it, give the
+  web core a smaller geometry budget or a separate product budget, or
+  restart the worker between documents.
+- **gearbox has one image-space product whose solidity check reruns on
+  every preview** (about 20 ms natively): cache it by shape like the
+  others.
+- **Native "Previewed in" leaves out the GPU upload** (the scene time is
+  included since the product cache change); adding it means timing the
+  upload in the ffi/app layer.
+
 ## Performance
 
 - **A stack-independent evaluator (owner decision, 2026-10-01: do it

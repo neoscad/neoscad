@@ -570,7 +570,16 @@ impl Session {
                 && matches!(other_built.geometry, Some(Geometry::Polygon2d(_)));
             (scene, is_2d)
         } else if let Some(tree) = &model.tree {
-            let scene = render::preview::scene(tree, &scheme, render::Previewer::OpenCsg);
+            // With the session's product cache, so a snapshot after an edit
+            // recomputes only the products the edit changed.
+            let scene = render::preview::scene_cached(
+                tree,
+                &scheme,
+                render::Previewer::OpenCsg,
+                &geom::csg::Stop::default(),
+                model.scene.cache(),
+            )
+            .unwrap_or_else(|_| Scene::empty(&scheme, None));
             (scene, false)
         } else {
             (

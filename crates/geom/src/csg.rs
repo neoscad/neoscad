@@ -1136,6 +1136,103 @@ pub struct ProductJob {
     pub negatives: Vec<Negative>,
 }
 
+/// A positive leaf of a product, by name, for [`product_key`]: the mesh
+/// of the leaf whose subtree key is `key` (its geometry in the renderer
+/// that built the tree, [`CsgTree::build`]), coloured `color` (every face
+/// when `force`, otherwise the faces without a valid colour of their own)
+/// and moved by `matrix`. `mesh` is the leaf's mesh as the tree has it;
+/// only its size is read.
+#[derive(Debug, Clone)]
+pub struct Source {
+    pub key: u128,
+    pub mesh: Arc<PolySet>,
+    pub matrix: Matrix,
+    pub color: Color,
+    pub force: bool,
+}
+
+/// The key under which a preview keeps a product's mesh
+/// ([`crate::Renderer::keep_product`]): the product whose [`ProductJob`]
+/// has `positives` as its positives and `negatives`, each coloured in its
+/// tint, as its negatives. The negatives' meshes may be the leaves'
+/// uncoloured ones: only their sizes are read. `None` when a negative has
+/// no [`Chain`], which names it.
+///
+/// [`product_meshes`] gives the product a mesh that is a function of what
+/// is hashed here, so equal keys mean byte-identical meshes:
+///
+/// - each leaf's mesh, named by its subtree key as the render cache names
+///   it (within one renderer, which is where the products are kept), with
+///   its colour and placement. Hashing the meshes themselves would cost
+///   much of what a hit saves: the threaded-ring example's 36 channels
+///   are 36 MB of vertices. Their vertex and face counts are hashed too,
+///   as a cheap check of the name;
+/// - for a union of negatives by subtree ([`crate::shared`]), the plan:
+///   which unions it computes and how each part is placed. Not the chains
+///   themselves, whose top is the root: its key changes with any edit
+///   anywhere in the file, and so would every product's;
+/// - `scheme`, which colours faces a repair left uncoloured.
+///
+/// Not hashed, because the mesh does not depend on them: the IDs the
+/// conversions draw (a product's run order depends only on their order
+/// within its own range), and which other products, computed with it,
+/// share a negative (a shared conversion gives what the product's own
+/// would, [`SharedNegatives`]).
+pub fn product_key(positives: &[Source], negatives: &[Negative], scheme: &Scheme) -> Option<u128> {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    let count = |h: &mut Sha256, x: usize| h.update((x as u64).to_le_bytes());
+    let color = |h: &mut Sha256, c: Color| {
+        for x in c.0 {
+            h.update(x.to_bits().to_le_bytes());
+        }
+    };
+    h.update(b"neoscad preview product\0");
+    color(&mut h, scheme.face_front);
+    color(&mut h, scheme.face_back);
+    count(&mut h, positives.len());
+    for s in positives {
+        h.update(s.key.to_le_bytes());
+        hash_matrix(&mut h, &s.matrix);
+        color(&mut h, s.color);
+        h.update([u8::from(s.force)]);
+        count(&mut h, s.mesh.vertices.len());
+        count(&mut h, s.mesh.faces.len());
+    }
+    count(&mut h, negatives.len());
+    for n in negatives {
+        h.update(n.chain.as_ref()?.key.to_le_bytes());
+        match &n.matrix {
+            Some(m) => {
+                h.update([1]);
+                hash_matrix(&mut h, m);
+            }
+            None => h.update([0]),
+        }
+        color(&mut h, n.tint);
+        h.update([u8::from(n.slab)]);
+        count(&mut h, n.mesh.vertices.len());
+        count(&mut h, n.mesh.faces.len());
+    }
+    match crate::shared::Plan::new(negatives) {
+        Some(plan) => {
+            h.update([1]);
+            plan.hash_into(&mut h);
+        }
+        None => h.update([0]),
+    }
+    let d = h.finalize();
+    Some(u128::from_le_bytes(d[..16].try_into().expect("32 bytes")))
+}
+
+/// A matrix bit for bit into a product key.
+pub(crate) fn hash_matrix(h: &mut sha2::Sha256, m: &Matrix) {
+    use sha2::Digest as _;
+    for x in m.as_flattened() {
+        h.update(x.to_bits().to_le_bytes());
+    }
+}
+
 /// A negative leaf of a product: its mesh where the leaf is, and where
 /// it came from in the tree, so copies of a repeated subtree can share
 /// one union ([`crate::shared`]).

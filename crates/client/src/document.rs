@@ -725,26 +725,33 @@ impl Client {
 /// before this it ignored both a cancel and the time limit. A limit
 /// passed there is [`CoreError::Failed`] with the limit's message and
 /// hint; a cancel is [`CoreError::Cancelled`].
+///
+/// The products' meshes are kept in the session's renderer cache
+/// (`session::SceneStep`), so a re-preview recomputes only the products
+/// an edit changed. The time this takes is added to the run's
+/// ([`render_result`]'s timings count it as geometry), so every host's
+/// "Previewed in" includes the booleans, which are often most of a
+/// preview's time.
 pub fn run_scene(
     r: &session::Rendered,
     scheme: &render::ColorScheme,
     previewer: render::Previewer,
 ) -> Result<Option<render::Scene>, CoreError> {
-    Ok(match (&r.tree, &r.geometry) {
-        (Some(tree), _) => Some(
-            render::preview::scene_until(tree, scheme, previewer, &r.stop).map_err(|_| match r
-                .stop
-                .exceeded()
-            {
-                Some(e) => CoreError::Failed {
-                    message: format!("{}. To fix: {}", e.message(), e.hint()),
-                },
-                None => CoreError::Cancelled,
-            })?,
-        ),
-        (None, Some(g)) => Some(render::Scene::new(Some(g), scheme)),
-        // An empty top level: show the empty view.
-        (None, None) if r.exit_code == 0 => Some(render::Scene::new(None, scheme)),
-        (None, None) => None,
+    r.scene.time(|| {
+        Ok(match (&r.tree, &r.geometry) {
+            (Some(tree), _) => Some(
+                render::preview::scene_cached(tree, scheme, previewer, &r.stop, r.scene.cache())
+                    .map_err(|_| match r.stop.exceeded() {
+                        Some(e) => CoreError::Failed {
+                            message: format!("{}. To fix: {}", e.message(), e.hint()),
+                        },
+                        None => CoreError::Cancelled,
+                    })?,
+            ),
+            (None, Some(g)) => Some(render::Scene::new(Some(g), scheme)),
+            // An empty top level: show the empty view.
+            (None, None) if r.exit_code == 0 => Some(render::Scene::new(None, scheme)),
+            (None, None) => None,
+        })
     })
 }

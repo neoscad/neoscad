@@ -469,6 +469,9 @@ pub struct Rendered {
     /// request on the document no longer sets the flag once this returns
     /// (only the host's own `Run::interrupt` and the limits stop it).
     pub stop: geom::csg::Stop,
+    /// What the host's scene step needs from the session and reports
+    /// back: see [`SceneStep`].
+    pub scene: SceneStep,
     /// The file's view after `$vp*`.
     pub camera: eval::Camera,
     /// Which `$vp*` the file assigned itself (a GUI moves its view to
@@ -493,7 +496,80 @@ pub struct Rendered {
     pub inputs: Vec<orient::InputIssue>,
 }
 
+/// The preview scene's step, which the host runs after
+/// [`Session::render`] returns (`client::run_scene`): where it keeps the
+/// products' booleans between runs, and the time it took.
+///
+/// The scene is the preview's real geometry, each CSG product's boolean
+/// standing in for OpenCSG's image-space CSG, and often most of the wait.
+/// The session's timings end before it, so the apps said "Previewed in
+/// 615 ms" for a threaded-ring preview whose model appeared 2.6 s later
+/// in the web demo. The step reads the session's clock
+/// ([`Config::clock`]) and [`Rendered::timings_with_scene`] counts it as
+/// geometry, so every host reports the time the model took to appear.
+#[derive(Default)]
+pub struct SceneStep {
+    /// The renderer whose cache holds `tree`'s leaves, which keeps the
+    /// products' meshes too (`geom::Renderer::keep_product`), under the
+    /// same budget and eviction as the subtrees renders keep.
+    renderer: Option<Arc<geom::Renderer>>,
+    clock: Option<Clock>,
+    /// Milliseconds spent in [`SceneStep::time`], as `f64` bits.
+    ms: AtomicU64,
+}
+
+impl std::fmt::Debug for SceneStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SceneStep")
+            .field("cached", &self.renderer.is_some())
+            .field("ms", &self.ms())
+            .finish()
+    }
+}
+
+impl SceneStep {
+    /// Where a preview keeps its products' meshes
+    /// (`render::preview::scene_cached`); `None` keeps nothing.
+    pub fn cache(&self) -> Option<&geom::Renderer> {
+        self.renderer.as_deref()
+    }
+
+    /// Run `f`, the scene's work, adding the time it took on the
+    /// session's clock (none: 0) to the step's.
+    pub fn time<T>(&self, f: impl FnOnce() -> T) -> T {
+        let now = || self.clock.as_ref().map_or(0.0, |c| c());
+        let t = now();
+        let out = f();
+        let spent = now() - t;
+        // Only the host's thread runs the step; `fetch_update` keeps a
+        // second caller's time anyway.
+        let _ = self
+            .ms
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+                Some((f64::from_bits(bits) + spent).to_bits())
+            });
+        out
+    }
+
+    /// The milliseconds spent in [`SceneStep::time`].
+    pub fn ms(&self) -> f64 {
+        f64::from_bits(self.ms.load(Ordering::Relaxed))
+    }
+}
+
 impl Rendered {
+    /// [`Rendered::timings`] with the scene's time
+    /// ([`SceneStep::time`]) counted as geometry: what a host reports as
+    /// the time the model took.
+    pub fn timings_with_scene(&self) -> Timings {
+        let ms = self.scene.ms();
+        Timings {
+            geometry: self.timings.geometry + ms,
+            total: self.timings.total + ms,
+            ..self.timings
+        }
+    }
+
     /// `geometry` as JSON (`null` when empty): see [`stats::geometry`].
     pub fn geometry_json(&self, scheme: &geom::color::Scheme) -> Value {
         self.geometry
@@ -1604,7 +1680,9 @@ impl Session {
 
     /// Build the geometry (or the preview's products) of an evaluated
     /// program, reusing the document's last products when the tree, its
-    /// sources and the renderer are the same.
+    /// sources and the renderer are the same. Also returns the renderer's
+    /// cache statistics and the renderer, whose cache a preview's scene
+    /// keeps its products in ([`SceneStep`]).
     #[allow(clippy::too_many_arguments)]
     fn build(
         &self,
@@ -1615,7 +1693,7 @@ impl Session {
         scheme: &geom::color::Scheme,
         job: &JobGuard<'_>,
         csg_limit: usize,
-    ) -> Result<(Product, geom::CacheStats), Stop> {
+    ) -> Result<(Product, geom::CacheStats, Arc<geom::Renderer>), Stop> {
         let t = self.now();
         let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
         let keys = eval::dump::Keys::new(&ev.root, &*pipe.fs);
@@ -1715,7 +1793,8 @@ impl Session {
         };
         self.report_inputs(pipe, loaded, top, &import_mesh, Some(&keys));
         pipe.timings.geometry = self.now() - t;
-        Ok((product, renderer.stats()))
+        let stats = renderer.stats();
+        Ok((product, stats, renderer))
     }
 
     // --- Operations --------------------------------------------------------
@@ -1852,6 +1931,10 @@ impl Session {
                 interrupt: Some(job.flag.clone()),
                 guard: job.limits.clone(),
             },
+            scene: SceneStep {
+                clock: self.cfg.clock.clone(),
+                ..SceneStep::default()
+            },
             camera: run.camera,
             camera_assigned: eval::CameraAssigned::default(),
             cache_entries: 0,
@@ -1870,7 +1953,7 @@ impl Session {
             out.camera = ev.camera;
             out.camera_assigned = ev.camera_assigned;
             run.stage(Stage::Geometry);
-            let (p, cache) = self.build(
+            let (p, cache, renderer) = self.build(
                 &mut pipe,
                 &loaded,
                 &ev,
@@ -1881,6 +1964,9 @@ impl Session {
             )?;
             out.geometry = p.geometry.filter(|g| !g.is_empty());
             out.tree = p.tree;
+            if out.tree.is_some() {
+                out.scene.renderer = Some(renderer);
+            }
             out.cache_entries = cache.entries;
             out.cache_bytes = cache.bytes;
             out.cache_budget = cache.budget;
@@ -1973,7 +2059,7 @@ impl Session {
             let scheme = req.scheme.geometry_scheme();
             let mode = if req.force { Mode::Force } else { Mode::Render };
             run.stage(Stage::Geometry);
-            let (p, cache) = self.build(
+            let (p, cache, _) = self.build(
                 &mut pipe,
                 &loaded,
                 &ev,

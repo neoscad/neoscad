@@ -13,7 +13,7 @@ use super::*;
 
 const DOC: &str = "/doc/main.scad";
 
-fn client() -> Client {
+pub(crate) fn client() -> Client {
     let files: Arc<dyn FileSystem + Send + Sync> = Arc::new(MemFs::new());
     let fs: Arc<dyn FileSystem + Send + Sync> =
         Arc::new(assets::libraries(files, "/neoscad/libraries"));

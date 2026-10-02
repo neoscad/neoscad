@@ -457,6 +457,8 @@ pub fn geometry_stats(g: &geom::Geometry, scheme: &geom::color::Scheme) -> Geome
 }
 
 /// What `render` (and a document run) report about a finished render.
+/// Its timings include the scene [`run_scene`] built from it, if one was
+/// built before this is called, as geometry: hosts call it after drawing.
 pub fn render_result(r: &session::Rendered, scheme: &render::ColorScheme) -> RenderResult {
     RenderResult {
         exit_code: r.exit_code,
@@ -468,6 +470,6 @@ pub fn render_result(r: &session::Rendered, scheme: &render::ColorScheme) -> Ren
             .as_ref()
             .map(|g| geometry_stats(g, &scheme.geometry_scheme())),
         cache_entries: r.cache_entries as u64,
-        timings: r.timings.into(),
+        timings: r.timings_with_scene().into(),
     }
 }

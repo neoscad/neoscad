@@ -1205,6 +1205,48 @@ impl Renderer {
             ..Cache::default()
         };
     }
+
+    /// A preview product's mesh kept by [`Renderer::keep_product`] under
+    /// `key` ([`crate::csg::product_key`]), if the cache still
+    /// holds it: `Some(None)` is a product that came out empty. A hit
+    /// counts as a use for the least-recently-used order.
+    pub fn product(&self, key: u128) -> Option<Option<Arc<PolySet>>> {
+        let (geom, _, _) = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)?;
+        match geom {
+            None => Some(None),
+            Some(Geometry::PolySet(ps)) => Some(Some(ps)),
+            // Product keys are hashed apart from node keys, so no node's
+            // result is ever found here; if one were, it is not a product.
+            Some(_) => None,
+        }
+    }
+
+    /// Keep a preview product's mesh under `key` for the next preview.
+    ///
+    /// Product meshes share the geometry cache's budget and its least
+    /// recently used order with the subtrees renders cache, so the memory
+    /// a session keeps for a document is bounded by the one budget
+    /// (`session::Config::geometry_budget`) however it is split between
+    /// renders and previews, and a host's eviction under memory pressure
+    /// (`set_budget`, `clear`) drops them too. Without that, previewing
+    /// one large model after another would keep every product it ever
+    /// computed.
+    pub fn keep_product(&self, key: u128, mesh: Option<Arc<PolySet>>) {
+        let replay = Replay {
+            msgs: None,
+            pattern: 0,
+            epoch: 0,
+            demand: None,
+        };
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, mesh.map(Geometry::PolySet), replay, Arc::from([]));
+    }
 }
 
 impl Ctx<'_> {

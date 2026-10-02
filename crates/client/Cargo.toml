@@ -31,6 +31,8 @@ session = { package = "neoscad-session", path = "../session", default-features =
 
 [dev-dependencies]
 assets = { package = "neoscad-assets", path = "../assets" }
+# Thread pools of different sizes, for the scene determinism test.
+rayon.workspace = true
 
 [lints]
 workspace = true

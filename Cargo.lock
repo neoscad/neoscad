@@ -1519,6 +1519,7 @@ dependencies = [
  "neoscad-lang",
  "neoscad-render",
  "neoscad-session",
+ "rayon",
  "semver",
  "serde",
  "serde_json",
@@ -1600,6 +1601,7 @@ dependencies = [
  "neoscad-lang",
  "neoscad-text",
  "rayon",
+ "sha2",
 ]
 
 [[package]]

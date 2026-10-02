@@ -22,6 +22,11 @@
 //! (inside out, a face flipped, not closed) is drawn as OpenCSG draws it,
 //! in image space ([`Scene::push_image_csg`], `crate::gpu`).
 //!
+//! The booleans are most of a preview's time, and an editor previews
+//! again after every edit, so a host keeps them in the renderer's cache
+//! ([`scene_cached`]): a product whose leaves are unchanged is not
+//! computed again.
+//!
 //! What this cannot reproduce: image-space artefacts of products drawn
 //! from booleans. Where a positive and a negative face are coplanar
 //! OpenCSG shows z-fighting, which real booleans resolve cleanly; a leaf
@@ -36,7 +41,9 @@ use std::sync::Arc;
 
 use geom::Matrix;
 use geom::color::Color;
-use geom::csg::{ChainObject, CsgTree, FLAG_HIGHLIGHT, Negative, ProductJob, Products, Stop};
+use geom::csg::{
+    ChainObject, CsgTree, FLAG_HIGHLIGHT, Negative, ProductJob, Products, Source, Stop,
+};
 
 use geom::polyset::PolySet;
 
@@ -147,6 +154,23 @@ pub fn scene_until(
     previewer: Previewer,
     stop: &Stop,
 ) -> Result<Scene, geom::Unsupported> {
+    scene_cached(tree, scheme, previewer, stop, None)
+}
+
+/// [`scene_until`] that keeps the products' booleans in `cache`, the
+/// renderer whose cache holds `tree`'s leaves, by name
+/// ([`geom::csg::product_key`]), and reuses those an earlier preview
+/// computed: a re-preview after an edit recomputes only the products the
+/// edit changed. The scene is the one [`scene_until`] draws, byte for
+/// byte, since a product's mesh is a function of its key and does not
+/// depend on the products computed with it.
+pub fn scene_cached(
+    tree: &CsgTree,
+    scheme: &ColorScheme,
+    previewer: Previewer,
+    stop: &Stop,
+    cache: Option<&geom::Renderer>,
+) -> Result<Scene, geom::Unsupported> {
     // Past `geom::csg::BOOLEAN_LIMIT` the products' booleans would take
     // minutes and gigabytes; the tree carries the warning that says so.
     let previewer = if tree.booleans {
@@ -162,7 +186,7 @@ pub fn scene_until(
         (Pass::Highlight, &tree.highlights),
     ];
     match previewer {
-        Previewer::OpenCsg => opencsg(&mut scene, &lists, scheme, stop)?,
+        Previewer::OpenCsg => opencsg(&mut scene, &lists, scheme, stop, cache)?,
         Previewer::ThrownTogether => {
             for (pass, list) in lists {
                 if let Some(p) = list {
@@ -229,18 +253,23 @@ fn negative_color(obj: &ChainObject, pass: Pass, scheme: &ColorScheme) -> Color 
 }
 
 /// What goes into the scene, in order: a surface, a product waiting for
-/// its boolean, or a product drawn in image space.
+/// its boolean, a product whose boolean an earlier preview kept (its mesh,
+/// `None` when empty, its depth test and bias), or a product drawn in
+/// image space.
 enum Slot {
     Surface(Surface),
     Boolean,
+    Kept(Option<(Arc<PolySet>, Depth, bool)>),
     Image(Vec<CsgPrimitive>),
 }
 
-/// A product waiting for its boolean: where its draws go in the scene.
+/// A product waiting for its boolean: where its draws go in the scene,
+/// and the key it is kept under for the next preview.
 struct Pending {
     at: usize,
     depth: Depth,
     bias: bool,
+    key: Option<u128>,
 }
 
 /// `OpenCSGRenderer::createCSGVBOProducts` and `draw`.
@@ -249,7 +278,12 @@ fn opencsg(
     lists: &[(Pass, &Option<Products>); 3],
     scheme: &ColorScheme,
     stop: &Stop,
+    cache: Option<&geom::Renderer>,
 ) -> Result<(), geom::Unsupported> {
+    let scheme_colors = geom::color::Scheme {
+        face_front: scheme.opencsg_face_front,
+        face_back: scheme.opencsg_face_back,
+    };
     // `paintGL` starts with `GL_LESS`; each product leaves `GL_LEQUAL`.
     let mut depth = Depth::Less;
     let mut jobs: Vec<ProductJob> = Vec::new();
@@ -317,86 +351,138 @@ fn opencsg(
                         slots.push(Slot::Surface(surface(Cull::Back)));
                     }
                 }
-                _ if !pos.iter().chain(&neg).all(|o| is_solid(o)) => {
-                    image_product(&mut slots, &pos, &neg, *pass, scheme);
-                }
                 _ => {
-                    let mut job = ProductJob::default();
-                    for obj in &pos {
-                        let (color, force) = positive_color(obj, *pass, scheme);
-                        job.positives
-                            .extend(job_mesh(obj, &obj.leaf.matrix, color, force));
-                    }
-                    for obj in &neg {
-                        let color = negative_color(obj, *pass, scheme);
-                        // Placed, not moved: copies of a repeated subtree
-                        // share one union (`geom::csg::Negative`).
-                        job.negatives
-                            .extend(coloured(obj, color, true).map(|ps| Negative {
-                                mesh: Arc::new(ps),
-                                matrix: Some(negative_matrix(obj)),
-                                tint: color,
-                                slab: obj.leaf.dim == 2,
-                                chain: obj.leaf.chain.clone(),
-                            }));
-                    }
-                    jobs.push(job);
-                    pending.push(Pending {
-                        at: slots.len(),
-                        depth,
-                        bias: *pass == Pass::Highlight,
+                    let bias = *pass == Pass::Highlight;
+                    // The product by name, looked up before anything is
+                    // built: a re-preview of the threaded-ring example
+                    // spent 70 ms natively copying and colouring the 36
+                    // channels for products it then found in the cache.
+                    let key = cache.and_then(|_| {
+                        let positives = pos
+                            .iter()
+                            .map(|obj| {
+                                let (color, force) = positive_color(obj, *pass, scheme);
+                                Some(Source {
+                                    key: obj.leaf.chain.as_ref()?.key,
+                                    mesh: obj.leaf.mesh.clone()?,
+                                    matrix: obj.leaf.matrix,
+                                    color,
+                                    force,
+                                })
+                            })
+                            .collect::<Option<Vec<_>>>()?;
+                        let negatives: Vec<Negative> = neg
+                            .iter()
+                            .map(|obj| {
+                                let mesh = obj.leaf.mesh.clone().expect("filtered");
+                                negative(obj, *pass, scheme, mesh)
+                            })
+                            .collect();
+                        geom::csg::product_key(&positives, &negatives, &scheme_colors)
                     });
-                    slots.push(Slot::Boolean);
+                    if let Some(kept) = key.zip(cache).and_then(|(k, c)| c.product(k)) {
+                        // Kept by an earlier preview, so its leaves (the
+                        // same meshes as now) bounded solids then: the
+                        // check below would pass.
+                        slots.push(Slot::Kept(kept.map(|m| (m, depth, bias))));
+                    } else if !pos.iter().chain(&neg).all(|o| is_solid(o)) {
+                        image_product(&mut slots, &pos, &neg, *pass, scheme);
+                    } else {
+                        let mut job = ProductJob::default();
+                        for obj in &pos {
+                            let (color, force) = positive_color(obj, *pass, scheme);
+                            job.positives
+                                .extend(job_mesh(obj, &obj.leaf.matrix, color, force));
+                        }
+                        for obj in &neg {
+                            let color = negative_color(obj, *pass, scheme);
+                            job.negatives.extend(
+                                coloured(obj, color, true)
+                                    .map(|ps| negative(obj, *pass, scheme, Arc::new(ps))),
+                            );
+                        }
+                        jobs.push(job);
+                        pending.push(Pending {
+                            at: slots.len(),
+                            depth,
+                            bias,
+                            key,
+                        });
+                        slots.push(Slot::Boolean);
+                    }
                 }
             }
             depth = Depth::LessEqual;
         }
     }
-    let scheme_colors = geom::color::Scheme {
-        face_front: scheme.opencsg_face_front,
-        face_back: scheme.opencsg_face_back,
-    };
     let meshes = geom::csg::product_meshes_until(jobs, &scheme_colors, stop)?;
     let mut solved: Vec<Option<(Arc<PolySet>, Depth, bool)>> = vec![None; slots.len()];
     for (p, m) in pending.iter().zip(meshes) {
-        solved[p.at] = m.map(|m| (Arc::new(m), p.depth, p.bias));
+        let m = m.map(Arc::new);
+        // Kept for the next preview only once every product is done: a
+        // stopped preview keeps nothing.
+        if let (Some(k), Some(c)) = (p.key, cache) {
+            c.keep_product(k, m.clone());
+        }
+        solved[p.at] = m.map(|m| (m, p.depth, p.bias));
     }
     for (s, solved) in slots.into_iter().zip(solved) {
-        match (s, solved) {
-            (Slot::Surface(s), _) => scene.push(s),
-            (Slot::Image(primitives), _) => scene.push_image_csg(primitives),
-            (Slot::Boolean, Some((mesh, depth, bias))) => {
-                // OpenCSG's depth pass, then colour where the depth is
-                // the product's.
-                let base = Surface {
-                    mesh,
-                    matrix: None,
-                    color: scheme.opencsg_face_front,
-                    force_color: false,
-                    lit: true,
-                    state: DrawState {
-                        cull: Cull::None,
-                        depth,
-                        color_write: false,
-                        bias,
-                    },
-                };
-                let color = Surface {
-                    state: DrawState {
-                        cull: Cull::None,
-                        depth: Depth::Equal,
-                        color_write: true,
-                        bias,
-                    },
-                    ..base.clone()
-                };
-                scene.push(base);
-                scene.push(color);
+        let solved = match s {
+            Slot::Surface(s) => {
+                scene.push(s);
+                continue;
             }
-            (Slot::Boolean, None) => {}
+            Slot::Image(primitives) => {
+                scene.push_image_csg(primitives);
+                continue;
+            }
+            Slot::Boolean => solved,
+            Slot::Kept(kept) => kept,
+        };
+        // An empty product draws nothing.
+        if let Some((mesh, depth, bias)) = solved {
+            // OpenCSG's depth pass, then colour where the depth is
+            // the product's.
+            let base = Surface {
+                mesh,
+                matrix: None,
+                color: scheme.opencsg_face_front,
+                force_color: false,
+                lit: true,
+                state: DrawState {
+                    cull: Cull::None,
+                    depth,
+                    color_write: false,
+                    bias,
+                },
+            };
+            let color = Surface {
+                state: DrawState {
+                    cull: Cull::None,
+                    depth: Depth::Equal,
+                    color_write: true,
+                    bias,
+                },
+                ..base.clone()
+            };
+            scene.push(base);
+            scene.push(color);
         }
     }
     Ok(())
+}
+
+/// A subtracted leaf of a product with `mesh` (the leaf's own, or coloured
+/// in its tint), placed, not moved: copies of a repeated subtree share
+/// one union (`geom::csg::Negative`).
+fn negative(obj: &ChainObject, pass: Pass, scheme: &ColorScheme, mesh: Arc<PolySet>) -> Negative {
+    Negative {
+        mesh,
+        matrix: Some(negative_matrix(obj)),
+        tint: negative_color(obj, pass, scheme),
+        slab: obj.leaf.dim == 2,
+        chain: obj.leaf.chain.clone(),
+    }
 }
 
 /// A subtracted leaf's placement: 2D slabs are stretched in z.

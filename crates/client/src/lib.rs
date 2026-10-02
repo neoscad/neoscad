@@ -222,3 +222,6 @@ mod tests;
 
 #[cfg(test)]
 mod shared_tests;
+
+#[cfg(test)]
+mod scene_tests;

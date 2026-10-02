@@ -228,6 +228,33 @@ impl Plan {
         Some(Plan { unions, root })
     }
 
+    /// What the plan computes, into a product's cache key
+    /// ([`crate::csg::product_key`]): each union's parts in
+    /// order, which negative or earlier union each is and its placement,
+    /// and the result's. Heights and use counts follow from these. The
+    /// subtree keys the plan was found by are left out: they only decided
+    /// which subtrees are copies, which is what the parts say.
+    pub(crate) fn hash_into(&self, h: &mut sha2::Sha256) {
+        use sha2::Digest as _;
+        let val = |h: &mut sha2::Sha256, v: &Val| {
+            let (tag, i) = match v.base {
+                Base::Mesh(i) => (0u8, i),
+                Base::Union(u) => (1u8, u),
+            };
+            h.update([tag]);
+            h.update((i as u64).to_le_bytes());
+            crate::csg::hash_matrix(h, &v.m);
+        };
+        h.update((self.unions.len() as u64).to_le_bytes());
+        for u in &self.unions {
+            h.update((u.parts.len() as u64).to_le_bytes());
+            for p in &u.parts {
+                val(h, p);
+            }
+        }
+        val(h, &self.root);
+    }
+
     /// The IDs each union's conversions take, in union order, `need`
     /// being what converting one mesh takes.
     pub(crate) fn needs(&self, negatives: &[Negative], need: impl Fn(&PolySet) -> u32) -> Vec<u32> {
