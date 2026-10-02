@@ -157,6 +157,17 @@ lead them, come roughly in order of user impact.
   `upload_packed`), so neither that nor the transfer from the worker is
   in it.
 
+- **`neoscad` isn't bit-reproducible.** Two builds of the same commit into
+  the same target path differ in 118 bytes: the Mach-O UUID and ad-hoc
+  signature, rustc's random `rustcXXXX` temp-dir names in the debug map,
+  and mimalloc's C code compiling in `__DATE__`/`__TIME__` (its "built on"
+  string). Output is unaffected (conformance, bench STL hashes). For
+  reproducible releases: set `SOURCE_DATE_EPOCH` (clang honours it for
+  `__DATE__`/`__TIME__`), and check the debug map and signing. Found by
+  the sccache spike (2026-10-02), which also found sccache doesn't help a
+  new worktree (proc-macro install names, `OUT_DIR` and the checkout path
+  are in its keys), so it isn't wired in.
+
 ## Performance
 
 - **A stack-independent evaluator (owner decision, 2026-10-01: do it
