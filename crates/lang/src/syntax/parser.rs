@@ -180,6 +180,14 @@ pub const WASM32_NESTING_LIMIT: u32 = 2_590;
 /// levels of `[let (a = 1) let ...` overflowed, 107 alternating with a
 /// comprehension's `if`, 60 with `[` (`let (a = 1) [let (a = 1) [`), 49
 /// with `each [`, 88 with a comprehension's `for`.
+///
+/// `?:` was measured again once a chain of them was walked in a loop
+/// (`Evaluator::ternary_chain`) rather than two native calls a level: a
+/// run still overflowed at 220 levels of `x ? ` (222 before; the
+/// `parameters` request, which does not evaluate, at 237), so it keeps
+/// 17. With other kinds: 119 levels alternating with `let` (117 before),
+/// 144 with `assert`, 146 with `echo`, 61 of `[x ? `, 72 of `(x ? `, 60
+/// of `max(x ? `.
 pub const fn nesting_weight(kind: SyntaxKind) -> u32 {
     match kind {
         // The `if` it belongs to carries an `else if` level: a level of

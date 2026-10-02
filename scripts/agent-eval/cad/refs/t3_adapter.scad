@@ -9,6 +9,9 @@
 // height (CadQuery's part there); `barb_stem` ends the barb in a plain
 // stem of that length with a 0.6 tip chamfer (OpenSCAD's part there);
 // `barbs` sets their number; `flip = true` turns the part over.
+// `barb_flare` puts a 45-degree cone of that height between the flange
+// and the 25 mm of barbs (a skirt that lets the flange print barb-down);
+// `barb_fillet` puts one at the root of the barbs, inside the 25 mm.
 pitch = 2;
 major = 23.8;
 depth = 1.2;
@@ -25,6 +28,8 @@ order = "thread-hex-barb";
 hex_cham = 0;
 barb_stem = 0;
 barbs = 3;
+barb_flare = 0;
+barb_fillet = 0;
 flip = false;
 $fn = 64;
 
@@ -80,16 +85,23 @@ module hex(h) {
 }
 
 module barbs() {
-    teeth = barb_len - barb_stem;
-    for (k = [0:barbs - 1])
-        translate([0, 0, k * teeth / barbs - 0.01]) cylinder(d1 = 14, d2 = 12, h = teeth / barbs + 0.01);
-    if (barb_stem > 0) {
-        translate([0, 0, teeth - 0.01]) cylinder(d = 12, h = barb_stem - 0.6 + 0.01);
-        translate([0, 0, barb_len - 0.6 - 0.01]) cylinder(d1 = 12, d2 = 10.4, h = 0.61);
+    // A cone from beyond the crest down to the stem at 45 degrees.
+    if (barb_flare > 0)
+        translate([0, 0, -0.01]) cylinder(r1 = 6 + barb_flare, r2 = 6, h = barb_flare + 0.02);
+    if (barb_fillet > 0)
+        translate([0, 0, barb_flare - 0.01]) cylinder(r1 = 6 + barb_fillet, r2 = 6, h = barb_fillet + 0.02);
+    translate([0, 0, barb_flare + barb_fillet]) {
+        teeth = barb_len - barb_stem - barb_fillet;
+        for (k = [0:barbs - 1])
+            translate([0, 0, k * teeth / barbs - 0.01]) cylinder(d1 = 14, d2 = 12, h = teeth / barbs + 0.01);
+        if (barb_stem > 0) {
+            translate([0, 0, teeth - 0.01]) cylinder(d = 12, h = barb_stem - 0.6 + 0.01);
+            translate([0, 0, teeth + barb_stem - 0.6 - 0.01]) cylinder(d1 = 12, d2 = 10.4, h = 0.61);
+        }
     }
 }
 
-height = (order == "hex-thread-barb" ? flange + thread_len : flange_z + flange) + barb_len;
+height = (order == "hex-thread-barb" ? flange + thread_len : flange_z + flange) + barb_flare + barb_len;
 
 // Turned over by a rotation (not a mirror), so the thread stays right-hand.
 if (flip) translate([0, 0, height]) rotate([180, 0, 0]) adapter(); else adapter();

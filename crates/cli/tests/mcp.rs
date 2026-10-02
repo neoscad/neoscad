@@ -440,9 +440,39 @@ fn every_tool_round_trips() {
     assert!(text(&r).contains("box"), "{}", text(&r));
     // Not found: the hint names the tool's argument; an MCP client has
     // no `--in` flag.
-    let r = s.tool("docs", json!({"name": "thread"}));
+    let r = s.tool("docs", json!({"name": "gear"}));
     assert!(
         text(&r).ends_with("add `path` (the file that defines or includes it)"),
+        "{}",
+        text(&r)
+    );
+    // The printing recipes in the instructions: agents ask for them by
+    // name, or by part of it, and were told "no builtin".
+    let r = s.tool("docs", json!({"name": "snap_hook"}));
+    assert!(
+        text(&r).starts_with("The printing recipe snap_hook")
+            && text(&r).contains("// Upright snap hook")
+            && text(&r).contains("module snap_hook("),
+        "{}",
+        text(&r)
+    );
+    assert_eq!(r["isError"], false);
+    let r = s.tool("docs", json!({"name": "snap"}));
+    assert!(
+        text(&r).starts_with("'snap' is not a builtin; the printing recipe snap_hook"),
+        "{}",
+        text(&r)
+    );
+    let r = s.tool("docs", json!({"name": "countersunk"}));
+    assert!(text(&r).contains("module countersink("), "{}", text(&r));
+    // A builtin keeps its own answer, and the index names the recipes.
+    let r = s.tool("docs", json!({"name": "round"}));
+    assert!(!text(&r).contains("recipe"), "{}", text(&r));
+    let r = s.tool("docs", json!({}));
+    assert!(
+        text(&r).ends_with(
+            "Printing recipes (ask for one by name): countersink rounded_plate fillet thread snap_hook"
+        ),
         "{}",
         text(&r)
     );

@@ -4,6 +4,8 @@
 // `lip_relief` cuts the lip's outer face back by that much per side except
 // a 1 mm catch band at its free end (the OpenSCAD lid of
 // cad-20260928T231444Z, whose relief clears the base's snap barbs).
+// `post_hole` and `post_fn` size and facet the posts' holes; `vent` is
+// each vent's [length, width].
 part = "base";
 pcb = [50, 26];
 clear = 0.4;
@@ -15,6 +17,9 @@ lip_t = 1.5;
 lip_h = 4;
 vents = 5;
 lip_relief = 0;
+post_hole = 1.8;
+post_fn = 48;
+vent = [20, 2];
 $fn = 48;
 
 cav = pcb + [2 * clear, 2 * clear];
@@ -33,7 +38,7 @@ module base() {
     for (x = [3.5, pcb.x - 3.5], y = [3.5, pcb.y - 3.5])
         translate([wall + clear + x, wall + clear + y, floor_t - 0.01]) difference() {
             cylinder(d = 5, h = 5);
-            cylinder(d = 1.8, h = 6);
+            cylinder(d = post_hole, h = 6, $fn = post_fn);
         }
 }
 
@@ -57,7 +62,7 @@ module lid() {
                 translate([outer.x / 2 - 4, y, 2 + lip_h - (lip_relief > 0 ? 0.9 : 2.5)]) cube([8, 0.4, 0.8]);
         }
         for (i = [0:vents - 1])
-            translate([outer.x / 2 - 10, outer.y / 2 - 9 + i * 4.5 - 1, -1]) cube([20, 2, 4]);
+            translate([outer.x / 2 - vent[0] / 2, outer.y / 2 - 9 + i * 4.5 - 1, -1]) cube([vent[0], vent[1], 4]);
     }
 }
 

@@ -1,0 +1,37 @@
+ECHO: "b"
+ECHO: "mid"
+ECHO: "c", 0
+ECHO: "c", undef
+ECHO: "c", []
+ECHO: "c", ""
+ECHO: "c", [0]
+ECHO: "c", "list"
+ECHO: "list"
+ECHO: "c", 1
+ECHO: "in", 2
+ECHO: 4
+ECHO: "e"
+ECHO: 3
+ECHO: "head"
+WARNING: Ignoring unknown variable "undef_var" @9
+ECHO: undef, "after"
+ECHO: "m"
+ECHO: 6, [0, 1, 2]
+ECHO: 0
+ECHO: 1
+ECHO: 2
+ECHO: ["z", "o", "w", "many"]
+ECHO: "c", "top"
+ECHO: "deep"
+ERROR: Assertion '(x == 4)' failed: "branch fail" @16
+TRACE: called by 'echo' @16
+-- aborted true interrupted false hard false
+-- csg
+group();
+group();
+
+
+-- nodes
+0 1 Root
+1 8 Group
+1 10 Group

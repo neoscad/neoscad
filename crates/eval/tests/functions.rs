@@ -335,6 +335,48 @@ echo("not reached");
     );
 }
 
+/// `?:` chains outside a function's tail position, which
+/// `Evaluator::ternary_chain` walks in a loop rather than two native calls
+/// a level: chains through either branch, conditions with side effects and
+/// of every truth value, branches that are `let`, `assert` and `echo`
+/// links (and the reverse), a failing `assert` and an unknown variable in
+/// a branch, the same in a module's arguments and a range, and a chain
+/// 1,000 deep (17,000 of the debug build's nesting limit of 25,000). The
+/// expected file was written by the evaluator before the loop
+/// (`cc86a41`), which recursed into the branch.
+#[test]
+fn ternary_chains() {
+    let deep = |n: usize| {
+        format!(
+            "echo(c(\"top\") ? {}\"deep\"{});",
+            "x ? ".repeat(n),
+            " : 0".repeat(n + 1)
+        )
+    };
+    let src = format!(
+        r#"
+x = 5;
+function c(v) = echo("c", v) v;
+echo(x > 3 ? x > 4 ? x > 5 ? "a" : "b" : "c" : "d");
+echo(x < 0 ? "neg" : x < 3 ? "small" : x < 10 ? "mid" : "big");
+echo(c(0) ? c("t") : c(undef) ? "u" : c([]) ? "e" : c("") ? "s" : c([0]) ? c("list") : "none");
+echo(c(1) ? let (a = 2) assert(a == 2) echo("in", a) a > 1 ? let (b = a * 2) b : 0 : 9);
+echo(let (a = 1) a ? assert(true) echo("e") a == 1 ? let (a = 3) a : -1 : -2);
+echo(echo("head") true ? undef_var : 1, "after");
+module m(p, q) {{ echo(p, q); }}
+m(x == 5 ? x == 6 ? 0 : echo("m") 6 : 1, q = x ? [for (i = [0 : x > 2 ? 2 : 1]) i] : []);
+for (i = [x > 1 ? 0 : 1 : x > 4 ? 2 : 3]) echo(i);
+f = function (n) n == 0 ? "z" : n == 1 ? "o" : n == 2 ? let (t = "w") t : "many";
+echo([for (i = [0 : 3]) f(i)]);
+{deep}
+echo(x ? true ? assert(x == 4, "branch fail") 1 : 2 : 3);
+echo("not reached");
+"#,
+        deep = deep(1000)
+    );
+    check("ternaries", &src, &Options::default(), None);
+}
+
 /// The shapes that moved from the native evaluator to the heap (a
 /// range's bounds, `is_undef()`'s argument, a callee that is an
 /// expression, a method's arguments): their values, warnings and errors

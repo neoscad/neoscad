@@ -179,6 +179,14 @@ class Synthetic(unittest.TestCase):
         self.assertEqual(sorted(round(sm.poly_area(l), 6) for l in loops), [-1, 9])
         self.assertEqual(chains, [])
 
+    def test_circumscribed_diameter_of_a_faceted_circle(self):
+        import math
+        for n in (6, 16, 64):
+            poly = [(10 + 0.75 * math.cos(2 * math.pi * i / n), 5 + 0.75 * math.sin(2 * math.pi * i / n))
+                    for i in range(n)]
+            self.assertAlmostEqual(sm.circum_diameter(poly), 1.5, places=9)
+            self.assertLess(sm.equiv_diameter(poly), 1.5)
+
     def test_off_bed(self):
         t = topo(voxels([(0, 0, 0)], offset=(0, 0, 0.5)))
         self.assertFalse(t["on_bed"])
@@ -259,6 +267,21 @@ class References(unittest.TestCase):
         self.assertTrue(g["pass"], g["failed_gates"])
         self.assertFails(self.ref("T2", ["lip_relief=0.8", "lip_clear=0.4"], "t2-relief-wide"), "clearance")
 
+    def test_t2_faceted_pilots_and_short_slots(self):
+        # A 1.5 pilot is 1.5 across its facets' corners at any $fn; its
+        # area-equivalent diameter (1.499 at $fn = 64, 1.481 at 16) once
+        # failed the 1.5-1.8 window on a correct part. 1.4 is too small.
+        for fn in (64, 16):
+            g = self.ref("T2", ["post_hole=1.5", f"post_fn={fn}"], f"t2-pilot-{fn}")
+            self.assertTrue(g["pass"], (fn, g["failed_gates"]))
+            posts = next(c for c in g["checks"] if "M2 posts" in c["name"])["value"]
+            self.assertTrue(all(abs(d - 1.5) < 0.005 for d in posts), (fn, posts))
+        self.assertFails(self.ref("T2", ["post_hole=1.4"], "t2-pilot-small"), "M2 posts")
+        # Vents 4.5 x 2.5 (1.8:1) are slots; 3 x 2.5 (1.2:1) are not.
+        g = self.ref("T2", ["vent=[4.5, 2.5]"], "t2-vent-short")
+        self.assertTrue(g["pass"], g["failed_gates"])
+        self.assertFails(self.ref("T2", ["vent=[3, 2.5]"], "t2-vent-square"), "vent")
+
     def test_t3(self):
         g = self.ref("T3")
         self.assertTrue(g["pass"], g["failed_gates"] or g["parts"])
@@ -311,6 +334,20 @@ class References(unittest.TestCase):
         g = self.ref("T3", ["barb_stem=5"], "t3-stem")
         self.assertTrue(g["pass"], g["failed_gates"])
         self.assertFails(self.ref("T3", ["barb_stem=5", "barbs=2"], "t3-two"), "three barbs")
+
+    def test_t3_flares(self):
+        # A 45-degree flare between the flange and the barbs is neither a
+        # barb nor, necessarily, barb length: an 8 mm skirt before 25 mm of
+        # barbs and a 1.8 mm root fillet inside the 25 both pass.
+        for defs, tag in ((["barb_flare=8"], "t3-flare"), (["barb_fillet=1.8"], "t3-fillet"),
+                          (["barb_flare=8", "flip=true"], "t3-flare-flip")):
+            g = self.ref("T3", defs, tag)
+            self.assertTrue(g["pass"], (tag, g["failed_gates"]))
+            barbs = next(c for c in g["checks"] if c["name"] == "three barbs")["value"]
+            self.assertEqual(len(barbs["peaks"]), 3, (tag, barbs))
+        # It does not hide a fourth barb or a short barb.
+        self.assertFails(self.ref("T3", ["barb_flare=8", "barbs=4"], "t3-flare-four"), "three barbs")
+        self.assertFails(self.ref("T3", ["barb_flare=8", "barb_len=20"], "t3-flare-short"), "barb 25")
 
 
 T0_SCAD = "difference() { cube([20, 10, 4]); translate([10, 5, -1]) cylinder(d = 3, h = 6, $fn = 64); }\n"

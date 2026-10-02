@@ -491,7 +491,8 @@ fn without_browser_the_page_tools_are_not_listed() {
         "{instructions}"
     );
     assert!(
-        instructions.ends_with("are the resource neoscad://recipes."),
+        instructions
+            .ends_with("are the resource neoscad://recipes, and `docs` gives each by name."),
         "{instructions}"
     );
     // The default page is neoscad.org's.

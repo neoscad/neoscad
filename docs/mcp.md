@@ -114,7 +114,7 @@ transcript audit read as a problem in its model.
 | `measure` | model and part bbox, volume, centroid; distance between parts, or the overlap's pieces; sections with each contour's area, bbox, hole and radii; a radius profile with crests and pitch | `part`, `between`, `section`, `axis` (`x`/`y`/`z`, default z), `center` (`[a, b]`, the axis's position, default `[0, 0]`), `profile` (`[from, to, step]` along the axis) |
 | `test` (`--tool test`) | model tests (`docs/model-tests.md`); `path` is a test file or directory, `source` a test file's text | `filter` |
 | `format` (`--tool format`) | `source`: the formatted text; `path`: rewrites the file (only whitespace changes) | `check` (say how many lines would change, write nothing), `diff` (with `check`: the diff itself) |
-| `docs` | a builtin's reference, or with `path` a file's definitions; no name: the index | `name`, `full`, `verbose` (the whole index) |
+| `docs` | a builtin's or printing recipe's reference, or with `path` a file's definitions; no name: the index, which ends with the recipes' names | `name`, `full`, `verbose` (the whole index) |
 
 The server's `instructions` (sent once, at discovery or `initialize`)
 say when to use which: after an edit, one `check` (with `min_wall`)
@@ -136,13 +136,13 @@ cut "… [truncated]", so the whole text stays under that, which
 mid-comment. With `--browser` the page's paragraph leaves no
 room, and the recipes become a pointer to `neoscad://recipes`.
 
-The tool list is 4,686 bytes of compact JSON as `[name, description,
+The tool list is 4,720 bytes of compact JSON as `[name, description,
 input schema]` arrays, which is what `crates/cli/tests/mcp.rs` measures
 and keeps under 5,500 bytes (each description under 300). What a client
-receives is larger: 4,896 bytes with the keys (`name`, `description`,
-`inputSchema`) and 5,114 with `annotations`, roughly 1,250-1,500 tokens
+receives is larger: 4,930 bytes with the keys (`name`, `description`,
+`inputSchema`) and 5,148 with `annotations`, roughly 1,250-1,500 tokens
 (estimated at 3.5-4 bytes a token; not measured with a tokenizer). With
-`--tool test --tool format` the list is 5,856 bytes (6,427 as
+`--tool test --tool format` the list is 5,809 bytes (6,380 as
 received); before `test` and `format` were opt-in it was 5,488, without
 `check`'s `export`, `overwrite` and `sections`. To make room
 for `measure`'s `axis`, `center` and `profile`, `base_dir` lost its
@@ -248,7 +248,11 @@ spans and the area steeper than `max_overhang` + 15°, with theirs
 steeper than 60° (z 11.9)"), since findings carry no bbox here: an
 agent swept `max_overhang` to find a ledge the point was 5 mm from.
 `docs` of an unknown name, with nothing close, says to add `path` (the
-tool's argument, not the command line's `--in`). A pinched solid (two pieces touching along an edge: Manifold says
+tool's argument, not the command line's `--in`). A name that is no builtin or definition but
+is a printing recipe's, or a prefix of it or of one of its words (`snap`,
+`hook`, three letters or more) or close to it (`snaphook`), answers with
+that recipe's comment and code: agents read the recipes in the
+instructions and asked `docs` for `snap_hook`, which said "no builtin". A pinched solid (two pieces touching along an edge: Manifold says
 valid, an STL of it is not manifold) reads `NOT manifold` with a line
 saying how many edges and where the first is, and the geometry's
 `pinched` carries the `fix`. Slicers read an STL's coordinates as

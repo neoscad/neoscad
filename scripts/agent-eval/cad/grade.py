@@ -349,6 +349,11 @@ def panel_openings(p, axis, at):
     return res
 
 
+# How much longer than wide an opening must be to count as a slot (T2's
+# vents; see grade_t2).
+SLOT_RATIO = 1.5
+
+
 def grade_t2(parts):
     out = []
     base, lid = parts.get("base"), parts.get("lid")
@@ -373,14 +378,20 @@ def grade_t2(parts):
                      len(dims) == 2 and abs(dims[0] - 50.8) <= 0.1 and abs(dims[1] - 26.8) <= 0.1,
                      r3(dims), [50.8, 26.8]))
 
-    # Posts: M2 holes in the section 1 mm above the floor.
+    # Posts: M2 holes in the section 1 mm above the floor, judged by their
+    # circumscribed diameter, the size the model gave them. The area-
+    # equivalent diameter of a faceted hole is smaller than the circle its
+    # vertices lie on: a 1.5 pilot at $fn = 64 measured 1.499 and failed
+    # the 1.5-1.8 window on a correct part. The window's ends allow 0.005
+    # for the STL's 32-bit coordinates.
     loops, _ = base.section(2, cav["floor_top"] + 1.0)
     _, holes = classify_loops(loops)
-    post_holes = [sm.equiv_diameter(h) for h in holes if 1.4 <= sm.equiv_diameter(h) <= 3.7]
+    post_holes = [d for d in (sm.circum_diameter(h) for h in holes) if 1.4 <= d <= 3.7]
     out.append(check("four M2 posts (holes 1.5..3.6 dia, 1 mm above the floor)",
-                     len(post_holes) == 4 and all(1.5 <= d <= 3.6 for d in post_holes),
-                     r3(post_holes), 4, note="a post counts by its hole: pilot (1.5-1.8), clearance "
-                                              "(2.2-2.4) or heat-set insert (3.2-3.6); solid posts are not counted"))
+                     len(post_holes) == 4 and all(1.495 <= d <= 3.605 for d in post_holes),
+                     r3(post_holes), 4, note="a post counts by its hole's circumscribed diameter: pilot "
+                                              "(1.5-1.8), clearance (2.2-2.4) or heat-set insert (3.2-3.6); "
+                                              "solid posts are not counted"))
 
     # Openings: walls at mid-wall, the floor, and the lid's plate.
     w = cav["wall"] or 2
@@ -417,8 +428,14 @@ def grade_t2(parts):
                      note="through-openings of the base walls, floor and lid plate (section bboxes); "
                           "a notch open to the rim is not found"))
     # Vents: the largest group of identical slot-shaped openings, so snap
-    # windows or screw holes of another size are not counted as vents.
-    slots = [o for o in opens if o not in usb[:1] and o["size"][1] >= 0.5 and o["size"][0] >= 2 * o["size"][1]]
+    # windows or screw holes of another size are not counted as vents. The
+    # spec says "slots" and gives no proportion; a slot is an opening
+    # clearly longer than it is wide, so 1.5:1 or more counts. Round holes
+    # (1:1) and square or hexagonal vents (up to 1.15:1) do not. The rule
+    # was 2:1 until a row of five 2.5 x 4.5 vents with pointed roofs, built
+    # and described as slots (1.8:1), failed it: a person grading the spec
+    # would count those.
+    slots = [o for o in opens if o not in usb[:1] and o["size"][1] >= 0.5 and o["size"][0] >= SLOT_RATIO * o["size"][1]]
     groups = []
     for o in slots:
         for g in groups:
@@ -431,7 +448,7 @@ def grade_t2(parts):
     out.append(check("five vent slots", len(best) == 5,
                      {"largest_group": len(best), "size": best[0]["size"] if best else None,
                       "where": sorted({o["part"] for o in best}), "all_slots": [o["size"] for o in slots]}, 5,
-                     note="slots: through-openings at least twice as long as wide, grouped by size (+-0.2)"))
+                     note="slots: through-openings at least 1.5 times as long as wide, grouped by size (+-0.2)"))
 
     # Lid lip clearance: rings of the lid above its plate, measured with
     # rays at 9 positions per axis on levels 0.2 mm apart, against the
@@ -529,6 +546,11 @@ def xcorr_lag(a, b, max_lag):
         if c > best:
             best, best_l = c, L
     return best_l, best
+
+
+# Radius lost per unit of length, away from the hex or thread, from which
+# the end of T3's barb is a flare rather than a barb (see grade_t3).
+FLARE_SLOPE = 0.5
 
 
 def grade_t3(parts):
@@ -743,7 +765,27 @@ def grade_t3(parts):
     # it springs from (the hex face or the thread's end, whichever is
     # nearer; anything between, such as a chamfer or collar, is the barb's
     # stem) to the next feature or the part's end on its other side.
+    #
+    # A flare is the cone by which the barb's stem widens into the feature
+    # it springs from: a fillet at the barb's root, or a skirt under the
+    # flange that lets the flange print without support when the barb is
+    # down. It has no retaining face and grips no hose, so it is not a
+    # barb (below), and the spec does not say whether it belongs to the
+    # "25 long barb" or to the flange: a 1.8 mm root fillet inside the 25
+    # and an 11 mm skirt below a 25 mm barb both meet the spec as a person
+    # would read it, and the 11 mm skirt failed the length and the barb
+    # count on a correct part. So the length passes measured either from
+    # the feature or from where the flare starts. The flare is the levels
+    # next to the feature that narrow away from it at FLARE_SLOPE or
+    # steeper (about 27 degrees from the axis and up; a 45-degree flare is
+    # 1) over at least 0.5 mm: a barb's ramp is shallower (the
+    # reference's is 0.12, agents' about 0.2), so a tooth that starts at
+    # the flange face stays a barb, and so does a crest behind a small
+    # chamfer. A plain collar does not narrow, so it stays the barb's
+    # stem, as before.
     br = longest("B")
+    flare = {"lo": 0, "hi": 0}  # levels of the barb run in a flare, at each end
+    barb_lens = []
     if br:
         z0, z1 = zs[br[1]], zs[br[2]]
         below = [z for z in ((fl[1] + step / 2) if fl and fl[1] < z0 else None,
@@ -753,10 +795,39 @@ def grade_t3(parts):
         b_lo = max(below) if below else p.bmin[2]
         b_hi = min(above) if above else p.bmax[2]
         barb_len = b_hi - b_lo
+        # Walk from the feature's face towards the barb while the profile
+        # narrows steeply. The flare's wide end is often too wide to be
+        # barb-like (a 45-degree skirt reads as thread-like past radius 9
+        # and as hex past 13.5), so the walk starts at the face, not at the
+        # barb run. Only an end that meets a feature can flare into it;
+        # the part's own end is the hose's tip.
+        lo_z, hi_z = b_lo, b_hi
+        for end, inward, face in (("lo", 1, b_lo if below else None), ("hi", -1, b_hi if above else None)):
+            if face is None:
+                continue
+            ins = [i for i in range(len(zs)) if (zs[i] > face if inward > 0 else zs[i] < face)]
+            i = ins[0] if inward > 0 else ins[-1]
+            while ((i + inward <= br[2] if inward > 0 else i + inward >= br[1])
+                   and Rmean[i + inward] < Rmean[i] - FLARE_SLOPE * step):
+                i += inward
+            # It counts if it is 0.5 mm long and reaches into the barb run
+            # past its first level.
+            if abs(zs[i] - face) >= 0.5 and (i > br[1] if inward > 0 else i < br[2]):
+                flare[end] = abs(i - (br[1] if inward > 0 else br[2]))
+                if inward > 0:
+                    lo_z = zs[i]
+                else:
+                    hi_z = zs[i]
+        barb_lens = [barb_len]
+        if flare["lo"] or flare["hi"]:
+            barb_lens.append(hi_z - lo_z)
     else:
         barb_len = None
-    out.append(check("barb 25 long (+-1, from the hex face or thread end to its end)", within(barb_len, 24, 26),
-                     r3(barb_len), 25))
+    out.append(check("barb 25 long (+-1, from the hex face or thread end to its end)",
+                     any(within(x, 24, 26) for x in barb_lens),
+                     r3(barb_len) if len(barb_lens) < 2 else {"from_feature": r3(barb_lens[0]),
+                                                              "from_flare": r3(barb_lens[1])}, 25,
+                     note="a flare into the hex or thread counts as the barb's root or as the feature's"))
 
     # Barbs: plateaus of the mean radius that stand 0.3 above the lowest
     # point on each side before the profile rises higher again (their
@@ -785,7 +856,10 @@ def grade_t3(parts):
                     sides_min.append(lowest)
             prom = top - max(sides_min) if sides_min else 0
             z = zs[br[1] + (j + k) // 2]
-            if prom >= 0.3 and (not peaks or z - peaks[-1][0] > 1.0):
+            # The flare's wide end, where the run meets the feature, is
+            # not a barb (see the barb's length above).
+            in_flare = (j == 0 and flare["lo"]) or (k == len(prof) - 1 and flare["hi"])
+            if prom >= 0.3 and not in_flare and (not peaks or z - peaks[-1][0] > 1.0):
                 peaks.append((z, 2 * top))
         j = k + 1
     shank = 2 * min(prof) if prof else None

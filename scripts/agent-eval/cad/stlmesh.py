@@ -555,6 +555,18 @@ def equiv_diameter(p):
     return 2 * math.sqrt(abs(poly_area(p)) / math.pi)
 
 
+def circum_diameter(p):
+    """Twice the farthest vertex's distance from the centroid: a faceted
+    circle's nominal diameter. OpenSCAD and CadQuery put a circle's
+    vertices on it, so a hole modelled as d = 1.5 has this diameter
+    whatever its facet count, while its area-equivalent diameter is
+    smaller (1.499 at $fn = 64, 1.481 at $fn = 16). Section points on a
+    facet's diagonal edge lie inside the circle and do not move the
+    farthest one."""
+    c = poly_centroid(p)
+    return 2 * max(math.hypot(x - c[0], y - c[1]) for x, y in p)
+
+
 def median(xs):
     xs = sorted(xs)
     if not xs:

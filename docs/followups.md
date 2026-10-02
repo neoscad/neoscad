@@ -477,6 +477,32 @@ lead them, come roughly in order of user impact.
   now builds each once, sharing the inner lists, with a stack of its own:
   4,000 levels peak at 9 MB and 4,900 (the parser's limit) at 10 MB,
   the output unchanged.
+- **Parallel renders of many-child unions peak higher than one thread's
+  (BOSL2 `skin__042`).** The example sweeps a region and calls
+  `show_anchors()`, which attaches an arrow and a text label to each
+  anchor: 628 `text()` extrusions, 342 polyhedra and 682 cylinders under
+  one union. It is the render that grows, in the geometry: evaluation alone
+  (`-o x.csg`) peaks at 237 MB (a 44 MB CSG file) and the preview PNG at
+  232 MB, `check` and `-o x.stl` alike pass 2 GB in about 2 s, and
+  without `show_anchors()` the sweep renders in 0.1 s. So the cut stage
+  (`crates/session/src/cuts.rs`) is not the cause, and the survey of the
+  cut findings that was killed on it ran `check` (whose command line
+  sets no limits) under a 2 GB watchdog. The
+  nightly (`--backend=manifold`) also passes 2 GB on it (killed at 9.8 s;
+  its preview peaks at 499 MB), so the example itself needs more than
+  2 GB in both. Scaled down to `rgn1`'s first two circles
+  (`d=[10:10:20]`, an 855k-facet result), the nightly finishes at 1.74 GB
+  in 7.5 s and neoscad at 1.80 GB in 10.0 s on one thread
+  (`RAYON_NUM_THREADS=1`), 1.92 GB in 6.2 s on 2, 1.93 GB in 4.2 s on 4,
+  and passes 2 GB within 1.7 s at the default 14: each union level's
+  branches (`geom::shared`'s `level.par_iter()`, `kids_in_parallel`)
+  hold their intermediate meshes at once. A memory limit stops it cleanly
+  (`--limit memory=1536`: "the engine uses 1,552 MiB of memory, over the
+  memory limit of 1,536 MiB (measured)" after 2.4 s), and the agent
+  surfaces have one, so this is about peak, not safety. A fix would
+  bound how many large unions run side by side (by their inputs'
+  triangle counts, say) and needs a benchmark run, since the same
+  fan-out is what makes the heavy models fast.
 
 ## Parity
 - `manifold-rust` 0.13.1 ports Manifold v3.5.0; OpenSCAD pins v3.5.2.
@@ -1514,11 +1540,20 @@ lead them, come roughly in order of user impact.
     the same; `let` alone needs 15). BOSL2's `nurbs.scad` (66 chained
     `assert`s) weighs 1,311, down from 2,289; MCAD's `bitmap.scad`
     (2,005) is now the deepest file by weight.
-  - Left: a `?:` in a statement's arguments still recurses per level
-    (`eval_expr`'s `Ternary` arm calls `eval` for the branch); taking
-    the branch in `eval_expr`'s loop would make a chain of them cost no
-    frame a level, and let `TernaryExpr` and a `let` alternating with it
-    weigh less.
+  - Done: a `?:` whose branch is another `?:` is walked in a loop
+    (`Evaluator::ternary_chain`), so a chain of them costs no native
+    frame a level. Output is unchanged (4,028 of 4,029 OpenSCAD and
+    BOSL2 files echo byte for byte; the other differs only in the bundled
+    library's path, which follows the binary). Taking every `?:`'s
+    branch in `eval_expr`'s own loop instead made BOSL2's isosurface
+    benchmark 7-8% slower. `TernaryExpr` keeps its weight, 17: with the
+    limit lifted, WebKit's worst case for a run is still 220 levels of
+    `x ? ` (222 before), and the parameters request, which does not
+    evaluate, overflows at 237, so evaluation was not what overflowed
+    first. With other kinds: 119 levels alternating with `let` (117
+    before), 144 with `assert`, 146 with `echo`, 61 of `[x ? ` (45 + 17
+    = 62 needs 60.7), 72 of `(x ? `, 60 of `max(x ? `. Left: lowering its
+    weight needs the stages before evaluation to go deeper on `?:` too.
 - **Done: the preview's product booleans run under the limits.**
   `geom::csg::product_meshes_until` checks a `geom::csg::Stop` (the
   request's interrupt flag and limits guard) before every kernel

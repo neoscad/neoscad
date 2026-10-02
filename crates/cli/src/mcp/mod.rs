@@ -25,6 +25,7 @@ mod bridge;
 
 /// Also what `neoscad bench --submit` opens its issue link with.
 pub(crate) use bridge::open_in_browser;
+mod recipes;
 pub mod roots;
 mod tools;
 
@@ -85,7 +86,7 @@ const RECIPES_INTRO: &str = "\n\nPrinting recipes (tested; adapt the numbers):\n
 /// What stands in for [`RECIPES`] when they would not fit the limit
 /// (with `--browser`'s extra paragraph): a pointer, rather than recipes
 /// the client cuts short.
-const RECIPES_POINTER: &str = " Printing recipes (countersink, rounded plate, fillet, thread, snap hook) are the resource neoscad://recipes.";
+const RECIPES_POINTER: &str = " Printing recipes (countersink, rounded plate, fillet, thread, snap hook) are the resource neoscad://recipes, and `docs` gives each by name.";
 
 /// The server's instructions: the guidance, `--browser`'s paragraph when
 /// there is a page bridge, then the recipes if they fit

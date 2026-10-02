@@ -179,7 +179,7 @@ pub fn list() -> Vec<Value> {
         },
         json!({
             "name": "docs",
-            "description": "Reference for an OpenSCAD builtin (cube, rotate_extrude, $fn...) or a library module; no name gives the index. With `path`, that file's definitions and includes.",
+            "description": "Reference for an OpenSCAD builtin (cube, rotate_extrude, $fn...), a printing recipe (snap_hook...) or a library module; no name gives the index. With `path`, that file's definitions and includes.",
             "inputSchema": {"type": "object", "properties": {
                 "name": {"type": "string"},
                 "path": {"type": "string", "description": "File whose definitions to search"},
@@ -1147,15 +1147,39 @@ impl Tools {
     fn docs(&self, id: &Value, args: &Value) -> Reply {
         let base = self.base(args)?;
         let file = self.readable(&base, args, "path")?;
+        let name = str_arg(args, "name");
         let r = self.run(
             id,
             "docs",
-            &json!({"name": str_arg(args, "name"), "file": file, "cwd": base,
+            &json!({"name": name, "file": file, "cwd": base,
                     "full": bool_arg(args, "full"), "brief": !bool_arg(args, "verbose"),
                     "file_arg": "`path` (the file that defines or includes it)"}),
         )?;
+        let mut text = r["text"].as_str().unwrap_or("").trim_end().to_string();
+        match name {
+            // The index lists the recipes too: the instructions show them,
+            // and an agent that asks for the index is looking for what to
+            // ask about next.
+            None => text.push_str(&format!(
+                "\nPrinting recipes (ask for one by name): {}",
+                super::recipes::names()
+            )),
+            // Builtins and the file's own definitions come first (a model
+            // may define its own `thread`); a name they don't know may be
+            // a recipe the agent read in the instructions. (`entries` is
+            // there when the name was not found, not when `path` could
+            // not be read, an error the agent still needs to see.)
+            Some(n) if r["exit_code"] != 0 && r["entries"].is_array() => {
+                if let Some((how, found)) = super::recipes::find(n) {
+                    text = super::recipes::answer(n, how, &found)
+                        .trim_end()
+                        .to_string();
+                }
+            }
+            Some(_) => {}
+        }
         Ok(Out {
-            text: r["text"].as_str().unwrap_or("").trim_end().to_string(),
+            text,
             structured: Value::Null,
             png: None,
         })

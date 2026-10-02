@@ -1752,6 +1752,9 @@ impl<'a> Evaluator<'a> {
                 } else {
                     *b
                 };
+                if let ExprKind::Ternary(..) = ast.expr(next).kind {
+                    return self.ternary_chain(u, next, ctx);
+                }
                 self.eval(u, next, ctx)
             }
             ExprKind::Index(a, i) => {
@@ -1763,6 +1766,35 @@ impl<'a> Evaluator<'a> {
             ExprKind::Let(..) => self.eval_chain(u, id, ctx),
             _ => self.eval_cold(u, id, ctx),
         }
+    }
+
+    /// A `?:` whose taken branch is another `?:` (`a ? x : b ? y : ...`,
+    /// or nested through the other branch), walked in a loop: each
+    /// condition is evaluated and its branch taken until the branch is
+    /// something else, which is evaluated once. Recursing (`eval` and
+    /// `eval_expr` a level), such a chain in a statement's arguments cost
+    /// two native frames a `?:`. What runs is what the recursion ran: the
+    /// same conditions in the same order, and its per-level `check_hard`
+    /// came right after each branch returned with nothing run in between,
+    /// so the one after the last branch (in [`Self::eval`]) stands for
+    /// them all.
+    ///
+    /// Only a chain comes here. Taking every `?:`'s branch in
+    /// `eval_expr`'s own loop, as it does `assert` and `echo` links, made
+    /// the common single `?:` slower: BOSL2's isosurface example
+    /// (`bosl_isosurface__006` in `conformance/bench.json`) took 7-8%
+    /// longer.
+    #[inline(never)]
+    fn ternary_chain(&mut self, u: u32, mut id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
+        let ast: &'a Ast = self.units[u as usize].ast;
+        while let ExprKind::Ternary(c, a, b) = ast.expr(id).kind {
+            id = if self.eval(u, c, ctx)?.to_bool() {
+                a
+            } else {
+                b
+            };
+        }
+        self.eval(u, id, ctx)
     }
 
     #[inline(never)]
