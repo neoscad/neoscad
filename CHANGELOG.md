@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1
+
+### Changed
+
+- **The geometry kernel is manifold-rust 0.15.0** (from 0.13.1), with
+  NeoSCAD's changes to it in the form offered upstream
+  (larsbrubaker/manifold-rust #5-#10). Results are the same to within
+  rounding; a few models triangulate slightly differently. One of them
+  is BOSL2's `cubetruss`, whose union no longer leaves a two-sided sheet,
+  so its area now matches OpenSCAD's.
+- A long boolean can be cancelled sooner, because the kernel checks for
+  cancellation while it intersects edges, as Manifold's C++ library
+  does.
+
 ## 0.3.0
 
 ### New

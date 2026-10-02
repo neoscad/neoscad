@@ -69,6 +69,7 @@
          one: a release's Flatpak job (.github/workflows/flatpak.yml)
          dates the bundle's copy the day it builds, and fails a stable
          release that has no entry here (docs/release.md). -->
+    <release version="0.3.1" date="2026-10-02"/>
     <release version="0.3.0" date="2026-10-02"/>
     <release version="0.2.1" date="2026-10-01"/>
     <release version="0.2.0" date="2026-09-30"/>
