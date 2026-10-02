@@ -12,6 +12,20 @@ const html = readFileSync(new URL("../src/index.html", import.meta.url), "utf8")
 const early = readFileSync(new URL("../src/early.js", import.meta.url), "utf8");
 const attr = (re) => html.match(re)?.[1];
 
+test("title, og:title, h1 and JSON-LD name all say what the page is", () => {
+  // The page is what people find when they search for OpenSCAD in a
+  // browser; a title of only "Try NeoSCAD" names a product they haven't
+  // heard of. Search results cut a title at about 60 characters.
+  const title = html.match(/<title>([^<]*)<\/title>/)?.[1];
+  assert.ok(title, "a title");
+  assert.ok([...title].length <= 60, `title is ${[...title].length} characters`);
+  assert.match(title, /^OpenSCAD in your browser\b/);
+  assert.equal(attr(/<meta property="og:title" content="([^"]*)"/), title);
+  assert.match(html.match(/<h1\b[^>]*>([^<]*)<\/h1>/)?.[1], /OpenSCAD in your browser/);
+  const [app] = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m) => JSON.parse(m[1]));
+  assert.match(app.name, /OpenSCAD in your browser/);
+});
+
 test("head: description, canonical, Open Graph and Twitter tags", () => {
   const description = attr(/<meta\s+name="description"\s+content="([^"]*)"/);
   assert.ok(description, "a meta description");

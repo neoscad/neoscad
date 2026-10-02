@@ -23,29 +23,33 @@
     />
     <meta name="color-scheme" content="light dark" />
     <meta name="neoscad-site" content="../site.json" />
-    <title>Try NeoSCAD</title>
+    <title>OpenSCAD in your browser · NeoSCAD</title>
     <!--
       For search engines and link previews. The bundle is relative so it
       can be unpacked anywhere, but it is published at neoscad.org/try/, and
       these URLs must be absolute: the canonical names that address (so
       /try/index.html and links with a fragment count as one page), and the
       image is the home page's hero still, as the JPEG its og:image uses.
-      Every fact here is on the site: the download page's "In the browser"
-      and the home page's hero. The JSON-LD block is data, not script, so script-src
-      neither runs nor blocks it; embed links (#embed=1) are this same
+      The title and description answer the search "OpenSCAD in your
+      browser" (search results cut a title at about 60 characters and a
+      description at about 155). Every fact here is on the site (the
+      download page's "In the browser", the home page's hero) or in this
+      page: the examples' manifest and the Export menu's formats
+      (EXPORT_FORMATS in src/engine/protocol.js). The JSON-LD block is
+      data, not script, so script-src neither runs nor blocks it; embed links (#embed=1) are this same
       document, which is why it describes the whole page.
     -->
     <meta
       name="description"
-      content="OpenSCAD's language in your browser: NeoSCAD compiled to WebAssembly, an editor with examples, rendering with WebGPU or WebGL 2. Nothing is uploaded."
+      content="Write and render OpenSCAD models in your browser. NeoSCAD runs as WebAssembly on your machine: BOSL2 examples, STL and 3MF export, nothing to install."
     />
     <link rel="canonical" href="https://neoscad.org/try/" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="NeoSCAD" />
-    <meta property="og:title" content="Try NeoSCAD: OpenSCAD in your browser" />
+    <meta property="og:title" content="OpenSCAD in your browser · NeoSCAD" />
     <meta
       property="og:description"
-      content="OpenSCAD's language in your browser: NeoSCAD compiled to WebAssembly, an editor with examples, rendering with WebGPU or WebGL 2. Nothing is uploaded."
+      content="Write and render OpenSCAD models in your browser. NeoSCAD runs as WebAssembly on your machine: BOSL2 examples, STL and 3MF export, nothing to install."
     />
     <meta property="og:url" content="https://neoscad.org/try/" />
     <meta property="og:image" content="https://neoscad.org/assets/hero-gearbox.jpg" />
@@ -60,9 +64,9 @@
       {
         "@context": "https://schema.org",
         "@type": "WebApplication",
-        "name": "NeoSCAD",
+        "name": "NeoSCAD: OpenSCAD in your browser",
         "url": "https://neoscad.org/try/",
-        "description": "NeoSCAD compiled to WebAssembly: an editor with examples, rendering in your browser with WebGPU, or WebGL 2 where WebGPU isn't available. Nothing is uploaded.",
+        "description": "Write and render OpenSCAD models in your browser: NeoSCAD compiled to WebAssembly, running on your machine with nothing to install and nothing uploaded. An editor with examples, BOSL2 among them; rendering with WebGPU, or WebGL 2 where WebGPU isn't available; export to STL, 3MF, OFF and SVG.",
         "applicationCategory": "DesignApplication",
         "operatingSystem": "Web browser",
         "browserRequirements": "WebAssembly; WebGPU or WebGL 2",
