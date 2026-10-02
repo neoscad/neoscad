@@ -291,14 +291,17 @@ impl Core {
             };
             let mut shown = false;
             let mut file_view = None;
+            let mut upload_ms = 0.0;
             if let Some(v) = &viewport
                 && v.requests.load(Ordering::SeqCst) == generation
             {
                 let scene = client::run_scene(&r, &scheme, render::Previewer::OpenCsg)?;
                 if let Some(scene) = scene {
+                    let t0 = std::time::Instant::now();
                     let model = v.gpu.upload(&scene).map_err(|e| CoreError::Failed {
                         message: e.to_string(),
                     })?;
+                    upload_ms = t0.elapsed().as_secs_f64() * 1000.0;
                     file_view = v.apply_file_view(&r, generation);
                     shown = v.lock().set_model(Arc::new(model), generation);
                 }
@@ -313,8 +316,14 @@ impl Core {
                 .filter(|f| f.is_file())
                 .map(|f| f.to_string_lossy().into_owned())
                 .collect();
+            // The summary's time is how long the user waited for the
+            // model to appear, and copying the scene into GPU buffers is
+            // part of that wait, so the total counts it. Not the geometry
+            // time: the tooltip's stages stay what the core computed.
+            let mut render = crate::render_result(&r, &scheme);
+            render.timings.total_ms += upload_ms;
             Ok(DocumentResult {
-                render: crate::render_result(&r, &scheme),
+                render,
                 console,
                 files,
                 language,

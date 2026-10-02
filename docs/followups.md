@@ -141,17 +141,6 @@ lead them, come roughly in order of user impact.
   under limits. Memory and time are not re-checked on a hit (it
   allocates and takes nothing). (8f)
 
-- **`aRunawayModelStopsAtTheDeadline` (apple/Tests/QuickLookTests.swift)
-  fails now and then under heavy machine load** (load average ~40, seen
-  2026-10-02): the core answers at about 1 s without `timedOut`, so it
-  stopped for a reason other than the 1 s watchdog, before it. It passed
-  5 of 5 runs once the load eased, and 6 of 6 run alone with only
-  `-only-testing:NeoSCADTests` under load, so it fails only next to the
-  app's tests; the note it returns was not captured.
-  Next time it fails, print `r.notes` (the test's `#expect` comment) to
-  see which limit tripped. Suspect the 512 MiB memory limit measured
-  against the test process while parallel tests render.
-
 - **Preview product cache and wasm memory.** Since preview products are
   cached in the renderer's geometry cache, a long /try session's wasm
   memory peak is higher: threaded-ring then gearbox, eight previews in
@@ -160,12 +149,13 @@ lead them, come roughly in order of user impact.
   like fragmentation). The web limit is 1 GiB. If users hit it, give the
   web core a smaller geometry budget or a separate product budget, or
   restart the worker between documents.
-- **gearbox has one image-space product whose solidity check reruns on
-  every preview** (about 20 ms natively): cache it by shape like the
-  others.
-- **Native "Previewed in" leaves out the GPU upload** (the scene time is
-  included since the product cache change); adding it means timing the
-  upload in the ffi/app layer.
+- **The web page's "Previewed in" leaves out the GPU upload.** The
+  native apps count it in the total (`crates/ffi/src/document.rs`,
+  `crates/linux-app/src/run.rs`); the page shows the core's summary as
+  it comes from the worker (`web/src/app.js`, `runOnce`), before
+  `viewer.setScene` uploads the packed scene (`crates/web-view`,
+  `upload_packed`), so neither that nor the transfer from the worker is
+  in it.
 
 ## Performance
 

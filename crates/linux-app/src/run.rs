@@ -81,6 +81,7 @@ pub fn run_document(
         }
     }
     let scene = client::run_scene(&r, scheme, render::Previewer::OpenCsg)?;
+    let t0 = std::time::Instant::now();
     let model = match (scene, gpu) {
         (Some(scene), Some(gpu)) => Some(Arc::new(gpu.upload(&scene).map_err(|e| {
             CoreError::Failed {
@@ -89,6 +90,7 @@ pub fn run_document(
         })?)),
         _ => None,
     };
+    let upload_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let a = r.camera_assigned;
     let c = &r.camera;
     let file_view = a.any().then_some((
@@ -97,7 +99,13 @@ pub fn run_document(
         a.vpd.then_some(c.vpd),
         a.vpf.then_some(c.vpf),
     ));
-    let render = client::render_result(&r, scheme);
+    // The summary's time is how long the user waited for the model to
+    // appear, and copying the scene into GPU buffers is part of that wait,
+    // so the total counts it (as the macOS and Windows apps' core does,
+    // `crates/ffi/src/document.rs`). Not the geometry time: the tooltip's
+    // stages stay what the core computed.
+    let mut render = client::render_result(&r, scheme);
+    render.timings.total_ms += upload_ms;
     let files = crate::watch::on_disk(client.run_files(&r, &doc));
     Ok(RunOutput {
         generation: plan.generation,

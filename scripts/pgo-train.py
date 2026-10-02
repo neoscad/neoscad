@@ -21,10 +21,10 @@ recurse that deep, so without it the heap's call loop would be trained
 almost only by statements and would be laid out as cold code.
 
 The training is deterministic in what it runs: fixed inputs, fixed sizes,
-no unseeded `rands()` in the models written here. (Some BOSL2 tests call
-`rands()` unseeded, which the command line seeds from the clock, and
-parallel runs interleave differently; both move counters a little, not
-which code runs.)
+and a fixed `--seed` for unseeded `rands()`, which some BOSL2 tests call
+and which the command line otherwise seeds from the clock. (Parallel runs
+still interleave differently, which moves counters a little, not which
+code runs.)
 
 What it leaves out is deliberate: the odd-numbered BOSL2 examples, the
 other BOSL2 `examples/` files and OpenSCAD's `examples/Old`, `Advanced`
@@ -46,7 +46,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 REF = REPO / ".reference"
-LIMITS = ["--no-server", "--limit", "memory=2G", "--limit", "time=120"]
+LIMITS = ["--no-server", "--limit", "memory=2G", "--limit", "time=120", "--seed", "1"]
 
 # Recursion past the native call levels, so the heap evaluator's loops are
 # profiled: non-tail calls (`sum`), branching calls (`fib`), calls through

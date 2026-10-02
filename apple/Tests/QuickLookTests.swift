@@ -22,6 +22,18 @@ private func directory(_ files: [String: String]) throws -> URL {
     return dir
 }
 
+/// Quick Look's limits with room for the test process. The tests run in
+/// the app's process, beside the app's own tests, and the core measures
+/// memory as the whole process's footprint: under the full suite that was
+/// already 514 MiB when the runaway model below was stopped, so Quick
+/// Look's 512 MiB ended it for memory it never used, before its deadline
+/// and without `timedOut`. 2 GiB still bounds a test that does run away.
+private let hosted: ResourceLimits = {
+    var l = QuickLookRender.limits
+    l.memoryBytes = 2 << 30
+    return l
+}()
+
 /// Width and height from a PNG's IHDR chunk.
 private func pngSize(_ png: Data) -> (Int, Int) {
     let b = [UInt8](png)
@@ -34,7 +46,8 @@ private func pngSize(_ png: Data) -> (Int, Int) {
         let dir = try directory(["cube.scad": "color(\"teal\") cube(10);\n"])
         defer { try? FileManager.default.removeItem(at: dir) }
         let r = await QuickLookRender.render(
-            fileAt: dir.appendingPathComponent("cube.scad"), width: 200, height: 120)
+            fileAt: dir.appendingPathComponent("cube.scad"), width: 200, height: 120,
+            limits: hosted)
         let png = try #require(r.png, "\(r.notes)")
         #expect(png.starts(with: pngSignature))
         #expect(pngSize(png) == (200, 120))
@@ -49,7 +62,7 @@ private func pngSize(_ png: Data) -> (Int, Int) {
         ])
         defer { try? FileManager.default.removeItem(at: dir) }
         let r = await QuickLookRender.render(
-            fileAt: dir.appendingPathComponent("gear.scad"), width: 64, height: 64)
+            fileAt: dir.appendingPathComponent("gear.scad"), width: 64, height: 64, limits: hosted)
         #expect(r.png != nil, "\(r.notes)")
         #expect(r.unreadable.isEmpty)
     }
@@ -67,7 +80,7 @@ private func pngSize(_ png: Data) -> (Int, Int) {
         ])
         defer { try? FileManager.default.removeItem(at: dir) }
         let r = await QuickLookRender.render(
-            fileAt: dir.appendingPathComponent("main.scad"), width: 64, height: 64)
+            fileAt: dir.appendingPathComponent("main.scad"), width: 64, height: 64, limits: hosted)
         #expect(r.png != nil, "\(r.notes)")
         #expect(r.unreadable == ["parts.scad", "lib/helpers.scad", "bracket.stl"], "\(r.notes)")
         let note = try #require(r.notes.first)
@@ -79,7 +92,7 @@ private func pngSize(_ png: Data) -> (Int, Int) {
         let dir = try directory(["bad.scad": "cube(10);\ncube(;\n"])
         defer { try? FileManager.default.removeItem(at: dir) }
         let r = await QuickLookRender.render(
-            fileAt: dir.appendingPathComponent("bad.scad"), width: 64, height: 64)
+            fileAt: dir.appendingPathComponent("bad.scad"), width: 64, height: 64, limits: hosted)
         #expect(r.png == nil)
         #expect(r.notes.contains { $0.contains("line 2") }, "\(r.notes)")
         #expect(r.source == "cube(10);\ncube(;\n")
@@ -95,11 +108,11 @@ private func pngSize(_ png: Data) -> (Int, Int) {
         let start = Date()
         let r = await QuickLookRender.render(
             path: "/NeoSCAD-swift-test/runaway.scad", text: text, width: 64, height: 64,
-            deadline: 1)
+            deadline: 1, limits: hosted)
         let elapsed = Date().timeIntervalSince(start)
         #expect(r.png == nil)
         #expect(!r.notes.isEmpty)
-        #expect(r.timedOut)
+        #expect(r.timedOut, "notes: \(r.notes)")
         #expect(elapsed < 3, "took \(elapsed) s")
     }
 

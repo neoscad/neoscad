@@ -343,7 +343,10 @@ determinism test (`CLAUDE.md`).
   a group whose empty sibling still sends its child through a 2D union
   (`5e8ef61`).
 - **Evaluation** is single-threaded. Unseeded `rands()` starts from a
-  seed the host passes in (`eval::Options::rng_seed`). Statement reuse
+  seed the host passes in (`eval::Options::rng_seed`): the command line
+  takes it from the clock and process ID, as OpenSCAD does, unless
+  `--seed N` fixes it (PGO training does, so its runs repeat; OpenSCAD
+  has no such option). Statement reuse
   (`eval::memo`) must give output identical to a fresh evaluation; a
   randomized harness checks it (`crates/eval/tests/incremental.rs`).
   So must call reuse within an evaluation (`eval::callmemo`), which

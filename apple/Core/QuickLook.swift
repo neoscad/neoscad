@@ -8,7 +8,9 @@
 // extension's memory:
 //
 // - Each request gets a core of its own, under `QuickLookRender.limits`
-//   (5 s and 512 MiB of estimated memory). A fresh core also keeps a
+//   (5 s, and 512 MiB of memory, estimated and also measured as the
+//   footprint of the whole process: in an extension, the extension's
+//   requests together). A fresh core also keeps a
 //   long-lived extension process from accumulating geometry caches, and
 //   two requests for the same file (a thumbnail at two sizes) cannot
 //   cancel each other as two requests on one core's document would.
@@ -48,9 +50,14 @@ public enum QuickLookRender {
     /// Render the file at `url` as a `width` by `height` pixel picture.
     /// Never throws: every failure becomes a result without a picture and
     /// with a note saying why.
+    ///
+    /// `limits` are for tests only. They run inside the app's process,
+    /// whose footprint (the app and the tests running beside them) is
+    /// already near 512 MiB, so the measured memory limit would stop a
+    /// model for memory it never used.
     public static func render(
         fileAt url: URL, width: UInt32, height: UInt32, mode: RenderMode = .preview,
-        deadline: TimeInterval = deadline
+        deadline: TimeInterval = deadline, limits: ResourceLimits = limits
     ) async -> QuickLookResult {
         let data: Data
         do {
@@ -64,15 +71,17 @@ public enum QuickLookRender {
         let text = String(decoding: data, as: UTF8.self)
         return await render(
             path: url.standardizedFileURL.path, text: text, width: width, height: height,
-            mode: mode, deadline: deadline)
+            mode: mode, deadline: deadline, limits: limits)
     }
 
     /// Render `text` as the document at `path` (absolute; includes resolve
     /// against its directory): the core's `preview_picture` on a core made
-    /// for this request, raced against the watchdog.
+    /// for this request, raced against the watchdog. `limits` as for
+    /// `render(fileAt:)`.
     public static func render(
         path: String, text: String, width: UInt32, height: UInt32,
-        mode: RenderMode = .preview, deadline: TimeInterval = deadline
+        mode: RenderMode = .preview, deadline: TimeInterval = deadline,
+        limits: ResourceLimits = limits
     ) async -> QuickLookResult {
         let core: Core
         do {

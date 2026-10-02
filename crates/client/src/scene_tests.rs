@@ -95,10 +95,12 @@ fn preview(c: &Client, path: &str, overrides: Vec<ParameterOverride>) -> Preview
 /// share one cutter (converted once, `geom::csg`'s shared negatives), a
 /// cube minus copies of a subtree with unions of its own (a plan,
 /// `geom::shared`), a 2D difference drawn as slabs, a highlighted one,
-/// and a cube coloured inside its difference (only the positive's colour
-/// tells two of them apart). `hole` is the radius of the 2D difference's
-/// hole, which the tests edit to change that product alone, and `green`
-/// the colour of the wedges and that cube, which changes only colours.
+/// a cube coloured inside its difference (only the positive's colour
+/// tells two of them apart), and a coloured cube minus an open box, which
+/// does not bound a solid and so is drawn in image space. `hole` is the
+/// radius of the 2D difference's hole, which the tests edit to change that
+/// product alone, and `green` the colour of the wedges and both coloured
+/// cubes, which changes only colours.
 fn products_model(hole: f64, green: f64) -> String {
     format!(
         "module holes() for (a = [[0, 0, 0], [90, 0, 0], [0, 90, 0]]) \
@@ -113,9 +115,18 @@ fn products_model(hole: f64, green: f64) -> String {
          }}\n\
          translate([0, -20, 0]) difference() {{ square(5); translate([2, 2]) circle({hole}, $fn = 10); }}\n\
          #translate([20, 0, 0]) difference() {{ sphere(3, $fn = 16); cube(3); }}\n\
-         translate([0, 0, 15]) difference() {{ color([{green}, 0.2, 0.2]) cube(4, center = true); sphere(2.5, $fn = 12); }}\n"
+         translate([0, 0, 15]) difference() {{ color([{green}, 0.2, 0.2]) cube(4, center = true); sphere(2.5, $fn = 12); }}\n\
+         translate([0, 0, -15]) difference() {{\n\
+             color([0.2, {green}, 0.2]) cube(4, center = true);\n\
+             {OPEN_BOX}\n\
+         }}\n"
     )
 }
+
+/// A 2-unit box with no top face: not closed, so not a solid.
+const OPEN_BOX: &str = "polyhedron([[0, 0, 0], [2, 0, 0], [2, 2, 0], [0, 2, 0], \
+     [0, 0, 2], [2, 0, 2], [2, 2, 2], [0, 2, 2]], \
+     [[0, 1, 2, 3], [4, 5, 1, 0], [5, 6, 2, 1], [6, 7, 3, 2], [7, 4, 0, 3]]);";
 
 /// The packed scene of a preview of `path`, as a viewer receives it.
 fn packed(scene: &render::Scene) -> Vec<u8> {
@@ -210,7 +221,7 @@ fn cached_previews_are_the_uncached_ones() {
             // them apart.
             c.update(DOC, models[2].clone()).unwrap();
             let (recoloured, before, after) = cached_preview(&c, DOC);
-            assert_eq!(after, before + 7, "the edit recoloured seven products");
+            assert_eq!(after, before + 8, "the edit recoloured eight products");
             assert!(
                 recoloured == fresh[2],
                 "a recoloured preview differs ({threads} threads)"
@@ -219,6 +230,23 @@ fn cached_previews_are_the_uncached_ones() {
         }));
     }
     assert!(runs[0] == runs[1], "the thread count changed a scene");
+}
+
+/// A product drawn in image space (a leaf that does not bound a solid) is
+/// kept too, so a re-preview does not check its leaves again, and the
+/// re-preview draws what a fresh one does.
+#[test]
+fn image_space_products_are_kept() {
+    let model = format!("difference() {{ cube(4, center = true); {OPEN_BOX} }}\n");
+    let fresh = uncached_preview(model.clone());
+    let c = crate::tests::client();
+    c.open(DOC, Some(model)).unwrap();
+    let (cold, before, after) = cached_preview(&c, DOC);
+    assert_eq!(after, before + 1, "the image-space product was kept");
+    assert!(cold == fresh, "a cold cached preview differs");
+    let (warm, before, after) = cached_preview(&c, DOC);
+    assert_eq!(after, before, "an unchanged re-preview kept another entry");
+    assert!(warm == fresh, "a warm preview differs");
 }
 
 /// `render_result`'s timings count the scene `run_scene` built as

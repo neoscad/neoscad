@@ -25,7 +25,8 @@
 //! The booleans are most of a preview's time, and an editor previews
 //! again after every edit, so a host keeps them in the renderer's cache
 //! ([`scene_cached`]): a product whose leaves are unchanged is not
-//! computed again.
+//! computed again, nor, for one drawn in image space, are its leaves
+//! checked again.
 //!
 //! What this cannot reproduce: image-space artefacts of products drawn
 //! from booleans. Where a positive and a negative face are coplanar
@@ -39,11 +40,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use geom::Matrix;
 use geom::color::Color;
 use geom::csg::{
     ChainObject, CsgTree, FLAG_HIGHLIGHT, Negative, ProductJob, Products, Source, Stop,
 };
+use geom::{KeptProduct, Matrix};
 
 use geom::polyset::PolySet;
 
@@ -288,6 +289,9 @@ fn opencsg(
     let mut depth = Depth::Less;
     let mut jobs: Vec<ProductJob> = Vec::new();
     let mut pending: Vec<Pending> = Vec::new();
+    // The keys of products found to need image space, kept once the
+    // booleans are done (a stopped preview keeps nothing).
+    let mut images: Vec<u128> = Vec::new();
     // Surfaces are collected in order; a product needing a boolean leaves
     // a placeholder to be filled once all booleans are done in parallel.
     let mut slots: Vec<Slot> = Vec::new();
@@ -380,13 +384,19 @@ fn opencsg(
                             .collect();
                         geom::csg::product_key(&positives, &negatives, &scheme_colors)
                     });
-                    if let Some(kept) = key.zip(cache).and_then(|(k, c)| c.product(k)) {
+                    let kept = key.zip(cache).and_then(|(k, c)| c.product(k));
+                    if let Some(KeptProduct::Mesh(kept)) = kept {
                         // Kept by an earlier preview, so its leaves (the
                         // same meshes as now) bounded solids then: the
                         // check below would pass.
                         slots.push(Slot::Kept(kept.map(|m| (m, depth, bias))));
+                    } else if matches!(kept, Some(KeptProduct::Image)) {
+                        // An earlier preview found a leaf (the same mesh
+                        // as now) that does not bound a solid.
+                        image_product(&mut slots, &pos, &neg, *pass, scheme);
                     } else if !pos.iter().chain(&neg).all(|o| is_solid(o)) {
                         image_product(&mut slots, &pos, &neg, *pass, scheme);
+                        images.extend(key);
                     } else {
                         let mut job = ProductJob::default();
                         for obj in &pos {
@@ -425,6 +435,11 @@ fn opencsg(
             c.keep_product(k, m.clone());
         }
         solved[p.at] = m.map(|m| (m, p.depth, p.bias));
+    }
+    if let Some(c) = cache {
+        for k in images {
+            c.keep_image_product(k);
+        }
     }
     for (s, solved) in slots.into_iter().zip(solved) {
         let solved = match s {

@@ -275,6 +275,14 @@ struct Cli {
     #[arg(long = "trace-depth", value_name = "N")]
     trace_depth: Option<u32>,
 
+    /// The seed of unseeded `rands()` (a 32-bit unsigned integer).
+    /// Without it the seed comes from the clock and the process ID, as
+    /// OpenSCAD's does, so two runs of a model that calls `rands()`
+    /// without a seed differ; with it they repeat. OpenSCAD has no such
+    /// option.
+    #[arg(long, value_name = "N")]
+    seed: Option<u32>,
+
     /// Trace user module parameters (true/false).
     #[arg(long = "trace-usermodule-parameters", value_name = "BOOL")]
     trace_usermodule_parameters: Option<String>,
@@ -903,7 +911,7 @@ fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
         check_parameters: flag(&cli.check_parameters, true, "check-parameters")?,
         check_parameter_ranges: flag(&cli.check_parameter_ranges, false, "check-parameter-ranges")?,
         hardwarnings: cli.hardwarnings,
-        rng_seed: host::entropy_seed(),
+        rng_seed: cli.seed.unwrap_or_else(host::entropy_seed),
         parts: parts_enabled(&cli.enable),
         features: features(&cli.enable),
         ..Default::default()
@@ -1108,5 +1116,15 @@ mod tests {
         assert_eq!(cli.define, ["file=\"a.svg\";"]);
         assert_eq!(cli.render.as_deref(), Some("force"));
         assert_eq!(cli.view, ["axes", "scales"]);
+    }
+
+    /// `--seed` reaches unseeded `rands()`: PGO training (scripts/pgo-train.py)
+    /// relies on it to run BOSL2's unseeded tests the same way every time.
+    #[test]
+    fn seed_flag_sets_the_rands_seed() {
+        let cli = Cli::try_parse_from(["neoscad", "in.scad", "--seed", "4242"]).unwrap();
+        assert_eq!(cli.seed, Some(4242));
+        assert_eq!(eval_options(&cli).ok().map(|o| o.rng_seed), Some(4242));
+        assert!(Cli::try_parse_from(["neoscad", "in.scad", "--seed", "-1"]).is_err());
     }
 }

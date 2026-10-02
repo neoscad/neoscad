@@ -283,6 +283,10 @@ struct Replay {
     /// computed; `None` when it was computed without limits (the checks
     /// that measure it are skipped then). See [`Demand`].
     demand: Option<Demand>,
+    /// The entry is a preview product drawn in image space
+    /// ([`KeptProduct::Image`]), which has no mesh; always false for a
+    /// node's result.
+    image: bool,
 }
 
 /// The largest fragment, slice and triangle counts a subtree asked for
@@ -1206,19 +1210,22 @@ impl Renderer {
         };
     }
 
-    /// A preview product's mesh kept by [`Renderer::keep_product`] under
-    /// `key` ([`crate::csg::product_key`]), if the cache still
-    /// holds it: `Some(None)` is a product that came out empty. A hit
+    /// A preview product kept by [`Renderer::keep_product`] or
+    /// [`Renderer::keep_image_product`] under `key`
+    /// ([`crate::csg::product_key`]), if the cache still holds it. A hit
     /// counts as a use for the least-recently-used order.
-    pub fn product(&self, key: u128) -> Option<Option<Arc<PolySet>>> {
-        let (geom, _, _) = self
+    pub fn product(&self, key: u128) -> Option<KeptProduct> {
+        let (geom, replay, _) = self
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(key)?;
+        if replay.image {
+            return Some(KeptProduct::Image);
+        }
         match geom {
-            None => Some(None),
-            Some(Geometry::PolySet(ps)) => Some(Some(ps)),
+            None => Some(KeptProduct::Mesh(None)),
+            Some(Geometry::PolySet(ps)) => Some(KeptProduct::Mesh(Some(ps))),
             // Product keys are hashed apart from node keys, so no node's
             // result is ever found here; if one were, it is not a product.
             Some(_) => None,
@@ -1236,17 +1243,42 @@ impl Renderer {
     /// one large model after another would keep every product it ever
     /// computed.
     pub fn keep_product(&self, key: u128, mesh: Option<Arc<PolySet>>) {
+        self.keep(key, mesh.map(Geometry::PolySet), false);
+    }
+
+    /// Keep under `key` that the preview product it names is drawn in
+    /// image space because a leaf does not bound a solid. Finding that out
+    /// means checking the leaves (`PolySet::is_outward_solid`), which for
+    /// the BOSL2 gearbox example took about 20 ms of every preview,
+    /// unchanged or not, when there is no boolean to save. The key names
+    /// the leaves' meshes, so the verdict holds as long as the key does.
+    pub fn keep_image_product(&self, key: u128) {
+        self.keep(key, None, true);
+    }
+
+    fn keep(&self, key: u128, geom: Option<Geometry>, image: bool) {
         let replay = Replay {
             msgs: None,
             pattern: 0,
             epoch: 0,
             demand: None,
+            image,
         };
         self.cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key, mesh.map(Geometry::PolySet), replay, Arc::from([]));
+            .insert(key, geom, replay, Arc::from([]));
     }
+}
+
+/// A preview product an earlier preview kept ([`Renderer::product`]).
+#[derive(Debug, Clone)]
+pub enum KeptProduct {
+    /// The product's boolean, `None` when it came out empty.
+    Mesh(Option<Arc<PolySet>>),
+    /// A leaf of the product does not bound a solid, so it is drawn in
+    /// image space from its leaves, as OpenCSG draws it.
+    Image,
 }
 
 impl Ctx<'_> {
@@ -1555,6 +1587,7 @@ impl Ctx<'_> {
                     pattern,
                     epoch: self.opts.replay.unwrap_or(0),
                     demand,
+                    image: false,
                 },
                 ids,
             );

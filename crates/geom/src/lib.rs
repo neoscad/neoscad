@@ -40,8 +40,8 @@ use std::sync::Arc;
 
 pub use eval::node::{IDENTITY, Matrix};
 pub use evaluate::{
-    CACHE_BUDGET, CacheStats, INTERRUPTED, Msg, MsgLoc, RenderOptions, Rendered, Renderer,
-    Unsupported, result_key,
+    CACHE_BUDGET, CacheStats, INTERRUPTED, KeptProduct, Msg, MsgLoc, RenderOptions, Rendered,
+    Renderer, Unsupported, result_key,
 };
 
 use manifold_geom::ManifoldGeometry;
