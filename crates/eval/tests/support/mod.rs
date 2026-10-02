@@ -1,8 +1,9 @@
 //! The expected-output harness shared by `statements.rs` and
 //! `functions.rs`: a program's messages, its `.csg` dump and every node's
-//! index and kind, compared with a file the recursive evaluator wrote
-//! (`NEOSCAD_BLESS=1`), so the heap evaluator (`--features heap-eval`) is
-//! held to its output byte for byte.
+//! index and kind, compared with an expected file. The files were written
+//! by the recursive evaluator before the heap evaluator replaced it, and
+//! hold the heap evaluator to that output byte for byte; rewrite one
+//! (`NEOSCAD_BLESS=1`) only for a change meant to alter it.
 
 #![allow(dead_code)]
 
@@ -91,8 +92,6 @@ pub fn run(src: &str, opts: &Options, stop: Option<usize>) -> (String, eval::Eva
     (s, ev)
 }
 
-pub const HEAP: bool = cfg!(feature = "heap-eval");
-
 pub fn with_depth(depth: u64, opts: Options) -> Options {
     let limits = eval::limits::Limits {
         depth: Some(depth),
@@ -116,8 +115,7 @@ pub fn check_in(dir: &str, name: &str, src: &str, opts: &Options, stop: Option<u
         .join("tests")
         .join(dir)
         .join(format!("{name}.expected"));
-    // Blessed by the recursive evaluator, the reference.
-    if !HEAP && std::env::var_os("NEOSCAD_BLESS").is_some() {
+    if std::env::var_os("NEOSCAD_BLESS").is_some() {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, &got).unwrap();
         return;

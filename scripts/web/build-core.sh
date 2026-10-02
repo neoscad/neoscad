@@ -56,11 +56,7 @@ fi
 # shellcheck source=scripts/web/remap-paths.sh
 source "$root/scripts/web/remap-paths.sh"
 neoscad_remap_paths
-# NEOSCAD_FEATURES: features of neoscad-web to build with, beyond its
-# defaults; NEOSCAD_NO_DEFAULT_FEATURES=1 leaves the defaults out (the
-# heap evaluator, `heap-eval`), for comparing against the recursive one.
-cargo build --quiet --profile web --target wasm32-unknown-unknown -p neoscad-web \
-    ${NEOSCAD_NO_DEFAULT_FEATURES:+--no-default-features} ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
+cargo build --quiet --profile web --target wasm32-unknown-unknown -p neoscad-web
 wasm=$target_dir/wasm32-unknown-unknown/web/neoscad_web.wasm
 
 rm -rf "$out"

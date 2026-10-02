@@ -204,14 +204,17 @@ lead them, come roughly in order of user impact.
   with the counted `--limit depth=N`) is done; see "Stage 1 done" there.
   Stage 2 (function calls, comprehensions and `let`/`assert`/`echo` on
   the heap past 8 native call levels, with the counted limit covering
-  functions) is done; see "Stage 2 done". Every build turns the feature
-  on by default: the native crates (cli, ffi, linux-app), the web core
-  and wasm-check. (The web core was held back because WebKit's first
-  preview came about 5 s late with it. The cause was the worker's stack
-  probes: the core's `heapStatements()` read the web crate's own feature,
-  which was off while the evaluator's was on, so all eight probes ran
-  against a heap evaluator to the depth limit, about 7 s in a WebKit
-  worker. It now asks the evaluator, `eval::recursion::HEAP_EVAL`.)
+  functions) is done; see "Stage 2 done". **The heap evaluator is the
+  only evaluator** (owner decision, 2026-10-01): the recursive statement
+  driver and the `heap-eval` feature are gone from every crate, and
+  `conformance depth` now checks that every build, PGO included, reports
+  the counted limit's depths; see "Feature removed" in the audit. (The
+  web core was held back once because WebKit's first preview came about
+  5 s late with the feature: the core's `heapStatements()` read the web
+  crate's own feature, which was off while the evaluator's was on, so
+  all eight stack probes ran against a heap evaluator to the depth
+  limit, about 7 s in a WebKit worker. It asks the evaluator,
+  `eval::recursion::HEAP_EVAL`, now always true.)
   Left from stage 2:
   - the rare shapes that stay native and start a nested heap loop for a
     part that calls: ranges (`[0 : f(n - 1)]`), callees that are
@@ -230,11 +233,35 @@ lead them, come roughly in order of user impact.
     `docs/audits/heap-evaluator.md` §6), which a WebKit worker's stack
     may not hold. It is unmeasured there; natively it is fine;
   - `resolve::Stats` does not count the `may_call` share of a corpus;
-  - the frame budget, its weights and the worker's probe are unused for
-    recursion under the feature. They still bound native source nesting,
-    which the parser bounds first (see "Stage 2 done"). The feature is
-    now the default in every build, so they can go along with the
-    recursive evaluator.
+  - the web side of the frame weights and the stack probe, now dead
+    (`crates/web` was being changed by other work when the feature was
+    removed, so it was left alone). The evaluator keeps thin shims for
+    it in `eval::recursion`: `HEAP_EVAL` (true), `set_frame_weights`
+    (ignored), `frame_weights`/`DEFAULT_WEIGHTS`/`FrameWeights` (the
+    constants) and `frames_at_last_check` (0). To remove:
+    - `crates/web/src/wasm.rs`: `setFrameWeights`, `frameWeights`,
+      `framesAtLastCheck` and `heapStatements`, and `setFrameLimit` too
+      unless a host should still set the budget, with their docs (which
+      still name the `heap-eval` feature);
+    - `crates/web/js/worker.js`: the stack probe (`PROBES`, `RUNS`,
+      `probeRun`, `probeWeights` and their constants), `start()`'s
+      `probe` option and its `setFrameWeights`/`setFrameLimit` calls, the
+      `frameLimit`, `frameWeights` and `probe` fields of the `ready`
+      message, and the comment naming the feature;
+    - `crates/web/test/run.mjs`: "the stack probe ran and calibrated the
+      weights";
+    - `docs/web-protocol.md`: the `ready` message's fields and "the
+      probe";
+    - then the shims above, and `set_default_frame_limit` if
+      `setFrameLimit` went. The frame budget itself stays: it is the
+      wasm32 guard for what still recurses natively;
+  - the native stack is still sized for the recursive evaluator:
+    `DEFAULT_STACK_LIMIT` is 64 MiB on a thread of 80 MiB
+    (`with_stack`), though only the native call levels, the shapes
+    above, printing and source nesting (bounded by the parser) use it
+    now. Shrinking it means measuring what those need, in a debug build
+    too, and deciding how deep a recursion through the native shapes
+    should go.
 
   Left from stage 1:
   - Done: the apps' `ResourceLimits` record (`crates/client/src/types.rs`,
@@ -1393,7 +1420,11 @@ lead them, come roughly in order of user impact.
   expectation from it (`arch -x86_64`), as `tests/experimental.rs` does.
 
 ## WASM
-- Recursion on wasm32 stops at a frame budget calibrated for V8's default
+- Superseded by the heap evaluator for user recursion, which now stops at
+  the counted depth limit on wasm32 too (`scripts/wasm-check.sh --depths`:
+  99,999 for both recursions below); the budget only meets the shapes
+  that still recurse natively. The rest of this entry is history.
+  Recursion on wasm32 stopped at a frame budget calibrated for V8's default
   stack in node 18 (`eval::recursion`): function depth 498 and module
   depth 249 for the simplest recursions, against 110,361 and 16,842
   natively and the nightly's 9,192 and 7,052. Without the budget V8

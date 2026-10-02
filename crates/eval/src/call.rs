@@ -467,11 +467,10 @@ impl<'a> Evaluator<'a> {
     /// constant native stack.
     #[inline(never)]
     pub fn eval_call(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
-        // Under the heap evaluator, a user call past `NATIVE_CALLS` nested
-        // native ones runs on the heap ([`crate::heap_expr`]), with
+        // A user call past `NATIVE_CALLS` nested native ones runs on the
+        // heap ([`crate::heap_expr`]), with
         // everything it calls. Until then calls run here, where nearly
         // all of a program's work is done, at the cost of this compare.
-        #[cfg(feature = "heap-eval")]
         if self.calls_deep() && self.static_builtin(u, id).is_none() {
             return self.heap_eval(u, id, ctx);
         }
@@ -487,7 +486,7 @@ impl<'a> Evaluator<'a> {
         self.work += 1;
         // A frame for the frame budget (see `crate::recursion`); tail
         // calls below reuse it, as they reuse the native stack.
-        self.frames += self.weights.call;
+        self.frames += crate::recursion::CALL_FRAMES;
         // A call that can only ever reach a builtin makes one step and no
         // context, so it skips the loop and its stack slot. The checks
         // above and the frame charge are the loop's, in the same order, so
@@ -495,17 +494,14 @@ impl<'a> Evaluator<'a> {
         // before.
         if let Some(b) = self.static_builtin(u, id) {
             let r = self.direct_builtin(b, u, id, ctx);
-            self.frames -= self.weights.call;
+            self.frames -= crate::recursion::CALL_FRAMES;
             return r;
         }
-        // Under the heap evaluator a user call counts towards the depth
-        // limit wherever it runs, and the calls running natively are
-        // counted so that they stop at `heap_expr::NATIVE_CALLS`.
-        #[cfg(feature = "heap-eval")]
-        {
-            self.fn_depth += 1;
-            self.native_calls += 1;
-        }
+        // A user call counts towards the depth limit wherever it runs, and
+        // the calls running natively are counted so that they stop at
+        // `heap_expr::NATIVE_CALLS`.
+        self.fn_depth += 1;
+        self.native_calls += 1;
         // The loop owns one stack slot, holding the context of the step
         // being evaluated, and `simplify` pushes each callee's (or `let`'s)
         // context just above it, where it is visible to the arguments as
@@ -632,31 +628,23 @@ impl<'a> Evaluator<'a> {
         if let Some(c) = cur {
             Ctx::recycle(c, &mut self.ctx_pool);
         }
-        self.frames -= self.weights.call;
-        #[cfg(feature = "heap-eval")]
-        {
-            self.fn_depth -= 1;
-            self.native_calls -= 1;
-        }
+        self.frames -= crate::recursion::CALL_FRAMES;
+        self.fn_depth -= 1;
+        self.native_calls -= 1;
         result
     }
 
-    /// `eval_call`'s recursion check: the native one, and under the heap
-    /// evaluator the counted limit for a call that is not always to a
-    /// builtin (a builtin adds no level, so it is not the call a recursion
-    /// through it stops at).
+    /// `eval_call`'s recursion check: the counted limit for a call that
+    /// is not always to a builtin (a builtin adds no level, so it is not
+    /// the call a recursion through it stops at), and the native checks
+    /// (`recursion_exhausted`), for the native call levels and the shapes
+    /// that still recurse natively per level (see [`crate::recursion`]).
+    /// Every function call passes here, so this is where those shapes
+    /// stop cleanly rather than overflow the stack.
     #[inline(always)]
     pub(crate) fn call_exhausted(&self, u: u32, id: ExprId) -> bool {
-        #[cfg(feature = "heap-eval")]
-        {
-            self.recursion_exhausted()
-                || (self.depth_exhausted() && self.static_builtin(u, id).is_none())
-        }
-        #[cfg(not(feature = "heap-eval"))]
-        {
-            let _ = (u, id);
-            self.recursion_exhausted()
-        }
+        self.recursion_exhausted()
+            || (self.depth_exhausted() && self.static_builtin(u, id).is_none())
     }
 
     /// The builtin call `id` always makes, if it always makes one: its

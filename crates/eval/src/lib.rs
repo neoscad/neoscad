@@ -41,9 +41,7 @@ mod context;
 pub mod dump;
 mod eval;
 pub mod features;
-#[cfg(feature = "heap-eval")]
 mod heap;
-#[cfg(feature = "heap-eval")]
 mod heap_expr;
 pub use features::{Feature, Features};
 mod callmemo;
@@ -196,12 +194,14 @@ pub struct Options {
     pub check_parameters: bool,
     /// `--check-parameter-ranges`: warn about degenerate primitive sizes.
     pub check_parameter_ranges: bool,
-    /// Bytes of stack evaluation may use before reporting recursion
-    /// (OpenSCAD's `StackCheck`, 8 MiB minus 128 KiB on macOS and Linux);
-    /// see [`recursion`].
+    /// Bytes of native stack evaluation may use before reporting recursion
+    /// (OpenSCAD's `StackCheck`, 8 MiB minus 128 KiB on macOS and Linux).
+    /// Recursion runs on the heap and stops at the counted depth limit;
+    /// this bounds what still recurses natively. See [`recursion`].
     pub stack_limit: usize,
-    /// Nested function calls and statement instantiations allowed before
-    /// reporting recursion, whatever the stack; see [`recursion`].
+    /// Nested native expressions, function calls and comprehension
+    /// elements allowed before reporting recursion, whatever the stack (the
+    /// wasm32 guard for what still recurses natively); see [`recursion`].
     pub frame_limit: u32,
     /// `version()`: the OpenSCAD release this evaluator matches.
     pub version: [f64; 3],

@@ -6,8 +6,9 @@
 //!   with `--record` writes a progress snapshot.
 //! - `conformance grid` renders snapshots' `grid.png` from their data.
 //! - `conformance showcase` checks the showcase list.
-//! - `conformance depth` checks that a built binary recurses deeper than
-//!   OpenSCAD (the recursion-depth guard for release and PGO builds).
+//! - `conformance depth` checks that a built binary recurses exactly as
+//!   deep as the counted limit allows, the same in every build (release
+//!   and PGO builds run it before they ship).
 //! - `conformance images` surveys neoscad's renderer on every render-mode
 //!   PNG case.
 //! - `conformance diff` compares neoscad with a reference OpenSCAD binary
@@ -119,9 +120,10 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// The recursion-depth guard: fail unless the binary recurses at least
-    /// 1.25 times as deep as OpenSCAD on its recursion tests. For any
-    /// build (release, PGO, a downloaded release archive).
+    /// The recursion-depth check: fail unless a neoscad binary reports
+    /// exactly the depths of the counted limit (the same in every build),
+    /// or another binary (OpenSCAD) recurses 1.25 times as deep as the
+    /// nightly. For any build (release, PGO, a downloaded release archive).
     Depth {
         /// Binary under test (default: target/release/neoscad).
         #[arg(long)]

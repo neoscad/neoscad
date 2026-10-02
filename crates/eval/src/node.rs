@@ -206,11 +206,9 @@ pub struct Origin {
 ///
 /// `Clone`, `PartialEq`, `Drop` and `Debug` are written by hand, without
 /// recursion: the derived ones take a native frame per level, and a
-/// recursive module builds a tree as deep as the evaluator allows (65,507
-/// levels natively). Copying, comparing, freeing or printing such a tree
-/// could overflow the stack after the evaluation itself had succeeded, and
-/// on wasm32 these walks were part of what a statement costs in frames
-/// (`recursion::STATEMENT_FRAMES`).
+/// recursive module builds a tree as deep as the counted depth limit allows
+/// (`limits::DEFAULT_DEPTH`, 100,000 levels). Copying, comparing, freeing or printing such a tree
+/// could overflow the stack after the evaluation itself had succeeded.
 pub struct Node {
     pub kind: NodeKind,
     pub children: Vec<Node>,

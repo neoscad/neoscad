@@ -676,21 +676,20 @@ fn hardwarnings_stop_at_the_first_warning() {
     assert_eq!(lines.len(), 2);
 }
 
-/// The frame budget (`eval::recursion`), which decides on wasm32, stops a
-/// recursion with OpenSCAD's messages wherever it runs out: at the
-/// recursive module itself rather than at a builtin inside it, and at a
-/// chain of builtins (`children()` of `children()`) that no user module
-/// check sees.
+/// Small recursion limits stop a recursion with OpenSCAD's messages
+/// wherever they run out. The counted depth limit stops function and
+/// module recursion (at the recursive module itself, and at a chain of
+/// `children()` of `children()`), and the frame budget (`eval::recursion`,
+/// the wasm32 guard) stops what still recurses natively: a recursion
+/// through a range's bounds, and printing a deeply nested vector.
 #[test]
-fn frame_budget_gives_the_recursion_errors() {
-    let small = Options {
+fn small_limits_give_the_recursion_errors() {
+    let budget = Options {
         frame_limit: 400,
         ..Options::default()
     };
-    // Statements and calls spend the budget natively; on the heap
-    // evaluator they take no native stack (past a few native calls), and
-    // the counted depth limit stops them.
-    #[cfg(feature = "heap-eval")]
+    // Statements and calls take no native stack (past a few native
+    // calls), so the counted depth limit is what stops them.
     let small = {
         let limits = eval::limits::Limits {
             depth: Some(40),
@@ -704,7 +703,7 @@ fn frame_budget_gives_the_recursion_errors() {
                 None,
             ))),
             interrupt: Some(flag),
-            ..small
+            ..budget.clone()
         }
     };
     let (lines, ev) = run_with(
@@ -716,7 +715,7 @@ fn frame_budget_gives_the_recursion_errors() {
         lines[0],
         "ERROR: Recursion detected calling function 'f' @1"
     );
-    let within = if cfg!(feature = "heap-eval") { 30 } else { 50 };
+    let within = 30;
     let (lines, _) = run_with(
         &format!("function f(n) = n == 0 ? 0 : 1 + f(n - 1);\necho(f({within}));"),
         &small,
@@ -739,10 +738,23 @@ fn frame_budget_gives_the_recursion_errors() {
         "{lines:?}"
     );
 
+    // A range's bounds are evaluated natively, so a recursion through
+    // them holds native stack per level, and the frame budget stops it at
+    // its call, far short of the depth limit.
+    let range = "function f(n) = n == 0 ? 0 : len([for (i = [0 : f(n - 1)]) i]);";
+    let (lines, _) = run_with(&format!("{range}\necho(f(20));"), &budget);
+    assert_eq!(lines, ["ECHO: 20"]);
+    let (lines, ev) = run_with(&format!("{range}\necho(f(1000));"), &budget);
+    assert!(ev.aborted);
+    assert_eq!(
+        lines[0],
+        "ERROR: Recursion detected calling function 'f' @1"
+    );
+
     // Printing a nested vector counts its levels against the budget too.
     let (lines, _) = run_with(
         "function nest(n, acc) = n == 0 ? acc : nest(n - 1, [acc]);\necho(nest(1000, 0));",
-        &small,
+        &budget,
     );
     assert_eq!(
         lines[0],

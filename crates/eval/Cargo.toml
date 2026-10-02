@@ -9,19 +9,6 @@ license.workspace = true
 [lib]
 name = "eval"
 
-[features]
-# The heap evaluator: statements and module instantiation (`src/heap.rs`),
-# and function calls past a few native levels with the expressions around
-# them (`src/heap_expr.rs`), run on an explicit stack of frames instead of
-# native recursion, so a recursion ends at the counted depth limit
-# (`limits::Limits::depth`) in every build and browser. Off here; the
-# crates that build an application (cli, ffi, linux-app, web,
-# wasm-check) turn it on by default (docs/audits/heap-evaluator.md,
-# "Stage 2 done"). A host that adapts to it asks `recursion::HEAP_EVAL`,
-# not a feature of its own, since Cargo can turn this one on through
-# any crate.
-heap-eval = []
-
 [dependencies]
 io = { package = "neoscad-io", path = "../io" }
 lang = { package = "neoscad-lang", path = "../lang" }

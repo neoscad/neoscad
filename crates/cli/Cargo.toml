@@ -32,12 +32,8 @@ path = "src/main.rs"
 # Compile the Liberation fonts and the MCAD library into the binary (about
 # 4.3 MB), so the default font and `include <MCAD/...>` work with nothing
 # installed, as they do in OpenSCAD, which ships them as resources.
-default = ["bundled-assets", "heap-eval", "mimalloc"]
+default = ["bundled-assets", "mimalloc"]
 bundled-assets = ["dep:assets"]
-# The heap evaluator (`neoscad-eval`'s `heap-eval`): recursion runs on
-# a heap stack, bounded by the counted depth limit and not by the native
-# stack. On by default (docs/audits/heap-evaluator.md).
-heap-eval = ["eval/heap-eval"]
 # mimalloc as the global allocator (`main.rs`). A feature only so that a
 # cross-target `cargo check` can leave out its C build: checking the
 # Windows code from macOS or Linux has no MSVC compiler or Windows SDK

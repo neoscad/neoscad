@@ -52,8 +52,9 @@
 //!   `import()`, `surface()`, `part()`, deprecation messages, font
 //!   metrics), an error message, a passed limit, or a message flood: the
 //!   call is not kept, and neither is any call around it;
-//! - the recursion limit: an entry replays only where the native stack
-//!   used and the frame count are no more than where it was recorded. A
+//! - the recursion limit: an entry replays only where the module depth
+//!   (`Evaluator::memo_depth`) and the frame count are no more than where
+//!   it was recorded. A
 //!   fresh evaluation from there would take the same path, so each of its
 //!   recursion checks would see no more than the recording's did, and
 //!   those all passed;
@@ -238,7 +239,8 @@ struct Entry {
     ticks: u32,
     work: u64,
     messages: Vec<Recorded>,
-    /// The native stack used and the frames held where it was recorded.
+    /// The module depth (`Evaluator::memo_depth`) and the frames held
+    /// where it was recorded.
     stack: usize,
     frames: u32,
     /// Its peak memory estimate above where it started.
@@ -464,7 +466,7 @@ impl CallMemo {
         self.bytes < BUDGET && self.table.get(key).is_none_or(|v| v.len() < MAX_PER_KEY)
     }
 
-    /// What an entry needs to replay: the stack and frames it was
+    /// What an entry needs to replay: the module depth and frames it was
     /// recorded at, its memory peak and its node count.
     pub fn needs(&self, key: &Digest, i: usize) -> (usize, u32, u64, usize) {
         let e = &self.table[key][i];
@@ -845,8 +847,8 @@ impl crate::eval::Evaluator<'_> {
     }
 
     /// Whether and how to reuse a call of module `def` by `name`, bound in
-    /// `mctx` and not yet on the stack; `stack` is the native stack used
-    /// where the call is recorded and replayed.
+    /// `mctx` and not yet on the stack; `stack` is the module depth
+    /// (`Evaluator::memo_depth`) where the call is recorded and replayed.
     #[inline(never)]
     fn call_plan(
         &mut self,

@@ -17,11 +17,7 @@ name = "neoscad_ffi"
 crate-type = ["staticlib", "lib"]
 
 [features]
-default = ["heap-eval", "mimalloc"]
-# The heap evaluator (`neoscad-eval`'s `heap-eval`): recursion runs on
-# a heap stack, bounded by the counted depth limit and not by the native
-# stack. On by default (docs/audits/heap-evaluator.md).
-heap-eval = ["eval/heap-eval"]
+default = ["mimalloc"]
 # mimalloc as the core's global allocator (`lib.rs`). A feature only so
 # that `cargo clippy --target x86_64-pc-windows-msvc -p neoscad-ffi` can
 # run off Windows: mimalloc's C sources need MSVC and the Windows SDK

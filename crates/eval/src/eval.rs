@@ -53,7 +53,6 @@ pub(crate) struct Unit<'a> {
     /// Per expression, whether evaluating it can reach a user function
     /// call (`Evaluator::may_call`): 0 not yet known, 1 no, 2 yes. Sized
     /// on the first question, as `accumulates` is.
-    #[cfg(feature = "heap-eval")]
     pub may_call: Vec<u8>,
     /// Where each name reference can be bound (see [`crate::resolve`]).
     pub res: crate::resolve::UnitRes,
@@ -71,7 +70,6 @@ impl<'a> Unit<'a> {
             consts: Vec::new(),
             uses: Vec::new(),
             accumulates: Vec::new(),
-            #[cfg(feature = "heap-eval")]
             may_call: Vec::new(),
             res: crate::resolve::UnitRes::default(),
         };
@@ -222,13 +220,10 @@ pub(crate) struct Evaluator<'a> {
     /// [`Options::stack_limit`], capped on wasm32 by the stack actually left
     /// (see [`crate::recursion`]).
     stack_limit: usize,
-    /// Frames in use for [`Options::frame_limit`]: nested function calls
-    /// and statement instantiations.
+    /// Frames in use for [`Options::frame_limit`]: nested expressions,
+    /// function calls and comprehension elements on the native stack (see
+    /// [`crate::recursion`]).
     pub frames: u32,
-    /// What each nested frame kind adds to [`Self::frames`]: the
-    /// constants in [`crate::recursion`], or on wasm32 the weights the
-    /// host calibrated for its engine ([`crate::recursion::frame_weights`]).
-    pub(crate) weights: crate::recursion::FrameWeights,
     pub main_dir: PathBuf,
     node_index: usize,
     pub builtin_ctx: Rc<Ctx>,
@@ -311,34 +306,26 @@ pub(crate) struct Evaluator<'a> {
     pub work: u64,
     /// The heap evaluator's frames: the statements being instantiated,
     /// innermost last (see [`crate::heap`]).
-    #[cfg(feature = "heap-eval")]
     pub(crate) heap: Vec<crate::heap::Frame<'a>>,
     /// The nodes of the builtins and module bodies whose children the heap
     /// evaluator is instantiating, innermost last.
-    #[cfg(feature = "heap-eval")]
     pub(crate) heap_nodes: Vec<Node>,
     /// The heap evaluator's finished nodes, not yet collected by the
     /// scope or loop they belong to (see [`crate::heap`]).
-    #[cfg(feature = "heap-eval")]
     pub(crate) heap_out: Vec<Node>,
     /// `children(index)`'s indices for the scopes running them.
-    #[cfg(feature = "heap-eval")]
     pub(crate) heap_indices: Vec<Vec<usize>>,
     /// The arguments of the `if`s whose children are running.
-    #[cfg(feature = "heap-eval")]
     pub(crate) heap_args: Vec<Vec<crate::call::ArgVal>>,
     /// The heap evaluator's expression frames and their side stacks (see
     /// [`crate::heap_expr`]).
-    #[cfg(feature = "heap-eval")]
     pub(crate) xs: crate::heap_expr::Stacks<'a>,
     /// User function calls in progress on the heap, not counting tail
     /// calls, which replace their caller: with the user modules, what the
     /// counted depth limit counts.
-    #[cfg(feature = "heap-eval")]
     pub(crate) fn_depth: usize,
     /// The user calls of `fn_depth` running natively (`eval_call`), whose
     /// count decides when the heap takes over (`heap_expr::NATIVE_CALLS`).
-    #[cfg(feature = "heap-eval")]
     pub(crate) native_calls: u32,
 }
 
@@ -551,7 +538,6 @@ impl<'a> Evaluator<'a> {
             stack_base,
             stack_limit,
             frames: 0,
-            weights: crate::recursion::frame_weights(),
             main_dir,
             node_index: 1,
             builtin_ctx: Ctx::new(None, CtxKind::Builtin, BUILTIN_REGION, 1),
@@ -586,21 +572,13 @@ impl<'a> Evaluator<'a> {
             rec: None,
             cm: crate::callmemo::CallMemo::new(opts.call_memo && !opts.hardwarnings),
             work: 0,
-            #[cfg(feature = "heap-eval")]
             heap: Vec::new(),
-            #[cfg(feature = "heap-eval")]
             heap_nodes: Vec::new(),
-            #[cfg(feature = "heap-eval")]
             heap_out: Vec::new(),
-            #[cfg(feature = "heap-eval")]
             heap_indices: Vec::new(),
-            #[cfg(feature = "heap-eval")]
             heap_args: Vec::new(),
-            #[cfg(feature = "heap-eval")]
             xs: Default::default(),
-            #[cfg(feature = "heap-eval")]
             fn_depth: 0,
-            #[cfg(feature = "heap-eval")]
             native_calls: 0,
             opts,
         }
@@ -621,50 +599,34 @@ impl<'a> Evaluator<'a> {
     /// the stack measured, and the frame budget.
     #[inline]
     pub fn recursion_exhausted(&self) -> bool {
-        crate::recursion::note_frames(self.frames);
         self.stack_used() >= self.stack_limit || self.frames >= self.opts.frame_limit
     }
 
     /// Whether the user modules being instantiated have reached the
-    /// counted depth limit ([`crate::limits::Limits::depth`]): the limit
-    /// of a module recursion under the `heap-eval` feature, where
-    /// statements take no native stack.
+    /// counted depth limit ([`crate::limits::Limits::depth`]), which stops
+    /// a recursion: statements and deep calls take no native stack.
     #[inline]
     pub fn depth_exhausted(&self) -> bool {
         self.depth_used() >= self.caps.depth
     }
 
     /// What the counted depth limit counts: the user modules being
-    /// instantiated, and under the heap evaluator the user function calls
-    /// in progress too, so a recursion through both stops at one limit.
+    /// instantiated and the user function calls in progress, so a
+    /// recursion through both stops at one limit.
     #[inline]
     pub fn depth_used(&self) -> usize {
-        #[cfg(feature = "heap-eval")]
-        {
-            self.module_names.len() + self.fn_depth
-        }
-        #[cfg(not(feature = "heap-eval"))]
-        {
-            self.module_names.len()
-        }
+        self.module_names.len() + self.fn_depth
     }
 
     /// How deep a module call is, for the call memo, which replays a call
     /// only where a fresh evaluation would not meet the recursion limit
     /// sooner than the recorded one did (`callmemo::replay_fits`): the
-    /// native stack used, or under the heap evaluator, where every
-    /// statement starts on the same native stack, the user-module depth
-    /// that its limit counts.
+    /// user-module depth that its limit counts. (It was the native stack
+    /// used while statements recursed natively; now every statement starts
+    /// on the same native stack.)
     #[inline]
     pub fn memo_depth(&self) -> usize {
-        #[cfg(feature = "heap-eval")]
-        {
-            self.module_names.len()
-        }
-        #[cfg(not(feature = "heap-eval"))]
-        {
-            self.stack_used()
-        }
+        self.module_names.len()
     }
 
     /// The measured stack limit alone (for printing, which has its own
@@ -1235,8 +1197,8 @@ impl<'a> Evaluator<'a> {
     }
 
     /// The evaluator's own stacks' share of [`Evaluator::live_bytes`]: the
-    /// contexts in use and, with the heap evaluator, its statement and
-    /// expression frames, which a deep recursion holds one set of per
+    /// contexts in use and the heap evaluator's statement and expression
+    /// frames, which a deep recursion holds one set of per
     /// level. Uncounted, a module recursion at the default depth limit
     /// held over 100 MB, and a function recursion (which makes no nodes)
     /// 30 MB, that the estimate did not see. Measured per level at
@@ -1251,17 +1213,16 @@ impl<'a> Evaluator<'a> {
     fn held_bytes(&self) -> u64 {
         let shared = Rc::strong_count(&self.placeholder).saturating_sub(1);
         let contexts = self.stack.len().saturating_sub(shared) as u64;
-        let n =
-            contexts * CTX_BYTES + held(&self.stack) + held(&self.regs) + held(&self.module_names);
-        #[cfg(feature = "heap-eval")]
-        let n = n
+        contexts * CTX_BYTES
+            + held(&self.stack)
+            + held(&self.regs)
+            + held(&self.module_names)
             + held(&self.heap)
             + held(&self.heap_nodes)
             + held(&self.heap_out)
             + held(&self.heap_indices)
             + held(&self.heap_args)
-            + self.xs.held_bytes();
-        n
+            + self.xs.held_bytes()
     }
 
     pub fn next_node_index(&mut self) -> usize {
@@ -1703,9 +1664,9 @@ impl<'a> Evaluator<'a> {
         // A nested expression is a frame for the frame budget (see
         // `crate::recursion`): a recursive function whose body nests
         // deeply costs stack between its calls too.
-        self.frames += self.weights.expression;
+        self.frames += crate::recursion::EXPRESSION_FRAMES;
         let v = self.eval_expr(u, id, ctx);
-        self.frames -= self.weights.expression;
+        self.frames -= crate::recursion::EXPRESSION_FRAMES;
         let v = v?;
         self.check_hard()?;
         Ok(v)
@@ -1713,15 +1674,14 @@ impl<'a> Evaluator<'a> {
 
     /// [`Self::eval`] on the native stack, whatever `id` is: for the heap
     /// evaluator, which has decided that.
-    #[cfg(feature = "heap-eval")]
     #[inline]
     pub(crate) fn eval_native(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
         // A nested expression is a frame for the frame budget (see
         // `crate::recursion`): a recursive function whose body nests
         // deeply costs stack between its calls too.
-        self.frames += self.weights.expression;
+        self.frames += crate::recursion::EXPRESSION_FRAMES;
         let v = self.eval_expr(u, id, ctx);
-        self.frames -= self.weights.expression;
+        self.frames -= crate::recursion::EXPRESSION_FRAMES;
         let v = v?;
         self.check_hard()?;
         Ok(v)
@@ -2145,9 +2105,9 @@ impl<'a> Evaluator<'a> {
         rest: &[ExprId],
         ctx: &Rc<Ctx>,
     ) -> R<Value> {
-        self.frames += self.weights.comprehension;
+        self.frames += crate::recursion::COMPREHENSION_FRAMES;
         let v = self.eval(u, x, ctx);
-        self.frames -= self.weights.comprehension;
+        self.frames -= crate::recursion::COMPREHENSION_FRAMES;
         let mut g = match v? {
             Value::Vector(v) => match v.into_growable() {
                 Ok(g) => g,
@@ -2227,9 +2187,9 @@ impl<'a> Evaluator<'a> {
         ctx: &Rc<Ctx>,
         out: &mut Vec<Value>,
     ) -> R<()> {
-        self.frames += self.weights.comprehension;
+        self.frames += crate::recursion::COMPREHENSION_FRAMES;
         let r = self.eval_lc_frame(u, id, ctx, out);
-        self.frames -= self.weights.comprehension;
+        self.frames -= crate::recursion::COMPREHENSION_FRAMES;
         r
     }
 

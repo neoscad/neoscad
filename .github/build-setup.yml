@@ -53,12 +53,14 @@
 # --message-format=json-render-diagnostics --target T --package P`, and
 # RUSTFLAGS as inherited plus ` -Ctarget-feature=+crt-static` on MSVC).
 # Cargo then finds it fresh and `dist build` packages this very binary, so
-# the guard checks what ships. The guard is there because PGO inlines more
-# into the recursive evaluator, whose frames grow, so a PGO build recurses
-# less deep than a plain one; falling short of 1.25 times OpenSCAD's depth
-# fails the job before anything is packaged. The binary's SHA-256 is
-# logged so it can be matched against the release's
-# neoscad-executables.sha256sums.
+# the guard checks what ships. Recursion runs on the heap and stops at a
+# counted limit, so every build recurses exactly as deep; the guard checks
+# that this one reports the same depths as a plain build (the counted
+# limit's, `crates/conformance/src/depth.rs`) and fails the job before
+# anything is packaged if not. It was a margin over OpenSCAD's depth while
+# the evaluator recursed natively and PGO's larger frames cost a third of
+# it. The binary's SHA-256 is logged so it can be matched against the
+# release's neoscad-executables.sha256sums.
 #
 # Only the targets whose PGO build .github/workflows/pgo.yml has checked.
 # Left out, and shipped as plain builds: x86_64-apple-darwin, cross-built

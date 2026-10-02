@@ -15,8 +15,10 @@
 #   3. scripts/pgo.sh: the instrumented build, the training
 #      (scripts/pgo-train.py, about 1,350 bounded runs) and the optimised
 #      build;
-#   4. `conformance depth` on both binaries: the PGO build must recurse at
-#      least 1.25 times as deep as OpenSCAD, which is what fails the job;
+#   4. `conformance depth` on both binaries: each must report exactly the
+#      counted limit's depths, so the PGO build recurses as deep as the
+#      plain one (it once lost a third of the depth to larger frames), and
+#      a difference fails the job;
 #   5. a conformance subset on both binaries (tiers 0-2; on the Mac 4-5 too);
 #   6. `conformance bench --quick` on both, twice, interleaved, compared by
 #      scripts/pgo-compare.py.
@@ -167,7 +169,7 @@ jobs:
       - name: Recursion depth, plain
         if: ${{ !cancelled() && env.PLAIN_BIN != '' }}
         run: '"$CONFORMANCE" depth --binary "$PLAIN_BIN" --json "$OUT/depth-plain.json" | tee "$OUT/depth-plain.txt"'
-      - name: Recursion depth, PGO (the gate)
+      - name: Recursion depth, PGO (the gate; the plain build's depths)
         if: ${{ !cancelled() && env.PGO_BIN != '' }}
         run: '"$CONFORMANCE" depth --binary "$PGO_BIN" --json "$OUT/depth-pgo.json" | tee "$OUT/depth-pgo.txt"'
 

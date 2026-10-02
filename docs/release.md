@@ -415,10 +415,13 @@ The step is `.github/build-setup.yml`'s second (cargo-dist copies it into
    --profile dist --target TRIPLE --package neoscad-cli`), in dist's
    target directory, and logs its SHA-256;
 4. runs the recursion-depth guard on that binary, `conformance depth
-   --binary target/TRIPLE/dist/neoscad`: at least 1.25 times OpenSCAD's
-   depth (`crates/conformance/src/depth.rs`), or the job fails before
-   anything is packaged. PGO inlines more into the recursive evaluator,
-   whose frames grow, so a PGO build recurses less deep than a plain one;
+   --binary target/TRIPLE/dist/neoscad`: exactly the depths of the
+   counted recursion limit, the ones a plain build reports
+   (`crates/conformance/src/depth.rs`), or the job fails before anything
+   is packaged. While the evaluator recursed natively, PGO's larger
+   frames made a PGO build recurse a third less deep than a plain one,
+   and the guard asked for 1.25 times OpenSCAD's depth; on the heap the
+   depth no longer depends on the build;
 5. exports `RUSTFLAGS=-Cprofile-use=<profile>` for `dist build`, which
    then finds step 3's build fresh and packages that binary. The SHA-256
    logged in step 3 should equal the one `neoscad-executables.sha256sums`

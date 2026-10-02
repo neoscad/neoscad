@@ -1,12 +1,13 @@
 //! Function calls, comprehensions and `let`/`assert`/`echo` expressions,
-//! compared between the two evaluators.
+//! held to the recursive evaluator's output.
 //!
-//! Under `--features heap-eval`, an expression that can reach a user call
-//! runs on the heap evaluator's stack (`src/heap_expr.rs`), and its output
-//! must be byte-identical to the recursive evaluator's. As in
+//! An expression that can reach a user call past the first few native
+//! levels runs on the heap evaluator's stack (`src/heap_expr.rs`), and its
+//! output must be byte-identical to the native evaluator's. As in
 //! `statements.rs`, the expected files under `tests/functions/` were
-//! written by the recursive evaluator (`NEOSCAD_BLESS=1 cargo test --test
-//! functions`), and both builds must match them. The cases aim at where
+//! written before the heap evaluator existed (`NEOSCAD_BLESS=1 cargo test
+//! --test functions`), and both the debug build (every call on the heap)
+//! and the release build (the mix) must match them. The cases aim at where
 //! the two could drift: evaluation order and side effects (`echo`,
 //! short-circuits), closures and function literals, `$` variables across
 //! calls, tail calls and their accumulators, recursion inside
@@ -296,7 +297,6 @@ echo("after");
 /// comprehensions or both, and through modules and functions together,
 /// takes no native stack, so it reaches the counted limit on a thread of
 /// 128 KiB and stops there with OpenSCAD's error.
-#[cfg(feature = "heap-eval")]
 #[test]
 fn deep_function_recursion_on_a_small_thread() {
     let depth = eval::limits::DEFAULT_DEPTH as usize;
@@ -378,7 +378,6 @@ fn deep_function_recursion_on_a_small_thread() {
 /// The counted limit with a small value: within it a recursion runs, past
 /// it the call that reaches it fails with every level traced, and module
 /// levels count towards it too.
-#[cfg(feature = "heap-eval")]
 #[test]
 fn the_depth_limit_counts_function_calls() {
     let opts = support::with_depth(50, Options::default());

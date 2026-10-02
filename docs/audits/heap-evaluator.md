@@ -1350,3 +1350,120 @@ on the heap:
 - The memory estimate still does not charge heap frames: 41 MB for a
   function recursion at the default depth, 100 MB through a
   comprehension.
+
+## Feature removed
+
+Done on 2026-10-02 against `bebdbc7`, on the same Apple M4 Pro. The
+owner chose (2026-10-01) to turn the heap evaluator on everywhere, and
+to delete the recursive driver now rather than keep it behind a
+`recursive-eval` feature for a release (§3, stage 5).
+
+**What went.**
+- The recursive statement driver: `instantiate`, `user_module` and
+  their halves, `instantiate_scope`, `instantiate_children` and
+  `builtin_recursion` (`crates/eval/src/inst.rs`), and `with_children`,
+  `builtin_module`, `part_module`, `children_module` and the geometry
+  modules' driver (`builtins/modules.rs`). With them went the builtin
+  modules' quarter-margin frame check and the geometry frame weight.
+- Every `cfg(feature = "heap-eval")` in `neoscad-eval`, and the
+  feature itself, in `neoscad-eval` and in the five crates that
+  forwarded it (cli, ffi, linux-app, wasm-check, web). In all,
+  `crates/eval/src` and its `Cargo.toml` lose 874 lines and gain 241,
+  mostly documentation rewritten for one evaluator.
+- `NEOSCAD_NO_DEFAULT_FEATURES` and `NEOSCAD_FEATURES` in
+  `scripts/wasm-check.sh` and `scripts/web/build-core.sh`: both came in
+  with the feature (`8f0fe78`), and the two crates they fed have no
+  features left. `scripts/pgo.sh` and `scripts/apple/build-core.sh` keep
+  `NEOSCAD_FEATURES`; their crates still have features.
+- The frame weights. Statements take no native stack, so nothing tunes
+  the budget per kind any more: the budget counts expression, call and
+  comprehension frames with the constants. `eval::recursion` keeps thin
+  shims for the web core, which another change was editing at the time:
+  `HEAP_EVAL` (always true), `set_frame_weights` (ignored),
+  `frame_weights` (the constants) and `frames_at_last_check` (always
+  0). `docs/followups.md` lists what to remove on the web side, and then
+  these.
+
+**The native checks, kept and removed.** The stack measure and the
+frame budget (`recursion_exhausted`) now guard only what still recurses
+natively.
+- Kept in `eval_call`'s `call_exhausted`, which every function call
+  passes: the first `NATIVE_CALLS` levels, and the shapes that stay
+  native and start a nested heap loop per level. Measured natively, a
+  recursion through `is_undef()` stops cleanly at 61,667 levels and one
+  through a C-style `for`'s initialiser at 49,332, the same as before
+  and short of the counted 100,000.
+- Kept in printing (`print_stack_exhausted`), whose depth is the value's.
+- Kept as they were: the parser's `NESTING_LIMIT` and `Unit::add_scope`
+  (source nesting).
+- Removed from `heap::begin_user`, the module call. The statement
+  driver only starts from a top-level statement (`memo.rs`), never from
+  inside an expression, so at a module call the native stack is the
+  driver's own at any depth and no expression frame is held. The check
+  could only fire for a `frame_limit` of 0.
+- Removed from `module_call_text`, which writes `...` for a module's
+  parameters near the limit as OpenSCAD's `print_trace` does at its
+  stack check: the counted limit is that check now, for the same
+  reason.
+- `memo_depth` is the module depth alone; the native-stack variant
+  went with the recursive driver.
+- `DEFAULT_STACK_LIMIT` stays at 64 MiB. Its PGO rationale is gone, but
+  it is what the native shapes above reach; shrinking it and
+  `with_stack`'s thread is a followup.
+
+**The PGO depth guard is an identity check.** `conformance depth` now
+holds a neoscad binary to the exact depths of the counted limit (§4.1's
+"identical N across builds"), and only another binary (OpenSCAD, to
+check the harness) to 1.25 times the nightly's. A program check needs
+two runs (at its depth, and one past it) instead of a bisection: the
+whole command takes 1 s. Plain, PGO with either training, and `bebdbc7`'s
+PGO build all report the same:
+
+| Check | Every build |
+|---|---:|
+| `recursion-test-module` | 199,977 |
+| `recursion-test-vector` | 199,977 |
+| `recursion-test-function3` | 99,977 |
+| `module-if` | 99,999 |
+| `function-add` | 99,999 |
+| `issue4172` (not gated) | 301 |
+
+**The PGO training gained a deep-recursion model** (`DEEP` in
+`scripts/pgo-train.py`, to `.echo` and STL): non-tail, branching, `let`,
+comprehension, `each` and function-literal recursions 10,000 to 20,000
+deep, one through a range's bounds, and module recursion through a
+transform, `children()` and a block. Fixed sizes and no `rands()`, about
+0.2 s natively. Its effect is below what one training per variant can
+show:
+- on the deep recursions themselves (best of 7), the PGO builds with and
+  without it are within 2%: `fib(25)` 27.9 ms both, the model 188.0
+  against 188.9 ms, `n + f(n - 1)` 50,000 deep 63.4 against 64.6 ms;
+- on the bench (below), PGO gained 6.7% over plain with it and 4.8%
+  without, but the two PGO builds' per-round ratio ranged 0.87–1.07.
+
+**Speed.** Six interleaved rounds of `conformance bench --quick --refs
+neoscad` over five binaries: `bebdbc7` plain and PGO + thin ("base"),
+and this change plain, PGO, and PGO trained without the new model. Each
+round waited for a 1-minute load below 4 (up to 15 minutes). The load
+at the runs' starts was 2.7–17, from other work on the machine. The
+eleven models of at least 30 ms, best of the six rounds' bests:
+
+| Ratio | Geomean | Per-round paired |
+|---|---:|---|
+| new / base, plain | 0.991 | 0.967–0.997 |
+| new / base, PGO | 0.998 | 0.873–1.070 |
+| PGO / plain, base | 0.926 | 0.883–0.993 |
+| PGO / plain, new | 0.933 | 0.886–1.028 |
+| PGO / plain, new, old training | 0.952 | 0.930–1.116 |
+
+`eval_only` (BOSL2's 976 tests, summed), median of six and the best in
+brackets: base 32.74 s (31.93) plain and 31.70 s (30.34) PGO; this
+change 33.08 s (32.15) plain and 30.91 s (30.33) PGO. The served BOSL2
+edit loop's render is 9.2–10.8 ms best in every build.
+
+**Checks.** `cargo fmt`, `clippy --all-targets -D warnings`, `cargo
+test --workspace`; conformance 1773/0 at default threads and with
+`RAYON_NUM_THREADS=1`; `scripts/wasm-check.sh --depths` (functions and
+modules 99,999; source nesting stops at the parser's limit); `node
+crates/web/test/run.mjs` on a core built from this change, its probe
+test included.

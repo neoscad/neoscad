@@ -283,31 +283,24 @@ result with a `resource-limit` diagnostic, not a crash.
 - **Time** is checked at evaluator calls and loop iterations and before
   each geometry node; one long kernel operation runs to its end.
 - **Recursion** ends with OpenSCAD's "Recursion detected" error, not a
-  crash (`crates/eval/src/recursion.rs`). Natively the evaluator measures
-  its stack (64 MiB on its own thread). On wasm32 it cannot see the
-  engine's stack, so it counts weighted frames against a budget instead.
-  Browsers' stacks hold very different numbers of wasm frames (a WebKit
-  worker about a fifth of what V8's holds) and disagree about which kind
-  of recursion is expensive, so the web worker probes its engine once at
-  start-up: throwaway instances recurse through functions,
-  comprehensions, `children()` and transforms until the stack overflows,
-  each run counting one kind of frame, and the worker sets a weight per
-  kind so that each stops at half the depth that overflowed, never
-  deeper than the defaults allow (`crates/web/js/worker.js`,
-  `eval::recursion::FrameWeights`). Nesting in the
-  source itself (deeply nested brackets or statements) ends with
-  OpenSCAD's "Parser error: memory exhausted" past a counted limit on
-  the syntax tree's depth (`lang::syntax::parser::NESTING_LIMIT`: 5,000
-  natively, 320 on wasm32), which bounds every later recursion over the
-  source; it is sized for V8, not yet for WebKit (`docs/followups.md`).
-  A counted limit, `--limit depth=N` (`Limits::depth`, default 100,000
-  nested module calls, never off), applies in every build. Built with the
-  `heap-eval` feature, statements run on a heap stack
+  crash, at a counted limit: `--limit depth=N` (`Limits::depth`, default
+  100,000, never off) counts the user modules being instantiated plus
+  the user function calls in progress. Statements run on a heap stack
   (`crates/eval/src/heap.rs`), and so do function calls past 8 native
-  levels with the expressions around them (`crates/eval/src/heap_expr.rs`).
-  The limit then also counts function calls in progress, and it alone
-  stops a recursion through modules, functions or both, at the same depth
-  on every target and browser (`docs/audits/heap-evaluator.md`).
+  levels with the expressions around them
+  (`crates/eval/src/heap_expr.rs`), so a recursion takes no native stack
+  per level and stops at the same depth in every build, profile, target
+  and browser (`docs/audits/heap-evaluator.md`; `conformance depth`
+  checks it). What still recurses natively is bounded separately
+  (`crates/eval/src/recursion.rs`): nesting in the source itself ends
+  with OpenSCAD's "Parser error: memory exhausted" past a counted limit
+  on the syntax tree's depth (`lang::syntax::parser::NESTING_LIMIT`:
+  5,000 natively, 320 on wasm32), and the few expression shapes that
+  stay native per level (a range's bounds, parameter defaults and the
+  like), and printing deeply nested values, stop at a native check.
+  Natively that check measures the stack (64 MiB on the evaluation's own
+  thread); on wasm32, where the engine's stack cannot be seen, it counts
+  frames against a budget calibrated for V8.
 
 Details: `docs/cli-json.md` ("Resource limits"); open gaps in
 `docs/followups.md` ("Serve and session").

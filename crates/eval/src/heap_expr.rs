@@ -1,38 +1,38 @@
-//! The heap evaluator's expressions (the `heap-eval` feature): function
-//! calls, list comprehensions, `let`, `assert` and `echo`, and every
-//! expression around them.
+//! The heap evaluator's expressions: function calls, list
+//! comprehensions, `let`, `assert` and `echo`, and every expression
+//! around them.
 //!
-//! The recursive evaluator evaluates `1 + f(n - 1)` by calling into it:
-//! `eval` → `eval_binary` → `eval` → `eval_call` → `simplify` … → `eval`,
-//! several native frames per level of the recursion, so how deep a
-//! function recursion can go is decided by the native stack: 110,000
-//! levels natively, and in a browser whatever the engine gives a wasm
-//! thread (67 levels in WebKit). Here an expression that can reach a user
-//! call runs in one loop over an explicit stack of [`XFrame`]s, so a
-//! recursion through functions and comprehensions holds no native stack
-//! and stops at the counted limit ([`crate::limits::Limits::depth`]), which
-//! counts the calls in progress together with the user modules (see
-//! [`Evaluator::depth_used`]).
+//! The recursive (native) evaluator in `eval.rs` and `call.rs` evaluates
+//! `1 + f(n - 1)` by calling into it: `eval` → `eval_binary` → `eval` →
+//! `eval_call` → `simplify` … → `eval`, several native frames per level of
+//! the recursion, so on its own how deep a function recursion could go
+//! was decided by the native stack: 110,000 levels natively, and in a
+//! browser whatever the engine gives a wasm thread (67 levels in WebKit).
+//! Here an expression that can reach a user call runs in one loop over an
+//! explicit stack of [`XFrame`]s, so a recursion through functions and
+//! comprehensions holds no native stack and stops at the counted limit
+//! ([`crate::limits::Limits::depth`]), which counts the calls in progress
+//! together with the user modules (see [`Evaluator::depth_used`]).
 //!
 //! When: the first [`NATIVE_CALLS`] nested user calls still run natively,
 //! where nearly all of a program's work is done; `eval_call` hands the
 //! next one to this loop, and everything it reaches runs here until it
 //! returns. The native stack then holds a bounded number of call levels
-//! at any depth, and the recursive evaluator's tuned code does the common
+//! at any depth, and the native evaluator's tuned code does the common
 //! work at native speed.
 //!
 //! Which expressions, on the heap: [`Evaluator::may_call`], a bit per
 //! expression, is set when evaluating it can reach a call that is not to
 //! a builtin the resolver pinned down (`Evaluator::static_builtin`). The
 //! others, by far the most (arithmetic, indexing, variables, `len(v)`),
-//! run through the recursive evaluator unchanged, whose depth is then the
+//! run through the native evaluator unchanged, whose depth is then the
 //! source's nesting, not the recursion's.
 //!
 //! How: as in `crate::heap`, a frame is the part of a native function that
 //! runs after its callee returns. A step either asks the loop to evaluate
 //! an expression ([`Next::Eval`]), having pushed the frame that takes its
 //! value, or hands a result to the frame on top ([`Next::Val`]). The leaves
-//! are the recursive evaluator's own: operators, lookups, binding, the
+//! are the native evaluator's own: operators, lookups, binding, the
 //! builtins, the tail-call steps, the accumulator moves and the register
 //! regions run the same functions in the same order, so output is
 //! byte-identical. What differs is only what a native frame held: here a
@@ -67,7 +67,7 @@ use crate::sym::Sym;
 use crate::value::{Growable, Value};
 
 /// How many user calls run natively, nested, before the next one goes on
-/// the heap (`Evaluator::eval_call`). The recursive evaluator's tuned code
+/// the heap (`Evaluator::eval_call`). The native evaluator's tuned code
 /// does the common work, at the shallow depths most programs never leave;
 /// the heap takes over for a recursion past this depth, so the native
 /// stack holds at most this many call levels at any depth. Running every
@@ -108,7 +108,7 @@ pub(crate) enum Next {
     Val(R<Value>),
 }
 
-/// One suspended native function of the recursive evaluator. Most name
+/// One suspended native function of the native evaluator. Most name
 /// their expression by `(u, id)` and read the rest from the syntax tree;
 /// the larger ones keep their state on a side stack of [`Stacks`].
 pub(crate) enum XFrame<'a> {
@@ -491,7 +491,7 @@ impl<'a> Evaluator<'a> {
         // Started from native code: one native level of the frame budget,
         // so a chain of the rare shapes that stay native (see the module
         // docs) is still counted.
-        self.frames += self.weights.call;
+        self.frames += crate::recursion::CALL_FRAMES;
         let base = self.xs.frames.len();
         let mut next = self.x_value(u, id, ctx.clone());
         let r = loop {
@@ -509,7 +509,7 @@ impl<'a> Evaluator<'a> {
                 }
             };
         };
-        self.frames -= self.weights.call;
+        self.frames -= crate::recursion::CALL_FRAMES;
         self.hard(r)
     }
 

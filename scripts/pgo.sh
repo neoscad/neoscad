@@ -29,12 +29,11 @@
 # GitHub's Windows runners have it; .github/workflows/pgo.yml).
 #
 # Output is byte-identical to the normal build's on everything checked
-# (perf-opportunities.md, P2), with one known difference: PGO inlines
-# more into the recursive evaluator, whose frames grow, so recursion
-# reaches the stack budget (eval's DEFAULT_STACK_LIMIT) at a smaller depth
-# and `*** Excluding N frames ***` counts change. Before shipping a PGO
-# build, run the recursion-depth guard on it:
-# `conformance depth --binary PATH`.
+# (perf-opportunities.md, P2). Recursion depth is too: it is a counted
+# limit, not a measure of the stack, so PGO's larger frames no longer
+# make a build recurse less deep, as they did while the evaluator
+# recursed natively. Before shipping a PGO build, check that it reports
+# the plain build's depths: `conformance depth --binary PATH`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -49,7 +48,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --profile) profile=$2; shift 2 ;;
         --profile-only) profile_only=true; shift ;;
-        -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
         *) echo "pgo.sh: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -86,8 +85,8 @@ mkdir -p "$raw"
 # `--target $host` keeps RUSTFLAGS off build scripts and proc macros:
 # without it they are instrumented too, write their own profiles into
 # $raw during the build and warn about value-profile counters.
-# NEOSCAD_FEATURES (e.g. `heap-eval`) builds both with those features of
-# neoscad-cli, so the profile is trained on the code it optimises.
+# NEOSCAD_FEATURES builds both with those features of neoscad-cli, so the
+# profile is trained on the code it optimises.
 echo "pgo.sh: instrumented build ($profile)" >&2
 RUSTFLAGS="${RUSTFLAGS:-} -Cprofile-generate=$raw" CARGO_TARGET_DIR="$work/gen" \
     cargo build --quiet --locked --profile "$profile" --target "$host" -p neoscad-cli ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}

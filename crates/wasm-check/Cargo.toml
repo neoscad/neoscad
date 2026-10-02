@@ -13,15 +13,6 @@ name = "wasm_check"
 # same cases through the same code.
 crate-type = ["cdylib", "rlib"]
 
-[features]
-default = ["heap-eval"]
-# The heap evaluator (`neoscad-eval`'s `heap-eval`): recursion runs on
-# a heap stack, bounded by the counted depth limit and not by the native
-# stack. On by default, as in the web core (docs/audits/heap-evaluator.md);
-# NEOSCAD_NO_DEFAULT_FEATURES=1 scripts/wasm-check.sh checks the
-# recursive evaluator.
-heap-eval = ["eval/heap-eval"]
-
 [dependencies]
 assets = { package = "neoscad-assets", path = "../assets" }
 eval = { package = "neoscad-eval", path = "../eval" }

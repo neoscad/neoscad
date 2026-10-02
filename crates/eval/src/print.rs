@@ -79,21 +79,19 @@ const PRINT_STACK_LIMIT: usize = (8 << 20) - (128 << 10);
 /// The native stack a level of module recursion holds in the recursive
 /// evaluator's plain release build: 64 MiB over its 33,000 levels of
 /// `recursion-test-module` (`conformance depth`), about 2 KiB.
-#[cfg(feature = "heap-eval")]
 const MODULE_LEVEL_STACK: usize = 2 << 10;
 
 /// The same for a level of function recursion that is not a tail call
 /// (`1 + f(n - 1)`): 64 MiB over the 110,000 levels of `function-add`,
 /// about 600 bytes.
-#[cfg(feature = "heap-eval")]
 const FUNCTION_LEVEL_STACK: usize = 600;
 
 impl Evaluator<'_> {
-    /// The native stack the user modules being instantiated stand for, for
-    /// printing: none natively, where they hold it themselves. The heap
-    /// evaluator's statements take no native stack, but printing deep in a
-    /// module recursion must still run out of room as it does natively and
-    /// in OpenSCAD, where module levels and printing share one stack: a
+    /// The native stack the user modules and function calls in progress
+    /// stand for, for printing. They take no native stack on the heap, but
+    /// printing deep in a recursion must still run out of room as it did
+    /// when they recursed natively, and as in OpenSCAD, where module levels
+    /// and printing share one stack: a
     /// recursion that passes its parameter one vector deeper per call
     /// (`recursion-test-vector`) otherwise prints every level's whole
     /// value into its trace, quadratic in the depth (76 s, against 0.35 s
@@ -101,14 +99,7 @@ impl Evaluator<'_> {
     /// runs out of room about where it did, some 4,000 levels deep.
     #[inline]
     fn module_stack(&self) -> usize {
-        #[cfg(feature = "heap-eval")]
-        {
-            self.module_names.len() * MODULE_LEVEL_STACK + self.fn_depth * FUNCTION_LEVEL_STACK
-        }
-        #[cfg(not(feature = "heap-eval"))]
-        {
-            0
-        }
+        self.module_names.len() * MODULE_LEVEL_STACK + self.fn_depth * FUNCTION_LEVEL_STACK
     }
 
     /// Whether printing a vector nested `depth` levels inside the value
@@ -121,7 +112,7 @@ impl Evaluator<'_> {
         self.stack_used() + self.module_stack() >= self.stack_limit().min(PRINT_STACK_LIMIT)
             || self
                 .frames
-                .saturating_add(depth.saturating_mul(self.weights.expression))
+                .saturating_add(depth.saturating_mul(crate::recursion::EXPRESSION_FRAMES))
                 >= self.opts.frame_limit
     }
 

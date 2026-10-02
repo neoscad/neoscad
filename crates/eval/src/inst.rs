@@ -5,19 +5,11 @@ use std::rc::Rc;
 use lang::ast::{BinaryOp, ExprKind, Instantiation, Scope};
 use lang::diag::DiagCode;
 
-#[cfg(not(feature = "heap-eval"))]
-use crate::call::Instantiable;
-#[cfg(not(feature = "heap-eval"))]
-use crate::context::{Children, CtxKind};
 use crate::context::{Ctx, ScopeRef};
 use crate::eval::Evaluator;
-#[cfg(not(feature = "heap-eval"))]
-use crate::message::UnwindKind;
 use crate::message::{Loc, R};
 use crate::node::{Node, NodeKind, Origin};
 use crate::sym::Sym;
-#[cfg(not(feature = "heap-eval"))]
-use crate::value::Value;
 
 impl<'a> Evaluator<'a> {
     pub fn scope(&self, sr: ScopeRef) -> &'a Scope {
@@ -139,70 +131,6 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    #[cfg(not(feature = "heap-eval"))]
-    /// `LocalScope::instantiateModules`: instantiate a scope's modules (or
-    /// the ones at `indices`) into `out`.
-    ///
-    /// Inlined, like [`Self::instantiate_children`] and `with_children`:
-    /// each is a level of every recursion through statements, and in
-    /// JavaScriptCore's baseline wasm tier a frame costs about a kilobyte
-    /// of stack however little it holds, so a wrapper of its own made
-    /// WebKit's stack overflow sooner (see `crate::recursion`). Only in
-    /// optimised builds: unoptimised, an inlined callee's locals are not
-    /// shared with the caller's, so forcing it made a debug build's frames
-    /// so large that a 1,000-level module chain exhausted 64 MiB.
-    #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn instantiate_scope(
-        &mut self,
-        sr: ScopeRef,
-        ctx: &Rc<Ctx>,
-        out: &mut Vec<Node>,
-        indices: Option<&[usize]>,
-    ) -> R<()> {
-        let n = self.scope(sr).instantiations.len();
-        match indices {
-            None => {
-                for i in 0..n {
-                    if let Some(node) = self.instantiate(sr, i, ctx)? {
-                        out.push(node);
-                    }
-                }
-            }
-            Some(ix) => {
-                for &i in ix {
-                    if let Some(node) = self.instantiate(sr, i, ctx)? {
-                        out.push(node);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "heap-eval"))]
-    /// `Children::instantiate`: a new scope context for the children, whose
-    /// assignments are evaluated each time.
-    #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn instantiate_children(
-        &mut self,
-        children: &Children,
-        out: &mut Vec<Node>,
-        indices: Option<&[usize]>,
-    ) -> R<()> {
-        let region = self.units[children.scope.unit as usize].res.scope_region
-            [children.scope.scope as usize];
-        let c = self.new_ctx(&children.ctx, CtxKind::Scope(children.scope), region);
-        let mark = self.push(c.clone());
-        // A `match`, not `and_then`: the closure was a wasm frame of its own
-        // at every level of a recursion through `children()`.
-        let r = match self.init_scope(&c, children.scope) {
-            Ok(()) => self.instantiate_scope(children.scope, &c, out, indices),
-            Err(e) => Err(e),
-        };
-        self.truncate(mark);
-        r
-    }
-
     pub fn origin(&self, sr: ScopeRef, i: usize) -> Box<Origin> {
         let inst = self.inst(sr, i);
         let unit = &self.units[sr.unit as usize];
@@ -243,183 +171,6 @@ impl<'a> Evaluator<'a> {
         self.units[sr.unit as usize].sym(self.inst(sr, i).name)
     }
 
-    #[cfg(not(feature = "heap-eval"))]
-    /// `ModuleInstantiation::evaluate`.
-    pub fn instantiate(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
-        self.check_interrupt()?;
-        // Every nested statement holds frames of the frame budget (see
-        // `crate::recursion`), builtin ones included: a module recursing
-        // through `if`, `for` or `children()` nests those too, and each
-        // becomes a level of the node tree that rendering walks later.
-        self.frames += self.weights.statement;
-        self.work += 1;
-        let r = self.instantiate_frame(sr, i, ctx);
-        self.frames -= self.weights.statement;
-        r
-    }
-
-    #[cfg(not(feature = "heap-eval"))]
-    #[inline(always)]
-    fn instantiate_frame(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
-        let name = self.inst_name(sr, i);
-        let loc = self.inst_loc(sr, i);
-        let found = match self.inst_res(sr, i).0 {
-            0 => {
-                if !self.syms.is_config(name) {
-                    self.stats.fallbacks += 1;
-                }
-                self.lookup_module(ctx, name, loc)?
-            }
-            r => self.find_module(sr.unit, r - 1, ctx, name, loc)?,
-        };
-        let Some(m) = found else {
-            // "Ignoring unknown module" is printed by the lookup, before
-            // `ModuleInstantiation::evaluate`'s try block: no trace.
-            self.check_hard()?;
-            return Ok(None);
-        };
-        let r = match m {
-            // OpenSCAD checks the stack only for user modules, but a chain
-            // of builtins can nest as deep as the user modules around it
-            // (`children()` of `children()` of ...), so the frame budget
-            // is checked here too, with a quarter more room so that a
-            // recursive module still stops at its own call, with
-            // OpenSCAD's message, rather than at an `if` inside it.
-            // Natively the budget is unlimited, and this never fires.
-            Instantiable::Builtin(b) => self.builtin_module(b, sr, i, ctx),
-            Instantiable::User {
-                ctx: dctx,
-                unit,
-                scope,
-                index,
-            } => self.user_module(&dctx, ScopeRef { unit, scope }, index, sr, i, ctx),
-        };
-        // A builtin module's own warnings (its argument checks) are raised
-        // inside the try block, so they get the "called by" line.
-        let r = r.and_then(|n| self.check_hard().map(|_| n));
-        r.map_err(|mut e| {
-            let t = format!("called by '{}'", self.name(name));
-            self.trace(&mut e, loc, t.into_bytes());
-            e
-        })
-    }
-
-    #[cfg(not(feature = "heap-eval"))]
-    /// The frame budget ran out at a builtin module (see `builtin_module`).
-    /// Kept out of line: `instantiate` is on every level of a recursion,
-    /// and its frame should stay small.
-    #[cold]
-    #[inline(never)]
-    pub fn builtin_recursion(&mut self, sr: ScopeRef, i: usize) -> Box<crate::message::Unwind> {
-        let (name, loc) = (self.inst_name(sr, i), self.inst_loc(sr, i));
-        let t = format!("Recursion detected calling module '{}'", self.name(name));
-        self.error(Some(loc), DiagCode::RecursionLimit, t);
-        self.unwind(UnwindKind::Recursion)
-    }
-
-    #[cfg(not(feature = "heap-eval"))]
-    /// `UserModule::instantiate`.
-    fn user_module(
-        &mut self,
-        dctx: &Rc<Ctx>,
-        def_scope: ScopeRef,
-        index: u32,
-        sr: ScopeRef,
-        i: usize,
-        ctx: &Rc<Ctx>,
-    ) -> R<Option<Node>> {
-        let mu = def_scope.unit;
-        let def = &self.scope(def_scope).modules[index as usize];
-        let def_loc = Loc {
-            unit: mu,
-            span: def.span,
-        };
-        let inst_name = self.inst_name(sr, i);
-        if self.recursion_exhausted() || self.depth_exhausted() {
-            let t = format!(
-                "Recursion detected calling module '{}'",
-                self.name(inst_name)
-            );
-            self.error(Some(def_loc), DiagCode::RecursionLimit, t);
-            return Err(self.unwind(UnwindKind::Recursion));
-        }
-        self.module_names.push(inst_name);
-        let r = self.user_module_inner(dctx, def_scope, index, sr, i, ctx);
-        self.module_names.pop();
-        r
-    }
-
-    #[cfg(not(feature = "heap-eval"))]
-    fn user_module_inner(
-        &mut self,
-        dctx: &Rc<Ctx>,
-        def_scope: ScopeRef,
-        index: u32,
-        sr: ScopeRef,
-        i: usize,
-        ctx: &Rc<Ctx>,
-    ) -> R<Option<Node>> {
-        let mu = def_scope.unit;
-        let def = &self.scope(def_scope).modules[index as usize];
-        let body = ScopeRef {
-            unit: mu,
-            scope: self.units[mu as usize].scopes[def_scope.scope as usize].bodies[index as usize],
-        };
-        let inst = self.inst(sr, i);
-        let loc = self.inst_loc(sr, i);
-        let args = self.eval_args(sr.unit, &inst.args, ctx)?;
-        let children = Children {
-            scope: self.children_scope(sr, i),
-            ctx: ctx.clone(),
-        };
-        let n_children = self.scope(children.scope).instantiations.len();
-        let region = self.module_region(mu, def_scope.scope, index);
-        let mctx = self.new_ctx(dctx, CtxKind::Module(body, children), region);
-        let (sc, sp) = (self.k.children, self.k.parent_modules);
-        // `$children` is the region's last binder.
-        let last = self.regions[region as usize].binds.len().wrapping_sub(1);
-        self.set_bound(&mctx, last, sc, Value::Number(n_children as f64));
-        self.set_var(&mctx, sp, Value::Number(self.module_names.len() as f64));
-        self.bind_module(args, loc, mu, &def.params, dctx, &mctx)?;
-        // Reuse a repeated call (see `crate::callmemo`), its children
-        // included in the key. Out of line, so the frame every level of a
-        // recursive module holds stays as small as it was: the native stack
-        // decides how deep modules can recurse.
-        if self.cm.on
-            && let Some(node) = self.call_enter((mu, def_scope.scope, index), dctx, &mctx, (sr, i))
-        {
-            return Ok(Some(*node));
-        }
-        let mark = self.push(mctx.clone());
-        let r = (|| {
-            self.init_scope(&mctx, body)?;
-            let group = format!("module {}", self.units[mu as usize].ast.name(def.name));
-            let mut node = self.new_node(NodeKind::Group { name: Some(group) }, sr, i);
-            match self.instantiate_scope(body, &mctx, &mut node.children, None) {
-                Ok(()) => Ok(Some(node)),
-                Err(mut e) => {
-                    if self.opts.trace_usermodule_parameters {
-                        let t = self.module_call_text(mu, def, &mctx);
-                        let def_loc = Loc {
-                            unit: mu,
-                            span: def.span,
-                        };
-                        self.trace(&mut e, def_loc, t);
-                    }
-                    Err(e)
-                }
-            }
-        })();
-        self.truncate(mark);
-        // A recording this call started sits at its stack index (and the
-        // ones its body started have ended); kept in the memo, not in a
-        // local, for the same reason as above.
-        if self.cm.recording_at(mark) {
-            self.call_end(r.as_ref().ok().and_then(Option::as_ref));
-        }
-        r
-    }
-
     /// Bind a module call's arguments into its context. Out of line, so the
     /// bound frame is not part of the instantiation's stack frame, which
     /// every level of a recursive module holds.
@@ -448,7 +199,12 @@ impl<'a> Evaluator<'a> {
         let ast = self.units[mu as usize].ast;
         let mut t = format!("call of '{}(", ast.name(def.name)).into_bytes();
         if !def.params.is_empty() {
-            if self.recursion_exhausted() || self.depth_exhausted() {
+            // OpenSCAD writes `...` for the parameters while its stack
+            // check fires (`print_trace` in `UserModule.cc`); a module
+            // recursion ends at the counted limit here, so that is the
+            // check. The native ones cannot fire while the heap driver
+            // writes a module's trace (see `heap::begin_user`).
+            if self.depth_exhausted() {
                 t.extend_from_slice(b"...");
             } else {
                 for (k, p) in def.params.iter().enumerate() {

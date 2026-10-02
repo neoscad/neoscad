@@ -49,20 +49,11 @@ fi
 # package separately, so each gets the features its own build uses (one
 # invocation would unify them, e.g. the GPU renderer into the session). The
 # workspace crates each pulls in are linted with it.
-# NEOSCAD_FEATURES and NEOSCAD_NO_DEFAULT_FEATURES=1 (which leaves out
-# the heap evaluator, `heap-eval`, on by default) go to the two packages
-# that forward the evaluator's features, neoscad-wasm-check and
-# neoscad-web.
-eval_features=(${NEOSCAD_NO_DEFAULT_FEATURES:+--no-default-features} ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"})
 for package in neoscad-wasm-check neoscad-render neoscad-web neoscad-web-view; do
-    features=()
-    case $package in
-        neoscad-wasm-check | neoscad-web) features=(${eval_features[@]+"${eval_features[@]}"}) ;;
-    esac
-    cargo clippy --quiet --release --target wasm32-unknown-unknown -p "$package" ${features[@]+"${features[@]}"} -- -D warnings
+    cargo clippy --quiet --release --target wasm32-unknown-unknown -p "$package" -- -D warnings
 done
 echo "wasm-check: clippy is clean for wasm32"
-cargo build --quiet --release --target wasm32-unknown-unknown -p neoscad-wasm-check ${eval_features[@]+"${eval_features[@]}"}
+cargo build --quiet --release --target wasm32-unknown-unknown -p neoscad-wasm-check
 cargo build --quiet --release --target wasm32-unknown-unknown -p neoscad-render
 echo "wasm-check: neoscad-render (wgpu, WebGPU backend) builds for wasm32"
 # Cargo writes to $CARGO_TARGET_DIR when it is set (shared or per-worktree

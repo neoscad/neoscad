@@ -12,14 +12,10 @@ use std::rc::Rc;
 use lang::diag::DiagCode;
 
 use crate::call::ArgVal;
-#[cfg(not(feature = "heap-eval"))]
-use crate::context::Children;
 use crate::context::{Ctx, CtxKind, ScopeRef};
 use crate::eval::Evaluator;
 use crate::fma::mul_add;
 use crate::message::{Loc, R};
-#[cfg(not(feature = "heap-eval"))]
-use crate::node::Node;
 use crate::node::{self, CsgOp, Discretizer, LinearExtrude, Matrix, NodeKind, OffsetJoin};
 use crate::print::Exhausted;
 use crate::sym::{FxBuild, Sym, Syms};
@@ -364,152 +360,6 @@ impl<'a> Evaluator<'a> {
         self.eval_args(sr.unit, &inst.args, ctx)
     }
 
-    #[cfg(not(feature = "heap-eval"))]
-    /// Instantiate children into `node` and return it. Inlined for the
-    /// reason `instantiate_scope` is.
-    #[cfg_attr(not(debug_assertions), inline(always))]
-    fn with_children(
-        &mut self,
-        mut node: Node,
-        sr: ScopeRef,
-        i: usize,
-        ctx: &Rc<Ctx>,
-    ) -> R<Option<Node>> {
-        let ch = Children {
-            scope: self.children_scope(sr, i),
-            ctx: ctx.clone(),
-        };
-        self.instantiate_children(&ch, &mut node.children, None)?;
-        Ok(Some(node))
-    }
-
-    #[cfg(not(feature = "heap-eval"))]
-    pub fn builtin_module(
-        &mut self,
-        b: BuiltinModule,
-        sr: ScopeRef,
-        i: usize,
-        ctx: &Rc<Ctx>,
-    ) -> R<Option<Node>> {
-        use BuiltinModule as B;
-        // OpenSCAD checks the stack only for user modules, but a chain of
-        // builtins can nest as deep as the user modules around it
-        // (`children()` of `children()` of ...), so the frame budget is
-        // checked here too, with a quarter more room so that a recursive
-        // module still stops at its own call, with OpenSCAD's message,
-        // rather than at an `if` inside it. Natively the budget is
-        // unlimited, and this never fires.
-        let budget = self.opts.frame_limit;
-        crate::recursion::note_frames(self.frames);
-        if self.frames >= budget.saturating_add(budget / 4) {
-            return Err(self.builtin_recursion(sr, i));
-        }
-        let loc = self.inst_loc(sr, i);
-        match b {
-            B::Children => self.children_module(sr, i, ctx),
-            B::Echo => {
-                let inst = self.inst(sr, i);
-                self.echo(sr.unit, &inst.args, ctx)?;
-                let node = self.new_node(NodeKind::Group { name: None }, sr, i);
-                let node = self.with_children(node, sr, i, ctx)?;
-                Ok(node.filter(|n| !n.children.is_empty()))
-            }
-            B::Assert => {
-                let inst = self.inst(sr, i);
-                self.perform_assert(sr.unit, &inst.args, inst.span, ctx)?;
-                let node = self.new_node(NodeKind::Group { name: None }, sr, i);
-                let node = self.with_children(node, sr, i, ctx)?;
-                Ok(node.filter(|n| !n.children.is_empty()))
-            }
-            B::Let => {
-                let inst = self.inst(sr, i);
-                let region = self.inst_res(sr, i).1;
-                let c = self.new_ctx(ctx, CtxKind::Plain, region);
-                let mark = self.push(c.clone());
-                // A `match`, not `and_then`, as in `instantiate_children`.
-                let r = match self.sequential_assign(sr.unit, &inst.args, inst.span, &c) {
-                    Ok(()) => {
-                        let node = self.new_node(NodeKind::Group { name: None }, sr, i);
-                        self.with_children(node, sr, i, &c)
-                    }
-                    Err(e) => Err(e),
-                };
-                self.truncate(mark);
-                r
-            }
-            B::For | B::IntersectionFor => {
-                let kind = if b == B::For {
-                    NodeKind::Group { name: None }
-                } else {
-                    NodeKind::IntersectionFor
-                };
-                let mut node = self.new_node(kind, sr, i);
-                let inst = self.inst(sr, i);
-                if !inst.args.is_empty() {
-                    let scope = self.children_scope(sr, i);
-                    let mut kids = Vec::new();
-                    let region = self.inst_res(sr, i).1;
-                    self.for_each(sr.unit, &inst.args, region, loc, ctx, &mut |ev, c| {
-                        ev.instantiate_children(
-                            &Children {
-                                scope,
-                                ctx: c.clone(),
-                            },
-                            &mut kids,
-                            None,
-                        )
-                    })?;
-                    node.children = kids;
-                }
-                Ok(Some(node))
-            }
-            B::If => {
-                let inst = self.inst(sr, i);
-                let args = self.eval_args(sr.unit, &inst.args, ctx)?;
-                let branch = if args.first().is_some_and(|a| a.value.to_bool()) {
-                    Some(self.children_scope(sr, i))
-                } else {
-                    self.else_scope(sr, i)
-                };
-                let Some(scope) = branch else { return Ok(None) };
-                let mut node = self.new_node(NodeKind::Group { name: None }, sr, i);
-                self.instantiate_children(
-                    &Children {
-                        scope,
-                        ctx: ctx.clone(),
-                    },
-                    &mut node.children,
-                    None,
-                )?;
-                Ok(Some(node))
-            }
-            B::Part => self.part_module(sr, i, ctx, loc),
-            _ => self.geometry_module(b, sr, i, ctx, loc),
-        }
-    }
-
-    /// `part("name") { ... }`: a union node carrying the part's dotted name
-    /// (see [`NodeKind::Part`]). A name that is not a non-empty string is
-    /// a warning, and the children are kept as a plain group, so the
-    /// geometry is the same either way.
-    #[cfg(not(feature = "heap-eval"))]
-    fn part_module(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>, loc: Loc) -> R<Option<Node>> {
-        let args = self.inst_args(sr, i, ctx)?;
-        let p = self.params(args, loc, &["name"], &[], "part");
-        let Some(full) = self.part_name(&p, loc) else {
-            let node = self.new_node(NodeKind::Group { name: None }, sr, i);
-            let r = self.with_children(node, sr, i, ctx);
-            self.end(p);
-            return r;
-        };
-        let node = self.new_node(NodeKind::Part { name: full.clone() }, sr, i);
-        self.part_stack.push(full);
-        let r = self.with_children(node, sr, i, ctx);
-        self.part_stack.pop();
-        self.end(p);
-        r
-    }
-
     /// A `part()`'s full dotted name, checked for duplicates, or `None`
     /// (with a warning) when its name is not a non-empty string.
     #[inline(always)]
@@ -539,38 +389,6 @@ impl<'a> Evaluator<'a> {
             self.warn(loc, DiagCode::DuplicatePart, t);
         }
         Some(full)
-    }
-
-    #[cfg(not(feature = "heap-eval"))]
-    /// `builtin_children`.
-    fn children_module(&mut self, sr: ScopeRef, i: usize, ctx: &Rc<Ctx>) -> R<Option<Node>> {
-        let loc = self.inst_loc(sr, i);
-        let args = self.inst_args(sr, i, ctx)?;
-        self.no_children(sr, i);
-        let p = self.params(args, loc, &[], &["index"], "children");
-        let r = self.children_module_inner(&p, sr, i, ctx);
-        self.end(p);
-        r
-    }
-
-    #[cfg(not(feature = "heap-eval"))]
-    fn children_module_inner(
-        &mut self,
-        p: &Params,
-        sr: ScopeRef,
-        i: usize,
-        ctx: &Rc<Ctx>,
-    ) -> R<Option<Node>> {
-        let Some(children) = ctx.module_children() else {
-            return Ok(None);
-        };
-        let size = self.scope(children.scope).instantiations.len();
-        let Some(indices) = self.children_select(p, size) else {
-            return Ok(None);
-        };
-        let mut node = self.new_node(NodeKind::Group { name: None }, sr, i);
-        self.instantiate_children(&children, &mut node.children, indices.as_deref())?;
-        Ok(Some(node))
     }
 
     /// The children `children(index)` instantiates out of `size`: `Some`
@@ -647,50 +465,6 @@ impl<'a> Evaluator<'a> {
             }
         };
         Some(indices)
-    }
-
-    #[cfg(not(feature = "heap-eval"))]
-    fn geometry_module(
-        &mut self,
-        b: BuiltinModule,
-        sr: ScopeRef,
-        i: usize,
-        ctx: &Rc<Ctx>,
-        loc: Loc,
-    ) -> R<Option<Node>> {
-        let args = self.inst_args(sr, i, ctx)?;
-        if is_leaf(b) {
-            self.no_children(sr, i);
-        }
-        let (req, opt, caller) = geometry_params(b);
-        let p = self.params(args, loc, req, opt, caller);
-        let r = self.geometry_node(b, &p, sr, i, ctx);
-        self.end(p);
-        r
-    }
-
-    #[cfg(not(feature = "heap-eval"))]
-    fn geometry_node(
-        &mut self,
-        b: BuiltinModule,
-        p: &Params,
-        sr: ScopeRef,
-        i: usize,
-        ctx: &Rc<Ctx>,
-    ) -> R<Option<Node>> {
-        let kind = self.geometry_kind(b, p);
-        let node = self.new_node(kind, sr, i);
-        if is_leaf(b) {
-            Ok(Some(node))
-        } else {
-            // A geometry module's children cost more stack per level than
-            // other statements (this function's frame); the extra weight is
-            // 0 unless a host calibrated one (`crate::recursion::FrameWeights`).
-            self.frames += self.weights.geometry;
-            let r = self.with_children(node, sr, i, ctx);
-            self.frames -= self.weights.geometry;
-            r
-        }
     }
 
     /// A geometry module's node kind from its bound arguments, with their

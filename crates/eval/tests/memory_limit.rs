@@ -252,7 +252,6 @@ fn values_under_the_limit_are_untouched() {
 /// value, 900 through a comprehension), so 90,000 levels pass a 16 MiB
 /// limit that the estimate did not see at all, while 1,000 levels stay
 /// well under it.
-#[cfg(feature = "heap-eval")]
 #[test]
 fn deep_recursions_count_their_frames() {
     const SMALL: u64 = 16 << 20;

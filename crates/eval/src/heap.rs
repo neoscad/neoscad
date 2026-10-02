@@ -1,14 +1,18 @@
-//! The heap evaluator's statement driver (the `heap-eval` feature).
+//! The statement driver: statements and module instantiation on a heap
+//! stack.
 //!
-//! The recursive evaluator instantiates a statement by calling into it:
-//! `instantiate` → `user_module` → `instantiate_scope` → `instantiate` …,
-//! one set of native frames per level, so how deep a module recursion can
-//! go is decided by the native stack: 33,000 levels natively, and in a
-//! browser whatever the engine gives a wasm thread (about 30 levels of a
-//! module chain through `translate` in WebKit). Here the same work runs in
-//! one loop over an explicit stack of [`Frame`]s on the heap, so a module
-//! recursion holds no native stack at all and ends at the counted limit
+//! The recursive statement evaluator this replaced instantiated a
+//! statement by calling into it: `instantiate` → `user_module` →
+//! `instantiate_scope` → `instantiate` …, one set of native frames per
+//! level, so how deep a module recursion could go was decided by the
+//! native stack: 33,000 levels natively, and in a browser whatever the
+//! engine gave a wasm thread (about 30 levels of a module chain through
+//! `translate` in WebKit). Here the same work runs in one loop over an
+//! explicit stack of [`Frame`]s on the heap, so a module recursion holds
+//! no native stack at all and ends at the counted limit
 //! [`crate::limits::Limits::depth`], the same in every build and browser.
+//! (The recursive driver was removed once this one was on in every build;
+//! the names in the frames' documentation are its functions.)
 //!
 //! What a frame is: the part of a native function that runs after its
 //! callee returns. Each `begin_*` function below is the part of a native
@@ -16,11 +20,11 @@
 //! finish it and returns `None`, or finishes at once (a primitive, an
 //! error) and returns the result for the frame on top. The driver pops a
 //! frame and hands it the result of the one above it, until the frame it
-//! started from has its result. Everything else is shared with the
-//! recursive evaluator: arguments, scopes' assignments, bindings, lookups,
-//! node construction and the call memo run the same functions, in the
-//! same order, so the output is byte-identical (the conformance A/B in
-//! `docs/audits/heap-evaluator.md` checks that).
+//! started from has its result. Arguments, scopes' assignments, bindings,
+//! lookups, node construction and the call memo are ordinary functions
+//! shared with the rest of the evaluator, run in the order the recursive
+//! driver ran them, which kept the output byte-identical when it was
+//! replaced (the conformance A/B in `docs/audits/heap-evaluator.md`).
 //!
 //! Expressions start from this loop's own native frame, at any module
 //! depth, so the frame budget of [`crate::recursion`] counts only the
@@ -58,7 +62,7 @@ pub(crate) enum Ret {
     Kids(R<Vec<Node>>),
 }
 
-/// One suspended native function of the recursive evaluator. Small (40
+/// One suspended native function of the recursive driver. Small (40
 /// bytes) and unboxed, as frames are pushed and popped at every statement:
 /// what does not fit waits on side stacks of the evaluator, popped in the
 /// same order as the frames (the nodes being filled, `heap_nodes`; the
@@ -91,7 +95,7 @@ pub(crate) enum Frame<'a> {
 
 // Kept at 40 bytes on 64-bit targets: a frame is moved at every push and
 // pop, and the first version's large frames and results cost 10-20% more
-// instructions than the recursive evaluator on statement-heavy models.
+// instructions than the recursive driver on statement-heavy models.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Frame<'static>>() <= 40);
 
@@ -312,7 +316,6 @@ impl<'a> Evaluator<'a> {
                     loc,
                     user: false,
                 });
-                crate::recursion::note_frames(self.frames);
                 self.begin_builtin(b, sr, i, ctx)
             }
             Instantiable::User {
@@ -339,11 +342,14 @@ impl<'a> Evaluator<'a> {
     ) -> Option<Ret> {
         let mu = def_scope.unit;
         let def = &self.scope(def_scope).modules[index as usize];
-        // The counted limit is what stops a module recursion here. The
-        // stack measure and the frame budget stay as the recursive
-        // evaluator has them, though this native stack does not grow
-        // with module depth.
-        if self.depth_exhausted() || self.recursion_exhausted() {
+        // The counted limit is what stops a module recursion. The native
+        // checks (`recursion_exhausted`) are not asked here: this driver
+        // only starts from a top-level statement (`memo.rs`), never from
+        // inside an expression, so at a module call the native stack is
+        // the driver's own at any depth and no expression frame is held.
+        // They could only fire for a `frame_limit` of 0, and the call
+        // checks still guard every expression a module's arguments run.
+        if self.depth_exhausted() {
             self.heap.push(Frame::Called {
                 name,
                 loc,

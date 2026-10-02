@@ -396,42 +396,10 @@ fn infinite_recursion_fails_the_same() {
     assert!(lines.iter().any(|l| l.contains("Recursion")), "{lines:?}");
 }
 
-#[test]
-#[cfg(not(feature = "heap-eval"))]
-fn recursion_limit_near_a_replay() {
-    // `heavy()` recurses a fixed amount inside. It is recorded at the top,
-    // then called again under ever more nested `if`s (the same module
-    // depth, so the same key, with fewer frames to spare): somewhere a
-    // fresh evaluation passes the frame limit, and a replay must pass it
-    // at the same nesting, with the same message.
-    let mut failed = 0;
-    let mut runs = 0;
-    for n in (0..700).step_by(11) {
-        let src = format!(
-            "function f(k) = k == 0 ? 0 : 1 + f(k - 1);
-             module heavy() {{ echo(f(150)); {WORK} }}
-             heavy(); heavy(); {} heavy();",
-            "if (true) ".repeat(n)
-        );
-        let opts = Options {
-            frame_limit: 3000,
-            ..Options::default()
-        };
-        let (_, lines) = same_with(&src, &opts);
-        runs += 1;
-        failed += usize::from(lines.iter().any(|l| l.contains("Recursion")));
-    }
-    assert!(
-        failed > 0 && failed < runs,
-        "the limit was crossed {failed} times of {runs}"
-    );
-}
-
-/// Under the heap evaluator statements take no native stack and so no
-/// frames: the same calls under ever more nested `if`s all have the whole
+/// Statements run on the heap and take no native stack and so no frames:
+/// the same calls under ever more nested `if`s all have the whole
 /// budget, recorded and replayed alike.
 #[test]
-#[cfg(feature = "heap-eval")]
 fn nested_statements_leave_the_budget_to_calls() {
     for n in (0..700).step_by(77) {
         let src = format!(

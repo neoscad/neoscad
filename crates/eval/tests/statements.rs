@@ -1,12 +1,13 @@
-//! Statement execution, compared between the two evaluators.
+//! Statement execution, held to the recursive evaluator's output.
 //!
-//! The heap evaluator (`--features heap-eval`, `src/heap.rs`) re-implements
-//! statement execution as frames on a heap stack, and its output must be
-//! byte-identical to the recursive evaluator's. Each case here writes its
-//! messages, its `.csg` dump and every node's index and kind; the expected
-//! files under `tests/statements/` were written by the recursive evaluator
-//! (`NEOSCAD_BLESS=1 cargo test --test statements`) and both builds must
-//! match them. The cases aim at the paths where the two could drift: `$`
+//! The heap evaluator (`src/heap.rs`) re-implemented statement execution
+//! as frames on a heap stack, and its output had to be byte-identical to
+//! the recursive evaluator's, which it has since replaced. Each case here
+//! writes its messages, its `.csg` dump and every node's index and kind;
+//! the expected files under `tests/statements/` were written by the
+//! recursive evaluator (`NEOSCAD_BLESS=1 cargo test --test statements`)
+//! and still hold the heap one to them. The cases aim at the paths where
+//! the two could drift: `$`
 //! variables through `children()`, `for` and `let`, children chains and
 //! indices, every kind of `for` value, errors and their traces at each
 //! point of a module call, `--hardwarnings`, the call memo's replays, the
@@ -283,7 +284,6 @@ echo("after");
 /// The heap evaluator's point: a module recursion through statements
 /// takes no native stack, so it reaches the counted limit on a thread of
 /// 128 KiB, through `translate`, `children()` and `for` alike.
-#[cfg(feature = "heap-eval")]
 #[test]
 fn deep_module_recursion_on_a_small_thread() {
     let depth = eval::limits::DEFAULT_DEPTH as usize;
