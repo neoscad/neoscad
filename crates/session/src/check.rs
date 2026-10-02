@@ -1031,6 +1031,16 @@ const MAX_RAYS: usize = 400_000;
 /// `$fn = 64`) is still under.
 const WALL_TOLERANCE: f64 = 1e-3;
 
+/// Thin places whose faces add up to less than this (mm²) are slivers, an
+/// info finding rather than a warning or an error. They are where two
+/// surfaces meet at a sharp edge: every crest of a V thread measured "walls
+/// at 22 places, the thinnest 0.62 mm thick (0 mm² of surface ...)" in an
+/// agent's check of a hose adapter, and the agent thickened a thread that
+/// printed fine. A real wall's faces measure square millimetres (the
+/// thinnest wall a 0.4 mm nozzle prints, 0.4 mm by one 0.2 mm layer, is
+/// 0.08 mm²), so no wall hides under it.
+const SLIVER_AREA: f64 = 0.05;
+
 /// Whether a wall `h` thick is under `limit` ([`WALL_TOLERANCE`]).
 fn under(h: f64, limit: f64) -> bool {
     h < limit - WALL_TOLERANCE
@@ -1324,11 +1334,19 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
             let x = &thin[c.first];
             let error = under(x.thickness, s.nozzle);
             let limit = if error { s.nozzle } else { s.min_wall };
+            let sliver = c.area < SLIVER_AREA;
             Finding {
-                level: if error { Level::Error } else { Level::Warning },
+                level: if sliver {
+                    Level::Info
+                } else if error {
+                    Level::Error
+                } else {
+                    Level::Warning
+                },
                 code: "thin-wall",
                 message: format!(
-                    "{} {} mm thick{} ({} mm² of surface measures under the minimum)",
+                    "{}{} {} mm thick{} ({} mm² of surface measures under the minimum)",
+                    if sliver { "a sliver, not a wall: " } else { "" },
                     if *places > 1 {
                         format!("walls at {places} places, the thinnest")
                     } else {
@@ -1346,7 +1364,14 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
                 bbox: c.b,
                 part: c.part.map(|p| mesh.part_names[p as usize].to_string()),
                 fix: format!(
-                    "thicken it to at least {} mm ({} perimeters of a {} mm nozzle), or remove it",
+                    "{}thicken it to at least {} mm ({} perimeters of a {} mm nozzle), or remove it",
+                    if sliver {
+                        "nothing to do where sharp edges meet (a thread's crest, a chamfer's tip): \
+                         the slicer prints it as part of what is beside it; if it is meant to be \
+                         a wall, "
+                    } else {
+                        ""
+                    },
                     mm(s.min_wall),
                     mm((s.min_wall / s.nozzle).round()),
                     mm(s.nozzle)
@@ -1386,12 +1411,140 @@ fn walls(mesh: &Mesh, bvh: &Bvh, s: &CheckSettings, diag: f64) -> Walls {
     (findings, tris, min)
 }
 
+/// How far past `max_overhang` (degrees) a face must lean before it is an
+/// overhang. A face modelled at exactly the limit comes out of the
+/// geometry a hair either side of it, and with a 1e-12 margin such faces
+/// were flagged: an agent's snap-fit lid read "6.19 mm² faces down at up
+/// to 45° from vertical (limit 45°)" four times over. Half a degree is
+/// far below what a printer can tell apart (0.2 mm layers step out 0.2035
+/// mm at 45.5° against 0.2 at 45°).
+const OVERHANG_TOLERANCE: f64 = 0.5;
+
+/// A bridge: a flat downward region (every face within this many degrees
+/// of horizontal) held up by walls on two opposite sides, at most
+/// [`BRIDGE_SPAN`] apart. Slicers print such a span as a bridge, in
+/// straight strands from wall to wall, without support; the print rules
+/// agents work to allow "short bridges", and the top of a USB port cut
+/// through a 2 mm wall read as a 90° overhang that needed support.
+const BRIDGE_FLAT: f64 = 1.0;
+/// The longest span (mm) a bridge is reported as info. Common FDM printers
+/// bridge 20 mm cleanly; longer spans sag and stay a warning.
+const BRIDGE_SPAN: f64 = 20.0;
+
+/// Thread flanks: a band of downward faces around a vertical axis at most
+/// this deep (mm, radially) that winds all the way round and climbs more
+/// than it is deep. An ISO metric thread's flanks lean 60° from its axis,
+/// past the usual 45° limit, and FDM prints them as they are (each layer
+/// steps out 0.35 mm, under a 0.4 mm line): every check of an M24 thread
+/// warned about them, and agents raised `max_overhang` until the warning
+/// went away, which would hide a real ledge too. The rules keep real
+/// overhangs warnings: a flat ring or a chamfer around a boss climbs less
+/// than it is deep (at any angle past 45°), a ledge is deeper than this,
+/// and faces leaning more than [`THREAD_STEEP`] past the limit over more
+/// than a speck (two extrusion widths squared, as for regions) disqualify
+/// it: a square thread, or a ledge the flanks run into (a 41 mm² ledge on
+/// a 554 mm² band of flanks stays a warning).
+const THREAD_DEPTH: f64 = 2.5;
+/// Degrees past `max_overhang` a thread flank may lean (75° by default).
+const THREAD_STEEP: f64 = 30.0;
+
+/// What an overhanging region is, which decides how loud its finding is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OverhangKind {
+    /// Needs support (or a chamfer, or another orientation): a warning.
+    Plain,
+    /// A short bridge ([`BRIDGE_SPAN`]) of this span: info.
+    Bridge(f64),
+    /// A thread's lower flanks ([`THREAD_DEPTH`]), this deep: info.
+    Thread(f64),
+}
+
+impl OverhangKind {
+    fn same(self, o: OverhangKind) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&o)
+    }
+}
+
+/// Whether the flat region `faces` is a short bridge: the faces across its
+/// boundary edges go down from them (walls holding the span up) on both
+/// ends of its box along x, or along y. `below` gives, for a boundary edge,
+/// whether a face outside the region shares it and runs below it. The span
+/// between the two supported ends is returned when it is short.
+fn bridge_span(
+    mesh: &Mesh,
+    faces: &[usize],
+    b: &Aabb,
+    below: &HashMap<(u32, u32), bool>,
+) -> Option<f64> {
+    let tol = 0.01;
+    let mut best: Option<f64> = None;
+    for axis in 0..2 {
+        let (lo, hi) = (b.lo[axis], b.hi[axis]);
+        let (mut at_lo, mut at_hi) = (false, false);
+        for &t in faces {
+            let v = mesh.tris[t];
+            for k in 0..3 {
+                let (a, c) = (v[k], v[(k + 1) % 3]);
+                if below.get(&(a.min(c), a.max(c))) != Some(&true) {
+                    continue;
+                }
+                let (pa, pc) = (mesh.verts[a as usize][axis], mesh.verts[c as usize][axis]);
+                at_lo |= pa <= lo + tol && pc <= lo + tol;
+                at_hi |= pa >= hi - tol && pc >= hi - tol;
+            }
+        }
+        let span = hi - lo;
+        if at_lo && at_hi && span <= BRIDGE_SPAN {
+            best = Some(best.map_or(span, |x: f64| x.min(span)));
+        }
+    }
+    best
+}
+
+/// Whether the region `faces` (angles from vertical, areas, indices) is a
+/// band of thread flanks ([`THREAD_DEPTH`]), and how deep it is.
+fn thread_depth(
+    mesh: &Mesh,
+    faces: &[(f64, f64, usize)],
+    b: &Aabb,
+    s: &CheckSettings,
+) -> Option<f64> {
+    let c = b.center();
+    let (mut rmin, mut rmax) = (f64::INFINITY, 0.0f64);
+    let mut sectors = [false; 12];
+    let mut steep = 0.0;
+    for &(angle, a, t) in faces {
+        for p in mesh.corners(t) {
+            let r = (p[0] - c[0]).hypot(p[1] - c[1]);
+            rmin = rmin.min(r);
+            rmax = rmax.max(r);
+        }
+        let m = mesh.centroid(t);
+        let turn = (m[1] - c[1]).atan2(m[0] - c[0]) + std::f64::consts::PI;
+        sectors[((turn / std::f64::consts::TAU * 12.0) as usize).min(11)] = true;
+        if angle > s.max_overhang + THREAD_STEEP {
+            steep += a;
+        }
+    }
+    let depth = rmax - rmin;
+    let climbs = b.hi[2] - b.lo[2] > depth;
+    (depth <= THREAD_DEPTH
+        && rmin > depth
+        && climbs
+        && sectors.iter().all(|&x| x)
+        && steep < (2.0 * s.nozzle).powi(2))
+    .then_some(depth)
+}
+
 fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u32>, f64) {
-    let limit = s.max_overhang.to_radians().sin();
+    let limit = (s.max_overhang + OVERHANG_TOLERANCE)
+        .min(90.0)
+        .to_radians()
+        .sin();
     let over: Vec<usize> = (0..mesh.tris.len())
         .filter(|&t| {
             let n = mesh.normal(t);
-            if -n[2] <= limit + 1e-12 {
+            if -n[2] <= limit {
                 return false;
             }
             // Faces on the bed are held up by it.
@@ -1433,7 +1586,9 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
     // given "550 mm² at up to 90°" could not tell a 41 mm² ledge from the
     // 60° thread flanks around it, and swept `max_overhang` to find it.
     let steep = (s.max_overhang + 15.0).min(89.0);
-    let steep_sin = steep.to_radians().sin();
+    // With the same tolerance as the limit: 60° flanks read "263 mm² of
+    // it steeper than 60°" when their faces leaned a hair past it.
+    let steep_sin = (steep + OVERHANG_TOLERANCE).min(90.0).to_radians().sin();
     struct Region {
         area: f64,
         b: Aabb,
@@ -1480,6 +1635,48 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
     let min_area = (2.0 * s.nozzle).powi(2);
     regions.retain(|r| r.area >= min_area);
     regions.sort_by(|a, b| b.area.total_cmp(&a.area));
+    // Which regions are short bridges or thread flanks. A bridge is flat;
+    // for the flat regions, find which of their boundary edges a wall runs
+    // down from (the face across the edge has a corner below it).
+    let flat = |r: &Region| r.faces.iter().all(|f| f.0 >= 90.0 - BRIDGE_FLAT);
+    let mut below: HashMap<(u32, u32), bool> = HashMap::new();
+    for r in regions.iter().filter(|r| flat(r)) {
+        let mut seen: HashMap<(u32, u32), u32> = HashMap::new();
+        for &(_, _, t) in &r.faces {
+            let v = mesh.tris[t];
+            for k in 0..3 {
+                let (a, b) = (v[k], v[(k + 1) % 3]);
+                *seen.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        below.extend(seen.into_iter().filter(|e| e.1 == 1).map(|e| (e.0, false)));
+    }
+    if !below.is_empty() {
+        for v in &mesh.tris {
+            for k in 0..3 {
+                let (a, b) = (v[k], v[(k + 1) % 3]);
+                if let Some(e) = below.get_mut(&(a.min(b), a.max(b))) {
+                    let z = mesh.verts[a as usize][2].min(mesh.verts[b as usize][2]);
+                    *e |= mesh.verts[v[(k + 2) % 3] as usize][2] < z - 1e-6;
+                }
+            }
+        }
+    }
+    let kinds: Vec<OverhangKind> = regions
+        .iter()
+        .map(|r| {
+            let faces: Vec<usize> = r.faces.iter().map(|f| f.2).collect();
+            if flat(r)
+                && let Some(span) = bridge_span(mesh, &faces, &r.b, &below)
+            {
+                OverhangKind::Bridge(span)
+            } else if let Some(depth) = thread_depth(mesh, &r.faces, &r.b, s) {
+                OverhangKind::Thread(depth)
+            } else {
+                OverhangKind::Plain
+            }
+        })
+        .collect();
     let owner = |r: &Region| -> Option<u32> {
         r.parts
             .iter()
@@ -1491,25 +1688,37 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
     // were most of a check's text. Largest first.
     let diag = crate::mesh::norm(mesh.bbox().size());
     let reach = (4.0 * s.min_wall).max(0.05 * diag);
+    // Only regions of one kind merge: a bridge beside a ledge must not
+    // quieten the ledge, nor the ledge make the bridge a warning.
     struct Merged {
         regions: Vec<usize>,
         b: Aabb,
         area: f64,
         steep_area: f64,
         steep_b: Aabb,
+        kind: OverhangKind,
     }
     let mut merged: Vec<Merged> = Vec::new();
     for (i, r) in regions.iter().enumerate() {
-        match merged
-            .iter_mut()
-            .find(|m| owner(&regions[m.regions[0]]) == owner(r) && m.b.gap(&r.b) <= reach)
-        {
+        let kind = kinds[i];
+        match merged.iter_mut().find(|m| {
+            owner(&regions[m.regions[0]]) == owner(r) && m.kind.same(kind) && m.b.gap(&r.b) <= reach
+        }) {
             Some(m) => {
                 m.regions.push(i);
                 m.b = m.b.union(&r.b);
                 m.area += r.area;
                 m.steep_area += r.steep_area;
                 m.steep_b = m.steep_b.union(&r.steep_b);
+                m.kind = match (m.kind, kind) {
+                    (OverhangKind::Bridge(a), OverhangKind::Bridge(b)) => {
+                        OverhangKind::Bridge(a.max(b))
+                    }
+                    (OverhangKind::Thread(a), OverhangKind::Thread(b)) => {
+                        OverhangKind::Thread(a.max(b))
+                    }
+                    (k, _) => k,
+                };
             }
             None => merged.push(Merged {
                 regions: vec![i],
@@ -1517,6 +1726,7 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
                 area: r.area,
                 steep_area: r.steep_area,
                 steep_b: r.steep_b,
+                kind,
             }),
         }
     }
@@ -1543,11 +1753,42 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
             } else {
                 String::new()
             };
+            let (level, what) = match m.kind {
+                OverhangKind::Plain => (Level::Warning, String::new()),
+                OverhangKind::Bridge(span) => (
+                    Level::Info,
+                    format!("a {} mm bridge between walls: ", mm(span)),
+                ),
+                OverhangKind::Thread(depth) => (
+                    Level::Info,
+                    format!(
+                        "thread flanks (a band {} mm deep winding round a vertical axis): ",
+                        mm(depth)
+                    ),
+                ),
+            };
+            let fix = match m.kind {
+                OverhangKind::Plain => format!(
+                    "add support, chamfer it to {}° or less, or reorient the model; a short \
+                     flat span between two walls may bridge instead",
+                    mm(s.max_overhang)
+                ),
+                OverhangKind::Bridge(_) => format!(
+                    "none needed: slicers bridge a flat span up to {} mm between walls; \
+                     shorten it if the printer sags",
+                    mm(BRIDGE_SPAN)
+                ),
+                OverhangKind::Thread(_) => format!(
+                    "none needed for a thread (60° flanks print as they are); if it is not \
+                     one, add support or chamfer it to {}° or less",
+                    mm(s.max_overhang)
+                ),
+            };
             Finding {
-                level: Level::Warning,
+                level,
                 code: "overhang",
                 message: format!(
-                    "{} mm² faces down{} at up to {}° from vertical (limit {}°), {}{}",
+                    "{what}{} mm² faces down{} at up to {}° from vertical (limit {}°), {}{}",
                     mm(m.area),
                     if m.regions.len() > 1 {
                         format!(" in {} places", m.regions.len())
@@ -1567,11 +1808,7 @@ fn overhangs(mesh: &Mesh, s: &CheckSettings, bed_z: f64) -> (Vec<Finding>, Vec<u
                 point: mesh.centroid(at),
                 bbox: m.b,
                 part,
-                fix: format!(
-                    "add support, chamfer it to {}° or less, or reorient the model; a short \
-                     flat span between two walls may bridge instead",
-                    mm(s.max_overhang)
-                ),
+                fix,
                 value: Some(m.area),
                 limit: Some(s.max_overhang),
             }

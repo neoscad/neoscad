@@ -35,7 +35,9 @@ and sent, for debugging a client), `--limit NAME=VALUE` (repeatable:
 change a resource limit; see "Safety"), `--enable FEATURE` (repeatable:
 one of OpenSCAD's experimental features for every call, as the command
 line's `--enable`: `textmetrics`, `object-function`, `import-function`,
-`vector-swizzle`; off by default, as in OpenSCAD), `--browser` (let the
+`vector-swizzle`; off by default, as in OpenSCAD), `--tool NAME`
+(repeatable: also list the optional tool `test` or `format`; see
+"Tools"), `--browser` (let the
 web page connect; see "The web page" below) with `--browser-url URL` and
 `--open`.
 
@@ -80,7 +82,13 @@ PNG's base64 is 20 lines).
 
 ## Tools
 
-Eight tools, few and orthogonal. Each takes a model as `path` (a
+Eight tools, few and orthogonal; six are listed by default, and `test`
+and `format` only with `--tool test` and `--tool format` (`format` is
+also listed with `--browser`, where it formats the page's text). Every
+listed tool costs every session context, and a modelling session rarely
+runs model tests or the formatter (agents that formatted did so after
+the finished export, then rendered again to check it). A call to a tool that is not listed is the
+JSON-RPC error for an unknown tool. Each takes a model as `path` (a
 `.scad` file) or `source` (OpenSCAD text, so an agent can iterate
 without writing files); `base_dir` is where relative paths and a
 source's `include`s resolve (default: the server's working directory).
@@ -100,12 +108,12 @@ transcript audit read as a problem in its model.
 | Tool | What it answers | Extra arguments |
 |---|---|---|
 | `evaluate` | errors and warnings with fix hints, `echo()` output; no geometry | |
-| `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch, and edges an STL breaks at 32-bit precision), components; optionally writes the model | `export` (a file; format from its extension; `.stl` is ASCII STL), `overwrite` |
+| `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch, and edges an STL breaks at 32-bit precision), components; optionally writes the model and reads a mesh file back | `export` (a file; format from its extension; `.stl` is ASCII STL), `overwrite` |
 | `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `dims`, `preview`, `output` (also save the PNG; a `.png` name), `overwrite` |
-| `check` | printability findings, each with location and fix; the description asks for the spec's minimum wall as `min_wall` | `bed`, `nozzle`, `min_wall`, `max_overhang` |
+| `check` | printability findings, each with location and fix; the description asks for the spec's minimum wall as `min_wall`; optionally `render`'s export and `measure`'s sections in the same result | `bed`, `nozzle`, `min_wall`, `max_overhang`, `export`, `overwrite`, `sections` (planes, each as `measure`'s `section`) |
 | `measure` | model and part bbox, volume, centroid; distance between parts, or the overlap's pieces; sections with each contour's area, bbox, hole and radii; a radius profile with crests and pitch | `part`, `between`, `section`, `axis` (`x`/`y`/`z`, default z), `center` (`[a, b]`, the axis's position, default `[0, 0]`), `profile` (`[from, to, step]` along the axis) |
-| `test` | model tests (`docs/model-tests.md`); `path` is a test file or directory, `source` a test file's text | `filter` |
-| `format` | `source`: the formatted text; `path`: rewrites the file (only whitespace changes) | `check` (say how many lines would change, write nothing), `diff` (with `check`: the diff itself) |
+| `test` (`--tool test`) | model tests (`docs/model-tests.md`); `path` is a test file or directory, `source` a test file's text | `filter` |
+| `format` (`--tool format`) | `source`: the formatted text; `path`: rewrites the file (only whitespace changes) | `check` (say how many lines would change, write nothing), `diff` (with `check`: the diff itself) |
 | `docs` | a builtin's reference, or with `path` a file's definitions; no name: the index | `name`, `full`, `verbose` (the whole index) |
 
 The server's `instructions` (sent once, at discovery or `initialize`)
@@ -113,18 +121,27 @@ say when to use which: after an edit, one `check` (with `min_wall`)
 gives errors, warnings, echo, geometry and printability, with no
 `evaluate` or `render` first; independent calls go in parallel;
 `measure` for exact numbers, `snapshot` when the shape is in doubt;
-`render`'s `export` reports what it wrote. They used to list
-`evaluate`, `render`, `snapshot` and `check` in turn, and agents ran
-them one turn each after every edit; a turn costs seconds of model time
-and a re-read of the whole context, a tool call milliseconds. The
-tool list is 5,488 bytes of compact JSON as `[name, description, input
-schema]` arrays, which is what `crates/cli/tests/mcp.rs` measures and
-keeps under 5,500 bytes (each description under 300). What a client
-receives is larger: 5,768 bytes with the keys (`name`, `description`,
-`inputSchema`) and 6,059 with `annotations`, roughly 1,450-1,700 tokens
-(estimated at 3.5-4 bytes a token; not measured with a tokenizer). To
-make room for `measure`'s `axis`, `center` and `profile`, `base_dir`
-lost its description ("Dir for includes") and others were shortened.
+`check` also takes `export` and `sections`, and an export is read
+back; info findings need no action. A list of tools in turn reads as a
+sequence of separate calls, and each turn an agent takes costs seconds
+of model time and a re-read of its whole context, while a tool call
+takes milliseconds. A picture stays `snapshot`'s own call, so the agent
+takes one only when it decides it needs one. The
+instructions end with the printing recipes ("Recipes" below): 808
+bytes of guidance, then 1,507 of recipes with their heading (2,315 in
+all, roughly 600 tokens).
+
+The tool list is 4,686 bytes of compact JSON as `[name, description,
+input schema]` arrays, which is what `crates/cli/tests/mcp.rs` measures
+and keeps under 5,500 bytes (each description under 300). What a client
+receives is larger: 4,896 bytes with the keys (`name`, `description`,
+`inputSchema`) and 5,114 with `annotations`, roughly 1,250-1,500 tokens
+(estimated at 3.5-4 bytes a token; not measured with a tokenizer). With
+`--tool test --tool format` the list is 5,856 bytes (6,427 as
+received); before `test` and `format` were opt-in it was 5,488, without
+`check`'s `export`, `overwrite` and `sections`. To make room
+for `measure`'s `axis`, `center` and `profile`, `base_dir` lost its
+description ("Dir for includes") and others were shortened.
 
 Arguments are checked against the schemas before a tool runs: a
 wrongly typed argument (`"parts": "yes"`, `"nozzle": "big"`) or one the
@@ -132,6 +149,52 @@ tool does not take is refused with `isError` and a message naming the
 argument and the type it needs; it used to be treated as absent. Errors
 from the parsers the tools share with the command line name the
 arguments (`` `size` must be WxH``), not command-line flags.
+
+### Exports are read back
+
+A mesh export (`.stl`, `.3mf`, `.obj`, `.off`) is read back from the
+disk once written, with the same readers `import()` uses, and the
+result says what the file holds: `wrote out/b.stl (3435 bytes); read
+back: 12 triangles, watertight, z 2 to 7`, and in the structured
+content `"read_back": {"triangles": 12, "watertight": true, "z": [2,
+7]}`. Watertight means every edge joins exactly two faces in opposite
+directions, with the vertices matched as the file stores them (an
+STL's 32-bit floats, as a slicer reads it); otherwise it reads `NOT
+watertight (4 open edges)` (or edges shared by more than two faces),
+with `open_edges` and `shared_edges` in the structured content. After
+every export, agents had checked the file with Bash (`ls`, `head`,
+`grep -c "facet normal"`, an `awk` for the lowest z), a turn each.
+
+### One check for everything
+
+`check` with `export` writes the file as `render` does (and reads it
+back), with `sections` it cuts each plane as `measure`'s `section`
+does, and with `snapshot` (`true`, or an object of `snapshot`'s
+arguments such as `{"views": ["iso"], "size": "512x512"}`) it adds the
+image. The plain check's text comes first, unchanged, then a line per
+extra (`wrote ...; read back: ...`, `section z=5: area 144 mm², ...`
+with its contours, `section z=50: nothing to cut`, `snapshot: iso at
+512x512`); the structured content adds `export`, `sections` and
+`snapshot` (views and size) objects, and the PNG is an image block. A
+bad `export` path, or an option `snapshot` would refuse, fails the call
+before anything runs; an export that exists needs `overwrite: true`.
+Without these arguments the result is exactly what it was. Agents had
+run `check`, `measure`, `snapshot` and `render` with `export` as
+separate turns after their last edit.
+
+### Recipes
+
+The instructions end with five OpenSCAD modules for features printable
+parts keep needing, also served as the resource `neoscad://recipes`
+(`crates/cli/src/mcp/recipes.scad`): a 90° countersink, a plate with
+rounded vertical corners, an inner-corner fillet, a right-hand ISO
+metric thread (a true helix: a twisted `linear_extrude` of the thread's
+cross-section, with one slice per section step, since a coarser twist
+leaves a sawtooth of faces) and a snap hook with 45° faces.
+`crates/cli/tests/mcp.rs` renders each as its comment says to use it
+and requires one manifold solid with no errors or warnings (the
+thread's flanks are info). Every session pays for them, so they stay
+under 2,000 bytes.
 
 ### Results
 
@@ -303,8 +366,9 @@ output's directory is created.
   link.
 - Writes happen only through `render`'s `export`, `snapshot`'s `output`
   and `format` on a `path`.
-- Resources: `neoscad://docs` (the builtin index) and the template
-  `neoscad://docs/{name}`. No prompts.
+- Resources: `neoscad://docs` (the builtin index), the template
+  `neoscad://docs/{name}`, and `neoscad://recipes` ("Recipes"). No
+  prompts.
 
 ## The web page (`--browser`)
 
@@ -361,8 +425,8 @@ wait up to 5 s for one, then answer with how to connect.
 
 The browser tools add 2,510 bytes to the tool list as the model sees it
 (`[name, description, input schema]`, compact JSON; 3,081 with the keys and
-annotations a client receives, roughly 630 to 880 tokens). The model tools
-stay at 5,488. `crates/cli/src/mcp/tools/browser.rs` keeps the browser
+annotations a client receives, roughly 630 to 880 tokens), and `format`,
+listed with `--browser`, 447 more. The model tools stay at 4,766. `crates/cli/src/mcp/tools/browser.rs` keeps the browser
 tools under 2,600 and each description under 300; the instructions gain
 one sentence.
 

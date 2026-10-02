@@ -60,7 +60,19 @@ const TTL_MS: u64 = 3_600_000;
 /// every turn in model time and in re-reading its whole context, while the
 /// tools answer in milliseconds, so the wording avoids reading as a ladder
 /// of separate calls (evaluate, then render, then snapshot, then check).
-const INSTRUCTIONS: &str = "NeoSCAD is an OpenSCAD-compatible modeller; every tool answers in milliseconds. After writing or editing a model, one `check` (with the spec's minimum wall as `min_wall`) reports its errors, warnings and echo, bbox, volume, manifold and printability findings, so there is no need to `evaluate` or `render` first. Call tools on independent files or questions in parallel. `measure` gives exact numbers (sections, distances); `snapshot` shows the shape when it is in doubt. `render` with `export` writes the file and reports its path and size. A model is a file you write (`path`) or inline `source`.";
+const INSTRUCTIONS: &str = "NeoSCAD is an OpenSCAD-compatible modeller; every tool answers in milliseconds. After writing or editing a model, one `check` (with the spec's minimum wall as `min_wall`) reports its errors, warnings and echo, bbox, volume, manifold and printability findings, so there is no need to `evaluate` or `render` first. Call tools on independent files or questions in parallel. `measure` gives exact numbers (sections, distances); `snapshot` shows the shape when it is in doubt. `check` also takes `export` and `sections`, so one call can verify, measure and write the file; an export is read back (triangles, watertight, z range), so the file needs no other inspection. Info findings (short bridges, thread flanks, slivers) need no action. A model is a file you write (`path`) or inline `source`.";
+
+/// Idioms for the features printable parts keep needing (a countersink,
+/// rounded corners, a fillet, a thread, a snap hook), as OpenSCAD modules,
+/// appended to [`INSTRUCTIONS`] and served as `neoscad://recipes`. Agents
+/// worked these out from scratch in every session, and a first thread was
+/// sometimes an inside-out sweep. Each module is rendered and checked by
+/// `crates/cli/tests/mcp.rs`; every session pays for the text, so it stays
+/// at five modules.
+pub const RECIPES: &str = include_str!("recipes.scad");
+
+/// What introduces [`RECIPES`] in the instructions.
+const RECIPES_INTRO: &str = "\n\nPrinting recipes (tested OpenSCAD; adapt the numbers):\n";
 
 /// What `--browser` adds to [`INSTRUCTIONS`].
 const BROWSER_INSTRUCTIONS: &str = " The user may have NeoSCAD's web page open: browser_connect gives the link that connects it. Once it is connected, work on the page's text rather than files: omit path and source to use it, change it with editor_edit (the user sees each change), look with view_capture and point with view_annotate.";
@@ -119,6 +131,12 @@ pub(crate) struct Args {
     /// Open the connect link in the default browser at startup.
     #[arg(long, requires = "browser")]
     open: bool,
+
+    /// Also list an optional tool (repeatable): test (model tests),
+    /// format (the formatter; listed anyway with --browser). Left out by
+    /// default because every listed tool costs the agent context.
+    #[arg(long = "tool", value_name = "NAME", action = clap::ArgAction::Append)]
+    tools: Vec<String>,
 }
 
 /// Run `neoscad mcp` with the arguments after `mcp`.
@@ -195,14 +213,29 @@ pub fn main(args: Vec<OsString>) -> u8 {
     } else {
         None
     };
+    let tools = match tools::Tools::new(
+        crate::serve::Local::new(cfg),
+        roots,
+        bridge.clone(),
+        &a.tools,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("neoscad mcp: {e}");
+            return EXIT_ERROR;
+        }
+    };
     let server = Arc::new(Server {
-        instructions: if bridge.is_some() {
-            format!("{INSTRUCTIONS}{BROWSER_INSTRUCTIONS}")
-        } else {
-            INSTRUCTIONS.to_string()
-        },
+        instructions: format!(
+            "{INSTRUCTIONS}{}{RECIPES_INTRO}{RECIPES}",
+            if bridge.is_some() {
+                BROWSER_INSTRUCTIONS
+            } else {
+                ""
+            }
+        ),
         bridge: bridge.clone(),
-        tools: tools::Tools::new(crate::serve::Local::new(cfg), roots, bridge),
+        tools,
         out: Mutex::new(Box::new(std::io::stdout())),
         log: a.log.and_then(|p| {
             std::fs::OpenOptions::new()

@@ -273,7 +273,15 @@ fn finish(parsed: fragment::Parsed, main_path: &Path, annotate: bool) -> Program
         } else {
             (
                 "Parser error: syntax error",
-                syntax_hint(&sources, span, toks.get(e.token as usize).is_none()),
+                // The `\x03` OpenSCAD appends (and so do NeoSCAD's
+                // callers) is where an unfinished program fails; read as a
+                // token, the hint said ``unexpected `\u0003` at line 2``.
+                syntax_hint(
+                    &sources,
+                    span,
+                    toks.get(e.token as usize)
+                        .is_none_or(|t| t.kind == syntax::SyntaxKind::Eot),
+                ),
             )
         };
         diags.push(
@@ -317,9 +325,21 @@ fn nesting_hint() -> String {
 /// "syntax error").
 fn syntax_hint(sources: &source::SourceMap, span: Span, at_end: bool) -> String {
     let f = sources.get(span.file);
-    let (line, col) = f.line_col(span.start);
+    // At the end, the place to point at is just after the last thing
+    // written, not the start of the line OpenSCAD's appended `\n\x03\n`
+    // puts the end marker on: "line 2, column 1" of a one-line model sent
+    // an agent looking for a second line.
+    let at = if at_end {
+        f.text[..span.start as usize]
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(0, |i| i as u32 + 1)
+    } else {
+        span.start
+    };
+    let (line, col) = f.line_col(at);
     let what = if at_end {
-        "the end of the input".to_string()
+        "end of input".to_string()
     } else {
         let tok = &f.text[span.start as usize..(span.end as usize).min(f.text.len())];
         match std::str::from_utf8(tok) {

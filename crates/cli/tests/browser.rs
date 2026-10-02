@@ -477,7 +477,9 @@ fn without_browser_the_page_tools_are_not_listed() {
     let mut b = Mcp::start(&dir, &["--browser"]);
     let r = b.call("tools/list", json!({}));
     let tools = r["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 16);
+    // The model tools, `format` (which formats the page's text; opt-in
+    // without `--browser`) and the eight page tools; not `test`.
+    assert_eq!(tools.len(), 15);
     let r = b.call("initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test"}}));
     assert!(
         r["result"]["instructions"]

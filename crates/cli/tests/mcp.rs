@@ -167,11 +167,10 @@ fn tools_list_is_small_and_ordered() {
     let r = s.call("tools/list", json!({"_meta": modern()}));
     let tools = r["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    // `test` and `format` are listed only when asked for (`--tool`).
     assert_eq!(
         names,
-        [
-            "evaluate", "render", "snapshot", "check", "measure", "test", "format", "docs"
-        ]
+        ["evaluate", "render", "snapshot", "check", "measure", "docs"]
     );
     for t in tools {
         assert_eq!(t["inputSchema"]["type"], "object", "{t}");
@@ -205,7 +204,7 @@ fn every_tool_round_trips() {
     )
     .unwrap();
     std::fs::write(dir.join("messy.scad"), "cube( [1,2,3] ) ;\n").unwrap();
-    let mut s = Mcp::start(&dir, &[]);
+    let mut s = Mcp::start(&dir, &["--tool", "test", "--tool", "format"]);
 
     // evaluate: diagnostics with hints, and echo.
     let r = s.tool("evaluate", json!({"source": "cub(2);\necho(\"hi\", 3);"}));
@@ -1118,4 +1117,201 @@ fn mesh_paths_quiet_info_and_touching_parts() {
         .as_str()
         .unwrap();
     assert!(fix.starts_with("two parts touch along an edge"), "{fix}");
+}
+
+#[test]
+fn test_and_format_are_listed_only_when_asked_for() {
+    let dir = scratch("optin");
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.call(
+        "tools/call",
+        json!({"name": "format", "arguments": {"source": "cube(1);"}}),
+    );
+    assert_eq!(r["error"]["code"], -32602, "{r}");
+    let mut s = Mcp::start(&dir, &["--tool", "test"]);
+    let r = s.call("tools/list", json!({}));
+    let names: Vec<&str> = r["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"test") && !names.contains(&"format"),
+        "{names:?}"
+    );
+    // A name that is not an optional tool stops the server with the choices.
+    let out = Command::new(BIN)
+        .args(["mcp", "--tool", "evaluate"])
+        .current_dir(&dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("choose from test, format"), "{err}");
+}
+
+#[test]
+fn an_export_is_read_back() {
+    let dir = scratch("readback");
+    std::fs::write(
+        dir.join("b.scad"),
+        "translate([0, 0, 2]) cube([10, 10, 5]);",
+    )
+    .unwrap();
+    let mut s = Mcp::start(&dir, &[]);
+    for (file, triangles) in [("out/b.stl", 12), ("out/b.3mf", 12), ("out/b.off", 12)] {
+        let r = s.tool("render", json!({"path": "b.scad", "export": file}));
+        let t = text(&r);
+        assert!(
+            t.contains(&format!(
+                "; read back: {triangles} triangles, watertight, z 2 to 7"
+            )),
+            "{t}"
+        );
+        let b = &r["structuredContent"]["read_back"];
+        assert_eq!(b["watertight"], true, "{b}");
+        assert_eq!(b["z"][0].as_f64(), Some(2.0), "{b}");
+        assert_eq!(b["z"][1].as_f64(), Some(7.0), "{b}");
+    }
+    // A file that does not close reads back as such: an STL of an open
+    // polyhedron (one face of a cube left out).
+    let r = s.tool(
+        "render",
+        json!({"source": "polyhedron([[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1]], [[0,1,2,3],[4,5,1,0],[7,6,5,4],[5,6,2,1],[6,7,3,2]]);",
+               "export": "out/open.stl"}),
+    );
+    let t = text(&r);
+    assert!(t.contains("NOT watertight (4 open edges)"), "{t}");
+    assert_eq!(r["structuredContent"]["read_back"]["open_edges"], 4);
+}
+
+#[test]
+fn check_can_export_and_measure_in_one_call() {
+    let dir = scratch("compound");
+    std::fs::write(
+        dir.join("box.scad"),
+        "difference() { cube([20, 20, 10]); translate([2, 2, 2]) cube([16, 16, 10]); }",
+    )
+    .unwrap();
+    let mut s = Mcp::start(&dir, &[]);
+    // Plain: as small as before, none of the extras.
+    let plain = s.tool("check", json!({"path": "box.scad", "min_wall": 1.2}));
+    let p = &plain["structuredContent"];
+    for k in ["export", "sections"] {
+        assert!(p.get(k).is_none(), "{p}");
+    }
+    assert_eq!(plain["content"].as_array().unwrap().len(), 1);
+    let r = s.tool(
+        "check",
+        json!({"path": "box.scad", "min_wall": 1.2, "export": "out/box.stl",
+               "sections": ["z=5", "z=50"]}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    let t = text(&r);
+    // The plain check's text comes first, unchanged.
+    assert!(t.starts_with(&text(&plain)), "{t}");
+    assert!(t.contains("read back: "), "{t}");
+    assert!(t.contains("section z=5: area 144 mm²"), "{t}");
+    assert!(t.contains("section z=50: nothing to cut"), "{t}");
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["export"]["read_back"]["watertight"], true, "{sc}");
+    assert_eq!(sc["sections"][0]["area"].as_f64(), Some(144.0), "{sc}");
+    assert!(dir.join("out/box.stl").exists());
+    // A picture stays `snapshot`'s own call.
+    assert_eq!(r["content"].as_array().unwrap().len(), 1, "{r}");
+    // An export that would replace a file without `overwrite` is refused
+    // before the check runs.
+    let r = s.tool(
+        "check",
+        json!({"path": "box.scad", "export": "out/box.stl"}),
+    );
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(text(&r).contains("overwrite: true"), "{r}");
+    let r = s.tool(
+        "check",
+        json!({"path": "box.scad", "export": "out/box.stl", "overwrite": true}),
+    );
+    assert!(text(&r).contains("wrote "), "{}", text(&r));
+}
+
+#[test]
+fn a_program_that_stops_short_says_so() {
+    let dir = scratch("eof");
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("evaluate", json!({"source": "cube(1"}));
+    let h = r["structuredContent"]["diagnostics"][0]["hint"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        h.starts_with("unexpected end of input at line 1, column 7"),
+        "{r}"
+    );
+}
+
+#[test]
+fn the_recipes_are_in_the_instructions_and_each_one_prints() {
+    let dir = scratch("recipes");
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.call(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+    );
+    let instructions = r["result"]["instructions"].as_str().unwrap().to_string();
+    let r = s.call("resources/read", json!({"uri": "neoscad://recipes"}));
+    let recipes = r["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(instructions.ends_with(&recipes), "{instructions}");
+    assert!(recipes.contains("module thread("), "{recipes}");
+    // Every session pays for them.
+    assert!(
+        recipes.len() < 2000,
+        "the recipes are {} bytes",
+        recipes.len()
+    );
+    // Each module, used as its comment says, renders to one sound solid
+    // that check passes with no warnings: what an agent copies must not
+    // send it chasing findings. The thread's flanks are info.
+    for (name, call) in [
+        (
+            "countersink",
+            "difference() { cube([20, 20, 4]); translate([10, 10, 0]) countersink(4); }",
+        ),
+        ("rounded_plate", "rounded_plate(40, 30, 4);"),
+        (
+            "fillet",
+            "cube([40, 30, 4]); cube([40, 4, 30]); translate([0, 4 - 0.01, 4 - 0.01]) fillet(4, 40);",
+        ),
+        (
+            "thread",
+            "cylinder(d = 30, h = 2, $fn = 6); translate([0, 0, 2 - 0.01]) thread(24, 2, 12);",
+        ),
+        (
+            "snap_hook",
+            "cube([20, 6, 2]); translate([7, 0, 2]) snap_hook();",
+        ),
+    ] {
+        let src = format!("{recipes}\n{call}\n");
+        let r = s.tool("check", json!({"source": src, "min_wall": 1.2}));
+        let sc = &r["structuredContent"];
+        assert_eq!(sc["model"]["manifold"], true, "{name}: {}", text(&r));
+        assert_eq!(sc["model"]["components"], 1, "{name}: {}", text(&r));
+        assert_eq!(sc["counts"]["errors"], 0, "{name}: {}", text(&r));
+        assert_eq!(sc["counts"]["warnings"], 0, "{name}: {}", text(&r));
+        assert!(
+            sc["diagnostics"].as_array().unwrap().is_empty(),
+            "{name}: {}",
+            text(&r)
+        );
+        if name == "thread" {
+            assert!(
+                text(&r).contains("info overhang: thread flanks"),
+                "{}",
+                text(&r)
+            );
+        }
+    }
 }

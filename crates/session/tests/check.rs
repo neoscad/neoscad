@@ -1221,3 +1221,135 @@ fn text_counts_are_pluralised() {
         "{text}"
     );
 }
+
+/// The overhang findings of `src` as (severity, message) pairs.
+fn overhangs_of(src: &str) -> Vec<(String, String)> {
+    let spec = CheckSettings {
+        min_wall: 1.2,
+        ..CheckSettings::default()
+    };
+    let v = check(src, false, spec);
+    findings(&v, "overhang")
+        .iter()
+        .map(|f| {
+            (
+                f["severity"].as_str().unwrap().to_string(),
+                f["message"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn faces_at_the_overhang_limit_pass_and_a_degree_past_it_do_not() {
+    // A slope at the limit, made by rotating a block: its faces lean 45°
+    // give or take the rotation's rounding, and were flagged "at up to
+    // 45° (limit 45°)".
+    let at = |deg: f64| {
+        overhangs_of(&format!(
+            "cube([30, 10, 2]); intersection() {{ translate([0, 0, 2]) cube([30, 10, 30]); \
+             translate([15, 0, 2]) rotate([0, -{deg}, 0]) translate([0, 0, -20]) cube([40, 10, 40]); }}"
+        ))
+    };
+    assert!(at(45.0).is_empty(), "{:?}", at(45.0));
+    let o = at(47.0);
+    assert_eq!(o.len(), 1, "{o:?}");
+    assert_eq!(o[0].0, "warning", "{o:?}");
+}
+
+/// A 60 mm long, 2 mm thick wall with a window `w` wide cut through it
+/// from z = 5 to 10: the window's top is a span between its sides.
+fn window(w: f64) -> String {
+    format!(
+        "difference() {{ cube([60, 2, 20]); translate([30 - {w} / 2, -1, 5]) cube([{w}, 4, 5]); }}"
+    )
+}
+
+#[test]
+fn a_short_bridge_is_info_and_a_long_one_a_warning() {
+    let o = overhangs_of(&window(9.5));
+    assert_eq!(o.len(), 1, "{o:?}");
+    assert_eq!(o[0].0, "info", "{o:?}");
+    assert!(
+        o[0].1.starts_with("a 9.5 mm bridge between walls: 19 mm²"),
+        "{o:?}"
+    );
+    let o = overhangs_of(&window(30.0));
+    assert_eq!(o.len(), 1, "{o:?}");
+    assert_eq!(o[0].0, "warning", "{o:?}");
+    assert!(!o[0].1.contains("bridge"), "{o:?}");
+}
+
+#[test]
+fn a_ledge_held_up_on_one_side_stays_a_warning() {
+    // A shelf sticking out of a wall, and a slab on a post (overhanging
+    // both ways): flat and short, but nothing holds up their far edges.
+    for src in [
+        "cube([20, 10, 20]); translate([20, 0, 15]) cube([8, 10, 2]);",
+        "translate([8, 0, 0]) cube([4, 10, 10]); translate([0, 0, 10]) cube([20, 10, 2]);",
+    ] {
+        let o = overhangs_of(src);
+        assert!(!o.is_empty(), "{src}");
+        assert!(o.iter().all(|f| f.0 == "warning"), "{src}: {o:?}");
+    }
+}
+
+#[test]
+fn thread_flanks_are_info_and_rings_and_ledges_around_a_boss_are_not() {
+    // An agent's adapter: an M24x2 thread with 60° flanks.
+    let o = overhangs_of(T3_ADAPTER);
+    assert_eq!(o.len(), 1, "{o:?}");
+    assert_eq!(o[0].0, "info", "{o:?}");
+    assert!(o[0].1.starts_with("thread flanks ("), "{o:?}");
+    // The same thread under a 90° ledge: the ledge stays a warning.
+    let o = overhangs_of(T3_LEDGE);
+    assert!(
+        o.iter().any(|f| f.0 == "warning" && f.1.contains("90°")),
+        "{o:?}"
+    );
+    // A flat ring 2 mm wide and a 60° chamfer ring round a boss are as
+    // shallow as a thread, but go once round without climbing.
+    for src in [
+        "cylinder(r = 8, h = 10, $fn = 96); translate([0, 0, 10]) cylinder(r = 10, h = 5, $fn = 96);",
+        "cylinder(r = 8, h = 10, $fn = 96); translate([0, 0, 10]) cylinder(r1 = 8, r2 = 10, h = 2 / tan(60), $fn = 96); \
+         translate([0, 0, 10 + 2 / tan(60)]) cylinder(r = 10, h = 5, $fn = 96);",
+    ] {
+        let o = overhangs_of(src);
+        assert_eq!(o.len(), 1, "{src}: {o:?}");
+        assert_eq!(o[0].0, "warning", "{src}: {o:?}");
+    }
+}
+
+#[test]
+fn a_sliver_is_info_and_a_thin_wall_is_not() {
+    let spec = CheckSettings {
+        min_wall: 1.2,
+        ..CheckSettings::default()
+    };
+    // A speck of a fin, 0.05 mm across: its faces add up to 0.04 mm².
+    let v = check(
+        "cube([10, 10, 3]); translate([5, 5, 3]) cube([0.05, 0.05, 0.2]);",
+        false,
+        spec,
+    );
+    let t = findings(&v, "thin-wall");
+    assert_eq!(t.len(), 1, "{v}");
+    assert_eq!(t[0]["severity"], "info", "{v}");
+    assert!(
+        t[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("a sliver, not a wall: "),
+        "{v}"
+    );
+    // A real wall half the minimum, and one under the nozzle, keep their
+    // severities.
+    let v = check(
+        "cube([20, 20, 3]); translate([0, 0, 3]) cube([20, 0.6, 5]); translate([0, 10, 3]) cube([20, 0.3, 5]);",
+        false,
+        spec,
+    );
+    let t = findings(&v, "thin-wall");
+    let sev: Vec<&str> = t.iter().map(|f| f["severity"].as_str().unwrap()).collect();
+    assert_eq!(sev, ["error", "warning"], "{v}");
+}

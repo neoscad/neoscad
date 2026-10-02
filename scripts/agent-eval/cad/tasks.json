@@ -40,7 +40,7 @@
    "label": "NeoSCAD",
    "ext": "scad",
    "how_export": "Export each with the render tool's export argument to out/<part>.stl.",
-   "briefing": "Your tools are the NeoSCAD MCP tools (an OpenSCAD-compatible modeller: evaluate, render, snapshot, check, measure, test, format, docs), Bash, Read, Write and Edit. The render tool exports meshes (its export argument, e.g. out/part.stl) and snapshot returns PNG images. There is no network access."
+   "briefing": "Your tools are the NeoSCAD MCP tools (an OpenSCAD-compatible modeller), Bash, Read, Write and Edit. The render tool exports meshes (its export argument, e.g. out/part.stl) and snapshot returns PNG images. There is no network access."
   }
  }
 }

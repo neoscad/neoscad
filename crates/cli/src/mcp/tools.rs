@@ -33,6 +33,15 @@ pub const NAMES: &[&str] = &[
     "evaluate", "render", "snapshot", "check", "measure", "test", "format", "docs",
 ];
 
+/// Tools listed only when asked for (`neoscad mcp --tool NAME`). Every
+/// listed tool is paid for in context by every session, and a modelling
+/// session rarely runs model tests or the formatter (agents that
+/// formatted did so after the finished export, then rendered again to
+/// check it). `format` is
+/// listed with `--browser` too, where it formats the page's text as one
+/// undoable edit.
+pub const OPT_IN: &[&str] = &["test", "format"];
+
 /// The snapshot's default size. Smaller than the command line's 1024x1024:
 /// an image's cost in context grows with its pixels, and four 384-pixel
 /// panels still show a model's shape and the grid's labels.
@@ -88,7 +97,7 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "render",
-            "Build the geometry; report bbox, volume, area, manifold and components, to verify dimensions. `export` also writes it (.stl is ASCII STL; .3mf .obj .off .svg .dxf .png).",
+            "Build the geometry; report bbox, volume, area, manifold and components, to verify dimensions. `export` also writes it (.stl is ASCII STL; .3mf .obj .off .svg .dxf .png) and reads a mesh back: triangles, watertight, z range.",
             json!({
                 "export": {"type": "string", "description": "Output file"},
                 "overwrite": {"type": "boolean"},
@@ -114,12 +123,15 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "check",
-            "3D-printability check: manifold, thin walls, overhangs, floating or tiny pieces, bed fit, intersecting parts; each finding has a location and a fix. Run before finishing; pass the spec's minimum wall as min_wall.",
+            "3D-printability check: manifold, thin walls, overhangs, floating or tiny pieces, bed fit, intersecting parts; each finding has a location and a fix. Pass the spec's minimum wall as min_wall. `export` and `sections` add those in the same call.",
             json!({
                 "bed": {"type": "array", "items": {"type": "number"}, "description": "[w, d, h] mm"},
                 "nozzle": num("mm, default 0.4"),
                 "min_wall": num("mm, default 2 x nozzle"),
                 "max_overhang": num("degrees from vertical, default 45"),
+                "export": {"type": "string", "description": "Also write it, as render"},
+                "overwrite": {"type": "boolean"},
+                "sections": {"type": "array", "items": {"type": "string"}, "description": "Also measure these, e.g. [\"z=5\"]"},
             }),
             true,
         ),
@@ -180,15 +192,24 @@ pub fn list() -> Vec<Value> {
     ]
 }
 
-/// `resources/list`: the builtins' index.
+/// `resources/list`: the builtins' index, and the printing recipes.
 pub fn resources() -> Vec<Value> {
-    vec![json!({
-        "uri": "neoscad://docs",
-        "name": "builtins",
-        "title": "OpenSCAD builtins",
-        "description": "Every builtin module, function and special variable, one line each",
-        "mimeType": "text/plain",
-    })]
+    vec![
+        json!({
+            "uri": "neoscad://docs",
+            "name": "builtins",
+            "title": "OpenSCAD builtins",
+            "description": "Every builtin module, function and special variable, one line each",
+            "mimeType": "text/plain",
+        }),
+        json!({
+            "uri": "neoscad://recipes",
+            "name": "recipes",
+            "title": "Printing recipes",
+            "description": "OpenSCAD modules for a countersink, rounded corners, a fillet, a thread and a snap hook",
+            "mimeType": "text/plain",
+        }),
+    ]
 }
 
 /// `resources/templates/list`: one builtin's reference.
@@ -220,6 +241,8 @@ pub struct Tools {
     /// The web page's bridge (`--browser`), whose tools are listed and
     /// whose page is the model when a call gives neither path nor source.
     browser: Option<Arc<Bridge>>,
+    /// The [`OPT_IN`] tools this server lists.
+    opted: Vec<&'static str>,
 }
 
 impl std::fmt::Debug for Tools {
@@ -246,18 +269,48 @@ struct Model<'a> {
 }
 
 impl Tools {
-    pub fn new(local: Local, roots: Roots, browser: Option<Arc<Bridge>>) -> Tools {
-        Tools {
+    /// `opt_in` names the [`OPT_IN`] tools to list (`--tool`); an unknown
+    /// name is an error naming the choices.
+    pub fn new(
+        local: Local,
+        roots: Roots,
+        browser: Option<Arc<Bridge>>,
+        opt_in: &[String],
+    ) -> Result<Tools, String> {
+        let mut opted = Vec::new();
+        for name in opt_in {
+            match OPT_IN.iter().find(|t| **t == name.as_str()) {
+                Some(t) => opted.push(*t),
+                None => {
+                    return Err(format!(
+                        "--tool {name}: not an optional tool (choose from {})",
+                        OPT_IN.join(", ")
+                    ));
+                }
+            }
+        }
+        if browser.is_some() && !opted.contains(&"format") {
+            opted.push("format");
+        }
+        Ok(Tools {
             local,
             roots,
             inline: Mutex::new(()),
             browser,
-        }
+            opted,
+        })
     }
 
-    /// The tools this server lists: the browser's too with `--browser`.
+    /// The tools this server lists: the opted-in ones and, with
+    /// `--browser`, the browser's too.
     pub fn list(&self) -> Vec<Value> {
-        let mut tools = list();
+        let mut tools: Vec<Value> = list()
+            .into_iter()
+            .filter(|t| {
+                let name = t["name"].as_str().unwrap_or("");
+                !OPT_IN.contains(&name) || self.opted.contains(&name)
+            })
+            .collect();
         if self.browser.is_some() {
             tools.extend(browser::list());
         }
@@ -265,7 +318,8 @@ impl Tools {
     }
 
     pub fn knows(&self, name: &str) -> bool {
-        NAMES.contains(&name) || (self.browser.is_some() && BROWSER_NAMES.contains(&name))
+        (NAMES.contains(&name) && (!OPT_IN.contains(&name) || self.opted.contains(&name)))
+            || (self.browser.is_some() && BROWSER_NAMES.contains(&name))
     }
 
     pub fn cancel(&self, id: &Value) {
@@ -334,6 +388,9 @@ impl Tools {
     }
 
     pub fn read_resource(&self, uri: &str) -> Option<String> {
+        if uri == "neoscad://recipes" {
+            return Some(super::RECIPES.to_string());
+        }
         let name = match uri.strip_prefix("neoscad://docs") {
             Some("") => None,
             Some(rest) => Some(rest.strip_prefix('/')?.to_string()),
@@ -579,10 +636,15 @@ impl Tools {
         let mut text = status(&r);
         text.push('\n');
         text.push_str(&geometry_line_of(&r["geometry"], &r["diagnostics"]));
+        let mut back = Value::Null;
         if let Some(out) = &export
             && r["exit_code"] == 0
         {
             text.push_str(&format!("\nwrote {} ({} bytes)", out.display(), r["bytes"]));
+            back = read_back(out);
+            if !back.is_null() {
+                text.push_str(&format!("; {}", read_back_text(&back)));
+            }
         }
         push_log(&mut text, &r);
         let mut s = terse_log(&r, &main);
@@ -590,6 +652,9 @@ impl Tools {
         if export.is_some() {
             s["output"] = r["output"].clone();
             s["bytes"] = r["bytes"].clone();
+            if !back.is_null() {
+                s["read_back"] = back;
+            }
         }
         Ok(label(&imported, finish(args, text, s, r)))
     }
@@ -710,7 +775,92 @@ impl Tools {
         Ok(out)
     }
 
+    /// `check`, and with `export` or `sections` what `render` and
+    /// `measure` would answer too, in one result: each turn an agent takes
+    /// re-reads its whole context, while the calls take milliseconds on the
+    /// warm session. A snapshot stays its own tool, so a picture is taken
+    /// only when the agent decides it needs one. Without these arguments
+    /// the result is exactly the plain check's.
     fn check(&self, id: &Value, args: &Value) -> Reply {
+        // Refuse a bad export path before any work.
+        if str_arg(args, "export").is_some() {
+            let base = self.base(args)?;
+            self.writable(&base, args, "export", EXPORT_FORMATS)?;
+        }
+        let (mut out, rendered) = self.check_only(id, args)?;
+        if !rendered {
+            return Ok(out);
+        }
+        if let Some(e) = str_arg(args, "export") {
+            let mut a = self.sub_args(args);
+            a["export"] = json!(e);
+            a["overwrite"] = json!(bool_arg(args, "overwrite"));
+            match self.render(id, &a) {
+                Ok(r) => {
+                    let s = &r.structured;
+                    match s["output"].as_str() {
+                        Some(o) => {
+                            out.text
+                                .push_str(&format!("\nwrote {o} ({} bytes)", s["bytes"]));
+                            if !s["read_back"].is_null() {
+                                out.text
+                                    .push_str(&format!("; {}", read_back_text(&s["read_back"])));
+                            }
+                        }
+                        None => out.text.push_str("\nexport failed: nothing was written"),
+                    }
+                    out.structured["export"] = json!({
+                        "output": s["output"], "bytes": s["bytes"], "read_back": s["read_back"],
+                    });
+                }
+                Err(e) => out.text.push_str(&format!("\nexport failed: {e}")),
+            }
+        }
+        if let Some(planes) = args.get("sections").and_then(Value::as_array) {
+            let mut all = Vec::new();
+            for plane in planes {
+                let mut a = self.sub_args(args);
+                a["section"] = plane.clone();
+                // The section alone: measure's text would repeat the
+                // model's warnings once per plane.
+                let r = self.measure(id, &a)?;
+                let s = &r.structured;
+                let (line, sec) = match (s.get("section"), s["error"].as_str()) {
+                    (Some(sec), _) if sec.is_object() && sec["contours"] != 0 => {
+                        (section_lines(sec), sec.clone())
+                    }
+                    (_, Some(e)) => (
+                        format!("section {}: {e}", plane.as_str().unwrap_or("?")),
+                        json!({"plane": plane, "error": e}),
+                    ),
+                    _ => (
+                        format!("section {}: nothing to cut", plane.as_str().unwrap_or("?")),
+                        json!({"plane": plane, "area": 0}),
+                    ),
+                };
+                out.text.push('\n');
+                out.text.push_str(&line);
+                all.push(sec);
+            }
+            out.structured["sections"] = Value::Array(all);
+        }
+        Ok(out)
+    }
+
+    /// The model arguments of `args`, for a call [`Tools::check`] makes on
+    /// the same model.
+    fn sub_args(&self, args: &Value) -> Value {
+        let mut a = json!({});
+        for k in ["path", "source", "base_dir", "parts"] {
+            if let Some(v) = args.get(k) {
+                a[k] = v.clone();
+            }
+        }
+        a
+    }
+
+    /// The plain check, and whether the model rendered.
+    fn check_only(&self, id: &Value, args: &Value) -> Result<(Out, bool), String> {
         let m = self.model(args, INLINE)?;
         let main = m.path.clone();
         let imported = m.label.clone();
@@ -736,9 +886,9 @@ impl Tools {
                 "echo": d["echo"],
             });
             push_log(&mut text, &log);
-            return Ok(label(
-                &imported,
-                finish(args, text, terse_log(&log, &main), r),
+            return Ok((
+                label(&imported, finish(args, text, terse_log(&log, &main), r)),
+                false,
             ));
         }
         let mut text = String::new();
@@ -782,7 +932,7 @@ impl Tools {
             "diagnostics": terse_diags(&log["diagnostics"], &main),
         });
         put_echo(&mut s, &log["echo"]);
-        Ok(label(&imported, finish(args, text, s, r)))
+        Ok((label(&imported, finish(args, text, s, r)), true))
     }
 
     fn measure(&self, id: &Value, args: &Value) -> Reply {
@@ -1037,6 +1187,107 @@ fn check_text(diff: &str, full: bool) -> String {
     format!(
         "not formatted: {n} line{} would change (diff: true shows them)",
         if n == 1 { "" } else { "s" }
+    )
+}
+
+/// What a written mesh file holds, read back from the disk as a slicer
+/// would read it: its triangles, whether every edge joins exactly two of
+/// them in opposite directions (watertight), and its height range. Null
+/// for formats that are not meshes, or a file that cannot be read.
+///
+/// After every export, agents checked the file with Bash (`ls`, `head`,
+/// `grep -c "facet normal"`, an `awk` for the lowest z), a turn each
+/// time: the render's numbers are the model's, and only the file shows
+/// what was written. So the answer comes with the export. The vertices
+/// are matched as the file has them (an STL's 32-bit floats), so faces
+/// that collapse at that precision show here as open edges.
+fn read_back(path: &Path) -> Value {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let Ok(bytes) = std::fs::read(path) else {
+        return Value::Null;
+    };
+    let mut msgs = Vec::new();
+    let meshes = match ext.as_str() {
+        "stl" => vec![io::stl::read(&bytes, "", &mut msgs)],
+        "obj" => vec![io::obj::read(&bytes, "", &mut msgs)],
+        "off" => vec![io::off::read(Some(&bytes), "", &mut msgs)],
+        "3mf" => io::threemf::read(Some(&bytes), "", 0, &mut msgs),
+        _ => return Value::Null,
+    };
+    let (mut triangles, mut open, mut over) = (0usize, 0usize, 0usize);
+    let (mut zmin, mut zmax) = (f64::INFINITY, f64::NEG_INFINITY);
+    for m in &meshes {
+        // Directed edges, each face's in its winding: a closed, consistently
+        // oriented surface has each one once, and its reverse once.
+        let mut edges: std::collections::HashMap<(u32, u32), u32> =
+            std::collections::HashMap::new();
+        for f in &m.faces {
+            triangles += f.len().saturating_sub(2);
+            for k in 0..f.len() {
+                let (a, b) = (f[k], f[(k + 1) % f.len()]);
+                if a != b {
+                    *edges.entry((a, b)).or_insert(0) += 1;
+                }
+            }
+            for &v in f {
+                if let Some(p) = m.vertices.get(v as usize) {
+                    zmin = zmin.min(p[2]);
+                    zmax = zmax.max(p[2]);
+                }
+            }
+        }
+        for (&(a, b), &n) in &edges {
+            let back = edges.get(&(b, a)).copied().unwrap_or(0);
+            if n > 1 || back > 1 {
+                over += 1;
+            } else if back == 0 {
+                open += 1;
+            }
+        }
+    }
+    if triangles == 0 {
+        return json!({"triangles": 0, "watertight": false});
+    }
+    let mut v = json!({
+        "triangles": triangles,
+        "watertight": open == 0 && over == 0,
+        "z": [zmin, zmax],
+    });
+    if open > 0 {
+        v["open_edges"] = json!(open);
+    }
+    if over > 0 {
+        v["shared_edges"] = json!(over);
+    }
+    v
+}
+
+/// [`read_back`]'s result as words: "read back: 1240 triangles,
+/// watertight, z 0 to 25".
+fn read_back_text(v: &Value) -> String {
+    let n = v["triangles"].as_u64().unwrap_or(0);
+    if n == 0 {
+        return "read back: no triangles in the file".into();
+    }
+    let tight = if v["watertight"] == true {
+        "watertight".to_string()
+    } else {
+        let mut why = Vec::new();
+        if let Some(o) = v["open_edges"].as_u64() {
+            why.push(format!("{o} open edges"));
+        }
+        if let Some(o) = v["shared_edges"].as_u64() {
+            why.push(format!("{o} edges shared by more than two faces"));
+        }
+        format!("NOT watertight ({})", why.join(", "))
+    };
+    format!(
+        "read back: {n} triangles, {tight}, z {} to {}",
+        num_of(&v["z"][0]),
+        num_of(&v["z"][1])
     )
 }
 

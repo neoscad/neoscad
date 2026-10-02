@@ -160,7 +160,8 @@ request, `ffi`'s `guarded` per call) and keeps its session; see "Panics".
   Implemented in 7c: `neoscad mcp` (`docs/mcp.md`), MCP 2026-07-28 over
   stdio with the legacy `initialize` handshake too, eight tools
   (`evaluate`, `render`, `snapshot` with `diff_against`, `check`,
-  `measure`, `test`, `format`, `docs`) on the warm session of `serve`,
+  `measure`, `test`, `format`, `docs`; `test` and `format` listed only
+  with `--tool`) on the warm session of `serve`,
   inline source or files, and file access fenced to allowed roots.
 - **Named parts:** a `part("lid") { … }` extension behind a flag, so checks
   and measurements can refer to parts. A deliberate divergence from
