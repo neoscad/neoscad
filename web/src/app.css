@@ -45,6 +45,20 @@
   --left-width: 34%;
   --right-width: 22%;
   --console-height: 30%;
+
+  /* The height of one row of controls (a button or select: a 1.4 line,
+     0.25rem padding above and below, 1px borders), for the space the bars
+     below reserve before app.js fills them. */
+  --control-height: calc(1.4em + 0.5rem + 2px);
+  /* The top bar's height in its two- and three-row layouts (the media
+     queries at the end): its padding and bottom border, its rows, and the
+     gaps between them. In two rows the first holds the agent button, a
+     little taller than a control (0.3rem padding, 1.5px borders); on a
+     phone that button is smaller, so every row is a control's height. A
+     bar held a pixel taller than its content costs nothing; one held
+     shorter grows when filled, which is the shift this prevents. */
+  --topbar-rows-2: calc(0.8rem + 1px + (1.4em + 0.6rem + 3px) + 0.4rem + var(--control-height));
+  --topbar-rows-3: calc(0.8rem + 1px + 3 * var(--control-height) + 0.8rem);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -77,6 +91,20 @@
    gives them. */
 [hidden] {
   display: none !important;
+}
+
+/* For screen readers and search engines only (the page's h1): out of the
+   layout, so the workspace's grid and the embed view don't see it. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 html,
@@ -223,8 +251,12 @@ input[type="number"] {
   margin-left: auto;
 }
 
+/* A set width (shrinking when the bar is short of room) rather than the
+   width of the chosen title: the picker is filled when the examples have
+   loaded, after the bar is drawn, and sized by its content it pushed every
+   button after it sideways (a layout shift). */
 .tools select {
-  flex: 0 1 auto;
+  flex: 0 1 13rem;
   min-width: 5.5rem;
   max-width: 13rem;
   text-overflow: ellipsis;
@@ -381,8 +413,13 @@ body.inspector-hidden #split-right {
   background: var(--ns-surface);
 }
 
+/* min-height: a tab (a control without its bottom border) and the bar's
+   2px top padding and 1px border. app.js adds the document's tab once the
+   editor has loaded; without the height held, the editor below moved
+   down a tab's height then. */
 .editor-tabs {
   display: flex;
+  min-height: calc(var(--control-height) + 2px);
   gap: 2px;
   overflow-x: auto;
   background: var(--ns-surface-2);
@@ -417,6 +454,17 @@ body.inspector-hidden #split-right {
 
 .editor > .cm-editor.cm-focused {
   outline: none;
+}
+
+/* Line numbers in the site's muted text colour. The editor's light scheme
+   (OpenSCAD's "For Light Background", apple/Editor/web/src/theme.js)
+   draws them #808080 on #f8f8f8, 3.7:1, under WCAG AA's 4.5:1; the muted
+   token is 7.9:1 there, and 7.3:1 on the dark scheme's gutter (6.4:1 on
+   its current-line band). The editor follows prefers-color-scheme, as the
+   tokens do, so each scheme gets its own. This selector outranks the
+   editor theme's scoped one. */
+.editor .cm-editor .cm-gutters {
+  color: var(--ns-text-muted);
 }
 
 .splitter {
@@ -637,8 +685,11 @@ body.inspector-hidden #split-right {
   background: var(--ns-surface-2);
 }
 
+/* min-height: its buttons' row (borderless buttons inside a 1px border),
+   held before app.js adds them, so the panel below doesn't move. */
 .segmented {
   display: flex;
+  min-height: var(--control-height);
   margin: 0.4rem;
   border: 1px solid var(--ns-border);
   border-radius: var(--ns-radius-small);
@@ -1206,9 +1257,12 @@ input.narrow {
    the second, rather than whatever the browser's wrapping makes of them --- */
 
 @media (min-width: 761px) and (max-width: 1199px) {
+  /* app.js fills the bar after the page has painted; holding its two rows'
+     height from the start keeps the workspace from moving down then. */
   .topbar {
     flex-wrap: wrap;
     row-gap: 0.4rem;
+    min-height: var(--topbar-rows-2);
   }
 
   .tools {
@@ -1257,9 +1311,17 @@ input.narrow {
     flex-wrap: wrap;
   }
 
+  /* Three rows: the home link, the agent and the status; the example
+     picker, on a row of its own; the buttons. Their height is held from
+     the start, since app.js fills the bar after the page has painted: an
+     empty bar that grew to three rows pushed the view and editor down
+     (most of /try's layout shift on a phone, 0.3 to 0.6), and a picker
+     sharing its row with the buttons made the row count, and so the
+     height, depend on the width and the chosen example's title. */
   .topbar {
     flex-wrap: wrap;
     gap: 0.4rem;
+    min-height: var(--topbar-rows-3);
   }
 
   .tools {
@@ -1270,11 +1332,34 @@ input.narrow {
   }
 
   .tools select {
-    max-width: 11rem;
+    flex: 1 1 100%;
+    max-width: none;
   }
 
-  .tools .quiet {
+  /* The buttons' row stays one row with Cancel shown during a run from
+     360 px up: no Reset, no dividers (on its own row the first would start
+     it) and narrower side padding. Cancel appears for the preview that runs
+     as the page opens, so a row that wrapped then pushed the view and
+     editor down and back up again (a layout shift of 0.5 at 360 px). */
+  .tools .quiet,
+  .tools .divider {
     display: none;
+  }
+
+  .tools > button,
+  .tools > .menu-wrap > button {
+    padding-left: 0.45rem;
+    padding-right: 0.45rem;
+  }
+
+  /* The status takes what the first row has left and is cut short rather
+     than wrapping onto a row of its own, which would move everything
+     below it each time its text changes length ("ready", "working…"). */
+  .engine-status {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .workspace,
@@ -1292,9 +1377,13 @@ input.narrow {
     flex: 0 0 38vh;
   }
 
+  /* min-height: a row of its buttons (a 1.4 line and 0.5rem padding above
+     and below) and its borders, held before app.js adds the buttons, so
+     the editor below doesn't move down when it does. */
   .mobile-tabs {
     order: 2;
     display: flex;
+    min-height: calc(1.4em + 1rem + 2px);
     overflow-x: auto;
     border-top: 1px solid var(--ns-border);
     border-bottom: 1px solid var(--ns-border);
@@ -1350,6 +1439,14 @@ input.narrow {
   }
 
   .segmented {
+    display: none;
+  }
+}
+
+/* Narrower still, Cancel takes Render's place during a run (about the same
+   width) rather than wrapping View onto a fourth row. */
+@media (max-width: 359px) {
+  .tools:has(> .cancel:not([hidden])) > [data-testid="render"] {
     display: none;
   }
 }

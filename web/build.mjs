@@ -3,7 +3,7 @@
 //   node build.mjs [--out DIR] [--engine mock|wasm] [--view none|wasm]
 //                  [--version V] [--sha S]
 //
-// DIR (default web/dist) gets index.html, app.js, app.css, the mock
+// DIR (default web/dist) gets index.html, app.js, app.css, early.js, the mock
 // worker (for `--engine mock` only), the examples, build.json and the
 // front end's third-party licences. scripts/web/build.sh calls this, then adds the wasm core and
 // viewer, BOSL2 and the release files; `npm run build` alone gives a
@@ -72,7 +72,7 @@ const app = await esbuild.build({
   outdir: out,
 });
 
-for (const f of ["index.html", "app.css", "favicon.svg"]) copyFileSync(join(root, "src", f), join(out, f));
+for (const f of ["index.html", "app.css", "early.js", "favicon.svg"]) copyFileSync(join(root, "src", f), join(out, f));
 mkdirSync(join(out, "examples"));
 for (const f of readdirSync(join(root, "examples"))) {
   if (/\.(scad|json|txt)$/.test(f)) copyFileSync(join(root, "examples", f), join(out, "examples", f));

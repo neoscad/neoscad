@@ -66,7 +66,11 @@ The embed view is the 3D view alone, previewed on load (a heavy example
 waits for its Preview button), with "Open in NeoSCAD" opening the same
 model in the whole page in a new tab. It loads no editor (so the
 language server never starts), no agent bridge and no inspector, and
-neither reads nor writes the visitor's storage. A blog post frames it:
+neither reads nor writes the visitor's storage. It is the same document
+as the whole page; `src/early.js`, a classic script in `<head>`, gives
+it the embed layout before the first paint (app.js, a module, runs only
+after it), so an embed doesn't draw the page's top bar first and then
+move. A blog post frames it:
 
     <iframe src="/try/#embed=1&code=z:…" title="…" loading="lazy"></iframe>
 
