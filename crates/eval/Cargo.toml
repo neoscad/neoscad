@@ -14,9 +14,10 @@ name = "eval"
 # and function calls past a few native levels with the expressions around
 # them (`src/heap_expr.rs`), run on an explicit stack of frames instead of
 # native recursion, so a recursion ends at the counted depth limit
-# (`limits::Limits::depth`) in every build and browser. A compile-time switch, so the default build
-# keeps the recursive evaluator's code and layout unchanged
-# (docs/audits/heap-evaluator.md, section 3).
+# (`limits::Limits::depth`) in every build and browser. On by default
+# since stage 2 (docs/audits/heap-evaluator.md); `--no-default-features`
+# builds the recursive evaluator, until its code is removed.
+default = ["heap-eval"]
 heap-eval = []
 
 [dependencies]

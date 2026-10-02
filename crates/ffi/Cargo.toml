@@ -20,8 +20,8 @@ crate-type = ["staticlib", "lib"]
 default = ["mimalloc"]
 # The heap evaluator (`neoscad-eval`'s `heap-eval`): statements run on
 # a heap stack, so module recursion is bounded by the counted depth limit
-# and not by the native stack. Off by default until it is proven
-# (docs/audits/heap-evaluator.md).
+# and not by the native stack. On by default through `neoscad-eval`'s
+# own default features (docs/audits/heap-evaluator.md).
 heap-eval = ["eval/heap-eval"]
 # mimalloc as the core's global allocator (`lib.rs`). A feature only so
 # that `cargo clippy --target x86_64-pc-windows-msvc -p neoscad-ffi` can
