@@ -14,11 +14,14 @@ name = "neoscad_web"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+default = ["heap-eval"]
 # The heap evaluator (`neoscad-eval`'s `heap-eval`): recursion runs on
 # a heap stack, bounded by the counted depth limit and not by the native
-# stack. Off for the web core until it stops delaying WebKit's first
-# preview by seconds (docs/followups.md); NEOSCAD_FEATURES=heap-eval
-# builds it in.
+# stack. On by default (docs/audits/heap-evaluator.md). The worker skips
+# its stack probes when the evaluator has it (`heapStatements`, which
+# asks the evaluator rather than this feature). Without it
+# (NEOSCAD_NO_DEFAULT_FEATURES=1 scripts/web/build-core.sh) the core is
+# the recursive evaluator, whose frame budget the probes calibrate.
 heap-eval = ["eval/heap-eval"]
 
 [dependencies]

@@ -15,8 +15,11 @@ name = "eval"
 # them (`src/heap_expr.rs`), run on an explicit stack of frames instead of
 # native recursion, so a recursion ends at the counted depth limit
 # (`limits::Limits::depth`) in every build and browser. Off here; the
-# native crates (cli, ffi, linux-app) turn it on by default, and the web
-# core does not yet (docs/audits/heap-evaluator.md, "Stage 2 done").
+# crates that build an application (cli, ffi, linux-app, web,
+# wasm-check) turn it on by default (docs/audits/heap-evaluator.md,
+# "Stage 2 done"). A host that adapts to it asks `recursion::HEAP_EVAL`,
+# not a feature of its own, since Cargo can turn this one on through
+# any crate.
 heap-eval = []
 
 [dependencies]

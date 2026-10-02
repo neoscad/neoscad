@@ -178,20 +178,15 @@ lead them, come roughly in order of user impact.
   with the counted `--limit depth=N`) is done; see "Stage 1 done" there.
   Stage 2 (function calls, comprehensions and `let`/`assert`/`echo` on
   the heap past 8 native call levels, with the counted limit covering
-  functions) is done; see "Stage 2 done". The native crates (cli, ffi,
-  linux-app) turn the feature on by default; the web core does not yet.
+  functions) is done; see "Stage 2 done". Every build turns the feature
+  on by default: the native crates (cli, ffi, linux-app), the web core
+  and wasm-check. (The web core was held back because WebKit's first
+  preview came about 5 s late with it. The cause was the worker's stack
+  probes: the core's `heapStatements()` read the web crate's own feature,
+  which was off while the evaluator's was on, so all eight probes ran
+  against a heap evaluator to the depth limit, about 7 s in a WebKit
+  worker. It now asks the evaluator, `eval::recursion::HEAP_EVAL`.)
   Left from stage 2:
-  - **The web core with `heap-eval` delays WebKit's first preview by
-    about 5 s.** In WebKit (Playwright), the /try `threaded-ring`
-    example's Preview takes 8-9 s from the click against 3.3-3.5 s
-    without the feature, while the engine reports the same preview time
-    (~640 ms). So the extra time is spent in the worker outside
-    evaluation, and a language-server request queued behind it times out
-    ("Request timed out" page error). `gearbox` is slower the same way;
-    Chromium and Firefox were not compared. Find where the time goes
-    (wasm instantiation or compile of the larger module, the skipped
-    probe's replacement, `may_call`, a library load), fix it, then build
-    the web core with the feature.
   - the rare shapes that stay native and start a nested heap loop for a
     part that calls: ranges (`[0 : f(n - 1)]`), callees that are
     expressions (`f(x)(y)`), methods, C-style `for` comprehensions,
@@ -211,8 +206,9 @@ lead them, come roughly in order of user impact.
   - `resolve::Stats` does not count the `may_call` share of a corpus;
   - the frame budget, its weights and the worker's probe are unused for
     recursion under the feature. They still bound native source nesting,
-    which the parser bounds first (see "Stage 2 done"). They go when the
-    feature becomes the default.
+    which the parser bounds first (see "Stage 2 done"). The feature is
+    now the default in every build, so they can go along with the
+    recursive evaluator.
 
   Left from stage 1:
   - the apps' `ResourceLimits` record (`crates/client/src/types.rs`)

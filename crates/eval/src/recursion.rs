@@ -176,6 +176,21 @@ pub(crate) fn note_frames(frames: u32) {
     let _ = frames;
 }
 
+/// Whether this build runs recursion on the heap (the `heap-eval`
+/// feature): statements and calls past a few native levels then hold no
+/// native stack, so a recursion ends at the counted depth limit
+/// ([`crate::limits::Limits::depth`]) rather than at the frame budget.
+///
+/// A host that tunes itself to the evaluator's stack use must ask this
+/// crate, not its own features. The web worker's stack probes recurse
+/// until the stack overflows; on the heap they only stop at the depth
+/// limit, which took about 7 s at start-up in a WebKit worker. When the
+/// heap evaluator came on through this crate's default features while
+/// the web core's own `heap-eval` feature stayed off, the core told the
+/// worker it was recursive, the probes ran, and the first preview and
+/// the language server's requests waited behind them.
+pub const HEAP_EVAL: bool = cfg!(feature = "heap-eval");
+
 /// What one nested frame of each kind adds to the frame budget's count.
 ///
 /// The defaults are [`STATEMENT_FRAMES`] and its neighbours: one set of

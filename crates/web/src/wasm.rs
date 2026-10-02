@@ -106,13 +106,20 @@ pub fn frames_at_last_check() -> u32 {
 }
 
 /// Whether this core runs statements and calls on the heap (the
-/// `heap-eval` feature): a recursion then takes no stack past a few native
-/// call levels, and every one of the worker's stack probes would only run
-/// to the counted depth limit, which in WebKit's cold tiers took 40 s at
-/// start-up, so the worker skips them.
+/// evaluator's `heap-eval` feature): a recursion then takes no stack past
+/// a few native call levels, and every one of the worker's stack probes
+/// would only run to the counted depth limit, which in WebKit's cold
+/// tiers took 40 s at start-up, so the worker skips them.
+///
+/// It asks the evaluator (`eval::recursion::HEAP_EVAL`), not this crate's
+/// own `heap-eval` feature. The two disagreed once: the evaluator had the
+/// feature on by default and this crate had it off, so the worker ran
+/// every probe against a heap evaluator, starting up 7 s late in WebKit,
+/// with the first preview and a language-server request (which timed
+/// out) queued behind it.
 #[wasm_bindgen(js_name = heapStatements)]
 pub fn heap_statements() -> bool {
-    cfg!(feature = "heap-eval")
+    eval::recursion::HEAP_EVAL
 }
 
 /// The worker's engine: `handle` one request at a time.

@@ -27,6 +27,8 @@ const GUARD = 2 * 1024 ** 3;
 
 const worker = await import(pathToFileURL(join(dir, 'worker.js')).href);
 const { start, handle } = worker;
+// The same module instance the worker's glue loads (one URL, one module).
+const glue = await import(pathToFileURL(join(dir, 'neoscad_web.js')).href);
 await start(readFileSync(join(dir, 'neoscad_web_bg.wasm')));
 
 let id = 0;
@@ -218,6 +220,17 @@ await test('the stack probe ran and calibrated the weights', 1000, () => {
     assert.ok(p && Object.keys(p.frames).length === 4, JSON.stringify(p));
     for (const f of Object.values(p.frames)) {
         assert.ok(Object.values(f).every((n) => n === null || n >= 0), JSON.stringify(p));
+    }
+    // A heap core (`heapStatements()`) skips every probe. A recursive one
+    // overflows V8's stack in at least the function probe. A core that
+    // calls itself recursive while its evaluator runs on the heap gets
+    // neither: each probe runs to the depth limit instead (705 ms here,
+    // about 7 s in a WebKit worker, which held back the first preview).
+    const probed = Object.values(p.frames).flatMap((f) => Object.values(f));
+    if (glue.heapStatements()) {
+        assert.ok(probed.every((n) => n === null), JSON.stringify(p));
+    } else {
+        assert.ok(p.frames.fn.expr > 0, `no probe overflowed: ${JSON.stringify(p)}`);
     }
     if (p.weights) {
         const unit = p.limit / 2000;
