@@ -56,6 +56,10 @@ flange_z = skirt == "none" ? thread_len : skirt_z + hex_r - root_r;
 module skirt() {
     if (skirt == "cone")
         translate([0, 0, skirt_z]) cylinder(r1 = root_r, r2 = hex_r, h = flange_z - skirt_z + 0.01);
+    else if (skirt == "hexcone")
+        // Six-sided, its corners on the root circle, so its flats start
+        // inside the root.
+        translate([0, 0, skirt_z]) cylinder(r1 = root_r, r2 = hex_r, h = flange_z - skirt_z + 0.01, $fn = 6);
     else if (skirt == "hull")
         hull() {
             translate([0, 0, skirt_z]) cylinder(r = root_r, h = 0.01);

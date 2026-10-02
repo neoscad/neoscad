@@ -481,11 +481,18 @@ fn without_browser_the_page_tools_are_not_listed() {
     // without `--browser`) and the eight page tools; not `test`.
     assert_eq!(tools.len(), 15);
     let r = b.call("initialize", json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test"}}));
+    let instructions = r["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("browser_connect"));
+    // The page's paragraph leaves no room for the recipes under the
+    // 2,048 characters Claude Code keeps, so they are a pointer to the
+    // resource instead of text the client would cut mid-recipe.
     assert!(
-        r["result"]["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("browser_connect")
+        instructions.encode_utf16().count() <= 2048,
+        "{instructions}"
+    );
+    assert!(
+        instructions.ends_with("are the resource neoscad://recipes."),
+        "{instructions}"
     );
     // The default page is neoscad.org's.
     assert!(

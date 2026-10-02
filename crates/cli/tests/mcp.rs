@@ -1266,6 +1266,14 @@ fn the_recipes_are_in_the_instructions_and_each_one_prints() {
         .to_string();
     assert!(instructions.ends_with(&recipes), "{instructions}");
     assert!(recipes.contains("module thread("), "{recipes}");
+    assert!(recipes.contains("module snap_hook("), "{recipes}");
+    // Claude Code cuts a server's instructions after 2,048 characters,
+    // which once dropped the last recipe: all of them must arrive.
+    assert!(
+        instructions.encode_utf16().count() <= 2048,
+        "the instructions are {} UTF-16 units",
+        instructions.encode_utf16().count()
+    );
     // Every session pays for them.
     assert!(
         recipes.len() < 2000,

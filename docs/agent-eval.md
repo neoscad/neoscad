@@ -88,7 +88,7 @@ and ModelRift's metrics.
     scripts/agent-eval/cad/setup-cadquery.sh      # CadQuery 2.8.0 venv (.cache/, gitignored)
     scripts/agent-eval/cad/test_grade.py          # grader tests (no model calls)
     scripts/agent-eval/cad/run_cad.py --neoscad PATH \
-        [--model 'claude-opus-5[1m]'] [--tasks T1,T2,T3] \
+        [--model 'claude-opus-5[1m]'] [--effort LEVEL] [--tasks T1,T2,T3] \
         [--conditions openscad,cadquery,neoscad] [--n 1]
     scripts/agent-eval/cad/run_cad.py --tasks T0 --model haiku ...  # plumbing check
     scripts/agent-eval/cad/summarize.py progress/agent-eval/cad-<ts>.json
@@ -122,7 +122,12 @@ user or project settings, hooks, skills or MCP servers),
 none`, stream-json output. The default model is `claude-opus-5[1m]`
 (Opus 5 with 1M context, as ModelRift; this id was accepted by Claude
 Code 2.1.284). `--max-turns 200` and `--max-budget-usd 20` are
-backstops; the version cap is the budget.
+backstops; the version cap is the budget. `--effort` passes Claude
+Code's reasoning effort; without it the model's default applies, since
+`--restricted` ignores the user's `effortLevel` setting (Opus 5's
+default was high on Claude Code 2.1.286, where a Bash `echo
+$CLAUDE_EFFORT` in a run printed `high`). Each record keeps the effort it
+ran at.
 
 **Safety.** Claude Code's Bash sandbox is on (`failIfUnavailable`, no
 unsandboxed escape): writes only in the run directory, no network (a

@@ -60,7 +60,15 @@ const TTL_MS: u64 = 3_600_000;
 /// every turn in model time and in re-reading its whole context, while the
 /// tools answer in milliseconds, so the wording avoids reading as a ladder
 /// of separate calls (evaluate, then render, then snapshot, then check).
-const INSTRUCTIONS: &str = "NeoSCAD is an OpenSCAD-compatible modeller; every tool answers in milliseconds. After writing or editing a model, one `check` (with the spec's minimum wall as `min_wall`) reports its errors, warnings and echo, bbox, volume, manifold and printability findings, so there is no need to `evaluate` or `render` first. Call tools on independent files or questions in parallel. `measure` gives exact numbers (sections, distances); `snapshot` shows the shape when it is in doubt. `check` also takes `export` and `sections`, so one call can verify, measure and write the file; an export is read back (triangles, watertight, z range), so the file needs no other inspection. Info findings (short bridges, thread flanks, slivers) need no action. A model is a file you write (`path`) or inline `source`.";
+/// With the recipes it has to fit [`INSTRUCTIONS_LIMIT`].
+const INSTRUCTIONS: &str = "NeoSCAD is an OpenSCAD-compatible modeller; every tool answers in milliseconds. After writing or editing a model, one `check` (with the spec's minimum wall as `min_wall`) reports its errors, warnings, echo, geometry and printability findings, so there is no need to `evaluate` or `render` first. Call tools on independent files or questions in parallel. `measure` gives exact numbers (sections, distances); `snapshot` shows the shape when it is in doubt. `check` also takes `export` and `sections`, so one call can verify, measure and write the file; an export is read back, so the file needs no other inspection. Info findings (short bridges, thread flanks, slivers) need no action. A model is a file you write (`path`) or inline `source`.";
+
+/// The most of the instructions a client is known to keep, in UTF-16
+/// code units. Claude Code (2.1.286) cuts a server's instructions after
+/// 2,048 characters and adds "… [truncated]": the model then saw the
+/// recipes end mid-comment, without the snap hook, and went looking for
+/// it with `docs`. Text past the limit costs tokens and helps no one.
+const INSTRUCTIONS_LIMIT: usize = 2048;
 
 /// Idioms for the features printable parts keep needing (a countersink,
 /// rounded corners, a fillet, a thread, a snap hook), as OpenSCAD modules,
@@ -72,7 +80,28 @@ const INSTRUCTIONS: &str = "NeoSCAD is an OpenSCAD-compatible modeller; every to
 pub const RECIPES: &str = include_str!("recipes.scad");
 
 /// What introduces [`RECIPES`] in the instructions.
-const RECIPES_INTRO: &str = "\n\nPrinting recipes (tested OpenSCAD; adapt the numbers):\n";
+const RECIPES_INTRO: &str = "\n\nPrinting recipes (tested; adapt the numbers):\n";
+
+/// What stands in for [`RECIPES`] when they would not fit the limit
+/// (with `--browser`'s extra paragraph): a pointer, rather than recipes
+/// the client cuts short.
+const RECIPES_POINTER: &str = " Printing recipes (countersink, rounded plate, fillet, thread, snap hook) are the resource neoscad://recipes.";
+
+/// The server's instructions: the guidance, `--browser`'s paragraph when
+/// there is a page bridge, then the recipes if they fit
+/// [`INSTRUCTIONS_LIMIT`] and a pointer to them if not.
+fn instructions(browser: bool) -> String {
+    let head = format!(
+        "{INSTRUCTIONS}{}",
+        if browser { BROWSER_INSTRUCTIONS } else { "" }
+    );
+    let full = format!("{head}{RECIPES_INTRO}{RECIPES}");
+    if full.encode_utf16().count() <= INSTRUCTIONS_LIMIT {
+        full
+    } else {
+        format!("{head}{RECIPES_POINTER}")
+    }
+}
 
 /// What `--browser` adds to [`INSTRUCTIONS`].
 const BROWSER_INSTRUCTIONS: &str = " The user may have NeoSCAD's web page open: browser_connect gives the link that connects it. Once it is connected, work on the page's text rather than files: omit path and source to use it, change it with editor_edit (the user sees each change), look with view_capture and point with view_annotate.";
@@ -226,14 +255,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
         }
     };
     let server = Arc::new(Server {
-        instructions: format!(
-            "{INSTRUCTIONS}{}{RECIPES_INTRO}{RECIPES}",
-            if bridge.is_some() {
-                BROWSER_INSTRUCTIONS
-            } else {
-                ""
-            }
-        ),
+        instructions: instructions(bridge.is_some()),
         bridge: bridge.clone(),
         tools,
         out: Mutex::new(Box::new(std::io::stdout())),

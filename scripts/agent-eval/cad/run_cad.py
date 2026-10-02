@@ -2,7 +2,7 @@
 """Agent CAD comparison: ModelRift's CadQuery-vs-OpenSCAD benchmark with
 NeoSCAD as a third condition (docs/agent-eval.md, "CAD comparison").
 
-    run_cad.py --neoscad PATH [--model 'claude-opus-5[1m]'] [--tasks T1,T2,T3]
+    run_cad.py --neoscad PATH [--model 'claude-opus-5[1m]'] [--effort LEVEL] [--tasks T1,T2,T3]
                [--conditions openscad,cadquery,neoscad] [--n 1]
     run_cad.py --tasks T0 --model haiku ...      # plumbing check, cheap
     run_cad.py --print-commands ...              # show the claude commands only
@@ -182,6 +182,8 @@ def command(task, cond, workdir, args, keep, aux=None):
         "--max-turns", str(args.max_turns),
         "--max-budget-usd", str(args.max_budget_usd),
     ]
+    if args.effort:
+        cmd += ["--effort", args.effort]
     if cond == "neoscad":
         mcp = keep / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": {"neoscad": {
@@ -712,6 +714,10 @@ def main():
     ap.add_argument("--venv", type=Path, default=VENV, help="the CadQuery venv (setup-cadquery.sh)")
     ap.add_argument("--model", default="claude-opus-5[1m]",
                     help="ModelRift ran Claude Opus 5 with 1M context")
+    ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"],
+                    help="Claude Code's reasoning effort. Unset, `--restricted` ignores the user's"
+                         " effortLevel setting and the model's default applies (high for Opus 5 on"
+                         " Claude Code 2.1.286), so records without an effort ran at that default.")
     ap.add_argument("--tasks", default="T1,T2,T3")
     ap.add_argument("--conditions", default="openscad,cadquery,neoscad")
     ap.add_argument("--n", type=int, default=1, help="runs per cell")
@@ -764,12 +770,13 @@ def main():
     rundir.mkdir()
     sha = git("rev-parse", "--short", "HEAD")
     record = {"name": name, "timestamp": ts, "sha": git("rev-parse", "HEAD"),
-              "dirty": bool(git("status", "--porcelain")), "model": args.model, "n": args.n,
+              "dirty": bool(git("status", "--porcelain")), "model": args.model, "effort": args.effort,
+              "n": args.n,
               "max_turns": args.max_turns, "max_budget_usd": args.max_budget_usd,
               "timeout_min": args.timeout_min, "mem_limit_mb": args.mem_limit_mb,
               "versions": tool_versions(args), "neoscad_path": args.neoscad,
               "prompt_template": SPEC["prompt"], "runs": []}
-    log(f"{name} ({sha}) model {args.model}: {len(tasks)} tasks x {len(conds)} conditions x {args.n}")
+    log(f"{name} ({sha}) model {args.model} effort {args.effort or 'default'}: {len(tasks)} tasks x {len(conds)} conditions x {args.n}")
     path = args.out / f"{name}.json"
     for rep in range(1, args.n + 1):
         for t in tasks:

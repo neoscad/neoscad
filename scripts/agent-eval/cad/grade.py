@@ -654,9 +654,22 @@ def grade_t3(parts):
     run = []
     if tr:
         side = list(range(tr[1], tr[2] + 1))
-        root = sorted(rmin4[i] for i in side)[int(0.02 * (len(side) - 1))]
-        depth = sorted(rmax4[i] for i in side)[int(0.8 * (len(side) - 1))] - root
-        open_ = [i for i in side if rmin4[i] <= root + 0.3 * depth]
+        # Levels of a polygon (a $fn = 6 cone between thread and flange)
+        # are not thread, though they reach radius 9: opposite directions
+        # match on both axes while the axes differ. A helix's opposite
+        # sides are half a pitch apart, so on an ISO profile they never
+        # match on both axes at once. Such a cone's flats can start inside
+        # the root; counted, they pulled the root 1-1.5 mm low, no level of
+        # a real 12 mm thread was open, and five thread gates failed on a
+        # sound part (and the cone's own levels then read as groove).
+        def polygonal(i):
+            return (abs(R[0][i] - R[180][i]) <= 0.05 and abs(R[90][i] - R[270][i]) <= 0.05
+                    and abs(R[0][i] - R[90][i]) > 0.1)
+
+        cand = [i for i in side if not polygonal(i)] or side
+        root = sorted(rmin4[i] for i in cand)[int(0.02 * (len(cand) - 1))]
+        depth = sorted(rmax4[i] for i in cand)[int(0.8 * (len(cand) - 1))] - root
+        open_ = [i for i in cand if rmin4[i] <= root + 0.3 * depth]
         clusters = []
         for i in open_:
             if clusters and zs[i] - zs[clusters[-1][-1]] <= 1.6:

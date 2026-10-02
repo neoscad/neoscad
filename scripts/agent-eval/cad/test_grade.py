@@ -155,6 +155,30 @@ class Synthetic(unittest.TestCase):
         self.assertEqual((t["degenerate_faces"], t["components"], t["genus"]), (1, 1, 0))
         self.assertTrue(t["clean"], t["reasons"])
 
+    def test_collapsed_face_keeps_section_loops(self):
+        # Exported meshes carry faces that weld to two corners through
+        # float32 (a bracket's countersunk holes had 272). One on a hole's
+        # wall, across the plane, must not split the hole's loop into open
+        # chains, or the hole is not counted.
+        ring = [(x, y, 0) for x in range(3) for y in range(3) if (x, y) != (1, 1)]
+        tris = voxels(ring)
+        a, b = (1, 1, 0), (1, 1, 1)  # a vertical edge of the hole
+        tris.append((a, (a[0] + 3e-9, a[1], a[2]), b))
+        p = TMP / "collapsed.stl"
+        with open(p, "w") as f:
+            f.write("solid t\n")
+            for tri in tris:
+                f.write(" facet normal 0 0 0\n  outer loop\n")
+                for v in tri:
+                    f.write(f"   vertex {float(v[0])!r} {float(v[1])!r} {float(v[2])!r}\n")
+                f.write("  endloop\n endfacet\n")
+            f.write("endsolid t\n")
+        verts, faces = sm.load_stl(p)
+        self.assertEqual(sum(1 for t in faces if len(set(t)) < 3), 1)
+        loops, chains = grade.Part(verts, faces).section(2, 0.5)
+        self.assertEqual(sorted(round(sm.poly_area(l), 6) for l in loops), [-1, 9])
+        self.assertEqual(chains, [])
+
     def test_off_bed(self):
         t = topo(voxels([(0, 0, 0)], offset=(0, 0, 0.5)))
         self.assertFalse(t["on_bed"])
@@ -247,9 +271,12 @@ class References(unittest.TestCase):
         # and counting them failed length, major and pitch on correct
         # threads. These are shapes agents really made: a cone from the
         # root, a hull of root circle and hexagon, and a cone starting 1 mm
-        # inside the thread.
+        # inside the thread. A six-sided cone whose flats start inside the
+        # root once pulled the root estimate under the thread's and failed
+        # five thread gates on correct parts.
         for defs, tag in ((['skirt="cone"'], "t3-cone"), (['skirt="hull"'], "t3-hull"),
-                          (['skirt="cone"', "skirt_dz=-1"], "t3-overlap")):
+                          (['skirt="cone"', "skirt_dz=-1"], "t3-overlap"),
+                          (['skirt="hexcone"'], "t3-hexcone")):
             g = self.ref("T3", defs, tag)
             self.assertTrue(g["pass"], (tag, g["failed_gates"]))
             length = next(c for c in g["checks"] if c["name"].startswith("thread 12 long"))["value"]

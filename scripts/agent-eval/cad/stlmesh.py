@@ -405,6 +405,16 @@ class SliceIndex:
         pts = {}
         for fi in self.b[self._bin(z)]:
             t = tris[fi]
+            # A triangle that welding collapsed onto an edge (two corners
+            # the same vertex: float32 STL coordinates merge points closer
+            # than about 1e-6) has no area and adds nothing to a section.
+            # Kept, it crossed its one real edge twice, made a one-point
+            # segment that overwrote the neighbour's link in `nxt`, and
+            # split a hole's loop into open chains: a bracket's countersunk
+            # holes went uncounted. Collinear slivers with three distinct
+            # corners still bridge T-junctions, so only these are skipped.
+            if t[0] == t[1] or t[1] == t[2] or t[0] == t[2]:
+                continue
             d = [verts[i][a] - z for i in t]
             if (d[0] > 0) == (d[1] > 0) == (d[2] > 0):
                 continue

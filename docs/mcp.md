@@ -127,9 +127,14 @@ sequence of separate calls, and each turn an agent takes costs seconds
 of model time and a re-read of its whole context, while a tool call
 takes milliseconds. A picture stays `snapshot`'s own call, so the agent
 takes one only when it decides it needs one. The
-instructions end with the printing recipes ("Recipes" below): 808
-bytes of guidance, then 1,507 of recipes with their heading (2,315 in
-all, roughly 600 tokens).
+instructions end with the printing recipes ("Recipes" below): 740
+bytes of guidance, then 1,300 of recipes with their heading (2,040 in
+all, 2,038 characters, roughly 550 tokens). Claude Code (2.1.286) keeps
+the first 2,048 characters of a server's instructions and marks the
+cut "… [truncated]", so the whole text stays under that, which
+`crates/cli/tests/mcp.rs` checks; past it, the last recipe would be cut
+mid-comment. With `--browser` the page's paragraph leaves no
+room, and the recipes become a pointer to `neoscad://recipes`.
 
 The tool list is 4,686 bytes of compact JSON as `[name, description,
 input schema]` arrays, which is what `crates/cli/tests/mcp.rs` measures
@@ -193,8 +198,9 @@ cross-section, with one slice per section step, since a coarser twist
 leaves a sawtooth of faces) and a snap hook with 45° faces.
 `crates/cli/tests/mcp.rs` renders each as its comment says to use it
 and requires one manifold solid with no errors or warnings (the
-thread's flanks are info). Every session pays for them, so they stay
-under 2,000 bytes.
+thread's flanks are info). Every session pays for them, and with the
+guidance they must fit Claude Code's 2,048 characters (above), so
+their comments are terse.
 
 ### Results
 
