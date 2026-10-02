@@ -476,32 +476,33 @@ pub(super) fn winding03(
     let sort_idx = if forward { 0 } else { 1 };
 
     // Build union-find: unite vertices along unbroken edges. This loop is the
-    // Rust counterpart of the ctx-passing `for_each` at boolean3.cpp:425, so it
-    // gets the same bounded-latency check — but on a chunk boundary rather than
-    // per element, because the body is a cheap binary search and `unite`.
+    // Rust counterpart of the ctx-passing `for_each` at boolean3.cpp:425, and
+    // checks the token once per C++ kSeqCancelChunk (= 1024) halfedges
+    // (parallel.h:424), in the search and again in the unions.
+    const CHUNK: usize = 1024;
     let u_a = DisjointSets::new(a.vert_pos.len() as u32);
-    // Hoisted so the uncancellable path pays one predictable branch per edge
-    // instead of a modulo: C++ gets the same effect from `ctx == nullptr`
-    // folding the check out of the loop entirely (parallel.h:427-430).
-    let cancellable = token.is_some();
-    // Find the edges to unite in parallel, but unite them in index order: the
-    // union-find's roots, where windings are computed, depend on that order.
-    let unbroken = crate::par::maybe_par_filter(a.halfedge.len(), 10_000, |edge| {
-        let he = &a.halfedge[edge];
-        // Check if this edge is broken (has an intersection)
-        he.is_forward()
-            && p1q2
-                .binary_search_by(|pair| pair[sort_idx].cmp(&(edge as i32)))
-                .is_err()
-    });
-    for (k, &edge) in unbroken.iter().enumerate() {
-        // C++ `for_each` checks every kSeqCancelChunk (= 1024) elements on the
-        // sequential branch (parallel.h:424); same constant, same reason.
-        if cancellable && k % 1024 == 0 && is_cancelled(token) {
+    let n = a.halfedge.len();
+    // Find each chunk's unbroken edges in parallel, but unite them in index
+    // order: the union-find's roots, where windings are computed, depend on it.
+    let unbroken = crate::par::maybe_par_map_ct(n.div_ceil(CHUNK), 10, token, |c| {
+        (c * CHUNK..n.min((c + 1) * CHUNK))
+            .filter(|&edge| {
+                // Unbroken: no intersection on it.
+                a.halfedge[edge].is_forward()
+                    && p1q2
+                        .binary_search_by(|pair| pair[sort_idx].cmp(&(edge as i32)))
+                        .is_err()
+            })
+            .collect::<Vec<usize>>()
+    })?;
+    for chunk in unbroken {
+        if is_cancelled(token) {
             return None;
         }
-        let he = &a.halfedge[edge];
-        u_a.unite(he.start_vert as u32, he.end_vert as u32);
+        for edge in chunk {
+            let he = &a.halfedge[edge];
+            u_a.unite(he.start_vert as u32, he.end_vert as u32);
+        }
     }
 
     // Post-loop check, matching C++ boolean3.cpp:437.

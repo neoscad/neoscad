@@ -5,7 +5,7 @@ the output is the sequential output. Test:
 crates/geom/tests/parallel_kernels.rs.
 
 Upstream: proposed as branch `neoscad/parallel-batch-rounds`
-(commit 360b0b4) of a fork of larsbrubaker/manifold-rust, on top of its
+(commit 6827974) of a fork of larsbrubaker/manifold-rust, on top of its
 `main` at 40f20c6 (0.15.0 plus two QuickHull commits that touch none of
 these files). This patch is that commit's changes under src/, byte for
 byte apart from CRLF line endings; the branch also adds a benchmark

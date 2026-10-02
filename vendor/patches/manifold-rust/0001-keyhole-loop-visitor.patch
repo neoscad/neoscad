@@ -8,7 +8,7 @@ loop_verts skipped such a ring whole. Test:
 crates/geom/tests/kernel_patches.rs.
 
 Upstream: proposed as branch `neoscad/earclip-loop-visitor`
-(commit 2352adc) of a fork of larsbrubaker/manifold-rust, on top of its
+(commit 1d963ed) of a fork of larsbrubaker/manifold-rust, on top of its
 `main` at 40f20c6 (0.15.0 plus two QuickHull commits that touch none of
 these files). This patch is that commit's changes under src/, byte for
 byte apart from CRLF line endings; the branch also adds a benchmark

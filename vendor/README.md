@@ -342,7 +342,9 @@ rounds `0004-parallel-batch-rounds.patch`, and the round threshold
   per-element maps; the sorts are stable sorts on integer keys, whose
   result does not depend on the algorithm (`par::maybe_par_sort_by_key`).
 - **`winding03`**: the test for which edges to unite (forward, not cut)
-  runs in parallel; the unions stay sequential in index order, because
+  runs in parallel, in chunks of 1,024 halfedges that each check the
+  cancel token first (C++'s `kSeqCancelChunk`), so a cancel does not wait
+  for the whole search; the unions stay sequential in index order, because
   the union-find's roots depend on it and a component's winding number is
   computed at its root.
 
