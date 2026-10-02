@@ -322,10 +322,11 @@ refuses to notarize a build without it.
 
 Next steps, in order:
 
-1. **The first live feed.** The keys and secrets are in place. The next
-   release's `update-feed` and `appcast` jobs publish the first signed
-   feeds; check `https://neoscad.org/updates/v1/stable.json`, its
-   `.minisig` and `updates/macos/appcast.xml`.
+1. **The first live feed.** Done: v0.3.0-rc.1 published the first signed
+   feeds (2026-10-02), and both `stable.json` and `rc.json` verify against
+   the release key with `minisign -V`. The appcast job's first run failed on
+   v0.2.1, built before the key (fixed in 5220ba5: releases older than
+   0.3.0-rc.1 are left out); every release since has written it.
 2. **Windows app.** Built (above; finding 5 was already fixed by
    `AllowSameVersionUpgrades="yes"`). Left: run it on Windows against a
    test-signed feed and an older installed MSI, and look at the UAC
@@ -333,9 +334,13 @@ Next steps, in order:
    the restart (`docs/windows-app.md`, "Updates").
 3. **macOS app.** Built and keyed: the public EdDSA key is in
    `apple/project.yml` (Release only) and `SPARKLE_ED_PRIVATE_KEY` is set.
-   Left: the `appcast` job's first real run, with `WEBSITE_TOKEN`. The
-   shared feed's `macos` entry is for other readers: the CLI, the website,
-   a future custom check.
+   **Verified end to end on 2026-10-02:** an installed 0.3.0 (241) was
+   offered 0.3.1 by Sparkle from the stable appcast, downloaded and
+   verified it, and relaunched as 0.3.1 (247), core 0.3.1. Left: the
+   dialog's release notes are only a link; the appcast job could embed the
+   version's CHANGELOG section (docs/followups.md). The shared feed's
+   `macos` entry is for other readers: the CLI, the website, a future
+   custom check.
 4. **Linux app.** The in-app notice is built (above). Still to do: the
    GPG-signed Flatpak repository on its own Pages site (owner decision),
    so GNOME Software, Discover and `flatpak update` update the app; the
