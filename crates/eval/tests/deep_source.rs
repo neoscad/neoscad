@@ -13,7 +13,11 @@ use std::path::{Path, PathBuf};
 
 use eval::Options;
 use lang::loader::StdFs;
-use lang::syntax::parser::NESTING_LIMIT;
+use lang::syntax::SyntaxKind::{
+    self, Arg, ArgList, BinaryExpr, BlockStmt, CallExpr, ElseClause, IfInst, LcFor, LetExpr,
+    ModuleInst, ParenExpr, TernaryExpr, UnaryExpr, VectorExpr,
+};
+use lang::syntax::parser::{NESTING_LIMIT, nesting_weight};
 
 #[derive(Default)]
 struct Lines(Vec<String>);
@@ -54,43 +58,65 @@ fn errors(src: String) -> Vec<String> {
 
 #[test]
 fn source_nested_to_the_limit_evaluates() {
-    // A few nodes of each program are not its levels (the root, the
-    // statement, the innermost call's arguments); 10 covers them.
-    let n = NESTING_LIMIT as usize - 10;
+    // Levels of nesting whose nodes weigh `w` together that fit under the
+    // limit. Some of each program is not its levels (the root, the
+    // statement, the innermost call's arguments); 200 covers them.
+    let n = |w: u32| ((NESTING_LIMIT - 200) / w) as usize;
+    let levels = |kinds: &[SyntaxKind]| n(kinds.iter().map(|&k| nesting_weight(k)).sum());
+    let translate = levels(&[ModuleInst]);
+    let blocks = levels(&[BlockStmt]);
+    let parens = levels(&[ParenExpr]);
+    let calls = levels(&[CallExpr, ArgList, Arg]);
+    // Nested list literals take memory with the square of their depth to
+    // evaluate (a followup): about 750 MB for 5,000 levels, some 40 MB at
+    // the 1,100 the limit allows now.
+    let lists = levels(&[VectorExpr]);
     for (what, src) in [
-        ("translate", "translate([0, 0, 1]) ".repeat(n) + "cube(1);"),
-        ("blocks", "{".repeat(n) + "cube(1);" + &"}".repeat(n)),
-        // Two nodes a level: `IfInst > ElseClause`.
+        (
+            "translate",
+            "translate([0, 0, 1]) ".repeat(translate) + "cube(1);",
+        ),
+        (
+            "blocks",
+            "{".repeat(blocks) + "cube(1);" + &"}".repeat(blocks),
+        ),
         (
             "else if",
-            "x = 1;\n".to_string() + &"if (x == 0) cube(1); else ".repeat(n / 2) + "sphere(1);",
+            "x = 1;\n".to_string()
+                + &"if (x == 0) cube(1); else ".repeat(levels(&[IfInst, ElseClause]))
+                + "sphere(1);",
         ),
         (
             "parens",
-            format!("echo({}1{});", "(".repeat(n), ")".repeat(n)),
+            format!("echo({}1{});", "(".repeat(parens), ")".repeat(parens)),
         ),
-        ("sum", format!("echo({}1);", "1 + ".repeat(n))),
-        ("negations", format!("echo({}1);", "-".repeat(n))),
-        ("lets", format!("echo({}1);", "let (a = 1) ".repeat(n))),
         (
-            "ternaries",
-            format!("echo({}1{});", "true ? ".repeat(n), " : 0".repeat(n)),
+            "sum",
+            format!("echo({}1);", "1 + ".repeat(levels(&[BinaryExpr]))),
         ),
+        (
+            "negations",
+            format!("echo({}1);", "-".repeat(levels(&[UnaryExpr]))),
+        ),
+        (
+            "lets",
+            format!("echo({}1);", "let (a = 1) ".repeat(levels(&[LetExpr]))),
+        ),
+        ("ternaries", {
+            let n = levels(&[TernaryExpr]);
+            format!("echo({}1{});", "true ? ".repeat(n), " : 0".repeat(n))
+        }),
         (
             "comprehensions",
-            format!("echo([{}1]);", "for (i = [0]) ".repeat(n)),
+            format!("echo([{}1]);", "for (i = [0]) ".repeat(levels(&[LcFor]))),
         ),
-        // Three nodes a level: `CallExpr > ArgList > Arg`.
         (
             "calls",
-            format!("echo({}1{});", "max(".repeat(n / 3), ")".repeat(n / 3)),
+            format!("echo({}1{});", "max(".repeat(calls), ")".repeat(calls)),
         ),
-        // Nested list literals take memory with the square of their depth
-        // to evaluate (a followup), about 750 MB at the limit: these stay at a
-        // fifth of it.
         (
             "lists",
-            format!("echo({}1{});", "[".repeat(n / 5), "]".repeat(n / 5)),
+            format!("echo({}1{});", "[".repeat(lists), "]".repeat(lists)),
         ),
     ] {
         assert_eq!(errors(src), Vec::<String>::new(), "{what}");

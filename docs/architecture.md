@@ -295,10 +295,12 @@ result with a `resource-limit` diagnostic, not a crash.
   checks it). What still recurses natively is bounded separately
   (`crates/eval/src/recursion.rs`): nesting in the source itself ends
   with OpenSCAD's "Parser error: memory exhausted" past a counted limit
-  on the syntax tree's depth (`lang::syntax::parser::NESTING_LIMIT`:
-  5,000 natively, 320 on wasm32), and the few expression shapes that
-  stay native per level (a range's bounds, parameter defaults and the
-  like), and printing deeply nested values, stop at a native check.
+  on the syntax tree's depth, weighted by what each level costs
+  (`lang::syntax::parser::NESTING_LIMIT` and `nesting_weight`: about
+  5,000 levels of `{` natively, 250 on wasm32, sized for WebKit), and
+  the few expression shapes that stay native per level (a range's
+  bounds, parameter defaults and the like), and printing deeply nested
+  values, stop at a native check.
   Natively that check measures the stack (64 MiB on the evaluation's own
   thread); on wasm32, where the engine's stack cannot be seen, it counts
   frames against a budget calibrated for V8.

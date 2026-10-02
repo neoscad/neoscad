@@ -261,8 +261,10 @@ lead them, come roughly in order of user impact.
   - Closed: the evaluator's start, `Unit::add_scope`
     (`crates/eval/src/eval.rs`), recurses on source nesting, like the
     parser and the lowering, and the parser's nesting limit
-    (`lang::syntax::parser::NESTING_LIMIT`: 5,000 natively, 320 on
-    wasm32) bounds all three. At the limit it fits with room: natively,
+    (`lang::syntax::parser::NESTING_LIMIT`: then 5,000 nodes natively,
+    320 on wasm32; since October 2026 a depth weighted by kind, which
+    allows about 2,380 levels of `translate()` natively and 119 on wasm32)
+    bounds all three. At the limit it fits with room: natively,
     `Unit::new` on 4,990 levels of `translate()` overflowed a 1 MiB
     thread and fit in 2 MiB (release), against the evaluator's 80 MiB
     (`crates/eval/tests/deep_source.rs` evaluates every kind of nesting at
@@ -272,8 +274,9 @@ lead them, come roughly in order of user impact.
     exhausted") with no trap. By the native
     measure `add_scope` would take about 10 MiB at 26,000 levels, so what
     overflowed 80 MiB there was the evaluation, not `add_scope`. In
-    WebKit the parser overflows first (about 200 levels; see the WebKit
-    entry under the web core), so `add_scope` is not what any host's
+    WebKit the parser overflowed first (about 200 levels; the WebKit
+    entry under the web core has the weighted limit sized for it since),
+    so `add_scope` is not what any host's
     limit is sized by. Iterative, it would only matter together with an
     iterative parser and lowering;
   - which `--trace-usermodule-parameters` lines print `...` near the
@@ -1480,22 +1483,31 @@ lead them, come roughly in order of user impact.
   budget with constant weights (`eval::recursion::HEAP_LOOP_FRAMES`,
   `PRINT_FRAMES`) sized for WebKit's stack.
   Left:
-  - Nesting in the source: `lang::syntax::parser::NESTING_LIMIT` is 320
-    syntax tree levels on wasm32, sized for V8 (past it the parse ends in
-    OpenSCAD's "Parser error: memory exhausted"; `wasm-check.sh --depths`
-    checks seven kinds of nesting for it), and WebKit's stack overflows
-    below it for some kinds. Measured October 2026 in Playwright's WebKit
-    on macOS arm64, parsing alone (the `parameters` request): one worker
-    taking nesting 4 levels deeper each run, so that its tiers warm up on
-    the way, overflowed at 88 levels of `[`, 108 of `(` and 88 of `max(`
-    (264 nodes); fresh workers at 140-160 of `[` and about 193-250 of
-    `translate()`. Blocks, `else if` and `+` chains reach the limit, and
-    Chromium and Firefox reach it for every kind. Nodes cost different
-    stack by kind (a `[` level is many parser frames, an `else if` level
-    few), so no one node limit fits: one safe for `[` with room (about
-    60) would refuse MCAD's `bitmap.scad`, 186 nodes of `else if`, which
-    parses in all three browsers now. A fix weighs nesting by kind, or
-    makes the parser, the lowering and `Unit::add_scope` iterative.
+  - `let`, `assert` and `echo` expressions nested in a statement's
+    arguments keep 20% of WebKit's stack to spare at the parser's limit,
+    not 30%. Source nesting is now bounded by a weighted depth
+    (`lang::syntax::parser::nesting_weight`, `NESTING_LIMIT`: 2,590 on
+    wasm32), each kind weighed by the stack a level of it took in
+    WebKit's worst case (a worker part-way through tiering up), and every
+    other kind stops with 30% to spare: in `wasm-check.sh --depths` and
+    the browsers, 55 levels of `[` parse, 68 of `(`, 46 of `max(`, 119 of
+    `translate()`, 120 of `else if` and 252 of `{`, and one more ends in
+    "Parser error: memory exhausted". Measured October 2026 in Playwright's WebKit on macOS
+    arm64 with the limit lifted (the table is in `nesting_weight`'s
+    comment), 123 levels of `echo(assert(true) assert(true) ... 1)`
+    overflowed, because the native evaluator recurses into each one's
+    body (`Evaluator::eval`'s `Let`, `Assert` and `Echo` arms in
+    `crates/eval/src/eval.rs`), where in a function's body, or parsed
+    alone, they reached 371 levels. A weight of 31 would keep 30% for
+    them, and would put BOSL2's `nurbs.scad` (66 `assert`s chained in a
+    function, 2,649 by that weight) over the limit, so they weigh 26
+    (`nurbs.scad` 2,289, MCAD's `bitmap.scad` 2,005; `tests/
+    deep_nesting.rs` checks both). Evaluating those bodies in a loop, or
+    on the heap evaluator, would let them weigh as little as a `{` (10)
+    and leave every kind 30%. OpenSCAD's
+    `issue4172-echo-vector-stack-exhaust.scad` (144 levels of `[`) is now
+    refused in browsers, where WebKit would overflow on it; natively it
+    is unchanged.
 - **Done: the preview's product booleans run under the limits.**
   `geom::csg::product_meshes_until` checks a `geom::csg::Stop` (the
   request's interrupt flag and limits guard) before every kernel

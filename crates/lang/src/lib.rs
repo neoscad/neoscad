@@ -311,10 +311,17 @@ fn finish(parsed: fragment::Parsed, main_path: &Path, annotate: bool) -> Program
 
 /// The fix hint of the nesting limit's error, which OpenSCAD's message
 /// ("memory exhausted") does not explain.
+///
+/// The limit is a weighted depth (`syntax::parser::nesting_weight`), so
+/// the hint gives it as levels of the costliest and the cheapest common
+/// kinds rather than as one number no kind of nesting reaches.
 fn nesting_hint() -> String {
+    use syntax::SyntaxKind::{BlockStmt, VectorExpr};
+    use syntax::parser::{NESTING_LIMIT, nesting_weight};
     format!(
-        "the program nests more than {} levels deep here (statements, brackets or a chain of operators): build deep structures with a recursive module or function, or a list, instead of writing out every level",
-        syntax::parser::NESTING_LIMIT
+        "the program nests too deeply here (statements, brackets or a chain of operators; at most about {} levels of `[` or {} of `{{`): build deep structures with a recursive module or function, or a list, instead of writing out every level",
+        NESTING_LIMIT / nesting_weight(VectorExpr),
+        NESTING_LIMIT / nesting_weight(BlockStmt),
     )
 }
 

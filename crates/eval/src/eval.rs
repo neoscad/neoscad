@@ -2753,7 +2753,10 @@ mod tests {
     }
 
     fn nested_constants() {
-        let n = 2_000;
+        // As deep as the parser's nesting limit allows, less a few levels
+        // for the statement.
+        use lang::syntax::parser::{NESTING_LIMIT, nesting_weight};
+        let n = (NESTING_LIMIT / nesting_weight(lang::syntax::SyntaxKind::VectorExpr)) as usize - 5;
         let consts = consts_of(&format!("x = {}1{};", "[".repeat(n), "]".repeat(n)));
         let own = |v: &Value| v.as_vector().map(|v| v.as_slice().as_ptr());
         let mut lists: Vec<*const Value> = consts.iter().flatten().filter_map(own).collect();

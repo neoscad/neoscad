@@ -40,66 +40,145 @@ pub struct SyntaxError {
     pub too_deep: bool,
 }
 
-/// How deep the syntax tree may nest, counted in nodes from the root (a
-/// top-level `cube();` is 2 deep, its argument list 3; each level of
-/// `translate()`, `{`, `(` or `[` adds one, each `else if` two),
-/// before parsing stops with OpenSCAD's "memory exhausted" error.
+/// How deep the syntax tree may nest, counted as the sum of the
+/// [`nesting_weight`]s of the nodes from the root down to the deepest
+/// leaf, before parsing stops with OpenSCAD's "memory exhausted" error.
 ///
 /// Every stage after the parser walks the source's nesting recursively:
 /// the parser itself, the lowering to the AST, the AST's clone and drop,
 /// the evaluator's scopes and expressions, and the formatter. Bounding
 /// the tree here is what turns a nesting that would overflow one of them
-/// into a parse error. The bound is a count, not a
-/// measured stack, so a program parses or fails the same way on every
-/// thread, and it is the same for every host: a limit that varied would
-/// make an included file's cached parse ([`crate::fragment`]) depend on
-/// who parsed it first.
+/// into a parse error. The bound is a count, not a measured stack, so a
+/// program parses or fails the same way on every thread, and on a given
+/// target it is the same for every host: a limit that varied would make
+/// an included file's cached parse ([`crate::fragment`]) depend on who
+/// parsed it first. The weights are the same on every target; only this
+/// limit differs.
+///
+/// The count is weighted because a level of nesting takes a different
+/// amount of stack depending on what nests: a level of `[` passes through
+/// eight parser functions and a level of `{` through one, and the
+/// lowering and the evaluation differ as much. A plain node count low
+/// enough for `[` in WebKit (about 60 levels) would have refused MCAD's
+/// `bitmap.scad`, whose `else if` chain is 186 nodes deep and parses in
+/// every browser.
 ///
 /// OpenSCAD's Bison parser has a stack of 200,000 entries (`YYMAXDEPTH` in
 /// `parser.y`) and stops with "memory exhausted" when a program fills it:
 /// the nightly does at 99,997 levels of `translate()` or of `{`, and
 /// parses 100,000 levels of `(`. Its evaluator crashed on far less: 10,000
-/// levels of `translate()`, 50,000 of `[`. The deepest file in BOSL2,
-/// MCAD and OpenSCAD's tests is 186 nodes deep (MCAD's `bitmap.scad`, an
-/// `else if` chain).
+/// levels of `translate()`, 50,000 of `[`. By weight, the deepest files in
+/// BOSL2, MCAD and OpenSCAD's tests are BOSL2's `nurbs.scad` (2,289: 66
+/// `assert`s chained in one expression) and MCAD's `bitmap.scad` (2,005;
+/// `tests/deep_nesting.rs` checks both against the wasm32 limit).
 ///
-/// Natively the limit is 5,000 in an optimised build, set by the stages
-/// that run on a thread's own stack. Measured in a release build on macOS
-/// arm64:
+/// Natively the limit is 50,000 in an optimised build: 5,000 levels of
+/// the cheapest kinds (weight 10), as many as the plain node count it
+/// replaced allowed, and fewer of the costlier ones (2,380 levels of
+/// `translate()`, 1,111 of `[`). It is set by the stages that run on a
+/// thread's own stack. Measured in a release build on macOS arm64, when
+/// the limit was 5,000 nodes:
 /// - the parser and lowering take up to 800 bytes a node (`translate()`),
 ///   and the formatter more: `neoscad fmt`, on the main thread's 8 MiB,
 ///   overflowed between 8,000 and 10,000 levels of `(`;
 /// - with an evaluator's 80 MiB (`eval::DEFAULT_THREAD_STACK`), a program
 ///   overflowed at 26,000 levels of `translate()`, and at over 150,000 of
 ///   `{` or `(`; the evaluator's start (`Unit::add_scope`) took between 1
-///   and 2 MiB at this limit's 5,000 levels of `translate()`;
+///   and 2 MiB at 5,000 levels of `translate()`;
 /// - `neoscad fmt`'s output is quadratic in the depth (each line indented
 ///   by its level): 240 MB for 5,000 levels of `translate()`, formatted
 ///   in 860 MB.
 #[cfg(all(not(target_arch = "wasm32"), not(debug_assertions)))]
-pub const NESTING_LIMIT: u32 = 5_000;
+pub const NESTING_LIMIT: u32 = 50_000;
 
 /// [`NESTING_LIMIT`] in an unoptimised native build, whose frames are
 /// several times larger: on 80 MiB its evaluation of nested `translate()`
 /// overflowed between 3,600 and 3,800 levels, and its parser and lowering
-/// took 17 MB for 5,000.
+/// took 17 MB for 5,000. Half the optimised build's.
 #[cfg(all(not(target_arch = "wasm32"), debug_assertions))]
-pub const NESTING_LIMIT: u32 = 2_500;
+pub const NESTING_LIMIT: u32 = 25_000;
 
 /// [`NESTING_LIMIT`] on wasm32, where the engine's own stack is what the
-/// recursive stages overflow: V8's is under 1 MiB, a WebKit worker's a
-/// fifth of that. Measured in node 18 with a release build
-/// (`crates/wasm-check/run.js --depths`), the first to trap was a chain
-/// of `translate()` levels evaluated and rendered: at 542 levels (577 in
-/// another run of the same module), where the frame budget
-/// (`eval::recursion`) stops such a chain only from about 625. Parsing,
-/// lowering and formatting it alone trapped at 1,194 levels. This is 60%
-/// of the 542, the margin the frame budget keeps from V8's limit. WebKit
-/// is not covered: a WebKit worker overflowed at 187 levels of
-/// `translate()` (`docs/audits/heap-evaluator.md`). Nor is an unoptimised
-/// wasm32 build, which was not measured.
+/// recursive stages overflow, and a WebKit worker's is the smallest of the
+/// browsers'. It is 70% of the 3,700 that [`nesting_weight`]'s weights
+/// are sized by, so nesting stops here with 30% of the depth that
+/// overflowed WebKit in its worst case to spare (20% for `let`, `assert`
+/// and `echo` expressions outside functions; see there). Not covered: an
+/// unoptimised wasm32 build, which was not measured.
 #[cfg(target_arch = "wasm32")]
-pub const NESTING_LIMIT: u32 = 320;
+pub const NESTING_LIMIT: u32 = WASM32_NESTING_LIMIT;
+
+/// The wasm32 build's [`NESTING_LIMIT`], defined on every target so that
+/// native tests can check what a browser will parse.
+pub const WASM32_NESTING_LIMIT: u32 = 2_590;
+
+/// What a node of `kind` adds to the tree's depth as [`NESTING_LIMIT`]
+/// counts it: its share of the stack that one level of nesting through
+/// it takes in the stages that recurse on the tree. The cheapest levels
+/// weigh 10.
+///
+/// Measured October 2026 in Playwright's WebKit on macOS arm64, through
+/// the web core's worker (`crates/web`) with the limit lifted: for each
+/// kind, the fewest levels that overflowed, over fresh workers and over
+/// workers taking one program deeper each run (from several starting
+/// depths and steps, so that the engine's tiers warm up part-way), for
+/// parsing alone (the customizer's `parameters` request) and for a
+/// preview. The worst case is a worker part-way through tiering up, not
+/// a fresh one: 84 levels of `[` where a fresh worker reached 147. A
+/// level weighs at least 3,700 divided by those levels:
+/// - 69: `max(` (`CallExpr`, `ArgList` and `Arg`: 54), also with a named
+///   argument;
+/// - 84: `[` (`VectorExpr`: 45), `[a : b]` nested in `a` (`RangeExpr`),
+///   `1 + (` (`BinaryExpr` and `ParenExpr`);
+/// - 102: `(` (`ParenExpr`: 37), and 103 of `a[` (`IndexExpr`);
+/// - 112: a comprehension's `for` (`LcFor`: 34), `(for` (`LcParen` and
+///   `LcFor`);
+/// - 125: `{` after a module or an `if` (`ChildBlock` and its
+///   `ModuleInst` or `IfInst`: 31); 135: `function (a =` (`FunctionExpr`,
+///   `ParamList` and `Param`: 30);
+/// - 172: `.x` chains (`MemberExpr`: 22), 180 of `()` chains;
+/// - 181: `translate()`, `if ()` (`ModuleInst`, `IfInst`: 21); 191 or
+///   more of `for ()`, `let ()` and a user module; 193 of `else if`
+///   (`IfInst` and `ElseClause`: 21);
+/// - 214: a comprehension's `if` (`LcIf`: 18); 222: `?:` (`TernaryExpr`:
+///   17); 231: a comprehension's `each` (`LcEach`: 17);
+/// - 338: modifiers (`ModifierInst`: 11); 371 or more: `{` (`BlockStmt`:
+///   10), `module m()`, `1 + 1 + `, `1 ^ 1 ^ `, unary `-`, `function ()`.
+///
+/// Mixed kinds overflowed no sooner than their weights' sum says: a level
+/// of `max((-[` weighs 146, so the limit allows 17 levels, and WebKit
+/// overflowed at 28. The other engines have far more room: Chromium
+/// overflowed at 5 times WebKit's depths or more (913 levels of
+/// `translate()`, 406 of `max(`), Firefox at 10 times or more (2,053 of
+/// `translate()`, 1,174 of `[`) and node 24, in fresh processes only, at
+/// 14 times or more (2,585 of `translate()`, 1,550 of `[`).
+///
+/// The exception is `let`, `assert` and `echo` expressions: 123 levels of
+/// them overflowed in a statement's arguments (`echo(assert(true) ...
+/// 1)`), where the native evaluator (`Evaluator::eval` in
+/// `crates/eval/src/eval.rs`) recurses into each one's body, and 30% to
+/// spare would need a weight of 31. Parsed alone, or in a function's body
+/// (`function f() = assert(true) ... 1;`, called once), they reached 371.
+/// BOSL2's `nurbs.scad` chains 66 of them in a function's body, and at 31
+/// it would weigh 2,649, over the limit; at 26 it weighs 2,289, and the
+/// limit (99 levels) leaves 20% of the 123 to spare.
+pub const fn nesting_weight(kind: SyntaxKind) -> u32 {
+    match kind {
+        // The `if` it belongs to carries an `else if` level: a level of
+        // `else if` overflowed WebKit no sooner than one of `if`.
+        ElseClause => 0,
+        ModifierInst => 11,
+        TernaryExpr | LcEach => 17,
+        LcIf => 18,
+        ModuleInst | IfInst => 21,
+        MemberExpr => 22,
+        LetExpr | LcLet | AssertExpr | EchoExpr => 26,
+        CallExpr | LcFor | LcForC => 34,
+        ParenExpr | LcParen | IndexExpr => 37,
+        VectorExpr | RangeExpr => 45,
+        _ => 10,
+    }
+}
 
 #[derive(Debug)]
 pub struct Parse {
@@ -133,7 +212,8 @@ pub fn parse_with_limit(tokens: Vec<Token>, limit: u32) -> Parse {
         pos: 0,
         events: Vec::with_capacity(tokens.len()),
         open: Vec::new(),
-        limit: limit as usize,
+        depth: 0,
+        limit,
         exhausted: false,
         errors: Vec::new(),
     };
@@ -176,8 +256,20 @@ struct Marker(u32);
 struct Done {
     /// The node's start event.
     start: u32,
-    /// Nodes from this one to its deepest leaf, itself included.
+    /// The summed [`nesting_weight`]s from this node to its deepest leaf,
+    /// itself included.
     height: u32,
+}
+
+/// A node that has been started and not yet completed.
+#[derive(Debug, Clone, Copy)]
+struct Open {
+    /// Its start event.
+    start: u32,
+    /// Its own [`nesting_weight`].
+    weight: u32,
+    /// The height of its tallest completed child.
+    tallest: u32,
 }
 
 /// Whether an element inside `[...]` turned out to be a list-comprehension
@@ -195,11 +287,13 @@ struct Parser {
     raw: Vec<u32>,
     pos: usize,
     events: Vec<Event>,
-    /// Nodes not yet completed: each one's start event, and the height of
-    /// its tallest completed child.
-    open: Vec<(u32, u32)>,
-    /// The deepest the tree may get ([`NESTING_LIMIT`]).
-    limit: usize,
+    /// Nodes not yet completed, innermost last.
+    open: Vec<Open>,
+    /// The open nodes' summed [`nesting_weight`]s: the weighted depth of
+    /// the node being parsed.
+    depth: u32,
+    /// The weighted depth the tree may reach ([`NESTING_LIMIT`]).
+    limit: u32,
     /// The tree reached `limit`, and the input now ends at the token where
     /// it did, so every open rule unwinds as it would at the end of input.
     exhausted: bool,
@@ -277,17 +371,27 @@ impl Parser {
     // depth where nodes open bounds the parser's own recursion as well as
     // the tree. A node that encloses a completed one (`precede`, as in a
     // chain `a + b + c`, which the parser reads in a loop but every later
-    // stage walks as nested nodes) makes that subtree one deeper at once,
-    // so it checks the subtree's height too.
+    // stage walks as nested nodes) makes that subtree deeper at once, so it
+    // checks the subtree's height too.
 
-    fn start(&mut self) -> Marker {
+    /// Open a node that will be a `kind`, or one weighed the same where
+    /// the rule decides only later: a vector or a range, a parenthesised
+    /// expression or comprehension, a `let` expression or comprehension
+    /// `let`, a `for` or C-style `for` (`undecided_kinds_weigh_the_same`).
+    fn start(&mut self, kind: SyntaxKind) -> Marker {
         let pos = self.events.len() as u32;
         self.events.push(Event::Start {
             kind: Tombstone,
             forward_parent: 0,
         });
-        self.open.push((pos, 0));
-        if self.open.len() > self.limit {
+        let weight = nesting_weight(kind);
+        self.open.push(Open {
+            start: pos,
+            weight,
+            tallest: 0,
+        });
+        self.depth += weight;
+        if self.depth > self.limit {
             self.exhaust();
         }
         Marker(pos)
@@ -296,12 +400,15 @@ impl Parser {
     /// Close the top open node: its start event and height, which goes
     /// into its parent's tallest child.
     fn close(&mut self) -> (u32, u32) {
-        let (start, tallest) = self.open.pop().unwrap_or((0, 0));
-        let height = tallest + 1;
-        if let Some((_, t)) = self.open.last_mut() {
-            *t = (*t).max(height);
+        let Some(o) = self.open.pop() else {
+            return (0, 0);
+        };
+        self.depth -= o.weight;
+        let height = o.tallest + o.weight;
+        if let Some(parent) = self.open.last_mut() {
+            parent.tallest = parent.tallest.max(height);
         }
-        (start, height)
+        (o.start, height)
     }
 
     fn complete(&mut self, m: Marker, kind: SyntaxKind) -> Done {
@@ -315,12 +422,12 @@ impl Parser {
     }
 
     /// Start a node that will enclose the already completed `d`.
-    fn precede(&mut self, d: Done) -> Marker {
-        let m = self.start();
-        if let Some((_, t)) = self.open.last_mut() {
-            *t = d.height;
+    fn precede(&mut self, d: Done, kind: SyntaxKind) -> Marker {
+        let m = self.start(kind);
+        if let Some(o) = self.open.last_mut() {
+            o.tallest = d.height;
         }
-        if self.open.len() + d.height as usize > self.limit {
+        if self.depth.saturating_add(d.height) > self.limit {
             self.exhaust();
         }
         if let Event::Start { forward_parent, .. } = &mut self.events[d.start as usize] {
@@ -342,7 +449,7 @@ impl Parser {
             }
             self.events.push(Event::Finish);
         }
-        let m = self.start();
+        let m = self.start(ErrorNode);
         let mut nest = 0u32;
         loop {
             match self.cur() {
@@ -377,10 +484,10 @@ impl Parser {
     // --- statements -----------------------------------------------------
 
     fn source_file(&mut self) {
-        let m = self.start();
+        let m = self.start(SourceFile);
         while !self.at(Eof) {
             if self.at(UseDirective) {
-                let u = self.start();
+                let u = self.start(UseStmt);
                 self.bump();
                 self.complete(u, UseStmt);
                 continue;
@@ -396,12 +503,12 @@ impl Parser {
     fn statement(&mut self) -> PResult {
         match self.cur() {
             Semi => {
-                let m = self.start();
+                let m = self.start(EmptyStmt);
                 self.bump();
                 self.complete(m, EmptyStmt);
             }
             LBrace => {
-                let m = self.start();
+                let m = self.start(BlockStmt);
                 self.bump();
                 while !self.at(RBrace) {
                     if self.at(Eof) {
@@ -416,7 +523,7 @@ impl Parser {
                 self.complete(m, BlockStmt);
             }
             KwModule => {
-                let m = self.start();
+                let m = self.start(ModuleDef);
                 self.bump();
                 self.expect(Ident)?;
                 self.expect(LParen)?;
@@ -426,7 +533,7 @@ impl Parser {
                 self.complete(m, ModuleDef);
             }
             KwFunction => {
-                let m = self.start();
+                let m = self.start(FunctionDef);
                 self.bump();
                 self.expect(Ident)?;
                 self.expect(LParen)?;
@@ -438,7 +545,7 @@ impl Parser {
                 self.complete(m, FunctionDef);
             }
             Eot => {
-                let m = self.start();
+                let m = self.start(EotStmt);
                 self.bump();
                 self.complete(m, EotStmt);
             }
@@ -449,7 +556,7 @@ impl Parser {
     }
 
     fn assignment(&mut self) -> PResult {
-        let m = self.start();
+        let m = self.start(Assignment);
         self.bump();
         self.bump();
         self.expr()?;
@@ -461,20 +568,20 @@ impl Parser {
     fn module_instantiation(&mut self) -> PResult {
         match self.cur() {
             Bang | Hash | Percent | Star => {
-                let m = self.start();
+                let m = self.start(ModifierInst);
                 self.bump();
                 self.module_instantiation()?;
                 self.complete(m, ModifierInst);
             }
             KwIf => {
-                let m = self.start();
+                let m = self.start(IfInst);
                 self.bump();
                 self.expect(LParen)?;
                 self.expr()?;
                 self.expect(RParen)?;
                 self.child_statement()?;
                 if self.at(KwElse) {
-                    let e = self.start();
+                    let e = self.start(ElseClause);
                     self.bump();
                     self.child_statement()?;
                     self.complete(e, ElseClause);
@@ -483,7 +590,7 @@ impl Parser {
             }
             // "for", "let", "assert", "echo" and "each" are module names too.
             Ident | KwFor | KwLet | KwAssert | KwEcho | KwEach => {
-                let m = self.start();
+                let m = self.start(ModuleInst);
                 self.bump();
                 self.expect(LParen)?;
                 self.arguments()?;
@@ -499,12 +606,12 @@ impl Parser {
     fn child_statement(&mut self) -> PResult {
         match self.cur() {
             Semi => {
-                let m = self.start();
+                let m = self.start(EmptyStmt);
                 self.bump();
                 self.complete(m, EmptyStmt);
             }
             LBrace => {
-                let m = self.start();
+                let m = self.start(ChildBlock);
                 self.bump();
                 while !self.at(RBrace) {
                     if self.at(Eof) {
@@ -529,9 +636,9 @@ impl Parser {
     }
 
     fn parameters(&mut self) -> PResult {
-        let list = self.start();
+        let list = self.start(ParamList);
         while self.at(Ident) {
-            let m = self.start();
+            let m = self.start(Param);
             self.bump();
             if self.eat(Eq) {
                 self.expr()?;
@@ -546,9 +653,9 @@ impl Parser {
     }
 
     fn arguments(&mut self) -> PResult {
-        let list = self.start();
+        let list = self.start(ArgList);
         while self.cur().starts_expr() {
-            let m = self.start();
+            let m = self.start(Arg);
             if self.at(Ident) && self.nth(1) == Eq {
                 self.bump();
                 self.bump();
@@ -568,7 +675,7 @@ impl Parser {
     fn expr(&mut self) -> PResult<Done> {
         let kind = match self.cur() {
             KwFunction => {
-                let m = self.start();
+                let m = self.start(FunctionExpr);
                 self.bump();
                 self.expect(LParen)?;
                 self.parameters()?;
@@ -581,7 +688,7 @@ impl Parser {
             KwEcho => EchoExpr,
             _ => return self.expr_from(None),
         };
-        let m = self.start();
+        let m = self.start(kind);
         self.bump();
         self.expect(LParen)?;
         self.arguments()?;
@@ -600,7 +707,7 @@ impl Parser {
         if !self.at(Question) {
             return Ok(cond);
         }
-        let m = self.precede(cond);
+        let m = self.precede(cond, TernaryExpr);
         self.bump();
         self.expr()?;
         self.expect(Colon)?;
@@ -630,7 +737,7 @@ impl Parser {
             if level < min {
                 break;
             }
-            let m = self.precede(left);
+            let m = self.precede(left, BinaryExpr);
             self.bump();
             self.binary(level + 1, None)?;
             left = self.complete(m, BinaryExpr);
@@ -640,7 +747,7 @@ impl Parser {
 
     fn unary(&mut self, lhs: Option<Done>) -> PResult<Done> {
         if lhs.is_none() && matches!(self.cur(), Plus | Minus | Bang | Tilde) {
-            let m = self.start();
+            let m = self.start(UnaryExpr);
             self.bump();
             self.unary(None)?;
             return Ok(self.complete(m, UnaryExpr));
@@ -649,7 +756,7 @@ impl Parser {
         if !self.at(Caret) {
             return Ok(base);
         }
-        let m = self.precede(base);
+        let m = self.precede(base, BinaryExpr);
         self.bump();
         self.unary(None)?;
         Ok(self.complete(m, BinaryExpr))
@@ -663,21 +770,21 @@ impl Parser {
         loop {
             let kind = match self.cur() {
                 LParen => {
-                    let m = self.precede(left);
+                    let m = self.precede(left, CallExpr);
                     self.bump();
                     self.arguments()?;
                     self.expect(RParen)?;
                     (m, CallExpr)
                 }
                 LBrack => {
-                    let m = self.precede(left);
+                    let m = self.precede(left, IndexExpr);
                     self.bump();
                     self.expr()?;
                     self.expect(RBrack)?;
                     (m, IndexExpr)
                 }
                 Dot => {
-                    let m = self.precede(left);
+                    let m = self.precede(left, MemberExpr);
                     self.bump();
                     self.expect(Ident)?;
                     (m, MemberExpr)
@@ -691,17 +798,17 @@ impl Parser {
     fn primary(&mut self) -> PResult<Done> {
         match self.cur() {
             KwTrue | KwFalse | KwUndef | Number | String => {
-                let m = self.start();
+                let m = self.start(Literal);
                 self.bump();
                 Ok(self.complete(m, Literal))
             }
             Ident => {
-                let m = self.start();
+                let m = self.start(NameRef);
                 self.bump();
                 Ok(self.complete(m, NameRef))
             }
             LParen => {
-                let m = self.start();
+                let m = self.start(ParenExpr);
                 self.bump();
                 self.expr()?;
                 self.expect(RParen)?;
@@ -714,7 +821,7 @@ impl Parser {
 
     /// `[]`, `[a : b]`, `[a : s : b]` or `[elements]`.
     fn vector(&mut self) -> PResult<Done> {
-        let m = self.start();
+        let m = self.start(VectorExpr);
         self.bump();
         if self.eat(RBrack) {
             return Ok(self.complete(m, VectorExpr));
@@ -755,7 +862,7 @@ impl Parser {
             }
             KwLet => self.let_chain(),
             LParen if matches!(self.nth(1), KwEach | KwFor | KwIf) => {
-                let m = self.start();
+                let m = self.start(LcParen);
                 self.bump();
                 self.lc_clause()?;
                 self.expect(RParen)?;
@@ -763,7 +870,7 @@ impl Parser {
                 Ok(Elem::Lc)
             }
             LParen if self.nth(1) == KwLet => {
-                let m = self.start();
+                let m = self.start(ParenExpr);
                 self.bump();
                 let inner = self.let_chain()?;
                 self.expect(RParen)?;
@@ -785,7 +892,7 @@ impl Parser {
     /// `let(args) X` inside a vector: a comprehension let when `X` is a
     /// clause, a let expression otherwise.
     fn let_chain(&mut self) -> PResult<Elem> {
-        let m = self.start();
+        let m = self.start(LetExpr);
         self.bump();
         self.expect(LParen)?;
         self.arguments()?;
@@ -800,13 +907,13 @@ impl Parser {
     fn lc_clause(&mut self) -> PResult {
         match self.cur() {
             KwEach => {
-                let m = self.start();
+                let m = self.start(LcEach);
                 self.bump();
                 self.element()?;
                 self.complete(m, LcEach);
             }
             KwFor => {
-                let m = self.start();
+                let m = self.start(LcFor);
                 self.bump();
                 self.expect(LParen)?;
                 self.arguments()?;
@@ -823,7 +930,7 @@ impl Parser {
                 self.complete(m, kind);
             }
             KwIf => {
-                let m = self.start();
+                let m = self.start(LcIf);
                 self.bump();
                 self.expect(LParen)?;
                 self.expr()?;
@@ -1070,31 +1177,55 @@ mod tests {
             .collect()
     }
 
+    /// The weighted depth of a path of nodes, root first.
+    fn depth(path: &[SyntaxKind]) -> u32 {
+        path.iter().map(|&k| nesting_weight(k)).sum()
+    }
+
     #[test]
     fn nesting_past_the_limit_stops_the_parse() {
-        // SourceFile > Assignment > ParenExpr ... > Literal: `x = (1);` is
-        // 4 deep, and every `(` one more. The error is at the token where
-        // the node that is one too deep starts.
-        assert_eq!(errors_with_limit("x = (1);", 4), vec![]);
-        assert_eq!(errors_with_limit("x = ((1));", 4), vec![("1".into(), true)]);
+        // SourceFile > Assignment > ParenExpr ... > Literal: every `(` adds
+        // a ParenExpr's weight. The error is at the token where the node
+        // that goes past the limit starts.
+        let one = depth(&[SourceFile, Assignment, ParenExpr, Literal]);
+        assert_eq!(errors_with_limit("x = (1);", one), vec![]);
+        assert_eq!(
+            errors_with_limit("x = (1);", one - 1),
+            vec![("1".into(), true)]
+        );
+        assert_eq!(
+            errors_with_limit("x = ((1));", one + nesting_weight(ParenExpr) - 1),
+            vec![("1".into(), true)]
+        );
+        assert_eq!(
+            errors_with_limit("x = ((1));", one),
+            vec![("(".into(), true)]
+        );
         // One error however much input follows, broken or not: the parse
         // ends where the limit was reached.
+        let three = depth(&[SourceFile, Assignment, ParenExpr, ParenExpr, ParenExpr]);
         assert_eq!(
-            errors_with_limit("x = ((((1)))); y = ; z = (((2)));", 5),
+            errors_with_limit("x = ((((1)))); y = ; z = (((2)));", three),
             vec![("(".into(), true)]
         );
         // An earlier syntax error is still the first.
         assert_eq!(
-            errors_with_limit("a = ; x = ((((1))));", 5),
+            errors_with_limit("a = ; x = ((((1))));", three),
             vec![(";".into(), false), ("(".into(), true)]
         );
         // Statements: SourceFile > ModuleInst > ModuleInst > ... > ArgList.
-        assert_eq!(errors_with_limit("a() b() c();", 5), vec![]);
+        let four = depth(&[SourceFile, ModuleInst, ModuleInst, ModuleInst, ModuleInst]);
+        let args = nesting_weight(ArgList);
+        assert_eq!(errors_with_limit("a() b() c();", four + args - 1), vec![]);
         assert_eq!(
-            errors_with_limit("a() b() c() d();", 5),
+            errors_with_limit("a() b() c() d();", four + args - 1),
             vec![(")".into(), true)]
         );
-        assert_eq!(errors_with_limit("{{{a();}}}", 4), vec![("a".into(), true)]);
+        let blocks = depth(&[SourceFile, BlockStmt, BlockStmt, BlockStmt]);
+        assert_eq!(
+            errors_with_limit("{{{a();}}}", blocks),
+            vec![("a".into(), true)]
+        );
     }
 
     /// A chain the parser reads in a loop (`1 + 1 + ...`, `f()()`,
@@ -1103,21 +1234,39 @@ mod tests {
     #[test]
     fn chains_count_against_the_limit() {
         // SourceFile > Assignment > BinaryExpr x2 > Literal.
-        assert_eq!(errors_with_limit("x = 1 + 2 + 3;", 5), vec![]);
+        let two = depth(&[SourceFile, Assignment, BinaryExpr, BinaryExpr, Literal]);
+        assert_eq!(errors_with_limit("x = 1 + 2 + 3;", two), vec![]);
         assert_eq!(
-            errors_with_limit("x = 1 + 2 + 3 + 4;", 5),
+            errors_with_limit("x = 1 + 2 + 3 + 4;", two),
             vec![("+".into(), true)]
         );
+        let index = depth(&[SourceFile, Assignment, IndexExpr, IndexExpr, NameRef]);
+        assert_eq!(errors_with_limit("x = a[0][1];", index), vec![]);
         assert_eq!(
-            errors_with_limit("x = a[0][1][2][3];", 5),
+            errors_with_limit("x = a[0][1][2][3];", index),
             vec![("[".into(), true)]
         );
         // A right-nested chain grows as the parser recurses.
-        assert_eq!(errors_with_limit("x = 1 ^ 2 ^ 3;", 5), vec![]);
+        assert_eq!(errors_with_limit("x = 1 ^ 2 ^ 3;", two), vec![]);
         assert_eq!(
-            errors_with_limit("x = 1 ^ 2 ^ 3 ^ 4;", 5),
+            errors_with_limit("x = 1 ^ 2 ^ 3 ^ 4;", two),
             vec![("^".into(), true)]
         );
+    }
+
+    /// Kinds whose rule opens a node before it knows which of two kinds
+    /// it is weigh the same, so the depth the parser checks is the depth
+    /// of the tree it builds.
+    #[test]
+    fn undecided_kinds_weigh_the_same() {
+        for (a, b) in [
+            (VectorExpr, RangeExpr),
+            (LetExpr, LcLet),
+            (ParenExpr, LcParen),
+            (LcFor, LcForC),
+        ] {
+            assert_eq!(nesting_weight(a), nesting_weight(b), "{a:?} {b:?}");
+        }
     }
 
     #[test]

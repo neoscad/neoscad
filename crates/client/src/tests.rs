@@ -115,7 +115,12 @@ fn overrides_run_as_assignments_and_bad_ones_are_dropped() {
 /// (`Client::customizer`). On the caller's stack it overflowed.
 #[test]
 fn customizer_parses_deep_documents_on_a_small_stack() {
-    let n = lang::syntax::parser::NESTING_LIMIT as usize - 10;
+    // As many levels of `translate()` as the nesting limit allows, less a
+    // few for the statement around them and the innermost arguments.
+    let n = (lang::syntax::parser::NESTING_LIMIT
+        / lang::syntax::parser::nesting_weight(lang::syntax::SyntaxKind::ModuleInst))
+        as usize
+        - 10;
     let text = format!(
         "w = 2; // [1:10]\n{}cube(w);\n",
         "translate([0, 0, 1]) ".repeat(n)

@@ -293,7 +293,12 @@ fn language_server_over_the_core() {
 /// caller's stack in a test build before it had a thread of its own.
 #[test]
 fn deep_documents_on_a_dispatch_queues_stack() {
-    let n = lang::syntax::parser::NESTING_LIMIT as usize - 10;
+    // As many levels of `translate()` as the nesting limit allows, less a
+    // few for the statement around them and the innermost arguments.
+    let n = (lang::syntax::parser::NESTING_LIMIT
+        / lang::syntax::parser::nesting_weight(lang::syntax::SyntaxKind::ModuleInst))
+        as usize
+        - 10;
     let text = format!(
         "w = 2; // [1:10]\n{}cube(w);\n",
         "translate([0, 0, 1]) ".repeat(n)
