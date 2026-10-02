@@ -39,9 +39,9 @@ use serde::{Deserialize, Serialize};
 /// More than one is for rotation: a release adds the new key here, the
 /// feed switches to signing with it once installs that trust it are
 /// common, and a later release drops the old one (`docs/release.md`,
-/// "Rotating the feed key"). Empty until the owner creates the release
-/// key; with no key every feed is refused, so nothing is ever offered.
-pub const RELEASE_KEYS: &[&str] = &[];
+/// "Rotating the feed key"). The release key's secret half is the
+/// `UPDATE_FEED_MINISIGN_KEY` repository secret.
+pub const RELEASE_KEYS: &[&str] = &["RWSm6qcEzUbgwTHzZlTMn8T16vKTFxERNk49C0bTuEca3MOZyStydzJJ"];
 
 /// One extra trusted key, set at build time through the
 /// `NEOSCAD_UPDATE_TEST_PUBLIC_KEY` environment variable: the end-to-end

@@ -345,9 +345,9 @@ checked by `client::update::check`, the code the CLI uses.
   (`linux_app::update::Settings::due`). Main menu > Check for Updates
   checks at once and says what it found, a failure included; the
   automatic check is silent and only logs (`G_MESSAGES_DEBUG=neoscad`,
-  lines starting `update:`). A build with no trusted key (every build
-  until the release key exists, `RELEASE_KEYS` in
-  `crates/client/src/update.rs`) makes no request at all.
+  lines starting `update:`). A build with no trusted key (`RELEASE_KEYS` in
+  `crates/client/src/update.rs` empty, as before 0.2.2) makes no request
+  at all.
 - **What it fetches.** `https://neoscad.org/updates/v1/stable.json`, or
   `rc.json` with "Receive release candidates" on, and its `.minisig`:
   plain GETs through libsoup (already linked by WebKitGTK), no cookies,
