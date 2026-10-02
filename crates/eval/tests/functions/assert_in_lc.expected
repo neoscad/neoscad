@@ -1,0 +1,11 @@
+ERROR: Assertion '(i < 3)' failed: "i is 3" @2
+TRACE: called by 'g' @3
+TRACE: called by 'echo' @3
+TRACE: call of 'm()' @3
+TRACE: called by 'm' @4
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

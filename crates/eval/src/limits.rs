@@ -134,18 +134,21 @@ pub struct Limits {
     /// Triangles (2D: vertices) of one geometry result, the final model
     /// included.
     pub triangles: Option<u64>,
-    /// User modules instantiated inside one another before evaluation
-    /// stops with OpenSCAD's "Recursion detected" error. Unlike the other
+    /// User modules instantiated inside one another (and, with the
+    /// `heap-eval` feature, user function calls in progress too, tail
+    /// calls not counting) before evaluation stops with OpenSCAD's
+    /// "Recursion detected" error. Unlike the other
     /// limits this one always applies: `None` is [`DEFAULT_DEPTH`], and it
     /// cannot be turned off, because `module m() m();` must end in that
     /// error rather than run until the memory is gone.
     ///
     /// A count rather than a measure of the native stack, so the depth is
     /// the same in every build and browser. With the `heap-eval` feature
-    /// statements take no native stack and this is what stops a module
-    /// recursion; the default (recursive) evaluator also stops at the stack
-    /// limit of [`crate::recursion`], which it reaches first unless this
-    /// is set lower. Function calls are not counted yet.
+    /// statements and calls take no native stack (past a few native call
+    /// levels) and this is what stops a recursion; the default (recursive)
+    /// evaluator counts only modules, and also stops at the stack limit of
+    /// [`crate::recursion`], which it reaches first unless this is set
+    /// lower.
     pub depth: Option<u64>,
 }
 

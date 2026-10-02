@@ -300,9 +300,11 @@ result with a `resource-limit` diagnostic, not a crash.
   A counted limit, `--limit depth=N` (`Limits::depth`, default 100,000
   nested module calls, never off), applies in every build. Built with the
   `heap-eval` feature, statements run on a heap stack
-  (`crates/eval/src/heap.rs`), so it alone stops a module recursion, at
-  the same depth on every target and browser; function calls still
-  recurse natively (`docs/audits/heap-evaluator.md`).
+  (`crates/eval/src/heap.rs`), and so do function calls past 8 native
+  levels with the expressions around them (`crates/eval/src/heap_expr.rs`).
+  The limit then also counts function calls in progress, and it alone
+  stops a recursion through modules, functions or both, at the same depth
+  on every target and browser (`docs/audits/heap-evaluator.md`).
 
 Details: `docs/cli-json.md` ("Resource limits"); open gaps in
 `docs/followups.md` ("Serve and session").

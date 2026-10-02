@@ -1,0 +1,23 @@
+ECHO: 5, -3, true, 6, 2, 1, 8
+ECHO: 3, 2, true, true
+ECHO: "e", 1
+ECHO: "e", 0
+ECHO: "e", 0
+ECHO: "e", 3
+ECHO: "e", false
+ECHO: "e", "b"
+ECHO: false, true, "b"
+ECHO: [0 : 2 : 6], [1, 2, 3]
+ECHO: 4, [1, 2, 3, 2], 3, "s2"
+WARNING: Ignoring unknown function 'undef_function' @10
+ECHO: false, true
+ECHO: 7, [2, 3]
+ECHO: 3, 1
+-- aborted false interrupted false hard false
+-- csg
+group();
+
+
+-- nodes
+0 1 Root
+1 9 Group

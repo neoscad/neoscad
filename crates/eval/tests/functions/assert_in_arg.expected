@@ -1,0 +1,12 @@
+ERROR: Assertion 'false' failed: "in an argument" @3
+TRACE: called by 't' @3
+TRACE: called by 't' @3
+TRACE: called by 't' @3
+TRACE: called by 't' @4
+TRACE: called by 'echo' @4
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

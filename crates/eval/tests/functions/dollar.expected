@@ -1,0 +1,12 @@
+ECHO: 3, 4
+ECHO: 9, [2, 4]
+ECHO: 12, 5
+ECHO: 0, 3, [4, 5]
+-- aborted false interrupted false hard false
+-- csg
+group();
+
+
+-- nodes
+0 1 Root
+1 4 Group

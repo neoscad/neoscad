@@ -1,0 +1,9 @@
+ECHO: 80
+ERROR: Resource limit exceeded: a list would make 102 list elements, over the list limit of 100 @5
+TRACE: called by 'echo' @5
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

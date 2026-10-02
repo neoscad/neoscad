@@ -687,23 +687,9 @@ fn frame_budget_gives_the_recursion_errors() {
         frame_limit: 400,
         ..Options::default()
     };
-    let (lines, ev) = run_with(
-        "function f(n) = n == 0 ? 0 : 1 + f(n - 1);\necho(f(1000));",
-        &small,
-    );
-    assert!(ev.aborted);
-    assert_eq!(
-        lines[0],
-        "ERROR: Recursion detected calling function 'f' @1"
-    );
-    let (lines, _) = run_with(
-        "function f(n) = n == 0 ? 0 : 1 + f(n - 1);\necho(f(50));",
-        &small,
-    );
-    assert_eq!(lines, ["ECHO: 50"]);
-
-    // Statements spend the budget natively; on the heap evaluator they
-    // take no native stack, and the counted depth limit stops them.
+    // Statements and calls spend the budget natively; on the heap
+    // evaluator they take no native stack (past a few native calls), and
+    // the counted depth limit stops them.
     #[cfg(feature = "heap-eval")]
     let small = {
         let limits = eval::limits::Limits {
@@ -721,6 +707,22 @@ fn frame_budget_gives_the_recursion_errors() {
             ..small
         }
     };
+    let (lines, ev) = run_with(
+        "function f(n) = n == 0 ? 0 : 1 + f(n - 1);\necho(f(1000));",
+        &small,
+    );
+    assert!(ev.aborted);
+    assert_eq!(
+        lines[0],
+        "ERROR: Recursion detected calling function 'f' @1"
+    );
+    let within = if cfg!(feature = "heap-eval") { 30 } else { 50 };
+    let (lines, _) = run_with(
+        &format!("function f(n) = n == 0 ? 0 : 1 + f(n - 1);\necho(f({within}));"),
+        &small,
+    );
+    assert_eq!(lines, [format!("ECHO: {within}")]);
+
     let (lines, _) = run_with(
         "module m(n) { if (n > 0) translate([1, 0, 0]) m(n - 1); }\nm(1000);",
         &small,

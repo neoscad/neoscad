@@ -82,6 +82,12 @@ const PRINT_STACK_LIMIT: usize = (8 << 20) - (128 << 10);
 #[cfg(feature = "heap-eval")]
 const MODULE_LEVEL_STACK: usize = 2 << 10;
 
+/// The same for a level of function recursion that is not a tail call
+/// (`1 + f(n - 1)`): 64 MiB over the 110,000 levels of `function-add`,
+/// about 600 bytes.
+#[cfg(feature = "heap-eval")]
+const FUNCTION_LEVEL_STACK: usize = 600;
+
 impl Evaluator<'_> {
     /// The native stack the user modules being instantiated stand for, for
     /// printing: none natively, where they hold it themselves. The heap
@@ -97,7 +103,7 @@ impl Evaluator<'_> {
     fn module_stack(&self) -> usize {
         #[cfg(feature = "heap-eval")]
         {
-            self.module_names.len() * MODULE_LEVEL_STACK
+            self.module_names.len() * MODULE_LEVEL_STACK + self.fn_depth * FUNCTION_LEVEL_STACK
         }
         #[cfg(not(feature = "heap-eval"))]
         {

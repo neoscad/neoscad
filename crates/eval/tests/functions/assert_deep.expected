@@ -1,0 +1,15 @@
+ERROR: Assertion 'false' failed: "at the bottom" @2
+TRACE: called by 'f' @2
+TRACE: called by 'f' @2
+TRACE: called by 'f' @2
+TRACE: called by 'f' @2
+TRACE: called by 'f' @2
+TRACE: called by 'f' @2
+TRACE: called by 'f' @3
+TRACE: called by 'echo' @3
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

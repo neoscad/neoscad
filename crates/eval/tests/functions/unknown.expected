@@ -1,0 +1,12 @@
+WARNING: Ignoring unknown function 'nosuch' @2
+WARNING: Ignoring unknown variable "nosuchvar" @2
+WARNING: undefined operation (undefined + undefined) @2
+WARNING: Ignoring unknown function 'nosuch2' @3
+WARNING: Ignoring unknown function 'nosuch2' @3
+ECHO: [[undef]], [undef, undef]
+-- aborted false interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

@@ -266,7 +266,7 @@ impl<'a> Evaluator<'a> {
     /// pooled, and the evaluator's speed is sensitive to how LLVM inlines
     /// its hot functions (`docs/audits/bytecode-vm.md` §3.6).
     #[inline(always)]
-    fn apply_builtin(&mut self, b: Builtin, loc: Loc, a: &mut Vec<ArgVal>) -> R<Value> {
+    pub(crate) fn apply_builtin(&mut self, b: Builtin, loc: Loc, a: &mut Vec<ArgVal>) -> R<Value> {
         use Builtin::*;
         Ok(match b {
             Abs => self.num1("abs", a, loc, f64::abs),

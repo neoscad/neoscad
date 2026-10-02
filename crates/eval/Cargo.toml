@@ -10,10 +10,11 @@ license.workspace = true
 name = "eval"
 
 [features]
-# The heap evaluator: statements and module instantiation run on an
-# explicit stack of frames instead of native recursion (`src/heap.rs`), so
-# module recursion ends at the counted depth limit (`limits::Limits::depth`)
-# in every build and browser. A compile-time switch, so the default build
+# The heap evaluator: statements and module instantiation (`src/heap.rs`),
+# and function calls past a few native levels with the expressions around
+# them (`src/heap_expr.rs`), run on an explicit stack of frames instead of
+# native recursion, so a recursion ends at the counted depth limit
+# (`limits::Limits::depth`) in every build and browser. A compile-time switch, so the default build
 # keeps the recursive evaluator's code and layout unchanged
 # (docs/audits/heap-evaluator.md, section 3).
 heap-eval = []

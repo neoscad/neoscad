@@ -1,0 +1,10 @@
+ERROR: Assertion '(a < 3)' failed: "a too big" @2
+TRACE: called by 'h' @3
+TRACE: called by 'k' @4
+TRACE: assignment to "x" @4
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

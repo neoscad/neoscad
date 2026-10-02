@@ -1,0 +1,171 @@
+ECHO: "w", 2, 5, [3, 4, 5]
+ECHO: "w", 2, 5, [3, 4, 5]
+ECHO: "w", 2, 5, [3, 4, 5]
+ECHO: "w", 2, 5, [3, 4, 5]
+ECHO: "w", 4, 7, [3, 4, 5, 6, 7]
+ECHO: "w", 4, 7, [3, 4, 5, 6, 7]
+ECHO: "w", 4, 7, [3, 4, 5, 6, 7]
+ECHO: "w", 4, 7, [3, 4, 5, 6, 7]
+ECHO: "w", 4, 7, [3, 4, 5, 6, 7]
+ECHO: "w", 4, 7, [3, 4, 5, 6, 7]
+ECHO: "w", 4, 7, [3, 4, 5, 6, 7]
+ECHO: "w", 4, 7, [3, 4, 5, 6, 7]
+-- aborted false interrupted false hard false
+-- csg
+group() {
+	cube(size = [5, 5, 5], center = false);
+}
+group() {
+	cube(size = [5, 5, 5], center = false);
+}
+group() {
+	cube(size = [5, 5, 5], center = false);
+}
+multmatrix([[1, 0, 0, 1], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+	group() {
+		cube(size = [5, 5, 5], center = false);
+	}
+}
+group() {
+	group() {
+		group() {
+			group() {
+				group() {
+					group() {
+						group() {
+							group() {
+								group() {
+									cube(size = [7, 7, 7], center = false);
+								}
+							}
+						}
+						group() {
+							group() {
+								group() {
+									cube(size = [7, 7, 7], center = false);
+								}
+							}
+						}
+					}
+				}
+				group() {
+					group() {
+						group() {
+							group() {
+								group() {
+									cube(size = [7, 7, 7], center = false);
+								}
+							}
+						}
+						group() {
+							group() {
+								group() {
+									cube(size = [7, 7, 7], center = false);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		group() {
+			group() {
+				group() {
+					group() {
+						group() {
+							group() {
+								group() {
+									cube(size = [7, 7, 7], center = false);
+								}
+							}
+						}
+						group() {
+							group() {
+								group() {
+									cube(size = [7, 7, 7], center = false);
+								}
+							}
+						}
+					}
+				}
+				group() {
+					group() {
+						group() {
+							group() {
+								group() {
+									cube(size = [7, 7, 7], center = false);
+								}
+							}
+						}
+						group() {
+							group() {
+								group() {
+									cube(size = [7, 7, 7], center = false);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+
+-- nodes
+0 1 Root
+1 2 Group
+2 4 Cube
+1 5 Group
+2 7 Cube
+1 8 Group
+2 10 Cube
+1 11 Transform
+2 12 Group
+3 14 Cube
+1 15 Group
+2 16 Group
+3 17 Group
+4 18 Group
+5 19 Group
+6 20 Group
+7 21 Group
+8 22 Group
+9 23 Group
+10 25 Cube
+7 26 Group
+8 27 Group
+9 28 Group
+10 30 Cube
+5 31 Group
+6 32 Group
+7 33 Group
+8 34 Group
+9 35 Group
+10 37 Cube
+7 38 Group
+8 39 Group
+9 40 Group
+10 42 Cube
+3 43 Group
+4 44 Group
+5 45 Group
+6 46 Group
+7 47 Group
+8 48 Group
+9 49 Group
+10 51 Cube
+7 52 Group
+8 53 Group
+9 54 Group
+10 56 Cube
+5 57 Group
+6 58 Group
+7 59 Group
+8 60 Group
+9 61 Group
+10 63 Cube
+7 64 Group
+8 65 Group
+9 66 Group
+10 68 Cube

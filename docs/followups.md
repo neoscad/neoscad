@@ -176,13 +176,40 @@ lead them, come roughly in order of user impact.
   are in that file's "Stage 0 done". Stage 1 (statements and module
   instantiation on a heap stack, behind the `heap-eval` cargo feature,
   with the counted `--limit depth=N`) is done; see "Stage 1 done" there.
+  Stage 2 (function calls, comprehensions and `let`/`assert`/`echo` on
+  the heap past 8 native call levels, with the counted limit covering
+  functions) is done; see "Stage 2 done". Left from stage 2:
+  - the rare shapes that stay native and start a nested heap loop for a
+    part that calls: ranges (`[0 : f(n - 1)]`), callees that are
+    expressions (`f(x)(y)`), methods, C-style `for` comprehensions,
+    `object()` and `is_undef()` arguments, parameter defaults and `use`d
+    libraries' assignments. A recursion through one of them at every
+    level still holds native stack per level, and still stops with the
+    frame budget's error;
+  - the heap path costs 1.3-1.6 times the native one per call (every
+    node on the way to a call is a frame), so a deep non-tail recursion
+    is slower than before past 8 levels: `fib(25)` runs 28% more
+    instructions and `1 + f(n - 1)` 36%;
+  - values nested as deep as the counted limit (`[nest(n - 1)]` 100,000
+    times) can now be built in any browser, and dropping or printing
+    them recurses on the value's depth (see "Value depth" in
+    `docs/audits/heap-evaluator.md` §6), which a WebKit worker's stack
+    may not hold. It is unmeasured there; natively it is fine;
+  - `resolve::Stats` does not count the `may_call` share of a corpus;
+  - the frame budget, its weights and the worker's probe are unused for
+    recursion under the feature. They still bound native source nesting,
+    which the parser bounds first (see "Stage 2 done"). They go when the
+    feature becomes the default.
+
   Left from stage 1:
   - the apps' `ResourceLimits` record (`crates/client/src/types.rs`)
     does not carry `depth`, so the app always uses the default; adding it
     changes the Swift, C# and Kotlin bindings;
   - the heap frames are not charged to the memory estimate
     (`limits::live`): at the default depth a module recursion holds about
-    100 MB of contexts and frames that `--limit memory` does not see;
+    100 MB of contexts and frames that `--limit memory` does not see (a
+    function recursion 41 MB, one through a comprehension 100 MB, since
+    stage 2);
   - the evaluator's start, `Unit::add_scope` (`crates/eval/src/eval.rs`),
     recurses on source nesting, like the parser. Natively the parser
     overflows first; in a browser, with the frame budget no longer

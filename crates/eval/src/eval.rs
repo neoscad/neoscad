@@ -50,6 +50,11 @@ pub(crate) struct Unit<'a> {
     /// (`Evaluator::move_accumulators`): 0 not yet known, 1 no, 2 yes.
     /// Sized on the first call, so a unit that calls nothing costs nothing.
     pub accumulates: Vec<u8>,
+    /// Per expression, whether evaluating it can reach a user function
+    /// call (`Evaluator::may_call`): 0 not yet known, 1 no, 2 yes. Sized
+    /// on the first question, as `accumulates` is.
+    #[cfg(feature = "heap-eval")]
+    pub may_call: Vec<u8>,
     /// Where each name reference can be bound (see [`crate::resolve`]).
     pub res: crate::resolve::UnitRes,
 }
@@ -66,6 +71,8 @@ impl<'a> Unit<'a> {
             consts: Vec::new(),
             uses: Vec::new(),
             accumulates: Vec::new(),
+            #[cfg(feature = "heap-eval")]
+            may_call: Vec::new(),
             res: crate::resolve::UnitRes::default(),
         };
         u.add_scope(&ast.root);
@@ -284,6 +291,19 @@ pub(crate) struct Evaluator<'a> {
     /// The arguments of the `if`s whose children are running.
     #[cfg(feature = "heap-eval")]
     pub(crate) heap_args: Vec<Vec<crate::call::ArgVal>>,
+    /// The heap evaluator's expression frames and their side stacks (see
+    /// [`crate::heap_expr`]).
+    #[cfg(feature = "heap-eval")]
+    pub(crate) xs: crate::heap_expr::Stacks<'a>,
+    /// User function calls in progress on the heap, not counting tail
+    /// calls, which replace their caller: with the user modules, what the
+    /// counted depth limit counts.
+    #[cfg(feature = "heap-eval")]
+    pub(crate) fn_depth: usize,
+    /// The user calls of `fn_depth` running natively (`eval_call`), whose
+    /// count decides when the heap takes over (`heap_expr::NATIVE_CALLS`).
+    #[cfg(feature = "heap-eval")]
+    pub(crate) native_calls: u32,
 }
 
 /// A variable's value moved out of its frame, to be handed to the one read
@@ -528,6 +548,12 @@ impl<'a> Evaluator<'a> {
             heap_indices: Vec::new(),
             #[cfg(feature = "heap-eval")]
             heap_args: Vec::new(),
+            #[cfg(feature = "heap-eval")]
+            xs: Default::default(),
+            #[cfg(feature = "heap-eval")]
+            fn_depth: 0,
+            #[cfg(feature = "heap-eval")]
+            native_calls: 0,
             opts,
         }
     }
@@ -557,7 +583,22 @@ impl<'a> Evaluator<'a> {
     /// statements take no native stack.
     #[inline]
     pub fn depth_exhausted(&self) -> bool {
-        self.module_names.len() >= self.caps.depth
+        self.depth_used() >= self.caps.depth
+    }
+
+    /// What the counted depth limit counts: the user modules being
+    /// instantiated, and under the heap evaluator the user function calls
+    /// in progress too, so a recursion through both stops at one limit.
+    #[inline]
+    pub fn depth_used(&self) -> usize {
+        #[cfg(feature = "heap-eval")]
+        {
+            self.module_names.len() + self.fn_depth
+        }
+        #[cfg(not(feature = "heap-eval"))]
+        {
+            self.module_names.len()
+        }
     }
 
     /// How deep a module call is, for the call memo, which replays a call
@@ -1590,6 +1631,22 @@ impl<'a> Evaluator<'a> {
         Ok(v)
     }
 
+    /// [`Self::eval`] on the native stack, whatever `id` is: for the heap
+    /// evaluator, which has decided that.
+    #[cfg(feature = "heap-eval")]
+    #[inline]
+    pub(crate) fn eval_native(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
+        // A nested expression is a frame for the frame budget (see
+        // `crate::recursion`): a recursive function whose body nests
+        // deeply costs stack between its calls too.
+        self.frames += self.weights.expression;
+        let v = self.eval_expr(u, id, ctx);
+        self.frames -= self.weights.expression;
+        let v = v?;
+        self.check_hard()?;
+        Ok(v)
+    }
+
     fn eval_expr(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
         let ast: &'a Ast = self.units[u as usize].ast;
         let e = ast.expr(id);
@@ -1755,7 +1812,7 @@ impl<'a> Evaluator<'a> {
 
     /// `Expression::checkUndef`: print why an operator gave `undef`.
     #[inline(never)]
-    fn check_undef(&mut self, r: ops::OpResult, u: u32, span: Span) -> Value {
+    pub(crate) fn check_undef(&mut self, r: ops::OpResult, u: u32, span: Span) -> Value {
         // An element-wise operator stops at the memory limit with a partial
         // result (`ops::map_vec`), which must not be used.
         if !matches!(r, Ok(Value::Number(_) | Value::Bool(_))) {
@@ -1817,7 +1874,14 @@ impl<'a> Evaluator<'a> {
     }
 
     #[inline(never)]
-    fn binary_slow(&mut self, op: BinaryOp, a: &Value, b: &Value, u: u32, span: Span) -> R<Value> {
+    pub(crate) fn binary_slow(
+        &mut self,
+        op: BinaryOp,
+        a: &Value,
+        b: &Value,
+        u: u32,
+        span: Span,
+    ) -> R<Value> {
         let res = match op {
             BinaryOp::Plus => ops::add(a, b),
             BinaryOp::Minus => ops::sub(a, b),
@@ -1939,7 +2003,7 @@ impl<'a> Evaluator<'a> {
         Ok(Value::range(bd, sd, ed))
     }
 
-    fn is_lc(&self, u: u32, id: ExprId) -> bool {
+    pub(crate) fn is_lc(&self, u: u32, id: ExprId) -> bool {
         matches!(
             self.units[u as usize].ast.expr(id).kind,
             ExprKind::LcIf(..)
@@ -1983,7 +2047,7 @@ impl<'a> Evaluator<'a> {
     /// so the per-element path stays one compare.
     #[cold]
     #[inline(never)]
-    fn list_overflow(&mut self, u: u32, id: ExprId, n: usize) -> R<()> {
+    pub(crate) fn list_overflow(&mut self, u: u32, id: ExprId, n: usize) -> R<()> {
         let loc = self.expr_loc(u, id);
         self.list_fits(n, loc, "a list");
         self.check_hard()
@@ -2076,7 +2140,13 @@ impl<'a> Evaluator<'a> {
 
     /// A list comprehension element holds frames of the frame budget, like
     /// an expression (see `crate::recursion`).
-    fn eval_lc(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>, out: &mut Vec<Value>) -> R<()> {
+    pub(crate) fn eval_lc(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        ctx: &Rc<Ctx>,
+        out: &mut Vec<Value>,
+    ) -> R<()> {
         self.frames += self.weights.comprehension;
         let r = self.eval_lc_frame(u, id, ctx, out);
         self.frames -= self.weights.comprehension;
@@ -2219,7 +2289,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `LcEach::evalRecur` for one value.
-    fn each_value(&mut self, v: Value, loc: Loc, out: &mut Vec<Value>) {
+    pub(crate) fn each_value(&mut self, v: Value, loc: Loc, out: &mut Vec<Value>) {
         match v {
             Value::Range(r) => {
                 let n = r.num_values();
@@ -2476,7 +2546,7 @@ impl<'a> Evaluator<'a> {
 
     #[cold]
     #[inline(never)]
-    fn unnamed_assignment(&mut self, loc: Loc, v: &Value) {
+    pub(crate) fn unnamed_assignment(&mut self, loc: Loc, v: &Value) {
         let mut t = b"Assignment without variable name ".to_vec();
         self.write_echo_nothrow(v, &mut t);
         self.warn(loc, DiagCode::Evaluation, t);
@@ -2484,7 +2554,7 @@ impl<'a> Evaluator<'a> {
 
     #[cold]
     #[inline(never)]
-    fn duplicate_assignment(&mut self, loc: Loc, s: Sym, v: &Value) {
+    pub(crate) fn duplicate_assignment(&mut self, loc: Loc, s: Sym, v: &Value) {
         let mut t = format!(
             "Ignoring duplicate variable assignment {} = ",
             self.quote_sym(s)
@@ -2497,6 +2567,17 @@ impl<'a> Evaluator<'a> {
     /// `echo(...)`: print the evaluated arguments.
     pub fn echo(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>) -> R<()> {
         let values = self.eval_args(u, args, ctx)?;
+        self.echo_values(u, args, &values)
+    }
+
+    /// [`Self::echo`] once its arguments are evaluated.
+    #[inline(always)]
+    pub(crate) fn echo_values(
+        &mut self,
+        u: u32,
+        args: &'a [Arg],
+        values: &[crate::call::ArgVal],
+    ) -> R<()> {
         let mut text = Vec::new();
         for (i, a) in values.iter().enumerate() {
             if i > 0 {
@@ -2543,8 +2624,20 @@ impl<'a> Evaluator<'a> {
 
     /// `Assert::performAssert`.
     pub fn perform_assert(&mut self, u: u32, args: &'a [Arg], span: Span, ctx: &Rc<Ctx>) -> R<()> {
-        let loc = Loc { unit: u, span };
         let values = self.eval_args(u, args, ctx)?;
+        self.assert_values(u, args, span, values)
+    }
+
+    /// [`Self::perform_assert`] once its arguments are evaluated.
+    #[inline(always)]
+    pub(crate) fn assert_values(
+        &mut self,
+        u: u32,
+        args: &'a [Arg],
+        span: Span,
+        values: Vec<crate::call::ArgVal>,
+    ) -> R<()> {
+        let loc = Loc { unit: u, span };
         let (condition, message) = (self.k.condition, self.k.message);
         let frame = self.bind_builtin(values, loc, &[condition], &[message], true);
         let cond = frame.get(condition).cloned().unwrap_or_default();
@@ -2578,7 +2671,7 @@ impl<'a> Evaluator<'a> {
 /// past the end), and `w`, `r`, `g`, `b` and `a` alone are elements 3, 0,
 /// 1, 2 and 3. Anything else, mixed sets included (`v.xr`), is `undef`
 /// (`Expression.cc`, `re_swizzle_validation`).
-fn swizzle(v: &Value, name: &str) -> Value {
+pub(crate) fn swizzle(v: &Value, name: &str) -> Value {
     let index = |c: u8| match c {
         b'x' | b'r' => 0.0,
         b'y' | b'g' => 1.0,

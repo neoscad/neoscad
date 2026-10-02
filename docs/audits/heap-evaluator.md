@@ -1024,3 +1024,329 @@ best of the five rounds' bests, as a ratio.
 - Under the feature the frame budget's `statement` and `geometry`
   weights, and the probes for them, are unused. They are deleted at
   stage 5, with the default switched.
+
+## Stage 2 done
+
+Measured on 2026-10-01 against `8f0fe78` on the same Apple M4 Pro. This
+step is the plan's stage 3 (§3): function calls, comprehensions and the
+expressions around them on the heap. "Base" below is this change built
+without the feature; "main" is `8f0fe78`.
+
+**What changed.**
+- `crates/eval/src/heap_expr.rs`, compiled only with `heap-eval`. User
+  function calls run on a loop over an explicit stack: their tail-call
+  loop (pure frames, register `let`s, accumulator moves), function
+  literals, list comprehensions (`for` over every kind of value, `if`,
+  `each`, `let`), `let`, `assert` and `echo` expressions, and every
+  expression on the way to a call (operators, `&&`/`||`, ternaries,
+  indexing, member lookups, vectors and `[each x, ...]`). A frame is
+  again the part of a native function that runs after its callee
+  returns. A call's loop state, the argument vectors, the lists being
+  filled and a comprehension `for`'s and a `let`'s state wait on side
+  stacks, so a frame is at most 48 bytes; a call's state is boxed and
+  pooled, so it moves as a pointer whenever it waits.
+- **The `may_call` bit** (`Evaluator::may_call`): per expression, whether
+  its subtree holds a call that `static_builtin` cannot pin to a
+  builtin, not looking inside function literals. It is worked out on
+  first use per expression, with an explicit-stack walk, and kept per
+  unit (`Unit::may_call`), not in `resolve`: the resolver resolves a
+  function's body when it is first called, and the bit needs those
+  resolutions, which are always in place before a body's expressions
+  run. On the heap, a subtree without it runs through the recursive
+  evaluator unchanged, and so does every operand that cannot call.
+- **Native first; the heap past 8 call levels** (`NATIVE_CALLS`). The
+  first version ran every user call on the heap. It was byte-identical
+  (conformance, the whole A/B sweep below), but it ran BOSL2's examples
+  26% slower and the corpus 17% slower. A profile put the cost in the
+  loop itself: every node on the way to a call was a frame and a trip
+  through the loop. A leaf call (`sq(i)` in a comprehension) cost about
+  600 more instructions than natively.
+  - Now `eval_call` counts the user calls running natively
+    (`Evaluator::native_calls`) and hands the ninth nested one to the
+    loop. Everything that call reaches runs on the heap until it
+    returns.
+  - The native stack holds at most 8 call levels at any depth.
+  - Most work is done at shallower depths, where the cost is one
+    compare per call.
+  - A debug build uses 0, so every call is on the heap. Its frames are
+    many times larger (8 levels overflowed a 128 KiB test thread), and
+    the test suite then covers the heap path everywhere.
+- The leaves are the recursive evaluator's: the heap's frames call the
+  same lookups, binding, builtins, accumulator moves and register code,
+  in the same order. The native code gained four `#[inline(always)]`
+  splits so both can call the second halves: `pure_frame`/`pure_bind`,
+  `call_frame`/`frame_bind`, `echo`/`echo_values` and
+  `perform_assert`/`assert_values`. It also gained `call_exhausted`.
+- **The counted limit counts calls.** `Limits::depth` now counts the
+  user modules being instantiated plus the user function calls in
+  progress (`Evaluator::depth_used`): non-tail calls, native or heap,
+  not counting builtins. So one limit stops a recursion through modules,
+  functions or both, with OpenSCAD's `Recursion detected calling
+  function 'f'` and one `called by` trace line per level.
+  - Natively at the default 100,000, `function-add` reaches 99,999
+    levels in 0.02 s and 41 MB, and a recursion through a comprehension
+    takes 0.03 s and 100 MB.
+  - The default build does not count function calls: its native stack
+    still decides.
+- **The call memo** is unchanged. A module call starts only from a
+  statement, when no function call is in progress, so `memo_depth`
+  stays the module depth.
+- **Printing** charges each level of function recursion 600 bytes of
+  virtual stack (`FUNCTION_LEVEL_STACK`, what a level holds natively),
+  as stage 1 charged module levels.
+- **Web.** A heap core skips the worker's stack probes entirely
+  (`heapStatements()`), not only the module ones. Every probe would only
+  recurse to the counted limit. The default weights and budget stand.
+
+**Tests.**
+- `crates/eval/tests/functions.rs` compares 16 programs' messages,
+  `.csg` dumps and node indices with expected files that the recursive
+  evaluator wrote. The harness is now shared with `statements.rs`
+  (`tests/support`). The programs cover:
+  - calls in every expression position, with `echo` side effects and
+    short-circuits showing the order;
+  - closures and function literals: recursive literals, literals
+    returned and called, `fs[i](x)`, compose, defaults that call;
+  - `$` variables across calls, including `$fn` defaults;
+  - tail calls with `concat` and `[each acc, n]` accumulators, tail
+    `let`, `assert` and `echo`, and the 1,000,000-step tail limit;
+  - comprehensions: nested and multi-variable `for`, every kind of `for`
+    value, `if`/`else`, `let`, `each` over values and comprehensions,
+    C-style `for`, recursion through comprehensions, the 2e6-element
+    range warning;
+  - `assert` failing at the bottom of a recursion, in a comprehension, a
+    `let` and an argument, with their traces;
+  - unknown functions and variables;
+  - `--hardwarnings` deep in a recursion;
+  - the list limit inside a comprehension;
+  - the call memo on and off for modules that call recursive functions;
+  - an interrupt in the middle of a function recursion.
+
+  Both builds match all 16, the debug build with every call on the heap
+  and the release build with the mix.
+- Under the feature, on a 128 KiB thread, six recursions reach 99,990
+  levels and stop past 100,000 with the error:
+  - `1 + f(n - 1)`;
+  - through a comprehension;
+  - through `let` and `max()`;
+  - through an index;
+  - a function literal;
+  - modules and functions half and half.
+- With `--limit depth=50`, a function recursion stops at 50 levels with
+  every level traced, and module levels count towards the limit.
+- `semantics.rs`'s frame-budget test now checks the counted limit for
+  functions under the feature.
+
+**Output.** All with the feature on against base:
+- conformance 1773/0 for base and heap, plain and PGO, at default
+  threads and with `RAYON_NUM_THREADS=1`;
+- `conformance diff`, echo and csg, BOSL2 as a library path:
+  - the BOSL2 corpus: 3512/3512 echo, and 3511/3512 csg, where the one is
+    `isosurface__022` (unseeded `rands()`);
+  - the OpenSCAD examples: 50/50;
+  - the bench files: 9/9.
+
+  This held both for the first version (every call on the heap) and for
+  the final one.
+- the bench models' STL and console at 1 and 8 threads, plain and PGO
+  pairs: all identical, and each the same at both thread counts.
+
+**Checks.** All pass with the feature off and on:
+- `cargo fmt`;
+- `clippy -D warnings`;
+- `cargo test --workspace`;
+- `scripts/wasm-check.sh --depths`: off, functions 498 and modules 249;
+  on, 99,999 for both;
+- `node crates/web/test/run.mjs` on both cores.
+
+**Browsers.** The heap core and the `/try` bundle with it, served
+locally:
+- In Chromium, WebKit and Firefox, every kind of recursion evaluates at
+  99,990 levels and stops with OpenSCAD's recursion error at 100,010:
+  - `1 + f(n - 1)`;
+  - through a comprehension;
+  - through `let` and `max()`;
+  - a function literal;
+  - modules then functions.
+
+  Module recursion through `translate` and `children()` stops at
+  100,000, as in stage 1.
+- WebKit's function depth was 66 and comprehensions 24 (the base core
+  today, probed). It is now the limit. Chromium's was 327/137 and
+  Firefox's 498/165.
+- The worker starts with no probe: its `probe.ms` is 0, against the
+  base core's runs.
+- All 8 `/try` examples preview and render in all three browsers.
+- **Source nesting is unchanged, and the probe never protected it.**
+  Nested parentheses `((…1…))` crash the engine at the same depth with
+  and without the probe in Chromium (925) and Firefox (1,749): the
+  parser overflows first. WebKit evaluates 170 levels on the heap core,
+  against 105 on the base core, and both crash past that. Nested
+  `translate()` statements evaluate deeper on the heap core (Chromium
+  1,312, WebKit 189, Firefox 2,807) and then crash. The base core stops
+  them earlier with the frame budget's clean error (474, 89, 623). That
+  is stage 1's finding. Its cause is the parser and `Unit::add_scope`
+  (a followup), not the evaluator, so the probe would not help it.
+
+**Depth.** `conformance depth`, plain and PGO + thin, main, base and
+heap:
+
+| Test | main and base, plain | main and base, PGO | heap, plain and PGO |
+|---|---:|---:|---:|
+| `recursion-test-module` | 66,021 | 39,919 | 199,977 |
+| `module-if` | 22,072 | 12,371 | 99,999 |
+| `recursion-test-function3` | 110,338 | 55,159 | 99,977 |
+| `function-add` | 110,360 | 55,181 | 99,999 |
+
+- The heap builds give the same numbers plain and PGO. The depth no
+  longer depends on the build.
+- `function-add` on the heap is 10.9× OpenSCAD's. That is above the PGO
+  builds that ship (6.0×), but below the plain build's native 12.0×. A
+  plain-build program that recursed between 100,000 and 110,000
+  function levels would now stop. Raising `DEFAULT_DEPTH` to stay above
+  it is the owner's call (§6, Q1). It would cost about 5 MB per 10,000
+  function levels, and 10 MB per 10,000 module levels.
+
+**Speed.** Five interleaved rounds of main, base and heap, each plain
+and PGO + thin (each side retrained). Each run started at a 1-minute load
+below 3. The load seen at the starts was 2.4–3.0, and up to 8.8 between
+runs, with no thermal warnings. The table is `conformance bench --refs
+neoscad`, full set: the best of the five rounds' bests, as a ratio.
+
+| Model | heap/base plain | heap/base PGO | base/main plain | base/main PGO |
+|---|---:|---:|---:|---:|
+| bosl_fractal_tree | 1.009 | 0.991 | 0.984 | 0.995 |
+| bosl_gears__003 | 1.000 | 0.995 | 0.987 | 1.005 |
+| bosl_isosurface__006 | 1.015 | 1.014 | 0.985 | 0.996 |
+| bosl_screws__001 | 1.007 | 0.995 | 0.990 | 1.010 |
+| bosl_spring_handle | 0.980 | 1.022 | 1.030 | 0.978 |
+| csg_deep_union | 1.027 | 1.005 | 0.976 | 1.015 |
+| csg_spheres | 0.984 | 1.010 | 1.014 | 1.003 |
+| ex_menger | 0.994 | 0.996 | 1.005 | 1.000 |
+| extrude_twist | 0.934 | 1.015 | 1.044 | 1.000 |
+| import_stl | 0.985 | 1.035 | 0.988 | 1.008 |
+| text_30lines | 0.969 | 1.031 | 1.008 | 0.956 |
+| **Geomean (11 models ≥ 30 ms)** | **0.991** | **1.010** | **1.001** | **0.997** |
+| Per-round paired geomean | 0.937–1.005 | 0.973–1.021 | 0.985–1.008 | 0.982–1.032 |
+
+- Parity throughout, inside the ±3% layout band of §4.4, and well
+  inside the owner's 5%. The models outside ±2% vary on both sides:
+  - `import_stl` and `text_30lines` are 1.03 under PGO and 0.97–0.99
+    plain, and their time is geometry;
+  - `extrude_twist` is 0.93 plain.
+- The evaluation-bound models of the kill criterion (isosurface,
+  fractal_tree, screws, spring_handle) are 0.991–1.022 under PGO.
+- The feature-off build matches main: 1.001 plain and 0.997 PGO.
+- `eval_only` (BOSL2's 976 tests, summed), median of five, and the best
+  of five in brackets:
+
+  | Build | Main | Base | Heap |
+  |---|---:|---:|---:|
+  | Plain | 31.02 s | 30.74 s (29.78) | 30.87 s (29.88) |
+  | PGO | 28.92 s | 28.86 s (28.16) | 29.54 s (28.50) |
+
+  That is +0.4% plain and +2.4% PGO (+1.2% on the best).
+- **The BOSL2 corpus**, echo, process time summed over its 3512 files, in
+  one A/B run:
+  - base 263.1 s against heap 264.7 s, plain (+0.6%);
+  - in the correctness sweep, under a load of 4–10: 286.2 s against
+    287.0 s echo, and 293.7 s against 293.4 s csg.
+
+  The PGO and main pairs did not run: the machine's load stayed at
+  12–52 from other work.
+- **The served edit loop** (`serve`, best and median):
+
+  | Build | BOSL2 render, base | BOSL2 render, heap |
+  |---|---|---|
+  | Plain | 9.1 / 9.8 ms | 9.3 / 9.9 ms |
+  | PGO | 8.7 / 9.2 ms | 8.6 / 9.2 ms |
+
+  Snapshots and the CSG case agree within 0.3 ms. Cold start is 2.9 ms
+  in all builds.
+- **The app core** (stage 1's `DocumentController` harness, 20 edits a
+  round, best of rounds and median of round medians):
+  - BOSL2 preview: 8.44/8.89 ms base, 8.38/8.89 ms heap;
+  - BOSL2 render: 8.40/8.90 ms base, 8.42/8.96 ms heap;
+  - CSG: under 1 ms on both.
+- **The web worker in node** (`profile.web`), from request to result,
+  best and median:
+
+  | Case | Base | Heap |
+  |---|---|---|
+  | CSG preview | 3.41 / 3.72 ms | 3.46 / 4.06 ms |
+  | Module tree preview | 9.99 / 10.55 ms | 9.93 / 10.67 ms |
+  | Module tree render | 142.6 / 148.0 ms | 143.4 / 149.1 ms |
+  | Function-heavy preview | 0.77 / 0.85 ms | 0.82 / 1.07 ms |
+  | Function-heavy render | 0.87 / 0.92 ms | 0.98 / 1.01 ms |
+
+  - The mesh copies take 0.004–0.19 ms on either side.
+  - The function-heavy case is new: a polygon from a 120-deep non-tail
+    recursion and a 170-deep sum. It is 7–13% slower on the best. Both
+    recursions run mostly past the 8 native levels, where a call costs
+    1.3–1.6 times the native one.
+- **Deep recursion is where the heap costs.** In instructions retired
+  (echo export, plain):
+  - a leaf call in a loop: +0.9%;
+  - a tail recursion: +0.1%;
+  - a loop with no calls: −0.3%;
+  - `fib(25)`: +28%;
+  - `1 + f(n - 1)` 5,000 deep: +36%.
+
+  No bench model recurses that way.
+
+**Can it become the default?** On correctness, yes: everything above
+holds with the feature on. On speed it meets the owner's bar: parity on
+the bench models, the corpus, `eval_only`, the edit loops and the app
+core. Deep non-tail function recursion is the exception. It runs
+1.3–1.6× slower past 8 levels, a cost in exchange for having no depth
+ceiling. The step left before switching is the plan's stage 5: run the
+gate with the roles swapped, and keep the recursive driver behind
+`recursive-eval` for one release.
+
+**What turning it on everywhere retires** (§5), now that both halves are
+on the heap:
+- **The worker's stack probe and the per-kind weights.** Under the
+  feature the probe is already skipped. No recursion reaches the frame
+  budget: the native stack holds at most 8 call levels, plus the
+  source's own nesting. The budget remains only as a guard for that
+  nesting, which the parser bounds first, in every browser alike (see
+  "Browsers"). So `FrameWeights`, `set_frame_weights`, the probe and the
+  builtin-module ¼ margin can go. A single frame count for source
+  nesting is enough until the parser has a depth limit.
+- **The PGO depth guard in CI.** `conformance depth` gives the same
+  numbers on plain and PGO builds. The guard becomes an identity check,
+  and PGO no longer trades depth.
+- **The native stack measure for recursion** (`stack_used` in
+  `recursion_exhausted`, the 64 MiB `DEFAULT_STACK_LIMIT` and its PGO
+  rationale), but not the stack itself:
+  - the parser, `Unit::add_scope` and source nesting still recurse;
+  - so do the printer, and values nested deep (see below).
+
+  `with_stack`'s per-request thread could shrink to what those need. It
+  cannot go.
+- **PGO exclusions.** None retire through depth. The DMG's core still
+  needs an ffi training run, and Windows arm64 the toolchain fix (§0.2).
+  What this removes is the depth cost that PGO would have had there.
+- The memo's stack condition (`replay_fits`) already compares module
+  depth under the feature.
+
+**Left, and followups** (`docs/followups.md`):
+- A few rare shapes stay native even on the heap:
+  - ranges;
+  - callees that are expressions;
+  - methods;
+  - C-style `for`;
+  - `object()` and `is_undef()` arguments;
+  - parameter defaults;
+  - `use`d libraries' assignments.
+
+  A recursion through one of them at every level still uses native
+  stack per level, and still stops with the frame budget's clean error.
+- The heap path's per-call cost, for deep non-tail recursion.
+- Values nested as deep as the limit can now be built in a browser.
+  Dropping and printing them recurses on the value's depth (§6, "Value
+  depth"). That is unmeasured in WebKit.
+- The `may_call` share of the corpus is not counted (`resolve::Stats`).
+- The memory estimate still does not charge heap frames: 41 MB for a
+  function recursion at the default depth, 100 MB through a
+  comprehension.

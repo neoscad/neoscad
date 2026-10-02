@@ -1,0 +1,10 @@
+ECHO: 55
+ERROR: Recursion detected calling function 'crash' @4
+TRACE: called by 'crash' @4
+TRACE: called by 'echo' @5
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

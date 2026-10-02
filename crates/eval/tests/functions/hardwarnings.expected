@@ -1,0 +1,13 @@
+ECHO: "before"
+WARNING: Ignoring unknown variable "undefined_var" @2
+TRACE: called by 'f' @2
+TRACE: called by 'f' @2
+TRACE: called by 'f' @2
+TRACE: called by 'f' @4
+TRACE: called by 'echo' @4
+-- aborted true interrupted false hard true
+-- csg
+
+
+-- nodes
+0 1 Root

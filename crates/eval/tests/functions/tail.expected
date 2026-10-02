@@ -1,0 +1,14 @@
+ECHO: 2000, [5, 4, 3, 2, 1], 2000, [4, 3, 2, 1], 500500
+ECHO: "at", 3
+ECHO: "at", 2
+ECHO: "at", 1
+ECHO: [6, 5, 4, 3], 1500, [1, 2, 3, 4], "done"
+ERROR: Recursion detected calling function 'forever' @10
+TRACE: called by 'forever' @10
+TRACE: called by 'echo' @11
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

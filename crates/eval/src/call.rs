@@ -430,7 +430,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `apply_config_variables`: copy `from`'s own `$` variables.
-    fn copy_config(&mut self, from: &Ctx, to: &Ctx) {
+    pub(crate) fn copy_config(&mut self, from: &Ctx, to: &Ctx) {
         let src = from.vars.borrow();
         if !src.has_config {
             return;
@@ -467,7 +467,15 @@ impl<'a> Evaluator<'a> {
     /// constant native stack.
     #[inline(never)]
     pub fn eval_call(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
-        if self.recursion_exhausted() {
+        // Under the heap evaluator, a user call past `NATIVE_CALLS` nested
+        // native ones runs on the heap ([`crate::heap_expr`]), with
+        // everything it calls. Until then calls run here, where nearly
+        // all of a program's work is done, at the cost of this compare.
+        #[cfg(feature = "heap-eval")]
+        if self.calls_deep() && self.static_builtin(u, id).is_none() {
+            return self.heap_eval(u, id, ctx);
+        }
+        if self.call_exhausted(u, id) {
             let loc = self.expr_loc(u, id);
             let mut t = b"Recursion detected calling function '".to_vec();
             t.extend_from_slice(&self.call_name(u, id));
@@ -489,6 +497,14 @@ impl<'a> Evaluator<'a> {
             let r = self.direct_builtin(b, u, id, ctx);
             self.frames -= self.weights.call;
             return r;
+        }
+        // Under the heap evaluator a user call counts towards the depth
+        // limit wherever it runs, and the calls running natively are
+        // counted so that they stop at `heap_expr::NATIVE_CALLS`.
+        #[cfg(feature = "heap-eval")]
+        {
+            self.fn_depth += 1;
+            self.native_calls += 1;
         }
         // The loop owns one stack slot, holding the context of the step
         // being evaluated, and `simplify` pushes each callee's (or `let`'s)
@@ -617,7 +633,30 @@ impl<'a> Evaluator<'a> {
             Ctx::recycle(c, &mut self.ctx_pool);
         }
         self.frames -= self.weights.call;
+        #[cfg(feature = "heap-eval")]
+        {
+            self.fn_depth -= 1;
+            self.native_calls -= 1;
+        }
         result
+    }
+
+    /// `eval_call`'s recursion check: the native one, and under the heap
+    /// evaluator the counted limit for a call that is not always to a
+    /// builtin (a builtin adds no level, so it is not the call a recursion
+    /// through it stops at).
+    #[inline(always)]
+    pub(crate) fn call_exhausted(&self, u: u32, id: ExprId) -> bool {
+        #[cfg(feature = "heap-eval")]
+        {
+            self.recursion_exhausted()
+                || (self.depth_exhausted() && self.static_builtin(u, id).is_none())
+        }
+        #[cfg(not(feature = "heap-eval"))]
+        {
+            let _ = (u, id);
+            self.recursion_exhausted()
+        }
     }
 
     /// The builtin call `id` always makes, if it always makes one: its
@@ -630,7 +669,7 @@ impl<'a> Evaluator<'a> {
     /// 2-3% slower on call-heavy code at equal instruction counts (code
     /// layout; see `docs/followups.md`, "Evaluator layout sensitivity").
     #[inline]
-    fn static_builtin(&self, u: u32, id: ExprId) -> Option<Builtin> {
+    pub(crate) fn static_builtin(&self, u: u32, id: ExprId) -> Option<Builtin> {
         let unit = &self.units[u as usize];
         let r = unit.res.expr[id.0 as usize];
         if r == 0 {
@@ -650,7 +689,13 @@ impl<'a> Evaluator<'a> {
     /// Out of line, so the direct path adds nothing to `eval_call`'s stack
     /// frame, which every level of a recursion holds.
     #[inline(never)]
-    fn direct_builtin(&mut self, b: Builtin, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
+    pub(crate) fn direct_builtin(
+        &mut self,
+        b: Builtin,
+        u: u32,
+        id: ExprId,
+        ctx: &Rc<Ctx>,
+    ) -> R<Value> {
         let ast: &'a Ast = self.units[u as usize].ast;
         let ExprKind::Call(_, args) = &ast.expr(id).kind else {
             unreachable!("a resolved function reference is a call");
@@ -664,7 +709,7 @@ impl<'a> Evaluator<'a> {
         })
     }
 
-    fn trace_call(&mut self, e: &mut crate::message::Unwind, call: (u32, ExprId)) {
+    pub(crate) fn trace_call(&mut self, e: &mut crate::message::Unwind, call: (u32, ExprId)) {
         let mut t = b"called by '".to_vec();
         t.extend_from_slice(&self.call_name(call.0, call.1));
         t.push(b'\'');
@@ -854,7 +899,7 @@ impl<'a> Evaluator<'a> {
     /// object-function` can make.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
-    fn method_call(
+    pub(crate) fn method_call(
         &mut self,
         u: u32,
         id: ExprId,
@@ -900,7 +945,7 @@ impl<'a> Evaluator<'a> {
     /// `eval_call`'s stack frame, which every level of a recursion holds.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
-    fn call_frame(
+    pub(crate) fn call_frame(
         &mut self,
         u: u32,
         id: ExprId,
@@ -913,11 +958,6 @@ impl<'a> Evaluator<'a> {
         body_ctx: &Ctx,
         this: Option<&Object>,
     ) -> R<()> {
-        // Defaults are evaluated in the defining context: the body's parent.
-        let defining = body_ctx
-            .parent
-            .as_ref()
-            .expect("a function body context has its defining context as parent");
         // Argument vectors are reused: a call allocates only its context
         // and slots.
         let mut argv = self.arg_pool.pop().unwrap_or_default();
@@ -926,6 +966,28 @@ impl<'a> Evaluator<'a> {
         } else {
             self.eval_args_into(u, args, ctx, &mut argv)
         };
+        self.frame_bind(r, argv, loc, fu, params, body_ctx, this)
+    }
+
+    /// [`Self::call_frame`] once its arguments are evaluated into `argv`
+    /// (a vector from `arg_pool`, which it goes back to), or failed.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub(crate) fn frame_bind(
+        &mut self,
+        r: R<()>,
+        mut argv: Vec<ArgVal>,
+        loc: Loc,
+        fu: u32,
+        params: &'a [Param],
+        body_ctx: &Ctx,
+        this: Option<&Object>,
+    ) -> R<()> {
+        // Defaults are evaluated in the defining context: the body's parent.
+        let defining = body_ctx
+            .parent
+            .as_ref()
+            .expect("a function body context has its defining context as parent");
         let frame = r.and_then(|()| match this {
             None => self.bind_user(&mut argv, loc, fu, params, defining, body_ctx.region),
             Some(o) => self.bind_general(
@@ -958,7 +1020,7 @@ impl<'a> Evaluator<'a> {
     /// except through a register, and nothing can capture it.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
-    fn pure_frame(
+    pub(crate) fn pure_frame(
         &mut self,
         u: u32,
         id: ExprId,
@@ -982,6 +1044,24 @@ impl<'a> Evaluator<'a> {
             self.arg_pool.push(argv);
             return Err(e);
         }
+        self.pure_bind(u, id, argv, fu, params, body, defining, region)
+    }
+
+    /// [`Self::pure_frame`] once its arguments are evaluated into `argv`
+    /// (a vector from `arg_pool`, which it goes back to).
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub(crate) fn pure_bind(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        mut argv: Vec<ArgVal>,
+        fu: u32,
+        params: &'a [Param],
+        body: ExprId,
+        defining: Rc<Ctx>,
+        region: u32,
+    ) -> R<Step> {
         let base = self.regs.len();
         let n = argv.len();
         self.regs
@@ -1024,7 +1104,7 @@ impl<'a> Evaluator<'a> {
     /// the ones it would copy stay visible in the step's context, which
     /// keeps the loop's slot. Out of line, as `pure_frame` is.
     #[inline(never)]
-    fn tail_let_regs(
+    pub(crate) fn tail_let_regs(
         &mut self,
         u: u32,
         args: &'a [Arg],
@@ -1041,7 +1121,7 @@ impl<'a> Evaluator<'a> {
     /// context for this call: its register references must find it by the
     /// chain walk, not in an outer pure call's registers.
     #[inline(never)]
-    fn frame_in_ctx(&mut self, region: u32) {
+    pub(crate) fn frame_in_ctx(&mut self, region: u32) {
         let old = std::mem::replace(&mut self.reg_base[region as usize], NO_BASE);
         self.reg_saves.push((region, old));
     }
@@ -1052,7 +1132,14 @@ impl<'a> Evaluator<'a> {
     /// `$` lookups), its register instances die, and the new frame's
     /// registers move down in their place.
     #[inline(never)]
-    fn enter_pure(&mut self, slot: usize, regs: usize, saves: usize, region: u32, base: u32) {
+    pub(crate) fn enter_pure(
+        &mut self,
+        slot: usize,
+        regs: usize,
+        saves: usize,
+        region: u32,
+        base: u32,
+    ) {
         debug_assert_eq!(self.stack.len(), slot + 1);
         // After a first or a pure step the slot already holds it.
         if !Rc::ptr_eq(&self.stack[slot], &self.placeholder) {
@@ -1110,7 +1197,7 @@ impl<'a> Evaluator<'a> {
     /// Whether call `id` has an argument [`Evaluator::accumulator`] finds,
     /// remembered per call (this runs at every user function call).
     #[inline]
-    fn accumulates(&mut self, u: u32, id: ExprId, args: &[Arg]) -> bool {
+    pub(crate) fn accumulates(&mut self, u: u32, id: ExprId, args: &[Arg]) -> bool {
         let known = &self.units[u as usize].accumulates;
         match known.get(id.0 as usize) {
             Some(1) => false,
@@ -1149,7 +1236,7 @@ impl<'a> Evaluator<'a> {
     ///   register one, which its maker and the context stack both hold
     ///   (or the loop slot and `cur`, for a pure frame): the test fails,
     ///   so nothing is moved ([`Self::entry_blocked`]).
-    fn move_accumulators(
+    pub(crate) fn move_accumulators(
         &mut self,
         u: u32,
         id: ExprId,
@@ -1336,7 +1423,7 @@ impl<'a> Evaluator<'a> {
     /// that can define or bind the name, in the same order. Not inlined:
     /// its frame would add to every level of a recursion.
     #[inline(never)]
-    fn find_function(
+    pub(crate) fn find_function(
         &mut self,
         u: u32,
         r: u32,

@@ -1,0 +1,17 @@
+ECHO: 3.6288e+6
+ECHO: 7, 11, 42
+ECHO: [10, 11, 12, 13]
+ECHO: 27
+ECHO: [[1, 1], [1, 1]]
+ECHO: 14, 3, 3
+ECHO: [1, 2, 3, 4, 5]
+WARNING: Can't call function on number @18
+WARNING: Can't call function on undefined @18
+WARNING: Can't call function on string @18
+ECHO: undef, undef, undef
+-- aborted false interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

@@ -22,10 +22,11 @@
 //! same order, so the output is byte-identical (the conformance A/B in
 //! `docs/audits/heap-evaluator.md` checks that).
 //!
-//! Expressions, function calls included, still run natively (stage 2 of
-//! the plan). Every one starts from this loop's own native frame, at any
-//! module depth, so the frame budget of [`crate::recursion`] counts only
-//! the calls and expressions themselves: statements add no weight.
+//! Expressions start from this loop's own native frame, at any module
+//! depth, so the frame budget of [`crate::recursion`] counts only the
+//! calls and expressions themselves: statements add no weight. Past a few
+//! native call levels, calls and the expressions around them run on a
+//! heap stack of their own ([`crate::heap_expr`]).
 
 use std::rc::Rc;
 

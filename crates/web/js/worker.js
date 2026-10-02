@@ -171,9 +171,13 @@ async function probeWeights(compiled) {
     const frames = {};
     for (const [i, [probe, kind, weights]] of RUNS.entries()) {
         frames[probe] ??= {};
-        // A core that runs statements on the heap has no module frames to
-        // measure: those probes would only recurse to its depth limit.
-        if (heapStatements() && (probe === 'children' || probe === 'transform')) {
+        // A core that runs statements and calls on the heap (the
+        // `heap-eval` feature) holds at most a few native call levels at
+        // any depth, so there is nothing to measure: every probe would
+        // only recurse to its counted depth limit, which took 40 s in
+        // WebKit's cold tiers. The default weights and budget stand; they
+        // only ever meet the source's own nesting.
+        if (heapStatements()) {
             frames[probe][kind] = null;
             continue;
         }
