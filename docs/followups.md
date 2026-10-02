@@ -207,12 +207,18 @@ lead them, come roughly in order of user impact.
   `heapStatements()` are gone now.)
   Left from stage 2:
   - the rare shapes that stay native and start a nested heap loop for a
-    part that calls: ranges (`[0 : f(n - 1)]`), callees that are
-    expressions (`f(x)(y)`), methods, C-style `for` comprehensions,
-    `object()` and `is_undef()` arguments, parameter defaults and `use`d
-    libraries' assignments. A recursion through one of them at every
-    level still holds native stack per level, and still stops with the
-    frame budget's error;
+    part that calls: C-style `for` comprehensions, `object()`'s
+    arguments, parameter defaults and `use`d libraries' assignments
+    (`heap_expr`'s module docs say why each stayed). A recursion through
+    one of them at every level still holds native stack per level, and
+    still stops with the frame budget's error. Done: ranges' bounds,
+    `is_undef()`'s argument (in a tail call too), callees that are
+    expressions (`f(n - 1)(x)`) and methods' arguments run on the heap
+    (`XFrame::RangeBegin` and the others), so a recursion through them
+    reaches the counted limit in every browser (99,999 levels; 49,999
+    for a callee or a method's argument, two counted calls a level),
+    where it stopped at 30-37; natively a range stopped at 57,443 and
+    `is_undef()` at 61,667;
   - the heap path costs 1.3-1.6 times the native one per call (every
     node on the way to a call is a frame), so a deep non-tail recursion
     is slower than before past 8 levels: `fib(25)` runs 28% more
@@ -223,8 +229,9 @@ lead them, come roughly in order of user impact.
     `docs/audits/heap-evaluator.md` §6), which a WebKit worker's stack
     may not hold. It is unmeasured there; natively it is fine;
   - `resolve::Stats` does not count the `may_call` share of a corpus;
-  - a recursion through those shapes stops at 34-37 levels in every
-    browser, where Chromium's stack would hold 220-280 and Firefox's
+  - a recursion through the shapes still native stops at 34-37 levels
+    in every browser, where Chromium's stack would hold 220-280 and
+    Firefox's
     390-720: each level starts a heap loop, whose native frames are
     large (about 8 KiB a level in a WebKit worker), and the frame budget
     charges one `eval::recursion::HEAP_LOOP_FRAMES` (64) so that it
@@ -1482,32 +1489,36 @@ lead them, come roughly in order of user impact.
   from `crates/web`. What still recurses natively is held to the frame
   budget with constant weights (`eval::recursion::HEAP_LOOP_FRAMES`,
   `PRINT_FRAMES`) sized for WebKit's stack.
-  Left:
-  - `let`, `assert` and `echo` expressions nested in a statement's
-    arguments keep 20% of WebKit's stack to spare at the parser's limit,
-    not 30%. Source nesting is now bounded by a weighted depth
-    (`lang::syntax::parser::nesting_weight`, `NESTING_LIMIT`: 2,590 on
-    wasm32), each kind weighed by the stack a level of it took in
-    WebKit's worst case (a worker part-way through tiering up), and every
-    other kind stops with 30% to spare: in `wasm-check.sh --depths` and
-    the browsers, 55 levels of `[` parse, 68 of `(`, 46 of `max(`, 119 of
-    `translate()`, 120 of `else if` and 252 of `{`, and one more ends in
-    "Parser error: memory exhausted". Measured October 2026 in Playwright's WebKit on macOS
-    arm64 with the limit lifted (the table is in `nesting_weight`'s
-    comment), 123 levels of `echo(assert(true) assert(true) ... 1)`
-    overflowed, because the native evaluator recurses into each one's
-    body (`Evaluator::eval`'s `Let`, `Assert` and `Echo` arms in
-    `crates/eval/src/eval.rs`), where in a function's body, or parsed
-    alone, they reached 371 levels. A weight of 31 would keep 30% for
-    them, and would put BOSL2's `nurbs.scad` (66 `assert`s chained in a
-    function, 2,649 by that weight) over the limit, so they weigh 26
-    (`nurbs.scad` 2,289, MCAD's `bitmap.scad` 2,005; `tests/
-    deep_nesting.rs` checks both). Evaluating those bodies in a loop, or
-    on the heap evaluator, would let them weigh as little as a `{` (10)
-    and leave every kind 30%. OpenSCAD's
-    `issue4172-echo-vector-stack-exhaust.scad` (144 levels of `[`) is now
-    refused in browsers, where WebKit would overflow on it; natively it
-    is unchanged.
+  Source nesting is now bounded by a weighted depth
+  (`lang::syntax::parser::nesting_weight`, `NESTING_LIMIT`: 2,590 on
+  wasm32), each kind weighed by the stack a level of it took in WebKit's
+  worst case (a worker part-way through tiering up), and every kind
+  stops with at least 30% to spare: in `wasm-check.sh --depths` and the
+  browsers, 55 levels of `[` parse, 68 of `(`, 46 of `max(`, 119 of
+  `translate()`, 120 of `else if` and 252 of `{`, and one more ends in
+  "Parser error: memory exhausted". Measured October 2026 in Playwright's
+  WebKit on macOS arm64 with the limit lifted (the table is in
+  `nesting_weight`'s comment). OpenSCAD's
+  `issue4172-echo-vector-stack-exhaust.scad` (144 levels of `[`) is
+  refused in browsers, where WebKit would overflow on it; natively it is
+  unchanged.
+  - Done: `let`, `assert` and `echo` expressions keep 30% too. The
+    native evaluator recursed into each one's body (`eval`, `eval_expr`,
+    `eval_cold` a link), so 123 links of `echo(assert(true) ... 1)`
+    overflowed WebKit, and they weighed 26 with 20% to spare. Now
+    `Evaluator::eval_chain` walks a chain of them in a loop, and
+    `eval_expr` runs `assert` and `echo` links itself: a chain reaches
+    372 levels or more, as `{` does, and how they nest with other kinds
+    decides their weights, `assert` and `echo` 12 and `let` 17 (the
+    lowest that keeps 30% for a comprehension's `let`, which must weigh
+    the same; `let` alone needs 15). BOSL2's `nurbs.scad` (66 chained
+    `assert`s) weighs 1,311, down from 2,289; MCAD's `bitmap.scad`
+    (2,005) is now the deepest file by weight.
+  - Left: a `?:` in a statement's arguments still recurses per level
+    (`eval_expr`'s `Ternary` arm calls `eval` for the branch); taking
+    the branch in `eval_expr`'s loop would make a chain of them cost no
+    frame a level, and let `TernaryExpr` and a `let` alternating with it
+    weigh less.
 - **Done: the preview's product booleans run under the limits.**
   `geom::csg::product_meshes_until` checks a `geom::csg::Stop` (the
   request's interrupt flag and limits guard) before every kernel

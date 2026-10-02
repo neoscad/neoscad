@@ -1,0 +1,85 @@
+ECHO: [0 : 2 : 21]
+ECHO: 4
+WARNING: Unable to convert ["x":...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+WARNING: Unable to convert [undef:...:3] to a range @6
+ECHO: undef
+WARNING: Unable to convert [...:"s":...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+WARNING: Unable to convert [...:undef:...] to a step value @8
+ECHO: undef
+WARNING: Unable to convert [10:...:[10 : 1 : 5]] to a range @10
+WARNING: Unable to convert [10:...:undef] to a range @10
+WARNING: Unable to convert [10:...:undef] to a range @10
+WARNING: Unable to convert [10:...:undef] to a range @10
+WARNING: Unable to convert [10:...:undef] to a range @10
+WARNING: Unable to convert [10:...:undef] to a range @10
+WARNING: Unable to convert [10:...:undef] to a range @10
+WARNING: Unable to convert [10:...:undef] to a range @10
+WARNING: Unable to convert [10:...:undef] to a range @10
+WARNING: Unable to convert [10:...:undef] to a range @10
+WARNING: Unable to convert [10:...:undef] to a range @10
+ECHO: undef
+ECHO: [0, 1, 2, 3, 4]
+ECHO: undef
+ECHO: false
+WARNING: is_undef() number of parameters does not match: expected 1, found 2 @17
+ECHO: undef
+ECHO: false
+ECHO: 20
+WARNING: Can't call function on number @23
+WARNING: Can't call function on undefined @23
+WARNING: Can't call function on undefined @23
+WARNING: Can't call function on undefined @23
+WARNING: Can't call function on undefined @23
+WARNING: Can't call function on undefined @23
+WARNING: Can't call function on undefined @23
+WARNING: Can't call function on undefined @23
+WARNING: Can't call function on undefined @23
+WARNING: Can't call function on undefined @23
+WARNING: Can't call function on undefined @23
+WARNING: Can't call function on undefined @23
+ECHO: undef
+ECHO: 7
+ECHO: 33
+ECHO: 20
+ECHO: 20
+ERROR: Assertion 'false' failed: "bottom" @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @33
+TRACE: called by 'fail' @34
+TRACE: called by 'echo' @34
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

@@ -1687,9 +1687,32 @@ impl<'a> Evaluator<'a> {
         Ok(v)
     }
 
-    fn eval_expr(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
+    fn eval_expr(&mut self, u: u32, mut id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
         let ast: &'a Ast = self.units[u as usize].ast;
-        let e = ast.expr(id);
+        let mut e = ast.expr(id);
+        // `assert` and `echo` links ahead of the expression, in a loop (see
+        // `eval_chain`): they bind nothing, so nothing waits to be undone
+        // after their body, which is then this call's expression.
+        loop {
+            let body = match &e.kind {
+                ExprKind::Assert(args, body) => {
+                    self.perform_assert(u, args, e.span, ctx)?;
+                    body
+                }
+                ExprKind::Echo(args, body) => {
+                    self.echo(u, args, ctx)?;
+                    body
+                }
+                _ => break,
+            };
+            match body {
+                Some(b) => {
+                    id = *b;
+                    e = ast.expr(id);
+                }
+                None => return Ok(Value::Undef),
+            }
+        }
         match &e.kind {
             ExprKind::Undef | ExprKind::Invalid => Ok(Value::Undef),
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
@@ -1737,6 +1760,7 @@ impl<'a> Evaluator<'a> {
                 Ok(ops::index(&a, &i))
             }
             ExprKind::Call(..) => self.eval_call(u, id, ctx),
+            ExprKind::Let(..) => self.eval_chain(u, id, ctx),
             _ => self.eval_cold(u, id, ctx),
         }
     }
@@ -1802,41 +1826,6 @@ impl<'a> Evaluator<'a> {
                     ctx.clone(),
                 ))))
             }
-            ExprKind::Let(args, body) => {
-                let region = self.units[u as usize].res.expr[id.0 as usize];
-                if self.regions[region as usize].reg() {
-                    // Inline: a recursion through a `let` holds this frame
-                    // at every level, and a helper would add one.
-                    let old = self.reg_open(region);
-                    let r = self
-                        .assign_regs(u, args, e.span, region, ctx)
-                        .and_then(|_| self.eval(u, *body, ctx));
-                    self.reg_close(region, old);
-                    return r;
-                }
-                let c = self.new_ctx(ctx, CtxKind::Plain, region);
-                let mark = self.push(c.clone());
-                let r = self
-                    .sequential_assign(u, args, e.span, &c)
-                    .and_then(|_| self.eval(u, *body, &c));
-                self.truncate(mark);
-                Ctx::recycle(c, &mut self.ctx_pool);
-                r
-            }
-            ExprKind::Assert(args, body) => {
-                self.perform_assert(u, args, e.span, ctx)?;
-                match body {
-                    Some(b) => self.eval(u, *b, ctx),
-                    None => Ok(Value::Undef),
-                }
-            }
-            ExprKind::Echo(args, body) => {
-                self.echo(u, args, ctx)?;
-                match body {
-                    Some(b) => self.eval(u, *b, ctx),
-                    None => Ok(Value::Undef),
-                }
-            }
             ExprKind::LcIf(..)
             | ExprKind::LcEach(_)
             | ExprKind::LcFor(..)
@@ -1847,6 +1836,130 @@ impl<'a> Evaluator<'a> {
                 Ok(Value::vector(out))
             }
             _ => unreachable!("handled in eval"),
+        }
+    }
+
+    /// A `let` expression, and the chain of `let`, `assert` and `echo`
+    /// expressions its body starts (`let (a = 1) assert(a) echo(a) a`), in
+    /// one loop rather than one native call per link: each link is set up
+    /// in turn, the innermost body is evaluated, and the links are torn
+    /// down newest first. In a function's body the tail-call loop
+    /// (`simplify`) already walks such a chain; this is the same for a
+    /// chain anywhere else, as in a statement's arguments. Recursing per
+    /// link (`eval_expr` and `eval_cold` each time), 123 links overflowed a
+    /// WebKit worker's stack, and the parser had to weigh a link nearly
+    /// three times a `{` (`lang::syntax::parser::nesting_weight`).
+    ///
+    /// What runs, and in what order, is what the recursion ran: the same
+    /// assignments, asserts and echoes, a `let`'s registers closed and its
+    /// context dropped after the body whether it failed or not. The
+    /// recursion's per-level `check_hard` came right after its body
+    /// returned, with nothing run in between, so the one after the
+    /// innermost body (in [`Self::eval`]) stands for them all.
+    ///
+    /// A nesting through these expressions holds one of these frames a
+    /// level (`let (a = let (b = ...) b) a`, or a `let` alternating with
+    /// `?:`), so the path is kept short: `eval_expr` calls this directly
+    /// rather than through `eval_cold`, and runs `assert` and `echo` links
+    /// ahead of a `let` itself, so an `assert` nested in another's
+    /// arguments costs `eval_expr`, `perform_assert` and `eval_args_into` a
+    /// level (it was those, `eval_cold` and `eval_args`), and a `let` in
+    /// another's arguments this frame in place of `eval_cold`'s. Measured
+    /// in WebKit, nesting through them with other kinds goes as deep as it
+    /// did (within 4%), or deeper: 57 levels of `max(let (a = 1) ` where 45
+    /// overflowed before, 69 of `max(assert(true) ` where 45 did
+    /// (`nesting_weight` has the rest).
+    #[inline(never)]
+    fn eval_chain(&mut self, u: u32, mut id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
+        let ast: &'a Ast = self.units[u as usize].ast;
+        // The innermost context: the caller's, or the newest `let`'s. Each
+        // `let` context's parent is the one before it, so the teardown
+        // finds them all from here.
+        let mut cur = ctx.clone();
+        let mut ctxs = 0u32;
+        // Register lets save the base they replace on `reg_saves`, as the
+        // tail-call loop's do, so the teardown restores them newest first.
+        let saves = self.reg_saves.len();
+        let regs = self.regs.len();
+        let mark = self.stack.len();
+        let r = loop {
+            let e = ast.expr(id);
+            let (link, body) = match &e.kind {
+                ExprKind::Let(args, body) => {
+                    let region = self.units[u as usize].res.expr[id.0 as usize];
+                    let link = if self.regions[region as usize].reg() {
+                        let old = self.reg_open(region);
+                        self.reg_saves.push((region, old));
+                        self.assign_regs(u, args, e.span, region, &cur)
+                    } else {
+                        let c = self.new_ctx(&cur, CtxKind::Plain, region);
+                        self.push(c.clone());
+                        cur = c;
+                        ctxs += 1;
+                        self.sequential_assign(u, args, e.span, &cur)
+                    };
+                    (link, Some(body))
+                }
+                ExprKind::Assert(args, body) => {
+                    (self.perform_assert(u, args, e.span, &cur), body.as_ref())
+                }
+                ExprKind::Echo(args, body) => (self.echo(u, args, &cur), body.as_ref()),
+                _ => break self.chain_body(u, id, &cur),
+            };
+            match (link, body) {
+                (Ok(()), Some(b)) => id = *b,
+                (Ok(()), None) => break Ok(Value::Undef),
+                (Err(e), _) => break Err(e),
+            }
+        };
+        self.chain_end(saves, regs, mark, cur, ctxs);
+        r
+    }
+
+    /// [`Self::eval`] of a chain's body, calling `eval_call` or `eval_cold`
+    /// itself for the kinds `eval_expr` would hand them to: a `let` nested
+    /// in a call's arguments (`max(let (a = 1) max(...))`) then costs this
+    /// frame a level and not `eval_expr`'s as well.
+    #[inline(always)]
+    fn chain_body(&mut self, u: u32, id: ExprId, ctx: &Rc<Ctx>) -> R<Value> {
+        self.frames += crate::recursion::EXPRESSION_FRAMES;
+        let v = match self.units[u as usize].ast.expr(id).kind {
+            ExprKind::Call(..) => self.eval_call(u, id, ctx),
+            ExprKind::Undef
+            | ExprKind::Invalid
+            | ExprKind::Bool(_)
+            | ExprKind::Number(_)
+            | ExprKind::Var(_)
+            | ExprKind::Binary(..)
+            | ExprKind::Ternary(..)
+            | ExprKind::Index(..)
+            | ExprKind::Let(..)
+            | ExprKind::Assert(..)
+            | ExprKind::Echo(..) => self.eval_expr(u, id, ctx),
+            _ => self.eval_cold(u, id, ctx),
+        };
+        self.frames -= crate::recursion::EXPRESSION_FRAMES;
+        let v = v?;
+        self.check_hard()?;
+        Ok(v)
+    }
+
+    /// The end of [`Self::eval_chain`]: its `let`s' registers closed and
+    /// contexts dropped, newest first, from `cur`, the innermost of the
+    /// `ctxs` contexts it made.
+    #[inline(never)]
+    fn chain_end(&mut self, saves: usize, regs: usize, mark: usize, mut cur: Rc<Ctx>, ctxs: u32) {
+        if self.reg_saves.len() > saves {
+            self.reg_unwind(saves, regs);
+        }
+        self.truncate(mark);
+        // Newest first, as each level of the recursion recycled its own
+        // context before its caller's: a context is only reusable once
+        // the one inside it has let go of it as a parent.
+        for _ in 0..ctxs {
+            let parent = cur.parent.clone().expect("a `let` context has a parent");
+            Ctx::recycle(cur, &mut self.ctx_pool);
+            cur = parent;
         }
     }
 
@@ -1999,33 +2112,65 @@ impl<'a> Evaluator<'a> {
         end: ExprId,
         ctx: &Rc<Ctx>,
     ) -> R<Value> {
-        let loc = self.expr_loc(u, id);
         let b = self.eval(u, begin, ctx)?;
         let e = self.eval(u, end, ctx)?;
-        let (Some(bd), Some(ed)) = (b.as_number(), e.as_number()) else {
-            let mut t = b"Unable to convert [".to_vec();
-            self.write_echo_nothrow(&b, &mut t);
-            t.extend_from_slice(b":...:");
-            self.write_echo_nothrow(&e, &mut t);
-            t.extend_from_slice(b"] to a range");
-            self.warn(loc, DiagCode::InvalidArgument, t);
+        let Some((bd, ed)) = self.range_ends(u, id, &b, &e) else {
             return Ok(Value::Undef);
         };
-        let mut sd = 1.0;
-        if let Some(s) = step {
-            let sv = self.eval(u, s, ctx)?;
-            match sv.as_number() {
-                Some(x) => sd = x,
-                None => {
-                    let mut t = b"Unable to convert [...:".to_vec();
-                    self.write_echo_nothrow(&sv, &mut t);
-                    t.extend_from_slice(b":...] to a step value");
-                    self.warn(loc, DiagCode::InvalidArgument, t);
-                    return Ok(Value::Undef);
+        let sd = match step {
+            Some(s) => {
+                let sv = self.eval(u, s, ctx)?;
+                match self.range_step(u, id, &sv) {
+                    Some(x) => x,
+                    None => return Ok(Value::Undef),
                 }
             }
+            None => 1.0,
+        };
+        Ok(self.range_value(u, id, bd, sd, ed))
+    }
+
+    /// A range's begin and end as numbers, or `None` after the warning
+    /// that they are not (and the step is then never evaluated). Shared
+    /// with the heap evaluator's range (`heap_expr`), so the two warn
+    /// alike.
+    pub(crate) fn range_ends(
+        &mut self,
+        u: u32,
+        id: ExprId,
+        b: &Value,
+        e: &Value,
+    ) -> Option<(f64, f64)> {
+        if let (Some(bd), Some(ed)) = (b.as_number(), e.as_number()) {
+            return Some((bd, ed));
         }
+        let mut t = b"Unable to convert [".to_vec();
+        self.write_echo_nothrow(b, &mut t);
+        t.extend_from_slice(b":...:");
+        self.write_echo_nothrow(e, &mut t);
+        t.extend_from_slice(b"] to a range");
+        self.warn(self.expr_loc(u, id), DiagCode::InvalidArgument, t);
+        None
+    }
+
+    /// A range's step as a number, or `None` after the warning that it is
+    /// not.
+    pub(crate) fn range_step(&mut self, u: u32, id: ExprId, sv: &Value) -> Option<f64> {
+        if let Some(x) = sv.as_number() {
+            return Some(x);
+        }
+        let mut t = b"Unable to convert [...:".to_vec();
+        self.write_echo_nothrow(sv, &mut t);
+        t.extend_from_slice(b":...] to a step value");
+        self.warn(self.expr_loc(u, id), DiagCode::InvalidArgument, t);
+        None
+    }
+
+    /// The range, after the warnings a literal range whose step points
+    /// away from its end gets.
+    pub(crate) fn range_value(&mut self, u: u32, id: ExprId, bd: f64, sd: f64, ed: f64) -> Value {
         if self.units[u as usize].ast.is_literal(id) {
+            let loc = self.expr_loc(u, id);
             if sd > 0.0 && ed < bd {
                 self.warn(
                     loc,
@@ -2040,7 +2185,7 @@ impl<'a> Evaluator<'a> {
                 );
             }
         }
-        Ok(Value::range(bd, sd, ed))
+        Value::range(bd, sd, ed)
     }
 
     pub(crate) fn is_lc(&self, u: u32, id: ExprId) -> bool {
@@ -2606,7 +2751,10 @@ impl<'a> Evaluator<'a> {
 
     /// `echo(...)`: print the evaluated arguments.
     pub fn echo(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>) -> R<()> {
-        let values = self.eval_args(u, args, ctx)?;
+        // `eval_args`, inlined by hand: an `echo` nested in another's
+        // arguments holds this frame and the arguments' at every level.
+        let mut values = Vec::with_capacity(args.len());
+        self.eval_args_into(u, args, ctx, &mut values)?;
         self.echo_values(u, args, &values)
     }
 
@@ -2664,7 +2812,9 @@ impl<'a> Evaluator<'a> {
 
     /// `Assert::performAssert`.
     pub fn perform_assert(&mut self, u: u32, args: &'a [Arg], span: Span, ctx: &Rc<Ctx>) -> R<()> {
-        let values = self.eval_args(u, args, ctx)?;
+        // `eval_args`, inlined by hand, as in `echo`.
+        let mut values = Vec::with_capacity(args.len());
+        self.eval_args_into(u, args, ctx, &mut values)?;
         self.assert_values(u, args, span, values)
     }
 

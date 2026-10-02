@@ -44,11 +44,25 @@
 //! moves that matter are made.
 //!
 //! A few rare shapes stay native even on the heap, and a call they reach
-//! starts a nested loop (`eval_call` past `NATIVE_CALLS`): ranges, callees
-//! that are expressions (`f(x)(y)`), methods, C-style `for` comprehensions,
-//! `object()` and `is_undef()`, parameter defaults and `use`d libraries'
-//! assignments. Each such level costs native stack and is still bounded by
-//! the native checks (`recursion_exhausted`), as it was before.
+//! starts a nested loop (`eval_call` past `NATIVE_CALLS`). Each such level
+//! costs native stack and is still bounded by the native checks
+//! (`recursion_exhausted`), which in a browser stop it after a few dozen
+//! levels (`recursion::HEAP_LOOP_FRAMES`):
+//! - C-style `for` comprehensions (`for (i = f(n); ...)`): their loop
+//!   keeps two contexts and an iteration's state across its parts, a
+//!   state machine of its own to move;
+//! - `object()`'s arguments: it builds the object as it goes and stops at
+//!   the first argument it cannot use, so its state (an `ObjectBuilder`)
+//!   would wait on a side stack of its own; and the function is
+//!   experimental;
+//! - parameter defaults, evaluated in the middle of binding a call's
+//!   arguments (`bind_user`), which would have to be split around them;
+//! - `use`d libraries' assignments, evaluated once, not per level.
+//!
+//! Ranges, `is_undef()`'s argument, callees that are expressions
+//! (`f(x)(y)`) and methods' arguments moved here from that list: a
+//! recursion through them stopped after 30 to 37 levels in a browser, and
+//! now reaches the counted limit there as natively.
 
 use std::rc::Rc;
 
@@ -64,7 +78,7 @@ use crate::message::{Loc, R, UnwindKind};
 use crate::ops;
 use crate::resolve::NO_SLOT;
 use crate::sym::Sym;
-use crate::value::{Growable, Value};
+use crate::value::{Growable, Object, Value};
 
 /// How many user calls run natively, nested, before the next one goes on
 /// the heap (`Evaluator::eval_call`). The native evaluator's tuned code
@@ -232,6 +246,32 @@ pub(crate) enum XFrame<'a> {
         id: ExprId,
         ctx: Rc<Ctx>,
     },
+    /// A range's begin, then its end, then its step
+    /// (`Evaluator::eval_range`). The step is evaluated last, and only
+    /// when begin and end are numbers.
+    RangeBegin {
+        u: u32,
+        id: ExprId,
+        ctx: Rc<Ctx>,
+    },
+    RangeEnd {
+        u: u32,
+        id: ExprId,
+        ctx: Rc<Ctx>,
+        b: Value,
+    },
+    RangeStep {
+        u: u32,
+        id: ExprId,
+        bd: f64,
+        ed: f64,
+    },
+    /// `is_undef(x)`'s argument, when `x` is not a plain variable (one is
+    /// looked up without its unknown-variable warning, natively).
+    IsUndef {
+        u: u32,
+        id: ExprId,
+    },
     /// A user call's tail-call loop (top of `calls`).
     Call,
 }
@@ -357,6 +397,16 @@ enum Phase<'a> {
         moved: Option<u32>,
         pure: Option<Rc<Ctx>>,
         body_ctx: Option<Rc<Ctx>>,
+        /// A method's object, bound to its `this` parameter.
+        this: Option<Object>,
+    },
+    /// `is_undef()`'s argument (see `Evaluator::heap_is_undef_arg`).
+    IsUndef,
+    /// A callee that is an expression, for the call `id`.
+    Callee {
+        id: ExprId,
+        args: &'a [Arg],
+        loc: Loc,
     },
     /// The step's own value: an expression in tail position that is not
     /// one of the above.
@@ -658,7 +708,16 @@ impl<'a> Evaluator<'a> {
                     want: Want::Lc,
                 }
             }
-            // Ranges: native, with a nested loop for a bound that calls.
+            ExprKind::Range { begin, .. } => {
+                self.xs.frames.push(XFrame::RangeBegin {
+                    u,
+                    id,
+                    ctx: ctx.clone(),
+                });
+                eval(*begin, ctx)
+            }
+            // Nothing else may call: a function literal's body runs only
+            // when it is called.
             _ => Next::Val(self.eval_native(u, id, &ctx)),
         }
     }
@@ -982,6 +1041,73 @@ impl<'a> Evaluator<'a> {
                     },
                     (Ok(()), None) => Next::Val(Ok(Value::Undef)),
                 }
+            }
+            XFrame::RangeBegin { u, id, ctx } => {
+                let b = match self.hard(r) {
+                    Ok(b) => b,
+                    Err(e) => return Next::Val(Err(e)),
+                };
+                let ExprKind::Range { end, .. } = ast(self, u).expr(id).kind else {
+                    unreachable!("a range")
+                };
+                self.xs.frames.push(XFrame::RangeEnd {
+                    u,
+                    id,
+                    ctx: ctx.clone(),
+                    b,
+                });
+                Next::Eval {
+                    u,
+                    id: end,
+                    ctx,
+                    want: Want::Value,
+                }
+            }
+            XFrame::RangeEnd { u, id, ctx, b } => {
+                let e = match self.hard(r) {
+                    Ok(e) => e,
+                    Err(e) => return Next::Val(Err(e)),
+                };
+                let Some((bd, ed)) = self.range_ends(u, id, &b, &e) else {
+                    return Next::Val(Ok(Value::Undef));
+                };
+                let ExprKind::Range { step, .. } = ast(self, u).expr(id).kind else {
+                    unreachable!("a range")
+                };
+                match step {
+                    Some(s) => {
+                        self.xs.frames.push(XFrame::RangeStep { u, id, bd, ed });
+                        Next::Eval {
+                            u,
+                            id: s,
+                            ctx,
+                            want: Want::Value,
+                        }
+                    }
+                    None => Next::Val(Ok(self.range_value(u, id, bd, 1.0, ed))),
+                }
+            }
+            XFrame::RangeStep { u, id, bd, ed } => {
+                let sv = match self.hard(r) {
+                    Ok(sv) => sv,
+                    Err(e) => return Next::Val(Err(e)),
+                };
+                Next::Val(Ok(match self.range_step(u, id, &sv) {
+                    Some(sd) => self.range_value(u, id, bd, sd, ed),
+                    None => Value::Undef,
+                }))
+            }
+            XFrame::IsUndef { u, id } => {
+                // `call_builtin`'s `is_undef`, then `direct_builtin`'s
+                // check and trace.
+                let r = self
+                    .hard(r)
+                    .map(|v| Value::Bool(v.is_undef()))
+                    .and_then(|v| self.check_hard().map(|()| v));
+                Next::Val(r.map_err(|mut e| {
+                    self.trace_call(&mut e, (u, id));
+                    e
+                }))
             }
             XFrame::Call | XFrame::For | XFrame::Let => unreachable!("handled above"),
         }
@@ -1632,6 +1758,21 @@ impl<'a> Evaluator<'a> {
 
     // --- calls ---------------------------------------------------------
 
+    /// `is_undef()`'s argument, when it is evaluated on the heap: when
+    /// there is exactly one (otherwise `call_builtin` warns), it is not a
+    /// plain variable (which `call_builtin` reads without evaluating it),
+    /// and it may call. Then the builtin is only `v.is_undef()` of its
+    /// value, and a recursion through it (`is_undef(f(n - 1))`) needs no
+    /// native stack per level.
+    fn heap_is_undef_arg(&mut self, u: u32, args: &[Arg]) -> Option<ExprId> {
+        let [a] = args else { return None };
+        let ast: &'a Ast = self.units[u as usize].ast;
+        if matches!(ast.expr(a.expr).kind, ExprKind::Var(_)) || !self.may_call(u, a.expr) {
+            return None;
+        }
+        Some(a.expr)
+    }
+
     /// The start of `eval_call`, for a call that may reach a user
     /// function: the checks, then the tail-call loop as a frame.
     fn x_call(&mut self, u: u32, id: ExprId, ctx: Rc<Ctx>) -> Next {
@@ -1652,7 +1793,20 @@ impl<'a> Evaluator<'a> {
             let ExprKind::Call(_, args) = &ast.expr(id).kind else {
                 unreachable!("a call")
             };
-            // `object()` and `is_undef()` evaluate their own arguments.
+            if b == Builtin::IsUndef
+                && let Some(x) = self.heap_is_undef_arg(u, args)
+            {
+                self.xs.frames.push(XFrame::IsUndef { u, id });
+                return Next::Eval {
+                    u,
+                    id: x,
+                    ctx,
+                    want: Want::Value,
+                };
+            }
+            // `object()` and `is_undef()` evaluate their own arguments:
+            // `object()` natively (see the module docs), `is_undef()` when
+            // its argument is a variable or cannot call.
             if matches!(b, Builtin::Object | Builtin::IsUndef) {
                 return Next::Val(self.direct_builtin(b, u, id, &ctx));
             }
@@ -1893,6 +2047,18 @@ impl<'a> Evaluator<'a> {
             }
             ExprKind::Call(callee, args) => {
                 if let Some(b) = self.static_builtin(u, id) {
+                    if b == Builtin::IsUndef
+                        && let Some(x) = self.heap_is_undef_arg(u, args)
+                    {
+                        let ctx = ctx.clone();
+                        st.phase = Phase::IsUndef;
+                        return S::Wait(Next::Eval {
+                            u,
+                            id: x,
+                            ctx,
+                            want: Want::Value,
+                        });
+                    }
                     if self.args_may_call(u, args)
                         && !matches!(b, Builtin::Object | Builtin::IsUndef)
                     {
@@ -2018,7 +2184,6 @@ impl<'a> Evaluator<'a> {
         args: &'a [Arg],
     ) -> S {
         let ast: &'a Ast = self.units[u as usize].ast;
-        let mode = st.mode;
         let loc = Loc {
             unit: u,
             span: e.span,
@@ -2040,63 +2205,124 @@ impl<'a> Evaluator<'a> {
                     r => self.find_function(u, r - 1, ctx, s, loc),
                 }
             }
-            _ => match self.eval(u, callee, ctx) {
-                Ok(Value::Function(f)) => Ok(Some(Callable::Literal(f))),
-                Ok(other) => {
-                    let t = format!("Can't call function on {}", other.type_name());
-                    self.warn(loc, DiagCode::UnknownFunction, t);
-                    Ok(None)
-                }
-                Err(e) => Err(e),
-            },
+            // A callee that is an expression (`f(x)(y)`, `fs[i](x)`) and
+            // may call: on the heap too, so a recursion through it holds
+            // no native stack per level.
+            _ if self.may_call(u, callee) => {
+                let ctx = ctx.clone();
+                st.phase = Phase::Callee { id, args, loc };
+                return S::Wait(Next::Eval {
+                    u,
+                    id: callee,
+                    ctx,
+                    want: Want::Value,
+                });
+            }
+            _ => self.eval(u, callee, ctx).map(|v| self.callee_value(v, loc)),
+        };
+        self.call_callable(st, u, id, args, loc, callable)
+    }
+
+    /// What a callee expression's value calls: a function literal, or
+    /// nothing, with the warning.
+    fn callee_value(&mut self, v: Value, loc: Loc) -> Option<Callable> {
+        match v {
+            Value::Function(f) => Some(Callable::Literal(f)),
+            other => {
+                let t = format!("Can't call function on {}", other.type_name());
+                self.warn(loc, DiagCode::UnknownFunction, t);
+                None
+            }
+        }
+    }
+
+    /// The rest of [`Self::call_simplify_call`], once the callee is known.
+    fn call_callable(
+        &mut self,
+        st: &mut CallSt<'a>,
+        u: u32,
+        id: ExprId,
+        args: &'a [Arg],
+        loc: Loc,
+        callable: R<Option<Callable>>,
+    ) -> S {
+        let mode = st.mode;
+        let ctx = match &st.cur {
+            Some(c) => c,
+            None => st.entry.as_ref().expect("the caller's context"),
         };
         let callable = match callable {
             Ok(c) => c,
             Err(e) => return S::Step(Err(e)),
         };
-        let (fu, params, body, defining, region): (u32, &'a [Param], ExprId, Rc<Ctx>, u32) =
-            match callable {
-                None => return S::Step(Ok(Step::Done(Value::Undef))),
-                Some(Callable::Builtin(b)) => {
-                    if self.args_may_call(u, args)
-                        && !matches!(b, Builtin::Object | Builtin::IsUndef)
-                    {
-                        let ctx = ctx.clone();
-                        st.phase = Phase::Builtin { b, u, id };
-                        let argv = self.arg_pool.pop().unwrap_or_default();
-                        self.xs.args.push(argv);
-                        return S::Wait(self.x_args(u, args, 0, ctx));
-                    }
-                    return S::Step(self.call_builtin(b, u, id, args, ctx).map(Step::Done));
+        // `this`: the call is of a method, bound into a context of its own
+        // with `this` set (`Evaluator::method_call`).
+        #[allow(clippy::type_complexity)]
+        let (fu, params, body, defining, region, this): (
+            u32,
+            &'a [Param],
+            ExprId,
+            Rc<Ctx>,
+            u32,
+            Option<Object>,
+        ) = match callable {
+            None => return S::Step(Ok(Step::Done(Value::Undef))),
+            Some(Callable::Builtin(b)) => {
+                if b == Builtin::IsUndef
+                    && let Some(x) = self.heap_is_undef_arg(u, args)
+                {
+                    let ctx = ctx.clone();
+                    st.phase = Phase::IsUndef;
+                    return S::Wait(Next::Eval {
+                        u,
+                        id: x,
+                        ctx,
+                        want: Want::Value,
+                    });
                 }
-                Some(Callable::User {
-                    ctx: dctx,
-                    unit,
-                    scope: scope_id,
-                    index,
-                }) => {
-                    let scope: &'a lang::ast::Scope =
-                        self.units[unit as usize].scopes[scope_id as usize].scope;
-                    let f = &scope.functions[index as usize];
-                    let region = self.function_region(unit, scope_id, index);
-                    (unit, &f.params, f.body, dctx, region)
+                if self.args_may_call(u, args) && !matches!(b, Builtin::Object | Builtin::IsUndef) {
+                    let ctx = ctx.clone();
+                    st.phase = Phase::Builtin { b, u, id };
+                    let argv = self.arg_pool.pop().unwrap_or_default();
+                    self.xs.args.push(argv);
+                    return S::Wait(self.x_args(u, args, 0, ctx));
                 }
-                Some(Callable::Literal(f)) => {
-                    if f.this.is_some() {
-                        // Methods: native (see the module docs).
-                        return S::Step(self.method_call(u, id, args, ctx, mode, loc, &f));
+                return S::Step(self.call_builtin(b, u, id, args, ctx).map(Step::Done));
+            }
+            Some(Callable::User {
+                ctx: dctx,
+                unit,
+                scope: scope_id,
+                index,
+            }) => {
+                let scope: &'a lang::ast::Scope =
+                    self.units[unit as usize].scopes[scope_id as usize].scope;
+                let f = &scope.functions[index as usize];
+                let region = self.function_region(unit, scope_id, index);
+                (unit, &f.params, f.body, dctx, region, None)
+            }
+            Some(Callable::Literal(f)) => {
+                let fast: &'a Ast = self.units[f.unit as usize].ast;
+                match &fast.expr(f.expr).kind {
+                    ExprKind::Function(params, body) => {
+                        let region = self.units[f.unit as usize].res.expr[f.expr.0 as usize];
+                        let this = f.this.clone();
+                        (
+                            f.unit,
+                            params.as_slice(),
+                            *body,
+                            f.ctx.clone(),
+                            region,
+                            this,
+                        )
                     }
-                    let fast: &'a Ast = self.units[f.unit as usize].ast;
-                    match &fast.expr(f.expr).kind {
-                        ExprKind::Function(params, body) => {
-                            let region = self.units[f.unit as usize].res.expr[f.expr.0 as usize];
-                            (f.unit, params.as_slice(), *body, f.ctx.clone(), region)
-                        }
-                        _ => return S::Step(Ok(Step::Done(Value::Undef))),
-                    }
+                    _ => return S::Step(Ok(Step::Done(Value::Undef))),
                 }
-            };
-        let pure = self.regions[region as usize].reg()
+            }
+        };
+        // A method is never pure: `this` is bound in its context.
+        let pure = this.is_none()
+            && self.regions[region as usize].reg()
             && args.len() <= params.len()
             && args.iter().all(|a| a.name.is_none())
             && (mode != Mode::Ctx || !ctx.vars.borrow().has_config);
@@ -2111,7 +2337,8 @@ impl<'a> Evaluator<'a> {
             if mode == Mode::Ctx {
                 self.copy_config(ctx, &body_ctx);
             }
-            let r = self.call_frame(u, id, args, ctx, mode, loc, fu, params, &body_ctx, None);
+            let this = this.as_ref();
+            let r = self.call_frame(u, id, args, ctx, mode, loc, fu, params, &body_ctx, this);
             return S::Step(r.map(|()| Step::Next {
                 unit: fu,
                 expr: Some(body),
@@ -2153,6 +2380,7 @@ impl<'a> Evaluator<'a> {
             moved,
             pure,
             body_ctx,
+            this,
         };
         S::Wait(self.x_args(u, args, 0, ctx))
     }
@@ -2213,6 +2441,12 @@ impl<'a> Evaluator<'a> {
                 }
                 Err(e) => S::Step(Err(e)),
             },
+            Phase::Callee { id, args, loc } => {
+                let callable = self.hard(r).map(|v| self.callee_value(v, loc));
+                self.call_callable(st, u, id, args, loc, callable)
+            }
+            // `call_builtin`'s `is_undef`, its argument evaluated.
+            Phase::IsUndef => S::Step(self.hard(r).map(|v| Step::Done(Value::Bool(v.is_undef())))),
             Phase::Builtin { b, u, id } => {
                 let mut argv = self.xs.args.pop().expect("a builtin's arguments");
                 let loc = self.expr_loc(u, id);
@@ -2232,6 +2466,7 @@ impl<'a> Evaluator<'a> {
                 moved,
                 pure,
                 body_ctx,
+                this,
             } => {
                 let mut argv = self.xs.args.pop().expect("a call's arguments");
                 if let Some(mark) = moved {
@@ -2249,8 +2484,9 @@ impl<'a> Evaluator<'a> {
                         }
                     },
                     (None, Some(body_ctx)) => {
+                        let this = this.as_ref();
                         let r =
-                            self.frame_bind(r.map(|_| ()), argv, loc, fu, params, &body_ctx, None);
+                            self.frame_bind(r.map(|_| ()), argv, loc, fu, params, &body_ctx, this);
                         S::Step(r.map(|()| Step::Next {
                             unit: fu,
                             expr: Some(body),

@@ -172,9 +172,12 @@ fn weighted_depth(src: &[u8]) -> u32 {
 
 /// The deepest library files by weight parse in a browser: their weighted
 /// depth is under the wasm32 limit. MCAD's `bitmap.scad` (an `else if`
-/// chain 186 nodes deep) is vendored; BOSL2's `nurbs.scad` (66 `assert`s
-/// chained in one expression, the deepest by weight in BOSL2, MCAD and
-/// OpenSCAD's tests) is checked when the reference checkout is there.
+/// chain 186 nodes deep, 2,005 by weight, the deepest in BOSL2, MCAD and
+/// OpenSCAD's tests but for one that tests the limit) is vendored; BOSL2's
+/// `nurbs.scad` (66 `assert`s chained in one expression, 1,311 by weight,
+/// the deepest in BOSL2) is checked when the reference checkout is there.
+/// It weighed 2,289 when a link of such a chain weighed 26, and is the
+/// file a heavier `assert` would push over the limit first.
 #[test]
 fn the_deepest_library_files_parse_in_a_browser() {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
@@ -188,7 +191,7 @@ fn the_deepest_library_files_parse_in_a_browser() {
     match std::fs::read(format!("{root}/.reference/BOSL2/nurbs.scad")) {
         Ok(nurbs) => {
             let depth = weighted_depth(&nurbs);
-            assert!(depth < WASM32_NESTING_LIMIT * 9 / 10, "nurbs.scad: {depth}");
+            assert!(depth < WASM32_NESTING_LIMIT * 6 / 10, "nurbs.scad: {depth}");
         }
         Err(_) => eprintln!("skipped nurbs.scad: no .reference/BOSL2"),
     }

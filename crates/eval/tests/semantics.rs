@@ -738,19 +738,21 @@ fn small_limits_give_the_recursion_errors() {
         "{lines:?}"
     );
 
-    // A range's bounds are evaluated natively, so a recursion through
-    // them holds native stack per level, and the frame budget stops it at
-    // its call, far short of the depth limit. Each level starts a heap
-    // loop (`recursion::HEAP_LOOP_FRAMES`), so this uses the wasm32
-    // release budget, under which browsers reach 34-37 levels.
+    // A C-style `for`'s initialiser is evaluated natively, so a recursion
+    // through it holds native stack per level, and the frame budget stops
+    // it at its call, far short of the depth limit. Each level starts a
+    // heap loop (`recursion::HEAP_LOOP_FRAMES`), so this uses the wasm32
+    // release budget, under which browsers reached 30-37 levels of the
+    // shapes that recursed this way. (A range's bounds were one, and are
+    // on the heap now: `functions.rs` runs one to the depth limit.)
     let wasm = Options {
         frame_limit: 2_000,
         ..Options::default()
     };
-    let range = "function f(n) = n == 0 ? 0 : len([for (i = [0 : f(n - 1)]) i]);";
-    let (lines, _) = run_with(&format!("{range}\necho(f(20));"), &wasm);
+    let cfor = "function f(n) = n == 0 ? 0 : [for (i = f(n - 1); i < n; i = n) i][0] + 1;";
+    let (lines, _) = run_with(&format!("{cfor}\necho(f(20));"), &wasm);
     assert_eq!(lines, ["ECHO: 20"]);
-    let (lines, ev) = run_with(&format!("{range}\necho(f(1000));"), &wasm);
+    let (lines, ev) = run_with(&format!("{cfor}\necho(f(1000));"), &wasm);
     assert!(ev.aborted);
     assert_eq!(
         lines[0],

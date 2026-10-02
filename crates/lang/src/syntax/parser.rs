@@ -68,9 +68,10 @@ pub struct SyntaxError {
 /// the nightly does at 99,997 levels of `translate()` or of `{`, and
 /// parses 100,000 levels of `(`. Its evaluator crashed on far less: 10,000
 /// levels of `translate()`, 50,000 of `[`. By weight, the deepest files in
-/// BOSL2, MCAD and OpenSCAD's tests are BOSL2's `nurbs.scad` (2,289: 66
-/// `assert`s chained in one expression) and MCAD's `bitmap.scad` (2,005;
-/// `tests/deep_nesting.rs` checks both against the wasm32 limit).
+/// BOSL2, MCAD and OpenSCAD's tests are MCAD's `bitmap.scad` (2,005: an
+/// `else if` chain) and BOSL2's `nurbs.scad` (66 `assert`s chained in one
+/// expression; `tests/deep_nesting.rs` checks both against the wasm32
+/// limit).
 ///
 /// Natively the limit is 50,000 in an optimised build: 5,000 levels of
 /// the cheapest kinds (weight 10), as many as the plain node count it
@@ -101,9 +102,8 @@ pub const NESTING_LIMIT: u32 = 25_000;
 /// [`NESTING_LIMIT`] on wasm32, where the engine's own stack is what the
 /// recursive stages overflow, and a WebKit worker's is the smallest of the
 /// browsers'. It is 70% of the 3,700 that [`nesting_weight`]'s weights
-/// are sized by, so nesting stops here with 30% of the depth that
-/// overflowed WebKit in its worst case to spare (20% for `let`, `assert`
-/// and `echo` expressions outside functions; see there). Not covered: an
+/// are sized by, so nesting stops here with at least 30% of the depth
+/// that overflowed WebKit in its worst case to spare. Not covered: an
 /// unoptimised wasm32 build, which was not measured.
 #[cfg(target_arch = "wasm32")]
 pub const NESTING_LIMIT: u32 = WASM32_NESTING_LIMIT;
@@ -153,26 +153,44 @@ pub const WASM32_NESTING_LIMIT: u32 = 2_590;
 /// `translate()`, 1,174 of `[`) and node 24, in fresh processes only, at
 /// 14 times or more (2,585 of `translate()`, 1,550 of `[`).
 ///
-/// The exception is `let`, `assert` and `echo` expressions: 123 levels of
-/// them overflowed in a statement's arguments (`echo(assert(true) ...
-/// 1)`), where the native evaluator (`Evaluator::eval` in
-/// `crates/eval/src/eval.rs`) recurses into each one's body, and 30% to
-/// spare would need a weight of 31. Parsed alone, or in a function's body
-/// (`function f() = assert(true) ... 1;`, called once), they reached 371.
-/// BOSL2's `nurbs.scad` chains 66 of them in a function's body, and at 31
-/// it would weigh 2,649, over the limit; at 26 it weighs 2,289, and the
-/// limit (99 levels) leaves 20% of the 123 to spare.
+/// `let`, `assert` and `echo` expressions were measured again once the
+/// evaluator walked a chain of them in a loop (`Evaluator::eval_chain` in
+/// `crates/eval/src/eval.rs`; it recursed into each one's body, and 123
+/// links overflowed in a statement's arguments). A chain of them now
+/// reaches 372 levels or more, as `{` does, in a statement's arguments,
+/// in a function's body and parsed alone, so they weigh by how they nest
+/// with other kinds, the evaluator holding a frame or two a level there:
+/// - `let` (`LetExpr`: 15 would do): 112 levels nested in a `let`'s
+///   arguments (`let (a = let (a = ...) a) a`, with `ArgList` and `Arg`),
+///   117 when alternating with `?:` (`let (a = 1) x ? let ... : 0`), 57 in
+///   a call's arguments (`max(let (a = 1) max(...))`), 83 with `(` or
+///   `a[`;
+/// - `assert` and `echo` (`AssertExpr`, `EchoExpr`: 12): 117 nested in
+///   another's arguments (`assert(assert(true) true)`), 69 in a call's
+///   arguments, 84 with `(`, 142 with `?:`;
+/// - 124 levels of `let (a = 1) assert(true) echo(1) `, the parser's.
+///
+/// Chromium overflowed at 6 times WebKit's depths or more there (350 levels
+/// of `max(let (a = 1) `, 670 of a `let` in a `let`'s arguments), Firefox
+/// at 14 times or more (1,200 and 1,850).
+///
+/// A comprehension's `let` (`LcLet`) must weigh what `let` does (the
+/// parser opens the node before it knows which it is), and the two weigh
+/// 17, what `LcLet` needs, though its evaluation did not change: 231
+/// levels of `[let (a = 1) let ...` overflowed, 107 alternating with a
+/// comprehension's `if`, 60 with `[` (`let (a = 1) [let (a = 1) [`), 49
+/// with `each [`, 88 with a comprehension's `for`.
 pub const fn nesting_weight(kind: SyntaxKind) -> u32 {
     match kind {
         // The `if` it belongs to carries an `else if` level: a level of
         // `else if` overflowed WebKit no sooner than one of `if`.
         ElseClause => 0,
         ModifierInst => 11,
-        TernaryExpr | LcEach => 17,
+        AssertExpr | EchoExpr => 12,
+        TernaryExpr | LcEach | LetExpr | LcLet => 17,
         LcIf => 18,
         ModuleInst | IfInst => 21,
         MemberExpr => 22,
-        LetExpr | LcLet | AssertExpr | EchoExpr => 26,
         CallExpr | LcFor | LcForC => 34,
         ParenExpr | LcParen | IndexExpr => 37,
         VectorExpr | RangeExpr => 45,

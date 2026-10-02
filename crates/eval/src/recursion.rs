@@ -40,11 +40,11 @@
 //! - the first `heap_expr::NATIVE_CALLS` nested user calls, which run
 //!   natively for speed (a bounded amount of stack);
 //! - the few shapes that stay native and start a nested heap loop for each
-//!   call they reach: ranges, callees that are expressions, methods,
-//!   C-style `for` comprehensions, `object()` and `is_undef()` arguments,
-//!   parameter defaults and `use`d libraries' assignments. A recursion
-//!   through one of them at every level holds native stack per level, and
-//!   the check at its calls is what stops it cleanly;
+//!   call they reach: C-style `for` comprehensions, `object()`'s
+//!   arguments, parameter defaults and `use`d libraries' assignments (see
+//!   `heap_expr`). A recursion through one of them at every level holds
+//!   native stack per level, and the check at its calls is what stops it
+//!   cleanly;
 //! - printing, whose depth is the value's;
 //! - the source's own nesting, which the parser bounds first with a
 //!   counted limit (`lang::syntax::parser::NESTING_LIMIT`).
@@ -87,9 +87,11 @@
 /// (`scripts/pgo.sh`) inlined more and grew its frames by half, then
 /// 64 MiB so that build cleared the nightly's depth by 25%. Neither
 /// reason holds now that recursion runs on the heap, but it is what the
-/// native shapes reach: 61,667 levels of a recursion through `is_undef()`
-/// and 49,332 through a C-style `for`'s initialiser (plain release build,
-/// macOS arm64), where the counted limit would allow 100,000. The stack
+/// native shapes reach: 49,330 levels of a recursion through a C-style
+/// `for`'s initialiser and 37,439 through `object()`'s arguments (plain
+/// release build, macOS arm64), where the counted limit would allow
+/// 100,000. A range's bounds and `is_undef()` reached 57,443 and 61,667
+/// before they moved to the heap. The stack
 /// is only touched when a program recurses that way. Shrinking it, and
 /// the thread [`crate::with_stack`] makes, to what source nesting and
 /// those shapes need is a followup (`docs/followups.md`).
@@ -149,8 +151,9 @@ pub const COMPREHENSION_FRAMES: u32 = 4;
 /// Frames a nested heap loop holds: `heap_expr`'s `heap_eval`, which a
 /// call past the native call levels starts from native code, and which
 /// each level of a recursion through a shape that stays native (a
-/// range's bounds, `is_undef()`, a C-style `for`, a parameter default)
-/// starts again. Its native frames are large. When this was
+/// C-style `for`, `object()`, a parameter default; a range's bounds, as
+/// measured below, before it moved to the heap) starts again. Its native
+/// frames are large. When this was
 /// [`CALL_FRAMES`], the release budget let such a recursion run to
 /// 280-660 levels, and the web core trapped instead: measured without
 /// the weight (October 2026, Playwright's browsers on macOS arm64), a

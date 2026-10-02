@@ -129,6 +129,12 @@ const PROGRAMS = {
   'module-children': (n) => `module c(n) { if (n > 0) c(n - 1) children(); else children(); }\nc(${n}) cube(1);`,
   'function-nested': (n) => `function h(n) = n == 0 ? 0 : 1 + (1 + (1 + (1 + (1 + h(n - 1)))));\necho(h(${n}));`,
   'function-args': (n) => `function a(n, v) = n == 0 ? v : max(0, a(n - 1, [v[0] + 1, norm([1, 2, 3])]));\necho(a(${n}, [0, 0]));`,
+  // Shapes that recursed natively, a heap loop a level, until they moved
+  // to the heap: they reach the counted limit as `function` does (the
+  // callee two counted calls a level: 49,999).
+  'function-range': (n) => `function r(n) = n == 0 ? 0 : [0 : 1 : r(n - 1)][2] + 1;\necho(r(${n}));`,
+  'function-is-undef': (n) => `function u(n) = n == 0 ? 0 : is_undef(u(n - 1)) ? -1 : n;\necho(u(${n}));`,
+  'function-callee': (n) => `function c(n) = n == 0 ? function (x) x : c(n - 1)(0) == 0 ? function (x) x : undef;\necho(c(${n})(7));`,
   // Nesting in the source rather than in a recursion: the parser, the
   // lowering and everything after walk it recursively, and past the
   // parser's nesting limit it must end in OpenSCAD's "memory exhausted"
@@ -140,10 +146,14 @@ const PROGRAMS = {
   'source-lists': (n) => `echo(len(${'['.repeat(n)}1${']'.repeat(n)}));`,
   'source-sum': (n) => `echo(${'1 + '.repeat(n)}1);`,
   'source-calls': (n) => `echo(${'max('.repeat(n)}1${')'.repeat(n)});`,
+  'source-chain': (n) => `echo(${'let (a = 1) assert(true) '.repeat(n)}1);`,
 };
 
 // Run by `--depths` alone; `--all-programs` runs every program above.
-const DEFAULT_PROGRAMS = ['function', 'module', ...Object.keys(PROGRAMS).filter((k) => k.startsWith('source-'))];
+const DEFAULT_PROGRAMS = [
+  'function', 'module', 'function-range', 'function-is-undef', 'function-callee',
+  ...Object.keys(PROGRAMS).filter((k) => k.startsWith('source-')),
+];
 
 function depthOf(kind) {
   const src = PROGRAMS[kind];

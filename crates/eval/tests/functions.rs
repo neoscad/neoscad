@@ -293,6 +293,101 @@ echo("after");
     );
 }
 
+/// `let`, `assert` and `echo` chained outside a function's tail position,
+/// which `eval_chain` walks in a loop: what each link binds, prints and
+/// checks, in order, with `$` variables, duplicate and unnamed
+/// assignments, unknown variables, a link with no body, an assert failing
+/// part-way, and the same chains inside calls that go on the heap. The
+/// expected file was written by the evaluator before `eval_chain`
+/// (`98be4d1`), which recursed into each link's body.
+#[test]
+fn let_assert_echo_chains() {
+    check(
+        "chains",
+        r#"
+x = 5;
+echo(let (a = 1) let (b = a + 1, $c = 7) assert(b == 2) echo("in", a, b, $c) let (a = 10) [a, b, $c]);
+echo(assert(true) echo("e1") echo("e2") let (q = 3, q = 4) q);
+echo(let (a = 1, 2) a);
+function g() = $c;
+echo(let ($c = 1) let ($c = 2) [g(), let ($c = 3) g(), g()]);
+v = let (a = [for (i = [0:3]) i]) echo(a) let (b = len(a)) b;
+echo(v);
+echo(assert(true) echo("no body"));
+echo(echo("only"));
+module m(p) { echo(p); }
+m(let (k = 2) assert(k == 2, "k") echo(k = k) k * 3);
+for (i = [let (n = 3) echo("range let") 0 : n]) echo(i);
+f = function (x) let (y = x * 2) echo("f", y) y;
+echo(f(4));
+echo(let (a = 1) let (b = undef_var) assert(true) b);
+echo([let (a = 1) a, let ($q = 2) let (r = $q) [r, let (r = 3) r]]);
+echo(let (a = let (b = 2) echo("inner", b) b + 1) assert(a == 3) a, assert(assert(true) true) 1);
+function h(n) = n == 0 ? let (a = 1) assert(a == 1) echo("bottom") 0 : 1 + (let (b = n) echo(b) h(n - 1));
+echo(h(12));
+echo(assert(x == 5) let (z = x) z + 1, "after");
+function k(n) = n == 0 ? let (a = 1) assert(a == 0, "deep fail") 0 : 1 + k(n - 1);
+echo(let (p = 2) echo("before") k(12));
+echo("not reached");
+"#,
+        &Options::default(),
+        None,
+    );
+}
+
+/// The shapes that moved from the native evaluator to the heap (a
+/// range's bounds, `is_undef()`'s argument, a callee that is an
+/// expression, a method's arguments): their values, warnings and errors
+/// in order, past the native call levels. The expected file was written
+/// by the evaluator that ran them natively (`98be4d1`).
+#[test]
+fn range_is_undef_callee_and_method_recursions() {
+    let opts = Options {
+        features: eval::Features::from_names(&["object-function"]),
+        ..Options::default()
+    };
+    check(
+        "heap_shapes",
+        r#"
+function r(n) = n == 0 ? [0 : 1] : let (q = r(n - 1)) [q[0] : 2 : q[2] + 1];
+echo(r(20));
+function rb(n) = n == 0 ? 0 : [rb(n - 1) : 1 : 3][2] + 1;
+echo(rb(30));
+function rw(n) = n == 0 ? "x" : [rw(n - 1) : 3];
+echo(rw(12));
+function rs(n) = n == 0 ? "s" : [0 : rs(n - 1) : 3];
+echo(rs(12));
+function re(n) = n == 0 ? 5 : [10 : 1 : re(n - 1)];
+echo(re(12));
+echo([for (i = [0 : rb(12)]) i]);
+function u(n) = n == 0 ? undef : is_undef(u(n - 1)) ? undef : 1;
+echo(u(25));
+function u3(n) = n == 0 ? undef : is_undef(u3(n - 1));
+echo(u3(25));
+function u4(n) = is_undef(n, 1);
+echo(u4(1));
+function u5(n) = n == 0 ? undef : is_undef(x = u5(n - 1));
+echo(u5(25));
+function k(n) = n == 0 ? function (x) x : function (x) k(n - 1)(x + 1);
+echo(k(20)(0));
+function nf(n) = n == 0 ? 3 : nf(n - 1)(1);
+echo(nf(12));
+function c(n) = n == 0 ? function (x) x : c(n - 1)(0) == 0 ? function (x) x : undef;
+echo(c(20)(7));
+p = object(f = function (n, this) n == 0 ? this.v : this.f(n - 1) + 1, v = 3);
+echo(p.f(30));
+q = object(g = function (n, this) n == 0 ? 0 : 1 + this.g(this.h(n) - 1), h = function (x, this) x);
+echo(q.g(20));
+o = object(f = function (n, this) n == 0 ? 0 : this.id(this.f(n - 1)) + 1, id = function (x, this) x);
+echo(o.f(20));
+function fail(n) = n == 0 ? assert(false, "bottom") 0 : [0 : 1 : fail(n - 1)];
+echo(fail(12));
+"#,
+        &opts,
+        None,
+    );
+}
+
 /// The heap evaluator's point for functions: a recursion through calls,
 /// comprehensions or both, and through modules and functions together,
 /// takes no native stack, so it reaches the counted limit on a thread of
@@ -326,6 +421,30 @@ fn deep_function_recursion_on_a_small_thread() {
         (
             "function f(n) = n == 0 ? 0 : 1 + f(n - 1);\nmodule m(n) { if (n > 0) m(n - 1); else echo(f(H)); }\nm(H);",
             "f",
+        ),
+        // Shapes that recursed natively until they moved to the heap: a
+        // range's bounds, `is_undef()`'s argument (in a tail call too), and
+        // a callee that is an expression, two counted calls a level (the
+        // call whose callee it is is in progress).
+        (
+            "function f(n) = n == 0 ? 0 : [0 : 1 : f(n - 1)][2] + 1;\necho(f(N));",
+            "f",
+        ),
+        (
+            "function f(n) = n == 0 ? 1 : [0 : f(n - 1) : 3][1];\necho(f(N));",
+            "f",
+        ),
+        (
+            "function f(n) = n == 0 ? 0 : is_undef(f(n - 1)) ? -1 : n;\necho(f(N));",
+            "f",
+        ),
+        (
+            "function f(n) = n == 0 ? undef : is_undef(f(n - 1)) ? undef : 1;\necho(f(N));",
+            "f",
+        ),
+        (
+            "function f(n) = n == 0 ? function (x) x : f(n - 1)(0) == 0 ? function (x) x : undef;\necho(f(H)(7));",
+            "(f((n - 1)))",
         ),
     ];
     for (k, (case, name)) in cases.into_iter().enumerate() {

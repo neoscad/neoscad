@@ -101,22 +101,22 @@ assert.equal(init.limits.memoryBytes, 2 ** 30);
 
 const example = (p) => join(root, '.reference/openscad/examples', p);
 
-// A recursion through a range's bounds is one of the shapes that still
-// recurse natively, each level starting a heap loop with large native
-// frames: the frame budget must stop it with the recursion error before
-// the engine's stack overflows, which would trap the instance. It runs
-// first, while the module is cold: V8's baseline frames are the larger,
-// and with the heap loop charged as a call this trapped here cold but
-// passed once warm. The engine answering afterwards shows it did not trap.
-await test("a recursion through a range's bounds is an error, not a trap", 5000, () => {
-    ok('open', {
-        path: '/doc/range.scad',
-        text: 'function f(n) = n == 0 ? 0 : len([for (i = [0 : f(n - 1)]) i]);\necho(f(100000));\n',
-    });
+// A recursion through a range's bounds once recursed natively, each level
+// starting a heap loop with large native frames, and the frame budget
+// stopped it after a few dozen levels (with a trap here, cold, when the
+// heap loop was charged as a call). It now runs on the heap evaluator, as
+// `is_undef()`'s argument, callees that are expressions and methods'
+// arguments do, and reaches the counted limit like any function
+// recursion. It runs first, while the module is cold: V8's baseline
+// frames are the larger.
+await test("a recursion through a range's bounds reaches the counted limit", 5000, () => {
+    const text = (n) => `function f(n) = n == 0 ? 0 : [0 : 1 : f(n - 1)][2] + 1;\necho(f(${n}));\n`;
+    ok('open', { path: '/doc/range.scad', text: text(99999) });
+    const at = ok('run', { path: '/doc/range.scad', mode: 'preview' }).render;
+    assert.match(at.console, /ECHO: 99999/, at.console);
+    ok('open', { path: '/doc/range.scad', text: text(100000) });
     const r = ok('run', { path: '/doc/range.scad', mode: 'preview' }).render;
     assert.match(r.console, /ERROR: Recursion detected calling function 'f'/, r.console);
-    ok('open', { path: '/doc/range.scad', text: 'cube(1);' });
-    assert.equal(ok('run', { path: '/doc/range.scad', mode: 'preview' }).render.exitCode, 0);
     console.log(`     ${r.console.trim().split('\n')[0]}`);
 });
 

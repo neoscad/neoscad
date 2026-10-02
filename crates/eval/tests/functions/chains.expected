@@ -1,0 +1,68 @@
+ECHO: [0, 1, 2, 3]
+ECHO: "in", 1, 2, 7
+ECHO: [10, 2, 7]
+ECHO: "e1"
+ECHO: "e2"
+WARNING: Ignoring duplicate variable assignment "q" = 4 @4
+ECHO: 3
+WARNING: Assignment without variable name 2 @5
+ECHO: 1
+ECHO: [2, 3, 2]
+ECHO: 4
+ECHO: "no body"
+ECHO: undef
+ECHO: "only"
+ECHO: undef
+ECHO: k = 2
+ECHO: 6
+ECHO: "range let"
+WARNING: Ignoring unknown variable "n" @14
+WARNING: Unable to convert [0:...:undef] to a range @14
+ECHO: "f", 8
+ECHO: 8
+WARNING: Ignoring unknown variable "undef_var" @17
+ECHO: undef
+ECHO: [1, [2, 3]]
+ECHO: "inner", 2
+ECHO: 3, 1
+ECHO: 12
+ECHO: 11
+ECHO: 10
+ECHO: 9
+ECHO: 8
+ECHO: 7
+ECHO: 6
+ECHO: 5
+ECHO: 4
+ECHO: 3
+ECHO: 2
+ECHO: 1
+ECHO: "bottom"
+ECHO: 12
+ECHO: 6, "after"
+ECHO: "before"
+ERROR: Assertion '(a == 0)' failed: "deep fail" @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @23
+TRACE: called by 'k' @24
+TRACE: called by 'echo' @24
+-- aborted true interrupted false hard false
+-- csg
+group();
+group();
+
+
+-- nodes
+0 1 Root
+1 9 Group
+1 11 Group
