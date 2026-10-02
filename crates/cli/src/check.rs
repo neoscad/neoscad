@@ -23,7 +23,8 @@ const EXIT_ERROR: u8 = 1;
 #[command(
     name = "neoscad check",
     about = "Check a model for FDM printing: manifold, floating pieces, thin walls, \
-             overhangs, bed fit, tiny features and intersecting parts",
+             overhangs, bed fit, tiny features, intersecting parts, and objects a \
+             difference() removes entirely",
     version
 )]
 pub(crate) struct Args {

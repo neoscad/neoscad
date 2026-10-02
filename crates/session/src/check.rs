@@ -331,7 +331,21 @@ pub fn analyze_with(
     s: &CheckSettings,
     now: &dyn Fn() -> f64,
 ) -> Analysis {
-    let mut a = analyze_solid(geometry, parts, inputs, s, now);
+    analyze_all(geometry, parts, inputs, Vec::new(), s, now)
+}
+
+/// [`analyze_with`], with findings found before the mesh was looked at
+/// (`extra`: the `cut-away` and `cuts-nothing` findings, which need the
+/// node tree), sorted, counted and truncated with the rest.
+pub fn analyze_all(
+    geometry: Option<&Geometry>,
+    parts: &[Part],
+    inputs: &[crate::orient::InputIssue],
+    extra: Vec<Finding>,
+    s: &CheckSettings,
+    now: &dyn Fn() -> f64,
+) -> Analysis {
+    let mut a = analyze_solid(geometry, parts, inputs, extra, s, now);
     link_to_winding(&mut a.findings);
     a
 }
@@ -363,6 +377,7 @@ fn analyze_solid(
     geometry: Option<&Geometry>,
     parts: &[Part],
     inputs: &[crate::orient::InputIssue],
+    extra: Vec<Finding>,
     s: &CheckSettings,
     now: &dyn Fn() -> f64,
 ) -> Analysis {
@@ -767,6 +782,7 @@ fn analyze_solid(
     }
     out.extend(intersections(parts));
     lap(&mut a, "parts");
+    out.extend(extra);
 
     if let Some(p) = stl {
         out.push(stl_precision(&p, &bbox));
@@ -1940,7 +1956,7 @@ impl Session {
     pub fn check(&self, req: &CheckRequest) -> Result<Checked, Cancelled> {
         let started = self.now();
         let scheme = render::ColorScheme::cornfield();
-        let (model, parts) = self.render_parts(&req.run, &scheme)?;
+        let (model, parts, cuts) = self.render_for_check(&req.run, &scheme)?;
         if model.exit_code != 0 {
             return Ok(Checked {
                 exit_code: model.exit_code,
@@ -1957,13 +1973,15 @@ impl Session {
         }
         let t = self.now();
         let clock = || self.now();
-        let analysis = analyze_with(
+        let mut analysis = analyze_all(
             model.geometry.as_ref(),
             &parts,
             &model.inputs,
+            cuts.findings,
             &req.settings,
             &clock,
         );
+        analysis.timings.push(("cuts", cuts.ms));
         let check_ms = self.now() - t;
         let count = |l: Level| analysis.counts[l as usize];
         let errors = count(Level::Error);

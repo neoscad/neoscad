@@ -392,7 +392,7 @@ as on the bed), at most 10 findings per code.
  "findings": [FINDING, ...], "truncated": {"code": int, ...},
  "timings_ms": {"evaluate", "geometry",
                 "check": {"manifold", "components", "walls",
-                          "overhangs", "parts", "total"},
+                          "overhangs", "parts", "total", "cuts"},
                 "total"},
  "diagnostics": DIAG}
 ```
@@ -419,6 +419,9 @@ as on the bed), at most 10 findings per code.
   what it broke. Numbers are rounded to 0.1 µm.
 - `counts` are before truncation; `truncated` counts, per code, the
   findings past the limit.
+- `timings_ms.check.cuts` is the `cut-away` and `cuts-nothing` stage,
+  which runs on the node tree right after the render, before the mesh
+  checks; `check.total` does not include it.
 
 Codes and how each is found:
 
@@ -437,9 +440,19 @@ Codes and how each is found:
 | `tiny-feature` | warning | A piece whose largest extent is under two nozzle widths. |
 | `parts-intersect` | warning | Two parts (neither nested in the other, both reaching the model as themselves) whose solids overlap: `value` is the overlap volume, by a boolean intersection. |
 | `part-not-manifold` | error | A part's own solid is not valid, or is pinched. |
+| `cut-away` | warning | An object in a `difference()`'s first child that the subtracted children remove entirely: posts in a `union()` with an enclosure's shell, and the cavity subtracted from both. Only differences written in the user's own files (the main file's directory and below) are looked at, not a library's. The first child is taken apart through unions, groups, module calls, `for` loops, colours, `render()` and transforms (while what is inside is the user's too); each piece is an object, and the objects one call made (four posts from one `for` loop) are one finding. An object is cut away when the subtracted children take at least a tenth of it and leave under 1% of its volume; or leave more, but only a stub (at most three quarters of the object's extent along some axis) inside the other objects, as of a post sunk into the floor. A ring left by a bore through an object buried in another (a taper inside the stem it should stick out of) is not a stub, and is not reported: the cut did not hide it. Objects thinner than 0.05 mm are ignored. The message names the difference and the call, as `file:line`; the fix names the subtracted child that took the most and says to add the objects after the subtraction. `value` is the volume left (mm³) and `limit` 1% of the objects' volume. |
+| `cuts-nothing` | warning | A subtracted child of such a difference that removes nothing: its box misses the first child's, or its overlap with the objects it reaches has no volume ("it does not touch the first child"), or everything it reaches is removed by the other subtracted children already (a cutout placed in the cavity instead of through the wall). Reported per call, only when every instance of the call that was compared removed nothing, so a loop of holes of which one falls off the end is not a finding. Background (`%`) children are not operands and are left out. |
 | `stl-precision` | warning, or info when no edge breaks | A valid solid's corners welded by 32-bit float position, as a slicer reads an STL (binary STL stores `f32`; slicers parse ASCII STL into `f32` too), beyond what the exact weld merges. A warning when that leaves edges shared by other than two faces: the solid checks manifold but its STL does not (the CAD pilot's twisted thread: 2998 triangles collapse and 738 edges break, the grader's count). `value` is the number of such edges, `point` the midpoint of the first, `bbox` the box around them. Info when triangles only collapse and every edge still pairs: a slicer drops the zero-area facets and the rest is closed, which Clipper-snapped slivers also give (3 of the 532 reference inputs), so it is not a warning; `value` is then the count and `point` the first one's centroid, and the message ends "so no action is needed" (the text report and the MCP tools' terse results leave its fix out; the JSON keeps it). The message gives the 32-bit spacing at the model's largest coordinate; the fix says to overlap or separate coincident surfaces by 0.01 or more, or coarsen the tessellation, keeping vertices more than 100 times that spacing apart. |
 | `off-bed` | info | The model's lowest point is not at z = 0. |
 | `polyhedron-inside-out`, `polyhedron-flipped-faces`, `polyhedron-open`, `polyhedron-not-manifold` | warning | A `polyhedron()` or imported mesh that does not bound a solid: the diagnostics of the same codes (see "Input meshes" under "Diagnostics"), as findings. The message ends with the call as `file:line`; `point` is in the model's coordinates. When a winding problem is among them, a `not-manifold` finding's fix says to fix that one first (`fix #1 first: an inside-out or partly flipped polyhedron is the likely cause, ...`) instead of to overlap the parts: booleans with an inside-out mesh leave pinched edges. |
+
+Cost of `cut-away` and `cuts-nothing`: the geometry is the render's own
+(its cache), and a mesh is converted to a solid or moved only when a
+boolean needs it; with one object, or one subtracted child, the volumes
+of the object and of the result answer without one. Booleans are capped
+at 200,000 operand triangles a check, and 50,000 each; at most 64
+distinct differences and 64 objects in one are looked at. A finding
+that would need more is not reported.
 
 Accuracy: on the synthetic models of `crates/session/tests/check.rs`
 the thickness of a 0.3 and a 0.5 mm wall, a 200 mm² overhang, a 45°

@@ -75,7 +75,8 @@ pub fn is_within(name: &str, outer: &str) -> bool {
             && name.as_bytes()[outer.len()] == b'.')
 }
 
-fn mul(a: &Matrix, b: &Matrix) -> Matrix {
+/// The product of two transforms (`a` then applied after `b`).
+pub(crate) fn mul(a: &Matrix, b: &Matrix) -> Matrix {
     let mut m = [[0.0; 4]; 4];
     for (i, row) in m.iter_mut().enumerate() {
         for (j, x) in row.iter_mut().enumerate() {

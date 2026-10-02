@@ -138,7 +138,8 @@ request, `ffi`'s `guarded` per call) and keeps its session; see "Panics".
   (`render::Lighting`), so faces turned away from OpenSCAD's fixed light
   stay legible; PNG export keeps OpenSCAD's lighting.
 - **`neoscad check`** (manifold, minimum wall, overhangs, floating or
-  intersecting parts), **`measure`** (bbox, distances, cross-sections),
+  intersecting parts, objects a `difference()` removes entirely),
+  **`measure`** (bbox, distances, cross-sections),
   **`test`** (assert-based model tests), **`fmt`**, **`docs <builtin>`**.
   `check` and `measure` are implemented in 7b-1 (`session::check`,
   `session::measure` on the analysis mesh and BVH of `session::mesh`;

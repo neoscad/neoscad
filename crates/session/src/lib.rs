@@ -52,6 +52,7 @@
 //! GPU through [`Config::gpu`].
 
 pub mod check;
+mod cuts;
 pub mod diag;
 mod docfs;
 pub mod docs;
@@ -721,6 +722,17 @@ struct Product {
     tree: Option<Arc<geom::csg::CsgTree>>,
     messages: Vec<geom::Msg>,
 }
+
+/// What [`Session::build`] returns: the product, the cache's state, the
+/// renderer, and the tree's keys (which the check's cut stage reuses:
+/// hashing the tree again cost the /try threaded ring a fifth of a
+/// second, its polyhedra's points and all).
+type Built = (
+    Product,
+    geom::CacheStats,
+    Arc<geom::Renderer>,
+    eval::dump::Keys,
+);
 
 /// Where a request's names resolve and print relative to.
 #[derive(Debug, Clone)]
@@ -1693,7 +1705,7 @@ impl Session {
         scheme: &geom::color::Scheme,
         job: &JobGuard<'_>,
         csg_limit: usize,
-    ) -> Result<(Product, geom::CacheStats, Arc<geom::Renderer>), Stop> {
+    ) -> Result<Built, Stop> {
         let t = self.now();
         let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
         let keys = eval::dump::Keys::new(&ev.root, &*pipe.fs);
@@ -1794,7 +1806,7 @@ impl Session {
         self.report_inputs(pipe, loaded, top, &import_mesh, Some(&keys));
         pipe.timings.geometry = self.now() - t;
         let stats = renderer.stats();
-        Ok((product, stats, renderer))
+        Ok((product, stats, renderer, keys))
     }
 
     // --- Operations --------------------------------------------------------
@@ -1887,8 +1899,8 @@ impl Session {
         scheme: &render::ColorScheme,
         csg_limit: usize,
     ) -> Result<Rendered, Cancelled> {
-        self.render_impl(run, mode, scheme, csg_limit, false)
-            .map(|(r, _)| r)
+        self.render_impl(run, mode, scheme, csg_limit, false, false)
+            .map(|(r, _, _)| r)
     }
 
     /// [`Session::render`] in [`Mode::Render`], with the solid of each
@@ -1907,6 +1919,28 @@ impl Session {
                 scheme,
                 geom::csg::DEFAULT_TERM_LIMIT,
                 true,
+                false,
+            )
+            .map(|(r, p, _)| (r, p))
+        })
+    }
+
+    /// [`Session::render_parts`], with the findings about the model's
+    /// `difference()`s that only the node tree can give (`cuts`): what
+    /// `check` works from.
+    pub(crate) fn render_for_check(
+        &self,
+        run: &Run,
+        scheme: &render::ColorScheme,
+    ) -> Result<(Rendered, Vec<parts::Part>, cuts::Cuts), Cancelled> {
+        eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+            self.render_impl(
+                run,
+                Mode::Render,
+                scheme,
+                geom::csg::DEFAULT_TERM_LIMIT,
+                true,
+                true,
             )
         })
     }
@@ -1918,8 +1952,10 @@ impl Session {
         scheme: &render::ColorScheme,
         csg_limit: usize,
         want_parts: bool,
-    ) -> Result<(Rendered, Vec<parts::Part>), Cancelled> {
+        want_cuts: bool,
+    ) -> Result<(Rendered, Vec<parts::Part>, cuts::Cuts), Cancelled> {
         let mut parts = Vec::new();
+        let mut cut_findings = cuts::Cuts::default();
         let mut pipe = self.pipe(run);
         let job = self.begin(&pipe.paths.doc, run);
         let mut out = Rendered {
@@ -1953,7 +1989,7 @@ impl Session {
             out.camera = ev.camera;
             out.camera_assigned = ev.camera_assigned;
             run.stage(Stage::Geometry);
-            let (p, cache, renderer) = self.build(
+            let (p, cache, renderer, keys) = self.build(
                 &mut pipe,
                 &loaded,
                 &ev,
@@ -1975,6 +2011,22 @@ impl Session {
                 parts =
                     self.part_solids(&mut pipe, &loaded, top, &scheme.geometry_scheme(), &job)?;
             }
+            if want_cuts && out.geometry.is_some() {
+                let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+                let t = self.now();
+                let found = self.cut_findings(
+                    &mut pipe,
+                    &loaded,
+                    top,
+                    &keys,
+                    &scheme.geometry_scheme(),
+                    &job,
+                )?;
+                cut_findings = cuts::Cuts {
+                    findings: found,
+                    ms: self.now() - t,
+                };
+            }
             Ok(())
         })();
         match step {
@@ -1985,7 +2037,7 @@ impl Session {
         out.files = pipe.fs.files();
         out.inputs = std::mem::take(&mut pipe.inputs);
         (out.log, out.timings) = self.finish(pipe);
-        Ok((out, parts))
+        Ok((out, parts, cut_findings))
     }
 
     /// The solid of every part under `top`, each on its own and placed as
@@ -2059,7 +2111,7 @@ impl Session {
             let scheme = req.scheme.geometry_scheme();
             let mode = if req.force { Mode::Force } else { Mode::Render };
             run.stage(Stage::Geometry);
-            let (p, cache, _) = self.build(
+            let (p, cache, _, _) = self.build(
                 &mut pipe,
                 &loaded,
                 &ev,
