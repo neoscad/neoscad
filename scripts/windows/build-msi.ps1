@@ -3,7 +3,8 @@
 #
 #   pwsh scripts/windows/build-msi.ps1 [-Arch x64|arm64] [-Out DIR]
 #
-#   1. `dotnet publish` the app, self-contained, into DIR/stage-<arch>/app;
+#   1. `dotnet publish` the app, self-contained, into DIR/stage-<arch>/app,
+#      and the `neoscad` CLI (cargo, dist profile) into its bin\;
 #   2. stage LICENSE, NOTICE and packaging/licenses beside it, and under
 #      licenses/third-party/ the licence and notice files of every NuGet
 #      package the app was restored from (the .NET runtime pack and the
@@ -61,6 +62,37 @@ if (-not (Test-Path (Join-Path $app "NeoSCAD.pri"))) {
 if (-not (Test-Path (Join-Path $app "Editor/editor.html"))) {
     throw "the editor bundle is missing from the publish (run build-core.ps1 without -SkipEditor)"
 }
+# The `neoscad` command-line tool, which the app's agent setup writes into
+# client configs by its absolute path (docs/mcp.md, "Setup from the
+# apps"). In bin\, not beside NeoSCAD.exe: Windows file names are
+# case-insensitive, so a neoscad.exe there would be the app's own exe.
+# Not added to PATH (the owner's decision): the CLI's own MSI and scoop
+# do that, and configs never depend on it. Built as cargo-dist builds the
+# released CLI (the dist profile, the C runtime linked statically, so it
+# needs no Visual C++ redistributable beside it in bin\), without the PGO
+# profile those builds add.
+$triple = if ($Arch -eq "arm64") { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
+$target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repo "target" }
+$savedRustflags = $env:RUSTFLAGS
+$env:RUSTFLAGS = (@($env:RUSTFLAGS, "-Ctarget-feature=+crt-static") | Where-Object { $_ }) -join " "
+Push-Location $repo
+try {
+    cargo build --locked --profile dist --target $triple -p neoscad-cli --bin neoscad
+    if ($LASTEXITCODE -ne 0) { throw "cargo build (neoscad-cli) failed ($LASTEXITCODE)" }
+}
+finally {
+    Pop-Location
+    $env:RUSTFLAGS = $savedRustflags
+}
+$cliBuilt = Join-Path $target "$triple/dist/neoscad.exe"
+if (-not (Test-Path $cliBuilt)) { throw "no CLI at $cliBuilt" }
+$bin = Join-Path $app "bin"
+New-Item -ItemType Directory -Force -Path $bin | Out-Null
+Copy-Item $cliBuilt $bin
+$cliVersion = & (Join-Path $bin "neoscad.exe") --version
+if ($cliVersion -ne "neoscad $version") { throw "the bundled CLI says '$cliVersion', expected 'neoscad $version'" }
+Write-Host "bundled CLI: bin\neoscad.exe ($cliVersion, $([math]::Round((Get-Item $cliBuilt).Length / 1MB, 1)) MB)"
+
 # Debug symbols stay out of the installer; the CI artifacts keep the build.
 Get-ChildItem -Recurse -Path $app -Filter *.pdb | Remove-Item -Force
 

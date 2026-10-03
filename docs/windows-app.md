@@ -64,8 +64,10 @@ executable.
 `pwsh scripts/windows/build-msi.ps1 [-Arch x64|arm64]`, after
 `build-core.ps1`, writes `dist/windows/NeoSCAD-<version>-windows-<arch>.msi`:
 an unsigned, per-machine MSI for each architecture. It runs `dotnet
-publish` (self-contained), stages the licence files beside the app, and
-runs `wix build` on `windows/installer/NeoSCAD.wxs`.
+publish` (self-contained), builds the `neoscad` CLI into the app's
+`bin\` (for AI agent clients; `docs/release.md`, "The Windows app in the
+release"), stages the licence files beside the app, and runs `wix build`
+on `windows/installer/NeoSCAD.wxs`.
 
 - **WiX 5.0.2**, a .NET tool the script installs into `dist/windows/tools`.
   The CLI's MSI uses WiX 3.14.1 through cargo-dist, but the app is a

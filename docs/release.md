@@ -30,7 +30,7 @@ Everything goes to `dist/` (gitignored), which each run empties first:
 
 | File | What |
 |---|---|
-| `NeoSCAD-<version>-<build>.dmg` | the app, an `Applications` link and a `Licenses` folder; HFS+, zlib |
+| `NeoSCAD-<version>-<build>.dmg` | the app (with the CLI in `Contents/Helpers`), an `Applications` link and a `Licenses` folder; HFS+, zlib |
 | `neoscad-<version>-<build>-macos-universal.tar.gz` | the CLI (arm64 + x86_64), `LICENSE`, `NOTICE` and `licenses/` |
 | `neoscad` | the same CLI, bare |
 | `NeoSCAD-<version>-<build>-dSYMs.zip` | `NeoSCAD.app.dSYM`, `NeoSCADCore.framework.dSYM`, `neoscad.dSYM` |
@@ -102,7 +102,9 @@ will not use):
 
 ## What the script does
 
-1. **Core and editor.** `scripts/apple/build-core.sh --universal` (cargo
+1. **Core, CLI and editor.** `scripts/apple/build-cli.sh --universal`
+   (the CLI the app carries; "The bundled command-line tool" below),
+   `scripts/apple/build-core.sh --universal` (cargo
    release profile: thin LTO, `debug = "line-tables-only"`; both
    architectures, one universal static library in the XCFramework) and
    `scripts/apple/build-editor.sh`, then `xcodegen generate`.
@@ -171,7 +173,71 @@ will not use):
    notices to travel with the binary, and until September 2026 only
    `LICENSE` did. (The app bundle itself does not carry them yet; the
    DMG's `Licenses` folder sits beside it.)
-8. **dSYM zip, `BUILDINFO.txt`, `SHA256SUMS`**, then the smoke test.
+   The app's own copy, `Contents/Helpers/neoscad`, must have the same
+   UUIDs as this CLI, so the one `neoscad.dSYM` serves both and a stale
+   bundled CLI fails the run.
+8. **dSYM zip, `BUILDINFO.txt`, `SHA256SUMS`**, then the smoke test,
+   which also runs the bundled CLI from the mounted DMG (`--version`,
+   then an MCP `initialize` and `tools/list`) and checks that the app,
+   launched from the read-only DMG, made no link to it.
+
+### The bundled command-line tool
+
+The app carries the universal `neoscad` CLI as
+`NeoSCAD.app/Contents/Helpers/neoscad`, for AI agent clients
+(`docs/mcp.md`, "Setup from the apps"). It is not on `PATH`, and the cask
+has no `binary` stanza, so it does not conflict with the `neoscad`
+formula (`packaging/homebrew/neoscad-app.rb`).
+
+- **Where.** `Contents/Helpers`, the place for helper tools in a bundle,
+  not `Contents/MacOS`: APFS is case-insensitive by default, and
+  `Contents/MacOS/neoscad` would be the app's executable, `NeoSCAD`.
+- **Build.** The `CommandLineTool` aggregate target runs
+  `scripts/apple/build-cli.sh` (cargo for Xcode's `ARCHS`, lipo, `strip
+  -x`, into `apple/build/cli/neoscad`), with the core's input file list
+  so it is skipped when no Rust input changed. The app target's "Embed
+  command-line tool" phase copies it into `Contents/Helpers` and signs it
+  there with the build's identity, the hardened runtime and the
+  identifier `org.neoscad.neoscad`, before Xcode signs the app: the
+  app's signature seals its nested code and refuses an unsigned
+  executable. Debug builds carry it too (arm64), which is what the hosted
+  app tests run.
+- **Signing.** `release.sh` signs it again (`sign_helper`) with the
+  release identity, `--options runtime`, a secure timestamp with
+  Developer ID, and no entitlements, after Sparkle's helpers and before
+  the app, in both the ad-hoc and the Developer ID path (an export's
+  signature is not relied on, as for Sparkle). It needs no entitlement:
+  it loads no libraries and runs no JIT, and the ad-hoc app's
+  library-validation exception stays the app's alone (the script fails
+  if the CLI carries any entitlement). The verification's Mach-O loop
+  covers it like any other: hardened runtime, both architectures, and
+  with Developer ID the team. It is notarized inside the app's zip and
+  covered by the app's stapled ticket.
+- **The link.** At each launch the app points
+  `~/Library/Application Support/NeoSCAD/bin/neoscad` at its own copy,
+  and agent configs name that link, so they survive moving the app;
+  Sparkle replaces the bundle in place, so updates keep the path anyway
+  (`apple/App/Agents/CommandLineTool.swift`). Launched from the DMG, from
+  App Translocation or under the tests, the app leaves the link alone.
+  `-NeoSCADToolLinkDirectory DIR` as a launch argument moves it, which is
+  how a local build is checked without touching the real one:
+
+      open -n -a /path/to/NeoSCAD.app --args -NeoSCADToolLinkDirectory /tmp/link-check
+      /tmp/link-check/neoscad --version
+
+- **Size.** Measured on one ad-hoc `release.sh` build (0.3.1, build
+  251, 2026-10-02), against a DMG made the same way from the same app
+  with `Contents/Helpers` removed:
+
+  | | without the CLI | with it |
+  |---|---|---|
+  | NeoSCAD.app, unpacked (`du -sk`) | 42.5 MB | 80.9 MB |
+  | DMG | 21.8 MB | 39.7 MB (+17.8 MB, +82%) |
+
+  The CLI itself is 38.4 MB (universal, `strip -x`), the same binary as
+  the bare `neoscad` in `dist/`. Its tarball is 17.9 MB, so the DMG now
+  costs about what the DMG and the tarball did together. A Debug app
+  carries an arm64-only copy (18.3 MB).
 
 ### Size
 
@@ -973,6 +1039,19 @@ Dispatching the workflow by hand (`gh workflow run windows-installer.yml`)
 runs the same build and install test as a dry run. The MSIs and the
 licence page's RTF become workflow artifacts. Nothing is attested or
 attached, because both steps need the release's `plan` input.
+
+The app's MSI carries the `neoscad` CLI as `bin\neoscad.exe` in the
+install folder, for AI agent clients (`docs/mcp.md`, "Setup from the
+apps"). `build-msi.ps1` builds it as cargo-dist builds the released CLI
+(`--profile dist`, `+crt-static`, so it needs no Visual C++ runtime in
+`bin\`), without the PGO profile, checks its `--version`, and stages it
+for the WiX harvest. It is in `bin\` because `neoscad.exe` beside
+`NeoSCAD.exe` would be the same file, and it is not added to `PATH` (the
+CLI's own MSI and scoop do that). The install check runs it from the
+install folder (`--version` and an MCP `initialize`) and checks that the
+machine `PATH` does not name the install. The MSI is unsigned like the
+rest (below), so the CLI in it is too. Its size in the MSI was not
+measured: it is built on Windows only.
 
 Before the build, the job runs `scripts/windows/test-scripts.ps1`, which
 parses every script in `scripts/windows` and checks the licence page's

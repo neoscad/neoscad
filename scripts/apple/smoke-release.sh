@@ -151,6 +151,34 @@ if [ -n "$(find "$reports" -name 'NeoSCAD*' -newer "$marker" -print -quit 2>/dev
 else
     pass "no crash report"
 fi
+# The CLI the app carries (Contents/Helpers/neoscad), run from the mounted
+# DMG as an agent client would run it through the app's link: the version,
+# and an MCP session that lists the tools. The app launched above from a
+# read-only volume, so it must not have made a link to this copy.
+helper=$app/Contents/Helpers/neoscad
+got=$("$helper" --version 2>/dev/null || true)
+if [ -n "$got" ] && { [ -z "$version" ] || [ "$got" = "neoscad $version" ]; }; then
+    pass "bundled CLI --version: $got"
+else
+    fail "bundled CLI --version: ${got:-did not run}"
+fi
+session='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"neoscad-smoke","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+replies=$(printf '%s\n' "$session" | with_timeout 30 "$helper" mcp 2>/dev/null || true)
+if grep -q '"serverInfo"' <<<"$replies" && grep -q '"id":2' <<<"$replies" &&
+    grep -q '"name":"render"' <<<"$replies"; then
+    pass "bundled CLI mcp: initialize and tools/list ($(grep -o '"inputSchema"' <<<"$replies" | wc -l | tr -d ' ') tools)"
+else
+    fail "bundled CLI mcp: ${replies:-no reply}"
+fi
+link=$HOME/Library/Application\ Support/NeoSCAD/bin/neoscad
+if [ -L "$link" ] && [ "$(readlink "$link")" = "$helper" ]; then
+    fail "the app linked $link to the DMG's copy"
+else
+    pass "no command-line tool link to the DMG's copy"
+fi
+
 # The launch registered the DMG's copy with LaunchServices; forget it, so
 # the unmounted path does not linger as a handler for .scad files.
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \

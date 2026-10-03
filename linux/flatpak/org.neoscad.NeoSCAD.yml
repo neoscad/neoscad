@@ -65,6 +65,12 @@ modules:
       # rust-toolchain.toml's pin does not apply (docs/linux-app.md).
       - cargo --offline build --release -p neoscad-linux-app --features gtk
       - install -Dm755 -t /app/bin target/release/neoscad-gtk
+      # The command-line tool, for agent clients on the host (docs/mcp.md,
+      # "Setup from the apps"). A Flatpak cannot put it on the host's
+      # PATH, so clients run `flatpak run --command=neoscad
+      # org.neoscad.NeoSCAD mcp`; inside the sandbox it is /app/bin/neoscad.
+      - cargo --offline build --release -p neoscad-cli --bin neoscad
+      - install -Dm755 -t /app/bin target/release/neoscad
       # Desktop integration.
       - install -Dm644 -t /app/share/applications linux/data/org.neoscad.NeoSCAD.desktop
       - install -Dm644 -t /app/share/metainfo linux/data/org.neoscad.NeoSCAD.metainfo.xml

@@ -38,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a check's window would sit over the documents they drive.
         if NSClassFromString("XCTestCase") == nil {
             AppUpdater.shared?.start()
+            // The stable link agent clients run the bundled CLI through
+            // (App/Agents/CommandLineTool.swift). Not under XCTest: a
+            // DerivedData build must not repoint the developer's own link.
+            CommandLineTool.refreshAtLaunch()
         }
     }
 

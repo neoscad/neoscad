@@ -7,7 +7,8 @@
 #                 by scripts/apple/build-core.sh) and the async wrapper
 #                 (Core/Engine.swift), linking the Rust core's XCFramework
 #   NeoSCAD       the app: an NSDocument editor for .scad files, with the
-#                 editor bundle (EditorBundle) in Resources/Editor
+#                 editor bundle (EditorBundle) in Resources/Editor and the
+#                 `neoscad` CLI (CommandLineTool) in Helpers
 #   NeoSCADQuickLook  sandboxed Quick Look preview extension (picture,
 #                 notes and source; Core/QuickLook.swift), in the app's
 #                 PlugIns
@@ -133,6 +134,9 @@ targets:
         codeSign: true
       # The editor's page and script, built before this target copies them.
       - target: EditorBundle
+      # The `neoscad` command-line tool, which "Embed command-line tool"
+      # below copies into Contents/Helpers.
+      - target: CommandLineTool
       # Embedded in Contents/PlugIns, where Quick Look finds them once the
       # app has been launched (or registered with lsregister).
       - target: NeoSCADQuickLook
@@ -162,6 +166,31 @@ targets:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Editor/editor.html
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Editor/editor.js
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/Editor/THIRD-PARTY-LICENSES.txt
+        basedOnDependencyAnalysis: true
+        showEnvVars: false
+      # The `neoscad` CLI (scripts/apple/build-cli.sh) into
+      # Contents/Helpers, where agent clients run it through the stable
+      # link the app keeps at ~/Library/Application Support/NeoSCAD/bin
+      # (App/Agents/CommandLineTool.swift; docs/mcp.md, "Setup from the
+      # apps"). Helpers, not MacOS: APFS is case-insensitive by default,
+      # so Contents/MacOS/neoscad would be the app's own executable,
+      # NeoSCAD. Signed here, before Xcode signs the app, because the
+      # app's signature seals its nested code and refuses an unsigned
+      # executable inside it: with the build's identity, the hardened
+      # runtime and no entitlements, as the standalone CLI is signed.
+      # scripts/apple/release.sh signs it again for a release.
+      - name: Embed command-line tool
+        script: |
+          dest="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
+          mkdir -p "$dest"
+          cp -f "${SCRIPT_INPUT_FILE_0}" "$dest/neoscad"
+          identity="${EXPANDED_CODE_SIGN_IDENTITY:-${CODE_SIGN_IDENTITY:--}}"
+          codesign --force --options runtime --identifier org.neoscad.neoscad \
+            ${OTHER_CODE_SIGN_FLAGS:-} --sign "$identity" "$dest/neoscad"
+        inputFiles:
+          - $(SRCROOT)/build/cli/neoscad
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/neoscad
         basedOnDependencyAnalysis: true
         showEnvVars: false
     info:
@@ -395,6 +424,27 @@ aggregateTargets:
           - $(SRCROOT)/build/core-$(CONFIGURATION).stamp
           - $(SRCROOT)/Core/Generated/neoscad_ffi.swift
           - $(SRCROOT)/build/NeoSCADCore.xcframework/Info.plist
+        basedOnDependencyAnalysis: true
+        showEnvVars: false
+    settings:
+      base:
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+  # The `neoscad` command-line tool the app carries
+  # (scripts/apple/build-cli.sh): cargo for Xcode's ARCHS, lipo, strip.
+  # The input list is the core's (every file cargo reads, written by
+  # build-core.sh --prepare), so the phase is skipped when no Rust input
+  # changed. The per-configuration stamp makes a Release build after a
+  # Debug one run it, as for the core.
+  CommandLineTool:
+    buildScripts:
+      - name: Build command-line tool
+        script: exec "${SRCROOT}/../scripts/apple/build-cli.sh"
+        inputFileLists:
+          - $(SRCROOT)/build/core-inputs.xcfilelist
+        outputFiles:
+          - $(SRCROOT)/build/cli/neoscad
+          - $(SRCROOT)/build/cli/cli-$(CONFIGURATION).stamp
         basedOnDependencyAnalysis: true
         showEnvVars: false
     settings:

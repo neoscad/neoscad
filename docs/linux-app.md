@@ -435,6 +435,12 @@ Choices:
   apply. The workspace's `rust-version` is 1.98, so it builds; the
   byte-for-byte conformance output is checked with the pinned toolchain
   on the other platforms, not in the Flatpak (see `docs/followups.md`).
+- **The CLI too.** The manifest also builds and installs `neoscad`
+  (`/app/bin/neoscad`), for AI agent clients on the host, which run
+  `flatpak run --command=neoscad org.neoscad.NeoSCAD mcp`
+  (`docs/mcp.md`, "Setup from the apps"). No
+  `--talk-name=org.freedesktop.Flatpak`: the app does not run the host's
+  `claude`, and shows that command to copy instead.
 - **Permissions.** Wayland with X11 fallback, IPC, `--device=dri` for
   the GPU view, `--share=network` for the update check alone ("Updates"
   above; OpenSCAD files can't reach the network), and `--filesystem=home`: a model reads the files beside

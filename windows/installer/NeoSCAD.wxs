@@ -104,9 +104,14 @@
 
     <!--
       Everything build-msi.ps1 staged: the published app (runtime, Windows
-      App SDK, core DLL, editor bundle, icon) and LICENSE, NOTICE and
-      licenses\. Component GUIDs are derived from each file's path, so they
-      stay the same across versions. The exe is authored below instead.
+      App SDK, core DLL, editor bundle, icon), the `neoscad` command-line
+      tool in bin\ (for agent clients, which the app configures with its
+      absolute path; in a folder of its own because NeoSCAD.exe and
+      neoscad.exe are one name to Windows), and LICENSE, NOTICE and
+      licenses\. Nothing is added to PATH: the CLI's own MSI and scoop do
+      that, and a second entry would race them. Component GUIDs are
+      derived from each file's path, so they stay the same across
+      versions. The exe is authored below instead.
     -->
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
       <Files Include="!(bindpath.app)\**">

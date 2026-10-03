@@ -9,10 +9,16 @@
 # own cask in September 2026 because it failed Gatekeeper
 # (docs/packaging.md).
 #
-# No `binary` stanza and so no `conflicts_with formula: "neoscad"`: the app
-# bundle carries no command-line tool (the DMG's universal CLI ships
-# beside it, not inside it), so the cask and the formula install nothing
-# in common.
+# No `binary` stanza, on purpose, and so no `conflicts_with formula:
+# "neoscad"`. The app does carry the CLI (NeoSCAD.app/Contents/Helpers/
+# neoscad), but for AI agent clients only: the app writes their configs
+# with the absolute path of a link it keeps at ~/Library/Application
+# Support/NeoSCAD/bin/neoscad, so nothing depends on PATH (docs/mcp.md,
+# "Setup from the apps"). Exposing it as a `binary` would put a second
+# `neoscad` in Homebrew's bin, which conflicts with the `neoscad` formula
+# (the owner's decision, 2026-10-02): `brew install neoscad/tap/neoscad`
+# remains the way to get the command line in a terminal, and the cask and
+# the formula still install nothing in common.
 #
 # `auto_updates true`: the app updates itself with Sparkle (docs/release.md,
 # "The macOS app's updates"), so `brew upgrade` leaves it alone unless
@@ -54,10 +60,12 @@ cask "neoscad-app" do
 
   # The Quick Look preview and thumbnail extensions are sandboxed, so they
   # keep their own containers under their own bundle ids; the app's editor
-  # is a WKWebView, which keeps WebKit data under the app's.
+  # is a WKWebView, which keeps WebKit data under the app's. Application
+  # Support/NeoSCAD holds the CLI link agent configs name (see the top).
   zap trash: [
     "~/Library/Application Scripts/org.neoscad.NeoSCAD.QuickLook",
     "~/Library/Application Scripts/org.neoscad.NeoSCAD.Thumbnail",
+    "~/Library/Application Support/NeoSCAD",
     "~/Library/Caches/org.neoscad.NeoSCAD",
     "~/Library/Containers/org.neoscad.NeoSCAD.QuickLook",
     "~/Library/Containers/org.neoscad.NeoSCAD.Thumbnail",

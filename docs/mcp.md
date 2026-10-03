@@ -41,6 +41,90 @@ line's `--enable`: `textmetrics`, `object-function`, `import-function`,
 web page connect; see "The web page" below) with `--browser-url URL` and
 `--open`.
 
+## Setup from the apps
+
+Each desktop app ships its own `neoscad`, and sets up agent clients to
+run that copy by its **absolute path**, so nothing depends on `PATH`. A
+GUI client on macOS (Claude Desktop) starts servers with launchd's
+minimal `PATH`, which holds neither Homebrew nor `~/.local/bin`, so a
+bare `neoscad` that works in a terminal fails there. The app's copy is
+also the one whose version matches the app. None of the apps puts its
+copy on `PATH`; the CLI's own packages do that
+(`docs/audits/agent-connection-desktop.md`, "The CLI and PATH").
+
+| App | Where the CLI is | The command clients are given |
+|---|---|---|
+| macOS | `NeoSCAD.app/Contents/Helpers/neoscad` | `~/Library/Application Support/NeoSCAD/bin/neoscad mcp`: a link the app points at its own copy at every launch |
+| Windows | `bin\neoscad.exe` in the install folder (`C:\Program Files\NeoSCAD`) | `"C:\Program Files\NeoSCAD\bin\neoscad.exe" mcp` |
+| Linux Flatpak | `/app/bin/neoscad` in the sandbox | `flatpak run --command=neoscad org.neoscad.NeoSCAD mcp` |
+
+- **macOS, the link.** A client's config outlives the app's location:
+  users move the app, or first run it where it was downloaded. The link
+  follows the app at each launch, and Sparkle replaces the bundle in
+  place, so a config written once survives moves and updates. The app
+  leaves the link alone when it runs from a read-only volume (the DMG),
+  from App Translocation's temporary copy, or under the tests, and never
+  replaces a file there that is not a link (`apple/App/Agents/CommandLineTool.swift`).
+  The CLI is in `Contents/Helpers`, not `Contents/MacOS`, because APFS
+  is case-insensitive by default and `Contents/MacOS/neoscad` would be the
+  app's own executable, `NeoSCAD`. The cask exposes no `binary`
+  (`packaging/homebrew/neoscad-app.rb`).
+- **Windows.** In `bin\` for the same reason: `neoscad.exe` beside
+  `NeoSCAD.exe` would be the same file. It is built as cargo-dist builds
+  the released CLI (the `dist` profile, the C runtime linked statically).
+- **Flatpak.** The sandbox cannot put a program on the host's `PATH`, so
+  clients run `flatpak run`. The server's file roots are its working
+  directory, as everywhere, and the Flatpak sees only the home directory
+  (`--filesystem=home`), so projects outside home are not reachable from
+  it; a host-installed CLI (`install.sh`, .deb, Homebrew) has no such
+  limit. That `flatpak run` keeps the caller's working directory is what
+  `.github/workflows/flatpak.yml` checks with a relative path. The
+  Flatpak has no `--talk-name=org.freedesktop.Flatpak`, so it cannot run
+  the host's `claude`: its Claude Code row is a command to copy.
+
+**One click per client.** Each client is set up through its own install
+path where it has one, so the client asks the user and owns its format
+(checked against each vendor's page on 2026-10-02):
+
+| Client | What the app does |
+|---|---|
+| Claude Code | Runs `claude mcp add --scope user neoscad -- <cli> mcp` (every project). `claude` is looked for on `PATH` and where its installers put it (`~/.local/bin/claude`, `%USERPROFILE%\.local\bin\claude.exe`, Homebrew, npm), then through the login shell. A second `add` fails with "already exists in user config"; the app asks, then runs `claude mcp remove --scope user neoscad` and adds again. Not found, or in the Flatpak: the command to copy |
+| Cursor | Opens `cursor://anysphere.cursor-deeplink/mcp/install?name=neoscad&config=<base64 of {"command":…,"args":["mcp"]}>`, URL-encoded |
+| VS Code | Opens `vscode:mcp/install?<URL-encoded {"name":"neoscad","type":"stdio","command":…,"args":["mcp"]}>` |
+| Claude Desktop (macOS, Windows) | After the user agrees, merges `mcpServers.neoscad` into `~/Library/Application Support/Claude/claude_desktop_config.json` or `%APPDATA%\Claude\claude_desktop_config.json`, then says to quit and reopen Claude |
+| Other | The JSON block to copy |
+
+Every row also has the copy-able command or JSON, with the absolute
+command filled in.
+
+**Claude Desktop's file.** The merge keeps every other server and
+setting, in their order; an existing `neoscad` entry keeps its place and
+its other fields (`env`), with `command` and `args` replaced. The file
+is written as two-space JSON with a final newline. Before writing, the
+old file is copied beside it as
+`claude_desktop_config.json.neoscad-backup-<UTC yyyymmddThhmmssZ>` (with
+`-1`, `-2` … if that exists). The new file is written beside it and
+renamed over it; a config that is a link is edited through the link.
+Nothing is written when the entry already runs this command. A file
+that is not strict JSON (a comment, a trailing comma) or not the
+expected shape is refused and left exactly as it was: the app shows why,
+and the JSON to add by hand.
+
+**Working directory.** Claude Code, Cursor and VS Code start the server
+in the project, which becomes its root. Claude Desktop's working
+directory is undefined ("like `/` on macOS", modelcontextprotocol.io,
+"Debugging"); see `docs/followups.md`, "MCP and the agent eval".
+
+**Code.** The rows, links, commands, the config merge and the backup
+names are pure functions in `client::agent_setup`
+(`crates/client/src/agent_setup.rs`), so every surface renders the same
+table. What needs the machine is in `crates/ffi/src/agent_setup.rs`,
+exported to Swift and C#: `agent_setup_rows(cli)`,
+`agent_setup_find_claude()`, `agent_setup_add_to_claude_code(claude,
+cli, replace)` and `agent_setup_add_to_claude_desktop(cli)`. The sheet
+that calls them is not built yet (`docs/audits/agent-connection-desktop.md`,
+Option A).
+
 ## Protocol
 
 MCP revision **2026-07-28**, the current one

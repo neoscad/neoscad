@@ -125,10 +125,22 @@ jobs:
           $numeric = [regex]::Match($version, '^\d+\.\d+\.\d+').Value
           $dir = Join-Path $env:ProgramFiles 'NeoSCAD'
           $exe = Join-Path $dir 'NeoSCAD.exe'
-          foreach ($f in $exe, "$dir\Editor\editor.html", "$dir\Assets\NeoSCAD.ico", "$dir\LICENSE", "$dir\NOTICE",
+          $cli = Join-Path $dir 'bin\neoscad.exe'
+          foreach ($f in $exe, $cli, "$dir\Editor\editor.html", "$dir\Assets\NeoSCAD.ico", "$dir\LICENSE", "$dir\NOTICE",
                          "$dir\licenses\README.md", "$dir\licenses\third-party\README.txt") {
             if (-not (Test-Path $f)) { throw "missing after install: $f" }
           }
+          # The bundled CLI, which agent clients start by its absolute path
+          # (docs/mcp.md, "Setup from the apps"): it runs from the install,
+          # serves MCP on stdio, and is not on PATH.
+          $cliVersion = & $cli --version
+          if ($cliVersion -ne "neoscad $version") { throw "bin\neoscad.exe says '$cliVersion', expected 'neoscad $version'" }
+          $initialize = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"installer-test","version":"0"}}}'
+          $reply = ($initialize | & $cli mcp | Select-Object -First 1)
+          if ($reply -notmatch '"serverInfo"') { throw "bin\neoscad.exe mcp did not answer initialize: $reply" }
+          Write-Host "bundled CLI: $cliVersion; mcp initialize answered"
+          $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          if ($machinePath -split ';' | Where-Object { $_.TrimEnd('\') -like "$dir*" }) { throw "the install put $dir on PATH" }
           $fileVersion = (Get-Item $exe).VersionInfo.FileVersion
           if ($fileVersion -ne "$numeric.0") { throw "NeoSCAD.exe's file version is $fileVersion, expected $numeric.0" }
           Get-Content "$dir\licenses\third-party\README.txt" | Write-Host

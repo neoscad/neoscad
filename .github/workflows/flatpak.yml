@@ -28,6 +28,7 @@ on:
     paths:
       - "linux/**"
       - "crates/linux-app/**"
+      - "crates/cli/**"
       - "apple/Editor/web/**"
       - "Cargo.lock"
       - ".github/workflows/flatpak.yml"
@@ -36,6 +37,7 @@ on:
     paths:
       - "linux/**"
       - "crates/linux-app/**"
+      - "crates/cli/**"
       - "apple/Editor/web/**"
       - "Cargo.lock"
       - ".github/workflows/flatpak.yml"
@@ -120,6 +122,34 @@ jobs:
           # and pulls org.gnome.Platform from it.
           repository-url: https://dl.flathub.org/repo/flathub.flatpakrepo
           cache-key: flatpak-builder-${{ hashFiles('Cargo.lock', 'apple/Editor/web/package-lock.json') }}
+
+      # The command-line tool the way a host's agent client starts it
+      # (docs/mcp.md, "Setup from the apps"): `flatpak run
+      # --command=neoscad org.neoscad.NeoSCAD mcp`, from a project folder
+      # in the home directory, with a relative path. The relative path
+      # resolving is what shows that `flatpak run` keeps the caller's
+      # working directory, which the server's file roots start from.
+      # continue-on-error until it has passed once in this container
+      # (installing a bundle and bubblewrap in Docker were not tried here).
+      - name: The command-line tool through flatpak run
+        continue-on-error: true
+        run: |
+          flatpak install --user -y --noninteractive "$BUNDLE"
+          version=$(flatpak run --command=neoscad org.neoscad.NeoSCAD --version)
+          echo "$version"
+          project=$HOME/neoscad-cli-check
+          mkdir -p "$project"
+          echo 'cube(10);' > "$project/model.scad"
+          cd "$project"
+          replies=$(printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"flatpak-check","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"evaluate","arguments":{"path":"model.scad"}}}' \
+            | timeout 120 flatpak run --command=neoscad org.neoscad.NeoSCAD mcp)
+          echo "$replies"
+          grep -q '"serverInfo"' <<<"$replies" || { echo "::error::no initialize reply"; exit 1; }
+          grep '"id":2' <<<"$replies" | grep -qv '"isError":true' \
+            || { echo "::error::evaluate of a relative path failed: is the working directory kept?"; exit 1; }
 
   release:
     needs: flatpak

@@ -37,6 +37,13 @@ install on <https://neoscad.org/download.html>. For example
 `brew install neoscad/tap/neoscad` (the command line) or
 `brew install --cask neoscad/tap/neoscad-app` (the macOS app).
 
+Each desktop app carries its own `neoscad` for AI agents to run
+(`docs/mcp.md`, "Setup from the apps"): inside `NeoSCAD.app` on macOS,
+as `bin\neoscad.exe` in the Windows install folder, and as
+`flatpak run --command=neoscad org.neoscad.NeoSCAD` from the Flatpak.
+None of them puts it on `PATH`; for the terminal, install the command
+line on its own.
+
 ## Build from source
 
 You need a Rust toolchain (`rust-toolchain.toml` pins it). The

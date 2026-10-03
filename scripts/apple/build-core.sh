@@ -104,10 +104,15 @@ write_inputs() {
         echo "$root/Cargo.toml"
         echo "$root/Cargo.lock"
         echo "$root/scripts/apple/build-core.sh"
+        echo "$root/scripts/apple/build-cli.sh"
+        # Also the list scripts/apple/build-cli.sh is run with, so the
+        # files the CLI and the core compile in with include_str! count
+        # (the MCP relay page and recipes, the web examples).
         find "$root/crates" "$root/vendor" -type f \
-            \( -name '*.rs' -o -name 'Cargo.toml' -o -name '*.toml' -o -name '*.wgsl' \) \
+            \( -name '*.rs' -o -name 'Cargo.toml' -o -name '*.toml' -o -name '*.wgsl' \
+            -o -name '*.html' -o -name '*.scad' \) \
             -not -path '*/target/*' -not -path '*/tests/*' -not -path '*/benches/*'
-        find "$root/assets" -type f -not -name '.DS_Store'
+        find "$root/assets" "$root/web/examples" -type f -not -name '.DS_Store'
     } | LC_ALL=C sort -u >"$tmp"
     if ! cmp -s "$tmp" "$inputs" 2>/dev/null; then
         mv "$tmp" "$inputs"

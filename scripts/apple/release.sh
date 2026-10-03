@@ -2,7 +2,9 @@
 # Cuts a release of the macOS app and the `neoscad` command-line tool
 # (docs/release.md; docs/audits/macos-prep.md, 8j). Writes to dist/:
 #
-#   NeoSCAD-<version>-<build>.dmg                     the app and an Applications link
+#   NeoSCAD-<version>-<build>.dmg                     the app (with the CLI in
+#                                                     Contents/Helpers) and an
+#                                                     Applications link
 #   neoscad-<version>-<build>-macos-universal.tar.gz  the CLI and its licences
 #   neoscad                                           the same CLI, bare
 #   NeoSCAD-<version>-<build>-dSYMs.zip               debug symbols (app, core, CLI)
@@ -427,8 +429,12 @@ mkdir -p "$work" "$dist" "$app_stage" "$cli_stage" "$dsym_stage"
 
 # --- The app ----------------------------------------------------------------
 
-say "Core (${archs[*]}), editor bundle and project"
+say "Core and CLI (${archs[*]}), editor bundle and project"
 scripts/apple/build-core.sh --universal
+# The CLI the app carries in Contents/Helpers (apple/project.yml, "Embed
+# command-line tool"). Built universal here so the archive's own run of the
+# phase finds it current; the archive would build the same.
+scripts/apple/build-cli.sh --universal
 scripts/apple/build-editor.sh
 (cd apple && xcodegen generate --spec project.yml --quiet)
 
@@ -478,6 +484,21 @@ sign_sparkle() {
     codesign --force --options runtime $timestamp --sign "$sign_id" "$fw"
 }
 
+# The bundled CLI (Contents/Helpers/neoscad; docs/release.md, "The bundled
+# command-line tool"): a bare executable, so neither sign_sparkle nor the
+# bundle loop below reaches it, and notarization refuses an executable
+# signed by anyone but the team (Xcode's build phase signed it with the
+# build's identity, without a timestamp). The hardened runtime and no
+# entitlements, as the standalone CLI below: it loads no libraries, runs
+# no JIT, and needs no exception. Signed before the app, whose signature
+# seals it.
+sign_helper() {
+    local helper=$1/Contents/Helpers/neoscad
+    [ -x "$helper" ] || die "no Contents/Helpers/neoscad in the app (apple/project.yml, \"Embed command-line tool\")"
+    codesign --force --options runtime $timestamp --identifier org.neoscad.neoscad \
+        --sign "$sign_id" "$helper"
+}
+
 # Sign nested code inside out (a bundle's signature seals its contents'
 # signatures, so the inner ones must be final first), each with the
 # hardened runtime. Nested bundles keep the entitlements Xcode gave them
@@ -485,6 +506,7 @@ sign_sparkle() {
 sign_app() {
     local bundle=$1 item
     sign_sparkle "$bundle"
+    sign_helper "$bundle"
     while IFS= read -r item; do
         codesign --force --options runtime $timestamp --preserve-metadata=entitlements \
             --sign "$sign_id" "$item"
@@ -520,6 +542,7 @@ EOF
     # does. The check below that every Mach-O carries the team's
     # signature would catch a helper left behind either way.
     sign_sparkle "$app"
+    sign_helper "$app"
     codesign --force --options runtime $timestamp --entitlements "$entitlements" \
         --sign "$sign_id" "$app"
 else
@@ -581,6 +604,18 @@ fi
 if [ -n "$(find "$app" -name '*.dSYM' -print -quit)" ]; then
     die "a dSYM is inside the app"
 fi
+# The bundled CLI: the right version, and no entitlements at all (the ad-hoc
+# app's library-validation exception is the app's alone). The Mach-O loop
+# above has checked its runtime, architectures and team.
+helper=$app/Contents/Helpers/neoscad
+helper_version=$("$helper" --version)
+[ "$helper_version" = "neoscad $version" ] ||
+    die "the bundled CLI says '$helper_version', expected 'neoscad $version'"
+if [ -n "$(codesign -d --entitlements - --xml "$helper" 2>/dev/null)" ]; then
+    die "the bundled CLI carries entitlements"
+fi
+helper_bytes=$(stat -f %z "$helper")
+echo "Contents/Helpers/neoscad: $helper_version, $((helper_bytes / 1024 / 1024)) MB"
 shipped_version=$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")
 shipped_build=$(plutil -extract CFBundleVersion raw "$app/Contents/Info.plist")
 [ "$shipped_version" = "$marketing_version" ] && [ "$shipped_build" = "$build_number" ] ||
@@ -709,6 +744,10 @@ rm -rf "$work"/cli-*-apple-darwin
 strip -x "$cli"
 has_archs "$cli" || die "the CLI is $(lipo -archs "$cli"), not ${archs[*]}"
 check_uuid "$cli" "$dsym_stage/neoscad.dSYM"
+# The app's copy is the same build (build-cli.sh, the same environment and
+# targets), so this one dSYM symbolicates both; a mismatch means the app
+# shipped a stale CLI.
+check_uuid "$app/Contents/Helpers/neoscad" "$dsym_stage/neoscad.dSYM"
 codesign --force --options runtime $timestamp --identifier org.neoscad.neoscad \
     --sign "$sign_id" "$cli"
 codesign --verify --strict --verbose=2 "$cli"
@@ -765,7 +804,7 @@ fi
     echo "toolchains:    $(xcodebuild -version | tr '\n' ' ')/ $("${cargo_env[@]}" rustc -V)"
     echo "signing:       $mode"
     echo "notarized:     $notarized"
-    echo "app size:      $((app_bytes / 1024)) MB unpacked"
+    echo "app size:      $((app_bytes / 1024)) MB unpacked, of which the bundled CLI (Contents/Helpers/neoscad) $((helper_bytes / 1024 / 1024)) MB"
     echo "architectures: ${archs[*]} (every Mach-O in the app, and the CLI; $x86_run)"
     echo "updates:       $updates"
     echo

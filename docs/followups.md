@@ -1263,6 +1263,23 @@ lead them, come roughly in order of user impact.
   ends), no logging, no MRTR (`input_required`), no completions. The
   client's `roots` capability is not read either: the roots are the
   working directory and `--root`s given at start. (7c)
+- **Claude Desktop starts servers in an undefined working directory,
+  "like `/` on macOS"** (modelcontextprotocol.io, "Debugging", "Working
+  directory", read 2026-10-02), and `neoscad mcp` makes its working
+  directory a writable root, so a Claude Desktop entry, which the apps
+  now write (`docs/mcp.md`, "Setup from the apps"), lets the agent write
+  anywhere the user can. Not changed with the bundled CLI, since the fix
+  is in `crates/cli/src/mcp/mod.rs`: refuse `/` (and the home directory
+  itself?) as the implicit root and fall back to the client's MCP
+  `roots`, or have the app's Claude Desktop entry pass a `--root` and a
+  flag that drops the working directory. Claude Code, Cursor and VS Code
+  start the server in the project.
+- The CLI the apps bundle (macOS `Contents/Helpers/neoscad`, Windows
+  `bin\neoscad.exe`, the Flatpak's `/app/bin/neoscad`) is built without
+  the PGO profile cargo-dist's CLI builds use (`release.yml`), so it is
+  that much slower than the standalone CLI. Feeding the same profile to
+  `scripts/apple/build-cli.sh`, `build-msi.ps1` and the Flatpak needs the
+  profile as a build input.
 - Claude Code (2.1.283) shows the model the JSON of `structuredContent`
   instead of the text summary when a result has both, so the text is
   what other clients see. If a client shows both, a result costs about
