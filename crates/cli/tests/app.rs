@@ -576,7 +576,13 @@ fn consent_off_and_disconnect_end_the_connection() {
     let mut m2 = Mcp::start(&dir, &rv);
     assert!(text(&m2.tool("editor_read", json!({}))).starts_with("gear.scad"));
     app.link.set_allowed(false);
-    assert!(Rendezvous::at(&rv).scan().is_empty());
+    // A Unix socket goes at once. A Windows pipe instance lasts until the
+    // agent closes its end after `bye`, which takes a moment.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !Rendezvous::at(&rv).scan().is_empty() {
+        assert!(Instant::now() < deadline, "the app's pipe stayed listed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert!(app.link.start().is_err());
     let r = m2.tool("editor_read", json!({}));
     assert!(text(&r).contains("no NeoSCAD app is connected"), "{r}");
