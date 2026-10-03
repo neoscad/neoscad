@@ -188,7 +188,8 @@ jobs:
   # The Linux desktop app (crates/linux-app, docs/linux-app.md): clippy and
   # tests with GTK, then a headless run that opens a model, previews it,
   # shows the language server's markers in the editor, goes to a
-  # definition in MCAD, and previews again after typing in the editor.
+  # definition in MCAD, previews again after typing in the editor, and
+  # lets the real `neoscad mcp` read and edit the open document.
   # Ubuntu 24.04 is the first LTS with GTK 4.14, libadwaita 1.5 and
   # WebKitGTK 6.0; the `test` jobs above build the crate without its `gtk`
   # feature, so they need none of these packages. The Flatpak is built by
@@ -217,7 +218,9 @@ jobs:
           echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg" >> "$GITHUB_ENV"
       - run: cargo clippy --locked -p neoscad-linux-app --features gtk --all-targets -- -D warnings
       - run: cargo test --locked -p neoscad-linux-app --features gtk
-      - run: cargo build --locked -p neoscad-linux-app --features gtk
+      # The command line too: the smoke test runs its `neoscad mcp`
+      # against the app (AI agents, end to end).
+      - run: cargo build --locked -p neoscad-linux-app --features gtk -p neoscad-cli --bin neoscad --bin neoscad-gtk
       - name: The editor bundle
         run: scripts/apple/build-editor.sh
       - name: The app previews a model, shows markers and follows typing, headless

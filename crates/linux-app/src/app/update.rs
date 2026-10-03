@@ -298,7 +298,8 @@ pub fn show_details(sh: &Rc<Shared>, parent: &gtk::Window) {
     dialog.present(Some(parent));
 }
 
-/// Main menu > Preferences: the two update settings.
+/// Main menu > Preferences: the two update settings, and the Agents page
+/// (`super::agent::page`).
 pub fn preferences(sh: &Rc<Shared>, parent: Option<&gtk::Window>) {
     let s = sh.updates.settings.borrow().clone();
     let automatic = adw::SwitchRow::builder()
@@ -342,9 +343,13 @@ pub fn preferences(sh: &Rc<Shared>, parent: Option<&gtk::Window>) {
     let group = adw::PreferencesGroup::builder().title("Updates").build();
     group.add(&automatic);
     group.add(&rc);
-    let page = adw::PreferencesPage::new();
+    let page = adw::PreferencesPage::builder()
+        .title("General")
+        .icon_name("preferences-system-symbolic")
+        .build();
     page.add(&group);
     let dialog = adw::PreferencesDialog::new();
     dialog.add(&page);
+    dialog.add(&super::agent::page(sh));
     dialog.present(parent);
 }

@@ -7,8 +7,8 @@ and through, so it calls `crates/client`, `session` and `render` directly;
 there is no UniFFI layer as there is for Swift (`crates/ffi`).
 
 This page covers milestone 1 and milestone 2 so far (the language
-server, the Flatpak, the side panels, file watching and the rest of File
-> Export): what the app does, how it is put together, how to build,
+server, the Flatpak, the side panels, file watching, the rest of File
+> Export and AI agents): what the app does, how it is put together, how to build,
 package and run it, and what comes next.
 
 ## What milestone 1 does
@@ -150,11 +150,13 @@ logic that is not GTK glue, and builds and is tested on every platform:
 | `inspect.rs` | Check and measure requests, the overlay as the viewport's annotations, picked points, the panels' text |
 | `watch.rs` | Which files a window watches, by directory |
 | `update.rs` | The update check's settings, when a check is due, the feed's address, and the notice for each install type ("Updates") |
+| `agent.rs` | AI agents: the consent, which `neoscad` setups name, the header button's look, edits' versions, and the `AgentHost` that hops to the main loop ("AI agents") |
 
 The window (`src/app/`) is compiled only with the `gtk` feature;
 `app/library.rs` is the read-only library viewer, `app/customizer.rs` and
 `app/inspect.rs` the side panels' widgets, `app/update.rs` the update
-check's fetch, banner and preferences.
+check's fetch, banner and preferences, `app/agent.rs` and
+`app/window/agent.rs` the AI agent link, button, page and requests.
 
 ### The editor bridge
 
@@ -265,6 +267,114 @@ to a worker thread (`gio::spawn_blocking`) and its result is applied only
 if the loop says it is still current. The GPU upload of the scene happens
 on the worker; the main thread only swaps the model in.
 
+## AI agents
+
+"Connect your AI agent", on the shared foundation (`docs/agent-bridge.md`,
+"Desktop apps"; the design is `docs/audits/agent-connection-desktop.md`,
+Option C and its GTK spec). Plain `neoscad mcp` in Claude Code, Cursor, VS
+Code or any MCP client finds the running app by itself and works on the
+document the user is looking at.
+
+**What the user sees.**
+
+- **The header button**, left of the main menu: a sparkle while no agent
+  is connected (tooltip "Connect your AI agent"); the agent's name and a
+  green dot once one is ("Claude Code", or "2 agents"), the dot pulsing
+  while it works (tooltip "Claude Code is editing"; GTK holds the
+  animation still when the user turned animations off). Its popover says
+  what is going on, lists each agent with **Disconnect**, and has **Set
+  Up…**. A toast says "Claude Code connected" when an agent arrives (once
+  its client has said its name). The button hides only after the user
+  turned agents off again; the menu item stays.
+- **Main menu > Connect AI Agent…** opens the Agents page in a dialog of
+  its own, and **Preferences** has the same page beside "General" (the
+  update settings). The page:
+  1. *AI Agents*: what agents can do and where their reads go, then
+     **Allow AI agents to work on open documents**, off until the user
+     turns it on and kept in `$XDG_CONFIG_HOME/neoscad/agents.json` (a
+     damaged file grants nothing), and **Ask before applying an agent's
+     edits** (off, as on the web).
+  2. *Connected Agents*: each with Disconnect, or "No agent connected"
+     with an example of what to ask.
+  3. *Set Up an Agent*: a row per client from `client::agent_setup`.
+     Claude Code's **Add** runs `claude mcp add --scope user neoscad --
+     <cli> mcp` off the main loop (finding `claude` as
+     `agent_link::setup::find_claude` does, the login shell included),
+     asks before replacing an existing `neoscad`, and says what happened.
+     Cursor's and VS Code's buttons open their install links with
+     `GtkUriLauncher` (the OpenURI portal in the Flatpak); a link nothing
+     handles says so and opens the row's JSON. Every row expands to the
+     command or JSON with a copy button. Claude Desktop is not listed: it
+     does not run on Linux. A setup button pressed while agents are not
+     allowed first asks "Let AI agents work on your open models?" (Allow
+     / Not Now; either way the setup goes on).
+- **An agent's edit** lands in the editor through `agentEdit`: one
+  undoable step, highlighted for 8 s, the user's selection kept, then the
+  usual preview. It goes into the buffer, not the file; the user saves.
+  With "Ask before applying", a bar under the header says "Claude Code
+  wants to change line 12-14." with **Reject** and **Apply**; an edit not
+  answered in 140 s is declined, so a late Apply can never apply an edit
+  the agent was told failed.
+- **The agent's marks** in the 3D view are a layer of their own over the
+  check and measure panels' (`linux_app::agent::merge_marks`); a new
+  document clears them.
+
+**Which `neoscad` clients run** (`linux_app::agent::find_cli`): the one
+beside `neoscad-gtk` first (a build's `target/debug`, or a package that
+installs both), then `PATH`, `~/.local/bin`, `/usr/local/bin` and
+`/usr/bin`, written into each setup by its absolute path. With none, the
+page says how to install it and the one-click buttons are off.
+
+**In the Flatpak** (`/.flatpak-info` exists; owner decision 8): the app
+runs no host program, so Claude Code's row is the command to copy, shown
+expanded, and every setup names `flatpak run --command=neoscad
+org.neoscad.NeoSCAD mcp` (the manifest installs `/app/bin/neoscad`). The
+page says the sandboxed command line reaches the home folder only. The
+app listens in `$XDG_RUNTIME_DIR/app/org.neoscad.NeoSCAD/`, which a
+`neoscad mcp` inside the same sandbox finds; that a host-installed
+`neoscad mcp` reaches it there is unverified (`docs/followups.md`).
+
+**How it works.**
+
+| Where | What |
+|---|---|
+| `src/agent.rs` | The consent and its file, which `neoscad` setups name, the header button's look, the edit's version checks, captures' sizes, the camera, the marks layer, and `MainLoopHost`, the `AgentHost` that carries each request to the main loop |
+| `src/app/agent.rs` | The process's `AgentLink`, the status observer, the header button and popover, the Agents page and the setup actions |
+| `src/app/window/agent.rs` | A window's side of each request, and the approval bar |
+| `agent_link::setup` | Finding and running `claude` (shared with the macOS and Windows apps, which reach it through `crates/ffi`) |
+
+- **Nothing runs before consent.** The `AgentLink` is made at start-up
+  but has no thread and no socket until the user allows agents (in this
+  run or an earlier one); turning the switch off closes the socket and
+  every connection at once. Windows register their documents
+  (`document_opened` with the title's name and the saved path, again on
+  Save As; `document_focused` when a window becomes active;
+  `document_closed`), which is a lock and a compare whether or not the
+  link runs.
+- **Never blocking the main loop.** The link calls `AgentHost` on its
+  own threads. `MainLoopHost` hands each request to the main loop with
+  `MainContext::invoke`, where a thread-local finds the window by its
+  document number, and waits for the answer on a channel (14 s, 145 s for
+  an edit that may wait for Apply, 85 s for a capture: each under the
+  command line's own limit). The window answers when it can: after the
+  editor's callback (the selection for `read`, `agentEdit`'s result), the
+  user's click, or the end of the preview a capture waits for. A closed
+  window drops the reply, which the agent hears at once as "the document
+  was closed".
+- **Versions.** Each document counts every change of its text
+  (`Document::revision`: typing, an undo, a resync, a reload, an agent's
+  edit; a document replacing another in the window goes on from its
+  number), which is the `version` an agent reads and names. An edit is
+  sent to the editor only on that version and with the editor in step
+  with the window's copy, and `agentEdit` gets the editor version the
+  window checked as `expectVersion`, so a keystroke still on its way
+  from the web process makes the edit stale instead of misplaced.
+- **Captures** are drawn off the main loop: the window makes the
+  offscreen copy (`Viewport::copy_as_shown`: the user's camera, the grid,
+  every mark) at the size asked, and the link's thread draws and reads
+  it back. A capture asked for while a preview is due or running (after
+  an agent's edit) waits for it.
+
 ## Building
 
 The app needs GTK 4.14, libadwaita 1.5 and WebKitGTK 6.0 development
@@ -273,6 +383,7 @@ files (Ubuntu 24.04, Fedora 40 or later):
     sudo apt install libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev
     scripts/apple/build-editor.sh           # the editor bundle (node 18+)
     cargo build -p neoscad-linux-app --features gtk
+    cargo build -p neoscad-cli --bin neoscad   # for AI agents (and the smoke test's)
     target/debug/neoscad-gtk [FILE.scad]
 
 The `gtk` feature is off by default, so `cargo build`, `cargo clippy
@@ -298,7 +409,8 @@ toolchain. From the repository root:
     docker build -t neoscad-linux-dev linux
     docker run --rm --memory=8g -v "$PWD":/src \
         -v neoscad-linux-target:/target -e CARGO_TARGET_DIR=/target \
-        neoscad-linux-dev cargo build -p neoscad-linux-app --features gtk
+        neoscad-linux-dev cargo build -p neoscad-linux-app --features gtk \
+            -p neoscad-cli --bin neoscad --bin neoscad-gtk
     docker run --rm --memory=6g -v "$PWD":/src:ro -v neoscad-linux-target:/target \
         -e TYPE=1 -e SHOTS=/src/target/linux-shots \
         neoscad-linux-dev linux/smoke.sh /target/debug/neoscad-gtk
@@ -340,9 +452,26 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
   follows. With `SHOTS` that runs in both styles and saves
   `customizer-`, `check-` and `measure-light.png` and `-dark.png`. It
   kills the app above 2 GB of memory.
+- AI agents: `cargo test -p neoscad-linux-app` covers the consent (off by
+  default, kept, a damaged file granting nothing), which `neoscad` setups
+  name, the header button's states and toasts, edits refused on another
+  version or with the editor out of step and `agentEdit`'s arguments and
+  answers, captures' sizes, the marks layer, and `MainLoopHost` against
+  stand-in windows (answers, a closed document, a main loop that does not
+  answer in time); `Document::revision` never repeats. Running `claude`
+  (a stand-in that answers as Claude Code does) and the backups of
+  Claude Desktop's file are `crates/agent-link/src/setup.rs`'s tests.
+  `linux/smoke.sh` runs the real `neoscad mcp` (beside BIN, or
+  `NEOSCAD_CLI`) against the app with agents allowed: `editor_read`,
+  `editor_edit` (the edit lands in the editor and runs, the file stays as
+  it was), an edit on the old version refused, `view_camera`,
+  `view_annotate` (the marker drawn) and `view_capture`; with `SHOTS` it
+  also opens the popover and the Agents dialog, saves `agent-`,
+  `agent-popover-` and `agent-dialog-light.png` and `-dark.png`, and
+  presses the popover's Disconnect.
 - CI's `linux-app` job (ubuntu-24.04) runs clippy and the tests with the
-  `gtk` feature, builds the editor bundle and runs the smoke test with
-  typing.
+  `gtk` feature, builds the app and the command line and the editor
+  bundle, and runs the smoke test with typing.
 
 ## Updates
 

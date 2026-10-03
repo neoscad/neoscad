@@ -17,7 +17,7 @@ use client::{
     CheckFinding, CheckReport, Client, CoreError, FindingSeverity, MeasureReport, Measurement,
     OverlayState, PrinterSettings, RunOptions,
 };
-use render::viewport::{AnnotationLine, AnnotationMarker, Annotations};
+use render::viewport::Annotations;
 
 /// `neoscad check` on the document at `path` (its text sent to the core
 /// already) with the customizer's values and the window's parts toggle.
@@ -44,39 +44,12 @@ pub fn measure(
     client.measure(r)
 }
 
-/// The viewport's annotations for the panels' state. A colour with three
-/// channels is opaque; a point that is not three numbers is dropped (the
-/// core never makes one, but a marker at the origin would be a lie).
+/// The viewport's annotations for the panels' state
+/// (`crate::agent::marks`: a colour with three channels is opaque; a point
+/// that is not three numbers is dropped).
 pub fn annotations(state: &OverlayState) -> Annotations {
     let o = client::view_overlay(state);
-    let rgba = |c: &[f32]| match c {
-        [r, g, b, a, ..] => [*r, *g, *b, *a],
-        [r, g, b] => [*r, *g, *b, 1.0],
-        _ => [1.0, 0.0, 1.0, 1.0],
-    };
-    Annotations {
-        lines: o
-            .lines
-            .iter()
-            .map(|l| AnnotationLine {
-                // A trailing partial point is dropped.
-                points: l.points.as_chunks::<3>().0.to_vec(),
-                closed: l.closed,
-                color: rgba(&l.color),
-            })
-            .collect(),
-        markers: o
-            .markers
-            .iter()
-            .filter_map(|m| {
-                Some(AnnotationMarker {
-                    point: client::point3(&m.point, "a marker").ok()?,
-                    label: m.label.clone(),
-                    color: rgba(&m.color),
-                })
-            })
-            .collect(),
-    }
+    crate::agent::marks(&o.lines, &o.markers)
 }
 
 /// A finding's severity as the panel names it.

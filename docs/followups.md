@@ -1337,8 +1337,9 @@ lead them, come roughly in order of user impact.
   plainer. (7c)
 
 - The desktop apps' agent link (`docs/agent-bridge.md`, "Desktop apps")
-  has its macOS UI (`apple/App/Agents`); the Linux and Windows apps do
-  not call it yet. Open points:
+  has its UI in all three apps (`apple/App/Agents`,
+  `crates/linux-app/src/app/agent.rs`, `windows/NeoSCAD.Host/Agent*.cs`).
+  Open points:
   - That a host `neoscad mcp` reaches a socket the Flatpak'd app makes
     in `$XDG_RUNTIME_DIR/app/org.neoscad.NeoSCAD/` is unverified (no
     Linux machine with Flatpak was used), and so is `FLATPAK_ID` being
@@ -1352,11 +1353,11 @@ lead them, come roughly in order of user impact.
   - The app's version check and the editor's `agentEdit` meet on two
     threads: the host compares its revision on the main thread, but a
     keystroke still on its way from the web view is not counted yet.
-    Done for macOS and Windows: `agentEdit` takes the editor version the app checked
-    against and refuses (`stale: true`) when the editor has moved past
-    it, and the document keeps its own revision counter
-    (`SCADDocument.agentRevision`; on Windows `DocumentSession.Revision`).
-    The Linux host should pass the same argument.
+    Done in all three apps: `agentEdit` takes the editor version the
+    app checked against and refuses (`stale: true`) when the editor has
+    moved past it, and each document keeps its own revision counter
+    (`SCADDocument.agentRevision`, `DocumentSession.Revision`,
+    `Document::revision`).
   - macOS: the toolbar control was only checked in screenshots of an
     inactive window (drawn by `cacheDisplay`, since the build machine
     gives no screen-recording permission), where AppKit dims toolbar
@@ -1905,10 +1906,6 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
     Again from the keyboard, but not picking points (a click at a
     position in the view) or parameter sets; both are unit-tested
     (`linux_app::inspect`, `linux_app::customizer`).
-- `linux/Dockerfile` has no SVG loader for gdk-pixbuf (`librsvg2-common`,
-  a recommend that `--no-install-recommends` leaves out), so Adwaita's
-  symbolic icons draw as "missing image" in its screenshots; desktops,
-  CI's runner and the Flatpak runtime have it. Add it to the image.
 - The Flatpak (`linux/flatpak/`, `docs/linux-app.md` "Flatpak") builds
   on x86_64 in `flatpak.yml`, which is now blocking there and a release
   publish job. Its aarch64 build (`ubuntu-24.04-arm`, native) is
@@ -1937,6 +1934,19 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
 - The viewport stripes are fixed (`c3690f7`,
   `docs/audits/viewport-stripes.md`), but DX12 and hardware Vulkan were
   never run in the failing orbit, and the Mesa defect is unreported.
+- The Linux app's AI agents (`docs/linux-app.md`, "AI agents") ran only
+  in Docker (Xvfb, no window manager, no portal, no GNOME session). Not
+  tried: the OpenURI portal opening `cursor://` and `vscode:` links from
+  the Flatpak (in Docker, with no handler, the launch fails and the row
+  falls back to its JSON, as designed); a host `neoscad mcp` reaching the
+  Flatpak'd app's socket (the agent link's item above); the real
+  `claude` (a stand-in that answers as Claude Code 2.1.288 does was
+  used); Wayland. linux/smoke.sh's popover, dialog and Disconnect clicks
+  are at fixed coordinates (a 1280 × 800 window at the screen's corner),
+  so they run only with `SHOTS`. "Ask before applying" (Apply, Reject)
+  was driven once by hand in Docker, not by the smoke test. The agent
+  link's open point about `agentEdit` and keystrokes in flight is done
+  for Linux too (`expectVersion`).
 
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.

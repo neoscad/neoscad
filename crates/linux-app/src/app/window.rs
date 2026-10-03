@@ -14,6 +14,7 @@
 //! watched too: another program's change to it is taken in or reported
 //! (`disk`).
 
+mod agent;
 mod disk;
 
 use std::cell::RefCell;
@@ -62,6 +63,13 @@ pub struct Window {
     /// "The file changed on disk", under it while the window's copy and
     /// the file disagree (`disk`).
     notice: disk::DiskNotice,
+    /// "Claude Code wants to change line 12-14", while an agent's edit
+    /// waits for the user (`agent`).
+    approval: agent::ApprovalBar,
+    /// The header bar's agent button (`super::agent`).
+    pub(super) agent_button: super::agent::AgentButton,
+    /// This window's document number for AI agents (`AgentDocuments`).
+    agent_id: u64,
     web: Option<webkit6::WebView>,
     view: ViewWidget,
     console: Console,
@@ -124,10 +132,26 @@ struct State {
     export_stop: Option<Arc<AtomicBool>>,
     last_export: String,
     last_dimensions: Option<u32>,
+
+    /// The last run as the console shows it, and whether one is running:
+    /// what an agent's `read` reports.
+    summary: String,
+    console_lines: Vec<client::ConsoleLine>,
+    running: bool,
+    /// What waits for the run that is due or running to end: an agent's
+    /// capture, which should show the model after its edit.
+    after_run: Vec<AfterRun>,
+    /// An agent's marks in the view: a layer of their own over the panels'.
+    agent_marks: render::viewport::Annotations,
+    /// An agent's edit waiting for the user's Apply.
+    approval: Option<agent::Pending>,
 }
 
 /// A window action's handler.
 type Action = fn(&Rc<Window>);
+
+/// Work waiting for the preview to end (`State::after_run`).
+type AfterRun = Box<dyn FnOnce(&Rc<Window>)>;
 
 fn scheme_for(dark: bool) -> render::ColorScheme {
     render::scheme::find(if dark { DARK_SCHEME } else { LIGHT_SCHEME })
@@ -164,6 +188,8 @@ impl Window {
                 .tooltip_text("Main menu")
                 .build(),
         );
+        let agent_button = super::agent::AgentButton::new(&shared);
+        header.pack_end(&agent_button.button);
         let panel_toggle = gtk::ToggleButton::builder()
             .icon_name("sidebar-show-right-symbolic")
             .tooltip_text("Customizer, check and measure (F9)")
@@ -251,10 +277,12 @@ impl Window {
                 .revealed(false)
                 .build();
             let notice = disk::DiskNotice::new();
+            let approval = agent::ApprovalBar::new();
             let toolbar = adw::ToolbarView::new();
             toolbar.add_top_bar(&header);
             toolbar.add_top_bar(&banner);
             toolbar.add_top_bar(&notice.revealer);
+            toolbar.add_top_bar(&approval.revealer);
             toolbar.set_content(Some(&toasts));
             let win = adw::ApplicationWindow::builder()
                 .application(app)
@@ -267,12 +295,16 @@ impl Window {
             let mut lp = DocumentLoop::new(client::DEFAULT_PREVIEW_DELAY_MS);
             lp.set_path(&path);
             let language = web.as_ref().map(|_| start_language(&shared2, me.clone()));
+            let agent_id = shared2.agents.new_document();
             Window {
                 win,
                 title,
                 toasts,
                 banner,
                 notice,
+                approval,
+                agent_button,
+                agent_id,
                 web,
                 view,
                 console,
@@ -308,6 +340,12 @@ impl Window {
                     export_stop: None,
                     last_export: "binstl".into(),
                     last_dimensions: None,
+                    summary: String::new(),
+                    console_lines: Vec::new(),
+                    running: false,
+                    after_run: Vec::new(),
+                    agent_marks: render::viewport::Annotations::default(),
+                    approval: None,
                 }),
             }
         })
@@ -365,6 +403,7 @@ impl Window {
         });
         self.show_update(self.shared.updates.notice().as_ref());
         self.connect_disk_notice();
+        self.connect_agent();
         // The document's own file is watched from the start, not only
         // after its first run (which an example may never get).
         self.disk_reset();
@@ -462,6 +501,9 @@ impl Window {
         self.title.set_title(&t.title);
         self.title.set_subtitle(&t.subtitle);
         self.win.set_title(Some(&t.window));
+        // A new document, a save under another name: agents see it as the
+        // title does (a lock and a compare when nothing changed).
+        self.agent_register();
     }
 
     /// Show `doc` in this window (a file opened, an example), and run it
@@ -469,7 +511,8 @@ impl Window {
     pub fn replace_document(self: &Rc<Self>, doc: Document, run: bool) {
         let old = {
             let mut st = self.st.borrow_mut();
-            st.doc = doc;
+            st.doc = doc.follows(&st.doc);
+            st.agent_marks = render::viewport::Annotations::default();
             st.file_view = None;
             let path = st.doc.core_path();
             let old = st.lp.set_path(&path);
@@ -735,6 +778,10 @@ impl Window {
                 },
             ));
         }
+        drop(st);
+        // Nothing is due after all: a capture waiting for a preview takes
+        // the view as it is.
+        self.settle_agent_waits();
     }
 
     fn tick(self: &Rc<Self>) {
@@ -756,6 +803,8 @@ impl Window {
             }
             let path = st.doc.core_path();
             let Some(plan) = st.lp.begin_run(mode, &path) else {
+                drop(st);
+                self.settle_agent_waits();
                 return;
             };
             if let Some(old) = &plan.close {
@@ -795,6 +844,7 @@ impl Window {
             ),
         };
         self.spinner.start();
+        self.st.borrow_mut().running = true;
         self.console.set_summary(match mode {
             RenderMode::Preview => "Previewing…",
             _ => "Rendering…",
@@ -809,9 +859,11 @@ impl Window {
             if let Some(w) = me.upgrade() {
                 match out {
                     Ok(r) => w.finished(r),
-                    Err(_) => w
-                        .console
-                        .set_summary("The run panicked (a bug in NeoSCAD)."),
+                    Err(_) => {
+                        let why = "The run panicked (a bug in NeoSCAD).";
+                        w.console.set_summary(why);
+                        w.run_ended(why, &[]);
+                    }
                 }
             }
         });
@@ -825,6 +877,7 @@ impl Window {
             Err(e) => {
                 self.spinner.stop();
                 self.console.set_summary(&e.to_string());
+                self.run_ended(&e.to_string(), &[]);
                 return;
             }
         };
@@ -885,6 +938,30 @@ impl Window {
         }
         self.watch_files(out.files);
         self.refresh_parameters();
+        self.run_ended(&out.summary, &out.console);
+    }
+
+    /// The run is over (done, failed): what agents read of it, and what
+    /// waited for it (a capture of the view it drew).
+    fn run_ended(self: &Rc<Self>, summary: &str, console: &[client::ConsoleLine]) {
+        {
+            let mut st = self.st.borrow_mut();
+            st.running = false;
+            st.summary = summary.to_string();
+            st.console_lines = console.to_vec();
+        }
+        self.settle_agent_waits();
+    }
+
+    /// Run what waits for the preview once none is due or running.
+    fn settle_agent_waits(self: &Rc<Self>) {
+        let idle = {
+            let st = self.st.borrow();
+            !st.running && st.timer.is_none() && !st.after_run.is_empty()
+        };
+        if idle {
+            self.after_run();
+        }
     }
 
     fn camera(&self, f: impl FnOnce(&mut render::viewport::Viewport)) {
@@ -1305,7 +1382,10 @@ impl Window {
 
     /// Draw the panels' state in the view.
     fn update_overlay(&self) {
-        let a = inspect::annotations(&self.st.borrow().overlay);
+        let a = {
+            let st = self.st.borrow();
+            linux_app::agent::merge_marks(inspect::annotations(&st.overlay), &st.agent_marks)
+        };
         glib::g_debug!(
             "neoscad",
             "overlay: {} markers, {} lines",
@@ -1761,8 +1841,10 @@ impl Window {
             if let Some(ls) = st.language.take() {
                 ls.stop();
             }
+            st.after_run.clear();
             st.doc.core_path()
         };
+        self.agent_closed();
         let _ = self.shared.client.close(&path);
     }
 }

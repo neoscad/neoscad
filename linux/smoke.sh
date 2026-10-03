@@ -222,8 +222,115 @@ EOF
     sleep 1
 }
 
+# AI agents, end to end: with agents allowed (the consent kept in the
+# settings file, as a user's earlier "Allow" leaves it), the real
+# `neoscad mcp` finds the running app by itself (NEOSCAD_AGENT_DIR keeps the
+# test's socket apart from the user's), reads the open document, edits it
+# as one change in the editor (which runs it, and leaves the file alone),
+# is refused an edit on the version it read before, moves the camera,
+# marks the view and captures it. Needs the command line beside the app
+# (or NEOSCAD_CLI); with SHOTS it saves agent-light.png and agent-dark.png,
+# and the popover and the Agents dialog.
+agent_check() {
+    local cli=${NEOSCAD_CLI:-$(dirname "$bin")/neoscad}
+    if [ ! -x "$cli" ]; then
+        echo "agent_check: no $cli; skipped"
+        return 0
+    fi
+    local log=$work/agent-$1.log model=$work/agent/gear.scad
+    local config=$work/agent-config-$1 dir=$work/agent-sockets-$1 err=$work/mcp-$1.err
+    mkdir -p "$work/agent" "$config/neoscad" "$dir"
+    chmod 700 "$dir"
+    printf 'cube(10);\n' >"$model"
+    printf '{"allowed": true}\n' >"$config/neoscad/agents.json"
+    XDG_CONFIG_HOME=$config NEOSCAD_AGENT_DIR=$dir ADW_DEBUG_COLOR_SCHEME=prefer-$1 \
+        dbus-run-session -- "$bin" "$model" >"$log" 2>&1 &
+    launcher=$!
+    wait_for "run 1 (Preview)" "$log" 300
+    wait_for "agent: listening at" "$log" 30
+
+    coproc MCP { cd "$work/agent" && NEOSCAD_AGENT_DIR=$dir exec "$cli" mcp 2>"$err"; }
+    local to=${MCP[1]} from=${MCP[0]}
+    # One request; its reply, skipping notifications (the tool list
+    # changing when the app connects).
+    call() {
+        printf '{"jsonrpc":"2.0","id":%s,"method":"%s","params":%s}\n' "$1" "$2" "$3" >&"$to"
+        local line
+        while IFS= read -r -t 60 line <&"$from"; do
+            case $line in *"\"id\":$1,"*) printf '%s\n' "$line"; return 0 ;; esac
+        done
+        echo "no reply to $2" >&2
+        cat "$err" >&2
+        return 1
+    }
+    tool() { call "$1" tools/call "{\"name\":\"$2\",\"arguments\":$3}"; }
+    call 1 initialize '{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Smoke Test","version":"1"}}' >/dev/null
+    printf '{"jsonrpc":"2.0","method":"notifications/initialized"}\n' >&"$to"
+
+    local r version
+    r=$(tool 2 editor_read '{}')
+    echo "editor_read: ${r:0:200}"
+    version=$(grep -o 'version [0-9]*' <<<"$r" | head -1 | cut -d' ' -f2)
+    [ -n "$version" ] && grep -q 'cube(10);' <<<"$r"
+    wait_for "agent: Smoke Test connected" "$log" 30
+    r=$(tool 3 editor_edit "{\"version\":$version,\"edits\":[{\"old\":\"cube(10);\",\"new\":\"cube(12);\"}]}")
+    echo "editor_edit: ${r:0:200}"
+    if grep -q '"isError":true' <<<"$r"; then
+        echo "the agent's edit failed" >&2
+        return 1
+    fi
+    wait_for "agent: edit of 1 changes: Applied" "$log" 30
+    wait_for "run 2 (Preview)" "$log" 120
+    r=$(tool 4 editor_read '{}')
+    grep -q 'cube(12);' <<<"$r"
+    # The edit is in the buffer, not saved: the file is as it was.
+    grep -qx 'cube(10);' "$model"
+    # An edit on the version read before is refused (by the command line,
+    # which reads first, or the app), and changes nothing.
+    r=$(tool 5 editor_edit "{\"version\":$version,\"edits\":[{\"old\":\"cube(12);\",\"new\":\"cube(1);\"}]}")
+    grep -q '"isError":true' <<<"$r"
+    grep -q 'version' <<<"$r"
+    r=$(tool 6 view_camera '{"view":"diagonal","fit":true}')
+    grep -q 'vpr' <<<"$r"
+    r=$(tool 7 view_annotate '{"markers":[{"point":[12,12,12],"label":"corner"}]}')
+    wait_for "overlay: 1 markers" "$log" 30
+    r=$(tool 8 view_capture '{"size":256}')
+    grep -q '"type":"image"' <<<"$r"
+    sleep 1
+    shot "agent-$1"
+    if [ -n "${SHOTS:-}" ]; then
+        # The header button (left of the main menu; the window is at the
+        # screen's top left) opens the popover; its Set Up Agents… opens
+        # the Agents dialog.
+        xdotool mousemove 1100 27 click 1
+        sleep 1.5
+        shot "agent-popover-$1"
+        xdotool mousemove 1043 190 click 1
+        sleep 1.5
+        shot "agent-dialog-$1"
+        xdotool key Escape
+        sleep 0.5
+        # The popover's Disconnect ends the agent's connection.
+        xdotool mousemove 1100 27 click 1
+        sleep 1.5
+        xdotool mousemove 1112 134 click 1
+        wait_for "agent: disconnect" "$log" 30
+        sleep 1
+        grep "agent: [0-9]* connected, listening" "$log" | tail -1 | grep -q "agent: 0 connected"
+    fi
+    exec {to}>&-
+    wait "$MCP_PID" 2>/dev/null || true
+    grep "agent:" "$log"
+    pkill -x "$name" || true
+    sleep 1
+}
+
 if [ -f "$NEOSCAD_EDITOR_DIR/editor.html" ]; then
     lsp_check
+    agent_check light
+    if [ -n "${SHOTS:-}" ]; then
+        agent_check dark
+    fi
 fi
 if [ "${TYPE:-}" = 1 ]; then
     panels_check light

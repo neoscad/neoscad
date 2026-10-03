@@ -2,7 +2,8 @@
 //! docs/linux-app.md.
 //!
 //! This library is the app's host logic that is not GTK glue, so it builds
-//! and is tested on every platform: the editor bridge's state machine
+//! and is tested on every platform: AI agents' consent, setup and requests
+//! (`agent`), the editor bridge's state machine
 //! (`bridge`), the editor page's resources (`resources`), its language
 //! server and where a definition opens (`language`), the machine's side
 //! of the session (`host`), a window's document (`document`), runs and
@@ -13,6 +14,7 @@
 //! `crates/client`, the port boundary (docs/architecture.md).
 //! The window itself (`src/app/`) is compiled only with the `gtk` feature.
 
+pub mod agent;
 pub mod bridge;
 pub mod customizer;
 pub mod document;

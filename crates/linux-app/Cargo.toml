@@ -41,6 +41,11 @@ gtk = [
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
+# The live link to `neoscad mcp` (its listener, used directly rather than
+# through `crates/ffi` as the macOS and Windows apps do) and the client
+# setup that needs the machine (running `claude`): docs/linux-app.md,
+# "AI agents".
+agent-link = { package = "neoscad-agent-link", path = "../agent-link" }
 assets = { package = "neoscad-assets", path = "../assets" }
 client = { package = "neoscad-client", path = "../client" }
 eval = { package = "neoscad-eval", path = "../eval" }

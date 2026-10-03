@@ -1646,6 +1646,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "mimalloc",
+ "neoscad-agent-link",
  "neoscad-assets",
  "neoscad-client",
  "neoscad-eval",

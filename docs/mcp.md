@@ -119,8 +119,10 @@ directory is undefined ("like `/` on macOS", modelcontextprotocol.io,
 **Code.** The rows, links, commands, the config merge and the backup
 names are pure functions in `client::agent_setup`
 (`crates/client/src/agent_setup.rs`), so every surface renders the same
-table. What needs the machine is in `crates/ffi/src/agent_setup.rs`,
-exported to Swift and C#: `agent_setup_rows(cli)`,
+table. What needs the machine (finding and running `claude`, Claude
+Desktop's file and its backup) is `agent_link::setup`
+(`crates/agent-link/src/setup.rs`), which the Linux app calls directly
+and `crates/ffi/src/agent_setup.rs` exports to Swift and C#: `agent_setup_rows(cli)`,
 `agent_setup_find_claude()`, `agent_setup_add_to_claude_code(claude,
 cli, replace)` and `agent_setup_add_to_claude_desktop(cli)`. The macOS
 sheet (`apple/App/Agents/AgentSetup.swift`) and the Windows dialog
@@ -640,6 +642,34 @@ checkable items. The app is one process per window: allowing or turning
 off agents in one window does so in all of them at once, and an agent's
 request that names no document goes to the window used last. The code
 and its tests are `docs/windows-app.md`, "AI agents".
+
+**On Linux.** The header bar's agent button, left of the main menu,
+shows a sparkle until an agent is connected, then the agent's name with
+a green dot that pulses while it works (the tooltip says what it does);
+its popover lists each agent with Disconnect. Main menu > Connect AI
+Agent… and Preferences > Agents reach the same page. The flow:
+
+1. **Allow AI agents to work on open documents**, the page's first
+   switch, is off until the user turns it on, and kept. A setup button
+   pressed while it is off asks once ("Let AI agents work on your open
+   models?").
+2. **One click per client**: Add for Claude Code (runs `claude mcp add`
+   with the app's `neoscad`; Replace when it already has one), Open
+   Cursor and Open VS Code (their install links, through the OpenURI
+   portal in the Flatpak). Each row says what happened, and expands to
+   the command or JSON to copy. In the Flatpak, which runs no host
+   program, Claude Code's row is the command to copy, and every setup
+   runs `flatpak run --command=neoscad org.neoscad.NeoSCAD mcp`. Claude
+   Desktop does not run on Linux.
+3. **Then just ask** the agent about the model that is open. Its edits
+   are one highlighted step that Undo takes back, in the buffer (the user
+   saves); "Ask before applying an agent's edits" makes each wait for
+   Apply or Reject in a bar under the header.
+
+Turning the switch off disconnects every agent at once and removes the
+socket. The code is `crates/linux-app/src/agent.rs`, `src/app/agent.rs`
+and `src/app/window/agent.rs`; `linux/smoke.sh` drives the real `neoscad
+mcp` against the app (`docs/linux-app.md`, "AI agents").
 
 ## Smoke test
 

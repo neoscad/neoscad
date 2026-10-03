@@ -22,13 +22,17 @@
 //! - [`AgentLink`]: the app's side, which the macOS and Windows apps reach
 //!   through `crates/ffi` and the Linux app directly. It does nothing, and
 //!   costs nothing, until the app calls [`AgentLink::start`] after the
-//!   user's consent.
+//!   user's consent;
+//! - [`setup`]: setting up agent clients to run the app's `neoscad`
+//!   (finding and running `claude`, Claude Desktop's config), the part of
+//!   the apps' "Connect your AI agent" sheet that needs the machine.
 //!
 //! The command line's side is `crates/cli/src/mcp/app.rs`.
 
 pub mod discovery;
 pub mod frame;
 mod link;
+pub mod setup;
 pub mod transport;
 
 pub use link::{AgentLink, AgentObserver, LinkConfig};

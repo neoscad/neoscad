@@ -29,6 +29,12 @@ pub struct Document {
     disk: DiskTracker,
     /// Reads of the file that failed in a row (other than its absence).
     failed_reads: u32,
+    /// Counts every change of the text, the user's and an agent's, never
+    /// repeating a value for another text while the window is open: the
+    /// `version` an AI agent reads and must name to edit
+    /// (`client::agent::AgentDocumentState::version`). The undo count
+    /// above cannot serve, because an undo brings a number back.
+    revision: u64,
 }
 
 /// Failed reads of a changed file before the change is let go: a read
@@ -58,6 +64,7 @@ impl Document {
             saved: Some(0),
             disk: DiskTracker::new(),
             failed_reads: 0,
+            revision: 1,
         }
     }
 
@@ -75,7 +82,21 @@ impl Document {
             saved: Some(0),
             disk,
             failed_reads: 0,
+            revision: 1,
         }
+    }
+
+    /// The text's revision (see the field).
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// This document replaces `previous` in the same window: its
+    /// revisions go on from there, so an agent holding a version of the
+    /// old text cannot edit the new one with it.
+    pub fn follows(mut self, previous: &Document) -> Document {
+        self.revision = previous.revision + 1;
+        self
     }
 
     /// The watcher saw the file change: what that means for this document
@@ -138,6 +159,7 @@ impl Document {
     pub fn reload_without_editor(&mut self, edits: &[ReloadEdit]) {
         let text = client::apply_reload_edits(&self.text.text(), edits);
         self.text.replace(text);
+        self.revision += 1;
         self.reload_landed();
     }
 
@@ -182,6 +204,7 @@ impl Document {
 
     /// A transaction was applied.
     pub fn record(&mut self, kind: EditKind) {
+        self.revision += 1;
         self.changes += match kind {
             EditKind::Undo => -1,
             EditKind::Edit | EditKind::Redo => 1,
@@ -193,6 +216,7 @@ impl Document {
     /// no undo count can say when it is clean again.
     pub fn record_resync(&mut self, text: String) {
         self.text.replace(text);
+        self.revision += 1;
         self.saved = None;
     }
 
@@ -296,6 +320,24 @@ mod tests {
         assert_eq!(d.name(), "a.scad");
         d.record(EditKind::Undo);
         assert!(d.is_dirty(), "undone past the save");
+    }
+
+    /// An agent's `version`: every change counts, an undo too (it is a
+    /// different text from the one read), and a document that replaces
+    /// another in the window goes on from its number.
+    #[test]
+    fn the_revision_never_repeats_for_another_text() {
+        let mut d = Document::from_file("/p/x.scad".into(), "a".into());
+        assert_eq!(d.revision(), 1);
+        d.record(EditKind::Edit);
+        d.record(EditKind::Undo);
+        assert_eq!(d.revision(), 3);
+        d.record_resync("b".into());
+        assert_eq!(d.revision(), 4);
+        d.reload_without_editor(&[]);
+        assert_eq!(d.revision(), 5);
+        let next = Document::untitled("/home/u/Untitled.scad".into(), String::new()).follows(&d);
+        assert_eq!(next.revision(), 6);
     }
 
     #[test]

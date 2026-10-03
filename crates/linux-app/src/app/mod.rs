@@ -1,7 +1,9 @@
 //! The application: one core for the process, a window per document, the
 //! app-wide actions (New Window, Open, Examples, the colour scheme,
-//! Preferences, Check for Updates, About, Quit) and their shortcuts.
+//! Connect AI Agent, Preferences, Check for Updates, About, Quit) and their
+//! shortcuts.
 
+mod agent;
 mod console;
 mod customizer;
 mod editor;
@@ -54,6 +56,9 @@ pub struct Shared {
     /// The update check's settings and the newer release, if any
     /// (`update.rs`).
     updates: update::Updates,
+    /// AI agents: the consent, the link to `neoscad mcp` and its status
+    /// (`agent.rs`).
+    agents: agent::Agents,
     /// `G_MESSAGES_DEBUG` names this app: the bridge also asks the page
     /// how many markers it shows after each publication, for the log
     /// (linux/smoke.sh checks it). Off, that is one call saved per run.
@@ -149,11 +154,13 @@ pub fn run() -> glib::ExitCode {
             lsp_cache: Arc::new(lsp::Cache::new()),
             editor_dir,
             updates: update::Updates::new(),
+            agents: agent::Agents::new(),
             debug: std::env::var("G_MESSAGES_DEBUG")
                 .is_ok_and(|v| v.split([',', ' ']).any(|d| d == "neoscad" || d == "all")),
         });
         install_actions(app, &sh);
         update::start(&sh);
+        agent::start(&sh);
         *s.borrow_mut() = Some(sh);
     });
 
@@ -371,6 +378,16 @@ fn install_actions(app: &adw::Application, sh: &Rc<Shared>) {
     });
     app.add_action(&style);
 
+    // Main menu > Connect AI Agent…: the Agents page on its own.
+    let agents = gio::SimpleAction::new("agents", None);
+    let (a, s) = (app.downgrade(), sh.clone());
+    agents.connect_activate(move |_, _| {
+        if let Some(app) = a.upgrade() {
+            agent::show_dialog(&s, app.active_window().as_ref());
+        }
+    });
+    app.add_action(&agents);
+
     let preferences = gio::SimpleAction::new("preferences", None);
     let (a, s) = (app.downgrade(), sh.clone());
     preferences.connect_activate(move |_, _| {
@@ -524,6 +541,7 @@ pub fn main_menu() -> gio::Menu {
     }
     let app = gio::Menu::new();
     app.append_submenu(Some("Style"), &style);
+    app.append_item(&item("Connect AI Agent…", "app.agents", None));
     app.append_item(&item(
         "Preferences",
         "app.preferences",
