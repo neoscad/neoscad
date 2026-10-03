@@ -15,6 +15,7 @@
 //! `FileSystem`, and what only a host knows (whether a file is on disk, a
 //! creation date, where an export's bytes go) is passed in.
 
+pub mod agent;
 pub mod agent_setup;
 mod disk;
 mod document;

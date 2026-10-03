@@ -1,7 +1,11 @@
 //! The tools that act on the connected web page (`neoscad mcp --browser`;
-//! docs/mcp.md, "The web page"): its editor, its 3D view and its console,
-//! through the bridge ([`crate::mcp::bridge`]). The model tools use the
-//! page's text too when a call gives neither `path` nor `source`
+//! docs/mcp.md, "The web page") or on a running NeoSCAD app's open
+//! document (plain `neoscad mcp`; "The desktop apps"): its editor, its 3D
+//! view and its console, through the browser bridge
+//! ([`crate::mcp::bridge`]) or the app link ([`crate::mcp::app`]). Both
+//! speak the same requests, so one [`Surface`] serves the two, and the
+//! texts differ only in what they call it. The model tools use the
+//! surface's text too when a call gives neither `path` nor `source`
 //! ([`Tools::page_model`]).
 //!
 //! Positions an agent gives and reads are 1-based lines and 1-based byte
@@ -11,12 +15,14 @@
 //! conversion, so a line with a `°` or an emoji cannot shift an edit.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use lang::source::SourceFile;
 use serde_json::{Value, json};
 
 use super::{Label, Model, Out, Reply, Tools, bool_arg, check_text, num, scad_string, str_arg};
+use crate::mcp::app::{AppDocument, Apps, NO_APP};
 use crate::mcp::bridge::{Bridge, MAX_WAIT, NOT_CONNECTED, open_in_browser};
 
 /// The browser tools, in the order `tools/list` gives them (after the
@@ -31,6 +37,59 @@ pub const NAMES: &[&str] = &[
     "view_annotate",
     "console_read",
 ];
+
+/// The app tools: the browser's but `browser_connect` (an app needs no
+/// link), in the same order.
+pub const APP_NAMES: &[&str] = &[
+    "editor_read",
+    "editor_edit",
+    "editor_reveal",
+    "view_camera",
+    "view_capture",
+    "view_annotate",
+    "console_read",
+];
+
+/// Where the editor and view tools act: the connected web page, or one
+/// document of a connected NeoSCAD app.
+pub(super) enum Surface<'a> {
+    Page(&'a Bridge),
+    App(&'a Arc<Apps>, AppDocument),
+}
+
+impl Surface<'_> {
+    fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        match self {
+            Surface::Page(b) => b.request(method, params, timeout),
+            Surface::App(apps, doc) => apps.request(doc, method, params, timeout),
+        }
+    }
+
+    /// "the page", "the document": whose text, editor and view.
+    fn the(&self) -> &'static str {
+        match self {
+            Surface::Page(_) => "the page",
+            Surface::App(..) => "the document",
+        }
+    }
+
+    /// "the web page", "the NeoSCAD app": who answers.
+    fn who(&self) -> &'static str {
+        match self {
+            Surface::Page(_) => "the web page",
+            Surface::App(..) => "the NeoSCAD app",
+        }
+    }
+
+    /// A document by name: "the web page's gears.scad", "gears.scad in
+    /// NeoSCAD (document 2)".
+    fn name(&self, file: &str) -> String {
+        match self {
+            Surface::Page(_) => format!("the web page's {file}"),
+            Surface::App(_, d) => format!("{file} in NeoSCAD (document {})", d.number),
+        }
+    }
+}
 
 /// How long the page gets for a request it answers at once.
 const QUICK: Duration = Duration::from_secs(15);
@@ -121,10 +180,32 @@ pub fn list() -> Vec<Value> {
     ]
 }
 
+/// The app tools' list: the browser's, with `document` (which open
+/// document; the most recently focused by default) and without
+/// `browser_connect`, described for the app.
+pub fn app_list() -> Vec<Value> {
+    list()
+        .into_iter()
+        .filter(|t| t["name"] != "browser_connect")
+        .map(|mut t| {
+            let d = t["description"]
+                .as_str()
+                .unwrap_or("")
+                .replace("The page's ", "The NeoSCAD app's ")
+                .replace("the page's ", "the NeoSCAD app's ");
+            t["description"] = json!(d);
+            t["inputSchema"]["properties"]["document"] = json!({"type": "integer"});
+            t
+        })
+        .collect()
+}
+
 /// The page's document, as `read` gives it.
 #[derive(Debug)]
 struct Page {
     file: String,
+    /// The app's document: its file, when saved (the page's is never one).
+    path: Option<PathBuf>,
     version: u64,
     text: String,
     defines: Vec<String>,
@@ -133,15 +214,31 @@ struct Page {
 }
 
 impl Page {
-    fn read(b: &Bridge) -> Result<Page, String> {
-        let r = b.request("read", json!({}), QUICK)?;
+    fn read(s: &Surface) -> Result<Page, String> {
+        let r = s.request("read", json!({}), QUICK)?;
+        let broken = |what: &str| match s {
+            Surface::Page(_) => {
+                format!("the web page sent no {what} (reload it and connect again)")
+            }
+            Surface::App(..) => {
+                format!("the NeoSCAD app sent no {what} (update it to match this neoscad)")
+            }
+        };
         let text = r["text"]
             .as_str()
-            .ok_or("the web page sent no text (reload it and connect again)")?
+            .ok_or_else(|| broken("text"))?
             .to_string();
-        let version = r["version"]
-            .as_u64()
-            .ok_or("the web page sent no version (reload it and connect again)")?;
+        let version = r["version"].as_u64().ok_or_else(|| broken("version"))?;
+        // An app's document runs under its own path, so its includes
+        // resolve beside it; it must be absolute, as every path the app
+        // sends is.
+        let path = match s {
+            Surface::App(..) => r["path"]
+                .as_str()
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute()),
+            Surface::Page(_) => None,
+        };
         let defines = r["values"]
             .as_object()
             .into_iter()
@@ -149,7 +246,11 @@ impl Page {
             .filter_map(|(k, v)| define(k, v))
             .collect();
         Ok(Page {
-            file: safe_name(r["file"].as_str()),
+            file: match s {
+                Surface::App(..) => r["file"].as_str().unwrap_or("Untitled").to_string(),
+                Surface::Page(_) => safe_name(r["file"].as_str()),
+            },
+            path,
             version,
             text,
             defines,
@@ -210,7 +311,7 @@ fn offset_of(sf: &SourceFile, text: &str, line: u64, col: u64) -> Result<u32, St
     let lines = u64::from(sf.line_count());
     if line < 1 || line > lines {
         return Err(format!(
-            "line {line} is not in the page's text (it has {lines} lines)"
+            "line {line} is not in the text (it has {lines} lines)"
         ));
     }
     let (start, end) = (
@@ -262,16 +363,16 @@ fn at_arg(args: &Value) -> Result<Option<Vec<u64>>, String> {
 }
 
 impl Tools {
-    pub(super) fn browser_tool(&self, b: &Bridge, name: &str, args: &Value) -> Reply {
-        match name {
-            "browser_connect" => connect(b, args),
-            "editor_read" => editor_read(b),
-            "editor_edit" => editor_edit(b, args),
-            "editor_reveal" => editor_reveal(b, args),
-            "view_camera" => view_camera(b, args),
-            "view_capture" => view_capture(b, args),
-            "view_annotate" => view_annotate(b, args),
-            "console_read" => console_read(b),
+    pub(super) fn browser_tool(&self, s: &Surface, name: &str, args: &Value) -> Reply {
+        match (name, s) {
+            ("browser_connect", Surface::Page(b)) => connect(b, args),
+            ("editor_read", _) => editor_read(s),
+            ("editor_edit", _) => editor_edit(s, args),
+            ("editor_reveal", _) => editor_reveal(s, args),
+            ("view_camera", _) => view_camera(s, args),
+            ("view_capture", _) => view_capture(s, args),
+            ("view_annotate", _) => view_annotate(s, args),
+            ("console_read", _) => console_read(s),
             _ => Err(format!("unknown tool '{name}'")),
         }
     }
@@ -280,13 +381,15 @@ impl Tools {
     /// customizer values and `part()` switch.
     pub(super) fn page_model(
         &self,
-        b: &Bridge,
+        s: &Surface,
         base: PathBuf,
         _inline: &str,
     ) -> Result<Model<'_>, String> {
-        let page = Page::read(b).map_err(|e| {
+        let page = Page::read(s).map_err(|e| {
             if e == NOT_CONNECTED {
                 format!("give path (a .scad file) or source (OpenSCAD text); or, for the user's web page, {NOT_CONNECTED}")
+            } else if e == NO_APP {
+                format!("give path (a .scad file) or source (OpenSCAD text); {NO_APP}")
             } else {
                 e
             }
@@ -295,10 +398,27 @@ impl Tools {
             .inline
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let doc = base.join(&page.file);
+        // An app's saved document runs where it is, as the app runs it, so
+        // its includes resolve (its directory is readable while it is
+        // open: `Roots::set_document_dirs`). Anything else is a document
+        // under `base_dir` with a plain name, which the page cannot choose.
+        let (doc, base) = match &page.path {
+            Some(p) => (
+                session::normal(p),
+                p.parent().map_or(base, Path::to_path_buf),
+            ),
+            None => (base.join(safe_name(Some(&page.file))), base),
+        };
         self.local
             .session()
             .open(&doc, Some(page.text.into_bytes()));
+        let (number, activity) = match s {
+            Surface::App(apps, d) => (
+                Some(d.number),
+                Some(apps.activity(d, &super::current_tool())),
+            ),
+            Surface::Page(_) => (None, None),
+        };
         Ok(Model {
             opened: vec![doc.clone()],
             path: doc,
@@ -306,10 +426,12 @@ impl Tools {
             label: Label::Page {
                 file: page.file,
                 version: page.version,
+                number,
             },
             defines: page.defines,
             parts: page.parts,
             _turn: Some(turn),
+            _activity: activity,
         })
     }
 
@@ -317,13 +439,13 @@ impl Tools {
     /// edit (or with `check`, what would change).
     pub(super) fn format_page(
         &self,
-        b: &Bridge,
+        s: &Surface,
         id: &Value,
         base: &Path,
         check: bool,
         diff: bool,
     ) -> Reply {
-        let page = Page::read(b)?;
+        let page = Page::read(s)?;
         let r = self.run(
             id,
             "format",
@@ -344,21 +466,19 @@ impl Tools {
         } else {
             let sf = page.source();
             let edit = json!({"from": [0, 0], "to": editor_pos(&sf, page.text.len() as u32), "insert": formatted});
-            let r = b.request(
+            let r = s.request(
                 "edit",
                 json!({"version": page.version, "edits": [edit], "summary": "format"}),
                 EDIT,
             )?;
             format!(
-                "reformatted the web page's {} (whitespace only); version {}",
-                page.file, r["version"]
+                "reformatted {} (whitespace only); version {}",
+                s.name(&page.file),
+                r["version"]
             )
         };
         Ok(Out {
-            text: format!(
-                "the web page's {} (version {})\n{text}",
-                page.file, page.version
-            ),
+            text: format!("{} (version {})\n{text}", s.name(&page.file), page.version),
             structured: Value::Null,
             png: None,
         })
@@ -424,12 +544,25 @@ fn connect(b: &Bridge, args: &Value) -> Reply {
     text_out(text)
 }
 
-fn editor_read(b: &Bridge) -> Reply {
-    let page = Page::read(b)?;
+fn editor_read(s: &Surface) -> Reply {
+    let page = Page::read(s)?;
     let sf = page.source();
     let r = &page.raw;
     let lines = page.text.split('\n').count();
-    let mut text = format!("{}, version {}, {lines} lines", page.file, page.version);
+    let mut text = match s {
+        Surface::Page(_) => format!("{}, version {}, {lines} lines", page.file, page.version),
+        Surface::App(..) => format!(
+            "{}, version {}, {lines} lines, {}",
+            s.name(&page.file),
+            page.version,
+            page.path
+                .as_ref()
+                .map_or("not saved yet".to_string(), |p| format!(
+                    "saved as {}",
+                    p.display()
+                ))
+        ),
+    };
     let sel = &r["selection"];
     if let (Some(a), Some(h)) = (agent_pos(&sf, &sel["anchor"]), agent_pos(&sf, &sel["head"])) {
         let (from, to) = (a.min(h), a.max(h));
@@ -454,6 +587,20 @@ fn editor_read(b: &Bridge) -> Reply {
     for d in r["diagnostics"].as_array().into_iter().flatten().take(20) {
         text.push_str(&format!("\n{}", console_line(d)));
     }
+    if let Surface::App(apps, d) = s {
+        let others: Vec<String> = apps
+            .documents()
+            .iter()
+            .filter(|o| o.number != d.number)
+            .map(|o| format!("{} {}", o.number, o.file))
+            .collect();
+        if !others.is_empty() {
+            text.push_str(&format!(
+                "\nalso open (pass document): {}",
+                others.join(", ")
+            ));
+        }
+    }
     text.push_str("\n---\n");
     for (i, l) in page.text.split('\n').enumerate() {
         text.push_str(&format!("{:>6}\t{l}\n", i + 1));
@@ -471,14 +618,16 @@ fn console_line(d: &Value) -> String {
     }
 }
 
-fn editor_edit(b: &Bridge, args: &Value) -> Reply {
-    let version = args["version"].as_u64().ok_or(
-        "editor_edit needs `version`, the number editor_read gives (read the page's text first)",
-    )?;
-    let page = Page::read(b)?;
+fn editor_edit(s: &Surface, args: &Value) -> Reply {
+    let version = args["version"].as_u64().ok_or(format!(
+        "editor_edit needs `version`, the number editor_read gives (read {}'s text first)",
+        s.the()
+    ))?;
+    let page = Page::read(s)?;
     if page.version != version {
         return Err(format!(
-            "the page's text changed since version {version} (the user may be typing; it is at version {} now): editor_read again and make the edit on the new text",
+            "{}'s text changed since version {version} (the user may be typing; it is at version {} now): editor_read again and make the edit on the new text",
+            s.the(),
             page.version
         ));
     }
@@ -514,7 +663,8 @@ fn editor_edit(b: &Bridge, args: &Value) -> Reply {
                             [k] => (k as u32, (k + old.len()) as u32),
                             [] => {
                                 return Err(format!(
-                                    "edit {i}: `old` does not occur in the page's text (its spaces and line breaks must match exactly; editor_read shows the text)"
+                                    "edit {i}: `old` does not occur in {}'s text (its spaces and line breaks must match exactly; editor_read shows the text)",
+                                    s.the()
                                 ));
                             }
                             _ => {
@@ -575,25 +725,33 @@ fn editor_edit(b: &Bridge, args: &Value) -> Reply {
         .map(|(a, z, t, _)| json!({"from": editor_pos(&sf, *a), "to": editor_pos(&sf, *z), "insert": t}))
         .collect();
     let n = edits.len();
-    let r = b.request(
+    let r = s.request(
         "edit",
         json!({"version": version, "edits": edits, "summary": format!("line {summary}")}),
         EDIT,
     )?;
     let v = r["version"].as_u64().unwrap_or(0);
+    let mut structured = json!({"version": v, "file": page.file, "lines": summary});
+    if let Surface::App(_, d) = s {
+        structured["document"] = json!(d.number);
+    }
     Ok(Out {
         text: format!(
-            "applied {n} edit{} to the web page's {} (line {summary}); now version {v}. The page previews it: view_capture shows the result, console_read its messages.",
+            "applied {n} edit{} to {} (line {summary}); now version {v}. {} previews it: view_capture shows the result, console_read its messages.",
             if n == 1 { "" } else { "s" },
-            page.file
+            s.name(&page.file),
+            match s {
+                Surface::Page(_) => "The page",
+                Surface::App(..) => "NeoSCAD",
+            }
         ),
-        structured: json!({"version": v, "file": page.file, "lines": summary}),
+        structured,
         png: None,
     })
 }
 
-fn editor_reveal(b: &Bridge, args: &Value) -> Reply {
-    let page = Page::read(b)?;
+fn editor_reveal(s: &Surface, args: &Value) -> Reply {
+    let page = Page::read(s)?;
     let sf = page.source();
     let t = &page.text;
     let line_len = |l: u64| u64::from(sf.line_end(l as u32) - sf.line_start(l as u32));
@@ -602,7 +760,7 @@ fn editor_reveal(b: &Bridge, args: &Value) -> Reply {
         (None, None) => return Err("give at ([line, col?, end_line?, end_col?]) or text".into()),
         (None, Some(needle)) => match t.find(needle).filter(|_| !needle.is_empty()) {
             Some(k) => (k as u32, (k + needle.len()) as u32),
-            None => return Err("`text` does not occur in the page's text".into()),
+            None => return Err(format!("`text` does not occur in {}'s text", s.the())),
         },
         (Some(at), None) => match at[..] {
             [l] => (
@@ -621,7 +779,7 @@ fn editor_reveal(b: &Bridge, args: &Value) -> Reply {
             _ => unreachable!("at_arg gives 1 to 4 numbers"),
         },
     };
-    b.request(
+    s.request(
         "reveal",
         json!({"from": editor_pos(&sf, from), "to": editor_pos(&sf, to.max(from))}),
         QUICK,
@@ -629,12 +787,13 @@ fn editor_reveal(b: &Bridge, args: &Value) -> Reply {
     let (l, c) = sf.line_col(from);
     let (el, ec) = sf.line_col(to.max(from));
     text_out(format!(
-        "showing {l}:{c}{} in the page's editor",
+        "showing {l}:{c}{} in {}'s editor",
         if (l, c) == (el, ec) {
             String::new()
         } else {
             format!("-{el}:{ec}")
-        }
+        },
+        s.the()
     ))
 }
 
@@ -662,7 +821,7 @@ fn camera_text(c: &Value) -> String {
     )
 }
 
-fn view_camera(b: &Bridge, args: &Value) -> Reply {
+fn view_camera(s: &Surface, args: &Value) -> Reply {
     let mut set = json!({});
     for k in ["vpt", "vpr"] {
         if let Some(v) = args.get(k).filter(|v| !v.is_null()) {
@@ -694,15 +853,15 @@ fn view_camera(b: &Bridge, args: &Value) -> Reply {
     if bool_arg(args, "fit") {
         set["fit"] = json!(true);
     }
-    let r = b.request("camera", set, QUICK)?;
+    let r = s.request("camera", set, QUICK)?;
     Ok(Out {
-        text: format!("the page's camera: {}", camera_text(&r)),
+        text: format!("{}'s camera: {}", s.the(), camera_text(&r)),
         structured: json!({"camera": r}),
         png: None,
     })
 }
 
-fn view_capture(b: &Bridge, args: &Value) -> Reply {
+fn view_capture(s: &Surface, args: &Value) -> Reply {
     let size = match args.get("size").filter(|v| !v.is_null()) {
         None => CAPTURE_SIZE,
         Some(s) => match s.as_f64() {
@@ -710,12 +869,13 @@ fn view_capture(b: &Bridge, args: &Value) -> Reply {
             _ => return Err("`size` is the longest side in pixels, 64 to 2048".into()),
         },
     };
-    let r = b.request("capture", json!({"size": size}), CAPTURE)?;
+    let r = s.request("capture", json!({"size": size}), CAPTURE)?;
     let png = decode_base64(r["png"].as_str().unwrap_or(""))
         .filter(|p| p.starts_with(b"\x89PNG\r\n\x1a\n"))
-        .ok_or("the web page sent no image")?;
+        .ok_or(format!("{} sent no image", s.who()))?;
     let mut text = format!(
-        "the page's 3D view, {}x{} ({}); {}",
+        "{}'s 3D view, {}x{} ({}); {}",
+        s.the(),
         r["width"],
         r["height"],
         r["backend"].as_str().unwrap_or("?"),
@@ -745,7 +905,7 @@ fn color_arg(v: &Value) -> Result<String, String> {
     }
 }
 
-fn view_annotate(b: &Bridge, args: &Value) -> Reply {
+fn view_annotate(s: &Surface, args: &Value) -> Reply {
     let empty = Vec::new();
     let markers = args["markers"].as_array().unwrap_or(&empty);
     let lines = args["lines"].as_array().unwrap_or(&empty);
@@ -777,24 +937,25 @@ fn view_annotate(b: &Bridge, args: &Value) -> Reply {
         out_lines.push(json!({"points": p, "closed": l["closed"].as_bool().unwrap_or(false), "color": color_arg(&l["color"])?}));
     }
     let (nm, nl) = (out_markers.len(), out_lines.len());
-    b.request(
+    s.request(
         "annotate",
         json!({"markers": out_markers, "lines": out_lines}),
         QUICK,
     )?;
     text_out(if nm + nl == 0 {
-        "cleared your marks from the page's 3D view".into()
+        format!("cleared your marks from {}'s 3D view", s.the())
     } else {
         format!(
-            "showing {nm} marker{} and {nl} line{} in the page's 3D view (view_capture to see them)",
+            "showing {nm} marker{} and {nl} line{} in {}'s 3D view (view_capture to see them)",
             if nm == 1 { "" } else { "s" },
-            if nl == 1 { "" } else { "s" }
+            if nl == 1 { "" } else { "s" },
+            s.the()
         )
     })
 }
 
-fn console_read(b: &Bridge) -> Reply {
-    let r = b.request("console", json!({}), QUICK)?;
+fn console_read(s: &Surface) -> Reply {
+    let r = s.request("console", json!({}), QUICK)?;
     let mut text = r["summary"].as_str().unwrap_or("no run yet").to_string();
     let lines = r["lines"].as_array().map_or(&[][..], Vec::as_slice);
     for l in lines.iter().take(200) {
@@ -936,5 +1097,28 @@ mod tests {
             .collect();
         let size = Value::Array(visible).to_string().len();
         assert!(size < 2600, "the browser tools are {size} bytes");
+    }
+
+    /// The app's tools are the browser's less `browser_connect`, plus
+    /// `document`: no larger, so a session with the app open pays no more
+    /// than one with the web page (docs/mcp.md, "The desktop apps").
+    #[test]
+    fn the_app_tools_stay_small() {
+        let tools = app_list();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, APP_NAMES);
+        for t in &tools {
+            let d = t["description"].as_str().unwrap();
+            assert!(d.len() < 300, "{}", t["name"]);
+            assert!(!d.contains("page"), "{d}");
+            assert!(t["inputSchema"]["properties"]["document"].is_object());
+        }
+        let visible: Vec<Value> = tools
+            .iter()
+            .map(|t| json!([t["name"], t["description"], t["inputSchema"]]))
+            .collect();
+        let size = Value::Array(visible).to_string().len();
+        assert!(size < 2600, "the app tools are {size} bytes");
+        eprintln!("the app tools: {size} bytes");
     }
 }

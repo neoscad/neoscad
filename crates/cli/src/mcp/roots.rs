@@ -10,20 +10,35 @@
 //! `surface()` names files too, and without this layer inline source
 //! could read any file on the machine (`import("/etc/passwd")` fails to
 //! parse, but its error text may quote the file).
+//!
+//! A connected NeoSCAD app adds one readable directory per open document:
+//! the document's own, so the model tools run it under its real path and
+//! its includes resolve (docs/agent-bridge.md, "Desktop apps"). The user
+//! chose those directories by opening the documents; writes stay in the
+//! roots.
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use lang::loader::{FileSystem, Metadata};
 
 /// The directories a client may use.
 #[derive(Debug, Clone)]
 pub struct Roots {
-    /// Read and write, canonical. The first is the default base directory.
+    /// Read and write, canonical.
     write: Vec<PathBuf>,
+    /// Where relative paths resolve: the working directory, root or not.
+    base: PathBuf,
+    /// Why the working directory is not a root ([`unsafe_cwd`]), for the
+    /// refusals.
+    cwd_refused: Option<&'static str>,
     /// Read only (libraries, fonts), canonical.
     read: Vec<PathBuf>,
+    /// Read only: the directories of a connected app's open documents,
+    /// canonical. Shared by every clone (the tools' and the file
+    /// system's), and replaced whenever the app's documents change.
+    documents: Arc<RwLock<Vec<PathBuf>>>,
 }
 
 impl Roots {
@@ -42,16 +57,45 @@ impl Roots {
             out.dedup();
             out
         };
+        let write = canon(write);
         Roots {
-            write: canon(write),
+            base: write.first().cloned().unwrap_or_else(|| PathBuf::from("/")),
+            write,
             read: canon(read),
+            cwd_refused: None,
+            documents: Arc::default(),
         }
     }
 
+    /// Relative paths resolve against `cwd`, which is not a root because
+    /// of `why` ([`unsafe_cwd`]); the refusals say so.
+    pub fn with_unsafe_cwd(mut self, cwd: &Path, why: &'static str) -> Roots {
+        self.base = cwd.to_path_buf();
+        self.cwd_refused = Some(why);
+        self
+    }
+
+    /// The directories of the connected apps' open documents, readable
+    /// from now on in place of the ones before. Directories that do not
+    /// exist are dropped.
+    pub fn set_document_dirs(&self, dirs: &[PathBuf]) {
+        let mut out: Vec<PathBuf> = dirs
+            .iter()
+            .filter_map(|p| p.canonicalize().ok().map(lang::paths::plain))
+            .collect();
+        out.sort();
+        out.dedup();
+        *self
+            .documents
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = out;
+    }
+
     /// The directory relative paths resolve against when no `base_dir`
-    /// is given: the first root (the working directory).
+    /// is given: the working directory (the first root, unless it is not
+    /// one).
     pub fn home(&self) -> &Path {
-        self.write.first().map_or(Path::new("/"), PathBuf::as_path)
+        &self.base
     }
 
     pub fn writable(&self) -> &[PathBuf] {
@@ -61,11 +105,18 @@ impl Roots {
     /// May `p` (absolute) be read?
     pub fn can_read(&self, p: &Path) -> bool {
         let r = resolve(p);
-        !r.as_os_str().is_empty()
-            && self
-                .write
+        if r.as_os_str().is_empty() {
+            return false;
+        }
+        self.write
+            .iter()
+            .chain(&self.read)
+            .any(|d| r.starts_with(d))
+            || self
+                .documents
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
                 .iter()
-                .chain(&self.read)
                 .any(|d| r.starts_with(d))
     }
 
@@ -80,11 +131,174 @@ impl Roots {
     /// to add one.
     pub fn refusal(&self, what: &str, p: &Path) -> String {
         let roots: Vec<String> = self.write.iter().map(|d| d.display().to_string()).collect();
-        format!(
-            "{what} '{}' is outside the allowed roots ({}); start `neoscad mcp` with `--root DIR` to allow another directory",
-            p.display(),
-            roots.join(", ")
-        )
+        match self.cwd_refused {
+            Some(why) if roots.is_empty() => format!(
+                "{what} '{}' is outside the allowed roots: there are none. neoscad mcp started in {} ({why}), which is never a root (some clients, Claude Desktop among them, start servers in `/`). Add `--root DIR` to the server's arguments (\"args\": [\"mcp\", \"--root\", \"/path/to/models\"]); inline `source` works without one",
+                p.display(),
+                self.base.display(),
+            ),
+            Some(why) => format!(
+                "{what} '{}' is outside the allowed roots ({}; not the working directory {}, {why}); start `neoscad mcp` with `--root DIR` to allow another directory",
+                p.display(),
+                roots.join(", "),
+                self.base.display(),
+            ),
+            None => format!(
+                "{what} '{}' is outside the allowed roots ({}); start `neoscad mcp` with `--root DIR` to allow another directory",
+                p.display(),
+                roots.join(", ")
+            ),
+        }
+    }
+}
+
+/// Why the working directory `cwd` must not be a root, or `None` for a
+/// project-like folder that may be. `home` is the user's home directory,
+/// `system` the system's folders ([`SystemDirs::here`]).
+///
+/// An MCP client may start the server anywhere: Claude Desktop starts it
+/// with an undefined working directory, "like `/` on macOS"
+/// (modelcontextprotocol.io, "Debugging"). Made a root, `/` or the home
+/// folder would let an agent write anywhere the user can (a LaunchAgent,
+/// a shell profile, `~/.ssh`). So the working directory is a root only
+/// when it is none of:
+/// - a file system's root (`/`, `C:\`);
+/// - the home folder itself, or a folder that contains it (`/Users`);
+/// - a folder under home whose first component hides settings, keys or
+///   code that runs on its own: a dot folder (`~/.ssh`, `~/.config`),
+///   `~/Library` (macOS: LaunchAgents) or `~/AppData` (Windows: Startup);
+/// - a system tree (`/usr`, `/etc`, `/System`, `C:\Windows`, ...), or a
+///   folder the whole system shares (`/tmp`, `/var`, `/opt`), though not
+///   the folders under those.
+///
+/// A deny list rather than a test for a project (a `.git`, a `.scad`):
+/// models live in plain folders, and every folder the list leaves out is
+/// one the user chose to start an agent in.
+pub fn unsafe_cwd(cwd: &Path, home: Option<&Path>, system: &SystemDirs) -> Option<&'static str> {
+    let same = |a: &Path, b: &Path| {
+        if cfg!(windows) {
+            a.as_os_str().eq_ignore_ascii_case(b.as_os_str())
+        } else {
+            a == b
+        }
+    };
+    let under = |p: &Path, dir: &Path| {
+        if cfg!(windows) {
+            let (p, d) = (
+                p.to_string_lossy().to_ascii_lowercase(),
+                dir.to_string_lossy().to_ascii_lowercase(),
+            );
+            Path::new(&p).starts_with(Path::new(&d))
+        } else {
+            p.starts_with(dir)
+        }
+    };
+    if cwd.parent().is_none() {
+        return Some("the file system's root");
+    }
+    if let Some(home) = home.filter(|h| h.parent().is_some()) {
+        if same(cwd, home) {
+            return Some("the home folder");
+        }
+        if under(home, cwd) {
+            return Some("a folder that contains the home folder");
+        }
+        if under(cwd, home) {
+            let rel = if cfg!(windows) {
+                PathBuf::from(&cwd.to_string_lossy()[home.as_os_str().len()..])
+            } else {
+                cwd.strip_prefix(home)
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default()
+            };
+            let first = rel
+                .components()
+                .find_map(|c| match c {
+                    Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if first.starts_with('.') {
+                return Some("a hidden settings folder in the home folder");
+            }
+            if ["library", "appdata"].contains(&first.to_lowercase().as_str()) {
+                return Some("an application settings folder in the home folder");
+            }
+        }
+    }
+    if system.trees.iter().any(|d| under(cwd, d)) {
+        return Some("a system folder");
+    }
+    if system.shared.iter().any(|d| same(cwd, d)) {
+        return Some("a folder the whole system shares");
+    }
+    None
+}
+
+/// The system's folders as [`unsafe_cwd`] judges them.
+#[derive(Debug, Clone)]
+pub struct SystemDirs {
+    /// Never a root, nor anything under them.
+    pub trees: Vec<PathBuf>,
+    /// Never a root themselves; their subfolders may be (the temp
+    /// directories, where scratch work and tests run, are under `/var` and
+    /// `/tmp`).
+    pub shared: Vec<PathBuf>,
+}
+
+impl SystemDirs {
+    /// This platform's.
+    pub fn here() -> SystemDirs {
+        let paths = |v: &[&str]| v.iter().map(PathBuf::from).collect();
+        if cfg!(windows) {
+            let var =
+                |k: &str, d: &str| PathBuf::from(std::env::var_os(k).unwrap_or_else(|| d.into()));
+            SystemDirs {
+                trees: vec![
+                    var("SystemRoot", r"C:\Windows"),
+                    var("ProgramFiles", r"C:\Program Files"),
+                    var("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                    var("ProgramData", r"C:\ProgramData"),
+                ],
+                shared: paths(&[r"C:\Users"]),
+            }
+        } else {
+            SystemDirs {
+                trees: paths(&[
+                    "/bin",
+                    "/sbin",
+                    "/usr",
+                    "/etc",
+                    "/dev",
+                    "/proc",
+                    "/sys",
+                    "/boot",
+                    "/lib",
+                    "/lib64",
+                    "/System",
+                    "/Library",
+                    "/Applications",
+                    "/private/etc",
+                    "/private/var/db",
+                    "/private/var/root",
+                    "/var/db",
+                    "/var/lib",
+                    "/var/log",
+                    "/var/root",
+                ]),
+                shared: paths(&[
+                    "/tmp",
+                    "/private",
+                    "/private/tmp",
+                    "/private/var",
+                    "/var",
+                    "/var/tmp",
+                    "/opt",
+                    "/home",
+                    "/Users",
+                ]),
+            }
+        }
     }
 }
 
@@ -305,6 +519,98 @@ mod tests {
             assert!(!roots.can_write(&a.join("x.stl")));
             assert!(!outside.join("newfile.stl").exists());
         }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_project_like_working_directory_is_a_root() {
+        let sys = SystemDirs::here();
+        let home = Some(Path::new("/Users/ada"));
+        let why = |p: &str| unsafe_cwd(Path::new(p), home, &sys);
+        // Claude Desktop's `/`, the home folder and what contains it.
+        assert_eq!(why("/"), Some("the file system's root"));
+        assert_eq!(why("/Users/ada"), Some("the home folder"));
+        assert_eq!(
+            why("/Users"),
+            Some("a folder that contains the home folder")
+        );
+        // Where settings, keys and launch agents live.
+        assert!(why("/Users/ada/.ssh").is_some());
+        assert!(why("/Users/ada/.config/claude").is_some());
+        assert!(why("/Users/ada/Library/LaunchAgents").is_some());
+        assert!(why("/Users/ada/Library/Application Support/Claude").is_some());
+        // The system's trees, and the shared folders themselves.
+        assert_eq!(why("/usr/local/bin"), Some("a system folder"));
+        assert_eq!(why("/etc"), Some("a system folder"));
+        assert_eq!(why("/Applications/Claude.app"), Some("a system folder"));
+        assert_eq!(why("/tmp"), Some("a folder the whole system shares"));
+        assert_eq!(
+            why("/private/var"),
+            Some("a folder the whole system shares")
+        );
+        // Projects: in the home folder, on another disk, in a temp folder.
+        assert_eq!(why("/Users/ada/models"), None);
+        assert_eq!(why("/Users/ada/Documents/gearbox"), None);
+        assert_eq!(why("/Users/ada/my.models"), None);
+        assert_eq!(why("/Volumes/Work/cad"), None);
+        assert_eq!(why("/tmp/scratch"), None);
+        assert_eq!(why("/private/var/folders/xy/T/test"), None);
+        // No home known: the rest still holds.
+        assert_eq!(
+            unsafe_cwd(Path::new("/"), None, &sys),
+            Some("the file system's root")
+        );
+        assert_eq!(unsafe_cwd(Path::new("/srv/cad"), None, &sys), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_a_project_like_working_directory_is_a_root() {
+        let sys = SystemDirs::here();
+        let home = Some(Path::new(r"C:\Users\ada"));
+        let why = |p: &str| unsafe_cwd(Path::new(p), home, &sys);
+        assert!(why(r"C:\").is_some());
+        assert!(why(r"C:\Users\Ada").is_some());
+        assert!(why(r"C:\Users").is_some());
+        assert!(why(r"C:\Users\ada\AppData\Roaming\Claude").is_some());
+        assert!(why(r"C:\Windows\System32").is_some());
+        assert!(why(r"c:\program files\NeoSCAD").is_some());
+        assert_eq!(why(r"C:\Users\ada\models"), None);
+        assert_eq!(why(r"D:\cad"), None);
+    }
+
+    #[test]
+    fn with_no_roots_the_refusal_says_how_to_add_one() {
+        let roots = Roots::new(&[], &[]).with_unsafe_cwd(Path::new("/"), "the file system's root");
+        assert!(roots.writable().is_empty());
+        assert_eq!(roots.home(), Path::new("/"));
+        assert!(!roots.can_write(Path::new("/x.stl")));
+        let r = roots.refusal("export", Path::new("/x.stl"));
+        assert!(r.contains("there are none"), "{r}");
+        assert!(r.contains("--root"), "{r}");
+        assert!(r.contains("inline `source` works"), "{r}");
+    }
+
+    #[test]
+    fn an_app_documents_directory_is_readable_not_writable() {
+        let tmp = std::env::temp_dir().join(format!("nsroots-doc-{}", std::process::id()));
+        let (home, doc) = (tmp.join("home"), tmp.join("models"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&doc).unwrap();
+        let roots = Roots::new(std::slice::from_ref(&home), &[]);
+        let fs = RootedFs::new(Arc::new(lang::loader::StdFs), roots.clone());
+        let doc = lang::paths::plain(doc.canonicalize().unwrap());
+        assert!(!fs.exists(&doc));
+        // A clone (the file system's) sees the change too.
+        roots.set_document_dirs(std::slice::from_ref(&doc));
+        assert!(fs.exists(&doc));
+        assert!(roots.can_read(&doc.join("gear.scad")));
+        assert!(!roots.can_write(&doc.join("gear.stl")));
+        assert!(!roots.can_read(&tmp.join("elsewhere.scad")));
+        // Replaced, not added to: a closed document's directory goes.
+        roots.set_document_dirs(&[]);
+        assert!(!roots.can_read(&doc.join("gear.scad")));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

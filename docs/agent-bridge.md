@@ -222,3 +222,188 @@ the unit of every diagnostic, so `at` edits can target a diagnostic's
 span. The editor counts UTF-16 units. The conversion happens once, in
 Rust, through `lang::source` (`utf16_position`, `offset_at_utf16`).
 Most edits use `{old, new}`, which needs no positions.
+
+## Desktop apps
+
+The macOS, Linux and Windows apps get the same tools on their open
+documents, with no link and no flag: plain `neoscad mcp` finds a running
+app by itself (owner decision, 2026-10-02; `--no-app` turns it off). The
+design and the options weighed are in
+`docs/audits/agent-connection-desktop.md` (Option C). This is the shared
+foundation; the apps' controls (the status button, the consent prompt,
+the approval bar) are the next step.
+
+| Part | Where |
+|---|---|
+| The protocol, and the answer to each request from the app's documents | `crates/client/src/agent.rs` (pure, WASM-clean; tests in `agent_tests.rs`) |
+| Sockets and pipes with owner checks (shared with `neoscad serve --socket`) | `crates/agent-link/src/transport.rs`, `transport/win.rs` |
+| Where an app listens, where the command line looks | `crates/agent-link/src/discovery.rs` |
+| The app's listener (`AgentLink`) | `crates/agent-link/src/link.rs` |
+| The macOS and Windows apps' API (UniFFI) | `crates/ffi/src/agent.rs`; the Linux app uses `agent_link` and `client::agent` directly |
+| The command line's side: discovery, connections, documents | `crates/cli/src/mcp/app.rs` |
+| The tools (shared with the web page) | `crates/cli/src/mcp/tools/browser.rs` (`Surface`) |
+| Tests | `crates/agent-link/tests/link.rs`; `crates/cli/tests/app.rs` (the real `neoscad mcp` against a test app over the real socket) |
+
+### How it connects
+
+1. Nothing happens until the user has allowed agents in the app: the app
+   calls `set_allowed(true)` with the user's consent, then `start()`.
+   Before that there is no socket and no thread, and `start` refuses.
+2. The app listens at a fresh address of its own in this user's
+   rendezvous (below): a Unix socket made 0600 in a 0700 directory, or a
+   named pipe whose security descriptor admits this user alone.
+3. `neoscad mcp` looks there once at startup, before it answers
+   anything (so the first `tools/list` already has the app's tools and
+   the instructions their sentence), then every 2 s on a thread of its
+   own: a directory listing, nothing measurable. It connects to every
+   app it finds, checking the socket's owner and directory (the pipe's
+   owner on Windows) before it sends anything.
+4. The command line sends `welcome` (its version, the protocol version
+   and, once `initialize` has given it, the MCP client's name); the app
+   sends `hello` (app, version, platform, protocol, its open documents).
+   Then come requests `{id, method, params}` and their answers, as with
+   the web page, one JSON message per line (32 MiB at most) instead of
+   WebSocket frames.
+5. When the first app connects or the last one goes, the server sends
+   `notifications/tools/list_changed` (it declares `listChanged: true`
+   only when it looks for apps). Claude Code refetches the list on it
+   ([Claude Code MCP](https://code.claude.com/docs/en/mcp), "Dynamic tool
+   updates", as cited by the audit; not re-checked here). Once an app has
+   connected in a session, its tools stay callable while unlisted, so a
+   call made while the app restarts waits for it instead of failing as
+   an unknown tool.
+
+Restarts need nothing: a request made while no app is connected waits up
+to 5 s for one (the user may be restarting it), looking again every
+200 ms, and the restarted app's new address is found by the next look.
+A new agent session connects the same way. Nothing is keyed to a session
+or a token.
+
+### Where an app listens
+
+| Platform | Directory (Unix) or pipe | Notes |
+|---|---|---|
+| macOS | `~/Library/Application Support/NeoSCAD/run/app-<random>.sock` | Not `$TMPDIR`, which an MCP client may not pass on. When a long home path would make the socket path longer than 103 bytes (`sun_path`), `/tmp/neoscad-<uid>/`, which the command line searches too |
+| Linux | `$XDG_RUNTIME_DIR/neoscad/app-<random>.sock`; without `XDG_RUNTIME_DIR`, `/tmp/neoscad-<uid>/` | Never an abstract socket: those have no permission checks, and the Flatpak's `--share=network` reaches them all ([Flatpak sandbox permissions](https://docs.flatpak.org/en/latest/sandbox-permissions.html)) |
+| Flatpak | `$XDG_RUNTIME_DIR/app/org.neoscad.NeoSCAD/app-<random>.sock` | Sandboxed when `FLATPAK_ID` is set or `/.flatpak-info` exists. A host `neoscad mcp` searches this directory too |
+| Windows | `\\.\pipe\neoscad-<SID>-app-<pid>-<random>` | The command line lists the pipe namespace for its user's prefix. Each app process (one per window) has its own |
+
+`NEOSCAD_AGENT_DIR` replaces the search and listen places with one
+directory (on Windows, a tag in the pipe names), as the tests use. The
+name is random so that two app processes never collide, including two
+Flatpak sandboxes that both see their app as process 2. An app removes
+its socket when it stops, and on start removes sockets in its own
+directory that nothing answers at (left by a crash).
+
+**The Flatpak.** The Flatpak page says the sandbox has "no access to any
+host files except the runtime, the app, `~/.var/app/$FLATPAK_ID`, and
+`$XDG_RUNTIME_DIR/app/$FLATPAK_ID`. Only the latter two being writable"
+(retrieved 2026-10-02), which reads as the host's own directory made
+visible in the sandbox. That a host `neoscad mcp` reaches a socket the
+sandboxed app made there is **unverified**: no Linux machine with Flatpak
+was used for this work. A `neoscad` run inside the sandbox (`flatpak run
+--command=neoscad org.neoscad.NeoSCAD mcp`) sees the same directory, so
+if the host cannot reach it, that command in the client's config is the
+way.
+
+### Documents, and which one a request acts on
+
+The app registers each open document (`document_opened(id, file, path)`,
+again after Save As), says when its window is focused
+(`document_focused`, stamped with the wall clock so that documents of
+several app processes order together) and when it is closed. A request
+without `document` acts on the most recently focused document of all
+connected apps: the one the user is looking at when they type "make the
+teeth smaller" into their agent. The agent can name another: each
+document has a number, given in the order the app opened them and stable
+while the app runs, which `editor_read` shows ("also open (pass
+document): 1 gear.scad"), and every editor and view tool takes
+`document`. An agent asked to choose every time would ask the user a
+question the focus already answers.
+
+The model tools given neither `path` nor `source` run the focused
+document's text (unsaved changes included) under its real path, so its
+includes resolve beside it; while a document is open its directory is
+readable (owner decision 5), never writable. An unsaved document runs as
+a plain name under the working directory, as the web page's does. While a
+model tool runs on the app's document, the app is told (`activity`), so
+it can show "Claude Code is checking the model".
+
+### The app's API
+
+Shared by all three apps (`client::agent`, `agent_link`; through UniFFI
+for Swift and C#):
+
+- `AgentLink(host, appVersion)` makes nothing run. `setAllowed(bool)`
+  (the user's consent; off stops the link and tells each agent why),
+  `start() -> address`, `stop()`, `disconnect(clientId)`, `status()`,
+  `setObserver(observer)`, `documentOpened(id, file, path?)`,
+  `documentFocused(id)`, `documentClosed(id)`. Releasing the link stops
+  it. `AgentLink.withDir(host, appVersion, dir)` listens in a test
+  directory.
+- `AgentHost`, which the app implements: one call per request, on the
+  link's threads (the host hops to its main thread and may block there).
+  `read(document) -> AgentDocumentState` (version, text, selection,
+  customizer overrides, `part()` switch, last run, console lines),
+  `edit(document, AgentEditRequest) -> Applied(version) | Stale(version)
+  | Declined`, `reveal(document, from, to)`, `camera(document, change)`,
+  `capture(document, maxSide)`, `annotate(document, lines, markers)`.
+  Positions are the editor's (0-based lines, UTF-16 columns), ready for
+  `agentEdit` and `revealRange`.
+- `AgentObserver.statusChanged(status, sequence)`: whether agents are
+  allowed and listened for, and each connected client's self-reported
+  name and current activity ("is editing"); keep the highest
+  `sequence`. `agentStatusLine(status)` gives the control's text
+  ("Claude Code is editing", "2 agents connected").
+- On `Viewport`: `captureAsShown(maxSide)` (`copy_as_shown`: the user's
+  camera, grid and marks, drawn offscreen), `applyAgentCamera(change)`
+  and `setAgentAnnotations(lines, markers)`, a layer of the agent's own
+  that the check and measure panels' `setAnnotations` no longer
+  replaces, nor the reverse.
+
+### Security
+
+The audit's model ("Security and privacy"), as built:
+
+- **Same user only.** No TCP, no network listener, no token. The socket
+  is 0600 in a directory that must be the user's and not writable by
+  others, and the app also refuses a peer whose credentials
+  (`SO_PEERCRED`, `getpeereid`) name another user, which only root could
+  be. The pipe's security descriptor grants this user alone, and remote
+  clients are rejected. The command line checks the socket's or pipe's
+  owner before it sends anything, so another user's look-alike is never
+  told anything.
+- **Off until the user allows it.** No socket exists before
+  `setAllowed(true)` and `start()`; every request is refused while
+  consent is off (`client::agent::handle_request` checks it on each
+  request, whatever connected); turning it off closes the socket and
+  every connection at once.
+- **Visible, and one click to end.** The status names every connected
+  client and what it is doing. The name is the client's own claim (MCP's
+  `clientInfo`), not an identity. `disconnect` sends `bye` with
+  `reconnect: false`, and that `neoscad mcp` does not connect to that app
+  again until its session or the app restarts.
+- **The app only shows.** Edits go into the buffer as one undoable,
+  highlighted step, on the version the agent read (a stale one is
+  refused); the app saves, exports and runs nothing for the agent.
+  Bounds as on the web: 32 MiB messages, captures 64 to 2048 pixels, 500
+  marks and 20,000 points; and 10,000 edits a request, at most 8 agents
+  and 16 requests in flight per agent.
+- **Files.** Reads widen by the open documents' directories only, and
+  only while they are open; writes stay in the roots (`docs/mcp.md`,
+  "Safety").
+
+Not protected against: a process running as the user, which can connect
+like any agent. It can already read and write the user's files; what it
+gains is the unsaved text and pictures of the view, which is why the
+link is off until the user allows it, and shown while in use.
+
+### Cost
+
+An app with agents not allowed has no thread and no socket; allowed and
+idle, one thread blocked in `accept`. `neoscad mcp` lists one to three
+directories every 2 s. A request is one local socket round trip plus
+the host's work: in debug builds on an Apple-silicon Mac, `read` through
+the listener took 116 µs (`crates/agent-link/tests/link.rs`), and
+`editor_read` from an MCP client through `neoscad mcp` to the test app
+and back 0.6 to 0.8 ms (`crates/cli/tests/app.rs`).

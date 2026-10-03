@@ -224,7 +224,9 @@ installers and the MSI run `neoscad generate` themselves.
    first). That check needs Win32 calls no maintained crate wraps safely,
    so `neoscad-cli`'s `unsafe_code` lint is `deny` instead of the
    workspace's `forbid`, lifted only in the Windows-only
-   `crates/cli/src/transport/win.rs`. Checked here with `cargo clippy
+   `crates/cli/src/transport/win.rs` (since moved, with the rest of the
+   transport, to `crates/agent-link/src/transport/win.rs`, which the
+   desktop apps' agent link shares). Checked here with `cargo clippy
    --target x86_64-pc-windows-msvc -p neoscad-cli --all-targets
    --no-default-features --features bundled-assets -- -D warnings` in
    `rust:1.98.1` (clean); mimalloc's C build needs MSVC, hence the new

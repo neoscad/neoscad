@@ -1,0 +1,60 @@
+[package]
+name = "neoscad-agent-link"
+description = "The desktop apps' live link to `neoscad mcp`: per-user Unix sockets and Windows named pipes with owner checks (shared with `neoscad serve`), where running apps listen and how the command line finds them, and the app side's listener over `client::agent`'s protocol (docs/agent-bridge.md, \"Desktop apps\")"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "agent_link"
+
+[dependencies]
+# The protocol and the document-side request handling (`client::agent`):
+# pure, so the three apps share it whatever they link this crate through.
+client = { package = "neoscad-client", path = "../client" }
+# A listening app's socket name (random, so two app instances, or two
+# Flatpak sandboxes whose process ids both read 2, never collide). Already
+# in the build through the command line's pairing token.
+getrandom = "0.4"
+serde_json.workspace = true
+
+# The user id for the per-user directories and the socket's ownership
+# check; `socket` for the peer's credentials on Linux (`SO_PEERCRED`) and
+# `getpeereid` on macOS and the BSDs. nix is already in the build; the
+# extra feature adds no crate.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["user", "socket"] }
+
+# The named pipes on Windows (src/transport.rs): interprocess's synchronous
+# pipe listener (overlapped I/O underneath, so a connection's reader and
+# its writer do not block each other; no async runtime) and its SDDL
+# security descriptor. windows-sys, already in the build through
+# interprocess, for the calls the pipe's access check needs
+# (src/transport/win.rs).
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "2.4.4", default-features = false }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+# The workspace's lints, written out because one differs: `unsafe_code` is
+# `deny` rather than the workspace's `forbid`, since `forbid` cannot be
+# lifted for a single module and the named pipe's access check needs Win32
+# calls that no maintained crate wraps safely (the current user's SID, and
+# the owner of the pipe a client connected to). `src/transport/win.rs`,
+# compiled on Windows only, is the one module that allows it. Keep the rest
+# in step with `[workspace.lints]`.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"

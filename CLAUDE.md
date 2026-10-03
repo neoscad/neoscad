@@ -62,7 +62,7 @@ against the nightly, which is how the harness itself is checked.
 - Library crates never touch `std::fs`, `std::env` or the clock. Files go
   through `lang`'s `FileSystem`; seeds, paths and limits come in through
   `Options`. Only non-library crates (`cli`, `ffi`, `conformance`, `wasm-check`,
-  `uniffi-bindgen`, `web`, `web-view`, `bench-core`, `linux-app`) and test code may use them directly.
+  `uniffi-bindgen`, `web`, `web-view`, `bench-core`, `linux-app`, `agent-link`) and test code may use them directly.
   `docs/architecture.md` has the limits, panics and determinism policies. This is what keeps the WASM build honest.
 - Output must be byte-identical at any thread count; add a determinism test
   for anything parallel.

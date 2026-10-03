@@ -54,7 +54,11 @@ The workspace is every directory under `crates/` (`Cargo.toml`,
   `bench-core` (package `neoscad-bench-core`: the benchmark timing, the
   bench kit, the community result schema and the official-release check
   that `neoscad bench` and `conformance bench` share;
-  `docs/community-bench.md`).
+  `docs/community-bench.md`) · `agent-link` (package
+  `neoscad-agent-link`: per-user sockets and named pipes with owner
+  checks, shared by `neoscad serve --socket` and the desktop apps' live
+  agent link, which `neoscad mcp` finds by itself;
+  `docs/agent-bridge.md`, "Desktop apps").
 - **Tooling:** `wasm-check` (a wasm32 build of the pipeline, run in node
   by `scripts/wasm-check.sh`) · `uniffi-bindgen` (the Swift bindings
   generator pinned to `ffi`'s UniFFI, run by

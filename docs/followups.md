@@ -1280,17 +1280,13 @@ lead them, come roughly in order of user impact.
   ends), no logging, no MRTR (`input_required`), no completions. The
   client's `roots` capability is not read either: the roots are the
   working directory and `--root`s given at start. (7c)
-- **Claude Desktop starts servers in an undefined working directory,
-  "like `/` on macOS"** (modelcontextprotocol.io, "Debugging", "Working
-  directory", read 2026-10-02), and `neoscad mcp` makes its working
-  directory a writable root, so a Claude Desktop entry, which the apps
-  now write (`docs/mcp.md`, "Setup from the apps"), lets the agent write
-  anywhere the user can. Not changed with the bundled CLI, since the fix
-  is in `crates/cli/src/mcp/mod.rs`: refuse `/` (and the home directory
-  itself?) as the implicit root and fall back to the client's MCP
-  `roots`, or have the app's Claude Desktop entry pass a `--root` and a
-  flag that drops the working directory. Claude Code, Cursor and VS Code
-  start the server in the project.
+- **Done: Claude Desktop's undefined working directory.** Claude Desktop
+  starts servers in an undefined working directory ("like `/` on macOS").
+  `neoscad mcp` no longer takes its working directory as a writable root
+  when it is `/` or a drive root, the home folder or one containing it, a
+  dot folder, `~/Library`/`~/AppData`, a system tree, or exactly a shared
+  folder such as `/tmp`; explicit `--root`s always count, and an attached
+  app's document folder is readable (docs/mcp.md, "Safety").
 - The CLI the apps bundle (macOS `Contents/Helpers/neoscad`, Windows
   `bin\neoscad.exe`, the Flatpak's `/app/bin/neoscad`) is built without
   the PGO profile cargo-dist's CLI builds use (`release.yml`), so it is
@@ -1339,6 +1335,36 @@ lead them, come roughly in order of user impact.
   empty model now measures volume 0 (T2 audit fixes), so the marker is
   no longer needed; an `@expect volume-between` would still make them
   plainer. (7c)
+
+- The desktop apps' agent link (`docs/agent-bridge.md`, "Desktop apps")
+  is built and tested in Rust only; no app calls it yet (the native UIs
+  are the next step). Open points for that step and after:
+  - That a host `neoscad mcp` reaches a socket the Flatpak'd app makes
+    in `$XDG_RUNTIME_DIR/app/org.neoscad.NeoSCAD/` is unverified (no
+    Linux machine with Flatpak was used), and so is `FLATPAK_ID` being
+    set in the sandbox (`/.flatpak-info` is checked too).
+  - Windows: a pipe's halves cannot be shut down from another thread
+    (`transport::Closer` does nothing there), so Disconnect and stop
+    rely on the agent closing its end after `bye`; a client that never
+    does keeps one reader thread until it exits. The pipe listing
+    (`read_dir(r"\\.\pipe\")`) and the link have only been compiled for
+    Windows, not run.
+  - The app's version check and the editor's `agentEdit` meet on two
+    threads: the host compares its revision on the main thread, but a
+    keystroke still on its way from the web view is not counted yet.
+    `agentEdit` should take the expected length (or revision) and refuse
+    a document that moved on.
+  - Versions restart with the app's counters: after an app restart a
+    `version` read before it can equal the new document's. The document
+    gets a new number, `{old, new}` edits match the current text anyway,
+    but an `at` edit with no `document` could land on shifted text.
+  - Whether Cursor, VS Code and Claude Desktop honour
+    `notifications/tools/list_changed` is unchecked. A client that
+    ignores it sees the app's tools only in a session that starts while
+    the app is connected.
+  - The model tools on the app's document evaluate it in the command
+    line's own session, a second time; routing them to the app's warm
+    core needs the app and the command line to be one version.
 
 ## Tooling: fmt, test, docs
 - The builtin index's footer (`crates/docs/src/lib.rs`, "--in FILE for

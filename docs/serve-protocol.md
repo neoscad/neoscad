@@ -71,8 +71,10 @@ change would get a new `protocol` number; there has been none.
 
 **Platforms.** stdio works everywhere, and so do `neoscad mcp` and
 `neoscad lsp`, which use it. `--socket` is a Unix socket on macOS, Linux
-and the BSDs and a named pipe on Windows (`crates/cli/src/transport.rs`;
-the pipe is interprocess's synchronous listener, with no async runtime).
+and the BSDs and a named pipe on Windows (`crates/agent-link/src/transport.rs`,
+shared with the desktop apps' agent link, and `crates/cli/src/transport.rs`
+for the server's default address; the pipe is interprocess's synchronous
+listener, with no async runtime).
 Elsewhere `--socket` fails at once and the command line runs everything
 in-process. The Windows code is checked with
 `cargo clippy --target x86_64-pc-windows-msvc -p neoscad-cli

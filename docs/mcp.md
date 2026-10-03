@@ -39,7 +39,8 @@ line's `--enable`: `textmetrics`, `object-function`, `import-function`,
 (repeatable: also list the optional tool `test` or `format`; see
 "Tools"), `--browser` (let the
 web page connect; see "The web page" below) with `--browser-url URL` and
-`--open`.
+`--open`, and `--no-app` (do not look for a running NeoSCAD app; see
+"The desktop apps" below).
 
 ## Setup from the apps
 
@@ -427,7 +428,25 @@ output's directory is created.
 
 - **Files:** the allowed roots are the working directory and each
   `--root`, read and write; the library path (`OPENSCADPATH`, the user
-  library directory) and font directories are readable. Tool arguments
+  library directory) and font directories are readable, and so is the
+  directory of each document open in a connected NeoSCAD app, while it
+  is open ("The desktop apps").
+- **The working directory is a root only when it looks like a
+  project.** A client may start the server anywhere: Claude Desktop
+  starts it with an undefined working directory, "like `/` on macOS"
+  (modelcontextprotocol.io, "Debugging"), and a root there would let the
+  agent write anywhere the user can. So it is not a root when it is a
+  file system's root, the home folder or a folder containing it, a dot
+  folder or `Library` / `AppData` in the home folder, a system tree
+  (`/usr`, `/etc`, `/System`, `/Library`, `/Applications`, `C:\Windows`,
+  `C:\Program Files`, ...), or a folder the whole system shares (`/tmp`,
+  `/var`, `/opt`, `/home`, `/Users`; their subfolders are fine)
+  (`mcp::roots::unsafe_cwd`). It is a deny list, not a test for a
+  project: models live in plain folders. stderr says when the working
+  directory is left out; relative paths still resolve against it, inline
+  `source` still works, and a file tool's refusal says to add `--root
+  DIR` to the server's arguments. A `--root` is always honoured: it is
+  the user's explicit choice. Tool arguments
   that name files are checked before the call runs, by where they
   resolve: `..` is folded, then every symlink along the path is
   followed, the last one included even when it dangles
@@ -457,7 +476,9 @@ output's directory is created.
   listener on 127.0.0.1, which accepts only the web page's origin with
   the link's 128-bit key (`docs/agent-bridge.md`, "Security"), and
   `browser_connect`'s `open`, which runs the system's URL opener on the
-  link.
+  link. Looking for a NeoSCAD app uses no network either: a per-user
+  socket or pipe whose owner is checked before anything is sent
+  (`docs/agent-bridge.md`, "Desktop apps", "Security").
 - Writes happen only through `render`'s `export`, `snapshot`'s `output`
   and `format` on a `path`.
 - Resources: `neoscad://docs` (the builtin index), the template
@@ -523,6 +544,47 @@ annotations a client receives, roughly 630 to 880 tokens), and `format`,
 listed with `--browser`, 447 more. The model tools stay at 4,766. `crates/cli/src/mcp/tools/browser.rs` keeps the browser
 tools under 2,600 and each description under 300; the instructions gain
 one sentence.
+
+## The desktop apps
+
+Plain `neoscad mcp` also works on the documents open in the NeoSCAD app
+(macOS, Linux, Windows) once the user has allowed AI agents there. It
+looks for running apps at startup and every 2 s after, over a per-user
+socket or named pipe; nothing to configure, and `--no-app` turns it off
+(`--browser` does too: the page then takes the same tool names). The
+design, the platforms and the security model are in
+`docs/agent-bridge.md`, "Desktop apps"; the code is
+`crates/cli/src/mcp/app.rs` and `crates/agent-link`.
+
+While an app is connected:
+
+- the editor and view tools of "The web page" are listed, without
+  `browser_connect` and each with an optional `document` (a number;
+  `editor_read` lists the open documents), and act on the most recently
+  focused document unless given one;
+- `evaluate`, `render`, `snapshot`, `check`, `measure` and `format`
+  given neither `path` nor `source` use that document's text, unsaved
+  changes included, under its real path (its includes resolve beside it;
+  its directory is readable while it is open, not writable); the result
+  starts with `gear.scad in NeoSCAD (document 1, version 12)` and has
+  `"document": {"number", "file", "version"}`;
+- the instructions gain one sentence when an app is connected as the
+  session starts.
+
+When the first app connects or the last one goes, the server sends
+`notifications/tools/list_changed` (and declares `listChanged: true`
+whenever it looks for apps). Once an app has connected in the session,
+its tools stay known while unlisted: called with no app connected, they
+wait up to 5 s for one (the user may be restarting it), then say how to
+connect. Before any app, they are unknown like any unlisted tool, and
+the model tools never wait for one.
+
+The app tools add 2,318 bytes to the tool list as the model sees it
+(compact `[name, description, input schema]`), less than the browser
+tools' 2,510; `crates/cli/src/mcp/tools/browser.rs` keeps them under
+2,600 and every description under 300, and the instructions with the
+app's sentence stay under Claude Code's 2,048 characters
+(`crates/cli/tests/app.rs`).
 
 ## Smoke test
 

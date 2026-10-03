@@ -127,6 +127,30 @@ pub struct Viewport {
     /// swap chain, shared with the surface's configure hook
     /// ([`Viewport::attach_swap_chain_panel`]).
     panel: Arc<Mutex<PanelState>>,
+    /// The marks drawn over the model, by whose they are: the check and
+    /// measure panels' (`set_annotations`) and an agent's
+    /// (`set_agent_annotations`, `agent.rs`). The view draws both; each
+    /// side replaces only its own, so an agent pointing at a hole does
+    /// not wipe the check panel's findings, nor the reverse.
+    pub(crate) marks: Mutex<Marks>,
+}
+
+/// The two layers of marks (see [`Viewport::marks`]).
+#[derive(Debug, Default)]
+pub(crate) struct Marks {
+    pub(crate) panels: render::viewport::Annotations,
+    pub(crate) agent: render::viewport::Annotations,
+}
+
+impl Marks {
+    /// Both layers as the view draws them: the panels' first, the agent's
+    /// over them.
+    pub(crate) fn merged(&self) -> render::viewport::Annotations {
+        let mut all = self.panels.clone();
+        all.lines.extend(self.agent.lines.iter().cloned());
+        all.markers.extend(self.agent.markers.iter().cloned());
+        all
+    }
 }
 
 /// What the configure hook of a `SwapChainPanel` surface needs, and what it
@@ -225,6 +249,7 @@ impl Viewport {
                 requests: AtomicU64::new(0),
                 file_view: Mutex::new(None),
                 panel: Arc::default(),
+                marks: Mutex::default(),
             }))
         })
     }

@@ -21,12 +21,27 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{Value, json};
 
+use super::app::{Activity, Apps};
 use super::bridge::Bridge;
 use super::roots::Roots;
 use crate::serve::Local;
 
 mod browser;
+pub use browser::APP_NAMES;
 pub use browser::NAMES as BROWSER_NAMES;
+use browser::Surface;
+
+std::thread_local! {
+    /// The tool this thread is running (each `tools/call` has a thread of
+    /// its own), for the app's activity line when a model tool runs on
+    /// the app's document.
+    static TOOL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The tool this thread is running.
+fn current_tool() -> String {
+    TOOL.with(|t| t.borrow().clone())
+}
 
 /// The tools, in the order `tools/list` gives them.
 pub const NAMES: &[&str] = &[
@@ -241,6 +256,10 @@ pub struct Tools {
     /// The web page's bridge (`--browser`), whose tools are listed and
     /// whose page is the model when a call gives neither path nor source.
     browser: Option<Arc<Bridge>>,
+    /// The running NeoSCAD apps (plain `neoscad mcp`, unless `--no-app`):
+    /// while one is connected, its tools are listed and its focused
+    /// document is the model when a call gives neither path nor source.
+    apps: Option<Arc<Apps>>,
     /// The [`OPT_IN`] tools this server lists.
     opted: Vec<&'static str>,
 }
@@ -266,6 +285,9 @@ struct Model<'a> {
     defines: Vec<String>,
     parts: bool,
     _turn: Option<MutexGuard<'a, ()>>,
+    /// The app's "is checking the model" while a model tool runs on its
+    /// document.
+    _activity: Option<Activity>,
 }
 
 impl Tools {
@@ -275,6 +297,7 @@ impl Tools {
         local: Local,
         roots: Roots,
         browser: Option<Arc<Bridge>>,
+        apps: Option<Arc<Apps>>,
         opt_in: &[String],
     ) -> Result<Tools, String> {
         let mut opted = Vec::new();
@@ -297,29 +320,58 @@ impl Tools {
             roots,
             inline: Mutex::new(()),
             browser,
+            apps,
             opted,
         })
     }
 
+    /// Whether the app's tools are listed: an app is connected (and no
+    /// web page bridge, which takes the same names).
+    fn app_listed(&self) -> bool {
+        self.browser.is_none() && self.apps.as_ref().is_some_and(|a| a.connected())
+    }
+
     /// The tools this server lists: the opted-in ones and, with
-    /// `--browser`, the browser's too.
+    /// `--browser`, the browser's too; while a NeoSCAD app is connected,
+    /// the app's (and `format`, which then formats its document).
     pub fn list(&self) -> Vec<Value> {
+        let app = self.app_listed();
         let mut tools: Vec<Value> = list()
             .into_iter()
             .filter(|t| {
                 let name = t["name"].as_str().unwrap_or("");
-                !OPT_IN.contains(&name) || self.opted.contains(&name)
+                !OPT_IN.contains(&name) || self.opted.contains(&name) || (app && name == "format")
             })
             .collect();
         if self.browser.is_some() {
             tools.extend(browser::list());
+        } else if app {
+            tools.extend(browser::app_list());
         }
         tools
     }
 
+    /// Whether `name` is a tool here. The app's tools stay known once an
+    /// app has connected in this session, listed or not: an agent that
+    /// used them before the app restarted gets the wait for the app, not
+    /// "Unknown tool". Before any app, they are as unknown as unlisted.
     pub fn knows(&self, name: &str) -> bool {
-        (NAMES.contains(&name) && (!OPT_IN.contains(&name) || self.opted.contains(&name)))
+        let app = self.browser.is_none() && self.apps.as_ref().is_some_and(|a| a.seen());
+        (NAMES.contains(&name)
+            && (!OPT_IN.contains(&name) || self.opted.contains(&name) || (app && name == "format")))
             || (self.browser.is_some() && BROWSER_NAMES.contains(&name))
+            || (app && APP_NAMES.contains(&name))
+    }
+
+    /// The schema `name`'s arguments are checked against.
+    fn schemas(&self) -> Vec<Value> {
+        let mut tools = list();
+        if self.browser.is_none() && self.apps.is_some() {
+            tools.extend(browser::app_list());
+        } else {
+            tools.extend(browser::list());
+        }
+        tools
     }
 
     pub fn cancel(&self, id: &Value) {
@@ -338,12 +390,17 @@ impl Tools {
     pub fn call(&self, id: &Value, name: &str, args: &Value) -> Value {
         // A tool that panics (a bug) answers like a failed call, and the
         // server keeps its caches, as `neoscad serve` does.
+        TOOL.with(|t| *t.borrow_mut() = name.to_string());
         let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            check_args(name, args)?;
+            check_args(&self.schemas(), name, args)?;
             if BROWSER_NAMES.contains(&name) {
-                return match &self.browser {
-                    Some(b) => self.browser_tool(b, name, args),
-                    None => Err(format!("unknown tool '{name}'")),
+                return match (&self.browser, &self.apps) {
+                    (Some(b), _) => self.browser_tool(&Surface::Page(b), name, args),
+                    (None, Some(apps)) if APP_NAMES.contains(&name) => {
+                        let doc = apps.target(args["document"].as_u64())?;
+                        self.browser_tool(&Surface::App(apps, doc), name, args)
+                    }
+                    _ => Err(format!("unknown tool '{name}'")),
                 };
             }
             match name {
@@ -502,10 +559,16 @@ impl Tools {
         match (str_arg(args, "source"), self.readable(&base, args, "path")?) {
             (Some(_), Some(_)) => Err("give either path or source, not both".into()),
             // With a web page connected, its text is the model: what the
-            // user is looking at is what the agent asks about.
-            (None, None) => match &self.browser {
-                Some(b) => self.page_model(b, base, inline),
-                None => Err("give path (a .scad file) or source (OpenSCAD text)".into()),
+            // user is looking at is what the agent asks about. The same
+            // for a connected app's focused document; without an app,
+            // nothing waits for one.
+            (None, None) => match (&self.browser, &self.apps) {
+                (Some(b), _) => self.page_model(&Surface::Page(b), base, inline),
+                (None, Some(apps)) if apps.connected() => {
+                    let doc = apps.target(None)?;
+                    self.page_model(&Surface::App(apps, doc), base, inline)
+                }
+                _ => Err("give path (a .scad file) or source (OpenSCAD text)".into()),
             },
             // A mesh file is rendered as its import. Given to the parser,
             // `check out/base.stl` failed with a syntax error on the STL's
@@ -532,6 +595,7 @@ impl Tools {
                     defines: Vec::new(),
                     parts: false,
                     _turn: Some(turn),
+                    _activity: None,
                 })
             }
             (None, Some(path)) => Ok(Model {
@@ -542,6 +606,7 @@ impl Tools {
                 defines: Vec::new(),
                 parts: false,
                 _turn: None,
+                _activity: None,
             }),
             (Some(src), None) => {
                 let turn = self
@@ -560,6 +625,7 @@ impl Tools {
                     defines: Vec::new(),
                     parts: false,
                     _turn: Some(turn),
+                    _activity: None,
                 })
             }
         }
@@ -1109,7 +1175,23 @@ impl Tools {
         }
         let Some(path) = self.readable(&base, args, "path")? else {
             if let Some(b) = &self.browser {
-                return self.format_page(b, id, &base, check, bool_arg(args, "diff"));
+                return self.format_page(
+                    &Surface::Page(b),
+                    id,
+                    &base,
+                    check,
+                    bool_arg(args, "diff"),
+                );
+            }
+            if let Some(apps) = self.apps.as_ref().filter(|a| a.connected()) {
+                let doc = apps.target(None)?;
+                return self.format_page(
+                    &Surface::App(apps, doc),
+                    id,
+                    &base,
+                    check,
+                    bool_arg(args, "diff"),
+                );
             }
             return Err("give path (a .scad file) or source".into());
         };
@@ -1337,8 +1419,13 @@ enum Label {
     Import(String),
     /// The connected web page's text (no `path` or `source`), at this
     /// version: the agent needs the version for `editor_edit`, and should
-    /// never mistake the page's text for a file of its own.
-    Page { file: String, version: u64 },
+    /// never mistake the page's text for a file of its own. With a
+    /// `number`, a connected app's document of that number.
+    Page {
+        file: String,
+        version: u64,
+        number: Option<u64>,
+    },
 }
 
 /// A result labelled with where its model came from: first in the text,
@@ -1353,10 +1440,30 @@ fn label(l: &Label, mut out: Out) -> Out {
                 o.insert("imported".into(), json!(call));
             }
         }
-        Label::Page { file, version } => {
+        Label::Page {
+            file,
+            version,
+            number: None,
+        } => {
             out.text = format!("the web page's {file} (version {version})\n{}", out.text);
             if let Some(o) = out.structured.as_object_mut() {
                 o.insert("page".into(), json!({"file": file, "version": version}));
+            }
+        }
+        Label::Page {
+            file,
+            version,
+            number: Some(n),
+        } => {
+            out.text = format!(
+                "{file} in NeoSCAD (document {n}, version {version})\n{}",
+                out.text
+            );
+            if let Some(o) = out.structured.as_object_mut() {
+                o.insert(
+                    "document".into(),
+                    json!({"number": n, "file": file, "version": version}),
+                );
             }
         }
     }
@@ -1377,9 +1484,7 @@ fn make_dir(p: &Path) -> Result<(), String> {
 /// not take, naming the argument and what it should be. A wrong type was
 /// silently treated as absent (`"parts": "true"` gave "no part 'a'" with
 /// no reason), which is the least actionable answer an agent can get.
-fn check_args(name: &str, args: &Value) -> Result<(), String> {
-    let mut tools = list();
-    tools.extend(browser::list());
+fn check_args(tools: &[Value], name: &str, args: &Value) -> Result<(), String> {
     let Some(tool) = tools.iter().find(|t| t["name"] == name) else {
         return Ok(());
     };

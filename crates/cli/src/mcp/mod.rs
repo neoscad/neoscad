@@ -21,6 +21,7 @@
 //! line is synchronous threads (`rmcp` needs tokio), and `rmcp` 3.4.1
 //! (2026-09-23) still defaults to 2025-11-25.
 
+mod app;
 mod bridge;
 
 /// Also what `neoscad bench --submit` opens its issue link with.
@@ -33,6 +34,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
@@ -88,13 +90,27 @@ const RECIPES_INTRO: &str = "\n\nPrinting recipes (tested; adapt the numbers):\n
 /// the client cuts short.
 const RECIPES_POINTER: &str = " Printing recipes (countersink, rounded plate, fillet, thread, snap hook) are the resource neoscad://recipes, and `docs` gives each by name.";
 
+/// What the server's instructions add to [`INSTRUCTIONS`]: the web page's
+/// paragraph, or the app's while one is connected, or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Extra {
+    None,
+    Browser,
+    App,
+}
+
 /// The server's instructions: the guidance, `--browser`'s paragraph when
-/// there is a page bridge, then the recipes if they fit
-/// [`INSTRUCTIONS_LIMIT`] and a pointer to them if not.
-fn instructions(browser: bool) -> String {
+/// there is a page bridge (or the app's when an app is connected), then
+/// the recipes if they fit [`INSTRUCTIONS_LIMIT`] and a pointer to them if
+/// not.
+fn instructions(extra: Extra) -> String {
     let head = format!(
         "{INSTRUCTIONS}{}",
-        if browser { BROWSER_INSTRUCTIONS } else { "" }
+        match extra {
+            Extra::None => "",
+            Extra::Browser => BROWSER_INSTRUCTIONS,
+            Extra::App => APP_INSTRUCTIONS,
+        }
     );
     let full = format!("{head}{RECIPES_INTRO}{RECIPES}");
     if full.encode_utf16().count() <= INSTRUCTIONS_LIMIT {
@@ -107,6 +123,11 @@ fn instructions(browser: bool) -> String {
 /// What `--browser` adds to [`INSTRUCTIONS`].
 const BROWSER_INSTRUCTIONS: &str = " The user may have NeoSCAD's web page open: browser_connect gives the link that connects it. Once it is connected, work on the page's text rather than files: omit path and source to use it, change it with editor_edit (the user sees each change), look with view_capture and point with view_annotate.";
 
+/// What a connected NeoSCAD app adds to [`INSTRUCTIONS`]. Only when an
+/// app is connected as the session starts: the tool descriptions say the
+/// rest, and a session without an app pays nothing.
+const APP_INSTRUCTIONS: &str = " The user has the NeoSCAD app open: omit path and source to work on its focused document, change it with editor_edit (the user sees each change), look with view_capture and point with view_annotate.";
+
 const EXIT_ERROR: u8 = 1;
 
 #[derive(Parser, Debug)]
@@ -116,8 +137,9 @@ const EXIT_ERROR: u8 = 1;
 )]
 pub(crate) struct Args {
     /// Allow reading and writing under DIR (repeatable). The working
-    /// directory is always allowed; library and font directories are
-    /// readable.
+    /// directory is allowed too, unless it is /, the home folder, a hidden
+    /// or settings folder in it, or a system folder; library and font
+    /// directories are readable.
     #[arg(long = "root", value_name = "DIR", action = clap::ArgAction::Append)]
     roots: Vec<PathBuf>,
 
@@ -162,6 +184,13 @@ pub(crate) struct Args {
     #[arg(long, requires = "browser")]
     open: bool,
 
+    /// Do not look for a running NeoSCAD app. By default the server
+    /// connects to every NeoSCAD app of this user that allows AI agents
+    /// (a per-user socket, no network), and the editor and view tools act
+    /// on its open document; without one, everything works on files.
+    #[arg(long = "no-app", conflicts_with = "browser")]
+    no_app: bool,
+
     /// Also list an optional tool (repeatable): test (model tests),
     /// format (the formatter; listed anyway with --browser). Left out by
     /// default because every listed tool costs the agent context.
@@ -182,7 +211,27 @@ pub fn main(args: Vec<OsString>) -> u8 {
     // A parent can start us in a verbatim (`\\?\`) directory on Windows;
     // `--root ../x` joined onto that would not fold its `..`.
     let cwd = lang::paths::plain(std::env::current_dir().unwrap_or_default());
-    let mut write = vec![cwd.clone()];
+    // The working directory is a root only when it is a project-like
+    // folder: a client that starts the server in `/` or the home folder
+    // (Claude Desktop does) must not let the agent write anywhere the user
+    // can (`roots::unsafe_cwd`). `--root`s are the user's explicit choice.
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .map(|h| lang::paths::plain(h.canonicalize().unwrap_or(h)));
+    let cwd_refused = roots::unsafe_cwd(
+        &lang::paths::plain(cwd.canonicalize().unwrap_or_else(|_| cwd.clone())),
+        home.as_deref(),
+        &roots::SystemDirs::here(),
+    );
+    let mut write = Vec::new();
+    match cwd_refused {
+        None => write.push(cwd.clone()),
+        Some(why) => eprintln!(
+            "neoscad mcp: not using the working directory {} as a root ({why}); add --root DIR for the agent's files",
+            cwd.display()
+        ),
+    }
     write.extend(a.roots.iter().map(|r| cwd.join(r)));
     // Libraries and fonts are readable wherever they are: the unrestricted
     // host says where they are, then the real one is built over the
@@ -194,7 +243,10 @@ pub fn main(args: Vec<OsString>) -> u8 {
             read.push(d);
         }
     }
-    let roots = roots::Roots::new(&write, &read);
+    let mut roots = roots::Roots::new(&write, &read);
+    if let Some(why) = cwd_refused {
+        roots = roots.with_unsafe_cwd(&cwd, why);
+    }
     if roots.writable().len() < write.len() {
         eprintln!("neoscad mcp: warning: a --root that does not exist was ignored");
     }
@@ -243,10 +295,22 @@ pub fn main(args: Vec<OsString>) -> u8 {
     } else {
         None
     };
+    // A running app is looked for before anything is answered, so the
+    // first `tools/list` already has its tools.
+    let apps = (!a.no_app && bridge.is_none())
+        .then(|| app::Apps::start(agent_link::discovery::Rendezvous::from_env(), roots.clone()));
+    let extra = if bridge.is_some() {
+        Extra::Browser
+    } else if apps.as_ref().is_some_and(|a| a.connected()) {
+        Extra::App
+    } else {
+        Extra::None
+    };
     let tools = match tools::Tools::new(
         crate::serve::Local::new(cfg),
         roots,
         bridge.clone(),
+        apps.clone(),
         &a.tools,
     ) {
         Ok(t) => t,
@@ -256,8 +320,10 @@ pub fn main(args: Vec<OsString>) -> u8 {
         }
     };
     let server = Arc::new(Server {
-        instructions: instructions(bridge.is_some()),
+        instructions: instructions(extra),
         bridge: bridge.clone(),
+        apps: apps.clone(),
+        initialized: AtomicBool::new(false),
         tools,
         out: Mutex::new(Box::new(std::io::stdout())),
         log: a.log.and_then(|p| {
@@ -270,6 +336,18 @@ pub fn main(args: Vec<OsString>) -> u8 {
         }),
         cancelled: Mutex::new(HashSet::new()),
     });
+    if let Some(apps) = &apps {
+        // The app's tools come and go with the app: tell the client to
+        // fetch the list again (Claude Code does, "Dynamic tool updates").
+        let weak = Arc::downgrade(&server);
+        apps.on_presence(Box::new(move || {
+            if let Some(s) = weak.upgrade()
+                && s.initialized.load(Ordering::SeqCst)
+            {
+                s.send(&json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}));
+            }
+        }));
+    }
     let stdin = std::io::stdin();
     serve(&server, stdin.lock());
     0
@@ -281,6 +359,10 @@ struct Server {
     /// The web page's bridge, told the client's name for the page's
     /// "connected to" line.
     bridge: Option<Arc<bridge::Bridge>>,
+    /// The running apps, told the client's name likewise.
+    apps: Option<Arc<app::Apps>>,
+    /// The client has opened the session, so notifications may be sent.
+    initialized: AtomicBool,
     out: Mutex<Box<dyn Write + Send>>,
     log: Option<Mutex<std::fs::File>>,
     /// Requests the client cancelled: their answers are not sent
@@ -444,14 +526,19 @@ fn note_client(server: &Server, info: Option<&Value>) {
     if let (Some(b), Some(n)) = (&server.bridge, name.and_then(Value::as_str)) {
         b.set_client(n);
     }
+    if let (Some(a), Some(n)) = (&server.apps, name.and_then(Value::as_str)) {
+        a.set_client(n);
+    }
 }
 
 fn server_info() -> Value {
     json!({"name": "neoscad", "title": "NeoSCAD", "version": env!("CARGO_PKG_VERSION")})
 }
 
-fn capabilities() -> Value {
-    json!({"tools": {"listChanged": false}, "resources": {"subscribe": false, "listChanged": false}})
+/// The tool list changes only when apps are looked for (an app's tools
+/// come and go with it).
+fn capabilities(server: &Server) -> Value {
+    json!({"tools": {"listChanged": server.apps.is_some()}, "resources": {"subscribe": false, "listChanged": false}})
 }
 
 /// Which revision a request speaks: modern when its `_meta` names a
@@ -494,9 +581,10 @@ fn request(server: &Server, id: &Value, method: &str, params: &Value) -> Result<
             .unwrap_or_default();
         let version = LEGACY.iter().find(|v| **v == asked).unwrap_or(&LEGACY[0]);
         note_client(server, params.get("clientInfo"));
+        server.initialized.store(true, Ordering::SeqCst);
         return Ok(json!({
             "protocolVersion": version,
-            "capabilities": capabilities(),
+            "capabilities": capabilities(server),
             "serverInfo": server_info(),
             "instructions": server.instructions,
         }));
@@ -507,12 +595,13 @@ fn request(server: &Server, id: &Value, method: &str, params: &Value) -> Result<
             server,
             params["_meta"].get("io.modelcontextprotocol/clientInfo"),
         );
+        server.initialized.store(true, Ordering::SeqCst);
     }
     let mut result = match method {
         "ping" => json!({}),
         "server/discover" => json!({
             "supportedVersions": [MODERN],
-            "capabilities": capabilities(),
+            "capabilities": capabilities(server),
             "instructions": server.instructions,
         }),
         "tools/list" => json!({"tools": server.tools.list()}),

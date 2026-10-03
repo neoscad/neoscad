@@ -1458,6 +1458,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "neoscad-agent-link"
+version = "0.3.1"
+dependencies = [
+ "getrandom",
+ "interprocess",
+ "neoscad-client",
+ "nix",
+ "serde_json",
+ "windows-sys",
+]
+
+[[package]]
 name = "neoscad-assets"
 version = "0.3.1"
 dependencies = [
@@ -1485,9 +1497,9 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "getrandom",
- "interprocess",
  "libc",
  "mimalloc",
+ "neoscad-agent-link",
  "neoscad-assets",
  "neoscad-bench-core",
  "neoscad-client",
@@ -1499,7 +1511,6 @@ dependencies = [
  "neoscad-render",
  "neoscad-session",
  "neoscad-text",
- "nix",
  "png",
  "roff",
  "serde_json",
@@ -1568,6 +1579,7 @@ version = "0.3.1"
 dependencies = [
  "libc",
  "mimalloc",
+ "neoscad-agent-link",
  "neoscad-assets",
  "neoscad-client",
  "neoscad-eval",
@@ -1765,6 +1777,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

@@ -556,37 +556,54 @@ fn rgba(c: &[f32]) -> [f32; 4] {
     }
 }
 
+/// Lines and markers as the renderer draws them.
+pub(crate) fn annotations(
+    lines: &[ViewLine],
+    markers: &[ViewMarker],
+) -> Result<render::viewport::Annotations, CoreError> {
+    let lines = lines
+        .iter()
+        .map(|l| render::viewport::AnnotationLine {
+            // A trailing partial point is dropped.
+            points: l.points.as_chunks::<3>().0.to_vec(),
+            closed: l.closed,
+            color: rgba(&l.color),
+        })
+        .collect();
+    let markers = markers
+        .iter()
+        .map(|m| {
+            Ok(render::viewport::AnnotationMarker {
+                point: client::point3(&m.point, "a marker's point")?,
+                label: m.label.clone(),
+                color: rgba(&m.color),
+            })
+        })
+        .collect::<Result<_, CoreError>>()?;
+    Ok(render::viewport::Annotations { lines, markers })
+}
+
 #[uniffi::export]
 impl Viewport {
     /// Draw these lines and markers over the model from now on, replacing
-    /// the ones before (empty lists clear them).
+    /// the ones before (empty lists clear them). The check and measure
+    /// panels' layer: an agent's marks (`set_agent_annotations`) stay.
     pub fn set_annotations(
         &self,
         lines: Vec<ViewLine>,
         markers: Vec<ViewMarker>,
     ) -> Result<(), CoreError> {
         guarded(|| {
-            let lines = lines
-                .iter()
-                .map(|l| render::viewport::AnnotationLine {
-                    // A trailing partial point is dropped.
-                    points: l.points.as_chunks::<3>().0.to_vec(),
-                    closed: l.closed,
-                    color: rgba(&l.color),
-                })
-                .collect();
-            let markers = markers
-                .iter()
-                .map(|m| {
-                    Ok(render::viewport::AnnotationMarker {
-                        point: client::point3(&m.point, "a marker's point")?,
-                        label: m.label.clone(),
-                        color: rgba(&m.color),
-                    })
-                })
-                .collect::<Result<_, CoreError>>()?;
-            self.lock()
-                .set_annotations(render::viewport::Annotations { lines, markers });
+            let layer = annotations(&lines, &markers)?;
+            let merged = {
+                let mut marks = self
+                    .marks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                marks.panels = layer;
+                marks.merged()
+            };
+            self.lock().set_annotations(merged);
             Ok(())
         })
     }

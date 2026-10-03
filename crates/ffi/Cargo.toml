@@ -26,6 +26,9 @@ default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
+# The agent link (`agent.rs`): the listener `neoscad mcp` connects to once
+# the user allows agents, over a per-user socket or pipe.
+agent-link = { package = "neoscad-agent-link", path = "../agent-link" }
 assets = { package = "neoscad-assets", path = "../assets" }
 # The host-neutral glue (runs, console lines, customizer, check, measure,
 # export), shared with the web worker; its records cross as remote types.

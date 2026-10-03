@@ -27,7 +27,22 @@ struct Mcp {
 
 impl Mcp {
     fn start(dir: &Path, args: &[&str]) -> Mcp {
-        let mut child = Command::new(BIN)
+        Mcp::start_with(dir, args, &[])
+    }
+
+    /// Started in `dir` with `env` set. The app link looks for apps in a
+    /// directory of the test's own (empty), never the user's: a NeoSCAD
+    /// app running on this machine must not change what these tests see.
+    fn start_with(dir: &Path, args: &[&str], env: &[(&str, &Path)]) -> Mcp {
+        let mut cmd = Command::new(BIN);
+        cmd.env(
+            "NEOSCAD_AGENT_DIR",
+            std::env::temp_dir().join("nsmcp-no-app"),
+        );
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .arg("mcp")
             .args(args)
             .current_dir(dir)
@@ -503,6 +518,64 @@ fn resources_serve_the_docs() {
         json!({"uri": "neoscad://docs/nothing", "_meta": modern()}),
     );
     assert_eq!(r["error"]["code"], -32602);
+}
+
+/// Claude Desktop starts servers in `/`: there, in the home folder, or in
+/// a settings folder of it, the working directory is no root, so an
+/// agent cannot write anywhere the user can. Inline source still works, a
+/// file tool says how to add a root, and `--root` and a project folder
+/// work as before.
+#[test]
+fn an_unsafe_working_directory_is_no_root() {
+    let top = scratch("cwd");
+    let home = top.join("home");
+    let project = home.join("project");
+    let settings = home.join(".config");
+    for d in [&project, &settings] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let root = if cfg!(windows) {
+        PathBuf::from(r"C:\")
+    } else {
+        PathBuf::from("/")
+    };
+    let home_env = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    for cwd in [&root, &home, &settings] {
+        let mut s = Mcp::start_with(cwd, &[], &[(home_env, &home)]);
+        let r = s.tool("render", json!({"source": "cube(2);"}));
+        assert_eq!(r["isError"], false, "inline source works anywhere: {r}");
+        let r = s.tool(
+            "render",
+            json!({"source": "cube(2);", "export": home.join("x.stl")}),
+        );
+        assert_eq!(r["isError"], true, "{}: {r}", cwd.display());
+        let t = text(&r);
+        assert!(t.contains("there are none") && t.contains("--root"), "{t}");
+        assert!(!home.join("x.stl").exists());
+        // An explicit root is the user's choice, and works.
+        let mut s = Mcp::start_with(
+            cwd,
+            &["--root", &project.to_string_lossy()],
+            &[(home_env, &home)],
+        );
+        let r = s.tool(
+            "render",
+            json!({"source": "cube(2);", "export": project.join("y.stl")}),
+        );
+        assert_eq!(r["isError"], false, "{r}");
+        let r = s.tool(
+            "render",
+            json!({"source": "cube(2);", "export": home.join("y.stl")}),
+        );
+        assert_eq!(r["isError"], true, "{r}");
+        let _ = std::fs::remove_file(project.join("y.stl"));
+    }
+    // A project folder in the home folder is a root, as before.
+    let mut s = Mcp::start_with(&project, &[], &[(home_env, &home)]);
+    let r = s.tool("render", json!({"source": "cube(2);", "export": "z.stl"}));
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(project.join("z.stl").exists());
+    let _ = std::fs::remove_dir_all(&top);
 }
 
 #[test]
