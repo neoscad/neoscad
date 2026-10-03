@@ -1,8 +1,14 @@
-// The Settings window (NeoSCAD > Settings…, Command-comma). It holds the
-// update choices the owner decided on (docs/audits/auto-update.md,
-// "Decisions"): automatic checks, on by default, and the opt-in
-// release-candidate channel. A SwiftUI form in an AppKit window, as the
-// documents are, because the app is built on NSApplication rather than a
+// The Settings window (NeoSCAD > Settings…, Command-comma), in two panes:
+//
+// - Updates: the choices the owner decided on (docs/audits/auto-update.md,
+//   "Decisions"): automatic checks, on by default, and the opt-in
+//   release-candidate channel;
+// - Agents: whether AI agents may work on open documents, whether their
+//   edits wait for Apply, and who is connected
+//   (Agents/AgentService.swift).
+//
+// SwiftUI forms in an AppKit window with toolbar tabs, as macOS settings
+// windows look, because the app is built on NSApplication rather than a
 // SwiftUI App (whose `Settings` scene this would otherwise be).
 
 import AppKit
@@ -14,19 +20,40 @@ import SwiftUI
 final class SettingsWindowController: NSWindowController {
     static let shared = SettingsWindowController()
 
+    enum Tab: Int {
+        case updates, agents
+    }
+
+    private let tabs = NSTabViewController()
+
     private init() {
-        let host = NSHostingController(rootView: SettingsView(model: UpdateSettingsModel()))
-        let window = NSWindow(contentViewController: host)
-        window.title = "Settings"
+        tabs.tabStyle = .toolbar
+        tabs.addTabViewItem(
+            Self.pane(
+                "Updates", "arrow.triangle.2.circlepath",
+                SettingsView(model: UpdateSettingsModel())))
+        tabs.addTabViewItem(Self.pane("Agents", "sparkles", AgentSettingsView(service: .shared)))
+        let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
         window.setFrameAutosaveName("NeoSCADSettings")
         super.init(window: window)
     }
 
+    private static func pane<V: View>(_ title: String, _ symbol: String, _ view: V) -> NSTabViewItem {
+        let host = NSHostingController(rootView: view)
+        // The window takes each pane's own size as the tab changes.
+        host.sizingOptions = [.preferredContentSize]
+        let item = NSTabViewItem(viewController: host)
+        item.label = title
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        return item
+    }
+
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("not from a nib") }
 
-    func show() {
+    func show(tab: Tab? = nil) {
+        if let tab { tabs.selectedTabViewItemIndex = tab.rawValue }
         if window?.isVisible != true { window?.center() }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
@@ -90,7 +117,41 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420)
+        .frame(width: 460)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Settings > Agents.
+struct AgentSettingsView: View {
+    @Bindable var service: AgentService
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(
+                    "Allow AI agents to work on open documents",
+                    isOn: Binding(get: { service.allowed }, set: { service.setAllowed($0) }))
+                Text(AgentHelp.consentText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Ask before applying edits", isOn: $service.askBeforeApplying)
+                    .disabled(!service.allowed)
+            }
+            Section("Connected agents") {
+                AgentStatusList(service: service)
+            }
+            Section {
+                HStack {
+                    Button("Set Up Agents…") { AgentSetupPresenter.show() }
+                    Spacer()
+                    Link("Using NeoSCAD with AI Agents", destination: AgentHelp.url)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
     }
 }

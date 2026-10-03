@@ -42,7 +42,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // (App/Agents/CommandLineTool.swift). Not under XCTest: a
             // DerivedData build must not repoint the developer's own link.
             CommandLineTool.refreshAtLaunch()
+            // Listen for AI agents again if the user allowed them before
+            // (Agents/AgentService.swift); nothing at all otherwise.
+            AgentService.shared.startIfAllowed()
         }
+    }
+
+    /// Help > Connect Your AI Agent….
+    @objc func connectAgent(_ sender: Any?) {
+        AgentSetupPresenter.show()
+    }
+
+    /// Help > Using NeoSCAD with AI Agents: the website's page.
+    @objc func showAgentHelp(_ sender: Any?) {
+        NSWorkspace.shared.open(AgentHelp.url)
     }
 
     @objc func showSettings(_ sender: Any?) {

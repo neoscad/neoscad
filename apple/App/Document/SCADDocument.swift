@@ -67,6 +67,11 @@ final class DocumentModel {
     /// What the bar over the editor says about the file on disk; nil while
     /// the file and the document agree (SCADDocument+Disk.swift).
     var diskNotice: DiskNotice?
+    /// An agent's edit waiting for the user's Apply or Reject (only when
+    /// they chose "Ask before applying"; SCADDocument+Agent.swift).
+    var agentApproval: AgentApproval?
+    /// How many marks the agent drew in the 3D view (0: none showing).
+    var agentMarkCount = 0
 
     /// The check and measure panels.
     @ObservationIgnored let check = CheckModel()
@@ -137,6 +142,8 @@ struct DocumentActions {
     /// The disk notice's buttons (SCADDocument+Disk.swift).
     var reloadFromDisk: () -> Void = {}
     var keepMine: () -> Void = {}
+    /// Remove the marks an agent drew in the 3D view.
+    var clearAgentMarks: () -> Void = {}
 }
 
 /// The inspector's panels, beside the 3D view.
@@ -215,6 +222,27 @@ final class SCADDocument: NSDocument {
     /// Set by `close`: nothing more runs.
     private(set) var isClosed = false
 
+    // MARK: AI agents (Document/SCADDocument+Agent.swift)
+
+    /// The number agents know this document by while the app runs
+    /// (`AgentLink.documentOpened`).
+    let agentID = AgentService.newDocumentID()
+    /// Counts every change of the text, the user's, the agent's and a
+    /// reload's: the `version` an agent reads and must quote to edit. Kept
+    /// here rather than taken from the editor, whose version restarts at
+    /// each load, so a number never stands for two different texts while
+    /// the document is open.
+    private(set) var agentRevision: UInt64 = 1
+    /// The window's toolbar and its delegate (NSToolbar holds it weakly).
+    var toolbar: DocumentToolbar?
+    /// Tells the agent link when this window becomes the focused one.
+    var keyObserver: NSObjectProtocol?
+
+    /// The text changed (any way): agents must read it again.
+    func textRevised() {
+        agentRevision += 1
+    }
+
     /// Milliseconds on a monotonic clock: the "now" the loop schedules
     /// against (its delay is the core's `default_preview_delay_ms`).
     static func nowMs() -> UInt64 { DispatchTime.now().uptimeNanoseconds / 1_000_000 }
@@ -257,6 +285,7 @@ final class SCADDocument: NSDocument {
             // After `connectPanels`, which sets the actions afresh.
             model.actions.reloadFromDisk = { [weak self] in self?.reloadFromDisk() }
             model.actions.keepMine = { [weak self] in self?.keepMine() }
+            model.actions.clearAgentMarks = { [weak self] in self?.clearAgentMarks() }
         }
     }
 
@@ -309,6 +338,8 @@ final class SCADDocument: NSDocument {
                 // Moved or saved under a new name: watch the new file.
                 model.diskNotice = nil
                 watchFiles(runFiles)
+                // Agents see the new name and path.
+                AgentService.shared.documentOpened(self)
             }
         }
     }
@@ -330,6 +361,7 @@ final class SCADDocument: NSDocument {
         // Typing goes to the editor from the start.
         window.initialFirstResponder = model.editor.webView
         refreshParameterSets()
+        attachAgentControls(to: window)
     }
 
     // MARK: Reading and writing
@@ -362,6 +394,7 @@ final class SCADDocument: NSDocument {
 
     /// The text was read (open, revert): show it and run it.
     private func textReplaced() {
+        textRevised()
         model.editor.load(model.text)
         coreInSync = false
         if runsWhenTextIsReplaced { schedulePreview() }
@@ -378,6 +411,7 @@ final class SCADDocument: NSDocument {
             return false
         }
         guard model.utf16Length == length else { return false }
+        textRevised()
         updateChangeCount(kind.changeType)
         reloadLanded()
         if coreInSync, let path = corePath, case .success(let engine) = CoreService.shared {
@@ -400,6 +434,7 @@ final class SCADDocument: NSDocument {
     /// would leave it unsaved.
     private func editorReplacedText(_ text: String) {
         model.replaceWithEditorText(text)
+        textRevised()
         updateChangeCount(.changeDone)
         reloadLanded()
         coreInSync = false
@@ -564,6 +599,7 @@ final class SCADDocument: NSDocument {
         exportTask?.cancel()
         watcher.stop()
         diskReadAgain?.cancel()
+        detachAgentControls()
         model.viewport.detach()
         model.editor.detach()
         if let path = corePath, case .success(let engine) = CoreService.shared {

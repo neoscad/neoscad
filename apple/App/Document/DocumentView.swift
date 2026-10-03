@@ -2,7 +2,8 @@
 // the 3D view in the middle, and the inspector (customizer, check,
 // measure) on the right (View > Customizer, Check and Measure). Over them,
 // while the file on disk and the document disagree, a bar says so
-// (SCADDocument+Disk.swift).
+// (SCADDocument+Disk.swift), and while an agent's edit waits for the
+// user's answer, another asks (SCADDocument+Agent.swift).
 
 import SwiftUI
 
@@ -13,6 +14,10 @@ struct DocumentView: View {
         VStack(spacing: 0) {
             if let notice = model.diskNotice {
                 DiskNoticeBar(notice: notice, actions: model.actions)
+                Divider()
+            }
+            if let approval = model.agentApproval {
+                AgentApprovalBar(approval: approval)
                 Divider()
             }
             HSplitView {
@@ -26,6 +31,13 @@ struct DocumentView: View {
                 .frame(minWidth: 320, idealWidth: 420)
                 ViewportView(controller: model.viewport)
                     .frame(minWidth: 320, idealWidth: 600, minHeight: 240)
+                    .overlay(alignment: .topLeading) {
+                        if model.agentMarkCount > 0 {
+                            AgentMarksChip(count: model.agentMarkCount) {
+                                model.actions.clearAgentMarks()
+                            }
+                        }
+                    }
                 if model.customizerShown {
                     InspectorView(model: model)
                         .frame(minWidth: 240, idealWidth: 300, maxWidth: 400)

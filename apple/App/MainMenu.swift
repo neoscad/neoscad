@@ -16,7 +16,7 @@ enum MainMenu {
         let window = windowMenu()
         bar.addItem(submenu(window))
         NSApp.windowsMenu = window
-        let help = NSMenu(title: "Help")
+        let help = helpMenu()
         bar.addItem(submenu(help))
         NSApp.helpMenu = help
         return bar
@@ -175,6 +175,14 @@ enum MainMenu {
         m.addItem(bigger)
         m.addItem(item("Smaller", #selector(A.decreaseEditorFontSize(_:)), "-"))
         m.addItem(item("Default Font Size", #selector(A.resetEditorFontSize(_:))))
+        return m
+    }
+
+    /// macOS adds its search field at the top.
+    private static func helpMenu() -> NSMenu {
+        let m = NSMenu(title: "Help")
+        m.addItem(item("Connect Your AI Agent…", #selector(AppDelegate.connectAgent(_:))))
+        m.addItem(item("Using NeoSCAD with AI Agents", #selector(AppDelegate.showAgentHelp(_:))))
         return m
     }
 

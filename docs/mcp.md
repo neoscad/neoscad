@@ -122,9 +122,9 @@ names are pure functions in `client::agent_setup`
 table. What needs the machine is in `crates/ffi/src/agent_setup.rs`,
 exported to Swift and C#: `agent_setup_rows(cli)`,
 `agent_setup_find_claude()`, `agent_setup_add_to_claude_code(claude,
-cli, replace)` and `agent_setup_add_to_claude_desktop(cli)`. The sheet
-that calls them is not built yet (`docs/audits/agent-connection-desktop.md`,
-Option A).
+cli, replace)` and `agent_setup_add_to_claude_desktop(cli)`. The macOS
+app's "Connect your AI agent" sheet calls them
+(`apple/App/Agents/AgentSetup.swift`; "The desktop apps", below).
 
 ## Protocol
 
@@ -570,6 +570,40 @@ While an app is connected:
   `"document": {"number", "file", "version"}`;
 - the instructions gain one sentence when an app is connected as the
   session starts.
+
+**On the Mac.** The document window's toolbar ends in the agent control:
+a sparkle and "Connect your AI agent" until an agent is connected, then
+the agent's name with a green dot that pulses while it works (the tooltip
+says what it does: "Claude Code is editing"). Help > Connect Your AI
+Agent… and Settings > Agents reach the same place. The flow:
+
+1. **Connect your AI agent** (the toolbar control, or the Help menu)
+   opens a sheet. Its first switch, "Allow AI agents to work on open
+   documents", is off until the user turns it on; it is kept, so the app
+   listens again at each launch. Clicking a client's Add while it is off
+   asks once ("Let AI agents work on your open models?").
+2. **One click per client**, from the rows above: Add (Claude Code, run
+   with the `claude` the app finds; Replace when it already has a
+   `neoscad`), Open Cursor or Open VS Code (their install links), Add for
+   Claude Desktop (after the user agrees to the file change; then quit
+   and reopen Claude). Each row says what happened: Added, Already set
+   up, Not installed, or the error, and shows the command or JSON to copy
+   whenever the click could not do it.
+3. **Then just ask** the agent ("make the teeth smaller and show me").
+   The control shows the agent connected and what it is doing; its
+   popover lists each agent with Disconnect, the last few things they
+   did, and "Ask before applying edits", which makes each edit wait for
+   Apply or Reject in a bar over the editor.
+
+An agent's edit is one highlighted step that Undo takes back; it goes
+into the buffer, which autosave then saves like the user's typing. Its
+marks in the 3D view show a chip with a button that clears them.
+Turning the switch off (in the sheet or Settings) disconnects every
+agent at once, removes the socket and hides the toolbar control. The
+app's side is `apple/App/Agents` and
+`apple/App/Document/SCADDocument+Agent.swift`; its tests
+(`apple/AppTests/AgentTests.swift`) include the bundled `neoscad mcp`
+editing an open document end to end.
 
 When the first app connects or the last one goes, the server sends
 `notifications/tools/list_changed` (and declares `listChanged: true`

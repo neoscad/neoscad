@@ -381,7 +381,18 @@ window.NeoSCADEditor = {
   /// already checked that the agent saw this text. The user's selection
   /// stays where it was (moved by the edit), and the view scrolls to the
   /// first change. The marks clear after `ms`, or when the user types.
-  agentEdit(edits, ms = 8000) {
+  ///
+  /// `expectVersion`, when given, is the editor version the app checked
+  /// the agent's edit against. The app's copy of the text can trail the
+  /// editor by a keystroke whose change message is still on its way, and
+  /// positions computed for the older text would land in the wrong place
+  /// in the newer one; so an editor that has moved past it refuses the
+  /// edit (`stale: true`) and the agent reads again.
+  agentEdit(edits, ms = 8000, expectVersion = null) {
+    if (expectVersion !== null && expectVersion !== versions.version) {
+      return { ...historyState(), stale: true, marks: 0 };
+    }
+    if (edits.length === 0) return { ...historyState(), marks: 0 };
     const doc = view.state.doc;
     const pos = ([l, c]) => {
       const line = doc.line(Math.min(Math.max(l + 1, 1), doc.lines));

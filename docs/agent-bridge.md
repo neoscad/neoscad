@@ -230,8 +230,10 @@ documents, with no link and no flag: plain `neoscad mcp` finds a running
 app by itself (owner decision, 2026-10-02; `--no-app` turns it off). The
 design and the options weighed are in
 `docs/audits/agent-connection-desktop.md` (Option C). This is the shared
-foundation; the apps' controls (the status button, the consent prompt,
-the approval bar) are the next step.
+foundation. The macOS app's controls (the toolbar control, the consent
+switch, the setup sheet, the approval bar) are built on it
+(`apple/App/Agents`; the user's flow is in `docs/mcp.md`, "The desktop
+apps").
 
 | Part | Where |
 |---|---|

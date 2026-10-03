@@ -1337,8 +1337,8 @@ lead them, come roughly in order of user impact.
   plainer. (7c)
 
 - The desktop apps' agent link (`docs/agent-bridge.md`, "Desktop apps")
-  is built and tested in Rust only; no app calls it yet (the native UIs
-  are the next step). Open points for that step and after:
+  has its macOS UI (`apple/App/Agents`); the Linux and Windows apps do
+  not call it yet. Open points:
   - That a host `neoscad mcp` reaches a socket the Flatpak'd app makes
     in `$XDG_RUNTIME_DIR/app/org.neoscad.NeoSCAD/` is unverified (no
     Linux machine with Flatpak was used), and so is `FLATPAK_ID` being
@@ -1352,8 +1352,15 @@ lead them, come roughly in order of user impact.
   - The app's version check and the editor's `agentEdit` meet on two
     threads: the host compares its revision on the main thread, but a
     keystroke still on its way from the web view is not counted yet.
-    `agentEdit` should take the expected length (or revision) and refuse
-    a document that moved on.
+    Done for macOS: `agentEdit` takes the editor version the app checked
+    against and refuses (`stale: true`) when the editor has moved past
+    it, and the document keeps its own revision counter
+    (`SCADDocument.agentRevision`). The Linux and Windows hosts should
+    pass the same argument.
+  - macOS: the toolbar control was only checked in screenshots of an
+    inactive window (drawn by `cacheDisplay`, since the build machine
+    gives no screen-recording permission), where AppKit dims toolbar
+    content; its look in a key window is unchecked.
   - Versions restart with the app's counters: after an app restart a
     `version` read before it can equal the new document's. The document
     gets a new number, `{old, new}` edits match the current text anyway,

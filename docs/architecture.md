@@ -238,6 +238,15 @@ request, `ffi`'s `guarded` per call) and keeps its session; see "Panics".
   solids in the core for sections, distances and picking; findings,
   section outlines and picked points are drawn over the model as the
   viewport's annotations.
+- **AI agents** (`apple/App/Agents`, `docs/agent-bridge.md`, "Desktop
+  apps"): once the user allows agents, the app's `AgentLink` listens on
+  a per-user socket that plain `neoscad mcp` finds, and the app answers
+  its requests on the open documents (`SCADDocument+Agent.swift`): the
+  editor's text and a per-document revision, edits through the editor's
+  `agentEdit` as one undoable step, captures drawn offscreen, and an
+  agent layer of marks. The link calls the app on its own threads, which
+  wait while the work hops to the main actor; nothing exists before the
+  user allows agents.
 - **Web** (phase 9): the same core compiled to WASM and run in a module
   worker (`crates/web`), the same wgpu renderer on WebGPU in the page
   (`crates/web-view`, with a lazily loaded WebGL2 build), and the app's
