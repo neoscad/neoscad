@@ -80,11 +80,11 @@ The series, in `vendor/patches/manifold-rust/`:
 | Patch | Change |
 |---|---|
 | `removed` | `.gitmodules` (a submodule the `.crate` does not ship) and `README_HERO.png` (the README's 257 KiB screenshot) are left out; neither is used by the build |
-| `0001-keyhole-loop-visitor.patch` | the keyhole speed patch (`src/polygon_earclip.rs`); branch `neoscad/earclip-loop-visitor` |
-| `0002-keyhole-ring-boxes.patch` | the keyhole ring-box patch (`src/polygon_earclip.rs`); branch `neoscad/earclip-ring-boxes`, on top of the previous one |
-| `0003-parallel-booleans.patch` | the parallel boolean kernels (`src/par.rs`, `src/edge_op.rs`, the new `src/edge_op_orbits.rs`, and others); branch `neoscad/parallel-booleans` |
-| `0004-parallel-batch-rounds.patch` | `batch_boolean` runs each round's pairs in parallel (`src/csg_tree.rs`); branch `neoscad/parallel-batch-rounds` |
-| `0005-cancel-new-edge-verts.patch` | checks inside `AddNewEdgeVerts`, and its lists sized up front (`src/boolean_result*.rs`); branch `neoscad/cancel-new-edge-verts`, on top of `neoscad/parallel-booleans` |
+| `0001-keyhole-loop-visitor.patch` | the keyhole speed patch (`src/polygon_earclip.rs`, whose keyhole code moves to the new `src/polygon_earclip_keyhole.rs`); branch `neoscad/earclip-loop-visitor` (larsbrubaker/manifold-rust#6) |
+| `0002-keyhole-ring-boxes.patch` | the keyhole ring-box patch (`src/polygon_earclip*.rs`); branch `neoscad/earclip-ring-boxes` (#9), on top of the previous one |
+| `0003-parallel-booleans.patch` | the parallel boolean kernels (`src/par.rs`, `src/edge_op.rs`, the new `src/edge_op_orbits.rs`, and others); branch `neoscad/parallel-booleans` (#8) |
+| `0004-parallel-batch-rounds.patch` | `batch_boolean` runs each round's pairs in parallel and renumbers their mesh IDs in pair order (`src/csg_tree.rs`; its tests move to the new `src/csg_tree_tests.rs`); branch `neoscad/parallel-batch-rounds` (#7) |
+| `0005-cancel-new-edge-verts.patch` | checks inside `AddNewEdgeVerts`, and its lists sized up front (`src/boolean_result*.rs`; a test-only poll countdown in `src/cancel.rs`); branch `neoscad/cancel-new-edge-verts` (#10), on top of `neoscad/parallel-booleans` |
 | `0006-batch-round-threshold.patch` | NeoSCAD's: `batch_boolean` rounds of under 10,000 vertices run their pairs serially (`src/csg_tree.rs`; see the parallel boolean patch) |
 | `0007-cancel-token-over-a-flag.patch` | NeoSCAD's: a `CancelToken` over a caller's flag, polling a caller's check (`src/cancel.rs`; see the cancellation patch) |
 
@@ -95,9 +95,22 @@ recorded reason; they could as well be restored, which would empty
 Most of its source files use CRLF line endings; keep them when editing (a
 tool that rewrites them as LF turns every line into a diff). A few files
 new in 0.15.0 (`src/cross_section_tests.rs`, `src/impl_shapes.rs`, and
-others) use LF, and so do the files the series adds (`src/edge_op_orbits.rs`,
-`src/par_tests.rs`). The patches carry the CRs in their lines, so keep
-those too.
+others) use LF, and so do the files the series adds
+(`src/polygon_earclip_keyhole.rs`, `src/edge_op_orbits.rs`,
+`src/par_tests.rs`, `src/csg_tree_tests.rs`). The patches carry the CRs
+in their lines, so keep those too.
+
+The five upstream patches follow their branches as revised after
+review, on the fork's `main` at 9989b92 (0.15.0, two QuickHull commits
+and a union regression test, none of which touch these files). That
+`main` adds a test at the end of `src/edge_op_tests.rs`, so `0003`'s new
+tests there sit after the file's last test in 0.15.0 instead; the code
+is otherwise the commits'. The review's changes, against the first
+versions of the branches: the keyhole code moved to its own file and a
+test for a ring collapsed by an earlier hole (`0001`); the ring-box
+`ccw` cull guarded against underflow and overflow (`0002`, below); orbit
+walks capped (`0003`, below); mesh IDs renumbered after each batch round
+(`0004`, below); and a poll-countdown test of the cancel checks (`0005`).
 
 ### Moving from 0.13.1 to 0.15.0
 
@@ -219,7 +232,10 @@ The patch adds `for_each_loop_vert`, which visits the same verts in the
 same order without collecting them (as C++ Manifold's `Loop` does), and
 the two bridge searches use it and borrow `outers`. `loop_verts` is now a
 wrapper over it for the three once-per-polygon callers. The walk itself,
-and so the quadratic cost, is unchanged.
+and so the quadratic cost, is unchanged. The keyhole code (the two
+searches, `join_polygons` and the ring walk) moves, unchanged otherwise,
+into a child module, `src/polygon_earclip_keyhole.rs`, which keeps
+`polygon_earclip.rs` under upstream's 800-line limit.
 
 One detail keeps the output identical. `loop_verts` returned `None` for a
 degenerate ring (one whose vert has `right == left`), and the callers then
@@ -233,7 +249,12 @@ ring manifold-rust and C++ may already choose different bridges. The patch
 keeps manifold-rust's behaviour, not C++'s.
 
 `crates/geom/tests/kernel_patches.rs` pins the triangles, in order, of a
-24×24 grid of octagonal holes, hashed with the unpatched copy.
+24×24 grid of octagonal holes, hashed with the unpatched copy. The
+crate's own tests (`src/polygon_earclip_tests.rs`) pin the same grid and
+a hole that collapses an outer ring to two verts, so that both searches
+for the next hole walk a degenerate ring; in practice a ring degenerates
+whole, so the walk reports it before visiting any vert and the restore
+has nothing to undo.
 
 ### The keyhole ring-box patch
 
@@ -270,6 +291,18 @@ epsilon, plus a relative 1e-9 far above the comparisons' rounding) only
 make the tests more permissive. The searches also track which ring the
 connector came from, so the right box is grown.
 
+The `ccw` bound holds only where `ccw`'s own arithmetic does. At extreme
+scales `ccw` calls a vert that clearly turns the wrong way collinear,
+when `area * area` underflows to 0 or `base2 * tol * tol` overflows to
+infinity, and the tie-break can then take it; the first version of the
+patch skipped such a ring and so changed the bridge (found in upstream
+review). The `ccw` cull now applies only when the corner distances, the
+connector's distance and epsilon are at most 1e75 and the margin is at
+least 1e-150 (NaN fails too); otherwise the ring is walked. The
+coordinate tests hold at any scale. The crate's tests pin the review's
+two cases (lengths of 1e-84 with epsilon 0, and 1e80 with epsilon 1e74),
+with triangles taken on the unpatched code.
+
 `crates/geom/tests/kernel_patches.rs` pins the triangles of a grid of
 glyph-like outer rings with holes and islands, hashed before the patch.
 Every 3D model in `tests/data/scad` and `examples` (301 STL exports), and
@@ -297,10 +330,25 @@ rounds `0004-parallel-batch-rounds.patch`, and the round threshold
 - **`batch_boolean` rounds** (`csg_tree.rs`): a round's up to four pairs
   are picked first, then run side by side (C++ `csg_tree.cpp:451-479` in
   Manifold 3.5.2), and the results go back on the heap in pair order with
-  the serials the sequential loop gave them. The one shared state a boolean touches is the
-  mesh-ID counter; the kernel compares mesh IDs only for equality, and
-  neoscad orders output runs by original ID for the same reason
-  (`crates/geom/src/manifold_geom.rs`, `canonical_mesh`). With 0006 a
+  the serials the sequential loop gave them. The one shared state a
+  boolean touches is the mesh-ID counter. The kernel compares mesh IDs
+  for equality, except where a disjoint union (`compose_meshes`) keeps
+  both operands' IDs and `MeshGL` then orders their runs by value; so
+  after each round the IDs its booleans reserved are moved, in pair
+  order, into one block reserved after the round
+  (`renumber_round_mesh_ids`, added in upstream review), and the IDs and
+  run order are the same at any thread count. neoscad never reached that
+  race: its unions go through `batch_union`, which composes the disjoint
+  operands into groups first, and the groups, and any union of them,
+  overlap pairwise, and an intersection of disjoint operands is empty,
+  so the rounds run only real booleans, which put the
+  right operand's IDs after the left's whatever their values (and
+  neoscad orders output runs sharing an original ID by their first
+  triangle anyway: `crates/geom/src/manifold_geom.rs`, `canonical_mesh`).
+  Upstream's test of it (eight instances of one sphere in rounds of
+  under 10,000 vertices) also passes without the renumbering once 0006
+  is in, since its rounds then run serially; without either it failed
+  three runs out of three. With 0006 a
   round goes parallel only when its operands have 10,000 vertices in all
   (C++ `autoPolicy`'s `kSeqThreshold`): with five busy loops per core,
   `csg_spheres` took 2.76 s against 3.70 s and the hero 10.5 against
@@ -320,7 +368,12 @@ rounds `0004-parallel-batch-rounds.patch`, and the round threshold
   so it first checks that `paired_halfedge` is an involution (then the
   step is injective and a walk either closes or ends at a missing pair;
   an open orbit is seen by its smallest eligible halfedge) and falls back
-  to the sequential scan otherwise. The owners' work (the pinched-vertex
+  to the sequential scan otherwise. A walk stops after 64 steps; an orbit
+  longer than that has no walk that returned, so its owner is its
+  smallest capped halfedge, and each such orbit is then walked once,
+  sequentially. Without the cap (the first version) a vertex of valence
+  100,000 whose orbit meets its halfedges in ascending order cost 1e10
+  steps. The owners' work (the pinched-vertex
   splits, in owner order; the duplicate lists, concatenated in owner
   order) is then the sequential scan's. C++ uses atomics here
   (`edge_op.cpp:722-796, 903-924`) and sorts the duplicates, which would
@@ -363,7 +416,12 @@ renders two models large enough to take every parallel path above (a
 checkerboard of 256 edge-touching cubes for the orbit scans and
 `batch_boolean`, a sphere with 49 holes for the rest) on 1 and 8
 threads and checks the export against hashes taken with the unpatched
-copy.
+copy. It also combines instances of one sphere (one original ID) in
+batch rounds large enough to run in parallel, two unions and an
+intersection, and compares the kernel's whole `MeshGL64`, before
+`canonical_mesh`, and the export on 1, 2, 3 and 8 threads, twice each.
+It passed before the renumbering too, with or without 0006, for the
+reason given under the batch rounds above.
 
 **Timings** (M4 Pro, 14 cores, interleaved, best of 5; the machine was
 shared, load average 5–9 unless noted): see `docs/audits/slow-cases.md`
@@ -402,7 +460,13 @@ peak). So:
   depth 5 (`examples/Old/example024.scad`, `n=5`) the last union grew a
   wasm instance from under 1 GiB past 2 GB within this one step, before
   any check ran; the last doubling of the new-edge list alone copied
-  a buffer into one twice its size.
+  a buffer into one twice its size. For the crate's own test of the
+  loop (`src/cancel_tests.rs`), 0005 gives `CancelToken`, in test builds
+  only (`#[cfg(test)]`), a poll countdown: a token from
+  `cancelling_after(k)` reads as live for k polls and then cancels
+  itself, and the lists then hold exactly the first k intersections'
+  entries. 0007 keeps it
+  beside the check, and reads it first.
 
 The content and order of the lists are unchanged (a capacity is not
 content), and an uncancelled token changes no output:

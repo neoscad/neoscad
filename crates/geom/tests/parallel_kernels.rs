@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 
+use geom::manifold_geom::{GlobalIds, ManifoldGeometry, OpType};
 use geom::{RenderOptions, Renderer};
 
 fn tree(src: &str) -> eval::Evaluation {
@@ -130,4 +131,110 @@ fn check_agree(src: &str) {
 #[test]
 fn batch_rounds_above_and_below_the_parallel_threshold_agree() {
     check_agree("for (i = [0:31]) translate([i * 1.5, (i % 4) * 1.5, 0]) sphere(2, $fn = 48);");
+}
+
+/// One sphere of about 2,000 vertices, converted once and placed at each
+/// of `centres`, as a cached subtree's solid is reused for every instance.
+/// The instances share an original ID, so the output's runs of them are
+/// told apart only by mesh ID. (Each call converts the sphere afresh, with
+/// a new original ID, so one call's instances serve every comparison.)
+fn instances(centres: &[[f64; 3]]) -> Vec<ManifoldGeometry> {
+    let ev = tree("sphere(1, $fn = 64);");
+    let keys = eval::dump::Keys::new(&ev.root, &lang::loader::StdFs);
+    let out = Renderer::new()
+        .render(&ev.root, &keys, RenderOptions::default())
+        .expect("supported");
+    let Some(geom::Geometry::PolySet(ps)) = out.geometry else {
+        panic!("expected a mesh");
+    };
+    let (mut w, mut e) = (Vec::new(), Vec::new());
+    let sphere = ManifoldGeometry::from_polyset(&ps, &GlobalIds, &mut w, &mut e);
+    centres
+        .iter()
+        .map(|&[x, y, z]| {
+            let mut g = sphere.clone();
+            let mut m = geom::IDENTITY;
+            (m[0][3], m[1][3], m[2][3]) = (x, y, z);
+            g.transform(&m);
+            g
+        })
+        .collect()
+}
+
+/// A batch of `parts` on `threads` threads, as two hashes: the kernel's
+/// whole `MeshGL64` before neoscad reorders its runs (vertices, triangles,
+/// runs with their original IDs and transforms, face IDs), and the OFF
+/// export after.
+fn batch_hashes(op: OpType, parts: &[ManifoldGeometry], threads: usize) -> (u64, u64) {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .stack_size(eval::DEFAULT_THREAD_STACK)
+        .build()
+        .unwrap();
+    let parts = parts.to_vec();
+    let g = pool
+        .install(|| ManifoldGeometry::batch(op, parts))
+        .expect("a result");
+    let gl = g.manifold.get_mesh_gl64(-1);
+    let ps = g.to_polyset(&geom::color::CORNFIELD);
+    let off = geom::export::off(&ps, false, &mut Vec::new());
+    (fnv(format!("{gl:?}").as_bytes()), fnv(&off))
+}
+
+/// Instances of one solid combined in `batch_boolean` rounds that run
+/// their pairs in parallel (each first round has well over the 10,000
+/// vertices that takes) give the same mesh at any thread count, run after
+/// run: not only the exported file, whose runs neoscad puts in a fixed
+/// order (`canonical_mesh`), but the kernel's own output.
+///
+/// Each boolean draws mesh IDs from a process-wide counter, so pairs that
+/// run side by side drew them in whatever order the scheduler gave, and a
+/// later disjoint union in `batch_boolean` orders its operands' runs by
+/// those values. manifold-rust's renumbering after each round
+/// (`renumber_round_mesh_ids`, patch 0004) fixes the values' order. Three
+/// batches: a union of sixteen mutually overlapping instances (every round
+/// a real boolean), a union of eight in overlapping pairs ten apart
+/// (upstream's case for the race), and an intersection of eight.
+///
+/// This passes without the renumbering too, even with every round
+/// parallel, because neoscad's batches never reach that disjoint union:
+/// `batch_union` first composes the operands into groups of disjoint ones,
+/// and the groups' boxes overlap pairwise (an operand joins the first
+/// group it overlaps nothing in), as do the unions of groups; an
+/// intersection of disjoint operands is empty; and an overlapping boolean
+/// puts its right operand's IDs after its left's whatever their values.
+/// The test is here so that a batch path that does reach the race fails.
+#[test]
+fn batch_rounds_of_one_instanced_solid_agree_at_any_thread_count() {
+    let ring: Vec<[f64; 3]> = (0..16)
+        .map(|i| {
+            let a = f64::from(i) * std::f64::consts::TAU / 16.0;
+            [0.5 * a.cos(), 0.5 * a.sin(), 0.05 * f64::from(i)]
+        })
+        .collect();
+    let pairs: Vec<[f64; 3]> = (0..8)
+        .map(|i| [f64::from(i / 2) * 10.0 + f64::from(i % 2) * 0.5, 0.0, 0.0])
+        .collect();
+    let cases = [
+        ("union of a ring", OpType::Add, &ring[..]),
+        ("union of pairs", OpType::Add, &pairs[..]),
+        ("intersection", OpType::Intersect, &ring[..8]),
+    ];
+    for (name, op, centres) in cases {
+        let parts = instances(centres);
+        let expected = batch_hashes(op, &parts, 1);
+        for threads in [1, 2, 3, 8] {
+            for rep in 0..2 {
+                let (gl, off) = batch_hashes(op, &parts, threads);
+                assert_eq!(
+                    gl, expected.0,
+                    "{name}: kernel mesh, {threads} threads, rep {rep}"
+                );
+                assert_eq!(
+                    off, expected.1,
+                    "{name}: export, {threads} threads, rep {rep}"
+                );
+            }
+        }
+    }
 }

@@ -37,6 +37,7 @@ use crate::types::{Halfedge, TriRef};
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(super) struct EdgePos {
     edge_pos: f64,
     vert: i32,

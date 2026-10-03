@@ -1,5 +1,7 @@
 // EarClip triangulator — extracted from polygon.rs
 // Port of C++ ear-clipping algorithm with 2D KD-tree acceleration
+// Keyholing (bridging holes into outer rings) and the ring walk are in the
+// child module polygon_earclip_keyhole.rs.
 
 use crate::linalg::Vec2;
 use crate::types::{PolyVert, PolygonsIdx, Rect, K_PRECISION};
@@ -170,43 +172,8 @@ impl EarClip {
         self.polygon[left].right_dir = safe_normalize_2d(dir);
     }
 
-    /// The unclipped verts of the ring starting from `first`, or `None` if
-    /// the ring is degenerate.
-    fn loop_verts(&self, first: usize) -> Option<Vec<usize>> {
-        let mut result = Vec::new();
-        self.for_each_loop_vert(first, |v| result.push(v))
-            .then_some(result)
-    }
-
-    /// Apply `f` to each vert `loop_verts` would return, without collecting
-    /// them, as C++ `Loop` does. Returns `false` if the ring is degenerate,
-    /// after `f` has already seen the verts before the degenerate one.
-    fn for_each_loop_vert(&self, first: usize, mut f: impl FnMut(usize)) -> bool {
-        let mut v = first;
-        let mut cur_first = first;
-        loop {
-            if self.clipped(v) {
-                cur_first = self.polygon[self.polygon[v].right].left;
-                if !self.clipped(cur_first) {
-                    v = cur_first;
-                    if self.polygon[v].right == self.polygon[v].left {
-                        return false;
-                    }
-                    f(v);
-                }
-            } else {
-                if self.polygon[v].right == self.polygon[v].left {
-                    return false;
-                }
-                f(v);
-            }
-            v = self.polygon[v].right;
-            if v == cur_first {
-                break;
-            }
-        }
-        true
-    }
+    // The ring walk, `loop_verts`, is in polygon_earclip_keyhole.rs, next to
+    // the bridge searches that run it over every outer ring.
 
     // -----------------------------------------------------------------------
     // Vert predicate methods (take vert index `v`)
@@ -598,185 +565,6 @@ impl EarClip {
         }
     }
 
-    /// Attach a hole to an outer polygon via a keyhole.
-    fn cut_keyhole(&mut self, start: usize) {
-        let bbox = *self.hole2bbox.get(&start).unwrap();
-        let start_pos = self.polygon[start].pos;
-        let on_top: i32 = if start_pos.y >= bbox.max.y - self.epsilon {
-            1
-        } else if start_pos.y <= bbox.min.y + self.epsilon {
-            -1
-        } else {
-            0
-        };
-        let mut connector: usize = INVALID;
-        let mut ring: usize = INVALID;
-        // A ring wholly above or below start.y -+ eps has no edge with a
-        // finite `vert_interp_y2x`, so it cannot take the connector. The
-        // margin only widens that test, so no ring that could is skipped.
-        let slack = 2.0 * self.epsilon.abs() + 1e-9 * (1.0 + start_pos.y.abs());
-
-        // Port of the C++ CheckEdge lambda: take `edge` as the new connector
-        // when the horizontal ray from `start` crosses it (finite x), `start`
-        // lies inside THAT edge's wedge, and it beats the current connector —
-        // either the crossing point is CCW of the connector edge, or (for any
-        // non-CCW result) the vertical-ordering InsideEdge tie-break holds.
-        // A degenerate ring is skipped whole, as `loop_verts` returning `None`
-        // skipped it, so the connector is restored if the walk stops part-way.
-        for (k, &outer_start) in self.outers.iter().enumerate() {
-            let rb = &self.outer_bbox[k];
-            if rb.min.y > start_pos.y + slack || rb.max.y < start_pos.y - slack {
-                continue;
-            }
-            let before = (connector, ring);
-            let complete = self.for_each_loop_vert(outer_start, |edge| {
-                let x = self.vert_interp_y2x(edge, start_pos, on_top);
-                if x.is_finite()
-                    && self.vert_inside_edge(start, edge, true)
-                    && (connector == INVALID
-                        || ccw(
-                            Vec2::new(x, start_pos.y),
-                            self.polygon[connector].pos,
-                            self.polygon[self.polygon[connector].right].pos,
-                            self.epsilon,
-                        ) == 1
-                        || (if self.polygon[connector].pos.y < self.polygon[edge].pos.y {
-                            self.vert_inside_edge(edge, connector, false)
-                        } else {
-                            !self.vert_inside_edge(connector, edge, false)
-                        }))
-                {
-                    connector = edge;
-                    ring = k;
-                }
-            });
-            if !complete {
-                (connector, ring) = before;
-            }
-        }
-
-        if connector == INVALID {
-            self.simples.push(start);
-            return;
-        }
-
-        let (connector, ring) = self.find_closer_bridge(start, connector, ring);
-        self.join_polygons(start, connector);
-        // The hole's verts are now part of that ring.
-        let rb = &mut self.outer_bbox[ring];
-        rb.union_point(bbox.min);
-        rb.union_point(bbox.max);
-    }
-
-    /// Refine keyhole connector: find any reflex vert closer to start.
-    /// Also returns the `outers` index of the connector's ring.
-    fn find_closer_bridge(&self, start: usize, edge: usize, edge_ring: usize) -> (usize, usize) {
-        let start_pos = self.polygon[start].pos;
-        let edge_right = self.polygon[edge].right;
-        let mut connector = if self.polygon[edge].pos.x < start_pos.x {
-            edge_right
-        } else if self.polygon[edge_right].pos.x < start_pos.x {
-            edge
-        } else if self.polygon[edge_right].pos.y - start_pos.y
-            > start_pos.y - self.polygon[edge].pos.y
-        {
-            edge
-        } else {
-            edge_right
-        };
-
-        if (self.polygon[connector].pos.y - start_pos.y).abs() <= self.epsilon {
-            return (connector, edge_ring);
-        }
-        let above: f64 = if self.polygon[connector].pos.y > start_pos.y {
-            1.0
-        } else {
-            -1.0
-        };
-
-        // Degenerate rings are skipped whole, as in `cut_keyhole`. A vert must
-        // be right of start, on the `above` side and not outside start ->
-        // connector (`ccw`): all linear in position, so a ring whose box
-        // corners all fail one test is skipped. The margins only widen them.
-        let eps = self.epsilon.abs();
-        let slack = 2.0 * eps + 1e-9 * (1.0 + start_pos.x.abs() + start_pos.y.abs());
-        let mut ring = edge_ring;
-        for (k, &outer_start) in self.outers.iter().enumerate() {
-            let rb = &self.outer_bbox[k];
-            if rb.max.x < start_pos.x - slack
-                || (above > 0.0 && rb.max.y < start_pos.y - slack)
-                || (above < 0.0 && rb.min.y > start_pos.y + slack)
-            {
-                continue;
-            }
-            let v2 = self.polygon[connector].pos - start_pos;
-            let len2 = (v2.x * v2.x + v2.y * v2.y).sqrt();
-            let mut best = f64::NEG_INFINITY;
-            let mut dist = len2;
-            for c in [
-                Vec2::new(rb.min.x, rb.min.y),
-                Vec2::new(rb.max.x, rb.min.y),
-                Vec2::new(rb.min.x, rb.max.y),
-                Vec2::new(rb.max.x, rb.max.y),
-            ] {
-                let v1 = c - start_pos;
-                best = best.max(above * (v1.x * v2.y - v1.y * v2.x));
-                dist = dist.max((v1.x * v1.x + v1.y * v1.y).sqrt());
-            }
-            if best < -(dist * eps + 1e-9 * dist * len2) {
-                continue;
-            }
-            let before = (connector, ring);
-            let complete = self.for_each_loop_vert(outer_start, |vert| {
-                let inside = above
-                    * ccw(
-                        start_pos,
-                        self.polygon[vert].pos,
-                        self.polygon[connector].pos,
-                        self.epsilon,
-                    ) as f64;
-                let vp = self.polygon[vert].pos;
-                let cp = self.polygon[connector].pos;
-                if vp.x > start_pos.x - self.epsilon
-                    && vp.y * above > start_pos.y * above - self.epsilon
-                    && (inside > 0.0
-                        || (inside == 0.0 && vp.x < cp.x && vp.y * above < cp.y * above))
-                    && self.vert_inside_edge(vert, edge, true)
-                    && self.vert_is_reflex(vert)
-                {
-                    connector = vert;
-                    ring = k;
-                }
-            });
-            if !complete {
-                (connector, ring) = before;
-            }
-        }
-
-        (connector, ring)
-    }
-
-    /// Create a keyhole between hole `start` and outer polygon `connector`.
-    fn join_polygons(&mut self, start: usize, connector: usize) {
-        let new_start = self.polygon.len();
-        self.polygon.push(self.polygon[start].clone());
-        let new_connector = self.polygon.len();
-        self.polygon.push(self.polygon[connector].clone());
-
-        let start_right = self.polygon[start].right;
-        self.polygon[start_right].left = new_start;
-        let connector_left = self.polygon[connector].left;
-        self.polygon[connector_left].right = new_connector;
-
-        self.link(start, connector);
-        self.link(new_connector, new_start);
-
-        self.clip_if_degenerate(start);
-        self.clip_if_degenerate(new_start);
-        self.clip_if_degenerate(connector);
-        self.clip_if_degenerate(new_connector);
-    }
-
     /// Update ear queue entry for vert v.
     fn process_ear(&mut self, v: usize, collider: &IdxCollider) {
         // Lazy-delete existing queue entry
@@ -887,6 +675,13 @@ impl EarClip {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Keyholing and the ring walk — extracted to polygon_earclip_keyhole.rs
+// ---------------------------------------------------------------------------
+
+#[path = "polygon_earclip_keyhole.rs"]
+mod keyhole;
 
 #[cfg(test)]
 #[path = "polygon_earclip_tests.rs"]

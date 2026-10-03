@@ -2,7 +2,8 @@ NeoSCAD patch to manifold-rust 0.15.0 (crates.io): a CancelToken can be
 made over an existing flag (CancelToken::from_flag) and can poll a
 condition with it (with_check), so a request's interrupt flag and its
 time and memory limits stop a boolean from inside. Without a check a
-token reads only its flag, as before. Test:
+token reads only its flag, as before. The test-only poll countdown of
+0005 is kept, and is read before the flag and the check. Test:
 crates/geom/tests/kernel_cancel.rs.
 
 Upstream: not proposed; the API serves NeoSCAD's limits.
@@ -14,7 +15,7 @@ See vendor/README.md ("The cancellation patch").
 
 --- a/src/cancel.rs
 +++ b/src/cancel.rs
-@@ -106,19 +106,48 @@
+@@ -106,9 +106,11 @@
  /// let result = a.boolean_with_token(&b, OpType::Add, Some(&token));
  /// assert_eq!(result.status(), Error::Cancelled);
  /// ```
@@ -24,6 +25,11 @@ See vendor/README.md ("The cancellation patch").
      flag: Arc<AtomicBool>,
 +    // NeoSCAD patch: a condition polled with the flag (see `with_check`).
 +    check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+     /// Polls left before the token cancels itself. Tests use it to land a
+     /// cancel at an exact iteration of a loop, which a cancel from another
+     /// thread cannot do deterministically.
+@@ -116,21 +118,54 @@
+     polls_left: Option<Arc<std::sync::atomic::AtomicUsize>>,
  }
  
 +// NeoSCAD patch: `Debug` by hand, since the check is a closure.
@@ -42,6 +48,8 @@ See vendor/README.md ("The cancellation patch").
          Self {
              flag: Arc::new(AtomicBool::new(false)),
 +            check: None,
+             #[cfg(test)]
+             polls_left: None,
          }
      }
  
@@ -49,7 +57,12 @@ See vendor/README.md ("The cancellation patch").
 +    /// request's interrupt flag), so a cancel of the request reaches the
 +    /// kernel without a thread to copy one flag into the other.
 +    pub fn from_flag(flag: Arc<AtomicBool>) -> Self {
-+        Self { flag, check: None }
++        Self {
++            flag,
++            check: None,
++            #[cfg(test)]
++            polls_left: None,
++        }
 +    }
 +
 +    /// NeoSCAD patch: this token, also cancelled once `check` returns
@@ -61,13 +74,19 @@ See vendor/README.md ("The cancellation patch").
 +        self
 +    }
 +
-     /// Request cancellation. Callable from any thread, including while another
-     /// thread is inside an operation holding a clone of this token.
-     ///
-@@ -132,7 +161,17 @@
-     /// Whether cancellation has been requested.
-     #[inline]
-     pub fn is_cancelled(&self) -> bool {
+     /// A token that reads as live for `polls` polls, then cancels itself.
+     #[cfg(test)]
+     pub(crate) fn cancelling_after(polls: usize) -> Self {
+         Self {
+             flag: Arc::new(AtomicBool::new(false)),
++            check: None,
+             polls_left: Some(Arc::new(std::sync::atomic::AtomicUsize::new(polls))),
+         }
+     }
+@@ -157,7 +192,17 @@
+                 self.cancel();
+             }
+         }
 -        self.flag.load(Ordering::Relaxed)
 +        if self.flag.load(Ordering::Relaxed) {
 +            return true;

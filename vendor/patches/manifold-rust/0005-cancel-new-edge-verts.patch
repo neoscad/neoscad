@@ -3,15 +3,18 @@ largest step of a boolean's result assembly, checks the cancel token at
 each intersection and between the sorts after it, and allocates its lists
 at their final size instead of growing them by doubling. Without a token
 nothing changes, and with one that never fires the output is unchanged.
-Tests: crates/geom/tests/kernel_cancel.rs and crates/web/test/run.mjs
-(a measured memory limit on the gearbox example).
+For its test, CancelToken gets a poll countdown that exists only in the
+crate's test builds. Tests: crates/geom/tests/kernel_cancel.rs,
+crates/web/test/run.mjs (a measured memory limit on the gearbox
+example), and the crate's own (src/cancel_tests.rs: a token that cancels
+itself at its k-th poll stops the loop after k intersections).
 
 Upstream: proposed as branch `neoscad/cancel-new-edge-verts`
-(commit 6269c45) of a fork of larsbrubaker/manifold-rust, on top of its
-`main` at 40f20c6 (0.15.0 plus two QuickHull commits that touch none of
-these files). This patch is that commit's changes under src/, byte for
-byte apart from CRLF line endings; the branch also adds a benchmark
-under examples/, which is not vendored.
+(commit 63f7fb6, larsbrubaker/manifold-rust#10) of a fork of
+larsbrubaker/manifold-rust, on top of `neoscad/parallel-booleans` (0003),
+on its `main` at 9989b92 (0.15.0 plus two QuickHull commits and a regression
+test for unions, which touch none of these files). This patch is that commit's changes under src/, byte for
+byte apart from CRLF line endings.
 
 Apply from the crate root on top of 0004: patch -p1 < this file.
 The crate's older sources use CRLF line endings; files this series
@@ -20,7 +23,15 @@ See vendor/README.md ("The cancellation patch").
 
 --- a/src/boolean_result.rs
 +++ b/src/boolean_result.rs
-@@ -251,8 +251,14 @@
+@@ -37,6 +37,7 @@
+ // ---------------------------------------------------------------------------
+ 
+ #[derive(Clone)]
++#[cfg_attr(test, derive(Debug, PartialEq))]
+ pub(super) struct EdgePos {
+     edge_pos: f64,
+     vert: i32,
+@@ -251,8 +252,14 @@
      halfedge_p: &[Halfedge],
      forward: bool,
      offset: usize,
@@ -116,17 +127,66 @@ See vendor/README.md ("The cancellation patch").
  //   face_op.rs            `face2tri_ct` entry plus per-face triangulation
  //                                              <- face_op.cpp:192/290
  //
+@@ -106,6 +109,11 @@
+ #[derive(Clone, Debug, Default)]
+ pub struct CancelToken {
+     flag: Arc<AtomicBool>,
++    /// Polls left before the token cancels itself. Tests use it to land a
++    /// cancel at an exact iteration of a loop, which a cancel from another
++    /// thread cannot do deterministically.
++    #[cfg(test)]
++    polls_left: Option<Arc<std::sync::atomic::AtomicUsize>>,
+ }
+ 
+ impl CancelToken {
+@@ -113,9 +121,20 @@
+     pub fn new() -> Self {
+         Self {
+             flag: Arc::new(AtomicBool::new(false)),
++            #[cfg(test)]
++            polls_left: None,
+         }
+     }
+ 
++    /// A token that reads as live for `polls` polls, then cancels itself.
++    #[cfg(test)]
++    pub(crate) fn cancelling_after(polls: usize) -> Self {
++        Self {
++            flag: Arc::new(AtomicBool::new(false)),
++            polls_left: Some(Arc::new(std::sync::atomic::AtomicUsize::new(polls))),
++        }
++    }
++
+     /// Request cancellation. Callable from any thread, including while another
+     /// thread is inside an operation holding a clone of this token.
+     ///
+@@ -129,6 +148,15 @@
+     /// Whether cancellation has been requested.
+     #[inline]
+     pub fn is_cancelled(&self) -> bool {
++        #[cfg(test)]
++        if let Some(left) = &self.polls_left {
++            if left
++                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
++                .is_err()
++            {
++                self.cancel();
++            }
++        }
+         self.flag.load(Ordering::Relaxed)
+     }
+ }
 --- a/src/cancel_tests.rs
 +++ b/src/cancel_tests.rs
-@@ -307,4 +307,44 @@
-     );
+@@ -308,3 +308,54 @@
      // Same tree, no token: unaffected.
      assert_eq!(tree.evaluate().status, Error::NoError);
-+}
+ }
 +
 +/// `add_new_edge_verts` checks the token per intersection, as C++
-+/// `AddNewEdgeVerts` does: a live token fills the lists, a cancelled one
-+/// leaves them empty.
++/// `AddNewEdgeVerts` does: a live token fills the lists, and a token that
++/// cancels at the k-th poll leaves only the entries of the k intersections
++/// before it. A check only at entry would fill the lists for every k > 0.
 +#[test]
 +fn add_new_edge_verts_stops_at_a_cancelled_token() {
 +    use crate::types::Halfedge;
@@ -154,12 +214,22 @@ See vendor/README.md ("The cancellation patch").
 +            0,
 +            token,
 +        );
-+        (edges_p.len(), edges_new.len())
++        (edges_p, edges_new)
 +    };
-+    let live = CancelToken::new();
-+    assert_eq!(run(None), (5, 10));
-+    assert_eq!(run(Some(&live)), (5, 10));
++    let (all_p, all_new) = run(None);
++    assert_eq!((all_p.len(), all_new.len()), (5, 10));
++    assert_eq!(
++        run(Some(&CancelToken::new())),
++        (all_p.clone(), all_new.clone())
++    );
 +    let cancelled = CancelToken::new();
 +    cancelled.cancel();
-+    assert_eq!(run(Some(&cancelled)), (0, 0));
- }
++    assert_eq!(run(Some(&cancelled)), (vec![], vec![]));
++    // Intersection k adds |i12[k]| entries to `edges_p` and twice that to
++    // `edges_new`, so after k intersections the lists hold these prefixes.
++    for (polls, len_p) in [0, 1, 2, 4, 5].into_iter().enumerate() {
++        let token = CancelToken::cancelling_after(polls);
++        let expected = (all_p[..len_p].to_vec(), all_new[..2 * len_p].to_vec());
++        assert_eq!(run(Some(&token)), expected, "cancelled at poll {polls}");
++    }
++}

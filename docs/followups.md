@@ -1500,7 +1500,17 @@ lead them, come roughly in order of user impact.
 - manifold-rust's `compose_meshes` does not give each composed copy its own
   mesh IDs as C++ `Compose` does (`csg_tree.cpp:386-395`); `batch` in
   `manifold_geom.rs` renumbers colliding operands first. Report upstream,
-  then drop the workaround. (5b)
+  then drop the workaround. (5b) The upstream batch-rounds PR's review
+  (larsbrubaker/manifold-rust#7) hit the same bug from the kernel side: a
+  disjoint union of two instances of one mesh (`boolean_with_token`'s
+  shortcut, which calls `compose_meshes`) merges the operands'
+  `mesh_id_transform` maps by key (`src/boolean3.rs`, `compose_meshes`),
+  so the second instance's relation (its transform, `back_side`)
+  overwrites the first's and both instances' triangles come out as one
+  run. That PR's mesh-ID test steers clear of it (its first round's
+  pairs overlap, and a full boolean gives the right operand fresh IDs);
+  the fix belongs in its own upstream PR, after which neoscad's
+  renumbering in `batch` could go.
 - The libtess2 port's broken-mesh path (`arena.rs`) has no known input
   where multiply-adds are not fused (x86_64, wasm32): 3 million random
   polygons searched under Rosetta broke none, so
@@ -1958,6 +1968,20 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   CI would need it too. (5a)
 - The six PDF cases need a PDF rasteriser (Ghostscript or poppler), which
   CI would need too. (5f)
+- Nothing runs `vendor/manifold-rust`'s own tests, which since the
+  post-review patches include tests of the patched code
+  (`src/polygon_earclip_tests.rs`, `src/edge_op_tests.rs`,
+  `src/par_tests.rs`, `src/csg_tree_tests.rs`, `src/cancel_tests.rs`).
+  They cannot run from the vendored tree as it is: the `.crate` leaves
+  out `src/robust/testdata/*.stl`, which other test modules
+  `include_bytes!`, and the whole suite peaked over 4 GB here before it
+  was stopped. A script could copy the tree, add the test data from the
+  upstream tag, and run the patched modules' tests (`polygon_earclip`,
+  `edge_op`, `par::`, `csg_tree`, `cancel`) with and without
+  `--features parallel`. One of them,
+  `cancel_from_another_thread_interrupts_a_boolean_in_flight`, has a
+  timing precondition (its boolean must take 20 ms) that a fast machine
+  misses now and then, upstream as well.
 
 - **Library crates touch the host file system for message paths** (`lang/src/diag.rs` `weakly_canonical`: `current_dir()`, `canonicalize()`; `eval::Options::default()` uses `StdFs`). Owner decision: route through `FileSystem`, or reword the CLAUDE.md rule to allow host-called helpers.
 

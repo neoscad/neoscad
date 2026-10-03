@@ -15,10 +15,32 @@ use crate::types::{next_halfedge, Halfedge};
 // returns to its start or reaches a halfedge with no pair, which an open
 // orbit's smallest eligible halfedge must do. Otherwise, or on an open orbit,
 // the callers fall back to their sequential scans.
+//
+// A walk from every halfedge costs the square of an orbit's length when the
+// orbit meets its halfedges in ascending order, so a vertex of valence 1e5
+// would take 1e10 steps against the sequential scan's 1e5. Walks therefore
+// stop after `OWNER_WALK_CAP` steps, and the orbits they leave undecided are
+// walked once each, sequentially, which keeps the search linear.
 
 /// Halfedge count from which the orbit scans run in parallel. Above C++'s 1e4:
-/// every halfedge walks its own orbit, and below 100k that costs more than it saves.
+/// every halfedge walks part of its orbit, and below 100k that costs more than it saves.
 pub(super) const ORBIT_PAR_THRESHOLD: usize = 100_001;
+
+/// Steps a parallel owner walk takes before it leaves its orbit to the
+/// sequential pass. Far above a typical valence, so that pass is rare, and it
+/// bounds the parallel walks at this many steps per halfedge.
+const OWNER_WALK_CAP: usize = 64;
+
+/// What one halfedge's capped walk found.
+#[derive(Clone, Copy, PartialEq)]
+enum Role {
+    NotOwner,
+    Owner,
+    /// The orbit is open, so owners are not the sequential scan's.
+    Open,
+    /// The walk reached `OWNER_WALK_CAP`; the orbit is decided in a later pass.
+    Long,
+}
 
 /// The owner of every orbit with an eligible halfedge, ascending, or `None`
 /// below `threshold` or if an orbit is not a closed cycle.
@@ -41,34 +63,61 @@ where
     if !paired_back.is_empty() {
         return None;
     }
-    // 0: not an owner, 1: owner, 2: the walk left the orbit open.
-    let role: Vec<u8> = crate::par::maybe_par_map(n, threshold, |i| {
+    // The next halfedge of an orbit, or `None` where it is open. A count that
+    // is not a multiple of 3 also ends up here, and goes to the sequential scan.
+    let step = |current: usize| {
+        let p = halfedge[current].paired_halfedge;
+        if p < 0 {
+            return None;
+        }
+        let next = next_halfedge(p) as usize;
+        (next < n).then_some(next)
+    };
+    let mut role: Vec<Role> = crate::par::maybe_par_map(n, threshold, |i| {
         if !eligible(&halfedge[i]) {
-            return 0;
+            return Role::NotOwner;
         }
         let mut current = i;
-        loop {
-            let p = halfedge[current].paired_halfedge;
-            if p < 0 {
-                return 2;
-            }
-            current = next_halfedge(p) as usize;
-            if current >= n {
-                // Count not a multiple of 3: leave it to the sequential scan.
-                return 2;
-            }
+        for _ in 0..OWNER_WALK_CAP {
+            let Some(next) = step(current) else {
+                return Role::Open;
+            };
+            current = next;
             if current == i {
-                return 1;
+                return Role::Owner;
             }
             if current < i && eligible(&halfedge[current]) {
-                return 0;
+                return Role::NotOwner;
             }
         }
+        Role::Long
     });
-    if role.contains(&2) {
+    if role.contains(&Role::Open) {
         return None;
     }
-    Some((0..n).filter(|&i| role[i] == 1).collect())
+    // An orbit with a `Long` halfedge has more than `OWNER_WALK_CAP`
+    // halfedges, so none of its walks returned, and its owner, whose walk
+    // meets no smaller eligible halfedge, is `Long` too. As `Long` halfedges
+    // are eligible, the owner is the orbit's smallest `Long` halfedge: the
+    // first this ascending scan reaches. Each such orbit is walked once, to
+    // mark it visited and to find an open one.
+    let long = crate::par::maybe_par_filter(n, threshold, |i| role[i] == Role::Long);
+    let mut visited = vec![false; if long.is_empty() { 0 } else { n }];
+    for &owner in &long {
+        if visited[owner] {
+            continue;
+        }
+        role[owner] = Role::Owner;
+        let mut current = owner;
+        loop {
+            visited[current] = true;
+            current = step(current)?;
+            if current == owner {
+                break;
+            }
+        }
+    }
+    Some((0..n).filter(|&i| role[i] == Role::Owner).collect())
 }
 
 /// Appends the duplicate edges of the orbit walked from `i`, in walk order:

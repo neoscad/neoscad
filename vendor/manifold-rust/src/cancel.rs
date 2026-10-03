@@ -111,6 +111,11 @@ pub struct CancelToken {
     flag: Arc<AtomicBool>,
     // NeoSCAD patch: a condition polled with the flag (see `with_check`).
     check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Polls left before the token cancels itself. Tests use it to land a
+    /// cancel at an exact iteration of a loop, which a cancel from another
+    /// thread cannot do deterministically.
+    #[cfg(test)]
+    polls_left: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 // NeoSCAD patch: `Debug` by hand, since the check is a closure.
@@ -129,6 +134,8 @@ impl CancelToken {
         Self {
             flag: Arc::new(AtomicBool::new(false)),
             check: None,
+            #[cfg(test)]
+            polls_left: None,
         }
     }
 
@@ -136,7 +143,12 @@ impl CancelToken {
     /// request's interrupt flag), so a cancel of the request reaches the
     /// kernel without a thread to copy one flag into the other.
     pub fn from_flag(flag: Arc<AtomicBool>) -> Self {
-        Self { flag, check: None }
+        Self {
+            flag,
+            check: None,
+            #[cfg(test)]
+            polls_left: None,
+        }
     }
 
     /// NeoSCAD patch: this token, also cancelled once `check` returns
@@ -146,6 +158,16 @@ impl CancelToken {
     pub fn with_check(mut self, check: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         self.check = Some(check);
         self
+    }
+
+    /// A token that reads as live for `polls` polls, then cancels itself.
+    #[cfg(test)]
+    pub(crate) fn cancelling_after(polls: usize) -> Self {
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            check: None,
+            polls_left: Some(Arc::new(std::sync::atomic::AtomicUsize::new(polls))),
+        }
     }
 
     /// Request cancellation. Callable from any thread, including while another
@@ -161,6 +183,15 @@ impl CancelToken {
     /// Whether cancellation has been requested.
     #[inline]
     pub fn is_cancelled(&self) -> bool {
+        #[cfg(test)]
+        if let Some(left) = &self.polls_left {
+            if left
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_err()
+            {
+                self.cancel();
+            }
+        }
         if self.flag.load(Ordering::Relaxed) {
             return true;
         }

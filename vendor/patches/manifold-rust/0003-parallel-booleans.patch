@@ -1,15 +1,21 @@
 NeoSCAD patch to manifold-rust 0.15.0 (crates.io): run the large serial
 stages of a boolean in parallel, with output identical to the sequential
 code at any thread count (edge-flag and orbit scans, the result
-assembly's edge maps, face2tri's writes, the sorts). Test:
-crates/geom/tests/parallel_kernels.rs.
+assembly's edge maps, face2tri's writes, the sorts). A parallel orbit
+walk stops after 64 steps and each longer orbit is then walked once,
+sequentially, so a vertex of high valence costs linear time, not
+quadratic. Tests: crates/geom/tests/parallel_kernels.rs, and the crate's
+own (src/par_tests.rs, src/edge_op_tests.rs).
 
 Upstream: proposed as branch `neoscad/parallel-booleans`
-(commit 009dab5) of a fork of larsbrubaker/manifold-rust, on top of its
-`main` at 40f20c6 (0.15.0 plus two QuickHull commits that touch none of
-these files). This patch is that commit's changes under src/, byte for
-byte apart from CRLF line endings; the branch also adds a benchmark
-under examples/, which is not vendored.
+(commit 1dfe80b, larsbrubaker/manifold-rust#8) of a fork of
+larsbrubaker/manifold-rust, on top of its
+`main` at 9989b92 (0.15.0 plus two QuickHull commits and a regression
+test for unions, which touch none of these files). This patch is that commit's changes under src/, byte for
+byte apart from CRLF line endings and one position: that `main` adds a
+test at the end of src/edge_op_tests.rs, so there the commit's new tests
+follow it, and here they follow the file's last test in 0.15.0. The
+branch also adds a benchmark under examples/, which is not vendored.
 
 Apply from the crate root on top of 0002: patch -p1 < this file.
 The crate's older sources use CRLF line endings; files this series
@@ -785,7 +791,7 @@ See vendor/README.md ("The parallel boolean patch").
      let mut edge_swap_stack: Vec<i32> = Vec::new();
 --- a/src/edge_op_orbits.rs
 +++ b/src/edge_op_orbits.rs
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,205 @@
 +// edge_op_orbits.rs — vertex-orbit scans for `split_pinched_verts` and
 +// `dedupe_edges` (edge_op.rs): the owner search that lets both run in
 +// parallel, and the per-orbit duplicate search they share.
@@ -803,10 +809,32 @@ See vendor/README.md ("The parallel boolean patch").
 +// returns to its start or reaches a halfedge with no pair, which an open
 +// orbit's smallest eligible halfedge must do. Otherwise, or on an open orbit,
 +// the callers fall back to their sequential scans.
++//
++// A walk from every halfedge costs the square of an orbit's length when the
++// orbit meets its halfedges in ascending order, so a vertex of valence 1e5
++// would take 1e10 steps against the sequential scan's 1e5. Walks therefore
++// stop after `OWNER_WALK_CAP` steps, and the orbits they leave undecided are
++// walked once each, sequentially, which keeps the search linear.
 +
 +/// Halfedge count from which the orbit scans run in parallel. Above C++'s 1e4:
-+/// every halfedge walks its own orbit, and below 100k that costs more than it saves.
++/// every halfedge walks part of its orbit, and below 100k that costs more than it saves.
 +pub(super) const ORBIT_PAR_THRESHOLD: usize = 100_001;
++
++/// Steps a parallel owner walk takes before it leaves its orbit to the
++/// sequential pass. Far above a typical valence, so that pass is rare, and it
++/// bounds the parallel walks at this many steps per halfedge.
++const OWNER_WALK_CAP: usize = 64;
++
++/// What one halfedge's capped walk found.
++#[derive(Clone, Copy, PartialEq)]
++enum Role {
++    NotOwner,
++    Owner,
++    /// The orbit is open, so owners are not the sequential scan's.
++    Open,
++    /// The walk reached `OWNER_WALK_CAP`; the orbit is decided in a later pass.
++    Long,
++}
 +
 +/// The owner of every orbit with an eligible halfedge, ascending, or `None`
 +/// below `threshold` or if an orbit is not a closed cycle.
@@ -829,34 +857,61 @@ See vendor/README.md ("The parallel boolean patch").
 +    if !paired_back.is_empty() {
 +        return None;
 +    }
-+    // 0: not an owner, 1: owner, 2: the walk left the orbit open.
-+    let role: Vec<u8> = crate::par::maybe_par_map(n, threshold, |i| {
++    // The next halfedge of an orbit, or `None` where it is open. A count that
++    // is not a multiple of 3 also ends up here, and goes to the sequential scan.
++    let step = |current: usize| {
++        let p = halfedge[current].paired_halfedge;
++        if p < 0 {
++            return None;
++        }
++        let next = next_halfedge(p) as usize;
++        (next < n).then_some(next)
++    };
++    let mut role: Vec<Role> = crate::par::maybe_par_map(n, threshold, |i| {
 +        if !eligible(&halfedge[i]) {
-+            return 0;
++            return Role::NotOwner;
 +        }
 +        let mut current = i;
-+        loop {
-+            let p = halfedge[current].paired_halfedge;
-+            if p < 0 {
-+                return 2;
-+            }
-+            current = next_halfedge(p) as usize;
-+            if current >= n {
-+                // Count not a multiple of 3: leave it to the sequential scan.
-+                return 2;
-+            }
++        for _ in 0..OWNER_WALK_CAP {
++            let Some(next) = step(current) else {
++                return Role::Open;
++            };
++            current = next;
 +            if current == i {
-+                return 1;
++                return Role::Owner;
 +            }
 +            if current < i && eligible(&halfedge[current]) {
-+                return 0;
++                return Role::NotOwner;
 +            }
 +        }
++        Role::Long
 +    });
-+    if role.contains(&2) {
++    if role.contains(&Role::Open) {
 +        return None;
 +    }
-+    Some((0..n).filter(|&i| role[i] == 1).collect())
++    // An orbit with a `Long` halfedge has more than `OWNER_WALK_CAP`
++    // halfedges, so none of its walks returned, and its owner, whose walk
++    // meets no smaller eligible halfedge, is `Long` too. As `Long` halfedges
++    // are eligible, the owner is the orbit's smallest `Long` halfedge: the
++    // first this ascending scan reaches. Each such orbit is walked once, to
++    // mark it visited and to find an open one.
++    let long = crate::par::maybe_par_filter(n, threshold, |i| role[i] == Role::Long);
++    let mut visited = vec![false; if long.is_empty() { 0 } else { n }];
++    for &owner in &long {
++        if visited[owner] {
++            continue;
++        }
++        role[owner] = Role::Owner;
++        let mut current = owner;
++        loop {
++            visited[current] = true;
++            current = step(current)?;
++            if current == owner {
++                break;
++            }
++        }
++    }
++    Some((0..n).filter(|&i| role[i] == Role::Owner).collect())
 +}
 +
 +/// Appends the duplicate edges of the orbit walked from `i`, in walk order:
@@ -944,10 +999,36 @@ See vendor/README.md ("The parallel boolean patch").
 +}
 --- a/src/edge_op_tests.rs
 +++ b/src/edge_op_tests.rs
-@@ -124,3 +124,45 @@
+@@ -124,3 +124,127 @@
          .count();
      assert_eq!(moved, 0, "a corner that moves changes the solid");
  }
++
++/// The owners the sequential scans find: each orbit's smallest eligible
++/// halfedge, walked with visited flags in ascending order.
++#[cfg(feature = "parallel")]
++fn sequential_orbit_owners(
++    halfedge: &[Halfedge],
++    eligible: &dyn Fn(&Halfedge) -> bool,
++) -> Vec<usize> {
++    let mut visited = vec![false; halfedge.len()];
++    let mut owners = Vec::new();
++    for i in 0..halfedge.len() {
++        if visited[i] || !eligible(&halfedge[i]) {
++            continue;
++        }
++        owners.push(i);
++        let mut current = i;
++        loop {
++            visited[current] = true;
++            current = next_halfedge(halfedge[current].paired_halfedge) as usize;
++            if current == i {
++                break;
++            }
++        }
++    }
++    owners
++}
 +
 +/// `orbit_owners` must give each orbit's smallest eligible halfedge, as the
 +/// sequential scans do, on cubes touching along edges, for two rules.
@@ -971,23 +1052,79 @@ See vendor/README.md ("The parallel boolean patch").
 +        h.start_vert >= 0 && h.end_vert % 3 != 0
 +    }];
 +    for eligible in rules {
-+        let mut visited = vec![false; halfedge.len()];
-+        let mut expected = Vec::new();
-+        for i in 0..halfedge.len() {
-+            if visited[i] || !eligible(&halfedge[i]) {
-+                continue;
-+            }
-+            expected.push(i);
-+            let mut current = i;
-+            loop {
-+                visited[current] = true;
-+                current = next_halfedge(halfedge[current].paired_halfedge) as usize;
-+                if current == i {
-+                    break;
-+                }
-+            }
-+        }
++        let expected = sequential_orbit_owners(halfedge, eligible);
 +        assert_eq!(orbit_owners(halfedge, 0, eligible), Some(expected));
++    }
++}
++
++/// The halfedges of a bicone: two fans of `k` triangles around a ring, so
++/// both apexes have valence `k`. The top fan is stored in reverse, so the walk
++/// around the top apex meets its halfedges in ascending order.
++#[cfg(feature = "parallel")]
++fn bicone_halfedges(k: usize) -> Vec<Halfedge> {
++    let (top, bottom) = (k as i32, k as i32 + 1);
++    let ring = |t: usize| (t % k) as i32;
++    let top_tri = |t: usize| k - 1 - t % k;
++    let bottom_tri = |t: usize| k + t % k;
++    let mut halfedge = vec![
++        Halfedge {
++            start_vert: -1,
++            end_vert: -1,
++            paired_halfedge: -1,
++            prop_vert: -1,
++        };
++        6 * k
++    ];
++    let mut set = |tri: usize, verts: [i32; 3], pairs: [usize; 3]| {
++        for j in 0..3 {
++            halfedge[3 * tri + j] = Halfedge {
++                start_vert: verts[j],
++                end_vert: verts[(j + 1) % 3],
++                paired_halfedge: pairs[j] as i32,
++                prop_vert: verts[j],
++            };
++        }
++    };
++    for t in 0..k {
++        // Top (apex, r_t, r_t+1), bottom (apex, r_t+1, r_t).
++        set(
++            top_tri(t),
++            [top, ring(t), ring(t + 1)],
++            [
++                3 * top_tri(t + k - 1) + 2,
++                3 * bottom_tri(t) + 1,
++                3 * top_tri(t + 1),
++            ],
++        );
++        set(
++            bottom_tri(t),
++            [bottom, ring(t + 1), ring(t)],
++            [
++                3 * bottom_tri(t + 1) + 2,
++                3 * top_tri(t) + 1,
++                3 * bottom_tri(t + k - 1),
++            ],
++        );
++    }
++    halfedge
++}
++
++/// Two vertices of valence 100,000, in a mesh above `ORBIT_PAR_THRESHOLD`.
++/// If every halfedge walked its orbit until it met a smaller one, this would
++/// take 1e10 steps; walks stop at `OWNER_WALK_CAP` and each long orbit is
++/// walked once.
++#[cfg(feature = "parallel")]
++#[test]
++fn test_orbit_owners_of_a_high_valence_vertex() {
++    let halfedge = bicone_halfedges(100_000);
++    assert!(halfedge.len() >= ORBIT_PAR_THRESHOLD);
++    let rules: [&(dyn Fn(&Halfedge) -> bool + Sync); 2] = [&|h| h.start_vert >= 0, &|h| {
++        h.start_vert >= 0 && h.end_vert % 3 != 0
++    }];
++    for eligible in rules {
++        let expected = sequential_orbit_owners(&halfedge, eligible);
++        let owners = orbit_owners(&halfedge, ORBIT_PAR_THRESHOLD, eligible);
++        assert_eq!(owners, Some(expected));
 +    }
 +}
 --- a/src/face_op_triangulate.rs
@@ -1490,15 +1627,16 @@ See vendor/README.md ("The parallel boolean patch").
 +mod tests;
 --- a/src/par_tests.rs
 +++ b/src/par_tests.rs
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,241 @@
 +// par_tests.rs — the parallel sites must give the sequential output, on any
 +// thread count.
 +
 +use crate::linalg::Vec3;
 +use crate::manifold::Manifold;
 +
-+/// FNV-1a over the output mesh, less `run_original_id`, which comes from the
-+/// process-wide ID counter.
++/// FNV-1a over every field of the output mesh, with the length of every list.
++/// Of `run_original_id`, which comes from the process-wide ID counter, only
++/// the length is hashed.
 +fn fingerprint(m: &Manifold) -> u64 {
 +    let gl = m.get_mesh_gl64(-1);
 +    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1509,8 +1647,12 @@ See vendor/README.md ("The parallel boolean patch").
 +        }
 +    };
 +    eat(&gl.num_prop.to_le_bytes());
-+    for x in &gl.vert_properties {
-+        eat(&x.to_bits().to_le_bytes());
++    eat(&gl.tolerance.to_bits().to_le_bytes());
++    for list in [&gl.vert_properties, &gl.run_transform, &gl.halfedge_tangent] {
++        eat(&(list.len() as u64).to_le_bytes());
++        for x in list {
++            eat(&x.to_bits().to_le_bytes());
++        }
 +    }
 +    for list in [
 +        &gl.tri_verts,
@@ -1524,6 +1666,9 @@ See vendor/README.md ("The parallel boolean patch").
 +            eat(&x.to_le_bytes());
 +        }
 +    }
++    eat(&(gl.run_original_id.len() as u64).to_le_bytes());
++    eat(&(gl.run_flags.len() as u64).to_le_bytes());
++    eat(&gl.run_flags);
 +    h
 +}
 +
@@ -1567,7 +1712,7 @@ See vendor/README.md ("The parallel boolean patch").
 +    for threads in [1, 8] {
 +        assert_eq!(
 +            run_on(threads, &model),
-+            0x1d97_1ec0_be2b_3cfb,
++            0x0116_641f_953c_52d0,
 +            "{threads} threads"
 +        );
 +    }
@@ -1580,7 +1725,7 @@ See vendor/README.md ("The parallel boolean patch").
 +/// disjoint, so `compose` builds it and three unions join them.
 +#[test]
 +fn large_checkerboard_unions_keep_the_sequential_output() {
-+    for (size, hash) in [(1.0, 0x2257_e6ea_ac8d_7e6e), (1.5, 0xb5c4_56fa_a945_58ee)] {
++    for (size, hash) in [(1.0, 0x89fd_3a6c_41b3_a52c), (1.5, 0x230c_a78a_1804_c434)] {
 +        let model = || {
 +            let cube = Manifold::cube(Vec3::splat(size), false);
 +            let class = |(ox, oy, oz): (i32, i32, i32)| {
@@ -1615,13 +1760,10 @@ See vendor/README.md ("The parallel boolean patch").
 +    }
 +}
 +
-+/// An imported checkerboard of unit cubes, 20 a side, whose cubes share the
-+/// verts where they touch, so `split_pinched_verts` has thousands of orbits to
-+/// split, in a mesh over the 100,001-halfedge thresholds of the orbit and
-+/// edge-flag scans. Runs in every build, against `main`'s hash.
-+#[test]
-+fn pinched_checkerboard_import_keeps_the_sequential_output() {
-+    const N: u32 = 20;
++/// A checkerboard of unit cubes, `n` a side, as one mesh whose cubes share
++/// the verts where they touch, so `split_pinched_verts` has an orbit to split
++/// at every shared vert.
++fn pinched_checkerboard(n: u32) -> crate::types::MeshGL64 {
 +    // Corners as x | y << 1 | z << 2, wound outward.
 +    const QUADS: [[u32; 4]; 6] = [
 +        [0, 4, 6, 2],
@@ -1631,38 +1773,47 @@ See vendor/README.md ("The parallel boolean patch").
 +        [0, 2, 3, 1],
 +        [4, 5, 7, 6],
 +    ];
++    let side = n + 1;
++    let mut gl = crate::types::MeshGL64 {
++        num_prop: 3,
++        ..Default::default()
++    };
++    for z in 0..side {
++        for y in 0..side {
++            for x in 0..side {
++                gl.vert_properties
++                    .extend([f64::from(x), f64::from(y), f64::from(z)]);
++            }
++        }
++    }
++    for z in 0..n {
++        for y in 0..n {
++            for x in 0..n {
++                if (x + y + z) % 2 != 0 {
++                    continue;
++                }
++                let corner = |c: u32| {
++                    let (cx, cy, cz) = (x + (c & 1), y + (c >> 1 & 1), z + (c >> 2));
++                    u64::from(cx + side * (cy + side * cz))
++                };
++                for q in QUADS {
++                    gl.tri_verts
++                        .extend([q[0], q[1], q[2], q[0], q[2], q[3]].map(corner));
++                }
++            }
++        }
++    }
++    gl
++}
++
++/// An imported checkerboard of 20 a side: `split_pinched_verts` has
++/// thousands of orbits to split, in a mesh over the 100,001-halfedge
++/// thresholds of the orbit and edge-flag scans. Runs in every build, against
++/// `main`'s hash.
++#[test]
++fn pinched_checkerboard_import_keeps_the_sequential_output() {
 +    let model = || {
-+        let side = N + 1;
-+        let mut gl = crate::types::MeshGL64 {
-+            num_prop: 3,
-+            ..Default::default()
-+        };
-+        for z in 0..side {
-+            for y in 0..side {
-+                for x in 0..side {
-+                    gl.vert_properties
-+                        .extend([f64::from(x), f64::from(y), f64::from(z)]);
-+                }
-+            }
-+        }
-+        for z in 0..N {
-+            for y in 0..N {
-+                for x in 0..N {
-+                    if (x + y + z) % 2 != 0 {
-+                        continue;
-+                    }
-+                    let corner = |c: u32| {
-+                        let (cx, cy, cz) = (x + (c & 1), y + (c >> 1 & 1), z + (c >> 2));
-+                        u64::from(cx + side * (cy + side * cz))
-+                    };
-+                    for q in QUADS {
-+                        gl.tri_verts
-+                            .extend([q[0], q[1], q[2], q[0], q[2], q[3]].map(corner));
-+                    }
-+                }
-+            }
-+        }
-+        let result = Manifold::from_mesh_gl64(&gl);
++        let result = Manifold::from_mesh_gl64(&pinched_checkerboard(20));
 +        assert!(
 +            3 * result.num_tri() > 100_001,
 +            "{} triangles",
@@ -1673,7 +1824,47 @@ See vendor/README.md ("The parallel boolean patch").
 +    for threads in [1, 8] {
 +        assert_eq!(
 +            run_on(threads, &model),
-+            0xf52c_94c8_660d_b561,
++            0xaf78_1fb7_4bc9_643f,
++            "{threads} threads"
++        );
++    }
++}
++
++/// The same import with a tangent on every halfedge, so the output's
++/// `halfedge_tangent` is not empty and has gone through the cleanup and
++/// `sort_geometry`'s gather, which permutes it with the halfedges above its
++/// 100,000 threshold. The tangents are multiples of 1/4, exact everywhere.
++#[test]
++fn pinched_checkerboard_import_with_tangents_keeps_the_sequential_output() {
++    let model = || {
++        let mut gl = pinched_checkerboard(20);
++        let quarters = |k: usize, m: usize| (k % m) as f64 / 4.0 - 1.0;
++        gl.halfedge_tangent = (0..gl.tri_verts.len())
++            .flat_map(|k| {
++                [
++                    quarters(k, 9),
++                    quarters(k, 7),
++                    quarters(k, 5),
++                    quarters(k, 4),
++                ]
++            })
++            .collect();
++        let result = Manifold::from_mesh_gl64(&gl);
++        assert!(
++            3 * result.num_tri() > 100_001,
++            "{} triangles",
++            result.num_tri()
++        );
++        assert_eq!(
++            result.get_mesh_gl64(-1).halfedge_tangent.len(),
++            12 * result.num_tri()
++        );
++        result
++    };
++    for threads in [1, 8] {
++        assert_eq!(
++            run_on(threads, &model),
++            0x5829_215b_5954_d206,
 +            "{threads} threads"
 +        );
 +    }
