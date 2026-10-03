@@ -31,8 +31,8 @@ nix = { version = "0.31", default-features = false, features = ["user", "socket"
 # pipe listener (overlapped I/O underneath, so a connection's reader and
 # its writer do not block each other; no async runtime) and its SDDL
 # security descriptor. windows-sys, already in the build through
-# interprocess, for the calls the pipe's access check needs
-# (src/transport/win.rs).
+# interprocess, for the calls the pipe's access check needs and for the
+# client's overlapped reads and writes (src/transport/win.rs).
 [target.'cfg(windows)'.dependencies]
 interprocess = { version = "2.4.4", default-features = false }
 windows-sys = { version = "0.61", features = [
@@ -40,6 +40,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_Threading",
 ] }
 

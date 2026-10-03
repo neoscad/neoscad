@@ -1347,9 +1347,12 @@ lead them, come roughly in order of user impact.
   - Windows: a pipe's halves cannot be shut down from another thread
     (`transport::Closer` does nothing there), so Disconnect and stop
     rely on the agent closing its end after `bye`; a client that never
-    does keeps one reader thread until it exits. The pipe listing
-    (`read_dir(r"\\.\pipe\")`) and the link have only been compiled for
-    Windows, not run.
+    does keeps one reader thread until it exits. The client's pipe is
+    now overlapped (`transport/win.rs`, `OverlappedPipe`), so `CancelIoEx`
+    could make its `Closer` work; the listener's halves are
+    interprocess's. The first Windows CI run of the agent tests found the
+    client's pipe synchronous, so `neoscad mcp`'s writes waited behind its
+    pending read and `initialize` never answered.
   - The app's version check and the editor's `agentEdit` meet on two
     threads: the host compares its revision on the main thread, but a
     keystroke still on its way from the web view is not counted yet.

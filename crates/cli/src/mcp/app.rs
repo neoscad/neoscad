@@ -97,6 +97,8 @@ struct State {
     /// Addresses not to connect to again: the app said `bye` with
     /// `reconnect: false` (the user disconnected this agent there).
     refused: HashSet<PathBuf>,
+    /// Addresses that failed the owner check, already reported on stderr.
+    untrusted: HashSet<PathBuf>,
     /// The agent's document numbers, by app address and app id.
     numbers: HashMap<(PathBuf, u64), u64>,
     next_number: u64,
@@ -215,8 +217,23 @@ impl Apps {
     fn connect(self: &Arc<Self>, address: PathBuf) {
         // The owner check comes first: nothing is sent to a socket or pipe
         // that is not this user's.
-        let Ok(conn) = transport::connect(&address) else {
-            return;
+        let conn = match transport::connect(&address) {
+            Ok(conn) => conn,
+            // Gone since the listing (an app that just quit): nothing to say.
+            Err(transport::ConnectError::NoServer) => return,
+            // Said once per address (the scan retries every RESCAN, and a
+            // directory's permissions may yet be fixed). Skipped silently,
+            // a user whose app was running could not tell why the agent
+            // never saw it.
+            Err(transport::ConnectError::Untrusted(why)) => {
+                if lock(&self.state).untrusted.insert(address.clone()) {
+                    eprintln!(
+                        "neoscad mcp: not connecting to {}: {why}",
+                        address.display()
+                    );
+                }
+                return;
+            }
         };
         let c = Arc::new(Conn {
             serial: self.next_conn.fetch_add(1, Ordering::SeqCst),
@@ -228,6 +245,10 @@ impl Apps {
             documents: Mutex::new(Vec::new()),
         });
         if !c.send(&self.welcome()) {
+            eprintln!(
+                "neoscad mcp: the NeoSCAD app at {} closed the connection at once",
+                c.address.display()
+            );
             return;
         }
         lock(&self.state).conns.push(c.clone());

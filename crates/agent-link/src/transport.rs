@@ -419,9 +419,13 @@ mod imp {
             // (`ImpersonateNamedPipeClient`), and without this flag at the
             // client's full rights. Someone else's pipe at our name must
             // not get that before the owner check below refuses it.
+            //
+            // Overlapped, so the connection's reader and writer do not
+            // wait on each other (see `win::OverlappedPipe`).
             let opened = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
+                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED)
                 .security_qos_flags(
                     windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION,
                 )
@@ -451,12 +455,15 @@ mod imp {
                 )));
             }
         }
-        // One synchronous handle for both directions: a client writes its
-        // request and then reads, never both at once.
-        let writer = pipe.try_clone().map_err(|_| ConnectError::NoServer)?;
+        // One handle for both directions. Not a synchronous one: `neoscad
+        // mcp` keeps a read pending on an app's connection while it writes
+        // (`serve`'s client, which writes and then reads, never would), and
+        // Windows serializes I/O on a synchronous handle, so that write
+        // waited for the app to speak.
+        let pipe = win::OverlappedPipe::new(pipe);
         Ok(Conn {
-            reader: Box::new(pipe),
-            writer: Box::new(writer),
+            reader: Box::new(pipe.clone()),
+            writer: Box::new(pipe),
             closer: Closer::default(),
         })
     }
@@ -631,6 +638,55 @@ mod tests {
         assert_eq!(line, "hello\n");
         server.join().unwrap();
         drop(w);
+        cleanup(&address);
+    }
+
+    /// `neoscad mcp`'s use: a read stays pending on the client while it
+    /// writes. With a synchronous Windows pipe handle the write waited
+    /// behind the read (I/O on such a handle is serialized), and the
+    /// server, which answers only once it has the write, never did.
+    #[test]
+    fn a_client_writes_while_its_read_is_pending() {
+        let address = scratch_address("duplex");
+        let listener = Listener::bind(&address, true).unwrap();
+        let server = std::thread::spawn(move || {
+            let conn = listener.accept_from_user().unwrap().expect("our own user");
+            let mut line = String::new();
+            BufReader::new(conn.reader).read_line(&mut line).unwrap();
+            let mut w = conn.writer;
+            w.write_all(format!("got {line}").as_bytes()).unwrap();
+            w.flush().unwrap();
+            // Held open a while, so the test does not depend on what a
+            // closed pipe still gives its reader.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
+        let conn = connect(&address).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut r = BufReader::new(conn.reader);
+        let reader = std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = r.read_line(&mut line);
+            let _ = tx.send(line);
+        });
+        // Let the read start before the write.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut w = conn.writer;
+        let (wtx, wrx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ok = w.write_all(b"ping\n").and_then(|()| w.flush()).is_ok();
+            let _ = wtx.send(ok);
+            // The writing half lives until the answer is in.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
+        let wait = std::time::Duration::from_secs(10);
+        assert_eq!(
+            wrx.recv_timeout(wait),
+            Ok(true),
+            "the write waited for the pending read"
+        );
+        assert_eq!(rx.recv_timeout(wait).as_deref(), Ok("got ping\n"));
+        reader.join().unwrap();
+        server.join().unwrap();
         cleanup(&address);
     }
 

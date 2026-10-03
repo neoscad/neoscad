@@ -12,6 +12,7 @@
 using System.Text.Json;
 using NeoSCAD.Host;
 using NeoSCAD.Native;
+using Xunit.Abstractions;
 
 namespace NeoSCAD.Tests;
 
@@ -63,9 +64,11 @@ public sealed class AgentTests : IDisposable
     readonly DocumentSession doc;
     readonly FakeAgentEditor editor;
     readonly AgentDocumentHost host;
+    readonly ITestOutputHelper output;
 
-    public AgentTests()
+    public AgentTests(ITestOutputHelper output)
     {
+        this.output = output;
         doc = new DocumentSession(core, ui, timer, clock, dir);
         var model = Path.Combine(dir, "gear.scad");
         File.WriteAllText(model, "teeth = 12;\ncube(teeth);\n");
@@ -332,7 +335,20 @@ public sealed class AgentTests : IDisposable
             var cam = withView.Camera(1, new AgentCameraChange(null, false, [1, 2, 3], null, 50));
             Assert.Equal([1.0, 2.0, 3.0], cam.Vpt);
             withView.Annotate(1, [], [new ViewMarker([0, 0, 0], "here", [1, 0, 0, 1])]);
+            // Opening the file scheduled a preview, and a capture waits for
+            // a preview that is due (AgentDocumentHost.RunWait, a minute)
+            // so the agent sees its edit's result. The manual timer never
+            // fires by itself, so let the pause pass and run it here;
+            // without this the capture outwaited OnLink's 20 s (the first
+            // Windows CI run, the first with a graphics adapter).
+            Assert.True(doc.RunPending);
+            clock.NowMs += 1_000;
+            timer.Fire();
+            Assert.True(ui.PumpUntil(() => !doc.RunPending, Wait), "the opening preview did not finish");
+            var started = DateTime.UtcNow;
             var capture = OnLink(() => withView.Capture(1, 128));
+            output.WriteLine($"capture: {capture.Width}x{capture.Height} on {capture.Backend}, " +
+                $"{(DateTime.UtcNow - started).TotalMilliseconds:0} ms");
             Assert.Equal((128u, 128u), (capture.Width, capture.Height));
         }
     }

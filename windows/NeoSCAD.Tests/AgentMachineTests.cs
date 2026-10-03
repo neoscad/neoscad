@@ -12,6 +12,7 @@
 //   scripts/windows/docker-test.sh --with-cli does in Docker), and passes
 //   vacuously otherwise, saying so.
 
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -210,11 +211,51 @@ public sealed class AgentEndToEndTests(ITestOutputHelper output) : IDisposable
         }
     }
 
-    T Pumped<T>(Func<T> work)
+    readonly Stopwatch elapsed = Stopwatch.StartNew();
+    // What the failure output shows: the command line's stderr, and the
+    // link's view of its clients. Windows CI is the only place the pipes
+    // run, and a hang there otherwise says only "no answer in time".
+    McpClient? mcp;
+    AgentConnection? agents;
+
+    void Note(string what) => output.WriteLine($"[{elapsed.ElapsedMilliseconds,6} ms] {what}");
+
+    T Pumped<T>(string step, Func<T> work)
     {
+        Note($"{step}: sent");
         var task = Task.Run(work);
-        Assert.True(ui.PumpUntil(() => task.IsCompleted, Wait), "no answer in time");
+        if (!ui.PumpUntil(() => task.IsCompleted, Wait))
+        {
+            Note($"{step}: no answer after {Wait.TotalSeconds:0} s");
+            Diagnose();
+            Assert.Fail($"no answer in time to {step}");
+        }
+        Note($"{step}: answered");
         return task.GetAwaiter().GetResult();
+    }
+
+    void Diagnose()
+    {
+        Note($"the window's link: {agents?.Address ?? "not listening"}; clients: " +
+            string.Join(", ", agents?.Status?.Clients.Select(c => $"{c.Id} {c.Name ?? "(no name yet)"}") ?? []));
+        if (OperatingSystem.IsWindows())
+        {
+            // What `neoscad mcp`'s discovery lists (crates/agent-link/src/discovery.rs).
+            try
+            {
+                var pipes = Directory.GetFiles(@"\\.\pipe\").Where(p => p.Contains("neoscad", StringComparison.OrdinalIgnoreCase));
+                Note($"neoscad pipes: {string.Join(", ", pipes)}");
+            }
+            catch (Exception e)
+            {
+                Note($"cannot list the pipes: {e.Message}");
+            }
+        }
+        if (mcp is not null)
+        {
+            Note($"neoscad mcp {(mcp.Exited ? "has exited" : "is running")}; its stderr:");
+            foreach (var line in mcp.Stderr) output.WriteLine($"  {line}");
+        }
     }
 
     [Fact]
@@ -238,12 +279,18 @@ public sealed class AgentEndToEndTests(ITestOutputHelper output) : IDisposable
         finally
         {
             AgentDocumentHost.RunWait = savedRunWait;
+            if (mcp is not null)
+            {
+                // Shown when the test fails anywhere (xunit prints a passing
+                // test's output only when asked).
+                output.WriteLine("neoscad mcp's stderr:");
+                foreach (var line in mcp.Stderr) output.WriteLine($"  {line}");
+            }
         }
     }
 
     void Run(string cli)
     {
-
         Directory.CreateDirectory(Path.Combine(dir, "work"));
         Directory.CreateDirectory(Path.Combine(dir, "models"));
         var model = Path.Combine(dir, "models", "gear.scad");
@@ -257,24 +304,31 @@ public sealed class AgentEndToEndTests(ITestOutputHelper output) : IDisposable
         var rendezvous = Path.Combine(dir, $"rv{Environment.ProcessId}");
         using var agents = new AgentConnection(doc, ui, editor, () => null, "test", settings, rendezvous,
             watchSettings: false);
+        this.agents = agents;
         agents.Activated(true);
         Assert.True(ui.PumpUntil(() => agents.Address is not null, Wait), "the link did not listen");
-        output.WriteLine($"listening at {agents.Address}");
+        Note($"listening at {agents.Address}");
 
         using var mcp = McpClient.Start(cli, Path.Combine(dir, "work"), rendezvous);
-        var init = Pumped(() => mcp.Call("initialize", new
+        this.mcp = mcp;
+        Note("neoscad mcp started");
+        var init = Pumped("initialize", () => mcp.Call("initialize", new
         {
             protocolVersion = "2025-11-25",
             capabilities = new { },
             clientInfo = new { name = "test-client", title = "Test Client", version = "1" },
         }));
         Assert.Contains("NeoSCAD app open", init.GetProperty("result").GetProperty("instructions").GetString());
-        Assert.True(ui.PumpUntil(() => agents.Status?.Clients.FirstOrDefault()?.Name == "Test Client", Wait),
-            $"the window did not see the agent: {agents.Status}");
+        if (!ui.PumpUntil(() => agents.Status?.Clients.FirstOrDefault()?.Name == "Test Client", Wait))
+        {
+            Diagnose();
+            Assert.Fail($"the window did not see the agent: {agents.Status}");
+        }
+        Note("the window sees the agent");
         Assert.Equal("Test Client connected", agents.Indicator.Text);
 
         var started = Stopwatch.StartNew();
-        var read = Pumped(() => mcp.Tool("editor_read", new { }));
+        var read = Pumped("editor_read", () => mcp.Tool("editor_read", new { }));
         output.WriteLine($"editor_read through neoscad mcp and the C# host: {started.Elapsed.TotalMilliseconds:0.0} ms");
         var text = McpClient.Text(read);
         Assert.Contains("gear.scad in NeoSCAD (document 1)", text);
@@ -282,7 +336,7 @@ public sealed class AgentEndToEndTests(ITestOutputHelper output) : IDisposable
         Assert.Contains("cube(10);", text);
 
         var v = doc.Revision;
-        var edit = Pumped(() => mcp.Tool("editor_edit", new
+        var edit = Pumped("editor_edit", () => mcp.Tool("editor_edit", new
         {
             version = v,
             edits = new[] { new { old = "cube(10);", @new = "cube(20);" } },
@@ -293,7 +347,7 @@ public sealed class AgentEndToEndTests(ITestOutputHelper output) : IDisposable
         Assert.Single(editor.Applied);
 
         // An error in the window reaches the agent as a sentence.
-        var capture = Pumped(() => mcp.Tool("view_capture", new { }));
+        var capture = Pumped("view_capture", () => mcp.Tool("view_capture", new { }));
         Assert.True(capture.GetProperty("isError").GetBoolean());
         Assert.Contains("no 3D view", McpClient.Text(capture));
 
@@ -301,7 +355,12 @@ public sealed class AgentEndToEndTests(ITestOutputHelper output) : IDisposable
         // Unix its socket with it.
         var client = agents.Status!.Clients.Single().Id;
         agents.Disconnect(client);
-        Assert.True(ui.PumpUntil(() => agents.Status?.Clients.Length == 0, Wait));
+        if (!ui.PumpUntil(() => agents.Status?.Clients.Length == 0, Wait))
+        {
+            Diagnose();
+            Assert.Fail("the agent was still connected after the window disconnected it");
+        }
+        Note("disconnected");
         agents.SetAllowed(false);
         Assert.Null(agents.Status);
         Assert.Equal(AgentIndicatorState.Hidden, agents.Indicator.State);
@@ -314,9 +373,29 @@ public sealed class AgentEndToEndTests(ITestOutputHelper output) : IDisposable
 sealed class McpClient : IDisposable
 {
     readonly Process process;
+    readonly Stopwatch since = Stopwatch.StartNew();
+    readonly ConcurrentQueue<string> stderr = new();
     int next = 1;
 
     McpClient(Process process) => this.process = process;
+
+    /// <summary>What it has written to stderr so far, each line with its time since the start.</summary>
+    public IEnumerable<string> Stderr => stderr;
+
+    public bool Exited
+    {
+        get
+        {
+            try
+            {
+                return process.HasExited;
+            }
+            catch (InvalidOperationException)
+            {
+                return true;
+            }
+        }
+    }
 
     public static McpClient Start(string cli, string cwd, string rendezvous)
     {
@@ -332,9 +411,13 @@ sealed class McpClient : IDisposable
         info.Environment["NEOSCAD_AGENT_DIR"] = rendezvous;
         info.Environment.Remove("OPENSCADPATH");
         var p = Process.Start(info)!;
-        p.ErrorDataReceived += (_, _) => { };
+        var client = new McpClient(p);
+        p.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data is not null) client.stderr.Enqueue($"[{client.since.ElapsedMilliseconds,6} ms] {e.Data}");
+        };
         p.BeginErrorReadLine();
-        return new McpClient(p);
+        return client;
     }
 
     public JsonElement Call(string method, object parameters)
