@@ -294,7 +294,8 @@ or a token.
 | Windows | `\\.\pipe\neoscad-<SID>-app-<pid>-<random>` | The command line lists the pipe namespace for its user's prefix. Each app process (one per window) has its own |
 
 `NEOSCAD_AGENT_DIR` replaces the search and listen places with one
-directory (on Windows, a tag in the pipe names), as the tests use. The
+directory (on Windows, a hash of its whole path tags the pipe names, so
+two such directories are as separate as on Unix), as the tests use. The
 name is random so that two app processes never collide, including two
 Flatpak sandboxes that both see their app as process 2. An app removes
 its socket when it stops, and on start removes sockets in its own

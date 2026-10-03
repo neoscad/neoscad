@@ -21,8 +21,10 @@
 //! - **Windows:** a pipe `\\.\pipe\neoscad-<SID>-app-<pid>-<random>`; the
 //!   command line lists the pipe namespace for its user's prefix.
 //!
-//! `NEOSCAD_AGENT_DIR` names one directory instead (on Windows, a tag in
-//! the pipe names), for tests and for running two setups side by side.
+//! `NEOSCAD_AGENT_DIR` names one directory instead, for tests and for
+//! running two setups side by side. On Windows, where pipes share one
+//! namespace, a hash of the directory's whole path tags the pipe names
+//! ([`dir_tag`]), so two directories never see each other's apps.
 //!
 //! Finding a socket proves nothing: the command line checks its owner and
 //! directory before it sends anything ([`crate::transport::connect`]).
@@ -61,8 +63,8 @@ impl Rendezvous {
         }
     }
 
-    /// One place only: a directory on Unix; on Windows its last component
-    /// becomes a tag in the pipe names.
+    /// One place only: a directory on Unix; on Windows a hash of its path
+    /// becomes a tag in the pipe names ([`dir_tag`]).
     pub fn at(dir: &Path) -> Rendezvous {
         imp::at(dir)
     }
@@ -104,6 +106,43 @@ impl Rendezvous {
         out.sort();
         out.dedup();
         out
+    }
+}
+
+/// The pipe-name tag for `NEOSCAD_AGENT_DIR` on Windows: `rv` and a hash
+/// of the directory's absolute path, folded the way Windows compares
+/// paths (case, `/` against `\`, a trailing separator).
+///
+/// The whole path, not its last component: tagging by the folder's name
+/// alone made `C:\a\rv` and `C:\b\rv` one rendezvous, so parallel tests
+/// (each with its own `...\rv`) attached to each other's apps, and two
+/// setups side by side would have crossed the same way. The `rv` start
+/// keeps a tagged name from reading as an untagged one: after the user's
+/// prefix an untagged app's name goes straight on with `app-`.
+///
+/// FNV-1a rather than std's hasher, whose output may change between
+/// Rust releases: the app and `neoscad mcp` can be different builds and
+/// must compute the same tag.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn dir_tag(dir: &Path) -> String {
+    let abs = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let folded = abs.to_string_lossy().replace('/', "\\").to_lowercase();
+    let folded = folded.trim_end_matches('\\');
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in folded.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("rv{h:016x}")
+}
+
+/// The pipe names' prefix for `user` (a SID), tagged for one
+/// `NEOSCAD_AGENT_DIR` or not.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pipe_prefix(user: &str, dir: Option<&Path>) -> String {
+    match dir {
+        Some(d) => format!("neoscad-{user}-{}-", dir_tag(d)),
+        None => format!("neoscad-{user}-"),
     }
 }
 
@@ -209,7 +248,7 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    use super::{PREFIX, Rendezvous, is_app};
+    use super::{PREFIX, Rendezvous, is_app, pipe_prefix};
     use crate::transport::Address;
     use std::path::{Path, PathBuf};
 
@@ -228,18 +267,11 @@ mod imp {
     }
 
     pub fn default() -> Rendezvous {
-        with_prefix(format!("neoscad-{}-", user()))
+        with_prefix(pipe_prefix(&user(), None))
     }
 
     pub fn at(dir: &Path) -> Rendezvous {
-        let tag: String = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
-        with_prefix(format!("neoscad-{}-{tag}-", user()))
+        with_prefix(pipe_prefix(&user(), Some(dir)))
     }
 
     pub fn address(r: &Rendezvous, tag: &str) -> Address {
@@ -299,6 +331,39 @@ mod tests {
         assert!(!is_app("serve.sock", ""));
         assert!(is_app("neoscad-S-1-5-app-12-ab", "neoscad-S-1-5-"));
         assert!(!is_app("neoscad-S-1-6-app-12-ab", "neoscad-S-1-5-"));
+    }
+
+    /// The Windows rendezvous filter, checked on every platform: tagging
+    /// and the name filter are plain string work.
+    #[test]
+    fn agent_dirs_isolate_pipe_names() {
+        let sid = "S-1-5-21-1";
+        let a = Path::new(r"C:\Temp\nsapp1one\rv");
+        let b = Path::new(r"C:\Temp\nsapp1two\rv");
+        let (pa, pb) = (pipe_prefix(sid, Some(a)), pipe_prefix(sid, Some(b)));
+        // Same folder name, different folders: different rendezvous (the
+        // Windows CI failure was these two being one).
+        assert_ne!(pa, pb);
+        let app_b = format!("{pb}app-42-0123abcd");
+        assert!(is_app(&app_b, &pb));
+        assert!(!is_app(&app_b, &pa));
+        // An untagged scan and another user's do not see a tagged app,
+        // and a tagged scan does not see an untagged one.
+        let plain = pipe_prefix(sid, None);
+        assert!(!is_app(&app_b, &plain));
+        assert!(!is_app(&app_b, &pipe_prefix("S-1-5-21-2", Some(b))));
+        assert!(!is_app(&format!("{plain}app-42-0123abcd"), &pb));
+        // A folder named like the untagged marker is still kept apart.
+        let named_app = pipe_prefix(sid, Some(Path::new(r"C:\app")));
+        assert!(!is_app(&format!("{named_app}app-42-0123abcd"), &plain));
+        // The same folder spelled another way is the same rendezvous, as
+        // on Windows it is the same folder; and the tag is stable.
+        assert_eq!(
+            dir_tag(Path::new(r"C:\Temp\NSAPP1ONE\rv\")),
+            dir_tag(Path::new("c:/temp/nsapp1one/rv"))
+        );
+        assert_eq!(dir_tag(a), dir_tag(a));
+        assert_eq!(dir_tag(a).len(), 18);
     }
 
     #[test]

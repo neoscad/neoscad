@@ -148,6 +148,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release -p neoscad-cli
       - run: cargo test --locked --no-fail-fast -p neoscad-cli -p neoscad-lang
+      # agent-link's unit tests (named pipes, discovery). Its tests/link.rs
+      # assumes Unix end-of-stream and scan behaviour, so not that.
+      - run: cargo test --locked --no-fail-fast -p neoscad-agent-link --lib
       - name: The user library directory is Documents\OpenSCAD\libraries
         shell: pwsh
         run: |

@@ -300,7 +300,7 @@ public sealed class AgentEndToEndTests(ITestOutputHelper output) : IDisposable
         var editor = new FakeAgentEditor(doc);
         var settings = Path.Combine(dir, "agents.json");
         new AgentSettings().WithAllowed(true).Save(settings);
-        // On Windows the folder's name tags the pipe names (crates/agent-link/src/discovery.rs).
+        // On Windows a hash of this folder tags the pipe names (crates/agent-link/src/discovery.rs).
         var rendezvous = Path.Combine(dir, $"rv{Environment.ProcessId}");
         using var agents = new AgentConnection(doc, ui, editor, () => null, "test", settings, rendezvous,
             watchSettings: false);

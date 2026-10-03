@@ -171,10 +171,68 @@ impl Roots {
 ///   folder the whole system shares (`/tmp`, `/var`, `/opt`), though not
 ///   the folders under those.
 ///
+/// The user's temp directory ([`SystemDirs::temp`]) and its subfolders
+/// are excepted from the settings-folder rule only. On Windows it is
+/// `%LOCALAPPDATA%\Temp`, under `~\AppData`, and refusing it refused every
+/// scratch folder a user, a script or a test makes there (Windows CI's
+/// MCP tests all failed so); macOS's (`/var/folders/...`) and Linux's
+/// (`/tmp`) are outside home and already roots below their shared
+/// folders. The exception is ignored when the temp directory is itself
+/// refused for any other reason, or is a settings folder's top
+/// (`TEMP=%APPDATA%` must not make Claude Desktop's folder a root).
+///
 /// A deny list rather than a test for a project (a `.git`, a `.scad`):
 /// models live in plain folders, and every folder the list leaves out is
 /// one the user chose to start an agent in.
 pub fn unsafe_cwd(cwd: &Path, home: Option<&Path>, system: &SystemDirs) -> Option<&'static str> {
+    let temp = system.temp.as_deref().filter(|t| {
+        let bare = SystemDirs {
+            temp: None,
+            ..system.clone()
+        };
+        match judge(t, home, &bare) {
+            Verdict::Fine => true,
+            Verdict::Settings { depth, .. } => depth >= 2,
+            Verdict::Refused(_) => false,
+        }
+    });
+    match judge(cwd, home, system) {
+        Verdict::Fine => None,
+        Verdict::Settings { why, .. } => match temp {
+            Some(t) if is_under(cwd, t) => None,
+            _ => Some(why),
+        },
+        Verdict::Refused(why) => Some(why),
+    }
+}
+
+/// [`unsafe_cwd`]'s verdict before the temp directory's exception.
+enum Verdict {
+    Fine,
+    /// Under a settings folder in home, `depth` components below home
+    /// (`~/AppData` is 1, `~/AppData/Local/Temp` 3).
+    Settings {
+        why: &'static str,
+        depth: usize,
+    },
+    Refused(&'static str),
+}
+
+/// `p` is `dir` or inside it, compared as this platform compares paths
+/// (case-insensitively on Windows).
+fn is_under(p: &Path, dir: &Path) -> bool {
+    if cfg!(windows) {
+        let (p, d) = (
+            p.to_string_lossy().to_ascii_lowercase(),
+            dir.to_string_lossy().to_ascii_lowercase(),
+        );
+        Path::new(&p).starts_with(Path::new(&d))
+    } else {
+        p.starts_with(dir)
+    }
+}
+
+fn judge(cwd: &Path, home: Option<&Path>, system: &SystemDirs) -> Verdict {
     let same = |a: &Path, b: &Path| {
         if cfg!(windows) {
             a.as_os_str().eq_ignore_ascii_case(b.as_os_str())
@@ -182,26 +240,19 @@ pub fn unsafe_cwd(cwd: &Path, home: Option<&Path>, system: &SystemDirs) -> Optio
             a == b
         }
     };
-    let under = |p: &Path, dir: &Path| {
-        if cfg!(windows) {
-            let (p, d) = (
-                p.to_string_lossy().to_ascii_lowercase(),
-                dir.to_string_lossy().to_ascii_lowercase(),
-            );
-            Path::new(&p).starts_with(Path::new(&d))
-        } else {
-            p.starts_with(dir)
-        }
-    };
+    let under = is_under;
     if cwd.parent().is_none() {
-        return Some("the file system's root");
+        return Verdict::Refused("the file system's root");
     }
+    // Found here but reported last: the temp exception lifts only this,
+    // so a system folder must still be refused after it.
+    let mut settings = None;
     if let Some(home) = home.filter(|h| h.parent().is_some()) {
         if same(cwd, home) {
-            return Some("the home folder");
+            return Verdict::Refused("the home folder");
         }
         if under(home, cwd) {
-            return Some("a folder that contains the home folder");
+            return Verdict::Refused("a folder that contains the home folder");
         }
         if under(cwd, home) {
             let rel = if cfg!(windows) {
@@ -211,28 +262,34 @@ pub fn unsafe_cwd(cwd: &Path, home: Option<&Path>, system: &SystemDirs) -> Optio
                     .map(Path::to_path_buf)
                     .unwrap_or_default()
             };
-            let first = rel
+            let names: Vec<String> = rel
                 .components()
-                .find_map(|c| match c {
+                .filter_map(|c| match c {
                     Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
                     _ => None,
                 })
-                .unwrap_or_default();
-            if first.starts_with('.') {
-                return Some("a hidden settings folder in the home folder");
-            }
-            if ["library", "appdata"].contains(&first.to_lowercase().as_str()) {
-                return Some("an application settings folder in the home folder");
-            }
+                .collect();
+            let first = names.first().cloned().unwrap_or_default();
+            let why = if first.starts_with('.') {
+                Some("a hidden settings folder in the home folder")
+            } else if ["library", "appdata"].contains(&first.to_lowercase().as_str()) {
+                Some("an application settings folder in the home folder")
+            } else {
+                None
+            };
+            settings = why.map(|why| Verdict::Settings {
+                why,
+                depth: names.len(),
+            });
         }
     }
     if system.trees.iter().any(|d| under(cwd, d)) {
-        return Some("a system folder");
+        return Verdict::Refused("a system folder");
     }
     if system.shared.iter().any(|d| same(cwd, d)) {
-        return Some("a folder the whole system shares");
+        return Verdict::Refused("a folder the whole system shares");
     }
-    None
+    settings.unwrap_or(Verdict::Fine)
 }
 
 /// The system's folders as [`unsafe_cwd`] judges them.
@@ -244,12 +301,21 @@ pub struct SystemDirs {
     /// directories, where scratch work and tests run, are under `/var` and
     /// `/tmp`).
     pub shared: Vec<PathBuf>,
+    /// The user's temp directory, resolved (`std::env::temp_dir`): it and
+    /// its subfolders may be roots though under a settings folder in home
+    /// (Windows' `~\AppData\Local\Temp`); see [`unsafe_cwd`].
+    pub temp: Option<PathBuf>,
 }
 
 impl SystemDirs {
     /// This platform's.
     pub fn here() -> SystemDirs {
         let paths = |v: &[&str]| v.iter().map(PathBuf::from).collect();
+        // Resolved like the working directory it is compared with: on
+        // Windows TEMP may hold an 8.3 short name (`RUNNER~1`) that only
+        // canonicalizing spells out, and on macOS `/var` is a link.
+        let t = std::env::temp_dir();
+        let temp = Some(lang::paths::plain(t.canonicalize().unwrap_or(t)));
         if cfg!(windows) {
             let var =
                 |k: &str, d: &str| PathBuf::from(std::env::var_os(k).unwrap_or_else(|| d.into()));
@@ -261,6 +327,7 @@ impl SystemDirs {
                     var("ProgramData", r"C:\ProgramData"),
                 ],
                 shared: paths(&[r"C:\Users"]),
+                temp,
             }
         } else {
             SystemDirs {
@@ -297,6 +364,7 @@ impl SystemDirs {
                     "/home",
                     "/Users",
                 ]),
+                temp,
             }
         }
     }
@@ -564,6 +632,44 @@ mod tests {
         assert_eq!(unsafe_cwd(Path::new("/srv/cad"), None, &sys), None);
     }
 
+    /// Windows' temp directory is `~\AppData\Local\Temp`; the same layout
+    /// in Unix spelling checks the exception on every platform's CI.
+    #[cfg(unix)]
+    #[test]
+    fn the_temp_directory_is_a_root_though_under_a_settings_folder() {
+        let home = Some(Path::new("/Users/ada"));
+        let with_temp = |t: &str| SystemDirs {
+            temp: Some(PathBuf::from(t)),
+            ..SystemDirs::here()
+        };
+        let sys = with_temp("/Users/ada/AppData/Local/Temp");
+        let why = |p: &str| unsafe_cwd(Path::new(p), home, &sys);
+        assert_eq!(why("/Users/ada/AppData/Local/Temp/nsmcp-1-tools"), None);
+        assert_eq!(why("/Users/ada/AppData/Local/Temp"), None);
+        // The rest of the settings folder is still refused.
+        assert!(why("/Users/ada/AppData/Roaming/Claude").is_some());
+        assert!(why("/Users/ada/AppData/Local").is_some());
+        // A temp directory that is itself refused, or a settings folder's
+        // top, excepts nothing.
+        for bad in ["/", "/Users", "/Users/ada", "/Users/ada/AppData", "/usr"] {
+            let sys = with_temp(bad);
+            assert!(
+                unsafe_cwd(Path::new("/Users/ada/AppData/Roaming/Claude"), home, &sys).is_some(),
+                "TEMP={bad}"
+            );
+        }
+        // Nor does it lift a system folder's refusal.
+        let sys = with_temp("/usr/tmp");
+        assert_eq!(
+            unsafe_cwd(Path::new("/usr/tmp/x"), home, &sys),
+            Some("a system folder")
+        );
+        // The real temp directory's scratch folders are roots here too.
+        let real = SystemDirs::here();
+        let t = real.temp.clone().unwrap().join("nsmcp-scratch");
+        assert_eq!(unsafe_cwd(&t, home, &real), None);
+    }
+
     #[cfg(windows)]
     #[test]
     fn only_a_project_like_working_directory_is_a_root() {
@@ -578,6 +684,21 @@ mod tests {
         assert!(why(r"c:\program files\NeoSCAD").is_some());
         assert_eq!(why(r"C:\Users\ada\models"), None);
         assert_eq!(why(r"D:\cad"), None);
+        // %TEMP% and its scratch folders, where tests and scripts run.
+        let sys = SystemDirs {
+            temp: Some(PathBuf::from(r"C:\Users\ada\AppData\Local\Temp")),
+            ..SystemDirs::here()
+        };
+        let why = |p: &str| unsafe_cwd(Path::new(p), home, &sys);
+        assert_eq!(why(r"C:\Users\ada\AppData\Local\Temp\nsmcp-1-tools"), None);
+        assert_eq!(why(r"c:\users\ada\appdata\local\temp\x"), None);
+        assert!(why(r"C:\Users\ada\AppData\Roaming\Claude").is_some());
+        // The real one, under whatever home this runner has.
+        let real = SystemDirs::here();
+        let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+        let home = home.map(|h| lang::paths::plain(h.canonicalize().unwrap_or(h)));
+        let t = real.temp.clone().unwrap().join("nsmcp-scratch");
+        assert_eq!(unsafe_cwd(&t, home.as_deref(), &real), None);
     }
 
     #[test]

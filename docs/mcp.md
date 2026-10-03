@@ -444,7 +444,11 @@ output's directory is created.
   (`/usr`, `/etc`, `/System`, `/Library`, `/Applications`, `C:\Windows`,
   `C:\Program Files`, ...), or a folder the whole system shares (`/tmp`,
   `/var`, `/opt`, `/home`, `/Users`; their subfolders are fine)
-  (`mcp::roots::unsafe_cwd`). It is a deny list, not a test for a
+  (`mcp::roots::unsafe_cwd`). The user's temp directory and its
+  subfolders are fine even though Windows keeps it under
+  `~\AppData\Local\Temp`, unless the temp directory is itself one of the
+  folders above or a settings folder's top (`TEMP=%APPDATA%`); macOS's
+  and Linux's are already outside home. It is a deny list, not a test for a
   project: models live in plain folders. stderr says when the working
   directory is left out; relative paths still resolve against it, inline
   `source` still works, and a file tool's refusal says to add `--root

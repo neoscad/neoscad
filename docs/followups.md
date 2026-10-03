@@ -1286,7 +1286,9 @@ lead them, come roughly in order of user impact.
   when it is `/` or a drive root, the home folder or one containing it, a
   dot folder, `~/Library`/`~/AppData`, a system tree, or exactly a shared
   folder such as `/tmp`; explicit `--root`s always count, and an attached
-  app's document folder is readable (docs/mcp.md, "Safety").
+  app's document folder is readable (docs/mcp.md, "Safety"). The user's
+  temp directory is excepted from the `~/AppData` rule: on Windows it is
+  `~\AppData\Local\Temp`, and refusing it broke every MCP test there.
 - The CLI the apps bundle (macOS `Contents/Helpers/neoscad`, Windows
   `bin\neoscad.exe`, the Flatpak's `/app/bin/neoscad`) is built without
   the PGO profile cargo-dist's CLI builds use (`release.yml`), so it is
