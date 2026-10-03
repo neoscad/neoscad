@@ -553,6 +553,14 @@ fn consent_off_and_disconnect_end_the_connection() {
     // next call waits for an app and then says how to connect.
     let id = app.link.status().clients[0].id;
     app.link.disconnect(id);
+    // Until the server has read the app's `bye`, a call still goes out on
+    // the closing connection and is answered "disconnected before it
+    // answered" (what an agent sees if the user disconnects it mid-call).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while m.names().contains(&"editor_read".to_string()) {
+        assert!(Instant::now() < deadline, "the app's tools stayed listed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let start = Instant::now();
     let r = m.tool("editor_read", json!({}));
     assert_eq!(r["isError"], true, "{r}");

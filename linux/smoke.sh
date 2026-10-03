@@ -237,6 +237,8 @@ agent_check() {
         echo "agent_check: no $cli; skipped"
         return 0
     fi
+    # Absolute: the server runs from the model's folder.
+    cli=$(cd "$(dirname "$cli")" && pwd)/$(basename "$cli")
     local log=$work/agent-$1.log model=$work/agent/gear.scad
     local config=$work/agent-config-$1 dir=$work/agent-sockets-$1 err=$work/mcp-$1.err
     mkdir -p "$work/agent" "$config/neoscad" "$dir"
