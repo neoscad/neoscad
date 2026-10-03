@@ -172,6 +172,7 @@ public sealed partial class DocumentSession
             return;
         }
         storage.Replace(NeoScad.ApplyReloadEdits(storage.Text(), list));
+        TextRevised();
         ReloadLanded();
         loop.TextReplaced();
         TextLoaded?.Invoke(storage.Text());

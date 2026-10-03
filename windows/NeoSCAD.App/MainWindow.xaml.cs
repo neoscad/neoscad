@@ -73,11 +73,17 @@ public sealed partial class MainWindow : Window
         document.ConsoleChanged += ShowConsole;
         document.NoticeChanged += ShowDiskNotice; // MainWindow.Disk.cs
         AppWindow.Closing += OnClosing;
-        Closed += (_, _) => document.Dispose();
+        // The agent link first: it stops answering before the document goes.
+        Closed += (_, _) =>
+        {
+            StopAgents();
+            document.Dispose();
+        };
 
         BuildExamplesMenu();
         BuildExportMenu();
         StartUpdates(); // MainWindow.Updates.cs
+        StartAgents(); // MainWindow.Agents.cs
         if (panel is not null) ShowPanel(panel);
         if (core is null) Status.Text = $"The core did not start: {CoreService.Error}";
         AppLog.Write(core is null ? $"core did not start: {CoreService.Error}" : "core started");

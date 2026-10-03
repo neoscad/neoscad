@@ -38,10 +38,47 @@ public sealed class EditorSync
     public void LoadSent() => Version = null;
 
     /// <summary>The page loaded the text: its version.</summary>
-    public void Loaded(long version) => Version = version;
+    public void Loaded(long version)
+    {
+        Version = version;
+        // A load starts the page's count again, so nothing waited for can
+        // still come: let every waiter go.
+        Release(all: true);
+    }
 
     /// <summary>The page's whole text arrived after a disagreement, at <paramref name="version"/>.</summary>
-    public void Resynced(long version) => Version = version;
+    public void Resynced(long version)
+    {
+        Version = version;
+        Release(all: false);
+    }
+
+    readonly List<(long Version, TaskCompletionSource Done)> waiters = [];
+
+    /// <summary>
+    /// Completes once this copy has caught up with the page's
+    /// <paramref name="version"/> (an agent's edit the page applied has come
+    /// back as a change), or after <paramref name="timeout"/>. Call on the
+    /// UI thread, like everything here.
+    /// </summary>
+    public Task WaitForAsync(long version, TimeSpan timeout)
+    {
+        if (Version is { } v && v >= version) return Task.CompletedTask;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        waiters.Add((version, done));
+        return Task.WhenAny(done.Task, Task.Delay(timeout));
+    }
+
+    void Release(bool all)
+    {
+        for (var i = waiters.Count - 1; i >= 0; i--)
+        {
+            var (version, done) = waiters[i];
+            if (!all && (Version is not { } v || v < version)) continue;
+            waiters.RemoveAt(i);
+            done.TrySetResult();
+        }
+    }
 
     public void Changes(EditorMessage.Changes m)
     {
@@ -60,6 +97,7 @@ public sealed class EditorSync
         {
             Version = next;
             Applied++;
+            if (waiters.Count > 0) Release(all: false);
         }
         else
         {

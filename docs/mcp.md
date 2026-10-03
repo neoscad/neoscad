@@ -123,8 +123,9 @@ table. What needs the machine is in `crates/ffi/src/agent_setup.rs`,
 exported to Swift and C#: `agent_setup_rows(cli)`,
 `agent_setup_find_claude()`, `agent_setup_add_to_claude_code(claude,
 cli, replace)` and `agent_setup_add_to_claude_desktop(cli)`. The macOS
-app's "Connect your AI agent" sheet calls them
-(`apple/App/Agents/AgentSetup.swift`; "The desktop apps", below).
+sheet (`apple/App/Agents/AgentSetup.swift`) and the Windows dialog
+(`windows/NeoSCAD.Host/AgentSetup.cs`) call them; "The desktop apps",
+below.
 
 ## Protocol
 
@@ -619,6 +620,26 @@ tools' 2,510; `crates/cli/src/mcp/tools/browser.rs` keeps them under
 2,600 and every description under 300, and the instructions with the
 app's sentence stay under Claude Code's 2,048 characters
 (`crates/cli/tests/app.rs`).
+
+**On Windows.** The window's menu row ends in the agent control ("Connect
+your AI agent"; then "Claude Code connected" with a green dot, or a busy
+ring and "Claude Code is editing"). Help > Connect Your AI Agent… opens
+the same dialog: first the switch "Allow AI agents to work on open
+documents" with the consent text beside it (off until turned on, kept in
+`%LOCALAPPDATA%\NeoSCAD\agents.json`), then a card per client: Add for
+Claude Code (Replace when it already has a `neoscad`), Open Cursor and
+Open VS Code (their install links), Add… for Claude Desktop (the card asks
+first, then writes `%APPDATA%\Claude\claude_desktop_config.json` with a
+backup and says to quit and reopen Claude), and Copy on every card, the
+command or JSON shown whenever the button could not do it. Every config
+names the app's own `bin\neoscad.exe` by its absolute path. Once allowed,
+the control's flyout lists each agent with Disconnect and the "Ask me
+before applying the agent's edits" switch, whose approval bar has Apply
+(closing it declines). The Help menu also has the two switches as
+checkable items. The app is one process per window: allowing or turning
+off agents in one window does so in all of them at once, and an agent's
+request that names no document goes to the window used last. The code
+and its tests are `docs/windows-app.md`, "AI agents".
 
 ## Smoke test
 

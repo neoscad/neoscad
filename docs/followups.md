@@ -1352,11 +1352,11 @@ lead them, come roughly in order of user impact.
   - The app's version check and the editor's `agentEdit` meet on two
     threads: the host compares its revision on the main thread, but a
     keystroke still on its way from the web view is not counted yet.
-    Done for macOS: `agentEdit` takes the editor version the app checked
+    Done for macOS and Windows: `agentEdit` takes the editor version the app checked
     against and refuses (`stale: true`) when the editor has moved past
     it, and the document keeps its own revision counter
-    (`SCADDocument.agentRevision`). The Linux and Windows hosts should
-    pass the same argument.
+    (`SCADDocument.agentRevision`; on Windows `DocumentSession.Revision`).
+    The Linux host should pass the same argument.
   - macOS: the toolbar control was only checked in screenshots of an
     inactive window (drawn by `cacheDisplay`, since the build machine
     gives no screen-recording permission), where AppKit dims toolbar
@@ -1840,6 +1840,27 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   declined UAC prompt starts the old version again; a failed install is
   only in `install.log` beside the downloaded MSI in `%TEMP%`, and the
   app says nothing about it after the restart.
+- The Windows app's AI agent UI (`docs/windows-app.md`, "AI agents") was
+  built and checked off Windows only: the host and setup tests and the
+  real `neoscad mcp` against the C# host ran on Linux over a Unix socket
+  (`docker-test.sh --with-cli`), and the app type-checks. CI's
+  `windows-app.yml` runs the same end-to-end test over a named pipe, with
+  a fake editor and no 3D view. Unchecked until a Windows machine runs
+  them: the XAML (the menu row's control, the `InfoBadge` and
+  `ProgressRing`, the approval bar), the dialog's look and scrolling at
+  720 px, `Launcher.LaunchUriAsync` with Cursor's and VS Code's install
+  links (and its answer when neither is installed), the clipboard, a
+  real `claude.cmd` from npm run through `claude mcp add`, `agentEdit`'s
+  `expectVersion` refusal in WebView2, and a capture from a real
+  `SwapChainPanel` view. Also:
+  - Disconnect acts on one window's link: an agent connected to three
+    windows (three processes) needs three. The consent switch acts on
+    all of them, through `agents.json`.
+  - The dialog does not remember a client it set up (the core has no
+    `claude mcp get`), so Claude Code's card offers Add again each time,
+    and a second Add asks to Replace.
+  - The Help menu's two agent items are the app's only agent settings
+    besides the dialog; a settings window would be their natural home.
 
 ## Linux
 

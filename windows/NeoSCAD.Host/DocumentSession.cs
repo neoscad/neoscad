@@ -220,6 +220,7 @@ public sealed partial class DocumentSession : IDisposable
     void Replace(string text)
     {
         storage.Replace(text);
+        TextRevised();
         changeCount = 0;
         loop.TextReplaced();
         TextLoaded?.Invoke(text);
@@ -267,6 +268,9 @@ public sealed partial class DocumentSession : IDisposable
         {
             return false;
         }
+        // Counted before the length check: the copy has changed either
+        // way, and a mismatch is followed by the editor's whole text.
+        TextRevised();
         if (storage.Utf16Length() != length) return false;
         var wasDirty = IsDirty;
         changeCount += kind == EditKind.Undo ? -1 : 1;
@@ -299,6 +303,7 @@ public sealed partial class DocumentSession : IDisposable
     public void EditorReplacedText(string text)
     {
         storage.Replace(text);
+        TextRevised();
         var wasDirty = IsDirty;
         changeCount = changeCount == 0 ? 1 : changeCount;
         if (IsDirty != wasDirty) TitleChanged?.Invoke();

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  A document window: menu bar, then the editor (left) beside the 3D view
+  A document window: menu bar (with the AI agent control at its right
+  end), then the editor (left) beside the 3D view
   over the console (right), with the side panels (customizer, check,
   measure) in a SplitView pane on the far right, and a status line. Mica
   behind it all, the system's light or dark theme throughout (the view's
@@ -29,97 +30,128 @@
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
 
-    <MenuBar Grid.Row="0">
-      <MenuBarItem Title="File">
-        <MenuFlyoutItem Text="New" Click="OnNew">
-          <MenuFlyoutItem.KeyboardAccelerators>
-            <KeyboardAccelerator Modifiers="Control" Key="N" />
-          </MenuFlyoutItem.KeyboardAccelerators>
-        </MenuFlyoutItem>
-        <MenuFlyoutItem Text="Open…" Click="OnOpen">
-          <MenuFlyoutItem.KeyboardAccelerators>
-            <KeyboardAccelerator Modifiers="Control" Key="O" />
-          </MenuFlyoutItem.KeyboardAccelerators>
-        </MenuFlyoutItem>
-        <MenuFlyoutSubItem x:Name="ExamplesMenu" Text="Examples" />
-        <MenuFlyoutSeparator />
-        <MenuFlyoutItem Text="Save" Click="OnSave">
-          <MenuFlyoutItem.KeyboardAccelerators>
-            <KeyboardAccelerator Modifiers="Control" Key="S" />
-          </MenuFlyoutItem.KeyboardAccelerators>
-        </MenuFlyoutItem>
-        <MenuFlyoutItem Text="Save As…" Click="OnSaveAs">
-          <MenuFlyoutItem.KeyboardAccelerators>
-            <KeyboardAccelerator Modifiers="Control,Shift" Key="S" />
-          </MenuFlyoutItem.KeyboardAccelerators>
-        </MenuFlyoutItem>
-        <MenuFlyoutSeparator />
-        <MenuFlyoutItem x:Name="ExportAgainItem" Text="Export…" Click="OnExportAgain">
-          <MenuFlyoutItem.KeyboardAccelerators>
-            <KeyboardAccelerator Modifiers="Control,Shift" Key="E" />
-          </MenuFlyoutItem.KeyboardAccelerators>
-        </MenuFlyoutItem>
-        <MenuFlyoutSubItem x:Name="ExportMenu" Text="Export As" />
-        <MenuFlyoutSeparator />
-        <MenuFlyoutItem Text="Exit" Click="OnExit" />
-      </MenuBarItem>
-      <MenuBarItem Title="Edit">
-        <MenuFlyoutItem Text="Undo" Click="OnUndo" KeyboardAcceleratorTextOverride="Ctrl+Z" />
-        <MenuFlyoutItem Text="Redo" Click="OnRedo" KeyboardAcceleratorTextOverride="Ctrl+Y" />
-        <MenuFlyoutSeparator />
-        <MenuFlyoutItem Text="Select All" Click="OnSelectAll" KeyboardAcceleratorTextOverride="Ctrl+A" />
-        <MenuFlyoutItem Text="Find…" Click="OnFind" KeyboardAcceleratorTextOverride="Ctrl+F" />
-      </MenuBarItem>
-      <MenuBarItem Title="Design">
-        <MenuFlyoutItem Text="Preview" Click="OnPreview">
-          <MenuFlyoutItem.KeyboardAccelerators>
-            <KeyboardAccelerator Key="F5" />
-          </MenuFlyoutItem.KeyboardAccelerators>
-        </MenuFlyoutItem>
-        <MenuFlyoutItem Text="Render" Click="OnRender">
-          <MenuFlyoutItem.KeyboardAccelerators>
-            <KeyboardAccelerator Key="F6" />
-          </MenuFlyoutItem.KeyboardAccelerators>
-        </MenuFlyoutItem>
-        <MenuFlyoutSeparator />
-        <MenuFlyoutItem Text="Check" Click="OnCheck">
-          <MenuFlyoutItem.KeyboardAccelerators>
-            <KeyboardAccelerator Modifiers="Control,Shift" Key="K" />
-          </MenuFlyoutItem.KeyboardAccelerators>
-        </MenuFlyoutItem>
-        <MenuFlyoutItem Text="Measure" Click="OnMeasure">
-          <MenuFlyoutItem.KeyboardAccelerators>
-            <KeyboardAccelerator Modifiers="Control,Shift" Key="M" />
-          </MenuFlyoutItem.KeyboardAccelerators>
-        </MenuFlyoutItem>
-      </MenuBarItem>
-      <MenuBarItem Title="View">
-        <MenuFlyoutItem Text="View All" Click="OnViewAll" />
-        <MenuFlyoutItem Text="Reset View" Click="OnResetView" />
-        <MenuFlyoutSeparator />
-        <MenuFlyoutItem Text="Top" Tag="Top" Click="OnPreset" />
-        <MenuFlyoutItem Text="Bottom" Tag="Bottom" Click="OnPreset" />
-        <MenuFlyoutItem Text="Left" Tag="Left" Click="OnPreset" />
-        <MenuFlyoutItem Text="Right" Tag="Right" Click="OnPreset" />
-        <MenuFlyoutItem Text="Front" Tag="Front" Click="OnPreset" />
-        <MenuFlyoutItem Text="Back" Tag="Back" Click="OnPreset" />
-        <MenuFlyoutItem Text="Diagonal" Tag="Diagonal" Click="OnPreset" />
-        <MenuFlyoutSeparator />
-        <ToggleMenuFlyoutItem x:Name="CustomizerItem" Text="Customizer" Tag="customizer" Click="OnPanelItem">
-          <ToggleMenuFlyoutItem.KeyboardAccelerators>
-            <KeyboardAccelerator Modifiers="Control,Shift" Key="P" />
-          </ToggleMenuFlyoutItem.KeyboardAccelerators>
-        </ToggleMenuFlyoutItem>
-        <ToggleMenuFlyoutItem x:Name="CheckItem" Text="Check Panel" Tag="check" Click="OnPanelItem" />
-        <ToggleMenuFlyoutItem x:Name="MeasureItem" Text="Measure Panel" Tag="measure" Click="OnPanelItem" />
-      </MenuBarItem>
-      <MenuBarItem Title="Help">
-        <MenuFlyoutItem Text="Check for Updates…" Click="OnCheckForUpdates" />
-        <MenuFlyoutSeparator />
-        <ToggleMenuFlyoutItem x:Name="AutoUpdateItem" Text="Check for Updates Automatically" Click="OnAutoUpdateToggle" />
-        <ToggleMenuFlyoutItem x:Name="RcUpdateItem" Text="Receive Release Candidates" Click="OnRcUpdateToggle" />
-      </MenuBarItem>
-    </MenuBar>
+    <!-- The menu row: the menus, then the agent control at its right end
+         (MainWindow.Agents.cs; the audit's Windows spec puts it there, as
+         the window has a MenuBar and no CommandBar). -->
+    <Grid Grid.Row="0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <MenuBar Grid.Column="0">
+        <MenuBarItem Title="File">
+          <MenuFlyoutItem Text="New" Click="OnNew">
+            <MenuFlyoutItem.KeyboardAccelerators>
+              <KeyboardAccelerator Modifiers="Control" Key="N" />
+            </MenuFlyoutItem.KeyboardAccelerators>
+          </MenuFlyoutItem>
+          <MenuFlyoutItem Text="Open…" Click="OnOpen">
+            <MenuFlyoutItem.KeyboardAccelerators>
+              <KeyboardAccelerator Modifiers="Control" Key="O" />
+            </MenuFlyoutItem.KeyboardAccelerators>
+          </MenuFlyoutItem>
+          <MenuFlyoutSubItem x:Name="ExamplesMenu" Text="Examples" />
+          <MenuFlyoutSeparator />
+          <MenuFlyoutItem Text="Save" Click="OnSave">
+            <MenuFlyoutItem.KeyboardAccelerators>
+              <KeyboardAccelerator Modifiers="Control" Key="S" />
+            </MenuFlyoutItem.KeyboardAccelerators>
+          </MenuFlyoutItem>
+          <MenuFlyoutItem Text="Save As…" Click="OnSaveAs">
+            <MenuFlyoutItem.KeyboardAccelerators>
+              <KeyboardAccelerator Modifiers="Control,Shift" Key="S" />
+            </MenuFlyoutItem.KeyboardAccelerators>
+          </MenuFlyoutItem>
+          <MenuFlyoutSeparator />
+          <MenuFlyoutItem x:Name="ExportAgainItem" Text="Export…" Click="OnExportAgain">
+            <MenuFlyoutItem.KeyboardAccelerators>
+              <KeyboardAccelerator Modifiers="Control,Shift" Key="E" />
+            </MenuFlyoutItem.KeyboardAccelerators>
+          </MenuFlyoutItem>
+          <MenuFlyoutSubItem x:Name="ExportMenu" Text="Export As" />
+          <MenuFlyoutSeparator />
+          <MenuFlyoutItem Text="Exit" Click="OnExit" />
+        </MenuBarItem>
+        <MenuBarItem Title="Edit">
+          <MenuFlyoutItem Text="Undo" Click="OnUndo" KeyboardAcceleratorTextOverride="Ctrl+Z" />
+          <MenuFlyoutItem Text="Redo" Click="OnRedo" KeyboardAcceleratorTextOverride="Ctrl+Y" />
+          <MenuFlyoutSeparator />
+          <MenuFlyoutItem Text="Select All" Click="OnSelectAll" KeyboardAcceleratorTextOverride="Ctrl+A" />
+          <MenuFlyoutItem Text="Find…" Click="OnFind" KeyboardAcceleratorTextOverride="Ctrl+F" />
+        </MenuBarItem>
+        <MenuBarItem Title="Design">
+          <MenuFlyoutItem Text="Preview" Click="OnPreview">
+            <MenuFlyoutItem.KeyboardAccelerators>
+              <KeyboardAccelerator Key="F5" />
+            </MenuFlyoutItem.KeyboardAccelerators>
+          </MenuFlyoutItem>
+          <MenuFlyoutItem Text="Render" Click="OnRender">
+            <MenuFlyoutItem.KeyboardAccelerators>
+              <KeyboardAccelerator Key="F6" />
+            </MenuFlyoutItem.KeyboardAccelerators>
+          </MenuFlyoutItem>
+          <MenuFlyoutSeparator />
+          <MenuFlyoutItem Text="Check" Click="OnCheck">
+            <MenuFlyoutItem.KeyboardAccelerators>
+              <KeyboardAccelerator Modifiers="Control,Shift" Key="K" />
+            </MenuFlyoutItem.KeyboardAccelerators>
+          </MenuFlyoutItem>
+          <MenuFlyoutItem Text="Measure" Click="OnMeasure">
+            <MenuFlyoutItem.KeyboardAccelerators>
+              <KeyboardAccelerator Modifiers="Control,Shift" Key="M" />
+            </MenuFlyoutItem.KeyboardAccelerators>
+          </MenuFlyoutItem>
+        </MenuBarItem>
+        <MenuBarItem Title="View">
+          <MenuFlyoutItem Text="View All" Click="OnViewAll" />
+          <MenuFlyoutItem Text="Reset View" Click="OnResetView" />
+          <MenuFlyoutSeparator />
+          <MenuFlyoutItem Text="Top" Tag="Top" Click="OnPreset" />
+          <MenuFlyoutItem Text="Bottom" Tag="Bottom" Click="OnPreset" />
+          <MenuFlyoutItem Text="Left" Tag="Left" Click="OnPreset" />
+          <MenuFlyoutItem Text="Right" Tag="Right" Click="OnPreset" />
+          <MenuFlyoutItem Text="Front" Tag="Front" Click="OnPreset" />
+          <MenuFlyoutItem Text="Back" Tag="Back" Click="OnPreset" />
+          <MenuFlyoutItem Text="Diagonal" Tag="Diagonal" Click="OnPreset" />
+          <MenuFlyoutSeparator />
+          <ToggleMenuFlyoutItem x:Name="CustomizerItem" Text="Customizer" Tag="customizer" Click="OnPanelItem">
+            <ToggleMenuFlyoutItem.KeyboardAccelerators>
+              <KeyboardAccelerator Modifiers="Control,Shift" Key="P" />
+            </ToggleMenuFlyoutItem.KeyboardAccelerators>
+          </ToggleMenuFlyoutItem>
+          <ToggleMenuFlyoutItem x:Name="CheckItem" Text="Check Panel" Tag="check" Click="OnPanelItem" />
+          <ToggleMenuFlyoutItem x:Name="MeasureItem" Text="Measure Panel" Tag="measure" Click="OnPanelItem" />
+        </MenuBarItem>
+        <MenuBarItem Title="Help">
+          <MenuFlyoutItem Text="Connect Your AI Agent…" Click="OnConnectAgent" />
+          <MenuFlyoutItem Text="Using NeoSCAD with AI Agents" Click="OnAgentHelp" />
+          <ToggleMenuFlyoutItem x:Name="AllowAgentsItem" Text="Allow AI Agents to Work on Open Documents" Click="OnAllowAgentsToggle" />
+          <ToggleMenuFlyoutItem x:Name="AskAgentEditsItem" Text="Ask Before Applying Agent Edits" Click="OnAskAgentEditsToggle" />
+          <MenuFlyoutSeparator />
+          <MenuFlyoutItem Text="Check for Updates…" Click="OnCheckForUpdates" />
+          <MenuFlyoutSeparator />
+          <ToggleMenuFlyoutItem x:Name="AutoUpdateItem" Text="Check for Updates Automatically" Click="OnAutoUpdateToggle" />
+          <ToggleMenuFlyoutItem x:Name="RcUpdateItem" Text="Receive Release Candidates" Click="OnRcUpdateToggle" />
+        </MenuBarItem>
+      </MenuBar>
+
+      <!-- The agent control: "Connect your AI agent", "Claude Code
+           connected" with a dot, or a busy ring and "Claude Code is
+           editing". Hidden after the user turned agents off. -->
+      <Button x:Name="AgentButton" Grid.Column="1" Margin="0,0,8,0" Padding="10,4,10,4"
+              VerticalAlignment="Center" Click="OnAgentButton"
+              Background="Transparent" BorderThickness="0">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Text="&#x2726;" VerticalAlignment="Center" FontSize="14"
+                     Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+          <InfoBadge x:Name="AgentDot" Visibility="Collapsed" VerticalAlignment="Center"
+                     Style="{ThemeResource SuccessDotInfoBadgeStyle}" />
+          <ProgressRing x:Name="AgentBusy" Visibility="Collapsed" IsActive="False"
+                        Width="14" Height="14" VerticalAlignment="Center" />
+          <TextBlock x:Name="AgentLabel" Text="Connect your AI agent" VerticalAlignment="Center" />
+        </StackPanel>
+      </Button>
+    </Grid>
 
     <!-- "Update available" (MainWindow.Updates.cs): Install downloads and
          checks the MSI, then installs it silently after one UAC prompt and
@@ -129,6 +161,17 @@
                IsClosable="True" CloseButtonClick="OnUpdateLater">
         <InfoBar.ActionButton>
           <Button x:Name="UpdateButton" Content="Install" Click="OnUpdateInstall" />
+        </InfoBar.ActionButton>
+      </InfoBar>
+
+      <!-- "Claude Code wants to change …" (MainWindow.Agents.cs): only
+           when the user chose "Ask Before Applying Agent Edits". Apply
+           applies it as one undoable, highlighted step; closing the bar
+           declines it. -->
+      <InfoBar x:Name="AgentEditBar" Margin="8,0,8,8" IsOpen="False" Severity="Informational"
+               IsClosable="True" CloseButtonClick="OnAgentEditReject">
+        <InfoBar.ActionButton>
+          <Button x:Name="AgentApplyButton" Content="Apply" Click="OnAgentEditApply" />
         </InfoBar.ActionButton>
       </InfoBar>
 

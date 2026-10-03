@@ -245,6 +245,7 @@ apps").
 | The command line's side: discovery, connections, documents | `crates/cli/src/mcp/app.rs` |
 | The tools (shared with the web page) | `crates/cli/src/mcp/tools/browser.rs` (`Surface`) |
 | Tests | `crates/agent-link/tests/link.rs`; `crates/cli/tests/app.rs` (the real `neoscad mcp` against a test app over the real socket) |
+| The Windows app's host and controls | `windows/NeoSCAD.Host/AgentConnection.cs`, `AgentDocumentHost.cs`, `AgentSetup.cs`; `windows/NeoSCAD.App/MainWindow.Agents.cs`; tests in `windows/NeoSCAD.Tests/AgentTests.cs` and `AgentMachineTests.cs` (the real `neoscad mcp` against the C# host); `docs/windows-app.md`, "AI agents" |
 
 ### How it connects
 

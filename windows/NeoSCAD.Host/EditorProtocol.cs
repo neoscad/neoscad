@@ -21,6 +21,7 @@
 //   valid JavaScript expression for any string.
 
 using System.Text.Json;
+using NeoSCAD.Native;
 
 namespace NeoSCAD.Host;
 
@@ -153,6 +154,30 @@ public static class EditorScript
     /// </summary>
     public static string AgentEdit(string editsJson) => $"NeoSCADEditor.agentEdit({editsJson})";
 
+    /// <summary>
+    /// An AI agent's edit (AgentDocumentHost), applied only if the page is
+    /// still at <paramref name="expectedVersion"/>, the version this
+    /// window's copy holds (`agentEdit`'s `expectVersion`, the macOS host's
+    /// argument too). The check is the page's, made as it applies the
+    /// edit, because the page is where a keystroke lands first: a change
+    /// still on its way to the app has already moved the page's version,
+    /// and an edit worked out for the older text would otherwise land in
+    /// the wrong place in the newer one (docs/followups.md, the agent
+    /// link's "version check and agentEdit meet on two threads"). Answers
+    /// `agentEdit`'s history state, with <c>stale: true</c> when it refused.
+    /// The 8 s is the bundle's own highlight time, spelled out because the
+    /// version comes after it.
+    /// </summary>
+    public static string GuardedAgentEdit(string editsJson, long expectedVersion) =>
+        $"NeoSCADEditor.agentEdit({editsJson}, 8000, {Literal(expectedVersion)})";
+
+    /// <summary>The main selection as `{anchor: [line, character], head: [line, character]}`.</summary>
+    public static string SelectionPositions() => Call("selectionPositions");
+
+    /// <summary>Select a range (0-based lines, UTF-16 columns) and scroll it into view.</summary>
+    public static string RevealRange(uint line, uint character, uint endLine, uint endCharacter) =>
+        Call("revealRange", line, character, endLine, endCharacter);
+
     // The Edit menu, chosen with the mouse (keys reach CodeMirror's
     // keymap directly; Shortcuts.cs).
     public static string Undo() => Call("undo");
@@ -170,6 +195,59 @@ public static class EditorReply
     /// <summary>`text()`: the page's version and whole text.</summary>
     public static (long Version, string Text)? Text(string json) =>
         Parse(json, out var v, out var t) && v is { } version && t is { } text ? (version, text) : null;
+
+    /// <summary>
+    /// <see cref="EditorScript.GuardedAgentEdit"/>'s answer: the page's
+    /// version after the edit, <see cref="AgentEditReply.Moved"/> when the
+    /// page had moved on, or null for anything else (no answer, a script
+    /// error).
+    /// </summary>
+    public static AgentEditReply? AgentEdit(string? json)
+    {
+        if (json is null) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var m = doc.RootElement;
+            if (m.ValueKind != JsonValueKind.Object) return null;
+            if (m.TryGetProperty("stale", out var stale) && stale.ValueKind == JsonValueKind.True)
+                return new AgentEditReply.Moved();
+            if (m.TryGetProperty("version", out var v) && v.TryGetInt64(out var version))
+                return new AgentEditReply.Applied(version);
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>`selectionPositions()`: the main selection, or null.</summary>
+    public static EditorSelection? Selection(string? json)
+    {
+        if (json is null) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var m = doc.RootElement;
+            if (m.ValueKind != JsonValueKind.Object
+                || Position(m, "anchor") is not { } anchor || Position(m, "head") is not { } head)
+            {
+                return null;
+            }
+            return new EditorSelection(anchor, head);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    static EditorPosition? Position(JsonElement m, string name) =>
+        m.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.Array && p.GetArrayLength() == 2
+            && p[0].TryGetUInt32(out var line) && p[1].TryGetUInt32(out var character)
+            ? new EditorPosition(line, character)
+            : null;
 
     static bool Parse(string json, out long? version, out string? text)
     {
@@ -189,4 +267,14 @@ public static class EditorReply
             return false;
         }
     }
+}
+
+/// <summary>What became of an agent's edit in the page.</summary>
+public abstract record AgentEditReply
+{
+    /// <summary>Applied; the page's version after it.</summary>
+    public sealed record Applied(long Version) : AgentEditReply;
+
+    /// <summary>The page had changed since the window's copy (a keystroke on its way); nothing applied.</summary>
+    public sealed record Moved : AgentEditReply;
 }

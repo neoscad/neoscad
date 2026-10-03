@@ -6,6 +6,7 @@ namespace NeoSCAD.Tests;
 /// <summary>A UI thread stand-in: posted work waits until the test pumps it.</summary>
 sealed class QueueDispatcher : IUiDispatcher
 {
+    static readonly TimeSpan Slice = TimeSpan.FromMilliseconds(10);
     readonly BlockingCollection<Action> queue = [];
 
     public void Post(Action action) => queue.Add(action);
@@ -18,7 +19,9 @@ sealed class QueueDispatcher : IUiDispatcher
         {
             var left = deadline - DateTime.UtcNow;
             if (left <= TimeSpan.Zero) return false;
-            if (queue.TryTake(out var a, left)) a();
+            // In slices, so a condition another thread makes true (an
+            // agent's request answered) is seen without work being posted.
+            if (queue.TryTake(out var a, left < Slice ? left : Slice)) a();
         }
         return true;
     }

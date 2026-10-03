@@ -3,7 +3,9 @@
 # host-logic and binding tests, builds the WinUI app, launches it on one
 # of the core's examples and uploads a screenshot of its window and its
 # diagnostic log (scripts/windows/launch-screenshot.ps1) for a person to
-# look at.
+# look at. The tests include the agent link end to end: the `neoscad`
+# command line, built here, drives the app's C# host over a real named
+# pipe (windows/NeoSCAD.Tests/AgentMachineTests.cs).
 #
 # Runs only when something the app is built from changes, and on demand.
 name: Windows app
@@ -14,6 +16,8 @@ on:
       - "windows/**"
       - "crates/ffi/**"
       - "crates/client/**"
+      - "crates/agent-link/**"
+      - "crates/cli/**"
       - "apple/Editor/web/**"
       - "scripts/windows/**"
       - ".github/workflows/windows-app.yml"
@@ -23,6 +27,8 @@ on:
       - "windows/**"
       - "crates/ffi/**"
       - "crates/client/**"
+      - "crates/agent-link/**"
+      - "crates/cli/**"
       - "apple/Editor/web/**"
       - "scripts/windows/**"
       - ".github/workflows/windows-app.yml"
@@ -73,9 +79,21 @@ jobs:
         shell: pwsh
         run: scripts/windows/build-core.ps1 -Arch ${{ matrix.arch }}
 
+      # The command line the agent end-to-end test runs as `neoscad mcp`
+      # (AgentEndToEndTests): the real server finding the test's link on a
+      # named pipe, reading and editing the C# host's document, and the
+      # consent switch taking the pipe away. Release, as the app bundles
+      # it (without build-msi.ps1's dist profile, which only shrinks it).
+      - name: The neoscad command line, for the agent end-to-end test
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p neoscad-cli --bin neoscad
+          if ($LASTEXITCODE -ne 0) { throw "cargo build (neoscad-cli) failed ($LASTEXITCODE)" }
+          "NEOSCAD_TEST_CLI=$(Resolve-Path target/release/neoscad.exe)" >> $env:GITHUB_ENV
+
       - name: Host logic and binding tests (against the real core)
         shell: pwsh
-        run: dotnet test windows/NeoSCAD.Tests/NeoSCAD.Tests.csproj -c Release -p:NeoScadRid=win-${{ matrix.arch }}
+        run: dotnet test windows/NeoSCAD.Tests/NeoSCAD.Tests.csproj -c Release -p:NeoScadRid=win-${{ matrix.arch }} --logger "console;verbosity=normal"
 
       - name: Build the app
         shell: pwsh

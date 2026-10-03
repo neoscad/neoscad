@@ -22,14 +22,14 @@ it does not do yet is listed under "Next".
 |---|---|
 | `windows/NeoSCAD.sln` | The solution: the four projects below |
 | `windows/NeoSCAD.Bindings/` | The generated C# binding of `crates/ffi` (`Generated/neoscad_ffi.cs`, not checked in) and the core's native library for the platform, copied to every project that references it. `net10.0` |
-| `windows/NeoSCAD.Host/` | Host logic that is not UI, tested on any OS: `DocumentSession` (the window's loop, text copy, dirty state, save) and `DocumentSession.Panels.cs` (the customizer, check, measure, the view's overlay, export), `FileWatch` (the run's files on disk), `Shortcuts` (the chords the editor page forwards), `EditorSync` and `EditorProtocol` (the editor bridge), `EditorPage` (what the editor's origin serves, and the page's key script), `LanguageBridge` (the in-process language server), `StartupAction`, `AppLog` (the `--log` file), `PanelScale` (the viewport's display-scale arithmetic), `Updates` (the update check, the MSI's download and the install helper; see "Updates"). `net10.0` |
-| `windows/NeoSCAD.App/` | The WinUI 3 app: `MainWindow` (menus, panes, pickers, dialogs; `MainWindow.Updates.cs` the update bar and Help menu), `Panels/` (`CustomizerPanel`, `CheckPanel`, `MeasurePanel`, built in code), `Editor/EditorHost.cs` (WebView2), `Viewport/ViewportPanel.cs` (the `SwapChainPanel`), `WinUiHost.cs` (DispatcherQueue timer and dispatcher). `net10.0-windows10.0.19041.0`, unpackaged, self-contained |
+| `windows/NeoSCAD.Host/` | Host logic that is not UI, tested on any OS: `DocumentSession` (the window's loop, text copy, dirty state, save) and `DocumentSession.Panels.cs` (the customizer, check, measure, the view's overlay, export), `FileWatch` (the run's files on disk), `Shortcuts` (the chords the editor page forwards), `EditorSync` and `EditorProtocol` (the editor bridge), `EditorPage` (what the editor's origin serves, and the page's key script), `LanguageBridge` (the in-process language server), `StartupAction`, `AppLog` (the `--log` file), `PanelScale` (the viewport's display-scale arithmetic), `Updates` (the update check, the MSI's download and the install helper; see "Updates"), `AgentSettings`, `AgentConnection`, `AgentDocumentHost` and `AgentSetup` (AI agents; see "AI agents"). `net10.0` |
+| `windows/NeoSCAD.App/` | The WinUI 3 app: `MainWindow` (menus, panes, pickers, dialogs; `MainWindow.Updates.cs` the update bar and Help menu, `MainWindow.Agents.cs` the agent control, dialog and approval bar), `Panels/` (`CustomizerPanel`, `CheckPanel`, `MeasurePanel`, built in code), `Editor/EditorHost.cs` (WebView2), `Viewport/ViewportPanel.cs` (the `SwapChainPanel`), `WinUiHost.cs` (DispatcherQueue timer and dispatcher). `net10.0-windows10.0.19041.0`, unpackaged, self-contained |
 | `windows/NeoSCAD.Tests/` | xUnit tests of `NeoSCAD.Host` and of the binding against the real core. `net10.0` |
 | `windows/installer/NeoSCAD.wxs` | The MSI's WiX 5 source (see "Installer") |
 | `windows/NeoSCAD.App/Assets/NeoSCAD.ico` | The app icon, built by `scripts/windows/make-icon.py` and committed |
 | `windows/uniffi.toml` | uniffi-bindgen-cs settings (namespace `NeoSCAD.Native`, public types, `NeoScad` for the free functions) |
 | `scripts/windows/build-core.ps1` | The core's DLL, the binding and the editor bundle, before `dotnet build` |
-| `scripts/windows/docker-test.sh` | The binding and host tests on Linux in Docker (from a Mac) |
+| `scripts/windows/docker-test.sh` | The binding and host tests on Linux in Docker (from a Mac); `--with-cli` adds the agent end-to-end test |
 | `scripts/windows/docker-typecheck.sh` | The WinUI app's C# compiled against the Windows App SDK in Docker, with `xaml-standins.py` in place of the XAML compiler (see "Testing off Windows") |
 | `scripts/windows/launch-screenshot.ps1` | Launch the built app with `--log` (and `-Panel`, a side panel open), capture its window, check it stayed up (CI) |
 | `scripts/windows/build-msi.ps1` | Publish the app, stage its licences, build the MSI |
@@ -413,6 +413,128 @@ a result is shown only while `DocumentController.IsCurrent` holds. Quick
 document calls (`update`, `edit`, `close`) stay on the UI thread so edits
 reach the session in order.
 
+## AI agents
+
+The window's side of `docs/agent-bridge.md`, "Desktop apps": plain
+`neoscad mcp`, started by any MCP client, works on the open document once
+the user allows it. The design and the strings are
+`docs/audits/agent-connection-desktop.md` (Option C and its Windows UI
+spec); the shared parts are `crates/ffi/src/agent.rs` (`AgentLink`,
+`AgentHost`, `AgentObserver`, the viewport's `CaptureAsShown`,
+`ApplyAgentCamera`, `SetAgentAnnotations`) and
+`crates/ffi/src/agent_setup.rs` (the client rows and their actions).
+
+**What the user sees.**
+
+- *The control*, at the right end of the menu row (the window has a
+  `MenuBar`, not a `CommandBar`): a sparkle and "Connect your AI agent".
+  When an agent is connected it reads "Claude Code connected" (several:
+  "2 agents connected") with a green dot (`InfoBadge`); while one works,
+  a small `ProgressRing` and "Claude Code is editing" (the core's
+  `agent_status_line`). The tooltip names every connected agent. The
+  names are what each client calls itself, and nothing presents them as
+  verified.
+- *Before agents are allowed*, the control opens the dialog. *After*, it
+  opens a flyout: who is connected and what each is doing, Disconnect per
+  agent, "Ask me before applying the agent's edits", "Add NeoSCAD to an
+  agent…" and "Turn off AI agents".
+- *Help > Connect Your AI Agent…*: a `ContentDialog`, "Connect your AI
+  agent":
+  1. the switch "Allow AI agents to work on open documents", with the
+     consent text beside it ("Agents on this computer that use NeoSCAD
+     … What they read goes to the agent's AI service.") and the link's
+     state;
+  2. "Add NeoSCAD to your agent": a card per client from
+     `agent_setup_rows(cli)`, each with its button, its state and Copy.
+     Claude Code: `claude` is looked for when the dialog opens (off the
+     UI thread), then Add runs `claude mcp add --scope user neoscad --
+     "<install>\bin\neoscad.exe" mcp`; an existing entry turns the button
+     into Replace, run only when pressed. Cursor and VS Code: "Open
+     Cursor" launches the client's install link (`Launcher.LaunchUriAsync`),
+     and the client asks the user; a link nothing handles says the client
+     looks missing. Claude Desktop: the first press puts the question in
+     the card (which file, and that a copy is kept), "Add and keep a
+     backup" writes `%APPDATA%\Claude\claude_desktop_config.json` through
+     the core's merge, and the card then says to quit and reopen Claude.
+     Other: the JSON to copy. A card that cannot act (no `claude`, Claude
+     Desktop not installed, a config the core refused) shows the text to
+     copy instead;
+  3. things to ask (the web page's `IDEAS`), and "Using NeoSCAD with AI
+     agents" (`neoscad.org/agents.html`).
+- *Help > Allow AI Agents to Work on Open Documents* and *Ask Before
+  Applying Agent Edits*: the same two settings, as checkable items, as
+  the update settings already are (the app has no settings window).
+  Checking the first asks the consent question in its own dialog (Allow /
+  Not Now).
+- *The approval bar*, when the user asked to be asked: an `InfoBar` like
+  the update bar, "Claude Code wants to change this model", the change's
+  lines, Apply, and close to decline. Unanswered, it goes after 140 s as
+  declined, before the command line's 150 s would give up on the edit.
+- *Turned off*: the control hides (the audit's "off" state); the Help
+  menu brings agents back. "Not now" before ever allowing leaves the
+  control as the invitation.
+
+**Consent and cost.** The setting is `%LOCALAPPDATA%\NeoSCAD\agents.json`
+(`AgentSettings`: `allowed`, `ask_before_edits`, `turned_off`), off by
+default; a missing or damaged file reads as off. Until it is on, no
+`AgentLink` exists in the process: no pipe and no thread. The
+app is one process per window, so each window has its own link, and each
+watches `agents.json` (one `FileSystemWatcher`, an idle OS notification)
+so that a choice made in one window reaches every other at once:
+turning agents off anywhere closes every window's pipe. Allowed and
+idle, the cost is the link's one thread waiting on its pipe.
+
+**The host** (`NeoSCAD.Host/AgentDocumentHost.cs`) answers the link for
+the window's one document, number 1 (the command line tells processes
+apart by their pipes):
+
+| Request | What the window does |
+|---|---|
+| `read` | The document's text (unsaved changes included), `Revision`, the editor's selection (`selectionPositions()`), the customizer's values, the parts switch, the last run's summary and the console |
+| `edit` | Stale unless the agent's version is the document's `Revision`; asks first when the user chose to; then the editor's `agentEdit`, one undoable, highlighted step, guarded in the page by the page's own version (below). Without an editor (no WebView2) the document's copy takes it and the editor gets the text later |
+| `reveal` | `revealRange`: selected and scrolled to |
+| `camera` | `Viewport.ApplyAgentCamera` |
+| `capture` | Waits for a preview that is running or due (an agent's edit schedules one) up to 60 s, then `Viewport.CaptureAsShown` |
+| `annotate` | `Viewport.SetAgentAnnotations`, the agent's own layer: the check and measure overlays stay |
+
+`DocumentSession.Revision` counts every change of the text (typing, undo,
+a reload, an agent's edit) and only grows while the window is open, so an
+edit against a version the agent read is never applied to different
+text. The agent's own edit gets the next number whichever way it lands.
+The page applies an edit only if its version is still the one the
+window's copy holds (`agentEdit`'s `expectVersion`, as the macOS host
+passes it; `EditorScript.GuardedAgentEdit`): a keystroke still on its way
+to the app has already moved the page's version, and the edit is then
+refused as stale rather than applied to text it was not worked out for.
+The edit's answer waits (up to 2 s) for the page's change to reach the
+window's copy, so the next `read` and a save include it.
+
+**Threads.** The link calls the host on its own threads. Whatever touches
+the document or the editor is posted to the UI thread
+(`DispatcherQueue.TryEnqueue`) and the link's thread waits for it, up to
+10 s (the agent is then told the window did not answer, for instance
+behind a modal dialog); the UI thread never waits on the link. The view's
+three calls are the core's, which lock the view in Rust, so they run on
+the link's thread, and a capture's readback does not hold up typing or
+frames. Statuses from the observer are only posted, and the newest
+sequence wins.
+
+**Several windows.** Each window process registers its document and
+reports focus (`Activated`), stamped with the wall clock, so a request
+naming no document goes to the window the user used last. Disconnect in
+one window ends that agent's connection to that window only; the
+consent switch acts on all of them.
+
+**Files.** `NeoSCAD.Host`: `AgentSettings.cs`, `AgentConnection.cs` (the
+link's lifecycle, the settings watch, the control's state as
+`AgentIndicator`), `AgentDocumentHost.cs`, `AgentSetup.cs` (the rows'
+steps and sentences, and `AgentCli.Locate`: `bin\neoscad.exe` beside the
+app, else a `neoscad.exe` on `PATH` for a build run from the source tree,
+else the dialog says there is no command-line tool),
+`DocumentSession.Agent.cs`, and the scripts in `EditorProtocol.cs`.
+`NeoSCAD.App`: `MainWindow.Agents.cs`, `EditorHost` (`IAgentEditor`), the
+XAML's control, Help items and approval bar.
+
 ## Diagnostics
 
 `--log FILE` appends one timestamped line per start-up event
@@ -445,7 +567,12 @@ binding in `rust:<pinned toolchain>`, then runs `dotnet test` on
 binding's checksums, records, objects, a C#-implemented observer, the
 UTF-16 edits, and the document loop end to end (a pause runs a preview
 whose console reaches the session; save; STL export). The WinUI project
-needs Windows to build.
+needs Windows to build. With `--with-cli` it also builds the `neoscad`
+command line in the Rust container and runs the agent end-to-end test
+with it (`AgentEndToEndTests`: the real `neoscad mcp` reading and editing
+the C# host's document over the link's Unix socket); without it that
+test passes at once and says it was skipped. `windows-app.yml` builds the
+command line and runs it over a named pipe.
 
 `scripts/windows/docker-typecheck.sh` (after `docker-test.sh`, which
 generates the binding) compiles the app's C# against the Windows App
@@ -559,6 +686,33 @@ Not verified until CI or a Windows machine runs it: the XAML loading
 how the panels look, slider dragging, picking in the view, the export
 dialog, the forwarded keys in WebView2, and `FileSystemWatcher` on NTFS
 (the test ran on Linux's inotify).
+
+**AI agents** (October 2026, "AI agents" above) were checked off Windows
+only:
+- `docker-test.sh --with-cli` passes 120 of 120 tests on linux-arm64, 21
+  of them new (`AgentTests.cs`, `AgentMachineTests.cs`): consent off by
+  default and a damaged settings file read as off; the control's states;
+  the host's `read`, `edit` (stale versions, the page's refusal, no
+  editor, ask first, an unanswered question declined), `reveal`, the
+  view's refusals without a view, a busy window and a closed one; each
+  setup card's flow with a fake backend; a stand-in `claude` found on
+  `PATH` and run through `claude mcp add` and Replace by the real core;
+  and the real `neoscad mcp` reading the document, editing it as one
+  step at the version it read, getting the window's "no 3D view" as an
+  error, Disconnect, and the consent switch taking the socket away.
+  Two parts ran vacuously there: the view's calls on a real `Viewport`
+  (no GPU in the container) and Claude Desktop's config, which the core
+  writes on Windows and macOS only (on Linux the test checks the core
+  refuses);
+- `docker-typecheck.sh` compiles the app with the new controls (warnings
+  as errors);
+- `actionlint` 1.7.12 passes on `windows-app.yml`.
+
+Not verified until CI or a Windows machine runs it: the named pipe (CI's
+end-to-end test), Claude Desktop's config under `%APPDATA%` (CI), and,
+by hand, the XAML and look of the control, flyout, dialog and approval
+bar, the install links, the clipboard, a real `claude`, and `agentEdit`
+in WebView2 (`docs/followups.md`, "Windows").
 
 Unverified until `windows-installer.yml` runs: the MSI build itself (ICE
 validation included), install, the shortcut, the uninstall entry, the

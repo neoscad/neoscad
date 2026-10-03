@@ -28,11 +28,12 @@ using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
 using NeoSCAD.Host;
+using NeoSCAD.Native;
 using Windows.Storage.Streams;
 
 namespace NeoSCAD.App.Editor;
 
-public sealed class EditorHost
+public sealed class EditorHost : IAgentEditor
 {
     readonly WebView2 view;
     readonly DocumentSession document;
@@ -61,7 +62,7 @@ public sealed class EditorHost
         document.TextLoaded += text => _ = Load(text);
         // Another program's change to a clean document's file: applied in
         // the page, whose change then comes back through `sync`.
-        document.EditorInStep = () => ready && sync.Version is not null;
+        document.EditorInStep = () => InStep;
         document.ReloadRequested += json => _ = Call(EditorScript.AgentEdit(json));
         document.LanguageSyncRequested += () => _ = Call(EditorScript.LspSync());
         // Not gated on `ready`: the page's client sends `initialize` before
@@ -290,6 +291,38 @@ public sealed class EditorHost
     }
 
     public void Focus() => _ = Call(EditorScript.Focus());
+
+    // --- An AI agent's requests (NeoSCAD.Host/AgentDocumentHost.cs) -------------------
+
+    /// <summary>The page is up and the document's copy holds its version.</summary>
+    public bool InStep => ready && sync.Version is not null;
+
+    public async Task<AgentEditorOutcome> ApplyAsync(string editsJson)
+    {
+        if (!ready || sync.Version is not { } version) return AgentEditorOutcome.Failed;
+        var reply = EditorReply.AgentEdit(await Call(EditorScript.GuardedAgentEdit(editsJson, version)));
+        switch (reply)
+        {
+            case AgentEditReply.Moved:
+                return AgentEditorOutcome.Moved;
+            case AgentEditReply.Applied a:
+                // The page posted the edit as a change before the script
+                // returned, but WebView2 may hand the script's answer over
+                // first: wait for the change, so the document's copy (what
+                // Save writes, what the agent reads next) has it.
+                await sync.WaitForAsync(a.Version, TimeSpan.FromSeconds(2));
+                return AgentEditorOutcome.Applied;
+            default:
+                AppLog.Write("editor: an agent's edit got no answer from the page");
+                return AgentEditorOutcome.Failed;
+        }
+    }
+
+    public async Task<EditorSelection?> SelectionAsync() =>
+        EditorReply.Selection(await Call(EditorScript.SelectionPositions()));
+
+    public async Task<bool> RevealAsync(EditorPosition from, EditorPosition to) =>
+        await Call(EditorScript.RevealRange(from.Line, from.Character, to.Line, to.Character)) is not null;
 
     /// <summary>
     /// An Edit menu command chosen with the mouse (<see
