@@ -230,10 +230,11 @@ class References(unittest.TestCase):
     """The references pass; each variant fails exactly the checks it breaks."""
 
     def ref(self, task, defines=(), tag="ref"):
-        src = {"T1": "t1_bracket.scad", "T2": "t2_enclosure.scad", "T3": "t3_adapter.scad"}[task]
-        if task == "T2":
+        src = {"T1": "t1_bracket.scad", "T2": "t2_enclosure.scad", "T3": "t3_adapter.scad",
+               "T4": "t4_hinge.scad", "T5": "t5_knob.scad", "T6": "t6_gears.scad"}[task]
+        if len(grade.PARTS[task]) > 1:
             files = {part: render("openscad", HERE / "refs" / src, TMP / f"{tag}-{part}.stl",
-                                  [f'part="{part}"', *defines]) for part in ("base", "lid")}
+                                  [f'part="{part}"', *defines]) for part in grade.PARTS[task]}
         else:
             files = {grade.PARTS[task][0]: render("openscad", HERE / "refs" / src, TMP / f"{tag}.stl", defines)}
         return graded(task, files)
@@ -349,8 +350,64 @@ class References(unittest.TestCase):
         self.assertFails(self.ref("T3", ["barb_flare=8", "barbs=4"], "t3-flare-four"), "three barbs")
         self.assertFails(self.ref("T3", ["barb_flare=8", "barb_len=20"], "t3-flare-short"), "barb 25")
 
+    # Held-out tasks T4-T6: each reference passes, also turned or printed
+    # the other way up, and each wrong variant fails its own check.
+
+    def test_t4(self):
+        g = self.ref("T4")
+        self.assertTrue(g["pass"], g["failed_gates"] or g["parts"])
+        # The hinge along y instead of x, and the box turned round.
+        for turn in (90, 180):
+            g = self.ref("T4", [f"turn={turn}"], f"t4-turn{turn}")
+            self.assertTrue(g["pass"], (turn, g["failed_gates"]))
+        # Knuckle ribs down the back wall are hinge, and the box is still
+        # 70 x 45 when they cover most of it (20 of every 24.8 here, where
+        # a median of the rays read the back face 2 out). A 47 deep box
+        # (and lid) is not.
+        for ribs in (12, 20):
+            g = self.ref("T4", [f"ribs={ribs}"], f"t4-ribs{ribs}")
+            self.assertTrue(g["pass"], (ribs, g["failed_gates"]))
+        self.assertFails(self.ref("T4", ["size=[70, 47, 30]"], "t4-deep"), "body 70 x 45", "lid plate")
+        self.assertFails(self.ref("T4", ["wall=2.5"], "t4-wall"), "walls 2")
+        self.assertFails(self.ref("T4", ["kn_d=8"], "t4-od"), "outer diameter")
+        self.assertFails(self.ref("T4", ["hole=3"], "t4-hole"), "pin hole")
+        self.assertFails(self.ref("T4", ["gap=0.8"], "t4-gap"), "0.4 between")
+        # Lid knuckles 1 lower when closed: each part is right on its own,
+        # but the pin cannot pass both.
+        self.assertFails(self.ref("T4", ["lid_dz=-1"], "t4-axis"), "axis on the body")
+
+    def test_t5(self):
+        g = self.ref("T5")
+        self.assertTrue(g["pass"], g["failed_gates"] or g["parts"])
+        g = self.ref("T5", ["flip=false"], "t5-bore-down")
+        self.assertTrue(g["pass"], g["failed_gates"])
+        self.assertFails(self.ref("T5", ["flutes=18"], "t5-flutes"), "20 grip flutes")
+        self.assertFails(self.ref("T5", ["flute_d=2"], "t5-flute-depth"), "1 deep")
+        self.assertFails(self.ref("T5", ["flat=4.2"], "t5-flat"), "D bore")
+        self.assertFails(self.ref("T5", ["depth=14"], "t5-depth"), "12 deep")
+        self.assertFails(self.ref("T5", ["depth=18"], "t5-through"), "12 deep")
+        self.assertFails(self.ref("T5", ["screw_z=7"], "t5-screw"), "set-screw")
+
+    def test_t6(self):
+        g = self.ref("T6")
+        self.assertTrue(g["pass"], g["failed_gates"] or g["parts"])
+        # Thinner teeth (more backlash) still turn; a 25-degree pressure
+        # angle is not measured (the spec's 20 is not gated).
+        for d in ("fat=-0.5", "pa=25"):
+            g = self.ref("T6", [d], f"t6-{d}")
+            self.assertTrue(g["pass"], (d, g["failed_gates"]))
+        self.assertFails(self.ref("T6", ["dist=36"], "t6-dist"), "34 apart")
+        self.assertFails(self.ref("T6", ["axle_d=6"], "t6-axle"), "axles")
+        self.assertFails(self.ref("T6", ["bore=5"], "t6-bore"), "bores")
+        self.assertFails(self.ref("T6", ["thick=7"], "t6-thick"), "6 thick")
+        self.assertFails(self.ref("T6", ["plate_t=5"], "t6-plate"), "plate 80")
+        # Teeth 0.1 mm too thick on the big gear bind at 34.
+        self.assertFails(self.ref("T6", ["fat=0.25"], "t6-fat"), "mesh")
+        self.assertFails(self.ref("T6", ["small_z=16"], "t6-z16"), "15 teeth", "outside diameter 25.5", "mesh")
+
 
 T0_SCAD = "difference() { cube([20, 10, 4]); translate([10, 5, -1]) cylinder(d = 3, h = 6, $fn = 64); }\n"
+
 T0_PY = """import cadquery as cq
 r = cq.Workplane("XY").box(20, 10, 4, centered=False).faces(">Z").workplane(centerOption="CenterOfBoundBox").hole(3)
 cq.exporters.export(r, "plate.stl")

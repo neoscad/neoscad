@@ -26,7 +26,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import stlmesh as sm  # noqa: E402
 
-PARTS = {"T0": ["plate"], "T1": ["bracket"], "T2": ["base", "lid"], "T3": ["adapter"]}
+PARTS = {"T0": ["plate"], "T1": ["bracket"], "T2": ["base", "lid"], "T3": ["adapter"],
+         "T4": ["body", "lid"], "T5": ["knob"], "T6": ["plate", "large_gear", "small_gear"]}
 SQ2M1 = math.sqrt(2) - 1
 
 
@@ -38,8 +39,10 @@ def check(name, ok, value=None, expected=None, gate=True, note=None):
 
 
 def r3(x):
-    if x is None:
-        return None
+    if x is None or isinstance(x, (bool, str)):
+        return x
+    if isinstance(x, dict):
+        return {k: r3(v) for k, v in x.items()}
     if isinstance(x, (list, tuple)):
         return [r3(y) for y in x]
     return round(x, 3)
@@ -886,7 +889,633 @@ def grade_t3(parts):
     return out
 
 
-GRADERS = {"T0": grade_t0, "T1": grade_t1, "T2": grade_t2, "T3": grade_t3}
+# ---------------------------------------------------------------------------
+# Held-out tasks T4-T6. Written before any agent run saw these tasks, from
+# the spec's numbers alone (tasks.json); like T1-T3, a check gates only on
+# a number the spec states, and every tolerance is given beside it.
+
+
+def at(a, along, uv):
+    """The 3D point at `along` on axis a and (u, v) across it, in the
+    section plane's own coordinates (stlmesh._axes)."""
+    u, v = sm._axes(a)
+    q = [0.0, 0.0, 0.0]
+    q[a], q[u], q[v] = along, uv[0], uv[1]
+    return q
+
+
+def mode(xs, bin_mm=0.05):
+    """The most common value to within `bin_mm`: a flat edge seen from
+    most positions, which a median misses when knuckles, notches or webs
+    cover half of them."""
+    if not xs:
+        return None
+    best = max(xs, key=lambda x: sum(1 for y in xs if abs(y - x) <= bin_mm))
+    return sm.median([y for y in xs if abs(y - best) <= bin_mm])
+
+
+def quantile(xs, q):
+    """The value a share q of xs lies at or below (nearest rank)."""
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, max(0, int(round(q * (len(xs) - 1)))))] if xs else None
+
+
+def frange(a, b, step):
+    n = int(math.floor((b - a) / step)) + 1
+    return [a + i * step for i in range(max(0, n))]
+
+
+def hinge(p, a, od_hint=7.0):
+    """The pin hole along axis `a` and the knuckles around it.
+
+    Sections across `a` every 0.5 mm find small holes (narrowest width
+    1.2-3.5); the hole centre seen at most sections is the hinge axis.
+    Knuckle outer diameter: twice the median distance from the axis to the
+    vertices of the loop around the hole that lie within od_hint/2 + 1.5,
+    so the knuckle's arc counts and the web or wall it joins does not.
+    Knuckle spans: rays along `a` at mid-wall between hole and outside, in
+    8 directions; a direction that runs along a web sees one long span,
+    so the one seeing the most separate spans (each holding the hole) is
+    used. Returns None without a hole."""
+    stations = []
+    for t in frange(p.bmin[a] + 0.25, p.bmax[a] - 0.25, 0.5):
+        loops, _ = p.section(a, t)
+        outer, holes = classify_loops(loops)
+        for h in holes:
+            wmin, wmax = sm.width_range(h, 90)
+            if 1.2 <= wmin <= 3.5 and wmax <= 5:
+                stations.append({"t": t, "c": sm.poly_centroid(h), "w": wmin, "outer": outer})
+    clusters = []
+    for s in stations:
+        for c in clusters:
+            if math.dist(s["c"], c[0]["c"]) <= 0.3:
+                c.append(s)
+                break
+        else:
+            clusters.append([s])
+    if not clusters:
+        return None
+    best = max(clusters, key=len)
+    c = (sm.median([s["c"][0] for s in best]), sm.median([s["c"][1] for s in best]))
+    hole_d = sm.median([s["w"] for s in best])
+    radii = []
+    for s in best:
+        around = [l for l in s["outer"] if sm.point_in_poly(c, l)]
+        if not around:
+            continue
+        loop = min(around, key=lambda l: abs(sm.poly_area(l)))
+        ds = [math.dist(c, q) for q in loop]
+        near = [d for d in ds if d <= od_hint / 2 + 1.5]
+        if near:
+            radii.append(sm.median(near))
+    od = 2 * sm.median(radii) if radii else None
+    r_probe = (hole_d / 2 + (od or od_hint) / 2) / 2
+    ts = [s["t"] for s in best]
+    choice = None
+    for k in range(8):
+        th = math.pi * k / 4
+        q = at(a, 0, (c[0] + r_probe * math.cos(th), c[1] + r_probe * math.sin(th)))
+        spans = [iv for iv in p.intervals(a, q) if any(iv[0] <= t <= iv[1] for t in ts)]
+        key = (len(spans), -sum(e - s for s, e in spans))
+        if choice is None or key > choice[0]:
+            choice = (key, spans)
+    spans = choice[1]
+    # The pin must pass every knuckle: no material on the axis inside a
+    # span, and the hole seen in every span.
+    on_axis = p.intervals(a, at(a, 0, c))
+    blocked = [s for s, e in spans if any(x0 < e - 0.05 and x1 > s + 0.05 for x0, x1 in on_axis)]
+    holed = [s for s, e in spans if any(s <= t <= e for t in ts)]
+    return {"axis": c, "axis3": at(a, 0, c), "hole_d": hole_d, "od": od, "spans": spans,
+            "through": not blocked and len(holed) == len(spans), "stations": len(best)}
+
+
+def open_box(b):
+    """Floor, walls, outer size and rim height of an open-top box, measured
+    below the hinge: rays at heights from 1 above the floor to half the
+    part's height, so knuckles and their webs near the rim are not in
+    them."""
+    H = b.bmax[2] - b.bmin[2]
+    cx, cy = (b.bmin[0] + b.bmax[0]) / 2, (b.bmin[1] + b.bmax[1]) / 2
+    fl = []
+    for dx in lin(-0.2, 0.2, 5):
+        for dy in lin(-0.2, 0.2, 5):
+            iv = b.intervals(2, (cx + dx * (b.bmax[0] - b.bmin[0]), cy + dy * (b.bmax[1] - b.bmin[1]), 0))
+            if iv and abs(iv[0][0] - b.bmin[2]) < 0.05 and iv[0][1] < b.bmin[2] + 0.5 * H:
+                fl.append(iv[0][1] - iv[0][0])
+    if len(fl) < 5:
+        return None
+    floor = sm.median(fl)
+    lo, hi, walls, cav = {0: [], 1: []}, {0: [], 1: []}, [], {0: [], 1: []}
+    for z in lin(b.bmin[2] + floor + 1, b.bmin[2] + 0.5 * H, 4):
+        for axis, other in ((0, 1), (1, 0)):
+            c = (b.bmin[other] + b.bmax[other]) / 2
+            L = b.bmax[other] - b.bmin[other]
+            for f in lin(-0.3, 0.3, 13):
+                q = [0, 0, z]
+                q[other] = c + f * L
+                iv = b.intervals(axis, q)
+                if len(iv) >= 2:
+                    lo[axis].append(iv[0][0])
+                    hi[axis].append(iv[-1][1])
+                    walls += [iv[0][1] - iv[0][0], iv[-1][1] - iv[-1][0]]
+                    cav[axis].append(iv[-1][0] - iv[0][1])
+    if not lo[0] or not lo[1]:
+        return None
+    # Each outer face is the innermost quartile of what the rays see, not
+    # the median: features outside a wall (ribs carrying the knuckles down
+    # to the floor, which are hinge) can cover half of it. A median read
+    # the back face 2 out on a 70 x 45 box whose knuckle ribs covered 36
+    # of its 70 (a T4 part in one eval run) and failed its size
+    # and its hinge axis.
+    box = {"floor": floor, "wall": sm.median(walls),
+           "lo": [quantile(lo[0], 0.75), quantile(lo[1], 0.75)], "hi": [quantile(hi[0], 0.25), quantile(hi[1], 0.25)]}
+    w = box["wall"]
+    tops = []
+    for axis, other in ((0, 1), (1, 0)):
+        for edge in (box["lo"][axis] + w / 2, box["hi"][axis] - w / 2):
+            for t in lin(box["lo"][other] + 5, box["hi"][other] - 5, 9):
+                q = [0, 0, 0]
+                q[axis], q[other] = edge, t
+                iv = b.intervals(2, q)
+                if iv:
+                    tops.append(iv[-1][1])
+    box["rim"] = sm.median(tops) - b.bmin[2] if tops else None
+    box["outer"] = [box["hi"][i] - box["lo"][i] for i in (0, 1)]
+    return box
+
+
+def side_offset(x, lo, hi):
+    """Signed distance of x outward from the nearer of two faces lo < hi."""
+    return max(lo - x, x - hi) if not lo <= x <= hi else -min(x - lo, hi - x)
+
+
+def grade_t4(parts):
+    out = []
+    body, lid = parts.get("body"), parts.get("lid")
+    box = open_box(body)
+    if box is None:
+        body = body.transformed(rot_x180)
+        box = open_box(body)
+    if box is None:
+        return [check("body is an open box with a floor", False, None, None,
+                      note="no floor found under the middle of the body from either side")]
+    out.append(check("body measured", True, r3(box), gate=False))
+    a = 0 if box["outer"][0] >= box["outer"][1] else 1
+    bx = 1 - a
+    o = sorted(box["outer"], reverse=True)
+    # Flat faces measured by rays: +-0.2 for the outside (it may carry a
+    # chamfer or rounded vertical edge whose facets move the median ray),
+    # +-0.1 for walls and floor (T2's tolerance).
+    out.append(check("body 70 x 45 x 30 outside (+-0.2)",
+                     abs(o[0] - 70) <= 0.2 and abs(o[1] - 45) <= 0.2 and within(box["rim"], 29.8, 30.2),
+                     r3(o + [box["rim"]]), [70, 45, 30], note="rim: median top of the walls"))
+    out.append(check("walls 2 and floor 2 (+-0.1)",
+                     within(box["wall"], 1.9, 2.1) and within(box["floor"], 1.9, 2.1),
+                     r3([box["wall"], box["floor"]]), [2, 2]))
+
+    # The lid: a plate whose faces and edges are the values most rays see.
+    # It may be printed either face down; the knuckles stand on its top.
+    la = 0 if (lid.bmax[0] - lid.bmin[0]) >= (lid.bmax[1] - lid.bmin[1]) else 1
+    lb = 1 - la
+    th = []
+    for x in lin(lid.bmin[0], lid.bmax[0], 11)[2:-2]:
+        for y in lin(lid.bmin[1], lid.bmax[1], 11)[2:-2]:
+            iv = lid.intervals(2, (x, y, 0))
+            if iv and abs(iv[0][0] - lid.bmin[2]) < 0.05:
+                th.append(iv[0][1] - iv[0][0])
+    lt = mode(th)
+    edges = {}
+    if lt:
+        z = lid.bmin[2] + lt / 2
+        for axis, other in ((la, lb), (lb, la)):
+            los, his = [], []
+            for t in lin(lid.bmin[other] + 2, lid.bmax[other] - 2, 33):
+                q = [0, 0, z]
+                q[other] = t
+                iv = lid.intervals(axis, q)
+                if iv:
+                    los.append(iv[0][0])
+                    his.append(iv[-1][1])
+            edges[axis] = (mode(los), mode(his))
+    lsize = [edges[i][1] - edges[i][0] if i in edges and None not in edges[i] else None for i in (la, lb)]
+    out.append(check("lid plate 70 x 45 x 3 (+-0.2, thickness +-0.1)",
+                     lt is not None and None not in lsize and abs(lsize[0] - 70) <= 0.2
+                     and abs(lsize[1] - 45) <= 0.2 and abs(lt - 3) <= 0.1,
+                     r3(lsize + [lt]), [70, 45, 3],
+                     note="each value the most common one over 33 rays (thickness: 49), so knuckles do not count"))
+
+    hb, hl = hinge(body, a), hinge(lid, la)
+    out.append(check("hinge found", True, {"body": r3(hb and {k: hb[k] for k in ("axis3", "spans", "stations")}),
+                                           "lid": r3(hl and {k: hl[k] for k in ("axis3", "spans", "stations")})},
+                     gate=False, note="the pin hole's axis along the 70 side, and knuckle spans along it"))
+    lens = {"body": [e - s for s, e in hb["spans"]] if hb else [], "lid": [e - s for s, e in hl["spans"]] if hl else []}
+    out.append(check("3 body and 2 lid knuckles, 12 long (+-0.2)",
+                     len(lens["body"]) == 3 and len(lens["lid"]) == 2
+                     and all(abs(x - 12) <= 0.2 for x in lens["body"] + lens["lid"]), r3(lens), 12))
+    ods = [h["od"] for h in (hb, hl) if h]
+    out.append(check("knuckles 7 outer diameter (+-0.3)", len(ods) == 2 and all(within(d, 6.7, 7.3) for d in ods),
+                     r3(ods), 7, note="median distance from the axis to the knuckle's outline near it"))
+    # The pin hole: its narrowest width, which a teardrop or faceted hole
+    # keeps at its nominal size (+-0.15), through every knuckle of a part.
+    holes = [h["hole_d"] for h in (hb, hl) if h]
+    out.append(check("2 pin hole through all knuckles on one axis (+-0.15)",
+                     len(holes) == 2 and all(within(d, 1.85, 2.15) for d in holes) and hb["through"] and hl["through"],
+                     {"diameters": r3(holes), "through": [h["through"] for h in (hb, hl) if h]}, 2))
+
+    # Interleaving: lid knuckles in the body's gaps, 0.4 from each body
+    # knuckle (+-0.1). The lid's spans are placed by its plate's ends,
+    # which match the body's 70 when closed, either way round (a lid
+    # turned over about the hinge's perpendicular reverses them).
+    gaps_best = None
+    if hb and hl and la in edges and None not in edges[la]:
+        L0, L1 = edges[la]
+        B = [(s - box["lo"][a], e - box["lo"][a], "B") for s, e in hb["spans"]]
+        for lmap in ((lambda x: x - L0), (lambda x: L1 - x)):
+            Ls = [tuple(sorted((lmap(s), lmap(e)))) + ("L",) for s, e in hl["spans"]]
+            seq = sorted(B + Ls)
+            gaps = [seq[i + 1][0] - seq[i][1] for i in range(len(seq) - 1)]
+            alt = all(seq[i][2] != seq[i + 1][2] for i in range(len(seq) - 1)) and seq and seq[0][2] == "B"
+            err = max((abs(g - 0.4) for g in gaps), default=9) if alt else 9
+            if gaps_best is None or err < gaps_best[0]:
+                gaps_best = (err, gaps, "".join(s[2] for s in seq))
+    out.append(check("knuckles alternate with 0.4 between neighbours (+-0.1)",
+                     gaps_best is not None and gaps_best[0] <= 0.1 + 1e-6 and gaps_best[2] == "BLBLB",
+                     gaps_best and {"gaps": r3(gaps_best[1]), "order": gaps_best[2]}, 0.4,
+                     note="lid spans placed by its plate's ends, either way round"))
+
+    # Closed, the lid's axis must be the body's: the same distance out
+    # from the hinge-side wall (lid: plate edge), and the same height over
+    # the rim (lid: over the face that rests on the rim, which is either
+    # face of a plate printed either way up). +-0.3, a third of the play a
+    # 2 hole leaves around 1.75 filament, doubled for two parts.
+    al = None
+    if hb and hl and lt and lb in edges and None not in edges[lb]:
+        ab, al3 = hb["axis3"], hl["axis3"]
+        h_b = side_offset(ab[bx], box["lo"][bx], box["hi"][bx])
+        v_b = ab[2] - (body.bmin[2] + box["rim"])
+        h_l = side_offset(al3[lb], *edges[lb])
+        v_ls = [al3[2] - lid.bmin[2], lid.bmin[2] + lt - al3[2]]
+        dv = min(abs(v - v_b) for v in v_ls)
+        al = {"body_out_up": r3([h_b, v_b]), "lid_out": r3(h_l), "lid_up_either_face": r3(v_ls),
+              "ok": abs(h_l - h_b) <= 0.3 and dv <= 0.3}
+    out.append(check("lid's hinge axis on the body's when closed (+-0.3)", bool(al and al["ok"]), al, None,
+                     note="axis offset out from the hinge-side wall and up from the rim, body against lid"))
+    out.append(check("lid opens and knuckles print without support", None, None, None, gate=False,
+                     note="not judged: swing clearance and the knuckles' overhangs need the assembly"))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# T5: D-shaft knob
+
+
+def outer_radii(loop, c, n=720):
+    """Distance from c to the outline along n directions (c inside it)."""
+    rs = []
+    for k in range(n):
+        th = 2 * math.pi * k / n
+        rs.append(sm.ray2d_first_hit(c, (math.cos(th), math.sin(th)), [loop]))
+    return rs
+
+
+def count_lobes(rs, frac=0.5):
+    """Runs of the radius profile below the midpoint between its extremes,
+    around the circle: flutes (or the gaps between teeth)."""
+    rs = [r for r in rs if r is not None]
+    if not rs:
+        return 0, 0
+    lo, hi = min(rs), max(rs)
+    mid = lo + frac * (hi - lo)
+    below = [r < mid for r in rs]
+    if all(below) or not any(below):
+        return 0, hi - lo
+    k = below.index(False)
+    rot = below[k:] + below[:k]
+    runs = sum(1 for i in range(1, len(rot)) if rot[i] and not rot[i - 1])
+    return runs, hi - lo
+
+
+def grade_t5(parts):
+    p = parts["knob"]
+    out = []
+    ext = [p.bmax[i] - p.bmin[i] for i in range(3)]
+    ax = min(range(3), key=lambda i: ext[i])
+    if ax != 2:
+        p = p.transformed(to_z(ax))
+    # The bore opens on the bottom face: turn the knob so it does.
+    cx, cy = (p.bmin[0] + p.bmax[0]) / 2, (p.bmin[1] + p.bmax[1]) / 2
+    iv = p.intervals(2, (cx, cy, 0))
+    if iv and abs(iv[0][0] - p.bmin[2]) < 0.05 and abs(iv[-1][1] - p.bmax[2]) > 0.5:
+        p = p.transformed(rot_x180)
+        cy = -cy
+    H = p.bmax[2] - p.bmin[2]
+    z0 = p.bmin[2]
+    out.append(check("18 tall (+-0.1)", within(H, 17.9, 18.1), r3(H), 18, note="along the knob's shortest extent"))
+
+    # Outside and flutes: sections at five heights, each around its
+    # outline's bbox centre; the median of each measure, so one level that
+    # a set-screw hole or a chamfer crosses does not decide it.
+    per = []
+    for f in (0.2, 0.35, 0.5, 0.65, 0.8):
+        loops, _ = p.section(2, z0 + f * H)
+        outer, _ = classify_loops(loops)
+        if not outer:
+            continue
+        ol = max(outer, key=sm.poly_area)
+        x0, y0, x1, y1 = sm.poly_bbox(ol)
+        cc = ((x0 + x1) / 2, (y0 + y1) / 2)
+        rs = outer_radii(ol, cc)
+        n, depth = count_lobes(rs)
+        per.append((n, depth, max(r for r in rs if r is not None), cc))
+    if not per:
+        return out + [check("knob section", False, None, None, note="no outline")]
+    n = sm.median([q[0] for q in per])
+    depth = sm.median([q[1] for q in per])
+    rmax = sm.median([q[2] for q in per])
+    c = per[len(per) // 2][3]
+    out.append(check("30 diameter (+-0.2)", within(2 * rmax, 29.8, 30.2), r3(2 * rmax), 30,
+                     note="over the lands between flutes"))
+    out.append(check("20 grip flutes", n == 20, n, 20))
+    out.append(check("flutes 1 deep (+-0.25)", within(depth, 0.75, 1.25), r3(depth), 1))
+
+    # Bore depth: rays along the axis near the centre; the first material
+    # above the bottom face is the bore's end. +-0.2 for a flat end, which
+    # a short bridge or a 45-degree cone tip would not have (the cone is
+    # not measured at the centre but up to 1 off it).
+    ends, through = [], 0
+    for dx, dy in ((0, 0), (0.5, 0), (-0.5, 0), (0, 0.5), (0, -0.5)):
+        iv = p.intervals(2, (c[0] + dx, c[1] + dy, 0))
+        if not iv:
+            through += 1
+        elif iv[0][0] > z0 + 0.05:
+            ends.append(iv[0][0] - z0)
+    bd = sm.median(ends)
+    out.append(check("bore 12 deep, not through the top (+-0.2)", through == 0 and within(bd, 11.8, 12.2),
+                     {"depth": r3(bd), "through_rays": through}, 12))
+
+    # The D: the hole around the centre in sections below and above the
+    # set screw (1.5, 2.5, 8 and 10 from the bottom). Calipers: widest
+    # (the 6.2 across the round) and narrowest (flat to round, 4.7);
+    # +-0.15 covers faceting (a 32-gon of 6.2 is 6.17 across its flats).
+    mins, maxs, dirs = [], [], []
+    for h in (1.5, 2.5, 8, 10):
+        loops, _ = p.section(2, z0 + h)
+        _, holes = classify_loops(loops)
+        hs = [l for l in holes if sm.point_in_poly(c, l)]
+        if not hs:
+            continue
+        hl = hs[0]
+        best = None
+        for k in range(360):
+            th = math.pi * k / 360
+            proj = [(x - c[0]) * math.cos(th) + (y - c[1]) * math.sin(th) for x, y in hl]
+            w = max(proj) - min(proj)
+            if best is None or w < best[0]:
+                best = (w, th, min(proj), max(proj))
+        mins.append(best[0])
+        maxs.append(sm.width_range(hl, 360)[1])
+        # The flat is the side nearer the centre.
+        th = best[1] if abs(best[3]) < abs(best[2]) else best[1] + math.pi
+        dirs.append((math.cos(th), math.sin(th), min(abs(best[2]), abs(best[3]))))
+    dmax, dmin = sm.median(maxs), sm.median(mins)
+    out.append(check("D bore 6.2 across, flat 4.7 from the far side (+-0.15)",
+                     within(dmax, 6.05, 6.35) and within(dmin, 4.55, 4.85), r3([dmax, dmin]), [6.2, 4.7],
+                     note="calipers of the bore's section at 1.5, 2.5, 8 and 10 from the bottom"))
+
+    # Set screw: turn the knob so the flat faces +x and cut it at x = 8
+    # out from the axis, between the flat and the outside; the hole there
+    # is the screw's. Narrowest width 2.5 (+-0.2, a teardrop keeps it),
+    # axis 5 from the bottom (+-0.3) and on the flat's middle (+-0.3), and
+    # nothing in the way from the bore to the outside.
+    ss = None
+    if dirs:
+        nx, ny = sm.median([d[0] for d in dirs]), sm.median([d[1] for d in dirs])
+        ang = math.atan2(ny, nx)
+        ca, sa = math.cos(-ang), math.sin(-ang)
+
+        def rot(q):
+            x, y = q[0] - c[0], q[1] - c[1]
+            return (x * ca - y * sa, x * sa + y * ca, q[2])
+
+        r = p.transformed(rot)
+        loops, _ = r.section(0, 8.0)
+        _, holes = classify_loops(loops)
+        cands = []
+        for hl in holes:
+            wmin, wmax = sm.width_range(hl, 180)
+            ys = [q[0] for q in hl]
+            zs = [q[1] for q in hl]
+            yc = (min(ys) + max(ys)) / 2
+            zc = min(zs) + (max(ys) - min(ys)) / 2 - z0
+            if 1.5 <= wmin <= 4:
+                cands.append((abs(yc) + abs(zc - 5), wmin, yc, zc))
+        if cands:
+            _, wmin, yc, zc = min(cands)
+            flat = sm.median([d[2] for d in dirs])
+            iv = r.intervals(0, (0, yc, z0 + zc))
+            clear = not any(s < 14 and e > flat + 0.3 for s, e in iv)
+            if through:  # no blind end to say which face is the bottom: either will do
+                zc = min(zc, H - zc, key=lambda v: abs(v - 5))
+            ss = {"diameter": r3(wmin), "from_bottom": r3(zc), "off_middle": r3(yc), "clear": clear,
+                  "ok": within(wmin, 2.3, 2.7) and within(zc, 4.7, 5.3) and abs(yc) <= 0.3 and clear}
+    out.append(check("2.5 set-screw hole through the flat's middle, 5 from the bottom", bool(ss and ss["ok"]), ss,
+                     {"diameter": 2.5, "from_bottom": 5}))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# T6: spur gears on a base plate
+
+
+def gear_profile(g):
+    """Section of a gear at mid-thickness: its outline, bore and centre
+    (the bore's centroid), lying flat whatever axis it was printed on."""
+    ext = [g.bmax[i] - g.bmin[i] for i in range(3)]
+    ax = min(range(3), key=lambda i: ext[i])
+    if ax != 2:
+        g = g.transformed(to_z(ax))
+    T = g.bmax[2] - g.bmin[2]
+    loops, _ = g.section(2, g.bmin[2] + T / 2)
+    outer, holes = classify_loops(loops)
+    if not outer:
+        return None
+    ol = max(outer, key=sm.poly_area)
+    x0, y0, x1, y1 = sm.poly_bbox(ol)
+    mid = ((x0 + x1) / 2, (y0 + y1) / 2)
+    bores = [h for h in holes if sm.point_in_poly(mid, h)]
+    c = sm.poly_centroid(bores[0]) if bores else mid
+    rs = outer_radii(ol, c, 1440)
+    teeth, _ = count_lobes([-r for r in rs if r is not None])
+    rr = [r for r in rs if r is not None]
+    # The meshing test is quadratic in edges near the mesh, so a finely
+    # tessellated outline (a CAD kernel's arcs can be thousands of points)
+    # keeps only vertices 0.1 apart: the chord then strays 0.001 from an
+    # R1 arc, against 0.18 of backlash.
+    thin = []
+    for q in ol:
+        if not thin or math.dist(q, thin[-1]) >= 0.1:
+            thin.append(q)
+    return {"T": T, "outline": [(x - c[0], y - c[1]) for x, y in thin],
+            "bore": sm.circum_diameter(bores[0]) if bores else None,
+            "teeth": teeth, "tip": max(rr), "root": min(rr)}
+
+
+def _rot(poly, ang, dx=0.0):
+    ca, sa = math.cos(ang), math.sin(ang)
+    return [(x * ca - y * sa + dx, x * sa + y * ca) for x, y in poly]
+
+
+def _seg_cross(p1, p2, q1, q2):
+    def orient(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    d1, d2 = orient(q1, q2, p1), orient(q1, q2, p2)
+    d3, d4 = orient(p1, p2, q1), orient(p1, p2, q2)
+    return (d1 > 0) != (d2 > 0) and (d3 > 0) != (d4 > 0)
+
+
+def _overlap(A, B, cA, cB, rA, rB):
+    """Do outlines A and B cross? Only edges in the lens where each could
+    reach the other (within the other's tip radius) are tested."""
+    ea = [(A[i], A[(i + 1) % len(A)]) for i in range(len(A))
+          if math.dist(A[i], cB) <= rB + 0.05 or math.dist(A[(i + 1) % len(A)], cB) <= rB + 0.05]
+    eb = [(B[i], B[(i + 1) % len(B)]) for i in range(len(B))
+          if math.dist(B[i], cA) <= rA + 0.05 or math.dist(B[(i + 1) % len(B)], cA) <= rA + 0.05]
+    # B's edges bucketed on a 0.5 mm grid by bbox, so each of A's edges
+    # meets only the few that could cross it.
+    cell = 0.5
+    grid = {}
+    for e in eb:
+        (x1, y1), (x2, y2) = e
+        for i in range(int(math.floor(min(x1, x2) / cell)), int(math.floor(max(x1, x2) / cell)) + 1):
+            for j in range(int(math.floor(min(y1, y2) / cell)), int(math.floor(max(y1, y2) / cell)) + 1):
+                grid.setdefault((i, j), []).append(e)
+    for p1, p2 in ea:
+        seen = set()
+        for i in range(int(math.floor(min(p1[0], p2[0]) / cell)), int(math.floor(max(p1[0], p2[0]) / cell)) + 1):
+            for j in range(int(math.floor(min(p1[1], p2[1]) / cell)), int(math.floor(max(p1[1], p2[1]) / cell)) + 1):
+                for e in grid.get((i, j), ()):
+                    if id(e) in seen:
+                        continue
+                    seen.add(id(e))
+                    if _seg_cross(p1, p2, e[0], e[1]):
+                        return True
+    # A tooth wholly inside the other gear crosses nothing: catch it by a
+    # vertex of each lens inside the other outline.
+    for (p1, _) in ea[::7]:
+        if sm.point_in_poly(p1, B):
+            return True
+    for (q1, _) in eb[::7]:
+        if sm.point_in_poly(q1, A):
+            return True
+    return False
+
+
+def gears_turn(big, small, dist, ratio, steps=12, phase_step_deg=0.25):
+    """Place the outlines `dist` apart and look for a phase of the small
+    gear at which they do not overlap and from which the big gear can turn
+    through one tooth pitch, the small one following at `ratio`, in
+    `steps` steps, without the outlines crossing. That is turning without
+    binding, at the stated centre distance."""
+    zb = big["teeth"]
+    pitch_b = 2 * math.pi / max(zb, 1)
+    pitch_s = 2 * math.pi / max(small["teeth"], 1)
+    cA, cB = (0.0, 0.0), (dist, 0.0)
+    n = int(round(math.degrees(pitch_s) / phase_step_deg))
+    for k in range(n):
+        phi = k * pitch_s / n
+        ok = True
+        for j in range(steps + 1):
+            d = pitch_b * j / steps
+            A = _rot(big["outline"], d)
+            B = _rot(small["outline"], phi - ratio * d, dist)
+            if _overlap(A, B, cA, cB, big["tip"], small["tip"]):
+                ok = False
+                break
+        if ok:
+            return math.degrees(phi)
+    return None
+
+
+def grade_t6(parts):
+    out = []
+    pl = parts["plate"]
+    # The plate: thickness from rays starting on its bottom face, away from
+    # the axles; outline from its section at half that.
+    th = []
+    for x in lin(pl.bmin[0], pl.bmax[0], 13)[1:-1]:
+        for y in lin(pl.bmin[1], pl.bmax[1], 13)[1:-1]:
+            iv = pl.intervals(2, (x, y, 0))
+            if iv and abs(iv[0][0] - pl.bmin[2]) < 0.05:
+                th.append(iv[0][1] - iv[0][0])
+    t = mode(th)
+    size = None
+    axles = []
+    if t:
+        loops, _ = pl.section(2, pl.bmin[2] + t / 2)
+        outer, _ = classify_loops(loops)
+        if outer:
+            x0, y0, x1, y1 = sm.poly_bbox(max(outer, key=sm.poly_area))
+            size = sorted([x1 - x0, y1 - y0], reverse=True)
+        top = pl.bmin[2] + t
+        loops, _ = pl.section(2, top + 5)
+        outer, _ = classify_loops(loops)
+        for l in outer:
+            d = sm.circum_diameter(l)
+            if 3 <= d <= 8:
+                cc = sm.poly_centroid(l)
+                iv = pl.intervals(2, (cc[0], cc[1], 0))
+                axles.append({"d": d, "c": cc, "height": (iv[-1][1] - top) if iv else None})
+    out.append(check("plate 80 x 55 x 4 (+-0.2, thickness +-0.1)",
+                     size is not None and abs(size[0] - 80) <= 0.2 and abs(size[1] - 55) <= 0.2 and within(t, 3.9, 4.1),
+                     r3((size or []) + [t]), [80, 55, 4]))
+    # Axles: circumscribed diameter (a faceted 5 is 5 at its corners),
+    # +-0.15; height to their top above the plate, +-0.2.
+    out.append(check("two 5 axles standing 10 above the plate (+-0.15, height +-0.2)",
+                     len(axles) == 2 and all(within(x["d"], 4.85, 5.15) and within(x["height"], 9.8, 10.2) for x in axles),
+                     [{"d": r3(x["d"]), "height": r3(x["height"])} for x in axles], {"d": 5, "height": 10}))
+    dist = math.dist(axles[0]["c"], axles[1]["c"]) if len(axles) == 2 else None
+    out.append(check("axle centres 34 apart (+-0.1)", within(dist, 33.9, 34.1), r3(dist), 34))
+
+    big, small = gear_profile(parts["large_gear"]), gear_profile(parts["small_gear"])
+    # Teeth: dips of the radius profile between tips; outside diameter
+    # m (z + 2), +-0.3 (a tip shortened for clearance or rounded is fine;
+    # a module 1.6 gear is 51 and 27.2 across).
+    for g, z, name in ((big, 30, "large"), (small, 15, "small")):
+        out.append(check(f"{name} gear: {z} teeth", bool(g) and g["teeth"] == z, g and g["teeth"], z))
+        od = 1.5 * (z + 2)
+        out.append(check(f"{name} gear: outside diameter {od} (module 1.5, +-0.3)",
+                         bool(g) and abs(2 * g["tip"] - od) <= 0.3, g and r3(2 * g["tip"]), od))
+    out.append(check("gears 6 thick (+-0.1)", bool(big and small) and within(big["T"], 5.9, 6.1) and within(small["T"], 5.9, 6.1),
+                     r3([g["T"] for g in (big, small) if g]), 6))
+    out.append(check("5.4 bores (+-0.15)",
+                     bool(big and small) and all(within(g["bore"], 5.25, 5.55) for g in (big, small)),
+                     r3([g["bore"] for g in (big, small) if g]), 5.4, note="circumscribed diameter"))
+    # Meshing: at the stated 34 (not the plate's, which has its own gate)
+    # the outlines must turn through a tooth pitch together at 30:15
+    # without crossing, and engage at least one module deep.
+    mesh = None
+    if big and small and big["teeth"] > 0 and small["teeth"] > 0:
+        engage = big["tip"] + small["tip"] - 34
+        phase = gears_turn(big, small, 34, big["teeth"] / small["teeth"])
+        mesh = {"engagement": r3(engage), "free_phase_deg": r3(phase),
+                "ok": phase is not None and engage >= 1.5 - 1e-6}
+    out.append(check("gears mesh at 34 and turn a tooth pitch without binding", bool(mesh and mesh["ok"]), mesh, None,
+                     note="mid-thickness outlines, big gear turned in 12 steps through one pitch, small at the "
+                          "tooth ratio; engagement = tip radii - 34, at least the module"))
+    if big and small:
+        tt = []
+        for g, z in ((big, 30), (small, 15)):
+            rp = 1.5 * z / 2
+            ins = sum(1 for k in range(3600) if sm.point_in_poly(
+                (rp * math.cos(2 * math.pi * k / 3600), rp * math.sin(2 * math.pi * k / 3600)), g["outline"]))
+            tt.append(ins / 3600 * 2 * math.pi * rp / max(g["teeth"], 1))
+        out.append(check("tooth thickness at the pitch circle", None, r3(tt), r3(math.pi * 1.5 / 2), gate=False,
+                         note="information: half the circular pitch less backlash for a standard tooth"))
+    return out
+
+
+GRADERS = {"T0": grade_t0, "T1": grade_t1, "T2": grade_t2, "T3": grade_t3,
+           "T4": grade_t4, "T5": grade_t5, "T6": grade_t6}
 
 
 def grade(task, files):

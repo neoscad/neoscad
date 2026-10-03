@@ -1,5 +1,5 @@
 {
- "_comment": "Agent CAD comparison (docs/agent-eval.md, 'CAD comparison'). T1-T3 specs are ModelRift's wording as published at https://modelrift.com/blog/cadquery-vs-openscad/ (retrieved 2026-09-28); T0 is the harness's plumbing check, not part of the comparison.",
+ "_comment": "Agent CAD comparison (docs/agent-eval.md, 'CAD comparison'). T1-T3 specs are ModelRift's wording as published at https://modelrift.com/blog/cadquery-vs-openscad/ (retrieved 2026-09-28); T4-T6 are ours, held out: written after NeoSCAD's MCP server was tuned on T1-T3 and before any run of any tool saw them, to test that tuning did not just fit the benchmark; they avoid T1-T3's features (countersinks, fillets, snaps, threads). T0 is the harness's plumbing check, not part of the comparison.",
  "tasks": {
   "T0": {
    "title": "plumbing check",
@@ -20,6 +20,21 @@
    "title": "threaded hose-barb adapter",
    "spec": "An M24x2 threaded hose-barb adapter with a hex flange 30 across flats, a real helical thread 12 long, a 25 long barb carrying three barbs for 12 ID hose, and an 8 through-channel. Stacked rings are not a thread and are not allowed.",
    "parts": ["adapter"]
+  },
+  "T4": {
+   "title": "pin-hinged box (held out)",
+   "spec": "A pin-hinged box in two parts, a body and a lid. The body is 70 x 45 x 30 outside, not counting the hinge, with walls 2 and floor 2, open at the top; the lid is a flat plate 70 x 45 x 3 that closes onto the body's rim. The hinge runs along one 70 long edge: five knuckles, 7 outer diameter and 12 long, alternating body, lid, body, lid, body with 0.4 between neighbouring knuckles, and a 2 hole straight through all five on one axis when the lid is closed, so that a length of 1.75 filament serves as the pin.",
+   "parts": ["body", "lid"]
+  },
+  "T5": {
+   "title": "D-shaft knob (held out)",
+   "spec": "A control knob for a 6 D-shaft. The knob is 30 diameter and 18 tall, with 20 grip flutes 1 deep around its side. A D-shaped bore 6.2 diameter, its flat 4.7 from the opposite side of the bore, goes 12 deep into the knob from its bottom face and does not break through the top. A 2.5 radial hole for an M3 set screw enters the bore through the middle of the flat, its axis 5 from the bottom face.",
+   "parts": ["knob"]
+  },
+  "T6": {
+   "title": "spur gear pair on a base plate (held out)",
+   "spec": "A spur gear pair on a base plate, in three parts. Two gears of module 1.5 with 20 degree involute teeth, one with 30 teeth and one with 15, both 6 thick with a 5.4 bore. A base plate 80 x 55 x 4 carries two 5 diameter axles standing 10 tall above it, their centres 34 apart, which is 0.25 more than the standard centre distance, for backlash. The gears must mesh on the axles and turn without binding.",
+   "parts": ["plate", "large_gear", "small_gear"]
   }
  },
  "prompt": "Design this part for FDM 3D printing and export it as STL.\n\nSpec: {spec}\n\nOutput:\n- One source file per part in the current directory: {sources}. {how_export}\n- The final STL files are {stls}. Each must be one watertight solid, in millimetres, placed in its print orientation resting on the build plate at z = 0.\n- Every export to out/ counts as one version. You may make at most 12 versions. Do not write STL files anywhere else.\n\n3D-printing rules:\n- FDM, 0.4 mm nozzle, 0.2 mm layers, printed without support material.\n- Walls at least 1.2 mm unless the spec gives a size.\n- Overhangs no more than 45 degrees from vertical, except short bridges.\n- Use the clearances the spec gives; where it gives none, 0.2 mm per side between mating parts.\n\nRules:\n- Work unattended; there is nobody to ask.\n- Never fake success. Do not claim a feature works unless you checked it.\n- Report every failure, with the verbatim error text of every error a tool gave you.\n- When you finish, reply with: what you built, how many versions you made, and every failure or known deviation from the spec.",

@@ -115,6 +115,15 @@ are not allowed", is ours: ModelRift's write-up says only that the spec banned
 them. Output names (`out/<part>.stl`, one source per part) are ours, so
 the grader can find the files.
 
+**Held-out tasks.** NeoSCAD's MCP server was improved using findings
+from T1-T3 (its recipes include a countersink, a thread and a snap
+hook), so T4-T6 are tasks it was never tuned on, written and fixed
+before any tool ran them: a pin-hinged box (body and lid, five
+interleaved knuckles), a knob for a D-shaft (flutes, a blind D bore, a
+radial set-screw hole) and a spur gear pair on a plate with axles. They
+are ours, in ModelRift's style, and avoid T1-T3's features. Run them with
+`--tasks T4,T5,T6` and report them apart from T1-T3.
+
 **Protocol.** One run at a time, each in a fresh temporary directory:
 `claude -p --restricted` (the file tools confined to that directory; no
 user or project settings, hooks, skills or MCP servers),
@@ -194,13 +203,16 @@ tolerances:
 | T1 | plates 4 thick (±0.1, median over rays from the outer face); 2 countersunk + 2 plain holes; head 9 (±0.4, cone extrapolated from sections 0.3 and 0.8 mm deep) at 90° (±8); countersinks on the inner face; every hole's line of sight clear; R4 inner fillet (±0.8, from the diagonal gap in profile sections); R3 on at least 2 of the plates' free corners and the L's outer corner (±0.6); two gussets (solid spans along the edge 3 mm beyond the inner corner) |
 | T2 | walls 2 (±0.1) and cavity 50.8 × 26.8 (±0.1), medians of rays at 6 heights × 9 positions; four M2 post holes (1.5-3.6 dia, circumscribed, so a faceted 1.5 hole is 1.5) 1 mm above the floor; a 9.5 × 3.5 opening (±0.25) in a wall, the floor or the lid plate; five vent slots (the largest group of identical openings at least 1.5 times as long as wide: the spec gives no proportion, and 2.5 × 4.5 vents are slots); lid lip (or skirt) clearance 0.2 per side (±0.05) over a band at least 0.6 mm tall (levels 0.2 mm apart, each the median over positions), so a lip relieved for snap clearance is judged by its locating band |
 | T3 | Segments found by radial profile, in any order and orientation: hex (mean radius ≥ 13.5), thread-like (some direction reaches radius 9), barb (the rest), each the longest run of its levels. 8 channel (±0.2) open at every level and along the axis; hex 30 across flats (±0.2) over the levels with full hexagon corners (corners/flats 1.13-1.18, at least two levels 0.25 mm apart; chamfered corners elsewhere are allowed); thread 12 long (±1, the longest cluster of levels whose groove is open: some direction within 30% of the depth of the root, the crest being the 80th percentile of the widest direction, so a 45° cone under the flange is not thread); major diameter 24 (-0.6/+0.1, over the threaded levels); pitch 2 (±0.1, autocorrelation of the radius along one direction); helical, depth at least 0.8: the profile at 90°, 180° and 270° shifted by a quarter, half and three quarters of a pitch (stacked rings shift by 0); right-hand (with no thread to sample, all four thread gates fail, so every part has 11 gates); barb 25 long (±1, from the hex face or the thread's end, whichever is nearer, to the next feature or the part's end; or from where a flare into that feature starts, the levels narrowing away from it at a slope of 0.5 or more over at least 0.5 mm, since the spec does not say whether a root fillet or a skirt under the flange is barb or flange); three barbs (plateaus of the mean radius with a prominence of 0.3, not counting a flare's wide end) of 12.5-16 dia; layout: thread and barb at opposite ends with the hex between (our reading of "hose-barb adapter": the spec does not state the order, but a thread with no free end cannot screw into a port without burying the barb; this is our interpretation). 11 gates |
+| T4 | body 70 × 45 × 30 outside (±0.2; rays below half height, so the hinge is not in them, each face the innermost quartile of the rays, so ribs carrying the knuckles down the wall do not count; rim the median top of the walls); walls 2 and floor 2 (±0.1); lid plate 70 × 45 × 3 (±0.2, ±0.1; each the most common value over many rays, so knuckles and notches do not count); the pin hole's axis found as the small hole (narrowest width 1.2-3.5) seen in most sections along the 70 side; 3 body and 2 lid knuckles 12 long (±0.2: spans along the axis at mid-knuckle, in the direction that sees most separate spans); knuckle outer diameter 7 (±0.3, median distance from the axis to the outline within 5 of it); pin hole 2 (±0.15, narrowest width, so a teardrop counts) clear through every knuckle; knuckles alternate B L B L B with 0.4 (±0.1) between neighbours, the lid's spans placed by its plate's ends either way round; closed, the lid's axis on the body's (±0.3): the same distance out from the hinge-side wall and up from the rim, the lid's rim face being either face of its plate. 8 gates |
+| T5 | 18 tall (±0.1; the shortest extent is the axis); 30 diameter (±0.2) over the lands, 20 flutes (dips of the radius profile) 1 deep (±0.25), medians of five sections; bore 12 deep (±0.2) from the face it opens on and not through; D bore 6.2 across and 4.7 flat to far side (±0.15, calipers of sections at 1.5, 2.5, 8 and 10); set-screw hole 2.5 (±0.2, narrowest width) on the flat's normal, its axis 5 (±0.3) from the bottom and within 0.3 of the flat's middle, clear from the bore to the outside. 7 gates |
+| T6 | plate 80 × 55 × 4 (±0.2, ±0.1); two axles 5 (±0.15, circumscribed) standing 10 (±0.2) above the plate; axle centres 34 apart (±0.1); per gear: tooth count (30, 15: dips of the radius profile at mid-thickness) and outside diameter m(z + 2) = 48, 25.5 (±0.3); gears 6 thick (±0.1); bores 5.4 (±0.15, circumscribed); meshing: the mid-thickness outlines 34 apart, from some phase of the small gear (0.25° steps), turn through one tooth pitch of the large gear in 12 steps at 30:15 without crossing, and the tips engage at least one module (1.5) deep. 10 gates |
 
 **What the grader does not judge**, and says so in the check (`ok:
 null`, not gated): whether T1 prints without supports (bridges and small
 horizontal holes are fine, so overhang area is only reported), whether
 T2's snaps work (it reports the spread of the lip width, which shows
 bumps), T2 hole positions against a PCB (the spec gives none), and
-self-intersection (not computed). Known blind spots: a USB cutout made
+self-intersection (not computed), whether T4's lid swings clear and its knuckles print without support (both need the assembly), and T6's 20° pressure angle (a 25° gear passes; only meshing at 34 is judged). Known blind spots: a USB cutout made
 as a notch open to the rim is not found (only closed openings are); a
 T1 gusset with legs under 6 mm is missed; T3 assumes the part's longest
 axis is its axis, and a barb under radius 9 and a thread over it (a
@@ -218,7 +230,14 @@ earlier version of the grader wrongly failed (a lip relieved
 also turned over; hex corners chamfered over 5 of 8 mm; a plain stem
 and tip chamfer after the barbs), which pass, and on wrong versions
 of them (band at 0.4; thread 10, barb 20, pitch 1.5, 32 across flats
-and rings in the flange-down stack; a round flange; two barbs); and on each condition's toolchain
+and rings in the flange-down stack; a round flange; two barbs); T4-T6 references (in `refs/`, also turned 90° and 180°, with knuckle ribs
+down the back wall, printed bore down, with thinner teeth or a 25° pressure
+angle), which pass, and their wrong variants (a 47 deep box, walls 2.5,
+knuckles 8, a 3 pin hole, 0.8 between knuckles, the lid's knuckles 1 off
+the body's axis; 18 flutes, flutes 2 deep, flat 4.2, a 14 deep and a
+through bore, the set screw at 7; axles 36 apart or 6 across, 5 bores, 7
+thick gears, a 5 plate, teeth 0.25° fatter), each failing its own check,
+and a 16-tooth small gear, which fails its count, its diameter and the mesh; and on each condition's toolchain
 making the same small plate.
 
 **Output.** `progress/agent-eval/cad-<ts>.json` (a new file per eval,
