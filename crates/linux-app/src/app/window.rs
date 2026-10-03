@@ -10,7 +10,11 @@
 //! `AdwOverlaySplitView` at the window's end, toggled from the header bar
 //! (F9) or opened on one panel (Alt+1, Alt+2, Alt+3). The files the last
 //! run read are watched (`GFileMonitor` per directory, `linux_app::watch`)
-//! and a change runs the document again.
+//! and a change runs the document again. The document's own file is
+//! watched too: another program's change to it is taken in or reported
+//! (`disk`).
+
+mod disk;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -55,6 +59,9 @@ pub struct Window {
     /// "NeoSCAD x.y.z is available", under the header bar while the app
     /// knows of a newer release (`super::update`).
     banner: adw::Banner,
+    /// "The file changed on disk", under it while the window's copy and
+    /// the file disagree (`disk`).
+    notice: disk::DiskNotice,
     web: Option<webkit6::WebView>,
     view: ViewWidget,
     console: Console,
@@ -108,6 +115,10 @@ struct State {
     watch: WatchSet,
     monitors: Vec<gio::FileMonitor>,
     watch_timer: Option<glib::SourceId>,
+    /// The last run's files (watched with the document's own), and the
+    /// pause before the document's file is read after it changed.
+    deps: Vec<PathBuf>,
+    disk_timer: Option<glib::SourceId>,
     /// The export running, File > Export's last format, and the last
     /// run's dimension (Export Again suggests a format that fits it).
     export_stop: Option<Arc<AtomicBool>>,
@@ -239,9 +250,11 @@ impl Window {
                 .button_label("Details")
                 .revealed(false)
                 .build();
+            let notice = disk::DiskNotice::new();
             let toolbar = adw::ToolbarView::new();
             toolbar.add_top_bar(&header);
             toolbar.add_top_bar(&banner);
+            toolbar.add_top_bar(&notice.revealer);
             toolbar.set_content(Some(&toasts));
             let win = adw::ApplicationWindow::builder()
                 .application(app)
@@ -259,6 +272,7 @@ impl Window {
                 title,
                 toasts,
                 banner,
+                notice,
                 web,
                 view,
                 console,
@@ -289,6 +303,8 @@ impl Window {
                     watch: WatchSet::default(),
                     monitors: Vec::new(),
                     watch_timer: None,
+                    deps: Vec::new(),
+                    disk_timer: None,
                     export_stop: None,
                     last_export: "binstl".into(),
                     last_dimensions: None,
@@ -348,6 +364,10 @@ impl Window {
             }
         });
         self.show_update(self.shared.updates.notice().as_ref());
+        self.connect_disk_notice();
+        // The document's own file is watched from the start, not only
+        // after its first run (which an example may never get).
+        self.disk_reset();
         // The web content process ended (a crash, or the system reclaimed
         // it). The document's copy of the text is complete, so reload the
         // page: `ready` shows the text again; only the undo history is
@@ -462,8 +482,11 @@ impl Window {
             st.shown_set = None;
             st.overlay = OverlayState::default();
             st.measurement = None;
+            // The old document's files mean nothing for this one.
+            st.deps.clear();
             old
         };
+        self.disk_reset();
         self.show_parameters();
         self.update_overlay();
         if let Some(old) = old {
@@ -657,6 +680,7 @@ impl Window {
                         }
                     }
                 }
+                self.check_reload_landed();
                 self.update_titles();
                 self.schedule();
             }
@@ -668,6 +692,7 @@ impl Window {
                         st.doc.record_resync(text);
                         st.lp.text_replaced();
                         drop(st);
+                        w.check_reload_landed();
                         w.update_titles();
                         w.schedule();
                     }
@@ -1293,9 +1318,10 @@ impl Window {
 
     // --- Watching the files a run read --------------------------------------
 
-    /// Watch `files` (the last run's) from now on. The monitors are made
-    /// again only when the directories change.
+    /// Watch `files` (the last run's) and the document's own file from now
+    /// on. The monitors are made again only when the directories change.
     fn watch_files(self: &Rc<Self>, files: Vec<PathBuf>) {
+        let files = self.watched_paths(files);
         let n = files.len();
         let dirs = {
             let mut st = self.st.borrow_mut();
@@ -1346,13 +1372,27 @@ impl Window {
         ) {
             return;
         }
+        let (ours, theirs) = {
+            let st = self.st.borrow();
+            let doc = st.doc.file();
+            let hits: Vec<PathBuf> = [Some(file), other]
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f.path())
+                .filter(|p| st.watch.concerns(p))
+                .collect();
+            (
+                hits.iter().any(|p| Some(p.as_path()) == doc),
+                hits.into_iter().find(|p| Some(p.as_path()) != doc),
+            )
+        };
+        if ours {
+            // The document's own file: another program's write, or this
+            // window's save coming back (which the check recognises).
+            self.disk_changed();
+        }
+        let Some(path) = theirs else { return };
         let mut st = self.st.borrow_mut();
-        let hit = [Some(file), other]
-            .into_iter()
-            .flatten()
-            .filter_map(|f| f.path())
-            .find(|p| st.watch.concerns(p));
-        let Some(path) = hit else { return };
         glib::g_debug!("neoscad", "watch: {} changed ({event:?})", path.display());
         if st.watch_timer.is_some() {
             return;
@@ -1381,12 +1421,7 @@ impl Window {
     /// Save, then `then(saved)`.
     fn save(self: &Rc<Self>, then: Option<Box<dyn FnOnce(bool)>>) {
         match self.file() {
-            Some(path) => {
-                let ok = self.write_to(path);
-                if let Some(t) = then {
-                    t(ok);
-                }
-            }
+            Some(path) => self.save_to_file(path, then),
             None => self.save_as(then),
         }
     }
@@ -1434,6 +1469,9 @@ impl Window {
         if let Some(old) = old {
             let _ = self.shared.client.close(&old);
         }
+        // The file is the window's text now: no notice stands, and under
+        // a new name the new file is the one watched.
+        self.disk_reset();
         // Saved under a new name: the page's client closes the old URI
         // and opens the new one, so the server's markers and the run's
         // diagnostics agree on the path again.
@@ -1700,6 +1738,9 @@ impl Window {
                 t.remove();
             }
             if let Some(t) = st.watch_timer.take() {
+                t.remove();
+            }
+            if let Some(t) = st.disk_timer.take() {
                 t.remove();
             }
             for m in st.monitors.drain(..) {

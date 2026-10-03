@@ -8,8 +8,9 @@
 # bridge) and the side panels are driven from the keyboard: a customizer
 # edit runs the model again with the text unchanged, a check finds a known
 # problem and marks it in the view, a measurement reports the volume,
-# Export Again writes an STL beside the model, and rewriting a used file
-# on disk runs the model again (file watching). CI's
+# Export Again writes an STL beside the model, rewriting a used file
+# on disk runs the model again (file watching), and rewriting the model
+# itself is taken into the editor and run. CI's
 # linux-app job runs it; docs/linux-app.md shows how to run it in Docker
 # from macOS.
 #
@@ -208,7 +209,15 @@ EOF
     mv "$work/extra.scad.tmp" "$work/extra.scad"
     wait_for "watch: .*extra.scad changed" "$log" 30
     wait_for "run $((runs + 1)) (Preview)" "$log" 120
-    grep "customizer:\|document:\|panels:\|check:\|overlay:\|measure:\|export:\|watch:" "$log"
+    # Another program (an agent through `neoscad mcp`) rewrites the model
+    # itself while it has no unsaved changes: the window takes the change
+    # in as one edit in the editor (`agentEdit`), and runs it.
+    runs=$(grep -c "run [0-9]* (Preview)" "$log")
+    sed 's/^size = 30;/size = 32;/' "$model" >"$model.tmp"
+    mv "$model.tmp" "$model"
+    wait_for "disk: reload (1 edits)" "$log" 30
+    wait_for "run $((runs + 1)) (Preview)" "$log" 120
+    grep "customizer:\|document:\|panels:\|check:\|overlay:\|measure:\|export:\|watch:\|disk:" "$log"
     pkill -x "$name" || true
     sleep 1
 }

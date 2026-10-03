@@ -1,8 +1,9 @@
 //! Which files a window watches, without GIO: the files its last run read
 //! that another program could change (`Client::run_files`: includes, used
-//! libraries, imports and fonts on disk, not the document itself, which
-//! the window writes, and not what exists only in memory, the bundled
-//! MCAD), grouped by directory.
+//! libraries, imports and fonts on disk, not what exists only in memory,
+//! the bundled MCAD), and the document's own file, grouped by directory.
+//! A change to the document's file is not a re-run but a reload or a
+//! notice (`app/window/disk.rs`).
 //!
 //! The window watches the directories, not the files (`GFileMonitor` per
 //! directory, `app/window.rs`), as the macOS app's `FileWatcher.swift`

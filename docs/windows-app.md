@@ -371,6 +371,16 @@ editor that saves by renaming a temporary file over the original is
 still seen. A burst of events becomes one `DocumentController.files_changed`
 100 ms later: the last render again, or a preview after the pause.
 
+**The document's own file** is watched as well, with a callback of its
+own (`DocumentSession.Disk.cs`, deciding through the core's
+`DocumentFile`). Another program's change to a clean document is applied
+through the editor's `agentEdit`, one undoable, highlighted step, and the
+document stays clean. With unsaved changes the `DiskBar` InfoBar says
+"The file changed on disk" (Reload, undoable too; closing the bar keeps
+the window's text), and Save asks before overwriting (Save Anyway /
+Reload / Cancel). A deleted file is reported; saving writes it again.
+The window's own saves are recognised by a hash of what they wrote.
+
 **Export.** File > Export As lists `export_formats()` (binary and ASCII
 STL, 3MF, OBJ, OFF, SVG, DXF, PDF, the view as PNG, a snapshot sheet);
 a 3D model's formats are disabled after a 2D render and the other way
@@ -532,7 +542,10 @@ has been built yet:
   finding reaches the overlay (`view_overlay`); measure gives a cube's
   volume and two picks its height; changing an included file schedules
   a preview, and a watch coalesces a burst and survives a
-  rename-over-save; export writes 3MF, OFF, OBJ and STL with their
+  rename-over-save; another program's change to the open file reloads a
+  clean document (one `agentEdit`, or the copy without an editor), gives
+  a dirty one the notice, makes Save ask, is reported when the file is
+  deleted, and the window's own save is not taken for one; export writes 3MF, OFF, OBJ and STL with their
   stages and the customizer's values, SVG for 2D, refuses STL for 2D,
   and a cancelled export writes nothing; every forwarded chord is a menu
   accelerator in `MainWindow.xaml`;

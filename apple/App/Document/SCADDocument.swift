@@ -14,6 +14,9 @@
 // so undoing back to the saved text clears the edited dot, and autosave
 // saves whenever NSDocument sees unsaved changes.
 //
+// Another program changing the file (an AI agent, another editor) is taken
+// in as an undoable edit, or reported: Document/SCADDocument+Disk.swift.
+//
 // The document loop (Document/DocumentLoop.swift): each pause in typing,
 // customizer edit or change on disk to a file the model read runs the
 // document once, and that one run feeds the 3D view, the console, the
@@ -61,6 +64,9 @@ final class DocumentModel {
     /// Whether parameter sets can be read and written: the document has a
     /// file, next to which `name.json` lives.
     var parameterSetsAvailable = false
+    /// What the bar over the editor says about the file on disk; nil while
+    /// the file and the document agree (SCADDocument+Disk.swift).
+    var diskNotice: DiskNotice?
 
     /// The check and measure panels.
     @ObservationIgnored let check = CheckModel()
@@ -79,6 +85,8 @@ final class DocumentModel {
     /// which keeps its UTF-16 length with each edit and hands the edits
     /// back in the UTF-8 offsets `Core.edit` takes.
     @ObservationIgnored private let storage = EditorText(text: "")
+    /// The copy itself, for the core's checks against the file on disk.
+    var editorText: EditorText { storage }
     /// The text's length in UTF-16 units.
     var utf16Length: Int { Int((try? storage.utf16Length()) ?? 0) }
     /// The text's length in UTF-8 bytes (the core's `DocInfo.length`).
@@ -126,6 +134,9 @@ struct DocumentActions {
     var measureBetween: () -> Void = {}
     var updateSection: () -> Void = {}
     var clearPicks: () -> Void = {}
+    /// The disk notice's buttons (SCADDocument+Disk.swift).
+    var reloadFromDisk: () -> Void = {}
+    var keepMine: () -> Void = {}
 }
 
 /// The inspector's panels, beside the 3D view.
@@ -184,8 +195,17 @@ final class SCADDocument: NSDocument {
     var checkTask: Task<Void, Never>?
     var measureTask: Task<Void, Never>?
     var exportTask: Task<Void, Never>?
-    /// The files the last run read, watched for changes on disk.
+    /// The files the last run read, watched for changes on disk, with the
+    /// document's own file.
     let watcher = FileWatcher()
+    /// The last run's files (`watcher` adds the document's own).
+    var runFiles: [String] = []
+    /// The document's file as last read or written, and the bytes of the
+    /// save in progress (SCADDocument+Disk.swift).
+    let diskFile = DocumentFile()
+    var bytesBeingWritten: Data?
+    /// A read of the changed file, waiting for the rest of a write.
+    var diskReadAgain: Task<Void, Never>?
     /// The editor's language server: markers come from this document's
     /// runs (`hostDiagnostics`), which hand it their diagnostics.
     private(set) var languageServer: LanguageServer?
@@ -232,7 +252,11 @@ final class SCADDocument: NSDocument {
                 editor.connect(server)
             }
             watcher.onChange = { [weak self] in self?.filesChanged() }
+            watcher.onDocumentChange = { [weak self] in self?.documentFileChanged() }
             connectPanels()
+            // After `connectPanels`, which sets the actions afresh.
+            model.actions.reloadFromDisk = { [weak self] in self?.reloadFromDisk() }
+            model.actions.keepMine = { [weak self] in self?.keepMine() }
         }
     }
 
@@ -282,6 +306,9 @@ final class SCADDocument: NSDocument {
             MainActor.assumeIsolated {
                 model.editor.documentURIChanged()
                 refreshParameterSets()
+                // Moved or saved under a new name: watch the new file.
+                model.diskNotice = nil
+                watchFiles(runFiles)
             }
         }
     }
@@ -308,7 +335,11 @@ final class SCADDocument: NSDocument {
     // MARK: Reading and writing
 
     override func data(ofType typeName: String) throws -> Data {
-        MainActor.assumeIsolated { Data(model.text.utf8) }
+        MainActor.assumeIsolated {
+            let data = Data(model.text.utf8)
+            bytesBeingWritten = data
+            return data
+        }
     }
 
     /// UTF-8 only, as OpenSCAD reads files. Text that is not UTF-8 is
@@ -318,7 +349,13 @@ final class SCADDocument: NSDocument {
         guard let text = String(data: data, encoding: .utf8) else {
             throw CocoaError(.fileReadInapplicableStringEncoding)
         }
-        MainActor.assumeIsolated { model.text = text }
+        MainActor.assumeIsolated {
+            model.text = text
+            // What the file holds: the watcher's next event is then told
+            // from another program's write.
+            try? diskFile.loaded(bytes: data)
+            model.diskNotice = nil
+        }
     }
 
     // MARK: Edits
@@ -342,6 +379,7 @@ final class SCADDocument: NSDocument {
         }
         guard model.utf16Length == length else { return false }
         updateChangeCount(kind.changeType)
+        reloadLanded()
         if coreInSync, let path = corePath, case .success(let engine) = CoreService.shared {
             do {
                 let info = try engine.edit(path, edits: coreEdits)
@@ -363,6 +401,7 @@ final class SCADDocument: NSDocument {
     private func editorReplacedText(_ text: String) {
         model.replaceWithEditorText(text)
         updateChangeCount(.changeDone)
+        reloadLanded()
         coreInSync = false
         schedulePreview()
     }
@@ -524,6 +563,7 @@ final class SCADDocument: NSDocument {
         measureTask?.cancel()
         exportTask?.cancel()
         watcher.stop()
+        diskReadAgain?.cancel()
         model.viewport.detach()
         model.editor.detach()
         if let path = corePath, case .success(let engine) = CoreService.shared {

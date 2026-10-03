@@ -274,7 +274,7 @@ pub struct EditorText {
 }
 
 impl EditorText {
-    fn lock(&self) -> std::sync::MutexGuard<'_, client::EditorText> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, client::EditorText> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

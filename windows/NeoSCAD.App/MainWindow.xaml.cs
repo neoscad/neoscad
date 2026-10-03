@@ -71,6 +71,7 @@ public sealed partial class MainWindow : Window
         document.ReportChanged += ShowReport;
         document.ReportChanged += UpdateExportMenu;
         document.ConsoleChanged += ShowConsole;
+        document.NoticeChanged += ShowDiskNotice; // MainWindow.Disk.cs
         AppWindow.Closing += OnClosing;
         Closed += (_, _) => document.Dispose();
 
@@ -293,7 +294,7 @@ public sealed partial class MainWindow : Window
     async Task<bool> SaveAsync()
     {
         if (document.FilePath is null) return await SaveAsAsync();
-        return Write(() => document.Save());
+        return await SaveToFileAsync(); // MainWindow.Disk.cs
     }
 
     async Task<bool> SaveAsAsync()

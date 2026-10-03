@@ -145,6 +145,14 @@ public static class EditorScript
     public static string LspSync() => Call("lspSync");
     public static string SetUri(string? uri) => Call("setURI", uri);
 
+    /// <summary>
+    /// Another program's change to the file, applied as one undoable,
+    /// highlighted step. <paramref name="editsJson"/> is the core's JSON
+    /// array (<c>NeoScad.ReloadEditsJson</c>), already a JavaScript literal,
+    /// so it is passed through rather than quoted as a string.
+    /// </summary>
+    public static string AgentEdit(string editsJson) => $"NeoSCADEditor.agentEdit({editsJson})";
+
     // The Edit menu, chosen with the mouse (keys reach CodeMirror's
     // keymap directly; Shortcuts.cs).
     public static string Undo() => Call("undo");

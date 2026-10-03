@@ -10,6 +10,10 @@
 // the watched name (as a Renamed or Created event), where a handle on the
 // old file would go quiet after the first save. A burst of events (one
 // save raises several) becomes one call after `Latency`.
+//
+// The document's own file is watched too, with a callback of its own: a
+// change to it is not a re-run but a reload or a notice
+// (DocumentSession.Disk.cs).
 
 namespace NeoSCAD.Host;
 
@@ -17,21 +21,26 @@ public sealed class FileWatch : IDisposable
 {
     readonly IUiDispatcher ui;
     readonly Action changed;
+    readonly Action? documentChanged;
     readonly List<FileSystemWatcher> watchers = [];
     string[] directories = [];
     // Read on the watchers' threads, replaced whole on the UI thread.
     volatile HashSet<string> files = new(Comparer);
+    volatile string? document;
     int pending;
+    int pendingDocument;
     volatile bool disposed;
 
     /// <summary>Paths compare as the file system does: without case on Windows.</summary>
     static StringComparer Comparer => OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     /// <param name="changed">Called on the UI thread after a watched file changed.</param>
-    public FileWatch(IUiDispatcher ui, Action changed)
+    /// <param name="documentChanged">Called on the UI thread after the document's own file changed.</param>
+    public FileWatch(IUiDispatcher ui, Action changed, Action? documentChanged = null)
     {
         this.ui = ui;
         this.changed = changed;
+        this.documentChanged = documentChanged;
     }
 
     /// <summary>Events within this interval come as one call.</summary>
@@ -40,11 +49,17 @@ public sealed class FileWatch : IDisposable
     /// <summary>The files watched (full paths).</summary>
     public IReadOnlyCollection<string> Files => files;
 
-    /// <summary>Watch exactly <paramref name="paths"/> from now on (those in missing folders are skipped).</summary>
-    public void Watch(IEnumerable<string> paths)
+    /// <summary>
+    /// Watch exactly <paramref name="paths"/> and the document's own file
+    /// (<paramref name="documentPath"/>, if any) from now on (those in
+    /// missing folders are skipped).
+    /// </summary>
+    public void Watch(IEnumerable<string> paths, string? documentPath = null)
     {
         if (disposed) return;
         var next = new HashSet<string>(paths.Select(Full).OfType<string>(), Comparer);
+        document = documentPath is null ? null : Full(documentPath);
+        if (document is { } d) next.Add(d);
         if (next.SetEquals(files)) return;
         files = next;
         var dirs = next.Select(Path.GetDirectoryName).OfType<string>()
@@ -84,8 +99,13 @@ public sealed class FileWatch : IDisposable
                 w.Deleted += (_, e) => Hit(e.FullPath);
                 w.Renamed += (_, e) => Hit(e.FullPath);
                 // A lost buffer (too many changes at once) may have held one
-                // of ours; running again is cheaper than missing it.
-                w.Error += (_, _) => Fire();
+                // of ours; running again is cheaper than missing it, and
+                // the document's check finds nothing if its file is as it was.
+                w.Error += (_, _) =>
+                {
+                    Fire();
+                    FireDocument();
+                };
                 w.EnableRaisingEvents = true;
                 watchers.Add(w);
             }
@@ -99,7 +119,19 @@ public sealed class FileWatch : IDisposable
 
     void Hit(string path)
     {
-        if (files.Contains(path)) Fire();
+        if (document is { } d && Comparer.Equals(path, d)) FireDocument();
+        else if (files.Contains(path)) Fire();
+    }
+
+    void FireDocument()
+    {
+        if (disposed || documentChanged is null || document is null
+            || Interlocked.Exchange(ref pendingDocument, 1) == 1) return;
+        _ = Task.Delay(Latency).ContinueWith(_ => ui.Post(() =>
+        {
+            Interlocked.Exchange(ref pendingDocument, 0);
+            if (!disposed) documentChanged();
+        }), TaskScheduler.Default);
     }
 
     void Fire()
@@ -127,6 +159,7 @@ public sealed class FileWatch : IDisposable
         disposed = true;
         StopWatchers();
         files = new HashSet<string>(Comparer);
+        document = null;
         directories = [];
     }
 }

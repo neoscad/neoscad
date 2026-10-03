@@ -510,7 +510,9 @@ impl Client {
     /// document (the host writes it itself, and a save must not re-run
     /// it) and not other open documents (their buffers are what runs
     /// read). A host with a disk also leaves out what is not on it (the
-    /// bundled MCAD exists only in memory).
+    /// bundled MCAD exists only in memory). The hosts watch the document's
+    /// own file as well, but a change to it is a reload or a notice, not a
+    /// re-run (`disk.rs`).
     pub fn run_files<'r>(
         &self,
         r: &'r session::Rendered,

@@ -112,6 +112,16 @@ package and run it, and what comes next.
   the old one, which a monitor of the file itself can lose. A burst of
   events (100 ms) becomes one `DocumentLoop::files_changed`: a preview
   after the pause, or a render at once if the last run was a render.
+- **The document's own file** is watched too (`app/window/disk.rs`,
+  deciding through `client::DiskTracker`): another program's change (an
+  agent through `neoscad mcp`, another editor) to a clean document is
+  applied through the editor's `agentEdit`, one undoable, highlighted
+  step, and the document stays clean. With unsaved changes a bar says
+  "The file changed on disk" (Keep Mine / Reload, Reload being undoable
+  too), and Save asks before overwriting (Save Anyway / Reload /
+  Cancel). A deleted file is reported; saving writes it again. The app's
+  own saves are recognised by a hash of what they wrote; a half-written
+  file (it does not parse) is read again 150 ms later.
 - **Export**: File > Export lists every entry of `client::export_formats()`
   (binary and ASCII STL, 3MF, OBJ, OFF, SVG, DXF, PDF, a PNG of the view,
   the snapshot sheet); Export Again (Ctrl+Shift+E) uses the last format,

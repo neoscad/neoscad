@@ -176,6 +176,23 @@ final class EditorController: NSObject {
         }
     }
 
+    /// Another program's change to the file, applied as one undoable step
+    /// and highlighted (the bundle's `agentEdit`): unlike `load`, the undo
+    /// history stays, so the user sees what changed and can take it back.
+    /// `editsJSON` is the core's (`reloadEditsJson`). The change comes
+    /// back as an ordinary `changes` message.
+    func agentEdit(_ editsJSON: String) {
+        guard isReady else { return }
+        Task {
+            do {
+                _ = try await call(
+                    "return NeoSCADEditor.agentEdit(JSON.parse(edits))", ["edits": editsJSON])
+            } catch {
+                Self.log.error("agentEdit failed: \(error)")
+            }
+        }
+    }
+
     /// Talk to `server` from now on: the page's client (connected when
     /// the page loads) reaches it through here.
     func connect(_ server: LanguageServer) {

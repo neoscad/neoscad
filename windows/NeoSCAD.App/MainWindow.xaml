@@ -124,12 +124,26 @@
     <!-- "Update available" (MainWindow.Updates.cs): Install downloads and
          checks the MSI, then installs it silently after one UAC prompt and
          restarts; closing the bar is "Later" for that version. -->
-    <InfoBar x:Name="UpdateBar" Grid.Row="1" Margin="8,0,8,8" IsOpen="False" Severity="Informational"
-             IsClosable="True" CloseButtonClick="OnUpdateLater">
-      <InfoBar.ActionButton>
-        <Button x:Name="UpdateButton" Content="Install" Click="OnUpdateInstall" />
-      </InfoBar.ActionButton>
-    </InfoBar>
+    <StackPanel Grid.Row="1">
+      <InfoBar x:Name="UpdateBar" Margin="8,0,8,8" IsOpen="False" Severity="Informational"
+               IsClosable="True" CloseButtonClick="OnUpdateLater">
+        <InfoBar.ActionButton>
+          <Button x:Name="UpdateButton" Content="Install" Click="OnUpdateInstall" />
+        </InfoBar.ActionButton>
+      </InfoBar>
+
+      <!-- "The file changed on disk" (DocumentSession.Disk.cs): another
+           program wrote the document's file while it had unsaved changes,
+           or removed it. Reload takes the file's text as one undoable
+           step; closing the bar keeps the window's, and Save then asks
+           before overwriting. -->
+      <InfoBar x:Name="DiskBar" Margin="8,0,8,8" IsOpen="False" Severity="Warning"
+               IsClosable="True" CloseButtonClick="OnDiskKeepMine">
+        <InfoBar.ActionButton>
+          <Button x:Name="DiskReloadButton" Content="Reload" Click="OnDiskReload" />
+        </InfoBar.ActionButton>
+      </InfoBar>
+    </StackPanel>
 
     <SplitView x:Name="SidePanes" Grid.Row="2" PanePlacement="Right" DisplayMode="Inline"
                IsPaneOpen="False" OpenPaneLength="360" PaneBackground="Transparent">

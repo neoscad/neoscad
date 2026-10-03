@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use client::EditorText;
+use client::{DiskAction, DiskTracker, EditorText, ReloadEdit, SaveCheck};
 
 use crate::bridge::EditKind;
 
@@ -24,6 +24,26 @@ pub struct Document {
     /// so the document stays edited until it is saved.
     changes: i64,
     saved: Option<i64>,
+    /// The file as last read or written, to tell another program's change
+    /// from this window's own save (`client::DiskTracker`).
+    disk: DiskTracker,
+    /// Reads of the file that failed in a row (other than its absence).
+    failed_reads: u32,
+}
+
+/// Failed reads of a changed file before the change is let go: a read
+/// can fail while another program holds the file, which passes; a file
+/// this app may not read does not. (The macOS and Windows apps' core
+/// counts the same, `crates/ffi/src/disk.rs`.)
+const MAX_FAILED_READS: u32 = 4;
+
+/// A file's bytes; `Ok(None)` if there is none.
+pub fn read_disk(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 impl Document {
@@ -36,18 +56,105 @@ impl Document {
             text: EditorText::new(text),
             changes: 0,
             saved: Some(0),
+            disk: DiskTracker::new(),
+            failed_reads: 0,
         }
     }
 
-    /// A document read from `path`.
+    /// A document read from `path`. `text` is the file's bytes exactly
+    /// (`decode` refuses rather than alters them), so it is also what the
+    /// file is known to hold.
     pub fn from_file(path: PathBuf, text: String) -> Document {
+        let mut disk = DiskTracker::new();
+        disk.loaded(text.as_bytes());
         Document {
             untitled: path.to_string_lossy().into_owned(),
             file: Some(path),
             text: EditorText::new(text),
             changes: 0,
             saved: Some(0),
+            disk,
+            failed_reads: 0,
         }
+    }
+
+    /// The watcher saw the file change: what that means for this document
+    /// (see `client::DiskAction`).
+    pub fn disk_check(&mut self) -> DiskAction {
+        let Some(path) = &self.file else {
+            return DiskAction::None;
+        };
+        let disk = match read_disk(path) {
+            Ok(d) => d,
+            Err(_) if self.failed_reads < MAX_FAILED_READS => {
+                self.failed_reads += 1;
+                return DiskAction::ReadAgain {
+                    ms: client::DISK_READ_AGAIN_MS,
+                };
+            }
+            Err(_) => {
+                self.failed_reads = 0;
+                return DiskAction::None;
+            }
+        };
+        self.failed_reads = 0;
+        let dirty = self.is_dirty();
+        let action = self.disk.check(disk.as_deref(), &self.text.text(), dirty);
+        if action == DiskAction::Saved {
+            self.mark_saved();
+        }
+        action
+    }
+
+    /// The notice's Reload: the edits that make the text the file's, or
+    /// `None` if it is gone or not UTF-8.
+    pub fn disk_reload(&mut self) -> Option<Vec<ReloadEdit>> {
+        let disk = read_disk(self.file.as_deref()?).ok()?;
+        self.disk.reload(disk.as_deref(), &self.text.text())
+    }
+
+    /// The notice's Keep mine.
+    pub fn keep_mine(&mut self) {
+        self.disk.keep_mine();
+    }
+
+    /// Whether a notice about the file is showing.
+    pub fn disk_notice(&self) -> bool {
+        self.disk.is_reporting()
+    }
+
+    /// The editor applied a change: if it was a reload landing, the text
+    /// is the file's again and the document is saved. True then.
+    pub fn reload_landed(&mut self) -> bool {
+        if self.disk.is_pending() && self.disk.editor_changed(self.text.bytes()) {
+            self.mark_saved();
+            return true;
+        }
+        false
+    }
+
+    /// A reload with no editor to apply it (the page not up yet): the
+    /// text changes here, and the editor shows it when it loads.
+    pub fn reload_without_editor(&mut self, edits: &[ReloadEdit]) {
+        let text = client::apply_reload_edits(&self.text.text(), edits);
+        self.text.replace(text);
+        self.reload_landed();
+    }
+
+    /// Before Save writes to the document's own file: whether it may.
+    pub fn save_check(&self) -> SaveCheck {
+        match &self.file {
+            Some(path) => self
+                .disk
+                .save_check(read_disk(path).ok().flatten().as_deref()),
+            None => SaveCheck::Write,
+        }
+    }
+
+    /// The text matches the file again (a reload landed; another program
+    /// saved this very text).
+    fn mark_saved(&mut self) {
+        self.saved = Some(self.changes);
     }
 
     pub fn file(&self) -> Option<&Path> {
@@ -89,10 +196,11 @@ impl Document {
         self.saved = None;
     }
 
-    /// Written to `path` (Save, Save As).
+    /// Written to `path` (Save, Save As): the text is now the file's.
     pub fn saved_to(&mut self, path: PathBuf) {
         self.file = Some(path);
         self.saved = Some(self.changes);
+        self.disk.saved(self.text.bytes());
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -201,6 +309,69 @@ mod tests {
         d.saved_to("/p/x.scad".into());
         assert!(!d.is_dirty());
         assert!(!d.is_replaceable());
+    }
+
+    #[test]
+    fn another_programs_change_reloads_a_clean_document_and_conflicts_with_a_dirty_one() {
+        let dir =
+            std::env::temp_dir().join(format!("neoscad-linux-app-disk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("model.scad");
+        std::fs::write(&path, "cube(1);\n").unwrap();
+        let text = decode(std::fs::read(&path).unwrap()).unwrap();
+        let mut d = Document::from_file(path.clone(), text);
+        // The watcher's echo of nothing new.
+        assert_eq!(d.disk_check(), DiskAction::None);
+
+        // Clean: reloaded in place (here without an editor), still clean.
+        std::fs::write(&path, "cube(2);\n").unwrap();
+        let DiskAction::Reload { edits } = d.disk_check() else {
+            panic!("no reload")
+        };
+        d.record(EditKind::Edit); // the editor's report of the reload
+        d.reload_without_editor(&edits);
+        assert_eq!(d.text.text(), "cube(2);\n");
+        assert!(!d.is_dirty());
+        assert_eq!(d.save_check(), SaveCheck::Write);
+        // Undoing the reload is an edit away from the file.
+        d.record(EditKind::Undo);
+        assert!(d.is_dirty());
+        d.record(EditKind::Redo);
+
+        // Dirty: a conflict, and Save asks.
+        d.record(EditKind::Edit);
+        d.text.replace("sphere(1);\n".into());
+        std::fs::write(&path, "cube(3);\n").unwrap();
+        assert_eq!(d.disk_check(), DiskAction::Conflict { reloadable: true });
+        assert!(d.disk_notice());
+        d.keep_mine();
+        assert_eq!(d.disk_check(), DiskAction::None);
+        assert_eq!(d.save_check(), SaveCheck::Changed);
+        // Reload from the notice takes theirs.
+        let edits = d.disk_reload().unwrap();
+        d.record(EditKind::Edit);
+        d.reload_without_editor(&edits);
+        assert_eq!(d.text.text(), "cube(3);\n");
+        assert!(!d.is_dirty());
+
+        // Saved over: the save is the file, and its echo is nothing.
+        d.record(EditKind::Edit);
+        d.text.replace("cube(4);\n".into());
+        std::fs::write(&path, d.text.bytes()).unwrap();
+        d.saved_to(path.clone());
+        assert_eq!(d.disk_check(), DiskAction::None);
+
+        // Deleted: reported after a second look; Save may write it again.
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(d.disk_check(), DiskAction::ReadAgain { .. }));
+        assert_eq!(d.disk_check(), DiskAction::Missing);
+        assert_eq!(d.save_check(), SaveCheck::Write);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // An untitled document has no file to watch.
+        let mut u = Document::untitled("/nonexistent/Untitled.scad".into(), String::new());
+        assert_eq!(u.disk_check(), DiskAction::None);
+        assert_eq!(u.save_check(), SaveCheck::Write);
     }
 
     #[test]

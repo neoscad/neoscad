@@ -58,7 +58,7 @@ public sealed partial class DocumentSession : IDisposable
         this.clock = clock;
         DocumentsDirectory = documentsDirectory;
         loop = new DocumentController(null);
-        watch = new FileWatch(ui, FilesChanged);
+        watch = new FileWatch(ui, FilesChanged, DocumentFileChanged);
     }
 
     // --- What the window shows ------------------------------------------------
@@ -143,6 +143,10 @@ public sealed partial class DocumentSession : IDisposable
         FilePath = null;
         UntitledName = name;
         RunsWhenTextIsReplaced = autorun;
+        disk.Forget();
+        runFiles = [];
+        Rewatch();
+        SetNotice(null);
         Replace(text);
         RefreshParameterSets();
     }
@@ -158,12 +162,20 @@ public sealed partial class DocumentSession : IDisposable
     /// <summary>Open a file from disk.</summary>
     public void Open(string path)
     {
-        var text = File.ReadAllText(path, Encoding.UTF8);
+        // Read as bytes, so the file is known by exactly what it held: the
+        // watcher's next event is then told from another program's write
+        // (DocumentSession.Disk.cs).
+        var bytes = File.ReadAllBytes(path);
+        var text = Decode(bytes);
         ReleaseUntitledPath();
         var old = FilePath;
         FilePath = Path.GetFullPath(path);
         RunsWhenTextIsReplaced = true;
         if (old != FilePath) CloseInCore(loop.SetPath(FilePath));
+        disk.Loaded(bytes);
+        runFiles = [];
+        Rewatch();
+        SetNotice(null);
         Replace(text);
         RefreshParameterSets();
     }
@@ -172,7 +184,12 @@ public sealed partial class DocumentSession : IDisposable
     public void SaveAs(string path)
     {
         path = Path.GetFullPath(path);
-        AtomicWrite(path, storage.Text());
+        var bytes = new UTF8Encoding(false).GetBytes(storage.Text());
+        AtomicWrite(path, bytes);
+        // What the file holds now: the watcher's report of this write is
+        // recognised as the window's own.
+        disk.Saved(bytes);
+        SetNotice(null);
         if (path != FilePath)
         {
             ReleaseUntitledPath();
@@ -185,25 +202,18 @@ public sealed partial class DocumentSession : IDisposable
             // name means a new list, and an untitled document gets its
             // first one.
             RefreshParameterSets();
+            Rewatch();
         }
         changeCount = 0;
         TitleChanged?.Invoke();
     }
 
-    /// <summary>Save to the current file; false if untitled (the window asks for a name).</summary>
-    public bool Save()
-    {
-        if (FilePath is null) return false;
-        SaveAs(FilePath);
-        return true;
-    }
-
-    static void AtomicWrite(string path, string text)
+    static void AtomicWrite(string path, byte[] bytes)
     {
         // A crash or a full disk mid-write must not leave a half file where
         // the model was: write beside it, then replace it in one step.
         var tmp = path + ".neoscad-tmp";
-        File.WriteAllText(tmp, text, new UTF8Encoding(false));
+        File.WriteAllBytes(tmp, bytes);
         File.Move(tmp, path, overwrite: true);
     }
 
@@ -261,6 +271,7 @@ public sealed partial class DocumentSession : IDisposable
         var wasDirty = IsDirty;
         changeCount += kind == EditKind.Undo ? -1 : 1;
         if (IsDirty != wasDirty) TitleChanged?.Invoke();
+        ReloadLanded();
         var state = loop.State();
         if (state.InSync && state.Path is { } path && core is not null)
         {
@@ -291,6 +302,7 @@ public sealed partial class DocumentSession : IDisposable
         var wasDirty = IsDirty;
         changeCount = changeCount == 0 ? 1 : changeCount;
         if (IsDirty != wasDirty) TitleChanged?.Invoke();
+        ReloadLanded();
         loop.TextReplaced();
         SchedulePreview();
     }
@@ -382,10 +394,12 @@ public sealed partial class DocumentSession : IDisposable
         Language?.DeliverPublications(r.Language);
         Console = r.Console;
         ConsoleChanged?.Invoke();
-        // The files this run read (includes, uses, imports; not the
-        // document itself, which this window writes) are watched from now
-        // on, and the customizer reads the parameters of the text that ran.
-        watch.Watch(r.Files ?? []);
+        // The files this run read (includes, uses, imports) are watched
+        // from now on, with the document's own file (whose changes are a
+        // reload or a notice, not a re-run: DocumentSession.Disk.cs), and
+        // the customizer reads the parameters of the text that ran.
+        runFiles = r.Files ?? [];
+        Rewatch();
         RefreshParameters();
         string summary;
         try
@@ -422,7 +436,7 @@ public sealed partial class DocumentSession : IDisposable
         }
     }
 
-    /// <summary>The files the last run read, as they are watched.</summary>
+    /// <summary>The files watched: the last run's and the document's own.</summary>
     public IReadOnlyCollection<string> WatchedFiles => watch.Files;
 
     void SetReport(RunReport report)
@@ -453,6 +467,7 @@ public sealed partial class DocumentSession : IDisposable
         }
         ReleaseUntitledPath();
         storage.Dispose();
+        disk.Dispose();
         loop.Dispose();
     }
 

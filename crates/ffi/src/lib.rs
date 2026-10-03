@@ -34,6 +34,7 @@
 
 mod agent_setup;
 mod controller;
+mod disk;
 mod document;
 mod host;
 mod inspect;
@@ -57,6 +58,7 @@ use session::{Run, Session};
 
 pub use agent_setup::*;
 pub use controller::*;
+pub use disk::*;
 pub use document::*;
 pub use inspect::*;
 pub use language::*;

@@ -1257,6 +1257,23 @@ lead them, come roughly in order of user impact.
   error. (T2 audit fixes)
 
 ## MCP and the agent eval
+- Another program's change to the open file (an agent through `neoscad
+  mcp`; `docs/audits/agent-connection-desktop.md`, finding 1) is taken
+  in or reported in all three apps (`crates/client/src/disk.rs`). Left:
+  - The page's `agentEdit` takes no base version. A keystroke landing in
+    the instant between the host working out a reload's edits and the
+    page applying them makes the page apply them to text they were not
+    worked out for: nothing on disk is lost and the document stays
+    edited, but the editor can show a garbled merge until undone.
+    Passing the editor version the edits are against, and refusing in
+    the page when it moved, would close it.
+  - macOS: the hosted tests run with the app in the background (they
+    could not bring it forward), where AppKit did not take in a plain
+    write or a rename-over at all within 8 s. Whether it reverts on
+    becoming active, alongside the app's own reload, was not observed;
+    `presentedItemDidChange` is overridden, and the reload brings
+    NSDocument's `fileModificationDate` up to date, so a check after it
+    should find nothing to revert.
 - `neoscad mcp` implements MCP 2026-07-28 statelessly plus the legacy
   `initialize` handshake, and only the core: no `subscriptions/listen`,
   no progress notifications (a long render sends nothing until it

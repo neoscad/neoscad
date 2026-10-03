@@ -210,8 +210,9 @@ public sealed class PanelTests : IDisposable
         timer.Fire();
         Assert.True(ui.PumpUntil(() => doc.Report is RunReport.Rendered, Wait));
         Assert.Contains(doc.WatchedFiles, f => Path.GetFileName(f) == "part.scad");
-        // The document itself is this window's to write: not watched.
-        Assert.DoesNotContain(doc.WatchedFiles, f => Path.GetFileName(f) == "model.scad");
+        // The document's own file is watched too, for another program's
+        // change to it (DiskTests).
+        Assert.Contains(doc.WatchedFiles, f => Path.GetFileName(f) == "model.scad");
         Assert.Null(timer.Armed);
 
         File.WriteAllText(include, "module part() cube(2);\n");

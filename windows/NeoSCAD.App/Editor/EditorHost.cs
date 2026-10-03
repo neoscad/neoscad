@@ -59,6 +59,10 @@ public sealed class EditorHost
         sync.Apply = document.EditorChanged;
         sync.RequestText = RequestText;
         document.TextLoaded += text => _ = Load(text);
+        // Another program's change to a clean document's file: applied in
+        // the page, whose change then comes back through `sync`.
+        document.EditorInStep = () => ready && sync.Version is not null;
+        document.ReloadRequested += json => _ = Call(EditorScript.AgentEdit(json));
         document.LanguageSyncRequested += () => _ = Call(EditorScript.LspSync());
         // Not gated on `ready`: the page's client sends `initialize` before
         // the editor says ready, and its answer arrives in between (CI logs:

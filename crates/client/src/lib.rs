@@ -16,6 +16,7 @@
 //! creation date, where an export's bytes go) is passed in.
 
 pub mod agent_setup;
+mod disk;
 mod document;
 mod document_loop;
 mod examples;
@@ -32,6 +33,7 @@ use std::sync::{Mutex, PoisonError};
 
 use session::{Run, Session};
 
+pub use disk::*;
 pub use document::*;
 pub use document_loop::*;
 pub use examples::*;

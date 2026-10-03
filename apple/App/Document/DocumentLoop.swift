@@ -122,7 +122,7 @@ extension SCADDocument {
                 model.editor.languageClient?.deliverPublications(r.language)
                 model.console = r.console
                 model.report = .rendered(r.render, mode)
-                self?.watcher.watch(r.files)
+                self?.watchFiles(r.files)
                 self?.refreshParameters()
                 // Auto check follows renders, not previews (Panels/
                 // CheckPanel.swift says why).
