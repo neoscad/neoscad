@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1
+
+### Changed
+
+- **The geometry kernel is manifold-rust 0.16.0,** which includes all of
+  NeoSCAD's changes upstream (larsbrubaker/manifold-rust #5-#10). NeoSCAD
+  now carries one small patch to it instead of seven.
+- **`hull()` and `minkowski()` agree more closely with OpenSCAD's
+  nightly,** because QuickHull now decides exactly whether a point is
+  above a face. Volumes change by at most a few parts in 10^8, and the
+  benchmark's convex Minkowski model renders about three times faster.
+  Every other model exports the same bytes as 0.4.0.
+
 ## 0.4.0
 
 ### New
