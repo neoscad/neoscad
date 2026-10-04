@@ -1,0 +1,94 @@
+NeoSCAD patch to manifold-rust 0.16.0 (crates.io): a CancelToken can be
+made over an existing flag (CancelToken::from_flag) and can poll a
+condition with it (with_check), so a request's interrupt flag and its
+time and memory limits stop a boolean from inside. Without a check a
+token reads only its flag, as before. Upstream's test-only poll
+countdown (cancel_after_polls) is kept, and is read before the flag and
+the check. Test: crates/geom/tests/kernel_cancel.rs.
+
+Upstream: not proposed yet; the API serves NeoSCAD's limits.
+
+Apply from the crate root: patch -p1 < this file.
+See vendor/README.md ("The cancel token patch").
+
+--- a/src/cancel.rs
++++ b/src/cancel.rs
+@@ -109,9 +109,11 @@
+ /// let result = a.boolean_with_token(&b, OpType::Add, Some(&token));
+ /// assert_eq!(result.status(), Error::Cancelled);
+ /// ```
+-#[derive(Clone, Debug, Default)]
++#[derive(Clone, Default)]
+ pub struct CancelToken {
+     flag: Arc<AtomicBool>,
++    // NeoSCAD patch: a condition polled with the flag (see `with_check`).
++    check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+     /// Test builds only: polls left before the token cancels itself (see
+     /// [`CancelToken::cancel_after_polls`]). Absent from every other build, so
+     /// the public type and its poll cost are unchanged.
+@@ -119,16 +121,46 @@
+     polls_left: Option<Arc<AtomicUsize>>,
+ }
+ 
++// NeoSCAD patch: `Debug` by hand, since the check is a closure.
++impl std::fmt::Debug for CancelToken {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("CancelToken")
++            .field("flag", &self.flag)
++            .field("check", &self.check.is_some())
++            .finish()
++    }
++}
++
+ impl CancelToken {
+     /// A fresh, uncancelled token.
+     pub fn new() -> Self {
+         Self {
+             flag: Arc::new(AtomicBool::new(false)),
++            check: None,
+             #[cfg(test)]
+             polls_left: None,
+         }
+     }
+ 
++    /// NeoSCAD patch: a token over a flag the caller already has (a
++    /// request's interrupt flag), so a cancel of the request reaches the
++    /// kernel without a thread to copy one flag into the other.
++    pub fn from_flag(flag: Arc<AtomicBool>) -> Self {
++        Self {
++            flag,
++            ..Self::new()
++        }
++    }
++
++    /// NeoSCAD patch: this token, also cancelled once `check` returns
++    /// `true` (a time or memory limit passed). Every cancellation point
++    /// polls it, from any thread, so it must be cheap and thread-safe;
++    /// once it fires, the flag is set and stays set.
++    pub fn with_check(mut self, check: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
++        self.check = Some(check);
++        self
++    }
++
+     /// Test builds only: a token whose first `polls` calls to `is_cancelled`
+     /// return `false` and whose next call cancels it, as `cancel()` would, and
+     /// returns `true`. Clones share the count, so it counts the polls of a
+@@ -162,7 +194,17 @@
+                 self.cancel();
+             }
+         }
+-        self.flag.load(Ordering::Relaxed)
++        if self.flag.load(Ordering::Relaxed) {
++            return true;
++        }
++        // NeoSCAD patch: poll the check, and make its answer sticky.
++        match &self.check {
++            Some(c) if c() => {
++                self.cancel();
++                true
++            }
++            _ => false,
++        }
+     }
+ }
+ 

@@ -31,7 +31,7 @@ io = { package = "neoscad-io", path = "../io" }
 lang = { package = "neoscad-lang", path = "../lang" }
 # Pinned exactly: the port tracks Manifold C++ v3.5.0 and its output
 # (triangle topology, run order) is part of what the tier 3 images see.
-manifold-rust = { version = "=0.15.0", default-features = false }
+manifold-rust = { version = "=0.16.0", default-features = false }
 rayon = { workspace = true, optional = true }
 # A preview product's cache key (`csg::product_key`), hashed as
 # the evaluator hashes subtree keys. Already in the build through `eval`.

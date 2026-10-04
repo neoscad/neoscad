@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.77"
 name = "manifold-rust"
-version = "0.15.0"
+version = "0.16.0"
 authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
 build = false
 exclude = [
@@ -61,8 +61,20 @@ name = "manifold_rust"
 path = "src/lib.rs"
 
 [[example]]
+name = "batch_union_perf"
+path = "examples/batch_union_perf.rs"
+
+[[example]]
+name = "boolean_perf"
+path = "examples/boolean_perf.rs"
+
+[[example]]
 name = "debug_301921"
 path = "examples/debug_301921.rs"
+
+[[example]]
+name = "keyhole_perf"
+path = "examples/keyhole_perf.rs"
 
 [[example]]
 name = "large_scene_test"

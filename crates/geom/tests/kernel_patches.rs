@@ -1,7 +1,10 @@
-//! The speed patches in `vendor/` (see `vendor/README.md`) must not change
-//! a single output byte. Each test here pins behaviour the patched code has
-//! to reproduce exactly, so a later edit to either patch that changes the
-//! result fails here rather than as a drifted export.
+//! The speed patches to the vendored kernels (see `vendor/README.md`) must
+//! not change a single output byte. Each test here pins behaviour the
+//! patched code has to reproduce exactly, so a later edit to a patch, or an
+//! upstream release, that changes the result fails here rather than as a
+//! drifted export. The two ear-clipper patches were NeoSCAD's until
+//! manifold-rust 0.16.0 took them upstream; their hashes still come from
+//! the code before either.
 
 use manifold_rust::linalg::Vec2;
 use manifold_rust::polygon::triangulate;

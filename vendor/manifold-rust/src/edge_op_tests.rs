@@ -125,8 +125,54 @@ fn test_dedupe_edges_never_moves_a_triangle_corner() {
     assert_eq!(moved, 0, "a corner that moves changes the solid");
 }
 
-/// The owners the sequential scans find: each orbit's smallest eligible
-/// halfedge, walked with visited flags in ascending order.
+/// Two operands cut from a union in a BOSL2 `cubetruss` model, around a
+/// concave corner. Format: "3 numVert numTri tolerance 0", then one "x y z"
+/// per vertex, then one "v0 v1 v2" per triangle. Positions are round-trip
+/// formatted, so bit-exact. Neither mesh carries face IDs.
+const UNION_CONCAVE_CORNER_A: &str = include_str!("testdata/union-concave-corner-a.txt");
+const UNION_CONCAVE_CORNER_B: &str = include_str!("testdata/union-concave-corner-b.txt");
+
+fn load_tri_fixture(text: &str) -> crate::manifold::Manifold {
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
+    let (num_vert, num_tri) = (header[1].parse().unwrap(), header[2].parse().unwrap());
+    let mut mesh = crate::types::MeshGL64 {
+        num_prop: 3,
+        tolerance: header[3].parse().unwrap(),
+        ..Default::default()
+    };
+    for line in lines.by_ref().take(num_vert) {
+        mesh.vert_properties
+            .extend(line.split_whitespace().map(|s| s.parse::<f64>().unwrap()));
+    }
+    for line in lines.take(num_tri) {
+        mesh.tri_verts
+            .extend(line.split_whitespace().map(|s| s.parse::<u64>().unwrap()));
+    }
+    crate::manifold::Manifold::from_mesh_gl64(&mesh)
+}
+
+/// The union's volume must match inclusion-exclusion. Before the stale-entry
+/// check in `dedupe_edges` (divergence ledger entry 3), the cleanup filled the
+/// concave corner, as it does in C++ Manifold 3.5.2.
+#[test]
+fn test_union_keeps_concave_corner() {
+    use crate::types::OpType;
+    let a = load_tri_fixture(UNION_CONCAVE_CORNER_A);
+    let b = load_tri_fixture(UNION_CONCAVE_CORNER_B);
+    let expected = a.volume() + b.volume() - a.boolean(&b, OpType::Intersect).volume();
+    for (x, y) in [(&a, &b), (&b, &a)] {
+        let union = x.boolean(y, OpType::Add);
+        assert!(
+            (union.volume() - expected).abs() < 1e-9 * expected,
+            "union volume {}, expected {expected}",
+            union.volume()
+        );
+    }
+}
+
+/// The sequential owner scan that `orbit_owners` replaces: ascending, each
+/// unvisited eligible halfedge owns its orbit and marks it visited.
 #[cfg(feature = "parallel")]
 fn sequential_orbit_owners(
     halfedge: &[Halfedge],
@@ -151,8 +197,23 @@ fn sequential_orbit_owners(
     owners
 }
 
+/// `orbit_owners` with a threshold of 0 against the sequential scan, under
+/// eligibility rules that make every, most, and few halfedges eligible.
+#[cfg(feature = "parallel")]
+fn assert_orbit_owners_match(halfedge: &[Halfedge]) {
+    let rules: [&(dyn Fn(&Halfedge) -> bool + Sync); 3] = [
+        &|h| h.start_vert >= 0,
+        &|h| h.start_vert >= 0 && h.end_vert % 3 != 0,
+        &|h| h.start_vert >= 0 && h.end_vert % 7 == 3,
+    ];
+    for eligible in rules {
+        let expected = sequential_orbit_owners(halfedge, eligible);
+        assert_eq!(orbit_owners(halfedge, 0, eligible), Some(expected));
+    }
+}
+
 /// `orbit_owners` must give each orbit's smallest eligible halfedge, as the
-/// sequential scans do, on cubes touching along edges, for two rules.
+/// sequential scans do, on cubes touching along edges.
 #[cfg(feature = "parallel")]
 #[test]
 fn test_orbit_owners_match_the_sequential_scan() {
@@ -168,83 +229,47 @@ fn test_orbit_owners_match_the_sequential_scan() {
             }
         }
     }
-    let halfedge = &model.as_impl().halfedge;
-    let rules: [&(dyn Fn(&Halfedge) -> bool + Sync); 2] = [&|h| h.start_vert >= 0, &|h| {
-        h.start_vert >= 0 && h.end_vert % 3 != 0
-    }];
-    for eligible in rules {
-        let expected = sequential_orbit_owners(halfedge, eligible);
-        assert_eq!(orbit_owners(halfedge, 0, eligible), Some(expected));
-    }
+    assert_orbit_owners_match(&model.as_impl().halfedge);
 }
 
-/// The halfedges of a bicone: two fans of `k` triangles around a ring, so
-/// both apexes have valence `k`. The top fan is stored in reverse, so the walk
-/// around the top apex meets its halfedges in ascending order.
-#[cfg(feature = "parallel")]
-fn bicone_halfedges(k: usize) -> Vec<Halfedge> {
-    let (top, bottom) = (k as i32, k as i32 + 1);
-    let ring = |t: usize| (t % k) as i32;
-    let top_tri = |t: usize| k - 1 - t % k;
-    let bottom_tri = |t: usize| k + t % k;
-    let mut halfedge = vec![
-        Halfedge {
-            start_vert: -1,
-            end_vert: -1,
-            paired_halfedge: -1,
-            prop_vert: -1,
-        };
-        6 * k
-    ];
-    let mut set = |tri: usize, verts: [i32; 3], pairs: [usize; 3]| {
-        for j in 0..3 {
-            halfedge[3 * tri + j] = Halfedge {
-                start_vert: verts[j],
-                end_vert: verts[(j + 1) % 3],
-                paired_halfedge: pairs[j] as i32,
-                prop_vert: verts[j],
-            };
-        }
-    };
-    for t in 0..k {
-        // Top (apex, r_t, r_t+1), bottom (apex, r_t+1, r_t).
-        set(
-            top_tri(t),
-            [top, ring(t), ring(t + 1)],
-            [
-                3 * top_tri(t + k - 1) + 2,
-                3 * bottom_tri(t) + 1,
-                3 * top_tri(t + 1),
-            ],
-        );
-        set(
-            bottom_tri(t),
-            [bottom, ring(t + 1), ring(t)],
-            [
-                3 * bottom_tri(t + 1) + 2,
-                3 * top_tri(t) + 1,
-                3 * bottom_tri(t + k - 1),
-            ],
-        );
-    }
-    halfedge
-}
-
-/// Two vertices of valence 100,000, in a mesh above `ORBIT_PAR_THRESHOLD`.
-/// If every halfedge walked its orbit until it met a smaller one, this would
-/// take 1e10 steps; walks stop at `OWNER_WALK_CAP` and each long orbit is
-/// walked once.
+/// The same on orbits longer than `ORBIT_WALK_CAP`: a bipyramid whose two
+/// apexes have valence 300, so their orbits are left to the sequential pass,
+/// while the ring vertices' orbits (valence 4) resolve in the parallel walks.
 #[cfg(feature = "parallel")]
 #[test]
-fn test_orbit_owners_of_a_high_valence_vertex() {
-    let halfedge = bicone_halfedges(100_000);
-    assert!(halfedge.len() >= ORBIT_PAR_THRESHOLD);
-    let rules: [&(dyn Fn(&Halfedge) -> bool + Sync); 2] = [&|h| h.start_vert >= 0, &|h| {
-        h.start_vert >= 0 && h.end_vert % 3 != 0
-    }];
-    for eligible in rules {
-        let expected = sequential_orbit_owners(&halfedge, eligible);
-        let owners = orbit_owners(&halfedge, ORBIT_PAR_THRESHOLD, eligible);
-        assert_eq!(owners, Some(expected));
+fn test_orbit_owners_match_the_sequential_scan_on_orbits_longer_than_the_cap() {
+    let n = 300u64;
+    let mut mesh = crate::types::MeshGL64 {
+        num_prop: 3,
+        ..Default::default()
+    };
+    for i in 0..n {
+        let angle = i as f64 * std::f64::consts::TAU / n as f64;
+        mesh.vert_properties
+            .extend_from_slice(&[100.0 * angle.cos(), 100.0 * angle.sin(), 0.0]);
     }
+    mesh.vert_properties
+        .extend_from_slice(&[0.0, 0.0, 50.0, 0.0, 0.0, -50.0]);
+    let (top, bottom) = (n, n + 1);
+    for i in 0..n {
+        let j = (i + 1) % n;
+        mesh.tri_verts.extend_from_slice(&[i, j, top, j, i, bottom]);
+    }
+    let model = crate::manifold::Manifold::from_mesh_gl64(&mesh);
+    assert_eq!(model.num_tri(), 2 * n as usize);
+    let halfedge = &model.as_impl().halfedge;
+    let longest = (0..halfedge.len())
+        .map(|i| {
+            let mut len = 1;
+            let mut current = next_halfedge(halfedge[i].paired_halfedge) as usize;
+            while current != i {
+                len += 1;
+                current = next_halfedge(halfedge[current].paired_halfedge) as usize;
+            }
+            len
+        })
+        .max();
+    assert_eq!(longest, Some(n as usize));
+    assert!(n as usize > super::orbits::ORBIT_WALK_CAP);
+    assert_orbit_owners_match(halfedge);
 }

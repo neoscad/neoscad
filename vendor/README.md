@@ -60,57 +60,149 @@ and run the check. When no patch is left, drop
 `vendor/<crate>`, `vendor/patches/<crate>` and its `[patch.crates-io]`
 line.
 
-## manifold-rust 0.15.0, patched
+## manifold-rust 0.16.0, patched
 
 A copy of the crates.io release (`.cargo_vcs_info.json` gives the upstream
 commit), used through `[patch.crates-io]` in the root `Cargo.toml`. It is
 not a workspace member, so the workspace's lints, formatting and tests do
-not apply to it. It carries seven changes: two speed fixes in
-`src/polygon_earclip.rs`, parallel boolean kernels in `src/par.rs` and
-its callers, parallel `batch_boolean` rounds, cancellation checks inside
-the result assembly, a size threshold for the rounds, and a cancel token
-a host can drive (below). The first five are upstream proposals, each
-the `src/` part of one commit on a `neoscad/*` branch of a fork of
-larsbrubaker/manifold-rust, taken verbatim; the last two are NeoSCAD's
-own and are marked `NeoSCAD patch` in the source. Drop the copy once
-upstream has the five and the token API has another home.
+not apply to it. It carries one change, NeoSCAD's own and marked `NeoSCAD
+patch` in the source: a cancel token a host can drive (below). Drop the
+copy once the token API has a home upstream.
+
+0.16.0 took the five changes NeoSCAD had proposed upstream (two speed
+fixes in the ear clipper, parallel boolean stages, parallel
+`batch_boolean` rounds, and cancellation checks inside the result
+assembly), so their patches are gone; the sections on them below now
+describe upstream's code, and what NeoSCAD relies on in it.
 
 The series, in `vendor/patches/manifold-rust/`:
 
 | Patch | Change |
 |---|---|
 | `removed` | `.gitmodules` (a submodule the `.crate` does not ship) and `README_HERO.png` (the README's 257 KiB screenshot) are left out; neither is used by the build |
-| `0001-keyhole-loop-visitor.patch` | the keyhole speed patch (`src/polygon_earclip.rs`, whose keyhole code moves to the new `src/polygon_earclip_keyhole.rs`); branch `neoscad/earclip-loop-visitor` (larsbrubaker/manifold-rust#6) |
-| `0002-keyhole-ring-boxes.patch` | the keyhole ring-box patch (`src/polygon_earclip*.rs`); branch `neoscad/earclip-ring-boxes` (#9), on top of the previous one |
-| `0003-parallel-booleans.patch` | the parallel boolean kernels (`src/par.rs`, `src/edge_op.rs`, the new `src/edge_op_orbits.rs`, and others); branch `neoscad/parallel-booleans` (#8) |
-| `0004-parallel-batch-rounds.patch` | `batch_boolean` runs each round's pairs in parallel and renumbers their mesh IDs in pair order (`src/csg_tree.rs`; its tests move to the new `src/csg_tree_tests.rs`); branch `neoscad/parallel-batch-rounds` (#7) |
-| `0005-cancel-new-edge-verts.patch` | checks inside `AddNewEdgeVerts`, and its lists sized up front (`src/boolean_result*.rs`; a test-only poll countdown in `src/cancel.rs`); branch `neoscad/cancel-new-edge-verts` (#10), on top of `neoscad/parallel-booleans` |
-| `0006-batch-round-threshold.patch` | NeoSCAD's: `batch_boolean` rounds of under 10,000 vertices run their pairs serially (`src/csg_tree.rs`; see the parallel boolean patch) |
-| `0007-cancel-token-over-a-flag.patch` | NeoSCAD's: a `CancelToken` over a caller's flag, polling a caller's check (`src/cancel.rs`; see the cancellation patch) |
+| `0001-cancel-token-over-a-flag.patch` | NeoSCAD's: a `CancelToken` over a caller's flag, polling a caller's check (`src/cancel.rs`; see the cancel token patch) |
 
 The first vendoring (`17a31e4`) left the two files out without a
 recorded reason; they could as well be restored, which would empty
 `removed`.
 
-Most of its source files use CRLF line endings; keep them when editing (a
-tool that rewrites them as LF turns every line into a diff). A few files
-new in 0.15.0 (`src/cross_section_tests.rs`, `src/impl_shapes.rs`, and
-others) use LF, and so do the files the series adds
-(`src/polygon_earclip_keyhole.rs`, `src/edge_op_orbits.rs`,
-`src/par_tests.rs`, `src/csg_tree_tests.rs`). The patches carry the CRs
-in their lines, so keep those too.
+Every file in the 0.16.0 `.crate` uses LF line endings. Upstream's git
+blobs were LF all along (`src/vec.rs` at 0.15.0's `a866917` has no CR),
+but the 0.15.0 `.crate` was packaged with CRLF in most source files, so the move from 0.15.0 rewrote
+every line of those once. The patch is plain LF too. Keep whatever the
+release has: `scripts/vendor-check.sh` compares bytes.
 
-The five upstream patches follow their branches as revised after
-review, on the fork's `main` at 9989b92 (0.15.0, two QuickHull commits
-and a union regression test, none of which touch these files). That
-`main` adds a test at the end of `src/edge_op_tests.rs`, so `0003`'s new
-tests there sit after the file's last test in 0.15.0 instead; the code
-is otherwise the commits'. The review's changes, against the first
-versions of the branches: the keyhole code moved to its own file and a
-test for a ring collapsed by an earlier hole (`0001`); the ring-box
-`ccw` cull guarded against underflow and overflow (`0002`, below); orbit
-walks capped (`0003`, below); mesh IDs renumbered after each batch round
-(`0004`, below); and a poll-countdown test of the cancel checks (`0005`).
+### Moving from 0.15.0 to 0.16.0
+
+0.16.0 (upstream `f43ec62`, 28 commits after 0.15.0's `a866917`) has
+all five of NeoSCAD's upstream proposals, so `0001` to `0005` were
+dropped; `0006` was dropped as well, and `0007` is now `0001`. Its
+release commit (`d1cdf28`) lists the changes; upstream keeps no
+changelog file, and its `docs/CPP_DIVERGENCES.md` has the departures
+from C++. How 0.16.0's versions differ from NeoSCAD's former patches:
+
+- **Keyhole walks** (`0001`; upstream `c15d4ad`, PR #6, on top of the
+  pure move `8a963bd`): the same walk and the same save-and-restore
+  around a degenerate ring. `loop_verts` and `for_each_loop_vert` stay in
+  `src/polygon_earclip.rs` (the patch moved them into the keyhole file),
+  and the patch's test of an outer ring collapsed by an earlier hole was
+  not taken: upstream's divergence entry 12 argues, and fuzzes, that a
+  degenerate ring is reported before any vert is visited, so the restore
+  never acts.
+- **Ring boxes** (`0002`; `bc0a64d`, PR #9): the same culls, with a
+  different window for the `ccw` cull: the patch culled when the corner
+  distances, the connector's distance and epsilon were at most 1e75 and
+  the margin at least 1e-150; upstream culls when the connector's
+  distance is at least 1e-60 and the box distance and epsilon at most
+  1e60. The window decides only whether a ring is skipped or walked, and a
+  skipped ring is one the walk would not take a connector from, so the
+  triangles are the same either way; upstream's window walks more rings,
+  and only at scales beyond 1e60 or below 1e-60.
+- **Parallel stages** (`0003`; `6e127b5`, PR #8, unchanged, with
+  `e91eeee`, `cf5463e` and `7b89fae`): `boolean3_kernels.rs`,
+  `boolean_result_assemble.rs`, `edge_op.rs`, `face_op_triangulate.rs`
+  and `sort.rs` are the patched files byte for byte, line endings
+  aside. `edge_op_orbits.rs` is the same capped walk (`ORBIT_WALK_CAP`,
+  64 steps, with `u8` roles instead of an enum, and a longer proof).
+  `par.rs` adds a list of every site and `maybe_par_any_ct`, for the Auto
+  engine's self-intersection pre-check, which neoscad does not use (it
+  asks for the exact or the robust engine).
+- **Batch rounds** (`0004`; `fb1a52e`, PR #7, on top of `a882339`): no
+  renumbering after each round. Instead `compose_meshes` gives each
+  input local mesh IDs in input order, ascending within an input, before
+  `increment_mesh_ids`, which ranks them as C++ `Compose`'s offsets do,
+  and a boolean already puts its right operand's IDs after its left's,
+  so no output depends on which pair reserved IDs first. The same change
+  fixed `compose_meshes` merging two instanced copies of one mesh into
+  one run (upstream's "fixed mismatches"); neoscad's `ManifoldGeometry::batch`
+  renumbered colliding operands to avoid that, and no longer does.
+  The tests stay in `src/csg_tree.rs`.
+- **Cancel checks in `AddNewEdgeVerts`** (`0005`; `e81b00f`, PR #10,
+  unchanged, with its test `fc64db8`): the test-only poll countdown is
+  `cancel_after_polls` (the patch's was `cancelling_after`).
+- **Round threshold** (`0006`, NeoSCAD's): dropped; upstream runs every
+  round of two or more pairs in parallel. Re-applied to 0.16.0 it
+  measured no better, interleaved, best and median of 7 at a load average
+  of 2 to 8: Menger level 4 2.140/2.186 s without it against 2.184/2.203
+  s with it, `csg_spheres` 1.029/1.038 against 1.021/1.041 s,
+  `csg_deep_union` 0.065 against 0.066 s, and `bosl_fractal_tree`,
+  `ex_menger` and `bosl_screws__001` within 2%. With five busy loops per
+  core (load average up to 210), best and median of 5: `csg_spheres`
+  3.70/4.71 s without against 4.59/4.99 s with, Menger level 4
+  13.55/14.20 against 13.72/14.38 s, `bosl_fractal_tree` 6.83/7.49
+  against 7.26/8.18 s. Outputs were byte-identical every run.
+- **Cancel token** (`0007`, now `0001`): the same API, re-applied to
+  0.16.0's `src/cancel.rs`; its test-only countdown is upstream's.
+
+The other changes that reach neoscad:
+
+- QuickHull decides whether a face is above a point exactly
+  (`orient3d`), where C++ uses the float plane distance (`a69e579`,
+  divergence entry 11). A point collinear with a hull edge no longer
+  builds a zero-area face and a folded hull. This is the one change in
+  neoscad's output (below). `geom::hull::hull_3d` still checks every
+  hull and rebuilds a folded one; on `mink_convex`
+  (`minkowski() { cube([30,20,5], center=true); sphere(3, $fn=48); }`)
+  it no longer has to, so the sum takes 0.007 s instead of 0.022 s and its
+  volume is now the nightly's to 1e-10.
+- Not reaching neoscad: the robust engine's faster coplanar cross-copy
+  and self-intersection pre-check (same output, upstream says; neoscad
+  uses the robust engine only for meshes its repair leaves as soups),
+  cancellable Minkowski sums and `repair_orientation_with_token`, new
+  progress phases, and CI with the `parallel` feature.
+
+**Output.** Every model in `tests/data/scad` (527), `web/examples` (8)
+and `examples` (6), plus the 14 benchmark models, Menger level 4 and
+three text models (50 lines extruded; 50 and 200 lines in 2D), exported
+by the old build (0.15.0 with seven patches) and the new one at 1, 4 and
+the default number of threads (`--limit time=60 memory=900M`; the four
+largest again at 1800M): 395 export a mesh or SVG, 377 byte-identical in
+all six runs and 18 different. Each build gives the same bytes at every
+thread count. All 18 are hulls or Minkowski sums, and all 18 are
+QuickHull's: with 0.15.0's `quickhull.rs` and `quickhull_algo.rs` put
+back into 0.16.0, they are byte-identical to the old build's. Their
+volumes agree to 2.6e-8 relative (`issue1089b`, 1848.38907 against
+1848.38911) and their areas to 4e-9, apart from
+`3D/issues/issue2841.scad`, a Minkowski sum of a cube and two unioned
+7-sided cylinders, whose area grew 8.36 mm² (0.8%): both builds leave a
+thin internal slit (opposite faces about 1e-6 apart) between two of its
+convex pieces, 1.9 mm² a side before and 6.1 mm² after, which the
+nightly's CGAL sum does not have (`docs/followups.md`). The other 17
+changed triangulation and vertex count (by up to 9%; the nightly's
+CGAL-based Minkowski sums differ from both by more). Removing the mesh-ID
+renumbering from `ManifoldGeometry::batch` changed none of the 395.
+Conformance is 1,773 passing, 0 failing, at the default and at
+`RAYON_NUM_THREADS=1`.
+
+**Speed.** `conformance bench --quick`, interleaved, three rounds each:
+the geometric mean of the nightly's (Manifold) time over neoscad's is
+4.29, 4.52 and 4.42 for the old build and 4.92, 4.92 and 4.84 for the
+new one. The gain is `mink_convex` (above); every other model is within
+6%, the old build's best against the new one's (`csg_deep_union` 0.038
+against 0.036 s, `bosl_fractal_tree` 0.664 against 0.632 s). Interleaved, best of 5:
+Menger level 4 2.110 s old against 2.106 s new, 200 lines of extruded
+text 1.472 against 1.489 s, 50 lines 0.356 against 0.350 s, 200 lines in
+2D 0.532 against 0.536 s, `text_30lines` 0.125 against 0.129 s.
 
 ### Moving from 0.13.1 to 0.15.0
 
@@ -218,7 +310,13 @@ triangles, 8.55 mm² each. On 0.15.0 the patch still rejected a few
 collapses: these are the five models listed above, and none of them
 changes volume or area.
 
-### The keyhole speed patch
+### The keyhole walks (upstream since 0.16.0)
+
+NeoSCAD's patch until 0.16.0, which has it as upstream `c15d4ad` (PR #6)
+on top of `8a963bd`, a pure move of the keyhole code into
+`src/polygon_earclip_keyhole.rs`. What follows describes the patch as
+NeoSCAD wrote it; where 0.16.0 differs is listed under "Moving from 0.15.0
+to 0.16.0".
 
 The ear clipper joins each hole to an outer ring through a keyhole.
 `cut_keyhole` and `find_closer_bridge` look for the bridge by walking every
@@ -256,9 +354,13 @@ for the next hole walk a degenerate ring; in practice a ring degenerates
 whole, so the walk reports it before visiting any vert and the restore
 has nothing to undo.
 
-### The keyhole ring-box patch
+### The keyhole ring boxes (upstream since 0.16.0)
 
-The keyhole speed patch made each walk cheaper but left the quadratic
+NeoSCAD's patch until 0.16.0, which has it as upstream `bc0a64d` (PR #9),
+with a different magnitude window for the `ccw` cull (below, and under
+"Moving from 0.15.0 to 0.16.0").
+
+The keyhole walk change made each walk cheaper but left the quadratic
 shape: every hole still walked every outer ring twice, once in each
 bridge search. C++ Manifold does the same (`CutKeyhole` and
 `FindCloserBridge` loop over all of `outers_`,
@@ -296,10 +398,13 @@ scales `ccw` calls a vert that clearly turns the wrong way collinear,
 when `area * area` underflows to 0 or `base2 * tol * tol` overflows to
 infinity, and the tie-break can then take it; the first version of the
 patch skipped such a ring and so changed the bridge (found in upstream
-review). The `ccw` cull now applies only when the corner distances, the
-connector's distance and epsilon are at most 1e75 and the margin is at
-least 1e-150 (NaN fails too); otherwise the ring is walked. The
-coordinate tests hold at any scale. The crate's tests pin the review's
+review). NeoSCAD's revised patch applied the `ccw` cull only when the
+corner distances, the connector's distance and epsilon were at most 1e75
+and the margin at least 1e-150; upstream's `bc0a64d` applies it only when
+the connector's distance is at least 1e-60 and the box distance and
+epsilon at most 1e60 (`in_window` in `find_closer_bridge`). NaN fails
+either test, and outside the window the ring is walked. The coordinate
+tests hold at any scale. The crate's tests pin the review's
 two cases (lengths of 1e-84 with epsilon 0, and 1e80 with epsilon 1e74),
 with triangles taken on the unpatched code.
 
@@ -310,50 +415,50 @@ the 50- and 200-line text extrusions at 1 and 14 threads, export
 byte-identical STL before and after. The 200-line extrusion went from
 33.6 to 2.7 s (`docs/audits/slow-cases.md` §2).
 
-### The parallel boolean patch
+### The parallel boolean stages (upstream since 0.16.0)
+
+NeoSCAD's patches until 0.16.0, which has the kernels as upstream
+`6e127b5` (PR #8, unchanged) plus the orbit-walk cap (`e91eeee`), and the
+batch rounds as `fb1a52e` (PR #7) on top of `a882339`, a different fix
+for the mesh-ID question below. 0.16.0's `src/par.rs` lists every site and
+its threshold.
 
 manifold-rust (0.13.1 and 0.15.0) runs most of a boolean on one thread,
 where C++ Manifold runs it under TBB. On the level-4 Menger sponge the
 last two differences (the cube minus the union of the three rotated
 negatives, about 300,000 faces) ran alone for over a second while the
-other cores idled (`docs/audits/slow-cases.md` §1). The patches make the
-large serial stages parallel, each in a way whose output is the
+other cores idled (`docs/audits/slow-cases.md` §1). The stages below make
+the large serial stages parallel, each in a way whose output is the
 sequential output, so the result is byte-identical at any thread count
-and to the unpatched crate's (measured on 0.13.1, below). Every site
+and to the serial crate's (measured on 0.13.1, below). Every site
 goes through a helper in `src/par.rs` with a sequential twin for builds
 without the `parallel` feature (the WASM build's pool runs on the
-calling thread either way). The kernels are
-`vendor/patches/manifold-rust/0003-parallel-booleans.patch`, the batch
-rounds `0004-parallel-batch-rounds.patch`, and the round threshold
-`0006-batch-round-threshold.patch`. By site:
+calling thread either way). By site:
 
 - **`batch_boolean` rounds** (`csg_tree.rs`): a round's up to four pairs
   are picked first, then run side by side (C++ `csg_tree.cpp:451-479` in
   Manifold 3.5.2), and the results go back on the heap in pair order with
   the serials the sequential loop gave them. The one shared state a
-  boolean touches is the mesh-ID counter. The kernel compares mesh IDs
-  for equality, except where a disjoint union (`compose_meshes`) keeps
-  both operands' IDs and `MeshGL` then orders their runs by value; so
-  after each round the IDs its booleans reserved are moved, in pair
-  order, into one block reserved after the round
-  (`renumber_round_mesh_ids`, added in upstream review), and the IDs and
-  run order are the same at any thread count. neoscad never reached that
-  race: its unions go through `batch_union`, which composes the disjoint
-  operands into groups first, and the groups, and any union of them,
-  overlap pairwise, and an intersection of disjoint operands is empty,
-  so the rounds run only real booleans, which put the
-  right operand's IDs after the left's whatever their values (and
-  neoscad orders output runs sharing an original ID by their first
-  triangle anyway: `crates/geom/src/manifold_geom.rs`, `canonical_mesh`).
-  Upstream's test of it (eight instances of one sphere in rounds of
-  under 10,000 vertices) also passes without the renumbering once 0006
-  is in, since its rounds then run serially; without either it failed
-  three runs out of three. With 0006 a
-  round goes parallel only when its operands have 10,000 vertices in all
-  (C++ `autoPolicy`'s `kSeqThreshold`): with five busy loops per core,
-  `csg_spheres` took 2.76 s against 3.70 s and the hero 10.5 against
-  11.5 s (best of 7); unloaded, and with one busy loop per core, the
-  difference was within noise (`docs/audits/slow-cases.md` §1.1).
+  boolean touches is the mesh-ID counter, so the IDs a round's booleans
+  reserve follow the scheduler. NeoSCAD's 0.15.0 patch renumbered them in
+  pair order after each round, because `compose_meshes` (a disjoint
+  union) then ranked its operands' IDs by value. In 0.16.0 `compose_meshes`
+  ranks them node by node, as C++ `Compose` does (`a882339`), and a
+  boolean puts its right operand's IDs after its left's, so no output
+  depends on the values and upstream does not renumber. neoscad never
+  reached that race anyway: its unions go through `batch_union`, which
+  composes the disjoint operands into groups first, and the groups, and
+  any union of them, overlap pairwise, and an intersection of disjoint
+  operands is empty (and neoscad orders output runs sharing an original
+  ID by their first triangle: `crates/geom/src/manifold_geom.rs`,
+  `canonical_mesh`). Every round of two or more pairs runs in parallel.
+  Until 0.16.0 NeoSCAD's own patch (`0006-batch-round-threshold.patch`)
+  ran a round serially unless its operands had 10,000 vertices in all
+  (C++ `autoPolicy`'s `kSeqThreshold`), measured as faster with five busy
+  loops per core on 0.15.0 (`csg_spheres` 2.76 s against 3.70 s,
+  `docs/audits/slow-cases.md` §1.1). Upstream did not take it, and on
+  0.16.0 it measured no better, so it was dropped ("Moving from 0.15.0 to
+  0.16.0").
 - **Edge-flag scans** of `collapse_short_edges`, `collapse_colinear_edges`
   and `swap_degenerates` (`edge_op.rs`): the flags are tested in parallel
   above 100,000 halfedges (C++ `FlagStore::run`, `edge_op.cpp:54-97`) and
@@ -417,56 +522,66 @@ checkerboard of 256 edge-touching cubes for the orbit scans and
 `batch_boolean`, a sphere with 49 holes for the rest) on 1 and 8
 threads and checks the export against hashes taken with the unpatched
 copy. It also combines instances of one sphere (one original ID) in
-batch rounds large enough to run in parallel, two unions and an
-intersection, and compares the kernel's whole `MeshGL64`, before
-`canonical_mesh`, and the export on 1, 2, 3 and 8 threads, twice each.
-It passed before the renumbering too, with or without 0006, for the
-reason given under the batch rounds above.
+batch rounds that run in parallel, two unions and an intersection, and
+compares the kernel's whole `MeshGL64`, before `canonical_mesh`, and the
+export on 1, 2, 3 and 8 threads, twice each. It passed with 0.15.0's
+renumbering, without it, and on 0.16.0, for the reason given under the
+batch rounds above.
 
 **Timings** (M4 Pro, 14 cores, interleaved, best of 5; the machine was
 shared, load average 5–9 unless noted): see `docs/audits/slow-cases.md`
 §1 for the tables. Menger level 4 went from 2.62 s to 1.59 s (the
 nightly: 2.29 s), `csg_spheres` from 0.57 to 0.47 s.
 
-### The cancellation patch
+### The cancel token patch
 
 manifold-rust ports Manifold's cooperative cancellation (`src/cancel.rs`:
 a token checked between a boolean's stages, inside its long loops and
-between `csg_tree`'s batch rounds), but `CancelToken::new` makes its own
-flag, and the token knows only that flag. A request's cancel is the
+between `csg_tree`'s batch rounds; since 0.16.0 also in Minkowski sums
+and `repair_orientation_with_token`), but `CancelToken::new` makes its
+own flag, and the token knows only that flag. A request's cancel is the
 host's flag, and its time and memory limits are only known to the
 request's guard (the clock, and on wasm32 the counting allocator's
-peak). So:
+peak). So `0001-cancel-token-over-a-flag.patch`, NeoSCAD's own:
 
 - `CancelToken::from_flag` makes a token over an existing
   `Arc<AtomicBool>`, and `with_check` adds a condition polled at every
   check; once it is true the flag is set, so the answer is sticky as
   before. `geom::manifold_geom::kernel_token` builds the request's token:
   its interrupt flag, and the guard's `stopped()` as the check. Without
-  a token (`None`, every unlimited render) nothing is polled. This is
-  `0007-cancel-token-over-a-flag.patch`, NeoSCAD's own.
-- `AddNewEdgeVerts` (`src/boolean_result.rs`, called from
-  `src/boolean_result_assemble.rs`) checks the token at every
-  intersection, and between the three sorts after it, and its three
-  lists are allocated at their final size (the sum of the inclusions'
-  magnitudes) instead of grown by doubling
-  (`0005-cancel-new-edge-verts.patch`, the upstream proposal). Upstream's
-  check is one atomic load; neoscad's also polls the guard, so under a
-  limit a check costs a clock read. NeoSCAD's earlier version of the
-  patch checked every 16,384 intersections instead: under `--limit
-  time=1000`, Menger level 4 took 1.41 s with this one against 1.36 s
-  with that one (best of 5, load average about 9), and without a limit
-  the two take the same time. In the Menger sponge at
-  depth 5 (`examples/Old/example024.scad`, `n=5`) the last union grew a
-  wasm instance from under 1 GiB past 2 GB within this one step, before
-  any check ran; the last doubling of the new-edge list alone copied
-  a buffer into one twice its size. For the crate's own test of the
-  loop (`src/cancel_tests.rs`), 0005 gives `CancelToken`, in test builds
-  only (`#[cfg(test)]`), a poll countdown: a token from
-  `cancelling_after(k)` reads as live for k polls and then cancels
-  itself, and the lists then hold exactly the first k intersections'
-  entries. 0007 keeps it
-  beside the check, and reads it first.
+  a token (`None`, every unlimited render) nothing is polled. `Debug` is
+  written by hand, since the check is a closure.
+- Upstream's test-only poll countdown (`cancel_after_polls`, under
+  `#[cfg(test)]`, which lands a cancel at an exact check) is kept beside
+  the check, and read first.
+
+neoscad reaches the kernel's cancel points through `boolean_until` and
+`batch_until` (`crates/geom/src/manifold_geom.rs`). It does not call
+manifold-rust's Minkowski or `repair_orientation`: `geom::minkowski`
+ports OpenSCAD's hull-and-union sum (OpenSCAD builds without
+`USE_MANIFOLD_MINKOWSKI`), and the repair of a broken mesh is neoscad's
+own (`orient_soup`), so the new cancel points there are not used.
+
+### The cancellation checks inside the result assembly (upstream since 0.16.0)
+
+NeoSCAD's patch until 0.16.0, which has it as upstream `e81b00f` (PR #10,
+unchanged), its test as `fc64db8` and the poll countdown under the name
+`cancel_after_polls` (NeoSCAD's was `cancelling_after`).
+
+`AddNewEdgeVerts` (`src/boolean_result.rs`, called from
+`src/boolean_result_assemble.rs`) checks the token at every
+intersection, and between the three sorts after it, and its three lists
+are allocated at their final size (the sum of the inclusions'
+magnitudes) instead of grown by doubling. Upstream's check is one atomic
+load; neoscad's also polls the guard, so under a limit a check costs a
+clock read. NeoSCAD's earlier version checked every 16,384 intersections
+instead: under `--limit time=1000`, Menger level 4 took 1.41 s with this
+one against 1.36 s with that one (best of 5, load average about 9), and
+without a limit the two take the same time. In the Menger sponge at
+depth 5 (`examples/Old/example024.scad`, `n=5`) the last union grew a
+wasm instance from under 1 GiB past 2 GB within this one step, before
+any check ran; the last doubling of the new-edge list alone copied a
+buffer into one twice its size.
 
 The content and order of the lists are unchanged (a capacity is not
 content), and an uncancelled token changes no output:
@@ -683,57 +798,11 @@ with the patch applied (or dropping it, if the release has the fix).
 
 ## Upstream drafts
 
-Both crates are Lars Brubaker's ports. Their `main` branches, fetched
-2026-09-27, still have the code these patches replace, and so do
-manifold-rust 0.15.0 and its `main` at `40f20c6` (2026-09-30). The two
-manifold-rust drafts below have since become the branches
-`neoscad/earclip-loop-visitor` and `neoscad/earclip-ring-boxes`
-(patches `0001` and `0002`). The owner can send
-these as issues, with the diff of the vendored file as the patch.
-
-### manifold-rust: `EarClip` allocates every outer ring once per hole
-
-> **Title:** Triangulation is dominated by `loop_verts` allocation on
-> polygons with many holes
->
-> `EarClip::cut_keyhole` and `find_closer_bridge`
-> (`src/polygon_earclip.rs`) clone `self.outers` and call `loop_verts`,
-> which collects each outer ring into a new `Vec`, for every hole. The
-> outer rings grow as holes are joined, so on a square with 5,041 circular
-> holes (`$fn = 16`) this collection is 60% of the run, and in extruded
-> text (many glyph holes) `Vec` growth alone is 29%.
->
-> Suggested fix: a visitor, `fn for_each_loop_vert(&self, first: usize,
-> f: impl FnMut(usize)) -> bool`, with the same traversal as `loop_verts`
-> (which can then wrap it), used by both bridge searches over
-> `&self.outers`. This matches C++'s `Loop(first, func)`. To keep the
-> current output exactly, a search saves its `connector` before each ring
-> and restores it when the visitor reports a degenerate ring, since
-> `loop_verts` skipped such a ring whole. (C++ keeps the partial update;
-> matching C++ would be the other option, and would change output only for
-> degenerate outer rings.) With the restore, output is byte-identical on
-> every OpenSCAD test model we export (392 files), and triangulation-heavy exports are
-> 17–35% faster end to end.
-
-### manifold-rust: every hole walks every outer ring
-
-> **Title:** Triangulating many separate polygons with holes is quadratic
-> in the number of rings
->
-> `EarClip::cut_keyhole` and `find_closer_bridge` walk every ring in
-> `outers` for every hole, as C++ Manifold does. For one polygon with
-> many holes that is needed, but for many separate polygons (a page of
-> text is about 30,000 rings) almost every ring is far from the hole:
-> 200 lines of extruded text spent over 90% of 34 s in these walks.
->
-> Suggested fix: keep a `Rect` per outer ring (from `find_start`, grown by
-> the hole's box on each `join_polygons`), and skip a ring whose box
-> cannot contain a qualifying vert: for `cut_keyhole`, a ring wholly above
-> or below start.y ± eps; for `find_closer_bridge`, a box left of
-> start.x − eps, on the wrong side of start.y, or wholly outside the line
-> from start to the connector (checked at the corners, since the test is
-> linear). With margins above rounding, the output is unchanged; on the
-> text model the run is 12 times faster.
+Both crates are Lars Brubaker's ports. clipper2-rust's `main`, fetched
+2026-09-27, still had the code the drafts below replace. (The two
+manifold-rust drafts that stood here became upstream PRs #6 and #9 and
+are in manifold-rust 0.16.0.) The owner can send these as issues, with
+the diff of the vendored file as the patch.
 
 ### clipper2-rust: `nearbyint_f64` in software
 

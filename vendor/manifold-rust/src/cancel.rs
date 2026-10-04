@@ -78,9 +78,12 @@
 //     the trailing simplify + sort block), not a wrong status.
 //   - C++ also threads ctx into the non-Boolean entry points (`FromMeshGL`,
 //     `Smooth`, `LevelSet`, `Hull`, `Minkowski`, `Refine`). Here only the
-//     boolean / CSG pipeline is cancellable at all; those entry points ignore
+//     boolean / CSG pipeline and Minkowski (`minkowski_with_progress`, per
+//     hull, batch and face) are cancellable; the other entry points ignore
 //     tokens rather than reporting a stale status, since they take none.
 
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -111,11 +114,11 @@ pub struct CancelToken {
     flag: Arc<AtomicBool>,
     // NeoSCAD patch: a condition polled with the flag (see `with_check`).
     check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-    /// Polls left before the token cancels itself. Tests use it to land a
-    /// cancel at an exact iteration of a loop, which a cancel from another
-    /// thread cannot do deterministically.
+    /// Test builds only: polls left before the token cancels itself (see
+    /// [`CancelToken::cancel_after_polls`]). Absent from every other build, so
+    /// the public type and its poll cost are unchanged.
     #[cfg(test)]
-    polls_left: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    polls_left: Option<Arc<AtomicUsize>>,
 }
 
 // NeoSCAD patch: `Debug` by hand, since the check is a closure.
@@ -145,9 +148,7 @@ impl CancelToken {
     pub fn from_flag(flag: Arc<AtomicBool>) -> Self {
         Self {
             flag,
-            check: None,
-            #[cfg(test)]
-            polls_left: None,
+            ..Self::new()
         }
     }
 
@@ -160,13 +161,15 @@ impl CancelToken {
         self
     }
 
-    /// A token that reads as live for `polls` polls, then cancels itself.
+    /// Test builds only: a token whose first `polls` calls to `is_cancelled`
+    /// return `false` and whose next call cancels it, as `cancel()` would, and
+    /// returns `true`. Clones share the count, so it counts the polls of a
+    /// whole operation, which lets a test land a cancel at an exact check.
     #[cfg(test)]
-    pub(crate) fn cancelling_after(polls: usize) -> Self {
+    pub(crate) fn cancel_after_polls(polls: usize) -> Self {
         Self {
-            flag: Arc::new(AtomicBool::new(false)),
-            check: None,
-            polls_left: Some(Arc::new(std::sync::atomic::AtomicUsize::new(polls))),
+            polls_left: Some(Arc::new(AtomicUsize::new(polls))),
+            ..Self::new()
         }
     }
 
@@ -185,10 +188,9 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         #[cfg(test)]
         if let Some(left) = &self.polls_left {
-            if left
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-                .is_err()
-            {
+            let counted =
+                left.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+            if counted.is_err() {
                 self.cancel();
             }
         }
@@ -198,7 +200,7 @@ impl CancelToken {
         // NeoSCAD patch: poll the check, and make its answer sticky.
         match &self.check {
             Some(c) if c() => {
-                self.flag.store(true, Ordering::Relaxed);
+                self.cancel();
                 true
             }
             _ => false,

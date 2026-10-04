@@ -16,31 +16,48 @@ use crate::types::{next_halfedge, Halfedge};
 // orbit's smallest eligible halfedge must do. Otherwise, or on an open orbit,
 // the callers fall back to their sequential scans.
 //
-// A walk from every halfedge costs the square of an orbit's length when the
-// orbit meets its halfedges in ascending order, so a vertex of valence 1e5
-// would take 1e10 steps against the sequential scan's 1e5. Walks therefore
-// stop after `OWNER_WALK_CAP` steps, and the orbits they leave undecided are
-// walked once each, sequentially, which keeps the search linear.
+// Walking a whole orbit from every eligible halfedge costs the sum of the
+// squared orbit lengths, Θ(n²) for one high-valence vertex. So the parallel
+// walks stop after `ORBIT_WALK_CAP` steps, and the orbits they leave
+// unresolved are settled by one sequential visited-flag pass, which walks
+// each such orbit once. Why the owners are still exactly the sequential
+// scan's, in its order, given closed orbits:
+//
+// - An orbit of length L <= cap: every walk from an eligible halfedge returns
+//   to its start within L steps unless it first meets a smaller eligible one,
+//   so the walks alone mark exactly its smallest eligible halfedge owner.
+// - An orbit of length L > cap: no walk returns within the cap. A walk from a
+//   halfedge that is not the smallest eligible one ends `NOT_OWNER` or
+//   `UNRESOLVED`; the walk from the smallest one meets nothing smaller and
+//   ends `UNRESOLVED`. So the orbit's `UNRESOLVED` halfedges are eligible and
+//   include its smallest eligible halfedge, which is therefore the smallest
+//   `UNRESOLVED` one. The ascending pass reaches it first, makes it the owner
+//   and marks the whole orbit visited, so no other halfedge of the orbit
+//   becomes an owner.
+// - The pass walks only from `UNRESOLVED` halfedges, and a walk never leaves
+//   its orbit, so short orbits keep the roles their walks gave them.
+//
+// Every orbit with an eligible halfedge thus has exactly one owner, its
+// smallest eligible halfedge, as in the sequential scan, and the owners are
+// collected ascending, the order in which that scan reaches them. An open
+// orbit with an eligible halfedge is still caught: its smallest eligible
+// halfedge's walk meets no smaller one, so it either reaches the open end
+// (`OPEN`) or the cap, and then the pass reaches it first and its full walk
+// reaches the open end.
 
 /// Halfedge count from which the orbit scans run in parallel. Above C++'s 1e4:
-/// every halfedge walks part of its orbit, and below 100k that costs more than it saves.
+/// every halfedge walks its own orbit, and below 100k that costs more than it saves.
 pub(super) const ORBIT_PAR_THRESHOLD: usize = 100_001;
 
-/// Steps a parallel owner walk takes before it leaves its orbit to the
-/// sequential pass. Far above a typical valence, so that pass is rare, and it
-/// bounds the parallel walks at this many steps per halfedge.
-const OWNER_WALK_CAP: usize = 64;
+/// Steps after which a parallel orbit walk stops and leaves its orbit to the
+/// sequential pass. Vertex valences rarely exceed it, so that pass is usually
+/// empty, and it bounds the parallel work at 64 steps per halfedge.
+pub(super) const ORBIT_WALK_CAP: usize = 64;
 
-/// What one halfedge's capped walk found.
-#[derive(Clone, Copy, PartialEq)]
-enum Role {
-    NotOwner,
-    Owner,
-    /// The orbit is open, so owners are not the sequential scan's.
-    Open,
-    /// The walk reached `OWNER_WALK_CAP`; the orbit is decided in a later pass.
-    Long,
-}
+const NOT_OWNER: u8 = 0;
+const OWNER: u8 = 1;
+const OPEN: u8 = 2;
+const UNRESOLVED: u8 = 3;
 
 /// The owner of every orbit with an eligible halfedge, ascending, or `None`
 /// below `threshold` or if an orbit is not a closed cycle.
@@ -63,9 +80,9 @@ where
     if !paired_back.is_empty() {
         return None;
     }
-    // The next halfedge of an orbit, or `None` where it is open. A count that
-    // is not a multiple of 3 also ends up here, and goes to the sequential scan.
-    let step = |current: usize| {
+    // The step from `current`, or `None` at an open end (no pair, or a count
+    // not a multiple of 3): those cases are left to the sequential scan.
+    let step = |current: usize| -> Option<usize> {
         let p = halfedge[current].paired_halfedge;
         if p < 0 {
             return None;
@@ -73,51 +90,49 @@ where
         let next = next_halfedge(p) as usize;
         (next < n).then_some(next)
     };
-    let mut role: Vec<Role> = crate::par::maybe_par_map(n, threshold, |i| {
+    let mut role: Vec<u8> = crate::par::maybe_par_map(n, threshold, |i| {
         if !eligible(&halfedge[i]) {
-            return Role::NotOwner;
+            return NOT_OWNER;
         }
         let mut current = i;
-        for _ in 0..OWNER_WALK_CAP {
+        for _ in 0..ORBIT_WALK_CAP {
             let Some(next) = step(current) else {
-                return Role::Open;
+                return OPEN;
             };
             current = next;
             if current == i {
-                return Role::Owner;
+                return OWNER;
             }
             if current < i && eligible(&halfedge[current]) {
-                return Role::NotOwner;
+                return NOT_OWNER;
             }
         }
-        Role::Long
+        UNRESOLVED
     });
-    if role.contains(&Role::Open) {
+    if role.contains(&OPEN) {
         return None;
     }
-    // An orbit with a `Long` halfedge has more than `OWNER_WALK_CAP`
-    // halfedges, so none of its walks returned, and its owner, whose walk
-    // meets no smaller eligible halfedge, is `Long` too. As `Long` halfedges
-    // are eligible, the owner is the orbit's smallest `Long` halfedge: the
-    // first this ascending scan reaches. Each such orbit is walked once, to
-    // mark it visited and to find an open one.
-    let long = crate::par::maybe_par_filter(n, threshold, |i| role[i] == Role::Long);
-    let mut visited = vec![false; if long.is_empty() { 0 } else { n }];
-    for &owner in &long {
-        if visited[owner] {
-            continue;
-        }
-        role[owner] = Role::Owner;
-        let mut current = owner;
-        loop {
-            visited[current] = true;
-            current = step(current)?;
-            if current == owner {
-                break;
+    // The sequential pass over the orbits longer than the cap (see above).
+    let unresolved: Vec<usize> = (0..n).filter(|&i| role[i] == UNRESOLVED).collect();
+    if !unresolved.is_empty() {
+        let mut visited = vec![false; n];
+        for i in unresolved {
+            if visited[i] {
+                role[i] = NOT_OWNER;
+                continue;
+            }
+            role[i] = OWNER;
+            let mut current = i;
+            loop {
+                visited[current] = true;
+                current = step(current)?;
+                if current == i {
+                    break;
+                }
             }
         }
     }
-    Some((0..n).filter(|&i| role[i] == Role::Owner).collect())
+    Some((0..n).filter(|&i| role[i] == OWNER).collect())
 }
 
 /// Appends the duplicate edges of the orbit walked from `i`, in walk order:

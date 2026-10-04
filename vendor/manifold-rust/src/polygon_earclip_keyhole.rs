@@ -1,62 +1,18 @@
-// polygon_earclip_keyhole.rs — keyholing for the ear clipper: joining each
-// hole into the outer ring its bridge reaches (cut_keyhole, find_closer_bridge,
-// join_polygons), and the ring walk (loop_verts, for_each_loop_vert) that the
-// bridge searches run over every outer ring.
+// EarClip keyholing — the hole-to-outer bridge searches of the ear clipper
 //
-// Ports the CutKeyhole / FindCloserBridge / JoinPolygons portion of the
-// EarClip class in src/polygon.cpp, plus its `Loop`. Extracted from
-// polygon_earclip.rs, which owns the Vert list, the predicates these searches
-// use (vert_interp_y2x, vert_inside_edge, vert_is_reflex) and the ear-clipping
-// loop. A child module, so it keeps access to EarClip's private fields; the
-// rest of polygon_earclip.rs also walks rings through loop_verts.
+// Ports C++ `EarClip::CutKeyhole`, `FindCloserBridge` and `JoinPolygons`
+// (src/polygon.cpp). Before ear clipping, `EarClip::triangulate` (in
+// polygon_earclip.rs, which defines the struct, the vert predicates and the
+// ear-clipping loop) joins each hole, rightmost first, to an outer ring by a
+// zero-width bridge so every polygon left is simple. This file adds a second
+// `impl EarClip` block holding just those three steps.
 
 use crate::linalg::Vec2;
 
-use super::{ccw, EarClip, INVALID};
+use super::super::{ccw, INVALID};
+use super::EarClip;
 
 impl EarClip {
-    /// The unclipped verts of the ring starting from `first`, or `None` if
-    /// the ring is degenerate.
-    pub(super) fn loop_verts(&self, first: usize) -> Option<Vec<usize>> {
-        let mut result = Vec::new();
-        self.for_each_loop_vert(first, |v| result.push(v))
-            .then_some(result)
-    }
-
-    /// Apply `f` to each vert `loop_verts` would return, without collecting
-    /// them, as C++ `Loop` does. Returns `false` if the ring is degenerate.
-    /// A ring degenerates whole, to two verts, so the walk reports that at
-    /// the first vert it lands on, before `f` has seen any; the bridge
-    /// searches still restore their state if it does stop part-way, so that
-    /// they skip the ring whole either way, as `loop_verts` returning `None`
-    /// made them.
-    pub(super) fn for_each_loop_vert(&self, first: usize, mut f: impl FnMut(usize)) -> bool {
-        let mut v = first;
-        let mut cur_first = first;
-        loop {
-            if self.clipped(v) {
-                cur_first = self.polygon[self.polygon[v].right].left;
-                if !self.clipped(cur_first) {
-                    v = cur_first;
-                    if self.polygon[v].right == self.polygon[v].left {
-                        return false;
-                    }
-                    f(v);
-                }
-            } else {
-                if self.polygon[v].right == self.polygon[v].left {
-                    return false;
-                }
-                f(v);
-            }
-            v = self.polygon[v].right;
-            if v == cur_first {
-                break;
-            }
-        }
-        true
-    }
-
     /// Attach a hole to an outer polygon via a keyhole.
     pub(super) fn cut_keyhole(&mut self, start: usize) {
         let bbox = *self.hole2bbox.get(&start).unwrap();
@@ -70,9 +26,12 @@ impl EarClip {
         };
         let mut connector: usize = INVALID;
         let mut ring: usize = INVALID;
-        // A ring wholly above or below start.y -+ eps has no edge with a
-        // finite `vert_interp_y2x`, so it cannot take the connector. The
-        // margin only widens that test, so no ring that could is skipped.
+        // Speed only, not in C++: a ring wholly above or below start.y -+ eps
+        // has no edge with a finite `vert_interp_y2x`, which needs one end at
+        // or below start.y + eps and the other at or above start.y - eps, so
+        // it cannot take the connector and is not walked. The margin only
+        // widens the band: twice eps, plus 1e-9 relative, far above the
+        // rounding of the comparisons. A NaN or overflowed slack culls nothing.
         let slack = 2.0 * self.epsilon.abs() + 1e-9 * (1.0 + start_pos.y.abs());
 
         // Port of the C++ CheckEdge lambda: take `edge` as the new connector
@@ -82,6 +41,8 @@ impl EarClip {
         // non-CCW result) the vertical-ordering InsideEdge tie-break holds.
         // A degenerate ring is skipped whole, as `loop_verts` returning `None`
         // skipped it, so the connector is restored if the walk stops part-way.
+        // C++ `Loop` keeps what it saw before the degenerate vert; see
+        // docs/CPP_DIVERGENCES.md entry 12.
         for (k, &outer_start) in self.outers.iter().enumerate() {
             let rb = &self.outer_bbox[k];
             if rb.min.y > start_pos.y + slack || rb.max.y < start_pos.y - slack {
@@ -121,14 +82,17 @@ impl EarClip {
 
         let (connector, ring) = self.find_closer_bridge(start, connector, ring);
         self.join_polygons(start, connector);
-        // The hole's verts are now part of that ring.
+        // The hole's verts are now part of that ring. The joined verts are
+        // copies of verts already in one box or the other, and clipping only
+        // removes verts, so the box still holds every vert the ring walks.
         let rb = &mut self.outer_bbox[ring];
         rb.union_point(bbox.min);
         rb.union_point(bbox.max);
     }
 
     /// Refine keyhole connector: find any reflex vert closer to start.
-    /// Also returns the `outers` index of the connector's ring.
+    /// Also returns the `outers` index of the connector's ring, which starts
+    /// as `edge_ring`, the ring `edge` came from.
     fn find_closer_bridge(&self, start: usize, edge: usize, edge_ring: usize) -> (usize, usize) {
         let start_pos = self.polygon[start].pos;
         let edge_right = self.polygon[edge].right;
@@ -153,11 +117,16 @@ impl EarClip {
             -1.0
         };
 
-        // Degenerate rings are skipped whole, as in `cut_keyhole`. A vert must
-        // be right of start, on the `above` side and not outside start ->
-        // connector (`ccw`), so a ring whose box shows that every vert fails
-        // one of those tests is skipped. The first two compare coordinates,
-        // and their margins only widen them, so they hold at any scale.
+        // Degenerate rings are skipped whole, as in `cut_keyhole`.
+        //
+        // Speed only, not in C++: a ring whose bounding box shows that no
+        // vert in it can pass the test below is not walked, so the bridge,
+        // and the triangles, are unchanged. A vert must lie right of
+        // start.x - eps, on the `above` side of start.y -+ eps, and not
+        // clearly outside start -> connector. The coordinate tests are bounded
+        // by the box's edges, widened by twice eps plus 1e-9 relative, far
+        // above the rounding of the comparisons; they need no guard, as a
+        // NaN or overflowed slack culls nothing.
         let eps = self.epsilon.abs();
         let slack = 2.0 * eps + 1e-9 * (1.0 + start_pos.x.abs() + start_pos.y.abs());
         let mut ring = edge_ring;
@@ -169,10 +138,30 @@ impl EarClip {
             {
                 continue;
             }
+            // The `ccw` test rejects a vert only when ccw(start, vert,
+            // connector) is nonzero with sign -above, that is when its area
+            // a = v1 x v2 (v1 = vert - start, v2 = connector - start) has
+            // above * a < 0 and 4a^2 > max(|v1|^2, |v2|^2) eps^2. above * a
+            // is linear in the vert, so its maximum over the box is at a
+            // corner (`best`); `dist` bounds |v1| and |v2| over the box. In
+            // exact arithmetic best < -(dist eps) rejects every vert in the
+            // box. The 1e-9 dist |v2| margin covers rounding: each difference
+            // and product is rounded to ~1e-16 relative, so the computed a of
+            // a culled vert keeps its sign and |a| > dist eps.
+            //
+            // That argument needs the squares in `ccw` to be finite normal
+            // numbers, so the cull applies only inside a magnitude window.
+            // There a culled vert has |a| > 1e-9 dist |v2| >= 1e-9 |v2|^2 >=
+            // 1e-129, so 4a^2 >= 4e-258 does not underflow, and |a| <= dist
+            // |v2| <= 1e120 and max(|v1|^2, |v2|^2) eps^2 <= 1e240 do not
+            // overflow. Outside it, a^2 can underflow to 0 (or both sides
+            // overflow to inf) and `ccw` returns 0 for a vert the bound
+            // calls outside, which the `inside == 0` tie-break can then take;
+            // see `keyhole_cull_keeps_a_bridge_whose_ccw_underflows`.
             let v2 = self.polygon[connector].pos - start_pos;
-            let len2 = (v2.x * v2.x + v2.y * v2.y).sqrt();
+            let v2_len = (v2.x * v2.x + v2.y * v2.y).sqrt();
             let mut best = f64::NEG_INFINITY;
-            let mut dist = len2;
+            let mut dist = v2_len;
             for c in [
                 Vec2::new(rb.min.x, rb.min.y),
                 Vec2::new(rb.max.x, rb.min.y),
@@ -183,27 +172,9 @@ impl EarClip {
                 best = best.max(above * (v1.x * v2.y - v1.y * v2.x));
                 dist = dist.max((v1.x * v1.x + v1.y * v1.y).sqrt());
             }
-            // The `ccw` test, from the box's corners. `ccw` takes the cross
-            // product of vert - start with v2, which is linear in the vert, and
-            // rounding is monotonic, so each vert's rounded vert - start lies in
-            // the box of the corners' rounded differences: no vert's `above *
-            // cross` exceeds `best`. Below -margin, every vert's cross product
-            // has the wrong sign by more than dist * eps, twice what `ccw` calls
-            // collinear, plus 1e-9 * dist * len2, far above the rounding of the
-            // products. Then `ccw` returns -above for every vert, which fails
-            // whatever the tie-break says.
-            //
-            // That holds only while `ccw`'s own arithmetic neither overflows nor
-            // underflows. If `area * area` underflows to zero, or `base2 * tol *
-            // tol` overflows to infinity, `ccw` returns 0 for a vert that turns
-            // clearly the wrong way, and the tie-break can take it. So the cull
-            // applies only where neither can happen: dist, len2 and eps at most
-            // 1e75 (under 2^250) keep both sides of its comparison below 2^1004,
-            // and a margin of at least 1e-150 (over 2^-500) keeps `area * area`
-            // a normal number. Outside that range the ring is walked. NaN fails
-            // these comparisons, so it is walked too.
-            let margin = dist * eps + 1e-9 * dist * len2;
-            if dist <= 1e75 && eps <= 1e75 && margin >= 1e-150 && best < -margin {
+            // False on NaN.
+            let in_window = v2_len >= 1e-60 && dist <= 1e60 && eps <= 1e60;
+            if in_window && best < -(dist * eps + 1e-9 * dist * v2_len) {
                 continue;
             }
             let before = (connector, ring);

@@ -1,7 +1,7 @@
 // EarClip triangulator — extracted from polygon.rs
 // Port of C++ ear-clipping algorithm with 2D KD-tree acceleration
-// Keyholing (bridging holes into outer rings) and the ring walk are in the
-// child module polygon_earclip_keyhole.rs.
+// The hole keyholing (CutKeyhole, FindCloserBridge, JoinPolygons) is a second
+// `impl EarClip` block in polygon_earclip_keyhole.rs.
 
 use crate::linalg::Vec2;
 use crate::types::{PolyVert, PolygonsIdx, Rect, K_PRECISION};
@@ -172,8 +172,43 @@ impl EarClip {
         self.polygon[left].right_dir = safe_normalize_2d(dir);
     }
 
-    // The ring walk, `loop_verts`, is in polygon_earclip_keyhole.rs, next to
-    // the bridge searches that run it over every outer ring.
+    /// The unclipped verts of the ring starting from `first`, or `None` if
+    /// the ring is degenerate.
+    fn loop_verts(&self, first: usize) -> Option<Vec<usize>> {
+        let mut result = Vec::new();
+        self.for_each_loop_vert(first, |v| result.push(v))
+            .then_some(result)
+    }
+
+    /// Apply `f` to each vert `loop_verts` would return, without collecting
+    /// them, as C++ `Loop` does. Returns `false` if the ring is degenerate,
+    /// after `f` has already seen the verts before the degenerate one.
+    fn for_each_loop_vert(&self, first: usize, mut f: impl FnMut(usize)) -> bool {
+        let mut v = first;
+        let mut cur_first = first;
+        loop {
+            if self.clipped(v) {
+                cur_first = self.polygon[self.polygon[v].right].left;
+                if !self.clipped(cur_first) {
+                    v = cur_first;
+                    if self.polygon[v].right == self.polygon[v].left {
+                        return false;
+                    }
+                    f(v);
+                }
+            } else {
+                if self.polygon[v].right == self.polygon[v].left {
+                    return false;
+                }
+                f(v);
+            }
+            v = self.polygon[v].right;
+            if v == cur_first {
+                break;
+            }
+        }
+        true
+    }
 
     // -----------------------------------------------------------------------
     // Vert predicate methods (take vert index `v`)
@@ -675,10 +710,6 @@ impl EarClip {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Keyholing and the ring walk — extracted to polygon_earclip_keyhole.rs
-// ---------------------------------------------------------------------------
 
 #[path = "polygon_earclip_keyhole.rs"]
 mod keyhole;

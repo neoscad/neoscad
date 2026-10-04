@@ -37,6 +37,12 @@ struct Mcp {
 impl Mcp {
     fn start(dir: &Path, args: &[&str]) -> Mcp {
         let mut child = Command::new(BIN)
+            // No real NeoSCAD app, as in mcp.rs: a running one would add
+            // its tools.
+            .env(
+                "NEOSCAD_AGENT_DIR",
+                std::env::temp_dir().join("nsbrowser-no-app"),
+            )
             .arg("mcp")
             .args(args)
             .current_dir(dir)

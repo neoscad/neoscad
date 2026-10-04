@@ -358,27 +358,20 @@ impl ManifoldGeometry {
         for p in &rest {
             ids = ids.combine_ids(p, op, Manifold::empty());
         }
-        // Every operand must carry its own mesh IDs. The C++ `Compose` (the
-        // disjoint-parts step of a union) offsets each node's IDs "since the
-        // nodes may be copies containing the same meshIDs"
-        // (`csg_tree.cpp:386-395`); manifold-rust's `compose_meshes` does
-        // not, so two copies of one cached solid would merge into a single
-        // run. Whether copies share IDs depends on scheduling (siblings with
-        // the same key computed at once both miss the cache and get
-        // separate IDs; computed in turn, the second is a cache hit), so
-        // without this the exported triangle order changed from run to run.
-        let mut seen = std::collections::HashSet::new();
+        // Operands may share mesh IDs: two copies of one cached solid do
+        // (whether they do depends on scheduling: siblings with the same key
+        // computed at once both miss the cache and get separate IDs, computed
+        // in turn the second is a cache hit). The kernel keeps each copy its
+        // own run either way. Its `compose_meshes` (the disjoint-parts step
+        // of a union) ranks each node's IDs node by node, as C++ `Compose`
+        // does by offsetting them (`csg_tree.cpp:386-395`), and a boolean
+        // offsets its right operand's IDs. Before manifold-rust 0.16.0,
+        // `compose_meshes` merged the copies into one run, and this
+        // renumbered colliding operands first; without that the exported
+        // triangle order changed from run to run.
         let leaves: Vec<CsgNode> = std::iter::once(first)
             .chain(rest)
-            .map(|p| {
-                let mut imp = p.manifold.into_impl();
-                let keys = &imp.mesh_relation.mesh_id_transform;
-                if keys.keys().any(|k| seen.contains(k)) {
-                    imp.increment_mesh_ids();
-                }
-                seen.extend(imp.mesh_relation.mesh_id_transform.keys().copied());
-                CsgNode::leaf(imp)
-            })
+            .map(|p| CsgNode::leaf(p.manifold.into_impl()))
             .collect();
         ids.manifold = Manifold::from_impl(CsgNode::op_n(op, leaves).evaluate_with_token(token));
 

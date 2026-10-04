@@ -1,13 +1,13 @@
-//! The vendored manifold-rust runs parts of its boolean pipeline in
-//! parallel (see `vendor/README.md`, "The parallel boolean patch"): the
-//! pairs of each `batch_boolean` round, the edge-flag and vertex-orbit scans
-//! of the topology cleanup, the edge-map sort of the result assembly, the
-//! triangle writes of `face2tri`, and the sorts of `sort_geometry` and
-//! `intersect12`. Each is written to give the sequential result exactly.
-//! These models are big enough to take every one of those parallel paths,
-//! and must export the same bytes at any thread count, and the bytes they
-//! exported before the patch (the pinned hashes were taken with the
-//! unpatched vendored copy).
+//! manifold-rust runs parts of its boolean pipeline in parallel (see
+//! `vendor/README.md`, "The parallel boolean stages"; NeoSCAD's patch
+//! until upstream took it in 0.16.0): the pairs of each `batch_boolean`
+//! round, the edge-flag and vertex-orbit scans of the topology cleanup, the
+//! edge-map sort of the result assembly, the triangle writes of `face2tri`,
+//! and the sorts of `sort_geometry` and `intersect12`. Each is written to
+//! give the sequential result exactly. These models are big enough to take
+//! every one of those parallel paths, and must export the same bytes at any
+//! thread count, and the bytes they exported before any of it was parallel
+//! (the pinned hashes were taken with manifold-rust 0.13.1, unpatched).
 
 use std::path::PathBuf;
 
@@ -123,13 +123,14 @@ fn check_agree(src: &str) {
     );
 }
 
-/// A union of 32 overlapping spheres of about 1,150 vertices each: its
-/// first `batch_boolean` rounds are under the 10,000 vertices a round
-/// needs to run its pairs in parallel and its later rounds over, so both
-/// paths run, and must give the same bytes. (The checkerboard's rounds
-/// are all under it.)
+/// A union of 32 overlapping spheres of about 1,150 vertices each, in
+/// `batch_boolean` rounds that run their pairs in parallel, from rounds
+/// of small operands to rounds of large ones, must give the same bytes on
+/// 1 and 8 threads. (Until manifold-rust 0.16.0 a NeoSCAD patch ran rounds
+/// of under 10,000 vertices serially, and this model took both paths;
+/// upstream runs every round of two or more pairs in parallel.)
 #[test]
-fn batch_rounds_above_and_below_the_parallel_threshold_agree() {
+fn batch_rounds_of_small_and_large_operands_agree() {
     check_agree("for (i = [0:31]) translate([i * 1.5, (i % 4) * 1.5, 0]) sphere(2, $fn = 48);");
 }
 
@@ -182,28 +183,28 @@ fn batch_hashes(op: OpType, parts: &[ManifoldGeometry], threads: usize) -> (u64,
 }
 
 /// Instances of one solid combined in `batch_boolean` rounds that run
-/// their pairs in parallel (each first round has well over the 10,000
-/// vertices that takes) give the same mesh at any thread count, run after
-/// run: not only the exported file, whose runs neoscad puts in a fixed
-/// order (`canonical_mesh`), but the kernel's own output.
+/// their pairs in parallel give the same mesh at any thread count, run
+/// after run: not only the exported file, whose runs neoscad puts in a
+/// fixed order (`canonical_mesh`), but the kernel's own output.
 ///
 /// Each boolean draws mesh IDs from a process-wide counter, so pairs that
-/// run side by side drew them in whatever order the scheduler gave, and a
-/// later disjoint union in `batch_boolean` orders its operands' runs by
-/// those values. manifold-rust's renumbering after each round
-/// (`renumber_round_mesh_ids`, patch 0004) fixes the values' order. Three
-/// batches: a union of sixteen mutually overlapping instances (every round
-/// a real boolean), a union of eight in overlapping pairs ten apart
-/// (upstream's case for the race), and an intersection of eight.
+/// run side by side draw them in whatever order the scheduler gives. The
+/// output must not depend on those values: a boolean puts its right
+/// operand's IDs after its left's whatever their values, and since
+/// manifold-rust 0.16.0 a disjoint union (`compose_meshes`) ranks its
+/// operands' IDs node by node, as C++ `Compose` does, rather than by value.
+/// (0.15.0 with NeoSCAD's patches renumbered each round's IDs in pair
+/// order instead.) Three batches: a union of sixteen mutually overlapping
+/// instances (every round a real boolean), a union of eight in overlapping
+/// pairs ten apart (upstream's case for the race), and an intersection of
+/// eight.
 ///
-/// This passes without the renumbering too, even with every round
-/// parallel, because neoscad's batches never reach that disjoint union:
-/// `batch_union` first composes the operands into groups of disjoint ones,
-/// and the groups' boxes overlap pairwise (an operand joins the first
-/// group it overlaps nothing in), as do the unions of groups; an
-/// intersection of disjoint operands is empty; and an overlapping boolean
-/// puts its right operand's IDs after its left's whatever their values.
-/// The test is here so that a batch path that does reach the race fails.
+/// neoscad's batches did not reach the race even before: `batch_union`
+/// first composes the operands into groups of disjoint ones, and the
+/// groups' boxes overlap pairwise (an operand joins the first group it
+/// overlaps nothing in), as do the unions of groups, and an intersection
+/// of disjoint operands is empty. The test is here so that a batch path
+/// that does reach it fails.
 #[test]
 fn batch_rounds_of_one_instanced_solid_agree_at_any_thread_count() {
     let ring: Vec<[f64; 3]> = (0..16)

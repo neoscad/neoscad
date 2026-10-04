@@ -38,24 +38,21 @@ use super::arrangement::{self, ArrangementInput};
 use super::exact::rational::{r3_eq, R3};
 use super::tri_tri::{tri_tri_intersect, TriTriIsect};
 
-use super::graph_geom::{
-    approx3, box3_contains, clip_segment_to_polygon, point_in_polygon_coplanar, point_on_segment_f,
-    seg_box3,
-};
+use super::graph_geom::{approx3, box3_contains, point_on_segment_f, seg_box3};
 use super::graph_types::{bit_edge_key, geo_edge_key, BitEdgeKey, GeoEdgeKey, PointTable};
 
 // `tri_box` / `is_degenerate` / `real_self_contact` / `SelfCutStats` stay
 // crate-internal (robust/soup.rs reaches them through this path).
 pub(super) use super::graph_geom::{is_degenerate, tri_box};
-pub(super) use super::graph_self_cut::{real_self_contact, SelfCutStats};
+pub(super) use super::graph_self_cut::{orient3d_plane, real_self_contact, SelfCutStats};
 pub use super::graph_types::{edge_key, EdgeKey, IntersectionGraph, Piece, VertInterner};
 
 /// A pair's primitives after distribution: segments (including coplanar
 /// boundary edges) and isolated points.
 #[derive(Clone, Debug, Default)]
-struct TriPrims {
-    points: Vec<(R3, usize)>,
-    segments: Vec<(R3, R3, usize)>,
+pub(super) struct TriPrims {
+    pub(super) points: Vec<(R3, usize)>,
+    pub(super) segments: Vec<(R3, R3, usize)>,
 }
 
 /// Build the intersection graph for soups `p` and `q` (each triangle wound
@@ -88,7 +85,7 @@ pub fn build_graph_with_progress(
     token: Option<&crate::cancel::CancelToken>,
     progress: Option<&crate::progress::ProgressReporter>,
 ) -> Option<IntersectionGraph> {
-    use crate::progress::{begin_phase, maybe_par_map_ct_progress, Phase};
+    use crate::progress::{begin_phase, complete_phase, maybe_par_map_ct_progress, Phase};
     let cancelled = || crate::cancel::is_cancelled(token);
     let t_all = crate::timing::start();
     let meshes: [&[[Vec3; 3]]; 2] = [p, q];
@@ -181,6 +178,10 @@ pub fn build_graph_with_progress(
         }
     }
 
+    // All |P| units spent, cancel-free: close the bar at 1.0, which the
+    // throttle alone cannot — `ProgressReporter::complete_phase` says why,
+    // for all five phases here.
+    complete_phase(progress);
     crate::timing::print("robust: pair narrow phase", t_all);
     let t_self = crate::timing::start();
 
@@ -276,40 +277,22 @@ pub fn build_graph_with_progress(
         ));
     }
 
+    // Both meshes cut, so all |P| + |Q| units are spent.
+    complete_phase(progress);
+
     crate::timing::print("robust: self-intersection cuts", t_self);
     let t_cross = crate::timing::start();
 
     // 3. Cross-copy primitives through coplanar overlap regions so both
-    // sides see identical geometry inside the shared area. Clip against the
-    // region to avoid dragging unrelated geometry across.
-    for (pi, qi, poly) in &coplanar_regions {
-        if cancelled() {
-            return None;
-        }
-        let from_p: TriPrims = prims[0][*pi].clone();
-        let from_q: TriPrims = prims[1][*qi].clone();
-        let copy = |src: &TriPrims, dst: &mut TriPrims| {
-            for (a, b, prov) in &src.segments {
-                if let Some((ca, cb)) = clip_segment_to_polygon(a, b, poly) {
-                    if !dst.segments.iter().any(|(x, y, pv)| {
-                        pv == prov && ((x, y) == (&ca, &cb) || (x, y) == (&cb, &ca))
-                    }) {
-                        dst.segments.push((ca, cb, *prov));
-                    }
-                }
-            }
-            for (pt, prov) in &src.points {
-                if clip_segment_to_polygon(pt, pt, poly).is_some()
-                    || point_in_polygon_coplanar(pt, poly)
-                {
-                    if !dst.points.iter().any(|(x, pv)| pv == prov && x == pt) {
-                        dst.points.push((pt.clone(), *prov));
-                    }
-                }
-            }
-        };
-        copy(&from_p, &mut prims[1][*qi]);
-        copy(&from_q, &mut prims[0][*pi]);
+    // sides see identical geometry inside the shared area (robust/
+    // coplanar_clip.rs; its own progress phase when there are regions).
+    if !super::coplanar_clip::cross_copy_coplanar_regions(
+        &mut prims,
+        &coplanar_regions,
+        token,
+        progress,
+    ) {
+        return None;
     }
 
     crate::timing::print("robust: coplanar cross-copy", t_cross);
@@ -368,6 +351,10 @@ pub fn build_graph_with_progress(
         }
         base += len;
     }
+
+    // Every chunk mapped and interned; the endpoint sweep below is not this
+    // phase.
+    complete_phase(progress);
 
     // Intersection-segment endpoints share the id space, so the segment
     // registry keys on `(u32, u32)` too. Flat per-mesh arrays (offsets +
@@ -530,6 +517,10 @@ pub fn build_graph_with_progress(
     let n_split_hits: usize = split_hits.iter().map(|h| h.len()).sum();
     drop(split_hits);
 
+    // Both sweeps mapped and merged: the whole 2 × |reg_work| total,
+    // cancel-free.
+    complete_phase(progress);
+
     // The dedup sets have done their job; the arrangement phase below reads
     // only the id lists. Releasing them (and the candidate lists, which no
     // later phase touches) before phase 5 keeps the two peaks from stacking.
@@ -658,6 +649,10 @@ pub fn build_graph_with_progress(
             }
         }
     }
+
+    // The map spent every unit and the interning replay finished it,
+    // cancel-free.
+    complete_phase(progress);
 
     crate::timing::print("robust: arrangements", t_arr);
     crate::timing::print_count(&format!(

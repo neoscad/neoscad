@@ -4,9 +4,14 @@
 use crate::linalg::Vec3;
 use crate::manifold::Manifold;
 
-/// FNV-1a over every field of the output mesh, with the length of every list.
-/// Of `run_original_id`, which comes from the process-wide ID counter, only
-/// the length is hashed.
+/// FNV-1a (64-bit) over every field of the output `MeshGL64` but
+/// `run_original_id`, which comes from the process-wide ID counter. In struct
+/// order: `num_prop`; then `vert_properties`, `tri_verts`, `merge_from_vert`,
+/// `merge_to_vert`, `run_index`, `run_transform`, `face_id`,
+/// `halfedge_tangent` and `run_flags`, each as its length then its elements;
+/// then `tolerance`. Lengths and integers are u64 little-endian, floats their
+/// IEEE bits as u64 little-endian, `run_flags` one byte each.
+/// `examples/boolean_perf.rs` hashes the same way.
 fn fingerprint(m: &Manifold) -> u64 {
     let gl = m.get_mesh_gl64(-1);
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -16,29 +21,30 @@ fn fingerprint(m: &Manifold) -> u64 {
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
     };
-    eat(&gl.num_prop.to_le_bytes());
-    eat(&gl.tolerance.to_bits().to_le_bytes());
-    for list in [&gl.vert_properties, &gl.run_transform, &gl.halfedge_tangent] {
-        eat(&(list.len() as u64).to_le_bytes());
-        for x in list {
-            eat(&x.to_bits().to_le_bytes());
-        }
-    }
-    for list in [
-        &gl.tri_verts,
-        &gl.merge_from_vert,
-        &gl.merge_to_vert,
-        &gl.run_index,
-        &gl.face_id,
-    ] {
+    let ints = |eat: &mut dyn FnMut(&[u8]), list: &[u64]| {
         eat(&(list.len() as u64).to_le_bytes());
         for x in list {
             eat(&x.to_le_bytes());
         }
-    }
-    eat(&(gl.run_original_id.len() as u64).to_le_bytes());
+    };
+    let floats = |eat: &mut dyn FnMut(&[u8]), list: &[f64]| {
+        eat(&(list.len() as u64).to_le_bytes());
+        for x in list {
+            eat(&x.to_bits().to_le_bytes());
+        }
+    };
+    eat(&gl.num_prop.to_le_bytes());
+    floats(&mut eat, &gl.vert_properties);
+    ints(&mut eat, &gl.tri_verts);
+    ints(&mut eat, &gl.merge_from_vert);
+    ints(&mut eat, &gl.merge_to_vert);
+    ints(&mut eat, &gl.run_index);
+    floats(&mut eat, &gl.run_transform);
+    ints(&mut eat, &gl.face_id);
+    floats(&mut eat, &gl.halfedge_tangent);
     eat(&(gl.run_flags.len() as u64).to_le_bytes());
     eat(&gl.run_flags);
+    eat(&gl.tolerance.to_bits().to_le_bytes());
     h
 }
 
@@ -82,7 +88,7 @@ fn checkerboard_union_keeps_the_sequential_output() {
     for threads in [1, 8] {
         assert_eq!(
             run_on(threads, &model),
-            0x0116_641f_953c_52d0,
+            0xc743_9615_a333_76c3,
             "{threads} threads"
         );
     }
@@ -95,7 +101,7 @@ fn checkerboard_union_keeps_the_sequential_output() {
 /// disjoint, so `compose` builds it and three unions join them.
 #[test]
 fn large_checkerboard_unions_keep_the_sequential_output() {
-    for (size, hash) in [(1.0, 0x89fd_3a6c_41b3_a52c), (1.5, 0x230c_a78a_1804_c434)] {
+    for (size, hash) in [(1.0, 0x2b61_93db_25a6_fe23), (1.5, 0x3c32_2f28_5659_dcf7)] {
         let model = || {
             let cube = Manifold::cube(Vec3::splat(size), false);
             let class = |(ox, oy, oz): (i32, i32, i32)| {
@@ -130,10 +136,12 @@ fn large_checkerboard_unions_keep_the_sequential_output() {
     }
 }
 
-/// A checkerboard of unit cubes, `n` a side, as one mesh whose cubes share
-/// the verts where they touch, so `split_pinched_verts` has an orbit to split
-/// at every shared vert.
-fn pinched_checkerboard(n: u32) -> crate::types::MeshGL64 {
+/// A checkerboard of `n` unit cubes a side imported from a `MeshGL64` whose
+/// cubes share the verts where they touch, so `split_pinched_verts` has
+/// thousands of orbits to split. With `tangents`, every halfedge carries a
+/// tangent of small integers, which the import keeps and `sort_geometry`
+/// gathers.
+fn pinched_checkerboard(n: u32, tangents: bool) -> Manifold {
     // Corners as x | y << 1 | z << 2, wound outward.
     const QUADS: [[u32; 4]; 6] = [
         [0, 4, 6, 2],
@@ -173,55 +181,48 @@ fn pinched_checkerboard(n: u32) -> crate::types::MeshGL64 {
             }
         }
     }
-    gl
+    if tangents {
+        for i in 0..gl.tri_verts.len() as u32 {
+            gl.halfedge_tangent.extend([
+                f64::from(i % 7) - 3.0,
+                f64::from(i % 5) - 2.0,
+                f64::from(i % 3),
+                f64::from(i % 4) * 0.5,
+            ]);
+        }
+    }
+    let result = Manifold::from_mesh_gl64(&gl);
+    assert!(
+        3 * result.num_tri() > 100_001,
+        "{} triangles",
+        result.num_tri()
+    );
+    result
 }
 
-/// An imported checkerboard of 20 a side: `split_pinched_verts` has
-/// thousands of orbits to split, in a mesh over the 100,001-halfedge
+/// An imported checkerboard of 20 a side, over the 100,001-halfedge
 /// thresholds of the orbit and edge-flag scans. Runs in every build, against
 /// `main`'s hash.
 #[test]
 fn pinched_checkerboard_import_keeps_the_sequential_output() {
-    let model = || {
-        let result = Manifold::from_mesh_gl64(&pinched_checkerboard(20));
-        assert!(
-            3 * result.num_tri() > 100_001,
-            "{} triangles",
-            result.num_tri()
-        );
-        result
-    };
     for threads in [1, 8] {
         assert_eq!(
-            run_on(threads, &model),
-            0xaf78_1fb7_4bc9_643f,
+            run_on(threads, &|| pinched_checkerboard(20, false)),
+            0x1c3d_e063_12f8_0576,
             "{threads} threads"
         );
     }
 }
 
-/// The same import with a tangent on every halfedge, so the output's
-/// `halfedge_tangent` is not empty and has gone through the cleanup and
-/// `sort_geometry`'s gather, which permutes it with the halfedges above its
-/// 100,000 threshold. The tangents are multiples of 1/4, exact everywhere.
+/// The same import, 26 a side with halfedge tangents: over 100,000
+/// triangles, so `sort_geometry` sorts the faces and gathers the tangents in
+/// parallel with the feature.
 #[test]
 fn pinched_checkerboard_import_with_tangents_keeps_the_sequential_output() {
     let model = || {
-        let mut gl = pinched_checkerboard(20);
-        let quarters = |k: usize, m: usize| (k % m) as f64 / 4.0 - 1.0;
-        gl.halfedge_tangent = (0..gl.tri_verts.len())
-            .flat_map(|k| {
-                [
-                    quarters(k, 9),
-                    quarters(k, 7),
-                    quarters(k, 5),
-                    quarters(k, 4),
-                ]
-            })
-            .collect();
-        let result = Manifold::from_mesh_gl64(&gl);
+        let result = pinched_checkerboard(26, true);
         assert!(
-            3 * result.num_tri() > 100_001,
+            result.num_tri() >= 100_000,
             "{} triangles",
             result.num_tri()
         );
@@ -234,7 +235,7 @@ fn pinched_checkerboard_import_with_tangents_keeps_the_sequential_output() {
     for threads in [1, 8] {
         assert_eq!(
             run_on(threads, &model),
-            0x5829_215b_5954_d206,
+            0x3a43_20b2_3394_3b5d,
             "{threads} threads"
         );
     }

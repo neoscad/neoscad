@@ -21,7 +21,8 @@
 //   intersection_graph — broad phase, prim distribution, piece emission
 //                        (split helpers: graph_types — edge keys, vertex
 //                        interner, Piece/IntersectionGraph; graph_geom —
-//                        boxes, clips, filtered on-segment tests;
+//                        boxes, filtered on-segment tests; coplanar_clip —
+//                        the coplanar cross-copy and its prepared clips;
 //                        graph_self_cut — same-mesh narrow phase)
 //   cells              — arrangement cell complex + winding propagation
 //                        (cells_extract — containment predicate + boundary
@@ -54,6 +55,7 @@ pub mod assemble;
 pub mod cdt;
 pub mod cells;
 pub mod cells_extract;
+mod coplanar_clip;
 pub mod exact;
 mod graph_geom;
 mod graph_self_cut;
@@ -98,7 +100,9 @@ fn needs_no_classification(
     tris: &[[Vec3; 3]],
     token: Option<&CancelToken>,
 ) -> bool {
-    // Cheapest first, and usually already cached by `Auto`'s dispatch. A
+    // Cheapest first. Cached when `Auto`'s dispatch scanned this operand, but
+    // not when the other, smaller operand self-intersected and decided alone
+    // (boolean3.rs `boolean_dispatch_full`): then this scan runs here, once. A
     // cancelled scan answers "self-intersecting", which routes to the pipeline
     // and so reports `Error::Cancelled` rather than a bogus pass-through.
     !soup::has_self_intersections_with_token(imp, token) && repair::shells_well_nested(tris)
@@ -283,6 +287,10 @@ fn classify_and_assemble(
     // cells follow combinatorially. Winding and assembly report as phase
     // transitions only: neither has a work total the caller could see a
     // fraction of without instrumenting the exact ray queries themselves.
+    // That is also why neither closes with `complete_phase` the way the
+    // determinate phases upstream do — an indeterminate phase has no bar to
+    // leave short, and `complete_phase` on one emits the same `None`
+    // `begin_phase` already emitted.
     begin_phase(progress, Phase::Winding, 0);
     let t_winding = crate::timing::start();
     let wind = cells::windings(&graph, &complex, [p_tris, q_tris]);
@@ -396,3 +404,7 @@ mod rebuild_tests;
 #[cfg(test)]
 #[path = "thingi_tests.rs"]
 mod thingi_tests;
+
+#[cfg(test)]
+#[path = "coplanar_cross_copy_tests.rs"]
+pub(crate) mod coplanar_cross_copy_tests;

@@ -392,12 +392,15 @@ lead them, come roughly in order of user impact.
   to 2.76 s, hero 11.5 to 10.5 s, `csg_deep_union` unchanged (0.138/0.143
   s). The original 4.6-against-3.5 s regression was not reproduced (that
   run had load 80-120 from one many-threaded process), so the pairs were
-  at most part of it. Left: a profile under that kind of load, and
-  rayon's spin-waiting (other sites, and `geom`'s own `rayon::join`s,
-  have no size threshold either).
+  at most part of it. With manifold-rust 0.16.0 (upstream has the parallel
+  rounds without a threshold) the threshold was dropped: re-applied to
+  0.16.0 it measured no better, unloaded or with five busy loops per core
+  (`vendor/README.md`, "Moving from 0.15.0 to 0.16.0"). Left: a profile
+  under that kind of load, and rayon's spin-waiting (the rounds, and
+  `geom`'s own `rayon::join`s, have no size threshold).
 - The ear clipper's bridge searches still scan every outer ring's box
-  once per hole (the ring-box patch, `vendor/README.md`, only skips the
-  walk), and `find_closer_bridge`'s wedge test admits rings up and to the
+  once per hole (the ring boxes, upstream since manifold-rust 0.16.0,
+  `vendor/README.md`, only skip the walk), and `find_closer_bridge`'s wedge test admits rings up and to the
   right of the hole. On 200 lines of extruded text, now 2.7 s against the
   nightly's 32.3 s (`docs/audits/slow-cases.md` §2.1), that search is
   still about 1 s. An index of the boxes sorted by y, and a tighter bound
@@ -515,9 +518,15 @@ lead them, come roughly in order of user impact.
   triangle counts, say) and needs a benchmark run, since the same
   fan-out is what makes the heavy models fast.
 
+- A long `minkowski()` can't be stopped mid-way: `geom::minkowski`
+  (NeoSCAD's hull-and-union port, not manifold-rust's Minkowski) runs its
+  `batch` and `boolean` calls with no cancel token. Thread the request's
+  token through `minkowski_3d`, as the other boolean paths do.
+
 ## Parity
-- `manifold-rust` 0.15.0 ports Manifold v3.5.0 (with a few later
-  upstream fixes); OpenSCAD pins v3.5.2.
+- `manifold-rust` 0.16.0 ports Manifold v3.5.0 (with a few later
+  upstream fixes, and divergences listed in its
+  `docs/CPP_DIVERGENCES.md`); OpenSCAD pins v3.5.2.
   (5a)
 - `collapse_edge`'s clean-up after a boolean could slide a vertex across
   a crease and fill a concave corner (BOSL2 `cubetruss`, 7.3 mm³ too
@@ -561,9 +570,21 @@ lead them, come roughly in order of user impact.
   hulls and minkowski sums fold. Where the nightly's own hull folds (e.g.
   `hull() for (x=[0,30], y=[0,30], z=[0,5]) translate([x,y,z])
   sphere(r=3, $fn=16);`, 13453.12 against CGAL's 13453.41) neoscad now
-  differs from it, correctly. Report upstream to Manifold and
-  manifold-rust with `minkowski(){cube([30,20,5],center=true);
-  sphere(3,$fn=48);}` (9751.29 instead of 9751.42). (H1)
+  differs from it, correctly. manifold-rust 0.16.0 decides "above a
+  face" exactly (its `docs/CPP_DIVERGENCES.md` entry 11, the fix for one
+  cause of the folds), and `minkowski(){cube([30,20,5],center=true);
+  sphere(3,$fn=48);}` (9751.29 instead of 9751.42 in C++) no longer needs
+  the rebuild: the sum is 3x faster and its volume is the nightly's to
+  1e-10. Whether other inputs still fold is not measured; report the
+  remaining cases to Manifold, which still has the float test. (H1)
+- `3D/issues/issue2841.scad` (a Minkowski sum of a cube and two unioned
+  7-sided cylinders) exports a thin internal slit between two of its
+  convex pieces: opposite faces on the plane through (-0.901, -0.434, 0)
+  at -9.0097, about 1e-6 apart, 1.9 mm² a side with manifold-rust 0.15.0
+  and 6.1 mm² with 0.16.0's QuickHull (`vendor/README.md`). The volume
+  is right, the area 0.4% too large with 0.15.0 and 1.2% with 0.16.0;
+  the nightly's CGAL sum has no slit. Probably the union of hulls whose touching faces are not exactly
+  coplanar; not traced.
 - The nightly prints CGAL's own diagnostics for some minkowski operands
   (Nef assertion failures for cubes touching at an edge or a vertex,
   `minkowski-cubes-touch-*.scad`, `issue1137.scad`); they are not
@@ -1494,23 +1515,6 @@ lead them, come roughly in order of user impact.
   Also `BOSL2/examples_x/shapes2d__122.scad`: its render summary says
   "Geometries in cache: 46" in about four runs of five and 45 otherwise
   (seen at `3b977e7`; the SVG is identical). (P1 sweep)
-- manifold-rust's `Slice` starts each loop from a `HashSet` iteration, so
-  the raw polygon order varies; `projection(cut=true)` output is canonical
-  only because Clipper's union reorders it. (5b)
-- manifold-rust's `compose_meshes` does not give each composed copy its own
-  mesh IDs as C++ `Compose` does (`csg_tree.cpp:386-395`); `batch` in
-  `manifold_geom.rs` renumbers colliding operands first. Report upstream,
-  then drop the workaround. (5b) The upstream batch-rounds PR's review
-  (larsbrubaker/manifold-rust#7) hit the same bug from the kernel side: a
-  disjoint union of two instances of one mesh (`boolean_with_token`'s
-  shortcut, which calls `compose_meshes`) merges the operands'
-  `mesh_id_transform` maps by key (`src/boolean3.rs`, `compose_meshes`),
-  so the second instance's relation (its transform, `back_side`)
-  overwrites the first's and both instances' triangles come out as one
-  run. That PR's mesh-ID test steers clear of it (its first round's
-  pairs overlap, and a full boolean gives the right operand fresh IDs);
-  the fix belongs in its own upstream PR, after which neoscad's
-  renumbering in `batch` could go.
 - The libtess2 port's broken-mesh path (`arena.rs`) has no known input
   where multiply-adds are not fused (x86_64, wasm32): 3 million random
   polygons searched under Rosetta broke none, so
@@ -1968,17 +1972,17 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   CI would need it too. (5a)
 - The six PDF cases need a PDF rasteriser (Ghostscript or poppler), which
   CI would need too. (5f)
-- Nothing runs `vendor/manifold-rust`'s own tests, which since the
-  post-review patches include tests of the patched code
-  (`src/polygon_earclip_tests.rs`, `src/edge_op_tests.rs`,
-  `src/par_tests.rs`, `src/csg_tree_tests.rs`, `src/cancel_tests.rs`).
-  They cannot run from the vendored tree as it is: the `.crate` leaves
-  out `src/robust/testdata/*.stl`, which other test modules
-  `include_bytes!`, and the whole suite peaked over 4 GB here before it
-  was stopped. A script could copy the tree, add the test data from the
-  upstream tag, and run the patched modules' tests (`polygon_earclip`,
-  `edge_op`, `par::`, `csg_tree`, `cancel`) with and without
-  `--features parallel`. One of them,
+- Nothing in this repository runs `vendor/manifold-rust`'s own tests.
+  Upstream's CI runs them, with and without `--features parallel`, on
+  everything but NeoSCAD's cancel token patch (`src/cancel.rs`). They
+  cannot run from the vendored tree as it is: the `.crate` leaves out
+  `src/robust/testdata/*.stl`, which other test modules `include_bytes!`,
+  and the whole suite peaked over 4 GB here before it was stopped. For
+  the move to 0.16.0 they were run by hand: the patched tree plus the
+  test data from upstream's `f43ec62`, release build, `cancel`,
+  `polygon_earclip`, `edge_op`, `par::`, `csg_tree`, `compose` and
+  `quickhull`, with and without `parallel`, all passed. A script could do
+  the same. One of them,
   `cancel_from_another_thread_interrupts_a_boolean_in_flight`, has a
   timing precondition (its boolean must take 20 ms) that a fast machine
   misses now and then, upstream as well.
