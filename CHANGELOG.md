@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.0
+
+### New
+
+- **Connect your AI agent to the desktop apps.** Claude Code, Cursor,
+  VS Code, Claude Desktop or any MCP client can now work on the document
+  open in NeoSCAD:
+  - it reads the code and the selection;
+  - it edits, each edit one highlighted step that Undo takes back;
+  - it looks at the 3D view as shown, moves the camera and marks things
+    in it.
+
+  Each app has a "Connect your AI agent" control and a setup sheet with
+  one-click setup for each client. On macOS it's in the toolbar, the Help
+  menu and Settings > Agents; on Linux in the header bar and Preferences;
+  on Windows in the menu row and the Help menu.
+
+  Agent access is off until you allow it. An indicator shows while an
+  agent is connected, each agent can be disconnected, and "Ask before
+  applying edits" makes every edit wait for your OK.
+- **`neoscad mcp` finds a running NeoSCAD app** and works on its open
+  document. Without an app (or with `--no-app`) it works on files as
+  before. Its read roots widen to the open document's folder.
+- **The apps bundle the `neoscad` command-line tool**, and the setup
+  sheet writes its absolute path into each client's configuration, so no
+  separate install is needed. The Flatpak shows `flatpak run` commands to
+  copy instead.
+- **The apps notice when the open file changes on disk.** A document
+  with no unsaved edits reloads; one with unsaved edits warns, and is
+  never saved over the newer file.
+
+### Changed
+
+- The geometry kernel's patches carry the fixes from upstream review
+  (larsbrubaker/manifold-rust #6-#10): a guard for the ear clipper's
+  bounding-box cull at extreme scales, linear orbit scans on high-valence
+  vertices, and mesh IDs in batch booleans that don't depend on thread
+  scheduling. Output is unchanged.
+
+### Fixed
+
+- **Windows:**
+  - `neoscad mcp` no longer deadlocks on an app's pipe, because the
+    client now uses overlapped I/O.
+  - Agent directories with the same folder name no longer find each
+    other's apps.
+  - `neoscad mcp` accepts a working directory under `%TEMP%`.
+
 ## 0.3.1
 
 ### Changed
