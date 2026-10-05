@@ -34,6 +34,11 @@ nix = { version = "0.31", default-features = false, features = ["user", "socket"
 # interprocess, for the calls the pipe's access check needs and for the
 # client's overlapped reads and writes (src/transport/win.rs).
 [target.'cfg(windows)'.dependencies]
+# The shell's Documents folder (`FOLDERID_Documents`), for Claude Desktop's
+# project folder (src/setup.rs, `documents`): OneDrive's backup redirects
+# it away from `%USERPROFILE%\Documents`. Already in the build through
+# `lang`'s user library path.
+dirs = "7"
 interprocess = { version = "2.4.4", default-features = false }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

@@ -2,9 +2,9 @@
 //! sheets (`docs/mcp.md`, "Setup from the apps";
 //! `docs/audits/agent-connection-desktop.md`, Option A): what needs the
 //! machine, which `client::agent_setup` (the rows, as data) may not touch.
-//! That is the environment (home, `PATH`, the Flatpak sandbox), finding
-//! and running `claude`, and editing Claude Desktop's config file with a
-//! backup.
+//! That is the environment (home, the Documents folder, `PATH`, the
+//! Flatpak sandbox), finding and running `claude`, and editing Claude
+//! Desktop's config file with a backup and making its project folder.
 //!
 //! Shared by every app: the macOS and Windows apps reach it through
 //! `crates/ffi/src/agent_setup.rs` (UniFFI), and the Linux app calls it
@@ -65,6 +65,27 @@ pub enum ClaudeDesktopOutcome {
     Refused { path: String, reason: String },
 }
 
+/// What [`claude_desktop_status`] found, before the user clicks anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeDesktopStatus {
+    /// Claude Desktop's directory does not exist.
+    NotInstalled { path: String },
+    /// No `neoscad` server in its config (or no config).
+    NotAdded { path: String },
+    /// It runs this app's server with its folder, and the folder exists.
+    UpToDate { path: String },
+    /// It runs this app's `neoscad` with other arguments (a setup from
+    /// before `--root`, whose agent cannot export), or its folder is
+    /// gone. [`add_to_claude_desktop`] brings it up to date, after the
+    /// user agreed, with a backup.
+    Outdated { path: String },
+    /// It has a `neoscad` server running another program, one the user
+    /// set up themselves; adding replaces it, after the user agreed.
+    Other { path: String },
+    /// The config cannot be read as JSON this understands.
+    Unreadable { path: String, reason: String },
+}
+
 /// Where this process runs. `LinuxFlatpak` inside a Flatpak sandbox:
 /// `/.flatpak-info` exists there, and only there, whatever the
 /// environment says.
@@ -86,7 +107,8 @@ pub fn host() -> setup::Host {
 pub fn rows(cli: &str) -> Vec<setup::ClientSetup> {
     let host = host();
     let server = setup::ServerCommand::for_host(host, cli);
-    setup::setups(host, &server, &home(), appdata().as_deref())
+    let home = home();
+    setup::setups_in(host, &server, &home, appdata().as_deref(), &documents())
 }
 
 /// The `claude` to run, or `None`: the usual install locations and this
@@ -176,14 +198,87 @@ pub fn claude_desktop_config() -> Option<String> {
     setup::claude_desktop_config_path(host(), &home(), appdata().as_deref())
 }
 
+/// The folder Claude Desktop's server gets as its `--root`
+/// (`client::agent_setup::claude_desktop_folder`): `NeoSCAD` in the
+/// user's Documents folder ([`documents`]); `None` where Claude Desktop
+/// does not run.
+pub fn claude_desktop_folder() -> Option<String> {
+    setup::claude_desktop_folder(host(), &documents())
+}
+
+/// The server Claude Desktop is given: `cli` serving MCP with
+/// [`claude_desktop_folder`] as its root, as the row's JSON shows.
+pub fn claude_desktop_server(cli: &str) -> Option<setup::ServerCommand> {
+    let host = host();
+    setup::claude_desktop_server(
+        host,
+        &setup::ServerCommand::for_host(host, cli),
+        &documents(),
+    )
+}
+
+/// What Claude Desktop's config at `path` has, against `server` (from
+/// [`claude_desktop_server`]) and its project folder `folder`; read
+/// only, for the sheet to show before the user clicks.
+pub fn claude_desktop_status(
+    path: &Path,
+    server: &setup::ServerCommand,
+    folder: &Path,
+) -> ClaudeDesktopStatus {
+    let shown = path.display().to_string();
+    if !path.parent().is_some_and(Path::is_dir) {
+        return ClaudeDesktopStatus::NotInstalled { path: shown };
+    }
+    let text = match std::fs::read(path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(t) => Some(t),
+            Err(_) => {
+                return ClaudeDesktopStatus::Unreadable {
+                    path: shown,
+                    reason: "the file is not UTF-8 text".to_string(),
+                };
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return ClaudeDesktopStatus::Unreadable {
+                path: shown,
+                reason: e.to_string(),
+            };
+        }
+    };
+    match setup::claude_desktop_entry(text.as_deref(), server) {
+        Ok(setup::ClaudeDesktopEntry::Missing) => ClaudeDesktopStatus::NotAdded { path: shown },
+        // `neoscad mcp` drops a `--root` that does not exist, so a
+        // deleted folder leaves the agent unable to export again: adding
+        // once more makes it.
+        Ok(setup::ClaudeDesktopEntry::Current) if folder.is_dir() => {
+            ClaudeDesktopStatus::UpToDate { path: shown }
+        }
+        Ok(setup::ClaudeDesktopEntry::Current | setup::ClaudeDesktopEntry::Outdated) => {
+            ClaudeDesktopStatus::Outdated { path: shown }
+        }
+        Ok(setup::ClaudeDesktopEntry::Other) => ClaudeDesktopStatus::Other { path: shown },
+        Err(e) => ClaudeDesktopStatus::Unreadable {
+            path: shown,
+            reason: e.to_string(),
+        },
+    }
+}
+
 /// Adds the server to Claude Desktop's config at `path`, after the user
 /// agreed: `client::agent_setup::merge_claude_desktop_config` on the
 /// file's text, a backup beside it, then an atomic replace. Refuses a
-/// file it cannot read as JSON rather than rewrite it. `unix_seconds`
-/// names the backup ([`now`] outside the tests).
+/// file it cannot read as JSON rather than rewrite it. `folder`, the
+/// server's `--root` ([`claude_desktop_folder`]), is created when it is
+/// missing, even if the config already had the entry: `neoscad mcp`
+/// ignores a root that does not exist, which would leave the agent with
+/// nowhere to write. `unix_seconds` names the backup ([`now`] outside
+/// the tests).
 pub fn add_to_claude_desktop(
     path: &Path,
     server: &setup::ServerCommand,
+    folder: &Path,
     unix_seconds: i64,
 ) -> std::io::Result<ClaudeDesktopOutcome> {
     let shown = path.display().to_string();
@@ -220,6 +315,14 @@ pub fn add_to_claude_desktop(
             });
         }
     };
+    // Before the config: a config naming a folder that could not be made
+    // would look set up and still refuse every export.
+    std::fs::create_dir_all(folder).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("could not create {}: {e}", folder.display()),
+        )
+    })?;
     if merged.change == setup::ConfigChange::Unchanged {
         return Ok(ClaudeDesktopOutcome::Unchanged { path: shown });
     }
@@ -299,6 +402,19 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 pub fn home() -> String {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var(var).unwrap_or_default()
+}
+
+/// The user's Documents folder: on Windows the shell's known folder
+/// (`FOLDERID_Documents`, through `dirs`, as `lang::loader::LibraryPath`
+/// finds OpenSCAD's user library), which OneDrive's backup redirects away
+/// from `%USERPROFILE%\Documents`; elsewhere `~/Documents`
+/// (`client::agent_setup::default_documents`).
+pub fn documents() -> String {
+    #[cfg(windows)]
+    if let Some(d) = dirs::document_dir() {
+        return d.display().to_string();
+    }
+    setup::default_documents(host(), &home())
 }
 
 /// `%APPDATA%` on Windows (unset elsewhere).
@@ -402,22 +518,28 @@ mod tests {
         setup::ServerCommand::bundled("/Apps/NeoSCAD/bin/neoscad")
     }
 
+    /// A project folder for Claude Desktop in `dir`'s home.
+    fn folder(dir: &Path) -> PathBuf {
+        dir.join("home/Documents/NeoSCAD")
+    }
+
     #[test]
     fn claude_desktop_config_is_backed_up_then_replaced() {
         let dir = scratch("desktop");
         let config = dir.join("Claude/claude_desktop_config.json");
         // No Claude directory: not installed, nothing created.
         assert_eq!(
-            add_to_claude_desktop(&config, &server(), 0).unwrap(),
+            add_to_claude_desktop(&config, &server(), &folder(&dir), 0).unwrap(),
             ClaudeDesktopOutcome::NotInstalled {
                 path: config.display().to_string()
             }
         );
         assert!(!config.parent().unwrap().exists());
+        assert!(!folder(&dir).exists());
 
         // A directory with no file: written, no backup.
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        let r = add_to_claude_desktop(&config, &server(), 0).unwrap();
+        let r = add_to_claude_desktop(&config, &server(), &folder(&dir), 0).unwrap();
         assert!(
             matches!(
                 r,
@@ -431,9 +553,12 @@ mod tests {
         );
         let written = std::fs::read_to_string(&config).unwrap();
         assert!(written.contains("/Apps/NeoSCAD/bin/neoscad"));
+        // The project folder is made with its parents (a home with no
+        // Documents yet).
+        assert!(folder(&dir).is_dir());
 
         // The same again: unchanged, nothing new on disk.
-        let r = add_to_claude_desktop(&config, &server(), 1).unwrap();
+        let r = add_to_claude_desktop(&config, &server(), &folder(&dir), 1).unwrap();
         assert!(matches!(r, ClaudeDesktopOutcome::Unchanged { .. }), "{r:?}");
         assert_eq!(
             std::fs::read_dir(config.parent().unwrap()).unwrap().count(),
@@ -448,7 +573,7 @@ mod tests {
             backup: Some(b1),
             replaced_entry: true,
             ..
-        } = add_to_claude_desktop(&config, &server(), 1_791_037_805).unwrap()
+        } = add_to_claude_desktop(&config, &server(), &folder(&dir), 1_791_037_805).unwrap()
         else {
             panic!()
         };
@@ -465,18 +590,24 @@ mod tests {
         std::fs::write(&config, old).unwrap();
         let ClaudeDesktopOutcome::Written {
             backup: Some(b2), ..
-        } = add_to_claude_desktop(&config, &server(), 1_791_037_805).unwrap()
+        } = add_to_claude_desktop(&config, &server(), &folder(&dir), 1_791_037_805).unwrap()
         else {
             panic!()
         };
         assert!(b2.ends_with("-20261003T143005Z-1"), "{b2}");
         assert_eq!(std::fs::read_to_string(&b1).unwrap(), old);
 
+        // Unchanged, but the folder was deleted: made again.
+        std::fs::remove_dir_all(dir.join("home")).unwrap();
+        let r = add_to_claude_desktop(&config, &server(), &folder(&dir), 6).unwrap();
+        assert!(matches!(r, ClaudeDesktopOutcome::Unchanged { .. }), "{r:?}");
+        assert!(folder(&dir).is_dir());
+
         // Not JSON: refused, and the file is exactly as it was, no backup.
         let bad = "{\n  // mine\n  \"mcpServers\": {}\n}\n";
         std::fs::write(&config, bad).unwrap();
         let before = std::fs::read_dir(config.parent().unwrap()).unwrap().count();
-        let r = add_to_claude_desktop(&config, &server(), 5).unwrap();
+        let r = add_to_claude_desktop(&config, &server(), &folder(&dir), 5).unwrap();
         assert!(
             matches!(&r, ClaudeDesktopOutcome::Refused { reason, .. } if reason.contains("line 2")),
             "{r:?}"
@@ -499,7 +630,7 @@ mod tests {
         let config = dir.join("Claude/claude_desktop_config.json");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&real, &config).unwrap();
-        let r = add_to_claude_desktop(&config, &server(), 0).unwrap();
+        let r = add_to_claude_desktop(&config, &server(), &dir.join("NeoSCAD"), 0).unwrap();
         assert!(
             matches!(
                 r,
@@ -520,6 +651,118 @@ mod tests {
         // The backup sits beside the real file.
         assert!(std::fs::read_dir(real.parent().unwrap()).unwrap().count() == 2);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An entry from before the setup passed `--root`: found as outdated,
+    /// then brought up to date with a backup, its folder made, and found
+    /// up to date; a deleted folder makes it outdated again.
+    #[test]
+    fn an_old_claude_desktop_entry_is_found_and_updated() {
+        let dir = scratch("upgrade");
+        let config = dir.join("Claude/claude_desktop_config.json");
+        let folder = folder(&dir);
+        let wanted = server().with_root(&folder.display().to_string());
+        let status = |s: &setup::ServerCommand| claude_desktop_status(&config, s, &folder);
+        let shown = config.display().to_string();
+        assert_eq!(
+            status(&wanted),
+            ClaudeDesktopStatus::NotInstalled {
+                path: shown.clone()
+            }
+        );
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        assert_eq!(
+            status(&wanted),
+            ClaudeDesktopStatus::NotAdded {
+                path: shown.clone()
+            }
+        );
+
+        // The entry the setup wrote before it passed --root.
+        add_to_claude_desktop(&config, &server(), &dir.join("unused"), 0).unwrap();
+        let old = std::fs::read_to_string(&config).unwrap();
+        assert_eq!(
+            status(&wanted),
+            ClaudeDesktopStatus::Outdated {
+                path: shown.clone()
+            }
+        );
+        let r = add_to_claude_desktop(&config, &wanted, &folder, 1_791_037_805).unwrap();
+        let ClaudeDesktopOutcome::Written {
+            backup: Some(backup),
+            replaced_entry: true,
+            ..
+        } = r
+        else {
+            panic!("{r:?}")
+        };
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
+        let now: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            now["mcpServers"]["neoscad"]["args"],
+            serde_json::json!(["mcp", "--root", folder.display().to_string()])
+        );
+        assert!(folder.is_dir());
+        assert_eq!(
+            status(&wanted),
+            ClaudeDesktopStatus::UpToDate {
+                path: shown.clone()
+            }
+        );
+        std::fs::remove_dir(&folder).unwrap();
+        assert_eq!(
+            status(&wanted),
+            ClaudeDesktopStatus::Outdated {
+                path: shown.clone()
+            }
+        );
+
+        // Another program under the name is the user's own; a file that
+        // is not JSON is unreadable.
+        std::fs::write(
+            &config,
+            r#"{"mcpServers": {"neoscad": {"command": "neoscad"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            status(&wanted),
+            ClaudeDesktopStatus::Other {
+                path: shown.clone()
+            }
+        );
+        std::fs::write(&config, "{,}").unwrap();
+        assert!(matches!(
+            status(&wanted),
+            ClaudeDesktopStatus::Unreadable { .. }
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The rows and the server Claude Desktop is given agree, in this
+    /// user's Documents folder.
+    #[test]
+    fn claude_desktops_row_names_its_folder() {
+        let Some(folder) = claude_desktop_folder() else {
+            // Only Linux has no Claude Desktop.
+            assert!(matches!(
+                host(),
+                setup::Host::Linux | setup::Host::LinuxFlatpak
+            ));
+            return;
+        };
+        assert!(folder.ends_with("NeoSCAD"), "{folder}");
+        let server = claude_desktop_server("/Apps/neoscad").unwrap();
+        assert_eq!(server.args, ["mcp", "--root", folder.as_str()]);
+        let row = rows("/Apps/neoscad")
+            .into_iter()
+            .find(|r| r.client == setup::Client::ClaudeDesktop)
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&row.copy_text).unwrap();
+        assert_eq!(
+            json["mcpServers"]["neoscad"]["args"],
+            serde_json::json!(server.args)
+        );
     }
 
     /// A stand-in `claude` that keeps its entries in a file and answers

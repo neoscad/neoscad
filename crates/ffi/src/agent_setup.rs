@@ -136,6 +136,50 @@ pub enum ClaudeDesktopOutcome {
     Refused { path: String, reason: String },
 }
 
+/// What [`agent_setup_claude_desktop_status`] found, for the sheet to show
+/// before the user clicks.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ClaudeDesktopStatus {
+    /// Claude Desktop's directory does not exist.
+    NotInstalled { path: String },
+    /// No `neoscad` server in its config.
+    NotAdded { path: String },
+    /// It runs this app's server with its project folder, which exists.
+    UpToDate { path: String },
+    /// It runs this app's `neoscad` from an earlier setup (before the
+    /// setup passed `--root`, so its agent cannot export), or the project
+    /// folder is gone: offer to update, which is
+    /// [`agent_setup_add_to_claude_desktop`] after the user agreed.
+    Outdated { path: String },
+    /// It has a `neoscad` server running another program, the user's own.
+    Other { path: String },
+    /// The config is not JSON this understands.
+    Unreadable { path: String, reason: String },
+}
+
+impl From<machine::ClaudeDesktopStatus> for ClaudeDesktopStatus {
+    fn from(s: machine::ClaudeDesktopStatus) -> Self {
+        match s {
+            machine::ClaudeDesktopStatus::NotInstalled { path } => {
+                ClaudeDesktopStatus::NotInstalled { path }
+            }
+            machine::ClaudeDesktopStatus::NotAdded { path } => {
+                ClaudeDesktopStatus::NotAdded { path }
+            }
+            machine::ClaudeDesktopStatus::UpToDate { path } => {
+                ClaudeDesktopStatus::UpToDate { path }
+            }
+            machine::ClaudeDesktopStatus::Outdated { path } => {
+                ClaudeDesktopStatus::Outdated { path }
+            }
+            machine::ClaudeDesktopStatus::Other { path } => ClaudeDesktopStatus::Other { path },
+            machine::ClaudeDesktopStatus::Unreadable { path, reason } => {
+                ClaudeDesktopStatus::Unreadable { path, reason }
+            }
+        }
+    }
+}
+
 impl From<machine::ClaudeCodeOutcome> for ClaudeCodeOutcome {
     fn from(o: machine::ClaudeCodeOutcome) -> Self {
         match o {
@@ -229,22 +273,58 @@ pub fn agent_setup_add_to_claude_code(
     })
 }
 
+/// Claude Desktop's config, its server (`cli mcp --root <folder>`) and
+/// the folder, or the error for a system without Claude Desktop.
+fn claude_desktop(cli: &str) -> Result<(String, setup::ServerCommand, String), CoreError> {
+    let missing = || CoreError::InvalidArgument {
+        message: "Claude Desktop does not run on this system".to_string(),
+    };
+    let path = machine::claude_desktop_config().ok_or_else(missing)?;
+    let server = machine::claude_desktop_server(cli).ok_or_else(missing)?;
+    let folder = machine::claude_desktop_folder().ok_or_else(missing)?;
+    Ok((path, server, folder))
+}
+
 /// Adds the server to Claude Desktop's config (macOS and Windows), after
 /// the user agreed: `client::agent_setup::merge_claude_desktop_config` on
 /// the file's text, a backup beside it, then an atomic replace. Refuses a
-/// file it cannot read as JSON rather than rewrite it.
+/// file it cannot read as JSON rather than rewrite it. The server gets
+/// [`agent_setup_claude_desktop_folder`] as its `--root`, created here if
+/// missing, so Claude Desktop's agent can export; an entry from an earlier
+/// setup is replaced (`Written` with `replaced_entry`).
 #[uniffi::export]
 pub fn agent_setup_add_to_claude_desktop(cli: String) -> Result<ClaudeDesktopOutcome, CoreError> {
     guarded(|| {
-        let server = setup::ServerCommand::for_host(machine::host(), &cli);
-        let path = machine::claude_desktop_config().ok_or_else(|| CoreError::InvalidArgument {
-            message: "Claude Desktop does not run on this system".to_string(),
-        })?;
-        machine::add_to_claude_desktop(Path::new(&path), &server, machine::now())
-            .map(Into::into)
-            .map_err(|e| CoreError::Failed {
-                message: format!("could not update {path}: {e}"),
-            })
+        let (path, server, folder) = claude_desktop(&cli)?;
+        machine::add_to_claude_desktop(
+            Path::new(&path),
+            &server,
+            Path::new(&folder),
+            machine::now(),
+        )
+        .map(Into::into)
+        .map_err(|e| CoreError::Failed {
+            message: format!("could not update {path}: {e}"),
+        })
+    })
+}
+
+/// The folder Claude Desktop's agent writes in: `NeoSCAD` in the user's
+/// Documents folder (`~/Documents/NeoSCAD`, or the Windows Documents
+/// known folder's), or `None` where Claude Desktop does not run.
+#[uniffi::export]
+pub fn agent_setup_claude_desktop_folder() -> Option<String> {
+    machine::claude_desktop_folder()
+}
+
+/// Whether Claude Desktop already runs this app's `cli` as set up now,
+/// read only: for "Already set up", and to offer an update to an entry
+/// from an earlier setup.
+#[uniffi::export]
+pub fn agent_setup_claude_desktop_status(cli: String) -> Result<ClaudeDesktopStatus, CoreError> {
+    guarded(|| {
+        let (path, server, folder) = claude_desktop(&cli)?;
+        Ok(machine::claude_desktop_status(Path::new(&path), &server, Path::new(&folder)).into())
     })
 }
 

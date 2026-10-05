@@ -1293,10 +1293,19 @@ lead them, come roughly in order of user impact.
   text says so only on macOS; one may be worth adding on Linux and
   Windows). The web page's "Things to ask" (`web/src/ui/agent.js`,
   `IDEAS`) is the examples' source; a test keeps them in step.
-- Claude Desktop starts `neoscad mcp` with no writable root, so its
-  agent cannot export (the usage text tells the user to export from the
-  app). A Claude Desktop setup that passes `--root` (the documents'
-  folder, or `~/Documents`) would let it, at the cost of a wider fence.
+- **Done: pass `--root` in Claude Desktop's setup.** Its entry is now
+  `<cli> mcp --root <Documents>/NeoSCAD` (the owner's choice of folder),
+  made by the setup, so its agent can export; relative paths resolve
+  into it (docs/mcp.md, "Setup from the apps"). Left: the Windows
+  dialog does not look before Add… (`agent_setup_claude_desktop_status`
+  is there for it, as the macOS sheet uses it), so an earlier version's
+  entry shows as nothing until Add… updates it, and its message then
+  says "Added" rather than "Updated" (`Written.replaced_entry`). Also,
+  `ClaudeDesktopsConfigIsMergedWithABackup` (windows/NeoSCAD.Tests)
+  points `%APPDATA%` at a scratch folder, but the Documents known folder
+  ignores the environment, so that test now makes the machine's real
+  `Documents\NeoSCAD`; an override for tests (as `NEOSCAD_AGENT_DIR` is
+  for the link) would keep it in the scratch folder.
 - Another program's change to the open file (an agent through `neoscad
   mcp`; `docs/audits/agent-connection-desktop.md`, finding 1) is taken
   in or reported in all three apps (`crates/client/src/disk.rs`). Left:

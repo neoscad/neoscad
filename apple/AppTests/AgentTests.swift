@@ -208,7 +208,10 @@ private func onLinkThread<T: Sendable>(_ body: @escaping @Sendable () throws -> 
     }
 
     /// Claude Desktop's config in a temporary home: not installed, then
-    /// added with a backup and the other servers kept, then found.
+    /// added with a backup and the other servers kept, its Documents
+    /// folder made and passed as `--root`, then found. An entry from before
+    /// the `--root` (an earlier version's setup) needs an update, and
+    /// Update rewrites it with another backup.
     @Test func claudeDesktopIsAddedWithABackup() async throws {
         let home = try scratch("home")
         let realHome = ProcessInfo.processInfo.environment["HOME"]
@@ -247,7 +250,12 @@ private func onLinkThread<T: Sendable>(_ body: @escaping @Sendable () throws -> 
         }
         let after = try String(contentsOf: config, encoding: .utf8)
         #expect(after.contains("\"other\"") && after.contains("\"theme\""))
-        #expect(AgentSetupModel.config(at: config, runs: cli))
+        let folder = home.appendingPathComponent("Documents/NeoSCAD").path
+        #expect(try Self.neoscadArgs(config) == ["mcp", "--root", folder])
+        var isDir: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: folder, isDirectory: &isDir) && isDir.boolValue)
+        #expect(row.copyText.contains(folder))
+        #expect(model.desktopFolderShown == "~/Documents/NeoSCAD")
         let backups = try FileManager.default.contentsOfDirectory(
             atPath: config.deletingLastPathComponent().path
         ).filter { $0.contains("neoscad-backup") }
@@ -261,6 +269,48 @@ private func onLinkThread<T: Sendable>(_ body: @escaping @Sendable () throws -> 
             Issue.record("\(model.state(.claudeDesktop))")
             return
         }
+
+        // The entry an earlier version wrote: no --root.
+        let old = #"{"mcpServers": {"neoscad": {"command": "/Apps/NeoSCAD/bin/neoscad", "args": ["mcp"]}}}"#
+        try old.write(to: config, atomically: true, encoding: .utf8)
+        model = AgentSetupModel(service: service, cli: cli)
+        model.ask = { $0 != .allowAgents }
+        model.look()
+        guard case .outdated = model.state(.claudeDesktop) else {
+            Issue.record("\(model.state(.claudeDesktop))")
+            return
+        }
+        #expect(AgentSetupRowView.actionTitle(row, state: model.state(.claudeDesktop)) == "Update")
+        var asked: [AgentSetupQuestion] = []
+        model.ask = {
+            asked.append($0)
+            return $0 != .allowAgents
+        }
+        await model.add(row)
+        #expect(asked.contains(.editClaudeDesktop(path: path, folder: "~/Documents/NeoSCAD", update: true)))
+        guard case .done(let message) = model.state(.claudeDesktop) else {
+            Issue.record("\(model.state(.claudeDesktop))")
+            return
+        }
+        #expect(message.hasPrefix("Updated"))
+        #expect(try Self.neoscadArgs(config) == ["mcp", "--root", folder])
+        let backups2 = try FileManager.default.contentsOfDirectory(
+            atPath: config.deletingLastPathComponent().path
+        ).filter { $0.contains("neoscad-backup") }
+        #expect(backups2.count == 2)
+        model = AgentSetupModel(service: service, cli: cli)
+        model.look()
+        guard case .alreadySetUp = model.state(.claudeDesktop) else {
+            Issue.record("\(model.state(.claudeDesktop))")
+            return
+        }
+    }
+
+    /// The `neoscad` server's arguments in Claude Desktop's config.
+    private static func neoscadArgs(_ config: URL) throws -> [String]? {
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: config)) as? [String: Any]
+        let servers = json?["mcpServers"] as? [String: Any]
+        return (servers?["neoscad"] as? [String: Any])?["args"] as? [String]
     }
 
     @Test func cursorAndVSCodeOpenTheirInstallLinks() async throws {
@@ -356,12 +406,12 @@ private func onLinkThread<T: Sendable>(_ body: @escaping @Sendable () throws -> 
         #expect(!usage.examples.isEmpty)
         #expect(usage.examples.contains { $0.contains("export") })
 
-        // Claude Desktop cannot write files, so it is told to export from
-        // the app, and is not offered an export request.
+        // Claude Desktop's agent exports into its Documents folder, and is
+        // offered an export request too.
         model.selected = .claudeDesktop
         let desktop = model.usage
-        #expect(try #require(desktop.items.last).body.contains("can’t write"))
-        #expect(!desktop.examples.contains { $0.contains("export") })
+        #expect(try #require(desktop.items.last).body.contains("Documents/NeoSCAD"))
+        #expect(desktop.examples.contains { $0.contains("export") })
 
         // The sheet lays out with the section open, in its width.
         let view = NSHostingView(rootView: AgentSetupContent(service: service, model: model))

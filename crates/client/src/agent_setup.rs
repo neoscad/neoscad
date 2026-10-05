@@ -35,7 +35,11 @@
 //!   `claude_desktop_config.json`, with the user's consent and a backup
 //!   ([`merge_claude_desktop_config`], [`backup_file_name`]), and then
 //!   asks for a restart (modelcontextprotocol.io/docs/develop/
-//!   connect-local-servers).
+//!   connect-local-servers). Its entry also passes `--root` with a
+//!   folder in the user's Documents ([`claude_desktop_folder`]): Claude
+//!   Desktop starts servers in an undefined working directory, which
+//!   `neoscad mcp` never takes as a root, so without one its agent could
+//!   read but never write an export.
 //! - **Other:** the JSON to copy.
 //!
 //! After the setup, what using it is like ("Using NeoSCAD with your
@@ -137,6 +141,15 @@ impl ServerCommand {
         ])
     }
 
+    /// This command with `--root <dir>` added: `dir` becomes a folder the
+    /// agent may write in whatever directory the client starts it in.
+    pub fn with_root(&self, dir: &str) -> ServerCommand {
+        let mut s = self.clone();
+        s.args.push("--root".to_string());
+        s.args.push(dir.to_string());
+        s
+    }
+
     /// The command line, quoted for `host`'s usual shell.
     pub fn display(&self, host: Host) -> String {
         std::iter::once(&self.command)
@@ -224,16 +237,30 @@ pub struct ClientSetup {
 /// The setups for `host`, serving `server`. `home` is the user's home
 /// directory; `appdata` is `%APPDATA%` on Windows (unused elsewhere).
 /// Claude Desktop is listed only where it exists (macOS and Windows) and
-/// its config's directory is known.
+/// its config's directory is known. Its project folder is taken to be in
+/// `home`'s `Documents` ([`default_documents`]); a host that knows the
+/// real Documents folder (Windows can redirect it) calls [`setups_in`].
 pub fn setups(
     host: Host,
     server: &ServerCommand,
     home: &str,
     appdata: Option<&str>,
 ) -> Vec<ClientSetup> {
+    setups_in(host, server, home, appdata, &default_documents(host, home))
+}
+
+/// [`setups`] with the user's Documents folder, `documents`, given: the
+/// Claude Desktop row's `--root` is [`claude_desktop_folder`] in it.
+pub fn setups_in(
+    host: Host,
+    server: &ServerCommand,
+    home: &str,
+    appdata: Option<&str>,
+    documents: &str,
+) -> Vec<ClientSetup> {
     Client::ALL
         .iter()
-        .filter_map(|&c| setup(c, host, server, home, appdata))
+        .filter_map(|&c| setup_in(c, host, server, home, appdata, documents))
         .collect()
 }
 
@@ -245,6 +272,25 @@ pub fn setup(
     server: &ServerCommand,
     home: &str,
     appdata: Option<&str>,
+) -> Option<ClientSetup> {
+    setup_in(
+        client,
+        host,
+        server,
+        home,
+        appdata,
+        &default_documents(host, home),
+    )
+}
+
+/// [`setup`] with the user's Documents folder given ([`setups_in`]).
+pub fn setup_in(
+    client: Client,
+    host: Host,
+    server: &ServerCommand,
+    home: &str,
+    appdata: Option<&str>,
+    documents: &str,
 ) -> Option<ClientSetup> {
     let row = |action, copy_text, note: &str| ClientSetup {
         client,
@@ -279,10 +325,13 @@ pub fn setup(
         }
         Client::ClaudeDesktop => {
             let path = claude_desktop_config_path(host, home, appdata)?;
+            let folder = claude_desktop_folder(host, documents)?;
             row(
                 SetupAction::MergeConfig { path },
-                servers_json("mcpServers", server, false),
-                "Then quit and reopen Claude to finish.",
+                servers_json("mcpServers", &server.with_root(&folder), false),
+                &format!(
+                    "Then quit and reopen Claude to finish. Its agent saves files in {folder}."
+                ),
             )
         }
         Client::Cursor => row(
@@ -302,7 +351,9 @@ pub fn setup(
         Client::Other => row(
             SetupAction::CopyOnly,
             servers_json("mcpServers", server, false),
-            "Most MCP clients take this shape. The server speaks MCP on stdio.",
+            "Most MCP clients take this shape. The server speaks MCP on stdio. It writes files \
+             only in the folder the client starts it in, when that is a project: a client that \
+             starts it elsewhere needs \"--root\" and a folder added to \"args\".",
         ),
     })
 }
@@ -398,6 +449,45 @@ pub fn claude_desktop_config_path(host: Host, home: &str, appdata: Option<&str>)
         }),
         Host::Linux | Host::LinuxFlatpak => None,
     }
+}
+
+/// The Documents folder in `home` when the host knows no better:
+/// `~/Documents` on macOS (where the system keeps it, and where OpenSCAD
+/// looks for it, `PlatformUtils-mac.mm`), `%USERPROFILE%\Documents` on
+/// Windows, which is wrong when the folder is redirected (OneDrive's
+/// backup does that), so the Windows host passes the shell's known folder
+/// to [`setups_in`] instead. Linux has no Claude Desktop to use it.
+pub fn default_documents(host: Host, home: &str) -> String {
+    if host.windows() {
+        format!("{}\\Documents", home.trim_end_matches('\\'))
+    } else {
+        format!("{}/Documents", home.trim_end_matches('/'))
+    }
+}
+
+/// The folder Claude Desktop's `neoscad mcp` gets as its `--root`, in the
+/// user's Documents folder `documents`: `~/Documents/NeoSCAD` on macOS,
+/// `Documents\NeoSCAD` on Windows; `None` on Linux, where Claude Desktop
+/// does not run. A folder of its own rather than Documents itself: the
+/// agent may write anywhere in a root, and the user agreed to NeoSCAD's
+/// files, not to everything they keep in Documents.
+pub fn claude_desktop_folder(host: Host, documents: &str) -> Option<String> {
+    match host {
+        Host::MacOs => Some(format!("{}/NeoSCAD", documents.trim_end_matches('/'))),
+        Host::Windows => Some(format!("{}\\NeoSCAD", documents.trim_end_matches('\\'))),
+        Host::Linux | Host::LinuxFlatpak => None,
+    }
+}
+
+/// Claude Desktop's server: `server` with [`claude_desktop_folder`] as
+/// its `--root`, as its row's JSON shows and the app writes; `None` on
+/// Linux.
+pub fn claude_desktop_server(
+    host: Host,
+    server: &ServerCommand,
+    documents: &str,
+) -> Option<ServerCommand> {
+    claude_desktop_folder(host, documents).map(|f| server.with_root(&f))
 }
 
 /// Cursor's install link: the server entry as compact JSON, base64,
@@ -583,6 +673,49 @@ pub fn merge_claude_desktop_config(
         text: pretty(&doc),
         change,
         previous,
+    })
+}
+
+/// What Claude Desktop's config already has, against what
+/// [`merge_claude_desktop_config`] would write for `server`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaudeDesktopEntry {
+    /// No file, or no `neoscad` entry in it.
+    Missing,
+    /// The entry runs `server` with its arguments: nothing to do.
+    Current,
+    /// The entry runs the same program with other arguments: an earlier
+    /// setup, such as one from before the setup passed `--root` (whose
+    /// agent cannot export). Offer to update it.
+    Outdated,
+    /// The entry runs another program, one the user set up themselves.
+    Other,
+}
+
+/// Reads `existing` (the config's text, `None` when there is no file)
+/// as [`merge_claude_desktop_config`] does, and says how its `neoscad`
+/// entry compares with `server`. Refuses the same files the merge does.
+pub fn claude_desktop_entry(
+    existing: Option<&str>,
+    server: &ServerCommand,
+) -> Result<ClaudeDesktopEntry, ConfigError> {
+    let merged = merge_claude_desktop_config(existing, server)?;
+    Ok(match merged.change {
+        ConfigChange::Added => ClaudeDesktopEntry::Missing,
+        ConfigChange::Unchanged => ClaudeDesktopEntry::Current,
+        ConfigChange::Replaced => {
+            let previous = merged
+                .previous
+                .as_deref()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok());
+            let command = previous.as_ref().and_then(|p| p["command"].as_str());
+            if command == Some(server.command.as_str()) {
+                ClaudeDesktopEntry::Outdated
+            } else {
+                ClaudeDesktopEntry::Other
+            }
+        }
     })
 }
 

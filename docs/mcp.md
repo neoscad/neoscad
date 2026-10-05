@@ -92,7 +92,7 @@ path where it has one, so the client asks the user and owns its format
 | Claude Code | Runs `claude mcp add --scope user neoscad -- <cli> mcp` (every project). `claude` is looked for on `PATH` and where its installers put it (`~/.local/bin/claude`, `%USERPROFILE%\.local\bin\claude.exe`, Homebrew, npm), then through the login shell. A second `add` fails with "already exists in user config"; the app asks, then runs `claude mcp remove --scope user neoscad` and adds again. Not found, or in the Flatpak: the command to copy |
 | Cursor | Opens `cursor://anysphere.cursor-deeplink/mcp/install?name=neoscad&config=<base64 of {"command":…,"args":["mcp"]}>`, URL-encoded |
 | VS Code | Opens `vscode:mcp/install?<URL-encoded {"name":"neoscad","type":"stdio","command":…,"args":["mcp"]}>` |
-| Claude Desktop (macOS, Windows) | After the user agrees, merges `mcpServers.neoscad` into `~/Library/Application Support/Claude/claude_desktop_config.json` or `%APPDATA%\Claude\claude_desktop_config.json`, then says to quit and reopen Claude |
+| Claude Desktop (macOS, Windows) | After the user agrees, merges `mcpServers.neoscad` (`<cli> mcp --root <Documents>/NeoSCAD`) into `~/Library/Application Support/Claude/claude_desktop_config.json` or `%APPDATA%\Claude\claude_desktop_config.json`, makes the folder if it is missing, then says to quit and reopen Claude |
 | Other | The JSON block to copy |
 
 Every row also has the copy-able command or JSON, with the absolute
@@ -111,10 +111,26 @@ that is not strict JSON (a comment, a trailing comma) or not the
 expected shape is refused and left exactly as it was: the app shows why,
 and the JSON to add by hand.
 
-**Working directory.** Claude Code, Cursor and VS Code start the server
-in the project, which becomes its root. Claude Desktop's working
-directory is undefined ("like `/` on macOS", modelcontextprotocol.io,
-"Debugging"); see `docs/followups.md`, "MCP and the agent eval".
+**Working directory, and Claude Desktop's folder.** Claude Code, Cursor
+and VS Code start the server in the project, which becomes its root.
+Claude Desktop's working directory is undefined ("like `/` on macOS",
+modelcontextprotocol.io, "Debugging"), which is never a root ("Safety"),
+so its entry passes `--root` with a folder of its own: `NeoSCAD` in the
+user's Documents folder, `~/Documents/NeoSCAD` on macOS and on Windows
+in the Documents known folder (`FOLDERID_Documents`, which OneDrive's
+backup can move off `%USERPROFILE%\Documents`;
+`client::agent_setup::claude_desktop_folder`, `agent_link::setup::documents`).
+Its agent exports there, and relative paths resolve there. A folder of
+its own rather than Documents itself: the agent may write anywhere in a
+root. The setup makes the folder whenever it runs, the entry unchanged
+included, since `neoscad mcp` ignores a `--root` that does not exist.
+An entry an earlier version wrote runs the same `neoscad` without the
+`--root`; the macOS sheet finds it (`agent_setup_claude_desktop_status`:
+`Outdated`, also when the folder is gone) and shows "Needs an update"
+with Update, which asks and then rewrites the entry with a backup like
+any change. An entry running another program is the user's own and is
+left as "not added": Add replaces it after asking. The Windows dialog
+does not look first; its Add… updates an old entry the same way.
 
 **Code.** The rows, links, commands, the config merge and the backup
 names are pure functions in `client::agent_setup`
@@ -124,7 +140,9 @@ Desktop's file and its backup) is `agent_link::setup`
 (`crates/agent-link/src/setup.rs`), which the Linux app calls directly
 and `crates/ffi/src/agent_setup.rs` exports to Swift and C#: `agent_setup_rows(cli)`,
 `agent_setup_find_claude()`, `agent_setup_add_to_claude_code(claude,
-cli, replace)` and `agent_setup_add_to_claude_desktop(cli)`, with the
+cli, replace)`, `agent_setup_add_to_claude_desktop(cli)`,
+`agent_setup_claude_desktop_status(cli)` and
+`agent_setup_claude_desktop_folder()`, with the
 text the sheet shows after the setup, `agent_setup_usage(host,
 client)`, and the picker's labels, `agent_setup_short_label(client)`. The macOS
 sheet (`apple/App/Agents/AgentSetup.swift`) and the Windows dialog
@@ -181,7 +199,8 @@ the finished export, then rendered again to check it). A call to a tool that is 
 JSON-RPC error for an unknown tool. Each takes a model as `path` (a
 `.scad` file) or `source` (OpenSCAD text, so an agent can iterate
 without writing files); `base_dir` is where relative paths and a
-source's `include`s resolve (default: the server's working directory).
+source's `include`s resolve (default: the server's working directory, or its first `--root` when the
+working directory is not a root; "Safety").
 Inline source is evaluated as `inline.scad` in `base_dir` (messages name
 it so) and removed afterwards. `parts: true` turns on the `part()`
 extension (`docs/cli-json.md`), and `verbose: true` returns the server's
@@ -452,7 +471,8 @@ output's directory is created.
   folders above or a settings folder's top (`TEMP=%APPDATA%`); macOS's
   and Linux's are already outside home. It is a deny list, not a test for a
   project: models live in plain folders. stderr says when the working
-  directory is left out; relative paths still resolve against it, inline
+  directory is left out; relative paths then resolve against the first
+  `--root` (or against it when there is none), inline
   `source` still works, and a file tool's refusal says to add `--root
   DIR` to the server's arguments. A `--root` is always honoured: it is
   the user's explicit choice. Tool arguments
@@ -598,8 +618,9 @@ Agent… and Settings > Agents reach the same place. The flow:
    Code, run with the `claude` the app finds; Replace when it already
    has a `neoscad`), Open Cursor or Open VS Code (their install links),
    Add for Claude Desktop (after the user agrees to the file change;
-   then quit and reopen Claude); Other has only the JSON. It says what
-   happened: Added, Already set up, Not installed, or the error, and
+   then quit and reopen Claude; Update when an earlier version's entry
+   has no `~/Documents/NeoSCAD`); Other has only the JSON. It says what
+   happened: Added, Already set up, Needs an update, Not installed, or the error, and
    shows the command or JSON to copy whenever the click could not do it.
 3. **Using NeoSCAD with your agent**, under the setup, says what to do
    next for the chosen client, in six short items: keep NeoSCAD open
@@ -623,8 +644,8 @@ the user saves). The preview runs after it as after a pause in typing.
 An agent's export (`check` or `render` with `export`) is written only
 inside the server's roots, so into the client's project folder and not
 beside a document opened from elsewhere; Claude Desktop, which has no
-project folder, cannot export, and the section says to export from the
-app instead. Its
+project folder, gets `~/Documents/NeoSCAD` from its setup, and the
+section says its exports go there. Its
 marks in the 3D view show a chip with a button that clears them.
 Turning the switch off (in the sheet or Settings) disconnects every
 agent at once, removes the socket and hides the toolbar control. The
@@ -660,7 +681,8 @@ in `agents.json`) over the chosen client's card: Add for
 Claude Code (Replace when it already has a `neoscad`), Open Cursor and
 Open VS Code (their install links), Add… for Claude Desktop (the card asks
 first, then writes `%APPDATA%\Claude\claude_desktop_config.json` with a
-backup and says to quit and reopen Claude), the JSON for Other, and Copy
+backup, makes `Documents\NeoSCAD` for its agent's files, and says to quit
+and reopen Claude), the JSON for Other, and Copy
 on every card, the command or JSON shown whenever the button could not
 do it. Under it, "Using NeoSCAD with your agent" is an expander, open
 until folded, with the core's six items for Windows and that client

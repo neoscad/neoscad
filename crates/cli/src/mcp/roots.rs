@@ -28,11 +28,12 @@ use lang::loader::{FileSystem, Metadata};
 pub struct Roots {
     /// Read and write, canonical.
     write: Vec<PathBuf>,
-    /// Where relative paths resolve: the working directory, root or not.
+    /// Where relative paths resolve: the working directory when it is a
+    /// root, else the first `--root`, else the working directory anyway.
     base: PathBuf,
-    /// Why the working directory is not a root ([`unsafe_cwd`]), for the
-    /// refusals.
-    cwd_refused: Option<&'static str>,
+    /// The working directory and why it is not a root ([`unsafe_cwd`]),
+    /// for the refusals.
+    cwd_refused: Option<(PathBuf, &'static str)>,
     /// Read only (libraries, fonts), canonical.
     read: Vec<PathBuf>,
     /// Read only: the directories of a connected app's open documents,
@@ -67,11 +68,18 @@ impl Roots {
         }
     }
 
-    /// Relative paths resolve against `cwd`, which is not a root because
-    /// of `why` ([`unsafe_cwd`]); the refusals say so.
+    /// The working directory `cwd` is not a root because of `why`
+    /// ([`unsafe_cwd`]); the refusals say so. Relative paths resolve
+    /// against the first `--root` then, so a server Claude Desktop starts
+    /// in `/` with `--root ~/Documents/NeoSCAD` (its setup from the apps)
+    /// exports `gear.stl` into that folder rather than refusing `/gear.stl`.
+    /// With no root at all they resolve against `cwd`, where every file
+    /// tool's refusal says how to add one.
     pub fn with_unsafe_cwd(mut self, cwd: &Path, why: &'static str) -> Roots {
-        self.base = cwd.to_path_buf();
-        self.cwd_refused = Some(why);
+        if self.write.is_empty() {
+            self.base = cwd.to_path_buf();
+        }
+        self.cwd_refused = Some((cwd.to_path_buf(), why));
         self
     }
 
@@ -92,8 +100,8 @@ impl Roots {
     }
 
     /// The directory relative paths resolve against when no `base_dir`
-    /// is given: the working directory (the first root, unless it is not
-    /// one).
+    /// is given: the first root (the working directory when it is one),
+    /// or the working directory when there is no root.
     pub fn home(&self) -> &Path {
         &self.base
     }
@@ -131,17 +139,17 @@ impl Roots {
     /// to add one.
     pub fn refusal(&self, what: &str, p: &Path) -> String {
         let roots: Vec<String> = self.write.iter().map(|d| d.display().to_string()).collect();
-        match self.cwd_refused {
-            Some(why) if roots.is_empty() => format!(
+        match &self.cwd_refused {
+            Some((cwd, why)) if roots.is_empty() => format!(
                 "{what} '{}' is outside the allowed roots: there are none. neoscad mcp started in {} ({why}), which is never a root (some clients, Claude Desktop among them, start servers in `/`). Add `--root DIR` to the server's arguments (\"args\": [\"mcp\", \"--root\", \"/path/to/models\"]); inline `source` works without one",
                 p.display(),
-                self.base.display(),
+                cwd.display(),
             ),
-            Some(why) => format!(
+            Some((cwd, why)) => format!(
                 "{what} '{}' is outside the allowed roots ({}; not the working directory {}, {why}); start `neoscad mcp` with `--root DIR` to allow another directory",
                 p.display(),
                 roots.join(", "),
-                self.base.display(),
+                cwd.display(),
             ),
             None => format!(
                 "{what} '{}' is outside the allowed roots ({}); start `neoscad mcp` with `--root DIR` to allow another directory",
@@ -711,6 +719,22 @@ mod tests {
         assert!(r.contains("there are none"), "{r}");
         assert!(r.contains("--root"), "{r}");
         assert!(r.contains("inline `source` works"), "{r}");
+    }
+
+    /// Claude Desktop's setup: started in `/` with a `--root`, relative
+    /// paths go into the root, and the refusal still names `/`.
+    #[test]
+    fn with_a_root_and_an_unsafe_cwd_relative_paths_go_into_the_root() {
+        let tmp = std::env::temp_dir().join(format!("nsroots-base-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let root = lang::paths::plain(tmp.canonicalize().unwrap());
+        let roots = Roots::new(std::slice::from_ref(&root), &[])
+            .with_unsafe_cwd(Path::new("/"), "the file system's root");
+        assert_eq!(roots.home(), root);
+        assert!(roots.can_write(&roots.home().join("gear.stl")));
+        let r = roots.refusal("export", Path::new("/x.stl"));
+        assert!(r.contains("not the working directory /,"), "{r}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

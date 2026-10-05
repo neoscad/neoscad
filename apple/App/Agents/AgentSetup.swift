@@ -13,7 +13,11 @@
 //   say so and offer Replace. Not found: the command to copy.
 // - Cursor, VS Code: open the client's install link; it asks the user.
 // - Claude Desktop: after the user agrees, merge the server into its
-//   config, keeping a backup beside it; then Claude must be reopened.
+//   config, keeping a backup beside it; then Claude must be reopened. Its
+//   server gets ~/Documents/NeoSCAD as its `--root` (made if missing), the
+//   folder its agent exports to: Claude Desktop starts servers in `/`,
+//   which is never a root. An entry from before that (no `--root`) shows
+//   as needing an update, and Update rewrites it, asking first.
 // - Other clients: the JSON to copy.
 //
 // Every row also shows the command or JSON to do it by hand. `claude` and
@@ -47,16 +51,27 @@ enum AgentSetupState: Equatable {
     case working
     case done(String)
     case alreadySetUp(String)
+    /// Set up by an earlier version, in a way that no longer works fully
+    /// (Claude Desktop without its folder): the button updates it.
+    case outdated(String)
     case notInstalled(String)
     case failed(String)
+}
+
+extension AgentSetupState {
+    var isOutdated: Bool {
+        if case .outdated = self { return true }
+        return false
+    }
 }
 
 /// A question the sheet asks before acting.
 enum AgentSetupQuestion: Equatable {
     /// Agents are off: allow them? (audit, "Consent, at first enable")
     case allowAgents
-    /// Write Claude Desktop's config at this path?
-    case editClaudeDesktop(path: String)
+    /// Write Claude Desktop's config at `path`, giving its agent `folder`?
+    /// `update` when it replaces an earlier setup's entry.
+    case editClaudeDesktop(path: String, folder: String, update: Bool)
     /// Claude Code already has a `neoscad`: replace it?
     case replaceClaudeCode
 }
@@ -95,6 +110,9 @@ final class AgentSetupModel {
     }
     @ObservationIgnored var addToClaudeDesktop: @Sendable (String) throws -> ClaudeDesktopOutcome = {
         try agentSetupAddToClaudeDesktop(cli: $0)
+    }
+    @ObservationIgnored var claudeDesktopStatus: (String) throws -> ClaudeDesktopStatus = {
+        try agentSetupClaudeDesktopStatus(cli: $0)
     }
     @ObservationIgnored var openURL: (URL) -> Bool = { NSWorkspace.shared.open($0) }
     @ObservationIgnored var hasHandler: (URL) -> Bool = {
@@ -166,12 +184,20 @@ final class AgentSetupModel {
                 if let u = URL(string: url), !hasHandler(u) {
                     states[row.client] = .notInstalled("\(row.label) isn't installed. Add the JSON below by hand.")
                 }
-            case .mergeConfig(let path):
-                let file = URL(fileURLWithPath: path)
-                if !FileManager.default.fileExists(atPath: file.deletingLastPathComponent().path) {
+            case .mergeConfig:
+                // One small file read, as the sheet opens.
+                switch try? claudeDesktopStatus(cli) {
+                case .notInstalled:
                     states[row.client] = .notInstalled("Claude Desktop isn't installed for this user.")
-                } else if Self.config(at: file, runs: cli) {
-                    states[row.client] = .alreadySetUp("Claude Desktop runs NeoSCAD.")
+                case .upToDate:
+                    states[row.client] = .alreadySetUp(
+                        "Claude Desktop runs NeoSCAD. Its agent saves files in \(desktopFolderShown).")
+                case .outdated:
+                    states[row.client] = .outdated(
+                        "Claude Desktop runs NeoSCAD from an earlier setup, so its agent can't save files. "
+                            + "Update gives it \(desktopFolderShown).")
+                case .notAdded, .other, .unreadable, nil:
+                    break
                 }
             case .runClaude:
                 let find = findClaude
@@ -188,15 +214,18 @@ final class AgentSetupModel {
         }
     }
 
-    /// Whether Claude Desktop's config at `file` already has a `neoscad`
-    /// server running `cli`.
-    nonisolated static func config(at file: URL, runs cli: String) -> Bool {
-        guard let data = try? Data(contentsOf: file),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let servers = json["mcpServers"] as? [String: Any],
-            let neoscad = servers["neoscad"] as? [String: Any]
-        else { return false }
-        return neoscad["command"] as? String == cli
+    /// Claude Desktop's folder (`~/Documents/NeoSCAD`), as the sheet
+    /// shows it.
+    var desktopFolderShown: String {
+        guard let folder = agentSetupClaudeDesktopFolder() else { return "~/Documents/NeoSCAD" }
+        // The home the core used (`HOME`, which the tests point elsewhere),
+        // not NSHomeDirectory's.
+        if let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty,
+            folder.hasPrefix(home + "/")
+        {
+            return "~" + folder.dropFirst(home.count)
+        }
+        return folder
     }
 
     /// The row's button.
@@ -215,16 +244,21 @@ final class AgentSetupModel {
             }
             states[row.client] = .done("Opened in \(row.label). Confirm there to finish.")
         case .mergeConfig(let path):
-            guard await ask(.editClaudeDesktop(path: path)) else { return }
+            let update = state(row.client).isOutdated
+            guard await ask(.editClaudeDesktop(path: path, folder: desktopFolderShown, update: update))
+            else { return }
             states[row.client] = .working
             let cli = self.cli
             let add = addToClaudeDesktop
             let outcome = await Task.detached { Result { try add(cli) } }.value
             switch outcome {
-            case .success(.written):
-                states[row.client] = .done("Added. Quit and reopen Claude to finish.")
+            case .success(.written(_, _, let replaced)):
+                states[row.client] = .done(
+                    "\(replaced ? "Updated" : "Added"). Quit and reopen Claude to finish. "
+                        + "Its agent saves files in \(desktopFolderShown).")
             case .success(.unchanged):
-                states[row.client] = .alreadySetUp("Claude Desktop runs NeoSCAD.")
+                states[row.client] = .alreadySetUp(
+                    "Claude Desktop runs NeoSCAD. Its agent saves files in \(desktopFolderShown).")
             case .success(.notInstalled):
                 states[row.client] = .notInstalled("Claude Desktop isn't installed for this user.")
             case .success(.refused(_, let reason)):
@@ -477,7 +511,7 @@ struct AgentSetupRowView: View {
                 if case .alreadySetUp = state, row.action == .runClaude {
                     Button("Replace") { Task { await model.replaceClaudeCode(row) } }
                 }
-                if let title = Self.actionTitle(row) {
+                if let title = Self.actionTitle(row, state: state) {
                     Button(title) { Task { await model.add(row) } }
                         .disabled(state == .working)
                         .accessibilityIdentifier("agent-add-\(row.label)")
@@ -514,11 +548,12 @@ struct AgentSetupRowView: View {
     }
 
     /// The one-click button's title; none for a client with only text to
-    /// copy.
-    static func actionTitle(_ row: AgentSetupRow) -> String? {
+    /// copy. "Update" for a setup an earlier version made.
+    static func actionTitle(_ row: AgentSetupRow, state: AgentSetupState = .idle) -> String? {
         switch row.action {
         case .openUrl: "Open \(row.label)"
-        case .runClaude, .mergeConfig: "Add"
+        case .mergeConfig: state.isOutdated ? "Update" : "Add"
+        case .runClaude: "Add"
         case .copyOnly: nil
         }
     }
@@ -530,6 +565,9 @@ struct AgentSetupRowView: View {
                 .labelStyle(.titleAndIcon).font(.caption)
         case .alreadySetUp:
             Label("Already set up", systemImage: "checkmark.circle").foregroundStyle(.green)
+                .font(.caption)
+        case .outdated:
+            Label("Needs an update", systemImage: "arrow.triangle.2.circlepath").foregroundStyle(.orange)
                 .font(.caption)
         case .notInstalled:
             Text("Not installed").foregroundStyle(.secondary).font(.caption)
@@ -543,7 +581,7 @@ struct AgentSetupRowView: View {
 
     private func message(_ s: AgentSetupState) -> String {
         switch s {
-        case .done(let m), .alreadySetUp(let m), .notInstalled(let m), .failed(let m): m
+        case .done(let m), .alreadySetUp(let m), .outdated(let m), .notInstalled(let m), .failed(let m): m
         case .working: "Working…"
         case .idle: row.note
         }
@@ -624,11 +662,15 @@ enum AgentSetupPresenter {
             alert.informativeText = AgentHelp.consentText
             alert.addButton(withTitle: "Allow")
             alert.addButton(withTitle: "Not Now")
-        case .editClaudeDesktop(let path):
-            alert.messageText = "Add NeoSCAD to Claude Desktop?"
+        case .editClaudeDesktop(let path, let folder, let update):
+            alert.messageText = update ? "Update NeoSCAD in Claude Desktop?" : "Add NeoSCAD to Claude Desktop?"
             alert.informativeText =
-                "NeoSCAD will add a “neoscad” server to \(path). Everything else in the file stays, and a copy of it is kept beside it."
-            alert.addButton(withTitle: "Add")
+                (update
+                    ? "NeoSCAD will update the “neoscad” server in \(path) "
+                    : "NeoSCAD will add a “neoscad” server to \(path) ")
+                + "and make \(folder), where Claude’s agent can save files. "
+                + "Everything else in the file stays, and a copy of it is kept beside it."
+            alert.addButton(withTitle: update ? "Update" : "Add")
             alert.addButton(withTitle: "Cancel")
         case .replaceClaudeCode:
             alert.messageText = "Replace Claude Code's NeoSCAD server?"

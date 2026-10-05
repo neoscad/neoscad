@@ -35,7 +35,11 @@
 //!   working directory when it looks like a project, and each `--root`
 //!   (`docs/mcp.md`, "Safety"). An open document's own folder is readable,
 //!   not writable. Claude Desktop starts servers in an undefined folder
-//!   ("like `/`"), which is never a root, so it cannot export.
+//!   ("like `/`"), which is never a root, so its setup passes `--root`
+//!   with a NeoSCAD folder in the user's Documents
+//!   (`super::claude_desktop_folder`), which the setup creates: its agent
+//!   exports there, and relative paths resolve there
+//!   (`crates/cli/src/mcp/roots.rs`, `Roots::with_unsafe_cwd`).
 //!
 //! Pure data: no file system, environment or clock.
 
@@ -92,6 +96,9 @@ struct Words {
     autosaves: bool,
     /// The view has a chip that clears the agent's marks.
     marks_chip: bool,
+    /// Claude Desktop's folder (`super::claude_desktop_folder`), as the
+    /// host's file manager spells it.
+    desktop_folder: &'static str,
 }
 
 fn words(host: Host) -> Words {
@@ -104,6 +111,7 @@ fn words(host: Host) -> Words {
             ask_first: "“Ask before applying edits” in the agent control’s popover or Settings > Agents",
             autosaves: true,
             marks_chip: true,
+            desktop_folder: "Documents/NeoSCAD",
         },
         Host::Windows => Words {
             save: "Ctrl+S",
@@ -116,6 +124,7 @@ fn words(host: Host) -> Words {
             ask_first: "“Ask me before applying the agent’s edits” in the agent control’s flyout or the Help menu",
             autosaves: false,
             marks_chip: false,
+            desktop_folder: "Documents\\NeoSCAD",
         },
         Host::Linux | Host::LinuxFlatpak => Words {
             save: "Ctrl+S",
@@ -125,13 +134,16 @@ fn words(host: Host) -> Words {
             ask_first: "“Ask before applying an agent’s edits” in Preferences > Agents",
             autosaves: false,
             marks_chip: false,
+            // No Claude Desktop on Linux; the macOS spelling, unused.
+            desktop_folder: "Documents/NeoSCAD",
         },
     }
 }
 
 /// The requests the /try page's "Things to ask" offers
 /// (`web/src/ui/agent.js`, `IDEAS`), chosen per client, plus one that
-/// exports for the clients that can write files.
+/// exports: every client can write files now that Claude Desktop's setup
+/// gives it a folder.
 fn examples(client: Client) -> Vec<String> {
     let list: &[&str] = match client {
         Client::ClaudeDesktop => &[
@@ -139,6 +151,7 @@ fn examples(client: Client) -> Vec<String> {
             "Walk me through this model, pointing at each part in the 3D view.",
             "Why won’t this print? Mark the problem spots in the view.",
             "Turn the fixed sizes into customizer parameters.",
+            "Check it prints, then export it as an STL.",
         ],
         Client::ClaudeCode | Client::Cursor | Client::VsCode | Client::Other => &[
             "Make the teeth smaller and show me the result.",
@@ -160,14 +173,14 @@ pub fn usage(host: Host, client: Client) -> Usage {
     };
 
     let closed = match client {
-        Client::ClaudeDesktop => {
-            "With NeoSCAD closed, the agent can still check models it writes in the chat, \
-             but can’t see or change your windows."
-        }
-        _ => {
-            "With NeoSCAD closed, the agent can still check .scad files in its project, \
-             but can’t see or change your windows."
-        }
+        Client::ClaudeDesktop => format!(
+            "With NeoSCAD closed, the agent can still check models in the chat or in {}, \
+             but can’t see or change your windows.",
+            w.desktop_folder
+        ),
+        _ => "With NeoSCAD closed, the agent can still check .scad files in its project, \
+              but can’t see or change your windows."
+            .to_string(),
     };
     // Only Claude Code is documented to refetch the tool list when the
     // server says it changed (docs/agent-bridge.md, "How it connects",
@@ -224,15 +237,15 @@ pub fn usage(host: Host, client: Client) -> Usage {
     );
 
     let ask_agent = match client {
-        Client::ClaudeDesktop => {
-            "Claude Desktop starts NeoSCAD without a project folder, so it can’t write the file: \
-             export from NeoSCAD."
-        }
-        Client::Other => {
-            "Or ask the agent to check and export it: it can write into the folder your client \
-             starts NeoSCAD in, when that is a project."
-        }
-        _ => "Or ask the agent to check and export it: it writes the file into its project folder.",
+        Client::ClaudeDesktop => format!(
+            "Or ask the agent to check and export it: it saves the file in {}.",
+            w.desktop_folder
+        ),
+        Client::Other => "Or ask the agent to check and export it: it can write into the folder \
+                          your client starts NeoSCAD in, when that is a project, and any --root."
+            .to_string(),
+        _ => "Or ask the agent to check and export it: it writes the file into its project folder."
+            .to_string(),
     };
     let export = format!(
         "Render (F6) builds the final model, and {} saves it as STL, 3MF and more. {ask_agent}",
@@ -347,11 +360,22 @@ mod tests {
         );
     }
 
+    /// Claude Desktop's setup passes `--root` with its Documents folder,
+    /// so its agent exports there, and each host names it its own way.
     #[test]
-    fn claude_desktop_is_not_told_to_export_through_the_agent() {
+    fn claude_desktop_exports_into_its_documents_folder() {
         let d = usage(Host::MacOs, Client::ClaudeDesktop);
-        assert!(body(&d, UsageTopic::Export).contains("can’t write"));
-        assert!(!d.examples.iter().any(|e| e.contains("export")));
+        let export = body(&d, UsageTopic::Export);
+        assert!(
+            export.contains("saves the file in Documents/NeoSCAD"),
+            "{export}"
+        );
+        assert!(!export.contains("can’t write"), "{export}");
+        assert!(d.examples.iter().any(|e| e.contains("export")));
+        assert!(body(&d, UsageTopic::KeepOpen).contains("Documents/NeoSCAD"));
+        let w = usage(Host::Windows, Client::ClaudeDesktop);
+        assert!(body(&w, UsageTopic::Export).contains("Documents\\NeoSCAD"));
+        assert!(!w.items.iter().any(|i| i.body.contains("Documents/")));
         let c = usage(Host::MacOs, Client::ClaudeCode);
         assert!(body(&c, UsageTopic::Export).contains("project folder"));
         assert!(c.examples.iter().any(|e| e.contains("export")));

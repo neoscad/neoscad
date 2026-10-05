@@ -578,6 +578,55 @@ fn an_unsafe_working_directory_is_no_root() {
     let _ = std::fs::remove_dir_all(&top);
 }
 
+/// The server the apps' Claude Desktop setup writes: started in `/`, as
+/// Claude Desktop starts it, with `--root <Documents>/NeoSCAD`
+/// (`client::agent_setup::claude_desktop_folder`). The folder is in the
+/// user's home but is no settings folder, and an explicit root counts
+/// wherever the server starts: an export lands in it, by absolute path
+/// or relative to it, and nothing goes elsewhere in home.
+#[test]
+fn claude_desktops_setup_exports_into_its_documents_folder() {
+    let top = scratch("desktop");
+    let home = top.join("home");
+    let folder = home.join("Documents").join("NeoSCAD");
+    std::fs::create_dir_all(&folder).unwrap();
+    let root = if cfg!(windows) {
+        PathBuf::from(r"C:\")
+    } else {
+        PathBuf::from("/")
+    };
+    let home_env = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let mut s = Mcp::start_with(
+        &root,
+        &["--root", &folder.to_string_lossy()],
+        &[(home_env, &home)],
+    );
+    let r = s.tool(
+        "check",
+        json!({"source": "cube(5);", "export": folder.join("cube.stl")}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(folder.join("cube.stl").is_file());
+    let r = s.tool(
+        "render",
+        json!({"source": "sphere(3);", "export": "parts/ball.3mf"}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(folder.join("parts/ball.3mf").is_file());
+    // A model saved there is found by a relative path too.
+    std::fs::write(folder.join("m.scad"), "cylinder(h = 2, r = 4);").unwrap();
+    let r = s.tool("render", json!({"path": "m.scad", "export": "m.stl"}));
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(folder.join("m.stl").is_file());
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(2);", "export": home.join("x.stl")}),
+    );
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(!home.join("x.stl").exists());
+    let _ = std::fs::remove_dir_all(&top);
+}
+
 #[test]
 fn file_access_stays_inside_the_roots() {
     let top = scratch("roots");

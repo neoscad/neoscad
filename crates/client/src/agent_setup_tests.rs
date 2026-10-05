@@ -449,8 +449,15 @@ fn every_host_gets_its_rows() {
                 .to_string()
         }
     );
-    assert_eq!(desktop.copy_text, FRESH);
+    // Claude Desktop's server gets a folder to write in: the rest of the
+    // JSON is the plain entry's.
+    assert_eq!(
+        value(&desktop.copy_text),
+        serde_json::json!({"mcpServers": {"neoscad": {"command": MAC_CLI,
+            "args": ["mcp", "--root", "/home/someone/Documents/NeoSCAD"]}}})
+    );
     assert!(desktop.note.contains("reopen Claude"));
+    assert!(desktop.note.contains("/home/someone/Documents/NeoSCAD"));
     for row in &rows {
         assert!(
             row.copy_text.contains(MAC_CLI) || row.copy_text.contains("Application Support"),
@@ -466,6 +473,28 @@ fn every_host_gets_its_rows() {
         Some(r"C:\Users\u\AppData\Roaming"),
     );
     assert_eq!(ids(&rows), Client::ALL);
+    // Without the shell's Documents folder, the one in the profile.
+    assert_eq!(
+        value(&rows[1].copy_text)["mcpServers"]["neoscad"]["args"][2],
+        r"C:\Users\u\Documents\NeoSCAD"
+    );
+    // A redirected Documents folder (OneDrive's backup) is the one used.
+    let rows = setups_in(
+        Host::Windows,
+        &win,
+        r"C:\Users\u",
+        Some(r"C:\Users\u\AppData\Roaming"),
+        r"C:\Users\u\OneDrive\Documents\",
+    );
+    assert_eq!(
+        value(&rows[1].copy_text),
+        serde_json::json!({"mcpServers": {"neoscad": {"command": WIN_CLI,
+            "args": ["mcp", "--root", r"C:\Users\u\OneDrive\Documents\NeoSCAD"]}}})
+    );
+    // Only Claude Desktop's: the others start in a project.
+    for r in rows.iter().filter(|r| r.client != Client::ClaudeDesktop) {
+        assert!(!r.copy_text.contains("\"--root\""), "{r:?}");
+    }
 
     // Linux: no Claude Desktop.
     let rows = setups(
@@ -520,4 +549,92 @@ fn rows_serialize_as_tagged_records() {
     let j = serde_json::to_value(&row).unwrap();
     assert_eq!(j["client"], "vs-code");
     assert_eq!(j["action"]["kind"], "open-url");
+}
+
+#[test]
+fn claude_desktops_folder_is_in_documents() {
+    assert_eq!(
+        default_documents(Host::MacOs, "/Users/ada/"),
+        "/Users/ada/Documents"
+    );
+    assert_eq!(
+        default_documents(Host::Windows, r"C:\Users\ada"),
+        r"C:\Users\ada\Documents"
+    );
+    assert_eq!(
+        claude_desktop_folder(Host::MacOs, "/Users/ada/Documents/").as_deref(),
+        Some("/Users/ada/Documents/NeoSCAD")
+    );
+    assert_eq!(
+        claude_desktop_folder(Host::Windows, r"D:\Docs").as_deref(),
+        Some(r"D:\Docs\NeoSCAD")
+    );
+    assert_eq!(
+        claude_desktop_folder(Host::Linux, "/home/u/Documents"),
+        None
+    );
+    assert_eq!(
+        claude_desktop_server(Host::LinuxFlatpak, &mac(), "/home/u"),
+        None
+    );
+    let s = claude_desktop_server(Host::MacOs, &mac(), "/Users/ada/Documents").unwrap();
+    assert_eq!(s.args, ["mcp", "--root", "/Users/ada/Documents/NeoSCAD"]);
+    assert_eq!(
+        s.display(Host::MacOs),
+        format!("'{MAC_CLI}' mcp --root /Users/ada/Documents/NeoSCAD")
+    );
+}
+
+/// An entry from before the setup passed `--root` is found as outdated,
+/// and the merge upgrades it in place, keeping its other fields.
+#[test]
+fn an_entry_without_the_root_is_outdated_and_upgraded() {
+    let wanted = mac().with_root("/Users/ada/Documents/NeoSCAD");
+    let old = format!(
+        r#"{{"mcpServers": {{"neoscad": {{"command": "{MAC_CLI}", "args": ["mcp"], "env": {{"A": "1"}}}}}}}}"#
+    );
+    assert_eq!(
+        claude_desktop_entry(None, &wanted),
+        Ok(ClaudeDesktopEntry::Missing)
+    );
+    assert_eq!(
+        claude_desktop_entry(Some("{\"mcpServers\": {\"x\": {}}}"), &wanted),
+        Ok(ClaudeDesktopEntry::Missing)
+    );
+    assert_eq!(
+        claude_desktop_entry(Some(&old), &wanted),
+        Ok(ClaudeDesktopEntry::Outdated)
+    );
+    // Another folder is outdated too: the app's setup is the one wanted.
+    let elsewhere = merge_claude_desktop_config(None, &mac().with_root("/tmp/x"))
+        .unwrap()
+        .text;
+    assert_eq!(
+        claude_desktop_entry(Some(&elsewhere), &wanted),
+        Ok(ClaudeDesktopEntry::Outdated)
+    );
+    // A command of the user's own is theirs, not an old setup.
+    assert_eq!(
+        claude_desktop_entry(
+            Some(r#"{"mcpServers": {"neoscad": {"command": "neoscad", "args": ["mcp"]}}}"#),
+            &wanted
+        ),
+        Ok(ClaudeDesktopEntry::Other)
+    );
+    assert!(matches!(
+        claude_desktop_entry(Some("{,}"), &wanted),
+        Err(ConfigError::InvalidJson { .. })
+    ));
+
+    let m = merge_claude_desktop_config(Some(&old), &wanted).unwrap();
+    assert_eq!(m.change, ConfigChange::Replaced);
+    assert_eq!(
+        value(&m.text),
+        serde_json::json!({"mcpServers": {"neoscad": {"command": MAC_CLI,
+            "args": ["mcp", "--root", "/Users/ada/Documents/NeoSCAD"], "env": {"A": "1"}}}})
+    );
+    assert_eq!(
+        claude_desktop_entry(Some(&m.text), &wanted),
+        Ok(ClaudeDesktopEntry::Current)
+    );
 }
