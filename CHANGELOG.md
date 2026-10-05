@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.2
+
+### Changed
+
+- **"Connect your AI agent" shows one client at a time.** A selector
+  across the top (Claude Code, Claude Desktop, Cursor, VS Code, Other;
+  Claude Desktop isn't on Linux) starts on Claude Code and remembers
+  your choice. Below it is only that client's one-click setup.
+- **New "Using NeoSCAD with your agent" section** in all three apps,
+  worded for the chosen client:
+  - keep NeoSCAD open;
+  - what to ask;
+  - how edits and saving work;
+  - how to watch the agent work;
+  - how to stay in control;
+  - how to render and export.
+- **Claude Desktop's agent can now export files.** The one-click setup
+  gives NeoSCAD a `Documents/NeoSCAD` folder to write in, and offers
+  to update an entry added by an earlier version (with a backup).
+  Relative export paths land in that folder.
+
 ## 0.4.1
 
 ### Changed
