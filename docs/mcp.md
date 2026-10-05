@@ -124,7 +124,9 @@ Desktop's file and its backup) is `agent_link::setup`
 (`crates/agent-link/src/setup.rs`), which the Linux app calls directly
 and `crates/ffi/src/agent_setup.rs` exports to Swift and C#: `agent_setup_rows(cli)`,
 `agent_setup_find_claude()`, `agent_setup_add_to_claude_code(claude,
-cli, replace)` and `agent_setup_add_to_claude_desktop(cli)`. The macOS
+cli, replace)` and `agent_setup_add_to_claude_desktop(cli)`, with the
+text the sheet shows after the setup, `agent_setup_usage(host,
+client)`, and the picker's labels, `agent_setup_short_label(client)`. The macOS
 sheet (`apple/App/Agents/AgentSetup.swift`) and the Windows dialog
 (`windows/NeoSCAD.Host/AgentSetup.cs`) call them; "The desktop apps",
 below.
@@ -589,21 +591,40 @@ Agent… and Settings > Agents reach the same place. The flow:
    documents", is off until the user turns it on; it is kept, so the app
    listens again at each launch. Clicking a client's Add while it is off
    asks once ("Let AI agents work on your open models?").
-2. **One click per client**, from the rows above: Add (Claude Code, run
-   with the `claude` the app finds; Replace when it already has a
-   `neoscad`), Open Cursor or Open VS Code (their install links), Add for
-   Claude Desktop (after the user agrees to the file change; then quit
-   and reopen Claude). Each row says what happened: Added, Already set
-   up, Not installed, or the error, and shows the command or JSON to copy
-   whenever the click could not do it.
-3. **Then just ask** the agent ("make the teeth smaller and show me").
+2. **Pick the client** in a segmented control under the switch (Claude
+   Code, Claude Desktop, Cursor, VS Code, Other): Claude Code until the
+   user picks another, then the last one picked. Only that client's
+   setup shows, with its one click, from the rows above: Add (Claude
+   Code, run with the `claude` the app finds; Replace when it already
+   has a `neoscad`), Open Cursor or Open VS Code (their install links),
+   Add for Claude Desktop (after the user agrees to the file change;
+   then quit and reopen Claude); Other has only the JSON. It says what
+   happened: Added, Already set up, Not installed, or the error, and
+   shows the command or JSON to copy whenever the click could not do it.
+3. **Using NeoSCAD with your agent**, under the setup, says what to do
+   next for the chosen client, in six short items: keep NeoSCAD open
+   (which document the agent works on, and what it can do with the app
+   closed), things to ask, edits and saving, watching it work, staying
+   in control, and rendering and exporting. It folds away, and is open
+   until the user folds it. The text is the core's
+   (`client::agent_setup::usage`, exported as `agent_setup_usage(host,
+   client)`), in each app's own keys and control names, so the Windows
+   and Linux apps can show the same section.
+4. **Then just ask** the agent ("make the teeth smaller and show me").
    The control shows the agent connected and what it is doing; its
    popover lists each agent with Disconnect, the last few things they
    did, and "Ask before applying edits", which makes each edit wait for
    Apply or Reject in a bar over the editor.
 
 An agent's edit is one highlighted step that Undo takes back; it goes
-into the buffer, which autosave then saves like the user's typing. Its
+into the buffer, which autosave then saves like the user's typing (the
+Windows and Linux apps have no autosave: there the file changes when
+the user saves). The preview runs after it as after a pause in typing.
+An agent's export (`check` or `render` with `export`) is written only
+inside the server's roots, so into the client's project folder and not
+beside a document opened from elsewhere; Claude Desktop, which has no
+project folder, cannot export, and the section says to export from the
+app instead. Its
 marks in the 3D view show a chip with a button that clears them.
 Turning the switch off (in the sheet or Settings) disconnects every
 agent at once, removes the socket and hides the toolbar control. The

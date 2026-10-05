@@ -1278,6 +1278,23 @@ lead them, come roughly in order of user impact.
   error. (T2 audit fixes)
 
 ## MCP and the agent eval
+- "Using NeoSCAD with your agent" (`client::agent_setup::usage`, FFI
+  `agent_setup_usage(host, client)`) is shown only by the macOS sheet,
+  under a client picker that shows one client's setup at a time. The
+  Windows dialog (`windows/NeoSCAD.Host/AgentSetup.cs`) and the Linux
+  page (`crates/linux-app/src/app/agent.rs`, which can call
+  `client::agent_setup::usage` directly) should show the same section
+  and picker (`Client::short_label` for the segment titles). Their text
+  was written from those apps' menus and docs, not run: check on each
+  that the preview follows an agent's edit, the "ask first" setting is
+  where the text says, and that neither has a chip clearing an agent's
+  marks (the text says so only on macOS; one may be worth adding). The
+  web page's "Things to ask" (`web/src/ui/agent.js`, `IDEAS`) is the
+  examples' source; a test keeps them in step.
+- Claude Desktop starts `neoscad mcp` with no writable root, so its
+  agent cannot export (the usage text tells the user to export from the
+  app). A Claude Desktop setup that passes `--root` (the documents'
+  folder, or `~/Documents`) would let it, at the cost of a wider fence.
 - Another program's change to the open file (an agent through `neoscad
   mcp`; `docs/audits/agent-connection-desktop.md`, finding 1) is taken
   in or reported in all three apps (`crates/client/src/disk.rs`). Left:

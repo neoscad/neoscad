@@ -18,6 +18,7 @@
 import AppKit
 import Foundation
 import NeoSCADCore
+import SwiftUI
 import Testing
 
 @testable import NeoSCAD
@@ -287,6 +288,86 @@ private func onLinkThread<T: Sendable>(_ body: @escaping @Sendable () throws -> 
             Issue.record("\(model.state(.cursor))")
             return
         }
+    }
+
+    /// The client picker: Claude Code until the user picks another, the
+    /// pick kept for the next sheet, and each client's panel with its own
+    /// button.
+    @Test func pickerStartsOnClaudeCodeAndKeepsTheChoice() throws {
+        let suite = "agent-tests-picker"
+        UserDefaults().removePersistentDomain(forName: suite)
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let service = AgentService(defaults: try #require(UserDefaults(suiteName: suite)))
+        let cli = "/Apps/NeoSCAD/bin/neoscad"
+        var model = AgentSetupModel(service: service, cli: cli)
+        #expect(model.selected == .claudeCode)
+        #expect(model.selectedRow?.action == .runClaude)
+        #expect(model.usageOpen)
+        #expect(
+            model.rows.map { AgentSetupModel.shortLabel($0.client) }
+                == ["Claude Code", "Claude Desktop", "Cursor", "VS Code", "Other"])
+
+        model.selected = .cursor
+        model.usageOpen = false
+        model = AgentSetupModel(service: service, cli: cli)
+        #expect(model.selected == .cursor)
+        #expect(!model.usageOpen)
+
+        // Each client's panel: its row, and the button it shows.
+        var titles: [AgentSetupClient: String] = [:]
+        for client in model.rows.map(\.client) {
+            model.selected = client
+            let row = try #require(model.selectedRow)
+            #expect(row.client == client)
+            titles[client] = AgentSetupRowView.actionTitle(row) ?? "(none)"
+        }
+        #expect(
+            titles == [
+                .claudeCode: "Add", .claudeDesktop: "Add", .cursor: "Open Cursor",
+                .vsCode: "Open VS Code", .other: "(none)",
+            ])
+        if case .mergeConfig = model.rows[1].action {} else { Issue.record("\(model.rows[1].action)") }
+        #expect(model.rows.last?.action == .copyOnly)
+        // The last one picked (Other) is kept too.
+        #expect(AgentSetupModel(service: service, cli: cli).selected == .other)
+
+        // A name the app does not know falls back to Claude Code.
+        service.defaults.set("emacs", forKey: AgentSetupModel.selectedKey)
+        #expect(AgentSetupModel(service: service, cli: cli).selected == .claudeCode)
+    }
+
+    /// "Using NeoSCAD with your agent": the core's items, in the Mac's
+    /// words, for the chosen client.
+    @Test func usageSectionHasItsItems() throws {
+        let suite = "agent-tests-usage"
+        UserDefaults().removePersistentDomain(forName: suite)
+        defer { UserDefaults().removePersistentDomain(forName: suite) }
+        let service = AgentService(defaults: try #require(UserDefaults(suiteName: suite)))
+        let model = AgentSetupModel(service: service, cli: "/Apps/NeoSCAD/bin/neoscad")
+        let usage = model.usage
+        #expect(
+            usage.items.map(\.title) == [
+                "Keep NeoSCAD open", "Things to ask", "Edits and saving", "Watching it work",
+                "Staying in control", "Rendering and exporting",
+            ])
+        #expect(usage.items.map(\.topic) == [.keepOpen, .whatToAsk, .edits, .seeing, .control, .export])
+        let edits = try #require(usage.items.first { $0.topic == .edits }).body
+        #expect(edits.contains("⌘Z") && edits.contains("⌘S"))
+        #expect(!usage.examples.isEmpty)
+        #expect(usage.examples.contains { $0.contains("export") })
+
+        // Claude Desktop cannot write files, so it is told to export from
+        // the app, and is not offered an export request.
+        model.selected = .claudeDesktop
+        let desktop = model.usage
+        #expect(try #require(desktop.items.last).body.contains("can’t write"))
+        #expect(!desktop.examples.contains { $0.contains("export") })
+
+        // The sheet lays out with the section open, in its width.
+        let view = NSHostingView(rootView: AgentSetupContent(service: service, model: model))
+        view.frame.size.width = AgentSetupView.size.width - 40
+        view.layoutSubtreeIfNeeded()
+        #expect(view.fittingSize.height > 600)
     }
 
     // MARK: The host

@@ -244,6 +244,7 @@ apps").
 | The macOS and Windows apps' API (UniFFI) | `crates/ffi/src/agent.rs`; the Linux app uses `agent_link` and `client::agent` directly |
 | The Linux app's side: consent, the host that hops to the GTK main loop, the button, page and requests | `crates/linux-app/src/agent.rs`, `src/app/agent.rs`, `src/app/window/agent.rs` (`docs/linux-app.md`, "AI agents") |
 | Setting up clients: finding and running `claude`, Claude Desktop's file | `crates/agent-link/src/setup.rs` (`ffi` exports it; the Linux app calls it) |
+| What to tell the user after the setup ("Using NeoSCAD with your agent"), per host and client | `crates/client/src/agent_setup/usage.rs` (`ffi`: `agent_setup_usage`); shown by the macOS sheet so far |
 | The command line's side: discovery, connections, documents | `crates/cli/src/mcp/app.rs` |
 | The tools (shared with the web page) | `crates/cli/src/mcp/tools/browser.rs` (`Surface`) |
 | Tests | `crates/agent-link/tests/link.rs`; `crates/cli/tests/app.rs` (the real `neoscad mcp` against a test app over the real socket) |

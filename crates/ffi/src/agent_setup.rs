@@ -248,9 +248,95 @@ pub fn agent_setup_add_to_claude_desktop(cli: String) -> Result<ClaudeDesktopOut
     })
 }
 
+impl From<AgentSetupClient> for setup::Client {
+    fn from(c: AgentSetupClient) -> Self {
+        match c {
+            AgentSetupClient::ClaudeCode => setup::Client::ClaudeCode,
+            AgentSetupClient::ClaudeDesktop => setup::Client::ClaudeDesktop,
+            AgentSetupClient::Cursor => setup::Client::Cursor,
+            AgentSetupClient::VsCode => setup::Client::VsCode,
+            AgentSetupClient::Other => setup::Client::Other,
+        }
+    }
+}
+
+/// The client's name in a picker of all of them side by side: "Other"
+/// for "Other MCP clients", which would make its segment twice as wide.
+#[uniffi::export]
+pub fn agent_setup_short_label(client: AgentSetupClient) -> String {
+    setup::Client::from(client).short_label().to_string()
+}
+
+/// What an item of "Using NeoSCAD with your agent" is about
+/// (`client::agent_setup::UsageTopic`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AgentUsageTopic {
+    KeepOpen,
+    WhatToAsk,
+    Edits,
+    Seeing,
+    Control,
+    Export,
+}
+
+/// One headed item of the section.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AgentUsageItem {
+    pub topic: AgentUsageTopic,
+    pub title: String,
+    pub body: String,
+}
+
+/// "Using NeoSCAD with your agent": the items in order, and the example
+/// requests to show under the `WhatToAsk` item.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AgentUsage {
+    pub items: Vec<AgentUsageItem>,
+    pub examples: Vec<String>,
+}
+
+/// The section for `client` on `host` (pass [`agent_setup_host`]): the
+/// same text in every app, with the host's own keys and control names
+/// (`client::agent_setup::usage`).
+#[uniffi::export]
+pub fn agent_setup_usage(host: AgentSetupHost, client: AgentSetupClient) -> AgentUsage {
+    let u = setup::usage(host.into(), client.into());
+    AgentUsage {
+        items: u
+            .items
+            .into_iter()
+            .map(|i| AgentUsageItem {
+                topic: match i.topic {
+                    setup::UsageTopic::KeepOpen => AgentUsageTopic::KeepOpen,
+                    setup::UsageTopic::WhatToAsk => AgentUsageTopic::WhatToAsk,
+                    setup::UsageTopic::Edits => AgentUsageTopic::Edits,
+                    setup::UsageTopic::Seeing => AgentUsageTopic::Seeing,
+                    setup::UsageTopic::Control => AgentUsageTopic::Control,
+                    setup::UsageTopic::Export => AgentUsageTopic::Export,
+                },
+                title: i.title,
+                body: i.body,
+            })
+            .collect(),
+        examples: u.examples,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_crosses_with_the_hosts_keys() {
+        let mac = agent_setup_usage(AgentSetupHost::MacOs, AgentSetupClient::ClaudeCode);
+        assert_eq!(mac.items.len(), 6);
+        assert_eq!(mac.items[0].topic, AgentUsageTopic::KeepOpen);
+        assert!(mac.items.iter().any(|i| i.body.contains("⌘Z")));
+        let win = agent_setup_usage(AgentSetupHost::Windows, AgentSetupClient::Cursor);
+        assert!(win.items.iter().any(|i| i.body.contains("Ctrl+Z")));
+        assert!(!win.examples.is_empty());
+        assert_eq!(agent_setup_short_label(AgentSetupClient::Other), "Other");
+    }
 
     // The file and process work is tested where it lives,
     // `crates/agent-link/src/setup.rs`.

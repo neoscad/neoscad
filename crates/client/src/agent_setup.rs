@@ -37,10 +37,17 @@
 //!   asks for a restart (modelcontextprotocol.io/docs/develop/
 //!   connect-local-servers).
 //! - **Other:** the JSON to copy.
+//!
+//! After the setup, what using it is like ("Using NeoSCAD with your
+//! agent": which document, saving, undo, the view, export) is
+//! [`usage`], per host and client, from `agent_setup/usage.rs`.
 
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 use serde::{Deserialize, Serialize};
+
+mod usage;
+pub use usage::{Usage, UsageItem, UsageTopic, usage};
 
 /// The name every setup registers the server under.
 pub const SERVER_NAME: &str = "neoscad";
@@ -167,6 +174,16 @@ impl Client {
             Client::Cursor => "Cursor",
             Client::VsCode => "VS Code",
             Client::Other => "Other MCP clients",
+        }
+    }
+
+    /// The label in a picker of all five side by side (a segmented
+    /// control, tabs): "Other MCP clients" would make its segment twice
+    /// the width of the rest, so it is "Other" there, as on the /try page.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Client::Other => "Other",
+            c => c.label(),
         }
     }
 }

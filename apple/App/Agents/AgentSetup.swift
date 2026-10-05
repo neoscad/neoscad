@@ -20,6 +20,17 @@
 // the config edit block (up to 60 s for `claude`), so they run off the
 // main thread; the sheet stays live meanwhile.
 //
+// Layout. The clients are a segmented control (Claude Code first, and
+// chosen until the user picks another; the choice is kept), and only the
+// chosen client's row shows below it: five rows at once made the sheet a
+// wall of buttons and JSON, most of it for clients the user does not have.
+// Under the setup, "Using NeoSCAD with your agent" answers what a user
+// asks right after connecting (keep the app open? does it save? where do
+// I see it?), for the chosen client. Its text is the core's
+// (`agentSetupUsage`, crates/client/src/agent_setup/usage.rs), shared
+// with the Windows and Linux apps; the section folds away, open until the
+// user closes it.
+//
 // Consent. The first switch is the user's consent for agents to work on
 // open documents (off until turned on, the owner's decision 2). Adding a
 // client while it is off asks once, with the audit's wording, since an
@@ -60,6 +71,23 @@ final class AgentSetupModel {
     /// Whether the command-line tool the configs name exists.
     let cliPresent: Bool
 
+    /// The defaults' keys: the client last chosen, and whether the usage
+    /// section is open. Kept in the service's defaults, which the tests
+    /// replace with a suite of their own.
+    static let selectedKey = "AgentSetupClient"
+    static let usageOpenKey = "AgentUsageExpanded"
+
+    /// The client whose setup shows: Claude Code until the user picks
+    /// another, then the last one picked.
+    var selected: AgentSetupClient {
+        didSet { service.defaults.set(Self.name(selected), forKey: Self.selectedKey) }
+    }
+    /// "Using NeoSCAD with your agent" is open: at first, and until the
+    /// user folds it.
+    var usageOpen: Bool {
+        didSet { service.defaults.set(usageOpen, forKey: Self.usageOpenKey) }
+    }
+
     // What the machine is asked, replaceable in the tests.
     @ObservationIgnored var findClaude: @Sendable () -> String? = { agentSetupFindClaude() }
     @ObservationIgnored var addToClaudeCode: @Sendable (String, String, Bool) throws -> ClaudeCodeOutcome = {
@@ -84,12 +112,49 @@ final class AgentSetupModel {
     ) {
         self.service = service
         self.cli = cli
-        rows = agentSetupRows(cli: cli)
+        let rows = agentSetupRows(cli: cli)
+        self.rows = rows
         cliPresent = FileManager.default.isExecutableFile(atPath: cli)
+        let kept = (service.defaults.string(forKey: Self.selectedKey)).flatMap(Self.client(named:))
+        // A kept client this host does not list (none today) falls back.
+        selected =
+            [kept, .claudeCode].compactMap { $0 }.first { c in rows.contains { $0.client == c } }
+            ?? rows.first?.client ?? .claudeCode
+        usageOpen = service.defaults.object(forKey: Self.usageOpenKey) as? Bool ?? true
     }
 
     func state(_ client: AgentSetupClient) -> AgentSetupState {
         states[client] ?? .idle
+    }
+
+    /// The chosen client's row.
+    var selectedRow: AgentSetupRow? {
+        rows.first { $0.client == selected }
+    }
+
+    /// "Using NeoSCAD with your agent" for the chosen client.
+    var usage: AgentUsage {
+        agentSetupUsage(host: agentSetupHost(), client: selected)
+    }
+
+    /// The segment's title: "Other" for "Other MCP clients".
+    static func shortLabel(_ client: AgentSetupClient) -> String {
+        agentSetupShortLabel(client: client)
+    }
+
+    /// The kept names, as the core spells the clients (`kebab-case`).
+    static func name(_ c: AgentSetupClient) -> String {
+        switch c {
+        case .claudeCode: "claude-code"
+        case .claudeDesktop: "claude-desktop"
+        case .cursor: "cursor"
+        case .vsCode: "vs-code"
+        case .other: "other"
+        }
+    }
+
+    static func client(named name: String) -> AgentSetupClient? {
+        [.claudeCode, .claudeDesktop, .cursor, .vsCode, .other].first { Self.name($0) == name }
     }
 
     /// What can be known without acting: whether each client is
@@ -215,6 +280,9 @@ final class AgentSetupModel {
 // MARK: The sheet
 
 struct AgentSetupView: View {
+    /// The sheet's size, for the windows that hold it.
+    static let size = NSSize(width: 580, height: 700)
+
     @Bindable var service: AgentService
     let model: AgentSetupModel
     var done: () -> Void
@@ -222,17 +290,11 @@ struct AgentSetupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    header
-                    consent
-                    clients
-                    cliNote
-                }
-                .padding(20)
+                AgentSetupContent(service: service, model: model)
+                    .padding(20)
             }
             Divider()
             HStack {
-                Link("Using NeoSCAD with AI Agents", destination: AgentHelp.url)
                 Spacer()
                 Button("Done", action: done)
                     .keyboardShortcut(.defaultAction)
@@ -240,8 +302,32 @@ struct AgentSetupView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
         }
-        .frame(width: 560, height: 640)
+        .frame(width: Self.size.width, height: Self.size.height)
         .onAppear { model.look() }
+    }
+}
+
+/// Everything the sheet scrolls: the consent and status, the client
+/// picker and the chosen client's setup, then how to use it.
+struct AgentSetupContent: View {
+    @Bindable var service: AgentService
+    @Bindable var model: AgentSetupModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            header
+            consent
+            clients
+            cliNote
+            Divider()
+            DisclosureGroup(isExpanded: $model.usageOpen) {
+                AgentUsageView(usage: model.usage)
+                    .padding(.top, 10)
+            } label: {
+                Text("Using NeoSCAD with your agent").font(.headline)
+            }
+            .accessibilityIdentifier("agent-usage")
+        }
     }
 
     private var header: some View {
@@ -286,9 +372,22 @@ struct AgentSetupView: View {
     private var clients: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Add NeoSCAD to your agent").font(.headline)
-            ForEach(model.rows, id: \.client) { row in
-                AgentSetupRowView(row: row, model: model)
-                if row.client != model.rows.last?.client { Divider() }
+            Picker("Agent", selection: $model.selected) {
+                ForEach(model.rows, id: \.client) { row in
+                    Text(AgentSetupModel.shortLabel(row.client)).tag(row.client)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityIdentifier("agent-client-picker")
+            if let row = model.selectedRow {
+                GroupBox {
+                    AgentSetupRowView(row: row, model: model)
+                        .padding(6)
+                }
+                // A view of its own per client, so "Show the JSON" and
+                // "Copied" do not carry over to the next one.
+                .id(row.client)
             }
         }
     }
@@ -302,6 +401,59 @@ struct AgentSetupView: View {
             .font(.caption)
             .foregroundStyle(.orange)
             .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// "Using NeoSCAD with your agent": a few headed items, a sentence or two
+/// each, and the example requests under "Things to ask".
+struct AgentUsageView: View {
+    let usage: AgentUsage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(usage.items, id: \.topic) { item in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Image(systemName: Self.symbol(item.topic))
+                        .foregroundStyle(.tint)
+                        .frame(width: 18)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.title).bold()
+                        Text(item.body)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if item.topic == .whatToAsk {
+                            examples
+                        }
+                    }
+                }
+            }
+            Link("Learn more", destination: AgentHelp.url)
+                .padding(.leading, 28)
+        }
+        .font(.callout)
+        .textSelection(.enabled)
+    }
+
+    private var examples: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(usage.examples, id: \.self) { e in
+                Text("“\(e)”").italic()
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    static func symbol(_ topic: AgentUsageTopic) -> String {
+        switch topic {
+        case .keepOpen: "macwindow"
+        case .whatToAsk: "text.bubble"
+        case .edits: "arrow.uturn.backward"
+        case .seeing: "eye"
+        case .control: "hand.raised"
+        case .export: "square.and.arrow.up"
         }
     }
 }
@@ -325,8 +477,8 @@ struct AgentSetupRowView: View {
                 if case .alreadySetUp = state, row.action == .runClaude {
                     Button("Replace") { Task { await model.replaceClaudeCode(row) } }
                 }
-                if row.action != .copyOnly {
-                    Button(addTitle) { Task { await model.add(row) } }
+                if let title = Self.actionTitle(row) {
+                    Button(title) { Task { await model.add(row) } }
                         .disabled(state == .working)
                         .accessibilityIdentifier("agent-add-\(row.label)")
                 }
@@ -361,10 +513,13 @@ struct AgentSetupRowView: View {
         }
     }
 
-    private var addTitle: String {
+    /// The one-click button's title; none for a client with only text to
+    /// copy.
+    static func actionTitle(_ row: AgentSetupRow) -> String? {
         switch row.action {
         case .openUrl: "Open \(row.label)"
-        default: "Add"
+        case .runClaude, .mergeConfig: "Add"
+        case .copyOnly: nil
         }
     }
 
@@ -431,7 +586,7 @@ enum AgentSetupPresenter {
         let front = NSApp.keyWindow ?? NSApp.mainWindow
         if let front, front.windowController?.document is SCADDocument, front.attachedSheet == nil {
             let sheet = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+                contentRect: NSRect(origin: .zero, size: AgentSetupView.size),
                 styleMask: [.titled], backing: .buffered, defer: false)
             sheet.contentViewController = NSHostingController(
                 rootView: AgentSetupView(service: service, model: model) { [weak front, weak sheet] in
@@ -446,7 +601,7 @@ enum AgentSetupPresenter {
             return
         }
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+            contentRect: NSRect(origin: .zero, size: AgentSetupView.size),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Connect your AI agent"
         window.isReleasedWhenClosed = false
