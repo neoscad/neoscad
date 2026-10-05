@@ -1279,20 +1279,19 @@ lead them, come roughly in order of user impact.
 
 ## MCP and the agent eval
 - "Using NeoSCAD with your agent" (`client::agent_setup::usage`, FFI
-  `agent_setup_usage(host, client)`) is shown by the macOS sheet and
-  the Windows dialog, each under a client picker that shows one client's
-  setup at a time (Windows: a `SelectorBar` and an `Expander`,
-  `windows/NeoSCAD.App/MainWindow.Agents.cs`; what is left to see on a
-  Windows machine is under "Windows", the agent UI item). The Linux page
-  (`crates/linux-app/src/app/agent.rs`, which can call
-  `client::agent_setup::usage` directly) should show the same section
-  and picker (`Client::short_label` for the segment titles). Its text
-  was written from the app's menus and docs, not run: check that the
-  preview follows an agent's edit, the "ask first" setting is where the
-  text says, and that it has no chip clearing an agent's marks (the
-  text says so only on macOS; one may be worth adding on Linux and
-  Windows). The web page's "Things to ask" (`web/src/ui/agent.js`,
-  `IDEAS`) is the examples' source; a test keeps them in step.
+  `agent_setup_usage(host, client)`) is shown by all three apps, each
+  under a client picker that shows one client's setup at a time (macOS:
+  a segmented control; Windows: a `SelectorBar` and an `Expander`,
+  `windows/NeoSCAD.App/MainWindow.Agents.cs`; Linux: linked toggle
+  buttons, `crates/linux-app/src/app/agent.rs`). The Linux text was
+  checked against the app: the smoke test sees the preview run after an
+  agent's edit, the switch is on Preferences > Agents, and there is no
+  chip. On Windows it was checked by reading the code only; what is left
+  to see on a Windows machine is under "Windows", the agent UI item.
+  Only macOS has a chip clearing an agent's marks (the text says so only
+  there); one may be worth adding on Linux and Windows. The web page's
+  "Things to ask" (`web/src/ui/agent.js`, `IDEAS`) is the examples'
+  source; a test keeps them in step.
 - **Done: pass `--root` in Claude Desktop's setup.** Its entry is now
   `<cli> mcp --root <Documents>/NeoSCAD` (the owner's choice of folder),
   made by the setup, so its agent can export; relative paths resolve

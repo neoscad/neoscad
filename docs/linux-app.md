@@ -296,18 +296,33 @@ document the user is looking at.
      edits** (off, as on the web).
   2. *Connected Agents*: each with Disconnect, or "No agent connected"
      with an example of what to ask.
-  3. *Set Up an Agent*: a row per client from `client::agent_setup`.
-     Claude Code's **Add** runs `claude mcp add --scope user neoscad --
-     <cli> mcp` off the main loop (finding `claude` as
-     `agent_link::setup::find_claude` does, the login shell included),
-     asks before replacing an existing `neoscad`, and says what happened.
-     Cursor's and VS Code's buttons open their install links with
-     `GtkUriLauncher` (the OpenURI portal in the Flatpak); a link nothing
-     handles says so and opens the row's JSON. Every row expands to the
-     command or JSON with a copy button. Claude Desktop is not listed: it
-     does not run on Linux. A setup button pressed while agents are not
-     allowed first asks "Let AI agents work on your open models?" (Allow
-     / Not Now; either way the setup goes on).
+  3. *Set Up an Agent*: a row of linked toggle buttons, one per client
+     from `client::agent_setup` (Claude Code, Cursor, VS Code, Other,
+     with `Client::short_label`; Claude Desktop is not listed, as it does
+     not run on Linux), and under it only the chosen client's row. The
+     page opens on the client picked last (`setupClient` in
+     `agents.json`), else Claude Code. `AdwToggleGroup` would be the
+     libadwaita way, but needs 1.7; the app targets 1.5. Claude Code's
+     **Add** runs `claude mcp add --scope user neoscad -- <cli> mcp` off
+     the main loop (finding `claude` as `agent_link::setup::find_claude`
+     does, the login shell included), asks before replacing an existing
+     `neoscad`, and says what happened. Cursor's and VS Code's buttons
+     open their install links with `GtkUriLauncher` (the OpenURI portal
+     in the Flatpak); a link nothing handles says so and opens the row's
+     JSON. Every row expands to the command or JSON with a copy button,
+     and a row with nothing to click (Other, and Claude Code in the
+     Flatpak) shows it expanded. A note under the row names the
+     `neoscad` the setups run. A setup button pressed while agents are
+     not allowed first asks "Let AI agents work on your open models?"
+     (Allow / Not Now; either way the setup goes on).
+  4. *Using NeoSCAD with your agent*: the core's text for the chosen
+     client on Linux (`client::agent_setup::usage`, shared with the macOS
+     and Windows apps; `linux_app::agent::usage_rows` adds an icon to
+     each item): six rows, each item's title and body, with *Things to
+     ask* open onto its example requests, each with a copy button, and
+     **Learn more** (neoscad.org/agents.html) in the header. It follows
+     the selector. It does not fold as a whole (a preferences group
+     cannot); *Things to ask* folds.
 - **An agent's edit** lands in the editor through `agentEdit`: one
   undoable step, highlighted for 8 s, the user's selection kept, then the
   usual preview. It goes into the buffer, not the file; the user saves.
@@ -338,7 +353,7 @@ app listens in `$XDG_RUNTIME_DIR/app/org.neoscad.NeoSCAD/`, which a
 
 | Where | What |
 |---|---|
-| `src/agent.rs` | The consent and its file, which `neoscad` setups name, the header button's look, the edit's version checks, captures' sizes, the camera, the marks layer, and `MainLoopHost`, the `AgentHost` that carries each request to the main loop |
+| `src/agent.rs` | The consent and its file, the setup page's client and usage rows, which `neoscad` setups name, the header button's look, the edit's version checks, captures' sizes, the camera, the marks layer, and `MainLoopHost`, the `AgentHost` that carries each request to the main loop |
 | `src/app/agent.rs` | The process's `AgentLink`, the status observer, the header button and popover, the Agents page and the setup actions |
 | `src/app/window/agent.rs` | A window's side of each request, and the approval bar |
 | `agent_link::setup` | Finding and running `claude` (shared with the macOS and Windows apps, which reach it through `crates/ffi`) |
@@ -453,7 +468,10 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
   `customizer-`, `check-` and `measure-light.png` and `-dark.png`. It
   kills the app above 2 GB of memory.
 - AI agents: `cargo test -p neoscad-linux-app` covers the consent (off by
-  default, kept, a damaged file granting nothing), which `neoscad` setups
+  default, kept, a damaged file granting nothing), the setup page's
+  client (Claude Code first, the last pick kept, Claude Desktop never
+  offered), its usage rows (the shared text word for word, examples only
+  under *Things to ask*, Linux's keys and controls), which `neoscad` setups
   name, the header button's states and toasts, edits refused on another
   version or with the editor out of step and `agentEdit`'s arguments and
   answers, captures' sizes, the marks layer, and `MainLoopHost` against
@@ -466,9 +484,14 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
   `editor_edit` (the edit lands in the editor and runs, the file stays as
   it was), an edit on the old version refused, `view_camera`,
   `view_annotate` (the marker drawn) and `view_capture`; with `SHOTS` it
-  also opens the popover and the Agents dialog, saves `agent-`,
-  `agent-popover-` and `agent-dialog-light.png` and `-dark.png`, and
-  presses the popover's Disconnect.
+  also opens the popover and the Agents dialog, picks each client in
+  turn (the last pick kept in `agents.json`, and the dialog opened again
+  on it), scrolls to the usage section, saves `agent-`, `agent-popover-`,
+  `agent-dialog-`, `agent-dialog-cursor-`, `agent-dialog-vs-code-`,
+  `agent-dialog-other-` and `agent-usage-light.png` and `-dark.png`, and
+  presses the popover's Disconnect. The clicks are at fixed coordinates
+  in the 1400×900 screen; a change to the page above the selector moves
+  them.
 - CI's `linux-app` job (ubuntu-24.04) runs clippy and the tests with the
   `gtk` feature, builds the app and the command line and the editor
   bundle, and runs the smoke test with typing.

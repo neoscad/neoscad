@@ -20,6 +20,7 @@ use client::agent::{
     AgentEditOutcome, AgentEditRequest, AgentHost, AgentStatus, AgentTextEdit, CAPTURE_MAX,
     CAPTURE_MIN, EditorPosition, VIEWS,
 };
+use client::agent_setup::{Client, Host, UsageTopic};
 use client::{ViewLine, ViewMarker};
 use render::viewport::{AnnotationLine, AnnotationMarker, Annotations, Viewport};
 use serde_json::{Value, json};
@@ -40,6 +41,10 @@ pub struct Settings {
     /// then hides, and the main menu's item is the way back. Someone who
     /// never tried them keeps the button, which is how they find them.
     pub turned_off: bool,
+    /// The client last picked in the Agents page's selector, so the page
+    /// opens on the client the user has rather than on Claude Code each
+    /// time; `None` until they pick one ([`chosen_client`]).
+    pub setup_client: Option<Client>,
 }
 
 impl Settings {
@@ -49,6 +54,10 @@ impl Settings {
             allowed: v["allowed"].as_bool().unwrap_or(false),
             ask_first: v["askFirst"].as_bool().unwrap_or(false),
             turned_off: v["turnedOff"].as_bool().unwrap_or(false),
+            // A name this build does not know (a newer app's client, a
+            // typo) is no choice, rather than a reason to drop the
+            // consent read above.
+            setup_client: serde_json::from_value(v["setupClient"].clone()).ok(),
         }
     }
 
@@ -57,6 +66,7 @@ impl Settings {
             "allowed": self.allowed,
             "askFirst": self.ask_first,
             "turnedOff": self.turned_off,
+            "setupClient": self.setup_client,
         }))
         .unwrap_or_default()
     }
@@ -103,6 +113,71 @@ impl Settings {
 pub fn settings_path(config_dir: &Path) -> PathBuf {
     config_dir.join("neoscad").join("agents.json")
 }
+
+// --- The Agents page's client selector and usage section -------------------
+
+/// The client whose setup the page shows, from those it `offers` (the
+/// host's setups, in their order): the one the user picked last, else
+/// Claude Code, which most users of the page have, else the first. A kept
+/// client the host does not offer (Claude Desktop, picked on another
+/// platform's settings or by hand) falls back rather than showing nothing.
+pub fn chosen_client(kept: Option<Client>, offers: &[Client]) -> Client {
+    [kept, Some(Client::ClaudeCode)]
+        .into_iter()
+        .flatten()
+        .find(|c| offers.contains(c))
+        .or_else(|| offers.first().copied())
+        .unwrap_or(Client::ClaudeCode)
+}
+
+/// One row of "Using NeoSCAD with your agent": an item of the shared text
+/// (`client::agent_setup::usage`) with the icon the page gives it, and
+/// the example requests for the row that has them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageRow {
+    pub icon: &'static str,
+    pub title: String,
+    pub body: String,
+    /// Shown under "Things to ask" only; empty elsewhere.
+    pub examples: Vec<String>,
+}
+
+/// The rows for `client` on `host`, in the shared text's order. The text
+/// is the core's, word for word, so the three apps cannot drift apart;
+/// only the icons are this app's. They are Adwaita's standard symbolic
+/// names, which the GNOME runtime and Ubuntu's icon theme both carry.
+pub fn usage_rows(host: Host, client: Client) -> Vec<UsageRow> {
+    let usage = client::agent_setup::usage(host, client);
+    usage
+        .items
+        .into_iter()
+        .map(|item| UsageRow {
+            icon: usage_icon(item.topic),
+            examples: if item.topic == UsageTopic::WhatToAsk {
+                usage.examples.clone()
+            } else {
+                Vec::new()
+            },
+            title: item.title,
+            body: item.body,
+        })
+        .collect()
+}
+
+fn usage_icon(topic: UsageTopic) -> &'static str {
+    match topic {
+        UsageTopic::KeepOpen => "window-new-symbolic",
+        UsageTopic::WhatToAsk => "dialog-question-symbolic",
+        UsageTopic::Edits => "edit-undo-symbolic",
+        UsageTopic::Seeing => "view-reveal-symbolic",
+        UsageTopic::Control => "emblem-ok-symbolic",
+        UsageTopic::Export => "document-save-as-symbolic",
+    }
+}
+
+/// The page's "Learn more": the website's guide to agents, which covers
+/// every client and the command line in more depth than the page can.
+pub const LEARN_MORE_URL: &str = "https://neoscad.org/agents.html";
 
 // --- Which `neoscad` clients run --------------------------------------------
 
@@ -560,6 +635,94 @@ mod tests {
         std::fs::write(&path, "{\"allowed\": tru").unwrap();
         assert!(!Settings::load(&path).allowed);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_selector_opens_on_claude_code_then_on_the_last_pick() {
+        let linux: Vec<Client> = client::agent_setup::setups(
+            Host::Linux,
+            &client::agent_setup::ServerCommand::for_host(Host::Linux, "/usr/bin/neoscad"),
+            "/home/u",
+            None,
+        )
+        .iter()
+        .map(|r| r.client)
+        .collect();
+        // Claude Desktop has no Linux build, so the selector never offers it.
+        assert_eq!(
+            linux,
+            [
+                Client::ClaudeCode,
+                Client::Cursor,
+                Client::VsCode,
+                Client::Other
+            ]
+        );
+        assert_eq!(chosen_client(None, &linux), Client::ClaudeCode);
+        assert_eq!(chosen_client(Some(Client::VsCode), &linux), Client::VsCode);
+        assert_eq!(
+            chosen_client(Some(Client::ClaudeDesktop), &linux),
+            Client::ClaudeCode
+        );
+        assert_eq!(
+            chosen_client(Some(Client::ClaudeDesktop), &[Client::Other]),
+            Client::Other
+        );
+
+        // The pick is kept in agents.json beside the consent, and a name
+        // this build does not know leaves the consent intact.
+        let dir = std::env::temp_dir().join(format!("neoscad-agents-pick-{}", std::process::id()));
+        let path = settings_path(&dir);
+        assert_eq!(Settings::load(&path).setup_client, None);
+        let s = Settings {
+            allowed: true,
+            setup_client: Some(Client::Cursor),
+            ..Settings::default()
+        };
+        s.save(&path).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"setupClient\": \"cursor\"")
+        );
+        assert_eq!(Settings::load(&path), s);
+        let s = Settings::from_json(br#"{"allowed": true, "setupClient": "zed"}"#);
+        assert!(s.allowed);
+        assert_eq!(s.setup_client, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_usage_rows_are_the_shared_text_with_examples_under_things_to_ask() {
+        for host in [Host::Linux, Host::LinuxFlatpak] {
+            for c in [
+                Client::ClaudeCode,
+                Client::Cursor,
+                Client::VsCode,
+                Client::Other,
+            ] {
+                let shared = client::agent_setup::usage(host, c);
+                let rows = usage_rows(host, c);
+                assert_eq!(rows.len(), 6);
+                for (row, item) in rows.iter().zip(&shared.items) {
+                    assert_eq!((&row.title, &row.body), (&item.title, &item.body));
+                    assert!(row.icon.ends_with("-symbolic"));
+                    if item.topic == UsageTopic::WhatToAsk {
+                        assert_eq!(row.examples, shared.examples);
+                    } else {
+                        assert!(row.examples.is_empty(), "{}", row.title);
+                    }
+                }
+                let icons: std::collections::HashSet<_> = rows.iter().map(|r| r.icon).collect();
+                assert_eq!(icons.len(), rows.len());
+                // What this app has: Ctrl keys, no autosave, no marks chip,
+                // the header button and Preferences > Agents.
+                let all: String = rows.iter().map(|r| r.body.as_str()).collect();
+                assert!(!all.contains('⌘') && !all.contains("chip"));
+                assert!(all.contains("Ctrl+Z") && all.contains("only when you save"));
+                assert!(all.contains("header bar") && all.contains("Preferences > Agents"));
+            }
+        }
     }
 
     #[test]

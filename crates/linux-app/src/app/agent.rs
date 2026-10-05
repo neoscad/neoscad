@@ -599,7 +599,8 @@ pub fn show_dialog(sh: &Rc<Shared>, parent: Option<&gtk::Window>) {
     dialog.present(parent);
 }
 
-/// The Agents page: consent, who is connected, and the setup rows. Shown
+/// The Agents page: consent, who is connected, the chosen client's setup,
+/// and how to work with the agent once it is set up. Shown
 /// on its own (`show_dialog`) and in Preferences.
 pub fn page(sh: &Rc<Shared>) -> adw::PreferencesPage {
     let p = Rc::new(AgentPage::new(sh));
@@ -660,7 +661,9 @@ impl AgentPage {
             .build();
         page.add(&connected);
 
-        page.add(&setup_group(sh));
+        let (set_up, usage) = client_groups(sh);
+        page.add(&set_up);
+        page.add(&usage);
 
         let p = AgentPage {
             page,
@@ -727,10 +730,17 @@ impl AgentPage {
     }
 }
 
-/// "Set Up an Agent": a row per client, each doing its client's own
-/// install (`client::agent_setup`), and always the command or JSON to
-/// copy.
-fn setup_group(sh: &Rc<Shared>) -> adw::PreferencesGroup {
+/// "Set Up an Agent" and "Using NeoSCAD with your agent".
+///
+/// The clients are a row of linked toggle buttons (GNOME's segmented
+/// control; `AdwToggleGroup` needs libadwaita 1.7, and the app targets
+/// 1.5), and only the chosen client's setup shows below them: four
+/// expandable rows at once made the page a wall of buttons and JSON, most
+/// of it for clients the user does not have. The page opens on the client
+/// picked last (kept in agents.json), else Claude Code. The usage section
+/// under it is the core's text for that client (`client::agent_setup::
+/// usage`, shared with the macOS and Windows apps), so it follows the pick.
+fn client_groups(sh: &Rc<Shared>) -> (adw::PreferencesGroup, adw::PreferencesGroup) {
     let a = &sh.agents;
     let description = if a.host == setup::Host::LinuxFlatpak {
         "NeoSCAD runs in a Flatpak sandbox, so agents start its command-line tool with \
@@ -745,13 +755,175 @@ fn setup_group(sh: &Rc<Shared>) -> adw::PreferencesGroup {
     };
     let group = adw::PreferencesGroup::builder()
         .title("Set Up an Agent")
-        .description(glib::markup_escape_text(&description))
         .build();
+    // Which command the setups name is a footnote under the setup, as on
+    // macOS, not the group's description: above the selector, its length
+    // (a long path wraps) would move the selector up and down between
+    // machines.
+    let note = gtk::Label::builder()
+        .label(&description)
+        .xalign(0.0)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .margin_top(12)
+        .build();
+    note.add_css_class("dim-label");
+    note.add_css_class("caption");
+    // Claude Desktop has no Linux build: `setups` leaves it out here.
     let rows = setup::setups(a.host, &a.server(), &machine::home(), None);
+    let offers: Vec<setup::Client> = rows.iter().map(|r| r.client).collect();
+    let chosen = logic::chosen_client(a.settings().setup_client, &offers);
+    glib::g_debug!(
+        "neoscad",
+        "agent: setup page opens on {}",
+        client_key(chosen)
+    );
+
+    // A widget that is not a row goes below the group's list, in the order
+    // added: the selector, then the chosen client's row in a list of its
+    // own, so the two read as one block under the group's title, then the
+    // note.
+    let picker = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .homogeneous(true)
+        .build();
+    picker.add_css_class("linked");
+    picker.update_property(&[gtk::accessible::Property::Label("Agent")]);
+    let stack = gtk::Stack::builder()
+        .vhomogeneous(false)
+        .margin_top(12)
+        .build();
+    let mut first: Option<gtk::ToggleButton> = None;
+    let mut buttons = Vec::new();
     for r in rows {
-        group.add(&setup_row(sh, r));
+        let client = r.client;
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        list.add_css_class("boxed-list");
+        list.append(&setup_row(sh, r));
+        stack.add_named(&list, Some(client_key(client)));
+        let button = gtk::ToggleButton::builder()
+            .label(client.short_label())
+            .name(format!("agent-client-{}", client_key(client)))
+            .build();
+        button.set_group(first.as_ref());
+        first.get_or_insert_with(|| button.clone());
+        picker.append(&button);
+        buttons.push((client, button));
     }
-    group
+    group.add(&picker);
+    group.add(&stack);
+    group.add(&note);
+
+    let usage = adw::PreferencesGroup::builder()
+        .title("Using NeoSCAD with your agent")
+        .build();
+    let learn = gtk::LinkButton::with_label(logic::LEARN_MORE_URL, "Learn more");
+    learn.set_valign(gtk::Align::Center);
+    usage.set_header_suffix(Some(&learn));
+    let usage_rows: Rc<RefCell<Vec<gtk::Widget>>> = Rc::default();
+
+    // The chosen client before the handlers, so opening the page does not
+    // count as a pick (only the user's click is kept).
+    stack.set_visible_child_name(client_key(chosen));
+    fill_usage(sh, &usage, &usage_rows, chosen);
+    for (client, button) in &buttons {
+        button.set_active(*client == chosen);
+        let (weak, stack, usage, usage_rows, client) = (
+            Rc::downgrade(sh),
+            stack.clone(),
+            usage.downgrade(),
+            usage_rows.clone(),
+            *client,
+        );
+        button.connect_toggled(move |b| {
+            // The group's other button turning off is not a pick.
+            let (true, Some(sh), Some(usage)) = (b.is_active(), weak.upgrade(), usage.upgrade())
+            else {
+                return;
+            };
+            glib::g_debug!("neoscad", "agent: setup for {}", client_key(client));
+            stack.set_visible_child_name(client_key(client));
+            fill_usage(&sh, &usage, &usage_rows, client);
+            sh.agents.change(|s| s.setup_client = Some(client));
+        });
+    }
+    (group, usage)
+}
+
+/// The client's name in the stack and the buttons' widget names (GTK's
+/// inspector finds them by it): the core's own spelling, as agents.json
+/// keeps it.
+fn client_key(c: setup::Client) -> &'static str {
+    match c {
+        setup::Client::ClaudeCode => "claude-code",
+        setup::Client::ClaudeDesktop => "claude-desktop",
+        setup::Client::Cursor => "cursor",
+        setup::Client::VsCode => "vs-code",
+        setup::Client::Other => "other",
+    }
+}
+
+/// "Using NeoSCAD with your agent" for `client`: a row per item, its body
+/// as the subtitle, all showing at once so the section can be scanned.
+/// "Things to ask" opens onto its example requests, each with a copy
+/// button, since pasting one into the agent is the quickest first try.
+fn fill_usage(
+    sh: &Rc<Shared>,
+    group: &adw::PreferencesGroup,
+    rows: &RefCell<Vec<gtk::Widget>>,
+    client: setup::Client,
+) {
+    for r in rows.borrow_mut().drain(..) {
+        group.remove(&r);
+    }
+    let mut added: Vec<gtk::Widget> = Vec::new();
+    for item in logic::usage_rows(sh.agents.host, client) {
+        let icon = gtk::Image::from_icon_name(item.icon);
+        let title = glib::markup_escape_text(&item.title);
+        let body = glib::markup_escape_text(&item.body);
+        if item.examples.is_empty() {
+            let row = adw::ActionRow::builder()
+                .title(title)
+                .subtitle(body)
+                .build();
+            row.add_prefix(&icon);
+            added.push(row.upcast());
+            continue;
+        }
+        let row = adw::ExpanderRow::builder()
+            .title(title)
+            .subtitle(body)
+            .expanded(true)
+            .build();
+        row.add_prefix(&icon);
+        for e in item.examples {
+            let example = adw::ActionRow::builder()
+                .title(glib::markup_escape_text(&format!("“{e}”")))
+                .build();
+            let copy = gtk::Button::builder()
+                .icon_name("edit-copy-symbolic")
+                .tooltip_text("Copy")
+                .valign(gtk::Align::Center)
+                .build();
+            copy.add_css_class("flat");
+            let weak = Rc::downgrade(sh);
+            copy.connect_clicked(move |b| {
+                b.clipboard().set_text(&e);
+                if let Some(sh) = weak.upgrade() {
+                    tell(&sh, "Copied");
+                }
+            });
+            example.add_suffix(&copy);
+            row.add_row(&example);
+        }
+        added.push(row.upcast());
+    }
+    for r in &added {
+        group.add(r);
+    }
+    *rows.borrow_mut() = added;
 }
 
 fn setup_row(sh: &Rc<Shared>, r: ClientSetup) -> adw::ExpanderRow {
@@ -790,9 +962,11 @@ fn setup_row(sh: &Rc<Shared>, r: ClientSetup) -> adw::ExpanderRow {
         });
         row.add_suffix(&button);
     }
-    // Nothing to click (Claude Code in the Flatpak, which runs nothing on
-    // the host): the command is the row's whole content, so show it.
-    if r.action == SetupAction::CopyOnly && r.client == setup::Client::ClaudeCode {
+    // Nothing to click (Other, and Claude Code in the Flatpak, which runs
+    // nothing on the host): the command or JSON is the row's whole
+    // content, so show it, rather than a closed row that seems to do
+    // nothing now that it is the only row under the selector.
+    if r.action == SetupAction::CopyOnly {
         row.set_expanded(true);
     }
     // The command or JSON, to copy: always there, for any client and for

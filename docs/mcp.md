@@ -629,8 +629,9 @@ Agent… and Settings > Agents reach the same place. The flow:
    in control, and rendering and exporting. It folds away, and is open
    until the user folds it. The text is the core's
    (`client::agent_setup::usage`, exported as `agent_setup_usage(host,
-   client)`), in each app's own keys and control names, so the Windows
-   and Linux apps can show the same section.
+   client)`), in each app's own keys and control names; the Linux page
+   shows the same section ("On Linux", below), and the Windows dialog
+   can.
 4. **Then just ask** the agent ("make the teeth smaller and show me").
    The control shows the agent connected and what it is doing; its
    popover lists each agent with Disconnect, the last few things they
@@ -707,15 +708,24 @@ Agent… and Preferences > Agents reach the same page. The flow:
    switch, is off until the user turns it on, and kept. A setup button
    pressed while it is off asks once ("Let AI agents work on your open
    models?").
-2. **One click per client**: Add for Claude Code (runs `claude mcp add`
-   with the app's `neoscad`; Replace when it already has one), Open
-   Cursor and Open VS Code (their install links, through the OpenURI
-   portal in the Flatpak). Each row says what happened, and expands to
-   the command or JSON to copy. In the Flatpak, which runs no host
-   program, Claude Code's row is the command to copy, and every setup
-   runs `flatpak run --command=neoscad org.neoscad.NeoSCAD mcp`. Claude
-   Desktop does not run on Linux.
-3. **Then just ask** the agent about the model that is open. Its edits
+2. **Pick the client** in a row of linked toggle buttons (Claude Code,
+   Cursor, VS Code, Other; Claude Desktop does not run on Linux): Claude
+   Code until the user picks another, then the last one picked, kept in
+   `agents.json`. Only that client's setup shows, with its one click:
+   Add for Claude Code (runs `claude mcp add` with the app's `neoscad`;
+   Replace when it already has one), Open Cursor and Open VS Code (their
+   install links, through the OpenURI portal in the Flatpak); Other has
+   only the JSON. The row says what happened, and expands to the command
+   or JSON to copy. In the Flatpak, which runs no host program, Claude
+   Code's row is the command to copy, and every setup runs `flatpak run
+   --command=neoscad org.neoscad.NeoSCAD mcp`.
+3. **Using NeoSCAD with your agent**, under the setup: the core's six
+   items for the chosen client (`client::agent_setup::usage` with the
+   Linux host: Ctrl keys, no autosave, the header button, Preferences >
+   Agents), a row each, with "Things to ask" open onto its example
+   requests and a copy button for each, and "Learn more"
+   (neoscad.org/agents.html).
+4. **Then just ask** the agent about the model that is open. Its edits
    are one highlighted step that Undo takes back, in the buffer (the user
    saves); "Ask before applying an agent's edits" makes each wait for
    Apply or Reject in a bar under the header.

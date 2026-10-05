@@ -230,7 +230,8 @@ EOF
 # is refused an edit on the version it read before, moves the camera,
 # marks the view and captures it. Needs the command line beside the app
 # (or NEOSCAD_CLI); with SHOTS it saves agent-light.png and agent-dark.png,
-# and the popover and the Agents dialog.
+# the popover, the Agents dialog with each client picked (the pick kept in
+# agents.json, and the page opening on it again), and its usage section.
 agent_check() {
     local cli=${NEOSCAD_CLI:-$(dirname "$bin")/neoscad}
     if [ ! -x "$cli" ]; then
@@ -308,8 +309,34 @@ agent_check() {
         sleep 1.5
         shot "agent-popover-$1"
         xdotool mousemove 1043 190 click 1
+        wait_for "agent: setup page opens on claude-code" "$log" 30
         sleep 1.5
         shot "agent-dialog-$1"
+        # The client selector (its buttons' centres in the dialog, which
+        # GTK centres over the 1280-wide window): each pick shows only
+        # that client's setup, and the last one is kept in agents.json.
+        local pick
+        for pick in cursor:567 vs-code:710 other:853; do
+            xdotool mousemove "${pick#*:}" 507 click 1
+            wait_for "agent: setup for ${pick%:*}" "$log" 30
+            sleep 1
+            shot "agent-dialog-${pick%:*}-$1"
+        done
+        grep -q '"setupClient": "other"' "$config/neoscad/agents.json"
+        # Opened again, the page starts on the last pick.
+        xdotool key Escape
+        sleep 0.5
+        xdotool mousemove 1100 27 click 1
+        sleep 1.5
+        xdotool mousemove 1043 190 click 1
+        wait_for "agent: setup page opens on other" "$log" 30
+        sleep 1.5
+        # Back to Claude Code, and down to "Using NeoSCAD with your agent".
+        xdotool mousemove 425 507 click 1
+        wait_for "agent: setup for claude-code" "$log" 30
+        xdotool mousemove 640 600 click --repeat 20 --delay 50 5
+        sleep 1.5
+        shot "agent-usage-$1"
         xdotool key Escape
         sleep 0.5
         # The popover's Disconnect ends the agent's connection.
