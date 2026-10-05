@@ -82,6 +82,13 @@ public sealed class AgentConnection : IDisposable
 
     public void SetAskBeforeEdits(bool ask) => Save(Settings with { AskBeforeEdits = ask });
 
+    /// <summary>The dialog's client picker moved: the next dialog, in any window, opens on it.</summary>
+    public void SetSetupClient(AgentSetupClient client) =>
+        Save(Settings with { SetupClient = AgentSetup.ClientName(client) });
+
+    /// <summary>"Using NeoSCAD with your agent" was folded or unfolded.</summary>
+    public void SetUsageOpen(bool open) => Save(Settings with { UsageOpen = open });
+
     /// <summary>"Disconnect": end this agent's connection to this window.</summary>
     public void Disconnect(ulong client)
     {

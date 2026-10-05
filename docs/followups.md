@@ -1279,18 +1279,20 @@ lead them, come roughly in order of user impact.
 
 ## MCP and the agent eval
 - "Using NeoSCAD with your agent" (`client::agent_setup::usage`, FFI
-  `agent_setup_usage(host, client)`) is shown only by the macOS sheet,
-  under a client picker that shows one client's setup at a time. The
-  Windows dialog (`windows/NeoSCAD.Host/AgentSetup.cs`) and the Linux
-  page (`crates/linux-app/src/app/agent.rs`, which can call
+  `agent_setup_usage(host, client)`) is shown by the macOS sheet and
+  the Windows dialog, each under a client picker that shows one client's
+  setup at a time (Windows: a `SelectorBar` and an `Expander`,
+  `windows/NeoSCAD.App/MainWindow.Agents.cs`; what is left to see on a
+  Windows machine is under "Windows", the agent UI item). The Linux page
+  (`crates/linux-app/src/app/agent.rs`, which can call
   `client::agent_setup::usage` directly) should show the same section
-  and picker (`Client::short_label` for the segment titles). Their text
-  was written from those apps' menus and docs, not run: check on each
-  that the preview follows an agent's edit, the "ask first" setting is
-  where the text says, and that neither has a chip clearing an agent's
-  marks (the text says so only on macOS; one may be worth adding). The
-  web page's "Things to ask" (`web/src/ui/agent.js`, `IDEAS`) is the
-  examples' source; a test keeps them in step.
+  and picker (`Client::short_label` for the segment titles). Its text
+  was written from the app's menus and docs, not run: check that the
+  preview follows an agent's edit, the "ask first" setting is where the
+  text says, and that it has no chip clearing an agent's marks (the
+  text says so only on macOS; one may be worth adding on Linux and
+  Windows). The web page's "Things to ask" (`web/src/ui/agent.js`,
+  `IDEAS`) is the examples' source; a test keeps them in step.
 - Claude Desktop starts `neoscad mcp` with no writable root, so its
   agent cannot export (the usage text tells the user to export from the
   app). A Claude Desktop setup that passes `--root` (the documents'
@@ -1885,7 +1887,11 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   a fake editor and no 3D view. Unchecked until a Windows machine runs
   them: the XAML (the menu row's control, the `InfoBadge` and
   `ProgressRing`, the approval bar), the dialog's look and scrolling at
-  720 px, `Launcher.LaunchUriAsync` with Cursor's and VS Code's install
+  720 px (with its client `SelectorBar`, whether five items fit its
+  width, the usage `Expander` and the Segoe Fluent glyphs beside its
+  items), that the preview follows an agent's edit and that "ask first"
+  is in the flyout and the Help menu as the usage text says,
+  `Launcher.LaunchUriAsync` with Cursor's and VS Code's install
   links (and its answer when neither is installed), the clipboard, a
   real `claude.cmd` from npm run through `claude mcp add`, `agentEdit`'s
   `expectVersion` refusal in WebView2, and a capture from a real

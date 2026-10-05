@@ -33,6 +33,21 @@ public sealed record AgentSettings
     /// </summary>
     [JsonPropertyName("turned_off")] public bool TurnedOff { get; init; }
 
+    /// <summary>
+    /// The client last picked in the "Connect your AI agent" dialog, as
+    /// <see cref="AgentSetup.ClientName"/> spells it; null until the user
+    /// picks one, when the dialog starts on Claude Code. Kept here rather
+    /// than per window so every window's dialog opens on the same client.
+    /// </summary>
+    [JsonPropertyName("setup_client")] public string? SetupClient { get; init; }
+
+    /// <summary>
+    /// "Using NeoSCAD with your agent" is open in the dialog: at first,
+    /// and until the user folds it. A file from before the setting reads
+    /// as open, since a missing key leaves the initialiser's value.
+    /// </summary>
+    [JsonPropertyName("usage_open")] public bool UsageOpen { get; init; } = true;
+
     /// <summary>Consent given (or taken back) from any of the app's switches.</summary>
     public AgentSettings WithAllowed(bool allowed) =>
         this with { Allowed = allowed, TurnedOff = !allowed && (Allowed || TurnedOff) };

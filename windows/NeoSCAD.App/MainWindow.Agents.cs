@@ -8,8 +8,10 @@
 //   for each, and "Ask before applying edits". Hidden once the user turns
 //   agents off; the Help menu is then the way back;
 // - Help > Connect Your AI Agent…: the dialog. Its first switch is the
-//   consent, then a row per client with one button each
-//   (NeoSCAD.Host/AgentSetup.cs), then things to ask;
+//   consent, then a selector bar of clients (Claude Code first, the last
+//   pick kept) over the chosen client's card with its one button
+//   (NeoSCAD.Host/AgentSetup.cs), then "Using NeoSCAD with your agent",
+//   an Expander with the core's text for that client;
 // - Help > Allow AI Agents… and Ask Before Applying Agent Edits: the same
 //   two settings, as the Help menu already holds the update settings (the
 //   app has no settings window);
@@ -20,6 +22,8 @@
 
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
@@ -261,42 +265,70 @@ public sealed partial class MainWindow
         access.Children.Add(state);
         content.Children.Add(access);
 
-        // 2. One row per client.
+        // 2. The client picker, and the chosen client's card under it.
         content.Children.Add(new TextBlock
         {
             Text = "Add NeoSCAD to your agent",
             Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
         });
         if (cli is not null) content.Children.Add(Secondary($"Each agent runs NeoSCAD's own command-line tool, {cli}."));
-        var rows = new Dictionary<AgentSetupRowModel, Border>();
+        var picker = new SelectorBar();
         foreach (var row in setup.Rows)
         {
-            var card = new Border
-            {
-                Padding = new Thickness(12),
-                CornerRadius = new CornerRadius(6),
-                Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
-                BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
-                BorderThickness = new Thickness(1),
-            };
-            card.Child = SetupRow(setup, row);
-            rows[row] = card;
-            content.Children.Add(card);
+            var item = new SelectorBarItem { Text = setup.ShortLabel(row.Client), Tag = row.Client };
+            AutomationProperties.SetName(item, row.Row.Label);
+            picker.Items.Add(item);
+            // Selected before the handler is attached, so opening the
+            // dialog doesn't count as the user picking.
+            if (row.Client == setup.Selected) picker.SelectedItem = item;
         }
+        var card = new Border
+        {
+            Padding = new Thickness(12),
+            CornerRadius = new CornerRadius(6),
+            Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
+            BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+            BorderThickness = new Thickness(1),
+        };
+        // Rebuilt on every change and every pick, so a card's "Copied"
+        // never carries over to the next client; a row's own state (a
+        // Replace or a Claude Desktop question waiting) stays in its model
+        // and is still there on coming back to it.
+        void ShowCard() => card.Child = setup.SelectedRow is { } r ? SetupRow(setup, r) : null;
+        ShowCard();
         setup.Changed += row =>
         {
-            if (rows.TryGetValue(row, out var card)) card.Child = SetupRow(setup, row);
+            if (row == setup.SelectedRow) ShowCard();
         };
+        var setupPanel = new StackPanel { Spacing = 8 };
+        setupPanel.Children.Add(picker);
+        setupPanel.Children.Add(card);
+        content.Children.Add(setupPanel);
 
-        // 3. What to ask once it works.
-        content.Children.Add(new TextBlock
+        // 3. How to work with it, for the chosen client: the core's text.
+        var usage = new Expander
         {
-            Text = "Then ask it, for example",
-            Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
-        });
-        foreach (var idea in AgentSetup.Ideas) content.Children.Add(Secondary($"“{idea}”"));
-        var help = new HyperlinkButton { Content = "Using NeoSCAD with AI agents", NavigateUri = new Uri(AgentsHelpUrl) };
-        content.Children.Add(help);
+            Header = new TextBlock
+            {
+                Text = "Using NeoSCAD with your agent",
+                Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
+            },
+            IsExpanded = agents.Settings.UsageOpen,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            Content = UsagePanel(setup),
+        };
+        usage.Expanding += (_, _) => agents?.SetUsageOpen(true);
+        usage.Collapsed += (_, _) => agents?.SetUsageOpen(false);
+        content.Children.Add(usage);
+
+        picker.SelectionChanged += (_, _) =>
+        {
+            if (picker.SelectedItem?.Tag is not AgentSetupClient client || !setup.Select(client)) return;
+            agents?.SetSetupClient(client);
+            ShowCard();
+            usage.Content = UsagePanel(setup);
+        };
 
         var dialog = new ContentDialog
         {
@@ -331,6 +363,70 @@ public sealed partial class MainWindow
             ? "On. No agent is connected yet: add NeoSCAD to one below, then ask it about this model."
             : $"On. {agents.Indicator.Text}.";
     }
+
+    /// <summary>
+    /// "Using NeoSCAD with your agent": a headed item per topic, a sentence
+    /// or two each, the example requests under "Things to ask", and the
+    /// web page for more. Selectable, so a user can copy an example into
+    /// their agent.
+    /// </summary>
+    static UIElement UsagePanel(AgentSetup setup)
+    {
+        var panel = new StackPanel { Spacing = 12 };
+        foreach (var entry in setup.Usage())
+        {
+            var item = new Grid { ColumnSpacing = 10 };
+            item.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) });
+            item.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var icon = new FontIcon
+            {
+                Glyph = UsageGlyph(entry.Topic),
+                FontSize = 16,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 2, 0, 0),
+                Foreground = (Brush)Application.Current.Resources["AccentTextFillColorPrimaryBrush"],
+            };
+            AutomationProperties.SetAccessibilityView(icon, AccessibilityView.Raw);
+            item.Children.Add(icon);
+            var text = new StackPanel { Spacing = 2 };
+            text.Children.Add(new TextBlock { Text = entry.Title, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+            var body = Secondary(entry.Body);
+            body.IsTextSelectionEnabled = true;
+            text.Children.Add(body);
+            foreach (var example in entry.Examples)
+            {
+                text.Children.Add(new TextBlock
+                {
+                    Text = example,
+                    FontStyle = Windows.UI.Text.FontStyle.Italic,
+                    TextWrapping = TextWrapping.Wrap,
+                    IsTextSelectionEnabled = true,
+                });
+            }
+            Grid.SetColumn(text, 1);
+            item.Children.Add(text);
+            panel.Children.Add(item);
+        }
+        panel.Children.Add(new HyperlinkButton
+        {
+            Content = "Learn more",
+            NavigateUri = new Uri(AgentsHelpUrl),
+            Margin = new Thickness(18, 0, 0, 0),
+        });
+        return panel;
+    }
+
+    /// <summary>Segoe Fluent Icons for each topic, as the macOS sheet gives each an SF Symbol.</summary>
+    static string UsageGlyph(AgentUsageTopic topic) => topic switch
+    {
+        AgentUsageTopic.KeepOpen => "\uE7F4", // TVMonitor (a screen)
+        AgentUsageTopic.WhatToAsk => "\uE8BD", // Message
+        AgentUsageTopic.Edits => "\uE7A7", // Undo
+        AgentUsageTopic.Seeing => "\uE890", // View (an eye)
+        AgentUsageTopic.Control => "\uE72E", // Lock
+        AgentUsageTopic.Export => "\uEDE1", // Export
+        _ => "\uE946", // Info
+    };
 
     UIElement SetupRow(AgentSetup setup, AgentSetupRowModel row)
     {

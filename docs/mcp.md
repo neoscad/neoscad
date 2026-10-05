@@ -653,12 +653,19 @@ your AI agent"; then "Claude Code connected" with a green dot, or a busy
 ring and "Claude Code is editing"). Help > Connect Your AI Agent… opens
 the same dialog: first the switch "Allow AI agents to work on open
 documents" with the consent text beside it (off until turned on, kept in
-`%LOCALAPPDATA%\NeoSCAD\agents.json`), then a card per client: Add for
+`%LOCALAPPDATA%\NeoSCAD\agents.json`), then, as on macOS, a selector
+bar of the clients (Claude Code, Claude Desktop, Cursor, VS Code, Other;
+Claude Code until the user picks another, then the last one picked, kept
+in `agents.json`) over the chosen client's card: Add for
 Claude Code (Replace when it already has a `neoscad`), Open Cursor and
 Open VS Code (their install links), Add… for Claude Desktop (the card asks
 first, then writes `%APPDATA%\Claude\claude_desktop_config.json` with a
-backup and says to quit and reopen Claude), and Copy on every card, the
-command or JSON shown whenever the button could not do it. Every config
+backup and says to quit and reopen Claude), the JSON for Other, and Copy
+on every card, the command or JSON shown whenever the button could not
+do it. Under it, "Using NeoSCAD with your agent" is an expander, open
+until folded, with the core's six items for Windows and that client
+(`agent_setup_usage`) and a "Learn more" link to
+`neoscad.org/agents.html`. Every config
 names the app's own `bin\neoscad.exe` by its absolute path. Once allowed,
 the control's flyout lists each agent with Disconnect and the "Ask me
 before applying the agent's edits" switch, whose approval bar has Apply

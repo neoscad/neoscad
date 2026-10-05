@@ -424,6 +424,123 @@ public sealed class AgentTests : IDisposable
             Calls.Add($"desktop {cli}");
             return Desktop;
         }
+
+        public string ShortLabel(AgentSetupClient client) => client == AgentSetupClient.Other ? "Other" : client.ToString();
+
+        public List<AgentSetupClient> UsageAsked = [];
+
+        public AgentUsage Usage(AgentSetupClient client)
+        {
+            UsageAsked.Add(client);
+            return new AgentUsage(
+            [
+                new(AgentUsageTopic.KeepOpen, "Keep NeoSCAD open", $"for {client}"),
+                new(AgentUsageTopic.WhatToAsk, "Things to ask", "For example:"),
+                new(AgentUsageTopic.Export, "Rendering and exporting", "F6"),
+            ], ["Make the teeth smaller.", "Export it."]);
+        }
+    }
+
+    // --- The client picker ------------------------------------------------------------------
+
+    [Fact]
+    public void ThePickerStartsOnClaudeCodeAndKeepsTheLastChoice()
+    {
+        var fake = new FakeSetup();
+        var setup = new AgentSetup(fake, "neoscad", _ => Task.FromResult(true));
+        Assert.Equal(AgentSetupClient.ClaudeCode, setup.Selected);
+        Assert.Same(setup.Row(AgentSetupClient.ClaudeCode), setup.SelectedRow);
+        Assert.False(setup.Select(AgentSetupClient.ClaudeCode)); // no change: nothing to keep
+        Assert.False(setup.Select(AgentSetupClient.VsCode));     // not listed by this (fake) host
+        Assert.Equal(AgentSetupClient.ClaudeCode, setup.Selected);
+        Assert.True(setup.Select(AgentSetupClient.Cursor));
+        Assert.Same(setup.Row(AgentSetupClient.Cursor), setup.SelectedRow);
+
+        // Kept in agents.json, as the window's AgentConnection does, and
+        // the next dialog opens on it.
+        var path = AgentSettings.PathIn(dir);
+        new AgentSettings { SetupClient = AgentSetup.ClientName(setup.Selected) }.Save(path);
+        Assert.Contains("\"setup_client\": \"cursor\"", File.ReadAllText(path));
+        var again = new AgentSetup(fake, "neoscad", _ => Task.FromResult(true), AgentSettings.Load(path).SetupClient);
+        Assert.Equal(AgentSetupClient.Cursor, again.Selected);
+
+        // A name this app doesn't know, or a client the host doesn't list,
+        // falls back to Claude Code rather than to nothing.
+        Assert.Equal(AgentSetupClient.ClaudeCode, new AgentSetup(fake, "neoscad", _ => Task.FromResult(true), "zed").Selected);
+        Assert.Equal(AgentSetupClient.ClaudeCode, new AgentSetup(fake, "neoscad", _ => Task.FromResult(true), "vs-code").Selected);
+        // The picker's labels are the core's short ones.
+        Assert.Equal("Other", setup.ShortLabel(AgentSetupClient.Other));
+    }
+
+    [Fact]
+    public void ClientNamesAreTheCoresAndRoundTrip()
+    {
+        Assert.Equal(["claude-code", "claude-desktop", "cursor", "vs-code", "other"],
+            Enum.GetValues<AgentSetupClient>().Select(AgentSetup.ClientName));
+        foreach (var c in Enum.GetValues<AgentSetupClient>()) Assert.Equal(c, AgentSetup.ClientNamed(AgentSetup.ClientName(c)));
+        Assert.Null(AgentSetup.ClientNamed(null));
+        Assert.Null(AgentSetup.ClientNamed("ClaudeCode"));
+    }
+
+    [Fact]
+    public void TheUsageSectionIsOpenUntilFoldedAndOldFilesReadAsOpen()
+    {
+        var path = AgentSettings.PathIn(dir);
+        Assert.True(AgentSettings.Load(path).UsageOpen); // no file
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "{\"allowed\": true}"); // from before the setting
+        var old = AgentSettings.Load(path);
+        Assert.True(old.Allowed && old.UsageOpen);
+        Assert.Null(old.SetupClient);
+        (old with { UsageOpen = false }).Save(path);
+        var folded = AgentSettings.Load(path);
+        Assert.False(folded.UsageOpen);
+        Assert.True(folded.Allowed); // the rest of the file kept
+    }
+
+    [Fact]
+    public void UsageItemsMapInOrderWithTheExamplesUnderThingsToAsk()
+    {
+        var fake = new FakeSetup();
+        var setup = new AgentSetup(fake, "neoscad", _ => Task.FromResult(true), "claude-desktop");
+        var entries = setup.Usage();
+        Assert.Equal([AgentSetupClient.ClaudeDesktop], fake.UsageAsked); // the chosen client's text
+        Assert.Equal([AgentUsageTopic.KeepOpen, AgentUsageTopic.WhatToAsk, AgentUsageTopic.Export],
+            entries.Select(e => e.Topic));
+        Assert.Equal(("Keep NeoSCAD open", "for ClaudeDesktop"), (entries[0].Title, entries[0].Body));
+        Assert.Empty(entries[0].Examples);
+        Assert.Equal(["“Make the teeth smaller.”", "“Export it.”"], entries[1].Examples);
+        Assert.Empty(entries[2].Examples);
+        setup.Select(AgentSetupClient.Other);
+        Assert.Equal("for Other", setup.Usage()[0].Body);
+    }
+
+    [Fact]
+    public void TheCoresWindowsUsageTextFitsTheWindowsApp()
+    {
+        // The real text, as the dialog gets it on Windows (the host is
+        // passed, since this runs on Linux too). It must name this app's
+        // keys and controls, and not the macOS-only marks chip.
+        foreach (var client in Enum.GetValues<AgentSetupClient>())
+        {
+            var entries = AgentSetup.Entries(NeoScad.AgentSetupUsage(AgentSetupHost.Windows, client));
+            Assert.Equal(6, entries.Count);
+            Assert.Equal(AgentUsageTopic.KeepOpen, entries[0].Topic);
+            Assert.All(entries, e => Assert.False(string.IsNullOrWhiteSpace(e.Title)));
+            Assert.NotEmpty(entries.Single(e => e.Topic == AgentUsageTopic.WhatToAsk).Examples);
+            var all = string.Join("\n", entries.Select(e => e.Body));
+            Assert.Contains("Ctrl+Z", all);
+            Assert.Contains("Ctrl+S", all);
+            Assert.Contains("Ctrl+Shift+E", all);
+            Assert.Contains("only when you save", all); // no autosave here
+            Assert.Contains("flyout", all);
+            Assert.Contains("Help menu", all);
+            Assert.DoesNotContain("⌘", all);
+            Assert.DoesNotContain("chip", all);
+            Assert.DoesNotContain("popover", all);
+        }
+        Assert.Equal("Other", NeoScad.AgentSetupShortLabel(AgentSetupClient.Other));
+        Assert.Equal("Claude Code", NeoScad.AgentSetupShortLabel(AgentSetupClient.ClaudeCode));
     }
 
     [Fact]

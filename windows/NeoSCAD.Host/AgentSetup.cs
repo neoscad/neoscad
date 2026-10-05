@@ -6,6 +6,14 @@
 // button says, runs its action off the UI thread, and turns the outcome
 // into the sentence the row shows.
 //
+// The dialog shows one client at a time, picked in a selector bar: five
+// cards at once made it a wall of buttons and JSON, most of it for clients
+// the user doesn't have. The pick starts on Claude Code and is kept in
+// agents.json. Under it, "Using NeoSCAD with your agent" is the core's
+// text for this host and the picked client (`agent_setup_usage`,
+// crates/client/src/agent_setup/usage.rs), shared with the other apps
+// word for word, so nothing here writes guidance of its own.
+//
 // Every action goes through the client's own install path where it has
 // one, so the client asks the user and owns its config: Claude Code's
 // `claude mcp add`, Cursor's and VS Code's install links. Claude Desktop's
@@ -57,12 +65,18 @@ public interface IAgentSetupBackend
     /// <summary>Blocks while `claude` runs (up to 60 s); called off the UI thread.</summary>
     ClaudeCodeOutcome AddToClaudeCode(string claude, string cli, bool replace);
     ClaudeDesktopOutcome AddToClaudeDesktop(string cli);
+    /// <summary>The picker's label: "Other" for "Other MCP clients".</summary>
+    string ShortLabel(AgentSetupClient client);
+    /// <summary>"Using NeoSCAD with your agent" for this host and <paramref name="client"/>.</summary>
+    AgentUsage Usage(AgentSetupClient client);
 }
 
 public sealed class NativeAgentSetup : IAgentSetupBackend
 {
     public static readonly NativeAgentSetup Instance = new();
     public AgentSetupRow[] Rows(string cli) => NeoScad.AgentSetupRows(cli);
+    public string ShortLabel(AgentSetupClient client) => NeoScad.AgentSetupShortLabel(client);
+    public AgentUsage Usage(AgentSetupClient client) => NeoScad.AgentSetupUsage(NeoScad.AgentSetupHost(), client);
     public string? FindClaude() => NeoScad.AgentSetupFindClaude();
     public ClaudeCodeOutcome AddToClaudeCode(string claude, string cli, bool replace) =>
         NeoScad.AgentSetupAddToClaudeCode(claude, cli, replace);
@@ -129,23 +143,23 @@ public sealed class AgentSetupRowModel(AgentSetupRow row)
                                  || (Step == SetupStep.Done && Row.Action is AgentSetupAction.OpenUrl);
 }
 
+/// <summary>
+/// One headed item of "Using NeoSCAD with your agent", ready to lay out:
+/// the core's title and body, and under "Things to ask" its example
+/// requests, already in quotation marks.
+/// </summary>
+public sealed record AgentUsageEntry(AgentUsageTopic Topic, string Title, string Body, IReadOnlyList<string> Examples);
+
 public sealed class AgentSetup
 {
-    /// <summary>"Things to ask", as the web page offers them (web/src/ui/agent.js, `IDEAS`).</summary>
-    public static readonly string[] Ideas =
-    [
-        "Make the teeth smaller and show me the result.",
-        "Why won't this print? Mark the problem spots in the view.",
-        "Walk me through this model, pointing at each part in the 3D view.",
-        "Turn the fixed sizes into customizer parameters.",
-    ];
-
     readonly IAgentSetupBackend backend;
     readonly Func<string, Task<bool>> openUrl;
 
     /// <param name="cli">The app's `neoscad` (<see cref="AgentCli.Locate"/>); null when there is none.</param>
     /// <param name="openUrl">Opens a link with the system (`Launcher.LaunchUriAsync`): false when nothing handles it.</param>
-    public AgentSetup(IAgentSetupBackend backend, string? cli, Func<string, Task<bool>> openUrl)
+    /// <param name="keptClient">The client the user last picked (<see cref="AgentSettings.SetupClient"/>), if any.</param>
+    public AgentSetup(IAgentSetupBackend backend, string? cli, Func<string, Task<bool>> openUrl,
+        string? keptClient = null)
     {
         this.backend = backend;
         this.openUrl = openUrl;
@@ -162,6 +176,16 @@ public sealed class AgentSetup
             rows = [];
         }
         Rows = rows.Select(r => new AgentSetupRowModel(r)).ToArray();
+        // The kept client if this host still lists it, else Claude Code,
+        // the one most users have and the only one that connects whatever
+        // order things start in; a kept name the core no longer lists (an
+        // older or newer app's file) must not leave the picker on nothing.
+        if (ClientNamed(keptClient) is { } kept && Row(kept) is not null)
+            Selected = kept;
+        else if (Row(AgentSetupClient.ClaudeCode) is not null)
+            Selected = AgentSetupClient.ClaudeCode;
+        else
+            Selected = Rows.FirstOrDefault()?.Client ?? AgentSetupClient.ClaudeCode;
         if (cli is null)
         {
             foreach (var r in Rows)
@@ -184,6 +208,76 @@ public sealed class AgentSetup
     public event Action<AgentSetupRowModel>? Changed;
 
     public AgentSetupRowModel? Row(AgentSetupClient client) => Rows.FirstOrDefault(r => r.Client == client);
+
+    /// <summary>The client whose setup the dialog shows (the picker's selection).</summary>
+    public AgentSetupClient Selected { get; private set; }
+
+    /// <summary>The chosen client's row; null only when the core listed none.</summary>
+    public AgentSetupRowModel? SelectedRow => Row(Selected);
+
+    /// <summary>
+    /// The picker moved to <paramref name="client"/>: true when that
+    /// changed the selection (the caller then keeps it in the settings),
+    /// false for the same client or one this host doesn't list.
+    /// </summary>
+    public bool Select(AgentSetupClient client)
+    {
+        if (client == Selected || Row(client) is null) return false;
+        Selected = client;
+        return true;
+    }
+
+    /// <summary>The picker's label for <paramref name="client"/>: the core's short one, else the row's.</summary>
+    public string ShortLabel(AgentSetupClient client)
+    {
+        try
+        {
+            return backend.ShortLabel(client);
+        }
+        catch (CoreException)
+        {
+            return Row(client)?.Row.Label ?? client.ToString();
+        }
+    }
+
+    /// <summary>"Using NeoSCAD with your agent" for the chosen client.</summary>
+    public IReadOnlyList<AgentUsageEntry> Usage() => Entries(backend.Usage(Selected));
+
+    /// <summary>
+    /// The core's section as the dialog lays it out: its items in order,
+    /// and the examples under "Things to ask" (only there: the core sends
+    /// them apart from the items so each app can place them), each in
+    /// quotation marks, as the macOS sheet shows them.
+    /// </summary>
+    public static IReadOnlyList<AgentUsageEntry> Entries(AgentUsage usage) =>
+        usage.Items.Select(i => new AgentUsageEntry(i.Topic, i.Title, i.Body,
+                i.Topic == AgentUsageTopic.WhatToAsk ? usage.Examples.Select(e => $"“{e}”").ToArray() : []))
+            .ToArray();
+
+    /// <summary>
+    /// The client's name in agents.json: the core's spelling
+    /// (`kebab-case`), the same names the macOS app keeps, so the file
+    /// doesn't depend on the C# enum's member names.
+    /// </summary>
+    public static string ClientName(AgentSetupClient client) => client switch
+    {
+        AgentSetupClient.ClaudeCode => "claude-code",
+        AgentSetupClient.ClaudeDesktop => "claude-desktop",
+        AgentSetupClient.Cursor => "cursor",
+        AgentSetupClient.VsCode => "vs-code",
+        AgentSetupClient.Other => "other",
+        _ => client.ToString(),
+    };
+
+    /// <summary>The client <paramref name="name"/> names, or null for none or a name this app doesn't know.</summary>
+    public static AgentSetupClient? ClientNamed(string? name)
+    {
+        foreach (var c in Enum.GetValues<AgentSetupClient>())
+        {
+            if (ClientName(c) == name) return c;
+        }
+        return null;
+    }
 
     /// <summary>Look for `claude` off the UI thread, and say on its row whether one click will do.</summary>
     public async Task DetectAsync()

@@ -444,9 +444,16 @@ spec); the shared parts are `crates/ffi/src/agent.rs` (`AgentLink`,
      consent text beside it ("Agents on this computer that use NeoSCAD
      … What they read goes to the agent's AI service.") and the link's
      state;
-  2. "Add NeoSCAD to your agent": a card per client from
-     `agent_setup_rows(cli)`, each with its button, its state and Copy.
-     Claude Code: `claude` is looked for when the dialog opens (off the
+  2. "Add NeoSCAD to your agent": a `SelectorBar` of the clients from
+     `agent_setup_rows(cli)` (Claude Code, Claude Desktop, Cursor, VS
+     Code, Other; titles from `agent_setup_short_label`), and under it
+     only the chosen client's card, with its button, its state and Copy.
+     It starts on Claude Code and then on the last client picked, kept as
+     `setup_client` in `agents.json` (the core's names, `claude-code` …
+     `other`, as the macOS app keeps them), so every window's dialog
+     opens on it; a kept name the host no longer lists falls back to
+     Claude Code. A card's state (Replace, Claude Desktop's question)
+     stays with its client while another is shown. Claude Code: `claude` is looked for when the dialog opens (off the
      UI thread), then Add runs `claude mcp add --scope user neoscad --
      "<install>\bin\neoscad.exe" mcp`; an existing entry turns the button
      into Replace, run only when pressed. Cursor and VS Code: "Open
@@ -459,8 +466,17 @@ spec); the shared parts are `crates/ffi/src/agent.rs` (`AgentLink`,
      Other: the JSON to copy. A card that cannot act (no `claude`, Claude
      Desktop not installed, a config the core refused) shows the text to
      copy instead;
-  3. things to ask (the web page's `IDEAS`), and "Using NeoSCAD with AI
-     agents" (`neoscad.org/agents.html`).
+  3. "Using NeoSCAD with your agent": an `Expander`, open until the user
+     folds it (`usage_open` in `agents.json`), with the core's text for
+     Windows and the chosen client (`agent_setup_usage(host, client)`,
+     `crates/client/src/agent_setup/usage.rs`, shared with the other
+     apps): six headed items with an icon each (keep NeoSCAD open, things
+     to ask with the example requests, edits and saving, watching it
+     work, staying in control, rendering and exporting), then "Learn
+     more" (`neoscad.org/agents.html`). The app writes none of this text;
+     a Windows wording is fixed in `usage.rs` (its Windows words name the
+     agent control's flyout and the Help menu for "ask first", and leave
+     out the macOS-only marks chip and autosave).
 - *Help > Allow AI Agents to Work on Open Documents* and *Ask Before
   Applying Agent Edits*: the same two settings, as checkable items, as
   the update settings already are (the app has no settings window).
@@ -475,7 +491,8 @@ spec); the shared parts are `crates/ffi/src/agent.rs` (`AgentLink`,
   control as the invitation.
 
 **Consent and cost.** The setting is `%LOCALAPPDATA%\NeoSCAD\agents.json`
-(`AgentSettings`: `allowed`, `ask_before_edits`, `turned_off`), off by
+(`AgentSettings`: `allowed`, `ask_before_edits`, `turned_off`, and the
+dialog's `setup_client` and `usage_open`), off by
 default; a missing or damaged file reads as off. Until it is on, no
 `AgentLink` exists in the process: no pipe and no thread. The
 app is one process per window, so each window has its own link, and each
@@ -528,7 +545,8 @@ consent switch acts on all of them.
 **Files.** `NeoSCAD.Host`: `AgentSettings.cs`, `AgentConnection.cs` (the
 link's lifecycle, the settings watch, the control's state as
 `AgentIndicator`), `AgentDocumentHost.cs`, `AgentSetup.cs` (the rows'
-steps and sentences, and `AgentCli.Locate`: `bin\neoscad.exe` beside the
+steps and sentences, the picked client, the usage section's items as
+`AgentUsageEntry`, and `AgentCli.Locate`: `bin\neoscad.exe` beside the
 app, else a `neoscad.exe` on `PATH` for a build run from the source tree,
 else the dialog says there is no command-line tool),
 `DocumentSession.Agent.cs`, and the scripts in `EditorProtocol.cs`.
@@ -707,6 +725,17 @@ only:
 - `docker-typecheck.sh` compiles the app with the new controls (warnings
   as errors);
 - `actionlint` 1.7.12 passes on `windows-app.yml`.
+
+The dialog's client picker and usage section (October 2026, after the
+macOS sheet's) were checked the same way: `docker-test.sh` passes 125
+of 125 on linux-arm64, five of them new (the picker's default, the
+kept choice and its fallback, the client names, `usage_open` with an
+older file, the usage items' mapping, and the core's real Windows text:
+Ctrl keys, no autosave, the flyout and Help menu, no chip), and
+`docker-typecheck.sh` compiles the `SelectorBar` and `Expander` code.
+Their look (the selector's width with five items in the 720-wide
+dialog, the icons' glyphs, the Expander in the dialog's scroll area)
+has not been seen on Windows.
 
 Not verified until CI or a Windows machine runs it: the named pipe (CI's
 end-to-end test), Claude Desktop's config under `%APPDATA%` (CI), and,

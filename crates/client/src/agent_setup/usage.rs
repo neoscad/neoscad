@@ -110,7 +110,10 @@ fn words(host: Host) -> Words {
             undo: "Ctrl+Z",
             export: "File > Export… (Ctrl+Shift+E)",
             control: "The agent control at the end of the menu row",
-            ask_first: "“Ask me before applying the agent’s edits” in the agent control’s menu",
+            // The control opens a flyout, not a menu (MainWindow.Agents.cs,
+            // `AgentFlyoutContent`), and the same setting is in the Help
+            // menu, which is where it stays reachable once agents are off.
+            ask_first: "“Ask me before applying the agent’s edits” in the agent control’s flyout or the Help menu",
             autosaves: false,
             marks_chip: false,
         },
@@ -329,6 +332,19 @@ mod tests {
         let win = usage(Host::Windows, Client::ClaudeCode);
         assert!(body(&win, UsageTopic::Edits).contains("only when you save"));
         assert!(!body(&win, UsageTopic::Seeing).contains("chip"));
+    }
+
+    #[test]
+    fn windows_names_the_flyout_and_the_help_menu() {
+        // The Windows agent control opens a flyout, and the Help menu has
+        // the same switch; "the agent control's menu" sent users looking
+        // for a menu the control doesn't have.
+        let win = usage(Host::Windows, Client::ClaudeCode);
+        let control = body(&win, UsageTopic::Control);
+        assert!(
+            control.contains("flyout") && control.contains("Help menu"),
+            "{control}"
+        );
     }
 
     #[test]
