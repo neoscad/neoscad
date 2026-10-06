@@ -43,8 +43,9 @@ use std::sync::{Arc, Mutex};
 use eval::dump::Keys;
 use eval::node::{CsgOp, Node, NodeKind};
 use lang::diag::{PathBase, Severity};
-use lang::loader::{FileSystem, StdFs};
+use lang::loader::FileSystem;
 use lang::source::Span;
+use lang::vfs::NoFs;
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::OpType;
 
@@ -117,7 +118,9 @@ pub struct RenderOptions {
     /// `--render=force`: convert a mesh result to a Manifold solid, as
     /// OpenSCAD's `RenderType::BACKEND_SPECIFIC` does (`openscad.cc:495-509`).
     pub force: bool,
-    /// Where `import()` and `surface()` read their files.
+    /// Where `import()` and `surface()` read their files, and what
+    /// resolves the paths their messages print. The default has no files
+    /// (`lang::vfs::NoFs`); a host passes its own.
     pub fs: Arc<dyn FileSystem + Send + Sync>,
     /// The working directory, which file names in import messages are
     /// relative to (`Filename`'s `operator<<`, `Value.cc:195-201`). Empty
@@ -160,7 +163,7 @@ impl Default for RenderOptions {
         RenderOptions {
             scheme: crate::color::CORNFIELD,
             force: false,
-            fs: Arc::new(StdFs),
+            fs: Arc::new(NoFs),
             work_dir: PathBuf::new(),
             fonts: Arc::new(text::FontDb::new()),
             interrupt: None,

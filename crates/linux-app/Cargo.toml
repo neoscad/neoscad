@@ -49,7 +49,8 @@ agent-link = { package = "neoscad-agent-link", path = "../agent-link" }
 assets = { package = "neoscad-assets", path = "../assets" }
 client = { package = "neoscad-client", path = "../client" }
 eval = { package = "neoscad-eval", path = "../eval" }
-lang = { package = "neoscad-lang", path = "../lang" }
+# `host`: the disk and the environment's library path (lang/src/host.rs).
+lang = { package = "neoscad-lang", path = "../lang", features = ["host"] }
 # The editor's language server, in process (docs/linux-app.md, "The
 # language server").
 lsp = { package = "neoscad-lsp", path = "../lsp" }

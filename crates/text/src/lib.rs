@@ -407,7 +407,7 @@ mod tests {
             eprintln!("skipped: no reference checkout");
             return None;
         }
-        let mut db = FontDb::new();
+        let mut db = FontDb::with_fs(std::sync::Arc::new(lang::loader::StdFs));
         db.add_dir(root.join("fonts"));
         db.add_dir(root.join("tests/data/ttf"));
         Some(db)

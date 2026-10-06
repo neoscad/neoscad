@@ -1,9 +1,9 @@
 //! File systems that are not the disk: [`MemFs`], files held in memory
-//! (the WASM build's documents, tests), and [`Overlay`], read-only files
+//! (the WASM build's documents, tests), [`Overlay`], read-only files
 //! compiled into the binary and mounted at a directory over another file
-//! system (the bundled MCAD library).
+//! system (the bundled MCAD library), and [`NoFs`], no files at all.
 //!
-//! Both have no symlinks, so a canonical path is the lexically normal one:
+//! None has symlinks, so a canonical path is the lexically normal one:
 //! `.` dropped and `..` folded into its parent.
 
 use std::collections::BTreeMap;
@@ -143,6 +143,29 @@ impl FileSystem for MemFs {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
         Ok(entries(&files, &p))
+    }
+}
+
+/// A file system with nothing in it: the default of the library crates'
+/// options. A host supplies its own (the disk is `loader::StdFs`, behind
+/// `lang`'s `host` feature); until then a program can read no file, and
+/// message paths are resolved lexically. A default that read the disk
+/// would let library code reach the machine without the host's say.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoFs;
+
+impl FileSystem for NoFs {
+    fn read(&self, _: &Path) -> io::Result<Vec<u8>> {
+        Err(io::Error::from(io::ErrorKind::NotFound))
+    }
+    fn exists(&self, _: &Path) -> bool {
+        false
+    }
+    fn is_dir(&self, _: &Path) -> bool {
+        false
+    }
+    fn canonicalize(&self, _: &Path) -> Option<PathBuf> {
+        None
     }
 }
 

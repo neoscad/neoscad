@@ -21,7 +21,14 @@ fn parse(fs: &MemFs, src: &str) -> Program {
 
 fn lines(p: &Program) -> Vec<String> {
     p.openscad_diags()
-        .map(|d| d.render_openscad(&p.sources, Path::new("/doc"), Path::new("/doc")))
+        .map(|d| {
+            d.render_openscad(
+                &p.sources,
+                Path::new("/doc"),
+                Path::new("/doc"),
+                &MemFs::new(),
+            )
+        })
         .collect()
 }
 

@@ -26,6 +26,8 @@ pub mod deps;
 pub mod diag;
 pub mod dump;
 pub mod fragment;
+#[cfg(feature = "host")]
+pub mod host;
 pub mod loader;
 pub mod number;
 pub mod paths;
@@ -137,7 +139,12 @@ pub fn parse_program_with(
     caches: Caches<'_>,
 ) -> Program {
     let main = path.clone();
-    finish(parse_with(path, text, &main, fs, libs, caches), &main, true)
+    finish(
+        parse_with(path, text, &main, fs, libs, caches),
+        &main,
+        true,
+        fs,
+    )
 }
 
 fn parse_with(
@@ -204,16 +211,25 @@ pub fn parse_library_with(
     libs: &LibraryPath,
     caches: Caches<'_>,
 ) -> Program {
-    finish(parse_with(path, text, main, fs, libs, caches), main, false)
+    finish(
+        parse_with(path, text, main, fs, libs, caches),
+        main,
+        false,
+        fs,
+    )
 }
 
 /// Parse one file without following includes (for editors and formatters).
+///
+/// It reads no files, so it needs no file system: with every statement in
+/// the main file, no message names another file to resolve.
 pub fn parse_file(path: PathBuf, text: Vec<u8>) -> Program {
     let main = path.clone();
     finish(
         fragment::Parsed::plain(loader::load_single(path, text)),
         &main,
         false,
+        &vfs::NoFs,
     )
 }
 
@@ -227,10 +243,16 @@ pub fn parse_file_annotated(path: PathBuf, text: Vec<u8>) -> Program {
         fragment::Parsed::plain(loader::load_single(path, text)),
         &main,
         true,
+        &vfs::NoFs,
     )
 }
 
-fn finish(parsed: fragment::Parsed, main_path: &Path, annotate: bool) -> Program {
+fn finish(
+    parsed: fragment::Parsed,
+    main_path: &Path,
+    annotate: bool,
+    fs: &dyn FileSystem,
+) -> Program {
     let (mut ast, lower_diags) = {
         let placed = parsed.placed();
         let (ast, diags, _) = ast::lower_with(
@@ -240,6 +262,7 @@ fn finish(parsed: fragment::Parsed, main_path: &Path, annotate: bool) -> Program
             &parsed.uses,
             &placed,
             false,
+            fs,
         );
         (ast, diags)
     };

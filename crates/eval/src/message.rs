@@ -17,8 +17,10 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use lang::diag::{DiagCode, Diagnostic, PathBase, Severity, relative_display};
+use lang::loader::FileSystem;
 use lang::source::{SourceMap, Span};
 
 /// One message, in the order OpenSCAD prints it.
@@ -36,13 +38,14 @@ pub struct Message<'a> {
 impl Message<'_> {
     /// The line OpenSCAD prints: `WARNING: text in file x.scad, line 3`.
     /// Paths are relative to `main_dir` (the evaluation messages' base).
-    pub fn render_openscad(&self, main_dir: &Path) -> Vec<u8> {
+    /// `fs` resolves symlinks in them (`lang::diag::relative_path`).
+    pub fn render_openscad(&self, main_dir: &Path, fs: &dyn FileSystem) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.text.len() + 48);
         out.extend_from_slice(self.diag.severity.openscad_label().as_bytes());
         out.extend_from_slice(b": ");
         out.extend_from_slice(self.text);
         if let (Some(span), Some(sources)) = (self.diag.span, self.sources) {
-            let rel = relative_display(sources.path(span.file), main_dir);
+            let rel = relative_display(sources.path(span.file), main_dir, fs);
             out.extend_from_slice(format!(" in file {rel}, line {}", self.diag.line).as_bytes());
         }
         out
@@ -83,8 +86,12 @@ pub struct Console<W: Write> {
     quiet: bool,
     last: VecDeque<Vec<u8>>,
     main_dir: PathBuf,
+    /// Resolves the printed paths' symlinks and working directory: the
+    /// host's file system, so paths print as OpenSCAD's would on the disk
+    /// and lexically where there is none.
+    fs: Arc<dyn FileSystem + Send + Sync>,
     /// Rendered paths per (source map address, file, base directory), as
-    /// computing a relative path touches the file system. The base is part
+    /// computing a relative path asks the file system. The base is part
     /// of the key: a file's parser errors print relative to the working
     /// directory and its warnings relative to the main file's directory.
     paths: Vec<((usize, u32, PathBuf), String)>,
@@ -190,12 +197,21 @@ pub fn excerpt(sources: &SourceMap, span: Span) -> String {
 }
 
 impl<W: Write> Console<W> {
-    pub fn new(out: W, main_dir: PathBuf, quiet: bool) -> Self {
+    /// A console printing to `out`, with paths relative to `main_dir` (or
+    /// the working directory, for messages based there) as `fs` resolves
+    /// them: the file system the program was read through.
+    pub fn new(
+        out: W,
+        main_dir: PathBuf,
+        fs: Arc<dyn FileSystem + Send + Sync>,
+        quiet: bool,
+    ) -> Self {
         Console {
             out,
             quiet,
             last: VecDeque::with_capacity(5),
             main_dir,
+            fs,
             paths: Vec::new(),
             records: None,
             rich: false,
@@ -377,7 +393,7 @@ impl<W: Write> Console<W> {
         {
             return p.clone();
         }
-        let p = relative_display(sources.path(span.file), base);
+        let p = relative_display(sources.path(span.file), base, &*self.fs);
         self.paths
             .push(((addr, file, base.to_path_buf()), p.clone()));
         p

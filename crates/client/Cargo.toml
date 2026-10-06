@@ -31,6 +31,8 @@ session = { package = "neoscad-session", path = "../session", default-features =
 
 [dev-dependencies]
 assets = { package = "neoscad-assets", path = "../assets" }
+# The disk, for tests only (`lang`'s `host` feature; see lang/src/host.rs).
+lang = { package = "neoscad-lang", path = "../lang", features = ["host"] }
 # Thread pools of different sizes, for the scene determinism test.
 rayon.workspace = true
 

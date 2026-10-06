@@ -52,7 +52,7 @@ fn relative(opts: &RenderOptions, file: &str) -> String {
     if file.is_empty() || opts.work_dir.as_os_str().is_empty() {
         return file.to_string();
     }
-    lang::diag::relative_path(Path::new(file), &opts.work_dir)
+    lang::diag::relative_path(Path::new(file), &opts.work_dir, &*opts.fs)
         .to_string_lossy()
         .replace('\\', "/")
 }

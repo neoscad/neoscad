@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::diag::{DiagCode, Diagnostic, PathBase, Severity};
-use crate::loader::seq_for_token;
+use crate::loader::{FileSystem, seq_for_token};
 use crate::source::{SourceMap, Span};
 use crate::syntax::SyntaxKind as K;
 use crate::syntax::cst::{Cst, Node, TokenRef};
@@ -368,14 +368,16 @@ impl Ast {
 
 /// Lower a parsed program. `main` is the path OpenSCAD treats as the main
 /// file for reassignment warnings: the program's own file, or for a `use`d
-/// library the program that uses it.
+/// library the program that uses it. `fs` resolves the paths those
+/// warnings print ([`crate::diag::relative_path`]).
 pub fn lower(
     cst: &Cst,
     sources: &SourceMap,
     main: &Path,
     uses: &[crate::loader::UseRef],
+    fs: &dyn FileSystem,
 ) -> (Ast, Vec<Diagnostic>) {
-    let (ast, diags, _) = lower_with(cst, sources, main, uses, &[], false);
+    let (ast, diags, _) = lower_with(cst, sources, main, uses, &[], false, fs);
     (ast, diags)
 }
 
@@ -447,10 +449,12 @@ pub(crate) fn lower_with(
     uses: &[crate::loader::UseRef],
     frags: &[Placed<'_>],
     record: bool,
+    fs: &dyn FileSystem,
 ) -> (Ast, Vec<Diagnostic>, Option<FragmentAst>) {
     let mut l = Lower {
         sources,
         main,
+        fs,
         ast: Ast::default(),
         diags: Vec::new(),
         file_ended: false,
@@ -489,6 +493,8 @@ pub(crate) fn lower_with(
 struct Lower<'a> {
     sources: &'a SourceMap,
     main: &'a Path,
+    /// Resolves the other file a reassignment warning names.
+    fs: &'a dyn FileSystem,
     ast: Ast,
     diags: Vec<Diagnostic>,
     /// Set once the `\x03` statement has been seen: assignments after it
@@ -762,7 +768,7 @@ impl<'a> Lower<'a> {
                 return None;
             }
             let main_dir = main.parent().unwrap_or(main);
-            let rel = crate::diag::relative_path(prev_path, main_dir);
+            let rel = crate::diag::relative_path(prev_path, main_dir, self.fs);
             format!(
                 "{quoted} was assigned on line {} of {} but was overwritten",
                 prev.line,

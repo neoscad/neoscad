@@ -297,6 +297,15 @@ fn parser_diagnostics<W: Write>(
     false
 }
 
+/// What a run's console resolves message paths through: the disk, as
+/// OpenSCAD's `std::filesystem::relative` does. (The run's [`Host`] file
+/// system is the disk too, with the bundled libraries mounted in memory,
+/// which resolve to their lexical paths either way; the console is made
+/// before the host.)
+fn disk() -> std::sync::Arc<dyn lang::loader::FileSystem + Send + Sync> {
+    std::sync::Arc::new(lang::loader::StdFs)
+}
+
 /// The console of a run's stderr: OpenSCAD's lines, or with `--format
 /// json` nothing printed and everything recorded for the report.
 fn stderr_console(job: &Job<'_>, paths: &Paths) -> Console<Box<dyn Write>> {
@@ -305,7 +314,7 @@ fn stderr_console(job: &Job<'_>, paths: &Paths) -> Console<Box<dyn Write>> {
     } else {
         Box::new(std::io::stderr())
     };
-    Console::new(out, paths.main_dir.clone(), job.quiet)
+    Console::new(out, paths.main_dir.clone(), disk(), job.quiet)
         .record(job.json)
         .rich(job.rich && !job.json)
 }
@@ -489,7 +498,8 @@ fn write_trees(
 /// `Echostream` captures them, and nothing on stderr.
 pub fn export_echo(job: &Job<'_>, options: &Options) -> u8 {
     let paths = Paths::of(job);
-    let mut con = Console::new(Vec::new(), paths.main_dir.clone(), job.quiet).record(job.json);
+    let mut con =
+        Console::new(Vec::new(), paths.main_dir.clone(), disk(), job.quiet).record(job.json);
     let code = match load(job, &paths, &mut con) {
         Err(code) => code,
         // The echo file is written as messages arrive, so after a hard
@@ -672,7 +682,11 @@ fn render_frame<W: Write>(
         if let Some(l) = &u.loc
             && let Some(sources) = unit_sources(loaded, l.unit)
         {
-            let rel = lang::diag::relative_display(sources.path(l.span.file), &paths.main_dir);
+            let rel = lang::diag::relative_display(
+                sources.path(l.span.file),
+                &paths.main_dir,
+                &lang::loader::StdFs,
+            );
             line.push_str(&format!(" (in file {rel}, line {})", l.line));
         }
         // Past `--quiet`, as the `eprintln!` it replaces was; recorded for

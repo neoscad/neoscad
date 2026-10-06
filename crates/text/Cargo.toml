@@ -20,5 +20,9 @@ harfrust = "=0.13.3"
 # by one copy of the parser.
 skrifa = "=0.46.2"
 
+[dev-dependencies]
+# The disk, for tests only (`lang`'s `host` feature; see lang/src/host.rs).
+lang = { package = "neoscad-lang", path = "../lang", features = ["host"] }
+
 [lints]
 workspace = true

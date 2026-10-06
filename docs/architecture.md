@@ -44,6 +44,17 @@ The workspace is every directory under `crates/` (`Cargo.toml`,
   `scadfmt`) · `assets` (bundled Liberation fonts and MCAD) · `session`
   (the long-lived core every client drives) · `lsp` (the language
   server over a session, transport-agnostic).
+  The one exception lives in `lang/src/host.rs`, compiled only with
+  `lang`'s `host` feature: the disk (`lang::loader::StdFs`) and the
+  environment's library path (`LibraryPath::from_env`, `user_dir`). Hosts
+  enable it; library crates enable it for their tests only
+  (`[dev-dependencies]`), so their defaults use `lang::vfs::NoFs` and a
+  host passes its file system in. Message paths resolve symlinks and the
+  working directory through that file system too (`diag::relative_path`;
+  the disk's `.` is the working directory), lexically where it resolves
+  nothing. `lang/tests/host_boundary.rs` fails on a library manifest that
+  enables `host` or library code that names `std::fs`, `std::env`,
+  `StdFs`, `canonicalize()` or the clock outside tests.
 - **Hosts** (may touch the platform): `cli` (the `neoscad` binary:
   OpenSCAD's flags plus `serve`, `mcp`, `lsp`, `snapshot`, `check`,
   `measure`, `test`, `fmt`, `docs` and `bench`) · `ffi` (the app's UniFFI

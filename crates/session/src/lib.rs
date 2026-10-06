@@ -1397,9 +1397,14 @@ impl Session {
     fn pipe(&self, run: &Run) -> Pipe {
         let paths = Paths::of(run, &self.cfg);
         Pipe {
-            con: Console::new(Vec::new(), paths.main_dir.clone(), run.quiet)
-                .record(true)
-                .rich(run.rich),
+            con: Console::new(
+                Vec::new(),
+                paths.main_dir.clone(),
+                self.fs.clone(),
+                run.quiet,
+            )
+            .record(true)
+            .rich(run.rich),
             paths,
             t0: self.now(),
             timings: Timings::default(),
@@ -1783,6 +1788,7 @@ impl Session {
                             let rel = lang::diag::relative_display(
                                 sources.path(l.span.file),
                                 &pipe.paths.main_dir,
+                                &*self.fs,
                             );
                             line.push_str(&format!(" (in file {rel}, line {})", l.line));
                         }

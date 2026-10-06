@@ -260,7 +260,7 @@ fn evaluate(p: &Parsed, opts: &Options, memo: Option<&mut Memo>) -> (Seen, eval:
         .collect();
     let mut out = Tee {
         lines: Stream::new(),
-        console: eval::Console::new(Stream::new(), main_dir.clone(), false),
+        console: eval::Console::new(Stream::new(), main_dir.clone(), opts.fs.clone(), false),
     };
     let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || match memo {
         Some(m) => eval::evaluate_incremental(

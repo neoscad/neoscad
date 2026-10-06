@@ -16,5 +16,9 @@ name = "assets"
 lang = { package = "neoscad-lang", path = "../lang" }
 text = { package = "neoscad-text", path = "../text" }
 
+[dev-dependencies]
+# The disk, for tests only (`lang`'s `host` feature; see lang/src/host.rs).
+lang = { package = "neoscad-lang", path = "../lang", features = ["host"] }
+
 [lints]
 workspace = true

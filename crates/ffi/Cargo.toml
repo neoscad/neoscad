@@ -34,7 +34,8 @@ assets = { package = "neoscad-assets", path = "../assets" }
 # export), shared with the web worker; its records cross as remote types.
 client = { package = "neoscad-client", path = "../client" }
 eval = { package = "neoscad-eval", path = "../eval" }
-lang = { package = "neoscad-lang", path = "../lang" }
+# `host`: the disk and the environment's library path (lang/src/host.rs).
+lang = { package = "neoscad-lang", path = "../lang", features = ["host"] }
 lsp = { package = "neoscad-lsp", path = "../lsp" }
 render = { package = "neoscad-render", path = "../render" }
 serde_json.workspace = true

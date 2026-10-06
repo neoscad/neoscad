@@ -145,7 +145,7 @@ impl Session {
                     return lang::loader::generic(r);
                 }
             }
-            lang::diag::relative_display(p, &cwd)
+            lang::diag::relative_display(p, &cwd, &*self.fs)
         };
         let Some(name) = &req.name else {
             let main = req.file.as_ref().map(|f| crate::normal(&cwd.join(f)));

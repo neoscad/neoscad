@@ -74,7 +74,7 @@ fn run_inner(
     text.extend_from_slice(b"\n\x03\n");
     let program = lang::parse_program(doc.join("main.scad"), text, &*fs, &libs);
     let mut out: Vec<u8> = Vec::new();
-    let mut con = eval::Console::new(&mut out, doc.clone(), false);
+    let mut con = eval::Console::new(&mut out, doc.clone(), fs.clone(), false);
     for d in program.openscad_diags() {
         con.diagnostic(d, &program.sources, &doc);
     }

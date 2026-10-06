@@ -273,7 +273,13 @@ fn execute_png(
     };
     // What the command line prints after the geometry: the same console
     // rules, continuing the log.
-    let mut con = eval::Console::new(Vec::new(), main_dir, quiet).record(true);
+    let mut con = eval::Console::new(
+        Vec::new(),
+        main_dir,
+        std::sync::Arc::new(lang::loader::StdFs),
+        quiet,
+    )
+    .record(true);
     if r.exit_code == 0 {
         let dim = r.geometry.as_ref().map_or(3, geom::Geometry::dimension);
         if mode == session::Mode::Force && dim == 3 {

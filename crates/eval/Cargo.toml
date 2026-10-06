@@ -24,6 +24,8 @@ rayon.workspace = true
 
 [dev-dependencies]
 assets = { package = "neoscad-assets", path = "../assets" }
+# The disk, for tests only (`lang`'s `host` feature; see lang/src/host.rs).
+lang = { package = "neoscad-lang", path = "../lang", features = ["host"] }
 
 [lints]
 workspace = true

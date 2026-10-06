@@ -557,7 +557,12 @@ fn ranges() {
 fn repeated_messages_are_suppressed_by_the_console() {
     let mut buf = Vec::new();
     {
-        let mut con = eval::Console::new(&mut buf, PathBuf::from("/"), false);
+        let mut con = eval::Console::new(
+            &mut buf,
+            PathBuf::from("/"),
+            Arc::new(lang::vfs::NoFs),
+            false,
+        );
         for _ in 0..8 {
             con.print(Some(Severity::Warning), b"WARNING: same");
         }

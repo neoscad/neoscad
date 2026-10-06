@@ -63,6 +63,9 @@ against the nightly, which is how the harness itself is checked.
   through `lang`'s `FileSystem`; seeds, paths and limits come in through
   `Options`. Only non-library crates (`cli`, `ffi`, `conformance`, `wasm-check`,
   `uniffi-bindgen`, `web`, `web-view`, `bench-core`, `linux-app`, `agent-link`) and test code may use them directly.
+  The disk itself (`StdFs`, `LibraryPath::from_env`) is behind `lang`'s
+  `host` feature, which only hosts and dev-dependencies enable;
+  `lang/tests/host_boundary.rs` checks it.
   `docs/architecture.md` has the limits, panics and determinism policies. This is what keeps the WASM build honest.
 - Output must be byte-identical at any thread count; add a determinism test
   for anything parallel.

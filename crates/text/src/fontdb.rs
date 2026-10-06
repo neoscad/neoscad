@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use lang::loader::{FileSystem, StdFs};
+use lang::loader::FileSystem;
+use lang::vfs::NoFs;
 use skrifa::raw::{FileRef, FontRef, TableProvider};
 use skrifa::{MetadataProvider, string::StringId};
 
@@ -86,12 +87,14 @@ pub struct FontDb {
 
 impl Default for FontDb {
     fn default() -> Self {
-        FontDb::with_fs(Arc::new(StdFs))
+        FontDb::with_fs(Arc::new(NoFs))
     }
 }
 
 impl FontDb {
-    /// An empty database reading directories and files from disk.
+    /// An empty database with no file system: fonts come only from
+    /// [`FontDb::add_static`] and the like. A host that reads font files
+    /// uses [`FontDb::with_fs`] (the disk is `lang::loader::StdFs`).
     pub fn new() -> FontDb {
         FontDb::default()
     }

@@ -73,7 +73,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use lang::Program;
-use lang::loader::{FileSystem, StdFs};
+use lang::loader::FileSystem;
+use lang::vfs::NoFs;
 
 pub use message::{Collect, Console, Location, Logged, LoggedHint, Message, Output, excerpt};
 pub use node::Node;
@@ -210,7 +211,9 @@ pub struct Options {
     /// hosts choose (a WASM host from its own entropy). The same seed
     /// always gives the same numbers, so the default, 0, is repeatable.
     pub rng_seed: u32,
-    /// Where `dxf_dim()` and `dxf_cross()` read their files.
+    /// Where `dxf_dim()` and `dxf_cross()` read their files, and what
+    /// resolves the paths messages print. The default has no files
+    /// (`lang::vfs::NoFs`); a host passes its own.
     pub fs: Arc<dyn FileSystem + Send + Sync>,
     /// Checked at every call and loop iteration; when set, evaluation stops.
     pub interrupt: Option<Arc<AtomicBool>>,
@@ -253,7 +256,7 @@ impl Default for Options {
             frame_limit: recursion::DEFAULT_FRAME_LIMIT,
             version: [2026.0, 9.0, 23.0],
             rng_seed: 0,
-            fs: Arc::new(StdFs),
+            fs: Arc::new(NoFs),
             interrupt: None,
             guard: None,
             hardwarnings: false,

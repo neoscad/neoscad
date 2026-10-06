@@ -20,7 +20,6 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use crate::diag::{DiagCode, Diagnostic, Severity};
 use crate::fragment::{self, Ctx, Dep, Fragment, FragmentKey, SpliceStats};
@@ -75,116 +74,18 @@ impl std::fmt::Debug for dyn FileSystem + Send + Sync {
     }
 }
 
-/// The real file system.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct StdFs;
-
-impl FileSystem for StdFs {
-    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        std::fs::read(path)
-    }
-    fn exists(&self, path: &Path) -> bool {
-        path.exists()
-    }
-    fn is_dir(&self, path: &Path) -> bool {
-        path.is_dir()
-    }
-    fn canonicalize(&self, path: &Path) -> Option<PathBuf> {
-        // Without `\\?\` on Windows, so found includes compare equal to
-        // (and print like) every other path (see `crate::paths`).
-        path.canonicalize().ok().map(crate::paths::plain)
-    }
-    fn metadata(&self, path: &Path) -> Option<Metadata> {
-        let m = std::fs::metadata(path).ok()?;
-        let modified = m
-            .modified()
-            .ok()
-            .map(|t| match t.duration_since(UNIX_EPOCH) {
-                Ok(d) => d.as_nanos() as i128,
-                Err(e) => -(e.duration().as_nanos() as i128),
-            });
-        Some(Metadata {
-            modified,
-            len: m.len(),
-        })
-    }
-    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
-        std::fs::read_dir(path)?
-            .map(|e| e.map(|e| e.path()))
-            .collect()
-    }
-}
+/// The real file system, for hosts (the `host` feature; see
+/// [`crate::host`]).
+#[cfg(feature = "host")]
+pub use crate::host::StdFs;
 
 /// Library directories searched after the including file's directory, in
 /// order (OpenSCAD's `librarypath`). A host that bundles libraries appends
-/// their directory last, as OpenSCAD appends `<resources>/libraries`.
+/// their directory last, as OpenSCAD appends `<resources>/libraries`. A
+/// host reads the process environment's with `LibraryPath::from_env` (the
+/// `host` feature).
 #[derive(Debug, Clone, Default)]
 pub struct LibraryPath(pub Vec<PathBuf>);
-
-impl LibraryPath {
-    /// `OPENSCADPATH` entries, then the per-user library directory, as
-    /// `parser_init()` in parsersettings.cc builds it (the resource
-    /// directory it adds last is the host's to add). This is the only place
-    /// `lang` reads the process environment, and only when a host asks: a
-    /// WASM host builds its path directly (and there `var_os` finds
-    /// nothing and `current_dir` fails, without panicking).
-    pub fn from_env() -> Self {
-        let mut dirs = Vec::new();
-        let cwd = std::env::current_dir().unwrap_or_default();
-        if let Some(paths) = std::env::var_os("OPENSCADPATH") {
-            let sep = if cfg!(windows) { ';' } else { ':' };
-            for p in paths.to_string_lossy().split(sep) {
-                dirs.push(if p.is_empty() {
-                    cwd.clone()
-                } else {
-                    cwd.join(p)
-                });
-            }
-        }
-        if let Some(user) = Self::user_dir() {
-            dirs.push(user);
-        }
-        Self(dirs)
-    }
-
-    /// The per-user library directory, `PlatformUtils::userLibraryPath()`
-    /// (`PlatformUtils.cc`, `userPath`): `<documents>/OpenSCAD/libraries`,
-    /// where the documents directory is `~/Documents` on macOS
-    /// (`PlatformUtils-mac.mm`), `$HOME/.local/share` on other Unix systems
-    /// (`PlatformUtils-posix.cc`, `documentsPath`), and the shell's
-    /// Documents folder on Windows (`PlatformUtils-win.cc`). `None` when
-    /// that base cannot be found (no `HOME`, or no known folder).
-    pub fn user_dir() -> Option<PathBuf> {
-        let base = if cfg!(windows) {
-            windows_documents()?
-        } else {
-            let home = PathBuf::from(std::env::var_os("HOME")?);
-            if cfg!(target_os = "macos") {
-                home.join("Documents")
-            } else {
-                home.join(".local/share")
-            }
-        };
-        Some(base.join("OpenSCAD").join("libraries"))
-    }
-}
-
-/// The Windows Documents folder. OpenSCAD asks the shell for
-/// `CSIDL_PERSONAL` (`PlatformUtils-win.cc`, `documentsPath`), whose
-/// current name is `FOLDERID_Documents`; `dirs` makes that known-folder
-/// call without `unsafe` in this crate. `%USERPROFILE%\Documents` is not
-/// equivalent: it is wrong whenever the folder is redirected (OneDrive's
-/// Documents backup does this by default on Windows 11), and libraries a
-/// user installed for OpenSCAD would then not be found.
-#[cfg(windows)]
-fn windows_documents() -> Option<PathBuf> {
-    dirs::document_dir()
-}
-
-#[cfg(not(windows))]
-fn windows_documents() -> Option<PathBuf> {
-    None
-}
 
 /// A `use` directive after resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -801,32 +702,6 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-
-    /// `PlatformUtils::userLibraryPath()`: `<documents>/OpenSCAD/libraries`,
-    /// with documents at `~/Documents` on macOS and `~/.local/share` on
-    /// other Unix systems. (Windows' known folder is checked by CI's
-    /// Windows job against PowerShell's `MyDocuments`.)
-    #[test]
-    fn the_user_library_dir_is_openscads() {
-        let Some(dir) = LibraryPath::user_dir() else {
-            return;
-        };
-        assert!(dir.ends_with("OpenSCAD/libraries"), "{}", dir.display());
-        if cfg!(unix)
-            && let Some(home) = std::env::var_os("HOME")
-        {
-            let docs = if cfg!(target_os = "macos") {
-                "Documents"
-            } else {
-                ".local/share"
-            };
-            assert_eq!(
-                dir,
-                PathBuf::from(home).join(docs).join("OpenSCAD/libraries")
-            );
-        }
-        assert_eq!(LibraryPath::from_env().0.last(), Some(&dir));
-    }
 
     /// In-memory files for tests; directories are implied by file paths.
     struct MemFs(HashMap<PathBuf, Vec<u8>>);

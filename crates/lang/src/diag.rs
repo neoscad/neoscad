@@ -20,6 +20,7 @@
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
+use crate::loader::FileSystem;
 use crate::source::{SourceMap, Span};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -266,15 +267,22 @@ impl Diagnostic {
     }
 
     /// The line OpenSCAD prints: `ERROR: <message> in file <path>, line <n>`.
-    /// `cwd` and `main_dir` resolve [`PathBase`].
-    pub fn render_openscad(&self, sources: &SourceMap, cwd: &Path, main_dir: &Path) -> String {
+    /// `cwd` and `main_dir` resolve [`PathBase`]; `fs` resolves symlinks
+    /// in the path and its base (see [`relative_path`]).
+    pub fn render_openscad(
+        &self,
+        sources: &SourceMap,
+        cwd: &Path,
+        main_dir: &Path,
+        fs: &dyn FileSystem,
+    ) -> String {
         let mut s = format!("{}: {}", self.severity.openscad_label(), self.message);
         if let Some(span) = self.span {
             let base = match self.base {
                 PathBase::WorkingDir => cwd,
                 PathBase::MainFileDir => main_dir,
             };
-            let rel = relative_display(sources.path(span.file), base);
+            let rel = relative_display(sources.path(span.file), base, fs);
             s.push_str(&format!(" in file {rel}, line {}", self.line));
         }
         s
@@ -285,15 +293,17 @@ impl Diagnostic {
 /// where they exist (resolving symlinks such as macOS `/tmp`), then the
 /// shortest `..`-path from `base` to `path` is returned.
 ///
-/// This asks the real file system rather than a [`crate::loader::FileSystem`]
-/// because it only shapes how a path is printed, and it is called from
-/// places that have no file system at hand (message printing). Where there
-/// is no real file system (wasm32-unknown-unknown, where `current_dir` and
-/// `canonicalize` fail rather than panic) it falls back to the lexical
-/// result, which is exact for in-memory files: they have no symlinks.
-pub fn relative_path(path: &Path, base: &Path) -> PathBuf {
-    let p = weakly_canonical(path);
-    let b = weakly_canonical(base);
+/// The canonical forms come from `fs`, never from the disk directly: a
+/// library crate that asked the disk would resolve paths the host's file
+/// system does not have (an in-memory document, a root-limited server),
+/// and would break the rule that only hosts touch the machine. A relative
+/// path or base is taken against `fs`'s answer for `.`, which for the
+/// disk is the working directory, so the host decides what that is. Where
+/// `fs` resolves nothing (an empty or in-memory file system, which has no
+/// symlinks) the result is the lexical one, which is then exact.
+pub fn relative_path(path: &Path, base: &Path, fs: &dyn FileSystem) -> PathBuf {
+    let p = weakly_canonical(path, fs);
+    let b = weakly_canonical(base, fs);
     let pc: Vec<Component> = p.components().collect();
     let bc: Vec<Component> = b.components().collect();
     let common = pc.iter().zip(&bc).take_while(|(a, b)| a == b).count();
@@ -313,27 +323,39 @@ pub fn relative_path(path: &Path, base: &Path) -> PathBuf {
 /// [`relative_path`] as OpenSCAD prints one in a message: `/`-separated on
 /// every host (`fs_uncomplete(..).generic_string()`, `AST.cc`), so output
 /// and the tests that compare it are the same on Windows as elsewhere.
-pub fn relative_display(path: &Path, base: &Path) -> String {
-    crate::loader::generic(&relative_path(path, base))
+pub fn relative_display(path: &Path, base: &Path, fs: &dyn FileSystem) -> String {
+    crate::loader::generic(&relative_path(path, base, fs))
 }
 
-/// Canonicalise the longest existing prefix and append the rest lexically.
-fn weakly_canonical(path: &Path) -> PathBuf {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|d| d.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    let mut existing = abs.clone();
+/// `std::filesystem::weakly_canonical`: canonicalise the longest prefix
+/// `fs` resolves and append the rest lexically.
+fn weakly_canonical(path: &Path, fs: &dyn FileSystem) -> PathBuf {
+    let mut existing = path.to_path_buf();
     let mut rest = Vec::new();
     loop {
-        if let Ok(c) = existing.canonicalize() {
-            // Plain, so a base that exists (verbatim from `canonicalize`
-            // on Windows) and a path that does not (lexical, plain) still
-            // share their leading components.
-            let mut out = crate::paths::plain(c);
+        // A relative path runs out at the empty path, which stands for the
+        // working directory: ask `fs` for `.` there (the disk resolves it,
+        // as it resolves every relative path, against the process's).
+        let probe = if existing.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            existing.as_path()
+        };
+        // Plain, so a base that exists (verbatim from `canonicalize` on
+        // Windows) and a path that does not (lexical, plain) still share
+        // their leading components.
+        let resolved = fs
+            .canonicalize(probe)
+            .map(crate::paths::plain)
+            .filter(|c| *c != normalize_lexically(probe));
+        // An answer that only normalises the path is passed over: it may
+        // come from a layer that resolves nothing (a document never saved,
+        // the bundled libraries mounted in memory) over a directory that
+        // is a symlink on disk, and taking it would print an unsaved
+        // `/link/a.scad` as `../link/a.scad` from `/real`. On the
+        // disk the ancestors of a canonical path are canonical too, so
+        // looking further up changes nothing there.
+        if let Some(mut out) = resolved {
             for r in rest.iter().rev() {
                 out.push(r);
             }
@@ -347,7 +369,7 @@ fn weakly_canonical(path: &Path) -> PathBuf {
                 rest.push(name);
                 existing = parent.to_path_buf();
             }
-            _ => return normalize_lexically(&abs),
+            _ => return normalize_lexically(path),
         }
     }
 }
@@ -368,29 +390,100 @@ fn normalize_lexically(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use super::*;
+    use crate::vfs::MemFs;
+
+    /// A disk as `relative_path` sees it: `/link` is a symlink to `/real`
+    /// (as `/tmp` is on macOS), `/work` is the working directory, a
+    /// few directories exist, and `/link/p/doc.scad` is a document never
+    /// saved, which (like a session's buffers) resolves to itself.
+    struct Linked;
+
+    impl FileSystem for Linked {
+        fn read(&self, _: &Path) -> io::Result<Vec<u8>> {
+            Err(io::ErrorKind::NotFound.into())
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.canonicalize(path).is_some()
+        }
+        fn is_dir(&self, path: &Path) -> bool {
+            self.exists(path)
+        }
+        fn canonicalize(&self, path: &Path) -> Option<PathBuf> {
+            let abs = normalize_lexically(&Path::new("/work").join(path));
+            if abs == Path::new("/link/p/doc.scad") {
+                return Some(abs);
+            }
+            let abs = match abs.strip_prefix("/link") {
+                Ok(r) => Path::new("/real").join(r),
+                Err(_) => abs,
+            };
+            ["/", "/real", "/real/p", "/work"]
+                .iter()
+                .any(|d| abs == Path::new(d))
+                .then_some(abs)
+        }
+    }
 
     #[test]
     fn relative_paths_like_std_filesystem() {
+        let fs = MemFs::new();
         assert_eq!(
-            relative_path(Path::new("/nonexist/a/b.scad"), Path::new("/nonexist/a")),
+            relative_path(
+                Path::new("/nonexist/a/b.scad"),
+                Path::new("/nonexist/a"),
+                &fs
+            ),
             Path::new("b.scad")
         );
         assert_eq!(
             relative_path(
                 Path::new("/nonexist/t/data/x.scad"),
-                Path::new("/nonexist/b/t")
+                Path::new("/nonexist/b/t"),
+                &fs
             ),
             Path::new("../../t/data/x.scad")
         );
         assert_eq!(
-            relative_path(Path::new("/nonexist/a"), Path::new("/nonexist/a")),
+            relative_path(Path::new("/nonexist/a"), Path::new("/nonexist/a"), &fs),
             Path::new(".")
+        );
+    }
+
+    /// Symlinks and the working directory come from the file system: a
+    /// path through `/link` meets a base under `/real`, and a
+    /// relative path or base is taken from the file system's `.`. Resolved
+    /// lexically instead, the first would print `../../link/p/x.scad`.
+    #[test]
+    fn relative_paths_resolve_through_the_file_system() {
+        let fs = Linked;
+        assert_eq!(
+            relative_path(Path::new("/link/p/x.scad"), Path::new("/real/p"), &fs),
+            Path::new("x.scad")
+        );
+        assert_eq!(
+            relative_path(Path::new("/link/p/doc.scad"), Path::new("/real/p"), &fs),
+            Path::new("doc.scad")
+        );
+        assert_eq!(
+            relative_path(Path::new("sub/x.scad"), Path::new("/work"), &fs),
+            Path::new("sub/x.scad")
+        );
+        assert_eq!(
+            relative_path(Path::new("/work/x.scad"), Path::new(""), &fs),
+            Path::new("x.scad")
+        );
+        assert_eq!(
+            relative_path(Path::new("../x.scad"), Path::new("/real"), &fs),
+            Path::new("../x.scad")
         );
     }
 
     #[test]
     fn renders_openscad_format() {
+        let fs = MemFs::new();
         let mut sm = SourceMap::new();
         let f = sm.add("/nonexist/d/e.scad".into(), b"x".to_vec());
         let d = Diagnostic::new(
@@ -400,12 +493,12 @@ mod tests {
         )
         .at(Span::new(f, 0, 1), 3);
         assert_eq!(
-            d.render_openscad(&sm, Path::new("/nonexist/d"), Path::new("/")),
+            d.render_openscad(&sm, Path::new("/nonexist/d"), Path::new("/"), &fs),
             "ERROR: Parser error: syntax error in file e.scad, line 3"
         );
         let d = Diagnostic::new(DiagCode::SyntaxError, Severity::Warning, "plain");
         assert_eq!(
-            d.render_openscad(&sm, Path::new("/"), Path::new("/")),
+            d.render_openscad(&sm, Path::new("/"), Path::new("/"), &fs),
             "WARNING: plain"
         );
     }

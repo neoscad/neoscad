@@ -65,7 +65,8 @@ neoscad_client = { package = "neoscad-client", path = "../client" }
 clap_complete = "4.6.11"
 clap_mangen = "0.3.3"
 roff = "1.1.1"
-lang = { package = "neoscad-lang", path = "../lang" }
+# `host`: the disk and the environment's library path (lang/src/host.rs).
+lang = { package = "neoscad-lang", path = "../lang", features = ["host"] }
 eval = { package = "neoscad-eval", path = "../eval" }
 geom = { package = "neoscad-geom", path = "../geom" }
 io = { package = "neoscad-io", path = "../io" }

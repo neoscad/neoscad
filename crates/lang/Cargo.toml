@@ -9,13 +9,26 @@ license.workspace = true
 [lib]
 name = "lang"
 
+[features]
+# The disk (`StdFs`) and the environment's library path
+# (`LibraryPath::from_env`), in `src/host.rs`: for hosts and tests only.
+# A library crate never turns it on in its `[dependencies]`
+# (`tests/host_boundary.rs` checks), so it cannot reach the disk itself.
+host = ["dep:dirs"]
+
 [dependencies]
 
 # The Windows Documents known folder, for the user library directory
-# (`LibraryPath::user_dir`); a safe wrapper, since the workspace forbids
-# `unsafe`. Windows only: every other platform derives it from `HOME`.
+# (`LibraryPath::user_dir`, `host` only); a safe wrapper, since the
+# workspace forbids `unsafe`. Windows only: every other platform derives it
+# from `HOME`.
 [target.'cfg(windows)'.dependencies]
-dirs = "7"
+dirs = { version = "7", optional = true }
+
+[dev-dependencies]
+# This crate with the `host` feature, for its tests (which read the
+# reference checkout); the library build stays without it.
+lang = { package = "neoscad-lang", path = ".", features = ["host"] }
 
 [lints]
 workspace = true

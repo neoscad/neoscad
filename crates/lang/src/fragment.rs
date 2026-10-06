@@ -397,7 +397,8 @@ pub(crate) fn build(
         return Fragment { deps, body: None };
     }
     let placed = p.placed();
-    let (_, _, frag) = ast::lower_with(&p.cst, &p.sources, ctx.main, &p.uses, &placed, true);
+    let (_, _, frag) =
+        ast::lower_with(&p.cst, &p.sources, ctx.main, &p.uses, &placed, true, ctx.fs);
     drop(placed);
     let Parsed {
         sources,
