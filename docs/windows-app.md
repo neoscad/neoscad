@@ -476,7 +476,7 @@ spec); the shared parts are `crates/ffi/src/agent.rs` (`AgentLink`,
      more" (`neoscad.org/agents.html`). The app writes none of this text;
      a Windows wording is fixed in `usage.rs` (its Windows words name the
      agent control's flyout and the Help menu for "ask first", and leave
-     out the macOS-only marks chip and autosave).
+     out the macOS-only autosave).
 - *Help > Allow AI Agents to Work on Open Documents* and *Ask Before
   Applying Agent Edits*: the same two settings, as checkable items, as
   the update settings already are (the app has no settings window).
@@ -486,6 +486,12 @@ spec); the shared parts are `crates/ffi/src/agent.rs` (`AgentLink`,
   the update bar, "Claude Code wants to change this model", the change's
   lines, Apply, and close to decline. Unanswered, it goes after 140 s as
   declined, before the command line's 150 s would give up on the edit.
+- *The marks chip*: while the view shows an agent's marks, a capsule
+  over its top left counts them ("2 agent marks", the macOS app's words)
+  with a button, "Clear the agent's marks", that clears them; the check
+  and measure overlay stays. The count is `NeoSCAD.Host/AgentMarks.cs`,
+  one per window and kept outside the link, so marks left when the user
+  turns agents off can still be cleared.
 - *Turned off*: the control hides (the audit's "off" state); the Help
   menu brings agents back. "Not now" before ever allowing leaves the
   control as the invitation.
@@ -512,7 +518,7 @@ apart by their pipes):
 | `reveal` | `revealRange`: selected and scrolled to |
 | `camera` | `Viewport.ApplyAgentCamera` |
 | `capture` | Waits for a preview that is running or due (an agent's edit schedules one) up to 60 s, then `Viewport.CaptureAsShown` |
-| `annotate` | `Viewport.SetAgentAnnotations`, the agent's own layer: the check and measure overlays stay |
+| `annotate` | `Viewport.SetAgentAnnotations`, the agent's own layer: the check and measure overlays stay. The draw and its count (`AgentMarks`, for the chip) are made under one lock |
 
 `DocumentSession.Revision` counts every change of the text (typing, undo,
 a reload, an agent's edit) and only grows while the window is open, so an
@@ -736,6 +742,15 @@ Ctrl keys, no autosave, the flyout and Help menu, no chip), and
 Their look (the selector's width with five items in the 720-wide
 dialog, the icons' glyphs, the Expander in the dialog's scroll area)
 has not been seen on Windows.
+
+The marks chip (October 2026, after the macOS and Linux apps') was
+checked the same way: `docker-test.sh --with-cli` passes 127 of 127 on
+linux-arm64, two of them new (the count follows the view's last draw,
+a refused draw leaves it, the label's words, and clearing with agents
+off), and the core's Windows usage text now names the chip;
+`docker-typecheck.sh` compiles the chip's handler and fields. The chip
+over the `SwapChainPanel`, its look and its button's click have not
+been seen on Windows.
 
 Not verified until CI or a Windows machine runs it: the named pipe (CI's
 end-to-end test), Claude Desktop's config under `%APPDATA%` (CI), and,

@@ -332,7 +332,10 @@ document the user is looking at.
   the agent was told failed.
 - **The agent's marks** in the 3D view are a layer of their own over the
   check and measure panels' (`linux_app::agent::merge_marks`); a new
-  document clears them.
+  document clears them. While they show, a chip over the view's top left
+  counts them ("2 agent marks", `linux_app::agent::marks_chip`, the macOS
+  app's words) and its button ("Clear the agent's marks") clears them,
+  leaving the panels' marks.
 
 **Which `neoscad` clients run** (`linux_app::agent::find_cli`): the one
 beside `neoscad-gtk` first (a build's `target/debug`, or a package that
@@ -474,7 +477,8 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
   under *Things to ask*, Linux's keys and controls), which `neoscad` setups
   name, the header button's states and toasts, edits refused on another
   version or with the editor out of step and `agentEdit`'s arguments and
-  answers, captures' sizes, the marks layer, and `MainLoopHost` against
+  answers, captures' sizes, the marks layer and the chip's count (what
+  the view draws), and `MainLoopHost` against
   stand-in windows (answers, a closed document, a main loop that does not
   answer in time); `Document::revision` never repeats. Running `claude`
   (a stand-in that answers as Claude Code does) and the backups of
@@ -483,7 +487,9 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
   `NEOSCAD_CLI`) against the app with agents allowed: `editor_read`,
   `editor_edit` (the edit lands in the editor and runs, the file stays as
   it was), an edit on the old version refused, `view_camera`,
-  `view_annotate` (the marker drawn) and `view_capture`; with `SHOTS` it
+  `view_annotate` (the marker drawn, the chip showing "1 agent mark")
+  and `view_capture`; with `TYPE=1` it presses the chip's clear button
+  (the marks and the chip gone); with `SHOTS` it
   also opens the popover and the Agents dialog, picks each client in
   turn (the last pick kept in `agents.json`, and the dialog opened again
   on it), scrolls to the usage section, saves `agent-`, `agent-popover-`,

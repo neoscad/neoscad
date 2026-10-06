@@ -228,10 +228,12 @@ EOF
 # test's socket apart from the user's), reads the open document, edits it
 # as one change in the editor (which runs it, and leaves the file alone),
 # is refused an edit on the version it read before, moves the camera,
-# marks the view and captures it. Needs the command line beside the app
-# (or NEOSCAD_CLI); with SHOTS it saves agent-light.png and agent-dark.png,
-# the popover, the Agents dialog with each client picked (the pick kept in
-# agents.json, and the page opening on it again), and its usage section.
+# marks the view (the marks chip shows) and captures it; with TYPE=1 the
+# chip's clear button takes the marks away. Needs the command line beside
+# the app (or NEOSCAD_CLI); with SHOTS it saves agent-light.png and
+# agent-dark.png, the popover, the Agents dialog with each client picked
+# (the pick kept in agents.json, and the page opening on it again), and
+# its usage section.
 agent_check() {
     local cli=${NEOSCAD_CLI:-$(dirname "$bin")/neoscad}
     if [ ! -x "$cli" ]; then
@@ -297,10 +299,20 @@ agent_check() {
     grep -q 'vpr' <<<"$r"
     r=$(tool 7 view_annotate '{"markers":[{"point":[12,12,12],"label":"corner"}]}')
     wait_for "overlay: 1 markers" "$log" 30
+    wait_for "agent: marks chip: 1 agent mark" "$log" 30
     r=$(tool 8 view_capture '{"size":256}')
     grep -q '"type":"image"' <<<"$r"
     sleep 1
     shot "agent-$1"
+    if [ "${TYPE:-}" = 1 ]; then
+        # The chip's clear button (the chip is at the view's top left;
+        # the window at the screen's) takes the agent's marks away, and
+        # the chip with them.
+        xdotool mousemove 711 78 click 1
+        wait_for "agent: marks cleared" "$log" 30
+        wait_for "agent: marks chip: hidden" "$log" 30
+        grep "overlay:" "$log" | tail -1 | grep -q "overlay: 0 markers"
+    fi
     if [ -n "${SHOTS:-}" ]; then
         # The header button (left of the main menu; the window is at the
         # screen's top left) opens the popover; its Set Up Agents… opens

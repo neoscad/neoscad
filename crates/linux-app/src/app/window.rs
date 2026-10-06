@@ -66,6 +66,9 @@ pub struct Window {
     /// "Claude Code wants to change line 12-14", while an agent's edit
     /// waits for the user (`agent`).
     approval: agent::ApprovalBar,
+    /// "2 agent marks" over the view's top left while an agent's marks
+    /// show, with the button that clears them (`agent`).
+    marks_chip: agent::MarksChip,
     /// The header bar's agent button (`super::agent`).
     pub(super) agent_button: super::agent::AgentButton,
     /// This window's document number for AI agents (`AgentDocuments`).
@@ -278,6 +281,8 @@ impl Window {
                 .build();
             let notice = disk::DiskNotice::new();
             let approval = agent::ApprovalBar::new();
+            let marks_chip = agent::MarksChip::new();
+            view.root.add_overlay(&marks_chip.root);
             let toolbar = adw::ToolbarView::new();
             toolbar.add_top_bar(&header);
             toolbar.add_top_bar(&banner);
@@ -303,6 +308,7 @@ impl Window {
                 banner,
                 notice,
                 approval,
+                marks_chip,
                 agent_button,
                 agent_id,
                 web,
@@ -1380,12 +1386,19 @@ impl Window {
         self.update_overlay();
     }
 
-    /// Draw the panels' state in the view.
+    /// Draw the panels' state and the agent's marks in the view, and show
+    /// the marks chip to match. Every change of the agent's layer comes
+    /// through here, so the chip can never count marks the view no longer
+    /// draws.
     fn update_overlay(&self) {
-        let a = {
+        let (a, chip) = {
             let st = self.st.borrow();
-            linux_app::agent::merge_marks(inspect::annotations(&st.overlay), &st.agent_marks)
+            (
+                linux_app::agent::merge_marks(inspect::annotations(&st.overlay), &st.agent_marks),
+                linux_app::agent::marks_chip(&st.agent_marks),
+            )
         };
+        self.marks_chip.show(chip.as_deref());
         glib::g_debug!(
             "neoscad",
             "overlay: {} markers, {} lines",

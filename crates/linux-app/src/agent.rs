@@ -461,6 +461,19 @@ pub fn merge_marks(panels: Annotations, agent: &Annotations) -> Annotations {
     all
 }
 
+/// The chip over the view while an agent's marks show ("2 agent marks",
+/// with a button that clears them, as the macOS app's `AgentMarksChip`
+/// is), or `None` when there are none and the chip hides. It counts what
+/// the view draws, so a marker dropped for a bad point is not counted:
+/// a chip claiming a mark the user cannot find would send them looking.
+pub fn marks_chip(agent: &Annotations) -> Option<String> {
+    match agent.lines.len() + agent.markers.len() {
+        0 => None,
+        1 => Some("1 agent mark".into()),
+        n => Some(format!("{n} agent marks")),
+    }
+}
+
 // --- The host: the link's threads to the main loop ---------------------------
 
 /// How long a request waits for the main loop, a little under the command
@@ -715,10 +728,10 @@ mod tests {
                 }
                 let icons: std::collections::HashSet<_> = rows.iter().map(|r| r.icon).collect();
                 assert_eq!(icons.len(), rows.len());
-                // What this app has: Ctrl keys, no autosave, no marks chip,
-                // the header button and Preferences > Agents.
+                // What this app has: Ctrl keys, no autosave, the marks
+                // chip, the header button and Preferences > Agents.
                 let all: String = rows.iter().map(|r| r.body.as_str()).collect();
-                assert!(!all.contains('⌘') && !all.contains("chip"));
+                assert!(!all.contains('⌘') && all.contains("chip over the view"));
                 assert!(all.contains("Ctrl+Z") && all.contains("only when you save"));
                 assert!(all.contains("header bar") && all.contains("Preferences > Agents"));
             }
@@ -910,6 +923,28 @@ mod tests {
         assert_eq!(all.markers.len(), 2);
         assert_eq!(all.markers[0].label, "check");
         assert_eq!(all.lines.len(), 1);
+    }
+
+    #[test]
+    fn the_marks_chip_counts_what_the_view_draws() {
+        assert_eq!(marks_chip(&Annotations::default()), None);
+        let marker = |p: f64| ViewMarker {
+            point: vec![p, 0.0, 0.0],
+            label: String::new(),
+            color: vec![1.0; 3],
+        };
+        assert_eq!(
+            marks_chip(&marks(&[], &[marker(1.0)])).as_deref(),
+            Some("1 agent mark")
+        );
+        let line = ViewLine {
+            points: vec![0.0; 6],
+            closed: false,
+            color: vec![1.0; 3],
+        };
+        // The bad marker is not drawn, so not counted.
+        let a = marks(&[line], &[marker(1.0), marker(f64::NAN)]);
+        assert_eq!(marks_chip(&a).as_deref(), Some("2 agent marks"));
     }
 
     /// Windows that answer from a table, as the main loop would; the

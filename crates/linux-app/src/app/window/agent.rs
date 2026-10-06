@@ -82,9 +82,72 @@ impl ApprovalBar {
     }
 }
 
+/// "2 agent marks" and a clear button, over the view's top left while an
+/// agent's marks show: the macOS app's `AgentMarksChip`. Without it the
+/// user's only way to get rid of an agent's marks was to open another
+/// document, so a marker pointing at a problem already fixed stayed in
+/// the way.
+pub(super) struct MarksChip {
+    pub(super) root: gtk::Box,
+    label: gtk::Label,
+    clear: gtk::Button,
+}
+
+impl MarksChip {
+    pub(super) fn new() -> MarksChip {
+        let label = gtk::Label::new(None);
+        label.add_css_class("caption");
+        let clear = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text("Clear the agent\u{2019}s marks")
+            .valign(gtk::Align::Center)
+            .build();
+        clear.add_css_class("flat");
+        clear.add_css_class("circular");
+        clear.update_property(&[gtk::accessible::Property::Label(
+            "Clear the agent\u{2019}s marks",
+        )]);
+        // `osd` is libadwaita's style for controls over pictures and
+        // video, legible on the light and the dark view alike.
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Start)
+            .margin_top(8)
+            .margin_start(8)
+            .visible(false)
+            .build();
+        root.add_css_class("osd");
+        root.add_css_class("agent-marks");
+        root.append(&super::super::agent::sparkle());
+        root.append(&label);
+        root.append(&clear);
+        MarksChip { root, label, clear }
+    }
+
+    /// Show `text` ("2 agent marks"), or hide the chip for `None`.
+    pub(super) fn show(&self, text: Option<&str>) {
+        // Logged only when it changes, for linux/smoke.sh: the overlay is
+        // redrawn on every pick and finding as well.
+        if self.root.is_visible() != text.is_some() || self.label.text() != text.unwrap_or("") {
+            glib::g_debug!("neoscad", "agent: marks chip: {}", text.unwrap_or("hidden"));
+        }
+        self.label.set_text(text.unwrap_or(""));
+        self.root.set_visible(text.is_some());
+    }
+}
+
 impl Window {
-    /// Connect the approval bar's buttons (from `setup`).
+    /// Connect the approval bar's buttons and the marks chip's (from
+    /// `setup`).
     pub(super) fn connect_agent(self: &Rc<Self>) {
+        let me = Rc::downgrade(self);
+        self.marks_chip.clear.connect_clicked(move |_| {
+            if let Some(w) = me.upgrade() {
+                w.clear_agent_marks();
+            }
+        });
         let me = Rc::downgrade(self);
         self.approval.apply.connect_clicked(move |_| {
             if let Some(w) = me.upgrade() {
@@ -354,6 +417,14 @@ impl Window {
         self.st.borrow_mut().agent_marks = logic::marks(lines, markers);
         self.update_overlay();
         reply.send(Ok(()));
+    }
+
+    /// The marks chip's clear button: the agent's layer goes, the panels'
+    /// marks stay (they are the user's own, cleared from their panels).
+    fn clear_agent_marks(&self) {
+        self.st.borrow_mut().agent_marks = render::viewport::Annotations::default();
+        glib::g_debug!("neoscad", "agent: marks cleared");
+        self.update_overlay();
     }
 }
 

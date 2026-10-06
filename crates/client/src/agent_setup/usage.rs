@@ -27,9 +27,10 @@
 //!   `DocumentFile` the other apps share).
 //! - **Seeing.** The agent's edit arrives as an editor change like a
 //!   keystroke, which schedules the document's run (`editorChanged`, then
-//!   `schedulePreview`). Only the macOS app has the chip over the view
-//!   that clears an agent's marks (`AgentMarksChip`), so only its text
-//!   mentions it.
+//!   `schedulePreview`). Every app shows a chip over the view's top left
+//!   while an agent's marks show, which clears them: macOS's
+//!   `AgentMarksChip`, Windows' `AgentMarksChip` in `MainWindow.xaml`,
+//!   Linux's `MarksChip` (`crates/linux-app/src/app/window/agent.rs`).
 //! - **Exports.** `check`'s `export` with no `path` or `source` works on
 //!   the open document, but writes only inside the server's roots: the
 //!   working directory when it looks like a project, and each `--root`
@@ -94,8 +95,6 @@ struct Words {
     ask_first: &'static str,
     /// The document saves itself (macOS autosave in place).
     autosaves: bool,
-    /// The view has a chip that clears the agent's marks.
-    marks_chip: bool,
     /// Claude Desktop's folder (`super::claude_desktop_folder`), as the
     /// host's file manager spells it.
     desktop_folder: &'static str,
@@ -110,7 +109,6 @@ fn words(host: Host) -> Words {
             control: "The agent control in the toolbar",
             ask_first: "“Ask before applying edits” in the agent control’s popover or Settings > Agents",
             autosaves: true,
-            marks_chip: true,
             desktop_folder: "Documents/NeoSCAD",
         },
         Host::Windows => Words {
@@ -123,7 +121,6 @@ fn words(host: Host) -> Words {
             // menu, which is where it stays reachable once agents are off.
             ask_first: "“Ask me before applying the agent’s edits” in the agent control’s flyout or the Help menu",
             autosaves: false,
-            marks_chip: false,
             desktop_folder: "Documents\\NeoSCAD",
         },
         Host::Linux | Host::LinuxFlatpak => Words {
@@ -133,7 +130,6 @@ fn words(host: Host) -> Words {
             control: "The agent button in the header bar",
             ask_first: "“Ask before applying an agent’s edits” in Preferences > Agents",
             autosaves: false,
-            marks_chip: false,
             // No Claude Desktop on Linux; the macOS spelling, unused.
             desktop_folder: "Documents/NeoSCAD",
         },
@@ -218,14 +214,10 @@ pub fn usage(host: Host, client: Client) -> Usage {
         w.undo
     );
 
-    let marks = if w.marks_chip {
-        "; the chip over the view clears the marks"
-    } else {
-        ""
-    };
     let seeing = format!(
         "The 3D view previews each edit, as it does your typing. The agent can look at the \
-         view, turn the camera and mark spots in it{marks}. {} shows what it’s doing.",
+         view, turn the camera and mark spots in it; the chip over the view clears the marks. \
+         {} shows what it’s doing.",
         w.control
     );
 
@@ -338,13 +330,21 @@ mod tests {
     }
 
     #[test]
-    fn only_macos_autosaves_and_has_the_marks_chip() {
+    fn only_macos_autosaves_and_every_app_has_the_marks_chip() {
         let mac = usage(Host::MacOs, Client::ClaudeCode);
         assert!(body(&mac, UsageTopic::Edits).contains("by itself"));
-        assert!(body(&mac, UsageTopic::Seeing).contains("chip"));
         let win = usage(Host::Windows, Client::ClaudeCode);
         assert!(body(&win, UsageTopic::Edits).contains("only when you save"));
-        assert!(!body(&win, UsageTopic::Seeing).contains("chip"));
+        // All three apps show the chip that clears an agent's marks, so
+        // every host's text names it; a host that lost its chip must drop
+        // the sentence too, or users go looking for it.
+        for host in [Host::MacOs, Host::Windows, Host::Linux, Host::LinuxFlatpak] {
+            let u = usage(host, Client::ClaudeCode);
+            assert!(
+                body(&u, UsageTopic::Seeing).contains("the chip over the view clears the marks"),
+                "{host:?}"
+            );
+        }
     }
 
     #[test]

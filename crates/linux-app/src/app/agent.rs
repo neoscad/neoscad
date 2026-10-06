@@ -264,8 +264,9 @@ fn tell(sh: &Shared, message: &str) {
     }
 }
 
-/// The animation of the status dot while an agent works; GTK leaves it
-/// still when the user turned animations off.
+/// The animation of the status dot while an agent works (GTK leaves it
+/// still when the user turned animations off), and the marks chip's
+/// capsule.
 fn install_css() {
     let Some(display) = gtk::gdk::Display::default() else {
         return;
@@ -274,7 +275,8 @@ fn install_css() {
     css.load_from_string(
         "@keyframes neoscad-agent-pulse { from { opacity: 1; } 50% { opacity: 0.3; } to { opacity: 1; } }\n\
          .agent-dot.working { animation: neoscad-agent-pulse 1.2s ease-in-out infinite; }\n\
-         .agent-copy { padding: 6px 12px; }",
+         .agent-copy { padding: 6px 12px; }\n\
+         .agent-marks { border-radius: 999px; padding: 2px 2px 2px 10px; }",
     );
     gtk::style_context_add_provider_for_display(
         &display,
@@ -451,7 +453,7 @@ impl AgentButton {
 
 /// The sparkle mark (the web page's ✦), drawn in the text colour so it
 /// follows the style, and needing no icon file or font.
-fn sparkle() -> gtk::DrawingArea {
+pub(super) fn sparkle() -> gtk::DrawingArea {
     let area = gtk::DrawingArea::builder()
         .content_width(16)
         .content_height(16)

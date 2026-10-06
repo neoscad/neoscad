@@ -79,14 +79,20 @@ public sealed class AgentDocumentHost : AgentHost
     readonly AutoResetEvent reported = new(false);
     volatile bool closed;
 
-    public AgentDocumentHost(DocumentSession session, IUiDispatcher ui, IAgentEditor editor, Func<Viewport?> viewport)
+    /// <param name="marks">The window's count of the agent's marks (the chip's); its own when null.</param>
+    public AgentDocumentHost(DocumentSession session, IUiDispatcher ui, IAgentEditor editor, Func<Viewport?> viewport,
+        AgentMarks? marks = null)
     {
         this.session = session;
         this.ui = ui;
         this.editor = editor;
         this.viewport = viewport;
+        Marks = marks ?? new AgentMarks(ui);
         session.ReportChanged += Reported;
     }
+
+    /// <summary>What the agent's marks in the view number, for the chip that clears them.</summary>
+    public AgentMarks Marks { get; }
 
     void Reported() => reported.Set();
 
@@ -156,7 +162,9 @@ public sealed class AgentDocumentHost : AgentHost
         Check(document);
         View(v =>
         {
-            v.SetAgentAnnotations(lines, markers);
+            // The core refuses the whole request over one bad marker, so
+            // a draw that returns drew every line and marker it was given.
+            Marks.Set(() => v.SetAgentAnnotations(lines, markers), lines.Length + markers.Length);
             return true;
         });
     }

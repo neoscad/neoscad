@@ -15,7 +15,9 @@
 // - Help > Allow AI Agents… and Ask Before Applying Agent Edits: the same
 //   two settings, as the Help menu already holds the update settings (the
 //   app has no settings window);
-// - the approval bar, when the user asked to be asked.
+// - the approval bar, when the user asked to be asked;
+// - the chip over the view's top left while an agent's marks show ("2
+//   agent marks"), whose button clears them (NeoSCAD.Host/AgentMarks.cs).
 //
 // The link and the document's side are NeoSCAD.Host's AgentConnection and
 // AgentDocumentHost; this file is controls only.
@@ -69,6 +71,9 @@ public sealed partial class MainWindow
             Approve = AskAboutEditAsync,
         };
         agents.Changed += ShowAgentState;
+        agents.Marks.Changed += ShowMarksChip;
+        ToolTipService.SetToolTip(AgentMarksClear, AgentMarks.ClearText);
+        AutomationProperties.SetName(AgentMarksClear, AgentMarks.ClearText);
         Activated += (_, e) => agents?.Activated(e.WindowActivationState != WindowActivationState.Deactivated);
         ShowAgentState();
     }
@@ -491,6 +496,18 @@ public sealed partial class MainWindow
         grid.Children.Add(buttons);
         return grid;
     }
+
+    // --- The marks chip ---------------------------------------------------------------------
+
+    /// <summary>The chip shows while the view shows an agent's marks, and says how many.</summary>
+    void ShowMarksChip()
+    {
+        var label = agents is null ? null : AgentMarks.Label(agents.Marks.Count);
+        AgentMarksLabel.Text = label ?? "";
+        AgentMarksChip.Visibility = label is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    void OnClearAgentMarks(object sender, RoutedEventArgs e) => agents?.ClearMarks();
 
     // --- Ask before applying ---------------------------------------------------------------
 

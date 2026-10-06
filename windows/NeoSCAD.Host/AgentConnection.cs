@@ -51,6 +51,7 @@ public sealed class AgentConnection : IDisposable
         this.appVersion = appVersion;
         this.settingsPath = settingsPath;
         this.rendezvous = rendezvous;
+        Marks = new AgentMarks(ui);
         Settings = AgentSettings.Load(settingsPath);
         session.TitleChanged += Register;
         if (watchSettings) watch = WatchSettings();
@@ -67,6 +68,27 @@ public sealed class AgentConnection : IDisposable
 
     /// <summary>The settings or the status changed.</summary>
     public event Action? Changed;
+
+    /// <summary>
+    /// The agent's marks in the view, counted for the chip. One for the
+    /// window, not one per link, because the marks stay in the view when
+    /// the user turns agents off and must still be clearable then.
+    /// </summary>
+    public AgentMarks Marks { get; }
+
+    /// <summary>The chip's clear button (UI thread): the agent's marks go; the panels' overlay stays.</summary>
+    public void ClearMarks()
+    {
+        try
+        {
+            Marks.Set(() => viewport()?.SetAgentAnnotations([], []), 0);
+            AppLog.Write("agents: marks cleared");
+        }
+        catch (Exception e) when (e is CoreException or ObjectDisposedException)
+        {
+            AppLog.Write($"agents: could not clear the marks: {e.Message}");
+        }
+    }
 
     /// <summary>
     /// Ask the user about an agent's edit when they chose "Ask before
@@ -154,7 +176,7 @@ public sealed class AgentConnection : IDisposable
     void Start()
     {
         if (link is not null) return;
-        host = new AgentDocumentHost(session, ui, editor, viewport)
+        host = new AgentDocumentHost(session, ui, editor, viewport, Marks)
         {
             AskBeforeEdits = () => Settings.AskBeforeEdits,
             Approve = (edit, cancel) => this.Approve?.Invoke(edit, cancel) ?? Task.FromResult(true),

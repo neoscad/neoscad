@@ -246,6 +246,24 @@
               <SwapChainPanel x:Name="ViewPanel" />
               <TextBlock x:Name="ViewError" Visibility="Collapsed" Margin="16"
                          TextWrapping="Wrap" Style="{ThemeResource BodyTextBlockStyle}" />
+              <!-- "2 agent marks" and a clear button while an agent's marks
+                   show (MainWindow.Agents.cs; the macOS app's chip). The
+                   button's tooltip and name are set from AgentMarks. -->
+              <Border x:Name="AgentMarksChip" Visibility="Collapsed" Margin="8" Padding="10,0,0,0"
+                      HorizontalAlignment="Left" VerticalAlignment="Top" CornerRadius="14"
+                      Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                      BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <TextBlock Text="&#x2726;" VerticalAlignment="Center" FontSize="12"
+                             Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                  <TextBlock x:Name="AgentMarksLabel" VerticalAlignment="Center"
+                             Style="{ThemeResource CaptionTextBlockStyle}" />
+                  <Button x:Name="AgentMarksClear" Click="OnClearAgentMarks" Padding="7"
+                          CornerRadius="14" Background="Transparent" BorderThickness="0">
+                    <FontIcon Glyph="&#xE711;" FontSize="10" />
+                  </Button>
+                </StackPanel>
+              </Border>
             </Grid>
           </Border>
           <Border Grid.Row="1" CornerRadius="{StaticResource OverlayCornerRadius}"

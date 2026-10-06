@@ -1292,13 +1292,12 @@ lead them, come roughly in order of user impact.
   `windows/NeoSCAD.App/MainWindow.Agents.cs`; Linux: linked toggle
   buttons, `crates/linux-app/src/app/agent.rs`). The Linux text was
   checked against the app: the smoke test sees the preview run after an
-  agent's edit, the switch is on Preferences > Agents, and there is no
-  chip. On Windows it was checked by reading the code only; what is left
-  to see on a Windows machine is under "Windows", the agent UI item.
-  Only macOS has a chip clearing an agent's marks (the text says so only
-  there); one may be worth adding on Linux and Windows. The web page's
-  "Things to ask" (`web/src/ui/agent.js`, `IDEAS`) is the examples'
-  source; a test keeps them in step.
+  agent's edit, the switch is on Preferences > Agents, and the marks
+  chip shows and its button clears the marks (`TYPE=1`). On Windows it
+  was checked by reading the code only; what is left to see on a Windows
+  machine is under "Windows", the agent UI item. The web page's "Things
+  to ask" (`web/src/ui/agent.js`, `IDEAS`) is the examples' source; a
+  test keeps them in step.
 - **Done: pass `--root` in Claude Desktop's setup.** Its entry is now
   `<cli> mcp --root <Documents>/NeoSCAD` (the owner's choice of folder),
   made by the setup, so its agent can export; relative paths resolve
@@ -1917,10 +1916,11 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   `windows-app.yml` runs the same end-to-end test over a named pipe, with
   a fake editor and no 3D view. Unchecked until a Windows machine runs
   them: the XAML (the menu row's control, the `InfoBadge` and
-  `ProgressRing`, the approval bar), the dialog's look and scrolling at
-  720 px (with its client `SelectorBar`, whether five items fit its
-  width, the usage `Expander` and the Segoe Fluent glyphs beside its
-  items), that the preview follows an agent's edit and that "ask first"
+  `ProgressRing`, the approval bar, the marks chip over the
+  `SwapChainPanel` and its clear button), the dialog's look and
+  scrolling at 720 px (with its client `SelectorBar`, whether five
+  items fit its width, the usage `Expander` and the Segoe Fluent glyphs
+  beside its items), that the preview follows an agent's edit and that "ask first"
   is in the flyout and the Help menu as the usage text says,
   `Launcher.LaunchUriAsync` with Cursor's and VS Code's install
   links (and its answer when neither is installed), the clipboard, a
@@ -1935,6 +1935,10 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
     and a second Add asks to Replace.
   - The Help menu's two agent items are the app's only agent settings
     besides the dialog; a settings window would be their natural home.
+  - File > Open and New keep the agent's marks (and so the marks chip)
+    from the document before; the Linux app clears them with a new
+    document, and macOS opens one in a new window. The chip clears them
+    by hand meanwhile.
 
 ## Linux
 

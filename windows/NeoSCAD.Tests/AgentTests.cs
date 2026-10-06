@@ -315,6 +315,42 @@ public sealed class AgentTests : IDisposable
         Assert.Contains("no 3D view", Message(e));
         e = Assert.ThrowsAny<AgentHostException>(() => host.Annotate(1, [], []));
         Assert.Contains("no 3D view", Message(e));
+        Assert.Equal(0, host.Marks.Count); // nothing drawn, so no chip
+    }
+
+    [Fact]
+    public void TheMarksChipCountsTheViewsLastDraw()
+    {
+        var marks = new AgentMarks(ui);
+        var changed = 0;
+        marks.Changed += () => changed++;
+        marks.Set(() => { }, 3);
+        Assert.Equal(3, marks.Count);
+        // Changed comes on the UI thread, where the chip reads Count.
+        Assert.Equal(0, changed);
+        Assert.True(ui.PumpUntil(() => changed == 1, Wait));
+        // A draw the core refused leaves the view, and so the count, as it was.
+        Assert.Throws<InvalidOperationException>(() => marks.Set(() => throw new InvalidOperationException(), 9));
+        Assert.Equal(3, marks.Count);
+        Assert.Equal("2 agent marks", AgentMarks.Label(2));
+        Assert.Equal("1 agent mark", AgentMarks.Label(1));
+        Assert.Null(AgentMarks.Label(0));
+    }
+
+    [Fact]
+    public void ClearingTheMarksWorksWithAgentsOff()
+    {
+        // The marks are the view's: a user who turned agents off still
+        // gets the chip, and its button still clears them.
+        using var agents = new AgentConnection(doc, ui, editor, () => null, "test",
+            Path.Combine(dir, "agents.json"), watchSettings: false);
+        Assert.False(agents.Settings.Allowed);
+        agents.Marks.Set(() => { }, 2);
+        var changed = 0;
+        agents.Marks.Changed += () => changed++;
+        agents.ClearMarks();
+        Assert.Equal(0, agents.Marks.Count);
+        Assert.True(ui.PumpUntil(() => changed == 2, Wait));
     }
 
     [Fact]
@@ -335,6 +371,7 @@ public sealed class AgentTests : IDisposable
             var cam = withView.Camera(1, new AgentCameraChange(null, false, [1, 2, 3], null, 50));
             Assert.Equal([1.0, 2.0, 3.0], cam.Vpt);
             withView.Annotate(1, [], [new ViewMarker([0, 0, 0], "here", [1, 0, 0, 1])]);
+            Assert.Equal(1, withView.Marks.Count);
             // Opening the file scheduled a preview, and a capture waits for
             // a preview that is due (AgentDocumentHost.RunWait, a minute)
             // so the agent sees its edit's result. The manual timer never
@@ -520,7 +557,7 @@ public sealed class AgentTests : IDisposable
     {
         // The real text, as the dialog gets it on Windows (the host is
         // passed, since this runs on Linux too). It must name this app's
-        // keys and controls, and not the macOS-only marks chip.
+        // keys and controls, the marks chip over the view included.
         foreach (var client in Enum.GetValues<AgentSetupClient>())
         {
             var entries = AgentSetup.Entries(NeoScad.AgentSetupUsage(AgentSetupHost.Windows, client));
@@ -536,7 +573,7 @@ public sealed class AgentTests : IDisposable
             Assert.Contains("flyout", all);
             Assert.Contains("Help menu", all);
             Assert.DoesNotContain("⌘", all);
-            Assert.DoesNotContain("chip", all);
+            Assert.Contains("the chip over the view clears the marks", all);
             Assert.DoesNotContain("popover", all);
         }
         Assert.Equal("Other", NeoScad.AgentSetupShortLabel(AgentSetupClient.Other));
