@@ -1701,16 +1701,75 @@ lead them, come roughly in order of user impact.
   too: `geom::manifold_geom::kernel_token` gives manifold-rust a
   `CancelToken` over the request's flag (`from_flag`, `with_check`;
   `vendor/patches/manifold-rust`).
-- **Browsers other than Chromium are untested.** Only Playwright's
-  Chromium is installed; WebKit and Firefox (their WebGPU, the WebGL2
-  fallback, module workers, `DecompressionStream`) and the worker's stack
-  depth per browser (see "WASM") are unverified. The e2e runs the full
-  Chromium (`channel: "chromium"`, Metal adapter); Playwright's default
-  headless shell has `navigator.gpu` but no adapter.
-- **The core is 4.41 MB gzipped**, over the plan's 4 MB target
-  (`opt-level = "s"` would reach about 4.05 MB and run 10–15% slower;
-  see `ca3c080`). The WebGPU viewer is 184 KB and the lazy WebGL build
-  1.10 MB gzipped. Whether GitHub Pages compresses `.wasm` is unverified.
+- **Done: every e2e spec runs in Chromium, Firefox and WebKit**
+  (`web/playwright.config.js`; Playwright 1.63: Chromium 1243, Firefox
+  155, WebKit 2359). On macOS arm64 against a release bundle all pass:
+  37 Chromium, 35 Firefox, 36 WebKit, 2 phone, with skips only for what
+  cannot apply (the agent's Local Network Access test is Chromium's; the
+  WebGPU splitter test in Firefox). WebKit's view is WebGPU (Apple
+  adapter); Playwright's Firefox has `navigator.gpu` but "WebGPU is
+  disabled by blocklist", also with `dom.webgpu.enabled` and
+  `gfx.webgpu.ignore-blocklist`, so Firefox runs the page's fallback to
+  the WebGL build, which is what it tests. `real.spec.js` now checks deep
+  recursion through the page with a cold worker in each engine (function,
+  module, comprehension and `children()` reach 99,999 levels, and the
+  100,000th is the recursion error with no restart), and the lazy fonts
+  (below). CI's new `web` job (`.github/workflows/ci.yml`, Playwright's
+  container image) runs the unit tests and the suite against the mock
+  build in all three, about a minute of tests; with the mock,
+  `real.spec.js` and `agent.spec.js` skip, as they need the wasm core and
+  `neoscad`. Checked in that image locally: 56 passed three times over.
+  The page needed no fix. One test flake did show: at 0 ms between keys,
+  Linux Chromium typed a key behind later ones about once in ten runs
+  (`share.spec.js`: "// shred on purposea"); the spec now types with
+  20 ms between keys after `settleCursor`. Left: whether that is
+  CodeMirror's input handling under synthetic keys or something the page
+  does on the first edit is not known. Firefox's WebGPU path is untested
+  until Playwright's Firefox gets an adapter.
+- **Done: the core is 2.34 MB gzipped** (6,865,928 bytes raw), down from
+  4.61 MB (4,612,645 bytes gzipped at `-9`; it had grown since the 4.41
+  MB this entry first said), under the 4 MB target. Its data section was
+  4.8 MB raw, and the twelve Liberation fonts were 2.28 MB of the gzipped
+  module. They are now a lazy `fonts.tar.gz` beside the bundle (2.25 MB,
+  `scripts/web/build.sh`), fetched like `bosl2.tar.gz`: before a run
+  whose source calls `text(`, `textmetrics(` or `fontmetrics(`, or when
+  the core reports `fontsWanted` (text drawn inside a library: the
+  `text::FontDb::on_index` hook in `crates/web`), after which the page
+  runs again. Adding files under `/neoscad/fonts` clears the session's
+  caches. Models without text never download them. No evaluation speed
+  changes; the first text model waits for the fetch. What else was
+  measured (`gzip -9` of the module; speed as medians of 9 interleaved
+  cold runs of a node bench of 15 models, with the machine at load
+  15-35):
+  - `wasm-opt -O3` (binaryen 132): -20 KB (0.4%); `-Oz` -18 KB, `-O2`
+    -11 KB. Not installed natively; `build-core.sh` already runs it when
+    it is on `PATH` (or `WASM_OPT=docker`).
+  - `opt-level = "z"` for the text stack (harfrust, skrifa, read-fonts,
+    font-types), `neoscad-io`, quick-xml, zip, png, lsp, fmt and docs:
+    -131 KB, but ASCII STL import 2.7x slower, 3MF import 1.8x, text
+    +8%. `"s"` for the text stack alone: -33 KB, text +3%. `"z"` for lsp,
+    fmt and docs alone: -23 KB, LSP queries +28% and formatting +43%. None
+    applied.
+  - Already minimal: no debug info, symbols stripped (the name section is
+    68 bytes), `panic = "abort"`, fat LTO, one codegen unit.
+  - Brotli would be 3.09 MB against gzip's 4.61 MB for the old module, but
+    GitHub Pages serves `.wasm` gzipped on the fly (`Content-Encoding:
+    gzip`, about `gzip -6`: 4,657,759 bytes for the live 10.9 MB module)
+    and never brotli, even to `Accept-Encoding: br` alone (checked
+    October 2026 with `curl -sI` on neoscad.org/try). The `.tar.gz`
+    archives are served as they are.
+  The WebGPU viewer is 190 KB and the lazy WebGL build 1.10 MB gzipped.
+  Left: of the remaining code, `core::slice::sort` instantiations are
+  about 400 KB raw and rayon's about 420 KB (on single-threaded wasm32);
+  those are in `geom` and `render`.
+- **One boolean overshoots the memory limit by about 700 MiB.**
+  `crates/web/test/run.mjs`'s "one boolean past the memory limit" test
+  (restored in October 2026; `34d69e2` had dropped it) passes, but the
+  Menger depth-5 render stops at "the engine uses 1,706 MiB of memory,
+  over the memory limit of 1,024 MiB (measured)" with wasm memory at
+  1,889 MiB, close to the test's 2 GiB guard. The kernel's check
+  (`geom::manifold_geom::kernel_token`) runs too rarely inside that
+  union to stop it near the limit.
 - **The canvas fallback draws only colour-writing draws**: a preview's
   image-space CSG primitives (subtracted and intersected shapes) are left
   out, so previews of differences show only what is kept. It shows only

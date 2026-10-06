@@ -65,7 +65,11 @@ Paths are absolute, `/`-separated, and exist only in the worker's memory:
   document's directory, as on the desktop.
 - `/neoscad/libraries/` is on the library path. MCAD is compiled in there;
   BOSL2 is added with `addFiles` under `/neoscad/libraries/BOSL2/`.
-- Fonts (Liberation) are compiled in.
+- `/neoscad/fonts/` is where `text()` finds the fonts OpenSCAD bundles
+  (Liberation Sans, Serif and Mono). They are not compiled in (they were
+  half the core's download): the page adds them with `addFiles` (the
+  bundle's `fonts.tar.gz`, `root: "/neoscad/fonts"`) before a run whose
+  text calls `text()`, or when a run says `fontsWanted`.
 
 A document is open from `open` until `close`; its text is what every
 request on its path reads (includes of it too).
@@ -149,7 +153,8 @@ the view, the editor's markers and (through `parameters`) the customizer.
     files: [string],                 // files the run read besides open documents, sorted
     language: [string],              // LSP notifications (JSON-RPC text) to feed the client
     scene: PackedScene | null,       // null when `scene: false`, or the run failed with nothing to draw
-    fileView: FileView | null        // the `$vp*` the file assigned, when it assigned any
+    fileView: FileView | null,       // the `$vp*` the file assigned, when it assigned any
+    fontsWanted: bool                // its text was drawn without the fonts: add them, run again
   }
 ```
 
@@ -176,6 +181,13 @@ the view, the editor's markers and (through `parameters`) the customizer.
 - `files` are the includes, `use`d libraries, imports and fonts the run
   read (all in memory here, bundled MCAD included): what the page would
   have to re-send to change them.
+- `fontsWanted` is true when the run drew or measured text while
+  `/neoscad/fonts/` was empty: the result lacks that text ("Can't get
+  font" warnings). The page fetches `fonts.tar.gz`, adds it, and runs
+  again. Adding files under `/neoscad/fonts/` drops the session's caches,
+  so that run does not reuse what was made without them. Text in a
+  library the page never sees is why the core reports it rather than the
+  page guessing from the document alone.
 - `fileView` has only the fields the file assigned:
   `{ vpt?: [x,y,z], vpr?: [x,y,z], vpd?: number, vpf?: number }`. The
   app moves its view only when these change from the previous run's, so a

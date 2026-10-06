@@ -23,6 +23,9 @@
 /// system (docs/web-protocol.md, "Paths and documents").
 export const DOC_ROOT = "/doc";
 export const LIB_ROOT = "/neoscad/libraries";
+/// Where the bundled fonts go once fetched (fonts.tar.gz; crates/web's
+/// FONT_DIR): the core does not compile them in.
+export const FONT_ROOT = "/neoscad/fonts";
 
 export const docPath = (file) => `${DOC_ROOT}/${file}`;
 export const fileURI = (path) => `file://${path.split("/").map(encodeURIComponent).join("/")}`;
@@ -245,6 +248,9 @@ export function runResult(r) {
     scene: r?.scene ?? null,
     fileView: r?.fileView ?? null,
     files: r?.files ?? [],
+    // Its text was drawn without the fonts, which the page fetches on
+    // first use: add them and run again.
+    fontsWanted: r?.fontsWanted === true,
   };
 }
 
@@ -276,6 +282,14 @@ export const betweenResult = (r) => r ?? {};
 export function usesLibrary(text, name) {
   const re = new RegExp(`\\b(?:include|use)\\s*<\\s*${name}/`);
   return re.test(text);
+}
+
+/// Whether a text draws or measures text, so the fonts should be in the
+/// worker before its run. A guess that saves a run on a model's first
+/// text: the core says when a run wanted fonts it did not have
+/// (`fontsWanted`), which also covers text drawn in an included library.
+export function usesText(text) {
+  return /\b(?:text|textmetrics|fontmetrics)\s*\(/.test(text);
 }
 
 /// Whether two `fileView`s (the `$vp*` a file assigned) differ: the view

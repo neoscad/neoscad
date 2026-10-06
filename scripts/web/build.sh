@@ -8,7 +8,9 @@
 #   dist/web/SHA256SUMS
 #
 # The bundle holds index.html, app.js, app.css, the examples, bosl2.tar.gz
-# (fetched by the page on first `include <BOSL2/...>`), build.json,
+# (fetched by the page on first `include <BOSL2/...>`), fonts.tar.gz (the
+# Liberation fonts, fetched when a model first draws text; with a core
+# only, since the mock draws no text), build.json,
 # THIRD-PARTY-LICENSES.txt and SOURCE.txt, plus the engine and the viewer
 # when they have been built (this script packages them; it does not build
 # them):
@@ -133,6 +135,14 @@ if [ "$engine" = wasm ]; then
     # package.json only lets node import the glue (crates/web/test); the
     # browser needs the module, its glue and the worker.
     cp "$core/worker.js" "$core/neoscad_web.js" "$core/neoscad_web_bg.wasm" "$out/core/"
+    # The fonts are not compiled into the core (crates/web, FONT_DIR): the
+    # page adds them when a model first draws text. Their paths under
+    # assets/fonts are kept, so the worker scans them in the order the
+    # native builds index them (the last tie-break in font matching).
+    fonts_stage=$(mktemp -d)
+    cp -R "$root/assets/fonts/." "$fonts_stage/"
+    repro_tar "$out/fonts.tar.gz" "$fonts_stage" Liberation-2.00.1
+    rm -rf "$fonts_stage"
 fi
 if [ "$viewer" = wasm ]; then
     mkdir "$out/view" "$out/view-webgl"
@@ -180,7 +190,7 @@ fi
     if [ "$engine" = wasm ]; then
         echo
         echo "------------------------------------------------------------------------"
-        echo "The engine embeds the Liberation fonts 2.00.1 (SIL Open Font License 1.1):"
+        echo "fonts.tar.gz is the Liberation fonts 2.00.1 (SIL Open Font License 1.1):"
         echo
         cat "$root/assets/fonts/Liberation-2.00.1/LICENSE"
         echo

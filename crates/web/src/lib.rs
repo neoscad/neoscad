@@ -12,7 +12,9 @@
 //! like the others (`CLAUDE.md`, "Rules"):
 //!
 //! - files: a [`MemFs`] under the bundled libraries (MCAD at
-//!   `/neoscad/libraries`) and fonts; the page adds BOSL2 with `addFiles`;
+//!   `/neoscad/libraries`); the page adds BOSL2 with `addFiles`, and the
+//!   Liberation fonts the same way (at [`FONT_DIR`]) once a run says it
+//!   wants them (`fontsWanted`);
 //! - the clock: passed to [`Worker::new`] (`performance.now()` in the
 //!   browser), for timings and the time limit;
 //! - a measurement of memory in use, for the memory limit: passed to
@@ -30,8 +32,9 @@ mod tar;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use client::{
     CheckOptions, Client, CoreError, DocumentRequest, ExportOptions, ParameterOverride, RenderMode,
@@ -45,6 +48,15 @@ use serde_json::{Value, json};
 /// Where the bundled libraries (and BOSL2, once added) are mounted: on the
 /// library path, as OpenSCAD's `<resources>/libraries`.
 pub const LIBRARY_DIR: &str = "/neoscad/libraries";
+
+/// Where the page adds the fonts OpenSCAD bundles (the Liberation fonts,
+/// `fonts.tar.gz` beside the page), which `text()` searches as OpenSCAD
+/// searches `<resources>/fonts`. They are not compiled in: 2.3 MB of the
+/// core's 4.6 MB gzipped download was those twelve files, which a model
+/// without text never reads. A run that draws or measures text before
+/// they are here says so (`fontsWanted`), and the page adds them and runs
+/// again.
+pub const FONT_DIR: &str = "/neoscad/fonts";
 
 /// The worker's limits unless `init` says otherwise: the agent limits, as
 /// the app runs models, with memory at 1 GiB. A wasm32 instance can grow
@@ -72,6 +84,9 @@ pub struct Reply {
 struct State {
     client: Client,
     files: Arc<MemFs>,
+    /// Set when a run's `text()` (or `textmetrics()`, `fontmetrics()`)
+    /// looked for fonts while [`FONT_DIR`] was empty; taken by `run`.
+    fonts_wanted: Arc<AtomicBool>,
     lsp: lsp::Server,
     /// The latest measurement and its handle (see the protocol's
     /// `measure`): one only, so a panel that measures again and again
@@ -339,22 +354,32 @@ fn config(
     clock: Option<Clock>,
     probe: Option<session::MemoryProbe>,
     seed: u32,
+    fonts_wanted: Arc<AtomicBool>,
 ) -> session::Config {
     let base: Arc<dyn FileSystem + Send + Sync> = files;
     let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(base, LIBRARY_DIR));
     let mut cfg = session::Config::new(fs.clone(), LibraryPath(vec![PathBuf::from(LIBRARY_DIR)]));
     cfg.work_dir = PathBuf::from("/doc");
-    // The bundled Liberation fonts, then any `use <font.ttf>` the program
-    // makes of a file the page added, as the app's host does.
+    // The bundled Liberation fonts once the page has added them, then any
+    // `use <font.ttf>` the program makes of a file the page added, as the
+    // app's host does. The database reads them on its first lookup, so
+    // only a run that draws or measures text finds out whether they are
+    // here; without them it would draw nothing where the text goes.
     cfg.fonts = Arc::new(move |used: &[String]| {
         let mut db = text::FontDb::with_fs(fs.clone());
-        assets::add_fonts(&mut db);
+        db.add_dir(FONT_DIR);
         for u in used {
-            let p = std::path::Path::new(u);
+            let p = Path::new(u);
             if session::is_font(u) && fs.exists(p) && !fs.is_dir(p) {
                 db.add_file(p);
             }
         }
+        let (fs, wanted) = (fs.clone(), fonts_wanted.clone());
+        db.on_index(move |_| {
+            if !fs.is_dir(Path::new(FONT_DIR)) {
+                wanted.store(true, Ordering::Relaxed);
+            }
+        });
         db
     });
     cfg.clock = clock;
@@ -522,11 +547,13 @@ impl Worker {
             return Err(invalid("the worker is already initialised"));
         }
         let files = Arc::new(MemFs::new());
+        let fonts_wanted = Arc::new(AtomicBool::new(false));
         let client = Client::new(config(
             files.clone(),
             self.clock.clone(),
             self.probe.clone(),
             r.seed,
+            fonts_wanted.clone(),
         ));
         if let Some(l) = r.limits {
             client.set_limits(l)?;
@@ -548,6 +575,7 @@ impl Worker {
         self.state = Some(State {
             client,
             files,
+            fonts_wanted,
             lsp,
             measurement: None,
             next_measurement: 1,
@@ -614,6 +642,7 @@ impl State {
             Some(name) => render::scheme::find(name)
                 .ok_or_else(|| invalid(format!("unknown colour scheme '{name}'")))?,
         };
+        self.fonts_wanted.store(false, Ordering::Relaxed);
         let (mut run, doc, text) = c.document_run(&r.path, &request)?;
         match r.camera {
             // The program sees the view it is shown in, as in OpenSCAD's
@@ -695,6 +724,7 @@ impl State {
             .map(|f| f.to_string_lossy().into_owned())
             .collect();
         let render = client::render_result(&rendered, &scheme);
+        let fonts_wanted = self.fonts_wanted.swap(false, Ordering::Relaxed);
         Ok(json!({
             // The console's summary line and its tooltip, worded by the
             // core as every app words them (`client::describe_render`).
@@ -706,6 +736,9 @@ impl State {
             "language": language,
             "scene": scene,
             "fileView": file_view,
+            // Its text was drawn without the bundled fonts, which the page
+            // has not added yet (see `FONT_DIR`): add them and run again.
+            "fontsWanted": fonts_wanted,
         }))
     }
 
@@ -774,9 +807,12 @@ impl State {
                     .ok_or_else(|| invalid(format!("addFiles: no buffer {index}"))),
             }
         };
+        let fonts = Path::new(FONT_DIR);
         let mut added = 0u32;
+        let mut new_fonts = false;
         for f in &r.files {
             let path = self.client.doc_path(&f.path)?;
+            new_fonts |= path.starts_with(fonts);
             self.files.insert(path, buffer(&f.data)?);
             added += 1;
         }
@@ -787,9 +823,18 @@ impl State {
             let data = buffer(t)?;
             let entries = tar::files(&data).map_err(|message| CoreError::Failed { message })?;
             for (name, body) in entries {
-                self.files.insert(root.join(name), body.to_vec());
+                let path = root.join(name);
+                new_fonts |= path.starts_with(fonts);
+                self.files.insert(path, body.to_vec());
                 added += 1;
             }
+        }
+        // The session keeps a font database per set of `use`d fonts, and
+        // the geometry and function results made with it, all keyed
+        // without the bundled fonts (they used to be compiled in). Dropped,
+        // so the next run looks again and draws the text it left out.
+        if new_fonts {
+            self.client.session.clear_caches();
         }
         Ok(json!({ "added": added }))
     }

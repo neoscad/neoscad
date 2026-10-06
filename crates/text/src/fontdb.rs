@@ -74,8 +74,11 @@ impl Face {
     }
 }
 
+/// Told the number of faces when a database is first indexed
+/// ([`FontDb::on_index`]).
+type IndexHook = Arc<dyn Fn(usize) + Send + Sync>;
+
 /// The fonts available to `text()`.
-#[derive(Debug)]
 pub struct FontDb {
     fs: Arc<dyn FileSystem + Send + Sync>,
     sources: Vec<Source>,
@@ -83,6 +86,17 @@ pub struct FontDb {
     /// Lookups by font name, as `FontCache::get_font` caches them. Failures
     /// are not cached, so their warnings repeat, as in OpenSCAD.
     lookups: Mutex<HashMap<String, Arc<Face>>>,
+    on_index: Option<IndexHook>,
+}
+
+impl std::fmt::Debug for FontDb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FontDb")
+            .field("sources", &self.sources)
+            .field("faces", &self.faces)
+            .field("on_index", &self.on_index.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for FontDb {
@@ -106,7 +120,16 @@ impl FontDb {
             sources: Vec::new(),
             faces: OnceLock::new(),
             lookups: Mutex::new(HashMap::new()),
+            on_index: None,
         }
+    }
+
+    /// Call `hook` with the number of faces found when the fonts are first
+    /// indexed, which is when a program first draws or measures text. The
+    /// web worker fetches its fonts only when a model uses them: this is
+    /// how it learns that a run wanted fonts it did not have yet.
+    pub fn on_index(&mut self, hook: impl Fn(usize) + Send + Sync + 'static) {
+        self.on_index = Some(Arc::new(hook));
     }
 
     /// Add every font file under `dir` (`FcConfigAppFontAddDir`). A
@@ -145,6 +168,9 @@ impl FontDb {
                     }
                     Source::Data(d) => index_data(d.clone(), &mut out),
                 }
+            }
+            if let Some(hook) = &self.on_index {
+                hook(out.len());
             }
             out
         })

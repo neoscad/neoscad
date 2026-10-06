@@ -33,7 +33,7 @@ E2E against a bundle synced into a copy of the website (the real engine;
 |---|---|
 | `src/engine/protocol.js` | The worker protocol as the page speaks it: request builders, error kinds, and the conversions (editor edits to LSP positions, customizer values to tagged `ParameterValue`s, section outlines to points). The one place that knows the wire. |
 | `src/engine/client.js` | The worker's lifecycle: coalesced runs, cancel and crash respawn, and the replay a new worker gets (`init` with the same seed, `addFiles`, `open`, the language server's setup). |
-| `src/engine/index.js` | Which worker the build starts (`core/worker.js`, or the mock), and lazy BOSL2 (`bosl2.tar.gz`, gunzipped and sent as `addFiles`' `tar`). |
+| `src/engine/index.js` | Which worker the build starts (`core/worker.js`, or the mock), and the lazy archives, gunzipped and sent as `addFiles`' `tar`: BOSL2 (`bosl2.tar.gz`) on its first `include`, and the fonts (`fonts.tar.gz`) when a model draws text (seen in the source, or the core's `fontsWanted`). |
 | `src/engine/mock-*.js`, `fixtures.js` | The mock engine for `npm run build` and the unit tests; it speaks the real wire, packed scenes included. |
 | `src/view/index.js` | The 3D view: the WebGPU-only viewer (`view/`), the WebGL2 build (`view-webgl/`, fetched only when WebGPU is missing or fails), else `canvas2d.js`, with a notice. |
 | `src/ui/`, `src/model/` | Panels, and the customizer's logic. |

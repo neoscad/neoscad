@@ -10,7 +10,7 @@
 // (store.js): their saved examples, edits and view settings are the whole
 // page's, and an embed always starts from the shipped defaults.
 
-import { ensureLibraries, createEngine } from "./engine/index.js";
+import { ensureFonts, ensureLibraries, createEngine } from "./engine/index.js";
 import { EngineRestarted } from "./engine/client.js";
 import { Requests, docPath, fileViewChanged, runResult } from "./engine/protocol.js";
 import { loadExampleText, loadManifest } from "./examples.js";
@@ -104,11 +104,18 @@ export class EmbedApp {
     this.say("Previewing…", "running");
     try {
       await ensureLibraries(this.engine, d.text, { onProgress: (name) => this.say(`Loading ${name}…`, "running") });
-      const raw = await this.engine.run(
-        Requests.run({ path: d.path, mode: "preview", camera: this.viewer.camera(), colorScheme: DEFAULT_VIEW.scheme }),
-      );
+      const run = () =>
+        this.engine.run(Requests.run({ path: d.path, mode: "preview", camera: this.viewer.camera(), colorScheme: DEFAULT_VIEW.scheme }));
+      let raw = await run();
       if (raw?.superseded) return;
-      const r = runResult(raw);
+      let r = runResult(raw);
+      // Text the page did not see coming (drawn by a library): fetch the
+      // fonts and run again (app.js does the same).
+      if (r.fontsWanted && (await ensureFonts(this.engine, { onProgress: () => this.say("Loading fonts…", "running") }))) {
+        raw = await run();
+        if (raw?.superseded) return;
+        r = runResult(raw);
+      }
       if (r.scene || r.exitCode === 0) this.viewer.setScene(r.scene);
       if (r.fileView && fileViewChanged(r.fileView, null)) this.viewer.setFileView(r.fileView);
       if (r.exitCode === 0) this.say(null);

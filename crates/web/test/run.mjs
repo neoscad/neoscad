@@ -126,6 +126,7 @@ await test('CSG.scad (render)', 2000, () => {
     ok('open', { path, text: readFileSync(example('Basics/CSG.scad'), 'utf8') });
     const r = ok('run', { path, mode: 'render' });
     assert.equal(r.render.exitCode, 0, r.render.console);
+    assert.equal(r.fontsWanted, false, 'a run without text wants no fonts');
     assert.match(r.render.echo[0], /^ECHO: version = \[/);
     const g = r.render.geometry;
     assert.equal(g.dimensions, 3);
@@ -162,16 +163,34 @@ await test('sign.scad (customizer + text)', 3000, () => {
     assert.equal(radius.control.kind, 'slider');
     const message = groups.flatMap((g) => g.parameters).find((p) => p.name === 'Message');
     assert.equal(message.control.kind, 'dropdown');
-    const r = ok('run', {
+    const run = () => ok('run', {
         path,
         mode: 'render',
         overrides: [{ name: 'radius', value: { kind: 'number', value: 100 } }],
     });
+    // The fonts are not in the core: the first run draws its text with
+    // none and says so, as the page then adds fonts.tar.gz (the files of
+    // assets/fonts) and runs again.
+    const bare = run();
+    assert.equal(bare.fontsWanted, true, 'a run with text and no fonts wants them');
+    const fontDir = join(root, 'assets/fonts');
+    const fonts = readdirSync(fontDir, { recursive: true })
+        .filter((f) => f.endsWith('.ttf'))
+        .sort()
+        .map((f) => [f, new Uint8Array(readFileSync(join(fontDir, f)))]);
+    assert.equal(fonts.length, 12);
+    ok('addFiles', { tar: tar(fonts).buffer, root: '/neoscad/fonts' });
+    const r = run();
+    assert.equal(r.fontsWanted, false);
     assert.equal(r.render.exitCode, 0, r.render.console);
     const g = r.render.geometry;
     assert.equal(g.dimensions, 3);
     assert.ok(Math.abs(g.bboxMax[0] - 100) < 1, JSON.stringify(g));
-    console.log(`     ${g.triangles} triangles, volume ${g.volume.toFixed(1)}`);
+    // The text is cut into the sign once the fonts are here (the cached
+    // result of the run without them is not reused).
+    assert.notEqual(g.volume.toFixed(1), bare.render.geometry.volume.toFixed(1));
+    assert.equal(g.volume.toFixed(1), '41760.1');
+    console.log(`     ${g.triangles} triangles, volume ${g.volume.toFixed(1)} (${bare.render.geometry.volume.toFixed(1)} without fonts)`);
 });
 
 await test('BOSL2 helical spur gear (addFiles tar)', 20000, () => {
@@ -309,6 +328,24 @@ await test('a preview past its time limit stops with the limit', 10000, () => {
     } finally {
         ok('setLimits', { limits: init.limits });
     }
+});
+
+// The Menger example at depth 5 renders to a last union that, on its own,
+// grows past the 1 GiB limit (it ran on past 2 GB, then trapped). The
+// kernel checks the limit inside the boolean (`geom::manifold_geom::
+// kernel_token`), so the render stops with a resource-limit error and the
+// engine lives on.
+await test('one boolean past the memory limit is a resource-limit error', 30000, () => {
+    const menger = join(root, 'web/examples/example024.scad');
+    if (!existsSync(menger)) return 'no web/examples/example024.scad';
+    const text = readFileSync(menger, 'utf8').replace(/^n\s*=\s*\d+;/m, 'n=5;');
+    ok('open', { path: '/doc/menger5.scad', text });
+    const r = ok('run', { path: '/doc/menger5.scad', mode: 'render' });
+    assert.equal(r.render.exitCode, 1);
+    assert.match(r.render.console, /ERROR: Resource limit exceeded: .* over the memory limit of 1,024 MiB \(measured\)/, r.render.console);
+    ok('open', { path: '/doc/after.scad', text: 'cube(1);' });
+    assert.equal(ok('run', { path: '/doc/after.scad', mode: 'render' }).render.exitCode, 0);
+    console.log(`     ${r.render.console.split('\n').find((l) => l.includes('measured'))}`);
 });
 
 console.log(failures ? `web core: ${failures} failed` : 'web core: all passed');

@@ -34,7 +34,10 @@ Node wasm timings, one run on a shared machine:
 Code is 5.3 MB (1.75 MB gzipped) and data 4.8 MB (fonts and MCAD, 2.56 MB
 gzipped). The stripped core is about 4.3 MB gzipped, and BOSL2 is 1.0 MB
 gzipped. The whole bundle is about 6 MB, far under Pages' limits. Pages
-serves `.wasm` as `application/wasm` with `max-age=600`.
+serves `.wasm` as `application/wasm` with `max-age=600`, gzipped on the
+fly (`Content-Encoding: gzip`, about `gzip -6`; never brotli, checked
+October 2026). Since October 2026 the fonts are a lazy `fonts.tar.gz`
+(2.25 MB) and the core is 2.34 MB gzipped (it was 4.61 MB).
 
 ## Architecture
 
@@ -59,9 +62,10 @@ serves `.wasm` as `application/wasm` with `max-age=600`.
     worker, which gets its buffers back ("engine restarted").
 - **No WebGPU:** try wgpu's WebGL2 backend (spike first). If that fails
   too, run without the 3D view; everything else still works.
-- **Libraries:** fonts and MCAD are embedded. BOSL2 is a lazy
-  `bosl2.tar.gz` fetched on first `include <BOSL2/…>` (included, with its
-  licence).
+- **Libraries:** MCAD is embedded. BOSL2 is a lazy `bosl2.tar.gz`
+  fetched on first `include <BOSL2/…>` (included, with its licence), and
+  the Liberation fonts a lazy `fonts.tar.gz` fetched when a model first
+  draws text (`fontsWanted`, docs/web-protocol.md).
 - **Persistence:** `localStorage` for edited examples, settings and
   customizer values, with "Reset example".
 
@@ -106,7 +110,7 @@ Excluded: BOSL2 `fractal_tree.scad`, which hits the wasm32 recursion budget.
 - **`scripts/web/build.sh`** writes a self-contained
   `dist/web/neoscad-web-<version>-<sha>/`:
   - index, JS/CSS, both wasm files and their glue, the worker, examples,
-    `bosl2.tar.gz`;
+    `bosl2.tar.gz`, `fonts.tar.gz`;
   - `THIRD-PARTY-LICENSES.txt`, `SOURCE.txt` (GPL source offer) and
     `build.json`;
   - plus a tarball and `SHA256SUMS`.

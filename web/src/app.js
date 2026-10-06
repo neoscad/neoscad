@@ -16,7 +16,7 @@
 
 import { parseConnect, stripConnect } from "./agent/link.js";
 import { setEditorHandler, loadEditor } from "./editor-host.js";
-import { createEngine, ensureLibraries } from "./engine/index.js";
+import { createEngine, ensureFonts, ensureLibraries } from "./engine/index.js";
 import { EngineError, EngineRestarted } from "./engine/client.js";
 import {
   EXPORT_FORMATS,
@@ -710,6 +710,19 @@ class App {
     }
   }
 
+  /// Fetch the fonts a run asked for (`fontsWanted`): true when they were
+  /// added and the run should go again; false, with the reason in the
+  /// summary, when they could not be.
+  async fonts() {
+    try {
+      this.console.setSummary("Loading fonts…", "running");
+      return await ensureFonts(this.engine);
+    } catch (e) {
+      this.fontError = `Could not load the fonts: ${e.message}`;
+      return false;
+    }
+  }
+
   runOptions() {
     return runOptions(this.doc.customizer.values, this.doc.parts);
   }
@@ -754,10 +767,19 @@ class App {
     }
     if (raw?.superseded || this.doc !== d) return;
     const r = runResult(raw);
+    // Text drawn before the fonts were fetched (in a library the page did
+    // not scan, say) is missing from this result: fetch them and run
+    // again, rather than show the model without it.
+    this.fontError = null;
+    if (r.fontsWanted && (await this.fonts())) {
+      if (this.doc === d) await this.runOnce(mode);
+      return;
+    }
     this.lastRun = { mode, timings: r.timings, exitCode: r.exitCode };
     this.console.summaryTitle = r.timingsText;
     this.console.setLines(r.console);
-    this.console.setSummary(r.summary, r.exitCode === 0 ? "done" : "failed");
+    if (this.fontError) this.console.setSummary(this.fontError, "failed");
+    else this.console.setSummary(r.summary, r.exitCode === 0 ? "done" : "failed");
     for (const m of r.language) this.editor.lspReceive(m);
     // A failed run with nothing to draw keeps the last model on screen, as
     // the app does while the text is mid-edit; a successful empty one

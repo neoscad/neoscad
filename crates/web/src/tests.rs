@@ -454,3 +454,47 @@ fn limits_are_set_and_checked() {
     let s = ok(&mut w, json!({ "id": 4, "type": "stats" }));
     assert!(s["memoryBytes"].is_u64());
 }
+
+/// The fonts are the page's to add: a run that draws text without them
+/// says so (`fontsWanted`), and once they are added under `FONT_DIR` the
+/// next run draws the text instead of reusing the result made without it.
+/// A model without text never wants them.
+#[test]
+fn text_without_the_fonts_asks_for_them() {
+    let mut w = worker();
+    let run = |w: &mut Worker, text: &str| {
+        ok(
+            w,
+            json!({ "id": 2, "type": "open", "path": DOC, "text": text }),
+        );
+        ok(
+            w,
+            json!({ "id": 3, "type": "run", "path": DOC, "mode": "render", "scene": false }),
+        )
+    };
+    let plain = run(&mut w, "cube(1);");
+    assert_eq!(plain["fontsWanted"], false, "{plain}");
+    let bare = run(&mut w, "linear_extrude(1) text(\"NeoSCAD\");");
+    assert_eq!(bare["fontsWanted"], true, "{bare}");
+    assert_eq!(bare["render"]["geometry"], Value::Null, "{bare}");
+
+    let files: Vec<Value> = assets::FONTS
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| json!({ "path": format!("{FONT_DIR}/{name}"), "data": { "$buffer": i } }))
+        .collect();
+    let buffers = assets::FONTS.iter().map(|(_, d)| d.to_vec()).collect();
+    let (v, _) = call(
+        &mut w,
+        json!({ "id": 4, "type": "addFiles", "files": files }),
+        buffers,
+    );
+    assert_eq!(v["result"]["added"], assets::FONTS.len(), "{v}");
+
+    let drawn = run(&mut w, "linear_extrude(1) text(\"NeoSCAD\");");
+    assert_eq!(drawn["fontsWanted"], false, "{drawn}");
+    assert!(
+        drawn["render"]["geometry"]["triangles"].as_u64().unwrap() > 100,
+        "{drawn}"
+    );
+}

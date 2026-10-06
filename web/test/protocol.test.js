@@ -22,6 +22,7 @@ import {
   sectionResult,
   uriPath,
   usesLibrary,
+  usesText,
 } from "../src/engine/protocol.js";
 
 test("controls: the wire's kinds, spinBox as the panel's spinbox", () => {
@@ -97,6 +98,8 @@ test("a run result passes the packed scene through and reads render's fields", (
   assert.equal(r.timings.totalMs, 2);
   assert.deepEqual(r.fileView, { vpr: [0, 0, 0] });
   assert.equal(r.language.length, 1);
+  assert.equal(r.fontsWanted, false);
+  assert.equal(runResult({ render: { exitCode: 0 }, fontsWanted: true }).fontsWanted, true);
 });
 
 test("fileView changes are what moves the view", () => {
@@ -162,6 +165,14 @@ test("library use is detected in include and use", () => {
   assert.ok(usesLibrary("use<BOSL2/gears.scad>", "BOSL2"));
   assert.ok(!usesLibrary("include <MCAD/gears.scad>", "BOSL2"));
   assert.ok(!usesLibrary("// BOSL2 is nice", "BOSL2"));
+});
+
+test("text drawing is guessed from the source, to fetch the fonts first", () => {
+  assert.ok(usesText('linear_extrude(2) text("Hi");'));
+  assert.ok(usesText("m = textmetrics(s);"));
+  assert.ok(usesText("fontmetrics ()"));
+  assert.ok(!usesText("context(1); my_text = 2; subtext(3);"));
+  assert.ok(!usesText("cube(1);"));
 });
 
 test("file URIs round-trip with spaces", () => {
