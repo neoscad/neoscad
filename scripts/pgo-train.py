@@ -2,6 +2,16 @@
 """The training run of a profile-guided build (scripts/pgo.sh).
 
     scripts/pgo-train.py INSTRUMENTED_NEOSCAD WORK_DIR
+    scripts/pgo-train.py --ffi INSTRUMENTED_PGO_TRAIN WORK_DIR
+
+With `--ffi`, the same workloads train the macOS app's core instead:
+the binary is neoscad-ffi's `pgo_train` example
+(crates/ffi/examples/pgo_train.rs), which links the core's library build
+and runs each job through the API the app calls (a preview and a render
+per model through `run_document`, with a viewport and the editor's
+language server, then the export; `snapshot`, `check`, `measure`, and the
+edit loop as a window makes it). The jobs are split between a few
+processes of it, which read them on standard input.
 
 Runs an instrumented `neoscad` over the workloads the release binary is
 measured on, so the profile weights the code they execute: every model of
@@ -77,7 +87,13 @@ translate([5, 0, 0]) tower(40);
 
 
 def main():
-    neoscad, work = sys.argv[1], Path(sys.argv[2])
+    args = sys.argv[1:]
+    ffi = bool(args) and args[0] == "--ffi"
+    if ffi:
+        args = args[1:]
+    if len(args) != 2:
+        sys.exit(__doc__.split("\n\n")[1])
+    neoscad, work = args[0], Path(args[1])
     models, out = work / "models", work / "out"
     models.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
@@ -98,6 +114,20 @@ def main():
         except subprocess.TimeoutExpired:
             return "timeout"
 
+    def run_ffi(lines, timeout=3600):
+        """One pgo_train process over `lines`: (ok, failed) requests, or None."""
+        try:
+            p = subprocess.run([neoscad], cwd=models, env=env, timeout=timeout,
+                               input="".join(f"{l}\n" for l in lines), text=True,
+                               stdout=subprocess.PIPE)  # stderr: only a missing GPU
+        except subprocess.TimeoutExpired:
+            return None
+        # Its last line is `ok N failed M`.
+        words = (p.stdout.strip().splitlines() or [""])[-1].split()
+        if p.returncode != 0 or len(words) != 4:
+            return None
+        return int(words[1]), int(words[3])
+
     bench = json.loads((REPO / "conformance/bench.json").read_text())
     files = {}
     for mid, m in bench["models"].items():
@@ -113,35 +143,57 @@ def main():
             if not (models / name).exists():
                 gen = models / f"gen_{name}.scad"
                 gen.write_text(src)
-                run([neoscad, *LIMITS, "-o", str(models / name), str(gen)])
+                if ffi:
+                    run_ffi([f"export\t{gen}\t{models / name}"])
+                else:
+                    run([neoscad, *LIMITS, "-o", str(models / name), str(gen)])
 
-    jobs = []
+    # Each workload as the command line runs it and as the app does (a
+    # pgo_train job line, crates/ffi/examples/pgo_train.rs); None where
+    # the app has no counterpart.
+    jobs, ffi_jobs = [], []
+
+    def job(cmd, line):
+        jobs.append(cmd)
+        if line is not None:
+            ffi_jobs.append(line)
+
     for mid, f in files.items():
-        jobs.append([neoscad, *LIMITS, "-o", str(out / f"{mid}.stl"), str(f)])
+        stl = out / f"{mid}.stl"
+        job([neoscad, *LIMITS, "-o", str(stl), str(f)], f"app\t{f}\t{stl}")
     for mid in ["ex_csg_basic", "csg_spheres", "bosl_gears__003", "mink_nonconvex"]:
-        jobs.append([neoscad, *LIMITS, "--render", "-o", str(out / f"{mid}.png"), str(files[mid])])
+        job([neoscad, *LIMITS, "--render", "-o", str(out / f"{mid}.png"), str(files[mid])],
+            f"snapshot\t{files[mid]}")
     for f in sorted((REF / "BOSL2/tests_x").glob("*.scad")):
-        jobs.append([neoscad, *LIMITS, "-o", str(out / f"t_{f.stem}.echo"), str(f)])
+        job([neoscad, *LIMITS, "-o", str(out / f"t_{f.stem}.echo"), str(f)], f"preview\t{f}")
     for f in sorted((REF / "BOSL2/examples_x").glob("*.scad"))[0::8]:
-        jobs.append([neoscad, *LIMITS, "-o", str(out / f"x_{f.stem}.stl"), str(f)])
+        stl = out / f"x_{f.stem}.stl"
+        job([neoscad, *LIMITS, "-o", str(stl), str(f)], f"app\t{f}\t{stl}")
     for sub in ["Basics", "Functions"]:
         for f in sorted((REF / "openscad/examples" / sub).glob("*.scad")):
-            jobs.append([neoscad, *LIMITS, "-o", str(out / f"o_{f.stem}.stl"), str(f)])
-            jobs.append([neoscad, *LIMITS, "-o", str(out / f"o_{f.stem}.csg"), str(f)])
+            stl, csg = out / f"o_{f.stem}.stl", out / f"o_{f.stem}.csg"
+            job([neoscad, *LIMITS, "-o", str(stl), str(f)], f"app\t{f}\t{stl}")
+            job([neoscad, *LIMITS, "-o", str(csg), str(f)], f"export\t{f}\t{csg}")
     deep = models / "deep_recursion.scad"
     deep.write_text(DEEP)
-    jobs.append([neoscad, *LIMITS, "-o", str(out / "deep_recursion.echo"), str(deep)])
-    jobs.append([neoscad, *LIMITS, "-o", str(out / "deep_recursion.stl"), str(deep)])
+    job([neoscad, *LIMITS, "-o", str(out / "deep_recursion.echo"), str(deep)], None)
+    stl = out / "deep_recursion.stl"
+    job([neoscad, *LIMITS, "-o", str(stl), str(deep)], f"app\t{deep}\t{stl}")
     for f in [files["ex_csg_basic"], files["bosl_gears__003"], files["csg_spheres"],
               REF / "openscad/examples/Basics/LetterBlock.scad"]:
-        jobs.append([neoscad, "snapshot", "-o", str(out / f"snap_{f.stem}.png"), str(f)])
-        jobs.append([neoscad, "check", str(f)])
-        jobs.append([neoscad, "measure", str(f)])
+        job([neoscad, "snapshot", "-o", str(out / f"snap_{f.stem}.png"), str(f)],
+            f"snapshot\t{f}")
+        job([neoscad, "check", str(f)], f"check\t{f}")
+        job([neoscad, "measure", str(f)], f"measure\t{f}")
+
+    workers = min(6, os.cpu_count() or 1)
+    if ffi:
+        train_ffi(run_ffi, ffi_jobs, workers, models)
+        return
 
     # Parallel runs are fine: the profile runtime merges counters from
     # concurrent processes into the same file (`%m` in the raw file name),
     # and only the counts' proportions matter.
-    workers = min(6, os.cpu_count() or 1)
     with ThreadPoolExecutor(workers) as pool:
         codes = list(pool.map(run, jobs))
     # Exit 1 is a model error (a BOSL2 example that is 2D, say); anything
@@ -161,10 +213,37 @@ def main():
     serve(neoscad, models, out, env)
 
 
+def train_ffi(run_ffi, lines, workers, models):
+    """The app core's training: the jobs dealt round-robin to `workers`
+    pgo_train processes (a process per job would spend the training on
+    starting cores), the edit loop last in one of them."""
+    edited = models / "edit.scad"
+    edited.write_text(EDIT_SRC)
+    lines = lines + [f"edit\t{edited}"]
+    shards = [lines[i::workers] for i in range(workers)]
+    with ThreadPoolExecutor(workers) as pool:
+        results = list(pool.map(run_ffi, shards))
+    broken = sum(1 for r in results if r is None)
+    ok = sum(r[0] for r in results if r)
+    failed = sum(r[1] for r in results if r)
+    print(f"pgo-train: {len(lines)} core jobs in {workers} processes, "
+          f"{ok} requests ok, {failed} failed, {broken} processes died or timed out")
+    # A failed request is a model error as often as not (a 2D example's
+    # export to STL); a process that died, or mostly failures, means the
+    # instrumented core itself is broken, and its profile with it.
+    if broken or failed > (ok + failed) // 2:
+        sys.exit("pgo-train: the instrumented core does not work on this target")
+
+
+# The edit loop's model: BOSL2, so each edit re-evaluates a library-sized
+# program, and a `12]` the edits change, so the geometry changes too.
+EDIT_SRC = ('include <BOSL2/std.scad>\ncuboid([40,30,12], rounding=2, edges="Z");\n'
+            "right(35) cyl(h=20, d=10, chamfer=1);\n")
+
+
 def serve(neoscad, models, out, env):
     """The served edit loop (docs/serve-protocol.md), as `edit_loop` drives it."""
-    src = ('include <BOSL2/std.scad>\ncuboid([40,30,12], rounding=2, edges="Z");\n'
-           "right(35) cyl(h=20, d=10, chamfer=1);\n")
+    src = EDIT_SRC
     p = subprocess.Popen([neoscad, "serve"], cwd=models, env=env, stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 

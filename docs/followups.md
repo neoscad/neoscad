@@ -469,29 +469,29 @@ lead them, come roughly in order of user impact.
 - **PGO in releases.** The cargo-dist release builds `neoscad` with PGO
   on macOS arm64, Linux x86_64 and aarch64 and Windows x86_64
   (`docs/release.md`, "PGO builds"; the v0.2.0 release ran it, and `pgo.yml`
-  passed on all four after the bench fixes). Whether `dist build` packed
-  the step's optimised binary rather than rebuilding it (the SHA-256 the
-  step logs against `neoscad-executables.sha256sums`) has not been
-  compared. Left plain:
+  passed on all four after the bench fixes). `dist build` packs the
+  step's optimised binary rather than rebuilding it: in v0.4.2's run
+  the SHA-256 each of the four PGO targets logs equals the one
+  `neoscad-executables.sha256sums` lists. The macOS DMG's core and CLI
+  are PGO builds too (`release.sh --pgo`; docs/release.md, "PGO
+  builds"): the core trains through its own `pgo_train` example, since
+  the CLI's profile does not match the core's symbols, and the x86_64
+  slices train under Rosetta. Left plain:
   1. `aarch64-pc-windows-msvc` ships a plain build: its instrumented
      binary crashed on every training run (`0xC0000005`) and
      `llvm-profdata` rejected the raw profile ("symbol name is empty"),
      the error rust-lang/rust#150123 reports. Retry when that issue
      moves, by putting the target back in `pgo.yml`'s matrix and then in
      `build-setup.yml`'s list.
-  2. `x86_64-apple-darwin` ships a plain build: it is cross-built on the
-     arm64 `macos-15` runner, so training would need Rosetta.
-  3. The macOS DMG (`scripts/apple/release.sh`,
-     `publish-macos-app.yml`) has no PGO, deliberately, for now. The
-     aarch64 slice could run `pgo.sh`'s steps directly; the x86_64 slice
-     needs its instrumented binary run under Rosetta. The app core is
-     `neoscad-ffi`, a different crate graph: whether the CLI's profile
-     matches its functions (symbol hashes depend on features and crate
-     metadata) is untested; check with `-Cllvm-args=-pgo-warn-mismatch`,
-     or train through the ffi. Until then the DMG's CLI stays plain too,
-     so the app's CLI and core are built alike.
+  2. `x86_64-apple-darwin`'s cargo-dist archive ships a plain build: it
+     is cross-built on the arm64 `macos-15` runner. The DMG now trains
+     its x86_64 slices under Rosetta on `macos-26` with `pgo.sh
+     --target x86_64-apple-darwin`; the same would work in
+     `build-setup.yml` if `macos-15` has Rosetta (not checked), and the
+     host check there (`$host = $target`) would have to allow it.
   The release step runs the recursion-depth guard (`conformance depth
-  --binary PATH`) on the binary it ships.
+  --binary PATH`) on the binary it ships, and `release.sh` runs it on
+  both slices of the DMG's CLI.
 - The web core gained nothing from `simd128` autovectorisation
   (`perf-opportunities.md` P7, within 2% on six kernel-bound models,
   identical output). A kernel gain there needs hand-written `v128` code;

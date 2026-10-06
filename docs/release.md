@@ -10,6 +10,7 @@ below and `docs/packaging.md`.
     scripts/apple/release.sh              # build, sign, package, verify, smoke test
     scripts/apple/release.sh --no-smoke   # the same without launching the app
     scripts/apple/release.sh --no-wait    # submit the app to Apple and stop (CI's first stage)
+    scripts/apple/release.sh --pgo        # with the core and the CLI profile-guided (CI passes it; "PGO builds")
     scripts/apple/release.sh --staple-app DIR   # once Accepted: staple, make and submit the DMG
     scripts/apple/release.sh --staple-dmg DIR   # once Accepted: staple and check the DMG
     scripts/apple/smoke-release.sh DMG CLI [VERSION]   # the smoke test alone
@@ -341,7 +342,7 @@ such as `v0.1.0` runs, in order:
    has none); GitHub artifact attestations.
 4. **host**: the GitHub Release.
 5. **publish**: the `neoscad` formula pushed to `neoscad/homebrew-tap`;
-   `publish-macos-app.yml` (this document's `release.sh --no-wait` on
+   `publish-macos-app.yml` (this document's `release.sh --pgo --no-wait` on
    `macos-26` with Xcode 26.6, signed from the `NEOSCAD_*` secrets: it
    builds and smoke-tests the app, submits it to Apple without waiting
    and records the submission on the release, which stays a prerelease
@@ -460,7 +461,8 @@ bench models (`docs/audits/perf-opportunities.md`, P2). The release's
 aarch64, and Windows x86_64. Two ship plain builds:
 
 - `x86_64-apple-darwin` is cross-built on the arm64 `macos-15` runner,
-  whose host cannot run its instrumented binary (short of Rosetta);
+  whose host cannot run its instrumented binary (short of Rosetta, which
+  the DMG's x86_64 slices now train under; see "The macOS DMG" below);
 - `aarch64-pc-windows-msvc`: in `.github/workflows/pgo.yml`'s first run
   every instrumented run crashed with `0xC0000005` and `llvm-profdata`
   rejected the raw profile ("malformed instrumentation profile data:
@@ -496,9 +498,10 @@ The step is `.github/build-setup.yml`'s second (cargo-dist copies it into
    depth no longer depends on the build;
 5. exports `RUSTFLAGS=-Cprofile-use=<profile>` for `dist build`, which
    then finds step 3's build fresh and packages that binary. The SHA-256
-   logged in step 3 should equal the one `neoscad-executables.sha256sums`
-   lists for the target; if cargo rebuilt instead, the inputs were still
-   the same, so this is a check on the packaging, not on the code.
+   logged in step 3 equals the one `neoscad-executables.sha256sums`
+   lists for the target: checked for v0.4.2 (run 37324462422), where all
+   four PGO targets' logged hashes match the release's, so `dist build`
+   packed the guarded binary rather than rebuilding it.
 
 Cost per PGO target: `conformance`, an instrumented build and the
 training before the one optimised build dist would make anyway; in
@@ -521,15 +524,67 @@ Windows, both fixed since). Windows x86_64 has no bench numbers yet.
 It trained on the `release` profile where releases train on `dist`,
 which only adds `strip = "debuginfo"` (`Cargo.toml`, `[profile.dist]`).
 
-**Not in the macOS DMG yet.** `scripts/apple/release.sh` (and so
-`publish-macos-app.yml`) builds the app's bundled CLI and the app core
-without PGO. The core is `neoscad-ffi`, a different crate graph, and
-whether a CLI profile matches its functions is untested
-(`docs/followups.md`, "PGO in releases"); training the CLI there would
-make the DMG's CLI differ from the tarball's for no measured gain in the
-app. The Homebrew formula, the shell and PowerShell installers, the
-MSIs, the `.deb`/`.rpm` packages and the container image all take the
-cargo-dist archives, so they get PGO where the archive has it.
+**The macOS DMG.** `scripts/apple/release.sh --pgo` (which
+`publish-macos-app.yml` runs) builds the app core and the app's bundled
+CLI with PGO, both slices of both, from four profiles it trains first:
+
+- **The core trains through itself.** It is `neoscad-ffi`, built as a
+  static library, and a profile matches functions by their symbol
+  names, which carry each crate's metadata hash. Built for the CLI and
+  for the core, every shared crate (serde, eval, geom, manifold_rust,
+  session, wgpu_core, ...) gets a different hash, so the CLI's profile
+  leaves the core unmatched: with `-Cllvm-args=-pgo-warn-missing-function`,
+  the arm64 core reported 14,614 functions without profile data under
+  the CLI's profile (eval 958, geom 1,090, manifold_rust 2,534) against
+  2,775 under its own (eval 90, geom 56, manifold_rust 301; the CLI
+  itself, under its own, 1,576). `scripts/pgo.sh --ffi` trains it with
+  the crate's `pgo_train` example (`crates/ffi/examples/pgo_train.rs`),
+  which links the very library build that ships (an example of the
+  crate compiles against the `--lib` unit; building the example leaves
+  `--lib` fresh) and runs `scripts/pgo-train.py --ffi`: the CLI's
+  workloads, through the calls the app makes (`run_document` previews
+  and renders with a viewport and the editor's language server, exports,
+  snapshot, check, measure and an edit loop), dealt to six processes.
+- **x86_64 trains under Rosetta.** `pgo.sh --target x86_64-apple-darwin`
+  runs the instrumented x86_64 binaries on the arm64 host; the macos-26
+  runner has Rosetta (v0.4.2's app job ran the CLI's x86_64 slice under
+  it), and `release.sh --pgo` stops before building without it.
+- **The CLI is the CLI's own PGO build** (`pgo.sh --target`, release
+  profile), so the app's CLI and core are built alike. It is not byte
+  for byte the cargo-dist archive's (that is the `dist` profile).
+
+The profiles reach `build-core.sh` and `build-cli.sh` through
+`NEOSCAD_PGO_DIR`, exported so that the archive's own runs of those
+build phases build the same way and find everything fresh; release.sh
+checks that the archive left the core's libraries as built, and the
+bundled CLI's UUIDs against the CLI's dSYM. Both CLI slices then pass
+the recursion-depth guard (`conformance depth`; the x86_64 one under
+Rosetta), with or without `--pgo` whenever `.reference/openscad` is
+there, and BUILDINFO.txt records both.
+
+Measured on an M4 Pro (2026-10-06, load average 3 to 7 from other
+work), plain against PGO, best of five interleaved runs per model, the
+geometric mean over runs of 30 ms or more: the core (through
+`pgo_train --time`, one cold job per process, preview and render of
+the 14 bench models) 0.927, and 0.998 under the CLI's profile; the
+release CLI on the same models 0.928. On models held out of the
+training (OpenSCAD's Old, Advanced and Parametric examples and every
+8th BOSL2 documentation example from the 5th; 306 runs, best of three)
+the core's mean was 0.939, so the profile is not fitted to its training
+models alone. The x86_64 core, run under Rosetta on the same Mac (best
+of three), measured 0.907; Rosetta's timings are not an Intel Mac's,
+but its profile matches as the arm64 one does (eval 132 and geom 77
+functions without data).
+
+Cost: the four trainings (each an instrumented build and the training
+run) took 88 s (core, arm64), 69 s (CLI, arm64), 153 s (core, x86_64)
+and 118 s (CLI, x86_64) on that Mac, and the whole `release.sh --pgo
+--no-smoke` 12 minutes; a hosted runner is several times slower (pgo.sh
+took 5 to 14 minutes per target in `pgo.yml`), so the CI job's timeout
+went from 120 to 180 minutes. The
+Homebrew formula, the shell and PowerShell installers, the MSIs, the
+`.deb`/`.rpm` packages and the container image all take the cargo-dist
+archives, so they get PGO where the archive has it.
 
 ## The macOS app after the release
 
@@ -561,7 +616,7 @@ universal CLI, because its tarball isn't published. A local
      app will come. Between `host` and `hold` the new release is latest
      for the few seconds a runner takes to start. Closing that gap would
      mean editing the generated `release.yml`.
-   - `app` runs `release.sh --no-wait`, which builds, signs and verifies
+   - `app` runs `release.sh --pgo --no-wait`, which builds, signs and verifies
      the app, smoke-tests it from an unnotarized DMG of the same app,
      submits `NeoSCAD-<version>-<build>-app.zip` and stops. The zip,
      `notary-app.id`, the dSYMs and `BUILDINFO.txt` are kept as the

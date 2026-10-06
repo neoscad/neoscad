@@ -38,6 +38,15 @@
 #   scripts/apple/build-core.sh              build (release profile)
 #   scripts/apple/build-core.sh --universal  arm64 + x86_64 (release.sh)
 #   scripts/apple/build-core.sh --prepare    as xcodegen runs it
+#
+# NEOSCAD_PGO_DIR, when set, makes it a profile-guided build: each
+# architecture's library is built with `-Cprofile-use` of
+# $NEOSCAD_PGO_DIR/neoscad-ffi-<triple>.profdata, which must exist
+# (`scripts/apple/release.sh --pgo` trains them with `scripts/pgo.sh
+# --ffi` and exports the variable, so the archive's own run of this phase
+# builds the same way and finds the libraries fresh; docs/release.md,
+# "PGO builds"). Unset, the build is plain, and the first plain build
+# after a PGO one recompiles the core, since RUSTFLAGS changed.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD
@@ -143,7 +152,21 @@ if [ -n "${CARGO_HOME:-}" ]; then cargo_env+=(CARGO_HOME="$CARGO_HOME"); fi
 cargo_env+=(CARGO_TARGET_DIR="$target_dir")
 
 for triple in "${triples[@]}"; do
-    "${cargo_env[@]}" cargo build --quiet --release --target "$triple" -p neoscad-ffi --lib ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
+    # The profile per target (a profile is for the code of one target, so
+    # x86_64 has its own, trained under Rosetta). Only on these builds:
+    # `--target` keeps RUSTFLAGS off build scripts, and the binding
+    # generator below must not be built against the core's profile.
+    rustflags=()
+    if [ -n "${NEOSCAD_PGO_DIR:-}" ]; then
+        profile=$NEOSCAD_PGO_DIR/neoscad-ffi-$triple.profdata
+        if [ ! -f "$profile" ]; then
+            echo "build-core: NEOSCAD_PGO_DIR is set but $profile is missing" >&2
+            exit 1
+        fi
+        rustflags=(RUSTFLAGS="-Cprofile-use=$profile")
+    fi
+    "${cargo_env[@]}" ${rustflags[@]+"${rustflags[@]}"} cargo build --quiet --release \
+        --target "$triple" -p neoscad-ffi --lib ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
 done
 "${cargo_env[@]}" cargo build --quiet --release -p neoscad-uniffi-bindgen
 

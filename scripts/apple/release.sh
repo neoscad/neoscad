@@ -48,6 +48,16 @@
 #
 #   scripts/apple/release.sh              build, sign, package, verify, smoke test
 #   scripts/apple/release.sh --no-smoke   without the smoke test
+#   scripts/apple/release.sh --pgo        with the core and the CLI profile-guided
+#
+# --pgo (docs/release.md, "PGO builds"; CI passes it) trains four
+# profiles first with scripts/pgo.sh, the core's (`--ffi`) and the CLI's
+# for each architecture, the x86_64 ones under Rosetta, and builds both
+# slices of both with them, so the app's CLI and core are built alike.
+# It needs llvm-tools-preview for the pinned toolchain, Rosetta, Python 3
+# and .reference with BOSL2's tests_x/examples_x, as pgo.sh does. Either
+# way, the CLI's slices then pass the recursion-depth guard (`conformance
+# depth`) when .reference/openscad is there, which --pgo requires.
 #
 # Notarizing in stages, as CI does (docs/release.md, "The macOS app after
 # the release"): Apple's queue held a new team's submissions for over an
@@ -71,12 +81,14 @@ root=$PWD
 
 smoke=1
 wait=1
+pgo=0
 resume=
 resume_dir=
 while [ $# -gt 0 ]; do
     case $1 in
         --no-smoke) smoke=0 ;;
         --no-wait) wait=0 ;;
+        --pgo) pgo=1 ;;
         --staple-app | --staple-dmg)
             [ $# -ge 2 ] || {
                 echo "release: $1 needs the previous stage's directory" >&2
@@ -101,6 +113,10 @@ if [ -n "$resume" ] && [ $wait = 0 ]; then
     echo "release: --no-wait is for the build; --$resume never waits" >&2
     exit 2
 fi
+if [ -n "$resume" ] && [ $pgo = 1 ]; then
+    echo "release: --pgo is for the build; --$resume builds nothing" >&2
+    exit 2
+fi
 
 say() { printf '\n==> %s\n' "$*"; }
 die() {
@@ -123,6 +139,21 @@ done
 free_kb=$(df -k "$root" | awk 'NR == 2 { print $4 }')
 if [ "$free_kb" -lt $((5 * 1024 * 1024)) ]; then
     die "under 5 GB free on $(df -h "$root" | awk 'NR == 2 { print $1 }'); clear target/ or DerivedData first"
+fi
+
+# Whether this Mac runs x86_64 code: natively, or arm64 with Rosetta.
+can_run_x86() { [ "$(uname -m)" = x86_64 ] || arch -x86_64 /usr/bin/true 2>/dev/null; }
+
+# Everything the PGO training needs, checked before the build starts
+# rather than found missing after the first training's minutes.
+if [ $pgo = 1 ]; then
+    can_run_x86 ||
+        die "--pgo trains the x86_64 slices, which needs Rosetta: softwareupdate --install-rosetta"
+    command -v python3 >/dev/null || [ -n "${PYTHON:-}" ] || die "--pgo needs Python 3 (or PYTHON)"
+    for need in openscad/tests/data/scad openscad/examples BOSL2/tests_x BOSL2/examples_x; do
+        [ -d "$root/.reference/$need" ] ||
+            die "--pgo needs .reference/$need (CLAUDE.md's reference checkout, then conformance bosl2-corpus)"
+    done
 fi
 
 identity=${NEOSCAD_SIGN_IDENTITY:-}
@@ -427,6 +458,55 @@ say "NeoSCAD $version (build $build_number, $commit, dirty: $dirty); signing: $m
 rm -rf "$work" "$dist"
 mkdir -p "$work" "$dist" "$app_stage" "$cli_stage" "$dsym_stage"
 
+# The same clean environment and target triples as build-core.sh and
+# build-cli.sh, for the PGO training and the CLI below, so they share the
+# core's compiled dependencies and its deployment target, and the
+# release's builds leave the developer's target/release alone (but for
+# the depth guard's `conformance`).
+cargo_env=(env -i
+    HOME="$HOME"
+    PATH="$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+    MACOSX_DEPLOYMENT_TARGET=15.0
+    CARGO_TARGET_DIR="$target_dir"
+    TERM="${TERM:-dumb}")
+if [ -n "${RUSTUP_HOME:-}" ]; then cargo_env+=(RUSTUP_HOME="$RUSTUP_HOME"); fi
+if [ -n "${CARGO_HOME:-}" ]; then cargo_env+=(CARGO_HOME="$CARGO_HOME"); fi
+
+# --- PGO profiles -------------------------------------------------------------
+
+# Four profiles: a profile only matches code built from the same crate
+# graph for the same target, and the core (neoscad-ffi) and the CLI build
+# their shared crates under different metadata, so the CLI's profile
+# leaves the core's functions unmatched (docs/release.md, "PGO builds").
+# Each is trained in the environment the build uses, the x86_64 ones
+# under Rosetta, and handed to build-core.sh and build-cli.sh through
+# NEOSCAD_PGO_DIR, exported so that the archive's own runs of their
+# build phases build the same way and find everything fresh.
+pgo_info="no (plain builds)"
+if [ $pgo = 1 ]; then
+    say "PGO profiles (core and CLI, ${archs[*]}; x86_64 under Rosetta)"
+    pgo_dir=$work/pgo
+    mkdir -p "$pgo_dir"
+    pgo_env=("${cargo_env[@]}")
+    if [ -n "${PYTHON:-}" ]; then pgo_env+=(PYTHON="$PYTHON"); fi
+    for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+        for package in neoscad-ffi neoscad-cli; do
+            pgo_args=(--profile release --profile-only --target "$triple")
+            if [ $package = neoscad-ffi ]; then pgo_args+=(--ffi); fi
+            started=$SECONDS
+            profile=$("${pgo_env[@]}" scripts/pgo.sh "${pgo_args[@]}" | tail -n 1)
+            [ -f "$profile" ] || die "pgo.sh made no profile for $package ($triple)"
+            cp "$profile" "$pgo_dir/$package-$triple.profdata"
+            # The instrumented build and the training's outputs served
+            # only the profile; they are gigabytes on a runner's disk.
+            rm -rf "$(dirname "$profile")/gen" "$(dirname "$profile")/train"
+            echo "PGO: $package for $triple trained in $((SECONDS - started)) s"
+        done
+    done
+    export NEOSCAD_PGO_DIR=$pgo_dir
+    pgo_info="yes (core and CLI, both architectures, each trained by scripts/pgo.sh)"
+fi
+
 # --- The app ----------------------------------------------------------------
 
 say "Core and CLI (${archs[*]}), editor bundle and project"
@@ -437,6 +517,13 @@ scripts/apple/build-core.sh --universal
 scripts/apple/build-cli.sh --universal
 scripts/apple/build-editor.sh
 (cd apple && xcodegen generate --spec project.yml --quiet)
+# The core's libraries as built here, to check that the archive links
+# these and did not rebuild them (with other RUSTFLAGS, the PGO ones
+# would silently become plain builds). The CLI has its UUID check below.
+core_libs() {
+    shasum -a 256 "$target_dir"/{aarch64,x86_64}-apple-darwin/release/libneoscad_ffi.a
+}
+core_sums=$(core_libs)
 
 say "Archive (Release)"
 sign_settings=(CODE_SIGN_IDENTITY="$sign_id" CODE_SIGN_STYLE=Manual)
@@ -459,6 +546,7 @@ if ! xcodebuild \
 fi
 grep -E '(warning|error):' "$log" | grep -v 'Metadata extraction skipped' | sort -u || true
 [ -d "$archive/Products/Applications/NeoSCAD.app" ] || die "the archive has no NeoSCAD.app; see $log"
+[ "$(core_libs)" = "$core_sums" ] || die "the archive rebuilt the core's libraries; see $log"
 
 app=$app_stage/NeoSCAD.app
 entitlements=$root/apple/App/NeoSCAD.entitlements
@@ -702,22 +790,17 @@ fi
 # --- The CLI ----------------------------------------------------------------
 
 say "CLI (neoscad, ${archs[*]})"
-# The same clean environment and target triples as build-core.sh, so the
-# CLI shares the core's compiled dependencies and its deployment target,
-# and a release build leaves the developer's target/release alone.
-cargo_env=(env -i
-    HOME="$HOME"
-    PATH="$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
-    MACOSX_DEPLOYMENT_TARGET=15.0
-    CARGO_TARGET_DIR="$target_dir"
-    TERM="${TERM:-dumb}")
-if [ -n "${RUSTUP_HOME:-}" ]; then cargo_env+=(RUSTUP_HOME="$RUSTUP_HOME"); fi
-if [ -n "${CARGO_HOME:-}" ]; then cargo_env+=(CARGO_HOME="$CARGO_HOME"); fi
+# In cargo_env, with build-cli.sh's RUSTFLAGS, so this is the build the
+# app carries (checked below by its UUIDs).
 cli=$cli_stage/neoscad
 thin=()
 for triple in aarch64-apple-darwin x86_64-apple-darwin; do
-    "${cargo_env[@]}" cargo build --quiet --release --target "$triple" \
-        -p neoscad-cli --bin neoscad
+    rustflags=()
+    if [ $pgo = 1 ]; then
+        rustflags=(RUSTFLAGS="-Cprofile-use=$pgo_dir/neoscad-cli-$triple.profdata")
+    fi
+    "${cargo_env[@]}" ${rustflags[@]+"${rustflags[@]}"} cargo build --quiet --release \
+        --target "$triple" -p neoscad-cli --bin neoscad
     built=$target_dir/$triple/release/neoscad
     # The symbols first, then strip the copy that ships: the symbol table
     # and the line tables' debug map only serve a debugger or a crash
@@ -764,6 +847,28 @@ else
     x86_run="x86_64 slice not run (no Rosetta)"
 fi
 echo "CLI: $(lipo -archs "$cli"); $x86_run"
+# The recursion-depth guard, as the cargo-dist release runs it on the
+# binaries it ships (docs/release.md, "PGO builds"): each slice must
+# report exactly the counted limit's depths. It needs OpenSCAD's
+# recursion tests, so without .reference it is skipped and BUILDINFO says
+# so; --pgo has checked they are there. The arm64 slice is the shipped
+# binary itself; the x86_64 one is its thin build (the same code), since
+# the guard runs a binary by path and macOS would pick the arm64 slice.
+if [ -d "$root/.reference/openscad/tests/data/scad" ]; then
+    "${cargo_env[@]}" cargo build --quiet --locked --release -p neoscad-conformance
+    "$target_dir/release/conformance" depth --binary "$cli" ||
+        die "the CLI's arm64 slice failed the recursion-depth guard"
+    depth_run="passed (arm64"
+    if can_run_x86; then
+        "$target_dir/release/conformance" depth --binary "$target_dir/x86_64-apple-darwin/release/neoscad" ||
+            die "the CLI's x86_64 slice failed the recursion-depth guard"
+        depth_run="$depth_run, x86_64"
+    fi
+    depth_run="$depth_run)"
+else
+    depth_run="not run (no .reference/openscad)"
+fi
+echo "CLI recursion-depth guard: $depth_run"
 # Not in the staged (CI) flow: the release ships cargo-dist's CLI
 # archives, not this one, so a third submission would only add an hour.
 if [ -n "$notary" ] && [ $wait = 1 ]; then
@@ -806,6 +911,8 @@ fi
     echo "notarized:     $notarized"
     echo "app size:      $((app_bytes / 1024)) MB unpacked, of which the bundled CLI (Contents/Helpers/neoscad) $((helper_bytes / 1024 / 1024)) MB"
     echo "architectures: ${archs[*]} (every Mach-O in the app, and the CLI; $x86_run)"
+    echo "PGO:           $pgo_info"
+    echo "depth guard:   $depth_run"
     echo "updates:       $updates"
     echo
     echo "codesign --verify --deep --strict: passed; hardened runtime on every Mach-O"

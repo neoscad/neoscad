@@ -90,7 +90,9 @@ jobs:
     # Pinned, so an image update can't change the toolchain unannounced.
     runs-on: macos-26
     # The build and one upload to Apple; nothing waits on the notary queue.
-    timeout-minutes: 120
+    # The PGO training (four profiles, two of them under Rosetta) is most
+    # of the time beyond the plain build's half hour.
+    timeout-minutes: 180
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       HAVE_SIGNING: ${{ secrets.NEOSCAD_DEVELOPER_ID_P12 != '' && secrets.NEOSCAD_NOTARY_KEY != '' }}
@@ -109,6 +111,33 @@ jobs:
           brew install xcodegen
           rustup show active-toolchain
           node --version
+
+      # PGO (docs/release.md, "PGO builds"): what `release.sh --pgo` trains
+      # on, fetched as .github/build-setup.yml fetches it for the CLI
+      # release: llvm-profdata for the pinned toolchain, OpenSCAD at the
+      # manifest's commit, BOSL2 at the bench kit's, and BOSL2's tests and
+      # examples extracted. The runner image has Rosetta (the v0.4.2 run
+      # logged "x86_64 slice ran (under Rosetta)"), which trains the
+      # x86_64 slices; release.sh fails early without it.
+      - uses: actions/setup-python@v7
+        id: python
+        with:
+          python-version: "3.12"
+
+      - name: PGO training inputs
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component llvm-tools-preview
+          scripts/release/fetch-reference.sh
+          commit=$(sed -n 's/^BOSL2_COMMIT=\([0-9a-f]\{40\}\)$/\1/p' scripts/release/bench-kit.sh)
+          [ -n "$commit" ] || { echo "PGO: no BOSL2_COMMIT in bench-kit.sh" >&2; exit 1; }
+          git init -q .reference/BOSL2
+          git -C .reference/BOSL2 remote add origin https://github.com/BelfrySCAD/BOSL2.git
+          git -C .reference/BOSL2 fetch -q --depth 1 origin "$commit"
+          git -C .reference/BOSL2 checkout -q --detach FETCH_HEAD
+          cargo build --locked --release -p neoscad-conformance
+          target/release/conformance bosl2-corpus
 
       - name: Signing keychain
         if: env.HAVE_SIGNING == 'true'
@@ -138,19 +167,23 @@ jobs:
             --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
           rm "$RUNNER_TEMP/notary.p8"
 
-      # Signed: build, smoke-test (from an unnotarized DMG of the same
-      # app), and submit the app zip without waiting. The CLI is not
+      # Signed: build (the core and the CLI profile-guided), smoke-test
+      # (from an unnotarized DMG of the same app), and submit the app zip
+      # without waiting. The CLI is not
       # submitted: the release ships cargo-dist's archives, not release.sh's.
       - name: Build, sign, smoke-test, submit
         env:
           NEOSCAD_SIGN_IDENTITY: ${{ env.HAVE_SIGNING == 'true' && secrets.NEOSCAD_SIGN_IDENTITY || '' }}
           NEOSCAD_TEAM_ID: ${{ secrets.NEOSCAD_TEAM_ID }}
           NEOSCAD_NOTARY_PROFILE: ${{ env.HAVE_SIGNING == 'true' && 'neoscad-notary' || '' }}
+          # release.sh trains in a clean environment, whose PATH does not
+          # have setup-python's interpreter.
+          PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           if [[ "$HAVE_SIGNING" == true ]]; then
-            scripts/apple/release.sh --no-wait
+            scripts/apple/release.sh --pgo --no-wait
           else
-            scripts/apple/release.sh
+            scripts/apple/release.sh --pgo
           fi
 
       # What macos-notarize.yml resumes from: the submitted zip (the exact

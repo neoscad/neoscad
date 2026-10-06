@@ -14,7 +14,18 @@
 #   4. build again with -Cprofile-use, same profile settings as the
 #      normal build (thin LTO, one codegen unit).
 #
-#   scripts/pgo.sh [--profile release|dist] [--profile-only]
+#   scripts/pgo.sh [--profile release|dist] [--profile-only] [--ffi] [--target TRIPLE]
+#
+# --ffi trains the macOS app's core (neoscad-ffi) instead: the
+# instrumented build is the crate's `pgo_train` example, which links the
+# same library build (crates/ffi/examples/pgo_train.rs says why a CLI
+# profile cannot serve), the training is `pgo-train.py --ffi`, and the
+# optimised build is `-p neoscad-ffi --lib` (its static library's path is
+# printed). --target trains another target than the host's, whose
+# instrumented binary must still run here: x86_64-apple-darwin on an
+# arm64 Mac, under Rosetta (scripts/apple/release.sh --pgo). The host's
+# CLI keeps target/pgo/neoscad.profdata; the others get
+# target/pgo/<package>-<target>/<package>.profdata.
 #
 # Prints the path of the optimised binary; with --profile-only, stops
 # after step 3 and prints the path of the merged .profdata instead, for a
@@ -23,8 +34,8 @@
 # the binary it checks is the one dist ships). Needs `rustup component add
 # llvm-tools-preview` (for the toolchain in rust-toolchain.toml), Python 3
 # ($PYTHON, else python3, else python), and .reference with BOSL2's
-# tests_x/examples_x (`conformance bosl2-corpus`). Host target only: the
-# instrumented binary has to run here, so a cross-built target cannot be
+# tests_x/examples_x (`conformance bosl2-corpus`). The instrumented
+# binary has to run here, so a target this machine cannot run cannot be
 # trained this way. Meant for macOS, Linux and Windows under Git Bash (as
 # GitHub's Windows runners have it; .github/workflows/pgo.yml).
 #
@@ -44,11 +55,15 @@ fi
 
 profile=release
 profile_only=false
+ffi=false
+target=
 while [ $# -gt 0 ]; do
     case "$1" in
         --profile) profile=$2; shift 2 ;;
         --profile-only) profile_only=true; shift ;;
-        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+        --ffi) ffi=true; shift ;;
+        --target) target=$2; shift 2 ;;
+        -h|--help) sed -n '2,47p' "$0"; exit 0 ;;
         *) echo "pgo.sh: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -76,30 +91,55 @@ if [ ! -x "$profdata_tool" ]; then
 fi
 
 root=$(native "${CARGO_TARGET_DIR:-$PWD/target}")
-work=$root/pgo
+target=${target:-$host}
+case "$target" in *-windows-*) exe=.exe ;; *) exe= ;; esac
+if $ffi; then
+    package=neoscad-ffi
+    gen_args=(--example pgo_train)
+    use_args=(--lib)
+    trained=examples/pgo_train$exe
+    built=libneoscad_ffi.a
+    train_args=(--ffi)
+else
+    package=neoscad-cli
+    gen_args=()
+    use_args=()
+    trained=neoscad$exe
+    built=neoscad$exe
+    train_args=()
+fi
+if ! $ffi && [ "$target" = "$host" ]; then
+    work=$root/pgo
+    profdata=$work/neoscad.profdata
+else
+    work=$root/pgo/$package-$target
+    profdata=$work/$package.profdata
+fi
 raw=$work/raw
-profdata=$work/neoscad.profdata
 rm -rf "$raw" "$work/train"
 mkdir -p "$raw"
 
-# `--target $host` keeps RUSTFLAGS off build scripts and proc macros:
-# without it they are instrumented too, write their own profiles into
-# $raw during the build and warn about value-profile counters.
-# NEOSCAD_FEATURES builds both with those features of neoscad-cli, so the
+# `--target` keeps RUSTFLAGS off build scripts and proc macros: without
+# it they are instrumented too, write their own profiles into $raw during
+# the build and warn about value-profile counters.
+# NEOSCAD_FEATURES builds both with those features of the package, so the
 # profile is trained on the code it optimises.
-echo "pgo.sh: instrumented build ($profile)" >&2
+echo "pgo.sh: instrumented build ($package, $target, $profile)" >&2
 RUSTFLAGS="${RUSTFLAGS:-} -Cprofile-generate=$raw" CARGO_TARGET_DIR="$work/gen" \
-    cargo build --quiet --locked --profile "$profile" --target "$host" -p neoscad-cli ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
+    cargo build --quiet --locked --profile "$profile" --target "$target" -p "$package" \
+    ${gen_args[@]+"${gen_args[@]}"} ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
 
 echo "pgo.sh: training" >&2
-"$python" scripts/pgo-train.py "$work/gen/$host/$profile/neoscad$exe" "$work/train" >&2
+"$python" scripts/pgo-train.py ${train_args[@]+"${train_args[@]}"} \
+    "$work/gen/$target/$profile/$trained" "$work/train" >&2
 "$profdata_tool" merge -o "$profdata" "$raw"
 if $profile_only; then
     echo "$profdata"
     exit 0
 fi
 
-echo "pgo.sh: optimised build ($profile)" >&2
+echo "pgo.sh: optimised build ($package, $target, $profile)" >&2
 RUSTFLAGS="${RUSTFLAGS:-} -Cprofile-use=$profdata" CARGO_TARGET_DIR="$work/use" \
-    cargo build --quiet --locked --profile "$profile" --target "$host" -p neoscad-cli ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
-echo "$work/use/$host/$profile/neoscad$exe"
+    cargo build --quiet --locked --profile "$profile" --target "$target" -p "$package" \
+    ${use_args[@]+"${use_args[@]}"} ${NEOSCAD_FEATURES:+--features "$NEOSCAD_FEATURES"}
+echo "$work/use/$target/$profile/$built"

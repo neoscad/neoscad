@@ -19,6 +19,11 @@
 #
 #   scripts/apple/build-cli.sh              build (release profile)
 #   scripts/apple/build-cli.sh --universal  arm64 + x86_64
+#
+# NEOSCAD_PGO_DIR as build-core.sh: set, each architecture is built with
+# `-Cprofile-use` of $NEOSCAD_PGO_DIR/neoscad-cli-<triple>.profdata, the
+# CLI's own profile (`scripts/pgo.sh --target`), so the app's CLI and
+# core are built alike, both PGO or both plain.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$PWD
@@ -68,7 +73,17 @@ if [ -n "${CARGO_HOME:-}" ]; then cargo_env+=(CARGO_HOME="$CARGO_HOME"); fi
 
 thin=()
 for triple in "${triples[@]}"; do
-    "${cargo_env[@]}" cargo build --quiet --release --target "$triple" -p neoscad-cli --bin neoscad
+    rustflags=()
+    if [ -n "${NEOSCAD_PGO_DIR:-}" ]; then
+        profile=$NEOSCAD_PGO_DIR/neoscad-cli-$triple.profdata
+        if [ ! -f "$profile" ]; then
+            echo "build-cli: NEOSCAD_PGO_DIR is set but $profile is missing" >&2
+            exit 1
+        fi
+        rustflags=(RUSTFLAGS="-Cprofile-use=$profile")
+    fi
+    "${cargo_env[@]}" ${rustflags[@]+"${rustflags[@]}"} cargo build --quiet --release \
+        --target "$triple" -p neoscad-cli --bin neoscad
     thin+=("$target_dir/$triple/release/neoscad")
 done
 
