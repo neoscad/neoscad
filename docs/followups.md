@@ -507,31 +507,59 @@ lead them, come roughly in order of user impact.
   4,000 levels peak at 9 MB and 4,900 (the parser's limit) at 10 MB,
   the output unchanged.
 - **Parallel renders of many-child unions peak higher than one thread's
-  (BOSL2 `skin__042`).** The example sweeps a region and calls
-  `show_anchors()`, which attaches an arrow and a text label to each
-  anchor: 628 `text()` extrusions, 342 polyhedra and 682 cylinders under
-  one union. It is the render that grows, in the geometry: evaluation alone
-  (`-o x.csg`) peaks at 237 MB (a 44 MB CSG file) and the preview PNG at
-  232 MB, `check` and `-o x.stl` alike pass 2 GB in about 2 s, and
-  without `show_anchors()` the sweep renders in 0.1 s. So the cut stage
-  (`crates/session/src/cuts.rs`) is not the cause, and the survey of the
-  cut findings that was killed on it ran `check` (whose command line
-  sets no limits) under a 2 GB watchdog. The
-  nightly (`--backend=manifold`) also passes 2 GB on it (killed at 9.8 s;
-  its preview peaks at 499 MB), so the example itself needs more than
-  2 GB in both. Scaled down to `rgn1`'s first two circles
-  (`d=[10:10:20]`, an 855k-facet result), the nightly finishes at 1.74 GB
-  in 7.5 s and neoscad at 1.80 GB in 10.0 s on one thread
-  (`RAYON_NUM_THREADS=1`), 1.92 GB in 6.2 s on 2, 1.93 GB in 4.2 s on 4,
-  and passes 2 GB within 1.7 s at the default 14: each union level's
-  branches (`geom::shared`'s `level.par_iter()`, `kids_in_parallel`)
-  hold their intermediate meshes at once. A memory limit stops it cleanly
-  (`--limit memory=1536`: "the engine uses 1,552 MiB of memory, over the
-  memory limit of 1,536 MiB (measured)" after 2.4 s), and the agent
-  surfaces have one, so this is about peak, not safety. A fix would
-  bound how many large unions run side by side (by their inputs'
-  triangle counts, say) and needs a benchmark run, since the same
-  fan-out is what makes the heavy models fast.
+  (BOSL2 `skin__042`), but not from holding more meshes.** The example
+  sweeps a region and calls `show_anchors()`, which attaches an arrow and
+  a text label to each anchor: 628 `text()` extrusions, 342 polyhedra and
+  682 cylinders under one union. It is the render that grows, in the
+  geometry: evaluation alone (`-o x.csg`) peaks at 237 MB and the preview
+  PNG at 232 MB, without `show_anchors()` the sweep renders in 0.1 s,
+  and `-o x.stl` passes 2 GB in both neoscad and the nightly
+  (`--backend=manifold`, killed at 9.8 s), so the example itself needs
+  more than 2 GB. A memory limit stops it cleanly (`--limit memory=1536`
+  reports "the engine uses 1,552 MiB of memory, over the memory limit of
+  1,536 MiB (measured)"), so this is about peak, not safety. Scaled
+  down to `rgn1`'s first two circles (`d=[10:10:20]`, an 855k-facet
+  result), the nightly finishes at 1.74 GB in 7.5 s. Neoscad, run
+  without `--limit` (2026-10-06, load 4-9 from other processes,
+  interleaved runs), takes 9.9 s on one thread and peaks at 1.62-1.69 GB
+  of physical footprint (1.77-1.84 GB peak RSS), on two 6.2 s and
+  1.73 GB, on four 4.1 s and 1.85-2.04 GB, and on the default 14
+  2.7-2.9 s and 2.01-2.12 GB (2.15-2.27 GB RSS). The earlier reading, that each union level's
+  branches (`kids_in_parallel`, `geom::shared`'s `level.par_iter()`) hold
+  their intermediate meshes at once, does not hold here: a counting
+  global allocator puts the peak of live heap at 1,258 MB on one thread,
+  1,266 MB on four and 1,265 MB on fourteen (1,536 and 1,544 MB with a
+  third circle), so a bound on how many unions run side by side has no
+  live memory to save. The extra footprint is the allocator's: freed
+  memory that mimalloc keeps in each worker's pages, and its purges
+  waiting out `purge_delay` (1 s by default in mimalloc 3). Walking the
+  tree serially while the kernels stay parallel shows what a bound could
+  win: 270 MB less footprint for 60% more time (4.5 s against 2.8 s).
+  `MIMALLOC_PURGE_DELAY=0` or `10` cuts the default-thread footprint to
+  1.70-1.84 GB for about 10% more time on this model (peak RSS is
+  unchanged, since macOS counts purged pages there until it reclaims
+  them); whether to set it in `cli`'s and `ffi`'s allocator needs a
+  benchmark run. The live peak itself, about ten times the result's
+  cache estimate (116 MB), is the thing to cut for every thread count:
+  the geometry cache is not it (a 1 MB budget, or not caching results
+  over the budget, leaves it at 1,257 MB); a heap snapshot on one thread
+  shows mostly deep copies in `transform()` and `to_manifold()` (the
+  cache holds the child's `Arc`, so `Arc::unwrap_or_clone` copies) and
+  the batch union's working memory.
+- **A memory limit makes parallel renders 2.4 times slower.** Every
+  kernel check calls `Guard::stopped` (`kernel_token` in
+  `geom/src/manifold_geom.rs`), which reads the memory probe, and the
+  probe's throttle (`read` in `session/src/memory.rs`) takes one
+  process-wide mutex on every call, even when it returns the cached
+  reading. With fourteen threads checking at once the lock is most of
+  the time: the scaled-down `skin__042` above renders in 2.8 s without a
+  limit and 6.7 s with `--limit memory=2900` (12 s user and 1.7 s system
+  against 17.6 s user and 42.7 s system; `sample` puts most stacks in
+  `__psynch_mutexwait` under `request_probe`), and 9.9 s against 10.8 s
+  on one thread. The command line, the session and so every agent
+  surface use this probe. Keeping the last reading and its time in
+  atomics, and taking the lock only to probe again, would make a check
+  that finds a recent reading lock-free. (2026-10-06)
 
 - A `children()` chain takes memory with the square of its depth: a
   module that passes `children()` down 5,000 levels peaks at 510 MB, and
