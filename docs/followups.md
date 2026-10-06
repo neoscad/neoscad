@@ -1428,6 +1428,13 @@ lead them, come roughly in order of user impact.
     core needs the app and the command line to be one version.
 
 ## Tooling: fmt, test, docs
+- `mcp::bridge::tests::a_request_waits_briefly_for_a_tab_to_connect`
+  failed once on CI's Linux aarch64 runner (19ad621; it passed on
+  re-run): the request got "no NeoSCAD web page is connected", although
+  the fake tab connects after 200 ms and the grace is 5 s. Either the
+  runner stalled past `TAB_GRACE`, or the tab connected and its writer
+  closed before the send. If it recurs, log which of `wait_for_socket`
+  and `tab.out.send` returned the error.
 - The builtin index's footer (`crates/docs/src/lib.rs`, "--in FILE for
   a file's own modules and functions") still names the command line's
   flag when the MCP `docs` tool returns the index; the not-found hint
