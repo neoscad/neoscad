@@ -518,20 +518,6 @@ lead them, come roughly in order of user impact.
   triangle counts, say) and needs a benchmark run, since the same
   fan-out is what makes the heavy models fast.
 
-- `minkowski() { difference() { cube(10, center = true);
-  cylinder(r = 3, h = 12, center = true, $fn = 24); } sphere(2, $fn = 24); }`
-  ran for 127 s and peaked at 18.8 GB RSS (release build, no limits); the
-  nightly (`--backend=manifold`) takes 1 s. A stack sample puts all of
-  it in `convex_pieces`' `split_by_plane` booleans (`geom::minkowski`):
-  the hole's 24 reflex edges are under `MAX_REFLEX`, so the block is cut
-  into convex pieces, and the cuts get slower and larger as they go.
-  Since the cancel token reaches `minkowski_3d` (its cuts, hulls and
-  unions), `--limit time=2` and `--limit memory=1024` stop it within
-  4 s; the cost itself is not fixed. Cutting fewer pieces (a lower
-  `MAX_REFLEX` for curved holes, or covering through the boundary when
-  a cut's pieces grow) needs a look at why the pieces grow and a
-  benchmark run.
-
 ## Parity
 - `manifold-rust` 0.16.0 ports Manifold v3.5.0 (with a few later
   upstream fixes, and divergences listed in its
@@ -561,12 +547,22 @@ lead them, come roughly in order of user impact.
   builds without `USE_MANIFOLD_MINKOWSKI` (`CMakeLists.txt:43`) and sums
   convex parts with hulls, which `geom::minkowski` ports. (5d)
 - 3D `minkowski()` cuts non-convex operands into convex pieces with
-  Manifold booleans rather than CGAL's `convex_decomposition_3`, and covers
-  a solid with more than 48 reflex edges through its boundary instead. The
-  solid is the same, but the mesh has more vertices than the nightly's
-  (e.g. an L of two unioned cubes plus a 32-segment sphere: 926 vs 764;
-  an L plus an L: 73 vs 35), because the pieces differ and the union keeps
-  vertices on flat faces. Images match; exported bytes do not. (5d)
+  Manifold booleans (along each reflex edge's bisecting plane) rather than
+  CGAL's `convex_decomposition_3`, and covers a solid with more than 48
+  reflex edges through its boundary instead. The solid is the same, but
+  the mesh differs from the nightly's because the pieces do and the union
+  keeps vertices on flat faces (e.g. an L of `cube([20,5,5])` and
+  `cube([5,20,5])` plus a 32-segment sphere: 828 vertices vs 772; that L
+  plus itself: 32 vs 34). Images match; exported bytes do not. (5d)
+- The boundary cover in `geom::minkowski` (`Operand::Boundary`, used past
+  `MAX_REFLEX`) left a zero-volume sheet in one case:
+  `minkowski() { difference() { cube([20,10,4], center = true); hull()
+  for (x=[-4,4]) translate([x,0,0]) cylinder(r = 2, h = 6, center = true,
+  $fn = 16); } sphere(0.5, $fn = 16); }` with `MAX_REFLEX` forced to 0
+  gives the nightly's volume (982.6486) but 2.65 more area (806.0157 vs
+  803.3664) and genus 0 instead of 1. With the default it is cut into
+  pieces and matches; the same slot at `$fn = 64`, which does take the
+  boundary path, matches too. Not looked into.
 - 3D `hull()` matches the nightly's vertices and triangle order, but some
   triangles start at a different vertex (e.g. `hull() { cylinder(r=10,
   h=1); translate([0,0,10]) cube(5, center=true); }`: 11 of 190 OFF
@@ -586,14 +582,6 @@ lead them, come roughly in order of user impact.
   the rebuild: the sum is 3x faster and its volume is the nightly's to
   1e-10. Whether other inputs still fold is not measured; report the
   remaining cases to Manifold, which still has the float test. (H1)
-- `3D/issues/issue2841.scad` (a Minkowski sum of a cube and two unioned
-  7-sided cylinders) exports a thin internal slit between two of its
-  convex pieces: opposite faces on the plane through (-0.901, -0.434, 0)
-  at -9.0097, about 1e-6 apart, 1.9 mm² a side with manifold-rust 0.15.0
-  and 6.1 mm² with 0.16.0's QuickHull (`vendor/README.md`). The volume
-  is right, the area 0.4% too large with 0.15.0 and 1.2% with 0.16.0;
-  the nightly's CGAL sum has no slit. Probably the union of hulls whose touching faces are not exactly
-  coplanar; not traced.
 - The nightly prints CGAL's own diagnostics for some minkowski operands
   (Nef assertion failures for cubes touching at an edge or a vertex,
   `minkowski-cubes-touch-*.scad`, `issue1137.scad`); they are not

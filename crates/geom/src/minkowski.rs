@@ -216,9 +216,23 @@ fn operand(
     })
 }
 
-/// Reflex edges (the solid bends inwards across them by more than a
-/// rounding error) as the planes of their two faces, `(normal, offset)`.
-fn reflex_planes(imp: &ManifoldImpl) -> Vec<[(Vec3, f64); 2]> {
+/// The cut for each reflex edge (the solid bends inwards across it by more
+/// than a rounding error): the plane through the edge that halves the
+/// angle the solid fills there, `(normal, offset)`. Each side of it then
+/// holds less than half a turn of solid at the edge, so the edge is convex
+/// in both pieces.
+///
+/// The cut used to run along the plane of one of the edge's two faces,
+/// which also resolves the edge but makes every split a boolean with a
+/// face lying in the cutting plane. Manifold's halfspace is a rotated cube,
+/// so that face and the cut were only nearly coplanar: the side that should
+/// have lost the face kept it as a flap of no volume, the edge stayed
+/// reflex, and every further cut along the same plane split off another
+/// empty sliver and added triangles. A 24-sided hole in a cube grew from
+/// 112 triangles to millions within 30 cuts (127 s and 18.8 GB in a
+/// minkowski with a sphere). The bisecting plane meets the edge's faces
+/// only along the edge itself.
+fn reflex_cuts(imp: &ManifoldImpl) -> Vec<(Vec3, f64)> {
     use manifold_rust::linalg::cross;
     let mut out = Vec::new();
     for (i, h) in imp.halfedge.iter().enumerate() {
@@ -232,8 +246,17 @@ fn reflex_planes(imp: &ManifoldImpl) -> Vec<[(Vec3, f64); 2]> {
         if len == 0.0 || dot(e, cross(n0, n1)) / len >= -1e-9 {
             continue;
         }
-        let p = imp.vert_pos[h.start_vert as usize];
-        out.push([(n0, dot(n0, p)), (n1, dot(n1, p))]);
+        // The bisector contains the edge and the direction n0 + n1, which
+        // points out of the solid between the two faces (into the notch);
+        // its normal is perpendicular to both. Faces folded flat onto each
+        // other (n0 = -n1) have no bisector worth cutting along.
+        let n = cross(e / len, n0 + n1);
+        let l = dot(n, n).sqrt();
+        if l < 1e-9 {
+            continue;
+        }
+        let n = n / l;
+        out.push((n, dot(n, imp.vert_pos[h.start_vert as usize])));
     }
     out
 }
@@ -246,16 +269,28 @@ const MAX_PIECES: usize = 64;
 
 /// The solid cut into convex pieces, the way CGAL's
 /// `convex_decomposition_3` does it in spirit: while a piece has a reflex
-/// edge, cut it along the plane of one of that edge's faces (which leaves
-/// the edge flat on both sides), and split pieces that fall apart into
-/// their components. `None` when that would take too long, or when `token`
-/// is cancelled: the token is looked at before every cut, since each cut
-/// is two booleans (manifold-rust's `split_by_plane`, which takes no
-/// token) and a solid can need up to `2 * MAX_PIECES` of them.
+/// edge, cut it along that edge's bisecting plane ([`reflex_cuts`]), and
+/// split pieces that fall apart into their components. `None` when that
+/// would take too long, or when `token` is cancelled: the token is looked
+/// at before every cut, since each cut is two booleans (manifold-rust's
+/// `split_by_plane`, which takes no token) and a solid can need up to
+/// `2 * MAX_PIECES` of them.
+///
+/// Rounding can still leave a cut degenerate (a plane through an edge or a
+/// vertex elsewhere on the piece). So a cut only counts when both sides
+/// keep some volume, pieces with none are dropped (they lie on a cut face
+/// of a neighbour, whose sum covers theirs), and the triangles of the
+/// pieces in hand are capped: a decomposition that grows instead of
+/// converging gives up and the solid is covered through its boundary,
+/// rather than running until memory runs out.
 fn convex_pieces(m: &Manifold, token: Option<&CancelToken>) -> Option<Vec<Vec<Vec3>>> {
-    if reflex_planes(m.as_impl()).len() > MAX_REFLEX {
+    if reflex_cuts(m.as_impl()).len() > MAX_REFLEX {
         return None;
     }
+    // Volume below this is rounding, relative to the whole solid's.
+    let tiny = m.volume().abs() * 1e-9;
+    let max_tris = 8 * m.num_tri() + 64 * MAX_PIECES;
+    let mut live = m.num_tri();
     let mut stack = vec![m.clone()];
     let mut out = Vec::new();
     let mut cuts = 0;
@@ -263,30 +298,42 @@ fn convex_pieces(m: &Manifold, token: Option<&CancelToken>) -> Option<Vec<Vec<Ve
         if manifold_rust::cancel::is_cancelled(token) {
             return None;
         }
-        if s.is_empty() {
+        let imp = s.as_impl();
+        if s.is_empty() || s.volume() <= tiny {
+            live -= imp.num_tri();
             continue;
         }
-        let imp = s.as_impl();
         if component_vertices(imp).len() > 1 {
             stack.extend(s.decompose().into_iter().rev());
             continue;
         }
-        let Some(planes) = reflex_planes(imp).into_iter().next() else {
+        let planes = reflex_cuts(imp);
+        if planes.is_empty() {
             out.push(imp.vert_pos.clone());
             if out.len() > MAX_PIECES {
                 return None;
             }
             continue;
-        };
-        cuts += 1;
-        if cuts > 2 * MAX_PIECES {
+        }
+        let mut halves = None;
+        for (n, d) in planes {
+            cuts += 1;
+            if cuts > 2 * MAX_PIECES || manifold_rust::cancel::is_cancelled(token) {
+                return None;
+            }
+            let (a, b) = s.split_by_plane(n, d);
+            if a.volume() > tiny && b.volume() > tiny {
+                halves = Some((a, b));
+                break;
+            }
+        }
+        // Reflex edges but no cut that divides the piece: rounding has the
+        // last word here, so leave it to the boundary cover.
+        let (a, b) = halves?;
+        live = live + a.num_tri() + b.num_tri() - imp.num_tri();
+        if live > max_tris {
             return None;
         }
-        let halves = planes
-            .into_iter()
-            .map(|(n, d)| s.split_by_plane(n, d))
-            .find(|(a, b)| !a.is_empty() && !b.is_empty());
-        let (a, b) = halves?;
         stack.push(b);
         stack.push(a);
     }
@@ -835,7 +882,7 @@ mod tests {
         let Geometry::Manifold(m) = dented_block() else {
             unreachable!()
         };
-        assert!(reflex_planes(m.manifold.as_impl()).len() > MAX_REFLEX);
+        assert!(reflex_cuts(m.manifold.as_impl()).len() > MAX_REFLEX);
         assert!(matches!(
             operand(&Geometry::Manifold(m), &GlobalIds, None),
             Ok(Operand::Boundary(_))
@@ -852,6 +899,49 @@ mod tests {
             v > 1331.0 - 4.0 / 3.0 * std::f64::consts::PI * 27.0 / 2.0 && v < 1331.0,
             "{v}"
         );
+    }
+
+    /// A 10-unit block with a hole of `sides` sides through it: one reflex
+    /// edge per side, all along the hole.
+    fn holed_block(sides: f64) -> ManifoldGeometry {
+        let hole = primitives::cylinder(12.0, 3.0, 3.0, true, &disc(sides));
+        let block = solid(&primitives::cube([10.0; 3], true));
+        block.boolean(&solid(&hole), OpType::Subtract)
+    }
+
+    /// The followup's repro: cutting the holed block along its faces' own
+    /// planes left an empty flap on every cut, so the same edge was cut
+    /// again and again, and the pieces doubled in triangles each time (127
+    /// s and 18.8 GB summed with a sphere). Cut along bisectors, a hole of
+    /// n sides is n pieces in n - 1 cuts.
+    ///
+    /// The 12-sided hole goes first, under a fuse: a token that fires after
+    /// 40 checks (one per piece taken off the stack and one per cut; this
+    /// needs 34). Face-plane cuts give it 13 pieces without running away,
+    /// so a return to them fails here, quickly, before the 24-sided case,
+    /// which they took past 3 GB even with a token firing at 80. That case
+    /// is bounded by `convex_pieces`' own caps on cuts and triangles.
+    #[test]
+    fn round_hole_is_one_piece_per_facet() {
+        let m = holed_block(12.0);
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fuse = counting_token(seen, 40);
+        let pieces = convex_pieces(&m.manifold, Some(&fuse)).map(|p| p.len());
+        assert_eq!(pieces, Some(12));
+
+        let m = holed_block(24.0);
+        assert_eq!(reflex_cuts(m.manifold.as_impl()).len(), 24);
+        let pieces = convex_pieces(&m.manifold, None).map(|p| p.len());
+        assert_eq!(pieces, Some(24));
+
+        // And the sum is the nightly's: its STL export of this sum has a
+        // volume of 2533.0873 and an area of 1099.9202 (float precision).
+        let ball = Geometry::PolySet(Arc::new(primitives::sphere(2.0, &disc(24.0))));
+        let s = sum(&[Geometry::Manifold(Arc::new(m)), ball]);
+        let v = s.manifold.volume();
+        assert!((v - 2533.0873).abs() < 1e-3, "{v}");
+        let a = s.manifold.surface_area();
+        assert!((a - 1099.9202).abs() < 1e-3, "{a}");
     }
 
     /// A token counting its checks, firing at the `fire_at`-th (never, with
