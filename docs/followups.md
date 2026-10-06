@@ -2088,6 +2088,17 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   for Linux too (`expectVersion`).
 
 ## Structure
+- **A failed release CI gate still publishes an empty release.** The
+  v0.4.3 tag's first run failed `custom-ci` (the `plan-jobs` gate,
+  Cargo.toml's `[workspace.metadata.dist]`), so both build jobs were
+  skipped; cargo-dist's generated `host` job accepts "skipped" builds,
+  so it and `announce` published v0.4.3 as Latest with only
+  `dist-manifest.json`. The empty release was deleted and the tag moved
+  to the fix (owner's call, 2026-10-06). Make `host` require
+  `needs.custom-ci.result == 'success'` (release.yml is generated:
+  either `allow-dirty = ["ci"]` and keep the edit, or a gate step that
+  fails `plan` instead). Until then, a red `custom-ci` on a release run
+  means: delete the release before anything else.
 - The tier 3 baseline needs the pinned nightly installed as its renderer.
   CI would need it too. (5a)
 - The six PDF cases need a PDF rasteriser (Ghostscript or poppler), which
