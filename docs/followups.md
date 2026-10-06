@@ -1075,8 +1075,6 @@ lead them, come roughly in order of user impact.
   markers took 167 and 180 ms and the view 431 and 433 ms (two
   evaluations per pause, the view's after a 400 ms pause). Nearly all of
   it is the 150 ms pause (`SCADDocument.previewDelay`). (8e, 8f)
-- `neoscad lsp --stdio` has no page on setting it up in VS Code, Zed,
-  Neovim or Helix. (8e)
 - The release `wasm_check.wasm` is 46.3 MB with the language server in it
   (the WASM section's 38 MB is from H2); the language server's share was
   not measured. (8e)

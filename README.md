@@ -44,6 +44,9 @@ as `bin\neoscad.exe` in the Windows install folder, and as
 None of them puts it on `PATH`; for the terminal, install the command
 line on its own.
 
+`neoscad lsp --stdio` is the language server for other editors; setting
+it up in VS Code, Neovim, Helix and Emacs is in `docs/lsp.md`.
+
 ## Build from source
 
 You need a Rust toolchain (`rust-toolchain.toml` pins it). The

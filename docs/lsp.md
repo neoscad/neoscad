@@ -1,0 +1,134 @@
+# The language server in other editors
+
+`neoscad lsp --stdio` is NeoSCAD's language server for `.scad` files, the
+same one the apps' editors use (`crates/lsp`). It speaks the Language
+Server Protocol over stdin and stdout, so any editor with an LSP client
+can run it. It offers:
+
+- diagnostics: parse and evaluation errors and warnings, with quick fixes
+  (geometry-stage warnings, which only a render prints, are not included);
+- hover, completion and signature help, for builtins and your own modules,
+  functions and variables, through `include` and `use`;
+- go to definition and find references;
+- rename, of names no included file defines or uses (it sees the
+  document and what it includes, not the files that include it);
+- formatting of a whole document or a range, following
+  `.neoscad-fmt.toml`;
+- document symbols (the outline) and folding ranges.
+
+It finds libraries as the command line does: beside the file, on
+`OPENSCADPATH`, in the user library folder, then the bundled ones (MCAD).
+Its evaluations run under the same resource limits as `neoscad serve`;
+change them with `--limit NAME=VALUE` (repeatable, `off` for none). To
+see what an editor sends and gets, add `--log FILE`, which appends every
+message to FILE.
+
+## The command
+
+The examples below run `neoscad` from `PATH`, which the command-line
+packages (Homebrew, Scoop, the `.deb` and `.rpm`, the archives) put it on.
+The desktop apps carry their own copy, off `PATH`; to use it, put its
+absolute path in place of `neoscad`:
+
+| App | Path |
+|---|---|
+| macOS | `~/Library/Application Support/NeoSCAD/bin/neoscad` (a link the app makes and keeps pointing at its own copy at each launch) |
+| Windows | `C:\Program Files\NeoSCAD\bin\neoscad.exe` |
+| Linux Flatpak | the command `flatpak run --command=neoscad org.neoscad.NeoSCAD` |
+
+Editors started from the macOS Dock or Finder may not see a shell's
+`PATH` (Homebrew's `/opt/homebrew/bin` in particular); if the server does
+not start, give the absolute path. Check the command by hand with
+`neoscad lsp --help`.
+
+## VS Code
+
+There is no NeoSCAD extension. VS Code needs two: one that defines a
+language for `.scad` files, and a generic LSP client to run the server
+for it.
+
+1. Install [OpenSCAD](https://marketplace.visualstudio.com/items?itemName=Antyos.openscad)
+   (`Antyos.openscad`), which gives `.scad` files the language id `scad`
+   and syntax highlighting.
+2. Install [Simple LSP Client](https://marketplace.visualstudio.com/items?itemName=wdomitrz.simple-lsp-client)
+   (`wdomitrz.simple-lsp-client`) and add to your `settings.json`:
+
+```json
+{
+  "simpleLspClient.servers": {
+    "neoscad": {
+      "cmd": ["neoscad", "lsp", "--stdio"],
+      "filetypes": ["scad"]
+    }
+  }
+}
+```
+
+Leave out `Leathong.openscad-language-support`
+(openscad-LSP's client), or disable it, so that two servers do not
+answer the same files.
+
+## Neovim
+
+Neovim 0.11 and later configure servers with `vim.lsp.config` and need
+no plugin; Neovim detects `.scad` files as the filetype `openscad`. In
+your `init.lua`:
+
+```lua
+vim.lsp.config('neoscad', {
+  cmd = { 'neoscad', 'lsp', '--stdio' },
+  filetypes = { 'openscad' },
+  root_markers = { '.git' },
+})
+vim.lsp.enable('neoscad')
+```
+
+nvim-lspconfig's `openscad_lsp` and `openscad_ls` configs start other
+servers (`openscad-lsp`); don't enable them alongside this one.
+
+## Helix
+
+Helix already knows `.scad` files as the language `openscad`, with
+`openscad-lsp` as its server. Point it at NeoSCAD's in your
+`languages.toml` (`~/.config/helix/languages.toml`, or
+`%AppData%\helix\languages.toml` on Windows):
+
+```toml
+[language-server.neoscad]
+command = "neoscad"
+args = ["lsp", "--stdio"]
+
+[[language]]
+name = "openscad"
+language-servers = ["neoscad"]
+```
+
+`hx --health openscad` shows whether Helix finds the command.
+
+## Emacs
+
+Eglot is built into Emacs 29 and later. Install `scad-mode` (NonGNU ELPA
+or MELPA: `M-x package-install RET scad-mode`), which opens `.scad` files
+in `scad-mode`, then tell Eglot which server to run for it:
+
+```elisp
+(with-eval-after-load 'eglot
+  (add-to-list 'eglot-server-programs
+               '(scad-mode . ("neoscad" "lsp" "--stdio"))))
+(add-hook 'scad-mode-hook #'eglot-ensure)
+```
+
+## Zed
+
+Zed runs only the language servers its extensions provide; its settings
+can change a provided server's binary but cannot add a server. Zed's
+OpenSCAD extension (`openscad`) gives `.scad` files highlighting and no
+language server, so NeoSCAD's cannot be used in Zed today without an
+extension of its own.
+
+## Other editors
+
+Any LSP client that can start a server over stdio works: run
+`neoscad lsp --stdio` for `.scad` files. The server ignores the
+`languageId` a client sends, needs no initialization options or
+workspace settings, and uses UTF-16 positions.
