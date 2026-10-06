@@ -291,8 +291,9 @@ await test('menger depth 5 preview is thrown together, not a crash', 5000, () =>
     assert.ok(JSON.parse(r.scene.meta).draws.length > 0);
 });
 
-// The Menger example at depth 4 previews in about 30 s here, all of it in
-// the product booleans, which once ran on past the time limit. Under a
+// The Menger example at depth 4 previews in about 10 s here (as long as
+// its render), nearly all of it in the product booleans, which once ran on
+// past the time limit. Under a
 // 3 s limit the run must stop at the next kernel operation after it,
 // with the limit as its error.
 await test('a preview past its time limit stops with the limit', 10000, () => {

@@ -1709,62 +1709,10 @@ lead them, come roughly in order of user impact.
   edit in the macOS app still waits for the old preview; `neoscad`'s
   PNG export (`cli/src/png.rs`) and `session`'s snapshots
   (`session/src/snapshot.rs`) still call the unlimited
-  `render::preview::scene`. A single kernel operation is still not
-  interrupted (manifold-rust's `CancelToken` could be, but it owns its
-  flag and knows nothing of the clock).
-- **A preview recomputes what a render reuses.** The Menger example at
-  depth 4 previews in 28 s in the web core but renders in 8 s: the render
-  caches each `menger_negative` level (its subtrees are identical under
-  their `translate`), while the preview's product unions its 1,756
-  negatives flat. Natively (2026-09-30, load about 20) it is 10.6 s
-  against 3.4 s at the default thread count and 22.5 s against 6.2 s on
-  one thread. Not done; the plan:
-  1. Record, for each leaf `TreeEvaluator::visit` reaches, its chain of
-     ancestors (node index, the node's cache key from `Keys`, the
-     accumulated matrix there), shared as an `Arc` list so the cost is
-     one link per node.
-  2. Pass the negatives to `product_meshes` as leaf meshes with matrix,
-     colour and that chain, not as transformed `PolySet`s.
-  3. In `product_mesh`, group a product's negatives into the trie of
-     their ancestor chains and union bottom-up: a trie node's union is
-     the `union_tree` of its children's. Two trie nodes whose ancestors
-     have the same key, the same leaves in this product (pruning by box
-     can drop different leaves from two copies, so compare the leaf
-     lists, not just the key) and the same colours are one union moved
-     by `M_k * inverse(M_j)`: compute the first in order, transform it
-     (`ManifoldGeometry::transform`) for the rest. Deciding which are
-     equal before any boolean runs keeps it the same at any thread count.
-  4. IDs: a transformed copy keeps the first's original IDs, as a render's
-     cached subtree does; reserve the ranges for the distinct unions only.
-  The meshes change (the unions run in another order), so the preview
-  images need re-checking; the Menger sponge should drop to about the
-  render's time. Effort: M-L (`geom::csg` and `render::preview`).
-- **Out of memory inside one kernel operation still traps.** The web
-  core now measures (see "Serve and session", the memory limit): growth
-  the estimate missed (BOSL2 evaluation, kernel working memory, the
-  cache) stops at the next node or ring with a `resource-limit`
-  "(measured)" error, and the worker lives on (`crates/web/test/run.mjs`:
-  the heavy example under 256 MiB). But one kernel operation runs to its
-  end, so a single boolean that needs the rest of the address space on
-  its own still traps: the Menger example at depth 5's render reaches its
-  last union of 20 depth-4 negatives well under 1 GiB and then grows past
-  2 GB inside it (stopped by the test's process guard; previously the
-  instance trapped). The fix is in the kernel: manifold-rust already
-  ports Manifold's cooperative cancellation (`vendor/manifold-rust/src/cancel.rs`,
-  `boolean_with_token`, checks in `csg_tree`'s batch rounds); it needs a
-  `CancelToken` over an existing flag (a vendor patch: `CancelToken::new`
-  makes its own), a token-taking batch entry, and `geom::manifold_geom`
-  passing the request's interrupt flag, with a cancelled (empty) result
-  never cached. The web allocator would then raise that flag when the live
-  count passes the limit. Left for the `geom` owner (another builder had
-  `geom` at the time).
-- Consider "Connect your AI agent" (the `neoscad mcp --browser` bridge,
-  docs/agent-bridge.md) for the native apps too: macOS, and the Linux and
-  Windows apps being built (owner, 2026-09-30: weigh its value first, don't
-  build yet). Questions: what an agent gains from the live app (the open
-  buffer, the 3D view as shown, markers) over file-based `neoscad mcp`;
-  whether the same bridge or a local socket suits a native app; one shared
-  core implementation for all three.
+  `render::preview::scene`. A single kernel operation is interrupted
+  too: `geom::manifold_geom::kernel_token` gives manifold-rust a
+  `CancelToken` over the request's flag (`from_flag`, `with_check`;
+  `vendor/patches/manifold-rust`).
 - **Browsers other than Chromium are untested.** Only Playwright's
   Chromium is installed; WebKit and Firefox (their WebGPU, the WebGL2
   fallback, module workers, `DecompressionStream`) and the worker's stack

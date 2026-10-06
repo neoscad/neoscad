@@ -232,6 +232,61 @@ fn cached_previews_are_the_uncached_ones() {
     assert!(runs[0] == runs[1], "the thread count changed a scene");
 }
 
+/// The Menger example (the web demo's, depth 3) is one product whose
+/// negatives are copies of a subtree nested three deep, so its union of
+/// negatives follows `geom::shared`'s plan: each repeated subtree unioned
+/// once and moved, the unions of one height in parallel. Its scene, which
+/// is all a PNG or a viewer draws from, must be the same byte for byte on
+/// one thread, two and eight; a plan whose classes or IDs depended on
+/// which union finished first would change the triangles between runs.
+#[test]
+fn a_preview_of_shared_unions_is_the_same_at_any_thread_count() {
+    let text = include_str!("../../../web/examples/example024.scad").to_owned();
+    assert!(text.contains("\nn=3;"), "the example's depth changed");
+    let c = crate::tests::client();
+    c.open(DOC, Some(text.clone())).unwrap();
+    let req = DocumentRequest {
+        mode: RenderMode::Preview,
+        overrides: Vec::new(),
+        parts: false,
+        enable: Vec::new(),
+    };
+    let scheme = render::ColorScheme::cornfield();
+    let (run, _, _) = c.document_run(DOC, &req).unwrap();
+    let r = c.session.render(&run, req.mode.into(), &scheme).unwrap();
+    let tree = r.tree.as_ref().expect("a preview");
+    let product = tree.root.as_ref().expect("products").products[0].clone();
+    let negatives: Vec<geom::csg::Negative> = product
+        .subtractions
+        .iter()
+        .map(|o| geom::csg::Negative {
+            mesh: o.leaf.mesh.clone().expect("a mesh"),
+            matrix: Some(o.leaf.matrix),
+            tint: geom::csg::NO_COLOR,
+            slab: false,
+            chain: o.leaf.chain.clone(),
+        })
+        .collect();
+    assert!(
+        geom::csg::shares_subtrees(&negatives),
+        "the sponge's {} negatives should take the shared plan",
+        negatives.len()
+    );
+    let runs: Vec<Vec<u8>> = [1, 2, 8]
+        .into_iter()
+        .map(|threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| uncached_preview(text.clone()))
+        })
+        .collect();
+    assert!(!runs[0].is_empty());
+    assert!(runs[1] == runs[0], "2 threads changed the scene");
+    assert!(runs[2] == runs[0], "8 threads changed the scene");
+}
+
 /// A product drawn in image space (a leaf that does not bound a solid) is
 /// kept too, so a re-preview does not check its leaves again, and the
 /// re-preview draws what a fresh one does.
