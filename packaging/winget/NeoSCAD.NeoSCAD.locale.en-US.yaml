@@ -1,27 +1,34 @@
-# Template (scripts/release/fill-manifests.sh fills @VERSION@).
+# Template: `scripts/release/fill-manifests.sh --winget` fills @VERSION@
+# and drops every line above the schema line.
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
 PackageIdentifier: NeoSCAD.NeoSCAD
 PackageVersion: "@VERSION@"
 PackageLocale: en-US
-Publisher: NeoSCAD
+Publisher: The NeoSCAD contributors
 PublisherUrl: https://neoscad.org
 PublisherSupportUrl: https://github.com/neoscad/neoscad/issues
 PackageName: NeoSCAD
 PackageUrl: https://neoscad.org
 License: GPL-2.0-or-later
 LicenseUrl: https://github.com/neoscad/neoscad/blob/main/LICENSE
-ShortDescription: OpenSCAD-compatible programmable solid CAD (command line, MCP and language servers)
+ShortDescription: OpenSCAD-compatible programmable solid CAD (desktop app and command line)
 Description: |-
-  neoscad reads OpenSCAD's language and command-line flags and exports STL,
-  3MF, OFF, VRML, SVG, DXF, PDF and PNG. It also runs as a JSON-RPC server
-  (neoscad serve), a Model Context Protocol server for AI agents (neoscad mcp)
-  and a language server (neoscad lsp).
+  NeoSCAD is an open-source reimplementation of OpenSCAD: a desktop app for
+  writing .scad models, with a code editor, a 3D viewport, a customizer and
+  checks, and the neoscad command-line tool. The command-line tool reads
+  OpenSCAD's language and command-line flags and exports STL, 3MF, OFF,
+  VRML, SVG, DXF, PDF and PNG. It also runs as a JSON-RPC server
+  (neoscad serve), a Model Context Protocol server for AI agents
+  (neoscad mcp) and a language server (neoscad lsp); the app sets up AI
+  agent clients to use it. The command-line tool is installed in the app's
+  bin folder and is not added to PATH.
 Moniker: neoscad
 Tags:
-  - cad
-  - 3d-printing
-  - openscad
-  - mcp
+- 3d-printing
+- cad
+- mcp
+- openscad
 ReleaseNotesUrl: https://github.com/neoscad/neoscad/releases/tag/v@VERSION@
 ManifestType: defaultLocale
 ManifestVersion: 1.12.0

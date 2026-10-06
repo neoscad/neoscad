@@ -10,12 +10,14 @@
 # - the vendored-dependency source tarball (scripts/release/source-tarballs.sh);
 #   cargo-dist already attaches the plain source.tar.gz;
 # - filled package-manager manifests (scripts/release/fill-manifests.sh):
-#   the AUR PKGBUILD, the Scoop manifest and the winget manifests, attached
-#   for a maintainer to submit; the Scoop manifest is also pushed to the
+#   the AUR PKGBUILD and the Scoop manifest, attached for a maintainer to
+#   submit; the Scoop manifest is also pushed to the
 #   bucket neoscad/scoop-bucket (the `scoop` job, with the
 #   SCOOP_BUCKET_TOKEN secret: a fine-grained token with Contents read and
 #   write on that repository, which release.yml passes here through
-#   `secrets: inherit`). Nothing here pushes to the AUR or winget;
+#   `secrets: inherit`). Nothing here pushes to the AUR. The winget
+#   manifests install the app's MSIs and need their ProductCodes, so
+#   windows-installer.yml fills them after building the MSIs;
 # - the ghcr.io/neoscad/neoscad image (packaging/docker/Dockerfile), for
 #   linux/amd64 and linux/arm64;
 # - the bench kit and the executables' checksums `neoscad bench` needs

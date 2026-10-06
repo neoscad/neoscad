@@ -354,8 +354,9 @@ such as `v0.1.0` runs, in order:
    binary generates, installed with apt or dnf and run in Debian 10 and
    12, Ubuntu 22.04 and 24.04, Rocky Linux 8 and Fedora on an x86_64 and
    an arm64 runner, and attached only if all twelve pass; the
-   vendored-dependency tarball, the filled AUR, Scoop and winget
-   manifests in `neoscad-package-manifests.tar.gz`, the Scoop manifest
+   vendored-dependency tarball, the filled AUR and Scoop manifests in
+   `neoscad-package-manifests.tar.gz` (winget's come from
+   `windows-installer.yml`, below), the Scoop manifest
    also pushed to the bucket `neoscad/scoop-bucket` as
    `bucket/neoscad.json`, and the `ghcr.io/neoscad/neoscad` image; the
    bench kit `neoscad-bench-kit-<version>.tar.gz` with its `.sha256`, and
@@ -382,7 +383,11 @@ such as `v0.1.0` runs, in order:
    (`docs/windows-app.md`, "Installer"), installed silently, checked,
    launched, opened a `.scad` through the association, uninstalled and
    checked again, and only then attested and attached; unsigned, like
-   the CLI's MSIs from step 3, which are a separate installer).
+   the CLI's MSIs from step 3, which are a separate installer; then its
+   `winget` job reads both MSIs back from the release, fills the winget
+   manifests from them with `fill-manifests.sh --winget`, which needs
+   each MSI's ProductCode, and attaches
+   `neoscad-winget-manifests.tar.gz`).
 6. **announce**.
 7. **update feed** (`update-feed.yml`, a cargo-dist post-announce job):
    the signed `stable.json` and `rc.json` on neoscad.org, from the
@@ -435,7 +440,8 @@ Mesa's software renderers):
     scripts/release/linux-packages.sh                     # .deb and .rpm in dist/linux, smoke-tested
     scripts/release/package-smoke.sh DIR [IMAGE...]       # install and run DIR's packages
     scripts/release/source-tarballs.sh                    # dist/source
-    scripts/release/fill-manifests.sh VERSION SUMS_DIR OUT_DIR
+    scripts/release/fill-manifests.sh VERSION SUMS_DIR OUT_DIR   # AUR, Scoop
+    scripts/release/fill-manifests.sh --winget VERSION MSI_DIR OUT_DIR   # needs msiinfo (msitools)
     scripts/release/fill-cask.sh VERSION dist/NeoSCAD-*.dmg OUT_FILE   # the app's cask
 
 `linux-packages.sh` builds on Debian bookworm (glibc 2.36), so it

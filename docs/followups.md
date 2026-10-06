@@ -1839,18 +1839,11 @@ lead them, come roughly in order of user impact.
   the agent did not see.
 
 ## Windows
-- winget's `NeoSCAD.NeoSCAD` is now the desktop app's MSI (x64 and arm64,
-  `Scope: machine`; microsoft/winget-pkgs#443995 at 0.4.2), but
-  `packaging/winget/`, which `scripts/release/fill-manifests.sh` fills
-  into each release's `neoscad-package-manifests.tar.gz`, still writes
-  the CLI zip as a portable command (its comment says the MSI isn't used
-  because it's unsigned). Switch the template to the app MSI (`wix`,
-  ProductCode and UpgradeCode per architecture, Publisher "The NeoSCAD
-  contributors" as in Apps & Features) so later version PRs match, and
-  fix `docs/packaging.md`, which says schema 1.10.0 where the templates
-  use 1.12.0. The CLI run with no arguments exits 2, the likely cause of
-  0.1.0's `Validation-Executable-Error`; a CLI-only package would need
-  winget's reviewers told to use `--version`.
+- `windows-installer.yml`'s `winget` job (fill the winget manifests from
+  the attached MSIs, attach `neoscad-winget-manifests.tar.gz`) has not
+  run yet; `fill-manifests.sh --winget` was checked locally on v0.4.2's
+  MSIs only. The filled manifests are not run through `winget validate`,
+  which needs a Windows machine with winget.
 
 Found fixing the first CI run's Windows failures, which removed the
 verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,

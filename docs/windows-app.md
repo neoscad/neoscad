@@ -37,7 +37,7 @@ it does not do yet is listed under "Next".
 | `scripts/windows/test-scripts.ps1` | Parse every `.ps1` here and check the licence page's RTF; any OS with pwsh, no build |
 | `scripts/windows/make-icon.py` | The multi-size `.ico` from the macOS icon's art |
 | `.github/workflows/windows-app.yml` | CI: build, test, launch, screenshot and log |
-| `.github/workflows/windows-installer.yml` | CI, on demand and as a release publish job: build both MSIs, install, check, launch, uninstall; in a release, attest and attach them |
+| `.github/workflows/windows-installer.yml` | CI, on demand and as a release publish job: build both MSIs, install, check, launch, uninstall; in a release, attest and attach them, then fill and attach the winget manifests (`neoscad-winget-manifests.tar.gz`) |
 
 ## Build on Windows
 

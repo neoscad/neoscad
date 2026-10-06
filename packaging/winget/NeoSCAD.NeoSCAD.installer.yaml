@@ -1,23 +1,38 @@
-# Template (scripts/release/fill-manifests.sh fills @VERSION@ and the
-# hashes). The portable zips cargo-dist makes, not the MSI: the MSI is not
-# Authenticode-signed yet, and winget's validation flags unsigned
-# installers (docs/packaging.md).
+# Template: `scripts/release/fill-manifests.sh --winget` fills it from the
+# app's two MSIs (NeoSCAD-<version>-windows-<arch>.msi, built by
+# .github/workflows/windows-installer.yml) and drops every line above the
+# schema line. ProductCode is new in every build (NeoSCAD.wxs sets none),
+# so it is read from each MSI's Property table, as is UpgradeCode;
+# Apps & Features lists the install under the MSI's Manufacturer, hence
+# the Publisher below.
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
 PackageIdentifier: NeoSCAD.NeoSCAD
 PackageVersion: "@VERSION@"
-InstallerType: zip
-NestedInstallerType: portable
-NestedInstallerFiles:
-  - RelativeFilePath: neoscad.exe
-    PortableCommandAlias: neoscad
-Commands:
-  - neoscad
+InstallerType: wix
+Scope: machine
+ElevationRequirement: elevationRequired
+FileExtensions:
+- scad
+ReleaseDate: "@RELEASE_DATE@"
 Installers:
-  - Architecture: x64
-    InstallerUrl: https://github.com/neoscad/neoscad/releases/download/v@VERSION@/neoscad-cli-x86_64-pc-windows-msvc.zip
-    InstallerSha256: "@SHA256_X86_64_PC_WINDOWS_MSVC@"
-  - Architecture: arm64
-    InstallerUrl: https://github.com/neoscad/neoscad/releases/download/v@VERSION@/neoscad-cli-aarch64-pc-windows-msvc.zip
-    InstallerSha256: "@SHA256_AARCH64_PC_WINDOWS_MSVC@"
+- Architecture: x64
+  InstallerUrl: https://github.com/neoscad/neoscad/releases/download/v@VERSION@/NeoSCAD-@VERSION@-windows-x64.msi
+  InstallerSha256: "@SHA256_X64@"
+  ProductCode: '@PRODUCT_CODE_X64@'
+  AppsAndFeaturesEntries:
+  - DisplayName: NeoSCAD
+    Publisher: The NeoSCAD contributors
+    ProductCode: '@PRODUCT_CODE_X64@'
+    UpgradeCode: '@UPGRADE_CODE_X64@'
+- Architecture: arm64
+  InstallerUrl: https://github.com/neoscad/neoscad/releases/download/v@VERSION@/NeoSCAD-@VERSION@-windows-arm64.msi
+  InstallerSha256: "@SHA256_ARM64@"
+  ProductCode: '@PRODUCT_CODE_ARM64@'
+  AppsAndFeaturesEntries:
+  - DisplayName: NeoSCAD
+    Publisher: The NeoSCAD contributors
+    ProductCode: '@PRODUCT_CODE_ARM64@'
+    UpgradeCode: '@UPGRADE_CODE_ARM64@'
 ManifestType: installer
 ManifestVersion: 1.12.0

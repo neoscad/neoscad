@@ -15,7 +15,10 @@
 #      way Explorer does (ShellExecute) and check the installed exe got it;
 #   5. uninstall silently and check that the files and keys are gone;
 #   6. in a release only: attest the MSI and attach it, with its .sha256,
-#      to the GitHub Release.
+#      to the GitHub Release;
+#   7. in a release only, once both MSIs are attached: fill the winget
+#      manifests from them and attach neoscad-winget-manifests.tar.gz
+#      (the `winget` job).
 #
 # It runs as one of release.yml's publish jobs (`publish-jobs` in
 # Cargo.toml's [workspace.metadata.dist]; docs/release.md, "The
@@ -285,3 +288,37 @@ jobs:
           name: neoscad-windows-${{ matrix.arch }}-installer-test
           path: installer-test/
           if-no-files-found: warn
+
+  # The winget manifests for NeoSCAD.NeoSCAD, which installs these MSIs.
+  # They need each MSI's ProductCode, which WiX makes anew in every build,
+  # so they can only be filled once both MSIs exist; publish-packages.yml,
+  # which fills the other manifests, runs alongside this workflow and
+  # cannot wait for them. The MSIs are read back from the release, so the
+  # manifests describe exactly the files a user downloads. Attached as
+  # neoscad-winget-manifests.tar.gz for a maintainer to submit to
+  # microsoft/winget-pkgs (docs/packaging.md); nothing here submits it.
+  winget:
+    needs: msi
+    if: inputs.plan != ''
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.plan && fromJson(inputs.plan).announcement_tag || '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # msiinfo, which reads the MSIs' Property tables.
+      - name: msitools
+        run: sudo apt-get update -q && sudo apt-get install -y -q msitools
+      - name: Fill and attach
+        run: |
+          msis=$RUNNER_TEMP/msi
+          out=$RUNNER_TEMP/winget
+          mkdir -p "$msis" "$out"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$msis" \
+            --pattern 'NeoSCAD-*-windows-*.msi' --pattern 'NeoSCAD-*-windows-*.msi.sha256'
+          scripts/release/fill-manifests.sh --winget "${TAG#v}" "$msis" "$out"
+          cat "$out"/*.yaml
+          tar -czf "$RUNNER_TEMP/neoscad-winget-manifests.tar.gz" -C "$out" .
+          gh release upload "$TAG" "$RUNNER_TEMP/neoscad-winget-manifests.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
