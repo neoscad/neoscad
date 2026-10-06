@@ -17,7 +17,7 @@
 
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "neoscad";
-  version = "0.2.0";
+  version = "0.4.2";
   __structuredAttrs = true;
 
   src = fetchFromGitHub {
@@ -38,7 +38,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
     "neoscad-cli"
   ];
 
-  # Every workspace crate the CLI is built from. Tests that need the
+  # The CLI and the workspace crates its modelling, export and language
+  # tooling come from (the app core, agent link and benchmark crates it
+  # also links are left to upstream's CI). Tests that need the
   # OpenSCAD reference checkout, or a GPU to draw with (the build sandbox
   # has none), skip themselves when it is missing; checkFlags lists the
   # platform checks the nixpkgs build cannot meet.
