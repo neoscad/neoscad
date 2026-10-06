@@ -8,7 +8,7 @@
 import { createServer } from "node:http";
 import { deflateRawSync } from "node:zlib";
 import { expect, test } from "@playwright/test";
-import { editorText, expectDrawn, open, settleCursor, shot, summary } from "./helpers.js";
+import { collectErrors, editorText, expectDrawn, open, settleCursor, shot, summary } from "./helpers.js";
 
 const SOURCE = `// Shared from a link: ünïcödé 🧊
 difference() {
@@ -41,8 +41,7 @@ async function fresh(page, hash = "") {
 
 /// The embed view loaded and run (or failed: data-ran says which).
 async function openEmbed(page, hash) {
-  const errors = [];
-  page.on("pageerror", (e) => errors.push(e.message));
+  const errors = collectErrors(page);
   await page.goto("about:blank");
   await page.goto(`/try/${hash}`);
   await page.waitForSelector("html[data-ran]");
@@ -203,8 +202,7 @@ async function framingPage(page, origin, src) {
 }
 
 test("framed by a page from the same origin it works; from another it refuses", async ({ page, baseURL }) => {
-  const errors = [];
-  page.on("pageerror", (e) => errors.push(e.message));
+  const errors = collectErrors(page);
   const frame = await framingPage(page, baseURL, `/try/#embed=1&code=${packed(SOURCE)}`);
   await expect(frame.locator("html[data-ran=ok]")).toHaveCount(1);
   await expect(frame.getByTestId("embed-open")).toBeVisible();

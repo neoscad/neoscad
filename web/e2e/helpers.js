@@ -9,13 +9,23 @@ export const shot = async (page, name) => {
   if (shots) await page.screenshot({ path: `${shots}/${name}.png` });
 };
 
+/// Collect the page's uncaught errors into `errors`, leaving out
+/// "ResizeObserver loop completed with undelivered notifications": the
+/// browser's report that a resize callback's layout change waits for the
+/// next frame (WebKit raises it on CI's runners), not a page fault.
+export function collectErrors(page, errors = []) {
+  page.on("pageerror", (e) => {
+    if (!/^ResizeObserver loop/.test(e.message)) errors.push(e.message);
+  });
+  return errors;
+}
+
 export async function open(page, hash = "") {
   const failed = [];
   page.on("response", (r) => {
     if (r.status() >= 400) failed.push(`${r.status()} ${r.url()}`);
   });
-  const errors = [];
-  page.on("pageerror", (e) => errors.push(e.message));
+  const errors = collectErrors(page);
   await page.goto(`/try/${hash}`);
   await page.waitForSelector("html[data-ready]");
   return { failed, errors };
