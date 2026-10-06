@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.4.3
+
+### Fixed
+
+- **`minkowski()` of a shape with a hole is fast.** A cube with a round
+  hole plus a sphere took 127 s and 18.8 GB; it now takes 0.06 s and
+  52 MB (OpenSCAD's nightly: 0.2 s). Other holed and slotted shapes are
+  from 2.5 to several hundred times faster, and their volume and area
+  match the nightly's; the thin slit `issue2841` exported is gone.
+- **A long `minkowski()` can be stopped** by Cancel, the time limit and
+  the memory limit.
+- **A memory limit no longer slows renders on many cores.** With
+  `--limit memory` (which the apps and every agent tool set), heavy
+  models ran up to 2.8 times slower; BOSL2's `fractal_tree` now takes
+  0.66 s instead of 1.86 s.
+- **Windows: Disconnect ends an agent's connection at once,** instead of
+  waiting for the agent to close it.
+- **Deep recursion through a C-style `for`, `object()`'s arguments or a
+  parameter default** reaches the full 99,999 levels in every browser
+  (it stopped at 34-37 in /try), and values nested hundreds of thousands
+  deep no longer overflow the stack when printed, combined with `+ - * /`
+  or freed. A deeply nested list prints to the same depth in every build
+  (`issue4172` prints 302 levels).
+
+### Changed
+
+- **The macOS app is about 7% faster:** its engine and bundled
+  command-line tool are now profile-guided builds, like the
+  command-line downloads.
+- **Linux and Windows: a chip over the view clears an agent's marks,**
+  as on macOS.
+- **/try downloads half as much:** the engine is 2.3 MB instead of 4.6 MB.
+  The fonts now download the first time a model draws text. /try is
+  tested in Firefox and Safari's engine as well as Chrome's.
+- **winget installs the desktop app** (`winget install NeoSCAD.NeoSCAD`),
+  with the command-line tool in its `bin` folder.
+- **Setting up the language server in other editors** (VS Code, Neovim,
+  Helix, Emacs) is in `docs/lsp.md`.
+
 ## 0.4.2
 
 ### Changed
