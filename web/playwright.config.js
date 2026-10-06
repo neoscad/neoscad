@@ -1,8 +1,9 @@
 // Playwright against a built bundle served under /try/ (serve.mjs), as the
 // website serves it. Build first (`npm run build`, or scripts/web/build.sh
-// and E2E_DIR=../dist/web/neoscad-web-...). Chromium for the app's specs;
-// the agent bridge's and the links' specs also run in Firefox and WebKit
-// (the projects below; `npx playwright install firefox webkit`).
+// and E2E_DIR=../dist/web/neoscad-web-...). Every desktop spec runs in
+// Chromium, Firefox and WebKit (`npx playwright install chromium firefox
+// webkit`); CI runs them against the mock build (.github/workflows/ci.yml,
+// `web`).
 //
 // Needs Node 20 or newer (Playwright 1.63's requirement), unlike the unit
 // tests, which run on 18.
@@ -43,20 +44,22 @@ export default defineConfig({
       testIgnore: /phone\.spec/,
     },
     { name: "phone", use: { ...devices["Pixel 7"], channel: "chromium" }, testMatch: /phone\.spec/ },
-    // The agent bridge, and the links and embed view (share.spec), must
-    // work in every desktop engine, so their specs run in Firefox and
-    // WebKit too (`npx playwright install firefox webkit`; the agent's
-    // needs NEOSCAD_BIN, and skips without it). The other specs are
-    // written against Chromium's WebGPU viewer.
+    // The page must work in every desktop engine, so every desktop spec
+    // runs in Firefox and WebKit too (the agent's needs NEOSCAD_BIN, and
+    // skips without it). Their viewer is whichever the browser starts:
+    // Playwright's WebKit on macOS has a WebGPU adapter, and its Firefox
+    // has `navigator.gpu` but "WebGPU is disabled by blocklist" (no
+    // adapter, even with the blocklist prefs), so Firefox tests the page's
+    // fallback to the WebGL build, and skips the one WebGPU-only test.
     {
       name: "firefox",
       use: { ...devices["Desktop Firefox"], viewport: { width: 1400, height: 860 } },
-      testMatch: /(agent|share)\.spec/,
+      testIgnore: /phone\.spec/,
     },
     {
       name: "webkit",
       use: { ...devices["Desktop Safari"], viewport: { width: 1400, height: 860 } },
-      testMatch: /(agent|share)\.spec/,
+      testIgnore: /phone\.spec/,
     },
   ],
 });

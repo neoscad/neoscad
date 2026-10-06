@@ -8,7 +8,7 @@
 import { createServer } from "node:http";
 import { deflateRawSync } from "node:zlib";
 import { expect, test } from "@playwright/test";
-import { editorText, expectDrawn, open, shot, summary } from "./helpers.js";
+import { editorText, expectDrawn, open, settleCursor, shot, summary } from "./helpers.js";
 
 const SOURCE = `// Shared from a link: ünïcödé 🧊
 difference() {
@@ -70,7 +70,8 @@ test("a #code= link opens as its own document, and saves nothing", async ({ page
     // reaches storage but the view settings the page always keeps.
     await page.locator(".cm-content").click();
     await page.keyboard.press("ControlOrMeta+End");
-    await page.keyboard.type("\ncube(1);");
+    await settleCursor(page, "end");
+    await page.keyboard.type("\ncube(1);", { delay: 20 });
     await expect.poll(() => editorText(page)).toContain("cube(1);");
     await page.waitForTimeout(500);
     expect(await stored(page)).toEqual(before);
@@ -116,7 +117,12 @@ test("Copy link makes a link that opens the same text", async ({ page, context, 
   await fresh(page, "#example=csg");
   await page.locator(".cm-content").click();
   await page.keyboard.press("ControlOrMeta+End");
-  await page.keyboard.type("\n// shared on purpose");
+  await settleCursor(page, "end");
+  // 20 ms between keys: at 0 ms, Linux Chromium (Playwright's image) put
+  // a key behind the ones typed after it about once in ten runs ("// shred
+  // on purposea"), the stale-selection race settleCursor's comment
+  // describes, mid-word. A person never types that fast.
+  await page.keyboard.type("\n// shared on purpose", { delay: 20 });
   await expect.poll(() => editorText(page)).toContain("// shared on purpose");
   const text = await editorText(page);
   for (const [item, embed] of [["Copy link", false], ["Copy embed link", true]]) {

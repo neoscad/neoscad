@@ -11,7 +11,9 @@
 #   named pipe;
 # - linux-app: the GTK desktop app builds, its tests pass, and it runs
 #   headless;
-# - wasm: scripts/wasm-check.sh.
+# - wasm: scripts/wasm-check.sh;
+# - web: the web demo's unit tests, and its e2e suite against the mock
+#   build in Chromium, Firefox and WebKit.
 name: CI
 
 on:
@@ -240,3 +242,34 @@ jobs:
         with:
           node-version: 22
       - run: scripts/wasm-check.sh
+
+  # The web demo's page in Chromium, Firefox and WebKit: its unit tests,
+  # then the e2e suite against the mock build (`npm run build`: the page,
+  # the editor, the console, the customizer, links and the embed view; no
+  # Rust). real.spec.js needs the wasm core and viewer, and agent.spec.js a
+  # `neoscad`, so they skip here; run them locally against a release
+  # bundle (web/README.md). Playwright's own image, pinned to the version
+  # in web/package-lock.json, carries the three browsers and their system
+  # libraries.
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      options: --ipc=host
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: npm ci --no-audit --no-fund
+        working-directory: apple/Editor/web
+      - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: npx playwright test
+        working-directory: web
+        env:
+          HOME: /root

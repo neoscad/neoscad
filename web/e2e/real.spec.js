@@ -213,6 +213,71 @@ test("the language server answers from the worker: go to a BOSL2 definition", as
   await shot(page, "real-gear-definition");
 });
 
+// Deep recursion in every engine, through the page and a cold worker (a
+// fresh page load each time): WebKit's worker has about 512 KiB of stack
+// and JavaScriptCore's baseline tier spends about a kilobyte a wasm frame,
+// so recursion that used native frames overflowed there at a few dozen
+// levels and trapped the instance. The evaluator's heap stack makes depth
+// a count: 99,999 levels run, and the 100,000th is OpenSCAD's recursion
+// error, with the worker still alive. crates/web/test/run.mjs checks the
+// same in node (V8); this is the check that runs in JavaScriptCore and
+// SpiderMonkey.
+const DEEP = {
+  function: (n) => `function f(n) = n == 0 ? 0 : 1 + f(n - 1);\necho(f(${n}));\n`,
+  module: (n) => `module m(n) { if (n > 0) m(n - 1); else cube(1); }\nm(${n});\n`,
+  comprehension: (n) => `function g(n) = n == 0 ? [] : [for (i = [0:0]) each g(n - 1)];\necho(len(g(${n})));\n`,
+  children: (n) => `module c(n) { if (n > 0) c(n - 1) children(); else children(); }\nc(${n}) cube(1);\n`,
+};
+const codeLink = (text) => `#code=${Buffer.from(text, "utf8").toString("base64url")}&name=deep`;
+
+test("deep recursion reaches the counted limit, and past it is an error, not a crash", async ({ page }) => {
+  test.setTimeout(120000);
+  for (const [kind, source] of Object.entries(DEEP)) {
+    for (const [n, stops] of [[99999, false], [100000, true]]) {
+      await page.goto("about:blank");
+      await open(page, codeLink(source(n)));
+      await expect.poll(() => page.evaluate(() => window.NeoSCADWeb.lastRun?.exitCode), { timeout: 60000 }).not.toBeUndefined();
+      const text = (await page.locator(".console-line").allInnerTexts()).join("\n");
+      expect(await page.evaluate(() => window.NeoSCADWeb.engine.restarts), `${kind} at ${n}`).toBe(0);
+      if (stops) expect(text, `${kind} at ${n}`).toMatch(/Recursion detected calling (function|module) '[fgmc]'/);
+      else {
+        expect(text, `${kind} at ${n}`).not.toMatch(/Recursion detected/);
+        expect(await page.evaluate(() => window.NeoSCADWeb.lastRun.exitCode), `${kind} at ${n}`).toBe(0);
+        if (kind === "function") expect(text).toContain("ECHO: 99999");
+      }
+    }
+  }
+});
+
+// The fonts are not in the core: fonts.tar.gz is fetched the first time a
+// model draws text, either because the page sees `text(` in it or because
+// the core says a run wanted fonts (text drawn inside a library), and
+// never for a model without text.
+test("the fonts are fetched once, only when a model draws text", async ({ page }) => {
+  const fetched = [];
+  page.on("response", (r) => r.url().endsWith("/fonts.tar.gz") && fetched.push(r.status()));
+  await open(page, "#example=csg");
+  await expect(summary(page)).toContainText("Previewed");
+  expect(fetched).toEqual([]);
+  // BOSL2's text3d() calls text() where the page cannot see it.
+  await page.goto("about:blank");
+  await open(page, codeLink('include <BOSL2/std.scad>\ntext3d("NeoSCAD", h = 3);\n'));
+  await expect.poll(() => page.evaluate(() => window.NeoSCADWeb.lastRun?.exitCode), { timeout: 60000 }).toBe(0);
+  expect(fetched).toEqual([200]);
+  expect((await page.locator(".console-line").allInnerTexts()).join("\n")).not.toMatch(/Can't get font/);
+  await expectDrawn(page);
+  // The sign example's text is seen in its source: fetched before its run.
+  await page.goto("about:blank");
+  fetched.length = 0;
+  await open(page, "#example=sign");
+  await expect(summary(page)).toContainText("Previewed");
+  expect(fetched).toEqual([200]);
+  expect((await page.locator(".console-line").allInnerTexts()).join("\n")).not.toMatch(/Can't get font/);
+  await page.getByTestId("preview").click();
+  await expect(summary(page)).toContainText("Previewed");
+  expect(fetched).toEqual([200]);
+});
+
 const timings = [];
 
 test("every example previews and renders; timings", async ({ page }) => {
