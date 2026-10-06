@@ -1,0 +1,20 @@
+ERROR: Assertion 'false' failed: "module default" @3
+TRACE: called by 'd' @4
+TRACE: called by 'if' @4
+TRACE: call of 'm(n = 0)' @4
+TRACE: called by 'm' @4
+TRACE: called by 'if' @4
+TRACE: call of 'm(n = 1)' @4
+TRACE: called by 'm' @4
+TRACE: called by 'if' @4
+TRACE: call of 'm(n = 2)' @4
+TRACE: called by 'm' @4
+TRACE: called by 'if' @4
+TRACE: call of 'm(n = 3)' @4
+TRACE: called by 'm' @5
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

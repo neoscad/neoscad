@@ -1002,6 +1002,13 @@ impl FunctionValue {
 impl Drop for FunctionValue {
     fn drop(&mut self) {
         crate::limits::live::credit(FUNCTION_BYTES);
+        // The last reference to the context it was made in: freed by a
+        // loop rather than inside this drop, as a chain of closures can
+        // be a million deep (see `context::free_later`).
+        if Rc::strong_count(&self.ctx) == 1 {
+            let ctx = std::mem::replace(&mut self.ctx, crate::context::empty_ctx());
+            crate::context::free_later(ctx);
+        }
     }
 }
 

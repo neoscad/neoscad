@@ -135,6 +135,15 @@ const PROGRAMS = {
   'function-range': (n) => `function r(n) = n == 0 ? 0 : [0 : 1 : r(n - 1)][2] + 1;\necho(r(${n}));`,
   'function-is-undef': (n) => `function u(n) = n == 0 ? 0 : is_undef(u(n - 1)) ? -1 : n;\necho(u(${n}));`,
   'function-callee': (n) => `function c(n) = n == 0 ? function (x) x : c(n - 1)(0) == 0 ? function (x) x : undef;\necho(c(${n})(7));`,
+  'function-cfor': (n) => `function cf(n) = n == 0 ? 0 : [for (i = cf(n - 1); i < n; i = n) i][0] + 1;\necho(cf(${n}));`,
+  'function-default': (n) => `function d(x = $k > 0 ? let ($k = $k - 1) d() + 1 : 0) = x;\necho(let ($k = ${n}) d());`,
+  // Values nested as deep as a recursion can build them: printing stops
+  // at its counted depth (46,918 levels, as natively) with OpenSCAD's
+  // "Stack exhausted"; the operators, and freeing a chain of closures,
+  // go on to the tail-call limit (999,999).
+  'value-print': (n) => `function nest(n, acc = 0) = n == 0 ? acc : nest(n - 1, [acc]);\necho(len(str(nest(${n}))));`,
+  'value-ops': (n) => `function nest(n, acc = 0) = n == 0 ? acc : nest(n - 1, [acc]);\nv = nest(${n});\necho(len(-v) + len(v + v) + len(v * 2), v == v);`,
+  'value-closures': (n) => `function nf(n, acc) = n == 0 ? acc : nf(n - 1, function () acc);\necho(is_function(nf(${n}, 0)));`,
   // Nesting in the source rather than in a recursion: the parser, the
   // lowering and everything after walk it recursively, and past the
   // parser's nesting limit it must end in OpenSCAD's "memory exhausted"
@@ -152,6 +161,7 @@ const PROGRAMS = {
 // Run by `--depths` alone; `--all-programs` runs every program above.
 const DEFAULT_PROGRAMS = [
   'function', 'module', 'function-range', 'function-is-undef', 'function-callee',
+  'function-cfor', 'function-default', 'value-print', 'value-ops', 'value-closures',
   ...Object.keys(PROGRAMS).filter((k) => k.startsWith('source-')),
 ];
 

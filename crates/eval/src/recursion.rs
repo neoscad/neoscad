@@ -23,8 +23,8 @@
 //! - **A frame budget** ([`crate::Options::frame_limit`]), which measures
 //!   nothing: each nested expression, function call and list comprehension
 //!   element holds a few frames ([`EXPRESSION_FRAMES`] and the like), a
-//!   heap loop started from native code many ([`HEAP_LOOP_FRAMES`]), and
-//!   printing a nested vector [`PRINT_FRAMES`] per level. On wasm32 the
+//!   and a heap loop started from native code many
+//!   ([`HEAP_LOOP_FRAMES`]). On wasm32 the
 //!   stack that overflows first is one the module cannot measure: a
 //!   WebAssembly engine runs wasm functions on its own machine stack
 //!   (about 1 MB in V8), and overflowing it throws `RangeError: Maximum
@@ -34,20 +34,25 @@
 //!   that keep every shape below within the smallest engine stack, a
 //!   WebKit worker's (about 512 KiB); natively the budget is unlimited.
 //!
-//! Both are checked at every function call (`Evaluator::call_exhausted`)
-//! and while printing a nested value. What they still guard:
+//! Both are checked at every function call (`Evaluator::call_exhausted`).
+//! What they still guard:
 //!
 //! - the first `heap_expr::NATIVE_CALLS` nested user calls, which run
 //!   natively for speed (a bounded amount of stack);
-//! - the few shapes that stay native and start a nested heap loop for each
-//!   call they reach: C-style `for` comprehensions, `object()`'s
-//!   arguments, parameter defaults and `use`d libraries' assignments (see
-//!   `heap_expr`). A recursion through one of them at every level holds
-//!   native stack per level, and the check at its calls is what stops it
+//! - the one shape that stays native and starts a nested heap loop for
+//!   each call it reaches: a `use`d library's assignments (see
+//!   `heap_expr`). A recursion through them at every level holds native
+//!   stack per level, and the check at its calls is what stops it
 //!   cleanly;
-//! - printing, whose depth is the value's;
 //! - the source's own nesting, which the parser bounds first with a
 //!   counted limit (`lang::syntax::parser::NESTING_LIMIT`).
+//!
+//! Values take none: printing, comparing, hashing, the element-wise
+//! operators, `chr()` and freeing walk a nested value with a stack of
+//! their own, so a value nested as deep as a recursion can build it needs
+//! no native stack per level (`tests/value_depth.rs` runs them on a
+//! thread of 512 KiB). Printing still fails with OpenSCAD's "Stack
+//! exhausted" error, at a counted depth (`print.rs`).
 //!
 //! On wasm32 the measured limit also guards the module's own stack in
 //! linear memory (Rust's "shadow stack", where locals whose address is
@@ -86,15 +91,19 @@
 /// levels all held native stack: 48 MiB until a profile-guided build
 /// (`scripts/pgo.sh`) inlined more and grew its frames by half, then
 /// 64 MiB so that build cleared the nightly's depth by 25%. Neither
-/// reason holds now that recursion runs on the heap, but it is what the
-/// native shapes reach: 49,330 levels of a recursion through a C-style
-/// `for`'s initialiser and 37,439 through `object()`'s arguments (plain
-/// release build, macOS arm64), where the counted limit would allow
-/// 100,000. A range's bounds and `is_undef()` reached 57,443 and 61,667
-/// before they moved to the heap. The stack
-/// is only touched when a program recurses that way. Shrinking it, and
-/// the thread [`crate::with_stack`] makes, to what source nesting and
-/// those shapes need is a followup (`docs/followups.md`).
+/// reason holds now that recursion runs on the heap. What still uses the
+/// native stack, measured as the smallest evaluation thread that runs it
+/// (plain release build, and debug, macOS arm64; October 2026):
+/// - source nested to the parser's limit: at most 2.7 MiB (`{` blocks),
+///   4.3 MiB in a debug build at its lower limit;
+/// - every file of the BOSL2 corpus, examples and tests: 64 KiB;
+/// - the one shape that stays native, a recursion through two `use`d
+///   libraries' assignments: 3.3 KiB a level (13 KiB in debug), so this
+///   limit stops it at about 20,000 levels, where OpenSCAD's nightly stops
+///   between 3,000 and 6,000.
+///
+/// The stack is only touched when a program needs it. A smaller limit
+/// and thread are proposed in `docs/followups.md`.
 #[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_STACK_LIMIT: usize = 64 << 20;
 
@@ -119,10 +128,12 @@ pub const DEFAULT_FRAME_LIMIT: u32 = u32::MAX;
 /// --depths --all-programs --frames=4000000000` when every level of a
 /// recursion held native stack: the deepest each kind reached under this
 /// budget was at most 63% of the depth where V8 overflowed. It now only
-/// meets the shapes that still recurse natively, and a heap loop's and a
-/// printing level's weights ([`HEAP_LOOP_FRAMES`], [`PRINT_FRAMES`]) are
-/// set so that this budget stops them short of a WebKit worker's stack,
-/// the smallest of the three engines'.
+/// meets the shape that still recurses natively, and a heap loop's weight
+/// ([`HEAP_LOOP_FRAMES`]) is set so that this budget stops it short of a
+/// WebKit worker's stack, the smallest of the three engines'. (Printing a
+/// nested vector had a weight too, which stopped it at 250 levels in a
+/// browser, where WebKit's stack overflowed at 518; it holds no native
+/// stack per level now.)
 #[cfg(all(target_arch = "wasm32", not(debug_assertions)))]
 pub const DEFAULT_FRAME_LIMIT: u32 = 2_000;
 
@@ -150,9 +161,10 @@ pub const COMPREHENSION_FRAMES: u32 = 4;
 
 /// Frames a nested heap loop holds: `heap_expr`'s `heap_eval`, which a
 /// call past the native call levels starts from native code, and which
-/// each level of a recursion through a shape that stays native (a
-/// C-style `for`, `object()`, a parameter default; a range's bounds, as
-/// measured below, before it moved to the heap) starts again. Its native
+/// each level of a recursion through the shape that stays native (a
+/// `use`d library's assignments; a range's bounds, as measured below, and
+/// a C-style `for`, `object()` and parameter defaults, before they moved
+/// to the heap) starts again. Its native
 /// frames are large. When this was
 /// [`CALL_FRAMES`], the release budget let such a recursion run to
 /// 280-660 levels, and the web core trapped instead: measured without
@@ -162,13 +174,6 @@ pub const COMPREHENSION_FRAMES: u32 = 4;
 /// turned off; Chromium's at 223-280 and Firefox's at 393-724. At this
 /// weight [`DEFAULT_FRAME_LIMIT`] stops them at 34-37 levels in all three.
 pub const HEAP_LOOP_FRAMES: u32 = 64;
-
-/// Frames one level of printing a nested vector holds (`print.rs`).
-/// Measured as for [`HEAP_LOOP_FRAMES`], printing overflowed a WebKit
-/// worker's stack at a vector nested 518 deep (Chromium 2,618, Firefox
-/// 5,385), which the release budget allowed at one frame a level; at this
-/// weight it stops printing at 250.
-pub const PRINT_FRAMES: u32 = 8;
 
 /// The linear-memory stack a wasm32 build of neoscad should be linked
 /// with: `-C link-arg=-zstack-size=8388608` (rustc's default is 1 MiB).

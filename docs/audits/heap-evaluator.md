@@ -548,7 +548,8 @@ against the extra CI time on six targets.
 - **Value depth.** Operators, comparisons and printing on deeply nested
   vectors recurse on value depth. Tail recursion can already build a
   million-level vector (value.rs:458-463), so this predates the heap
-  work. It is not made worse, but it is not fixed either.
+  work. It is not made worse, but it is not fixed either. (Fixed since:
+  see "Native shapes and value depth" below.)
 - **Memory-limit timing.** Heap frames change when live bytes peak. The
   call memo's 2× margin rule (`replay_fits`) assumes fresh evaluations
   allocate about what recordings did. Re-run `crates/eval/tests/memory_limit.rs`
@@ -1467,3 +1468,133 @@ test --workspace`; conformance 1773/0 at default threads and with
 modules 99,999; source nesting stops at the parser's limit); `node
 crates/web/test/run.mjs` on a core built from this change, its probe
 test included.
+
+## Native shapes and value depth
+
+Done on 2026-10-06 against `d8c73e7`, on the same Apple M4 Pro, with
+other builds running (load 3-11).
+
+**The native shapes.** Three of the four that stayed native in stage 2
+run on the heap now (`crates/eval/src/heap_expr.rs`):
+- C-style `for` comprehensions: `x_for_c`, its state (`ForCSt`: the
+  initial and current contexts, the increment's, the counter and the
+  part it is at) on a side stack, each initialiser, the condition, the
+  body and each increment evaluated by the loop when it may call.
+- `object()`'s arguments: `x_object`, applied one at a time as they come
+  (`object_arg`, shared with the native `object_function`), the object
+  being built on a side stack, so the first bad one still ends the call
+  with the rest unevaluated.
+- Parameter defaults that may call: such a call binds its arguments
+  first (`pure_place` for a pure frame, `bind_args`, split out of
+  `bind_general`, otherwise), then evaluates each unset default in
+  `bind_user`'s order (`Phase::PureDefault`, `Phase::FrameDefault`).
+  Whether a function's defaults may call is remembered per region.
+
+Left native: `use`d libraries' assignments, evaluated during a function
+lookup (`library_context`). A recursion through them needs two libraries
+that `use` each other and a `$` variable: natively 20,163 levels, about
+3.3 KiB each (OpenSCAD's nightly stops between 3,000 and 6,000).
+
+`crates/eval/tests/functions.rs` holds the moved shapes to the native
+evaluator's output (`heap_shapes2*.expected`, written by `d8c73e7`: every
+part of a C-style `for`, `$` variables, closures over iterations, the
+duplicate and unnamed warnings; `object()` in order, stopping at a bad
+argument, in tail position; defaults positional and named, of methods
+and literals, that echo, fail or read `$` variables; an error from each,
+with its trace), and runs a recursion through each on a 128 KiB thread to
+the counted limit. In node (`wasm-check.sh --depths`) `function-cfor` and
+`function-default` reach 99,999.
+
+**Value depth.** Values that nest as deep as a recursion builds them no
+longer recurse natively anywhere:
+- printing (`print.rs`) walks with a stack of the open lists and
+  objects. OpenSCAD's "Stack exhausted" is now a count: each level is
+  charged 176 bytes (what the recursive walk's frame held in the plain
+  release build) against OpenSCAD's 8 MiB, with the modules and calls in
+  progress as before; the measured stack and the frame budget no longer
+  take part (`PRINT_FRAMES` is gone). A nested list prints 46,918 levels
+  in every build and engine, where release printed 46,835, a debug
+  build fewer (larger frames; not measured), and browsers 250. `issue4172` prints 302 levels (301 before in
+  release), and `conformance depth` now gates it;
+- the element-wise operators (`ops::map_tree`, `zip_tree`: `+`, `-`,
+  `*` and `/` by a number, unary `-`) build the result with a stack of
+  their own, inner lists first as before;
+- `chr()` walks its lists with a stack (`chr_into`);
+- a chain of closures (`nf(n - 1, function () acc)`) is freed by a loop:
+  a function value holding the last reference to its context hands it
+  to `context::free_later`, which frees nested ones after it rather than
+  inside it. Lists and objects were already freed this way, and
+  comparison and hashing already walked iteratively.
+
+`crates/eval/tests/value_depth.rs` runs 43 cases on a 512 KiB thread,
+in debug and release: values 100,000 to 999,999 deep dropped, printed,
+compared, added, negated, multiplied, divided, passed to `chr()`,
+`concat()`, `max()`, `norm()`, `search()`, `lookup()`, used as a
+module's arguments and `$` variables (the call memo's keys), as
+geometry parameters, printed in traces, nested objects and closure
+chains. With `d8c73e7`'s evaluator 21 of them overflowed that stack, in
+both builds (printing, the operators, `chr()`, the geometry parameters
+and traces that print their value, the closure chains). In node,
+`value-print` stops at 46,918 with the error, and `value-ops` and
+`value-closures` reach the tail-call limit (999,999).
+
+**Output.** Conformance 1773/0, at default threads and with
+`RAYON_NUM_THREADS=1`. The BOSL2 corpus A/B against `d8c73e7`'s release
+build, `--seed 1`: all 3,502 echo exports and 3,495 CSG exports
+identical, and every file's console output (the other seven are syntax
+errors in both). `conformance depth`: the counted depths unchanged, and
+`issue4172` 302 for the release and the debug build alike.
+
+**Speed.** Instructions retired (`/usr/bin/time -l`), best of 5
+interleaved runs, new against `d8c73e7`; the bench models exported to
+CSG (evaluation only):
+
+| Program | new / base |
+|---|---:|
+| `bosl_fractal_tree` (noisy, ±2% run to run; 10 runs) | 1.001-1.003 |
+| `bosl_gears__003` | 1.0005 |
+| `bosl_isosurface__006` | 1.002 |
+| `bosl_screws__001` | 1.003-1.004 |
+| `bosl_spring_handle` | 1.005 |
+| BOSL2's 977 tests, echo, summed | 1.0002 |
+| `fib(25)` | 1.009 |
+| `1 + f(n - 1)` 5,000 deep, 100 times | 1.010 |
+| a leaf call in a loop | 1.002 |
+| a tail recursion | 1.001 |
+| a loop with no calls | 1.000 |
+| a C-style `for` at the top level | 1.010 |
+| a C-style `for` that calls, 12 calls deep | 1.055 |
+| a default that calls, 12 calls deep | 1.087 |
+| a default that does not call, 12 calls deep | 1.008 |
+| nested-list arithmetic | 0.911 |
+| printing nested lists | 0.951 |
+
+- The two shapes that moved cost what the heap costs past the 8 native
+  call levels (1.3-1.6 times a native call); at the top level they still
+  run natively.
+- `fib(25)` and `1 + f(n - 1)` run the same source path as before. The
+  1% is layout in the expression loop: with `d8c73e7`'s `heap_expr.rs`
+  and everything else from this change they were at 1.000 and 0.999,
+  and edits to `heap_expr.rs` that change no behaviour (arms moved out
+  of line, the new side stacks boxed, a branch restructured) moved them
+  between 1.009 and 1.020. The version kept is the best of those tried.
+- Wall time agreed within noise: `fractal_tree` 0.48 s against 0.49 s
+  best, `isosurface__006` 0.67 s against 0.66 s.
+
+**The native stack.** Measured with a temporary knob for the CLI's
+evaluation thread size (removed again), the smallest thread on which each
+runs to the end:
+- every BOSL2 corpus file: 64 KiB release, 256 KiB debug, with output
+  byte-identical to the default 80 MiB;
+- source nested to the parser's limit (`deep_source.rs`'s programs):
+  release, limit 50,000: `{` blocks 2.7 MiB, `else if` and
+  `translate()` 1.9 MiB, sums and negations 1.7 MiB, the rest under
+  1 MiB; debug, limit 25,000: 4.3 MiB at most;
+- the `use`d-library recursion: 3.3 KiB a level release, 13 KiB debug.
+
+The proposal is in `docs/followups.md`: a 16 MiB `DEFAULT_STACK_LIMIT`
+on a 32 MiB thread, after giving geometry, which shares
+`DEFAULT_THREAD_STACK` and recurses in Clipper2, a constant of its own.
+
+**Checks.** `cargo fmt`, `clippy --all-targets -D warnings`, `cargo test
+--workspace`; `scripts/wasm-check.sh --depths`.

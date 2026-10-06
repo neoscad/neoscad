@@ -55,11 +55,6 @@ fn undefined_op(a: &Value, op: &str, b: &Value) -> Why {
     ))
 }
 
-/// Drop the reasons: an element stored inside a vector.
-fn elem(r: OpResult) -> Value {
-    r.unwrap_or(Value::Undef)
-}
-
 // --- walking two lists ----------------------------------------------------
 //
 // `==` and `<` on lists recurse element by element, as `VectorType`'s
@@ -602,35 +597,119 @@ pub fn relation(op: BinaryOp, a: &Value, b: &Value, stop: Stop<'_>) -> Result<Op
 
 // --- arithmetic -----------------------------------------------------------
 
-/// `f` over the elements of `v`, as a new list.
-///
-/// Element-wise operators recurse into nested lists in one Rust call that
-/// the evaluator's checks cannot interrupt, and a list whose halves are
-/// shared (`t = [t, t]` a few dozen times) costs nothing until an operator
-/// like `-t` copies it into 2^depth lists. So once the memory limit has
-/// passed (see `crate::limits::live`, which trips it as the lists are
-/// made), this stops with `undef`, and the evaluator reports the limit as
-/// soon as the operator returns.
-#[inline]
-fn map_vec(v: &[Value], f: impl FnMut(&Value) -> Value) -> Value {
-    if crate::limits::live::over() {
-        return Value::Undef;
-    }
-    Value::vector(v.iter().map(f).collect())
+/// What an element-wise operator makes of one element: a value (`undef`
+/// where OpenSCAD's would be undefined, whose reasons it drops), or a
+/// nested list (or pair of lists) to walk into, which becomes a list.
+enum Elem<T> {
+    Leaf(Value),
+    Descend(T),
 }
 
-fn zip_with(x: &Vector, y: &Vector, f: impl Fn(&Value, &Value) -> OpResult) -> Value {
-    // As `map_vec`.
+/// An element-wise operator over `root` and every list nested in it: `f`
+/// decides for each element whether it is a value or a list to walk into,
+/// which the walk does with the same `f`, as OpenSCAD's operators recurse.
+///
+/// The walk is a loop over an explicit stack of the lists being built: a
+/// list can nest as deep as a recursion can build it (100,000 levels at
+/// the counted limit, any depth through a tail call), and the recursive
+/// walk this replaced held native stack per level, which a browser
+/// worker's stack (about 512 KiB in WebKit) ran out of within a few
+/// thousand levels. Lists are made in the recursive walk's order, inner
+/// before outer, so the memory limit sees the same.
+///
+/// It runs in one Rust call that the evaluator's checks cannot interrupt,
+/// and a list whose halves are shared (`t = [t, t]` a few dozen times)
+/// costs nothing until an operator like `-t` copies it into 2^depth lists.
+/// So once the memory limit has passed (see `crate::limits::live`, which
+/// trips it as the lists are made), each list from then on is `undef`,
+/// and the evaluator reports the limit as soon as the operator returns.
+// Out of line, as the recursive walk was: inlined into the operators, it
+// made them too big to inline into the evaluator's hot paths.
+#[inline(never)]
+fn map_tree<'v>(root: &'v [Value], mut f: impl FnMut(&'v Value) -> Elem<&'v [Value]>) -> Value {
     if crate::limits::live::over() {
         return Value::Undef;
     }
-    Value::vector(x.iter().zip(y.iter()).map(|(p, q)| elem(f(p, q))).collect())
+    let mut open: Vec<(&'v [Value], usize, Vec<Value>)> =
+        vec![(root, 0, Vec::with_capacity(root.len()))];
+    loop {
+        let (items, i, out) = open.last_mut().expect("a list being walked");
+        let Some(e) = items.get(*i) else {
+            let (_, _, out) = open.pop().expect("a list being walked");
+            let v = Value::vector(out);
+            match open.last_mut() {
+                Some((_, _, parent)) => parent.push(v),
+                None => return v,
+            }
+            continue;
+        };
+        *i += 1;
+        match f(e) {
+            Elem::Leaf(v) => out.push(v),
+            Elem::Descend(sub) => {
+                // `map_vec`'s check, where the nested call would make it.
+                if crate::limits::live::over() {
+                    out.push(Value::Undef);
+                } else {
+                    open.push((sub, 0, Vec::with_capacity(sub.len())));
+                }
+            }
+        }
+    }
+}
+
+/// [`map_tree`] over two lists in step, as far as the shorter one goes.
+#[allow(clippy::type_complexity)]
+fn zip_tree<'v>(
+    x: &'v [Value],
+    y: &'v [Value],
+    mut f: impl FnMut(&'v Value, &'v Value) -> Elem<(&'v [Value], &'v [Value])>,
+) -> Value {
+    if crate::limits::live::over() {
+        return Value::Undef;
+    }
+    let n = x.len().min(y.len());
+    let mut open: Vec<(&'v [Value], &'v [Value], usize, Vec<Value>)> =
+        vec![(x, y, 0, Vec::with_capacity(n))];
+    loop {
+        let (xs, ys, i, out) = open.last_mut().expect("a list being walked");
+        let (Some(p), Some(q)) = (xs.get(*i), ys.get(*i)) else {
+            let (_, _, _, out) = open.pop().expect("a list being walked");
+            let v = Value::vector(out);
+            match open.last_mut() {
+                Some((_, _, _, parent)) => parent.push(v),
+                None => return v,
+            }
+            continue;
+        };
+        *i += 1;
+        match f(p, q) {
+            Elem::Leaf(v) => out.push(v),
+            Elem::Descend((a, b)) => {
+                if crate::limits::live::over() {
+                    out.push(Value::Undef);
+                } else {
+                    open.push((a, b, 0, Vec::with_capacity(a.len().min(b.len()))));
+                }
+            }
+        }
+    }
+}
+
+/// `+` or `-` on two lists, element by element.
+#[inline(never)]
+fn zip_arith(x: &Vector, y: &Vector, op: fn(f64, f64) -> f64) -> Value {
+    zip_tree(x, y, |p, q| match (p, q) {
+        (Value::Number(a), Value::Number(b)) => Elem::Leaf(Value::Number(op(*a, *b))),
+        (Value::Vector(a), Value::Vector(b)) => Elem::Descend((a.as_slice(), b.as_slice())),
+        _ => Elem::Leaf(Value::Undef),
+    })
 }
 
 pub fn add(a: &Value, b: &Value) -> OpResult {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x + y)),
-        (Value::Vector(x), Value::Vector(y)) => Ok(zip_with(x, y, add)),
+        (Value::Vector(x), Value::Vector(y)) => Ok(zip_arith(x, y, |p, q| p + q)),
         _ => Err(undefined_op(a, "+", b)),
     }
 }
@@ -638,15 +717,22 @@ pub fn add(a: &Value, b: &Value) -> OpResult {
 pub fn sub(a: &Value, b: &Value) -> OpResult {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x - y)),
-        (Value::Vector(x), Value::Vector(y)) => Ok(zip_with(x, y, sub)),
+        (Value::Vector(x), Value::Vector(y)) => Ok(zip_arith(x, y, |p, q| p - q)),
         _ => Err(undefined_op(a, "-", b)),
     }
 }
 
 /// Vector times number, element by element (`multvecnum`: the element is
 /// always the left operand).
-fn mul_vec_num(v: &Vector, n: &Value, warn: &mut Vec<String>) -> Value {
-    map_vec(v, |e| elem(mul(e, n, warn)))
+fn mul_vec_num(v: &Vector, n: &Value) -> Value {
+    let Value::Number(n) = *n else {
+        unreachable!("a vector times a number")
+    };
+    map_tree(v, |e| match e {
+        Value::Number(x) => Elem::Leaf(Value::Number(x * n)),
+        Value::Vector(w) => Elem::Descend(w.as_slice()),
+        _ => Elem::Leaf(Value::Undef),
+    })
 }
 
 /// Matrix times vector (`multmatvec`).
@@ -717,8 +803,8 @@ fn mul_vec_mat(v: &Vector, m: &Vector, warn: &mut Vec<String>) -> OpResult {
 pub fn mul(a: &Value, b: &Value, warn: &mut Vec<String>) -> OpResult {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x * y)),
-        (Value::Number(_), Value::Vector(v)) => Ok(mul_vec_num(v, a, warn)),
-        (Value::Vector(v), Value::Number(_)) => Ok(mul_vec_num(v, b, warn)),
+        (Value::Number(_), Value::Vector(v)) => Ok(mul_vec_num(v, a)),
+        (Value::Vector(v), Value::Number(_)) => Ok(mul_vec_num(v, b)),
         (Value::Vector(x), Value::Vector(y)) => mul_vectors(x, y, warn),
         _ => Err(undefined_op(a, "*", b)),
     }
@@ -816,8 +902,16 @@ fn mul_vectors(x: &Vector, y: &Vector, warn: &mut Vec<String>) -> OpResult {
 pub fn div(a: &Value, b: &Value) -> OpResult {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x / y)),
-        (Value::Vector(v), Value::Number(_)) => Ok(map_vec(v, |e| elem(div(e, b)))),
-        (Value::Number(_), Value::Vector(v)) => Ok(map_vec(v, |e| elem(div(a, e)))),
+        (Value::Vector(v), Value::Number(y)) => Ok(map_tree(v, |e| match e {
+            Value::Number(x) => Elem::Leaf(Value::Number(x / y)),
+            Value::Vector(w) => Elem::Descend(w.as_slice()),
+            _ => Elem::Leaf(Value::Undef),
+        })),
+        (Value::Number(x), Value::Vector(v)) => Ok(map_tree(v, |e| match e {
+            Value::Number(y) => Elem::Leaf(Value::Number(x / y)),
+            Value::Vector(w) => Elem::Descend(w.as_slice()),
+            _ => Elem::Leaf(Value::Undef),
+        })),
         _ => Err(undefined_op(a, "/", b)),
     }
 }
@@ -884,7 +978,11 @@ pub fn bitwise(a: &Value, b: &Value, op: Bitwise) -> OpResult {
 pub fn neg(a: &Value) -> OpResult {
     match a {
         Value::Number(x) => Ok(Value::Number(-x)),
-        Value::Vector(v) => Ok(map_vec(v, |e| elem(neg(e)))),
+        Value::Vector(v) => Ok(map_tree(v, |e| match e {
+            Value::Number(x) => Elem::Leaf(Value::Number(-x)),
+            Value::Vector(w) => Elem::Descend(w.as_slice()),
+            _ => Elem::Leaf(Value::Undef),
+        })),
         _ => Err(Why::new(format!(
             "undefined operation (-{})",
             a.type_name()

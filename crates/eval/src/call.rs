@@ -22,14 +22,14 @@ pub(crate) struct Frame {
 }
 
 impl Frame {
-    fn has(&self, slot: u32, s: Sym) -> bool {
+    pub(crate) fn has(&self, slot: u32, s: Sym) -> bool {
         match slot {
             NO_SLOT => self.vars.get(s).is_some(),
             i => self.slots[i as usize].is_some(),
         }
     }
 
-    fn set(&mut self, slot: u32, s: Sym, v: Value, config: bool) {
+    pub(crate) fn set(&mut self, slot: u32, s: Sym, v: Value, config: bool) {
         match slot {
             NO_SLOT => {
                 self.vars.set(s, v, config);
@@ -259,6 +259,35 @@ impl<'a> Evaluator<'a> {
         region: u32,
         this: Option<&Object>,
     ) -> R<Frame> {
+        let mut f = self.bind_args(args, loc, unit, params, region, this);
+        for (k, p) in params.iter().enumerate() {
+            let s = self.units[unit as usize].sym(p.name);
+            let slot = self.param_slot(region, k);
+            if !f.has(slot, s) {
+                let v = match p.default {
+                    Some(d) => self.eval(unit, d, defining)?,
+                    None => Value::Undef,
+                };
+                let config = self.syms.is_config(s);
+                f.set(slot, s, v, config);
+            }
+        }
+        Ok(f)
+    }
+
+    /// [`Self::bind_general`]'s arguments, bound with their warnings, and
+    /// `this`; the parameters left unset are for their defaults. The heap
+    /// evaluator binds this way and then evaluates the defaults that may
+    /// call on its own stack (`heap_expr`).
+    pub(crate) fn bind_args(
+        &mut self,
+        args: &mut Vec<ArgVal>,
+        loc: Loc,
+        unit: u32,
+        params: &'a [Param],
+        region: u32,
+        this: Option<&Object>,
+    ) -> Frame {
         let warn = self.opts.check_parameters;
         // A cheap clone (reference count), so the closure does not borrow
         // `self` while warnings need it mutably.
@@ -332,19 +361,7 @@ impl<'a> Evaluator<'a> {
                 f.set(slot, this_sym, Value::Object(o.clone()), false);
             }
         }
-        for (k, p) in params.iter().enumerate() {
-            let s = psym(k);
-            let slot = self.param_slot(region, k);
-            if !f.has(slot, s) {
-                let v = match p.default {
-                    Some(d) => self.eval(unit, d, defining)?,
-                    None => Value::Undef,
-                };
-                let config = self.syms.is_config(s);
-                f.set(slot, s, v, config);
-            }
-        }
-        Ok(f)
+        f
     }
 
     /// [`Self::bind_user`] for the common call: positional arguments only,
@@ -402,7 +419,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// The slot of parameter `k` in `region` (its `k`th binder).
-    fn param_slot(&self, region: u32, k: usize) -> u32 {
+    pub(crate) fn param_slot(&self, region: u32, k: usize) -> u32 {
         let binds = &self.regions[region as usize].binds;
         binds.get(k).copied().unwrap_or(NO_SLOT)
     }
@@ -1043,22 +1060,14 @@ impl<'a> Evaluator<'a> {
         &mut self,
         u: u32,
         id: ExprId,
-        mut argv: Vec<ArgVal>,
+        argv: Vec<ArgVal>,
         fu: u32,
         params: &'a [Param],
         body: ExprId,
         defining: Rc<Ctx>,
         region: u32,
     ) -> R<Step> {
-        let base = self.regs.len();
-        let n = argv.len();
-        self.regs
-            .resize(base + self.regions[region as usize].len(), None);
-        for (k, a) in argv.drain(..).enumerate() {
-            let slot = self.regions[region as usize].binds[k] as usize;
-            self.regs[base + slot] = Some(a.value);
-        }
-        self.arg_pool.push(argv);
+        let (base, n) = self.pure_place(argv, region);
         for (k, p) in params.iter().enumerate().skip(n) {
             let i = base + self.regions[region as usize].binds[k] as usize;
             if self.regs[i].is_none() {
@@ -1085,6 +1094,24 @@ impl<'a> Evaluator<'a> {
             region,
             base: base as u32,
         })
+    }
+
+    /// [`Self::pure_bind`]'s arguments, placed in a pure frame's registers
+    /// on top (`argv` goes back to `arg_pool`): the registers' base, and
+    /// how many arguments there were, the parameters from which on take
+    /// their defaults if unset.
+    #[inline(always)]
+    pub(crate) fn pure_place(&mut self, mut argv: Vec<ArgVal>, region: u32) -> (usize, usize) {
+        let base = self.regs.len();
+        let n = argv.len();
+        self.regs
+            .resize(base + self.regions[region as usize].len(), None);
+        for (k, a) in argv.drain(..).enumerate() {
+            let slot = self.regions[region as usize].binds[k] as usize;
+            self.regs[base + slot] = Some(a.value);
+        }
+        self.arg_pool.push(argv);
+        (base, n)
     }
 
     /// A tail `let` in registers: it lives until the step is replaced

@@ -430,6 +430,137 @@ echo(fail(12));
     );
 }
 
+/// The last shapes that moved from the native evaluator to the heap: a
+/// C-style `for` comprehension (every part, its `$` variables, closures
+/// over its iterations, its errors), `object()`'s arguments (in order,
+/// stopping at the first bad one) and parameter defaults (positional and
+/// named calls, methods, defaults that call, echo, fail or read `$`
+/// variables): their values, warnings and errors in order, past the
+/// native call levels. The expected file was written by the evaluator
+/// that ran them natively (`d8c73e7`).
+#[test]
+fn c_for_object_and_default_recursions() {
+    let opts = Options {
+        features: eval::Features::from_names(&["object-function"]),
+        ..Options::default()
+    };
+    let prelude = "function id(x) = x;\nfunction f(n) = n == 0 ? 0 : 1 + f(n - 1);\n";
+    // An error ends its program, so each has one of its own.
+    let errors = [
+        (
+            "cond",
+            r#"function e(n) = n == 0 ? [for (i = 0; assert(i < 2, "cond") true; i = i + 1) i] : e(n - 1) + [];"#,
+        ),
+        (
+            "body",
+            r#"function e(n) = n == 0 ? [for (i = 0; i < 3; i = i + 1) assert(i < 1, "body") i] : [e(n - 1)];"#,
+        ),
+        (
+            "incr",
+            r#"function e(n) = n == 0 ? [for (i = 0; i < 3; i = assert(i < 1, "incr") i + 1) i] : [e(n - 1)];"#,
+        ),
+        (
+            "init",
+            r#"function e(n) = n == 0 ? [for (i = f(3), j = assert(false, "init") 1; i < 3; i = i + 1) i] : [e(n - 1)];"#,
+        ),
+        (
+            "object",
+            r#"function e(n) = n == 0 ? object(a = assert(false, "in object") 1) : [e(n - 1)];"#,
+        ),
+        (
+            "default",
+            r#"function d(a = assert(false, "default") 1) = a;
+function e(n) = n == 0 ? d() : [e(n - 1)];"#,
+        ),
+        (
+            "named_default",
+            r#"function d(a, b = assert(false, "named default") 1) = a;
+function e(n) = n == 0 ? d(a = f(9)) : [e(n - 1)];"#,
+        ),
+        (
+            "method_default",
+            r#"o = object(m = function (this, b = assert(false, "method default") 1) b);
+function e(n) = n == 0 ? o.m() : [e(n - 1)];"#,
+        ),
+        (
+            "module_default",
+            r#"module d(a = assert(false, "module default") 1) echo(a);
+module m(n) if (n == 0) d(); else m(n - 1);
+m(3);"#,
+        ),
+    ];
+    for (name, src) in errors {
+        check(
+            &format!("heap_shapes2_{name}"),
+            &format!("{prelude}{src}\necho(e(10));"),
+            &opts,
+            None,
+        );
+    }
+    check(
+        "heap_shapes2",
+        r#"
+function id(x) = x;
+function f(n) = n == 0 ? 0 : 1 + f(n - 1);
+function ci(n) = n == 0 ? 0 : [for (i = ci(n - 1); i < n; i = n) i][0] + 1;
+echo(ci(25));
+function cc(n) = n == 0 ? 1 : len([for (i = 0; i < cc(n - 1); i = i + 1) i]);
+echo(cc(20));
+function cn(n) = n == 0 ? 0 : [for (i = 0, j = 0; j < 1; i = cn(n - 1), j = j + 1) i][0] + 1;
+echo(cn(20));
+function cb(n) = n == 0 ? [] : [for (i = 0; i < 2; i = i + 1) each [i, cb(n - 1)]];
+echo(cb(3));
+echo([for (i = 0, j = echo("j0") 1; echo("cond", i) i < 3; i = i + 1, j = echo("incr", j) j * 2) [i, j]]);
+echo([for (i = 0; i < 3; i = i + 1) if (i % 2 == 0) f(i + 9) else each [i, f(i)]]);
+echo([for (i = 0; i < 2; i = i + 1) for (j = f(10); j < f(12); j = j + 1) [i, j]]);
+fs = [for (i = 0; i < 3; i = i + 1) function () [i, f(i + 8)]];
+echo([for (g = fs) g()]);
+function dl() = $i * 10 + f(9);
+echo([for ($i = 0; $i < 3; $i = $i + 1) dl()]);
+echo([for (i = 0, i = 1; i < 3; i = i + 1, i = i + 5) i]);
+echo([for (i = 0; i < 2; i = i + 1, 7) i]);
+echo([for (i = f(10); i < 12; i = i + 1) let (k = f(i)) k]);
+function oo(n) = n == 0 ? 0 : object(v = oo(n - 1), w = echo("w", n) n).v + 1;
+echo(oo(12));
+function ot(n) = object(v = n == 0 ? 0 : ot(n - 1).v + 1);
+echo(ot(15).v);
+echo(object([["k", f(10)], ["d"]], d = f(11), e = id(1)));
+echo(object(a = echo("a") f(9), 5, c = echo("c") f(10)));
+echo(object(id(object(x = f(9))), [["y", f(10)]], [["x"]]));
+echo(object([[1, 2]]), object([[]]), object([3]));
+function ob(n) = n == 0 ? object() : object(ob(n - 1), [[str("k", n), f(n)]]);
+echo(ob(10));
+function g(a, b = echo("b") f(9), c = echo("c") f(10)) = [a, b, c];
+echo(g(echo("a") 1));
+echo(g(1, 2));
+echo(g(c = echo("cn") 5, a = 1));
+echo(g(b = 2, 1, b = 3));
+echo(g(1, 2, 3, 4));
+echo(g(x = 1));
+function dk(x = $k > 0 ? let ($k = $k - 1) dk() + 1 : 0) = x;
+echo(let ($k = 20) dk());
+function dd($n = f(9), m = $n + 1) = [$n, m];
+echo(dd(), dd(1), dd(m = 2), let ($n = 7) dd());
+lit = function (a, b = f(a == undef ? 9 : a)) [a, b];
+echo(lit(), lit(1), lit(b = 2));
+function lits(n) = n == 0 ? lit : function (a, b = lits(n - 1)(a)) [b];
+echo(lits(9)(3));
+o = object(m = function (x, this, y = this.v * f(9)) x + y, v = 5, n = function (this, z = this.m(1)) z);
+echo(o.m(1), o.m(1, y = 2), o.n());
+function dp(n, acc = f(9)) = n == 0 ? acc : dp(n - 1, acc + 1);
+echo(dp(20));
+function dr(n, d = dr0()) = n == 0 ? d : dr(n - 1) + 1;
+function dr0(x = f(10)) = x;
+echo(dr(20));
+module md(a, b = f(9), c = echo("mc") f(10)) echo(a, b, c);
+md(1);
+md(c = 2, a = 3);
+"#,
+        &opts,
+        None,
+    );
+}
+
 /// The heap evaluator's point for functions: a recursion through calls,
 /// comprehensions or both, and through modules and functions together,
 /// takes no native stack, so it reaches the counted limit on a thread of
@@ -488,7 +619,46 @@ fn deep_function_recursion_on_a_small_thread() {
             "function f(n) = n == 0 ? function (x) x : f(n - 1)(0) == 0 ? function (x) x : undef;\necho(f(H)(7));",
             "(f((n - 1)))",
         ),
+        // The last shapes to move: every part of a C-style `for`,
+        // `object()`'s arguments (in tail position too) and a parameter's
+        // default (which only `$` variables can drive).
+        (
+            "function f(n) = n == 0 ? 0 : [for (i = f(n - 1); i < n; i = n) i][0] + 1;\necho(f(N));",
+            "f",
+        ),
+        (
+            "function f(n) = n == 0 ? 0 : [for (i = 0; i < 1 && f(n - 1) >= 0; i = i + 1) n][0];\necho(f(N));",
+            "f",
+        ),
+        (
+            "function f(n) = n == 0 ? 0 : [for (i = 0; i < 1; i = i + 1) f(n - 1) + 1][0];\necho(f(N));",
+            "f",
+        ),
+        (
+            "function f(n) = n == 0 ? 0 : [for (i = 0, j = 0; j < 1; i = f(n - 1), j = 1) i][0] + 1;\necho(f(N));",
+            "f",
+        ),
+        (
+            "function f(n) = n == 0 ? 0 : object(v = f(n - 1)).v + 1;\necho(f(N));",
+            "f",
+        ),
+        (
+            "function f(n) = object(v = n == 0 ? 0 : f(n - 1).v + 1);\necho(f(N).v);",
+            "f",
+        ),
+        (
+            "function f(x = $n > 0 ? let ($n = $n - 1) f() + 1 : 0) = x;\necho(let ($n = N) f());",
+            "f",
+        ),
+        (
+            "function f(a, x = $n > 0 ? let ($n = $n - 1) f(a = 1) + 1 : 0) = x;\necho(let ($n = N) f(a = 1));",
+            "f",
+        ),
     ];
+    let opts = Options {
+        features: eval::Features::from_names(&["object-function"]),
+        ..Options::default()
+    };
     for (k, (case, name)) in cases.into_iter().enumerate() {
         for (n, ok) in [(depth - 10, true), (depth + 10, false)] {
             let src = case
@@ -500,6 +670,7 @@ fn deep_function_recursion_on_a_small_thread() {
                 src.into_bytes(),
             );
             let mut out = eval::Collect::default();
+            let opts = opts.clone();
             let ev = std::thread::Builder::new()
                 .stack_size(128 << 10)
                 .spawn(move || {
@@ -508,7 +679,7 @@ fn deep_function_recursion_on_a_small_thread() {
                         &[],
                         &[],
                         std::path::PathBuf::from("/nonexistent"),
-                        &Options::default(),
+                        &opts,
                         &mut out,
                     );
                     (ev.aborted, out)

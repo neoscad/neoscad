@@ -216,47 +216,62 @@ lead them, come roughly in order of user impact.
   all eight stack probes ran against a heap evaluator to the depth
   limit, about 7 s in a WebKit worker. The probe, its frame weights and
   `heapStatements()` are gone now.)
-  Left from stage 2:
-  - the rare shapes that stay native and start a nested heap loop for a
-    part that calls: C-style `for` comprehensions, `object()`'s
-    arguments, parameter defaults and `use`d libraries' assignments
-    (`heap_expr`'s module docs say why each stayed). A recursion through
-    one of them at every level still holds native stack per level, and
-    still stops with the frame budget's error. Done: ranges' bounds,
-    `is_undef()`'s argument (in a tail call too), callees that are
-    expressions (`f(n - 1)(x)`) and methods' arguments run on the heap
-    (`XFrame::RangeBegin` and the others), so a recursion through them
-    reaches the counted limit in every browser (99,999 levels; 49,999
-    for a callee or a method's argument, two counted calls a level),
-    where it stopped at 30-37; natively a range stopped at 57,443 and
-    `is_undef()` at 61,667;
-  - the heap path costs 1.3-1.6 times the native one per call (every
-    node on the way to a call is a frame), so a deep non-tail recursion
-    is slower than before past 8 levels: `fib(25)` runs 28% more
-    instructions and `1 + f(n - 1)` 36%;
-  - values nested as deep as the counted limit (`[nest(n - 1)]` 100,000
-    times) can now be built in any browser, and dropping or printing
-    them recurses on the value's depth (see "Value depth" in
-    `docs/audits/heap-evaluator.md` §6), which a WebKit worker's stack
-    may not hold. It is unmeasured there; natively it is fine;
+  Left from stage 2 (updated 2026-10-06; numbers and method in
+  `docs/audits/heap-evaluator.md`, "Native shapes and value depth"):
+  - done: every shape that stayed native but one runs on the heap.
+    Ranges' bounds, `is_undef()`'s argument, callees that are
+    expressions and methods' arguments moved first; C-style `for`
+    comprehensions (every part), `object()`'s arguments and parameter
+    defaults that may call followed (`heap_expr`'s module docs). A
+    recursion through any of them reaches the counted limit in every
+    build and engine (`wasm-check.sh --depths`: `function-cfor` and
+    `function-default` 99,999 in node), where it stopped at 30-37 levels
+    in browsers;
+  - left: `use`d libraries' assignments, which `library_context`
+    evaluates during a function lookup. A recursion through them needs
+    two libraries that `use` each other and a `$` variable to drive it.
+    Natively it reaches 20,163 levels (3.3 KiB a level; OpenSCAD's
+    nightly stops between 3,000 and 6,000), and in a browser the frame
+    budget stops it after about 30 (its arithmetic: 64 frames a level;
+    not measured in a browser). Moving it means making the lookup
+    (`find_function` -> `library_context` -> `init_scope`) resumable;
+    not done, as no real program recursing that way is known;
+  - done: value depth. Printing, the element-wise operators, `chr()` and
+    freeing a chain of closures walk a nested value with a stack of
+    their own (comparing, hashing, and freeing lists and objects already
+    did). `crates/eval/tests/value_depth.rs` runs 43 such cases, values
+    100,000 to 999,999 deep, on a 512 KiB thread, in debug and release.
+    Printing still stops with OpenSCAD's "Stack exhausted", at a counted
+    depth now (`print.rs`), the same in every build and engine: 46,918
+    levels of a nested list (browsers stopped at 250), and `issue4172`
+    prints 302 levels (301 before in release, fewer in debug), which
+    `conformance depth` now holds a build to;
+  - the heap path costs 1.3-1.6 times the native one per call, so a
+    deep non-tail recursion is slower past 8 levels than it was
+    natively: `fib(25)` 28% more instructions and `1 + f(n - 1)` 36% at
+    stage 2. The shapes moved now pay it too past 8 levels: a program
+    running a C-style `for` that calls 12 levels deep takes 5.5% more
+    instructions, one calling a function whose default calls 8.7%.
+    Elsewhere this change is at parity (instructions retired
+    against `d8c73e7`): the eval-bound bench models +0.05% to +0.55%,
+    BOSL2's tests +0.02%, `fib(25)`, `1 + f(n - 1)` and a top-level
+    C-style `for` +0.9-1.0% (layout: edits to `heap_expr` that change
+    no behaviour moved the first two between +0.9% and +2%), and
+    nested-list arithmetic and printing 9% and 5% fewer;
   - `resolve::Stats` does not count the `may_call` share of a corpus;
-  - a recursion through the shapes still native stops at 34-37 levels
-    in every browser, where Chromium's stack would hold 220-280 and
-    Firefox's
-    390-720: each level starts a heap loop, whose native frames are
-    large (about 8 KiB a level in a WebKit worker), and the frame budget
-    charges one `eval::recursion::HEAP_LOOP_FRAMES` (64) so that it
-    stops them short of WebKit's 57-60. Smaller frames in `heap_eval`'s
-    loop, or no new loop per level, would let them go deeper. (Before
-    the weight they trapped in all three browsers and in a cold node
-    instance.)
-  - the native stack is still sized for the recursive evaluator:
-    `DEFAULT_STACK_LIMIT` is 64 MiB on a thread of 80 MiB
-    (`with_stack`), though only the native call levels, the shapes
-    above, printing and source nesting (bounded by the parser) use it
-    now. Shrinking it means measuring what those need, in a debug build
-    too, and deciding how deep a recursion through the native shapes
-    should go.
+  - proposed, not applied: a smaller native stack. Measured, what still
+    uses it needs little: every BOSL2 corpus file evaluates on a 64 KiB
+    thread in release and 256 KiB in debug (byte-identical output);
+    source nested to the parser's limit needs at most 2.7 MiB (debug,
+    at its lower limit, 4.3 MiB); only the `use` recursion above grows
+    with depth. So `DEFAULT_STACK_LIMIT` could be 16 MiB (that recursion
+    then stops near 4,900 levels, inside OpenSCAD's range) and the
+    evaluation thread 32 MiB. Two cautions: `DEFAULT_THREAD_STACK` also
+    sizes the geometry pool's threads and the CLI thread that runs short
+    geometry chains, where Clipper2's polytree recursion needs over
+    2 MiB for 12,000 nested rings, so geometry should get a constant of
+    its own first; and the size is reserved address space, touched only
+    as used, so the gain natively is small.
 
   Left from stage 1:
   - Done: the apps' `ResourceLimits` record (`crates/client/src/types.rs`,
@@ -517,6 +532,16 @@ lead them, come roughly in order of user impact.
   bound how many large unions run side by side (by their inputs'
   triangle counts, say) and needs a benchmark run, since the same
   fan-out is what makes the heavy models fast.
+
+- A `children()` chain takes memory with the square of its depth: a
+  module that passes `children()` down 5,000 levels peaks at 510 MB, and
+  a debug build of 99,990 levels passed 86 GB before it was killed. The
+  memory limit did not stop it in time (found 2026-10-06).
+- Text exports are not under the memory limit: the CSG export of a
+  `translate()` tree 100,000 deep grows with the square of the depth
+  (each level re-indents its subtree), built about 137 GB of text and
+  wrote a 24 GB file. Charging the export's output to the limit, or
+  capping the indent, would stop it. (2026-10-06)
 
 ## Parity
 - `manifold-rust` 0.16.0 ports Manifold v3.5.0 (with a few later
@@ -1640,8 +1665,9 @@ lead them, come roughly in order of user impact.
   module, comprehension and `children()` recursion reach 99,999 levels
   in all three browsers, and the probe and its per-kind weights are gone
   from `crates/web`. What still recurses natively is held to the frame
-  budget with constant weights (`eval::recursion::HEAP_LOOP_FRAMES`,
-  `PRINT_FRAMES`) sized for WebKit's stack.
+  budget with a constant weight (`eval::recursion::HEAP_LOOP_FRAMES`)
+  sized for WebKit's stack; printing a nested value holds no native
+  stack per level any more, and stops at a counted depth.
   Source nesting is now bounded by a weighted depth
   (`lang::syntax::parser::nesting_weight`, `NESTING_LIMIT`: 2,590 on
   wasm32), each kind weighed by the stack a level of it took in WebKit's

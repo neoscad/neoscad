@@ -629,13 +629,6 @@ impl<'a> Evaluator<'a> {
         self.module_names.len()
     }
 
-    /// The measured stack limit alone (for printing, which has its own
-    /// depth count).
-    #[inline]
-    pub fn stack_limit(&self) -> usize {
-        self.stack_limit
-    }
-
     #[inline]
     pub fn interrupted(&self) -> bool {
         self.opts

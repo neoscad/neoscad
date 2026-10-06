@@ -692,21 +692,48 @@ impl<'a> Evaluator<'a> {
     /// evaluated, as in OpenSCAD.
     #[inline(never)]
     fn object_function(&mut self, u: u32, args: &'a [Arg], ctx: &Rc<Ctx>, loc: Loc) -> R<Value> {
-        let ast = self.units[u as usize].ast;
         let mut b = ObjectBuilder::new();
         for (n, a) in args.iter().enumerate() {
             let v = self.eval(u, a.expr, ctx)?;
-            match a.name {
-                Some(name) => b.set(Str::new(ast.name(name).as_bytes()), v),
-                None => {
-                    if let Err(e) = object_unnamed(&mut b, &v, n) {
-                        self.warn(loc, DiagCode::InvalidArgument, e);
-                        return Ok(Value::Undef);
-                    }
-                }
+            if !self.object_arg(&mut b, u, a, n, v, loc) {
+                return Ok(Value::Undef);
             }
         }
-        Ok(Value::Object(b.finish(|f| self.is_method_literal(f))))
+        Ok(self.object_finish(b))
+    }
+
+    /// `object()`'s argument `n`, evaluated to `v`, applied to `b`; false
+    /// (with the warning) when it is a bad one, which ends the call with
+    /// `undef`. Shared with the heap evaluator (`heap_expr`), which
+    /// evaluates the arguments that may call on its own stack.
+    pub(crate) fn object_arg(
+        &mut self,
+        b: &mut ObjectBuilder,
+        u: u32,
+        a: &Arg,
+        n: usize,
+        v: Value,
+        loc: Loc,
+    ) -> bool {
+        match a.name {
+            Some(name) => {
+                let ast = self.units[u as usize].ast;
+                b.set(Str::new(ast.name(name).as_bytes()), v);
+                true
+            }
+            None => match object_unnamed(b, &v, n) {
+                Ok(()) => true,
+                Err(e) => {
+                    self.warn(loc, DiagCode::InvalidArgument, e);
+                    false
+                }
+            },
+        }
+    }
+
+    /// `object()`'s result, once every argument is applied.
+    pub(crate) fn object_finish(&self, b: ObjectBuilder) -> Value {
+        Value::Object(b.finish(|f| self.is_method_literal(f)))
     }
 
     /// Whether a function literal has a parameter named `this`, which
@@ -1060,52 +1087,85 @@ impl<'a> Evaluator<'a> {
     /// text being built is not a value yet, so nothing else counts it),
     /// and stops once the text is past the string limit, which it could
     /// only fail.
+    ///
+    /// The walk keeps the lists it is inside on a stack of its own rather
+    /// than recursing: a list can nest as deep as a recursion can build it
+    /// (`[nest(n - 1)]` to the counted limit), deeper than a browser
+    /// worker's stack holds a recursive walk.
     fn chr_into(&mut self, v: &Value, out: &mut Vec<u8>, w: &mut ChrWalk) {
+        /// A list being walked: its elements, the next one, its key, and
+        /// the text's length and the warnings when it started.
+        struct Open<'v> {
+            items: &'v [Value],
+            i: usize,
+            key: usize,
+            start: usize,
+            warnings: u32,
+        }
         if w.stopped {
             return;
         }
-        match v {
-            Value::Number(x) => {
-                if *x > 0.0 {
-                    utf8::encode(*x as u32, out);
-                }
-            }
-            Value::Vector(items) => {
-                let key = items.as_slice().as_ptr() as usize;
-                if w.silent.contains(&key) {
-                    return;
-                }
-                let (start, warnings) = (out.len(), w.warnings);
-                for e in items.iter() {
-                    w.steps += 1;
-                    if w.steps.is_multiple_of(4096) && self.chr_stopped(out.capacity()) {
-                        w.stopped = true;
+        let mut open: Vec<Open<'_>> = Vec::new();
+        let mut next = Some(v);
+        loop {
+            match next.take() {
+                Some(Value::Number(x)) => {
+                    if *x > 0.0 {
+                        utf8::encode(*x as u32, out);
                     }
-                    if w.stopped || out.len() > self.caps.string {
-                        w.stopped = true;
-                        return;
+                }
+                Some(Value::Vector(items)) => {
+                    let key = items.as_slice().as_ptr() as usize;
+                    if !w.silent.contains(&key) {
+                        open.push(Open {
+                            items,
+                            i: 0,
+                            key,
+                            start: out.len(),
+                            warnings: w.warnings,
+                        });
                     }
-                    self.chr_into(e, out, w);
                 }
-                if out.len() == start && w.warnings == warnings {
-                    w.silent.insert(key);
+                Some(Value::Range(r)) => {
+                    let steps = r.num_values();
+                    if steps >= MAX_RANGE_STEPS {
+                        let t = format!(
+                            "Bad range parameter in for statement: too many elements ({steps})."
+                        );
+                        self.warn_noloc(DiagCode::IterationLimit, t);
+                        w.warnings += 1;
+                    } else {
+                        for d in r.iter() {
+                            if d > 0.0 {
+                                utf8::encode(d as u32, out);
+                            }
+                        }
+                    }
                 }
+                _ => {}
             }
-            Value::Range(r) => {
-                let steps = r.num_values();
-                if steps >= MAX_RANGE_STEPS {
-                    let t = format!(
-                        "Bad range parameter in for statement: too many elements ({steps})."
-                    );
-                    self.warn_noloc(DiagCode::IterationLimit, t);
-                    w.warnings += 1;
-                    return;
+            let Some(top) = open.last_mut() else {
+                return;
+            };
+            let Some(e) = top.items.get(top.i) else {
+                if out.len() == top.start && w.warnings == top.warnings {
+                    w.silent.insert(top.key);
                 }
-                for d in r.iter() {
-                    self.chr_into(&Value::Number(d), out, w);
-                }
+                open.pop();
+                continue;
+            };
+            top.i += 1;
+            w.steps += 1;
+            if w.steps.is_multiple_of(4096) && self.chr_stopped(out.capacity()) {
+                w.stopped = true;
             }
-            _ => {}
+            if w.stopped || out.len() > self.caps.string {
+                // Once stopped nothing more is written, so the lists still
+                // open are not remembered as silent.
+                w.stopped = true;
+                return;
+            }
+            next = Some(e);
         }
     }
 

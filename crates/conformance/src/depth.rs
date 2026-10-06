@@ -29,10 +29,12 @@
 //!   neoscad, two runs, at its depth (which must evaluate without an
 //!   error) and one past it (which must not); for OpenSCAD, bisected.
 //!
-//! `issue4172` is reported but not gated: printing a nested vector is
-//! capped at OpenSCAD's own 8 MiB of native stack (`eval/src/print.rs`,
-//! `PRINT_STACK_LIMIT`), so how many levels print depends on the build's
-//! frames, and it prints fewer than OpenSCAD by design.
+//! `issue4172` counts how many levels print before printing a nested
+//! vector fails. Printing is capped at OpenSCAD's own 8 MiB of stack
+//! (`eval/src/print.rs`, `PRINT_STACK_LIMIT`), so it prints fewer levels
+//! than OpenSCAD by design; the cap is a count now, not a measure, so a
+//! neoscad build is held to its exact depth, and other binaries are only
+//! reported.
 
 use std::fs;
 use std::io::Read;
@@ -74,8 +76,8 @@ enum Kind {
     /// A program with `{N}` for the depth, which must evaluate cleanly at
     /// the depth the margin asks for; its real depth is then bisected.
     Program(&'static str),
-    /// A reference file whose `ECHO` lines count how many levels printed;
-    /// reported, not gated.
+    /// A reference file whose `ECHO` lines count how many levels printed:
+    /// exact for neoscad, reported for other binaries.
     Echoes(&'static str),
 }
 
@@ -115,7 +117,7 @@ const CHECKS: &[Check] = &[
         id: "issue4172-echo-vector-stack-exhaust",
         kind: Kind::Echoes("issues/issue4172-echo-vector-stack-exhaust.scad"),
         openscad: 434,
-        neoscad: None,
+        neoscad: Some(302),
     },
 ];
 
@@ -211,11 +213,14 @@ pub fn depth(ctx: &Ctx, opts: &DepthOptions) -> Result<u8, String> {
                 Err(why) => (None, None, why),
                 Ok((_, text)) => {
                     let n = text.lines().filter(|l| l.starts_with("ECHO:")).count() as u32;
-                    (
-                        Some(n),
-                        None,
-                        "not gated: printing shares OpenSCAD's 8 MiB".into(),
-                    )
+                    match exact {
+                        Some(e) => (Some(n), Some(n == e), String::new()),
+                        None => (
+                            Some(n),
+                            None,
+                            "not gated: printing shares OpenSCAD's 8 MiB".into(),
+                        ),
+                    }
                 }
             },
         };

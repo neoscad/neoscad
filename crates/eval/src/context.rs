@@ -13,7 +13,7 @@
 //! `resolve`), so a resolved reference reads one by index, and `$`
 //! variables in a small map that the dynamic lookup scans.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -143,6 +143,52 @@ pub(crate) struct Ctx {
     /// `$` variables, and named arguments that are neither parameters nor
     /// otherwise bound in the region (see `resolve::Cand::Extra`).
     pub vars: RefCell<Vars>,
+}
+
+thread_local! {
+    /// Contexts waiting to be freed by the [`free_later`] under way.
+    static DEFERRED: RefCell<Vec<Rc<Ctx>>> = const { RefCell::new(Vec::new()) };
+    /// Whether a [`free_later`] is freeing contexts on this thread.
+    static DRAINING: Cell<bool> = const { Cell::new(false) };
+    /// An empty context, which a dropped function value holds in place of
+    /// the one it hands to [`free_later`].
+    static EMPTY: Rc<Ctx> = Ctx::new(None, CtxKind::Plain, 0, 0);
+}
+
+/// Free `ctx`, the last reference to a context, with a loop instead of
+/// recursion, for a function value's drop (`value::FunctionValue`). A
+/// context holds values, a function literal among them holds the context
+/// it was made in, which holds values in turn, and a tail recursion can
+/// build that chain a million levels deep without using any stack:
+/// `function nf(n, acc) = n == 0 ? acc : nf(n - 1, function () acc);`.
+/// Freed recursively it overflowed a browser worker's stack (512 KiB in
+/// WebKit) some thousands of levels deep, and the native stack too further
+/// down. (Lists and objects free their elements with a loop already, see
+/// `value::drop_nested`, but a function among them freed its context
+/// inside that loop.)
+///
+/// The first call on a thread frees `ctx` with `DRAINING` set; a function
+/// value dropped meanwhile, however deep inside that, leaves its context
+/// on `DEFERRED` and returns, and the first call frees those in turn. Every
+/// link of such a chain goes through a function value: a context's own
+/// parent chain is as deep as the source's nesting, not the recursion's.
+/// Only function values pay for this, not the contexts the evaluator
+/// makes and frees by the million.
+pub(crate) fn free_later(ctx: Rc<Ctx>) {
+    if DRAINING.with(|d| d.replace(true)) {
+        DEFERRED.with(|q| q.borrow_mut().push(ctx));
+        return;
+    }
+    drop(ctx);
+    while let Some(c) = DEFERRED.with(|q| q.borrow_mut().pop()) {
+        drop(c);
+    }
+    DRAINING.with(|d| d.set(false));
+}
+
+/// A shared empty context (see [`free_later`]).
+pub(crate) fn empty_ctx() -> Rc<Ctx> {
+    EMPTY.with(Rc::clone)
 }
 
 impl Ctx {

@@ -43,26 +43,31 @@
 //! itself borrows its contexts as the native one does, which is where the
 //! moves that matter are made.
 //!
-//! A few rare shapes stay native even on the heap, and a call they reach
-//! starts a nested loop (`eval_call` past `NATIVE_CALLS`). Each such level
-//! costs native stack and is still bounded by the native checks
-//! (`recursion_exhausted`), which in a browser stop it after a few dozen
-//! levels (`recursion::HEAP_LOOP_FRAMES`):
-//! - C-style `for` comprehensions (`for (i = f(n); ...)`): their loop
-//!   keeps two contexts and an iteration's state across its parts, a
-//!   state machine of its own to move;
-//! - `object()`'s arguments: it builds the object as it goes and stops at
-//!   the first argument it cannot use, so its state (an `ObjectBuilder`)
-//!   would wait on a side stack of its own; and the function is
-//!   experimental;
-//! - parameter defaults, evaluated in the middle of binding a call's
-//!   arguments (`bind_user`), which would have to be split around them;
-//! - `use`d libraries' assignments, evaluated once, not per level.
+//! One rare shape stays native even on the heap: a `use`d library's
+//! top-level assignments, which `library_context` evaluates (anew, as
+//! OpenSCAD does) while a call looks up one of its functions. A call they
+//! reach starts a nested loop (`eval_call` past `NATIVE_CALLS`), so each
+//! level of a recursion through them costs native stack and is bounded by
+//! the native checks (`recursion_exhausted`), which in a browser stop it
+//! after a few dozen levels (`recursion::HEAP_LOOP_FRAMES`). Such a
+//! recursion needs two libraries that `use` each other and a `$` variable
+//! to drive it (an assignment sees no call's arguments); natively it
+//! reaches 20,000 levels, where OpenSCAD's nightly stops between 3,000 and
+//! 6,000. Moving it would make the function lookup itself resumable.
 //!
-//! Ranges, `is_undef()`'s argument, callees that are expressions
-//! (`f(x)(y)`) and methods' arguments moved here from that list: a
-//! recursion through them stopped after 30 to 37 levels in a browser, and
-//! now reaches the counted limit there as natively.
+//! Every other shape moved here from that list, and a recursion through
+//! it, which stopped after 30 to 37 levels in a browser, now reaches the
+//! counted limit there as natively:
+//! - ranges' bounds, `is_undef()`'s argument, callees that are
+//!   expressions (`f(x)(y)`) and methods' arguments;
+//! - C-style `for` comprehensions (`x_for_c`, every part), whose state
+//!   waits on a side stack ([`ForCSt`]);
+//! - `object()`'s arguments (`x_object`), applied one at a time as they
+//!   come, the object being built waiting on a side stack;
+//! - parameter defaults that may call: the arguments are bound first
+//!   (`bind_args`, `pure_place`), then each default unset is evaluated
+//!   here in turn (`Phase::PureDefault`, `Phase::FrameDefault`), in the
+//!   order `bind_user` evaluates them.
 
 use std::rc::Rc;
 
@@ -71,14 +76,14 @@ use lang::diag::DiagCode;
 use lang::source::Span;
 
 use crate::builtins::functions::Builtin;
-use crate::call::{ArgVal, Callable};
+use crate::call::{ArgVal, Callable, Frame};
 use crate::context::{Ctx, CtxKind};
 use crate::eval::{Evaluator, Mode, Step};
 use crate::message::{Loc, R, UnwindKind};
 use crate::ops;
 use crate::resolve::NO_SLOT;
 use crate::sym::Sym;
-use crate::value::{Growable, Object, Value};
+use crate::value::{Growable, Object, ObjectBuilder, Value};
 
 /// How many user calls run natively, nested, before the next one goes on
 /// the heap (`Evaluator::eval_call`). The native evaluator's tuned code
@@ -274,6 +279,23 @@ pub(crate) enum XFrame<'a> {
     },
     /// A user call's tail-call loop (top of `calls`).
     Call,
+    /// A C-style `for` comprehension's loop (top of `forcs`).
+    ForC,
+    /// `object()`'s argument `k` (the object being built on top of
+    /// `objs`).
+    Object {
+        u: u32,
+        id: ExprId,
+        k: u32,
+        ctx: Rc<Ctx>,
+    },
+    /// `direct_builtin`'s check and trace, for a call that is always to a
+    /// builtin and evaluated its arguments on the heap itself
+    /// (`object()`).
+    Direct {
+        u: u32,
+        id: ExprId,
+    },
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -297,10 +319,17 @@ pub(crate) struct Stacks<'a> {
     #[allow(clippy::vec_box)]
     call_pool: Vec<Box<CallSt<'a>>>,
     fors: Vec<ForSt>,
+    forcs: Vec<ForCSt>,
     lets: Vec<LetSt>,
     grow: Vec<Growable>,
+    /// The objects `object()` calls are building.
+    objs: Vec<ObjectBuilder>,
     /// Scratch for [`Evaluator::may_call`]'s walk.
     walk: Vec<(ExprId, bool)>,
+    /// Per function body region: whether a parameter's default may call
+    /// (2) or not (1), or not yet known (0); see
+    /// [`Evaluator::defaults_may_call`].
+    defaults: Vec<u8>,
 }
 
 impl Stacks<'_> {
@@ -322,9 +351,13 @@ impl Stacks<'_> {
             + held(&self.call_pool)
             + (self.calls.len() + self.call_pool.len()) as u64 * call
             + held(&self.fors)
+            + held(&self.forcs)
             + held(&self.lets)
             + held(&self.grow)
+            + held(&self.objs)
+            + self.objs.len() as u64 * BOX
             + held(&self.walk)
+            + held(&self.defaults)
     }
 }
 
@@ -399,6 +432,34 @@ enum Phase<'a> {
         body_ctx: Option<Rc<Ctx>>,
         /// A method's object, bound to its `this` parameter.
         this: Option<Object>,
+        /// Whether a parameter's default may call, so the defaults are
+        /// evaluated here too (`PureDefault`, `FrameDefault`).
+        defaults: bool,
+    },
+    /// Parameter `k`'s default, for a pure frame whose registers start at
+    /// `base` (`Evaluator::pure_bind`).
+    PureDefault {
+        u: u32,
+        id: ExprId,
+        fu: u32,
+        params: &'a [Param],
+        body: ExprId,
+        region: u32,
+        defining: Rc<Ctx>,
+        base: u32,
+        k: u32,
+    },
+    /// Parameter `k`'s default, for a frame bound in `body_ctx`
+    /// (`Evaluator::bind_general`).
+    FrameDefault {
+        u: u32,
+        id: ExprId,
+        fu: u32,
+        params: &'a [Param],
+        body: ExprId,
+        body_ctx: Rc<Ctx>,
+        frame: Box<Frame>,
+        k: u32,
     },
     /// `is_undef()`'s argument (see `Evaluator::heap_is_undef_arg`).
     IsUndef,
@@ -437,6 +498,34 @@ pub(crate) struct ForSt {
 enum ForMode {
     Reg { i: usize, old: u32 },
     Ctx { slot: u32, name: Sym, config: bool },
+}
+
+/// A C-style `for` comprehension's loop (`Evaluator::lc_for_c`): its
+/// initial context, the current iteration's, and the part it is at.
+pub(crate) struct ForCSt {
+    u: u32,
+    id: ExprId,
+    /// The initialisers' context, and the stack mark that drops it with
+    /// everything above it at the end.
+    initial: Rc<Ctx>,
+    mark: usize,
+    /// The current iteration's context and its stack position.
+    current: Option<Rc<Ctx>>,
+    slot: usize,
+    /// The context the increment assigns into, while it does.
+    step: Option<Rc<Ctx>>,
+    counter: u32,
+    part: ForCPart,
+}
+
+/// Where a C-style `for` is: an initialiser or an increment `k`, the
+/// condition, or the body.
+#[derive(Clone, Copy)]
+enum ForCPart {
+    Init(u32),
+    Cond,
+    Body,
+    Incr(u32),
 }
 
 /// A `let` (or comprehension `let`): its next assignment, or its body.
@@ -531,6 +620,34 @@ impl<'a> Evaluator<'a> {
 
     fn args_may_call(&mut self, u: u32, args: &[Arg]) -> bool {
         args.iter().any(|a| self.may_call(u, a.expr))
+    }
+
+    /// Whether a default of the function whose body binds in `region`
+    /// (each function and literal has its own) may call: then its call
+    /// binds on the heap, defaults included. Remembered per region, as it
+    /// is asked at every call past the native levels.
+    #[inline(always)]
+    fn defaults_may_call(&mut self, fu: u32, params: &[Param], region: u32) -> bool {
+        match self.xs.defaults.get(region as usize) {
+            Some(1) => false,
+            Some(2) => true,
+            _ => self.find_defaults_may_call(fu, params, region),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn find_defaults_may_call(&mut self, fu: u32, params: &[Param], region: u32) -> bool {
+        let yes = params
+            .iter()
+            .any(|p| p.default.is_some_and(|d| self.may_call(fu, d)));
+        let r = region as usize;
+        if self.xs.defaults.len() <= r {
+            let n = self.regions.len().max(r + 1);
+            self.xs.defaults.resize(n, 0);
+        }
+        self.xs.defaults[r] = if yes { 2 } else { 1 };
+        yes
     }
 
     // --- the loop ------------------------------------------------------
@@ -747,10 +864,7 @@ impl<'a> Evaluator<'a> {
     fn x_lc(&mut self, u: u32, id: ExprId, ctx: Rc<Ctx>) -> Next {
         let ast: &'a Ast = self.units[u as usize].ast;
         let e = ast.expr(id);
-        let native = !self.may_call(u, id) || matches!(e.kind, ExprKind::LcForC { .. });
-        if native || !self.is_lc(u, id) {
-            // Native: C-style `for` comprehensions, with a nested loop for
-            // a part that calls (see the module docs).
+        if !self.may_call(u, id) || !self.is_lc(u, id) {
             let mut out = self.take_out();
             let r = self.eval_lc(u, id, &ctx, &mut out);
             self.put_out(out);
@@ -794,6 +908,7 @@ impl<'a> Evaluator<'a> {
                 self.lc_for_var(u, id, 0, region, ctx)
             }
             ExprKind::LcLet(..) => self.x_let(u, id, ctx, Want::Element),
+            ExprKind::LcForC { .. } => self.x_for_c(u, id, ctx),
             _ => unreachable!("a comprehension"),
         }
     }
@@ -807,6 +922,7 @@ impl<'a> Evaluator<'a> {
             }
             Some(XFrame::For) => return self.lc_for_resume(r),
             Some(XFrame::Let) => return self.let_resume(r),
+            Some(XFrame::ForC) => return self.for_c_resume(r),
             _ => {}
         }
         let ast = |ev: &Self, u: u32| -> &'a Ast { ev.units[u as usize].ast };
@@ -1109,7 +1225,11 @@ impl<'a> Evaluator<'a> {
                     e
                 }))
             }
-            XFrame::Call | XFrame::For | XFrame::Let => unreachable!("handled above"),
+            XFrame::Object { u, id, k, ctx } => self.object_resume(u, id, k, ctx, r),
+            XFrame::Direct { u, id } => self.direct_resume(u, id, r),
+            XFrame::Call | XFrame::For | XFrame::Let | XFrame::ForC => {
+                unreachable!("handled above")
+            }
         }
     }
 
@@ -1756,6 +1876,308 @@ impl<'a> Evaluator<'a> {
         Next::Val(r.map(|()| Value::Undef))
     }
 
+    // --- C-style `for` -------------------------------------------------
+
+    /// `lc_for_c` on the heap: its initial context, then its parts in
+    /// turn, each part that may call evaluated by the loop.
+    #[inline(never)]
+    fn x_for_c(&mut self, u: u32, id: ExprId, ctx: Rc<Ctx>) -> Next {
+        let first = self.units[u as usize].res.expr[id.0 as usize];
+        let initial = self.new_ctx(&ctx, CtxKind::Plain, first);
+        let mark = self.push(initial.clone());
+        self.xs.forcs.push(ForCSt {
+            u,
+            id,
+            initial,
+            mark,
+            current: None,
+            slot: 0,
+            step: None,
+            counter: 0,
+            part: ForCPart::Init(0),
+        });
+        self.xs.frames.push(XFrame::ForC);
+        self.for_c_run()
+    }
+
+    /// The C-style `for` on top: its parts from where it is, up to the
+    /// next one that waits for the loop.
+    fn for_c_run(&mut self) -> Next {
+        loop {
+            let st = self.xs.forcs.last().expect("a C-style for");
+            let (u, id, part) = (st.u, st.id, st.part);
+            let ast: &'a Ast = self.units[u as usize].ast;
+            let e = ast.expr(id);
+            let ExprKind::LcForC {
+                init,
+                cond,
+                incr,
+                body,
+            } = &e.kind
+            else {
+                unreachable!("a C-style for")
+            };
+            let (args, k, target) = match part {
+                ForCPart::Init(k) => (init, k, st.initial.clone()),
+                ForCPart::Incr(k) => (incr, k, st.step.clone().expect("an increment's context")),
+                ForCPart::Cond => {
+                    let current = st.current.clone().expect("an iteration's context");
+                    if self.may_call(u, *cond) {
+                        return Next::Eval {
+                            u,
+                            id: *cond,
+                            ctx: current,
+                            want: Want::Value,
+                        };
+                    }
+                    let r = self.eval(u, *cond, &current);
+                    return self.for_c_cond(r, *body);
+                }
+                ForCPart::Body => unreachable!("a body waits for the loop"),
+            };
+            let Some(a) = args.get(k as usize) else {
+                self.for_c_iteration(matches!(part, ForCPart::Incr(_)));
+                continue;
+            };
+            if self.may_call(u, a.expr) {
+                return Next::Eval {
+                    u,
+                    id: a.expr,
+                    ctx: target,
+                    want: Want::Value,
+                };
+            }
+            match self.eval(u, a.expr, &target) {
+                Ok(v) => self.for_c_assign(args, k, &target, v),
+                Err(e) => return self.for_c_end(Err(e)),
+            }
+        }
+    }
+
+    /// `sequential_assign`'s assignment of argument `k` of an initialiser
+    /// or increment, and the next one.
+    fn for_c_assign(&mut self, args: &'a [Arg], k: u32, target: &Ctx, v: Value) {
+        let st = self.xs.forcs.last().expect("a C-style for");
+        let (u, id) = (st.u, st.id);
+        let span = self.units[u as usize].ast.expr(id).span;
+        self.assign_ctx(u, span, args, k as usize, target, v);
+        let st = self.xs.forcs.last_mut().expect("a C-style for");
+        st.part = match st.part {
+            ForCPart::Init(k) => ForCPart::Init(k + 1),
+            ForCPart::Incr(k) => ForCPart::Incr(k + 1),
+            other => other,
+        };
+    }
+
+    /// The initialisers or an increment done: the next iteration's
+    /// context. After an increment its values move to a fresh child of the
+    /// initial context, as `lc_for_c` does, so the chain stays two deep.
+    fn for_c_iteration(&mut self, after_incr: bool) {
+        let st = self.xs.forcs.last_mut().expect("a C-style for");
+        let initial = st.initial.clone();
+        let step = st.step.take();
+        let slot = st.slot;
+        let iteration = crate::resolve::next_region(initial.region);
+        if !after_incr {
+            let current = self.new_ctx(&initial, CtxKind::Plain, iteration);
+            let slot = self.push(current.clone());
+            let st = self.xs.forcs.last_mut().expect("a C-style for");
+            st.current = Some(current);
+            st.slot = slot;
+            st.part = ForCPart::Cond;
+            return;
+        }
+        let step = step.expect("an increment's context");
+        let next = self.new_ctx(&initial, CtxKind::Plain, iteration);
+        next.slots.borrow_mut().clone_from(&step.slots.borrow());
+        next.vars.borrow_mut().clone_from(&step.vars.borrow());
+        drop(step);
+        self.truncate(slot);
+        self.push(next.clone());
+        let st = self.xs.forcs.last_mut().expect("a C-style for");
+        st.current = Some(next);
+        st.part = ForCPart::Cond;
+    }
+
+    /// The condition's value: the end, or the body.
+    fn for_c_cond(&mut self, r: R<Value>, body: ExprId) -> Next {
+        let go = match r {
+            Ok(v) => v.to_bool(),
+            Err(e) => return self.for_c_end(Err(e)),
+        };
+        if !go {
+            return self.for_c_end(Ok(()));
+        }
+        if let Err(e) = self.check_interrupt() {
+            return self.for_c_end(Err(e));
+        }
+        let st = self.xs.forcs.last_mut().expect("a C-style for");
+        st.part = ForCPart::Body;
+        Next::Eval {
+            u: st.u,
+            id: body,
+            ctx: st.current.clone().expect("an iteration's context"),
+            want: Want::Element,
+        }
+    }
+
+    #[inline(never)]
+    fn for_c_resume(&mut self, r: R<Value>) -> Next {
+        let st = self.xs.forcs.last().expect("a C-style for");
+        let (u, id, part, counter) = (st.u, st.id, st.part, st.counter);
+        let ast: &'a Ast = self.units[u as usize].ast;
+        let e = ast.expr(id);
+        let ExprKind::LcForC {
+            init, incr, body, ..
+        } = &e.kind
+        else {
+            unreachable!("a C-style for")
+        };
+        match part {
+            ForCPart::Init(k) | ForCPart::Incr(k) => {
+                let v = match self.hard(r) {
+                    Ok(v) => v,
+                    Err(e) => return self.for_c_end(Err(e)),
+                };
+                let st = self.xs.forcs.last().expect("a C-style for");
+                let (args, target) = match part {
+                    ForCPart::Init(_) => (init, st.initial.clone()),
+                    _ => (incr, st.step.clone().expect("an increment's context")),
+                };
+                self.for_c_assign(args, k, &target, v);
+                drop(target);
+                self.for_c_run()
+            }
+            ForCPart::Cond => {
+                let r = self.hard(r);
+                self.for_c_cond(r, *body)
+            }
+            ForCPart::Body => {
+                if let Err(e) = r {
+                    return self.for_c_end(Err(e));
+                }
+                if counter == 1_000_000 {
+                    let loc = Loc {
+                        unit: u,
+                        span: e.span,
+                    };
+                    self.error(
+                        Some(loc),
+                        DiagCode::IterationLimit,
+                        "For loop counter exceeded limit",
+                    );
+                    let e = self.unwind(UnwindKind::LoopLimit);
+                    return self.for_c_end(Err(e));
+                }
+                let st = self.xs.forcs.last().expect("a C-style for");
+                let current = st.current.clone().expect("an iteration's context");
+                let step = self.new_ctx(&current, CtxKind::Plain, current.region);
+                drop(current);
+                self.push(step.clone());
+                let st = self.xs.forcs.last_mut().expect("a C-style for");
+                st.counter += 1;
+                st.step = Some(step);
+                st.part = ForCPart::Incr(0);
+                self.for_c_run()
+            }
+        }
+    }
+
+    /// The end of a C-style `for`: its contexts gone, as `lc_for_c` drops
+    /// them.
+    fn for_c_end(&mut self, r: R<()>) -> Next {
+        let st = self.xs.forcs.pop().expect("a C-style for");
+        let top = self.xs.frames.pop();
+        debug_assert!(matches!(top, Some(XFrame::ForC)));
+        self.truncate(st.mark);
+        drop(st);
+        Next::Val(r.map(|()| Value::Undef))
+    }
+
+    // --- `object()` ----------------------------------------------------
+
+    /// `object_function` on the heap: its arguments in order, each that
+    /// may call evaluated by the loop, and the first bad one ends it.
+    #[inline(never)]
+    fn x_object(&mut self, u: u32, id: ExprId, ctx: Rc<Ctx>) -> Next {
+        self.xs.objs.push(ObjectBuilder::new());
+        self.object_next(u, id, 0, ctx)
+    }
+
+    /// `object()`'s argument `k` evaluated: applied, then the next. Out of
+    /// line, as the other rare shapes' steps are, so that `x_resume`, which
+    /// every expression's value passes through, stays as small as it was.
+    #[inline(never)]
+    fn object_resume(&mut self, u: u32, id: ExprId, k: u32, ctx: Rc<Ctx>, r: R<Value>) -> Next {
+        let v = match self.hard(r) {
+            Ok(v) => v,
+            Err(e) => {
+                self.xs.objs.pop();
+                return Next::Val(Err(e));
+            }
+        };
+        let mut b = self.xs.objs.pop().expect("an object being built");
+        let ast: &'a Ast = self.units[u as usize].ast;
+        let ExprKind::Call(_, args) = &ast.expr(id).kind else {
+            unreachable!("a call")
+        };
+        let loc = self.expr_loc(u, id);
+        if !self.object_arg(&mut b, u, &args[k as usize], k as usize, v, loc) {
+            return Next::Val(Ok(Value::Undef));
+        }
+        self.xs.objs.push(b);
+        self.object_next(u, id, k + 1, ctx)
+    }
+
+    /// `direct_builtin`'s check and trace, after `object()` on the heap.
+    #[inline(never)]
+    fn direct_resume(&mut self, u: u32, id: ExprId, r: R<Value>) -> Next {
+        let r = r.and_then(|v| self.check_hard().map(|()| v));
+        Next::Val(r.map_err(|mut e| {
+            self.trace_call(&mut e, (u, id));
+            e
+        }))
+    }
+
+    /// `object()`'s arguments from `k`.
+    #[inline(never)]
+    fn object_next(&mut self, u: u32, id: ExprId, mut k: u32, ctx: Rc<Ctx>) -> Next {
+        let ast: &'a Ast = self.units[u as usize].ast;
+        let ExprKind::Call(_, args) = &ast.expr(id).kind else {
+            unreachable!("a call")
+        };
+        while let Some(a) = args.get(k as usize) {
+            if self.may_call(u, a.expr) {
+                self.xs.frames.push(XFrame::Object {
+                    u,
+                    id,
+                    k,
+                    ctx: ctx.clone(),
+                });
+                return Next::Eval {
+                    u,
+                    id: a.expr,
+                    ctx,
+                    want: Want::Value,
+                };
+            }
+            let v = self.eval(u, a.expr, &ctx);
+            let mut b = self.xs.objs.pop().expect("an object being built");
+            let v = match v {
+                Ok(v) => v,
+                Err(e) => return Next::Val(Err(e)),
+            };
+            let loc = self.expr_loc(u, id);
+            if !self.object_arg(&mut b, u, a, k as usize, v, loc) {
+                return Next::Val(Ok(Value::Undef));
+            }
+            self.xs.objs.push(b);
+            k += 1;
+        }
+        let b = self.xs.objs.pop().expect("an object being built");
+        Next::Val(Ok(self.object_finish(b)))
+    }
+
     // --- calls ---------------------------------------------------------
 
     /// `is_undef()`'s argument, when it is evaluated on the heap: when
@@ -1804,9 +2226,14 @@ impl<'a> Evaluator<'a> {
                     want: Want::Value,
                 };
             }
-            // `object()` and `is_undef()` evaluate their own arguments:
-            // `object()` natively (see the module docs), `is_undef()` when
-            // its argument is a variable or cannot call.
+            // `object()` applies each argument as it comes, so its own
+            // walk over them runs here, then `direct_builtin`'s check.
+            if b == Builtin::Object && self.args_may_call(u, args) {
+                self.xs.frames.push(XFrame::Direct { u, id });
+                return self.x_object(u, id, ctx);
+            }
+            // `object()` and `is_undef()` evaluate their own arguments,
+            // which here cannot call (`is_undef()`'s may be a variable).
             if matches!(b, Builtin::Object | Builtin::IsUndef) {
                 return Next::Val(self.direct_builtin(b, u, id, &ctx));
             }
@@ -2059,15 +2486,13 @@ impl<'a> Evaluator<'a> {
                             want: Want::Value,
                         });
                     }
-                    if self.args_may_call(u, args)
-                        && !matches!(b, Builtin::Object | Builtin::IsUndef)
-                    {
-                        let ctx = ctx.clone();
-                        st.phase = Phase::Builtin { b, u, id };
-                        let argv = self.arg_pool.pop().unwrap_or_default();
-                        self.xs.args.push(argv);
-                        return S::Wait(self.x_args(u, args, 0, ctx));
+                    if let Some(s) = self.call_builtin_args(st, b, u, id, args) {
+                        return s;
                     }
+                    let ctx = match &st.cur {
+                        Some(c) => c,
+                        None => st.entry.as_ref().expect("the caller's context"),
+                    };
                     return S::Step(self.call_builtin(b, u, id, args, ctx).map(Step::Done));
                 }
                 self.call_simplify_call(st, u, id, e, *callee, args)
@@ -2086,6 +2511,37 @@ impl<'a> Evaluator<'a> {
                 S::Step(self.eval(u, id, ctx).map(Step::Done))
             }
         }
+    }
+
+    /// A builtin call in tail position whose arguments may call: evaluated
+    /// by the loop, then applied (`Phase::Builtin`), or for `object()`,
+    /// which applies each as it comes, walked by `x_object` (its value is
+    /// the step's). `None`: none may call, or it is `is_undef()`, which
+    /// the caller does.
+    #[inline(never)]
+    fn call_builtin_args(
+        &mut self,
+        st: &mut CallSt<'a>,
+        b: Builtin,
+        u: u32,
+        id: ExprId,
+        args: &'a [Arg],
+    ) -> Option<S> {
+        if b == Builtin::IsUndef || !self.args_may_call(u, args) {
+            return None;
+        }
+        let ctx = match &st.cur {
+            Some(c) => c.clone(),
+            None => st.entry.clone().expect("the caller's context"),
+        };
+        if b == Builtin::Object {
+            st.phase = Phase::Done;
+            return Some(S::Wait(self.x_object(u, id, ctx)));
+        }
+        st.phase = Phase::Builtin { b, u, id };
+        let argv = self.arg_pool.pop().unwrap_or_default();
+        self.xs.args.push(argv);
+        Some(S::Wait(self.x_args(u, args, 0, ctx)))
     }
 
     /// A tail `let`'s assignments into its registers from `k`.
@@ -2280,13 +2736,13 @@ impl<'a> Evaluator<'a> {
                         want: Want::Value,
                     });
                 }
-                if self.args_may_call(u, args) && !matches!(b, Builtin::Object | Builtin::IsUndef) {
-                    let ctx = ctx.clone();
-                    st.phase = Phase::Builtin { b, u, id };
-                    let argv = self.arg_pool.pop().unwrap_or_default();
-                    self.xs.args.push(argv);
-                    return S::Wait(self.x_args(u, args, 0, ctx));
+                if let Some(s) = self.call_builtin_args(st, b, u, id, args) {
+                    return s;
                 }
+                let ctx = match &st.cur {
+                    Some(c) => c,
+                    None => st.entry.as_ref().expect("the caller's context"),
+                };
                 return S::Step(self.call_builtin(b, u, id, args, ctx).map(Step::Done));
             }
             Some(Callable::User {
@@ -2326,7 +2782,13 @@ impl<'a> Evaluator<'a> {
             && args.len() <= params.len()
             && args.iter().all(|a| a.name.is_none())
             && (mode != Mode::Ctx || !ctx.vars.borrow().has_config);
-        if !self.args_may_call(u, args) {
+        // A default that may call is evaluated here too, after the
+        // arguments are bound, so the arguments take the same path.
+        // (Only a parameter that no argument binds takes its default: none
+        // does when positional arguments cover them all.)
+        let defaults = (args.len() < params.len() || args.iter().any(|a| a.name.is_some()))
+            && self.defaults_may_call(fu, params, region);
+        if !defaults && !self.args_may_call(u, args) {
             if pure {
                 return S::Step(
                     self.pure_frame(u, id, args, ctx, mode, fu, params, body, defining, region),
@@ -2381,8 +2843,172 @@ impl<'a> Evaluator<'a> {
             pure,
             body_ctx,
             this,
+            defaults,
         };
         S::Wait(self.x_args(u, args, 0, ctx))
+    }
+
+    /// A user call's arguments evaluated, when a default may call: bound
+    /// without the defaults (`pure_place`, `bind_args`), whose evaluation
+    /// then starts. Out of line, so the common call's step does not grow.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[inline(never)]
+    fn user_defaults(
+        &mut self,
+        st: &mut CallSt<'a>,
+        r: R<Value>,
+        mut argv: Vec<ArgVal>,
+        ids: (u32, ExprId, u32),
+        params: &'a [Param],
+        body: ExprId,
+        region: u32,
+        loc: Loc,
+        (pure, body_ctx, this): (Option<Rc<Ctx>>, Option<Rc<Ctx>>, Option<Object>),
+    ) -> S {
+        if let Err(e) = r {
+            argv.clear();
+            self.arg_pool.push(argv);
+            return S::Step(Err(e));
+        }
+        match (pure, body_ctx) {
+            (Some(defining), _) => {
+                let (base, n) = self.pure_place(argv, region);
+                self.pure_defaults(st, ids, params, body, region, defining, base, n)
+            }
+            (None, Some(body_ctx)) => {
+                let this = this.as_ref();
+                let f = self.bind_args(&mut argv, loc, ids.2, params, body_ctx.region, this);
+                argv.clear();
+                self.arg_pool.push(argv);
+                self.frame_defaults(st, ids, params, body, body_ctx, Box::new(f), 0)
+            }
+            (None, None) => unreachable!("a frame to bind into"),
+        }
+    }
+
+    /// `pure_bind`'s defaults from parameter `k`, for registers from
+    /// `base`, each that may call evaluated by the loop.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn pure_defaults(
+        &mut self,
+        st: &mut CallSt<'a>,
+        (u, id, fu): (u32, ExprId, u32),
+        params: &'a [Param],
+        body: ExprId,
+        region: u32,
+        defining: Rc<Ctx>,
+        base: usize,
+        k: usize,
+    ) -> S {
+        for (k, p) in params.iter().enumerate().skip(k) {
+            let i = base + self.regions[region as usize].binds[k] as usize;
+            if self.regs[i].is_some() {
+                continue;
+            }
+            let v = match p.default {
+                Some(d) if self.may_call(fu, d) => {
+                    st.phase = Phase::PureDefault {
+                        u,
+                        id,
+                        fu,
+                        params,
+                        body,
+                        region,
+                        defining: defining.clone(),
+                        base: base as u32,
+                        k: k as u32,
+                    };
+                    return S::Wait(Next::Eval {
+                        u: fu,
+                        id: d,
+                        ctx: defining,
+                        want: Want::Value,
+                    });
+                }
+                Some(d) => match self.eval(fu, d, &defining) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // The bound values die here, as in `pure_bind`.
+                        self.regs.truncate(base);
+                        return S::Step(Err(e));
+                    }
+                },
+                None => Value::Undef,
+            };
+            self.regs[i] = Some(v);
+        }
+        S::Step(Ok(Step::Pure {
+            unit: fu,
+            expr: body,
+            ctx: defining,
+            call: (u, id),
+            region,
+            base: base as u32,
+        }))
+    }
+
+    /// `bind_general`'s defaults from parameter `k`, into `frame`, each
+    /// that may call evaluated by the loop; then the frame applied to
+    /// `body_ctx`, as `frame_bind` does.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn frame_defaults(
+        &mut self,
+        st: &mut CallSt<'a>,
+        (u, id, fu): (u32, ExprId, u32),
+        params: &'a [Param],
+        body: ExprId,
+        body_ctx: Rc<Ctx>,
+        mut frame: Box<Frame>,
+        k: usize,
+    ) -> S {
+        // Defaults are evaluated in the defining context: the body's parent.
+        let defining = body_ctx
+            .parent
+            .clone()
+            .expect("a function body context has its defining context as parent");
+        for (k, p) in params.iter().enumerate().skip(k) {
+            let s = self.units[fu as usize].sym(p.name);
+            let slot = self.param_slot(body_ctx.region, k);
+            if frame.has(slot, s) {
+                continue;
+            }
+            let v = match p.default {
+                Some(d) if self.may_call(fu, d) => {
+                    st.phase = Phase::FrameDefault {
+                        u,
+                        id,
+                        fu,
+                        params,
+                        body,
+                        body_ctx,
+                        frame,
+                        k: k as u32,
+                    };
+                    return S::Wait(Next::Eval {
+                        u: fu,
+                        id: d,
+                        ctx: defining,
+                        want: Want::Value,
+                    });
+                }
+                Some(d) => match self.eval(fu, d, &defining) {
+                    Ok(v) => v,
+                    Err(e) => return S::Step(Err(e)),
+                },
+                None => Value::Undef,
+            };
+            let config = self.syms.is_config(s);
+            frame.set(slot, s, v, config);
+        }
+        self.apply_frame(&body_ctx, *frame);
+        S::Step(Ok(Step::Next {
+            unit: fu,
+            expr: Some(body),
+            ctx: Some(body_ctx),
+            call: Some((u, id)),
+        }))
     }
 
     /// The step waiting in `st` once its evaluation is done.
@@ -2467,10 +3093,16 @@ impl<'a> Evaluator<'a> {
                 pure,
                 body_ctx,
                 this,
+                defaults,
             } => {
                 let mut argv = self.xs.args.pop().expect("a call's arguments");
                 if let Some(mark) = moved {
                     self.moved.truncate(mark as usize);
+                }
+                if defaults {
+                    let ids = (u, id, fu);
+                    let frame = (pure, body_ctx, this);
+                    return self.user_defaults(st, r, argv, ids, params, body, region, loc, frame);
                 }
                 match (pure, body_ctx) {
                     (Some(defining), _) => match r {
@@ -2497,6 +3129,51 @@ impl<'a> Evaluator<'a> {
                     (None, None) => unreachable!("a frame to bind into"),
                 }
             }
+            Phase::PureDefault {
+                u,
+                id,
+                fu,
+                params,
+                body,
+                region,
+                defining,
+                base,
+                k,
+            } => match self.hard(r) {
+                Ok(v) => {
+                    let base = base as usize;
+                    let k = k as usize;
+                    let i = base + self.regions[region as usize].binds[k] as usize;
+                    self.regs[i] = Some(v);
+                    let ids = (u, id, fu);
+                    self.pure_defaults(st, ids, params, body, region, defining, base, k + 1)
+                }
+                Err(e) => {
+                    self.regs.truncate(base as usize);
+                    S::Step(Err(e))
+                }
+            },
+            Phase::FrameDefault {
+                u,
+                id,
+                fu,
+                params,
+                body,
+                body_ctx,
+                mut frame,
+                k,
+            } => match self.hard(r) {
+                Ok(v) => {
+                    let k = k as usize;
+                    let s = self.units[fu as usize].sym(params[k].name);
+                    let slot = self.param_slot(body_ctx.region, k);
+                    let config = self.syms.is_config(s);
+                    frame.set(slot, s, v, config);
+                    let ids = (u, id, fu);
+                    self.frame_defaults(st, ids, params, body, body_ctx, frame, k + 1)
+                }
+                Err(e) => S::Step(Err(e)),
+            },
             Phase::Done => S::Step(self.hard(r).map(Step::Done)),
         }
     }

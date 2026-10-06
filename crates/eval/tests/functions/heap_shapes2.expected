@@ -1,0 +1,109 @@
+ECHO: 25
+ECHO: 1
+ECHO: 1
+ECHO: [0, [0, [0, [], 1, []], 1, [0, [], 1, []]], 1, [0, [0, [], 1, []], 1, [0, [], 1, []]]]
+ECHO: "j0"
+ECHO: "cond", 0
+ECHO: "incr", 1
+ECHO: "cond", 1
+ECHO: "incr", 2
+ECHO: "cond", 2
+ECHO: "incr", 4
+ECHO: "cond", 3
+ECHO: [[0, 1], [1, 2], [2, 4]]
+ECHO: [9, 1, 1, 11]
+ECHO: [[0, 10], [0, 11], [1, 10], [1, 11]]
+ECHO: [[0, 8], [1, 9], [2, 10]]
+ECHO: [9, 19, 29]
+WARNING: Ignoring duplicate variable assignment "i" = 1 @19
+WARNING: Ignoring duplicate variable assignment "i" = 6 @19
+WARNING: Ignoring duplicate variable assignment "i" = 7 @19
+WARNING: Ignoring duplicate variable assignment "i" = 8 @19
+ECHO: [0, 1, 2]
+WARNING: Assignment without variable name 7 @20
+WARNING: Assignment without variable name 7 @20
+ECHO: [0, 1]
+ECHO: [10, 11]
+ECHO: "w", 1
+ECHO: "w", 2
+ECHO: "w", 3
+ECHO: "w", 4
+ECHO: "w", 5
+ECHO: "w", 6
+ECHO: "w", 7
+ECHO: "w", 8
+ECHO: "w", 9
+ECHO: "w", 10
+ECHO: "w", 11
+ECHO: "w", 12
+ECHO: 12
+ECHO: 15
+ECHO: { k = 10; d = 11; e = 1; }
+ECHO: "a"
+WARNING: object(Argument 1 <number>) An unnamed argument must be either <object> or <list>, it is <number>.  @27
+ECHO: undef
+ECHO: { y = 10; }
+WARNING: object(Argument 0 [Element 0 [<number>,value]]) The key of the entry is not <string> but <number>. In an unnamed list, entries must be [key,value] to set or [key] to delete. The key must be <string>. @29
+WARNING: object(Argument 0 [Element 0 []]) Entry is empty. In an unnamed list, entries must be [key,value] to set or [key] to delete. The key must be <string>. @29
+WARNING: object( Argument 0 [Element 0 <number>] ) Entry type is not a list, it is <number>. In an unnamed list, entries must be [key,value] to set or [key] to delete. The key must be <string>. @29
+ECHO: undef, undef, undef
+ECHO: { k1 = 1; k2 = 2; k3 = 3; k4 = 4; k5 = 5; k6 = 6; k7 = 7; k8 = 8; k9 = 9; k10 = 10; }
+ECHO: "a"
+ECHO: "b"
+ECHO: "c"
+ECHO: [1, 9, 10]
+ECHO: "c"
+ECHO: [1, 2, 10]
+ECHO: "cn"
+ECHO: "b"
+ECHO: [1, 9, 5]
+WARNING: argument "b" supplied more than once @36
+ECHO: "c"
+ECHO: [1, 3, 10]
+WARNING: Too many unnamed arguments supplied @37
+ECHO: [1, 2, 3]
+WARNING: variable "x" not specified as parameter @38
+ECHO: "b"
+ECHO: "c"
+ECHO: [undef, 9, 10]
+ECHO: 20
+WARNING: Ignoring unknown variable "$n" @41
+WARNING: undefined operation (undefined + number) @41
+WARNING: Ignoring unknown variable "$n" @41
+WARNING: undefined operation (undefined + number) @41
+ECHO: [9, undef], [1, undef], [9, 2], [9, 8]
+WARNING: Ignoring unknown variable "a" @43
+WARNING: Ignoring unknown variable "a" @43
+ECHO: [undef, 9], [1, 9], [undef, 2]
+WARNING: Ignoring unknown variable "a" @45
+WARNING: Ignoring unknown variable "a" @45
+WARNING: Ignoring unknown variable "a" @45
+WARNING: Ignoring unknown variable "a" @45
+WARNING: Ignoring unknown variable "a" @45
+WARNING: Ignoring unknown variable "a" @45
+WARNING: Ignoring unknown variable "a" @45
+WARNING: Ignoring unknown variable "a" @45
+WARNING: Ignoring unknown variable "a" @45
+WARNING: Ignoring unknown variable "a" @43
+ECHO: [[[[[[[[[[undef, 9]]]]]]]]]]
+WARNING: Ignoring unknown variable "this" @47
+WARNING: undefined operation (undefined * number) @47
+WARNING: undefined operation (number + undefined) @47
+WARNING: Ignoring unknown variable "this" @47
+WARNING: Can't call function on undefined @47
+ECHO: undef, 3, undef
+ECHO: 29
+ECHO: 30
+ECHO: "mc"
+ECHO: 1, 9, 10
+ECHO: 3, 9, 2
+-- aborted false interrupted false hard false
+-- csg
+group();
+group();
+
+
+-- nodes
+0 1 Root
+1 34 Group
+1 36 Group

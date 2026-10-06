@@ -1,0 +1,19 @@
+ERROR: Assertion 'false' failed: "method default" @3
+TRACE: called by 'e' @4
+TRACE: called by 'e' @4
+TRACE: called by 'e' @4
+TRACE: called by 'e' @4
+TRACE: called by 'e' @4
+TRACE: called by 'e' @4
+TRACE: called by 'e' @4
+TRACE: called by 'e' @4
+TRACE: called by 'e' @4
+TRACE: called by 'e' @4
+TRACE: called by 'e' @5
+TRACE: called by 'echo' @5
+-- aborted true interrupted false hard false
+-- csg
+
+
+-- nodes
+0 1 Root

@@ -743,36 +743,41 @@ fn small_limits_give_the_recursion_errors() {
         "{lines:?}"
     );
 
-    // A C-style `for`'s initialiser is evaluated natively, so a recursion
-    // through it holds native stack per level, and the frame budget stops
-    // it at its call, far short of the depth limit. Each level starts a
-    // heap loop (`recursion::HEAP_LOOP_FRAMES`), so this uses the wasm32
-    // release budget, under which browsers reached 30-37 levels of the
-    // shapes that recursed this way. (A range's bounds were one, and are
-    // on the heap now: `functions.rs` runs one to the depth limit.)
+    // A C-style `for`'s initialiser was evaluated natively, and a
+    // recursion through it held native stack per level: under the wasm32
+    // release budget the frame budget stopped it after 30-37 levels, as it
+    // did the other shapes that recursed this way. On the heap it takes
+    // none, so the budget does not stop it, and the counted limit does.
     let wasm = Options {
         frame_limit: 2_000,
         ..Options::default()
     };
     let cfor = "function f(n) = n == 0 ? 0 : [for (i = f(n - 1); i < n; i = n) i][0] + 1;";
-    let (lines, _) = run_with(&format!("{cfor}\necho(f(20));"), &wasm);
-    assert_eq!(lines, ["ECHO: 20"]);
-    let (lines, ev) = run_with(&format!("{cfor}\necho(f(1000));"), &wasm);
+    let (lines, _) = run_with(&format!("{cfor}\necho(f(1000));"), &wasm);
+    assert_eq!(lines, ["ECHO: 1000"]);
+    let (lines, ev) = run_with(&format!("{cfor}\necho(f(1000));"), &small);
     assert!(ev.aborted);
     assert_eq!(
         lines[0],
         "ERROR: Recursion detected calling function 'f' @1"
     );
 
-    // Printing a nested vector counts its levels against the budget too.
-    let (lines, _) = run_with(
-        "function nest(n, acc) = n == 0 ? acc : nest(n - 1, [acc]);\necho(nest(1000, 0));",
-        &budget,
-    );
-    assert_eq!(
-        lines[0],
-        "ERROR: Stack exhausted while trying to convert a vector to EchoString"
-    );
+    // Printing a nested vector holds no native stack per level either: the
+    // frame budget, which stopped it at 50 levels here, does not, and it
+    // stops at the depth OpenSCAD's stack check stands for, counted, the
+    // same under any budget.
+    let nest = "function nest(n, acc) = n == 0 ? acc : nest(n - 1, [acc]);";
+    let (lines, _) = run_with(&format!("{nest}\necho(len(str(nest(1000, 0))));"), &budget);
+    assert_eq!(lines, ["ECHO: 2001"]);
+    for opts in [&budget, &Options::default()] {
+        let (lines, _) = run_with(&format!("{nest}\necho(len(str(nest(46918, 0))));"), opts);
+        assert_eq!(lines, ["ECHO: 93837"]);
+        let (lines, _) = run_with(&format!("{nest}\necho(nest(46919, 0));"), opts);
+        assert_eq!(
+            lines[0],
+            "ERROR: Stack exhausted while trying to convert a vector to EchoString"
+        );
+    }
 }
 
 /// Unseeded `rands()` starts from the seed the host passes, so a host that
