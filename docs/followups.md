@@ -546,20 +546,33 @@ lead them, come roughly in order of user impact.
   shows mostly deep copies in `transform()` and `to_manifold()` (the
   cache holds the child's `Arc`, so `Arc::unwrap_or_clone` copies) and
   the batch union's working memory.
-- **A memory limit makes parallel renders 2.4 times slower.** Every
-  kernel check calls `Guard::stopped` (`kernel_token` in
+- **Fixed: a memory limit made parallel renders 2.4 times slower.**
+  Every kernel check calls `Guard::stopped` (`kernel_token` in
   `geom/src/manifold_geom.rs`), which reads the memory probe, and the
-  probe's throttle (`read` in `session/src/memory.rs`) takes one
-  process-wide mutex on every call, even when it returns the cached
-  reading. With fourteen threads checking at once the lock is most of
-  the time: the scaled-down `skin__042` above renders in 2.8 s without a
-  limit and 6.7 s with `--limit memory=2900` (12 s user and 1.7 s system
-  against 17.6 s user and 42.7 s system; `sample` puts most stacks in
-  `__psynch_mutexwait` under `request_probe`), and 9.9 s against 10.8 s
-  on one thread. The command line, the session and so every agent
-  surface use this probe. Keeping the last reading and its time in
-  atomics, and taking the lock only to probe again, would make a check
-  that finds a recent reading lock-free. (2026-10-06)
+  probe's throttle (`read` in `session/src/memory.rs`) took one
+  process-wide mutex on every call, even to return the cached reading:
+  the scaled-down `skin__042` above took 6.7 s with `--limit memory=2900`
+  against 2.7 s without (42.7 s of system time, mostly
+  `__psynch_mutexwait`). The last reading and its time are now atomics,
+  and when the reading is stale one thread probes again while the others
+  use the last one. With the limit it now takes 2.8 s (1.5 s system), on
+  one thread 10.7 s against 10.8 s; the fractal tree went from 1.86 s to
+  0.66 s and `csg_spheres` from 0.89 s to 0.44 s under the same limit,
+  with identical output.
+- A time or memory limit still costs a render about 4% on fourteen
+  threads and 8% on one (the scaled-down `skin__042`: 2.8 s against
+  2.7 s, 10.6 s against 9.7 s; a `fragments` limit, which makes a guard
+  but reads no clock, costs 1%). It is the clock read in every check:
+  `par::maybe_par_map_ct` in `vendor/manifold-rust` polls the token once
+  per element (per halfedge in `intersect12`), where C++ polls once per
+  parallel chunk and per 1,024 elements (`kSeqCancelChunk`, Manifold's
+  `parallel.h`). The port chose per element because its token was one
+  relaxed load; NeoSCAD's `with_check` patch made each poll a call to
+  `Guard::stopped`, which reads the clock (and, with a memory limit, the
+  probe's cached reading). Polling the check once per 1,024 elements in
+  that patch, while keeping the flag per element, would remove most of
+  it; `kernel_token`'s documentation already says "every few thousand
+  items". (2026-10-06)
 
 - A `children()` chain takes memory with the square of its depth: a
   module that passes `children()` down 5,000 levels peaks at 510 MB, and
