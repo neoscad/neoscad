@@ -422,8 +422,9 @@ impl Inner {
                         }
                     }
                 }
-                // Ends the reader too (on Unix; on Windows the peer closes
-                // when it reads the `bye`).
+                // Ends the reader too, whether or not the peer closes its
+                // end after the `bye` (a socket shutdown on Unix, cancelled
+                // pipe I/O on Windows).
                 closer.close();
             });
         if writer_thread.is_err() {

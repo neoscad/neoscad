@@ -1401,15 +1401,19 @@ lead them, come roughly in order of user impact.
     in `$XDG_RUNTIME_DIR/app/org.neoscad.NeoSCAD/` is unverified (no
     Linux machine with Flatpak was used), and so is `FLATPAK_ID` being
     set in the sandbox (`/.flatpak-info` is checked too).
-  - Windows: a pipe's halves cannot be shut down from another thread
-    (`transport::Closer` does nothing there), so Disconnect and stop
-    rely on the agent closing its end after `bye`; a client that never
-    does keeps one reader thread until it exits. The client's pipe is
-    now overlapped (`transport/win.rs`, `OverlappedPipe`), so `CancelIoEx`
-    could make its `Closer` work; the listener's halves are
-    interprocess's. The first Windows CI run of the agent tests found the
-    client's pipe synchronous, so `neoscad mcp`'s writes waited behind its
-    pending read and `initialize` never answered.
+  - Windows: `transport::Closer` now cancels a pipe's pending I/O
+    (`CancelIoEx`, `transport/win.rs`'s `cancellable`) on both the
+    client's pipe and interprocess's server halves, so Disconnect and
+    stop no longer rely on the agent closing its end after `bye`. Written
+    on macOS and checked only with `cargo clippy --target
+    x86_64-pc-windows-msvc`; the transport tests that exercise it
+    (`a_line_goes_both_ways_and_the_closer_ends_a_blocked_read`,
+    `the_clients_closer_ends_its_blocked_read`) first run on Windows CI.
+    Not done: the closer leaves the handle open until both halves drop
+    (closing it under another thread's operation could cancel a reused
+    handle's I/O), and a dropped server half that still has unflushed
+    data goes to interprocess's "limbo" thread, which waits for the
+    client to read it.
   - The app's version check and the editor's `agentEdit` meet on two
     threads: the host compares its revision on the main thread, but a
     keystroke still on its way from the web view is not counted yet.

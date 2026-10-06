@@ -46,10 +46,10 @@ impl std::fmt::Debug for Conn {
 }
 
 /// Ends a connection from another thread than its reader's. On Unix it
-/// shuts the socket down, which ends a blocked read at once. A Windows
-/// pipe's halves cannot be shut down apart from their handles, so there it
-/// does nothing, and a listener asks the peer to close instead (the agent
-/// link's `bye`).
+/// shuts the socket down, which ends a blocked read at once. On Windows,
+/// where a pipe has no shutdown, it cancels the pipe's pending reads and
+/// writes and refuses new ones (`win::cancellable`), so a blocked read
+/// returns the end of the stream there too.
 #[derive(Default)]
 pub struct Closer(Option<Box<dyn Fn() + Send + Sync>>);
 
@@ -460,12 +460,39 @@ mod imp {
         // (`serve`'s client, which writes and then reads, never would), and
         // Windows serializes I/O on a synchronous handle, so that write
         // waited for the app to speak.
-        let pipe = win::OverlappedPipe::new(pipe);
+        let pipe = std::sync::Arc::new(win::OverlappedPipe::new(pipe));
+        let (reader, writer, close) = win::cancellable(Shared(pipe.clone()), Shared(pipe));
         Ok(Conn {
-            reader: Box::new(pipe.clone()),
-            writer: Box::new(pipe),
-            closer: Closer::default(),
+            reader,
+            writer,
+            closer: Closer(Some(close)),
         })
+    }
+
+    /// The client's one pipe, as both halves: each half of
+    /// [`win::cancellable`] owns what it is given, and both are the same
+    /// handle here.
+    struct Shared(std::sync::Arc<win::OverlappedPipe>);
+
+    impl std::os::windows::io::AsRawHandle for Shared {
+        fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
+            self.0.as_raw_handle()
+        }
+    }
+
+    impl std::io::Read for &Shared {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut &*self.0, buf)
+        }
+    }
+
+    impl std::io::Write for &Shared {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::io::Write::write(&mut &*self.0, buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            std::io::Write::flush(&mut &*self.0)
+        }
     }
 
     pub struct Listener(PipeListener<pipe_mode::Bytes, pipe_mode::Bytes>);
@@ -514,11 +541,14 @@ mod imp {
 
     impl Listener {
         pub fn accept(&self) -> std::io::Result<Conn> {
+            // interprocess makes its server pipes overlapped, so their
+            // pending reads and writes can be cancelled as the client's.
             let (reader, writer) = self.0.accept()?.split();
+            let (reader, writer, close) = win::cancellable(reader, writer);
             Ok(Conn {
-                reader: Box::new(reader),
-                writer: Box::new(writer),
-                closer: Closer::default(),
+                reader,
+                writer,
+                closer: Closer(Some(close)),
             })
         }
 
@@ -603,6 +633,25 @@ mod tests {
         }
     }
 
+    /// Block a read on `r` on its own thread, then call `closer`: the
+    /// read must end, at the end of the stream, within a few seconds
+    /// (a channel, not a join, so a closer that does nothing fails the
+    /// test rather than hanging it).
+    fn ends_blocked_read(mut r: BufReader<Box<dyn Read + Send>>, closer: &Closer) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut rest = String::new();
+            let _ = tx.send(r.read_line(&mut rest).map(|n| n == 0));
+        });
+        // Let the read start first, so the closer has one to cancel.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        closer.close();
+        let ended = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the closer did not end the blocked read");
+        assert!(ended.unwrap_or(true), "data after the close");
+    }
+
     #[test]
     fn a_line_goes_both_ways_and_the_closer_ends_a_blocked_read() {
         let address = scratch_address("echo");
@@ -615,17 +664,14 @@ mod tests {
             r.read_line(&mut line).unwrap();
             w.write_all(line.as_bytes()).unwrap();
             w.flush().unwrap();
-            // Next, a read that only the closer ends.
+            // Next, a read that only the closer ends: the client keeps its
+            // end open and says nothing more, as an agent that ignores
+            // `bye` does.
             let closer = conn.closer;
-            let blocked = std::thread::spawn(move || {
-                let mut rest = String::new();
-                r.read_line(&mut rest).map(|n| n == 0)
-            });
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            if closer.works() {
-                closer.close();
-                assert!(blocked.join().unwrap().unwrap_or(true));
-            }
+            assert!(closer.works());
+            ends_blocked_read(r, &closer);
+            // Closed is closed: nothing more goes out.
+            assert!(w.write_all(b"late\n").and_then(|()| w.flush()).is_err());
         });
         assert!(may_be_listening(&address));
         let conn = connect(&address).unwrap();
@@ -638,6 +684,32 @@ mod tests {
         assert_eq!(line, "hello\n");
         server.join().unwrap();
         drop(w);
+        cleanup(&address);
+    }
+
+    /// The client's closer (`neoscad mcp` leaving an app) ends its own
+    /// pending read while the listener keeps the connection open. On
+    /// Windows the client's pipe is a different kind of handle from the
+    /// listener's (`win::OverlappedPipe`, not interprocess's), so it is
+    /// tested apart.
+    #[test]
+    fn the_clients_closer_ends_its_blocked_read() {
+        let address = scratch_address("client-close");
+        let listener = Listener::bind(&address, true).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let conn = listener.accept_from_user().unwrap().expect("our own user");
+            // Open, silent, until the client is done.
+            let _ = done_rx.recv_timeout(std::time::Duration::from_secs(30));
+            drop(conn);
+        });
+        let conn = connect(&address).unwrap();
+        assert!(conn.closer.works());
+        ends_blocked_read(BufReader::new(conn.reader), &conn.closer);
+        let mut w = conn.writer;
+        assert!(w.write_all(b"late\n").and_then(|()| w.flush()).is_err());
+        let _ = done_tx.send(());
+        server.join().unwrap();
         cleanup(&address);
     }
 

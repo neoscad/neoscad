@@ -3,7 +3,9 @@
 //! default pipe and is the only one its security descriptor admits, and
 //! the owner of a pipe a client opened, which must be that same user.
 //! Also the client's overlapped reads and writes ([`OverlappedPipe`]),
-//! which std's `File` does not do.
+//! which std's `File` does not do, and the cancelling of a connection's
+//! pending I/O from another thread ([`cancellable`]), which is what
+//! `transport::Closer` does here.
 //!
 //! The one module of this crate that allows `unsafe` (see `Cargo.toml`'s
 //! lints). interprocess and std wrap the pipe itself; neither reads a
@@ -19,6 +21,9 @@
 use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_NOT_CONNECTED, ERROR_SUCCESS,
@@ -32,7 +37,7 @@ use windows_sys::Win32::Security::{
     TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, OpenProcessToken};
 
 /// This process's user, as `S-1-5-21-...`.
@@ -143,16 +148,17 @@ fn with_user_sid<R>(f: impl FnOnce(PSID) -> io::Result<R>) -> io::Result<R> {
 /// `OVERLAPPED` and event, so a read and a write proceed independently.
 ///
 /// Each call waits for its own operation before returning, so the
-/// `OVERLAPPED` and the buffer outlive the I/O; the handle is shared by
-/// the reading and the writing half and closes when both are gone, so it
-/// cannot close under a pending operation.
-#[derive(Clone)]
-pub struct OverlappedPipe(std::sync::Arc<std::fs::File>);
+/// `OVERLAPPED` and the buffer outlive the I/O. Reads and writes take
+/// `&self`: the reading and the writing half share one `OverlappedPipe`
+/// (through [`cancellable`]), and the handle closes when both are gone, so
+/// it cannot close under a pending operation.
+#[derive(Debug)]
+pub struct OverlappedPipe(std::fs::File);
 
 impl OverlappedPipe {
     /// `file` must have been opened with `FILE_FLAG_OVERLAPPED`.
     pub fn new(file: std::fs::File) -> OverlappedPipe {
-        OverlappedPipe(std::sync::Arc::new(file))
+        OverlappedPipe(file)
     }
 
     fn handle(&self) -> HANDLE {
@@ -197,7 +203,13 @@ impl OverlappedPipe {
     }
 }
 
-impl io::Read for OverlappedPipe {
+impl AsRawHandle for OverlappedPipe {
+    fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
+        self.0.as_raw_handle()
+    }
+}
+
+impl io::Read for &OverlappedPipe {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
         let (h, ptr) = (self.handle(), buf.as_mut_ptr());
@@ -217,7 +229,7 @@ impl io::Read for OverlappedPipe {
     }
 }
 
-impl io::Write for OverlappedPipe {
+impl io::Write for &OverlappedPipe {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
         let (h, ptr) = (self.handle(), buf.as_ptr());
@@ -230,4 +242,169 @@ impl io::Write for OverlappedPipe {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// What a connection's reader, writer and closer share: whether it has
+/// been closed, and how many of its operations are under way.
+#[derive(Default)]
+struct Shutdown {
+    closed: AtomicBool,
+    busy: AtomicUsize,
+}
+
+impl Shutdown {
+    /// Run one operation unless the connection is closed (`None` then).
+    /// The count goes up before the flag is read, and the closer sets the
+    /// flag before it reads the count, so either this operation sees the
+    /// flag or the closer sees the operation and cancels until it is done.
+    fn run<R>(&self, op: impl FnOnce() -> io::Result<R>) -> Option<io::Result<R>> {
+        self.busy.fetch_add(1, Ordering::SeqCst);
+        let out = if self.closed.load(Ordering::SeqCst) {
+            None
+        } else {
+            Some(op())
+        };
+        self.busy.fetch_sub(1, Ordering::SeqCst);
+        out
+    }
+
+    fn closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+}
+
+/// How long [`cancellable`]'s closer keeps cancelling an operation that is
+/// still under way. Pipe reads and writes end at once when cancelled, so
+/// this is only reached if a thread is starved between counting itself in
+/// and starting its call; the closer then gives up, as it did before it
+/// could cancel anything.
+const CANCEL_FOR: Duration = Duration::from_secs(2);
+
+/// One half of a [`cancellable`] connection.
+struct Half<T> {
+    io: Arc<T>,
+    shutdown: Arc<Shutdown>,
+}
+
+impl<T> io::Read for Half<T>
+where
+    for<'a> &'a T: io::Read,
+{
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let io = &self.io;
+        match self.shutdown.run(|| (&**io).read(buf)) {
+            // Closed: the end of the stream, as a read on a Unix socket
+            // that was shut down gives, whether the closer came first or
+            // cancelled this read (`ERROR_OPERATION_ABORTED`).
+            None => Ok(0),
+            Some(Err(_)) if self.shutdown.closed() => Ok(0),
+            Some(r) => r,
+        }
+    }
+}
+
+impl<T> io::Write for Half<T>
+where
+    for<'a> &'a T: io::Write,
+{
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let io = &self.io;
+        match self.shutdown.run(|| (&**io).write(buf)) {
+            None => Err(io::ErrorKind::BrokenPipe.into()),
+            Some(r) => r,
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let io = &self.io;
+        match self.shutdown.run(|| (&**io).flush()) {
+            None => Err(io::ErrorKind::BrokenPipe.into()),
+            Some(r) => r,
+        }
+    }
+}
+
+/// The reader, the writer and the closer [`cancellable`] makes.
+pub type Cancellable = (
+    Box<dyn io::Read + Send>,
+    Box<dyn io::Write + Send>,
+    Box<dyn Fn() + Send + Sync>,
+);
+
+/// A pipe connection's reader and writer (the two halves of one handle,
+/// overlapped) and a closer that ends both from any thread, as shutting a
+/// Unix socket down does.
+///
+/// Without the closer a Windows connection ended only when its peer
+/// closed: Disconnect, stop and a refused extra agent sent `bye` and then
+/// waited, and an agent that never closed its end kept a reader thread
+/// blocked in its read for as long as it ran. The closer marks the
+/// connection closed, so no new operation starts, and cancels the handle's
+/// pending ones with `CancelIoEx` (both halves', whichever thread started
+/// them; that needs the handle to be overlapped, which the client's
+/// [`OverlappedPipe`] and interprocess's server pipes are). It cancels
+/// again until no operation is under way, because one that had counted
+/// itself in but not yet started when the first cancel ran would otherwise
+/// start afterwards and block. Data already written stays in the pipe for
+/// the peer to read, as it would after a Unix shutdown.
+///
+/// The handle is not closed here: an operation on another thread may
+/// still be returning from it, and a closed handle's value can be reused
+/// by the next one opened, so a later cancel could hit another file. It
+/// closes when both halves are dropped, which a closed connection's users
+/// do once their read returns. The closer holds the halves only weakly, so
+/// it never keeps the pipe open, and does nothing once both are gone.
+pub fn cancellable<R, W>(reader: R, writer: W) -> Cancellable
+where
+    R: AsRawHandle + Send + Sync + 'static,
+    W: AsRawHandle + Send + Sync + 'static,
+    for<'a> &'a R: io::Read,
+    for<'a> &'a W: io::Write,
+{
+    let shutdown = Arc::new(Shutdown::default());
+    let (reader, writer) = (Arc::new(reader), Arc::new(writer));
+    let (weak_r, weak_w) = (Arc::downgrade(&reader), Arc::downgrade(&writer));
+    let state = shutdown.clone();
+    let close = move || {
+        state.closed.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + CANCEL_FOR;
+        loop {
+            // Both halves, though they share one handle: either may be the
+            // one still alive.
+            let r = cancel_all(&weak_r);
+            let w = cancel_all(&weak_w);
+            if !r && !w {
+                // Both halves are gone, and the handle with them.
+                return;
+            }
+            if state.busy.load(Ordering::SeqCst) == 0 || Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    (
+        Box::new(Half {
+            io: reader,
+            shutdown: shutdown.clone(),
+        }),
+        Box::new(Half {
+            io: writer,
+            shutdown,
+        }),
+        Box::new(close),
+    )
+}
+
+/// Cancel every pending operation of this process on the handle behind
+/// `half`, if it is still open: false when it is gone.
+fn cancel_all<T: AsRawHandle>(half: &Weak<T>) -> bool {
+    let Some(io) = half.upgrade() else {
+        return false;
+    };
+    // SAFETY: the handle is open while `io` is held. A null OVERLAPPED
+    // cancels all of this process's I/O on the handle; with nothing
+    // pending the call fails with ERROR_NOT_FOUND, which is fine.
+    unsafe { CancelIoEx(io.as_raw_handle() as HANDLE, std::ptr::null()) };
+    true
 }
