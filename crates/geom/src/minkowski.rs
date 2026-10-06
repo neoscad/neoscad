@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use clipper2_rust::{ClipType, FillRule, Path64, Paths64, Point64, PolyTree64, is_positive};
+use manifold_rust::cancel::CancelToken;
 use manifold_rust::impl_mesh::ManifoldImpl;
 use manifold_rust::linalg::{Vec3, dot};
 use manifold_rust::manifold::Manifold;
@@ -154,7 +155,14 @@ fn vec3(v: [f64; 3]) -> Vec3 {
 /// OpenSCAD's Nef conversion does. Conversion messages are dropped:
 /// OpenSCAD's CGAL reading prints none of Manifold's, and the fallback in
 /// [`minkowski_3d`] repeats the conversion that does.
-fn operand(g: &Geometry, ids: &dyn IdSource) -> Result<Operand, Failed> {
+///
+/// `token` stops the cutting into convex pieces ([`convex_pieces`]), whose
+/// splits are booleans of their own; a stopped cut is `Err(Failed)`.
+fn operand(
+    g: &Geometry,
+    ids: &dyn IdSource,
+    token: Option<&CancelToken>,
+) -> Result<Operand, Failed> {
     let solid = match g {
         Geometry::PolySet(ps) => {
             if ps.is_empty() {
@@ -198,7 +206,11 @@ fn operand(g: &Geometry, ids: &dyn IdSource) -> Result<Operand, Failed> {
         }
         Geometry::Polygon2d(_) => return Err(Failed),
     };
-    Ok(match convex_pieces(&solid.manifold) {
+    let pieces = convex_pieces(&solid.manifold, token);
+    if manifold_rust::cancel::is_cancelled(token) {
+        return Err(Failed);
+    }
+    Ok(match pieces {
         Some(pieces) => Operand::Pieces(pieces),
         None => Operand::Boundary(Box::new(solid)),
     })
@@ -236,8 +248,11 @@ const MAX_PIECES: usize = 64;
 /// `convex_decomposition_3` does it in spirit: while a piece has a reflex
 /// edge, cut it along the plane of one of that edge's faces (which leaves
 /// the edge flat on both sides), and split pieces that fall apart into
-/// their components. `None` when that would take too long.
-fn convex_pieces(m: &Manifold) -> Option<Vec<Vec<Vec3>>> {
+/// their components. `None` when that would take too long, or when `token`
+/// is cancelled: the token is looked at before every cut, since each cut
+/// is two booleans (manifold-rust's `split_by_plane`, which takes no
+/// token) and a solid can need up to `2 * MAX_PIECES` of them.
+fn convex_pieces(m: &Manifold, token: Option<&CancelToken>) -> Option<Vec<Vec<Vec3>>> {
     if reflex_planes(m.as_impl()).len() > MAX_REFLEX {
         return None;
     }
@@ -245,6 +260,9 @@ fn convex_pieces(m: &Manifold) -> Option<Vec<Vec<Vec3>>> {
     let mut out = Vec::new();
     let mut cuts = 0;
     while let Some(s) = stack.pop() {
+        if manifold_rust::cancel::is_cancelled(token) {
+            return None;
+        }
         if s.is_empty() {
             continue;
         }
@@ -514,13 +532,18 @@ fn coplanar(pts: &[Vec3]) -> bool {
 /// Hulls of the point sets, in order; on rayon's pool with the `parallel`
 /// feature. Each hull's result depends only on its points, so the order of
 /// the output (and everything after) is the same at any thread count.
-fn hulls(sets: &[Vec<Vec3>]) -> Vec<ManifoldImpl> {
+///
+/// Once `token` is cancelled the remaining hulls are skipped (left empty):
+/// a sum of two dense non-convex operands builds thousands of them, and
+/// without the check a cancel or a time limit would wait for every one
+/// before the union could notice it. The caller discards the result.
+fn hulls(sets: &[Vec<Vec3>], token: Option<&CancelToken>) -> Vec<ManifoldImpl> {
     // "if (minkowski_points.size() <= 3) return empty"; and a flat set
     // gives nothing either: OpenSCAD keeps only hull vertices whose faces
     // are not all coplanar, which leaves none of a planar hull, where
     // QuickHull returns a zero-volume mesh.
     let one = |s: &Vec<Vec3>| {
-        if s.len() <= 3 || coplanar(s) {
+        if s.len() <= 3 || coplanar(s) || manifold_rust::cancel::is_cancelled(token) {
             ManifoldImpl::new()
         } else {
             crate::hull::hull_3d(s)
@@ -551,18 +574,28 @@ fn hulls(sets: &[Vec<Vec3>]) -> Vec<ManifoldImpl> {
 /// those overlaps is most of the cost, so fewer and larger pieces win (an
 /// extruded L summed with a 32-segment sphere took 53 ms through boundary
 /// patches, 5 ms as 2 pieces).
+///
+/// `token` is the request's kernel token
+/// ([`crate::manifold_geom::kernel_token`]): the hulls and the union of
+/// each step stop on it, so a cancel or a limit ends a long sum instead of
+/// waiting for it. A cancelled sum is `None` (or an empty solid), without
+/// the fallback's warning; the caller sees the token and reports an
+/// interruption rather than this result.
 pub fn minkowski_3d<'a>(
     children: &[Geometry],
     conv: &dyn Fn(usize) -> Box<dyn IdSource + 'a>,
     own: &dyn IdSource,
+    token: Option<&CancelToken>,
     warnings: &mut Warnings,
     errors: &mut Warnings,
 ) -> Option<ManifoldGeometry> {
-    if let Ok(m) = fold(children, conv, own) {
-        return Some(m);
+    match fold(children, conv, own, token) {
+        Ok(m) => return Some(m),
+        Err(Failed) if manifold_rust::cancel::is_cancelled(token) => return None,
+        Err(Failed) => {}
     }
     warnings.push("[manifold] Minkowski hard-crashed, falling back to Nef operation.".into());
-    fallback(children, conv, own, warnings, errors)
+    fallback(children, conv, own, token, warnings, errors)
 }
 
 /// The fallback, `applyOperator3DManifold(children, MINKOWSKI)`: each child
@@ -575,6 +608,7 @@ fn fallback<'a>(
     children: &[Geometry],
     conv: &dyn Fn(usize) -> Box<dyn IdSource + 'a>,
     own: &dyn IdSource,
+    token: Option<&CancelToken>,
     warnings: &mut Warnings,
     errors: &mut Warnings,
 ) -> Option<ManifoldGeometry> {
@@ -600,7 +634,7 @@ fn fallback<'a>(
                         Geometry::Manifold(Arc::new(acc)),
                         Geometry::Manifold(Arc::new(m)),
                     ];
-                    fold(&pair, conv, own).unwrap_or_default()
+                    fold(&pair, conv, own, token).unwrap_or_default()
                 }
             }
         });
@@ -608,20 +642,26 @@ fn fallback<'a>(
     geom
 }
 
+/// `Err(Failed)` both where OpenSCAD's sum throws and when `token` stops
+/// it; [`minkowski_3d`] tells the two apart by the token.
 fn fold<'a>(
     children: &[Geometry],
     conv: &dyn Fn(usize) -> Box<dyn IdSource + 'a>,
     own: &dyn IdSource,
+    token: Option<&CancelToken>,
 ) -> Result<ManifoldGeometry, Failed> {
-    let mut lhs = operand(&children[0], &*conv(0))?;
+    let mut lhs = operand(&children[0], &*conv(0), token)?;
     let mut result: Option<ManifoldGeometry> = None;
     for (i, g) in children.iter().enumerate().skip(1) {
         if let Some(n) = result.take() {
-            lhs = operand(&Geometry::Manifold(Arc::new(n)), own)?;
+            lhs = operand(&Geometry::Manifold(Arc::new(n)), own, token)?;
         }
-        let rhs = operand(g, &*conv(i))?;
+        let rhs = operand(g, &*conv(i), token)?;
         let (sets, copies) = pair_terms(&lhs, &rhs);
-        let built = hulls(&sets);
+        let built = hulls(&sets, token);
+        if manifold_rust::cancel::is_cancelled(token) {
+            return Err(Failed);
+        }
         // IDs for the hulls, consecutive and in order, so the union orders
         // their triangles the same way whichever thread built them.
         let first = Manifold::reserve_ids(built.len() as u32);
@@ -639,8 +679,8 @@ fn fold<'a>(
             s.transform(&translation(v));
             parts.push(s);
         }
-        let mut n = ManifoldGeometry::batch(OpType::Add, parts)
-            .filter(|m| !m.is_empty())
+        let mut n = ManifoldGeometry::batch_until(OpType::Add, parts, token)
+            .filter(|m| !m.is_empty() && !m.is_cancelled())
             .ok_or(Failed)?;
         // Not `to_original`: when the sum is a single hull, the batch
         // returns that hull, which already counts as one original under
@@ -682,7 +722,7 @@ mod tests {
         let mut w = Vec::new();
         let mut e = Vec::new();
         let conv = |_: usize| -> Box<dyn IdSource> { Box::new(GlobalIds) };
-        minkowski_3d(children, &conv, &GlobalIds, &mut w, &mut e).expect("a solid")
+        minkowski_3d(children, &conv, &GlobalIds, None, &mut w, &mut e).expect("a solid")
     }
 
     #[test]
@@ -758,6 +798,7 @@ mod tests {
             ],
             &conv,
             &GlobalIds,
+            None,
             &mut w,
             &mut e,
         );
@@ -796,7 +837,7 @@ mod tests {
         };
         assert!(reflex_planes(m.manifold.as_impl()).len() > MAX_REFLEX);
         assert!(matches!(
-            operand(&Geometry::Manifold(m), &GlobalIds),
+            operand(&Geometry::Manifold(m), &GlobalIds, None),
             Ok(Operand::Boundary(_))
         ));
         // The sum with a small cube: the dent shrinks by the cube, the block
@@ -811,6 +852,62 @@ mod tests {
             v > 1331.0 - 4.0 / 3.0 * std::f64::consts::PI * 27.0 / 2.0 && v < 1331.0,
             "{v}"
         );
+    }
+
+    /// A token counting its checks, firing at the `fire_at`-th (never, with
+    /// `usize::MAX`). A count, not a timer: timed, a busy machine can let
+    /// the sum finish before the cancel, which says nothing about the
+    /// checks (as in `tests/kernel_cancel.rs`).
+    fn counting_token(seen: Arc<std::sync::atomic::AtomicUsize>, fire_at: usize) -> CancelToken {
+        use std::sync::atomic::Ordering;
+        CancelToken::new().with_check(Arc::new(move || {
+            seen.fetch_add(1, Ordering::Relaxed) + 1 >= fire_at
+        }))
+    }
+
+    /// A cancel that lands inside a sum stops it there: the hulls, the cuts
+    /// into convex pieces and the union of each step look at the request's
+    /// token. Before they did, nothing in `minkowski_3d` looked, so a
+    /// cancel or a time limit waited for the whole sum (a cube with a
+    /// round hole summed with a sphere ran for minutes).
+    #[test]
+    fn a_cancel_stops_the_sum() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ball = Geometry::PolySet(Arc::new(primitives::sphere(2.0, &disc(24.0))));
+        let children = [dented_block(), ball];
+        let conv = |_: usize| -> Box<dyn IdSource> { Box::new(GlobalIds) };
+        let run = |token: Option<&CancelToken>| {
+            let (mut w, mut e) = (Vec::new(), Vec::new());
+            let r = minkowski_3d(&children, &conv, &GlobalIds, token, &mut w, &mut e);
+            (r, w, e)
+        };
+
+        // A token that never fires: every check is counted, and the sum is
+        // the same, triangle for triangle, as without a token.
+        let plain = run(None).0.expect("a solid");
+        let total = Arc::new(AtomicUsize::new(0));
+        let (r, w, _) = run(Some(&counting_token(total.clone(), usize::MAX)));
+        let r = r.expect("a solid");
+        assert!(w.is_empty() && !r.is_cancelled());
+        let mesh = |m: &ManifoldGeometry| m.to_polyset(&crate::color::CORNFIELD);
+        assert!(mesh(&r) == mesh(&plain), "an unfired token changed the sum");
+        let total = total.load(Ordering::Relaxed);
+        assert!(total >= 8, "only {total} checks in a whole sum");
+
+        // Fired half way: the sum stops, with no fallback (and so no
+        // "hard-crashed" warning), after few more checks.
+        let seen = Arc::new(AtomicUsize::new(0));
+        let (r, w, e) = run(Some(&counting_token(seen.clone(), total / 2)));
+        assert!(r.is_none_or(|m| m.is_empty()));
+        assert!(w.is_empty() && e.is_empty(), "{w:?} {e:?}");
+        let seen = seen.load(Ordering::Relaxed);
+        assert!(seen < total, "{seen} checks before stopping, of {total}");
+
+        // Cancelled before it starts: nothing is built.
+        let seen = Arc::new(AtomicUsize::new(0));
+        let (r, w, _) = run(Some(&counting_token(seen.clone(), 1)));
+        assert!(r.is_none() && w.is_empty());
+        assert!(seen.load(Ordering::Relaxed) <= 1);
     }
 
     /// The hulls are built on rayon's pool; the result must not depend on

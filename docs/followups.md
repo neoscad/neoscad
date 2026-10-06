@@ -518,10 +518,19 @@ lead them, come roughly in order of user impact.
   triangle counts, say) and needs a benchmark run, since the same
   fan-out is what makes the heavy models fast.
 
-- A long `minkowski()` can't be stopped mid-way: `geom::minkowski`
-  (NeoSCAD's hull-and-union port, not manifold-rust's Minkowski) runs its
-  `batch` and `boolean` calls with no cancel token. Thread the request's
-  token through `minkowski_3d`, as the other boolean paths do.
+- `minkowski() { difference() { cube(10, center = true);
+  cylinder(r = 3, h = 12, center = true, $fn = 24); } sphere(2, $fn = 24); }`
+  ran for 127 s and peaked at 18.8 GB RSS (release build, no limits); the
+  nightly (`--backend=manifold`) takes 1 s. A stack sample puts all of
+  it in `convex_pieces`' `split_by_plane` booleans (`geom::minkowski`):
+  the hole's 24 reflex edges are under `MAX_REFLEX`, so the block is cut
+  into convex pieces, and the cuts get slower and larger as they go.
+  Since the cancel token reaches `minkowski_3d` (its cuts, hulls and
+  unions), `--limit time=2` and `--limit memory=1024` stop it within
+  4 s; the cost itself is not fixed. Cutting fewer pieces (a lower
+  `MAX_REFLEX` for curved holes, or covering through the boundary when
+  a cut's pieces grow) needs a look at why the pieces grow and a
+  benchmark run.
 
 ## Parity
 - `manifold-rust` 0.16.0 ports Manifold v3.5.0 (with a few later

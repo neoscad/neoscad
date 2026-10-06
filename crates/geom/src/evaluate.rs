@@ -2346,7 +2346,14 @@ impl Ctx<'_> {
                             };
                             let mut w = Vec::new();
                             let mut e = Vec::new();
-                            let m = minkowski::minkowski_3d(&geoms, &conv, &own, &mut w, &mut e);
+                            let m = minkowski::minkowski_3d(
+                                &geoms,
+                                &conv,
+                                &own,
+                                self.token.as_ref(),
+                                &mut w,
+                                &mut e,
+                            );
                             msgs.extend(w.into_iter().map(|t| Msg {
                                 severity: Some(Severity::Warning),
                                 text: t,
