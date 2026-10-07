@@ -29,7 +29,8 @@ The design covers two NeoSCAD extensions to the OpenSCAD language:
 10. User-facing documentation outline
 11. Staged implementation plan
 12. Alternatives considered
-13. Open questions for the owner
+13. Decisions
+14. The questions as first asked
 
 ## 1. OpenSCAD compatibility
 
@@ -963,7 +964,31 @@ lands.
   without a C++ runtime, it brings Eigen and Boost, and its `diagnose`
   is threaded (section 4.6).
 
-## 13. Open questions for the owner
+## 13. Decisions
+
+Settled by the owner (2026-10-07):
+
+1. **Flag names:** unprefixed, `--enable sketch` and `--enable query`,
+   checked against OpenSCAD's `Feature.cc` at every reference update.
+2. **Solved values:** anchors (and `measure --sketch`) for v1; a function
+   form only if it is missed.
+3. **Strictness:** an under-constrained sketch is an info message, as in
+   FreeCAD; `strict = true` makes it an error.
+4. **Licence:** the source stays GPL-2.0-or-later; distributed binaries
+   are already effectively GPLv3 through Apache-2.0-only dependencies
+   (README, "Licence"), so GPLv3-compatible dependencies are acceptable.
+   The solver is still NeoSCAD's own, in Rust, for WASM and determinism,
+   and it is validated against the established solvers' test suites
+   (FreeCAD's Sketcher and planegcs tests, SolveSpace's constraint tests)
+   and, as a differential oracle outside the shipped code, against
+   SolveSpace's solver.
+
+Still open, with the recommendation taken unless the owner says
+otherwise: top-level query syntax (not now), the `libm` crate (use it in
+the solver now), a scratch `Renderer` as the warm/cold fallback (yes),
+and the v1 vocabulary (section 4.3 as written).
+
+## 14. The questions as first asked
 
 1. **Flag names.** Are `sketch` and `query` unprefixed (matching
    `part`), or `neoscad-sketch`/`neoscad-query` so a future upstream
