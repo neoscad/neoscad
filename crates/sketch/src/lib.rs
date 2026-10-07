@@ -54,6 +54,11 @@
 //!    equation with the earlier ones it depends on: redundant if its
 //!    residual agrees with theirs, a conflict if not.
 //!
+//! For a sketch left with free degrees of freedom, [`Sketch::completion`]
+//! picks, from constraints a host proposes in its order of preference,
+//! those that would each remove some of that freedom at the solution, so
+//! the host can suggest exactly enough constraints and none redundant.
+//!
 //! # Determinism
 //!
 //! The result depends only on the sketch: the same bits on every platform

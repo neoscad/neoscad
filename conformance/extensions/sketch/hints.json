@@ -1,0 +1,525 @@
+[
+  {
+    "code": "sketch-underconstrained",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "add all 3: `length(bottom, 20); length(right, 10); fix(o);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 11
+            },
+            "start": {
+              "column": 1,
+              "line": 11
+            }
+          },
+          "text": "  length(bottom, 20);\n  length(right, 10);\n  fix(o);\n"
+        }
+      },
+      {
+        "message": "add `length(bottom, 20);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 11
+            },
+            "start": {
+              "column": 1,
+              "line": 11
+            }
+          },
+          "text": "  length(bottom, 20);\n"
+        }
+      },
+      {
+        "message": "add `length(right, 10);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 11
+            },
+            "start": {
+              "column": 1,
+              "line": 11
+            }
+          },
+          "text": "  length(right, 10);\n"
+        }
+      },
+      {
+        "message": "add `fix(o);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 11
+            },
+            "start": {
+              "column": 1,
+              "line": 11
+            }
+          },
+          "text": "  fix(o);\n"
+        }
+      }
+    ],
+    "line": 7,
+    "message": "Sketch 'loose': 4 free degrees of freedom; these can still move: 'o' along x, 'o' along y, 'a' along x, 'a' along y, 'b' along x, 'b' along y, 'c' along x, 'c' along y",
+    "severity": "info",
+    "span": {
+      "end": {
+        "column": 2,
+        "line": 11
+      },
+      "start": {
+        "column": 1,
+        "line": 7
+      }
+    },
+    "text": "INFO: Sketch 'loose': 4 free degrees of freedom; these can still move: 'o' along x, 'o' along y, 'a' along x, 'a' along y, 'b' along x, 'b' along y, 'c' along x, 'c' along y in file hints.scad, line 7"
+  },
+  {
+    "code": "sketch-underconstrained",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "add `length(right, 10);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 19
+            },
+            "start": {
+              "column": 1,
+              "line": 19
+            }
+          },
+          "text": "  length(right, 10);\n"
+        }
+      }
+    ],
+    "line": 14,
+    "message": "Sketch 'strict': 1 free degree of freedom; these can still move: 'b' along y, 'c' along y",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 2,
+        "line": 19
+      },
+      "start": {
+        "column": 1,
+        "line": 14
+      }
+    },
+    "text": "ERROR: Sketch 'strict': 1 free degree of freedom; these can still move: 'b' along y, 'c' along y in file hints.scad, line 14"
+  },
+  {
+    "code": "sketch-redundant",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "remove `length(top, 20)`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 28
+            },
+            "start": {
+              "column": 1,
+              "line": 27
+            }
+          },
+          "text": ""
+        }
+      }
+    ],
+    "line": 27,
+    "message": "Sketch 'redundant': length(top, 20) is implied by the other constraints: vertical(right) at line 25, vertical(left) at line 25, length(bottom, 20) at line 26",
+    "severity": "warning",
+    "span": {
+      "end": {
+        "column": 19,
+        "line": 27
+      },
+      "start": {
+        "column": 3,
+        "line": 27
+      }
+    },
+    "text": "WARNING: Sketch 'redundant': length(top, 20) is implied by the other constraints: vertical(right) at line 25, vertical(left) at line 25, length(bottom, 20) at line 26 in file hints.scad, line 27"
+  },
+  {
+    "code": "sketch-conflict",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "remove `length(top, 25)`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 47
+            },
+            "start": {
+              "column": 1,
+              "line": 46
+            }
+          },
+          "text": ""
+        }
+      },
+      {
+        "message": "remove `length(bottom, 20)`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 23,
+              "line": 45
+            },
+            "start": {
+              "column": 3,
+              "line": 45
+            }
+          },
+          "text": ""
+        }
+      },
+      {
+        "message": "remove `vertical(left)`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 80,
+              "line": 44
+            },
+            "start": {
+              "column": 64,
+              "line": 44
+            }
+          },
+          "text": ""
+        }
+      },
+      {
+        "message": "remove `vertical(right)`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 65,
+              "line": 44
+            },
+            "start": {
+              "column": 48,
+              "line": 44
+            }
+          },
+          "text": ""
+        }
+      },
+      {
+        "message": "or change the values so that they agree"
+      }
+    ],
+    "line": 46,
+    "message": "Sketch 'conflict': constraints conflict: length(top, 25) at line 46, vertical(right) at line 44, vertical(left) at line 44, length(bottom, 20) at line 45",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 19,
+        "line": 46
+      },
+      "start": {
+        "column": 3,
+        "line": 46
+      }
+    },
+    "text": "ERROR: Sketch 'conflict': constraints conflict: length(top, 25) at line 46, vertical(right) at line 44, vertical(left) at line 44, length(bottom, 20) at line 45 in file hints.scad, line 46"
+  },
+  {
+    "code": "sketch-flipped",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "if the solved shape is the one you meant, pin the drawing to it: 1 guess rewritten to the solved coordinates",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 2,
+              "line": 57
+            },
+            "start": {
+              "column": 1,
+              "line": 51
+            }
+          },
+          "text": "sketch(name = \"flipped\") {\n  o = point([0, 0]); a = point([10, 0]); b = point([10, -6]);\n  base = line(o, a); side = line(a, b); back = line(b, o);\n  fix(o); horizontal(base); vertical(side);\n  length(base, 10);\n  distance(a, b, -6, along = \"y\");\n}"
+        }
+      },
+      {
+        "message": "otherwise move the guesses of 'o' and its neighbours closer to the shape you mean"
+      }
+    ],
+    "line": 52,
+    "message": "Sketch 'flipped': the corner at 'o' between 'base' and 'back' turns the other way than drawn",
+    "severity": "warning",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 52
+      },
+      "start": {
+        "column": 7,
+        "line": 52
+      }
+    },
+    "text": "WARNING: Sketch 'flipped': the corner at 'o' between 'base' and 'back' turns the other way than drawn in file hints.scad, line 52"
+  },
+  {
+    "code": "sketch-flipped",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "if the solved shape is the one you meant, pin the drawing to it: 1 guess rewritten to the solved coordinates",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 2,
+              "line": 57
+            },
+            "start": {
+              "column": 1,
+              "line": 51
+            }
+          },
+          "text": "sketch(name = \"flipped\") {\n  o = point([0, 0]); a = point([10, 0]); b = point([10, -6]);\n  base = line(o, a); side = line(a, b); back = line(b, o);\n  fix(o); horizontal(base); vertical(side);\n  length(base, 10);\n  distance(a, b, -6, along = \"y\");\n}"
+        }
+      },
+      {
+        "message": "otherwise move the guesses of 'a' and its neighbours closer to the shape you mean"
+      }
+    ],
+    "line": 52,
+    "message": "Sketch 'flipped': the corner at 'a' between 'base' and 'side' turns the other way than drawn",
+    "severity": "warning",
+    "span": {
+      "end": {
+        "column": 40,
+        "line": 52
+      },
+      "start": {
+        "column": 26,
+        "line": 52
+      }
+    },
+    "text": "WARNING: Sketch 'flipped': the corner at 'a' between 'base' and 'side' turns the other way than drawn in file hints.scad, line 52"
+  },
+  {
+    "code": "sketch-flipped",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "if the solved shape is the one you meant, pin the drawing to it: 1 guess rewritten to the solved coordinates",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 2,
+              "line": 57
+            },
+            "start": {
+              "column": 1,
+              "line": 51
+            }
+          },
+          "text": "sketch(name = \"flipped\") {\n  o = point([0, 0]); a = point([10, 0]); b = point([10, -6]);\n  base = line(o, a); side = line(a, b); back = line(b, o);\n  fix(o); horizontal(base); vertical(side);\n  length(base, 10);\n  distance(a, b, -6, along = \"y\");\n}"
+        }
+      },
+      {
+        "message": "otherwise move the guesses of 'b' and its neighbours closer to the shape you mean"
+      }
+    ],
+    "line": 52,
+    "message": "Sketch 'flipped': the corner at 'b' between 'side' and 'back' turns the other way than drawn",
+    "severity": "warning",
+    "span": {
+      "end": {
+        "column": 60,
+        "line": 52
+      },
+      "start": {
+        "column": 46,
+        "line": 52
+      }
+    },
+    "text": "WARNING: Sketch 'flipped': the corner at 'b' between 'side' and 'back' turns the other way than drawn in file hints.scad, line 52"
+  },
+  {
+    "code": "sketch-no-guess",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "give it a guess: `point([4, 5])`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 53,
+              "line": 61
+            },
+            "start": {
+              "column": 46,
+              "line": 61
+            }
+          },
+          "text": "point([4, 5])"
+        }
+      }
+    ],
+    "line": 61,
+    "message": "Sketch 'placed': point 'b' has no guess, so the solver placed it; it solved to [4, 5]",
+    "severity": "info",
+    "span": {
+      "end": {
+        "column": 53,
+        "line": 61
+      },
+      "start": {
+        "column": 46,
+        "line": 61
+      }
+    },
+    "text": "INFO: Sketch 'placed': point 'b' has no guess, so the solver placed it; it solved to [4, 5] in file hints.scad, line 61"
+  },
+  {
+    "code": "sketch-self-intersection",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "move the guesses (or the dimensions) so that the curves do not cross, or mark one `construction = true`"
+      }
+    ],
+    "line": 70,
+    "message": "Sketch 'crossing': line 'l2' crosses circle 'ring' near [10, 7.85317]; the profile fills even-odd, so where loops cross the overlap is left out",
+    "severity": "warning",
+    "span": {
+      "end": {
+        "column": 35,
+        "line": 70
+      },
+      "start": {
+        "column": 25,
+        "line": 70
+      }
+    },
+    "text": "WARNING: Sketch 'crossing': line 'l2' crosses circle 'ring' near [10, 7.85317]; the profile fills even-odd, so where loops cross the overlap is left out in file hints.scad, line 70"
+  },
+  {
+    "code": "sketch-fillet-too-large",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "make it at most 10",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 15,
+              "line": 81
+            },
+            "start": {
+              "column": 13,
+              "line": 81
+            }
+          },
+          "text": "10"
+        }
+      }
+    ],
+    "line": 81,
+    "message": "Sketch 'big': fillet(o, 30) needs 30 along 'l1', which is 10 long",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 17,
+        "line": 81
+      },
+      "start": {
+        "column": 3,
+        "line": 81
+      }
+    },
+    "text": "ERROR: Sketch 'big': fillet(o, 30) needs 30 along 'l1', which is 10 long in file hints.scad, line 81"
+  },
+  {
+    "code": "sketch-underconstrained",
+    "file": "/doc/hints.scad",
+    "hints": [
+      {
+        "message": "add all 2: `vertical(l3); length(l2, 7.07107);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 92
+            },
+            "start": {
+              "column": 1,
+              "line": 92
+            }
+          },
+          "text": "  vertical(l3);\n  length(l2, 7.07107);\n"
+        }
+      },
+      {
+        "message": "add `vertical(l3);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 92
+            },
+            "start": {
+              "column": 1,
+              "line": 92
+            }
+          },
+          "text": "  vertical(l3);\n"
+        }
+      },
+      {
+        "message": "add `length(l2, 7.07107);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 92
+            },
+            "start": {
+              "column": 1,
+              "line": 92
+            }
+          },
+          "text": "  length(l2, 7.07107);\n"
+        }
+      }
+    ],
+    "line": 85,
+    "message": "Sketch 'labels': 2 free degrees of freedom; these can still move: 'q[1]' along x, 'q[1]' along y",
+    "severity": "info",
+    "span": {
+      "end": {
+        "column": 2,
+        "line": 92
+      },
+      "start": {
+        "column": 1,
+        "line": 85
+      }
+    },
+    "text": "INFO: Sketch 'labels': 2 free degrees of freedom; these can still move: 'q[1]' along x, 'q[1]' along y in file hints.scad, line 85"
+  }
+]

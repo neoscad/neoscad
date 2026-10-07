@@ -1337,6 +1337,29 @@ impl<'a> Evaluator<'a> {
         loc: Option<Loc>,
         hint: Option<String>,
     ) {
+        let hints = hint
+            .map(|message| {
+                vec![lang::diag::Hint {
+                    message,
+                    replacement: None,
+                }]
+            })
+            .unwrap_or_default();
+        self.emit_with_hints(severity, code, text, loc, hints);
+    }
+
+    /// [`Evaluator::emit`] with any number of fix hints, which may carry
+    /// exact edits (a sketch's "remove this redundant constraint"). An
+    /// edit's span must be in `loc`'s unit: the hint is located through
+    /// that unit's sources.
+    pub fn emit_with_hints(
+        &mut self,
+        severity: Severity,
+        code: DiagCode,
+        text: &[u8],
+        loc: Option<Loc>,
+        hints: Vec<lang::diag::Hint>,
+    ) {
         // OpenSCAD would already be unwinding from the first warning, so
         // nothing printed between it and the check that raises it exists
         // there (a builtin warning about several arguments, an unknown
@@ -1374,9 +1397,7 @@ impl<'a> Evaluator<'a> {
         crate::limits::live::charge(message_bytes(loc.is_some()) + 3 * text.len() as u64);
         let mut diag = Diagnostic::new(code, severity, String::from_utf8_lossy(text).into_owned())
             .with_base(PathBase::MainFileDir);
-        if let Some(h) = hint {
-            diag = diag.with_hint(h);
-        }
+        diag.hints.extend(hints);
         let mut sources = None;
         if let Some(l) = loc {
             let src = &self.units[l.unit as usize].program.sources;

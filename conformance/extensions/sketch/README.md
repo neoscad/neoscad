@@ -6,7 +6,7 @@ Models for NeoSCAD's `sketch()` extension (`--enable sketch`;
 
 Each `NAME.scad` has what the command line prints for it with
 `--enable sketch` (`NAME.echo`) and its `.csg` export (`NAME.csg`).
-`crates/session/tests/sketch.rs` checks both; rewrite them with
+`crates/session/tests/sketch.rs` checks them; rewrite them with
 `NEOSCAD_BLESS=1 cargo test -p neoscad-session --test sketch` after a
 change meant to alter them, and read the diff.
 
@@ -18,6 +18,16 @@ change meant to alter them, and read the diff.
   helper modules whose body is a `sketch()`.
 - `handles.scad`: entity handles as values.
 - `diagnostics.scad`: every diagnostic, at its span.
+- `hints.scad`: the hints of stage 3, which are exact edits where one is
+  known: constraints to add (measured on the solution), statements to
+  remove, the drawing pinned to the solution, a guess for an unguessed
+  point, a fillet size that fits; and loops that cross, and labels from
+  values (`pts[0]`).
+
+For `diagnostics.scad` and `hints.scad`, `NAME.json` holds the
+diagnostics as JSON (`docs/cli-json.md`), hints and their edits
+included. The same test applies every edit to the source and checks that
+the problem it was about is gone.
 
 The `.csg` files are plain OpenSCAD: the stock nightly renders them
 (`--backend=manifold`) to the meshes NeoSCAD renders from the sources, to

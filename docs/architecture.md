@@ -276,8 +276,9 @@ unless `--limit NAME=VALUE` is given. Every host that runs code it did
 not write — `serve`, `mcp`, `lsp --stdio` and the app — starts from
 `Limits::AGENT` (`crates/eval/src/limits.rs`): 60 s, 4 GiB of estimated
 memory, 10,000 fragments per primitive and slices per extrusion, 10
-million list elements, 64 MiB strings, 10 million `rands()` numbers
-and 10 million triangles per result. `session::Config::limits` sets a
+million list elements, 64 MiB strings, 10 million `rands()` numbers,
+10 million triangles per result and 5,000 unknowns per constrained
+sketch. `session::Config::limits` sets a
 session's, and a request's `limits` its own. A trip is an ordinary
 result with a `resource-limit` diagnostic, not a crash.
 

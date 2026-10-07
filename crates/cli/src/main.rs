@@ -268,8 +268,8 @@ struct Cli {
     hardwarnings: bool,
 
     /// A resource limit, NAME=VALUE (repeatable): time (s), memory (MiB,
-    /// or 4G), fragments, slices, list, string, rands, triangles; 'off'
-    /// for none. Unlimited by default, as OpenSCAD is. Also depth: nested
+    /// or 4G), fragments, slices, list, string, rands, triangles,
+    /// sketch_unknowns; 'off' for none. Unlimited by default, as OpenSCAD is. Also depth: nested
     /// module calls before 'Recursion detected' (default 100000; it cannot
     /// be off).
     #[arg(long = "limit", value_name = "NAME=VALUE", action = ArgAction::Append)]

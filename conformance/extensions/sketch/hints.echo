@@ -1,0 +1,12 @@
+INFO: Sketch 'loose': 4 free degrees of freedom; these can still move: 'o' along x, 'o' along y, 'a' along x, 'a' along y, 'b' along x, 'b' along y, 'c' along x, 'c' along y in file hints.scad, line 7
+ERROR: Sketch 'strict': 1 free degree of freedom; these can still move: 'b' along y, 'c' along y in file hints.scad, line 14
+WARNING: Sketch 'redundant': length(top, 20) is implied by the other constraints: vertical(right) at line 25, vertical(left) at line 25, length(bottom, 20) at line 26 in file hints.scad, line 27
+ERROR: Sketch 'conflict': constraints conflict: length(top, 25) at line 46, vertical(right) at line 44, vertical(left) at line 44, length(bottom, 20) at line 45 in file hints.scad, line 46
+WARNING: Sketch 'flipped': the corner at 'o' between 'base' and 'back' turns the other way than drawn in file hints.scad, line 52
+WARNING: Sketch 'flipped': the corner at 'a' between 'base' and 'side' turns the other way than drawn in file hints.scad, line 52
+WARNING: Sketch 'flipped': the corner at 'b' between 'side' and 'back' turns the other way than drawn in file hints.scad, line 52
+INFO: Sketch 'placed': point 'b' has no guess, so the solver placed it; it solved to [4, 5] in file hints.scad, line 61
+WARNING: Sketch 'crossing': line 'l2' crosses circle 'ring' near [10, 7.85317]; the profile fills even-odd, so where loops cross the overlap is left out in file hints.scad, line 70
+ERROR: Sketch 'big': fillet(o, 30) needs 30 along 'l1', which is 10 long in file hints.scad, line 81
+ECHO: <sketch point "p">, [<sketch point "q[0]">, <sketch point "q[1]">]
+INFO: Sketch 'labels': 2 free degrees of freedom; these can still move: 'q[1]' along x, 'q[1]' along y in file hints.scad, line 85

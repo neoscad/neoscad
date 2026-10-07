@@ -14,8 +14,9 @@
 //!
 //! - **Counts** ([`Limits::fragments`], [`Limits::slices`],
 //!   [`Limits::list`], [`Limits::string`], [`Limits::rands`],
-//!   [`Limits::triangles`]) are compared with what an operation is about
-//!   to build, so `sphere(10, $fn=1e5)` fails before it allocates a vertex.
+//!   [`Limits::triangles`], [`Limits::sketch_unknowns`]) are compared
+//!   with what an operation is about to build, so `sphere(10, $fn=1e5)`
+//!   fails before it allocates a vertex.
 //! - **Memory** ([`Limits::memory`]) is an estimate kept at the
 //!   allocation-heavy points, not a measurement of the process (the
 //!   workspace forbids the `unsafe` a counting global allocator needs, and
@@ -62,10 +63,11 @@ pub enum Limit {
     Rands,
     Triangles,
     Depth,
+    SketchUnknowns,
 }
 
 impl Limit {
-    pub const ALL: [Limit; 9] = [
+    pub const ALL: [Limit; 10] = [
         Limit::Time,
         Limit::Memory,
         Limit::Fragments,
@@ -75,6 +77,7 @@ impl Limit {
         Limit::Rands,
         Limit::Triangles,
         Limit::Depth,
+        Limit::SketchUnknowns,
     ];
 
     /// The name `--limit NAME=VALUE` and the JSON `limits` object use.
@@ -89,6 +92,7 @@ impl Limit {
             Limit::Rands => "rands",
             Limit::Triangles => "triangles",
             Limit::Depth => "depth",
+            Limit::SketchUnknowns => "sketch_unknowns",
         }
     }
 
@@ -108,6 +112,7 @@ impl Limit {
             Limit::Rands => "numbers per rands() call",
             Limit::Triangles => "triangles per result",
             Limit::Depth => "nested module calls",
+            Limit::SketchUnknowns => "unknowns per sketch",
         }
     }
 }
@@ -148,6 +153,12 @@ pub struct Limits {
     /// [`crate::recursion`] remain for the few shapes that still recurse
     /// natively per level.
     pub depth: Option<u64>,
+    /// Unknowns of one constrained sketch (`--enable sketch`): two per
+    /// point and one per circle. The solver's factorisations take O(n³)
+    /// time and O(n²) memory in this count, so a generated sketch is
+    /// refused before the first one, rather than left to run for minutes
+    /// between the time checks (which come once per iteration).
+    pub sketch_unknowns: Option<u64>,
 }
 
 /// [`Limits::depth`]'s default: about three times the module depth the
@@ -170,6 +181,7 @@ impl Limits {
         rands: None,
         triangles: None,
         depth: None,
+        sketch_unknowns: None,
     };
 
     /// The defaults of the agent and app surfaces (`serve`, `mcp`, the
@@ -184,6 +196,9 @@ impl Limits {
     /// - 10 million list elements (160 MB of numbers) and 64 MiB strings.
     /// - 10 million numbers from one `rands()`.
     /// - 10 million triangles in one result (a few GB as a Manifold mesh).
+    /// - 5,000 unknowns in one sketch: a dense QR of that size is about
+    ///   10^11 flops per iteration and 200 MB per matrix, where a real
+    ///   sketch has tens to a few hundred.
     pub const AGENT: Limits = Limits {
         time: Some(60.0),
         memory: Some(4 << 30),
@@ -194,6 +209,7 @@ impl Limits {
         rands: Some(10_000_000),
         triangles: Some(10_000_000),
         depth: None,
+        sketch_unknowns: Some(5_000),
     };
 
     pub fn is_none(&self) -> bool {
@@ -211,6 +227,7 @@ impl Limits {
             Limit::Rands => self.rands.map(|n| n as f64),
             Limit::Triangles => self.triangles.map(|n| n as f64),
             Limit::Depth => Some(self.depth.unwrap_or(DEFAULT_DEPTH) as f64),
+            Limit::SketchUnknowns => self.sketch_unknowns.map(|n| n as f64),
         }
     }
 
@@ -281,6 +298,7 @@ impl Limits {
             Limit::Triangles => self.triangles = v.map(count),
             // `None` is the default here, not unlimited (see `Limits::depth`).
             Limit::Depth => self.depth = v.map(count),
+            Limit::SketchUnknowns => self.sketch_unknowns = v.map(count),
         }
     }
 
@@ -381,6 +399,7 @@ impl Exceeded {
                     Limit::String => "bytes of string",
                     Limit::Rands => "random numbers",
                     Limit::Depth => "nested module calls",
+                    Limit::SketchUnknowns => "sketch unknowns",
                     _ => "triangles",
                 },
                 l.key(),
@@ -399,6 +418,9 @@ impl Exceeded {
             Limit::Rands => "ask rands() for fewer numbers",
             Limit::Triangles => "lower $fn or simplify the model",
             Limit::Depth => "check the recursion's end condition",
+            Limit::SketchUnknowns => {
+                "split the sketch into smaller ones, or check the loop that makes its entities"
+            }
             Limit::Memory => "simplify the model or lower $fn",
             Limit::Time => "simplify the model or lower $fn",
         };

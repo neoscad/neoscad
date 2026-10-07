@@ -309,6 +309,11 @@ pub struct ResourceLimits {
     /// `None`, so the web worker's older pages still parse.
     #[serde(default)]
     pub depth: Option<u64>,
+    /// Unknowns of one constrained sketch (`--enable sketch`): two per
+    /// point, one per circle. Absent from a JSON request is unlimited, as
+    /// for the other limits there.
+    #[serde(default)]
+    pub sketch_unknowns: Option<u64>,
 }
 
 impl From<session::Limits> for ResourceLimits {
@@ -323,6 +328,7 @@ impl From<session::Limits> for ResourceLimits {
             rands: l.rands,
             triangles: l.triangles,
             depth: l.depth,
+            sketch_unknowns: l.sketch_unknowns,
         }
     }
 }
@@ -355,6 +361,7 @@ impl ResourceLimits {
             rands: self.rands,
             triangles: self.triangles,
             depth: self.depth,
+            sketch_unknowns: self.sketch_unknowns,
         })
     }
 }

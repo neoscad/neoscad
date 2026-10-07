@@ -161,6 +161,12 @@ pub enum DiagCode {
     SketchForeignEntity,
     /// Geometry instantiated inside a sketch body.
     SketchGeometryInBody,
+    /// Sketch profile loops that cross each other or themselves, which the
+    /// even-odd fill turns into a shape the author probably did not mean.
+    SketchSelfIntersection,
+    /// A sketch point written without a guess, which the solver placed
+    /// (info).
+    SketchNoGuess,
 }
 
 impl DiagCode {
@@ -218,6 +224,8 @@ impl DiagCode {
             DiagCode::SketchUnknownEntity => "sketch-unknown-entity",
             DiagCode::SketchForeignEntity => "sketch-foreign-entity",
             DiagCode::SketchGeometryInBody => "sketch-geometry-in-body",
+            DiagCode::SketchSelfIntersection => "sketch-self-intersection",
+            DiagCode::SketchNoGuess => "sketch-no-guess",
         }
     }
 }

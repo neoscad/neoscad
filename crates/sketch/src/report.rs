@@ -86,6 +86,11 @@ pub struct Solution {
     pub conflicts: Vec<Dependency>,
     /// Where the solution's orientation differs from the drawing's.
     pub flipped: Vec<Orientation>,
+    /// The equations the solution does not meet (residual over
+    /// [`Solution::tolerance`]), each source once with its largest
+    /// residual, worst first: empty when solved. Where a solve that did not
+    /// converge is stuck.
+    pub unmet: Vec<(Source, f64)>,
     /// Points and circles that had no guess, in entity order: the solver
     /// placed them before solving.
     pub placed: Vec<EntityId>,

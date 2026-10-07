@@ -1,0 +1,326 @@
+[
+  {
+    "code": "sketch-underconstrained",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "add a dimension, or fix() what should not move (suggestions name the entities assigned to variables in the sketch's own body)"
+      }
+    ],
+    "line": 13,
+    "message": "Sketch 'under': 6 free degrees of freedom; these can still move: 'o' along x, 'o' along y, 'a' along x, 'a' along y, 'b' along x, 'b' along y",
+    "severity": "info",
+    "span": {
+      "end": {
+        "column": 39,
+        "line": 13
+      },
+      "start": {
+        "column": 1,
+        "line": 13
+      }
+    },
+    "text": "INFO: Sketch 'under': 6 free degrees of freedom; these can still move: 'o' along x, 'o' along y, 'a' along x, 'a' along y, 'b' along x, 'b' along y in file diagnostics.scad, line 13"
+  },
+  {
+    "code": "sketch-underconstrained",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "add `fix(c.center);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 69,
+              "line": 16
+            },
+            "start": {
+              "column": 69,
+              "line": 16
+            }
+          },
+          "text": "fix(c.center); "
+        }
+      }
+    ],
+    "line": 16,
+    "message": "Sketch 'strict': 2 free degrees of freedom; these can still move: 'c.center' along x, 'c.center' along y",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 70,
+        "line": 16
+      },
+      "start": {
+        "column": 1,
+        "line": 16
+      }
+    },
+    "text": "ERROR: Sketch 'strict': 2 free degrees of freedom; these can still move: 'c.center' along x, 'c.center' along y in file diagnostics.scad, line 16"
+  },
+  {
+    "code": "sketch-conflict",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "remove `distance(o, a, 12)`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 26
+            },
+            "start": {
+              "column": 1,
+              "line": 25
+            }
+          },
+          "text": ""
+        }
+      },
+      {
+        "message": "remove `length(l1, 10)`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 24
+            },
+            "start": {
+              "column": 1,
+              "line": 23
+            }
+          },
+          "text": ""
+        }
+      },
+      {
+        "message": "or change the values so that they agree"
+      }
+    ],
+    "line": 25,
+    "message": "Sketch 'conflict': constraints conflict: distance(o, a, 12) at line 25, length(l1, 10) at line 23",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 22,
+        "line": 25
+      },
+      "start": {
+        "column": 3,
+        "line": 25
+      }
+    },
+    "text": "ERROR: Sketch 'conflict': constraints conflict: distance(o, a, 12) at line 25, length(l1, 10) at line 23 in file diagnostics.scad, line 25"
+  },
+  {
+    "code": "sketch-redundant",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "remove `distance(o, a, 10)`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 36
+            },
+            "start": {
+              "column": 1,
+              "line": 35
+            }
+          },
+          "text": ""
+        }
+      }
+    ],
+    "line": 35,
+    "message": "Sketch 'redundant': distance(o, a, 10) is implied by the other constraints: length(l1, 10) at line 33",
+    "severity": "warning",
+    "span": {
+      "end": {
+        "column": 22,
+        "line": 35
+      },
+      "start": {
+        "column": 3,
+        "line": 35
+      }
+    },
+    "text": "WARNING: Sketch 'redundant': distance(o, a, 10) is implied by the other constraints: length(l1, 10) at line 33 in file diagnostics.scad, line 35"
+  },
+  {
+    "code": "sketch-open-profile",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "share the point, or mark the curve `construction = true`"
+      }
+    ],
+    "line": 41,
+    "message": "Sketch 'open': line 'l1' start is not joined to another profile curve",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 18,
+        "line": 41
+      },
+      "start": {
+        "column": 8,
+        "line": 41
+      }
+    },
+    "text": "ERROR: Sketch 'open': line 'l1' start is not joined to another profile curve in file diagnostics.scad, line 41"
+  },
+  {
+    "code": "sketch-open-profile",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "share the point, or mark the curve `construction = true`"
+      }
+    ],
+    "line": 41,
+    "message": "Sketch 'open': line 'l2' end is not joined to another profile curve",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 35,
+        "line": 41
+      },
+      "start": {
+        "column": 25,
+        "line": 41
+      }
+    },
+    "text": "ERROR: Sketch 'open': line 'l2' end is not joined to another profile curve in file diagnostics.scad, line 41"
+  },
+  {
+    "code": "sketch-fillet-too-large",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "make it at most 10",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 15,
+              "line": 51
+            },
+            "start": {
+              "column": 13,
+              "line": 51
+            }
+          },
+          "text": "10"
+        }
+      }
+    ],
+    "line": 51,
+    "message": "Sketch 'big': fillet(o, 30) needs 30 along 'l1', which is 10 long",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 17,
+        "line": 51
+      },
+      "start": {
+        "column": 3,
+        "line": 51
+      }
+    },
+    "text": "ERROR: Sketch 'big': fillet(o, 30) needs 30 along 'l1', which is 10 long in file diagnostics.scad, line 51"
+  },
+  {
+    "code": "sketch-geometry-in-body",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "inside a sketch, write `c = circle(...);` with entities as its arguments"
+      }
+    ],
+    "line": 57,
+    "message": "Sketch 'misuse': circle(5): in a sketch body, circle() makes an entity and must be assigned",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 13,
+        "line": 57
+      },
+      "start": {
+        "column": 3,
+        "line": 57
+      }
+    },
+    "text": "ERROR: Sketch 'misuse': circle(5): in a sketch body, circle() makes an entity and must be assigned in file diagnostics.scad, line 57"
+  },
+  {
+    "code": "sketch-unknown-entity",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "pass a variable assigned from point(), line(), arc() or circle()"
+      }
+    ],
+    "line": 58,
+    "message": "Sketch 'misuse': fix(3): p must be a sketch entity, found number (3)",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 58
+      },
+      "start": {
+        "column": 3,
+        "line": 58
+      }
+    },
+    "text": "ERROR: Sketch 'misuse': fix(3): p must be a sketch entity, found number (3) in file diagnostics.scad, line 58"
+  },
+  {
+    "code": "sketch-geometry-in-body",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "move it out of the sketch body"
+      }
+    ],
+    "line": 59,
+    "message": "Sketch 'misuse': geometry in a sketch body is not part of the sketch; only entities and constraints are",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 31,
+        "line": 59
+      },
+      "start": {
+        "column": 21,
+        "line": 59
+      }
+    },
+    "text": "ERROR: Sketch 'misuse': geometry in a sketch body is not part of the sketch; only entities and constraints are in file diagnostics.scad, line 59"
+  },
+  {
+    "code": "unknown-module",
+    "file": "/doc/diagnostics.scad",
+    "hints": [
+      {
+        "message": "define the module, or `use`/`include` the file that defines it"
+      }
+    ],
+    "line": 63,
+    "message": "Ignoring unknown module 'fix'",
+    "severity": "warning",
+    "span": {
+      "end": {
+        "column": 8,
+        "line": 63
+      },
+      "start": {
+        "column": 1,
+        "line": 63
+      }
+    },
+    "text": "WARNING: Ignoring unknown module 'fix' in file diagnostics.scad, line 63"
+  }
+]

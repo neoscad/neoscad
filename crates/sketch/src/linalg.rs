@@ -204,9 +204,81 @@ pub(crate) fn rank_analysis(rows: &[Vec<f64>], n: usize, tol: f64) -> RankAnalys
     out
 }
 
+/// The span of a growing set of unit-length rows, kept as the Householder
+/// reflectors of QR of their transpose, as in [`rank_analysis`]: a row is
+/// taken only if it adds to the rank. Rows can be taken back
+/// ([`Basis::truncate`]), so a group of rows (one constraint's equations)
+/// can be tried and kept only if every one of them is independent.
+#[derive(Clone, Debug)]
+pub(crate) struct Basis {
+    n: usize,
+    tol: f64,
+    refl: Vec<Reflector>,
+}
+
+impl Basis {
+    pub fn new(n: usize, tol: f64) -> Basis {
+        Basis {
+            n,
+            tol,
+            refl: Vec::new(),
+        }
+    }
+
+    pub fn rank(&self) -> usize {
+        self.refl.len()
+    }
+
+    /// Take `row` (unit length) if it is independent of the rows taken so
+    /// far; whether it was.
+    pub fn push(&mut self, row: &[f64]) -> bool {
+        let r = self.refl.len();
+        if r == self.n {
+            return false;
+        }
+        let mut w = row.to_vec();
+        for h in &self.refl {
+            h.apply(&mut w);
+        }
+        let rem = sum_squares(&w[r..]).sqrt();
+        if rem <= self.tol {
+            return false;
+        }
+        let alpha = if w[r] >= 0.0 { -rem } else { rem };
+        let mut v = w[r..].to_vec();
+        v[0] -= alpha;
+        let vtv = sum_squares(&v);
+        self.refl.push(Reflector { at: r, v, vtv });
+        true
+    }
+
+    /// Forget the rows taken after the first `rank`.
+    pub fn truncate(&mut self, rank: usize) {
+        self.refl.truncate(rank);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_basis_takes_independent_rows_and_gives_back_a_group() {
+        let s = 0.5f64.sqrt();
+        let mut b = Basis::new(3, 1e-10);
+        assert!(b.push(&[1.0, 0.0, 0.0]));
+        assert!(!b.push(&[1.0, 0.0, 0.0]));
+        let r = b.rank();
+        assert!(b.push(&[0.0, 1.0, 0.0]));
+        // In the span of the two taken: refused.
+        assert!(!b.push(&[s, s, 0.0]));
+        b.truncate(r);
+        assert_eq!(b.rank(), 1);
+        // Taken back, so the diagonal is independent again.
+        assert!(b.push(&[s, s, 0.0]));
+        assert!(b.push(&[0.0, 0.0, 1.0]));
+        assert!(!b.push(&[0.0, 1.0, 0.0]));
+    }
 
     #[test]
     fn damped_step_solves_a_square_system() {

@@ -497,7 +497,8 @@ output's directory is created.
 - **Resource limits:** every call runs under the agent limits (60 s,
   4 GiB of memory (measured and estimated), 10,000 fragments per primitive, 10,000
   slices, 10 million list elements and `rands()` numbers, 64 MiB
-  strings, 10 million triangles per result; `docs/cli-json.md`,
+  strings, 10 million triangles per result, 5,000 unknowns per
+  constrained sketch; `docs/cli-json.md`,
   "Resource limits"). A model that would pass one (`sphere(10,
   $fn=100000)` once reached a 43 GB footprint) fails at once with a
   `resource-limit` error that names the limit and the flag that raises

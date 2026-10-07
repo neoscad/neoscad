@@ -597,7 +597,7 @@ impl<'a> Evaluator<'a> {
             self.truncate(mark);
             return Some(Ret::Kids(Err(e)));
         }
-        self.sketch_label(before, children.scope);
+        self.sketch_label(before, children.scope, &c);
         let out = self.heap_out.len() as u32;
         self.heap.push(Frame::Scope(ScopeRun {
             sr: children.scope,
@@ -770,7 +770,8 @@ impl<'a> Evaluator<'a> {
                 // module's body, called from a sketch body) adds to it.
                 let merge = self.sketch.is_some();
                 if !merge {
-                    self.sketch_open(&p, loc);
+                    let body = self.children_scope(sr, i);
+                    self.sketch_open(&p, loc, body);
                 }
                 let node = self.new_node(NodeKind::Group { name: None }, sr, i);
                 let post = Post {

@@ -1,8 +1,10 @@
 # Language extensions: constrained sketches and geometry queries
 
-Status: design; stages 0 (the flags), 1 (the solver crate) and 2 (the
-language binding of sketches, `--enable sketch`) built; section 11.1
-records how stage 2 was built and where it departs from this text.
+Status: design; stages 0 (the flags), 1 (the solver crate), 2 (the
+language binding of sketches, `--enable sketch`) and 3 (diagnostics with
+hints, strict mode, the unknowns limit) built; sections 11.1 and 11.2
+record how stages 2 and 3 were built and where they depart from this
+text.
 Written 2026-10-07 against the tree at
 `4aa80a4` and the reference checkout in `.reference/openscad`. Every
 claim about this codebase cites `path:line`; claims about OpenSCAD cite
@@ -1017,9 +1019,9 @@ dump). What it does, and where it departs from sections 4 and 9:
   lines are `invalid-argument`. Messages name a constraint by its source
   text (`length(axis, slot_len)`), not by evaluated values as section
   4.7's examples do. Every error leaves the sketch an empty polygon; the
-  model goes on. Not built yet (stage 3): `sketch-self-intersection`, the
-  info for points placed without a guess, and hints with `replace` edits
-  or suggested constraints. `sketch-foreign-entity` guards an invariant
+  model goes on. Stage 3 added `sketch-self-intersection`, the info for
+  points placed without a guess and the hints (section 11.2).
+  `sketch-foreign-entity` guards an invariant
   rather than a case found in practice: every way found of reaching a
   handle outside its sketch (helpers, children, `$` variables, function
   literals) runs inside the sketch, which merges.
@@ -1035,8 +1037,8 @@ dump). What it does, and where it departs from sections 4 and 9:
   `io::fragments` (section 8), with `geom::fragments` as its form over a
   node's `Discretizer`.
 - **Limits.** Under any resource limit a sketch may have at most 5,000
-  unknowns (the design's `Limits::sketch_unknowns`, as a constant until
-  stage 3); the solve polls the interrupt flag and the time limit.
+  unknowns (a constant until stage 3 made it `Limits::sketch_unknowns`);
+  the solve polls the interrupt flag and the time limit.
 - **Docs.** `sketch` and the vocabulary have `builtins.toml` entries
   labelled `extension = "sketch"`; `neoscad docs` lists the vocabulary on
   a line of its own, and LSP completion leaves it out until stage 4 makes
@@ -1052,6 +1054,99 @@ dump). What it does, and where it departs from sections 4 and 9:
   its polygon, that a sketch circle is `circle()` at any `$fn`, `$fa`,
   `$fs`, and the same STL at 1, 2 and 8 threads; `crates/wasm-check`
   renders the two worked examples on wasm32.
+
+### 11.2 Stage 3 as built
+
+Stage 3 is in `crates/eval/src/sketch.rs` (the diagnosis and its hints),
+`crates/sketch/src/solve.rs` (two additions to the solver) and the
+limits plumbing. What it does, and where it departs from sections 4.6
+and 4.7:
+
+- **Hints are edits.** A diagnostic's hints go out in the existing JSON
+  shape (`hints[]` with `replace`; `crates/session/src/diag.rs`), which
+  the language server already turns into code actions
+  (`crates/lsp/src/diagnose.rs`, `fixes`). One hint carries one edit, so
+  a fix that needs several is either one edit of a larger span (pinning
+  the drawing replaces the whole `sketch()` call) or several hints. An
+  edit is only attached where it is exactly right; otherwise the hint is
+  advice:
+  - *Under-constrained*: constraints to add, as statements inserted
+    before the body's closing brace (on their own lines, indented like
+    the body), each measured on the solution so that it holds there:
+    `horizontal(l)` for a line solved level, `length`, `radius`, `angle`
+    between lines sharing a point, `fix(p)` (with `at` when the solve
+    moved it from its guess), and last a coordinate measured from a point
+    that cannot move (`distance(o, p, 12, along = "y")`). The solver picks
+    which of these candidates to keep: `Sketch::completion` takes them in
+    that order and keeps each whose equations all add to the rank of the
+    Jacobian at the solution, until no freedom is left. So each suggestion
+    on its own removes freedom and none is redundant, and with several
+    there is first an "add all N" hint that leaves the sketch fully
+    constrained. Only entities the outermost body names can be suggested
+    (a helper module's variables are not in scope there); sketches over
+    400 unknowns get advice only, as the rank updates cost O(n²) per
+    candidate equation.
+  - *Redundant*: delete the statement, with its line when nothing else is
+    on it. *Conflict*: one hint per statement in the conflicting set
+    (the later first, at most four) deleting it, and advice to make the
+    values agree. A statement that ran more than once (in a loop, or in a
+    helper called twice) or that is not written as a statement (the
+    radius of `circle(c, r = 5)`) gets advice instead of an edit.
+  - *Flipped*: "pin the drawing", the textual form of section 4.8's code
+    action: the `sketch()` call with every literal `[x, y]` guess in it
+    rewritten to the solved coordinates (6 significant digits), so that
+    the next solve starts on the solved branch. Guesses computed from
+    parameters keep their expressions. And advice for the other case,
+    that the drawing should move towards the shape meant.
+  - *No convergence*: the message names the equations still unmet, worst
+    first (the solver's new `Solution::unmet`), and the hint the points
+    whose guesses to move. There is no edit: no solution is known.
+  - *Fillet too large*: the size argument replaced with the largest that
+    fits, rounded down so that it does fit.
+- **New diagnostics.** `sketch-self-intersection` (warning) for profile
+  loops that cross each other or themselves, found on the tessellated
+  loops (proper crossings only; touching loops are not reported), naming
+  the two curves and where. `sketch-no-guess` (info) for a point written
+  `point()`, saying where it solved, with the edit that writes that
+  position in as its guess. Section 4.7 has no code for the latter; it is
+  the "info diagnostic" of section 4.2.
+- **The implied parallel.** `distance(l1, l2, d)` adds a parallel
+  constraint (section 11.1). Stage 2 reported it as redundant, under the
+  distance's name, whenever other constraints already made the lines
+  parallel (two `horizontal` edges), and the obvious fix, deleting the
+  distance, would have lost a dimension. It is no longer reported as
+  redundant; in a conflict it is named as "(which makes the lines
+  parallel)".
+- **Messages.** A statement in a loop is many constraints with one text:
+  identical messages are printed once, and a message lists at most six
+  statements ("and N more"). The other texts are stage 2's.
+- **Labels from values.** Besides a call that is an assignment's whole
+  expression, an entity takes the name of the variable that holds it
+  (`p = f(point(...))`, a conditional), and a list of entities names its
+  elements (`pts[0]`, one level of nesting deeper too). Entities made in
+  a statement's arguments still have no name (`point #3`).
+- **Strict mode** is unchanged from stage 2 (Decision 3): the
+  under-constrained message is info, an error with `strict = true`, and
+  its hints are the same either way.
+- **Limits.** `Limits::sketch_unknowns` (`crates/eval/src/limits.rs`) is
+  a limit like the others: `--limit sketch_unknowns=N`, the `limits`
+  object of `serve` and MCP requests, `sketch_unknowns` in the apps'
+  `ResourceLimits`, 5,000 under `Limits::AGENT`, none by default. Past
+  it, `sketch()` stops evaluation with a `resource-limit` error before
+  the solve, as `rands()` does. The solve's interrupt callback is the
+  request's cancel flag and its time limit, polled once per
+  Levenberg–Marquardt iteration and per equation in
+  `Sketch::completion`.
+- **Fillets** between a line and an arc stay in stage 7 (section 11).
+- **Tests.** `conformance/extensions/sketch/hints.scad` has every new
+  hint and diagnostic, with its JSON (`hints.json`; `diagnostics.json`
+  for the stage 2 model) checked by `crates/session/tests/sketch.rs`,
+  which also applies every edit a hint carries and checks that its
+  problem is gone, checks the unknowns limit, and stops a 300-unknown
+  solve by cancellation and by the time limit. The solver's
+  `completion` and `unmet` have tests of their own
+  (`crates/sketch/tests/completion.rs`), and the edit placement
+  (deletion, insertion) unit tests in `crates/eval/src/sketch.rs`.
 
 ## 12. Alternatives considered
 

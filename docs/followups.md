@@ -1608,12 +1608,11 @@ lead them, come roughly in order of user impact.
   deprecated, and `client::Severity`/the ffi's have no info variant. Stage
   4 should add one, with the editor marker and the LSP's
   `DiagnosticSeverity::Information`.
-- Stage 1 of `docs/language-extensions.md` built the solver crate
-  (`crates/sketch`, package `sketch-solver`) with no language binding.
-  Stages 2 and 3 map `SolveOptions::max_unknowns` and `interrupt` to
-  `Limits::sketch_unknowns` and the evaluator's interrupt flag, and the
-  plain-data diagnosis (`Solution::free`, `redundant`, `conflicts`,
-  `flipped`, `placed`) to spans, names and hints.
+- The diagnosis after a solve (`Solver::diagnose`'s rank analysis,
+  O(equations × n²)) does not poll the interrupt; only the iterations
+  and `Sketch::completion` do. Under `Limits::sketch_unknowns` (5,000)
+  it is bounded, but at that size it is tens of seconds that a
+  cancellation cannot cut short.
 - Solve time is dense O(n³) per iteration: a regular polygon drawn
   roughly (angles, equal sides, one length; free to rotate) of 100
   unknowns takes 24 ms, 200 take 190 ms and 400 take 1.6 s (about 40
@@ -1653,21 +1652,29 @@ lead them, come roughly in order of user impact.
 - Exactify snaps coincident, horizontal and vertical classes, fixed
   coordinates and circle radii; midpoints and symmetric points are not
   snapped to their exact formulas.
-- Stage 2 (the language binding, `crates/eval/src/sketch.rs`) leaves for
-  stage 3: `sketch-self-intersection` (loops that cross), the info for
-  points the solver placed without a guess, and hints that are edits
-  (delete the redundant statement, the constraint a free direction
-  needs). The under-constrained message lists every coordinate with a
-  mobility over 0.01, so it can name more coordinates than there are
-  free degrees of freedom (a point sliding along a 45° line is listed in
-  x and in y).
-- `Limits::sketch_unknowns` is a constant (5,000 under any resource
-  limit, none without one) in `crates/eval/src/sketch.rs`; stage 3 makes
-  it a limit with its own `resource-limit` text.
-- Only an entity made by a call that is an assignment's whole expression
-  gets the variable's name (`p = point(...)`); `p = f(point(...))` or an
-  entity made in a statement's arguments prints as `<sketch point>` and
-  is named `point #3` in messages.
+- The under-constrained message lists every coordinate with a mobility
+  over 0.01, so it can name more coordinates than there are free degrees
+  of freedom (a point sliding along a 45° line is listed in x and in y).
+  The suggested constraints (stage 3) are exactly as many as needed.
+- Suggested constraints (stage 3, `docs/language-extensions.md` section
+  11.2) name only entities the outermost sketch body names: a sketch
+  built by a helper module gets advice, not an edit, and so does a
+  sketch over 400 unknowns. Inserting into the helper's own body would
+  constrain every use of it.
+- One flip often shows at several places (a triangle drawn the other way
+  round turns all three corners): one warning each, with the same "pin
+  the drawing" edit. Grouping them would read better.
+- The angle a suggested `angle()` states is measured with `io::trig`'s
+  `atan2`, whose last bit may differ by platform; it only reaches the
+  hint's text, at 6 digits.
+- `sketch-self-intersection` tests the tessellated loops, so two arcs
+  that nearly touch can cross only between their chords (or the
+  reverse), and curves that overlap along a stretch, or touch, are not
+  reported. The sweep stops after 20 million segment pairs.
+- An entity made in a statement's arguments (`fix(point([1, 2]))`) has no
+  name: it prints as `<sketch point>` and is `point #3` in messages.
+  Stage 3 names entities by the variable that holds them, list elements
+  included (`pts[0]`).
 - Fillets and chamfers cut corners between two lines only; line–arc and
   arc–arc fillets are stage 7.
 - The goldens in `conformance/extensions/sketch` run as a cargo test

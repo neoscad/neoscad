@@ -280,6 +280,9 @@ pub struct ResourceLimits {
     /// is the default (100,000), not unlimited: this limit cannot be
     /// turned off. 0 is an invalid argument.
     pub depth: Option<u64>,
+    /// Unknowns of one constrained sketch (`--enable sketch`): two per
+    /// point, one per circle.
+    pub sketch_unknowns: Option<u64>,
 }
 
 pub use client::{console, diagnostics, geometry_stats};

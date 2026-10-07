@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use crate::equations::{
     Dim, Eq, Layout, Row, Source, coincident_classes, cross, dot, lower, norm, sub,
 };
-use crate::linalg::{Mat, damped_step, rank_analysis};
+use crate::linalg::{Basis, Mat, damped_step, rank_analysis};
 use crate::model::{Constraint, Entity, EntityId, Sketch};
 use crate::report::{Dependency, FreeCoordinate, Orientation, Slot, Solution, SolveError, Status};
 use crate::trig;
@@ -80,6 +80,109 @@ impl Sketch {
     /// thread.
     pub fn solve_with(&self, opt: &SolveOptions<'_>) -> Result<Solution, SolveError> {
         Solver::new(self, opt)?.run()
+    }
+
+    /// Which of `candidates` would complete the constraints at `sol` (a
+    /// solution of this sketch): taken in order, each candidate whose
+    /// equations are all independent of the sketch's and of the
+    /// candidates already taken, until no degree of freedom is left. The
+    /// indices of the candidates taken come back in order.
+    ///
+    /// This is how a host turns "these coordinates can still move" into
+    /// constraints to suggest: it proposes candidates in the order it
+    /// prefers (a dimension before a fixed coordinate, say), measured on
+    /// `sol` so that each holds there, and this keeps the ones that each
+    /// remove a degree of freedom. Each taken candidate on its own is also
+    /// independent of the sketch's equations, so a host may offer them one
+    /// by one. Only the equations' gradients at `sol` count, not their
+    /// targets, so a candidate's value only needs to be close to what it
+    /// measures. A candidate the model refuses (a wrong kind of entity) is
+    /// not taken.
+    ///
+    /// The cost is a rank-one update per equation, O(equations × n²) for n
+    /// unknowns. `opt.interrupt` is polled per equation, and
+    /// `opt.max_unknowns` applies as in [`Sketch::solve_with`].
+    pub fn completion(
+        &self,
+        sol: &Solution,
+        candidates: &[Constraint],
+        opt: &SolveOptions<'_>,
+    ) -> Result<Vec<usize>, SolveError> {
+        let lay = Layout::new(self);
+        let n = lay.len();
+        if n > opt.max_unknowns {
+            return Err(SolveError::TooManyUnknowns {
+                unknowns: n,
+                limit: opt.max_unknowns,
+            });
+        }
+        if sol.values.len() != n {
+            return Ok(Vec::new());
+        }
+        let mut all = self.clone();
+        let base = self.constraints.len();
+        // Each candidate's constraint index in `all`, if the model took it.
+        let mut index = Vec::with_capacity(candidates.len());
+        for c in candidates {
+            index.push(all.add(c.clone()).ok().map(|id| id.index()));
+        }
+        let rows = lower(&all, &lay, &sol.values);
+        let interrupted = || opt.interrupt.is_some_and(|f| f());
+        let mut basis = Basis::new(n, RANK_TOLERANCE);
+        let mut g = Vec::new();
+        let mut dense = vec![0.0; n];
+        let mut unit = |row: &Row, out: &mut Vec<f64>| -> bool {
+            g.clear();
+            row.eval(&sol.values, sol.size, &mut g);
+            out.iter_mut().for_each(|e| *e = 0.0);
+            for &(v, d) in &g {
+                out[v] += d;
+            }
+            let len = sum_squares(out).sqrt();
+            if !(len > 0.0 && len.is_finite()) {
+                return false;
+            }
+            out.iter_mut().for_each(|e| *e /= len);
+            true
+        };
+        let mut by_constraint: Vec<Vec<usize>> = vec![Vec::new(); all.constraints.len()];
+        for (i, r) in rows.iter().enumerate() {
+            match r.source {
+                Source::Constraint(c) if c.index() >= base => by_constraint[c.index()].push(i),
+                _ => {
+                    if interrupted() {
+                        return Err(SolveError::Interrupted);
+                    }
+                    if unit(r, &mut dense) {
+                        basis.push(&dense);
+                    }
+                }
+            }
+        }
+        let mut taken = Vec::new();
+        for (k, at) in index.iter().enumerate() {
+            if basis.rank() == n {
+                break;
+            }
+            let Some(at) = *at else { continue };
+            let before = basis.rank();
+            let mut all_in = !by_constraint[at].is_empty();
+            for &ri in &by_constraint[at] {
+                if interrupted() {
+                    return Err(SolveError::Interrupted);
+                }
+                if !(unit(&rows[ri], &mut dense) && basis.push(&dense)) {
+                    all_in = false;
+                    break;
+                }
+            }
+            if all_in {
+                taken.push(k);
+            } else {
+                basis.truncate(before);
+            }
+        }
+        Ok(taken)
     }
 }
 
@@ -751,6 +854,7 @@ impl<'s, 'o> Solver<'s, 'o> {
         let mut conflicts: BTreeMap<Source, Vec<Source>> = BTreeMap::new();
         let mut covered = vec![false; n];
         let mut residual = 0.0f64;
+        let mut unmet: BTreeMap<Source, f64> = BTreeMap::new();
         let mut local = vec![usize::MAX; n];
         let mut g = Vec::new();
         for comp in comps {
@@ -765,6 +869,10 @@ impl<'s, 'o> Solver<'s, 'o> {
                 g.clear();
                 let f = self.rows[ri].eval(&self.x, self.size, &mut g);
                 residual = worse(residual, f);
+                if worse(0.0, f) > self.tol {
+                    let e = unmet.entry(self.rows[ri].source).or_insert(0.0);
+                    *e = worse(*e, f);
+                }
                 let mut row = vec![0.0; nc];
                 for &(v, d) in &g {
                     row[local[v]] += d;
@@ -850,6 +958,10 @@ impl<'s, 'o> Solver<'s, 'o> {
                 Entity::Line { .. } => Slot::Line,
             })
             .collect();
+        let mut unmet: Vec<(Source, f64)> = unmet.into_iter().collect();
+        // Worst first; equal residuals in source order (the sort is
+        // stable), so the order is the same everywhere.
+        unmet.sort_by(|a, b| b.1.total_cmp(&a.1));
         Solution {
             status: if all && residual <= self.tol {
                 Status::Solved
@@ -864,6 +976,7 @@ impl<'s, 'o> Solver<'s, 'o> {
             redundant: deps(redundant),
             conflicts: deps(conflicts),
             flipped,
+            unmet,
             placed: self.placed.clone(),
             iterations: self.iterations,
             residual,

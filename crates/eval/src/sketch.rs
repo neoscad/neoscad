@@ -32,9 +32,12 @@
 //!   enclosing sketch instead of starting its own: that is how constraint
 //!   patterns are reused.
 //! - When the outermost body ends, the model is solved, the diagnosis is
-//!   printed with the constraints' spans, fillets and chamfers are cut at
-//!   their corners, and the profile's closed loops become a polygon
-//!   (`NodeKind::Sketch`), tessellated by `circle()`'s rule.
+//!   printed with the constraints' spans and with hints that are exact
+//!   edits where one is known (constraints to add, measured on the
+//!   solution; a statement to delete; the drawing pinned to the
+//!   solution), fillets and chamfers are cut at their corners, and the
+//!   profile's closed loops become a polygon (`NodeKind::Sketch`),
+//!   tessellated by `circle()`'s rule.
 //!
 //! A sketch's errors leave an empty shape rather than stopping evaluation
 //! (section 4.7), so the rest of the model still renders. Everything here
@@ -49,8 +52,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use lang::diag::{DiagCode, Severity};
+use lang::ast::Ast;
+use lang::diag::{DiagCode, Hint, Severity};
 use lang::number::fmt_number;
+use lang::source::Span;
 use sketch_solver::{
     Along, Constraint, ConstraintId, Coordinate, EntityId, EntityKind, ModelError, Orientation,
     Pair, Sketch, Solution, SolveError, SolveOptions, Source, Status,
@@ -60,18 +65,13 @@ use crate::builtins::functions::Builtin;
 use crate::builtins::modules::{BuiltinModule, Params};
 use crate::call::ArgVal;
 use crate::context::{Ctx, ScopeRef};
-use crate::eval::Evaluator;
+use crate::eval::{Evaluator, Unit};
+use crate::limits::Limit;
 use crate::message::{Loc, R};
 use crate::node::{Discretizer, Node, NodeKind, SketchNode, SketchReport};
 use crate::sym::{FxBuild, Sym, Syms};
 use crate::trig::{atan2_degrees, cos_degrees, sin_degrees};
 use crate::value::Value;
-
-/// Unknowns a sketch may have under a host's resource limits: the solver's
-/// factorisations are O(n³) in time and O(n²) in memory, so a generated
-/// sketch must be stopped before it starts (the design's
-/// `Limits::sketch_unknowns`, which stage 3 makes a limit of its own).
-const LIMITED_UNKNOWNS: usize = 5000;
 
 /// A sketch statement: a constraint, a fillet or chamfer, or an entity
 /// written as a statement by mistake.
@@ -264,6 +264,12 @@ fn kind_name(k: EntityKind) -> &'static str {
 struct Stmt {
     text: String,
     loc: Loc,
+    /// Written as a statement of its own, so deleting its text removes
+    /// it; not the radius a `circle(c, r = 5)` call states.
+    written: bool,
+    /// Its arguments as written: name, and the span of the expression if
+    /// it is a number literal (which an edit may replace).
+    args: Vec<(Option<String>, Option<lang::source::Span>)>,
 }
 
 /// A `fillet` or `chamfer` to cut after the solve.
@@ -292,6 +298,20 @@ pub(crate) struct Builder {
     corners: Vec<Corner>,
     /// Points made one by `coincident`, so the profile joins curves there.
     joins: Vec<(EntityId, EntityId)>,
+    /// The outermost `sketch()` call's body: where suggested constraints
+    /// are inserted, so they can name only the variables it binds.
+    body: ScopeRef,
+    /// Per entity: whether its label is a variable of `body` (or a member
+    /// or element of one), so an edit inserted there can name it.
+    reach: Vec<bool>,
+    /// Per entity: for a point drawn at `[x, y]` in the source, the call
+    /// and its argument (position and name) holding that literal, which
+    /// "pin the drawing" rewrites.
+    drawn: Vec<Option<(Loc, usize, &'static str)>>,
+    /// Per solver constraint: added by the binding rather than written
+    /// (the parallel that `distance(l1, l2, d)` implies), so it is not the
+    /// author's to remove.
+    implied: Vec<bool>,
     /// An error was printed: the sketch gives an empty shape.
     failed: bool,
 }
@@ -321,6 +341,7 @@ impl Builder {
         kind: EntityKind,
         parts: [Option<Rc<Entity>>; 3],
         loc: Loc,
+        drawn: Option<(Loc, usize, &'static str)>,
     ) -> Rc<Entity> {
         let e = Rc::new(Entity {
             sketch: self.serial,
@@ -332,6 +353,8 @@ impl Builder {
         debug_assert_eq!(self.ents.len(), id.index());
         self.ents.push(e.clone());
         self.ent_locs.push(loc);
+        self.reach.push(false);
+        self.drawn.push(drawn);
         e
     }
 
@@ -339,7 +362,17 @@ impl Builder {
         let id = self.model.add(c)?;
         debug_assert_eq!(self.cons.len(), id.index());
         self.cons.push(stmt);
+        self.implied.push(false);
         Ok(id)
+    }
+
+    /// An entity's name in source an edit can use, if it has one there.
+    fn name_in_body(&self, id: EntityId) -> Option<&str> {
+        if self.reach[id.index()] {
+            self.ents[id.index()].label()
+        } else {
+            None
+        }
     }
 }
 
@@ -349,7 +382,22 @@ struct Note {
     code: DiagCode,
     loc: Loc,
     text: String,
-    hint: Option<String>,
+    hints: Vec<Fix>,
+}
+
+/// A fix hint: what to do, and the exact edit when one is known (the
+/// text replacing a span; empty text deletes, an empty span inserts).
+struct Fix {
+    message: String,
+    edit: Option<(Loc, String)>,
+}
+
+/// A hint that is advice only.
+fn say(message: impl Into<String>) -> Vec<Fix> {
+    vec![Fix {
+        message: message.into(),
+        edit: None,
+    }]
 }
 
 /// One curve of the profile, between two vertices.
@@ -368,7 +416,7 @@ impl<'a> Evaluator<'a> {
     /// The start of a `sketch()` instantiation that begins a sketch (not
     /// one merging into the sketch being built): its arguments, and the
     /// `$fn`, `$fa`, `$fs` its arcs and circles are tessellated with.
-    pub(crate) fn sketch_open(&mut self, p: &Params, loc: Loc) {
+    pub(crate) fn sketch_open(&mut self, p: &Params, loc: Loc, body: ScopeRef) {
         let name = match self.get(p, "name") {
             Value::Str(s) => String::from_utf8_lossy(s.as_bytes()).into_owned(),
             Value::Undef => String::new(),
@@ -398,6 +446,10 @@ impl<'a> Evaluator<'a> {
             cons: Vec::new(),
             corners: Vec::new(),
             joins: Vec::new(),
+            body,
+            reach: Vec::new(),
+            drawn: Vec::new(),
+            implied: Vec::new(),
             failed: false,
         }));
     }
@@ -412,14 +464,27 @@ impl<'a> Evaluator<'a> {
     /// `sr` (`c1 = point([0, 0]);` names the point `c1`), and then the
     /// points made from coordinates for a named line, arc or circle
     /// (`top.start`).
-    pub(crate) fn sketch_label(&mut self, from: usize, sr: ScopeRef) {
-        let Some(b) = self.sketch.as_ref() else {
+    ///
+    /// A call that is an assignment's whole expression names what it made
+    /// by its span. Otherwise the variable's value does: `p = f(point(..))`
+    /// or `p = c ? point(a) : point(b)` names the point it holds, and a
+    /// list of handles names its elements (`pts[0]`), so messages and
+    /// suggested edits can name them as the source can.
+    pub(crate) fn sketch_label(&mut self, from: usize, sr: ScopeRef, ctx: &Rc<Ctx>) {
+        let Some(mut b) = self.sketch.take() else {
             return;
         };
         let unit = &self.units[sr.unit as usize];
         let scope = self.scope(sr);
-        let made = &b.ents[from.min(b.ents.len())..];
-        let locs = &b.ent_locs[from.min(b.ent_locs.len())..];
+        let start = from.min(b.ents.len());
+        let made = &b.ents[start..];
+        let locs = &b.ent_locs[start..];
+        let mut named: Vec<usize> = Vec::new();
+        let name = |e: &Entity, label: String, named: &mut Vec<usize>| {
+            if e.sketch == b.serial && e.id.index() >= start && e.label.set(label).is_ok() {
+                named.push(e.id.index());
+            }
+        };
         for a in &scope.assignments {
             let span = unit.ast.expr(a.expr).span;
             if let Some((e, _)) = made
@@ -428,19 +493,50 @@ impl<'a> Evaluator<'a> {
                 .rev()
                 .find(|(_, l)| l.unit == sr.unit && l.span == span)
             {
-                let _ = e.label.set(unit.ast.name(a.name).to_string());
+                name(e, unit.ast.name(a.name).to_string(), &mut named);
             }
         }
-        for e in made {
-            let Some(l) = e.label() else { continue };
-            for (k, part) in ["start", "end", "center"].iter().enumerate() {
-                if let Some(p) = &e.parts[k]
-                    && p.id.index() >= from
-                {
-                    let _ = p.label.set(format!("{l}.{part}"));
+        for a in &scope.assignments {
+            let var = unit.ast.name(a.name);
+            match ctx.get_local(unit.sym(a.name), &self.regions) {
+                Some(Value::Entity(e)) => name(&e, var.to_string(), &mut named),
+                Some(Value::Vector(v)) => {
+                    for (i, x) in v.as_slice().iter().enumerate() {
+                        match x {
+                            Value::Entity(e) => name(e, format!("{var}[{i}]"), &mut named),
+                            Value::Vector(w) => {
+                                for (j, y) in w.as_slice().iter().enumerate() {
+                                    if let Value::Entity(e) = y {
+                                        name(e, format!("{var}[{i}][{j}]"), &mut named);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut k = 0;
+        while k < named.len() {
+            let e = b.ents[named[k]].clone();
+            let l = e.label().unwrap_or_default().to_string();
+            for (i, part) in ["start", "end", "center"].iter().enumerate() {
+                if let Some(p) = &e.parts[i] {
+                    name(p, format!("{l}.{part}"), &mut named);
                 }
             }
+            k += 1;
         }
+        // Labels given here name variables of this body: the outermost
+        // sketch's body can use them in an edit; a helper's cannot.
+        if sr == b.body {
+            for i in named {
+                b.reach[i] = true;
+            }
+        }
+        self.sketch = Some(b);
     }
 
     /// `point`, `line`, `arc` and `circle`: a new entity of the sketch
@@ -504,6 +600,27 @@ impl<'a> Evaluator<'a> {
             vals
         };
         let text = statement_text(self.units[sr.unit as usize].program.sources.text(loc.span));
+        let args = {
+            let ast = self.units[sr.unit as usize].ast;
+            self.inst(sr, i)
+                .args
+                .iter()
+                .map(|a| {
+                    let e = ast.expr(a.expr);
+                    let number = match &e.kind {
+                        lang::ast::ExprKind::Number(_) => true,
+                        lang::ast::ExprKind::Unary(_, x) => {
+                            matches!(ast.expr(*x).kind, lang::ast::ExprKind::Number(_))
+                        }
+                        _ => false,
+                    };
+                    (
+                        a.name.map(|n| ast.name(n).to_string()),
+                        number.then_some(e.span),
+                    )
+                })
+                .collect()
+        };
         let Some(mut b) = self.sketch.take() else {
             let t = format!("{}() is only valid inside a sketch body", v.name());
             self.error(Some(loc), DiagCode::SketchForeignEntity, t);
@@ -524,7 +641,7 @@ impl<'a> Evaluator<'a> {
                 text: format!(
                     "{text}: in a sketch body, {name}() makes an entity and must be assigned"
                 ),
-                hint: Some(format!(
+                hints: say(format!(
                     "inside a sketch, write `c = {name}(...);` with entities as its arguments"
                 )),
             });
@@ -532,6 +649,8 @@ impl<'a> Evaluator<'a> {
             b.stmts.push(Stmt {
                 text: text.clone(),
                 loc,
+                written: true,
+                args,
             });
             let stmt = b.stmts.len() - 1;
             statement_in(&mut b, v, &text, stmt, &vals, loc, &mut notes, self);
@@ -548,7 +667,20 @@ impl<'a> Evaluator<'a> {
     fn print_notes(&mut self, prefix: &str, notes: Vec<Note>) {
         for n in notes {
             let text = format!("{prefix}{}", n.text);
-            self.emit_hinted(n.severity, n.code, text.as_bytes(), Some(n.loc), n.hint);
+            // An edit is located through the message's unit, so one in
+            // another unit (a library's helper) is left as advice.
+            let hints = n
+                .hints
+                .into_iter()
+                .map(|f| Hint {
+                    message: f.message,
+                    replacement: f
+                        .edit
+                        .filter(|(l, _)| l.unit == n.loc.unit)
+                        .map(|(l, t)| (l.span, t)),
+                })
+                .collect();
+            self.emit_with_hints(n.severity, n.code, text.as_bytes(), Some(n.loc), hints);
         }
     }
 
@@ -607,6 +739,22 @@ impl<'a> Evaluator<'a> {
         if b.failed {
             return Ok(empty(report, b.convexity));
         }
+        // The unknowns limit, before any O(n³) work: two per point, one per
+        // circle (the solver's own count).
+        let unknowns: usize = b
+            .model
+            .entities()
+            .iter()
+            .map(|e| match e {
+                sketch_solver::Entity::Point { .. } => 2,
+                sketch_solver::Entity::Circle { .. } => 1,
+                _ => 0,
+            })
+            .sum();
+        self.over_limit(Limit::SketchUnknowns, unknowns as f64, b.loc, "sketch()");
+        self.check_hard()?;
+        // The solve stops between iterations when the request is
+        // cancelled or out of time; the evaluator then reports which.
         let flag = self.opts.interrupt.clone();
         let guard = self.opts.guard.clone();
         let stop = move || {
@@ -614,16 +762,16 @@ impl<'a> Evaluator<'a> {
                 || guard.as_ref().is_some_and(|g| g.over_time())
         };
         let opts = SolveOptions {
-            max_unknowns: if self.opts.guard.is_some() {
-                LIMITED_UNKNOWNS
-            } else {
-                usize::MAX
-            },
             interrupt: Some(&stop),
             ..SolveOptions::default()
         };
         let prefix = b.prefix();
-        let sol = match b.model.solve_with(&opts) {
+        let solved = b.model.solve_with(&opts).and_then(|sol| {
+            let src = Src { units: &self.units };
+            let notes = diagnose(&b, &sol, &src, &opts)?;
+            Ok((sol, notes))
+        });
+        let (sol, mut notes) = match solved {
             Ok(s) => s,
             Err(SolveError::Interrupted) => {
                 self.check_interrupt()?;
@@ -631,6 +779,9 @@ impl<'a> Evaluator<'a> {
                 return Ok(empty(report, b.convexity));
             }
             Err(e @ SolveError::TooManyUnknowns { .. }) => {
+                // The solve itself sets no cap (the limit is checked
+                // above), so this does not happen; it is reported as the
+                // limit it would be.
                 let t = format!("{prefix}{e}");
                 self.error(Some(b.loc), DiagCode::ResourceLimit, t);
                 return Ok(empty(report, b.convexity));
@@ -644,20 +795,14 @@ impl<'a> Evaluator<'a> {
         report.residual = sol.residual;
         report.solved = sol.status == Status::Solved;
         report.continuation = sol.continuation;
-        let units = &self.units;
-        let line = |l: Loc| {
-            units[l.unit as usize]
-                .program
-                .sources
-                .get(l.span.file)
-                .line_of(l.span.start)
-        };
-        let mut notes = diagnose(&b, &sol, &line);
         let mut ok = !notes.iter().any(|n| n.severity == Severity::Error);
         let mut loops = Vec::new();
         if ok {
             match profile(&b, &sol) {
-                Ok(l) => loops = l,
+                Ok((l, warnings)) => {
+                    loops = l;
+                    notes.extend(warnings);
+                }
                 Err(n) => {
                     notes.extend(n);
                     ok = false;
@@ -686,6 +831,34 @@ impl<'a> Evaluator<'a> {
             convexity: b.convexity,
             report: Arc::new(report),
         })))
+    }
+}
+
+/// The program text the diagnosis quotes and edits.
+struct Src<'u, 'a> {
+    units: &'u [Unit<'a>],
+}
+
+impl Src<'_, '_> {
+    fn line(&self, l: Loc) -> u32 {
+        self.units[l.unit as usize]
+            .program
+            .sources
+            .get(l.span.file)
+            .line_of(l.span.start)
+    }
+
+    /// The whole text of the file `l` is in.
+    fn file(&self, l: Loc) -> &[u8] {
+        &self.units[l.unit as usize]
+            .program
+            .sources
+            .get(l.span.file)
+            .text
+    }
+
+    fn ast(&self, l: Loc) -> &Ast {
+        self.units[l.unit as usize].ast
     }
 }
 
@@ -764,7 +937,7 @@ fn handle(
                     article(e.kind_name()),
                     e.label().map_or(String::new(), |l| format!("'{l}'"))
                 ),
-                hint: None,
+                hints: Vec::new(),
             });
             None
         }
@@ -780,9 +953,7 @@ fn handle(
                     v.type_name(),
                     String::from_utf8_lossy(&found)
                 ),
-                hint: Some(
-                    "pass a variable assigned from point(), line(), arc() or circle()".into(),
-                ),
+                hints: say("pass a variable assigned from point(), line(), arc() or circle()"),
             });
             None
         }
@@ -810,7 +981,7 @@ fn number(v: &Value, what: &str, param: &str, loc: Loc, notes: &mut Vec<Note>) -
                     "{what}: {param} must be a finite number, found {}",
                     v.type_name()
                 ),
-                hint: None,
+                hints: Vec::new(),
             });
             None
         }
@@ -823,7 +994,7 @@ fn model_note(e: &ModelError, what: &str, loc: Loc) -> Note {
         code: DiagCode::InvalidArgument,
         loc,
         text: format!("{what}: {e}"),
-        hint: None,
+        hints: Vec::new(),
     }
 }
 
@@ -834,14 +1005,15 @@ fn point_arg(
     b: &mut Builder,
     v: &Value,
     what: &str,
-    param: &str,
+    (pos, param): (usize, &'static str),
     loc: Loc,
     notes: &mut Vec<Note>,
     ev: &mut Evaluator<'_>,
 ) -> Option<Rc<Entity>> {
     if let Some(xy) = v.as_vec2(true) {
+        let drawn = Some((loc, pos, param));
         return match b.model.point(Some(xy)) {
-            Ok(id) => Some(b.push(id, EntityKind::Point, [None, None, None], loc)),
+            Ok(id) => Some(b.push(id, EntityKind::Point, [None, None, None], loc, drawn)),
             Err(e) => {
                 notes.push(model_note(&e, what, loc));
                 None
@@ -859,7 +1031,7 @@ fn point_arg(
                 article(e.kind_name()),
                 e.kind_name()
             ),
-            hint: None,
+            hints: Vec::new(),
         });
         return None;
     }
@@ -890,14 +1062,15 @@ fn sketch_entity_in(
                             code: DiagCode::InvalidArgument,
                             loc,
                             text: format!("{what}: at must be [x, y], found {}", v.type_name()),
-                            hint: None,
+                            hints: Vec::new(),
                         });
                         return None;
                     }
                 },
             };
+            let drawn = guess.map(|_| (loc, 0, "at"));
             match b.model.point(guess) {
-                Ok(id) => Some(b.push(id, EntityKind::Point, [None, None, None], loc)),
+                Ok(id) => Some(b.push(id, EntityKind::Point, [None, None, None], loc, drawn)),
                 Err(e) => {
                     notes.push(model_note(&e, &what, loc));
                     None
@@ -905,8 +1078,8 @@ fn sketch_entity_in(
             }
         }
         Builtin::SketchLine => {
-            let p = point_arg(b, &vals[0], &what, "p", loc, notes, ev)?;
-            let q = point_arg(b, &vals[1], &what, "q", loc, notes, ev)?;
+            let p = point_arg(b, &vals[0], &what, (0, "p"), loc, notes, ev)?;
+            let q = point_arg(b, &vals[1], &what, (1, "q"), loc, notes, ev)?;
             let id = match b.model.line(p.id, q.id) {
                 Ok(id) => id,
                 Err(e) => {
@@ -915,12 +1088,12 @@ fn sketch_entity_in(
                 }
             };
             let _ = b.model.set_construction(id, flag(&vals[2]));
-            Some(b.push(id, EntityKind::Line, [Some(p), Some(q), None], loc))
+            Some(b.push(id, EntityKind::Line, [Some(p), Some(q), None], loc, None))
         }
         Builtin::SketchArc => {
-            let c = point_arg(b, &vals[0], &what, "center", loc, notes, ev)?;
-            let s = point_arg(b, &vals[1], &what, "start", loc, notes, ev)?;
-            let e = point_arg(b, &vals[2], &what, "end", loc, notes, ev)?;
+            let c = point_arg(b, &vals[0], &what, (0, "center"), loc, notes, ev)?;
+            let s = point_arg(b, &vals[1], &what, (1, "start"), loc, notes, ev)?;
+            let e = point_arg(b, &vals[2], &what, (2, "end"), loc, notes, ev)?;
             let id = match b.model.arc(c.id, s.id, e.id, flag(&vals[3])) {
                 Ok(id) => id,
                 Err(err) => {
@@ -929,10 +1102,10 @@ fn sketch_entity_in(
                 }
             };
             let _ = b.model.set_construction(id, flag(&vals[4]));
-            Some(b.push(id, EntityKind::Arc, [Some(s), Some(e), Some(c)], loc))
+            Some(b.push(id, EntityKind::Arc, [Some(s), Some(e), Some(c)], loc, None))
         }
         _ => {
-            let c = point_arg(b, &vals[0], &what, "center", loc, notes, ev)?;
+            let c = point_arg(b, &vals[0], &what, (0, "center"), loc, notes, ev)?;
             // `r` or `d`, if given, is a radius constraint (sugar for
             // `radius()`), and the radius's starting value.
             let radius = match (&vals[1], &vals[2]) {
@@ -945,7 +1118,7 @@ fn sketch_entity_in(
                         code: DiagCode::ArgumentMismatch,
                         loc,
                         text: format!("{what}: give r or d, not both"),
-                        hint: None,
+                        hints: Vec::new(),
                     });
                     return None;
                 }
@@ -958,11 +1131,13 @@ fn sketch_entity_in(
                 }
             };
             let _ = b.model.set_construction(id, flag(&vals[3]));
-            let handle = b.push(id, EntityKind::Circle, [None, None, Some(c)], loc);
+            let handle = b.push(id, EntityKind::Circle, [None, None, Some(c)], loc, None);
             if let Some(r) = radius {
                 b.stmts.push(Stmt {
                     text: format!("{what} radius"),
                     loc,
+                    written: false,
+                    args: Vec::new(),
                 });
                 let stmt = b.stmts.len() - 1;
                 if let Err(e) = b.add(
@@ -1078,7 +1253,7 @@ fn statement_in(
                             "{what}: along must be \"x\" or \"y\", found {}",
                             String::from_utf8_lossy(&found)
                         ),
-                        hint: None,
+                        hints: Vec::new(),
                     });
                     return;
                 }
@@ -1095,7 +1270,7 @@ fn statement_in(
                     code: DiagCode::InvalidArgument,
                     loc,
                     text: format!("{what}: along applies only between two points"),
-                    hint: None,
+                    hints: Vec::new(),
                 });
                 return;
             }
@@ -1112,7 +1287,11 @@ fn statement_in(
                         if (*p == x && *q == y) || (*p == y && *q == x))
                 });
                 if !stated {
+                    let n = b.implied.len();
                     add(b, Constraint::Parallel(x, y), notes);
+                    if b.implied.len() > n {
+                        b.implied[n] = true;
+                    }
                 }
             }
             add(
@@ -1220,7 +1399,7 @@ fn statement_in(
                             code: DiagCode::InvalidArgument,
                             loc,
                             text: format!("{what}: at must be [x, y], found {}", v.type_name()),
-                            hint: None,
+                            hints: Vec::new(),
                         });
                         return;
                     }
@@ -1237,7 +1416,7 @@ fn statement_in(
                     code: DiagCode::InvalidArgument,
                     loc,
                     text: format!("{what}: needs a corner point and a size greater than 0"),
-                    hint: None,
+                    hints: Vec::new(),
                 });
                 return;
             }
@@ -1254,12 +1433,13 @@ fn statement_in(
 
 /// What an equation is, for messages: its statement and line, or an arc's
 /// own equation.
-fn source_text(b: &Builder, s: Source, line: &dyn Fn(Loc) -> u32) -> String {
+fn source_text(b: &Builder, s: Source, src: &Src) -> String {
     match s {
-        Source::Constraint(c) => {
-            let st = &b.stmts[b.cons[c.index()]];
-            format!("{} at line {}", st.text, line(st.loc))
-        }
+        Source::Constraint(_) => format!(
+            "{} at line {}",
+            source_name(b, s),
+            src.line(source_loc(b, s))
+        ),
         Source::Arc(e) => format!(
             "arc {} (its ends are the same distance from its centre)",
             b.describe(e)
@@ -1271,6 +1451,10 @@ fn source_text(b: &Builder, s: Source, line: &dyn Fn(Loc) -> u32) -> String {
 /// own location gives that).
 fn source_name(b: &Builder, s: Source) -> String {
     match s {
+        Source::Constraint(c) if b.implied[c.index()] => format!(
+            "{} (which makes the lines parallel)",
+            b.stmts[b.cons[c.index()]].text
+        ),
         Source::Constraint(c) => b.stmts[b.cons[c.index()]].text.clone(),
         Source::Arc(e) => format!("arc {}", b.describe(e)),
     }
@@ -1293,14 +1477,503 @@ fn source_key(b: &Builder, s: Source) -> (bool, usize) {
     }
 }
 
-/// Free coordinates listed in an under-constrained message, at most.
+/// Free coordinates listed in an under-constrained message, at most, and
+/// suggested constraints offered one by one.
 const FREE_LISTED: usize = 8;
 
-/// The solve's findings as messages (section 4.7, without stage 3's
-/// hints): conflicts, failure to converge, redundancy, flips and free
-/// degrees of freedom. `line` gives a location's line, for messages that
-/// name other statements.
-fn diagnose(b: &Builder, sol: &Solution, line: &dyn Fn(Loc) -> u32) -> Vec<Note> {
+/// Sketches with more unknowns get no suggested constraints: finding them
+/// is a rank update per candidate equation, O(n²) each.
+const SUGGEST_UNKNOWNS: usize = 400;
+
+/// The hint that deletes statement `stmt`, when deleting its text removes
+/// exactly it: written as a statement (not a circle's `r`), and run once
+/// (a statement in a loop, or in a helper called twice, made several).
+fn removal(b: &Builder, stmt: usize, src: &Src) -> Fix {
+    let st = &b.stmts[stmt];
+    let once = b
+        .stmts
+        .iter()
+        .filter(|o| o.loc.unit == st.loc.unit && o.loc.span == st.loc.span)
+        .count()
+        == 1;
+    let edit = (st.written && once).then(|| {
+        let span = deletion(src.file(st.loc), st.loc.span);
+        (
+            Loc {
+                unit: st.loc.unit,
+                span,
+            },
+            String::new(),
+        )
+    });
+    let message = if edit.is_none() && st.written {
+        format!(
+            "remove `{}` (it runs more than once: in a loop or a module called again)",
+            st.text
+        )
+    } else {
+        format!("remove `{}`", st.text)
+    };
+    Fix { message, edit }
+}
+
+/// The span that deletes the statement at `span`: with its `;`, and its
+/// whole line when nothing else is on it, or the spaces after it when
+/// something is, so no blank line or double space is left.
+fn deletion(text: &[u8], span: Span) -> Span {
+    let blank = |c: u8| c == b' ' || c == b'\t';
+    let (s, mut e) = (span.start as usize, (span.end as usize).min(text.len()));
+    if e == 0 || text[e - 1] != b';' {
+        let mut k = e;
+        while k < text.len() && blank(text[k]) {
+            k += 1;
+        }
+        if k < text.len() && text[k] == b';' {
+            e = k + 1;
+        }
+    }
+    let mut ls = s;
+    while ls > 0 && blank(text[ls - 1]) {
+        ls -= 1;
+    }
+    let line_start = ls == 0 || text[ls - 1] == b'\n';
+    let mut le = e;
+    while le < text.len() && blank(text[le]) {
+        le += 1;
+    }
+    let line_end = le == text.len() || text[le] == b'\n' || text[le] == b'\r';
+    let (from, to) = match (line_start, line_end) {
+        (true, true) => {
+            let mut to = le;
+            if to < text.len() && text[to] == b'\r' {
+                to += 1;
+            }
+            if to < text.len() && text[to] == b'\n' {
+                to += 1;
+            }
+            (ls, to)
+        }
+        (false, true) => (ls, e),
+        _ => (s, le),
+    };
+    Span::new(span.file, from as u32, to as u32)
+}
+
+/// Where statements are inserted at the end of the body of the `sketch()`
+/// call at `call`, and how each is written there: on a line of its own
+/// before the closing brace, indented like the body's last line, or before
+/// the brace on the same line when the body is written on one line. `None`
+/// when the body is not a `{ ... }` block.
+fn insertion(text: &[u8], call: Span) -> Option<(Span, String, bool)> {
+    let blank = |c: u8| c == b' ' || c == b'\t';
+    let open = call.start as usize;
+    let mut k = (call.end as usize).min(text.len());
+    while k > open && (text[k - 1].is_ascii_whitespace() || text[k - 1] == b';') {
+        k -= 1;
+    }
+    if k == open || text[k - 1] != b'}' {
+        return None;
+    }
+    let brace = k - 1;
+    let first_brace = open + text[open..brace].iter().position(|&c| c == b'{')?;
+    let mut ls = brace;
+    while ls > 0 && text[ls - 1] != b'\n' {
+        ls -= 1;
+    }
+    if ls <= first_brace || !text[ls..brace].iter().all(|&c| blank(c)) {
+        let at = Span::new(call.file, brace as u32, brace as u32);
+        let pad = brace > 0 && !text[brace - 1].is_ascii_whitespace();
+        return Some((at, if pad { " ".into() } else { String::new() }, true));
+    }
+    // The indentation of the last non-blank line before the brace, unless
+    // that is the line that opens the body (then one level deeper than the
+    // brace).
+    let brace_indent: String = text[ls..brace].iter().map(|&c| c as char).collect();
+    let mut e = ls;
+    let mut indent = None;
+    while e > 0 {
+        let mut s = e - 1;
+        while s > 0 && text[s - 1] != b'\n' {
+            s -= 1;
+        }
+        let line = &text[s..e - 1];
+        if line.iter().any(|c| !c.is_ascii_whitespace()) {
+            if s > first_brace {
+                indent = Some(
+                    line.iter()
+                        .take_while(|&&c| blank(c))
+                        .map(|&c| c as char)
+                        .collect(),
+                );
+            }
+            break;
+        }
+        e = s;
+    }
+    let indent = indent.unwrap_or(format!("{brace_indent}  "));
+    Some((Span::new(call.file, ls as u32, ls as u32), indent, false))
+}
+
+/// A fix that inserts `stmts` (each a statement with its `;`) at the end of
+/// the sketch's body, or advice only when there is nowhere to insert.
+fn insert_fix(b: &Builder, src: &Src, message: String, stmts: &[&str]) -> Fix {
+    let edit = insertion(src.file(b.loc), b.loc.span).map(|(span, lead, inline)| {
+        let text = if inline {
+            format!("{lead}{} ", stmts.join(" "))
+        } else {
+            stmts.iter().map(|s| format!("{lead}{s}\n")).collect()
+        };
+        (
+            Loc {
+                unit: b.loc.unit,
+                span,
+            },
+            text,
+        )
+    });
+    Fix { message, edit }
+}
+
+/// A number for a suggested statement: 6 significant digits, as OpenSCAD
+/// prints numbers.
+fn num(x: f64) -> String {
+    fmt_number(if x == 0.0 { 0.0 } else { x })
+}
+
+/// `x` rounded towards zero to 6 significant digits, so that a printed
+/// "at most" never exceeds what it bounds.
+fn at_most(x: f64) -> f64 {
+    if !(x > 0.0 && x.is_finite()) {
+        return x;
+    }
+    let mut scale = 1.0;
+    while x * scale < 1e5 {
+        scale *= 10.0;
+    }
+    while x * scale >= 1e6 {
+        scale /= 10.0;
+    }
+    let y = (x * scale).floor() / scale;
+    if y > x {
+        (x * scale - 1.0).floor() / scale
+    } else {
+        y
+    }
+}
+
+/// A point's coordinates as source: `[x, y]`.
+fn coords(p: [f64; 2]) -> String {
+    format!("[{}, {}]", num(p[0]), num(p[1]))
+}
+
+/// The edit that rewrites the guesses written in the sketch's call to the
+/// solved coordinates ("pin the drawing", section 4.8): one replacement
+/// of the whole `sketch()` call, since a hint carries one edit. Only
+/// literal `[x, y]` guesses are rewritten (a guess computed from
+/// parameters keeps its expression), and only in the outermost call's
+/// text.
+fn pin_drawing(b: &Builder, sol: &Solution, src: &Src) -> Option<Fix> {
+    use lang::ast::ExprKind;
+    let call = b.loc;
+    let ast = src.ast(call);
+    let inside = |l: Loc| {
+        l.unit == call.unit
+            && l.span.file == call.span.file
+            && l.span.start >= call.span.start
+            && l.span.end <= call.span.end
+    };
+    let mut calls: HashMap<(u32, u32), &[lang::ast::Arg]> = HashMap::new();
+    for e in &ast.exprs {
+        if let ExprKind::Call(_, args) = &e.kind
+            && e.span.file == call.span.file
+            && e.span.start >= call.span.start
+            && e.span.end <= call.span.end
+        {
+            calls.entry((e.span.start, e.span.end)).or_insert(args);
+        }
+    }
+    let number = |id: lang::ast::ExprId| match &ast.expr(id).kind {
+        ExprKind::Number(_) => true,
+        ExprKind::Unary(_, x) => matches!(ast.expr(*x).kind, ExprKind::Number(_)),
+        _ => false,
+    };
+    let text = src.file(call);
+    let mut edits: Vec<(Span, String)> = Vec::new();
+    for (i, d) in b.drawn.iter().enumerate() {
+        let Some((at, pos, param)) = *d else { continue };
+        let Some(p) = sol.point(b.ents[i].id) else {
+            continue;
+        };
+        if !inside(at) {
+            continue;
+        }
+        let Some(args) = calls.get(&(at.span.start, at.span.end)) else {
+            continue;
+        };
+        let arg = args
+            .iter()
+            .find(|a| a.name.is_some_and(|n| ast.name(n) == param))
+            .or_else(|| args.iter().filter(|a| a.name.is_none()).nth(pos));
+        let Some(arg) = arg else { continue };
+        let e = ast.expr(arg.expr);
+        let ExprKind::Vector(v) = &e.kind else {
+            continue;
+        };
+        if v.len() != 2 || !v.iter().all(|&x| number(x)) {
+            continue;
+        }
+        let new = coords(p);
+        if text.get(e.span.start as usize..e.span.end as usize) != Some(new.as_bytes()) {
+            edits.push((e.span, new));
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    edits.sort_by_key(|(s, _)| s.start);
+    edits.dedup_by_key(|(s, _)| s.start);
+    let mut out = String::new();
+    let mut at = call.span.start as usize;
+    for (s, t) in &edits {
+        out.push_str(&String::from_utf8_lossy(&text[at..s.start as usize]));
+        out.push_str(t);
+        at = s.end as usize;
+    }
+    out.push_str(&String::from_utf8_lossy(
+        &text[at..(call.span.end as usize).min(text.len())],
+    ));
+    Some(Fix {
+        message: format!(
+            "if the solved shape is the one you meant, pin the drawing to it: {} guess{} rewritten to the solved coordinates",
+            edits.len(),
+            if edits.len() == 1 { "" } else { "es" }
+        ),
+        edit: Some((call, out)),
+    })
+}
+
+/// The entities an unmet constraint ties together, as points (a line's
+/// ends, an arc's centre and ends, a circle's centre), for "move these
+/// guesses".
+fn points_of(b: &Builder, s: Source, out: &mut Vec<EntityId>) {
+    let ents = b.model.entities();
+    let add = |e: EntityId, out: &mut Vec<EntityId>| match ents[e.index()] {
+        sketch_solver::Entity::Point { .. } => out.push(e),
+        sketch_solver::Entity::Line { start, end } => out.extend([start, end]),
+        sketch_solver::Entity::Arc {
+            center, start, end, ..
+        } => out.extend([center, start, end]),
+        sketch_solver::Entity::Circle { center, .. } => out.push(center),
+    };
+    match s {
+        Source::Arc(e) => add(e, out),
+        Source::Constraint(c) => match &b.model.constraints()[c.index()] {
+            Constraint::Coincident(x, y)
+            | Constraint::Parallel(x, y)
+            | Constraint::Perpendicular(x, y)
+            | Constraint::Tangent(x, y)
+            | Constraint::Equal(x, y)
+            | Constraint::Distance { a: x, b: y, .. }
+            | Constraint::Angle { from: x, to: y, .. } => {
+                add(*x, out);
+                add(*y, out);
+            }
+            Constraint::Horizontal(p) | Constraint::Vertical(p) => match *p {
+                Pair::Line(l) => add(l, out),
+                Pair::Points(x, y) => {
+                    add(x, out);
+                    add(y, out);
+                }
+            },
+            Constraint::On { point, curve } => {
+                add(*point, out);
+                add(*curve, out);
+            }
+            Constraint::Midpoint { point, line } => {
+                add(*point, out);
+                add(*line, out);
+            }
+            Constraint::Symmetric { a, b: q, about } => {
+                add(*a, out);
+                add(*q, out);
+                add(*about, out);
+            }
+            Constraint::Length { line: e, .. }
+            | Constraint::Radius { curve: e, .. }
+            | Constraint::Diameter { curve: e, .. }
+            | Constraint::Sweep { arc: e, .. }
+            | Constraint::Fix { entity: e, .. } => add(*e, out),
+        },
+    }
+}
+
+/// Constraints that would remove the free degrees of freedom, as statements
+/// to insert (section 4.7): candidates measured on the solution, in the
+/// order an author would usually reach for them (a line that is drawn
+/// level made horizontal, lengths, radii, angles at shared corners, a
+/// fixed point, and last a coordinate measured from a point that cannot
+/// move), of which the solver keeps those that each remove freedom
+/// ([`Sketch::completion`]). Only entities the body names can be
+/// suggested.
+fn suggestions(
+    b: &Builder,
+    sol: &Solution,
+    opts: &SolveOptions<'_>,
+) -> Result<Vec<String>, SolveError> {
+    if sol.unknowns > SUGGEST_UNKNOWNS {
+        return Ok(Vec::new());
+    }
+    let tiny = 1e-9 * sol.size;
+    let ents = b.model.entities();
+    let mut cands: Vec<(Constraint, String)> = Vec::new();
+    let named = |id: EntityId| b.name_in_body(id);
+    let ends = |l: EntityId| match ents[l.index()] {
+        sketch_solver::Entity::Line { start, end } => Some((start, end)),
+        _ => None,
+    };
+    let mut lines = Vec::new();
+    for (i, e) in ents.iter().enumerate() {
+        let id = b.ents[i].id;
+        if let (sketch_solver::Entity::Line { start, end }, Some(n)) = (e, named(id))
+            && let (Some(p), Some(q)) = (sol.point(*start), sol.point(*end))
+        {
+            lines.push((id, n, p, q));
+        }
+    }
+    for &(id, n, p, q) in &lines {
+        let d = sub(q, p);
+        if d[1].abs() <= tiny && d[0].abs() > tiny {
+            cands.push((
+                Constraint::Horizontal(Pair::Line(id)),
+                format!("horizontal({n});"),
+            ));
+        } else if d[0].abs() <= tiny && d[1].abs() > tiny {
+            cands.push((
+                Constraint::Vertical(Pair::Line(id)),
+                format!("vertical({n});"),
+            ));
+        }
+    }
+    for &(id, n, p, q) in &lines {
+        let len = norm(sub(q, p));
+        if len > tiny {
+            cands.push((
+                Constraint::Length {
+                    line: id,
+                    value: len,
+                },
+                format!("length({n}, {});", num(len)),
+            ));
+        }
+    }
+    for (i, e) in ents.iter().enumerate() {
+        let id = b.ents[i].id;
+        if matches!(
+            e,
+            sketch_solver::Entity::Arc { .. } | sketch_solver::Entity::Circle { .. }
+        ) && let (Some(n), Some(r)) = (named(id), sol.radius(id))
+            && r > tiny
+        {
+            cands.push((
+                Constraint::Radius {
+                    curve: id,
+                    value: r,
+                },
+                format!("radius({n}, {});", num(r)),
+            ));
+        }
+    }
+    for (k, &(l1, n1, p1, q1)) in lines.iter().enumerate() {
+        for &(l2, n2, p2, q2) in &lines[k + 1..] {
+            let (Some((a1, b1)), Some((a2, b2))) = (ends(l1), ends(l2)) else {
+                continue;
+            };
+            if !(a1 == a2 || a1 == b2 || b1 == a2 || b1 == b2) {
+                continue;
+            }
+            let (u, v) = (sub(q1, p1), sub(q2, p2));
+            let deg = atan2_degrees(u[0] * v[1] - u[1] * v[0], u[0] * v[0] + u[1] * v[1]);
+            // Parallel lines are a `parallel()`, and an angle near 0 or 180
+            // degrees is barely a corner.
+            if deg.abs() < 1.0 || deg.abs() > 179.0 {
+                continue;
+            }
+            cands.push((
+                Constraint::Angle {
+                    from: l1,
+                    to: l2,
+                    degrees: deg,
+                },
+                format!("angle({n1}, {n2}, {});", num(deg)),
+            ));
+        }
+    }
+    let mut points = Vec::new();
+    for (i, e) in ents.iter().enumerate() {
+        let id = b.ents[i].id;
+        if let (sketch_solver::Entity::Point { guess }, Some(n), Some(p)) =
+            (e, named(id), sol.point(id))
+        {
+            points.push((id, n, p));
+            let at = match guess {
+                Some(g) if num(g[0]) == num(p[0]) && num(g[1]) == num(p[1]) => String::new(),
+                _ => format!(", {}", coords(p)),
+            };
+            cands.push((
+                Constraint::Fix {
+                    entity: id,
+                    at: Some(p),
+                },
+                format!("fix({n}{at});"),
+            ));
+        }
+    }
+    let free =
+        |id: EntityId, c: Coordinate| sol.free.iter().any(|f| f.entity == id && f.coordinate == c);
+    for f in &sol.free {
+        if f.mobility < 0.01 || f.coordinate == Coordinate::Radius {
+            continue;
+        }
+        let Some(&(id, n, p)) = points.iter().find(|x| x.0 == f.entity) else {
+            continue;
+        };
+        let Some(&(rid, rn, r)) = points
+            .iter()
+            .find(|x| x.0 != id && !free(x.0, f.coordinate))
+        else {
+            continue;
+        };
+        let (k, axis, along) = match f.coordinate {
+            Coordinate::X => (0, "x", Along::X),
+            _ => (1, "y", Along::Y),
+        };
+        cands.push((
+            Constraint::Distance {
+                a: rid,
+                b: id,
+                value: p[k] - r[k],
+                along,
+            },
+            format!(
+                "distance({rn}, {n}, {}, along = \"{axis}\");",
+                num(p[k] - r[k])
+            ),
+        ));
+    }
+    let cons: Vec<Constraint> = cands.iter().map(|c| c.0.clone()).collect();
+    let taken = b.model.completion(sol, &cons, opts)?;
+    Ok(taken.into_iter().map(|k| cands[k].1.clone()).collect())
+}
+
+/// The solve's findings as messages (section 4.7): conflicts, failure to
+/// converge, redundancy, flips, points placed without a guess and free
+/// degrees of freedom, each with hints that are edits where one is known.
+fn diagnose(
+    b: &Builder,
+    sol: &Solution,
+    src: &Src,
+    opts: &SolveOptions<'_>,
+) -> Result<Vec<Note>, SolveError> {
     let mut notes = Vec::new();
     let mut seen: Vec<(bool, usize)> = Vec::new();
     for d in &sol.conflicts {
@@ -1309,41 +1982,106 @@ fn diagnose(b: &Builder, sol: &Solution, line: &dyn Fn(Loc) -> u32) -> Vec<Note>
             continue;
         }
         seen.push(key);
-        let mut parts = vec![source_text(b, d.source, line)];
-        parts.extend(d.with.iter().map(|w| source_text(b, *w, line)));
+        let parts = listed(
+            std::iter::once(d.source)
+                .chain(d.with.iter().copied())
+                .map(|w| source_text(b, w, src)),
+        );
+        // Removing any one of them may resolve it: the later one first,
+        // since the earlier ones were met before it came.
+        let mut hints = Vec::new();
+        let mut offered: Vec<usize> = Vec::new();
+        for s in std::iter::once(d.source).chain(d.with.iter().rev().copied()) {
+            if let Source::Constraint(c) = s {
+                let stmt = b.cons[c.index()];
+                if !offered.contains(&stmt) && offered.len() < 4 && b.stmts[stmt].written {
+                    offered.push(stmt);
+                    hints.push(removal(b, stmt, src));
+                }
+            }
+        }
+        hints.extend(say("or change the values so that they agree"));
         notes.push(Note {
             severity: Severity::Error,
             code: DiagCode::SketchConflict,
             loc: source_loc(b, d.source),
-            text: format!("constraints conflict: {}", parts.join(", ")),
-            hint: Some("remove one, or make the values agree".into()),
+            text: format!("constraints conflict: {parts}"),
+            hints,
         });
     }
     if sol.status == Status::NotConverged && sol.conflicts.is_empty() {
+        let unmet: Vec<String> = sol
+            .unmet
+            .iter()
+            .take(3)
+            .map(|(s, _)| source_text(b, *s, src))
+            .collect();
+        let mut pts = Vec::new();
+        for (s, _) in sol.unmet.iter().take(3) {
+            points_of(b, *s, &mut pts);
+        }
+        let mut names: Vec<String> = Vec::new();
+        for p in pts {
+            let n = b.describe(p);
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+        let hint = if names.is_empty() {
+            "check the guesses: the drawing may be far from any solution".to_string()
+        } else {
+            format!(
+                "move the guesses of {} closer to a shape that meets {}",
+                names.join(", "),
+                if unmet.len() == 1 {
+                    "that constraint"
+                } else {
+                    "those constraints"
+                }
+            )
+        };
         notes.push(Note {
             severity: Severity::Error,
             code: DiagCode::SketchNoConvergence,
             loc: b.loc,
             text: format!(
-                "did not converge (residual {}{})",
+                "did not converge (residual {}{}){}",
                 fmt_number(sol.residual),
                 if sol.continuation {
                     " after continuation"
                 } else {
                     ""
+                },
+                if unmet.is_empty() {
+                    String::new()
+                } else {
+                    format!("; not met: {}", unmet.join(", "))
                 }
             ),
-            hint: Some("check the guesses: the drawing may be far from any solution".into()),
+            hints: say(hint),
         });
     }
     let mut seen: Vec<(bool, usize)> = Vec::new();
     for d in &sol.redundant {
+        // The parallel a line-to-line distance adds is the binding's, not
+        // the author's: lines already parallel (two horizontal edges) make
+        // it redundant, and the warning would name the distance, whose
+        // removal would lose a dimension.
+        if let Source::Constraint(c) = d.source
+            && b.implied[c.index()]
+        {
+            continue;
+        }
         let key = source_key(b, d.source);
         if seen.contains(&key) {
             continue;
         }
         seen.push(key);
-        let with: Vec<String> = d.with.iter().map(|w| source_text(b, *w, line)).collect();
+        let with = listed(d.with.iter().map(|w| source_text(b, *w, src)));
+        let hints = match d.source {
+            Source::Constraint(c) => vec![removal(b, b.cons[c.index()], src)],
+            Source::Arc(_) => Vec::new(),
+        };
         notes.push(Note {
             severity: Severity::Warning,
             code: DiagCode::SketchRedundant,
@@ -1351,19 +2089,28 @@ fn diagnose(b: &Builder, sol: &Solution, line: &dyn Fn(Loc) -> u32) -> Vec<Note>
             text: format!(
                 "{} is implied by the other constraints: {}",
                 source_name(b, d.source),
-                with.join(", ")
+                with
             ),
-            hint: Some("remove it".into()),
+            hints,
         });
     }
+    let pin = if sol.flipped.is_empty() || sol.status != Status::Solved {
+        None
+    } else {
+        pin_drawing(b, sol, src)
+    };
     for o in &sol.flipped {
-        let (what, loc) = match *o {
+        let (what, loc, advice) = match *o {
             Orientation::ArcSweep(e) => (
                 format!(
                     "arc {} sweeps the other side of 180 degrees than drawn",
                     b.describe(e)
                 ),
                 b.ent_locs[e.index()],
+                format!(
+                    "otherwise draw arc {}'s ends so that it sweeps the way you mean",
+                    b.describe(e)
+                ),
             ),
             Orientation::AngleBranch(c) => {
                 let s = Source::Constraint(c);
@@ -1373,17 +2120,20 @@ fn diagnose(b: &Builder, sol: &Solution, line: &dyn Fn(Loc) -> u32) -> Vec<Note>
                         source_name(b, s)
                     ),
                     source_loc(b, s),
+                    "otherwise draw the lines closer to the angle you mean".to_string(),
                 )
             }
             Orientation::RadiusSign(e) => (
                 format!("circle {} came out with a negative radius", b.describe(e)),
                 b.ent_locs[e.index()],
+                format!("otherwise give circle {} a radius", b.describe(e)),
             ),
             Orientation::TangentSide(c) => {
                 let s = Source::Constraint(c);
                 (
                     format!("{} solved on the other side than drawn", source_name(b, s)),
                     source_loc(b, s),
+                    "otherwise draw the curves touching on the side you mean".to_string(),
                 )
             }
             Orientation::Corner { point, lines } => (
@@ -1394,14 +2144,61 @@ fn diagnose(b: &Builder, sol: &Solution, line: &dyn Fn(Loc) -> u32) -> Vec<Note>
                     b.describe(lines[1])
                 ),
                 b.ent_locs[point.index()],
+                format!(
+                    "otherwise move the guesses of {} and its neighbours closer to the shape you mean",
+                    b.describe(point)
+                ),
             ),
         };
+        let mut hints: Vec<Fix> = pin
+            .iter()
+            .map(|f| Fix {
+                message: f.message.clone(),
+                edit: f.edit.clone(),
+            })
+            .collect();
+        hints.extend(say(if pin.is_some() {
+            advice
+        } else {
+            "move the guesses closer to the intended shape".to_string()
+        }));
         notes.push(Note {
             severity: Severity::Warning,
             code: DiagCode::SketchFlipped,
             loc,
             text: what,
-            hint: Some("move the guesses closer to the intended shape".into()),
+            hints,
+        });
+    }
+    // Points written without a guess (section 4.2): the solver placed
+    // them, so where they end up depends on that placement rather than on
+    // the drawing. The fix writes the solved position in.
+    for &id in &sol.placed {
+        if b.ents[id.index()].kind != EntityKind::Point {
+            continue;
+        }
+        let Some(p) = sol.point(id) else { continue };
+        let loc = b.ent_locs[id.index()];
+        let text = src.file(loc);
+        let call = text
+            .get(loc.span.start as usize..loc.span.end as usize)
+            .map(statement_text)
+            .unwrap_or_default();
+        let new = format!("point({})", coords(p));
+        let edit = (call == "point()").then(|| (loc, new.clone()));
+        notes.push(Note {
+            severity: Severity::Info,
+            code: DiagCode::SketchNoGuess,
+            loc,
+            text: format!(
+                "point {} has no guess, so the solver placed it; it solved to {}",
+                b.describe(id),
+                coords(p)
+            ),
+            hints: vec![Fix {
+                message: format!("give it a guess: `{new}`"),
+                edit,
+            }],
         });
     }
     if sol.status == Status::Solved && sol.dof > 0 {
@@ -1428,6 +2225,25 @@ fn diagnose(b: &Builder, sol: &Solution, line: &dyn Fn(Loc) -> u32) -> Vec<Note>
             list.push_str(", ...");
         }
         let s = if sol.dof == 1 { "" } else { "s" };
+        let add = suggestions(b, sol, opts)?;
+        let mut hints = Vec::new();
+        if add.len() > 1 {
+            let all: Vec<&str> = add.iter().map(String::as_str).collect();
+            hints.push(insert_fix(
+                b,
+                src,
+                format!("add all {}: `{}`", add.len(), all.join(" ")),
+                &all,
+            ));
+        }
+        for a in add.iter().take(FREE_LISTED) {
+            hints.push(insert_fix(b, src, format!("add `{a}`"), &[a]));
+        }
+        if add.is_empty() {
+            hints.extend(say(
+                "add a dimension, or fix() what should not move (suggestions name the entities assigned to variables in the sketch's own body)",
+            ));
+        }
         notes.push(Note {
             // The owner's decision (section 13): an under-constrained
             // sketch is information, as in FreeCAD, unless the author
@@ -1443,10 +2259,43 @@ fn diagnose(b: &Builder, sol: &Solution, line: &dyn Fn(Loc) -> u32) -> Vec<Note>
                 "{} free degree{s} of freedom; these can still move: {list}",
                 sol.dof
             ),
-            hint: Some("add a dimension, or fix() what should not move".into()),
+            hints,
         });
     }
-    notes
+    // A statement in a loop is many constraints with one text and span:
+    // one message for them all.
+    let mut kept: Vec<Note> = Vec::with_capacity(notes.len());
+    for n in notes {
+        if !kept
+            .iter()
+            .any(|k| k.code == n.code && k.loc == n.loc && k.text == n.text)
+        {
+            kept.push(n);
+        }
+    }
+    Ok(kept)
+}
+
+/// Statements named in one message, at most: a constraint in a loop can
+/// depend on hundreds of others.
+const STATEMENTS_LISTED: usize = 6;
+
+/// `items` joined with commas, each once, the first [`STATEMENTS_LISTED`]
+/// and how many more.
+fn listed(items: impl Iterator<Item = String>) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for i in items {
+        if !out.contains(&i) {
+            out.push(i);
+        }
+    }
+    let more = out.len().saturating_sub(STATEMENTS_LISTED);
+    out.truncate(STATEMENTS_LISTED);
+    let mut s = out.join(", ");
+    if more > 0 {
+        s.push_str(&format!(" and {more} more"));
+    }
+    s
 }
 
 /// Segments for an arc or circle, by `circle()`'s rule.
@@ -1582,7 +2431,7 @@ fn cut_corner(b: &Builder, sol: &Solution, g: &mut Graph, k: &Corner) -> Result<
             code: DiagCode::InvalidArgument,
             loc: stmt.loc,
             text,
-            hint: None,
+            hints: Vec::new(),
         });
     }
     let far = |(ci, at_b): (usize, bool), g: &Graph| {
@@ -1607,7 +2456,7 @@ fn cut_corner(b: &Builder, sol: &Solution, g: &mut Graph, k: &Corner) -> Result<
                 stmt.text,
                 b.describe(k.point)
             ),
-            hint: None,
+            hints: Vec::new(),
         });
     }
     // The trim along each line. A fillet of radius r touches both lines
@@ -1632,7 +2481,7 @@ fn cut_corner(b: &Builder, sol: &Solution, g: &mut Graph, k: &Corner) -> Result<
                     b.describe(g.curves[ci].src),
                     fmt_number(l)
                 ),
-                hint: Some(format!("make it at most {}", fmt_number(most))),
+                hints: vec![size_fix(b, k, at_most(most))],
             });
         }
     }
@@ -1665,10 +2514,161 @@ fn cut_corner(b: &Builder, sol: &Solution, g: &mut Graph, k: &Corner) -> Result<
     Ok(())
 }
 
+/// The hint for a fillet or chamfer too large for its corner: its size
+/// argument replaced with the largest that fits, when the statement runs
+/// once and the size is written as a number.
+fn size_fix(b: &Builder, k: &Corner, most: f64) -> Fix {
+    let st = &b.stmts[k.stmt];
+    let param = if k.round { "r" } else { "d" };
+    let once = b
+        .stmts
+        .iter()
+        .filter(|o| o.loc.unit == st.loc.unit && o.loc.span == st.loc.span)
+        .count()
+        == 1;
+    let arg = st
+        .args
+        .iter()
+        .find(|(n, _)| n.as_deref() == Some(param))
+        .or_else(|| st.args.iter().filter(|(n, _)| n.is_none()).nth(1));
+    let edit = match arg {
+        Some((_, Some(span))) if once => Some((
+            Loc {
+                unit: st.loc.unit,
+                span: *span,
+            },
+            num(most),
+        )),
+        _ => None,
+    };
+    Fix {
+        message: format!("make it at most {}", num(most)),
+        edit,
+    }
+}
+
+/// Where the profile's loops cross each other or themselves (section 4.4):
+/// the even-odd fill then gives a shape the author probably did not mean.
+/// `loops[i][k]` to the next point is a segment of curve `srcs[i][k]`.
+/// Proper crossings only: loops that touch at a point, or run along each
+/// other, are not reported. One note per pair of curves, at most
+/// [`CROSSINGS_LISTED`].
+fn crossings(b: &Builder, loops: &[Vec<[f64; 2]>], srcs: &[Vec<EntityId>], size: f64) -> Vec<Note> {
+    struct Seg {
+        p: [f64; 2],
+        q: [f64; 2],
+        lo: [f64; 2],
+        hi: [f64; 2],
+        ring: usize,
+        k: usize,
+    }
+    let mut segs = Vec::new();
+    for (ring, l) in loops.iter().enumerate() {
+        let n = l.len();
+        for k in 0..n {
+            let (p, q) = (l[k], l[(k + 1) % n]);
+            segs.push(Seg {
+                p,
+                q,
+                lo: [p[0].min(q[0]), p[1].min(q[1])],
+                hi: [p[0].max(q[0]), p[1].max(q[1])],
+                ring,
+                k,
+            });
+        }
+    }
+    // A sweep along x: each segment meets only those whose x range starts
+    // before its own ends. Sorted with ties in input order, so the notes
+    // come out the same everywhere.
+    segs.sort_by(|a, b| a.lo[0].total_cmp(&b.lo[0]));
+    let orient = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    };
+    let eps = 1e-12 * size * size;
+    let mut found: Vec<(EntityId, EntityId, [f64; 2])> = Vec::new();
+    // A bound on the work for a profile of very many vertices.
+    let mut budget: u64 = 20_000_000;
+    'outer: for (i, s) in segs.iter().enumerate() {
+        for t in &segs[i + 1..] {
+            if t.lo[0] > s.hi[0] {
+                break;
+            }
+            budget = budget.saturating_sub(1);
+            if budget == 0 {
+                break 'outer;
+            }
+            if t.lo[1] > s.hi[1] || t.hi[1] < s.lo[1] {
+                continue;
+            }
+            if s.ring == t.ring {
+                let n = loops[s.ring].len();
+                if (s.k + 1) % n == t.k || (t.k + 1) % n == s.k {
+                    continue;
+                }
+            }
+            let d1 = orient(t.p, t.q, s.p);
+            let d2 = orient(t.p, t.q, s.q);
+            let d3 = orient(s.p, s.q, t.p);
+            let d4 = orient(s.p, s.q, t.q);
+            let proper = (d1 > eps && d2 < -eps || d1 < -eps && d2 > eps)
+                && (d3 > eps && d4 < -eps || d3 < -eps && d4 > eps);
+            if !proper {
+                continue;
+            }
+            let (x, y) = (srcs[s.ring][s.k], srcs[t.ring][t.k]);
+            let (x, y) = if x <= y { (x, y) } else { (y, x) };
+            if found.iter().any(|f| f.0 == x && f.1 == y) {
+                continue;
+            }
+            let f = d1 / (d1 - d2);
+            let at = [
+                s.p[0] + f * (s.q[0] - s.p[0]),
+                s.p[1] + f * (s.q[1] - s.p[1]),
+            ];
+            found.push((x, y, at));
+        }
+    }
+    found.sort_by_key(|f| (f.0, f.1));
+    let curve = |id: EntityId| {
+        let e = &b.ents[id.index()];
+        if e.kind == EntityKind::Point {
+            format!("the corner cut at {}", b.describe(id))
+        } else {
+            format!("{} {}", e.kind_name(), b.describe(id))
+        }
+    };
+    found
+        .into_iter()
+        .take(CROSSINGS_LISTED)
+        .map(|(x, y, at)| Note {
+            severity: Severity::Warning,
+            code: DiagCode::SketchSelfIntersection,
+            loc: b.ent_locs[x.index()],
+            text: if x == y {
+                format!("{} crosses itself near {}", curve(x), coords(at))
+            } else {
+                format!(
+                    "{} crosses {} near {}; the profile fills even-odd, so where loops cross the overlap is left out",
+                    curve(x),
+                    curve(y),
+                    coords(at)
+                )
+            },
+            hints: say(
+                "move the guesses (or the dimensions) so that the curves do not cross, or mark one `construction = true`",
+            ),
+        })
+        .collect()
+}
+
+/// Crossings reported per sketch, at most.
+const CROSSINGS_LISTED: usize = 4;
+
 /// Every closed loop of the profile as polygon points, after cutting the
-/// fillets and chamfers (sections 4.4 and 4.5), or the notes saying why
-/// there is none.
-fn profile(b: &Builder, sol: &Solution) -> Result<Vec<Vec<[f64; 2]>>, Vec<Note>> {
+/// fillets and chamfers (sections 4.4 and 4.5), with warnings about loops
+/// that cross; or the notes saying why there is no profile.
+#[allow(clippy::type_complexity)]
+fn profile(b: &Builder, sol: &Solution) -> Result<(Vec<Vec<[f64; 2]>>, Vec<Note>), Vec<Note>> {
     let ents = b.model.entities();
     let mut g = Graph {
         verts: Vec::new(),
@@ -1683,7 +2683,7 @@ fn profile(b: &Builder, sol: &Solution) -> Result<Vec<Vec<[f64; 2]>>, Vec<Note>>
         let (rp, rq) = (find(&mut g.root, p.index()), find(&mut g.root, q.index()));
         g.root[rp.max(rq)] = rp.min(rq);
     }
-    let mut circles: Vec<([f64; 2], f64)> = Vec::new();
+    let mut circles: Vec<([f64; 2], f64, EntityId)> = Vec::new();
     for (i, e) in ents.iter().enumerate() {
         let src = b.ents[i].id;
         if b.model.is_construction(src) {
@@ -1718,7 +2718,7 @@ fn profile(b: &Builder, sol: &Solution) -> Result<Vec<Vec<[f64; 2]>>, Vec<Note>>
             }
             sketch_solver::Entity::Circle { center, .. } => {
                 let c = sol.point(center).unwrap_or([0.0, 0.0]);
-                circles.push((c, sol.radius(src).unwrap_or(0.0)));
+                circles.push((c, sol.radius(src).unwrap_or(0.0), src));
             }
             sketch_solver::Entity::Point { .. } => {}
         }
@@ -1751,7 +2751,7 @@ fn profile(b: &Builder, sol: &Solution) -> Result<Vec<Vec<[f64; 2]>>, Vec<Note>>
                         "{kind} {} {end} is not joined to another profile curve",
                         b.describe(c.src)
                     ),
-                    hint: Some("share the point, or mark the curve `construction = true`".into()),
+                    hints: say("share the point, or mark the curve `construction = true`"),
                 });
             }
         }
@@ -1767,7 +2767,7 @@ fn profile(b: &Builder, sol: &Solution) -> Result<Vec<Vec<[f64; 2]>>, Vec<Note>>
                     b.describe(g.vsrc[v]),
                     i.len()
                 ),
-                hint: Some("mark the extra curves `construction = true`".into()),
+                hints: say("mark the extra curves `construction = true`"),
             });
         }
     }
@@ -1775,12 +2775,14 @@ fn profile(b: &Builder, sol: &Solution) -> Result<Vec<Vec<[f64; 2]>>, Vec<Note>>
         return Err(notes);
     }
     let mut loops = Vec::new();
+    let mut srcs: Vec<Vec<EntityId>> = Vec::new();
     let mut used = vec![false; g.curves.len()];
     for start in 0..g.curves.len() {
         if used[start] {
             continue;
         }
         let mut pts: Vec<[f64; 2]> = Vec::new();
+        let mut from_curve: Vec<EntityId> = Vec::new();
         let (mut ci, mut reversed) = (start, false);
         for _ in 0..g.curves.len() {
             used[ci] = true;
@@ -1794,6 +2796,7 @@ fn profile(b: &Builder, sol: &Solution) -> Result<Vec<Vec<[f64; 2]>>, Vec<Note>>
                 }
                 pts.extend(inner);
             }
+            from_curve.resize(pts.len(), c.src);
             // `ci` arrives at `to` by its end there (`b` unless reversed);
             // leave by the other curve end at `to`.
             let here = !reversed;
@@ -1808,14 +2811,17 @@ fn profile(b: &Builder, sol: &Solution) -> Result<Vec<Vec<[f64; 2]>>, Vec<Note>>
             reversed = at_b;
         }
         loops.push(pts);
+        srcs.push(from_curve);
     }
-    for (c, r) in circles {
+    for (c, r, id) in circles {
         let pts = circle_points(c, r, &b.disc);
         if !pts.is_empty() {
+            srcs.push(vec![id; pts.len()]);
             loops.push(pts);
         }
     }
-    Ok(loops)
+    let warnings = crossings(b, &loops, &srcs, sol.size);
+    Ok((loops, warnings))
 }
 
 #[cfg(test)]
@@ -1859,6 +2865,80 @@ mod tests {
         let p = circle_points([1.0, 0.0], 3.0, &disc(5.0));
         assert_eq!(p.len(), 5);
         assert_eq!(p[0], [4.0, 0.0]);
+    }
+
+    fn span(text: &str, of: &str) -> Span {
+        let at = text.find(of).unwrap() as u32;
+        Span::new(lang::source::FileId(0), at, at + of.len() as u32)
+    }
+
+    fn cut(text: &str, s: Span) -> String {
+        format!("{}{}", &text[..s.start as usize], &text[s.end as usize..])
+    }
+
+    /// A deleted statement takes its line when it is alone on it, and its
+    /// `;` and the space after it when it is not, so the edit leaves
+    /// neither a blank line nor a double space.
+    #[test]
+    fn deleting_a_statement_takes_its_line_or_its_space() {
+        let t = "sketch() {\n  fix(o);\n  length(l, 3);\n}\n";
+        assert_eq!(
+            cut(t, deletion(t.as_bytes(), span(t, "length(l, 3);"))),
+            "sketch() {\n  fix(o);\n}\n"
+        );
+        // A span without its `;` still takes it.
+        assert_eq!(
+            cut(t, deletion(t.as_bytes(), span(t, "length(l, 3)"))),
+            "sketch() {\n  fix(o);\n}\n"
+        );
+        let t = "  fix(o); horizontal(l); length(l, 3);\n";
+        assert_eq!(
+            cut(t, deletion(t.as_bytes(), span(t, "horizontal(l);"))),
+            "  fix(o); length(l, 3);\n"
+        );
+        assert_eq!(
+            cut(t, deletion(t.as_bytes(), span(t, "length(l, 3);"))),
+            "  fix(o); horizontal(l);\n"
+        );
+    }
+
+    /// Statements are inserted before the body's closing brace: on their
+    /// own lines, indented like the body's last line, or on the brace's
+    /// line when the body is written on one line.
+    #[test]
+    fn insertions_go_before_the_closing_brace() {
+        let t = "sketch(name = \"s\") {\n    a = point([0, 0]);\n    fix(a);\n}\n";
+        let (at, indent, inline) = insertion(t.as_bytes(), span(t, t.trim_end())).unwrap();
+        assert_eq!((at.start, at.end), (t.rfind('}').unwrap() as u32, at.start));
+        assert_eq!((indent.as_str(), inline), ("    ", false));
+        let t = "sketch() { a = point(); }";
+        let (at, lead, inline) = insertion(t.as_bytes(), span(t, t)).unwrap();
+        assert_eq!(at.start as usize, t.rfind('}').unwrap());
+        assert_eq!((lead.as_str(), inline), ("", true));
+        // An empty body: one level deeper than the brace.
+        let t = "  sketch() {\n  }\n";
+        let (_, indent, _) = insertion(t.as_bytes(), span(t, t.trim())).unwrap();
+        assert_eq!(indent, "    ");
+        // A body that is not a block has nowhere to insert.
+        let t = "sketch() fix(a);";
+        assert!(insertion(t.as_bytes(), span(t, t)).is_none());
+    }
+
+    /// "At most" is rounded down, so the printed number fits.
+    #[test]
+    fn at_most_never_rounds_up() {
+        let x = 7.071_067_811_865_476;
+        assert!(at_most(x) <= x);
+        assert_eq!(num(at_most(x)), "7.07106");
+        assert_eq!(at_most(10.0), 10.0);
+        assert_eq!(
+            listed(
+                ["a", "b", "a", "c", "d", "e", "f", "g", "h"]
+                    .iter()
+                    .map(|s| s.to_string())
+            ),
+            "a, b, c, d, e, f and 2 more"
+        );
     }
 
     #[test]

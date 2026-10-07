@@ -1520,8 +1520,8 @@ fn nodes_anchored(n: &Node, anchors: &[Anchor]) -> bool {
 }
 
 fn message_anchored(r: &Recorded, anchors: &[Anchor]) -> bool {
-    // Evaluation hints carry no replacement spans; one that did could not
-    // be moved, since its unit is not recorded.
+    // A hint's replacement span (a sketch's edits; sketches are never
+    // replayed anyway) could not be moved, since its unit is not recorded.
     if r.diag.hints.iter().any(|h| h.replacement.is_some()) {
         return false;
     }

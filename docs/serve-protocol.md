@@ -405,7 +405,8 @@ limits, because a server runs models that agents and editors write and
 one runaway `$fn` must not exhaust the machine: time 60 s, estimated
 memory 4 GiB, 10,000 fragments per primitive, 10,000 slices per
 extrusion, 10 million list elements, 64 MiB strings, 10 million
-`rands()` numbers and 10 million triangles per result
+`rands()` numbers, 10 million triangles per result and 5,000 unknowns
+per constrained sketch
 (`docs/cli-json.md`, "Resource limits", has the details). A request that
 would pass one is an ordinary result: `exit_code` 1 and a
 `resource-limit` error saying which limit, where, and how to raise it.

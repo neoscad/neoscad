@@ -33,6 +33,7 @@ const LIMITS = {
   string: 67108864,
   rands: 10000000,
   triangles: 10000000,
+  sketchUnknowns: 5000,
 };
 
 function busyWait(ms) {
