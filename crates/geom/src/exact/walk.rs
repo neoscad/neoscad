@@ -31,6 +31,8 @@
 //! nothing) and tagged [`Surface::Faceted`]: its triangles reach the file
 //! as planar faces. Those are the substitutions the caller reports.
 
+mod extrude;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -45,6 +47,7 @@ use meshbrep::primitives::{self, Transform};
 use meshbrep::{Surface, TaggedMesh};
 
 use crate::evaluate::{MsgLoc, RenderOptions, Renderer, Unsupported};
+use crate::exact::profile::Curve2;
 use crate::manifold_geom::{GlobalIds, ManifoldGeometry, kernel_token};
 use crate::polyset::PolySet;
 use crate::{Geometry, Matrix, fragments};
@@ -96,6 +99,20 @@ pub struct ExportMesh {
     /// render's polygons: the sum, over the curved primitives made exact,
     /// of their curved area times their sagitta.
     pub normal_volume_bound: f64,
+    /// How many `linear_extrude`/`rotate_extrude` nodes were built with
+    /// exact surfaces (none with [`Extrusions::Faceted`]).
+    pub exact_extrusions: u32,
+}
+
+/// How the export render builds `linear_extrude` and `rotate_extrude`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Extrusions {
+    /// With exact surfaces where their profiles have them (stage 2).
+    Exact,
+    /// As the normal render builds them, as planar facets: the fallback
+    /// when a model's exact extrusions do not reconstruct, so that a model
+    /// stage 1 exported still exports.
+    Faceted,
 }
 
 /// A node's result in the export render. Each is moved once into its
@@ -122,6 +139,18 @@ pub fn export_render(
     opts: &RenderOptions,
     mult: u32,
 ) -> Result<ExportMesh, (Unsupported, Vec<Substitution>)> {
+    export_render_with(renderer, top, keys, opts, mult, Extrusions::Exact)
+}
+
+/// [`export_render`] with extrusions built as `extrusions` says.
+pub fn export_render_with(
+    renderer: &Renderer,
+    top: &Node,
+    keys: &Keys,
+    opts: &RenderOptions,
+    mult: u32,
+    extrusions: Extrusions,
+) -> Result<ExportMesh, (Unsupported, Vec<Substitution>)> {
     let mut w = Walk {
         renderer,
         keys,
@@ -134,6 +163,9 @@ pub fn export_render(
         sub_index: HashMap::new(),
         normal_sagitta: 0.0,
         normal_volume_bound: 0.0,
+        curves2: vec![Curve2::Faceted],
+        extrusions,
+        exact_extrusions: 0,
     };
     let res = match w.node(top, &crate::IDENTITY) {
         Ok(r) => r,
@@ -168,6 +200,7 @@ pub fn export_render(
         substitutions: w.subs,
         normal_sagitta: w.normal_sagitta,
         normal_volume_bound: w.normal_volume_bound,
+        exact_extrusions: w.exact_extrusions,
     })
 }
 
@@ -194,6 +227,11 @@ struct Walk<'a> {
     sub_index: HashMap<SubKey, usize>,
     normal_sagitta: f64,
     normal_volume_bound: f64,
+    /// The 2D curve table of the profiles built so far
+    /// ([`crate::exact::profile`]); entry 0 is the facet.
+    curves2: Vec<Curve2>,
+    extrusions: Extrusions,
+    exact_extrusions: u32,
 }
 
 fn loc_of(n: &Node) -> Option<MsgLoc> {
@@ -362,6 +400,20 @@ fn transform_surface(s: &Surface, m: &Matrix, scale: Option<f64>) -> Surface {
         (Surface::Sphere { center, radius }, Some(k)) => Surface::Sphere {
             center: apply(m, *center),
             radius: radius * k,
+        },
+        (
+            Surface::Torus {
+                center,
+                axis,
+                major_radius,
+                minor_radius,
+            },
+            Some(k),
+        ) => Surface::Torus {
+            center: apply(m, *center),
+            axis: unit(linear(m, *axis)),
+            major_radius: major_radius * k,
+            minor_radius: minor_radius * k,
         },
         _ => Surface::Faceted,
     }
@@ -635,6 +687,28 @@ impl Walk<'_> {
             | NodeKind::Circle { .. }
             | NodeKind::Polygon { .. }
             | NodeKind::Sketch(_) => Ok(Res::TwoD),
+            NodeKind::LinearExtrude(_) | NodeKind::RotateExtrude { .. }
+                if self.extrusions == Extrusions::Faceted =>
+            {
+                self.delegate(
+                    n,
+                    m,
+                    Some(
+                        "is exported as planar facets: the model did not reconstruct with its extrusions exact"
+                            .into(),
+                    ),
+                )
+            }
+            NodeKind::LinearExtrude(e) => {
+                self.exact_extrusions += 1;
+                self.linear_extrude(n, e, m)
+            }
+            NodeKind::RotateExtrude {
+                angle, start, disc, ..
+            } => {
+                self.exact_extrusions += 1;
+                self.rotate_extrude(n, *angle, *start, disc, m)
+            }
             _ => {
                 let module = module_name(&n.kind);
                 self.delegate(

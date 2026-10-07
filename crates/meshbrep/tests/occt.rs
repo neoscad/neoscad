@@ -30,7 +30,7 @@ fn occt_reads_every_case_back() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut files = Vec::new();
     let mut expect = Vec::new();
-    for name in FIFTEEN.iter().chain(&IDIOMS).chain(&MORE) {
+    for name in FIFTEEN.iter().chain(&IDIOMS).chain(&MORE).chain(&TORI) {
         for (ri, res) in RESOLUTIONS.iter().enumerate() {
             let (_, _, reference, brep, _) = build(name, *res);
             let brep = brep.expect("reconstruct");

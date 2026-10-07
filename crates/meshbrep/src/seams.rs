@@ -307,6 +307,7 @@ fn base_param(topo: &Topo, f: usize) -> Param {
                 .unwrap_or(cands[0]);
             Param::new(face.surf, c, z, z.perp(), 0.0)
         }
+        Surf::Torus { .. } => torus_param(topo, f).0,
     }
 }
 
@@ -340,22 +341,281 @@ fn clear_of_poles(topo: &Topo, face: &crate::topo::TFace, c: V, r: f64, z: V) ->
     })
 }
 
-/// Rotates the frame's x axis by `u0` about z.
+/// Rotates the frame's x axis by `u0` about z (a swapped torus's tube
+/// angle instead; see [`Param::rotated`]).
 fn rotated(p: &Param, u0: f64) -> Param {
-    let x = p.x * cos(u0) + p.y * sin(u0);
-    Param::new(p.s, p.o, p.z, x, p.r0)
+    p.rotated(u0)
+}
+
+/// The middle of the widest gap that angle intervals leave on the circle,
+/// or `None` when they cover all of it. Each interval is shorter than π.
+fn widest_gap(intervals: &[(f64, f64)]) -> Option<f64> {
+    let mut iv: Vec<(f64, f64)> = Vec::with_capacity(intervals.len() + 4);
+    for &(lo, hi) in intervals {
+        let l = lo - TAU * (lo / TAU).floor();
+        let h = l + (hi - lo);
+        iv.push((l, h));
+        if h > TAU {
+            iv.push((l - TAU, h - TAU));
+        }
+    }
+    if iv.is_empty() {
+        return None;
+    }
+    iv.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let first = iv[0].0;
+    let mut end = iv[0].1;
+    let mut best = (0.0f64, 0.0f64);
+    for &(l, h) in &iv[1..] {
+        if l > end && l - end > best.0 {
+            best = (l - end, 0.5 * (l + end));
+        }
+        end = end.max(h);
+    }
+    let wrap = first + TAU - end;
+    if wrap > best.0 {
+        best = (wrap, end + 0.5 * wrap);
+    }
+    (best.0 > 1e-9).then_some(best.1)
+}
+
+/// A torus face's frame. Both of a torus's coordinates are angles, so
+/// each needs its cut (where the angle jumps by 2π) outside the face, or
+/// a seam where it cannot be: which one is decided from the angles the
+/// face's mesh triangles cover. Returns the frame and whether the face
+/// wraps both ways (a whole torus, perhaps with holes), which needs two
+/// seams.
+fn torus_param(topo: &Topo, f: usize) -> (Param, bool) {
+    let face = &topo.faces[f];
+    let Surf::Torus { c, a, big, .. } = face.surf else {
+        unreachable!("a torus face")
+    };
+    let xr = a.perp();
+    let reference = Param::new(face.surf, c, a, xr, 0.0);
+    let angles = |p: V| {
+        let d = p - c;
+        let h = d.dot(reference.z);
+        let w = d.reject(reference.z);
+        (
+            atan2(w.dot(reference.y), w.dot(reference.x)),
+            atan2(h, w.len() - big),
+        )
+    };
+    let mut phi = Vec::with_capacity(face.tris.len());
+    let mut theta = Vec::with_capacity(face.tris.len());
+    for t in &face.tris {
+        let q = t.map(angles);
+        let span = |k: usize| {
+            let pick = |p: (f64, f64)| if k == 0 { p.0 } else { p.1 };
+            let a0 = pick(q[0]);
+            let (mut lo, mut hi) = (a0, a0);
+            for &p in &q[1..] {
+                let x = wrap_near(pick(p), a0);
+                lo = lo.min(x);
+                hi = hi.max(x);
+            }
+            (lo, hi)
+        };
+        phi.push(span(0));
+        theta.push(span(1));
+    }
+    let gp = widest_gap(&phi);
+    let gt = widest_gap(&theta);
+    let x = match gp {
+        // The axis-angle cut (±π) in the middle of the gap.
+        Some(g) => reference.x * cos(g + PI) + reference.y * sin(g + PI),
+        None => xr,
+    };
+    let mut p = Param::new(face.surf, c, a, x, 0.0);
+    p.t0 = gt.map_or(0.0, |g| g + PI);
+    p.swap = gp.is_some() && gt.is_none();
+    (p, gp.is_none() && gt.is_none())
+}
+
+/// Seams a torus face that wraps both ways: a meridian and a parallel
+/// through one new vertex, both clear of the face's loops (which must
+/// then be holes), joined into one loop around the parameter square.
+fn double_seam(topo: &mut Topo, f: usize, param: Param) -> Result<(), Error> {
+    let Surf::Torus { c, big, r, .. } = param.s else {
+        unreachable!("a torus face")
+    };
+    let loops = topo.faces[f].loops.clone();
+    // Each loop's continuous (axis, tube) angle ranges.
+    let mut ranges: Vec<((f64, f64), (f64, f64))> = Vec::with_capacity(loops.len());
+    for lp in &loops {
+        let mut prev: Option<(f64, f64)> = None;
+        let (mut first, mut last) = ((0.0, 0.0), (0.0, 0.0));
+        let mut lo = (f64::INFINITY, f64::INFINITY);
+        let mut hi = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for &(e, fwd) in lp {
+            let ed = &topo.edges[e];
+            let n = curve::sample_count(&ed.curve, ed.range);
+            for (p, _) in coedge_points(topo, e, fwd, n) {
+                let (u, w) = param.uv(p);
+                let q = match prev {
+                    None => {
+                        first = (u, w);
+                        (u, w)
+                    }
+                    Some((pu, pw)) => (wrap_near(u, pu), wrap_near(w, pw)),
+                };
+                lo = (lo.0.min(q.0), lo.1.min(q.1));
+                hi = (hi.0.max(q.0), hi.1.max(q.1));
+                last = q;
+                prev = Some(q);
+            }
+        }
+        if ((last.0 - first.0) / TAU).round() != 0.0 || ((last.1 - first.1) / TAU).round() != 0.0 {
+            return Err(Error::Reconstruction(format!(
+                "face {f} on a torus: a loop winds about the axis or the tube of a face that wraps both ways"
+            )));
+        }
+        ranges.push((lo, hi));
+    }
+    let clear = |x: f64, k: usize| {
+        ranges.iter().all(|r| {
+            let (lo, hi) = if k == 0 {
+                (r.0.0, r.1.0)
+            } else {
+                (r.0.1, r.1.1)
+            };
+            let m = 1e-6;
+            // The first copy of x at or above lo must lie beyond hi.
+            let j = ((lo - m - x) / TAU).ceil();
+            x + j * TAU > hi + m
+        })
+    };
+    let pick = |k: usize| {
+        (0..256)
+            .map(|i| TAU * (i as f64 + 0.5) / 256.0 - PI)
+            .find(|&x| clear(x, k))
+    };
+    let (Some(u0), Some(v0)) = (pick(0), pick(1)) else {
+        return Err(Error::Reconstruction(format!(
+            "face {f} on a torus: no meridian or parallel for a seam misses the face's holes"
+        )));
+    };
+    let mut fr = rotated(&param, u0);
+    // Tube angles of the face then lie in (v0, v0 + 2π].
+    fr.t0 = v0 + PI;
+    let x = fr.x;
+    let p0 = fr.eval(0.0, v0);
+    let vx = topo.add_vertex(p0);
+    topo.pinned[vx] = true;
+    let meridian = topo.edges.len();
+    topo.edges.push(TEdge {
+        v0: vx,
+        v1: vx,
+        curve: Curve::Circle {
+            center: (c + x * big).arr(),
+            normal: x.cross(fr.z).arr(),
+            x_axis: x.arr(),
+            radius: r,
+        },
+        range: [v0, v0 + TAU],
+        faces: [f, f],
+        chain: Vec::new(),
+        seam: true,
+        dev: 0.0,
+    });
+    let parallel = topo.edges.len();
+    topo.edges.push(TEdge {
+        v0: vx,
+        v1: vx,
+        curve: Curve::Circle {
+            center: (c + fr.z * (r * sin(v0))).arr(),
+            normal: fr.z.arr(),
+            x_axis: x.arr(),
+            radius: big + r * cos(v0),
+        },
+        range: [0.0, TAU],
+        faces: [f, f],
+        chain: Vec::new(),
+        seam: true,
+        dev: 0.0,
+    });
+    // Counter-clockwise around [0, 2π] x [v0, v0 + 2π] for a face whose
+    // normal is the torus's own, clockwise otherwise.
+    let outer = if topo.faces[f].same_sense {
+        vec![
+            (parallel, true),
+            (meridian, true),
+            (parallel, false),
+            (meridian, false),
+        ]
+    } else {
+        vec![
+            (meridian, true),
+            (parallel, true),
+            (meridian, false),
+            (parallel, false),
+        ]
+    };
+    let mut new_loops = vec![outer];
+    new_loops.extend(loops);
+    topo.faces[f].loops = new_loops;
+    topo.faces[f].param = Some(fr);
+    Ok(())
+}
+
+/// The parameter-space curves of the loop [`double_seam`] made, in edge
+/// direction: the parallel along `v0` or `v0 + 2π`, the meridian along
+/// `u = 0` or `2π`.
+fn double_seam_pcurves(
+    topo: &Topo,
+    param: &Param,
+    lp: &[(usize, bool)],
+    same: bool,
+) -> Vec<BSpline<2>> {
+    let v0 = param.t0 - PI;
+    lp.iter()
+        .map(|&(e, fwd)| {
+            let ed = &topo.edges[e];
+            let is_parallel = matches!(ed.curve, Curve::Circle { normal, .. }
+                if V::from(normal).cross(param.z).len() < 1e-9);
+            if is_parallel {
+                // A same-sense loop runs the parallel forward along the
+                // bottom (v0) and back along the top; the other sense the
+                // opposite way round.
+                let w = if fwd == same { v0 } else { v0 + TAU };
+                bspline::interpolate_at(&[[0.0, w], [TAU, w]], &ed.range)
+            } else {
+                let u = if fwd == same { TAU } else { 0.0 };
+                bspline::interpolate_at(&[[u, v0], [u, v0 + TAU]], &ed.range)
+            }
+        })
+        .collect()
+}
+
+/// Whether a loop is the one [`double_seam`] made.
+fn is_double_seam_loop(topo: &Topo, param: &Param, lp: &[(usize, bool)]) -> bool {
+    matches!(param.s, Surf::Torus { .. })
+        && !param.swap
+        && lp.len() == 4
+        && lp.iter().all(|&(e, _)| topo.edges[e].seam)
 }
 
 /// Chooses each face's frame and inserts seams (pass 1).
 fn frames_and_seams(topo: &mut Topo, scale: f64) -> Result<(), Error> {
     let tol = 1e-9 * scale;
     for f in 0..topo.faces.len() {
-        let param = base_param(topo, f);
+        let (param, double) = match topo.faces[f].surf {
+            Surf::Torus { .. } => torus_param(topo, f),
+            _ => (base_param(topo, f), false),
+        };
         if !param.periodic() {
             topo.faces[f].param = Some(param);
             continue;
         }
-        let s = if topo.faces[f].same_sense { 1 } else { -1 };
+        if double {
+            double_seam(topo, f, param)?;
+            continue;
+        }
+        let s = if param.sense(topo.faces[f].same_sense) {
+            1
+        } else {
+            -1
+        };
         let loops = topo.faces[f].loops.clone();
         let lifts: Vec<Vec<Vec<S>>> = loops
             .iter()
@@ -392,11 +652,7 @@ fn frames_and_seams(topo: &mut Topo, scale: f64) -> Result<(), Error> {
             (b, t) => {
                 return Err(Error::Reconstruction(format!(
                     "face {f} on a {}: unsupported topology ({b} loops wind up, {t} down)",
-                    match param.s {
-                        Surf::Cyl { .. } => "cylinder",
-                        Surf::Cone { .. } => "cone",
-                        _ => "sphere",
-                    }
+                    param.s.to_public().kind()
                 )));
             }
         };
@@ -499,6 +755,34 @@ fn frames_and_seams(topo: &mut Topo, scale: f64) -> Result<(), Error> {
                         normal: n.arr(),
                         x_axis: d.arr(),
                         radius: r,
+                    },
+                    [wb, wt],
+                )
+            }
+            // A torus: the meridian at u = 0 (the circle's parameter is
+            // the tube angle), or for a swapped one the parallel at the
+            // internal u = 0 (its parameter the axis angle).
+            Surf::Torus { c, big, r, .. } if !fr.swap => {
+                let d = fr.x;
+                let (wb, wt) = (fr.uv(pb).1, fr.uv(pt).1);
+                (
+                    Curve::Circle {
+                        center: (c + d * big).arr(),
+                        normal: d.cross(fr.z).arr(),
+                        x_axis: d.arr(),
+                        radius: r,
+                    },
+                    [wb, wt],
+                )
+            }
+            Surf::Torus { c, big, r, .. } => {
+                let (wb, wt) = (fr.uv(pb).1, fr.uv(pt).1);
+                (
+                    Curve::Circle {
+                        center: (c + fr.z * (r * sin(fr.t0))).arr(),
+                        normal: fr.z.arr(),
+                        x_axis: fr.x.arr(),
+                        radius: big + r * cos(fr.t0),
                     },
                     [wb, wt],
                 )
@@ -646,7 +930,11 @@ fn pcurves(topo: &mut Topo, scale: f64, fit_tol: f64) -> f64 {
     let mut max_dev = 0.0f64;
     for f in 0..topo.faces.len() {
         let param = topo.faces[f].param.expect("param");
-        let s = if topo.faces[f].same_sense { 1.0 } else { -1.0 };
+        let s = if param.sense(topo.faces[f].same_sense) {
+            1.0
+        } else {
+            -1.0
+        };
         let loops = topo.faces[f].loops.clone();
         let mut all_pc = Vec::with_capacity(loops.len());
         let mut outer = Vec::with_capacity(loops.len());
@@ -655,6 +943,12 @@ fn pcurves(topo: &mut Topo, scale: f64, fit_tol: f64) -> f64 {
                 let l = lift_loop(topo, &param, lp, None, tol);
                 outer.push(s * area(&l) > 0.0);
                 all_pc.push(vec![None; lp.len()]);
+                continue;
+            }
+            if is_double_seam_loop(topo, &param, lp) {
+                let pcs = double_seam_pcurves(topo, &param, lp, topo.faces[f].same_sense);
+                all_pc.push(pcs.into_iter().map(Some).collect());
+                outer.push(true);
                 continue;
             }
             let seamed = lp.iter().any(|&(e, _)| topo.edges[e].seam);
@@ -689,7 +983,7 @@ fn pcurves(topo: &mut Topo, scale: f64, fit_tol: f64) -> f64 {
                     let u = if fwd == (s > 0.0) { TAU } else { 0.0 };
                     let (vb, vt) = (param.uv(topo.verts[ed.v0]).1, param.uv(topo.verts[ed.v1]).1);
                     let (vb, vt) = match param.s {
-                        Surf::Sphere { .. } => (ed.range[0], ed.range[1]),
+                        Surf::Sphere { .. } | Surf::Torus { .. } => (ed.range[0], ed.range[1]),
                         _ => (vb, vt),
                     };
                     // v is linear in the seam's own parameter (length
@@ -717,8 +1011,21 @@ fn pcurves(topo: &mut Topo, scale: f64, fit_tol: f64) -> f64 {
                 let l = lift_loop(topo, &param, lp, Some(start_u), tol);
                 outer.push(s * area(&l) > 0.0);
             }
+            if param.swap {
+                // Back to STEP's (axis angle, tube angle).
+                for bs in pcs.iter_mut().flatten() {
+                    for q in &mut bs.control {
+                        *q = param.step_coords(*q);
+                    }
+                }
+            }
             all_pc.push(pcs);
         }
+        // The frame as written: STEP's coordinates, whatever the internal
+        // ones were.
+        let mut written = param;
+        written.swap = false;
+        topo.faces[f].param = Some(written);
         topo.faces[f].pcurves = all_pc;
         topo.faces[f].outer = outer;
     }

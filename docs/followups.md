@@ -2268,9 +2268,103 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
 
 ## Exact geometry (STEP)
 Stage 1a of `docs/audits/exact-geometry-rust.md` is `crates/meshbrep`;
-stage 1b is `geom::exact` and `-o x.step` behind `--enable exact`. The
-stop-rule numbers are in the audit's status note (`conformance exact`
-reproduces them). Leftovers of stage 1b first, then of the crate.
+stage 1b is `geom::exact` and `-o x.step` behind `--enable exact`; stage
+2 (extrusions, tori, `offset(r)`, sketch arcs) is `geom::exact::profile`
+and `walk/extrude.rs`. The stop-rule numbers are in the audit's status
+notes (`conformance exact` reproduces them). Stage 2's leftovers first,
+then stage 1b's, then the crate's.
+- **After stage 2 the stop rule is below its bar: 181 of 200 eligible
+  real models (90.5%) export valid, from 121 of 127.** Making
+  extrusions exact made 73 more models eligible; 60 of them export
+  exact, 2 are written with their extrusions as facets after the exact
+  attempt failed (`masks__097`, `vnf__031`), and 11 fail. Every model
+  valid before is valid still (the fallback below sees to the four
+  non-eligible ones that would otherwise have failed). The failures are classes that exist
+  without extrusions, reached now because the extrusions are exact:
+  - **BOSL2 `stroke()` and `vnf_wireframe()` joints** (`beziers__022`,
+    `__032`, `__037`, `rounding__035`, `turtle3d__002`, `drawing__040`;
+    `vnf__031` fell back): cylinders of the stroke's width meeting at
+    spheres of the same width. Each cylinder touches the sphere along a
+    great circle, and two of them meet where those circles cross, a
+    point where three surfaces touch. `sphere(d=1)` plus two
+    `cylinder(d=1)` from its centre at 90° fails the same way with
+    plain cylinders at the base commit; aligning the sphere's poles is
+    not enough there. Needs a vertex placed at the triple contact and
+    the mesh's slivers around it collapsed into it (the `distributors`
+    item below is the same shape of problem).
+  - **Flush faces from different chains of transforms**
+    (`candleStand.scad`: coaxial cylinders of one radius from two
+    module paths; `hinges__015`, `skin__084`, `skin__094`,
+    `example017.scad`): rounding keeps faces apart that the model has
+    flush, and Manifold keeps a sliver or a crack between them. Two
+    fixes for slivers went in (a closed bubble of two faces of no volume
+    is dropped; a slit of no width in a face is closed unless it runs
+    along a fin of two flush walls facing apart). `example017.scad` has
+    such fins: closing their slits wrote a file our validator passed
+    and OCCT rejected (a wire of the disc's top face badly oriented), so
+    they are left and the export is refused. A fin check in `validate`
+    (two faces on one surface, facing apart, sharing an edge) would
+    catch that class directly. Snapping the export render's vertices to a
+    grid (2^-32, then 2^-40, of the model's reach) before Manifold
+    fixed `masks__097` and `cubetruss__010` and broke `issue1165.scad`
+    (a deliberate 1e-10 gap), and at 2^-40 made manifold-rust panic on
+    `candleStand.scad` (`edge_op.rs:224`, index out of bounds): not
+    kept. The panic itself is worth a reduced case for the vendored
+    crate.
+  - **BOSL2 mask corner patches** (`masks__097` fell back): one
+    profile extruded along an edge and revolved round the corner, cut
+    by a vertical prism of the same profile. The patch is smaller than
+    the export render's sections; at 1× its mesh made a B-rep 0.4% off
+    the model that passed every check (the volume tolerance was 7%),
+    and at 2× and 4× its topology differs. Now refused at 1× (the loose
+    check below) and written with faceted extrusions. Placing the
+    revolve's sections at the patch's own vertices would align it.
+  - The five `distributors` examples and the Menger sponge, as before.
+- **Twisted and non-uniformly scaled extrusions are facets**, reported
+  at the `linear_extrude`; so are arcs scaled toward a point off their
+  centre (oblique cones), arcs under a non-uniform 2D or 3D scale
+  (elliptic cylinders), and arcs of `rotate_extrude` that reach past the
+  axis (spindle tori, which STEP writes as another entity). Text is
+  facets too: its Bézier outlines would need
+  `Surface::LinearExtrusion` of a B-spline profile in `meshbrep`
+  (surface evaluation, intersections with planes and other extrusions,
+  parameter-space curves, measure) and the glyph curves carried through
+  `crates/text`'s flattening; not started.
+- **The eligibility rule counts an ellipse under a non-uniform scale as
+  mesh-only when it comes from an extrusion** (the substitution is at
+  the `linear_extrude` or the 2D `scale`, not at a `sphere` or
+  `cylinder`, which `conformance exact`'s `mesh_only` exempts). Models
+  like `scale([2, 1, 1]) linear_extrude(3) circle(5)` are therefore not
+  eligible, as they were not before stage 2.
+- **When a model's exact extrusions do not reconstruct, the export
+  falls back to building them as the normal render does** (stage 1's
+  behaviour, reported at each extrusion), so no model that exported
+  before stage 2 fails now. `conformance exact` judges such a model's
+  eligibility by its exact attempts and does not count it as valid. A
+  further level (everything faceted, as a mesh export would write it)
+  would give the joint models above a file too.
+- **A first attempt whose volume check is loose (tolerance above 1e-3
+  of the volume) is held, not trusted**: the export renders at 2× and
+  then 4× the segments, and takes the first finer B-rep that passes, or
+  the held one if a finer mesh's corrected volume agrees with it within
+  a tolerance under 1e-3. A coarse capsule (`x02` at `$fa = 60`) then
+  exports from its 4× mesh. This retries coarse models that passed
+  before, so their files changed (`crates/wasm-check/cases.json`'s
+  `exact-step-export` hash) and gate 5's ratios grew on them.
+- **Profile edges are attributed geometrically, not through Clipper's Z
+  channel** (`geom::exact::profile` says why: `using_z` is a Cargo
+  feature that would change `Point64` for every Clipper user in the
+  build, the normal render and Manifold's included, and one Z per
+  intersection vertex cannot tell which crossing edge leaves it). After
+  an offset, an edge that matches no input line, offset circle or
+  round-join circle is a facet: none in the corpora, but a profile with
+  collinear input edges offset by a round join could reach it.
+- **Torus pairs with no closed form fall back to fitted B-splines**:
+  non-coaxial tori, a torus and a plane neither across nor through its
+  axis, a torus and a non-coaxial cone or sphere. Contacts are known
+  for coaxial surfaces of revolution and a cylinder along the tube;
+  others are not classified (a plane touching the tube from the side,
+  two tori touching off the axis).
 - **The stop rule's bar is met, narrowly: 121 of 127 eligible real
   models (95.3%) export valid by our checks and OCCT's.** The six left:
   - **Five BOSL2 `distributors` examples** (six or more equal cones about
@@ -2344,10 +2438,9 @@ reproduces them). Leftovers of stage 1b first, then of the crate.
   `validate`). A faceted region written as one `FACETED_BREP`-like shell
   without reconstruction is the remaining large step; parallelising per
   face would need a wasm-safe fallback.
-- **Mesh-only models dominate the fallbacks.** 230 of 461 valid real
-  models are all facets (BOSL2's `vnf_polyhedron` shapes, text,
-  extrusions); stage 2 (2D attribution through Clipper's Z channel,
-  extrusions, tori) is where exact faces for them come from. Polyhedra
+- **Mesh-only models still dominate the fallbacks.** 170 of 457 valid
+  real models are all facets after stage 2 (228 of 456 before): BOSL2's
+  `vnf_polyhedron` shapes, text, twisted extrusions, hulls. Polyhedra
   that are not closed solids (24 failures, mostly BOSL2 `vnf` and
   `nurbs` examples of open surfaces) are refused, correctly: OpenSCAD's
   own render cannot make them a solid either.
@@ -2369,7 +2462,7 @@ reproduces them). Leftovers of stage 1b first, then of the crate.
   live in `session::diag`.
 - **Non-uniform scales fall back to facets.** An ellipse needs a
   B-spline surface or an elliptic-cylinder record; planes stay exact
-  under any affine map already.
+  under any affine map already (extruded lines included).
 - **Faceted regions cut by exact surfaces can mismatch at coarse
   tagging.** x07 (a 12-segment polyhedral sphere minus an exact skew hole)
   gives folded sliver faces at 8, 12 and 16 hole segments. The inscribed
@@ -2388,10 +2481,12 @@ reproduces them). Leftovers of stage 1b first, then of the crate.
   points).
 - **Closed forms not implemented:** plane–cone sections that are not
   circles (ellipse, parabola, hyperbola: B-spline today); tangency of
-  plane–cone along a generator and of cone–cylinder (not classified, so
-  they fall back to numeric tangent points, then arc merging). Arc merging
-  is not reached by any test model; a unit test reaches it by turning
-  analytic contacts off.
+  cone–cylinder (not classified, so it falls back to numeric tangent
+  points, then arc merging). A plane through a cone's apex at its
+  half-angle is now known to touch it along a generator (an extruded
+  and a revolved line of one profile). Arc merging is not reached by
+  any test model; a unit test reaches it by turning analytic contacts
+  off.
 - **The OCCT oracle is not in CI.** `crates/meshbrep/oracle/build.sh`
   downloads cadrum's prebuilt OCCT 8.0.1 (about 140 MB) and builds
   `check`; `MESHBREP_OCCT_CHECK=… cargo test -p meshbrep --release --test
@@ -2404,8 +2499,9 @@ reproduces them). Leftovers of stage 1b first, then of the crate.
   `manifold-rust` dev-dependency then resolves to crates.io rather than
   `vendor/`.
 - `measure` integrates in closed form along `u` (exact for planes,
-  cylinders, cones and spheres). A torus or extrusion surface needs the
-  quadrature it keeps for its own test (`inner_quadrature`).
+  cylinders, cones, spheres and tori: a torus's integrand has the same
+  `A + B cos u + C sin u` form, checked against `inner_quadrature`). An
+  extrusion surface would need the quadrature.
 - `validate`'s self-crossing check samples loops (8× finer to confirm),
   so two arcs closer than the sampling's sagitta can be misread. It has
   not happened in the test models.

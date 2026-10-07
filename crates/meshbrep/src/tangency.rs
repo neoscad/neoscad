@@ -74,11 +74,116 @@ impl Cont {
     }
 }
 
+/// A surface of revolution's profile in the half-plane of an axis
+/// (o, a), in coordinates (distance from the axis, height along it): a
+/// line (point, unit direction) or a circle (centre, radius).
+#[derive(Clone, Copy, Debug)]
+enum Profile {
+    Line([f64; 2], [f64; 2]),
+    Circle([f64; 2], f64),
+}
+
+/// `s`'s profile about the axis (o, a), when `s` is a surface of
+/// revolution about that axis (a plane across it counts).
+fn profile(s: &Surf, o: V, a: V, tol: f64) -> Option<Profile> {
+    let on_axis = |p: V| (p - o).reject(a).len() < tol;
+    let par = |x: V| x.dot(a).abs() > 1.0 - 1e-12;
+    let h = |p: V| (p - o).dot(a);
+    match *s {
+        Surf::Plane { o: po, n } if par(n) => Some(Profile::Line([0.0, h(po)], [1.0, 0.0])),
+        Surf::Cyl { o: oc, a: ac, r } if par(ac) && on_axis(oc) => {
+            Some(Profile::Line([r, 0.0], [0.0, 1.0]))
+        }
+        Surf::Cone { apex, a: ac, k } if par(ac) && on_axis(apex) => {
+            let sg = ac.dot(a).signum();
+            let l = (1.0 + k * k).sqrt();
+            Some(Profile::Line([0.0, h(apex)], [k / l, sg / l]))
+        }
+        Surf::Sphere { c, r } if on_axis(c) => Some(Profile::Circle([0.0, h(c)], r)),
+        Surf::Torus { c, a: at, big, r } if par(at) && on_axis(c) => {
+            Some(Profile::Circle([big, h(c)], r))
+        }
+        _ => None,
+    }
+}
+
+/// Where two profiles touch without crossing, as a point of the
+/// half-plane, within `tol`.
+fn profile_contact(p: Profile, q: Profile, tol: f64) -> Option<[f64; 2]> {
+    let line_circle = |o: [f64; 2], d: [f64; 2], c: [f64; 2], r: f64| {
+        let t = (c[0] - o[0]) * d[0] + (c[1] - o[1]) * d[1];
+        let f = [o[0] + d[0] * t, o[1] + d[1] * t];
+        let dist = ((c[0] - f[0]).powi(2) + (c[1] - f[1]).powi(2)).sqrt();
+        ((dist - r).abs() < tol).then_some(f)
+    };
+    match (p, q) {
+        (Profile::Line(o, d), Profile::Circle(c, r))
+        | (Profile::Circle(c, r), Profile::Line(o, d)) => line_circle(o, d, c, r),
+        (Profile::Circle(c1, r1), Profile::Circle(c2, r2)) => {
+            let w = [c2[0] - c1[0], c2[1] - c1[1]];
+            let d = (w[0] * w[0] + w[1] * w[1]).sqrt();
+            if d < tol {
+                return None;
+            }
+            let u = [w[0] / d, w[1] / d];
+            let k = if (d - (r1 + r2)).abs() < tol {
+                r1
+            } else if (d - (r1 - r2).abs()).abs() < tol {
+                if r1 > r2 { r1 } else { -r1 }
+            } else {
+                return None;
+            };
+            Some([c1[0] + u[0] * k, c1[1] + u[1] * k])
+        }
+        _ => None,
+    }
+}
+
+/// The contact of two coaxial surfaces of revolution, one of them a torus,
+/// from their profiles: a circle about the axis, or a point on it. Pairs
+/// that are not coaxial are not handled.
+fn coaxial_contact(a: &Surf, b: &Surf, tol: f64) -> Option<Cont> {
+    let (o, ax) = [a, b].into_iter().find_map(|s| match *s {
+        Surf::Torus { c, a, .. } => Some((c, a)),
+        _ => None,
+    })?;
+    let p = profile(a, o, ax, tol)?;
+    let q = profile(b, o, ax, tol)?;
+    let [rho, h] = profile_contact(p, q, tol)?;
+    if rho < -tol {
+        return None;
+    }
+    let c = o + ax * h;
+    Some(if rho < tol {
+        Cont::Point { p: c }
+    } else {
+        Cont::Circle { c, n: ax, r: rho }
+    })
+}
+
 /// The contact set of two surfaces that are tangent, within `tol` for
 /// lengths. `None` for surfaces that cross, miss or coincide, and for the
 /// pairs not handled (cone–plane along a generator, cone–cylinder).
 pub(crate) fn contact(a: &Surf, b: &Surf, tol: f64) -> Option<Cont> {
     let (a, b) = if a.rank() <= b.rank() { (a, b) } else { (b, a) };
+    if let Surf::Torus { c, a: at, big, r } = *b {
+        if let Surf::Cyl { o, a: ax, r: rc } = *a
+            && ax.dot(at).abs() < 1e-12
+        {
+            // A cylinder whose axis is tangent to the tube's centre
+            // circle, of the tube's radius, touches the torus along the
+            // tube's circle there (a rounded edge meeting its rounded
+            // corner, the same profile extruded and revolved).
+            let h = (o - c).dot(at);
+            let w = (c - o).reject(ax);
+            let foot = c - w;
+            if h.abs() < tol && (w.len() - big).abs() < tol && (rc - r).abs() < tol {
+                return Some(Cont::Circle { c: foot, n: ax, r });
+            }
+            return None;
+        }
+        return coaxial_contact(a, b, tol);
+    }
     let par = |x: V, y: V| x.dot(y).abs() > 1.0 - 1e-12;
     match (*a, *b) {
         (Surf::Plane { o: po, n }, Surf::Cyl { o, a: ax, r }) => {
@@ -91,6 +196,20 @@ pub(crate) fn contact(a: &Surf, b: &Surf, tol: f64) -> Option<Cont> {
         (Surf::Plane { o: po, n }, Surf::Sphere { c, r }) => {
             let h = (c - po).dot(n);
             ((h.abs() - r).abs() < tol).then(|| Cont::Point { p: c - n * h })
+        }
+        // A plane through the apex at the cone's half-angle to its axis
+        // touches it along a generator. A profile both extruded and
+        // revolved makes this pair from each of its lines (BOSL2's edge
+        // and corner masks): the extruded line's plane is the revolved
+        // line's cone's tangent plane where the two meet.
+        (Surf::Plane { o: po, n }, Surf::Cone { apex, a: ax, k }) => {
+            let sin_half = k / (1.0 + k * k).sqrt();
+            let c = n.dot(ax);
+            if (apex - po).dot(n).abs() >= tol || (c.abs() - sin_half).abs() >= 1e-9 {
+                return None;
+            }
+            let g = (ax - n * c).norm();
+            g.is_finite().then_some(Cont::Line { p: apex, d: g })
         }
         (
             Surf::Cyl {

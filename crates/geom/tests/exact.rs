@@ -13,6 +13,10 @@ fn cases() -> PathBuf {
 }
 
 fn tree(src: &str) -> eval::Evaluation {
+    tree_with(src, eval::Options::default())
+}
+
+fn tree_with(src: &str, options: eval::Options) -> eval::Evaluation {
     let path = PathBuf::from("/nonexistent/test.scad");
     let program = lang::parse_file(path, src.as_bytes().to_vec());
     assert!(!program.has_syntax_errors(), "syntax error in test program");
@@ -23,7 +27,7 @@ fn tree(src: &str) -> eval::Evaluation {
             &[],
             &[],
             PathBuf::from("/nonexistent"),
-            &eval::Options::default(),
+            &options,
             &mut out,
         )
     })
@@ -40,7 +44,10 @@ fn step_options() -> meshbrep::StepOptions {
 
 /// The normal render and the exact export of `src` with `renderer`.
 fn export_with(renderer: &Renderer, src: &str) -> Result<ExactExport, String> {
-    let ev = tree(src);
+    export_tree(renderer, tree(src))
+}
+
+fn export_tree(renderer: &Renderer, ev: eval::Evaluation) -> Result<ExactExport, String> {
     let keys = eval::dump::Keys::new(&ev.root, &lang::loader::StdFs);
     let opts = RenderOptions::default();
     let normal = renderer
@@ -195,7 +202,7 @@ fn audit_case(name: &str) -> String {
 /// warm one, and one warmed by a different model first.
 #[test]
 fn step_bytes_are_the_same_at_any_thread_count_and_cache_state() {
-    let models: Vec<String> = ["c01", "c14", "x02", "x07", "f02"]
+    let models: Vec<String> = ["c01", "c14", "x02", "x07", "f02", "e02", "e04", "e09"]
         .iter()
         .map(|n| audit_case(n))
         .collect();
@@ -245,6 +252,14 @@ fn golden_step_hashes() {
             "x07",
             "aa023e903d443cc12b5cc26c650d38b3ae4cfff9a5849aaaa40946482d9a76a9",
         ),
+        (
+            "e02",
+            "6f075cdc292f6c098508b85c2fd955e8ca65bba0761c490327a8c882d6905e72",
+        ),
+        (
+            "e04",
+            "a8c154194cdbeceaa05cb3321a8fa95dcc8cbb791b1ab7b10245e1560c5d07bb",
+        ),
     ];
     let mut wrong = Vec::new();
     for (name, want) in pinned {
@@ -266,7 +281,8 @@ fn audit_cases_match_their_closed_forms() {
         .filter(|p| p.extension().is_some_and(|x| x == "scad"))
         .collect();
     names.sort();
-    assert_eq!(names.len(), 28);
+    // The audit's 28, and stage 2's extrusions e01-e10.
+    assert_eq!(names.len(), 38);
     for p in names {
         let src = std::fs::read_to_string(&p).unwrap();
         let e = export(&src);
@@ -427,4 +443,276 @@ fn a_face_with_no_area_is_removed() {
         e.stats.notes
     );
     assert_eq!(e.stats.faces, 9);
+}
+
+// Stage 2: extrusions.
+
+fn kinds(e: &ExactExport, kind: SubstitutionKind) -> Vec<&'static str> {
+    e.substitutions
+        .iter()
+        .filter(|s| s.kind == kind)
+        .map(|s| s.module)
+        .collect()
+}
+
+/// Extruded and revolved profiles carry their curves: arcs become
+/// cylinders, cones and tori, lines planes and cones, and the volume is
+/// the closed form's.
+#[test]
+fn extrusions_are_exact() {
+    use std::f64::consts::PI;
+    let cases: [(&str, &str, f64); 5] = [
+        (
+            "linear_extrude(3) difference() { circle(10); circle(4); }",
+            "CYLINDRICAL_SURFACE",
+            252.0 * PI,
+        ),
+        (
+            "rotate_extrude() translate([10, 0]) circle(3);",
+            "TOROIDAL_SURFACE",
+            180.0 * PI * PI,
+        ),
+        (
+            "linear_extrude(10, scale = 0.5) circle(5);",
+            "CONICAL_SURFACE",
+            437.5 * PI / 3.0,
+        ),
+        // A sphere from a half disc on the axis.
+        (
+            "rotate_extrude() intersection() { circle(5); translate([0, -5]) square([5, 10]); }",
+            "SPHERICAL_SURFACE",
+            500.0 * PI / 3.0,
+        ),
+        // Rotated, mirrored and scaled uniformly: still exact.
+        (
+            "rotate([30, 40, 50]) mirror([1, 0, 0]) scale(2) rotate_extrude(angle = 120) translate([10, 0]) circle(3);",
+            "TOROIDAL_SURFACE",
+            8.0 * 60.0 * PI * PI,
+        ),
+    ];
+    for (src, entity, volume) in cases {
+        let e = export(src);
+        assert!(count(&e.step, entity) >= 1, "{src}: no {entity}");
+        assert_eq!(e.stats.exact_faces, e.stats.faces, "{src}");
+        let rel = (e.stats.volume - volume).abs() / volume;
+        assert!(
+            rel < 1e-9,
+            "{src}: {} vs {volume} ({rel:.1e})",
+            e.stats.volume
+        );
+        assert!(
+            kinds(&e, SubstitutionKind::Faceted).is_empty(),
+            "{src}: {:?}",
+            e.substitutions
+        );
+    }
+}
+
+/// The 2D tree is followed through booleans, transforms and offsets: a
+/// mirrored union keeps its circle, a negative offset of a disc with a
+/// square hole rounds the hole's corners with exact arcs and shrinks the
+/// disc's circle, and a chamfered offset is all planes.
+#[test]
+fn profiles_keep_their_curves_through_2d_operations() {
+    use std::f64::consts::PI;
+    let e = export(
+        "linear_extrude(4) mirror([1, 0]) union() { circle(5); translate([4, 0]) square([8, 3]); }",
+    );
+    assert_eq!(count(&e.step, "CYLINDRICAL_SURFACE"), 1);
+    assert_eq!(e.stats.exact_faces, e.stats.faces);
+    // offset(r = -1) of a radius-10 disc less a 4 mm square: a radius-9
+    // disc less the square grown by 1 with round corners.
+    let e = export(
+        "linear_extrude(3) offset(r = -1) difference() { circle(10); square(4, center = true); }",
+    );
+    assert_eq!(count(&e.step, "CYLINDRICAL_SURFACE"), 5);
+    let hole = 16.0 + 4.0 * 4.0 * 1.0 + PI;
+    let want = 3.0 * (81.0 * PI - hole);
+    assert!(
+        (e.stats.volume - want).abs() < 1e-9 * want,
+        "{} vs {want}",
+        e.stats.volume
+    );
+    let e = export("linear_extrude(3) offset(delta = 2, chamfer = true) square(10);");
+    assert_eq!(e.stats.faces, 10);
+    assert_eq!(count(&e.step, "CYLINDRICAL_SURFACE"), 0);
+    // Clipper squares a corner off at delta from the vertex.
+    let cut = 2.0 * 2f64.sqrt() - 2.0;
+    let want = 3.0 * (196.0 - 4.0 * cut * cut);
+    assert!(
+        (e.stats.volume - want).abs() < 1e-9 * want,
+        "{} vs {want}",
+        e.stats.volume
+    );
+}
+
+/// What has no exact surface yet is built by the normal render and
+/// reported where it comes from: a twist, a non-uniform scale, a
+/// projection.
+#[test]
+fn twists_scales_and_text_fall_back_with_a_report() {
+    let e = export("linear_extrude(10, twist = 90) square(5, center = true);");
+    assert_eq!(kinds(&e, SubstitutionKind::Faceted), ["linear_extrude"]);
+    let e = export("linear_extrude(10, scale = [1, 2]) circle(5);");
+    assert_eq!(kinds(&e, SubstitutionKind::Faceted), ["linear_extrude"]);
+    // A 2D shape only the normal render builds (text and imports too).
+    let e = export("linear_extrude(2) projection() sphere(5);");
+    assert_eq!(kinds(&e, SubstitutionKind::Faceted), ["projection"]);
+    // An arc scaled toward a point off its centre sweeps an oblique cone.
+    let e = export("linear_extrude(10, scale = 0.5) translate([8, 0]) circle(2);");
+    assert_eq!(kinds(&e, SubstitutionKind::Faceted), ["linear_extrude"]);
+    // An explicit $fn keeps the polygon: planes, exact as they are.
+    let e = export("rotate_extrude($fn = 8) translate([8, 0]) circle(2);");
+    assert!(kinds(&e, SubstitutionKind::Faceted).is_empty());
+    assert_eq!(count(&e.step, "TOROIDAL_SURFACE"), 0);
+}
+
+/// A sketch's solved arcs are exact circles: the slot of
+/// `docs/language-extensions.md` section 6.2, cut from a plate.
+#[test]
+fn a_sketch_slot_extrudes_with_exact_ends() {
+    use std::f64::consts::PI;
+    let src = r#"slot_len = 30;
+slot_w = 8;
+linear_extrude(3) difference() {
+  square([50, 20], center = true);
+  translate([-slot_len / 2, 0]) sketch(name = "slot") {
+    c1 = point([0, 0]);
+    c2 = point([slot_len, 0]);
+    axis = line(c1, c2, construction = true);
+    top = line([0, slot_w / 2], [slot_len, slot_w / 2]);
+    bot = line([slot_len, -slot_w / 2], [0, -slot_w / 2]);
+    e1 = arc(c1, top.start, bot.end);
+    e2 = arc(c2, bot.start, top.end);
+    fix(c1);
+    horizontal(axis); length(axis, slot_len);
+    tangent(e1, top); tangent(e1, bot);
+    tangent(e2, top); tangent(e2, bot);
+    diameter(e1, slot_w); equal(e1, e2);
+  }
+}"#;
+    let options = eval::Options {
+        extensions: eval::extensions::Extensions::default()
+            .with(eval::extensions::Extension::Sketch),
+        ..Default::default()
+    };
+    let e = export_tree(&Renderer::new(), tree_with(src, options)).unwrap();
+    assert_eq!(count(&e.step, "CYLINDRICAL_SURFACE"), 2);
+    let want = 3.0 * (1000.0 - 240.0 - 16.0 * PI);
+    assert!(
+        (e.stats.volume - want).abs() < 1e-7 * want,
+        "{} vs {want}",
+        e.stats.volume
+    );
+}
+
+// Stage 2's corpus hardening. Each failed before the fix it names.
+
+/// A cylinder poking 0.01 mm through a face (the overlap BOSL2 gives
+/// every mask) meets the face at 2.6°. The mesh's crossing then stands a
+/// quarter of a millimetre along the face from the exact one, and the
+/// cross-check's bound, made for steep intersections, refused a correct
+/// B-rep. The bound now divides by the angle.
+#[test]
+fn a_cylinder_grazing_a_face_exports() {
+    let e = export(
+        "difference() { cube([60, 60, 30]); translate([50, 10, 19.99]) cylinder(r = 10.01, h = 10.02); }",
+    );
+    // The cube less the cylinder's part inside it: two circular
+    // segments of the r = 10.01 disc stand outside at x = 60 and y = 0.
+    let (r, d) = (10.01f64, 10.0f64);
+    let segment = r * r * (d / r).acos() - d * (r * r - d * d).sqrt();
+    let want = 108000.0 - 10.01 * (std::f64::consts::PI * r * r - 2.0 * segment);
+    assert!(
+        (e.stats.volume - want).abs() < 1e-9 * want,
+        "{} vs {want}",
+        e.stats.volume
+    );
+}
+
+/// One profile extruded along an edge and revolved round a corner (an
+/// edge mask meeting its corner mask): the extruded lines' planes are the
+/// revolved lines' cones' tangent planes along a generator where they
+/// meet. That contact is now known, so the edge is that line.
+#[test]
+fn an_extruded_and_a_revolved_mask_meet_exactly() {
+    let profile = "polygon([[10, -0.01], [-0.01, -0.01], [-0.01, 10], [-1.77636e-15, 10], [0.192147, 8.0491], [0.761205, 6.17317], [1.6853, 4.4443], [2.92893, 2.92893], [4.4443, 1.6853], [6.17317, 0.761205], [8.0491, 0.192147], [10, 0]]);";
+    let e = export(&format!(
+        "difference() {{ cube([60, 60, 30]); translate([10, 0, 30]) rotate([90, 0, 90]) linear_extrude(40.01) rotate(180) {profile} translate([50, 10, 20]) rotate_extrude(angle = 90, start = -90) translate([10, 0]) mirror([1, 0]) {profile} }}"
+    ));
+    // The normal render's volume at $fn 2048 and 8192 for the revolve,
+    // extrapolated (its error falls as 1/n²): 107726.871417327.
+    let want = 107726.871417327;
+    assert!(
+        (e.stats.volume - want).abs() < 1e-8 * want,
+        "{} vs {want}",
+        e.stats.volume
+    );
+    assert!(e.stats.notes.iter().all(|n| !n.contains("B-spline")));
+}
+
+/// The corner patch of BOSL2's masks (the profile extruded upwards and
+/// revolved, intersected) is smaller than the export render's
+/// tessellation: its mesh's curves stand ten sagittas off the exact
+/// edges, and the B-rep it made passed every other check 0.4% off the
+/// model. Such a mesh is now refused at both resolutions, and the
+/// export falls back to faceted extrusions instead of writing it.
+#[test]
+fn a_mesh_coarser_than_its_features_is_not_trusted() {
+    let arc = "[0.192147, 8.0491], [0.761205, 6.17317], [1.6853, 4.4443], [2.92893, 2.92893], [4.4443, 1.6853], [6.17317, 0.761205], [8.0491, 0.192147], [10, 0]";
+    let src = format!(
+        "intersection() {{ linear_extrude(height = 10.01) polygon([[-0.01, -0.01], [-0.01, 10], [0, 10], {arc}, [10, -0.01]]); translate([10, 10, 0]) rotate([0, 0, 180]) rotate_extrude(angle = 90) translate([10, 0]) mirror([1, 0]) polygon([[10, -0.01], [-0.01, -0.01], [-0.01, 10], [-1.77636e-15, 10], {arc}]); }}"
+    );
+    match export_with(&Renderer::new(), &src) {
+        Ok(e) => {
+            // Written only as the normal render's facets, which are the
+            // model as rendered: the volume is the mesh's.
+            assert!(e.stats.fallback.is_some(), "{:?}", e.stats);
+            assert!((e.stats.volume - e.stats.normal_volume).abs() < 1e-9);
+        }
+        Err(msg) => assert!(msg.contains("topology"), "{msg}"),
+    }
+}
+
+/// Extrusions that do not reconstruct exact fall back to facets, so a
+/// model stage 1 exported still exports (with the extrusions reported):
+/// the corner patch above, unioned instead of intersected, fails exact
+/// at both resolutions.
+#[test]
+fn extrusions_fall_back_to_facets_when_they_do_not_reconstruct() {
+    let arc = "[0.192147, 8.0491], [0.761205, 6.17317], [1.6853, 4.4443], [2.92893, 2.92893], [4.4443, 1.6853], [6.17317, 0.761205], [8.0491, 0.192147], [10, 0]";
+    let e = export(&format!(
+        "linear_extrude(height = 10.01) polygon([[-0.01, -0.01], [-0.01, 10], [0, 10], {arc}, [10, -0.01]]); translate([10, 10, 0]) rotate([0, 0, 180]) rotate_extrude(angle = 90) translate([10, 0]) mirror([1, 0]) polygon([[10, -0.01], [-0.01, -0.01], [-0.01, 10], [-1.77636e-15, 10], {arc}]);"
+    ));
+    assert!(e.stats.fallback.is_some());
+    assert_eq!(e.stats.exact_attempt_faceted, Vec::<&str>::new());
+    assert_eq!(
+        kinds(&e, SubstitutionKind::Faceted),
+        ["linear_extrude", "rotate_extrude"]
+    );
+}
+
+/// The tripods of `example017.scad` stand in slots of a disc, the slots
+/// turned in 2D and the tripods in 3D, so their flush faces differ in
+/// the last bits: Manifold leaves a closed sliver of no volume between
+/// them, which reconstruction now drops. (Skipped without the reference
+/// checkout.)
+#[test]
+fn flush_tabs_in_rotated_slots_export() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.reference/openscad/examples/Old/example017.scad");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        eprintln!("skipped: no reference checkout");
+        return;
+    };
+    let lib = &text[..text.find("module parts()").expect("example017's modules")];
+    let src = format!(
+        "{lib}\nlinear_extrude(height = thickness) shape_outer_disc();\nrotate(120) translate([0, thickness * 2 + locklen1 + inner1_to_inner2 + boltlen + midhole, 0]) rotate([90, 0, -90]) linear_extrude(height = thickness, center = true) shape_tripod();\n"
+    );
+    let e = export(&src);
+    assert!(
+        e.stats.notes.iter().any(|n| n.contains("of no area")),
+        "{:?}",
+        e.stats.notes
+    );
 }

@@ -1007,6 +1007,11 @@ fn exact_json(
         "error": failure.map(|f| f.message.clone()),
         "attempts": s.attempts,
         "retried_because": s.retried_because,
+        // Why the extrusions were written as facets after all, and what
+        // fell back in the exact attempts (`conformance exact` judges the
+        // model's eligibility by those).
+        "fallback": s.fallback,
+        "exact_attempt_faceted": s.exact_attempt_faceted,
         "triangles": s.triangles,
         "faces": s.faces,
         "exact_faces": s.exact_faces,
@@ -1017,6 +1022,8 @@ fn exact_json(
         "volume_error": s.volume_error,
         "volume_tolerance": s.volume_tolerance,
         "normal_volume": s.normal_volume,
+        "chain_deviation": s.chain_deviation,
+        "max_cap": s.max_cap,
         "substitutions": {
             "exact": count(K::Exact),
             "polygon": count(K::Polygon),

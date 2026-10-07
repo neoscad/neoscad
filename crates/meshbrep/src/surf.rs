@@ -28,6 +28,25 @@ pub(crate) enum Surf {
         c: V,
         r: f64,
     },
+    /// A ring torus: the points at distance `r` from the circle of radius
+    /// `big` about the axis (c, a). `big > r`, so it does not cross its
+    /// axis.
+    Torus {
+        c: V,
+        a: V,
+        big: f64,
+        r: f64,
+    },
+}
+
+/// The point of a torus's tube circle (the circle of radius `big` about
+/// the axis (c, a)) nearest `p`. On the axis every point of the circle is
+/// as near; one of them is taken.
+pub(crate) fn tube_centre(c: V, a: V, big: f64, p: V) -> V {
+    let w = (p - c).reject(a);
+    let l = w.len();
+    let d = if l > 0.0 { w * (1.0 / l) } else { a.perp() };
+    c + d * big
 }
 
 impl Surf {
@@ -57,6 +76,17 @@ impl Surf {
                 c: V::from(*center),
                 r: *radius,
             },
+            Surface::Torus {
+                center,
+                axis,
+                major_radius,
+                minor_radius,
+            } => Surf::Torus {
+                c: V::from(*center),
+                a: V::from(*axis).norm(),
+                big: *major_radius,
+                r: *minor_radius,
+            },
             _ => return None,
         })
     }
@@ -81,6 +111,12 @@ impl Surf {
                 center: c.arr(),
                 radius: r,
             },
+            Surf::Torus { c, a, big, r } => Surface::Torus {
+                center: c.arr(),
+                axis: a.arr(),
+                major_radius: big,
+                minor_radius: r,
+            },
         }
     }
 
@@ -96,6 +132,18 @@ impl Surf {
                 apex.is_finite() && a.is_finite() && a.len() > 0.5 && k.is_finite() && k > 0.0
             }
             Surf::Sphere { c, r } => c.is_finite() && r.is_finite() && r > 0.0,
+            // A spindle or horn torus (`big <= r`) crosses its own axis:
+            // STEP writes those as a different entity, and their tube
+            // angle is not a coordinate near the axis.
+            Surf::Torus { c, a, big, r } => {
+                c.is_finite()
+                    && a.is_finite()
+                    && a.len() > 0.5
+                    && r.is_finite()
+                    && r > 0.0
+                    && big.is_finite()
+                    && big > r
+            }
         }
     }
 
@@ -106,6 +154,7 @@ impl Surf {
             Surf::Cyl { .. } => 1,
             Surf::Cone { .. } => 2,
             Surf::Sphere { .. } => 3,
+            Surf::Torus { .. } => 4,
         }
     }
 
@@ -126,6 +175,7 @@ impl Surf {
                 (rho - k * t) / (1.0 + k * k).sqrt()
             }
             Surf::Sphere { c, r } => (p - c).len() - r,
+            Surf::Torus { c, a, big, r } => (p - tube_centre(c, a, big, p)).len() - r,
         }
     }
 
@@ -138,6 +188,7 @@ impl Surf {
                 (q - a * k) * (1.0 / (1.0 + k * k).sqrt())
             }
             Surf::Sphere { c, .. } => (p - c).norm(),
+            Surf::Torus { c, a, big, .. } => (p - tube_centre(c, a, big, p)).norm(),
         }
     }
 
@@ -147,6 +198,7 @@ impl Surf {
         match *self {
             Surf::Cyl { o, a, .. } => Some((o, a)),
             Surf::Cone { apex, a, .. } => Some((apex, a)),
+            Surf::Torus { c, a, .. } => Some((c, a)),
             _ => None,
         }
     }
@@ -159,7 +211,7 @@ impl Surf {
         match *self {
             Surf::Plane { o, .. } | Surf::Cyl { o, .. } => o,
             Surf::Cone { apex, .. } => apex,
-            Surf::Sphere { c, .. } => c,
+            Surf::Sphere { c, .. } | Surf::Torus { c, .. } => c,
         }
     }
 
@@ -203,6 +255,25 @@ impl Surf {
                     k: k2,
                 },
             ) => (p1 - p2).len() < tol && a1.dot(a2) > 1.0 - 1e-12 && (k1 - k2).abs() < 1e-9,
+            (
+                Surf::Torus {
+                    c: c1,
+                    a: a1,
+                    big: b1,
+                    r: r1,
+                },
+                Surf::Torus {
+                    c: c2,
+                    a: a2,
+                    big: b2,
+                    r: r2,
+                },
+            ) => {
+                (c1 - c2).len() < tol
+                    && a1.dot(a2).abs() > 1.0 - 1e-12
+                    && (b1 - b2).abs() < tol
+                    && (r1 - r2).abs() < tol
+            }
             _ => false,
         }
     }
@@ -218,6 +289,16 @@ pub(crate) struct Param {
     pub z: V,
     /// Cone: radius at `o`.
     pub r0: f64,
+    /// Torus: work in (tube angle, axis angle) instead of STEP's (axis
+    /// angle, tube angle). A face that wraps around the tube but not
+    /// around the axis (a partial `rotate_extrude` of a whole circle) is
+    /// then seamed by the same code that seams a cylinder; its curves are
+    /// swapped back before they are written.
+    pub swap: bool,
+    /// Torus: the tube angle that internal tube coordinates are measured
+    /// from. Without `swap` the tube angle stays STEP's own, taken on the
+    /// branch `(t0 - π, t0 + π]`, so `t0` keeps a face clear of the cut.
+    pub t0: f64,
 }
 
 impl Param {
@@ -231,7 +312,76 @@ impl Param {
             y: z.cross(x),
             z,
             r0,
+            swap: false,
+            t0: 0.0,
         }
+    }
+
+    /// The same frame with x turned by `u0` about z: for a swapped torus,
+    /// the internal `u` (a tube angle) is moved instead.
+    pub fn rotated(&self, u0: f64) -> Param {
+        if self.swap {
+            return Param {
+                t0: self.t0 + u0,
+                ..*self
+            };
+        }
+        // Through `new`, as the frame was always made, so the bits (and
+        // the files) are those of before tori.
+        let x = self.x * cos(u0) + self.y * sin(u0);
+        Param {
+            swap: self.swap,
+            t0: self.t0,
+            ..Param::new(self.s, self.o, self.z, x, self.r0)
+        }
+    }
+
+    /// The face sense in internal coordinates: swapping a torus's
+    /// coordinates reverses the orientation of its parameter plane.
+    pub fn sense(&self, same_sense: bool) -> bool {
+        same_sense != self.swap
+    }
+
+    /// A point's (axis angle, tube angle) on a torus, both raw (atan2).
+    fn torus_angles(&self, p: V) -> (f64, f64) {
+        let Surf::Torus { big, .. } = self.s else {
+            return (0.0, 0.0);
+        };
+        let d = p - self.o;
+        let h = d.dot(self.z);
+        let rho = d.reject(self.z).len();
+        (self.angle_about_z(p), atan2(h, rho - big))
+    }
+
+    fn angle_about_z(&self, p: V) -> f64 {
+        let d = p - self.o;
+        atan2(d.dot(self.y), d.dot(self.x))
+    }
+
+    /// STEP's torus point at (axis angle, tube angle).
+    fn torus_eval(&self, u: f64, w: f64) -> V {
+        let Surf::Torus { big, r, .. } = self.s else {
+            return self.o;
+        };
+        let dir = self.x * cos(u) + self.y * sin(u);
+        self.o + dir * (big + r * cos(w)) + self.z * (r * sin(w))
+    }
+
+    /// STEP's torus partial derivatives at (axis angle, tube angle).
+    fn torus_derivs(&self, u: f64, w: f64) -> (V, V) {
+        let Surf::Torus { big, r, .. } = self.s else {
+            return (self.x, self.y);
+        };
+        let (su, cu) = (sin(u), cos(u));
+        let dir = self.x * cu + self.y * su;
+        let ddir = self.y * cu - self.x * su;
+        let (sw, cw) = (sin(w), cos(w));
+        (ddir * (big + r * cw), dir * (-r * sw) + self.z * (r * cw))
+    }
+
+    /// Internal parameter-space coordinates `q` as STEP's (u, v).
+    pub fn step_coords(&self, q: [f64; 2]) -> [f64; 2] {
+        if self.swap { [q[1], q[0] + self.t0] } else { q }
     }
 
     pub fn frame(&self) -> Frame {
@@ -254,10 +404,13 @@ impl Param {
         }
     }
 
-    /// The angle of `p` about the frame's z axis.
+    /// The angle of `p` about the frame's z axis (for a swapped torus,
+    /// its internal `u`, the tube angle from `t0`).
     pub fn angle(&self, p: V) -> f64 {
-        let d = p - self.o;
-        atan2(d.dot(self.y), d.dot(self.x))
+        match self.s {
+            Surf::Torus { .. } => self.uv(p).0,
+            _ => self.angle_about_z(p),
+        }
     }
 
     /// Parameters of a point on (or near) the surface; `u` in (-π, π] for
@@ -272,6 +425,15 @@ impl Param {
                 let rho = d.reject(self.z).len();
                 (self.angle(p), atan2(h, rho))
             }
+            Surf::Torus { .. } => {
+                let (phi, th) = self.torus_angles(p);
+                let rel = wrap_pi(th - self.t0);
+                if self.swap {
+                    (rel, phi)
+                } else {
+                    (phi, self.t0 + rel)
+                }
+            }
         }
     }
 
@@ -282,6 +444,13 @@ impl Param {
             Surf::Cyl { r, .. } => self.o + dir(u) * r + self.z * w,
             Surf::Cone { k, .. } => self.o + dir(u) * (self.r0 + w * k) + self.z * w,
             Surf::Sphere { r, .. } => self.o + dir(u) * (r * cos(w)) + self.z * (r * sin(w)),
+            Surf::Torus { .. } => {
+                if self.swap {
+                    self.torus_eval(w, u + self.t0)
+                } else {
+                    self.torus_eval(u, w)
+                }
+            }
         }
     }
 
@@ -298,6 +467,14 @@ impl Param {
                 let (sw, cw) = (sin(w), cos(w));
                 (ddir * (r * cw), dir * (-r * sw) + self.z * (r * cw))
             }
+            Surf::Torus { .. } => {
+                if self.swap {
+                    let (a, b) = self.torus_derivs(w, u + self.t0);
+                    (b, a)
+                } else {
+                    self.torus_derivs(u, w)
+                }
+            }
         }
     }
 
@@ -313,6 +490,18 @@ impl Param {
 
     /// Whether `p` is so near the axis that its angle is meaningless.
     pub fn near_axis(&self, p: V, tol: f64) -> bool {
-        self.periodic() && (p - self.o).reject(self.z).len() < tol.max(1e-12 * self.radius())
+        // A ring torus keeps clear of its axis.
+        self.periodic()
+            && !matches!(self.s, Surf::Torus { .. })
+            && (p - self.o).reject(self.z).len() < tol.max(1e-12 * self.radius())
     }
+}
+
+/// `x` moved by whole turns into (-π, π].
+pub(crate) fn wrap_pi(x: f64) -> f64 {
+    let mut d = x - TAU * (x / TAU).round();
+    if d <= -PI {
+        d += TAU;
+    }
+    d
 }

@@ -318,7 +318,7 @@ usual text with no JSON.
 
 `neoscad --enable exact -o model.step model.scad` (or `.stp`, or
 `--export-format step`) writes STEP AP214 whose faces are the exact
-planes, cylinders, cones and spheres of the model, not its triangles
+planes, cylinders, cones, spheres and tori of the model, not its triangles
 (`crates/geom/src/exact`; `docs/audits/exact-geometry-rust.md`). It is a
 NeoSCAD extension: without the flag `.step` is an unknown suffix, with
 OpenSCAD's own `Invalid suffix step...` error, and `--enable all` does
@@ -331,9 +331,16 @@ not turn it on.
   is planar and so written exactly as modelled (`$fn = 6` hexagons,
   polygon-sized printing holes). Rotations, mirrors and uniform scales
   keep curves exact; a non-uniform scale or shear writes them as facets.
+- **Extrusions** sweep their profile's exact curves: `circle()` (by the
+  same `$fn` rule), `square()` and `polygon()` edges, `offset(r)`
+  rounds, and solved `sketch()` arcs, through 2D booleans and
+  transforms. `linear_extrude` writes planes and cylinders (cones under
+  a uniform `scale` toward an arc's centre); `rotate_extrude` planes,
+  cylinders, cones, spheres and tori. A `twist`, a non-uniform `scale`
+  and an arc scaled off its centre are facets.
 - **Everything else** (`polyhedron`, `hull`, `minkowski`, `text`,
-  `import`, extrusions, `offset`, `resize`) is written as the planar
-  facets of the mesh render, in the same solid as the exact faces.
+  `import`, `projection`, `resize`) is written as the planar facets of
+  the mesh render, in the same solid as the exact faces.
 - **Every substitution is reported** at its source line, once per
   location with a count: `INFO: STEP export: sphere() is exported as an
   exact sphere, not the 30-fragment polyhedron of the mesh ($fn is not
@@ -344,7 +351,11 @@ not turn it on.
   rendered mesh's, and its box with the render's. A failure prints
   `ERROR: STEP export failed: REASON. No file was written.` and exits 1.
   A mesh whose topology does not match the exact model at a tangency is
-  retried once at twice the segments.
+  retried once at twice the segments, and a result whose volume check
+  is loose (coarse fragments) is held until a mesh at twice or four
+  times the segments vouches for it. If a model's exact extrusions still
+  do not reconstruct, they are written as facets instead (reported as
+  such), as before extrusions were exact.
 - **Deterministic:** fixed header names and date (`1970-01-01T00:00:00`,
   originating system `NeoSCAD`, product named after the input file), so
   the same model gives the same bytes at any thread count, warm or cold,
@@ -372,6 +383,13 @@ With `--format json`, the run object has an `exact` key. For
   (relative), which follows from the tessellation.
 - `normal_volume`, `normal_render_ms`: the mesh render's, for comparison.
 - `faceted_modules`: the modules that fell back to facets.
+- `fallback`: why the extrusions were written as facets after the exact
+  attempts failed (`null` otherwise); `exact_attempt_faceted` the
+  modules that fell back in those attempts.
+- `chain_deviation`, `max_cap`: how far the export mesh's intersection
+  curves stand off the exact edges, and its triangles off their curved
+  surfaces (the first far beyond the second means the mesh's topology is
+  not the model's, and the attempt is rejected).
 
 `neoscad serve` does not export STEP yet, and does not list `exact` in
 its features.

@@ -88,7 +88,7 @@ impl Ord for Key {
 /// - cylinders by radius, cones by apex `x`, spheres by centre `x`, each
 ///   within `tol` for equal surfaces.
 struct SameIndex {
-    maps: [BTreeMap<Key, Vec<usize>>; 4],
+    maps: [BTreeMap<Key, Vec<usize>>; 5],
     plane_window: f64,
     tol: f64,
 }
@@ -108,6 +108,7 @@ impl SameIndex {
             Surf::Cyl { r, .. } => (1, r, self.tol),
             Surf::Cone { apex, .. } => (2, apex.x, self.tol),
             Surf::Sphere { c, .. } => (3, c.x, self.tol),
+            Surf::Torus { c, .. } => (4, c.x, self.tol),
         }
     }
 
@@ -247,7 +248,7 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
     }
 
     // A face with no boundary is a whole mesh component on one surface.
-    // On a sphere that is a lone sphere; on anything else it is flat: a
+    // On a sphere or a torus that is a lone one; on anything else it is flat: a
     // closed bubble of zero volume lying in one plane, which Manifold can
     // leave behind where coplanar cuts meet after a rotation (four
     // triangles on one plane in a rotated block cut by touching bars).
@@ -261,7 +262,10 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
             }
         }
         let flat: Vec<usize> = (0..nf)
-            .filter(|&f| !bounded[f] && !matches!(cls.surf[fcls[f]], Surf::Sphere { .. }))
+            .filter(|&f| {
+                !bounded[f]
+                    && !matches!(cls.surf[fcls[f]], Surf::Sphere { .. } | Surf::Torus { .. })
+            })
             .collect();
         if !flat.is_empty() {
             let vol_tol = tol * scale * scale;
@@ -601,10 +605,33 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
     }
     for (i, ch) in chains.iter().enumerate() {
         let (ca, cb) = (fcls[ch.f], fcls[ch.g]);
-        if alive[i] && !(cls.faceted[ca] && cls.faceted[cb]) {
+        // Only chains with a curved side count, and not those between
+        // surfaces that touch. Between two planes the mesh's vertices are
+        // on both already, except where the planes are nearly parallel
+        // (flush faces a rotation's rounding left apart), whose line is
+        // ill-defined; along a contact the mesh may cross, touch or miss
+        // wherever its polygon vertices fall (a capsule's chain strays 5
+        // sagittas from its circle). Neither says anything about the
+        // topology.
+        let curved = !cls.surf[ca].is_plane() || !cls.surf[cb].is_plane();
+        // Nor those ending at a point where two surfaces touch (two
+        // cones crossing there): the mesh's crossing near it is as
+        // ill-conditioned as a contact curve.
+        let at_touch = [ch.verts[0], *ch.verts.last().expect("chain")]
+            .iter()
+            .any(|&p| tangent_at[p as usize].is_some());
+        if alive[i] && curved && contact_of(ca, cb).is_none() && !at_touch {
             let pts: Vec<V> = ch.verts.iter().map(|&p| pos[p as usize]).collect();
-            let d = edges::chain_deviation(&cls.surf[ca], &cls.surf[cb], &pts);
-            max_chain_dev = max_chain_dev.max(d);
+            let (sa, sb) = (&cls.surf[ca], &cls.surf[cb]);
+            let d = edges::chain_deviation(sa, sb, &pts);
+            // Measured across the surfaces, not along them: where they
+            // meet at a grazing angle θ the mesh's crossing slides along
+            // them by its sagitta / sin θ (a cylinder poking 0.01 mm
+            // through a face meets it at 2.6°), which is the tessellation
+            // and not the topology.
+            let q = solve(&[*sa, *sb], pts[pts.len() / 2]).0;
+            let sin = sa.grad(q).cross(sb.grad(q)).len();
+            max_chain_dev = max_chain_dev.max(d * sin.clamp(0.02, 1.0));
         }
     }
 
@@ -627,8 +654,15 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
             param: None,
             pcurves: Vec::new(),
             outer: Vec::new(),
+            tris: Vec::new(),
         })
         .collect();
+    for (t, &[a, b, c]) in tris.iter().enumerate() {
+        let f = tface[t];
+        if matches!(topo.faces[f].surf, Surf::Torus { .. }) {
+            topo.faces[f].tris.push([pos[a], pos[b], pos[c]]);
+        }
+    }
     // A half-edge starts its chain (in its own direction) when it is the
     // chain's first half-edge (forward) or the twin of its last (reverse).
     let starts_chain = |h: usize, he_chain: &[(usize, bool)]| {
@@ -668,8 +702,9 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
     }
     for (f, face) in topo.faces.iter().enumerate() {
         // A face with no boundary covers a whole closed component by
-        // itself (a lone sphere): it gets a seam later, from nothing.
-        if face.loops.is_empty() && !matches!(face.surf, Surf::Sphere { .. }) {
+        // itself (a lone sphere or torus): it gets seams later, from
+        // nothing.
+        if face.loops.is_empty() && !matches!(face.surf, Surf::Sphere { .. } | Surf::Torus { .. }) {
             return Err(Error::Reconstruction(format!("face {f} has no boundary")));
         }
     }
@@ -700,7 +735,21 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
             "{short} edges shorter than the merge tolerance collapsed (corners the mesh split)"
         ));
     }
-    let digons = topo.drop_digons();
+    let empty = topo.drop_empty_faces();
+    if !empty.is_empty() {
+        let mut k = 0;
+        face_mesh_volume.retain(|_| {
+            let keep = empty.binary_search(&k).is_err();
+            k += 1;
+            keep
+        });
+        topo.notes.push(format!(
+            "{} face{} of no area (every edge shorter than the merge tolerance) removed",
+            empty.len(),
+            if empty.len() == 1 { "" } else { "s" }
+        ));
+    }
+    let digons = topo.drop_digons(tol);
     if !digons.is_empty() {
         let mut k = 0;
         face_mesh_volume.retain(|_| {
@@ -1030,15 +1079,31 @@ fn classes(
             uf.join(t, u);
         }
     }
-    // Degenerate faceted triangles join a faceted neighbour.
-    for t in 0..nt {
-        if is_faceted(t) && planes[t].is_none() {
-            if let Some(u) = (0..3)
-                .map(|k| twin[3 * t + k] / 3)
-                .find(|&u| is_faceted(u) && planes[u].is_some())
-            {
-                uf.join(t, u);
+    // Degenerate faceted triangles join a faceted neighbour; a run of
+    // them joins through each other, so this repeats until nothing joins
+    // (each pass joins at least one more, or stops).
+    let mut has_plane: Vec<bool> = planes.iter().map(Option::is_some).collect();
+    loop {
+        // Each pass joins only to triangles that had a plane (or had
+        // joined one) before it, so the first pass is the single pass
+        // this always was, and the groups of any mesh it settled are
+        // unchanged.
+        let before = has_plane.clone();
+        let mut joined = false;
+        for t in 0..nt {
+            if is_faceted(t) && !before[t] {
+                if let Some(u) = (0..3)
+                    .map(|k| twin[3 * t + k] / 3)
+                    .find(|&u| is_faceted(u) && before[u])
+                {
+                    uf.join(t, u);
+                    has_plane[t] = true;
+                    joined = true;
+                }
             }
+        }
+        if !joined {
+            break;
         }
     }
     // Each group's plane: its largest triangle's.
@@ -1086,9 +1151,19 @@ fn classes(
             continue;
         }
         let Some(&(_, bt)) = group_best.get(&r) else {
-            return Err(Error::InvalidInput(
-                "a faceted region has only degenerate triangles".into(),
-            ));
+            // Slivers of no area between exact faces (a faceted mesh's
+            // edge snapped onto an exact one): they take an exact
+            // neighbour's surface; with no area they add nothing to it.
+            let Some(w) = (0..3)
+                .map(|k| twin[3 * t + k] / 3)
+                .find(|&w| !is_faceted(w))
+            else {
+                return Err(Error::InvalidInput(
+                    "a faceted region has only degenerate triangles".into(),
+                ));
+            };
+            of_tri[t] = of_tri[w];
+            continue;
         };
         let c = match joins.get(&r) {
             Some(&c) => c,

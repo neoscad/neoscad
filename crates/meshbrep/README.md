@@ -7,7 +7,7 @@ as STEP AP214. Pure Rust, no `unsafe`, deterministic, and it builds for
 
 A mesh kernel such as [Manifold](https://github.com/elalish/manifold) does
 booleans robustly, but only on triangles. Tag every input triangle with the
-plane, cylinder, cone or sphere it approximates, and the tags survive the
+plane, cylinder, cone, sphere or torus it approximates, and the tags survive the
 booleans: Manifold's `MeshGL::faceID` carries them through. `meshbrep`
 turns the result back into exact geometry:
 
@@ -20,7 +20,14 @@ turns the result back into exact geometry:
   surfaces. Tangent surfaces are detected from their records, and their
   contact line or circle is used instead of an ill-conditioned solve.
   Where two surfaces touch at a point, their intersection crosses
-  itself there, and that point is solved for exactly.
+  itself there, and that point is solved for exactly. A torus touching a
+  coaxial plane, cylinder, cone, sphere or torus (profiles of one
+  `rotate_extrude`), a cylinder along its tube, and a plane touching a
+  cone along a generator (one profile extruded and revolved) are
+  recognised too.
+- **Slivers the mesh leaves** where flush faces differ in the last bits
+  are cleaned up: edges and faces of no length or area, and closed
+  bubbles of two faces with no volume, are removed.
 - **Seams and parameter-space curves** go on curved faces, sharing the
   edge's parameter, so a STEP reader uses them as written. A sphere's
   axis is chosen so its bounding circles are parallels, and so that no
@@ -61,10 +68,16 @@ output's positions, triangles and `face_id`s. The tests in
 consistently oriented 2-manifold, counter-clockwise from outside, with a
 surface index per triangle.
 
-`Surface` has `Plane`, `Cylinder`, `Cone`, `Sphere` and `Faceted`.
-`Torus`, `LinearExtrusion` and `Revolution` are declared for extruded and
-revolved 2D profiles, but `reconstruct` does not accept them yet
+`Surface` has `Plane`, `Cylinder`, `Cone`, `Sphere`, `Torus` (a ring
+torus: major radius larger than minor) and `Faceted`. `LinearExtrusion`
+and `Revolution` are declared for extruded and revolved free-form
+curves (text outlines), but `reconstruct` does not accept them yet
 (`Error::Unsupported`).
+
+A torus face can wrap around its axis, around its tube, or both (a
+whole ring, perhaps with holes). Its frame puts each angle's cut where
+the face's triangles leave a gap, and adds a seam where they leave none:
+a meridian, a parallel, or both through one vertex.
 
 The tessellation used for tagging never reaches the output; only its
 topology does. Choose it so that the mesh's topology matches the exact

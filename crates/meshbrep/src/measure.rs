@@ -40,7 +40,7 @@ pub(crate) fn face_param(f: &Face) -> Option<Param> {
 
 /// ∫₀ᵘ F(s, v) ds for the volume and area integrands.
 ///
-/// On a plane, cylinder, cone or sphere the volume integrand
+/// On a plane, cylinder, cone, sphere or torus the volume integrand
 /// σ · (σ_u × σ_v) is `A(v) + B(v) cos u + C(v) sin u` (the frame origin's
 /// offset enters only through `cos u` and `sin u`), and the area integrand
 /// |σ_u × σ_v| does not depend on `u`. So three evaluations give the
@@ -238,6 +238,14 @@ mod tests {
                 k: 0.7,
             },
             Surf::Sphere { c: o, r: 3.0 },
+            // A torus's integrand has the same form in u: its tube angle
+            // v enters only through A, B and C.
+            Surf::Torus {
+                c: o,
+                a: z,
+                big: 4.0,
+                r: 1.5,
+            },
         ];
         for s in surfs {
             let p = Param::new(s, o + v(0.2, 0.1, -0.3), z, x, 1.2);

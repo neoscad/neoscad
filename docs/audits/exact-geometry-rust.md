@@ -93,6 +93,87 @@ failures are five BOSL2 `distributors` examples (a tangent point that is
 also a triple point) and the Menger sponge (`docs/followups.md`, "Exact
 geometry").
 
+**Update, stage 2 built (2026-10-07):** extrusions. A 2D subtree under
+`linear_extrude` or `rotate_extrude` is built again in the export render
+with each edge attributed to the exact curve it lies on
+(`crates/geom/src/exact/profile.rs`): `$fa`/`$fs` circles (tessellated
+aligned, as the 3D primitives are), `square()` and `polygon()` lines,
+sketch arcs, and `offset(r)` round joins and offset curves. The
+extrusions then tag each side triangle with the surface its edge sweeps:
+`linear_extrude` gives planes and cylinders, and cones under a uniform
+`scale` toward an arc's centre; `rotate_extrude` gives planes,
+cylinders, cones, spheres and tori, whole or partial. `meshbrep` gained
+`Surface::Torus`: frames that put both angles' cuts where the face's
+triangles leave a gap, a swapped frame for faces that wrap the tube but
+not the axis, two seams for a whole ring, closed-form parallels,
+meridians and coaxial circles, and contacts with coaxial surfaces of
+revolution. Its volume integral along `u` is closed form, as for the
+other quadrics (the integrand has the same `A + B cos u + C sin u`
+form, checked against quadrature), so section 3.6's note that a torus
+needs quadrature applies to `v` only, as for every surface. Departures
+from this audit's plan:
+
+- **No Clipper Z channel (F6).** `using_z` is a Cargo feature, so it
+  would change `Point64` for every Clipper user in the build (the normal
+  render and Manifold included), and one Z per intersection vertex
+  cannot say which of the two crossing edges leaves it. Edges are
+  matched geometrically after each Clipper call instead: after a boolean
+  an output edge lies on an input edge; after an offset, on an offset
+  input line or circle or a round-join circle. Clipper's calls and
+  output are the normal render's.
+- **Text stays facets** (its Béziers would need
+  `Surface::LinearExtrusion` of a B-spline profile, not started), and so
+  do twists, non-uniform scales and arcs scaled off their centre
+  (oblique cones), each reported.
+- **Corpus hardening found by the sweep:** a plane through a cone's
+  apex at its half-angle touches it along a generator, and a cylinder
+  along a torus's tube touches it along a circle (one profile extruded
+  and revolved); the cross-check's bound for intersection strips divides
+  by the sine of the angle the surfaces meet at (a cylinder poking 0.01
+  mm through a face, BOSL2's mask overlap, was refused though correct);
+  a mesh whose intersection curves stand far further off the exact
+  edges than its sagitta, or whose volume check is looser than 1e-3, is
+  not trusted until a mesh at 2× or 4× vouches for it (a BOSL2 corner
+  patch smaller than its sections made a B-rep 0.4% off that passed
+  every other check: gate 4's find of this stage); edges and faces of no
+  length or area, closed bubbles of two faces and slits of no width are
+  cleaned up. When a model's exact extrusions still do not reconstruct,
+  the export builds them as facets, as stage 1 did, so no model that
+  exported before stage 2 fails now; `conformance exact` counts such a
+  model by its exact attempts and not as valid.
+
+The measurement (`conformance exact`, OCCT 8.0.1 reading every file):
+
+| Corpus | 3D models | Eligible | Valid, ours | Valid, ours + OCCT | All-faceted | Failed |
+|---|---|---|---|---|---|---|
+| This audit's 28 cases and stage 2's 10 extrusions × 4 `$fa`/`$fs` settings | 152 | 144 | 144 | 144 (100%) | 0 | 0 |
+| OpenSCAD's `render-manifold` inputs | 214 | 104 | 101 | 101 (97.1%) | 52 | 21 |
+| BOSL2 examples, every 5th | 311 | 94 | 78 | 78 (83.0%) | 114 | 55 |
+| Benchmark models | 14 | 4 | 3 | 3 (75%; 1 not read in 2 GB) | 4 | 4 |
+| **Real corpora, deduplicated** | 536 | 200 | 181 (90.5%) | **181 (90.5%)** | 170 | 79 |
+
+(`example019.scad` is counted valid with OCCT, as in the table above:
+OCCT reads it valid and its volume differs from ours by OCCT's own
+re-projected pcurves.) Gate 3: all 148 closed-form cases within 4.5e-9,
+the 40 extrusion cases among them. Gate 4: OCCT disagrees with the same
+files as before stage 2 and no others: `example019.scad`'s volume,
+`screws__001` (non-eligible, in two corpora), and three not read within
+2 GB. Gate 5 is still missed: (reconstruct + check + write) / render
+medians of 0.44 on the render tests, 1.10 on BOSL2 and 4.9 on the
+benchmarks (run beside other builds; 0.41, 0.91 and 3.7 before). Exact
+faces are 13.0% of all faces written (11.2% before); 59 more real models
+have exact faces, 170 are still all facets. **By the stop rule, 90.5%
+is between 80% and 95%: the owner decides.** On the 127 models eligible
+before, all 121 that exported still do; of the 73 that stage 2 made
+eligible, 60 export exact, 2 export with faceted extrusions and 11 fail.
+Every failure is of a class that exists without extrusions, reached now
+because the extrusions are exact: BOSL2 `stroke()` and
+`vnf_wireframe()` joints (cylinders meeting at spheres of their own
+radius: 6 fail, 1 fell back), flush faces from different chains of
+transforms (5, `candleStand.scad`'s coaxial cylinders among them), a BOSL2
+mask corner patch smaller than its sections (fell back), and the six
+failures from before (`docs/followups.md`, "Exact geometry").
+
 It follows `docs/audits/brep-feasibility.md` (below, "the previous
 audit"), which found that only OCCT survives OpenSCAD-shaped trees. The
 owner prefers an exact backend written in-house: pure Rust, publishable as
@@ -512,10 +593,10 @@ These were not spiked.
 
 | Construct | How it would map | Risk |
 |---|---|---|
-| `linear_extrude` of exact 2D | Side faces are extrusion surfaces of the profile's curves (planes, cylinders, `SURFACE_OF_LINEAR_EXTRUSION` of B-splines for text). Needs 2D attribution (F6) | Medium |
-| `rotate_extrude` | Planes, cylinders, cones, spheres, and tori (from arcs off-axis). Needs a torus record and torus pair rules | Medium |
-| `offset(r)` arcs | 2D arcs → cylinders after extrusion; Clipper's Z channel | Medium |
-| `text` | Glyph Béziers → exact B-spline profile (`crates/text` has them) → extrusion surfaces | Medium |
+| `linear_extrude` of exact 2D | Side faces are extrusion surfaces of the profile's curves (planes, cylinders, `SURFACE_OF_LINEAR_EXTRUSION` of B-splines for text). Needs 2D attribution (F6). **Built in stage 2** (planes, cylinders, cones under a uniform scale), without the Z channel | Medium |
+| `rotate_extrude` | Planes, cylinders, cones, spheres, and tori (from arcs off-axis). Needs a torus record and torus pair rules. **Built in stage 2** | Medium |
+| `offset(r)` arcs | 2D arcs → cylinders after extrusion; Clipper's Z channel. **Built in stage 2**, matched geometrically | Medium |
+| `text` | Glyph Béziers → exact B-spline profile (`crates/text` has them) → extrusion surfaces. **Not built**: still facets | Medium |
 | `hull`, `minkowski`, `polyhedron`, `surface`, `import`, twisted extrude | Faceted fallback regions (x07 shows mixing works), reported per the previous audit's rules | Low |
 | Non-uniform `scale`, `resize` | Quadrics stay quadrics under affine maps (cylinder → elliptic cylinder). STEP has no elliptic cylinder, so a B-spline surface or faceted fallback. Report it | Medium |
 | General curved–curved intersections | B-spline fit to 1e-7 (c12). Branch selection near singular points is the fragile part | Medium |
@@ -816,8 +897,9 @@ further weeks of fixes, stop path 1 and fall back to OCCT. Between 80% and
 
 ## 11. Not verified
 
-- **Path 1 beyond the spiked primitives:** extrusions, `rotate_extrude`,
-  tori, text, non-uniform scale, `offset(r)` (section 3.6).
+- **Path 1 beyond the spiked primitives:** text and non-uniform scale
+  (section 3.6). Extrusions, `rotate_extrude`, tori and `offset(r)` were
+  built and measured in stage 2 (the status note at the top).
 - **Writing pcurves and seams.** The effect is inferred from c13 with an
   aligned sphere axis and from OCCT's own files. Not implemented.
 - **Importers other than OCCT** (FreeCAD is OCCT; Fusion, Onshape and

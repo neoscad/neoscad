@@ -64,6 +64,9 @@ pub enum Node {
     /// cylinder(h, r1, r2) from z = 0.
     Cyl(f64, f64, f64, Transform),
     Sphere(f64, Transform),
+    /// rotate_extrude(angle) translate([major, 0]) circle(minor): a torus
+    /// about z, swept from the xz plane.
+    Torus(f64, f64, f64, Transform),
     /// linear_extrude(h) polygon(points): planes only (an explicit $fn).
     Prism(Vec<[f64; 2]>, f64, Transform),
     /// 'U'nion, 'D'ifference, 'I'ntersection.
@@ -418,6 +421,68 @@ pub fn case(name: &str) -> (Node, Option<f64>) {
             k.push(cyl(12.0, 4.0, 4.0, false, t(10.0, 10.0, -1.0)));
             (op('D', k), Some(3640.0 - 70.0 * PI))
         }
+        // rotate_extrude() translate([10,0]) circle(3): a whole torus,
+        // one face with two seams.
+        "t01" => (Torus(10.0, 3.0, 360.0, ID), Some(180.0 * PI * PI)),
+        // rotate_extrude(angle=90) ...: wraps the tube, not the axis.
+        "t02" => (Torus(10.0, 3.0, 90.0, ID), Some(45.0 * PI * PI)),
+        // The same at 270 degrees, tilted.
+        "t03" => (
+            Torus(10.0, 3.0, 270.0, rot(30.0, 20.0, 10.0)),
+            Some(135.0 * PI * PI),
+        ),
+        // difference(){torus; translate([-20,-20,-10]) cube([40,40,10]);}:
+        // the upper half, a band about the axis.
+        "t04" => (
+            op(
+                'D',
+                vec![
+                    Torus(10.0, 3.0, 360.0, ID),
+                    cube(40.0, 40.0, 10.0, false, t(-20.0, -20.0, -10.0)),
+                ],
+            ),
+            Some(90.0 * PI * PI),
+        ),
+        // A quarter cut away by a cube: ends on meridians.
+        "t05" => (
+            op(
+                'D',
+                vec![
+                    Torus(10.0, 3.0, 360.0, ID),
+                    cube(20.0, 20.0, 10.0, false, t(0.0, 0.0, -5.0)),
+                ],
+            ),
+            Some(135.0 * PI * PI),
+        ),
+        // A hole drilled down through the tube: a whole torus with two
+        // holes, so both seams must miss them.
+        "t06" => (
+            op(
+                'D',
+                vec![
+                    Torus(10.0, 3.0, 360.0, ID),
+                    cyl(10.0, 1.0, 1.0, false, t(10.0, 0.0, -5.0)),
+                ],
+            ),
+            None,
+        ),
+        // A disc with a fully rounded rim: cylinder(r=7,h=6,center=true)
+        // ∪ the torus, its flat faces tangent to the tube.
+        "t07" => (
+            op(
+                'U',
+                vec![cyl(6.0, 7.0, 7.0, true, ID), Torus(7.0, 3.0, 360.0, ID)],
+            ),
+            Some(330.0 * PI + 63.0 * PI * PI),
+        ),
+        // A coaxial cylinder through the tube: circles where they cross.
+        "t08" => (
+            op(
+                'U',
+                vec![Torus(10.0, 3.0, 360.0, ID), cyl(2.0, 11.0, 11.0, true, ID)],
+            ),
+            None,
+        ),
         _ => panic!("unknown case {name}"),
     }
 }
@@ -428,6 +493,7 @@ pub const FIFTEEN: [&str; 15] = [
 ];
 pub const IDIOMS: [&str; 6] = ["x01", "x02", "x03", "x04", "x05", "x06"];
 pub const MORE: [&str; 7] = ["x07", "x08", "x09", "x10", "x11", "f01", "f02"];
+pub const TORI: [&str; 8] = ["t01", "t02", "t03", "t04", "t05", "t06", "t07", "t08"];
 
 /// The volume of sphere(10) ∩ cube(15, center = true): the sphere less six
 /// caps of height 2.5 (they do not overlap).
@@ -539,6 +605,9 @@ fn prim(n: &Node, res: Res) -> TaggedMesh {
         Cube(s, m) => primitives::cuboid(*s, m),
         Cyl(h, r1, r2, m) => primitives::frustum(*h, *r1, *r2, res.segments(r1.max(*r2)), m),
         Sphere(r, m) => primitives::sphere(*r, res.segments(*r), m),
+        Torus(big, r, a, m) => {
+            primitives::torus(*big, *r, res.segments(*big), res.segments(*r), *a, m)
+        }
         Prism(p, h, m) => primitives::prism(p, *h, m),
         _ => unreachable!(),
     }

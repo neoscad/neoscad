@@ -248,6 +248,15 @@ fn surface_entity(w: &mut W, f: &Face) -> usize {
         Surface::Sphere { radius, .. } => {
             w.add(format!("SPHERICAL_SURFACE('',#{a},{})", real(*radius)))
         }
+        Surface::Torus {
+            major_radius,
+            minor_radius,
+            ..
+        } => w.add(format!(
+            "TOROIDAL_SURFACE('',#{a},{},{})",
+            real(*major_radius),
+            real(*minor_radius)
+        )),
         _ => w.add(format!("PLANE('',#{a})")),
     }
 }

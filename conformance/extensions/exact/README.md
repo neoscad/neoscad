@@ -1,8 +1,9 @@
 # Exact STEP export cases
 
 The 28 models of `docs/audits/exact-geometry-rust.md` (its 15 boolean
-cases, the idioms x01–x11 and the CSG fillets f01–f02) as OpenSCAD
-sources, for NeoSCAD's `--enable exact` STEP export. They are not in
+cases, the idioms x01–x11 and the CSG fillets f01–f02), and stage 2's
+extrusions e01–e10 (`linear_extrude`, `rotate_extrude`, `offset(r)`), as
+OpenSCAD sources, for NeoSCAD's `--enable exact` STEP export. They are not in
 `conformance/manifest.json`, and `conformance run` does not read them.
 
 Each file's `// volume:` comment is its closed-form volume (none for

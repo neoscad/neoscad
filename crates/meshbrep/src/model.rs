@@ -43,9 +43,13 @@ pub enum Surface {
         /// The radius.
         radius: f64,
     },
-    /// A torus about the unit `axis` through `center`. Declared for the
-    /// surfaces `rotate_extrude` will produce; reconstruction does not
-    /// accept it yet ([`crate::Error::Unsupported`]).
+    /// A ring torus about the unit `axis` through `center`: what an arc
+    /// off the axis sweeps in `rotate_extrude`. `major_radius` must be
+    /// larger than `minor_radius` (a torus that crosses its own axis is
+    /// refused as malformed).
+    ///
+    /// Its frame (STEP's `TOROIDAL_SURFACE`) puts the point at
+    /// `(u, v)` at `origin + (R + r cos v)(cos u x + sin u y) + r sin v z`.
     Torus {
         /// The centre.
         center: [f64; 3],
@@ -57,7 +61,7 @@ pub enum Surface {
         minor_radius: f64,
     },
     /// The surface swept by `profile` moving along `direction`. Declared
-    /// for extruded 2D curves (text, `offset` arcs); not accepted yet.
+    /// for extruded free-form 2D curves (text outlines); not accepted yet.
     LinearExtrusion {
         /// The swept curve.
         profile: Curve,
@@ -190,10 +194,15 @@ pub struct TaggedMesh {
 /// - cylinder of radius `r`: `origin + r (cos u x + sin u y) + v z`;
 /// - cone: `origin + (r + v · slope) (cos u x + sin u y) + v z`, where `r`
 ///   is the radius at `origin` ([`Face::ref_radius`]);
-/// - sphere of radius `r`: `origin + r cos v (cos u x + sin u y) + r sin v z`.
+/// - sphere of radius `r`: `origin + r cos v (cos u x + sin u y) + r sin v z`;
+/// - torus of radii `R` and `r`:
+///   `origin + (R + r cos v) (cos u x + sin u y) + r sin v z`.
 ///
 /// `u` is in radians, and a face's curves on a periodic surface use `u` in
-/// `[0, 2π]`, with the seam (if any) at `u = 0` and `u = 2π`.
+/// `[0, 2π]`, with the seam (if any) at `u = 0` and `u = 2π`. A torus's `v`
+/// is an angle too: a face that wraps around the tube has a seam along a
+/// parallel, at `v0` and `v0 + 2π`; one that does not uses any interval
+/// of `v` clear of its cut.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frame {
     /// The origin.
@@ -307,6 +316,13 @@ pub struct Report {
     pub max_pcurve_deviation: f64,
     /// The largest distance of a mesh vertex on an edge from the edge's
     /// exact curve: how far the tessellation is from the exact model.
+    /// Only edges with a curved face count, and not those between tangent
+    /// surfaces (there the mesh's curve wanders wherever its polygons
+    /// cross); each is scaled by the sine of the angle its faces meet at,
+    /// so a grazing intersection counts its distance across the surfaces,
+    /// not along them. Much more than the
+    /// tessellation's own sagitta means the mesh's topology differs from
+    /// the exact model's even where reconstruction succeeded.
     pub max_chain_deviation: f64,
     /// Pairs of surfaces found tangent analytically.
     pub tangencies: Vec<Tangency>,

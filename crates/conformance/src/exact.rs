@@ -5,7 +5,8 @@
 //! x.step` in its own process, and the `exact` section of the JSON report
 //! is tabulated per corpus:
 //!
-//! - `cases`: the audit's 28 cases (`conformance/extensions/exact`) at
+//! - `cases`: the audit's 28 cases and stage 2's extrusions
+//!   (`conformance/extensions/exact`) at
 //!   several resolutions. Explicit `$fn` would keep polygons, so the
 //!   resolutions are `$fa`/`$fs` settings: OpenSCAD's defaults, `$fs=0.5`,
 //!   a coarse `$fa=60` (5 fragments, 8 in the export render) and a fine
@@ -22,7 +23,10 @@
 //! construct". Its outcome is **valid** (the export passed reconstruction,
 //! validation and the volume and box cross-checks), **failed** (a reported
 //! export error), or **killed** (over the time or the 2 GB memory guard,
-//! which cannot tell the render's share from the export's).
+//! which cannot tell the render's share from the export's). A model whose
+//! exact extrusions did not reconstruct, and which was then written with
+//! them as facets (`fallback` in the export's report), is judged eligible
+//! by its exact attempts, written, and not counted as valid.
 //!
 //! With `--occt PATH` (or `MESHBREP_OCCT_CHECK`), every written file is
 //! read back by OCCT (`crates/meshbrep/oracle`): valid closed solids (one
@@ -79,6 +83,9 @@ struct Outcome {
     /// `valid`, `failed`, `killed`, or `not3d` (not counted).
     status: &'static str,
     eligible: bool,
+    /// Written only after its extrusions fell back to facets: eligible
+    /// (judged by its exact attempts) but not an exact export.
+    fell_back: bool,
     exact: Option<Value>,
     message: String,
     step: Option<PathBuf>,
@@ -368,13 +375,22 @@ fn run_one(ctx: &Ctx, opts: &ExactOptions, work: &Path, m: &Model) -> Outcome {
         };
     };
     let ok = exact["ok"].as_bool().unwrap_or(false);
-    let faceted = exact["substitutions"]["faceted_modules"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    // After a fallback the file's own substitutions name the extrusions
+    // that went to facets; whether the model is eligible is what fell back
+    // while they were exact.
+    let fell_back = exact["fallback"].is_string();
+    let faceted = if fell_back {
+        &exact["exact_attempt_faceted"]
+    } else {
+        &exact["substitutions"]["faceted_modules"]
+    }
+    .as_array()
+    .cloned()
+    .unwrap_or_default();
     Outcome {
         status: if ok { "valid" } else { "failed" },
         eligible: !mesh_only(&faceted),
+        fell_back: ok && fell_back,
         message: exact["error"].as_str().unwrap_or("").to_string(),
         step: ok.then_some(step),
         exact: Some(exact),
@@ -492,7 +508,15 @@ pub fn command(ctx: &Ctx, opts: &ExactOptions) -> Result<u8, String> {
             .filter(|(_, o)| o.eligible || o.status == "killed")
             .copied()
             .collect();
-        let valid_eligible = eligible.iter().filter(|(_, o)| o.status == "valid").count();
+        // An eligible model written only with its extrusions as facets is
+        // not an exact export: it counts against the stop rule (and is
+        // reported on its own line below).
+        let valid_eligible = eligible
+            .iter()
+            .filter(|(_, o)| o.status == "valid" && !o.fell_back)
+            .count();
+        let fell_back = counted.iter().filter(|(_, o)| o.fell_back).count();
+        let fell_back_eligible = eligible.iter().filter(|(_, o)| o.fell_back).count();
         let fallback_only = counted
             .iter()
             .filter(|(_, o)| {
@@ -579,9 +603,17 @@ pub fn command(ctx: &Ctx, opts: &ExactOptions) -> Result<u8, String> {
                 "-".into()
             },
         );
+        if fell_back > 0 {
+            println!(
+                "{:12} written with extrusions as facets after the exact attempt failed: {fell_back} ({fell_back_eligible} eligible)",
+                ""
+            );
+        }
         summary.insert(
             c.to_string(),
             json!({
+                "fell_back": fell_back,
+                "fell_back_eligible": fell_back_eligible,
                 "models": rows.len(),
                 "three_d": counted.len(),
                 "eligible": eligible.len(),
@@ -645,6 +677,7 @@ pub fn command(ctx: &Ctx, opts: &ExactOptions) -> Result<u8, String> {
                 "id": m.id,
                 "status": o.status,
                 "eligible": o.eligible,
+                "fell_back": o.fell_back,
                 "message": o.message,
                 "wall_ms": o.wall_ms,
                 "exact": o.exact,

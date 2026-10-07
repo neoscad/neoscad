@@ -100,6 +100,35 @@ fn cap(s: &Surface, p: V3, n: V3) -> Option<(f64, f64)> {
             let q = reject(d, *axis);
             Some(radial(q, slope * dot(d, *axis), n))
         }
+        Surface::Torus {
+            center,
+            axis,
+            major_radius,
+            minor_radius,
+        } => {
+            // Tube coordinates: s from the tube's centre circle, φ round
+            // the tube; dV = s (R + s cos φ) ds dθ dφ, and the triangle's
+            // dA projects to dθ dφ = (n·ŝ) dA / (ρ · ρ_axis).
+            let (big, r) = (*major_radius, *minor_radius);
+            let d = sub(p, *center);
+            let w = reject(d, *axis);
+            let rho_axis = dot(w, w).sqrt();
+            if rho_axis == 0.0 {
+                return Some((0.0, r));
+            }
+            let s = sub(w, scaled(w, big / rho_axis));
+            let s = [0, 1, 2].map(|k| s[k] + axis[k] * dot(d, *axis));
+            let rho = dot(s, s).sqrt();
+            if rho == 0.0 {
+                return Some((0.0, r));
+            }
+            let cos_phi = (rho_axis - big) / rho;
+            let f = (big * (r * r - rho * rho) / 2.0
+                + cos_phi * (r * r * r - rho * rho * rho) / 3.0)
+                * dot(n, s)
+                / (rho * rho * rho_axis);
+            Some((f, (r - rho).abs()))
+        }
         _ => None,
     }
 }
@@ -211,8 +240,61 @@ fn project(s: &Surface, p: V3) -> (V3, f64) {
             let q = reject(d, *axis);
             radial(sub(p, q), q, slope * dot(d, *axis))
         }
+        Surface::Torus {
+            center,
+            axis,
+            major_radius,
+            minor_radius,
+        } => {
+            let d = sub(p, *center);
+            let w = reject(d, *axis);
+            let l = dot(w, w).sqrt();
+            if l == 0.0 {
+                return (p, *minor_radius);
+            }
+            let tube = [0, 1, 2].map(|k| center[k] + w[k] * major_radius / l);
+            radial(tube, sub(p, tube), *minor_radius)
+        }
         Surface::Plane { origin, normal } => (p, dot(sub(p, *origin), *normal).abs()),
         _ => (p, 0.0),
+    }
+}
+
+/// The smallest sine of the angle between two surfaces that the strip
+/// bound divides by: tangent surfaces (where it is 0) meet along a curve
+/// both project onto, so their gap terms vanish anyway.
+const MIN_SIN: f64 = 0.02;
+
+/// The unit normal of a surface at `p` (on or near it), up to sign. `None`
+/// for a facet.
+fn normal(s: &Surface, p: V3) -> Option<V3> {
+    let unit = |v: V3| {
+        let l = dot(v, v).sqrt();
+        (l > 0.0).then(|| scaled(v, 1.0 / l))
+    };
+    match s {
+        Surface::Plane { normal, .. } => Some(*normal),
+        Surface::Sphere { center, .. } => unit(sub(p, *center)),
+        Surface::Cylinder { origin, axis, .. } => unit(reject(sub(p, *origin), *axis)),
+        Surface::Cone { apex, axis, slope } => {
+            let q = unit(reject(sub(p, *apex), *axis))?;
+            unit(sub(q, scaled(*axis, *slope)))
+        }
+        Surface::Torus {
+            center,
+            axis,
+            major_radius,
+            ..
+        } => {
+            let w = reject(sub(p, *center), *axis);
+            let l = dot(w, w).sqrt();
+            if l == 0.0 {
+                return None;
+            }
+            let tube = [0, 1, 2].map(|k| center[k] + w[k] * major_radius / l);
+            unit(sub(p, tube))
+        }
+        _ => None,
     }
 }
 
@@ -274,7 +356,19 @@ fn strips(mesh: &TaggedMesh) -> f64 {
             let (pb, eb) = project(&b, m);
             let da = project(&b, pa).1;
             let db = project(&a, pb).1;
-            worst = worst.max(0.5 * (da * ea + db * eb));
+            // Where the surfaces meet at a grazing angle θ, the exact
+            // curve lies up to the gap / sin θ along them from the mesh's,
+            // not the gap: a cylinder poking 0.01 mm through a plane (the
+            // overlap BOSL2 gives every mask) meets it at 2.6° and left a
+            // sliver ten times the bound without this.
+            let sin = match (normal(&a, pa), normal(&b, pb)) {
+                (Some(na), Some(nb)) => {
+                    let c = cross(na, nb);
+                    dot(c, c).sqrt()
+                }
+                _ => 1.0,
+            };
+            worst = worst.max(0.5 * (da * ea + db * eb) / sin.max(MIN_SIN));
         }
         total += length * worst;
     }

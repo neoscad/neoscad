@@ -1,17 +1,23 @@
-//! STEP export with exact surfaces (`--enable exact`; stage 1b of
+//! STEP export with exact surfaces (`--enable exact`; stages 1b and 2 of
 //! `docs/audits/exact-geometry-rust.md`, path 1).
 //!
 //! The pipeline, for a tree the normal render has already built:
 //!
 //! 1. **Export render** ([`walk`]): the tree again, every triangle tagged
-//!    with the exact plane, cylinder, cone or sphere it lies on, in a
-//!    tessellation chosen for reconstruction rather than OpenSCAD's.
+//!    with the exact plane, cylinder, cone, sphere or torus it lies on, in
+//!    a tessellation chosen for reconstruction rather than OpenSCAD's.
 //!    Curves whose fragments come from `$fa`/`$fs` become exact; an
 //!    explicit `$fn` keeps OpenSCAD's polygon; everything else is faceted.
+//!    Extrusions sweep their profiles' exact curves ([`profile`]).
 //! 2. **Reconstruction** with `meshbrep`: faces, exact edges and vertices.
 //!    When the mesh's topology differs from the exact model's
-//!    (`TopologyMismatch`, slivers at a near-tangency), the export render is
-//!    built again at twice the segments, once.
+//!    (`TopologyMismatch`, slivers at a near-tangency, intersection curves
+//!    far further off the exact edges than the tessellation explains), the
+//!    export render is built again at twice the segments. A result whose
+//!    volume check is too loose to trust is held until a finer mesh
+//!    vouches for it (see `LOOSE_CHECK`). If the exact attempts fail and
+//!    the model has exact extrusions, they are built as facets instead,
+//!    as stage 1 built them, so the model still exports (reported).
 //! 3. **Checks** before anything is written: `meshbrep::validate`, then the
 //!    exact volume against the tagged mesh corrected onto its surfaces
 //!    ([`check`]), and the volume and bounding box against the normal
@@ -24,6 +30,7 @@
 //! [`ExactOptions::clock`].
 
 pub mod check;
+pub mod profile;
 pub mod walk;
 
 use eval::dump::Keys;
@@ -89,6 +96,20 @@ pub struct ExactStats {
     pub volume_tolerance: f64,
     /// The normal render's volume.
     pub normal_volume: f64,
+    /// How far the export render's intersection curves stand off the
+    /// exact edges at most (`meshbrep::Report::max_chain_deviation`).
+    pub chain_deviation: f64,
+    /// How far its triangles stand off their curved surfaces at most:
+    /// the scale `chain_deviation` is judged against.
+    pub max_cap: f64,
+    /// Why the extrusions were exported as facets after all, when the
+    /// model did not reconstruct with them exact: the file is the one
+    /// stage 1 would have written.
+    pub fallback: Option<String>,
+    /// The modules that fell back to facets in the exact attempts (before
+    /// any [`ExactStats::fallback`]): what decides whether the model is
+    /// one exact export should handle.
+    pub exact_attempt_faceted: Vec<&'static str>,
     /// Reconstruction's notes (merged arcs, tangencies resolved, ...).
     pub notes: Vec<String>,
     pub timings: Timings,
@@ -208,11 +229,27 @@ fn stray_void(brep: &meshbrep::Brep, tol: f64) -> Option<usize> {
     })
 }
 
+/// The relative volume tolerance above which the first attempt's
+/// cross-check is too weak to trust on its own ([`attempt`]).
+///
+/// A tessellation coarse against the model (a BOSL2 corner patch smaller
+/// than its sections) made a B-rep 0.4% off the model that a 7% tolerance
+/// let through. Such a result is held back; the export renders at twice
+/// the segments, and either that attempt's own B-rep passes, or the held
+/// one must agree with the finer mesh's corrected volume within the finer
+/// tolerance (a coarse capsule, whose finer mesh does not reconstruct,
+/// still exports), or the export fails rather than guess.
+const LOOSE_CHECK: f64 = 1e-3;
+
 /// One attempt's outcome: the written file, or why it was rejected and
 /// whether a finer export render could cure it.
 enum Attempt {
     /// The STEP text.
     Done(String),
+    /// A STEP text that passed every check, but a volume check too loose
+    /// to trust on its own (see [`LOOSE_CHECK`]): it needs a second
+    /// opinion from a finer mesh.
+    Loose(String),
     Rejected {
         message: String,
         retry: bool,
@@ -233,12 +270,44 @@ pub fn export_step(
     let mut stats = ExactStats::default();
     let (normal_volume, normal_box) = normal_measures(normal);
     stats.normal_volume = normal_volume;
-    let mut substitutions;
+    let mut substitutions: Vec<Substitution> = Vec::new();
     let mut first_reason: Option<String> = None;
-    for mult in [1u32, 2] {
+    let mut exact_failure: Option<String> = None;
+    let mut exact_extrusions = 0u32;
+    // A first attempt that passed with a loose check: (file, its stats,
+    // its substitutions).
+    let mut held: Option<(String, ExactStats, Vec<Substitution>)> = None;
+    let plan = [
+        (1u32, walk::Extrusions::Exact),
+        (2, walk::Extrusions::Exact),
+        (4, walk::Extrusions::Exact),
+        (1, walk::Extrusions::Faceted),
+    ];
+    for (k, (mult, mode)) in plan.into_iter().enumerate() {
+        if k == 1 && exact_failure.is_some() {
+            // Rejected for a reason a finer mesh cannot cure.
+            continue;
+        }
+        if k == 2 && held.is_none() {
+            // Four times the segments only to settle a loose first check.
+            continue;
+        }
+        if mode == walk::Extrusions::Faceted {
+            // Only a model whose extrusions were built exact can do
+            // better with them as facets.
+            if exact_extrusions == 0 {
+                break;
+            }
+            let Some(why) = exact_failure.take() else {
+                break;
+            };
+            stats.fallback = Some(why);
+            stats.exact_attempt_faceted = faceted_modules(&substitutions);
+            first_reason = None;
+        }
         stats.attempts += 1;
         let t0 = now();
-        let built = match walk::export_render(renderer, top, keys, opts, mult) {
+        let built = match walk::export_render_with(renderer, top, keys, opts, mult, mode) {
             Ok(b) => b,
             Err((u, subs)) => {
                 stats.timings.export_render_ms += now() - t0;
@@ -261,7 +330,55 @@ pub fn export_step(
         };
         stats.timings.export_render_ms += now() - t0;
         substitutions = built.substitutions.clone();
-        match attempt(&built, normal_volume, normal_box, x, &mut stats, &now) {
+        if mode == walk::Extrusions::Exact {
+            exact_extrusions = exact_extrusions.max(built.exact_extrusions);
+        }
+        let outcome = attempt(
+            &built,
+            normal_volume,
+            normal_box,
+            k == 0,
+            x,
+            &mut stats,
+            &now,
+        );
+        if mode == walk::Extrusions::Exact
+            && k > 0
+            && matches!(outcome, Attempt::Rejected { .. })
+            && let Some((step, held_stats, held_subs)) = held.take()
+        {
+            // The finer mesh did not reconstruct; its corrected volume
+            // can still vouch for the held B-rep, if it is close enough
+            // to be a check.
+            let (finer, tolerance) = volume_check(&built.mesh, held_stats.volume);
+            let accept = (held_stats.volume - finer).abs() <= tolerance
+                && tolerance <= LOOSE_CHECK * held_stats.volume.abs();
+            if accept {
+                let mut s = held_stats;
+                s.attempts = stats.attempts;
+                s.timings = stats.timings;
+                s.retried_because = None;
+                return Ok(ExactExport {
+                    step,
+                    stats: s,
+                    substitutions: held_subs,
+                });
+            }
+            if k == 1 {
+                // Held for the next, finer opinion.
+                held = Some((step, held_stats, held_subs));
+                continue;
+            }
+        }
+        match outcome {
+            Attempt::Loose(step) => {
+                held = Some((step, stats.clone(), substitutions.clone()));
+                first_reason = Some(format!(
+                    "the mesh is too coarse to check the B-rep's volume closely (tolerance {:.1e})",
+                    stats.volume_tolerance
+                ));
+                continue;
+            }
             Attempt::Done(step) => {
                 stats.retried_because = first_reason;
                 return Ok(ExactExport {
@@ -271,15 +388,23 @@ pub fn export_step(
                 });
             }
             Attempt::Rejected { message, retry } => {
-                if retry && mult == 1 {
+                if retry && k == 0 {
                     first_reason = Some(message);
                     continue;
                 }
-                let message = match first_reason {
+                let message = match first_reason.take() {
                     Some(first) if first != message => {
                         format!("{message} (and at the default resolution: {first})")
                     }
                     _ => message,
+                };
+                if mode == walk::Extrusions::Exact {
+                    exact_failure = Some(message);
+                    continue;
+                }
+                let message = match &stats.fallback {
+                    Some(exact) => format!("{message} (and with its extrusions exact: {exact})"),
+                    None => message,
                 };
                 stats.retried_because = None;
                 return Err(Box::new(ExactFailure {
@@ -291,13 +416,32 @@ pub fn export_step(
             }
         }
     }
-    unreachable!("the second attempt always returns")
+    stats.retried_because = None;
+    Err(Box::new(ExactFailure {
+        message: exact_failure.unwrap_or_else(|| "the export failed".into()),
+        interrupted: None,
+        stats,
+        substitutions,
+    }))
+}
+
+/// The modules among `subs` that fell back to facets, each once, sorted.
+fn faceted_modules(subs: &[Substitution]) -> Vec<&'static str> {
+    let mut m: Vec<&'static str> = subs
+        .iter()
+        .filter(|s| s.kind == SubstitutionKind::Faceted)
+        .map(|s| s.module)
+        .collect();
+    m.sort_unstable();
+    m.dedup();
+    m
 }
 
 fn attempt(
     built: &walk::ExportMesh,
     normal_volume: f64,
     normal_box: Bounds,
+    first: bool,
     x: &ExactOptions<'_>,
     stats: &mut ExactStats,
     now: &dyn Fn() -> f64,
@@ -348,6 +492,7 @@ fn attempt(
         .filter(|e| !e.seam && matches!(e.curve, meshbrep::Curve::BSpline(_)))
         .count();
     stats.notes = brep.report.notes.clone();
+    stats.chain_deviation = brep.report.max_chain_deviation;
     stats.notes.extend(validation.notes.iter().cloned());
     if !validation.is_valid() {
         stats.timings.check_ms += now() - t0;
@@ -389,6 +534,24 @@ fn attempt(
     stats.volume = volume;
     let corrected = check::corrected_volume(mesh);
     stats.corrected_volume = corrected.volume;
+    stats.max_cap = corrected.max_cap;
+    // The mesh's intersection curves stand off the exact edges by about
+    // its sagitta (at most 1.6 times the largest cap on every valid model
+    // of the stop-rule corpora). Far more means the mesh went round a
+    // feature smaller than its tessellation: two masks of one profile,
+    // one extruded and one revolved, meeting in a corner patch made a
+    // B-rep that passed every check and was 0.4% off the model.
+    let chain_limit = 4.0 * corrected.max_cap + 1e-6 * scale;
+    if stats.chain_deviation > chain_limit {
+        stats.timings.check_ms += now() - t0;
+        return Attempt::Rejected {
+            message: format!(
+                "the mesh's topology differs from the exact model's: its intersection curves stand {:.3e} off the exact edges, more than its tessellation accounts for ({chain_limit:.3e})",
+                stats.chain_deviation
+            ),
+            retry: true,
+        };
+    }
     let denom = volume.abs().max(1e-300);
     stats.volume_error = (volume - corrected.volume).abs() / denom;
     // The residual bound with a margin of 4 (it is an estimate of a
@@ -398,6 +561,7 @@ fn attempt(
         4.0 * corrected.residual_bound + 1e-7 * volume.abs() + 1e-9 * scale * scale * scale;
     stats.volume_tolerance = tolerance / denom;
     stats.timings.check_ms += now() - t0;
+    let loose = first && stats.volume_tolerance > LOOSE_CHECK;
     if (volume - corrected.volume).abs() > tolerance {
         return Attempt::Rejected {
             message: format!(
@@ -440,5 +604,21 @@ fn attempt(
     let t0 = now();
     let step = meshbrep::write_step(&brep, &x.step);
     stats.timings.write_ms += now() - t0;
-    Attempt::Done(step)
+    if loose {
+        Attempt::Loose(step)
+    } else {
+        Attempt::Done(step)
+    }
+}
+
+/// The tagged mesh's corrected volume and the tolerance a B-rep's volume
+/// is held to against it (as [`attempt`] computes them).
+fn volume_check(mesh: &meshbrep::TaggedMesh, volume: f64) -> (f64, f64) {
+    let corrected = check::corrected_volume(mesh);
+    let scale = mesh_bounds(mesh).map_or(0.0, |(lo, hi)| {
+        (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max)
+    });
+    let tolerance =
+        4.0 * corrected.residual_bound + 1e-7 * volume.abs() + 1e-9 * scale * scale * scale;
+    (corrected.volume, tolerance)
 }

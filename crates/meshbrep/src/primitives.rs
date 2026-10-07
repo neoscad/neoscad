@@ -370,3 +370,85 @@ impl TaggedMesh {
             .extend(other.triangle_surface.iter().map(|s| s + ps));
     }
 }
+
+/// A torus about the z axis: the circle of radius `minor` centred
+/// `major` from the axis in the xz plane, swept by `angle` degrees
+/// (360 for a whole ring, otherwise from the xz plane counter-clockwise,
+/// with planar ends), `segments` sections per turn about the axis and
+/// `tube_segments` around the tube, then `t`.
+pub fn torus(
+    major: f64,
+    minor: f64,
+    segments: u32,
+    tube_segments: u32,
+    angle: f64,
+    t: &Transform,
+) -> TaggedMesh {
+    let mut b = Builder::new(t);
+    let whole = angle >= 360.0;
+    let turn = if whole { 360.0 } else { angle };
+    let n = aligned_segments(segments) as usize;
+    let sections = if whole {
+        n
+    } else {
+        ((n as f64 * turn / 360.0).ceil() as usize).max(1)
+    };
+    let m = aligned_segments(tube_segments) as usize;
+    let s = b.surf(Surface::Torus {
+        center: [0.0; 3],
+        axis: [0.0, 0.0, 1.0],
+        major_radius: major,
+        minor_radius: minor,
+    });
+    let rings = if whole { sections } else { sections + 1 };
+    let mut rows: Vec<Vec<u32>> = Vec::with_capacity(rings);
+    for j in 0..rings {
+        let phi = turn * j as f64 / sections as f64;
+        let row = (0..m)
+            .map(|i| {
+                let th = 360.0 * i as f64 / m as f64;
+                let rho = major + minor * cos_deg(th);
+                b.vert(v(
+                    rho * cos_deg(phi),
+                    rho * sin_deg(phi),
+                    minor * sin_deg(th),
+                ))
+            })
+            .collect();
+        rows.push(row);
+    }
+    for j in 0..sections {
+        let k = (j + 1) % rings;
+        for i in 0..m {
+            let l = (i + 1) % m;
+            // (axis angle, tube angle) counter-clockwise: the outward
+            // normal is σ_φ × σ_θ.
+            b.fan(&[rows[j][i], rows[k][i], rows[k][l], rows[j][l]], s);
+        }
+    }
+    if !whole {
+        let ends = [(0usize, 0.0f64, -1.0f64), (sections, turn, 1.0)];
+        for (j, phi, sign) in ends {
+            // The end planes face away from the swept solid.
+            let nrm = v(-sin_deg(phi), cos_deg(phi), 0.0) * sign;
+            let id = b.surf(Surface::Plane {
+                origin: [0.0; 3],
+                normal: nrm.arr(),
+            });
+            let mut p = rows[j].clone();
+            let pts: Vec<V> = p
+                .iter()
+                .map(|&i| V::from(b.m.positions[i as usize]))
+                .collect();
+            let mut area = V::default();
+            for w in 0..pts.len() {
+                area = area + pts[w].cross(pts[(w + 1) % pts.len()]);
+            }
+            if area.dot(V::from(b.t.direction(nrm.arr()))) < 0.0 {
+                p.reverse();
+            }
+            b.fan(&p, id);
+        }
+    }
+    b.m
+}

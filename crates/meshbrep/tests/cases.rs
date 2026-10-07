@@ -153,6 +153,11 @@ fn faceted_voids_poles_and_fillets() {
     run_all(&MORE);
 }
 
+#[test]
+fn tori() {
+    run_all(&TORI);
+}
+
 /// Reconstruction time of one case, repeated (`MESHBREP_BENCH=c02,200`),
 /// for profiling. Does nothing without the variable.
 #[test]
@@ -205,7 +210,7 @@ fn dump() {
     };
     let dir = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&dir).unwrap();
-    for name in FIFTEEN.iter().chain(&IDIOMS).chain(&MORE) {
+    for name in FIFTEEN.iter().chain(&IDIOMS).chain(&MORE).chain(&TORI) {
         let (_, _, reference, b, _) = build(name, RESOLUTIONS[0]);
         let b = b.unwrap();
         let mut sizes = Vec::new();

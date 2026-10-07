@@ -89,6 +89,24 @@ fn closed_form(s: &Surf, t: &Surf, q: V) -> Option<Exact> {
                 (r1 * r1 - x * x).max(0.0).sqrt(),
             ))
         }
+        (Plane { o: po, n }, Torus { c, a, big, r }) => {
+            if par(n, a) {
+                // A parallel (a plane across the axis cuts two at most:
+                // the one through q).
+                Some(circ(c, a))
+            } else if n.dot(a).abs() < 1e-12 && (c - po).dot(n).abs() < 1e-9 * (1.0 + c.len()) {
+                // A plane through the axis cuts two meridians: q's.
+                let d = (q - c).reject(a).norm();
+                Some(Exact::Circle(c + d * big, n, r))
+            } else {
+                None
+            }
+        }
+        (Sphere { c: cs, .. }, Torus { c, a, .. })
+            if (cs - c).reject(a).len() < 1e-9 * (1.0 + c.len()) =>
+        {
+            Some(circ(c, a))
+        }
         _ => match (s.axis(), t.axis(), *t) {
             // Coaxial surfaces of revolution meet in circles, parallel
             // cylinders in lines.

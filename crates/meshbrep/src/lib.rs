@@ -413,4 +413,50 @@ mod tests {
         assert!(matches!(t[1].contact, Contact::Point { .. }));
         assert!(matches!(t[2].contact, Contact::Circle { .. }));
     }
+
+    /// A torus touches coaxial planes, cylinders and spheres along
+    /// circles, found from the profiles in its half-plane.
+    #[test]
+    fn torus_tangencies_are_circles() {
+        let z = [0.0, 0.0, 1.0];
+        let surfaces = [
+            Surface::Torus {
+                center: [0.0; 3],
+                axis: z,
+                major_radius: 7.0,
+                minor_radius: 3.0,
+            },
+            // Its top, its hole and its outside.
+            Surface::Plane {
+                origin: [0.0, 0.0, 3.0],
+                normal: z,
+            },
+            Surface::Cylinder {
+                origin: [0.0; 3],
+                axis: z,
+                radius: 4.0,
+            },
+            Surface::Cylinder {
+                origin: [0.0, 0.0, -5.0],
+                axis: [0.0, 0.0, -1.0],
+                radius: 10.0,
+            },
+            // Crossing, not tangent.
+            Surface::Cylinder {
+                origin: [0.0; 3],
+                axis: z,
+                radius: 8.0,
+            },
+        ];
+        let t = find_tangencies(&surfaces, 1e-9);
+        let radii: Vec<f64> = t
+            .iter()
+            .filter(|x| x.surfaces[0] == 0)
+            .map(|x| match x.contact {
+                Contact::Circle { radius, .. } => radius,
+                _ => f64::NAN,
+            })
+            .collect();
+        assert_eq!(radii, [7.0, 4.0, 10.0], "{t:?}");
+    }
 }
