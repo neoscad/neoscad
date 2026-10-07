@@ -276,6 +276,103 @@ pub fn run_check(files: Arc<MemFs>, src: &[u8]) -> String {
     out
 }
 
+/// Exact B-rep reconstruction and STEP writing (`meshbrep`) on a boolean
+/// built with Manifold, as an exact export in the web core would run it.
+/// `src` names the case; the lines give the B-rep's size, validity and
+/// volume, then the STEP text's length and SHA-256, which must be the same
+/// natively and in wasm32 (so the expectation is one hash for both).
+pub fn run_brep(src: &[u8]) -> String {
+    use manifold_rust::manifold::Manifold;
+    use manifold_rust::types::{MeshGL64, OpType};
+    use meshbrep::primitives::{self, Transform};
+    use sha2::{Digest, Sha256};
+
+    let name = String::from_utf8_lossy(src).trim().to_string();
+    let id = Transform::IDENTITY;
+    let (a, b) = match name.as_str() {
+        // difference() { cube(15, center = true); sphere(10); }
+        "cube-minus-sphere" => (
+            primitives::cuboid([15.0; 3], &Transform::translate([-7.5; 3])),
+            primitives::sphere(10.0, 32, &id),
+        ),
+        // difference() { cylinder(r = 5, h = 30); translate([0, 0, 20])
+        //   rotate([90, 0, 0]) cylinder(r = 1.5, h = 12, center = true); }
+        // Its cylinder–cylinder edges are B-splines.
+        "cross-drilled-pin" => (
+            primitives::frustum(30.0, 5.0, 5.0, 32, &id),
+            primitives::frustum(
+                12.0,
+                1.5,
+                1.5,
+                16,
+                &Transform::translate([0.0, 0.0, 20.0])
+                    .then_after(&Transform::rotate([90.0, 0.0, 0.0]))
+                    .then_after(&Transform::translate([0.0, 0.0, -6.0])),
+            ),
+        ),
+        _ => return format!("unknown case {name}\n"),
+    };
+    // One surface table; each triangle's face_id is its surface's index.
+    let mut surfaces = Vec::new();
+    let mut to_manifold = |m: &meshbrep::TaggedMesh| {
+        let off = surfaces.len() as u64;
+        surfaces.extend(m.surfaces.iter().cloned());
+        Manifold::from_mesh_gl64(&MeshGL64 {
+            num_prop: 3,
+            vert_properties: m.positions.iter().flatten().copied().collect(),
+            tri_verts: m
+                .triangles
+                .iter()
+                .flatten()
+                .map(|&i| u64::from(i))
+                .collect(),
+            face_id: m
+                .triangle_surface
+                .iter()
+                .map(|&s| u64::from(s) + off)
+                .collect(),
+            run_index: vec![0, 3 * m.triangles.len() as u64],
+            run_original_id: vec![Manifold::reserve_ids(1)],
+            ..Default::default()
+        })
+    };
+    let (ma, mb) = (to_manifold(&a), to_manifold(&b));
+    let gl = ma.boolean(&mb, OpType::Subtract).get_mesh_gl64(-1);
+    let np = gl.num_prop as usize;
+    let mesh = meshbrep::TaggedMesh {
+        positions: gl
+            .vert_properties
+            .chunks(np)
+            .map(|c| [c[0], c[1], c[2]])
+            .collect(),
+        triangles: gl
+            .tri_verts
+            .chunks(3)
+            .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32])
+            .collect(),
+        triangle_surface: gl.face_id.iter().map(|&f| f as u32).collect(),
+        surfaces,
+    };
+    let brep = match meshbrep::reconstruct(&mesh, &meshbrep::Options::default()) {
+        Ok(b) => b,
+        Err(e) => return format!("B-rep {name}: {e}\n"),
+    };
+    let valid = meshbrep::validate(&brep, 1e-6);
+    let volume = meshbrep::measure(&brep).map_or(f64::NAN, |m| m.volume);
+    let step = meshbrep::write_step(&brep, &meshbrep::StepOptions::default());
+    let hash: String = Sha256::digest(step.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!(
+        "B-rep {name}: {} faces, {} edges, {}, volume {volume:.9}\nSTEP {name}: {} bytes, sha256 {hash}\n",
+        brep.faces.len(),
+        brep.edges.len(),
+        if valid.is_valid() { "valid" } else { "INVALID" },
+        step.len()
+    )
+}
+
 /// `neoscad fmt` and `neoscad test` as a web worker runs them: with
 /// `test` false, `src` (an open document) formatted, then its formatted
 /// text formatted again (it must not change); with `test` true, `src` is
@@ -551,7 +648,8 @@ pub extern "C" fn add_file(name_len: usize) {
 /// formatted and with 5 as a test file ([`run_tooling`]); with 6 through
 /// the language server ([`run_lsp`]); with 7 as a preview that passes
 /// its time limit ([`run_preview_stopped`]); with 8, the input is a count
-/// of generated sketches to solve ([`run_sketches`]).
+/// of generated sketches to solve ([`run_sketches`]); with 9, an exact
+/// B-rep and STEP case ([`run_brep`]).
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
@@ -575,6 +673,8 @@ pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
     OUTPUT.lock().expect("output").clear();
     let out = if preview == 8 {
         run_sketches(&src)
+    } else if preview == 9 {
+        run_brep(&src)
     } else if preview == 7 {
         run_preview_stopped(files, &src)
     } else if preview == 6 {
@@ -673,6 +773,8 @@ mod tests {
             let src = c["src"].as_str().unwrap().as_bytes();
             let out = if c["session"] == "sketch" {
                 run_sketches(src)
+            } else if c["session"] == "brep" {
+                run_brep(src)
             } else if c["preview"] == "stop" {
                 run_preview_stopped(files, src)
             } else if c["session"] == "lsp" {

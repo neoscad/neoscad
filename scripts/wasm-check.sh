@@ -13,9 +13,11 @@
 # output, which must not change), `neoscad test` on a test file (its
 # tests in turn: no threads on wasm32), and the language server
 # (`crates/lsp`: hover, definition into the bundled MCAD, completion and
-# published diagnostics, as a web worker would drive it), and the sketch
+# published diagnostics, as a web worker would drive it), the sketch
 # solver over 200 generated sketches, whose digest of every solved bit must
-# equal the native one (crates/wasm-check/src/sketches.rs). Each result also
+# equal the native one (crates/wasm-check/src/sketches.rs), and exact B-rep
+# reconstruction with STEP output (`crates/meshbrep`), whose STEP text
+# must hash the same in node as natively. Each result also
 # goes through the renderer's CPU side (scene, colour scheme, camera fit).
 # The renderer's GPU side (wgpu on WebGPU) is only built, not run: it needs
 # a browser and wasm-bindgen glue, which this plain module has neither of.

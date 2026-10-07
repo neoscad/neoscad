@@ -1,7 +1,34 @@
 # Audit: an exact-geometry backend in pure Rust (STEP export, later 3D fillets)
 
-Status: judgement plus measurements, nothing built in the tree. Written
-2026-10-07 against `56cb815` and the reference checkout at `28fe66b`.
+Status: judgement plus measurements. Written 2026-10-07 against
+`56cb815` and the reference checkout at `28fe66b`.
+
+**Update, stage 1a built (2026-10-07):** path 1 is approved. Its
+reconstruction is the standalone crate `crates/meshbrep` (`MIT OR
+Apache-2.0`, no NeoSCAD dependency, to move to `neoscad/meshbrep`). It is
+driven by tests and not yet wired into the evaluator or CLI (stage 1b).
+It now has:
+
+- seams, and parameter-space curves on every curved face;
+- analytic tangency, arc merging and short-edge collapse;
+- faceted fallback, voids (`BREP_WITH_VOIDS`), and a structural
+  validator;
+- volume and area integrated on the exact geometry.
+
+All 28 test models (the 15 cases below, x01–x11, f01–f02) pass at the six
+resolutions of section 3.4. Validity is checked by its own validator and
+by OCCT 8.0.1 read-back (168 files). The volume error against closed form
+is at most 4.5e-9 relative. STEP bytes are identical across runs and
+between native and wasm32 (`scripts/wasm-check.sh`). F3 is confirmed and
+fixed, with one addition: OCCT drops a parameter-space curve that is not
+parametrised like its edge's 3D curve, and projects its own instead
+(`XSAlgo_AlgoContainer::CheckPCurve`, OCCT 7.8.1
+`src/XSAlgo/XSAlgo_AlgoContainer.cxx:314-359`). Doing so put c01 5.9e-5
+off in OCCT's own volume (adaptive integration), although the file read
+back valid. F2 has a
+faceted counterpart: x07 at 8–16 segments gives folded sliver faces,
+which `reconstruct` now reports as `TopologyMismatch` and a finer tagging
+mesh cures. Leftovers are in `docs/followups.md`, "Exact geometry".
 It follows `docs/audits/brep-feasibility.md` (below, "the previous
 audit"), which found that only OCCT survives OpenSCAD-shaped trees. The
 owner prefers an exact backend written in-house: pure Rust, publishable as

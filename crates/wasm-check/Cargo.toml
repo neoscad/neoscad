@@ -21,6 +21,11 @@ geom = { package = "neoscad-geom", path = "../geom" }
 lang = { package = "neoscad-lang", path = "../lang" }
 # The language server, as a web worker would run it.
 lsp = { package = "neoscad-lsp", path = "../lsp" }
+# Builds the booleans the exact B-rep cases reconstruct (`run_brep`).
+manifold-rust = { version = "=0.16.0", default-features = false }
+# Exact B-rep reconstruction and STEP, checked to give the same bytes in
+# wasm32 as natively.
+meshbrep = { path = "../meshbrep" }
 # Without the GPU: the module is loaded by node without wasm-bindgen glue,
 # so it runs the renderer's CPU side only. `scripts/wasm-check.sh` builds
 # the GPU side for wasm32 separately.
@@ -33,6 +38,7 @@ serde_json.workspace = true
 # every target.
 libm = "0.2.16"
 sketch-solver = { path = "../sketch" }
+sha2.workspace = true
 text = { package = "neoscad-text", path = "../text" }
 
 

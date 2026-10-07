@@ -42,7 +42,7 @@ function instance(files) {
       put(Buffer.from(src));
       try {
         e.run_input(seed >>> 0, (frames || 0) >>> 0,
-          preview === 'sketch' ? 8 : preview === 'stop' ? 7 : preview === 'lsp' ? 6 : preview === 'test' ? 5 : preview === 'fmt' ? 4 : preview === 'check' ? 3
+          preview === 'brep' ? 9 : preview === 'sketch' ? 8 : preview === 'stop' ? 7 : preview === 'lsp' ? 6 : preview === 'test' ? 5 : preview === 'fmt' ? 4 : preview === 'check' ? 3
             : preview === 'session' ? 2 : preview ? 1 : 0);
       } catch (x) {
         // A Rust panic leaves its message in the output before trapping.
@@ -84,7 +84,7 @@ function runCase(c) {
   const t0 = Date.now();
   let out;
   try {
-    const mode = ['check', 'fmt', 'test', 'lsp', 'sketch'].includes(c.session) ? c.session
+    const mode = ['check', 'fmt', 'test', 'lsp', 'sketch', 'brep'].includes(c.session) ? c.session
       : c.session ? 'session' : c.preview;
     out = instance(files).run(c.src, c.seed || 0, 0, mode);
   } catch (x) {

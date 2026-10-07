@@ -2167,6 +2167,51 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   link's open point about `agentEdit` and keystrokes in flight is done
   for Linux too (`expectVersion`).
 
+## Exact geometry (STEP)
+Stage 1a of `docs/audits/exact-geometry-rust.md` is `crates/meshbrep`.
+These are its leftovers. Stage 1b (the `face_id` plumbing in `geom`, the
+export render with aligned tessellation, `-o x.step` behind
+`--enable exact`) is the next task, not a follow-up.
+- **Faceted regions cut by exact surfaces can mismatch at coarse
+  tagging.** x07 (a 12-segment polyhedral sphere minus an exact skew hole)
+  gives folded sliver faces at 8, 12 and 16 hole segments. The inscribed
+  polygonal hole leaves facet pieces that the exact hole removes.
+  `reconstruct` reports `TopologyMismatch`; the tests retry at twice the
+  segments, as the binding must (32 and 40 pass). Aligned tessellation
+  does not help here: the faceted planes are arbitrary. A fix in the
+  crate would drop faces whose exact region is empty and re-link their
+  neighbours.
+- **Parameter-space curves are large on spheres.** A non-parallel circle
+  on a sphere needs 257–513 cubic control points to stay within 1e-7, so
+  c02 (7 faces) writes 209 KB and the 400-hole plate 2.17 MB (the spike
+  wrote 1.09 MB without pcurves; OCCT's own file is 2.68 MB). Fitting with
+  end derivatives, or at a higher degree, would cut this several-fold.
+  The 3D B-spline edges have the same issue at a smaller scale (c12: 257
+  points).
+- **Closed forms not implemented:** plane–cone sections that are not
+  circles (ellipse, parabola, hyperbola: B-spline today); tangency of
+  plane–cone along a generator and of cone–cylinder (not classified, so
+  they fall back to numeric tangent points, then arc merging). Arc merging
+  is not reached by any test model; a unit test reaches it by turning
+  analytic contacts off.
+- **The OCCT oracle is not in CI.** `crates/meshbrep/oracle/build.sh`
+  downloads cadrum's prebuilt OCCT 8.0.1 (about 140 MB) and builds
+  `check`; `MESHBREP_OCCT_CHECK=… cargo test -p meshbrep --release --test
+  occt` reads back the 28 models at six resolutions. A CI job (cached
+  OCCT) would keep it honest.
+- **The declared MSRV is unverified.** `rust-version = "1.85"` (edition
+  2024's minimum), tested only on 1.98.1.
+- **Publishing:** move `crates/meshbrep` to `github.com/neoscad/meshbrep`,
+  publish it, and make NeoSCAD depend on the published version. The tests'
+  `manifold-rust` dev-dependency then resolves to crates.io rather than
+  `vendor/`.
+- `measure` integrates in closed form along `u` (exact for planes,
+  cylinders, cones and spheres). A torus or extrusion surface needs the
+  quadrature it keeps for its own test (`inner_quadrature`).
+- `validate`'s self-crossing check samples loops (8× finer to confirm),
+  so two arcs closer than the sampling's sagitta can be misread. It has
+  not happened in the test models.
+
 ## Structure
 - **A failed release CI gate still publishes an empty release.** The
   v0.4.3 tag's first run failed `custom-ci` (the `plan-jobs` gate,
