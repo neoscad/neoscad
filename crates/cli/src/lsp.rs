@@ -42,6 +42,13 @@ pub(crate) struct Args {
     /// Append every message received and sent to FILE.
     #[arg(long = "log", value_name = "FILE")]
     log: Option<PathBuf>,
+
+    /// Turn on one of OpenSCAD's experimental features or NeoSCAD's
+    /// extensions (`part`, `sketch`, `query`) for the diagnostics'
+    /// evaluations, as the command line's --enable does (repeatable). Off
+    /// by default, as in OpenSCAD.
+    #[arg(long = "enable", value_name = "FEATURE", action = clap::ArgAction::Append)]
+    enable: Vec<String>,
 }
 
 pub fn main(args: Vec<OsString>) -> u8 {
@@ -56,6 +63,12 @@ pub fn main(args: Vec<OsString>) -> u8 {
     let _ = a.stdio;
     let host = crate::host::Host::from_env();
     let mut cfg = host.session_config(crate::host::entropy_seed());
+    // stderr: stdout carries only protocol messages.
+    for w in crate::enable_warnings(&a.enable) {
+        eprintln!("neoscad lsp: {w}");
+    }
+    cfg.features = crate::features(&a.enable);
+    cfg.extensions = crate::extensions(&a.enable);
     // An editor runs whatever is being typed: the agent limits apply
     // unless the user changes them, as for `serve`.
     cfg.limits = match crate::limits::from_flags(session::Limits::AGENT, &a.limit) {

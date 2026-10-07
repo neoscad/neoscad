@@ -489,7 +489,7 @@ impl<'a> Evaluator<'a> {
             concat: syms.intern("concat"),
         };
         let builtin_fns = crate::builtins::functions::table(&mut syms);
-        let builtin_mods = crate::builtins::modules::table(&mut syms, opts.parts);
+        let builtin_mods = crate::builtins::modules::table(&mut syms, opts.extensions);
         let mut units = vec![Unit::new(main, &mut syms)];
         let mut keys: HashMap<&str, u32> = HashMap::new();
         for lib in libraries {

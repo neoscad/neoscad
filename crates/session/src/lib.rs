@@ -125,9 +125,10 @@ pub struct Config {
     pub rng_seed: u32,
     #[cfg(feature = "gpu")]
     pub gpu: Option<GpuProvider>,
-    /// neoscad's `part()` extension for every request (`--enable part`);
-    /// a request can also turn it on alone ([`Run::parts`]).
-    pub parts: bool,
+    /// NeoSCAD's own extensions for every request (`--enable part`,
+    /// `sketch`, `query`); a request can add its own
+    /// ([`Run::extensions`]).
+    pub extensions: eval::Extensions,
     /// OpenSCAD's experimental features for every request (`--enable`);
     /// a request can add its own ([`Run::features`]).
     pub features: eval::Features,
@@ -194,7 +195,7 @@ impl Config {
             rng_seed: 0,
             #[cfg(feature = "gpu")]
             gpu: None,
-            parts: false,
+            extensions: eval::Extensions::NONE,
             features: eval::Features::NONE,
             limits: Limits::NONE,
             reuse_evaluation: true,
@@ -262,9 +263,10 @@ pub struct Run {
     /// requests do not, so two exports of one file can run side by side.
     pub supersede: bool,
     pub progress: Option<Progress>,
-    /// neoscad's `part("name") { ... }` extension (`--enable part`), on
-    /// for this request; see `eval::Options::parts`.
-    pub parts: bool,
+    /// NeoSCAD's own extensions (`--enable part`, `sketch`, `query`) for
+    /// this request, on top of [`Config::extensions`]; see
+    /// `eval::Options::extensions`.
+    pub extensions: eval::Extensions,
     /// OpenSCAD's experimental features (`--enable`) for this request, on
     /// top of [`Config::features`]; see `eval::Options::features`.
     pub features: eval::Features,
@@ -330,7 +332,7 @@ impl Run {
             rng_seed: None,
             supersede: true,
             progress: None,
-            parts: false,
+            extensions: eval::Extensions::NONE,
             features: eval::Features::NONE,
             entry: None,
             limits: None,
@@ -1578,7 +1580,7 @@ impl Session {
             fs: pipe.fs.clone(),
             interrupt: Some(job.flag.clone()),
             guard: job.limits.clone(),
-            parts: run.parts || self.cfg.parts,
+            extensions: run.extensions.union(self.cfg.extensions),
             features,
             fonts,
             ..eval::Options::default()

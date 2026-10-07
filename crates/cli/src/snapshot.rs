@@ -194,7 +194,8 @@ pub fn request(
     run.progress = progress;
     // Unseeded `rands()` repeats from snapshot to snapshot.
     run.rng_seed = Some(0);
-    run.parts = b("parts") || crate::parts_enabled(&strings("enable"));
+    run.extensions =
+        crate::extensions(&strings("enable")).with_if(eval::Extension::Part, b("parts"));
     run.features = crate::features(&strings("enable"));
     run.limits = crate::limits::of_params(params, session::Limits::NONE)?;
     // `issues`: true for the default check settings (or those given

@@ -33,9 +33,11 @@ Flags: `--root DIR` (repeatable), `--cache-mb N` (the geometry cache
 budget, as for `serve`), `--log FILE` (append every message received
 and sent, for debugging a client), `--limit NAME=VALUE` (repeatable:
 change a resource limit; see "Safety"), `--enable FEATURE` (repeatable:
-one of OpenSCAD's experimental features for every call, as the command
-line's `--enable`: `textmetrics`, `object-function`, `import-function`,
-`vector-swizzle`; off by default, as in OpenSCAD), `--tool NAME`
+one of OpenSCAD's experimental features or NeoSCAD's extensions for
+every call, as the command line's `--enable`: `textmetrics`,
+`object-function`, `import-function`, `vector-swizzle`, and `part`;
+`sketch` and `query` are accepted and do nothing yet; off by default,
+as in OpenSCAD), `--tool NAME`
 (repeatable: also list the optional tool `test` or `format`; see
 "Tools"), `--browser` (let the
 web page connect; see "The web page" below) with `--browser-url URL` and

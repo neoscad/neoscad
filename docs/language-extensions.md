@@ -1,6 +1,7 @@
 # Language extensions: constrained sketches and geometry queries
 
-Status: design, nothing built. Written 2026-10-07 against the tree at
+Status: design; stage 0 (the flags, carried and doing nothing yet)
+built. Written 2026-10-07 against the tree at
 `4aa80a4` and the reference checkout in `.reference/openscad`. Every
 claim about this codebase cites `path:line`; claims about OpenSCAD cite
 the reference checkout; claims about other projects cite what was

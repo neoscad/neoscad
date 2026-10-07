@@ -1008,6 +1008,26 @@ fn writes_never_follow_links_out_or_replace_other_files() {
     assert!(text(&r).contains("wrote "), "{r}");
 }
 
+/// The server-wide `--enable` turns on NeoSCAD's extensions for every
+/// call, as on the command line: `part` names parts with no `parts`
+/// argument, and the extension names do not draw OpenSCAD's "unknown
+/// feature" warning. Before, `--enable part` was accepted here and
+/// silently ignored.
+#[test]
+fn server_wide_enable_turns_on_extensions() {
+    let dir = scratch("enable");
+    let src = "part(\"a\") cube(1); part(\"b\") translate([3, 0, 0]) cube(1);";
+    let mut s = Mcp::start(&dir, &["--enable", "part", "--enable", "sketch"]);
+    let r = s.tool("measure", json!({"source": src, "verbose": true}));
+    let parts = &r["structuredContent"]["parts"];
+    assert_eq!(parts.as_array().map(Vec::len), Some(2), "{r}");
+    // Without the flag `part` is OpenSCAD's unknown module.
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("measure", json!({"source": src, "verbose": true}));
+    assert_eq!(r["structuredContent"]["parts"], json!([]), "{r}");
+    assert!(text(&r).contains("Ignoring unknown module 'part'"), "{r}");
+}
+
 #[test]
 fn bad_calls_are_explained_in_the_callers_terms() {
     let dir = scratch("args");

@@ -156,6 +156,34 @@ fn hover_builtins_user_code_and_constants() {
     assert!(c.at("textDocument/hover", MAIN, main, "1.5", 0).is_null());
 }
 
+/// A NeoSCAD extension's builtin says so in its hover and its completion
+/// detail, with the same label `neoscad docs` prints; an OpenSCAD
+/// builtin's does not.
+#[test]
+fn extension_builtins_are_labelled() {
+    const LABEL: &str = "NeoSCAD extension (`--enable part`); not in OpenSCAD";
+    let main = "part(\"lid\") cube(1);\n";
+    let mut c = Client::mem(&[(MAIN, main)]);
+    c.open(MAIN, main);
+    let h = c.at("textDocument/hover", MAIN, main, "part(", 0);
+    let v = h["contents"]["value"].as_str().unwrap();
+    assert!(v.contains(LABEL), "{v}");
+    let h = c.at("textDocument/hover", MAIN, main, "cube(", 0);
+    let v = h["contents"]["value"].as_str().unwrap();
+    assert!(!v.contains("NeoSCAD extension"), "{v}");
+
+    let text = format!("{main}par");
+    let mut c = Client::mem(&[(MAIN, text.as_str())]);
+    c.open(MAIN, &text);
+    let r = c.request(
+        "textDocument/completion",
+        json!({"textDocument": {"uri": uri(MAIN)}, "position": {"line": 1, "character": 3}}),
+    );
+    let items = r["items"].as_array().unwrap();
+    let part = items.iter().find(|i| i["label"] == "part").unwrap();
+    assert!(part["detail"].as_str().unwrap().ends_with(LABEL), "{part}");
+}
+
 #[test]
 fn completion_in_statements_expressions_and_calls() {
     let lib = "module lib_mod(a) {}\nfunction lib_fn(x) = x;\nlib_var = 3;\n";

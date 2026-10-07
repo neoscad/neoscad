@@ -151,7 +151,8 @@ pub fn run_of(params: &Value, model: &str, cwd: &Path) -> session::Run {
     run.rich = b("rich");
     run.supersede = b("supersede");
     run.rng_seed = Some(0);
-    run.parts = b("parts") || crate::parts_enabled(&strings("enable"));
+    run.extensions =
+        crate::extensions(&strings("enable")).with_if(eval::Extension::Part, b("parts"));
     run.features = crate::features(&strings("enable"));
     // A server resolves a request's limits into a whole `limits` object
     // (`crate::limits`), so nothing here depends on its defaults.

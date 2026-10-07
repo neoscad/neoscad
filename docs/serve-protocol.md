@@ -132,7 +132,7 @@ Requests on a model take:
 | `defines` | [string] | `-D` assignments, e.g. `"a=3"`. |
 | `quiet` | bool | Only errors in the log. |
 | `seed` | int | The seed of unseeded `rands()` (default: the server's, fixed per process). |
-| `enable` | [string] | `--enable`'s names, for this request. `"part"` turns on neoscad's `part()` extension (`docs/cli-json.md`, "Named parts"), as `--enable part` does. OpenSCAD's experimental features by their names (`"all"` is every one): `textmetrics`, `object-function`, `import-function` and `vector-swizzle` change evaluation; `predictible-output` sorts an `export`'s mesh file (`docs/cli-json.md`, "Sorted exports"). Other names are ignored. |
+| `enable` | [string] | `--enable`'s names, for this request. `"part"` turns on neoscad's `part()` extension (`docs/cli-json.md`, "Named parts"), as `--enable part` does; `"sketch"` and `"query"`, NeoSCAD's other extension names, are accepted and do nothing yet (`docs/language-extensions.md`). `"all"` never turns an extension on. OpenSCAD's experimental features by their names (`"all"` is every one): `textmetrics`, `object-function`, `import-function` and `vector-swizzle` change evaluation; `predictible-output` sorts an `export`'s mesh file (`docs/cli-json.md`, "Sorted exports"). Other names are ignored. |
 | `parts` | bool | The same as `"enable": ["part"]`. |
 | `progress` | bool | Send `progress` notifications (default true). |
 | `supersede` | bool | Cancel older requests on the same document when this one starts (default true; see "Ordering and concurrency"). `false` lets requests on one file run side by side, as `neoscad mcp` sends them. |
@@ -171,6 +171,10 @@ Params: anything (ignored). Result:
    "format": true, "docs": true, "test": true,
    "features": ["part"]}}
 ```
+
+`features` lists the NeoSCAD extensions (`enable` names) the server
+implements; a name it accepts but does not implement yet (`sketch`,
+`query`) is left out.
 
 `initialize` is optional (the command line does not send it).
 

@@ -318,8 +318,8 @@ usual text with no JSON.
 `part("name") { ... }` is neoscad's language extension for naming the
 pieces of a model, so that `check`, `measure` and `snapshot` can refer
 to them. It is off by default: without `--enable part` (the `parts` or
-`enable` option of a server request, `session::Run::parts` or
-`session::Config::parts`), `part` is an unknown module exactly as in
+`enable` option of a server request, `session::Run::extensions` or
+`session::Config::extensions`), `part` is an unknown module exactly as in
 OpenSCAD, with its warning (`WARNING: Ignoring unknown module 'part'
 ...`), and `--enable all` does not turn it on. A program's own `part`
 module always wins over the extension.
@@ -625,7 +625,13 @@ With `--format json`:
 
 A builtin `ENTRY` is `{"source": "builtin", "kind": "module"|"function"|
 "variable", "name", "signature", "summary", "params": [{"name", "type",
-"default", "doc"}], "returns", "example", "notes"}`; a user one is
+"default", "doc"}], "returns", "example", "notes", "extension",
+"label"}`; `extension` is the `--enable` name of the NeoSCAD extension
+the builtin belongs to (`"part"`; null for OpenSCAD's builtins) and
+`label` the line every surface shows for it ("NeoSCAD extension
+(`--enable part`); not in OpenSCAD"), which the text form prints under
+the summary and the language server puts in hover and completion. A user
+one is
 `{"source": "user", "kind", "name", "signature", "file", "line",
 "comment"?, "sections"?}` (`sections`: `[{"title", "text", "lines"}]`
 for structured blocks, synopsis, usage and arguments unless `--full`;

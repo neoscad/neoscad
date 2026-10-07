@@ -260,7 +260,7 @@ module p() part("m") children();
 p() part("n") sphere(1);
 "#,
         &Options {
-            parts: true,
+            extensions: eval::Extensions::NONE.with(eval::Extension::Part),
             ..Options::default()
         },
         None,

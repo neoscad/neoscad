@@ -122,6 +122,9 @@ pub fn builtin_markdown(e: &docs::Entry) -> String {
         e.signature,
         e.summary
     );
+    if let Some(l) = e.extension_label() {
+        out.push_str(&format!("\n*{l}*\n"));
+    }
     if !e.params.is_empty() {
         out.push('\n');
         for p in &e.params {

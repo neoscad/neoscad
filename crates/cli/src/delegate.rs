@@ -44,9 +44,12 @@ pub struct Plan<'a> {
     pub json: bool,
     pub rich: bool,
     pub seed: u32,
-    /// `--enable part`.
-    pub parts: bool,
-    /// `--enable`'s names, for OpenSCAD's experimental features.
+    /// NeoSCAD's extensions `--enable` names. The server reads them from
+    /// `enable` too; `parts` is still sent for a server from before the
+    /// other extensions existed.
+    pub extensions: eval::Extensions,
+    /// `--enable`'s names, for OpenSCAD's experimental features and
+    /// NeoSCAD's extensions.
     pub enable: &'a [String],
     /// The image flags, when the outputs are PNGs.
     pub png: Option<PngArgs<'a>>,
@@ -106,7 +109,7 @@ pub fn params(p: &Plan<'_>) -> Value {
         "json": p.json,
         "rich": p.rich,
         "seed": p.seed,
-        "parts": p.parts,
+        "parts": p.extensions.has(eval::Extension::Part),
         "enable": p.enable,
         "png": p.png.as_ref().map(|g| json!({
             "camera": g.camera, "viewall": g.viewall, "autocenter": g.autocenter,
@@ -172,8 +175,9 @@ fn run_of(params: &Value, input: &str, cwd: &Path) -> session::Run {
     run.camera = camera_of(params.get("camera").unwrap_or(&Value::Null));
     run.rng_seed = params.get("seed").and_then(Value::as_u64).map(|n| n as u32);
     run.supersede = false;
-    run.parts = b("parts");
-    run.features = crate::features(&strings(params, "enable"));
+    let enable = strings(params, "enable");
+    run.extensions = crate::extensions(&enable).with_if(eval::Extension::Part, b("parts"));
+    run.features = crate::features(&enable);
     // Unlimited, as the command line is: the client sends no `limits`,
     // and the server fills in an explicit unlimited object on every
     // `cli.*` request (`serve::cli`; `crate::limits`). An absent object

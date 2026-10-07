@@ -216,7 +216,7 @@ pub fn run_check(files: Arc<MemFs>, src: &[u8]) -> String {
     let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(base, LIBRARY_DIR));
     let mut cfg = session::Config::new(fs, LibraryPath(vec![PathBuf::from(LIBRARY_DIR)]));
     cfg.work_dir = PathBuf::from(DOC_DIR);
-    cfg.parts = true;
+    cfg.extensions = eval::Extensions::NONE.with(eval::Extension::Part);
     let s = session::Session::new(cfg);
     s.update(std::path::Path::new("main.scad"), src.to_vec());
     let mut out = String::new();

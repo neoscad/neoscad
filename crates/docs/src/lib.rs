@@ -57,6 +57,26 @@ pub struct Entry {
     pub returns: Option<String>,
     pub example: String,
     pub notes: Option<String>,
+    /// The `--enable` name of the NeoSCAD extension this builtin belongs
+    /// to (`part`, `sketch`, `query`); `None` for OpenSCAD's own. Every
+    /// surface labels such an entry with [`extension_label`], so a reader
+    /// can always tell an OpenSCAD builtin from a NeoSCAD one.
+    pub extension: Option<String>,
+}
+
+/// The one label every surface (`neoscad docs`, MCP `docs`, LSP hover and
+/// completion) shows for a NeoSCAD extension's builtin. It is built from
+/// the entry's structured `extension` field rather than written into each
+/// summary, so the wording cannot drift between entries or surfaces.
+pub fn extension_label(extension: &str) -> String {
+    format!("NeoSCAD extension (`--enable {extension}`); not in OpenSCAD")
+}
+
+impl Entry {
+    /// [`extension_label`] for an extension's entry.
+    pub fn extension_label(&self) -> Option<String> {
+        self.extension.as_deref().map(extension_label)
+    }
 }
 
 /// `name: type = default -- meaning`.
@@ -87,7 +107,14 @@ fn parse(text: &str) -> Result<Vec<Entry>, String> {
         for (k, _) in &t.values {
             if !matches!(
                 k.as_str(),
-                "name" | "signature" | "summary" | "params" | "returns" | "example" | "notes"
+                "name"
+                    | "signature"
+                    | "summary"
+                    | "params"
+                    | "returns"
+                    | "example"
+                    | "notes"
+                    | "extension"
             ) {
                 return Err(format!("line {}: unknown key '{k}'", t.line));
             }
@@ -111,6 +138,7 @@ fn parse(text: &str) -> Result<Vec<Entry>, String> {
             returns: t.str("returns").map(str::to_string),
             example: req("example")?,
             notes: t.str("notes").map(str::to_string),
+            extension: t.str("extension").map(str::to_string),
         });
     }
     Ok(out)
@@ -133,6 +161,9 @@ pub fn builtin(name: &str) -> Vec<&'static Entry> {
 /// An entry as text: signature, summary, parameters, returns, example.
 pub fn entry_text(e: &Entry) -> String {
     let mut out = format!("{} {}\n  {}\n", e.kind.name(), e.signature, e.summary);
+    if let Some(l) = e.extension_label() {
+        out.push_str(&format!("  {l}\n"));
+    }
     if !e.params.is_empty() {
         let w = e.params.iter().map(|p| p.name.len()).max().unwrap_or(0);
         for p in &e.params {
@@ -198,6 +229,16 @@ mod tests {
         assert_eq!(builtin("echo").len(), 2);
         let t = entry_text(cube[0]);
         assert!(t.starts_with("module cube(size=1, center=false)\n"), "{t}");
+        assert!(!t.contains("NeoSCAD extension"), "{t}");
+        // An extension's entry carries the label on its second line.
+        let part = builtin("part");
+        assert_eq!(part[0].extension.as_deref(), Some("part"));
+        let t = entry_text(part[0]);
+        assert_eq!(
+            t.lines().nth(2),
+            Some("  NeoSCAD extension (`--enable part`); not in OpenSCAD"),
+            "{t}"
+        );
     }
 
     #[test]

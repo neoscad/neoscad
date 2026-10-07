@@ -19,7 +19,11 @@ can run it. It offers:
 It finds libraries as the command line does: beside the file, on
 `OPENSCADPATH`, in the user library folder, then the bundled ones (MCAD).
 Its evaluations run under the same resource limits as `neoscad serve`;
-change them with `--limit NAME=VALUE` (repeatable, `off` for none). To
+change them with `--limit NAME=VALUE` (repeatable, `off` for none), and
+turn on OpenSCAD's experimental features or NeoSCAD's extensions for
+them with `--enable NAME` (repeatable, as on the command line). Hover and
+completion label a NeoSCAD extension's builtin ("NeoSCAD extension
+(`--enable part`); not in OpenSCAD"). To
 see what an editor sends and gets, add `--log FILE`, which appends every
 message to FILE.
 

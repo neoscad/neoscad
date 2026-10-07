@@ -28,7 +28,7 @@ fn session(files: &[(&str, &str)]) -> Session {
 fn check(src: &str, parts: bool, settings: CheckSettings) -> Value {
     let s = session(&[("m.scad", src)]);
     let mut run = Run::new("m.scad");
-    run.parts = parts;
+    run.extensions = eval::Extensions::NONE.with_if(eval::Extension::Part, parts);
     let c = s.check(&CheckRequest { run, settings }).unwrap();
     c.summary
 }
@@ -342,7 +342,7 @@ fn findings_name_their_parts_and_parts_intersect() {
 fn measure(src: &str, f: impl FnOnce(&mut MeasureRequest)) -> Value {
     let s = session(&[("m.scad", src)]);
     let mut run = Run::new("m.scad");
-    run.parts = true;
+    run.extensions = eval::Extensions::NONE.with(eval::Extension::Part);
     let mut req = MeasureRequest::new(run);
     f(&mut req);
     let m = s.measure(&req).unwrap();

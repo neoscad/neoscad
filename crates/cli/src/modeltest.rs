@@ -33,8 +33,9 @@ pub(crate) struct Args {
     #[arg(long, value_name = "FORMAT")]
     format: Option<String>,
 
-    /// `part`: neoscad's `part("name") { ... }` extension for every test
-    /// (a test with `@expect parts` has it anyway).
+    /// NeoSCAD's extensions (`part`: the `part("name") { ... }` module; a
+    /// test with `@expect parts` has it anyway) and OpenSCAD's experimental
+    /// features, for every test.
     #[arg(long, value_name = "FEATURE", action = clap::ArgAction::Append)]
     enable: Vec<String>,
 
@@ -73,7 +74,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
         paths: a.paths,
         cwd: Some(std::env::current_dir().unwrap_or_default()),
         filter: a.filter,
-        parts: crate::parts_enabled(&a.enable),
+        extensions: crate::extensions(&a.enable),
         features: crate::features(&a.enable),
         jobs: jobs.max(1),
     };

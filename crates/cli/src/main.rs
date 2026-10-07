@@ -159,8 +159,11 @@ struct Cli {
     #[arg(short = 'P', value_name = "NAME")]
     parameter_set: Option<String>,
 
-    /// `part` turns on neoscad's `part("name") { ... }` extension (named
-    /// parts for `check` and `measure`). OpenSCAD's experimental features
+    /// `part` turns on NeoSCAD's `part("name") { ... }` extension (named
+    /// parts for `check` and `measure`); `sketch` and `query` are reserved
+    /// for NeoSCAD's constrained sketches and geometry queries (accepted,
+    /// with no effect yet). `all` turns on OpenSCAD's experiments only,
+    /// never NeoSCAD's extensions. OpenSCAD's experimental features
     /// `textmetrics`, `object-function`, `import-function`,
     /// `vector-swizzle` and `predictible-output` (sorted mesh exports) work
     /// as in OpenSCAD; the others are accepted for compatibility, with a
@@ -456,15 +459,12 @@ pub fn rich_diagnostics() -> bool {
     }
 }
 
-/// neoscad's own `--enable` feature: the `part("name") { ... }` module
-/// (`eval::Options::parts`). Only this exact name turns it on; `--enable
-/// all` means OpenSCAD's experiments and leaves it off, so a program run
-/// with OpenSCAD's flags behaves as it does in OpenSCAD.
-pub const PART_FEATURE: &str = "part";
-
-/// Whether `--enable` names neoscad's `part()` extension.
-pub fn parts_enabled(names: &[String]) -> bool {
-    names.iter().any(|n| n == PART_FEATURE)
+/// NeoSCAD's own extensions `--enable` names (`part`, `sketch`, `query`;
+/// `eval::Options::extensions`). Only the exact names turn them on:
+/// `--enable all` means OpenSCAD's experiments and leaves them off, so a
+/// program run with OpenSCAD's flags behaves as it does in OpenSCAD.
+pub fn extensions(names: &[String]) -> eval::Extensions {
+    eval::Extensions::from_names(names)
 }
 
 /// OpenSCAD's experimental features `--enable` turns on (`all` is every
@@ -483,7 +483,10 @@ pub fn features(names: &[String]) -> eval::Features {
 pub fn enable_warnings(names: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for name in names {
-        if name == PART_FEATURE {
+        // NeoSCAD's own names are accepted silently, including those
+        // that do nothing yet: they are not OpenSCAD's, so its "unknown
+        // feature" warning would be wrong for them.
+        if eval::Extension::from_name(name).is_some() {
             continue;
         }
         if name == "all" {
@@ -859,7 +862,7 @@ fn served_export(
         json: cli.format.as_deref() == Some("json"),
         rich: rich_diagnostics(),
         seed: options.rng_seed,
-        parts: options.parts,
+        extensions: options.extensions,
         enable: &cli.enable,
         png: formats
             .iter()
@@ -912,7 +915,7 @@ fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
         check_parameter_ranges: flag(&cli.check_parameter_ranges, false, "check-parameter-ranges")?,
         hardwarnings: cli.hardwarnings,
         rng_seed: cli.seed.unwrap_or_else(host::entropy_seed),
-        parts: parts_enabled(&cli.enable),
+        extensions: extensions(&cli.enable),
         features: features(&cli.enable),
         ..Default::default()
     };
@@ -1048,12 +1051,18 @@ mod tests {
         assert!(w(&["textmetrics", "object-function", "vector-swizzle"]).is_empty());
         // `all` ends the list, as in OpenSCAD.
         assert_eq!(w(&["all", "foo"]).len(), 1);
-        assert!(w(&["predictible-output", "part"]).is_empty());
+        // NeoSCAD's own names are not OpenSCAD's unknown features.
+        assert!(w(&["predictible-output", "part", "sketch", "query"]).is_empty());
         let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let sorted = |n: &[&str]| features(&names(n)).has(eval::Feature::PredictibleOutput);
         assert!(sorted(&["predictible-output"]));
         assert!(sorted(&["all"]));
         assert!(!sorted(&["roof", "part"]));
+        // `all` is OpenSCAD's experiments, never NeoSCAD's extensions.
+        assert_eq!(extensions(&names(&["all"])), eval::Extensions::NONE);
+        let on = extensions(&names(&["all", "sketch", "query"]));
+        assert!(on.has(eval::Extension::Sketch) && on.has(eval::Extension::Query));
+        assert!(!on.has(eval::Extension::Part));
     }
 
     #[test]

@@ -208,7 +208,13 @@ fn candidate_item(ctx: &Ctx<'_>, c: &Candidate, statement: bool) -> (String, Val
             Ns::Function => KIND_FUNCTION,
             Ns::Variable => KIND_CONSTANT,
         });
-        item["detail"] = json!(e.signature);
+        // An extension's label goes in the detail, which editors show
+        // beside the name in the list: a reader picking `part` should see
+        // it is NeoSCAD's before choosing it, not only in the hover.
+        item["detail"] = json!(match e.extension_label() {
+            Some(l) => format!("{}  {l}", e.signature),
+            None => e.signature.clone(),
+        });
         item["documentation"] = json!({"kind": "markdown", "value": e.summary});
         if statement
             && c.ns == Ns::Module

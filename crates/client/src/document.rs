@@ -124,9 +124,9 @@ pub struct DocumentRequest {
     /// accept the same text without warning that `part` is unknown.
     #[serde(default)]
     pub parts: bool,
-    /// OpenSCAD's experimental features, as `--enable` names them
-    /// (`textmetrics`, `object-function`, ...); off by default, as in
-    /// OpenSCAD.
+    /// OpenSCAD's experimental features and NeoSCAD's extensions, as
+    /// `--enable` names them (`textmetrics`, `object-function`, `sketch`,
+    /// ...); off by default, as in OpenSCAD.
     #[serde(default)]
     pub enable: Vec<String>,
 }
@@ -469,7 +469,8 @@ impl Client {
         let text = self.text_now(&doc)?;
         run.text = Some(text.clone());
         run.defines = request.overrides.iter().filter_map(define).collect();
-        run.parts = request.parts;
+        run.extensions = eval::Extensions::from_names(&request.enable)
+            .with_if(eval::Extension::Part, request.parts);
         run.features = eval::Features::from_names(&request.enable);
         Ok((run, doc, text))
     }

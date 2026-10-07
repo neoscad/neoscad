@@ -16,7 +16,7 @@ fn solid(src: &str) -> ManifoldGeometry {
     assert!(!program.has_syntax_errors());
     let mut out = eval::Collect::default();
     let opts = eval::Options {
-        parts: true,
+        extensions: eval::Extensions::NONE.with(eval::Extension::Part),
         ..eval::Options::default()
     };
     let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {

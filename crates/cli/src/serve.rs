@@ -479,7 +479,14 @@ fn quick(server: &Server, method: &str, params: &Value) -> Reply {
                 "format": true,
                 "docs": true,
                 "test": true,
-                "features": ["part"],
+                // The extensions a client can use: only the implemented
+                // ones, so a client does not send sketches to a server
+                // that would answer "unknown module".
+                "features": eval::Extension::ALL
+                    .into_iter()
+                    .filter(|e| e.implemented())
+                    .map(eval::Extension::name)
+                    .collect::<Vec<_>>(),
             },
         })),
         "status" => {
@@ -575,8 +582,8 @@ fn run_of(
         .get("supersede")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    // neoscad's `part()`: `"enable": ["part"]` as on the command line, or
-    // `"parts": true`.
+    // NeoSCAD's extensions: `"enable": ["part", "sketch"]` as on the
+    // command line, or `"parts": true` for `part()` alone.
     let enable: Vec<String> = params
         .get("enable")
         .and_then(Value::as_array)
@@ -584,11 +591,13 @@ fn run_of(
         .flatten()
         .filter_map(|v| v.as_str().map(str::to_string))
         .collect();
-    run.parts = crate::parts_enabled(&enable)
-        || params
+    run.extensions = crate::extensions(&enable).with_if(
+        eval::Extension::Part,
+        params
             .get("parts")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(false),
+    );
     // OpenSCAD's experimental features, by the same names.
     run.features = crate::features(&enable);
     if params
@@ -757,7 +766,7 @@ fn heavy(server: &Server, id: &Value, method: &str, params: &Value, w: &Writer) 
             p["json"] = json!(true);
             p["supersede"] = json!(run.supersede);
             p["limits"] = crate::limits::json(&run.limits.unwrap_or(s.config().limits));
-            if run.parts {
+            if run.extensions.has(eval::Extension::Part) {
                 p["parts"] = json!(true);
             }
             if let Some(e) = params.get("enable") {
@@ -881,11 +890,13 @@ fn test_method(s: &session::Session, params: &Value) -> Reply {
         paths,
         cwd: str_param(params, "cwd").map(PathBuf::from),
         filter: str_param(params, "filter"),
-        parts: crate::parts_enabled(&enable)
-            || params
+        extensions: crate::extensions(&enable).with_if(
+            eval::Extension::Part,
+            params
                 .get("parts")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+        ),
         features: crate::features(&enable),
         jobs: jobs.max(1),
     };

@@ -79,7 +79,8 @@ fn binary(env: &Env) -> Command {
         .env(crate::geometry::NO_SERVER_VAR, "1")
         .env("OPENSCADPATH", &env.library_path)
         .stdin(Stdio::null())
-        .stdout(Stdio::null());
+        .stdout(Stdio::null())
+        .args(&env.extra_args);
     cmd
 }
 

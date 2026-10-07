@@ -89,6 +89,8 @@ pub struct RunOptions {
     pub record: bool,
     /// With `record`, also write the snapshot's grid.png.
     pub grid: bool,
+    /// `--enable` names added to every run of the binary under test.
+    pub extra_enable: Vec<String>,
 }
 
 /// Everything a finished run produced; `record` turns it into a snapshot.
@@ -160,6 +162,17 @@ pub fn run(ctx: &Ctx, opts: &RunOptions) -> Result<i32, String> {
         .collect();
 
     let mut env = Env::new(ctx, &manifest, &binary, opts.timeout);
+    env.extra_args = opts
+        .extra_enable
+        .iter()
+        .flat_map(|n| ["--enable".to_string(), n.clone()])
+        .collect();
+    if !env.extra_args.is_empty() {
+        println!(
+            "extra arguments for every run: {}",
+            env.extra_args.join(" ")
+        );
+    }
     if selected.iter().any(|c| c.runner == Runner::Geometry) {
         env.geometry = Some(GeometryEnv::new(ctx, &opts.renderer)?);
     }
@@ -443,6 +456,9 @@ pub(crate) struct Env {
     pub font_path: PathBuf,
     pub library_path: PathBuf,
     geometry: Option<GeometryEnv>,
+    /// Arguments added to every run of the binary under test, before the
+    /// case's own (`--extra-enable`); empty normally.
+    pub extra_args: Vec<String>,
 }
 
 impl Env {
@@ -460,6 +476,7 @@ impl Env {
             font_path: ctx.ref_root.join("tests/data/ttf"),
             library_path: ctx.ref_root.join("libraries"),
             geometry: None,
+            extra_args: Vec::new(),
         }
     }
 
@@ -517,6 +534,7 @@ impl Env {
             timeout: self.timeout,
             font_path: &self.font_path,
             library_path: &self.library_path,
+            extra_args: &self.extra_args,
         };
         let started = Instant::now();
         let result = image.run(&env, c);
@@ -598,7 +616,8 @@ impl Env {
             .env("OPENSCAD_FONT_PATH", &self.font_path)
             .env_remove(crate::geometry::FONT_DIR_VAR)
             .env(crate::geometry::NO_SERVER_VAR, "1")
-            .env("OPENSCADPATH", &self.library_path);
+            .env("OPENSCADPATH", &self.library_path)
+            .args(&self.extra_args);
         if c.stdio {
             let stdin = File::open(input).map_err(|e| e.to_string())?;
             cmd.arg("-").stdin(stdin).stdout(out_file);

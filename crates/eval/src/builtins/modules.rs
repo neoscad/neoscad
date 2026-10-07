@@ -114,12 +114,17 @@ pub(crate) const ALL: [(&str, BuiltinModule); 37] = [
     ("roof", BuiltinModule::Roof),
 ];
 
-pub(crate) fn table(syms: &mut Syms, parts: bool) -> HashMap<Sym, BuiltinModule, FxBuild> {
+pub(crate) fn table(
+    syms: &mut Syms,
+    extensions: crate::Extensions,
+) -> HashMap<Sym, BuiltinModule, FxBuild> {
     use BuiltinModule::*;
     // `part` is left out entirely when off (not registered as a disabled
     // experiment like `roof`): OpenSCAD has no such module, so a program
     // calling it must get OpenSCAD's plain "Ignoring unknown module".
-    let part = parts.then_some(("part", Part));
+    let part = extensions
+        .has(crate::Extension::Part)
+        .then_some(("part", Part));
     ALL.into_iter()
         .chain(part)
         .map(|(n, b)| (syms.intern(n), b))

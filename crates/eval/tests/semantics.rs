@@ -842,7 +842,7 @@ fn part_is_opt_in() {
         ]
     );
     let on = Options {
-        parts: true,
+        extensions: eval::Extensions::NONE.with(eval::Extension::Part),
         ..Options::default()
     };
     let (lines, ev) = run_with(src, &on);

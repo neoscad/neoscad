@@ -162,8 +162,8 @@ the view, the editor's markers and (through `parameters`) the customizer.
   assignments are; a name that is not an identifier or a value that is not
   finite is dropped.
 - `parts` turns on neoscad's `part()` extension (`--enable part`); `enable`
-  lists OpenSCAD's experimental features as `--enable` names them
-  (`textmetrics`, `object-function`, ...).
+  lists OpenSCAD's experimental features and NeoSCAD's extensions as
+  `--enable` names them (`textmetrics`, `object-function`, `part`, ...).
 - `camera` is the view the model is shown in, for `$vpt`, `$vpr`, `$vpd`,
   `$vpf` (OpenSCAD's GUI passes its view the same way). Default:
   OpenSCAD's default camera.

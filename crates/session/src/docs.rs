@@ -65,6 +65,8 @@ fn entry_json(e: &Entry) -> Value {
         "returns": e.returns,
         "example": e.example,
         "notes": e.notes,
+        "extension": e.extension,
+        "label": e.extension_label(),
     })
 }
 

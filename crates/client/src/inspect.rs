@@ -45,7 +45,8 @@ pub struct RunOptions {
     pub overrides: Vec<ParameterOverride>,
     /// neoscad's `part()` extension (`--enable part`).
     pub parts: bool,
-    /// OpenSCAD's experimental features, as `--enable` names them.
+    /// OpenSCAD's experimental features and NeoSCAD's extensions, as
+    /// `--enable` names them.
     pub enable: Vec<String>,
 }
 
@@ -62,7 +63,8 @@ impl Client {
     ) -> Result<session::Run, CoreError> {
         let mut run = self.run(path)?;
         run.supersede = false;
-        run.parts = options.parts;
+        run.extensions = eval::Extensions::from_names(&options.enable)
+            .with_if(eval::Extension::Part, options.parts);
         run.features = eval::Features::from_names(&options.enable);
         run.defines = options
             .overrides

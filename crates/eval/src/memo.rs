@@ -371,7 +371,7 @@ fn global_key(
         u8::from(o.trace_usermodule_parameters),
         u8::from(o.check_parameters),
         u8::from(o.check_parameter_ranges),
-        u8::from(o.parts),
+        o.extensions.bits(),
     ]);
     h.update(o.features.bits().to_le_bytes());
     f(&mut h, o.time);

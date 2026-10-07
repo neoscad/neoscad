@@ -9,6 +9,11 @@
 # Each entry: `name`, `signature`, `summary` (one line), `params` (each
 # "name: type = default -- meaning"; the default is optional), `example`,
 # and optionally `returns` (functions) and `notes`.
+#
+# A NeoSCAD extension's builtin (not in OpenSCAD) also has `extension`,
+# its `--enable` name ("part", "sketch", "query"). Every surface renders
+# the same label from it ("NeoSCAD extension (`--enable part`); not in
+# OpenSCAD"), so don't repeat that in the summary.
 
 # --- 3D primitives ---------------------------------------------------------
 
@@ -370,7 +375,8 @@ notes = "A failed assert fails `neoscad test`."
 [[module]]
 name = "part"
 signature = "part(name) children"
-summary = "neoscad extension (`--enable part`): name a piece of the model for check, measure and snapshot."
+summary = "Name a piece of the model for check, measure and snapshot."
+extension = "part"
 params = ["name: string -- the part's name; nested parts get dotted names"]
 example = "part(\"lid\") translate([0, 0, 10]) cube([20, 20, 2]);"
 notes = "Without --enable part it is an unknown module, as in OpenSCAD. See docs/cli-json.md, Named parts."

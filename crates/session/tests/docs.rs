@@ -44,6 +44,36 @@ fn every_stable_builtin_has_an_entry() {
     }
 }
 
+/// An extension's builtin is labelled from the entry's `extension` field
+/// (`docs/language-extensions.md`, section 2): every builtin the evaluator
+/// registers as an extension has one naming a real `--enable` extension,
+/// and no OpenSCAD builtin has one, so the label never lies either way.
+#[test]
+fn extension_entries_name_their_flag() {
+    for b in eval::builtins() {
+        let is_ext = b.status == eval::BuiltinStatus::Extension;
+        for e in docs::builtin(b.name) {
+            assert_eq!(
+                e.extension.is_some(),
+                is_ext,
+                "{} {}: extension field {:?}",
+                e.kind.name(),
+                e.name,
+                e.extension
+            );
+        }
+    }
+    for e in docs::builtins() {
+        if let Some(x) = &e.extension {
+            assert!(
+                eval::Extension::from_name(x).is_some(),
+                "{}: unknown extension '{x}'",
+                e.name
+            );
+        }
+    }
+}
+
 /// A DXF drawing with a dimension named `width` and two lines crossing on
 /// layer `center`, for the `dxf_dim` and `dxf_cross` examples.
 const DXF: &str = "0\nSECTION\n2\nENTITIES\n\
@@ -61,9 +91,16 @@ fn every_example_parses_and_evaluates() {
             ("drawing.dxf", DXF.as_bytes()),
             ("heights.dat", b"1 2\n3 4\n"),
         ]);
-        let r = s.evaluate(&Run::new("ex.scad"), false).unwrap();
+        // An extension's example runs with its flag on: off, it is only
+        // an unknown-module warning, which would prove nothing.
+        let mut run = Run::new("ex.scad");
+        if let Some(x) = e.extension.as_deref().and_then(eval::Extension::from_name) {
+            run.extensions = eval::Extensions::NONE.with(x);
+        }
+        let r = s.evaluate(&run, false).unwrap();
         let errors = r.log.count(lang::diag::Severity::Error);
-        if r.exit_code != 0 || errors > 0 {
+        let unknown = String::from_utf8_lossy(&r.log.stderr).contains("unknown module");
+        if r.exit_code != 0 || errors > 0 || (e.extension.is_some() && unknown) {
             failures.push(format!(
                 "{} {}: {}",
                 e.kind.name(),

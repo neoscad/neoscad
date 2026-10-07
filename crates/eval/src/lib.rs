@@ -40,9 +40,11 @@ mod call;
 mod context;
 pub mod dump;
 mod eval;
+pub mod extensions;
 pub mod features;
 mod heap;
 mod heap_expr;
+pub use extensions::{Extension, Extensions};
 pub use features::{Feature, Features};
 mod callmemo;
 pub mod fma;
@@ -223,11 +225,12 @@ pub struct Options {
     /// `--hardwarnings`: stop at the first warning, with the `TRACE:` lines
     /// of an evaluation error (see [`Evaluation::hard_warning`]).
     pub hardwarnings: bool,
-    /// neoscad's `part("name") { ... }` extension (`--enable part`). Off,
-    /// `part` is an unknown module exactly as in OpenSCAD, with its
-    /// warning; on, it is a builtin that a program's own `part` module
-    /// still shadows (see [`node::NodeKind::Part`]).
-    pub parts: bool,
+    /// NeoSCAD's own extensions (`--enable part`, `sketch`, `query`); none
+    /// by default. Off, an extension's names are unknown exactly as in
+    /// OpenSCAD, with its warnings; on, they are builtins that a program's
+    /// own definitions still shadow (`part`: see [`node::NodeKind::Part`]).
+    /// See [`extensions`].
+    pub extensions: Extensions,
     /// Replay repeated module calls within an evaluation instead of
     /// evaluating them again (see `callmemo`). The output is the same
     /// either way; off is for comparing the two.
@@ -260,7 +263,7 @@ impl Default for Options {
             interrupt: None,
             guard: None,
             hardwarnings: false,
-            parts: false,
+            extensions: Extensions::NONE,
             call_memo: true,
             features: Features::NONE,
             fonts: None,

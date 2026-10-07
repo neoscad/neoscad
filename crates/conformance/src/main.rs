@@ -105,6 +105,18 @@ enum Cmd {
         /// With --record, also render the snapshot's grid.png now.
         #[arg(long, requires = "record")]
         grid: bool,
+        /// Also pass `--enable NAME` for each of these names to every run
+        /// of the binary under test (comma-separated: `sketch,query`). This
+        /// proves NeoSCAD's extensions leave OpenSCAD's files unchanged:
+        /// the results must be the same as without it. Not with --record
+        /// or --update-baseline, which describe the default flags.
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "NAMES",
+            conflicts_with_all = ["record", "update_baseline"]
+        )]
+        extra_enable: Vec<String>,
     },
     /// Render grid.png for progress snapshots from their recorded data.
     Grid {
@@ -340,11 +352,13 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             update_baseline,
             record,
             grid,
+            extra_enable,
         } => {
             if timeout.is_nan() || timeout <= 0.0 {
                 return Err("--timeout must be positive".into());
             }
             let opts = run::RunOptions {
+                extra_enable,
                 tiers: tier,
                 filter,
                 verbose,

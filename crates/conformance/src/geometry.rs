@@ -185,6 +185,8 @@ pub struct CaseEnv<'a> {
     pub timeout: Duration,
     pub font_path: &'a Path,
     pub library_path: &'a Path,
+    /// Added to every run of the binary under test (`--extra-enable`).
+    pub extra_args: &'a [String],
 }
 
 impl GeometryEnv {
@@ -327,6 +329,11 @@ impl GeometryEnv {
             .env("OPENSCADPATH", env.library_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null());
+        // Only the binary under test: the renderer is the reference
+        // OpenSCAD, which knows none of NeoSCAD's names.
+        if program == env.binary {
+            cmd.args(env.extra_args);
+        }
         cmd
     }
 
