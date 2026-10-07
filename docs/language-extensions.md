@@ -384,10 +384,37 @@ As built (stage 1), the crate is the package `sketch-solver`, licensed
 `MIT OR Apache-2.0` (the owner's decision of 2026-10-07) so that it can
 be published on its own and NeoSCAD can depend on the published crate.
 It depends on no NeoSCAD crate. Its diagnostics are plain data keyed by
-entity and constraint ids (`crates/sketch/src/report.rs`); the `eval`
-binding (stage 2) maps the ids to spans, names and hints. The
+entity and constraint ids (`src/report.rs` in the solver's repository);
+the `eval` binding (stage 2) maps the ids to spans, names and hints. The
 validation corpus translated from FreeCAD and SolveSpace tests is kept
-out of the published package (`crates/sketch/tests/corpus/README.md`).
+out of the published package (`corpus/README.md` there).
+
+**Where the solver lives.** Since 0.1.0 (2026-10-07) the crate is
+developed in its own repository, github.com/neoscad/sketch-solver, and NeoSCAD depends
+on the release published on crates.io (`sketch-solver` in the root
+`Cargo.toml`'s `[workspace.dependencies]`, used by `eval` and
+`wasm-check`). The solver's unit, worked-example, completion and fuzz
+tests and the GPL/LGPL-derived validation corpus with its SolveSpace
+differential oracle (`corpus/`, a never-published workspace member)
+live and run in CI there. A solver change therefore flows:
+
+1. change, test and review it in github.com/neoscad/sketch-solver (its CI runs the
+   unit tests, the corpus and a wasm32 build on every platform);
+2. publish a new version to crates.io from there;
+3. bump `sketch-solver` here (`cargo update -p sketch-solver`, and the
+   version in `[workspace.dependencies]` for a minor or major release),
+   then run `cargo test` (the sketch goldens in
+   `crates/session/tests/sketch.rs` and the eval tests) and
+   `scripts/wasm-check.sh`.
+
+The wasm-check case `sketch-solver-determinism`
+(`crates/wasm-check/cases.json`, `src/sketches.rs`) stays here: it
+solves 200 generated sketches natively and in wasm32 and compares a
+digest of every solved bit, so a release that changes any solution
+shows as a changed digest. A bump that changes the digest on purpose
+updates the expected digest in `cases.json` in the same commit and
+says why; one that changes it unexpectedly is a solver regression to
+fix upstream.
 
 **Algorithm.**
 
@@ -911,7 +938,7 @@ why this design avoids it.
      cache disabled.
    - Incremental evaluation is compared with fresh evaluation
      (`crates/eval/tests/incremental.rs` gains extension programs).
-6. **Solver unit tests** in `crates/sketch`: known closed-form
+6. **Solver unit tests** in the solver crate (now github.com/neoscad/sketch-solver): known closed-form
    configurations; rank and DOF on textbook cases; conflict-set
    minimality; exactify; and fillet geometry, checked against
    analytical arcs.
@@ -1012,9 +1039,9 @@ dump). What it does, and where it departs from sections 4 and 9:
 - **`distance(l1, l2, d)` implies parallel**, as section 4.3 says: the
   binding adds the solver's `Parallel` before its `Distance`, unless an
   earlier `parallel()` of the two lines already states it. The solver's
-  own constraint does not impose it (`crates/sketch/src/model.rs`,
+  own constraint does not impose it (`src/model.rs` in github.com/neoscad/sketch-solver,
   `Constraint::Distance`). Nothing in the solver's corpus disagrees: no
-  case has a distance between two lines (`crates/sketch/tests/corpus/*/*.json`),
+  case has a distance between two lines (`corpus/data/*/*.json` there),
   and the differential oracle cannot check one (`docs/followups.md`,
   "Constrained sketches").
 - **Diagnostics.** Built: `sketch-conflict`, `sketch-redundant`,
@@ -1067,7 +1094,8 @@ dump). What it does, and where it departs from sections 4 and 9:
 ### 11.2 Stage 3 as built
 
 Stage 3 is in `crates/eval/src/sketch.rs` (the diagnosis and its hints),
-`crates/sketch/src/solve.rs` (two additions to the solver) and the
+the solver's `src/solve.rs` (two additions to the solver, now in
+github.com/neoscad/sketch-solver) and the
 limits plumbing. What it does, and where it departs from sections 4.6
 and 4.7:
 
@@ -1154,7 +1182,7 @@ and 4.7:
   problem is gone, checks the unknowns limit, and stops a 300-unknown
   solve by cancellation and by the time limit. The solver's
   `completion` and `unmet` have tests of their own
-  (`crates/sketch/tests/completion.rs`), and the edit placement
+  (`tests/completion.rs` in github.com/neoscad/sketch-solver), and the edit placement
   (deletion, insertion) unit tests in `crates/eval/src/sketch.rs`.
 
 ### 11.3 Stage 4 as built

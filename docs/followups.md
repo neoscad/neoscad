@@ -1643,12 +1643,13 @@ lead them, come roughly in order of user impact.
 - An under-constrained arc whose radius grows keeps its end points near
   where they were drawn, so its sweep can cross 180°, reported as a flip
   (FreeCAD's `testCircleLineTangentOriented` case allows it, see
-  `crates/sketch/tests/corpus/translate.py`). FreeCAD keeps an arc's
+  `corpus/scripts/translate.py` in github.com/neoscad/sketch-solver). FreeCAD keeps an arc's
   angles as unknowns and so keeps its extent. Weighting the minimal-norm
   steps, or arc parameters in angle form, would avoid it.
 - From very rough drawings (noise of 10% of the sketch size) the solver
   sometimes lands on another branch and reports the flip, where
-  SolveSpace stays: in `scripts/sketch-oracle.py --generate 300`, 3–9 of
+  SolveSpace stays: in `corpus/scripts/sketch-oracle.py --generate 300`
+  (github.com/neoscad/sketch-solver), 3–9 of
   roughly 170 fully constrained sketches per seed end away from the
   generating truth (SolveSpace: 7–15), and 9–14 of 300 report a flip.
   Continuation only moves dimensions; it could also relax the geometric
@@ -1699,10 +1700,15 @@ lead them, come roughly in order of user impact.
   (section 9 of the design), and their `.csg` exports have been rendered
   by the stock nightly by hand only; a tier in the harness would compare
   those meshes on every run.
-- Moving the crate to its own repository needs its own CI (the wasm32
-  build and the cross-platform digest now in `crates/wasm-check`), and
-  the corpus (GPL/LGPL-derived) stays in NeoSCAD or goes to a separate
-  test-data repository.
+- The solver now lives in github.com/neoscad/sketch-solver (published as
+  `sketch-solver` 0.1.0), with its corpus and oracle in that
+  repository's unpublished `corpus/` member. Solver items above are
+  fixed there: change and release it, then bump the dependency here and
+  rerun `cargo test` and `scripts/wasm-check.sh`
+  (`docs/language-extensions.md`, "Where the solver lives"). That
+  repository's CI builds wasm32 but does not compare native and wasm32
+  digests; the cross-platform digest is still only checked here
+  (`sketch-solver-determinism` in `crates/wasm-check`).
 
 ## Geometry queries
 - `resize()` and `rotate_extrude()` hide their children's anchors

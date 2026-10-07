@@ -27,6 +27,12 @@ regex = { version = "1", default-features = false, features = ["std", "unicode-p
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# The constraint solver behind `sketch()` (eval) and its determinism check
+# (wasm-check). Developed and validated in its own repository,
+# github.com/neoscad/sketch-solver; docs/language-extensions.md, "Where
+# the solver lives", says how a change gets here. Cargo.lock pins the exact release, and the
+# wasm-check digest catches a release that moves any solved bit.
+sketch-solver = "0.1.0"
 unicode-script = "0.5"
 
 # manifold-rust with host-driven cancellation, clipper2-rust with a faster
