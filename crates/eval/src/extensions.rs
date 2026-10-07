@@ -26,8 +26,8 @@ pub enum Extension {
     /// Constrained 2D sketches: `sketch() { ... }` and its vocabulary
     /// (see `crate::sketch`).
     Sketch,
-    /// Geometry queries on a module's children (not built yet, as
-    /// [`Extension::Sketch`]).
+    /// Geometry queries on a module's children: `anchor()` and
+    /// `child_anchors()` (see `crate::query`).
     Query,
 }
 
@@ -54,7 +54,7 @@ impl Extension {
     /// others are still accepted, silently, so a command line written for
     /// a later version is not rejected.
     pub fn implemented(self) -> bool {
-        matches!(self, Extension::Part | Extension::Sketch)
+        matches!(self, Extension::Part | Extension::Sketch | Extension::Query)
     }
 
     fn bit(self) -> u8 {

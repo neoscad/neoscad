@@ -217,6 +217,37 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// What `children(indices)` instantiates, into `wrapper` as its
+    /// children (and its anchors), as the `children()` builtin does with
+    /// its own node: a query's sandboxed instantiation (`crate::query`).
+    /// The driver starts here from inside an expression, so unlike
+    /// [`Self::instantiate`] it runs above frames that are still in
+    /// progress, all of which sit below `base` and are left alone.
+    pub(crate) fn instantiate_children_into(
+        &mut self,
+        wrapper: Node,
+        children: Children,
+        indices: Option<Vec<usize>>,
+    ) -> R<Node> {
+        let base = self.heap.len();
+        self.heap.push(Frame::Root(self.heap_out.len()));
+        self.heap_nodes.push(wrapper);
+        self.heap.push(Frame::Wrap(PLAIN));
+        let mut ret = self.begin_children(children, indices, true);
+        while self.heap.len() > base + 1 {
+            ret = self.step(ret);
+        }
+        let Some(Frame::Root(out)) = self.heap.pop() else {
+            unreachable!("the driver's root frame")
+        };
+        let node = (self.heap_out.len() > out).then(|| self.heap_out.pop());
+        debug_assert_eq!(self.heap_out.len(), out);
+        match ret {
+            Some(Ret::Done(r)) => r.map(|()| node.flatten().expect("an unfiltered wrapper")),
+            _ => unreachable!("the driver ends with a statement"),
+        }
+    }
+
     /// Run the top frame on: `ret` is the result of the frame that was
     /// above it, or `None` when it starts. A scope, the most common, runs
     /// where it is; the others are popped.
@@ -270,7 +301,18 @@ impl<'a> Evaluator<'a> {
                 if post.mark != NO_MARK {
                     self.truncate(post.mark);
                 }
-                let r = r.map(|()| (!post.filter || !node.children.is_empty()).then_some(node));
+                let r = r.map(|()| {
+                    if !post.filter || !node.children.is_empty() {
+                        return Some(node);
+                    }
+                    // An `echo` or `assert` whose only children were
+                    // `anchor()`s leaves no node; the anchors, in the same
+                    // frame, go to the node around it.
+                    if let Some(a) = node.anchors.take() {
+                        self.add_anchors(*a);
+                    }
+                    None
+                });
                 self.done(r)
             }
             Some(Frame::For(f)) => self.for_step(f, ret),
@@ -484,6 +526,11 @@ impl<'a> Evaluator<'a> {
             }
         };
         self.truncate(mark);
+        // Children a query instantiated for this call and no `children()`
+        // took: the call is over, so nothing can take them now.
+        if !self.held.is_empty() {
+            self.drop_held(&mctx);
+        }
         // A recording this call started sits at its stack index (and the
         // ones its body started have ended).
         if self.cm.recording_at(mark) {
@@ -663,7 +710,14 @@ impl<'a> Evaluator<'a> {
                     self.end(p);
                     return Some(Ret::Done(Ok(())));
                 };
-                let node = self.new_node(NodeKind::Group { name: None }, sr, i);
+                let mut node = self.new_node(NodeKind::Group { name: None }, sr, i);
+                // The same children a query of this call already
+                // instantiated (`crate::query`): put in place, not run
+                // again.
+                if !self.held.is_empty() && self.reuse_held(&mut node, ctx, &indices) {
+                    self.end(p);
+                    return self.done(Ok(Some(node)));
+                }
                 let post = Post {
                     mark: p.mark,
                     ..PLAIN
@@ -765,7 +819,7 @@ impl<'a> Evaluator<'a> {
                 let p = self.params(args, loc, &[], &["name", "strict", "convexity"], "sketch");
                 // What a sketch makes depends on everything its body ran,
                 // and it is solved at its end: never replayed from a memo.
-                self.untracked();
+                self.untracked_sketch();
                 // A `sketch()` met while one is being built (a helper
                 // module's body, called from a sketch body) adds to it.
                 let merge = self.sketch.is_some();
@@ -788,6 +842,7 @@ impl<'a> Evaluator<'a> {
                 self.begin_sketch_body(ch)
             }
             B::SketchStatement(v) => Some(Ret::Done(self.sketch_statement(v, sr, i, ctx))),
+            B::Anchor => Some(Ret::Done(self.anchor_statement(sr, i, ctx))),
             _ => {
                 // `geometry_module` and `geometry_node`.
                 let args = tri!(self.inst_args(sr, i, ctx));

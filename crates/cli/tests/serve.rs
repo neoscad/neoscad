@@ -615,7 +615,10 @@ fn check_and_measure_are_served() {
     for m in ["check", "measure", "cli.check", "cli.measure"] {
         assert!(methods.contains(&json!(m)), "{m}");
     }
-    assert_eq!(init["capabilities"]["features"], json!(["part", "sketch"]));
+    assert_eq!(
+        init["capabilities"]["features"],
+        json!(["part", "sketch", "query"])
+    );
     let path = d.join("m.scad");
     let p = path.to_str().unwrap();
     s.result(

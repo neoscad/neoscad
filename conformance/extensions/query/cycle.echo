@@ -1,0 +1,7 @@
+ERROR: Recursion detected: child_anchors() asks about the child it is inside in file cycle.scad, line 5
+TRACE: called by '$ask' in file cycle.scad, line 10
+TRACE: assignment to "x" in file cycle.scad, line 10
+TRACE: called by 'asks' in file cycle.scad, line 13
+TRACE: called by '$ask' in file cycle.scad, line 6
+TRACE: assignment to "a" in file cycle.scad, line 6
+TRACE: called by 'q' in file cycle.scad, line 13

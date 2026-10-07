@@ -157,6 +157,7 @@ impl<'a> Evaluator<'a> {
             children: Vec::new(),
             origin: Some(self.origin(sr, i)),
             index,
+            anchors: None,
         }
     }
 

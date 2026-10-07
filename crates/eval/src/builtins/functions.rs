@@ -75,6 +75,9 @@ pub(crate) enum Builtin {
     SketchLine,
     SketchArc,
     SketchCircle,
+    /// NeoSCAD's `child_anchors()` (`--enable query`): in the table only
+    /// with the extension on, so off it is OpenSCAD's unknown function.
+    ChildAnchors,
 }
 
 impl Builtin {
@@ -156,8 +159,21 @@ pub(crate) const ALL: [(&str, Builtin); 46] = [
     ("import", Builtin::Import),
 ];
 
-pub(crate) fn table(syms: &mut Syms) -> HashMap<Sym, Builtin, FxBuild> {
-    ALL.into_iter().map(|(n, b)| (syms.intern(n), b)).collect()
+pub(crate) fn table(
+    syms: &mut Syms,
+    extensions: crate::Extensions,
+) -> HashMap<Sym, Builtin, FxBuild> {
+    // `child_anchors` is left out entirely when the extension is off, as
+    // `part` and `sketch` are among the modules: a call is then OpenSCAD's
+    // own "Ignoring unknown function", and a program's own
+    // `function child_anchors` is what it always was.
+    let query = extensions
+        .has(crate::Extension::Query)
+        .then_some(("child_anchors", Builtin::ChildAnchors));
+    ALL.into_iter()
+        .chain(query)
+        .map(|(n, b)| (syms.intern(n), b))
+        .collect()
 }
 
 impl<'a> Evaluator<'a> {
@@ -233,6 +249,13 @@ impl<'a> Evaluator<'a> {
         let loc = self.expr_loc(u, call);
         if b == Builtin::Object {
             return self.object_function(u, args, ctx, loc);
+        }
+        if b == Builtin::ChildAnchors {
+            // Needs the caller's context, to find the module whose
+            // children it asks about, as `children()` does.
+            let mut argv = Vec::new();
+            self.eval_args_into(u, args, ctx, &mut argv)?;
+            return self.child_anchors(argv, loc, ctx);
         }
         if b == Builtin::IsUndef {
             if args.len() != 1 {
@@ -550,8 +573,9 @@ impl<'a> Evaluator<'a> {
             SketchPoint | SketchLine | SketchArc | SketchCircle => {
                 return self.sketch_entity(b, loc, a);
             }
-            // Evaluated from their unevaluated arguments in `call_builtin`.
-            IsUndef | Object => Value::Undef,
+            // Evaluated from their unevaluated arguments in `call_builtin`
+            // (`child_anchors` there because it needs the caller's context).
+            IsUndef | Object | ChildAnchors => Value::Undef,
         })
     }
 

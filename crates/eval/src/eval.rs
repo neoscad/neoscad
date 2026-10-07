@@ -246,7 +246,7 @@ pub(crate) struct Evaluator<'a> {
     pub op_warnings: Vec<String>,
     /// Deprecation messages already printed, with their location: OpenSCAD
     /// prints each one once (`printedDeprecations`).
-    deprecations: std::collections::HashSet<DeprecationKey>,
+    pub(crate) deprecations: std::collections::HashSet<DeprecationKey>,
     /// `--hardwarnings` progress; see [`Hard`].
     hard: std::cell::Cell<Hard>,
     /// The dotted names of the `part()`s being instantiated, innermost
@@ -335,6 +335,24 @@ pub(crate) struct Evaluator<'a> {
     /// The user calls of `fn_depth` running natively (`eval_call`), whose
     /// count decides when the heap takes over (`heap_expr::NATIVE_CALLS`).
     pub(crate) native_calls: u32,
+    /// While a query instantiates a child (`crate::query`): the messages
+    /// it printed, held back from the output until a `children()` reuses
+    /// the instance (or the query fails, and they are printed with the
+    /// error).
+    pub(crate) hold: Option<Vec<crate::memo::Recorded>>,
+    /// Children instantiated by queries, kept for the `children()` that
+    /// follows (`crate::query`), innermost call last.
+    pub(crate) held: Vec<crate::query::Held>,
+    /// The queries' instantiations in progress, to stop one that asks
+    /// about the child it is inside.
+    pub(crate) querying: Vec<crate::query::Key>,
+    /// Bumped with every event [`Evaluator::untracked`] reports except a
+    /// sketch's: a query's instance is reused only if this did not move
+    /// while it ran (`crate::query`).
+    pub(crate) query_impure: u64,
+    /// The nodes in [`Evaluator::held`]: made, then taken off the node
+    /// counter, so the memory estimate counts them here.
+    pub(crate) held_nodes: usize,
 }
 
 /// A variable's value moved out of its frame, to be handed to the one read
@@ -496,7 +514,7 @@ impl<'a> Evaluator<'a> {
             empty: syms.intern(""),
             concat: syms.intern("concat"),
         };
-        let builtin_fns = crate::builtins::functions::table(&mut syms);
+        let builtin_fns = crate::builtins::functions::table(&mut syms, opts.extensions);
         let builtin_mods = crate::builtins::modules::table(&mut syms, opts.extensions);
         let (vocab_fns, vocab_mods) = crate::sketch::tables(&mut syms, opts.extensions);
         let mut units = vec![Unit::new(main, &mut syms)];
@@ -593,6 +611,11 @@ impl<'a> Evaluator<'a> {
             xs: Default::default(),
             fn_depth: 0,
             native_calls: 0,
+            hold: None,
+            held: Vec::new(),
+            querying: Vec::new(),
+            query_impure: 0,
+            held_nodes: 0,
             opts,
         }
     }
@@ -1200,7 +1223,7 @@ impl<'a> Evaluator<'a> {
 
     /// The nodes' share of [`Evaluator::live_bytes`].
     fn node_bytes(&self) -> u64 {
-        let nodes = (self.node_index as u64).saturating_sub(1);
+        let nodes = (self.node_index as u64).saturating_sub(1) + self.held_nodes as u64;
         nodes.saturating_mul(NODE_BYTES)
     }
 
@@ -1268,6 +1291,14 @@ impl<'a> Evaluator<'a> {
         self.limit_ticks = self.limit_ticks.wrapping_add(ticks);
     }
 
+    /// Put the node counter and the limits' check counter back where a
+    /// query's sandboxed instantiation found them (`crate::query`), so
+    /// that adding a query renumbers nothing after it.
+    pub(crate) fn restore_counters(&mut self, index: usize, ticks: u32) {
+        self.node_index = index;
+        self.limit_ticks = ticks;
+    }
+
     /// The most memory seen while recording, with `bytes` about to be
     /// allocated: a replay must not skip over a memory limit.
     pub(crate) fn track_peak(&mut self, bytes: u64) {
@@ -1280,6 +1311,17 @@ impl<'a> Evaluator<'a> {
     /// Something happened that a statement's fingerprint does not cover
     /// (see `crate::memo`): the statement being recorded is not kept.
     pub(crate) fn untracked(&mut self) {
+        self.query_impure += 1;
+        self.untracked_sketch();
+    }
+
+    /// [`Evaluator::untracked`] for what a sketch does. A sketch is never
+    /// replayed by the memos, since it is solved only at its end and its
+    /// entities change the sketch being built; but a query's instance of
+    /// a child holds the whole sketch, solved, and the sketch being built
+    /// around the query is set aside while it runs (`crate::query`), so
+    /// the instance can still be reused.
+    pub(crate) fn untracked_sketch(&mut self) {
         self.cm.impure += 1;
         if let Some(r) = &mut self.rec {
             r.untrack();
@@ -1289,6 +1331,13 @@ impl<'a> Evaluator<'a> {
     /// Print a message a replayed call printed when it ran, recording it
     /// wherever [`Evaluator::emit_hinted`] would have.
     pub(crate) fn replay_recorded(&mut self, m: crate::memo::Recorded) {
+        if let Some(h) = &mut self.hold {
+            if self.cm.active.get() {
+                self.cm.log.push(m.clone());
+            }
+            h.push(m);
+            return;
+        }
         if let Some(r) = &mut self.rec
             && !r.untracked
         {
@@ -1405,6 +1454,23 @@ impl<'a> Evaluator<'a> {
             diag = diag.at(l.span, line);
             sources = Some(src);
         }
+        // Inside a query's instantiation of a child: kept for the
+        // `children()` that prints it (`crate::query`), and not recorded
+        // for the statement memo, since the reuse records it where it is
+        // printed. A call recorded inside the instantiation still logs it:
+        // the call's own entry must replay it wherever that call repeats.
+        if let Some(h) = &mut self.hold {
+            let m = crate::memo::Recorded {
+                unit: loc.map(|l| l.unit),
+                diag,
+                text: text.to_vec(),
+            };
+            if self.cm.active.get() {
+                self.cm.log.push(m.clone());
+            }
+            h.push(m);
+            return;
+        }
         if let Some(r) = &mut self.rec
             && !r.untracked
         {
@@ -1513,6 +1579,7 @@ impl<'a> Evaluator<'a> {
             children: Vec::new(),
             origin: None,
             index: 0,
+            anchors: None,
         };
         root.index = self.next_node_index();
         let scope = ScopeRef { unit: 0, scope: 0 };

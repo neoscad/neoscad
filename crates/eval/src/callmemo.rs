@@ -518,6 +518,68 @@ impl CallMemo {
         self.active.set(true);
     }
 
+    /// Start noting what a query's instantiation of a child reads
+    /// (`crate::query`), whose first context goes on the stack at index
+    /// `base`. It is a recording like a call's, so that the `$` reads and
+    /// the unkeyable lookups below `base` are found by the same hooks, and
+    /// so that a recording around it learns them too; but it keeps no
+    /// entry ([`CallMemo::end_sandbox`]). It works whether the memo is on
+    /// or not.
+    pub fn begin_sandbox(&mut self, base: usize) {
+        let epoch = self.epoch.get() + 1;
+        self.epoch.set(epoch);
+        self.recs.get_mut().push(Rec {
+            key: [0; 16],
+            def: (u32::MAX, u32::MAX, u32::MAX),
+            base,
+            // `parent_module()` inside the child reads the same names
+            // where `children()` runs it, in the same module call.
+            module_base: 0,
+            deps: Vec::new(),
+            epoch,
+            unkeyable: usize::MAX,
+            module_read: usize::MAX,
+            log_start: self.log.len(),
+            impure: self.impure,
+            first_index: 0,
+            ticks: 0,
+            work: 0,
+            live: 0,
+            saved_high: 0,
+            stack: 0,
+            frames: 0,
+        });
+        self.active.set(true);
+    }
+
+    /// End the innermost recording, begun by [`CallMemo::begin_sandbox`]:
+    /// the `$` names read from below its base, in the order first read, or
+    /// `None` when something was read that no key can cover (a `$`-named
+    /// function or module found below it). The reads pass to the recording
+    /// around it, as a call's do. Its messages leave the log: they were
+    /// held back, not printed, and a reuse logs them again where it prints
+    /// them.
+    pub fn end_sandbox(&mut self) -> Option<Vec<Sym>> {
+        let rec = self.recs.get_mut().pop().expect("a sandbox recording");
+        match self.recs.get_mut().last_mut() {
+            Some(o) => {
+                for &(s, pos, shape) in &rec.deps {
+                    if pos <= o.base && !o.deps.iter().any(|&(t, _, _)| t == s) {
+                        o.deps.push((s, pos, shape));
+                    }
+                }
+                o.unkeyable = o.unkeyable.min(rec.unkeyable);
+                o.module_read = o.module_read.min(rec.module_read);
+                self.log.truncate(rec.log_start);
+            }
+            None => {
+                self.active.set(false);
+                self.log.clear();
+            }
+        }
+        (rec.unkeyable >= rec.base).then(|| rec.deps.iter().map(|&(s, _, _)| s).collect())
+    }
+
     /// Whether the innermost recording is of the call whose context sits
     /// at stack index `base`.
     #[inline]
@@ -804,7 +866,7 @@ fn stamp(stamps: &mut Vec<Stamp>, s: Sym) -> &mut Stamp {
 }
 
 /// Move a replayed subtree's node indices by `shift`.
-fn renumber(n: &mut Node, shift: i64) {
+pub(crate) fn renumber(n: &mut Node, shift: i64) {
     let mut stack = vec![n];
     while let Some(n) = stack.pop() {
         n.index = (n.index as i64 + shift) as usize;

@@ -314,6 +314,10 @@ pub(crate) struct Builder {
     /// (the parallel that `distance(l1, l2, d)` implies), so it is not the
     /// author's to remove.
     implied: Vec<bool>,
+    /// `anchor(name, entity)` statements: the anchors to export at the
+    /// entities' solved positions, after the named entities' own
+    /// (`crate::query`).
+    anchors: Vec<(String, EntityId)>,
     /// An error was printed: the sketch gives an empty shape.
     failed: bool,
     /// The codes of the diagnostics printed about it so far, each once,
@@ -534,6 +538,7 @@ impl<'a> Evaluator<'a> {
             reach: Vec::new(),
             drawn: Vec::new(),
             implied: Vec::new(),
+            anchors: Vec::new(),
             failed: false,
             codes: Vec::new(),
         }));
@@ -629,7 +634,7 @@ impl<'a> Evaluator<'a> {
     pub(crate) fn sketch_entity(&mut self, f: Builtin, loc: Loc, a: &mut Vec<ArgVal>) -> R<Value> {
         // Making an entity changes the sketch: a call or statement that
         // does cannot be replayed from a memo.
-        self.untracked();
+        self.untracked_sketch();
         let (name, params): (&str, &[&str]) = match f {
             Builtin::SketchPoint => ("point", &["at"]),
             Builtin::SketchLine => ("line", &["p", "q", "construction"]),
@@ -669,7 +674,7 @@ impl<'a> Evaluator<'a> {
         i: usize,
         ctx: &Rc<Ctx>,
     ) -> R<()> {
-        self.untracked();
+        self.untracked_sketch();
         let loc = self.inst_loc(sr, i);
         let args = self.inst_args(sr, i, ctx)?;
         self.no_children(sr, i);
@@ -794,14 +799,50 @@ impl<'a> Evaluator<'a> {
                 Some("move it out of the sketch body".to_string()),
             );
         }
+        // `anchor()`s with coordinates in the body, a helper module's
+        // included (its nodes are dropped with the rest), stay on the
+        // sketch: they are in its frame.
+        let written = crate::query::anchors_in(&kids);
         drop(kids);
+        if !written.is_empty() {
+            node.anchors
+                .get_or_insert_with(Default::default)
+                .extend(written);
+        }
         if !top {
+            // A helper's sketch merges and leaves no node: its anchors go
+            // to the node around it, which the outer sketch collects.
+            if let Some(a) = node.anchors.take() {
+                self.add_anchors(*a);
+            }
             return Ok(None);
         }
         let b = self.sketch.take().expect("the sketch being built");
-        let kind = self.sketch_solve(*b)?;
+        let (kind, solved) = self.sketch_solve(*b)?;
         node.kind = kind;
+        if !solved.is_empty() {
+            // The entities' own first, then those written in the body.
+            let mut all = solved;
+            all.extend(node.anchors.take().map(|a| *a).unwrap_or_default());
+            node.anchors = Some(Box::new(all));
+        }
         Ok(Some(node))
+    }
+
+    /// `anchor(name, e)` with entity `e`, in a sketch body: exported at
+    /// `e`'s solved position once the sketch is solved.
+    pub(crate) fn sketch_anchor(&mut self, name: String, e: Rc<Entity>, loc: Loc) {
+        // It changes the sketch being built, as a constraint does.
+        self.untracked_sketch();
+        match self.sketch.as_mut() {
+            Some(b) if b.serial == e.sketch => b.anchors.push((name, e.id)),
+            _ => {
+                let t = format!(
+                    "anchor('{name}', ...): the entity belongs to another sketch; an entity's anchor can only be set in the body of the sketch that made it"
+                );
+                self.error(Some(loc), DiagCode::SketchForeignEntity, t);
+            }
+        }
     }
 
     /// Drop the sketch being built after an error unwound its body.
@@ -810,7 +851,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Solve, report, and turn the profile into a polygon.
-    fn sketch_solve(&mut self, mut b: Builder) -> R<NodeKind> {
+    fn sketch_solve(&mut self, mut b: Builder) -> R<(NodeKind, Vec<crate::node::Anchor>)> {
         let mut report = SketchReport {
             name: b.name.clone(),
             failed: true,
@@ -827,7 +868,7 @@ impl<'a> Evaluator<'a> {
             }))
         };
         if b.failed {
-            return Ok(empty(report, b.convexity));
+            return Ok((empty(report, b.convexity), Vec::new()));
         }
         // The unknowns limit, before any O(n³) work: two per point, one per
         // circle (the solver's own count).
@@ -866,7 +907,7 @@ impl<'a> Evaluator<'a> {
             Err(SolveError::Interrupted) => {
                 self.check_interrupt()?;
                 self.check_limits(Some(b.loc))?;
-                return Ok(empty(report, b.convexity));
+                return Ok((empty(report, b.convexity), Vec::new()));
             }
             Err(e @ SolveError::TooManyUnknowns { .. }) => {
                 // The solve itself sets no cap (the limit is checked
@@ -875,7 +916,7 @@ impl<'a> Evaluator<'a> {
                 let t = format!("{prefix}{e}");
                 self.error(Some(b.loc), DiagCode::ResourceLimit, t);
                 report.codes.push(DiagCode::ResourceLimit.as_str());
-                return Ok(empty(report, b.convexity));
+                return Ok((empty(report, b.convexity), Vec::new()));
             }
         };
         report.unknowns = sol.unknowns;
@@ -913,7 +954,7 @@ impl<'a> Evaluator<'a> {
         report.codes = b.codes.clone();
         self.print_notes(&prefix, notes);
         if !ok {
-            return Ok(empty(report, b.convexity));
+            return Ok((empty(report, b.convexity), Vec::new()));
         }
         report.failed = false;
         let mut points = Vec::new();
@@ -927,13 +968,67 @@ impl<'a> Evaluator<'a> {
         if paths.len() == 1 {
             paths.clear();
         }
-        Ok(NodeKind::Sketch(Box::new(SketchNode {
+        // Solved positions as anchors, for `child_anchors()`; only with
+        // the queries on, the one thing that reads them.
+        let anchors = if self.opts.extensions.has(crate::Extension::Query) {
+            solved_anchors(&b, &sol)
+        } else {
+            Vec::new()
+        };
+        let kind = NodeKind::Sketch(Box::new(SketchNode {
             points,
             paths,
             convexity: b.convexity,
             report: Arc::new(report),
-        })))
+        }));
+        Ok((kind, anchors))
     }
+}
+
+/// The anchors a solved sketch exports (`docs/language-extensions.md`,
+/// section 5.3): every entity the outermost body names by a variable,
+/// under that name (`top`, `top.start`, `pts[0]`; a helper module's
+/// variables are not the sketch's to name), in entity order, then each
+/// `anchor(name, entity)` in statement order. An explicit anchor replaces
+/// a named entity's of the same name, so `anchor("c1", c2)` is not a
+/// duplicate for `child_anchors()` to warn about.
+fn solved_anchors(b: &Builder, sol: &Solution) -> Vec<crate::node::Anchor> {
+    let explicit: Vec<(&str, EntityId)> = b.anchors.iter().map(|(n, e)| (n.as_str(), *e)).collect();
+    let named = b.ents.iter().enumerate().filter_map(|(i, e)| {
+        let label = e.label().filter(|_| b.reach[i])?;
+        (!explicit.iter().any(|(n, _)| *n == label)).then_some((label, e.id))
+    });
+    named
+        .chain(explicit.iter().copied())
+        .filter_map(|(name, id)| entity_anchor(b, sol, name, id))
+        .collect()
+}
+
+/// An entity's anchor: a point where it solved; a line's midpoint, with
+/// its direction from start to end; an arc's or a circle's centre.
+fn entity_anchor(
+    b: &Builder,
+    sol: &Solution,
+    name: &str,
+    id: EntityId,
+) -> Option<crate::node::Anchor> {
+    let at = |p: EntityId| sol.point(p).map(|[x, y]| [x, y, 0.0]);
+    let (point, dir) = match b.model.entity(id)? {
+        sketch_solver::Entity::Point { .. } => (at(id)?, None),
+        sketch_solver::Entity::Line { start, end } => {
+            let (s, e) = (at(*start)?, at(*end)?);
+            let d = [e[0] - s[0], e[1] - s[1], 0.0];
+            let mid = [(s[0] + e[0]) / 2.0, (s[1] + e[1]) / 2.0, 0.0];
+            (mid, (d != [0.0; 3]).then_some(d))
+        }
+        sketch_solver::Entity::Arc { center, .. }
+        | sketch_solver::Entity::Circle { center, .. } => (at(*center)?, None),
+    };
+    Some(crate::node::Anchor {
+        name: name.to_string(),
+        point,
+        dir,
+    })
 }
 
 /// The program text the diagnosis quotes and edits.

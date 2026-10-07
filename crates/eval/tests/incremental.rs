@@ -595,6 +595,31 @@ fn sketches_are_evaluated_anew_and_their_neighbours_reused() {
     assert_eq!(reuse, [(0, 1, 1), (1, 0, 1), (0, 1, 1), (1, 0, 1)]);
 }
 
+/// Queries (`--enable query`) through the memo: a statement whose module
+/// asks about its children, reused or evaluated anew, gives what a fresh
+/// evaluation gives, anchors in the tree included (the comparison is of
+/// the whole tree's `Debug`, which prints them).
+#[test]
+fn queries_through_the_memo_match_a_fresh_evaluation() {
+    let model = |h: u32, t: u32| {
+        format!(
+            "module peg(h) {{ cylinder(d = 2, h = h); anchor(\"top\", [0, 0, h], [0, 0, 1]); echo(\"peg\", h); }}\n\
+             module show() {{ a = child_anchors(0); echo(a); children(0); }}\n\
+             show() translate([{t}, 0, 0]) peg({h});\n\
+             cube(1);\n\
+             show() rotate(90) peg(2);\n"
+        )
+    };
+    let texts = [model(3, 1), model(3, 1), model(4, 1), model(4, 2)];
+    let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let opts = Options {
+        extensions: eval::Extensions::NONE.with(eval::Extension::Query),
+        ..Options::default()
+    };
+    let s = versions_with(&[], &texts, &opts);
+    assert!(s[1].reused > 0, "{s:?}");
+}
+
 #[test]
 fn moved_statements_keep_their_positions_and_indices() {
     versions(

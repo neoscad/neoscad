@@ -1704,6 +1704,40 @@ lead them, come roughly in order of user impact.
   the corpus (GPL/LGPL-derived) stays in NeoSCAD or goes to a separate
   test-data repository.
 
+## Geometry queries
+- `resize()` and `rotate_extrude()` hide their children's anchors
+  (`docs/language-extensions.md`, section 11.3). `rotate_extrude` could
+  place a profile anchor at its `start` angle (after checking OpenSCAD's
+  default start against the reference), and `resize` needs the child's
+  bounds, which stage 6's oracle gives.
+- A query whose child is not reusable (`rands()`, `import()`, a file
+  read, `part()`, a deprecation) instantiates it twice: once for the
+  answer, once at `children()`. Restoring the `rands()` state the
+  sandbox ended with, when `children()` starts from the state it started
+  from, would let `rands()` children be reused too.
+- A query inside a helper module called from a sketch body sets the
+  sketch being built aside, so a child that adds sketch entities or
+  constraints there gets errors in the sandbox (held back, and dropped
+  when `children()` instantiates it again properly), and its answer has
+  no sketch anchors. Nothing in the design needs that shape.
+- Each query walks the child's whole subtree and each reuse renumbers
+  it, so n queries nested by recursion cost O(n²): 4,000 levels take
+  0.55 s (release). The same chain without queries (`module q()
+  children(0); q() rec(n - 1)`) already uses memory quadratic in the
+  depth, 144 MB at 2,000 levels and 544 MB at 4,000 (peak resident,
+  release), which is worth its own look.
+- Top-level `anchor()` statements belong to no node and are dropped
+  silently; `check` or `measure` could list anchors by name if a tool
+  wants them.
+- The editor's decorations (`apple/Editor/web/src/lang/builtins.js`) do
+  not list `anchor` and `child_anchors` (design section 7), and LSP
+  completion was not checked for them (stage 4 owns the language
+  server's extension handling).
+- The goldens in `conformance/extensions/query` run as a cargo test, as
+  the sketch goldens do; their `.csg` exports were rendered by the stock
+  nightly by hand only (`plate`, `sketch` and `reuse`, comparing vertex
+  and facet counts).
+
 ## Determinism
 - Console output of two reference models varies between runs of one
   build (seen at `6d73727` and after): `svg/id-layer-selection-test.scad`

@@ -1,0 +1,4 @@
+ECHO: { o = [[10, 0, 0], undef]; b = [[10, 30, 0], undef]; c = [[-10, 30, 0], undef]; l1 = [[10, 15, 0], [0, 1, 0]]; l2 = [[0, 30, 0], [-1, 0, 0]]; l3 = [[-10, 15, 0], [0, -1, 0]]; l4 = [[0, 0, 0], [1, 0, 0]]; c2 = [[0, 20, 0], undef]; hole = [[-10, 30, 0], undef]; mid = [[-10, 15, 0], [0, -1, 0]]; d = [[10, 0, 0], undef]; free = [[5, 5, 0], undef]; }
+ECHO: { p = [[0, 0, 0], undef]; q = [[10, 0, 0], undef]; r = [[0, 10, 0], undef]; a = [[5, 0, 0], [1, 0, 0]]; b = [[5, 5, 0], [-0.707107, 0.707107, 0]]; c = [[0, 5, 0], [0, -1, 0]]; arcs.center = [[20, 0, 0], undef]; arcs = [[20, 0, 0], undef]; tab = [[3, 3, 0], undef]; tab corner = [[4, 4, 0], undef]; }
+ECHO: { kept = [[1, 1, 0], undef]; }
+ERROR: Sketch 'conflict': constraints conflict: length(l, 5) at line 58, fix(p) at line 58, fix(q) at line 58 in file sketch.scad, line 58

@@ -61,6 +61,7 @@ mod print;
 pub mod recursion;
 mod resolve;
 pub use resolve::Stats as ResolveStats;
+mod query;
 pub mod rng;
 pub mod sketch;
 mod sym;
@@ -347,6 +348,17 @@ pub fn builtins() -> Vec<BuiltinName> {
     out.push(BuiltinName {
         name: "sketch",
         kind: Module,
+        status: BuiltinStatus::Extension,
+    });
+    // The queries (`--enable query`, `crate::query`).
+    out.push(BuiltinName {
+        name: "anchor",
+        kind: Module,
+        status: BuiltinStatus::Extension,
+    });
+    out.push(BuiltinName {
+        name: "child_anchors",
+        kind: Function,
         status: BuiltinStatus::Extension,
     });
     // The sketch vocabulary: builtins only inside sketch bodies, where the

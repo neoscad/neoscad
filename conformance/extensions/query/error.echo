@@ -1,0 +1,8 @@
+ECHO: "in the child"
+ERROR: Assertion 'false' failed: "the child fails" in file error.scad, line 11
+TRACE: called by 'assert' in file error.scad, line 11
+TRACE: call of 'failing()' in file error.scad, line 9
+TRACE: called by 'failing' in file error.scad, line 15
+TRACE: called by 'child_anchors' in file error.scad, line 5
+TRACE: assignment to "a" in file error.scad, line 5
+TRACE: called by 'q' in file error.scad, line 15

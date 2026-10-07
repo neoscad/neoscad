@@ -131,6 +131,7 @@ fn node(kind: NodeKind, index: usize, children: Vec<Node>) -> Node {
             tag_background: false,
         })),
         index,
+        anchors: None,
     }
 }
 

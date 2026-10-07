@@ -1,0 +1,28 @@
+WARNING: child_anchors() is only valid inside a module, where it asks about the module's children in file diagnostics.scad, line 6
+ECHO: top = undef
+WARNING: child_anchors() is only valid inside a module, where it asks about the module's children in file diagnostics.scad, line 7
+ECHO: in_function = undef
+WARNING: child_anchors(): Children index (5) out of bounds (1 children) in file diagnostics.scad, line 13
+ECHO: undef
+WARNING: child_anchors(): Children index (-1) out of bounds (1 children) in file diagnostics.scad, line 14
+ECHO: undef
+WARNING: child_anchors(): bad index ("x"); it must be a number, a list of numbers or a range in file diagnostics.scad, line 15
+ECHO: undef
+WARNING: child_anchors(): Children index (7) out of bounds (1 children) in file diagnostics.scad, line 16
+ECHO: undef
+WARNING: child_anchors(): Children index (1) out of bounds (1 children) in file diagnostics.scad, line 17
+ECHO: undef
+ECHO: { m1 = [[1, 0, 0], undef]; }
+WARNING: child_anchors(): Children index (0) out of bounds (0 children) in file diagnostics.scad, line 21
+ECHO: no_children = { }, first = undef
+WARNING: child_anchors(): more than one anchor named 'm2', 'm3' among the children; the first is used in file diagnostics.scad, line 25
+ECHO: { m2 = [[2, 0, 0], undef]; m3 = [[8, 0, 0], undef]; }
+ECHO: { u = [[0, 0, 0], undef]; v = [[0, 0, 0], undef]; ok = [[1, 2, 0], undef]; }
+WARNING: anchor(): 'name' must be a string, found 1; the anchor is ignored in file diagnostics.scad, line 31
+WARNING: anchor(): 'point' must be [x, y] or [x, y, z], found "x"; the anchor is ignored in file diagnostics.scad, line 32
+WARNING: anchor(): 'point' must be [x, y] or [x, y, z], found [1, 2, 3, 4]; the anchor is ignored in file diagnostics.scad, line 33
+WARNING: anchor(): 'point' must be [x, y] or [x, y, z], found [1, nan]; the anchor is ignored in file diagnostics.scad, line 34
+WARNING: anchor(): 'dir' must be a non-zero [x, y] or [x, y, z], found [0, 0, 0]; the anchor is ignored in file diagnostics.scad, line 35
+WARNING: anchor(): 'dir' must be a non-zero [x, y] or [x, y, z], found "up"; the anchor is ignored in file diagnostics.scad, line 36
+WARNING: variable "extra" not specified as parameter in file diagnostics.scad, line 37
+WARNING: module anchor() does not support child modules in file diagnostics.scad, line 38

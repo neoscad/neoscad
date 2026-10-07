@@ -2528,7 +2528,10 @@ impl<'a> Evaluator<'a> {
         id: ExprId,
         args: &'a [Arg],
     ) -> Option<S> {
-        if b == Builtin::IsUndef || !self.args_may_call(u, args) {
+        // `child_anchors()` needs the caller's context, which only
+        // `call_builtin` passes on: its argument (an index) is evaluated
+        // there.
+        if b == Builtin::IsUndef || b == Builtin::ChildAnchors || !self.args_may_call(u, args) {
             return None;
         }
         let ctx = match &st.cur {

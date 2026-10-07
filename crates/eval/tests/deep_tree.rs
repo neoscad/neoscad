@@ -89,6 +89,7 @@ fn node(kind: NodeKind, index: usize, children: Vec<Node>) -> Node {
             tag_background: false,
         })),
         index,
+        anchors: None,
     }
 }
 
@@ -175,7 +176,7 @@ fn a_deep_tree_prints_with_debug_on_a_small_stack() {
     for (tree, nodes) in [(chain(DEPTH), DEPTH + 2), (comb(DEPTH), 2 * DEPTH + 2)] {
         let text = on_small_stack(|| format!("{tree:?}"));
         assert_eq!(text.matches("Node {").count(), nodes);
-        assert!(text.ends_with("origin: None, index: 0 }"));
+        assert!(text.ends_with("origin: None, index: 0, anchors: None }"));
         on_small_stack(move || drop(tree));
     }
     // The alternate form indents each level eight spaces more than the
@@ -184,7 +185,7 @@ fn a_deep_tree_prints_with_debug_on_a_small_stack() {
     let tree = comb(PRETTY_DEPTH);
     let text = on_small_stack(|| format!("{tree:#?}"));
     assert_eq!(text.matches("Node {").count(), 2 * PRETTY_DEPTH + 2);
-    assert!(text.ends_with("index: 0,\n}"));
+    assert!(text.ends_with("index: 0,\n    anchors: None,\n}"));
 }
 
 #[test]

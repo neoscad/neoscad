@@ -254,6 +254,14 @@ fn hint(d: &Logged, names: &Names) -> Option<String> {
             "`sketch()` is a NeoSCAD extension (constrained 2D sketches): enable it with \
              `--enable sketch`, or define a module called `sketch`"
         }
+        DiagCode::UnknownModule if quoted(&d.message) == Some("anchor") => {
+            "`anchor()` is a NeoSCAD extension (geometry queries): enable it with \
+             `--enable query`, or define a module called `anchor`"
+        }
+        DiagCode::UnknownFunction if quoted(&d.message) == Some("child_anchors") => {
+            "`child_anchors()` is a NeoSCAD extension (geometry queries): enable it with \
+             `--enable query`, or define a function called `child_anchors`"
+        }
         DiagCode::DuplicatePart => {
             "give each part a unique name: parts with one name are measured and checked as one"
         }

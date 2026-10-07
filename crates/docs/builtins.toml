@@ -602,6 +602,21 @@ extension = "sketch"
 params = ["corner: point -- shared by exactly two lines of the profile", "d: number -- the cut along each line"]
 example = "sketch() {\n  o = point([0, 0]); a = point([20, 0]); b = point([20, 10]); c = point([0, 10]);\n  l1 = line(o, a); l2 = line(a, b); l3 = line(b, c); l4 = line(c, o);\n  fix(o); fix(a); fix(b); fix(c);\n  chamfer(b, 2);\n}"
 
+# --- NeoSCAD's queries (--enable query) ---------------------------------------
+
+[[module]]
+name = "anchor"
+signature = "anchor(name, point, dir = undef)"
+summary = "Name a point (and optionally a direction) here, for child_anchors() in a module this geometry is a child of."
+extension = "query"
+params = [
+    "name: string -- the anchor's name",
+    "point: [x, y] or [x, y, z] -- where it is, in the frame of the statement; in a sketch body, a sketch entity (its solved position)",
+    "dir: [x, y] or [x, y, z] = undef -- a direction, such as an outward normal",
+]
+example = "module bolt(l = 10) {\n  cylinder(d = 3, h = l);\n  anchor(\"tip\", [0, 0, l], [0, 0, 1]);\n}\nmodule show() { echo(child_anchors(0)); children(0); }\nshow() translate([5, 0, 0]) bolt(20);"
+notes = "It makes no node: the model's tree, .csg and geometry are those of the same model without it, so a .csg export runs in stock OpenSCAD. The anchor belongs to the instantiation it is written in and moves with it through translate, rotate, scale, mirror, multmatrix, linear_extrude and projection; under resize and rotate_extrude, whose placement depends on the geometry, it is not visible. A sketch exports every entity its body names as an anchor of the same name: a point where it solved, a line's midpoint and direction, an arc's or circle's centre. Without --enable query it is an unknown module, as in OpenSCAD."
+
 # --- functions: numbers --------------------------------------------------------
 
 [[function]]
@@ -955,6 +970,16 @@ params = [
 ]
 returns = "[x, y]"
 example = "echo(dxf_cross(file=\"drawing.dxf\", layer=\"center\"));"
+
+[[function]]
+name = "child_anchors"
+signature = "child_anchors(index = undef)"
+summary = "Inside a module: the anchors of what children(index) would instantiate here, as an object from each name to [point, dir], in the module's frame."
+extension = "query"
+params = ["index: number, list or range = undef -- which children, as children() takes it; all of them when omitted"]
+returns = "object, or undef with a warning (outside a module, a bad index)"
+example = "module plate_under() {\n  a = child_anchors(0);\n  tip = a.tip[0];\n  translate([tip[0] - 5, tip[1] - 5, -2]) cube([10, 10, 2]);\n  children(0);\n}\nplate_under() translate([3, 4, 0]) { cylinder(d = 2, h = 5); anchor(\"tip\", [0, 0, 5], [0, 0, 1]); }"
+notes = "Points are always [x, y, z] and directions unit vectors (undef when none was given). No rendering is involved: the child is instantiated early, its messages held back, and a later children(index) with the same $ variables reuses the instance, printing them then, so a query changes nothing else a model prints or builds. The first anchor of a name wins, with a warning for the others (query-duplicate-anchor). Outside a module it warns (query-outside-module); a bad index warns (query-index). Without --enable query it is an unknown function, as in OpenSCAD."
 
 [[function]]
 name = "echo"

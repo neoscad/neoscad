@@ -308,6 +308,25 @@ pub struct Text {
     pub disc: Discretizer,
 }
 
+/// A named point recorded by NeoSCAD's `anchor()` (`--enable query`), or
+/// exported by a sketch, in the frame of the node that holds it
+/// (`docs/language-extensions.md`, section 5.3). `child_anchors()` reads
+/// anchors; nothing else does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Anchor {
+    pub name: String,
+    /// Always three coordinates: a 2D anchor has `z = 0`, so a transform
+    /// that tilts its plane moves it as it moves the shape.
+    pub point: [f64; 3],
+    /// A direction, or `None` for a bare point.
+    pub dir: Option<[f64; 3]>,
+}
+
+/// A node's anchors: `None` for every node OpenSCAD can produce. Boxed so
+/// that the field costs one word on the nodes that have none, which
+/// without the extension is all of them.
+pub type Anchors = Option<Box<Vec<Anchor>>>;
+
 /// The instantiation that produced a node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Origin {
@@ -336,9 +355,27 @@ pub struct Node {
     pub origin: Option<Box<Origin>>,
     /// Creation order, as OpenSCAD's node index counter assigns it.
     pub index: usize,
+    /// Named points for `child_anchors()` (`--enable query`) in this
+    /// node's frame, which is the frame its children are in (after its own
+    /// transform). They are a side field rather than child nodes because
+    /// an empty child changes a 2D union (`docs/architecture.md`,
+    /// "Determinism"). Geometry, the `.csg` dump and the cache keys never
+    /// read this field, so anchors cannot change a model's output.
+    pub anchors: Anchors,
 }
 
 impl Node {
+    /// A node with no children and no anchors.
+    pub fn new(kind: NodeKind, origin: Option<Box<Origin>>, index: usize) -> Node {
+        Node {
+            kind,
+            children: Vec::new(),
+            origin,
+            index,
+            anchors: None,
+        }
+    }
+
     /// A copy of this node's own fields, with no children yet.
     fn shallow_clone(&self) -> Node {
         Node {
@@ -346,6 +383,7 @@ impl Node {
             children: Vec::with_capacity(self.children.len()),
             origin: self.origin.clone(),
             index: self.index,
+            anchors: self.anchors.clone(),
         }
     }
 
@@ -355,6 +393,7 @@ impl Node {
             && self.children.len() == other.children.len()
             && self.origin == other.origin
             && self.index == other.index
+            && self.anchors == other.anchors
     }
 
     /// Whether every child is a leaf, so that a walk over this node goes
@@ -516,6 +555,10 @@ fn debug_close(n: &Node, depth: usize, f: &mut std::fmt::Formatter<'_>) -> std::
         f.write_str("index: ")?;
         debug_field(&n.index, depth + 1, f)?;
         f.write_str(",\n")?;
+        indent(f, depth + 1)?;
+        f.write_str("anchors: ")?;
+        debug_field(&n.anchors, depth + 1, f)?;
+        f.write_str(",\n")?;
         indent(f, depth)?;
         f.write_str("}")
     } else {
@@ -523,6 +566,8 @@ fn debug_close(n: &Node, depth: usize, f: &mut std::fmt::Formatter<'_>) -> std::
         std::fmt::Debug::fmt(&n.origin, f)?;
         f.write_str(", index: ")?;
         std::fmt::Debug::fmt(&n.index, f)?;
+        f.write_str(", anchors: ")?;
+        std::fmt::Debug::fmt(&n.anchors, f)?;
         f.write_str(" }")
     }
 }
@@ -607,7 +652,7 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
-    use super::{CsgOp, Node, NodeKind, Origin};
+    use super::{Anchor, CsgOp, Node, NodeKind, Origin};
     use lang::source::{FileId, Span};
 
     /// What the derived `Debug` printed: the same fields under the same
@@ -620,6 +665,7 @@ mod tests {
             pub children: Vec<Node>,
             pub origin: Option<Box<super::Origin>>,
             pub index: usize,
+            pub anchors: super::super::Anchors,
         }
     }
 
@@ -629,6 +675,7 @@ mod tests {
             children: n.children.iter().map(mirror).collect(),
             origin: n.origin.clone(),
             index: n.index,
+            anchors: n.anchors.clone(),
         }
     }
 
@@ -650,6 +697,13 @@ mod tests {
                 tag_background: false,
             })),
             index,
+            anchors: (index == 3).then(|| {
+                Box::new(vec![Anchor {
+                    name: "a".into(),
+                    point: [1.0, 2.0, 0.0],
+                    dir: Some([0.0, 0.0, 1.0]),
+                }])
+            }),
         }
     }
 
@@ -671,6 +725,7 @@ mod tests {
             ],
             origin: None,
             index: 0,
+            anchors: None,
         }
     }
 

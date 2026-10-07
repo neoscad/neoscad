@@ -1,0 +1,23 @@
+ECHO: "plain", { top = [[0, 0, 10], [0, 0, 1]]; base = [[0, 0, 0], [0, 0, -1]]; }
+ECHO: "translate", { top = [[10, 0, 5], [0, 0, 1]]; base = [[10, 0, 0], [0, 0, -1]]; }
+ECHO: "rotate", { top = [[0, -10, 0], [0, -1, 0]]; base = [[0, 0, 0], [0, 1, 0]]; }
+ECHO: "rotate z", { top = [[8.66025, 5, 10], [0, 0, 1]]; base = [[8.66025, 5, 0], [0, 0, -1]]; }
+ECHO: "scale", { top = [[0, 0, 40], [0, 0, 1]]; base = [[0, 0, 0], [0, 0, -1]]; }
+ECHO: "mirror", { top = [[-5, 0, 10], [0, 0, 1]]; base = [[-5, 0, 0], [0, 0, -1]]; }
+ECHO: "multmatrix", { top = [[1, 2, 13], [0, 0, 1]]; base = [[1, 2, 3], [0, 0, -1]]; }
+ECHO: "dir", { d = [[1, 2, 3], [0, 0, 1]]; }
+ECHO: "csg", { top = [[0, 0, 11], [0, 0, 1]]; base = [[0, 0, 1], [0, 0, -1]]; in minkowski = [[1, 1, 1], undef]; }
+ECHO: "for", { p0 = [[0, 0, 0], undef]; p1 = [[10, 0, 0], undef]; p2 = [[20, 0, 0], undef]; }
+ECHO: "if", { yes = [[1, 0, 0], undef]; }
+ECHO: "let", { let = [[4, 0, 0], undef]; }
+ECHO: "echo", { echoed = [[0, 1, 0], undef]; }
+ECHO: "only an anchor"
+ECHO: "2D", { corner = [[3, 3, 0], undef]; }
+ECHO: "extrude", { c = [[3, 0, 0], [1, 0, 0]]; }
+ECHO: "extrude centered", { c = [[0, 0, -2], undef]; }
+ECHO: "projection", { up = [[1, 1, 0], undef]; side = [[1, 1, 0], [1, 0, 0]]; }
+ECHO: "resize", { }
+ECHO: "rotate_extrude", { }
+ECHO: "nan", { }
+ECHO: "among children", { loose = [[9, 9, 9], undef]; }
+ECHO: first = { a = [[1, 0, 0], undef]; }, second = { b = [[2, 0, 0], undef]; }, both = { a = [[1, 0, 0], undef]; b = [[2, 0, 0], undef]; }, range = { b = [[2, 0, 0], undef]; }

@@ -2,10 +2,12 @@
 
 Status: design; stages 0 (the flags), 1 (the solver crate), 2 (the
 language binding of sketches, `--enable sketch`), 3 (diagnostics with
-hints, strict mode, the unknowns limit) and 4 (the sketch surfaces:
+hints, strict mode, the unknowns limit), 4 (the sketch surfaces:
 `check`, `measure --sketch`, the language server, MCP, the apps'
-setting, `docs/sketch.md`) built; sections 11.1 to 11.3 record how
-stages 2 to 4 were built and where they depart from this text.
+setting, `docs/sketch.md`) and 5 (render-free queries: `anchor()` and
+`child_anchors()`, `--enable query`) built; sections 11.1 to 11.4
+record how stages 2 to 5 were built and where they depart from this
+text.
 Written 2026-10-07 against the tree at
 `4aa80a4` and the reference checkout in `.reference/openscad`. Every
 claim about this codebase cites `path:line`; claims about OpenSCAD cite
@@ -1228,6 +1230,113 @@ resolution (`world.rs`), the MCP tools, `client`/`ffi` and the apps, and
   renders fully constrained; `check` and `measure` through MCP);
   `crates/client` (info diagnostics, `enable` through the loop); the
   editor's `language.test.js` (the colours).
+
+### 11.4 Stage 5 as built
+
+The queries are `crates/eval/src/query.rs`; the rest of the evaluator
+changed only where the sandbox needs it (the heap driver, messages, the
+call memo's recording, the node, the sketch binding). What it does, and
+where it departs from sections 5.2 to 5.4:
+
+- **`anchor(name, point, dir = undef)`** is a builtin module with
+  `--enable query`, in the table only then, as `part` and `sketch` are.
+  It makes no node, so a model's tree, `.csg`, geometry keys and node
+  numbering are those of the same model without it. It puts an
+  `eval::node::Anchor` (name, point, direction) on the node being filled
+  (the innermost instantiation around it: a module call, a transform, a
+  loop, `children()`'s own node). The side field is
+  `Node::anchors: Option<Box<Vec<Anchor>>>` rather than
+  `Option<Box<[Anchor]>>`, because statements add to it one at a time; it
+  costs one word per node. An `echo` or `assert` whose only children were
+  anchors leaves no node, and its anchors go to the node around it. At
+  the top level there is no node and nothing could ask, so they are
+  dropped. A point is always three coordinates (`z = 0` for `[x, y]`).
+  Bad arguments are `invalid-argument` warnings and the anchor is
+  ignored. Inside a sketch body `point` may be an entity (below).
+- **Placement.** `child_anchors()` walks the child's nodes from a heap
+  stack, composing each transform's matrix with plain sums of products,
+  as `geom::csg`'s own walk composes them, so the answers are the same
+  on every platform (section 5.3 said `eval::fma`, which rounds
+  differently on aarch64). A direction is moved by the linear part and
+  scaled to unit length. `linear_extrude(center = true)` moves its
+  profile's anchors to its base (half the height vector down), and
+  `projection()` flattens them onto `z = 0` (a direction it flattens to
+  nothing is dropped). `resize()` and `rotate_extrude()` hide their
+  children's anchors, since placing them needs the geometry (`resize`
+  scales by the child's size) or a choice of angle; so does a transform
+  with a NaN or infinite entry, whose children OpenSCAD removes.
+- **`child_anchors(index)`** takes `index` as `children()` does (none for
+  all the children, a number, a list, a range) and returns an object
+  from each name to `[point, dir]`, `dir` `undef` when none was given, in
+  pre-order (a node's own anchors before its children's). The first of a
+  name wins. It is resolved like `children()`, lexically: a function
+  defined outside the module cannot ask, even when the module calls it.
+- **The sandbox.** The child is instantiated by a nested run of the
+  statement driver (`Evaluator::instantiate_children_into`) into a group
+  node standing in for `children()`'s own, from inside the expression
+  that asked. Held back or restored around it: its messages
+  (`Evaluator::hold`; the error path prints them before the error), the
+  node counter, the limit-check counter, the `rands()` state, the
+  deprecations and part names already printed, and the sketch number. A
+  sketch being built around the query is set aside while it runs, so the
+  child cannot add to it. Each level of such nesting holds native stack,
+  so it is charged to the frame budget like a nested expression loop
+  (`recursion::HEAP_LOOP_FRAMES`) and stops with OpenSCAD's recursion
+  error where the stack would run out; a child that asks about itself
+  (through a `$` function) is the same error at once.
+- **Reuse.** What the child read from outside itself is noted by the
+  call memo's own hooks: the sandbox is a recording on its stack
+  (`CallMemo::begin_sandbox`, `end_sandbox`) that keeps no entry but
+  passes its reads to any recording around it. The instance is kept for
+  the rest of the module call; a later `children()` of the same call and
+  indices takes it (renumbered from the counter, its messages printed,
+  its node indices and limit checks counted) when every `$` variable it
+  read has the same value there, and a second query reads it again
+  under the same test. It is never reused after something no key covers
+  (`rands()`, file reads, `import()`, `part()`, a deprecation, a `$`
+  function found outside it, a passed limit), with a sketch set aside,
+  or under `--hardwarnings`, whose stop at a warning a replay would not
+  make; the child is then instantiated again by `children()`, which is
+  always correct. A sketch's own work does not count against reuse
+  (`Evaluator::untracked_sketch`): the memos still never replay a sketch,
+  but a sandboxed instance holds the whole sketch, solved. The held
+  nodes count in the memory estimate.
+- **Sketch anchors** (with `--enable sketch` too): once a sketch solves
+  without an error, every entity its outermost body names becomes an
+  anchor of that name (`top`, `top.start`, `pts[0]`; a helper module's
+  variables are not the sketch's): a point where it solved, a line's
+  midpoint with its direction from start to end, an arc's or circle's
+  centre. `anchor(name, entity)` in the body adds one at that entity's
+  solved position, and replaces a named entity's anchor of the same
+  name. `anchor(name, [x, y])` in a sketch body, a helper's included, is
+  kept on the sketch's node. A sketch that fails exports no solved
+  anchors.
+- **Diagnostics.** `query-outside-module` and `query-index` (with
+  `children()`'s text) as section 5.4 says, warnings, the answer
+  `undef`; and `query-duplicate-anchor` (new), a warning naming the
+  duplicated anchors. An error in the child stops evaluation at the
+  query, with the child's messages before it. `query-empty` and
+  `query-unavailable` belong to stage 6, which renders.
+- **Surfaces.** `anchor` and `child_anchors` have `builtins.toml` entries
+  labelled `extension = "query"`, `serve` lists `query` among its
+  features, and with the flag off the JSON hints of their unknown-module
+  and unknown-function warnings name `--enable query`.
+- **Tests.** `conformance/extensions/query` (inputs, `.echo`, `.csg`),
+  run by `crates/session/tests/query.rs`, which also checks the flag off,
+  the `.csg` exports evaluated without the flag (`plate.csg`,
+  `sketch.csg` and `reuse.csg` were also rendered by the stock nightly,
+  by hand, to the vertex and facet counts NeoSCAD renders them to), and
+  a warm export equal to a cold one.
+  `crates/eval/tests/query.rs` checks that removing every `anchor()`
+  leaves the `.csg`, the keys and the numbering unchanged, that the dump
+  and the keys never read the field, that replacing every query with a
+  constant changes nothing but the lines printing the answers (call memo
+  on and off), and the native budget. `crates/eval/tests/incremental.rs`
+  runs a query model through the statement memo, `crates/geom/tests/query.rs`
+  renders at 1, 2 and 8 threads, and `crates/wasm-check` runs two of
+  the models on wasm32. The design's section 6.3 is `plate.scad`, with
+  the child's extent read from anchors it declares rather than from its
+  bounding box (stage 6).
 
 ## 12. Alternatives considered
 

@@ -66,6 +66,9 @@ pub(crate) enum BuiltinModule {
     Part,
     /// neoscad's `sketch()` extension; in the table only when enabled.
     Sketch,
+    /// NeoSCAD's `anchor()` (`--enable query`); in the table only when
+    /// enabled.
+    Anchor,
     /// A statement of the sketch vocabulary (`crate::sketch`), bound only
     /// inside sketch bodies: never in the table.
     SketchStatement(crate::sketch::Vocab),
@@ -135,9 +138,14 @@ pub(crate) fn table(
     let sketch = extensions
         .has(crate::Extension::Sketch)
         .then_some(("sketch", Sketch));
+    // `anchor` with the queries that read it, on the same terms.
+    let anchor = extensions
+        .has(crate::Extension::Query)
+        .then_some(("anchor", Anchor));
     ALL.into_iter()
         .chain(part)
         .chain(sketch)
+        .chain(anchor)
         .map(|(n, b)| (syms.intern(n), b))
         .collect()
 }

@@ -111,9 +111,13 @@ fn run_inner(
         fs: fs.clone(),
         preview,
         // `sketch()` on, so a constrained sketch's solve, profile and
-        // tessellation run on wasm32 as natively (the `sketch-*` cases);
-        // the other cases never call it, so it changes nothing for them.
-        extensions: eval::Extensions::NONE.with(eval::Extension::Sketch),
+        // tessellation run on wasm32 as natively (the `sketch-*` cases),
+        // and the queries, so a query's nested instantiation and its
+        // anchors' transforms do too (the `query-*` cases); the other
+        // cases call neither, so they change nothing for them.
+        extensions: eval::Extensions::NONE
+            .with(eval::Extension::Sketch)
+            .with(eval::Extension::Query),
         ..Default::default()
     };
     let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {

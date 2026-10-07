@@ -1,0 +1,34 @@
+ECHO: "outer", ["m1"]
+ECHO: "middle", ["m1"]
+ECHO: "inner", ["m1"]
+ECHO: "mark", 1, fn = 0
+ECHO: "dollar", { m2 = [[2, 0, 0], undef]; }
+ECHO: "mark", 2, fn = 7
+ECHO: "same", { m3 = [[3, 0, 0], undef]; }
+ECHO: "mark", 3, fn = 5
+ECHO: seeded = [0.796543]
+ECHO: unseeded = [0.183435]
+ECHO: "mark", 4, fn = 0
+ECHO: after = [0.779691]
+ECHO: "unused", { m5 = [[5, 0, 0], undef]; }
+ECHO: "mark", 6, fn = 0
+ECHO: "mark", 6, fn = 0
+ECHO: "peg 0", ["m7"]
+ECHO: "mark", 7, fn = 0
+ECHO: "peg 1", ["m7"]
+ECHO: "mark", 7, fn = 0
+ECHO: "peg 2", ["m7"]
+ECHO: "mark", 7, fn = 0
+ECHO: "peg 3", ["m7"]
+ECHO: "mark", 7, fn = 0
+ECHO: "peg 0", ["m7"]
+ECHO: "mark", 7, fn = 0
+ECHO: "peg 1", ["m7"]
+ECHO: "mark", 7, fn = 0
+ECHO: "peg 2", ["m7"]
+ECHO: "mark", 7, fn = 0
+ECHO: "peg 3", ["m7"]
+ECHO: "mark", 7, fn = 0
+ECHO: "warns"
+ECHO: "child"
+WARNING: Ignoring unknown variable "undefined_size" in file reuse.scad, line 65

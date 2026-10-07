@@ -1092,6 +1092,7 @@ mod tests {
             children,
             origin: Some(Box::new(origin)),
             index,
+            anchors: None,
         }
     }
 
@@ -1117,6 +1118,7 @@ mod tests {
             children: vec![g],
             origin: None,
             index: 0,
+            anchors: None,
         };
         assert_eq!(
             csg(&root, Path::new("/"), &StdFs),
@@ -1134,6 +1136,7 @@ mod tests {
             children: vec![a, b, c],
             origin: None,
             index: 0,
+            anchors: None,
         };
         let k = Keys::new(&root, &StdFs);
         // The label hashed for a node keeps every bit of its numbers.
@@ -1281,6 +1284,7 @@ mod tests {
             children: (0..3).map(|_| tree(&mut next, 6)).collect(),
             origin: None,
             index: 0,
+            anchors: None,
         };
         let keys = |threads: usize| {
             rayon::ThreadPoolBuilder::new()

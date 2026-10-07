@@ -167,6 +167,13 @@ pub enum DiagCode {
     /// A sketch point written without a guess, which the solver placed
     /// (info).
     SketchNoGuess,
+    /// NeoSCAD's queries (`--enable query`): a query outside any user
+    /// module, which has no children to ask about.
+    QueryOutsideModule,
+    /// A query's child index out of range or not a number.
+    QueryIndex,
+    /// Two anchors of one name among the children a query asked about.
+    QueryDuplicateAnchor,
 }
 
 impl DiagCode {
@@ -226,6 +233,9 @@ impl DiagCode {
             DiagCode::SketchGeometryInBody => "sketch-geometry-in-body",
             DiagCode::SketchSelfIntersection => "sketch-self-intersection",
             DiagCode::SketchNoGuess => "sketch-no-guess",
+            DiagCode::QueryOutsideModule => "query-outside-module",
+            DiagCode::QueryIndex => "query-index",
+            DiagCode::QueryDuplicateAnchor => "query-duplicate-anchor",
         }
     }
 }
