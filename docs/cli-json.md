@@ -309,9 +309,72 @@ fields are only added. Keys sorted, compact, a trailing newline.
   other formats, or when empty.
 - `timings_ms`: `total` for a local run; `parse`, `evaluate`, `geometry`
   and `total` for a served one.
+- `exact`: only when a `.step` file was asked for (next section).
 
 Usage errors (a bad flag, no `-o`) happen before the run and print their
 usual text with no JSON.
+
+# STEP with exact surfaces: `--enable exact`
+
+`neoscad --enable exact -o model.step model.scad` (or `.stp`, or
+`--export-format step`) writes STEP AP214 whose faces are the exact
+planes, cylinders, cones and spheres of the model, not its triangles
+(`crates/geom/src/exact`; `docs/audits/exact-geometry-rust.md`). It is a
+NeoSCAD extension: without the flag `.step` is an unknown suffix, with
+OpenSCAD's own `Invalid suffix step...` error, and `--enable all` does
+not turn it on.
+
+- **Which curves become exact:** a `cylinder()` or `sphere()` whose
+  fragments come from `$fa`/`$fs` is written as the true surface (the
+  mesh's polygon is inscribed, so the solid grows by up to the
+  fragments' sagitta). An explicit `$fn` keeps OpenSCAD's polygon, which
+  is planar and so written exactly as modelled (`$fn = 6` hexagons,
+  polygon-sized printing holes). Rotations, mirrors and uniform scales
+  keep curves exact; a non-uniform scale or shear writes them as facets.
+- **Everything else** (`polyhedron`, `hull`, `minkowski`, `text`,
+  `import`, extrusions, `offset`, `resize`) is written as the planar
+  facets of the mesh render, in the same solid as the exact faces.
+- **Every substitution is reported** at its source line, once per
+  location with a count: `INFO: STEP export: sphere() is exported as an
+  exact sphere, not the 30-fragment polyhedron of the mesh ($fn is not
+  set) in file m.scad, line 3`; a kept polygon is `INFO`, a faceted
+  region `WARNING` (so `--hardwarnings` refuses it).
+- **No silent wrong file:** the B-rep is validated, its volume compared
+  with the export mesh's corrected onto the exact surfaces and with the
+  rendered mesh's, and its box with the render's. A failure prints
+  `ERROR: STEP export failed: REASON. No file was written.` and exits 1.
+  A mesh whose topology does not match the exact model at a tangency is
+  retried once at twice the segments.
+- **Deterministic:** fixed header names and date (`1970-01-01T00:00:00`,
+  originating system `NeoSCAD`, product named after the input file), so
+  the same model gives the same bytes at any thread count, warm or cold,
+  natively and in wasm32.
+
+With `--format json`, the run object has an `exact` key. For
+`difference() { cube(20); translate([10, 10, -1]) cylinder(r=4, h=22); }`
+(numbers shortened; the exact volume is 8000 - 320π):
+
+```json
+"exact": {"ok": true, "error": null, "attempts": 1, "retried_because": null,
+ "triangles": 80, "faces": 7, "exact_faces": 7, "edges": 14, "bspline_edges": 0,
+ "volume": 6994.690350851, "corrected_mesh_volume": 6994.690350812,
+ "volume_error": 5.5e-12, "volume_tolerance": 1.2e-7, "normal_volume": 7033.375802149,
+ "substitutions": {"exact": 1, "polygon": 0, "faceted": 0, "faceted_modules": []},
+ "notes": [], "normal_render_ms": 4.2,
+ "timings_ms": {"export_render": 0.4, "reconstruct": 0.2, "check": 1.5, "write": 0.1}}
+```
+
+- `faces`, `exact_faces`: B-rep faces, and those on an exact surface
+  (planes included) rather than faceted; `edges` excludes seams.
+- `volume`: integrated on the exact geometry; `corrected_mesh_volume`
+  the export mesh's volume plus its triangles' caps up to the surfaces;
+  `volume_error` their relative difference, held to `volume_tolerance`
+  (relative), which follows from the tessellation.
+- `normal_volume`, `normal_render_ms`: the mesh render's, for comparison.
+- `faceted_modules`: the modules that fell back to facets.
+
+`neoscad serve` does not export STEP yet, and does not list `exact` in
+its features.
 
 # Named parts: `--enable part`
 

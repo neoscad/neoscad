@@ -29,6 +29,35 @@ back valid. F2 has a
 faceted counterpart: x07 at 8–16 segments gives folded sliver faces,
 which `reconstruct` now reports as `TopologyMismatch` and a finer tagging
 mesh cures. Leftovers are in `docs/followups.md`, "Exact geometry".
+**Update, stage 1b built (2026-10-07):** `neoscad --enable exact -o
+x.step` exports STEP through `crates/geom/src/exact` (an export render
+tagged per surface, `meshbrep`, then a volume cross-check against the
+mesh and the normal render). Its design follows F7: a second render
+whose tessellation never reaches the file; curves are exact unless `$fn`
+is set; every substitution is reported at its source line. Stage 1b also
+fixed two `meshbrep` bugs it found: plane loops were unwrapped as if `u`
+were an angle, so a hole in a face larger than about π mm read as a
+second outer loop; and equal surfaces were merged by a pairwise scan
+(7.5 s on 125 `$fn = 48` spheres, now 0.4 s, same bytes). The gate-1
+measurement (`conformance exact`, with OCCT 8.0.1 read-back):
+
+| Corpus | 3D models | Eligible | Valid, ours | Valid, ours + OCCT | All-faceted | Failed |
+|---|---|---|---|---|---|---|
+| This audit's 28 cases × 4 `$fa`/`$fs` settings | 112 | 104 | 104 | 104 (100%) | 0 | 0 |
+| OpenSCAD's `render-manifold` inputs | 214 | 81 | 79 | 78 (96.3%) | 80 | 21 |
+| BOSL2 examples, every 5th | 311 | 44 | 38 | 38 (86.4%) | 145 | 53 |
+| Benchmark models | 14 | 4 | 4 | 3 (75%; 1 not read in 2 GB) | 5 | 2 |
+| **Real corpora, deduplicated** | 537 | 127 | 119 (93.7%) | **118 (92.9%)** | 230 | 76 |
+
+"Eligible" means nothing fell back to facets (a non-uniform scale
+aside). Gate 3: all 108 closed-form cases within 4.5e-9. Gate 4: every
+exported file passed the cross-checks; OCCT disagrees with 10 of 564
+(one eligible, the Menger sponge; `docs/followups.md`). Gate 5 is
+missed: (reconstruct + check + write) / render has a median of 0.65 on
+the render tests but 5.4 on the benchmarks. By the stop rule, 92.9% is
+between 80% and 95%: the owner decides, with the failure classes in
+`docs/followups.md`, "Exact geometry".
+
 It follows `docs/audits/brep-feasibility.md` (below, "the previous
 audit"), which found that only OCCT survives OpenSCAD-shaped trees. The
 owner prefers an exact backend written in-house: pure Rust, publishable as

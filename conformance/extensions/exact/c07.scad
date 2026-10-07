@@ -1,0 +1,53 @@
+// The exact-geometry audit's case c07 (docs/audits/exact-geometry-rust.md).
+// volume: 23946.37194071072
+difference() {
+  cube([90, 60, 5]);
+  translate([7.5, 7.5, -1]) cylinder(r=2.25, h=7);
+  translate([7.5, 7.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([7.5, 22.5, -1]) cylinder(r=2.25, h=7);
+  translate([7.5, 22.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([7.5, 37.5, -1]) cylinder(r=2.25, h=7);
+  translate([7.5, 37.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([7.5, 52.5, -1]) cylinder(r=2.25, h=7);
+  translate([7.5, 52.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([22.5, 7.5, -1]) cylinder(r=2.25, h=7);
+  translate([22.5, 7.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([22.5, 22.5, -1]) cylinder(r=2.25, h=7);
+  translate([22.5, 22.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([22.5, 37.5, -1]) cylinder(r=2.25, h=7);
+  translate([22.5, 37.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([22.5, 52.5, -1]) cylinder(r=2.25, h=7);
+  translate([22.5, 52.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([37.5, 7.5, -1]) cylinder(r=2.25, h=7);
+  translate([37.5, 7.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([37.5, 22.5, -1]) cylinder(r=2.25, h=7);
+  translate([37.5, 22.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([37.5, 37.5, -1]) cylinder(r=2.25, h=7);
+  translate([37.5, 37.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([37.5, 52.5, -1]) cylinder(r=2.25, h=7);
+  translate([37.5, 52.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([52.5, 7.5, -1]) cylinder(r=2.25, h=7);
+  translate([52.5, 7.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([52.5, 22.5, -1]) cylinder(r=2.25, h=7);
+  translate([52.5, 22.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([52.5, 37.5, -1]) cylinder(r=2.25, h=7);
+  translate([52.5, 37.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([52.5, 52.5, -1]) cylinder(r=2.25, h=7);
+  translate([52.5, 52.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([67.5, 7.5, -1]) cylinder(r=2.25, h=7);
+  translate([67.5, 7.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([67.5, 22.5, -1]) cylinder(r=2.25, h=7);
+  translate([67.5, 22.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([67.5, 37.5, -1]) cylinder(r=2.25, h=7);
+  translate([67.5, 37.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([67.5, 52.5, -1]) cylinder(r=2.25, h=7);
+  translate([67.5, 52.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([82.5, 7.5, -1]) cylinder(r=2.25, h=7);
+  translate([82.5, 7.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([82.5, 22.5, -1]) cylinder(r=2.25, h=7);
+  translate([82.5, 22.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([82.5, 37.5, -1]) cylinder(r=2.25, h=7);
+  translate([82.5, 37.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+  translate([82.5, 52.5, -1]) cylinder(r=2.25, h=7);
+  translate([82.5, 52.5, 0.5]) cylinder(r1=0, r2=4.51, h=4.51);
+}

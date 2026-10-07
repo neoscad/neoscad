@@ -545,6 +545,9 @@ pub enum MeshFormat {
     /// An image, which takes 2D and 3D results alike (and draws an empty
     /// one as the background alone).
     Png,
+    /// STEP with exact surfaces (`--enable exact`; `geom::exact`), from a
+    /// second render of the tree rather than from the mesh.
+    Step,
 }
 
 impl MeshFormat {
@@ -563,6 +566,7 @@ impl MeshFormat {
             MeshFormat::Dxf => Format::Dxf,
             MeshFormat::Pdf => Format::Pdf,
             MeshFormat::Png => unreachable!("images are drawn, not encoded"),
+            MeshFormat::Step => unreachable!("STEP is reconstructed, not encoded"),
         }
     }
 
@@ -654,6 +658,7 @@ fn render_frame<W: Write>(
     let mut opts = render_options(job, loaded, paths, force);
     opts.interrupt = options.interrupt.clone();
     opts.guard = options.guard.clone();
+    let mut render_ms = 0.0;
     let unsupported = |u: geom::Unsupported, con: &mut Console<W>| {
         // A limit the geometry stage passed (only `--limit` runs have
         // any), reported at the node that passed it.
@@ -718,7 +723,11 @@ fn render_frame<W: Write>(
         None => None,
     };
     let rendered = if needs_geometry {
-        match renderer.render(top, &keys, opts.clone()) {
+        let rendered = renderer.render(top, &keys, opts.clone());
+        // The normal render's time, which `-o x.step`'s report compares
+        // its own stages with (the exact-geometry audit's gate 5).
+        render_ms = started.elapsed().as_secs_f64() * 1000.0;
+        match rendered {
             Ok(r) => {
                 if print_messages(job, loaded, paths, &r.messages, con) {
                     return EXIT_ERROR;
@@ -813,6 +822,15 @@ fn render_frame<W: Write>(
             con.print(None, b"Current top level object is empty.");
             return EXIT_ERROR;
         };
+        if *format == MeshFormat::Step {
+            let code = export_step(
+                job, paths, loaded, renderer, top, &keys, &opts, root, target, render_ms, con,
+            );
+            if code != 0 {
+                return code;
+            }
+            continue;
+        }
         let settings = settings.get_or_insert_with(|| export_settings(job, options, &opts));
         let enc = session::export::encode(format.session(), root, settings, &mut mesh);
         for (severity, line) in &enc.immediate {
@@ -843,6 +861,129 @@ fn render_frame<W: Write>(
         return EXIT_ERROR;
     }
     0
+}
+
+/// `-o x.step` with `--enable exact`: the exact export of the tree the
+/// normal render just built (`geom::exact`), its substitutions printed as
+/// `INFO` and `WARNING` lines at their source locations, and no file at
+/// all when the export fails its checks.
+#[allow(clippy::too_many_arguments)]
+fn export_step<W: Write>(
+    job: &Job<'_>,
+    paths: &Paths,
+    loaded: &Loaded,
+    renderer: &geom::Renderer,
+    top: &eval::Node,
+    keys: &eval::dump::Keys,
+    opts: &geom::RenderOptions,
+    normal: &geom::Geometry,
+    target: &str,
+    render_ms: f64,
+    con: &mut Console<W>,
+) -> u8 {
+    let t0 = std::time::Instant::now();
+    let clock = move || t0.elapsed().as_secs_f64() * 1000.0;
+    let file_name = std::path::Path::new(target).file_name().map_or_else(
+        || "part.step".to_string(),
+        |f| f.to_string_lossy().into_owned(),
+    );
+    let product = std::path::Path::new(display_name(job))
+        .file_stem()
+        .map_or_else(|| "part".to_string(), |f| f.to_string_lossy().into_owned());
+    let x = geom::exact::ExactOptions {
+        // Fixed names and date: the same model gives the same file. The
+        // originating system has no version in it for the same reason.
+        step: geom::exact::meshbrep::StepOptions {
+            product_name: product,
+            file_name,
+            originating_system: "NeoSCAD".into(),
+            ..Default::default()
+        },
+        clock: Some(&clock),
+    };
+    let result = geom::exact::export_step(renderer, top, keys, opts, normal, &x);
+    let (subs, stats) = match &result {
+        Ok(e) => (&e.substitutions, &e.stats),
+        Err(f) => (&f.substitutions, &f.stats),
+    };
+    let mut json = exact_json(stats, subs, result.as_ref().err().map(|f| &**f));
+    json["normal_render_ms"] = serde_json::json!(render_ms);
+    crate::report::set_exact(json);
+    if print_messages(
+        job,
+        loaded,
+        paths,
+        &geom::exact::substitution_messages(subs),
+        con,
+    ) {
+        return EXIT_ERROR;
+    }
+    match result {
+        Ok(e) => match write_output(target, e.step.as_bytes()) {
+            Ok(()) => 0,
+            Err(code) => code,
+        },
+        Err(f) => {
+            con.print(
+                Some(Severity::Error),
+                format!(
+                    "ERROR: STEP export failed: {}. No file was written.",
+                    f.message
+                )
+                .as_bytes(),
+            );
+            EXIT_ERROR
+        }
+    }
+}
+
+/// The exact export's numbers for `--format json` (`exact`), and for the
+/// stop-rule sweep (`conformance exact`) that reads them.
+fn exact_json(
+    s: &geom::exact::ExactStats,
+    subs: &[geom::exact::Substitution],
+    failure: Option<&geom::exact::ExactFailure>,
+) -> serde_json::Value {
+    use geom::exact::SubstitutionKind as K;
+    let count = |k: K| {
+        subs.iter()
+            .filter(|x| x.kind == k)
+            .map(|x| x.count)
+            .sum::<u32>()
+    };
+    serde_json::json!({
+        "ok": failure.is_none(),
+        "error": failure.map(|f| f.message.clone()),
+        "attempts": s.attempts,
+        "retried_because": s.retried_because,
+        "triangles": s.triangles,
+        "faces": s.faces,
+        "exact_faces": s.exact_faces,
+        "edges": s.edges,
+        "bspline_edges": s.bspline_edges,
+        "volume": s.volume,
+        "corrected_mesh_volume": s.corrected_volume,
+        "volume_error": s.volume_error,
+        "volume_tolerance": s.volume_tolerance,
+        "normal_volume": s.normal_volume,
+        "substitutions": {
+            "exact": count(K::Exact),
+            "polygon": count(K::Polygon),
+            "faceted": count(K::Faceted),
+            "faceted_modules": subs
+                .iter()
+                .filter(|x| x.kind == K::Faceted)
+                .map(|x| x.module)
+                .collect::<std::collections::BTreeSet<_>>(),
+        },
+        "notes": s.notes,
+        "timings_ms": {
+            "export_render": s.timings.export_render_ms,
+            "reconstruct": s.timings.reconstruct_ms,
+            "check": s.timings.check_ms,
+            "write": s.timings.write_ms,
+        },
+    })
 }
 
 /// How the shared encoder writes this run's files: the `-O` settings, the

@@ -19,6 +19,8 @@ struct Report {
     lines: Vec<Logged>,
     names: Names,
     geometry: Option<Value>,
+    /// `-o x.step`'s exact export (`--enable exact`).
+    exact: Option<Value>,
 }
 
 static REPORT: Mutex<Option<Report>> = Mutex::new(None);
@@ -57,6 +59,13 @@ pub fn set_geometry(g: Value) {
     }
 }
 
+/// The exact STEP export's numbers (`run::exact_json`).
+pub fn set_exact(v: Value) {
+    if let Some(r) = REPORT.lock().expect("report").as_mut() {
+        r.exact = Some(v);
+    }
+}
+
 /// What the JSON says about the run besides its messages.
 #[derive(Debug)]
 pub struct Run<'a> {
@@ -72,6 +81,18 @@ pub struct Run<'a> {
 
 /// The object, from recorded lines.
 pub fn json(run: &Run<'_>, lines: &[Logged], names: &Names, geometry: Option<Value>) -> Value {
+    json_with(run, lines, names, geometry, None)
+}
+
+/// [`json`] with an exact export's section, which is present only when a
+/// `.step` file was asked for, so other runs' JSON is unchanged.
+pub fn json_with(
+    run: &Run<'_>,
+    lines: &[Logged],
+    names: &Names,
+    geometry: Option<Value>,
+    exact: Option<Value>,
+) -> Value {
     use lang::diag::Severity;
     let count = |s: Severity| lines.iter().filter(|l| l.severity == Some(s)).count();
     let log: Vec<&str> = lines
@@ -79,7 +100,7 @@ pub fn json(run: &Run<'_>, lines: &[Logged], names: &Names, geometry: Option<Val
         .filter(|l| l.severity.is_none())
         .map(|l| l.text.as_str())
         .collect();
-    json!({
+    let mut out = json!({
         "schema": 1,
         "command": run.command,
         "input": run.input,
@@ -96,11 +117,18 @@ pub fn json(run: &Run<'_>, lines: &[Logged], names: &Names, geometry: Option<Val
         "log": log,
         "geometry": geometry.unwrap_or(Value::Null),
         "timings_ms": run.timings,
-    })
+    });
+    if let (Some(e), Some(o)) = (exact, out.as_object_mut()) {
+        o.insert("exact".into(), e);
+    }
+    out
 }
 
 /// The collected report as JSON text (one line), and stop collecting.
 pub fn finish(run: &Run<'_>) -> String {
     let r = REPORT.lock().expect("report").take().unwrap_or_default();
-    format!("{}\n", json(run, &r.lines, &r.names, r.geometry))
+    format!(
+        "{}\n",
+        json_with(run, &r.lines, &r.names, r.geometry, r.exact)
+    )
 }

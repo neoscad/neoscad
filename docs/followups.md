@@ -2224,10 +2224,70 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   for Linux too (`expectVersion`).
 
 ## Exact geometry (STEP)
-Stage 1a of `docs/audits/exact-geometry-rust.md` is `crates/meshbrep`.
-These are its leftovers. Stage 1b (the `face_id` plumbing in `geom`, the
-export render with aligned tessellation, `-o x.step` behind
-`--enable exact`) is the next task, not a follow-up.
+Stage 1a of `docs/audits/exact-geometry-rust.md` is `crates/meshbrep`;
+stage 1b is `geom::exact` and `-o x.step` behind `--enable exact`. The
+stop-rule numbers are in the audit's status note (`conformance exact`
+reproduces them). Leftovers of stage 1b first, then of the crate.
+- **The stop rule is between its thresholds: an owner decision.** On the
+  real corpora (OpenSCAD's render tests, every 5th BOSL2 example, the
+  benchmarks) 118 of 127 eligible models export valid by our checks and
+  OCCT's (92.9%). The failures, by class: five BOSL2 `distributors`
+  examples (rotated copies of a cone whose base circles all meet in two
+  points: twelve faces at one vertex; "face has no boundary" or a folded
+  face after the retry); `rotate-parameters.scad` (unit spheres cut
+  through their centre by cube faces: a seam lands on a boundary edge,
+  `TopologyMismatch` at both resolutions); BOSL2 `attachments__079`
+  (genus 0 against the mesh's 1); the Menger sponge (below); and
+  `issue4522.scad`, a degenerate `scale()` with no closed solid.
+- **The Menger sponge (`example024.scad`, n = 3) passes our checks and
+  OCCT reads it as an open shell** (60 free edges, no solid; 3,959 faces
+  where we wrote 3,894). n = 1 and 2 read back valid, and so do faces
+  pinched at a corner, cubes touching along an edge, and c15's hole
+  tangent to a wall, so it is not the pinch. Not found yet; it is the
+  one eligible file we write that OCCT rejects. Nine non-eligible ones
+  (faceted BOSL2 shapes: `rounding__105/165/200`, `screws__001`,
+  `shapes3d__071`, `turtle3d__002`, `drawing__040`; `example017.scad`)
+  are also read back invalid or with another volume; `screws__001`'s
+  OCCT volume is 0.45% under ours, which matches the mesh. Put OCCT's
+  read-back into the export's own tests once it is in CI.
+- **OCCT's volume of `example019.scad` (41 overlapping cones, 40 B-spline
+  edges) is 1.8e-4 over ours.** Ours is right: Richardson extrapolation
+  of the mesh volume at `$fn` 1024 and 2048 gives 91431.842423, ours is
+  91431.842424. OCCT reads it valid; its re-projected pcurves on cones
+  are the likely cause (as F3 found on spheres).
+- **Gate 5 (reconstruction and writing within 50% of the render) is
+  missed.** Median (reconstruct + check + write) / render: 0.65 on the
+  render tests, 1.23 on BOSL2, 5.4 on the benchmarks (one job, no
+  OCCT): `csg_spheres` 3.7×, `text_30lines` 16×, `bosl_fractal_tree`
+  34× (10.4 s of reconstruction for 0.5 s of render). The cost is in
+  faceted and `$fn` regions, which reach the B-rep as thousands of
+  planar faces: `meshbrep`'s reconstruct, validate and the writer are
+  each about linear but slow per face. Options: write faceted regions
+  as one `FACETED_BREP`-like shell without reconstruction, merge
+  coplanar facets before tagging, or parallelise per face.
+- **Mesh-only models dominate the fallbacks.** 230 of 461 valid real
+  models are all facets (BOSL2's `vnf_polyhedron` shapes, text,
+  extrusions); stage 2 (2D attribution through Clipper's Z channel,
+  extrusions, tori) is where exact faces for them come from. Polyhedra
+  that are not closed solids (24 failures, mostly BOSL2 `vnf` and
+  `nurbs` examples of open surfaces) are refused, correctly: OpenSCAD's
+  own render cannot make them a solid either.
+- **The export render has no cache of its own.** Tagged solids are not
+  cached (their surface numbers depend on the tree), so a module
+  instantiated 400 times is built 400 times; delegated faceted subtrees
+  do come from the normal render's cache. A per-export memo keyed by
+  subtree key and placement would cut the export render on repetitive
+  models.
+- **Not wired yet:** `neoscad serve`, the MCP `check`/`export` tools and
+  the apps (stage 3); `serve` leaves `exact` out of its advertised
+  features until then. `--enable exact=strict` (faceted fallback as an
+  error, `docs/audits/brep-feasibility.md` F3) is not implemented. The
+  JSON hint for `-o x.step` without the flag ("STEP export is a NeoSCAD
+  extension; enable it with `--enable exact`") is not added: the hints
+  live in `session::diag`.
+- **Non-uniform scales fall back to facets.** An ellipse needs a
+  B-spline surface or an elliptic-cylinder record; planes stay exact
+  under any affine map already.
 - **Faceted regions cut by exact surfaces can mismatch at coarse
   tagging.** x07 (a 12-segment polyhedral sphere minus an exact skew hole)
   gives folded sliver faces at 8, 12 and 16 hole segments. The inscribed

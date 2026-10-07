@@ -121,6 +121,12 @@ const FORMATS: &[(&str, &str)] = &[
     ("pov", "POV"),
 ];
 
+/// Formats only NeoSCAD's extensions add: `--enable exact` makes `step`
+/// (and its other common suffix `stp`) an output format. Without it they
+/// are not formats at all, so `-o x.step` fails with OpenSCAD's own
+/// "Invalid suffix" message, exactly as before the extension existed.
+const EXACT_FORMATS: &[(&str, &str)] = &[("step", "STEP"), ("stp", "STEP")];
+
 #[derive(Parser, Debug)]
 #[command(
     name = "neoscad",
@@ -133,7 +139,9 @@ struct Cli {
     input: Vec<String>,
 
     /// Output file; its extension selects the format (stl, off, wrl, 3mf,
-    /// csg, dxf, svg, pdf, png, echo, ast, term, nef3, nefdbg, param, pov).
+    /// csg, dxf, svg, pdf, png, echo, ast, term, nef3, nefdbg, param, pov;
+    /// with `--enable exact` also step and stp: STEP AP214 with exact
+    /// planes, cylinders, cones and spheres).
     /// Use '-' for stdout. May be given more than once.
     #[arg(short = 'o', value_name = "FILE", action = ArgAction::Append, allow_hyphen_values = true)]
     output: Vec<String>,
@@ -162,8 +170,10 @@ struct Cli {
     /// `part` turns on NeoSCAD's `part("name") { ... }` extension (named
     /// parts for `check` and `measure`), `sketch` its constrained 2D
     /// sketches (`sketch() { ... }`), `query` its geometry queries
-    /// (`anchor()` and `child_anchors()`). `all` turns on OpenSCAD's
-    /// experiments only, never NeoSCAD's extensions. OpenSCAD's experimental features
+    /// (`anchor()` and `child_anchors()`), `exact` STEP export
+    /// (`-o x.step`) with exact surfaces where `$fn` is not set. `all`
+    /// turns on OpenSCAD's experiments only, never NeoSCAD's extensions.
+    /// OpenSCAD's experimental features
     /// `textmetrics`, `object-function`, `import-function`,
     /// `vector-swizzle` and `predictible-output` (sorted mesh exports) work
     /// as in OpenSCAD; the others are accepted for compatibility, with a
@@ -584,8 +594,9 @@ fn run_cli(cli: Cli) -> ExitCode {
 
     // An unknown --export-format is rejected before any output is attempted,
     // with OpenSCAD's wording (openscad.cc, "Unknown --export-format option").
+    let exact = extensions(&cli.enable).has(eval::Extension::Exact);
     if let Some(fmt) = &cli.export_format
-        && lookup_format(fmt).is_none()
+        && lookup_format(fmt, exact).is_none()
     {
         eprintln!("Unknown --export-format option '{fmt}'.  Use -h to list available options.");
         return ExitCode::from(EXIT_ERROR);
@@ -645,7 +656,8 @@ fn run_cli(cli: Cli) -> ExitCode {
             outputs: outputs
                 .iter()
                 .map(|o| {
-                    let id = resolve_format(o, cli.export_format.as_deref()).map_or("", |f| f.0);
+                    let id =
+                        resolve_format(o, cli.export_format.as_deref(), exact).map_or("", |f| f.0);
                     (o.clone(), id.to_string())
                 })
                 .collect(),
@@ -675,7 +687,11 @@ fn run_cli(cli: Cli) -> ExitCode {
 fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
     let mut formats = Vec::with_capacity(outputs.len());
     for output in outputs {
-        match resolve_format(output, cli.export_format.as_deref()) {
+        match resolve_format(
+            output,
+            cli.export_format.as_deref(),
+            extensions(&cli.enable).has(eval::Extension::Exact),
+        ) {
             Ok(f) => formats.push(f),
             Err(suffix) => {
                 // Same text as OpenSCAD's cmdline() so scripts see one message.
@@ -780,6 +796,7 @@ fn export(cli: &Cli, outputs: &[String], animate: Option<run::Animate>) -> u8 {
             "dxf" => Some(run::MeshFormat::Dxf),
             "pdf" => Some(run::MeshFormat::Pdf),
             "png" => Some(run::MeshFormat::Png),
+            "step" => Some(run::MeshFormat::Step),
             _ => None,
         })
         .collect();
@@ -954,8 +971,18 @@ fn eval_options(cli: &Cli) -> Result<eval::Options, u8> {
     Ok(o)
 }
 
-fn lookup_format(id: &str) -> Option<(&'static str, &'static str)> {
-    FORMATS.iter().copied().find(|(name, _)| *name == id)
+fn lookup_format(id: &str, exact: bool) -> Option<(&'static str, &'static str)> {
+    FORMATS
+        .iter()
+        .copied()
+        .find(|(name, _)| *name == id)
+        .or_else(|| {
+            exact
+                .then(|| EXACT_FORMATS.iter().copied().find(|(name, _)| *name == id))
+                .flatten()
+                // One identifier for both suffixes.
+                .map(|(_, desc)| ("step", desc))
+        })
 }
 
 /// Pick the output format the way OpenSCAD's `cmdline()` does: an explicit
@@ -965,15 +992,16 @@ fn lookup_format(id: &str) -> Option<(&'static str, &'static str)> {
 fn resolve_format(
     output: &str,
     export_format: Option<&str>,
+    exact: bool,
 ) -> Result<(&'static str, &'static str), String> {
     if let Some(id) = export_format {
-        return lookup_format(id).ok_or_else(|| id.to_string());
+        return lookup_format(id, exact).ok_or_else(|| id.to_string());
     }
     let suffix = Path::new(output)
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    lookup_format(&suffix).ok_or(suffix)
+    lookup_format(&suffix, exact).ok_or(suffix)
 }
 
 #[cfg(test)]
@@ -988,11 +1016,25 @@ mod tests {
 
     #[test]
     fn extension_selects_format_case_insensitively() {
-        assert_eq!(resolve_format("out/x-actual.ECHO", None).unwrap().0, "echo");
-        assert_eq!(resolve_format("x.stl", None).unwrap().1, "STL (ascii)");
-        assert_eq!(resolve_format("-", None), Err(String::new()));
-        assert_eq!(resolve_format("-", Some("ast")).unwrap().0, "ast");
-        assert!(resolve_format("x.txt", None).is_err());
+        let f = |o: &str, e: Option<&str>| resolve_format(o, e, false);
+        assert_eq!(f("out/x-actual.ECHO", None).unwrap().0, "echo");
+        assert_eq!(f("x.stl", None).unwrap().1, "STL (ascii)");
+        assert_eq!(f("-", None), Err(String::new()));
+        assert_eq!(f("-", Some("ast")).unwrap().0, "ast");
+        assert!(f("x.txt", None).is_err());
+    }
+
+    /// `.step` is a format only with `--enable exact`: without it the
+    /// suffix is unknown, as in OpenSCAD, and gets its "Invalid suffix".
+    #[test]
+    fn step_is_a_format_only_with_exact() {
+        assert_eq!(resolve_format("x.step", None, false), Err("step".into()));
+        assert_eq!(resolve_format("x.STP", None, false), Err("stp".into()));
+        assert_eq!(resolve_format("-", Some("step"), false), Err("step".into()));
+        assert_eq!(resolve_format("x.step", None, true).unwrap().0, "step");
+        assert_eq!(resolve_format("x.STP", None, true).unwrap().0, "step");
+        assert_eq!(resolve_format("-", Some("stp"), true).unwrap().0, "step");
+        assert_eq!(resolve_format("x.stl", None, true).unwrap().0, "stl");
     }
 
     #[test]
@@ -1052,7 +1094,7 @@ mod tests {
         // `all` ends the list, as in OpenSCAD.
         assert_eq!(w(&["all", "foo"]).len(), 1);
         // NeoSCAD's own names are not OpenSCAD's unknown features.
-        assert!(w(&["predictible-output", "part", "sketch", "query"]).is_empty());
+        assert!(w(&["predictible-output", "part", "sketch", "query", "exact"]).is_empty());
         let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let sorted = |n: &[&str]| features(&names(n)).has(eval::Feature::PredictibleOutput);
         assert!(sorted(&["predictible-output"]));

@@ -17,6 +17,8 @@
 //!   `conformance/bench.json`; `conformance bench-chart` draws a result.
 //! - `conformance bosl2-corpus` writes BOSL2's documentation examples and
 //!   tests out as `.scad` files for `diff`.
+//! - `conformance exact` exports corpora as STEP with `--enable exact` and
+//!   tabulates the exact-geometry stop rule's numbers.
 //! - `conformance video` stitches the recorded snapshots and benchmarks
 //!   (and, with `--agent-eval`, the agent eval) into a progress video.
 //!
@@ -31,6 +33,7 @@ mod ctx;
 mod depth;
 mod diff;
 mod edit_loop;
+mod exact;
 mod geometry;
 mod grid;
 mod image_compare;
@@ -267,6 +270,36 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// Export corpora as STEP with `--enable exact` and tabulate the
+    /// exact-geometry audit's stop rule: valid, fallback and failed
+    /// exports, exact-face fraction, volume error, time against the
+    /// render, and OCCT read-back. Results in target/conformance/exact/.
+    Exact {
+        /// Corpora to run (comma-separated: cases, conformance, bosl2,
+        /// bench; default all).
+        #[arg(long, value_delimiter = ',')]
+        corpus: Vec<String>,
+        /// Take every Nth BOSL2 documentation example.
+        #[arg(long, default_value_t = 5)]
+        bosl2_every: usize,
+        /// Only models whose id contains this.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Parallel exports. Each is held under 2 GB, so the default keeps
+        /// the sweep under 8 GB.
+        #[arg(long, short, default_value_t = 4)]
+        jobs: usize,
+        /// Per-model time limit in seconds.
+        #[arg(long, default_value_t = 120.0)]
+        timeout: f64,
+        /// Binary under test (default: target/release/neoscad).
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        /// OCCT read-back checker (`crates/meshbrep/oracle/build.sh`;
+        /// default: $MESHBREP_OCCT_CHECK).
+        #[arg(long)]
+        occt: Option<PathBuf>,
+    },
     /// Render the progress video: one scene per snapshot in
     /// progress/index.jsonl, with benchmark interludes, encoded to H.264 by
     /// ffmpeg.
@@ -489,6 +522,31 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             &bosl2.unwrap_or_else(|| ctx.repo.join(".reference/BOSL2")),
             check,
         ),
+        Cmd::Exact {
+            corpus,
+            bosl2_every,
+            filter,
+            jobs,
+            timeout,
+            binary,
+            occt,
+        } => {
+            if timeout.is_nan() || timeout <= 0.0 {
+                return Err("--timeout must be positive".into());
+            }
+            exact::command(
+                &ctx,
+                &exact::ExactOptions {
+                    corpora: corpus,
+                    bosl2_every,
+                    jobs,
+                    timeout: Duration::from_secs_f64(timeout),
+                    binary,
+                    occt,
+                    filter,
+                },
+            )
+        }
         Cmd::Video { .. } => unreachable!("handled before the reference is required"),
     }
 }

@@ -292,6 +292,9 @@ pub fn run_brep(src: &[u8]) -> String {
     use sha2::{Digest, Sha256};
 
     let name = String::from_utf8_lossy(src).trim().to_string();
+    if let Some(scad) = name.strip_prefix("scad:") {
+        return run_exact(scad);
+    }
     let id = Transform::IDENTITY;
     let (a, b) = match name.as_str() {
         // difference() { cube(15, center = true); sphere(10); }
@@ -375,6 +378,66 @@ pub fn run_brep(src: &[u8]) -> String {
         if valid.is_valid() { "valid" } else { "INVALID" },
         step.len()
     )
+}
+
+/// `--enable exact`'s STEP export of an OpenSCAD source, the whole way: the
+/// tree, the normal render, the export render (`geom::exact`: tagged
+/// primitives, Manifold's CSG tree, the delegated faceted parts),
+/// reconstruction, the checks and the writer. The STEP text's hash must
+/// be the same in wasm32 as natively, so the export render's ID and
+/// surface numbering and the checks' arithmetic are platform-independent.
+fn run_exact(scad: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut text = scad.as_bytes().to_vec();
+    text.extend_from_slice(b"\n\x03\n");
+    let program = lang::parse_file(PathBuf::from("/doc/main.scad"), text);
+    let mut out: Vec<u8> = Vec::new();
+    let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(MemFs::new());
+    let mut con = eval::Console::new(&mut out, PathBuf::from(DOC_DIR), fs.clone(), false);
+    let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+        eval::evaluate(
+            &program,
+            &[],
+            &[],
+            PathBuf::from(DOC_DIR),
+            &eval::Options::default(),
+            &mut con,
+        )
+    });
+    let keys = eval::dump::Keys::new(&ev.root, &*fs);
+    let r = geom::Renderer::new();
+    let ro = geom::RenderOptions::default();
+    let Some(normal) = r
+        .render(&ev.root, &keys, ro.clone())
+        .ok()
+        .and_then(|x| x.geometry)
+    else {
+        return "exact: no geometry\n".into();
+    };
+    let x = geom::exact::ExactOptions {
+        step: geom::exact::meshbrep::StepOptions {
+            originating_system: "NeoSCAD".into(),
+            ..Default::default()
+        },
+        clock: None,
+    };
+    match geom::exact::export_step(&r, &ev.root, &keys, &ro, &normal, &x) {
+        Err(f) => format!("exact: failed: {}\n", f.message),
+        Ok(e) => {
+            let hash: String = Sha256::digest(e.step.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            format!(
+                "exact: {} faces ({} exact), volume {:.9}, {} substitutions\nexact STEP: {} bytes, sha256 {hash}\n",
+                e.stats.faces,
+                e.stats.exact_faces,
+                e.stats.volume,
+                e.substitutions.len(),
+                e.step.len()
+            )
+        }
+    }
 }
 
 /// `neoscad fmt` and `neoscad test` as a web worker runs them: with

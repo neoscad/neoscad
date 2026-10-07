@@ -58,6 +58,78 @@ struct Classes {
     input: Vec<Option<u32>>,
 }
 
+/// A float that sorts, for the index below.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Key(f64);
+impl Eq for Key {}
+impl PartialOrd for Key {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for Key {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&o.0)
+    }
+}
+
+/// The surface classes found so far, sorted by one number per kind, so
+/// that finding the class an exact record belongs to looks at a window of
+/// candidates instead of every class. A model with tens of thousands of
+/// planes (`$fn` spheres keep a plane per facet) spent seconds in the
+/// pairwise scan.
+///
+/// The window is wide enough to hold every class [`Surf::same`] accepts,
+/// so the answer (the lowest-numbered equal class) is the scan's:
+///
+/// - planes by `|n · o|`: for equal planes `n₁ · (o₂ - o₁) < tol` and the
+///   normals differ by at most `√(2·1e-12)`, so the keys differ by at most
+///   `tol + 1.5e-6 · reach`, `reach` the largest `|o|`;
+/// - cylinders by radius, cones by apex `x`, spheres by centre `x`, each
+///   within `tol` for equal surfaces.
+struct SameIndex {
+    maps: [BTreeMap<Key, Vec<usize>>; 4],
+    plane_window: f64,
+    tol: f64,
+}
+
+impl SameIndex {
+    fn new(tol: f64, reach: f64) -> SameIndex {
+        SameIndex {
+            maps: Default::default(),
+            plane_window: tol + 2e-6 * reach,
+            tol,
+        }
+    }
+
+    fn key(&self, s: &Surf) -> (usize, f64, f64) {
+        match *s {
+            Surf::Plane { o, n } => (0, n.dot(o).abs(), self.plane_window),
+            Surf::Cyl { r, .. } => (1, r, self.tol),
+            Surf::Cone { apex, .. } => (2, apex.x, self.tol),
+            Surf::Sphere { c, .. } => (3, c.x, self.tol),
+        }
+    }
+
+    fn insert(&mut self, s: &Surf, class: usize) {
+        let (m, k, _) = self.key(s);
+        self.maps[m].entry(Key(k)).or_default().push(class);
+    }
+
+    /// The lowest-numbered class in `surf` that is the same surface as `e`.
+    fn first_same(&self, surf: &[Surf], e: &Surf, tol: f64) -> Option<usize> {
+        let (m, k, w) = self.key(e);
+        // The window, widened by a few ulps so that rounding in the key
+        // itself cannot drop a class at its edge.
+        let w = w * (1.0 + 1e-9) + 4.0 * f64::EPSILON * k.abs();
+        self.maps[m]
+            .range(Key(k - w)..=Key(k + w))
+            .flat_map(|(_, cs)| cs.iter().copied())
+            .filter(|&c| surf[c].same(e, tol))
+            .min()
+    }
+}
+
 /// One boundary chain between two faces.
 #[derive(Clone, Debug)]
 struct Chain {
@@ -806,12 +878,21 @@ fn classes(
     let mut class_of_rec = vec![usize::MAX; ns];
     let mut surf: Vec<Surf> = Vec::new();
     let mut input: Vec<Option<u32>> = Vec::new();
+    let reach = exact
+        .iter()
+        .flatten()
+        .map(|s| s.key_point().len())
+        .fold(0.0, f64::max);
+    let mut index = SameIndex::new(tol, reach);
     for s in 0..ns {
         let Some(e) = exact[s] else { continue };
         if !used[s] {
             continue;
         }
-        let c = surf.iter().position(|r| r.same(&e, tol));
+        let c = index.first_same(&surf, &e, tol);
+        if c.is_none() {
+            index.insert(&e, surf.len());
+        }
         class_of_rec[s] = c.unwrap_or_else(|| {
             surf.push(e);
             input.push(Some(s as u32));
@@ -950,4 +1031,62 @@ fn classes(
         faceted,
         input,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The index answers exactly as the pairwise scan it replaced: the
+    /// lowest-numbered equal class, over surfaces with near-duplicates
+    /// (rotated copies rounded differently, the same plane from far away).
+    #[test]
+    fn same_index_matches_the_scan() {
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let tol = 1e-9 * 200.0;
+        let mut recs = Vec::new();
+        for i in 0..3000 {
+            let pick = |r: f64, k: usize| (r * k as f64).floor();
+            let n = v(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).norm();
+            let n = if i % 3 == 0 { v(0.0, 0.0, 1.0) } else { n };
+            let o = v(pick(rnd(), 5) * 10.0, pick(rnd(), 5), 100.0 * rnd());
+            let jitter = v(rnd(), rnd(), rnd()) * (tol * 0.3);
+            recs.push(match i % 4 {
+                0 => Surf::Plane { o: o + jitter, n },
+                1 => Surf::Cyl {
+                    o: o + jitter,
+                    a: n,
+                    r: 1.0 + pick(rnd(), 3),
+                },
+                2 => Surf::Sphere {
+                    c: v(pick(rnd(), 3), 0.0, 0.0) + jitter,
+                    r: 2.0 + pick(rnd(), 2),
+                },
+                _ => Surf::Cone {
+                    apex: v(pick(rnd(), 3), 1.0, 0.0) + jitter,
+                    a: v(0.0, 0.0, 1.0),
+                    k: 0.5,
+                },
+            });
+        }
+        let reach = recs.iter().map(|s| s.key_point().len()).fold(0.0, f64::max);
+        let mut index = SameIndex::new(tol, reach);
+        let mut classes: Vec<Surf> = Vec::new();
+        for e in &recs {
+            let scan = classes.iter().position(|r| r.same(e, tol));
+            assert_eq!(index.first_same(&classes, e, tol), scan);
+            if scan.is_none() {
+                index.insert(e, classes.len());
+                classes.push(*e);
+            }
+        }
+        // Enough merging to mean something.
+        assert!(classes.len() < recs.len() * 3 / 4, "{}", classes.len());
+    }
 }

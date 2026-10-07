@@ -86,9 +86,13 @@ fn lift(param: &Param, pts: &[(V, f64)], start_u: Option<f64>, tol: f64) -> Vec<
     let mut prev = start_u;
     for (i, u) in us.iter().enumerate() {
         let raw_u = u.unwrap_or(prev.unwrap_or(0.0));
+        // Only an angle wraps. On a plane `u` is a length, and wrapping it
+        // by 2π folded any loop whose samples are more than π apart (a
+        // 30 mm cube's 5-sample edges) into the wrong area, so a hole
+        // read as a second outer loop.
         let lu = match prev {
-            Some(p) => wrap_near(raw_u, p),
-            None => raw_u,
+            Some(p) if param.periodic() => wrap_near(raw_u, p),
+            _ => raw_u,
         };
         out.push(S {
             u: lu,

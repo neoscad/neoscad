@@ -397,3 +397,75 @@ fn gpu_frameworks_are_not_initialized_at_launch() {
         frameworks.join("\n")
     );
 }
+
+/// `-o x.step` is NeoSCAD's `--enable exact` extension. Without the flag
+/// the suffix is unknown, exactly as in OpenSCAD (its message, exit 1, no
+/// file); with it the file is STEP with exact surfaces, the substitutions
+/// are reported at their source lines, and `--format json` carries the
+/// export's numbers. A failed export writes no file.
+#[test]
+fn step_export_needs_the_exact_extension() {
+    let d = scratch("step");
+    std::fs::write(
+        d.join("a.scad"),
+        "difference() {\n  cube(20);\n  translate([10, 10, -1]) cylinder(r=4, h=22);\n}\n",
+    )
+    .unwrap();
+    let out = neoscad(&d, &["-o", "a.step", "a.scad"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "Invalid suffix step. Either add a valid suffix or specify one using the --export-format option.\n"
+    );
+    assert!(!d.join("a.step").exists());
+    let out = neoscad(&d, &["--enable", "all", "-o", "a.stp", "a.scad"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("Invalid suffix stp."));
+
+    let out = neoscad(&d, &["--enable", "exact", "-o", "a.step", "a.scad"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let step = std::fs::read_to_string(d.join("a.step")).unwrap();
+    assert!(step.starts_with("ISO-10303-21;"), "{step}");
+    assert!(step.contains("CYLINDRICAL_SURFACE"));
+    assert!(step.contains("FILE_NAME('a.step','1970-01-01T00:00:00'"));
+    assert!(
+        text(&out.stderr).contains(
+            "INFO: STEP export: cylinder() is exported as an exact cylinder, not the 13-sided polygon of the mesh ($fn is not set) in file a.scad, line 3"
+        ),
+        "{}",
+        text(&out.stderr)
+    );
+    // The same bytes again.
+    let again = neoscad(&d, &["--enable", "exact", "-o", "b.step", "a.scad"]);
+    assert!(again.status.success());
+    let b = std::fs::read_to_string(d.join("b.step")).unwrap();
+    assert_eq!(b.replace("'b.step'", "'a.step'"), step);
+
+    let out = neoscad(
+        &d,
+        &[
+            "--enable", "exact", "--format", "json", "-o", "c.step", "a.scad",
+        ],
+    );
+    assert!(out.status.success());
+    let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(j["exact"]["ok"], true);
+    assert_eq!(j["exact"]["faces"], 7);
+    assert_eq!(j["exact"]["substitutions"]["exact"], 1);
+
+    // An inside-out polyhedron has no STEP solid: an error, and no file.
+    std::fs::write(
+        d.join("bad.scad"),
+        "polyhedron(points = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]], faces = [[0,2,4],[0,5,2],[0,4,3],[0,3,5],[1,4,2],[1,2,5],[1,3,4],[1,5,3]]);\n",
+    )
+    .unwrap();
+    let out = neoscad(&d, &["--enable", "exact", "-o", "bad.step", "bad.scad"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("ERROR: STEP export failed:"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!d.join("bad.step").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}

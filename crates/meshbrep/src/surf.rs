@@ -151,6 +151,18 @@ impl Surf {
         }
     }
 
+    /// The point a surface is placed by (a plane's origin, an axis point,
+    /// an apex, a centre): its distance from the origin bounds how much a
+    /// direction's rounding moves the surface ([`crate::reconstruct`]'s
+    /// index of equal surfaces).
+    pub fn key_point(&self) -> V {
+        match *self {
+            Surf::Plane { o, .. } | Surf::Cyl { o, .. } => o,
+            Surf::Cone { apex, .. } => apex,
+            Surf::Sphere { c, .. } => c,
+        }
+    }
+
     /// Whether `o` is geometrically the same surface, within `tol` for
     /// lengths (angles within 1e-12, which transform rounding stays far
     /// below).

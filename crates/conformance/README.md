@@ -35,6 +35,7 @@ any test listed in `conformance/baseline.json` no longer passes.
 | `bench` | Times neoscad against the reference binaries on `conformance/bench.json`; see "Benchmarks" below. `--only IDS`, `--refs IDS`, `--quick`, `--runs N`, `--timeout S`, `--binary PATH`, and the cache flags `--fresh-refs`, `--fresh-ref ID`, `--refs-max-age DAYS`, `--seed-refs FILE`. |
 | `bench-chart [FILE\|--latest] [--out PATH]` | Draws a benchmark result as a 1920x1080 PNG (default: next to the result). |
 | `video` | Renders the progress video from `progress/`; see "Progress video" below. |
+| `exact` | The exact-geometry stop rule (`docs/audits/exact-geometry-rust.md`, section 10): exports corpora with `neoscad --enable exact -o x.step` and tabulates per corpus the models that export valid among the eligible ones (nothing faceted), faceted and failed exports, the exact-face fraction, the volume error against the mesh, and (reconstruct + check + write) over the render's time; the audit's cases are also held to their closed-form volumes. `--corpus cases,conformance,bosl2,bench` (default all; the BOSL2 corpus needs `bosl2-corpus` first), `--bosl2-every N` (default 5), `--filter S`, `--jobs` (default 4), `--timeout` (default 120 s), `--binary`, `--occt PATH` (default `$MESHBREP_OCCT_CHECK`: OCCT reads every written file back, see `crates/meshbrep/oracle`). Every export, and every OCCT read, runs in its own process with `--limit memory=2000` and a 2 GB resident-size guard. Results go to `target/conformance/exact/results-<corpora>.json`. |
 
 ## BOSL2 corpus
 

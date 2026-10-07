@@ -32,6 +32,9 @@ lang = { package = "neoscad-lang", path = "../lang" }
 # Pinned exactly: the port tracks Manifold C++ v3.5.0 and its output
 # (triangle topology, run order) is part of what the tier 3 images see.
 manifold-rust = { version = "=0.16.0", default-features = false }
+# Exact B-rep reconstruction and the STEP writer behind `--enable exact`
+# (`exact`); MIT OR Apache-2.0, pure Rust, no NeoSCAD dependency.
+meshbrep = { path = "../meshbrep" }
 rayon = { workspace = true, optional = true }
 # A preview product's cache key (`csg::product_key`), hashed as
 # the evaluator hashes subtree keys. Already in the build through `eval`.

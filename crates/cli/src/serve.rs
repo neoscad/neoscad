@@ -482,10 +482,13 @@ fn quick(server: &Server, method: &str, params: &Value) -> Reply {
                 "test": true,
                 // The extensions a client can use: only the implemented
                 // ones, so a client does not send sketches to a server
-                // that would answer "unknown module".
+                // that would answer "unknown module". `exact` is left out
+                // too: it is STEP export, which only the one-shot command
+                // line does so far (`export_formats` has no `step`), and a
+                // client that saw it would ask for a file it cannot get.
                 "features": eval::Extension::ALL
                     .into_iter()
-                    .filter(|e| e.implemented())
+                    .filter(|e| e.implemented() && *e != eval::Extension::Exact)
                     .map(eval::Extension::name)
                     .collect::<Vec<_>>(),
             },

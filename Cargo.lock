@@ -1619,6 +1619,7 @@ version = "0.4.3"
 dependencies = [
  "clipper2-rust",
  "manifold-rust",
+ "meshbrep",
  "neoscad-eval",
  "neoscad-io",
  "neoscad-lang",

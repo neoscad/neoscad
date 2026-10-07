@@ -85,7 +85,13 @@ extension:
   still leaves them off. This is the rule `part` already follows
   (`crates/cli/src/main.rs:459-462`). The proposed names are `sketch`
   and `query`. `enable_warnings` (`crates/cli/src/main.rs:483`) skips
-  them as it skips `part`.
+  them as it skips `part`. A fourth, `exact`, came later
+  (`docs/audits/exact-geometry-rust.md`): it adds no names to the
+  language, only the `.step`/`.stp` output suffixes (STEP with exact
+  surfaces), which without it stay OpenSCAD's "Invalid suffix" error. It
+  follows the same rules: not in `--enable all`, checked against
+  `Feature.cc` by `crates/eval/tests/extensions.rs`, and its messages say
+  "STEP export:" so they are never mistaken for OpenSCAD's.
 - **One extension set in the evaluator.** `eval::Options::parts: bool`
   (`crates/eval/src/lib.rs:226-230`) becomes `extensions: Extensions`,
   a bit set like `Features` (`crates/eval/src/features.rs:93-154`) with
