@@ -160,6 +160,7 @@ pub fn list() -> Vec<Value> {
                 "axis": {"type": "string", "description": "x, y or z"},
                 "center": {"type": "array", "items": {"type": "number"}, "description": "Axis at [a, b]"},
                 "profile": {"type": "array", "items": {"type": "number"}, "description": "[from, to, step]"},
+                "sketch": {"type": "string", "description": "Sketch name: solved entities"},
             }),
             true,
         ),
@@ -444,8 +445,21 @@ impl Tools {
         }
     }
 
+    /// Whether the server runs with NeoSCAD's sketch extension
+    /// (`neoscad mcp --enable sketch`).
+    fn sketch_on(&self) -> bool {
+        self.local
+            .session()
+            .config()
+            .extensions
+            .has(session::Extension::Sketch)
+    }
+
     pub fn read_resource(&self, uri: &str) -> Option<String> {
         if uri == "neoscad://recipes" {
+            if self.sketch_on() {
+                return Some(format!("{}\n{}", super::RECIPES, super::SKETCH_RECIPE));
+            }
             return Some(super::RECIPES.to_string());
         }
         let name = match uri.strip_prefix("neoscad://docs") {
@@ -980,6 +994,10 @@ impl Tools {
             let more: Vec<String> = t.iter().map(|(k, v)| format!("{v} more {k}")).collect();
             text.push_str(&format!("\n(and {})", more.join(", ")));
         }
+        for sk in r["sketches"].as_array().into_iter().flatten() {
+            text.push('\n');
+            text.push_str(&session::sketches::line_text(sk));
+        }
         let log =
             json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"]});
         push_log(&mut text, &log);
@@ -998,6 +1016,9 @@ impl Tools {
             "diagnostics": terse_diags(&log["diagnostics"], &main),
         });
         put_echo(&mut s, &log["echo"]);
+        if let Some(sk) = terse_sketches(&r["sketches"], &main) {
+            s["sketches"] = sk;
+        }
         Ok((label(&imported, finish(args, text, s, r)), true))
     }
 
@@ -1006,14 +1027,16 @@ impl Tools {
         let main = m.path.clone();
         let imported = m.label.clone();
         let mut p = self.params(&m, args);
-        for k in ["part", "between", "section", "axis", "center", "profile"] {
+        for k in [
+            "part", "between", "section", "axis", "center", "profile", "sketch",
+        ] {
             if let Some(v) = args.get(k) {
                 p[k] = v.clone();
             }
         }
         // Asked for a section, a profile or a distance, the answer is that:
         // the model's own numbers (which `render` gives) are left out.
-        let focused = ["between", "section", "profile"]
+        let focused = ["between", "section", "profile", "sketch"]
             .iter()
             .any(|k| args.get(*k).is_some_and(|v| !v.is_null()));
         let r = self.run(id, "measure", &p);
@@ -1025,6 +1048,9 @@ impl Tools {
         } else {
             if !focused {
                 lines.push(solid_line("model", &r["model"]));
+            }
+            if let Some(sk) = r.get("sketch").filter(|v| v.is_object()) {
+                lines.push(session::measure::sketch_text(sk).trim_end().to_string());
             }
             for part in r["parts"].as_array().into_iter().flatten() {
                 lines.push(solid_line(
@@ -1064,6 +1090,9 @@ impl Tools {
         }
         s["diagnostics"] = terse_diags(&log["diagnostics"], &main);
         put_echo(&mut s, &log["echo"]);
+        if let Some(sk) = s.get("sketch").filter(|v| v.is_object()).cloned() {
+            s["sketch"] = terse_place(&sk, &main);
+        }
         if let Some(e) = s.get("error").and_then(Value::as_str) {
             s["error"] = json!(crate::serve::param_names(e));
         }
@@ -1242,10 +1271,22 @@ impl Tools {
             // The index lists the recipes too: the instructions show them,
             // and an agent that asks for the index is looking for what to
             // ask about next.
-            None => text.push_str(&format!(
-                "\nPrinting recipes (ask for one by name): {}",
-                super::recipes::names()
-            )),
+            None => {
+                text.push_str(&format!(
+                    "\nPrinting recipes (ask for one by name): {}",
+                    super::recipes::names()
+                ));
+                if self.sketch_on() {
+                    text.push_str("\nConstrained sketches are on: `docs` for sketch has a recipe.");
+                }
+            }
+            // `sketch` with the extension on: its reference, then a
+            // whole sketch to adapt, which agents otherwise assemble
+            // entity by entity from the vocabulary's entries.
+            Some("sketch") if r["exit_code"] == 0 && self.sketch_on() => {
+                text.push_str("\n\nRecipe (tested; adapt the numbers):\n");
+                text.push_str(super::SKETCH_RECIPE.trim_end());
+            }
             // Builtins and the file's own definitions come first (a model
             // may define its own `thread`); a name they don't know may be
             // a recipe the agent read in the instructions. (`entries` is
@@ -1902,6 +1943,51 @@ fn terse_diag(d: &Value, main: &Path) -> Value {
         t["hint"] = h.clone();
     }
     t
+}
+
+/// A sketch (or one of its entities) as an agent reads it: the line, and
+/// the file only when it is not the model; no byte spans.
+fn terse_place(v: &Value, main: &Path) -> Value {
+    let mut t = v.clone();
+    if let Some(o) = t.as_object_mut() {
+        o.remove("span");
+        match o.get("file").and_then(Value::as_str).map(str::to_string) {
+            Some(f) if Path::new(&f) != main => {
+                o.insert("file".into(), json!(short(&f)));
+            }
+            _ => {
+                o.remove("file");
+            }
+        }
+        if let Some(Value::Array(es)) = o.get_mut("entities") {
+            for e in es {
+                *e = terse_place(e, main);
+            }
+        }
+    }
+    t
+}
+
+/// `check`'s sketches as an agent reads them: name, state, degrees of
+/// freedom, the codes of their diagnostics (which come in full under
+/// `diagnostics`) and where they are.
+fn terse_sketches(v: &Value, main: &Path) -> Option<Value> {
+    let list = v.as_array().filter(|l| !l.is_empty())?;
+    Some(Value::Array(
+        list.iter()
+            .take(MAX_LINES)
+            .map(|s| {
+                let t = terse_place(s, main);
+                let mut o = json!({});
+                for k in ["name", "status", "dof", "unknowns", "codes", "file", "line"] {
+                    if let Some(x) = t.get(k).filter(|x| !x.is_null()) {
+                        o[k] = x.clone();
+                    }
+                }
+                o
+            })
+            .collect(),
+    ))
 }
 
 fn terse_diags(v: &Value, main: &Path) -> Value {

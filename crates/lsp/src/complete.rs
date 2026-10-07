@@ -216,7 +216,14 @@ fn candidate_item(ctx: &Ctx<'_>, c: &Candidate, statement: bool) -> (String, Val
             None => e.signature.clone(),
         });
         item["documentation"] = json!({"kind": "markdown", "value": e.summary});
-        if statement
+        if crate::sketch::is_vocabulary(e) {
+            // Offered only inside a sketch body (`World::visible`): a
+            // statement with its `;`, an entity as an expression.
+            if let Some(s) = crate::sketch::snippet(&c.name) {
+                item["insertText"] = json!(s);
+                item["insertTextFormat"] = json!(2);
+            }
+        } else if statement
             && c.ns == Ns::Module
             && let Some((_, s)) = SNIPPETS.iter().find(|(n, _)| *n == c.name)
         {

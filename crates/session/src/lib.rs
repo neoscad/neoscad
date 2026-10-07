@@ -65,6 +65,7 @@ pub mod modeltest;
 pub mod orient;
 mod parse;
 pub mod parts;
+pub mod sketches;
 pub mod snapshot;
 pub mod stats;
 mod usehint;
@@ -77,6 +78,7 @@ use std::sync::{Arc, Mutex};
 
 pub use eval::limits::{Exceeded, Limit, Limits, MemoryProbe};
 use eval::{Console, Logged};
+pub use eval::{Extension, Extensions};
 use lang::Program;
 use lang::diag::{DiagCode, Diagnostic, Severity};
 use lang::loader::{FileSystem, LibraryPath};
@@ -383,6 +385,10 @@ pub struct Log {
     pub lines: Vec<Logged>,
     /// Names the program defines, for "did you mean" hints.
     pub names: Arc<Names>,
+    /// The constrained sketches the evaluation solved, as JSON
+    /// ([`sketches`]): the first [`sketches::MAX_SKETCHES`], and how many
+    /// there were in all.
+    pub sketches: Arc<(Vec<Value>, usize)>,
 }
 
 impl Log {
@@ -855,6 +861,8 @@ struct Pipe {
     fs: Arc<docfs::Recorder>,
     /// Problems with the input meshes (`orient`), as reported.
     inputs: Vec<orient::InputIssue>,
+    /// The evaluation's sketches ([`Log::sketches`]).
+    sketches: Arc<(Vec<Value>, usize)>,
 }
 
 /// The core. See the crate documentation.
@@ -1413,6 +1421,7 @@ impl Session {
             programs: Vec::new(),
             fs: Arc::new(docfs::Recorder::new(self.fs.clone())),
             inputs: Vec::new(),
+            sketches: Arc::default(),
         }
     }
 
@@ -1429,6 +1438,7 @@ impl Session {
             stderr: Vec::new(),
             lines,
             names: Arc::new(names),
+            sketches: pipe.sketches.clone(),
         }
     }
 
@@ -1445,6 +1455,7 @@ impl Session {
                 stderr: pipe.con.into_inner(),
                 lines,
                 names: Arc::new(names),
+                sketches: pipe.sketches.clone(),
             },
             pipe.timings,
         )
@@ -1618,6 +1629,11 @@ impl Session {
             return Err(Stop::Cancelled);
         }
         let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+        // Only with the extension on can the tree hold a sketch: no walk
+        // over every other tree.
+        if options.extensions.has(eval::Extension::Sketch) {
+            pipe.sketches = Arc::new(sketches::collect(&ev.root, &|u| loaded.unit_sources(u)));
+        }
         usehint::report(
             &mut pipe.con,
             top,

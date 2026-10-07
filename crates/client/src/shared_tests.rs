@@ -662,6 +662,17 @@ fn customizer_values_are_kept_sorted_and_pruned() {
             .request
             .parts
     );
+    // The window's `enable` names (the app's sketch setting) reach every
+    // run from then on.
+    let sketch = vec!["sketch".to_string()];
+    assert!(l.set_enable(&sketch) && !l.set_enable(&sketch));
+    assert_eq!(
+        l.begin_run(RenderMode::Preview, "/d/a.scad")
+            .unwrap()
+            .request
+            .enable,
+        sketch
+    );
 }
 
 // --- The file-manager preview (preview.rs) -----------------------------------

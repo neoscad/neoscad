@@ -191,6 +191,65 @@ pub struct SketchReport {
     pub continuation: bool,
     /// Whether an error left the profile empty.
     pub failed: bool,
+    /// The codes of the diagnostics printed about it, each once, in the
+    /// order first printed.
+    pub codes: Vec<&'static str>,
+    /// Every entity, in creation order, with its solved values: what
+    /// `measure --sketch` reports and hover shows (section 4.8 of
+    /// `docs/language-extensions.md`).
+    pub entities: Vec<SketchEntity>,
+    /// "Pin the drawing": the whole `sketch()` call with each literal
+    /// `[x, y]` guess rewritten to its solved coordinates, when that
+    /// changes any. The language server offers it as a code action.
+    pub pin: Option<SketchEdit>,
+}
+
+/// One entity of a sketch, for the tools.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchEntity {
+    /// The variable that holds it (`top`, `top.start`, `pts[0]`), if any.
+    pub label: Option<String>,
+    /// `point`, `line`, `arc` or `circle`.
+    pub kind: &'static str,
+    pub construction: bool,
+    /// The call that made it: the unit (as [`Origin::unit`]) and span.
+    pub unit: u32,
+    pub span: Span,
+    /// Its solved values; `None` when the sketch did not solve.
+    pub solved: Option<SketchValues>,
+}
+
+/// An entity's solved values. Angles are in degrees, counter-clockwise
+/// from +x; an arc's sweep is measured in its own direction.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SketchValues {
+    Point([f64; 2]),
+    Line {
+        start: [f64; 2],
+        end: [f64; 2],
+        length: f64,
+        angle: f64,
+    },
+    Arc {
+        center: [f64; 2],
+        start: [f64; 2],
+        end: [f64; 2],
+        radius: f64,
+        sweep: f64,
+        cw: bool,
+    },
+    Circle {
+        center: [f64; 2],
+        radius: f64,
+    },
+}
+
+/// A replacement of a span of the program's text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchEdit {
+    pub unit: u32,
+    pub span: Span,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

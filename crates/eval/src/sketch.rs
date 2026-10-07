@@ -68,7 +68,9 @@ use crate::context::{Ctx, ScopeRef};
 use crate::eval::{Evaluator, Unit};
 use crate::limits::Limit;
 use crate::message::{Loc, R};
-use crate::node::{Discretizer, Node, NodeKind, SketchNode, SketchReport};
+use crate::node::{
+    Discretizer, Node, NodeKind, SketchEdit, SketchEntity, SketchNode, SketchReport, SketchValues,
+};
 use crate::sym::{FxBuild, Sym, Syms};
 use crate::trig::{atan2_degrees, cos_degrees, sin_degrees};
 use crate::value::Value;
@@ -314,6 +316,9 @@ pub(crate) struct Builder {
     implied: Vec<bool>,
     /// An error was printed: the sketch gives an empty shape.
     failed: bool,
+    /// The codes of the diagnostics printed about it so far, each once,
+    /// for the tools' summary (`SketchReport::codes`).
+    codes: Vec<&'static str>,
 }
 
 impl Builder {
@@ -374,6 +379,85 @@ impl Builder {
             None
         }
     }
+
+    /// Remember the codes of messages about to be printed about it.
+    fn record(&mut self, notes: &[Note]) {
+        for n in notes {
+            self.code(n.code);
+        }
+    }
+
+    fn code(&mut self, c: DiagCode) {
+        let c = c.as_str();
+        if !self.codes.contains(&c) {
+            self.codes.push(c);
+        }
+    }
+
+    /// Every entity with its solved values (none without a solution), for
+    /// the tools (`SketchReport::entities`).
+    fn entities(&self, sol: Option<&Solution>) -> Vec<SketchEntity> {
+        let model = self.model.entities();
+        self.ents
+            .iter()
+            .zip(&self.ent_locs)
+            .enumerate()
+            .map(|(i, (e, loc))| SketchEntity {
+                label: e.label().map(str::to_string),
+                kind: e.kind_name(),
+                construction: self.model.is_construction(e.id),
+                unit: loc.unit,
+                span: loc.span,
+                solved: sol.and_then(|s| solved_values(&model[i], e.id, s)),
+            })
+            .collect()
+    }
+}
+
+/// An entity's solved values: its points, and the lengths, angles and
+/// radii they give.
+fn solved_values(e: &sketch_solver::Entity, id: EntityId, s: &Solution) -> Option<SketchValues> {
+    Some(match *e {
+        sketch_solver::Entity::Point { .. } => SketchValues::Point(s.point(id)?),
+        sketch_solver::Entity::Line { start, end } => {
+            let (a, b) = (s.point(start)?, s.point(end)?);
+            let d = sub(b, a);
+            SketchValues::Line {
+                start: a,
+                end: b,
+                length: norm(d),
+                angle: atan2_degrees(d[1], d[0]),
+            }
+        }
+        sketch_solver::Entity::Arc {
+            center,
+            start,
+            end,
+            clockwise,
+        } => {
+            let (c, a, b) = (s.point(center)?, s.point(start)?, s.point(end)?);
+            let a0 = atan2_degrees(a[1] - c[1], a[0] - c[0]);
+            let a1 = atan2_degrees(b[1] - c[1], b[0] - c[0]);
+            // As the tessellation measures it (`arc_points`): an arc
+            // from a point to itself is a full turn.
+            let mut sweep = if clockwise { a0 - a1 } else { a1 - a0 };
+            if sweep <= 0.0 {
+                sweep += 360.0;
+            }
+            SketchValues::Arc {
+                center: c,
+                start: a,
+                end: b,
+                radius: s.radius(id)?,
+                sweep,
+                cw: clockwise,
+            }
+        }
+        sketch_solver::Entity::Circle { center, .. } => SketchValues::Circle {
+            center: s.point(center)?,
+            radius: s.radius(id)?,
+        },
+    })
 }
 
 /// A message about a sketch, with what is needed to print it.
@@ -451,6 +535,7 @@ impl<'a> Evaluator<'a> {
             drawn: Vec::new(),
             implied: Vec::new(),
             failed: false,
+            codes: Vec::new(),
         }));
     }
 
@@ -569,6 +654,7 @@ impl<'a> Evaluator<'a> {
         if !notes.is_empty() {
             b.failed = true;
         }
+        b.record(&notes);
         let prefix = b.prefix();
         self.sketch = Some(b);
         self.print_notes(&prefix, notes);
@@ -658,6 +744,7 @@ impl<'a> Evaluator<'a> {
         if notes.iter().any(|n| n.severity == Severity::Error) {
             b.failed = true;
         }
+        b.record(&notes);
         let prefix = b.prefix();
         self.sketch = Some(b);
         self.print_notes(&prefix, notes);
@@ -693,6 +780,7 @@ impl<'a> Evaluator<'a> {
             && let Some(b) = self.sketch.as_mut()
         {
             b.failed = true;
+            b.code(DiagCode::SketchGeometryInBody);
             let prefix = b.prefix();
             let loc = at.unwrap_or(b.loc);
             let t = format!(
@@ -722,10 +810,12 @@ impl<'a> Evaluator<'a> {
     }
 
     /// Solve, report, and turn the profile into a polygon.
-    fn sketch_solve(&mut self, b: Builder) -> R<NodeKind> {
+    fn sketch_solve(&mut self, mut b: Builder) -> R<NodeKind> {
         let mut report = SketchReport {
             name: b.name.clone(),
             failed: true,
+            codes: b.codes.clone(),
+            entities: b.entities(None),
             ..SketchReport::default()
         };
         let empty = |report: SketchReport, convexity: i32| {
@@ -784,6 +874,7 @@ impl<'a> Evaluator<'a> {
                 // limit it would be.
                 let t = format!("{prefix}{e}");
                 self.error(Some(b.loc), DiagCode::ResourceLimit, t);
+                report.codes.push(DiagCode::ResourceLimit.as_str());
                 return Ok(empty(report, b.convexity));
             }
         };
@@ -795,6 +886,15 @@ impl<'a> Evaluator<'a> {
         report.residual = sol.residual;
         report.solved = sol.status == Status::Solved;
         report.continuation = sol.continuation;
+        report.entities = b.entities(Some(&sol));
+        report.pin = pin_drawing(&b, &sol, &Src { units: &self.units }).and_then(|f| {
+            let (loc, text) = f.edit?;
+            Some(SketchEdit {
+                unit: loc.unit,
+                span: loc.span,
+                text,
+            })
+        });
         let mut ok = !notes.iter().any(|n| n.severity == Severity::Error);
         let mut loops = Vec::new();
         if ok {
@@ -809,6 +909,8 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
+        b.record(&notes);
+        report.codes = b.codes.clone();
         self.print_notes(&prefix, notes);
         if !ok {
             return Ok(empty(report, b.convexity));

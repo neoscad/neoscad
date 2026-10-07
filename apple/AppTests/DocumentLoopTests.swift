@@ -49,6 +49,34 @@ private func waitForRun(_ doc: SCADDocument, after count: Int, _ what: String = 
         doc.close()
     }
 
+    /// Settings > Language: with constrained sketches off, `sketch()` is
+    /// OpenSCAD's unknown module; turned on, the open document runs again
+    /// with it, and the under-constrained sketch's info reaches the
+    /// console and the editor as an information marker.
+    @Test func theSketchSettingRunsSketchesAndShowsTheirInfo() async throws {
+        let saved = LanguageSettings.sketches
+        defer { LanguageSettings.sketches = saved }
+        LanguageSettings.sketches = false
+        let doc = try await openDocument(
+            "sketch(name = \"s\") { p = point([1, 2]); q = point([5, 2]); l = line(p, q, construction = true); }\n")
+        try await waitForRun(doc, after: 0)
+        #expect(doc.model.console.contains { $0.kind == .warning && $0.text.contains("unknown module 'sketch'") })
+        let runs = doc.requestCount
+        LanguageSettings.sketches = true
+        try await waitForRun(doc, after: runs)
+        #expect(!doc.model.console.contains { $0.kind == .warning })
+        #expect(doc.model.console.contains { $0.kind == .info && $0.text.hasPrefix("INFO: Sketch 's'") })
+        var infos = 0
+        try await waitUntil("an information marker") {
+            infos == 1
+        } while: {
+            infos =
+                try await doc.model.editor.call(
+                    "return document.querySelectorAll('.cm-lintRange-info').length") as? Int ?? 0
+        }
+        doc.close()
+    }
+
     @Test func aGeometryWarningReachesTheMarkers() async throws {
         let doc = try await openDocument("union() { cube(1); square(1); }\n")
         doc.renderDocument(nil)

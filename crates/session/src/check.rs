@@ -1958,15 +1958,17 @@ impl Session {
         let scheme = render::ColorScheme::cornfield();
         let (model, parts, cuts) = self.render_for_check(&req.run, &scheme)?;
         if model.exit_code != 0 {
+            let mut summary = json!({
+                "schema": 1,
+                "input": req.run.input,
+                "failed": true,
+                "exit_code": model.exit_code,
+                "diagnostics": crate::diag::summary_json(&model.log.lines, &model.log.names),
+            });
+            add_sketches(&mut summary, &model.log);
             return Ok(Checked {
                 exit_code: model.exit_code,
-                summary: json!({
-                    "schema": 1,
-                    "input": req.run.input,
-                    "failed": true,
-                    "exit_code": model.exit_code,
-                    "diagnostics": crate::diag::summary_json(&model.log.lines, &model.log.names),
-                }),
+                summary,
                 analysis: Analysis::default(),
                 log: model.log,
             });
@@ -1999,7 +2001,7 @@ impl Session {
         stages.insert("total".into(), json!(round(check_ms)));
         timings.insert("check".into(), Value::Object(stages));
         timings.insert("total".into(), json!(round(self.now() - started)));
-        let summary = json!({
+        let mut summary = json!({
             "schema": 1,
             "input": req.run.input,
             "ok": errors == 0,
@@ -2017,12 +2019,29 @@ impl Session {
             "timings_ms": Value::Object(timings),
             "diagnostics": crate::diag::summary_json(&model.log.lines, &model.log.names),
         });
+        add_sketches(&mut summary, &model.log);
         Ok(Checked {
             exit_code,
             summary,
             analysis,
             log: model.log,
         })
+    }
+}
+
+/// The run's constrained sketches in a check's summary (`sketches`, and
+/// `sketches_omitted` past [`crate::sketches::MAX_SKETCHES`]): each one's
+/// state, degrees of freedom and diagnostic codes, without the entities
+/// (`measure --sketch` gives those). Absent for a model with none, so a
+/// check without the extension reads as it always did.
+fn add_sketches(summary: &mut Value, log: &Log) {
+    let (list, count) = &*log.sketches;
+    if list.is_empty() {
+        return;
+    }
+    summary["sketches"] = Value::Array(list.iter().map(crate::sketches::summary).collect());
+    if *count > list.len() {
+        summary["sketches_omitted"] = json!(count - list.len());
     }
 }
 
@@ -2051,6 +2070,7 @@ pub fn text(summary: &Value) -> String {
     let input = summary["input"].as_str().unwrap_or("");
     if summary["failed"] == json!(true) {
         out.push_str(&format!("check {input}: the model did not render\n"));
+        sketch_lines(&mut out, summary);
         return out;
     }
     let c = &summary["counts"];
@@ -2112,5 +2132,17 @@ pub fn text(summary: &Value) -> String {
     for (code, n) in summary["truncated"].as_object().into_iter().flatten() {
         out.push_str(&format!("    ... and {n} more {code}\n"));
     }
+    sketch_lines(&mut out, summary);
     out
+}
+
+/// A line per sketch of a check's summary.
+fn sketch_lines(out: &mut String, summary: &Value) {
+    for s in summary["sketches"].as_array().into_iter().flatten() {
+        out.push_str(&crate::sketches::line_text(s));
+        out.push('\n');
+    }
+    if let Some(n) = summary["sketches_omitted"].as_u64() {
+        out.push_str(&format!("... and {n} more sketches\n"));
+    }
 }

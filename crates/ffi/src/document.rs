@@ -256,9 +256,11 @@ impl Core {
                 let (doc, text) = (doc.clone(), text.clone());
                 run.on_evaluated = Some(Arc::new(move |log: &session::Log| {
                     let diags = log.diagnostics_json();
-                    let out =
-                        ls.server
-                            .supply(ls.core.session(), &doc, text.clone(), diags.clone());
+                    // The log, not only its diagnostics: its sketches give
+                    // hover their solved values and "Pin drawing".
+                    let out = ls
+                        .server
+                        .supply_log(ls.core.session(), &doc, text.clone(), log);
                     *published
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(diags);
@@ -283,7 +285,8 @@ impl Core {
                         // server has not yet: the evaluator's stack, not
                         // the caller's dispatch queue.
                         eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
-                            l.server.supply(self.session(), &doc, text.clone(), diags)
+                            l.server
+                                .supply_log(self.session(), &doc, text.clone(), &r.log)
                         })
                     }
                 }

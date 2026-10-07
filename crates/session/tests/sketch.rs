@@ -341,6 +341,169 @@ fn diagnostics_have_codes_and_spans() {
     assert!(String::from_utf8_lossy(&r.log.stderr).contains("ECHO: \"still evaluating\""));
 }
 
+/// Every example in `docs/sketch.md` evaluates with the extension on and
+/// gives exactly the diagnostics its fence names (```openscad
+/// expect=code,...), none for a plain one; each sketch in it that has no
+/// expected error has a profile or is all construction geometry.
+#[test]
+fn docs_examples_evaluate() {
+    let doc =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/sketch.md"))
+            .unwrap();
+    let mut examples: Vec<(usize, Vec<String>, String)> = Vec::new();
+    let mut open: Option<(usize, Vec<String>, String)> = None;
+    for (i, line) in doc.lines().enumerate() {
+        match (&mut open, line.strip_prefix("```")) {
+            (None, Some(info)) if info.starts_with("openscad") => {
+                let expect = info
+                    .split_whitespace()
+                    .find_map(|w| w.strip_prefix("expect="))
+                    .map(|c| c.split(',').map(str::to_string).collect())
+                    .unwrap_or_default();
+                open = Some((i + 1, expect, String::new()));
+            }
+            (Some(_), Some("")) => examples.extend(open.take()),
+            (Some((_, _, text)), _) => {
+                text.push_str(line);
+                text.push('\n');
+            }
+            _ => {}
+        }
+    }
+    assert!(examples.len() >= 30, "{} examples", examples.len());
+    let mut failures = Vec::new();
+    for (line, expect, text) in &examples {
+        let (s, _) = session(&[("example.scad", text.as_bytes())]);
+        let r = s.evaluate(&run("example.scad", true), false).unwrap();
+        let mut got: Vec<String> = r
+            .log
+            .diagnostics_json()
+            .iter()
+            .map(|d| d["code"].as_str().unwrap_or("").to_string())
+            .collect();
+        got.dedup();
+        if &got != expect || r.aborted {
+            failures.push(format!(
+                "docs/sketch.md:{line}: expected {expect:?}, got {got:?}\n{}",
+                String::from_utf8_lossy(&r.log.stderr)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `check` lists every sketch with its state, degrees of freedom and the
+/// codes of its diagnostics (`docs/language-extensions.md`, section 4.8);
+/// a model without sketches has no `sketches` at all.
+#[test]
+fn check_lists_the_sketches() {
+    use session::check::{CheckRequest, CheckSettings};
+    let text = std::fs::read(goldens().join("diagnostics.scad")).unwrap();
+    let (s, _) = session(&[("diagnostics.scad", &text), ("plain.scad", b"cube(1);")]);
+    let c = s
+        .check(&CheckRequest {
+            run: run("diagnostics.scad", true),
+            settings: CheckSettings::default(),
+        })
+        .unwrap();
+    let got: Vec<String> = c.summary["sketches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| {
+            format!(
+                "{} line {}: {} dof {} empty {} {}",
+                k["name"], k["line"], k["status"], k["dof"], k["empty"], k["codes"]
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            "\"under\" line 13: \"underconstrained\" dof 6 empty false [\"sketch-underconstrained\"]",
+            "\"strict\" line 16: \"underconstrained\" dof 2 empty true [\"sketch-underconstrained\"]",
+            "\"conflict\" line 19: \"conflict\" dof 0 empty true [\"sketch-conflict\"]",
+            "\"redundant\" line 29: \"fully-constrained\" dof 0 empty false [\"sketch-redundant\"]",
+            "\"open\" line 39: \"error\" dof 0 empty true [\"sketch-open-profile\"]",
+            "\"big\" line 46: \"error\" dof 0 empty true [\"sketch-fillet-too-large\"]",
+            "\"misuse\" line 55: \"error\" dof 0 empty true [\"sketch-geometry-in-body\",\"sketch-unknown-entity\"]",
+        ]
+    );
+    // The check's summary has no entities or edits: `measure` has those.
+    assert!(c.summary["sketches"][0].get("entities").is_none());
+    assert!(
+        session::check::text(&c.summary)
+            .contains("sketch 'conflict' (line 19): conflicting constraints")
+    );
+    let c = s
+        .check(&CheckRequest {
+            run: run("plain.scad", true),
+            settings: CheckSettings::default(),
+        })
+        .unwrap();
+    assert!(c.summary.get("sketches").is_none(), "{}", c.summary);
+}
+
+/// `measure --sketch NAME`: every entity's solved values.
+#[test]
+fn measure_gives_a_sketchs_solved_values() {
+    use session::measure::MeasureRequest;
+    let text = std::fs::read(goldens().join("slot.scad")).unwrap();
+    let (s, _) = session(&[("slot.scad", &text)]);
+    let mut req = MeasureRequest::new(run("slot.scad", true));
+    req.sketch = Some("slot".into());
+    let m = s.measure(&req).unwrap();
+    assert_eq!(m.exit_code, 0, "{}", m.summary);
+    let sk = &m.summary["sketch"];
+    assert_eq!(sk["status"], "fully-constrained");
+    assert_eq!(sk["instances"], 1);
+    let e = |name: &str| {
+        sk["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("{name}: {sk}"))
+            .clone()
+    };
+    assert_eq!(e("c2")["at"], serde_json::json!([30.0, 0.0]));
+    let top = e("top");
+    assert_eq!(top["length"], 30.0);
+    assert_eq!(top["angle"], 0.0);
+    assert_eq!(e("bot")["angle"], 180.0);
+    let e1 = e("e1");
+    assert_eq!(e1["radius"], 4.0);
+    assert_eq!(e1["sweep"], 180.0);
+    assert_eq!(e("axis")["construction"], true);
+    assert!(sk.get("pin").is_none(), "an editor's, not measure's");
+    let t = session::measure::text(&m.summary);
+    assert!(
+        t.contains("  top line [0, 4]..[30, 4], length 30, angle 0°\n"),
+        "{t}"
+    );
+    assert!(
+        t.contains("  e1 arc centre [0, 0], radius 4, from [0, 4] to [0, -4], sweep 180°\n"),
+        "{t}"
+    );
+    // An unknown name lists the names there are; without the extension
+    // there are none.
+    req.sketch = Some("slit".into());
+    let m = s.measure(&req).unwrap();
+    assert_eq!(m.exit_code, 1);
+    assert_eq!(m.summary["error"], "no sketch 'slit' (sketches: slot)");
+    let mut req = MeasureRequest::new(run("slot.scad", false));
+    req.sketch = Some("slot".into());
+    let m = s.measure(&req).unwrap();
+    assert!(
+        m.summary["error"]
+            .as_str()
+            .unwrap()
+            .contains("the model has no sketches (they need `--enable sketch`)"),
+        "{}",
+        m.summary
+    );
+}
+
 struct Sink(Vec<u8>);
 
 impl ExportSink for Sink {

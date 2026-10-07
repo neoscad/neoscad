@@ -566,6 +566,7 @@ impl Worker {
             sync_session: false,
             limits: None,
             host_diagnostics: true,
+            ..lsp::Options::default()
         });
         let reply = json!({
             "version": env!("CARGO_PKG_VERSION"),
@@ -662,12 +663,11 @@ impl State {
             None => run.camera.auto = false,
         }
         let rendered = c.session.render(&run, request.mode.into(), &scheme)?;
-        let language = self.lsp.supply(
-            &c.session,
-            &doc,
-            text.clone(),
-            rendered.log.diagnostics_json(),
-        );
+        // The whole log: its sketches give hover their solved values and
+        // "Pin drawing", besides the markers.
+        let language = self
+            .lsp
+            .supply_log(&c.session, &doc, text.clone(), &rendered.log);
         let scene = if r.scene {
             let previewer = match r.previewer {
                 PreviewerIn::OpenCsg => render::Previewer::OpenCsg,

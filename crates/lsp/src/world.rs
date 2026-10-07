@@ -226,6 +226,10 @@ pub struct World {
     pub targets: HashMap<(usize, usize), PathBuf>,
     /// Each `use`d library with the files it includes, in `use` order.
     pub libs: Vec<Vec<Arc<Analyzed>>>,
+    /// Whether NeoSCAD's sketch extension is on (`--enable sketch`), so
+    /// that sketch bodies bind the sketch vocabulary
+    /// ([`World::sketch_body`]).
+    pub sketch: bool,
 }
 
 /// Where the world's files come from: an open document's text first,
@@ -320,6 +324,7 @@ impl World {
             files,
             targets,
             libs,
+            sketch: false,
         }
     }
 
@@ -356,6 +361,15 @@ impl World {
                     def: d,
                 }));
             }
+            // A sketch body binds the vocabulary between itself and the
+            // scopes around the call, as the evaluator's resolver does
+            // (`Env::vocab`): BOSL2's `arc` is never found from inside.
+            if self.is_sketch_body(file, i) {
+                let v = crate::sketch::vocabulary(name, ns);
+                if !v.is_empty() {
+                    return Some(Target::Builtin(v));
+                }
+            }
             s = ix.scopes[i].parent;
         }
         if let Some(f) = self.top(name, ns, file) {
@@ -373,8 +387,56 @@ impl World {
                 }
             }
         }
-        let b = builtins(name, ns);
+        // The vocabulary exists nowhere else: outside a body `circle` is
+        // OpenSCAD's module only, and `point` is unknown.
+        let b: Vec<_> = builtins(name, ns)
+            .into_iter()
+            .filter(|e| !crate::sketch::is_vocabulary(e))
+            .collect();
         (!b.is_empty()).then_some(Target::Builtin(b))
+    }
+
+    /// Whether `scope` of `file` is the body of a `sketch()` that is the
+    /// builtin, with the extension on: a child block whose module
+    /// resolves to no definition of the program's (roof.scad's own
+    /// `module sketch` gets no vocabulary, as in the evaluator).
+    pub fn is_sketch_body(&self, file: &Arc<Analyzed>, scope: ScopeId) -> bool {
+        if !self.sketch {
+            return false;
+        }
+        let ix = &file.index;
+        let Some(r) = ix.scopes[scope].callee else {
+            return false;
+        };
+        if ix.refs[r].name != "sketch" {
+            return false;
+        }
+        matches!(
+            self.resolve(
+                file,
+                ix.refs[r].scope,
+                ix.refs[r].span.0,
+                "sketch",
+                Ns::Module
+            ),
+            Some(Target::Builtin(_))
+        )
+    }
+
+    /// The innermost sketch body around `scope`, if any.
+    pub fn sketch_body(&self, file: &Arc<Analyzed>, scope: ScopeId) -> Option<ScopeId> {
+        let ix = &file.index;
+        let mut s = Some(scope);
+        while let Some(i) = s {
+            if ix.scopes[i].kind == ScopeKind::File {
+                return None;
+            }
+            if self.is_sketch_body(file, i) {
+                return Some(i);
+            }
+            s = ix.scopes[i].parent;
+        }
+        None
     }
 
     /// A top-level definition of the program: in `prefer` (the file asked
@@ -447,6 +509,22 @@ impl World {
                     add(&mut out, candidate(file, id, Origin::Local));
                 }
             }
+            // Inside a sketch body its vocabulary comes before anything
+            // the scopes around it define.
+            if self.is_sketch_body(file, i) {
+                for e in crate::sketch::vocabulary_all() {
+                    add(
+                        &mut out,
+                        Candidate {
+                            name: e.name.clone(),
+                            ns: crate::sketch::ns_of(e),
+                            origin: Origin::Local,
+                            found: None,
+                            builtin: Some(e),
+                        },
+                    );
+                }
+            }
             s = ix.scopes[i].parent;
         }
         for f in std::iter::once(file).chain(self.files.iter()) {
@@ -469,11 +547,10 @@ impl World {
             }
         }
         for e in docs::builtins() {
-            // The sketch vocabulary exists only inside sketch bodies; until
-            // completion knows where it is (stage 4 of
-            // docs/language-extensions.md), it is not offered at all, so
-            // `on` or `length` are never suggested where they mean nothing.
-            if e.extension.as_deref() == Some("sketch") && e.name != "sketch" {
+            // The sketch vocabulary exists only inside sketch bodies (added
+            // above when the cursor is in one), so `on` or `length` are
+            // never suggested where they mean nothing.
+            if crate::sketch::is_vocabulary(e) {
                 continue;
             }
             let ns = match e.kind {

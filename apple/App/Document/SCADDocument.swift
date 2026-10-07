@@ -237,6 +237,9 @@ final class SCADDocument: NSDocument {
     var toolbar: DocumentToolbar?
     /// Tells the agent link when this window becomes the focused one.
     var keyObserver: NSObjectProtocol?
+    /// Settings > Language changed: the runs and the language server take
+    /// the new `--enable` names.
+    private var languageObserver: NSObjectProtocol?
 
     /// The text changed (any way): agents must read it again.
     func textRevised() {
@@ -279,6 +282,15 @@ final class SCADDocument: NSDocument {
                 languageServer = server
                 editor.connect(server)
             }
+            applyLanguageSettings()
+            languageObserver = NotificationCenter.default.addObserver(
+                forName: LanguageSettings.didChange, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.applyLanguageSettings() else { return }
+                    if let mode = self.lastMode { self.run(mode) } else { self.schedulePreview() }
+                }
+            }
             watcher.onChange = { [weak self] in self?.filesChanged() }
             watcher.onDocumentChange = { [weak self] in self?.documentFileChanged() }
             connectPanels()
@@ -287,6 +299,16 @@ final class SCADDocument: NSDocument {
             model.actions.keepMine = { [weak self] in self?.keepMine() }
             model.actions.clearAgentMarks = { [weak self] in self?.clearAgentMarks() }
         }
+    }
+
+    /// Pass Settings > Language's `--enable` names to the loop (every run
+    /// from now on) and the language server (the sketch vocabulary in
+    /// completion and hover). Whether they changed.
+    @discardableResult
+    func applyLanguageSettings() -> Bool {
+        let enable = LanguageSettings.enable
+        try? languageServer?.setEnable(enable: enable)
+        return (try? loop.setEnable(enable: enable)) ?? false
     }
 
     /// The URI the language server knows this document by: the core's
@@ -589,6 +611,8 @@ final class SCADDocument: NSDocument {
     /// language client, and the core's buffer.
     override func close() {
         isClosed = true
+        if let languageObserver { NotificationCenter.default.removeObserver(languageObserver) }
+        languageObserver = nil
         try? loop.close()
         pendingPreview?.cancel()
         pendingPreview = nil

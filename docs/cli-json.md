@@ -419,6 +419,21 @@ as on the bed), at most 10 findings per code.
   what it broke. Numbers are rounded to 0.1 µm.
 - `counts` are before truncation; `truncated` counts, per code, the
   findings past the limit.
+- `sketches` (only when the model has constrained sketches, `--enable
+  sketch`; `docs/sketch.md`): `[SKETCH, ...]`, each solved sketch in
+  tree order, at most 100 (`sketches_omitted` counts the rest; a sketch
+  in a module called twice is two). `SKETCH`: `{"name": string|null,
+  "file", "line", "span", "status": "fully-constrained" |
+  "underconstrained" | "conflict" | "not-converged" | "error", "dof",
+  "unknowns", "equations", "rank", "iterations", "residual",
+  "continuation": bool, "empty": bool, "codes": [code, ...]}`. `empty`
+  says an error left the sketch without a shape (an under-constrained
+  sketch with `strict = true` is `underconstrained` and empty); `codes`
+  are those of the diagnostics printed about it, each once, which
+  `diagnostics` has in full. The text report has a line per sketch
+  (`sketch 'slot' (line 4): fully constrained, 12 unknowns`). The same
+  JSON is in the failed form too, where a model with sketch errors that
+  rendered nothing still lists them.
 - `timings_ms.check.cuts` is the `cut-away` and `cuts-nothing` stage,
   which runs on the node tree right after the render, before the mesh
   checks; `check.total` does not include it.
@@ -472,16 +487,17 @@ overhang.
 
 `neoscad measure MODEL.scad [--part P] [--between A B] [--section
 z=H|x=H|y=H] [--axis x|y|z] [--center A,B] [--profile FROM:TO:STEP]
-[--svg FILE] [--enable part] [-D var=val] [--format json]`
-(`crates/session/src/measure.rs`). Exit status 0, or 1 when the model
-fails or a named part does not exist (then `error` says which parts
-there are).
+[--sketch NAME] [--svg FILE] [--enable part|sketch] [-D var=val]
+[--format json]` (`crates/session/src/measure.rs`). Exit status 0, or 1
+when the model fails or a named part or sketch does not exist (then
+`error` says which there are).
 
 ```json
 {"schema": 1, "input": "model.scad", "exit_code": 0,
  "model": SOLID|GEOM2D|null, "parts": [SOLID + {"name", "instances",
  "context"}, ...],
  "between": BETWEEN, "section": SECTION|null, "profile": PROFILE|null,
+ "sketch": SKETCH,
  "timings_ms": {"evaluate", "geometry", "measure", "total"},
  "diagnostics": DIAG}
 ```
@@ -537,6 +553,20 @@ there are).
   (`pitch_span`: the first and last crest fitted). The pilot's M24x2
   adapter gives pitch 2 over crests 2..10 and radii 10.64..11.64 in
   the thread.
+- `sketch` (with `--sketch NAME` and `--enable sketch`): the first
+  sketch named `NAME`, as `check`'s `SKETCH` plus `"instances"` (how
+  many sketches have that name) and `"entities": [ENTITY, ...]`, every
+  entity in creation order: `{"id": int, "name": string|null, "kind":
+  "point"|"line"|"arc"|"circle", "construction"?: true, "file",
+  "line", "span"}` and its solved values, absent when the sketch did
+  not solve: a point's `"at": [x, y]`; a line's `"start"`, `"end"`,
+  `"length"` and `"angle"` (degrees counter-clockwise from +x); an
+  arc's `"center"`, `"start"`, `"end"`, `"radius"`, `"sweep"` (degrees,
+  in its own direction) and `"cw"?: true`; a circle's `"center"` and
+  `"radius"`. `name` is the variable holding it (`top`, `top.start`
+  for a point made from coordinates, `pts[0]`). Numbers are rounded to
+  1e-9. The text report has a line per entity (`top line [0, 4]..[30,
+  4], length 30, angle 0°`).
 
 # `neoscad fmt`
 
@@ -880,3 +910,6 @@ have them.
   error hint of a program that stops short says "unexpected end of input"
   just after its last character (it named the end marker OpenSCAD
   appends: ``unexpected `\u0003` at line 2, column 1``).
+- Constrained sketches, stage 4 (`docs/sketch.md`): `check`'s
+  `sketches` and `sketches_omitted` (only for a model with sketches),
+  and `measure --sketch NAME` with its `sketch` object. Additive.

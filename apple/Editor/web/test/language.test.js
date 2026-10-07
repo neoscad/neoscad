@@ -96,6 +96,20 @@ test("builtin names are classified as OpenSCAD's editor classifies them", () => 
   ]);
 });
 
+test("the sketch vocabulary is coloured only inside sketch bodies", () => {
+  const s = state(
+    "circle(1); arc(2); sketch(name = \"s\") { c = circle(point([0, 0]), r = 1); fix(c.center); if (true) horizontal(l); } x = line;",
+  );
+  const found = builtinNames(s).map((n) => `${s.sliceDoc(n.from, n.to)}:${n.kind}`);
+  assert.deepEqual(found, [
+    "circle:model",
+    "circle:sketch",
+    "point:sketch",
+    "fix:sketch",
+    "horizontal:sketch",
+  ]);
+});
+
 test("new lines indent by the structure", () => {
   // Each line is asked for its indentation given the lines above it as
   // they stand; the expected values are the indentation shown.

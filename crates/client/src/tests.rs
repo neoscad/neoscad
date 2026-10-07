@@ -81,6 +81,30 @@ fn console_lines_point_in_editor_positions() {
     assert_eq!(at.start_line, 1);
 }
 
+/// A sketch's free degrees of freedom are an info diagnostic, which the
+/// apps had dropped: `diagnostics` keeps it, with its hints.
+#[test]
+fn info_diagnostics_reach_the_apps() {
+    let c = client();
+    let src = "sketch(name = \"s\") { p = point([1, 2]); q = point([5, 2]); l = line(p, q); }\n";
+    c.open(DOC, Some(src.into())).unwrap();
+    let req = DocumentRequest {
+        mode: RenderMode::Preview,
+        overrides: Vec::new(),
+        parts: false,
+        enable: vec!["sketch".into()],
+    };
+    let (run, _, _) = c.document_run(DOC, &req).unwrap();
+    let r = c.session.evaluate(&run, false).unwrap();
+    let d = crate::types::diagnostics(&r.log);
+    let info = d
+        .iter()
+        .find(|d| d.code == "sketch-underconstrained")
+        .unwrap_or_else(|| panic!("{d:?}"));
+    assert_eq!(info.severity, crate::Severity::Info);
+    assert!(!info.hints.is_empty());
+}
+
 #[test]
 fn overrides_run_as_assignments_and_bad_ones_are_dropped() {
     let c = client();

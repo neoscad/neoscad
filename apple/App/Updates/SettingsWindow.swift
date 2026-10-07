@@ -5,7 +5,9 @@
 //   release-candidate channel;
 // - Agents: whether AI agents may work on open documents, whether their
 //   edits wait for Apply, and who is connected
-//   (Agents/AgentService.swift).
+//   (Agents/AgentService.swift);
+// - Language: NeoSCAD's extensions to the OpenSCAD language, off by
+//   default (Editor/LanguageSettings.swift).
 //
 // SwiftUI forms in an AppKit window with toolbar tabs, as macOS settings
 // windows look, because the app is built on NSApplication rather than a
@@ -21,7 +23,7 @@ final class SettingsWindowController: NSWindowController {
     static let shared = SettingsWindowController()
 
     enum Tab: Int {
-        case updates, agents
+        case updates, agents, language
     }
 
     private let tabs = NSTabViewController()
@@ -33,6 +35,8 @@ final class SettingsWindowController: NSWindowController {
                 "Updates", "arrow.triangle.2.circlepath",
                 SettingsView(model: UpdateSettingsModel())))
         tabs.addTabViewItem(Self.pane("Agents", "sparkles", AgentSettingsView(service: .shared)))
+        tabs.addTabViewItem(
+            Self.pane("Language", "curlybraces", LanguageSettingsView(model: LanguageSettingsModel())))
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
         window.setFrameAutosaveName("NeoSCADSettings")
@@ -114,6 +118,43 @@ struct SettingsView: View {
                     Text("This build of NeoSCAD doesn't update itself.")
                         .foregroundStyle(.secondary)
                 }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Settings > Language's state, kept in `LanguageSettings` (the app's
+/// defaults), which tells open documents when it changes.
+@MainActor
+final class LanguageSettingsModel: ObservableObject {
+    @Published var sketches: Bool {
+        didSet { LanguageSettings.sketches = sketches }
+    }
+
+    init() {
+        sketches = LanguageSettings.sketches
+    }
+}
+
+/// Settings > Language: NeoSCAD's extensions to the OpenSCAD language.
+struct LanguageSettingsView: View {
+    @ObservedObject var model: LanguageSettingsModel
+
+    var body: some View {
+        Form {
+            Section("NeoSCAD extensions") {
+                Toggle("Constrained sketches (sketch)", isOn: $model.sketches)
+                Text(
+                    "Points, lines, arcs and circles tied by constraints and solved into a 2D shape, "
+                        + "like the command line's --enable sketch. A NeoSCAD extension, not in OpenSCAD: "
+                        + "off, sketch() is an unknown module as in OpenSCAD."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
         .formStyle(.grouped)

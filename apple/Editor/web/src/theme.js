@@ -102,6 +102,9 @@ function editorTheme(s) {
       ".cm-scad-boolean": { color: s.boolean },
       ".cm-scad-function": { color: s.function },
       ".cm-scad-model": { color: s.model },
+      // The sketch vocabulary inside a sketch body: entities and
+      // constraints are geometry, coloured as the primitives are.
+      ".cm-scad-sketch": { color: s.model },
       ".cm-scad-value": { color: s.number },
       ".cm-panels": { backgroundColor: s.marginBackground, color: s.text },
       ".cm-tooltip": { backgroundColor: s.marginBackground, color: s.text },

@@ -237,6 +237,15 @@ impl DocumentController {
         })
     }
 
+    /// The `--enable` names the runs pass from now on (the app's setting
+    /// for constrained sketches, `sketch`). Whether they changed.
+    pub fn set_enable(&self, enable: Vec<String>) -> Result<bool, CoreError> {
+        self.change(|l| {
+            let c = l.set_enable(&enable);
+            (c, c)
+        })
+    }
+
     /// The edited values as a run takes them, sorted by name.
     pub fn overrides(&self) -> Result<Vec<ParameterOverride>, CoreError> {
         self.read(client::DocumentLoop::overrides)

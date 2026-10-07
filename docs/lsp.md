@@ -14,7 +14,15 @@ can run it. It offers:
   document and what it includes, not the files that include it);
 - formatting of a whole document or a range, following
   `.neoscad-fmt.toml`;
-- document symbols (the outline) and folding ranges.
+- document symbols (the outline) and folding ranges;
+- with `--enable sketch`, constrained sketches (`docs/sketch.md`): the
+  sketch vocabulary completed (with snippets), hovered and resolved only
+  inside sketch bodies; an under-constrained sketch as an information
+  marker; each hint's edit as a quick fix; "Pin drawing" as a code
+  action (`refactor.rewrite`) anywhere in a sketch; on hover, an entity
+  variable's solved values and a `sketch` call's state from the last
+  evaluation of the same text; and go to definition on a handle's member
+  (`top.start`) to the point it names.
 
 It finds libraries as the command line does: beside the file, on
 `OPENSCADPATH`, in the user library folder, then the bundled ones (MCAD).

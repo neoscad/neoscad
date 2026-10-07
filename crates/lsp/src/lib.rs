@@ -58,6 +58,7 @@ pub mod index;
 mod layout;
 mod navigate;
 pub mod proto;
+mod sketch;
 pub mod uri;
 mod value;
 pub mod world;
@@ -90,6 +91,11 @@ pub struct Options {
     /// The host supplies each document's diagnostics ([`Server::supply`])
     /// and the server never evaluates (see the crate documentation).
     pub host_diagnostics: bool,
+    /// NeoSCAD's extensions the host runs documents with, besides the
+    /// session's own (`Config::extensions`): with `sketch`, sketch bodies
+    /// bind the sketch vocabulary for completion, hover and navigation,
+    /// and the server's own evaluations enable it.
+    pub extensions: session::Extensions,
 }
 
 /// A run the host supplied: the text it read and its diagnostics.
@@ -144,6 +150,9 @@ struct State {
     /// With [`Options::host_diagnostics`]: the latest run the host
     /// supplied per document path, with the text it read.
     supplied: HashMap<PathBuf, Supplied>,
+    /// The latest run's sketches per document path, with the text it
+    /// read (hover's solved values, "Pin drawing").
+    sketches: HashMap<PathBuf, sketch::Facts>,
 }
 
 /// A language server. See the crate documentation.
@@ -164,11 +173,21 @@ pub(crate) struct Ctx<'a> {
     pub libs: Vec<PathBuf>,
     /// The URIs the client opened files under, by path.
     pub uris: HashMap<PathBuf, String>,
+    /// The sketches of the last run of exactly this text, if any.
+    pub sketches: Option<sketch::Facts>,
 }
 
 impl Ctx<'_> {
     pub fn file(&self) -> &Arc<Analyzed> {
         self.world.main()
+    }
+
+    /// The last run's sketches, when it read the document's current text.
+    pub fn sketches(&self) -> &[Value] {
+        self.sketches
+            .as_ref()
+            .and_then(|f| f.for_text(self.file().text()))
+            .unwrap_or_default()
     }
 
     /// The URI of a file: the client's own spelling for a file it has
@@ -202,6 +221,27 @@ impl Server {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .limits = limits;
+    }
+
+    /// Change the extensions the host runs documents with
+    /// ([`Options::extensions`]), as an app's setting does.
+    pub fn set_extensions(&self, extensions: session::Extensions) {
+        self.opts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extensions = extensions;
+    }
+
+    /// Whether sketch bodies bind the sketch vocabulary: the host's
+    /// extensions or the session's have `sketch`.
+    fn sketch_on(&self, session: &Session) -> bool {
+        let opts = self
+            .opts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extensions;
+        opts.union(session.config().extensions)
+            .has(session::Extension::Sketch)
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -265,6 +305,30 @@ impl Server {
             }
         }
         self.publish_supplied(session)
+    }
+
+    /// [`Server::supply`] with a whole run's log: its diagnostics, and
+    /// its sketches for hover and "Pin drawing". What a host that has the
+    /// log calls.
+    pub fn supply_log(
+        &self,
+        session: &Session,
+        path: &Path,
+        text: Arc<[u8]>,
+        log: &session::Log,
+    ) -> Vec<String> {
+        self.keep_sketches(path, text.clone(), log);
+        self.supply(session, path, text, log.diagnostics_json())
+    }
+
+    /// Keep a run's sketches for the document at `path` (dropping an
+    /// older run's, also when this one has none).
+    fn keep_sketches(&self, path: &Path, text: Arc<[u8]>, log: &session::Log) {
+        let facts = sketch::Facts {
+            text,
+            sketches: log.sketches.clone(),
+        };
+        self.state().sketches.insert(session::normal(path), facts);
     }
 
     /// Publish every due document whose text a supplied run read; the
@@ -405,7 +469,31 @@ impl Server {
                     .get(uri)
                     .cloned()
                     .unwrap_or_default();
-                diagnose::code_actions(uri, ctx.file().source(), params, &published)
+                let mut actions =
+                    diagnose::code_actions(uri, ctx.file().source(), params, &published);
+                let refactor = params
+                    .pointer("/context/only")
+                    .and_then(Value::as_array)
+                    .is_none_or(|o| {
+                        o.iter()
+                            .any(|k| k.as_str().is_some_and(|k| k.starts_with("refactor")))
+                    });
+                if let (true, Some(range), Value::Array(list)) = (
+                    refactor,
+                    params
+                        .get("range")
+                        .and_then(|r| proto::offsets(ctx.file().source(), r)),
+                    &mut actions,
+                ) {
+                    list.extend(sketch::pin_actions(
+                        uri,
+                        ctx.file().source(),
+                        &ctx.file().path,
+                        ctx.sketches(),
+                        range,
+                    ));
+                }
+                actions
             }
             _ => return Err((code::METHOD_NOT_FOUND, format!("unknown method '{method}'"))),
         })
@@ -490,6 +578,7 @@ impl Server {
                     st.dirty.retain(|u| *u != uri);
                     if !st.docs.values().any(|d| d.path == doc.path) {
                         st.supplied.remove(&session::normal(&doc.path));
+                        st.sketches.remove(&session::normal(&doc.path));
                     }
                     if self.sync_session() {
                         session.close(&doc.path);
@@ -527,7 +616,7 @@ impl Server {
     fn context<'s>(&self, session: &'s Session, uri: &str) -> Result<Ctx<'s>, (i64, String)> {
         let path =
             uri::to_path(uri).ok_or((code::INVALID_PARAMS, format!("not a file URI: {uri}")))?;
-        let (doc, open, uris) = {
+        let (doc, open, uris, sketches) = {
             let st = self.state();
             let open: HashMap<PathBuf, Arc<Doc>> = st
                 .docs
@@ -539,7 +628,8 @@ impl Server {
                 .iter()
                 .map(|(u, d)| (d.path.clone(), u.clone()))
                 .collect();
-            (st.docs.get(uri).cloned(), open, uris)
+            let sketches = st.sketches.get(&session::normal(&path)).cloned();
+            (st.docs.get(uri).cloned(), open, uris, sketches)
         };
         let doc = match doc {
             Some(d) => d,
@@ -560,6 +650,7 @@ impl Server {
             uri: uri.to_string(),
             libs: session.config().libs.0.clone(),
             uris,
+            sketches,
         })
     }
 
@@ -576,8 +667,10 @@ impl Server {
                 None => fs.metadata(p),
             }
         };
+        let sketch = self.sketch_on(session);
         let mut slot = doc.world.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some((w, stamps)) = &*slot
+            && w.sketch == sketch
             && stamps.iter().all(|(p, m)| m.is_some() && stamp(p) == *m)
         {
             return w.clone();
@@ -592,7 +685,9 @@ impl Server {
                     .map(|d| d.analyzed())
             },
         };
-        let w = Arc::new(World::new(doc.analyzed(), &loader));
+        let mut w = World::new(doc.analyzed(), &loader);
+        w.sketch = sketch;
+        let w = Arc::new(w);
         let stamps = w
             .files
             .iter()
@@ -628,11 +723,10 @@ impl Server {
             let (open, uris) = open_docs(&st);
             (jobs, open, uris)
         };
-        let limits = self
-            .opts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .limits;
+        let (limits, extensions) = {
+            let o = self.opts.lock().unwrap_or_else(PoisonError::into_inner);
+            (o.limits, o.extensions)
+        };
         let mut out = Vec::new();
         for (uri, doc, flag) in jobs {
             let mut run = Run::new(doc.path.to_string_lossy());
@@ -643,6 +737,7 @@ impl Server {
             run.text = Some(doc.text.clone());
             run.interrupt = Some(flag.clone());
             run.limits = limits;
+            run.extensions = extensions;
             let Ok(ev) = session.evaluate(&run, false) else {
                 // Cancelled: by a newer change (already due again), or by
                 // the host cancelling the document's requests, after which
@@ -656,6 +751,7 @@ impl Server {
                 continue;
             };
             let diags = ev.log.diagnostics_json();
+            self.keep_sketches(&doc.path, doc.text.clone(), &ev.log);
             out.extend(self.publish_one(session, &uri, &doc, &diags, &open, &uris, Some(&flag)));
         }
         out
@@ -685,10 +781,21 @@ impl Server {
             Some(Arc::new(SourceFile::new(p.to_path_buf(), t)))
         };
         let uri_for = |p: &Path| uris.get(p).cloned().unwrap_or_else(|| uri::from_path(p));
-        let per_uri =
+        let mut per_uri =
             diagnose::convert(&world, &session.config().libs.0, diags, &text_of, &uri_for);
         let mut out = Vec::new();
         let mut st = self.state();
+        // "Pin drawing" on the sketch's own diagnostics, from the run of
+        // this very text.
+        if let Some(sk) = st
+            .sketches
+            .get(&session::normal(&doc.path))
+            .and_then(|f| f.for_text(&doc.text))
+            && let Some((_, list)) = per_uri.first_mut()
+        {
+            let main = world.main();
+            sketch::attach_pins(list, main.source(), &main.path, sk);
+        }
         let current = st.docs.get(uri).is_some_and(|d| Arc::ptr_eq(d, doc));
         if !current || flag.is_some_and(|f| f.load(Ordering::Relaxed)) {
             return out;
@@ -757,7 +864,7 @@ fn initialize_result() -> Value {
             "documentSymbolProvider": true,
             "foldingRangeProvider": true,
             "renameProvider": {"prepareProvider": true},
-            "codeActionProvider": {"codeActionKinds": ["quickfix"]},
+            "codeActionProvider": {"codeActionKinds": ["quickfix", "refactor.rewrite"]},
         },
         "serverInfo": {"name": "neoscad", "version": env!("CARGO_PKG_VERSION")},
     })

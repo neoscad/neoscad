@@ -58,6 +58,11 @@ pub(crate) struct Args {
     #[arg(long, value_name = "FROM:TO:STEP", allow_hyphen_values = true)]
     profile: Option<String>,
 
+    /// A constrained sketch's solved values, by its name (`--enable
+    /// sketch`): each entity's points, lengths, angles and radii.
+    #[arg(long, value_name = "NAME")]
+    sketch: Option<String>,
+
     /// Also write the section's outline as SVG.
     #[arg(long, value_name = "FILE", requires = "section")]
     svg: Option<String>,
@@ -70,7 +75,8 @@ pub(crate) struct Args {
     #[arg(short = 'D', value_name = "var=val", action = clap::ArgAction::Append)]
     define: Vec<String>,
 
-    /// `part`: neoscad's `part("name") { ... }` extension.
+    /// `part`: neoscad's `part("name") { ... }` extension; `sketch`:
+    /// constrained sketches.
     #[arg(long, value_name = "FEATURE", action = clap::ArgAction::Append)]
     enable: Vec<String>,
 
@@ -101,6 +107,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
         "axis": a.axis,
         "center": a.center,
         "profile": a.profile,
+        "sketch": a.sketch,
         "svg": a.svg,
         "json": match a.format.as_deref() {
             None => false,
@@ -130,7 +137,7 @@ fn fail(msg: impl std::fmt::Display) -> Outcome {
 /// The measure request a command's parameters give (`part`, `between`
 /// as two names, `section` as `axis=mm`, `axis` as a letter, `center` as
 /// `a,b` or `[a, b]`, `profile` as `from:to:step` or `[from, to, step]`,
-/// `svg`).
+/// `sketch` as a name, `svg`).
 pub fn request_of(params: &Value, run: session::Run) -> Result<MeasureRequest, String> {
     let mut req = MeasureRequest::new(run);
     req.part = params
@@ -178,6 +185,10 @@ pub fn request_of(params: &Value, run: session::Run) -> Result<MeasureRequest, S
     if let Some(v) = numbers("profile", ':', 3)? {
         req.profile = Some(Profile::new(v[0], v[1], v[2]).map_err(|e| format!("--{e}"))?);
     }
+    req.sketch = params
+        .get("sketch")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     req.svg = matches!(
         params.get("svg"),
         Some(Value::String(_)) | Some(Value::Bool(true))

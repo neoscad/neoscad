@@ -1603,11 +1603,28 @@ lead them, come roughly in order of user impact.
   test font is CFF. (5e)
 
 ## Constrained sketches
-- The apps drop `INFO:` diagnostics (an under-constrained sketch):
-  `client::types::diagnostic_of` knows only error, warning and
-  deprecated, and `client::Severity`/the ffi's have no info variant. Stage
-  4 should add one, with the editor marker and the LSP's
-  `DiagnosticSeverity::Information`.
+- The Linux and Windows apps have no setting for `--enable sketch`
+  (stage 4 added Settings > Language to the macOS app only). The
+  plumbing is there: `DocumentController::set_enable` (every run, check
+  and export of the window) and `LanguageServer::set_enable`; each app
+  needs a preference that calls both and runs the document again.
+- Hover on a constraint statement (satisfied, redundant or conflicting,
+  and its residual; `docs/language-extensions.md`, section 4.8) is not
+  built: the facts carry entities and the sketch's state, not
+  per-constraint status. The solver's `Solution` has what it needs
+  (`redundant`, `conflicts`, `unmet`).
+- The editor colours the sketch vocabulary inside any `sketch(...)`
+  child, also a program's own `module sketch` (roof.scad), and with the
+  extension off: the Lezer decorations do not resolve names. The
+  language server's own resolution is right; semantic tokens from it
+  would be.
+- `pin_drawing` now runs for every solved sketch (the "Pin drawing"
+  code action needs it), scanning the unit's expressions for the calls
+  inside the sketch's span: O(sketches × expressions). A sketch in a
+  loop of thousands of iterations in a large file pays it each time; an
+  index of call spans per unit would not.
+- `measure --sketch` renders the model as every `measure` does, though
+  it needs only the evaluation.
 - The diagnosis after a solve (`Solver::diagnose`'s rank analysis,
   O(equations × n²)) does not poll the interrupt; only the iterations
   and `Sketch::completion` do. Under `Limits::sketch_unknowns` (5,000)
@@ -1682,8 +1699,6 @@ lead them, come roughly in order of user impact.
   (section 9 of the design), and their `.csg` exports have been rendered
   by the stock nightly by hand only; a tier in the harness would compare
   those meshes on every run.
-- LSP completion leaves the sketch vocabulary out everywhere, until
-  stage 4 offers it inside sketch bodies only; hover shows its docs.
 - Moving the crate to its own repository needs its own CI (the wasm32
   build and the cross-platform digest now in `crates/wasm-check`), and
   the corpus (GPL/LGPL-derived) stays in NeoSCAD or goes to a separate

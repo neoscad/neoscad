@@ -79,6 +79,7 @@ impl Language {
             sync_session: false,
             host_diagnostics: true,
             limits: None,
+            ..lsp::Options::default()
         };
         let server = Arc::new(lsp::Server::with_cache(options, cache));
         let (tx, rx) = mpsc::channel::<String>();
@@ -151,10 +152,11 @@ impl Language {
     }
 
     /// Hand the server a run of the document at `path`: the exact text it
-    /// read and its diagnostics (`Log::diagnostics_json`), and deliver the
-    /// markers that are due now (for the client's version with that
-    /// text; later, from `handle`, if the client has not sent it yet).
-    pub fn supply(&self, path: &Path, text: Arc<[u8]>, diagnostics: Vec<Value>) {
+    /// read and its log (the diagnostics, and the sketches hover and "Pin
+    /// drawing" use), and deliver the markers that are due now (for the
+    /// client's version with that text; later, from `handle`, if the
+    /// client has not sent it yet).
+    pub fn supply(&self, path: &Path, text: Arc<[u8]>, log: &session::Log) {
         if self.is_stopped() {
             return;
         }
@@ -165,7 +167,7 @@ impl Language {
         let out = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
             self.inner
                 .server
-                .supply(&self.inner.client.session, path, text, diagnostics)
+                .supply_log(&self.inner.client.session, path, text, log)
         });
         if !out.is_empty() && !self.is_stopped() {
             (self.inner.sink)(out);

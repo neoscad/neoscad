@@ -1425,6 +1425,90 @@ fn a_program_that_stops_short_says_so() {
     );
 }
 
+/// With `--enable sketch`: `docs` for `sketch` ends with a sketch to
+/// adapt, which renders fully constrained; `check` lists the sketch and
+/// `measure` with `sketch` gives its solved values. The instructions are
+/// the same as without (they are at Claude Code's limit).
+#[test]
+fn sketches_in_check_measure_and_the_sketch_recipe() {
+    let dir = scratch("sketch");
+    let mut plain = Mcp::start(&dir, &[]);
+    let r = plain.call(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+    );
+    let before = r["result"]["instructions"].clone();
+    let r = plain.tool("docs", json!({"name": "sketch"}));
+    assert!(!text(&r).contains("module sketch_plate("), "{}", text(&r));
+
+    let mut s = Mcp::start(&dir, &["--enable", "sketch"]);
+    let r = s.call(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+    );
+    assert_eq!(r["result"]["instructions"], before);
+    let r = s.tool("docs", json!({"name": "sketch"}));
+    let docs = text(&r);
+    let at = docs.find("// Constrained sketch").expect("the recipe");
+    let recipe = &docs[at..];
+    assert!(recipe.contains("module sketch_plate("), "{docs}");
+    let r = s.call("resources/read", json!({"uri": "neoscad://recipes"}));
+    let all = r["result"]["contents"][0]["text"].as_str().unwrap();
+    assert!(all.contains("module sketch_plate("), "{all}");
+    let r = s.tool("docs", json!({}));
+    assert!(
+        text(&r).ends_with("`docs` for sketch has a recipe."),
+        "{}",
+        text(&r)
+    );
+
+    let src = format!("{recipe}\nsketch_plate();\n");
+    let r = s.tool("check", json!({"source": src, "min_wall": 1.2}));
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["model"]["manifold"], true, "{}", text(&r));
+    assert_eq!(sc["counts"]["errors"], 0, "{}", text(&r));
+    assert!(
+        sc["diagnostics"].as_array().unwrap().is_empty(),
+        "{}",
+        text(&r)
+    );
+    assert_eq!(
+        sc["sketches"],
+        json!([{"name": "plate", "status": "fully-constrained", "dof": 0, "unknowns": 11, "codes": [], "line": 4}]),
+        "{}",
+        text(&r)
+    );
+    assert!(
+        text(&r).contains("sketch 'plate' (line 4): fully constrained, 11 unknowns"),
+        "{}",
+        text(&r)
+    );
+
+    let r = s.tool("measure", json!({"source": src, "sketch": "plate"}));
+    let t = text(&r);
+    assert!(t.contains("  b point [40, 20]"), "{t}");
+    assert!(t.contains("  hc circle centre [20, 10], radius 3"), "{t}");
+    // Asked for a sketch, the answer is the sketch, not the model's
+    // numbers.
+    assert!(!t.contains("volume"), "{t}");
+    let sk = &r["structuredContent"]["sketch"];
+    assert_eq!(sk["status"], "fully-constrained");
+    let b = sk["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "b")
+        .unwrap();
+    assert_eq!(b["at"], json!([40.0, 20.0]));
+    assert!(b.get("span").is_none() && b.get("file").is_none(), "{b}");
+    let r = s.tool("measure", json!({"source": src, "sketch": "nope"}));
+    assert!(
+        text(&r).contains("no sketch 'nope' (sketches: plate)"),
+        "{}",
+        text(&r)
+    );
+}
+
 #[test]
 fn the_recipes_are_in_the_instructions_and_each_one_prints() {
     let dir = scratch("recipes");

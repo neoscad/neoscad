@@ -8,6 +8,12 @@
 // name), so these are mark decorations over the visible syntax tree rather
 // than highlighting tags. The highlight style leaves plain names
 // unstyled, so the decoration's colour is the one that shows.
+//
+// NeoSCAD's constrained sketches (`--enable sketch`, docs/sketch.md) bind
+// their vocabulary only inside the body of a `sketch()` call, so those
+// names are coloured as "sketch" there and nowhere else: a coloured `arc`
+// is a sketch arc, never BOSL2's arc() (docs/language-extensions.md,
+// section 7).
 
 import { syntaxTree } from "@codemirror/language";
 import { RangeSetBuilder } from "@codemirror/state";
@@ -30,6 +36,34 @@ const lists = {
   value: "PI",
 };
 
+/// The sketch vocabulary: its entities and constraint statements.
+export const sketchVocabulary = new Set(
+  (
+    "point line arc circle coincident on horizontal vertical parallel " +
+    "perpendicular tangent distance length radius diameter angle equal " +
+    "midpoint symmetric fix fillet chamfer"
+  ).split(" "),
+);
+
+/// Whether `node` is inside the child of a `sketch(...)` call (its body,
+/// not its arguments).
+function inSketchBody(state, node) {
+  for (let n = node.parent; n; n = n.parent) {
+    if (n.name !== "ModuleCall") continue;
+    const name = n.firstChild;
+    const args = name?.nextSibling;
+    if (
+      name?.name === "ModuleName" &&
+      state.doc.sliceString(name.from, name.to) === "sketch" &&
+      args &&
+      node.from >= args.to
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// A builtin's kind by name: "keyword", "transformation", "boolean",
 /// "function", "model" or "value".
 export const builtinKind = new Map();
@@ -38,11 +72,12 @@ for (const [kind, words] of Object.entries(lists)) {
 }
 
 const marks = {};
-for (const kind of Object.keys(lists)) {
+for (const kind of [...Object.keys(lists), "sketch"]) {
   marks[kind] = Decoration.mark({ class: `cm-scad-${kind}` });
 }
 
-/// Each builtin name in `from..to` of `state`, in order: `{from, to, kind}`.
+/// Each builtin name in `from..to` of `state`, in order: `{from, to, kind}`
+/// (`kind` "sketch" for the sketch vocabulary inside a sketch body).
 export function builtinNames(state, from = 0, to = state.doc.length) {
   const out = [];
   syntaxTree(state).iterate({
@@ -53,7 +88,11 @@ export function builtinNames(state, from = 0, to = state.doc.length) {
       if (name !== "VariableName" && name !== "ModuleName") return;
       // A `$` name is a special variable, never a builtin.
       if (node.node.firstChild?.name === "SpecialVariable") return false;
-      const kind = builtinKind.get(state.doc.sliceString(node.from, node.to));
+      const word = state.doc.sliceString(node.from, node.to);
+      const kind =
+        sketchVocabulary.has(word) && inSketchBody(state, node.node)
+          ? "sketch"
+          : builtinKind.get(word);
       if (kind) out.push({ from: node.from, to: node.to, kind });
       return false;
     },

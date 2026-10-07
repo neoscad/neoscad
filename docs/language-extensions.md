@@ -1,10 +1,11 @@
 # Language extensions: constrained sketches and geometry queries
 
 Status: design; stages 0 (the flags), 1 (the solver crate), 2 (the
-language binding of sketches, `--enable sketch`) and 3 (diagnostics with
-hints, strict mode, the unknowns limit) built; sections 11.1 and 11.2
-record how stages 2 and 3 were built and where they depart from this
-text.
+language binding of sketches, `--enable sketch`), 3 (diagnostics with
+hints, strict mode, the unknowns limit) and 4 (the sketch surfaces:
+`check`, `measure --sketch`, the language server, MCP, the apps'
+setting, `docs/sketch.md`) built; sections 11.1 to 11.3 record how
+stages 2 to 4 were built and where they depart from this text.
 Written 2026-10-07 against the tree at
 `4aa80a4` and the reference checkout in `.reference/openscad`. Every
 claim about this codebase cites `path:line`; claims about OpenSCAD cite
@@ -1147,6 +1148,86 @@ and 4.7:
   `completion` and `unmet` have tests of their own
   (`crates/sketch/tests/completion.rs`), and the edit placement
   (deletion, insertion) unit tests in `crates/eval/src/sketch.rs`.
+
+### 11.3 Stage 4 as built
+
+Stage 4 is in `crates/session/src/sketches.rs` (the facts as JSON),
+`check.rs` and `measure.rs`, `crates/lsp/src/sketch.rs` and the server's
+resolution (`world.rs`), the MCP tools, `client`/`ffi` and the apps, and
+`docs/sketch.md`. What it does, and where it departs from section 4.8:
+
+- **Where the facts travel.** The evaluator's `SketchReport` gained each
+  entity (label, kind, construction, span, solved values: a line's
+  length and angle, an arc's radius and sweep), the "pin the drawing"
+  edit, now computed for every solved sketch rather than only with a
+  flip (`pin_drawing`), and the codes of its diagnostics. After
+  evaluation the session walks the tree (only with the extension on)
+  and keeps each sketch as JSON in `Log::sketches`, the first 100 with
+  the count, so every host gets them with the run's diagnostics through
+  the same path, as section 4.8 asks. Values are rounded to 1e-9 there.
+- **`check`** has `sketches` (name, place, `status`, DOF, unknowns,
+  equations, rank, iterations, residual, continuation, `empty`, codes)
+  only when the model has a sketch, so other checks read as before, and
+  a line per sketch in the text. **`measure --sketch NAME`** reports the
+  first sketch of that name with every entity's solved values and
+  `instances`; an unknown name is an error listing the names. It still
+  renders the model, as every `measure` does.
+- **Language server.** `Options::extensions` (and `set_extensions`, for
+  the apps' setting) together with the session's own make sketch bodies
+  bind the vocabulary in resolution, as the evaluator's `Env::vocab`
+  does: the child block of a `sketch` call that resolves to the builtin
+  (scopes now record their instantiation's reference). Completion offers
+  the vocabulary only there, with snippets; hover and signature help
+  find the vocabulary's entries there and only there (outside, `circle`
+  is OpenSCAD's module and `point` unknown), with the extension label
+  from `docs`. Hover adds an entity variable's solved values and a
+  `sketch` call's state from the last run of exactly the current text:
+  facts are kept with the text the run read, from the server's own
+  evaluation or from a host's `Server::supply_log` (the macOS, Windows,
+  Linux and web hosts now hand over the log rather than its diagnostics
+  alone). "Pin drawing" is a `refactor.rewrite` code action anywhere in
+  a sketch, and also a fix on the sketch's own diagnostics, since the
+  apps' editor offers fixes from diagnostics only. Every hint with an
+  edit already was a quick fix (`diagnose::fixes`); info diagnostics are
+  published as `Information`. Go to definition on a handle's member
+  (`top.start`, `e1.center`) goes to the point it names: the variable
+  given as that argument, through further members, or the `[x, y]`
+  literal. Hover on a constraint (satisfied, redundant, its residual) is
+  not built.
+- **Info severity in the apps.** `client::Severity` and the ffi's gained
+  `Info`, and `diagnostic_of` maps it. The shared editor bundle already
+  mapped LSP severity 3 to CodeMirror's `info` marker, so the macOS,
+  Windows and Linux editors show it once the server publishes it.
+- **Editor colours.** `builtins.js` colours the vocabulary as `sketch`
+  inside the child of a `sketch(...)` call only (section 7). The editor
+  cannot tell the builtin from a program's own `module sketch`, so it
+  colours inside that too.
+- **MCP.** `measure` takes `sketch`; `check`'s structured content lists
+  the sketches (name, status, DOF, unknowns, codes, line). The sketch
+  recipe (`crates/cli/src/mcp/recipe_sketch.scad`) is not in the
+  instructions: with the printing recipes they are 2,038 of Claude
+  Code's 2,048 characters, and a server without the extension should not
+  steer agents to `sketch()`. With `--enable sketch`, `docs` for
+  `sketch` ends with it, the index says so in a line, and
+  `neoscad://recipes` appends it.
+- **Apps' setting.** The macOS app has Settings > Language >
+  "Constrained sketches (sketch)", passed to the document loop (a new
+  `set_enable`, so every run, check, measure and export takes it) and to
+  the window's language server (`LanguageServer::set_enable`); changing
+  it runs open documents again. Linux and Windows have no such setting
+  yet (`docs/followups.md`).
+- **Snapshot.** `snapshot --sketch` stays in stage 7, as the table in
+  section 11 has it.
+- **Tests.** `crates/session/tests/sketch.rs` (the `check` listing on
+  the diagnostics golden, `measure` on the slot, and every example of
+  `docs/sketch.md` with the diagnostics its fence names);
+  `crates/lsp/tests/sketch.rs` (scoped completion, hover and resolution,
+  roof.scad's own module, info markers, quick fixes and "Pin drawing"
+  applied, solved values on hover and their invalidation, a host's run,
+  definitions through members); `crates/cli/tests/mcp.rs` (the recipe
+  renders fully constrained; `check` and `measure` through MCP);
+  `crates/client` (info diagnostics, `enable` through the loop); the
+  editor's `language.test.js` (the colours).
 
 ## 12. Alternatives considered
 

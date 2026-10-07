@@ -69,6 +69,9 @@ pub struct DocumentLoop {
     values: BTreeMap<String, ParameterValue>,
     selected_set: Option<String>,
     parts: bool,
+    /// `--enable` names the runs pass: the app's setting for NeoSCAD's
+    /// `sketch` extension, or OpenSCAD's experiments.
+    enable: Vec<String>,
     closed: bool,
 }
 
@@ -87,6 +90,7 @@ impl DocumentLoop {
             values: BTreeMap::new(),
             selected_set: None,
             parts: false,
+            enable: Vec::new(),
             closed: false,
         }
     }
@@ -165,7 +169,7 @@ impl DocumentLoop {
                 mode,
                 overrides: self.overrides(),
                 parts: self.parts,
-                enable: Vec::new(),
+                enable: self.enable.clone(),
             },
         })
     }
@@ -338,5 +342,17 @@ impl DocumentLoop {
 
     pub fn parts(&self) -> bool {
         self.parts
+    }
+
+    /// The `--enable` names runs pass from now on (a window's setting for
+    /// `sketch`). Whether they changed, so the host runs again.
+    pub fn set_enable(&mut self, names: &[String]) -> bool {
+        let changed = self.enable != names;
+        self.enable = names.to_vec();
+        changed
+    }
+
+    pub fn enable(&self) -> &[String] {
+        &self.enable
     }
 }

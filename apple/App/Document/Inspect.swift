@@ -32,7 +32,7 @@ extension SCADDocument {
     }
 
     var runOptions: RunOptions {
-        RunOptions(overrides: overrides, parts: model.partsEnabled)
+        RunOptions(overrides: overrides, parts: model.partsEnabled, enable: LanguageSettings.enable)
     }
 
     /// The window's parts toggle: the view runs again with it, and the

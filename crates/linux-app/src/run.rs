@@ -65,7 +65,7 @@ pub fn run_document(
         let (doc, text) = (doc.clone(), text.clone());
         run.on_evaluated = Some(Arc::new(move |log: &session::Log| {
             let diags = log.diagnostics_json();
-            ls.supply(&doc, text.clone(), diags.clone());
+            ls.supply(&doc, text.clone(), log);
             *published.lock().unwrap_or_else(PoisonError::into_inner) = Some(diags);
         }));
     }
@@ -77,7 +77,7 @@ pub fn run_document(
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         if early.as_ref() != Some(&diags) {
-            ls.supply(&doc, text.clone(), diags);
+            ls.supply(&doc, text.clone(), &r.log);
         }
     }
     let scene = client::run_scene(&r, scheme, render::Previewer::OpenCsg)?;

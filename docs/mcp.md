@@ -222,7 +222,7 @@ transcript audit read as a problem in its model.
 | `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch, and edges an STL breaks at 32-bit precision), components; optionally writes the model and reads a mesh file back | `export` (a file; format from its extension; `.stl` is ASCII STL), `overwrite` |
 | `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `dims`, `preview`, `output` (also save the PNG; a `.png` name), `overwrite` |
 | `check` | printability findings, each with location and fix; the description asks for the spec's minimum wall as `min_wall`; optionally `render`'s export and `measure`'s sections in the same result | `bed`, `nozzle`, `min_wall`, `max_overhang`, `export`, `overwrite`, `sections` (planes, each as `measure`'s `section`) |
-| `measure` | model and part bbox, volume, centroid; distance between parts, or the overlap's pieces; sections with each contour's area, bbox, hole and radii; a radius profile with crests and pitch | `part`, `between`, `section`, `axis` (`x`/`y`/`z`, default z), `center` (`[a, b]`, the axis's position, default `[0, 0]`), `profile` (`[from, to, step]` along the axis) |
+| `measure` | model and part bbox, volume, centroid; distance between parts, or the overlap's pieces; sections with each contour's area, bbox, hole and radii; a radius profile with crests and pitch; a constrained sketch's solved points, lengths, angles and radii | `part`, `between`, `section`, `axis` (`x`/`y`/`z`, default z), `center` (`[a, b]`, the axis's position, default `[0, 0]`), `profile` (`[from, to, step]` along the axis), `sketch` (a sketch's `name`, with `--enable sketch`) |
 | `test` (`--tool test`) | model tests (`docs/model-tests.md`); `path` is a test file or directory, `source` a test file's text | `filter` |
 | `format` (`--tool format`) | `source`: the formatted text; `path`: rewrites the file (only whitespace changes) | `check` (say how many lines would change, write nothing), `diff` (with `check`: the diff itself) |
 | `docs` | a builtin's or printing recipe's reference, or with `path` a file's definitions; no name: the index, which ends with the recipes' names | `name`, `full`, `verbose` (the whole index) |
@@ -312,6 +312,20 @@ and requires one manifold solid with no errors or warnings (the
 thread's flanks are info). Every session pays for them, and with the
 guidance they must fit Claude Code's 2,048 characters (above), so
 their comments are terse.
+
+A server started with `--enable sketch` has one more recipe, a
+constrained sketch (`crates/cli/src/mcp/recipe_sketch.scad`: a plate
+with rounded corners and a centred hole, fully constrained; see
+`docs/sketch.md`). It is not in the instructions, which are at the
+limit already and which a server without the extension must not spend
+on `sketch()`: `docs` for `sketch` ends with it, the index says so in
+one line, and `neoscad://recipes` appends it. With the extension,
+`check`'s structured content lists each sketch (`sketches`: name,
+`status`, `dof`, `unknowns`, the codes of its diagnostics and its
+line) and its text a line per sketch; `measure` with `sketch` answers
+with that sketch's entities and their solved values, and leaves out
+the model's numbers as for a section. `crates/cli/tests/mcp.rs` checks
+that the recipe renders fully constrained and that both tools say so.
 
 ### Results
 

@@ -77,6 +77,18 @@ impl LanguageServer {
         })
     }
 
+    /// The `--enable` names the window runs its document with (the app's
+    /// setting for NeoSCAD's `sketch` extension): with `sketch`, sketch
+    /// bodies bind the sketch vocabulary for completion, hover and
+    /// navigation. OpenSCAD's feature names are ignored here.
+    pub fn set_enable(&self, enable: Vec<String>) -> Result<(), CoreError> {
+        guarded(|| {
+            self.server
+                .set_extensions(eval::Extensions::from_names(&enable));
+            Ok(())
+        })
+    }
+
     /// Whether a document changed since its diagnostics were published:
     /// the app then calls `publish_diagnostics` once typing pauses.
     pub fn diagnostics_pending(&self) -> Result<bool, CoreError> {

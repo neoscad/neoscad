@@ -87,6 +87,9 @@ pub enum Severity {
     Error,
     Warning,
     Deprecated,
+    /// NeoSCAD's notes that need no action (a sketch's free degrees of
+    /// freedom).
+    Info,
 }
 
 /// A range of source text: 1-based lines, 1-based byte columns, the end

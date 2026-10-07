@@ -47,16 +47,33 @@ impl Client {
         Client::with(fs, LibraryPath(vec![PathBuf::from("/lib")]), true)
     }
 
+    /// Over in-memory `files`, with the session's configuration changed
+    /// by `config` (its extensions, say).
+    pub fn mem_config(files: &[(&str, &str)], config: impl FnOnce(&mut Config)) -> Client {
+        let fs = Arc::new(MemFs::new());
+        for (p, t) in files {
+            fs.insert(p, t.as_bytes().to_vec());
+        }
+        let mut cfg = Config::new(fs, LibraryPath(vec![PathBuf::from("/lib")]));
+        config(&mut cfg);
+        Client::with_config(cfg, false)
+    }
+
     fn with(
         fs: Arc<dyn FileSystem + Send + Sync>,
         libs: LibraryPath,
         host_diagnostics: bool,
     ) -> Client {
-        let session = Session::new(Config::new(fs, libs));
+        Client::with_config(Config::new(fs, libs), host_diagnostics)
+    }
+
+    pub fn with_config(cfg: Config, host_diagnostics: bool) -> Client {
+        let session = Session::new(cfg);
         let server = lsp::Server::new(lsp::Options {
             sync_session: true,
             limits: None,
             host_diagnostics,
+            ..lsp::Options::default()
         });
         let mut c = Client {
             session,

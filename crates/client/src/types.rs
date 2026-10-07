@@ -115,6 +115,11 @@ pub enum Severity {
     Error,
     Warning,
     Deprecated,
+    /// NeoSCAD's own notes that need no action, such as a constrained
+    /// sketch's free degrees of freedom (`sketch-underconstrained`). The
+    /// apps had dropped them, so an under-constrained sketch looked
+    /// fully constrained there.
+    Info,
 }
 
 /// A range of source text: 1-based lines, 1-based byte columns, the end
@@ -392,6 +397,7 @@ fn diagnostic_of(v: &Value) -> Option<Diagnostic> {
         "error" => Severity::Error,
         "warning" => Severity::Warning,
         "deprecated" => Severity::Deprecated,
+        "info" => Severity::Info,
         _ => return None,
     };
     let hints = v["hints"]
@@ -425,7 +431,7 @@ fn diagnostic_of(v: &Value) -> Option<Diagnostic> {
     })
 }
 
-/// A log's errors, warnings and deprecations, in order.
+/// A log's errors, warnings, deprecations and info notes, in order.
 pub fn diagnostics(log: &session::Log) -> Vec<Diagnostic> {
     log.diagnostics_json()
         .iter()

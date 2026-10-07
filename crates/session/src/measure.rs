@@ -239,6 +239,9 @@ pub struct MeasureRequest {
     /// The axis of a section's and a profile's radii.
     pub axis: Axis,
     pub profile: Option<Profile>,
+    /// A constrained sketch's solved values, by its `name`
+    /// (`--enable sketch`; `docs/language-extensions.md`, section 4.8).
+    pub sketch: Option<String>,
 }
 
 impl MeasureRequest {
@@ -251,6 +254,7 @@ impl MeasureRequest {
             svg: false,
             axis: Axis::default(),
             profile: None,
+            sketch: None,
         }
     }
 }
@@ -931,6 +935,13 @@ impl Session {
             },
             None => None,
         };
+        if let Some(name) = &req.sketch {
+            let found = match crate::sketches::find(&model.log.sketches.0, name) {
+                Ok(f) => f,
+                Err(e) => return Ok(fail(model.log, 1, Some(e))),
+            };
+            out.insert("sketch".into(), sketch_json(&found));
+        }
         let part_json: Vec<Value> = parts
             .iter()
             .filter(|p| chosen.is_none_or(|c| is_within(&p.name, c)))
@@ -1021,6 +1032,33 @@ impl Session {
     }
 }
 
+/// What `measure --sketch` reports: the first sketch of that name, with
+/// its entities' solved values, and how many sketches have the name (a
+/// module called twice makes two, each solved on its own).
+fn sketch_json(found: &[&Value]) -> Value {
+    let mut v = found[0].clone();
+    if let Some(o) = v.as_object_mut() {
+        o.remove("pin");
+        o.insert("instances".into(), json!(found.len()));
+    }
+    v
+}
+
+/// The text of `measure --sketch`: its state, then a line per entity.
+pub fn sketch_text(s: &Value) -> String {
+    let mut out = crate::sketches::line_text(s);
+    if let Some(n) = s["instances"].as_u64().filter(|n| *n > 1) {
+        out.push_str(&format!(" (the first of {n} with this name)"));
+    }
+    out.push('\n');
+    for e in s["entities"].as_array().into_iter().flatten() {
+        out.push_str("  ");
+        out.push_str(&crate::sketches::entity_text(e));
+        out.push('\n');
+    }
+    out
+}
+
 /// The human-readable report of a measurement.
 pub fn text(summary: &Value) -> String {
     let n = |v: &Value| render::snapshot::number(v.as_f64().unwrap_or(0.0));
@@ -1058,6 +1096,9 @@ pub fn text(summary: &Value) -> String {
             vec(&v["centroid"]),
         ));
     };
+    if let Some(s) = summary.get("sketch") {
+        out.push_str(&sketch_text(s));
+    }
     if summary["model"].is_null() {
         out.push_str(&format!("{input}: empty\n"));
     } else {

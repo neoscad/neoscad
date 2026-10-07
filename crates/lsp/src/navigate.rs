@@ -58,7 +58,8 @@ pub fn hover(ctx: &Ctx<'_>, params: &Value) -> Value {
     let Some((target, span)) = target_at(ctx, offset) else {
         return Value::Null;
     };
-    let value = match &target {
+    let main = ctx.file();
+    let mut value = match &target {
         Target::Builtin(entries) => entries
             .iter()
             .map(|e| describe::builtin_markdown(e))
@@ -70,6 +71,21 @@ pub fn hover(ctx: &Ctx<'_>, params: &Value) -> Value {
             describe::location(&ctx.world.main().path, &ctx.libs, p)
         ),
     };
+    // A sketch's last run: its state on `sketch`, an entity's solved
+    // values on the variable that holds it.
+    let solved = match &target {
+        Target::Builtin(e) if e.iter().any(|e| e.name == "sketch") => {
+            crate::sketch::hover_sketch(main.source(), &main.path, ctx.sketches(), span)
+        }
+        Target::Def(found) if Arc::ptr_eq(&found.file, main) => found.def().value.and_then(|v| {
+            crate::sketch::hover_values(main.source(), &main.path, ctx.sketches(), v)
+        }),
+        _ => None,
+    };
+    if let Some(s) = solved {
+        value.push_str("\n\n");
+        value.push_str(&s);
+    }
     json!({
         "contents": {"kind": "markdown", "value": value},
         "range": proto::range(ctx.file().source(), span),
@@ -86,7 +102,12 @@ pub fn definition(ctx: &Ctx<'_>, params: &Value) -> Value {
             "uri": ctx.uri_for(&p),
             "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
         }),
-        _ => Value::Null,
+        Some(_) => Value::Null,
+        // A sketch handle's member (`top.start`): the point it names.
+        None => match crate::sketch::member_definition(ctx, offset) {
+            Some((file, span)) => location(ctx, &file, span),
+            None => Value::Null,
+        },
     }
 }
 

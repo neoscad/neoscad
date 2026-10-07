@@ -82,6 +82,15 @@ const INSTRUCTIONS_LIMIT: usize = 2048;
 /// at five modules.
 pub const RECIPES: &str = include_str!("recipes.scad");
 
+/// A constrained sketch (`--enable sketch`; `docs/sketch.md`) as a module
+/// to adapt, for servers started with the extension. It is not in the
+/// instructions: they are at Claude Code's 2,048 characters already with
+/// the printing recipes, and a server without the extension must not
+/// steer agents to `sketch()`. An agent finds it where it looks before
+/// writing a sketch, `docs` for `sketch`, and in `neoscad://recipes`.
+/// `crates/cli/tests/mcp.rs` checks that it renders fully constrained.
+pub const SKETCH_RECIPE: &str = include_str!("recipe_sketch.scad");
+
 /// What introduces [`RECIPES`] in the instructions.
 const RECIPES_INTRO: &str = "\n\nPrinting recipes (tested; adapt the numbers):\n";
 

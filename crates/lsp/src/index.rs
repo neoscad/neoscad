@@ -99,6 +99,9 @@ pub struct Scope {
     pub start: u32,
     pub end: u32,
     pub kind: ScopeKind,
+    /// For the child block of a module instantiation: the reference to
+    /// the module (a `sketch` body binds the sketch vocabulary).
+    pub callee: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +209,7 @@ pub fn build(p: &Program) -> FileIndex {
         start: 0,
         end: text.len() as u32,
         kind: ScopeKind::File,
+        callee: None,
     });
     b.stmt(p.cst.root(), 0);
     b.directives_and_comments();
@@ -260,6 +264,7 @@ impl Builder<'_> {
             start,
             end,
             kind,
+            callee: None,
         });
         self.out.scopes.len() - 1
     }
@@ -468,7 +473,9 @@ impl Builder<'_> {
         let child = node_after(n, K::RParen);
         let child_scope = child.map(|c| {
             let (a, b) = range(c).unwrap_or((0, 0));
-            self.scope(scope, a, b, ScopeKind::Children)
+            let s = self.scope(scope, a, b, ScopeKind::Children);
+            self.out.scopes[s].callee = Some(callee);
+            s
         });
         if let Some(args) = n.children().find(|c| c.kind() == K::ArgList) {
             self.fold(args);
