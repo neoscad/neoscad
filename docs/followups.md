@@ -1602,6 +1602,56 @@ lead them, come roughly in order of user impact.
   libm, but a WASM libm may round a cube differently in the last bit. No
   test font is CFF. (5e)
 
+## Constrained sketches (solver)
+- Stage 1 of `docs/language-extensions.md` built the solver crate
+  (`crates/sketch`, package `sketch-solver`) with no language binding.
+  Stages 2 and 3 map `SolveOptions::max_unknowns` and `interrupt` to
+  `Limits::sketch_unknowns` and the evaluator's interrupt flag, and the
+  plain-data diagnosis (`Solution::free`, `redundant`, `conflicts`,
+  `flipped`, `placed`) to spans, names and hints.
+- Solve time is dense O(n³) per iteration: a regular polygon drawn
+  roughly (angles, equal sides, one length; free to rotate) of 100
+  unknowns takes 24 ms, 200 take 190 ms and 400 take 1.6 s (about 40
+  iterations each, release build, Apple silicon). Corpus sketches (10–40
+  unknowns) take 20–330 µs. A rejected
+  Levenberg–Marquardt step recomputes the Jacobian and refactors the
+  whole stacked [J; √μI]. Reusing J across rejected steps, factoring J
+  once per iteration and folding in each μ with Givens rotations
+  (MINPACK's `lmpar`), a better initial μ (iteration counts look high),
+  or sparse QR would each help.
+- An under-constrained arc whose radius grows keeps its end points near
+  where they were drawn, so its sweep can cross 180°, reported as a flip
+  (FreeCAD's `testCircleLineTangentOriented` case allows it, see
+  `crates/sketch/tests/corpus/translate.py`). FreeCAD keeps an arc's
+  angles as unknowns and so keeps its extent. Weighting the minimal-norm
+  steps, or arc parameters in angle form, would avoid it.
+- From very rough drawings (noise of 10% of the sketch size) the solver
+  sometimes lands on another branch and reports the flip, where
+  SolveSpace stays: in `scripts/sketch-oracle.py --generate 300`, 3–9 of
+  roughly 170 fully constrained sketches per seed end away from the
+  generating truth (SolveSpace: 7–15), and 9–14 of 300 report a flip.
+  Continuation only moves dimensions; it could also relax the geometric
+  constraints from the drawing.
+- The differential oracle cannot check some paths, because SolveSpace
+  (the `slvs` 3.2 wheel) has no equivalent: tangency away from a shared
+  end point, circle tangents, sweeps, symmetry about a point, signed
+  axis distances (emulated with a helper point), line–line distance.
+  The `slvs` 3.2 wheel also predates SolveSpace's fix for issue #1354,
+  so it reports `perpendicular_4m` (that issue's own test file) as not
+  converging. A newer wheel, or the solver built from source, would
+  remove that noise.
+- `distance(l1, l2, d)` between lines measures from `l2`'s start and
+  does not make the lines parallel (`Constraint::Distance`). Section 4.3
+  says "line–line (parallel)"; stage 2 should settle whether it should
+  also impose parallelism.
+- Exactify snaps coincident, horizontal and vertical classes, fixed
+  coordinates and circle radii; midpoints and symmetric points are not
+  snapped to their exact formulas.
+- Moving the crate to its own repository needs its own CI (the wasm32
+  build and the cross-platform digest now in `crates/wasm-check`), and
+  the corpus (GPL/LGPL-derived) stays in NeoSCAD or goes to a separate
+  test-data repository.
+
 ## Determinism
 - Console output of two reference models varies between runs of one
   build (seen at `6d73727` and after): `svg/id-layer-selection-test.scad`

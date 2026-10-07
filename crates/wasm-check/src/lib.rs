@@ -11,6 +11,19 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+mod sketches;
+
+/// Solve the number of generated sketches `src` names (decimal) and
+/// return the digest line ([`sketches`]): the sketch solver's
+/// cross-platform determinism check.
+pub fn run_sketches(src: &[u8]) -> String {
+    let count = std::str::from_utf8(src)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    sketches::run(count)
+}
+
 use lang::loader::{FileSystem, LibraryPath};
 use lang::vfs::MemFs;
 
@@ -533,7 +546,8 @@ pub extern "C" fn add_file(name_len: usize) {
 /// ([`run_session`]); with 3, as a check case ([`run_check`]); with 4
 /// formatted and with 5 as a test file ([`run_tooling`]); with 6 through
 /// the language server ([`run_lsp`]); with 7 as a preview that passes
-/// its time limit ([`run_preview_stopped`]).
+/// its time limit ([`run_preview_stopped`]); with 8, the input is a count
+/// of generated sketches to solve ([`run_sketches`]).
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
@@ -555,7 +569,9 @@ pub extern "C" fn run_input(seed: u32, frame_limit: u32, preview: u32) {
         n => n,
     };
     OUTPUT.lock().expect("output").clear();
-    let out = if preview == 7 {
+    let out = if preview == 8 {
+        run_sketches(&src)
+    } else if preview == 7 {
         run_preview_stopped(files, &src)
     } else if preview == 6 {
         run_lsp(files, &src)
@@ -651,7 +667,9 @@ mod tests {
             let seed = c["seed"].as_u64().unwrap_or(0) as u32;
             let preview = c["preview"].as_bool().unwrap_or(false);
             let src = c["src"].as_str().unwrap().as_bytes();
-            let out = if c["preview"] == "stop" {
+            let out = if c["session"] == "sketch" {
+                run_sketches(src)
+            } else if c["preview"] == "stop" {
                 run_preview_stopped(files, src)
             } else if c["session"] == "lsp" {
                 run_lsp(files, src)

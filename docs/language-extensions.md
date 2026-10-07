@@ -253,7 +253,7 @@ error (`sketch-foreign-entity`).
 | `on(p, c)` | point, line/arc/circle | point on the infinite line, or on the circle |
 | `horizontal(l)`, `vertical(l)` | line, or two points | Δy = 0 / Δx = 0 |
 | `parallel(l1, l2)`, `perpendicular(l1, l2)` | lines | cross product = 0 / dot product = 0 |
-| `tangent(x, y)` | line–arc/circle, arc–arc, circle–circle | signed distance = ±r, or \|c1 − c2\| = r1 ± r2. The side and internal/external choice come from the drawing |
+| `tangent(x, y)` | line–arc/circle, arc–arc, circle–circle | signed distance = ±r, or \|c1 − c2\| = r1 ± r2. The side and internal/external choice come from the drawing. Where the two curves share an end point (the same point, or coincident ones), the equation is written at that point instead: the radius there is perpendicular to the line, or the two radii are parallel (FreeCAD's endpoint tangency, SolveSpace's `ARC_LINE_TANGENT`). The distance form holds there only to second order, so a fully constrained slot (section 6.2) would report a free DOF |
 | `distance(a, b, d, along)` | point–point, point–line, line–line (parallel) | `along = "x"`/`"y"` for FreeCAD's DistanceX/DistanceY |
 | `length(l, d)` | line | |
 | `radius(c, r)`, `diameter(c, d)` | arc, circle | |
@@ -367,6 +367,15 @@ checked for determinism, diagnosis quality or maintenance.
   (`System::diagnose`, GCS.cpp:4773). We port the behaviour, not the
   code.
 
+As built (stage 1), the crate is the package `sketch-solver`, licensed
+`MIT OR Apache-2.0` (the owner's decision of 2026-10-07) so that it can
+be published on its own and NeoSCAD can depend on the published crate.
+It depends on no NeoSCAD crate. Its diagnostics are plain data keyed by
+entity and constraint ids (`crates/sketch/src/report.rs`); the `eval`
+binding (stage 2) maps the ids to spans, names and hints. The
+validation corpus translated from FreeCAD and SolveSpace tests is kept
+out of the published package (`crates/sketch/tests/corpus/README.md`).
+
 **Algorithm.**
 
 1. **Decompose.** Split the unknowns and constraints into connected
@@ -377,34 +386,60 @@ checked for determinism, diagnosis quality or maintenance.
    geometric constraints (horizontal, tangent, and so on) move points.
    Use minimal-norm Gauss–Newton steps, so unconstrained directions keep
    their guessed values. Record the drawing's *orientation signature*:
-   tangent sides, arc sweep directions, and the sign of each angle and
-   point–line distance.
+   which way each corner between two lines turns, which side of 180°
+   each arc sweeps, which side of a line an endpoint-tangent arc lies on
+   (and whether two endpoint-tangent arcs touch inside or outside), that
+   angle constraints are met on their own branch rather than 180° away,
+   and that circle radii are positive. Point–line distances and tangents
+   written as distances need no entry: their residuals are signed, with
+   the side read from the drawing. If the cleaning does not converge, or
+   itself flips the signature, start the next steps from the drawing
+   instead: the drawn dimensions need not be consistent with the
+   geometric constraints when the drawing does not meet them, and the
+   least-squares compromise is a poor start (found by the differential
+   oracle, below).
 3. **Solve.** Run damped Gauss–Newton (Levenberg–Marquardt with a
    fixed damping schedule) from the cleaned drawing to the real targets.
    Stop when the scaled residual is at most 1e-10 times the sketch size,
-   or at a fixed iteration cap (100).
+   or at a fixed iteration cap (100). Then take up to four undamped steps
+   while each halves the cost, which brings the result from 1e-10 of the
+   size to rounding level.
 4. **Check the branch.** If the result's orientation signature differs
-   from the drawing's, or step 3 did not converge, use **continuation**
-   instead: move the dimension targets from the measured values to the
-   real ones in 2ᵏ steps, halving on failure down to a fixed floor. Each
-   step starts from the previous one. This tracks the branch the drawing
-   is on through large parameter changes, which is the "flip" problem.
+   from the drawing's, step 3 did not converge, or step 3 had to take
+   back a step (the linear model failed on the way, which is where a
+   solve can jump branches without any recorded sign changing), use
+   **continuation** instead: move the dimension targets from the measured
+   values to the real ones in 2ᵏ steps, halving on failure down to a
+   fixed floor (1/1024, and 500 iterations in all). Each step starts from
+   the previous one and must converge without flips. This tracks the
+   branch the drawing is on through large parameter changes, which is
+   the "flip" problem. If continuation fails, the direct result stands,
+   with its flips reported.
 5. **Exactify.** Snap what has a closed form, in constraint order: a
    horizontal line's second y becomes the first's exactly, coincident
    points become the same bits, and fixed points become their values.
    Then re-check the residual. Without this, profiles carry `1e-17`
-   noise into the `.csg` and the echo output.
+   noise into the `.csg` and the echo output. (As built: the equal
+   coordinates form classes, each taking a fixed value if one of its
+   members has one, else its lowest unknown's; a snap that would leave a
+   residual over the tolerance is undone.)
 
-**DOF and diagnosis.** Run column-pivoted Householder QR on the
-Jacobian at the solution, with a rank tolerance relative to the largest
-pivot.
+**DOF and diagnosis.** Run Householder QR on the Jacobian at the
+solution, with a rank tolerance relative to the largest pivot. (As
+built: one QR of Jᵀ, its rows normalised to unit length and taken in
+constraint order without pivoting, gives the rank, the null space and the
+dependent rows at once; taking them in order means a dependent row is
+always reported against earlier ones.)
 
 - **Free DOF** is the number of unknowns minus the rank. The null space
   maps back to entities, so the report can say "g2 can still move along
   y".
 - **Dependent rows** come from QR of Jᵀ. If the residual converged, they
   are *redundant*. If it did not, they are a *conflict* set; the
-  smallest dependent group is reported.
+  smallest dependent group is reported. (As built: a dependent row whose
+  residual is not the same combination of the earlier rows' residuals is
+  a conflict, the others are redundant, whether or not the solve
+  converged.)
 - A sketch with nothing fixed has three rigid DOF, which is not an
   error: minimal-norm steps leave it where it was drawn.
 
@@ -812,7 +847,7 @@ why this design avoids it.
 
 | Crate | Change |
 |---|---|
-| `sketch` (new library) | Entity and constraint model; residuals and analytic Jacobians; LM/Gauss–Newton with continuation; pivoted QR, DOF, redundancy and conflict sets; exactify; fillet and chamfer; loop finding; arc tessellation; a `Report`. No `std::fs`, env or clock; wasm-clean; optional `libm` dependency |
+| `sketch` (new library, package `sketch-solver`, `MIT OR Apache-2.0`; the solver core, built in stage 1, is everything up to exactify and the diagnosis, and fillets, loops and tessellation may live in `eval` instead so that the published crate stays a solver) | Entity and constraint model; residuals and analytic Jacobians; LM/Gauss–Newton with continuation; pivoted QR, DOF, redundancy and conflict sets; exactify; fillet and chamfer; loop finding; arc tessellation; a `Report`. No `std::fs`, env or clock; wasm-clean; optional `libm` dependency |
 | `io` | `circular_segments[_for_angle]` moves here from `geom/src/fragments.rs` (with a re-export in `geom`), so `sketch` and `geom` share one rule. Degree trigonometry already lives in `io` for the same reason (`crates/eval/src/lib.rs:65-67`) |
 | `lang` | New `DiagCode`s (`sketch-*`, `query-*`). No syntax change |
 | `eval` | `Extensions` set replacing `Options::parts`; the `sketch` builtin module and its lexically scoped vocabulary (a body region in `resolve` that binds vocabulary names first); an entity-handle `Value` variant (type name, printing, equality, members `.start`/`.end`/`.center`); `NodeKind::Sketch`, dumped and keyed as `polygon`; an anchor side field on `Node`; `child_bounds`/`child_measure`/`child_anchors`; the `GeometryOracle` trait and `Options::geometry`; sandboxed child instantiation with reuse; `Limits::sketch_unknowns` and `Limits::queries`; the extension bits in memo and callmemo fingerprints |
@@ -919,7 +954,7 @@ Rough effort is for one builder working serially.
 | Stage | Content | Effort |
 |---|---|---|
 | 0 | `Extensions` set replacing `Options::parts`; CLI, serve, MCP, LSP and ffi plumbing; docs `extension` field and labels; the conformance `--extra-enable` run | S, 1–2 days |
-| 1 | `crates/sketch` solver core with no language attached: the model, residuals, LM, QR diagnosis, exactify, `libm`; the cross-platform determinism test in wasm-check | L, 1.5–2 weeks |
+| 1 | `crates/sketch` solver core with no language attached: the model, residuals, LM, QR diagnosis, exactify, `libm`; the cross-platform determinism test in wasm-check. (Built with continuation and the flip check too, which are solver behaviour; stage 3 keeps their diagnostics and hints.) | L, 1.5–2 weeks |
 | 2 | Language binding: the `sketch` module, the scoped vocabulary in `resolve`, entity handles, loops, tessellation (moving fragments to `io`), `NodeKind::Sketch` as a polygon; fillet and chamfer; the first goldens | L, 1–1.5 weeks |
 | 3 | Diagnostics with hints; continuation and the flip check; strict mode; `Limits::sketch_unknowns` | M, 1 week |
 | 4 | Sketch surfaces: `check` JSON, `measure --sketch`, LSP completion, hover and "Pin drawing", MCP recipe, editor decorations, `docs/sketch.md` | M, 1 week |
@@ -983,6 +1018,11 @@ Settled by the owner (2026-10-07):
    (FreeCAD's Sketcher and planegcs tests, SolveSpace's constraint tests)
    and, as a differential oracle outside the shipped code, against
    SolveSpace's solver.
+5. **The solver crate** (added during stage 1): it may be published on
+   its own (its own repository under the neoscad organisation, and
+   crates.io), with NeoSCAD depending on it. It is licensed
+   `MIT OR Apache-2.0`, depends on no NeoSCAD crate, and its published
+   package contains no file derived from FreeCAD or SolveSpace.
 
 Still open, with the recommendation taken unless the owner says
 otherwise: top-level query syntax (not now), the `libm` crate (use it in

@@ -28,6 +28,11 @@ render = { package = "neoscad-render", path = "../render", default-features = fa
 # The session every client uses, without the GPU (as `render` above).
 session = { package = "neoscad-session", path = "../session", default-features = false }
 serde_json.workspace = true
+# The constraint solver, for its cross-platform determinism check
+# (src/sketches.rs); libm generates the sketches' angles the same way on
+# every target.
+libm = "0.2.16"
+sketch-solver = { path = "../sketch" }
 text = { package = "neoscad-text", path = "../text" }
 
 

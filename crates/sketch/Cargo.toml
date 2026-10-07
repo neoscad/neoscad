@@ -1,0 +1,34 @@
+[package]
+name = "sketch-solver"
+description = "A deterministic 2D geometric constraint solver for CAD sketches: points, lines, arcs and circles, with degree-of-freedom, redundancy and conflict diagnosis, bit-identical on every platform including wasm32"
+# Versioned on its own, not with NeoSCAD: the crate is meant to be
+# published separately (README.md).
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/neoscad/sketch-solver"
+readme = "README.md"
+keywords = ["cad", "constraint", "solver", "sketch", "geometry"]
+categories = ["mathematics", "science", "graphics"]
+authors = ["The NeoSCAD contributors"]
+# The validation corpus is translated from FreeCAD (LGPL-2.1-or-later) and
+# SolveSpace (GPL-3.0-or-later) test data, so it must not ship in the
+# permissively licensed package; the tests and the example that read it
+# stay in the repository only (tests/corpus/README.md).
+exclude = ["tests/corpus/", "tests/corpus.rs", "tests/support/", "examples/"]
+
+[lib]
+name = "sketch_solver"
+
+[dependencies]
+# Pure-Rust trigonometry, so the cosine of an angle constraint has the same
+# bits on aarch64, x86_64 and wasm32: the platform maths libraries differ
+# in the last place, which would move every coordinate downstream.
+libm = "0.2.16"
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
