@@ -1,7 +1,9 @@
 # Language extensions: constrained sketches and geometry queries
 
-Status: design; stage 0 (the flags, carried and doing nothing yet)
-built. Written 2026-10-07 against the tree at
+Status: design; stages 0 (the flags), 1 (the solver crate) and 2 (the
+language binding of sketches, `--enable sketch`) built; section 11.1
+records how stage 2 was built and where it departs from this text.
+Written 2026-10-07 against the tree at
 `4aa80a4` and the reference checkout in `.reference/openscad`. Every
 claim about this codebase cites `path:line`; claims about OpenSCAD cite
 the reference checkout; claims about other projects cite what was
@@ -965,6 +967,91 @@ Rough effort is for one builder working serially.
 Stages 1 to 4 deliver sketches without queries; 5 and 6 can follow
 independently. The `docs/followups.md` entries go in as each stage
 lands.
+
+### 11.1 Stage 2 as built
+
+The binding is `crates/eval/src/sketch.rs`; the rest of the evaluator
+changed only where the design says (resolve, heap driver, values, node,
+dump). What it does, and where it departs from sections 4 and 9:
+
+- **Vocabulary scoping.** The resolver puts a link that binds nothing at
+  run time between a sketch body and the scope around the `sketch()`
+  call (`Env::vocab` in `crates/eval/src/resolve.rs`), but only when that
+  `sketch` can resolve to nothing but the builtin. A function or module
+  lookup reaching the link stops at the vocabulary, so a definition
+  outside the body (BOSL2's `arc`, MCAD's `chamfer`) is never found for a
+  vocabulary name; only a function literal assigned to that name in the
+  body itself would come first. A program's own `module sketch`
+  (roof.scad) gets no vocabulary at all. The vocabulary is per namespace:
+  `distance` is a statement, so MCAD's `function distance` can still be
+  called inside a body. OpenSCAD's grammar allows only assignments and
+  instantiations in a child block (`child_statements`,
+  `.reference/openscad/src/core/parser.y:300-313`), so helper modules are
+  defined outside the body.
+- **Parameter names**, which section 4.2 did not fix: `point(at)`,
+  `line(p, q, construction)`, `arc(center, start, end, cw,
+  construction)`, `circle(center, r, d, construction)`; the statements'
+  names are those of section 4.3 (`on(p, c)`, `fix(p, at)`, `distance(a,
+  b, d, along)`, `angle(l1, l2, deg)`).
+- **Labels.** After a body's assignments run, each entity a call made
+  directly in an assignment takes the variable's name; the points a
+  named line, arc or circle made from `[x, y]` become `top.start` and so
+  on. A handle prints as `<sketch line "top">`, or `<sketch point>`
+  before it has a name.
+- **`distance(l1, l2, d)` implies parallel**, as section 4.3 says: the
+  binding adds the solver's `Parallel` before its `Distance`, unless an
+  earlier `parallel()` of the two lines already states it. The solver's
+  own constraint does not impose it (`crates/sketch/src/model.rs`,
+  `Constraint::Distance`). Nothing in the solver's corpus disagrees: no
+  case has a distance between two lines (`crates/sketch/tests/corpus/*/*.json`),
+  and the differential oracle cannot check one (`docs/followups.md`,
+  "Constrained sketches").
+- **Diagnostics.** Built: `sketch-conflict`, `sketch-redundant`,
+  `sketch-underconstrained` (a new `Severity::Info`, printed `INFO:` and
+  listed in the JSON diagnostics; an error with `strict = true`),
+  `sketch-no-convergence`, `sketch-flipped`, `sketch-open-profile` (also
+  for a point joining more than two profile curves),
+  `sketch-fillet-too-large`, `sketch-unknown-entity`,
+  `sketch-foreign-entity` and `sketch-geometry-in-body`. Wrong entity
+  kinds, bad values and a fillet at a point that is not a corner of two
+  lines are `invalid-argument`. Messages name a constraint by its source
+  text (`length(axis, slot_len)`), not by evaluated values as section
+  4.7's examples do. Every error leaves the sketch an empty polygon; the
+  model goes on. Not built yet (stage 3): `sketch-self-intersection`, the
+  info for points placed without a guess, and hints with `replace` edits
+  or suggested constraints. `sketch-foreign-entity` guards an invariant
+  rather than a case found in practice: every way found of reaching a
+  handle outside its sketch (helpers, children, `$` variables, function
+  literals) runs inside the sketch, which merges.
+- **Profile.** Points made one by `coincident()` are one vertex; each
+  vertex must join exactly two profile curves. Fillets and chamfers cut
+  corners of two lines only. A single loop is written as `polygon()`
+  without `paths`. Besides the polygon, `NodeKind::Sketch` holds an
+  `Arc<eval::node::SketchReport>` (name, counts, residual, status), the
+  evaluator's own summary rather than the solver's `Solution`, so the
+  node stays plain data; stage 4 adds what `check`, `measure` and hover
+  need.
+- **Sharing code with `circle()`.** The segment rule moved to
+  `io::fragments` (section 8), with `geom::fragments` as its form over a
+  node's `Discretizer`.
+- **Limits.** Under any resource limit a sketch may have at most 5,000
+  unknowns (the design's `Limits::sketch_unknowns`, as a constant until
+  stage 3); the solve polls the interrupt flag and the time limit.
+- **Docs.** `sketch` and the vocabulary have `builtins.toml` entries
+  labelled `extension = "sketch"`; `neoscad docs` lists the vocabulary on
+  a line of its own, and LSP completion leaves it out until stage 4 makes
+  completion aware of sketch bodies.
+- **Tests.** The goldens (section 9, item 3) are in
+  `conformance/extensions/sketch` (inputs, `.echo`, `.csg`), run by
+  `crates/session/tests/sketch.rs` rather than by a `conformance run
+  --tier ext`: the worked examples, holes, scoping and helpers, handles,
+  and every diagnostic. The same file checks the flag off, roof.scad's
+  module, the real MCAD and BOSL2 names, the `.csg` export evaluated
+  without the flag, and a warm export equal to a cold one;
+  `crates/geom/tests/sketch.rs` checks that a sketch renders and keys as
+  its polygon, that a sketch circle is `circle()` at any `$fn`, `$fa`,
+  `$fs`, and the same STL at 1, 2 and 8 threads; `crates/wasm-check`
+  renders the two worked examples on wasm32.
 
 ## 12. Alternatives considered
 

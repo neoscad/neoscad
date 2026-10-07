@@ -216,6 +216,7 @@ impl Evaluator<'_> {
                         }
                     }
                     Value::Range(r) => push_range(out, r),
+                    Value::Entity(e) => e.write(out),
                     Value::Function(f) => {
                         let ast = self.units[f.unit as usize].ast;
                         if let ExprKind::Function(params, body) = &ast.expr(f.expr).kind {

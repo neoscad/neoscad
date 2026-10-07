@@ -160,9 +160,10 @@ struct Cli {
     parameter_set: Option<String>,
 
     /// `part` turns on NeoSCAD's `part("name") { ... }` extension (named
-    /// parts for `check` and `measure`); `sketch` and `query` are reserved
-    /// for NeoSCAD's constrained sketches and geometry queries (accepted,
-    /// with no effect yet). `all` turns on OpenSCAD's experiments only,
+    /// parts for `check` and `measure`), `sketch` its constrained 2D
+    /// sketches (`sketch() { ... }`); `query` is reserved for geometry
+    /// queries (accepted, with no effect yet). `all` turns on OpenSCAD's
+    /// experiments only,
     /// never NeoSCAD's extensions. OpenSCAD's experimental features
     /// `textmetrics`, `object-function`, `import-function`,
     /// `vector-swizzle` and `predictible-output` (sorted mesh exports) work

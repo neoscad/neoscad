@@ -603,6 +603,7 @@ fn uses_children(n: &Node) -> bool {
         | NodeKind::Square { .. }
         | NodeKind::Circle { .. }
         | NodeKind::Polygon { .. }
+        | NodeKind::Sketch(_)
         | NodeKind::Surface { .. }
         | NodeKind::Import(_)
         | NodeKind::Text(_) => false,
@@ -1715,7 +1716,9 @@ impl Ctx<'_> {
                 let c = primitives::circle2d_with(*r, disc, &stop).ok_or_else(stopped)?;
                 leaf(leaf_2d(c))
             }
-            NodeKind::Polygon { points, paths, .. } => {
+            // A sketch is the polygon it solved to (`eval::node::SketchNode`).
+            k @ (NodeKind::Polygon { .. } | NodeKind::Sketch(_)) => {
+                let (points, paths, _) = k.polygon().expect("a polygon");
                 leaf(leaf_2d(primitives::polygon(points, paths)))
             }
             NodeKind::Root | NodeKind::Group { .. } | NodeKind::Render { .. } => {

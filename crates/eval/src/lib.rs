@@ -62,6 +62,7 @@ pub mod recursion;
 mod resolve;
 pub use resolve::Stats as ResolveStats;
 pub mod rng;
+pub mod sketch;
 mod sym;
 pub mod text_props;
 /// Degree trigonometry lives in `io`, the lowest crate that needs it
@@ -343,6 +344,18 @@ pub fn builtins() -> Vec<BuiltinName> {
         kind: Module,
         status: BuiltinStatus::Extension,
     });
+    out.push(BuiltinName {
+        name: "sketch",
+        kind: Module,
+        status: BuiltinStatus::Extension,
+    });
+    // The sketch vocabulary: builtins only inside sketch bodies, where the
+    // resolver binds them (`sketch`), but documented like any builtin.
+    out.extend(sketch::vocabulary().map(|(name, function)| BuiltinName {
+        name,
+        kind: if function { Function } else { Module },
+        status: BuiltinStatus::Extension,
+    }));
     out.extend(builtins::functions::ALL.iter().map(|(n, b)| BuiltinName {
         name: n,
         kind: Function,

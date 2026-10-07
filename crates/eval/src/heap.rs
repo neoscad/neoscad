@@ -136,6 +136,10 @@ pub(crate) struct Post {
     filter: bool,
     /// `part()`: leave the part.
     part: bool,
+    /// `sketch()`: [`SKETCH_TOP`] for one that begins a sketch (solve it
+    /// into its node), [`SKETCH_MERGE`] for one adding to the sketch being
+    /// built (no node), or 0.
+    sketch: u8,
     /// `if`: its arguments are on top of `heap_args`, kept alive until
     /// now, as its native frame holds them, for the memory estimate.
     args: bool,
@@ -144,9 +148,13 @@ pub(crate) struct Post {
     mark: usize,
 }
 
+const SKETCH_TOP: u8 = 1;
+const SKETCH_MERGE: u8 = 2;
+
 const PLAIN: Post = Post {
     filter: false,
     part: false,
+    sketch: 0,
     args: false,
     mark: NO_MARK,
 };
@@ -242,6 +250,22 @@ impl<'a> Evaluator<'a> {
                 let r = r.map(|kids| node.children = kids);
                 if post.part {
                     self.part_stack.pop();
+                }
+                if post.sketch != 0 {
+                    let top = post.sketch == SKETCH_TOP;
+                    let r = match r {
+                        Ok(()) => self.sketch_close(node, top),
+                        Err(e) => {
+                            if top {
+                                self.sketch_abandon();
+                            }
+                            Err(e)
+                        }
+                    };
+                    if post.mark != NO_MARK {
+                        self.truncate(post.mark);
+                    }
+                    return self.done(r);
                 }
                 if post.mark != NO_MARK {
                     self.truncate(post.mark);
@@ -560,6 +584,33 @@ impl<'a> Evaluator<'a> {
         None
     }
 
+    /// [`Self::begin_children`] for a sketch body: after the body's
+    /// assignments ran, the entities they made are named after their
+    /// variables (`crate::sketch`), before any statement can print one.
+    fn begin_sketch_body(&mut self, children: Children) -> Option<Ret> {
+        let region = self.units[children.scope.unit as usize].res.scope_region
+            [children.scope.scope as usize];
+        let c = self.new_ctx(&children.ctx, CtxKind::Scope(children.scope), region);
+        let mark = self.push(c.clone());
+        let before = self.sketch_entities();
+        if let Err(e) = self.init_scope(&c, children.scope) {
+            self.truncate(mark);
+            return Some(Ret::Kids(Err(e)));
+        }
+        self.sketch_label(before, children.scope);
+        let out = self.heap_out.len() as u32;
+        self.heap.push(Frame::Scope(ScopeRun {
+            sr: children.scope,
+            ctx: c,
+            mark: mark as u32,
+            pos: 0,
+            out,
+            indices: false,
+            collect: true,
+        }));
+        None
+    }
+
     /// The children of instantiation `i` of `sr` in `ctx` into `node`,
     /// then `post` (`with_children`).
     fn begin_wrap(
@@ -709,6 +760,33 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
+            B::Sketch => {
+                let args = tri!(self.inst_args(sr, i, ctx));
+                let p = self.params(args, loc, &[], &["name", "strict", "convexity"], "sketch");
+                // What a sketch makes depends on everything its body ran,
+                // and it is solved at its end: never replayed from a memo.
+                self.untracked();
+                // A `sketch()` met while one is being built (a helper
+                // module's body, called from a sketch body) adds to it.
+                let merge = self.sketch.is_some();
+                if !merge {
+                    self.sketch_open(&p, loc);
+                }
+                let node = self.new_node(NodeKind::Group { name: None }, sr, i);
+                let post = Post {
+                    mark: p.mark,
+                    sketch: if merge { SKETCH_MERGE } else { SKETCH_TOP },
+                    ..PLAIN
+                };
+                let ch = Children {
+                    scope: self.children_scope(sr, i),
+                    ctx: ctx.clone(),
+                };
+                self.heap_nodes.push(node);
+                self.heap.push(Frame::Wrap(post));
+                self.begin_sketch_body(ch)
+            }
+            B::SketchStatement(v) => Some(Ret::Done(self.sketch_statement(v, sr, i, ctx))),
             _ => {
                 // `geometry_module` and `geometry_node`.
                 let args = tri!(self.inst_args(sr, i, ctx));

@@ -1,0 +1,7 @@
+WARNING: undefined operation (sketch entity + number) in file handles.scad, line 17
+ECHO: <sketch point "a">, <sketch line "base">, <sketch point "a">, <sketch point "base.end">, <sketch point "cap.center">, <sketch point "base.end">
+ECHO: true, true, false, false
+ECHO: "as text: <sketch line "base">", [<sketch point "a">, <sketch line "base">], true, undef
+ECHO: false, false, false, "true"
+ECHO: undef
+INFO: Sketch 'handles': 6 free degrees of freedom; these can still move: 'cap.center' along x, 'cap.center' along y, 'cap.end' along x, 'cap.end' along y, 'side.end' along x, 'side.end' along y, 'back.start' along x, 'back.start' along y in file handles.scad, line 3

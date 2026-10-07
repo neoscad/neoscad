@@ -110,6 +110,10 @@ fn run_inner(
         frame_limit,
         fs: fs.clone(),
         preview,
+        // `sketch()` on, so a constrained sketch's solve, profile and
+        // tessellation run on wasm32 as natively (the `sketch-*` cases);
+        // the other cases never call it, so it changes nothing for them.
+        extensions: eval::Extensions::NONE.with(eval::Extension::Sketch),
         ..Default::default()
     };
     let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {

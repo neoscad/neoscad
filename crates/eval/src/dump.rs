@@ -489,11 +489,11 @@ impl Writer<'_> {
                 self.num(*r);
                 self.lit(")");
             }
-            NodeKind::Polygon {
-                points,
-                paths,
-                convexity,
-            } => {
+            // A sketch is written as the polygon it solved to, in both
+            // forms: the `.csg` must run in stock OpenSCAD, and the key
+            // must share cache entries with an identical polygon.
+            k @ (NodeKind::Polygon { .. } | NodeKind::Sketch(_)) => {
+                let (points, paths, convexity) = k.polygon().expect("a polygon");
                 self.lit("polygon(points = [");
                 for (i, p) in points.iter().enumerate() {
                     if i > 0 {

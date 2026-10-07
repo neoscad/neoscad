@@ -23,7 +23,7 @@ pub fn severity_name(s: Option<Severity>) -> &'static str {
         Some(Severity::Deprecated) => "deprecated",
         Some(Severity::Echo) => "echo",
         Some(Severity::Trace) => "trace",
-        None => "info",
+        Some(Severity::Info) | None => "info",
     }
 }
 
@@ -250,6 +250,10 @@ fn hint(d: &Logged, names: &Names) -> Option<String> {
             "`part()` is neoscad's named-parts extension: turn it on with `--enable part` \
              (the `parts` request option), or define a module called `part`"
         }
+        DiagCode::UnknownModule if quoted(&d.message) == Some("sketch") => {
+            "`sketch()` is a NeoSCAD extension (constrained 2D sketches): enable it with \
+             `--enable sketch`, or define a module called `sketch`"
+        }
         DiagCode::DuplicatePart => {
             "give each part a unique name: parts with one name are measured and checked as one"
         }
@@ -317,7 +321,9 @@ pub fn list_json(lines: &[Logged], names: &Names) -> Vec<Value> {
     let mut last_error: Option<usize> = None;
     for l in lines {
         match l.severity {
-            Some(Severity::Error | Severity::Warning | Severity::Deprecated) => {
+            // Info is NeoSCAD's own (an under-constrained sketch): not a
+            // problem, but a fact a tool or an agent should see.
+            Some(Severity::Error | Severity::Warning | Severity::Deprecated | Severity::Info) => {
                 last_error = (l.severity == Some(Severity::Error)).then_some(out.len());
                 out.push(to_json(l, names));
             }

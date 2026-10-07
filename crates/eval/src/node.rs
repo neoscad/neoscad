@@ -130,6 +130,67 @@ pub enum NodeKind {
     Part {
         name: String,
     },
+    /// NeoSCAD's `sketch() { ... }` (only with `--enable sketch`): a
+    /// solved constrained sketch. It holds exactly what a `polygon` node
+    /// holds, and the `.csg` dump, the geometry key and `geom` treat it as
+    /// that polygon, so a `.csg` export renders in stock OpenSCAD and an
+    /// identical polygon shares its cache entry
+    /// (`docs/language-extensions.md`, section 4.4).
+    Sketch(Box<SketchNode>),
+}
+
+/// A polygon's points, paths and convexity, borrowed from its node.
+pub type PolygonRef<'a> = (&'a [[f64; 2]], &'a [Vec<usize>], i32);
+
+impl NodeKind {
+    /// The polygon a `polygon` or `sketch` node is: its points, paths and
+    /// convexity.
+    pub fn polygon(&self) -> Option<PolygonRef<'_>> {
+        match self {
+            NodeKind::Polygon {
+                points,
+                paths,
+                convexity,
+            } => Some((points, paths, *convexity)),
+            NodeKind::Sketch(s) => Some((&s.points, &s.paths, s.convexity)),
+            _ => None,
+        }
+    }
+}
+
+/// A solved sketch: the polygon of its profile, plus the solve's summary
+/// for the tools (`check`, hover). Nothing that geometry, the dump or the
+/// key reads is in the summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchNode {
+    /// The profile's loops, one after the other.
+    pub points: Vec<[f64; 2]>,
+    /// One path per loop; empty for a single loop (all the points in
+    /// order), as `polygon()` without `paths`.
+    pub paths: Vec<Vec<usize>>,
+    pub convexity: i32,
+    pub report: std::sync::Arc<SketchReport>,
+}
+
+/// What a sketch's solve found, for the tools.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SketchReport {
+    /// The `name` argument, empty when there is none.
+    pub name: String,
+    pub unknowns: usize,
+    pub equations: usize,
+    pub rank: usize,
+    /// Free degrees of freedom: unknowns minus rank.
+    pub dof: usize,
+    pub iterations: u32,
+    /// The largest residual at the solution, in sketch units.
+    pub residual: f64,
+    /// Whether every equation was met.
+    pub solved: bool,
+    /// Whether the solve needed continuation (it failed or flipped first).
+    pub continuation: bool,
+    /// Whether an error left the profile empty.
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

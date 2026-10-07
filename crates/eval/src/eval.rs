@@ -234,6 +234,14 @@ pub(crate) struct Evaluator<'a> {
     /// Index of each unit's used-library keys.
     pub builtin_fns: HashMap<Sym, crate::builtins::functions::Builtin, FxBuild>,
     pub builtin_mods: HashMap<Sym, crate::builtins::modules::BuiltinModule, FxBuild>,
+    /// The sketch vocabulary, which the resolver binds inside sketch bodies
+    /// only; empty without `--enable sketch` (see [`crate::sketch`]).
+    pub vocab_fns: HashMap<Sym, crate::builtins::functions::Builtin, FxBuild>,
+    pub vocab_mods: HashMap<Sym, crate::builtins::modules::BuiltinModule, FxBuild>,
+    /// The sketch being built, while a sketch body runs.
+    pub(crate) sketch: Option<Box<crate::sketch::Builder>>,
+    /// Sketches begun so far: each one's number, which its entities carry.
+    pub(crate) sketch_serial: u32,
     /// Scratch for location-less warnings from `ops::mul`.
     pub op_warnings: Vec<String>,
     /// Deprecation messages already printed, with their location: OpenSCAD
@@ -490,6 +498,7 @@ impl<'a> Evaluator<'a> {
         };
         let builtin_fns = crate::builtins::functions::table(&mut syms);
         let builtin_mods = crate::builtins::modules::table(&mut syms, opts.extensions);
+        let (vocab_fns, vocab_mods) = crate::sketch::tables(&mut syms, opts.extensions);
         let mut units = vec![Unit::new(main, &mut syms)];
         let mut keys: HashMap<&str, u32> = HashMap::new();
         for lib in libraries {
@@ -545,6 +554,10 @@ impl<'a> Evaluator<'a> {
             captured_limit: 1024,
             builtin_fns,
             builtin_mods,
+            vocab_fns,
+            vocab_mods,
+            sketch: None,
+            sketch_serial: 0,
             op_warnings: Vec::new(),
             deprecations: Default::default(),
             hard: std::cell::Cell::new(if opts.hardwarnings {
@@ -1085,6 +1098,8 @@ impl<'a> Evaluator<'a> {
             syms: &self.syms,
             builtin_fns: &self.builtin_fns,
             builtin_mods: &self.builtin_mods,
+            vocab_fns: &self.vocab_fns,
+            vocab_mods: &self.vocab_mods,
             extras: &self.extras,
             empty: self.k.empty,
             children: self.k.children,
@@ -1815,6 +1830,7 @@ impl<'a> Evaluator<'a> {
                     (Value::Vector(_), "y") | (Value::Range(_), "step") => 1.0,
                     (Value::Vector(_), "z") | (Value::Range(_), "end") => 2.0,
                     (Value::Object(o), _) => return Ok(o.get(name.as_bytes())),
+                    (Value::Entity(h), _) => return Ok(h.member(name)),
                     (Value::Vector(_), _)
                         if self.opts.features.has(crate::Feature::VectorSwizzle) =>
                     {

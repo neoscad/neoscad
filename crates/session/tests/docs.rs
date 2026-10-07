@@ -52,7 +52,14 @@ fn every_stable_builtin_has_an_entry() {
 fn extension_entries_name_their_flag() {
     for b in eval::builtins() {
         let is_ext = b.status == eval::BuiltinStatus::Extension;
-        for e in docs::builtin(b.name) {
+        let kind = match b.kind {
+            eval::BuiltinKind::Module => docs::Kind::Module,
+            eval::BuiltinKind::Function => docs::Kind::Function,
+            eval::BuiltinKind::Variable => docs::Kind::Variable,
+        };
+        // By kind as well as name: the sketch vocabulary's `circle` is a
+        // function, OpenSCAD's a module.
+        for e in docs::builtin(b.name).into_iter().filter(|e| e.kind == kind) {
             assert_eq!(
                 e.extension.is_some(),
                 is_ext,

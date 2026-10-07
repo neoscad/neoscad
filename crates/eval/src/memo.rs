@@ -290,7 +290,8 @@ pub(crate) fn entry_bytes(node: Option<&Node>, messages: &[Recorded]) -> usize {
             crate::node::NodeKind::Polyhedron { points, faces, .. } => {
                 points.len() * 24 + faces.iter().map(|f| 24 + f.len() * 8).sum::<usize>()
             }
-            crate::node::NodeKind::Polygon { points, paths, .. } => {
+            k @ (crate::node::NodeKind::Polygon { .. } | crate::node::NodeKind::Sketch(_)) => {
+                let (points, paths, _) = k.polygon().expect("a polygon");
                 points.len() * 16 + paths.iter().map(|p| 24 + p.len() * 8).sum::<usize>()
             }
             _ => 0,
@@ -973,7 +974,10 @@ fn plain_digest(v: &Value, h: &mut Sha256, done: &mut Done) -> bool {
                 h.update(x.to_bits().to_le_bytes());
             }
         }
-        Value::Function(_) => return false,
+        // A sketch entity is only ever made inside a sketch, whose
+        // instantiation is never kept (it is `untracked`), so a call taking
+        // one need not be keyed either.
+        Value::Function(_) | Value::Entity(_) => return false,
         // Only a top-level value gets here: a list holding an object is
         // hashed on its own, and its walk takes the object.
         Value::Object(o) => {

@@ -169,12 +169,12 @@ Params: anything (ignored). Result:
    "incremental_edits": true,
    "snapshot": true, "check": true, "measure": true,
    "format": true, "docs": true, "test": true,
-   "features": ["part"]}}
+   "features": ["part", "sketch"]}}
 ```
 
 `features` lists the NeoSCAD extensions (`enable` names) the server
-implements; a name it accepts but does not implement yet (`sketch`,
-`query`) is left out.
+implements; a name it accepts but does not implement yet (`query`) is
+left out.
 
 `initialize` is optional (the command line does not send it).
 

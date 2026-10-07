@@ -13,6 +13,8 @@ name = "eval"
 io = { package = "neoscad-io", path = "../io" }
 lang = { package = "neoscad-lang", path = "../lang" }
 sha2.workspace = true
+# The constraint solver behind `sketch()` (`--enable sketch`).
+sketch-solver = { path = "../sketch" }
 text = { package = "neoscad-text", path = "../text" }
 unicode-script.workspace = true
 

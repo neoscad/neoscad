@@ -197,10 +197,14 @@ pub fn entry_text(e: &Entry) -> String {
 /// A compact index of the builtins: names by kind.
 pub fn index_text() -> String {
     let mut out = String::new();
+    // The sketch vocabulary is listed on a line of its own: its names
+    // (`on`, `fix`, `length`) exist only inside sketch bodies, and among
+    // OpenSCAD's modules they would read as global builtins.
+    let sketch = |e: &&Entry| e.extension.as_deref() == Some("sketch");
     for kind in [Kind::Module, Kind::Function, Kind::Variable] {
         let names: Vec<&str> = builtins()
             .iter()
-            .filter(|e| e.kind == kind)
+            .filter(|e| e.kind == kind && !sketch(e))
             .map(|e| e.name.as_str())
             .collect();
         out.push_str(&format!(
@@ -210,6 +214,16 @@ pub fn index_text() -> String {
             names.join(" ")
         ));
     }
+    let names: Vec<&str> = builtins()
+        .iter()
+        .filter(sketch)
+        .map(|e| e.name.as_str())
+        .collect();
+    out.push_str(&format!(
+        "sketch, with --enable sketch; the rest only inside a sketch body ({}): {}\n",
+        names.len(),
+        names.join(" ")
+    ));
     out.push_str("neoscad docs NAME for one; --in FILE for a file's own modules and functions\n");
     out
 }

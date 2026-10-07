@@ -34,6 +34,11 @@ pub enum Value {
     /// OpenSCAD's experimental `ObjectType`: only the experimental
     /// features make one (`object()`, `textmetrics()`, JSON `import()`).
     Object(Object),
+    /// NeoSCAD's `sketch()` extension: a handle to a point, line, arc or
+    /// circle of a sketch (`docs/language-extensions.md`, section 4.2).
+    /// Only the sketch vocabulary makes one, so OpenSCAD's programs never
+    /// hold one.
+    Entity(Rc<crate::sketch::Entity>),
 }
 
 /// The value kinds, named as OpenSCAD names them in messages.
@@ -47,6 +52,7 @@ pub enum Type {
     Range,
     Function,
     Object,
+    Entity,
 }
 
 impl Type {
@@ -60,6 +66,7 @@ impl Type {
             Type::Range => "range",
             Type::Function => "function",
             Type::Object => "object",
+            Type::Entity => "sketch entity",
         }
     }
 }
@@ -75,6 +82,7 @@ impl Value {
             Value::Range(_) => Type::Range,
             Value::Function(_) => Type::Function,
             Value::Object(_) => Type::Object,
+            Value::Entity(_) => Type::Entity,
         }
     }
 
@@ -98,7 +106,7 @@ impl Value {
             Value::Number(n) => *n != 0.0,
             Value::Str(s) => !s.is_empty(),
             Value::Vector(v) => !v.is_empty(),
-            Value::Range(_) | Value::Function(_) => true,
+            Value::Range(_) | Value::Function(_) | Value::Entity(_) => true,
             Value::Object(o) => !o.is_empty(),
         }
     }

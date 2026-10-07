@@ -33,6 +33,11 @@ pub enum Severity {
     Echo,
     /// A call-stack line printed after an evaluation error.
     Trace,
+    /// NeoSCAD's own: a fact worth knowing that is not a problem (an
+    /// under-constrained sketch, as FreeCAD reports it). OpenSCAD has no
+    /// such group; only NeoSCAD's extensions print one, so OpenSCAD's own
+    /// programs never see the label.
+    Info,
 }
 
 impl Severity {
@@ -44,6 +49,7 @@ impl Severity {
             Severity::Deprecated => "DEPRECATED",
             Severity::Echo => "ECHO",
             Severity::Trace => "TRACE",
+            Severity::Info => "INFO",
         }
     }
 }
@@ -132,6 +138,29 @@ pub enum DiagCode {
     /// which its modules never see (special variables come from the
     /// caller).
     UseSpecialVariables,
+    /// NeoSCAD's `sketch()` extension (`--enable sketch`): constraints
+    /// that contradict each other.
+    SketchConflict,
+    /// A sketch constraint implied by the others.
+    SketchRedundant,
+    /// A sketch with free degrees of freedom (info; an error with
+    /// `strict = true`).
+    SketchUnderconstrained,
+    /// A sketch the solver could not bring to a solution.
+    SketchNoConvergence,
+    /// A sketch solved on another branch than the one drawn.
+    SketchFlipped,
+    /// A sketch profile curve whose end joins no other curve, or a point
+    /// where more than two meet.
+    SketchOpenProfile,
+    /// A sketch fillet or chamfer longer than a line it trims.
+    SketchFilletTooLarge,
+    /// A sketch constraint given something that is not an entity.
+    SketchUnknownEntity,
+    /// An entity used outside the sketch that made it.
+    SketchForeignEntity,
+    /// Geometry instantiated inside a sketch body.
+    SketchGeometryInBody,
 }
 
 impl DiagCode {
@@ -179,6 +208,16 @@ impl DiagCode {
             DiagCode::PolyhedronOpen => "polyhedron-open",
             DiagCode::PolyhedronNotManifold => "polyhedron-not-manifold",
             DiagCode::UseSpecialVariables => "use-special-variables",
+            DiagCode::SketchConflict => "sketch-conflict",
+            DiagCode::SketchRedundant => "sketch-redundant",
+            DiagCode::SketchUnderconstrained => "sketch-underconstrained",
+            DiagCode::SketchNoConvergence => "sketch-no-convergence",
+            DiagCode::SketchFlipped => "sketch-flipped",
+            DiagCode::SketchOpenProfile => "sketch-open-profile",
+            DiagCode::SketchFilletTooLarge => "sketch-fillet-too-large",
+            DiagCode::SketchUnknownEntity => "sketch-unknown-entity",
+            DiagCode::SketchForeignEntity => "sketch-foreign-entity",
+            DiagCode::SketchGeometryInBody => "sketch-geometry-in-body",
         }
     }
 }

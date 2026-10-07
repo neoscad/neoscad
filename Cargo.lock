@@ -1571,6 +1571,7 @@ dependencies = [
  "neoscad-text",
  "rayon",
  "sha2",
+ "sketch-solver",
  "unicode-script",
 ]
 

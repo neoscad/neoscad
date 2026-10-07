@@ -1328,6 +1328,7 @@ impl<'a> Evaluator<'a> {
             (Value::Vector(_), "y") | (Value::Range(_), "step") => 1.0,
             (Value::Vector(_), "z") | (Value::Range(_), "end") => 2.0,
             (Value::Object(o), _) => return o.get(name.as_bytes()),
+            (Value::Entity(h), _) => return h.member(name),
             (Value::Vector(_), _) if self.opts.features.has(crate::Feature::VectorSwizzle) => {
                 return crate::eval::swizzle(&v, name);
             }

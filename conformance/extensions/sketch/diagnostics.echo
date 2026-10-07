@@ -1,0 +1,12 @@
+INFO: Sketch 'under': 6 free degrees of freedom; these can still move: 'o' along x, 'o' along y, 'a' along x, 'a' along y, 'b' along x, 'b' along y in file diagnostics.scad, line 13
+ERROR: Sketch 'strict': 2 free degrees of freedom; these can still move: 'c.center' along x, 'c.center' along y in file diagnostics.scad, line 16
+ERROR: Sketch 'conflict': constraints conflict: distance(o, a, 12) at line 25, length(l1, 10) at line 23 in file diagnostics.scad, line 25
+WARNING: Sketch 'redundant': distance(o, a, 10) is implied by the other constraints: length(l1, 10) at line 33 in file diagnostics.scad, line 35
+ERROR: Sketch 'open': line 'l1' start is not joined to another profile curve in file diagnostics.scad, line 41
+ERROR: Sketch 'open': line 'l2' end is not joined to another profile curve in file diagnostics.scad, line 41
+ERROR: Sketch 'big': fillet(o, 30) needs 30 along 'l1', which is 10 long in file diagnostics.scad, line 51
+ERROR: Sketch 'misuse': circle(5): in a sketch body, circle() makes an entity and must be assigned in file diagnostics.scad, line 57
+ERROR: Sketch 'misuse': fix(3): p must be a sketch entity, found number (3) in file diagnostics.scad, line 58
+ERROR: Sketch 'misuse': geometry in a sketch body is not part of the sketch; only entities and constraints are in file diagnostics.scad, line 59
+WARNING: Ignoring unknown module 'fix' in file diagnostics.scad, line 63
+ECHO: "still evaluating"

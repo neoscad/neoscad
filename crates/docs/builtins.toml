@@ -381,6 +381,227 @@ params = ["name: string -- the part's name; nested parts get dotted names"]
 example = "part(\"lid\") translate([0, 0, 10]) cube([20, 20, 2]);"
 notes = "Without --enable part it is an unknown module, as in OpenSCAD. See docs/cli-json.md, Named parts."
 
+# --- constrained sketches (--enable sketch) -----------------------------------
+#
+# `sketch` is a builtin module; the rest is its vocabulary, which exists only
+# inside a sketch body (docs/language-extensions.md, section 4).
+
+[[module]]
+name = "sketch"
+signature = "sketch(name, strict = false, convexity = 1) { entities; constraints; }"
+summary = "A constrained 2D sketch: points, lines, arcs and circles tied by constraints, solved into a polygon."
+extension = "sketch"
+params = [
+    "name: string -- the sketch's name in its messages",
+    "strict: bool = false -- free degrees of freedom are an error instead of information",
+    "convexity: number = 1 -- as polygon()'s",
+]
+example = "sketch(name = \"plate\") {\n  o = point([0, 0]); a = point([20, 0]); b = point([20, 10]); c = point([0, 10]);\n  l1 = line(o, a); l2 = line(a, b); l3 = line(b, c); l4 = line(c, o);\n  fix(o); horizontal(l1); vertical(l2); horizontal(l3); vertical(l4);\n  length(l1, 20); length(l2, 10);\n}"
+notes = "Assignments in the body make entities (point, line, arc, circle) and statements add constraints; that vocabulary exists only inside sketch bodies, so libraries' own arc() or distance() are untouched elsewhere. The closed loops of the non-construction curves become the polygon's paths, filled even-odd (a circle inside an outline is a hole); arcs and circles use $fn, $fa and $fs as circle() does. A module whose body is a sketch() adds to the sketch it is called from. Without --enable sketch it is an unknown module, as in OpenSCAD."
+
+[[function]]
+name = "point"
+signature = "point([x, y])"
+summary = "A sketch point, drawn at [x, y]: the solver starts there."
+extension = "sketch"
+params = ["at: [x, y] -- where it is drawn"]
+returns = "sketch entity"
+example = "sketch() { p = point([3, 4]); fix(p); echo(p); }"
+
+[[function]]
+name = "line"
+signature = "line(p, q, construction = false)"
+summary = "A sketch line segment from p to q."
+extension = "sketch"
+params = [
+    "p: point or [x, y] -- its start; [x, y] makes a new point there (`.start`)",
+    "q: point or [x, y] -- its end (`.end`)",
+    "construction: bool = false -- a helper line, not part of the profile",
+]
+returns = "sketch entity"
+example = "sketch() { l = line([0, 0], [10, 0], construction = true); fix(l); }"
+
+[[function]]
+name = "arc"
+signature = "arc(center, start, end, cw = false, construction = false)"
+summary = "A sketch arc around center from start to end, counter-clockwise unless cw; start and end stay the same distance from center."
+extension = "sketch"
+params = [
+    "center: point or [x, y] -- `.center`",
+    "start: point or [x, y] -- `.start`",
+    "end: point or [x, y] -- `.end`",
+    "cw: bool = false -- run clockwise",
+    "construction: bool = false -- a helper arc, not part of the profile",
+]
+returns = "sketch entity"
+example = "sketch() { c = point([0, 0]); a = arc(c, [5, 0], [0, 5], construction = true); fix(c); fix(a.start); angle(a, 90); }"
+
+[[function]]
+name = "circle"
+signature = "circle(center, r, d, construction = false)"
+summary = "A sketch circle; r or d, when given, is a radius constraint."
+extension = "sketch"
+params = [
+    "center: point or [x, y] -- `.center`",
+    "r: number -- its radius",
+    "d: number -- its diameter",
+    "construction: bool = false -- a helper circle, not part of the profile",
+]
+returns = "sketch entity"
+example = "sketch() { c = circle([0, 0], r = 5); fix(c.center); }"
+notes = "In a sketch body this is the sketch circle, not OpenSCAD's circle() module."
+
+[[module]]
+name = "coincident"
+signature = "coincident(a, b)"
+summary = "Two sketch points are the same point; the profile joins curves there."
+extension = "sketch"
+params = ["a: point", "b: point"]
+example = "sketch() {\n  l1 = line([0, 0], [10, 0], construction = true);\n  l2 = line([10, 1], [10, 8], construction = true);\n  coincident(l1.end, l2.start);\n}"
+
+[[module]]
+name = "on"
+signature = "on(p, c)"
+summary = "A sketch point lies on a curve: the infinite line through a line, or an arc's or circle's circle."
+extension = "sketch"
+params = ["p: point", "c: line, arc or circle"]
+example = "sketch() { c = circle([0, 0], r = 5, construction = true); p = point([4, 3]); on(p, c); }"
+
+[[module]]
+name = "horizontal"
+signature = "horizontal(l) or horizontal(p, q)"
+summary = "A sketch line, or the line between two points, is horizontal."
+extension = "sketch"
+params = ["a: line or point", "b: point -- with a point as a"]
+example = "sketch() { l = line([0, 0], [10, 1], construction = true); horizontal(l); }"
+
+[[module]]
+name = "vertical"
+signature = "vertical(l) or vertical(p, q)"
+summary = "A sketch line, or the line between two points, is vertical."
+extension = "sketch"
+params = ["a: line or point", "b: point -- with a point as a"]
+example = "sketch() { l = line([0, 0], [1, 10], construction = true); vertical(l); }"
+
+[[module]]
+name = "parallel"
+signature = "parallel(l1, l2)"
+summary = "Two sketch lines are parallel."
+extension = "sketch"
+params = ["l1: line", "l2: line"]
+example = "sketch() {\n  a = line([0, 0], [10, 0], construction = true);\n  b = line([0, 5], [10, 6], construction = true);\n  parallel(a, b);\n}"
+
+[[module]]
+name = "perpendicular"
+signature = "perpendicular(l1, l2)"
+summary = "Two sketch lines are perpendicular."
+extension = "sketch"
+params = ["l1: line", "l2: line"]
+example = "sketch() {\n  a = line([0, 0], [10, 0], construction = true);\n  b = line([0, 0], [1, 10], construction = true);\n  perpendicular(a, b);\n}"
+
+[[module]]
+name = "tangent"
+signature = "tangent(a, b)"
+summary = "A sketch line and an arc or circle, or two arcs or circles, touch; the side comes from the drawing."
+extension = "sketch"
+params = ["a: line, arc or circle", "b: arc or circle (or a line, with a curve as a)"]
+example = "sketch() {\n  c = circle([0, 0], r = 5, construction = true);\n  l = line([-10, 6], [10, 5], construction = true);\n  tangent(l, c);\n}"
+notes = "Where the two share an end point, the tangency is written at that point (the radius there is perpendicular to the line)."
+
+[[module]]
+name = "distance"
+signature = "distance(a, b, d, along)"
+summary = "The distance between two sketch points, a point and a line, or two lines (which it makes parallel)."
+extension = "sketch"
+params = [
+    "a: point or line",
+    "b: point or line",
+    "d: number -- the distance",
+    "along: string -- \"x\" or \"y\": the signed offset b - a along that axis, between two points",
+]
+example = "sketch() { o = point([0, 0]); p = point([9, 1]); fix(o); distance(o, p, 10, along = \"x\"); }"
+
+[[module]]
+name = "length"
+signature = "length(l, d)"
+summary = "A sketch line's length."
+extension = "sketch"
+params = ["l: line", "d: number -- the length"]
+example = "sketch() { l = line([0, 0], [9, 0], construction = true); length(l, 10); }"
+
+[[module]]
+name = "radius"
+signature = "radius(c, r)"
+summary = "A sketch arc's or circle's radius."
+extension = "sketch"
+params = ["c: arc or circle", "r: number -- the radius"]
+example = "sketch() { c = circle([0, 0]); fix(c.center); radius(c, 4); }"
+
+[[module]]
+name = "diameter"
+signature = "diameter(c, d)"
+summary = "A sketch arc's or circle's diameter."
+extension = "sketch"
+params = ["c: arc or circle", "d: number -- the diameter"]
+example = "sketch() { c = circle([0, 0]); fix(c.center); diameter(c, 8); }"
+
+[[module]]
+name = "angle"
+signature = "angle(l1, l2, deg) or angle(a, deg)"
+summary = "The signed angle, counter-clockwise, from one sketch line to another; or the angle an arc sweeps."
+extension = "sketch"
+params = ["l1: line, or an arc for its sweep", "l2: line", "deg: number -- degrees"]
+example = "sketch() {\n  a = line([0, 0], [10, 0], construction = true);\n  b = line([0, 0], [7, 7], construction = true);\n  angle(a, b, 45);\n}"
+
+[[module]]
+name = "equal"
+signature = "equal(a, b)"
+summary = "Two sketch lines have equal lengths, or two arcs or circles equal radii."
+extension = "sketch"
+params = ["a: line, arc or circle", "b: the same kind"]
+example = "sketch() {\n  a = line([0, 0], [10, 0], construction = true);\n  b = line([0, 5], [8, 5], construction = true);\n  equal(a, b);\n}"
+
+[[module]]
+name = "midpoint"
+signature = "midpoint(p, l)"
+summary = "A sketch point is the midpoint of a line."
+extension = "sketch"
+params = ["p: point", "l: line"]
+example = "sketch() { l = line([0, 0], [10, 0], construction = true); m = point([4, 1]); midpoint(m, l); }"
+
+[[module]]
+name = "symmetric"
+signature = "symmetric(p, q, about)"
+summary = "Two sketch points are mirror images about a line or a point."
+extension = "sketch"
+params = ["p: point", "q: point", "about: line or point"]
+example = "sketch() {\n  axis = line([0, -5], [0, 5], construction = true);\n  p = point([-3, 1]); q = point([4, 1]);\n  symmetric(p, q, axis);\n}"
+
+[[module]]
+name = "fix"
+signature = "fix(p, at)"
+summary = "A sketch point stays where it is drawn, or at `at`; a line keeps both its points."
+extension = "sketch"
+params = ["p: point or line", "at: [x, y] -- for a point; defaults to where it is drawn"]
+example = "sketch() { p = point([2, 3]); fix(p); q = point([0, 0]); fix(q, at = [1, 1]); }"
+
+[[module]]
+name = "fillet"
+signature = "fillet(corner, r)"
+summary = "Round a sketch corner where two profile lines meet with a tangent arc, after the solve."
+extension = "sketch"
+params = ["corner: point -- shared by exactly two lines of the profile", "r: number -- the radius"]
+example = "sketch() {\n  o = point([0, 0]); a = point([20, 0]); b = point([20, 10]); c = point([0, 10]);\n  l1 = line(o, a); l2 = line(a, b); l3 = line(b, c); l4 = line(c, o);\n  fix(o); fix(a); fix(b); fix(c);\n  fillet(b, 3);\n}"
+notes = "The corner point stays the sharp corner the dimensions refer to. A fillet longer than a line it trims is an error (sketch-fillet-too-large)."
+
+[[module]]
+name = "chamfer"
+signature = "chamfer(corner, d)"
+summary = "Cut a sketch corner where two profile lines meet with a straight line, d along each, after the solve."
+extension = "sketch"
+params = ["corner: point -- shared by exactly two lines of the profile", "d: number -- the cut along each line"]
+example = "sketch() {\n  o = point([0, 0]); a = point([20, 0]); b = point([20, 10]); c = point([0, 10]);\n  l1 = line(o, a); l2 = line(a, b); l3 = line(b, c); l4 = line(c, o);\n  fix(o); fix(a); fix(b); fix(c);\n  chamfer(b, 2);\n}"
+
 # --- functions: numbers --------------------------------------------------------
 
 [[function]]

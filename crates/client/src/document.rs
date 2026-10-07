@@ -499,7 +499,7 @@ impl Client {
                     Some(lang::diag::Severity::Deprecated) => ConsoleKind::Deprecated,
                     Some(lang::diag::Severity::Echo) => ConsoleKind::Echo,
                     Some(lang::diag::Severity::Trace) => ConsoleKind::Trace,
-                    None => ConsoleKind::Info,
+                    Some(lang::diag::Severity::Info) | None => ConsoleKind::Info,
                 },
                 text: l.text.clone(),
                 location: l.location.as_ref().and_then(|at| positions.range(at)),

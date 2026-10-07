@@ -1,0 +1,8 @@
+ECHO: "BOSL2 arc()", "MCAD distance()", "MCAD angle()"
+ECHO: "BOSL2 arc module"
+ECHO: "BOSL2 circle module"
+ECHO: "BOSL2 fillet module"
+ECHO: "MCAD chamfer module"
+ECHO: <sketch circle "hole">, <sketch point "hole.center">, "MCAD distance()"
+ECHO: "BOSL2 arc()"
+ECHO: "BOSL2 fillet module"

@@ -69,6 +69,12 @@ pub(crate) enum Builtin {
     Object,
     HasKey,
     Import,
+    /// NeoSCAD's sketch vocabulary (`--enable sketch`), bound only inside
+    /// sketch bodies (`crate::sketch`): never in [`ALL`].
+    SketchPoint,
+    SketchLine,
+    SketchArc,
+    SketchCircle,
 }
 
 impl Builtin {
@@ -541,6 +547,9 @@ impl<'a> Evaluator<'a> {
             TextMetrics => self.metrics(std::mem::take(a), loc, false),
             FontMetrics => self.metrics(std::mem::take(a), loc, true),
             Import => self.import_function(std::mem::take(a), loc),
+            SketchPoint | SketchLine | SketchArc | SketchCircle => {
+                return self.sketch_entity(b, loc, a);
+            }
             // Evaluated from their unevaluated arguments in `call_builtin`.
             IsUndef | Object => Value::Undef,
         })

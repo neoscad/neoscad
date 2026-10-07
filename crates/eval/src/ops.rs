@@ -360,6 +360,9 @@ fn scalars_equal(a: &Value, b: &Value) -> bool {
         // Function literals are equal only to themselves (FunctionType
         // compares addresses).
         (Value::Function(x), Value::Function(y)) => Rc::ptr_eq(x, y),
+        // Sketch entity handles are equal when they name the same entity
+        // (`.start` of a line drawn from point `a` is `a`).
+        (Value::Entity(x), Value::Entity(y)) => x.same(y),
         _ => false,
     }
 }

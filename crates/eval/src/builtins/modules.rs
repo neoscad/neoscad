@@ -64,6 +64,11 @@ pub(crate) enum BuiltinModule {
     Roof,
     /// neoscad's `part()` extension; in the table only when enabled.
     Part,
+    /// neoscad's `sketch()` extension; in the table only when enabled.
+    Sketch,
+    /// A statement of the sketch vocabulary (`crate::sketch`), bound only
+    /// inside sketch bodies: never in the table.
+    SketchStatement(crate::sketch::Vocab),
 }
 
 impl BuiltinModule {
@@ -125,8 +130,14 @@ pub(crate) fn table(
     let part = extensions
         .has(crate::Extension::Part)
         .then_some(("part", Part));
+    // `sketch` likewise: off, a call is OpenSCAD's unknown module, and on,
+    // a program's own `module sketch` still shadows it (roof.scad has one).
+    let sketch = extensions
+        .has(crate::Extension::Sketch)
+        .then_some(("sketch", Sketch));
     ALL.into_iter()
         .chain(part)
+        .chain(sketch)
         .map(|(n, b)| (syms.intern(n), b))
         .collect()
 }
@@ -227,7 +238,7 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn get(&mut self, p: &Params, name: &str) -> Value {
+    pub(crate) fn get(&mut self, p: &Params, name: &str) -> Value {
         self.lookup_param(p, name).unwrap_or_default()
     }
 
@@ -308,7 +319,7 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `CurveDiscretizer(parameters, loc)`, with its clamping warnings.
-    fn discretizer(&mut self, p: &Params) -> Discretizer {
+    pub(crate) fn discretizer(&mut self, p: &Params) -> Discretizer {
         let mut fn_ = self.get(p, "$fn").to_f64();
         let mut fs = self.get(p, "$fs").to_f64();
         let mut fa = self.get(p, "$fa").to_f64();

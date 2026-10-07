@@ -354,6 +354,14 @@ struct Env {
     scope: Option<u32>,
     file: bool,
     parent: Option<u32>,
+    /// The boundary of a sketch body (`--enable sketch`): a link that binds
+    /// nothing at run time, between the body and the scope around the
+    /// `sketch()` call, where the sketch vocabulary is bound. A name looked
+    /// up from inside the body finds what the body itself binds first (a
+    /// function literal in one of its variables), then the vocabulary, and
+    /// never a user's or library's `arc` or `chamfer` outside:
+    /// `docs/language-extensions.md`, section 4.1.
+    vocab: bool,
 }
 
 /// Everything the resolver reads besides the unit it resolves.
@@ -362,6 +370,10 @@ pub(crate) struct Tables<'t, 'a> {
     pub syms: &'t Syms,
     pub builtin_fns: &'t HashMap<Sym, Builtin, FxBuild>,
     pub builtin_mods: &'t HashMap<Sym, BuiltinModule, FxBuild>,
+    /// The sketch vocabulary, bound inside sketch bodies only (see
+    /// [`Env::vocab`]); empty without `--enable sketch`.
+    pub vocab_fns: &'t HashMap<Sym, Builtin, FxBuild>,
+    pub vocab_mods: &'t HashMap<Sym, BuiltinModule, FxBuild>,
     /// Names some call or instantiation passes as a named argument,
     /// collected at the first question: resolving a program's top level
     /// seldom asks, and a model that calls no function never pays for the
@@ -536,8 +548,33 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
             scope,
             file,
             parent,
+            vocab: false,
         });
         self.res.envs.len() as u32 - 1
+    }
+
+    /// The vocabulary boundary around a sketch body ([`Env::vocab`]). Its
+    /// region binds nothing, so no candidate ever names it.
+    fn vocab_env(&mut self, parent: u32) -> u32 {
+        self.res.envs.push(Env {
+            region: NONE_REGION,
+            scope: None,
+            file: false,
+            parent: Some(parent),
+            vocab: true,
+        });
+        self.res.envs.len() as u32 - 1
+    }
+
+    /// Whether module reference `m` (as [`Self::module_ref`] returns it) is
+    /// the builtin `sketch`: no definition anywhere can take the name, so
+    /// the lookup can only end at the builtin. A program's own
+    /// `module sketch` (roof.scad has one) is a candidate and wins.
+    fn is_builtin_sketch(&self, m: u32) -> bool {
+        m != 0 && {
+            let r = self.res.mods[m as usize - 1];
+            r.cands.len == 0 && r.builtin == Some(BuiltinModule::Sketch)
+        }
     }
 
     fn add_region(&mut self, b: RegionBuilder<'_>, params: bool) -> u32 {
@@ -716,6 +753,11 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
             insts.push((m, first));
             let children = info.children[j];
             let r = self.scope_region(children, None);
+            let child_env = if self.is_builtin_sketch(m) {
+                self.vocab_env(child_env)
+            } else {
+                child_env
+            };
             let e = self.env(r, Some(children), false, Some(child_env));
             self.scopes.push((children, e));
             let els = info.else_children[j];
@@ -915,6 +957,14 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
         while let Some(i) = cur {
             let e = self.res.envs[i as usize];
             cur = e.parent;
+            if e.vocab
+                && let Some(&b) = self.t.vocab_fns.get(&s)
+            {
+                return FnRef {
+                    cands: self.finish(start),
+                    builtin: Some(b),
+                };
+            }
             if let Some(sid) = e.scope
                 && let Some(&index) = self.unit.scopes[sid as usize].functions.get(&s)
             {
@@ -952,9 +1002,16 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
         }
         let start = self.start();
         let mut cur = Some(env);
+        let mut builtin = self.t.builtin_mods.get(&s).copied();
         while let Some(i) = cur {
             let e = self.res.envs[i as usize];
             cur = e.parent;
+            if e.vocab
+                && let Some(&b) = self.t.vocab_mods.get(&s)
+            {
+                builtin = Some(b);
+                break;
+            }
             if let Some(sid) = e.scope
                 && let Some(&index) = self.unit.scopes[sid as usize].modules.get(&s)
             {
@@ -979,7 +1036,7 @@ impl<'r, 't, 'a> Resolver<'r, 't, 'a> {
         }
         let r = ModRef {
             cands: self.finish(start),
-            builtin: self.t.builtin_mods.get(&s).copied(),
+            builtin,
         };
         self.res.mods.push(r);
         self.res.mods.len() as u32

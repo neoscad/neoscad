@@ -559,6 +559,42 @@ fn objects_digest_by_content_and_shared_trees_digest_fast() {
     );
 }
 
+/// Constrained sketches (`--enable sketch`) through the memo: a sketch is
+/// never replayed (what it makes depends on everything its body ran, and
+/// its entities are numbered per evaluation), and the statements around
+/// it still are, with the same output as a fresh evaluation.
+#[test]
+fn sketches_are_evaluated_anew_and_their_neighbours_reused() {
+    let sketch = |w: u32| {
+        format!(
+            "module rect(o, w, h) sketch() {{\n\
+               a = point([w, 0]); b = point([w, h]); c = point([0, h]);\n\
+               l1 = line(o, a); l2 = line(a, b); l3 = line(b, c); l4 = line(c, o);\n\
+               horizontal(l1); vertical(l2); horizontal(l3); vertical(l4);\n\
+               length(l1, w); length(l2, h);\n\
+             }}\n\
+             sketch(name = \"s\") {{ o = point([0, 0]); fix(o); rect(o, {w}, 10); echo(o); fillet(o, 2); }}\n"
+        )
+    };
+    let texts = [
+        format!("cube(1);\n{}", sketch(20)),
+        format!("cube(1);\n{}", sketch(20)),
+        format!("cube(2);\n{}", sketch(20)),
+        format!("cube(2);\n{}", sketch(30)),
+    ];
+    let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let opts = Options {
+        extensions: eval::Extensions::NONE.with(eval::Extension::Sketch),
+        ..Options::default()
+    };
+    let s = versions_with(&[], &texts, &opts);
+    let reuse: Vec<_> = s
+        .iter()
+        .map(|s| (s.reused, s.recorded, s.unrecorded))
+        .collect();
+    assert_eq!(reuse, [(0, 1, 1), (1, 0, 1), (0, 1, 1), (1, 0, 1)]);
+}
+
 #[test]
 fn moved_statements_keep_their_positions_and_indices() {
     versions(

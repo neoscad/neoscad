@@ -26,6 +26,7 @@
 
 pub mod color;
 pub mod dxf;
+pub mod fragments;
 pub mod mesh;
 pub mod nef3;
 pub mod obj;

@@ -1602,7 +1602,12 @@ lead them, come roughly in order of user impact.
   libm, but a WASM libm may round a cube differently in the last bit. No
   test font is CFF. (5e)
 
-## Constrained sketches (solver)
+## Constrained sketches
+- The apps drop `INFO:` diagnostics (an under-constrained sketch):
+  `client::types::diagnostic_of` knows only error, warning and
+  deprecated, and `client::Severity`/the ffi's have no info variant. Stage
+  4 should add one, with the editor marker and the LSP's
+  `DiagnosticSeverity::Information`.
 - Stage 1 of `docs/language-extensions.md` built the solver crate
   (`crates/sketch`, package `sketch-solver`) with no language binding.
   Stages 2 and 3 map `SolveOptions::max_unknowns` and `interrupt` to
@@ -1641,12 +1646,37 @@ lead them, come roughly in order of user impact.
   converging. A newer wheel, or the solver built from source, would
   remove that noise.
 - `distance(l1, l2, d)` between lines measures from `l2`'s start and
-  does not make the lines parallel (`Constraint::Distance`). Section 4.3
-  says "line–line (parallel)"; stage 2 should settle whether it should
-  also impose parallelism.
+  does not make the lines parallel (`Constraint::Distance`). Settled in
+  stage 2: the language's `distance()` adds the parallel constraint
+  (`docs/language-extensions.md`, section 11.1); the solver crate's
+  constraint stays as it is, for hosts that want FreeCAD's form.
 - Exactify snaps coincident, horizontal and vertical classes, fixed
   coordinates and circle radii; midpoints and symmetric points are not
   snapped to their exact formulas.
+- Stage 2 (the language binding, `crates/eval/src/sketch.rs`) leaves for
+  stage 3: `sketch-self-intersection` (loops that cross), the info for
+  points the solver placed without a guess, and hints that are edits
+  (delete the redundant statement, the constraint a free direction
+  needs). The under-constrained message lists every coordinate with a
+  mobility over 0.01, so it can name more coordinates than there are
+  free degrees of freedom (a point sliding along a 45° line is listed in
+  x and in y).
+- `Limits::sketch_unknowns` is a constant (5,000 under any resource
+  limit, none without one) in `crates/eval/src/sketch.rs`; stage 3 makes
+  it a limit with its own `resource-limit` text.
+- Only an entity made by a call that is an assignment's whole expression
+  gets the variable's name (`p = point(...)`); `p = f(point(...))` or an
+  entity made in a statement's arguments prints as `<sketch point>` and
+  is named `point #3` in messages.
+- Fillets and chamfers cut corners between two lines only; line–arc and
+  arc–arc fillets are stage 7.
+- The goldens in `conformance/extensions/sketch` run as a cargo test
+  (`crates/session/tests/sketch.rs`), not as `conformance run --tier ext`
+  (section 9 of the design), and their `.csg` exports have been rendered
+  by the stock nightly by hand only; a tier in the harness would compare
+  those meshes on every run.
+- LSP completion leaves the sketch vocabulary out everywhere, until
+  stage 4 offers it inside sketch bodies only; hover shows its docs.
 - Moving the crate to its own repository needs its own CI (the wasm32
   build and the cross-platform digest now in `crates/wasm-check`), and
   the corpus (GPL/LGPL-derived) stays in NeoSCAD or goes to a separate

@@ -469,6 +469,13 @@ impl World {
             }
         }
         for e in docs::builtins() {
+            // The sketch vocabulary exists only inside sketch bodies; until
+            // completion knows where it is (stage 4 of
+            // docs/language-extensions.md), it is not offered at all, so
+            // `on` or `length` are never suggested where they mean nothing.
+            if e.extension.as_deref() == Some("sketch") && e.name != "sketch" {
+                continue;
+            }
             let ns = match e.kind {
                 docs::Kind::Module => Ns::Module,
                 docs::Kind::Function => Ns::Function,
