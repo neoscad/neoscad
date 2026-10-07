@@ -263,6 +263,17 @@ fn mul(a: &Matrix, b: &Matrix) -> Matrix {
     r
 }
 
+/// A transform node whose matrix is finite but flattens space (a zero
+/// scale): its children have no volume however they are built.
+fn flattening(n: &Node) -> bool {
+    match &n.kind {
+        NodeKind::Transform { matrix, .. } => {
+            matrix.iter().flatten().all(|v| v.is_finite()) && det3(matrix) == 0.0
+        }
+        _ => false,
+    }
+}
+
 fn det3(m: &Matrix) -> f64 {
     m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
@@ -836,6 +847,14 @@ impl Walk<'_> {
                 let mut w = Vec::new();
                 let mut e = Vec::new();
                 let m = ManifoldGeometry::from_polyset(&ps, &GlobalIds, &mut w, &mut e).manifold;
+                if m.is_empty() && flattening(n) {
+                    // A transform that flattens its children (`scale([1,
+                    // 0, 0])`, `issue4522.scad`) leaves a mesh with no
+                    // volume. The normal render drops it from the solid,
+                    // so the export does too; the volume and box checks
+                    // against the normal render still hold it to that.
+                    return Ok(Res::Solid(Manifold::empty()));
+                }
                 if m.is_empty() {
                     // A mesh export writes such a mesh as it is (OpenSCAD
                     // does too), but it encloses no solid, so it has no

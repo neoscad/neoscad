@@ -58,6 +58,41 @@ the render tests but 5.4 on the benchmarks. By the stop rule, 92.9% is
 between 80% and 95%: the owner decides, with the failure classes in
 `docs/followups.md`, "Exact geometry".
 
+**Update, stage 1b fixes (2026-10-07):** the owner continued path 1 with
+the failure classes above. Fixed: two cones crossing at a tangent point
+(the mesh's four-face crossing now gets the exact point), a sphere whose
+boundary passes the poles of its frame's axis (the axis keeps clear),
+a mesh with fewer handles than the exact faces (a tunnel of no
+thickness: a note, not an error), and a flattening `scale()` (dropped,
+as the render drops it). Reconstruction also drops flat closed
+components and faces of no area. The Menger sponge is the gate-4 find:
+rounding joins bodies that touch along an edge so that a corner of a
+face lies on another of its edges, which OCCT reads as an open shell;
+the validator now finds that and the export is refused.
+Reconstruction, checks and writing went from 3.7× to about 2× the
+render on `csg_spheres`, with the same bytes. The measurement, as
+before:
+
+| Corpus | 3D models | Eligible | Valid, ours | Valid, ours + OCCT | All-faceted | Failed |
+|---|---|---|---|---|---|---|
+| This audit's 28 cases × 4 `$fa`/`$fs` settings | 112 | 104 | 104 | 104 (100%) | 0 | 0 |
+| OpenSCAD's `render-manifold` inputs | 214 | 81 | 80 | 80 (98.8%) | 79 | 21 |
+| BOSL2 examples, every 5th | 311 | 44 | 39 | 39 (88.6%) | 144 | 56 |
+| Benchmark models | 14 | 4 | 3 | 3 (75%; 1 not read in 2 GB) | 5 | 4 |
+| **Real corpora, deduplicated** | 537 | 127 | 121 (95.3%) | **121 (95.3%)** | 228 | 80 |
+
+Gate 3: all 108 closed-form cases within 4.5e-9. Gate 4: OCCT disagrees
+with 2 of the 567 files it read, both `screws__001` (in the BOSL2 and
+benchmark corpora; non-eligible), and three were not read within 2 GB;
+it disagreed with 10 of 564 before. Gate 5 is still missed:
+(reconstruct + check + write) / render has medians of 0.52 on the render
+tests, 1.02 on BOSL2 and 3.1 on the benchmarks (`text_30lines` 10.9×).
+Exact faces are 11.2% of all faces written, 100% on eligible models. By
+the stop rule, 95.3% meets the 95% bar, narrowly; the six eligible
+failures are five BOSL2 `distributors` examples (a tangent point that is
+also a triple point) and the Menger sponge (`docs/followups.md`, "Exact
+geometry").
+
 It follows `docs/audits/brep-feasibility.md` (below, "the previous
 audit"), which found that only OCCT survives OpenSCAD-shaped trees. The
 owner prefers an exact backend written in-house: pure Rust, publishable as

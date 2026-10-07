@@ -348,6 +348,7 @@ fn attempt(
         .filter(|e| !e.seam && matches!(e.curve, meshbrep::Curve::BSpline(_)))
         .count();
     stats.notes = brep.report.notes.clone();
+    stats.notes.extend(validation.notes.iter().cloned());
     if !validation.is_valid() {
         stats.timings.check_ms += now() - t0;
         let mut errs = validation.errors.clone();
@@ -367,8 +368,16 @@ fn attempt(
             retry: false,
         };
     }
-    let volume = match meshbrep::measure(&brep) {
-        Ok(m) => m.volume,
+    // The validator integrated every shell's volume on the exact
+    // geometry already (each face is in one shell); integrating again
+    // took a sixth of a faceted model's export.
+    let measured = if validation.shell_volumes.len() == brep.shells.len() {
+        Ok(validation.shell_volumes.iter().sum())
+    } else {
+        meshbrep::measure(&brep).map(|m| m.volume)
+    };
+    let volume = match measured {
+        Ok(v) => v,
         Err(e) => {
             stats.timings.check_ms += now() - t0;
             return Attempt::Rejected {

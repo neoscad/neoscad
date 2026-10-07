@@ -19,9 +19,12 @@ turns the result back into exact geometry:
 - **Vertices** are where three or more faces meet, solved on the exact
   surfaces. Tangent surfaces are detected from their records, and their
   contact line or circle is used instead of an ill-conditioned solve.
+  Where two surfaces touch at a point, their intersection crosses
+  itself there, and that point is solved for exactly.
 - **Seams and parameter-space curves** go on curved faces, sharing the
   edge's parameter, so a STEP reader uses them as written. A sphere's
-  axis is chosen so its bounding circles are parallels.
+  axis is chosen so its bounding circles are parallels, and so that no
+  other boundary passes near its poles.
 - **Faceted fallback:** triangles tagged `Surface::Faceted` (from
   `polyhedron`, `hull` or imported meshes) become planar faces, and mix
   with exact faces in one valid solid.
@@ -76,7 +79,15 @@ other orientations.
 When the mesh's topology differs from the exact model's anyway, so that a
 face would fold over itself once its corners are exact, `reconstruct`
 returns `Error::TopologyMismatch`. Retrying with a finer tagging mesh
-usually cures it.
+usually cures it. It returns the same error when a corner lands on
+another edge of its own face: bodies that touch along an edge, which
+rounding (after a rotation, say) joined on the wrong side. A finer mesh
+does not help there.
+
+A closed component of the mesh that lies in one plane (zero volume, as
+Manifold can leave where coplanar cuts meet) is dropped, and so is a face
+of two straight edges along one line (a sliver triangle once its short
+edge collapses), each with a note in the report.
 
 ## Output
 
@@ -104,9 +115,13 @@ platform.
 - every edge is used by exactly two coedges in opposite directions, and a
   seam twice by one face;
 - loops are closed and do not cross themselves in their face's parameter
-  plane;
-- the Euler–Poincaré genus is a whole, non-negative number, equal to the
-  input mesh's;
+  plane, and no corner lies inside another edge of its face (a boundary
+  touching itself there reads back from position-based readers such as
+  OCCT as an open shell);
+- the Euler–Poincaré genus is a whole, non-negative number, no more than
+  the input mesh's (fewer is reported in `Validation::notes`: rounding
+  can leave a mesh with a tunnel of no thickness that the exact faces
+  close);
 - curves meet their vertices and lie on their faces' surfaces;
 - every shell encloses positive volume (negative for a void).
 

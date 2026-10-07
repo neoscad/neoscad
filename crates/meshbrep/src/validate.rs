@@ -22,6 +22,9 @@ pub struct Validation {
     /// The signed volume of each shell (negative for voids), when it could
     /// be integrated.
     pub shell_volumes: Vec<f64>,
+    /// Findings that are not errors, in words: the B-rep has fewer
+    /// handles than the input mesh.
+    pub notes: Vec<String>,
 }
 
 impl Validation {
@@ -39,8 +42,10 @@ impl Validation {
 ///   (orientation consistency), by two faces, or twice by one face if it
 ///   is a seam;
 /// - every face is in exactly one shell, and shells are edge-connected;
-/// - the Euler–Poincaré formula gives a whole, non-negative genus, equal to
-///   the input mesh's when the report has it;
+/// - the Euler–Poincaré formula gives a whole, non-negative genus, no more
+///   than the input mesh's when the report has it (fewer is a note);
+/// - no face's boundary crosses itself, or touches itself with a corner
+///   inside one of its edges (within `tolerance`);
 /// - geometry, within `tolerance` (model units): curve ends at their
 ///   vertices, edges on both their faces' surfaces, parameter-space curves
 ///   present on curved faces with ends at the edge's vertices;
@@ -68,8 +73,24 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
         if f.loops.is_empty() {
             err(&mut out, format!("face {fi}: no loops"));
         }
-        if f.loops.iter().filter(|l| l.outer).count() > 1 {
+        let outer = f.loops.iter().filter(|l| l.outer).count();
+        if outer > 1 {
             err(&mut out, format!("face {fi}: more than one outer loop"));
+        } else if outer == 0
+            && !f.loops.is_empty()
+            && matches!(
+                f.surface,
+                crate::model::Surface::Plane { .. } | crate::model::Surface::Faceted
+            )
+        {
+            // A bounded planar region has an outer loop. Without one the
+            // face's loops all wind the wrong way for its normal: a face
+            // folded through a tunnel of no thickness in the mesh (BOSL2
+            // `attachments__084`, which OCCT read back as unorientable).
+            err(
+                &mut out,
+                format!("face {fi}: no outer loop (its loops wind against its normal)"),
+            );
         }
         for (li, lp) in f.loops.iter().enumerate() {
             nloops += 1;
@@ -93,6 +114,21 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                     (e.end, e.start)
                 }
             };
+            // Two straight edges make a loop with no area: they overlap
+            // rather than cross, so the crossing check below cannot see it.
+            if lp.coedges.len() == 2
+                && lp.coedges.iter().all(|c| {
+                    matches!(
+                        brep.edges[c.edge as usize].curve,
+                        crate::model::Curve::Line { .. }
+                    )
+                })
+            {
+                err(
+                    &mut out,
+                    format!("face {fi} loop {li}: two straight edges along one line (no area)"),
+                );
+            }
             for k in 0..lp.coedges.len() {
                 let a = ends(&lp.coedges[k]).1;
                 let b = ends(&lp.coedges[(k + 1) % lp.coedges.len()]).0;
@@ -187,12 +223,29 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
         if g < 0 {
             err(&mut out, format!("Euler–Poincaré: genus {g} is negative"));
         }
+        // More handles than the mesh means the B-rep joined what the
+        // mesh keeps apart (corners merged that should not be): an error.
+        // Fewer can be right. Rounding can leave a mesh with a tunnel of
+        // no thickness, where a plane meets one that is equal within
+        // the merge tolerance but whose triangles straddle it (a cube
+        // standing on a rotated prism, BOSL2 `attachments__079`): the
+        // two sides of the tunnel are one exact face, so the B-rep has
+        // no handle there and is the exact model's. A tunnel with any
+        // volume would change the volume, which callers must compare
+        // with the mesh's anyway (see the module documentation).
         let r = &brep.report;
-        if r.mesh_components == brep.shells.len() && r.mesh_components > 0 && g != r.mesh_genus {
-            err(
-                &mut out,
-                format!("genus {g} differs from the input mesh's {}", r.mesh_genus),
-            );
+        if r.mesh_components == brep.shells.len() && r.mesh_components > 0 {
+            if g > r.mesh_genus {
+                err(
+                    &mut out,
+                    format!("genus {g} is more than the input mesh's {}", r.mesh_genus),
+                );
+            } else if g < r.mesh_genus {
+                out.notes.push(format!(
+                    "genus {g} is less than the input mesh's {} (a tunnel of no thickness in the mesh)",
+                    r.mesh_genus
+                ));
+            }
         }
     }
     // Geometry.
@@ -274,7 +327,7 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
     }
     if out.errors.is_empty() {
         for fi in 0..nf {
-            if let Some(e) = face_crossing(brep, fi) {
+            if let Some(e) = face_crossing(brep, fi).or_else(|| face_touch(brep, fi, tolerance)) {
                 err(&mut out, e);
             }
         }
@@ -368,6 +421,121 @@ pub(crate) fn face_crossing(b: &Brep, fi: usize) -> Option<String> {
     };
     found(1)?;
     found(8)
+}
+
+/// Where a corner of a face lies inside another edge of the same face,
+/// within `tol` in space: a boundary touching itself in the middle of an
+/// edge. Corners that coincide (a pinch) are allowed.
+///
+/// Manifold keeps two bodies that touch along a line apart with duplicated
+/// vertices, and after a rotation its rounding can leave the duplicates on
+/// different sides of each other, so that the mesh joins faces the exact
+/// model only pinches. Once the vertices sit at their exact positions, a
+/// corner lies on an edge of its own face. Counted by its topology the
+/// B-rep is still a closed 2-manifold, but a reader that joins by position
+/// sees a self-intersecting wire: the rotated Menger sponge
+/// (`example024.scad`) read back from OCCT as an open shell with 60 free
+/// edges because of this. The test is in space, not in the parameter
+/// plane, whose `u` (an angle) and `v` (a length) are not comparable.
+pub(crate) fn face_touch(b: &Brep, fi: usize, tol: f64) -> Option<String> {
+    let f = &b.faces[fi];
+    // (vertex, loop) and (edge, loop) pairs.
+    let mut verts: Vec<(u32, usize)> = Vec::new();
+    let mut edges: Vec<(u32, usize)> = Vec::new();
+    for (li, lp) in f.loops.iter().enumerate() {
+        for c in &lp.coedges {
+            let e = &b.edges[c.edge as usize];
+            verts.push((e.start, li));
+            verts.push((e.end, li));
+            edges.push((c.edge, li));
+        }
+    }
+    verts.sort_unstable();
+    verts.dedup();
+    edges.sort_unstable();
+    edges.dedup();
+    if verts.len() < 3 {
+        return None;
+    }
+    let at = |v: u32| V::from(b.vertices[v as usize]);
+    // The corners sorted by x, so that each edge looks only at those in
+    // its box: faces of thousands of corners are common (text, `$fn`).
+    let mut by_x: Vec<(f64, u32, usize)> = verts.iter().map(|&(v, l)| (at(v).x, v, l)).collect();
+    by_x.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    for &(ei, el) in &edges {
+        let e = &b.edges[ei as usize];
+        let n = curve::sample_count(&e.curve, e.range);
+        let pts = curve::sample(&e.curve, e.range, n);
+        let mut lo = pts[0];
+        let mut hi = pts[0];
+        for p in &pts {
+            lo = v(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+            hi = v(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+        }
+        // The samples' box misses the curve between them by at most the
+        // sagitta, which a twentieth of the spacing bounds at this
+        // sampling; the pad covers that and the tolerance.
+        let pad = tol + 0.05 * (hi - lo).len() / n as f64;
+        let (s, t) = (at(e.start), at(e.end));
+        let first = by_x.partition_point(|&(x, _, _)| x < lo.x - pad);
+        for &(x, vi, vl) in &by_x[first..] {
+            if x > hi.x + pad {
+                break;
+            }
+            if vi == e.start || vi == e.end {
+                continue;
+            }
+            let p = at(vi);
+            if p.y < lo.y - pad
+                || p.z < lo.z - pad
+                || p.y > hi.y + pad
+                || p.z > hi.z + pad
+                || (p - s).len() <= tol
+                || (p - t).len() <= tol
+            {
+                continue;
+            }
+            if distance_to_curve(&e.curve, e.range, &pts, p) <= tol {
+                return Some(format!(
+                    "face {fi}: boundary touches itself, a corner at ({:.4}, {:.4}, {:.4}) lies on edge {ei} ({})",
+                    p.x,
+                    p.y,
+                    p.z,
+                    if vl == el {
+                        "same loop"
+                    } else {
+                        "another loop"
+                    }
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// The distance from `p` to a curve sampled as `pts` over `range`: from
+/// the nearest sample's neighbourhood, refined by golden-section search.
+fn distance_to_curve(c: &crate::model::Curve, range: [f64; 2], pts: &[V], p: V) -> f64 {
+    let n = pts.len() - 1;
+    let k = (0..=n)
+        .min_by(|&i, &j| (pts[i] - p).len().total_cmp(&(pts[j] - p).len()))
+        .expect("samples");
+    let step = (range[1] - range[0]) / n as f64;
+    let (mut a, mut z) = (
+        range[0] + step * k.saturating_sub(1) as f64,
+        range[0] + step * (k + 1).min(n) as f64,
+    );
+    let d = |t: f64| (curve::eval(c, t) - p).len();
+    let g = 0.5 * (5f64.sqrt() - 1.0);
+    for _ in 0..80 {
+        let (m1, m2) = (z - g * (z - a), a + g * (z - a));
+        if d(m1) < d(m2) {
+            z = m2;
+        } else {
+            a = m1;
+        }
+    }
+    d(0.5 * (a + z)).min((pts[k] - p).len())
 }
 
 fn crossing_in(lines: &[Vec<[f64; 2]>]) -> Option<([f64; 2], [f64; 2])> {

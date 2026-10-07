@@ -2234,43 +2234,79 @@ Stage 1a of `docs/audits/exact-geometry-rust.md` is `crates/meshbrep`;
 stage 1b is `geom::exact` and `-o x.step` behind `--enable exact`. The
 stop-rule numbers are in the audit's status note (`conformance exact`
 reproduces them). Leftovers of stage 1b first, then of the crate.
-- **The stop rule is between its thresholds: an owner decision.** On the
-  real corpora (OpenSCAD's render tests, every 5th BOSL2 example, the
-  benchmarks) 118 of 127 eligible models export valid by our checks and
-  OCCT's (92.9%). The failures, by class: five BOSL2 `distributors`
-  examples (rotated copies of a cone whose base circles all meet in two
-  points: twelve faces at one vertex; "face has no boundary" or a folded
-  face after the retry); `rotate-parameters.scad` (unit spheres cut
-  through their centre by cube faces: a seam lands on a boundary edge,
-  `TopologyMismatch` at both resolutions); BOSL2 `attachments__079`
-  (genus 0 against the mesh's 1); the Menger sponge (below); and
-  `issue4522.scad`, a degenerate `scale()` with no closed solid.
-- **The Menger sponge (`example024.scad`, n = 3) passes our checks and
-  OCCT reads it as an open shell** (60 free edges, no solid; 3,959 faces
-  where we wrote 3,894). n = 1 and 2 read back valid, and so do faces
-  pinched at a corner, cubes touching along an edge, and c15's hole
-  tangent to a wall, so it is not the pinch. Not found yet; it is the
-  one eligible file we write that OCCT rejects. Nine non-eligible ones
-  (faceted BOSL2 shapes: `rounding__105/165/200`, `screws__001`,
-  `shapes3d__071`, `turtle3d__002`, `drawing__040`; `example017.scad`)
-  are also read back invalid or with another volume; `screws__001`'s
-  OCCT volume is 0.45% under ours, which matches the mesh. Put OCCT's
-  read-back into the export's own tests once it is in CI.
+- **The stop rule's bar is met, narrowly: 121 of 127 eligible real
+  models (95.3%) export valid by our checks and OCCT's.** The six left:
+  - **Five BOSL2 `distributors` examples** (six or more equal cones about
+    one axis, base circles all through two points). Two such cones are
+    tangent at a point, where their intersection crosses itself; that
+    point is now solved for even when the mesh has the crossing as a
+    four-face vertex, which fixed two cones at any angle (the
+    `cones_crossing_at_a_tangent_point_export` test). With three or more,
+    a pair's tangent point lies exactly on a third cone's base plane, and
+    a tangent point that is also a triple point is not handled: the mesh
+    near it has the wrong topology at every resolution tried (×1 to ×8).
+    It needs a vertex placed at the tangent point with three surfaces,
+    and the mesh's vertices around it collapsed into it.
+  - **The Menger sponge (`example024.scad`), now refused, not written
+    wrong.** Its tunnels touch along edges. Manifold keeps such bodies
+    apart with duplicated vertices, and after the model's rotation its
+    rounding joins the faces on the wrong side, so a corner of a face
+    lies on another edge of the same face. OCCT read our file as an open
+    shell (60 free edges, 3,959 faces for our 3,894). The validator now
+    finds a corner on an edge of its own face (`face_touch`, in space)
+    and reconstruction reports it as `TopologyMismatch`. The same check
+    caught four of last sweep's nine non-eligible files OCCT rejected
+    (`drawing__040`, `rounding__105`, `shapes3d__071`, `turtle3d__002`);
+    it is conservative, refusing three that OCCT read valid
+    (`hinges__015`, `masks__112`, `skin__129`) and the BOSL2 fractal
+    tree, which OCCT could not read in 2 GB. Writing these would need the
+    touching corner split into the edge and the pinched loop into two
+    faces; a scripted trial of that on the Menger file did not read back
+    valid either.
+- **One file we write is still read back invalid by OCCT:**
+  `screws__001` (non-eligible; OCCT's volume is 0.45% under ours, which
+  matches the mesh). Three more were not read within 2 GB (`csg_spheres`,
+  `text_30lines`, `surface-png-image-tests.scad`). Of last sweep's other
+  disagreements, `rounding__165` now reads back valid (its faces of no
+  area are removed), and `example017.scad`, `rounding__200` and
+  `attachments__084` are refused: faces of no area inside other faces'
+  loops, and planar faces with no outer loop (folded through a tunnel of
+  no thickness). Put OCCT's read-back into the export's own tests once it
+  is in CI.
+- **A rotated block with bars flush to its faces fails the bounding-box
+  check** (`rotate([45, 35, 0]) difference() { cube(30, center = true);
+  translate([0, 10, 10]) cube([40, 10, 10], center = true); }`). The
+  export render's rounding leaves sheets of no thickness where the faces
+  were flush, so its mesh reaches the removed corner; the volume agrees
+  and the box does not, so it is refused rather than written. Not in the
+  corpora's eligible failures. The same rounding leaves flat closed
+  components, which `reconstruct` now drops with a note.
+- **A B-rep with fewer handles than its mesh is accepted, with a note.**
+  Rounding can leave the mesh a tunnel of no thickness (a cube standing
+  on a rotated prism: `attachments__079`, `sliders__004`), which the
+  exact faces close. The volume and box checks still apply, and a planar
+  face with no outer loop is refused, which caught the one such file
+  OCCT rejected (`attachments__084`). More handles than the mesh stays
+  an error. A per-shell comparison would be tighter.
 - **OCCT's volume of `example019.scad` (41 overlapping cones, 40 B-spline
   edges) is 1.8e-4 over ours.** Ours is right: Richardson extrapolation
   of the mesh volume at `$fn` 1024 and 2048 gives 91431.842423, ours is
   91431.842424. OCCT reads it valid; its re-projected pcurves on cones
   are the likely cause (as F3 found on spheres).
 - **Gate 5 (reconstruction and writing within 50% of the render) is
-  missed.** Median (reconstruct + check + write) / render: 0.65 on the
-  render tests, 1.23 on BOSL2, 5.4 on the benchmarks (one job, no
-  OCCT): `csg_spheres` 3.7×, `text_30lines` 16×, `bosl_fractal_tree`
-  34× (10.4 s of reconstruction for 0.5 s of render). The cost is in
-  faceted and `$fn` regions, which reach the B-rep as thousands of
-  planar faces: `meshbrep`'s reconstruct, validate and the writer are
-  each about linear but slow per face. Options: write faceted regions
-  as one `FACETED_BREP`-like shell without reconstruction, merge
-  coplanar facets before tagging, or parallelise per face.
+  still missed on faceted-heavy models.** (reconstruct + check + write) /
+  render: `csg_spheres` 3.7× → 2.0–2.4× (runs vary), `text_30lines`
+  16× → 10.9×; medians 0.65 → 0.52 on the render tests, 1.23 → 1.02 on
+  BOSL2, 5.4 → 3.1 on the benchmarks. Done: plane faces
+  integrate in closed form, the export takes the volume from the
+  validator instead of integrating twice, lines between planes skip
+  sampling, and the writer formats numbers without temporary strings
+  (same bytes). Left: the STEP text itself (`csg_spheres` is 152 MB,
+  `text_30lines` 107 MB) costs about as much as the render, and the
+  crossing and touch checks run twice (in `reconstruct`, then in
+  `validate`). A faceted region written as one `FACETED_BREP`-like shell
+  without reconstruction is the remaining large step; parallelising per
+  face would need a wasm-safe fallback.
 - **Mesh-only models dominate the fallbacks.** 230 of 461 valid real
   models are all facets (BOSL2's `vnf_polyhedron` shapes, text,
   extrusions); stage 2 (2D attribution through Clipper's Z channel,
@@ -2281,9 +2317,12 @@ reproduces them). Leftovers of stage 1b first, then of the crate.
 - **The export render has no cache of its own.** Tagged solids are not
   cached (their surface numbers depend on the tree), so a module
   instantiated 400 times is built 400 times; delegated faceted subtrees
-  do come from the normal render's cache. A per-export memo keyed by
-  subtree key and placement would cut the export render on repetitive
-  models.
+  do come from the normal render's cache. The BOSL2 fractal tree spends
+  9 s in the export render's unions against 0.5 s of normal render,
+  whose cache builds each of its ten levels once. A per-export memo of
+  a subtree's solid in its own frame, keyed by subtree key, placed by
+  transforming positions and surface records, would cut that. Gate 5
+  does not count the export render, so it was left for now.
 - **Not wired yet:** `neoscad serve`, the MCP `check`/`export` tools and
   the apps (stage 3); `serve` leaves `exact` out of its advertised
   features until then. `--enable exact=strict` (faceted fallback as an

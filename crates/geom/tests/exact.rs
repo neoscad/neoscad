@@ -335,3 +335,96 @@ fn a_deep_tree_exports_on_a_small_stack() {
         .unwrap();
     assert!(step.contains("CYLINDRICAL_SURFACE"));
 }
+
+// Regressions of the stop-rule failure classes (`docs/followups.md`,
+// "Exact geometry"). Each failed before the fix it names.
+
+/// Two equal cones whose axes cross at their base centres are tangent at
+/// a point near the bases, where their intersection crosses itself (the
+/// BOSL2 `distributors` examples are six of them). The mesh's crossing
+/// sits up to 0.9 mm off the exact one and used to be solved onto the
+/// intersection there, so the curves on either side folded back
+/// ("boundary crosses itself"); it now gets the exact tangent point.
+#[test]
+fn cones_crossing_at_a_tangent_point_export() {
+    for a in [60, 90, 120] {
+        let e = export(&format!(
+            "for (i = [0:1]) rotate([{a} * i, 0, 0]) cylinder(h = 20, r1 = 5, r2 = 0);"
+        ));
+        assert!(e.stats.exact_faces == e.stats.faces, "{a}");
+    }
+}
+
+/// A sphere cut by three planes through its centre: its boundary arcs
+/// pass through the poles of every circle normal, which the frame used to
+/// take as its axis (`rotate-parameters.scad`; "boundary crosses itself"
+/// or a volume off by a sixth). The axis now keeps clear of the boundary.
+#[test]
+fn a_sphere_cut_through_its_centre_exports() {
+    for src in [
+        "union() { cube([1, 2, 3]); sphere(1); }",
+        "union() { cube([1, 2, 3]); rotate(45) cube([1, 2, 3]); sphere(1); }",
+    ] {
+        let e = export(src);
+        assert!(e.step.contains("SPHERICAL_SURFACE"), "{src}");
+    }
+}
+
+/// A transform that flattens its child leaves no volume; the normal
+/// render drops it (`issue4522.scad`), and so does the export, instead of
+/// failing on a mesh that is not a closed solid.
+#[test]
+fn a_flattening_scale_is_left_out_as_the_render_leaves_it() {
+    let e = export("cube(); scale([1, 0, 0]) cube();");
+    assert_eq!(e.stats.faces, 6);
+    assert!((e.stats.volume - 1.0).abs() < 1e-12);
+}
+
+/// A cube standing on a rotated prism, both under one rotation: rounding
+/// leaves the mesh a tunnel of no thickness under the cube (genus 1),
+/// which the exact faces close (BOSL2 `attachments__079`). Fewer handles
+/// than the mesh is a note, not an error.
+#[test]
+fn a_tunnel_of_no_thickness_in_the_mesh_is_a_note() {
+    let e = export(
+        "multmatrix([[cos(20), 0, sin(20), 15], [0, 1, 0, 0], [-sin(20), 0, cos(20), 0]]) {\n  cylinder(d = 10, h = 10, center = true, $fn = 16);\n  translate([0, 0, 6.5]) cube(3, center = true);\n}",
+    );
+    assert!(
+        e.stats
+            .notes
+            .iter()
+            .any(|n| n.contains("less than the input mesh's")),
+        "{:?}",
+        e.stats.notes
+    );
+}
+
+/// A rotated Menger sponge: bodies that touch along edges, which Manifold
+/// keeps apart and rounding then joins on the wrong side, so a corner of
+/// a face lies on another edge of the same face. The file used to pass
+/// our checks and read back from OCCT with a face split and a solid that
+/// would not close (`example024.scad`: 60 free edges). It is refused.
+#[test]
+fn a_boundary_touching_itself_is_refused() {
+    let src = "module m(s, l) { cube([30, s / 3, s / 3], center = true);\n  if (l > 1) for (i = [-1:1], j = [-1:1]) if (i || j) translate([0, i * s / 3, j * s / 3]) m(s / 3, l - 1); }\nrotate([45, atan(1 / sqrt(2)), 0]) difference() { cube(27, center = true); for (v = [[0, 0, 0], [0, 0, 90], [0, 90, 0]]) rotate(v) m(27, 2); }";
+    let err = export_with(&Renderer::new(), src).unwrap_err();
+    assert!(err.contains("touches itself"), "{err}");
+}
+
+/// A cube cut by two others whose faces miss each other by 1e-10: the
+/// mesh keeps a sliver triangle between them, which becomes a face of two
+/// straight edges along one line once its short edge collapses. It has
+/// no area and no orientation; it is removed and its neighbours share
+/// the edge (`issue1165.scad`).
+#[test]
+fn a_face_with_no_area_is_removed() {
+    let e = export(
+        "translate([0, 10, 0]) difference() {\n  cube(10, center = true);\n  translate([6, 5.5, 0]) cube(11, center = true);\n  translate([6, -5.500000000088, 0]) cube(11, center = true);\n}",
+    );
+    assert!(
+        e.stats.notes.iter().any(|n| n.contains("of no area")),
+        "{:?}",
+        e.stats.notes
+    );
+    assert_eq!(e.stats.faces, 9);
+}

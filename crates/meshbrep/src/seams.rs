@@ -264,7 +264,7 @@ fn base_param(topo: &Topo, f: usize) -> Param {
             let t = if t > 0.0 { t } else { 1.0 };
             Param::new(face.surf, apex + a * t, a, a.perp(), k * t)
         }
-        Surf::Sphere { c, .. } => {
+        Surf::Sphere { c, r } => {
             // The normal shared by most of the bounding circles, so that
             // they are parallels (lines of constant v).
             let mut counts: Vec<(V, usize)> = Vec::new();
@@ -284,17 +284,60 @@ fn base_param(topo: &Topo, f: usize) -> Param {
                     }
                 }
             }
-            let mut z = v(0.0, 0.0, 1.0);
-            let mut best = 0;
-            for (n, k) in counts {
-                if k > best {
-                    best = k;
-                    z = n;
-                }
+            // Most shared first; equal counts keep their order of first
+            // use, so the choice is deterministic.
+            let mut cands: Vec<V> = Vec::new();
+            for k in (1..=counts.iter().map(|x| x.1).max().unwrap_or(0)).rev() {
+                cands.extend(counts.iter().filter(|x| x.1 == k).map(|x| x.0));
             }
+            cands.push(v(0.0, 0.0, 1.0));
+            // Then axes no model aligns with by accident.
+            for d in [
+                [1.0, 2.0, 3.0],
+                [3.0, -1.0, 2.0],
+                [-2.0, 3.0, 1.0],
+                [1.0, -3.0, -2.0],
+            ] {
+                cands.push(V::from(d).norm());
+            }
+            let z = cands
+                .iter()
+                .copied()
+                .find(|&z| clear_of_poles(topo, face, c, r, z))
+                .unwrap_or(cands[0]);
             Param::new(face.surf, c, z, z.perp(), 0.0)
         }
     }
+}
+
+/// Whether no boundary of `face` (on the sphere `c`, `r`) comes near the
+/// poles of axis `z`, except along parallels. At a pole `u` is undefined:
+/// an edge through it jumps by π in parameter space, and a seam from that
+/// pole runs along the boundary. Three quarter circles bounding a sphere
+/// cut by an octant corner (`rotate-parameters.scad`) pass through the
+/// poles of every one of their own normals.
+fn clear_of_poles(topo: &Topo, face: &crate::topo::TFace, c: V, r: f64, z: V) -> bool {
+    // About 0.6 degrees.
+    let min_sin = 0.01;
+    face.loops.iter().flatten().all(|&(e, _)| {
+        let ed = &topo.edges[e];
+        if let Curve::Circle { normal, .. } = ed.curve
+            && V::from(normal).cross(z).len() < 1e-9
+        {
+            // A parallel: constant v, whatever its latitude.
+            return true;
+        }
+        // Samples 0.005 r apart, so that a curve through a pole has one
+        // within the limit.
+        let len: f64 = curve::sample(&ed.curve, ed.range, 16)
+            .windows(2)
+            .map(|w| (w[1] - w[0]).len())
+            .sum();
+        let n = ((1.1 * len / (0.005 * r)).ceil() as usize).clamp(8, 4096);
+        curve::sample(&ed.curve, ed.range, n)
+            .iter()
+            .all(|&p| ((p - c) * (1.0 / r)).cross(z).len() > min_sin)
+    })
 }
 
 /// Rotates the frame's x axis by `u0` about z.

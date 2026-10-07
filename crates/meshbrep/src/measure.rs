@@ -134,44 +134,58 @@ pub(crate) fn face_integrals(b: &Brep, fi: usize) -> Result<(f64, f64), Error> {
         for c in &lp.coedges {
             let e = &b.edges[c.edge as usize];
             let sign = if c.forward { 1.0 } else { -1.0 };
-            let (v, a) = if p.periodic() {
-                let pc = c.pcurve.as_ref().ok_or_else(|| {
-                    Error::Reconstruction(format!(
-                        "face {fi}: an edge has no parameter-space curve"
-                    ))
-                })?;
-                pcurve_integral(&p, pc)
-            } else {
-                let ev = CurveEval::new(&e.curve);
-                let [t0, t1] = e.range;
-                let pieces = match &e.curve {
-                    crate::model::Curve::Line { .. } => 1,
-                    crate::model::Curve::BSpline(bs) => bspline::spans(bs).len().max(1),
-                    _ => (((t1 - t0).abs() / 0.5).ceil() as usize).clamp(1, 64),
-                };
-                // B-spline pieces follow its knot spans.
-                if let crate::model::Curve::BSpline(bs) = &e.curve {
-                    let mut acc = (0.0, 0.0);
-                    for (a, bb) in bspline::spans(bs) {
-                        let (a, bb) = (a.max(t0), bb.min(t1));
-                        if bb <= a {
-                            continue;
+            let (v, a) =
+                if let (Surf::Plane { .. }, crate::model::Curve::Line { .. }) = (p.s, &e.curve) {
+                    // A straight edge on a plane: the integrand is constant
+                    // there (σ · n = o · n), so the loop integral is the
+                    // trapezoid's, exactly. Faceted models are thousands of
+                    // these, and quadrature cost a third of their export.
+                    let ev = CurveEval::new(&e.curve);
+                    let uv = |t: f64| {
+                        let q = ev.at(t) - p.o;
+                        (q.dot(p.x), q.dot(p.y))
+                    };
+                    let ((u0, w0), (u1, w1)) = (uv(e.range[0]), uv(e.range[1]));
+                    let g = 0.5 * (u0 + u1) * (w1 - w0);
+                    (p.o.dot(p.x.cross(p.y)) / 3.0 * g, g)
+                } else if p.periodic() {
+                    let pc = c.pcurve.as_ref().ok_or_else(|| {
+                        Error::Reconstruction(format!(
+                            "face {fi}: an edge has no parameter-space curve"
+                        ))
+                    })?;
+                    pcurve_integral(&p, pc)
+                } else {
+                    let ev = CurveEval::new(&e.curve);
+                    let [t0, t1] = e.range;
+                    let pieces = match &e.curve {
+                        crate::model::Curve::Line { .. } => 1,
+                        crate::model::Curve::BSpline(bs) => bspline::spans(bs).len().max(1),
+                        _ => (((t1 - t0).abs() / 0.5).ceil() as usize).clamp(1, 64),
+                    };
+                    // B-spline pieces follow its knot spans.
+                    if let crate::model::Curve::BSpline(bs) = &e.curve {
+                        let mut acc = (0.0, 0.0);
+                        for (a, bb) in bspline::spans(bs) {
+                            let (a, bb) = (a.max(t0), bb.min(t1));
+                            if bb <= a {
+                                continue;
+                            }
+                            let r = along(&p, a, bb, 1, &|t| {
+                                let q = ev.at(t) - p.o;
+                                (q.dot(p.x), q.dot(p.y), ev.deriv(t).dot(p.y))
+                            });
+                            acc.0 += r.0;
+                            acc.1 += r.1;
                         }
-                        let r = along(&p, a, bb, 1, &|t| {
+                        acc
+                    } else {
+                        along(&p, t0, t1, pieces, &|t| {
                             let q = ev.at(t) - p.o;
                             (q.dot(p.x), q.dot(p.y), ev.deriv(t).dot(p.y))
-                        });
-                        acc.0 += r.0;
-                        acc.1 += r.1;
+                        })
                     }
-                    acc
-                } else {
-                    along(&p, t0, t1, pieces, &|t| {
-                        let q = ev.at(t) - p.o;
-                        (q.dot(p.x), q.dot(p.y), ev.deriv(t).dot(p.y))
-                    })
-                }
-            };
+                };
             vol += sign * v;
             area += sign * a;
         }

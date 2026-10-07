@@ -246,6 +246,52 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
         face_mesh_volume[tface[t]] += (pos[a] - mid).dot((pos[b] - mid).cross(pos[c] - mid)) / 6.0;
     }
 
+    // A face with no boundary is a whole mesh component on one surface.
+    // On a sphere that is a lone sphere; on anything else it is flat: a
+    // closed bubble of zero volume lying in one plane, which Manifold can
+    // leave behind where coplanar cuts meet after a rotation (four
+    // triangles on one plane in a rotated block cut by touching bars).
+    // It has no exact counterpart, so it is dropped, and the mesh is
+    // rebuilt without it so that its genus and components stay honest.
+    {
+        let mut bounded = vec![false; nf];
+        for h in 0..3 * nt {
+            if tface[twin[h] / 3] != tface[h / 3] {
+                bounded[tface[h / 3]] = true;
+            }
+        }
+        let flat: Vec<usize> = (0..nf)
+            .filter(|&f| !bounded[f] && !matches!(cls.surf[fcls[f]], Surf::Sphere { .. }))
+            .collect();
+        if !flat.is_empty() {
+            let vol_tol = tol * scale * scale;
+            if let Some(&f) = flat.iter().find(|&&f| face_mesh_volume[f].abs() > vol_tol) {
+                return Err(Error::Reconstruction(format!(
+                    "face {f} has no boundary but encloses volume {:.3e}",
+                    face_mesh_volume[f]
+                )));
+            }
+            let mut keep = mesh.clone();
+            let (tri, sur): (Vec<[u32; 3]>, Vec<u32>) = mesh
+                .triangles
+                .iter()
+                .zip(&mesh.triangle_surface)
+                .enumerate()
+                .filter(|&(t, _)| !flat.contains(&tface[t]))
+                .map(|(_, (&t, &s))| (t, s))
+                .unzip();
+            keep.triangles = tri;
+            keep.triangle_surface = sur;
+            let mut b = build(&keep, opts, use_contacts)?;
+            b.topo.notes.push(format!(
+                "dropped {} flat closed component{} (zero volume, one plane)",
+                flat.len(),
+                if flat.len() == 1 { "" } else { "s" }
+            ));
+            return Ok(b);
+        }
+    }
+
     // 3. Faces around each mesh vertex.
     let mut vfaces: Vec<Vec<usize>> = vec![Vec::new(); np];
     for (t, tri) in tris.iter().enumerate() {
@@ -287,19 +333,34 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
         .collect();
 
     // 5. Where two curved surfaces touch at a point, their intersection
-    // curve crosses itself: a vertex although only two faces meet there.
-    // Candidates are two-face vertices with nearly parallel normals; the
-    // exact touching point is solved for, and the nearest mesh vertex
-    // keeps it.
+    // curve crosses itself: a vertex although only two surfaces meet
+    // there. Candidates are vertices on exactly two curved surfaces with
+    // nearly parallel normals; the exact touching point is solved for, and
+    // the nearest mesh vertex keeps it.
+    //
+    // Where the mesh has the crossing itself (four faces, two surfaces,
+    // as two cones of equal angle crossing near their base circles give),
+    // that vertex keeps it before any two-face one. Near a tangency the
+    // mesh's crossing can be far off the exact one (0.9 mm on cones of
+    // radius 5), and solving it onto the two surfaces only slides it
+    // along their intersection: the curves on either side then fold back
+    // on themselves (BOSL2 `distributors` examples).
     let mut tangent_at: Vec<Option<V>> = vec![None; np];
     {
-        let mut best: Vec<(V, usize, f64)> = Vec::new();
+        let mut best: Vec<(V, usize, (bool, f64))> = Vec::new();
         for p in 0..np {
             let fl = &vfaces[p];
-            if fl.len() != 2 || fcls[fl[0]] == fcls[fl[1]] {
+            let (ca, cb) = match fl.len() {
+                0 | 1 => continue,
+                2 => (fcls[fl[0]], fcls[fl[1]]),
+                _ => match classes_at(p)[..] {
+                    [a, b] => (a, b),
+                    _ => continue,
+                },
+            };
+            if ca == cb {
                 continue;
             }
-            let (ca, cb) = (fcls[fl[0]], fcls[fl[1]]);
             let (a, b) = (cls.surf[ca], cls.surf[cb]);
             if a.is_plane() && b.is_plane() {
                 continue;
@@ -313,10 +374,12 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
                 continue;
             }
             if let Some(tp) = tangent_point(&a, &b, q, scale) {
-                let d = (tp - pos[p]).len();
-                if d > 0.05 * scale {
+                let dist = (tp - pos[p]).len();
+                if dist > 0.05 * scale {
                     continue;
                 }
+                // Crossings in the mesh first, then the nearest.
+                let d = (fl.len() == 2, dist);
                 match best
                     .iter_mut()
                     .find(|(x, _, _)| (*x - tp).len() < 1e-7 * scale)
@@ -635,6 +698,20 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
     if short > 0 {
         topo.notes.push(format!(
             "{short} edges shorter than the merge tolerance collapsed (corners the mesh split)"
+        ));
+    }
+    let digons = topo.drop_digons();
+    if !digons.is_empty() {
+        let mut k = 0;
+        face_mesh_volume.retain(|_| {
+            let keep = digons.binary_search(&k).is_err();
+            k += 1;
+            keep
+        });
+        topo.notes.push(format!(
+            "{} face{} of no area (two edges along one line) removed",
+            digons.len(),
+            if digons.len() == 1 { "" } else { "s" }
         ));
     }
     let n_tangent = tangent_at.iter().filter(|t| t.is_some()).count();

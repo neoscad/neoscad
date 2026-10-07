@@ -85,8 +85,10 @@ pub enum Error {
     /// The mesh's topology differs from the exact model's: with its
     /// corners at their exact positions, a face folds over itself (a
     /// sliver the polygonal approximation left and the exact geometry
-    /// removes). A finer attribution mesh usually cures it; the caller owns
-    /// the tessellation, so retrying is the caller's.
+    /// removes), or a corner lands on another edge of its own face (bodies
+    /// touching along an edge, joined on the wrong side by rounding). A
+    /// finer attribution mesh usually cures the first; the caller owns the
+    /// tessellation, so retrying is the caller's.
     TopologyMismatch(String),
 }
 
@@ -121,11 +123,21 @@ fn reconstruct_with(mesh: &TaggedMesh, options: &Options, contacts: bool) -> Res
     let max_pcurve = seams::parametrise(&mut topo, built.scale, options.tolerances.fit)?;
     let max_edge = topo.edges.iter().map(|e| e.dev).fold(0.0, f64::max);
     let mut b = assemble(topo);
+    let touch_tol = options.tolerances.fit.max(1e-9 * built.scale);
     let folded: Vec<String> = (0..b.faces.len())
-        .filter_map(|f| validate::face_crossing(&b, f))
+        .filter_map(|f| {
+            validate::face_crossing(&b, f).or_else(|| validate::face_touch(&b, f, touch_tol))
+        })
         .collect();
     if !folded.is_empty() {
-        return Err(Error::TopologyMismatch(folded.join("; ")));
+        // The first few: a rotated Menger sponge has dozens, and the
+        // message ends up in a user's report.
+        let more = folded.len().saturating_sub(3);
+        let mut msg = folded[..folded.len().min(3)].join("; ");
+        if more > 0 {
+            msg.push_str(&format!("; and {more} more"));
+        }
+        return Err(Error::TopologyMismatch(msg));
     }
     // Shells, and which of them are voids.
     let mut uf = UnionFind::new(b.faces.len());
@@ -329,6 +341,52 @@ mod tests {
         let v = measure(&without).unwrap().volume;
         let exact = std::f64::consts::PI * (500.0 + 500.0 / 3.0);
         assert!((v - exact).abs() < 1e-9 * exact, "{v} vs {exact}");
+    }
+
+    /// A closed component of zero volume lying in one plane (four
+    /// triangles over four coplanar points: Manifold leaves these where
+    /// coplanar cuts meet after a rotation) has no exact counterpart. It
+    /// used to fail as "face has no boundary"; it is dropped with a note,
+    /// and the rest reconstructs as if it were not there.
+    #[test]
+    fn a_flat_closed_component_is_dropped() {
+        let cube = primitives::cuboid([2.0, 2.0, 2.0], &Transform::IDENTITY);
+        let mut mesh = cube.clone();
+        let base = mesh.positions.len() as u32;
+        // A doubly covered quadrilateral in the plane z = 5: a
+        // tetrahedron flattened, closed and consistently oriented.
+        mesh.positions.extend([
+            [0.0, 0.0, 5.0],
+            [1.0, 0.0, 5.0],
+            [1.0, 1.0, 5.0],
+            [0.0, 1.0, 5.0],
+        ]);
+        let plane = mesh.surfaces.len() as u32;
+        mesh.surfaces.push(Surface::Plane {
+            origin: [0.0, 0.0, 5.0],
+            normal: [0.0, 0.0, 1.0],
+        });
+        for t in [[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]] {
+            mesh.triangles.push(t.map(|i| base + i));
+            mesh.triangle_surface.push(plane);
+        }
+        let b = reconstruct(&mesh, &Options::default()).unwrap();
+        assert!(
+            b.report
+                .notes
+                .iter()
+                .any(|n| n.contains("flat closed component")),
+            "{:?}",
+            b.report.notes
+        );
+        assert_eq!(b.faces.len(), 6);
+        assert_eq!(b.shells.len(), 1);
+        assert!(validate(&b, 1e-6).is_valid());
+        assert!((measure(&b).unwrap().volume - 8.0).abs() < 1e-12);
+        // With volume it is a real body, not something to drop silently.
+        let mut solid = mesh.clone();
+        solid.positions[base as usize + 2][2] = 6.0;
+        assert!(reconstruct(&solid, &Options::default()).is_err());
     }
 
     #[test]

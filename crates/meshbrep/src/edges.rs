@@ -219,7 +219,13 @@ pub(crate) fn make_edge(
     fit_tol: f64,
 ) -> Built {
     let (s, t) = if a.rank() <= b.rank() { (a, b) } else { (b, a) };
-    let q = on_curve(s, t, chain[chain.len() / 2]);
+    // Two planes meet in a line whatever the point; the solve is for the
+    // other pairs' circles and ellipses.
+    let q = if s.is_plane() && t.is_plane() {
+        chain[chain.len() / 2]
+    } else {
+        on_curve(s, t, chain[chain.len() / 2])
+    };
     // The chain with its ends at the exact vertices: the mesh's own end
     // points can sit further from the vertices than a short arc is long,
     // and then they would give the arc the wrong direction.
@@ -318,6 +324,17 @@ fn fit(a: &Surf, b: &Surf, chain: &[V], n: usize) -> Curve {
 
 /// The largest distance of samples of the curve from either surface.
 pub(crate) fn deviation(c: &Curve, range: [f64; 2], a: &Surf, b: &Surf) -> f64 {
+    if let (Curve::Line { .. }, true, true) = (c, a.is_plane(), b.is_plane()) {
+        // Distances from planes are linear along a line: the ends bound
+        // them. Planar models have tens of thousands of these edges.
+        return [range[0], range[1]]
+            .iter()
+            .map(|&t| {
+                let p = curve::eval(c, t);
+                a.f(p).abs().max(b.f(p).abs())
+            })
+            .fold(0.0, f64::max);
+    }
     let n = match c {
         Curve::BSpline(BSpline { control, .. }) => (8 * control.len()).min(8192),
         _ => 64,
@@ -331,6 +348,24 @@ pub(crate) fn deviation(c: &Curve, range: [f64; 2], a: &Surf, b: &Surf) -> f64 {
 /// The largest distance of the chain's points from the curve, measured as
 /// the distance to their projection onto both surfaces.
 pub(crate) fn chain_deviation(a: &Surf, b: &Surf, chain: &[V]) -> f64 {
+    if let (Surf::Plane { n: na, .. }, Surf::Plane { n: nb, .. }) = (*a, *b) {
+        // The distance to the planes' line in closed form: the shortest
+        // step δ with nₐ·δ = -rₐ and n_b·δ = -r_b has |δ|² = rᵀG⁻¹r, G the
+        // normals' Gram matrix.
+        let c = na.dot(nb);
+        let det = 1.0 - c * c;
+        if det > 1e-12 {
+            return chain
+                .iter()
+                .map(|&p| {
+                    let (ra, rb) = (a.f(p), b.f(p));
+                    ((ra * ra - 2.0 * c * ra * rb + rb * rb) / det)
+                        .max(0.0)
+                        .sqrt()
+                })
+                .fold(0.0, f64::max);
+        }
+    }
     chain
         .iter()
         .map(|&p| (on_curve(a, b, p) - p).len())

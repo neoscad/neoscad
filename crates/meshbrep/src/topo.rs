@@ -159,6 +159,94 @@ impl Topo {
         n
     }
 
+    /// Removes faces that are two straight edges between the same two
+    /// vertices: slivers with no area, which is what a thin mesh triangle
+    /// becomes once its short edge collapses. Their two edges are one
+    /// line, so the faces either side now share the first, and the second
+    /// goes. Returns the removed faces' indices, in order.
+    ///
+    /// They are common on faceted models (twelve files of the stop-rule
+    /// corpora had them, `issue1165.scad` among the eligible ones). OCCT
+    /// reads most of them, but the face has no area and no orientation:
+    /// left in, it fails our own check for an outer loop.
+    pub fn drop_digons(&mut self) -> Vec<usize> {
+        const NONE: usize = usize::MAX;
+        let mut replace: Vec<Option<(usize, bool)>> = vec![None; self.edges.len()];
+        let mut touched = vec![false; self.edges.len()];
+        let mut dropped = Vec::new();
+        for (fi, f) in self.faces.iter().enumerate() {
+            if f.loops.len() != 1 || f.loops[0].len() != 2 {
+                continue;
+            }
+            let (a, b) = (f.loops[0][0].0, f.loops[0][1].0);
+            if a == b || touched[a] || touched[b] {
+                continue;
+            }
+            let (ea, eb) = (&self.edges[a], &self.edges[b]);
+            let lines =
+                matches!(ea.curve, Curve::Line { .. }) && matches!(eb.curve, Curve::Line { .. });
+            let same_ends = ea.v0 != ea.v1
+                && ((ea.v0, ea.v1) == (eb.v0, eb.v1) || (ea.v0, ea.v1) == (eb.v1, eb.v0));
+            let other = |e: &TEdge| {
+                if e.faces[0] == fi {
+                    e.faces[1]
+                } else {
+                    e.faces[0]
+                }
+            };
+            let (fa, fb) = (other(ea), other(eb));
+            // The faces either side must be two others, or the edge left
+            // would bound one face twice.
+            if !lines || !same_ends || fa == fb || [fa, fb].iter().any(|&x| x == NONE || x == fi) {
+                continue;
+            }
+            replace[b] = Some((a, eb.v0 != ea.v0));
+            touched[a] = true;
+            touched[b] = true;
+            dropped.push(fi);
+        }
+        if dropped.is_empty() {
+            return dropped;
+        }
+        let mut renum = vec![usize::MAX; self.edges.len()];
+        let mut kept = Vec::with_capacity(self.edges.len());
+        for (i, ed) in std::mem::take(&mut self.edges).into_iter().enumerate() {
+            if replace[i].is_none() {
+                renum[i] = kept.len();
+                kept.push(ed);
+            }
+        }
+        self.edges = kept;
+        let mut k = 0;
+        self.faces.retain(|_| {
+            let keep = dropped.binary_search(&k).is_err();
+            k += 1;
+            keep
+        });
+        for f in &mut self.faces {
+            for lp in &mut f.loops {
+                for c in lp.iter_mut() {
+                    *c = match replace[c.0] {
+                        Some((a, flip)) => (renum[a], c.1 != flip),
+                        None => (renum[c.0], c.1),
+                    };
+                }
+            }
+        }
+        // Which faces each edge separates, again (forward user first).
+        for e in &mut self.edges {
+            e.faces = [NONE, NONE];
+        }
+        for (fi, f) in self.faces.iter().enumerate() {
+            for lp in &f.loops {
+                for &(e, fwd) in lp {
+                    self.edges[e].faces[usize::from(!fwd)] = fi;
+                }
+            }
+        }
+        dropped
+    }
+
     /// Moves the vertex of the closed conic edge `e` to the point at curve
     /// parameter `t`, keeping the curve.
     pub fn reseat_closed(&mut self, e: usize, t: f64) {

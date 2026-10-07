@@ -80,25 +80,35 @@ fn string(s: &str) -> String {
 
 /// A STEP real: shortest round-trip digits, always with a decimal point.
 fn real(x: f64) -> String {
+    let mut out = String::new();
+    push_real(&mut out, x, &mut String::new());
+    out
+}
+
+/// [`real`], appended to `out` (`scratch` is reused between calls). The
+/// writer formats millions of these on a large faceted model, and the
+/// temporary strings cost as much as the digits.
+fn push_real(out: &mut String, x: f64, scratch: &mut String) {
     if x == 0.0 {
-        return "0.".into();
+        out.push_str("0.");
+        return;
     }
-    let s = format!("{x:E}");
-    let (mant, exp) = s.split_once('E').expect("exponent");
-    let mant = if mant.contains('.') {
-        mant.to_string()
-    } else {
-        format!("{mant}.")
-    };
-    if exp == "0" {
-        mant
-    } else {
-        format!("{mant}E{exp}")
+    scratch.clear();
+    let _ = write!(scratch, "{x:E}");
+    let (mant, exp) = scratch.split_once('E').expect("exponent");
+    out.push_str(mant);
+    if !mant.contains('.') {
+        out.push('.');
+    }
+    if exp != "0" {
+        out.push('E');
+        out.push_str(exp);
     }
 }
 
 struct W {
     out: Vec<String>,
+    scratch: String,
 }
 
 impl W {
@@ -112,28 +122,28 @@ impl W {
     fn set(&mut self, id: usize, s: String) {
         self.out[id - 1] = s;
     }
+    /// `KIND('',(x,y,...))`.
+    fn tuple(&mut self, kind: &str, xs: &[f64]) -> usize {
+        let mut s = String::with_capacity(kind.len() + 8 + 24 * xs.len());
+        s.push_str(kind);
+        s.push_str("('',(");
+        for (i, &x) in xs.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            push_real(&mut s, x, &mut self.scratch);
+        }
+        s.push_str("))");
+        self.add(s)
+    }
     fn pt(&mut self, p: [f64; 3]) -> usize {
-        self.add(format!(
-            "CARTESIAN_POINT('',({},{},{}))",
-            real(p[0]),
-            real(p[1]),
-            real(p[2])
-        ))
+        self.tuple("CARTESIAN_POINT", &p)
     }
     fn pt2(&mut self, p: [f64; 2]) -> usize {
-        self.add(format!(
-            "CARTESIAN_POINT('',({},{}))",
-            real(p[0]),
-            real(p[1])
-        ))
+        self.tuple("CARTESIAN_POINT", &p)
     }
     fn dir(&mut self, d: [f64; 3]) -> usize {
-        self.add(format!(
-            "DIRECTION('',({},{},{}))",
-            real(d[0]),
-            real(d[1]),
-            real(d[2])
-        ))
+        self.tuple("DIRECTION", &d)
     }
     fn ax2(&mut self, o: [f64; 3], z: [f64; 3], x: [f64; 3]) -> usize {
         let p = self.pt(o);
@@ -144,10 +154,14 @@ impl W {
 }
 
 fn refs(ids: &[usize]) -> String {
-    ids.iter()
-        .map(|i| format!("#{i}"))
-        .collect::<Vec<_>>()
-        .join(",")
+    let mut s = String::with_capacity(8 * ids.len());
+    for (k, i) in ids.iter().enumerate() {
+        if k > 0 {
+            s.push(',');
+        }
+        let _ = write!(s, "#{i}");
+    }
+    s
 }
 
 fn bspline_entity<const D: usize>(w: &mut W, b: &BSpline<D>) -> usize {
@@ -286,7 +300,10 @@ fn void_parents(b: &Brep) -> Vec<Option<usize>> {
 /// millimetres, with parameter-space curves on curved faces and seam
 /// curves on periodic ones.
 pub fn write_step(brep: &Brep, opts: &StepOptions) -> String {
-    let mut w = W { out: Vec::new() };
+    let mut w = W {
+        out: Vec::new(),
+        scratch: String::new(),
+    };
     let name = string(&opts.product_name);
     let app = w.add("APPLICATION_CONTEXT('automotive design')".into());
     w.add(format!(
@@ -446,7 +463,7 @@ pub fn write_step(brep: &Brep, opts: &StepOptions) -> String {
         format!("SHAPE_DEFINITION_REPRESENTATION(#{pds},#{rep})"),
     );
 
-    let mut s = String::with_capacity(64 * w.out.len() + 512);
+    let mut s = String::with_capacity(w.out.iter().map(|l| l.len() + 10).sum::<usize>() + 1024);
     s.push_str("ISO-10303-21;\nHEADER;\n");
     let _ = writeln!(
         s,
@@ -464,8 +481,15 @@ pub fn write_step(brep: &Brep, opts: &StepOptions) -> String {
         string(&opts.originating_system)
     );
     s.push_str("FILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\nENDSEC;\nDATA;\n");
+    let mut num = String::new();
     for (i, l) in w.out.iter().enumerate() {
-        let _ = writeln!(s, "#{}={};", i + 1, l);
+        num.clear();
+        let _ = write!(num, "{}", i + 1);
+        s.push('#');
+        s.push_str(&num);
+        s.push('=');
+        s.push_str(l);
+        s.push_str(";\n");
     }
     s.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
     s
