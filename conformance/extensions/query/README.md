@@ -1,9 +1,10 @@
 # Query goldens
 
-Models for NeoSCAD's render-free queries (`--enable query`: `anchor()`
-and `child_anchors()`; `docs/language-extensions.md`, section 5.3), not
-OpenSCAD's: they are not in `conformance/manifest.json` and `conformance
-run` does not read them.
+Models for NeoSCAD's queries (`--enable query`: `anchor()`,
+`child_anchors()`, `child_bounds()` and `child_measure()`;
+`docs/language-extensions.md`, sections 5.2 to 5.4), not OpenSCAD's:
+they are not in `conformance/manifest.json` and `conformance run` does
+not read them.
 
 Each `NAME.scad` has what the command line prints for it with
 `--enable query --enable sketch` (`NAME.echo`) and its `.csg` export
@@ -26,7 +27,13 @@ change meant to alter them, and read the diff.
   entity)`), a helper sketch, and a sketch whose solve fails.
 - `plate.scad`: the design's section 6.3, with the child's extent read
   from its anchors.
+- `plate-bounds.scad`: the design's section 6.3 as written, with
+  `child_bounds()`.
+- `bounds.scad`: `child_bounds()` and `child_measure()` on 2D and 3D
+  children, booleans, `%` and `#` children, mixed dimensions, empty
+  children, indices, nested queries, a recursion, and their warnings.
 
 The `.csg` files are plain OpenSCAD: an anchor makes no node and a query
 is a value, so the stock nightly renders them (`--backend=manifold`) to
-the meshes NeoSCAD renders from them.
+the meshes NeoSCAD renders from them (to the six significant digits a
+`.csg` prints its numbers with).

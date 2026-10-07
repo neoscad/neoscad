@@ -1,6 +1,7 @@
-//! NeoSCAD's render-free geometry queries (`--enable query`): `anchor()`
-//! and `child_anchors()` (`docs/language-extensions.md`, sections 5.2 and
-//! 5.3).
+//! NeoSCAD's geometry queries (`--enable query`): `anchor()` and
+//! `child_anchors()`, which need no rendering, and `child_bounds()` and
+//! `child_measure()`, which do (`docs/language-extensions.md`, sections
+//! 5.2 to 5.4).
 //!
 //! **Anchors.** `anchor(name, point, dir)` records a named point on the
 //! node of the instantiation it is written in ([`crate::node::Anchor`]),
@@ -15,6 +16,16 @@
 //! CSG tree's own walk composes them) into the module's frame. It needs no
 //! rendering; its cost is the child's evaluation and the size of its
 //! subtree.
+//!
+//! **Geometry.** `child_bounds(i)` and `child_measure(i)` take the same
+//! instance and hand it to the host's oracle (`crate::oracle`), which
+//! renders it as a full render of the model would and answers with its
+//! box, area or volume. Each counts against `Limits::queries`, and the
+//! request's interrupt flag and limits stop its render. A statement or
+//! call that asked one is never replayed by the memos (`crate::memo`,
+//! `crate::callmemo`): the answer is a function of the child's subtree,
+//! but the count is not part of any key, and a replay would skip it, so a
+//! warm evaluation could pass where a cold one stops at the limit.
 //!
 //! **The sandbox.** Asking about a child means instantiating it early,
 //! from inside an expression, which must not change anything the model
@@ -67,7 +78,8 @@ pub(crate) struct Held {
     /// A group node holding what `children()` would put in its own node:
     /// the children's nodes and the anchors written directly among them.
     node: Node,
-    /// The node counter where the instance started, and the node indices
+    /// The first index of the instance's nodes (always 1: they are
+    /// renumbered from there, below the wrapper's 0), and the node indices
     /// and limit checks it used.
     first_index: usize,
     count: usize,
@@ -178,7 +190,7 @@ impl Evaluator<'_> {
         let Some(indices) = self.query_indices("child_anchors", &index, size, loc) else {
             return Ok(Value::Undef);
         };
-        let k = self.query_instance(&mctx, &children, indices, loc)?;
+        let k = self.query_instance(&mctx, &children, indices, loc, "child_anchors")?;
         let mut found = Vec::new();
         collect_anchors(&self.held[k].node, &mut found);
         let mut out = ObjectBuilder::new();
@@ -253,6 +265,109 @@ impl Evaluator<'_> {
         ok.then_some(Some(out))
     }
 
+    // --- child_bounds() and child_measure() -----------------------------------
+
+    /// `child_bounds(index)` (`measure` false): the box `[min, max]` of
+    /// what `children(index)` would produce here, rendered; or
+    /// `child_measure(index)`: an object with its dimension, box, size,
+    /// centre and area (2D) or volume and surface area (3D).
+    pub(crate) fn child_geometry(
+        &mut self,
+        args: Vec<ArgVal>,
+        loc: Loc,
+        ctx: &Rc<Ctx>,
+        measure: bool,
+    ) -> R<Value> {
+        let fname = if measure {
+            "child_measure"
+        } else {
+            "child_bounds"
+        };
+        let syms = [self.syms.intern("index")];
+        let vars = self.bind_builtin(args, loc, &[], &syms, true);
+        let index = vars.get(syms[0]).cloned().unwrap_or_default();
+        let Some(mctx) = module_ctx(ctx) else {
+            let t = format!(
+                "{fname}() is only valid inside a module, where it asks about the module's children"
+            );
+            self.warn(loc, DiagCode::QueryOutsideModule, t);
+            return Ok(Value::Undef);
+        };
+        let CtxKind::Module(_, children) = &mctx.kind else {
+            unreachable!("a module context")
+        };
+        let children = children.clone();
+        let size = self.scope(children.scope).instantiations.len();
+        let Some(indices) = self.query_indices(fname, &index, size, loc) else {
+            return Ok(Value::Undef);
+        };
+        // Checked before the child is instantiated: with no oracle there
+        // is nothing to do with it.
+        let Some(oracle) = self.opts.geometry.clone() else {
+            let t = format!(
+                "{fname}(): no geometry is available here (this host does not render), so the answer is undef"
+            );
+            self.warn(loc, DiagCode::QueryUnavailable, t);
+            return Ok(Value::Undef);
+        };
+        self.queries += 1;
+        let what = format!("{fname}()");
+        self.over_limit(
+            crate::limits::Limit::Queries,
+            self.queries as f64,
+            loc,
+            &what,
+        );
+        self.check_hard()?;
+        // The count is in no memo key: see the module documentation.
+        self.untracked_sketch();
+        let k = self.query_instance(&mctx, &children, indices, loc, fname)?;
+        let facts = oracle.measure(
+            &self.held[k].node,
+            self.opts.interrupt.as_ref(),
+            self.opts.guard.as_ref(),
+        );
+        let facts = match facts {
+            Ok(f) => f,
+            Err(crate::oracle::OracleError::Interrupted) => {
+                // A limit the render passed, reported where the render
+                // found it (the node that asked too much), or the
+                // request's cancellation.
+                if let Some(e) = self.opts.guard.as_ref().and_then(|g| g.exceeded()) {
+                    let at = e.at.as_ref().map_or(loc, |a| Loc {
+                        unit: a.unit,
+                        span: a.span,
+                    });
+                    self.limit_exceeded(Some(at), e);
+                    self.check_hard()?;
+                }
+                self.check_interrupt()?;
+                return Err(self.unwind(UnwindKind::Interrupted));
+            }
+            Err(crate::oracle::OracleError::Unsupported(what)) => {
+                let t = format!(
+                    "{fname}(): the children cannot be rendered: {what}; the answer is undef"
+                );
+                self.warn(loc, DiagCode::QueryUnavailable, t);
+                return Ok(Value::Undef);
+            }
+        };
+        Ok(match (facts, measure) {
+            (crate::oracle::Facts::Empty, false) => {
+                let t = format!(
+                    "{fname}(): the children render to nothing, so they have no bounds; the answer is undef"
+                );
+                self.warn(loc, DiagCode::QueryEmpty, t);
+                Value::Undef
+            }
+            (f, false) => match box_of(&f) {
+                Some((lo, hi)) => Value::vector(vec![numbers(&lo), numbers(&hi)]),
+                None => Value::Undef,
+            },
+            (f, true) => measure_object(&f),
+        })
+    }
+
     // --- the sandbox --------------------------------------------------------
 
     /// The index in [`Evaluator::held`] of the instance of `children`
@@ -264,6 +379,7 @@ impl Evaluator<'_> {
         children: &Children,
         indices: Option<Vec<usize>>,
         loc: Loc,
+        fname: &str,
     ) -> R<usize> {
         if let Some(k) = self.find_held(mctx, &indices) {
             return Ok(k);
@@ -273,7 +389,7 @@ impl Evaluator<'_> {
             .iter()
             .any(|(c, ix)| Rc::ptr_eq(c, mctx) && *ix == indices)
         {
-            let t = "Recursion detected: child_anchors() asks about the child it is inside";
+            let t = format!("Recursion detected: {fname}() asks about the child it is inside");
             self.error(Some(loc), DiagCode::RecursionLimit, t);
             return Err(self.unwind(UnwindKind::Recursion));
         }
@@ -284,7 +400,7 @@ impl Evaluator<'_> {
         self.frames += crate::recursion::HEAP_LOOP_FRAMES;
         if self.recursion_exhausted() {
             self.frames -= crate::recursion::HEAP_LOOP_FRAMES;
-            let t = "Recursion detected calling function 'child_anchors'";
+            let t = format!("Recursion detected calling function '{fname}'");
             self.error(Some(loc), DiagCode::RecursionLimit, t);
             return Err(self.unwind(UnwindKind::Recursion));
         }
@@ -316,7 +432,7 @@ impl Evaluator<'_> {
         self.sketch = sketch;
         self.querying.pop();
         self.frames -= crate::recursion::HEAP_LOOP_FRAMES;
-        let node = match r {
+        let mut node = match r {
             Ok(n) => n,
             Err(e) => {
                 // Evaluation stops here, as it would have in `children()`:
@@ -341,12 +457,21 @@ impl Evaluator<'_> {
                 })
                 .collect::<Option<Vec<_>>>()
         });
+        // Numbered from 1 under the wrapper (0), whatever the counter was:
+        // a geometry query keys the subtree by node index
+        // (`dump::Keys`), whose tables are as long as the largest index,
+        // so a query late in a big model would otherwise allocate for
+        // every node before it. A reuse renumbers from here
+        // (`reuse_held`).
+        for c in &mut node.children {
+            crate::callmemo::renumber(c, 1 - first_index as i64);
+        }
         self.held_nodes += count;
         self.held.push(Held {
             mctx: mctx.clone(),
             indices,
             node,
-            first_index,
+            first_index: 1,
             count,
             ticks,
             messages,
@@ -426,6 +551,65 @@ impl Evaluator<'_> {
         });
         self.held_nodes -= freed;
     }
+}
+
+/// A list of numbers.
+fn numbers(v: &[f64]) -> Value {
+    Value::vector(v.iter().map(|&x| Value::Number(x)).collect())
+}
+
+/// The box of a non-empty result, with as many coordinates as it has
+/// dimensions.
+fn box_of(f: &crate::oracle::Facts) -> Option<(Vec<f64>, Vec<f64>)> {
+    use crate::oracle::Facts;
+    match f {
+        Facts::Empty => None,
+        Facts::Flat { min, max, .. } => Some((min.to_vec(), max.to_vec())),
+        Facts::Solid { min, max, .. } => Some((min.to_vec(), max.to_vec())),
+    }
+}
+
+/// `child_measure()`'s object. An empty result is not an error here (the
+/// object says so in `empty`, which a model can test), so it has the same
+/// keys with `undef` values, and neither `area` nor `volume`.
+fn measure_object(f: &crate::oracle::Facts) -> Value {
+    use crate::oracle::Facts;
+    let mut out = ObjectBuilder::new();
+    let mut set = |k: &str, v: Value| out.set(Str::new(k.as_bytes()), v);
+    let dim = match f {
+        Facts::Empty => Value::Undef,
+        Facts::Flat { .. } => Value::Number(2.0),
+        Facts::Solid { .. } => Value::Number(3.0),
+    };
+    set("dim", dim);
+    set("empty", Value::Bool(matches!(f, Facts::Empty)));
+    match box_of(f) {
+        None => {
+            for k in ["bounds", "size", "center"] {
+                set(k, Value::Undef);
+            }
+        }
+        Some((lo, hi)) => {
+            let size: Vec<f64> = lo.iter().zip(&hi).map(|(l, h)| h - l).collect();
+            let center: Vec<f64> = lo.iter().zip(&hi).map(|(l, h)| (l + h) / 2.0).collect();
+            set("bounds", Value::vector(vec![numbers(&lo), numbers(&hi)]));
+            set("size", numbers(&size));
+            set("center", numbers(&center));
+        }
+    }
+    match *f {
+        Facts::Empty => {}
+        Facts::Flat { area, .. } => set("area", Value::Number(area)),
+        Facts::Solid {
+            volume,
+            surface_area,
+            ..
+        } => {
+            set("volume", Value::Number(volume));
+            set("surface_area", Value::Number(surface_area));
+        }
+    }
+    Value::Object(out.finish(|_| false))
 }
 
 /// `[x, y]` or `[x, y, z]` of finite numbers, as three coordinates.

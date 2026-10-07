@@ -57,6 +57,8 @@ pub use memo::{MEMO_BUDGET, Memo, ReuseStats};
 pub mod message;
 pub mod node;
 mod ops;
+pub mod oracle;
+pub use oracle::{Facts, GeometryOracle, OracleError};
 mod print;
 pub mod recursion;
 mod resolve;
@@ -245,6 +247,11 @@ pub struct Options {
     /// `use`d font files). Only read with [`Feature::TextMetrics`] on;
     /// without it they find no font and warn "Can't get font".
     pub fonts: Option<Arc<text::FontDb>>,
+    /// What renders a child for `child_bounds()` and `child_measure()`
+    /// (`--enable query`; see [`oracle`]): a host that renders passes one
+    /// over its geometry cache. `None` (the default) makes those queries
+    /// warn `query-unavailable` and answer `undef`.
+    pub geometry: Option<Arc<dyn GeometryOracle>>,
 }
 
 impl Default for Options {
@@ -269,6 +276,7 @@ impl Default for Options {
             call_memo: true,
             features: Features::NONE,
             fonts: None,
+            geometry: None,
         }
     }
 }
@@ -356,11 +364,13 @@ pub fn builtins() -> Vec<BuiltinName> {
         kind: Module,
         status: BuiltinStatus::Extension,
     });
-    out.push(BuiltinName {
-        name: "child_anchors",
-        kind: Function,
-        status: BuiltinStatus::Extension,
-    });
+    for name in ["child_anchors", "child_bounds", "child_measure"] {
+        out.push(BuiltinName {
+            name,
+            kind: Function,
+            status: BuiltinStatus::Extension,
+        });
+    }
     // The sketch vocabulary: builtins only inside sketch bodies, where the
     // resolver binds them (`sketch`), but documented like any builtin.
     out.extend(sketch::vocabulary().map(|(name, function)| BuiltinName {

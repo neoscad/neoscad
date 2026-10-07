@@ -353,6 +353,10 @@ pub(crate) struct Evaluator<'a> {
     /// The nodes in [`Evaluator::held`]: made, then taken off the node
     /// counter, so the memory estimate counts them here.
     pub(crate) held_nodes: usize,
+    /// Geometry queries asked of the oracle so far, for
+    /// [`crate::limits::Limits::queries`]. Never restored after a
+    /// sandbox: the renders happened.
+    pub(crate) queries: u64,
 }
 
 /// A variable's value moved out of its frame, to be handed to the one read
@@ -616,6 +620,7 @@ impl<'a> Evaluator<'a> {
             querying: Vec::new(),
             query_impure: 0,
             held_nodes: 0,
+            queries: 0,
             opts,
         }
     }

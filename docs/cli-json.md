@@ -878,6 +878,7 @@ removes it)". The limits, and the defaults of `serve` and `mcp`:
 | `rands` | 10,000,000 | Numbers from one `rands()` call. |
 | `triangles` | 10,000,000 | Triangles of one geometry result (2D: vertices), checked before a primitive or extrusion is built and after every node. |
 | `sketch_unknowns` | 5,000 | Unknowns of one constrained sketch (`--enable sketch`): two per point, one per circle, checked before the solve, whose factorisations take O(n³) time in this count. The solve itself stops at the time limit or a cancellation between iterations. |
+| `queries` | 10,000 | Geometry queries (`child_bounds()`, `child_measure()`; `--enable query`) in one evaluation, each a render of its child. A query's render is stopped by the time limit and a cancellation like any render, and counts against the triangle and memory limits. `child_anchors()` renders nothing and does not count. |
 
 `--limit NAME=VALUE` (repeatable) changes one: seconds for `time`, MiB
 for `memory`, a count otherwise, `off` for none. The one-shot command

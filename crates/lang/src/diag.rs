@@ -174,6 +174,11 @@ pub enum DiagCode {
     QueryIndex,
     /// Two anchors of one name among the children a query asked about.
     QueryDuplicateAnchor,
+    /// A geometry query (`child_bounds()`) about children that render to
+    /// nothing.
+    QueryEmpty,
+    /// A geometry query in a host that cannot render, so has no answer.
+    QueryUnavailable,
 }
 
 impl DiagCode {
@@ -236,6 +241,8 @@ impl DiagCode {
             DiagCode::QueryOutsideModule => "query-outside-module",
             DiagCode::QueryIndex => "query-index",
             DiagCode::QueryDuplicateAnchor => "query-duplicate-anchor",
+            DiagCode::QueryEmpty => "query-empty",
+            DiagCode::QueryUnavailable => "query-unavailable",
         }
     }
 }

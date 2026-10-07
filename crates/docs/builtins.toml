@@ -982,6 +982,26 @@ example = "module plate_under() {\n  a = child_anchors(0);\n  tip = a.tip[0];\n 
 notes = "Points are always [x, y, z] and directions unit vectors (undef when none was given). No rendering is involved: the child is instantiated early, its messages held back, and a later children(index) with the same $ variables reuses the instance, printing them then, so a query changes nothing else a model prints or builds. The first anchor of a name wins, with a warning for the others (query-duplicate-anchor). Outside a module it warns (query-outside-module); a bad index warns (query-index). Without --enable query it is an unknown function, as in OpenSCAD."
 
 [[function]]
+name = "child_bounds"
+signature = "child_bounds(index = undef)"
+summary = "Inside a module: the bounding box [min, max] of what children(index) would make here, rendered, in the module's frame."
+extension = "query"
+params = ["index: number, list or range = undef -- which children, as children() takes it; all of them when omitted"]
+returns = "[[x0, y0, z0], [x1, y1, z1]] for a 3D child, [[x0, y0], [x1, y1]] for a 2D one; undef with a warning when it renders to nothing (query-empty), outside a module, or with a bad index"
+example = "module plate_for(margin = 2) {\n  b = child_bounds(0);\n  translate([b[0][0] - margin, b[0][1] - margin, -2])\n    cube([b[1][0] - b[0][0] + 2 * margin, b[1][1] - b[0][1] + 2 * margin, 2]);\n  children(0);\n}\nplate_for() translate([5, 0, 0]) cylinder(d = 10, h = 4);"
+notes = "The child is rendered as a full render would render it, in preview too: % children are left out and # children kept, so the model has the same shape in both. The box is that of the result (a difference() is measured after the cut), in the same format as BOSL2's pointlist_bounds(). The render shares the geometry cache with the final render, so the child is built once, and the child's geometry warnings are printed once, by the final render. Each query counts against the queries resource limit; the time limit and cancellation stop its render. A later children(index) reuses the instantiated child as with child_anchors(). Without --enable query it is an unknown function, as in OpenSCAD."
+
+[[function]]
+name = "child_measure"
+signature = "child_measure(index = undef)"
+summary = "Inside a module: the measurements of what children(index) would make here, rendered: an object with dim, empty, bounds, size, center, and area (2D) or volume and surface_area (3D)."
+extension = "query"
+params = ["index: number, list or range = undef -- which children, as children() takes it; all of them when omitted"]
+returns = "object; undef with a warning outside a module or with a bad index"
+example = "module report() {\n  m = child_measure(0);\n  echo(volume = m.volume, size = m.size, center = m.center);\n  children(0);\n}\nreport() difference() { cube(10); translate([5, 5, -1]) cube(20); }"
+notes = "Measured as child_bounds() measures, from the same render. dim is 2 or 3; for a child that renders to nothing, empty is true and dim, bounds, size and center are undef (no warning: the object says so). Areas and volumes are summed over the rendered mesh in a fixed order, so they are the same at any thread count and on every platform. Without --enable query it is an unknown function, as in OpenSCAD."
+
+[[function]]
 name = "echo"
 signature = "echo(values...) expression"
 summary = "Print values, then return the expression's value (for tracing functions)."

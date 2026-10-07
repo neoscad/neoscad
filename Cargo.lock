@@ -1710,6 +1710,7 @@ dependencies = [
  "neoscad-lang",
  "neoscad-render",
  "neoscad-text",
+ "rayon",
  "serde_json",
 ]
 

@@ -319,6 +319,11 @@ pub struct ResourceLimits {
     /// for the other limits there.
     #[serde(default)]
     pub sketch_unknowns: Option<u64>,
+    /// Geometry queries (`child_bounds()`, `child_measure()`; `--enable
+    /// query`) in one evaluation, each a render of its child. Absent from
+    /// a JSON request is unlimited.
+    #[serde(default)]
+    pub queries: Option<u64>,
 }
 
 impl From<session::Limits> for ResourceLimits {
@@ -334,6 +339,7 @@ impl From<session::Limits> for ResourceLimits {
             triangles: l.triangles,
             depth: l.depth,
             sketch_unknowns: l.sketch_unknowns,
+            queries: l.queries,
         }
     }
 }
@@ -367,6 +373,7 @@ impl ResourceLimits {
             triangles: self.triangles,
             depth: self.depth,
             sketch_unknowns: self.sketch_unknowns,
+            queries: self.queries,
         })
     }
 }

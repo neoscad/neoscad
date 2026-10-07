@@ -34,6 +34,7 @@ const LIMITS = {
   rands: 10000000,
   triangles: 10000000,
   sketchUnknowns: 5000,
+  queries: 10000,
 };
 
 function busyWait(ms) {

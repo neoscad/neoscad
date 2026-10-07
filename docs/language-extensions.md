@@ -4,10 +4,11 @@ Status: design; stages 0 (the flags), 1 (the solver crate), 2 (the
 language binding of sketches, `--enable sketch`), 3 (diagnostics with
 hints, strict mode, the unknowns limit), 4 (the sketch surfaces:
 `check`, `measure --sketch`, the language server, MCP, the apps'
-setting, `docs/sketch.md`) and 5 (render-free queries: `anchor()` and
-`child_anchors()`, `--enable query`) built; sections 11.1 to 11.4
-record how stages 2 to 5 were built and where they depart from this
-text.
+setting, `docs/sketch.md`), 5 (render-free queries: `anchor()` and
+`child_anchors()`, `--enable query`) and 6 (rendering queries:
+`child_bounds()`, `child_measure()`, the geometry oracle,
+`docs/geometry-queries.md`) built; sections 11.1 to 11.5 record how
+stages 2 to 6 were built and where they depart from this text.
 Written 2026-10-07 against the tree at
 `4aa80a4` and the reference checkout in `.reference/openscad`. Every
 claim about this codebase cites `path:line`; claims about OpenSCAD cite
@@ -1371,6 +1372,112 @@ where it departs from sections 5.2 to 5.4:
   the models on wasm32. The design's section 6.3 is `plate.scad`, with
   the child's extent read from anchors it declares rather than from its
   bounding box (stage 6).
+
+### 11.5 Stage 6 as built
+
+`child_bounds()` and `child_measure()` are `crates/eval/src/query.rs`
+(`child_geometry`) over the stage 5 sandbox; the oracle's trait is
+`crates/eval/src/oracle.rs`, its implementation
+`crates/session/src/oracle.rs`. The user reference is
+`docs/geometry-queries.md`. Where it departs from sections 5.2 to 5.4:
+
+- **The trait.** `eval::GeometryOracle::measure(subtree, interrupt,
+  guard)` returns `eval::Facts` (`Empty`, `Flat { min, max, area }`,
+  `Solid { min, max, volume, surface_area }`) or an `OracleError`
+  (`Interrupted`, `Unsupported`). `Options::geometry` holds it as
+  `Option<Arc<dyn GeometryOracle>>` (the trait is `Send + Sync`). The
+  subtree is the sandbox's group standing in for `children()`'s node;
+  the instance is now renumbered from 1 under it (the group is 0)
+  whatever the counter was, because `dump::Keys` and the renderer size
+  their tables by the largest node index, and a query late in a big
+  model would otherwise allocate for every node before it. A reuse
+  renumbers from there as before.
+- **The hosts.** `session` builds an oracle per request when `query` is
+  on, over the renderer the build will use (`Session::renderer_for`
+  with the request's colour scheme and fonts; `evaluate_loaded` now
+  takes the scheme, and `Session::evaluate`, which builds nothing, uses
+  the default one) and the build's render settings, `replay:
+  Some(epoch)` included. The command line (`crates/cli/src/run.rs`,
+  `query_oracle`) makes one per frame over the export's renderer, now an
+  `Arc`, and for `.csg`, `.term`, `.echo` and `.param` exports over a
+  renderer of their own. The LSP evaluates through the session, so it
+  answers queries too; `.ast` export never evaluates. With no oracle (a
+  library test) a query is `query-unavailable`.
+- **One cache, proved.** The oracle renders into the shared renderer.
+  The proof the design asked for is
+  `crates/session/tests/query.rs`, `a_query_changes_no_exported_byte`:
+  the §6.3 model with `child_bounds()` exports the same STL bytes as its
+  twin with the answers written in as literals (no query at all), cold,
+  and warm in both orders in one session; `a_warm_query_export_equals_a_cold_one`
+  repeats stage 5's warm test with rendering queries. So the scratch
+  `Renderer` fallback (Decision, question 6) was not needed.
+- **Messages.** A query render's messages are dropped. For the child's
+  geometry warnings still to be printed once, by the final render, that
+  render must replay what cached nodes printed when computed; the
+  session always does (`replay: Some(epoch)`), and the command line,
+  whose rule is OpenSCAD's silent cache hit, does so (epoch 0) only for
+  a frame whose evaluation rendered a query (`Oracle::asked`).
+  `a_queried_childs_warnings_print_once` compares the log with that of
+  the model without the query.
+- **Answers.** Bounds are the result's own box (`Polygon2d::bounds`,
+  `PolySet::bounds` over the vertices faces use, Manifold's bounding
+  box: minima and maxima, which no order changes). Area is the shoelace
+  sum over a 2D result's outlines; volume and surface area are serial
+  sums over a mesh result's face fans or over a solid's triangles
+  (`session::mesh::Mesh::mass`), never Manifold's parallel reductions.
+  The oracle keeps its answers per request by result key, so the same
+  child asked about twice is measured once. `force` is ignored: a query
+  measures what a render makes before any conversion.
+- **Empty children.** `child_bounds()` warns `query-empty` and is
+  `undef`, as section 5.4 says; `child_measure()` does not warn: its
+  object has `empty = true` and `dim`, `bounds`, `size` and `center`
+  `undef` (and no `area` or `volume`), which a model can test.
+- **Limits.** `Limits::queries` (`--limit queries=N`, the `limits`
+  object of `serve` and MCP, `queries` in the apps' `ResourceLimits`;
+  10,000 under `Limits::AGENT`, none by default) counts the
+  `child_bounds()` and `child_measure()` calls that reach an oracle, in
+  one evaluation; past it the call stops evaluation with a
+  `resource-limit` error at the query. `child_anchors()` does not count.
+  A query render runs under the evaluation's interrupt flag and guard,
+  so a cancellation or the time limit stops it at its next node, and a
+  count or memory limit it passes is reported at the node that passed
+  it (the guard's location), as in a cold render, after which
+  evaluation stops.
+- **Memoisation.** Section 5.4 expected no new memo rule. But the count
+  is in no key, and a replayed statement or call would skip its
+  queries, so a warm evaluation could pass where a cold one stops at
+  the limit. So a statement or module call that asked a geometry query
+  is never recorded by the statement memo or the call memo
+  (`Evaluator::untracked_sketch`, which leaves the sandbox's own reuse
+  alone, so nested queries still cost one evaluation per level). The
+  renders still come from the cache. A followup could carry the count in
+  the entries instead.
+- **Unsupported children.** A child the renderer cannot build (a
+  feature of a later phase) is a `query-unavailable` warning naming it,
+  and `undef`; the final render then reports it as usual.
+- **Not built.** The fast path for bounds (stage 7); an app setting for
+  the flag (the apps have one for sketches only).
+- **Tests.** `conformance/extensions/query/plate-bounds.scad` is
+  section 6.3 as written, beside stage 5's `plate.scad`, and
+  `bounds.scad` covers 2D and 3D children, booleans, `%` and `#`,
+  mixed dimensions, empty children, indices, nesting, a recursion and
+  the warnings. `crates/session/tests/query.rs` adds the byte-identity
+  and warm tests above, preview and render giving the same answers, 1,
+  2 and 8 threads, the queries and triangles limits, the flag off with
+  its JSON hints, and the examples of `docs/geometry-queries.md`.
+  `crates/eval/tests/query.rs` checks with a fake oracle that geometry
+  queries change nothing but the printed answers (call memo on and off),
+  what the oracle is shown, `query-unavailable`, a cancelled or
+  limit-stopped query render, and the count; `crates/eval/tests/incremental.rs`
+  that statements with queries are evaluated anew and still match a
+  fresh evaluation. `crates/wasm-check`'s `query-bounds` case renders
+  queries on wasm32, its volume and area included. The `.csg` exports
+  of `plate-bounds` and `bounds` were rendered by the stock nightly:
+  `plate-bounds.csg` gives the same vertex and facet counts (582, 1,164)
+  in the nightly as in NeoSCAD, and the same volume as the source to
+  the six digits the `.csg` keeps; `bounds.csg` the same volume and box,
+  with a different triangulation that a plain file without queries
+  reproduces (`docs/followups.md`, "Geometry queries").
 
 ## 12. Alternatives considered
 

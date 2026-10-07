@@ -62,6 +62,7 @@ pub mod measure;
 pub mod memory;
 pub mod mesh;
 pub mod modeltest;
+pub mod oracle;
 pub mod orient;
 mod parse;
 pub mod parts;
@@ -1560,12 +1561,17 @@ impl Session {
         Ok(loaded)
     }
 
+    /// `scheme` is the colour scheme the geometry will be built with: a
+    /// geometry query renders through that scheme's renderer
+    /// ([`Session::renderer_for`]), so the build finds what the query
+    /// rendered in its cache.
     fn evaluate_loaded(
         &self,
         pipe: &mut Pipe,
         loaded: &Loaded,
         run: &Run,
         preview: bool,
+        scheme: &geom::color::Scheme,
         job: &JobGuard<'_>,
     ) -> Result<eval::Evaluation, Stop> {
         run.stage(Stage::Evaluate);
@@ -1584,6 +1590,25 @@ impl Session {
         let fonts = features
             .has(eval::Feature::TextMetrics)
             .then(|| self.fonts_for(&loaded.used(), &*pipe.fs).1);
+        let extensions = run.extensions.union(self.cfg.extensions);
+        // `child_bounds()` and `child_measure()` render through the
+        // renderer and settings the build will use (`Session::build`),
+        // so the queried subtrees are cache hits there.
+        let geometry = extensions.has(eval::Extension::Query).then(|| {
+            let (font_sig, fonts) = self.fonts_for(&loaded.used(), &*pipe.fs);
+            let (_, renderer) = self.renderer_for(scheme, font_sig);
+            let opts = geom::RenderOptions {
+                scheme: *scheme,
+                force: false,
+                fs: pipe.fs.clone(),
+                work_dir: pipe.paths.cwd.clone(),
+                fonts,
+                interrupt: None,
+                guard: None,
+                replay: Some(loaded.epoch),
+            };
+            Arc::new(oracle::Oracle::new(renderer, opts)) as Arc<dyn eval::GeometryOracle>
+        });
         let options = eval::Options {
             preview,
             camera: run.camera,
@@ -1591,9 +1616,10 @@ impl Session {
             fs: pipe.fs.clone(),
             interrupt: Some(job.flag.clone()),
             guard: job.limits.clone(),
-            extensions: run.extensions.union(self.cfg.extensions),
+            extensions,
             features,
             fonts,
+            geometry,
             ..eval::Options::default()
         };
         let ev = if self.cfg.reuse_evaluation {
@@ -1864,7 +1890,16 @@ impl Session {
         let (exit_code, tree, aborted) = match self.load(&mut pipe, run) {
             Err(Stop::Cancelled) => return Err(self.cancelled()),
             Err(Stop::Exit(c)) => (c, None, false),
-            Ok(loaded) => match self.evaluate_loaded(&mut pipe, &loaded, run, true, &job) {
+            // The scheme a render takes by default: any is right for the
+            // answers, which no colour changes.
+            Ok(loaded) => match self.evaluate_loaded(
+                &mut pipe,
+                &loaded,
+                run,
+                true,
+                &geom::RenderOptions::default().scheme,
+                &job,
+            ) {
                 Err(Stop::Cancelled) => return Err(self.cancelled()),
                 Err(Stop::Exit(c)) => (c, None, false),
                 Ok(ev) => {
@@ -2006,7 +2041,14 @@ impl Session {
         };
         let step = (|| {
             let loaded = self.load(&mut pipe, run)?;
-            let ev = self.evaluate_loaded(&mut pipe, &loaded, run, mode == Mode::Preview, &job)?;
+            let ev = self.evaluate_loaded(
+                &mut pipe,
+                &loaded,
+                run,
+                mode == Mode::Preview,
+                &scheme.geometry_scheme(),
+                &job,
+            )?;
             if let Some(hook) = &run.on_evaluated {
                 hook(&self.log_so_far(&pipe));
             }
@@ -2130,9 +2172,9 @@ impl Session {
         let mut geometry = None;
         let step = (|| -> Result<u8, Stop> {
             let loaded = self.load(&mut pipe, run)?;
-            let ev = self.evaluate_loaded(&mut pipe, &loaded, run, false, &job)?;
-            let started = self.now();
             let scheme = req.scheme.geometry_scheme();
+            let ev = self.evaluate_loaded(&mut pipe, &loaded, run, false, &scheme, &job)?;
+            let started = self.now();
             let mode = if req.force { Mode::Force } else { Mode::Render };
             run.stage(Stage::Geometry);
             let (p, cache, _, _) = self.build(

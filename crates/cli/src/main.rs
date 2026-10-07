@@ -170,7 +170,8 @@ struct Cli {
     /// `part` turns on NeoSCAD's `part("name") { ... }` extension (named
     /// parts for `check` and `measure`), `sketch` its constrained 2D
     /// sketches (`sketch() { ... }`), `query` its geometry queries
-    /// (`anchor()` and `child_anchors()`), `exact` STEP export
+    /// (`anchor()`, `child_anchors()`, `child_bounds()` and
+    /// `child_measure()`), `exact` STEP export
     /// (`-o x.step`) with exact surfaces where `$fn` is not set. `all`
     /// turns on OpenSCAD's experiments only, never NeoSCAD's extensions.
     /// OpenSCAD's experimental features
@@ -278,9 +279,9 @@ struct Cli {
 
     /// A resource limit, NAME=VALUE (repeatable): time (s), memory (MiB,
     /// or 4G), fragments, slices, list, string, rands, triangles,
-    /// sketch_unknowns; 'off' for none. Unlimited by default, as OpenSCAD is. Also depth: nested
-    /// module calls before 'Recursion detected' (default 100000; it cannot
-    /// be off).
+    /// sketch_unknowns, queries; 'off' for none. Unlimited by default, as
+    /// OpenSCAD is. Also depth: nested module calls before 'Recursion
+    /// detected' (default 100000; it cannot be off).
     #[arg(long = "limit", value_name = "NAME=VALUE", action = ArgAction::Append)]
     limit: Vec<String>,
 

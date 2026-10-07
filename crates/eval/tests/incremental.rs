@@ -620,6 +620,60 @@ fn queries_through_the_memo_match_a_fresh_evaluation() {
     assert!(s[1].reused > 0, "{s:?}");
 }
 
+/// An oracle for `child_bounds()` that answers from the subtree's node
+/// count, so an answer depends on the child, without rendering.
+#[derive(Debug)]
+struct CountingOracle;
+
+impl eval::GeometryOracle for CountingOracle {
+    fn measure(
+        &self,
+        subtree: &eval::Node,
+        _: Option<&Arc<std::sync::atomic::AtomicBool>>,
+        _: Option<&Arc<eval::limits::Guard>>,
+    ) -> Result<eval::Facts, eval::OracleError> {
+        let mut n = 0.0;
+        let mut stack = vec![subtree];
+        while let Some(c) = stack.pop() {
+            n += 1.0;
+            stack.extend(&c.children);
+        }
+        Ok(eval::Facts::Solid {
+            min: [0.0; 3],
+            max: [n; 3],
+            volume: n,
+            surface_area: n,
+        })
+    }
+}
+
+/// Geometry queries through the memo: a statement that asked one is
+/// evaluated anew every time (its count is in no key, see `crate::query`),
+/// and the others are still replayed, to what a fresh evaluation gives.
+#[test]
+fn geometry_queries_through_the_memo_match_a_fresh_evaluation() {
+    let model = |h: u32| {
+        format!(
+            "module show() {{ b = child_bounds(0); echo(b); children(0); }}\n\
+             show() translate([1, 0, 0]) cylinder(h = {h});\n\
+             cube(1);\n\
+             show() union() {{ cube(2); sphere(1); }}\n"
+        )
+    };
+    let texts = [model(3), model(3), model(4)];
+    let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let opts = Options {
+        extensions: eval::Extensions::NONE.with(eval::Extension::Query),
+        geometry: Some(Arc::new(CountingOracle)),
+        ..Options::default()
+    };
+    let s = versions_with(&[], &texts, &opts);
+    // The two `show()` statements are never recorded; `cube(1)` is
+    // replayed.
+    assert_eq!(s[1].reused, 1, "{s:?}");
+    assert_eq!(s[1].unrecorded, 2, "{s:?}");
+}
+
 #[test]
 fn moved_statements_keep_their_positions_and_indices() {
     versions(

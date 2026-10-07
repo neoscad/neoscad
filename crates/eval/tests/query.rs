@@ -333,3 +333,318 @@ fn nested_queries_stop_at_the_native_budget() {
     let shallow = evaluate(&text.replace("rec(200)", "rec(10)"), &o);
     assert!(!shallow.aborted, "{:?}", shallow.lines);
 }
+
+// --- Geometry queries (`child_bounds()`, `child_measure()`) ---------------
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use eval::{Facts, GeometryOracle, OracleError};
+
+/// What a fake oracle does when asked.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Mode {
+    /// Answer with the subtree's node count as its box.
+    Count,
+    /// Stop as a cancelled render does.
+    Cancel,
+    /// Stop as a render that passed the triangle limit does.
+    Limit,
+}
+
+/// An oracle that answers from the subtree's shape alone, recording what
+/// it was asked: no geometry is needed to test the evaluator's side.
+#[derive(Debug)]
+struct Fake {
+    mode: Mode,
+    calls: AtomicUsize,
+    /// The `.csg` of each subtree asked about.
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+impl Fake {
+    fn new(mode: Mode) -> Arc<Fake> {
+        Arc::new(Fake {
+            mode,
+            calls: AtomicUsize::new(0),
+            seen: Default::default(),
+        })
+    }
+}
+
+impl GeometryOracle for Fake {
+    fn measure(
+        &self,
+        subtree: &Node,
+        interrupt: Option<&Arc<AtomicBool>>,
+        guard: Option<&Arc<eval::limits::Guard>>,
+    ) -> Result<Facts, OracleError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let mut n = 0;
+        let mut indices = Vec::new();
+        walk(subtree, &mut |c| {
+            n += 1;
+            indices.push(c.index);
+        });
+        // Numbered from 0 (the group standing in for `children()`'s
+        // node), whatever the model's counter was: `GEOMETRY` makes a
+        // thousand nodes before its first query, and no instance it
+        // queries has a hundred. (Not densely: a node the instance made
+        // and dropped, an empty `echo()`'s, still took an index.)
+        assert_eq!(indices[0], 0);
+        assert!(indices.iter().all(|&i| i < 100), "{indices:?}");
+        let mut distinct = indices.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), indices.len());
+        let csg = subtree
+            .children
+            .iter()
+            .map(|c| eval::dump::csg(c, Path::new("/"), &lang::loader::StdFs))
+            .collect();
+        self.seen.lock().unwrap().push(csg);
+        match self.mode {
+            Mode::Count => Ok(if n == 1 {
+                Facts::Empty
+            } else {
+                Facts::Solid {
+                    min: [0.0; 3],
+                    max: [n as f64; 3],
+                    volume: n as f64,
+                    surface_area: 0.0,
+                }
+            }),
+            Mode::Cancel => {
+                interrupt
+                    .expect("the evaluation's flag")
+                    .store(true, Ordering::Relaxed);
+                Err(OracleError::Interrupted)
+            }
+            Mode::Limit => {
+                let g = guard.expect("the evaluation's limits");
+                let e = g
+                    .exceeds(eval::limits::Limit::Triangles, 1e9, "sphere()")
+                    .expect("over");
+                g.trip(e);
+                Err(OracleError::Interrupted)
+            }
+        }
+    }
+}
+
+fn with_oracle(o: &Arc<Fake>, call_memo: bool) -> Options {
+    Options {
+        geometry: Some(o.clone() as Arc<dyn GeometryOracle>),
+        ..opts(call_memo)
+    }
+}
+
+/// A model asking geometry queries in the shapes of `MODELS`: nested,
+/// repeated (for the call memo), reused and not, with `rands()` in the
+/// child. Answers are printed only on `echo("Q", ...)` lines.
+const GEOMETRY: &str = "for (i = [1:1000]) cube(i);\n\
+     module mark(n) {\n\
+       cube(n);\n\
+       echo(\"mark\", n, $fn, rands(0, 1, 1, n));\n\
+     }\n\
+     module q(tag) {\n\
+       b = child_bounds(0);\n\
+       m = child_measure(0);\n\
+       echo(\"Q\", tag, b, m);\n\
+       children(0);\n\
+     }\n\
+     q(\"outer\") q(\"inner\") translate([1, 2, 3]) mark(1);\n\
+     module dollar() {\n\
+       b = child_bounds(0);\n\
+       echo(\"Q\", b);\n\
+       let($fn = 7) children(0);\n\
+     }\n\
+     dollar() mark(2);\n\
+     module r() {\n\
+       b = child_bounds();\n\
+       children();\n\
+     }\n\
+     r() { echo(rands(0, 1, 2)); mark(3); }\n\
+     module unused() {\n\
+       b = child_measure(0);\n\
+       echo(\"Q\", b);\n\
+     }\n\
+     unused() { echo(\"never\"); mark(4); }\n\
+     module pegs() for (i = [0:3]) translate([i * 3, 0, 0]) q(str(\"peg \", i)) mark(6);\n\
+     pegs();\n\
+     pegs();\n\
+     module empty() { echo(\"Q\", child_bounds(), child_measure()); children(); }\n\
+     empty();\n";
+
+fn without_geometry_queries(text: &str) -> String {
+    let mut out = text
+        .replace("child_bounds(", "no_query(")
+        .replace("child_measure(", "no_query(");
+    out.push_str("function no_query(i) = undef;\n");
+    out
+}
+
+/// As `queries_change_nothing_else`, for the queries that render: the
+/// tree, keys, numbering and messages are those of the model with every
+/// query replaced by a constant, but for the lines printing the answers
+/// and the `query-empty` warning.
+#[test]
+fn geometry_queries_change_nothing_else() {
+    let unmarked = |out: &Out| -> Vec<String> {
+        unmarked(out)
+            .into_iter()
+            .filter(|l| !l.contains("the children render to nothing"))
+            .collect()
+    };
+    for call_memo in [true, false] {
+        let o = Fake::new(Mode::Count);
+        let with = evaluate(GEOMETRY, &with_oracle(&o, call_memo));
+        let without = evaluate(&without_geometry_queries(GEOMETRY), &opts(call_memo));
+        assert_eq!(with.csg, without.csg);
+        assert_eq!(with.key, without.key);
+        assert_eq!(with.indices, without.indices);
+        assert_eq!(unmarked(&with), unmarked(&without));
+        assert!(o.calls.load(Ordering::Relaxed) > 0);
+    }
+    let a = evaluate(GEOMETRY, &with_oracle(&Fake::new(Mode::Count), true));
+    let b = evaluate(GEOMETRY, &with_oracle(&Fake::new(Mode::Count), false));
+    assert_eq!(a, b, "the call memo changed the output");
+}
+
+/// The oracle is asked about the child as `children(i)` would make it at
+/// the query: in the module's frame, with the `$` variables there; and
+/// its answer reaches the program as a box and an object.
+#[test]
+fn the_oracle_sees_the_child_as_children_makes_it() {
+    let o = Fake::new(Mode::Count);
+    let text = "module m() {\n\
+                  b = child_bounds(0);\n\
+                  m = child_measure(0);\n\
+                  echo(b);\n\
+                  echo(m);\n\
+                  translate([9, 9, 9]) children(0);\n\
+                }\n\
+                cube(5);\n\
+                $fn = 6;\n\
+                m() rotate(90) sphere(1);\n";
+    let out = evaluate(text, &with_oracle(&o, true));
+    let seen = o.seen.lock().unwrap().clone();
+    // Asked twice, about the same instance (a second query reads the kept
+    // instance again).
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0], seen[1]);
+    assert!(seen[0].contains("multmatrix"), "{}", seen[0]);
+    assert!(seen[0].contains("sphere($fn = 6"), "{}", seen[0]);
+    assert!(
+        !seen[0].contains(" 9]"),
+        "the module's own transform leaked in"
+    );
+    assert_eq!(
+        out.lines,
+        [
+            "ECHO: [[0, 0, 0], [3, 3, 3]] @0",
+            "ECHO: { dim = 3; empty = false; bounds = [[0, 0, 0], [3, 3, 3]]; size = [3, 3, 3]; center = [1.5, 1.5, 1.5]; volume = 3; surface_area = 0; } @0",
+        ]
+    );
+}
+
+/// No oracle (a host that does not render): `query-unavailable`, and the
+/// answer is undef.
+#[test]
+fn without_an_oracle_geometry_queries_are_unavailable() {
+    let text = "module m() { echo(child_bounds(0), child_measure()); children(); }\n\
+                m() { echo(\"child\"); cube(1); }\n";
+    let out = evaluate(text, &opts(true));
+    assert_eq!(
+        out.lines,
+        [
+            "WARNING: child_bounds(): no geometry is available here (this host does not render), so the answer is undef @1",
+            "WARNING: child_measure(): no geometry is available here (this host does not render), so the answer is undef @1",
+            "ECHO: undef, undef @0",
+            "ECHO: \"child\" @0",
+        ]
+    );
+}
+
+fn run_guarded(
+    text: &str,
+    limits: eval::limits::Limits,
+    mode: Mode,
+) -> (eval::Evaluation, Vec<String>) {
+    let program = lang::parse_file(
+        PathBuf::from("/nonexistent/q.scad"),
+        text.as_bytes().to_vec(),
+    );
+    let flag = Arc::new(AtomicBool::new(false));
+    let guard = Arc::new(eval::limits::Guard::new(limits, flag.clone(), None));
+    let o = Options {
+        interrupt: Some(flag),
+        guard: Some(guard),
+        ..with_oracle(&Fake::new(mode), true)
+    };
+    let mut out = Lines(Vec::new());
+    let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+        eval::evaluate(
+            &program,
+            &[],
+            &[],
+            PathBuf::from("/nonexistent"),
+            &o,
+            &mut out,
+        )
+    });
+    (ev, out.0)
+}
+
+/// A query render the request's cancellation stopped stops the
+/// evaluation as a cancellation; one that passed a limit stops it with
+/// the limit's error.
+#[test]
+fn a_stopped_query_render_stops_the_evaluation() {
+    let text = "module m() { b = child_bounds(0); echo(\"after\", b); children(0); }\n\
+                m() sphere(1);\n\
+                echo(\"end\");\n";
+    let agent = eval::limits::Limits::AGENT;
+    let (ev, lines) = run_guarded(text, agent, Mode::Cancel);
+    assert!(ev.interrupted, "{lines:?}");
+    assert!(lines.iter().all(|l| !l.contains("ECHO")), "{lines:?}");
+    let (ev, lines) = run_guarded(text, agent, Mode::Limit);
+    assert!(!ev.interrupted && ev.aborted, "{lines:?}");
+    assert!(
+        lines[0].starts_with(
+            "ERROR: Resource limit exceeded: sphere() would make 1,000,000,000 triangles, over the triangles limit of"
+        ),
+        "{lines:?}"
+    );
+    assert!(lines.iter().all(|l| !l.contains("ECHO")), "{lines:?}");
+}
+
+/// `Limits::queries` counts every query that renders (`child_anchors()`
+/// does not), and stops the evaluation past it.
+#[test]
+fn the_queries_limit_counts_renders() {
+    let text = "module m() { a = child_anchors(0); b = child_bounds(0); echo(b); children(0); }\n\
+                for (i = [1:3]) m() cube(i);\n";
+    let limit = |n: u64| eval::limits::Limits {
+        queries: Some(n),
+        ..eval::limits::Limits::NONE
+    };
+    let (ev, lines) = run_guarded(text, limit(3), Mode::Count);
+    assert!(!ev.aborted, "{lines:?}");
+    assert_eq!(lines.len(), 3);
+    let (ev, lines) = run_guarded(text, limit(2), Mode::Count);
+    assert!(ev.aborted);
+    assert_eq!(
+        lines[..2],
+        [
+            "ECHO: [[0, 0, 0], [2, 2, 2]] @0",
+            "ECHO: [[0, 0, 0], [2, 2, 2]] @0"
+        ]
+    );
+    assert!(
+        lines[2].starts_with(
+            "ERROR: Resource limit exceeded: child_bounds() would make 3 geometry queries, over the queries limit of 2"
+        ),
+        "{lines:?}"
+    );
+}

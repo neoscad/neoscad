@@ -258,9 +258,17 @@ fn hint(d: &Logged, names: &Names) -> Option<String> {
             "`anchor()` is a NeoSCAD extension (geometry queries): enable it with \
              `--enable query`, or define a module called `anchor`"
         }
-        DiagCode::UnknownFunction if quoted(&d.message) == Some("child_anchors") => {
-            "`child_anchors()` is a NeoSCAD extension (geometry queries): enable it with \
-             `--enable query`, or define a function called `child_anchors`"
+        DiagCode::UnknownFunction
+            if matches!(
+                quoted(&d.message),
+                Some("child_anchors" | "child_bounds" | "child_measure")
+            ) =>
+        {
+            let name = quoted(&d.message).unwrap_or_default();
+            return Some(format!(
+                "`{name}()` is a NeoSCAD extension (geometry queries): enable it with \
+                 `--enable query`, or define a function called `{name}`"
+            ));
         }
         DiagCode::DuplicatePart => {
             "give each part a unique name: parts with one name are measured and checked as one"

@@ -105,11 +105,28 @@ fn run_inner(
             uses: &l.uses,
         })
         .collect();
+    let mut fonts = text::FontDb::with_fs(fs.clone());
+    assets::add_fonts(&mut fonts);
+    let ro = geom::RenderOptions {
+        fs: fs.clone(),
+        work_dir: doc.clone(),
+        fonts: Arc::new(fonts),
+        ..Default::default()
+    };
+    // One renderer for the queries and the render after them, as a host
+    // keeps (`session::oracle`): `child_bounds()` renders its child on
+    // wasm32's one thread, into the cache the render then reads (the
+    // `query-bounds` case).
+    let renderer = Arc::new(geom::Renderer::new());
+    let mut query_ro = ro.clone();
+    query_ro.replay = Some(0);
+    let oracle = Arc::new(session::oracle::Oracle::new(renderer.clone(), query_ro));
     let opts = eval::Options {
         rng_seed: seed,
         frame_limit,
         fs: fs.clone(),
         preview,
+        geometry: Some(oracle.clone()),
         // `sketch()` on, so a constrained sketch's solve, profile and
         // tessellation run on wasm32 as natively (the `sketch-*` cases),
         // and the queries, so a query's nested instantiation and its
@@ -124,18 +141,16 @@ fn run_inner(
         eval::evaluate(&program, &uses, &elibs, doc.clone(), &opts, &mut con)
     });
     let keys = eval::dump::Keys::new(&ev.root, &*fs);
-    let mut fonts = text::FontDb::with_fs(fs.clone());
-    assets::add_fonts(&mut fonts);
-    let ro = geom::RenderOptions {
-        fs: fs.clone(),
-        work_dir: doc.clone(),
-        fonts: Arc::new(fonts),
-        ..Default::default()
-    };
+    let mut ro = ro;
+    if oracle.asked() {
+        // The queried children's warnings, which their query renders
+        // did not print, come from the cache (`session::oracle`).
+        ro.replay = Some(0);
+    }
     let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
     if preview {
         let limit = geom::csg::DEFAULT_TERM_LIMIT;
-        match geom::csg::CsgTree::build(top, &geom::Renderer::new(), &keys, ro, limit) {
+        match geom::csg::CsgTree::build(top, &renderer, &keys, ro, limit) {
             Err(u) => con.print(None, format!("{}() is not implemented", u.what).as_bytes()),
             Ok(t) => {
                 for m in &t.messages {
@@ -149,7 +164,7 @@ fn run_inner(
         drop(con);
         return String::from_utf8_lossy(&out).into_owned();
     }
-    match geom::Renderer::new().render(top, &keys, ro) {
+    match renderer.render(top, &keys, ro) {
         Err(u) => con.print(None, format!("{}() is not implemented", u.what).as_bytes()),
         Ok(r) => {
             for m in &r.messages {

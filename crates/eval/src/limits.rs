@@ -16,7 +16,8 @@
 //!   [`Limits::list`], [`Limits::string`], [`Limits::rands`],
 //!   [`Limits::triangles`], [`Limits::sketch_unknowns`]) are compared
 //!   with what an operation is about to build, so `sphere(10, $fn=1e5)`
-//!   fails before it allocates a vertex.
+//!   fails before it allocates a vertex. [`Limits::queries`] counts the
+//!   geometry queries of one evaluation, each a render of its own.
 //! - **Memory** ([`Limits::memory`]) is an estimate kept at the
 //!   allocation-heavy points, not a measurement of the process (the
 //!   workspace forbids the `unsafe` a counting global allocator needs, and
@@ -64,10 +65,11 @@ pub enum Limit {
     Triangles,
     Depth,
     SketchUnknowns,
+    Queries,
 }
 
 impl Limit {
-    pub const ALL: [Limit; 10] = [
+    pub const ALL: [Limit; 11] = [
         Limit::Time,
         Limit::Memory,
         Limit::Fragments,
@@ -78,6 +80,7 @@ impl Limit {
         Limit::Triangles,
         Limit::Depth,
         Limit::SketchUnknowns,
+        Limit::Queries,
     ];
 
     /// The name `--limit NAME=VALUE` and the JSON `limits` object use.
@@ -93,6 +96,7 @@ impl Limit {
             Limit::Triangles => "triangles",
             Limit::Depth => "depth",
             Limit::SketchUnknowns => "sketch_unknowns",
+            Limit::Queries => "queries",
         }
     }
 
@@ -113,6 +117,7 @@ impl Limit {
             Limit::Triangles => "triangles per result",
             Limit::Depth => "nested module calls",
             Limit::SketchUnknowns => "unknowns per sketch",
+            Limit::Queries => "geometry queries per evaluation",
         }
     }
 }
@@ -159,6 +164,12 @@ pub struct Limits {
     /// refused before the first one, rather than left to run for minutes
     /// between the time checks (which come once per iteration).
     pub sketch_unknowns: Option<u64>,
+    /// Geometry queries (`child_bounds()`, `child_measure()`; `--enable
+    /// query`) in one evaluation. Each renders its child, so a query in a
+    /// loop or a recursion is a render per step; the time limit stops one
+    /// long render, and this stops a pattern that asks for thousands of
+    /// small ones. `child_anchors()` renders nothing and does not count.
+    pub queries: Option<u64>,
 }
 
 /// [`Limits::depth`]'s default: about three times the module depth the
@@ -182,6 +193,7 @@ impl Limits {
         triangles: None,
         depth: None,
         sketch_unknowns: None,
+        queries: None,
     };
 
     /// The defaults of the agent and app surfaces (`serve`, `mcp`, the
@@ -199,6 +211,9 @@ impl Limits {
     /// - 5,000 unknowns in one sketch: a dense QR of that size is about
     ///   10^11 flops per iteration and 200 MB per matrix, where a real
     ///   sketch has tens to a few hundred.
+    /// - 10,000 geometry queries in one evaluation: a real model asks a
+    ///   few per module that uses them; a recursion or loop that queries
+    ///   at every step is what this stops.
     pub const AGENT: Limits = Limits {
         time: Some(60.0),
         memory: Some(4 << 30),
@@ -210,6 +225,7 @@ impl Limits {
         triangles: Some(10_000_000),
         depth: None,
         sketch_unknowns: Some(5_000),
+        queries: Some(10_000),
     };
 
     pub fn is_none(&self) -> bool {
@@ -228,6 +244,7 @@ impl Limits {
             Limit::Triangles => self.triangles.map(|n| n as f64),
             Limit::Depth => Some(self.depth.unwrap_or(DEFAULT_DEPTH) as f64),
             Limit::SketchUnknowns => self.sketch_unknowns.map(|n| n as f64),
+            Limit::Queries => self.queries.map(|n| n as f64),
         }
     }
 
@@ -299,6 +316,7 @@ impl Limits {
             // `None` is the default here, not unlimited (see `Limits::depth`).
             Limit::Depth => self.depth = v.map(count),
             Limit::SketchUnknowns => self.sketch_unknowns = v.map(count),
+            Limit::Queries => self.queries = v.map(count),
         }
     }
 
@@ -400,6 +418,7 @@ impl Exceeded {
                     Limit::Rands => "random numbers",
                     Limit::Depth => "nested module calls",
                     Limit::SketchUnknowns => "sketch unknowns",
+                    Limit::Queries => "geometry queries",
                     _ => "triangles",
                 },
                 l.key(),
@@ -420,6 +439,9 @@ impl Exceeded {
             Limit::Depth => "check the recursion's end condition",
             Limit::SketchUnknowns => {
                 "split the sketch into smaller ones, or check the loop that makes its entities"
+            }
+            Limit::Queries => {
+                "query once and keep the answer in a variable, or check the recursion or loop that queries at every step"
             }
             Limit::Memory => "simplify the model or lower $fn",
             Limit::Time => "simplify the model or lower $fn",

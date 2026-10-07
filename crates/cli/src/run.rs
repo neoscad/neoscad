@@ -121,6 +121,42 @@ pub fn frame_target(target: &str, frame: Option<u32>) -> String {
     s
 }
 
+/// The geometry oracle of an evaluation with `--enable query`
+/// (`child_bounds()`, `child_measure()`): it renders through `renderer`
+/// with the export's settings, so a render that follows finds the queried
+/// subtrees in the cache. `None` without the extension, so no other run
+/// pays for the fonts it loads.
+///
+/// Its renders record their messages for replay (epoch 0: the command
+/// line's sources never change between its renders), and a render after a
+/// query must replay them (`opts.replay`), or the child's warnings, which
+/// a query render does not print, would never be printed: the command
+/// line's own rule is that a cache hit is silent.
+fn query_oracle(
+    job: &Job<'_>,
+    loaded: &Loaded,
+    paths: &Paths,
+    options: &Options,
+    renderer: &std::sync::Arc<geom::Renderer>,
+) -> Option<std::sync::Arc<session::oracle::Oracle>> {
+    options.extensions.has(eval::Extension::Query).then(|| {
+        let mut opts = render_options(job, loaded, paths, false);
+        opts.replay = Some(0);
+        std::sync::Arc::new(session::oracle::Oracle::new(renderer.clone(), opts))
+    })
+}
+
+/// `options` with `oracle` as its geometry oracle.
+fn with_oracle(
+    options: &Options,
+    oracle: Option<&std::sync::Arc<session::oracle::Oracle>>,
+) -> Options {
+    Options {
+        geometry: oracle.map(|o| o.clone() as std::sync::Arc<dyn eval::GeometryOracle>),
+        ..options.clone()
+    }
+}
+
 /// `options` at the frame's `$t`.
 fn at_time(options: &Options, frame: Frame) -> Options {
     Options {
@@ -444,6 +480,11 @@ fn export_tree_with<W: Write>(
         Ok(l) => l,
         Err(code) => return code,
     };
+    // Queries render even when only the tree is written: the tree holds
+    // their answers. Frames share the cache, as a mesh export's do.
+    let renderer = std::sync::Arc::new(geom::Renderer::new());
+    let oracle = query_oracle(job, &loaded, paths, options, &renderer);
+    let options = &with_oracle(options, oracle.as_ref());
     for frame in job.frames() {
         job.announce(frame, con);
         let ev = evaluate(&loaded, paths, &at_time(options, frame), con);
@@ -508,6 +549,9 @@ pub fn export_echo(job: &Job<'_>, options: &Options) -> u8 {
         // its frame loop and never renames it.
         Ok(l) => {
             let mut code = 0;
+            let renderer = std::sync::Arc::new(geom::Renderer::new());
+            let oracle = query_oracle(job, &l, &paths, options, &renderer);
+            let options = &with_oracle(options, oracle.as_ref());
             for frame in job.frames() {
                 job.announce(frame, &mut con);
                 let ev = evaluate(&l, &paths, &at_time(options, frame), &mut con);
@@ -610,7 +654,7 @@ fn export_mesh_with<W: Write>(
         Ok(l) => l,
         Err(code) => return code,
     };
-    let renderer = geom::Renderer::new();
+    let renderer = std::sync::Arc::new(geom::Renderer::new());
     for frame in job.frames() {
         job.announce(frame, con);
         let code = render_frame(
@@ -637,14 +681,17 @@ fn render_frame<W: Write>(
     job: &Job<'_>,
     paths: &Paths,
     loaded: &Loaded,
-    renderer: &geom::Renderer,
+    renderer: &std::sync::Arc<geom::Renderer>,
     options: &eval::Options,
     formats: &[MeshFormat],
     force: bool,
     frame: Frame,
     con: &mut Console<W>,
 ) -> u8 {
-    let ev = evaluate(loaded, paths, options, con);
+    // One oracle per frame, so `asked` says whether this frame's
+    // evaluation rendered anything.
+    let oracle = query_oracle(job, loaded, paths, options, renderer);
+    let ev = evaluate(loaded, paths, &with_oracle(options, oracle.as_ref()), con);
     // `--limit`: the evaluator printed the limit it passed.
     let exceeded = || options.guard.as_ref().and_then(|g| g.exceeded());
     if ev.hard_warning || exceeded().is_some() {
@@ -658,6 +705,10 @@ fn render_frame<W: Write>(
     let mut opts = render_options(job, loaded, paths, force);
     opts.interrupt = options.interrupt.clone();
     opts.guard = options.guard.clone();
+    if oracle.as_ref().is_some_and(|o| o.asked()) {
+        // A query rendered into the cache: see `query_oracle`.
+        opts.replay = Some(0);
+    }
     let mut render_ms = 0.0;
     let unsupported = |u: geom::Unsupported, con: &mut Console<W>| {
         // A limit the geometry stage passed (only `--limit` runs have
@@ -1150,6 +1201,9 @@ fn export_param_with<W: Write>(
         Ok(l) => l,
         Err(code) => return code,
     };
+    let renderer = std::sync::Arc::new(geom::Renderer::new());
+    let oracle = query_oracle(job, &loaded, paths, options, &renderer);
+    let options = &with_oracle(options, oracle.as_ref());
     for frame in job.frames() {
         job.announce(frame, con);
         let ev = evaluate(&loaded, paths, &at_time(options, frame), con);

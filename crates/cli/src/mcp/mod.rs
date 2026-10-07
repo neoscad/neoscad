@@ -164,7 +164,7 @@ pub(crate) struct Args {
     /// Change a resource limit, NAME=VALUE (repeatable; 'off' for none):
     /// time (s, default 60), memory (MiB or 4G, default 4G), fragments
     /// (10000), slices (10000), list (1e7), string (64 MiB), rands (1e7),
-    /// triangles (1e7), sketch_unknowns (5000).
+    /// triangles (1e7), sketch_unknowns (5000), queries (10000).
     #[arg(long = "limit", value_name = "NAME=VALUE", action = clap::ArgAction::Append)]
     limit: Vec<String>,
 

@@ -1,0 +1,165 @@
+group() {
+	group() {
+		cube(size = [1, 2, 3], center = false);
+	}
+}
+group() {
+	group() {
+		multmatrix([[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			square(size = [2, 2], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		difference() {
+			square(size = [10, 10], center = true);
+			square(size = [4, 4], center = true);
+		}
+	}
+}
+group() {
+	group() {
+		multmatrix([[0.707107, -0.707107, 0, 0], [0.707107, 0.707107, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			cube(size = [1, 1, 1], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		difference() {
+			cube(size = [10, 10, 10], center = false);
+			multmatrix([[1, 0, 0, 5], [0, 1, 0, 5], [0, 0, 1, -1], [0, 0, 0, 1]]) {
+				cube(size = [20, 20, 20], center = false);
+			}
+		}
+	}
+}
+group() {
+	group() {
+		intersection() {
+			sphere($fn = 24, $fa = 12, $fs = 2, r = 5);
+			cube(size = [4, 4, 4], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+%		multmatrix([[1, 0, 0, 10], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			cube(size = [1, 1, 1], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+#		multmatrix([[1, 0, 0, 10], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			cube(size = [1, 1, 1], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 1], [0, 0, 0, 1]]) {
+			cube(size = [1, 1, 1], center = false);
+		}
+		square(size = [5, 5], center = false);
+	}
+}
+group() {
+	group() {
+		cube(size = [0, 0, 0], center = false);
+	}
+}
+group() {
+	group();
+}
+group() {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+		multmatrix([[1, 0, 0, 5], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			cube(size = [1, 1, 1], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		group() {
+			multmatrix([[1, 0, 0, -2], [0, 1, 0, -2], [0, 0, 1, 1], [0, 0, 0, 1]]) {
+				cube(size = [6, 6, 0.5], center = false);
+			}
+			group() {
+				group() {
+					multmatrix([[1, 0, 0, -1], [0, 1, 0, -1], [0, 0, 1, 1], [0, 0, 0, 1]]) {
+						cube(size = [4, 4, 0.5], center = false);
+					}
+					group() {
+						multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 1], [0, 0, 0, 1]]) {
+							cube(size = [2, 2, 2], center = false);
+						}
+					}
+				}
+			}
+		}
+	}
+}
+group() {
+	group() {
+		group() {
+			group() {
+				group() {
+					group() {
+						group() {
+							group() {
+								group() {
+									group() {
+										group() {
+											group() {
+												group() {
+													group() {
+														group() {
+															group() {
+																group() {
+																	group() {
+																		group() {
+																			group() {
+																				cube(size = [1, 1, 1], center = false);
+																			}
+																		}
+																	}
+																	multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 1], [0, 0, 0, 1]]) {
+																		cube(size = [1, 1, 1], center = false);
+																	}
+																}
+															}
+														}
+													}
+													multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 2], [0, 0, 0, 1]]) {
+														cube(size = [1, 1, 1], center = false);
+													}
+												}
+											}
+										}
+									}
+									multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 3], [0, 0, 0, 1]]) {
+										cube(size = [1, 1, 1], center = false);
+									}
+								}
+							}
+						}
+					}
+					multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 4], [0, 0, 0, 1]]) {
+						cube(size = [1, 1, 1], center = false);
+					}
+				}
+			}
+		}
+	}
+}
+group() {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+

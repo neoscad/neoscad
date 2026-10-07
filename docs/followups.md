@@ -1715,7 +1715,8 @@ lead them, come roughly in order of user impact.
   (`docs/language-extensions.md`, section 11.3). `rotate_extrude` could
   place a profile anchor at its `start` angle (after checking OpenSCAD's
   default start against the reference), and `resize` needs the child's
-  bounds, which stage 6's oracle gives.
+  bounds, which stage 6's oracle now gives (`eval::oracle`), at the cost
+  of a render whenever a resized child is asked for anchors.
 - A query whose child is not reusable (`rands()`, `import()`, a file
   read, `part()`, a deprecation) instantiates it twice: once for the
   answer, once at `children()`. Restoring the `rands()` state the
@@ -1736,13 +1737,49 @@ lead them, come roughly in order of user impact.
   silently; `check` or `measure` could list anchors by name if a tool
   wants them.
 - The editor's decorations (`apple/Editor/web/src/lang/builtins.js`) do
-  not list `anchor` and `child_anchors` (design section 7), and LSP
-  completion was not checked for them (stage 4 owns the language
-  server's extension handling).
+  not list `anchor`, `child_anchors`, `child_bounds` and `child_measure`
+  (design section 7), and LSP completion was not checked for them
+  (stage 4 owns the language server's extension handling).
 - The goldens in `conformance/extensions/query` run as a cargo test, as
   the sketch goldens do; their `.csg` exports were rendered by the stock
   nightly by hand only (`plate`, `sketch` and `reuse`, comparing vertex
-  and facet counts).
+  and facet counts; `plate-bounds` and `bounds` by volume and box too).
+- The apps have no setting for `--enable query` (they have one for
+  sketches, `apple/App/Updates/SettingsWindow.swift`); `serve`, MCP and
+  the command line take it.
+- A top-level statement or module call that asked `child_bounds()` or
+  `child_measure()` is never replayed by the statement memo or the call
+  memo (`crates/eval/src/query.rs`, module docs), because the queries
+  limit counts every query and a replay would skip the count. Recording
+  the count in memo and call-memo entries and adding it on replay (as
+  node indices and limit checks are) would let them be replayed; the
+  renders already come from the cache, so this costs only evaluation.
+- The command line replays cached geometry messages (`replay: Some(0)`)
+  in a frame whose evaluation rendered a query, so with `--animate` a
+  queried child's warnings print in every frame, where OpenSCAD's rule
+  (and the command line's otherwise) prints a cached subtree's warnings
+  in the first frame only (`crates/cli/src/run.rs`, `query_oracle`).
+- Stage 7's fast path for bounds (primitives under transforms, unions
+  and hulls without rendering, behind a differential test) is not built:
+  every `child_bounds()` renders, from the cache when it can.
+- The thread-count tests (`crates/session/tests/query.rs`,
+  `crates/geom/tests/query.rs`, like `crates/geom/tests/render.rs`) run
+  inside `rayon` pools of 1, 2 and 8 threads, but `geom::Renderer` keeps
+  its own pool sized by rayon's default (`RAYON_NUM_THREADS` or the CPU
+  count), so the render's own parallelism is not varied by them; for
+  stage 6 the query models were also exported with `RAYON_NUM_THREADS`
+  1, 2 and 8 by hand.
+- Found while checking the `.csg` of `bounds.scad` in the nightly: a
+  union of overlapping solids with coplanar faces renders to the same
+  volume and box but a different triangulation (90 facets in NeoSCAD, 80
+  in the 2026.09.23 nightly with `--backend=manifold`) from a plain file
+  with no extension:
+  `cube([1, 2, 3]); multmatrix([[0.707107, -0.707107, 0, 0], [0.707107,
+  0.707107, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) cube(1); difference() {
+  cube(10); translate([5, 5, -1]) cube(20); } intersection() { sphere(r
+  = 5, $fn = 24); cube(4); } cube(1); translate([10, 0, 0]) cube(1);`.
+  Each statement alone matches; in `bounds.csg` the counts first differ
+  when the last two cubes join the union of the others.
 
 ## Determinism
 - Console output of two reference models varies between runs of one

@@ -75,12 +75,27 @@ pub(crate) enum Builtin {
     SketchLine,
     SketchArc,
     SketchCircle,
-    /// NeoSCAD's `child_anchors()` (`--enable query`): in the table only
-    /// with the extension on, so off it is OpenSCAD's unknown function.
+    /// NeoSCAD's queries (`--enable query`): in the table only with the
+    /// extension on, so off they are OpenSCAD's unknown functions.
+    /// `child_anchors()` reads anchors; `child_bounds()` and
+    /// `child_measure()` render the child (`crate::oracle`).
     ChildAnchors,
+    ChildBounds,
+    ChildMeasure,
 }
 
 impl Builtin {
+    /// The queries about a module's children, which need the caller's
+    /// context (to find the module) and so are evaluated from their
+    /// unevaluated arguments in `call_builtin`.
+    #[inline]
+    pub fn is_query(self) -> bool {
+        matches!(
+            self,
+            Builtin::ChildAnchors | Builtin::ChildBounds | Builtin::ChildMeasure
+        )
+    }
+
     /// Experimental functions are known but disabled unless their feature
     /// is on (`--enable`), as in OpenSCAD: `is_object` goes with
     /// `textmetrics` there, not with `object`.
@@ -163,13 +178,17 @@ pub(crate) fn table(
     syms: &mut Syms,
     extensions: crate::Extensions,
 ) -> HashMap<Sym, Builtin, FxBuild> {
-    // `child_anchors` is left out entirely when the extension is off, as
+    // The queries are left out entirely when the extension is off, as
     // `part` and `sketch` are among the modules: a call is then OpenSCAD's
     // own "Ignoring unknown function", and a program's own
     // `function child_anchors` is what it always was.
-    let query = extensions
-        .has(crate::Extension::Query)
-        .then_some(("child_anchors", Builtin::ChildAnchors));
+    let query = [
+        ("child_anchors", Builtin::ChildAnchors),
+        ("child_bounds", Builtin::ChildBounds),
+        ("child_measure", Builtin::ChildMeasure),
+    ]
+    .into_iter()
+    .filter(|_| extensions.has(crate::Extension::Query));
     ALL.into_iter()
         .chain(query)
         .map(|(n, b)| (syms.intern(n), b))
@@ -250,12 +269,16 @@ impl<'a> Evaluator<'a> {
         if b == Builtin::Object {
             return self.object_function(u, args, ctx, loc);
         }
-        if b == Builtin::ChildAnchors {
+        if b.is_query() {
             // Needs the caller's context, to find the module whose
             // children it asks about, as `children()` does.
             let mut argv = Vec::new();
             self.eval_args_into(u, args, ctx, &mut argv)?;
-            return self.child_anchors(argv, loc, ctx);
+            return match b {
+                Builtin::ChildAnchors => self.child_anchors(argv, loc, ctx),
+                Builtin::ChildBounds => self.child_geometry(argv, loc, ctx, false),
+                _ => self.child_geometry(argv, loc, ctx, true),
+            };
         }
         if b == Builtin::IsUndef {
             if args.len() != 1 {
@@ -574,8 +597,8 @@ impl<'a> Evaluator<'a> {
                 return self.sketch_entity(b, loc, a);
             }
             // Evaluated from their unevaluated arguments in `call_builtin`
-            // (`child_anchors` there because it needs the caller's context).
-            IsUndef | Object | ChildAnchors => Value::Undef,
+            // (the queries there because they need the caller's context).
+            IsUndef | Object | ChildAnchors | ChildBounds | ChildMeasure => Value::Undef,
         })
     }
 

@@ -7,13 +7,17 @@ and adds a surface built for people and for AI agents: structured JSON
 output, `check`, `measure` and `snapshot`, an MCP server, a language
 server and a long-running `serve` mode.
 
-NeoSCAD extends OpenSCAD with two language extensions, both off by
+NeoSCAD extends OpenSCAD with three language extensions, all off by
 default so that a file means exactly what it means in OpenSCAD: named
 parts (`part("lid") { ... }`, `--enable part`), which `check` and
-`measure` report on one by one, and constrained 2D sketches
+`measure` report on one by one; constrained 2D sketches
 (`sketch() { ... }`, `--enable sketch`): points, lines, arcs and circles
 tied by constraints and solved into a 2D shape, as in FreeCAD's
-Sketcher (`docs/sketch.md`).
+Sketcher (`docs/sketch.md`); and geometry queries (`--enable query`):
+a module can read its children's bounding box, volume and area
+(`child_bounds()`, `child_measure()`) or the points they name
+(`anchor()`, `child_anchors()`) as ordinary values
+(`docs/geometry-queries.md`).
 
 - Website: <https://neoscad.org>
 - Try it in the browser: <https://neoscad.org/try>

@@ -2528,10 +2528,10 @@ impl<'a> Evaluator<'a> {
         id: ExprId,
         args: &'a [Arg],
     ) -> Option<S> {
-        // `child_anchors()` needs the caller's context, which only
-        // `call_builtin` passes on: its argument (an index) is evaluated
-        // there.
-        if b == Builtin::IsUndef || b == Builtin::ChildAnchors || !self.args_may_call(u, args) {
+        // The queries (`child_anchors()` and the rest) need the caller's
+        // context, which only `call_builtin` passes on: their argument (an
+        // index) is evaluated there.
+        if b == Builtin::IsUndef || b.is_query() || !self.args_may_call(u, args) {
             return None;
         }
         let ctx = match &st.cur {
