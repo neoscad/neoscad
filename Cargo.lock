@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-agent-link"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "dirs",
  "getrandom",
@@ -1480,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-assets"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "neoscad-lang",
  "neoscad-text",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-bench-core"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "nix",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-cli"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-client"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "minisign-verify",
  "neoscad-assets",
@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-conformance"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "clap",
  "flate2",
@@ -1564,14 +1564,14 @@ dependencies = [
 
 [[package]]
 name = "neoscad-docs"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "neoscad-lang",
 ]
 
 [[package]]
 name = "neoscad-eval"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "neoscad-assets",
  "neoscad-io",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-ffi"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "libc",
  "mimalloc",
@@ -1608,14 +1608,14 @@ dependencies = [
 
 [[package]]
 name = "neoscad-fmt"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "neoscad-lang",
 ]
 
 [[package]]
 name = "neoscad-geom"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "clipper2-rust",
  "manifold-rust",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-io"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "clipper2-rust",
  "flate2",
@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-lang"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "dirs",
  "neoscad-lang",
@@ -1651,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-linux-app"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-lsp"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "neoscad-docs",
  "neoscad-fmt",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-render"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "neoscad-geom",
  "neoscad-io",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-session"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "neoscad-docs",
  "neoscad-eval",
@@ -1716,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-text"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "harfrust",
  "neoscad-lang",
@@ -1725,14 +1725,14 @@ dependencies = [
 
 [[package]]
 name = "neoscad-uniffi-bindgen"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "uniffi",
 ]
 
 [[package]]
 name = "neoscad-wasm-check"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "libm",
  "manifold-rust",
@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-web"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "js-sys",
  "neoscad-assets",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "neoscad-web-view"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "js-sys",
  "neoscad-assets",

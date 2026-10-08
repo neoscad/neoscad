@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.5.0
+
+NeoSCAD now extends OpenSCAD's language. The extensions are off by
+default, so every OpenSCAD file means exactly what it means in OpenSCAD;
+turn each one on with `--enable NAME` on the command line, or in the
+apps' settings (macOS: Settings > Language; Linux: Preferences >
+Language; Windows: Design > NeoSCAD Extensions).
+
+### New
+
+- **Constrained 2D sketches** (`--enable sketch`, `docs/sketch.md`).
+  `sketch() { ... }` declares points, lines, arcs and circles and ties
+  them with constraints (coincident, tangent, horizontal, distance,
+  angle, equal, symmetric and more), as FreeCAD's Sketcher does; the
+  solved profile is an ordinary 2D shape for `linear_extrude`,
+  `rotate_extrude` and the rest. Fillets and chamfers at corners.
+  - Under-constrained, redundant and conflicting constraints are
+    reported at their source line, with fixes you can apply as edits
+    ("add all" leaves a sketch fully constrained; "pin the drawing"
+    writes the solved positions back).
+  - The language server completes the sketch vocabulary inside sketch
+    bodies, shows solved values on hover and offers the fixes; `check`
+    lists each sketch, `measure --sketch NAME` reports solved lengths,
+    angles and radii, and `snapshot --sketch NAME` draws the sketch
+    with its constraints.
+  - The solver is a separate crate, `sketch-solver`
+    (github.com/neoscad/sketch-solver, MIT OR Apache-2.0), validated
+    against FreeCAD's and SolveSpace's own solver tests and giving
+    bit-identical results on every platform, the browser included.
+- **Geometry queries** (`--enable query`, `docs/geometry-queries.md`).
+  Inside a module, `child_bounds()`, `child_measure()` and
+  `child_distance()` measure its children as rendered, and
+  `anchor()`/`child_anchors()` pass named points up from them; a solved
+  sketch's named points are anchors too. Queries never change what a
+  model exports.
+- **Exact STEP export** (`--enable exact`, `docs/step-export.md`).
+  `-o part.step`, and STEP in the apps' and /try's export menus, writes
+  true planes, cylinders, cones, spheres and tori wherever `$fn` is not
+  set (an explicit `$fn` keeps OpenSCAD's polygon as flat faces), so a
+  CAD program sees real holes and diameters. Whatever has no exact form
+  (`hull`, `minkowski`, `polyhedron`, text, twisted extrusions) is
+  written as flat facets and reported at its source line, and a model
+  that can't be written correctly is refused rather than written wrong.
+  Pure Rust, in the browser too.
+
+### Changed
+
+- `serve` advertises `sketch`, `query` and `exact`; MCP's `check` and
+  `render` export STEP when the server runs with `--enable exact`, and
+  its `measure` takes `sketch`.
+- New resource limits `sketch_unknowns` and `queries` (both on for
+  agents).
+- `neoscad mcp --enable part` now turns parts on; it was ignored before.
+
 ## 0.4.3
 
 ### Fixed
