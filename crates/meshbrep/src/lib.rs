@@ -4,7 +4,8 @@
 //!
 //! A mesh kernel such as Manifold does booleans robustly but only on
 //! triangles. If every input triangle is tagged with the exact surface it
-//! approximates (a plane, cylinder, cone or sphere), the tags survive the
+//! approximates (a plane, cylinder, cone, sphere, torus or B-spline
+//! surface; [`spline`] builds the B-splines blends need), the tags survive the
 //! booleans, and the output mesh says which surface each region lies on.
 //! This crate turns that into a B-rep:
 //!
@@ -59,10 +60,12 @@ mod edges;
 mod math;
 mod measure;
 mod model;
+mod nurbs;
 pub mod primitives;
 mod reconstruct;
 mod seams;
 mod solve;
+pub mod spline;
 mod step;
 mod surf;
 mod tangency;
@@ -258,9 +261,12 @@ fn reconstruct_with(mesh: &TaggedMesh, options: &Options, contacts: bool) -> Res
     b.report.tangencies = built
         .tangencies
         .iter()
-        .map(|&(a, c, k)| Tangency {
-            surfaces: [a.min(c), a.max(c)],
-            contact: k.to_public(),
+        .flat_map(|(a, c, k)| {
+            let (a, c) = (*a, *c);
+            k.to_public(a, c).into_iter().map(move |contact| Tangency {
+                surfaces: [a.min(c), a.max(c)],
+                contact,
+            })
         })
         .collect();
     Ok(b)

@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 
 use crate::math::*;
-use crate::model::{BSpline, Brep, Curve, Face, Surface};
+use crate::model::{BSpline, BSplineSurface, Brep, Curve, Face, Surface};
 
 /// Names and dates for the file header and the product.
 #[derive(Clone, Debug, PartialEq)]
@@ -233,7 +233,78 @@ fn curve_entity(w: &mut W, c: &Curve) -> usize {
     }
 }
 
+/// A knot vector as STEP's distinct knots and their multiplicities.
+fn knot_runs(knots: &[f64]) -> (Vec<f64>, Vec<usize>) {
+    let mut ks: Vec<f64> = Vec::new();
+    let mut ms: Vec<usize> = Vec::new();
+    for &k in knots {
+        if ks.last() == Some(&k) {
+            *ms.last_mut().expect("multiplicity") += 1;
+        } else {
+            ks.push(k);
+            ms.push(1);
+        }
+    }
+    (ks, ms)
+}
+
+/// `(a,b,...)` of integers or of reals.
+fn int_list(xs: &[usize]) -> String {
+    let parts: Vec<String> = xs.iter().map(|m| m.to_string()).collect();
+    format!("({})", parts.join(","))
+}
+
+fn real_list(xs: &[f64]) -> String {
+    let parts: Vec<String> = xs.iter().map(|&k| real(k)).collect();
+    format!("({})", parts.join(","))
+}
+
+/// A B-spline surface: `B_SPLINE_SURFACE_WITH_KNOTS`, or for a rational
+/// one the complex instance ISO 10303-42 requires (its supertypes and
+/// `RATIONAL_B_SPLINE_SURFACE` with the weights), its partial entities in
+/// alphabetical order as Part 21 has them.
+fn bspline_surface_entity(w: &mut W, b: &BSplineSurface) -> usize {
+    let rows: Vec<String> = b
+        .control
+        .iter()
+        .map(|row| {
+            let ids: Vec<usize> = row.iter().map(|&p| w.pt(p)).collect();
+            format!("({})", refs(&ids))
+        })
+        .collect();
+    let net = format!("({})", rows.join(","));
+    let (ku, mu) = knot_runs(&b.knots_u);
+    let (kv, mv) = knot_runs(&b.knots_v);
+    let knots = format!(
+        "{},{},{},{},.UNSPECIFIED.",
+        int_list(&mu),
+        int_list(&mv),
+        real_list(&ku),
+        real_list(&kv)
+    );
+    match &b.weights {
+        None => w.add(format!(
+            "B_SPLINE_SURFACE_WITH_KNOTS('',{},{},{net},.UNSPECIFIED.,.F.,.F.,.F.,{knots})",
+            b.degree_u, b.degree_v
+        )),
+        Some(ws) => {
+            let rows: Vec<String> = ws.iter().map(|r| real_list(r)).collect();
+            w.add(format!(
+                "(BOUNDED_SURFACE()B_SPLINE_SURFACE({},{},{net},.UNSPECIFIED.,.F.,.F.,.F.)B_SPLINE_SURFACE_WITH_KNOTS({knots})GEOMETRIC_REPRESENTATION_ITEM()RATIONAL_B_SPLINE_SURFACE(({}))REPRESENTATION_ITEM('')SURFACE())",
+                b.degree_u,
+                b.degree_v,
+                rows.join(",")
+            ))
+        }
+    }
+}
+
 fn surface_entity(w: &mut W, f: &Face) -> usize {
+    // A B-spline carries its own placement: the face's frame is not
+    // written.
+    if let Surface::BSpline(b) = &f.surface {
+        return bspline_surface_entity(w, b);
+    }
     let fr = f.frame;
     let a = w.ax2(fr.origin, fr.z, fr.x);
     match &f.surface {

@@ -341,6 +341,14 @@ pub fn run_brep(src: &[u8]) -> String {
                     .then_after(&Transform::translate([0.0, 0.0, -6.0])),
             ),
         ),
+        // A box whose top is a bicubic B-spline patch, drilled through
+        // the patch: projection onto the patch, its closed edge with the
+        // hole, and `B_SPLINE_SURFACE_WITH_KNOTS` (`docs/fillets.md`,
+        // 15.8).
+        "bspline-drilled-box" => (
+            bspline_box(),
+            primitives::frustum(10.0, 2.0, 2.0, 32, &Transform::translate([6.3, 3.7, -1.0])),
+        ),
         _ => return format!("unknown case {name}\n"),
     };
     // One surface table; each triangle's face_id is its surface's index.
@@ -402,6 +410,119 @@ pub fn run_brep(src: &[u8]) -> String {
         if valid.is_valid() { "valid" } else { "INVALID" },
         step.len()
     )
+}
+
+/// The box [0, 12] × [0, 8] × [0, ~5] whose top is a bicubic B-spline
+/// patch (5 by 5 control points, x and y at the knots' Greville
+/// abscissae so that they are linear in the parameters), tagged on a 6 by
+/// 6 grid of the patch's points; its sides and bottom are planes.
+fn bspline_box() -> meshbrep::TaggedMesh {
+    use meshbrep::{BSplineSurface, Surface};
+    const L: f64 = 12.0;
+    const W: f64 = 8.0;
+    const N: usize = 6;
+    let knots = vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0];
+    let g = [0.0, 1.0 / 6.0, 0.5, 5.0 / 6.0, 1.0];
+    let z = [
+        [5.0, 5.2, 5.4, 5.1, 4.9],
+        [5.3, 5.6, 5.2, 4.8, 5.0],
+        [4.8, 5.5, 5.9, 5.3, 5.1],
+        [5.0, 4.7, 5.2, 5.6, 5.4],
+        [5.2, 5.0, 4.9, 5.1, 5.3],
+    ];
+    let top = BSplineSurface {
+        degree_u: 3,
+        degree_v: 3,
+        control: (0..5)
+            .map(|i| (0..5).map(|j| [L * g[i], W * g[j], z[i][j]]).collect())
+            .collect(),
+        weights: None,
+        knots_u: knots.clone(),
+        knots_v: knots,
+    };
+    let ev = meshbrep::spline::Evaluator::new(&top).expect("a valid patch");
+    let plane = |origin: [f64; 3], normal: [f64; 3]| Surface::Plane { origin, normal };
+    let mut mesh = meshbrep::TaggedMesh {
+        surfaces: vec![
+            Surface::BSpline(top),
+            plane([0.0; 3], [0.0, 0.0, -1.0]),
+            plane([0.0; 3], [-1.0, 0.0, 0.0]),
+            plane([L, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            plane([0.0; 3], [0.0, -1.0, 0.0]),
+            plane([0.0, W, 0.0], [0.0, 1.0, 0.0]),
+        ],
+        ..Default::default()
+    };
+    let t = |k: usize| k as f64 / N as f64;
+    // Top points then bottom points, (N + 1)² each.
+    for z_top in [true, false] {
+        for i in 0..=N {
+            for j in 0..=N {
+                let h = if z_top { ev.eval(t(i), t(j))[2] } else { 0.0 };
+                mesh.positions.push([L * t(i), W * t(j), h]);
+            }
+        }
+    }
+    let top_at = |i: usize, j: usize| (i * (N + 1) + j) as u32;
+    let bottom_at = |i: usize, j: usize| ((N + 1) * (N + 1) + i * (N + 1) + j) as u32;
+    // A quad, turned to face `out`.
+    let quad = |m: &mut meshbrep::TaggedMesh, q: [u32; 4], s: u32, out: [f64; 3]| {
+        let p = |k: usize| m.positions[q[k] as usize];
+        let (a, b, c) = (p(0), p(1), p(2));
+        let (u, v) = (
+            [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+            [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+        );
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let q = if n[0] * out[0] + n[1] * out[1] + n[2] * out[2] >= 0.0 {
+            q
+        } else {
+            [q[0], q[3], q[2], q[1]]
+        };
+        m.triangles.push([q[0], q[1], q[2]]);
+        m.triangles.push([q[0], q[2], q[3]]);
+        m.triangle_surface.extend([s, s]);
+    };
+    for i in 0..N {
+        for j in 0..N {
+            let tq = [
+                top_at(i, j),
+                top_at(i + 1, j),
+                top_at(i + 1, j + 1),
+                top_at(i, j + 1),
+            ];
+            quad(&mut mesh, tq, 0, [0.0, 0.0, 1.0]);
+            let bq = [
+                bottom_at(i, j),
+                bottom_at(i + 1, j),
+                bottom_at(i + 1, j + 1),
+                bottom_at(i, j + 1),
+            ];
+            quad(&mut mesh, bq, 1, [0.0, 0.0, -1.0]);
+        }
+    }
+    for k in 0..N {
+        let sides = [
+            ((0, k), (0, k + 1), 2, [-1.0, 0.0, 0.0]),
+            ((N, k), (N, k + 1), 3, [1.0, 0.0, 0.0]),
+            ((k, 0), (k + 1, 0), 4, [0.0, -1.0, 0.0]),
+            ((k, N), (k + 1, N), 5, [0.0, 1.0, 0.0]),
+        ];
+        for ((i0, j0), (i1, j1), s, out) in sides {
+            let q = [
+                bottom_at(i0, j0),
+                bottom_at(i1, j1),
+                top_at(i1, j1),
+                top_at(i0, j0),
+            ];
+            quad(&mut mesh, q, s, out);
+        }
+    }
+    mesh
 }
 
 /// `--enable exact`'s STEP export of an OpenSCAD source, the whole way: the

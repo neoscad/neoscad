@@ -418,7 +418,7 @@ fn validate_unsorted(brep: &Brep, tolerance: f64) -> Validation {
                         at_edge(c.edge as usize),
                     );
                 }
-                if !p.periodic() {
+                if !p.has_pcurves() {
                     continue;
                 }
                 let Some(pc) = &c.pcurve else {
@@ -652,7 +652,7 @@ fn face_polylines(b: &Brep, fi: usize, k: usize) -> Option<Vec<Vec<[f64; 2]>>> {
         let mut pts: Vec<[f64; 2]> = Vec::new();
         for c in &lp.coedges {
             let e = &b.edges[c.edge as usize];
-            let mut s: Vec<[f64; 2]> = if p.periodic() {
+            let mut s: Vec<[f64; 2]> = if p.has_pcurves() {
                 let pc = c.pcurve.as_ref()?;
                 let (t0, t1) = (pc.knots[0], *pc.knots.last()?);
                 let n = k * (4 * bspline::spans(pc).len()).clamp(2, 512);

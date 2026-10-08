@@ -12,7 +12,8 @@ how, and where they depart from this text). The stop rule's corpus
 passes (99.7% of supported cases exact, section 15.4). F5 is split:
 F5a built (convex and concave corners in two passes in one call, and
 spindle tori: section 15.6); F5b, blends between curved surfaces with
-no common axis, planned (section 15.7).
+no common axis, planned (section 15.7), its first phase (B-spline
+surfaces in `meshbrep`) built (section 15.8).
 Written
 2026-10-08 against `127be03` and the reference checkouts in
 `.reference/openscad` and `.reference/BOSL2`.
@@ -900,7 +901,7 @@ Person-weeks, wide bands, in the audit's terms (its stage 4 estimate was
 | F4 | Surfaces: LSP (hover, completion, code actions), MCP recipe and docs, the apps' and /try's toggle, a user reference page (as `docs/step-export.md` is for exact export), editor colouring | 1–2 |
 | F5 (optional) | Blends between curved surfaces with no common axis (spine as the intersection of offset surfaces, a faceted pipe, or B-spline surfaces later), unequal-radius and mixed corners, automatic two-pass calls | 3–6, decided after F3 |
 | F5a | Mixed corners as two passes in one call, selection of the second pass by provenance, spindle tori, corpus families for corners, spheres, rotations, nested calls (built: 15.6) | — |
-| F5b | Exact blends between curved surfaces with no common axis: spine marching, B-spline surfaces in `meshbrep` (planned: 15.7) | 4–6 |
+| F5b | Exact blends between curved surfaces with no common axis: spine marching, B-spline surfaces in `meshbrep` (planned: 15.7; phase 1, B-spline surfaces in `meshbrep`, built: 15.8) | 4–6 |
 
 F0–F4: 9–13.5 person-weeks.
 
@@ -1654,6 +1655,161 @@ exact surfaces or are not built; a faceted pipe is not an option.
   surface's tolerance: the tool's tessellation and the exact surface
   differ by the fit's error as well as the sagitta, which the tangency
   rules (exact contact lines today) would have to allow for.
+
+### 15.8 Stage F5b phase 1 as built
+
+F5b is split in two. **Phase 1** (this section) is `meshbrep` alone: it
+can represent, reconstruct, validate, measure and write exact B-spline
+surfaces, and build the ones a blend needs. **Phase 2** is the rest of
+15.7: marching the spine from the exact surfaces, the swept-arc tool in
+`blend.rs`, its checks, and NeoSCAD's side (selection, the normal
+render, the STEP walk, reports, goldens and the corpus).
+
+- **The surface.** `Surface::BSpline(BSplineSurface)`
+  (`crates/meshbrep/src/model.rs`): degrees, a control net, clamped
+  knot vectors, and weights when rational. Evaluation with derivatives
+  to second order and point inversion are in `nurbs.rs` (Piegl and
+  Tiller's A2.3, A3.6 and A4.4; inversion as in their section 6.1): the
+  nearest of a grid of seeds (four a knot span, about 64 a direction at
+  most, made once per patch), then Newton on the squared distance,
+  falling back to Gauss–Newton where the Hessian is not positive
+  definite, each step clamped to the domain (the other parameter moving
+  alone when one is held at a bound) and halved until the distance does
+  not grow. Its implicit form, which corners and edges are solved on,
+  is the signed distance along the normal at the projection, where the
+  projection may run past a side by half the end span (at most a tenth
+  of the domain): the end span's polynomial continues the patch
+  smoothly, and a canal surface's arc continues as the same circle.
+  Patches do not wrap (no seams) and must be regular (no pole).
+- **Reconstruction.** A B-spline face uses its surface's parameters and
+  gets a parameter-space curve on every edge (`seams.rs`; planes still
+  get none). Tangency (`tangency.rs`, `Cont::Boundary`) is recognised
+  from the records, as 15.7 asked: a side of the patch's domain is a
+  contact with a neighbouring surface when, sampled four times a knot
+  span, it lies on it within the merge tolerance plus
+  `Tolerances::surface_fit` and the normals agree within a sine of
+  1e-4. The edge along a contact is that side (`edges.rs`,
+  `boundary_edge`): a polynomial side is its own row of control points,
+  exactly; a rational one is interpolated at even parameters of the side
+  until within half the fit tolerance, so that its parameter-space curve
+  on the patch is a segment. It is used only where the mesh chain lies
+  on the side (within 1e-4 of the chain's length), so a second
+  intersection of the same pair is fitted as before. Corners on a
+  contact side are solved along the side (Gauss–Newton in its
+  parameter, `reconstruct.rs`, `on_sides`), and where two sides of one
+  patch meet, at the patch's corner. Sides that cross a neighbour are
+  fitted like any other intersection (`cyl_exact` below: its rational
+  arcs on the cut planes are cubics within 1e-7). The public report
+  lists each contact side as `Contact::Boundary`.
+- **The tolerance risk of 15.7, made explicit.** `Tolerances::surface_fit`
+  (default 1e-7) is how far a patch may be from the surfaces it was made
+  to meet. It widens only the B-spline contact test; on top of the
+  tagging's sagitta it is the error a fitted blend adds, and the edges'
+  deviation, the corners' residuals and the caller's validation
+  tolerance carry it. Measured on a boss's fillet built as a canal
+  surface whose spine and contact curves were fitted within 5e-6 (33
+  stations; the curves come out 1.1e-6 off their circles, the arcs
+  3.0e-7 off the true ones;
+  `the_fit_allowance_decides_the_fitted_contact`): with no allowance
+  the contact on the boss is taken for a crossing and reconstruction
+  fails ("face 4 on a cylinder: unsupported topology"); with
+  `surface_fit = 1e-5` the model is valid at 1e-5 and its volume is
+  1.4e-10 relative off the closed form. Fitted within 1e-9 (the `canal`
+  case below) the default allowance holds it.
+- **Measure** (`measure.rs`): the inner integral of Green's theorem by
+  8-point Gauss–Legendre, two panels a knot span; the outer one along
+  each parameter-space curve, split where it crosses a knot line of the
+  patch (the integrand's derivatives jump there).
+- **STEP** (`step.rs`): `B_SPLINE_SURFACE_WITH_KNOTS`, and for a
+  rational patch the complex entity (`BOUNDED_SURFACE`,
+  `B_SPLINE_SURFACE`, `B_SPLINE_SURFACE_WITH_KNOTS`,
+  `GEOMETRIC_REPRESENTATION_ITEM`, `RATIONAL_B_SPLINE_SURFACE` with the
+  weights, `REPRESENTATION_ITEM`, `SURFACE`), formatted like every
+  other real (shortest round trip). The face's frame is not written.
+- **Construction** (`meshbrep::spline`): `Evaluator` (points,
+  derivatives, normals, projection); `interpolate_curve` and
+  `fit_curves` (cubics at even parameters, several on one knot vector,
+  doubled until within a tolerance); `interpolate_surface` and
+  `fit_surface` (tensor-product interpolation of a grid, refined per
+  direction); `canal_surface` (degree 2 across with the arcs' exact
+  weights, from foot curve to foot curve, the rows at `u = 0` and `u =
+  1` the given foot curves themselves; the middle row, the arcs' tangent
+  points and weights in homogeneous coordinates, interpolated at the
+  knots' Greville abscissae; it returns its distance from the true arcs,
+  measured at four points a span along and seven across: zero to
+  rounding for a straight spine, 7.3e-11 round a quarter circle whose
+  curves were fitted within 1e-9); `ruled_surface` (degree 1 across,
+  for chamfers).
+- **Tests** (`crates/meshbrep/tests/bspline.rs`): eight solids built
+  by hand or with Manifold, each at five tagging resolutions (4 to 24
+  segments), reconstructed, validated at 1e-6, measured against a
+  closed form, written twice to the same bytes, and read back by OCCT
+  8.0.1 (`MESHBREP_OCCT_CHECK`): all 40 files valid, one closed solid,
+  no free edges, tolerances 1e-7 after reading. Worst relative volume
+  errors over the resolutions:
+
+  | Case | Faces | Ours | OCCT |
+  |---|---|---|---|
+  | `cyl_analytic`: quarter cylinder, `Surface::Cylinder` | 1 cylinder, 4 planes | 1.0e-15 | 1.9e-13 |
+  | `cyl_exact`: the same, the side the exact rational patch | 1 B-spline, 4 planes | 2.3e-10 | 5.8e-10 |
+  | `bump`: box with a bicubic top over all of it | 1 B-spline, 5 planes | 8.2e-12 | 4.7e-12 |
+  | `drilled`: `bump` less a cylinder through the top (Manifold) | 1 B-spline, 1 cylinder, 5 planes | 6.8e-11 | 3.9e-11 |
+  | `torus_analytic`: quarter boss on a disc, r 2 fillet as `Surface::Torus` | 1 torus, 2 cylinders, 5 planes | 0 | 7.7e-14 |
+  | `torus_exact`: the fillet as the exact rational torus patch | 1 B-spline, 2 cylinders, 5 planes | 1.2e-11 | 6.7e-10 |
+  | `canal`: the fillet from `canal_surface`, curves fitted within 1e-9 | 1 B-spline, 2 cylinders, 5 planes | 9.9e-14 | 7.1e-12 |
+  | `chamfer`: the boss's chamfer from `ruled_surface` | 1 B-spline, 2 cylinders, 5 planes | 5.0e-11 | 3.7e-11 |
+
+  OCCT's column is the better of its two integrators: each misjudges
+  some patches (its adaptive integration to 1e-9 is 1.8e-8 off on
+  `cyl_exact`'s rational patch while estimating its own error at 3e-17;
+  its fixed-order one is 2.6e-8 off on `bump`'s bicubic), and the other
+  then agrees with the closed form. The exact torus patch and the
+  analytic torus measure the same to 1e-9 at every resolution
+  (`an_exact_torus_patch_measures_as_the_torus`). The two blends touch
+  the disc's top and the boss along two `Contact::Boundary` sides. The
+  B-spline faces' edges deviate from both of their surfaces by at most
+  5.1e-8, their parameter-space curves by 8.1e-8.
+- **Determinism and wasm32.** Everything is `f64` arithmetic and
+  `sqrt` in a fixed order; no platform maths. `meshbrep` builds for
+  `wasm32-unknown-unknown`, and `crates/wasm-check` gains
+  `brep-bspline-drilled-box` (a box with a bicubic top drilled through
+  it by Manifold), whose STEP text must hash the same in node as
+  natively, and does (7 faces, 15 edges, valid, 110,778 bytes).
+- **Cost.** Projection makes B-spline faces slow next to analytic ones:
+  reconstruction takes 4 to 60 ms for the cases above (`drilled`, the
+  slowest) against under 1 ms for their analytic counterparts
+  (`docs/followups.md`). A tightly fitted canal patch is large in STEP:
+  163 KB for `canal` (257 stations: doubling stopped there to get the
+  curves within 1e-9) against 13 KB for the torus.
+- **Breaking changes** (the crate's README, "Changes since 0.2.0"):
+  `Surface::BSpline` and `Contact::Boundary` are new variants, and
+  `Tolerances` has a new field. NeoSCAD's one exhaustive match
+  (`geom::fillet::curve::outward`) takes B-spline faces with the
+  fallbacks for now.
+
+**What phase 2 needs from this API**, and the rules it must follow:
+
+- Fit the spine and both contact curves on one knot vector with
+  `fit_curves` (stations of the marched spine, then each foot point
+  along its face's normal), then `canal_surface` (or `ruled_surface` for
+  a chamfer), with `u` from one contact to the other so that the
+  contacts are the patch's `u = 0` and `u = 1` sides: only sides are
+  recognised as contacts. Contact curves on planes come out exactly on
+  them; on curved faces they are only as close as the fit.
+- Extend the patch along the spine past the edge's ends, so that the
+  end planes cut it (its `v` sides then touch nothing). A patch must not
+  wrap: a closed spine (a ring) needs two patches.
+- Put the tool's mesh vertices on the patch (`Evaluator::eval` at the
+  canal's own parameters), the contact rows' vertices on the contact
+  curves exactly, as 6.3 requires of the other tools.
+- Set `Tolerances::surface_fit` to at least the fit's error (the
+  `canal_surface` error and the curves' `fit_curves` error), and
+  validate with a tolerance that allows it; the export's volume check
+  allows for it as for the sagitta.
+- Give B-spline faces a real outward normal in
+  `geom::fillet::curve::outward` (`Evaluator::project`, then
+  `Evaluator::normal`), which selection on a result with a blend will
+  need.
 
 ## 16. Test plan
 

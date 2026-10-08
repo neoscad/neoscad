@@ -251,11 +251,14 @@ pub(crate) fn outward(f: &Face, p: V) -> V {
             let tube = add(*center, mul(radial, *major_radius));
             unit(sub(p, tube))
         }
-        // Not produced by reconstruction (faceted regions become planes);
-        // a direction of no use is better than a panic.
-        Surface::LinearExtrusion { .. } | Surface::Revolution { .. } | Surface::Faceted => {
-            f.frame.z
-        }
+        // Not produced by reconstruction (faceted regions become planes),
+        // nor, yet, by NeoSCAD's tagging (B-spline blends are stage F5b's
+        // second phase, `docs/fillets.md` 15.8); a direction of no use is
+        // better than a panic.
+        Surface::LinearExtrusion { .. }
+        | Surface::Revolution { .. }
+        | Surface::Faceted
+        | Surface::BSpline(_) => f.frame.z,
     };
     if f.same_sense { n } else { mul(n, -1.0) }
 }

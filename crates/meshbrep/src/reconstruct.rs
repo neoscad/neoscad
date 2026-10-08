@@ -13,9 +13,10 @@ use crate::curve;
 use crate::edges::{self, make_edge};
 use crate::math::*;
 use crate::model::{Surface, TaggedMesh};
+use crate::nurbs::Spline;
 use crate::solve::{solve, tangent_point};
 use crate::surf::Surf;
-use crate::tangency::{Cont, contact};
+use crate::tangency::{Cont, Side, contact};
 use crate::topo::{TEdge, TFace, Topo};
 use crate::{Error, Failure};
 
@@ -31,6 +32,17 @@ pub struct Tolerances {
     /// parameter-space curve may stray from the surfaces it lies on.
     /// Default 1e-7, the precision written to the STEP file.
     pub fit: f64,
+    /// How far (absolute, model units) a [`crate::Surface::BSpline`] may
+    /// be from the surfaces it was made to meet: a blend whose spine and
+    /// contact curves were fitted touches a cylinder only to within that
+    /// fit. A side of a patch that lies on a neighbouring surface within
+    /// `merge` (scaled) plus this, with normals parallel, is their
+    /// contact: the edge between them is that side, and vertices on it are
+    /// solved along it. On top of the tessellation's sagitta, this is the
+    /// error a fitted surface adds; the residuals and validation of such a
+    /// model are only as good as it. Default 1e-7, as `fit`. It matters
+    /// only where a B-spline surface is.
+    pub surface_fit: f64,
 }
 
 impl Default for Tolerances {
@@ -38,6 +50,7 @@ impl Default for Tolerances {
         Tolerances {
             merge: 1e-9,
             fit: 1e-7,
+            surface_fit: 1e-7,
         }
     }
 }
@@ -135,7 +148,7 @@ impl Ord for Key {
 /// - cylinders by radius, cones by apex `x`, spheres by centre `x`, each
 ///   within `tol` for equal surfaces.
 struct SameIndex {
-    maps: [BTreeMap<Key, Vec<usize>>; 5],
+    maps: [BTreeMap<Key, Vec<usize>>; 6],
     plane_window: f64,
     tol: f64,
 }
@@ -156,6 +169,9 @@ impl SameIndex {
             Surf::Cone { apex, .. } => (2, apex.x, self.tol),
             Surf::Sphere { c, .. } => (3, c.x, self.tol),
             Surf::Torus { c, .. } => (4, c.x, self.tol),
+            // Equal patches have equal control points, the first within
+            // the tolerance.
+            Surf::Spline(ref s) => (5, s.public.control[0][0][0], self.tol),
         }
     }
 
@@ -458,19 +474,19 @@ pub(crate) fn build(
         if a < b {
             contacts.entry((a, b)).or_insert_with(|| {
                 use_contacts
-                    .then(|| contact(&cls.surf[a], &cls.surf[b], tol))
+                    .then(|| contact(&cls.surf[a], &cls.surf[b], tol, opts.tolerances.surface_fit))
                     .flatten()
             });
         }
     }
     let contact_of = |a: usize, b: usize| -> Option<Cont> {
         let k = if a < b { (a, b) } else { (b, a) };
-        contacts.get(&k).copied().flatten()
+        contacts.get(&k).cloned().flatten()
     };
     let tangencies: Vec<(u32, u32, Cont)> = contacts
         .iter()
         .filter_map(|(&(a, b), c)| {
-            let c = (*c)?;
+            let c = c.clone()?;
             Some((cls.input[a]?, cls.input[b]?, c))
         })
         .collect();
@@ -504,7 +520,7 @@ pub(crate) fn build(
             if ca == cb {
                 continue;
             }
-            let (a, b) = (cls.surf[ca], cls.surf[cb]);
+            let (a, b) = (&cls.surf[ca], &cls.surf[cb]);
             if a.is_plane() && b.is_plane() {
                 continue;
             }
@@ -512,11 +528,11 @@ pub(crate) fn build(
             if contact_of(ca, cb).is_some_and(|c| c.is_curve()) {
                 continue;
             }
-            let q = solve(&[a, b], pos[p]).0;
+            let q = solve(&[a.clone(), b.clone()], pos[p]).0;
             if a.grad(q).cross(b.grad(q)).len() > 0.35 {
                 continue;
             }
-            if let Some(tp) = tangent_point(&a, &b, q, scale) {
+            if let Some(tp) = tangent_point(a, b, q, scale) {
                 let dist = (tp - pos[p]).len();
                 if dist > 0.05 * scale {
                     continue;
@@ -774,7 +790,7 @@ pub(crate) fn build(
             // them by its sagitta / sin θ (a cylinder poking 0.01 mm
             // through a face meets it at 2.6°), which is the tessellation
             // and not the topology.
-            let q = solve(&[*sa, *sb], pts[pts.len() / 2]).0;
+            let q = solve(&[sa.clone(), sb.clone()], pts[pts.len() / 2]).0;
             let sin = sa.grad(q).cross(sb.grad(q)).len();
             chain_devs[i] = d * sin.clamp(0.02, 1.0);
             max_chain_dev = max_chain_dev.max(chain_devs[i]);
@@ -795,7 +811,7 @@ pub(crate) fn build(
     // 9. Loops: walk each face's boundary half-edges.
     topo.faces = (0..nf)
         .map(|f| TFace {
-            surf: cls.surf[fcls[f]],
+            surf: cls.surf[fcls[f]].clone(),
             same_sense: fvote[f] > 0.0,
             faceted: cls.faceted[fcls[f]],
             loops: Vec::new(),
@@ -950,7 +966,7 @@ fn chain_edge(
     fit_tol: f64,
 ) -> TEdge {
     let (ca, cb) = (fcls[ch.f], fcls[ch.g]);
-    let (sa, sb) = (cls.surf[ca], cls.surf[cb]);
+    let (sa, sb) = (&cls.surf[ca], &cls.surf[cb]);
     let first = ch.verts[0] as usize;
     let last = *ch.verts.last().expect("chain") as usize;
     let (v0, v1) = if ch.closed {
@@ -978,16 +994,7 @@ fn chain_edge(
             dev: 0.0,
         }
     } else {
-        make_edge(
-            &sa,
-            &sb,
-            contact_of(ca, cb),
-            p0,
-            p1,
-            &pts,
-            ch.closed,
-            fit_tol,
-        )
+        make_edge(sa, sb, contact_of(ca, cb), p0, p1, &pts, ch.closed, fit_tol)
     };
     TEdge {
         v0,
@@ -1026,13 +1033,17 @@ fn place_vertex(
     }
     let mut taken = vec![false; cl.len()];
     let mut cons: Vec<Surf> = Vec::new();
+    let mut sides: Vec<(std::sync::Arc<Spline>, Side)> = Vec::new();
     for i in 0..cl.len() {
         for j in i + 1..cl.len() {
             if taken[i] || taken[j] {
                 continue;
             }
             if let Some(c) = contact_of(cl[i], cl[j]) {
-                cons.extend(c.constraints());
+                match c.nearest_side(pos[p]) {
+                    Some((s, sd)) => sides.push((s.clone(), sd)),
+                    None => cons.extend(c.constraints()),
+                }
                 taken[i] = true;
                 taken[j] = true;
             }
@@ -1040,11 +1051,60 @@ fn place_vertex(
     }
     for (i, &c) in cl.iter().enumerate() {
         if !taken[i] {
-            cons.push(cls.surf[c]);
+            cons.push(cls.surf[c].clone());
         }
+    }
+    if let Some(q) = on_sides(&sides, &mut cons, pos[p]) {
+        return (q, residual(q));
     }
     let q = solve(&cons, pos[p]).0;
     (q, residual(q))
+}
+
+/// A vertex on a side of a B-spline patch that touches another surface
+/// (a blend's contact): solved along that side, not on the two surfaces,
+/// which touch at a grazing angle (and, where the patch was fitted, only
+/// to within the fit). Two sides of one patch meet at its corner; a side
+/// of another patch adds that patch as a surface to meet. Along the side
+/// the point is the one nearest `p0` that meets the other surfaces:
+/// Gauss–Newton in the side's parameter. `None` with no side.
+fn on_sides(sides: &[(std::sync::Arc<Spline>, Side)], cons: &mut Vec<Surf>, p0: V) -> Option<V> {
+    let (s, sd) = sides.first()?.clone();
+    for (t, td) in &sides[1..] {
+        if (std::sync::Arc::ptr_eq(t, &s) || t.same(&s, 0.0)) && td.fixed_u != sd.fixed_u {
+            let (u, v) = if sd.fixed_u {
+                (sd.at, td.at)
+            } else {
+                (td.at, sd.at)
+            };
+            return Some(s.eval(u, v));
+        }
+        cons.push(Surf::Spline(t.clone()));
+    }
+    let (u, v) = s.project(p0, false);
+    let mut t = if sd.fixed_u { v } else { u };
+    let [lo, hi] = s.iso_range(sd.fixed_u);
+    let (lo, hi) = (lo - (hi - lo), hi + (hi - lo));
+    for _ in 0..60 {
+        let (q, dq) = s.iso(sd.fixed_u, sd.at, t);
+        let (mut num, mut den) = (0.0, 0.0);
+        for c in cons.iter() {
+            let g = c.grad(q).dot(dq);
+            num += c.f(q) * g;
+            den += g * g;
+        }
+        if den <= 0.0 || den.is_nan() {
+            break;
+        }
+        let step = num / den;
+        let nt = (t - step).clamp(lo, hi);
+        let moved = ((nt - t) * dq.len()).abs();
+        t = nt;
+        if moved <= 1e-15 * (1.0 + q.len()) || moved.is_nan() {
+            break;
+        }
+    }
+    Some(s.iso(sd.fixed_u, sd.at, t).0)
 }
 
 fn reverse_chain(c: &mut Chain, twin: &[usize]) {
@@ -1381,7 +1441,7 @@ fn classes(
         .fold(0.0, f64::max);
     let mut index = SameIndex::new(tol, reach);
     for s in 0..ns {
-        let Some(e) = exact[s] else { continue };
+        let Some(e) = exact[s].clone() else { continue };
         if !used[s] {
             continue;
         }
@@ -1501,7 +1561,7 @@ fn classes(
         if joins.contains_key(&r) {
             continue;
         }
-        let plane = planes[bt].expect("plane").0;
+        let plane = planes[bt].as_ref().expect("plane").0.clone();
         for k in 0..3 {
             let w = twin[3 * t + k] / 3;
             if !is_faceted(w) && surf[of_tri[w]].same(&plane, tol) {
@@ -1538,7 +1598,7 @@ fn classes(
         let c = match joins.get(&r) {
             Some(&c) => c,
             None => {
-                surf.push(planes[bt].expect("plane").0);
+                surf.push(planes[bt].as_ref().expect("plane").0.clone());
                 faceted.push(true);
                 input.push(None);
                 surf.len() - 1
@@ -1605,7 +1665,7 @@ mod tests {
             assert_eq!(index.first_same(&classes, e, tol), scan);
             if scan.is_none() {
                 index.insert(e, classes.len());
-                classes.push(*e);
+                classes.push(e.clone());
             }
         }
         // Enough merging to mean something.

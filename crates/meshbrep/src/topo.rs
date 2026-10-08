@@ -334,11 +334,11 @@ impl Topo {
                 let (ga, gb) = (&self.faces[fa], &self.faces[fb]);
                 // The two sides as oriented surfaces: equal planes (a
                 // faceted one and an exact one count) facing opposite ways.
-                let opposite = match (ga.surf, gb.surf) {
+                let opposite = match (&ga.surf, &gb.surf) {
                     (Surf::Plane { n: na, .. }, Surf::Plane { n: nb, .. }) => {
                         let sa = if ga.same_sense { 1.0 } else { -1.0 };
                         let sb = if gb.same_sense { 1.0 } else { -1.0 };
-                        ga.surf.same(&gb.surf, tol) && na.dot(nb) * sa * sb < 0.0
+                        ga.surf.same(&gb.surf, tol) && na.dot(*nb) * sa * sb < 0.0
                     }
                     (a, b) => a == b && ga.same_sense != gb.same_sense,
                 };

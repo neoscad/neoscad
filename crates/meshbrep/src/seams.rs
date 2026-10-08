@@ -250,11 +250,11 @@ fn base_param(topo: &Topo, f: usize) -> Param {
         Surf::Plane { o, n } => {
             let p0 = verts.first().copied().unwrap_or(o);
             let origin = p0 - n * (p0 - o).dot(n);
-            Param::new(face.surf, origin, n, n.perp(), 0.0)
+            Param::new(face.surf.clone(), origin, n, n.perp(), 0.0)
         }
         Surf::Cyl { o, a, .. } => {
             let p0 = verts.first().copied().unwrap_or(o);
-            Param::new(face.surf, o + a * (p0 - o).dot(a), a, a.perp(), 0.0)
+            Param::new(face.surf.clone(), o + a * (p0 - o).dot(a), a, a.perp(), 0.0)
         }
         Surf::Cone { apex, a, k } => {
             let t = verts
@@ -262,7 +262,7 @@ fn base_param(topo: &Topo, f: usize) -> Param {
                 .map(|&p| (p - apex).dot(a))
                 .fold(0.0f64, f64::max);
             let t = if t > 0.0 { t } else { 1.0 };
-            Param::new(face.surf, apex + a * t, a, a.perp(), k * t)
+            Param::new(face.surf.clone(), apex + a * t, a, a.perp(), k * t)
         }
         Surf::Sphere { c, r } => {
             // The normal shared by most of the bounding circles, so that
@@ -305,10 +305,22 @@ fn base_param(topo: &Topo, f: usize) -> Param {
                 .copied()
                 .find(|&z| clear_of_poles(topo, face, c, r, z))
                 .unwrap_or(cands[0]);
-            Param::new(face.surf, c, z, z.perp(), 0.0)
+            Param::new(face.surf.clone(), c, z, z.perp(), 0.0)
         }
         Surf::Torus { .. } => torus_param(topo, f).0,
+        Surf::Spline(ref s) => spline_param(face.surf.clone(), s),
     }
+}
+
+/// A B-spline face's frame: its surface's own parameters, placed (for
+/// reports only) at the middle of the domain with the normal and `∂u`
+/// there.
+pub(crate) fn spline_param(surf: Surf, s: &crate::nurbs::Spline) -> Param {
+    let (du, dv) = s.domain();
+    let (u, v) = (0.5 * (du[0] + du[1]), 0.5 * (dv[0] + dv[1]));
+    let d = s.ders(u, v, 1);
+    let z = d[1][0].cross(d[0][1]).norm();
+    Param::new(surf, d[0][0], z, d[1][0], 0.0)
 }
 
 /// Whether no boundary of `face` (on the sphere `c`, `r`) comes near the
@@ -391,7 +403,7 @@ fn torus_param(topo: &Topo, f: usize) -> (Param, bool) {
         unreachable!("a torus face")
     };
     let xr = a.perp();
-    let reference = Param::new(face.surf, c, a, xr, 0.0);
+    let reference = Param::new(face.surf.clone(), c, a, xr, 0.0);
     let angles = |p: V| {
         let d = p - c;
         let h = d.dot(reference.z);
@@ -426,7 +438,7 @@ fn torus_param(topo: &Topo, f: usize) -> (Param, bool) {
         Some(g) => reference.x * cos(g + PI) + reference.y * sin(g + PI),
         None => xr,
     };
-    let mut p = Param::new(face.surf, c, a, x, 0.0);
+    let mut p = Param::new(face.surf.clone(), c, a, x, 0.0);
     p.t0 = gt.map_or(0.0, |g| g + PI);
     p.swap = gp.is_some() && gt.is_none();
     (p, gp.is_none() && gt.is_none())
@@ -926,7 +938,7 @@ fn pcurve(
         } else {
             bspline::interpolate_at(&uv, &ts)
         };
-        let dev = match other {
+        let dev = match &other {
             Some(o) => {
                 let m = (4 * uv.len()).min(16384);
                 let [t0, t1] = [bs.knots[0], *bs.knots.last().expect("knots")];
@@ -972,7 +984,7 @@ fn pcurves(topo: &mut Topo, scale: f64, fit_tol: f64) -> f64 {
     let tol = 1e-9 * scale;
     let mut max_dev = 0.0f64;
     for f in 0..topo.faces.len() {
-        let param = topo.faces[f].param.expect("param");
+        let param = topo.faces[f].param.clone().expect("param");
         let s = if param.sense(topo.faces[f].same_sense) {
             1.0
         } else {
@@ -982,7 +994,7 @@ fn pcurves(topo: &mut Topo, scale: f64, fit_tol: f64) -> f64 {
         let mut all_pc = Vec::with_capacity(loops.len());
         let mut outer = Vec::with_capacity(loops.len());
         for lp in &loops {
-            if !param.periodic() {
+            if !param.has_pcurves() {
                 let l = lift_loop(topo, &param, lp, None, tol);
                 outer.push(s * area(&l) > 0.0);
                 all_pc.push(vec![None; lp.len()]);
@@ -1010,8 +1022,11 @@ fn pcurves(topo: &mut Topo, scale: f64, fit_tol: f64) -> f64 {
                 let lo = pts.iter().copied().fold(f64::INFINITY, f64::min);
                 let hi = pts.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 // Shift by whole turns so the loop sits inside [0, 2π]
-                // (when it spans a full turn, from 0).
-                let k = if hi - lo >= TAU - 1e-9 {
+                // (when it spans a full turn, from 0). A B-spline's `u` is
+                // its own and is never shifted.
+                let k = if !param.periodic() {
+                    0.0
+                } else if hi - lo >= TAU - 1e-9 {
                     (lo / TAU).round()
                 } else {
                     ((mean - PI) / TAU).round()
@@ -1041,7 +1056,7 @@ fn pcurves(topo: &mut Topo, scale: f64, fit_tol: f64) -> f64 {
                 let other = {
                     let [a, b] = ed.faces;
                     let o = if a == f { b } else { a };
-                    (o != f).then(|| topo.faces[o].surf)
+                    (o != f).then(|| topo.faces[o].surf.clone())
                 };
                 let (bs, end_u, dev) = pcurve(topo, &param, other, e, fwd, cur_u, tol, fit_tol);
                 max_dev = max_dev.max(dev);

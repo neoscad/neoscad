@@ -2766,8 +2766,34 @@ surfaces with no common axis):
   query toggles either.
 - **CHANGELOG**: fillets (F0 to F5a) are not in `CHANGELOG.md` yet;
   the entry goes with the release that ships them. `meshbrep`'s changes
-  since 0.2.0 (spindle tori, the corner margin) are listed in its
-  README for its next release.
+  since 0.2.0 (spindle tori, the corner margin, B-spline surfaces) are
+  listed in its README for its next release.
+- **F5b phase 2** (`docs/fillets.md` 15.7, and what 15.8 says it needs
+  from phase 1's API): spine marching, the swept-arc and ruled tools in
+  `meshbrep::blend`, their checks, and NeoSCAD's side.
+- **B-spline faces are slow to reconstruct** (F5b phase 1): every
+  implicit evaluation projects onto the patch (a seed search and Newton),
+  and corner solving and edge fitting evaluate thousands of times, so
+  the B-spline cases of `crates/meshbrep/tests/bspline.rs` take 4 to
+  60 ms against under 1 ms for their analytic counterparts. Warm starts
+  (the previous parameters along a chain), fewer, coarser seeds for
+  small patches, or caching f and its gradient per point would cut it
+  before a model has dozens of blends.
+- **A B-spline patch's crossing sides are fitted**, not taken as its
+  sides (F5b phase 1): where a side lies on a neighbour that it crosses
+  (a rational quarter cylinder cut by the planes its arcs lie in), the
+  edge is a cubic within 1e-7 of the intersection, so `cyl_exact`
+  measures 2.3e-10 off its closed form where the analytic cylinder is
+  exact. Using the side, as for contacts, would make it exact.
+- **Closed and degenerate B-spline surfaces are not supported** (F5b
+  phase 1): no seams on a patch that wraps, and no pole (a collapsed
+  side, such as a sphere written as a B-spline). Phase 2's blends do
+  not need them (a ring's blend can be two patches); importing another
+  tool's STEP would.
+- **A tightly fitted canal patch is large in STEP** (F5b phase 1): the
+  `canal` test case fitted within 1e-9 writes 163 KB against the
+  torus's 13 KB. Fitting the spine to the export tolerance rather than
+  tighter, or knot removal after fitting, would shrink it.
 
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.

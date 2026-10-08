@@ -64,6 +64,12 @@ pub enum Surface {
         /// The radius of the tube.
         minor_radius: f64,
     },
+    /// A clamped B-spline surface patch, rational when it has weights: the
+    /// exact form of a surface with no closed form (a blend between two
+    /// curved faces), or a fit to one within a stated tolerance. Faces on
+    /// it lie inside its parameter domain, which does not wrap: it has no
+    /// seams. See [`BSplineSurface`].
+    BSpline(BSplineSurface),
     /// The surface swept by `profile` moving along `direction`. Declared
     /// for extruded free-form 2D curves (text outlines); not accepted yet.
     LinearExtrusion {
@@ -99,6 +105,7 @@ impl Surface {
             Surface::Cone { .. } => "cone",
             Surface::Sphere { .. } => "sphere",
             Surface::Torus { .. } => "torus",
+            Surface::BSpline(_) => "bspline",
             Surface::LinearExtrusion { .. } => "linear extrusion",
             Surface::Revolution { .. } => "revolution",
             Surface::Faceted => "faceted",
@@ -169,6 +176,38 @@ pub struct BSpline<const D: usize> {
     /// The full knot vector, `control.len() + degree + 1` long, with the
     /// end knots repeated `degree + 1` times.
     pub knots: Vec<f64>,
+}
+
+/// A clamped B-spline surface, rational when `weights` is given: STEP's
+/// `B_SPLINE_SURFACE_WITH_KNOTS` (with `RATIONAL_B_SPLINE_SURFACE`).
+///
+/// The point at `(u, v)` is `Σᵢⱼ Nᵢ(u) Nⱼ(v) wᵢⱼ Pᵢⱼ / Σᵢⱼ Nᵢ(u) Nⱼ(v) wᵢⱼ`,
+/// with `i` along `u` (the outer index of `control`) and `j` along `v`.
+/// Both knot vectors are clamped (each end knot repeated `degree + 1`
+/// times), so the patch's four boundaries are its outer rows and columns
+/// of control points, and its domain is
+/// `[knots_u[degree_u], knots_u[len - degree_u - 1]]` by the same in `v`.
+/// Its natural normal is `∂u × ∂v`. The patch must be regular (that
+/// cross product non-zero everywhere, so no collapsed edge such as a
+/// sphere's pole), and degrees are 1 to 7.
+///
+/// [`crate::spline`] evaluates, projects onto, fits and builds them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BSplineSurface {
+    /// The degree along `u`.
+    pub degree_u: u32,
+    /// The degree along `v`.
+    pub degree_v: u32,
+    /// The control net: `control[i][j]`, every row the same length.
+    pub control: Vec<Vec<[f64; 3]>>,
+    /// Positive weights in the same layout as `control`; `None` for a
+    /// non-rational surface (all weights 1).
+    pub weights: Option<Vec<Vec<f64>>>,
+    /// The knots along `u`: `control.len() + degree_u + 1` of them,
+    /// non-decreasing.
+    pub knots_u: Vec<f64>,
+    /// The knots along `v`: `control[0].len() + degree_v + 1` of them.
+    pub knots_v: Vec<f64>,
 }
 
 /// The input: a closed, oriented triangle mesh whose triangles each name
@@ -375,5 +414,17 @@ pub enum Contact {
     Point {
         /// The point.
         point: [f64; 3],
+    },
+    /// A boundary of a B-spline surface (an isoparametric curve at the
+    /// end of its domain) along which it touches the other surface: a
+    /// blend's contact with the face it rolls on.
+    Boundary {
+        /// The B-spline surface, as an index into the input's table (one
+        /// of [`Tangency::surfaces`]).
+        surface: u32,
+        /// Whether the curve is at a fixed `u` (else at a fixed `v`).
+        fixed_u: bool,
+        /// That fixed parameter: one end of the surface's domain.
+        parameter: f64,
     },
 }

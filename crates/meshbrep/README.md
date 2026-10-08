@@ -7,8 +7,8 @@ as STEP AP214. Pure Rust, no `unsafe`, deterministic, and it builds for
 
 A mesh kernel such as [Manifold](https://github.com/elalish/manifold) does
 booleans robustly, but only on triangles. Tag every input triangle with the
-plane, cylinder, cone, sphere or torus it approximates, and the tags survive the
-booleans: Manifold's `MeshGL::faceID` carries them through. `meshbrep`
+plane, cylinder, cone, sphere, torus or B-spline surface it approximates, and
+the tags survive the booleans: Manifold's `MeshGL::faceID` carries them through. `meshbrep`
 turns the result back into exact geometry:
 
 - **Faces** are connected regions on one surface. Equal surfaces from
@@ -24,7 +24,9 @@ turns the result back into exact geometry:
   coaxial plane, cylinder, cone, sphere or torus (profiles of one
   `rotate_extrude`), a cylinder along its tube, and a plane touching a
   cone along a generator (one profile extruded and revolved) are
-  recognised too.
+  recognised too, and so is a B-spline patch touching another surface
+  along a side of its domain (a blend along the face it rolls on): that
+  side is the edge, and corners on it are solved along it.
 - **Slivers the mesh leaves** where flush faces differ in the last bits,
   or surfaces touch, are cleaned up: mesh edges shorter than the
   touching tolerance (`max(fit, 1e-9 × size)`) are collapsed and needle
@@ -91,6 +93,32 @@ and `Revolution` are declared for extruded and revolved free-form
 curves (text outlines), but `reconstruct` does not accept them yet
 (`Error::Unsupported`).
 
+`Surface::BSpline` is a clamped B-spline patch (`BSplineSurface`:
+degrees, control net, knot vectors, and weights when it is rational):
+the exact form of a surface with no closed form, such as a blend
+between two curved faces. Faces on it lie inside its domain, which does
+not wrap (no seams; a closed B-spline surface is not supported), and it
+must be regular (no collapsed side such as a sphere's pole). Its points
+are projected onto it by Newton's method from the nearest of a grid of
+seeds; its implicit form, for solving corners and edges, is the signed
+distance along the normal at that projection, continued a little past
+the patch's sides by its end spans. `write_step` writes it as
+`B_SPLINE_SURFACE_WITH_KNOTS`, or for a rational one as the complex
+entity with `RATIONAL_B_SPLINE_SURFACE`. A patch that was fitted (a
+blend whose spine and contact curves were) meets its neighbours only to
+within the fit: `Tolerances::surface_fit` (default 1e-7) is how far its
+side may be from the surface it touches and still be their contact, and
+the edge's deviation, the corners' residuals and the validator's
+tolerance must allow for it on top of the tagging's sagitta.
+
+The `spline` module evaluates and projects onto them (`Evaluator`), and
+builds what blends need: cubic curves fitted on one knot vector
+(`fit_curves`: a spine and its two contact curves), a cubic surface
+through a grid or fitted to a function (`interpolate_surface`,
+`fit_surface`), the rational canal surface a ball sweeps between two
+contact curves with exact circular arcs across (`canal_surface`), and
+the ruled surface between two curves (`ruled_surface`, a chamfer).
+
 A torus face can wrap around its axis, around its tube, or both (a
 whole ring, perhaps with holes). Its frame puts each angle's cut where
 the face's triangles leave a gap, and adds a seam where they leave none:
@@ -127,11 +155,14 @@ field public.
 - An `Edge` has a `Curve` and a parameter range.
 - A `Face` has its `Surface`, a `Frame` (the parametrisation written to
   STEP), its sense, and `Loop`s of `Coedge`s, each with a parameter-space
-  `BSpline<2>` on curved faces.
+  `BSpline<2>` on curved faces. A B-spline face's parameters are its
+  surface's own; its frame is only a placement (a point of the patch,
+  its normal and `∂u`), not written.
 - A `Shell` is closed. Cavities are marked `void` and written as
   `BREP_WITH_VOIDS`.
 - The `Report` holds the residuals, the input mesh's genus, the tangencies
-  found, and notes.
+  found (`Contact::Boundary` for a B-spline patch's side, one per side),
+  and notes.
 
 `write_step` writes millimetres, with fixed header names and date unless
 the caller sets them in `StepOptions`. The same B-rep gives the same bytes
@@ -166,7 +197,12 @@ The tests reconstruct 28 models: the exact-geometry audit's 15 boolean
 cases, common idioms, faceted fallbacks, CSG fillets, a void, a lone
 sphere and a pointed cone. Each runs at six tagging resolutions and must
 be valid, match its closed-form volume to 1e-6, and write the same bytes
-twice. `oracle/` builds an OCCT read-back checker for an optional test
+twice. `tests/bspline.rs` does the same for solids with a B-spline face
+(a quarter cylinder as the exact rational patch, a box with a bicubic
+top, that box drilled through the top by Manifold, a boss's fillet as
+the exact rational torus patch and as a fitted canal surface, its
+chamfer as a ruled surface) at five resolutions, to the closed-form
+volume within 1e-9 (1e-8 where the surface was fitted). `oracle/` builds an OCCT read-back checker for an optional test
 (`MESHBREP_OCCT_CHECK`); OCCT is a test tool only, never a dependency.
 
 ## Blend tools
@@ -215,6 +251,18 @@ with its outline) closes.
 - `blend::tools`: the edges of a sphere corner take the least margin of
   every tangent chain one of them belongs to (before, a corner edge
   chained to an arc could make an open tool).
+- B-spline surfaces: `Surface::BSpline` and `BSplineSurface` (clamped,
+  optionally rational), reconstructed, validated, measured and written
+  to STEP, and the `spline` module (evaluation and projection, curve and
+  surface fitting, canal and ruled surfaces). Breaking for a caller
+  that matches `Surface` exhaustively.
+- `Contact::Boundary`: a B-spline patch touching another surface along
+  a side of its domain, in `Report::tangencies` and `find_tangencies`
+  (one entry per side). Breaking for a caller that matches `Contact`
+  exhaustively.
+- `Tolerances::surface_fit` (default 1e-7): how far a B-spline patch's
+  side may be from the surface it touches. Breaking for a caller that
+  builds `Tolerances` with a struct literal (use `..Default::default()`).
 
 ## Licence
 

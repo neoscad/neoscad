@@ -16,6 +16,7 @@ use crate::bspline;
 use crate::curve::CurveEval;
 use crate::math::*;
 use crate::model::{BSpline, Brep, Face};
+use crate::nurbs::Spline;
 use crate::surf::{Param, Surf};
 
 /// Volume and area of a B-rep.
@@ -29,6 +30,11 @@ pub struct Measure {
 
 pub(crate) fn face_param(f: &Face) -> Option<Param> {
     let s = Surf::from_public(&f.surface)?;
+    // A malformed B-spline record cannot be evaluated (its arrays do not
+    // fit its degrees): its face is unsupported rather than a panic.
+    if matches!(s, Surf::Spline(_)) && !s.well_formed() {
+        return None;
+    }
     Some(Param::new(
         s,
         V::from(f.frame.origin),
@@ -46,6 +52,9 @@ pub(crate) fn face_param(f: &Face) -> Option<Param> {
 /// |σ_u × σ_v| does not depend on `u`. So three evaluations give the
 /// integral in closed form, exactly.
 fn inner(p: &Param, u: f64, w: f64) -> (f64, f64) {
+    if let Some(s) = p.spline() {
+        return spline_inner(s, u, w);
+    }
     let f = |s: f64| {
         let (su, sv) = p.derivs(s, w);
         let n = su.cross(sv);
@@ -58,6 +67,71 @@ fn inner(p: &Param, u: f64, w: f64) -> (f64, f64) {
     let b = 0.5 * (f0 - fpi);
     let c = fh - a;
     (a * u + b * sin(u) + c * (1.0 - cos(u)), j * u)
+}
+
+/// [`inner`] on a B-spline, whose integrand has no closed form: from the
+/// start of its `u` domain to `u`, by Gauss–Legendre on each knot span
+/// the interval crosses (two panels a span), so that no panel straddles a
+/// knot, where the integrand's derivatives jump.
+fn spline_inner(s: &Spline, u: f64, w: f64) -> (f64, f64) {
+    let lo = s.domain().0[0];
+    let (a, b, sign) = if u >= lo { (lo, u, 1.0) } else { (u, lo, -1.0) };
+    let mut cuts = vec![a];
+    cuts.extend(s.breaks(true).into_iter().filter(|&k| k > a && k < b));
+    cuts.push(b);
+    let (mut vol, mut area) = (0.0, 0.0);
+    for c in cuts.windows(2) {
+        let h = 0.5 * (c[1] - c[0]);
+        for k in 0..2 {
+            let a0 = c[0] + k as f64 * h;
+            for &(x, wt) in &GL8 {
+                let t = a0 + 0.5 * h * (x + 1.0);
+                let d = s.ders(t, w, 1);
+                let n = d[1][0].cross(d[0][1]);
+                vol += 0.5 * h * wt * d[0][0].dot(n) / 3.0;
+                area += 0.5 * h * wt * n.len();
+            }
+        }
+    }
+    (sign * vol, sign * area)
+}
+
+/// Where a parameter-space curve on a B-spline crosses the surface's
+/// interior knot lines between `a` and `b`, sorted: the outer quadrature
+/// splits there, since its integrand's derivatives jump across them.
+fn knot_crossings(s: &Spline, pc: &BSpline<2>, a: f64, b: f64) -> Vec<f64> {
+    const N: usize = 16;
+    let lines = [s.breaks(true), s.breaks(false)];
+    let at = |t: f64| bspline::eval(pc, t);
+    let mut out = Vec::new();
+    for k in 0..N {
+        let (t0, t1) = (
+            a + (b - a) * k as f64 / N as f64,
+            a + (b - a) * (k + 1) as f64 / N as f64,
+        );
+        let (q0, q1) = (at(t0), at(t1));
+        for (d, ks) in lines.iter().enumerate() {
+            for &x in ks {
+                if (q0[d] - x) * (q1[d] - x) >= 0.0 {
+                    continue;
+                }
+                let (mut lo, mut hi) = (t0, t1);
+                let side = q0[d] < x;
+                for _ in 0..60 {
+                    let m = 0.5 * (lo + hi);
+                    if (at(m)[d] < x) == side {
+                        lo = m;
+                    } else {
+                        hi = m;
+                    }
+                }
+                out.push(0.5 * (lo + hi));
+            }
+        }
+    }
+    out.sort_by(f64::total_cmp);
+    out.dedup();
+    out
 }
 
 /// The same integral by quadrature, for checking the closed form.
@@ -109,17 +183,25 @@ fn pcurve_integral(p: &Param, pc: &BSpline<2>) -> (f64, f64) {
     let d = bspline::derivative(pc);
     let (mut vol, mut area) = (0.0, 0.0);
     for (a, b) in bspline::spans(pc) {
-        let q0 = bspline::eval(pc, a);
-        let q1 = bspline::eval(pc, b);
-        let len = ((q1[0] - q0[0]).powi(2) + (q1[1] - q0[1]).powi(2)).sqrt();
-        let pieces = ((len / 0.5).ceil() as usize).clamp(1, 64);
-        let (v, ar) = along(p, a, b, pieces, &|t| {
-            let q = bspline::eval(pc, t);
-            let dq = bspline::eval(&d, t);
-            (q[0], q[1], dq[1])
-        });
-        vol += v;
-        area += ar;
+        let mut cuts = vec![a];
+        if let Some(s) = p.spline() {
+            cuts.extend(knot_crossings(s, pc, a, b));
+        }
+        cuts.push(b);
+        for c in cuts.windows(2) {
+            let (a, b) = (c[0], c[1]);
+            let q0 = bspline::eval(pc, a);
+            let q1 = bspline::eval(pc, b);
+            let len = ((q1[0] - q0[0]).powi(2) + (q1[1] - q0[1]).powi(2)).sqrt();
+            let pieces = ((len / 0.5).ceil() as usize).clamp(1, 64);
+            let (v, ar) = along(p, a, b, pieces, &|t| {
+                let q = bspline::eval(pc, t);
+                let dq = bspline::eval(&d, t);
+                (q[0], q[1], dq[1])
+            });
+            vol += v;
+            area += ar;
+        }
     }
     (vol, area)
 }
@@ -135,7 +217,7 @@ pub(crate) fn face_integrals(b: &Brep, fi: usize) -> Result<(f64, f64), Error> {
             let e = &b.edges[c.edge as usize];
             let sign = if c.forward { 1.0 } else { -1.0 };
             let (v, a) =
-                if let (Surf::Plane { .. }, crate::model::Curve::Line { .. }) = (p.s, &e.curve) {
+                if let (Surf::Plane { .. }, crate::model::Curve::Line { .. }) = (&p.s, &e.curve) {
                     // A straight edge on a plane: the integrand is constant
                     // there (σ · n = o · n), so the loop integral is the
                     // trapezoid's, exactly. Faceted models are thousands of
@@ -148,7 +230,7 @@ pub(crate) fn face_integrals(b: &Brep, fi: usize) -> Result<(f64, f64), Error> {
                     let ((u0, w0), (u1, w1)) = (uv(e.range[0]), uv(e.range[1]));
                     let g = 0.5 * (u0 + u1) * (w1 - w0);
                     (p.o.dot(p.x.cross(p.y)) / 3.0 * g, g)
-                } else if p.periodic() {
+                } else if p.has_pcurves() {
                     let pc = c.pcurve.as_ref().ok_or_else(|| {
                         Error::Reconstruction(format!(
                             "face {fi}: an edge has no parameter-space curve"
@@ -248,7 +330,7 @@ mod tests {
             },
         ];
         for s in surfs {
-            let p = Param::new(s, o + v(0.2, 0.1, -0.3), z, x, 1.2);
+            let p = Param::new(s.clone(), o + v(0.2, 0.1, -0.3), z, x, 1.2);
             for &(u, w) in &[(0.3, 0.2), (2.0, -0.5), (6.2, 1.1), (-1.0, 0.4)] {
                 let (a, b) = (inner(&p, u, w), inner_quadrature(&p, u, w));
                 assert!(

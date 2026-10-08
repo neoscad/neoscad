@@ -2,12 +2,16 @@
 //! (signed distance and gradient), equality, and the parametrisation of a
 //! face's surface in a [`Param`] frame.
 
+use std::sync::Arc;
+
 use crate::math::*;
 use crate::model::{Frame, Surface};
+use crate::nurbs::Spline;
 
 /// An exact surface. The natural normal points away from the axis or
-/// centre (cylinder, cone, sphere) or along `n` (plane).
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// centre (cylinder, cone, sphere) or along `n` (plane), and is `∂u × ∂v`
+/// on a B-spline.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Surf {
     Plane {
         o: V,
@@ -37,6 +41,11 @@ pub(crate) enum Surf {
         big: f64,
         r: f64,
     },
+    /// A B-spline patch. Its implicit form is the signed distance along
+    /// the normal at a point's projection, the projection allowed a little
+    /// past the patch's boundary ([`Spline::project`]). Shared, because a
+    /// surface is cloned wherever it is used.
+    Spline(Arc<Spline>),
 }
 
 /// The point of a torus's tube circle (the circle of radius `big` about
@@ -87,12 +96,13 @@ impl Surf {
                 big: *major_radius,
                 r: *minor_radius,
             },
+            Surface::BSpline(b) => Surf::Spline(Arc::new(Spline::new(b))),
             _ => return None,
         })
     }
 
-    pub fn to_public(self) -> Surface {
-        match self {
+    pub fn to_public(&self) -> Surface {
+        match *self {
             Surf::Plane { o, n } => Surface::Plane {
                 origin: o.arr(),
                 normal: n.arr(),
@@ -117,6 +127,7 @@ impl Surf {
                 major_radius: big,
                 minor_radius: r,
             },
+            Surf::Spline(ref s) => Surface::BSpline(s.public.clone()),
         }
     }
 
@@ -149,6 +160,7 @@ impl Surf {
                     && big.is_finite()
                     && big > 0.0
             }
+            Surf::Spline(ref s) => s.valid,
         }
     }
 
@@ -160,6 +172,7 @@ impl Surf {
             Surf::Cone { .. } => 2,
             Surf::Sphere { .. } => 3,
             Surf::Torus { .. } => 4,
+            Surf::Spline(_) => 5,
         }
     }
 
@@ -181,6 +194,7 @@ impl Surf {
             }
             Surf::Sphere { c, r } => (p - c).len() - r,
             Surf::Torus { c, a, big, r } => (p - tube_centre(c, a, big, p)).len() - r,
+            Surf::Spline(ref s) => s.f(p),
         }
     }
 
@@ -194,6 +208,7 @@ impl Surf {
             }
             Surf::Sphere { c, .. } => (p - c).norm(),
             Surf::Torus { c, a, big, .. } => (p - tube_centre(c, a, big, p)).norm(),
+            Surf::Spline(ref s) => s.grad(p),
         }
     }
 
@@ -217,6 +232,7 @@ impl Surf {
             Surf::Plane { o, .. } | Surf::Cyl { o, .. } => o,
             Surf::Cone { apex, .. } => apex,
             Surf::Sphere { c, .. } | Surf::Torus { c, .. } => c,
+            Surf::Spline(ref s) => V::from(s.public.control[0][0]),
         }
     }
 
@@ -225,7 +241,7 @@ impl Surf {
     /// below).
     pub fn same(&self, o: &Surf, tol: f64) -> bool {
         let line_dist = |p: V, q: V, a: V| (q - p).reject(a).len();
-        match (*self, *o) {
+        match (self.clone(), o.clone()) {
             (Surf::Plane { o: o1, n: n1 }, Surf::Plane { o: o2, n: n2 }) => {
                 n1.dot(n2).abs() > 1.0 - 1e-12 && (o2 - o1).dot(n1).abs() < tol
             }
@@ -279,13 +295,16 @@ impl Surf {
                     && (b1 - b2).abs() < tol
                     && (r1 - r2).abs() < tol
             }
+            (Surf::Spline(a), Surf::Spline(b)) => Arc::ptr_eq(&a, &b) || a.same(&b, tol),
             _ => false,
         }
     }
 }
 
-/// A face's surface with its parametrisation frame.
-#[derive(Clone, Copy, Debug)]
+/// A face's surface with its parametrisation frame. A B-spline face uses
+/// its surface's own parameters; its frame (a point of the patch, its
+/// normal and `∂u` there) is only a placement for reports.
+#[derive(Clone, Debug)]
 pub(crate) struct Param {
     pub s: Surf,
     pub o: V,
@@ -328,8 +347,11 @@ impl Param {
         if self.swap {
             return Param {
                 t0: self.t0 + u0,
-                ..*self
+                ..self.clone()
             };
+        }
+        if !self.periodic() {
+            return self.clone();
         }
         // Through `new`, as the frame was always made, so the bits (and
         // the files) are those of before tori.
@@ -337,7 +359,7 @@ impl Param {
         Param {
             swap: self.swap,
             t0: self.t0,
-            ..Param::new(self.s, self.o, self.z, x, self.r0)
+            ..Param::new(self.s.clone(), self.o, self.z, x, self.r0)
         }
     }
 
@@ -399,7 +421,21 @@ impl Param {
 
     /// Whether `u` is an angle (periodic).
     pub fn periodic(&self) -> bool {
+        !matches!(self.s, Surf::Plane { .. } | Surf::Spline(_))
+    }
+
+    /// Whether the face's edges get parameter-space curves: every surface
+    /// but a plane, whose coordinates are the frame's lengths.
+    pub fn has_pcurves(&self) -> bool {
         !self.s.is_plane()
+    }
+
+    /// The B-spline patch of a B-spline face.
+    pub fn spline(&self) -> Option<&Spline> {
+        match &self.s {
+            Surf::Spline(s) => Some(s),
+            _ => None,
+        }
     }
 
     fn radius(&self) -> f64 {
@@ -413,7 +449,7 @@ impl Param {
     /// its internal `u`, the tube angle from `t0`).
     pub fn angle(&self, p: V) -> f64 {
         match self.s {
-            Surf::Torus { .. } => self.uv(p).0,
+            Surf::Torus { .. } | Surf::Spline(_) => self.uv(p).0,
             _ => self.angle_about_z(p),
         }
     }
@@ -439,6 +475,7 @@ impl Param {
                     (phi, self.t0 + rel)
                 }
             }
+            Surf::Spline(ref s) => s.project(p, false),
         }
     }
 
@@ -456,6 +493,7 @@ impl Param {
                     self.torus_eval(u, w)
                 }
             }
+            Surf::Spline(ref s) => s.eval(u, w),
         }
     }
 
@@ -479,6 +517,10 @@ impl Param {
                 } else {
                     self.torus_derivs(u, w)
                 }
+            }
+            Surf::Spline(ref s) => {
+                let d = s.ders(u, w, 1);
+                (d[1][0], d[0][1])
             }
         }
     }

@@ -8,22 +8,63 @@
 //! polygon vertices fall. Knowing the contact set exactly lets
 //! reconstruction put vertices on it and use it as the edge's curve.
 
+use std::sync::Arc;
+
 use crate::math::*;
 use crate::model::{Contact, Surface, Tangency};
+use crate::nurbs::Spline;
 use crate::surf::Surf;
 
+/// How far apart (the sine of the angle) the normals of a B-spline
+/// patch and another surface may be along a boundary of the patch that
+/// lies on the other surface, for the two to count as tangent there. A
+/// blend whose spine and contacts are fitted has normals off by about the
+/// fit's error over its point spacing (1e-7 over a few tenths of a
+/// millimetre for the default tolerance); a boundary that crosses the
+/// other surface at a smaller angle still has the boundary as their
+/// intersection, so treating it as a contact is harmless.
+const BOUNDARY_ANGLE: f64 = 1e-4;
+
+/// A side of a B-spline patch's domain: fixed `u` (else fixed `v`) at
+/// `at`, an end of the domain.
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Side {
+    pub fixed_u: bool,
+    pub at: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Cont {
-    Line { p: V, d: V },
-    Circle { c: V, n: V, r: f64 },
-    Point { p: V },
+    Line {
+        p: V,
+        d: V,
+    },
+    Circle {
+        c: V,
+        n: V,
+        r: f64,
+    },
+    Point {
+        p: V,
+    },
+    /// Boundaries of a B-spline patch along which it touches the other
+    /// surface (one or more sides of its domain). `first`: the patch is
+    /// the first of the pair [`contact`] was given.
+    Boundary {
+        s: Arc<Spline>,
+        sides: Vec<Side>,
+        first: bool,
+    },
 }
 
 impl Cont {
     /// Surfaces whose common points are exactly the contact set, for
-    /// solving vertices on it.
+    /// solving vertices on it. A boundary contact has no such pair: its
+    /// vertices are solved along the boundary curve instead
+    /// (`reconstruct::place_vertex`), and this gives only the patch.
     pub fn constraints(&self) -> Vec<Surf> {
         match *self {
+            Cont::Boundary { ref s, .. } => vec![Surf::Spline(s.clone())],
             Cont::Line { p, d } => {
                 let n1 = d.perp();
                 vec![
@@ -58,8 +99,21 @@ impl Cont {
         !matches!(self, Cont::Point { .. })
     }
 
-    pub fn to_public(self) -> Contact {
-        match self {
+    /// The published contacts, `a` and `b` the input indices of the pair
+    /// in the order [`contact`] was given them (one per side for a
+    /// boundary contact).
+    pub fn to_public(&self, a: u32, b: u32) -> Vec<Contact> {
+        if let Cont::Boundary { sides, first, .. } = self {
+            return sides
+                .iter()
+                .map(|sd| Contact::Boundary {
+                    surface: if *first { a } else { b },
+                    fixed_u: sd.fixed_u,
+                    parameter: sd.at,
+                })
+                .collect();
+        }
+        vec![match *self {
             Cont::Line { p, d } => Contact::Line {
                 point: p.arr(),
                 direction: d.arr(),
@@ -70,8 +124,70 @@ impl Cont {
                 radius: r,
             },
             Cont::Point { p } => Contact::Point { point: p.arr() },
+            Cont::Boundary { .. } => unreachable!("handled above"),
+        }]
+    }
+
+    /// The side of a boundary contact nearest `p`, and its patch.
+    pub fn nearest_side(&self, p: V) -> Option<(&Arc<Spline>, Side)> {
+        let Cont::Boundary { s, sides, .. } = self else {
+            return None;
+        };
+        let (u, v) = s.project(p, false);
+        let mut best: Option<(f64, Side)> = None;
+        for &sd in sides {
+            let q = if sd.fixed_u {
+                s.eval(sd.at, v)
+            } else {
+                s.eval(u, sd.at)
+            };
+            let d = (q - p).len();
+            if best.is_none_or(|b| d < b.0) {
+                best = Some((d, sd));
+            }
+        }
+        best.map(|b| (s, b.1))
+    }
+}
+
+/// The sides of patch `s` that lie on `other` within `tol` with normals
+/// parallel within [`BOUNDARY_ANGLE`]: sampled at four points a knot span
+/// (at most 64 and the ends) along each side.
+fn boundary_contact(s: &Arc<Spline>, other: &Surf, tol: f64, first: bool) -> Option<Cont> {
+    let (du, dv) = s.domain();
+    let mut sides = Vec::new();
+    for sd in [
+        Side {
+            fixed_u: true,
+            at: du[0],
+        },
+        Side {
+            fixed_u: true,
+            at: du[1],
+        },
+        Side {
+            fixed_u: false,
+            at: dv[0],
+        },
+        Side {
+            fixed_u: false,
+            at: dv[1],
+        },
+    ] {
+        let on = s.iso_samples(sd.fixed_u).into_iter().all(|t| {
+            let (u, v) = if sd.fixed_u { (sd.at, t) } else { (t, sd.at) };
+            let p = s.eval(u, v);
+            other.f(p).abs() <= tol && s.normal(u, v).cross(other.grad(p)).len() <= BOUNDARY_ANGLE
+        });
+        if on {
+            sides.push(sd);
         }
     }
+    (!sides.is_empty()).then(|| Cont::Boundary {
+        s: s.clone(),
+        sides,
+        first,
+    })
 }
 
 /// A surface of revolution's profile in the half-plane of an axis
@@ -164,7 +280,27 @@ fn coaxial_contact(a: &Surf, b: &Surf, tol: f64) -> Option<Cont> {
 /// The contact set of two surfaces that are tangent, within `tol` for
 /// lengths. `None` for surfaces that cross, miss or coincide, and for the
 /// pairs not handled (cone–plane along a generator, cone–cylinder).
-pub(crate) fn contact(a: &Surf, b: &Surf, tol: f64) -> Option<Cont> {
+///
+/// A B-spline patch touches another surface along sides of its domain
+/// (a blend along the faces it rolls on): those are found from the
+/// records too, by sampling, within `tol + fit`. `fit` is how far a
+/// patch may be from the surfaces it was made to meet
+/// ([`crate::Tolerances::surface_fit`]): a blend whose contact on a
+/// cylinder was fitted touches the cylinder only to within the fit, and
+/// without it would be taken for a crossing, whose ill-conditioned
+/// intersection the edge would then be fitted to.
+pub(crate) fn contact(a: &Surf, b: &Surf, tol: f64, fit: f64) -> Option<Cont> {
+    match (a, b) {
+        (Surf::Spline(s), o) | (o, Surf::Spline(s)) if !matches!(o, Surf::Spline(_)) => {
+            let first = matches!(a, Surf::Spline(_));
+            return boundary_contact(s, o, tol + fit, first);
+        }
+        (Surf::Spline(s), Surf::Spline(t)) => {
+            return boundary_contact(s, b, tol + fit, true)
+                .or_else(|| boundary_contact(t, a, tol + fit, false));
+        }
+        _ => {}
+    }
     let (a, b) = if a.rank() <= b.rank() { (a, b) } else { (b, a) };
     if let Surf::Torus { c, a: at, big, r } = *b {
         if let Surf::Cyl { o, a: ax, r: rc } = *a
@@ -185,7 +321,7 @@ pub(crate) fn contact(a: &Surf, b: &Surf, tol: f64) -> Option<Cont> {
         return coaxial_contact(a, b, tol);
     }
     let par = |x: V, y: V| x.dot(y).abs() > 1.0 - 1e-12;
-    match (*a, *b) {
+    match (a.clone(), b.clone()) {
         (Surf::Plane { o: po, n }, Surf::Cyl { o, a: ax, r }) => {
             let h = (o - po).dot(n);
             (ax.dot(n).abs() < 1e-12 && (h.abs() - r).abs() < tol).then(|| Cont::Line {
@@ -283,7 +419,9 @@ pub(crate) fn contact(a: &Surf, b: &Surf, tol: f64) -> Option<Cont> {
 }
 
 /// Every pair of surfaces in `surfaces` that is tangent, with where they
-/// touch. Lengths are compared within `tolerance`.
+/// touch. Lengths are compared within `tolerance` (for a B-spline
+/// surface, which touches others along sides of its domain, this must
+/// cover how far it was fitted from them too).
 ///
 /// A caller that tessellates the surfaces can use this to put polygon
 /// vertices on the contact lines and circles, which is what keeps the mesh
@@ -294,15 +432,20 @@ pub fn find_tangencies(surfaces: &[Surface], tolerance: f64) -> Vec<Tangency> {
         .iter()
         .enumerate()
         .filter_map(|(i, s)| Surf::from_public(s).map(|s| (i as u32, s)))
+        // A malformed record (a B-spline whose knots do not fit its net)
+        // touches nothing; evaluating it would index out of its arrays.
+        .filter(|(_, s)| !matches!(s, Surf::Spline(_)) || s.well_formed())
         .collect();
     let mut out = Vec::new();
     for (i, (ia, a)) in surfs.iter().enumerate() {
         for (ib, b) in &surfs[i + 1..] {
-            if let Some(c) = contact(a, b, tolerance) {
-                out.push(Tangency {
-                    surfaces: [*ia, *ib],
-                    contact: c.to_public(),
-                });
+            if let Some(c) = contact(a, b, tolerance, 0.0) {
+                for contact in c.to_public(*ia, *ib) {
+                    out.push(Tangency {
+                        surfaces: [*ia, *ib],
+                        contact,
+                    });
+                }
             }
         }
     }

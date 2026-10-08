@@ -220,6 +220,89 @@ pub(crate) fn interpolate_at<const D: usize>(pts: &[[f64; D]], u: &[f64]) -> BSp
     }
 }
 
+/// The B-spline of `degree` (1 to 7) on the given clamped `knots`
+/// (`pts.len() + degree + 1` of them) through `pts` at the increasing
+/// parameters `u`, which must satisfy Schoenberg–Whitney (each inside
+/// the support of its basis function, as the knots' Greville abscissae
+/// are). The collocation matrix is then banded and totally positive, so
+/// elimination without pivoting is stable, as in [`interpolate_at`].
+/// `None` when the parameters do not fit the knots.
+pub(crate) fn interpolate_knots<const D: usize>(
+    pts: &[[f64; D]],
+    u: &[f64],
+    knots: &[f64],
+    degree: usize,
+) -> Option<BSpline<D>> {
+    let n = pts.len();
+    let p = degree;
+    if !(1..=7).contains(&p) || n <= p || u.len() != n || knots.len() != n + p + 1 {
+        return None;
+    }
+    let w = p;
+    let band = |i: usize, j: usize| j + w - i;
+    let mut a = vec![[0.0f64; 15]; n];
+    let shell = BSpline::<D> {
+        degree: p as u32,
+        control: vec![[0.0; D]; n],
+        knots: knots.to_vec(),
+    };
+    for i in 0..n {
+        let s = find_span(&shell, u[i]);
+        let mut nb = [0.0; 8];
+        basis_funs(knots, s, u[i], p, &mut nb);
+        for (j, v) in nb.iter().enumerate().take(p + 1) {
+            let col = s - p + j;
+            if *v == 0.0 {
+                continue;
+            }
+            if col + w < i || col > i + w {
+                return None;
+            }
+            a[i][band(i, col)] = *v;
+        }
+    }
+    let mut b: Vec<[f64; D]> = pts.to_vec();
+    for c in 0..n {
+        let piv = a[c][band(c, c)];
+        if piv.abs() <= 1e-14 || piv.is_nan() {
+            return None;
+        }
+        for r in c + 1..(c + w + 1).min(n) {
+            let f = a[r][band(r, c)] / piv;
+            if f != 0.0 {
+                for k in c..(c + w + 1).min(n) {
+                    a[r][band(r, k)] -= f * a[c][band(c, k)];
+                }
+                for d in 0..D {
+                    b[r][d] -= f * b[c][d];
+                }
+            }
+        }
+    }
+    let mut x = vec![[0.0f64; D]; n];
+    for r in (0..n).rev() {
+        for d in 0..D {
+            let s: f64 = (r + 1..(r + w + 1).min(n))
+                .map(|k| a[r][band(r, k)] * x[k][d])
+                .sum();
+            x[r][d] = (b[r][d] - s) / a[r][band(r, r)];
+        }
+    }
+    Some(BSpline {
+        degree: p as u32,
+        control: x,
+        knots: knots.to_vec(),
+    })
+}
+
+/// The Greville abscissae of a degree-`p` knot vector for `n` control
+/// points: the averages of each run of `p` interior knots.
+pub(crate) fn greville(knots: &[f64], p: usize, n: usize) -> Vec<f64> {
+    (0..n)
+        .map(|j| knots[j + 1..=j + p].iter().sum::<f64>() / p as f64)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

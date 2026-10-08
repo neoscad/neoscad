@@ -1,7 +1,7 @@
 [package]
 name = "meshbrep"
 version = "0.1.0"
-description = "Rebuild an exact B-rep (planes, cylinders, cones, spheres) from a triangle mesh tagged with the surface each triangle came from, and write it as STEP AP214"
+description = "Rebuild an exact B-rep (planes, cylinders, cones, spheres, tori, B-spline surfaces) from a triangle mesh tagged with the surface each triangle came from, and write it as STEP AP214"
 # Standalone on purpose: no workspace inheritance, so that the crate can
 # move to its own repository and be published as it is.
 edition = "2024"
