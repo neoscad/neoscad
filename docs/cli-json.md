@@ -155,7 +155,7 @@ else is the same for the same input.
 ```json
 {"diagnostics": DIAG, "geometry": GEOM|null, "input": "model.scad",
  "lighting": "headlight"|"openscad",
- "mode": "render"|"preview"|"diff", "output": "model-snapshot.png",
+ "mode": "render"|"preview"|"diff"|"sketch", "output": "model-snapshot.png",
  "schema": 1, "size": [1024, 1024], "timings_ms": TIMES,
  "views": ["iso", "front", "top", "right"],
  "diff": DIFF, "preview_bbox": BBOX|null}
@@ -166,7 +166,8 @@ else is the same for the same input.
   model's file stem with `-snapshot.png`, in the working directory).
 - `mode`: what the sheet shows. `render` (the default) draws the rendered
   geometry; `preview` OpenSCAD's preview (`--preview`); `diff` the
-  comparison (`--diff`).
+  comparison (`--diff`); `sketch` one constrained sketch drawn flat
+  (`--sketch NAME`).
 - `views` and `size`: the panels in order and the sheet's pixel size.
 - `lighting`: `headlight` (the default: one light at the camera, so no
   visible face is drawn near black) or `openscad` (`--lighting openscad`:
@@ -258,6 +259,19 @@ else is the same for the same input.
   `location.point`, numbered by its `id`. `--highlight` and `--issues`
   draw the rendered model, so they cannot be combined with `--preview`
   or `--diff`.
+- `sketch`, with `--sketch NAME` (and `--enable sketch`): the first
+  sketch named `NAME`, drawn flat in its own plane (the top view by
+  default): the solved profile filled, its entities as lines
+  (construction dashed, entities free to move orange, those of a
+  conflicting or unmet constraint red), its points, names and a glyph
+  per constraint in its state's colour. The object is
+  `{"name", "status", "dof", "entities": int, "constraints": {STATE:
+  int, ...}, "free": [string, ...]}`: `status` and `dof` as `check`'s
+  `SKETCH`, the constraint statements counted by state (`satisfied`,
+  `redundant`, `conflicting`, `unmet`, `unknown`), and the names of the
+  entities free to move. An unknown name fails the snapshot with the
+  names there are. `--sketch` cannot be combined with `--diff`,
+  `--highlight` or `--issues`.
 
 When the model (or the `--diff` model) cannot be loaded or evaluated
 (a syntax error, `--hardwarnings`), no sheet is written and the summary
@@ -645,9 +659,18 @@ when the model fails or a named part or sketch does not exist (then
   arc's `"center"`, `"start"`, `"end"`, `"radius"`, `"sweep"` (degrees,
   in its own direction) and `"cw"?: true`; a circle's `"center"` and
   `"radius"`. `name` is the variable holding it (`top`, `top.start`
-  for a point made from coordinates, `pts[0]`). Numbers are rounded to
+  for a point made from coordinates, `pts[0]`). `"free"?: true` marks
+  an entity the constraints leave free to move (a point or radius with
+  a free coordinate, a curve with a free point). Numbers are rounded to
   1e-9. The text report has a line per entity (`top line [0, 4]..[30,
-  4], length 30, angle 0°`).
+  4], length 30, angle 0°`). `"constraints": [CONSTRAINT, ...]` has
+  every constraint statement as it ran (a fillet and a chamfer too):
+  `{"kind": string, "text": string, "entities": [int, ...], "status":
+  "satisfied"|"redundant"|"conflicting"|"unmet"|"unknown", "value"?:
+  double, "residual"?: double, "file", "line", "span"}`, with `kind`
+  the statement's name (`horizontal`, `fillet`; `radius` for a
+  circle's `r`), `entities` the `id`s it is about, `value` a
+  dimension's, and `residual` the largest residual of an unmet one.
 
 # `neoscad fmt`
 
@@ -896,7 +919,7 @@ removes it)". The limits, and the defaults of `serve` and `mcp`:
 | `rands` | 10,000,000 | Numbers from one `rands()` call. |
 | `triangles` | 10,000,000 | Triangles of one geometry result (2D: vertices), checked before a primitive or extrusion is built and after every node. |
 | `sketch_unknowns` | 5,000 | Unknowns of one constrained sketch (`--enable sketch`): two per point, one per circle, checked before the solve, whose factorisations take O(n³) time in this count. The solve itself stops at the time limit or a cancellation between iterations. |
-| `queries` | 10,000 | Geometry queries (`child_bounds()`, `child_measure()`; `--enable query`) in one evaluation, each a render of its child. A query's render is stopped by the time limit and a cancellation like any render, and counts against the triangle and memory limits. `child_anchors()` renders nothing and does not count. |
+| `queries` | 10,000 | Geometry queries (`child_bounds()`, `child_measure()`, `child_distance()`; `--enable query`) in one evaluation, each a render of its children (a `child_bounds()` the fast path answers without rendering still counts). A query's render is stopped by the time limit and a cancellation like any render, and counts against the triangle and memory limits. `child_anchors()` renders nothing and does not count. |
 
 `--limit NAME=VALUE` (repeatable) changes one: seconds for `time`, MiB
 for `memory`, a count otherwise, `off` for none. The one-shot command
@@ -995,3 +1018,6 @@ have them.
 - Constrained sketches, stage 4 (`docs/sketch.md`): `check`'s
   `sketches` and `sketches_omitted` (only for a model with sketches),
   and `measure --sketch NAME` with its `sketch` object. Additive.
+- Language extensions, stage 7: `measure --sketch`'s entities gain
+  `free` and its object `constraints`; `snapshot --sketch NAME` with
+  the `sketch` mode and object. Additive.

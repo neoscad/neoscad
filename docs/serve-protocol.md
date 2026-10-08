@@ -300,12 +300,13 @@ A contact sheet (`neoscad snapshot`). Params: the common ones, `output`
 (default: the model's stem with `-snapshot.png`, relative to `cwd`),
 `views` ([string]), `size` (`"WxH"`), `dims`, `preview`, `diff` (another
 model), `lighting` (`headlight`, the default, or `openscad`),
-`highlight` ([string]: parts to show in colour, the rest ghosted) and
+`highlight` ([string]: parts to show in colour, the rest ghosted),
 `issues` (`true` to run `check` with its defaults, or with the check
 parameters given alongside; or an object of check parameters: the
-findings are marked on the sheet). Result: the
-snapshot summary of `docs/cli-json.md` plus `exit_code`. A request the
-server cannot draw (no GPU, a bad view name) is error -32001 with the
+findings are marked on the sheet) and `sketch` (a constrained sketch's
+name, with `enable: ["sketch"]`: drawn flat with its constraints).
+Result: the snapshot summary of `docs/cli-json.md` plus `exit_code`. A
+request the server cannot draw (no GPU, a bad view name) is error -32001 with the
 message.
 
 ### `check`

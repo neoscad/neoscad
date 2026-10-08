@@ -101,6 +101,11 @@
               <KeyboardAccelerator Modifiers="Control,Shift" Key="M" />
             </MenuFlyoutItem.KeyboardAccelerators>
           </MenuFlyoutItem>
+          <MenuFlyoutSeparator />
+          <MenuFlyoutSubItem Text="NeoSCAD Extensions">
+            <ToggleMenuFlyoutItem x:Name="SketchItem" Text="Constrained Sketches (sketch)" Click="OnSketchToggle" />
+            <ToggleMenuFlyoutItem x:Name="QueryItem" Text="Geometry Queries (query)" Click="OnQueryToggle" />
+          </MenuFlyoutSubItem>
         </MenuBarItem>
         <MenuBarItem Title="View">
           <MenuFlyoutItem Text="View All" Click="OnViewAll" />

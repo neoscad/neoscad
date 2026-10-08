@@ -1,0 +1,19 @@
+ECHO: "apart along x", d = 3
+ECHO: "corner to corner", d = 1.73205
+ECHO: "touching", d = 0
+ECHO: "overlapping", d = 0
+ECHO: "one inside the other", d = 0
+ECHO: "into a cut", d = 2.01921
+ECHO: "2D", d = 3
+ECHO: "2D inside a hole", d = 3
+ECHO: between_lists = 4
+WARNING: child_distance(): a child renders to nothing, so there is no distance; the answer is undef in file distance.scad, line 7
+ECHO: "empty", d = undef
+WARNING: child_distance(): one child is 2D and the other 3D, which have no distance between them; the answer is undef in file distance.scad, line 7
+ECHO: "2D and 3D", d = undef
+WARNING: child_distance(): it needs two children to compare, as child_distance(a, b) in file distance.scad, line 73
+ECHO: missing = undef
+WARNING: child_distance(): Children index (3) out of bounds (1 children) in file distance.scad, line 74
+ECHO: out_of_range = undef
+WARNING: child_distance() is only valid inside a module, where it asks about the module's children in file distance.scad, line 78
+ECHO: top_level = undef

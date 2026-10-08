@@ -286,7 +286,8 @@ pub struct ResourceLimits {
     /// Unknowns of one constrained sketch (`--enable sketch`): two per
     /// point, one per circle.
     pub sketch_unknowns: Option<u64>,
-    /// Geometry queries (`child_bounds()`, `child_measure()`; `--enable
+    /// Geometry queries (`child_bounds()`, `child_measure()`,
+    /// `child_distance()`; `--enable
     /// query`) in one evaluation, each a render of its child.
     pub queries: Option<u64>,
 }

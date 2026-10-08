@@ -44,7 +44,9 @@ of the sketch vocabulary exists. Turn them on with:
   `check`, `measure`, `snapshot`, `test`, `serve`, `lsp` and `mcp`). OpenSCAD's
   `--enable all` turns on OpenSCAD's experiments only, not NeoSCAD's
   extensions;
-- the macOS app: Settings > Language > "Constrained sketches (sketch)".
+- the apps: Settings > Language > "Constrained sketches (sketch)" on
+  macOS, Preferences > Language on Linux, and Design > NeoSCAD
+  Extensions on Windows. Changing it runs the open documents again.
 
 Every surface marks the vocabulary with the label "NeoSCAD extension
 (`--enable sketch`); not in OpenSCAD": `neoscad docs sketch`, the
@@ -366,14 +368,27 @@ sketch() { p = point([2, 3]); fix(p); q = point([0, 0]); fix(q, at = [1, 1]); }
 
 ## Fillets and chamfers
 
-`fillet(corner, r)` rounds the corner where exactly two profile lines
-meet with a tangent arc; `chamfer(corner, d)` cuts it with a straight
-line `d` along each. Both are applied after the solve, so they add no
-unknowns, and the corner point stays the sharp corner the dimensions
-refer to (FreeCAD's fillet with "preserve corner" keeps such a point
-too). A fillet or chamfer longer than a line it trims is an error with
-the largest size that fits as its fix (`sketch-fillet-too-large`).
-Fillets between a line and an arc are not supported yet.
+`fillet(corner, r)` rounds the corner where exactly two profile curves
+meet, two lines or a line and an arc, with a tangent arc of radius `r`;
+`chamfer(corner, d)` cuts it with a straight line. Both are applied
+after the solve, so they add no unknowns, and the corner point stays the
+sharp corner the dimensions refer to (FreeCAD's fillet with "preserve
+corner" keeps such a point too).
+
+- Between two lines, a chamfer cuts `d` along each line.
+- Between a line and an arc, the line is trimmed and the arc shortened
+  on its own circle. A fillet touches the arc from inside its circle
+  when the line runs into it (a quarter disc's corners) and from outside
+  when it runs away (a concave scoop), so its radius must be under the
+  arc's in the first case. A chamfer cuts the line `d` from the corner
+  and the arc where it is `d` from the corner in a straight line. Where
+  the line runs on along the arc's tangent there is no corner, which is
+  an `invalid-argument` error.
+- Between two arcs: not supported yet.
+
+A fillet or chamfer that needs more of a curve than there is is an
+error with the largest size that fits as its fix
+(`sketch-fillet-too-large`).
 
 ```openscad
 sketch() {
@@ -381,6 +396,17 @@ sketch() {
   l1 = line(o, a); l2 = line(a, b); l3 = line(b, c); l4 = line(c, o);
   fix(o); fix(a); fix(b); fix(c);
   fillet(b, 3); chamfer(c, 2);
+}
+```
+
+A quarter disc with its arc's corners rounded and cut:
+
+```openscad
+sketch() {
+  o = point([0, 0]); a = point([20, 0]); b = point([0, 20]);
+  l1 = line(o, a); e = arc(o, a, b); l2 = line(b, o);
+  fix(o); horizontal(l1); vertical(l2); length(l1, 20);
+  fillet(a, 3); chamfer(b, 2);
 }
 ```
 
@@ -664,18 +690,30 @@ expressions. It is offered:
 - **`neoscad measure --enable sketch --sketch NAME`** gives every
   entity's solved values without rendering it in a picture: points,
   each line's ends, length and angle, each arc's centre, radius, ends and
-  sweep, each circle's centre and radius. These are the reference
+  sweep, each circle's centre and radius, whether it is free to move,
+  and every constraint statement with its state (`satisfied`,
+  `redundant`, `conflicting` or `unmet`). These are the reference
   dimensions FreeCAD shows as non-driving constraints.
+- **`neoscad snapshot --enable sketch --sketch NAME`** draws the sketch
+  flat in its own plane: the solved profile filled, every entity as a
+  line (construction geometry dashed), its points, the names it has in
+  the source, and a glyph per constraint (`H`, `V`, `||`, `L 30`,
+  `R 5`...) in the colour of its state. Entities the constraints leave
+  free to move are orange and those in a conflict red, so the picture
+  shows where the sketch needs another constraint. The summary's
+  `sketch` object counts the constraints by state and names the free
+  entities.
 - **The editor** (the apps, and `neoscad lsp --enable sketch` in any
   LSP editor): the vocabulary is completed, with snippets, and coloured
   only inside sketch bodies; hover shows each name's reference with the
   extension label, an entity variable's solved values from the last run,
-  and a `sketch` call's state; go to definition on a handle's member
+  a constraint statement's state (satisfied, redundant, conflicting or
+  not met, with its residual) and a `sketch` call's state; go to definition on a handle's member
   (`top.start`) goes to the point it names; every hint with an edit is a
   quick fix; and "Pin drawing" is a code action. An under-constrained
   sketch shows as an information marker.
 - **MCP** (`neoscad mcp --enable sketch`): `check` lists the sketches,
-  `measure` takes `sketch`, and `docs` for `sketch` ends with a complete
+  `measure` and `snapshot` take `sketch`, and `docs` for `sketch` ends with a complete
   sketch to adapt.
 
 ## Comparison with the FreeCAD Sketcher

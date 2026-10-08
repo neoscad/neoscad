@@ -251,6 +251,46 @@ pub fn hover_values(
     None
 }
 
+/// Hover's state of the constraint statement whose name is at `name`
+/// (`horizontal(top)`, `fillet(g1, 3)`): satisfied, redundant,
+/// conflicting or unmet, with its residual when unmet, from the last run
+/// of this text. A statement that ran more than once (in a loop, or a
+/// helper called twice) shows its worst run.
+pub fn hover_constraint(
+    src: &SourceFile,
+    path: &Path,
+    sketches: &[Value],
+    name: (u32, u32),
+) -> Option<String> {
+    let rank = |c: &Value| match c["status"].as_str() {
+        Some("conflicting") => 3,
+        Some("unmet") => 2,
+        Some("redundant") => 1,
+        _ => 0,
+    };
+    let mut best: Option<(&Value, &Value)> = None;
+    for s in sketches {
+        for c in s["constraints"].as_array().into_iter().flatten() {
+            if in_file(c, path)
+                && span_of(src, c).is_some_and(|(a, _)| a == name.0)
+                && best.is_none_or(|(_, b)| rank(c) > rank(b))
+            {
+                best = Some((s, c));
+            }
+        }
+    }
+    let (s, c) = best?;
+    let sk = match s["name"].as_str() {
+        Some(n) => format!("sketch '{n}'"),
+        None => "the sketch".to_string(),
+    };
+    Some(format!(
+        "Last run: {} ({sk}: {})",
+        session::sketches::constraint_text(c),
+        session::sketches::state_text(s)
+    ))
+}
+
 /// The DOF summary hover shows on a `sketch(` call.
 pub fn hover_sketch(
     src: &SourceFile,

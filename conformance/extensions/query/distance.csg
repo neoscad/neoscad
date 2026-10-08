@@ -1,0 +1,93 @@
+group() {
+	group() {
+		cube(size = [10, 10, 10], center = false);
+		multmatrix([[1, 0, 0, 13], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			cube(size = [10, 10, 10], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+		multmatrix([[1, 0, 0, 2], [0, 1, 0, 2], [0, 0, 1, 2], [0, 0, 0, 1]]) {
+			cube(size = [1, 1, 1], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		cube(size = [5, 5, 5], center = false);
+		multmatrix([[1, 0, 0, 5], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			cube(size = [5, 5, 5], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		cube(size = [5, 5, 5], center = false);
+		multmatrix([[1, 0, 0, 2], [0, 1, 0, 2], [0, 0, 1, 2], [0, 0, 0, 1]]) {
+			cube(size = [5, 5, 5], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		cube(size = [10, 10, 10], center = true);
+		cube(size = [2, 2, 2], center = true);
+	}
+}
+group() {
+	group() {
+		difference() {
+			cube(size = [20, 20, 20], center = true);
+			cube(size = [30, 6, 6], center = true);
+		}
+		sphere($fn = 16, $fa = 12, $fs = 2, r = 1);
+	}
+}
+group() {
+	group() {
+		square(size = [4, 4], center = false);
+		multmatrix([[1, 0, 0, 7], [0, 1, 0, 4], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			square(size = [4, 4], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		difference() {
+			square(size = [20, 20], center = true);
+			square(size = [10, 10], center = true);
+		}
+		circle($fn = 12, $fa = 12, $fs = 2, r = 2);
+	}
+}
+group() {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+		multmatrix([[1, 0, 0, 0], [0, 1, 0, 3], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			cube(size = [1, 1, 1], center = false);
+		}
+		multmatrix([[1, 0, 0, 5], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			cube(size = [1, 1, 1], center = false);
+		}
+	}
+}
+group() {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+		cube(size = [0, 0, 0], center = false);
+	}
+}
+group() {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+		square(size = [1, 1], center = false);
+	}
+}
+group() {
+	group() {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+

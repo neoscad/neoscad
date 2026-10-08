@@ -82,6 +82,8 @@ pub(crate) enum Builtin {
     ChildAnchors,
     ChildBounds,
     ChildMeasure,
+    /// `child_distance(i, j)`: renders both children (`crate::oracle`).
+    ChildDistance,
 }
 
 impl Builtin {
@@ -92,7 +94,10 @@ impl Builtin {
     pub fn is_query(self) -> bool {
         matches!(
             self,
-            Builtin::ChildAnchors | Builtin::ChildBounds | Builtin::ChildMeasure
+            Builtin::ChildAnchors
+                | Builtin::ChildBounds
+                | Builtin::ChildMeasure
+                | Builtin::ChildDistance
         )
     }
 
@@ -186,6 +191,7 @@ pub(crate) fn table(
         ("child_anchors", Builtin::ChildAnchors),
         ("child_bounds", Builtin::ChildBounds),
         ("child_measure", Builtin::ChildMeasure),
+        ("child_distance", Builtin::ChildDistance),
     ]
     .into_iter()
     .filter(|_| extensions.has(crate::Extension::Query));
@@ -277,6 +283,7 @@ impl<'a> Evaluator<'a> {
             return match b {
                 Builtin::ChildAnchors => self.child_anchors(argv, loc, ctx),
                 Builtin::ChildBounds => self.child_geometry(argv, loc, ctx, false),
+                Builtin::ChildDistance => self.child_distance(argv, loc, ctx),
                 _ => self.child_geometry(argv, loc, ctx, true),
             };
         }
@@ -598,7 +605,9 @@ impl<'a> Evaluator<'a> {
             }
             // Evaluated from their unevaluated arguments in `call_builtin`
             // (the queries there because they need the caller's context).
-            IsUndef | Object | ChildAnchors | ChildBounds | ChildMeasure => Value::Undef,
+            IsUndef | Object | ChildAnchors | ChildBounds | ChildMeasure | ChildDistance => {
+                Value::Undef
+            }
         })
     }
 

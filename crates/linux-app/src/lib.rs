@@ -9,7 +9,8 @@
 //! of the session (`host`), a window's document (`document`), runs and
 //! exports off the main thread (`run`), the 3D view's drawing and input
 //! (`view`), the side panels' logic (`customizer`, `inspect`), which
-//! files a window watches (`watch`) and the update check's settings and
+//! files a window watches (`watch`), the language extensions on
+//! (`extensions`) and the update check's settings and
 //! notice (`update`). Everything else a front end does comes from
 //! `crates/client`, the port boundary (docs/architecture.md).
 //! The window itself (`src/app/`) is compiled only with the `gtk` feature.
@@ -18,6 +19,7 @@ pub mod agent;
 pub mod bridge;
 pub mod customizer;
 pub mod document;
+pub mod extensions;
 pub mod host;
 pub mod inspect;
 pub mod language;

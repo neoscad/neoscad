@@ -2,7 +2,8 @@
 //! sketch`; `docs/language-extensions.md`, section 4.8): each solved
 //! sketch's summary for `check`, its entities' solved values for
 //! `measure --sketch`, and, for the language server, where its entities
-//! are and the "pin the drawing" edit.
+//! and constraints are, each constraint's state, and the "pin the
+//! drawing" edit; and for `snapshot --sketch`, the solved profile.
 //!
 //! The facts come from the evaluated tree (`NodeKind::Sketch` carries
 //! `eval::node::SketchReport`), collected once per run into
@@ -10,7 +11,7 @@
 //! the apps' language server) gets them with the run's diagnostics,
 //! through the same path.
 
-use eval::node::{NodeKind, SketchEdit, SketchReport, SketchValues};
+use eval::node::{NodeKind, SketchEdit, SketchNode, SketchReport, SketchValues};
 use lang::source::{SourceMap, Span};
 use serde_json::{Value, json};
 
@@ -77,6 +78,9 @@ fn entity_json(e: &eval::node::SketchEntity, i: usize, sources: Option<&SourceMa
     if e.construction {
         v["construction"] = json!(true);
     }
+    if e.free {
+        v["free"] = json!(true);
+    }
     if let Some(s) = sources {
         merge(&mut v, place(s, e.span));
     }
@@ -119,6 +123,55 @@ fn entity_json(e: &eval::node::SketchEntity, i: usize, sources: Option<&SourceMa
     v
 }
 
+fn constraint_json(c: &eval::node::SketchConstraint, sources: Option<&SourceMap>) -> Value {
+    let mut v = json!({
+        "kind": c.kind,
+        "text": c.text,
+        "entities": c.entities.iter().map(|i| i + 1).collect::<Vec<_>>(),
+        "status": c.status.as_str(),
+    });
+    if let Some(x) = c.value {
+        v["value"] = json!(r9(x));
+    }
+    if let Some(r) = c.residual {
+        v["residual"] = json!(r);
+    }
+    if let Some(s) = sources {
+        merge(&mut v, place(s, c.span));
+    }
+    v
+}
+
+/// The most profile points a sketch's facts carry for `snapshot
+/// --sketch`; a larger profile is left out (`profile_omitted`), and the
+/// snapshot draws the entities alone.
+const MAX_PROFILE_POINTS: usize = 20_000;
+
+/// The solved profile's loops, each a list of points, as the node's
+/// polygon holds them (fillets and chamfers cut, arcs tessellated).
+fn profile_json(s: &SketchNode) -> Value {
+    if s.points.len() > MAX_PROFILE_POINTS {
+        return Value::Null;
+    }
+    let pts = |idx: &mut dyn Iterator<Item = usize>| -> Value {
+        Value::Array(
+            idx.filter_map(|i| s.points.get(i))
+                .map(|p| p9(*p))
+                .collect(),
+        )
+    };
+    if s.paths.is_empty() {
+        json!([pts(&mut (0..s.points.len()))])
+    } else {
+        Value::Array(
+            s.paths
+                .iter()
+                .map(|p| pts(&mut p.iter().copied()))
+                .collect(),
+        )
+    }
+}
+
 fn edit_json(e: &SketchEdit, sources: &SourceMap) -> Value {
     let mut v = place(sources, e.span);
     v["text"] = json!(e.text);
@@ -126,8 +179,9 @@ fn edit_json(e: &SketchEdit, sources: &SourceMap) -> Value {
 }
 
 /// One sketch's facts: the summary fields of [`summary`], plus
-/// `entities` and `pin`.
+/// `entities`, `constraints`, `profile` and `pin`.
 fn sketch_json<'s>(
+    node: &SketchNode,
     r: &SketchReport,
     at: Option<(&SourceMap, Span)>,
     unit: &dyn Fn(u32) -> Option<&'s SourceMap>,
@@ -155,6 +209,16 @@ fn sketch_json<'s>(
             .map(|(i, e)| entity_json(e, i, unit(e.unit)))
             .collect(),
     );
+    v["constraints"] = Value::Array(
+        r.constraints
+            .iter()
+            .map(|c| constraint_json(c, unit(c.unit)))
+            .collect(),
+    );
+    match profile_json(node) {
+        Value::Null => v["profile_omitted"] = json!(true),
+        p => v["profile"] = p,
+    }
     if let Some(p) = &r.pin
         && let Some(s) = unit(p.unit)
     {
@@ -183,7 +247,7 @@ pub fn collect<'s>(
                     .origin
                     .as_ref()
                     .and_then(|o| Some((unit(o.unit)?, o.span)));
-                out.push(sketch_json(&s.report, at, unit));
+                out.push(sketch_json(s, &s.report, at, unit));
             }
         }
         stack.extend(n.children.iter().rev());
@@ -191,12 +255,15 @@ pub fn collect<'s>(
     (out, count)
 }
 
-/// The fields `check` lists per sketch: everything but the entities and
-/// the edit.
+/// The fields `check` lists per sketch: everything but the entities, the
+/// constraints, the profile and the edit.
 pub fn summary(sketch: &Value) -> Value {
     let mut v = sketch.clone();
     if let Some(o) = v.as_object_mut() {
         o.remove("entities");
+        o.remove("constraints");
+        o.remove("profile");
+        o.remove("profile_omitted");
         o.remove("pin");
     }
     v
@@ -303,6 +370,27 @@ pub fn entity_text(e: &Value) -> String {
     }
     if e["construction"] == json!(true) {
         t.push_str(" (construction)");
+    }
+    if e["free"] == json!(true) {
+        t.push_str(" (free to move)");
+    }
+    t
+}
+
+/// One constraint's state in words, as hover shows it: "satisfied",
+/// "redundant: implied by the other constraints", ...
+pub fn constraint_text(c: &Value) -> String {
+    let mut t = match c["status"].as_str().unwrap_or("") {
+        "satisfied" => "satisfied".to_string(),
+        "redundant" => "redundant: implied by the other constraints (sketch-redundant)".to_string(),
+        "conflicting" => {
+            "conflicting: cannot hold together with others (sketch-conflict)".to_string()
+        }
+        "unmet" => "not met: the solve did not converge".to_string(),
+        _ => "not solved (see the sketch's errors)".to_string(),
+    };
+    if let Some(r) = c["residual"].as_f64() {
+        t.push_str(&format!(", residual {}", lang::number::fmt_number(r)));
     }
     t
 }

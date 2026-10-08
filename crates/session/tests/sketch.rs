@@ -643,7 +643,20 @@ fn dof(json: &[serde_json::Value], sketch: &str) -> usize {
 /// the sketch fully constrained; pinning the drawing leaves no flip.)
 #[test]
 fn every_hint_edit_fixes_its_problem() {
-    let text = std::fs::read(goldens().join("hints.scad")).unwrap();
+    // The model has edits for: under-constrained (twice, 4 + 1), redundant,
+    // conflict (4), flips (3), the unguessed point, the fillet, and the
+    // labelled sketch's suggestions (3).
+    let applied = hint_edits_fix_their_problems("hints.scad");
+    assert!(applied >= 15, "{applied}");
+    // A line–arc fillet too large for its corner (stage 7): the size the
+    // bisection found fits.
+    assert_eq!(hint_edits_fix_their_problems("fillets.scad"), 1);
+}
+
+/// Apply each edit of the golden `name`'s hints alone and check that its
+/// problem is gone; how many edits there were.
+fn hint_edits_fix_their_problems(name: &str) -> usize {
+    let text = std::fs::read(goldens().join(name)).unwrap();
     let (before, json) = diagnose(&text);
     let mut applied = 0;
     for (i, d) in json.iter().enumerate() {
@@ -682,10 +695,7 @@ fn every_hint_edit_fixes_its_problem() {
             applied += 1;
         }
     }
-    // The model has edits for: under-constrained (twice, 4 + 1), redundant,
-    // conflict (4), flips (3), the unguessed point, the fillet, and the
-    // labelled sketch's suggestions (3).
-    assert!(applied >= 15, "{applied}");
+    applied
 }
 
 /// A suggested constraint's "add all" completes the sketch: no degree of
@@ -829,4 +839,88 @@ fn a_large_solve_stops_at_the_time_limit() {
             && x["message"].as_str().unwrap().contains("time limit")),
         "{d:?}"
     );
+}
+
+/// `snapshot --sketch` (stage 7): the overlay drawn from a run's sketch
+/// facts. Free entities are orange, a conflict's red, construction
+/// dashed; every constraint has a glyph in its state's colour; the
+/// profile is filled. The sheet itself needs a GPU, so the overlay is
+/// checked here and the request's errors through `Session::snapshot`.
+#[test]
+fn a_sketch_snapshot_shows_entities_and_constraint_states() {
+    let text =
+        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sketch-states.scad"))
+            .unwrap();
+    let (s, _) = session(&[("m.scad", &text)]);
+    let r = s.evaluate(&run("m.scad", true), false).unwrap();
+    let all = &r.log.sketches.0;
+    let scheme = render::ColorScheme::cornfield();
+    let loose = session::sketches::find(all, "loose").unwrap()[0];
+    // The facts: per-entity freedom and per-constraint state.
+    let free: Vec<&str> = loose["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["free"] == true)
+        .filter_map(|e| e["name"].as_str())
+        .collect();
+    assert_eq!(free, ["b", "c", "l2", "l3", "l4", "diag", "h.center", "h"]);
+    let states: Vec<(&str, &str)> = loose["constraints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["text"].as_str().unwrap(), c["status"].as_str().unwrap()))
+        .collect();
+    assert!(
+        states.contains(&("horizontal(o, a)", "redundant")),
+        "{states:?}"
+    );
+    assert!(
+        states.contains(&("length(l1, 20)", "satisfied")),
+        "{states:?}"
+    );
+    let sheet = session::snapshot_sketch::sheet(loose, &scheme).unwrap();
+    let o = &sheet.overlay;
+    // Four profile lines, the construction diagonal and the circle.
+    assert_eq!(o.strokes.len(), 6);
+    assert_eq!(o.strokes.iter().filter(|s| s.dashed).count(), 1);
+    let orange = [225, 115, 0];
+    assert_eq!(o.strokes.iter().filter(|s| s.color == orange).count(), 5);
+    let glyphs: Vec<&str> = o
+        .labels
+        .iter()
+        .filter(|l| l.boxed)
+        .map(|l| l.text.as_str())
+        .collect();
+    assert!(
+        glyphs.contains(&"L 20") && glyphs.contains(&"R 2"),
+        "{glyphs:?}"
+    );
+    assert_eq!(sheet.summary["constraints"]["redundant"], 1);
+    assert_eq!(sheet.summary["free"].as_array().unwrap().len(), 8);
+    assert_eq!(sheet.scene.surfaces().len(), 1, "the profile, filled");
+    // A conflict: its constraints and entities red, no profile.
+    let conflict = session::sketches::find(all, "conflict").unwrap()[0];
+    let sheet = session::snapshot_sketch::sheet(conflict, &scheme).unwrap();
+    let red = [200, 30, 30];
+    assert!(sheet.overlay.strokes.iter().all(|s| s.color == red));
+    assert!(
+        sheet
+            .overlay
+            .labels
+            .iter()
+            .filter(|l| l.text == "L 20" || l.text == "d 25")
+            .all(|l| l.color == red)
+    );
+    assert!(sheet.scene.surfaces().is_empty());
+    // The request: an unknown name lists the names; `--sketch` with
+    // `--issues` is refused.
+    let mut req = session::snapshot::SnapshotRequest::new(run("m.scad", true), "x.png");
+    req.sketch = Some("nope".into());
+    let e = s.snapshot(&req).unwrap_err().to_string();
+    assert_eq!(e, "no sketch 'nope' (sketches: loose, conflict)");
+    req.sketch = Some("loose".into());
+    req.issues = Some(Default::default());
+    let e = s.snapshot(&req).unwrap_err().to_string();
+    assert!(e.contains("cannot be combined"), "{e}");
 }

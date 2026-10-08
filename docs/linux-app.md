@@ -547,6 +547,13 @@ checked by `client::update::check`, the code the CLI uses.
   with the serials in `updates.json` under the user's configuration
   directory (`~/.config/neoscad/`, or
   `~/.var/app/org.neoscad.NeoSCAD/config/neoscad/` in the Flatpak).
+- **Language** (Preferences > Language): "Constrained sketches
+  (sketch)" and "Geometry queries (query)", NeoSCAD's extensions to the
+  OpenSCAD language (`docs/language-extensions.md`), off by default as
+  on the command line. They go to every window's document loop (runs,
+  check, measure, export) and its language server, and changing one runs
+  the open documents again. They are stored in `language.json` beside
+  `updates.json` (`linux_app::extensions`).
 - **Off switches.** `NEOSCAD_NO_UPDATE_CHECK` set (as for the CLI), or
   `CI` set, stops the automatic check for that run; CI's smoke test
   never checks.

@@ -298,7 +298,8 @@ pub fn show_details(sh: &Rc<Shared>, parent: &gtk::Window) {
     dialog.present(Some(parent));
 }
 
-/// Main menu > Preferences: the two update settings, and the Agents page
+/// Main menu > Preferences: the two update settings, the Language page
+/// (NeoSCAD's extensions, `linux_app::extensions`), and the Agents page
 /// (`super::agent::page`).
 pub fn preferences(sh: &Rc<Shared>, parent: Option<&gtk::Window>) {
     let s = sh.updates.settings.borrow().clone();
@@ -350,6 +351,60 @@ pub fn preferences(sh: &Rc<Shared>, parent: Option<&gtk::Window>) {
     page.add(&group);
     let dialog = adw::PreferencesDialog::new();
     dialog.add(&page);
+    dialog.add(&language_page(sh));
     dialog.add(&super::agent::page(sh));
     dialog.present(parent);
+}
+
+/// Preferences > Language: NeoSCAD's extensions to the OpenSCAD language,
+/// as the macOS app's Settings > Language has them. Off by default: off, a
+/// file means what it means in OpenSCAD.
+fn language_page(sh: &Rc<Shared>) -> adw::PreferencesPage {
+    let on = *sh.extensions.borrow();
+    let sketch = adw::SwitchRow::builder()
+        .title("Constrained sketches (sketch)")
+        .subtitle(
+            "Points, lines, arcs and circles tied by constraints and solved into a 2D shape, \
+             like the command line's --enable sketch. Off, sketch() is an unknown module \
+             as in OpenSCAD.",
+        )
+        .active(on.sketch)
+        .build();
+    let query = adw::SwitchRow::builder()
+        .title("Geometry queries (query)")
+        .subtitle(
+            "Bounding boxes, measurements, distances and named anchors of a module's \
+             children as values (child_bounds() and the like), like the command line's \
+             --enable query. Off, they are unknown functions as in OpenSCAD.",
+        )
+        .active(on.query)
+        .build();
+    let weak = Rc::downgrade(sh);
+    sketch.connect_active_notify(move |row| {
+        if let Some(sh) = weak.upgrade() {
+            let mut s = *sh.extensions.borrow();
+            s.sketch = row.is_active();
+            sh.set_extensions(s);
+        }
+    });
+    let weak = Rc::downgrade(sh);
+    query.connect_active_notify(move |row| {
+        if let Some(sh) = weak.upgrade() {
+            let mut s = *sh.extensions.borrow();
+            s.query = row.is_active();
+            sh.set_extensions(s);
+        }
+    });
+    let group = adw::PreferencesGroup::builder()
+        .title("NeoSCAD extensions")
+        .description("Not in OpenSCAD; every open document runs again when one changes.")
+        .build();
+    group.add(&sketch);
+    group.add(&query);
+    let page = adw::PreferencesPage::builder()
+        .title("Language")
+        .icon_name("accessories-text-editor-symbolic")
+        .build();
+    page.add(&group);
+    page
 }

@@ -1,14 +1,18 @@
 # Language extensions: constrained sketches and geometry queries
 
-Status: design; stages 0 (the flags), 1 (the solver crate), 2 (the
-language binding of sketches, `--enable sketch`), 3 (diagnostics with
-hints, strict mode, the unknowns limit), 4 (the sketch surfaces:
-`check`, `measure --sketch`, the language server, MCP, the apps'
-setting, `docs/sketch.md`), 5 (render-free queries: `anchor()` and
-`child_anchors()`, `--enable query`) and 6 (rendering queries:
-`child_bounds()`, `child_measure()`, the geometry oracle,
-`docs/geometry-queries.md`) built; sections 11.1 to 11.5 record how
-stages 2 to 6 were built and where they depart from this text.
+Status: complete. Every stage of section 11 is built: 0 (the flags), 1
+(the solver crate), 2 (the language binding of sketches, `--enable
+sketch`), 3 (diagnostics with hints, strict mode, the unknowns limit), 4
+(the sketch surfaces: `check`, `measure --sketch`, the language server,
+MCP, the apps' setting, `docs/sketch.md`), 5 (render-free queries:
+`anchor()` and `child_anchors()`, `--enable query`), 6 (rendering
+queries: `child_bounds()`, `child_measure()`, the geometry oracle,
+`docs/geometry-queries.md`) and 7 (the fast path for bounds,
+`child_distance()`, `snapshot --sketch`, line–arc fillets, and the
+apps' settings for both extensions). Sections 11.1 to 11.6 record how
+stages 2 to 7 were built and where they depart from this text; what is
+left is in `docs/followups.md` ("Constrained sketches", "Geometry
+queries").
 Written 2026-10-07 against the tree at
 `4aa80a4` and the reference checkout in `.reference/openscad`. Every
 claim about this codebase cites `path:line`; claims about OpenSCAD cite
@@ -341,7 +345,8 @@ All of this is plain arithmetic, with no trigonometry.
 - Doing this after the solve keeps fillets from adding unknowns, which
   is the most common source of solver trouble in GUI sketchers.
 - `chamfer(corner, d)` works the same way with a straight cut.
-- Fillets between a line and an arc are deferred (section 11).
+- Fillets between a line and an arc came in stage 7 (section 11.6);
+  between two arcs they are not built.
 
 ### 4.6 The solver
 
@@ -578,9 +583,9 @@ OpenSCAD's errors do.
   resource has the vocabulary with the extension label, and `recipes`
   gains a sketch recipe. Agents benefit most from the structured
   "free DOF → suggested constraint" hints and from `measure --sketch`.
-- **Snapshot** (later stage): `snapshot --sketch NAME` draws the solved
-  sketch flat, with entity labels, construction lines dashed, and
-  under-constrained entities highlighted.
+- **Snapshot** (stage 7, section 11.6): `snapshot --sketch NAME` draws
+  the solved sketch flat, with entity labels, construction lines dashed,
+  and under-constrained entities highlighted.
 
 ## 5. Geometry queries
 
@@ -619,8 +624,9 @@ module plate_for(margin = 4) {
   `center`, plus `area` for 2D or `volume` and `surface_area` for 3D.
 - `child_anchors(i)` is an object mapping anchor names to `[point,
   direction]` (section 5.3).
-- Later: `child_distance(i, j)`, the exact distance between two
-  children, reusing `measure`'s BVH search (`crates/session/src/measure.rs:1-17`).
+- `child_distance(i, j)` (stage 7, section 11.6): the exact distance
+  between two children, reusing `measure`'s BVH search
+  (`crates/session/src/measure.rs:1-17`).
 
 These are functions, valid only inside a user module body (anywhere
 else they warn and return `undef`, like `children()` at the top level).
@@ -713,7 +719,8 @@ library tests.
   hulls, the box of the leaves' generated vertices under their matrices
   is the result's box. The fast path may be used only where a
   differential test shows it bit-identical to the rendered answer.
-  Otherwise the oracle renders.
+  Otherwise the oracle renders. (Built in stage 7, more narrowly than
+  this: hulls in 2D only, and no transform above a union; section 11.6.)
 - **Limits.** Query renders count against the request's time, memory
   and triangle limits like any render. A new count,
   `Limits::queries` (default 10,000 per evaluation under
@@ -1001,7 +1008,7 @@ Rough effort is for one builder working serially.
 | 4 | Sketch surfaces: `check` JSON, `measure --sketch`, LSP completion, hover and "Pin drawing", MCP recipe, editor decorations, `docs/sketch.md` | M, 1 week |
 | 5 | Queries A (render-free): `anchor`, the node side field, `child_anchors`, sketch anchors, sandboxed and reused child instantiation | M, 4–5 days |
 | 6 | Queries B: `GeometryOracle`, the session implementation, `child_bounds` and `child_measure`; `Limits::queries`; warm/cold and thread tests; `docs/geometry-queries.md` | L, 1.5 weeks |
-| 7 | Fast path for bounds (behind the differential test); `child_distance`; `snapshot --sketch`; line–arc fillets | M, 1 week |
+| 7 | Fast path for bounds (behind the differential test); `child_distance`; `snapshot --sketch`; line–arc fillets (built, with the apps' settings for both extensions: section 11.6) | M, 1 week |
 
 Stages 1 to 4 deliver sketches without queries; 5 and 6 can follow
 independently. The `docs/followups.md` entries go in as each stage
@@ -1455,8 +1462,8 @@ where it departs from sections 5.2 to 5.4:
 - **Unsupported children.** A child the renderer cannot build (a
   feature of a later phase) is a `query-unavailable` warning naming it,
   and `undef`; the final render then reports it as usual.
-- **Not built.** The fast path for bounds (stage 7); an app setting for
-  the flag (the apps have one for sketches only).
+- **Not built.** The fast path for bounds and the apps' setting for the
+  flag; both came in stage 7 (section 11.6).
 - **Tests.** `conformance/extensions/query/plate-bounds.scad` is
   section 6.3 as written, beside stage 5's `plate.scad`, and
   `bounds.scad` covers 2D and 3D children, booleans, `%` and `#`,
@@ -1478,6 +1485,157 @@ where it departs from sections 5.2 to 5.4:
   the six digits the `.csg` keeps; `bounds.csg` the same volume and box,
   with a different triangulation that a plain file without queries
   reproduces (`docs/followups.md`, "Geometry queries").
+
+### 11.6 Stage 7 as built
+
+Stage 7 is `crates/geom/src/fastbounds.rs` (the fast path),
+`crates/eval/src/query.rs` (`child_distance`) with the oracle's two new
+methods (`crates/eval/src/oracle.rs`, `crates/session/src/oracle.rs`),
+the line–arc corners and the per-constraint facts in
+`crates/eval/src/sketch.rs`, `crates/session/src/snapshot_sketch.rs` and
+the overlay in `crates/render/src/snapshot.rs`, and the apps' settings.
+Where it departs from sections 4.5, 4.8, 5.2 and 5.4:
+
+- **The fast path for bounds.** `GeometryOracle` gained `bounds()`,
+  whose default renders (`measure()` and its box); `child_bounds()` asks
+  it, `child_measure()` still asks `measure()`. The session's oracle
+  tries `geom::fastbounds::bounds` first (`fastbounds.rs:92`). Section
+  5.4 described it as "the box of the leaves' generated vertices under
+  their matrices". It is built more narrowly, so that it can be exact:
+  - Rather than reasoning about vertices, it *builds* what the renderer
+    builds where that is cheap, with the renderer's own functions: the
+    primitives, the extrusions (`linear_extrude`, `rotate_extrude` of a
+    single 2D child), the 2D hull, and each transform applied node by
+    node with `evaluate::transform` (OpenSCAD applies a transform per
+    node, not a composed matrix, so composing them would round
+    differently). Only one step is replaced by reasoning: a 3D union of
+    several solids is the union of its operands' boxes.
+  - The differential test (`crates/session/tests/fastbounds.rs`)
+    renders every subtree of generated models (primitives, transforms
+    with arbitrary angles and singular or near-singular matrices,
+    unions, hulls, extrusions, `%` and `#`, scales of 1e-5 and 1000,
+    and the operations the fast path must leave alone) and requires the
+    fast answer to equal the rendered box bit for bit wherever it
+    answers. Searches of 100,000 models (about 600,000 subtrees
+    answered) found three things the obvious rule gets wrong, each now
+    declined: a 3D hull (QuickHull drops a point one bit outside a face:
+    a revolved vertex at 2.666…67 beside a cube's 8/3), an operand
+    flattened by a singular transform, which a union drops as having no
+    volume (`scale([1, 1, 0])`, and a shear whose determinant rounds to
+    6e-17; `singular`, `fastbounds.rs:399`), and two operands' extremes
+    closer than Manifold's tolerance, one of which the union merges away
+    (`union_box`, `fastbounds.rs:413`, with a clearance of 1e-6 relative
+    to the coordinates). 2D unions of more than one child are declined
+    outright: Clipper rounds to its 2^-27 grid and simplifies. The cargo
+    test runs 300 models (about 1,700 answered subtrees, under a second
+    in release);
+    `NEOSCAD_FASTBOUNDS_MODELS` asks for a longer search.
+  - It declines (and the oracle renders) for everything else: booleans
+    other than union, `minkowski`, `offset`, `projection`, `resize`,
+    `fill`, imports, text, parts, a transform above a union of solids
+    (only the union's box is known), trees deeper than 256 levels, more
+    than 2^20 vertices, and a primitive past the fragment or triangle
+    limit (the render then reports it, as before).
+  - A fast answer renders nothing into the cache, so the final render
+    still builds the child; the gain is a query that does not wait for
+    a Manifold union, and a preview, which never runs the union, that
+    does not run it either. The queries limit counts it all the same.
+- **`child_distance(a, b)`** (`query.rs:342`) takes two indices as
+  `children()` does and is one query against `Limits::queries`. Both
+  children are instantiated in the sandbox (the first copied out before
+  the second, whose evaluation may end module calls and so move the
+  kept instances) and reused by later `children()` calls as the other
+  queries' are. The oracle's `distance()` (`oracle.rs:237` in
+  `session`) renders both and measures as `measure --between` does:
+  0 when their intersection's volume (a serial sum, not Manifold's) is
+  over `between`'s floor, so one inside the other is 0, which surfaces
+  alone would not give; otherwise the BVH's exact smallest distance. 2D
+  children are compared in the plane (overlap by a Clipper
+  intersection's area, distance between their triangulations at z = 0).
+  The answer is the unrounded distance, where `measure` prints six
+  digits. Empty children are `query-empty`; a 2D child with a 3D one is
+  an `invalid-argument` warning; both answers `undef`. Distances are
+  kept per request by the two subtrees' keys.
+- **Per-constraint facts.** `SketchReport` gained `constraints` (one per
+  statement that ran, with its kind, text, span, entities, dimension,
+  state and, when unmet, its residual: `sketch.rs:446`) and each entity
+  `free` (a point or radius whose coordinate the diagnosis lists as
+  moving, mobility at least 0.01 as the under-constrained message uses,
+  or a curve with such a point). The state is the worst of the
+  statement's solver constraints: conflicting (in a conflict, as source
+  or as one of its set), unmet, redundant, or satisfied; the parallel
+  `distance(l1, l2, d)` implies does not count. The session's facts
+  carry them (`constraints`, `free`) and the solved `profile` (at most
+  20,000 points, else `profile_omitted`); `check`'s summary leaves all
+  three out, `measure --sketch` the profile.
+- **Hover on a constraint** (`crates/lsp/src/sketch.rs:259`): on a
+  constraint statement's name in a sketch body, the last run's state,
+  with the residual when unmet; a statement that ran more than once
+  shows its worst run. Section 4.8 asked for this and stage 4 left it
+  out.
+- **`snapshot --sketch NAME`** (CLI, `serve`, MCP `snapshot`'s
+  `sketch`): the first sketch of that name, from the run's facts, drawn
+  flat in its own plane (the top view unless views are asked for): the
+  profile filled in a pale colour without a render's 2D outline, every
+  entity as a line on top (bold; construction dashed; free to move
+  orange; in a conflicting or unmet constraint red), points as dots,
+  the names the source gives (not members such as `top.start`), and a
+  boxed glyph per constraint in its state's colour (`H`, `V`, `||`,
+  `_|_`, `T`, `=`, `F`, `o`, `L 30`, `R 5`, `D 8`, `d 12`, `< 45`,
+  `r 3` for a fillet, `c 2` for a chamfer; Hershey has ASCII only), with
+  a key line in the header. The overlay is drawn on the CPU after the
+  panels (`render::snapshot::SketchOverlay`, `sketch_overlay` at
+  `crates/render/src/snapshot.rs:599`), clipped to each panel, labels
+  stepping aside from each other as markers do, so the same sketch gives
+  the same pixels. The header grows with its lines. The summary's
+  `sketch` counts constraints by state and names the free entities. It
+  cannot be combined with `--diff`, `--highlight` or `--issues`.
+- **Line–arc fillets and chamfers** (`cut_line_arc`, `sketch.rs:3045`).
+  Section 4.5's arithmetic, extended: the fillet's centre is `r` from
+  the line on the corner's inside and `R + r` from the arc's centre, or
+  `R − r` when the line runs into the arc's circle (`u · (C − P) > 0`);
+  that is a quadratic along the line's offset, whose root nearest the
+  corner is taken, with square roots only. The arc is shortened on its
+  own circle to the tangency point; its direction and centre are kept.
+  A chamfer cuts the line `d` along and the arc where the circle of
+  radius `d` about the corner crosses it (also square roots only).
+  `sketch-fillet-too-large` now has four texts (more of the line or of
+  the arc than there is, a fillet inside the arc not smaller than it, or
+  no fitting arc), and its hint's size is found by bisection, since the
+  fit is not linear in the size; the golden test applies that edit and
+  checks the error is gone. A corner where the line runs along the arc's
+  tangent has no corner to cut (`invalid-argument`), and a corner of two
+  arcs is still `invalid-argument` ("not supported yet").
+- **The apps.** macOS Settings > Language has "Geometry queries
+  (query)" beside the sketch toggle (`LanguageSettings.queries`).
+  Linux has Preferences > Language with both
+  (`crates/linux-app/src/extensions.rs`, kept in `language.json`; each
+  window's loop and language server take the names, and changing one
+  runs every window again). Windows has Design > NeoSCAD Extensions
+  with both (`NeoSCAD.Host/LanguageSettings.cs`,
+  `DocumentSession.SetEnable`); its windows are processes, so a window
+  already open keeps its setting until toggled there. The panels' runs
+  (check, measure, export) on Linux and Windows now pass the names too;
+  they passed none before.
+- **Editor.** `builtins.js` colours `child_anchors`, `child_bounds`,
+  `child_measure` and `child_distance` as functions and `anchor` as a
+  module everywhere, with or without the extension (as for the sketch
+  vocabulary, the decorations do not know the setting).
+- **Tests.** `crates/session/tests/fastbounds.rs` (the differential
+  test, under a 2 GB resident guard and `Limits::AGENT`, and the
+  session's `child_bounds()` through the fast path); the goldens
+  `conformance/extensions/query/distance.scad` and
+  `conformance/extensions/sketch/fillets.scad` (with the hint edit
+  applied in `every_hint_edit_fixes_its_problem`);
+  `a_sketch_snapshot_shows_entities_and_constraint_states` in
+  `crates/session/tests/sketch.rs` (the overlay's colours, glyphs and
+  summary, and the request's errors; the PNG itself needs a GPU);
+  `a_sketch_overlay_draws_its_strokes_and_labels` in `render`;
+  `hover_shows_a_constraints_state` in `crates/lsp/tests/sketch.rs`;
+  the apps' settings (`theQuerySettingRunsQueries` on macOS, the Linux
+  settings' round trip, and the Windows session and settings tests);
+  the editor's colouring; and `crates/wasm-check`'s `query-distance`
+  case (a fast-path box, a rendered box and distances on wasm32).
 
 ## 12. Alternatives considered
 

@@ -158,6 +158,54 @@ public class DocumentSessionTests
         }
     }
 
+    /// <summary>
+    /// Design > NeoSCAD Extensions: with geometry queries off,
+    /// child_bounds() is OpenSCAD's unknown function; turned on, the
+    /// document runs again and echoes the child's box.
+    /// </summary>
+    [Fact]
+    public void TheQuerySettingRunsTheDocumentAgainWithQueries()
+    {
+        var (doc, ui, _, dir) = Session();
+        try
+        {
+            doc.LoadUntitled("module m() { echo(child_bounds(0)); children(0); }\nm() cube([1, 2, 3]);\n", autorun: false);
+            doc.Run(RenderMode.Preview);
+            Assert.True(ui.PumpUntil(() => doc.Report is not RunReport.Running, TimeSpan.FromSeconds(60)));
+            Assert.Contains(doc.Console, l => l.Kind == ConsoleKind.Warning && l.Text.Contains("unknown function 'child_bounds'"));
+            Assert.True(doc.SetEnable(new LanguageSettings { Query = true }.Names()));
+            Assert.False(doc.SetEnable(["query"]));
+            Assert.True(ui.PumpUntil(() => doc.Report is not RunReport.Running
+                && doc.Console.Any(l => l.Kind == ConsoleKind.Echo), TimeSpan.FromSeconds(60)));
+            Assert.Contains(doc.Console, l => l.Kind == ConsoleKind.Echo && l.Text == "ECHO: [[0, 0, 0], [1, 2, 3]]");
+            Assert.DoesNotContain(doc.Console, l => l.Kind == ConsoleKind.Warning);
+        }
+        finally
+        {
+            doc.Dispose();
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void LanguageSettingsRoundTripAndDefaultToOff()
+    {
+        var dir = Directory.CreateTempSubdirectory("neoscad-lang-").FullName;
+        try
+        {
+            var path = LanguageSettings.PathIn(dir);
+            Assert.Empty(LanguageSettings.Load(path).Names());
+            new LanguageSettings { Sketch = true, Query = true }.Save(path);
+            Assert.Equal(["sketch", "query"], LanguageSettings.Load(path).Names());
+            File.WriteAllText(path, "{\"sketch\": tru");
+            Assert.Empty(LanguageSettings.Load(path).Names());
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
     [Fact]
     public void EditsMarkTheDocumentDirtyAndUndoingCleansIt()
     {

@@ -122,6 +122,8 @@ pub struct Sheet {
     pub legend: Vec<([f32; 4], String)>,
     /// Numbered points drawn over every panel (`snapshot --issues`).
     pub markers: Vec<Marker>,
+    /// A sketch drawn over every panel (`snapshot --sketch`).
+    pub sketch: Option<SketchOverlay>,
     /// How the panels are lit: [`crate::Lighting::Headlight`] for agents'
     /// sheets, so faces turned away from OpenSCAD's fixed light stay
     /// legible.
@@ -136,6 +138,40 @@ pub struct Marker {
     pub point: [f64; 3],
     pub label: String,
     pub color: [u8; 3],
+}
+
+/// A constrained sketch drawn over the panels (`snapshot --sketch`): its
+/// solved entities as lines, its points as dots, and labels for names and
+/// constraint glyphs, all in model coordinates. Drawn on the CPU after the
+/// panels, like the markers, so the same sketch gives the same pixels.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SketchOverlay {
+    pub strokes: Vec<Stroke>,
+    /// Points, each a small square.
+    pub dots: Vec<([f64; 3], [u8; 3])>,
+    pub labels: Vec<Label>,
+}
+
+/// A polyline: a line, or an arc or circle as its tessellation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stroke {
+    pub points: Vec<[f64; 3]>,
+    pub color: [u8; 3],
+    /// Construction geometry, which is not part of the shape.
+    pub dashed: bool,
+    /// Two pixels wide (the profile's curves).
+    pub bold: bool,
+}
+
+/// Text at a point: an entity's name, or a constraint's glyph (`boxed`,
+/// drawn on a small plate of the background so it reads over lines).
+/// Labels that would cover one another step aside, as markers do.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Label {
+    pub point: [f64; 3],
+    pub text: String,
+    pub color: [u8; 3],
+    pub boxed: bool,
 }
 
 /// Where each panel goes.
@@ -158,7 +194,11 @@ impl Sheet {
         let n = self.views.len().max(1) as u32;
         let cols = (n as f64).sqrt().ceil() as u32;
         let rows = n.div_ceil(cols);
-        let header = HEADER.min(self.height / 4);
+        // Room for the title and one small line, and 18 pixels for each
+        // further line (`--sketch` adds the glyphs' key), so no header
+        // line runs into the panels' captions.
+        let lines = self.header.len().max(2) as u32;
+        let header = (HEADER + 18 * (lines - 2)).min(self.height / 4);
         Layout {
             header,
             cols,
@@ -217,6 +257,15 @@ impl Sheet {
                 l.header + (i as u32 / l.cols) * l.panel_h,
             );
             c.blit(img, x0, y0);
+            if let Some(s) = &self.sketch {
+                let rect = (
+                    f64::from(x0),
+                    f64::from(y0),
+                    f64::from(x0 + l.panel_w),
+                    f64::from(y0 + l.panel_h),
+                );
+                sketch_overlay(&mut c, cam, s, rect);
+            }
             let (title, sub) = view.caption();
             c.text(
                 &title,
@@ -542,6 +591,96 @@ fn dimensions(
     );
 }
 
+/// A panel's rectangle on the sheet: left, top, right, bottom.
+type Rect = (f64, f64, f64, f64);
+
+/// Draw `s` over the panel at `rect` seen through `cam`: strokes, then
+/// dots, then labels, each kept inside the panel.
+fn sketch_overlay(c: &mut Canvas, cam: &Camera, s: &SketchOverlay, rect: Rect) {
+    let px = |p: [f64; 3]| {
+        let [x, y] = to_pixel(cam, p);
+        (x + rect.0, y + rect.1)
+    };
+    for st in &s.strokes {
+        // The dash pattern runs on along the whole polyline, so a dashed
+        // arc of many short segments still shows gaps.
+        let mut phase = 0u32;
+        for w in st.points.windows(2) {
+            let (a, b) = (px(w[0]), px(w[1]));
+            phase = c.clipped_line(a, b, st.color, st.dashed, phase, rect);
+            if st.bold {
+                // A pixel right and a pixel down: two wide whichever way
+                // the line runs.
+                for (dx, dy) in [(1.0, 0.0), (0.0, 1.0)] {
+                    let (a, b) = ((a.0 + dx, a.1 + dy), (b.0 + dx, b.1 + dy));
+                    c.clipped_line(a, b, st.color, st.dashed, 0, rect);
+                }
+            }
+        }
+    }
+    for (p, color) in &s.dots {
+        let (x, y) = px(*p);
+        if x >= rect.0 + 2.0 && y >= rect.1 + 2.0 && x < rect.2 - 2.0 && y < rect.3 - 2.0 {
+            c.fill(x - 2.0, y - 2.0, 5.0, 5.0, *color);
+        }
+    }
+    // Labels step aside from earlier ones, as markers do: to the nearest
+    // free spot around their point, or on top when there is none near.
+    let mut placed: Vec<(f64, f64, f64, f64)> = Vec::new();
+    const SIZE: f64 = 11.0;
+    for l in &s.labels {
+        let (x, y) = px(l.point);
+        let w = f64::from(hershey::text_width(&l.text, SIZE as f32)) + 4.0;
+        let h = SIZE + 4.0;
+        let free = |bx: f64, by: f64, placed: &[(f64, f64, f64, f64)]| {
+            placed.iter().all(|&(qx, qy, qw, qh)| {
+                bx + w <= qx || qx + qw <= bx || by + h <= qy || qy + qh <= by
+            })
+        };
+        // The box's top left for a label centred a little above and right
+        // of its point, then the spots around it.
+        let (bx, by) = (x + 4.0, y - h - 2.0);
+        const STEPS: [(f64, f64); 8] = [
+            (0.0, 0.0),
+            (0.0, 1.0),
+            (-1.0, 0.0),
+            (-1.0, 1.0),
+            (0.0, -1.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (-1.0, -1.0),
+        ];
+        let (bx, by) = (1..=2)
+            .flat_map(|k| {
+                STEPS.iter().map(move |(dx, dy)| {
+                    (
+                        bx + dx * (w + 4.0) * k as f64,
+                        by + dy * (h + 2.0) * k as f64,
+                    )
+                })
+            })
+            .find(|&(x, y)| free(x, y, &placed))
+            .unwrap_or((bx, by));
+        if bx < rect.0 || by < rect.1 || bx + w > rect.2 || by + h > rect.3 {
+            continue;
+        }
+        placed.push((bx, by, w, h));
+        if l.boxed {
+            let bg = c.background;
+            c.fill(bx, by, w, h, bg);
+            for (x0, y0, x1, y1) in [
+                (bx, by, bx + w, by),
+                (bx, by + h, bx + w, by + h),
+                (bx, by, bx, by + h),
+                (bx + w, by, bx + w, by + h),
+            ] {
+                c.line(x0, y0, x1, y1, l.color);
+            }
+        }
+        c.strokes_at(&l.text, bx + 2.0, by + h - 4.0, SIZE, l.color);
+    }
+}
+
 /// An RGB image being drawn on the CPU.
 struct Canvas {
     width: u32,
@@ -596,6 +735,70 @@ impl Canvas {
             if e2 <= dx {
                 err += dx;
                 y += sy;
+            }
+        }
+    }
+
+    /// A one-pixel line kept inside `rect`, dashed (6 on, 4 off) when
+    /// asked, starting `phase` pixels into the pattern; the phase after
+    /// it, so a polyline's dashes run on from segment to segment.
+    fn clipped_line(
+        &mut self,
+        a: (f64, f64),
+        b: (f64, f64),
+        c: [u8; 3],
+        dashed: bool,
+        mut phase: u32,
+        rect: Rect,
+    ) -> u32 {
+        // Segments far outside the panel (a construction line through a
+        // zoomed view) are not walked pixel by pixel.
+        let out = |v: f64, lo: f64, hi: f64| v < lo - 1e5 || v > hi + 1e5;
+        if out(a.0, rect.0, rect.2)
+            || out(b.0, rect.0, rect.2)
+            || out(a.1, rect.1, rect.3)
+            || out(b.1, rect.1, rect.3)
+        {
+            return phase;
+        }
+        let (mut x, mut y) = (a.0.round() as i64, a.1.round() as i64);
+        let (x1, y1) = (b.0.round() as i64, b.1.round() as i64);
+        let (dx, dy) = ((x1 - x).abs(), -(y1 - y).abs());
+        let (sx, sy) = (if x < x1 { 1 } else { -1 }, if y < y1 { 1 } else { -1 });
+        let mut err = dx + dy;
+        loop {
+            let inside = (x as f64) >= rect.0
+                && (y as f64) >= rect.1
+                && (x as f64) < rect.2
+                && (y as f64) < rect.3;
+            if inside && (!dashed || phase % 10 < 6) {
+                self.put(x, y, c);
+            }
+            phase = phase.wrapping_add(1);
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+        phase
+    }
+
+    /// Hershey text with its baseline at `y`, left-aligned at `x`, over
+    /// whatever is there.
+    fn strokes_at(&mut self, s: &str, x: f64, y: f64, size: f64, c: [u8; 3]) {
+        for stroke in hershey::strokes(s, 0.0, 0.0, Align::Left, size as f32) {
+            for w in stroke.windows(2) {
+                let p = |q: [f32; 2]| (x + f64::from(q[0]), y - f64::from(q[1]));
+                let (a, b) = (p(w[0]), p(w[1]));
+                self.line(a.0, a.1, b.0, b.1, c);
             }
         }
     }
@@ -735,6 +938,7 @@ mod tests {
             header: vec![],
             legend: vec![],
             markers: vec![],
+            sketch: None,
             lighting: crate::Lighting::Headlight,
         };
         let l = s.layout();
@@ -762,5 +966,89 @@ mod tests {
         let a = to_pixel(&cam, [0.0, 0.0, 0.0]);
         let b = to_pixel(&cam, [0.0, 10.0, 0.0]);
         assert!(b[0] > a[0] + 1.0 && (b[1] - a[1]).abs() < 1e-9);
+    }
+
+    /// `snapshot --sketch`'s overlay: a bold line two pixels wide however
+    /// it runs, a dashed one with gaps, dots, and labels kept apart.
+    #[test]
+    fn a_sketch_overlay_draws_its_strokes_and_labels() {
+        const RED: [u8; 3] = [200, 0, 0];
+        const GREY: [u8; 3] = [100, 100, 100];
+        let overlay = SketchOverlay {
+            strokes: vec![
+                Stroke {
+                    points: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+                    color: RED,
+                    dashed: false,
+                    bold: true,
+                },
+                Stroke {
+                    points: vec![[0.0, 5.0, 0.0], [10.0, 5.0, 0.0]],
+                    color: GREY,
+                    dashed: true,
+                    bold: false,
+                },
+            ],
+            dots: vec![([10.0, 10.0, 0.0], RED)],
+            labels: vec![
+                Label {
+                    point: [5.0, 0.0, 0.0],
+                    text: "H".into(),
+                    color: RED,
+                    boxed: true,
+                },
+                Label {
+                    point: [5.0, 0.0, 0.0],
+                    text: "L 10".into(),
+                    color: RED,
+                    boxed: true,
+                },
+            ],
+        };
+        let sheet = Sheet {
+            views: vec![View::Top],
+            width: 300,
+            height: 300,
+            dims: false,
+            header: vec!["t".into(), "a".into(), "key".into()],
+            legend: vec![],
+            markers: vec![],
+            sketch: Some(overlay),
+            lighting: crate::Lighting::Headlight,
+        };
+        // A third header line makes the header taller.
+        assert_eq!(sheet.layout().header, HEADER + 18);
+        let bbox = Some(([0.0, 0.0, 0.0], [10.0, 10.0, 0.0]));
+        let views = sheet.views(bbox, &crate::ColorScheme::cornfield());
+        let l = sheet.layout();
+        let blank = crate::Image {
+            width: l.panel_w,
+            height: l.panel_h,
+            rgba: vec![255; (l.panel_w * l.panel_h * 4) as usize],
+        };
+        let cam = views[0].0;
+        let img = sheet.compose(&[blank], &[cam], bbox, [255, 255, 255]);
+        let at = |x: f64, y: f64| {
+            let i = ((y.round() as u32 * img.width + x.round() as u32) * 4) as usize;
+            [img.rgba[i], img.rgba[i + 1], img.rgba[i + 2]]
+        };
+        let off = f64::from(l.header);
+        let [x0, y0] = to_pixel(&cam, [2.0, 0.0, 0.0]);
+        // The horizontal bold line is two rows deep.
+        assert_eq!(at(x0, y0 + off), RED);
+        assert_eq!(at(x0, y0 + off + 1.0), RED);
+        // The dashed line has both ink and gaps along it.
+        let [xa, ya] = to_pixel(&cam, [0.5, 5.0, 0.0]);
+        let [xb, _] = to_pixel(&cam, [4.5, 5.0, 0.0]);
+        let row: Vec<[u8; 3]> = (xa as u32..xb as u32)
+            .map(|x| at(f64::from(x), ya + off))
+            .collect();
+        assert!(
+            row.contains(&GREY) && row.contains(&[255, 255, 255]),
+            "{row:?}"
+        );
+        // The dot.
+        let [xd, yd] = to_pixel(&cam, [10.0, 10.0, 0.0]);
+        assert_eq!(at(xd, yd + off), RED);
     }
 }

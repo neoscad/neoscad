@@ -45,8 +45,8 @@ public sealed partial class DocumentSession
         return path;
     }
 
-    /// <summary>What a detached request runs with: the customizer's values and the parts toggle.</summary>
-    RunOptions PanelRunOptions() => new(loop.Overrides(), loop.State().Parts, []);
+    /// <summary>What a detached request runs with: the customizer's values, the parts toggle and the extensions.</summary>
+    RunOptions PanelRunOptions() => new(loop.Overrides(), loop.State().Parts, enable);
 
     /// <summary>
     /// Run a blocking core call on the thread pool and finish on the UI

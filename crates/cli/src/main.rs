@@ -170,8 +170,8 @@ struct Cli {
     /// `part` turns on NeoSCAD's `part("name") { ... }` extension (named
     /// parts for `check` and `measure`), `sketch` its constrained 2D
     /// sketches (`sketch() { ... }`), `query` its geometry queries
-    /// (`anchor()`, `child_anchors()`, `child_bounds()` and
-    /// `child_measure()`), `exact` STEP export
+    /// (`anchor()`, `child_anchors()`, `child_bounds()`,
+    /// `child_measure()`, `child_distance()`), `exact` STEP export
     /// (`-o x.step`) with exact surfaces where `$fn` is not set. `all`
     /// turns on OpenSCAD's experiments only, never NeoSCAD's extensions.
     /// OpenSCAD's experimental features

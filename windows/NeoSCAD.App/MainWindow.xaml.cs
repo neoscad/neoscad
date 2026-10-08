@@ -82,6 +82,7 @@ public sealed partial class MainWindow : Window
 
         BuildExamplesMenu();
         BuildExportMenu();
+        StartLanguageSettings(); // MainWindow.Language.cs
         StartUpdates(); // MainWindow.Updates.cs
         StartAgents(); // MainWindow.Agents.cs
         if (panel is not null) ShowPanel(panel);

@@ -202,6 +202,62 @@ pub struct SketchReport {
     /// `[x, y]` guess rewritten to its solved coordinates, when that
     /// changes any. The language server offers it as a code action.
     pub pin: Option<SketchEdit>,
+    /// Every constraint statement (and fillet or chamfer), in the order
+    /// they ran, with what the solve made of it: what hover on a
+    /// constraint and `snapshot --sketch` show.
+    pub constraints: Vec<SketchConstraint>,
+}
+
+/// One statement of a sketch body that constrains it (a constraint, an
+/// entity's own radius, a fillet or chamfer), for the tools.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchConstraint {
+    /// What it is: the statement's name (`horizontal`, `distance`,
+    /// `fillet`; `radius` for a circle's `r`).
+    pub kind: &'static str,
+    /// Its source text, as messages name it (`length(axis, slot_len)`).
+    pub text: String,
+    pub unit: u32,
+    pub span: Span,
+    /// The entities it is about (indices into [`SketchReport::entities`]),
+    /// in argument order.
+    pub entities: Vec<usize>,
+    /// Its dimension, for a dimensional constraint (a length, radius,
+    /// distance, angle in degrees, fillet radius or chamfer size).
+    pub value: Option<f64>,
+    pub status: ConstraintStatus,
+    /// For an unmet constraint, the largest residual of its equations at
+    /// the end of the solve, in sketch units; the others are met within
+    /// the solver's tolerance (or, for fillets and chamfers, are not
+    /// equations at all).
+    pub residual: Option<f64>,
+}
+
+/// What the solve made of a constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstraintStatus {
+    /// Met, and needed.
+    Satisfied,
+    /// Implied by the others (`sketch-redundant`).
+    Redundant,
+    /// In a set that cannot hold together (`sketch-conflict`).
+    Conflicting,
+    /// Not met by a solve that did not converge.
+    Unmet,
+    /// The sketch was not solved (an earlier error), so nothing is known.
+    Unknown,
+}
+
+impl ConstraintStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConstraintStatus::Satisfied => "satisfied",
+            ConstraintStatus::Redundant => "redundant",
+            ConstraintStatus::Conflicting => "conflicting",
+            ConstraintStatus::Unmet => "unmet",
+            ConstraintStatus::Unknown => "unknown",
+        }
+    }
 }
 
 /// One entity of a sketch, for the tools.
@@ -217,6 +273,10 @@ pub struct SketchEntity {
     pub span: Span,
     /// Its solved values; `None` when the sketch did not solve.
     pub solved: Option<SketchValues>,
+    /// Whether the constraints leave it free to move: a point or radius
+    /// with a free coordinate, or a curve with a free point (the
+    /// under-constrained highlight of `snapshot --sketch`).
+    pub free: bool,
 }
 
 /// An entity's solved values. Angles are in degrees, counter-clockwise

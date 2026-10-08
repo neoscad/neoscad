@@ -44,6 +44,39 @@ pub enum Facts {
     },
 }
 
+impl Facts {
+    /// The box alone, as [`GeometryOracle::bounds`] answers it.
+    pub fn bounds(&self) -> Bounds {
+        match *self {
+            Facts::Empty => Bounds::Empty,
+            Facts::Flat { min, max, .. } => Bounds::Flat { min, max },
+            Facts::Solid { min, max, .. } => Bounds::Solid { min, max },
+        }
+    }
+}
+
+/// What `child_bounds()` learns: a subtree's bounding box alone. An
+/// oracle may answer it without rendering (`geom::fastbounds`), where
+/// that gives the rendered box bit for bit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Bounds {
+    Empty,
+    Flat { min: [f64; 2], max: [f64; 2] },
+    Solid { min: [f64; 3], max: [f64; 3] },
+}
+
+/// What `child_distance()` learns about two subtrees.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Distance {
+    /// One of them renders to nothing.
+    Empty,
+    /// One is 2D and the other 3D: no distance is defined between them.
+    Mixed,
+    /// The smallest distance between the two shapes as rendered: 0 where
+    /// they overlap (one inside the other included) or touch.
+    Apart(f64),
+}
+
 /// Why the oracle gave no facts.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OracleError {
@@ -69,4 +102,32 @@ pub trait GeometryOracle: std::fmt::Debug + Send + Sync {
         interrupt: Option<&Arc<AtomicBool>>,
         guard: Option<&Arc<crate::limits::Guard>>,
     ) -> Result<Facts, OracleError>;
+
+    /// The box of `subtree`, which must be exactly the box of
+    /// [`GeometryOracle::measure`]'s answer. The default renders; an
+    /// oracle may answer from the tree where that is proved identical.
+    fn bounds(
+        &self,
+        subtree: &Node,
+        interrupt: Option<&Arc<AtomicBool>>,
+        guard: Option<&Arc<crate::limits::Guard>>,
+    ) -> Result<Bounds, OracleError> {
+        self.measure(subtree, interrupt, guard).map(|f| f.bounds())
+    }
+
+    /// The distance between subtrees `a` and `b` as rendered (each a group
+    /// of children, as [`GeometryOracle::measure`] takes them). The
+    /// default says it cannot.
+    fn distance(
+        &self,
+        a: &Node,
+        b: &Node,
+        interrupt: Option<&Arc<AtomicBool>>,
+        guard: Option<&Arc<crate::limits::Guard>>,
+    ) -> Result<Distance, OracleError> {
+        let _ = (a, b, interrupt, guard);
+        Err(OracleError::Unsupported(
+            "this host cannot measure distances".into(),
+        ))
+    }
 }

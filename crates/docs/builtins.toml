@@ -1002,6 +1002,19 @@ example = "module report() {\n  m = child_measure(0);\n  echo(volume = m.volume,
 notes = "Measured as child_bounds() measures, from the same render. dim is 2 or 3; for a child that renders to nothing, empty is true and dim, bounds, size and center are undef (no warning: the object says so). Areas and volumes are summed over the rendered mesh in a fixed order, so they are the same at any thread count and on every platform. Without --enable query it is an unknown function, as in OpenSCAD."
 
 [[function]]
+name = "child_distance"
+signature = "child_distance(a, b)"
+summary = "Inside a module: the smallest distance between what children(a) and children(b) would make here, rendered; 0 where they overlap."
+extension = "query"
+params = [
+    "a: number, list or range -- the first children, as children() takes them",
+    "b: number, list or range -- the second children",
+]
+returns = "number; undef with a warning when either renders to nothing (query-empty), when one is 2D and the other 3D, outside a module, or with a bad index"
+example = "module clearance() {\n  echo(gap = child_distance(0, 1));\n  children();\n}\nclearance() {\n  cube(10);\n  translate([13, 0, 0]) cube(10);\n}"
+notes = "Measured on the rendered children as measure --between measures two parts: 0 when they overlap by more than a sliver, one inside the other included; otherwise the exact smallest distance between their surfaces, which is 0 where they touch. Two 2D children are compared in the plane. Both children are rendered through the shared geometry cache, and the call counts as one query against the queries resource limit. A later children(a) or children(b) reuses the instantiated child as with child_anchors(). Without --enable query it is an unknown function, as in OpenSCAD."
+
+[[function]]
 name = "echo"
 signature = "echo(values...) expression"
 summary = "Print values, then return the expression's value (for tracing functions)."

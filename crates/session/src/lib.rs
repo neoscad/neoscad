@@ -68,6 +68,7 @@ mod parse;
 pub mod parts;
 pub mod sketches;
 pub mod snapshot;
+pub mod snapshot_sketch;
 pub mod stats;
 mod usehint;
 

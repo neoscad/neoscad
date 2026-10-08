@@ -10,6 +10,8 @@
 //!   `clipper2-rust` (sanitizing, booleans, `offset`, `fill`).
 //! - [`extrude`]: `linear_extrude` and `rotate_extrude`.
 //! - [`hull`] and [`minkowski`]: `hull()` and `minkowski()` in 2D and 3D.
+//! - [`fastbounds`]: `child_bounds()` answered without the kernels, where
+//!   that is the rendered box bit for bit.
 //! - [`evaluate`]: the tree walk, with a cache keyed by
 //!   [`eval::dump::Keys`] and optional parallelism (feature `parallel`).
 //! - [`export`]: the mesh a result exports as, handed to the `io` crate's
@@ -28,6 +30,7 @@ pub mod evaluate;
 pub mod exact;
 pub mod export;
 pub mod extrude;
+pub mod fastbounds;
 pub mod fragments;
 pub mod hull;
 mod import;

@@ -17,6 +17,17 @@
 //! which the session always does; the command line does it when a query
 //! has rendered (`Oracle::asked`).
 //!
+//! **The fast path.** `child_bounds()` asks only for a box, which for
+//! primitives under transforms, unions and hulls is found without the
+//! kernels (`geom::fastbounds`); the oracle tries that first and renders
+//! when it declines. It is used only where `tests/fastbounds.rs` shows it
+//! equal to the rendered box, bit for bit.
+//!
+//! **Distances.** `child_distance()` renders both children and measures
+//! as `measure --between` does (`crate::measure::between`): 0 when they
+//! overlap, else the exact smallest distance between their surfaces (in
+//! 2D, between their outlines' triangles in the plane).
+//!
 //! **Answers.** The box is the result's own (minima and maxima, which no
 //! order of evaluation changes). Areas and volumes are serial sums in mesh
 //! order: over a 2D result's outlines, over a mesh's faces, or over a
@@ -27,7 +38,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use eval::oracle::{Facts, GeometryOracle, OracleError};
+use eval::oracle::{Bounds, Distance, Facts, GeometryOracle, OracleError};
 use geom::Geometry;
 use geom::polyset::PolySet;
 
@@ -43,6 +54,8 @@ pub struct Oracle {
     /// is measured once. Kept per request, so it never outlives the
     /// sources or limits it was computed under.
     answers: Mutex<HashMap<u128, Facts>>,
+    /// Distances already measured, by the two subtrees' result keys.
+    distances: Mutex<HashMap<(u128, u128), Distance>>,
     asked: AtomicBool,
 }
 
@@ -68,6 +81,7 @@ impl Oracle {
             renderer,
             opts,
             answers: Mutex::new(HashMap::new()),
+            distances: Mutex::new(HashMap::new()),
             asked: AtomicBool::new(false),
         }
     }
@@ -80,14 +94,82 @@ impl Oracle {
     }
 }
 
+impl Oracle {
+    /// `subtree` rendered through the shared renderer under the
+    /// evaluation's interrupt flag and limits, with its result key.
+    fn render(
+        &self,
+        subtree: &eval::Node,
+        keys: &eval::dump::Keys,
+        interrupt: Option<&Arc<AtomicBool>>,
+        guard: Option<&Arc<eval::limits::Guard>>,
+    ) -> Result<Option<Geometry>, OracleError> {
+        self.asked.store(true, Ordering::Relaxed);
+        let mut opts = self.opts.clone();
+        opts.interrupt = interrupt.cloned();
+        opts.guard = guard.cloned();
+        let r =
+            self.renderer
+                .render(subtree, keys, opts)
+                .map_err(|u| match u.is_interrupted() {
+                    true => OracleError::Interrupted,
+                    false => {
+                        OracleError::Unsupported(format!("{}() is not implemented yet", u.what))
+                    }
+                })?;
+        Ok(r.geometry)
+    }
+}
+
 impl GeometryOracle for Oracle {
+    fn bounds(
+        &self,
+        subtree: &eval::Node,
+        interrupt: Option<&Arc<AtomicBool>>,
+        guard: Option<&Arc<eval::limits::Guard>>,
+    ) -> Result<Bounds, OracleError> {
+        if let Some(b) = geom::fastbounds::bounds(subtree, guard.map(|g| &**g)) {
+            return Ok(b);
+        }
+        self.measure(subtree, interrupt, guard).map(|f| f.bounds())
+    }
+
+    fn distance(
+        &self,
+        a: &eval::Node,
+        b: &eval::Node,
+        interrupt: Option<&Arc<AtomicBool>>,
+        guard: Option<&Arc<eval::limits::Guard>>,
+    ) -> Result<Distance, OracleError> {
+        let (keys_a, keys_b) = (
+            eval::dump::Keys::new(a, &*self.opts.fs),
+            eval::dump::Keys::new(b, &*self.opts.fs),
+        );
+        let key = (geom::result_key(a, &keys_a), geom::result_key(b, &keys_b));
+        if let Some(d) = self
+            .distances
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
+            return Ok(*d);
+        }
+        let ga = self.render(a, &keys_a, interrupt, guard)?;
+        let gb = self.render(b, &keys_b, interrupt, guard)?;
+        let d = distance(ga.as_ref(), gb.as_ref());
+        self.distances
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, d);
+        Ok(d)
+    }
+
     fn measure(
         &self,
         subtree: &eval::Node,
         interrupt: Option<&Arc<AtomicBool>>,
         guard: Option<&Arc<eval::limits::Guard>>,
     ) -> Result<Facts, OracleError> {
-        self.asked.store(true, Ordering::Relaxed);
         let keys = eval::dump::Keys::new(subtree, &*self.opts.fs);
         let key = geom::result_key(subtree, &keys);
         if let Some(f) = self
@@ -96,21 +178,11 @@ impl GeometryOracle for Oracle {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&key)
         {
+            self.asked.store(true, Ordering::Relaxed);
             return Ok(*f);
         }
-        let mut opts = self.opts.clone();
-        opts.interrupt = interrupt.cloned();
-        opts.guard = guard.cloned();
-        let r =
-            self.renderer
-                .render(subtree, &keys, opts)
-                .map_err(|u| match u.is_interrupted() {
-                    true => OracleError::Interrupted,
-                    false => {
-                        OracleError::Unsupported(format!("{}() is not implemented yet", u.what))
-                    }
-                })?;
-        let f = facts(r.geometry.as_ref());
+        let g = self.render(subtree, &keys, interrupt, guard)?;
+        let f = facts(g.as_ref());
         self.answers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -152,6 +224,70 @@ pub fn facts(g: Option<&Geometry>) -> Facts {
                 surface_area,
             }
         }
+    }
+}
+
+/// The distance between two rendered results, as `measure --between`
+/// finds it between parts: 0 when they overlap by more than a sliver (one
+/// inside the other included, which their surfaces alone would not
+/// show), otherwise the smallest distance between their surfaces. 2D
+/// shapes are compared in the plane: overlap by a Clipper intersection,
+/// distance between their triangulations at z = 0. Everything is serial,
+/// so the answer is the same at any thread count.
+pub fn distance(a: Option<&Geometry>, b: Option<&Geometry>) -> Distance {
+    use crate::mesh::{Bvh, Mesh};
+    let (Some(a), Some(b)) = (a.filter(|g| !g.is_empty()), b.filter(|g| !g.is_empty())) else {
+        return Distance::Empty;
+    };
+    if a.dimension() != b.dimension() {
+        return Distance::Mixed;
+    }
+    let area = |p: &geom::polygon2d::Polygon2d| -> f64 {
+        p.outlines
+            .iter()
+            .map(|o| shoelace(&o.vertices))
+            .sum::<f64>()
+            .abs()
+    };
+    let (ma, mb) = match (a, b) {
+        (Geometry::Polygon2d(p), Geometry::Polygon2d(q)) => {
+            let both =
+                geom::clipper::apply(&[Some(&**p), Some(&**q)], geom::clipper::Op2::Intersection);
+            if area(&both) > 1e-12_f64.max(1e-9 * area(p).min(area(q))) {
+                return Distance::Apart(0.0);
+            }
+            let flat = |p: &geom::polygon2d::Polygon2d| {
+                let ps = p.tessellate();
+                Mesh {
+                    verts: ps.vertices.clone(),
+                    tris: ps
+                        .faces
+                        .iter()
+                        .filter(|f| f.len() == 3)
+                        .map(|f| [f[0], f[1], f[2]])
+                        .collect(),
+                    ..Mesh::default()
+                }
+            };
+            (flat(p), flat(q))
+        }
+        _ => {
+            let (sa, sb) = (crate::stats::solid(a), crate::stats::solid(b));
+            let both = sa.boolean(&sb, geom::manifold_geom::OpType::Intersect);
+            let (ma, mb) = (Mesh::of_solid(&sa), Mesh::of_solid(&sb));
+            // Serial volumes in mesh order, as the other answers are; the
+            // floor is `measure --between`'s.
+            let (va, vb) = (ma.mass().0, mb.mass().0);
+            let overlap = Mesh::of_solid(&both).mass().0;
+            if overlap > 1e-9_f64.max(1e-9 * va.min(vb)) {
+                return Distance::Apart(0.0);
+            }
+            (ma, mb)
+        }
+    };
+    match Bvh::new(&ma).closest(&ma, &Bvh::new(&mb), &mb) {
+        Some((d, _, _)) => Distance::Apart(d),
+        None => Distance::Empty,
     }
 }
 

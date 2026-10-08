@@ -76,8 +76,14 @@ pub(crate) struct Args {
     #[arg(long)]
     issues: bool,
 
+    /// Draw the constrained sketch of this name flat, in its own plane:
+    /// its entities (construction dashed, free ones orange, conflicting
+    /// red), names and constraint glyphs (needs `--enable sketch`).
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["diff", "highlight", "issues"])]
+    sketch: Option<String>,
+
     /// `part`: neoscad's `part("name") { ... }` extension; parts are then
-    /// drawn in colours with a legend.
+    /// drawn in colours with a legend. `sketch`: constrained sketches.
     #[arg(long, value_name = "FEATURE", action = clap::ArgAction::Append)]
     enable: Vec<String>,
 
@@ -119,6 +125,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
         "lighting": a.lighting,
         "highlight": a.highlight,
         "issues": a.issues,
+        "sketch": a.sketch,
         "enable": a.enable,
         "json": match a.format.as_deref() {
             None => false,
@@ -217,6 +224,7 @@ pub fn request(
         lighting,
         highlight: strings("highlight"),
         issues,
+        sketch: s("sketch").map(str::to_string),
     })
 }
 

@@ -77,6 +77,10 @@ pub fn hover(ctx: &Ctx<'_>, params: &Value) -> Value {
         Target::Builtin(e) if e.iter().any(|e| e.name == "sketch") => {
             crate::sketch::hover_sketch(main.source(), &main.path, ctx.sketches(), span)
         }
+        // A constraint statement in a sketch body: its state.
+        Target::Builtin(_) => {
+            crate::sketch::hover_constraint(main.source(), &main.path, ctx.sketches(), span)
+        }
         Target::Def(found) if Arc::ptr_eq(&found.file, main) => found.def().value.and_then(|v| {
             crate::sketch::hover_values(main.source(), &main.path, ctx.sketches(), v)
         }),

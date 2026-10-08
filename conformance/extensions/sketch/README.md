@@ -23,6 +23,10 @@ change meant to alter them, and read the diff.
   remove, the drawing pinned to the solution, a guess for an unguessed
   point, a fillet size that fits; and loops that cross, and labels from
   values (`pts[0]`).
+- `fillets.scad`: fillets and chamfers between a line and an arc
+  (stage 7), from inside and outside the arc's circle, and their errors
+  (too large, with the size that fits as the hint's edit, applied by
+  the test; a tangent join; two arcs).
 
 For `diagnostics.scad` and `hints.scad`, `NAME.json` holds the
 diagnostics as JSON (`docs/cli-json.md`), hints and their edits

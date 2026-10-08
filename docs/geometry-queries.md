@@ -4,14 +4,15 @@
 
 A geometry query lets a module ask about its own children while the
 program runs: their bounding box (`child_bounds()`), their volume, area
-and size (`child_measure()`), or the named points they declare
-(`anchor()` and `child_anchors()`). The answers are ordinary numbers, so
+and size (`child_measure()`), the distance between two of them
+(`child_distance()`), or the named points they declare (`anchor()` and
+`child_anchors()`). The answers are ordinary numbers, so
 a module can size a base plate to its child, put a hole beside it, or
 centre it, which plain OpenSCAD cannot do without the numbers being
 typed in by hand.
 
 The design, with its reasons and sources, is
-`docs/language-extensions.md` (sections 5 and 11.4 to 11.5).
+`docs/language-extensions.md` (sections 5 and 11.4 to 11.6).
 
 Contents:
 
@@ -19,6 +20,7 @@ Contents:
 - [Quick start](#quick-start)
 - [child_bounds(): the bounding box of a module's children](#child_bounds-the-bounding-box-of-a-modules-children)
 - [child_measure(): volume, area, size and centre](#child_measure-volume-area-size-and-centre)
+- [child_distance(): the gap between two children](#child_distance-the-gap-between-two-children)
 - [anchor() and child_anchors(): named points](#anchor-and-child_anchors-named-points)
 - [Evaluation order and cost](#evaluation-order-and-cost)
 - [Preview and render](#preview-and-render)
@@ -34,8 +36,8 @@ checks that it gives exactly the output shown with it.
 ## OpenSCAD superset: turning queries on
 
 Queries are off by default, and off a file means exactly what it means
-in OpenSCAD: `child_bounds()`, `child_measure()` and `child_anchors()`
-are unknown functions and `anchor()` an unknown module, with OpenSCAD's
+in OpenSCAD: `child_bounds()`, `child_measure()`, `child_distance()` and
+`child_anchors()` are unknown functions and `anchor()` an unknown module, with OpenSCAD's
 own warnings. A program's own definitions of those names win, on or off.
 Turn queries on with:
 
@@ -45,7 +47,9 @@ Turn queries on with:
   NeoSCAD's extensions;
 - `neoscad serve` and MCP requests: `"enable": ["query"]`.
 
-The apps have no setting for queries yet.
+- the apps: Settings > Language > "Geometry queries (query)" on macOS,
+  Preferences > Language on Linux, and Design > NeoSCAD Extensions on
+  Windows. Changing it runs the open documents again.
 
 Nothing is new syntax: the queries are functions and `anchor()` is a
 module, so a file parses, formats and prints its `.ast` the same with
@@ -155,6 +159,38 @@ The sums are taken over the rendered mesh in a fixed order, so the
 numbers are the same at any thread count and on every platform (the
 browser build included).
 
+## child_distance(): the gap between two children
+
+`child_distance(a, b)` is the smallest distance between what
+`children(a)` and `children(b)` would make, rendered, with `a` and `b` as
+`children()` takes an index (a list is those children together). It is
+measured as `neoscad measure --between` measures two parts: 0 when they
+overlap, one inside the other included, and otherwise the exact distance
+between their surfaces, which is 0 where they touch. Two 2D children are
+compared in the plane. A child that makes no geometry gives `undef` with
+a `query-empty` warning, and a 2D child with a 3D one gives `undef` with
+an `invalid-argument` warning.
+
+```openscad
+module clearance() {
+  echo(gap = child_distance(0, 1));
+  children();
+}
+clearance() {
+  cube(10);
+  translate([13, 0, 0]) cube(10);
+}
+clearance() {
+  cube(10, center = true);
+  sphere(2);
+}
+```
+
+```text
+ECHO: gap = 3
+ECHO: gap = 0
+```
+
 ## anchor() and child_anchors(): named points
 
 `anchor(name, point, dir = undef)` names a point, and optionally a
@@ -201,8 +237,15 @@ reverses that for one child:
    is held back, and the `rands()` state and node numbering are put back
    afterwards, so adding a query changes nothing else the model prints
    or builds.
-2. `child_bounds()` and `child_measure()` render it, through the same
-   geometry cache as the final render.
+2. `child_bounds()`, `child_measure()` and `child_distance()` render
+   it, through the same geometry cache as the final render. For
+   `child_bounds()` of primitives, extrusions and 2D hulls under
+   transforms, and of 3D unions of them, the box is found without the
+   kernels: the leaves are built and moved as a render builds and moves
+   them, and a union's box is its operands' (a test renders thousands of
+   generated models to check that this gives the rendered box to the
+   last bit wherever it is used). Differences, intersections, 2D unions,
+   3D hulls, `minkowski`, `offset` and the like are rendered.
 3. The module goes on with the numbers.
 4. A later `children(index)` in the same module call reuses the
    instance when the `$` variables it read are the same there, and
@@ -251,13 +294,14 @@ Query renders are renders: the time limit and a cancellation stop them,
 and they count against the memory and triangle limits like the final
 render. The `queries` limit (`--limit queries=N`; 10,000 for `serve`,
 `mcp` and the apps, unlimited on the command line) counts the
-`child_bounds()` and `child_measure()` calls of one evaluation and stops
+`child_bounds()`, `child_measure()` and `child_distance()` calls of one
+evaluation (whether they render or not) and stops
 a loop or recursion that queries at every step. `child_anchors()`
 renders nothing and does not count.
 
 | Code | Severity | When |
 |---|---|---|
-| `query-empty` | warning | `child_bounds()` of children that make no geometry; the answer is `undef` |
+| `query-empty` | warning | `child_bounds()` or `child_distance()` of children that make no geometry; the answer is `undef` |
 | `query-unavailable` | warning | the host cannot render (no geometry is available), or the child uses something the renderer does not build; the answer is `undef` |
 | `query-outside-module` | warning | a query outside any module body; the answer is `undef` |
 | `query-index` | warning | an index out of range or not a number, with `children()`'s text; the answer is `undef` |

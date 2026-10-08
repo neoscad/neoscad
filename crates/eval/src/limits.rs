@@ -164,7 +164,8 @@ pub struct Limits {
     /// refused before the first one, rather than left to run for minutes
     /// between the time checks (which come once per iteration).
     pub sketch_unknowns: Option<u64>,
-    /// Geometry queries (`child_bounds()`, `child_measure()`; `--enable
+    /// Geometry queries (`child_bounds()`, `child_measure()`,
+    /// `child_distance()`; `--enable
     /// query`) in one evaluation. Each renders its child, so a query in a
     /// loop or a recursion is a render per step; the time limit stops one
     /// long render, and this stops a pattern that asks for thousands of

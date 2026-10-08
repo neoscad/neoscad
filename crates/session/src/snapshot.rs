@@ -12,6 +12,10 @@
 //! Panels are lit by a headlight by default ([`render::Lighting`]), so a
 //! face that slopes away from OpenSCAD's fixed light is still legible.
 //!
+//! `sketch` draws one constrained sketch flat in its own plane instead,
+//! with its entities, names and constraint glyphs over the solved profile
+//! (`crate::snapshot_sketch`).
+//!
 //! `diff` compares against another version with real booleans on both
 //! rendered solids: MODEL - OTHER is what was added (green), OTHER - MODEL
 //! what was removed (red, translucent), and their intersection what stayed
@@ -54,6 +58,9 @@ pub struct SnapshotRequest {
     pub highlight: Vec<String>,
     /// Run `check` with these settings and mark its findings on the sheet.
     pub issues: Option<CheckSettings>,
+    /// Draw the constrained sketch of this name (`--enable sketch`) flat,
+    /// with its entities and constraints, instead of the model.
+    pub sketch: Option<String>,
 }
 
 impl SnapshotRequest {
@@ -69,6 +76,7 @@ impl SnapshotRequest {
             lighting: render::Lighting::Headlight,
             highlight: Vec::new(),
             issues: None,
+            sketch: None,
         }
     }
 }
@@ -373,6 +381,13 @@ impl Session {
                     .into(),
             ));
         }
+        if req.sketch.is_some() && (marking || req.diff.is_some()) {
+            return Err(SnapshotError::Failed(
+                "--sketch draws one sketch flat: it cannot be combined with --highlight, \
+                 --issues or --diff"
+                    .into(),
+            ));
+        }
         let (model, parts) = if req.issues.is_some() {
             self.render_parts(&req.run, &scheme)?
         } else {
@@ -398,6 +413,19 @@ impl Session {
         if model.exit_code != 0 {
             return failed(model.log, model.exit_code);
         }
+        // The sketch, from the run's facts, before anything is drawn: an
+        // unknown name is the request's error, listing the names.
+        let sketch = match &req.sketch {
+            None => None,
+            Some(name) => {
+                let found = crate::sketches::find(&model.log.sketches.0, name)
+                    .map_err(SnapshotError::Failed)?;
+                Some(
+                    crate::snapshot_sketch::sheet(found[0], &scheme)
+                        .map_err(SnapshotError::Failed)?,
+                )
+            }
+        };
         let evaluate_ms = model.timings.parse + model.timings.evaluate;
         let mut geometry_ms = model.timings.geometry;
 
@@ -408,6 +436,8 @@ impl Session {
                 .map_or(req.run.input.clone(), |f| f.to_string_lossy().into_owned()),
             if req.diff.is_some() {
                 "diff"
+            } else if req.sketch.is_some() {
+                "sketch"
             } else if req.preview {
                 "preview"
             } else {
@@ -476,7 +506,14 @@ impl Session {
             geometry_ms += self.now() - t;
         }
         let mut markers = Vec::new();
-        let (scene, is_2d) = if let Some(m) = marked {
+        let mut overlay = None;
+        let (scene, is_2d) = if let Some(sk) = sketch {
+            header.extend(sk.header);
+            legend = sk.legend;
+            summary.insert("sketch".into(), sk.summary);
+            overlay = Some(sk.overlay);
+            (sk.scene, true)
+        } else if let Some(m) = marked {
             markers = m.markers;
             (m.scene, false)
         } else if let Some(other) = &req.diff {
@@ -610,7 +647,7 @@ impl Session {
             if let Some(c) = &check_line {
                 line.push_str(c);
             }
-            if req.diff.is_none() {
+            if req.diff.is_none() && overlay.is_none() {
                 header.push(line);
             }
         } else if model.tree.is_some() {
@@ -618,7 +655,7 @@ impl Session {
                 let d: Vec<String> = (0..3).map(|k| number(hi[k] - lo[k])).collect();
                 header.push(format!("preview size {} mm", d.join(" x ")));
             }
-        } else if req.diff.is_none() {
+        } else if req.diff.is_none() && overlay.is_none() {
             header.push("empty: nothing to draw".into());
         }
 
@@ -638,12 +675,15 @@ impl Session {
             legend,
             lighting: req.lighting,
             markers,
+            sketch: overlay,
         };
         req.run.stage(crate::Stage::Draw);
         let (png, gpu_ms, draw_ms, encode_ms) = self.draw_sheet(&scene, &scheme, &sheet)?;
 
         let mode_name = if req.diff.is_some() {
             "diff"
+        } else if req.sketch.is_some() {
+            "sketch"
         } else if req.preview {
             "preview"
         } else {

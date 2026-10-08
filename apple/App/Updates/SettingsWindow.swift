@@ -133,9 +133,13 @@ final class LanguageSettingsModel: ObservableObject {
     @Published var sketches: Bool {
         didSet { LanguageSettings.sketches = sketches }
     }
+    @Published var queries: Bool {
+        didSet { LanguageSettings.queries = queries }
+    }
 
     init() {
         sketches = LanguageSettings.sketches
+        queries = LanguageSettings.queries
     }
 }
 
@@ -151,6 +155,15 @@ struct LanguageSettingsView: View {
                     "Points, lines, arcs and circles tied by constraints and solved into a 2D shape, "
                         + "like the command line's --enable sketch. A NeoSCAD extension, not in OpenSCAD: "
                         + "off, sketch() is an unknown module as in OpenSCAD."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                Toggle("Geometry queries (query)", isOn: $model.queries)
+                Text(
+                    "Bounding boxes, measurements, distances and named anchors of a module's children "
+                        + "as values (child_bounds() and the like), like the command line's --enable query. "
+                        + "A NeoSCAD extension, not in OpenSCAD: off, they are unknown functions as in OpenSCAD."
                 )
                 .font(.footnote)
                 .foregroundStyle(.secondary)

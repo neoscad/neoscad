@@ -1039,6 +1039,8 @@ fn sketch_json(found: &[&Value]) -> Value {
     let mut v = found[0].clone();
     if let Some(o) = v.as_object_mut() {
         o.remove("pin");
+        o.remove("profile");
+        o.remove("profile_omitted");
         o.insert("instances".into(), json!(found.len()));
     }
     v

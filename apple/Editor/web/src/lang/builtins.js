@@ -13,7 +13,12 @@
 // their vocabulary only inside the body of a `sketch()` call, so those
 // names are coloured as "sketch" there and nowhere else: a coloured `arc`
 // is a sketch arc, never BOSL2's arc() (docs/language-extensions.md,
-// section 7).
+// section 7). The geometry queries (`--enable query`,
+// docs/geometry-queries.md) are coloured everywhere, with the functions
+// (`child_bounds` and the like) and the modules (`anchor`), since a
+// program rarely defines those names; like the sketch vocabulary they are
+// coloured whether the extension is on or not, as the decorations do not
+// know the setting.
 
 import { syntaxTree } from "@codemirror/language";
 import { RangeSetBuilder } from "@codemirror/state";
@@ -25,13 +30,14 @@ const lists = {
   keyword: "import projection render return",
   transformation:
     "translate rotate scale linear_extrude rotate_extrude resize mirror " +
-    "multmatrix color offset hull minkowski children",
+    "multmatrix color offset hull minkowski children anchor",
   boolean: "union difference intersection intersection_for",
   function:
     "abs sign rands min max sin cos asin acos tan atan atan2 round ceil " +
     "floor pow sqrt exp len log ln str chr ord concat lookup search " +
     "version version_num norm cross parent_module dxf_dim dxf_cross " +
-    "is_undef is_list is_num is_bool is_string is_function is_object",
+    "is_undef is_list is_num is_bool is_string is_function is_object " +
+    "child_anchors child_bounds child_measure child_distance",
   model: "sphere cube cylinder polyhedron square polygon text circle surface roof",
   value: "PI",
 };

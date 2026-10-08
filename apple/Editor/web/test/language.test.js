@@ -110,6 +110,19 @@ test("the sketch vocabulary is coloured only inside sketch bodies", () => {
   ]);
 });
 
+test("the geometry queries are coloured as functions and modules", () => {
+  const s = state(
+    "module m() { b = child_bounds(0); d = child_distance(0, 1); anchor(\"tip\", [0, 0, 1]); children(); }",
+  );
+  const found = builtinNames(s).map((n) => `${s.sliceDoc(n.from, n.to)}:${n.kind}`);
+  assert.deepEqual(found, [
+    "child_bounds:function",
+    "child_distance:function",
+    "anchor:transformation",
+    "children:transformation",
+  ]);
+});
+
 test("new lines indent by the structure", () => {
   // Each line is asked for its indentation given the lines above it as
   // they stand; the expected values are the indentation shown.

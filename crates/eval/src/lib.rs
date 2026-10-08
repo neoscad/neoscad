@@ -58,7 +58,7 @@ pub mod message;
 pub mod node;
 mod ops;
 pub mod oracle;
-pub use oracle::{Facts, GeometryOracle, OracleError};
+pub use oracle::{Bounds, Distance, Facts, GeometryOracle, OracleError};
 mod print;
 pub mod recursion;
 mod resolve;
@@ -364,7 +364,12 @@ pub fn builtins() -> Vec<BuiltinName> {
         kind: Module,
         status: BuiltinStatus::Extension,
     });
-    for name in ["child_anchors", "child_bounds", "child_measure"] {
+    for name in [
+        "child_anchors",
+        "child_bounds",
+        "child_measure",
+        "child_distance",
+    ] {
         out.push(BuiltinName {
             name,
             kind: Function,

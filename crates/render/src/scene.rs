@@ -275,6 +275,13 @@ impl Scene {
         self.bbox
     }
 
+    /// Fit `--viewall` to `bbox` instead: a snapshot that draws more
+    /// than the geometry over it (a sketch's construction lines) fits
+    /// that too.
+    pub fn set_bounding_box(&mut self, bbox: BoundingBox) {
+        self.bbox = bbox;
+    }
+
     /// The surfaces, in drawing order.
     pub fn surfaces(&self) -> &[Surface] {
         &self.surfaces

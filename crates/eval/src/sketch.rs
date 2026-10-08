@@ -69,7 +69,8 @@ use crate::eval::{Evaluator, Unit};
 use crate::limits::Limit;
 use crate::message::{Loc, R};
 use crate::node::{
-    Discretizer, Node, NodeKind, SketchEdit, SketchEntity, SketchNode, SketchReport, SketchValues,
+    ConstraintStatus, Discretizer, Node, NodeKind, SketchConstraint, SketchEdit, SketchEntity,
+    SketchNode, SketchReport, SketchValues,
 };
 use crate::sym::{FxBuild, Sym, Syms};
 use crate::trig::{atan2_degrees, cos_degrees, sin_degrees};
@@ -402,6 +403,27 @@ impl Builder {
     /// the tools (`SketchReport::entities`).
     fn entities(&self, sol: Option<&Solution>) -> Vec<SketchEntity> {
         let model = self.model.entities();
+        // The coordinates the message about free degrees of freedom names
+        // (`diagnose`), so the picture and the text agree.
+        let mut free = vec![false; model.len()];
+        if let Some(s) = sol.filter(|s| s.status == Status::Solved && s.dof > 0) {
+            for f in s.free.iter().filter(|f| f.mobility >= 0.01) {
+                free[f.entity.index()] = true;
+            }
+        }
+        let moves = |i: usize| -> bool {
+            free[i]
+                || match model[i] {
+                    sketch_solver::Entity::Point { .. } => false,
+                    sketch_solver::Entity::Line { start, end } => {
+                        free[start.index()] || free[end.index()]
+                    }
+                    sketch_solver::Entity::Arc {
+                        center, start, end, ..
+                    } => free[center.index()] || free[start.index()] || free[end.index()],
+                    sketch_solver::Entity::Circle { center, .. } => free[center.index()],
+                }
+        };
         self.ents
             .iter()
             .zip(&self.ent_locs)
@@ -413,8 +435,151 @@ impl Builder {
                 unit: loc.unit,
                 span: loc.span,
                 solved: sol.and_then(|s| solved_values(&model[i], e.id, s)),
+                free: moves(i),
             })
             .collect()
+    }
+
+    /// Every statement that constrains the sketch, with what the solve
+    /// made of it (`SketchReport::constraints`): one entry per statement
+    /// run, its solver constraints taken together.
+    fn constraints(&self, sol: Option<&Solution>) -> Vec<SketchConstraint> {
+        let model = self.model.constraints();
+        let mut out: Vec<Option<SketchConstraint>> = vec![None; self.stmts.len()];
+        let is = |s: &Source, c: usize| matches!(s, Source::Constraint(id) if id.index() == c);
+        let deps = |list: &[sketch_solver::Dependency], c: usize, with: bool| {
+            list.iter()
+                .any(|d| is(&d.source, c) || (with && d.with.iter().any(|w| is(w, c))))
+        };
+        for (c, con) in model.iter().enumerate() {
+            let stmt = self.cons[c];
+            let st = &self.stmts[stmt];
+            let e = out[stmt].get_or_insert_with(|| SketchConstraint {
+                kind: constraint_kind(con),
+                text: st.text.clone(),
+                unit: st.loc.unit,
+                span: st.loc.span,
+                entities: Vec::new(),
+                value: None,
+                status: if sol.is_some() {
+                    ConstraintStatus::Satisfied
+                } else {
+                    ConstraintStatus::Unknown
+                },
+                residual: None,
+            });
+            for id in constraint_entities(con) {
+                if !e.entities.contains(&id.index()) {
+                    e.entities.push(id.index());
+                }
+            }
+            // The parallel that `distance(l1, l2, d)` implies is the
+            // binding's: its dimension and its state are the distance's.
+            if self.implied[c] {
+                continue;
+            }
+            if e.value.is_none() {
+                e.value = constraint_value(con);
+            }
+            let Some(s) = sol else { continue };
+            let status = if deps(&s.conflicts, c, true) {
+                ConstraintStatus::Conflicting
+            } else if let Some((_, r)) = s.unmet.iter().find(|(x, _)| is(x, c)) {
+                e.residual = Some(e.residual.map_or(*r, |o: f64| o.max(*r)));
+                ConstraintStatus::Unmet
+            } else if deps(&s.redundant, c, false) {
+                ConstraintStatus::Redundant
+            } else {
+                ConstraintStatus::Satisfied
+            };
+            // The worst of its constraints' states.
+            let rank = |s: ConstraintStatus| match s {
+                ConstraintStatus::Conflicting => 3,
+                ConstraintStatus::Unmet => 2,
+                ConstraintStatus::Redundant => 1,
+                _ => 0,
+            };
+            if rank(status) > rank(e.status) {
+                e.status = status;
+            }
+        }
+        for k in &self.corners {
+            let st = &self.stmts[k.stmt];
+            out[k.stmt].get_or_insert_with(|| SketchConstraint {
+                kind: if k.round { "fillet" } else { "chamfer" },
+                text: st.text.clone(),
+                unit: st.loc.unit,
+                span: st.loc.span,
+                entities: vec![k.point.index()],
+                value: Some(k.size),
+                status: if sol.is_some() {
+                    ConstraintStatus::Satisfied
+                } else {
+                    ConstraintStatus::Unknown
+                },
+                residual: None,
+            });
+        }
+        out.into_iter().flatten().collect()
+    }
+}
+
+/// A constraint's statement name.
+fn constraint_kind(c: &Constraint) -> &'static str {
+    match c {
+        Constraint::Coincident(..) => "coincident",
+        Constraint::On { .. } => "on",
+        Constraint::Horizontal(_) => "horizontal",
+        Constraint::Vertical(_) => "vertical",
+        Constraint::Parallel(..) => "parallel",
+        Constraint::Perpendicular(..) => "perpendicular",
+        Constraint::Tangent(..) => "tangent",
+        Constraint::Distance { .. } => "distance",
+        Constraint::Length { .. } => "length",
+        Constraint::Radius { .. } => "radius",
+        Constraint::Diameter { .. } => "diameter",
+        Constraint::Angle { .. } | Constraint::Sweep { .. } => "angle",
+        Constraint::Equal(..) => "equal",
+        Constraint::Midpoint { .. } => "midpoint",
+        Constraint::Symmetric { .. } => "symmetric",
+        Constraint::Fix { .. } => "fix",
+    }
+}
+
+/// The entities a constraint is about, in argument order.
+fn constraint_entities(c: &Constraint) -> Vec<EntityId> {
+    let pair = |p: &Pair| match *p {
+        Pair::Line(l) => vec![l],
+        Pair::Points(a, b) => vec![a, b],
+    };
+    match c {
+        Constraint::Coincident(a, b)
+        | Constraint::Parallel(a, b)
+        | Constraint::Perpendicular(a, b)
+        | Constraint::Tangent(a, b)
+        | Constraint::Equal(a, b) => vec![*a, *b],
+        Constraint::On { point, curve } => vec![*point, *curve],
+        Constraint::Horizontal(p) | Constraint::Vertical(p) => pair(p),
+        Constraint::Distance { a, b, .. } => vec![*a, *b],
+        Constraint::Length { line, .. } => vec![*line],
+        Constraint::Radius { curve, .. } | Constraint::Diameter { curve, .. } => vec![*curve],
+        Constraint::Angle { from, to, .. } => vec![*from, *to],
+        Constraint::Sweep { arc, .. } => vec![*arc],
+        Constraint::Midpoint { point, line } => vec![*point, *line],
+        Constraint::Symmetric { a, b, about } => vec![*a, *b, *about],
+        Constraint::Fix { entity, .. } => vec![*entity],
+    }
+}
+
+/// A dimensional constraint's value.
+fn constraint_value(c: &Constraint) -> Option<f64> {
+    match *c {
+        Constraint::Distance { value, .. }
+        | Constraint::Length { value, .. }
+        | Constraint::Radius { value, .. }
+        | Constraint::Diameter { value, .. } => Some(value),
+        Constraint::Angle { degrees, .. } | Constraint::Sweep { degrees, .. } => Some(degrees),
+        _ => None,
     }
 }
 
@@ -857,6 +1022,7 @@ impl<'a> Evaluator<'a> {
             failed: true,
             codes: b.codes.clone(),
             entities: b.entities(None),
+            constraints: b.constraints(None),
             ..SketchReport::default()
         };
         let empty = |report: SketchReport, convexity: i32| {
@@ -928,6 +1094,7 @@ impl<'a> Evaluator<'a> {
         report.solved = sol.status == Status::Solved;
         report.continuation = sol.continuation;
         report.entities = b.entities(Some(&sol));
+        report.constraints = b.constraints(Some(&sol));
         report.pin = pin_drawing(&b, &sol, &Src { units: &self.units }).and_then(|f| {
             let (loc, text) = f.edit?;
             Some(SketchEdit {
@@ -2607,17 +2774,20 @@ fn cut_corner(b: &Builder, sol: &Solution, g: &mut Graph, k: &Corner) -> Result<
             inc.push((ci, true));
         }
     }
-    let joins_arc = inc.iter().any(|(ci, _)| g.curves[*ci].arc.is_some());
-    if inc.len() != 2 || joins_arc {
-        let text = if joins_arc {
+    let arcs = inc
+        .iter()
+        .filter(|(ci, _)| g.curves[*ci].arc.is_some())
+        .count();
+    if inc.len() != 2 || arcs == 2 {
+        let text = if inc.len() == 2 {
             format!(
-                "{}: the corner {} joins an arc; fillets and chamfers between a line and an arc are not supported yet",
+                "{}: the corner {} joins two arcs; fillets and chamfers between two arcs are not supported yet",
                 stmt.text,
                 b.describe(k.point)
             )
         } else {
             format!(
-                "{}: the corner {} must join exactly two profile lines, and it joins {}",
+                "{}: the corner {} must join exactly two profile curves, lines or a line and an arc, and it joins {}",
                 stmt.text,
                 b.describe(k.point),
                 inc.len()
@@ -2634,6 +2804,15 @@ fn cut_corner(b: &Builder, sol: &Solution, g: &mut Graph, k: &Corner) -> Result<
     let far = |(ci, at_b): (usize, bool), g: &Graph| {
         if at_b { g.curves[ci].a } else { g.curves[ci].b }
     };
+    if arcs == 1 {
+        // The line first, then the arc.
+        let (line, arc) = if g.curves[inc[0].0].arc.is_none() {
+            (inc[0], inc[1])
+        } else {
+            (inc[1], inc[0])
+        };
+        return cut_line_arc(b, g, k, v, line, arc, far(line, g), far(arc, g));
+    }
     let p = g.verts[v];
     let da = sub(g.verts[far(inc[0], g)], p);
     let db = sub(g.verts[far(inc[1], g)], p);
@@ -2706,6 +2885,283 @@ fn cut_corner(b: &Builder, sol: &Solution, g: &mut Graph, k: &Corner) -> Result<
         a: t1,
         b: t2,
         arc,
+        src: k.point,
+    });
+    Ok(())
+}
+
+/// Where a fillet or chamfer of a line–arc corner cuts: the point on the
+/// line, the point on the arc, and for a fillet its centre.
+struct LineArcCut {
+    on_line: [f64; 2],
+    on_arc: [f64; 2],
+    center: Option<[f64; 2]>,
+}
+
+/// Why a line–arc corner cannot be cut at the size asked: the cut needs
+/// more of the line or of the arc than there is (lengths along each), a
+/// fillet inside the arc's circle is not smaller than it, no circle of
+/// that size touches both, or there is no corner at all (the line is
+/// tangent to the arc there).
+enum NoCut {
+    Line { need: f64, have: f64 },
+    Arc { need: f64, have: f64 },
+    Radius { have: f64 },
+    Fit,
+    Smooth,
+}
+
+/// The geometry of a line–arc corner, all from the solved points.
+struct LineArc {
+    /// The corner.
+    p: [f64; 2],
+    /// Unit direction of the line away from the corner, and its length.
+    u: [f64; 2],
+    len: f64,
+    /// The arc's centre and radius (the corner's distance from it).
+    c: [f64; 2],
+    r: f64,
+    /// Unit tangent of the arc leaving the corner, and whether that is
+    /// counter-clockwise about the centre.
+    w: [f64; 2],
+    ccw: bool,
+    /// The arc's sweep from the corner to its other end, in degrees.
+    sweep: f64,
+}
+
+impl LineArc {
+    /// How far round the arc from the corner `x` is, in degrees, in the
+    /// arc's direction from the corner: (0, 360].
+    fn angle_to(&self, x: [f64; 2]) -> f64 {
+        let (a, b) = (sub(self.p, self.c), sub(x, self.c));
+        let cross = a[0] * b[1] - a[1] * b[0];
+        let dot = a[0] * b[0] + a[1] * b[1];
+        let mut t = atan2_degrees(cross, dot);
+        if !self.ccw {
+            t = -t;
+        }
+        if t <= 0.0 {
+            t += 360.0;
+        }
+        t
+    }
+
+    /// Arc length for `deg` degrees of the arc.
+    fn arc_len(&self, deg: f64) -> f64 {
+        self.r * deg * std::f64::consts::PI / 180.0
+    }
+
+    /// The cut for a fillet of radius `size` (`round`) or a chamfer of
+    /// `size` along each curve from the corner. Only square roots: no
+    /// trigonometry decides where it lands (section 4.5).
+    ///
+    /// A fillet's centre is `size` from the line, on the corner's side,
+    /// and `r + size` from the arc's centre, or `r - size` when the line
+    /// runs into the arc's circle (the corner is then inside it): a point
+    /// at `s` along the line's offset meets that circle where
+    /// `s^2 + 2s(D.u) + |D|^2 - rho^2 = 0`, and the root nearest the
+    /// corner is the fillet next to it. A chamfer cuts the arc where the
+    /// circle of radius `size` about the corner crosses it.
+    fn cut(&self, size: f64, round: bool) -> Result<LineArcCut, NoCut> {
+        let (p, u, c, w, r) = (self.p, self.u, self.c, self.w, self.r);
+        let cross = u[0] * w[1] - u[1] * w[0];
+        let dot = u[0] * w[0] + u[1] * w[1];
+        if !cross.is_finite() || cross.abs() < 1e-12 {
+            return Err(NoCut::Smooth);
+        }
+        let (on_line, on_arc, center) = if round {
+            let s_abs = cross.abs();
+            // The line's normal towards the arc's tangent: the corner's
+            // inside.
+            let n = [(w[0] - dot * u[0]) / s_abs, (w[1] - dot * u[1]) / s_abs];
+            let inside = u[0] * (c[0] - p[0]) + u[1] * (c[1] - p[1]) > 0.0;
+            let rho = if inside { r - size } else { r + size };
+            if rho <= 0.0 {
+                return Err(NoCut::Radius { have: r });
+            }
+            let d = [p[0] + size * n[0] - c[0], p[1] + size * n[1] - c[1]];
+            let bq = d[0] * u[0] + d[1] * u[1];
+            let disc = bq * bq - (d[0] * d[0] + d[1] * d[1] - rho * rho);
+            if disc < 0.0 {
+                return Err(NoCut::Fit);
+            }
+            let root = disc.sqrt();
+            let s = [-bq - root, -bq + root]
+                .into_iter()
+                .filter(|s| *s > 0.0)
+                .fold(f64::INFINITY, f64::min);
+            if !s.is_finite() {
+                return Err(NoCut::Fit);
+            }
+            let f = [p[0] + s * u[0] + size * n[0], p[1] + s * u[1] + size * n[1]];
+            let fc = sub(f, c);
+            let l = norm(fc);
+            let on_arc = [c[0] + r * fc[0] / l, c[1] + r * fc[1] / l];
+            ([p[0] + s * u[0], p[1] + s * u[1]], on_arc, Some(f))
+        } else {
+            if size >= 2.0 * r {
+                return Err(NoCut::Arc {
+                    need: size,
+                    have: 2.0 * r,
+                });
+            }
+            // Along the radius towards the centre by size^2 / 2r, then
+            // along the leaving tangent by what is left of `size`.
+            let e = [(c[0] - p[0]) / r, (c[1] - p[1]) / r];
+            let along = size * size / (2.0 * r);
+            let side = (size * size - along * along).max(0.0).sqrt();
+            let on_arc = [
+                p[0] + along * e[0] + side * w[0],
+                p[1] + along * e[1] + side * w[1],
+            ];
+            ([p[0] + size * u[0], p[1] + size * u[1]], on_arc, None)
+        };
+        let s = norm(sub(on_line, p));
+        if s > self.len {
+            return Err(NoCut::Line {
+                need: s,
+                have: self.len,
+            });
+        }
+        let t = self.angle_to(on_arc);
+        if t >= self.sweep {
+            return Err(NoCut::Arc {
+                need: self.arc_len(t.min(360.0)),
+                have: self.arc_len(self.sweep),
+            });
+        }
+        Ok(LineArcCut {
+            on_line,
+            on_arc,
+            center,
+        })
+    }
+}
+
+/// [`cut_corner`] for a corner between a line and an arc (section 4.5):
+/// the line is trimmed, the arc shortened on its own circle, and a
+/// tangent arc (or a line) joins the cuts.
+#[allow(clippy::too_many_arguments)]
+fn cut_line_arc(
+    b: &Builder,
+    g: &mut Graph,
+    k: &Corner,
+    v: usize,
+    line: (usize, bool),
+    arc: (usize, bool),
+    line_far: usize,
+    arc_far: usize,
+) -> Result<(), Note> {
+    let stmt = &b.stmts[k.stmt];
+    let p = g.verts[v];
+    let q = sub(g.verts[line_far], p);
+    let len = norm(q);
+    let (c, arc_ccw) = g.curves[arc.0].arc.expect("an arc");
+    let r = norm(sub(p, c));
+    // The arc runs counter-clockwise from its `a` end to its `b` end when
+    // `arc_ccw`; leaving the corner, it turns the other way when the
+    // corner is its `b` end.
+    let ccw = arc_ccw != arc.1;
+    let rad = sub(p, c);
+    let w = if ccw {
+        [-rad[1] / r, rad[0] / r]
+    } else {
+        [rad[1] / r, -rad[0] / r]
+    };
+    let mut geo = LineArc {
+        p,
+        u: [q[0] / len, q[1] / len],
+        len,
+        c,
+        r,
+        w,
+        ccw,
+        sweep: 360.0,
+    };
+    let z = g.verts[arc_far];
+    geo.sweep = if z == p { 360.0 } else { geo.angle_to(z) };
+    let fail = |why: NoCut| -> Note {
+        match why {
+            NoCut::Smooth => Note {
+                severity: Severity::Error,
+                code: DiagCode::InvalidArgument,
+                loc: stmt.loc,
+                text: format!(
+                    "{}: the line and the arc at {} are tangent there, so there is no corner to cut",
+                    stmt.text,
+                    b.describe(k.point)
+                ),
+                hints: Vec::new(),
+            },
+            why => {
+                // The largest size that fits, by bisection: the cut grows
+                // with the size, but not in closed form.
+                let (mut lo, mut hi) = (0.0, k.size);
+                for _ in 0..60 {
+                    let mid = (lo + hi) / 2.0;
+                    if geo.cut(mid, k.round).is_ok() {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let (l, e) = (
+                    b.describe(g.curves[line.0].src),
+                    b.describe(g.curves[arc.0].src),
+                );
+                let text = match why {
+                    NoCut::Line { need, have } => format!(
+                        "{} needs {} along {l}, which is {} long",
+                        stmt.text,
+                        fmt_number(need),
+                        fmt_number(have)
+                    ),
+                    NoCut::Arc { need, have } => format!(
+                        "{} needs {} along {e}, which is {} long",
+                        stmt.text,
+                        fmt_number(need),
+                        fmt_number(have)
+                    ),
+                    NoCut::Radius { have } => format!(
+                        "{} sits inside arc {e}, so its radius must be under the arc's, {}",
+                        stmt.text,
+                        fmt_number(have)
+                    ),
+                    _ => format!(
+                        "{}: no arc of that size touches both {l} and {e} near {}",
+                        stmt.text,
+                        b.describe(k.point)
+                    ),
+                };
+                Note {
+                    severity: Severity::Error,
+                    code: DiagCode::SketchFilletTooLarge,
+                    loc: stmt.loc,
+                    text,
+                    hints: vec![size_fix(b, k, at_most(lo))],
+                }
+            }
+        }
+    };
+    let cut = geo.cut(k.size, k.round).map_err(fail)?;
+    let t1 = g.add_vertex(cut.on_line, k.point);
+    let t2 = g.add_vertex(cut.on_arc, k.point);
+    for (&(ci, at_b), t) in [line, arc].iter().zip([t1, t2]) {
+        if at_b {
+            g.curves[ci].b = t;
+        } else {
+            g.curves[ci].a = t;
+        }
+    }
+    let arc_of = cut.center.map(|f| {
+        let (from, to) = (sub(cut.on_line, f), sub(cut.on_arc, f));
+        // A fillet always turns the short way round.
+        (f, from[0] * to[1] - from[1] * to[0] > 0.0)
+    });
+    g.curves.push(Curve {
+        a: t1,
+        b: t2,
+        arc: arc_of,
         src: k.point,
     });
     Ok(())

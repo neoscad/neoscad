@@ -174,6 +174,16 @@ impl Language {
         }
     }
 
+    /// The `--enable` names the window runs its document with
+    /// (Preferences > Language, `crate::extensions`): with `sketch`,
+    /// sketch bodies bind the sketch vocabulary for completion, hover and
+    /// navigation. OpenSCAD's feature names are ignored here.
+    pub fn set_enable(&self, names: &[String]) {
+        self.inner
+            .server
+            .set_extensions(eval::Extensions::from_names(names));
+    }
+
     /// The editor closed or its page went away: deliver nothing more. The
     /// worker ends once it sees the flag or its queue close.
     pub fn stop(&self) {

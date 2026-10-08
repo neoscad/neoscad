@@ -286,71 +286,39 @@ impl Evaluator<'_> {
         let syms = [self.syms.intern("index")];
         let vars = self.bind_builtin(args, loc, &[], &syms, true);
         let index = vars.get(syms[0]).cloned().unwrap_or_default();
-        let Some(mctx) = module_ctx(ctx) else {
-            let t = format!(
-                "{fname}() is only valid inside a module, where it asks about the module's children"
-            );
-            self.warn(loc, DiagCode::QueryOutsideModule, t);
+        let Some((mctx, children, mut indices, oracle)) =
+            self.geometry_query(fname, &[index], loc, ctx)?
+        else {
             return Ok(Value::Undef);
         };
-        let CtxKind::Module(_, children) = &mctx.kind else {
-            unreachable!("a module context")
-        };
-        let children = children.clone();
-        let size = self.scope(children.scope).instantiations.len();
-        let Some(indices) = self.query_indices(fname, &index, size, loc) else {
-            return Ok(Value::Undef);
-        };
-        // Checked before the child is instantiated: with no oracle there
-        // is nothing to do with it.
-        let Some(oracle) = self.opts.geometry.clone() else {
-            let t = format!(
-                "{fname}(): no geometry is available here (this host does not render), so the answer is undef"
-            );
-            self.warn(loc, DiagCode::QueryUnavailable, t);
-            return Ok(Value::Undef);
-        };
-        self.queries += 1;
-        let what = format!("{fname}()");
-        self.over_limit(
-            crate::limits::Limit::Queries,
-            self.queries as f64,
-            loc,
-            &what,
-        );
-        self.check_hard()?;
-        // The count is in no memo key: see the module documentation.
-        self.untracked_sketch();
+        let indices = indices.pop().expect("one index");
         let k = self.query_instance(&mctx, &children, indices, loc, fname)?;
-        let facts = oracle.measure(
-            &self.held[k].node,
-            self.opts.interrupt.as_ref(),
-            self.opts.guard.as_ref(),
-        );
-        let facts = match facts {
-            Ok(f) => f,
-            Err(crate::oracle::OracleError::Interrupted) => {
-                // A limit the render passed, reported where the render
-                // found it (the node that asked too much), or the
-                // request's cancellation.
-                if let Some(e) = self.opts.guard.as_ref().and_then(|g| g.exceeded()) {
-                    let at = e.at.as_ref().map_or(loc, |a| Loc {
-                        unit: a.unit,
-                        span: a.span,
-                    });
-                    self.limit_exceeded(Some(at), e);
-                    self.check_hard()?;
-                }
-                self.check_interrupt()?;
-                return Err(self.unwind(UnwindKind::Interrupted));
-            }
-            Err(crate::oracle::OracleError::Unsupported(what)) => {
-                let t = format!(
-                    "{fname}(): the children cannot be rendered: {what}; the answer is undef"
-                );
-                self.warn(loc, DiagCode::QueryUnavailable, t);
-                return Ok(Value::Undef);
-            }
+        let (interrupt, guard) = (self.opts.interrupt.clone(), self.opts.guard.clone());
+        let node = &self.held[k].node;
+        let facts = if measure {
+            oracle.measure(node, interrupt.as_ref(), guard.as_ref())
+        } else {
+            // A box alone may be found without rendering (the oracle's
+            // fast path); it is the same box either way.
+            oracle
+                .bounds(node, interrupt.as_ref(), guard.as_ref())
+                .map(|b| match b {
+                    crate::oracle::Bounds::Empty => crate::oracle::Facts::Empty,
+                    crate::oracle::Bounds::Flat { min, max } => crate::oracle::Facts::Flat {
+                        min,
+                        max,
+                        area: f64::NAN,
+                    },
+                    crate::oracle::Bounds::Solid { min, max } => crate::oracle::Facts::Solid {
+                        min,
+                        max,
+                        volume: f64::NAN,
+                        surface_area: f64::NAN,
+                    },
+                })
+        };
+        let Some(facts) = self.oracle_answer(facts, fname, loc)? else {
+            return Ok(Value::Undef);
         };
         Ok(match (facts, measure) {
             (crate::oracle::Facts::Empty, false) => {
@@ -366,6 +334,167 @@ impl Evaluator<'_> {
             },
             (f, true) => measure_object(&f),
         })
+    }
+
+    /// `child_distance(a, b)`: the smallest distance between what
+    /// `children(a)` and `children(b)` would make here, rendered; 0 where
+    /// they overlap.
+    pub(crate) fn child_distance(
+        &mut self,
+        args: Vec<ArgVal>,
+        loc: Loc,
+        ctx: &Rc<Ctx>,
+    ) -> R<Value> {
+        let fname = "child_distance";
+        let syms = [self.syms.intern("a"), self.syms.intern("b")];
+        let vars = self.bind_builtin(args, loc, &[], &syms, true);
+        let (a, b) = (
+            vars.get(syms[0]).cloned().unwrap_or_default(),
+            vars.get(syms[1]).cloned().unwrap_or_default(),
+        );
+        if a.is_undef() || b.is_undef() {
+            let t = format!("{fname}(): it needs two children to compare, as child_distance(a, b)");
+            self.warn(loc, DiagCode::QueryIndex, t);
+            return Ok(Value::Undef);
+        }
+        let Some((mctx, children, mut indices, oracle)) =
+            self.geometry_query(fname, &[a, b], loc, ctx)?
+        else {
+            return Ok(Value::Undef);
+        };
+        let ib = indices.pop().expect("two indices");
+        let ia = indices.pop().expect("two indices");
+        // The first instance is copied out before the second is made: the
+        // second's evaluation may end module calls, whose kept instances
+        // go, which would move the first's place in the list.
+        let ka = self.query_instance(&mctx, &children, ia, loc, fname)?;
+        let first = self.held[ka].node.clone();
+        let kb = self.query_instance(&mctx, &children, ib, loc, fname)?;
+        let (interrupt, guard) = (self.opts.interrupt.clone(), self.opts.guard.clone());
+        let d = oracle.distance(
+            &first,
+            &self.held[kb].node,
+            interrupt.as_ref(),
+            guard.as_ref(),
+        );
+        drop(first);
+        let Some(d) = self.oracle_answer(d, fname, loc)? else {
+            return Ok(Value::Undef);
+        };
+        Ok(match d {
+            crate::oracle::Distance::Apart(d) => Value::Number(d),
+            crate::oracle::Distance::Empty => {
+                let t = format!(
+                    "{fname}(): a child renders to nothing, so there is no distance; the answer is undef"
+                );
+                self.warn(loc, DiagCode::QueryEmpty, t);
+                Value::Undef
+            }
+            crate::oracle::Distance::Mixed => {
+                let t = format!(
+                    "{fname}(): one child is 2D and the other 3D, which have no distance between them; the answer is undef"
+                );
+                self.warn(loc, DiagCode::InvalidArgument, t);
+                Value::Undef
+            }
+        })
+    }
+
+    /// What every geometry query does before it instantiates a child: the
+    /// module whose children it asks about, each index as `children()`
+    /// takes it, the oracle, and the count against `Limits::queries`.
+    /// `None` (with the warning printed) when there is no answer to give.
+    #[allow(clippy::type_complexity)]
+    fn geometry_query(
+        &mut self,
+        fname: &str,
+        index: &[Value],
+        loc: Loc,
+        ctx: &Rc<Ctx>,
+    ) -> R<
+        Option<(
+            Rc<Ctx>,
+            Children,
+            Vec<Option<Vec<usize>>>,
+            std::sync::Arc<dyn crate::oracle::GeometryOracle>,
+        )>,
+    > {
+        let Some(mctx) = module_ctx(ctx) else {
+            let t = format!(
+                "{fname}() is only valid inside a module, where it asks about the module's children"
+            );
+            self.warn(loc, DiagCode::QueryOutsideModule, t);
+            return Ok(None);
+        };
+        let CtxKind::Module(_, children) = &mctx.kind else {
+            unreachable!("a module context")
+        };
+        let children = children.clone();
+        let size = self.scope(children.scope).instantiations.len();
+        let mut all = Vec::with_capacity(index.len());
+        for i in index {
+            let Some(indices) = self.query_indices(fname, i, size, loc) else {
+                return Ok(None);
+            };
+            all.push(indices);
+        }
+        // Checked before the child is instantiated: with no oracle there
+        // is nothing to do with it.
+        let Some(oracle) = self.opts.geometry.clone() else {
+            let t = format!(
+                "{fname}(): no geometry is available here (this host does not render), so the answer is undef"
+            );
+            self.warn(loc, DiagCode::QueryUnavailable, t);
+            return Ok(None);
+        };
+        self.queries += 1;
+        let what = format!("{fname}()");
+        self.over_limit(
+            crate::limits::Limit::Queries,
+            self.queries as f64,
+            loc,
+            &what,
+        );
+        self.check_hard()?;
+        // The count is in no memo key: see the module documentation.
+        self.untracked_sketch();
+        Ok(Some((mctx, children, all, oracle)))
+    }
+
+    /// An oracle's answer, or what its failure means here: a passed limit
+    /// or a cancellation stops evaluation; a child the renderer cannot
+    /// build makes the answer undef, with a warning.
+    fn oracle_answer<T>(
+        &mut self,
+        r: Result<T, crate::oracle::OracleError>,
+        fname: &str,
+        loc: Loc,
+    ) -> R<Option<T>> {
+        match r {
+            Ok(f) => Ok(Some(f)),
+            Err(crate::oracle::OracleError::Interrupted) => {
+                // A limit the render passed, reported where the render
+                // found it (the node that asked too much), or the
+                // request's cancellation.
+                if let Some(e) = self.opts.guard.as_ref().and_then(|g| g.exceeded()) {
+                    let at = e.at.as_ref().map_or(loc, |a| Loc {
+                        unit: a.unit,
+                        span: a.span,
+                    });
+                    self.limit_exceeded(Some(at), e);
+                    self.check_hard()?;
+                }
+                self.check_interrupt()?;
+                Err(self.unwind(UnwindKind::Interrupted))
+            }
+            Err(crate::oracle::OracleError::Unsupported(what)) => {
+                let t = format!(
+                    "{fname}(): the children cannot be rendered: {what}; the answer is undef"
+                );
+                self.warn(loc, DiagCode::QueryUnavailable, t);
+                Ok(None)
+            }
+        }
     }
 
     // --- the sandbox --------------------------------------------------------

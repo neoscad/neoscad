@@ -693,7 +693,7 @@ fn loc_of(n: &Node) -> Option<MsgLoc> {
     })
 }
 
-fn is_background(n: &Node) -> bool {
+pub(crate) fn is_background(n: &Node) -> bool {
     n.origin.as_ref().is_some_and(|o| o.tag_background)
 }
 
@@ -2444,7 +2444,7 @@ impl Ctx<'_> {
 
 /// A 2D leaf as `visit(LeafNode)` stores it: sanitized unless the
 /// primitive already guarantees it (`GeometryEvaluator.cc:672-675`).
-fn leaf_2d(p: Polygon2d) -> Geometry {
+pub(crate) fn leaf_2d(p: Polygon2d) -> Geometry {
     Geometry::Polygon2d(Arc::new(if p.sanitized {
         p
     } else {
@@ -2538,7 +2538,7 @@ fn resize(g: Geometry, newsize: [f64; 3], autosize: [bool; 3], msgs: &mut Vec<Ms
 }
 
 /// Transform a result: 2D keeps the 2D part of the matrix, 3D takes it all.
-fn transform(g: Geometry, m: &crate::Matrix, msgs: &mut Vec<Msg>) -> Geometry {
+pub(crate) fn transform(g: Geometry, m: &crate::Matrix, msgs: &mut Vec<Msg>) -> Geometry {
     match g {
         Geometry::PolySet(ps) => {
             let mut ps: PolySet = Arc::unwrap_or_clone(ps);

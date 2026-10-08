@@ -319,7 +319,8 @@ pub struct ResourceLimits {
     /// for the other limits there.
     #[serde(default)]
     pub sketch_unknowns: Option<u64>,
-    /// Geometry queries (`child_bounds()`, `child_measure()`; `--enable
+    /// Geometry queries (`child_bounds()`, `child_measure()`,
+    /// `child_distance()`; `--enable
     /// query`) in one evaluation, each a render of its child. Absent from
     /// a JSON request is unlimited.
     #[serde(default)]

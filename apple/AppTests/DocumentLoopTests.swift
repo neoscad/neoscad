@@ -77,6 +77,25 @@ private func waitForRun(_ doc: SCADDocument, after count: Int, _ what: String = 
         doc.close()
     }
 
+    /// Settings > Language: geometry queries off, `child_bounds()` is
+    /// OpenSCAD's unknown function; turned on, the open document runs
+    /// again and echoes the child's box.
+    @Test func theQuerySettingRunsQueries() async throws {
+        let saved = LanguageSettings.queries
+        defer { LanguageSettings.queries = saved }
+        LanguageSettings.queries = false
+        let doc = try await openDocument(
+            "module m() { echo(child_bounds(0)); children(0); }\nm() cube([1, 2, 3]);\n")
+        try await waitForRun(doc, after: 0)
+        #expect(doc.model.console.contains { $0.kind == .warning && $0.text.contains("unknown function 'child_bounds'") })
+        let runs = doc.requestCount
+        LanguageSettings.queries = true
+        try await waitForRun(doc, after: runs)
+        #expect(!doc.model.console.contains { $0.kind == .warning })
+        #expect(doc.model.console.contains { $0.kind == .echo && $0.text == "ECHO: [[0, 0, 0], [1, 2, 3]]" })
+        doc.close()
+    }
+
     @Test func aGeometryWarningReachesTheMarkers() async throws {
         let doc = try await openDocument("union() { cube(1); square(1); }\n")
         doc.renderDocument(nil)

@@ -641,6 +641,7 @@ pub(crate) fn param_names(msg: &str) -> String {
         ("--lighting", "`lighting`"),
         ("--highlight", "`highlight`"),
         ("--issues", "`issues`"),
+        ("--sketch", "`sketch`"),
     ];
     let mut out = msg.to_string();
     for (flag, name) in NAMES {

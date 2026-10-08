@@ -249,6 +249,27 @@ fn hover_shows_the_last_runs_solved_values() {
     assert!(!a.contains("Solved"), "{a}");
 }
 
+/// Hover on a constraint statement shows what the last run made of it
+/// (stage 7): satisfied, or redundant beside the statement it repeats.
+#[test]
+fn hover_shows_a_constraints_state() {
+    let text = PLATE.replace("length(l1, 20);", "length(l1, 20); horizontal(o, a);");
+    let mut c = Client::mem_config(&[(MAIN, &text)], sketch_on());
+    c.open(MAIN, &text);
+    plate_diagnostics(&mut c);
+    let h = hover_text(&mut c, &text, "horizontal(l1)", 1);
+    assert!(
+        h.contains("Last run: satisfied (sketch 'plate': 1 free degree of freedom)"),
+        "{h}"
+    );
+    let r = hover_text(&mut c, &text, "horizontal(o, a)", 1);
+    assert!(r.contains("Last run: redundant"), "{r}");
+    // Outside a sketch, or before any run, a builtin's hover is its
+    // documentation alone.
+    let l = hover_text(&mut c, &text, "linear_extrude", 1);
+    assert!(!l.contains("Last run"), "{l}");
+}
+
 #[test]
 fn a_hosts_run_brings_its_sketches() {
     use std::sync::Arc;

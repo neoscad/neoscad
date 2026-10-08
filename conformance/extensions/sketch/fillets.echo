@@ -1,0 +1,3 @@
+ERROR: Sketch 'too large': fillet(a, 25) sits inside arc 'e', so its radius must be under the arc's, 20 in file fillets.scad, line 61
+ERROR: Sketch 'tangent': fillet(top.start, 1): the line and the arc at 'top.start' are tangent there, so there is no corner to cut in file fillets.scad, line 75
+ERROR: Sketch 'two arcs': fillet(a, 1): the corner 'a' joins two arcs; fillets and chamfers between two arcs are not supported yet in file fillets.scad, line 88

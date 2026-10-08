@@ -299,6 +299,8 @@ impl Window {
             let path = doc.core_path();
             let mut lp = DocumentLoop::new(client::DEFAULT_PREVIEW_DELAY_MS);
             lp.set_path(&path);
+            // Preferences > Language, from the first run on.
+            lp.set_enable(&shared2.enable());
             let language = web.as_ref().map(|_| start_language(&shared2, me.clone()));
             let agent_id = shared2.agents.new_document();
             Window {
@@ -488,6 +490,23 @@ impl Window {
 
     pub fn set_parts(&self, on: bool) {
         self.st.borrow_mut().lp.set_parts(on);
+    }
+
+    /// Preferences > Language changed: every run, check, measure and
+    /// export from now on takes `names`, and so does the editor's language
+    /// server; the document runs again in its last mode.
+    pub fn set_enable(self: &Rc<Self>, names: &[String]) {
+        let (changed, last) = {
+            let mut st = self.st.borrow_mut();
+            let changed = st.lp.set_enable(names);
+            if let Some(ls) = &st.language {
+                ls.set_enable(names);
+            }
+            (changed, st.lp.last_mode())
+        };
+        if changed && let Some(m) = last {
+            self.run(m);
+        }
     }
 
     pub fn toast(&self, message: &str) {
@@ -1003,7 +1022,7 @@ impl Window {
         RunOptions {
             overrides: st.lp.overrides(),
             parts: st.lp.parts(),
-            enable: Vec::new(),
+            enable: st.lp.enable().to_vec(),
         }
     }
 
@@ -1864,11 +1883,13 @@ impl Window {
 
 /// The window's language server, delivering to its page.
 fn start_language(shared: &Rc<Shared>, me: Weak<Window>) -> Language {
-    shared.language(move |m| {
+    let ls = shared.language(move |m| {
         if let Some(w) = me.upgrade() {
             w.deliver(m);
         }
-    })
+    });
+    ls.set_enable(&shared.enable());
+    ls
 }
 
 fn file_name(path: &str) -> String {

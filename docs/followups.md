@@ -1603,16 +1603,21 @@ lead them, come roughly in order of user impact.
   test font is CFF. (5e)
 
 ## Constrained sketches
-- The Linux and Windows apps have no setting for `--enable sketch`
-  (stage 4 added Settings > Language to the macOS app only). The
-  plumbing is there: `DocumentController::set_enable` (every run, check
-  and export of the window) and `LanguageServer::set_enable`; each app
-  needs a preference that calls both and runs the document again.
-- Hover on a constraint statement (satisfied, redundant or conflicting,
-  and its residual; `docs/language-extensions.md`, section 4.8) is not
-  built: the facts carry entities and the sketch's state, not
-  per-constraint status. The solver's `Solution` has what it needs
-  (`redundant`, `conflicts`, `unmet`).
+- Hover on a constraint (stage 7) shows its state and, when unmet, its
+  residual; a met constraint's own residual is not reported (the solver
+  returns residuals only for `unmet`), so hover says "satisfied" rather
+  than a number.
+- `snapshot --sketch NAME` (stage 7) draws the first sketch of that name
+  flat in its own plane; a sketch solved more than once (a helper called
+  twice, a loop) shows its first solve only, and the sketch is not shown
+  where the model places it. Its glyphs step aside from each other but
+  not from the lines, so a dense sketch's glyphs can sit on its
+  geometry; dimension glyphs are text at an entity, not dimension lines
+  with arrows.
+- The Windows app's Design > NeoSCAD Extensions is kept per process:
+  windows already open keep their setting until toggled there (the
+  agents' setting is watched across windows by `AgentConnection`; this
+  one is not).
 - The editor colours the sketch vocabulary inside any `sketch(...)`
   child, also a program's own `module sketch` (roof.scad), and with the
   extension off: the Lezer decorations do not resolve names. The
@@ -1693,8 +1698,12 @@ lead them, come roughly in order of user impact.
   name: it prints as `<sketch point>` and is `point #3` in messages.
   Stage 3 names entities by the variable that holds them, list elements
   included (`pts[0]`).
-- Fillets and chamfers cut corners between two lines only; line–arc and
-  arc–arc fillets are stage 7.
+- Fillets and chamfers cut corners between two lines or a line and an
+  arc (stage 7); a corner of two arcs is still "not supported yet". The
+  same construction (offset circles meeting) would do it. A fillet at a
+  line–arc corner takes the root nearest the corner and the inside of
+  the angle between the line and the arc's tangent there; a reflex
+  corner (over 180°) is filleted on the smaller side, as between lines.
 - The goldens in `conformance/extensions/sketch` run as a cargo test
   (`crates/session/tests/sketch.rs`), not as `conformance run --tier ext`
   (section 9 of the design), and their `.csg` exports have been rendered
@@ -1736,17 +1745,13 @@ lead them, come roughly in order of user impact.
 - Top-level `anchor()` statements belong to no node and are dropped
   silently; `check` or `measure` could list anchors by name if a tool
   wants them.
-- The editor's decorations (`apple/Editor/web/src/lang/builtins.js`) do
-  not list `anchor`, `child_anchors`, `child_bounds` and `child_measure`
-  (design section 7), and LSP completion was not checked for them
-  (stage 4 owns the language server's extension handling).
+- The editor's decorations colour the query names (stage 7) whether
+  the extension is on or not, and LSP completion was not checked for
+  them (stage 4 owns the language server's extension handling).
 - The goldens in `conformance/extensions/query` run as a cargo test, as
   the sketch goldens do; their `.csg` exports were rendered by the stock
   nightly by hand only (`plate`, `sketch` and `reuse`, comparing vertex
   and facet counts; `plate-bounds` and `bounds` by volume and box too).
-- The apps have no setting for `--enable query` (they have one for
-  sketches, `apple/App/Updates/SettingsWindow.swift`); `serve`, MCP and
-  the command line take it.
 - A top-level statement or module call that asked `child_bounds()` or
   `child_measure()` is never replayed by the statement memo or the call
   memo (`crates/eval/src/query.rs`, module docs), because the queries
@@ -1759,9 +1764,23 @@ lead them, come roughly in order of user impact.
   queried child's warnings print in every frame, where OpenSCAD's rule
   (and the command line's otherwise) prints a cached subtree's warnings
   in the first frame only (`crates/cli/src/run.rs`, `query_oracle`).
-- Stage 7's fast path for bounds (primitives under transforms, unions
-  and hulls without rendering, behind a differential test) is not built:
-  every `child_bounds()` renders, from the cache when it can.
+- The fast path for `child_bounds()` (stage 7, `geom::fastbounds`)
+  declines 3D hulls (QuickHull drops points within its tolerance of a
+  face), 2D unions of several children (Clipper's grid and
+  simplification), a transform above a 3D union (only the union's box is
+  known; transforming the operands' vertices would be exact only if
+  Manifold's lazily composed transform rounded as the node-by-node one
+  does, unchecked), and unions whose operands' extremes are within 1e-6
+  (relative) of each other. Each could be widened behind the same
+  differential test. A fast answer puts nothing in the cache, so the
+  final render still builds the child: the fast path saves the query's
+  wait, not the render.
+- `child_distance()` (stage 7) renders both children and builds two
+  BVHs per call; nothing is kept across requests but the renders. 2D
+  distance tessellates both shapes; a 2D answer from outlines alone
+  would be cheaper. Its `.csg` golden (`distance.csg`) has not been
+  rendered by the stock nightly, nor `fillets.csg` (both are plain
+  primitives and polygons).
 - The thread-count tests (`crates/session/tests/query.rs`,
   `crates/geom/tests/query.rs`, like `crates/geom/tests/render.rs`) run
   inside `rayon` pools of 1, 2 and 8 threads, but `geom::Renderer` keeps

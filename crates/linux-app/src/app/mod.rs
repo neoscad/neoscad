@@ -59,6 +59,10 @@ pub struct Shared {
     /// AI agents: the consent, the link to `neoscad mcp` and its status
     /// (`agent.rs`).
     agents: agent::Agents,
+    /// Preferences > Language: the extensions every window runs with
+    /// (`linux_app::extensions`), and where they are kept.
+    extensions: RefCell<linux_app::extensions::Settings>,
+    extensions_path: PathBuf,
     /// `G_MESSAGES_DEBUG` names this app: the bridge also asks the page
     /// how many markers it shows after each publication, for the log
     /// (linux/smoke.sh checks it). Off, that is one call saved per run.
@@ -78,6 +82,31 @@ impl Shared {
 
     fn windows(&self) -> Vec<Rc<Window>> {
         self.windows.borrow().clone()
+    }
+
+    /// The `--enable` names of Preferences > Language.
+    pub fn enable(&self) -> Vec<String> {
+        self.extensions.borrow().names()
+    }
+
+    /// Preferences > Language changed: keep it, and hand the names to
+    /// every window, which runs its document again with them.
+    pub fn set_extensions(&self, s: linux_app::extensions::Settings) {
+        if *self.extensions.borrow() == s {
+            return;
+        }
+        *self.extensions.borrow_mut() = s;
+        if let Err(e) = s.save(&self.extensions_path) {
+            glib::g_warning!(
+                "neoscad",
+                "language: could not save {}: {e}",
+                self.extensions_path.display()
+            );
+        }
+        let names = s.names();
+        for w in self.windows() {
+            w.set_enable(&names);
+        }
     }
 
     /// A window was destroyed.
@@ -155,6 +184,10 @@ pub fn run() -> glib::ExitCode {
             editor_dir,
             updates: update::Updates::new(),
             agents: agent::Agents::new(),
+            extensions: RefCell::new(linux_app::extensions::Settings::load(
+                &linux_app::extensions::settings_path(&glib::user_config_dir()),
+            )),
+            extensions_path: linux_app::extensions::settings_path(&glib::user_config_dir()),
             debug: std::env::var("G_MESSAGES_DEBUG")
                 .is_ok_and(|v| v.split([',', ' ']).any(|d| d == "neoscad" || d == "all")),
         });
