@@ -406,7 +406,27 @@ pub fn attribute_offset(
                 if prev == next && matches!(pc, Curve2::Circle { .. }) {
                     continue;
                 }
-                let v = o.vertices[i];
+                // The join's centre is the corner of the two curves where
+                // both are lines: their records are exact, where the
+                // polygon's vertex was rounded onto Clipper's grid. A
+                // centre off the corner (by 3e-9 at 15.3) makes the arc
+                // miss the offset lines it should touch, and anything
+                // built on that tangency (a fillet's end cut across it)
+                // does not reconstruct.
+                let v = match (pc, nc) {
+                    (Curve2::Line { p: p1, d: d1 }, Curve2::Line { p: p2, d: d2 }) => {
+                        let den = cross(d1, d2);
+                        let at = o.vertices[i];
+                        if den.abs() > 1e-9 * len(d1) * len(d2) {
+                            let t = cross(sub(p2, p1), d2) / den;
+                            let c = [p1[0] + d1[0] * t, p1[1] + d1[1] * t];
+                            if len(sub(c, at)) <= tol { c } else { at }
+                        } else {
+                            at
+                        }
+                    }
+                    _ => o.vertices[i],
+                };
                 let faceted = matches!(pc, Curve2::Faceted) || matches!(nc, Curve2::Faceted);
                 let tag = if faceted {
                     FACETED
