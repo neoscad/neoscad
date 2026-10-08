@@ -122,9 +122,14 @@ package and run it, and what comes next.
   Cancel). A deleted file is reported; saving writes it again. The app's
   own saves are recognised by a hash of what they wrote; a half-written
   file (it does not parse) is read again 150 ms later.
-- **Export**: File > Export lists every entry of `client::export_formats()`
-  (binary and ASCII STL, 3MF, OBJ, OFF, SVG, DXF, PDF, a PNG of the view,
-  the snapshot sheet); Export Again (Ctrl+Shift+E) uses the last format,
+- **Export**: File > Export lists every entry of
+  `client::export_formats_with()` for the window's extensions (binary and
+  ASCII STL, 3MF, OBJ, OFF, SVG, DXF, PDF, STEP with Preferences >
+  Language's `exact`, a PNG of the view, the snapshot sheet; the menu is
+  refilled when the setting changes); a STEP export's report (the share
+  of exact faces and each region written as facets, `docs/step-export.md`)
+  is an alert when it lists regions and part of the toast when not, and
+  a refused one is the failure alert's text; Export Again (Ctrl+Shift+E) uses the last format,
   or SVG for a 2D model and STL for a 3D one
   (`client::suggest_export_format`). The save dialog starts beside the
   model. An export runs detached, with the customizer's values, under a
@@ -548,8 +553,9 @@ checked by `client::update::check`, the code the CLI uses.
   directory (`~/.config/neoscad/`, or
   `~/.var/app/org.neoscad.NeoSCAD/config/neoscad/` in the Flatpak).
 - **Language** (Preferences > Language): "Constrained sketches
-  (sketch)" and "Geometry queries (query)", NeoSCAD's extensions to the
-  OpenSCAD language (`docs/language-extensions.md`), off by default as
+  (sketch)", "Geometry queries (query)" and "Exact STEP export
+  (exact)", NeoSCAD's extensions (the last adds STEP to File > Export,
+  `docs/step-export.md`) (`docs/language-extensions.md`), off by default as
   on the command line. They go to every window's document loop (runs,
   check, measure, export) and its language server, and changing one runs
   the open documents again. They are stored in `language.json` beside

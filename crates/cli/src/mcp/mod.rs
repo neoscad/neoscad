@@ -172,9 +172,9 @@ pub(crate) struct Args {
     /// extensions for every call, as the command line's --enable does
     /// (repeatable): textmetrics, object-function, import-function,
     /// vector-swizzle, predictible-output (sorted mesh exports); part
-    /// (named parts) and sketch (constrained 2D sketches; query is
-    /// reserved). Off by default, as in
-    /// OpenSCAD. (A server-wide flag rather than a tool argument, so it
+    /// (named parts), sketch (constrained 2D sketches), query (geometry
+    /// queries) and exact (`export` to .step with exact surfaces). Off
+    /// by default, as in OpenSCAD. (A server-wide flag rather than a tool argument, so it
     /// costs the agent's context nothing.)
     #[arg(long = "enable", value_name = "FEATURE", action = clap::ArgAction::Append)]
     enable: Vec<String>,

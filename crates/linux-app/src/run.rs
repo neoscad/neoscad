@@ -236,7 +236,9 @@ pub fn stage_label(stage: session::Stage) -> &'static str {
 
 /// The message for a finished export of `output`: what was written, or
 /// why nothing was (the core's reason, never silence). `Ok` for a toast,
-/// `Err` for an alert.
+/// `Err` for an alert. A STEP export adds its report: the share of exact
+/// faces, and on further lines (an alert rather than a toast) the regions
+/// written as facets; refused, the report is the reason.
 pub fn export_message(
     output: &Path,
     r: &Result<client::ExportResult, CoreError>,
@@ -248,9 +250,14 @@ pub fn export_message(
     Some(match r {
         Err(CoreError::Cancelled) => return None,
         Err(e) => Err(e.to_string()),
-        Ok(r) => match client::export_failure_reason(r) {
-            None => Ok(format!("Exported {name} ({} bytes)", r.bytes)),
-            Some(why) => Err(why),
+        Ok(r) => match (client::export_failure_reason(r), &r.step) {
+            (None, Some(step)) => Ok(format!(
+                "Exported {name} ({} bytes). {}",
+                r.bytes, step.summary
+            )),
+            (None, None) => Ok(format!("Exported {name} ({} bytes)", r.bytes)),
+            (Some(_), Some(step)) => Err(step.summary.clone()),
+            (Some(why), None) => Err(why),
         },
     })
 }
@@ -415,6 +422,41 @@ mod tests {
         );
         let why = export_message(&out, &r).unwrap().unwrap_err();
         assert!(why.contains("3D"), "{why}");
+        // STEP: refused with the reason without Preferences > Language's
+        // `exact`, and with it written with the report.
+        let out = dir.join("solid.step");
+        let r = export_file(
+            &c,
+            solid,
+            out.to_str().unwrap(),
+            "step",
+            &client::RunOptions::default(),
+            None,
+            None,
+        );
+        let why = export_message(&out, &r).unwrap().unwrap_err();
+        assert!(why.contains("--enable exact"), "{why}");
+        assert!(!out.exists());
+        let exact = client::RunOptions {
+            enable: vec!["exact".into()],
+            ..Default::default()
+        };
+        let r = export_file(&c, solid, out.to_str().unwrap(), "step", &exact, None, None);
+        let message = export_message(&out, &r).unwrap().unwrap();
+        assert!(
+            message.contains("STEP: 6 of 6 faces exact (100%)."),
+            "{message}"
+        );
+        assert!(
+            std::fs::read_to_string(&out)
+                .unwrap()
+                .starts_with("ISO-10303-21;")
+        );
+        assert!(
+            client::export_formats_with(&exact.enable)
+                .iter()
+                .any(|f| f.id == "step")
+        );
         // Cancelled before it starts: nothing is reported and the file
         // from before is still there.
         let out = dir.join("out-binstl.stl");

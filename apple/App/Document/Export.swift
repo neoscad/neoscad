@@ -1,5 +1,6 @@
 // File > Export: the document's model to a mesh or drawing file (STL,
-// 3MF, OBJ, OFF, SVG, DXF, PDF), an image of the 3D view as it is, or a
+// 3MF, OBJ, OFF, SVG, DXF, PDF; STEP with exact surfaces when Settings >
+// Language turns on `exact`), an image of the 3D view as it is, or a
 // contact sheet of standard views (`neoscad snapshot`).
 //
 // A save panel with the format in a popup and the format's options below
@@ -24,7 +25,7 @@ import UniformTypeIdentifiers
 /// format id, extension, dimension) is the core's table
 /// (`export_formats`), shared with every other host.
 enum ExportFormat: String, CaseIterable, Identifiable {
-    case binaryStl, asciiStl, threeMF, obj, off, svg, dxf, pdf, viewImage, snapshot
+    case binaryStl, asciiStl, threeMF, obj, off, svg, dxf, pdf, step, viewImage, snapshot
 
     var id: String { rawValue }
 
@@ -44,8 +45,17 @@ enum ExportFormat: String, CaseIterable, Identifiable {
         self = f
     }
 
+    /// Every entry, STEP's included; whether the panel offers STEP is
+    /// `offered`'s call.
     private static let table: [String: ExportFormatInfo] = Dictionary(
-        ((try? exportFormats()) ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        ((try? exportFormatsWith(enable: ["exact"])) ?? []).map { ($0.id, $0) },
+        uniquingKeysWith: { a, _ in a })
+
+    /// The formats the panel offers: STEP only while Settings > Language
+    /// has `exact` on, since without it the core refuses the export.
+    static var offered: [ExportFormat] {
+        allCases.filter { $0 != .step || LanguageSettings.exact }
+    }
 
     private var info: ExportFormatInfo? { Self.table[coreKey] }
 
@@ -121,18 +131,29 @@ struct ExportAlert: Equatable {
 /// How an export ended.
 enum ExportOutcome: Equatable {
     case written(URL, bytes: UInt64)
+    /// Written, with a report the user should see: a STEP export's share
+    /// of exact faces and the regions it wrote as facets.
+    case writtenWithReport(URL, bytes: UInt64, report: ExportAlert)
     case cancelled
     case failed(ExportAlert)
 
     /// The core's result for a file export: written, or failed with the
     /// console's error lines (every line when there is no `ERROR:` line,
-    /// such as "Current top level object is not a 3D object.").
+    /// such as "Current top level object is not a 3D object."). A STEP
+    /// export says why in its report, refusal and faceted regions alike.
     static func of(_ r: ExportResult, to url: URL) -> ExportOutcome {
         guard let reason = (try? exportFailureReason(result: r)) ?? nil else {
+            if let step = r.step {
+                return .writtenWithReport(
+                    url, bytes: r.bytes,
+                    report: ExportAlert(title: "“\(url.lastPathComponent)” exported", message: step.summary))
+            }
             return .written(url, bytes: r.bytes)
         }
         return .failed(
-            ExportAlert(title: "“\(url.lastPathComponent)” was not exported", message: reason))
+            ExportAlert(
+                title: "“\(url.lastPathComponent)” was not exported",
+                message: r.step.map(\.summary) ?? reason))
     }
 
     static func of(_ error: Error, to url: URL) -> ExportOutcome {
@@ -155,6 +176,8 @@ extension SCADDocument {
         {
             s.format = f
         }
+        // STEP last time, but `exact` is off now.
+        if !ExportFormat.offered.contains(s.format) { s.format = .binaryStl }
         return s
     }
 
@@ -199,7 +222,11 @@ extension SCADDocument {
                 DispatchQueue.main.async { MainActor.assumeIsolated { progress.stage = stage } }
             }
             if let sheet { sheet.sheetParent?.endSheet(sheet) }
-            if case .failed(let a) = outcome { self.present(a) }
+            switch outcome {
+            case .failed(let a): self.present(a)
+            case .writtenWithReport(_, _, let a): self.present(a, style: .informational)
+            default: break
+            }
         }
         progress.cancel = { [weak self] in self?.exportTask?.cancel() }
     }
@@ -248,9 +275,9 @@ extension SCADDocument {
         }
     }
 
-    private func present(_ a: ExportAlert) {
+    private func present(_ a: ExportAlert, style: NSAlert.Style = .warning) {
         let alert = NSAlert()
-        alert.alertStyle = .warning
+        alert.alertStyle = style
         alert.messageText = a.title
         alert.informativeText = a.message
         if let window = windowControllers.first?.window {
@@ -289,7 +316,7 @@ private struct ExportAccessory: View {
         let s = Binding(get: { state.settings }, set: { state.settings = $0 })
         Form {
             Picker("Format:", selection: s.format) {
-                ForEach(ExportFormat.allCases) { f in Text(f.title).tag(f) }
+                ForEach(ExportFormat.offered) { f in Text(f.title).tag(f) }
             }
             switch state.settings.format {
             case .threeMF:

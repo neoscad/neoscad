@@ -324,6 +324,7 @@ fn mime(format: session::export::Format) -> &'static str {
         "dxf" => "image/vnd.dxf",
         "pdf" => "application/pdf",
         "pov" => "text/plain",
+        "step" => "model/step",
         _ => "application/octet-stream",
     }
 }

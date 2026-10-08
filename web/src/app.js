@@ -68,7 +68,32 @@ const SETTINGS = {
   view: DEFAULT_VIEW,
   check: {},
   layout: { left: 34, right: 22, console: 30 },
+  // NeoSCAD's `exact` extension (Export > Exact STEP export): STEP with
+  // exact surfaces in the Export menu. Off by default, as on the command
+  // line, where `.step` is OpenSCAD's unknown suffix without it.
+  exact: false,
 };
+
+/// A STEP export's report as console lines: the share of exact faces,
+/// then each region written as planar facets, as a warning that jumps to
+/// its line when it is in the document (the core reports regions by file
+/// name and line).
+export function stepLines(step, doc) {
+  const [first, ...rest] = step.summary.split("\n");
+  const lines = [{ kind: step.ok ? "info" : "error", text: first, location: null }];
+  for (const text of rest.filter((l) => !l.startsWith("Faceted:"))) lines.push({ kind: "info", text, location: null });
+  const base = doc.path.split("/").pop();
+  for (const r of step.facetedRegions) {
+    const here = r.line && r.file && r.file.split("/").pop() === base;
+    const at = r.line ? ` (${r.file ?? base}, line ${r.line})` : "";
+    lines.push({
+      kind: "warning",
+      text: `STEP: ${r.module}() ${r.detail}${r.count > 1 ? ` (${r.count} instances)` : ""}${at}`,
+      location: here ? { path: doc.path, startLine: r.line - 1, startCharacter: 0, endLine: r.line - 1, endCharacter: 0 } : null,
+    });
+  }
+  return lines;
+}
 
 /// The picker's value for the document a link opened (`#code=`): not an
 /// example id (those are words), so the two cannot be confused.
@@ -209,10 +234,18 @@ class App {
     const exportMenu = new Menu(
       "Export",
       () => [
-        ...Object.entries(EXPORT_FORMATS).map(([id, f]) => ({
-          label: `${f.label}…`,
-          run: () => this.export(id),
-        })),
+        ...Object.entries(EXPORT_FORMATS)
+          .filter(([, f]) => !f.extension || this.settings[f.extension])
+          .map(([id, f]) => ({
+            label: `${f.label}…`,
+            run: () => this.export(id),
+          })),
+        "-",
+        {
+          label: "Exact STEP export (exact)",
+          checked: this.settings.exact,
+          run: () => this.saveSettings({ exact: !this.settings.exact }),
+        },
         "-",
         { heading: "Share" },
         { label: "Copy link", run: () => this.copyLink() },
@@ -825,16 +858,25 @@ class App {
     const f = EXPORT_FORMATS[format];
     this.console.setSummary(`Exporting ${f.label}…`, "running");
     if (!(await this.libraries())) return;
+    // A format's extension is sent with its export only: the runs that
+    // draw the model do not need it, and keep their cache entries.
+    const enable = f.extension ? [f.extension] : [];
     try {
-      const r = await this.engine.request(Requests.export(d.path, format, this.runOptions()));
+      const r = await this.engine.request(
+        Requests.export(d.path, format, runOptions(d.customizer.values, d.parts, enable)),
+      );
+      if (r.step) this.console.setLines(stepLines(r.step, d));
       if (r.exitCode !== 0 || !r.data) {
-        const why = (r.console ?? "").trim().split("\n").pop() || `exit code ${r.exitCode}`;
+        const why = r.step?.error
+          ? `STEP export refused: ${r.step.error}.`
+          : (r.console ?? "").trim().split("\n").pop() || `exit code ${r.exitCode}`;
         this.console.setSummary(`Export failed: ${why}`, "failed");
         return;
       }
       const name = `${d.example.file.replace(/\.scad$/, "")}.${f.ext}`;
       download(r.data, name, r.mime);
-      this.console.setSummary(`Exported ${name} (${r.bytes} bytes).`, "done");
+      const share = r.step ? ` ${r.step.summary.split("\n")[0]}` : "";
+      this.console.setSummary(`Exported ${name} (${r.bytes} bytes).${share}`, "done");
     } catch (e) {
       this.fail(e);
     }

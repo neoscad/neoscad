@@ -105,6 +105,7 @@
           <MenuFlyoutSubItem Text="NeoSCAD Extensions">
             <ToggleMenuFlyoutItem x:Name="SketchItem" Text="Constrained Sketches (sketch)" Click="OnSketchToggle" />
             <ToggleMenuFlyoutItem x:Name="QueryItem" Text="Geometry Queries (query)" Click="OnQueryToggle" />
+            <ToggleMenuFlyoutItem x:Name="ExactItem" Text="Exact STEP Export (exact)" Click="OnExactToggle" />
           </MenuFlyoutSubItem>
         </MenuBarItem>
         <MenuBarItem Title="View">

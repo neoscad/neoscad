@@ -643,8 +643,8 @@ pub enum ThreeMfMaterial {
 #[serde(rename_all = "camelCase", default)]
 pub struct ExportOptions {
     /// OpenSCAD's format id (`stl` for ASCII STL, `binstl`, `3mf`, `obj`,
-    /// `off`, `wrl`, `pov`, `svg`, `dxf`, `pdf`); `None` to go by the
-    /// output's extension.
+    /// `off`, `wrl`, `pov`, `svg`, `dxf`, `pdf`; `step` with the `exact`
+    /// extension on the run); `None` to go by the output's extension.
     pub format: Option<String>,
     pub threemf_color_mode: Option<ThreeMfColorMode>,
     /// A colour name or `#rrggbb`, for [`ThreeMfColorMode::SelectedOnly`].
@@ -666,7 +666,7 @@ pub fn export_format(
     });
     session::export::Format::from_id(&id).ok_or_else(|| CoreError::InvalidArgument {
         message: format!(
-            "unknown export format '{id}' (stl, binstl, off, obj, 3mf, wrl, pov, svg, dxf or pdf)"
+            "unknown export format '{id}' (stl, binstl, off, obj, 3mf, wrl, pov, svg, dxf, pdf or step)"
         ),
     })
 }
@@ -772,6 +772,7 @@ impl Client {
             diagnostics: types::diagnostics(&r.log),
             console: types::console(&r.log),
             timings: r.timings.into(),
+            step: r.exact.as_ref().map(types::StepReport::from_session),
         })
     }
 }

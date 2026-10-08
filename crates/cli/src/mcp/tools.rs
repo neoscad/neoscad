@@ -112,7 +112,7 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "render",
-            "Build the geometry; report bbox, volume, area, manifold and components, to verify dimensions. `export` also writes it (.stl is ASCII STL; .3mf .obj .off .svg .dxf .png) and reads a mesh back: triangles, watertight, z range.",
+            "Build the geometry; report bbox, volume, area, manifold and components, to verify dimensions. `export` also writes it (.stl is ASCII STL; .3mf .obj .off .svg .dxf .png; .step if started with --enable exact) and reads a mesh back: triangles, watertight, z range.",
             json!({
                 "export": {"type": "string", "description": "Output file"},
                 "overwrite": {"type": "boolean"},
@@ -446,6 +446,30 @@ impl Tools {
         }
     }
 
+    /// Refuses a `.step`/`.stp` export on a server without NeoSCAD's
+    /// `exact` extension, before any work: the extension is server-wide
+    /// (`neoscad mcp --enable exact`), so the agent cannot turn it on in
+    /// the call, and the user has to be told what to change.
+    fn step_allowed(&self, out: &Path) -> Result<(), String> {
+        let ext = out
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let on = self
+            .local
+            .session()
+            .config()
+            .extensions
+            .has(session::Extension::Exact);
+        if (ext == "step" || ext == "stp") && !on {
+            return Err(
+                "STEP export needs NeoSCAD's exact extension: start the server as `neoscad mcp --enable exact`"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Whether the server runs with NeoSCAD's sketch extension
     /// (`neoscad mcp --enable sketch`).
     fn sketch_on(&self) -> bool {
@@ -698,7 +722,7 @@ impl Tools {
             }
         };
         if let Some(out) = &export
-            && let Err(e) = make_dir(out)
+            && let Err(e) = self.step_allowed(out).and_then(|()| make_dir(out))
         {
             self.done(m);
             return Err(e);
@@ -727,14 +751,34 @@ impl Tools {
                 text.push_str(&format!("; {}", read_back_text(&back)));
             }
         }
+        // A STEP export says how much of it is exact and where it is not,
+        // written or refused.
+        let exact = r.get("exact").filter(|e| !e.is_null()).map(exact_brief);
+        if exact.is_some()
+            && let Some(summary) = r["exact"]["summary"].as_str()
+        {
+            // The faceted regions are in the log lines below, at their
+            // locations; the share and the reasons are not.
+            for line in summary.lines().filter(|l| !l.starts_with("Faceted:")) {
+                text.push('\n');
+                text.push_str(line);
+            }
+        }
         push_log(&mut text, &r);
         let mut s = terse_log(&r, &main);
         s["geometry"] = terse_geometry(&r["geometry"], &r["diagnostics"]);
         if export.is_some() {
-            s["output"] = r["output"].clone();
-            s["bytes"] = r["bytes"].clone();
+            // Only a written file is an output: `check` says "wrote" for
+            // one, and a refused STEP export writes nothing.
+            if r["exit_code"] == 0 {
+                s["output"] = r["output"].clone();
+                s["bytes"] = r["bytes"].clone();
+            }
             if !back.is_null() {
                 s["read_back"] = back;
+            }
+            if let Some(e) = exact {
+                s["exact"] = e;
             }
         }
         Ok(label(&imported, finish(args, text, s, r)))
@@ -867,7 +911,9 @@ impl Tools {
         // Refuse a bad export path before any work.
         if str_arg(args, "export").is_some() {
             let base = self.base(args)?;
-            self.writable(&base, args, "export", EXPORT_FORMATS)?;
+            if let Some(out) = self.writable(&base, args, "export", EXPORT_FORMATS)? {
+                self.step_allowed(&out)?;
+            }
         }
         let (mut out, rendered) = self.check_only(id, args)?;
         if !rendered {
@@ -891,9 +937,19 @@ impl Tools {
                         }
                         None => out.text.push_str("\nexport failed: nothing was written"),
                     }
+                    if let Some(summary) = r.text.lines().find(|l| l.starts_with("STEP")) {
+                        // The STEP report's first line (exact share, or the
+                        // refusal); the regions are in the structured
+                        // content's `exact`.
+                        out.text.push('\n');
+                        out.text.push_str(summary);
+                    }
                     out.structured["export"] = json!({
                         "output": s["output"], "bytes": s["bytes"], "read_back": s["read_back"],
                     });
+                    if !s["exact"].is_null() {
+                        out.structured["export"]["exact"] = s["exact"].clone();
+                    }
                 }
                 Err(e) => out.text.push_str(&format!("\nexport failed: {e}")),
             }
@@ -1314,8 +1370,29 @@ impl Tools {
 /// What `render`'s `export` can write: `neoscad serve`'s export formats
 /// by extension (`binstl` is a format name, not an extension).
 const EXPORT_FORMATS: &[&str] = &[
-    "stl", "off", "obj", "3mf", "wrl", "pov", "svg", "dxf", "pdf", "png", "echo", "ast", "csg",
+    "stl", "off", "obj", "3mf", "wrl", "pov", "svg", "dxf", "pdf", "step", "stp", "png", "echo",
+    "ast", "csg",
 ];
+
+/// A STEP export's report as an agent needs it (`serve`'s `exact`, cut
+/// down): whether the file was written, how much of it is exact, and each
+/// faceted region at its line, without the cross-check's numbers. An
+/// agent asked for STEP so that a CAD program gets true curves; the
+/// regions that are not are what it may want to remodel.
+fn exact_brief(e: &Value) -> Value {
+    json!({
+        "ok": e["ok"],
+        "error": e["error"],
+        "faces": e["faces"],
+        "exact_faces": e["exact_faces"],
+        "exact_percent": e["exact_percent"],
+        "exact_curves": e["substitutions"]["exact"],
+        "polygons": e["substitutions"]["polygon"],
+        "partial": e["partial"]["reason"],
+        "fallback": e["fallback"],
+        "faceted_regions": e["faceted_regions"],
+    })
+}
 
 /// What `format` with `check` says: how many lines would change, or the
 /// diff itself with `diff: true`. A whole diff of a file that only needs

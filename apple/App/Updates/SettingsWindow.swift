@@ -136,10 +136,14 @@ final class LanguageSettingsModel: ObservableObject {
     @Published var queries: Bool {
         didSet { LanguageSettings.queries = queries }
     }
+    @Published var exact: Bool {
+        didSet { LanguageSettings.exact = exact }
+    }
 
     init() {
         sketches = LanguageSettings.sketches
         queries = LanguageSettings.queries
+        exact = LanguageSettings.exact
     }
 }
 
@@ -164,6 +168,16 @@ struct LanguageSettingsView: View {
                     "Bounding boxes, measurements, distances and named anchors of a module's children "
                         + "as values (child_bounds() and the like), like the command line's --enable query. "
                         + "A NeoSCAD extension, not in OpenSCAD: off, they are unknown functions as in OpenSCAD."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                Toggle("Exact STEP export (exact)", isOn: $model.exact)
+                Text(
+                    "File > Export writes STEP whose cylinders, spheres, cones and tori are true surfaces "
+                        + "rather than triangles, for CAD programs such as FreeCAD, like the command line's "
+                        + "--enable exact. Curves are exact unless $fn is set; anything else is written as facets "
+                        + "and listed after the export."
                 )
                 .font(.footnote)
                 .foregroundStyle(.secondary)

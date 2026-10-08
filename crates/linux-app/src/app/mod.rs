@@ -63,6 +63,10 @@ pub struct Shared {
     /// (`linux_app::extensions`), and where they are kept.
     extensions: RefCell<linux_app::extensions::Settings>,
     extensions_path: PathBuf,
+    /// File > Export's formats, one menu every window's main menu shows,
+    /// refilled when Preferences > Language changes (STEP comes and goes
+    /// with `exact`).
+    pub export_formats: gio::Menu,
     /// `G_MESSAGES_DEBUG` names this app: the bridge also asks the page
     /// how many markers it shows after each publication, for the log
     /// (linux/smoke.sh checks it). Off, that is one call saved per run.
@@ -104,6 +108,7 @@ impl Shared {
             );
         }
         let names = s.names();
+        fill_export_formats(&self.export_formats, &names);
         for w in self.windows() {
             w.set_enable(&names);
         }
@@ -188,9 +193,11 @@ pub fn run() -> glib::ExitCode {
                 &linux_app::extensions::settings_path(&glib::user_config_dir()),
             )),
             extensions_path: linux_app::extensions::settings_path(&glib::user_config_dir()),
+            export_formats: gio::Menu::new(),
             debug: std::env::var("G_MESSAGES_DEBUG")
                 .is_ok_and(|v| v.split([',', ' ']).any(|d| d == "neoscad" || d == "all")),
         });
+        fill_export_formats(&sh.export_formats, &sh.enable());
         install_actions(app, &sh);
         update::start(&sh);
         agent::start(&sh);
@@ -500,8 +507,21 @@ pub fn scad_filters() -> gio::ListStore {
     store
 }
 
-/// The header bar's main menu.
-pub fn main_menu() -> gio::Menu {
+/// File > Export's formats: every format of the core's table for the
+/// `--enable` names `enable` (`client::export_formats_with`: STEP only
+/// with `exact`).
+pub fn fill_export_formats(menu: &gio::Menu, enable: &[String]) {
+    menu.remove_all();
+    for f in client::export_formats_with(enable) {
+        let i = gio::MenuItem::new(Some(&format!("{}…", f.title)), None);
+        i.set_action_and_target_value(Some("win.export"), Some(&f.id.to_variant()));
+        menu.append_item(&i);
+    }
+}
+
+/// The header bar's main menu, with `formats` (shared, see
+/// `Shared::export_formats`) as File > Export.
+pub fn main_menu(formats: &gio::Menu) -> gio::Menu {
     let menu = gio::Menu::new();
     let item = |label: &str, action: &str, accel: Option<&str>| {
         let i = gio::MenuItem::new(Some(label), Some(action));
@@ -528,17 +548,10 @@ pub fn main_menu() -> gio::Menu {
     save.append_item(&item("Save As…", "win.save-as", Some("<Control><Shift>s")));
     menu.append_section(None, &save);
 
-    // File > Export: every format of the core's table
-    // (`client::export_formats`), and Export Again in the last one (or
-    // one that fits the model's dimension).
+    // File > Export: the formats (`fill_export_formats`), and Export
+    // Again in the last one (or one that fits the model's dimension).
     let export = gio::Menu::new();
-    let formats = gio::Menu::new();
-    for f in client::export_formats() {
-        let i = gio::MenuItem::new(Some(&format!("{}…", f.title)), None);
-        i.set_action_and_target_value(Some("win.export"), Some(&f.id.to_variant()));
-        formats.append_item(&i);
-    }
-    export.append_submenu(Some("Export"), &formats);
+    export.append_submenu(Some("Export"), formats);
     export.append_item(&item(
         "Export Again…",
         "win.export-again",

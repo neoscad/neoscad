@@ -858,6 +858,11 @@ fn served_export(
         || cli.trace_usermodule_parameters.is_some()
         || cli.check_parameters.is_some()
         || cli.check_parameter_ranges.is_some()
+        // STEP runs here: its `--format json` report (`exact`, with the
+        // normal render's time beside the export's stages, which
+        // `conformance exact` reads) is the local run's, and a delegated
+        // reply has no place for it.
+        || formats.iter().any(|(id, _)| *id == "step")
         || !(formats
             .iter()
             .all(|(id, _)| session::export::Format::from_id(id).is_some())

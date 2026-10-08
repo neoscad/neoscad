@@ -130,6 +130,7 @@ fn a_failed_export_says_why() {
         diagnostics: vec![],
         console: String::new(),
         timings: result(0, None).timings,
+        step: None,
     };
     assert_eq!(export_failure_reason(&r), None);
     r.exit_code = 1;

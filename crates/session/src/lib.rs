@@ -56,6 +56,7 @@ mod cuts;
 pub mod diag;
 mod docfs;
 pub mod docs;
+pub mod exact;
 pub mod export;
 pub mod format;
 pub mod measure;
@@ -636,6 +637,8 @@ pub struct Exported {
     pub log: Log,
     pub geometry: Option<geom::Geometry>,
     pub timings: Timings,
+    /// A STEP output's report (written or refused); `None` without one.
+    pub exact: Option<exact::ExactReport>,
 }
 
 /// Session-wide numbers.
@@ -1740,6 +1743,32 @@ impl Session {
         );
     }
 
+    /// The options a request renders with: [`Session::build`]'s, and a
+    /// STEP export's second render of the same tree, which must see the
+    /// same fonts, limits and cancellation as the render it is checked
+    /// against.
+    fn render_options(
+        pipe: &Pipe,
+        loaded: &Loaded,
+        scheme: &geom::color::Scheme,
+        mode: Mode,
+        job: &JobGuard<'_>,
+        fonts: Arc<text::FontDb>,
+    ) -> geom::RenderOptions {
+        geom::RenderOptions {
+            scheme: *scheme,
+            force: mode == Mode::Force,
+            fs: pipe.fs.clone(),
+            work_dir: pipe.paths.cwd.clone(),
+            fonts,
+            interrupt: Some(job.flag.clone()),
+            guard: job.limits.clone(),
+            // Every request prints what a fresh command-line run would,
+            // however warm the cache.
+            replay: Some(loaded.epoch),
+        }
+    }
+
     /// Build the geometry (or the preview's products) of an evaluated
     /// program, reusing the document's last products when the tree, its
     /// sources and the renderer are the same. Also returns the renderer's
@@ -1784,18 +1813,7 @@ impl Session {
         let product = match reuse {
             Some(p) => p,
             None => {
-                let opts = geom::RenderOptions {
-                    scheme: *scheme,
-                    force: mode == Mode::Force,
-                    fs: pipe.fs.clone(),
-                    work_dir: pipe.paths.cwd.clone(),
-                    fonts,
-                    interrupt: Some(job.flag.clone()),
-                    guard: job.limits.clone(),
-                    // Every request prints what a fresh command-line run
-                    // would, however warm the cache.
-                    replay: Some(loaded.epoch),
-                };
+                let opts = Self::render_options(pipe, loaded, scheme, mode, job, fonts);
                 let built = if mode == Mode::Preview {
                     geom::csg::CsgTree::build(top, &renderer, &keys, opts, csg_limit).map(|t| {
                         let messages = t.messages.clone();
@@ -2171,6 +2189,7 @@ impl Session {
         let mut pipe = self.pipe(run);
         let job = self.begin(&pipe.paths.doc, run);
         let mut geometry = None;
+        let mut exact_report = None;
         let step = (|| -> Result<u8, Stop> {
             let loaded = self.load(&mut pipe, run)?;
             let scheme = req.scheme.geometry_scheme();
@@ -2178,7 +2197,7 @@ impl Session {
             let started = self.now();
             let mode = if req.force { Mode::Force } else { Mode::Render };
             run.stage(Stage::Geometry);
-            let (p, cache, _, _) = self.build(
+            let (p, cache, renderer, keys) = self.build(
                 &mut pipe,
                 &loaded,
                 &ev,
@@ -2187,6 +2206,7 @@ impl Session {
                 &job,
                 geom::csg::DEFAULT_TERM_LIMIT,
             )?;
+            let normal_render_ms = pipe.timings.geometry;
             let root = p.geometry;
             let dim = root.as_ref().map_or(3, geom::Geometry::dimension);
             if req.force && dim == 3 {
@@ -2219,6 +2239,42 @@ impl Session {
                     pipe.con.print(None, b"Current top level object is empty.");
                     return Err(Stop::Exit(EXIT_ERROR));
                 };
+                if *format == export::Format::Step {
+                    let made = self.export_step(
+                        &mut pipe,
+                        &loaded,
+                        &ev,
+                        (&renderer, &keys),
+                        (&scheme, mode, &job),
+                        root,
+                        target,
+                        run.extensions.union(self.cfg.extensions),
+                    );
+                    let (data, mut report) = match made {
+                        Ok(r) => r,
+                        Err(code) => return Err(Stop::Exit(code)),
+                    };
+                    if self.cfg.clock.is_some() {
+                        report.normal_render_ms = Some(normal_render_ms);
+                    }
+                    let ok = report.ok;
+                    exact_report = Some(report);
+                    if job.stopped() {
+                        return Err(self.interrupted(&mut pipe, &loaded, &job));
+                    }
+                    let Some(data) = data.filter(|_| ok) else {
+                        return Err(Stop::Exit(EXIT_ERROR));
+                    };
+                    if let Err(line) = sink.write(target, &data) {
+                        pipe.con.print_error_line(
+                            DiagCode::OutputNotWritable,
+                            line.as_bytes(),
+                            true,
+                        );
+                        return Err(Stop::Exit(EXIT_ERROR));
+                    }
+                    continue;
+                }
                 let enc = export::encode(*format, root, &settings, &mut mesh);
                 for (severity, line) in &enc.immediate {
                     pipe.con.print(*severity, line.as_bytes());
@@ -2256,7 +2312,96 @@ impl Session {
             log,
             geometry: geometry.filter(|g| !g.is_empty()),
             timings,
+            exact: exact_report,
         })
+    }
+
+    /// One STEP output of [`Session::export`]: the exact export of the
+    /// tree just rendered as `normal` (`geom::exact`), its substitutions
+    /// printed at their source lines as the command line prints them
+    /// (`INFO` for exact curves and kept polygons, `WARNING` for faceted
+    /// regions), and the report. The bytes are `None` when the export was
+    /// refused (an `ERROR` line says why, and the report has it); `Err` is
+    /// a request that may not export STEP at all.
+    #[allow(clippy::too_many_arguments)]
+    fn export_step(
+        &self,
+        pipe: &mut Pipe,
+        loaded: &Loaded,
+        ev: &eval::Evaluation,
+        (renderer, keys): (&geom::Renderer, &eval::dump::Keys),
+        (scheme, mode, job): (&geom::color::Scheme, Mode, &JobGuard<'_>),
+        normal: &geom::Geometry,
+        target: &str,
+        extensions: eval::Extensions,
+    ) -> Result<(Option<Vec<u8>>, exact::ExactReport), u8> {
+        if !extensions.has(eval::Extension::Exact) {
+            // The command line refuses `.step` without the extension as an
+            // unknown suffix; a host that asks for STEP by name gets the
+            // reason instead, rather than a file it did not opt into.
+            pipe.con.print(
+                Some(Severity::Error),
+                b"ERROR: STEP export needs NeoSCAD's exact extension (--enable exact).",
+            );
+            return Err(EXIT_ERROR);
+        }
+        let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+        let (_, fonts) = self.fonts_for(&loaded.used(), &*pipe.fs);
+        let opts = Self::render_options(pipe, loaded, scheme, mode, job, fonts);
+        let file_name = Path::new(target).file_name().map_or_else(
+            || "part.step".to_string(),
+            |f| f.to_string_lossy().into_owned(),
+        );
+        let product = Path::new(&pipe.paths.display)
+            .file_stem()
+            .map_or_else(|| "part".to_string(), |f| f.to_string_lossy().into_owned());
+        let clock = || self.now();
+        let x = geom::exact::ExactOptions {
+            // Fixed names and date, as the command line writes them: the
+            // same model gives the same file from every host.
+            step: geom::exact::meshbrep::StepOptions {
+                product_name: product,
+                file_name,
+                originating_system: "NeoSCAD".into(),
+                ..Default::default()
+            },
+            clock: self.cfg.clock.as_ref().map(|_| &clock as &dyn Fn() -> f64),
+        };
+        let result = geom::exact::export_step(renderer, top, keys, &opts, normal, &x);
+        let (subs, stats) = match &result {
+            Ok(e) => (&e.substitutions, &e.stats),
+            Err(f) => (&f.substitutions, &f.stats),
+        };
+        let fs = self.fs.clone();
+        let main_dir = pipe.paths.main_dir.clone();
+        let locate = |l: &geom::MsgLoc| {
+            let sources = loaded.unit_sources(l.unit)?;
+            let rel = lang::diag::relative_display(sources.path(l.span.file), &main_dir, &*fs);
+            Some((rel, l.line))
+        };
+        let report = exact::ExactReport::new(
+            stats,
+            subs,
+            result.as_ref().err().map(|f| f.message.as_str()),
+            &locate,
+        );
+        self.print_messages(pipe, loaded, &geom::exact::substitution_messages(subs));
+        match result {
+            Ok(e) => Ok((Some(e.step.into_bytes()), report)),
+            Err(f) => {
+                if f.interrupted.is_none() {
+                    pipe.con.print(
+                        Some(Severity::Error),
+                        format!(
+                            "ERROR: STEP export failed: {}. No file was written.",
+                            f.message
+                        )
+                        .as_bytes(),
+                    );
+                }
+                Ok((None, report))
+            }
+        }
     }
 }
 

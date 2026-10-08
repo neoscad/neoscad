@@ -356,13 +356,14 @@ ray comes from the viewer (`ray_at`), in model coordinates.
 
 ```js
 { type: "export", path, format: "stl" | "binstl" | "3mf" | "off" | "obj" | "wrl"
-                              | "pov" | "svg" | "dxf" | "pdf",
+                              | "pov" | "svg" | "dxf" | "pdf" | "step",
   options?: { threemfColorMode?: "model" | "noColor" | "selectedOnly",
               threemfColor?: "#rrggbb" | name, threemfMaterial?: "color" | "baseMaterial" },
   run?: RunOptions, creationDate?: "2026-09-29T12:00:00Z" }
 → { exitCode, format, bytes: u64, mime: "model/stl",
     data: ArrayBuffer | null,          // transferred; null when exitCode ≠ 0
-    geometry: GeometryStats | null, diagnostics, console, timings }
+    geometry: GeometryStats | null, diagnostics, console, timings,
+    step: StepReport | null }          // a STEP export's report, else null
 ```
 
 Renders the model and encodes it with OpenSCAD's default options; the
@@ -372,6 +373,17 @@ default `1970-01-01T00:00:00Z`. The model's title in 3MF and PDF
 metadata is the document's file name; the page names the download
 itself. A failed export (a 2D model to a 3D format, an empty model) has
 `exitCode` 1, `data: null` and the reason in `console`.
+
+`step` (STEP with exact surfaces, `docs/step-export.md`) needs
+`"exact"` in `run.enable`; without it the export fails with that
+reason. Its `mime` is `model/step`, and `step` is the report
+(`client::StepReport`): `{ ok, error, faces, exactFaces, exactPercent,
+exactCurves, polygons, partial, fallback, facetedRegions: [{ module,
+file, line, count, detail }], summary }`, also when the export was
+refused. The page's Export menu lists STEP only while its "Exact STEP
+export (exact)" toggle is on (a saved setting), and shows the summary's
+first line in the console summary and the faceted regions as console
+lines that jump to their source.
 
 ### `addFiles`
 

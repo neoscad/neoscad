@@ -195,8 +195,8 @@ public class DocumentSessionTests
         {
             var path = LanguageSettings.PathIn(dir);
             Assert.Empty(LanguageSettings.Load(path).Names());
-            new LanguageSettings { Sketch = true, Query = true }.Save(path);
-            Assert.Equal(["sketch", "query"], LanguageSettings.Load(path).Names());
+            new LanguageSettings { Sketch = true, Query = true, Exact = true }.Save(path);
+            Assert.Equal(["sketch", "query", "exact"], LanguageSettings.Load(path).Names());
             File.WriteAllText(path, "{\"sketch\": tru");
             Assert.Empty(LanguageSettings.Load(path).Names());
         }
@@ -308,6 +308,34 @@ public class DocumentSessionTests
             var output = Path.Combine(dir, "cube.stl");
             Assert.Null(await doc.ExportAsync(output, "stl"));
             Assert.StartsWith("solid", File.ReadAllText(output));
+        }
+        finally
+        {
+            doc.Dispose();
+            Directory.Delete(dir, true);
+        }
+    }
+
+    /// <summary>
+    /// STEP is in File > Export As only with <c>exact</c>, is refused
+    /// without it, and with it is written with its report.
+    /// </summary>
+    [Fact]
+    public async Task StepFollowsTheExactSettingAndReportsItsShare()
+    {
+        var (doc, _, _, dir) = Session();
+        try
+        {
+            Assert.DoesNotContain(NeoScad.ExportFormatsWith([]), f => f.Id == "step");
+            Assert.Contains(NeoScad.ExportFormatsWith(["exact"]), f => f.Id == "step");
+            doc.LoadUntitled("cube(10);", autorun: false);
+            var output = Path.Combine(dir, "cube.step");
+            Assert.Contains("--enable exact", await doc.ExportAsync(output, "step"));
+            Assert.False(File.Exists(output));
+            doc.SetEnable(new LanguageSettings { Exact = true }.Names());
+            Assert.Null(await doc.ExportAsync(output, "step"));
+            Assert.StartsWith("ISO-10303-21;", File.ReadAllText(output));
+            Assert.StartsWith("STEP: 6 of 6 faces exact (100%).", doc.LastStepReport);
         }
         finally
         {

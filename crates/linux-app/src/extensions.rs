@@ -1,9 +1,10 @@
 //! Preferences > Language: which of NeoSCAD's language extensions every
 //! window runs its document with (docs/language-extensions.md, section
 //! 2), the Linux port of the macOS app's `LanguageSettings.swift`.
-//! Constrained sketches (`--enable sketch`) and geometry queries
-//! (`--enable query`), both off by default as on the command line: off, a
-//! file means exactly what it means in OpenSCAD. `part()` keeps its
+//! Constrained sketches (`--enable sketch`), geometry queries (`--enable
+//! query`) and STEP export with exact surfaces (`--enable exact`, which
+//! adds STEP to File > Export), all off by default as on the command line:
+//! off, a file means exactly what it means in OpenSCAD. `part()` keeps its
 //! per-window toggle in the check and measure panels.
 //!
 //! The names go to each window's document loop (`DocumentLoop::set_enable`,
@@ -25,6 +26,8 @@ pub struct Settings {
     /// Geometry queries: `anchor()`, `child_anchors()`, `child_bounds()`,
     /// `child_measure()` and `child_distance()`.
     pub query: bool,
+    /// STEP export with exact surfaces (File > Export > STEP).
+    pub exact: bool,
 }
 
 impl Settings {
@@ -35,12 +38,15 @@ impl Settings {
         Settings {
             sketch: v["sketch"].as_bool().unwrap_or(false),
             query: v["query"].as_bool().unwrap_or(false),
+            exact: v["exact"].as_bool().unwrap_or(false),
         }
     }
 
     pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(&json!({"sketch": self.sketch, "query": self.query}))
-            .unwrap_or_default()
+        serde_json::to_string_pretty(
+            &json!({"sketch": self.sketch, "query": self.query, "exact": self.exact}),
+        )
+        .unwrap_or_default()
     }
 
     /// The file at `path`, or everything off when it is missing.
@@ -71,6 +77,9 @@ impl Settings {
         if self.query {
             out.push("query".to_string());
         }
+        if self.exact {
+            out.push("exact".to_string());
+        }
         out
     }
 }
@@ -90,14 +99,17 @@ mod tests {
         let s = Settings {
             sketch: true,
             query: false,
+            exact: false,
         };
         assert_eq!(Settings::from_json(s.to_json().as_bytes()), s);
         assert_eq!(s.names(), ["sketch"]);
-        let both = Settings {
+        let all = Settings {
             sketch: true,
             query: true,
+            exact: true,
         };
-        assert_eq!(both.names(), ["sketch", "query"]);
+        assert_eq!(Settings::from_json(all.to_json().as_bytes()), all);
+        assert_eq!(all.names(), ["sketch", "query", "exact"]);
         // Damage turns nothing on.
         assert_eq!(Settings::from_json(b"{\"sketch\": 1"), Settings::default());
         assert_eq!(Settings::from_json(b"[]").names(), Vec::<String>::new());
@@ -111,6 +123,7 @@ mod tests {
         let s = Settings {
             sketch: false,
             query: true,
+            exact: true,
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);

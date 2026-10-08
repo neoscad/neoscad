@@ -100,6 +100,30 @@ test("Export downloads a file named after the example", async ({ page }) => {
   expect([...readFileSync(await threemf.path()).subarray(0, 2)]).toEqual([0x50, 0x4b]);
 });
 
+test("STEP export is behind its toggle and reports how much is exact", async ({ page }) => {
+  await open(page);
+  await expect(summary(page)).toContainText("Previewed");
+  await page.getByTestId("export-menu").click();
+  await expect(page.getByRole("menuitem", { name: "STEP (exact surfaces)…" })).toHaveCount(0);
+  await page.getByRole("menuitemcheckbox", { name: "Exact STEP export (exact)" }).click();
+  await page.getByTestId("export-menu").click();
+  await expect(page.getByRole("menuitemcheckbox", { name: "Exact STEP export (exact)" })).toHaveAttribute("aria-checked", "true");
+  const [step] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("menuitem", { name: "STEP (exact surfaces)…" }).click(),
+  ]);
+  expect(step.suggestedFilename()).toBe("CSG.step");
+  const text = readFileSync(await step.path(), "utf8");
+  expect(text.startsWith("ISO-10303-21;")).toBe(true);
+  expect(text.trimEnd().endsWith("END-ISO-10303-21;")).toBe(true);
+  await expect(summary(page)).toContainText(/Exported CSG\.step \(\d+ bytes\)\. STEP: \d+ of \d+ faces exact/);
+  // The toggle is a setting: it survives a reload.
+  await page.reload();
+  await expect(summary(page)).toContainText("Previewed");
+  await page.getByTestId("export-menu").click();
+  await expect(page.getByRole("menuitem", { name: "STEP (exact surfaces)…" })).toHaveCount(1);
+});
+
 test("F5 previews instead of reloading, F6 and Mod-Enter render", async ({ page }) => {
   await open(page);
   await page.evaluate(() => (window.__notReloaded = true));

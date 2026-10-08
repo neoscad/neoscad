@@ -20,6 +20,11 @@ pub enum Format {
     Svg,
     Dxf,
     Pdf,
+    /// STEP AP214 with exact surfaces (`--enable exact`; `geom::exact`).
+    /// It is not encoded from the mesh: [`crate::Session::export`] builds
+    /// it from a second render of the tree ([`encode`] refuses it), and
+    /// only for a request with the `exact` extension on.
+    Step,
 }
 
 impl Format {
@@ -37,6 +42,7 @@ impl Format {
             "svg" => Format::Svg,
             "dxf" => Format::Dxf,
             "pdf" => Format::Pdf,
+            "step" | "stp" => Format::Step,
             _ => return None,
         })
     }
@@ -53,6 +59,7 @@ impl Format {
             Format::Svg => "svg",
             Format::Dxf => "dxf",
             Format::Pdf => "pdf",
+            Format::Step => "step",
         }
     }
 
@@ -118,6 +125,15 @@ pub fn encode(
     mesh: &mut Option<PolySet>,
 ) -> Encoded {
     let mut out = Encoded::default();
+    if format == Format::Step {
+        // A STEP file needs the tree, not the mesh: only
+        // `Session::export` can write it.
+        out.immediate.push((
+            Some(Severity::Error),
+            "ERROR: STEP is written from the model's tree, not encoded from its mesh.".into(),
+        ));
+        return out;
+    }
     let warnings = &mut out.warnings;
     out.data = match (format, root) {
         (Format::Svg, Geometry::Polygon2d(p)) => geom::export::svg(p, &s.svg),

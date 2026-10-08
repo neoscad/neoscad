@@ -381,8 +381,13 @@ the window's text), and Save asks before overwriting (Save Anyway /
 Reload / Cancel). A deleted file is reported; saving writes it again.
 The window's own saves are recognised by a hash of what they wrote.
 
-**Export.** File > Export As lists `export_formats()` (binary and ASCII
-STL, 3MF, OBJ, OFF, SVG, DXF, PDF, the view as PNG, a snapshot sheet);
+**Export.** File > Export As lists `export_formats_with()` for the
+window's extensions (binary and ASCII STL, 3MF, OBJ, OFF, SVG, DXF, PDF,
+STEP with Design > NeoSCAD Extensions' `exact`, the view as PNG, a
+snapshot sheet; rebuilt when a toggle changes). A STEP export ends in a
+dialog with its report (`DocumentSession.LastStepReport`: the share of
+exact faces and each region written as facets, `docs/step-export.md`),
+and a refused one says why in the status line and the same dialog;
 a 3D model's formats are disabled after a 2D render and the other way
 round. Export… (Ctrl+Shift+E) repeats the last format, or the one that
 suits the model (`suggest_export_format`). Geometry goes through
@@ -621,9 +626,9 @@ in `rust:1.98.1` (`--no-default-features` turns off `ffi`'s new
   Examples (the core's `examples()`), Export STL, Export Image (the view
   as PNG, `Viewport::image`), Exit; a save prompt before discarding edits.
 - Design: Preview (F5), Render (F6), also from the editor's own keys;
-  Design > NeoSCAD Extensions: "Constrained Sketches (sketch)" and
-  "Geometry Queries (query)", NeoSCAD's extensions to the OpenSCAD
-  language (`docs/language-extensions.md`), off by default. A toggle runs
+  Design > NeoSCAD Extensions: "Constrained Sketches (sketch)",
+  "Geometry Queries (query)" and "Exact STEP Export (exact)", NeoSCAD's
+  extensions (the last adds STEP to File > Export As) (`docs/language-extensions.md`), off by default. A toggle runs
   the window's document again with them (runs, check, measure, export
   and the language server) and is kept in
   `%LOCALAPPDATA%\NeoSCAD\language.json`, which windows opened later

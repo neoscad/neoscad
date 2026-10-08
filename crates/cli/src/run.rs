@@ -957,9 +957,25 @@ fn export_step<W: Write>(
         Ok(e) => (&e.substitutions, &e.stats),
         Err(f) => (&f.substitutions, &f.stats),
     };
-    let mut json = exact_json(stats, subs, result.as_ref().err().map(|f| &**f));
-    json["normal_render_ms"] = serde_json::json!(render_ms);
-    crate::report::set_exact(json);
+    // The session's report, so `--format json` and every host's (serve,
+    // MCP, the apps, the web page) agree on the counts and their words.
+    let locate = |l: &geom::MsgLoc| {
+        let sources = unit_sources(loaded, l.unit)?;
+        let rel = lang::diag::relative_display(
+            sources.path(l.span.file),
+            &paths.main_dir,
+            &lang::loader::StdFs,
+        );
+        Some((rel, l.line))
+    };
+    let mut report = session::exact::ExactReport::new(
+        stats,
+        subs,
+        result.as_ref().err().map(|f| f.message.as_str()),
+        &locate,
+    );
+    report.normal_render_ms = Some(render_ms);
+    crate::report::set_exact(report.json());
     if print_messages(
         job,
         loaded,
@@ -986,71 +1002,6 @@ fn export_step<W: Write>(
             EXIT_ERROR
         }
     }
-}
-
-/// The exact export's numbers for `--format json` (`exact`), and for the
-/// stop-rule sweep (`conformance exact`) that reads them.
-fn exact_json(
-    s: &geom::exact::ExactStats,
-    subs: &[geom::exact::Substitution],
-    failure: Option<&geom::exact::ExactFailure>,
-) -> serde_json::Value {
-    use geom::exact::SubstitutionKind as K;
-    let count = |k: K| {
-        subs.iter()
-            .filter(|x| x.kind == k)
-            .map(|x| x.count)
-            .sum::<u32>()
-    };
-    serde_json::json!({
-        "ok": failure.is_none(),
-        "error": failure.map(|f| f.message.clone()),
-        "attempts": s.attempts,
-        "retried_because": s.retried_because,
-        // Why the extrusions were written as facets after all, and what
-        // fell back in the exact attempts (`conformance exact` judges the
-        // model's eligibility by those).
-        "fallback": s.fallback,
-        "exact_attempt_faceted": s.exact_attempt_faceted,
-        // The regions written as facets where the exact attempts failed,
-        // the rest exact (`conformance exact` counts these apart).
-        "partial": s.partial.as_ref().map(|p| serde_json::json!({
-            "reason": p.reason,
-            "regions": p.regions,
-            "triangles": p.triangles,
-            "exact_triangles": p.exact_triangles,
-            "rounds": p.rounds,
-        })),
-        "triangles": s.triangles,
-        "faces": s.faces,
-        "exact_faces": s.exact_faces,
-        "edges": s.edges,
-        "bspline_edges": s.bspline_edges,
-        "volume": s.volume,
-        "corrected_mesh_volume": s.corrected_volume,
-        "volume_error": s.volume_error,
-        "volume_tolerance": s.volume_tolerance,
-        "normal_volume": s.normal_volume,
-        "chain_deviation": s.chain_deviation,
-        "max_cap": s.max_cap,
-        "substitutions": {
-            "exact": count(K::Exact),
-            "polygon": count(K::Polygon),
-            "faceted": count(K::Faceted),
-            "faceted_modules": subs
-                .iter()
-                .filter(|x| x.kind == K::Faceted)
-                .map(|x| x.module)
-                .collect::<std::collections::BTreeSet<_>>(),
-        },
-        "notes": s.notes,
-        "timings_ms": {
-            "export_render": s.timings.export_render_ms,
-            "reconstruct": s.timings.reconstruct_ms,
-            "check": s.timings.check_ms,
-            "write": s.timings.write_ms,
-        },
-    })
 }
 
 /// How the shared encoder writes this run's files: the `-O` settings, the

@@ -1028,6 +1028,35 @@ fn server_wide_enable_turns_on_extensions() {
     assert!(text(&r).contains("Ignoring unknown module 'part'"), "{r}");
 }
 
+/// `check` with `export` writes STEP on a server started with
+/// `--enable exact`, and its structured content says how much of the
+/// file is exact and where it is not; without the flag it is refused,
+/// and nothing is said to be written.
+#[test]
+fn check_exports_step_with_its_report() {
+    let dir = scratch("step");
+    let src = "difference() {\n  cube(20);\n  translate([10, 10, -1]) cylinder(r = 4, h = 22);\n  hull() { cube(1); translate([2, 2, 2]) cube(1); }\n}\n";
+    let mut s = Mcp::start(&dir, &["--enable", "exact"]);
+    let r = s.tool("check", json!({"source": src, "export": "part.step"}));
+    assert_eq!(r["isError"], false, "{r}");
+    let t = text(&r);
+    assert!(t.contains("wrote "), "{t}");
+    assert!(t.contains("faces exact ("), "{t}");
+    let e = &r["structuredContent"]["export"]["exact"];
+    assert_eq!(e["ok"], true, "{r}");
+    assert_eq!(e["exact_curves"], 1, "{e}");
+    assert_eq!(e["faceted_regions"][0]["module"], "hull", "{e}");
+    assert_eq!(e["faceted_regions"][0]["line"], 4, "{e}");
+    let step = std::fs::read_to_string(dir.join("part.step")).unwrap();
+    assert!(step.starts_with("ISO-10303-21;"));
+    // Without the extension the export is refused, with the reason.
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("check", json!({"source": src, "export": "other.step"}));
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(text(&r).contains("neoscad mcp --enable exact"), "{r}");
+    assert!(!dir.join("other.step").exists());
+}
+
 #[test]
 fn bad_calls_are_explained_in_the_callers_terms() {
     let dir = scratch("args");

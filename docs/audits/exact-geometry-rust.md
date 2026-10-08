@@ -257,6 +257,29 @@ traced (`beziers__022`, `__037`), the tangent-point class
 (`distributors__052`, refused after eight rounds) and fins
 (`example017.scad`) (`docs/followups.md`, "Exact geometry").
 
+**Update, stage 3 built (2026-10-07):** STEP export reaches every host
+through one entry point, `Session::export` with the `step` format
+(`crates/session/src/lib.rs`, `export_step`), which refuses a request
+without the `exact` extension and otherwise runs `geom::exact::export_step`
+on the tree the session just rendered, printing the substitutions at
+their lines as the command line does. Its report,
+`session::exact::ExactReport`, resolves each substitution to a file and
+line and is the one shape every host shows: the command line's
+`--format json` `exact` (now built from it, adding `exact_percent`,
+`faceted_regions` and `summary`), `serve`'s `export` reply, the MCP
+tools' structured content (`render`/`check` with `export: "x.step"` on
+`neoscad mcp --enable exact`), and `client::StepReport` for the apps and
+/try. `serve` now lists `exact` in its features and `step` in its
+export formats; a served STEP file is the command line's byte for byte
+(`crates/cli/tests/serve.rs`). The macOS, Linux and Windows apps have
+an "Exact STEP export (exact)" toggle beside the sketch and query ones,
+File > Export gains STEP with it (`client::export_formats_with`), and
+the report (exact faces as a share, each faceted region at its line, or
+why the model was refused) follows the export. /try has the same toggle
+in its Export menu and downloads the wasm core's file. No measurement
+changes: the export itself is stage 2's with the partial fallback. The
+user reference is `docs/step-export.md`.
+
 It follows `docs/audits/brep-feasibility.md` (below, "the previous
 audit"), which found that only OCCT survives OpenSCAD-shaped trees. The
 owner prefers an exact backend written in-house: pure Rust, publishable as

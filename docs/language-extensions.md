@@ -96,7 +96,9 @@ extension:
   surfaces), which without it stay OpenSCAD's "Invalid suffix" error. It
   follows the same rules: not in `--enable all`, checked against
   `Feature.cc` by `crates/eval/tests/extensions.rs`, and its messages say
-  "STEP export:" so they are never mistaken for OpenSCAD's.
+  "STEP export:" so they are never mistaken for OpenSCAD's. Its user
+  reference is `docs/step-export.md`; the apps, `serve`, MCP and the web
+  page offer it behind the same switch.
 - **One extension set in the evaluator.** `eval::Options::parts: bool`
   (`crates/eval/src/lib.rs:226-230`) becomes `extensions: Extensions`,
   a bit set like `Features` (`crates/eval/src/features.rs:93-154`) with

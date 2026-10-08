@@ -122,11 +122,15 @@ export const Requests = {
   lsp: (message) => ({ type: "lsp", message }),
 };
 
+/// The Export menu's formats. `extension` names the NeoSCAD extension a
+/// format needs (`--enable` on the command line): the menu lists it only
+/// while the Export menu's toggle for it is on, and the export sends it.
 export const EXPORT_FORMATS = {
   stl: { label: "STL", ext: "stl" },
   "3mf": { label: "3MF", ext: "3mf" },
   off: { label: "OFF", ext: "off" },
   svg: { label: "SVG (2D)", ext: "svg" },
+  step: { label: "STEP (exact surfaces)", ext: "step", extension: "exact" },
 };
 
 // --- Editor edits --------------------------------------------------------------

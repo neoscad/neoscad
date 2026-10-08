@@ -21,7 +21,24 @@ import { untar } from "./tar.js";
 
 export const MOCK_VERSION = "0.0.0-mock";
 
-const MIME = { stl: "model/stl", binstl: "model/stl", "3mf": "model/3mf", off: "text/plain", svg: "image/svg+xml" };
+const MIME = { stl: "model/stl", binstl: "model/stl", "3mf": "model/3mf", off: "text/plain", svg: "image/svg+xml", step: "model/step" };
+
+/// What the core reports for a STEP export (`client::StepReport`), fixed:
+/// one exact curve and one faceted region, so the page's lines can be
+/// tested without the wasm core.
+const MOCK_STEP_REPORT = {
+  ok: true,
+  error: null,
+  faces: 16,
+  exactFaces: 7,
+  exactPercent: 43.75,
+  exactCurves: 1,
+  polygons: 0,
+  partial: null,
+  fallback: null,
+  facetedRegions: [{ module: "hull", file: "CSG.scad", line: 2, count: 1, detail: "is exported as planar facets: hull() has no exact surfaces in STEP export yet" }],
+  summary: "STEP: 7 of 16 faces exact (43.8%).\n1 curve made exact.\nFaceted: hull() at CSG.scad, line 2 is exported as planar facets",
+};
 
 const CHECK_DEFAULTS = { nozzle: 0.4, minWall: 0.8, maxOverhang: 45, bed: null, bedTolerance: 0.5, maxFindings: 50 };
 const LIMITS = {
@@ -350,8 +367,17 @@ export class MockCore {
 
   export(msg) {
     const model = this.model ?? { meshes: [boxMesh([0, 0, 0], [10, 10, 10])] };
-    const make = { stl: () => stl(model), off: () => off(model), svg, "3mf": () => threeMF(model) }[msg.format];
+    const step = () => new TextEncoder().encode("ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n");
+    const make = { stl: () => stl(model), off: () => off(model), svg, "3mf": () => threeMF(model), step }[msg.format];
     if (!make) throw invalid(`unknown export format: ${msg.format}`);
+    // As the core: STEP only with the `exact` extension on the run.
+    if (msg.format === "step" && !(msg.run?.enable ?? []).includes("exact")) {
+      return {
+        result: { exitCode: 1, format: "step", bytes: 0, mime: MIME.step, data: null, geometry: null, diagnostics: [],
+          console: "ERROR: STEP export needs NeoSCAD's exact extension (--enable exact).\n",
+          timings: { parseMs: 0, evaluateMs: 0, geometryMs: 0, totalMs: 1 }, step: null },
+      };
+    }
     const bytes = make();
     const data = bytes.buffer;
     return {
@@ -365,6 +391,7 @@ export class MockCore {
         diagnostics: [],
         console: "",
         timings: { parseMs: 0, evaluateMs: 0, geometryMs: 0, totalMs: 1 },
+        step: msg.format === "step" ? MOCK_STEP_REPORT : null,
       },
       transfer: [data],
     };

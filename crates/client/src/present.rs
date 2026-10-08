@@ -176,11 +176,21 @@ pub struct ExportFormatInfo {
     pub kind: ExportKind,
 }
 
-/// File > Export's formats, in menu order. The geometry entries take their
-/// ids and dimensions from the session's own table
+/// File > Export's formats, in menu order, without the extensions'
+/// formats: [`export_formats_with`] with nothing on.
+pub fn export_formats() -> Vec<ExportFormatInfo> {
+    export_formats_with(&[])
+}
+
+/// File > Export's formats for documents run with `enable` (the
+/// `--enable` names the app's settings turn on): STEP with exact surfaces
+/// is offered only with `exact`, since without it the export is refused,
+/// and a file the user cannot get should not be in the menu. The geometry
+/// entries take their ids and dimensions from the session's own table
 /// (`session::export::Format`), so they cannot disagree with what
 /// [`Client::export`] accepts.
-pub fn export_formats() -> Vec<ExportFormatInfo> {
+pub fn export_formats_with(enable: &[String]) -> Vec<ExportFormatInfo> {
+    let step = eval::Extensions::from_names(enable).has(eval::Extension::Exact);
     let geometry = |id: &str, title: &str| {
         let f = session::export::Format::from_id(id).expect("a known format id");
         ExportFormatInfo {
@@ -201,7 +211,7 @@ pub fn export_formats() -> Vec<ExportFormatInfo> {
         dimension: None,
         kind,
     };
-    vec![
+    [
         geometry("binstl", "STL (binary)"),
         geometry("stl", "STL (ASCII)"),
         geometry("3mf", "3MF"),
@@ -210,14 +220,22 @@ pub fn export_formats() -> Vec<ExportFormatInfo> {
         geometry("svg", "SVG"),
         geometry("dxf", "DXF"),
         geometry("pdf", "PDF"),
+    ]
+    .into_iter()
+    .chain(step.then(|| geometry("step", "STEP (exact surfaces)")))
+    .chain([
         image("view-image", "PNG image of the view", ExportKind::ViewImage),
         image("snapshot", "PNG snapshot sheet", ExportKind::Snapshot),
-    ]
+    ])
+    .collect()
 }
 
-/// The entry with `id`, if File > Export offers it.
+/// The entry with `id`, if File > Export offers it with every extension
+/// on (STEP included: whether the menu shows it is the settings' call).
 pub fn export_format_info(id: &str) -> Option<ExportFormatInfo> {
-    export_formats().into_iter().find(|f| f.id == id)
+    export_formats_with(&["exact".to_string()])
+        .into_iter()
+        .find(|f| f.id == id)
 }
 
 /// Why a file export failed, as an alert says it: the console's last error

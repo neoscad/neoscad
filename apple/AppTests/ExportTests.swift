@@ -99,6 +99,41 @@ private func tempDirectory() throws -> URL {
         doc.close()
     }
 
+    /// STEP is offered and written only with Settings > Language's
+    /// `exact`, and its outcome carries the core's report: the share of
+    /// exact faces and each faceted region at its line.
+    @Test func stepFollowsTheSettingAndReportsWhatIsExact() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let was = LanguageSettings.exact
+        defer { LanguageSettings.exact = was }
+        LanguageSettings.exact = false
+        #expect(!ExportFormat.offered.contains(.step))
+        let doc = try await openDocument(
+            "difference() {\n  cube(20);\n  translate([10, 10, -1]) cylinder(r = 4, h = 22);\n"
+                + "  hull() { cube(1); translate([2, 2, 2]) cube(1); }\n}\n")
+        let step = dir.appendingPathComponent("part.step")
+        var s = ExportSettings()
+        s.format = .step
+        guard case .failed(let refused) = await doc.performExport(to: step, settings: s) else {
+            Issue.record("STEP was written without the exact extension")
+            return
+        }
+        #expect(refused.message.contains("--enable exact"))
+        #expect(!FileManager.default.fileExists(atPath: step.path))
+        LanguageSettings.exact = true
+        #expect(ExportFormat.offered.contains(.step))
+        guard case .writtenWithReport(_, _, let report) = await doc.performExport(to: step, settings: s) else {
+            Issue.record("the STEP file was not written")
+            return
+        }
+        #expect(report.message.hasPrefix("STEP: 7 of 16 faces exact (43.8%)."))
+        #expect(report.message.contains("Faceted: hull() at"))
+        let text = try String(contentsOf: step, encoding: .utf8)
+        #expect(text.hasPrefix("ISO-10303-21;"))
+        doc.close()
+    }
+
     @Test func aTwoDimensionalRenderStartsOnSVG() async throws {
         let doc = try await openDocument("square(10);\n")
         doc.renderDocument(nil)

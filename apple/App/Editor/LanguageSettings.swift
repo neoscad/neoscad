@@ -2,8 +2,9 @@
 // Settings > Language. Off by default, as on the command line: with them
 // off a file means exactly what it means in OpenSCAD
 // (docs/language-extensions.md, section 1). Constrained sketches
-// (`--enable sketch`, docs/sketch.md) and geometry queries (`--enable
-// query`, docs/geometry-queries.md) are here; `part()` keeps its
+// (`--enable sketch`, docs/sketch.md), geometry queries (`--enable
+// query`, docs/geometry-queries.md) and STEP export with exact surfaces
+// (`--enable exact`, docs/step-export.md) are here; `part()` keeps its
 // per-window toggle in the check and measure panels.
 
 import Foundation
@@ -15,6 +16,7 @@ enum LanguageSettings {
 
     private static let sketchesKey = "EnableSketches"
     private static let queriesKey = "EnableQueries"
+    private static let exactKey = "EnableExactExport"
 
     /// Constrained sketches: `sketch() { ... }` with its entities and
     /// constraints.
@@ -38,9 +40,19 @@ enum LanguageSettings {
         }
     }
 
+    /// STEP export with exact surfaces: File > Export offers STEP.
+    static var exact: Bool {
+        get { UserDefaults.standard.bool(forKey: exactKey) }
+        set {
+            guard newValue != exact else { return }
+            UserDefaults.standard.set(newValue, forKey: exactKey)
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
     /// The `--enable` names every document's runs, checks, exports and
     /// language server take.
     static var enable: [String] {
-        (sketches ? ["sketch"] : []) + (queries ? ["query"] : [])
+        (sketches ? ["sketch"] : []) + (queries ? ["query"] : []) + (exact ? ["exact"] : [])
     }
 }

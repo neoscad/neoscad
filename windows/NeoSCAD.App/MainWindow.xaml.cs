@@ -81,8 +81,7 @@ public sealed partial class MainWindow : Window
         };
 
         BuildExamplesMenu();
-        BuildExportMenu();
-        StartLanguageSettings(); // MainWindow.Language.cs
+        StartLanguageSettings(); // MainWindow.Language.cs; builds File > Export As
         StartUpdates(); // MainWindow.Updates.cs
         StartAgents(); // MainWindow.Agents.cs
         if (panel is not null) ShowPanel(panel);
@@ -335,17 +334,22 @@ public sealed partial class MainWindow : Window
 
     ExportFormatInfo[] exportFormats = [];
 
-    /// <summary>File > Export As: every format the core offers, in its order.</summary>
-    void BuildExportMenu()
+    /// <summary>
+    /// File > Export As: every format the core offers for the
+    /// <c>--enable</c> names <paramref name="enable"/>, in its order (STEP
+    /// only with <c>exact</c>).
+    /// </summary>
+    void BuildExportMenu(string[] enable)
     {
         try
         {
-            exportFormats = NeoScad.ExportFormats();
+            exportFormats = NeoScad.ExportFormatsWith([.. enable]);
         }
         catch (Exception e) when (e is CoreException or DllNotFoundException)
         {
             exportFormats = [];
         }
+        ExportMenu.Items.Clear();
         foreach (var format in exportFormats)
         {
             var item = new MenuFlyoutItem { Text = $"{format.Title}…", Tag = format.Id };
@@ -420,6 +424,21 @@ public sealed partial class MainWindow : Window
         }
         Status.Text = failure ?? $"Exported {file.Name}";
         if (failure is not null) AppLog.Write($"export {format.Id} failed: {failure}");
+        // A STEP export's report: the share of exact faces and the regions
+        // written as facets, or why it was refused.
+        if (format.Id == "step" && document.LastStepReport is { } report && !dialogShowing)
+        {
+            Status.Text = failure is null ? $"Exported {file.Name}. {report.Split('\n')[0]}" : Status.Text;
+            dialogShowing = true;
+            await new ContentDialog
+            {
+                XamlRoot = Root.XamlRoot,
+                Title = failure is null ? $"Exported {file.Name}" : $"{file.Name} was not exported",
+                Content = new TextBlock { Text = report, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true },
+                CloseButtonText = "Close",
+            }.ShowAsync();
+            dialogShowing = false;
+        }
     }
 
     async Task<string?> ExportWithProgressAsync(string path, string name, ExportFormatInfo format)

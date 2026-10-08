@@ -557,6 +557,13 @@ public sealed partial class DocumentSession
         Report is RunReport.Rendered { Result.Geometry: { } g } ? g.Dimensions : null;
 
     /// <summary>
+    /// The last STEP export's report (<c>client::StepReport::summary</c>):
+    /// the share of exact faces and each region written as facets, or why
+    /// it was refused; <c>null</c> after any other export.
+    /// </summary>
+    public string? LastStepReport { get; private set; }
+
+    /// <summary>
     /// Export the model to <paramref name="output"/> as <paramref
     /// name="format"/> (an id from <c>NeoScad.ExportFormats()</c>): a full
     /// render of the current text with the customizer's values, on the
@@ -586,8 +593,13 @@ public sealed partial class DocumentSession
             }
             var listener = stage is null ? null : new StageListener(stage);
             var options = new ExportOptions(format, null, null, null);
+            LastStepReport = null;
             var r = await CoreService.Run(() => core.ExportFile(path, output, options, run, cancel, listener));
-            return NeoScad.ExportFailureReason(r);
+            LastStepReport = r.Step?.Summary;
+            var failure = NeoScad.ExportFailureReason(r);
+            // A refused STEP export's report says why, with the faceted
+            // regions it found.
+            return failure is not null && r.Step is { } step ? step.Summary : failure;
         }
         catch (CoreException.Cancelled)
         {

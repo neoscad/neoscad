@@ -280,6 +280,82 @@ pub struct ExportResult {
     pub diagnostics: Vec<Diagnostic>,
     pub console: String,
     pub timings: Timings,
+    /// A STEP export's report (`exact` extension), written or refused;
+    /// `None` for every other format.
+    pub step: Option<StepReport>,
+}
+
+/// What a STEP export with exact surfaces did (`--enable exact`;
+/// `session::exact`), for the export's alert or message: how much of the
+/// model is exact, and where it is not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepReport {
+    /// Whether the file was written.
+    pub ok: bool,
+    /// Why it was refused (no file), when it was.
+    pub error: Option<String>,
+    /// The B-rep's faces, and those on an exact surface (planes included).
+    pub faces: u64,
+    pub exact_faces: u64,
+    /// `exact_faces` as a percentage of `faces`; `None` with no faces.
+    pub exact_percent: Option<f64>,
+    /// `$fa`/`$fs` curves written as exact surfaces, and `$fn` polygons
+    /// kept as modelled (instances).
+    pub exact_curves: u32,
+    pub polygons: u32,
+    /// Why some regions were written as facets where the model did not
+    /// reconstruct exact (the rest exact), when that happened.
+    pub partial: Option<String>,
+    /// Why the extrusions were written as facets after all, when they were.
+    pub fallback: Option<String>,
+    /// Every region written as planar facets, at its source line.
+    pub faceted_regions: Vec<FacetedRegion>,
+    /// The report in words, a line each, as the apps show it.
+    pub summary: String,
+}
+
+/// One call in the source whose geometry a STEP export wrote as planar
+/// facets rather than exact surfaces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FacetedRegion {
+    /// The module, as OpenSCAD spells it (`hull`, `polyhedron`).
+    pub module: String,
+    /// The file, relative to the main file's folder, and the line.
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    /// Instances at this location.
+    pub count: u32,
+    /// Why, in words.
+    pub detail: String,
+}
+
+impl StepReport {
+    pub fn from_session(r: &session::exact::ExactReport) -> StepReport {
+        StepReport {
+            ok: r.ok,
+            error: r.error.clone(),
+            faces: r.stats.faces as u64,
+            exact_faces: r.stats.exact_faces as u64,
+            exact_percent: r.exact_percent(),
+            exact_curves: r.count("exact"),
+            polygons: r.count("polygon"),
+            partial: r.stats.partial.as_ref().map(|p| p.reason.clone()),
+            fallback: r.stats.fallback.clone(),
+            faceted_regions: r
+                .faceted()
+                .map(|f| FacetedRegion {
+                    module: f.module.to_string(),
+                    file: f.file.clone(),
+                    line: f.line,
+                    count: f.count,
+                    detail: f.detail.clone(),
+                })
+                .collect(),
+            summary: r.summary(),
+        }
+    }
 }
 
 /// Resource limits for every request (`eval::limits`); `None` is

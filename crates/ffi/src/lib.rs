@@ -302,7 +302,8 @@ impl Core {
 
     /// Render and write the model to `output` (an absolute path) as
     /// `format` (OpenSCAD's id: `stl`, `binstl`, `off`, `obj`, `3mf`,
-    /// `wrl`, `pov`, `svg`, `dxf`, `pdf`), or by `output`'s extension.
+    /// `wrl`, `pov`, `svg`, `dxf`, `pdf`; `step` when the document runs
+    /// with the `exact` extension), or by `output`'s extension.
     /// The file's bytes are the command line's for the same model.
     pub fn export(
         &self,

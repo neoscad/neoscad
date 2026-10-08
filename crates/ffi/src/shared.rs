@@ -161,6 +161,13 @@ pub fn export_formats() -> Result<Vec<ExportFormatInfo>, CoreError> {
     guarded(|| Ok(client::export_formats()))
 }
 
+/// File > Export's formats for documents run with `enable` (the app's
+/// `--enable` names): STEP only with `exact`.
+#[uniffi::export]
+pub fn export_formats_with(enable: Vec<String>) -> Result<Vec<ExportFormatInfo>, CoreError> {
+    guarded(|| Ok(client::export_formats_with(&enable)))
+}
+
 /// Why a file export failed, as an alert says it; `None` when it did not.
 #[uniffi::export]
 pub fn export_failure_reason(result: ExportResult) -> Result<Option<String>, CoreError> {

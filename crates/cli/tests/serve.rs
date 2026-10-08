@@ -617,7 +617,7 @@ fn check_and_measure_are_served() {
     }
     assert_eq!(
         init["capabilities"]["features"],
-        json!(["part", "sketch", "query"])
+        json!(["part", "sketch", "query", "exact"])
     );
     let path = d.join("m.scad");
     let p = path.to_str().unwrap();
@@ -657,6 +657,61 @@ fn check_and_measure_are_served() {
     let m = s.result("measure", json!({"path": p}));
     assert_eq!(m["parts"], json!([]), "{m}");
     assert_eq!(m["diagnostics"]["warnings"], 2, "{m}");
+}
+
+#[test]
+fn step_is_served_with_the_exact_extension() {
+    let d = scratch("step");
+    std::fs::write(
+        d.join("m.scad"),
+        "difference() {\n  cube(20);\n  translate([10, 10, -1]) cylinder(r = 4, h = 22);\n  translate([5, 5, 5]) hull() { cube(1); translate([2, 2, 2]) cube(1); }\n}\n",
+    )
+    .unwrap();
+    let mut s = Stdio_::start(&d);
+    let init = s.result("initialize", json!({}));
+    assert!(
+        init["capabilities"]["export_formats"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("step"))
+    );
+    let p = d.join("m.scad");
+    // Without the extension: refused with the reason, no file.
+    let off = s.result("export", json!({"path": p, "output": "off.step"}));
+    assert_eq!(off["exit_code"], 1, "{off}");
+    assert!(
+        off["diagnostics"]
+            .to_string()
+            .contains("STEP export needs NeoSCAD's exact extension (--enable exact)"),
+        "{off}"
+    );
+    assert!(!d.join("off.step").exists());
+    let x = s.result(
+        "export",
+        json!({"path": p, "output": "m.step", "enable": ["exact"]}),
+    );
+    assert_eq!(x["exit_code"], 0, "{x}");
+    assert_eq!(x["format"], "step");
+    let e = &x["exact"];
+    assert_eq!(e["ok"], true, "{x}");
+    assert_eq!(e["substitutions"]["exact"], 1, "{e}");
+    // The hull is the one faceted region, at its line.
+    let regions = e["faceted_regions"].as_array().unwrap();
+    assert_eq!(regions.len(), 1, "{e}");
+    assert_eq!(regions[0]["module"], "hull");
+    assert_eq!(regions[0]["file"], "m.scad");
+    assert_eq!(regions[0]["line"], 4);
+    assert!(e["exact_faces"].as_u64().unwrap() < e["faces"].as_u64().unwrap());
+    // The served file is the command line's, byte for byte.
+    let served = std::fs::read(d.join("m.step")).unwrap();
+    let out = neoscad(&d, None, &["--enable", "exact", "-o", "m.step", "m.scad"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(d.join("m.step")).unwrap(), served);
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]

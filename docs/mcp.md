@@ -36,7 +36,8 @@ change a resource limit; see "Safety"), `--enable FEATURE` (repeatable:
 one of OpenSCAD's experimental features or NeoSCAD's extensions for
 every call, as the command line's `--enable`: `textmetrics`,
 `object-function`, `import-function`, `vector-swizzle`, `part`,
-`sketch` and `query`; off by default,
+`sketch`, `query` and `exact` (STEP export, "STEP exports" below); off
+by default,
 as in OpenSCAD), `--tool NAME`
 (repeatable: also list the optional tool `test` or `format`; see
 "Tools"), `--browser` (let the
@@ -219,7 +220,7 @@ transcript audit read as a problem in its model.
 | Tool | What it answers | Extra arguments |
 |---|---|---|
 | `evaluate` | errors and warnings with fix hints, `echo()` output; no geometry | |
-| `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch, and edges an STL breaks at 32-bit precision), components; optionally writes the model and reads a mesh file back | `export` (a file; format from its extension; `.stl` is ASCII STL), `overwrite` |
+| `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch, and edges an STL breaks at 32-bit precision), components; optionally writes the model and reads a mesh file back | `export` (a file; format from its extension; `.stl` is ASCII STL; `.step` with `--enable exact`), `overwrite` |
 | `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `sketch` (a sketch name, with `--enable sketch`: drawn flat with its constraints, `docs/sketch.md`), `dims`, `preview`, `output` (also save the PNG; a `.png` name), `overwrite` |
 | `check` | printability findings, each with location and fix; the description asks for the spec's minimum wall as `min_wall`; optionally `render`'s export and `measure`'s sections in the same result | `bed`, `nozzle`, `min_wall`, `max_overhang`, `export`, `overwrite`, `sections` (planes, each as `measure`'s `section`) |
 | `measure` | model and part bbox, volume, centroid; distance between parts, or the overlap's pieces; sections with each contour's area, bbox, hole and radii; a radius profile with crests and pitch; a constrained sketch's solved points, lengths, angles and radii | `part`, `between`, `section`, `axis` (`x`/`y`/`z`, default z), `center` (`[a, b]`, the axis's position, default `[0, 0]`), `profile` (`[from, to, step]` along the axis), `sketch` (a sketch's `name`, with `--enable sketch`) |
@@ -247,13 +248,14 @@ cut "… [truncated]", so the whole text stays under that, which
 mid-comment. With `--browser` the page's paragraph leaves no
 room, and the recipes become a pointer to `neoscad://recipes`.
 
-The tool list is 4,720 bytes of compact JSON as `[name, description,
+The tool list is 4,916 bytes of compact JSON as `[name, description,
 input schema]` arrays, which is what `crates/cli/tests/mcp.rs` measures
-and keeps under 5,500 bytes (each description under 300). What a client
-receives is larger: 4,930 bytes with the keys (`name`, `description`,
-`inputSchema`) and 5,148 with `annotations`, roughly 1,250-1,500 tokens
+and keeps under 5,500 bytes (each description under 300); `render`'s
+`.step` mention is 37 of them. What a client
+receives is larger: 5,126 bytes with the keys (`name`, `description`,
+`inputSchema`) and 5,344 with `annotations`, roughly 1,300-1,550 tokens
 (estimated at 3.5-4 bytes a token; not measured with a tokenizer). With
-`--tool test --tool format` the list is 5,809 bytes (6,380 as
+`--tool test --tool format` the list is 6,006 bytes (6,577 as
 received); before `test` and `format` were opt-in it was 5,488, without
 `check`'s `export`, `overwrite` and `sections`. To make room
 for `measure`'s `axis`, `center` and `profile`, `base_dir` lost its
@@ -280,6 +282,40 @@ watertight (4 open edges)` (or edges shared by more than two faces),
 with `open_edges` and `shared_edges` in the structured content. After
 every export, agents had checked the file with Bash (`ls`, `head`,
 `grep -c "facet normal"`, an `awk` for the lowest z), a turn each.
+
+### STEP exports
+
+A server started with `--enable exact` writes `.step` (and `.stp`)
+through `render`'s or `check`'s `export`: STEP whose faces are the
+model's true planes, cylinders, cones, spheres and tori
+(`docs/step-export.md`). The extension is server-wide, as `--enable`
+always is here: an agent cannot turn it on in a call, so a `.step`
+export on a server without it fails before anything runs, saying to
+start the server as `neoscad mcp --enable exact`. The tool descriptions
+mention `.step` in 37 bytes, and the instructions not at all: they
+are at Claude Code's limit already, and a server without the extension
+must not steer agents to it.
+
+A STEP file is not read back (it is not a mesh). Instead the text adds
+the report's first lines (`STEP: 7 of 16 faces exact (43.8%).`, then
+the counts and why anything fell back) after `wrote ...`, with each
+faceted region as a `warning` line at its location, and the structured
+content adds `exact` (under `export` for `check`):
+
+```json
+"exact": {"ok": true, "error": null, "faces": 16, "exact_faces": 7,
+ "exact_percent": 43.75, "exact_curves": 1, "polygons": 0,
+ "partial": null, "fallback": null,
+ "faceted_regions": [{"module": "hull", "file": "inline.scad", "line": 4,
+   "count": 1, "detail": "is exported as planar facets: hull() has no exact surfaces in STEP export yet"}]}
+```
+
+`partial` and `fallback` are the reasons a region or the extrusions
+were written as facets after the exact attempts failed. A refused
+model has `exit_code` 1, `ok: false` and the reason in `error`, and no
+file; `check` then says `export failed: nothing was written`, with the
+reason on the next line. The full report, with the cross-check's
+numbers, is `neoscad serve`'s (`docs/serve-protocol.md`, `export`).
 
 ### One check for everything
 

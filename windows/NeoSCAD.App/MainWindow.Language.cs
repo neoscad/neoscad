@@ -1,6 +1,7 @@
-// Design > NeoSCAD Extensions: constrained sketches (`--enable sketch`)
-// and geometry queries (`--enable query`), NeoSCAD's extensions to the
-// OpenSCAD language, as the macOS app's Settings > Language has them. Off
+// Design > NeoSCAD Extensions: constrained sketches (`--enable sketch`),
+// geometry queries (`--enable query`) and STEP export with exact surfaces
+// (`--enable exact`), NeoSCAD's extensions, as the macOS app's Settings >
+// Language has them. Off
 // by default; kept in %LOCALAPPDATA%\NeoSCAD\language.json
 // (NeoSCAD.Host/LanguageSettings.cs) for the windows opened later, and
 // watched (NeoSCAD.Host/LanguageSettingsWatch.cs) so that a toggle in
@@ -35,16 +36,25 @@ public sealed partial class MainWindow
     {
         SketchItem.IsChecked = s.Sketch;
         QueryItem.IsChecked = s.Query;
+        ExactItem.IsChecked = s.Exact;
         document.SetEnable(s.Names());
+        BuildExportMenu(s.Names());
     }
 
     void OnSketchToggle(object sender, RoutedEventArgs e) => ChangeLanguageSettings();
 
     void OnQueryToggle(object sender, RoutedEventArgs e) => ChangeLanguageSettings();
 
+    void OnExactToggle(object sender, RoutedEventArgs e) => ChangeLanguageSettings();
+
     void ChangeLanguageSettings()
     {
-        var s = new LanguageSettings { Sketch = SketchItem.IsChecked, Query = QueryItem.IsChecked };
+        var s = new LanguageSettings
+        {
+            Sketch = SketchItem.IsChecked,
+            Query = QueryItem.IsChecked,
+            Exact = ExactItem.IsChecked,
+        };
         languageWatch?.Saved(s);
         try
         {
@@ -55,5 +65,7 @@ public sealed partial class MainWindow
             AppLog.Write($"language settings: cannot save: {ex.Message}");
         }
         document.SetEnable(s.Names());
+        // STEP comes and goes with `exact`.
+        BuildExportMenu(s.Names());
     }
 }

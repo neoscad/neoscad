@@ -186,7 +186,7 @@ impl Window {
         header.pack_end(
             &gtk::MenuButton::builder()
                 .icon_name("open-menu-symbolic")
-                .menu_model(&super::main_menu())
+                .menu_model(&super::main_menu(&shared.export_formats))
                 .primary(true)
                 .tooltip_text("Main menu")
                 .build(),
@@ -1731,6 +1731,15 @@ impl Window {
                 }
             }
             match r {
+                // A report the user should read (a STEP export's faceted
+                // regions) is an alert; a plain success a toast.
+                Some(Ok(message)) if message.contains('\n') => {
+                    glib::g_debug!("neoscad", "export: {message}");
+                    let alert =
+                        adw::AlertDialog::new(Some(&format!("“{name}” Exported")), Some(&message));
+                    alert.add_response("close", "_Close");
+                    alert.present(Some(&w.win));
+                }
                 Some(Ok(message)) => {
                     glib::g_debug!("neoscad", "export: {message}");
                     w.toast(&message);

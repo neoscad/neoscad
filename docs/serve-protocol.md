@@ -26,7 +26,7 @@ change would get a new `protocol` number; there has been none.
 
 | `protocol` | Changes |
 |---|---|
-| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. Parsing each included file once (`9dbb98b`) added `stats`' `parse_cache.fragment_files` and `fragment_bytes`. `enable` now also takes OpenSCAD's experimental features (`textmetrics`, `object-function`, `import-function`, `vector-swizzle`, and on `export`/`cli.export` `predictible-output`). The `docs` method's `file_arg` was added after the CAD run cad-20260929T031249Z. |
+| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. Parsing each included file once (`9dbb98b`) added `stats`' `parse_cache.fragment_files` and `fragment_bytes`. `enable` now also takes OpenSCAD's experimental features (`textmetrics`, `object-function`, `import-function`, `vector-swizzle`, and on `export`/`cli.export` `predictible-output`). The `docs` method's `file_arg` was added after the CAD run cad-20260929T031249Z. Exact export stage 3 added `step` to `export` (with `enable: ["exact"]`), its `exact` report, `step` in `export_formats` and `exact` in `features`. |
 
 ## Transports
 
@@ -132,7 +132,7 @@ Requests on a model take:
 | `defines` | [string] | `-D` assignments, e.g. `"a=3"`. |
 | `quiet` | bool | Only errors in the log. |
 | `seed` | int | The seed of unseeded `rands()` (default: the server's, fixed per process). |
-| `enable` | [string] | `--enable`'s names, for this request. `"part"` turns on neoscad's `part()` extension (`docs/cli-json.md`, "Named parts"), as `--enable part` does; `"sketch"` turns on constrained sketches (`docs/sketch.md`) and `"query"` the geometry queries (`docs/geometry-queries.md`). `"all"` never turns an extension on. OpenSCAD's experimental features by their names (`"all"` is every one): `textmetrics`, `object-function`, `import-function` and `vector-swizzle` change evaluation; `predictible-output` sorts an `export`'s mesh file (`docs/cli-json.md`, "Sorted exports"). Other names are ignored. |
+| `enable` | [string] | `--enable`'s names, for this request. `"part"` turns on neoscad's `part()` extension (`docs/cli-json.md`, "Named parts"), as `--enable part` does; `"sketch"` turns on constrained sketches (`docs/sketch.md`) and `"query"` the geometry queries (`docs/geometry-queries.md`), and `"exact"` STEP export with exact surfaces (`docs/step-export.md`). `"all"` never turns an extension on. OpenSCAD's experimental features by their names (`"all"` is every one): `textmetrics`, `object-function`, `import-function` and `vector-swizzle` change evaluation; `predictible-output` sorts an `export`'s mesh file (`docs/cli-json.md`, "Sorted exports"). Other names are ignored. |
 | `parts` | bool | The same as `"enable": ["part"]`. |
 | `progress` | bool | Send `progress` notifications (default true). |
 | `supersede` | bool | Cancel older requests on the same document when this one starts (default true; see "Ordering and concurrency"). `false` lets requests on one file run side by side, as `neoscad mcp` sends them. |
@@ -164,12 +164,12 @@ Params: anything (ignored). Result:
    "notifications": {"server": ["progress", "diagnostics"],
                      "client": ["exit", "cancel", "$/cancelRequest"]},
    "export_formats": ["stl", "binstl", "off", "obj", "3mf", "wrl", "pov",
-                      "svg", "dxf", "pdf", "png", "echo", "ast", "csg"],
+                      "svg", "dxf", "pdf", "step", "png", "echo", "ast", "csg"],
    "render_modes": ["render", "force", "preview"],
    "incremental_edits": true,
    "snapshot": true, "check": true, "measure": true,
    "format": true, "docs": true, "test": true,
-   "features": ["part", "sketch", "query"]}}
+   "features": ["part", "sketch", "query", "exact"]}}
 ```
 
 `features` lists the NeoSCAD extensions (`enable` names) the server
@@ -286,6 +286,18 @@ one (as for every model method).
 - Mesh and 2D formats (`stl`, `binstl`, `off`, `obj`, `3mf`, `wrl`,
   `pov`, `svg`, `dxf`, `pdf`) go through the command line's encoder,
   byte for byte.
+- `step` (or `stp`): STEP with exact surfaces (`docs/step-export.md`),
+  the command line's bytes. It needs the `exact` extension, on the
+  request (`"enable": ["exact"]`) or the server (`--enable exact`);
+  without it the export fails with `STEP export needs NeoSCAD's exact
+  extension (--enable exact).` and writes nothing. The result adds
+  `exact`, the report `--format json` prints (`docs/cli-json.md`, "STEP
+  with exact surfaces"), whether written or refused: `ok`, `error`,
+  `faces`, `exact_faces`, `exact_percent`, the substitution counts,
+  `faceted_regions` (`module`, `file`, `line`, `count`, `detail`),
+  `partial`, `fallback`, `summary` (the report in words, a line each)
+  and the cross-check's numbers. Every other format's result has no
+  `exact`.
 - `echo`: every message, as the `.echo` export holds them; `csg`: the
   node tree; `ast`: the parsed program printed back.
 - `png`: OpenSCAD's image at its default camera (fitted to the model,
@@ -447,8 +459,8 @@ the pipe first. Otherwise the command runs in-process. The output is the command
 files and the same stderr, except the render summary's geometry
 cache count and size and its times, which are the (warm) server's. Runs the server
 cannot take (dependency files, `-m`, parameter sets, `--animate`,
-`--summary-file`, `--hardwarnings`, `--limit`, the evaluation flags, echo, AST, CSG
-and param exports, and a run mixing PNG with other formats) and every
+`--summary-file`, `--hardwarnings`, `--limit`, the evaluation flags, echo, AST, CSG,
+param and STEP exports, and a run mixing PNG with other formats) and every
 failure to reach a server (none, another build or environment, a dropped
 connection) run in the process, silently.
 

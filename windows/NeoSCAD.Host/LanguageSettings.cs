@@ -1,9 +1,10 @@
 // Design > NeoSCAD Extensions: which of NeoSCAD's language extensions the
 // window runs its document with (docs/language-extensions.md, section 2),
 // the Windows port of apple/App/Editor/LanguageSettings.swift. Constrained
-// sketches (`--enable sketch`) and geometry queries (`--enable query`),
-// both off by default as on the command line: off, a file means exactly
-// what it means in OpenSCAD. Kept in %LOCALAPPDATA%\NeoSCAD\language.json
+// sketches (`--enable sketch`), geometry queries (`--enable query`) and
+// STEP export with exact surfaces (`--enable exact`, which adds STEP to
+// File > Export As), all off by default as on the command line: off, a
+// file means exactly what it means in OpenSCAD. Kept in %LOCALAPPDATA%\NeoSCAD\language.json
 // beside agents.json, so every window opened later starts with them.
 //
 // The names go to the window's document loop (every run, check, measure
@@ -26,12 +27,16 @@ public sealed record LanguageSettings
     /// </summary>
     [JsonPropertyName("query")] public bool Query { get; init; }
 
+    /// <summary>STEP export with exact surfaces (File > Export As > STEP).</summary>
+    [JsonPropertyName("exact")] public bool Exact { get; init; }
+
     /// <summary>The <c>--enable</c> names runs and the language server take.</summary>
     public string[] Names()
     {
         var names = new List<string>();
         if (Sketch) names.Add("sketch");
         if (Query) names.Add("query");
+        if (Exact) names.Add("exact");
         return names.ToArray();
     }
 

@@ -471,7 +471,9 @@ fn quick(server: &Server, method: &str, params: &Value) -> Reply {
             "capabilities": {
                 "methods": METHODS,
                 "notifications": {"server": ["progress", "diagnostics"], "client": ["exit", "cancel", "$/cancelRequest"]},
-                "export_formats": ["stl", "binstl", "off", "obj", "3mf", "wrl", "pov", "svg", "dxf", "pdf", "png", "echo", "ast", "csg"],
+                // `step` needs the `exact` extension on the request
+                // (`"enable": ["exact"]`) or the server (`--enable exact`).
+                "export_formats": ["stl", "binstl", "off", "obj", "3mf", "wrl", "pov", "svg", "dxf", "pdf", "step", "png", "echo", "ast", "csg"],
                 "render_modes": ["render", "force", "preview"],
                 "incremental_edits": true,
                 "snapshot": true,
@@ -482,13 +484,11 @@ fn quick(server: &Server, method: &str, params: &Value) -> Reply {
                 "test": true,
                 // The extensions a client can use: only the implemented
                 // ones, so a client does not send sketches to a server
-                // that would answer "unknown module". `exact` is left out
-                // too: it is STEP export, which only the one-shot command
-                // line does so far (`export_formats` has no `step`), and a
-                // client that saw it would ask for a file it cannot get.
+                // that would answer "unknown module". `exact` is listed
+                // now that `export` writes STEP (`step` above).
                 "features": eval::Extension::ALL
                     .into_iter()
-                    .filter(|e| e.implemented() && *e != eval::Extension::Exact)
+                    .filter(|e| e.implemented())
                     .map(eval::Extension::name)
                     .collect::<Vec<_>>(),
             },
@@ -989,6 +989,10 @@ fn export(server: &Server, run: session::Run, params: &Value, w: &Writer, doc: &
             "bytes": files.bytes,
             "geometry": r.geometry.as_ref().map(|g| session::stats::geometry(g, &req.scheme.geometry_scheme())),
             "timings_ms": r.timings.json(),
+            // A STEP export's report, written or refused: the share of
+            // exact faces and every substitution at its source line
+            // (`docs/cli-json.md`, "STEP with exact surfaces").
+            "exact": r.exact.as_ref().map(session::exact::ExactReport::json),
         }),
         log_json(&r.log),
     ))

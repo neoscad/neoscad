@@ -2514,9 +2514,25 @@ pass's leftovers first, then stage 1b's, then the crate's.
   a subtree's solid in its own frame, keyed by subtree key, placed by
   transforming positions and surface records, would cut that. Gate 5
   does not count the export render, so it was left for now.
-- **Not wired yet:** `neoscad serve`, the MCP `check`/`export` tools and
-  the apps (stage 3); `serve` leaves `exact` out of its advertised
-  features until then. `--enable exact=strict` (faceted fallback as an
+- **Stage 3 (wired everywhere) leftovers.** `serve`, MCP (`render`/`check`
+  with `export: "x.step"` on `neoscad mcp --enable exact`), the three apps
+  and /try export STEP through `Session::export` with the
+  `session::exact::ExactReport` (`docs/step-export.md`). Left:
+  - The macOS app is tested end to end (`ExportTests`); the Linux app's
+    GTK side and the Windows app's WinUI side compile and are tested
+    only in their Docker/CI jobs, and neither has a test that drives the
+    menu toggle itself (the Linux and Windows tests drive
+    `export_file`/`DocumentSession.ExportAsync` and the settings).
+  - A refused STEP export reports `geometry: null` (`Session::export`
+    keeps the geometry only for a finished export), so `serve`'s and
+    MCP's refusal text says "empty: no geometry" beside the reason.
+  - /try's faceted-region console lines jump only to the main document
+    (the report gives a file name and line, not a span); a region in a
+    `use`d library is listed without a jump.
+  - MCP's extension is server-wide, so an agent whose server was started
+    without `--enable exact` cannot get STEP; a per-call `enable` was
+    left out to keep the tool schemas within their byte budget.
+  - `--enable exact=strict` (faceted fallback as an
   error, `docs/audits/brep-feasibility.md` F3) is not implemented. The
   JSON hint for `-o x.step` without the flag ("STEP export is a NeoSCAD
   extension; enable it with `--enable exact`") is not added: the hints

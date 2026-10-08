@@ -18,8 +18,9 @@
 //! gain, so it crosses as the same JSON string the CLI prints.
 
 pub use client::{
-    CoreError, Diagnostic, DocInfo, Evaluation, ExportResult, GeometryStats, Hint, RenderMode,
-    RenderResult, Replacement, ResourceLimits, Severity, SourceSpan, TextEdit, Timings,
+    CoreError, Diagnostic, DocInfo, Evaluation, ExportResult, FacetedRegion, GeometryStats, Hint,
+    RenderMode, RenderResult, Replacement, ResourceLimits, Severity, SourceSpan, StepReport,
+    TextEdit, Timings,
 };
 
 /// Why a call failed. Every exported function returns this on failure, so
@@ -253,6 +254,47 @@ pub struct ExportResult {
     pub diagnostics: Vec<Diagnostic>,
     pub console: String,
     pub timings: Timings,
+    /// A STEP export's report (`exact` extension), written or refused;
+    /// `None` for every other format.
+    pub step: Option<StepReport>,
+}
+
+/// What a STEP export with exact surfaces did: how much of the model is
+/// exact, and where it is not (`client::StepReport`).
+#[uniffi::remote(Record)]
+pub struct StepReport {
+    /// Whether the file was written.
+    pub ok: bool,
+    /// Why it was refused (no file), when it was.
+    pub error: Option<String>,
+    /// The B-rep's faces, and those on an exact surface (planes included).
+    pub faces: u64,
+    pub exact_faces: u64,
+    /// `exact_faces` as a percentage of `faces`; `None` with no faces.
+    pub exact_percent: Option<f64>,
+    /// `$fa`/`$fs` curves written exact, and `$fn` polygons kept.
+    pub exact_curves: u32,
+    pub polygons: u32,
+    /// Why some regions were written as facets (the rest exact).
+    pub partial: Option<String>,
+    /// Why the extrusions were written as facets after all.
+    pub fallback: Option<String>,
+    /// Every region written as planar facets, at its source line.
+    pub faceted_regions: Vec<FacetedRegion>,
+    /// The report in words, a line each, as the apps show it.
+    pub summary: String,
+}
+
+/// One call in the source a STEP export wrote as planar facets.
+#[uniffi::remote(Record)]
+pub struct FacetedRegion {
+    pub module: String,
+    /// The file, relative to the main file's folder, and the line.
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    /// Instances at this location.
+    pub count: u32,
+    pub detail: String,
 }
 
 /// Resource limits for every request (`eval::limits`); `None` is

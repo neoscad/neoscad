@@ -237,6 +237,26 @@ await test('export binary STL', 2000, () => {
     assert.equal(transfer.length, 1);
 });
 
+// STEP with exact surfaces needs the `exact` extension on the run, and
+// comes with its report (docs/step-export.md).
+await test('export STEP with its report', 5000, () => {
+    ok('open', { path: '/doc/hole.scad', text: 'difference() { cube(20); translate([10, 10, -1]) cylinder(r = 4, h = 22); }' });
+    const off = call('export', { path: '/doc/hole.scad', format: 'step' });
+    assert.equal(off.reply.ok, true);
+    assert.equal(off.reply.result.exitCode, 1);
+    assert.match(off.reply.result.console, /--enable exact/);
+    const { reply } = call('export', { path: '/doc/hole.scad', format: 'step', run: { overrides: [], parts: false, enable: ['exact'] } });
+    assert.equal(reply.ok, true);
+    assert.equal(reply.result.exitCode, 0, reply.result.console);
+    assert.equal(reply.result.mime, 'model/step');
+    const text = new TextDecoder().decode(reply.result.data);
+    assert.ok(text.startsWith('ISO-10303-21;'));
+    assert.equal(reply.result.step.ok, true);
+    assert.equal(reply.result.step.faces, 7);
+    assert.equal(reply.result.step.exactCurves, 1);
+    assert.match(reply.result.step.summary, /^STEP: 7 of 7 faces exact \(100%\)\./);
+});
+
 // Deep recursion ends in OpenSCAD's error, not a trap: the module is
 // linked with the 8 MiB stack the evaluator's budget assumes.
 await test('runaway recursion is an error, not a crash', 5000, () => {

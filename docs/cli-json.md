@@ -406,13 +406,28 @@ With `--format json`, the run object has an `exact` key. For
   would have been) and their `triangles`, the export mesh's
   `exact_triangles` before, and the reconstructions it took (`rounds`).
   Each region's module and line is a `faceted` substitution.
+- `exact_percent`: `exact_faces` as a percentage of `faces` (`null`
+  with no faces).
+- `faceted_regions`: each source location written as facets, as
+  `{"module", "file", "line", "count", "detail"}` (`file` relative to
+  the main file's directory), for a host to point at.
+- `summary`: the report in words, a line each, as the apps, the web page
+  and the MCP tools show it: `STEP: 7 of 16 faces exact (43.8%).`, then
+  the counts, why regions or extrusions fell back, and one `Faceted:`
+  line per region (a refused export starts `STEP export refused:
+  REASON. No file was written.`). The share never rounds a partly
+  faceted model up to 100%.
 - `chain_deviation`, `max_cap`: how far the export mesh's intersection
   curves stand off the exact edges, and its triangles off their curved
   surfaces (the first far beyond the second means the mesh's topology is
   not the model's, and the attempt is rejected).
 
-`neoscad serve` does not export STEP yet, and does not list `exact` in
-its features.
+The same report is `neoscad serve`'s `export` reply's `exact`
+(`docs/serve-protocol.md`), and, cut down, the MCP tools'
+(`docs/mcp.md`). The user reference is `docs/step-export.md`. A STEP
+export always runs in the command line's own process, never through a
+running server, so this report and its `normal_render_ms` are the run's
+own.
 
 # Named parts: `--enable part`
 

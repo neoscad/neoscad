@@ -379,6 +379,24 @@ fn language_page(sh: &Rc<Shared>) -> adw::PreferencesPage {
         )
         .active(on.query)
         .build();
+    let exact = adw::SwitchRow::builder()
+        .title("Exact STEP export (exact)")
+        .subtitle(
+            "File > Export writes STEP whose cylinders, spheres, cones and tori are true \
+             surfaces rather than triangles, for CAD programs such as FreeCAD, like the \
+             command line's --enable exact. Curves are exact unless $fn is set; anything \
+             else is written as facets and listed after the export.",
+        )
+        .active(on.exact)
+        .build();
+    let weak = Rc::downgrade(sh);
+    exact.connect_active_notify(move |row| {
+        if let Some(sh) = weak.upgrade() {
+            let mut s = *sh.extensions.borrow();
+            s.exact = row.is_active();
+            sh.set_extensions(s);
+        }
+    });
     let weak = Rc::downgrade(sh);
     sketch.connect_active_notify(move |row| {
         if let Some(sh) = weak.upgrade() {
@@ -401,6 +419,7 @@ fn language_page(sh: &Rc<Shared>) -> adw::PreferencesPage {
         .build();
     group.add(&sketch);
     group.add(&query);
+    group.add(&exact);
     let page = adw::PreferencesPage::builder()
         .title("Language")
         .icon_name("accessories-text-editor-symbolic")

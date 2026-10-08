@@ -17,7 +17,10 @@ Sketcher (`docs/sketch.md`); and geometry queries (`--enable query`):
 a module can read its children's bounding box, volume and area
 (`child_bounds()`, `child_measure()`) or the points they name
 (`anchor()`, `child_anchors()`) as ordinary values
-(`docs/geometry-queries.md`).
+(`docs/geometry-queries.md`). A fourth switch, `--enable exact`, exports
+STEP whose faces are the model's true planes, cylinders, cones, spheres
+and tori, for CAD programs such as FreeCAD, from the command line, the
+apps, the MCP server and the browser (`docs/step-export.md`).
 
 - Website: <https://neoscad.org>
 - Try it in the browser: <https://neoscad.org/try>
