@@ -1,13 +1,14 @@
 # Design: 3D fillets and chamfers (`--enable fillet`)
 
-Status: stages F0, F1 and F2 built (the flag, both builtins, the
-selector parser and the node; the plan: the child's B-rep, per-edge
-facts, selection, and the reports in `check`, `measure` and `snapshot`;
-then the blends of straight edges, in the mesh and in STEP, with the
-checks before and after the boolean; sections 15.1 to 15.3 record how,
-and where they depart from this text); F3 onwards not started. A call
-that selects a circle or an arc (F3's) passes its children through
-unchanged with a `fillet-not-built` warning. Written
+Status: stages F0 to F3 built (the flag, both builtins, the selector
+parser and the node; the plan: the child's B-rep, per-edge facts,
+selection, and the reports in `check`, `measure` and `snapshot`; the
+blends of straight edges, then of circles and arcs about an axis and
+the tangent chains of both, in the mesh and in STEP, with the checks
+before and after the boolean; sections 15.1 to 15.4 record how, and
+where they depart from this text). The stop rule's corpus passes
+(99.7% of supported cases exact, section 15.4); F4 and F5 not started.
+Written
 2026-10-08 against `127be03` and the reference checkouts in
 `.reference/openscad` and `.reference/BOSL2`.
 Claims about this codebase cite `path:line`; claims about OpenSCAD and
@@ -719,10 +720,13 @@ An agent needs to see what was selected without a STEP viewer.
 
 ## 12. Worked examples
 
-These are written in the proposed syntax and have not run (nothing is
-built). Volumes are closed forms; sections 12.1, 12.3 and 12.4 and the
-top outline of 12.2 were each built by hand as the tools the design
-generates, and exported and read back as section 14 reports.
+These were written in the proposed syntax before anything was built.
+Volumes are closed forms; sections 12.1, 12.3 and 12.4 and the top
+outline of 12.2 were each built by hand as the tools the design
+generates, and exported and read back as section 14 reports. All four
+now run as written and are golden models (`l_bracket`, `boss_plate`,
+`chamfered_hole`, `box_top` and `lid_lip` in
+`conformance/extensions/fillet`, sections 15.3 and 15.4).
 
 ### 12.1 L-bracket
 
@@ -1207,6 +1211,139 @@ F0–F4: 9–13.5 person-weeks.
   corner of three edges with a curved face (`docs/followups.md`,
   "Fillets and chamfers").
 
+### 15.4 Stage F3 as built
+
+- **Revolved tools** (`crates/meshbrep/src/blend/revolve.rs`): an edge's
+  `Path::Arc` (centre, axis, radius, sweep, sections) makes its
+  cross-section in the meridian half-plane through its start, where a
+  plane square to the axis, a coaxial cylinder or cone are lines and a
+  sphere centred on the axis or a coaxial torus are circles
+  (`BlendFace` gains `Cone`, `Sphere` and `Torus`), so section 6.1's
+  arithmetic is the straight edges' own; the region is then revolved.
+  The fillet arc sweeps a `Surface::Torus`, a chamfer's line a cone (or
+  a plane or cylinder where it is square to the axis or along it), each
+  other side the cone, plane or cylinder its segment sweeps; a concave
+  tool's side on a plane square to the axis is tagged with that plane.
+  Every ring point must stay off the axis, and a fillet's centre must
+  be further from it than the radius (meshbrep writes ring tori only),
+  so a boss's convex top rim takes a fillet up to half the boss's
+  radius: beyond that `fillet-too-large` says so ("short of their
+  axis").
+- **Conforming** (6.3), not by the walk recording each leaf's count and
+  phase but from the mesh the tools are applied to: the vertices of the
+  child's mesh on the edge's circle (the polygon of a cylinder or cone
+  beside it, wherever it came from: a primitive, an extrusion, an
+  offset's arc, an earlier blend) are the tool's sections
+  (`fillet::result::sectioned`), in the normal render (OpenSCAD's
+  polygon) and in the export (the walk's, mapped back through the
+  node's matrix). Each section is moved out along its radial by its
+  vertex's distance off the circle, so the tool's tangent ring runs
+  through the polygon's vertices themselves, chord for chord with its
+  facets. Without that, a 2D offset's arc, a few 1e-9 inside its exact
+  circle, left slivers. Arcs beside spheres and tori are not conformed
+  (a sphere's rings do not pass through the rim): their mesh keeps the
+  sphere's facets standing over the blend by up to their sagitta; the
+  export is exact all the same. Chamfers along straight cylinders are
+  now conformed to the facet as fillets were (the F2 followup).
+- **Ends of arcs**: a whole circle has none. A partial arc ends where
+  it runs on smoothly into another edge (cut across, on the plane
+  through the axis, taken through the vertex itself), or on a plane
+  through its axis (a half hole at a plate's edge: run on past it into
+  the air by up to 22.5° when convex and the material ends, else cut
+  by it). Anything else is `fillet-unsupported-vertex` ("an arc's blend
+  ends only where it runs on smoothly or on a plane through its axis").
+  One circle split at the vertices where its faces' seams reach it (a
+  countersink's cone meeting its hole) is a chain of its pieces.
+- **Mixed chains** (7.2): where two selected edges run on into each
+  other (`End::Chain`, for lines too), their tools are one solid, as F2
+  joined mitred pairs: the later takes the earlier's ring and neither
+  has a cap. For the rings to meet point for point the margin is the
+  least along the chain, and a concave chain's line overlaps into its
+  plane face where its neighbour arc's matching face is curved. A
+  rounded box's top outline (12.2) is one tool of four cylinders and
+  four quarter tori; the lid's two concave outlines are two.
+- **Overlap into the material** (6.2) beside a concave tool's curved
+  face is at most half the gap to a coaxial cylinder behind it (the
+  inside of a tube or a lip), so it cannot reach through a thin wall
+  (`fillet::build::wall`).
+- **Checks** (section 8) for arcs look across the edge in its meridian
+  half-planes at 64 places a turn, and at every boundary point of the
+  face in its own meridian with each boundary segment's point nearest
+  the axis: the strip's width on a plane, along a cylinder's or cone's
+  generator, or round a sphere's or torus's meridian. Straight edges
+  gained the same: every boundary point across from the edge, and a
+  circle's nearest point exactly, besides the five rays (a hole beside
+  an edge came nearest between them).
+- **Hints** offer 5% under the largest size that fits, three
+  significant digits ("use r = 1.9: the largest that fits is just under
+  2, which leaves almost nothing of the face beside the blend"): at the
+  limit itself the blends leave a sliver of face that prints as nothing
+  and that the export's reconstruction, near tangent along its whole
+  length, does not survive. Every hint edit applied builds
+  (`crates/geom/tests/fillet_build.rs`, ten cases, six of them
+  rotational).
+- **After the boolean**, a triangle of the result also counts as blend
+  when it is a piece of one of its tool's facets: a coarse rim's
+  facets turn too far from the surface's normal for the angle test
+  alone (a 0.085 rim fillet on a 10-sided hole reported half its blend
+  missing).
+- **2D offsets' arcs** (`crates/geom/src/exact/profile.rs`,
+  `attribute_offset`): a round join's centre is now the corner of the
+  two exact lines it joins rather than the polygon's vertex, which
+  Clipper's grid had rounded by about 3e-9 at 15.3; the arc then
+  touches its lines exactly, which a fillet ending across the tangency
+  needs.
+- **`fillet-not-built` is gone**: every class but section 6.1's "other
+  edges" is built. Those (two cylinders crossing, ellipses, B-splines,
+  saddles) are `fillet-unsupported-edge`: an error that leaves the
+  child sharp when named, a warning under the default `"all"` with the
+  rest built (decision 2 and section 8, as F2 left it).
+- **Results.** 29 golden models (`conformance/extensions/fillet`): F2's
+  15 and 14 of F3's (12.3's boss, 12.4's chamfered hole, 12.2's box
+  and lid fully built, a hole rim, both rims of a boss, a cone rim
+  filleted and chamfered, a ball cut flat and a ball sunk in a plate,
+  a half hole at a plate's edge, a rounded rectangle extruded from 2D,
+  a blind hole chamfered, the box rotated). Their closed forms are
+  Pappus's (exact boundary integrals of the revolved regions for the
+  cone and sphere rims). Every STEP is all exact, OCCT 8.0.1 reads
+  each back valid and closed with no free edges, and the rotational
+  ones' volumes agree with the closed forms to 7e-14 (OCCT) and 7e-16
+  (ours, `meshbrep::measure`; 1.3e-8 worst over all 29, F2's sphere
+  corner). Meshes are
+  within 5% at OpenSCAD's defaults and within 2e-4 at `$fa = 1; $fs =
+  0.05` (2° was too coarse a polygon for a 10-radius frustum's own
+  volume). STEP and mesh bytes are the same at 1, 2 and 8 threads,
+  cold and warm, for ten goldens (five rotational); the wasm-check case
+  `fillet-rotational-step` (a boss's rims, a chamfered hole, 12.2's box
+  turned 90°, a ball cut flat, a half hole) hashes the same STEP in
+  node as natively.
+- **The stop rule's corpus** (`conformance fillet-corpus`, section 16;
+  `crates/conformance/src/fillet_corpus.rs`): seeded plates, boxes,
+  rounded boxes and L brackets with through and blind holes,
+  countersinks, bosses, slots and pockets (rounded rectangles from 2D
+  offsets), and holes through a bracket's leg along x; one call with a
+  selector from the atoms and a log-uniform size from 0.25 to 6, a
+  quarter of them chamfers; every model exported in its own process
+  with `--limit`s, the sweep held under 2 GB, OCCT reading every file
+  back. On 2,000 models (seed 2, 2.5 minutes at 4 jobs): 1,174 built
+  and valid, 561 refused as too large or overlapping whose hint edit
+  then built valid, 81 refused by v1's classes (76 vertices, 4 named
+  unsupported edges, 1 child with no B-rep), 179 selecting nothing,
+  none killed; 1,735 of the 1,740 supported-class cases (99.7%) export
+  all-exact STEP that OCCT reads back valid with our volume, and no
+  mesh failed. The five failures: three fixes near the fit limit
+  (within 10% of the largest size, a thin band of face left between
+  two blends, which smaller sizes clear), one 0.02 fillet on a sliver
+  face 0.04 wide, and one F2 case that also fails on F2's commit (the
+  B-rep's "more than one outer loop" on a pocketed bracket). On 300
+  (seed 1, the default): 259 of 259 valid. The rule's "continue to F4"
+  threshold (95%) is met.
+- **Not in F3**: spindle tori (a convex rim fillet larger than half the
+  rim's radius); arcs ending on other faces; a concave tool's overlap
+  capped against walls other than coaxial cylinders; the near-limit
+  and sliver failures above; everything F2 left (`docs/followups.md`,
+  "Fillets and chamfers").
+
 ## 16. Test plan
 
 - **Flag off.** `fillet_edges(...)` and `chamfer_edges(...)` give the
@@ -1230,7 +1367,9 @@ F0–F4: 9–13.5 person-weeks.
   edges each), every evaluation under `Limits::AGENT`, a 2 GB resident
   guard on the process. Each case: either a valid exact result or a
   diagnostic; a too-large case's hint edit applied must make it pass
-  (the sketches' `every_hint_edit_fixes_its_problem` pattern).
+  (the sketches' `every_hint_edit_fixes_its_problem` pattern). Built
+  as `conformance fillet-corpus [--count N] [--seed S] [--occt PATH]`
+  (section 15.4), 300 models by default.
 - **Selection.** Unit tests of every atom and operator on known solids;
   CadQuery-equivalence cases (the same box and selector strings as
   CadQuery's selector docs, edge counts compared with the documented

@@ -69,9 +69,9 @@ impl Extension {
     /// others are still accepted, silently, so a command line written for
     /// a later version is not rejected.
     ///
-    /// `fillet` is listed since its straight edges are built
-    /// (`docs/fillets.md`, stage F2); a call that selects circles, whose
-    /// blends come in stage F3, says so with `fillet-not-built`.
+    /// `fillet` is listed since its blends are built (`docs/fillets.md`,
+    /// stages F2 and F3: straight edges, and circles and arcs about an
+    /// axis).
     pub fn implemented(self) -> bool {
         matches!(
             self,

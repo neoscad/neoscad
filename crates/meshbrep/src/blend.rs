@@ -1,6 +1,7 @@
-//! Blend tools: the solids that round or chamfer the straight edges of a
-//! solid when a mesh kernel subtracts them (convex edges) or adds them
-//! (concave edges).
+//! Blend tools: the solids that round or chamfer the edges of a solid
+//! when a mesh kernel subtracts them (convex edges) or adds them (concave
+//! edges): straight edges, and circles and arcs about an axis
+//! ([`Path::Arc`], whose cross-section is revolved: `revolve`).
 //!
 //! A constant-radius fillet is the envelope of a ball rolling in contact
 //! with both faces of an edge. When both faces are swept along the edge (a
@@ -39,6 +40,8 @@
 use crate::math::*;
 use crate::model::{Surface, TaggedMesh};
 
+mod revolve;
+
 /// A face beside a blended edge.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BlendFace {
@@ -49,7 +52,8 @@ pub enum BlendFace {
         /// Its unit normal, pointing out of the material.
         normal: [f64; 3],
     },
-    /// A circular cylinder whose axis is parallel to the edge.
+    /// A circular cylinder whose axis is parallel to a straight edge, or
+    /// is the axis of a circular one.
     Cylinder {
         /// A point on the axis.
         origin: [f64; 3],
@@ -60,6 +64,96 @@ pub enum BlendFace {
         /// The material is inside it (a boss or a rod), so its outward
         /// normal points away from the axis; `false` for a hole.
         convex: bool,
+    },
+    /// A cone about a circular edge's axis (a countersink, a chamfer made
+    /// earlier): circular edges only.
+    Cone {
+        /// The apex, on the axis.
+        apex: [f64; 3],
+        /// The unit axis, from the apex into the nappe.
+        axis: [f64; 3],
+        /// The radius gained per unit length along the axis.
+        slope: f64,
+        /// The material is inside it, so its outward normal points away
+        /// from the axis (tilted by the slope); `false` for a conical hole.
+        convex: bool,
+    },
+    /// A sphere centred on a circular edge's axis: circular edges only.
+    Sphere {
+        /// The centre.
+        center: [f64; 3],
+        /// The radius.
+        radius: f64,
+        /// The material is inside it (a ball); `false` for a spherical
+        /// pocket.
+        convex: bool,
+    },
+    /// A ring torus about a circular edge's axis (an earlier blend's):
+    /// circular edges only.
+    Torus {
+        /// The centre.
+        center: [f64; 3],
+        /// The unit axis.
+        axis: [f64; 3],
+        /// The distance from the axis to the tube's centre.
+        major_radius: f64,
+        /// The tube's radius.
+        minor_radius: f64,
+        /// The material is inside the tube.
+        convex: bool,
+    },
+}
+
+/// Whether `x` is a number above zero (`false` for NaN), as a function so
+/// the checks read as what they ask.
+fn positive(x: f64) -> bool {
+    x > 0.0
+}
+
+impl BlendFace {
+    /// Whether the face is curved in space (anything but a plane).
+    fn curved(&self) -> bool {
+        !matches!(self, BlendFace::Plane { .. })
+    }
+}
+
+/// The curve an edge runs along.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Path {
+    /// The straight segment from `from` to `to`: the tool is the
+    /// cross-section swept along it (the translational class).
+    Line,
+    /// A circular arc about an axis, from `from` turning counter-clockwise
+    /// about `axis` by `sweep` (a whole circle when `sweep` is `2π`, and
+    /// `to` is then `from`): the tool is the cross-section in the
+    /// meridian half-plane through `from`, revolved (the rotational
+    /// class). Both faces must be surfaces of revolution about the axis: a
+    /// plane perpendicular to it, a coaxial cylinder, cone or torus, or a
+    /// sphere centred on it.
+    Arc {
+        /// The centre of the edge's circle, on the axis.
+        center: [f64; 3],
+        /// The unit axis.
+        axis: [f64; 3],
+        /// The circle's radius. The cross-section is taken on the circle
+        /// at `from`'s angle, not at `from` itself: a vertex solved where
+        /// two faces nearly touch can lie a little off the circle, and the
+        /// tool's tangent ring must run through the polygon of the face
+        /// beside it, which is the circle's.
+        radius: f64,
+        /// The angle the edge turns through, in radians, in `(0, 2π]`.
+        sweep: f64,
+        /// The tool's sections, so that it conforms to the faceted face
+        /// it blends into: per vertex of that face's polygon on the edge,
+        /// its angle (radians from `from`) and how far it lies outside the
+        /// circle (negative inside), by which the whole section is moved
+        /// out along its radial. The tool's tangent ring then runs through
+        /// the polygon's vertices themselves, which a mesh made from a
+        /// slightly different circle (a 2D offset's, rounded on its grid)
+        /// has off the exact one by more than a kernel's tolerance. A
+        /// partial arc's ends are always sections; angles outside the
+        /// sweep are ignored. Empty: regular sections, 32 to a turn.
+        sections: Vec<[f64; 2]>,
     },
 }
 
@@ -97,6 +191,16 @@ pub enum End {
     /// index): the tool ends on the plane across the edge through the
     /// ball's centre, where the corner's sphere patch takes over.
     Corner(usize),
+    /// The edge runs on smoothly into another selected edge (`with`: its
+    /// index and end, which must be a `Chain` back to this one), a line
+    /// into an arc of a rounded outline: the tool is cut across the edge
+    /// there (by the meridian plane, for an arc). Where the two
+    /// cross-sections meet point for point, the two tools are one solid
+    /// with no cap between them, as for a [`End::Mitre`].
+    Chain {
+        /// The other edge and its end.
+        with: (usize, usize),
+    },
     /// Cut by the plane bisecting this edge and another one that ends
     /// at the same vertex (`with`: its index and end, 0 or 1), which is
     /// cut by the same plane. Where the two cross-sections meet in that
@@ -127,8 +231,21 @@ pub struct BlendEdge {
     /// The material angle is under 180°: the tool is subtracted.
     /// Otherwise it is added.
     pub convex: bool,
-    /// How the tool ends at `from` and at `to`.
+    /// How the tool ends at `from` and at `to`. A partial arc's tool
+    /// ends at the arc's ends whatever the end: an [`End::Plane`] there
+    /// must contain the axis (it only names the cap's surface), and
+    /// [`End::Open`] runs the tool on past the end by an angle. Arcs take
+    /// no [`End::Corner`] or [`End::Mitre`].
     pub ends: [End; 2],
+    /// The curve: a line, or an arc about an axis.
+    pub path: Path,
+    /// The most the tool may reach past a face: into the air beside a
+    /// convex edge's faces, or into the material behind a concave edge's
+    /// curved faces (whose tessellations a coincident side would not
+    /// match). `None`: the blend's size, and half a cylinder's radius or
+    /// half the distance of an arc from its axis. A caller that knows how
+    /// thin the material behind a face is passes less.
+    pub margin: Option<f64>,
 }
 
 /// A corner where three filleted edges of the same sense meet, between
@@ -241,16 +358,63 @@ impl F {
     }
 }
 
-/// The edge's frame: `e0` the start, `d` the unit direction, `len` the
-/// length, and the faces in the cross-section through `e0`.
+/// The edge's frame: `e0` the start, `d` the unit direction (an arc's
+/// tangent at its start), `len` the length, and the faces in the
+/// cross-section through `e0` (an arc's meridian half-plane there, where a
+/// cylinder or a cone is a line and a sphere or a torus a circle).
 struct Frame {
     e0: V,
     d: V,
     len: f64,
     f: [F; 2],
+    /// Whether each face is curved in space (a cylinder or a cone is a
+    /// line in an arc's meridian, but a concave tool's side along it must
+    /// still not lie on it).
+    curved: [bool; 2],
+    /// An arc's axis, when the edge is one.
+    arc: Option<ArcFrame>,
+}
+
+/// An arc's axis in its frame: `c` the centre, `a` the unit axis, `u0` the
+/// unit radial through the edge's start, `rho` the edge's distance from
+/// the axis, `sweep` the angle it turns through.
+#[derive(Clone, Copy, Debug)]
+struct ArcFrame {
+    c: V,
+    a: V,
+    u0: V,
+    rho: f64,
+    sweep: f64,
+}
+
+impl ArcFrame {
+    /// The unit radial at angle `t` from the start.
+    fn radial(&self, t: f64) -> V {
+        self.u0 * cos(t) + self.a.cross(self.u0) * sin(t)
+    }
+    /// A point's distance from the axis along the start's radial (negative
+    /// across the axis) and its height along it.
+    fn meridian(&self, p: V) -> (f64, f64) {
+        let q = p - self.c;
+        (q.dot(self.u0), q.dot(self.a))
+    }
+    /// The point at meridian coordinates `(rho, z)`, turned by `t`.
+    fn at(&self, rho: f64, z: f64, t: f64) -> V {
+        self.c + self.radial(t) * rho + self.a * z
+    }
 }
 
 fn frame(e: &BlendEdge, index: usize) -> Result<Frame, BlendError> {
+    if let Path::Arc {
+        center,
+        axis,
+        radius,
+        sweep,
+        ..
+    } = &e.path
+    {
+        return arc_frame(e, index, V::from(*center), V::from(*axis), *radius, *sweep);
+    }
     let e0 = V::from(e.from);
     let e1 = V::from(e.to);
     let len = (e1 - e0).len();
@@ -298,9 +462,155 @@ fn frame(e: &BlendEdge, index: usize) -> Result<Frame, BlendError> {
                     s: if *convex { 1.0 } else { -1.0 },
                 }
             }
+            _ => {
+                return Err(BlendError::Invalid(format!(
+                    "edge {index}: a straight edge's faces are planes and parallel cylinders"
+                )));
+            }
         };
     }
-    Ok(Frame { e0, d, len, f })
+    Ok(Frame {
+        e0,
+        d,
+        len,
+        f,
+        curved: [e.faces[0].curved(), e.faces[1].curved()],
+        arc: None,
+    })
+}
+
+/// An arc's frame: the faces in the meridian half-plane through its start.
+fn arc_frame(
+    e: &BlendEdge,
+    index: usize,
+    c: V,
+    axis: V,
+    radius: f64,
+    sweep: f64,
+) -> Result<Frame, BlendError> {
+    let bad = |what: &str| BlendError::Invalid(format!("edge {index}: {what}"));
+    if !(axis.is_finite() && (axis.len() - 1.0).abs() < 1e-6) {
+        return Err(bad("an arc's axis is not a unit vector"));
+    }
+    let a = axis.norm();
+    if !(sweep > 0.0 && sweep <= TAU * (1.0 + 1e-12)) {
+        return Err(bad("an arc turns through no angle"));
+    }
+    let radial = (V::from(e.from) - c).reject(a);
+    let rho = radius;
+    if !(rho > 0.0 && rho.is_finite() && radial.len() > 0.0) {
+        return Err(bad("an arc lies on its own axis"));
+    }
+    let u0 = radial.norm();
+    let e0 = c + u0 * rho;
+    let d = a.cross(u0);
+    // How far off the axis a centre may be: rounding in the B-rep, not
+    // geometry.
+    let tol = 1e-7 * (rho + (e0 - c).len());
+    let on_axis = |p: V| (p - c).reject(a).len() <= tol;
+    let coaxial = |ax: V| ax.cross(a).len() <= 1e-6;
+    let side = |convex: bool| if convex { 1.0 } else { -1.0 };
+    let mut f = [F::Line {
+        n: V::default(),
+        c: 0.0,
+    }; 2];
+    for (k, face) in e.faces.iter().enumerate() {
+        f[k] = match face {
+            BlendFace::Plane { origin, normal } => {
+                let n = V::from(*normal);
+                if n.cross(a).len() > 1e-6 {
+                    return Err(bad(
+                        "a plane beside an arc is not perpendicular to its axis",
+                    ));
+                }
+                F::Line {
+                    n,
+                    c: (V::from(*origin) - e0).dot(n),
+                }
+            }
+            BlendFace::Cylinder {
+                origin,
+                axis,
+                radius,
+                convex,
+            } => {
+                if !coaxial(V::from(*axis)) || !on_axis(V::from(*origin)) || !positive(*radius) {
+                    return Err(bad("a cylinder beside an arc is not about its axis"));
+                }
+                // In the meridian, the line at `radius` from the axis.
+                let s = side(*convex);
+                F::Line {
+                    n: u0 * s,
+                    c: s * (radius - rho),
+                }
+            }
+            BlendFace::Cone {
+                apex,
+                axis,
+                slope,
+                convex,
+            } => {
+                let ax = V::from(*axis);
+                if !coaxial(ax) || !on_axis(V::from(*apex)) || !positive(*slope) {
+                    return Err(bad("a cone beside an arc is not about its axis"));
+                }
+                // The generator through the apex runs along `ax + slope
+                // u0`; the outward normal is across it.
+                let n = (u0 - ax * *slope).norm() * side(*convex);
+                F::Line {
+                    n,
+                    c: (V::from(*apex) - e0).dot(n),
+                }
+            }
+            BlendFace::Sphere {
+                center,
+                radius,
+                convex,
+            } => {
+                let sc = V::from(*center);
+                if !on_axis(sc) || !positive(*radius) {
+                    return Err(bad("a sphere beside an arc is not centred on its axis"));
+                }
+                F::Circle {
+                    a: sc,
+                    r: *radius,
+                    s: side(*convex),
+                }
+            }
+            BlendFace::Torus {
+                center,
+                axis,
+                major_radius,
+                minor_radius,
+                convex,
+            } => {
+                let tc = V::from(*center);
+                if !coaxial(V::from(*axis)) || !on_axis(tc) || !positive(*minor_radius) {
+                    return Err(bad("a torus beside an arc is not about its axis"));
+                }
+                // The tube's circle in this meridian.
+                F::Circle {
+                    a: tc + u0 * *major_radius,
+                    r: *minor_radius,
+                    s: side(*convex),
+                }
+            }
+        };
+    }
+    Ok(Frame {
+        e0,
+        d,
+        len: rho * sweep,
+        f,
+        curved: [e.faces[0].curved(), e.faces[1].curved()],
+        arc: Some(ArcFrame {
+            c,
+            a,
+            u0,
+            rho,
+            sweep: sweep.min(TAU),
+        }),
+    })
 }
 
 /// The points at signed offset `h_k` along the outward normal from face
@@ -442,16 +752,38 @@ impl Prof {
     }
 }
 
-/// How far the tools reach past a face into the air, and into the
-/// material beside a curved face of a concave edge.
-fn margins(size: f64, f: &[F; 2]) -> f64 {
+/// How far an edge's tool reaches past a face into the air, and into the
+/// material behind a curved face of a concave edge: the size, at most
+/// half a circle's radius in the cross-section, at most half an arc's
+/// distance from its axis (so the revolved region stays clear of the
+/// axis), and at most the caller's [`BlendEdge::margin`].
+fn natural_margin(size: f64, fr: &Frame, cap: Option<f64>) -> f64 {
     let mut m = size;
-    for x in f {
+    for x in &fr.f {
         if let F::Circle { r, .. } = x {
             m = m.min(*r * 0.5);
         }
     }
+    if let Some(a) = fr.arc {
+        m = m.min(a.rho * 0.5);
+    }
+    if let Some(c) = cap
+        && c > 0.0
+    {
+        m = m.min(c);
+    }
     m
+}
+
+/// What [`tools`] settles across the edges before making each one's
+/// cross-section: the margin, equal along a tangent chain so that the
+/// cross-sections of its tools meet point for point, and which plane
+/// faces of a concave edge its tool overlaps into rather than lies in
+/// (those whose chained neighbour's matching face is curved).
+#[derive(Clone, Copy, Debug)]
+struct Adjust {
+    margin: f64,
+    overlap: [bool; 2],
 }
 
 /// The offset of a point beside a tangent: `σ r ν + μ ν`, the one
@@ -470,6 +802,7 @@ fn profile(
     e: &BlendEdge,
     index: usize,
     segments: &dyn Fn(f64) -> u32,
+    adjust: Option<Adjust>,
 ) -> Result<(Frame, Prof), BlendError> {
     let fr = frame(e, index)?;
     let size = spec.size;
@@ -587,16 +920,19 @@ fn profile(
         Profile::Chamfer => vec![t[0] - base, t[1] - base],
     };
     // The rest of the region.
-    let m = margins(size, &fr.f);
+    let adjust = adjust.unwrap_or(Adjust {
+        margin: natural_margin(size, &fr, e.margin),
+        overlap: [false; 2],
+    });
+    let m = adjust.margin;
     let mut mu = [0.0; 2];
     for k in 0..2 {
         mu[k] = if e.convex {
             m
+        } else if fr.curved[k] || adjust.overlap[k] {
+            -m
         } else {
-            match fr.f[k] {
-                F::Line { .. } => 0.0,
-                F::Circle { .. } => -m,
-            }
+            0.0
         };
     }
     // The corner point: both faces at their offsets. Relative to the base
@@ -661,6 +997,23 @@ fn profile(
         p[0] = Some(rest.len());
         rest.push(p0);
     }
+    if let Some(a) = fr.arc {
+        // Revolved, a point across the axis would turn the region inside
+        // out. And the blend must be a ring torus: its centre further
+        // from the axis than its radius (a boss's convex rim blend up to
+        // half the boss's radius), the only torus a B-rep writes.
+        let eps = 1e-9 * (a.rho + size);
+        if arc
+            .iter()
+            .chain(rest.iter())
+            .any(|q| !positive(a.meridian(base + *q).0 - eps))
+        {
+            return Err(BlendError::TooLarge(index));
+        }
+        if spec.profile == Profile::Fillet && !positive(a.meridian(base).0 - size * (1.0 + 1e-9)) {
+            return Err(BlendError::TooLarge(index));
+        }
+    }
     Ok((
         fr,
         Prof {
@@ -684,7 +1037,7 @@ pub fn section(spec: &BlendSpec, index: usize) -> Result<Section, BlendError> {
         .edges
         .get(index)
         .ok_or_else(|| BlendError::Invalid(format!("no edge {index}")))?;
-    profile(spec, e, index, &|_| 1).map(|(_, p)| p.section)
+    profile(spec, e, index, &|_| 1, None).map(|(_, p)| p.section)
 }
 
 /// The ball's centre at a corner: `σ r` inside each of its three planes.
@@ -717,9 +1070,10 @@ fn corner_offset(n: [V; 3], h: [f64; 3]) -> Option<V> {
 /// says what each blend surface is for). `segments(sweep)` is how many
 /// segments a fillet arc sweeping `sweep` radians gets (at least 1).
 pub fn tools(spec: &BlendSpec, segments: &dyn Fn(f64) -> u32) -> Result<Vec<Tool>, BlendError> {
+    let adjust = adjustments(spec)?;
     let mut profs = Vec::with_capacity(spec.edges.len());
     for (i, e) in spec.edges.iter().enumerate() {
-        profs.push(profile(spec, e, i, segments)?);
+        profs.push(profile(spec, e, i, segments, Some(adjust[i]))?);
     }
     // Corners: the ball's centre, and which face is which.
     let sigma_of = |i: usize| if spec.edges[i].convex { 1.0 } else { -1.0 };
@@ -743,7 +1097,15 @@ pub fn tools(spec: &BlendSpec, segments: &dyn Fn(f64) -> u32) -> Result<Vec<Tool
     }
     let mut ends: Vec<([Vec<V>; 2], [Surface; 2])> = Vec::with_capacity(spec.edges.len());
     let mut corner_rings: Vec<Vec<(usize, Vec<V>)>> = vec![Vec::new(); spec.corners.len()];
+    // An arc's section angles, its ends included.
+    let mut angles: Vec<Vec<revolve::Sect>> = vec![Vec::new(); spec.edges.len()];
     for (i, (e, (fr, prof))) in spec.edges.iter().zip(&profs).enumerate() {
+        if let Some(a) = fr.arc {
+            let (t, r, c) = revolve::arc_ends(e, i, fr, &a, prof)?;
+            angles[i] = t;
+            ends.push((r, c));
+            continue;
+        }
         let ring = prof.ring();
         let k = ring.len();
         let ext = 2.0 * ring.iter().map(|q| q.len()).fold(0.0, f64::max) + spec.size;
@@ -774,6 +1136,17 @@ pub fn tools(spec: &BlendSpec, segments: &dyn Fn(f64) -> u32) -> Result<Vec<Tool
                     caps[end] = Surface::Plane {
                         origin: *origin,
                         normal: *normal,
+                    };
+                }
+                End::Chain { .. } => {
+                    // Across the edge at its end.
+                    let o = if end == 0 { fr.e0 } else { V::from(e.to) };
+                    rings[end] = along(o, out_dir).ok_or_else(|| {
+                        BlendError::Invalid(format!("edge {i}: an end plane runs along the edge"))
+                    })?;
+                    caps[end] = Surface::Plane {
+                        origin: o.arr(),
+                        normal: out_dir.arr(),
                     };
                 }
                 End::Open { face } => {
@@ -836,17 +1209,19 @@ pub fn tools(spec: &BlendSpec, segments: &dyn Fn(f64) -> u32) -> Result<Vec<Tool
         uf.join(c.edges[0].0, c.edges[1].0);
         uf.join(c.edges[0].0, c.edges[2].0);
     }
-    // Mitred pairs, the same way, where their cross-sections meet in the
-    // mitre point for point: the later edge takes the earlier one's ring
-    // there (the same bits), and neither has a cap.
+    // Mitred pairs and tangent chains, the same way, where their
+    // cross-sections meet point for point: the later edge takes the
+    // earlier one's ring there (the same bits), and neither has a cap.
     let mut joined = vec![[false; 2]; spec.edges.len()];
     for i in 0..spec.edges.len() {
         for end in 0..2 {
-            let End::Mitre { with: (j, je), .. } = spec.edges[i].ends[end] else {
-                continue;
+            let (j, je) = match spec.edges[i].ends[end] {
+                End::Mitre { with, .. } | End::Chain { with } => with,
+                _ => continue,
             };
             let back = spec.edges.get(j).is_some_and(|o| {
-                je < 2 && matches!(o.ends[je], End::Mitre { with, .. } if with == (i, end))
+                je < 2
+                    && matches!(o.ends[je], End::Mitre { with, .. } | End::Chain { with } if with == (i, end))
             });
             if j <= i || !back {
                 continue;
@@ -854,7 +1229,7 @@ pub fn tools(spec: &BlendSpec, segments: &dyn Fn(f64) -> u32) -> Result<Vec<Tool
             let n_arc = profs[i].1.arc.len();
             let ri = ends[i].0[end].clone();
             let rj = &ends[j].0[je];
-            if ri.len() != rj.len() || profs[j].1.arc.len() != n_arc {
+            if ri.len() != rj.len() || profs[j].1.arc.len() != n_arc || ri.is_empty() {
                 continue;
             }
             let len = ri.len();
@@ -895,7 +1270,12 @@ pub fn tools(spec: &BlendSpec, segments: &dyn Fn(f64) -> u32) -> Result<Vec<Tool
             let (rings, caps) = &ends[i];
             let e = &spec.edges[i];
             let skip = [0, 1].map(|k| matches!(e.ends[k], End::Corner(_)) || joined[i][k]);
-            let b = edge_into(&mut m, spec, e, fr, prof, rings, caps, skip)?;
+            let b = match fr.arc {
+                Some(a) => {
+                    revolve::arc_into(&mut m, spec, e, fr, &a, prof, &angles[i], rings, caps, skip)?
+                }
+                None => edge_into(&mut m, spec, e, fr, prof, rings, caps, skip)?,
+            };
             blend.push((b, Source::Edge(i)));
         }
         for (ci, c) in spec.corners.iter().enumerate() {
@@ -928,6 +1308,64 @@ pub fn tools(spec: &BlendSpec, segments: &dyn Fn(f64) -> u32) -> Result<Vec<Tool
             blend: blend.iter().map(|b| b.0).collect(),
             sources: blend.iter().map(|b| b.1).collect(),
         });
+    }
+    Ok(out)
+}
+
+/// The margins and overlaps of every edge ([`Adjust`]): each edge's own
+/// margin, then the smallest along each tangent chain of selected edges,
+/// and, for a concave chain, the plane face of one tool that matches a
+/// curved face of its neighbour's overlaps too.
+fn adjustments(spec: &BlendSpec) -> Result<Vec<Adjust>, BlendError> {
+    let mut out = Vec::with_capacity(spec.edges.len());
+    let mut frames = Vec::with_capacity(spec.edges.len());
+    for (i, e) in spec.edges.iter().enumerate() {
+        let fr = frame(e, i)?;
+        out.push(Adjust {
+            margin: natural_margin(spec.size, &fr, e.margin),
+            overlap: [false; 2],
+        });
+        frames.push(fr);
+    }
+    let mut uf = crate::math::UnionFind::new(spec.edges.len());
+    for (i, e) in spec.edges.iter().enumerate() {
+        for end in &e.ends {
+            let End::Chain { with: (j, _) } = *end else {
+                continue;
+            };
+            if j >= spec.edges.len() {
+                return Err(BlendError::Invalid(format!(
+                    "edge {i}: chained to no edge {j}"
+                )));
+            }
+            uf.join(i, j);
+            let o = &spec.edges[j];
+            if e.convex || o.convex {
+                continue;
+            }
+            // The face each has that the other does not: the side the
+            // chain turns along (a plane beside a line, a cylinder beside
+            // the arc it runs into).
+            let own = |x: &BlendEdge, y: &BlendEdge| {
+                (0..2).find(|&k| !y.face_ids.contains(&x.face_ids[k]))
+            };
+            if let (Some(ki), Some(kj)) = (own(e, o), own(o, e)) {
+                if frames[j].curved[kj] {
+                    out[i].overlap[ki] = true;
+                }
+                if frames[i].curved[ki] {
+                    out[j].overlap[kj] = true;
+                }
+            }
+        }
+    }
+    let mut least: Vec<f64> = vec![f64::INFINITY; spec.edges.len()];
+    for i in 0..spec.edges.len() {
+        let r = uf.find(i);
+        least[r] = least[r].min(out[i].margin);
+    }
+    for i in 0..spec.edges.len() {
+        out[i].margin = least[uf.find(i)];
     }
     Ok(out)
 }
@@ -1187,26 +1625,9 @@ fn edge_into(
         } else {
             let a = ring[j];
             let b = ring[j1];
-            let face_side = |f: usize| -> bool {
-                // A concave tool's side along a plane face lies in it.
-                prof.mu[f] == 0.0 && matches!(e.faces[f], BlendFace::Plane { .. }) && {
-                    let n = prof.nu[f];
-                    let h = prof.sigma * spec.size;
-                    let base_h = match spec.profile {
-                        Profile::Fillet => h,
-                        Profile::Chamfer => match fr.f[f] {
-                            F::Line { c, .. } => c,
-                            F::Circle { .. } => 0.0,
-                        },
-                    };
-                    (a.dot(n) - base_h).abs() <= 1e-9 * (1.0 + spec.size)
-                        && (b.dot(n) - base_h).abs() <= 1e-9 * (1.0 + spec.size)
-                }
-            };
-            if face_side(0) {
-                m.surf(face_surface(&e.faces[0]))
-            } else if face_side(1) {
-                m.surf(face_surface(&e.faces[1]))
+            // A concave tool's side along a plane face lies in it.
+            if let Some(f) = side_face(spec, e, fr, prof, a, b) {
+                m.surf(face_surface(&e.faces[f]))
             } else {
                 let n = fr.d.cross(b - a).norm();
                 m.surf(Surface::Plane {
@@ -1259,7 +1680,58 @@ fn face_surface(f: &BlendFace) -> Surface {
             axis: *axis,
             radius: *radius,
         },
+        BlendFace::Cone {
+            apex, axis, slope, ..
+        } => Surface::Cone {
+            apex: *apex,
+            axis: *axis,
+            slope: *slope,
+        },
+        BlendFace::Sphere { center, radius, .. } => Surface::Sphere {
+            center: *center,
+            radius: *radius,
+        },
+        BlendFace::Torus {
+            center,
+            axis,
+            major_radius,
+            minor_radius,
+            ..
+        } => Surface::Torus {
+            center: *center,
+            axis: *axis,
+            major_radius: *major_radius,
+            minor_radius: *minor_radius,
+        },
     }
+}
+
+/// The face of the solid that the region's side from ring point `a` to
+/// `b` (offsets from the base) lies in, if any: a concave tool's side
+/// along a plane face it does not overlap into.
+fn side_face(
+    spec: &BlendSpec,
+    e: &BlendEdge,
+    fr: &Frame,
+    prof: &Prof,
+    a: V,
+    b: V,
+) -> Option<usize> {
+    (0..2).find(|&f| {
+        prof.mu[f] == 0.0 && matches!(e.faces[f], BlendFace::Plane { .. }) && {
+            let n = prof.nu[f];
+            let h = prof.sigma * spec.size;
+            let base_h = match spec.profile {
+                Profile::Fillet => h,
+                Profile::Chamfer => match fr.f[f] {
+                    F::Line { c, .. } => c,
+                    F::Circle { .. } => 0.0,
+                },
+            };
+            (a.dot(n) - base_h).abs() <= 1e-9 * (1.0 + spec.size)
+                && (b.dot(n) - base_h).abs() <= 1e-9 * (1.0 + spec.size)
+        }
+    })
 }
 
 /// A corner's sphere patch into `m`: bounded by the three edge tools'
@@ -1466,6 +1938,8 @@ mod tests {
             face_ids: [0, 1],
             convex,
             ends,
+            path: Path::Line,
+            margin: None,
         }
     }
 
@@ -1565,6 +2039,8 @@ mod tests {
                     plane([0.0; 3], [-1.0, 0.0, 0.0]),
                     plane([5.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
                 ],
+                path: Path::Line,
+                margin: None,
             }],
             corners: vec![],
         };
@@ -1604,6 +2080,8 @@ mod tests {
                     plane([0.0; 3], [0.0, 0.0, -1.0]),
                     plane([0.0, 0.0, 5.0], [0.0, 0.0, 1.0]),
                 ],
+                path: Path::Line,
+                margin: None,
             }],
             corners: vec![],
         };
@@ -1630,6 +2108,8 @@ mod tests {
             face_ids: [f[0] as u32, f[1] as u32],
             convex: true,
             ends: [End::Corner(0), plane(to, far)],
+            path: Path::Line,
+            margin: None,
         };
         let spec = BlendSpec {
             profile: Profile::Fillet,
@@ -1683,5 +2163,169 @@ mod tests {
             })
             .sum();
         assert!((area - 3.0).abs() < 1e-12);
+    }
+
+    /// The top rim of a hole of radius 5 about the z axis through a plate
+    /// whose top is z = 0, turning by `sweep` from the +x axis, with
+    /// sections every `step` radians.
+    fn hole_rim(sweep: f64, step: f64, ends: [End; 2]) -> BlendEdge {
+        let n = (sweep / step).round() as usize;
+        BlendEdge {
+            from: [5.0, 0.0, 0.0],
+            to: [5.0 * cos(sweep), 5.0 * sin(sweep), 0.0],
+            faces: [
+                BlendFace::Plane {
+                    origin: [0.0; 3],
+                    normal: [0.0, 0.0, 1.0],
+                },
+                BlendFace::Cylinder {
+                    origin: [0.0, 0.0, -10.0],
+                    axis: [0.0, 0.0, 1.0],
+                    radius: 5.0,
+                    convex: false,
+                },
+            ],
+            face_ids: [0, 1],
+            convex: true,
+            ends,
+            path: Path::Arc {
+                center: [0.0; 3],
+                axis: [0.0, 0.0, 1.0],
+                radius: 5.0,
+                sweep,
+                sections: (0..n).map(|j| [step * j as f64, 0.0]).collect(),
+            },
+            margin: None,
+        }
+    }
+
+    /// The volume a closed polygon `(ρ, z)` sweeps about the axis in a
+    /// whole turn (Pappus: 2π times its first moment about the axis).
+    fn swept(ring: &[(f64, f64)]) -> f64 {
+        let n = ring.len();
+        let mut m = 0.0;
+        for i in 0..n {
+            let ((r1, z1), (r2, z2)) = (ring[i], ring[(i + 1) % n]);
+            m += (r1 * r1 + r1 * r2 + r2 * r2) / 6.0 * (z2 - z1);
+        }
+        (2.0 * PI * m).abs()
+    }
+
+    #[test]
+    fn a_rim_tool_is_its_section_revolved() {
+        let spec = |sweep: f64, ends: [End; 2]| BlendSpec {
+            profile: Profile::Fillet,
+            size: 1.0,
+            edges: vec![hole_rim(sweep, TAU / 2000.0, ends)],
+            corners: vec![],
+        };
+        let full = spec(TAU, [End::Open { face: None }, End::Open { face: None }]);
+        let s = section(&full, 0).unwrap();
+        // The ball's centre is 1 below the top and 1 out from the wall;
+        // the tangents are on the plane and the wall.
+        let c = s.center.unwrap();
+        assert!(
+            (c[0] - 6.0).abs() < 1e-12 && (c[2] + 1.0).abs() < 1e-12,
+            "{c:?}"
+        );
+        assert!((s.widths[0] - 1.0).abs() < 1e-12 && (s.widths[1] - 1.0).abs() < 1e-12);
+        let t = tools(&full, &|_| 8).unwrap();
+        assert_eq!(t.len(), 1);
+        assert!(!t[0].add);
+        let Surface::Torus {
+            major_radius,
+            minor_radius,
+            ..
+        } = t[0].mesh.surfaces[t[0].blend[0] as usize]
+        else {
+            panic!("not a torus");
+        };
+        assert_eq!((major_radius, minor_radius), (6.0, 1.0));
+        // The section's polygon, revolved: the arc's 8 chords from the
+        // plane's tangent to the wall's, then into the hole by the margin
+        // (1), up past the plane by it, and back.
+        let mut ring: Vec<(f64, f64)> = (0..=8)
+            .map(|k| {
+                let th = PI / 2.0 + PI / 2.0 * k as f64 / 8.0;
+                (6.0 + cos(th), -1.0 + sin(th))
+            })
+            .collect();
+        ring.extend([(4.0, -1.0), (4.0, 1.0), (6.0, 1.0)]);
+        let want = swept(&ring);
+        let got = volume(&t[0].mesh);
+        // 2000 sections: the polygon about the axis loses (π/2000)²/6.
+        assert!((got - want).abs() / want < 1e-5, "{got} vs {want}");
+        // A quarter, cut on the planes through the axis at both ends: a
+        // quarter of the volume, closed by its caps.
+        let ends = [
+            End::Plane {
+                origin: [0.0; 3],
+                normal: [0.0, -1.0, 0.0],
+            },
+            End::Plane {
+                origin: [0.0; 3],
+                normal: [-1.0, 0.0, 0.0],
+            },
+        ];
+        let q = tools(&spec(PI / 2.0, ends), &|_| 8).unwrap();
+        let got = volume(&q[0].mesh);
+        assert!(
+            (got - want / 4.0).abs() / want < 1e-5,
+            "{got} vs {}",
+            want / 4.0
+        );
+        // Open ends run on past the arc's ends into the air.
+        let open = [
+            End::Open {
+                face: Some(([0.0; 3], [0.0, -1.0, 0.0])),
+            },
+            End::Open {
+                face: Some(([0.0; 3], [-1.0, 0.0, 0.0])),
+            },
+        ];
+        let o = tools(&spec(PI / 2.0, open), &|_| 8).unwrap();
+        assert!(volume(&o[0].mesh) > got * 1.2);
+    }
+
+    #[test]
+    fn a_boss_rim_needs_a_ring_torus() {
+        // A boss of radius 6 about z, top at z = 0: a convex fillet's
+        // centre is 6 - r from the axis, which must be more than r.
+        let edge = |r: f64| BlendSpec {
+            profile: Profile::Fillet,
+            size: r,
+            edges: vec![BlendEdge {
+                from: [6.0, 0.0, 0.0],
+                to: [6.0, 0.0, 0.0],
+                faces: [
+                    BlendFace::Plane {
+                        origin: [0.0; 3],
+                        normal: [0.0, 0.0, 1.0],
+                    },
+                    BlendFace::Cylinder {
+                        origin: [0.0, 0.0, -10.0],
+                        axis: [0.0, 0.0, 1.0],
+                        radius: 6.0,
+                        convex: true,
+                    },
+                ],
+                face_ids: [0, 1],
+                convex: true,
+                ends: [End::Open { face: None }, End::Open { face: None }],
+                path: Path::Arc {
+                    center: [0.0; 3],
+                    axis: [0.0, 0.0, 1.0],
+                    radius: 6.0,
+                    sweep: TAU,
+                    sections: vec![],
+                },
+                margin: None,
+            }],
+            corners: vec![],
+        };
+        assert!(section(&edge(2.9), 0).is_ok());
+        assert_eq!(section(&edge(3.1), 0), Err(BlendError::TooLarge(0)));
+        let t = tools(&edge(2.0), &|_| 4).unwrap();
+        assert!(t[0].mesh.triangles.len() > 32 * 4);
     }
 }

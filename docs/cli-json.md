@@ -573,8 +573,8 @@ as on the bed), at most 10 findings per code.
   "fillet_edges"|"chamfer_edges", "r"|"d": number, "selector": string,
   "except": string|null, "expect": int|null, "file", "line", "span",
   "status": "built" | "selected" | "no-edges" | "count" | "unsupported"
-  | "not-built" | "too-large" | "overlap" | "unsupported-vertex" |
-  "failed" | "no-brep" | "2d" | "empty", "matched": int, "edges":
+  | "too-large" | "overlap" | "unsupported-vertex" | "failed" |
+  "no-brep" | "2d" | "empty", "matched": int, "edges":
   [EDGE, ...],
   "edges_omitted"?: int, "unsupported": int, "skipped": [{"reason":
   "polygon seam"|"tangent"|"faceted", "count", "module"?, "line"?},
@@ -596,14 +596,13 @@ as on the bed), at most 10 findings per code.
   language server's "Pin count"), absent when `expect` already says so
   or nothing was selected. Numbers are rounded to 1e-4. The text report
   has a line per call (`fillet_edges at line 4: 4 edges (4 line,
-  convex, 90°), r 2, edges = "|z" [built]`). Straight edges are built
-  (stage F2: `built`, and their edges `built`); a call that selects a
-  circle or an arc (stage F3's) leaves its child unchanged with a
-  `fillet-not-built` warning (`not-built`). A call refused before any
-  boolean (`too-large`, `overlap`, `unsupported-vertex`, `failed`) is
-  an error that leaves its child sharp; the first three hints carry an
-  edit: the largest size that fits, or the call split into two nested
-  ones, concave edges first.
+  convex, 90°), r 2, edges = "|z" [built]`). Straight edges (stage F2)
+  and circles and arcs about an axis (stage F3) are built (`built`, and
+  their edges `built`). A call refused before any boolean (`too-large`,
+  `overlap`, `unsupported-vertex`, `failed`) is an error that leaves its
+  child sharp; the first three hints carry an edit: a size 5% under the
+  largest that fits, or the call split into two nested ones, concave
+  edges first.
 - `timings_ms.check.cuts` is the `cut-away` and `cuts-nothing` stage,
   which runs on the node tree right after the render, before the mesh
   checks; `check.total` does not include it.
@@ -1115,3 +1114,7 @@ have them.
   `fillet-failed`, and `check`'s `counts.fillet_errors`, which also
   count in `errors` and the exit code. Additive, except that a check
   with a failed fillet call now fails.
+- Fillets, stage F3: circles and arcs are built, so the status
+  `not-built` and the code `fillet-not-built` are gone; a size hint's
+  edit writes 5% under the largest size that fits, which its message
+  names. Not additive for a reader that matched `not-built`.

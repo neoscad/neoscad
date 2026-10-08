@@ -136,8 +136,8 @@ fn l_bracket() {
 
 /// 12.2, the box: the vertical edges, then the top outline. The inner
 /// call's blends are built (stage F2), so the outer call selects on the
-/// rounded box: the chain of four lines and four quarter circles, whose
-/// arcs are stage F3's (so the outer call is not built yet).
+/// rounded box: the chain of four lines and four quarter circles, built
+/// as one tool (stage F3).
 #[test]
 fn rounded_box() {
     let p = plans(
@@ -155,10 +155,7 @@ fn rounded_box() {
          circle (convex, 90°) at [38.1831, 1.8169, 20], 7.854 long rotational\n\
          circle (convex, 90°) at [38.1831, 28.1831, 20], 7.854 long rotational"
     );
-    assert_eq!(
-        (p[0].status, p[1].status),
-        (Status::NotBuilt, Status::Built)
-    );
+    assert_eq!((p[0].status, p[1].status), (Status::Built, Status::Built));
     assert_eq!(
         listing(&p[1]),
         "line (convex, 90°) at [0, 0, 10], 20 long translational\n\
@@ -424,9 +421,9 @@ fn unsupported_edges_warn_under_all_and_fail_when_named() {
     // A plane cutting a cylinder obliquely: an ellipse.
     let body = "difference() { cylinder(r = 5, h = 10); translate([0, 0, 6]) rotate([30, 0, 0]) translate([-10, -10, 0]) cube(20); }";
     let p = one(&format!("fillet_edges(r = 1) {body}"));
-    // The ellipse is left sharp with a warning; the rest of "all"
-    // includes the cylinder's rim, a circle, so nothing is built yet.
-    assert_eq!(p.status, Status::NotBuilt);
+    // The ellipse is left sharp with a warning; the rest of "all" (the
+    // cylinder's bottom rim, a circle) is built.
+    assert_eq!(p.status, Status::Built);
     let d = p
         .diags
         .iter()

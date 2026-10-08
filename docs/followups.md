@@ -2598,29 +2598,64 @@ pass's leftovers first, then stage 1b's, then the crate's.
   not happened in the test models.
 
 ## Fillets and chamfers
-Stages F0, F1 and F2 of `docs/fillets.md` are built: `--enable fillet`,
+Stages F0 to F3 of `docs/fillets.md` are built: `--enable fillet`,
 the two builtins, the selector parser (`eval::fillet::selector`),
 `NodeKind::Fillet`, the plan (`geom::fillet`: the child's B-rep, edge
 facts, selection; `session::fillets`: diagnostics and the
 `check`/`measure`/`snapshot` reports; "Pin count" in the language
-server), and the blends of straight edges (`meshbrep::blend`'s tools,
+server), the blends of straight edges (`meshbrep::blend`'s tools,
 `geom::fillet::build`'s ends and checks, the normal render's booleans,
-the STEP walk, the check after the boolean, exit codes; section 15.3).
-What they leave, beyond the later stages themselves:
-- **`fillet-not-built` whole-call**: a call that selects any circle or
-  arc builds nothing until F3, so `fillet_edges(r = 1)` on a part with a
-  hole is unchanged (with the warning); `and %line` builds the lines.
-  F3 retires the code.
+the STEP walk, the check after the boolean, exit codes; section 15.3)
+and of circles and arcs about an axis, with tangent chains of both
+(`meshbrep::blend::revolve`, conforming sections, `conformance
+fillet-corpus`; section 15.4). What they leave, beyond the later
+stages themselves:
+- **Spindle tori**: a convex rim's fillet must keep its centre further
+  from the axis than its radius (a boss's top rim: up to half the boss's
+  radius), because `meshbrep` writes ring tori only
+  (`Surface::Torus`). Larger is `fillet-too-large` though the blend
+  would fit. STEP's `degenerate_toroidal_surface` would be the entity
+  for the rest (from memory of ISO 10303-42; unverified here).
+- **Arcs that end on other faces**: an arc's tool ends only where the
+  arc runs on smoothly into another edge or on a plane through its axis
+  (`fillet::build::prepare`); an arc running into a wall off its axis,
+  or meeting another selected edge at an angle, is
+  `fillet-unsupported-vertex`. Cutting the revolved tool by an
+  arbitrary plane (as straight tools are) would cover most of them.
+- **Near the fit limit**: a blend within about 10% of the largest size
+  that fits can leave a band of face between two blends (a countersink's
+  cone between its two rims) thin enough that the polygonal tools cut it
+  apart, and the export falls back to facets there (3 of 1,740 cases in
+  the corpus, all from a hint's size; the hints back off 5% for this).
+  Requiring the band to exceed the faces' polygon sagitta in the checks
+  would refuse those sizes instead.
+- **Tiny blends on sliver faces**: a 0.02 fillet on a face 0.04 wide (a
+  generator's sliver) builds but does not reconstruct exact (1 of
+  1,740). Blends near the export's tolerance (1e-6 of the model) could
+  be refused or written as facets on purpose.
+- **Arcs beside spheres and tori are not conformed** to the mesh: a
+  sphere's rings do not pass through the rim, so the normal render keeps
+  the sphere's facets standing over the blend by up to their sagitta
+  (the STEP export is exact). Conforming would need the tool's tangent
+  ring on the sphere's polygon, or the sphere re-tessellated about the
+  rim's axis.
+- **A concave tool's overlap into the material** behind a curved face
+  is capped at half the gap to a coaxial cylinder behind it
+  (`fillet::build::wall`), not against other walls (a plane, or a cone,
+  close behind a concave rim's cylinder face); a straight edge's
+  concave tool on a parallel cylinder is not capped at all (F2's rule,
+  half the cylinder's radius).
+- **The corpus** (`conformance fillet-corpus`) has no spheres, tori,
+  rotations or nested calls, and checks validity, exactness and the
+  export's own mesh cross-check, not volumes against closed forms; the
+  goldens do that. A pocketed bracket's top face failing B-rep
+  validation ("more than one outer loop", case 1287 of seed 2) fails on
+  F2's commit too, with lines only.
 - **Colour and part of blends between different faces** (6.4: "the
   colour and part of the first of their two faces"): a blend takes the
   child's colour or part only when every face of the child has the same
   one (`ManifoldGeometry::adopt_tools`); otherwise it has neither. Needs
   the original ID of the mesh face each tool touches.
-- **Chamfers along cylinders in the mesh** keep the exact cylinder: the
-  normal render conforms a fillet's cylinder faces to the facet of
-  OpenSCAD's polygon its tangent touches (`fillet::result::conformed`),
-  but not a chamfer's, which leaves a sliver of the facet standing by
-  the chamfer's edge (at most the polygon's sagitta).
 - **Mitred pairs at unequal angles** (a boss whose two sides meet the
   plate at different angles) have cross-sections that do not meet point
   for point in the mitre, so they stay two tools with coincident caps,

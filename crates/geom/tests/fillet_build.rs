@@ -119,8 +119,9 @@ fn golden_cases_match_their_closed_forms() {
             (mesh - want).abs() / want < 0.05,
             "{name}: mesh {mesh} vs {want}"
         );
-        // Finer arcs close in on the closed form.
-        let (fine, _) = render(&Renderer::new(), &format!("$fa = 2; $fs = 0.05;\n{src}"));
+        // Finer arcs close in on the closed form. At 1° a polygon's area
+        // is within 5e-5 of its circle's, so what is left is the blends'.
+        let (fine, _) = render(&Renderer::new(), &format!("$fa = 1; $fs = 0.05;\n{src}"));
         assert!(
             (fine - want).abs() / want < 2e-4,
             "{name}: fine mesh {fine} vs {want}"
@@ -201,12 +202,17 @@ fn bytes_are_the_same_at_any_thread_count_and_cache_state() {
                 "lid_lip_lines",
                 "boss_base_mitre",
                 "plane_cylinder",
+                "box_top",
+                "boss_rims",
+                "sphere_rim",
+                "notch_rim",
+                "rotated_box_top",
             ]
             .contains(&n.as_str())
         })
         .map(|(_, s, _)| s)
         .collect();
-    assert_eq!(models.len(), 5);
+    assert_eq!(models.len(), 10);
     let both = |r: &Renderer, m: &String| {
         let (mesh, exact) = render(r, m);
         (mesh.to_bits(), exact.unwrap().0)
@@ -259,6 +265,40 @@ fn codes(p: &fillet::Plan) -> Vec<DiagCode> {
     p.diags.iter().map(|d| d.code).collect()
 }
 
+/// Every fillet call's plan in `src`, outermost first, with the
+/// diagnostics after the boolean appended.
+fn plans(src: &str) -> Vec<fillet::Plan> {
+    let ev = evaluate(src);
+    let keys = eval::dump::Keys::new(&ev.root, &lang::loader::StdFs);
+    let r = Renderer::new();
+    let opts = RenderOptions::default();
+    r.render(&ev.root, &keys, opts.clone()).expect("renders");
+    let mut out = Vec::new();
+    let mut stack = vec![&ev.root];
+    while let Some(n) = stack.pop() {
+        if matches!(n.kind, eval::node::NodeKind::Fillet(_)) {
+            let mut p = fillet::plan(&r, n, &keys, &opts).unwrap();
+            let after = fillet::blend_diags(&r, n, &keys, &opts, &p);
+            p.diags.extend(after);
+            out.push(p);
+        }
+        stack.extend(n.children.iter().rev());
+    }
+    out
+}
+
+/// Every golden call builds, and the check after the boolean finds each
+/// of its blends whole: nothing cut into it, nothing missing.
+#[test]
+fn golden_blends_are_whole() {
+    for (name, src, _) in golden() {
+        for p in plans(&src) {
+            assert_eq!(p.status, Status::Built, "{name}: {:?}", p.diags);
+            assert!(codes(&p).is_empty(), "{name}: {:?}", p.diags);
+        }
+    }
+}
+
 /// The size checks refuse a call before any boolean, and the size their
 /// hint's edit writes is one the checks pass: the edit applied, the call
 /// builds.
@@ -286,6 +326,43 @@ fn every_size_fix_makes_the_call_build() {
         // A chamfer longer than a face.
         (
             "chamfer_edges(d = R, edges = \"|z and <x and <y\") cube([2, 10, 5]);",
+            3.0,
+            DiagCode::FilletTooLarge,
+        ),
+        // A hole's rim fillet wider than the plate around the hole.
+        (
+            "fillet_edges(r = R, edges = \"%circle and >z\") difference() { translate([-10, -10, 0]) cube([20, 20, 10]); translate([0, 0, -1]) cylinder(r = 5, h = 12); }",
+            6.0,
+            DiagCode::FilletTooLarge,
+        ),
+        // A hole's rim fillet deeper than the plate.
+        (
+            "fillet_edges(r = R, edges = \"%circle and >z\") difference() { translate([-10, -10, 0]) cube([20, 20, 3]); translate([0, 0, -1]) cylinder(r = 4, h = 5); }",
+            3.5,
+            DiagCode::FilletTooLarge,
+        ),
+        // A boss's top rim: the blend's centre must stay further from
+        // the axis than its radius.
+        (
+            "fillet_edges(r = R, edges = \"%circle and >z\") cylinder(r = 6, h = 20);",
+            4.0,
+            DiagCode::FilletTooLarge,
+        ),
+        // Both rims of a tube's top, 2 apart.
+        (
+            "fillet_edges(r = R, edges = \"%circle and >z\") difference() { cylinder(r = 8, h = 10); translate([0, 0, -1]) cylinder(r = 6, h = 12); }",
+            1.5,
+            DiagCode::FilletOverlap,
+        ),
+        // Both rims of a hole through a plate 4 thick, chamfered.
+        (
+            "chamfer_edges(d = R, edges = \"%circle\") difference() { translate([-10, -10, 0]) cube([20, 20, 4]); translate([0, 0, -1]) cylinder(r = 4, h = 6); }",
+            2.5,
+            DiagCode::FilletOverlap,
+        ),
+        // A boss's base fillet taller than the boss.
+        (
+            "fillet_edges(r = R, edges = \"concave\") { translate([-10, -10, 0]) cube([20, 20, 3]); cylinder(r = 4, h = 5); }",
             3.0,
             DiagCode::FilletTooLarge,
         ),
@@ -340,19 +417,16 @@ fn a_mixed_corner_is_refused_and_two_passes_build() {
     assert_eq!(p.status, Status::Built, "{:?}", p.diags);
 }
 
-/// Circles are F3's: a call that selects one says so and leaves the child
-/// as it is; selecting only the lines builds.
+/// A call that selects lines and circles together builds both: a plate's
+/// top outline and the rim of the hole through it.
 #[test]
-fn circles_are_not_built_yet_and_lines_are() {
+fn lines_and_circles_build_together() {
     let part = "difference() { cube(20); translate([10, 10, -1]) cylinder(r = 4, h = 22); }";
-    let p = plan(&format!("fillet_edges(r = 1, edges = \">z\") {part}"));
-    assert_eq!(p.status, Status::NotBuilt);
-    assert_eq!(codes(&p), [DiagCode::FilletNotBuilt]);
-    let p = plan(&format!(
-        "fillet_edges(r = 1, edges = \">z and %line\") {part}"
-    ));
-    assert_eq!(p.status, Status::Built);
-    assert!(p.diags.is_empty(), "{:?}", p.diags);
+    for sel in [">z", ">z and %line", ">z and %circle"] {
+        let p = plan(&format!("fillet_edges(r = 1, edges = \"{sel}\") {part}"));
+        assert_eq!(p.status, Status::Built, "{sel}: {:?}", p.diags);
+        assert!(p.diags.is_empty(), "{sel}: {:?}", p.diags);
+    }
 }
 
 /// The check after the boolean finds every blend whole where nothing cuts

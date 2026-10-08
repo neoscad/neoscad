@@ -663,11 +663,8 @@ pub enum Status {
     Empty,
     /// The request stopped first.
     Interrupted,
-    /// Built: the blends were made (stage F2's edges).
+    /// Built: the blends were made.
     Built,
-    /// Selected edges of a class whose blends are not built yet (circles
-    /// about an axis, until stage F3): the child is unchanged.
-    NotBuilt,
     /// A blend does not fit (`fillet-too-large`).
     TooLarge,
     /// Two blends overlap on a face (`fillet-overlap`).
@@ -691,7 +688,6 @@ impl Status {
             Status::Empty => "empty",
             Status::Interrupted => "interrupted",
             Status::Built => "built",
-            Status::NotBuilt => "not-built",
             Status::TooLarge => "too-large",
             Status::Overlap => "overlap",
             Status::UnsupportedVertex => "unsupported-vertex",
@@ -1024,7 +1020,7 @@ pub fn number_text(x: f64) -> String {
     if s == "-0" { "0".to_string() } else { s }
 }
 
-/// Stage F2: whether the selection is built, and if not, why. Only calls
+/// Whether the selection is built, and if not, why. Only calls
 /// whose selection stands (no count or explicit unsupported-edge error)
 /// get this far; unsupported edges under the default `"all"` are left
 /// sharp, as their warning says.
@@ -1045,31 +1041,6 @@ fn decide(f: &FilletNode, p: &mut Plan, facts: &Facts) {
     }
     let m = f.kind.module();
     let sn = f.kind.size_name();
-    let rotational = list
-        .iter()
-        .filter(|&&i| facts.edges[i].class == Class::Rotational)
-        .count();
-    if rotational > 0 {
-        p.status = Status::NotBuilt;
-        p.diags.push(PlanDiag {
-            severity: Severity::Warning,
-            code: DiagCode::FilletNotBuilt,
-            message: if rotational == 1 {
-                format!(
-                    "{m}(): 1 of the selected edges is a circle or an arc (the rim of a hole or a boss, or an arc of a rounded outline), whose blend is not built yet in this version of NeoSCAD; the children are rendered unchanged"
-                )
-            } else {
-                format!(
-                    "{m}(): {rotational} of the selected edges are circles or arcs (rims of holes and bosses, arcs of rounded outlines), whose blends are not built yet in this version of NeoSCAD; the children are rendered unchanged"
-                )
-            },
-            hints: vec![
-                "straight edges are built: add `and %line` to the selector to round only those".into(),
-            ],
-            fix: None,
-        });
-        return;
-    }
     let profile = match f.kind {
         FilletKind::Fillet => meshbrep::blend::Profile::Fillet,
         FilletKind::Chamfer => meshbrep::blend::Profile::Chamfer,
@@ -1081,9 +1052,13 @@ fn decide(f: &FilletNode, p: &mut Plan, facts: &Facts) {
     };
     let quote = |k: usize| edge_text(&facts.edges[list[k]]);
     let size = number_text(f.size);
-    let fit_hint = |best: Option<f64>| match best {
-        Some(b) => (
-            format!("the largest {sn} that fits is {}", number_text(b)),
+    let fit_hint = |best: Option<[f64; 2]>| match best {
+        Some([b, limit]) => (
+            format!(
+                "use {sn} = {}: the largest that fits is just under {}, which leaves almost nothing of the face beside the blend",
+                number_text(b),
+                number_text(limit)
+            ),
             Some(Fix::Size(b)),
         ),
         None => (format!("use a smaller {sn}, or select fewer edges"), None),
@@ -1113,6 +1088,12 @@ fn decide(f: &FilletNode, p: &mut Plan, facts: &Facts) {
                     "{m}(): edge {} ({}) is too short for {sn} = {size} at the angles it ends at",
                     num(edge),
                     quote(edge)
+                ),
+                _ if facts.edges[list[edge]].class == Class::Rotational => format!(
+                    "{m}(): {sn} = {size} is too large for edge {} ({}): no blend that size fits between its {} faces short of their axis (around an axis a fillet's centre must stay further from it than its radius)",
+                    num(edge),
+                    quote(edge),
+                    facts.edges[list[edge]].faces.join(" and ")
                 ),
                 _ => format!(
                     "{m}(): {sn} = {size} is too large for edge {} ({}): no blend that size fits between its {} faces",

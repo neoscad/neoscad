@@ -446,6 +446,31 @@ fn apply(m: &Matrix, p: [f64; 3]) -> [f64; 3] {
     [0, 1, 2].map(|i| m[i][0] * p[0] + m[i][1] * p[1] + m[i][2] * p[2] + m[i][3])
 }
 
+/// The inverse of an affine matrix, `None` when it flattens.
+fn invert(m: &Matrix) -> Option<Matrix> {
+    let d = det3(m);
+    if d == 0.0 || !d.is_finite() {
+        return None;
+    }
+    let a = |i: usize, j: usize| m[i][j];
+    // The 3 x 3 inverse by cofactors, then the translation.
+    let mut r = [[0.0; 4]; 4];
+    r[0][0] = (a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1)) / d;
+    r[0][1] = (a(0, 2) * a(2, 1) - a(0, 1) * a(2, 2)) / d;
+    r[0][2] = (a(0, 1) * a(1, 2) - a(0, 2) * a(1, 1)) / d;
+    r[1][0] = (a(1, 2) * a(2, 0) - a(1, 0) * a(2, 2)) / d;
+    r[1][1] = (a(0, 0) * a(2, 2) - a(0, 2) * a(2, 0)) / d;
+    r[1][2] = (a(0, 2) * a(1, 0) - a(0, 0) * a(1, 2)) / d;
+    r[2][0] = (a(1, 0) * a(2, 1) - a(1, 1) * a(2, 0)) / d;
+    r[2][1] = (a(0, 1) * a(2, 0) - a(0, 0) * a(2, 1)) / d;
+    r[2][2] = (a(0, 0) * a(1, 1) - a(0, 1) * a(1, 0)) / d;
+    for row in r.iter_mut().take(3) {
+        row[3] = -(row[0] * a(0, 3) + row[1] * a(1, 3) + row[2] * a(2, 3));
+    }
+    r[3][3] = 1.0;
+    Some(r)
+}
+
 fn linear(m: &Matrix, d: [f64; 3]) -> [f64; 3] {
     [0, 1, 2].map(|i| m[i][0] * d[0] + m[i][1] * d[1] + m[i][2] * d[2])
 }
@@ -708,12 +733,41 @@ impl Walk<'_> {
         if child.is_empty() {
             return Ok(Res::Solid(child));
         }
-        let blends =
-            match crate::fillet::blends(self.renderer, n, self.keys, self.opts, self.mult, None) {
-                Ok(Some(b)) => b,
-                Ok(None) => return Ok(Res::Solid(child)),
-                Err(_) => return Err(Unsupported::interrupted()),
+        // The child's triangles back in the node's own coordinates, where
+        // the plan is: a circular edge's tool takes its sections at the
+        // vertices of the polygon beside it, as the walk tessellated it.
+        let local = invert(m).map(|inv| {
+            let gl = child.get_mesh_gl64(-1);
+            let np = (gl.num_prop as usize).max(3);
+            let at = |i: u64| {
+                let k = i as usize * np;
+                apply(
+                    &inv,
+                    [
+                        gl.vert_properties[k],
+                        gl.vert_properties[k + 1],
+                        gl.vert_properties[k + 2],
+                    ],
+                )
             };
+            gl.tri_verts
+                .chunks(3)
+                .map(|c| [at(c[0]), at(c[1]), at(c[2])])
+                .collect::<Vec<_>>()
+        });
+        let blends = match crate::fillet::blends(
+            self.renderer,
+            n,
+            self.keys,
+            self.opts,
+            self.mult,
+            local.as_deref(),
+            false,
+        ) {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(Res::Solid(child)),
+            Err(_) => return Err(Unsupported::interrupted()),
+        };
         let scale = similarity_scale(m);
         let base = self.surfaces.len();
         let mut adds = vec![Res::Solid(child)];

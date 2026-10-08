@@ -99,9 +99,9 @@ fn check_reports_each_call() {
     assert_eq!(f[0]["module"], "chamfer_edges");
     assert_eq!(f[0]["d"], 1.0);
     assert_eq!(f[0]["selector"], "\"%circle and >z\"");
-    // A circle: its blend is stage F3's.
-    assert_eq!(f[0]["status"], "not-built");
-    assert_eq!(f[0]["codes"], serde_json::json!(["fillet-not-built"]));
+    // A circle: its cone is built (stage F3).
+    assert_eq!(f[0]["status"], "built");
+    assert_eq!(f[0]["codes"], serde_json::json!([]));
     assert_eq!(f[0]["line"], 1);
     let e = &f[0]["edges"][0];
     assert_eq!(
@@ -251,16 +251,19 @@ fn a_failed_call_fails_check_with_its_fix() {
     assert_eq!(v["fillets"][0]["status"], "overlap");
     let d = &v["diagnostics"]["items"][0];
     assert_eq!(d["code"], "fillet-overlap");
-    assert_eq!(d["hints"][0]["message"], "the largest r that fits is 1.99");
+    assert_eq!(
+        d["hints"][0]["message"],
+        "use r = 1.9: the largest that fits is just under 2, which leaves almost nothing of the face beside the blend"
+    );
     // The edit replaces the `3`.
     let rep = &d["hints"][0]["replace"];
-    assert_eq!(rep["text"], "1.99");
+    assert_eq!(rep["text"], "1.9");
     assert_eq!(rep["span"]["start"]["column"], 18);
     assert_eq!(rep["span"]["end"]["column"], 19);
     // The child is unchanged.
     assert_eq!(v["model"]["volume"], 800.0);
     // The edit applied, the call builds and the check passes.
-    let fixed = src.replacen("r = 3", "r = 1.99", 1);
+    let fixed = src.replacen("r = 3", "r = 1.9", 1);
     let v = check(&session(fixed.as_bytes()), true);
     assert_eq!(v["exit_code"], 0, "{}", v["diagnostics"]);
     assert_eq!(v["fillets"][0]["status"], "built");

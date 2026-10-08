@@ -1882,12 +1882,13 @@ impl Ctx<'_> {
         }
     }
 
-    /// `fillet_edges()`/`chamfer_edges()` (`docs/fillets.md`, stage F2):
-    /// the children's union, with the call's blend tools added (concave
-    /// edges) and subtracted (convex ones). The child keeps OpenSCAD's
-    /// tessellation; the tools come from its exact B-rep. A call that
-    /// builds nothing (no edges, an error, edges of a class not built
-    /// yet) leaves the union as it is, and says why in its report.
+    /// `fillet_edges()`/`chamfer_edges()` (`docs/fillets.md`, stages F2
+    /// and F3): the children's union, with the call's blend tools added
+    /// (concave edges) and subtracted (convex ones). The child keeps
+    /// OpenSCAD's tessellation; the tools come from its exact B-rep, and
+    /// conform to that tessellation. A call that builds nothing (no
+    /// edges, an error) leaves the union as it is, and says why in its
+    /// report.
     fn fillet(&self, n: &Node, kids: Vec<Out>) -> Result<Out, Unsupported> {
         let mut out = self.apply(n, Op::Union, kids)?;
         let Some(g) = out.geom.take() else {
@@ -1898,14 +1899,15 @@ impl Ctx<'_> {
             return Ok(out);
         }
         let tris = crate::fillet::triangles(&g);
-        let blends = match crate::fillet::blends(self.r, n, self.keys, self.opts, 1, Some(&tris)) {
-            Ok(Some(b)) => b,
-            Ok(None) => {
-                out.geom = Some(g);
-                return Ok(out);
-            }
-            Err(_) => return Err(Unsupported::interrupted()),
-        };
+        let blends =
+            match crate::fillet::blends(self.r, n, self.keys, self.opts, 1, Some(&tris), true) {
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    out.geom = Some(g);
+                    return Ok(out);
+                }
+                Err(_) => return Err(Unsupported::interrupted()),
+            };
         // The child converted (if it is still a mesh) and the tools drawn
         // from the node's own block, in tool order.
         let ids = Seq {

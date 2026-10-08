@@ -19,6 +19,8 @@
 //!   tests out as `.scad` files for `diff`.
 //! - `conformance exact` exports corpora as STEP with `--enable exact` and
 //!   tabulates the exact-geometry stop rule's numbers.
+//! - `conformance fillet-corpus` generates fillet and chamfer models and
+//!   tabulates the stop rule of `docs/fillets.md`, section 15.
 //! - `conformance video` stitches the recorded snapshots and benchmarks
 //!   (and, with `--agent-eval`, the agent eval) into a progress video.
 //!
@@ -34,6 +36,7 @@ mod depth;
 mod diff;
 mod edit_loop;
 mod exact;
+mod fillet_corpus;
 mod geometry;
 mod grid;
 mod image_compare;
@@ -300,6 +303,37 @@ enum Cmd {
         #[arg(long)]
         occt: Option<PathBuf>,
     },
+    /// Generate plates, boxes and brackets with holes, bosses, slots and
+    /// pockets, round or chamfer their edges with selectors and sizes
+    /// drawn at random (seeded), export each as STEP, and tabulate the
+    /// fillet stop rule (`docs/fillets.md`, section 15): valid exact
+    /// results, size refusals whose fix builds, refusals, failures by
+    /// class. Results in target/conformance/fillet/.
+    FilletCorpus {
+        /// How many models (at most 2,000).
+        #[arg(long, default_value_t = 300)]
+        count: usize,
+        /// The generator's seed.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Only models whose id (`0042`) contains this.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Parallel exports. The sweep is held under 2 GB in all: each
+        /// export under its share.
+        #[arg(long, short, default_value_t = 4)]
+        jobs: usize,
+        /// Per-model time limit in seconds.
+        #[arg(long, default_value_t = 60.0)]
+        timeout: f64,
+        /// Binary under test (default: target/release/neoscad).
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        /// OCCT read-back checker (`crates/meshbrep/oracle/build.sh`;
+        /// default: $MESHBREP_OCCT_CHECK).
+        #[arg(long)]
+        occt: Option<PathBuf>,
+    },
     /// Render the progress video: one scene per snapshot in
     /// progress/index.jsonl, with benchmark interludes, encoded to H.264 by
     /// ffmpeg.
@@ -539,6 +573,31 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
                 &exact::ExactOptions {
                     corpora: corpus,
                     bosl2_every,
+                    jobs,
+                    timeout: Duration::from_secs_f64(timeout),
+                    binary,
+                    occt,
+                    filter,
+                },
+            )
+        }
+        Cmd::FilletCorpus {
+            count,
+            seed,
+            filter,
+            jobs,
+            timeout,
+            binary,
+            occt,
+        } => {
+            if timeout.is_nan() || timeout <= 0.0 {
+                return Err("--timeout must be positive".into());
+            }
+            fillet_corpus::command(
+                &ctx,
+                &fillet_corpus::FilletOptions {
+                    count,
+                    seed,
                     jobs,
                     timeout: Duration::from_secs_f64(timeout),
                     binary,

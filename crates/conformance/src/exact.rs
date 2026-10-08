@@ -249,6 +249,15 @@ fn rss_kib(pid: u32) -> u64 {
 /// `timeout` or above the memory guard. Returns the output, the wall
 /// time in ms, and why it was killed.
 fn guarded(cmd: &mut Command, timeout: Duration) -> (String, f64, Option<String>) {
+    guarded_under(cmd, timeout, MEMORY_GUARD_KIB)
+}
+
+/// [`guarded`] with its own resident-size guard, in KiB.
+pub(crate) fn guarded_under(
+    cmd: &mut Command,
+    timeout: Duration,
+    guard_kib: u64,
+) -> (String, f64, Option<String>) {
     let started = Instant::now();
     let mut child = match cmd.stdout(Stdio::piped()).spawn() {
         Ok(c) => c,
@@ -272,8 +281,8 @@ fn guarded(cmd: &mut Command, timeout: Duration) -> (String, f64, Option<String>
         }
         if started.elapsed() > timeout {
             killed = Some("timeout".to_string());
-        } else if rss_kib(pid) > MEMORY_GUARD_KIB {
-            killed = Some("memory guard (2 GB)".to_string());
+        } else if rss_kib(pid) > guard_kib {
+            killed = Some(format!("memory guard ({} MB)", guard_kib / 1024));
         }
         if killed.is_some() {
             let _ = child.kill();

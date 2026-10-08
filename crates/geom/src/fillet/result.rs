@@ -47,13 +47,17 @@ fn segments(f: &FilletNode, sweep: f64) -> u32 {
 
 /// The tools of fillet node `node`, with arcs of `mult` times the
 /// segments (the export render's retries), or `None` when the call builds
-/// nothing (no edges, an error, a class not built yet): its child is then
-/// unchanged. Only a stopped request is an error.
+/// nothing (no edges, an error): its child is then unchanged. Only a
+/// stopped request is an error.
 ///
-/// `conform` is the child's mesh in the normal render: a fillet's
-/// cylinder faces there are OpenSCAD's polygons, so each is replaced by
-/// the facet its tangent line lies on ([`conformed`]). The export render
-/// passes `None` and keeps the exact cylinders.
+/// `conform` is the child's mesh as the tools are applied to it, in the
+/// node's own coordinates. A circular edge's tool takes its sections at
+/// the angles of the mesh's vertices on that circle (the polygon of the
+/// cylinder or cone beside it), in both renders ([`sectioned`]). With
+/// `facets` (the normal render, where a straight edge's cylinder faces
+/// are OpenSCAD's polygons) each such cylinder is replaced by the facet
+/// its tangent line lies on ([`conformed`]); the export render keeps the
+/// exact cylinders.
 pub fn blends(
     renderer: &Renderer,
     node: &Node,
@@ -61,6 +65,7 @@ pub fn blends(
     opts: &RenderOptions,
     mult: u32,
     conform: Option<&[[V; 3]]>,
+    facets: bool,
 ) -> Result<Option<Blends>, Unavailable> {
     let NodeKind::Fillet(f) = &node.kind else {
         return Ok(None);
@@ -70,19 +75,94 @@ pub fn blends(
         Err(_) => return Ok(None),
         Ok(x) => x,
     };
+    let tol = facts.tolerance;
     let plan = plan_with(f, Ok(facts));
     let Some(b) = plan.build else {
         return Ok(None);
     };
-    if let Some(tris) = conform {
+    let b = match conform {
+        Some(tris) => sectioned(&b, tris, tol),
+        None => (*b).clone(),
+    };
+    if facets && let Some(tris) = conform {
         let c = conformed(&b, tris);
-        if c != *b
+        if c != b
             && let Ok(x) = made(f, &c, mult)
         {
             return Ok(Some(x));
         }
     }
     Ok(made(f, &b, mult).ok())
+}
+
+/// `b` with each circular edge's tool sectioned at the angles of the
+/// vertices of `tris` that lie on its circle (within `tol`), when a face
+/// beside it is a cylinder or a cone: the vertices of that face's polygon,
+/// where the plane or the other face cuts its straight sides. The tool's
+/// tangent ring then runs through the polygon's vertices, chord for chord
+/// with its facets. Arcs beside other faces (a sphere's rings do not pass
+/// through the rim) keep regular sections.
+fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> build::Built {
+    use meshbrep::blend::{BlendFace, Path};
+    let mut out = b.clone();
+    let mut points: Vec<V> = tris.iter().flatten().copied().collect();
+    points.sort_by(|x, y| {
+        x[0].total_cmp(&y[0])
+            .then(x[1].total_cmp(&y[1]))
+            .then(x[2].total_cmp(&y[2]))
+    });
+    points.dedup();
+    for e in &mut out.spec.edges {
+        let from = e.from;
+        let polygonal = e
+            .faces
+            .iter()
+            .any(|f| matches!(f, BlendFace::Cylinder { .. } | BlendFace::Cone { .. }));
+        let Path::Arc {
+            center,
+            axis,
+            radius,
+            sweep,
+            sections,
+        } = &mut e.path
+        else {
+            continue;
+        };
+        if !polygonal {
+            continue;
+        }
+        let (c, a) = (*center, *axis);
+        let radial = |p: V| {
+            let q = sub(p, c);
+            sub(q, mul(a, dot(q, a)))
+        };
+        let r0 = radial(from);
+        let rho = *radius;
+        let u0 = unit(r0);
+        let mut found: Vec<[f64; 2]> = Vec::new();
+        for &p in &points {
+            if dot(sub(p, c), a).abs() > tol {
+                continue;
+            }
+            let r = radial(p);
+            let off = norm(r) - rho;
+            if off.abs() > tol {
+                continue;
+            }
+            let mut th = libm::atan2(dot(cross(u0, r), a), dot(u0, r));
+            if th < 0.0 {
+                th += std::f64::consts::TAU;
+            }
+            if *sweep < std::f64::consts::TAU * (1.0 - 1e-12) && th >= *sweep {
+                continue;
+            }
+            found.push([th, off]);
+        }
+        found.sort_by(|x, y| x[0].total_cmp(&y[0]).then(x[1].total_cmp(&y[1])));
+        found.dedup_by(|x, y| (x[0] - y[0]).abs() <= 1e-9);
+        *sections = found;
+    }
+    out
 }
 
 /// The distance from `p` to triangle `t`.
@@ -114,7 +194,7 @@ fn to_triangle(p: V, t: &[V; 3]) -> f64 {
     seg(a, b).min(seg(b, c)).min(seg(c, a))
 }
 
-/// `b` with each fillet's cylinder faces replaced by the planar facet of
+/// `b` with each straight edge's cylinder faces replaced by the planar facet of
 /// `tris` (the child's normal mesh) nearest its exact tangent line, facing
 /// the same way: the facet of OpenSCAD's polygon the ball touches. Then
 /// the tool's tangent line lies in the mesh's face, and the boolean
@@ -122,16 +202,16 @@ fn to_triangle(p: V, t: &[V; 3]) -> f64 {
 /// the inscribed polygon by up to its sagitta) would leave the facet
 /// standing over part of the blend, with a crease.
 fn conformed(b: &build::Built, tris: &[[V; 3]]) -> build::Built {
-    use meshbrep::blend::{BlendFace, Profile};
+    use meshbrep::blend::{BlendFace, Path};
     let mut out = b.clone();
-    if b.spec.profile != Profile::Fillet {
-        return out;
-    }
     for (i, e) in out.spec.edges.iter_mut().enumerate() {
-        if !e
-            .faces
-            .iter()
-            .any(|f| matches!(f, BlendFace::Cylinder { .. }))
+        // A circular edge's coaxial cylinder is conformed by its
+        // sections instead ([`sectioned`]).
+        if !matches!(e.path, Path::Line)
+            || !e
+                .faces
+                .iter()
+                .any(|f| matches!(f, BlendFace::Cylinder { .. }))
         {
             continue;
         }
@@ -182,7 +262,32 @@ fn conformed(b: &build::Built, tris: &[[V; 3]]) -> build::Built {
 
 fn made(f: &FilletNode, b: &build::Built, mult: u32) -> Result<Blends, String> {
     let seg = |sweep: f64| segments(f, sweep).saturating_mul(mult.max(1));
-    let tools = build::tools(b, &seg)?;
+    // Arcs with no polygon to conform to are revolved through the call's
+    // own segments for a circle of their radius, a multiple of 4 so that
+    // an axis-aligned rim has sections on the axes.
+    let mut b = b.clone();
+    for e in &mut b.spec.edges {
+        if let meshbrep::blend::Path::Arc {
+            radius,
+            sweep,
+            sections,
+            ..
+        } = &mut e.path
+            && sections.is_empty()
+        {
+            let n = fragments::circular_segments(&f.disc, *radius)
+                .unwrap_or(32)
+                .max(3) as u32;
+            let n = n.saturating_mul(mult.max(1)).div_ceil(4).max(1) * 4;
+            let step = std::f64::consts::TAU / f64::from(n);
+            *sections = (0..n)
+                .map(|j| step * f64::from(j))
+                .filter(|&t| t < *sweep)
+                .map(|t| [t, 0.0])
+                .collect();
+        }
+    }
+    let tools = build::tools(&b, &seg)?;
     let mut sagitta: f64 = 0.0;
     let mut area = 0.0;
     for t in &tools {
@@ -216,7 +321,54 @@ fn off_surface(s: &Surface, p: V) -> f64 {
         }
         Surface::Sphere { center, radius } => (norm(sub(p, *center)) - radius).abs(),
         Surface::Plane { origin, normal } => dot(sub(p, *origin), *normal).abs(),
+        Surface::Torus {
+            center,
+            axis,
+            major_radius,
+            minor_radius,
+        } => (norm(sub(p, tube_point(*center, *axis, *major_radius, p))) - minor_radius).abs(),
+        Surface::Cone { apex, axis, slope } => {
+            // The distance from the generator in `p`'s meridian.
+            let q = sub(p, *apex);
+            let h = dot(q, *axis);
+            let r = norm(sub(q, mul(*axis, h)));
+            let c = 1.0 / (1.0 + slope * slope).sqrt();
+            ((r - slope * h) * c).abs()
+        }
         _ => f64::INFINITY,
+    }
+}
+
+/// The point of a torus's tube circle (about `axis` through `center`, of
+/// radius `major`) in `p`'s meridian.
+fn tube_point(center: V, axis: V, major: f64, p: V) -> V {
+    let q = sub(p, center);
+    let r = unit(sub(q, mul(axis, dot(q, axis))));
+    add(center, mul(r, major))
+}
+
+/// The unit normal of the blend surface `s` at `p` (either way), for
+/// telling a triangle on it from one across it.
+fn surface_normal(s: &Surface, p: V) -> V {
+    match s {
+        Surface::Cylinder { origin, axis, .. } => {
+            let q = sub(p, *origin);
+            unit(sub(q, mul(*axis, dot(q, *axis))))
+        }
+        Surface::Sphere { center, .. } => unit(sub(p, *center)),
+        Surface::Plane { normal, .. } => *normal,
+        Surface::Torus {
+            center,
+            axis,
+            major_radius,
+            ..
+        } => unit(sub(p, tube_point(*center, *axis, *major_radius, p))),
+        Surface::Cone { apex, axis, slope } => {
+            let q = sub(p, *apex);
+            let radial = unit(sub(q, mul(*axis, dot(q, *axis))));
+            unit(sub(radial, mul(*axis, *slope)))
+        }
+        _ => [0.0; 3],
     }
 }
 
@@ -249,6 +401,42 @@ fn blend_shape(t: &Tool) -> (f64, f64) {
         area += tri_area(p[0], p[1], p[2]);
     }
     (dev, area)
+}
+
+/// Whether triangle `p` lies in the plane of triangle `f` (within `eps`)
+/// with its centroid inside it.
+fn piece_of(p: &[V; 3], f: &[V; 3], eps: f64) -> bool {
+    let n = cross(sub(f[1], f[0]), sub(f[2], f[0]));
+    let l = norm(n);
+    if l <= 0.0 {
+        return false;
+    }
+    let n = mul(n, 1.0 / l);
+    if p.iter().any(|v| dot(sub(*v, f[0]), n).abs() > eps) {
+        return false;
+    }
+    let c = mul(add(add(p[0], p[1]), p[2]), 1.0 / 3.0);
+    (0..3).all(|k| dot(cross(sub(f[(k + 1) % 3], f[k]), sub(c, f[k])), n) >= -eps * l)
+}
+
+/// The least cosine between a tool's blend triangles' normals and its
+/// surface's normals at their corners, less a margin: what a triangle of
+/// the result on the blend can turn by.
+fn facing(t: &Tool) -> f64 {
+    let m = &t.mesh;
+    let mut worst: f64 = 1.0;
+    for (tri, &s) in m.triangles.iter().zip(&m.triangle_surface) {
+        if !t.blend.contains(&s) {
+            continue;
+        }
+        let surf = &m.surfaces[s as usize];
+        let p = tri.map(|i| m.positions[i as usize]);
+        let n = unit(cross(sub(p[1], p[0]), sub(p[2], p[0])));
+        for v in p {
+            worst = worst.min(dot(n, surface_normal(surf, v)).abs());
+        }
+    }
+    (worst - 0.05).max(0.5)
 }
 
 /// The area of triangle `p` on the side of each plane `(o, n)` where
@@ -336,10 +524,11 @@ pub fn blend_diags(
             child_tris.extend(triangles(g));
         }
     }
-    let c = conformed(b, &child_tris);
+    let sb = sectioned(b, &child_tris, facts.tolerance);
+    let c = conformed(&sb, &child_tris);
     let made_now = match made(f, &c, 1) {
         Ok(x) => Ok(x),
-        Err(_) => made(f, b, 1),
+        Err(_) => made(f, &sb, 1),
     };
     let blends = match made_now {
         Ok(x) => x,
@@ -380,6 +569,10 @@ pub fn blend_diags(
     for t in &blends.tools {
         let mesh = &t.mesh;
         let (dev, _) = blend_shape(t);
+        // How far a facet of this tool turns from the surface's normal:
+        // a coarse blend's facets turn by up to half its segments' angle,
+        // and a piece of one must still count as lying on the blend.
+        let facing = facing(t).min(0.9);
         let band = 2.0 * dev + tol;
         for (&surf, &src) in t.blend.iter().zip(&t.sources) {
             // What the tool should leave of this blend: all of it, less
@@ -398,8 +591,12 @@ pub fn blend_diags(
                         // Two extended convex blends at a vertex cut each
                         // other along the plane bisecting their edges
                         // (equal sizes): each keeps its own side (7.3).
+                        // Only straight edges meet so.
                         for (j, o) in b.spec.edges.iter().enumerate() {
-                            if j == i {
+                            if j == i
+                                || !matches!(e.path, meshbrep::blend::Path::Line)
+                                || !matches!(o.path, meshbrep::blend::Path::Line)
+                            {
                                 continue;
                             }
                             let far = if o.from == at {
@@ -439,6 +636,16 @@ pub fn blend_diags(
                 continue;
             }
             let surface = &mesh.surfaces[surf as usize];
+            // The tool's own facets on this blend: what the boolean keeps
+            // of the blend are pieces of them, in their planes.
+            let facets: Vec<[V; 3]> = mesh
+                .triangles
+                .iter()
+                .zip(&mesh.triangle_surface)
+                .filter(|(_, s)| **s == surf)
+                .map(|(t, _)| t.map(|i| mesh.positions[i as usize]))
+                .collect();
+            let flat = facts.tolerance * 0.1;
             let mut found = 0.0;
             for p in &tris {
                 let inside = p
@@ -455,17 +662,12 @@ pub fn blend_diags(
                 let n = mul(n, 0.5 / a);
                 let c = mul(add(add(p[0], p[1]), p[2]), 1.0 / 3.0);
                 // Facing along the surface's normal there, not across it
-                // (a face of the child crossing the blend's band).
-                let sn = match surface {
-                    Surface::Cylinder { origin, axis, .. } => {
-                        let q = sub(c, *origin);
-                        unit(sub(q, mul(*axis, dot(q, *axis))))
-                    }
-                    Surface::Sphere { center, .. } => unit(sub(c, *center)),
-                    Surface::Plane { normal, .. } => *normal,
-                    _ => [0.0; 3],
-                };
-                if dot(n, sn).abs() >= 0.9 {
+                // (a face of the child crossing the blend's band); or,
+                // where the tool's facets turn further from the surface
+                // than that allows (a coarse polygon revolved), a piece
+                // of one of its facets.
+                let sn = surface_normal(surface, c);
+                if dot(n, sn).abs() >= facing || facets.iter().any(|f| piece_of(p, f, flat)) {
                     found += a;
                 }
             }

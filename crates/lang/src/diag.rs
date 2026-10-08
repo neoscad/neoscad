@@ -182,9 +182,6 @@ pub enum DiagCode {
     /// NeoSCAD's `fillet_edges()`/`chamfer_edges()` (`--enable fillet`):
     /// an edge selector that does not parse, or is not a selector.
     FilletSelector,
-    /// A fillet or chamfer call whose geometry this version does not
-    /// build yet: the children are rendered unchanged (warning).
-    FilletNotBuilt,
     /// A fillet call matched a different number of edges than its
     /// `expect` (error).
     FilletCount,
@@ -278,7 +275,6 @@ impl DiagCode {
             DiagCode::QueryEmpty => "query-empty",
             DiagCode::QueryUnavailable => "query-unavailable",
             DiagCode::FilletSelector => "fillet-selector",
-            DiagCode::FilletNotBuilt => "fillet-not-built",
             DiagCode::FilletCount => "fillet-count",
             DiagCode::FilletNoEdges => "fillet-no-edges",
             DiagCode::FilletSkipped => "fillet-skipped",
