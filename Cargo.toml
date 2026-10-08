@@ -158,8 +158,10 @@ github-attestations = true
 auto-includes = false
 include = ["LICENSE", "NOTICE", "packaging/licenses/"]
 # crates/cli/wix/main.wxs carries hand-added licence files (see there), so
-# `dist generate` must not rewrite it.
-allow-dirty = ["msi"]
+# `dist generate` must not rewrite it. release.yml has one hand edit too:
+# `host` requires `custom-ci` to have passed (see there), so a failed CI
+# gate can't publish an empty release; re-apply it after `dist generate`.
+allow-dirty = ["ci", "msi"]
 
 # Linux binaries are built in manylinux_2_28 containers so they run on
 # glibc 2.28 and later (Debian 10, RHEL 8); built on the runner's Ubuntu
