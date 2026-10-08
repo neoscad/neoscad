@@ -101,6 +101,19 @@ pub struct Console<W: Write> {
     /// Follow each located diagnostic with its source line and a caret
     /// under the span ([`Console::rich`]).
     rich: bool,
+    /// Errors of `fillet_edges()`/`chamfer_edges()` calls seen
+    /// ([`Console::failed_fillets`]).
+    fillet_errors: u32,
+}
+
+/// Whether an error is a failed `fillet_edges()`/`chamfer_edges()` call:
+/// a `fillet-*` code, or an argument error the call reported (all its
+/// messages start with the module's name).
+pub fn is_fillet_error(severity: Severity, code: DiagCode, message: &str) -> bool {
+    severity == Severity::Error
+        && (code.as_str().starts_with("fillet-")
+            || message.starts_with("fillet_edges(")
+            || message.starts_with("chamfer_edges("))
 }
 
 /// A line the console printed, with the tool view of it: what
@@ -215,7 +228,17 @@ impl<W: Write> Console<W> {
             paths: Vec::new(),
             records: None,
             rich: false,
+            fillet_errors: 0,
         }
+    }
+
+    /// How many errors of fillet and chamfer calls this console was given,
+    /// printed or not (repeats and `--quiet` filter lines, not failures).
+    /// A failed call leaves its child sharp, so an export of the model
+    /// exits non-zero (`docs/fillets.md`, section 18, decision 2): an agent
+    /// must not ship a sharp part believing it rounded.
+    pub fn failed_fillets(&self) -> u32 {
+        self.fillet_errors
     }
 
     /// Keep every printed line with its tool view ([`Logged`]), to be
@@ -401,6 +424,9 @@ impl<W: Write> Console<W> {
 
     /// Print a front-end diagnostic (lexer, parser, include messages).
     pub fn diagnostic(&mut self, d: &Diagnostic, sources: &SourceMap, cwd: &Path) {
+        if is_fillet_error(d.severity, d.code, &d.message) {
+            self.fillet_errors += 1;
+        }
         let mut line = format!("{}: {}", d.severity.openscad_label(), d.message).into_bytes();
         if let Some(span) = d.span {
             let base = match d.base {
@@ -448,6 +474,13 @@ impl<W: Write> Console<W> {
 
 impl<W: Write> Output for Console<W> {
     fn message(&mut self, m: &Message<'_>) {
+        if is_fillet_error(
+            m.diag.severity,
+            m.diag.code,
+            &String::from_utf8_lossy(m.text),
+        ) {
+            self.fillet_errors += 1;
+        }
         let mut line = Vec::with_capacity(m.text.len() + 48);
         line.extend_from_slice(m.diag.severity.openscad_label().as_bytes());
         line.extend_from_slice(b": ");

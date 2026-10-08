@@ -399,6 +399,32 @@ fn mul(a: &Matrix, b: &Matrix) -> Matrix {
     r
 }
 
+/// A blend tool with its blend triangles as planar facets: the export of
+/// a fillet call with `$fn` set. Each triangle is its own plane record;
+/// reconstruction merges the two of each quad of the arc.
+fn faceted_blend(t: &meshbrep::blend::Tool) -> TaggedMesh {
+    let mut m = t.mesh.clone();
+    for k in 0..m.triangles.len() {
+        if !t.blend.contains(&m.triangle_surface[k]) {
+            continue;
+        }
+        let [a, b, c] = m.triangles[k].map(|i| m.positions[i as usize]);
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        m.surfaces.push(Surface::Plane {
+            origin: a,
+            normal: unit(n),
+        });
+        m.triangle_surface[k] = (m.surfaces.len() - 1) as u32;
+    }
+    m
+}
+
 /// A transform node whose matrix is finite but flattens space (a zero
 /// scale): its children have no volume however they are built.
 fn flattening(n: &Node) -> bool {
@@ -617,7 +643,20 @@ impl Walk<'_> {
                 continue;
             }
             let w = stack.pop().expect("a waiting node");
-            let r = self.combine(w.op, w.kids)?;
+            let mut r = self.combine(w.op, w.kids)?;
+            // A fillet's blends, except on the node a traced walk selects
+            // for: that walk is of its child.
+            if matches!(w.n.kind, NodeKind::Fillet(_)) && !(self.trace && std::ptr::eq(w.n, top)) {
+                if self.trace {
+                    let child = stack.first().map(|p| (p.next - 1) as u32);
+                    let part = stack.iter().rev().find_map(|p| match &p.n.kind {
+                        NodeKind::Part { name } => Some(name.clone()),
+                        _ => None,
+                    });
+                    self.here = (child, part);
+                }
+                r = self.fillet(w.n, &w.m, r)?;
+            }
             // Then on with the parent's next child.
             match stack.last_mut() {
                 None => return Ok(r),
@@ -640,11 +679,9 @@ impl Walk<'_> {
                 Some((OpType::Intersect, *m))
             }
             NodeKind::Csg(CsgOp::Difference) => Some((OpType::Subtract, *m)),
-            // A traced walk selects on a fillet's child, whose own nested
-            // fillets are still the union of their children (their blends
-            // are not built). The STEP export leaves them to the normal
-            // render, as before.
-            NodeKind::Fillet(_) if self.trace => Some((OpType::Add, *m)),
+            // A fillet: its children's union, then its blend tools
+            // ([`Walk::fillet`]), tagged with their exact surfaces.
+            NodeKind::Fillet(_) => Some((OpType::Add, *m)),
             NodeKind::Transform { matrix, .. } => {
                 let next = mul(m, matrix);
                 let d = det3(&next);
@@ -658,6 +695,76 @@ impl Walk<'_> {
         }
     }
 
+    /// A fillet node's blends (`docs/fillets.md`, section 6.4) on its
+    /// children's union `r`, under `m`: the same plan's tools as the
+    /// normal render's, with arcs of [`Walk::mult`] times the segments and
+    /// every triangle tagged with its exact surface (cylinder, plane,
+    /// sphere), so the export reconstructs true blends. With `$fn` set on
+    /// the call, the arcs are kept as the polygon, as for any curve.
+    fn fillet(&mut self, n: &Node, m: &Matrix, r: Res) -> Result<Res, Unsupported> {
+        let Res::Solid(child) = r else {
+            return Ok(r);
+        };
+        if child.is_empty() {
+            return Ok(Res::Solid(child));
+        }
+        let blends =
+            match crate::fillet::blends(self.renderer, n, self.keys, self.opts, self.mult, None) {
+                Ok(Some(b)) => b,
+                Ok(None) => return Ok(Res::Solid(child)),
+                Err(_) => return Err(Unsupported::interrupted()),
+            };
+        let scale = similarity_scale(m);
+        let base = self.surfaces.len();
+        let mut adds = vec![Res::Solid(child)];
+        let mut subs = Vec::new();
+        for t in &blends.tools {
+            let placed = if blends.explicit_fn {
+                self.place(&faceted_blend(t), m, scale)?
+            } else {
+                self.place(&t.mesh, m, scale)?
+            };
+            if t.add {
+                adds.push(placed);
+            } else {
+                subs.push(placed);
+            }
+        }
+        self.record(n, base);
+        let tools = blends.tools.len();
+        if blends.explicit_fn {
+            self.note(
+                SubstitutionKind::Polygon,
+                n,
+                format!(
+                    "keeps its blends' arcs as polygons because $fn is set ({tools} tool{})",
+                    if tools == 1 { "" } else { "s" }
+                ),
+            );
+        } else if let Some(s) = scale {
+            self.normal_sagitta = self.normal_sagitta.max(blends.sagitta * s);
+            self.normal_volume_bound += blends.area * blends.sagitta * s * s * s;
+            self.note(
+                SubstitutionKind::Exact,
+                n,
+                format!(
+                    "is exported with exact blends ({tools} tool{}), not the polygonal arcs of the mesh ($fn is not set)",
+                    if tools == 1 { "" } else { "s" }
+                ),
+            );
+        } else {
+            self.note(
+                SubstitutionKind::Faceted,
+                n,
+                "exports its blends as planar facets: a non-uniform scale or shear makes them elliptic".into(),
+            );
+        }
+        let joined = self.combine(OpType::Add, adds)?;
+        let mut parts = vec![joined];
+        parts.extend(subs);
+        self.combine(OpType::Subtract, parts)
+    }
+
     /// [`Walk::leaf`], recording `n` as the origin of every surface it
     /// adds to the table.
     fn leaf_traced(&mut self, n: &Node, m: &Matrix) -> Result<Res, Unsupported> {
@@ -666,6 +773,13 @@ impl Walk<'_> {
         // Marks for a primitive that was delegated after all are void.
         self.pending_polygons.clear();
         let r = r?;
+        self.record(n, base);
+        Ok(r)
+    }
+
+    /// Records `n` as the origin of the surfaces from `base` on (and, in a
+    /// traced walk, where they lie: [`Walk::here`]).
+    fn record(&mut self, n: &Node, base: usize) {
         if self.trace {
             let (child, part) = self.here.clone();
             let leaf = self.leaves;
@@ -694,7 +808,6 @@ impl Walk<'_> {
             }
             self.surface_origin.resize(self.surfaces.len(), o);
         }
-        Ok(r)
     }
 
     /// A node that is not an operation on its children (a primitive, or

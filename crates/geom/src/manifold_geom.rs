@@ -579,6 +579,79 @@ impl ManifoldGeometry {
         }
     }
 
+    /// A closed, oriented mesh built elsewhere (a fillet's blend tool,
+    /// `meshbrep::blend`) as one new original `id`, from a block reserved
+    /// in tree order. Its surface tags are not kept: the normal render has
+    /// no use for them. Empty if the mesh is not a 2-manifold.
+    pub fn from_tagged(mesh: &meshbrep::TaggedMesh, id: u32) -> ManifoldGeometry {
+        let n = mesh.triangles.len() as u64 * 3;
+        let gl = MeshGL64 {
+            num_prop: 3,
+            vert_properties: mesh.positions.iter().flatten().copied().collect(),
+            tri_verts: mesh
+                .triangles
+                .iter()
+                .flat_map(|t| t.map(u64::from))
+                .collect(),
+            run_index: vec![0, n],
+            run_original_id: vec![id],
+            ..Default::default()
+        };
+        let m = Manifold::from_mesh_gl64(&gl);
+        if m.status() != Error::NoError {
+            return ManifoldGeometry::default();
+        }
+        ManifoldGeometry {
+            manifold: m,
+            original_ids: BTreeSet::from([id]),
+            id_to_color: BTreeMap::new(),
+            subtracted: BTreeSet::new(),
+            own_id: None,
+            parts: BTreeMap::new(),
+        }
+    }
+
+    /// After a fillet's tools (originals `tools`) were added to and
+    /// subtracted from `child_ids`: their faces are the part's own surface,
+    /// not cut faces, so they are not drawn as a `difference()`'s cuts
+    /// are; and when every face of the child had one colour, or belonged
+    /// to one `part()`, the blends take it. (Blends between faces of
+    /// different colours or parts get neither: `docs/followups.md`,
+    /// "Fillets and chamfers".)
+    pub fn adopt_tools(&mut self, child_ids: &BTreeSet<u32>, tools: &[u32]) {
+        for id in tools {
+            self.subtracted.remove(id);
+        }
+        // The same for the part (`--enable part`) the faces belong to.
+        let mut parts = child_ids.iter().map(|id| self.parts.get(id));
+        if let Some(Some(first)) = parts.next() {
+            let first = first.clone();
+            if parts.all(|p| p == Some(&first)) {
+                for &id in tools {
+                    self.parts.insert(id, first.clone());
+                }
+            }
+        }
+        let mut colours = child_ids.iter().map(|id| self.id_to_color.get(id));
+        let Some(Some(first)) = colours.next() else {
+            return;
+        };
+        let first = *first;
+        if colours.all(|c| c.is_some_and(|c| c.key() == first.key())) {
+            for &id in tools {
+                self.id_to_color.insert(id, first);
+            }
+        }
+    }
+
+    /// The original IDs of the solid's own faces (not the cut faces of
+    /// what a `difference()` in it subtracted).
+    pub fn own_face_ids(&self) -> BTreeSet<u32> {
+        let mut ids = self.ids();
+        ids.retain(|id| !self.subtracted.contains(id));
+        ids
+    }
+
     /// [`Self::to_original`] for a solid that must not keep the ID it was
     /// built with: a solid from [`Self::from_built`] already is one
     /// original, and `to_original` would keep its ID, so it is retagged

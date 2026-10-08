@@ -126,14 +126,9 @@ fn on_a_call_is_a_node_printed_as_the_call() {
         o.csg,
         "fillet_edges(r = 2, edges = \"|z and >x\", except = undef, expect = undef, $fn = 0, $fa = 12, $fs = 2) {\n\tcube(size = [10, 10, 10], center = false);\n}\n\n"
     );
-    // The geometry is not built yet, and the call says so.
-    let w = o.only(Severity::Warning);
-    assert_eq!(w.len(), 1, "{:?}", o.lines());
-    assert_eq!(w[0].code, DiagCode::FilletNotBuilt);
-    assert_eq!(
-        o.at(w[0]),
-        "fillet_edges(r = 2, edges = \"|Z  AND >x\") cube(10);"
-    );
+    // A call that checks out says nothing here: what it selects and
+    // builds is geometry's to report.
+    assert!(o.only(Severity::Warning).is_empty(), "{:?}", o.lines());
 
     let o = run(
         "chamfer_edges(1, [[0, 0, 1], \"%circle\"], except = [1, 0, 1], expect = 4, $fn = 8) cube(10);",

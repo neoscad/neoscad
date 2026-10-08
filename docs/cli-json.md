@@ -514,7 +514,7 @@ as on the bed), at most 10 findings per code.
               "max_overhang": 45.0, "bed_tolerance": 0.05,
               "max_findings": 10},
  "model": MODEL, "parts": [PART, ...],
- "counts": {"errors": int, "warnings": int, "info": int},
+ "counts": {"errors": int, "warnings": int, "info": int, "fillet_errors": int},
  "findings": [FINDING, ...], "truncated": {"code": int, ...},
  "timings_ms": {"evaluate", "geometry",
                 "check": {"manifold", "components", "walls",
@@ -543,6 +543,11 @@ as on the bed), at most 10 findings per code.
   (`polyhedron-*`) first, since they cause others, then errors. `value` is what was
   measured (mm, mm², mm³ or degrees, as the message says) and `limit`
   what it broke. Numbers are rounded to 0.1 µm.
+- `counts.fillet_errors` counts the errors of `fillet_edges()` and
+  `chamfer_edges()` calls (`--enable fillet`): each left its child
+  sharp, so they are in `errors` too and fail the check, though they
+  are diagnostics rather than findings (`docs/fillets.md`, section 18,
+  decision 2).
 - `counts` are before truncation; `truncated` counts, per code, the
   findings past the limit.
 - `sketches` (only when the model has constrained sketches, `--enable
@@ -567,8 +572,10 @@ as on the bed), at most 10 findings per code.
   iteration). `FILLET`: `{"index": int (from 1), "module":
   "fillet_edges"|"chamfer_edges", "r"|"d": number, "selector": string,
   "except": string|null, "expect": int|null, "file", "line", "span",
-  "status": "selected" | "no-edges" | "count" | "unsupported" |
-  "no-brep" | "2d" | "empty", "matched": int, "edges": [EDGE, ...],
+  "status": "built" | "selected" | "no-edges" | "count" | "unsupported"
+  | "not-built" | "too-large" | "overlap" | "unsupported-vertex" |
+  "failed" | "no-brep" | "2d" | "empty", "matched": int, "edges":
+  [EDGE, ...],
   "edges_omitted"?: int, "unsupported": int, "skipped": [{"reason":
   "polygon seam"|"tangent"|"faceted", "count", "module"?, "line"?},
   ...], "selectable": int, "bbox": {"min", "max"}, "codes": [code,
@@ -583,14 +590,20 @@ as on the bed), at most 10 findings per code.
   "axis"? and "radius"? (a circle's), "faces": [kind, kind],
   "children": [[int, ...], [int, ...]] (per face, the call's children
   it came from), "parts"?: [[name, ...], [name, ...]], "status":
-  "selected"|"unsupported"}`, in the order the selection numbers them.
+  "built"|"selected"|"unsupported"}`, in the order the selection
+  numbers them.
   `pin` is the edit that writes `expect = matched` into the call (the
   language server's "Pin count"), absent when `expect` already says so
   or nothing was selected. Numbers are rounded to 1e-4. The text report
   has a line per call (`fillet_edges at line 4: 4 edges (4 line,
-  convex, 90°), r 2, edges = "|z"`). The blends themselves are not built
-  yet (stage F2): the model is the children's union, and each call warns
-  `fillet-not-built`.
+  convex, 90°), r 2, edges = "|z" [built]`). Straight edges are built
+  (stage F2: `built`, and their edges `built`); a call that selects a
+  circle or an arc (stage F3's) leaves its child unchanged with a
+  `fillet-not-built` warning (`not-built`). A call refused before any
+  boolean (`too-large`, `overlap`, `unsupported-vertex`, `failed`) is
+  an error that leaves its child sharp; the first three hints carry an
+  edit: the largest size that fits, or the call split into two nested
+  ones, concave edges first.
 - `timings_ms.check.cuts` is the `cut-away` and `cuts-nothing` stage,
   which runs on the node tree right after the render, before the mesh
   checks; `check.total` does not include it.
@@ -1095,3 +1108,10 @@ have them.
   --fillet` and `snapshot --fillet` with their `fillet` object, and the
   diagnostic codes `fillet-count`, `fillet-no-edges`, `fillet-skipped`,
   `fillet-unsupported-edge`, `fillet-no-brep` and `fillet-2d`. Additive.
+- Fillets, stage F2: the statuses `built`, `not-built`, `too-large`,
+  `overlap`, `unsupported-vertex` and `failed` (calls and edges), the
+  codes `fillet-too-large`, `fillet-overlap`,
+  `fillet-unsupported-vertex`, `fillet-interrupted` and
+  `fillet-failed`, and `check`'s `counts.fillet_errors`, which also
+  count in `errors` and the exit code. Additive, except that a check
+  with a failed fillet call now fails.

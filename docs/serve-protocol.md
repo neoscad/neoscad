@@ -169,7 +169,7 @@ Params: anything (ignored). Result:
    "incremental_edits": true,
    "snapshot": true, "check": true, "measure": true,
    "format": true, "docs": true, "test": true,
-   "features": ["part", "sketch", "query", "exact"]}}
+   "features": ["part", "sketch", "query", "exact", "fillet"]}}
 ```
 
 `features` lists the NeoSCAD extensions (`enable` names) the server

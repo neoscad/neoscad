@@ -52,6 +52,7 @@
 //! assert!(step.contains("CYLINDRICAL_SURFACE"));
 //! ```
 
+pub mod blend;
 mod bspline;
 mod curve;
 mod edges;

@@ -123,7 +123,7 @@ fn l_bracket() {
     );
     assert!(
         p.iter()
-            .all(|p| p.diags.is_empty() && p.status == Status::Selected)
+            .all(|p| p.diags.is_empty() && p.status == Status::Built)
     );
     // The same edge at another thickness and width: provenance does not
     // depend on the sizes.
@@ -135,9 +135,9 @@ fn l_bracket() {
 }
 
 /// 12.2, the box: the vertical edges, then the top outline. The inner
-/// call's blends are not built yet (stage F2), so the outer call selects
-/// on the unrounded box: four lines, not the chain of lines and arcs it
-/// will be.
+/// call's blends are built (stage F2), so the outer call selects on the
+/// rounded box: the chain of four lines and four quarter circles, whose
+/// arcs are stage F3's (so the outer call is not built yet).
 #[test]
 fn rounded_box() {
     let p = plans(
@@ -146,10 +146,18 @@ fn rounded_box() {
     );
     assert_eq!(
         listing(&p[0]),
-        "line (convex, 90°) at [0, 15, 20], 30 long translational\n\
-         line (convex, 90°) at [20, 0, 20], 40 long translational\n\
-         line (convex, 90°) at [20, 30, 20], 40 long translational\n\
-         line (convex, 90°) at [40, 15, 20], 30 long translational"
+        "line (convex, 90°) at [0, 15, 20], 20 long translational\n\
+         line (convex, 90°) at [20, 0, 20], 30 long translational\n\
+         line (convex, 90°) at [20, 30, 20], 30 long translational\n\
+         line (convex, 90°) at [40, 15, 20], 20 long translational\n\
+         circle (convex, 90°) at [1.8169, 1.8169, 20], 7.854 long rotational\n\
+         circle (convex, 90°) at [1.8169, 28.1831, 20], 7.854 long rotational\n\
+         circle (convex, 90°) at [38.1831, 1.8169, 20], 7.854 long rotational\n\
+         circle (convex, 90°) at [38.1831, 28.1831, 20], 7.854 long rotational"
+    );
+    assert_eq!(
+        (p[0].status, p[1].status),
+        (Status::NotBuilt, Status::Built)
     );
     assert_eq!(
         listing(&p[1]),
@@ -162,8 +170,8 @@ fn rounded_box() {
 
 /// 12.2, the lid: where the lip meets the lid. `child(0, 1)` is both of
 /// the lip's walls where they stand on the lid, the outer outline the
-/// design describes and the inner one inside the lip (eight lines while
-/// the lip's own corner fillets are not built).
+/// design describes and the inner one inside the lip: with the lip's own
+/// corner fillets built, each a chain of four lines and four arcs.
 #[test]
 fn lid_lip() {
     let p = plans(
@@ -177,15 +185,18 @@ fn lid_lip() {
          }",
     );
     let lid = &p[0];
-    assert_eq!(lid.selected.len(), 8);
+    assert_eq!(lid.selected.len(), 16);
     let f = lid.facts.as_ref().unwrap();
     for &i in &lid.selected {
         let e = &f.edges[i];
-        assert_eq!(
-            (e.sense, e.class, e.center[2]),
-            (Sense::Concave, Class::Translational, 3.0)
-        );
+        assert_eq!((e.sense, e.center[2]), (Sense::Concave, 3.0));
     }
+    let lines = lid
+        .selected
+        .iter()
+        .filter(|&&i| f.edges[i].class == Class::Translational)
+        .count();
+    assert_eq!(lines, 8);
     // The outer outline alone: the lip's outside, at its full size.
     let outer = one(
         "fillet_edges(r = 1, edges = \"child(0, 1) and not box(1, 1, 0, 39, 29, 10)\") {
@@ -388,7 +399,7 @@ fn faceted_regions_and_tangent_edges_are_skipped() {
 #[test]
 fn expect_pins_the_count() {
     let p = one("fillet_edges(r = 1, edges = \"|z\", expect = 4) cube(10);");
-    assert_eq!((p.status, codes(&p)), (Status::Selected, vec![]));
+    assert_eq!((p.status, codes(&p)), (Status::Built, vec![]));
     let p = one("fillet_edges(r = 1, edges = \"|z\", expect = 3) cube(10);");
     assert_eq!(
         (p.status, codes(&p)),
@@ -413,7 +424,9 @@ fn unsupported_edges_warn_under_all_and_fail_when_named() {
     // A plane cutting a cylinder obliquely: an ellipse.
     let body = "difference() { cylinder(r = 5, h = 10); translate([0, 0, 6]) rotate([30, 0, 0]) translate([-10, -10, 0]) cube(20); }";
     let p = one(&format!("fillet_edges(r = 1) {body}"));
-    assert_eq!(p.status, Status::Unsupported);
+    // The ellipse is left sharp with a warning; the rest of "all"
+    // includes the cylinder's rim, a circle, so nothing is built yet.
+    assert_eq!(p.status, Status::NotBuilt);
     let d = p
         .diags
         .iter()

@@ -6,10 +6,9 @@
 //! instantiated, `child(i)` indices are checked against them and `@name`
 //! anchors resolved onto the node. What the node holds is everything the
 //! result will depend on, so the `.csg` label and the cache key (one
-//! writer, `crate::dump`) cover it. The geometry is not built yet (the
-//! selection is, in `geom::fillet`): the renderer passes the children
-//! through as their union, and the call says so with a `fillet-not-built`
-//! warning, so nobody takes a sharp part for a rounded one.
+//! writer, `crate::dump`) cover it. Selection and the blends are
+//! geometry's (`geom::fillet`), and so are the messages about them, which
+//! need the child's shape.
 //!
 //! A call whose arguments are wrong is an error (`docs/fillets.md`,
 //! section 18, decision 2): it reports at the argument, with the column
@@ -224,8 +223,7 @@ impl<'a> Evaluator<'a> {
     /// the selectors say about the children is checked (`child(i)` in
     /// range, `@name` an anchor of theirs) and the anchors are resolved
     /// onto the node. A problem is an error at the call, which then
-    /// becomes a plain group, as for a bad argument; otherwise the call
-    /// says that its blends are not built yet.
+    /// becomes a plain group, as for a bad argument.
     pub(crate) fn fillet_close(&mut self, node: &mut Node) {
         let NodeKind::Fillet(f) = &node.kind else {
             return;
@@ -316,19 +314,6 @@ impl<'a> Evaluator<'a> {
             return;
         };
         f.anchors = resolved;
-        let t = format!(
-            "{}(): edge {} is not built yet in this version of NeoSCAD; \
-             the children are rendered unchanged",
-            f.kind.module(),
-            if f.kind == FilletKind::Fillet {
-                "rounding"
-            } else {
-                "chamfering"
-            }
-        );
-        if let Some(loc) = loc {
-            self.warn(loc, DiagCode::FilletNotBuilt, t);
-        }
     }
 
     /// An `edges` or `except` value: a selector string, a BOSL2 direction

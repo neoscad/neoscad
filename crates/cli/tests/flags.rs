@@ -403,6 +403,47 @@ fn gpu_frameworks_are_not_initialized_at_launch() {
 /// file); with it the file is STEP with exact surfaces, the substitutions
 /// are reported at their source lines, and `--format json` carries the
 /// export's numbers. A failed export writes no file.
+/// A fillet call that fails leaves its child sharp; an export of the
+/// model writes the file and exits 1 (`docs/fillets.md`, section 18,
+/// decision 2), for an argument error, a selection error and a geometric
+/// one alike. One that builds exits 0, its STEP export with true
+/// cylinders.
+#[test]
+fn a_failed_fillet_fails_the_export() {
+    let d = scratch("fillet");
+    for src in [
+        "fillet_edges(r = 3, edges = \"|y\") cube([20, 10, 4]);",
+        "fillet_edges(r = -1) cube(10);",
+        "fillet_edges(r = 1, edges = \"|z\", expect = 3) cube(10);",
+    ] {
+        std::fs::write(d.join("a.scad"), format!("{src}\n")).unwrap();
+        let _ = std::fs::remove_file(d.join("a.stl"));
+        let out = neoscad(&d, &["--enable", "fillet", "-o", "a.stl", "a.scad"]);
+        assert_eq!(out.status.code(), Some(1), "{src}: {}", text(&out.stderr));
+        assert!(d.join("a.stl").exists(), "{src}: the file is written");
+        assert!(
+            text(&out.stderr).contains("ERROR: fillet_edges():"),
+            "{src}: {}",
+            text(&out.stderr)
+        );
+    }
+    std::fs::write(
+        d.join("a.scad"),
+        "fillet_edges(r = 2, edges = \"|z\") cube(10);\n",
+    )
+    .unwrap();
+    let out = neoscad(
+        &d,
+        &[
+            "--enable", "fillet", "--enable", "exact", "-o", "a.step", "a.scad",
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let step = std::fs::read_to_string(d.join("a.step")).unwrap();
+    assert_eq!(step.matches("=CYLINDRICAL_SURFACE(").count(), 4);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[test]
 fn step_export_needs_the_exact_extension() {
     let d = scratch("step");

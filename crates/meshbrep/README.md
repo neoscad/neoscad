@@ -163,6 +163,23 @@ be valid, match its closed-form volume to 1e-6, and write the same bytes
 twice. `oracle/` builds an OCCT read-back checker for an optional test
 (`MESHBREP_OCCT_CHECK`); OCCT is a test tool only, never a dependency.
 
+## Blend tools
+
+`blend::tools(&spec, segments)` makes the solids that round or chamfer
+straight edges when a mesh kernel subtracts them (convex edges) or adds
+them (concave ones): for each edge between two planes at any angle, or a
+plane and a parallel cylinder, or two parallel cylinders, a constant-radius
+fillet (a cylinder blend) or an equal-distance chamfer (a plane), swept
+between end planes (a face the edge runs into, a mitre, the plane across a
+tangent continuation) or run on into the air; and sphere patches where
+three filleted edges meet between three planes. Every triangle is tagged
+with its exact surface, and the arcs have vertices exactly on the tangent
+lines, so the boolean's result reconstructs with true blend faces.
+`blend::section` gives an edge's cross-section (centre, tangent points,
+how far into each face) for checks before anything is built. The edges of
+a sphere corner and its patch come out as one solid, so no two tools share
+a face.
+
 ## Licence
 
 Licensed under either of

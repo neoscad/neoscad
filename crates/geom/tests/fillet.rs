@@ -48,23 +48,27 @@ fn render(src: &str) -> String {
     }
 }
 
+/// A call that builds nothing renders its children unchanged: one that
+/// selects circles (stage F3's), one that matches nothing, one refused
+/// before any boolean, and one whose arguments are wrong (a group). One
+/// that builds does not.
 #[test]
-fn a_call_renders_its_children_unchanged() {
+fn a_call_that_builds_nothing_renders_its_children_unchanged() {
     let children = "cube(10); translate([5, 5, 5]) cylinder(r = 3, h = 10);";
     let plain = render(&format!("union() {{ {children} }}"));
-    assert_eq!(
-        plain,
-        render(&format!("fillet_edges(r = 1) {{ {children} }}"))
-    );
-    assert_eq!(
+    for call in [
+        "fillet_edges(r = 1)",
+        "chamfer_edges(d = 1, edges = \"%circle\")",
+        "fillet_edges(r = 1, edges = \"|x and >z and <z\")",
+        "fillet_edges(r = 20, edges = \"|z and <x\")",
+        "fillet_edges(r = -1)",
+    ] {
+        assert_eq!(plain, render(&format!("{call} {{ {children} }}")), "{call}");
+    }
+    assert_ne!(
         plain,
         render(&format!(
-            "chamfer_edges(d = 1, edges = \"|z\") {{ {children} }}"
+            "chamfer_edges(d = 1, edges = \"|z and <x\") {{ {children} }}"
         ))
-    );
-    // A failed call is a group: the same.
-    assert_eq!(
-        plain,
-        render(&format!("fillet_edges(r = -1) {{ {children} }}"))
     );
 }

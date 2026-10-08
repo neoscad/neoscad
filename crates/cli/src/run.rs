@@ -924,6 +924,13 @@ fn render_frame<W: Write>(
     if !crate::summary::emit(job.summary, &facts, con) {
         return EXIT_ERROR;
     }
+    // A fillet or chamfer call that failed left its child sharp: the files
+    // are written (so the model can be looked at), but the run fails
+    // (`docs/fillets.md`, section 18, decision 2), so a script or an agent
+    // cannot ship the sharp part believing it rounded.
+    if con.failed_fillets() > 0 {
+        return EXIT_ERROR;
+    }
     0
 }
 

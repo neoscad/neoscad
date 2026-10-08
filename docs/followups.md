@@ -2598,33 +2598,61 @@ pass's leftovers first, then stage 1b's, then the crate's.
   not happened in the test models.
 
 ## Fillets and chamfers
-Stages F0 and F1 of `docs/fillets.md` are built: `--enable fillet`, the
-two builtins, the selector parser (`eval::fillet::selector`),
-`NodeKind::Fillet`, and the plan without geometry (`geom::fillet`: the
-child's B-rep, edge facts, selection; `session::fillets`: diagnostics
-and the `check`/`measure`/`snapshot` reports; "Pin count" in the
-language server). What they leave, beyond the later stages themselves:
-- **A failed call does not make an export exit non-zero yet** (decision
-  2). Argument and selector errors and F1's `fillet-count`,
-  `fillet-unsupported-edge`, `fillet-no-brep` and `fillet-2d` are
-  `ERROR` lines, but `run.rs` decides the exit code from fatal errors
-  only, and `check`'s `counts`/`exit_code` count its own findings, not
-  diagnostics. F2's geometry failures need the same path, so wire them
-  all then (`crates/cli/src/run.rs`, `render_frame` and `export_step`,
-  and `check`'s status).
-- **`fillet-not-built`** is a temporary code: retire it (or keep it only
-  for edge classes still unbuilt, which `fillet-unsupported-edge` covers)
-  when F2 lands, and make `Extension::implemented()` true for `fillet`
-  then, so `serve` advertises it.
-- **The STEP export walk** treats the node as a leaf it cannot see into
-  (`geom::exact::walk::Walk::branch` returns `None` unless the walk is
-  the traced one selection uses), so a filleted model's STEP export
-  facets that subtree today; F2 adds the walk.
+Stages F0, F1 and F2 of `docs/fillets.md` are built: `--enable fillet`,
+the two builtins, the selector parser (`eval::fillet::selector`),
+`NodeKind::Fillet`, the plan (`geom::fillet`: the child's B-rep, edge
+facts, selection; `session::fillets`: diagnostics and the
+`check`/`measure`/`snapshot` reports; "Pin count" in the language
+server), and the blends of straight edges (`meshbrep::blend`'s tools,
+`geom::fillet::build`'s ends and checks, the normal render's booleans,
+the STEP walk, the check after the boolean, exit codes; section 15.3).
+What they leave, beyond the later stages themselves:
+- **`fillet-not-built` whole-call**: a call that selects any circle or
+  arc builds nothing until F3, so `fillet_edges(r = 1)` on a part with a
+  hole is unchanged (with the warning); `and %line` builds the lines.
+  F3 retires the code.
+- **Colour and part of blends between different faces** (6.4: "the
+  colour and part of the first of their two faces"): a blend takes the
+  child's colour or part only when every face of the child has the same
+  one (`ManifoldGeometry::adopt_tools`); otherwise it has neither. Needs
+  the original ID of the mesh face each tool touches.
+- **Chamfers along cylinders in the mesh** keep the exact cylinder: the
+  normal render conforms a fillet's cylinder faces to the facet of
+  OpenSCAD's polygon its tangent touches (`fillet::result::conformed`),
+  but not a chamfer's, which leaves a sliver of the facet standing by
+  the chamfer's edge (at most the polygon's sagitta).
+- **Mitred pairs at unequal angles** (a boss whose two sides meet the
+  plate at different angles) have cross-sections that do not meet point
+  for point in the mitre, so they stay two tools with coincident caps,
+  which a rotation can round into slivers (`meshbrep::blend`, `tools`,
+  the mitre joining). Equal angles are joined into one solid.
+- **A hole inside a blend's strip** is `fillet-too-large` (the check
+  casts across the face and meets the hole's loop), where section 8 had
+  it as `fillet-interrupted`; tell an inner loop the strip passes
+  around from a boundary it crosses.
+- **Sphere patches' volumes**: `meshbrep::measure` puts the box corner
+  (golden `box_corner`) 4.4e-9 relative off its closed form and OCCT
+  1.2e-8 the other way, against about 1e-12 elsewhere; the hand-built
+  prototype measured the same in OCCT. Probably quadrature on a trimmed
+  sphere with a pole edge; worth a look at `measure`'s sphere path.
 - **`Limits::fillet_edges`** (section 10: edges selected per evaluation,
-  100,000 under `Limits::AGENT`) is not added. Selection is linear in
-  the edges and the B-rep is built under the request's time limit and
-  cancellation, so nothing runs away today; the limit matters once F2
-  generates a tool per edge.
+  100,000 under `Limits::AGENT`) is not added. Tools count against the
+  triangle limit through the result, and the checks are linear in edges
+  times the faces' boundary edges, but a huge selection is not stopped
+  before its tools are generated.
+- **Renders inside a render**: the normal render of a fillet node asks
+  for its child's facts, whose export render renders the children (and
+  any subtree it delegates) through `Renderer::render` again while the
+  outer render is running. Those hit the cache in the cases tried, but a
+  nested render whose ID block overflows (more than 64 colours in one
+  mesh) clears the renderer's caches mid-render
+  (`Renderer::render`'s retry). Give the nested renders the outer
+  render's blocks, or compute the facts before the render.
+- **Non-special rotations differ across platforms**: `io::trig` uses the
+  platform's `sin`/`cos` (as OpenSCAD's `degree_trig.cc` does), so a
+  filleted part under `rotate([10, 20, 30])` exports different STEP
+  bytes in wasm32 than natively (the general H2 item under "WASM");
+  the wasm-check case uses multiples of 90°.
 - **The facts cache ignores the limits.** `geom::fillet`'s cache on the
   renderer is keyed by the children alone. A child whose export render
   (finer than the normal one, up to 4 times the segments after a

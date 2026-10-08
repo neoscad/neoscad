@@ -308,7 +308,13 @@ pub fn run_brep(src: &[u8]) -> String {
 
     let name = String::from_utf8_lossy(src).trim().to_string();
     if let Some(scad) = name.strip_prefix("scad:") {
-        return run_exact(scad);
+        return run_exact(scad, eval::Extensions::NONE);
+    }
+    // Fillets' blend tools (`docs/fillets.md`, stage F2) through the same
+    // export: their arcs' sines and cosines are `libm`'s, so the STEP
+    // text hashes the same in wasm32.
+    if let Some(scad) = name.strip_prefix("fillet-step:") {
+        return run_exact(scad, eval::Extensions::NONE.with(eval::Extension::Fillet));
     }
     if let Some(scad) = name.strip_prefix("fillet:") {
         return run_fillet(scad);
@@ -404,7 +410,7 @@ pub fn run_brep(src: &[u8]) -> String {
 /// reconstruction, the checks and the writer. The STEP text's hash must
 /// be the same in wasm32 as natively, so the export render's ID and
 /// surface numbering and the checks' arithmetic are platform-independent.
-fn run_exact(scad: &str) -> String {
+fn run_exact(scad: &str, extensions: eval::Extensions) -> String {
     use sha2::{Digest, Sha256};
     let mut text = scad.as_bytes().to_vec();
     text.extend_from_slice(b"\n\x03\n");
@@ -412,15 +418,12 @@ fn run_exact(scad: &str) -> String {
     let mut out: Vec<u8> = Vec::new();
     let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(MemFs::new());
     let mut con = eval::Console::new(&mut out, PathBuf::from(DOC_DIR), fs.clone(), false);
+    let opts = eval::Options {
+        extensions,
+        ..eval::Options::default()
+    };
     let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
-        eval::evaluate(
-            &program,
-            &[],
-            &[],
-            PathBuf::from(DOC_DIR),
-            &eval::Options::default(),
-            &mut con,
-        )
+        eval::evaluate(&program, &[], &[], PathBuf::from(DOC_DIR), &opts, &mut con)
     });
     let keys = eval::dump::Keys::new(&ev.root, &*fs);
     let r = geom::Renderer::new();

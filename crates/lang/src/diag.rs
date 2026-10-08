@@ -200,6 +200,19 @@ pub enum DiagCode {
     FilletNoBrep,
     /// A fillet call on 2D children.
     Fillet2d,
+    /// A blend that does not fit its edge's cross-section or a face
+    /// beside it (error, with the largest size that fits).
+    FilletTooLarge,
+    /// Two blends whose strips overlap on a face (error).
+    FilletOverlap,
+    /// Selected edges meeting at a vertex the blends cannot join: convex
+    /// and concave edges, more than three faces, a curved face (error).
+    FilletUnsupportedVertex,
+    /// Something else in the child cuts into a blend (info).
+    FilletInterrupted,
+    /// The blends could not be built, or the result does not hold them
+    /// (error).
+    FilletFailed,
 }
 
 impl DiagCode {
@@ -272,6 +285,11 @@ impl DiagCode {
             DiagCode::FilletUnsupportedEdge => "fillet-unsupported-edge",
             DiagCode::FilletNoBrep => "fillet-no-brep",
             DiagCode::Fillet2d => "fillet-2d",
+            DiagCode::FilletTooLarge => "fillet-too-large",
+            DiagCode::FilletOverlap => "fillet-overlap",
+            DiagCode::FilletUnsupportedVertex => "fillet-unsupported-vertex",
+            DiagCode::FilletInterrupted => "fillet-interrupted",
+            DiagCode::FilletFailed => "fillet-failed",
         }
     }
 }

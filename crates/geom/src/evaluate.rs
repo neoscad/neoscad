@@ -634,6 +634,9 @@ fn uses_children(n: &Node) -> bool {
 /// Per-render context.
 struct Ctx<'a> {
     r: &'a Renderer,
+    /// The tree's keys: a fillet node selects its edges on an export
+    /// render of its children, which renders subtrees by them.
+    keys: &'a Keys,
     opts: &'a RenderOptions,
     /// Node index → key hash.
     hashes: Vec<Key>,
@@ -1090,7 +1093,7 @@ impl Renderer {
     /// every node under `tops`, all decided before anything runs in
     /// parallel. A node reached again under a later top (a nested top) is
     /// not revisited, so it keeps the flags of its first, tree-order visit.
-    fn prepare<'a>(&'a self, tops: &[&Node], keys: &Keys, opts: &'a RenderOptions) -> Ctx<'a> {
+    fn prepare<'a>(&'a self, tops: &[&Node], keys: &'a Keys, opts: &'a RenderOptions) -> Ctx<'a> {
         // The walks here are iterative, as `Ctx::node` is: a recursive
         // one needs stack in proportion to the tree's depth.
         fn max_index(top: &Node) -> usize {
@@ -1105,6 +1108,7 @@ impl Renderer {
         let len = tops.iter().map(|t| max_index(t)).max().unwrap_or(0) + 1;
         let mut ctx = Ctx {
             r: self,
+            keys,
             opts,
             hashes: vec![0; len],
             first: vec![false; len],
@@ -1874,12 +1878,87 @@ impl Ctx<'_> {
             }
             NodeKind::Import(i) => Ok(self.import(n, i)),
             NodeKind::Text(t) => Ok(self.text(n, t)),
-            // `fillet_edges()`/`chamfer_edges()`: the blends are not
-            // built yet (`docs/fillets.md`, stage F2), so the result is the
-            // children's union, which the evaluator has already said with
-            // its `fillet-not-built` warning.
-            NodeKind::Fillet(_) => self.apply(n, Op::Union, kids),
+            NodeKind::Fillet(_) => self.fillet(n, kids),
         }
+    }
+
+    /// `fillet_edges()`/`chamfer_edges()` (`docs/fillets.md`, stage F2):
+    /// the children's union, with the call's blend tools added (concave
+    /// edges) and subtracted (convex ones). The child keeps OpenSCAD's
+    /// tessellation; the tools come from its exact B-rep. A call that
+    /// builds nothing (no edges, an error, edges of a class not built
+    /// yet) leaves the union as it is, and says why in its report.
+    fn fillet(&self, n: &Node, kids: Vec<Out>) -> Result<Out, Unsupported> {
+        let mut out = self.apply(n, Op::Union, kids)?;
+        let Some(g) = out.geom.take() else {
+            return Ok(out);
+        };
+        if g.dimension() != 3 || g.is_empty() {
+            out.geom = Some(g);
+            return Ok(out);
+        }
+        let tris = crate::fillet::triangles(&g);
+        let blends = match crate::fillet::blends(self.r, n, self.keys, self.opts, 1, Some(&tris)) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                out.geom = Some(g);
+                return Ok(out);
+            }
+            Err(_) => return Err(Unsupported::interrupted()),
+        };
+        // The child converted (if it is still a mesh) and the tools drawn
+        // from the node's own block, in tool order.
+        let ids = Seq {
+            block: self.block(n, OWN),
+            used: std::cell::Cell::new(0),
+        };
+        let child = match g {
+            Geometry::Manifold(m) => Arc::unwrap_or_clone(m),
+            Geometry::PolySet(ps) => {
+                let mut w = Vec::new();
+                let mut e = Vec::new();
+                ManifoldGeometry::from_polyset(&ps, &ids, &mut w, &mut e)
+            }
+            Geometry::Polygon2d(_) => unreachable!("the dimension is 3"),
+        };
+        let child_ids = child.own_face_ids();
+        let mut tool_ids = Vec::with_capacity(blends.tools.len());
+        let mut adds = vec![child];
+        let mut subs = Vec::new();
+        for t in &blends.tools {
+            let id = ids.reserve(1);
+            tool_ids.push(id);
+            let tool = ManifoldGeometry::from_tagged(&t.mesh, id);
+            if tool.is_empty() {
+                // Not a valid solid after all: the result would not be
+                // the call's, so the child stays as it is (the report
+                // says the blend is missing).
+                out.geom = Some(Geometry::Manifold(Arc::new(
+                    adds.into_iter().next().expect("the child"),
+                )));
+                return Ok(out);
+            }
+            if t.add {
+                adds.push(tool);
+            } else {
+                subs.push(tool);
+            }
+        }
+        let token = self.token.as_ref();
+        let Some(joined) = ManifoldGeometry::batch_until(OpType::Add, adds, token) else {
+            return Ok(out);
+        };
+        let mut parts = vec![joined];
+        parts.extend(subs);
+        let result = ManifoldGeometry::batch_until(OpType::Subtract, parts, token);
+        if result.as_ref().is_some_and(ManifoldGeometry::is_cancelled) {
+            return Err(Unsupported::interrupted());
+        }
+        out.geom = result.map(|mut m| {
+            m.adopt_tools(&child_ids, &tool_ids);
+            Geometry::Manifold(Arc::new(m))
+        });
+        Ok(out)
     }
 
     /// Messages from a reader, located at the node when OpenSCAD logs them

@@ -83,7 +83,9 @@ use lang::Program;
 use lang::loader::FileSystem;
 use lang::vfs::NoFs;
 
-pub use message::{Collect, Console, Location, Logged, LoggedHint, Message, Output, excerpt};
+pub use message::{
+    Collect, Console, Location, Logged, LoggedHint, Message, Output, excerpt, is_fillet_error,
+};
 pub use node::Node;
 pub use value::Value;
 

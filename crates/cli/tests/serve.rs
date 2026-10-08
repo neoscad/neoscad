@@ -617,7 +617,7 @@ fn check_and_measure_are_served() {
     }
     assert_eq!(
         init["capabilities"]["features"],
-        json!(["part", "sketch", "query", "exact"])
+        json!(["part", "sketch", "query", "exact", "fillet"])
     );
     let path = d.join("m.scad");
     let p = path.to_str().unwrap();

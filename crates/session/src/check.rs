@@ -1987,7 +1987,20 @@ impl Session {
         analysis.timings.push(("cuts", cuts.ms));
         let check_ms = self.now() - t;
         let count = |l: Level| analysis.counts[l as usize];
-        let errors = count(Level::Error);
+        // A failed fillet or chamfer call left its child sharp: the model
+        // is not what it says, so the check fails as an export does
+        // (`docs/fillets.md`, section 18, decision 2). Its diagnostics
+        // are in `diagnostics`; the count is here.
+        let fillet_errors = model
+            .log
+            .lines
+            .iter()
+            .filter(|l| match (l.severity, l.code) {
+                (Some(s), Some(c)) => eval::is_fillet_error(s, c, &l.message),
+                _ => false,
+            })
+            .count();
+        let errors = count(Level::Error) + fillet_errors;
         let exit_code = if errors > 0 { 1 } else { 0 };
         let mut timings = serde_json::Map::new();
         timings.insert(
@@ -2014,6 +2027,7 @@ impl Session {
                 "errors": errors,
                 "warnings": count(Level::Warning),
                 "info": count(Level::Info),
+                "fillet_errors": fillet_errors,
             },
             "findings": analysis.findings.iter().enumerate().map(|(i, f)| f.json(i + 1)).collect::<Vec<_>>(),
             "truncated": analysis.truncated.iter().map(|(c, n)| (c.to_string(), json!(n))).collect::<serde_json::Map<_, _>>(),

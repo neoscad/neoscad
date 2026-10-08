@@ -69,14 +69,17 @@ impl Extension {
     /// others are still accepted, silently, so a command line written for
     /// a later version is not rejected.
     ///
-    /// `fillet` is not listed yet: until its geometry exists
-    /// (`docs/fillets.md`, stage F2) a call checks its arguments and
-    /// passes its child through unchanged, and a client that saw it
-    /// advertised would expect rounded edges back.
+    /// `fillet` is listed since its straight edges are built
+    /// (`docs/fillets.md`, stage F2); a call that selects circles, whose
+    /// blends come in stage F3, says so with `fillet-not-built`.
     pub fn implemented(self) -> bool {
         matches!(
             self,
-            Extension::Part | Extension::Sketch | Extension::Query | Extension::Exact
+            Extension::Part
+                | Extension::Sketch
+                | Extension::Query
+                | Extension::Exact
+                | Extension::Fillet
         )
     }
 

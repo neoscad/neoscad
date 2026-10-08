@@ -635,7 +635,7 @@ params = [
     "expect: number = undef -- the number of edges the selection must match, or the call is an error",
 ]
 example = "fillet_edges(r = 2, edges = \"|z\") cube([40, 30, 20]);"
-notes = "Selector strings are a subset of CadQuery's: all, none, convex, concave, %line, %circle, %ellipse, %bspline, |z, #z, >z, <z, >>z[i], <<z[i] (any axis, or a vector (a, b, c)), new (edges booleans made), child(i) and child(i, j), part(name) (needs --enable part), @anchor (needs --enable query), box(x0, y0, z0, x1, y1, z1), joined with and, or, exc and not as CadQuery joins them. A selector that does not parse is an error at its column, with a did-you-mean fix. Not built yet in this version: the call reports the edges it selects (check's fillets, measure --fillet, snapshot --fillet draws them numbered) and renders the children unchanged, with a fillet-not-built warning. Without --enable fillet it is an unknown module, as in OpenSCAD."
+notes = "Selector strings are a subset of CadQuery's: all, none, convex, concave, %line, %circle, %ellipse, %bspline, |z, #z, >z, <z, >>z[i], <<z[i] (any axis, or a vector (a, b, c)), new (edges booleans made), child(i) and child(i, j), part(name) (needs --enable part), @anchor (needs --enable query), box(x0, y0, z0, x1, y1, z1), joined with and, or, exc and not as CadQuery joins them. A selector that does not parse is an error at its column, with a did-you-mean fix. Straight edges are rounded: between planes at any angle, or a plane and a parallel cylinder, convex (material removed) or concave (added), with sphere patches where three edges meet at a box corner; STEP export (--enable exact) writes true cylinder and sphere faces. Circles and arcs (hole rims, rounded outlines) are not built yet: a call that selects one renders its children unchanged with a fillet-not-built warning; add 'and %line' to round only the lines. A radius that does not fit, blends that overlap, or convex and concave edges meeting at a vertex are errors that leave the children sharp, with a fix (the largest radius that fits, or two nested calls), and make an export exit non-zero. check's fillets, measure --fillet and snapshot --fillet show the selected edges. Without --enable fillet it is an unknown module, as in OpenSCAD."
 
 [[module]]
 name = "chamfer_edges"
@@ -648,8 +648,8 @@ params = [
     "except: selector = undef -- edges to leave out",
     "expect: number = undef -- the number of edges the selection must match",
 ]
-example = "chamfer_edges(d = 1, edges = \"%circle and >z\") difference() {\n  cube([20, 20, 10]);\n  translate([10, 10, -1]) cylinder(d = 6, h = 12);\n}"
-notes = "Selectors as for fillet_edges(). Not built yet in this version: the call reports the edges it selects (check's fillets, measure --fillet, snapshot --fillet draws them numbered) and renders the children unchanged, with a fillet-not-built warning. Without --enable fillet it is an unknown module, as in OpenSCAD."
+example = "chamfer_edges(d = 1, edges = \">z and %line\") difference() {\n  cube([20, 20, 10]);\n  translate([10, 10, -1]) cylinder(d = 6, h = 12);\n}"
+notes = "Selectors as for fillet_edges(). Straight edges are chamfered, convex and concave; where three convex chamfers meet at a corner they meet in a point. Circles (hole rims) are not built yet: a call that selects one renders its children unchanged with a fillet-not-built warning. A distance that does not fit is an error with the largest that does, and makes an export exit non-zero. Without --enable fillet it is an unknown module, as in OpenSCAD."
 
 # --- functions: numbers --------------------------------------------------------
 

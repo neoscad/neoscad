@@ -17,8 +17,14 @@
 //! anything uses their order, so reports and drawings do not depend on
 //! how the reconstruction happened to number them.
 
+mod build;
 mod curve;
+mod result;
 mod select;
+
+pub use build::Built;
+pub(crate) use result::triangles;
+pub use result::{Blends, blend_diags, blends};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -142,6 +148,11 @@ pub struct EdgeFact {
     pub origin: Option<u32>,
     /// Points along it, for drawing, for `box(...)` and for anchors.
     pub path: Vec<V>,
+    /// Its edge in [`Facts::brep`], its two faces there (the first the
+    /// one whose loop runs along it), and its start and end vertices.
+    pub brep_edge: u32,
+    pub brep_faces: [u32; 2],
+    pub vertices: [u32; 2],
 }
 
 /// Everything selection needs to know about a fillet's child.
@@ -159,6 +170,12 @@ pub struct Facts {
     /// The export render's segment multiplier the B-rep was built at (1,
     /// or 2 or 4 after a topology mismatch).
     pub mult: u32,
+    /// The child's B-rep itself: the blends are built from its faces'
+    /// exact surfaces and the edges around each vertex.
+    pub brep: Arc<Brep>,
+    /// Per B-rep edge, its index in `edges` (seams and edges with other
+    /// than two faces have none).
+    pub fact_of: Vec<Option<u32>>,
 }
 
 /// Why a child has no facts.
@@ -207,7 +224,7 @@ impl FactsCache {
     }
 }
 
-fn is_background(n: &Node) -> bool {
+pub(crate) fn is_background(n: &Node) -> bool {
     n.origin.as_ref().is_some_and(|o| o.tag_background)
 }
 
@@ -257,22 +274,39 @@ fn compute(
     keys: &Keys,
     opts: &RenderOptions,
 ) -> Result<Facts, Unavailable> {
-    // The children's dimension, from the normal render (cached: the
-    // request rendered this node already).
-    match renderer.render(node, keys, opts.clone()) {
-        Ok(r) => match r.geometry {
-            None => return Err(Unavailable::Empty),
-            Some(g) if g.dimension() == 2 => return Err(Unavailable::TwoD),
-            Some(g) if g.is_empty() => return Err(Unavailable::Empty),
-            Some(_) => {}
-        },
-        Err(u) if u.is_interrupted() => return Err(Unavailable::Interrupted),
-        Err(u) => {
-            return Err(Unavailable::NoBrep(format!(
-                "{}() could not be rendered",
-                u.what
-            )));
+    // The children's dimension, from their normal renders (cached: the
+    // request rendered them already). Not the node's own render: that is
+    // the blended result, which is built from these facts. The first
+    // child with geometry decides, as for any operation on children.
+    let mut found = None;
+    for c in node.children.iter().filter(|c| !is_background(c)) {
+        match renderer.render(c, keys, opts.clone()) {
+            Ok(r) => match r.geometry {
+                None => {}
+                Some(g) if g.dimension() == 2 => {
+                    found.get_or_insert(2);
+                }
+                Some(g) if g.is_empty() => {}
+                Some(_) => {
+                    found.get_or_insert(3);
+                }
+            },
+            Err(u) if u.is_interrupted() => return Err(Unavailable::Interrupted),
+            Err(u) => {
+                return Err(Unavailable::NoBrep(format!(
+                    "{}() could not be rendered",
+                    u.what
+                )));
+            }
         }
+        if found.is_some() {
+            break;
+        }
+    }
+    match found {
+        Some(3) => {}
+        Some(_) => return Err(Unavailable::TwoD),
+        None => return Err(Unavailable::Empty),
     }
     let should_stop: meshbrep::StopFn = {
         let interrupt = opts.interrupt.clone();
@@ -310,7 +344,7 @@ fn compute(
             return Err(Unavailable::Empty);
         }
         match meshbrep::reconstruct_located(&em.mesh, &options) {
-            Ok(b) => return Ok(build(&b, &em, mult)),
+            Ok(b) => return Ok(build(b, &em, mult)),
             Err(f) if f.error == meshbrep::Error::Stopped => {
                 return Err(Unavailable::Interrupted);
             }
@@ -333,7 +367,8 @@ fn compute(
 /// rounding is far below this.
 const TANGENT: f64 = 1e-7;
 
-fn build(b: &Brep, em: &walk::ExportMesh, mult: u32) -> Facts {
+fn build(brep: Brep, em: &walk::ExportMesh, mult: u32) -> Facts {
+    let b = &brep;
     let mesh = &em.mesh;
     // Each face's surface records, from the triangles it was built from.
     let records: Vec<Vec<u32>> = b
@@ -523,6 +558,9 @@ fn build(b: &Brep, em: &walk::ExportMesh, mult: u32) -> Facts {
             skip,
             origin,
             path,
+            brep_edge: ei as u32,
+            brep_faces: [a.0 as u32, b_.0 as u32],
+            vertices: [e.start, e.end],
         });
     }
     let order = |c: CurveKind| match c {
@@ -540,12 +578,18 @@ fn build(b: &Brep, em: &walk::ExportMesh, mult: u32) -> Facts {
             .then(x.center[2].total_cmp(&y.center[2]))
             .then(x.length.total_cmp(&y.length))
     });
+    let mut fact_of = vec![None; b.edges.len()];
+    for (i, e) in edges.iter().enumerate() {
+        fact_of[e.brep_edge as usize] = Some(i as u32);
+    }
     Facts {
         edges,
         bbox,
         tolerance,
         origins: em.origins.clone(),
         mult,
+        brep: Arc::new(brep),
+        fact_of,
     }
 }
 
@@ -619,6 +663,20 @@ pub enum Status {
     Empty,
     /// The request stopped first.
     Interrupted,
+    /// Built: the blends were made (stage F2's edges).
+    Built,
+    /// Selected edges of a class whose blends are not built yet (circles
+    /// about an axis, until stage F3): the child is unchanged.
+    NotBuilt,
+    /// A blend does not fit (`fillet-too-large`).
+    TooLarge,
+    /// Two blends overlap on a face (`fillet-overlap`).
+    Overlap,
+    /// A vertex where the blends cannot be joined
+    /// (`fillet-unsupported-vertex`).
+    UnsupportedVertex,
+    /// The tools could not be made (`fillet-failed`).
+    Failed,
 }
 
 impl Status {
@@ -632,8 +690,23 @@ impl Status {
             Status::TwoD => "2d",
             Status::Empty => "empty",
             Status::Interrupted => "interrupted",
+            Status::Built => "built",
+            Status::NotBuilt => "not-built",
+            Status::TooLarge => "too-large",
+            Status::Overlap => "overlap",
+            Status::UnsupportedVertex => "unsupported-vertex",
+            Status::Failed => "failed",
         }
     }
+}
+
+/// A concrete fix a host turns into an edit of the call's text.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Fix {
+    /// Write this size (`r` or `d`) into the call.
+    Size(f64),
+    /// Split the call into two nested ones, the concave edges first.
+    Nested,
 }
 
 /// One diagnostic of a plan, at the call.
@@ -643,6 +716,8 @@ pub struct PlanDiag {
     pub code: DiagCode,
     pub message: String,
     pub hints: Vec<String>,
+    /// The edit the first hint carries, if any.
+    pub fix: Option<Fix>,
 }
 
 /// A fillet call's selection on its child.
@@ -664,6 +739,8 @@ pub struct Plan {
     /// Selected edges of a kind the blends do not cover.
     pub unsupported: Vec<usize>,
     pub diags: Vec<PlanDiag>,
+    /// What the render builds, when the checks passed.
+    pub build: Option<Arc<Built>>,
 }
 
 /// How many edges a diagnostic lists before "and N more".
@@ -687,7 +764,7 @@ pub fn round4(x: f64) -> f64 {
     if r == 0.0 { 0.0 } else { r }
 }
 
-fn point_text(p: V) -> String {
+pub(crate) fn point_text(p: V) -> String {
     let f = |x: f64| {
         let s = format!("{:.4}", round4(x));
         let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
@@ -735,6 +812,7 @@ pub fn plan_with(f: &FilletNode, facts: Result<Arc<Facts>, Unavailable>) -> Plan
         skipped: Vec::new(),
         unsupported: Vec::new(),
         diags: Vec::new(),
+        build: None,
     };
     let facts = match facts {
         Ok(x) => x,
@@ -751,6 +829,7 @@ pub fn plan_with(f: &FilletNode, facts: Result<Arc<Facts>, Unavailable>) -> Plan
                         hints: vec![
                             "round a 2D outline with offset(r = r) offset(delta = -r), or with a sketch's fillet()".into(),
                         ],
+                        fix: None,
                     }),
                 ),
                 Unavailable::NoBrep(why) => (
@@ -764,6 +843,7 @@ pub fn plan_with(f: &FilletNode, facts: Result<Arc<Facts>, Unavailable>) -> Plan
                         hints: vec![
                             "bodies that only touch along an edge or at a point are the usual cause: overlap them".into(),
                         ],
+                        fix: None,
                     }),
                 ),
             };
@@ -835,6 +915,7 @@ pub fn plan_with(f: &FilletNode, facts: Result<Arc<Facts>, Unavailable>) -> Plan
             hints: vec![
                 "polygon seams belong to a $fn polygon (leave $fn unset to get a true curve); tangent edges and the edges of hull(), polyhedron() and imports are never rounded".into(),
             ],
+            fix: None,
         });
     }
     let n = p.selected.len();
@@ -867,6 +948,7 @@ pub fn plan_with(f: &FilletNode, facts: Result<Arc<Facts>, Unavailable>) -> Plan
             hints: vec![format!(
                 "if these are the edges you mean, write expect = {n}; otherwise narrow or widen the selector"
             )],
+            fix: None,
         });
     } else if n == 0 && f.expect.is_none() {
         p.status = Status::NoEdges;
@@ -878,6 +960,7 @@ pub fn plan_with(f: &FilletNode, facts: Result<Arc<Facts>, Unavailable>) -> Plan
                 "`snapshot --fillet` draws the child's edges numbered, and `measure --fillet` lists them"
                     .into(),
             ],
+            fix: None,
         });
     }
     if !p.unsupported.is_empty() {
@@ -925,8 +1008,201 @@ pub fn plan_with(f: &FilletNode, facts: Result<Arc<Facts>, Unavailable>) -> Plan
             hints: vec![
                 "select fewer edges, or round the profile before the boolean".into(),
             ],
+            fix: None,
         });
     }
+    decide(f, &mut p, &facts);
     p.facts = Some(facts);
     p
+}
+
+/// A number as messages print it: at most 4 decimals, trailing zeros
+/// dropped.
+pub fn number_text(x: f64) -> String {
+    let s = format!("{:.4}", round4(x));
+    let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    if s == "-0" { "0".to_string() } else { s }
+}
+
+/// Stage F2: whether the selection is built, and if not, why. Only calls
+/// whose selection stands (no count or explicit unsupported-edge error)
+/// get this far; unsupported edges under the default `"all"` are left
+/// sharp, as their warning says.
+fn decide(f: &FilletNode, p: &mut Plan, facts: &Facts) {
+    if !matches!(p.status, Status::Selected | Status::Unsupported)
+        || p.diags.iter().any(|d| d.severity == Severity::Error)
+    {
+        return;
+    }
+    let list: Vec<usize> = p
+        .selected
+        .iter()
+        .copied()
+        .filter(|i| !p.unsupported.contains(i))
+        .collect();
+    if list.is_empty() {
+        return;
+    }
+    let m = f.kind.module();
+    let sn = f.kind.size_name();
+    let rotational = list
+        .iter()
+        .filter(|&&i| facts.edges[i].class == Class::Rotational)
+        .count();
+    if rotational > 0 {
+        p.status = Status::NotBuilt;
+        p.diags.push(PlanDiag {
+            severity: Severity::Warning,
+            code: DiagCode::FilletNotBuilt,
+            message: if rotational == 1 {
+                format!(
+                    "{m}(): 1 of the selected edges is a circle or an arc (the rim of a hole or a boss, or an arc of a rounded outline), whose blend is not built yet in this version of NeoSCAD; the children are rendered unchanged"
+                )
+            } else {
+                format!(
+                    "{m}(): {rotational} of the selected edges are circles or arcs (rims of holes and bosses, arcs of rounded outlines), whose blends are not built yet in this version of NeoSCAD; the children are rendered unchanged"
+                )
+            },
+            hints: vec![
+                "straight edges are built: add `and %line` to the selector to round only those".into(),
+            ],
+            fix: None,
+        });
+        return;
+    }
+    let profile = match f.kind {
+        FilletKind::Fillet => meshbrep::blend::Profile::Fillet,
+        FilletKind::Chamfer => meshbrep::blend::Profile::Chamfer,
+    };
+    // Report numbers: the edge's place in the selection, from 1.
+    let num = |k: usize| {
+        let i = list[k];
+        p.selected.iter().position(|&s| s == i).map_or(0, |x| x + 1)
+    };
+    let quote = |k: usize| edge_text(&facts.edges[list[k]]);
+    let size = number_text(f.size);
+    let fit_hint = |best: Option<f64>| match best {
+        Some(b) => (
+            format!("the largest {sn} that fits is {}", number_text(b)),
+            Some(Fix::Size(b)),
+        ),
+        None => (format!("use a smaller {sn}, or select fewer edges"), None),
+    };
+    match build::prepare(facts, &list, profile, f.size) {
+        Ok(b) => {
+            p.status = Status::Built;
+            p.build = Some(Arc::new(b));
+        }
+        Err(build::Problem::TooLarge {
+            edge,
+            face,
+            need,
+            have,
+            best,
+        }) => {
+            p.status = Status::TooLarge;
+            let message = match (need, have) {
+                (Some(need), Some(have)) => format!(
+                    "{m}(): {sn} = {size} needs {} on the {face} beside edge {} ({}), which is {} wide there",
+                    number_text(need),
+                    num(edge),
+                    quote(edge),
+                    number_text(have)
+                ),
+                _ if face == "edge" => format!(
+                    "{m}(): edge {} ({}) is too short for {sn} = {size} at the angles it ends at",
+                    num(edge),
+                    quote(edge)
+                ),
+                _ => format!(
+                    "{m}(): {sn} = {size} is too large for edge {} ({}): no blend that size fits between its {} faces",
+                    num(edge),
+                    quote(edge),
+                    facts.edges[list[edge]].faces.join(" and ")
+                ),
+            };
+            let (h, fix) = fit_hint(best);
+            p.diags.push(PlanDiag {
+                severity: Severity::Error,
+                code: DiagCode::FilletTooLarge,
+                message,
+                hints: vec![h],
+                fix,
+            });
+        }
+        Err(build::Problem::Overlap {
+            edges,
+            face,
+            need,
+            have,
+            best,
+        }) => {
+            p.status = Status::Overlap;
+            let (h, fix) = fit_hint(best);
+            p.diags.push(PlanDiag {
+                severity: Severity::Error,
+                code: DiagCode::FilletOverlap,
+                message: format!(
+                    "{m}(): the blends of edges {} and {} overlap on the {face} between them: they need {} + {} of its {}",
+                    num(edges[0]),
+                    num(edges[1]),
+                    number_text(need[0]),
+                    number_text(need[1]),
+                    number_text(have)
+                ),
+                hints: vec![h],
+                fix,
+            });
+        }
+        Err(build::Problem::Vertex { at, edges, why }) => {
+            p.status = Status::UnsupportedVertex;
+            let names: Vec<String> = edges.iter().map(|&k| num(k).to_string()).collect();
+            let mixed = why.contains("convex and concave");
+            let (hint, fix) = if mixed && f.edges.items.len() == 1 && f.except.is_none() {
+                (
+                    format!(
+                        "round them in two nested calls, the concave edges first: {m}({sn} = {size}, edges = \"(...) and convex\") {m}({sn} = {size}, edges = \"(...) and concave\") ..."
+                    ),
+                    Some(Fix::Nested),
+                )
+            } else if mixed {
+                (
+                    "round them in two nested calls, the concave edges first (the inner call), then the convex ones".to_string(),
+                    None,
+                )
+            } else {
+                (
+                    "select fewer edges at that vertex, or round them in two nested calls"
+                        .to_string(),
+                    None,
+                )
+            };
+            p.diags.push(PlanDiag {
+                severity: Severity::Error,
+                code: DiagCode::FilletUnsupportedVertex,
+                message: format!(
+                    "{m}(): edge{} {} meet{} at {}, where {why}",
+                    if names.len() == 1 { "" } else { "s" },
+                    names.join(", "),
+                    if names.len() == 1 { "s" } else { "" },
+                    point_text(at)
+                ),
+                hints: vec![hint],
+                fix,
+            });
+        }
+        Err(build::Problem::Failed(why)) => {
+            p.status = Status::Failed;
+            p.diags.push(PlanDiag {
+                severity: Severity::Error,
+                code: DiagCode::FilletFailed,
+                message: format!("{m}(): the blends could not be built: {why}"),
+                hints: vec![
+                    "this is a limitation or a bug of NeoSCAD; selecting fewer edges may avoid it"
+                        .into(),
+                ],
+                fix: None,
+            });
+        }
+    }
 }

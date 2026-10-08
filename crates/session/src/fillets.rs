@@ -115,6 +115,109 @@ pub fn pin_edit(program: &lang::Program, span: Span, n: usize) -> Option<(Span, 
     Some((last.span, format!("{src}, expect = {n}")))
 }
 
+/// The fillet or chamfer call at `span` as written, and its program text.
+fn call_at(program: &lang::Program, span: Span) -> Option<(&lang::ast::Instantiation, &str)> {
+    let ast = &program.ast;
+    let inst = crate::orient::find_inst(&ast.root, span)?;
+    let name = ast.name(inst.name);
+    if name != "fillet_edges" && name != "chamfer_edges" {
+        return None;
+    }
+    let text = std::str::from_utf8(&program.sources.get(span.file).text).ok()?;
+    Some((inst, text))
+}
+
+/// The edit that writes `value` as the size of the call at `span`: the
+/// expression of its `r` (or `d`) argument, named or first, replaced.
+pub fn size_edit(program: &lang::Program, span: Span, value: &str) -> Option<(Span, String)> {
+    let (inst, _) = call_at(program, span)?;
+    let ast = &program.ast;
+    let named = inst
+        .args
+        .iter()
+        .find(|a| a.name.is_some_and(|x| matches!(ast.name(x), "r" | "d")));
+    let first = inst.args.first().filter(|a| a.name.is_none());
+    let a = named.or(first)?;
+    Some((ast.expr(a.expr).span, value.to_string()))
+}
+
+/// The edit that splits the call at `span` into two nested calls, the
+/// concave edges first (the inner one), then the convex ones of its
+/// result (`docs/fillets.md`, section 7.4): the call's head written
+/// twice, its `edges` string narrowed with `and convex` and `and
+/// concave`. `None` unless `edges` is absent or a plain string literal.
+pub fn nested_edit(program: &lang::Program, span: Span) -> Option<(Span, String)> {
+    let (inst, text) = call_at(program, span)?;
+    let ast = &program.ast;
+    let bytes = text.as_bytes();
+    let name = ast.name(inst.name);
+    let start = inst.span.start as usize;
+    let at = start + text.get(start..)?.find(name)?;
+    // The argument list's closing parenthesis, strings skipped.
+    let open = at + text.get(at..)?.find('(')?;
+    let mut depth = 0i32;
+    let mut close = None;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let close = close?;
+    let named = inst
+        .args
+        .iter()
+        .find(|a| a.name.is_some_and(|x| ast.name(x) == "edges"));
+    let positional = inst.args.iter().filter(|a| a.name.is_none()).nth(1);
+    let head = |sense: &str| -> Option<String> {
+        match named.or(positional) {
+            Some(a) => {
+                let s = ast.expr(a.expr).span;
+                let (s0, s1) = (s.start as usize, s.end as usize);
+                let lit = text.get(s0..s1)?;
+                let inner = lit.strip_prefix('"')?.strip_suffix('"')?;
+                if inner.contains('\\') || inner.contains('"') {
+                    return None;
+                }
+                Some(format!(
+                    "{}\"({inner}) and {sense}\"{}",
+                    text.get(at..s0)?,
+                    text.get(s1..=close)?
+                ))
+            }
+            None => {
+                let sep = if inst.args.is_empty() { "" } else { ", " };
+                Some(format!(
+                    "{}{sep}edges = \"{sense}\")",
+                    text.get(at..close)?.trim_end()
+                ))
+            }
+        }
+    };
+    Some((
+        Span::new(span.file, at as u32, close as u32 + 1),
+        format!("{} {}", head("convex")?, head("concave")?),
+    ))
+}
+
 fn edge_json(e: &EdgeFact, index: usize, status: &str) -> Value {
     let mut v = json!({
         "index": index,
@@ -198,6 +301,8 @@ pub fn plan_json(p: &Plan, index: usize, at: Option<Value>, pin: Option<Value>) 
             .map(|(k, &i)| {
                 let status = if p.unsupported.contains(&i) {
                     "unsupported"
+                } else if p.build.as_ref().is_some_and(|b| b.edges.contains(&i)) {
+                    "built"
                 } else {
                     "selected"
                 };
@@ -243,13 +348,22 @@ pub fn report<'a, W: std::io::Write>(
         ..Reports::default()
     };
     for (k, n) in nodes.iter().enumerate() {
-        let Some(p) = fillet::plan(renderer, n, keys, opts) else {
+        let Some(mut p) = fillet::plan(renderer, n, keys, opts) else {
             continue;
         };
         if p.status == Status::Interrupted {
             // The host is stopping; what it reports now is discarded.
             break;
         }
+        // What the boolean kept of each blend.
+        let after = fillet::blend_diags(renderer, n, keys, opts, &p);
+        if after
+            .iter()
+            .any(|d| d.severity == lang::diag::Severity::Error)
+        {
+            p.status = Status::Failed;
+        }
+        p.diags.extend(after);
         let origin = n.origin.as_ref();
         let prog = origin.and_then(|o| program(o.unit));
         let pin = match (prog, origin) {
@@ -268,10 +382,22 @@ pub fn report<'a, W: std::io::Write>(
                 diag = diag.at(o.span, o.line).with_base(PathBase::MainFileDir);
             }
             for (i, h) in d.hints.iter().enumerate() {
-                // The count's first hint carries the edit that pins it.
-                let replacement = (i == 0 && d.code == lang::diag::DiagCode::FilletCount)
-                    .then(|| pin.clone())
-                    .flatten();
+                // The count's first hint carries the edit that pins it;
+                // a size or vertex problem's, the edit that fixes it.
+                let fix = match (d.fix, prog, origin) {
+                    (Some(fillet::Fix::Size(x)), Some(prog), Some(o)) => {
+                        size_edit(prog, o.span, &fillet::number_text(x))
+                    }
+                    (Some(fillet::Fix::Nested), Some(prog), Some(o)) => nested_edit(prog, o.span),
+                    _ => None,
+                };
+                let replacement = if i != 0 {
+                    None
+                } else if d.code == lang::diag::DiagCode::FilletCount {
+                    pin.clone()
+                } else {
+                    fix
+                };
                 diag.hints.push(Hint {
                     message: h.clone(),
                     replacement,

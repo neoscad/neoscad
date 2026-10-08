@@ -1,12 +1,13 @@
 # Design: 3D fillets and chamfers (`--enable fillet`)
 
-Status: stages F0 and F1 built (the flag, both builtins, the selector
-parser and the node; then the plan without geometry: the child's B-rep,
-per-edge facts, selection, and the reports in `check`, `measure` and
-`snapshot`; sections 15.1 and 15.2 record how, and where they depart
-from this text); F2 onwards not started. A call reports its selection
-and passes its children through unchanged with a `fillet-not-built`
-warning ("selection only", as the plan allows). Written
+Status: stages F0, F1 and F2 built (the flag, both builtins, the
+selector parser and the node; the plan: the child's B-rep, per-edge
+facts, selection, and the reports in `check`, `measure` and `snapshot`;
+then the blends of straight edges, in the mesh and in STEP, with the
+checks before and after the boolean; sections 15.1 to 15.3 record how,
+and where they depart from this text); F3 onwards not started. A call
+that selects a circle or an arc (F3's) passes its children through
+unchanged with a `fillet-not-built` warning. Written
 2026-10-08 against `127be03` and the reference checkouts in
 `.reference/openscad` and `.reference/BOSL2`.
 Claims about this codebase cite `path:line`; claims about OpenSCAD and
@@ -1064,6 +1065,147 @@ F0–F4: 9–13.5 person-weeks.
   `fillet-count` error is in `diagnostics` but not in `counts`), LSP hover
   and completion, and the blends (`docs/followups.md`, "Fillets and
   chamfers").
+
+### 15.3 Stage F2 as built
+
+- **The tool generator** is `meshbrep::blend` (`crates/meshbrep/src/blend.rs`,
+  MIT OR Apache-2.0, no NeoSCAD dependency): a `BlendSpec` (profile,
+  size, edges with their two faces as exact planes or parallel
+  cylinders with their outward sides, how each end ends, sphere
+  corners) gives closed, oriented `TaggedMesh` tools, each triangle
+  tagged with its exact surface, and `blend::section` gives an edge's
+  cross-section (fillet centre, tangent points, how far into each face)
+  for the checks. The arithmetic is 6.1's in 3D vectors across the
+  edge: the ball's centre where the faces offset by `r` meet (two
+  planes; a plane and a circle; two circles, the solution nearest the
+  edge), the arc between the tangent points with vertices exactly at
+  both (`segments(sweep)` from the call's `$fn`/`$fa`/`$fs`, as for
+  `circle()`), and a chamfer's line between the points `d` along each
+  face (an arc length on a cylinder). Every sine is `libm`'s.
+- **The region** (6.2): convex, the corner between the arc and the faces
+  pushed out past both faces by a margin (`r`, at most half a
+  cylinder's radius), so no tool face is coplanar with the child's;
+  concave, the space between the faces and the arc, its side on a
+  plane in that plane (tagged with the face's own plane record) and its
+  side on a cylinder overlapping into the material by the margin
+  instead (section 14's lesson). Swept along the edge and cut by each
+  end's plane; caps that cross inside the tool are an edge too short.
+- **Ends** (`crates/geom/src/fillet/build.rs`, from the B-rep's
+  vertex-edge incidence): past a tangent edge touching one of the
+  edge's faces (a line running into an arc), cut across the edge (7.2);
+  at a vertex of three faces with a plane third face and no other
+  selected edge, convex: extended into the air beyond that face when it
+  faces the way the edge leaves (open), cut by it when the edge runs
+  into it (a wall); concave: cut by it either way (7.1); a second
+  selected edge there: both extended when convex, both cut by the
+  bisecting plane when concave (7.3, the mitre of decision 5); three
+  selected edges of planes: a sphere corner (fillets) or extended
+  chamfers meeting in a point (convex chamfers; three concave chamfers
+  are refused). Convex and concave selected edges at one vertex, more
+  than three faces with another selected edge, or a curved third face
+  (except a convex open end) are `fillet-unsupported-vertex`.
+- **Sphere corners** (7.4): the ball's centre `r` inside the three
+  planes; each edge tool ends on the plane through it across the edge,
+  and the patch is the corner region between those planes and the faces
+  (offset by the margin, convex) less the ball. The edge tools of a
+  corner and its patch are built as **one solid**: their shared rings
+  are the same bits (the points beside a tangent come from one
+  expression on the same face normals), and the caps between them are
+  left out. Built as separate solids, the caps coincided exactly only on
+  exact coordinates: under `rotate([10, 20, 30])` the boolean left a
+  sliver between them that the export's box check rejected. Mitred
+  pairs are joined the same way (`End::Mitre`) where their
+  cross-sections meet point for point in the mitre (equal angles: the
+  later tool takes the earlier one's ring); before that, a mitred boss
+  base rotated inside the call did not reconstruct at all.
+- **Checks before the boolean** (section 8), on the B-rep: every blend
+  fits its cross-section (`fillet-too-large`, "no blend that size fits
+  between its faces"); at five points along each edge, the face's other
+  boundary edges (those at the edge's own ends excepted: the vertex
+  rules handle them) are crossed by the plane across the edge, and the
+  nearest crossing into the face (a distance on a plane, an arc length
+  on a cylinder) must be wider than the strip (`fillet-too-large`) or,
+  when it is another selected edge's, than both strips
+  (`fillet-overlap`), strictly: a face is never consumed to nothing;
+  and the tools' end caps must not cross. On failure the largest size
+  that passes the same checks is found by bisection (60 halvings),
+  then written with three significant digits, rounded to nearest if
+  that still passes, else down; its hint carries it as a `replace`
+  edit of the `r`/`d` argument (`session::fillets::size_edit`), and
+  `crates/geom/tests/fillet_build.rs` applies every such edit and
+  builds. A hole inside a strip is crossed by the ray, so it is
+  `fillet-too-large` here rather than section 8's `fillet-interrupted`.
+- **`fillet-unsupported-vertex`'s fix** for mixed senses rewrites the
+  call's head as two nested calls, `edges = "(S) and convex"` outside
+  `edges = "(S) and concave"` (`session::fillets::nested_edit`), when
+  `edges` is absent or one plain string; otherwise the hint is text.
+- **Normal render** (`crates/geom/src/evaluate.rs`, `Ctx::fillet`): the
+  children's union as OpenSCAD tessellates it, the concave tools added
+  and the convex ones subtracted in two batched booleans, the tools'
+  original IDs from the node's own block in tool order (so warm equals
+  cold). A fillet's cylinder faces are OpenSCAD's polygons there, so
+  each is replaced by the facet its exact tangent line touches (the
+  nearest child triangle facing that way, 6.3's "conform"): the arc
+  then meets the facet along a mesh line, where a tangent on the exact
+  cylinder left the inscribed facet standing over part of the blend.
+  Chamfers keep the exact cylinder. Blend faces are not drawn as cut
+  faces, and take the child's colour or `part()` when all its faces have
+  one. A call that builds nothing (no edges, an error, F3's edges)
+  leaves the union as it is; preview draws the node as a leaf with this
+  geometry, as before.
+- **STEP export** (`crates/geom/src/exact/walk.rs`, `Walk::fillet`): the
+  walk now descends into fillet nodes (nested ones too, in the traced
+  walk selection uses, where only the call being selected for is walked
+  as its children's union), unions the children tagged and applies the
+  same plan's exact tools (arcs at the
+  walk's segment multiplier), placed under the node's matrix; the call
+  is one `Exact` substitution ("is exported with exact blends (4
+  tools)"), its arcs' sagitta and area added to the cross-check's
+  bounds. With `$fn` set on the call the blend triangles are planar
+  facets (a `Polygon` substitution), as for any curve.
+- **After the boolean** (`fillet::blend_diags`, run by the report): per
+  blend surface, the area of the normal render's triangles lying on it
+  (within twice the arcs' deviation, facing along its normal, inside its
+  tool's box) against the tool's blend area less what lies past an open
+  end or past the bisector where two extended blends meet. Under 98% is
+  `fillet-interrupted` (info); under 2% is `fillet-failed` (error). It
+  is geometric rather than by original ID, because cached results are
+  rebased to new IDs; the surfaces do not move.
+- **Statuses and codes**: `built`, `not-built` (warning
+  `fillet-not-built`, now only for circles and arcs, said by the report
+  rather than the evaluator), `too-large`, `overlap`,
+  `unsupported-vertex`, `failed`; new codes `fillet-too-large`,
+  `fillet-overlap`, `fillet-unsupported-vertex`, `fillet-interrupted`,
+  `fillet-failed`. Unsupported edges under the default `"all"` stay
+  sharp with their warning and the rest is built.
+- **A failed call** (decision 2): every error of a fillet call
+  (`fillet-*` codes, and the argument errors, whose messages start with
+  the module's name) is counted by the console
+  (`eval::Console::failed_fillets`); `-o` writes its files and exits 1
+  (`crates/cli/src/run.rs`), and `check` adds them to `counts.errors` as
+  `counts.fillet_errors` and fails. `Extension::implemented()` is true
+  for `fillet`, so `serve` advertises it.
+- **Results.** The golden models (`conformance/extensions/fillet`, 15
+  cases: the L-bracket, the box corner, every edge of a cube, the box
+  top's lines, the lid lip's lines, a bottom outline (7.3), a mitred
+  boss base, a closed end, an inside sphere corner, 60° prisms filleted
+  and chamfered, a chamfered cube, plane–cylinder, a rotated cube, a
+  mitred boss base rotated inside the call)
+  export all-exact; their B-rep volumes are within 1.3e-8 of the closed
+  forms (within 1e-9 for the cases without a sphere patch), and OCCT
+  8.0.1 reads every file back as one valid closed solid with no free
+  edges, its volume within 1.2e-8 (the worst, the box corner's sphere
+  patch, where OCCT and `meshbrep::measure` land 1.2e-8 and 4.4e-9 on
+  either side of the closed form; section 14's hand-built file measured
+  the same 7804.6962015903 in OCCT). At `$fa = 2; $fs = 0.05` the mesh volumes are
+  within 2e-4 of the closed forms. STEP and mesh bytes are the same at
+  1, 2 and 8 threads, cold and warm; the wasm-check case
+  `fillet-step-export` hashes the same STEP in node as natively.
+- **Not in F2**: the rotational class (F3); a chamfer's cylinder faces
+  conformed to the polygon in the mesh; blends between faces of
+  different colours or parts taking one; `Limits::fillet_edges`; a
+  corner of three edges with a curved face (`docs/followups.md`,
+  "Fillets and chamfers").
 
 ## 16. Test plan
 
