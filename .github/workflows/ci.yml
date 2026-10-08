@@ -49,8 +49,17 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -LsSf \
             https://github.com/axodotdev/cargo-dist/releases/download/v0.33.0/cargo-dist-installer.sh | sh
-          dist generate --mode=ci --check
+          # release.yml carries one hand edit (Cargo.toml: allow-dirty "ci"),
+          # kept as .github/release-host-gate.patch: `host` waits for CI to
+          # pass, so a failed gate can't publish an empty release. dist
+          # refuses to check a dirty mode, so the check runs on a copy of
+          # the tree with the edit and the allow-dirty entry taken out;
+          # after a real `dist generate`, re-apply the patch.
           dist plan --output-format=json > /dev/null
+          git apply -R .github/release-host-gate.patch
+          sed -i 's/allow-dirty = \["ci", "msi"\]/allow-dirty = ["msi"]/' Cargo.toml
+          dist generate --mode=ci --check
+          git checkout -- .github/workflows/release.yml Cargo.toml
 
   test:
     name: test (${{ matrix.name }})

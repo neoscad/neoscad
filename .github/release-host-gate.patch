@@ -1,0 +1,21 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index c86c17a..2fdd788 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -307,10 +307,15 @@ jobs:
+   host:
+     needs:
+       - plan
++      - custom-ci
+       - build-local-artifacts
+       - build-global-artifacts
+     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
+-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
++    # NeoSCAD edit (Cargo.toml allow-dirty "ci"): also only if CI passed.
++    # When it fails the builds are skipped, and a skipped build counts as
++    # fine below, so without this the release was published empty
++    # (v0.4.3's first run).
++    if: ${{ always() && needs.plan.result == 'success' && needs.custom-ci.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+     env:
+       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+     runs-on: "ubuntu-22.04"
