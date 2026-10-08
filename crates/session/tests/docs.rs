@@ -158,7 +158,7 @@ fn user_definitions_and_hints() {
     );
     let r = s.docs(&DocsRequest::default());
     assert!(
-        r.text.starts_with("modules (38): cube sphere"),
+        r.text.starts_with("modules (40): cube sphere"),
         "{}",
         r.text
     );

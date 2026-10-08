@@ -617,6 +617,40 @@ params = [
 example = "module bolt(l = 10) {\n  cylinder(d = 3, h = l);\n  anchor(\"tip\", [0, 0, l], [0, 0, 1]);\n}\nmodule show() { echo(child_anchors(0)); children(0); }\nshow() translate([5, 0, 0]) bolt(20);"
 notes = "It makes no node: the model's tree, .csg and geometry are those of the same model without it, so a .csg export runs in stock OpenSCAD. The anchor belongs to the instantiation it is written in and moves with it through translate, rotate, scale, mirror, multmatrix, linear_extrude and projection; under resize and rotate_extrude, whose placement depends on the geometry, it is not visible. A sketch exports every entity its body names as an anchor of the same name: a point where it solved, a line's midpoint and direction, an arc's or circle's centre. Without --enable query it is an unknown module, as in OpenSCAD."
 
+# --- NeoSCAD's fillets and chamfers (--enable fillet) -------------------------
+#
+# docs/fillets.md. Stage F0: the calls check their arguments and selectors,
+# and pass their children through unchanged with a warning until the
+# geometry is built.
+
+[[module]]
+name = "fillet_edges"
+signature = "fillet_edges(r, edges = \"all\", except = undef, expect = undef) children"
+summary = "Round the selected edges of the children (their union) with radius r: convex edges lose material, concave ones gain it."
+extension = "fillet"
+params = [
+    "r: number -- the radius, measured along each face from the edge",
+    "edges: selector = \"all\" -- a selector string such as \"|z and >x\", \"%circle and >z\" or \"child(0, 1)\"; a BOSL2-style direction vector such as [0, 0, 1] (the edges in that face of the bounding box); or a list of them (their union)",
+    "except: selector = undef -- edges to leave out, in the same forms",
+    "expect: number = undef -- the number of edges the selection must match, or the call is an error",
+]
+example = "fillet_edges(r = 2, edges = \"|z\") cube([40, 30, 20]);"
+notes = "Selector strings are a subset of CadQuery's: all, none, convex, concave, %line, %circle, %ellipse, %bspline, |z, #z, >z, <z, >>z[i], <<z[i] (any axis, or a vector (a, b, c)), new (edges booleans made), child(i) and child(i, j), part(name) (needs --enable part), @anchor (needs --enable query), box(x0, y0, z0, x1, y1, z1), joined with and, or, exc and not as CadQuery joins them. A selector that does not parse is an error at its column, with a did-you-mean fix. Not built yet in this version: the children are rendered unchanged, with a fillet-not-built warning. Without --enable fillet it is an unknown module, as in OpenSCAD."
+
+[[module]]
+name = "chamfer_edges"
+signature = "chamfer_edges(d, edges = \"all\", except = undef, expect = undef) children"
+summary = "Cut the selected edges of the children (their union) with an equal-distance chamfer d."
+extension = "fillet"
+params = [
+    "d: number -- the distance along each face from the edge; r is accepted as another name",
+    "edges: selector = \"all\" -- as fillet_edges()",
+    "except: selector = undef -- edges to leave out",
+    "expect: number = undef -- the number of edges the selection must match",
+]
+example = "chamfer_edges(d = 1, edges = \"%circle and >z\") difference() {\n  cube([20, 20, 10]);\n  translate([10, 10, -1]) cylinder(d = 6, h = 12);\n}"
+notes = "Selectors as for fillet_edges(). Not built yet in this version: the children are rendered unchanged, with a fillet-not-built warning. Without --enable fillet it is an unknown module, as in OpenSCAD."
+
 # --- functions: numbers --------------------------------------------------------
 
 [[function]]

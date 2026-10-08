@@ -298,6 +298,7 @@ pub fn module_name(kind: &NodeKind) -> &'static str {
         NodeKind::Text(_) => "text",
         NodeKind::Part { .. } => "part",
         NodeKind::Sketch(_) => "sketch",
+        NodeKind::Fillet(f) => f.kind.module(),
     }
 }
 

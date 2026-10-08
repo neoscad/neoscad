@@ -219,6 +219,38 @@ impl Writer<'_> {
         self.out.push(b']');
     }
 
+    /// A fillet selector as an OpenSCAD value: one item bare, several as
+    /// a list; strings in canonical form, direction vectors as numbers.
+    fn selector(&mut self, s: &crate::fillet::Selector) {
+        use crate::fillet::Item;
+        let one = |w: &mut Self, item: &Item| match item {
+            Item::Expr(e) => w.quoted(&e.to_string()),
+            Item::Descriptor(d) => {
+                w.out.push(b'[');
+                for (i, x) in d.iter().enumerate() {
+                    if i > 0 {
+                        w.lit(", ");
+                    }
+                    w.int(x);
+                }
+                w.out.push(b']');
+            }
+        };
+        match s.items.as_slice() {
+            [item] => one(self, item),
+            items => {
+                self.out.push(b'[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        self.lit(", ");
+                    }
+                    one(self, item);
+                }
+                self.out.push(b']');
+            }
+        }
+    }
+
     /// `operator<<(CurveDiscretizer)` (without the experimental `$fe`).
     fn disc(&mut self, d: &Discretizer) {
         self.lit("$fn = ");
@@ -304,6 +336,35 @@ impl Writer<'_> {
             NodeKind::Part { name } => {
                 self.lit("part(name = ");
                 self.quoted(name);
+                self.lit(")");
+            }
+            // Printed as the call, as `part` is: the result is geometry
+            // the evaluator does not have, so the `.csg` of a filleted
+            // model runs only in NeoSCAD with `--enable fillet`
+            // (`docs/fillets.md`, sections 2 and 18). Selectors print in
+            // their canonical form, so two spellings of one selector
+            // share a cache key and the `.csg` parses back to the same
+            // node.
+            NodeKind::Fillet(f) => {
+                self.lit(f.kind.module());
+                self.lit("(");
+                self.lit(f.kind.size_name());
+                self.lit(" = ");
+                self.num(f.size);
+                self.lit(", edges = ");
+                self.selector(&f.edges);
+                self.lit(", except = ");
+                match &f.except {
+                    Some(s) => self.selector(s),
+                    None => self.lit("undef"),
+                }
+                self.lit(", expect = ");
+                match f.expect {
+                    Some(n) => self.int(n),
+                    None => self.lit("undef"),
+                }
+                self.lit(", ");
+                self.disc(&f.disc);
                 self.lit(")");
             }
             NodeKind::Fill => self.lit("fill()"),

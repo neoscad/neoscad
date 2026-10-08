@@ -42,6 +42,7 @@ pub mod dump;
 mod eval;
 pub mod extensions;
 pub mod features;
+pub mod fillet;
 mod heap;
 mod heap_expr;
 pub use extensions::{Extension, Extensions};
@@ -358,6 +359,14 @@ pub fn builtins() -> Vec<BuiltinName> {
         kind: Module,
         status: BuiltinStatus::Extension,
     });
+    // Fillets and chamfers (`--enable fillet`, `crate::fillet`).
+    for name in ["fillet_edges", "chamfer_edges"] {
+        out.push(BuiltinName {
+            name,
+            kind: Module,
+            status: BuiltinStatus::Extension,
+        });
+    }
     // The queries (`--enable query`, `crate::query`).
     out.push(BuiltinName {
         name: "anchor",

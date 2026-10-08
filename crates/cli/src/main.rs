@@ -172,7 +172,9 @@ struct Cli {
     /// sketches (`sketch() { ... }`), `query` its geometry queries
     /// (`anchor()`, `child_anchors()`, `child_bounds()`,
     /// `child_measure()`, `child_distance()`), `exact` STEP export
-    /// (`-o x.step`) with exact surfaces where `$fn` is not set. `all`
+    /// (`-o x.step`) with exact surfaces where `$fn` is not set, `fillet`
+    /// its `fillet_edges()` and `chamfer_edges()` (in development: the
+    /// arguments are checked and the children pass through unchanged). `all`
     /// turns on OpenSCAD's experiments only, never NeoSCAD's extensions.
     /// OpenSCAD's experimental features
     /// `textmetrics`, `object-function`, `import-function`,
@@ -1100,7 +1102,17 @@ mod tests {
         // `all` ends the list, as in OpenSCAD.
         assert_eq!(w(&["all", "foo"]).len(), 1);
         // NeoSCAD's own names are not OpenSCAD's unknown features.
-        assert!(w(&["predictible-output", "part", "sketch", "query", "exact"]).is_empty());
+        assert!(
+            w(&[
+                "predictible-output",
+                "part",
+                "sketch",
+                "query",
+                "exact",
+                "fillet"
+            ])
+            .is_empty()
+        );
         let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let sorted = |n: &[&str]| features(&names(n)).has(eval::Feature::PredictibleOutput);
         assert!(sorted(&["predictible-output"]));

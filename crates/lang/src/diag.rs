@@ -179,6 +179,12 @@ pub enum DiagCode {
     QueryEmpty,
     /// A geometry query in a host that cannot render, so has no answer.
     QueryUnavailable,
+    /// NeoSCAD's `fillet_edges()`/`chamfer_edges()` (`--enable fillet`):
+    /// an edge selector that does not parse, or is not a selector.
+    FilletSelector,
+    /// A fillet or chamfer call whose geometry this version does not
+    /// build yet: the children are rendered unchanged (warning).
+    FilletNotBuilt,
 }
 
 impl DiagCode {
@@ -243,6 +249,8 @@ impl DiagCode {
             DiagCode::QueryDuplicateAnchor => "query-duplicate-anchor",
             DiagCode::QueryEmpty => "query-empty",
             DiagCode::QueryUnavailable => "query-unavailable",
+            DiagCode::FilletSelector => "fillet-selector",
+            DiagCode::FilletNotBuilt => "fillet-not-built",
         }
     }
 }

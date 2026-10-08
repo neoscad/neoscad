@@ -69,6 +69,11 @@ pub(crate) enum BuiltinModule {
     /// NeoSCAD's `anchor()` (`--enable query`); in the table only when
     /// enabled.
     Anchor,
+    /// NeoSCAD's `fillet_edges()` (`--enable fillet`, `crate::fillet`);
+    /// in the table only when enabled.
+    FilletEdges,
+    /// NeoSCAD's `chamfer_edges()`, with `fillet_edges()`.
+    ChamferEdges,
     /// A statement of the sketch vocabulary (`crate::sketch`), bound only
     /// inside sketch bodies: never in the table.
     SketchStatement(crate::sketch::Vocab),
@@ -77,6 +82,16 @@ pub(crate) enum BuiltinModule {
 impl BuiltinModule {
     pub fn enabled(self) -> bool {
         self != BuiltinModule::Roof
+    }
+
+    /// The name `fillet_edges()`'s and `chamfer_edges()`'s argument
+    /// warnings use.
+    pub(crate) fn fillet_caller(self) -> &'static str {
+        if self == BuiltinModule::ChamferEdges {
+            "chamfer_edges"
+        } else {
+            "fillet_edges"
+        }
     }
 }
 
@@ -142,10 +157,23 @@ pub(crate) fn table(
     let anchor = extensions
         .has(crate::Extension::Query)
         .then_some(("anchor", Anchor));
+    // `fillet_edges` and `chamfer_edges` likewise. Their names are
+    // distinct from BOSL2's `fillet` and MCAD's `chamfer` modules, which a
+    // builtin of that name would not shadow but confuse (a program's own
+    // definitions always win; `docs/fillets.md`, section 2).
+    let fillet = extensions
+        .has(crate::Extension::Fillet)
+        .then_some([
+            ("fillet_edges", FilletEdges),
+            ("chamfer_edges", ChamferEdges),
+        ])
+        .into_iter()
+        .flatten();
     ALL.into_iter()
         .chain(part)
         .chain(sketch)
         .chain(anchor)
+        .chain(fillet)
         .map(|(n, b)| (syms.intern(n), b))
         .collect()
 }

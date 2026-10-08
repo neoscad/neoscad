@@ -33,15 +33,19 @@ pub enum Extension {
     /// adds no names to the language: it only makes `.step` and `.stp`
     /// output suffixes, which stay OpenSCAD's "Invalid suffix" without it.
     Exact,
+    /// 3D fillets and chamfers on selected edges: `fillet_edges()` and
+    /// `chamfer_edges()` (`docs/fillets.md`; see `crate::fillet`).
+    Fillet,
 }
 
 impl Extension {
     /// Every extension, in the order `--help` and the docs list them.
-    pub const ALL: [Extension; 4] = [
+    pub const ALL: [Extension; 5] = [
         Extension::Part,
         Extension::Sketch,
         Extension::Query,
         Extension::Exact,
+        Extension::Fillet,
     ];
 
     /// The `--enable` name.
@@ -51,6 +55,7 @@ impl Extension {
             Extension::Sketch => "sketch",
             Extension::Query => "query",
             Extension::Exact => "exact",
+            Extension::Fillet => "fillet",
         }
     }
 
@@ -63,6 +68,11 @@ impl Extension {
     /// would send sketches and get "unknown module" warnings back. The
     /// others are still accepted, silently, so a command line written for
     /// a later version is not rejected.
+    ///
+    /// `fillet` is not listed yet: until its geometry exists
+    /// (`docs/fillets.md`, stage F2) a call checks its arguments and
+    /// passes its child through unchanged, and a client that saw it
+    /// advertised would expect rounded edges back.
     pub fn implemented(self) -> bool {
         matches!(
             self,

@@ -622,7 +622,8 @@ fn uses_children(n: &Node) -> bool {
         | NodeKind::Minkowski { .. }
         | NodeKind::Hull
         | NodeKind::Resize { .. }
-        | NodeKind::Part { .. } => true,
+        | NodeKind::Part { .. }
+        | NodeKind::Fillet(_) => true,
     }
 }
 
@@ -1864,6 +1865,11 @@ impl Ctx<'_> {
             }
             NodeKind::Import(i) => Ok(self.import(n, i)),
             NodeKind::Text(t) => Ok(self.text(n, t)),
+            // `fillet_edges()`/`chamfer_edges()`: the blends are not
+            // built yet (`docs/fillets.md`, stage F2), so the result is the
+            // children's union, which the evaluator has already said with
+            // its `fillet-not-built` warning.
+            NodeKind::Fillet(_) => self.apply(n, Op::Union, kids),
         }
     }
 

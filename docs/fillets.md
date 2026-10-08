@@ -1,7 +1,11 @@
 # Design: 3D fillets and chamfers (`--enable fillet`)
 
-Status: design, not built. Written 2026-10-08 against `127be03` and the
-reference checkouts in `.reference/openscad` and `.reference/BOSL2`.
+Status: stage F0 built (the flag, both builtins, the selector parser and
+the node; section 15.1 records how, and where it departs from this
+text); F1 onwards not started. A call checks its arguments and passes its
+children through unchanged with a `fillet-not-built` warning. Written
+2026-10-08 against `127be03` and the reference checkouts in
+`.reference/openscad` and `.reference/BOSL2`.
 Claims about this codebase cite `path:line`; claims about OpenSCAD and
 BOSL2 cite the reference checkouts; claims about other projects cite what
 was retrieved on 2026-10-08, or say "unverified".
@@ -307,8 +311,16 @@ A selector string is case-insensitive; whitespace separates tokens.
 | `@name` | edges passing through anchor `name` of the children, and parallel to its direction if it has one (needs `--enable query`) | BOSL2 `named_anchor()` |
 | `box(x0, y0, z0, x1, y1, z1)` | edges lying wholly in the box | the earlier audit's "position or region" |
 
-Operators, loosest first: `or`, `exc` (set difference), `and`, `not`, and
-parentheses, as CadQuery's (`selectors.rst:33-50`). So `"|z and >x"` is
+Operators, loosest first: `not`, `exc` (set difference; `except` is the
+same), `or`, `and`, and parentheses. This is CadQuery's grammar as its
+code builds it (`cadquery/selectors.py`, `_makeExpressionGrammar`, `master`,
+retrieved 2026-10-08: `infix_notation` with `and`, then `or`, then
+`exc`/`except`, then `not`), not the order this section first gave
+(`or` loosest, `not` tightest), which `selectors.rst` does not state
+either. So `not convex and |z` is `not (convex and |z)`. CadQuery rejects
+a `not` after a binary operator; NeoSCAD accepts it with the same rule,
+`not` negating everything to its right up to the closing parenthesis
+(`|z and not >x or new` is `|z and not (>x or new)`). So `"|z and >x"` is
 the vertical edges on the +x side, `"%circle and >z"` the top hole rims,
 `"child(0, 1)"` where child 1 meets child 0, `"all exc <z"` everything but
 the bottom outline.
@@ -884,6 +896,56 @@ F0–F4: 9–13.5 person-weeks.
 - Independently, if the *mesh* result fails (non-manifold output, or a
   volume off the closed form by more than the sagitta bound) on more than
   1% of the corpus, stop and fix before any further class.
+
+### 15.1 Stage F0 as built
+
+- **Flag.** `Extension::Fillet`, `--enable fillet`
+  (`crates/eval/src/extensions.rs`), outside `--enable all`, checked
+  against `Feature.cc` by the existing test. `implemented()` stays false,
+  so `serve` does not advertise it until F2 builds geometry.
+- **Builtins.** `fillet_edges` and `chamfer_edges` enter the module table
+  only with the flag (`crates/eval/src/builtins/modules.rs`, `table`);
+  off, a call is OpenSCAD's unknown-module warning and the JSON hint
+  names `--enable fillet` (`crates/session/src/diag.rs`). Positional
+  order is `r`/`d`, `edges`, `except`, `expect`; `chamfer_edges` also
+  takes `r` (giving both `d` and `r` is an error).
+- **Selectors.** `eval::fillet::selector` parses the strings into an
+  expression tree stored on the node, with byte spans for errors. As
+  built against the grammar of 5.2: precedence is CadQuery's (above);
+  `except` is `exc` (CadQuery has both); `>>z`/`<<z` without an index
+  are index -1 (CadQuery's default); a bare `x`, `y` or `z` is `|x`...
+  (CadQuery's bare direction); `xy`/`xz`/`yz`, named views (`top`) and
+  `>z[i]` are errors with a hint (`>z[i]` suggests `>>z[i]`); vector
+  directions take signed decimals with an optional exponent; part names
+  are `[A-Za-z0-9_.-]+` or quoted with `'...'` and anchor names the
+  former, both case-sensitive (the rest is case-insensitive); `box()`
+  requires each minimum not to exceed its maximum. `part(...)` without
+  `--enable part` and `@name` without `--enable query` are selector
+  errors.
+- **Errors.** `fillet-selector` (a selector string that does not parse,
+  or a value that is not a selector) and `invalid-argument` (size,
+  `expect`) are `ERROR` lines; the call then becomes a plain `group()`,
+  so its children render sharp. A selector error points at the bad
+  text inside the string when the argument is a literal written without
+  escapes, with a `replace` edit for "did you mean" (edit distance with
+  swaps, within a third of the word); otherwise at the expression. The
+  message gives the 1-based column in the string.
+- **Node.** `NodeKind::Fillet(Box<FilletNode>)` holds the kind, size,
+  parsed `edges` and `except`, `expect` and the discretizer. The `.csg`
+  prints `fillet_edges(r = 2, edges = "|z and >x", except = undef,
+  expect = undef, $fn = 0, $fa = 12, $fs = 2)` with selectors in a
+  canonical form (lower case, minimal parentheses) that parses back to
+  the same tree; the key is the same label, so `"|Z"` and `"|z"` share
+  cache entries. A `.csg` export reads back to itself with the flag.
+- **Geometry.** The renderer returns the children's union
+  (`crates/geom/src/evaluate.rs`); the preview treats the node as a leaf
+  computed with geometry, as `hull()` (`crates/geom/src/csg.rs`); fast
+  bounds give up on it; the STEP walk does not descend into it. Each
+  valid call warns `fillet-not-built` ("edge rounding is not built yet
+  ...; the children are rendered unchanged").
+- **Not in F0** (`docs/followups.md`, "Fillets and chamfers"): export
+  exit codes for a failed call, `child(i)` range checks and anchor
+  resolution, the 2D-child error.
 
 ## 16. Test plan
 

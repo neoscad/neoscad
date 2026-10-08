@@ -843,6 +843,18 @@ impl<'a> Evaluator<'a> {
             }
             B::SketchStatement(v) => Some(Ret::Done(self.sketch_statement(v, sr, i, ctx))),
             B::Anchor => Some(Ret::Done(self.anchor_statement(sr, i, ctx))),
+            B::FilletEdges | B::ChamferEdges => {
+                let args = tri!(self.inst_args(sr, i, ctx));
+                let (req, opt) = crate::fillet::params(b);
+                let p = self.params(args, loc, req, opt, b.fillet_caller());
+                let kind = self.fillet_kind(b, &p, sr, i);
+                let node = self.new_node(kind, sr, i);
+                let post = Post {
+                    mark: p.mark,
+                    ..PLAIN
+                };
+                self.begin_wrap(node, post, sr, i, ctx)
+            }
             _ => {
                 // `geometry_module` and `geometry_node`.
                 let args = tri!(self.inst_args(sr, i, ctx));

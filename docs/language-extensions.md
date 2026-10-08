@@ -99,6 +99,10 @@ extension:
   "STEP export:" so they are never mistaken for OpenSCAD's. Its user
   reference is `docs/step-export.md`; the apps, `serve`, MCP and the web
   page offer it behind the same switch.
+  A fifth, `fillet` (`docs/fillets.md`), adds `fillet_edges()` and
+  `chamfer_edges()` on the same terms, with diagnostic codes starting
+  `fillet-`; it is not advertised by `serve` until its geometry exists
+  (`Extension::implemented`).
 - **One extension set in the evaluator.** `eval::Options::parts: bool`
   (`crates/eval/src/lib.rs:226-230`) becomes `extensions: Extensions`,
   a bit set like `Features` (`crates/eval/src/features.rs:93-154`) with

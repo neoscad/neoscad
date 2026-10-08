@@ -137,6 +137,11 @@ pub enum NodeKind {
     /// identical polygon shares its cache entry
     /// (`docs/language-extensions.md`, section 4.4).
     Sketch(Box<SketchNode>),
+    /// NeoSCAD's `fillet_edges()` and `chamfer_edges()` (only with
+    /// `--enable fillet`; `crate::fillet`): its children's union with the
+    /// selected edges rounded or cut. The `.csg` dump prints the call, as
+    /// it prints `part()` (`docs/fillets.md`, section 18, decision 4).
+    Fillet(Box<crate::fillet::FilletNode>),
 }
 
 /// A polygon's points, paths and convexity, borrowed from its node.

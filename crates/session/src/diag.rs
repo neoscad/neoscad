@@ -258,6 +258,15 @@ fn hint(d: &Logged, names: &Names) -> Option<String> {
             "`anchor()` is a NeoSCAD extension (geometry queries): enable it with \
              `--enable query`, or define a module called `anchor`"
         }
+        DiagCode::UnknownModule
+            if matches!(quoted(&d.message), Some("fillet_edges" | "chamfer_edges")) =>
+        {
+            let name = quoted(&d.message).unwrap_or_default();
+            return Some(format!(
+                "`{name}()` is a NeoSCAD extension (3D fillets and chamfers): enable it with \
+                 `--enable fillet`, or define a module called `{name}`"
+            ));
+        }
         DiagCode::UnknownFunction
             if matches!(
                 quoted(&d.message),

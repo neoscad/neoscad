@@ -596,9 +596,13 @@ fn role(n: &Node) -> Role {
         | NodeKind::Color { .. } => Role::Op(CsgOp::Union),
         NodeKind::IntersectionFor => Role::Op(CsgOp::Intersection),
         NodeKind::Csg(op) => Role::Op(*op),
-        NodeKind::Minkowski { .. } | NodeKind::Hull | NodeKind::Fill | NodeKind::Resize { .. } => {
-            Role::AdvLeaf
-        }
+        // A fillet is computed with real geometry in the preview, as
+        // `hull` and `minkowski` are (`docs/fillets.md`, section 10).
+        NodeKind::Minkowski { .. }
+        | NodeKind::Hull
+        | NodeKind::Fill
+        | NodeKind::Resize { .. }
+        | NodeKind::Fillet(_) => Role::AdvLeaf,
         _ => Role::Leaf,
     }
 }

@@ -278,7 +278,10 @@ impl Walk<'_> {
             | NodeKind::Surface { .. }
             | NodeKind::Import(_)
             | NodeKind::Text(_)
-            | NodeKind::Part { .. } => None,
+            | NodeKind::Part { .. }
+            // A fillet changes its children's shape, and (with concave
+            // blends) can add material: unknown until it is built.
+            | NodeKind::Fillet(_) => None,
         }
     }
 
