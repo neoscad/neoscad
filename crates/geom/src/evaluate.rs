@@ -362,6 +362,14 @@ impl Default for Cache {
     }
 }
 
+/// The cache key of a two-pass fillet node's first-pass result, from the
+/// node's own key: another fixed bijection, so it meets a node's key (or
+/// a preview product's) only by a collision of SHA-256 prefixes.
+fn stage_key(key: Key) -> Key {
+    key.wrapping_mul(0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c835)
+        .wrapping_add(0xbb67_ae85_84ca_a73b)
+}
+
 /// Default cache budget, the sum of OpenSCAD's two default cache sizes.
 pub const CACHE_BUDGET: usize = 200 << 20;
 
@@ -426,6 +434,13 @@ impl Cache {
         self.order.insert(self.clock, k);
         self.bytes += cost;
         self.shrink();
+    }
+
+    fn remove(&mut self, k: Key) {
+        if let Some(old) = self.entries.remove(&k) {
+            self.bytes -= old.cost;
+            self.order.remove(&old.stamp);
+        }
     }
 
     fn shrink(&mut self) {
@@ -1274,6 +1289,34 @@ impl Renderer {
         self.keep(key, None, true);
     }
 
+    /// Keep what a two-pass fillet node's first pass made
+    /// (`docs/fillets.md`, section 15.6), under a key hashed apart from
+    /// the node's own (`key`): the check after the boolean measures the
+    /// first pass's blends on it, and the second pass's tools are
+    /// conformed to it. It shares the geometry cache's budget and order.
+    pub(crate) fn keep_fillet_stage(&self, key: u128, g: Geometry) {
+        self.keep(stage_key(key), Some(g), false);
+    }
+
+    /// The first pass's result [`Renderer::keep_fillet_stage`] kept for
+    /// the fillet node of key `key`, if the cache still holds it.
+    pub(crate) fn fillet_stage(&self, key: u128) -> Option<Geometry> {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(stage_key(key))
+            .and_then(|(g, _, _)| g)
+    }
+
+    /// Drop the cached result of the node of key `key`, so the next
+    /// render computes it again (and keeps its first pass's stage).
+    pub(crate) fn forget(&self, key: u128) {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
+    }
+
     fn keep(&self, key: u128, geom: Option<Geometry>, image: bool) {
         let replay = Replay {
             msgs: None,
@@ -1898,68 +1941,103 @@ impl Ctx<'_> {
             out.geom = Some(g);
             return Ok(out);
         }
-        let tris = crate::fillet::triangles(&g);
-        let blends =
-            match crate::fillet::blends(self.r, n, self.keys, self.opts, 1, Some(&tris), true) {
-                Ok(Some(b)) => b,
-                Ok(None) => {
-                    out.geom = Some(g);
-                    return Ok(out);
-                }
-                Err(_) => return Err(Unsupported::interrupted()),
-            };
         // The child converted (if it is still a mesh) and the tools drawn
         // from the node's own block, in tool order.
         let ids = Seq {
             block: self.block(n, OWN),
             used: std::cell::Cell::new(0),
         };
-        let child = match g {
-            Geometry::Manifold(m) => Arc::unwrap_or_clone(m),
-            Geometry::PolySet(ps) => {
-                let mut w = Vec::new();
-                let mut e = Vec::new();
-                ManifoldGeometry::from_polyset(&ps, &ids, &mut w, &mut e)
-            }
-            Geometry::Polygon2d(_) => unreachable!("the dimension is 3"),
-        };
-        let child_ids = child.own_face_ids();
-        let mut tool_ids = Vec::with_capacity(blends.tools.len());
-        let mut adds = vec![child];
-        let mut subs = Vec::new();
-        for t in &blends.tools {
-            let id = ids.reserve(1);
-            tool_ids.push(id);
-            let tool = ManifoldGeometry::from_tagged(&t.mesh, id);
-            if tool.is_empty() {
-                // Not a valid solid after all: the result would not be
-                // the call's, so the child stays as it is (the report
-                // says the blend is missing).
-                out.geom = Some(Geometry::Manifold(Arc::new(
-                    adds.into_iter().next().expect("the child"),
-                )));
-                return Ok(out);
-            }
-            if t.add {
-                adds.push(tool);
-            } else {
-                subs.push(tool);
-            }
-        }
+        let mut solid: Option<ManifoldGeometry> = None;
+        let mut first: Option<Geometry> = Some(g);
         let token = self.token.as_ref();
-        let Some(joined) = ManifoldGeometry::batch_until(OpType::Add, adds, token) else {
-            return Ok(out);
-        };
-        let mut parts = vec![joined];
-        parts.extend(subs);
-        let result = ManifoldGeometry::batch_until(OpType::Subtract, parts, token);
-        if result.as_ref().is_some_and(ManifoldGeometry::is_cancelled) {
-            return Err(Unsupported::interrupted());
+        // A two-pass call (`docs/fillets.md`, section 15.6) builds its
+        // second pass on what its first made, conformed to that mesh, as
+        // the outer of two nested calls would.
+        for pass in [crate::fillet::Pass::First, crate::fillet::Pass::Second] {
+            let current = match (&solid, &first) {
+                (Some(m), _) => Geometry::Manifold(Arc::new(m.clone())),
+                (None, Some(g)) => g.clone(),
+                (None, None) => unreachable!("the child or a pass's result"),
+            };
+            let tris = crate::fillet::triangles(&current);
+            let blends = match crate::fillet::blends(
+                self.r,
+                n,
+                self.keys,
+                self.opts,
+                1,
+                Some(&tris),
+                true,
+                pass,
+            ) {
+                Ok(Some(b)) => b,
+                Ok(None) => break,
+                Err(_) => return Err(Unsupported::interrupted()),
+            };
+            if pass == crate::fillet::Pass::Second {
+                // What the first pass made, for the check after the
+                // boolean (`fillet::blend_diags`), which measures each
+                // pass's blends on the mesh that pass was applied to.
+                self.r
+                    .keep_fillet_stage(self.hashes[n.index], current.clone());
+            }
+            let child = match solid.take() {
+                Some(m) => m,
+                None => match first.take().expect("the child") {
+                    Geometry::Manifold(m) => Arc::unwrap_or_clone(m),
+                    Geometry::PolySet(ps) => {
+                        let mut w = Vec::new();
+                        let mut e = Vec::new();
+                        ManifoldGeometry::from_polyset(&ps, &ids, &mut w, &mut e)
+                    }
+                    Geometry::Polygon2d(_) => unreachable!("the dimension is 3"),
+                },
+            };
+            let child_ids = child.own_face_ids();
+            let mut tool_ids = Vec::with_capacity(blends.tools.len());
+            let mut adds = vec![child];
+            let mut subs = Vec::new();
+            for t in &blends.tools {
+                let id = ids.reserve(1);
+                tool_ids.push(id);
+                let tool = ManifoldGeometry::from_tagged(&t.mesh, id);
+                if tool.is_empty() {
+                    // Not a valid solid after all: the result would not be
+                    // the call's, so the child stays as it is (the report
+                    // says the blend is missing).
+                    out.geom = Some(current);
+                    return Ok(out);
+                }
+                if t.add {
+                    adds.push(tool);
+                } else {
+                    subs.push(tool);
+                }
+            }
+            let Some(joined) = ManifoldGeometry::batch_until(OpType::Add, adds, token) else {
+                return Ok(out);
+            };
+            let mut parts = vec![joined];
+            parts.extend(subs);
+            let result = ManifoldGeometry::batch_until(OpType::Subtract, parts, token);
+            if result.as_ref().is_some_and(ManifoldGeometry::is_cancelled) {
+                return Err(Unsupported::interrupted());
+            }
+            match result {
+                Some(mut m) => {
+                    m.adopt_tools(&child_ids, &tool_ids);
+                    solid = Some(m);
+                }
+                None => {
+                    out.geom = None;
+                    return Ok(out);
+                }
+            }
         }
-        out.geom = result.map(|mut m| {
-            m.adopt_tools(&child_ids, &tool_ids);
-            Geometry::Manifold(Arc::new(m))
-        });
+        out.geom = match (solid, first) {
+            (Some(m), _) => Some(Geometry::Manifold(Arc::new(m))),
+            (None, g) => g,
+        };
         Ok(out)
     }
 

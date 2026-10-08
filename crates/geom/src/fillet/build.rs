@@ -64,6 +64,9 @@ pub(crate) enum Problem {
         at: V,
         edges: Vec<usize>,
         why: String,
+        /// Convex and concave edges meet there: what two passes, one
+        /// sense each, can round (`docs/fillets.md`, section 15.6).
+        mixed: bool,
     },
     /// Something the checks above should have caught.
     Failed(String),
@@ -163,7 +166,7 @@ pub struct Built {
 /// An arc's axis: its circle's centre, the unit axis it turns
 /// counter-clockwise about from its start to its end, the angle, and the
 /// radius.
-fn arc_of(e: &Edge) -> Option<(V, V, f64, f64)> {
+pub(crate) fn arc_of(e: &Edge) -> Option<(V, V, f64, f64)> {
     let Curve::Circle {
         center,
         normal,
@@ -184,7 +187,7 @@ fn arc_of(e: &Edge) -> Option<(V, V, f64, f64)> {
 
 /// The unit direction in which B-rep edge `x` leaves vertex `v` (one of
 /// its ends): along a line, or along an arc's tangent there.
-fn leaving(b: &Brep, x: u32, v: u32) -> V {
+pub(crate) fn leaving(b: &Brep, x: u32, v: u32) -> V {
     let e = &b.edges[x as usize];
     let at_start = e.start == v;
     let t = if at_start { e.range[0] } else { e.range[1] };
@@ -309,6 +312,8 @@ pub(crate) fn prepare(
                 .flat_map(|&x| t.edge_faces[x as usize].iter().copied())
                 .filter(|f| !ab.contains(f))
                 .collect();
+            let sense_of = |x: u32| fact(x).map(|fi| facts.edges[fi as usize].sense);
+            let mixed = selected.iter().any(|&x| sense_of(x) != Some(e.sense));
             let vertex_problem = |why: &str| {
                 let mut es = vec![k];
                 es.extend(selected.iter().map(|x| in_list[x]));
@@ -317,12 +322,12 @@ pub(crate) fn prepare(
                     at: vp,
                     edges: es,
                     why: why.to_string(),
+                    mixed,
                 }
             };
-            let sense_of = |x: u32| fact(x).map(|fi| facts.edges[fi as usize].sense);
-            if selected.iter().any(|&x| sense_of(x) != Some(e.sense)) {
+            if mixed {
                 return Err(vertex_problem(
-                    "convex and concave edges meet, which one call cannot round",
+                    "convex and concave edges meet, which one pass cannot round",
                 ));
             }
             let simple = others.len() == 1 && around.len() == 2;
@@ -523,6 +528,7 @@ pub(crate) fn prepare(
                 at: b.vertices[v as usize],
                 edges: es.iter().map(|x| x.0).collect(),
                 why: "the corner's edges could not all be blended".into(),
+                mixed: false,
             });
         }
         corners.push(Corner {

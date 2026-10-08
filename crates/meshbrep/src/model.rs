@@ -43,10 +43,14 @@ pub enum Surface {
         /// The radius.
         radius: f64,
     },
-    /// A ring torus about the unit `axis` through `center`: what an arc
-    /// off the axis sweeps in `rotate_extrude`. `major_radius` must be
-    /// larger than `minor_radius` (a torus that crosses its own axis is
-    /// refused as malformed).
+    /// A torus about the unit `axis` through `center`: what an arc off
+    /// the axis sweeps in `rotate_extrude`. `major_radius` must be above
+    /// zero. When it is no larger than `minor_radius` (a spindle or horn
+    /// torus, which crosses its own axis) the surface is the torus's outer
+    /// part only, the apple: the points nearer the tube's centre circle on
+    /// their own side of the axis than on the other (a large fillet on a
+    /// boss's top rim). Faces on it must keep off the axis. STEP writes it
+    /// as a `DEGENERATE_TOROIDAL_SURFACE` selecting the outer part.
     ///
     /// Its frame (STEP's `TOROIDAL_SURFACE`) puts the point at
     /// `(u, v)` at `origin + (R + r cos v)(cos u x + sin u y) + r sin v z`.

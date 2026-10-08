@@ -183,114 +183,6 @@ fn diag_span(program: &lang::Program, call: Span, code: lang::diag::DiagCode) ->
     at.unwrap_or(call)
 }
 
-/// The edit that splits the call at `span` into two nested calls, the
-/// concave edges first (the inner one), then the convex ones of its
-/// result (`docs/fillets.md`, section 7.4): the call's head written
-/// twice, with `except = "concave"` and `except = "convex"` under the
-/// default `edges = "all"` and no `except`, otherwise its `edges` string
-/// narrowed with `and convex` and `and concave`. `None` unless `edges`
-/// is absent or a plain string literal.
-pub fn nested_edit(program: &lang::Program, span: Span) -> Option<(Span, String)> {
-    let (inst, text) = call_at(program, span)?;
-    let ast = &program.ast;
-    let bytes = text.as_bytes();
-    let name = ast.name(inst.name);
-    let start = inst.span.start as usize;
-    let at = start + text.get(start..)?.find(name)?;
-    // The argument list's closing parenthesis, strings skipped.
-    let open = at + text.get(at..)?.find('(')?;
-    let mut depth = 0i32;
-    let mut close = None;
-    let mut i = open;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-            }
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(i);
-                    break;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    let close = close?;
-    let named = inst
-        .args
-        .iter()
-        .find(|a| a.name.is_some_and(|x| ast.name(x) == "edges"));
-    let positional = inst.args.iter().filter(|a| a.name.is_none()).nth(1);
-    // Under the default `edges = "all"` (absent or written), each call
-    // keeps it and leaves the other sense out with `except`. Narrowing
-    // `edges` instead (`"(all) and convex"`) made the edges the inner
-    // call creates and v1 cannot round (the ellipses where two mitred
-    // concave blends meet) named ones, so errors, and the rewritten
-    // model of a block on a plate failed where the original only warned
-    // about them (section 15.5).
-    let except = inst
-        .args
-        .iter()
-        .find(|a| a.name.is_some_and(|x| ast.name(x) == "except"))
-        .or_else(|| inst.args.iter().filter(|a| a.name.is_none()).nth(2));
-    let all = match named.or(positional) {
-        None => true,
-        Some(a) => {
-            let s = ast.expr(a.expr).span;
-            text.get(s.start as usize..s.end as usize)
-                .and_then(|l| l.strip_prefix('"')?.strip_suffix('"'))
-                .is_some_and(|inner| inner.trim().eq_ignore_ascii_case("all"))
-        }
-    };
-    if all && except.is_none() {
-        let sep = if inst.args.is_empty() { "" } else { ", " };
-        let head = text.get(at..close)?.trim_end();
-        return Some((
-            Span::new(span.file, at as u32, close as u32 + 1),
-            format!("{head}{sep}except = \"concave\") {head}{sep}except = \"convex\")"),
-        ));
-    }
-    let head = |sense: &str| -> Option<String> {
-        match named.or(positional) {
-            Some(a) => {
-                let s = ast.expr(a.expr).span;
-                let (s0, s1) = (s.start as usize, s.end as usize);
-                let lit = text.get(s0..s1)?;
-                let inner = lit.strip_prefix('"')?.strip_suffix('"')?;
-                if inner.contains('\\') || inner.contains('"') {
-                    return None;
-                }
-                Some(format!(
-                    "{}\"({inner}) and {sense}\"{}",
-                    text.get(at..s0)?,
-                    text.get(s1..=close)?
-                ))
-            }
-            None => {
-                let sep = if inst.args.is_empty() { "" } else { ", " };
-                Some(format!(
-                    "{}{sep}edges = \"{sense}\")",
-                    text.get(at..close)?.trim_end()
-                ))
-            }
-        }
-    };
-    Some((
-        Span::new(span.file, at as u32, close as u32 + 1),
-        format!("{} {}", head("convex")?, head("concave")?),
-    ))
-}
-
 fn edge_json(e: &EdgeFact, index: usize, status: &str) -> Value {
     let mut v = json!({
         "index": index,
@@ -350,6 +242,29 @@ fn skipped_json(p: &Plan, f: &Facts) -> Value {
     )
 }
 
+/// The two passes of a call built in two (`docs/fillets.md`, section
+/// 15.6): per pass, the sense it rounds and the call's edges it rounds
+/// (their numbers in `edges`); the second also how many edges it rounds
+/// in all, `continued` of them edges the first pass made that continue
+/// the call's edges across its blends.
+fn passes_json(p: &Plan, s: &fillet::SecondPass, first: &fillet::Built) -> Value {
+    let number = |i: usize| p.selected.iter().position(|&x| x == i).map(|k| k + 1);
+    let first_edges: Vec<usize> = first.edges.iter().filter_map(|&i| number(i)).collect();
+    let mut second_edges: Vec<usize> = s
+        .origin
+        .iter()
+        .flatten()
+        .filter_map(|&i| number(i))
+        .collect();
+    second_edges.sort_unstable();
+    second_edges.dedup();
+    let continued = s.origin.iter().filter(|o| o.is_none()).count();
+    json!([
+        {"pass": 1, "sense": s.first.name(), "edges": first_edges, "count": first.edges.len()},
+        {"pass": 2, "sense": s.sense.name(), "edges": second_edges, "count": s.selected.len(), "continued": continued},
+    ])
+}
+
 /// One call's report: its place, arguments, status and selected edges.
 pub fn plan_json(p: &Plan, index: usize, at: Option<Value>, pin: Option<Value>) -> Value {
     let mut v = json!({
@@ -374,7 +289,11 @@ pub fn plan_json(p: &Plan, index: usize, at: Option<Value>, pin: Option<Value>) 
             .map(|(k, &i)| {
                 let status = if p.unsupported.contains(&i) {
                     "unsupported"
-                } else if p.build.as_ref().is_some_and(|b| b.edges.contains(&i)) {
+                } else if p.build.as_ref().is_some_and(|b| b.edges.contains(&i))
+                    || p.second
+                        .as_ref()
+                        .is_some_and(|s| s.origin.contains(&Some(i)))
+                {
                     "built"
                 } else {
                     "selected"
@@ -387,6 +306,9 @@ pub fn plan_json(p: &Plan, index: usize, at: Option<Value>, pin: Option<Value>) 
             v["edges_omitted"] = json!(p.selected.len() - MAX_EDGES);
         }
         v["unsupported"] = json!(p.unsupported.len());
+        if let (Some(s), Some(b)) = (&p.second, &p.build) {
+            v["passes"] = passes_json(p, s, b);
+        }
         v["skipped"] = skipped_json(p, f);
         v["selectable"] = json!(f.edges.iter().filter(|e| e.skip.is_none()).count());
         if let Some((lo, hi)) = f.bbox {
@@ -462,7 +384,6 @@ pub fn report<'a, W: std::io::Write>(
                     (Some(fillet::Fix::Size(x)), Some(prog), Some(o)) => {
                         size_edit(prog, o.span, &fillet::number_text(x))
                     }
-                    (Some(fillet::Fix::Nested), Some(prog), Some(o)) => nested_edit(prog, o.span),
                     _ => None,
                 };
                 let replacement = if i != 0 {
@@ -548,6 +469,13 @@ pub fn line_text(v: &Value) -> String {
     let mut out = format!("{module}{line}: {what}, {size_name} {size}");
     if let Some(sel) = v["selector"].as_str() {
         out.push_str(&format!(", edges = {sel}"));
+    }
+    if let Some([a, b]) = v["passes"].as_array().map(Vec::as_slice) {
+        out.push_str(&format!(
+            ", in two passes ({}, then {})",
+            a["sense"].as_str().unwrap_or(""),
+            b["sense"].as_str().unwrap_or("")
+        ));
     }
     match status {
         "selected" | "2d" | "empty" | "no-brep" => {}

@@ -207,12 +207,16 @@ fn bytes_are_the_same_at_any_thread_count_and_cache_state() {
                 "sphere_rim",
                 "notch_rim",
                 "rotated_box_top",
+                "bracket_all",
+                "block_plate_all",
+                "boss_spindle",
+                "nested_unequal",
             ]
             .contains(&n.as_str())
         })
         .map(|(_, s, _)| s)
         .collect();
-    assert_eq!(models.len(), 10);
+    assert_eq!(models.len(), 14);
     let both = |r: &Renderer, m: &String| {
         let (mesh, exact) = render(r, m);
         (mesh.to_bits(), exact.unwrap().0)
@@ -341,11 +345,11 @@ fn every_size_fix_makes_the_call_build() {
             3.5,
             DiagCode::FilletTooLarge,
         ),
-        // A boss's top rim: the blend's centre must stay further from
-        // the axis than its radius.
+        // A boss's top rim: past half the boss's radius the blend is a
+        // spindle torus (stage F5a), but it must leave some of the top.
         (
             "fillet_edges(r = R, edges = \"%circle and >z\") cylinder(r = 6, h = 20);",
-            4.0,
+            6.5,
             DiagCode::FilletTooLarge,
         ),
         // Both rims of a tube's top, 2 apart.
@@ -399,24 +403,67 @@ fn every_size_fix_makes_the_call_build() {
     }
 }
 
-/// Convex and concave edges at one vertex: refused, with the nested
-/// rewrite; and the nested calls, concave first, build.
+/// Convex and concave edges at one vertex (`docs/fillets.md`, section
+/// 15.6): one call builds them in two passes, concave first, whose
+/// second pass rounds exactly the call's convex edges as the first left
+/// them, and the edges continuing them across its blends; the STEP is
+/// the nested rewrite's, byte for byte.
 #[test]
-fn a_mixed_corner_is_refused_and_two_passes_build() {
+fn a_mixed_corner_builds_in_two_passes() {
     let block = "union() { cube([20, 20, 5]); translate([5, 5, 0]) cube([10, 10, 15]); }";
     let p = plan(&format!("fillet_edges(r = 1) {block}"));
-    assert_eq!(p.status, Status::UnsupportedVertex);
-    let d = &p.diags[p.diags.len() - 1];
-    assert_eq!(d.code, DiagCode::FilletUnsupportedVertex);
-    assert_eq!(d.fix, Some(Fix::Nested));
-    assert!(d.hints[0].contains("concave"), "{:?}", d.hints);
-    // The rewrite's two calls: the concave edges first.
+    assert_eq!(p.status, Status::Built, "{:?}", p.diags);
+    assert!(codes(&p).is_empty(), "{:?}", p.diags);
+    let s = p.second.as_ref().expect("a second pass");
+    assert_eq!(
+        (s.first, s.sense),
+        (fillet::Sense::Concave, fillet::Sense::Convex)
+    );
+    assert_eq!(p.build.as_ref().unwrap().edges.len(), 4);
+    // The 20 convex edges, each found again; the first pass's ellipses
+    // (convex, where its mitred blends meet) are not the call's.
+    assert_eq!(s.selected.len(), 20);
+    assert!(s.origin.iter().all(Option::is_some));
+    // An L-bracket: its end faces' outlines now cross the inner blend, so
+    // the second pass adds the two arcs that continue them.
+    let bracket = "union() { cube([40, 30, 5]); cube([40, 5, 30]); }";
+    let p = plan(&format!("fillet_edges(r = 1) {bracket}"));
+    assert_eq!(p.status, Status::Built, "{:?}", p.diags);
+    let s = p.second.as_ref().expect("a second pass");
+    assert_eq!(s.origin.iter().filter(|o| o.is_none()).count(), 2);
+    // A selector naming only the end face's outline: the arc joins it.
     let p = plan(&format!(
-        "fillet_edges(r = 1, edges = \"(all) and concave\") {block}"
+        "fillet_edges(r = 1, edges = \">x or concave\") {bracket}"
     ));
     assert_eq!(p.status, Status::Built, "{:?}", p.diags);
-    let p = plan(&format!("fillet_edges(r = 1, except = \"convex\") {block}"));
-    assert_eq!(p.status, Status::Built, "{:?}", p.diags);
+    let s = p.second.as_ref().expect("a second pass");
+    assert_eq!(s.selected.len(), 7);
+    // The same file as the two nested calls.
+    let one = render(&Renderer::new(), &format!("fillet_edges(r = 1) {block}"));
+    let two = render(
+        &Renderer::new(),
+        &format!(
+            "fillet_edges(r = 1, except = \"concave\") fillet_edges(r = 1, except = \"convex\") {block}"
+        ),
+    );
+    assert_eq!(one.0.to_bits(), two.0.to_bits());
+    assert_eq!(one.1.unwrap().0, two.1.unwrap().0);
+}
+
+/// A second pass's size problem is reported in that pass, with a hint
+/// that builds the whole call.
+#[test]
+fn a_second_pass_too_large_offers_a_size_that_builds() {
+    let src = "fillet_edges(r = R) union() { cube([40, 30, 5]); cube([40, 5, 30]); }";
+    let p = plan(&src.replace('R', "2.6"));
+    assert_eq!(p.status, Status::Overlap, "{:?}", p.diags);
+    let d = p.diags.last().unwrap();
+    assert!(d.message.contains("second pass"), "{}", d.message);
+    let Some(Fix::Size(fix)) = d.fix else {
+        panic!("no size: {:?}", d)
+    };
+    let fixed = plan(&src.replace('R', &fillet::number_text(fix)));
+    assert_eq!(fixed.status, Status::Built, "{fix}: {:?}", fixed.diags);
 }
 
 /// A call that selects lines and circles together builds both: a plate's

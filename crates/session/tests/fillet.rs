@@ -269,53 +269,45 @@ fn a_failed_call_fails_check_with_its_fix() {
     assert_eq!(v["fillets"][0]["status"], "built");
 }
 
-/// Convex and concave edges at a vertex: refused, and the edit rewrites
-/// the call as two nested ones, the concave edges first.
+/// Convex and concave edges at a vertex (`docs/fillets.md`, section
+/// 15.6): one call rounds them in two passes, concave first, reports
+/// both, and makes exactly the solid the nested rewrite v1 offered.
 #[test]
-fn a_mixed_vertex_offers_the_nested_rewrite() {
-    let head = "fillet_edges(r = 1, edges = \"all\")";
-    let src = format!(
-        "{head} union() {{ cube([20, 20, 5]); translate([5, 5, 0]) cube([10, 10, 15]); }}\n"
-    );
+fn a_mixed_vertex_builds_in_two_passes() {
+    let block = "union() { cube([20, 20, 5]); translate([5, 5, 0]) cube([10, 10, 15]); }";
+    let src = format!("fillet_edges(r = 1, edges = \"all\") {block}\n");
     let v = check(&session(src.as_bytes()), true);
-    assert_eq!(v["exit_code"], 1);
-    let d = v["diagnostics"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|d| d["code"] == "fillet-unsupported-vertex")
-        .expect("unsupported vertex")
-        .clone();
-    let text = d["hints"][0]["replace"]["text"].as_str().unwrap();
-    assert_eq!(
-        text,
-        "fillet_edges(r = 1, edges = \"all\", except = \"concave\") fillet_edges(r = 1, edges = \"all\", except = \"convex\")"
-    );
-    // Both calls build: the outer one too, its ellipses where the inner
-    // call's mitred blends meet left sharp with the default's warning
-    // (with `edges = "(all) and convex"` they were named, so errors).
-    let fixed = src.replacen(head, text, 1);
-    let v = check(&session(fixed.as_bytes()), true);
-    let f = v["fillets"].as_array().unwrap();
-    assert_eq!(f.len(), 2);
-    assert_eq!(f[0]["status"], "built", "{}", v["diagnostics"]);
-    assert_eq!(f[1]["status"], "built", "{}", v["diagnostics"]);
     assert_eq!(v["exit_code"], 0, "{}", v["diagnostics"]);
-    // A narrower selector is narrowed in each call.
-    let head = "fillet_edges(r = 1, edges = \"not <z\")";
-    let src = src.replacen("fillet_edges(r = 1, edges = \"all\")", head, 1);
-    let v = check(&session(src.as_bytes()), true);
-    let d = v["diagnostics"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|d| d["code"] == "fillet-unsupported-vertex")
-        .expect("unsupported vertex")
-        .clone();
-    assert_eq!(
-        d["hints"][0]["replace"]["text"],
-        "fillet_edges(r = 1, edges = \"(not <z) and convex\") fillet_edges(r = 1, edges = \"(not <z) and concave\")"
+    let f = &v["fillets"][0];
+    assert_eq!(f["status"], "built", "{}", v["diagnostics"]);
+    let passes = f["passes"].as_array().expect("passes");
+    assert_eq!(passes[0]["sense"], "concave");
+    assert_eq!(passes[0]["count"], 4);
+    assert_eq!(passes[1]["sense"], "convex");
+    assert_eq!(passes[1]["edges"].as_array().unwrap().len(), 20);
+    assert!(
+        f["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["status"] == "built"),
+        "{f}"
     );
+    // The nested calls (the edges the inner one makes and v1 cannot
+    // round, the ellipses where its mitred blends meet, left sharp with
+    // the default's warning) give the same volume.
+    let nested = format!(
+        "fillet_edges(r = 1, except = \"concave\") fillet_edges(r = 1, except = \"convex\") {block}\n"
+    );
+    let w = check(&session(nested.as_bytes()), true);
+    assert_eq!(w["fillets"][0]["status"], "built", "{}", w["diagnostics"]);
+    assert_eq!(v["model"]["volume"], w["model"]["volume"]);
+    // A narrower selector keeps its own edges in both passes.
+    let src = format!("fillet_edges(r = 1, edges = \"not <z\") {block}\n");
+    let v = check(&session(src.as_bytes()), true);
+    assert_eq!(v["exit_code"], 0, "{}", v["diagnostics"]);
+    let passes = v["fillets"][0]["passes"].as_array().expect("passes");
+    assert_eq!(passes[1]["edges"].as_array().unwrap().len(), 16);
 }
 
 /// A call's diagnostics point at what to change (`docs/fillets.md`,

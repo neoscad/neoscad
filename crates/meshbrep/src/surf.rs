@@ -132,9 +132,14 @@ impl Surf {
                 apex.is_finite() && a.is_finite() && a.len() > 0.5 && k.is_finite() && k > 0.0
             }
             Surf::Sphere { c, r } => c.is_finite() && r.is_finite() && r > 0.0,
-            // A spindle or horn torus (`big <= r`) crosses its own axis:
-            // STEP writes those as a different entity, and their tube
-            // angle is not a coordinate near the axis.
+            // A spindle or horn torus (`big <= r`) crosses its own axis.
+            // Its outer part (the apple: the points whose nearest point of
+            // the tube's centre circle is on their own side of the axis)
+            // is what a convex rim's large fillet sweeps, and every
+            // formula here (the tube centre a point projects to, the tube
+            // angle) holds there; STEP writes it as a
+            // `degenerate_toroidal_surface` selecting the outer part. A
+            // tube centred on the axis (`big = 0`) is a sphere.
             Surf::Torus { c, a, big, r } => {
                 c.is_finite()
                     && a.is_finite()
@@ -142,7 +147,7 @@ impl Surf {
                     && r.is_finite()
                     && r > 0.0
                     && big.is_finite()
-                    && big > r
+                    && big > 0.0
             }
         }
     }
@@ -490,9 +495,10 @@ impl Param {
 
     /// Whether `p` is so near the axis that its angle is meaningless.
     pub fn near_axis(&self, p: V, tol: f64) -> bool {
-        // A ring torus keeps clear of its axis.
+        // A ring torus keeps clear of its axis; a spindle torus's apple
+        // reaches it at its two poles.
         self.periodic()
-            && !matches!(self.s, Surf::Torus { .. })
+            && !matches!(self.s, Surf::Torus { big, r, .. } if big > r)
             && (p - self.o).reject(self.z).len() < tol.max(1e-12 * self.radius())
     }
 }

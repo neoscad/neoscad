@@ -16,7 +16,7 @@ use meshbrep::Surface;
 use meshbrep::blend::{End, Source, Tool};
 
 use super::curve::{V, add, cross, dot, mul, norm, sub, unit};
-use super::{Plan, PlanDiag, Unavailable, build, facts, plan_with, point_text};
+use super::{Pass, Plan, PlanDiag, Unavailable, build, facts, plan_with, point_text};
 use crate::evaluate::{RenderOptions, Renderer};
 use crate::{Geometry, fragments};
 
@@ -58,6 +58,11 @@ fn segments(f: &FilletNode, sweep: f64) -> u32 {
 /// are OpenSCAD's polygons) each such cylinder is replaced by the facet
 /// its tangent line lies on ([`conformed`]); the export render keeps the
 /// exact cylinders.
+///
+/// `pass` says which of a call's passes (`docs/fillets.md`, section
+/// 15.6): a call built in one has only a first; the conforming mesh of a
+/// second pass is what the first made.
+#[allow(clippy::too_many_arguments)]
 pub fn blends(
     renderer: &Renderer,
     node: &Node,
@@ -66,19 +71,43 @@ pub fn blends(
     mult: u32,
     conform: Option<&[[V; 3]]>,
     facets: bool,
+    pass: Pass,
 ) -> Result<Option<Blends>, Unavailable> {
     let NodeKind::Fillet(f) = &node.kind else {
         return Ok(None);
     };
-    let facts = match facts(renderer, node, keys, opts) {
-        Err(Unavailable::Interrupted) => return Err(Unavailable::Interrupted),
-        Err(_) => return Ok(None),
-        Ok(x) => x,
-    };
-    let tol = facts.tolerance;
-    let plan = plan_with(f, Ok(facts));
-    let Some(b) = plan.build else {
-        return Ok(None);
+    let (b, tol) = match pass {
+        Pass::FirstAlone(sense) => {
+            let facts = match facts(renderer, node, keys, opts, None) {
+                Err(Unavailable::Interrupted) => return Err(Unavailable::Interrupted),
+                Err(_) => return Ok(None),
+                Ok(x) => x,
+            };
+            let tol = facts.tolerance;
+            let p = plan_with(f, Ok(facts.clone()));
+            match super::passes::first_alone(f, &p, &facts, sense) {
+                Some(b) => (std::sync::Arc::new(b), tol),
+                None => return Ok(None),
+            }
+        }
+        Pass::First | Pass::Second => {
+            // The renders need the passes, not a checked size hint.
+            let Some(p) = super::plan_at(renderer, node, keys, opts, false) else {
+                return Ok(None);
+            };
+            if p.status == super::Status::Interrupted {
+                return Err(Unavailable::Interrupted);
+            }
+            let found = if pass == Pass::First {
+                p.build.zip(p.facts.as_ref().map(|x| x.tolerance))
+            } else {
+                p.second.map(|s| (s.build, s.facts.tolerance))
+            };
+            match found {
+                Some(x) => x,
+                None => return Ok(None),
+            }
+        }
     };
     let b = match conform {
         Some(tris) => sectioned(&b, tris, tol),
@@ -503,6 +532,12 @@ pub(crate) fn triangles(g: &Geometry) -> Vec<[V; 3]> {
 /// the child cut into it, often on purpose); almost none is
 /// `fillet-failed` (an error: the result is not what the call asked
 /// for). Tools that could not be made at all are `fillet-failed` too.
+///
+/// A call built in two passes (`docs/fillets.md`, section 15.6) is
+/// checked pass by pass, as two nested calls would be: the first pass's
+/// blends on what it made (the stage the normal render kept), the
+/// second's on the result, each pass's tools conformed to the mesh they
+/// were applied to.
 pub fn blend_diags(
     renderer: &Renderer,
     node: &Node,
@@ -513,9 +548,8 @@ pub fn blend_diags(
     let (NodeKind::Fillet(f), Some(b), Some(facts)) = (&node.kind, &plan.build, &plan.facts) else {
         return Vec::new();
     };
-    let m = f.kind.module();
-    // The tools as the normal render made them: conformed to the
-    // children's meshes (cached renders), falling back to the exact ones.
+    // The first pass's tools as the normal render made them: conformed to
+    // the children's meshes (cached renders).
     let mut child_tris = Vec::new();
     for c in node.children.iter().filter(|c| !super::is_background(c)) {
         if let Ok(r) = renderer.render(c, keys, opts.clone())
@@ -524,37 +558,14 @@ pub fn blend_diags(
             child_tris.extend(triangles(g));
         }
     }
-    let sb = sectioned(b, &child_tris, facts.tolerance);
-    let c = conformed(&sb, &child_tris);
-    let made_now = match made(f, &c, 1) {
-        Ok(x) => Ok(x),
-        Err(_) => made(f, &sb, 1),
-    };
-    let blends = match made_now {
-        Ok(x) => x,
-        Err(why) => {
-            return vec![PlanDiag {
-                severity: Severity::Error,
-                code: DiagCode::FilletFailed,
-                message: format!("{m}(): the blends could not be built: {why}"),
-                hints: vec![
-                    "this is a limitation or a bug of NeoSCAD; selecting fewer edges may avoid it"
-                        .into(),
-                ],
-                fix: None,
-            }];
-        }
-    };
     let Ok(rendered) = renderer.render(node, keys, opts.clone()) else {
         return Vec::new();
     };
     let Some(g) = rendered.geometry else {
         return Vec::new();
     };
-    let tris = triangles(&g);
-    let tol = facts.tolerance * 10.0;
-    let mut out = Vec::new();
-    let name = |src: Source| match src {
+    let result = triangles(&g);
+    let first_name = |src: Source| match src {
         Source::Edge(i) => {
             let fi = b.edges[i];
             let k = plan
@@ -566,6 +577,109 @@ pub fn blend_diags(
         }
         Source::Corner(c) => format!("the corner at {}", point_text(b.spec.corners[c].vertex)),
     };
+    let Some(second) = &plan.second else {
+        let mut out = Vec::new();
+        measure(
+            f,
+            b,
+            facts.tolerance,
+            &child_tris,
+            &result,
+            &first_name,
+            &mut out,
+        );
+        return out;
+    };
+    // What the first pass made: kept by the normal render. A cached result
+    // whose stage has been evicted is computed again, which keeps it.
+    let key = keys.get(node);
+    let stage = renderer.fillet_stage(key).or_else(|| {
+        renderer.forget(key);
+        renderer.render(node, keys, opts.clone()).ok()?;
+        renderer.fillet_stage(key)
+    });
+    let Some(stage) = stage else {
+        return Vec::new();
+    };
+    let stage = triangles(&stage);
+    let mut out = Vec::new();
+    measure(
+        f,
+        b,
+        facts.tolerance,
+        &child_tris,
+        &stage,
+        &first_name,
+        &mut out,
+    );
+    let sb = &second.build;
+    let second_name = |src: Source| match src {
+        Source::Edge(i) => {
+            let k = second.selected.iter().position(|&s| s == sb.edges[i]);
+            match k.and_then(|k| second.origin[k]) {
+                Some(o) => {
+                    let n = plan
+                        .selected
+                        .iter()
+                        .position(|&s| s == o)
+                        .map_or(0, |x| x + 1);
+                    format!("edge {n}")
+                }
+                None => format!(
+                    "the edge the first pass made ({})",
+                    super::edge_text(&second.facts.edges[sb.edges[i]])
+                ),
+            }
+        }
+        Source::Corner(c) => format!("the corner at {}", point_text(sb.spec.corners[c].vertex)),
+    };
+    measure(
+        f,
+        sb,
+        second.facts.tolerance,
+        &stage,
+        &result,
+        &second_name,
+        &mut out,
+    );
+    out
+}
+
+/// [`blend_diags`] for one pass: the tools of `b` conformed to `conform`
+/// (the mesh they were applied to), measured on `tris` (what came of it).
+fn measure(
+    f: &FilletNode,
+    b: &build::Built,
+    tolerance: f64,
+    conform: &[[V; 3]],
+    tris: &[[V; 3]],
+    name: &dyn Fn(Source) -> String,
+    out: &mut Vec<PlanDiag>,
+) {
+    let m = f.kind.module();
+    let sb = sectioned(b, conform, tolerance);
+    let c = conformed(&sb, conform);
+    let made_now = match made(f, &c, 1) {
+        Ok(x) => Ok(x),
+        Err(_) => made(f, &sb, 1),
+    };
+    let blends = match made_now {
+        Ok(x) => x,
+        Err(why) => {
+            out.push(PlanDiag {
+                severity: Severity::Error,
+                code: DiagCode::FilletFailed,
+                message: format!("{m}(): the blends could not be built: {why}"),
+                hints: vec![
+                    "this is a limitation or a bug of NeoSCAD; selecting fewer edges may avoid it"
+                        .into(),
+                ],
+                fix: None,
+            });
+            return;
+        }
+    };
+    let tol = tolerance * 10.0;
     for t in &blends.tools {
         let mesh = &t.mesh;
         let (dev, _) = blend_shape(t);
@@ -645,9 +759,9 @@ pub fn blend_diags(
                 .filter(|(_, s)| **s == surf)
                 .map(|(t, _)| t.map(|i| mesh.positions[i as usize]))
                 .collect();
-            let flat = facts.tolerance * 0.1;
+            let flat = tolerance * 0.1;
             let mut found = 0.0;
-            for p in &tris {
+            for p in tris {
                 let inside = p
                     .iter()
                     .all(|v| (0..3).all(|k| v[k] >= lo[k] && v[k] <= hi[k]));
@@ -703,5 +817,4 @@ pub fn blend_diags(
             }
         }
     }
-    out
 }

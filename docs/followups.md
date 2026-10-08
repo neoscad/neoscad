@@ -2611,13 +2611,48 @@ and of circles and arcs about an axis, with tangent chains of both
 fillet-corpus`; section 15.4), and the surfaces (the language server's
 selector completion and hover, the MCP recipe, the apps' and /try's
 toggles, editor colouring and the user reference
-`docs/fillet-edges.md`; section 15.5). What they leave, beyond F5:
-- **Spindle tori**: a convex rim's fillet must keep its centre further
-  from the axis than its radius (a boss's top rim: up to half the boss's
-  radius), because `meshbrep` writes ring tori only
-  (`Surface::Torus`). Larger is `fillet-too-large` though the blend
-  would fit. STEP's `degenerate_toroidal_surface` would be the entity
-  for the rest (from memory of ISO 10303-42; unverified here).
+`docs/fillet-edges.md`; section 15.5). Stage F5a (section 15.6) rounds
+convex and concave edges that meet in two passes in one call, and
+builds spindle tori (`DEGENERATE_TOROIDAL_SURFACE`, read back by OCCT).
+What they leave, beyond F5b (section 15.7, exact blends between curved
+surfaces with no common axis):
+- **Rolling-ball vertex blends at mixed corners**: two passes make what
+  nested calls make. At a block standing on a plate the vertical edges'
+  blends end square where the base's mitred blends meet them, and the
+  mitre curve between those stays sharp. A vertex patch (the horn torus
+  of question 5, or a blend between the three blends) would round it.
+- **A chain from a line into an arc on an earlier concave blend**, the
+  end faces of an L-bracket rounded with every edge: for a band of
+  sizes (with r = 2.19 and a wall 5 thick, plates 6.15 to 6.4 thick) the
+  export keeps a closed B-spline edge between the plate's top and the
+  arc's torus near the point where the torus touches the plate, which
+  our validator passes and OCCT 8.0.1 rejects (11 of the 2,300 extended
+  corpus models, `mixed`). The nested calls on 8930933 make the same
+  file; it is F3's chain, which two passes now reach routinely.
+- **Concave rims of spheres** whose rim lies within about a tenth of the
+  sphere's radius of its equator (a ball sunk about halfway into a
+  plate) export partly as facets ("degenerate edge"); 31 of 2,000
+  extended corpus models (`sphere`), and on 8930933 as well. Conforming
+  the tool to the sphere's tessellation (below) or re-tessellating the
+  sphere about the rim's axis is the likely cure.
+- **Two strips meeting obliquely** are not compared: the size checks
+  cast across each edge and look for other boundaries, so a box arc's
+  wide (spindle) strip and a pocket corner's rim strip that overlap off
+  those rays are built, and the export falls back to facets (corpus
+  seed 2, `f3` set, model 1366).
+- **Rotated bodies** (the corpus's `rotated` family, an F3 body turned by
+  arbitrary angles inside the call): 8 of 106 fail, mostly the
+  reconstruction's topology checks or the box cross-check (a blind
+  hole's rims turned by 81°/82°/83° export with a box 3.8 off the mesh's
+  while the volumes agree; the same on 8930933).
+- **Hints far below the size asked** (r = 0.0004 for 0.84, where a
+  nested call's first pass leaves a sliver face) build but do not
+  reconstruct exact; a hint under the export's tolerance should be
+  refused instead (with the sliver item below).
+- **Two-pass cost**: a two-pass call reconstructs what its first pass
+  makes (cached under the call's key, the first sense and the size), and
+  a size hint on one plans the call again up to six times. Fine for
+  parts; a large child pays two reconstructions per edit of the call.
 - **Arcs that end on other faces**: an arc's tool ends only where the
   arc runs on smoothly into another edge or on a plane through its axis
   (`fillet::build::prepare`); an arc running into a wall off its axis,
@@ -2647,12 +2682,11 @@ toggles, editor colouring and the user reference
   close behind a concave rim's cylinder face); a straight edge's
   concave tool on a parallel cylinder is not capped at all (F2's rule,
   half the cylinder's radius).
-- **The corpus** (`conformance fillet-corpus`) has no spheres, tori,
-  rotations or nested calls, and checks validity, exactness and the
-  export's own mesh cross-check, not volumes against closed forms; the
-  goldens do that. A pocketed bracket's top face failing B-rep
-  validation ("more than one outer loop", case 1287 of seed 2) fails on
-  F2's commit too, with lines only.
+- **The corpus** (`conformance fillet-corpus`) checks validity,
+  exactness and the export's own mesh cross-check, not volumes against
+  closed forms; the goldens do that. A pocketed bracket's top face
+  failing B-rep validation ("more than one outer loop", case 1287 of
+  seed 2) fails on F2's commit too, with lines only.
 - **Colour and part of blends between different faces** (6.4: "the
   colour and part of the first of their two faces"): a blend takes the
   child's colour or part only when every face of the child has the same
@@ -2721,14 +2755,6 @@ toggles, editor colouring and the user reference
   errors and completion. Rendering a document that has fillet calls
   after the evaluation (bounded by the limits, cancelled by the next
   change) would close it.
-- **Nested rewrites of narrowed selectors**: under the default `"all"`
-  the mixed-vertex rewrite leaves the other sense out with `except`
-  (section 15.5), but a written selector `S` is still narrowed to
-  `"(S) and convex"`, and if `S` names the edges the inner call creates
-  and v1 cannot round (the ellipses where mitred concave blends meet)
-  the outer call fails on them. Excluding those curve kinds from the
-  outer call, or making unsupported edges a warning whenever the
-  selector did not name them by kind, would cover it.
 - **Names in selectors are not completed**: inside `part(` and after `@`
   completion offers nothing; the part and anchor names the children
   declare (from the last run, or `child_anchors()`'s walk) would do.
@@ -2738,8 +2764,10 @@ toggles, editor colouring and the user reference
   model opens with the extension as the recipient's page has it (off by
   default), so the calls are unknown modules. The page has no sketch or
   query toggles either.
-- **CHANGELOG**: fillets (F0 to F4) are not in `CHANGELOG.md` yet; the
-  entry goes with the release that ships them.
+- **CHANGELOG**: fillets (F0 to F5a) are not in `CHANGELOG.md` yet;
+  the entry goes with the release that ships them. `meshbrep`'s changes
+  since 0.2.0 (spindle tori, the corner margin) are listed in its
+  README for its next release.
 
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.

@@ -54,7 +54,11 @@ pub struct FilletOptions {
     pub binary: Option<PathBuf>,
     pub occt: Option<PathBuf>,
     pub filter: Option<String>,
+    pub set: Set,
 }
+
+/// The most hint edits one model gets: nested calls can need one each.
+const FIX_ROUNDS: usize = 3;
 
 /// The most models one run makes (`docs/fillets.md`, section 16).
 pub const MAX_COUNT: usize = 2000;
@@ -263,9 +267,32 @@ fn features(g: &mut Rng, l: f64, w: f64, t: f64) -> (Vec<String>, Vec<String>) {
     (add, cut)
 }
 
+/// Which models a run makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Set {
+    /// Stage F3's corpus, model for model (the stop rule's numbers).
+    F3,
+    /// F3's models, with about two in five replaced by stage F5a's
+    /// kinds: mixed corners (one call over convex and concave edges,
+    /// built in two passes), spheres, rotations, nested calls of unequal
+    /// sizes and large boss rims (spindle tori).
+    All,
+}
+
 /// Model `i` of the corpus seeded with `seed`.
-fn case(seed: u64, i: usize) -> Case {
+fn case(seed: u64, i: usize, set: Set) -> Case {
+    // A stream of its own decides, so the models it keeps are F3's.
+    let mut pick = Rng(seed ^ (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5f5a);
+    if set == Set::All && pick.chance(0.4) {
+        return case_f5(seed, i);
+    }
     let mut g = Rng(seed ^ (i as u64).wrapping_mul(0x2545_f491_4f6c_dd1d));
+    let (family, solid) = solid(&mut g);
+    call(&mut g, i, family, solid)
+}
+
+/// A body of F3's families with its features: (family, solid).
+fn solid(g: &mut Rng) -> (&'static str, String) {
     let family = *g.pick(&["plate", "plate", "box", "rounded", "bracket"]);
     let l = g.range(25.0, 60.0);
     let w = g.range(20.0, 50.0);
@@ -331,7 +358,7 @@ fn case(seed: u64, i: usize) -> Case {
             (body, t)
         }
     };
-    let (add, cut) = features(&mut g, l, w, t);
+    let (add, cut) = features(g, l, w, t);
     let mut solid = if add.is_empty() {
         body
     } else {
@@ -340,6 +367,11 @@ fn case(seed: u64, i: usize) -> Case {
     if !cut.is_empty() {
         solid = format!("difference() {{ {solid} {} }}", cut.join(" "));
     }
+    (family, solid)
+}
+
+/// F3's call around `solid`: a selector from the atoms and a size.
+fn call(g: &mut Rng, i: usize, family: &'static str, solid: String) -> Case {
     let chamfer = g.chance(0.25);
     let selector = *g.pick(&[
         "",
@@ -370,6 +402,229 @@ fn case(seed: u64, i: usize) -> Case {
         format!(", edges = \"{selector}\"")
     };
     let text = format!("{module}({arg} = {}{edges})\n  {solid}\n", n(size));
+    Case {
+        id: format!("{i:04}"),
+        family,
+        text,
+    }
+}
+
+/// A size drawn log-uniformly from `a` to `b`.
+fn size(g: &mut Rng, a: f64, b: f64) -> f64 {
+    g.range(a.ln(), b.ln()).exp()
+}
+
+/// A model of stage F5a's kinds (`docs/fillets.md`, section 15.6): one
+/// call over convex and concave edges that meet (two passes), a sphere
+/// on or in a plate, a rotated body, nested calls of unequal sizes, and
+/// boss rims past half the boss's radius (spindle tori).
+fn case_f5(seed: u64, i: usize) -> Case {
+    let mut g = Rng(seed ^ (i as u64).wrapping_mul(0xd1b5_4a32_d192_ed03) ^ 0xf5a);
+    let family = *g.pick(&["mixed", "mixed", "sphere", "rotated", "nested", "spindle"]);
+    let chamfer = matches!(family, "mixed" | "rotated") && g.chance(0.2);
+    let (module, arg) = if chamfer {
+        ("chamfer_edges", "d")
+    } else {
+        ("fillet_edges", "r")
+    };
+    let edges = |s: &str| {
+        if s.is_empty() {
+            String::new()
+        } else {
+            format!(", edges = \"{s}\"")
+        }
+    };
+    let text = match family {
+        "mixed" => {
+            let l = g.range(25.0, 50.0);
+            let w = g.range(20.0, 40.0);
+            let t = g.range(3.0, 10.0);
+            let solid = match g.below(4) {
+                0 => {
+                    // A block on a plate.
+                    let bx = g.range(5.0, 0.6 * l);
+                    let by = g.range(5.0, 0.6 * w);
+                    let x = g.range(1.0, l - bx - 1.0);
+                    let y = g.range(1.0, w - by - 1.0);
+                    format!(
+                        "union() {{ cube([{}, {}, {}]); translate([{}, {}, 0]) cube([{}, {}, {}]); }}",
+                        n(l),
+                        n(w),
+                        n(t),
+                        n(x),
+                        n(y),
+                        n(bx),
+                        n(by),
+                        n(t + g.range(3.0, 15.0))
+                    )
+                }
+                1 => {
+                    // An L bracket.
+                    let t2 = g.range(3.0, 10.0);
+                    format!(
+                        "union() {{ cube([{}, {}, {}]); cube([{}, {}, {}]); }}",
+                        n(l),
+                        n(w),
+                        n(t),
+                        n(l),
+                        n(t2),
+                        n(t + g.range(10.0, 30.0))
+                    )
+                }
+                2 => {
+                    // A rib along a plate, flush with its end faces.
+                    let rw = g.range(2.0, 0.4 * w);
+                    let y = g.range(1.0, w - rw - 1.0);
+                    format!(
+                        "union() {{ cube([{}, {}, {}]); translate([0, {}, 0]) cube([{}, {}, {}]); }}",
+                        n(l),
+                        n(w),
+                        n(t),
+                        n(y),
+                        n(l),
+                        n(rw),
+                        n(t + g.range(2.0, 12.0))
+                    )
+                }
+                _ => {
+                    // A rectangular pocket: its rim convex, its walls and
+                    // floor concave.
+                    let a = g.range(5.0, 0.6 * l);
+                    let b = g.range(5.0, 0.6 * w);
+                    let x = g.range(2.0, l - a - 2.0);
+                    let y = g.range(2.0, w - b - 2.0);
+                    let d = g.range(0.3, 0.8) * t;
+                    format!(
+                        "difference() {{ cube([{}, {}, {}]); translate([{}, {}, {}]) cube([{}, {}, {}]); }}",
+                        n(l),
+                        n(w),
+                        n(t),
+                        n(x),
+                        n(y),
+                        n(t - d),
+                        n(a),
+                        n(b),
+                        n(d + 1.0)
+                    )
+                }
+            };
+            let sel = *g.pick(&["", "", "not <z", "convex or concave", ">z or concave"]);
+            format!(
+                "{module}({arg} = {}{})\n  {solid}\n",
+                n(size(&mut g, 0.25, 4.0)),
+                edges(sel)
+            )
+        }
+        "sphere" => {
+            let l = g.range(25.0, 50.0);
+            let w = g.range(20.0, 40.0);
+            let t = g.range(3.0, 10.0);
+            // The ball stays inside the plate's bottom and sides: only its
+            // rim on the top face is an edge.
+            let u = g.range(-0.6, 0.6);
+            let room = 0.4 * l.min(w);
+            let solid = if g.chance(0.5) {
+                // A ball sunk in the plate, its centre `u` radii from the
+                // top, its bottom at least 0.5 above the plate's.
+                let rs = g.range(1.0, room).min((t - 0.5) / (1.0 - u));
+                let x = g.range(rs + 1.0, l - rs - 1.0);
+                let y = g.range(rs + 1.0, w - rs - 1.0);
+                format!(
+                    "union() {{ cube([{}, {}, {}]); translate([{}, {}, {}]) sphere(r = {}); }}",
+                    n(l),
+                    n(w),
+                    n(t),
+                    n(x),
+                    n(y),
+                    n(t + u * rs),
+                    n(rs)
+                )
+            } else {
+                // A spherical dimple, part way into the plate.
+                let rs = g.range(2.0, room);
+                let d = g.range(0.2, 0.8) * t.min(rs);
+                let x = g.range(rs + 1.0, l - rs - 1.0);
+                let y = g.range(rs + 1.0, w - rs - 1.0);
+                format!(
+                    "difference() {{ cube([{}, {}, {}]); translate([{}, {}, {}]) sphere(r = {}); }}",
+                    n(l),
+                    n(w),
+                    n(t),
+                    n(x),
+                    n(y),
+                    n(t - d + rs),
+                    n(rs)
+                )
+            };
+            let sel = *g.pick(&["", "%circle", "%circle and convex", "concave", ">z"]);
+            format!(
+                "{module}({arg} = {}{})\n  {solid}\n",
+                n(size(&mut g, 0.25, 3.0)),
+                edges(sel)
+            )
+        }
+        "rotated" => {
+            let (_, solid) = solid(&mut g);
+            let a = [g.range(0.0, 90.0), g.range(0.0, 90.0), g.range(0.0, 90.0)];
+            let sel = *g.pick(&["", "convex", "concave", "%circle", "%line and convex"]);
+            format!(
+                "{module}({arg} = {}{})\n  rotate([{}, {}, {}]) {solid}\n",
+                n(size(&mut g, 0.25, 4.0)),
+                edges(sel),
+                n(a[0]),
+                n(a[1]),
+                n(a[2])
+            )
+        }
+        "nested" => {
+            let (_, solid) = solid(&mut g);
+            let inner = *g.pick(&["|z", "concave", "%circle", "%line and convex"]);
+            let outer = *g.pick(&["", ">z", "convex", "%circle and >z", "<z"]);
+            format!(
+                "fillet_edges(r = {}{})\n  fillet_edges(r = {}{})\n  {solid}\n",
+                n(size(&mut g, 0.25, 3.0)),
+                edges(outer),
+                n(size(&mut g, 0.25, 4.0)),
+                edges(inner)
+            )
+        }
+        _ => {
+            // Rims past half a boss's (or a blind hole's) radius.
+            let rb = g.range(2.0, 7.0);
+            let t = g.range(3.0, 8.0);
+            let r = g.range(0.5, 0.97) * rb;
+            if g.chance(0.6) {
+                let h = g.range(r + 0.5, 3.0 * rb);
+                let sel = *g.pick(&["%circle and >z", "%circle and convex", "%circle"]);
+                format!(
+                    "fillet_edges(r = {}{})\n  {{ translate([{}, {}, 0]) cube([{}, {}, {}]); cylinder(r = {}, h = {}); }}\n",
+                    n(r),
+                    edges(sel),
+                    n(-rb - 6.0),
+                    n(-rb - 6.0),
+                    n(2.0 * rb + 12.0),
+                    n(2.0 * rb + 12.0),
+                    n(t),
+                    n(rb),
+                    n(t + h)
+                )
+            } else {
+                let d = g.range(r + 0.5, r + 8.0);
+                format!(
+                    "fillet_edges(r = {}, edges = \"%circle and concave\")\n  difference() {{ translate([{}, {}, 0]) cube([{}, {}, {}]); translate([0, 0, {}]) cylinder(r = {}, h = {}); }}\n",
+                    n(r),
+                    n(-rb - 6.0),
+                    n(-rb - 6.0),
+                    n(2.0 * rb + 12.0),
+                    n(2.0 * rb + 12.0),
+                    n(d + 3.0),
+                    n(3.0),
+                    n(rb),
+                    n(d + 1.0)
+                )
+            }
+        }
+    };
     Case {
         id: format!("{i:04}"),
         family,
@@ -554,7 +809,7 @@ pub fn command(ctx: &Ctx, opts: &FilletOptions) -> Result<u8, String> {
         .filter(|p| p.is_file());
     let guard = BUDGET_KIB / opts.jobs.max(1) as u64;
     let list: Vec<Case> = (0..opts.count)
-        .map(|i| case(opts.seed, i))
+        .map(|i| case(opts.seed, i, opts.set))
         .filter(|c| {
             opts.filter
                 .as_ref()
@@ -624,33 +879,65 @@ pub fn command(ctx: &Ctx, opts: &FilletOptions) -> Result<u8, String> {
         if !(code == "fillet-too-large" || code == "fillet-overlap") || edit.is_none() {
             return json!({"outcome": "refused", "code": code, "message": first["message"], "codes": codes});
         }
-        // Apply the fix and run again: it must build, and be valid.
-        let Some(fixed) = apply_edit(&c.text, edit.expect("checked")) else {
-            return json!({"outcome": "failed", "class": "fix", "message": "the hint's edit does not apply"});
-        };
-        let ffile = cases_dir.join(format!("{}-fixed.scad", c.id));
-        let fstep = cases_dir.join(format!("{}-fixed.step", c.id));
-        if std::fs::write(&ffile, &fixed).is_err() {
-            return json!({"outcome": "killed", "message": "could not write the model"});
-        }
-        let fr = run_checked(&ffile, &fstep);
-        if let Some(k) = &fr.killed {
-            return json!({"outcome": "killed", "message": k, "fixed": true});
-        }
-        let freport = fr.report.clone().unwrap_or(Value::Null);
-        let ferr: Vec<String> = fillet_diags(&freport)
-            .iter()
-            .filter(|d| d["severity"] == "error")
-            .filter_map(|d| d["message"].as_str().map(String::from))
-            .collect();
-        if !ferr.is_empty() {
-            return json!({"outcome": "failed", "class": "fix", "message": ferr[0], "refused": code});
-        }
-        match judge(&fr, occt_bin.is_some()) {
-            None => json!({"outcome": "fixed", "refused": code}),
-            Some((class, msg)) => {
-                json!({"outcome": "failed", "class": class, "message": msg, "refused": code, "fixed": true})
+        // Apply the fix and run again: it must build, and be valid. Each
+        // hint fixes its own call; with nested calls a fix of one can
+        // leave (or make) a size problem in another, whose own hint is
+        // then applied, up to `FIX_ROUNDS` edits in all.
+        let mut text = c.text.clone();
+        let mut edit = edit.expect("checked").clone();
+        let mut round = 0;
+        loop {
+            round += 1;
+            let Some(fixed) = apply_edit(&text, &edit) else {
+                return json!({"outcome": "failed", "class": "fix", "message": "the hint's edit does not apply"});
+            };
+            text = fixed;
+            let ffile = cases_dir.join(format!("{}-fixed.scad", c.id));
+            let fstep = cases_dir.join(format!("{}-fixed.step", c.id));
+            if std::fs::write(&ffile, &text).is_err() {
+                return json!({"outcome": "killed", "message": "could not write the model"});
             }
+            let fr = run_checked(&ffile, &fstep);
+            if let Some(k) = &fr.killed {
+                return json!({"outcome": "killed", "message": k, "fixed": true});
+            }
+            let freport = fr.report.clone().unwrap_or(Value::Null);
+            let fdiags = fillet_diags(&freport);
+            let ferr: Vec<&&Value> = fdiags.iter().filter(|d| d["severity"] == "error").collect();
+            if let Some(first) = ferr.first() {
+                let next = first["hints"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find_map(|h| h.get("replace"));
+                let size = matches!(
+                    first["code"].as_str(),
+                    Some("fillet-too-large" | "fillet-overlap")
+                );
+                let nested = c.text.matches("_edges(").count() > 1;
+                match next {
+                    Some(e) if size && round < FIX_ROUNDS && nested => {
+                        edit = e.clone();
+                        continue;
+                    }
+                    // The fixed call builds, and another call of the
+                    // model is refused for a class this version does not
+                    // build: the model is refused, as it would have been
+                    // had that call's error come first.
+                    _ if nested && !size && first["code"] != "fillet-failed" => {
+                        return json!({"outcome": "refused", "code": first["code"], "message": first["message"], "fixed": true});
+                    }
+                    _ => {
+                        return json!({"outcome": "failed", "class": "fix", "message": first["message"], "refused": code});
+                    }
+                }
+            }
+            return match judge(&fr, occt_bin.is_some()) {
+                None => json!({"outcome": "fixed", "refused": code, "rounds": round}),
+                Some((class, msg)) => {
+                    json!({"outcome": "failed", "class": class, "message": msg, "refused": code, "fixed": true})
+                }
+            };
         }
     };
     std::thread::scope(|s| {
@@ -768,14 +1055,23 @@ mod tests {
 
     #[test]
     fn the_corpus_is_the_same_for_the_same_seed() {
-        let a: Vec<String> = (0..50).map(|i| case(7, i).text).collect();
-        let b: Vec<String> = (0..50).map(|i| case(7, i).text).collect();
+        let a: Vec<String> = (0..50).map(|i| case(7, i, Set::All).text).collect();
+        let b: Vec<String> = (0..50).map(|i| case(7, i, Set::All).text).collect();
         assert_eq!(a, b);
-        let c: Vec<String> = (0..50).map(|i| case(8, i).text).collect();
+        let c: Vec<String> = (0..50).map(|i| case(8, i, Set::All).text).collect();
         assert_ne!(a, c);
         // Every family turns up.
-        let fams: std::collections::BTreeSet<&str> = (0..200).map(|i| case(1, i).family).collect();
+        let fams: std::collections::BTreeSet<&str> =
+            (0..200).map(|i| case(1, i, Set::F3).family).collect();
         assert_eq!(fams.len(), 4, "{fams:?}");
+        let fams: std::collections::BTreeSet<&str> =
+            (0..400).map(|i| case(1, i, Set::All).family).collect();
+        assert_eq!(fams.len(), 9, "{fams:?}");
+        // The models the full set keeps are F3's.
+        let kept = (0..400)
+            .filter(|&i| case(1, i, Set::All).text == case(1, i, Set::F3).text)
+            .count();
+        assert!((200..300).contains(&kept), "{kept}");
     }
 
     #[test]

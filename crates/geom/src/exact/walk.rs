@@ -182,22 +182,45 @@ pub fn export_render_with(
     mult: u32,
     extrusions: Extrusions,
 ) -> Result<ExportMesh, (Unsupported, Vec<Substitution>)> {
-    run_walk(renderer, top, keys, opts, mult, extrusions, false)
+    run_walk(renderer, top, keys, opts, mult, extrusions, Trace::Off)
 }
 
 /// The export render of `top`'s children as one union (`top` is the
 /// fillet node whose child is to be selected on), with
-/// [`ExportMesh::provenance`] filled in. Fillet nodes are walked as the
-/// union of their children, which is what the normal render makes of
-/// them until their blends are built.
+/// [`ExportMesh::provenance`] filled in. Fillet nodes inside it are built
+/// with their blends, as in the export.
+///
+/// With `first_pass`, the union has `top`'s own first pass applied too,
+/// the one that rounds its selected edges of that sense
+/// (`docs/fillets.md`, section 15.6): what a two-pass call's second pass
+/// selects on, its first pass's blends recorded with no child
+/// ([`Provenance::child`] `None`).
 pub fn export_render_traced(
     renderer: &Renderer,
     top: &Node,
     keys: &Keys,
     opts: &RenderOptions,
     mult: u32,
+    first_pass: Option<crate::fillet::Sense>,
 ) -> Result<ExportMesh, (Unsupported, Vec<Substitution>)> {
-    run_walk(renderer, top, keys, opts, mult, Extrusions::Exact, true)
+    let trace = match first_pass {
+        Some(s) => Trace::FirstPass(s),
+        None => Trace::Children,
+    };
+    run_walk(renderer, top, keys, opts, mult, Extrusions::Exact, trace)
+}
+
+/// What a walk records of where surfaces came from, and what it makes of
+/// its top node when that is a fillet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trace {
+    /// The export itself: no provenance.
+    Off,
+    /// Provenance; a fillet top is its children's union.
+    Children,
+    /// Provenance; a fillet top is its children's union with its own
+    /// first pass applied, the one of edges of this sense.
+    FirstPass(crate::fillet::Sense),
 }
 
 fn run_walk(
@@ -207,10 +230,14 @@ fn run_walk(
     opts: &RenderOptions,
     mult: u32,
     extrusions: Extrusions,
-    trace: bool,
+    trace: Trace,
 ) -> Result<ExportMesh, (Unsupported, Vec<Substitution>)> {
     let mut w = Walk {
-        trace,
+        trace: trace != Trace::Off,
+        first_pass: match trace {
+            Trace::FirstPass(s) => Some(s),
+            _ => None,
+        },
         here: (None, None),
         leaves: 0,
         polygons: 0,
@@ -313,6 +340,8 @@ struct Walk<'a> {
     origin_index: HashMap<OriginKey, u32>,
     /// [`export_render_traced`]: record [`Provenance`].
     trace: bool,
+    /// [`export_render_traced`] with the top's first pass applied.
+    first_pass: Option<crate::fillet::Sense>,
     /// The top's child and the innermost part of the leaf being built.
     here: (Option<u32>, Option<String>),
     /// Leaves built so far.
@@ -670,8 +699,18 @@ impl Walk<'_> {
             let w = stack.pop().expect("a waiting node");
             let mut r = self.combine(w.op, w.kids)?;
             // A fillet's blends, except on the node a traced walk selects
-            // for: that walk is of its child.
-            if matches!(w.n.kind, NodeKind::Fillet(_)) && !(self.trace && std::ptr::eq(w.n, top)) {
+            // for: that walk is of its child (with its first pass, for a
+            // second pass's selection).
+            let at_top = self.trace && std::ptr::eq(w.n, top);
+            if matches!(w.n.kind, NodeKind::Fillet(_)) && (!at_top || self.first_pass.is_some()) {
+                let alone;
+                let passes: &[crate::fillet::Pass] = match self.first_pass {
+                    Some(s) if at_top => {
+                        alone = [crate::fillet::Pass::FirstAlone(s)];
+                        &alone
+                    }
+                    _ => &[crate::fillet::Pass::First, crate::fillet::Pass::Second],
+                };
                 if self.trace {
                     let child = stack.first().map(|p| (p.next - 1) as u32);
                     let part = stack.iter().rev().find_map(|p| match &p.n.kind {
@@ -680,7 +719,7 @@ impl Walk<'_> {
                     });
                     self.here = (child, part);
                 }
-                r = self.fillet(w.n, &w.m, r)?;
+                r = self.fillet(w.n, &w.m, r, passes)?;
             }
             // Then on with the parent's next child.
             match stack.last_mut() {
@@ -726,67 +765,97 @@ impl Walk<'_> {
     /// every triangle tagged with its exact surface (cylinder, plane,
     /// sphere), so the export reconstructs true blends. With `$fn` set on
     /// the call, the arcs are kept as the polygon, as for any curve.
-    fn fillet(&mut self, n: &Node, m: &Matrix, r: Res) -> Result<Res, Unsupported> {
-        let Res::Solid(child) = r else {
+    fn fillet(
+        &mut self,
+        n: &Node,
+        m: &Matrix,
+        r: Res,
+        passes: &[crate::fillet::Pass],
+    ) -> Result<Res, Unsupported> {
+        let Res::Solid(mut child) = r else {
             return Ok(r);
         };
         if child.is_empty() {
             return Ok(Res::Solid(child));
         }
-        // The child's triangles back in the node's own coordinates, where
-        // the plan is: a circular edge's tool takes its sections at the
-        // vertices of the polygon beside it, as the walk tessellated it.
-        let local = invert(m).map(|inv| {
-            let gl = child.get_mesh_gl64(-1);
-            let np = (gl.num_prop as usize).max(3);
-            let at = |i: u64| {
-                let k = i as usize * np;
-                apply(
-                    &inv,
-                    [
-                        gl.vert_properties[k],
-                        gl.vert_properties[k + 1],
-                        gl.vert_properties[k + 2],
-                    ],
-                )
-            };
-            gl.tri_verts
-                .chunks(3)
-                .map(|c| [at(c[0]), at(c[1]), at(c[2])])
-                .collect::<Vec<_>>()
-        });
-        let blends = match crate::fillet::blends(
-            self.renderer,
-            n,
-            self.keys,
-            self.opts,
-            self.mult,
-            local.as_deref(),
-            false,
-        ) {
-            Ok(Some(b)) => b,
-            Ok(None) => return Ok(Res::Solid(child)),
-            Err(_) => return Err(Unsupported::interrupted()),
-        };
         let scale = similarity_scale(m);
-        let base = self.surfaces.len();
-        let mut adds = vec![Res::Solid(child)];
-        let mut subs = Vec::new();
-        for t in &blends.tools {
-            let placed = if blends.explicit_fn {
-                self.place(&faceted_blend(t), m, scale)?
-            } else {
-                self.place(&t.mesh, m, scale)?
+        let inv = invert(m);
+        let mut tools = 0;
+        let mut explicit_fn = false;
+        let mut sagitta: f64 = 0.0;
+        let mut area = 0.0;
+        // A two-pass call (`docs/fillets.md`, section 15.6) applies its
+        // second pass to what its first made, as a nested call would.
+        for &pass in passes {
+            // The solid's triangles back in the node's own coordinates,
+            // where the plan is: a circular edge's tool takes its sections
+            // at the vertices of the polygon beside it, as the walk (or
+            // the first pass) tessellated it.
+            let local = inv.map(|inv| {
+                let gl = child.get_mesh_gl64(-1);
+                let np = (gl.num_prop as usize).max(3);
+                let at = |i: u64| {
+                    let k = i as usize * np;
+                    apply(
+                        &inv,
+                        [
+                            gl.vert_properties[k],
+                            gl.vert_properties[k + 1],
+                            gl.vert_properties[k + 2],
+                        ],
+                    )
+                };
+                gl.tri_verts
+                    .chunks(3)
+                    .map(|c| [at(c[0]), at(c[1]), at(c[2])])
+                    .collect::<Vec<_>>()
+            });
+            let blends = match crate::fillet::blends(
+                self.renderer,
+                n,
+                self.keys,
+                self.opts,
+                self.mult,
+                local.as_deref(),
+                false,
+                pass,
+            ) {
+                Ok(Some(b)) => b,
+                Ok(None) => break,
+                Err(_) => return Err(Unsupported::interrupted()),
             };
-            if t.add {
-                adds.push(placed);
-            } else {
-                subs.push(placed);
+            let base = self.surfaces.len();
+            let mut adds = vec![Res::Solid(child)];
+            let mut subs = Vec::new();
+            for t in &blends.tools {
+                let placed = if blends.explicit_fn {
+                    self.place(&faceted_blend(t), m, scale)?
+                } else {
+                    self.place(&t.mesh, m, scale)?
+                };
+                if t.add {
+                    adds.push(placed);
+                } else {
+                    subs.push(placed);
+                }
+            }
+            self.record(n, base);
+            tools += blends.tools.len();
+            explicit_fn |= blends.explicit_fn;
+            sagitta = sagitta.max(blends.sagitta);
+            area += blends.area;
+            let joined = self.combine(OpType::Add, adds)?;
+            let mut parts = vec![joined];
+            parts.extend(subs);
+            match self.combine(OpType::Subtract, parts)? {
+                Res::Solid(s) => child = s,
+                other => return Ok(other),
             }
         }
-        self.record(n, base);
-        let tools = blends.tools.len();
-        if blends.explicit_fn {
+        if tools == 0 {
+            return Ok(Res::Solid(child));
+        }
+        if explicit_fn {
             self.note(
                 SubstitutionKind::Polygon,
                 n,
@@ -796,8 +865,8 @@ impl Walk<'_> {
                 ),
             );
         } else if let Some(s) = scale {
-            self.normal_sagitta = self.normal_sagitta.max(blends.sagitta * s);
-            self.normal_volume_bound += blends.area * blends.sagitta * s * s * s;
+            self.normal_sagitta = self.normal_sagitta.max(sagitta * s);
+            self.normal_volume_bound += area * sagitta * s * s * s;
             self.note(
                 SubstitutionKind::Exact,
                 n,
@@ -813,10 +882,7 @@ impl Walk<'_> {
                 "exports its blends as planar facets: a non-uniform scale or shear makes them elliptic".into(),
             );
         }
-        let joined = self.combine(OpType::Add, adds)?;
-        let mut parts = vec![joined];
-        parts.extend(subs);
-        self.combine(OpType::Subtract, parts)
+        Ok(Res::Solid(child))
     }
 
     /// [`Walk::leaf`], recording `n` as the origin of every surface it

@@ -308,9 +308,10 @@ fn hover_on_selectors_arguments_and_the_last_run() {
 }
 
 /// A rendered run's fillet diagnostics in the editor: a selection
-/// problem on the `edges` string, a size that does not fit on `r` with
-/// the size that does as a quick fix, and a mixed vertex's nested
-/// rewrite as one too.
+/// problem on the `edges` string, and a size that does not fit on `r`
+/// with the size that does as a quick fix. (A mixed vertex is no longer a
+/// diagnostic: the call rounds it in two passes, `docs/fillets.md`
+/// section 15.6.)
 #[test]
 fn rendered_diagnostics_sit_on_what_to_change_with_their_fixes() {
     let text = "fillet_edges(r = 1, edges = \"|z\", expect = 3) cube(10);
@@ -352,12 +353,9 @@ fillet_edges(r = 1, edges = \"all\") translate([0, 40, 0]) union() { cube([20, 2
         fixed.contains("fillet_edges(r = 1.9, edges = \"|y\")"),
         "{fixed}"
     );
-    // The mixed vertex: the call rewritten as two.
-    let vertex = find("fillet-unsupported-vertex");
-    let edits = vertex["data"]["fixes"][0]["edits"].as_array().unwrap();
-    let fixed = apply(text, edits);
+    // The mixed vertex builds in two passes: nothing to fix.
     assert!(
-        fixed.contains("fillet_edges(r = 1, edges = \"all\", except = \"concave\") fillet_edges(r = 1, edges = \"all\", except = \"convex\") translate([0, 40, 0])"),
-        "{fixed}"
+        !d.iter().any(|x| x["code"] == "fillet-unsupported-vertex"),
+        "{d:?}"
     );
 }

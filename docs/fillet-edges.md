@@ -118,11 +118,20 @@ chamfer_edges(d, edges = "all", except = undef, expect = undef) children;
 - **Frame.** Directions in selectors are the call's own axes, so
   `rotate(...) fillet_edges(...)` rotates the rounded part with its
   selection.
-- **One operation per call.** A second rounding is a nested call:
-  `fillet_edges(r = 2, edges = ">z") fillet_edges(r = 5, edges = "|z")
-  cube(...)` rounds the vertical edges first, then the top outline of
-  that result. This is how different radii, and convex and concave edges
-  that meet, are written.
+- **Convex and concave edges that meet** (a block standing on a plate,
+  an L-bracket, a pocket, with the default `"all"`) are rounded in two
+  passes by the one call: the concave edges first, then the convex
+  edges of that result, which now run on across the first pass's blends
+  (an L-bracket's end face: line, arc, line). The second pass rounds the
+  call's own edges as the first left them, and the edges that continue
+  them across its blends, nothing else. `check` reports the passes
+  (`in two passes (concave, then convex)`). Where the concave edges
+  cannot go first at a vertex, the convex ones do.
+- **One size per call.** A second rounding with another radius is a
+  nested call: `fillet_edges(r = 1) fillet_edges(r = 4, edges = "|z")
+  cube(...)` rounds the vertical edges with 4 first, then everything
+  else of that result with 1, its top and bottom outlines running line,
+  arc, line round the first call's blends.
 - **A failed call** (a radius that does not fit, an edge it cannot
   round) is an error at the call; its children are left sharp, the rest
   of the model renders, and an export (`-o`) writes its file and exits
@@ -258,7 +267,11 @@ chamfer_edges(d = 1, edges = "%circle and >z")
 - **Circles and arcs about one axis**: the rims of holes, bosses,
   countersinks, cones and spheres, and the arcs of a rounded outline,
   between a plane square to the axis, a coaxial cylinder, cone or
-  torus, or a sphere centred on it.
+  torus, or a sphere centred on it. A boss's top rim takes any radius
+  that leaves some of its top (past half the boss's radius the blend is
+  the outer part of a spindle torus).
+- **Mixed corners**: convex and concave edges meeting at a vertex, in
+  two passes (above).
 - **Chains**: lines and arcs that run on into each other (a rounded
   rectangle's outline) are rounded as one piece.
 - **Chamfers** are equal-distance, on the same edges; three convex
@@ -284,7 +297,7 @@ the editor offers as a quick fix.
 | `fillet-skipped` | info | Edges the selector named that are never rounded (polygon seams, tangent edges), by reason |
 | `fillet-too-large` | error | A blend does not fit its cross-section or the face beside it. Fix: a size 5% under the largest that fits |
 | `fillet-overlap` | error | Two blends overlap on the face between them. Same fix |
-| `fillet-unsupported-vertex` | error | Selected edges meet at a vertex one call cannot round (convex and concave together, more than three faces, a curved third face). Fix for convex and concave: the call rewritten as two nested calls, the concave edges first |
+| `fillet-unsupported-vertex` | error | Selected edges meet at a vertex the call cannot round, even in two passes (three concave chamfers, more than three faces, a curved third face, an arc ending on a face off its axis). Select fewer edges there, or round them in nested calls of your own. A problem in one of a call's two passes names the pass |
 | `fillet-unsupported-edge` | error, or a warning under the default `"all"` | A selected edge of a kind not rounded yet (above) |
 | `fillet-no-brep` | error | The children could not be read as faces and edges (bodies touching along an edge only, say); overlap them |
 | `fillet-2d` | error | 2D children: use `offset(r = ...)` or a sketch's `fillet()` |
@@ -337,9 +350,9 @@ WARNING: fillet_edges(): edges = "|z" matched no edge; the child is unchanged in
 ```
 
 Convex and concave edges at one vertex (the default `"all"` on a block
-standing on a plate):
+standing on a plate) are rounded in two passes:
 
-```openscad expect=fillet-unsupported-vertex
+```openscad
 fillet_edges(r = 1) union() {
   cube([20, 20, 5]);
   translate([5, 5, 0]) cube([10, 10, 15]);
@@ -347,22 +360,24 @@ fillet_edges(r = 1) union() {
 ```
 
 ```text
-ERROR: fillet_edges(): edges 5, 6, 11 meet at [5, 5, 5], where convex and concave edges meet, which one call cannot round in file model.scad, line 1
+fillet_edges at line 1: 24 edges (4 line, concave, 270°; 20 line, convex, 90°), r 1, edges = "all", in two passes (concave, then convex) [built]
 ```
 
-Its fix rewrites the call's head as two calls, the inner one rounding
-the concave edges and the outer one the convex edges of that result.
-Under the default `"all"` each keeps it and leaves the other sense out
-with `except`, so the four short curves where the inner call's blends
-meet at the block's corners, which this version cannot round, stay sharp
-with the default's warning rather than failing the call (a narrower
-selector `S` becomes `"(S) and convex"` and `"(S) and concave"`):
+The block's base is mitred at its corners, and the four short curves
+where those blends meet stay sharp, as they would in two nested calls
+(which make the same solid: their outer call, under `"all"`, names
+those curves and warns that it cannot round them). Three concave
+chamfers at an inside corner are still refused:
 
-```openscad expect=fillet-unsupported-edge
-fillet_edges(r = 1, except = "concave") fillet_edges(r = 1, except = "convex") union() {
-  cube([20, 20, 5]);
-  translate([5, 5, 0]) cube([10, 10, 15]);
+```openscad expect=fillet-unsupported-vertex
+chamfer_edges(d = 1, edges = "concave") difference() {
+  cube(20);
+  translate([5, 5, 5]) cube(20);
 }
+```
+
+```text
+ERROR: chamfer_edges(): edges 1, 2, 3 meet at [5, 5, 5], where three concave chamfers meet in file model.scad, line 1
 ```
 
 ## STEP export, `--enable exact` and `$fn`
@@ -398,8 +413,11 @@ INFO: STEP export: fillet_edges() keeps its blends' arcs as polygons because $fn
   its place, size, selector, status (`built`, `selected`, `no-edges`,
   `count`, `too-large`, `overlap`, `unsupported-vertex`, `unsupported`,
   `failed`, ...), the matched count, each selected edge (curve, sense,
-  angle, class, length, centre, ends, the two faces' kinds), the skipped
-  edges by reason, and the codes of its diagnostics
+  angle, class, length, centre, ends, the two faces' kinds), for a call
+  built in two passes `passes` (per pass its sense and the call's edges
+  it rounds; the second also how many edges it continued across the
+  first's blends), the skipped edges by reason, and the codes of its
+  diagnostics
   (`docs/cli-json.md`). A failed call fails `check`
   (`counts.fillet_errors`).
 - **`neoscad measure --enable fillet --fillet N`** (or `--fillet
@@ -444,7 +462,7 @@ The other tools' side is from their sources, as surveyed in
 | On boolean results | yes | yes | no (primitives and attachables) | yes |
 | Stable under edits | names can break on a change | re-selected | re-selected | re-selected; `expect` pins a count |
 | Convex and concave | both | both | convex; external fillets top and bottom only | both, in one call |
-| Corners of three edges | vertex blends | vertex blends | `trimcorners` | sphere patch, equal radii; otherwise nested calls |
+| Corners of three edges | vertex blends | vertex blends | `trimcorners` | sphere patch, equal radii; convex and concave in two passes; unequal radii as nested calls |
 | Too-large radius | error, or an invalid solid | error | assertion or wrong result (unverified) | error with the size that fits as a fix |
 | Chamfers | equal, two distances, distance and angle | one or two lengths | `chamfer=` | equal distance |
 | Variable radius | yes | no | no | no |
@@ -460,13 +478,18 @@ What the design leaves for later, and what is known not to work yet,
 is in `docs/followups.md` ("Fillets and chamfers"). In short:
 
 - **Edges between curved faces with no common axis** (two cylinders
-  crossing, ellipses, B-splines) are not rounded, and **variable radii,
-  asymmetric chamfers and mixed corners in one call** are not
-  supported; mixed and unequal corners are nested calls.
-- **A convex rim's fillet** must be under half the rim's radius (a
-  boss's top edge), and **an arc's blend** ends only where it runs on
-  smoothly into another edge or on a plane through its axis; other ends
-  are `fillet-unsupported-vertex`.
+  crossing, ellipses, B-splines) are not rounded (stage F5b), and
+  **variable radii and asymmetric chamfers** are not supported; unequal
+  radii are nested calls.
+- **Mixed corners** are two passes, not a rolling-ball vertex blend: a
+  block's vertical blend ends square where its base's blends meet it,
+  and the mitre curve between the base's blends stays sharp.
+- **An arc's blend** ends only where it runs on smoothly into another
+  edge or on a plane through its axis; other ends are
+  `fillet-unsupported-vertex`.
+- **Concave rims on spheres** near the sphere's equator (a ball sunk
+  about half its radius into a plate) can come out of the STEP export
+  partly as facets.
 - **Near the largest size that fits**, a sliver of face can be left that
   the STEP export writes as facets; the size hints keep 5% under it for
   this reason.

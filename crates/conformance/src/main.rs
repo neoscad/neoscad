@@ -333,6 +333,11 @@ enum Cmd {
         /// default: $MESHBREP_OCCT_CHECK).
         #[arg(long)]
         occt: Option<PathBuf>,
+        /// `all`: stage F3's models with about two in five replaced by
+        /// F5a's (mixed corners, spheres, rotations, nested calls, spindle
+        /// rims); `f3`: F3's corpus exactly, for its stop-rule numbers.
+        #[arg(long, default_value = "all")]
+        set: String,
     },
     /// Render the progress video: one scene per snapshot in
     /// progress/index.jsonl, with benchmark interludes, encoded to H.264 by
@@ -589,10 +594,16 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             timeout,
             binary,
             occt,
+            set,
         } => {
             if timeout.is_nan() || timeout <= 0.0 {
                 return Err("--timeout must be positive".into());
             }
+            let set = match set.as_str() {
+                "all" => fillet_corpus::Set::All,
+                "f3" => fillet_corpus::Set::F3,
+                other => return Err(format!("--set must be all or f3, not {other}")),
+            };
             fillet_corpus::command(
                 &ctx,
                 &fillet_corpus::FilletOptions {
@@ -603,6 +614,7 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
                     binary,
                     occt,
                     filter,
+                    set,
                 },
             )
         }

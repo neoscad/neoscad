@@ -1,9 +1,12 @@
 # Fillet and chamfer cases
 
-Stages F2 and F3 of `docs/fillets.md`: `fillet_edges()` and
-`chamfer_edges()` (`--enable fillet`) on straight edges, and on circles
-and arcs about an axis, each with its closed-form volume in a
-`// volume:` comment. They are not in `conformance/manifest.json`, and
+Stages F2, F3 and F5a of `docs/fillets.md`: `fillet_edges()` and
+`chamfer_edges()` (`--enable fillet`) on straight edges, on circles and
+arcs about an axis, and on convex and concave edges that meet (two
+passes in one call), each with its volume in a `// volume:` comment:
+a closed form, or for two F5a cases with none written out
+(`block_plate_all`, `chamfer_bracket_all`) OCCT 8.0.1's volume of the
+exported file, as their comments say. They are not in `conformance/manifest.json`, and
 `conformance run` does not read them.
 
 `crates/geom/tests/fillet_build.rs` renders every case, exports it as STEP

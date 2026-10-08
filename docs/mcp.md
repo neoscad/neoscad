@@ -378,7 +378,7 @@ each selected edge's curve, sense, angle, class, length and centre, the
 skipped edges by reason, the codes of its diagnostics, and its line) and
 its text a line per call (`fillet_edges at line 4: 4 edges (4 line,
 convex, 90°), r 2, edges = "|z" [built]`); a failed call is an error
-with its fix (the size that fits, the nested rewrite) and fails the
+with its fix (the size that fits) and fails the
 check. `measure` with `fillet` lists that call's edges, and `snapshot`
 with `fillet` draws them numbered over the model.
 `crates/cli/tests/mcp.rs` checks that the recipe builds and that the

@@ -248,6 +248,19 @@ fn surface_entity(w: &mut W, f: &Face) -> usize {
         Surface::Sphere { radius, .. } => {
             w.add(format!("SPHERICAL_SURFACE('',#{a},{})", real(*radius)))
         }
+        // A spindle torus's outer part (the apple): ISO 10303-42's
+        // subtype for a major radius under the minor one, whose
+        // `select_outer` picks it. OCCT reads it as a toroidal surface of
+        // those radii, whose parameters on the apple are a ring torus's.
+        Surface::Torus {
+            major_radius,
+            minor_radius,
+            ..
+        } if major_radius < minor_radius => w.add(format!(
+            "DEGENERATE_TOROIDAL_SURFACE('',#{a},{},{},.T.)",
+            real(*major_radius),
+            real(*minor_radius)
+        )),
         Surface::Torus {
             major_radius,
             minor_radius,

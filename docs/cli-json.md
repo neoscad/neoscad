@@ -576,7 +576,8 @@ as on the bed), at most 10 findings per code.
   | "too-large" | "overlap" | "unsupported-vertex" | "failed" |
   "no-brep" | "2d" | "empty", "matched": int, "edges":
   [EDGE, ...],
-  "edges_omitted"?: int, "unsupported": int, "skipped": [{"reason":
+  "edges_omitted"?: int, "unsupported": int, "passes"?: [PASS, PASS],
+  "skipped": [{"reason":
   "polygon seam"|"tangent"|"faceted", "count", "module"?, "line"?},
   ...], "selectable": int, "bbox": {"min", "max"}, "codes": [code,
   ...], "pin"?: {"file", "line", "span", "text", "count"}}`. `selector`
@@ -591,18 +592,25 @@ as on the bed), at most 10 findings per code.
   "children": [[int, ...], [int, ...]] (per face, the call's children
   it came from), "parts"?: [[name, ...], [name, ...]], "status":
   "built"|"selected"|"unsupported"}`, in the order the selection
-  numbers them.
+  numbers them. `passes` is there for a call built in two passes
+  (convex and concave edges meeting at a vertex, `docs/fillets.md`
+  section 15.6): `PASS`: `{"pass": 1|2, "sense": "concave"|"convex",
+  "edges": [int, ...] (the call's edges it rounds, by their `index`),
+  "count": int (the edges it rounds in all), "continued"?: int (the
+  second pass's edges that the first pass made, continuing the call's
+  across its blends)}`.
   `pin` is the edit that writes `expect = matched` into the call (the
   language server's "Pin count"), absent when `expect` already says so
   or nothing was selected. Numbers are rounded to 1e-4. The text report
   has a line per call (`fillet_edges at line 4: 4 edges (4 line,
-  convex, 90°), r 2, edges = "|z" [built]`). Straight edges (stage F2)
-  and circles and arcs about an axis (stage F3) are built (`built`, and
-  their edges `built`). A call refused before any boolean (`too-large`,
-  `overlap`, `unsupported-vertex`, `failed`) is an error that leaves its
-  child sharp; the first three hints carry an edit: a size 5% under the
-  largest that fits, or the call split into two nested ones, concave
-  edges first.
+  convex, 90°), r 2, edges = "|z" [built]`, ending `, in two passes
+  (concave, then convex)` for a call built in two). Straight edges
+  (stage F2) and circles and arcs about an axis (stage F3) are built
+  (`built`, and their edges `built`). A call refused before any boolean
+  (`too-large`, `overlap`, `unsupported-vertex`, `failed`) is an error
+  that leaves its child sharp; a size problem's hint carries an edit, a
+  size 5% under the largest that fits (for a call built in two passes,
+  one at which both passes build).
 - `timings_ms.check.cuts` is the `cut-away` and `cuts-nothing` stage,
   which runs on the node tree right after the render, before the mesh
   checks; `check.total` does not include it.

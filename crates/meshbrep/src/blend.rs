@@ -88,8 +88,9 @@ pub enum BlendFace {
         /// pocket.
         convex: bool,
     },
-    /// A ring torus about a circular edge's axis (an earlier blend's):
-    /// circular edges only.
+    /// A torus about a circular edge's axis (an earlier blend's; the
+    /// outer part of a spindle torus, as [`Surface::Torus`]): circular
+    /// edges only.
     Torus {
         /// The centre.
         center: [f64; 3],
@@ -999,9 +1000,11 @@ fn profile(
     }
     if let Some(a) = fr.arc {
         // Revolved, a point across the axis would turn the region inside
-        // out. And the blend must be a ring torus: its centre further
-        // from the axis than its radius (a boss's convex rim blend up to
-        // half the boss's radius), the only torus a B-rep writes.
+        // out. The blend's torus may be a spindle (its centre nearer the
+        // axis than its radius: a boss's convex rim filleted with more
+        // than half the boss's radius), whose outer part the arc lies on
+        // as long as the arc keeps off the axis; its centre must still be
+        // off the axis (on it, the blend would be a sphere).
         let eps = 1e-9 * (a.rho + size);
         if arc
             .iter()
@@ -1010,7 +1013,7 @@ fn profile(
         {
             return Err(BlendError::TooLarge(index));
         }
-        if spec.profile == Profile::Fillet && !positive(a.meridian(base).0 - size * (1.0 + 1e-9)) {
+        if spec.profile == Profile::Fillet && !positive(a.meridian(base).0 - eps) {
             return Err(BlendError::TooLarge(index));
         }
     }
@@ -1358,6 +1361,23 @@ fn adjustments(spec: &BlendSpec) -> Result<Vec<Adjust>, BlendError> {
                 }
             }
         }
+    }
+    // A sphere corner's patch is built from its three edges' rings at
+    // one offset (the first edge's), so the three need one margin too.
+    // When one of them also runs on into an arc, whose margin is at most
+    // half its distance from its axis, the chain's least margin reached
+    // only that edge, and the patch's quads no longer met the other two
+    // edges' rings: an L-bracket's end face rounded with its outline (a
+    // line, the inner arc, a line, and sphere corners) made an open
+    // tool.
+    for c in &spec.corners {
+        for &(e, _) in &c.edges {
+            if e >= spec.edges.len() {
+                return Err(BlendError::Invalid(format!("a corner names no edge {e}")));
+            }
+        }
+        uf.join(c.edges[0].0, c.edges[1].0);
+        uf.join(c.edges[0].0, c.edges[2].0);
     }
     let mut least: Vec<f64> = vec![f64::INFINITY; spec.edges.len()];
     for i in 0..spec.edges.len() {
@@ -2288,9 +2308,11 @@ mod tests {
     }
 
     #[test]
-    fn a_boss_rim_needs_a_ring_torus() {
+    fn a_boss_rim_takes_a_spindle_torus() {
         // A boss of radius 6 about z, top at z = 0: a convex fillet's
-        // centre is 6 - r from the axis, which must be more than r.
+        // centre is 6 - r from the axis. Past r = 3 that is nearer than
+        // r (a spindle torus, its outer part); at r = 6 it is on the
+        // axis, and nothing of the top is left.
         let edge = |r: f64| BlendSpec {
             profile: Profile::Fillet,
             size: r,
@@ -2324,8 +2346,34 @@ mod tests {
             corners: vec![],
         };
         assert!(section(&edge(2.9), 0).is_ok());
-        assert_eq!(section(&edge(3.1), 0), Err(BlendError::TooLarge(0)));
+        assert!(section(&edge(3.1), 0).is_ok());
+        assert!(section(&edge(5.9), 0).is_ok());
+        assert_eq!(section(&edge(6.0), 0), Err(BlendError::TooLarge(0)));
         let t = tools(&edge(2.0), &|_| 4).unwrap();
         assert!(t[0].mesh.triangles.len() > 32 * 4);
+        // The spindle's blend: a torus record of major radius 2 and
+        // minor 4, its region revolved clear of the axis.
+        let t = tools(&edge(4.0), &|_| 4).unwrap();
+        let tagged = t[0].blend[0] as usize;
+        assert!(matches!(
+            t[0].mesh.surfaces[tagged],
+            Surface::Torus { major_radius, minor_radius, .. }
+                if (major_radius - 2.0).abs() < 1e-12 && minor_radius == 4.0
+        ));
+        // It reconstructs as a valid solid, writes the spindle as the
+        // outer part of a degenerate torus, and its exact volume is
+        // Pappus's: the rectangle from the top tangent (2 from the axis)
+        // to the margin (3) past the side and the top, less the quarter
+        // disk about the blend's centre (2, -4).
+        let b = crate::reconstruct(&t[0].mesh, &crate::Options::default()).unwrap();
+        assert!(crate::validate(&b, 1e-6).is_valid());
+        let step = crate::write_step(&b, &crate::StepOptions::default());
+        assert!(
+            step.contains("DEGENERATE_TOROIDAL_SURFACE('',") && step.contains(",2.,4.,.T.)"),
+            "{step}"
+        );
+        let want = TAU * (49.0 * 5.5 - 8.0 * PI - 64.0 / 3.0);
+        let got = crate::measure(&b).unwrap().volume;
+        assert!((got - want).abs() < 1e-9 * want, "{got} vs {want}");
     }
 }

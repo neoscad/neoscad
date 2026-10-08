@@ -79,8 +79,14 @@ output's positions, triangles and `face_id`s. The tests in
 consistently oriented 2-manifold, counter-clockwise from outside, with a
 surface index per triangle.
 
-`Surface` has `Plane`, `Cylinder`, `Cone`, `Sphere`, `Torus` (a ring
-torus: major radius larger than minor) and `Faceted`. `LinearExtrusion`
+`Surface` has `Plane`, `Cylinder`, `Cone`, `Sphere`, `Torus` and
+`Faceted`. A torus's major radius must be above zero; when it is no
+larger than the minor one (a spindle or horn torus, which crosses its
+axis) the surface is its outer part only, the apple, and faces on it
+must keep off the axis. `write_step` writes such a torus as a
+`DEGENERATE_TOROIDAL_SURFACE` with `select_outer` true (OCCT 8.0.1 reads
+it back as that part: with `select_outer` false the same file reads as
+the inner part, with another volume). `LinearExtrusion`
 and `Revolution` are declared for extruded and revolved free-form
 curves (text outlines), but `reconstruct` does not accept them yet
 (`Error::Unsupported`).
@@ -190,6 +196,25 @@ to, and how far each of that polygon's vertices lies off the exact
 circle, so the tool's tangent ring runs through the polygon's own
 vertices. Edges that run on into each other (`End::Chain`: a rounded
 rectangle's lines and arcs) come out as one solid.
+
+A convex rim's fillet may be wider than half the rim's radius: its blend
+is then a spindle torus (a boss's top rim filleted with anything that
+leaves some of the top). The tools of a sphere corner share one margin
+with the rest of any tangent chain one of its edges belongs to, so a
+corner whose edge runs on into an arc (an L-bracket's end face rounded
+with its outline) closes.
+
+## Changes since 0.2.0
+
+- `Surface::Torus` accepts spindle and horn tori (major radius above
+  zero, no longer above the minor radius), written to STEP as
+  `DEGENERATE_TOROIDAL_SURFACE(..., .T.)` when the major radius is the
+  smaller. Blend tools build convex rim fillets up to the rim's radius.
+  A caller that relied on `reconstruct` refusing such a torus as
+  malformed sees it accepted now.
+- `blend::tools`: the edges of a sphere corner take the least margin of
+  every tangent chain one of them belongs to (before, a corner edge
+  chained to an arc could make an open tool).
 
 ## Licence
 

@@ -9,7 +9,10 @@ before and after the boolean; then the surfaces: the language server,
 the MCP recipe, the apps' and /try's toggles, editor colouring and the
 user reference `docs/fillet-edges.md`; sections 15.1 to 15.5 record
 how, and where they depart from this text). The stop rule's corpus
-passes (99.7% of supported cases exact, section 15.4); F5 not started.
+passes (99.7% of supported cases exact, section 15.4). F5 is split:
+F5a built (convex and concave corners in two passes in one call, and
+spindle tori: section 15.6); F5b, blends between curved surfaces with
+no common axis, planned (section 15.7).
 Written
 2026-10-08 against `127be03` and the reference checkouts in
 `.reference/openscad` and `.reference/BOSL2`.
@@ -84,7 +87,9 @@ chamfer_edges(d = 1, edges = "%circle and >z") difference() { ... }
   axis (a cylinder meeting a cylinder at a tee), variable radius, and
   corners where unequal radii or convex and concave edges meet. Each is
   a diagnostic with a hint, usually "fillet in two passes", which the
-  language expresses by nesting calls.
+  language expresses by nesting calls. (Since stage F5a one call rounds
+  convex and concave edges that meet in two passes itself, section
+  15.6; unequal radii are nested calls, one size per call.)
 
 ## 2. OpenSCAD compatibility, flag and names
 
@@ -570,7 +575,11 @@ exact.
   "concave") child`), or the larger radius first. After the first pass
   the second pass's edges at such a vertex form tangent chains (7.2),
   which are supported. Whether one call should do the two passes itself
-  is question 5.
+  is question 5. (Stage F5a does: section 15.6. The second pass's edges
+  form tangent chains on an L-bracket's end faces, as said; at a block
+  standing on a plate they do not: the block's vertical edges end at the
+  base's mitred blends, where they are cut square, and the mitre curve
+  stays sharp.)
 
 ## 8. Failure modes and diagnostics
 
@@ -890,6 +899,8 @@ Person-weeks, wide bands, in the audit's terms (its stage 4 estimate was
 | F3 | Rotational class: torus, cone and plane tools; tessellation conforming to the face's polygon; mixed tangent chains (lines and arcs); rims of holes, bosses, cones and spheres | 2–3 |
 | F4 | Surfaces: LSP (hover, completion, code actions), MCP recipe and docs, the apps' and /try's toggle, a user reference page (as `docs/step-export.md` is for exact export), editor colouring | 1–2 |
 | F5 (optional) | Blends between curved surfaces with no common axis (spine as the intersection of offset surfaces, a faceted pipe, or B-spline surfaces later), unequal-radius and mixed corners, automatic two-pass calls | 3–6, decided after F3 |
+| F5a | Mixed corners as two passes in one call, selection of the second pass by provenance, spindle tori, corpus families for corners, spheres, rotations, nested calls (built: 15.6) | — |
+| F5b | Exact blends between curved surfaces with no common axis: spine marching, B-spline surfaces in `meshbrep` (planned: 15.7) | 4–6 |
 
 F0–F4: 9–13.5 person-weeks.
 
@@ -1437,6 +1448,213 @@ F0–F4: 9–13.5 person-weeks.
   off; the CHANGELOG entry, written at release (`docs/followups.md`,
   "Fillets and chamfers").
 
+### 15.6 Stage F5a as built
+
+F5 was split: **F5a** (this section) is corners and two-pass calls, and
+spindle tori; **F5b** (15.7) is blends between curved surfaces with no
+common axis, which by decision (section 18) export exact surfaces or are
+not built.
+
+- **Two passes in one call** (`crates/geom/src/fillet/passes.rs`). Where
+  `build::prepare` stops at a vertex where convex and concave selected
+  edges meet (`Problem::Vertex { mixed: true }`), the plan is left
+  pending and `fillet::plan` rounds the selection in two passes, exactly
+  as section 7.4's nested rewrite did: the first pass is the selected
+  edges of one sense, built and checked as a call selecting only them
+  would be; the second pass selects on the B-rep of what the first made
+  (`export_render_traced` with the node's own first pass applied, its
+  blends recorded with no child, `EdgeFact::own`) and is built and
+  checked on it. The normal render applies the passes in turn, the
+  second conformed to the first's mesh (`Ctx::fillet`), and so does the
+  STEP walk (`Walk::fillet`), so the solid is the nested calls' bit for
+  bit: the block on a plate (`block_plate_all`) exports the same STEP
+  bytes as `fillet_edges(r = 1, except = "concave")
+  fillet_edges(r = 1, except = "convex")` around it
+  (`crates/geom/tests/fillet_build.rs`, `a_mixed_corner_builds_in_two_passes`).
+- **The second pass's selection** is by provenance, not by the selector
+  again: an edge of the first pass's result is the call's when it lies
+  on one of the call's selected edges of the second sense (its curve
+  and within its extent: what the first pass left of it), or, repeatedly,
+  when it has a first-pass blend as a face and continues a chosen edge
+  smoothly at a vertex across a face they share (an L-bracket's end
+  face: its outline's lines now meet the inner blend's arc, which the
+  outline's rounding follows round). Edges the first pass made that
+  continue nothing are not the call's: the ellipses where two mitred
+  concave blends meet, which the nested rewrite under `"all"` named and
+  warned about (section 15.5), are neither rounded nor reported.
+- **Order.** Concave first. When that cannot be built because of a
+  vertex, convex first (the plan reports which); a size the
+  concave-first order cannot take is the call's error with its hint, so
+  that the shape a call makes does not flip with its size. When neither
+  order builds, the error is the concave-first one, naming its pass
+  ("fillet_edges() in its second pass (the convex edges, after the
+  concave ones are rounded): ..."), and an edge the first pass made is
+  named by where it is ("new at [x, y, z]"). A size hint on a two-pass
+  call is planned again at the size it offers, then at what the failing
+  pass offers there, up to six plans, and offered only if the whole call
+  builds (`passes::verified`): a smaller size changes both passes. Each
+  plan of a pass costs a reconstruction of the first pass's result; the
+  facts are cached under the children's keys, the call's key, the first
+  sense and the size.
+- **The rewrite hint is gone.** `Fix::Nested` and
+  `session::fillets::nested_edit` are removed: the rewrite made the
+  solid the passes now make, so where the passes fail it fails too.
+  `fillet-unsupported-vertex` remains for vertices neither order can
+  round (three concave chamfers, an arc ending on a face off its axis,
+  more than three faces or a curved third face), with a text hint.
+- **Unequal radii** do not arise in one call (one size per call); nested
+  calls of different sizes build as before, and now take the horn and
+  spindle tori they make (`nested_unequal`: an outer r = 1 round inner
+  r = 2 arcs gives horn tori, refused before).
+- **Reports.** `check`'s JSON gains `passes` for a call built in two (per
+  pass its sense, the call's edges it rounds by their numbers in `edges`,
+  and for the second how many edges it rounds in all and how many it
+  continued across the first's blends); the text line ends "in two
+  passes (concave, then convex)"; the call's convex edges are `built`.
+  The check after the boolean (`blend_diags`) measures each pass on the
+  mesh it was applied to, as for nested calls: the first on the stage
+  the normal render keeps in the geometry cache under a key hashed from
+  the node's (`Renderer::keep_fillet_stage`; a cached result whose stage
+  was evicted is rendered again), the second on the result.
+- **Sphere corners joined to chains.** A sphere corner's edges and patch
+  take one margin, but `adjustments` equalised margins only along
+  tangent chains, so a corner one of whose edges ran on into an arc
+  (whose margin is at most half its distance from its axis) built an
+  open tool: an L-bracket's end face rounded with its outline failed
+  this way in the nested rewrite too. The corners' edges now join the
+  chains' union for the margin (`meshbrep::blend`).
+- **Spindle tori.** `meshbrep`'s `Surface::Torus` takes any major radius
+  above zero; below the minor one it is the torus's outer part (the
+  apple), which every formula in `surf.rs` already holds on (the tube
+  centre a point projects to radially, the tube angle), and faces on it
+  must keep off the axis. STEP writes it as
+  `DEGENERATE_TOROIDAL_SURFACE('', axis, R, r, .T.)`, ISO 10303-42's
+  subtype for `major_radius < minor_radius` with `select_outer`
+  (`https://www.steptools.com/stds/stp_aim/html/t_degenerate_toroidal_surface.html`,
+  retrieved 2026-10-08; whether AP214's schema lists it was not
+  checked). OCCT 8.0.1 reads it as that part: a boss of radius 4
+  filleted with r = 3 reads back valid with the Pappus volume
+  133π + 4.5π² = 462.2450427, and the same file with `.F.` reads back as
+  the inner part, volume 284.59. The blend tools take a convex rim's
+  fillet up to the rim's radius (the blend's centre off the axis), so
+  `fillet-too-large` on a boss's top rim now means the top is used up.
+- **Goldens** (`conformance/extensions/fillet`, 36 cases): F3's 29 and
+  seven of F5a's: `bracket_all` (every edge of an L-bracket, two passes;
+  the bracket opened by a unit ball, 10624 + 274π/3 + π²/2),
+  `bracket_all_rotated` (the same turned inside the call),
+  `block_plate_all` (two passes with mitres; OCCT's volume, no closed
+  form), `chamfer_bracket_all` (OCCT's volume, all planes),
+  `boss_spindle` and `blind_spindle` (spindle tori, convex and concave,
+  Pappus), `nested_unequal` (horn tori, the opening of a rounded core).
+  Every STEP is all exact and OCCT reads each back valid and closed,
+  its volume within 1.8e-9 of the closed form (the rotated bracket's;
+  1e-14 or better for the tori). Four of them are in the byte-identity
+  test at 1, 2 and 8 threads, cold and warm.
+- **The corpus** (`conformance fillet-corpus`) gains `--set`: `f3` is
+  F3's models exactly; `all` (the default) replaces about two in five of
+  them, by a stream of their own, with F5a's: `mixed` (a block on a
+  plate, an L-bracket, a rib flush with a plate's ends, a pocket; `"all"`
+  and selectors over both senses), `sphere` (a ball sunk in a plate, a
+  spherical dimple), `rotated` (an F3 body turned by arbitrary angles
+  inside the call), `nested` (two calls of independent sizes) and
+  `spindle` (boss and blind-hole rims from half to all of the radius).
+  A model with nested calls gets up to three hint edits, one per call
+  that needs one; when what is left is another call's refusal, the
+  model is refused.
+
+  Results, all with OCCT read-back. **F3's set**, 2,000 models (seed 2):
+  1,755 of 1,761 supported-class models (99.7%) export all exact and
+  valid (F3: 1,735 of 1,740), 1,237 built and 518 fixed by their hint;
+  60 refused (55 vertices, F3 76; 4 unsupported edges; 1 child with no
+  B-rep), no mesh failure. Its six failures: three hint-sized fixes at
+  the fit limit or on a sliver (F3's classes), F2's pocketed bracket
+  (1287), a box arc's spindle strip overlapping a pocket's rim strip off
+  the checks' rays (1366), and a two-pass call's hint whose result does
+  not reconstruct (1910). The default 300 (seed 1): 261 of 261 (F3: 259
+  of 259). **The full set**, 2,000 models (seed 2): 1,701 of 1,768
+  (96.2%), 63 refused (57 vertices); 8930933 on the same models: 1,506
+  of 1,551 (97.1%), 282 refused (277 vertices). F5a builds 201 models
+  8930933 did not; 4 it built (or fixed) now fail, all where a spindle
+  torus lets a size build that 8930933 refused and hinted down to a ring
+  torus. By family (F5a's, then F3's): `spindle` 139 of 139, `mixed` 216
+  of 231 (8930933: 31 of 31, 212 refused), `nested` 88 of 96, `rotated`
+  98 of 106, `sphere` 77 of 109 (the same on 8930933: concave rims near
+  a sphere's equator, `docs/followups.md`); `plate` 443 of 443, `box` 247
+  of 247, `rounded` 193 of 195, `bracket` 200 of 202. Mesh failures: 3
+  (0.2%), the same three rotated models as on 8930933. The default 300
+  (seed 1): 249 of 260 (95.8%). Of the `mixed` failures, 8 (and 3 of the
+  300) are one F3 chain configuration OCCT rejects, which the nested
+  calls on 8930933 make too (`docs/followups.md`). The stop rule's
+  numbers (section 15) are the F3 set's: 99.7%, no mesh failure.
+- **Not in F5a**: rolling-ball vertex blends (a block's vertical blend
+  ends square where its base's mitred blends meet it, and the mitre
+  curve stays sharp, as in the nested calls); arcs ending on faces off
+  their axis; blends between curved surfaces with no common axis (F5b);
+  the near-limit and sliver classes F3 left (the hints still back off
+  5%; a band-over-sagitta check was not added); and the failure classes
+  the new corpus found, in `docs/followups.md` ("Fillets and chamfers").
+
+### 15.7 Stage F5b plan: exact curved–curved blends
+
+What is left of F5: blends between curved surfaces that share no axis
+(a boss meeting a cylinder side, two cylinders at a tee, a cylinder
+meeting a plane obliquely, a cylinder meeting an off-axis sphere), and
+the vertex blends where they end. By decision (section 18) these export
+exact surfaces or are not built; a faceted pipe is not an option.
+
+- **The spine.** The rolling ball's centre runs along the intersection
+  of the two faces offset by `r` towards the air (offsets of planes,
+  cylinders, cones, spheres and tori are surfaces of the same kinds), so
+  the spine is a surface–surface intersection of quadrics and tori.
+  Trace it by marching (predictor along the cross product of the two
+  normals, corrector by Newton onto both offsets), started from the
+  offset of the edge's own points, bounded by the edge's end planes;
+  then fit a cubic B-spline to it within the export tolerance.
+  `meshbrep` already fits B-spline *edges* to surface–surface
+  intersections from a mesh chain (`edges.rs`, `fit`, projecting each
+  point onto both surfaces), which is the corrector; the marching from
+  exact surfaces, not a mesh, is new.
+- **Contact curves** are the spine's foot points on each face (along
+  each offset's normal): B-spline curves fitted the same way. They are
+  the edges between the blend and its faces, tangent contacts, and the
+  tool's mesh must put vertices on them (6.3) as the straight and
+  revolved tools do.
+- **The blend surface** is the canal surface the ball sweeps between the
+  contacts: in each normal plane of the spine an arc of radius `r` from
+  one foot point to the other. Its exact form is a rational surface
+  (degree 2 across, the spine's degree along); write it as a
+  `B_SPLINE_SURFACE_WITH_KNOTS` fitted to the arcs (cubic both ways,
+  knots along the spine's, within the tolerance), or as a
+  `RATIONAL_B_SPLINE_SURFACE` built from the spine and the foot curves
+  with the circular arcs' exact weights. Chamfers rule a surface between
+  the two foot curves (`B_SPLINE_SURFACE` of degree 1 across).
+- **What `meshbrep` needs**: a `Surface::BSpline` (control net, knots,
+  weights) with evaluation, derivatives and point inversion (Newton from
+  the nearest net point), so reconstruction can tag and project onto it,
+  the validator check points against it, and seams and parameter-space
+  curves be written on it; its tangency with planes and quadrics along
+  the contact curves recognised from the records (`tangency.rs` knows
+  only coaxial and parallel contacts); area and volume integration
+  on it (`measure.rs`: quadrature in its parameter space, as for the
+  torus); the STEP entities and OCCT read-back of each. The tool
+  generator (`blend.rs`) gains a swept-arc tool along a fitted spine,
+  with ends cut by planes as straight tools are.
+- **Corners** of such blends with others (the ends of a tee's blend
+  where it meets the cylinder's rim blend) are left as F2 leaves
+  unsupported corners: `fillet-unsupported-vertex`, or a two-pass order
+  where one exists.
+- **Checks**: the spine must exist along the whole edge (the ball fits),
+  the contacts stay inside their faces (a ray test across the spine, as
+  for the other classes), and the swept arc must not fold (the ball's
+  radius under each face's curvature radius along the spine).
+- **Estimate**: 4–6 person-weeks (marching and fitting 1, B-spline
+  surfaces in `meshbrep` with STEP, validation and measure 2–3, the tool
+  and its checks 1, goldens against OCCT's own fillets of the same tees
+  and the corpus 0.5–1). The risk is reconstruction across the fitted
+  surface's tolerance: the tool's tessellation and the exact surface
+  differ by the fit's error as well as the sagitta, which the tangency
+  rules (exact contact lines today) would have to allow for.
+
 ## 16. Test plan
 
 - **Flag off.** `fillet_edges(...)` and `chamfer_edges(...)` give the
@@ -1515,7 +1733,9 @@ Settled by the owner (2026-10-08):
 The remaining questions take the recommendations below: one `--enable
 fillet` flag for both modules; `edges = "all"` by default, unsupported
 edges as warnings; mitred concave corners, with nested calls for mixed or
-unequal corners for now; curved-curved blends (F5) an error until exact;
+unequal corners for now (stage F5a: mixed corners are two passes in one
+call, section 15.6; unequal radii stay nested calls); curved-curved
+blends (F5) an error until exact (F5b, section 15.7);
 equal-distance chamfers only in v1; the normal render keeps OpenSCAD's
 tessellation for the child.
 
@@ -1538,6 +1758,8 @@ tessellation for the child.
    refuses mixed and unequal corners with a nested-call rewrite (7.4).
    Should one call later do the two passes itself, and should the
    concave corner wrap a rolling-ball horn torus instead of a mitre?
+   (The owner chose F5; F5a does the two passes, concave first, and
+   keeps the mitre: section 15.6.)
 6. **Where the tool generator lives.** In `meshbrep` (`MIT OR
    Apache-2.0`, written fresh so the crate stays publishable: "blend
    tools from a B-rep edge"), or in `geom` (GPL), which could reuse the
