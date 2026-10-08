@@ -31,6 +31,9 @@ let
       (root + "/LICENSE")
       (root + "/NOTICE")
       (root + "/assets")
+      # The extensions' golden models and cases (sketch, query, exact),
+      # which the session and geom tests read.
+      (root + "/conformance/extensions")
       (root + "/crates")
       (root + "/examples")
       (root + "/packaging/licenses")
