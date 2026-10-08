@@ -947,7 +947,26 @@ F0–F4: 9–13.5 person-weeks.
 - **OCCT for fillets.** The owner's pure-Rust, WASM-clean rule, and OCCT's
   measured silent failure (`docs/audits/brep-feasibility.md:159-180`).
 
-## 18. Open questions for the owner
+## 18. Decisions
+
+Settled by the owner (2026-10-08):
+
+1. **Names:** `fillet_edges()` and `chamfer_edges()`, not `fillet`/`chamfer`.
+2. **A failed call:** the child stays sharp, the call is an error with a
+   fix hint, and an export of the model exits non-zero.
+3. **Where the tool generator lives:** in `meshbrep` (MIT OR Apache-2.0),
+   written fresh.
+4. **`.csg` export:** prints `fillet_edges(...)` as `part()` is printed.
+
+The remaining questions take the recommendations below: one `--enable
+fillet` flag for both modules; `edges = "all"` by default, unsupported
+edges as warnings; mitred concave corners, with nested calls for mixed or
+unequal corners for now; curved-curved blends (F5) an error until exact;
+equal-distance chamfers only in v1; the normal render keeps OpenSCAD's
+tessellation for the child.
+
+## 19. The questions as first asked
+
 
 1. **Names.** `fillet_edges()` and `chamfer_edges()` (recommended: no
    collision with BOSL2's `fillet`, MCAD's `chamfer` or the sketch
