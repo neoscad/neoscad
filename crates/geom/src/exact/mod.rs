@@ -15,9 +15,13 @@
 //!    far further off the exact edges than the tessellation explains), the
 //!    export render is built again at twice the segments. A result whose
 //!    volume check is too loose to trust is held until a finer mesh
-//!    vouches for it (see `LOOSE_CHECK`). If the exact attempts fail and
-//!    the model has exact extrusions, they are built as facets instead,
-//!    as stage 1 built them, so the model still exports (reported).
+//!    vouches for it (see `LOOSE_CHECK`). If the exact attempts fail
+//!    somewhere in particular, the source regions there (connected
+//!    triangles of one surface record, the faces they would have made)
+//!    are written as facets and the rest stays exact ([`partial`]); if
+//!    that fails too and the model has exact extrusions, they are built
+//!    as facets instead, as stage 1 built them. Either is reported at the
+//!    source location of what went to facets.
 //! 3. **Checks** before anything is written: `meshbrep::validate`, then the
 //!    exact volume against the tagged mesh corrected onto its surfaces
 //!    ([`check`]), and the volume and bounding box against the normal
@@ -106,6 +110,9 @@ pub struct ExactStats {
     /// model did not reconstruct with them exact: the file is the one
     /// stage 1 would have written.
     pub fallback: Option<String>,
+    /// What was written as facets after the exact attempts failed in
+    /// places (the rest of the model exact), when it came to that.
+    pub partial: Option<Partial>,
     /// The modules that fell back to facets in the exact attempts (before
     /// any [`ExactStats::fallback`]): what decides whether the model is
     /// one exact export should handle.
@@ -113,6 +120,25 @@ pub struct ExactStats {
     /// Reconstruction's notes (merged arcs, tangencies resolved, ...).
     pub notes: Vec<String>,
     pub timings: Timings,
+}
+
+/// A partial faceted fallback ([`partial`]): the regions around where
+/// reconstruction or its checks failed, written as planar facets so that
+/// the rest of the model keeps its exact surfaces.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Partial {
+    /// Why the model did not export with every face exact.
+    pub reason: String,
+    /// Source regions written as facets: connected triangles of the
+    /// export render on one exact surface, the faces they would have been.
+    pub regions: usize,
+    /// Their triangles.
+    pub triangles: usize,
+    /// The export render's triangles on exact surfaces (planes included),
+    /// before any was retagged.
+    pub exact_triangles: usize,
+    /// Reconstructions it took, the one that passed included.
+    pub rounds: u32,
 }
 
 /// A finished export.
@@ -241,6 +267,23 @@ fn stray_void(brep: &meshbrep::Brep, tol: f64) -> Option<usize> {
 /// still exports), or the export fails rather than guess.
 const LOOSE_CHECK: f64 = 1e-3;
 
+/// What the regions [`partial`] retagged as facets change in the checks
+/// of an [`attempt`] (nothing, by default).
+#[derive(Debug, Clone, Copy, Default)]
+struct Facets {
+    /// The volume between those facets and their exact surfaces
+    /// ([`check::Caps`]). The B-rep's volume plus their signed sum is the
+    /// exact model's, which is what is compared with the normal render;
+    /// their size must be small beside the volume, or the triangles were
+    /// not on the surfaces they were tagged with and the comparison says
+    /// nothing.
+    caps: check::Caps,
+    /// The largest cap height of the mesh as rendered. Retagged triangles
+    /// no longer count in the corrected mesh's, but the chains along
+    /// their edges are still the tessellation's.
+    max_cap: f64,
+}
+
 /// One attempt's outcome: the written file, or why it was rejected and
 /// whether a finer export render could cure it.
 enum Attempt {
@@ -253,6 +296,9 @@ enum Attempt {
     Rejected {
         message: String,
         retry: bool,
+        /// The mesh's triangles where it failed, when that is known
+        /// ([`partial`] writes the faces around them as facets).
+        at: Vec<u32>,
     },
 }
 
@@ -277,6 +323,9 @@ pub fn export_step(
     // A first attempt that passed with a loose check: (file, its stats,
     // its substitutions).
     let mut held: Option<(String, ExactStats, Vec<Substitution>)> = None;
+    // The latest exact attempt that failed somewhere in particular: its
+    // mesh, where, and why. A partial fallback starts from it.
+    let mut located: Option<(walk::ExportMesh, Vec<u32>)> = None;
     let plan = [
         (1u32, walk::Extrusions::Exact),
         (2, walk::Extrusions::Exact),
@@ -293,6 +342,22 @@ pub fn export_step(
             continue;
         }
         if mode == walk::Extrusions::Faceted {
+            // Before giving up on exact extrusions altogether: the exact
+            // attempt with the regions where it failed written as facets.
+            if let (Some(why), Some((b, at))) = (&exact_failure, located.take()) {
+                let before = faceted_modules(&substitutions);
+                if let Some((step, subs)) =
+                    partial(&b, &at, why, normal_volume, normal_box, x, &mut stats, &now)
+                {
+                    stats.exact_attempt_faceted = before;
+                    stats.retried_because = None;
+                    return Ok(ExactExport {
+                        step,
+                        stats,
+                        substitutions: subs,
+                    });
+                }
+            }
             // Only a model whose extrusions were built exact can do
             // better with them as facets.
             if exact_extrusions == 0 {
@@ -335,6 +400,8 @@ pub fn export_step(
         }
         let outcome = attempt(
             &built,
+            &built.mesh,
+            Facets::default(),
             normal_volume,
             normal_box,
             k == 0,
@@ -387,7 +454,32 @@ pub fn export_step(
                     substitutions,
                 });
             }
-            Attempt::Rejected { message, retry } => {
+            Attempt::Rejected { message, retry, at } => {
+                if mode == walk::Extrusions::Exact && !at.is_empty() {
+                    located = Some((built, at));
+                } else if mode == walk::Extrusions::Faceted && !at.is_empty() {
+                    // The last resort's own failure, located: its regions
+                    // as facets too.
+                    let before = stats.exact_attempt_faceted.clone();
+                    if let Some((step, subs)) = partial(
+                        &built,
+                        &at,
+                        &message,
+                        normal_volume,
+                        normal_box,
+                        x,
+                        &mut stats,
+                        &now,
+                    ) {
+                        stats.exact_attempt_faceted = before;
+                        stats.retried_because = None;
+                        return Ok(ExactExport {
+                            step,
+                            stats,
+                            substitutions: subs,
+                        });
+                    }
+                }
                 if retry && k == 0 {
                     first_reason = Some(message);
                     continue;
@@ -425,6 +517,210 @@ pub fn export_step(
     }))
 }
 
+/// How many rounds [`partial`] grows the faceted region before giving up.
+/// Each is one more reconstruction; the corpora's models that pass take
+/// one or two.
+const PARTIAL_ROUNDS: u32 = 8;
+
+/// Union-find root with path halving, over `u32` parents.
+fn root(parent: &mut [u32], mut i: u32) -> u32 {
+    while parent[i as usize] != i {
+        parent[i as usize] = parent[parent[i as usize] as usize];
+        i = parent[i as usize];
+    }
+    i
+}
+
+/// The partial faceted fallback: `built`'s exact attempt failed at the
+/// triangles `at`, so the source regions there (connected triangles of
+/// one exact surface record, which would have been faces) are retagged
+/// as facets and the mesh is reconstructed again, growing the region
+/// while each new failure is located, up to [`PARTIAL_ROUNDS`] times.
+///
+/// The result is held to every check an exact attempt is, with the
+/// facets' caps added to what the volume may differ from the normal
+/// render by, and to a volume check tight enough to trust
+/// ([`LOOSE_CHECK`]): a file written this way is never the wrong solid,
+/// only a less exact one. On success, `stats` is the passing attempt's,
+/// with [`ExactStats::partial`] set, and the substitutions are `built`'s
+/// plus one for each source location that lost faces. On failure `stats`
+/// is as it was, with the attempts and their time added.
+#[allow(clippy::too_many_arguments)]
+fn partial(
+    built: &walk::ExportMesh,
+    at: &[u32],
+    reason: &str,
+    normal_volume: f64,
+    normal_box: Bounds,
+    x: &ExactOptions<'_>,
+    stats: &mut ExactStats,
+    now: &dyn Fn() -> f64,
+) -> Option<(String, Vec<Substitution>)> {
+    let before = stats.clone();
+    let out = partial_rounds(built, at, reason, normal_volume, normal_box, x, stats, now);
+    if out.is_none() {
+        let (attempts, timings) = (stats.attempts, stats.timings);
+        *stats = before;
+        stats.attempts = attempts;
+        stats.timings = timings;
+    }
+    out
+}
+
+/// [`partial`]'s rounds.
+#[allow(clippy::too_many_arguments)]
+fn partial_rounds(
+    built: &walk::ExportMesh,
+    at: &[u32],
+    reason: &str,
+    normal_volume: f64,
+    normal_box: Bounds,
+    x: &ExactOptions<'_>,
+    stats: &mut ExactStats,
+    now: &dyn Fn() -> f64,
+) -> Option<(String, Vec<Substitution>)> {
+    let mesh = &built.mesh;
+    let nt = mesh.triangles.len();
+    let tagged_faceted = |t: usize| {
+        matches!(
+            mesh.surfaces[mesh.triangle_surface[t] as usize],
+            meshbrep::Surface::Faceted
+        )
+    };
+    // The triangles across each edge, by sorting the edges.
+    let mut keyed: Vec<(u32, u32, u32)> = Vec::with_capacity(3 * nt);
+    for (t, tri) in mesh.triangles.iter().enumerate() {
+        for k in 0..3 {
+            let (a, b) = (tri[k], tri[(k + 1) % 3]);
+            keyed.push((a.min(b), a.max(b), t as u32));
+        }
+    }
+    keyed.sort_unstable();
+    let mut neighbours: Vec<Vec<u32>> = vec![Vec::new(); nt];
+    for w in keyed.windows(2) {
+        if (w[0].0, w[0].1) == (w[1].0, w[1].1) && w[0].2 != w[1].2 {
+            neighbours[w[0].2 as usize].push(w[1].2);
+            neighbours[w[1].2 as usize].push(w[0].2);
+        }
+    }
+    // Source regions: neighbours on one surface record.
+    let mut parent: Vec<u32> = (0..nt as u32).collect();
+    for (t, around) in neighbours.iter().enumerate() {
+        for &u in around {
+            if mesh.triangle_surface[t] == mesh.triangle_surface[u as usize] {
+                let (a, b) = (root(&mut parent, t as u32), root(&mut parent, u));
+                if a != b {
+                    parent[a.max(b) as usize] = a.min(b);
+                }
+            }
+        }
+    }
+    let region: Vec<u32> = (0..nt as u32).map(|t| root(&mut parent, t)).collect();
+    let mut members: std::collections::BTreeMap<u32, Vec<u32>> = Default::default();
+    for (t, &r) in region.iter().enumerate() {
+        members.entry(r).or_default().push(t as u32);
+    }
+    let exact_triangles = (0..nt).filter(|&t| !tagged_faceted(t)).count();
+    let max_cap = check::corrected_volume(mesh).max_cap;
+    let mut faceted = vec![false; nt];
+    let mut chosen: std::collections::BTreeSet<u32> = Default::default();
+    let mut at = at.to_vec();
+    let open = |t: u32, faceted: &[bool]| !faceted[t as usize] && !tagged_faceted(t as usize);
+    for round in 1..=PARTIAL_ROUNDS {
+        let mut seeds: Vec<u32> = at.iter().copied().filter(|&t| open(t, &faceted)).collect();
+        if seeds.is_empty() {
+            // The failure is inside what is faceted already: the regions
+            // next to it.
+            seeds = at
+                .iter()
+                .flat_map(|&t| neighbours[t as usize].iter().copied())
+                .filter(|&t| open(t, &faceted))
+                .collect();
+        }
+        if seeds.is_empty() {
+            return None;
+        }
+        for t in seeds {
+            let r = region[t as usize];
+            if chosen.insert(r) {
+                for &m in &members[&r] {
+                    faceted[m as usize] = true;
+                }
+            }
+        }
+        let mut retagged = mesh.clone();
+        let tag = retagged.surfaces.len() as u32;
+        retagged.surfaces.push(meshbrep::Surface::Faceted);
+        let gone: Vec<u32> = (0..nt as u32).filter(|&t| faceted[t as usize]).collect();
+        for &t in &gone {
+            retagged.triangle_surface[t as usize] = tag;
+        }
+        let facets = Facets {
+            caps: check::cap_volume(mesh, &gone),
+            max_cap,
+        };
+        stats.attempts += 1;
+        let outcome = attempt(
+            built,
+            &retagged,
+            facets,
+            normal_volume,
+            normal_box,
+            false,
+            x,
+            stats,
+            now,
+        );
+        let step = match outcome {
+            Attempt::Done(step) | Attempt::Loose(step) => step,
+            Attempt::Rejected { at: next, .. } => {
+                if next.is_empty() {
+                    return None;
+                }
+                at = next;
+                continue;
+            }
+        };
+        if stats.volume_tolerance > LOOSE_CHECK {
+            // Too coarse a check to vouch for a solid that is not the
+            // exact model's anyway.
+            return None;
+        }
+        // One substitution per source location that lost faces.
+        let mut per_origin: std::collections::BTreeMap<u32, usize> = Default::default();
+        for r in &chosen {
+            let s = mesh.triangle_surface[*r as usize] as usize;
+            if let Some(&o) = built.surface_origin.get(s) {
+                *per_origin.entry(o).or_default() += 1;
+            }
+        }
+        let why = reason.split("; ").next().unwrap_or(reason);
+        let mut subs = built.substitutions.clone();
+        for (o, n) in per_origin {
+            let (module, loc) = built.origins[o as usize].clone();
+            subs.push(Substitution {
+                kind: SubstitutionKind::Faceted,
+                module,
+                detail: format!(
+                    "is exported partly as planar facets ({n} face{} of it), where the model did not reconstruct exact: {why}",
+                    if n == 1 { "" } else { "s" }
+                ),
+                loc,
+                count: 1,
+            });
+        }
+        stats.partial = Some(Partial {
+            reason: reason.to_string(),
+            regions: chosen.len(),
+            triangles: gone.len(),
+            exact_triangles,
+            rounds: round,
+        });
+        return Some((step, subs));
+    }
+    None
+}
+
 /// The modules among `subs` that fell back to facets, each once, sorted.
 fn faceted_modules(subs: &[Substitution]) -> Vec<&'static str> {
     let mut m: Vec<&'static str> = subs
@@ -437,8 +733,14 @@ fn faceted_modules(subs: &[Substitution]) -> Vec<&'static str> {
     m
 }
 
+/// One reconstruction of `mesh` (the export render's, or it with some
+/// regions retagged as facets by [`partial`]) and every check on it.
+/// `facets` says what retagged regions change in the checks.
+#[allow(clippy::too_many_arguments)]
 fn attempt(
     built: &walk::ExportMesh,
+    mesh: &meshbrep::TaggedMesh,
+    facets: Facets,
     normal_volume: f64,
     normal_box: Bounds,
     first: bool,
@@ -446,12 +748,12 @@ fn attempt(
     stats: &mut ExactStats,
     now: &dyn Fn() -> f64,
 ) -> Attempt {
-    let mesh = &built.mesh;
     stats.triangles = mesh.triangles.len();
     if mesh.triangles.is_empty() {
         return Attempt::Rejected {
             message: "the export render is empty".into(),
             retry: false,
+            at: Vec::new(),
         };
     }
     if let Some(bad) = mesh
@@ -462,23 +764,36 @@ fn attempt(
         return Attempt::Rejected {
             message: format!("a triangle lost its surface (index {bad})"),
             retry: false,
+            at: Vec::new(),
         };
     }
     let t0 = now();
-    let brep = meshbrep::reconstruct(mesh, &meshbrep::Options::default());
+    let brep = meshbrep::reconstruct_located(mesh, &meshbrep::Options::default());
     stats.timings.reconstruct_ms += now() - t0;
     let brep = match brep {
         Ok(b) => b,
-        Err(e) => {
+        Err(f) => {
             let retry = matches!(
-                e,
+                f.error,
                 meshbrep::Error::TopologyMismatch(_) | meshbrep::Error::Reconstruction(_)
             );
             return Attempt::Rejected {
-                message: format!("reconstruction failed: {e}"),
+                message: format!("reconstruction failed: {}", f.error),
                 retry,
+                at: f.triangles,
             };
         }
+    };
+    // The input triangles of some of the B-rep's faces.
+    let triangles_of = |faces: &mut dyn Iterator<Item = usize>| -> Vec<u32> {
+        let mut t: Vec<u32> = faces
+            .filter_map(|f| brep.report.face_triangles.get(f))
+            .flatten()
+            .copied()
+            .collect();
+        t.sort_unstable();
+        t.dedup();
+        t
     };
     let t0 = now();
     let scale = brep.report.scale.max(1e-300);
@@ -501,6 +816,7 @@ fn attempt(
         return Attempt::Rejected {
             message: format!("the B-rep is invalid: {}", errs.join("; ")),
             retry: true,
+            at: triangles_of(&mut validation.error_faces.iter().map(|&f| f as usize)),
         };
     }
     if let Some(i) = stray_void(&brep, 1e-9 * scale) {
@@ -511,6 +827,7 @@ fn attempt(
                 i + 1
             ),
             retry: false,
+            at: Vec::new(),
         };
     }
     // The validator integrated every shell's volume on the exact
@@ -528,6 +845,7 @@ fn attempt(
             return Attempt::Rejected {
                 message: format!("its volume could not be measured: {e}"),
                 retry: true,
+                at: Vec::new(),
             };
         }
     };
@@ -541,10 +859,26 @@ fn attempt(
     // feature smaller than its tessellation: two masks of one profile,
     // one extruded and one revolved, meeting in a corner patch made a
     // B-rep that passed every check and was 0.4% off the model.
-    let chain_limit = 4.0 * corrected.max_cap + 1e-6 * scale;
+    let chain_limit = 4.0 * corrected.max_cap.max(facets.max_cap) + 1e-6 * scale;
     if stats.chain_deviation > chain_limit {
         stats.timings.check_ms += now() - t0;
+        // The faces either side of every edge whose chain stands too far
+        // off: where the mesh went round a feature it could not resolve.
+        let mut faces = brep.faces.iter().enumerate().filter_map(|(fi, f)| {
+            f.loops
+                .iter()
+                .flat_map(|l| &l.coedges)
+                .any(|c| {
+                    brep.report
+                        .edge_chain_deviation
+                        .get(c.edge as usize)
+                        .is_some_and(|&d| d > chain_limit)
+                })
+                .then_some(fi)
+        });
+        let at = triangles_of(&mut faces);
         return Attempt::Rejected {
+            at,
             message: format!(
                 "the mesh's topology differs from the exact model's: its intersection curves stand {:.3e} off the exact edges, more than its tessellation accounts for ({chain_limit:.3e})",
                 stats.chain_deviation
@@ -569,22 +903,46 @@ fn attempt(
                 corrected.volume, tolerance
             ),
             retry: true,
+            at: Vec::new(),
+        };
+    }
+    // Regions written as facets (a partial fallback) stand off their
+    // exact surfaces by their caps. The export render's tessellation is at
+    // least as fine as the normal render's, so its caps are within what
+    // the normal render's polygons stand off the curves (or a small part
+    // of the model, where they are not curves the normal render counts);
+    // more means the triangles were not on the surfaces they named, and
+    // nothing below would then vouch for the file.
+    let cap_limit = 1.05 * built.normal_volume_bound + LOOSE_CHECK * volume.abs();
+    if facets.caps.size > cap_limit {
+        return Attempt::Rejected {
+            message: format!(
+                "the regions written as facets stand {:.3e} off their exact surfaces in volume, too much to check against the rendered mesh",
+                facets.caps.size
+            ),
+            retry: false,
+            at: Vec::new(),
         };
     }
     // Against the normal render: the exact curves stand off its polygons
     // by at most their sagitta, so the volumes differ by at most the
     // curved area times that, and each side of the box by the sagitta.
-    // Beyond that, the export render built a different model.
+    // Beyond that, the export render built a different model. With some
+    // regions as facets, their caps put back give the exact model's
+    // volume, which is what is held to that.
     let allowance = 1.05 * built.normal_volume_bound
         + 2.0 * corrected.residual_bound
+        + facets.caps.error
         + 1e-7 * normal_volume.abs()
         + 1e-9 * scale * scale * scale;
-    if (volume - normal_volume).abs() > allowance {
+    let exact_volume = volume + facets.caps.signed;
+    if (exact_volume - normal_volume).abs() > allowance {
         return Attempt::Rejected {
             message: format!(
-                "the exact model's volume {volume:.6} is further from the rendered mesh's ({normal_volume:.6}) than its curves can account for ({allowance:.3e})"
+                "the exact model's volume {exact_volume:.6} is further from the rendered mesh's ({normal_volume:.6}) than its curves can account for ({allowance:.3e})"
             ),
             retry: false,
+            at: Vec::new(),
         };
     }
     if let (Some((nlo, nhi)), Some((elo, ehi))) = (normal_box, mesh_bounds(mesh)) {
@@ -598,6 +956,7 @@ fn attempt(
                     "the exact model's bounding box is {off:.3e} off the rendered mesh's (allowed {slack:.3e})"
                 ),
                 retry: false,
+                at: Vec::new(),
             };
         }
     }

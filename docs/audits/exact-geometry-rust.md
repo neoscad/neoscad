@@ -174,6 +174,89 @@ transforms (5, `candleStand.scad`'s coaxial cylinders among them), a BOSL2
 mask corner patch smaller than its sections (fell back), and the six
 failures from before (`docs/followups.md`, "Exact geometry").
 
+**Update, partial faceted fallback (2026-10-07):** the owner kept path 1.
+When reconstruction or a check fails somewhere in particular, the export
+now writes the faces there as facets and keeps the rest exact, instead of
+refusing the file (`geom::exact::partial`). `meshbrep` names the input
+triangles of each face, of a reconstruction failure
+(`reconstruct_located`) and of each validation error; the export retags
+the source regions there (connected triangles of one surface record) as
+`Faceted` and reconstructs again, growing the region while each failure
+is located (up to eight times). Each substitution is reported at the
+module and line it came from. Gate 4 holds as before: the result passes
+the validator and the cross-checks, the volume against the normal render
+compared with the facets' caps put back, and the caps held within what
+the render's own polygons account for. Also in this pass:
+
+- **Mesh cleanup before reconstruction:** mesh edges shorter than the
+  touching tolerance (`max(1e-7, 1e-9 × size)`) are collapsed, and needle
+  triangles narrower than it are flipped into their neighbours. A wall
+  2.1e-9 thick between flush faces of two chains of transforms
+  (`hinges__015`) had left a face whose boundary touched itself; it now
+  exports exact, as does `turtle3d__002`.
+- **The stroke joint:** a cylinder ending on a great circle of a sphere of
+  its radius leaves cap slivers between the two polygons whose two edges
+  are the same circle. Faces of two coinciding curves are removed like
+  faces of two coinciding lines, and the joint (`j01`, two cylinders at
+  any angle) is exact. The BOSL2 joints that still fail use `$fn`, so
+  they are all planes; their meshes touch themselves (below).
+- **Seam failures name every failing face at once,** and closed
+  components of two planar faces with no volume between them are
+  dropped (`skin__094`).
+- **Four validator checks**, three from files our checks passed and OCCT
+  rejected while this was built (zero-area facets in `distributors`,
+  slits in `example017.scad`, a closed edge inside a facet's loop and a
+  cone sliver between two facets in `threading__048`): a planar loop
+  narrower than the tolerance, two edges along one curve on any face, a
+  closed edge inside a longer planar loop, and (no corpus case yet) a
+  hole outside its outer loop or inside another hole.
+- **Not done:** unifying flush planes of different chains before
+  Manifold. The cases it was for are now exact (`hinges__015`), partial
+  (`skin__094`, `candleStand.scad`) or of a class it would not change
+  (`skin__084` touches itself at one position; `example017.scad` has
+  fins). A tangent point of two cones on a third cone's base plane
+  (`distributors`) needs the mesh rebuilt around it and is written as
+  facets.
+
+The measurement (`conformance exact`, OCCT 8.0.1 reading every file;
+"exact" is fully exact, "partial" written with some regions as facets):
+
+| Corpus | 3D models | Eligible | Valid, exact | Valid, with partial | All-faceted | Failed |
+|---|---|---|---|---|---|---|
+| This audit's 28 cases, stage 2's 10 extrusions and the joint `j01` × 4 `$fa`/`$fs` settings | 156 | 148 | 148 (100%) | 148 (100%) | 0 | 0 |
+| OpenSCAD's `render-manifold` inputs | 214 | 104 | 101 (97.1%) | 102 (98.1%) | 51 | 20 |
+| BOSL2 examples, every 5th | 311 | 94 | 81 (86.2%) | 87 (92.6%) | 117 | 43 |
+| Benchmark models | 14 | 4 | 3 (75%) | 3 (75%) | 4 | 3 |
+| **Real corpora, deduplicated** | 537 | 201 | **185 (92.0%)** | **192 (95.5%)** | 172 | 65 |
+
+(The deduplication drops the benchmark copies of a BOSL2 example and of
+the Menger sponge; counted so, stage 2 was 182 of 201, 90.5%, where the
+table above has 181 of 200.) Every eligible file written, partial ones
+included, read back valid in OCCT with its volume, but for
+`example019.scad`'s volume (as before) and `csg_spheres`, not read
+within 2 GB. The partial models
+keep 99.7% of the eligible models' faces exact overall (exact faces over
+exact faces plus regions faceted): `skin__094` 99.8%, `vnf__031` 95.4%,
+`candleStand.scad` 88.0%, and the four `distributors` none. Exact faces
+are 13.2% of all faces written (13.1% before). Gate 3: all 152
+closed-form cases within 8.8e-9 (`j01`). Gate 4: OCCT disagrees with
+`example019.scad`'s and `bottlecaps__022`'s volumes (1.8e-4 and 1.2e-6
+over ours; both read valid, and OCCT's healed volume of the second equals
+ours) and with no other file, and did not read four within 2 GB
+(`csg_spheres`, `text_30lines`, `surface-png-image-tests.scad`, the BOSL2
+fractal tree, now written partly faceted); `screws__001` now agrees.
+Gate 5, run alone: reconstruction 3–5% and checks 10–15% slower than
+stage 2 (`csg_spheres` 2.52 → 2.64 of the render, `import_stl` 2.11 →
+2.19). **By the stop rule, 92.0% fully exact is between 80% and 95%;
+with the partial fallback, 95.5% of eligible models export valid. The
+owner decides.** The nine eligible failures: bodies touching at a point
+in the mesh, refused correctly since two of its vertices share one
+position (the Menger sponge, `skin__084`, and the BOSL2 `$fn` joints
+`beziers__032`, `drawing__040`, `rounding__035`), two more joints not
+traced (`beziers__022`, `__037`), the tangent-point class
+(`distributors__052`, refused after eight rounds) and fins
+(`example017.scad`) (`docs/followups.md`, "Exact geometry").
+
 It follows `docs/audits/brep-feasibility.md` (below, "the previous
 audit"), which found that only OCCT survives OpenSCAD-shaped trees. The
 owner prefers an exact backend written in-house: pure Rust, publishable as

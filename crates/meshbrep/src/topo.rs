@@ -21,6 +21,9 @@ pub(crate) struct TEdge {
     pub seam: bool,
     /// Largest distance of samples from either surface.
     pub dev: f64,
+    /// How far the mesh chain stands off the curve, across the surfaces
+    /// (see `Report::max_chain_deviation`); zero where it does not count.
+    pub chain_dev: f64,
 }
 
 impl TEdge {
@@ -45,6 +48,9 @@ pub(crate) struct TFace {
     /// tube and axis angles the face covers decides where its frame puts
     /// the cuts of both periodic coordinates.
     pub tris: Vec<[V; 3]>,
+    /// The input triangles the face was built from, so that a failure can
+    /// be reported where it is (`Report::face_triangles`).
+    pub source: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -55,6 +61,50 @@ pub(crate) struct Topo {
     pub edges: Vec<TEdge>,
     pub faces: Vec<TFace>,
     pub notes: Vec<String>,
+}
+
+/// How far `p` is from the closed-form edge `e` (a line, circle or
+/// ellipse over its range); `None` for a B-spline.
+fn distance_to(e: &TEdge, p: V) -> Option<f64> {
+    if matches!(e.curve, Curve::BSpline(_)) {
+        return None;
+    }
+    let mut t = curve::param_of(&e.curve, p);
+    if !matches!(e.curve, Curve::Line { .. }) {
+        // Angles come in (-π, π]; the range may be anywhere.
+        while t < e.range[0] {
+            t += TAU;
+        }
+        while t - TAU >= e.range[0] {
+            t -= TAU;
+        }
+    }
+    let ends = [e.range[0], e.range[1]].map(|r| (curve::eval(&e.curve, r) - p).len());
+    Some(if t <= e.range[1] {
+        (curve::eval(&e.curve, t) - p)
+            .len()
+            .min(ends[0])
+            .min(ends[1])
+    } else {
+        ends[0].min(ends[1])
+    })
+}
+
+/// Whether two edges with the same ends run along each other within
+/// `tol`: samples of each lie on the other where it has a closed form
+/// (two B-splines are not compared, and so never coincide here).
+fn coincide(a: &TEdge, b: &TEdge, tol: f64) -> bool {
+    let along = |x: &TEdge, y: &TEdge| -> Option<bool> {
+        let pts = curve::sample(&y.curve, y.range, 16);
+        pts.iter()
+            .map(|&p| distance_to(x, p).map(|d| d < tol))
+            .try_fold(true, |acc, ok| ok.map(|ok| acc && ok))
+    };
+    match (along(a, b), along(b, a)) {
+        (Some(x), Some(y)) => x && y,
+        (Some(x), None) | (None, Some(x)) => x,
+        (None, None) => false,
+    }
 }
 
 impl Topo {
@@ -196,7 +246,9 @@ impl Topo {
     /// They are common on faceted models (twelve files of the stop-rule
     /// corpora had them, `issue1165.scad` among the eligible ones). OCCT
     /// reads most of them, but the face has no area and no orientation:
-    /// left in, it fails our own check for an outer loop.
+    /// left in, it fails our own check for an outer loop. A whole face of
+    /// two curved edges that run along each other between the same two
+    /// vertices goes the same way (see the comment on `lines` below).
     ///
     /// Two digons on the same two edges are a closed bubble of no volume
     /// (a sliver of the mesh between two flush faces, one of them rotated:
@@ -222,10 +274,20 @@ impl Topo {
                     continue;
                 }
                 let (ea, eb) = (&self.edges[a], &self.edges[b]);
-                let lines = matches!(ea.curve, Curve::Line { .. })
-                    && matches!(eb.curve, Curve::Line { .. });
                 let same_ends = ea.v0 != ea.v1
                     && ((ea.v0, ea.v1) == (eb.v0, eb.v1) || (ea.v0, ea.v1) == (eb.v1, eb.v0));
+                // Two straight edges between the same corners coincide; so
+                // do two curves that run along each other, which is what a
+                // face of no area between tangent surfaces is: where a
+                // cylinder ends on the equator of a sphere of its own
+                // radius, the mesh's cap pokes out between the sphere's
+                // polygon and its own in slivers, and exactly the cap and
+                // both edges of each sliver are the equator (a BOSL2
+                // `stroke()` joint). Only whole faces of curves go, not
+                // slits.
+                let lines = matches!(ea.curve, Curve::Line { .. })
+                    && matches!(eb.curve, Curve::Line { .. })
+                    || (whole && same_ends && coincide(ea, eb, 10.0 * tol));
                 let other = |e: &TEdge| {
                     if e.faces[0] == fi {
                         e.faces[1]

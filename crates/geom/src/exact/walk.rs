@@ -102,6 +102,13 @@ pub struct ExportMesh {
     /// How many `linear_extrude`/`rotate_extrude` nodes were built with
     /// exact surfaces (none with [`Extrusions::Faceted`]).
     pub exact_extrusions: u32,
+    /// Per entry of the mesh's surface table, the index in `origins` of
+    /// the node that made it: where a region written as facets after all
+    /// is reported (`super::partial`).
+    pub surface_origin: Vec<u32>,
+    /// The leaf nodes that made surfaces: module and source location,
+    /// each location once.
+    pub origins: Vec<(&'static str, Option<MsgLoc>)>,
 }
 
 /// How the export render builds `linear_extrude` and `rotate_extrude`.
@@ -166,6 +173,9 @@ pub fn export_render_with(
         curves2: vec![Curve2::Faceted],
         extrusions,
         exact_extrusions: 0,
+        surface_origin: Vec::new(),
+        origins: Vec::new(),
+        origin_index: HashMap::new(),
     };
     let res = match w.node(top, &crate::IDENTITY) {
         Ok(r) => r,
@@ -201,6 +211,8 @@ pub fn export_render_with(
         normal_sagitta: w.normal_sagitta,
         normal_volume_bound: w.normal_volume_bound,
         exact_extrusions: w.exact_extrusions,
+        surface_origin: w.surface_origin,
+        origins: w.origins,
     })
 }
 
@@ -210,6 +222,9 @@ type SubKey = (
     String,
     Option<(u32, u32, u32, u32)>,
 );
+
+/// A leaf's module and source span, for [`ExportMesh::origins`].
+type OriginKey = (&'static str, Option<(u32, u32, u32, u32)>);
 
 struct Walk<'a> {
     renderer: &'a Renderer,
@@ -232,6 +247,10 @@ struct Walk<'a> {
     curves2: Vec<Curve2>,
     extrusions: Extrusions,
     exact_extrusions: u32,
+    /// See [`ExportMesh::surface_origin`].
+    surface_origin: Vec<u32>,
+    origins: Vec<(&'static str, Option<MsgLoc>)>,
+    origin_index: HashMap<OriginKey, u32>,
 }
 
 fn loc_of(n: &Node) -> Option<MsgLoc> {
@@ -484,7 +503,7 @@ impl Walk<'_> {
                         kids: Vec::with_capacity(n.children.len()),
                         next: 0,
                     }),
-                    None => done = Some(self.leaf(n, &m)?),
+                    None => done = Some(self.leaf_traced(n, &m)?),
                 }
             }
             if let Some(r) = done {
@@ -540,6 +559,28 @@ impl Walk<'_> {
             }
             _ => None,
         }
+    }
+
+    /// [`Walk::leaf`], recording `n` as the origin of every surface it
+    /// adds to the table.
+    fn leaf_traced(&mut self, n: &Node, m: &Matrix) -> Result<Res, Unsupported> {
+        let r = self.leaf(n, m)?;
+        if self.surface_origin.len() < self.surfaces.len() {
+            let module = module_name(&n.kind);
+            let loc = loc_of(n);
+            let key = (
+                module,
+                loc.as_ref()
+                    .map(|l| (l.unit, l.span.file.0, l.span.start, l.span.end)),
+            );
+            let next = self.origins.len() as u32;
+            let o = *self.origin_index.entry(key).or_insert(next);
+            if o == next {
+                self.origins.push((module, loc));
+            }
+            self.surface_origin.resize(self.surfaces.len(), o);
+        }
+        Ok(r)
     }
 
     /// A node that is not an operation on its children (a primitive, or

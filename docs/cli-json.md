@@ -400,6 +400,12 @@ With `--format json`, the run object has an `exact` key. For
 - `fallback`: why the extrusions were written as facets after the exact
   attempts failed (`null` otherwise); `exact_attempt_faceted` the
   modules that fell back in those attempts.
+- `partial`: when the exact attempts failed in places and the faces
+  there were written as facets, the rest exact (`null` otherwise):
+  `reason`, the source `regions` written as facets (the faces they
+  would have been) and their `triangles`, the export mesh's
+  `exact_triangles` before, and the reconstructions it took (`rounds`).
+  Each region's module and line is a `faceted` substitution.
 - `chain_deviation`, `max_cap`: how far the export mesh's intersection
   curves stand off the exact edges, and its triangles off their curved
   surfaces (the first far beyond the second means the mesh's topology is

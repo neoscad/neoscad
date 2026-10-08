@@ -26,7 +26,10 @@
 //! which cannot tell the render's share from the export's). A model whose
 //! exact extrusions did not reconstruct, and which was then written with
 //! them as facets (`fallback` in the export's report), is judged eligible
-//! by its exact attempts, written, and not counted as valid.
+//! by its exact attempts, written, and not counted as valid. Nor is one
+//! written with some regions as facets where the exact attempts failed
+//! (`partial`): it is counted on its own, with the share of its faces
+//! that stayed exact (exact faces over exact faces plus regions faceted).
 //!
 //! With `--occt PATH` (or `MESHBREP_OCCT_CHECK`), every written file is
 //! read back by OCCT (`crates/meshbrep/oracle`): valid closed solids (one
@@ -86,6 +89,9 @@ struct Outcome {
     /// Written only after its extrusions fell back to facets: eligible
     /// (judged by its exact attempts) but not an exact export.
     fell_back: bool,
+    /// Written with some regions as facets where the exact attempts
+    /// failed (judged by its exact attempts, as `fell_back`).
+    partial: bool,
     exact: Option<Value>,
     message: String,
     step: Option<PathBuf>,
@@ -295,6 +301,15 @@ fn occt_one(check: &Path, step: &Path) -> Option<Value> {
         .and_then(|l| serde_json::from_str(l).ok())
 }
 
+/// The share of a written model's faces that stayed exact: its exact
+/// faces over those plus the regions a partial fallback wrote as facets
+/// (each region is a face it would have had). `None` without exact faces.
+fn exact_share(e: &Value) -> Option<f64> {
+    let exact = e["exact_faces"].as_f64()?;
+    let lost = e["partial"]["regions"].as_f64().unwrap_or(0.0);
+    (exact + lost > 0.0).then(|| exact / (exact + lost))
+}
+
 /// Faceted modules that are not mesh-only: a curved primitive under a
 /// non-uniform scale (an ellipse STEP export cannot write yet).
 fn mesh_only(modules: &[Value]) -> bool {
@@ -379,7 +394,8 @@ fn run_one(ctx: &Ctx, opts: &ExactOptions, work: &Path, m: &Model) -> Outcome {
     // that went to facets; whether the model is eligible is what fell back
     // while they were exact.
     let fell_back = exact["fallback"].is_string();
-    let faceted = if fell_back {
+    let partial = exact["partial"].is_object();
+    let faceted = if fell_back || partial {
         &exact["exact_attempt_faceted"]
     } else {
         &exact["substitutions"]["faceted_modules"]
@@ -391,6 +407,7 @@ fn run_one(ctx: &Ctx, opts: &ExactOptions, work: &Path, m: &Model) -> Outcome {
         status: if ok { "valid" } else { "failed" },
         eligible: !mesh_only(&faceted),
         fell_back: ok && fell_back,
+        partial: ok && partial,
         message: exact["error"].as_str().unwrap_or("").to_string(),
         step: ok.then_some(step),
         exact: Some(exact),
@@ -513,8 +530,25 @@ pub fn command(ctx: &Ctx, opts: &ExactOptions) -> Result<u8, String> {
         // reported on its own line below).
         let valid_eligible = eligible
             .iter()
-            .filter(|(_, o)| o.status == "valid" && !o.fell_back)
+            .filter(|(_, o)| o.status == "valid" && !o.fell_back && !o.partial)
             .count();
+        let partial_eligible: Vec<&&&(Model, Outcome)> = eligible
+            .iter()
+            .filter(|(_, o)| o.status == "valid" && o.partial)
+            .collect();
+        let partial_all = counted
+            .iter()
+            .filter(|(_, o)| o.status == "valid" && o.partial)
+            .count();
+        // Faces that stayed exact over all the eligible models written,
+        // partial ones included.
+        let (mut kept, mut lost) = (0.0, 0.0);
+        for (_, o) in eligible.iter().filter(|(_, o)| o.status == "valid") {
+            if let Some(e) = &o.exact {
+                kept += num(e, "exact_faces");
+                lost += e["partial"]["regions"].as_f64().unwrap_or(0.0);
+            }
+        }
         let fell_back = counted.iter().filter(|(_, o)| o.fell_back).count();
         let fell_back_eligible = eligible.iter().filter(|(_, o)| o.fell_back).count();
         let fallback_only = counted
@@ -609,6 +643,19 @@ pub fn command(ctx: &Ctx, opts: &ExactOptions) -> Result<u8, String> {
                 ""
             );
         }
+        if partial_all > 0 {
+            println!(
+                "{:12} written with some regions as facets (partial fallback): {partial_all} ({} eligible, {} with them); eligible faces exact: {:.2}%",
+                "",
+                partial_eligible.len(),
+                pct(valid_eligible + partial_eligible.len(), eligible.len()),
+                if kept + lost > 0.0 {
+                    100.0 * kept / (kept + lost)
+                } else {
+                    f64::NAN
+                },
+            );
+        }
         summary.insert(
             c.to_string(),
             json!({
@@ -618,6 +665,9 @@ pub fn command(ctx: &Ctx, opts: &ExactOptions) -> Result<u8, String> {
                 "three_d": counted.len(),
                 "eligible": eligible.len(),
                 "valid_eligible": valid_eligible,
+                "valid_eligible_partial": partial_eligible.len(),
+                "valid_partial": partial_all,
+                "eligible_exact_face_share": if kept + lost > 0.0 { kept / (kept + lost) } else { f64::NAN },
                 "valid_with_fallback": with_fallback,
                 "fallback_only": fallback_only,
                 "failed": failed,
@@ -669,6 +719,22 @@ pub fn command(ctx: &Ctx, opts: &ExactOptions) -> Result<u8, String> {
             e["substitutions"]["faceted_modules"]
         );
     }
+    // Each model written with a partial fallback, with how much of it
+    // stayed exact.
+    for (m, o) in outcomes.iter().filter(|(_, o)| o.partial) {
+        let e = o.exact.as_ref().expect("written");
+        println!(
+            "partial {:12} {:40} {} faces exact {:6.2}% ({} regions faceted, {} of {} triangles, {} rounds)",
+            m.corpus,
+            m.id,
+            if o.eligible { "eligible" } else { "        " },
+            100.0 * exact_share(e).unwrap_or(f64::NAN),
+            e["partial"]["regions"],
+            e["partial"]["triangles"],
+            e["partial"]["exact_triangles"],
+            e["partial"]["rounds"],
+        );
+    }
     let per_model: Vec<Value> = outcomes
         .iter()
         .map(|(m, o)| {
@@ -678,6 +744,8 @@ pub fn command(ctx: &Ctx, opts: &ExactOptions) -> Result<u8, String> {
                 "status": o.status,
                 "eligible": o.eligible,
                 "fell_back": o.fell_back,
+                "partial": o.partial,
+                "exact_face_share": o.exact.as_ref().and_then(exact_share),
                 "message": o.message,
                 "wall_ms": o.wall_ms,
                 "exact": o.exact,

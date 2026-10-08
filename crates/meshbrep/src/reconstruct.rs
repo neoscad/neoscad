@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::Error;
 use crate::curve;
 use crate::edges::{self, make_edge};
 use crate::math::*;
@@ -18,6 +17,7 @@ use crate::solve::{solve, tangent_point};
 use crate::surf::Surf;
 use crate::tangency::{Cont, contact};
 use crate::topo::{TEdge, TFace, Topo};
+use crate::{Error, Failure};
 
 /// Tolerances. Relative ones are multiplied by the model's size (the
 /// largest edge of its bounding box).
@@ -158,22 +158,27 @@ pub(crate) struct Built {
 
 /// With `use_contacts` false, tangent pairs are not detected analytically (only
 /// the tests turn it off, to reach the arc-merging path).
-pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Result<Built, Error> {
+pub(crate) fn build(
+    mesh: &TaggedMesh,
+    opts: &Options,
+    use_contacts: bool,
+) -> Result<Built, Failure> {
     let nt = mesh.triangles.len();
     if nt == 0 {
-        return Err(Error::InvalidInput("the mesh has no triangles".into()));
+        return Err(Error::InvalidInput("the mesh has no triangles".into()).into());
     }
     if mesh.triangle_surface.len() != nt {
         return Err(Error::InvalidInput(format!(
             "{} triangles but {} surface ids",
             nt,
             mesh.triangle_surface.len()
-        )));
+        ))
+        .into());
     }
     let np = mesh.positions.len();
     let pos: Vec<V> = mesh.positions.iter().map(|&p| V::from(p)).collect();
     if let Some(i) = pos.iter().position(|p| !p.is_finite()) {
-        return Err(Error::InvalidInput(format!("position {i} is not finite")));
+        return Err(Error::InvalidInput(format!("position {i} is not finite")).into());
     }
     let tris: Vec<[usize; 3]> = mesh
         .triangles
@@ -184,12 +189,11 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
         if tri.iter().any(|&i| i >= np) {
             return Err(Error::InvalidInput(format!(
                 "triangle {t} indexes a position that does not exist"
-            )));
+            ))
+            .into());
         }
         if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
-            return Err(Error::InvalidInput(format!(
-                "triangle {t} repeats a vertex"
-            )));
+            return Err(Error::InvalidInput(format!("triangle {t} repeats a vertex")).into());
         }
     }
     let mut lo = pos[tris[0][0]];
@@ -203,13 +207,52 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
     }
     let scale = (hi.x - lo.x).max(hi.y - lo.y).max(hi.z - lo.z);
     if scale <= 0.0 || !scale.is_finite() {
-        return Err(Error::InvalidInput("the mesh is flat".into()));
+        return Err(Error::InvalidInput("the mesh is flat".into()).into());
     }
     let tol = opts.tolerances.merge * scale;
     let fit_tol = opts.tolerances.fit;
 
     // Half-edge h = 3 t + k runs from tris[t][k] to tris[t][(k + 1) % 3].
     let twin = twins(&tris)?;
+    // Features below the tolerance a boundary is checked to (corners
+    // closer than it touch) cannot be written: clean them up first.
+    let touch_tol = fit_tol.max(tol);
+    if let Some(clean) = clean_mesh(mesh, touch_tol)? {
+        // The rebuilt mesh numbers its triangles afresh; what it reports
+        // goes back to this mesh's numbers.
+        let back = |ts: &mut Vec<u32>| {
+            for t in ts.iter_mut() {
+                *t = clean.kept[*t as usize];
+            }
+        };
+        let mut b = build(&clean.mesh, opts, use_contacts).map_err(|mut f| {
+            back(&mut f.triangles);
+            f
+        })?;
+        for f in &mut b.topo.faces {
+            back(&mut f.source);
+        }
+        if clean.collapsed > 0 {
+            b.topo.notes.push(format!(
+                "{} mesh edge{} shorter than {touch_tol:.1e} collapsed",
+                clean.collapsed,
+                if clean.collapsed == 1 { "" } else { "s" }
+            ));
+        }
+        if clean.flipped > 0 {
+            b.topo.notes.push(format!(
+                "{} needle triangle{} (narrower than {touch_tol:.1e}) flipped into {}",
+                clean.flipped,
+                if clean.flipped == 1 { "" } else { "s" },
+                if clean.flipped == 1 {
+                    "its neighbour"
+                } else {
+                    "their neighbours"
+                }
+            ));
+        }
+        return Ok(b);
+    }
     let ends = |h: usize| (tris[h / 3][h % 3], tris[h / 3][(h % 3 + 1) % 3]);
     let mesh_genus_components = mesh_topology(&tris, np);
 
@@ -267,31 +310,78 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
                     && !matches!(cls.surf[fcls[f]], Surf::Sphere { .. } | Surf::Torus { .. })
             })
             .collect();
-        if !flat.is_empty() {
-            let vol_tol = tol * scale * scale;
-            if let Some(&f) = flat.iter().find(|&&f| face_mesh_volume[f].abs() > vol_tol) {
-                return Err(Error::Reconstruction(format!(
+        let vol_tol = tol * scale * scale;
+        if let Some(&f) = flat.iter().find(|&&f| face_mesh_volume[f].abs() > vol_tol) {
+            return Err(Failure {
+                error: Error::Reconstruction(format!(
                     "face {f} has no boundary but encloses volume {:.3e}",
                     face_mesh_volume[f]
-                )));
-            }
+                )),
+                triangles: (0..nt)
+                    .filter(|&t| tface[t] == f)
+                    .map(|t| t as u32)
+                    .collect(),
+            });
+        }
+        // A closed component of two planar faces with no volume between
+        // them is a bubble too: two nearly parallel planes facing apart
+        // around one closed chain (Manifold's sliver where a BOSL2 `skin()`
+        // meets a flush face, `skin__094`). Its faces have no width, which
+        // the validator refuses.
+        let mut comp = UnionFind::new(nf);
+        for h in 0..3 * nt {
+            comp.join(tface[h / 3], tface[twin[h] / 3]);
+        }
+        let mut members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for f in 0..nf {
+            members.entry(comp.find(f)).or_default().push(f);
+        }
+        let bubbles: Vec<usize> = members
+            .values()
+            .filter(|fs| {
+                fs.len() == 2
+                    && fs.iter().all(|&f| cls.surf[fcls[f]].is_plane())
+                    && fs.iter().map(|&f| face_mesh_volume[f]).sum::<f64>().abs() <= vol_tol
+            })
+            .flatten()
+            .copied()
+            .collect();
+        if !flat.is_empty() || !bubbles.is_empty() {
+            let gone: Vec<bool> = (0..nf)
+                .map(|f| flat.contains(&f) || bubbles.contains(&f))
+                .collect();
             let mut keep = mesh.clone();
-            let (tri, sur): (Vec<[u32; 3]>, Vec<u32>) = mesh
-                .triangles
-                .iter()
-                .zip(&mesh.triangle_surface)
-                .enumerate()
-                .filter(|&(t, _)| !flat.contains(&tface[t]))
-                .map(|(_, (&t, &s))| (t, s))
-                .unzip();
-            keep.triangles = tri;
-            keep.triangle_surface = sur;
-            let mut b = build(&keep, opts, use_contacts)?;
-            b.topo.notes.push(format!(
-                "dropped {} flat closed component{} (zero volume, one plane)",
-                flat.len(),
-                if flat.len() == 1 { "" } else { "s" }
-            ));
+            let kept: Vec<usize> = (0..nt).filter(|&t| !gone[tface[t]]).collect();
+            keep.triangles = kept.iter().map(|&t| mesh.triangles[t]).collect();
+            keep.triangle_surface = kept.iter().map(|&t| mesh.triangle_surface[t]).collect();
+            // The rebuilt mesh numbers its triangles afresh; what it
+            // reports goes back to this mesh's numbers.
+            let back = |ts: &mut Vec<u32>| {
+                for t in ts.iter_mut() {
+                    *t = kept[*t as usize] as u32;
+                }
+            };
+            let mut b = build(&keep, opts, use_contacts).map_err(|mut f| {
+                back(&mut f.triangles);
+                f
+            })?;
+            for f in &mut b.topo.faces {
+                back(&mut f.source);
+            }
+            if !flat.is_empty() {
+                b.topo.notes.push(format!(
+                    "dropped {} flat closed component{} (zero volume, one plane)",
+                    flat.len(),
+                    if flat.len() == 1 { "" } else { "s" }
+                ));
+            }
+            if !bubbles.is_empty() {
+                let n = bubbles.len() / 2;
+                b.topo.notes.push(format!(
+                    "dropped {n} closed component{} of two planar faces with no volume between them",
+                    if n == 1 { "" } else { "s" }
+                ));
+            }
             return Ok(b);
         }
     }
@@ -405,7 +495,7 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
     let boundary = |h: usize| tface[twin[h] / 3] != tface[h / 3];
     let next_in_tri = |h: usize| 3 * (h / 3) + (h % 3 + 1) % 3;
     // The next boundary half-edge of the same face, leaving the end of h.
-    let next_b = |h: usize| -> Result<usize, Error> {
+    let next_b = |h: usize| -> Result<usize, Failure> {
         let mut cur = next_in_tri(h);
         for _ in 0..3 * nt {
             if boundary(cur) {
@@ -413,7 +503,10 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
             }
             cur = next_in_tri(twin[cur]);
         }
-        Err(Error::Reconstruction("a vertex walk did not end".into()))
+        Err(Failure {
+            error: Error::Reconstruction("a vertex walk did not end".into()),
+            triangles: vec![(h / 3) as u32],
+        })
     };
 
     // 6. Chains.
@@ -425,7 +518,7 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
                 closed: bool,
                 he_chain: &mut Vec<(usize, bool)>,
                 chains: &mut Vec<Chain>|
-     -> Result<(), Error> {
+     -> Result<(), Failure> {
         let f = tface[start / 3];
         let g = tface[twin[start] / 3];
         let id = chains.len();
@@ -452,9 +545,10 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
                 break;
             }
             if he_chain[nx].0 != NONE {
-                return Err(Error::Reconstruction(
-                    "a boundary chain ran into another".into(),
-                ));
+                return Err(Failure {
+                    error: Error::Reconstruction("a boundary chain ran into another".into()),
+                    triangles: vec![(nx / 3) as u32, (twin[nx] / 3) as u32],
+                });
             }
             cur = nx;
         }
@@ -603,6 +697,7 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
             break;
         }
     }
+    let mut chain_devs = vec![0.0f64; chains.len()];
     for (i, ch) in chains.iter().enumerate() {
         let (ca, cb) = (fcls[ch.f], fcls[ch.g]);
         // Only chains with a curved side count, and not those between
@@ -631,14 +726,16 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
             // and not the topology.
             let q = solve(&[*sa, *sb], pts[pts.len() / 2]).0;
             let sin = sa.grad(q).cross(sb.grad(q)).len();
-            max_chain_dev = max_chain_dev.max(d * sin.clamp(0.02, 1.0));
+            chain_devs[i] = d * sin.clamp(0.02, 1.0);
+            max_chain_dev = max_chain_dev.max(chain_devs[i]);
         }
     }
 
     // Number the surviving chains as edges.
     let mut edge_of_chain = vec![NONE; chains.len()];
     for (i, b) in built.into_iter().enumerate() {
-        if let Some(e) = b {
+        if let Some(mut e) = b {
+            e.chain_dev = chain_devs[i];
             edge_of_chain[i] = topo.edges.len();
             topo.edges.push(e);
         }
@@ -655,10 +752,12 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
             pcurves: Vec::new(),
             outer: Vec::new(),
             tris: Vec::new(),
+            source: Vec::new(),
         })
         .collect();
     for (t, &[a, b, c]) in tris.iter().enumerate() {
         let f = tface[t];
+        topo.faces[f].source.push(t as u32);
         if matches!(topo.faces[f].surf, Surf::Torus { .. }) {
             topo.faces[f].tris.push([pos[a], pos[b], pos[c]]);
         }
@@ -693,9 +792,10 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
                 break;
             }
             if seen[cur] {
-                return Err(Error::Reconstruction(
-                    "a loop walk revisited a half-edge".into(),
-                ));
+                return Err(Failure {
+                    error: Error::Reconstruction("a loop walk revisited a half-edge".into()),
+                    triangles: vec![(cur / 3) as u32, (twin[cur] / 3) as u32],
+                });
             }
         }
         topo.faces[f].loops.push(lp);
@@ -705,7 +805,10 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
         // itself (a lone sphere or torus): it gets seams later, from
         // nothing.
         if face.loops.is_empty() && !matches!(face.surf, Surf::Sphere { .. } | Surf::Torus { .. }) {
-            return Err(Error::Reconstruction(format!("face {f} has no boundary")));
+            return Err(Failure {
+                error: Error::Reconstruction(format!("face {f} has no boundary")),
+                triangles: face.source.clone(),
+            });
         }
     }
     for e in &mut topo.edges {
@@ -719,10 +822,12 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
             }
         }
     }
-    if topo.edges.iter().any(|e| e.faces.contains(&NONE)) {
-        return Err(Error::Reconstruction(
-            "an edge is not used by two faces".into(),
-        ));
+    if let Some(e) = topo.edges.iter().find(|e| e.faces.contains(&NONE)) {
+        let f = e.faces.iter().copied().find(|&f| f != NONE);
+        return Err(Failure {
+            error: Error::Reconstruction("an edge is not used by two faces".into()),
+            triangles: f.map(|f| topo.faces[f].source.clone()).unwrap_or_default(),
+        });
     }
     if n_merged > 0 {
         topo.notes.push(format!(
@@ -758,7 +863,7 @@ pub(crate) fn build(mesh: &TaggedMesh, opts: &Options, use_contacts: bool) -> Re
             keep
         });
         topo.notes.push(format!(
-            "{} face{} of no area (two edges along one line) removed",
+            "{} face{} of no area (two edges along one line or curve) removed",
             digons.len(),
             if digons.len() == 1 { "" } else { "s" }
         ));
@@ -842,6 +947,7 @@ fn chain_edge(
         chain: pts,
         seam: false,
         dev: b.dev,
+        chain_dev: 0.0,
     }
 }
 
@@ -933,6 +1039,219 @@ fn twins(tris: &[[usize; 3]]) -> Result<Vec<usize>, Error> {
         i += 2;
     }
     Ok(twin)
+}
+
+/// A mesh cleaned of features below the touching tolerance
+/// ([`clean_mesh`]).
+struct Clean {
+    mesh: TaggedMesh,
+    /// Per triangle of `mesh`, its number in the mesh cleaned.
+    kept: Vec<u32>,
+    collapsed: usize,
+    flipped: usize,
+}
+
+/// Removes what the mesh has below `tol` (the distance at which the
+/// validator calls two parts of a boundary touching), keeping it a closed
+/// 2-manifold: edges shorter than `tol` are collapsed, and needle
+/// triangles (a corner within `tol` of the opposite edge) have that edge
+/// flipped. `None` if there was nothing to do.
+///
+/// Manifold leaves both where faces meet at a tangency or are flush from
+/// different chains of transforms. A short edge (two corners 3e-8 apart
+/// at a BOSL2 `stroke()` joint, `rounding__035`) sits between the merge
+/// tolerance, below which reconstruction collapses edges itself, and the
+/// touching tolerance, so its two corners became two exact vertices that
+/// the boundary check then found touching. A needle (a wall's corner
+/// 2.1e-9 inside the edge of the face it meets, `hinges__015`) is in the
+/// face whose edge it lies along, so that face's boundary runs along the
+/// edge and also through the corner on it, which no exact face can do.
+/// Flipping changes nothing in space; a collapse moves one corner by less
+/// than `tol`, below the precision written to the file.
+///
+/// A collapse keeps the lower-numbered vertex, and is made only where it
+/// keeps the mesh a manifold (the two vertices share exactly the two
+/// neighbours across the edge) and turns no triangle over. A needle's
+/// flip is made only when neither new triangle is a needle and the edge
+/// it makes is new. Changes are made in rounds of independent ones until
+/// none is left; collapses lower the vertex count and flips the needle
+/// count, so the rounds end.
+fn clean_mesh(mesh: &TaggedMesh, tol: f64) -> Result<Option<Clean>, Failure> {
+    let pos: Vec<V> = mesh.positions.iter().map(|&p| V::from(p)).collect();
+    let mut tris: Vec<[usize; 3]> = mesh
+        .triangles
+        .iter()
+        .map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
+        .collect();
+    let mut surf = mesh.triangle_surface.clone();
+    // Per current triangle, its number in the input.
+    let mut kept: Vec<u32> = (0..tris.len() as u32).collect();
+    let (mut collapsed, mut flipped) = (0usize, 0usize);
+    let thin = |p: V, q: V, r: V| {
+        let longest = (q - p).len().max((r - q).len()).max((p - r).len());
+        (q - p).cross(r - p).len() / longest.max(1e-300) < tol
+    };
+    for _ in 0..1000 {
+        let mut changed = false;
+        // Collapses.
+        let mut short: Vec<(f64, usize, usize)> = Vec::new();
+        for t in &tris {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                if a < b {
+                    let l = (pos[b] - pos[a]).len();
+                    if l < tol {
+                        short.push((l, a, b));
+                    }
+                }
+            }
+        }
+        if !short.is_empty() {
+            short.sort_by(|x, y| x.0.total_cmp(&y.0).then((x.1, x.2).cmp(&(y.1, y.2))));
+            let mut around: Vec<Vec<usize>> = vec![Vec::new(); pos.len()];
+            for (i, t) in tris.iter().enumerate() {
+                for &p in t {
+                    around[p].push(i);
+                }
+            }
+            let mut busy = vec![false; pos.len()];
+            let mut gone_tri = vec![false; tris.len()];
+            let mut to = vec![usize::MAX; pos.len()];
+            for &(_, a, b) in &short {
+                if busy[a] || busy[b] {
+                    continue;
+                }
+                let ring = |p: usize| -> Vec<usize> {
+                    let mut r: Vec<usize> = around[p]
+                        .iter()
+                        .flat_map(|&i| tris[i])
+                        .filter(|&q| q != p)
+                        .collect();
+                    r.sort_unstable();
+                    r.dedup();
+                    r
+                };
+                let (ra, rb) = (ring(a), ring(b));
+                let common: Vec<usize> = ra.iter().copied().filter(|q| rb.contains(q)).collect();
+                let shared: Vec<usize> = around[b]
+                    .iter()
+                    .copied()
+                    .filter(|&i| tris[i].contains(&a))
+                    .collect();
+                if shared.len() != 2 || common.len() != 2 {
+                    continue;
+                }
+                // No triangle that keeps its area may turn over.
+                let turns = around[b].iter().any(|&i| {
+                    if shared.contains(&i) {
+                        return false;
+                    }
+                    let [p, q, r] = tris[i].map(|x| pos[x]);
+                    let before = (q - p).cross(r - p);
+                    let moved = tris[i].map(|x| if x == b { pos[a] } else { pos[x] });
+                    let after = (moved[1] - moved[0]).cross(moved[2] - moved[0]);
+                    before.len() > tol * tol && before.dot(after) <= 0.0
+                });
+                if turns {
+                    continue;
+                }
+                for &p in ra.iter().chain(&rb) {
+                    busy[p] = true;
+                }
+                busy[a] = true;
+                busy[b] = true;
+                for &i in &shared {
+                    gone_tri[i] = true;
+                }
+                to[b] = a;
+                collapsed += 1;
+                changed = true;
+            }
+            if changed {
+                let mut nt = Vec::with_capacity(tris.len());
+                let mut ns = Vec::with_capacity(tris.len());
+                let mut nk = Vec::with_capacity(tris.len());
+                for (i, t) in tris.iter().enumerate() {
+                    if gone_tri[i] {
+                        continue;
+                    }
+                    nt.push(t.map(|p| if to[p] != usize::MAX { to[p] } else { p }));
+                    ns.push(surf[i]);
+                    nk.push(kept[i]);
+                }
+                tris = nt;
+                surf = ns;
+                kept = nk;
+                continue;
+            }
+        }
+        // Needle flips. Finding the needles is a scan; the half-edge
+        // structure is built only for a mesh that has some.
+        let needles: Vec<(usize, usize)> = (0..tris.len())
+            .filter_map(|t| {
+                let tri = tris[t];
+                let len = |k: usize| (pos[tri[(k + 1) % 3]] - pos[tri[k]]).len();
+                let k = (0..3).max_by(|&i, &j| len(i).total_cmp(&len(j)).then(j.cmp(&i)))?;
+                let (a, b, v) = (tri[k], tri[(k + 1) % 3], tri[(k + 2) % 3]);
+                thin(pos[a], pos[b], pos[v]).then_some((t, k))
+            })
+            .collect();
+        if needles.is_empty() {
+            break;
+        }
+        let twin = twins(&tris)?;
+        let mut edges: std::collections::BTreeSet<(usize, usize)> = tris
+            .iter()
+            .flat_map(|t| (0..3).map(move |k| (t[k].min(t[(k + 1) % 3]), t[k].max(t[(k + 1) % 3]))))
+            .collect();
+        let mut touched = vec![false; tris.len()];
+        for (t, k) in needles {
+            let tri = tris[t];
+            let (a, b, v) = (tri[k], tri[(k + 1) % 3], tri[(k + 2) % 3]);
+            let h = 3 * t + k;
+            let u = twin[h] / 3;
+            if touched[t] || touched[u] || u == t {
+                continue;
+            }
+            // The neighbour's half-edge runs b -> a; its third corner
+            // follows.
+            let w = tris[u][(twin[h] % 3 + 2) % 3];
+            if w == v || edges.contains(&(v.min(w), v.max(w))) {
+                continue;
+            }
+            if thin(pos[b], pos[a], pos[w])
+                || thin(pos[a], pos[w], pos[v])
+                || thin(pos[w], pos[b], pos[v])
+            {
+                continue;
+            }
+            tris[t] = [a, w, v];
+            tris[u] = [w, b, v];
+            // The pair is the neighbour's: the needle had no area.
+            surf[t] = surf[u];
+            edges.remove(&(a.min(b), a.max(b)));
+            edges.insert((v.min(w), v.max(w)));
+            touched[t] = true;
+            touched[u] = true;
+            flipped += 1;
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+    if collapsed == 0 && flipped == 0 {
+        return Ok(None);
+    }
+    let mut out = mesh.clone();
+    out.triangles = tris.iter().map(|t| t.map(|p| p as u32)).collect();
+    out.triangle_surface = surf;
+    Ok(Some(Clean {
+        mesh: out,
+        kept,
+        collapsed,
+        flipped,
+    }))
 }
 
 /// The mesh's genus (summed over components) and component count, from

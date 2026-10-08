@@ -25,16 +25,27 @@ turns the result back into exact geometry:
   `rotate_extrude`), a cylinder along its tube, and a plane touching a
   cone along a generator (one profile extruded and revolved) are
   recognised too.
-- **Slivers the mesh leaves** where flush faces differ in the last bits
-  are cleaned up: edges and faces of no length or area, and closed
-  bubbles of two faces with no volume, are removed.
+- **Slivers the mesh leaves** where flush faces differ in the last bits,
+  or surfaces touch, are cleaned up: mesh edges shorter than the
+  touching tolerance (`max(fit, 1e-9 × size)`) are collapsed and needle
+  triangles narrower than it are flipped into their neighbours before
+  anything else; then edges and faces of no length or area (two straight
+  edges, or two curves that run along each other, between the same
+  corners: a cylinder's cap on the equator of a sphere of its radius),
+  and closed components of two faces with no volume, are removed.
 - **Seams and parameter-space curves** go on curved faces, sharing the
   edge's parameter, so a STEP reader uses them as written. A sphere's
   axis is chosen so its bounding circles are parallels, and so that no
   other boundary passes near its poles.
 - **Faceted fallback:** triangles tagged `Surface::Faceted` (from
   `polyhedron`, `hull` or imported meshes) become planar faces, and mix
-  with exact faces in one valid solid.
+  with exact faces in one valid solid. Each face names the input
+  triangles it was built from (`Report::face_triangles`), the validator
+  names the faces its errors are on (`Validation::error_faces`), and
+  `reconstruct_located` names the triangles where reconstruction failed
+  (`Failure::triangles`), so a caller can retag the faces around a
+  failure as `Faceted` and try again: a partial fallback rather than
+  none of the model.
 
 It also has a structural and geometric validator, and integrates volume
 and area on the exact geometry. Use them to check a result against the
@@ -130,7 +141,9 @@ platform.
 - loops are closed and do not cross themselves in their face's parameter
   plane, and no corner lies inside another edge of its face (a boundary
   touching itself there reads back from position-based readers such as
-  OCCT as an open shell);
+  OCCT as an open shell); a loop of a planar face is wider than the
+  tolerance (OCCT reads a narrower one as crossing itself, or as a badly
+  oriented hole);
 - the Euler–Poincaré genus is a whole, non-negative number, no more than
   the input mesh's (fewer is reported in `Validation::notes`: rounding
   can leave a mesh with a tunnel of no thickness that the exact faces

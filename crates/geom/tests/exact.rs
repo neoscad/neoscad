@@ -281,8 +281,9 @@ fn audit_cases_match_their_closed_forms() {
         .filter(|p| p.extension().is_some_and(|x| x == "scad"))
         .collect();
     names.sort();
-    // The audit's 28, and stage 2's extrusions e01-e10.
-    assert_eq!(names.len(), 38);
+    // The audit's 28, stage 2's extrusions e01-e10, and the stroke joint
+    // j01.
+    assert_eq!(names.len(), 39);
     for p in names {
         let src = std::fs::read_to_string(&p).unwrap();
         let e = export(&src);
@@ -431,7 +432,10 @@ fn a_boundary_touching_itself_is_refused() {
 /// mesh keeps a sliver triangle between them, which becomes a face of two
 /// straight edges along one line once its short edge collapses. It has
 /// no area and no orientation; it is removed and its neighbours share
-/// the edge (`issue1165.scad`).
+/// the edge (`issue1165.scad`). The fin of 8.8e-11 between the cuts goes
+/// too (the mesh's edges shorter than 1e-7 are collapsed first), leaving
+/// the cube's cut side as two faces of one plane: seven, not the nine
+/// the fin had.
 #[test]
 fn a_face_with_no_area_is_removed() {
     let e = export(
@@ -442,7 +446,7 @@ fn a_face_with_no_area_is_removed() {
         "{:?}",
         e.stats.notes
     );
-    assert_eq!(e.stats.faces, 9);
+    assert_eq!(e.stats.faces, 7);
 }
 
 // Stage 2: extrusions.
@@ -655,8 +659,14 @@ fn an_extruded_and_a_revolved_mask_meet_exactly() {
 /// revolved, intersected) is smaller than the export render's
 /// tessellation: its mesh's curves stand ten sagittas off the exact
 /// edges, and the B-rep it made passed every other check 0.4% off the
-/// model. Such a mesh is now refused at both resolutions, and the
-/// export falls back to faceted extrusions instead of writing it.
+/// model. Such a mesh is refused at every resolution. The finest one is
+/// then written with the regions around the failure as facets, or, if
+/// that fails too, with the extrusions as facets.
+///
+/// The normal render is far coarser than the model here: its volume is
+/// 1.5615 at OpenSCAD's defaults but 6.3847 at `$fn = 200` and 6.5050 at
+/// `$fn = 1000` (about 6.510 extrapolated, as 1/n²), so a file near 6.5
+/// is the model, and one at 1.56 the coarse render of it.
 #[test]
 fn a_mesh_coarser_than_its_features_is_not_trusted() {
     let arc = "[0.192147, 8.0491], [0.761205, 6.17317], [1.6853, 4.4443], [2.92893, 2.92893], [4.4443, 1.6853], [6.17317, 0.761205], [8.0491, 0.192147], [10, 0]";
@@ -664,6 +674,15 @@ fn a_mesh_coarser_than_its_features_is_not_trusted() {
         "intersection() {{ linear_extrude(height = 10.01) polygon([[-0.01, -0.01], [-0.01, 10], [0, 10], {arc}, [10, -0.01]]); translate([10, 10, 0]) rotate([0, 0, 180]) rotate_extrude(angle = 90) translate([10, 0]) mirror([1, 0]) polygon([[10, -0.01], [-0.01, -0.01], [-0.01, 10], [-1.77636e-15, 10], {arc}]); }}"
     );
     match export_with(&Renderer::new(), &src) {
+        Ok(e) if e.stats.partial.is_some() => {
+            // The finest mesh, faceted where it failed: inscribed in the
+            // model, and short of it by no more than its facets' caps.
+            assert!(
+                e.stats.volume > 6.0 && e.stats.volume < 6.511,
+                "{:?}",
+                e.stats
+            );
+        }
         Ok(e) => {
             // Written only as the normal render's facets, which are the
             // model as rendered: the volume is the mesh's.
@@ -677,18 +696,24 @@ fn a_mesh_coarser_than_its_features_is_not_trusted() {
 /// Extrusions that do not reconstruct exact fall back to facets, so a
 /// model stage 1 exported still exports (with the extrusions reported):
 /// the corner patch above, unioned instead of intersected, fails exact
-/// at both resolutions.
+/// at both resolutions. The regions around the failure go to facets
+/// first (a partial fallback), and the whole extrusions only if that
+/// fails; either is reported at the extrusions.
 #[test]
 fn extrusions_fall_back_to_facets_when_they_do_not_reconstruct() {
     let arc = "[0.192147, 8.0491], [0.761205, 6.17317], [1.6853, 4.4443], [2.92893, 2.92893], [4.4443, 1.6853], [6.17317, 0.761205], [8.0491, 0.192147], [10, 0]";
     let e = export(&format!(
         "linear_extrude(height = 10.01) polygon([[-0.01, -0.01], [-0.01, 10], [0, 10], {arc}, [10, -0.01]]); translate([10, 10, 0]) rotate([0, 0, 180]) rotate_extrude(angle = 90) translate([10, 0]) mirror([1, 0]) polygon([[10, -0.01], [-0.01, -0.01], [-0.01, 10], [-1.77636e-15, 10], {arc}]);"
     ));
-    assert!(e.stats.fallback.is_some());
+    assert!(e.stats.fallback.is_some() || e.stats.partial.is_some());
     assert_eq!(e.stats.exact_attempt_faceted, Vec::<&str>::new());
-    assert_eq!(
-        kinds(&e, SubstitutionKind::Faceted),
-        ["linear_extrude", "rotate_extrude"]
+    let faceted = kinds(&e, SubstitutionKind::Faceted);
+    assert!(
+        !faceted.is_empty()
+            && faceted
+                .iter()
+                .all(|k| ["linear_extrude", "rotate_extrude"].contains(k)),
+        "{faceted:?}"
     );
 }
 
@@ -715,4 +740,81 @@ fn flush_tabs_in_rotated_slots_export() {
         "{:?}",
         e.stats.notes
     );
+}
+
+/// BOSL2's `stroke()` joint: cylinders ending on great circles of a
+/// sphere of their own radius, which meet where all three surfaces touch.
+/// The cylinders' caps lie on the sphere's equators exactly, but the
+/// mesh's caps poke out between the sphere's polygon and their own in
+/// slivers whose two edges are the same circle; those faces of no area
+/// are removed, and the joint is exact at any angle between the
+/// cylinders. It was refused before ("no outer loop").
+#[test]
+fn a_stroke_joint_exports_exact() {
+    for turn in ["[0, 90, 0]", "[0, 60, 0]", "[0, 60, 30]"] {
+        let e = export(&format!(
+            "sphere(d = 1); cylinder(d = 1, h = 3); rotate({turn}) cylinder(d = 1, h = 3);"
+        ));
+        assert!(e.stats.partial.is_none(), "{turn}: {:?}", e.stats.partial);
+        assert_eq!(e.stats.faces, 5, "{turn}");
+        assert_eq!(e.stats.exact_faces, 5, "{turn}");
+    }
+}
+
+/// A cut that stops 2.1e-9 short of a face leaves a wall thinner than
+/// anything a STEP file can hold (BOSL2 `hinges__015` has one between
+/// flush faces from two chains of transforms). Manifold's mesh has needle
+/// triangles along it, whose corners lie on the edges they face, and the
+/// boundary of the face beside them touched itself. The needles are
+/// flipped into their neighbours, and the model exports exact.
+#[test]
+fn a_wall_thinner_than_the_tolerance_is_cleaned_up() {
+    let e = export(
+        "difference() { cube([20, 2.1, 7]); translate([4, -1, 3.5]) cube([5, 3.0999999979, 5]); }",
+    );
+    assert_eq!(e.stats.exact_faces, e.stats.faces);
+    assert!(
+        e.stats.notes.iter().any(|n| n.contains("needle")),
+        "{:?}",
+        e.stats.notes
+    );
+    // The wall's volume (3.7e-8) is all the file loses.
+    assert!((e.stats.volume - 257.25).abs() < 1e-7, "{}", e.stats.volume);
+}
+
+/// Where part of a model does not reconstruct (three cones whose pairs
+/// touch on the third's base plane: BOSL2 `distributors`), the faces
+/// around the failure are written as facets and the rest stays exact,
+/// with the substitution reported at the module and line it came from;
+/// before, the whole file was refused. The result is held to every
+/// check an exact export is.
+#[test]
+fn a_region_that_does_not_reconstruct_is_written_as_facets() {
+    let src = "for (i = [0:2]) rotate([60 * i, 0, 0]) cylinder(h = 20, r1 = 5, r2 = 0);\ntranslate([100, 0, 0]) cylinder(r = 5, h = 10);";
+    let e = export(src);
+    let p = e.stats.partial.as_ref().expect("a partial fallback");
+    assert!(p.regions > 0 && p.triangles < p.exact_triangles, "{p:?}");
+    // The separate cylinder keeps its three faces exact.
+    assert!(e.stats.exact_faces >= 3, "{:?}", e.stats);
+    assert_eq!(count(&e.step, "CYLINDRICAL_SURFACE"), 1);
+    // Judged by the exact attempts, nothing in the model is mesh-only.
+    assert_eq!(e.stats.exact_attempt_faceted, Vec::<&str>::new());
+    let partly: Vec<_> = e
+        .substitutions
+        .iter()
+        .filter(|s| s.kind == SubstitutionKind::Faceted)
+        .collect();
+    assert_eq!(partly.len(), 1, "{partly:?}");
+    assert_eq!(partly[0].module, "cylinder");
+    assert!(partly[0].detail.contains("partly as planar facets"));
+    assert_eq!(partly[0].loc.as_ref().map(|l| l.line), Some(1));
+    // Within what its facets and curves account for of the render (the
+    // render's 16-sided cones are 2% short of the round ones).
+    assert!(
+        (e.stats.volume - e.stats.normal_volume).abs() < 3e-2 * e.stats.volume,
+        "{:?}",
+        e.stats
+    );
+    // The same bytes again.
+    assert!(export(src).step == e.step);
 }

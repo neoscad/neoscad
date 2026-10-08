@@ -25,6 +25,11 @@ pub struct Validation {
     /// Findings that are not errors, in words: the B-rep has fewer
     /// handles than the input mesh.
     pub notes: Vec<String>,
+    /// The faces the errors are on (an edge's error is on the faces that
+    /// use it), sorted, each once. With `Report::face_triangles` they say
+    /// which input triangles to build some other way. Errors of the whole
+    /// B-rep (its genus) name no face.
+    pub error_faces: Vec<u32>,
 }
 
 impl Validation {
@@ -52,30 +57,63 @@ impl Validation {
 /// - every shell encloses a positive volume, or a negative one if it is a
 ///   void.
 pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
+    let mut out = validate_unsorted(brep, tolerance);
+    out.error_faces.sort_unstable();
+    out.error_faces.dedup();
+    out
+}
+
+fn validate_unsorted(brep: &Brep, tolerance: f64) -> Validation {
     let mut out = Validation::default();
-    let err = |out: &mut Validation, s: String| {
+    let (nv, ne, nf) = (brep.vertices.len(), brep.edges.len(), brep.faces.len());
+    // The faces using each edge, for saying where an edge's error is.
+    let mut edge_faces: Vec<Vec<u32>> = vec![Vec::new(); ne];
+    for (fi, f) in brep.faces.iter().enumerate() {
+        for c in f.loops.iter().flat_map(|l| &l.coedges) {
+            if let Some(v) = edge_faces.get_mut(c.edge as usize) {
+                if !v.contains(&(fi as u32)) {
+                    v.push(fi as u32);
+                }
+            }
+        }
+    }
+    let at_face = |f: usize| vec![f as u32];
+    let at_edge = |e: usize| edge_faces.get(e).cloned().unwrap_or_default();
+    let err = |out: &mut Validation, s: String, faces: Vec<u32>| {
         if out.errors.len() < 100 {
             out.errors.push(s);
         }
+        out.error_faces.extend(faces);
     };
-    let (nv, ne, nf) = (brep.vertices.len(), brep.edges.len(), brep.faces.len());
     for (i, e) in brep.edges.iter().enumerate() {
         if e.start as usize >= nv || e.end as usize >= nv {
-            err(&mut out, format!("edge {i}: vertex out of range"));
+            err(
+                &mut out,
+                format!("edge {i}: vertex out of range"),
+                at_edge(i),
+            );
         }
         if e.range[1] <= e.range[0] {
-            err(&mut out, format!("edge {i}: empty parameter range"));
+            err(
+                &mut out,
+                format!("edge {i}: empty parameter range"),
+                at_edge(i),
+            );
         }
     }
     let mut uses: Vec<Vec<(usize, bool)>> = vec![Vec::new(); ne];
     let mut nloops = 0i64;
     for (fi, f) in brep.faces.iter().enumerate() {
         if f.loops.is_empty() {
-            err(&mut out, format!("face {fi}: no loops"));
+            err(&mut out, format!("face {fi}: no loops"), at_face(fi));
         }
         let outer = f.loops.iter().filter(|l| l.outer).count();
         if outer > 1 {
-            err(&mut out, format!("face {fi}: more than one outer loop"));
+            err(
+                &mut out,
+                format!("face {fi}: more than one outer loop"),
+                at_face(fi),
+            );
         } else if outer == 0
             && !f.loops.is_empty()
             && matches!(
@@ -90,17 +128,22 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
             err(
                 &mut out,
                 format!("face {fi}: no outer loop (its loops wind against its normal)"),
+                at_face(fi),
             );
         }
         for (li, lp) in f.loops.iter().enumerate() {
             nloops += 1;
             if lp.coedges.is_empty() {
-                err(&mut out, format!("face {fi} loop {li}: empty"));
+                err(&mut out, format!("face {fi} loop {li}: empty"), at_face(fi));
                 continue;
             }
             for c in &lp.coedges {
                 if c.edge as usize >= ne {
-                    err(&mut out, format!("face {fi} loop {li}: edge out of range"));
+                    err(
+                        &mut out,
+                        format!("face {fi} loop {li}: edge out of range"),
+                        at_face(fi),
+                    );
                 }
             }
             if out.errors.iter().any(|e| e.contains("out of range")) {
@@ -114,6 +157,33 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                     (e.end, e.start)
                 }
             };
+            // A closed edge (a whole circle or ellipse) is a loop by
+            // itself. Inside a longer loop it is a hole that touches the
+            // boundary at a corner: OCCT splits it off as a wire of its
+            // own and rejects the face for wires that nest wrongly (BOSL2
+            // `threading__048` written partly as facets, where a facet's
+            // plane cut a cone's tip off in an ellipse through one of the
+            // facet's corners). On a periodic face a closed edge shares a
+            // loop with the seam (a cylinder's rims), which is right.
+            let planar = matches!(
+                f.surface,
+                crate::model::Surface::Plane { .. } | crate::model::Surface::Faceted
+            );
+            if planar && lp.coedges.len() > 1 {
+                for c in &lp.coedges {
+                    let e = &brep.edges[c.edge as usize];
+                    if e.start == e.end && !e.seam {
+                        err(
+                            &mut out,
+                            format!(
+                                "face {fi} loop {li}: closed edge {} inside a longer loop (a hole touching the boundary)",
+                                c.edge
+                            ),
+                            at_edge(c.edge as usize),
+                        );
+                    }
+                }
+            }
             // Two straight edges make a loop with no area: they overlap
             // rather than cross, so the crossing check below cannot see it.
             if lp.coedges.len() == 2
@@ -127,7 +197,30 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                 err(
                     &mut out,
                     format!("face {fi} loop {li}: two straight edges along one line (no area)"),
+                    at_face(fi),
                 );
+            } else if lp.coedges.len() == 2 {
+                // Two curves that run along each other within the
+                // tolerance make a sliver of no area too, on any surface
+                // (a cone between two facets whose planes cut it almost
+                // alike: BOSL2 `threading__048` written partly as facets,
+                // which OCCT read back as an unorientable face).
+                let (a, b) = (
+                    &brep.edges[lp.coedges[0].edge as usize],
+                    &brep.edges[lp.coedges[1].edge as usize],
+                );
+                let same_ends =
+                    (a.start, a.end) == (b.start, b.end) || (a.start, a.end) == (b.end, b.start);
+                // Not a seam, which a lone sphere's or torus's face runs
+                // along both ways.
+                let distinct = lp.coedges[0].edge != lp.coedges[1].edge && !a.seam && !b.seam;
+                if distinct && same_ends && a.start != a.end && run_along(a, b, tolerance) {
+                    err(
+                        &mut out,
+                        format!("face {fi} loop {li}: two edges along one curve (no area)"),
+                        at_face(fi),
+                    );
+                }
             }
             for k in 0..lp.coedges.len() {
                 let a = ends(&lp.coedges[k]).1;
@@ -136,6 +229,7 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                     err(
                         &mut out,
                         format!("face {fi} loop {li}: open after coedge {k}"),
+                        at_face(fi),
                     );
                 }
                 let c = &lp.coedges[k];
@@ -152,9 +246,14 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
             err(
                 &mut out,
                 format!("edge {i}: used {} times, not twice", u.len()),
+                at_edge(i),
             );
         } else if u[0].1 == u[1].1 {
-            err(&mut out, format!("edge {i}: both uses run the same way"));
+            err(
+                &mut out,
+                format!("edge {i}: both uses run the same way"),
+                at_edge(i),
+            );
         } else if (u[0].0 == u[1].0) != seam {
             err(
                 &mut out,
@@ -166,6 +265,7 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                         "used twice by one face but not a seam"
                     }
                 ),
+                at_edge(i),
             );
         }
     }
@@ -174,20 +274,24 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
     for (si, sh) in brep.shells.iter().enumerate() {
         for &f in &sh.faces {
             if f as usize >= nf {
-                err(&mut out, format!("shell {si}: face out of range"));
+                err(
+                    &mut out,
+                    format!("shell {si}: face out of range"),
+                    Vec::new(),
+                );
             } else if shell_of[f as usize] != usize::MAX {
-                err(&mut out, format!("face {f}: in two shells"));
+                err(&mut out, format!("face {f}: in two shells"), vec![f]);
             } else {
                 shell_of[f as usize] = si;
             }
         }
     }
     if let Some(f) = shell_of.iter().position(|&s| s == usize::MAX) {
-        err(&mut out, format!("face {f}: in no shell"));
+        err(&mut out, format!("face {f}: in no shell"), at_face(f));
     }
     for (i, u) in uses.iter().enumerate() {
         if u.len() == 2 && shell_of[u[0].0] != shell_of[u[1].0] {
-            err(&mut out, format!("edge {i}: joins two shells"));
+            err(&mut out, format!("edge {i}: joins two shells"), at_edge(i));
         }
     }
     let mut uf = UnionFind::new(nf);
@@ -200,7 +304,11 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
         if let Some(&f0) = sh.faces.first() {
             let r = uf.find(f0 as usize);
             if sh.faces.iter().any(|&f| uf.find(f as usize) != r) {
-                err(&mut out, format!("shell {si}: not connected"));
+                err(
+                    &mut out,
+                    format!("shell {si}: not connected"),
+                    sh.faces.clone(),
+                );
             }
         }
     }
@@ -216,12 +324,17 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
         err(
             &mut out,
             format!("Euler–Poincaré: V − E + 2F − L = {chi} is odd"),
+            Vec::new(),
         );
     } else {
         let g = brep.shells.len() as i64 - chi / 2;
         out.genus = Some(g);
         if g < 0 {
-            err(&mut out, format!("Euler–Poincaré: genus {g} is negative"));
+            err(
+                &mut out,
+                format!("Euler–Poincaré: genus {g} is negative"),
+                Vec::new(),
+            );
         }
         // More handles than the mesh means the B-rep joined what the
         // mesh keeps apart (corners merged that should not be): an error.
@@ -239,6 +352,7 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                 err(
                     &mut out,
                     format!("genus {g} is more than the input mesh's {}", r.mesh_genus),
+                    Vec::new(),
                 );
             } else if g < r.mesh_genus {
                 out.notes.push(format!(
@@ -256,7 +370,11 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                 .map(|w| (w[1] - w[0]).len())
                 .sum();
             if len < tolerance {
-                err(&mut out, format!("edge {i}: degenerate (length {len:.2e})"));
+                err(
+                    &mut out,
+                    format!("edge {i}: degenerate (length {len:.2e})"),
+                    at_edge(i),
+                );
             }
         }
         let (a, b) = (
@@ -272,6 +390,7 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
             err(
                 &mut out,
                 format!("edge {i}: curve ends {d:.2e} from its vertices"),
+                at_edge(i),
             );
         }
     }
@@ -280,6 +399,7 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
             err(
                 &mut out,
                 format!("face {fi}: unsupported surface {}", f.surface.kind()),
+                at_face(fi),
             );
             continue;
         };
@@ -295,6 +415,7 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                     err(
                         &mut out,
                         format!("face {fi}: edge {} is {worst:.2e} off the surface", c.edge),
+                        at_edge(c.edge as usize),
                     );
                 }
                 if !p.periodic() {
@@ -304,6 +425,7 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                     err(
                         &mut out,
                         format!("face {fi}: edge {} has no parameter-space curve", c.edge),
+                        at_face(fi),
                     );
                     continue;
                 };
@@ -320,15 +442,119 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                             "face {fi}: edge {}'s parameter-space curve ends {d:.2e} from the edge",
                             c.edge
                         ),
+                        at_face(fi),
                     );
                 }
+            }
+        }
+    }
+    // A loop of a planar face narrower than the tolerance (a needle
+    // triangle of the mesh written as a facet, or a slit whose two sides
+    // are not both lines) has no trustworthy area or orientation: its
+    // sides overlap within the tolerance. OCCT reads such a wire as
+    // crossing itself, or a hole as badly oriented (BOSL2 `distributors`
+    // and `example017.scad`, written partly as facets, read back invalid
+    // with them). Its width is taken as 4 · area / perimeter, a
+    // triangle's height on its long side, a slit's half-width.
+    for (fi, f) in brep.faces.iter().enumerate() {
+        let planar = matches!(
+            f.surface,
+            crate::model::Surface::Plane { .. } | crate::model::Surface::Faceted
+        );
+        if !planar {
+            continue;
+        }
+        let Some(lines) = face_polylines(brep, fi, 1) else {
+            continue;
+        };
+        for (li, pts) in lines.iter().enumerate() {
+            if pts.len() < 2 {
+                continue;
+            }
+            let (mut area, mut perimeter) = (0.0, 0.0);
+            for k in 0..pts.len() {
+                let (p, q) = (pts[k], pts[(k + 1) % pts.len()]);
+                area += p[0] * q[1] - p[1] * q[0];
+                perimeter += ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt();
+            }
+            let width = 2.0 * area.abs() / perimeter.max(1e-300);
+            if width < tolerance {
+                err(
+                    &mut out,
+                    format!(
+                        "face {fi} loop {li}: {width:.2e} wide, narrower than the tolerance (no area)"
+                    ),
+                    at_face(fi),
+                );
+            }
+        }
+        // Each hole inside the outer loop and outside the other holes.
+        // OCCT rejects a face whose wires nest otherwise ("invalid
+        // imbrication of wires"), and no other check here sees it when no
+        // two loops cross. None of the corpora's files has had one, but a
+        // face rebuilt partly from facets could. A hole may touch the outer
+        // loop or another hole, so a corner within the tolerance of the
+        // other loop is not counted. Holes are compared only where their
+        // boxes meet: a plate with 400 holes would otherwise compare every
+        // pair point by point.
+        let Some(outer) = f.loops.iter().position(|l| l.outer) else {
+            continue;
+        };
+        let boxes: Vec<[f64; 4]> = lines
+            .iter()
+            .map(|q| {
+                q.iter().fold(
+                    [
+                        f64::INFINITY,
+                        f64::INFINITY,
+                        f64::NEG_INFINITY,
+                        f64::NEG_INFINITY,
+                    ],
+                    |b, p| {
+                        [
+                            b[0].min(p[0]),
+                            b[1].min(p[1]),
+                            b[2].max(p[0]),
+                            b[3].max(p[1]),
+                        ]
+                    },
+                )
+            })
+            .collect();
+        let meet = |i: usize, j: usize| {
+            let (a, b) = (boxes[i], boxes[j]);
+            a[0] <= b[2] + tolerance
+                && b[0] <= a[2] + tolerance
+                && a[1] <= b[3] + tolerance
+                && b[1] <= a[3] + tolerance
+        };
+        for (li, pts) in lines.iter().enumerate() {
+            if li == outer {
+                continue;
+            }
+            let strictly = |q: &[[f64; 2]], inside: bool| {
+                pts.iter()
+                    .any(|&p| polyline_distance(q, p) > tolerance && winds(q, p) == inside)
+            };
+            let other_holes = lines
+                .iter()
+                .enumerate()
+                .any(|(lj, q)| lj != li && lj != outer && meet(li, lj) && strictly(q, true));
+            if strictly(&lines[outer], false) || other_holes {
+                err(
+                    &mut out,
+                    format!(
+                        "face {fi} loop {li}: a hole not inside its face's outer loop, or inside another hole"
+                    ),
+                    at_face(fi),
+                );
             }
         }
     }
     if out.errors.is_empty() {
         for fi in 0..nf {
             if let Some(e) = face_crossing(brep, fi).or_else(|| face_touch(brep, fi, tolerance)) {
-                err(&mut out, e);
+                err(&mut out, e, at_face(fi));
             }
         }
     }
@@ -347,15 +573,72 @@ pub fn validate(brep: &Brep, tolerance: f64) -> Validation {
                                     "inside out"
                                 }
                             ),
+                            sh.faces.clone(),
                         );
                     }
                 }
                 out.shell_volumes = vols;
             }
-            Err(e) => err(&mut out, format!("volume: {e}")),
+            Err(e) => err(&mut out, format!("volume: {e}"), Vec::new()),
         }
     }
     out
+}
+
+/// Whether edge `b` stays within `tol` of edge `a` everywhere (sampled
+/// densely, so the chords' sagitta is far below `tol` on the short
+/// curves where this matters).
+fn run_along(a: &crate::model::Edge, b: &crate::model::Edge, tol: f64) -> bool {
+    let pa = curve::sample(&a.curve, a.range, 512);
+    let pb = curve::sample(&b.curve, b.range, 64);
+    pb.iter().all(|&p| {
+        pa.windows(2)
+            .map(|w| {
+                let d = w[1] - w[0];
+                let l2 = d.dot(d);
+                let t = if l2 > 0.0 {
+                    ((p - w[0]).dot(d) / l2).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (p - (w[0] + d * t)).len()
+            })
+            .fold(f64::INFINITY, f64::min)
+            < tol
+    })
+}
+
+/// Whether the closed polyline `q` winds around `p` (crossing parity).
+fn winds(q: &[[f64; 2]], p: [f64; 2]) -> bool {
+    let mut inside = false;
+    for k in 0..q.len() {
+        let (a, b) = (q[k], q[(k + 1) % q.len()]);
+        if (a[1] > p[1]) != (b[1] > p[1]) {
+            let x = a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+            if x > p[0] {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+/// The distance from `p` to the closed polyline `q`.
+fn polyline_distance(q: &[[f64; 2]], p: [f64; 2]) -> f64 {
+    let mut best = f64::INFINITY;
+    for k in 0..q.len() {
+        let (a, b) = (q[k], q[(k + 1) % q.len()]);
+        let d = [b[0] - a[0], b[1] - a[1]];
+        let l2 = d[0] * d[0] + d[1] * d[1];
+        let t = if l2 > 0.0 {
+            (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / l2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (x, y) = (a[0] + d[0] * t - p[0], a[1] + d[1] * t - p[1]);
+        best = best.min((x * x + y * y).sqrt());
+    }
+    best
 }
 
 /// A face's loops as polylines in its parameter plane (plane coordinates

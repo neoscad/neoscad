@@ -324,6 +324,15 @@ pub struct Report {
     /// tessellation's own sagitta means the mesh's topology differs from
     /// the exact model's even where reconstruction succeeded.
     pub max_chain_deviation: f64,
+    /// Per edge of the B-rep, its share of `max_chain_deviation` (zero for
+    /// edges that do not count, seams among them): which edges a caller
+    /// that finds the maximum too large should not trust.
+    pub edge_chain_deviation: Vec<f64>,
+    /// Per face of the B-rep, the input triangles it was built from. A
+    /// caller that cannot use part of the result (a face the validator
+    /// rejects) can tag those triangles [`Surface::Faceted`] and try
+    /// again with the rest exact.
+    pub face_triangles: Vec<Vec<u32>>,
     /// Pairs of surfaces found tangent analytically.
     pub tangencies: Vec<Tangency>,
     /// Things worth a look, in words.

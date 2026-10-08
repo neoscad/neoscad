@@ -13,13 +13,13 @@
 //! bound it (so they are parallels), and the seam is placed along a
 //! meridian that misses every hole, at `u = 0`.
 
-use crate::Error;
 use crate::bspline;
 use crate::curve::{self, CurveEval};
 use crate::math::*;
 use crate::model::{BSpline, Curve};
 use crate::surf::{Param, Surf};
 use crate::topo::{TEdge, Topo};
+use crate::{Error, Failure};
 
 /// One sample of a loop in parameter space.
 #[derive(Clone, Copy, Debug)]
@@ -517,6 +517,7 @@ fn double_seam(topo: &mut Topo, f: usize, param: Param) -> Result<(), Error> {
         chain: Vec::new(),
         seam: true,
         dev: 0.0,
+        chain_dev: 0.0,
     });
     let parallel = topo.edges.len();
     topo.edges.push(TEdge {
@@ -533,6 +534,7 @@ fn double_seam(topo: &mut Topo, f: usize, param: Param) -> Result<(), Error> {
         chain: Vec::new(),
         seam: true,
         dev: 0.0,
+        chain_dev: 0.0,
     });
     // Counter-clockwise around [0, 2π] x [v0, v0 + 2π] for a face whose
     // normal is the torus's own, clockwise otherwise.
@@ -596,9 +598,49 @@ fn is_double_seam_loop(topo: &Topo, param: &Param, lp: &[(usize, bool)]) -> bool
 }
 
 /// Chooses each face's frame and inserts seams (pass 1).
-fn frames_and_seams(topo: &mut Topo, scale: f64) -> Result<(), Error> {
+/// Frames and seams for every face; a failure names the face's triangles.
+///
+/// It goes on past a face that fails, so that the failure names every
+/// such face's triangles at once: a caller that writes them as facets
+/// and tries again (BOSL2 `vnf_wireframe()` has a sliver of cylinder at
+/// every joint) needs one more try, not one per face.
+fn frames_and_seams(topo: &mut Topo, scale: f64) -> Result<(), Failure> {
+    let mut start = 0usize;
+    let mut failure: Option<Failure> = None;
+    while start < topo.faces.len() {
+        let mut at = start;
+        match frames_and_seams_from(topo, scale, &mut at) {
+            Ok(()) => break,
+            Err(error) => {
+                let tris = &topo.faces[at].source;
+                match &mut failure {
+                    None => {
+                        failure = Some(Failure {
+                            error,
+                            triangles: tris.clone(),
+                        })
+                    }
+                    Some(f) => f.triangles.extend_from_slice(tris),
+                }
+                start = at + 1;
+            }
+        }
+    }
+    match failure {
+        Some(mut f) => {
+            f.triangles.sort_unstable();
+            Err(f)
+        }
+        None => Ok(()),
+    }
+}
+
+/// [`frames_and_seams`] from face `at` on, keeping in `at` the face it is
+/// working on.
+fn frames_and_seams_from(topo: &mut Topo, scale: f64, at: &mut usize) -> Result<(), Error> {
     let tol = 1e-9 * scale;
-    for f in 0..topo.faces.len() {
+    for f in *at..topo.faces.len() {
+        *at = f;
         let (param, double) = match topo.faces[f].surf {
             Surf::Torus { .. } => torus_param(topo, f),
             _ => (base_param(topo, f), false),
@@ -808,6 +850,7 @@ fn frames_and_seams(topo: &mut Topo, scale: f64) -> Result<(), Error> {
             chain: Vec::new(),
             seam: true,
             dev: 0.0,
+            chain_dev: 0.0,
         });
         // The loops after splitting; rotate each end loop to start at its
         // seam vertex, then join them with the seam into one loop.
@@ -1034,7 +1077,7 @@ fn pcurves(topo: &mut Topo, scale: f64, fit_tol: f64) -> f64 {
 
 /// Frames, seams and parameter-space curves for every face. Returns the
 /// largest pcurve deviation.
-pub(crate) fn parametrise(topo: &mut Topo, scale: f64, fit_tol: f64) -> Result<f64, Error> {
+pub(crate) fn parametrise(topo: &mut Topo, scale: f64, fit_tol: f64) -> Result<f64, Failure> {
     frames_and_seams(topo, scale)?;
     Ok(pcurves(topo, scale, fit_tol))
 }

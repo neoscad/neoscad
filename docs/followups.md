@@ -2290,55 +2290,96 @@ Stage 1a of `docs/audits/exact-geometry-rust.md` is `crates/meshbrep`;
 stage 1b is `geom::exact` and `-o x.step` behind `--enable exact`; stage
 2 (extrusions, tori, `offset(r)`, sketch arcs) is `geom::exact::profile`
 and `walk/extrude.rs`. The stop-rule numbers are in the audit's status
-notes (`conformance exact` reproduces them). Stage 2's leftovers first,
-then stage 1b's, then the crate's.
-- **After stage 2 the stop rule is below its bar: 181 of 200 eligible
-  real models (90.5%) export valid, from 121 of 127.** Making
-  extrusions exact made 73 more models eligible; 60 of them export
-  exact, 2 are written with their extrusions as facets after the exact
-  attempt failed (`masks__097`, `vnf__031`), and 11 fail. Every model
-  valid before is valid still (the fallback below sees to the four
-  non-eligible ones that would otherwise have failed). The failures are classes that exist
-  without extrusions, reached now because the extrusions are exact:
-  - **BOSL2 `stroke()` and `vnf_wireframe()` joints** (`beziers__022`,
-    `__032`, `__037`, `rounding__035`, `turtle3d__002`, `drawing__040`;
-    `vnf__031` fell back): cylinders of the stroke's width meeting at
-    spheres of the same width. Each cylinder touches the sphere along a
-    great circle, and two of them meet where those circles cross, a
-    point where three surfaces touch. `sphere(d=1)` plus two
-    `cylinder(d=1)` from its centre at 90° fails the same way with
-    plain cylinders at the base commit; aligning the sphere's poles is
-    not enough there. Needs a vertex placed at the triple contact and
-    the mesh's slivers around it collapsed into it (the `distributors`
-    item below is the same shape of problem).
-  - **Flush faces from different chains of transforms**
-    (`candleStand.scad`: coaxial cylinders of one radius from two
-    module paths; `hinges__015`, `skin__084`, `skin__094`,
-    `example017.scad`): rounding keeps faces apart that the model has
-    flush, and Manifold keeps a sliver or a crack between them. Two
-    fixes for slivers went in (a closed bubble of two faces of no volume
-    is dropped; a slit of no width in a face is closed unless it runs
-    along a fin of two flush walls facing apart). `example017.scad` has
-    such fins: closing their slits wrote a file our validator passed
-    and OCCT rejected (a wire of the disc's top face badly oriented), so
-    they are left and the export is refused. A fin check in `validate`
-    (two faces on one surface, facing apart, sharing an edge) would
-    catch that class directly. Snapping the export render's vertices to a
-    grid (2^-32, then 2^-40, of the model's reach) before Manifold
-    fixed `masks__097` and `cubetruss__010` and broke `issue1165.scad`
-    (a deliberate 1e-10 gap), and at 2^-40 made manifold-rust panic on
-    `candleStand.scad` (`edge_op.rs:224`, index out of bounds): not
-    kept. The panic itself is worth a reduced case for the vendored
-    crate.
-  - **BOSL2 mask corner patches** (`masks__097` fell back): one
-    profile extruded along an edge and revolved round the corner, cut
-    by a vertical prism of the same profile. The patch is smaller than
-    the export render's sections; at 1× its mesh made a B-rep 0.4% off
-    the model that passed every check (the volume tolerance was 7%),
-    and at 2× and 4× its topology differs. Now refused at 1× (the loose
-    check below) and written with faceted extrusions. Placing the
-    revolve's sections at the patch's own vertices would align it.
-  - The five `distributors` examples and the Menger sponge, as before.
+notes (`conformance exact` reproduces them). The partial-fallback
+pass's leftovers first, then stage 1b's, then the crate's.
+- **After the partial faceted fallback, 185 of 201 eligible real models
+  (92.0%) export fully exact, and 192 (95.5%) export valid with the
+  regions around a failure written as facets** (counted as in the
+  audit's status note of this pass; the same sweep counts stage 2 as 182
+  of 201, 90.5%). No model valid before fails now. The partial fallback
+  is `geom::exact::partial`; `meshbrep` names the input triangles of
+  every face (`Report::face_triangles`), of a reconstruction failure
+  (`reconstruct_located`) and of every validation error
+  (`Validation::error_faces`). Left:
+  - **Bodies touching at a point or along an edge in the mesh**
+    (`example024.scad`, the Menger sponge; `beziers__032`,
+    `drawing__040`, `rounding__035`, `skin__084`; probably
+    `beziers__022` and `__037`, not traced): two distinct mesh vertices
+    at the same position, kept apart by Manifold, so that a corner of a
+    face lies on another edge of its own face. Faceting does not change
+    the mesh, so the partial fallback cannot help, and the export is
+    refused, correctly: a STEP solid cannot touch itself. The BOSL2
+    examples among them are `stroke()` and `vnf_wireframe()` joints with
+    `$fn` set, whose cylinders and revolved joints keep their polygons
+    (all planes); the joint class with `$fa`/`$fs` curves is fixed (the
+    `j01` case and `a_stroke_joint_exports_exact`).
+  - **A tangent point of two cones on a third cone's base plane**
+    (`distributors__027`, `__032`, `__037`, `__042`, written all as
+    facets; `distributors__052` fails): three equal cones about one
+    axis (`for (i = [0:2]) rotate([60 * i, 0, 0]) cylinder(h = 20, r1 =
+    5, r2 = 0)`). Cones 60° and 120° touch at (−4.657, −1.358, 0), which
+    lies on cone 0's base plane inside its base disc, so the plane, both
+    cones and both branches of their crossing meet at one point; the
+    nearest mesh vertex at OpenSCAD's defaults is 1.27 mm away, a
+    two-face vertex. An exact vertex there needs the mesh around it
+    rebuilt (its vertices collapsed into the tangent point), not
+    retagged. The partial fallback writes these four as facets
+    (0% of their faces exact) and the `a_region_that_does_not_reconstruct_is_written_as_facets`
+    test keeps a separate body beside them exact.
+    `distributors__052` ends with an odd Euler characteristic after
+    eight rounds, which no face is named for, and is refused.
+  - **Fins of flush walls facing apart** (`example017.scad`): slits of
+    no width in the disc's top face along the tabs. Closing them wrote a
+    file OCCT rejected before; they stay, and the export is refused (the
+    new narrow-loop check names the face, but faceting it changes
+    nothing). A fin check in `validate` would name the class directly.
+  - **The partial fallback is coarse where failures cascade.** It
+    facets whole source regions (the faces a surface record would have
+    made) and grows them while each failure is located, up to eight
+    reconstructions. `candleStand.scad` keeps 88% of its faces exact
+    (its coaxial cylinders from two module paths are one class with
+    seventeen wrapping loops), `vnf__031` 95%, `skin__094` 99.8%, the
+    distributors none. Faceting only the triangles near the failed
+    vertices, and growing by rings rather than whole faces, would keep
+    more exact. Unifying the planes and cylinders of different chains of
+    transforms before Manifold (snapping a primitive's vertices onto an
+    earlier record of the same surface) was not tried: the flush cases
+    it was meant for are now `hinges__015` (exact, by the mesh cleanup
+    below), `skin__094` and `candleStand.scad` (partial), and
+    `skin__084` and `example017.scad`, which it would not change (a
+    touch at one position, and fins). Grid snapping broke
+    `issue1165.scad` and made manifold-rust panic on `candleStand.scad`
+    at 2^-40 (`edge_op.rs:224`); the panic is worth a reduced case for
+    the vendored crate.
+  - **The mesh cleanup removes features below the touching tolerance**
+    (`max(1e-7, 1e-9 × size)`): edges shorter are collapsed and needle
+    triangles narrower are flipped before reconstruction. A wall 2.1e-9
+    thick (`hinges__015`) or a fin of 8.8e-11 (`issue1165.scad`'s
+    reduction) is gone from the file; the volume and box checks hold
+    the result to the model, and STEP's 1e-7 could not hold them anyway.
+  - **New validator checks, each from a file OCCT rejected during this
+    pass** (none in the final sweep): a planar loop narrower than the
+    tolerance (zero-area facets of the distributors), two curves running
+    along each other on any face (a cone sliver between two facets,
+    `threading__048`), and a closed edge inside a longer loop of a
+    planar face (an ellipse touching a facet's corner, `threading__048`).
+    A hole outside its outer loop, or inside another hole, is checked
+    too, though no corpus file has had one.
+  - **OCCT's volume of `bottlecaps__022` (partial, non-eligible) is
+    1.2e-6 over ours**, as for `example019.scad`: it reads the file
+    valid, and its healed volume (`volume_fixed`) equals ours to 1e-10.
+  - **The volume check against the normal render is loose on
+    intersections.** `normal_volume_bound` sums every curved primitive's
+    area times its sagitta, cut away or not: 18.9 for the BOSL2 mask
+    corner patch, whose normal render has volume 1.56. Here that is
+    right (the patch is far smaller than the render's sections: 6.38 at
+    `$fn = 200`, 6.50 at 1000, and the export's 6.16–6.51), but a bound
+    from the result's own curved area would be tighter.
+  - **BOSL2 mask corner patches** (`masks__097` is now exact; the
+    `a_mesh_coarser_than_its_features_is_not_trusted` reduction is
+    written from its finest mesh with the failing regions as facets):
+    placing the revolve's sections at the patch's own vertices would
+    align it.
 - **Twisted and non-uniformly scaled extrusions are facets**, reported
   at the `linear_extrude`; so are arcs scaled toward a point off their
   centre (oblique cones), arcs under a non-uniform 2D or 3D scale
@@ -2359,9 +2400,10 @@ then stage 1b's, then the crate's.
   falls back to building them as the normal render does** (stage 1's
   behaviour, reported at each extrusion), so no model that exported
   before stage 2 fails now. `conformance exact` judges such a model's
-  eligibility by its exact attempts and does not count it as valid. A
+  eligibility by its exact attempts and does not count it as valid. The
+  partial fallback now comes first, and this only when it fails; a
   further level (everything faceted, as a mesh export would write it)
-  would give the joint models above a file too.
+  would not help the touching bodies above, which no solid can hold.
 - **A first attempt whose volume check is loose (tolerance above 1e-3
   of the volume) is held, not trusted**: the export renders at 2× and
   then 4× the segments, and takes the first finer B-rep that passes, or

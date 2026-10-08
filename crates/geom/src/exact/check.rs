@@ -426,6 +426,54 @@ pub fn corrected_volume(mesh: &TaggedMesh) -> Corrected {
     out
 }
 
+/// The volume between `triangles` of `mesh` and the curved surfaces they
+/// are tagged with (a partial faceted fallback writes them as planar
+/// facets, `super::partial`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Caps {
+    /// The caps' signed sum: what [`corrected_volume`] adds for those
+    /// triangles, so a B-rep with them as facets plus this is the exact
+    /// model's volume.
+    pub signed: f64,
+    /// Each cap counted positive: how far the facets stand off the
+    /// exact model in volume.
+    pub size: f64,
+    /// The quadrature's error bound on `signed`.
+    pub error: f64,
+}
+
+/// The caps of `triangles` of `mesh` ([`Caps`]).
+pub fn cap_volume(mesh: &TaggedMesh, triangles: &[u32]) -> Caps {
+    let floor = 1e-8 * {
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for p in &mesh.positions {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max)
+    };
+    let mut out = Caps::default();
+    for &t in triangles {
+        let [a, b, c] = mesh.triangles[t as usize].map(|i| mesh.positions[i as usize]);
+        let s = &mesh.surfaces[mesh.triangle_surface[t as usize] as usize];
+        if matches!(s, Surface::Plane { .. } | Surface::Faceted) {
+            continue;
+        }
+        let nn = cross(sub(b, a), sub(c, a));
+        let len = dot(nn, nn).sqrt();
+        if len == 0.0 {
+            continue;
+        }
+        let (integral, quad_err, _) = integrate(s, [a, b, c], scaled(nn, 1.0 / len), 0, floor);
+        out.signed += integral;
+        out.size += integral.abs();
+        out.error += quad_err;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

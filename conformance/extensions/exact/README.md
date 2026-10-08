@@ -2,7 +2,9 @@
 
 The 28 models of `docs/audits/exact-geometry-rust.md` (its 15 boolean
 cases, the idioms x01–x11 and the CSG fillets f01–f02), and stage 2's
-extrusions e01–e10 (`linear_extrude`, `rotate_extrude`, `offset(r)`), as
+extrusions e01–e10 (`linear_extrude`, `rotate_extrude`, `offset(r)`), and
+j01 (a BOSL2 `stroke()` joint: two cylinders ending on great circles of a
+sphere of their radius), as
 OpenSCAD sources, for NeoSCAD's `--enable exact` STEP export. They are not in
 `conformance/manifest.json`, and `conformance run` does not read them.
 

@@ -1012,6 +1012,15 @@ fn exact_json(
         // model's eligibility by those).
         "fallback": s.fallback,
         "exact_attempt_faceted": s.exact_attempt_faceted,
+        // The regions written as facets where the exact attempts failed,
+        // the rest exact (`conformance exact` counts these apart).
+        "partial": s.partial.as_ref().map(|p| serde_json::json!({
+            "reason": p.reason,
+            "regions": p.regions,
+            "triangles": p.triangles,
+            "exact_triangles": p.exact_triangles,
+            "rounds": p.rounds,
+        })),
         "triangles": s.triangles,
         "faces": s.faces,
         "exact_faces": s.exact_faces,

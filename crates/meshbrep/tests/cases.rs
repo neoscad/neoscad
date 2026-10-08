@@ -234,3 +234,90 @@ fn dump() {
         std::fs::write(dir.join(format!("{name}.step")), step).unwrap();
     }
 }
+
+/// A tagged mesh of `node` at `res`, as [`tagged`] makes one for a case.
+fn mesh_of(node: &Node, res: Res) -> meshbrep::TaggedMesh {
+    let mut table = Vec::new();
+    let gl = eval(node, res, &mut table).get_mesh_gl64(-1);
+    let np = gl.num_prop as usize;
+    meshbrep::TaggedMesh {
+        positions: gl
+            .vert_properties
+            .chunks(np)
+            .map(|c| [c[0], c[1], c[2]])
+            .collect(),
+        triangles: gl
+            .tri_verts
+            .chunks(3)
+            .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32])
+            .collect(),
+        triangle_surface: gl.face_id.iter().map(|&f| f as u32).collect(),
+        surfaces: table,
+    }
+}
+
+/// Every face names the input triangles it was built from, each triangle
+/// at most once (`Report::face_triangles`), so that a caller can write
+/// the faces it cannot use as facets; and a failure names the triangles
+/// where it happened (`reconstruct_located`): x07, a faceted sphere minus
+/// an exact skew hole, folds at 12 segments.
+#[test]
+fn faces_and_failures_name_their_triangles() {
+    let (mesh, _, _) = tagged("c14", Res::Fn(16));
+    let b = reconstruct(&mesh, &Options::default()).unwrap();
+    assert_eq!(b.report.face_triangles.len(), b.faces.len());
+    let mut uses = vec![0u32; mesh.triangles.len()];
+    for t in b.report.face_triangles.iter().flatten() {
+        uses[*t as usize] += 1;
+    }
+    assert!(uses.iter().all(|&n| n == 1), "every triangle in one face");
+    assert_eq!(
+        b.report.edge_chain_deviation.len(),
+        b.edges.len(),
+        "a chain deviation per edge"
+    );
+
+    let (mesh, _, _) = tagged("x07", Res::Fn(12));
+    let f = meshbrep::reconstruct_located(&mesh, &Options::default()).unwrap_err();
+    assert!(
+        matches!(f.error, meshbrep::Error::TopologyMismatch(_)),
+        "{f}"
+    );
+    assert!(!f.triangles.is_empty());
+    assert!(
+        f.triangles
+            .iter()
+            .all(|&t| (t as usize) < mesh.triangles.len())
+    );
+}
+
+/// A cut stopping 2.1e-9 short of the far face leaves a wall thinner than
+/// the tolerance. Manifold's mesh has needle triangles along its top, and
+/// the face beside them used to have a boundary touching itself
+/// (`TopologyMismatch`). They are flipped into their neighbours before
+/// reconstruction, and the solid is the cut block, less a wall no STEP
+/// file could hold.
+#[test]
+fn needles_thinner_than_the_tolerance_are_flipped() {
+    let node = Node::Op(
+        'D',
+        vec![
+            Node::Cube([20.0, 2.1, 7.0], meshbrep::primitives::Transform::IDENTITY),
+            Node::Cube(
+                [5.0, 3.0999999979, 5.0],
+                meshbrep::primitives::Transform::translate([4.0, -1.0, 3.5]),
+            ),
+        ],
+    );
+    let mesh = mesh_of(&node, Res::Fn(16));
+    let b = reconstruct(&mesh, &Options::default()).unwrap();
+    assert!(
+        b.report.notes.iter().any(|n| n.contains("needle")),
+        "{:?}",
+        b.report.notes
+    );
+    let v = validate(&b, 1e-6);
+    assert!(v.is_valid(), "{:?}", v.errors);
+    let vol = measure(&b).unwrap().volume;
+    assert!((vol - 257.25).abs() < 1e-7, "{vol}");
+}
