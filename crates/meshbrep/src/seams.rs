@@ -3,7 +3,7 @@
 //! A STEP reader trims a face in its surface's (u, v) space. Without the
 //! 2D curves a reader rebuilds them itself, and on spheres trimmed by
 //! circles that are not parallels OCCT ends at tolerances up to 6.7e-3
-//! (the audit's F3). So every edge on a curved face gets a parameter-space
+//! (measured with OCCT 8.0.1). So every edge on a curved face gets a parameter-space
 //! curve here, and every face that wraps around its axis gets a seam: the
 //! edge along `u = 0` (= 2π) where the face meets itself, used once in each
 //! direction.

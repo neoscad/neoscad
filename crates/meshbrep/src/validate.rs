@@ -1,7 +1,7 @@
 //! A structural and geometric validator for [`Brep`], so that tests (and
 //! callers) can tell a valid solid from a broken one without a CAD kernel.
 //!
-//! Validity alone is not enough: the audit found a file that read back as
+//! Validity alone is not enough: testing found a file that read back as
 //! a valid solid with the wrong volume. Callers should also compare
 //! [`crate::measure`] with an independent volume (the mesh's).
 
@@ -70,10 +70,10 @@ fn validate_unsorted(brep: &Brep, tolerance: f64) -> Validation {
     let mut edge_faces: Vec<Vec<u32>> = vec![Vec::new(); ne];
     for (fi, f) in brep.faces.iter().enumerate() {
         for c in f.loops.iter().flat_map(|l| &l.coedges) {
-            if let Some(v) = edge_faces.get_mut(c.edge as usize) {
-                if !v.contains(&(fi as u32)) {
-                    v.push(fi as u32);
-                }
+            if let Some(v) = edge_faces.get_mut(c.edge as usize)
+                && !v.contains(&(fi as u32))
+            {
+                v.push(fi as u32);
             }
         }
     }

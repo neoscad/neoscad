@@ -487,8 +487,8 @@ mod tests {
     }
 
     /// Without analytic contacts, every vertex on the capsule's tangent
-    /// circles looks like a tangent crossing and splits the circle (the
-    /// audit's x02 came out with 16 arcs each); arc merging must join them
+    /// circles looks like a tangent crossing and splits the circle (the test
+    /// case x02 came out with 16 arcs each); arc merging must join them
     /// back into one closed circle per side.
     #[test]
     fn arcs_split_at_tangent_vertices_are_merged() {

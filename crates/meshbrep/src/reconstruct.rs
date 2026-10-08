@@ -1296,13 +1296,13 @@ fn classes(
     let mut exact: Vec<Option<Surf>> = Vec::with_capacity(ns);
     for (i, s) in mesh.surfaces.iter().enumerate() {
         let e = Surf::from_public(s);
-        if let Some(e) = &e {
-            if !e.well_formed() {
-                return Err(Error::InvalidInput(format!(
-                    "surface {i} ({}) is malformed",
-                    s.kind()
-                )));
-            }
+        if let Some(e) = &e
+            && !e.well_formed()
+        {
+            return Err(Error::InvalidInput(format!(
+                "surface {i} ({}) is malformed",
+                s.kind()
+            )));
         }
         exact.push(e);
     }
@@ -1410,15 +1410,15 @@ fn classes(
         let before = has_plane.clone();
         let mut joined = false;
         for t in 0..nt {
-            if is_faceted(t) && !before[t] {
-                if let Some(u) = (0..3)
+            if is_faceted(t)
+                && !before[t]
+                && let Some(u) = (0..3)
                     .map(|k| twin[3 * t + k] / 3)
                     .find(|&u| is_faceted(u) && before[u])
-                {
-                    uf.join(t, u);
-                    has_plane[t] = true;
-                    joined = true;
-                }
+            {
+                uf.join(t, u);
+                has_plane[t] = true;
+                joined = true;
             }
         }
         if !joined {

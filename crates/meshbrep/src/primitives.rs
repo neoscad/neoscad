@@ -5,8 +5,7 @@
 //! reconstruction reliable: segment counts that are multiples of 4 with a
 //! vertex on each axis, and spheres with poles and an equator ring. Then a
 //! cylinder tangent to an axis-aligned plane touches it along a mesh edge
-//! instead of crossing it in slivers that have no exact counterpart (the
-//! audit's F2).
+//! instead of crossing it in slivers that have no exact counterpart.
 
 use crate::math::*;
 use crate::model::{Surface, TaggedMesh};

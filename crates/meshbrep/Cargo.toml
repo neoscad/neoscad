@@ -5,7 +5,7 @@ description = "Rebuild an exact B-rep (planes, cylinders, cones, spheres) from a
 # Standalone on purpose: no workspace inheritance, so that the crate can
 # move to its own repository and be published as it is.
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["The NeoSCAD contributors"]
 repository = "https://github.com/neoscad/meshbrep"

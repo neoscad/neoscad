@@ -1,7 +1,7 @@
-//! The audit's test models as CSG trees, evaluated with Manifold into
+//! The test models as CSG trees, evaluated with Manifold into
 //! tagged meshes.
 //!
-//! The cases are the exact-geometry audit's: the 15 boolean cases b01,
+//! The cases: the 15 boolean cases b01,
 //! b03, c01–c03, c06–c15, the idioms x01–x06, the faceted fallbacks
 //! x07–x08 and the CSG fillets f01–f02, plus a void (x09), a lone sphere
 //! (x10) and a pointed cone (x11). Each comment gives the OpenSCAD source.
@@ -22,7 +22,7 @@ pub enum Res {
     Fn(u32),
 }
 
-/// The six resolutions of the audit's section 3.4.
+/// Six attribution resolutions, from coarse to fine.
 pub const RESOLUTIONS: [Res; 6] = [
     Res::Rule { fa: 12.0, fs: 2.0 },
     Res::Rule { fa: 12.0, fs: 0.5 },
@@ -178,7 +178,7 @@ pub fn case(name: &str) -> (Node, Option<f64>) {
             ),
             Some(1000.0 + 90.0 * PI),
         ),
-        // The countersunk plate of the B-rep audit, 2×2 and 6×4 holes.
+        // A countersunk plate, 2×2 and 6×4 holes.
         "c06" => (plate(2, 2), Some(4500.0 - 4.0 * 40.5 * PI)),
         "c07" => (plate(6, 4), Some(27000.0 - 24.0 * 40.5 * PI)),
         // The 20×20 plate, for timing (not in the default lists).
@@ -637,8 +637,7 @@ fn to_manifold(p: &TaggedMesh, table: &mut Vec<Surface>) -> Manifold {
 
 /// Reconstructs a case at `res`, retrying with a finer attribution mesh
 /// (up to three times) when the mesh's topology differs from the exact
-/// model's, as a caller would (the audit's "retry at a second
-/// resolution"). Returns the mesh, the B-rep and the resolutions that were
+/// model's, as a caller would (retry at a second resolution). Returns the mesh, the B-rep and the resolutions that were
 /// rejected first.
 pub fn build(
     name: &str,

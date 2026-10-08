@@ -264,33 +264,33 @@ pub(crate) fn make_edge(
     // Two quadrics meeting in a planar curve (equal cylinders with crossing
     // axes): the curve is that plane's section of the cylinder, an
     // ellipse.
-    if !closed && !s.is_plane() {
-        if let Some(cyl) = [*s, *t].into_iter().find(|x| matches!(x, Surf::Cyl { .. })) {
-            // Interior points only: near a crossing, projection can land
-            // on the other branch.
-            let k = chain.len() / 5;
-            let qs: Vec<V> = chain[k..chain.len() - k]
-                .iter()
-                .map(|&p| on_curve(s, t, p))
-                .collect();
-            let chord = (p1 - p0).norm();
-            let far = qs.iter().copied().max_by(|x, y| {
-                let d = |z: V| (z - p0).cross(chord).len();
-                d(*x).total_cmp(&d(*y))
-            });
-            if let Some(pm) = far {
-                let n = (pm - p0).cross(p1 - p0).norm();
-                let flat = qs.iter().all(|&q| (q - p0).dot(n).abs() < 1e-9);
-                if flat && n.len() > 0.5 {
-                    let pl = Surf::Plane { o: p0, n };
-                    if let Some((curve, range)) =
-                        closed_form(&pl, &cyl, q).and_then(|e| orient(e, p0, p1, chain, closed))
-                    {
-                        if !matches!(curve, Curve::Line { .. }) {
-                            let dev = deviation(&curve, range, s, t);
-                            return Built { curve, range, dev };
-                        }
-                    }
+    if !closed
+        && !s.is_plane()
+        && let Some(cyl) = [*s, *t].into_iter().find(|x| matches!(x, Surf::Cyl { .. }))
+    {
+        // Interior points only: near a crossing, projection can land
+        // on the other branch.
+        let k = chain.len() / 5;
+        let qs: Vec<V> = chain[k..chain.len() - k]
+            .iter()
+            .map(|&p| on_curve(s, t, p))
+            .collect();
+        let chord = (p1 - p0).norm();
+        let far = qs.iter().copied().max_by(|x, y| {
+            let d = |z: V| (z - p0).cross(chord).len();
+            d(*x).total_cmp(&d(*y))
+        });
+        if let Some(pm) = far {
+            let n = (pm - p0).cross(p1 - p0).norm();
+            let flat = qs.iter().all(|&q| (q - p0).dot(n).abs() < 1e-9);
+            if flat && n.len() > 0.5 {
+                let pl = Surf::Plane { o: p0, n };
+                if let Some((curve, range)) =
+                    closed_form(&pl, &cyl, q).and_then(|e| orient(e, p0, p1, chain, closed))
+                    && !matches!(curve, Curve::Line { .. })
+                {
+                    let dev = deviation(&curve, range, s, t);
+                    return Built { curve, range, dev };
                 }
             }
         }

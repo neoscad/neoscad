@@ -1,4 +1,4 @@
-//! Every audit case at the six attribution resolutions: reconstruction
+//! Every test case at the six attribution resolutions: reconstruction
 //! must succeed, validate, match the closed-form volume to 1e-6 relative
 //! and write byte-identical STEP when run again.
 //!
