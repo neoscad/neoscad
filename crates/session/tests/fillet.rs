@@ -289,11 +289,125 @@ fn a_mixed_vertex_offers_the_nested_rewrite() {
     let text = d["hints"][0]["replace"]["text"].as_str().unwrap();
     assert_eq!(
         text,
-        "fillet_edges(r = 1, edges = \"(all) and convex\") fillet_edges(r = 1, edges = \"(all) and concave\")"
+        "fillet_edges(r = 1, edges = \"all\", except = \"concave\") fillet_edges(r = 1, edges = \"all\", except = \"convex\")"
     );
+    // Both calls build: the outer one too, its ellipses where the inner
+    // call's mitred blends meet left sharp with the default's warning
+    // (with `edges = "(all) and convex"` they were named, so errors).
     let fixed = src.replacen(head, text, 1);
     let v = check(&session(fixed.as_bytes()), true);
     let f = v["fillets"].as_array().unwrap();
     assert_eq!(f.len(), 2);
+    assert_eq!(f[0]["status"], "built", "{}", v["diagnostics"]);
     assert_eq!(f[1]["status"], "built", "{}", v["diagnostics"]);
+    assert_eq!(v["exit_code"], 0, "{}", v["diagnostics"]);
+    // A narrower selector is narrowed in each call.
+    let head = "fillet_edges(r = 1, edges = \"not <z\")";
+    let src = src.replacen("fillet_edges(r = 1, edges = \"all\")", head, 1);
+    let v = check(&session(src.as_bytes()), true);
+    let d = v["diagnostics"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "fillet-unsupported-vertex")
+        .expect("unsupported vertex")
+        .clone();
+    assert_eq!(
+        d["hints"][0]["replace"]["text"],
+        "fillet_edges(r = 1, edges = \"(not <z) and convex\") fillet_edges(r = 1, edges = \"(not <z) and concave\")"
+    );
+}
+
+/// A call's diagnostics point at what to change (`docs/fillets.md`,
+/// section 15.5): what the selector matched at the `edges` argument, a
+/// size at `r`; the console line stays the call's.
+#[test]
+fn diagnostics_point_at_the_argument_to_change() {
+    let src = "fillet_edges(r = 1,\n  edges = \">z\", expect = 3) cube(10);\nfillet_edges(r = 3, edges = \"|y\") translate([20, 0, 0]) cube([20, 10, 4]);\n";
+    let v = check(&session(src.as_bytes()), true);
+    let items = v["diagnostics"]["items"].as_array().unwrap();
+    let at = |code: &str| {
+        let d = items.iter().find(|d| d["code"] == code).unwrap();
+        (d["line"].clone(), d["span"].clone())
+    };
+    let (line, span) = at("fillet-count");
+    assert_eq!(line, 1);
+    assert_eq!(
+        span,
+        serde_json::json!({"start": {"line": 2, "column": 11}, "end": {"line": 2, "column": 15}})
+    );
+    let (line, span) = at("fillet-overlap");
+    assert_eq!(line, 3);
+    assert_eq!(
+        span,
+        serde_json::json!({"start": {"line": 3, "column": 18}, "end": {"line": 3, "column": 19}})
+    );
+}
+
+/// Every example in `docs/fillet-edges.md` runs through `check` with the
+/// extension on and gives exactly the diagnostic codes its fence names
+/// (```openscad expect=code,...), none for a plain one; and every one
+/// with no expected error builds.
+#[test]
+fn docs_examples_check() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/fillet-edges.md");
+    let doc = std::fs::read_to_string(path).unwrap();
+    let mut examples: Vec<(usize, Vec<String>, String)> = Vec::new();
+    let mut open: Option<(usize, Vec<String>, String)> = None;
+    for (i, line) in doc.lines().enumerate() {
+        match (&mut open, line.strip_prefix("```")) {
+            (None, Some(info)) if info.starts_with("openscad") => {
+                let expect = info
+                    .split_whitespace()
+                    .find_map(|w| w.strip_prefix("expect="))
+                    .map(|c| c.split(',').map(str::to_string).collect())
+                    .unwrap_or_default();
+                open = Some((i + 1, expect, String::new()));
+            }
+            (Some(_), Some("")) => examples.extend(open.take()),
+            (Some((_, _, text)), _) => {
+                text.push_str(line);
+                text.push('\n');
+            }
+            _ => {}
+        }
+    }
+    assert!(examples.len() >= 12, "{} examples", examples.len());
+    let mut failures = Vec::new();
+    for (line, expect, text) in &examples {
+        let v = check(&session(text.as_bytes()), true);
+        // `check`'s diagnostics leave out info lines; each call's
+        // `codes` has them all.
+        let mut got: Vec<String> = v["diagnostics"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["code"].as_str().unwrap_or("").to_string())
+            .chain(
+                v["fillets"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|f| f["codes"].as_array().cloned().unwrap_or_default())
+                    .map(|c| c.as_str().unwrap_or("").to_string()),
+            )
+            .collect();
+        got.sort();
+        got.dedup();
+        let mut expect = expect.clone();
+        expect.sort();
+        let expect = &expect;
+        let built = v["fillets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|f| f["status"] == "built");
+        if &got != expect || (expect.is_empty() && !built) {
+            failures.push(format!(
+                "docs/fillet-edges.md:{line}: expected {expect:?}, got {got:?}; fillets {}",
+                v["fillets"]
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

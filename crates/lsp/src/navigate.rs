@@ -55,6 +55,25 @@ pub fn hover(ctx: &Ctx<'_>, params: &Value) -> Value {
     let Some(offset) = offset_of(ctx, params) else {
         return Value::Null;
     };
+    // Inside a fillet call's selector string: the atom under the cursor.
+    if let Some(s) = crate::fillet::selector_string(ctx, offset) {
+        return match crate::fillet::hover_atom(ctx.file(), s, offset) {
+            Some((value, span)) => json!({
+                "contents": {"kind": "markdown", "value": value},
+                "range": proto::range(ctx.file().source(), span),
+            }),
+            None => Value::Null,
+        };
+    }
+    // A named argument of a builtin call: its parameter, before the word
+    // is taken for a builtin of the same name (`scale` in
+    // `linear_extrude(scale = 2)`).
+    if let Some((value, span)) = crate::fillet::hover_argument(ctx, offset) {
+        return json!({
+            "contents": {"kind": "markdown", "value": value},
+            "range": proto::range(ctx.file().source(), span),
+        });
+    }
     let Some((target, span)) = target_at(ctx, offset) else {
         return Value::Null;
     };
@@ -76,6 +95,13 @@ pub fn hover(ctx: &Ctx<'_>, params: &Value) -> Value {
     let solved = match &target {
         Target::Builtin(e) if e.iter().any(|e| e.name == "sketch") => {
             crate::sketch::hover_sketch(main.source(), &main.path, ctx.sketches(), span)
+        }
+        // A fillet call: what the last rendered run selected.
+        Target::Builtin(e)
+            if e.iter()
+                .any(|e| crate::fillet::MODULES.contains(&e.name.as_str())) =>
+        {
+            crate::fillet::hover_call(main.source(), &main.path, ctx.fillets(), span)
         }
         // A constraint statement in a sketch body: its state.
         Target::Builtin(_) => {

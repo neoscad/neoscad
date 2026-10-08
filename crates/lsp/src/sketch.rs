@@ -144,14 +144,14 @@ pub fn pin_count_actions(
 }
 
 /// Whether a fact (a sketch, an entity, an edit) is in the file `path`.
-fn in_file(v: &Value, path: &Path) -> bool {
+pub(crate) fn in_file(v: &Value, path: &Path) -> bool {
     v["file"]
         .as_str()
         .is_some_and(|f| session::normal(Path::new(f)) == session::normal(path))
 }
 
 /// The byte range of a fact's `span` in `src`.
-fn span_of(src: &SourceFile, v: &Value) -> Option<(u32, u32)> {
+pub(crate) fn span_of(src: &SourceFile, v: &Value) -> Option<(u32, u32)> {
     let at = |k: &str| -> Option<u32> {
         let p = &v["span"][k];
         Some(proto::line_col_offset(

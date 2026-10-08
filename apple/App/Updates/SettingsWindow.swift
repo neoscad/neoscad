@@ -139,11 +139,15 @@ final class LanguageSettingsModel: ObservableObject {
     @Published var exact: Bool {
         didSet { LanguageSettings.exact = exact }
     }
+    @Published var fillets: Bool {
+        didSet { LanguageSettings.fillets = fillets }
+    }
 
     init() {
         sketches = LanguageSettings.sketches
         queries = LanguageSettings.queries
         exact = LanguageSettings.exact
+        fillets = LanguageSettings.fillets
     }
 }
 
@@ -178,6 +182,16 @@ struct LanguageSettingsView: View {
                         + "rather than triangles, for CAD programs such as FreeCAD, like the command line's "
                         + "--enable exact. Curves are exact unless $fn is set; anything else is written as facets "
                         + "and listed after the export."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                Toggle("Edge fillets and chamfers (fillet)", isOn: $model.fillets)
+                Text(
+                    "fillet_edges() and chamfer_edges() round or bevel the edges of any solid that a selector "
+                        + "picks (\"|z\" for vertical edges, \">z\" for the top outline), as FreeCAD's and CadQuery's "
+                        + "fillets do, like the command line's --enable fillet. A NeoSCAD extension, not in "
+                        + "OpenSCAD: off, they are unknown modules as in OpenSCAD."
                 )
                 .font(.footnote)
                 .foregroundStyle(.secondary)

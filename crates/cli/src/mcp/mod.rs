@@ -91,6 +91,16 @@ pub const RECIPES: &str = include_str!("recipes.scad");
 /// `crates/cli/tests/mcp.rs` checks that it renders fully constrained.
 pub const SKETCH_RECIPE: &str = include_str!("recipe_sketch.scad");
 
+/// Edge fillets (`--enable fillet`; `docs/fillet-edges.md`) as a module
+/// to adapt, with the selectors agents reach for, for servers started
+/// with the extension. Like [`SKETCH_RECIPE`] it is not in the
+/// instructions (at the limit already, and a server without the
+/// extension must not steer agents to `fillet_edges()`): `docs` for
+/// either builtin ends with it, the index says so in one line,
+/// `neoscad://recipes` appends it, and the hand-written `fillet` recipe
+/// points at it. `crates/cli/tests/mcp.rs` checks that it builds.
+pub const FILLET_RECIPE: &str = include_str!("recipe_fillet.scad");
+
 /// What introduces [`RECIPES`] in the instructions.
 const RECIPES_INTRO: &str = "\n\nPrinting recipes (tested; adapt the numbers):\n";
 
@@ -173,7 +183,8 @@ pub(crate) struct Args {
     /// (repeatable): textmetrics, object-function, import-function,
     /// vector-swizzle, predictible-output (sorted mesh exports); part
     /// (named parts), sketch (constrained 2D sketches), query (geometry
-    /// queries) and exact (`export` to .step with exact surfaces). Off
+    /// queries), exact (`export` to .step with exact surfaces) and fillet
+    /// (`fillet_edges()` and `chamfer_edges()` on selected edges). Off
     /// by default, as in OpenSCAD. (A server-wide flag rather than a tool argument, so it
     /// costs the agent's context nothing.)
     #[arg(long = "enable", value_name = "FEATURE", action = clap::ArgAction::Append)]

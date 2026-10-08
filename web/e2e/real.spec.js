@@ -249,6 +249,20 @@ test("deep recursion reaches the counted limit, and past it is an error, not a c
   }
 });
 
+// View > "Edge fillets and chamfers (fillet)" sends `fillet` with every
+// run: off, the call is OpenSCAD's unknown module; on, the engine knows
+// it and the warning goes (docs/fillet-edges.md).
+test("the fillet setting reaches the engine's runs", async ({ page }) => {
+  await open(page, codeLink('fillet_edges(r = 1, edges = "|z") cube(10);\n'));
+  await expect.poll(() => page.evaluate(() => window.NeoSCADWeb.lastRun?.exitCode), { timeout: 60000 }).not.toBeUndefined();
+  const lines = async () => (await page.locator(".console-line").allInnerTexts()).join("\n");
+  expect(await lines()).toContain("Ignoring unknown module 'fillet_edges'");
+  await page.getByTestId("view-menu").click();
+  await page.getByRole("menuitemcheckbox", { name: "Edge fillets and chamfers (fillet)" }).click();
+  await expect.poll(lines, { timeout: 60000 }).not.toContain("unknown module");
+  await expect(summary(page)).toContainText("Previewed");
+});
+
 // The fonts are not in the core: fonts.tar.gz is fetched the first time a
 // model draws text, either because the page sees `text(` in it or because
 // the core says a run wanted fonts (text drawn inside a library), and

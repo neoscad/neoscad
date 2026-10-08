@@ -36,7 +36,8 @@ change a resource limit; see "Safety"), `--enable FEATURE` (repeatable:
 one of OpenSCAD's experimental features or NeoSCAD's extensions for
 every call, as the command line's `--enable`: `textmetrics`,
 `object-function`, `import-function`, `vector-swizzle`, `part`,
-`sketch`, `query` and `exact` (STEP export, "STEP exports" below); off
+`sketch`, `query`, `exact` (STEP export, "STEP exports" below) and
+`fillet` (`fillet_edges()`/`chamfer_edges()`, "Recipes" below); off
 by default,
 as in OpenSCAD), `--tool NAME`
 (repeatable: also list the optional tool `test` or `format`; see
@@ -221,9 +222,9 @@ transcript audit read as a problem in its model.
 |---|---|---|
 | `evaluate` | errors and warnings with fix hints, `echo()` output; no geometry | |
 | `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch, and edges an STL breaks at 32-bit precision), components; optionally writes the model and reads a mesh file back | `export` (a file; format from its extension; `.stl` is ASCII STL; `.step` with `--enable exact`), `overwrite` |
-| `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `sketch` (a sketch name, with `--enable sketch`: drawn flat with its constraints, `docs/sketch.md`), `dims`, `preview`, `output` (also save the PNG; a `.png` name), `overwrite` |
+| `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `sketch` (a sketch name, with `--enable sketch`: drawn flat with its constraints, `docs/sketch.md`), `fillet` (a fillet call's number or selector, with `--enable fillet`: its edges drawn, the selected ones numbered, `docs/fillet-edges.md`), `dims`, `preview`, `output` (also save the PNG; a `.png` name), `overwrite` |
 | `check` | printability findings, each with location and fix; the description asks for the spec's minimum wall as `min_wall`; optionally `render`'s export and `measure`'s sections in the same result | `bed`, `nozzle`, `min_wall`, `max_overhang`, `export`, `overwrite`, `sections` (planes, each as `measure`'s `section`) |
-| `measure` | model and part bbox, volume, centroid; distance between parts, or the overlap's pieces; sections with each contour's area, bbox, hole and radii; a radius profile with crests and pitch; a constrained sketch's solved points, lengths, angles and radii | `part`, `between`, `section`, `axis` (`x`/`y`/`z`, default z), `center` (`[a, b]`, the axis's position, default `[0, 0]`), `profile` (`[from, to, step]` along the axis), `sketch` (a sketch's `name`, with `--enable sketch`) |
+| `measure` | model and part bbox, volume, centroid; distance between parts, or the overlap's pieces; sections with each contour's area, bbox, hole and radii; a radius profile with crests and pitch; a constrained sketch's solved points, lengths, angles and radii | `part`, `between`, `section`, `axis` (`x`/`y`/`z`, default z), `center` (`[a, b]`, the axis's position, default `[0, 0]`), `profile` (`[from, to, step]` along the axis), `sketch` (a sketch's `name`, with `--enable sketch`), `fillet` (a fillet call's number or selector, with `--enable fillet`: its selected edges) |
 | `test` (`--tool test`) | model tests (`docs/model-tests.md`); `path` is a test file or directory, `source` a test file's text | `filter` |
 | `format` (`--tool format`) | `source`: the formatted text; `path`: rewrites the file (only whitespace changes) | `check` (say how many lines would change, write nothing), `diff` (with `check`: the diff itself) |
 | `docs` | a builtin's or printing recipe's reference, or with `path` a file's definitions; no name: the index, which ends with the recipes' names | `name`, `full`, `verbose` (the whole index) |
@@ -362,6 +363,26 @@ line) and its text a line per sketch; `measure` with `sketch` answers
 with that sketch's entities and their solved values, and leaves out
 the model's numbers as for a section. `crates/cli/tests/mcp.rs` checks
 that the recipe renders fully constrained and that both tools say so.
+
+A server started with `--enable fillet` has a fillet recipe on the same
+terms (`crates/cli/src/mcp/recipe_fillet.scad`: the L-bracket of
+`docs/fillet-edges.md`, an inner concave corner then the outer heel,
+with the selectors agents reach for in its comment): `docs` for
+`fillet_edges` or `chamfer_edges` ends with it, the index says so in one
+line, `neoscad://recipes` appends it, and `docs` for `fillet` or
+`chamfer` (the hand-written printing recipe, or the sketch vocabulary's
+corner fillet) adds a line pointing at the builtins. The instructions
+stay the same. With the extension, `check`'s structured content lists
+each call (`fillets`: its module, size, selector, `status`, `matched`,
+each selected edge's curve, sense, angle, class, length and centre, the
+skipped edges by reason, the codes of its diagnostics, and its line) and
+its text a line per call (`fillet_edges at line 4: 4 edges (4 line,
+convex, 90°), r 2, edges = "|z" [built]`); a failed call is an error
+with its fix (the size that fits, the nested rewrite) and fails the
+check. `measure` with `fillet` lists that call's edges, and `snapshot`
+with `fillet` draws them numbered over the model.
+`crates/cli/tests/mcp.rs` checks that the recipe builds and that the
+tools say so.
 
 ### Results
 

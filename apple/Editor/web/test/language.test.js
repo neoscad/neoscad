@@ -110,6 +110,12 @@ test("the sketch vocabulary is coloured only inside sketch bodies", () => {
   ]);
 });
 
+test("the fillets are coloured as operations on their children", () => {
+  const s = state('fillet_edges(r = 2, edges = "|z") chamfer_edges(d = 1) cube(10);');
+  const found = builtinNames(s).map((n) => `${s.sliceDoc(n.from, n.to)}:${n.kind}`);
+  assert.deepEqual(found, ["fillet_edges:transformation", "chamfer_edges:transformation", "cube:model"]);
+});
+
 test("the geometry queries are coloured as functions and modules", () => {
   const s = state(
     "module m() { b = child_bounds(0); d = child_distance(0, 1); anchor(\"tip\", [0, 0, 1]); children(); }",

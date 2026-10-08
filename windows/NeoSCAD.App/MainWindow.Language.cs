@@ -1,6 +1,7 @@
 // Design > NeoSCAD Extensions: constrained sketches (`--enable sketch`),
-// geometry queries (`--enable query`) and STEP export with exact surfaces
-// (`--enable exact`), NeoSCAD's extensions, as the macOS app's Settings >
+// geometry queries (`--enable query`), STEP export with exact surfaces
+// (`--enable exact`) and edge fillets and chamfers (`--enable fillet`),
+// NeoSCAD's extensions, as the macOS app's Settings >
 // Language has them. Off
 // by default; kept in %LOCALAPPDATA%\NeoSCAD\language.json
 // (NeoSCAD.Host/LanguageSettings.cs) for the windows opened later, and
@@ -37,6 +38,7 @@ public sealed partial class MainWindow
         SketchItem.IsChecked = s.Sketch;
         QueryItem.IsChecked = s.Query;
         ExactItem.IsChecked = s.Exact;
+        FilletItem.IsChecked = s.Fillet;
         document.SetEnable(s.Names());
         BuildExportMenu(s.Names());
     }
@@ -47,6 +49,8 @@ public sealed partial class MainWindow
 
     void OnExactToggle(object sender, RoutedEventArgs e) => ChangeLanguageSettings();
 
+    void OnFilletToggle(object sender, RoutedEventArgs e) => ChangeLanguageSettings();
+
     void ChangeLanguageSettings()
     {
         var s = new LanguageSettings
@@ -54,6 +58,7 @@ public sealed partial class MainWindow
             Sketch = SketchItem.IsChecked,
             Query = QueryItem.IsChecked,
             Exact = ExactItem.IsChecked,
+            Fillet = FilletItem.IsChecked,
         };
         languageWatch?.Saved(s);
         try

@@ -645,6 +645,11 @@ impl State {
                 .ok_or_else(|| invalid(format!("unknown colour scheme '{name}'")))?,
         };
         self.fonts_wanted.store(false, Ordering::Relaxed);
+        // The page's language extensions come with each run (its View
+        // menu): the language server completes and hovers with the same
+        // ones, so `fillet_edges` is offered exactly when it runs.
+        self.lsp
+            .set_extensions(eval::Extensions::from_names(&request.enable));
         let (mut run, doc, text) = c.document_run(&r.path, &request)?;
         match r.camera {
             // The program sees the view it is shown in, as in OpenSCAD's

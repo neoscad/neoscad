@@ -106,6 +106,7 @@
             <ToggleMenuFlyoutItem x:Name="SketchItem" Text="Constrained Sketches (sketch)" Click="OnSketchToggle" />
             <ToggleMenuFlyoutItem x:Name="QueryItem" Text="Geometry Queries (query)" Click="OnQueryToggle" />
             <ToggleMenuFlyoutItem x:Name="ExactItem" Text="Exact STEP Export (exact)" Click="OnExactToggle" />
+            <ToggleMenuFlyoutItem x:Name="FilletItem" Text="Edge Fillets and Chamfers (fillet)" Click="OnFilletToggle" />
           </MenuFlyoutSubItem>
         </MenuBarItem>
         <MenuBarItem Title="View">

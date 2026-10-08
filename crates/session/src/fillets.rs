@@ -21,6 +21,10 @@ use lang::diag::{Diagnostic, Hint, PathBase};
 use lang::source::{SourceMap, Span};
 use serde_json::{Value, json};
 
+/// The selector language (`docs/fillets.md`, section 5.2), for the
+/// language server's completion and hover inside an `edges` string.
+pub use eval::fillet::selector;
+
 /// The most calls a run reports (a call in a loop is one per iteration);
 /// past this they are counted (`fillets_omitted`) but not listed.
 pub const MAX_FILLETS: usize = 100;
@@ -127,9 +131,9 @@ fn call_at(program: &lang::Program, span: Span) -> Option<(&lang::ast::Instantia
     Some((inst, text))
 }
 
-/// The edit that writes `value` as the size of the call at `span`: the
-/// expression of its `r` (or `d`) argument, named or first, replaced.
-pub fn size_edit(program: &lang::Program, span: Span, value: &str) -> Option<(Span, String)> {
+/// The span of the size argument (`r` or `d`, named or first) of the
+/// call at `span`, as written.
+fn size_span(program: &lang::Program, span: Span) -> Option<Span> {
     let (inst, _) = call_at(program, span)?;
     let ast = &program.ast;
     let named = inst
@@ -138,14 +142,54 @@ pub fn size_edit(program: &lang::Program, span: Span, value: &str) -> Option<(Sp
         .find(|a| a.name.is_some_and(|x| matches!(ast.name(x), "r" | "d")));
     let first = inst.args.first().filter(|a| a.name.is_none());
     let a = named.or(first)?;
-    Some((ast.expr(a.expr).span, value.to_string()))
+    Some(ast.expr(a.expr).span)
+}
+
+/// The edit that writes `value` as the size of the call at `span`: the
+/// expression of its `r` (or `d`) argument, named or first, replaced.
+pub fn size_edit(program: &lang::Program, span: Span, value: &str) -> Option<(Span, String)> {
+    Some((size_span(program, span)?, value.to_string()))
+}
+
+/// The span of the `edges` argument (named, or second) of the call at
+/// `span`, as written.
+fn edges_span(program: &lang::Program, span: Span) -> Option<Span> {
+    let (inst, _) = call_at(program, span)?;
+    let ast = &program.ast;
+    let named = inst
+        .args
+        .iter()
+        .find(|a| a.name.is_some_and(|x| ast.name(x) == "edges"));
+    let positional = inst.args.iter().filter(|a| a.name.is_none()).nth(1);
+    Some(ast.expr(named.or(positional)?.expr).span)
+}
+
+/// Where a call's diagnostic points (`docs/fillets.md`, section 15.5): a
+/// problem with what the selector matched at the `edges` argument, a
+/// size that does not fit at `r`/`d`, anything else at the call. An
+/// editor underlines that span, so the marker sits on the text to change
+/// rather than on the whole call and its children, which for a call
+/// around a `difference()` is most of the model. The console's line
+/// stays the call's, where OpenSCAD's messages put it.
+fn diag_span(program: &lang::Program, call: Span, code: lang::diag::DiagCode) -> Span {
+    use lang::diag::DiagCode as C;
+    let at = match code {
+        C::FilletCount | C::FilletNoEdges | C::FilletSkipped | C::FilletUnsupportedEdge => {
+            edges_span(program, call)
+        }
+        C::FilletTooLarge | C::FilletOverlap => size_span(program, call),
+        _ => None,
+    };
+    at.unwrap_or(call)
 }
 
 /// The edit that splits the call at `span` into two nested calls, the
 /// concave edges first (the inner one), then the convex ones of its
 /// result (`docs/fillets.md`, section 7.4): the call's head written
-/// twice, its `edges` string narrowed with `and convex` and `and
-/// concave`. `None` unless `edges` is absent or a plain string literal.
+/// twice, with `except = "concave"` and `except = "convex"` under the
+/// default `edges = "all"` and no `except`, otherwise its `edges` string
+/// narrowed with `and convex` and `and concave`. `None` unless `edges`
+/// is absent or a plain string literal.
 pub fn nested_edit(program: &lang::Program, span: Span) -> Option<(Span, String)> {
     let (inst, text) = call_at(program, span)?;
     let ast = &program.ast;
@@ -187,6 +231,35 @@ pub fn nested_edit(program: &lang::Program, span: Span) -> Option<(Span, String)
         .iter()
         .find(|a| a.name.is_some_and(|x| ast.name(x) == "edges"));
     let positional = inst.args.iter().filter(|a| a.name.is_none()).nth(1);
+    // Under the default `edges = "all"` (absent or written), each call
+    // keeps it and leaves the other sense out with `except`. Narrowing
+    // `edges` instead (`"(all) and convex"`) made the edges the inner
+    // call creates and v1 cannot round (the ellipses where two mitred
+    // concave blends meet) named ones, so errors, and the rewritten
+    // model of a block on a plate failed where the original only warned
+    // about them (section 15.5).
+    let except = inst
+        .args
+        .iter()
+        .find(|a| a.name.is_some_and(|x| ast.name(x) == "except"))
+        .or_else(|| inst.args.iter().filter(|a| a.name.is_none()).nth(2));
+    let all = match named.or(positional) {
+        None => true,
+        Some(a) => {
+            let s = ast.expr(a.expr).span;
+            text.get(s.start as usize..s.end as usize)
+                .and_then(|l| l.strip_prefix('"')?.strip_suffix('"'))
+                .is_some_and(|inner| inner.trim().eq_ignore_ascii_case("all"))
+        }
+    };
+    if all && except.is_none() {
+        let sep = if inst.args.is_empty() { "" } else { ", " };
+        let head = text.get(at..close)?.trim_end();
+        return Some((
+            Span::new(span.file, at as u32, close as u32 + 1),
+            format!("{head}{sep}except = \"concave\") {head}{sep}except = \"convex\")"),
+        ));
+    }
     let head = |sense: &str| -> Option<String> {
         match named.or(positional) {
             Some(a) => {
@@ -379,7 +452,8 @@ pub fn report<'a, W: std::io::Write>(
         for d in &p.diags {
             let mut diag = Diagnostic::new(d.code, d.severity, d.message.clone());
             if let Some(o) = origin {
-                diag = diag.at(o.span, o.line).with_base(PathBase::MainFileDir);
+                let span = prog.map_or(o.span, |p| diag_span(p, o.span, d.code));
+                diag = diag.at(span, o.line).with_base(PathBase::MainFileDir);
             }
             for (i, h) in d.hints.iter().enumerate() {
                 // The count's first hint carries the edit that pins it;

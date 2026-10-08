@@ -232,7 +232,10 @@ and SolidWorks were not run on them (the audit's section 11).
   extrusions.
 - **Export only.** The B-rep is reconstructed from what Manifold
   computed; NeoSCAD cannot import a STEP file and edit it.
-- **No fillets or chamfers on B-rep edges yet** (the audit's stage 4).
+- **Fillets and chamfers** on a model's edges are their own extension,
+  `--enable fillet` (`docs/fillet-edges.md`): with both on, their blends
+  export as exact cylinders, tori, cones and spheres, under the same `$fn`
+  rule.
 - **Time.** The export renders the model a second time for
   reconstruction; on large models it can take several times as long as
   the render (`docs/audits/exact-geometry-rust.md`, gate 5).

@@ -389,6 +389,24 @@ fn language_page(sh: &Rc<Shared>) -> adw::PreferencesPage {
         )
         .active(on.exact)
         .build();
+    let fillet = adw::SwitchRow::builder()
+        .title("Edge fillets and chamfers (fillet)")
+        .subtitle(
+            "fillet_edges() and chamfer_edges() round or bevel the edges of any solid that a \
+             selector picks (\"|z\" for vertical edges, \">z\" for the top outline), as FreeCAD's \
+             and CadQuery's fillets do, like the command line's --enable fillet. Off, they are \
+             unknown modules as in OpenSCAD.",
+        )
+        .active(on.fillet)
+        .build();
+    let weak = Rc::downgrade(sh);
+    fillet.connect_active_notify(move |row| {
+        if let Some(sh) = weak.upgrade() {
+            let mut s = *sh.extensions.borrow();
+            s.fillet = row.is_active();
+            sh.set_extensions(s);
+        }
+    });
     let weak = Rc::downgrade(sh);
     exact.connect_active_notify(move |row| {
         if let Some(sh) = weak.upgrade() {
@@ -420,6 +438,7 @@ fn language_page(sh: &Rc<Shared>) -> adw::PreferencesPage {
     group.add(&sketch);
     group.add(&query);
     group.add(&exact);
+    group.add(&fillet);
     let page = adw::PreferencesPage::builder()
         .title("Language")
         .icon_name("accessories-text-editor-symbolic")

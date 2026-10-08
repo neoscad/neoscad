@@ -482,12 +482,26 @@ impl Tools {
             .has(session::Extension::Sketch)
     }
 
+    /// Whether the server runs with NeoSCAD's fillets
+    /// (`neoscad mcp --enable fillet`).
+    fn fillet_on(&self) -> bool {
+        self.local
+            .session()
+            .config()
+            .extensions
+            .has(session::Extension::Fillet)
+    }
+
     pub fn read_resource(&self, uri: &str) -> Option<String> {
         if uri == "neoscad://recipes" {
+            let mut all = super::RECIPES.to_string();
             if self.sketch_on() {
-                return Some(format!("{}\n{}", super::RECIPES, super::SKETCH_RECIPE));
+                all = format!("{all}\n{}", super::SKETCH_RECIPE);
             }
-            return Some(super::RECIPES.to_string());
+            if self.fillet_on() {
+                all = format!("{all}\n{}", super::FILLET_RECIPE);
+            }
+            return Some(all);
         }
         let name = match uri.strip_prefix("neoscad://docs") {
             Some("") => None,
@@ -1353,6 +1367,17 @@ impl Tools {
                 if self.sketch_on() {
                     text.push_str("\nConstrained sketches are on: `docs` for sketch has a recipe.");
                 }
+                if self.fillet_on() {
+                    text.push_str(
+                        "\nFillets are on: `docs` for fillet_edges has a recipe and the selectors.",
+                    );
+                }
+            }
+            // A fillet builtin with the extension on: its reference, then
+            // a model to adapt with the selectors agents reach for.
+            Some("fillet_edges" | "chamfer_edges") if r["exit_code"] == 0 && self.fillet_on() => {
+                text.push_str("\n\nRecipe (tested; adapt the numbers):\n");
+                text.push_str(super::FILLET_RECIPE.trim_end());
             }
             // `sketch` with the extension on: its reference, then a
             // whole sketch to adapt, which agents otherwise assemble
@@ -1374,6 +1399,15 @@ impl Tools {
                 }
             }
             Some(_) => {}
+        }
+        // `fillet` is the hand-written printing recipe (or the sketch
+        // vocabulary's corner fillet); with the extension on, the agent
+        // asking for it most likely wants the builtin that rounds a
+        // solid's edges.
+        if self.fillet_on() && matches!(name, Some("fillet" | "chamfer")) {
+            text.push_str(
+                "\n\nThis server has --enable fillet: fillet_edges() and chamfer_edges() round or bevel chosen edges of any solid; `docs` for fillet_edges.",
+            );
         }
         Ok(Out {
             text,

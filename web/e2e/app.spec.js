@@ -124,6 +124,25 @@ test("STEP export is behind its toggle and reports how much is exact", async ({ 
   await expect(page.getByRole("menuitem", { name: "STEP (exact surfaces)…" })).toHaveCount(1);
 });
 
+test("the fillet extension is a View menu setting that runs the model again", async ({ page }) => {
+  await open(page);
+  await expect(summary(page)).toContainText("Previewed");
+  await page.getByTestId("view-menu").click();
+  const item = page.getByRole("menuitemcheckbox", { name: "Edge fillets and chamfers (fillet)" });
+  await expect(item).toHaveAttribute("aria-checked", "false");
+  await item.click();
+  // Turned on, the document runs again with it.
+  await expect(summary(page)).toContainText("Previewed");
+  await page.getByTestId("view-menu").click();
+  await expect(item).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Escape");
+  // A setting: it survives a reload.
+  await page.reload();
+  await expect(summary(page)).toContainText("Previewed");
+  await page.getByTestId("view-menu").click();
+  await expect(page.getByRole("menuitemcheckbox", { name: "Edge fillets and chamfers (fillet)" })).toHaveAttribute("aria-checked", "true");
+});
+
 test("F5 previews instead of reloading, F6 and Mod-Enter render", async ({ page }) => {
   await open(page);
   await page.evaluate(() => (window.__notReloaded = true));

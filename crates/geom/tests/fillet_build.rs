@@ -415,6 +415,8 @@ fn a_mixed_corner_is_refused_and_two_passes_build() {
         "fillet_edges(r = 1, edges = \"(all) and concave\") {block}"
     ));
     assert_eq!(p.status, Status::Built, "{:?}", p.diags);
+    let p = plan(&format!("fillet_edges(r = 1, except = \"convex\") {block}"));
+    assert_eq!(p.status, Status::Built, "{:?}", p.diags);
 }
 
 /// A call that selects lines and circles together builds both: a plate's

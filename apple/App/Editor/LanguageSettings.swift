@@ -3,8 +3,9 @@
 // off a file means exactly what it means in OpenSCAD
 // (docs/language-extensions.md, section 1). Constrained sketches
 // (`--enable sketch`, docs/sketch.md), geometry queries (`--enable
-// query`, docs/geometry-queries.md) and STEP export with exact surfaces
-// (`--enable exact`, docs/step-export.md) are here; `part()` keeps its
+// query`, docs/geometry-queries.md), STEP export with exact surfaces
+// (`--enable exact`, docs/step-export.md) and edge fillets and chamfers
+// (`--enable fillet`, docs/fillet-edges.md) are here; `part()` keeps its
 // per-window toggle in the check and measure panels.
 
 import Foundation
@@ -17,6 +18,7 @@ enum LanguageSettings {
     private static let sketchesKey = "EnableSketches"
     private static let queriesKey = "EnableQueries"
     private static let exactKey = "EnableExactExport"
+    private static let filletsKey = "EnableFillets"
 
     /// Constrained sketches: `sketch() { ... }` with its entities and
     /// constraints.
@@ -50,9 +52,21 @@ enum LanguageSettings {
         }
     }
 
+    /// Edge fillets and chamfers: `fillet_edges()` and `chamfer_edges()`
+    /// on the edges a selector picks.
+    static var fillets: Bool {
+        get { UserDefaults.standard.bool(forKey: filletsKey) }
+        set {
+            guard newValue != fillets else { return }
+            UserDefaults.standard.set(newValue, forKey: filletsKey)
+            NotificationCenter.default.post(name: didChange, object: nil)
+        }
+    }
+
     /// The `--enable` names every document's runs, checks, exports and
     /// language server take.
     static var enable: [String] {
         (sketches ? ["sketch"] : []) + (queries ? ["query"] : []) + (exact ? ["exact"] : [])
+            + (fillets ? ["fillet"] : [])
     }
 }

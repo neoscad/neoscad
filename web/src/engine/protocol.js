@@ -122,6 +122,18 @@ export const Requests = {
   lsp: (message) => ({ type: "lsp", message }),
 };
 
+/// NeoSCAD's language extensions the page can turn on for every run
+/// (`--enable` on the command line), each a View menu toggle kept in the
+/// settings under its name: `fillet` (`fillet_edges()`/`chamfer_edges()`,
+/// docs/fillet-edges.md). `exact` is not here: it only adds STEP to the
+/// Export menu, and is sent with that export alone.
+export const LANGUAGE_EXTENSIONS = {
+  fillet: { label: "Edge fillets and chamfers (fillet)" },
+};
+
+/// The `enable` names of the language extensions `settings` turns on.
+export const enabledExtensions = (settings) => Object.keys(LANGUAGE_EXTENSIONS).filter((name) => settings?.[name] === true);
+
 /// The Export menu's formats. `extension` names the NeoSCAD extension a
 /// format needs (`--enable` on the command line): the menu lists it only
 /// while the Export menu's toggle for it is on, and the export sends it.

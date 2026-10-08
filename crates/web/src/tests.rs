@@ -439,6 +439,81 @@ fn the_language_server_gets_diagnostics_from_runs() {
     assert_eq!(d["range"]["start"]["line"], 1, "{d}");
 }
 
+/// The page's language extensions come with its runs (`enable`), and the
+/// language server follows them: with `fillet` on, a fillet call builds
+/// and its `edges` string completes as a selector; off, the call is
+/// OpenSCAD's unknown module and the string completes nothing.
+#[test]
+fn a_runs_extensions_reach_the_language_server() {
+    let mut w = worker();
+    let lsp = |w: &mut Worker, m: Value| -> Vec<Value> {
+        let r = ok(
+            w,
+            json!({ "id": 1, "type": "lsp", "message": m.to_string() }),
+        );
+        r["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| serde_json::from_str(s.as_str().unwrap()).unwrap())
+            .collect()
+    };
+    lsp(
+        &mut w,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "capabilities": {} } }),
+    );
+    let text = "fillet_edges(r = 1, edges = \"|z and \") cube(10);\n";
+    ok(
+        &mut w,
+        json!({ "id": 2, "type": "open", "path": DOC, "text": text }),
+    );
+    lsp(
+        &mut w,
+        json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": { "uri": "file:///doc/main.scad", "languageId": "openscad",
+                              "version": 1, "text": text } } }),
+    );
+    let complete = |w: &mut Worker| -> Vec<String> {
+        let r = lsp(
+            w,
+            json!({ "jsonrpc": "2.0", "id": 9, "method": "textDocument/completion", "params": {
+                "textDocument": { "uri": "file:///doc/main.scad" },
+                "position": { "line": 0, "character": 36 } } }),
+        );
+        r[0]["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let r = ok(
+        &mut w,
+        json!({ "id": 3, "type": "run", "path": DOC, "mode": "render", "enable": ["fillet"] }),
+    );
+    // The call is known: its unfinished selector is the error.
+    assert!(
+        r["render"]["console"]
+            .as_str()
+            .unwrap()
+            .contains("expected a selector at the end"),
+        "{r}"
+    );
+    assert!(complete(&mut w).contains(&"convex".to_string()));
+    let r = ok(
+        &mut w,
+        json!({ "id": 4, "type": "run", "path": DOC, "mode": "render" }),
+    );
+    assert!(
+        r["render"]["console"]
+            .as_str()
+            .unwrap()
+            .contains("unknown module 'fillet_edges'"),
+        "{r}"
+    );
+    assert_eq!(complete(&mut w), Vec::<String>::new());
+}
+
 #[test]
 fn limits_are_set_and_checked() {
     let mut w = worker();

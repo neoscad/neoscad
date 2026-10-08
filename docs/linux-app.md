@@ -553,9 +553,10 @@ checked by `client::update::check`, the code the CLI uses.
   directory (`~/.config/neoscad/`, or
   `~/.var/app/org.neoscad.NeoSCAD/config/neoscad/` in the Flatpak).
 - **Language** (Preferences > Language): "Constrained sketches
-  (sketch)", "Geometry queries (query)" and "Exact STEP export
-  (exact)", NeoSCAD's extensions (the last adds STEP to File > Export,
-  `docs/step-export.md`) (`docs/language-extensions.md`), off by default as
+  (sketch)", "Geometry queries (query)", "Exact STEP export (exact)"
+  and "Edge fillets and chamfers (fillet)", NeoSCAD's extensions (the
+  third adds STEP to File > Export, `docs/step-export.md`; the fourth is
+  `docs/fillet-edges.md`) (`docs/language-extensions.md`), off by default as
   on the command line. They go to every window's document loop (runs,
   check, measure, export) and its language server, and changing one runs
   the open documents again. They are stored in `language.json` beside

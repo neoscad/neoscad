@@ -164,6 +164,9 @@ the view, the editor's markers and (through `parameters`) the customizer.
 - `parts` turns on neoscad's `part()` extension (`--enable part`); `enable`
   lists OpenSCAD's experimental features and NeoSCAD's extensions as
   `--enable` names them (`textmetrics`, `object-function`, `part`, ...).
+  A run's NeoSCAD extensions also become the language server's, so its
+  completion and hover follow the run (the page sends `fillet` with every
+  run while View > "Edge fillets and chamfers (fillet)" is on).
 - `camera` is the view the model is shown in, for `$vpt`, `$vpr`, `$vpd`,
   `$vpf` (OpenSCAD's GUI passes its view the same way). Default:
   OpenSCAD's default camera.

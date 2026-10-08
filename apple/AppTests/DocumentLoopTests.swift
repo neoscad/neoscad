@@ -96,6 +96,34 @@ private func waitForRun(_ doc: SCADDocument, after count: Int, _ what: String = 
         doc.close()
     }
 
+    /// Settings > Language: fillets off, `fillet_edges()` is OpenSCAD's
+    /// unknown module; turned on, the open document runs again and the
+    /// call's too-large radius is an error marker whose fix is the radius
+    /// that fits (a fillet's diagnostics come from the render, which the
+    /// app hands its language server).
+    @Test func theFilletSettingRunsFilletsAndShowsTheirFixes() async throws {
+        let saved = LanguageSettings.fillets
+        defer { LanguageSettings.fillets = saved }
+        LanguageSettings.fillets = false
+        let doc = try await openDocument("fillet_edges(r = 3, edges = \"|y\") cube([20, 10, 4]);\n")
+        try await waitForRun(doc, after: 0)
+        #expect(doc.model.console.contains { $0.kind == .warning && $0.text.contains("unknown module 'fillet_edges'") })
+        let runs = doc.requestCount
+        LanguageSettings.fillets = true
+        try await waitForRun(doc, after: runs)
+        #expect(!doc.model.console.contains { $0.kind == .warning })
+        #expect(doc.model.console.contains { $0.kind == .error && $0.text.contains("fillet_edges()") })
+        var errors = 0
+        try await waitUntil("an error marker") {
+            errors == 1
+        } while: {
+            errors =
+                try await doc.model.editor.call(
+                    "return document.querySelectorAll('.cm-lintRange-error').length") as? Int ?? 0
+        }
+        doc.close()
+    }
+
     @Test func aGeometryWarningReachesTheMarkers() async throws {
         let doc = try await openDocument("union() { cube(1); square(1); }\n")
         doc.renderDocument(nil)

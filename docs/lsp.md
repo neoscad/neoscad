@@ -22,7 +22,27 @@ can run it. It offers:
   action (`refactor.rewrite`) anywhere in a sketch; on hover, an entity
   variable's solved values and a `sketch` call's state from the last
   evaluation of the same text; and go to definition on a handle's member
-  (`top.start`) to the point it names.
+  (`top.start`) to the point it names;
+- with `--enable fillet`, edge fillets and chamfers
+  (`docs/fillet-edges.md`): inside the `edges` or `except` string of a
+  `fillet_edges()` or `chamfer_edges()` call, completion of the selector
+  language (the atoms where an operand goes, `and`, `or` and `exc` after
+  one, nothing inside `child(` or `box(`, and the "did you mean" word
+  for a slip; `@name` only with `--enable query`) and hover on the word
+  under the cursor; `fillet_edges` and `chamfer_edges` offered only with
+  the extension, and no selector completion under a program's own
+  `module fillet_edges`. Hover on any builtin call's named argument
+  (`r`, `edges`, or `scale` in `linear_extrude(scale = 2)`) shows that
+  parameter's line of the reference. The rest needs the children's
+  geometry, so a render: when a host hands the server a rendered run (the
+  apps and the web page do), hover on the call's name adds what that run
+  selected, its diagnostics sit on the text to change (the `edges`
+  string for a count or an empty selection, `r` or `d` for a size that
+  does not fit) with their fixes as quick fixes (the size that fits, the
+  nested two-call rewrite), and "Pin count" (`refactor.rewrite`) writes
+  the selection's size into `expect`. `neoscad lsp --stdio` evaluates
+  without rendering, so it shows the selector's own errors but none of
+  these.
 
 It finds libraries as the command line does: beside the file, on
 `OPENSCADPATH`, in the user library folder, then the bundled ones (MCAD).

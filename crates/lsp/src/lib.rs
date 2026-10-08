@@ -54,6 +54,7 @@ mod complete;
 mod context;
 mod describe;
 mod diagnose;
+mod fillet;
 pub mod index;
 mod layout;
 mod navigate;
@@ -694,10 +695,12 @@ impl Server {
         let on = self.extensions_on(session);
         let sketch = on.has(session::Extension::Sketch);
         let query = on.has(session::Extension::Query);
+        let fillet = on.has(session::Extension::Fillet);
         let mut slot = doc.world.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some((w, stamps)) = &*slot
             && w.sketch == sketch
             && w.query == query
+            && w.fillet == fillet
             && stamps.iter().all(|(p, m)| m.is_some() && stamp(p) == *m)
         {
             return w.clone();
@@ -715,6 +718,7 @@ impl Server {
         let mut w = World::new(doc.analyzed(), &loader);
         w.sketch = sketch;
         w.query = query;
+        w.fillet = fillet;
         let w = Arc::new(w);
         let stamps = w
             .files
@@ -883,7 +887,7 @@ fn initialize_result() -> Value {
             "positionEncoding": "utf-16",
             "textDocumentSync": {"openClose": true, "change": 2, "save": false},
             "hoverProvider": true,
-            "completionProvider": {"triggerCharacters": ["$"], "resolveProvider": false},
+            "completionProvider": {"triggerCharacters": ["$", "\""], "resolveProvider": false},
             "signatureHelpProvider": {"triggerCharacters": ["(", ","], "retriggerCharacters": [","]},
             "definitionProvider": true,
             "referencesProvider": true,

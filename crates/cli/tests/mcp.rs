@@ -1538,6 +1538,85 @@ fn sketches_in_check_measure_and_the_sketch_recipe() {
     );
 }
 
+/// `--enable fillet`: the recipe where an agent looks for it (`docs` for
+/// the builtins, the index, `neoscad://recipes`, and a pointer from the
+/// hand-written `fillet`), never in the instructions; and it builds, as
+/// `check` and `measure` report.
+#[test]
+fn fillets_recipe_docs_and_reports() {
+    let dir = scratch("fillet");
+    let mut plain = Mcp::start(&dir, &[]);
+    let r = plain.call(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+    );
+    let before = r["result"]["instructions"].clone();
+    let r = plain.tool("docs", json!({"name": "fillet_edges"}));
+    assert!(!text(&r).contains("module l_bracket("), "{}", text(&r));
+    let r = plain.tool("docs", json!({"name": "fillet"}));
+    assert!(!text(&r).contains("--enable fillet:"), "{}", text(&r));
+
+    let mut s = Mcp::start(&dir, &["--enable", "fillet"]);
+    let r = s.call(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}}),
+    );
+    assert_eq!(r["result"]["instructions"], before);
+    let r = s.tool("docs", json!({"name": "fillet_edges"}));
+    let docs = text(&r);
+    let at = docs.find("// Fillets").expect("the recipe");
+    let recipe = docs[at..].to_string();
+    assert!(recipe.contains("module l_bracket("), "{docs}");
+    let r = s.tool("docs", json!({"name": "chamfer_edges"}));
+    assert!(text(&r).contains("module l_bracket("), "{}", text(&r));
+    let r = s.call("resources/read", json!({"uri": "neoscad://recipes"}));
+    let all = r["result"]["contents"][0]["text"].as_str().unwrap();
+    assert!(all.contains("module l_bracket("), "{all}");
+    let r = s.tool("docs", json!({}));
+    assert!(
+        text(&r).ends_with("`docs` for fillet_edges has a recipe and the selectors."),
+        "{}",
+        text(&r)
+    );
+    let r = s.tool("docs", json!({"name": "fillet"}));
+    assert!(
+        text(&r).ends_with("`docs` for fillet_edges."),
+        "{}",
+        text(&r)
+    );
+
+    let src = format!("{recipe}\nl_bracket();\n");
+    let r = s.tool("check", json!({"source": src, "min_wall": 1.2}));
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["model"]["manifold"], true, "{}", text(&r));
+    assert_eq!(sc["counts"]["errors"], 0, "{}", text(&r));
+    assert!(
+        sc["diagnostics"].as_array().unwrap().is_empty(),
+        "{}",
+        text(&r)
+    );
+    let f = sc["fillets"].as_array().expect("fillets");
+    assert_eq!(f.len(), 2, "{}", text(&r));
+    for call in f {
+        assert_eq!(call["status"], "built", "{}", text(&r));
+        assert_eq!(call["matched"], 1, "{}", text(&r));
+    }
+    assert!(
+        text(&r).contains("fillet_edges at line 6: 1 edge (1 line, concave, 270°), r 3"),
+        "{}",
+        text(&r)
+    );
+    // The mesh's arcs are polygons: a little over the exact 6469.96.
+    let v = sc["model"]["volume"].as_f64().unwrap();
+    assert!((v - 6469.96).abs() < 15.0, "{v}");
+    let r = s.tool("measure", json!({"source": src, "fillet": "2"}));
+    assert!(
+        text(&r).contains("1. line (concave, 270°, translational)"),
+        "{}",
+        text(&r)
+    );
+}
+
 #[test]
 fn the_recipes_are_in_the_instructions_and_each_one_prints() {
     let dir = scratch("recipes");

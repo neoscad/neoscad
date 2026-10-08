@@ -1140,9 +1140,21 @@ fn decide(f: &FilletNode, p: &mut Plan, facts: &Facts) {
             let names: Vec<String> = edges.iter().map(|&k| num(k).to_string()).collect();
             let mixed = why.contains("convex and concave");
             let (hint, fix) = if mixed && f.edges.items.len() == 1 && f.except.is_none() {
+                // Under the default `"all"` the rewrite keeps it and
+                // leaves the other sense out (`session::fillets::nested_edit`),
+                // so edges the inner call makes and v1 cannot round stay
+                // warnings, as they are in the original call.
+                let (outer, inner) = if f.edges.is_all() {
+                    ("except = \"concave\"", "except = \"convex\"")
+                } else {
+                    (
+                        "edges = \"(...) and convex\"",
+                        "edges = \"(...) and concave\"",
+                    )
+                };
                 (
                     format!(
-                        "round them in two nested calls, the concave edges first: {m}({sn} = {size}, edges = \"(...) and convex\") {m}({sn} = {size}, edges = \"(...) and concave\") ..."
+                        "round them in two nested calls, the concave edges first: {m}({sn} = {size}, {outer}) {m}({sn} = {size}, {inner}) ..."
                     ),
                     Some(Fix::Nested),
                 )

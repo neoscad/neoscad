@@ -2598,7 +2598,7 @@ pass's leftovers first, then stage 1b's, then the crate's.
   not happened in the test models.
 
 ## Fillets and chamfers
-Stages F0 to F3 of `docs/fillets.md` are built: `--enable fillet`,
+Stages F0 to F4 of `docs/fillets.md` are built: `--enable fillet`,
 the two builtins, the selector parser (`eval::fillet::selector`),
 `NodeKind::Fillet`, the plan (`geom::fillet`: the child's B-rep, edge
 facts, selection; `session::fillets`: diagnostics and the
@@ -2608,8 +2608,10 @@ server), the blends of straight edges (`meshbrep::blend`'s tools,
 the STEP walk, the check after the boolean, exit codes; section 15.3)
 and of circles and arcs about an axis, with tangent chains of both
 (`meshbrep::blend::revolve`, conforming sections, `conformance
-fillet-corpus`; section 15.4). What they leave, beyond the later
-stages themselves:
+fillet-corpus`; section 15.4), and the surfaces (the language server's
+selector completion and hover, the MCP recipe, the apps' and /try's
+toggles, editor colouring and the user reference
+`docs/fillet-edges.md`; section 15.5). What they leave, beyond F5:
 - **Spindle tori**: a convex rim's fillet must keep its centre further
   from the axis than its radius (a boss's top rim: up to half the boss's
   radius), because `meshbrep` writes ring tori only
@@ -2710,15 +2712,34 @@ stages themselves:
   draws every edge over the panels, so edges behind the model show
   through. A hidden-line pass against the panel's depth (or dimming
   back-facing edges) would make dense models readable.
-- **"Pin count" needs a rendered run**: the language server's own runs
-  only evaluate, so the action appears only after a host supplies a log
-  that rendered (`Server::supply_log`, as the apps do). An editor with
-  only `neoscad lsp --stdio` never sees it.
-- **Surfaces** (F4): LSP completion inside selector strings, hover, MCP
-  recipe, the apps' and /try's toggles, editor colouring. Builtin
-  completion offers `fillet_edges` and `chamfer_edges` with the flag
-  off, as it does `part` and `sketch` (only the query names are gated,
-  `crates/lsp/src/world.rs`).
+- **`neoscad lsp --stdio` has no render**: the language server's own
+  runs only evaluate, so geometry diagnostics (a count, a size that
+  does not fit, the nested rewrite) with their quick fixes, the last
+  run's hover on a call and "Pin count" appear only when a host supplies
+  a log that rendered (`Server::supply_log`, as the apps and the web
+  page do). An editor with only `neoscad lsp` sees the selector's own
+  errors and completion. Rendering a document that has fillet calls
+  after the evaluation (bounded by the limits, cancelled by the next
+  change) would close it.
+- **Nested rewrites of narrowed selectors**: under the default `"all"`
+  the mixed-vertex rewrite leaves the other sense out with `except`
+  (section 15.5), but a written selector `S` is still narrowed to
+  `"(S) and convex"`, and if `S` names the edges the inner call creates
+  and v1 cannot round (the ellipses where mitred concave blends meet)
+  the outer call fails on them. Excluding those curve kinds from the
+  outer call, or making unsupported edges a warning whenever the
+  selector did not name them by kind, would cover it.
+- **Names in selectors are not completed**: inside `part(` and after `@`
+  completion offers nothing; the part and anchor names the children
+  declare (from the last run, or `child_anchors()`'s walk) would do.
+  `part(name)` is offered even without `--enable part`, since the apps
+  turn parts on per window rather than through the language server.
+- **/try's toggle is not in share links**: a shared link of a filleted
+  model opens with the extension as the recipient's page has it (off by
+  default), so the calls are unknown modules. The page has no sketch or
+  query toggles either.
+- **CHANGELOG**: fillets (F0 to F4) are not in `CHANGELOG.md` yet; the
+  entry goes with the release that ships them.
 
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.

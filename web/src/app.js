@@ -21,11 +21,13 @@ import { EngineError, EngineRestarted } from "./engine/client.js";
 import {
   EXPORT_FORMATS,
   ErrorKind,
+  LANGUAGE_EXTENSIONS,
   Requests,
   applyEdits,
   betweenResult,
   checkReport,
   docPath,
+  enabledExtensions,
   fileURI,
   fileViewChanged,
   measureResult,
@@ -72,6 +74,10 @@ const SETTINGS = {
   // exact surfaces in the Export menu. Off by default, as on the command
   // line, where `.step` is OpenSCAD's unknown suffix without it.
   exact: false,
+  // NeoSCAD's `fillet` extension (View > Edge fillets and chamfers):
+  // `fillet_edges()` and `chamfer_edges()` in every run. Off by default,
+  // as on the command line, where they are unknown modules without it.
+  fillet: false,
 };
 
 /// A STEP export's report as console lines: the share of exact faces,
@@ -757,7 +763,7 @@ class App {
   }
 
   runOptions() {
-    return runOptions(this.doc.customizer.values, this.doc.parts);
+    return runOptions(this.doc.customizer.values, this.doc.parts, enabledExtensions(this.settings));
   }
 
   async run(mode) {
@@ -787,6 +793,9 @@ class App {
           mode,
           values: d.customizer.values,
           parts: d.parts,
+          // The language extensions on (View menu); the worker's language
+          // server takes them from the run, so completion matches.
+          enable: enabledExtensions(this.settings),
           // The view the model is shown in, for `$vpt` and friends, and the
           // scheme its face colours are baked in (the viewer cannot
           // recolour a packed scene).
@@ -859,8 +868,9 @@ class App {
     this.console.setSummary(`Exporting ${f.label}…`, "running");
     if (!(await this.libraries())) return;
     // A format's extension is sent with its export only: the runs that
-    // draw the model do not need it, and keep their cache entries.
-    const enable = f.extension ? [f.extension] : [];
+    // draw the model do not need it, and keep their cache entries. The
+    // language extensions on go with every run, this one too.
+    const enable = [...enabledExtensions(this.settings), ...(f.extension ? [f.extension] : [])];
     try {
       const r = await this.engine.request(
         Requests.export(d.path, format, runOptions(d.customizer.values, d.parts, enable)),
@@ -1053,7 +1063,21 @@ class App {
         checked: !hidden && this.settings.inspector === id,
         run: () => this.toggleInspector(id),
       })),
+      "-",
+      { heading: "NeoSCAD extensions" },
+      ...Object.entries(LANGUAGE_EXTENSIONS).map(([name, x]) => ({
+        label: x.label,
+        checked: this.settings[name] === true,
+        run: () => this.toggleExtension(name),
+      })),
     ];
+  }
+
+  /// Turn a language extension on or off and run the document again
+  /// with it, in the mode last run, as the apps do when theirs change.
+  toggleExtension(name) {
+    this.saveSettings({ [name]: !(this.settings[name] === true) });
+    if (this.doc && this.lastMode) this.run(this.lastMode);
   }
 
   setView(change) {

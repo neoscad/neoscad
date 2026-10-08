@@ -87,7 +87,7 @@ const KEYWORD_SNIPPETS: &[(&str, &str)] = &[
 ];
 
 /// Whether `name` has the letters of `typed` in order, ignoring case.
-fn matches(name: &str, typed: &str) -> bool {
+pub(crate) fn matches(name: &str, typed: &str) -> bool {
     let mut it = name.chars().flat_map(char::to_lowercase);
     typed
         .chars()
@@ -103,6 +103,11 @@ pub fn completion(ctx: &Ctx<'_>, params: &Value) -> Value {
     else {
         return Value::Null;
     };
+    // The one string with a language of its own: a fillet call's edge
+    // selector.
+    if let Some(s) = crate::fillet::selector_string(ctx, offset) {
+        return crate::fillet::completion(ctx, s, offset);
+    }
     if context::in_comment_or_string(f, offset) || context::directive_at(f, offset).is_some() {
         return json!({"isIncomplete": false, "items": []});
     }

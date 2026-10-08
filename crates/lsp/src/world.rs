@@ -234,6 +234,10 @@ pub struct World {
     /// that completion offers `anchor` and, inside module bodies, the
     /// `child_*` functions.
     pub query: bool,
+    /// Whether NeoSCAD's fillets are on (`--enable fillet`), so that
+    /// completion offers `fillet_edges` and `chamfer_edges`, and their
+    /// `edges` strings complete as selectors.
+    pub fillet: bool,
 }
 
 /// Where the world's files come from: an open document's text first,
@@ -330,6 +334,7 @@ impl World {
             libs,
             sketch: false,
             query: false,
+            fillet: false,
         }
     }
 
@@ -576,6 +581,11 @@ impl World {
             if e.extension.as_deref() == Some("query")
                 && (!self.query || (e.name.starts_with("child_") && !in_module))
             {
+                continue;
+            }
+            // Without `--enable fillet` they are unknown modules: offering
+            // them would write a call that only warns.
+            if e.extension.as_deref() == Some("fillet") && !self.fillet {
                 continue;
             }
             let ns = match e.kind {

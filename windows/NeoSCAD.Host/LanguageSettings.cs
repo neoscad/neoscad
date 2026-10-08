@@ -1,9 +1,10 @@
 // Design > NeoSCAD Extensions: which of NeoSCAD's language extensions the
 // window runs its document with (docs/language-extensions.md, section 2),
 // the Windows port of apple/App/Editor/LanguageSettings.swift. Constrained
-// sketches (`--enable sketch`), geometry queries (`--enable query`) and
+// sketches (`--enable sketch`), geometry queries (`--enable query`),
 // STEP export with exact surfaces (`--enable exact`, which adds STEP to
-// File > Export As), all off by default as on the command line: off, a
+// File > Export As) and edge fillets and chamfers (`--enable fillet`),
+// all off by default as on the command line: off, a
 // file means exactly what it means in OpenSCAD. Kept in %LOCALAPPDATA%\NeoSCAD\language.json
 // beside agents.json, so every window opened later starts with them.
 //
@@ -30,6 +31,9 @@ public sealed record LanguageSettings
     /// <summary>STEP export with exact surfaces (File > Export As > STEP).</summary>
     [JsonPropertyName("exact")] public bool Exact { get; init; }
 
+    /// <summary>Edge fillets and chamfers: <c>fillet_edges()</c> and <c>chamfer_edges()</c>.</summary>
+    [JsonPropertyName("fillet")] public bool Fillet { get; init; }
+
     /// <summary>The <c>--enable</c> names runs and the language server take.</summary>
     public string[] Names()
     {
@@ -37,6 +41,7 @@ public sealed record LanguageSettings
         if (Sketch) names.Add("sketch");
         if (Query) names.Add("query");
         if (Exact) names.Add("exact");
+        if (Fillet) names.Add("fillet");
         return names.ToArray();
     }
 

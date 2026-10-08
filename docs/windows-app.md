@@ -627,8 +627,9 @@ in `rust:1.98.1` (`--no-default-features` turns off `ffi`'s new
   as PNG, `Viewport::image`), Exit; a save prompt before discarding edits.
 - Design: Preview (F5), Render (F6), also from the editor's own keys;
   Design > NeoSCAD Extensions: "Constrained Sketches (sketch)",
-  "Geometry Queries (query)" and "Exact STEP Export (exact)", NeoSCAD's
-  extensions (the last adds STEP to File > Export As) (`docs/language-extensions.md`), off by default. A toggle runs
+  "Geometry Queries (query)", "Exact STEP Export (exact)" and "Edge
+  Fillets and Chamfers (fillet)", NeoSCAD's extensions (the third adds
+  STEP to File > Export As; the fourth is `docs/fillet-edges.md`) (`docs/language-extensions.md`), off by default. A toggle runs
   the window's document again with them (runs, check, measure, export
   and the language server) and is kept in
   `%LOCALAPPDATA%\NeoSCAD\language.json`, which windows opened later

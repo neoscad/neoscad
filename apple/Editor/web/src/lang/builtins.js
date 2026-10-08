@@ -18,7 +18,11 @@
 // (`child_bounds` and the like) and the modules (`anchor`), since a
 // program rarely defines those names; like the sketch vocabulary they are
 // coloured whether the extension is on or not, as the decorations do not
-// know the setting.
+// know the setting. The fillets (`--enable fillet`, docs/fillet-edges.md),
+// `fillet_edges` and `chamfer_edges`, are operations on their children,
+// coloured as transformations like `offset` and `hull`, on the same terms;
+// their selector strings stay strings (the language server completes and
+// explains them).
 
 import { syntaxTree } from "@codemirror/language";
 import { RangeSetBuilder } from "@codemirror/state";
@@ -30,7 +34,8 @@ const lists = {
   keyword: "import projection render return",
   transformation:
     "translate rotate scale linear_extrude rotate_extrude resize mirror " +
-    "multmatrix color offset hull minkowski children anchor",
+    "multmatrix color offset hull minkowski children anchor " +
+    "fillet_edges chamfer_edges",
   boolean: "union difference intersection intersection_for",
   function:
     "abs sign rands min max sin cos asin acos tan atan atan2 round ceil " +

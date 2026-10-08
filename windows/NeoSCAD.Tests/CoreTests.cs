@@ -195,8 +195,8 @@ public class DocumentSessionTests
         {
             var path = LanguageSettings.PathIn(dir);
             Assert.Empty(LanguageSettings.Load(path).Names());
-            new LanguageSettings { Sketch = true, Query = true, Exact = true }.Save(path);
-            Assert.Equal(["sketch", "query", "exact"], LanguageSettings.Load(path).Names());
+            new LanguageSettings { Sketch = true, Query = true, Exact = true, Fillet = true }.Save(path);
+            Assert.Equal(["sketch", "query", "exact", "fillet"], LanguageSettings.Load(path).Names());
             File.WriteAllText(path, "{\"sketch\": tru");
             Assert.Empty(LanguageSettings.Load(path).Names());
         }

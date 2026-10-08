@@ -20,7 +20,12 @@ a module can read its children's bounding box, volume and area
 (`docs/geometry-queries.md`). A fourth switch, `--enable exact`, exports
 STEP whose faces are the model's true planes, cylinders, cones, spheres
 and tori, for CAD programs such as FreeCAD, from the command line, the
-apps, the MCP server and the browser (`docs/step-export.md`).
+apps, the MCP server and the browser (`docs/step-export.md`). A fifth,
+`--enable fillet`, rounds or bevels chosen edges of any solid, boolean
+results included, with CadQuery-style selectors
+(`fillet_edges(r = 2, edges = "|z") cube(...)`), as FreeCAD's and
+CadQuery's fillets do, and exports them as exact cylinders, tori and
+cones with `--enable exact` (`docs/fillet-edges.md`).
 
 - Website: <https://neoscad.org>
 - Try it in the browser: <https://neoscad.org/try>

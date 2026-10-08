@@ -1,13 +1,15 @@
 # Design: 3D fillets and chamfers (`--enable fillet`)
 
-Status: stages F0 to F3 built (the flag, both builtins, the selector
+Status: stages F0 to F4 built (the flag, both builtins, the selector
 parser and the node; the plan: the child's B-rep, per-edge facts,
 selection, and the reports in `check`, `measure` and `snapshot`; the
 blends of straight edges, then of circles and arcs about an axis and
 the tangent chains of both, in the mesh and in STEP, with the checks
-before and after the boolean; sections 15.1 to 15.4 record how, and
-where they depart from this text). The stop rule's corpus passes
-(99.7% of supported cases exact, section 15.4); F4 and F5 not started.
+before and after the boolean; then the surfaces: the language server,
+the MCP recipe, the apps' and /try's toggles, editor colouring and the
+user reference `docs/fillet-edges.md`; sections 15.1 to 15.5 record
+how, and where they depart from this text). The stop rule's corpus
+passes (99.7% of supported cases exact, section 15.4); F5 not started.
 Written
 2026-10-08 against `127be03` and the reference checkouts in
 `.reference/openscad` and `.reference/BOSL2`.
@@ -1342,6 +1344,97 @@ F0–F4: 9–13.5 person-weeks.
   rim's radius); arcs ending on other faces; a concave tool's overlap
   capped against walls other than coaxial cylinders; the near-limit
   and sliver failures above; everything F2 left (`docs/followups.md`,
+  "Fillets and chamfers").
+
+### 15.5 Stage F4 as built
+
+- **Language server** (`crates/lsp/src/fillet.rs`). A string is a
+  selector when it is the `edges` or `except` argument (named, or second
+  and third; alone or in a list) of a `fillet_edges`/`chamfer_edges`
+  call that resolves to the builtin, with `fillet` among the server's
+  extensions (`World::fillet`, as `query` gates its names). Inside one,
+  completion reads the text rather than parsing it (a string being typed
+  is mostly not a selector yet): the atoms of 5.2 where an operand goes
+  (start, `(`, after an operator), with snippets for `>>z[i]`,
+  `child(i, j)`, `part(name)` and `box(...)`; `and`, `or`, `exc` after
+  an operand; nothing inside `child(`, `part(` or `box(`; and when nothing
+  matches what was typed, the "did you mean" word (the diagnostics'
+  distance), its `filterText` the typed text so the editor's own filter
+  keeps it. `@name` is offered only with `query`; `part(name)` always,
+  its detail saying it needs `--enable part`, because the apps turn
+  parts on per window, not through the server's extensions. A unit test
+  parses every offered atom and operator with the evaluator's parser,
+  so completion cannot write a selector the call rejects. `"` is a
+  completion trigger character. Hover inside the string explains the
+  atom or operator under the cursor; hover on a named argument of *any*
+  builtin call shows that parameter's line of the reference (before
+  the word is taken for a builtin of the same name: `scale` in
+  `linear_extrude(scale = 2)` was the `scale()` module); hover on the
+  call's name adds the last rendered run's line and its first eight
+  edges (`session::fillets::line_text`, `edge_text`), the innermost
+  report whose span holds the name, as hover on `sketch` adds its state.
+  Builtin completion offers `fillet_edges` and `chamfer_edges` only with
+  the extension (the F3 followup).
+- **Diagnostics on the text to change** (`session::fillets::diag_span`):
+  `fillet-count`, `fillet-no-edges`, `fillet-skipped` and
+  `fillet-unsupported-edge` now carry the span of the `edges` argument,
+  `fillet-too-large` and `fillet-overlap` that of `r`/`d`, the rest the
+  call's; the console's line stays the call's. An editor's marker on a
+  call around a `difference()` underlined most of the model.
+- **Fixes as code actions.** Every hint with a `replace` edit was
+  already a quick fix (`lsp::diagnose::fixes`); F4 adds the tests that
+  a host's rendered run brings the size fix, the nested rewrite and the
+  count's edit through to `textDocument/codeAction`, and "Pin count"
+  is unchanged.
+- **Correction: the nested rewrite under the default `"all"`.** Applied
+  to the case that offers it (a block on a plate, section 7.4), the F2
+  rewrite `edges = "(all) and convex"` outside `edges = "(all) and
+  concave"` did not build: the inner call's mitred concave blends meet
+  in four short ellipses at the block's corners, and the outer call,
+  its edges now named, refused them as `fillet-unsupported-edge` errors
+  where the original call, under the default, would only have warned
+  (`crates/geom/tests/fillet_build.rs` and the session test had checked
+  only the inner call). Under `"all"` (absent or written) with no
+  `except`, the rewrite now keeps the default and leaves the other sense
+  out: `except = "concave"` outside `except = "convex"`; both build, the
+  ellipses sharp with the default's warning. A narrower selector is
+  narrowed as before. The hint's text says which form it writes.
+- **MCP.** `recipe_fillet.scad` (12.1's L-bracket, with the common
+  selectors in its comment), for servers started with `--enable fillet`,
+  on `SKETCH_RECIPE`'s terms: never in the instructions (unchanged, as a
+  test checks); `docs` for `fillet_edges` or `chamfer_edges` ends with
+  it; the index has one line; `neoscad://recipes` appends it; and `docs`
+  for `fillet` or `chamfer` (the hand-written printing recipe, or the
+  sketch vocabulary's entry) adds a line pointing at the builtins. The
+  hand-written `fillet` recipe stays in the instructions, which are the
+  same for every server. `docs/mcp.md` documents the recipe and the
+  `fillet` arguments of `measure` and `snapshot`.
+- **Apps and /try.** "Edge fillets and chamfers (fillet)" beside the
+  other extensions: macOS Settings > Language (`LanguageSettings.fillets`,
+  default key `EnableFillets`), Linux Preferences > Language
+  (`language.json`'s `fillet`), Windows Design > NeoSCAD Extensions
+  (`language.json`'s `fillet`). The web page has no language settings of
+  its own (its only extension toggle, `exact`, is in the Export menu and
+  goes with STEP exports alone), so the toggle is a View menu item under
+  "NeoSCAD extensions", kept in the page's settings and sent as `enable`
+  with every run, check, measure and export; the worker's language
+  server takes a run's extensions (`crates/web/src/lib.rs`, `run`), so
+  completion follows the toggle.
+- **Editor colouring.** `fillet_edges` and `chamfer_edges` are
+  coloured as transformations (`apple/Editor/web/src/lang/builtins.js`),
+  whether the extension is on or not, as the query names are. Selector
+  strings stay strings: no other string is coloured by meaning.
+- **User reference** `docs/fillet-edges.md`, linked from the README,
+  `docs/language-extensions.md`, `docs/step-export.md`, `docs/lsp.md`,
+  `docs/mcp.md` and both builtins' notes. Its examples run through
+  `check` in `crates/session/tests/fillet.rs` (`docs_examples_check`),
+  each with exactly the diagnostic codes its fence names, and the plain
+  ones built.
+- **Not in F4**: geometry diagnostics, last-run hover and "Pin count"
+  in `neoscad lsp --stdio`, which only evaluates; completion of part and
+  anchor names inside `part(` and after `@`; share links of /try do not
+  carry the toggle, so a shared filleted model opens with the extension
+  off; the CHANGELOG entry, written at release (`docs/followups.md`,
   "Fillets and chamfers").
 
 ## 16. Test plan

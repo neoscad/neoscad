@@ -2,8 +2,9 @@
 //! window runs its document with (docs/language-extensions.md, section
 //! 2), the Linux port of the macOS app's `LanguageSettings.swift`.
 //! Constrained sketches (`--enable sketch`), geometry queries (`--enable
-//! query`) and STEP export with exact surfaces (`--enable exact`, which
-//! adds STEP to File > Export), all off by default as on the command line:
+//! query`), STEP export with exact surfaces (`--enable exact`, which
+//! adds STEP to File > Export) and edge fillets and chamfers (`--enable
+//! fillet`), all off by default as on the command line:
 //! off, a file means exactly what it means in OpenSCAD. `part()` keeps its
 //! per-window toggle in the check and measure panels.
 //!
@@ -28,6 +29,8 @@ pub struct Settings {
     pub query: bool,
     /// STEP export with exact surfaces (File > Export > STEP).
     pub exact: bool,
+    /// Edge fillets and chamfers: `fillet_edges()` and `chamfer_edges()`.
+    pub fillet: bool,
 }
 
 impl Settings {
@@ -39,12 +42,13 @@ impl Settings {
             sketch: v["sketch"].as_bool().unwrap_or(false),
             query: v["query"].as_bool().unwrap_or(false),
             exact: v["exact"].as_bool().unwrap_or(false),
+            fillet: v["fillet"].as_bool().unwrap_or(false),
         }
     }
 
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(
-            &json!({"sketch": self.sketch, "query": self.query, "exact": self.exact}),
+            &json!({"sketch": self.sketch, "query": self.query, "exact": self.exact, "fillet": self.fillet}),
         )
         .unwrap_or_default()
     }
@@ -80,6 +84,9 @@ impl Settings {
         if self.exact {
             out.push("exact".to_string());
         }
+        if self.fillet {
+            out.push("fillet".to_string());
+        }
         out
     }
 }
@@ -100,6 +107,7 @@ mod tests {
             sketch: true,
             query: false,
             exact: false,
+            fillet: false,
         };
         assert_eq!(Settings::from_json(s.to_json().as_bytes()), s);
         assert_eq!(s.names(), ["sketch"]);
@@ -107,9 +115,10 @@ mod tests {
             sketch: true,
             query: true,
             exact: true,
+            fillet: true,
         };
         assert_eq!(Settings::from_json(all.to_json().as_bytes()), all);
-        assert_eq!(all.names(), ["sketch", "query", "exact"]);
+        assert_eq!(all.names(), ["sketch", "query", "exact", "fillet"]);
         // Damage turns nothing on.
         assert_eq!(Settings::from_json(b"{\"sketch\": 1"), Settings::default());
         assert_eq!(Settings::from_json(b"[]").names(), Vec::<String>::new());
@@ -124,6 +133,7 @@ mod tests {
             sketch: false,
             query: true,
             exact: true,
+            fillet: true,
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);

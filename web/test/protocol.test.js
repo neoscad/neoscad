@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   Requests,
   applyEdits,
+  enabledExtensions,
   checkReport,
   consoleLines,
   control,
@@ -135,6 +136,12 @@ test("requests carry the protocol's fields", () => {
     camera: { vpt: [0, 0, 0], vpr: [55, 0, 25], vpd: 140, vpf: 22.5 },
     colorScheme: "Metallic",
   });
+  // The page's language extensions: on in the settings, sent with every
+  // run; `exact` goes with its export alone.
+  assert.deepEqual(enabledExtensions({ fillet: true, exact: true }), ["fillet"]);
+  assert.deepEqual(enabledExtensions({ fillet: false }), []);
+  assert.deepEqual(enabledExtensions(undefined), []);
+  assert.deepEqual(Requests.run({ path: "/doc/a.scad", mode: "preview", enable: enabledExtensions({ fillet: true }) }).enable, ["fillet"]);
   assert.deepEqual(Requests.section(4, "z", 2), { type: "section", measurement: 4, axis: "z", offset: 2 });
   assert.deepEqual(Requests.section(4, "z", 2, "lid").part, "lid");
   const tar = new ArrayBuffer(8);
