@@ -2286,6 +2286,13 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   for Linux too (`expectVersion`).
 
 ## Exact geometry (STEP)
+- `meshbrep` 0.1.0 is published from github.com/neoscad/meshbrep (a
+  signed copy of `crates/meshbrep` at 9f3f3fd). While the fillet tool
+  generator is built (docs/fillets.md), `crates/meshbrep` here stays the
+  working copy and NeoSCAD keeps its path dependency; each milestone is
+  copied to that repository (src/ and tests/ byte-identical), released
+  there, and published. Once fillets settle, switch NeoSCAD to the
+  crates.io release as with sketch-solver.
 Stage 1a of `docs/audits/exact-geometry-rust.md` is `crates/meshbrep`;
 stage 1b is `geom::exact` and `-o x.step` behind `--enable exact`; stage
 2 (extrusions, tori, `offset(r)`, sketch arcs) is `geom::exact::profile`
