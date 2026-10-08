@@ -206,6 +206,47 @@ public class DocumentSessionTests
         }
     }
 
+    /// <summary>
+    /// Another window (another process) saving language.json reaches this
+    /// one through the watch; this window's own save, a damaged file and
+    /// an unchanged one do not.
+    /// </summary>
+    [Fact]
+    public void LanguageSettingsSavedElsewhereReachTheWatchingWindow()
+    {
+        var dir = Directory.CreateTempSubdirectory("neoscad-lang-").FullName;
+        var ui = new QueueDispatcher();
+        var seen = new List<LanguageSettings>();
+        var path = LanguageSettings.PathIn(dir);
+        var wait = TimeSpan.FromSeconds(10);
+        var quiet = TimeSpan.FromMilliseconds(600);
+        var watch = new LanguageSettingsWatch(path, new LanguageSettings(), ui, seen.Add);
+        try
+        {
+            // Another window turns queries on.
+            new LanguageSettings { Query = true }.Save(path);
+            Assert.True(ui.PumpUntil(() => seen.Count == 1, wait));
+            Assert.Equal(["query"], seen[0].Names());
+            // This window turns sketches on: its own change is not news.
+            var mine = new LanguageSettings { Sketch = true, Query = true };
+            watch.Saved(mine);
+            mine.Save(path);
+            Assert.False(ui.PumpUntil(() => seen.Count > 1, quiet));
+            // A half-written or damaged file changes nothing.
+            File.WriteAllText(path, "{\"sketch\": tru");
+            Assert.False(ui.PumpUntil(() => seen.Count > 1, quiet));
+            // Another window turns everything off.
+            new LanguageSettings().Save(path);
+            Assert.True(ui.PumpUntil(() => seen.Count == 2, wait));
+            Assert.Empty(seen[1].Names());
+        }
+        finally
+        {
+            watch.Dispose();
+            Directory.Delete(dir, true);
+        }
+    }
+
     [Fact]
     public void EditsMarkTheDocumentDirtyAndUndoingCleansIt()
     {

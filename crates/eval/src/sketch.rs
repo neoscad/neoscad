@@ -2778,26 +2778,17 @@ fn cut_corner(b: &Builder, sol: &Solution, g: &mut Graph, k: &Corner) -> Result<
         .iter()
         .filter(|(ci, _)| g.curves[*ci].arc.is_some())
         .count();
-    if inc.len() != 2 || arcs == 2 {
-        let text = if inc.len() == 2 {
-            format!(
-                "{}: the corner {} joins two arcs; fillets and chamfers between two arcs are not supported yet",
-                stmt.text,
-                b.describe(k.point)
-            )
-        } else {
-            format!(
-                "{}: the corner {} must join exactly two profile curves, lines or a line and an arc, and it joins {}",
-                stmt.text,
-                b.describe(k.point),
-                inc.len()
-            )
-        };
+    if inc.len() != 2 {
         return Err(Note {
             severity: Severity::Error,
             code: DiagCode::InvalidArgument,
             loc: stmt.loc,
-            text,
+            text: format!(
+                "{}: the corner {} must join exactly two profile curves, lines or arcs, and it joins {}",
+                stmt.text,
+                b.describe(k.point),
+                inc.len()
+            ),
             hints: Vec::new(),
         });
     }
@@ -2806,12 +2797,15 @@ fn cut_corner(b: &Builder, sol: &Solution, g: &mut Graph, k: &Corner) -> Result<
     };
     if arcs == 1 {
         // The line first, then the arc.
-        let (line, arc) = if g.curves[inc[0].0].arc.is_none() {
-            (inc[0], inc[1])
+        let sides = if g.curves[inc[0].0].arc.is_none() {
+            [inc[0], inc[1]]
         } else {
-            (inc[1], inc[0])
+            [inc[1], inc[0]]
         };
-        return cut_line_arc(b, g, k, v, line, arc, far(line, g), far(arc, g));
+        return cut_with_arc(b, g, k, v, sides, true);
+    }
+    if arcs == 2 {
+        return cut_with_arc(b, g, k, v, [inc[0], inc[1]], false);
     }
     let p = g.verts[v];
     let da = sub(g.verts[far(inc[0], g)], p);
@@ -2890,34 +2884,28 @@ fn cut_corner(b: &Builder, sol: &Solution, g: &mut Graph, k: &Corner) -> Result<
     Ok(())
 }
 
-/// Where a fillet or chamfer of a line–arc corner cuts: the point on the
-/// line, the point on the arc, and for a fillet its centre.
-struct LineArcCut {
-    on_line: [f64; 2],
-    on_arc: [f64; 2],
+/// Where a fillet or chamfer of a corner with an arc cuts: the point on
+/// each of the corner's two curves (in the order the corner lists them),
+/// and for a fillet its centre.
+struct Cut {
+    on: [[f64; 2]; 2],
     center: Option<[f64; 2]>,
 }
 
-/// Why a line–arc corner cannot be cut at the size asked: the cut needs
-/// more of the line or of the arc than there is (lengths along each), a
-/// fillet inside the arc's circle is not smaller than it, no circle of
-/// that size touches both, or there is no corner at all (the line is
-/// tangent to the arc there).
+/// Why a corner with an arc cannot be cut at the size asked: the cut needs
+/// more of one of its curves than there is (`which` is the curve's place
+/// in the corner, lengths along it), a fillet inside an arc's circle is
+/// not smaller than it, no circle of that size touches both curves, or
+/// there is no corner at all (the curves are tangent there).
 enum NoCut {
-    Line { need: f64, have: f64 },
-    Arc { need: f64, have: f64 },
-    Radius { have: f64 },
+    Along { which: usize, need: f64, have: f64 },
+    Radius { which: usize, have: f64 },
     Fit,
     Smooth,
 }
 
-/// The geometry of a line–arc corner, all from the solved points.
-struct LineArc {
-    /// The corner.
-    p: [f64; 2],
-    /// Unit direction of the line away from the corner, and its length.
-    u: [f64; 2],
-    len: f64,
+/// One arc of a corner, from the solved points.
+struct ArcSide {
     /// The arc's centre and radius (the corner's distance from it).
     c: [f64; 2],
     r: f64,
@@ -2929,11 +2917,39 @@ struct LineArc {
     sweep: f64,
 }
 
-impl LineArc {
-    /// How far round the arc from the corner `x` is, in degrees, in the
-    /// arc's direction from the corner: (0, 360].
-    fn angle_to(&self, x: [f64; 2]) -> f64 {
-        let (a, b) = (sub(self.p, self.c), sub(x, self.c));
+impl ArcSide {
+    /// The arc of curve `arc` (its index and whether the corner `p` is its
+    /// `b` end), whose other end is `z`.
+    fn new(g: &Graph, p: [f64; 2], arc: (usize, bool), z: [f64; 2]) -> Self {
+        let (c, arc_ccw) = g.curves[arc.0].arc.expect("an arc");
+        let rad = sub(p, c);
+        let r = norm(rad);
+        // The arc runs counter-clockwise from its `a` end to its `b` end
+        // when `arc_ccw`; leaving the corner, it turns the other way when
+        // the corner is its `b` end.
+        let ccw = arc_ccw != arc.1;
+        let w = if ccw {
+            [-rad[1] / r, rad[0] / r]
+        } else {
+            [rad[1] / r, -rad[0] / r]
+        };
+        let mut side = ArcSide {
+            c,
+            r,
+            w,
+            ccw,
+            sweep: 360.0,
+        };
+        if z != p {
+            side.sweep = side.angle_to(p, z);
+        }
+        side
+    }
+
+    /// How far round the arc from the corner `p` the point `x` is, in
+    /// degrees, in the arc's direction from the corner: (0, 360].
+    fn angle_to(&self, p: [f64; 2], x: [f64; 2]) -> f64 {
+        let (a, b) = (sub(p, self.c), sub(x, self.c));
         let cross = a[0] * b[1] - a[1] * b[0];
         let dot = a[0] * b[0] + a[1] * b[1];
         let mut t = atan2_degrees(cross, dot);
@@ -2951,9 +2967,73 @@ impl LineArc {
         self.r * deg * std::f64::consts::PI / 180.0
     }
 
+    /// The fillet's centre is `size` from this arc on the corner's
+    /// inside: `r - size` from its centre when the other curve's leaving
+    /// direction `other` runs into this arc's circle (the corner's inside
+    /// is then inside the circle), else `r + size`.
+    fn offset(&self, p: [f64; 2], other: [f64; 2], size: f64) -> f64 {
+        let into = other[0] * (self.c[0] - p[0]) + other[1] * (self.c[1] - p[1]) > 0.0;
+        if into { self.r - size } else { self.r + size }
+    }
+
+    /// Where the fillet centred at `f` touches the arc: on its circle,
+    /// towards `f`.
+    fn foot(&self, f: [f64; 2]) -> [f64; 2] {
+        let fc = sub(f, self.c);
+        let l = norm(fc);
+        [
+            self.c[0] + self.r * fc[0] / l,
+            self.c[1] + self.r * fc[1] / l,
+        ]
+    }
+
+    /// Where the circle of radius `size` about the corner `p` crosses the
+    /// arc: along the radius towards the centre by size^2 / 2r, then along
+    /// the leaving tangent by what is left of `size`. None when the circle
+    /// is too large to cross it (`size` at least the diameter).
+    fn chamfer(&self, p: [f64; 2], size: f64) -> Option<[f64; 2]> {
+        if size >= 2.0 * self.r {
+            return None;
+        }
+        let e = [(self.c[0] - p[0]) / self.r, (self.c[1] - p[1]) / self.r];
+        let along = size * size / (2.0 * self.r);
+        let side = (size * size - along * along).max(0.0).sqrt();
+        Some([
+            p[0] + along * e[0] + side * self.w[0],
+            p[1] + along * e[1] + side * self.w[1],
+        ])
+    }
+
+    /// Whether the cut at `x` leaves some of the arc, else how much of it
+    /// the cut needs (curve `which` of the corner).
+    fn check(&self, p: [f64; 2], x: [f64; 2], which: usize) -> Result<(), NoCut> {
+        let t = self.angle_to(p, x);
+        if t >= self.sweep {
+            return Err(NoCut::Along {
+                which,
+                need: self.arc_len(t.min(360.0)),
+                have: self.arc_len(self.sweep),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The geometry of a line–arc corner, all from the solved points.
+struct LineArc {
+    /// The corner.
+    p: [f64; 2],
+    /// Unit direction of the line away from the corner, and its length.
+    u: [f64; 2],
+    len: f64,
+    arc: ArcSide,
+}
+
+impl LineArc {
     /// The cut for a fillet of radius `size` (`round`) or a chamfer of
-    /// `size` along each curve from the corner. Only square roots: no
-    /// trigonometry decides where it lands (section 4.5).
+    /// `size` along each curve from the corner, the line's cut first.
+    /// Only square roots: no trigonometry decides where it lands (section
+    /// 4.5).
     ///
     /// A fillet's centre is `size` from the line, on the corner's side,
     /// and `r + size` from the arc's centre, or `r - size` when the line
@@ -2962,8 +3042,9 @@ impl LineArc {
     /// `s^2 + 2s(D.u) + |D|^2 - rho^2 = 0`, and the root nearest the
     /// corner is the fillet next to it. A chamfer cuts the arc where the
     /// circle of radius `size` about the corner crosses it.
-    fn cut(&self, size: f64, round: bool) -> Result<LineArcCut, NoCut> {
-        let (p, u, c, w, r) = (self.p, self.u, self.c, self.w, self.r);
+    fn cut(&self, size: f64, round: bool) -> Result<Cut, NoCut> {
+        let (p, u) = (self.p, self.u);
+        let (c, w, r) = (self.arc.c, self.arc.w, self.arc.r);
         let cross = u[0] * w[1] - u[1] * w[0];
         let dot = u[0] * w[0] + u[1] * w[1];
         if !cross.is_finite() || cross.abs() < 1e-12 {
@@ -2974,10 +3055,9 @@ impl LineArc {
             // The line's normal towards the arc's tangent: the corner's
             // inside.
             let n = [(w[0] - dot * u[0]) / s_abs, (w[1] - dot * u[1]) / s_abs];
-            let inside = u[0] * (c[0] - p[0]) + u[1] * (c[1] - p[1]) > 0.0;
-            let rho = if inside { r - size } else { r + size };
+            let rho = self.arc.offset(p, u, size);
             if rho <= 0.0 {
-                return Err(NoCut::Radius { have: r });
+                return Err(NoCut::Radius { which: 1, have: r });
             }
             let d = [p[0] + size * n[0] - c[0], p[1] + size * n[1] - c[1]];
             let bq = d[0] * u[0] + d[1] * u[1];
@@ -2994,173 +3074,234 @@ impl LineArc {
                 return Err(NoCut::Fit);
             }
             let f = [p[0] + s * u[0] + size * n[0], p[1] + s * u[1] + size * n[1]];
-            let fc = sub(f, c);
-            let l = norm(fc);
-            let on_arc = [c[0] + r * fc[0] / l, c[1] + r * fc[1] / l];
-            ([p[0] + s * u[0], p[1] + s * u[1]], on_arc, Some(f))
+            (
+                [p[0] + s * u[0], p[1] + s * u[1]],
+                self.arc.foot(f),
+                Some(f),
+            )
         } else {
-            if size >= 2.0 * r {
-                return Err(NoCut::Arc {
+            let Some(on_arc) = self.arc.chamfer(p, size) else {
+                return Err(NoCut::Along {
+                    which: 1,
                     need: size,
                     have: 2.0 * r,
                 });
-            }
-            // Along the radius towards the centre by size^2 / 2r, then
-            // along the leaving tangent by what is left of `size`.
-            let e = [(c[0] - p[0]) / r, (c[1] - p[1]) / r];
-            let along = size * size / (2.0 * r);
-            let side = (size * size - along * along).max(0.0).sqrt();
-            let on_arc = [
-                p[0] + along * e[0] + side * w[0],
-                p[1] + along * e[1] + side * w[1],
-            ];
+            };
             ([p[0] + size * u[0], p[1] + size * u[1]], on_arc, None)
         };
         let s = norm(sub(on_line, p));
         if s > self.len {
-            return Err(NoCut::Line {
+            return Err(NoCut::Along {
+                which: 0,
                 need: s,
                 have: self.len,
             });
         }
-        let t = self.angle_to(on_arc);
-        if t >= self.sweep {
-            return Err(NoCut::Arc {
-                need: self.arc_len(t.min(360.0)),
-                have: self.arc_len(self.sweep),
-            });
-        }
-        Ok(LineArcCut {
-            on_line,
-            on_arc,
+        self.arc.check(p, on_arc, 1)?;
+        Ok(Cut {
+            on: [on_line, on_arc],
             center,
         })
     }
 }
 
-/// [`cut_corner`] for a corner between a line and an arc (section 4.5):
-/// the line is trimmed, the arc shortened on its own circle, and a
+/// The geometry of a corner of two arcs, all from the solved points.
+struct ArcArc {
+    /// The corner.
+    p: [f64; 2],
+    arcs: [ArcSide; 2],
+}
+
+impl ArcArc {
+    /// The cut for a fillet of radius `size` (`round`) or a chamfer of
+    /// `size`, as [`LineArc::cut`] does it, with square roots only.
+    ///
+    /// A fillet's centre is `r1 ± size` from the first arc's centre and
+    /// `r2 ± size` from the second's (minus where the other arc runs into
+    /// that circle), so it is where those two circles cross: along the
+    /// line of centres by `(rho1^2 - rho2^2 + d^2) / 2d`, then across it
+    /// by what is left of `rho1`. Of the two crossings, the one nearer the
+    /// corner is the fillet next to it; the far one belongs to the
+    /// circles' other crossing. A chamfer cuts each arc where the circle
+    /// of radius `size` about the corner crosses it.
+    fn cut(&self, size: f64, round: bool) -> Result<Cut, NoCut> {
+        let p = self.p;
+        let [a, b] = &self.arcs;
+        let cross = a.w[0] * b.w[1] - a.w[1] * b.w[0];
+        if !cross.is_finite() || cross.abs() < 1e-12 {
+            return Err(NoCut::Smooth);
+        }
+        let (on, center) = if round {
+            let rho = [a.offset(p, b.w, size), b.offset(p, a.w, size)];
+            for (which, (rho, arc)) in rho.iter().zip(&self.arcs).enumerate() {
+                if *rho <= 0.0 {
+                    return Err(NoCut::Radius { which, have: arc.r });
+                }
+            }
+            let dv = sub(b.c, a.c);
+            let d = norm(dv);
+            // Concentric arcs (or a NaN from a degenerate one) have no
+            // crossing to find.
+            if d.is_nan() || d <= 0.0 {
+                return Err(NoCut::Fit);
+            }
+            let e = [dv[0] / d, dv[1] / d];
+            let along = (rho[0] * rho[0] - rho[1] * rho[1] + d * d) / (2.0 * d);
+            let h2 = rho[0] * rho[0] - along * along;
+            if h2 < 0.0 {
+                return Err(NoCut::Fit);
+            }
+            let h = h2.sqrt();
+            let mid = [a.c[0] + along * e[0], a.c[1] + along * e[1]];
+            let f = [
+                [mid[0] - h * e[1], mid[1] + h * e[0]],
+                [mid[0] + h * e[1], mid[1] - h * e[0]],
+            ]
+            .into_iter()
+            .min_by(|x, y| norm(sub(*x, p)).total_cmp(&norm(sub(*y, p))))
+            .expect("two crossings");
+            ([a.foot(f), b.foot(f)], Some(f))
+        } else {
+            let mut on = [p, p];
+            for (which, arc) in self.arcs.iter().enumerate() {
+                on[which] = arc.chamfer(p, size).ok_or(NoCut::Along {
+                    which,
+                    need: size,
+                    have: 2.0 * arc.r,
+                })?;
+            }
+            (on, None)
+        };
+        for (which, arc) in self.arcs.iter().enumerate() {
+            arc.check(p, on[which], which)?;
+        }
+        Ok(Cut { on, center })
+    }
+}
+
+/// A corner with an arc: a line and an arc, or two arcs.
+enum CornerGeo {
+    Line(LineArc),
+    Arcs(ArcArc),
+}
+
+/// [`cut_corner`] for a corner with an arc (section 4.5): a line–arc
+/// corner (`line` first) or two arcs. Each line is trimmed, each arc
+/// shortened on its own circle with its direction and centre kept, and a
 /// tangent arc (or a line) joins the cuts.
-#[allow(clippy::too_many_arguments)]
-fn cut_line_arc(
+fn cut_with_arc(
     b: &Builder,
     g: &mut Graph,
     k: &Corner,
     v: usize,
-    line: (usize, bool),
-    arc: (usize, bool),
-    line_far: usize,
-    arc_far: usize,
+    sides: [(usize, bool); 2],
+    line: bool,
 ) -> Result<(), Note> {
     let stmt = &b.stmts[k.stmt];
     let p = g.verts[v];
-    let q = sub(g.verts[line_far], p);
-    let len = norm(q);
-    let (c, arc_ccw) = g.curves[arc.0].arc.expect("an arc");
-    let r = norm(sub(p, c));
-    // The arc runs counter-clockwise from its `a` end to its `b` end when
-    // `arc_ccw`; leaving the corner, it turns the other way when the
-    // corner is its `b` end.
-    let ccw = arc_ccw != arc.1;
-    let rad = sub(p, c);
-    let w = if ccw {
-        [-rad[1] / r, rad[0] / r]
+    let far =
+        |(ci, at_b): (usize, bool)| g.verts[if at_b { g.curves[ci].a } else { g.curves[ci].b }];
+    let second = ArcSide::new(g, p, sides[1], far(sides[1]));
+    let cut = |size: f64, geo: &CornerGeo| match geo {
+        CornerGeo::Line(la) => la.cut(size, k.round),
+        CornerGeo::Arcs(aa) => aa.cut(size, k.round),
+    };
+    let geo = if line {
+        let q = sub(far(sides[0]), p);
+        let len = norm(q);
+        CornerGeo::Line(LineArc {
+            p,
+            u: [q[0] / len, q[1] / len],
+            len,
+            arc: second,
+        })
     } else {
-        [rad[1] / r, -rad[0] / r]
+        CornerGeo::Arcs(ArcArc {
+            p,
+            arcs: [ArcSide::new(g, p, sides[0], far(sides[0])), second],
+        })
     };
-    let mut geo = LineArc {
-        p,
-        u: [q[0] / len, q[1] / len],
-        len,
-        c,
-        r,
-        w,
-        ccw,
-        sweep: 360.0,
-    };
-    let z = g.verts[arc_far];
-    geo.sweep = if z == p { 360.0 } else { geo.angle_to(z) };
-    let fail = |why: NoCut| -> Note {
-        match why {
-            NoCut::Smooth => Note {
+    let names = sides.map(|(ci, _)| b.describe(g.curves[ci].src));
+    let found = cut(k.size, &geo).map_err(|why| {
+        if let NoCut::Smooth = why {
+            let what = if line {
+                "the line and the arc"
+            } else {
+                "the two arcs"
+            };
+            return Note {
                 severity: Severity::Error,
                 code: DiagCode::InvalidArgument,
                 loc: stmt.loc,
                 text: format!(
-                    "{}: the line and the arc at {} are tangent there, so there is no corner to cut",
+                    "{}: {what} at {} are tangent there, so there is no corner to cut",
                     stmt.text,
                     b.describe(k.point)
                 ),
                 hints: Vec::new(),
-            },
-            why => {
-                // The largest size that fits, by bisection: the cut grows
-                // with the size, but not in closed form.
-                let (mut lo, mut hi) = (0.0, k.size);
-                for _ in 0..60 {
-                    let mid = (lo + hi) / 2.0;
-                    if geo.cut(mid, k.round).is_ok() {
-                        lo = mid;
-                    } else {
-                        hi = mid;
-                    }
-                }
-                let (l, e) = (
-                    b.describe(g.curves[line.0].src),
-                    b.describe(g.curves[arc.0].src),
-                );
-                let text = match why {
-                    NoCut::Line { need, have } => format!(
-                        "{} needs {} along {l}, which is {} long",
-                        stmt.text,
-                        fmt_number(need),
-                        fmt_number(have)
-                    ),
-                    NoCut::Arc { need, have } => format!(
-                        "{} needs {} along {e}, which is {} long",
-                        stmt.text,
-                        fmt_number(need),
-                        fmt_number(have)
-                    ),
-                    NoCut::Radius { have } => format!(
-                        "{} sits inside arc {e}, so its radius must be under the arc's, {}",
-                        stmt.text,
-                        fmt_number(have)
-                    ),
-                    _ => format!(
-                        "{}: no arc of that size touches both {l} and {e} near {}",
-                        stmt.text,
-                        b.describe(k.point)
-                    ),
-                };
-                Note {
-                    severity: Severity::Error,
-                    code: DiagCode::SketchFilletTooLarge,
-                    loc: stmt.loc,
-                    text,
-                    hints: vec![size_fix(b, k, at_most(lo))],
-                }
+            };
+        }
+        // The largest size that fits, by bisection: the cut grows with the
+        // size, but not in closed form.
+        let (mut lo, mut hi) = (0.0, k.size);
+        for _ in 0..60 {
+            let mid = (lo + hi) / 2.0;
+            if cut(mid, &geo).is_ok() {
+                lo = mid;
+            } else {
+                hi = mid;
             }
         }
-    };
-    let cut = geo.cut(k.size, k.round).map_err(fail)?;
-    let t1 = g.add_vertex(cut.on_line, k.point);
-    let t2 = g.add_vertex(cut.on_arc, k.point);
-    for (&(ci, at_b), t) in [line, arc].iter().zip([t1, t2]) {
+        let text = match why {
+            NoCut::Along { which, need, have } => format!(
+                "{} needs {} along {}, which is {} long",
+                stmt.text,
+                fmt_number(need),
+                names[which],
+                fmt_number(have)
+            ),
+            NoCut::Radius { which, have } => format!(
+                "{} sits inside arc {}, so its radius must be under the arc's, {}",
+                stmt.text,
+                names[which],
+                fmt_number(have)
+            ),
+            _ => format!(
+                "{}: no arc of that size touches both {} and {} near {}",
+                stmt.text,
+                names[0],
+                names[1],
+                b.describe(k.point)
+            ),
+        };
+        Note {
+            severity: Severity::Error,
+            code: DiagCode::SketchFilletTooLarge,
+            loc: stmt.loc,
+            text,
+            hints: vec![size_fix(b, k, at_most(lo))],
+        }
+    })?;
+    let t = found.on.map(|x| g.add_vertex(x, k.point));
+    for (&(ci, at_b), t) in sides.iter().zip(t) {
         if at_b {
             g.curves[ci].b = t;
         } else {
             g.curves[ci].a = t;
         }
     }
-    let arc_of = cut.center.map(|f| {
-        let (from, to) = (sub(cut.on_line, f), sub(cut.on_arc, f));
-        // A fillet always turns the short way round.
-        (f, from[0] * to[1] - from[1] * to[0] > 0.0)
+    let arc_of = found.center.map(|f| {
+        // A fillet turns from its first cut towards the corner, which is
+        // the short way round, except at the largest fillet that fits: a
+        // lens's widest fillet touches both arcs at the far ends of a
+        // diameter, where "the short way" is a rounding error and took the
+        // half circle away from the corner.
+        let (from, towards) = (sub(found.on[0], f), sub(p, f));
+        (f, from[0] * towards[1] - from[1] * towards[0] > 0.0)
     });
     g.curves.push(Curve {
-        a: t1,
-        b: t2,
+        a: t[0],
+        b: t[1],
         arc: arc_of,
         src: k.point,
     });
@@ -3487,6 +3628,109 @@ mod tests {
             fa: 12.0,
             fs: 2.0,
         }
+    }
+
+    /// The arc about `c` that leaves the corner `p` (counter-clockwise
+    /// when `ccw`) and ends at `z`.
+    fn side(c: [f64; 2], p: [f64; 2], ccw: bool, z: [f64; 2]) -> ArcSide {
+        let rad = sub(p, c);
+        let r = norm(rad);
+        let w = if ccw {
+            [-rad[1] / r, rad[0] / r]
+        } else {
+            [rad[1] / r, -rad[0] / r]
+        };
+        let mut a = ArcSide {
+            c,
+            r,
+            w,
+            ccw,
+            sweep: 360.0,
+        };
+        a.sweep = a.angle_to(p, z);
+        a
+    }
+
+    /// A corner of two arcs is filleted by a circle of the fillet's radius
+    /// tangent to both (inside a circle when the corner's inside is, else
+    /// outside it), touching each on its own circle near the corner; a
+    /// chamfer cuts each arc at the chamfer's size from the corner.
+    #[test]
+    fn arc_arc_corners_are_cut_tangent_to_both_arcs() {
+        let y = 75f64.sqrt();
+        let x: f64 = 6.1;
+        let yc = (100.0 - x * x).sqrt();
+        let (xw, yw) = ((100.0 - 8.7f64 * 8.7).sqrt(), 8.7);
+        // A lens (inside both), a crescent's tip (inside the outer circle,
+        // outside the inner) and a snowman's waist (outside both): the
+        // corner, each arc as (centre, leaving counter-clockwise, far end),
+        // and whether the fillet is inside each circle.
+        let cases = [
+            (
+                [5.0, y],
+                ([0.0, 0.0], false, [5.0, -y]),
+                ([10.0, 0.0], true, [5.0, -y]),
+                [true, true],
+            ),
+            (
+                [x, yc],
+                ([0.0, 0.0], true, [x, -yc]),
+                ([5.0, 0.0], true, [x, -yc]),
+                [true, false],
+            ),
+            (
+                [xw, yw],
+                ([0.0, 0.0], false, [-xw, yw]),
+                ([0.0, 15.0], true, [-xw, yw]),
+                [false, false],
+            ),
+        ];
+        for (p, (c1, ccw1, z1), (c2, ccw2, z2), inside) in cases {
+            let geo = ArcArc {
+                p,
+                arcs: [side(c1, p, ccw1, z1), side(c2, p, ccw2, z2)],
+            };
+            for size in [0.25, 1.0, 2.0] {
+                let Ok(cut) = geo.cut(size, true) else {
+                    panic!("{p:?} r {size}");
+                };
+                let f = cut.center.unwrap();
+                for (i, arc) in geo.arcs.iter().enumerate() {
+                    let rho = if inside[i] {
+                        arc.r - size
+                    } else {
+                        arc.r + size
+                    };
+                    assert!((norm(sub(f, arc.c)) - rho).abs() < 1e-9, "{p:?} {i}");
+                    assert!((norm(sub(cut.on[i], f)) - size).abs() < 1e-9);
+                    assert!((norm(sub(cut.on[i], arc.c)) - arc.r).abs() < 1e-9);
+                    // Near the corner, not round the far side.
+                    assert!(arc.angle_to(p, cut.on[i]) < 90.0, "{p:?} {i}");
+                }
+                let Ok(chamfer) = geo.cut(size, false) else {
+                    panic!("{p:?} d {size}");
+                };
+                for (i, arc) in geo.arcs.iter().enumerate() {
+                    assert!((norm(sub(chamfer.on[i], p)) - size).abs() < 1e-9);
+                    assert!((norm(sub(chamfer.on[i], arc.c)) - arc.r).abs() < 1e-9);
+                }
+            }
+        }
+        // Too large: the lens has no room for a fillet of 9, and a chamfer
+        // of 20 is more than an arc's diameter.
+        let p = [5.0, y];
+        let lens = ArcArc {
+            p,
+            arcs: [
+                side([0.0, 0.0], p, false, [5.0, -y]),
+                side([10.0, 0.0], p, true, [5.0, -y]),
+            ],
+        };
+        assert!(matches!(lens.cut(9.0, true), Err(NoCut::Fit)));
+        assert!(matches!(
+            lens.cut(20.0, false),
+            Err(NoCut::Along { which: 0, .. })
+        ));
     }
 
     #[test]

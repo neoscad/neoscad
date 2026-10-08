@@ -1,0 +1,2 @@
+ERROR: Sketch 'too large': fillet(t, 9): no arc of that size touches both 'e1' and 'e2' near 't' in file arc-corners.scad, line 75
+ERROR: Sketch 'tangent': fillet(j, 1): the two arcs at 'j' are tangent there, so there is no corner to cut in file arc-corners.scad, line 91

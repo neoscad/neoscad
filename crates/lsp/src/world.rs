@@ -230,6 +230,10 @@ pub struct World {
     /// that sketch bodies bind the sketch vocabulary
     /// ([`World::sketch_body`]).
     pub sketch: bool,
+    /// Whether NeoSCAD's geometry queries are on (`--enable query`), so
+    /// that completion offers `anchor` and, inside module bodies, the
+    /// `child_*` functions.
+    pub query: bool,
 }
 
 /// Where the world's files come from: an open document's text first,
@@ -325,6 +329,7 @@ impl World {
             targets,
             libs,
             sketch: false,
+            query: false,
         }
     }
 
@@ -499,6 +504,18 @@ impl World {
             }
         };
         let ix = &file.index;
+        // The `child_*` queries answer only inside a module, where there
+        // are children to ask about; elsewhere they are a warning and
+        // undef, so they are not offered there.
+        let in_module = {
+            let mut s = Some(scope);
+            std::iter::from_fn(|| {
+                let i = s?;
+                s = ix.scopes[i].parent;
+                Some(i)
+            })
+            .any(|i| ix.scopes[i].kind == ScopeKind::Module)
+        };
         let mut s = Some(scope);
         while let Some(i) = s {
             if ix.scopes[i].kind == ScopeKind::File {
@@ -551,6 +568,14 @@ impl World {
             // above when the cursor is in one), so `on` or `length` are
             // never suggested where they mean nothing.
             if crate::sketch::is_vocabulary(e) {
+                continue;
+            }
+            // The queries exist only with `--enable query` (without it,
+            // `child_bounds` is an unknown function and `anchor` an
+            // unknown module), and the `child_*` ones only inside modules.
+            if e.extension.as_deref() == Some("query")
+                && (!self.query || (e.name.starts_with("child_") && !in_module))
+            {
                 continue;
             }
             let ns = match e.kind {

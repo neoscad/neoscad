@@ -588,18 +588,18 @@ example = "sketch() { p = point([2, 3]); fix(p); q = point([0, 0]); fix(q, at = 
 [[module]]
 name = "fillet"
 signature = "fillet(corner, r)"
-summary = "Round a sketch corner where two profile lines meet with a tangent arc, after the solve."
+summary = "Round a sketch corner where two profile curves (lines or arcs) meet with a tangent arc, after the solve."
 extension = "sketch"
-params = ["corner: point -- shared by exactly two lines of the profile", "r: number -- the radius"]
+params = ["corner: point -- shared by exactly two lines or arcs of the profile", "r: number -- the radius"]
 example = "sketch() {\n  o = point([0, 0]); a = point([20, 0]); b = point([20, 10]); c = point([0, 10]);\n  l1 = line(o, a); l2 = line(a, b); l3 = line(b, c); l4 = line(c, o);\n  fix(o); fix(a); fix(b); fix(c);\n  fillet(b, 3);\n}"
 notes = "The corner point stays the sharp corner the dimensions refer to. A fillet longer than a line it trims is an error (sketch-fillet-too-large)."
 
 [[module]]
 name = "chamfer"
 signature = "chamfer(corner, d)"
-summary = "Cut a sketch corner where two profile lines meet with a straight line, d along each, after the solve."
+summary = "Cut a sketch corner where two profile curves (lines or arcs) meet with a straight line, d from the corner along each, after the solve."
 extension = "sketch"
-params = ["corner: point -- shared by exactly two lines of the profile", "d: number -- the cut along each line"]
+params = ["corner: point -- shared by exactly two lines or arcs of the profile", "d: number -- the cut along each line, or the straight distance from the corner to the cut on an arc"]
 example = "sketch() {\n  o = point([0, 0]); a = point([20, 0]); b = point([20, 10]); c = point([0, 10]);\n  l1 = line(o, a); l2 = line(a, b); l3 = line(b, c); l4 = line(c, o);\n  fix(o); fix(a); fix(b); fix(c);\n  chamfer(b, 2);\n}"
 
 # --- NeoSCAD's queries (--enable query) ---------------------------------------

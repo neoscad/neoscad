@@ -232,16 +232,14 @@ impl Server {
             .extensions = extensions;
     }
 
-    /// Whether sketch bodies bind the sketch vocabulary: the host's
-    /// extensions or the session's have `sketch`.
-    fn sketch_on(&self, session: &Session) -> bool {
+    /// The extensions documents run with: the host's and the session's.
+    fn extensions_on(&self, session: &Session) -> session::Extensions {
         let opts = self
             .opts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .extensions;
         opts.union(session.config().extensions)
-            .has(session::Extension::Sketch)
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -667,10 +665,13 @@ impl Server {
                 None => fs.metadata(p),
             }
         };
-        let sketch = self.sketch_on(session);
+        let on = self.extensions_on(session);
+        let sketch = on.has(session::Extension::Sketch);
+        let query = on.has(session::Extension::Query);
         let mut slot = doc.world.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some((w, stamps)) = &*slot
             && w.sketch == sketch
+            && w.query == query
             && stamps.iter().all(|(p, m)| m.is_some() && stamp(p) == *m)
         {
             return w.clone();
@@ -687,6 +688,7 @@ impl Server {
         };
         let mut w = World::new(doc.analyzed(), &loader);
         w.sketch = sketch;
+        w.query = query;
         let w = Arc::new(w);
         let stamps = w
             .files

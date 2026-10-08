@@ -1614,10 +1614,6 @@ lead them, come roughly in order of user impact.
   not from the lines, so a dense sketch's glyphs can sit on its
   geometry; dimension glyphs are text at an entity, not dimension lines
   with arrows.
-- The Windows app's Design > NeoSCAD Extensions is kept per process:
-  windows already open keep their setting until toggled there (the
-  agents' setting is watched across windows by `AgentConnection`; this
-  one is not).
 - The editor colours the sketch vocabulary inside any `sketch(...)`
   child, also a program's own `module sketch` (roof.scad), and with the
   extension off: the Lezer decorations do not resolve names. The
@@ -1698,12 +1694,12 @@ lead them, come roughly in order of user impact.
   name: it prints as `<sketch point>` and is `point #3` in messages.
   Stage 3 names entities by the variable that holds them, list elements
   included (`pts[0]`).
-- Fillets and chamfers cut corners between two lines or a line and an
-  arc (stage 7); a corner of two arcs is still "not supported yet". The
-  same construction (offset circles meeting) would do it. A fillet at a
-  line–arc corner takes the root nearest the corner and the inside of
-  the angle between the line and the arc's tangent there; a reflex
-  corner (over 180°) is filleted on the smaller side, as between lines.
+- Fillets and chamfers cut corners between lines and arcs in any pair
+  (line–arc in stage 7, arc–arc after it: `docs/language-extensions.md`
+  section 11.7). A fillet at a corner with an arc takes the crossing
+  nearest the corner and the inside of the angle between the curves'
+  tangents there; a reflex corner (over 180°) is filleted on the smaller
+  side, as between lines.
 - The goldens in `conformance/extensions/sketch` run as a cargo test
   (`crates/session/tests/sketch.rs`), not as `conformance run --tier ext`
   (section 9 of the design), and their `.csg` exports have been rendered
@@ -1746,12 +1742,18 @@ lead them, come roughly in order of user impact.
   silently; `check` or `measure` could list anchors by name if a tool
   wants them.
 - The editor's decorations colour the query names (stage 7) whether
-  the extension is on or not, and LSP completion was not checked for
-  them (stage 4 owns the language server's extension handling).
+  the extension is on or not. The language server's completion offers
+  them only with `query` on, `child_*` only inside module bodies
+  (section 11.7); hover and navigation still document them without it,
+  labelled as an extension's.
 - The goldens in `conformance/extensions/query` run as a cargo test, as
   the sketch goldens do; their `.csg` exports were rendered by the stock
   nightly by hand only (`plate`, `sketch` and `reuse`, comparing vertex
-  and facet counts; `plate-bounds` and `bounds` by volume and box too).
+  and facet counts; `plate-bounds` and `bounds` by volume and box too;
+  `distance` after stage 7: 46 vertices and 84 facets in both, some
+  facets triangulated differently. The sketch goldens `fillets` gave
+  the same SVG byte for byte and `arc-corners` the same 121 vertices,
+  a few differing in the 6th digit, which the `.csg` rounds to).
 - A top-level statement or module call that asked `child_bounds()` or
   `child_measure()` is never replayed by the statement memo or the call
   memo (`crates/eval/src/query.rs`, module docs), because the queries
@@ -1778,9 +1780,7 @@ lead them, come roughly in order of user impact.
 - `child_distance()` (stage 7) renders both children and builds two
   BVHs per call; nothing is kept across requests but the renders. 2D
   distance tessellates both shapes; a 2D answer from outlines alone
-  would be cheaper. Its `.csg` golden (`distance.csg`) has not been
-  rendered by the stock nightly, nor `fillets.csg` (both are plain
-  primitives and polygons).
+  would be cheaper.
 - The thread-count tests (`crates/session/tests/query.rs`,
   `crates/geom/tests/query.rs`, like `crates/geom/tests/render.rs`) run
   inside `rayon` pools of 1, 2 and 8 threads, but `geom::Renderer` keeps

@@ -75,15 +75,3 @@ sketch(name = "tangent") {
   fillet(top.start, 1);
 }
 
-// Two arcs meeting: not supported yet.
-translate([40, -30])
-sketch(name = "two arcs") {
-  o  = point([0, 0]);
-  a  = point([10, 0]);
-  b  = point([0, 10]);
-  m  = point([10, 10]);
-  e1 = arc(o, a, b);
-  e2 = arc(m, b, a);
-  fix(o); fix(m); fix(a);
-  fillet(a, 1);
-}

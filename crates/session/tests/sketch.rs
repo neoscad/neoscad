@@ -651,6 +651,8 @@ fn every_hint_edit_fixes_its_problem() {
     // A line–arc fillet too large for its corner (stage 7): the size the
     // bisection found fits.
     assert_eq!(hint_edits_fix_their_problems("fillets.scad"), 1);
+    // And at a corner of two arcs.
+    assert_eq!(hint_edits_fix_their_problems("arc-corners.scad"), 1);
 }
 
 /// Apply each edit of the golden `name`'s hints alone and check that its

@@ -345,8 +345,8 @@ All of this is plain arithmetic, with no trigonometry.
 - Doing this after the solve keeps fillets from adding unknowns, which
   is the most common source of solver trouble in GUI sketchers.
 - `chamfer(corner, d)` works the same way with a straight cut.
-- Fillets between a line and an arc came in stage 7 (section 11.6);
-  between two arcs they are not built.
+- Fillets between a line and an arc came in stage 7 (section 11.6),
+  and between two arcs after it (section 11.7).
 
 ### 4.6 The solver
 
@@ -1590,7 +1590,9 @@ Where it departs from sections 4.5, 4.8, 5.2 and 5.4:
   the same pixels. The header grows with its lines. The summary's
   `sketch` counts constraints by state and names the free entities. It
   cannot be combined with `--diff`, `--highlight` or `--issues`.
-- **Line–arc fillets and chamfers** (`cut_line_arc`, `sketch.rs:3045`).
+- **Line–arc fillets and chamfers** (`LineArc::cut` in `sketch.rs`;
+  the function was `cut_line_arc` in stage 7, and is now
+  `cut_with_arc`, shared with the arc–arc corners of section 11.7).
   Section 4.5's arithmetic, extended: the fillet's centre is `r` from
   the line on the corner's inside and `R + r` from the arc's centre, or
   `R − r` when the line runs into the arc's circle (`u · (C − P) > 0`);
@@ -1605,7 +1607,8 @@ Where it departs from sections 4.5, 4.8, 5.2 and 5.4:
   fit is not linear in the size; the golden test applies that edit and
   checks the error is gone. A corner where the line runs along the arc's
   tangent has no corner to cut (`invalid-argument`), and a corner of two
-  arcs is still `invalid-argument` ("not supported yet").
+  arcs was still `invalid-argument` ("not supported yet") until section
+  11.7.
 - **The apps.** macOS Settings > Language has "Geometry queries
   (query)" beside the sketch toggle (`LanguageSettings.queries`).
   Linux has Preferences > Language with both
@@ -1614,7 +1617,8 @@ Where it departs from sections 4.5, 4.8, 5.2 and 5.4:
   runs every window again). Windows has Design > NeoSCAD Extensions
   with both (`NeoSCAD.Host/LanguageSettings.cs`,
   `DocumentSession.SetEnable`); its windows are processes, so a window
-  already open keeps its setting until toggled there. The panels' runs
+  already open kept its setting until toggled there (until section 11.7,
+  which watches the file). The panels' runs
   (check, measure, export) on Linux and Windows now pass the names too;
   they passed none before.
 - **Editor.** `builtins.js` colours `child_anchors`, `child_bounds`,
@@ -1636,6 +1640,58 @@ Where it departs from sections 4.5, 4.8, 5.2 and 5.4:
   settings' round trip, and the Windows session and settings tests);
   the editor's colouring; and `crates/wasm-check`'s `query-distance`
   case (a fast-path box, a rendered box and distances on wasm32).
+
+### 11.7 After stage 7 as built
+
+Small items from `docs/followups.md` ("Constrained sketches", "Geometry
+queries"), done after stage 7:
+
+- **Arc–arc fillets and chamfers** (`ArcArc::cut`, `cut_with_arc` in
+  `crates/eval/src/sketch.rs`). The fillet's centre is `r1 ± r` from the
+  first arc's centre and `r2 ± r` from the second's, minus where the
+  other arc's leaving tangent runs into that circle (`u · (C − P) > 0`,
+  the line–arc rule with the other arc's tangent for the line), so it is
+  where those two circles cross: along the line of centres by
+  `(ρ1² − ρ2² + d²) / 2d`, then across by the rest of `ρ1`, square roots
+  only. Of the two crossings the one nearer the corner is taken; the
+  other belongs to the circles' other crossing, and a cut that lands
+  past an arc's sweep (measured from the corner) is too large. A chamfer
+  cuts each arc where the circle of radius `d` about the corner crosses
+  it, as on the arc of a line–arc corner. The texts and the bisected
+  hint are the line–arc ones, naming the arc the cut runs out of; "the
+  two arcs at … are tangent there" when the arcs meet smoothly. The
+  golden is `conformance/extensions/sketch/arc-corners.scad` (a lens, a
+  crescent's tip inside one circle and outside the other, a snowman's
+  waist outside both, the widest fillet the lens takes, too large with
+  the hint's edit applied by `every_hint_edit_fixes_its_problem`, and a
+  tangent join), with
+  `arc_arc_corners_are_cut_tangent_to_both_arcs` in `eval` checking the
+  tangency (centre distances, fillet radius, the cut on each circle near
+  the corner) for each case at three sizes.
+  - The fillet arc of a corner with an arc (line–arc too) now turns from
+    its first cut towards the corner rather than "the short way round".
+    They agree except at the bound the hint gives for a lens: the widest
+    fillet touches both arcs at the ends of a diameter, and the short way
+    was a rounding error that took the half circle away from the corner
+    (the area by hand: half the lens plus a half disc, 100.68 at
+    `$fn = 360` against 100.69 exact). The line–arc goldens did not
+    change.
+- **Completion of the query names** (`World::visible`,
+  `crates/lsp/src/world.rs`): `anchor`, `child_anchors`, `child_bounds`,
+  `child_measure` and `child_distance` are offered only when the host or
+  the session has `query`, and the `child_*` functions only inside a
+  module body (any enclosing module scope), where they answer; outside
+  one they are a warning and undef. Hover and navigation still find
+  their documentation without the extension, labelled as an extension's
+  (`docs::extension_label`). Tests: `crates/lsp/tests/query.rs`.
+- **Windows: the extensions setting across windows**
+  (`NeoSCAD.Host/LanguageSettingsWatch.cs`). Each window watches
+  `language.json` as `AgentConnection` watches `agents.json`, and a
+  change another window saved sets the menu and runs the document with
+  the new names. Its own save is remembered first and so comes back as
+  no change; a file that fails to read or parse (another process
+  mid-write, a damaged file) is ignored rather than read as everything
+  off. Test: `LanguageSettingsSavedElsewhereReachTheWatchingWindow`.
 
 ## 12. Alternatives considered
 

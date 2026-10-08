@@ -11,7 +11,4 @@ multmatrix([[1, 0, 0, 70], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
 multmatrix([[1, 0, 0, 0], [0, 1, 0, -30], [0, 0, 1, 0], [0, 0, 0, 1]]) {
 	polygon(points = [], paths = undef, convexity = 1);
 }
-multmatrix([[1, 0, 0, 40], [0, 1, 0, -30], [0, 0, 1, 0], [0, 0, 0, 1]]) {
-	polygon(points = [], paths = undef, convexity = 1);
-}
 

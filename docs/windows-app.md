@@ -627,8 +627,9 @@ in `rust:1.98.1` (`--no-default-features` turns off `ffi`'s new
   the window's document again with them (runs, check, measure, export
   and the language server) and is kept in
   `%LOCALAPPDATA%\NeoSCAD\language.json`, which windows opened later
-  read; a window already open keeps its own until toggled
-  (`NeoSCAD.Host/LanguageSettings.cs`).
+  read and windows already open watch, so a toggle in one window reaches
+  every other (`NeoSCAD.Host/LanguageSettings.cs`,
+  `NeoSCAD.Host/LanguageSettingsWatch.cs`).
 - View: View All, Reset View, the seven standard views; orbit (left
   drag), pan (right or middle drag), zoom (wheel).
 - Live preview 150 ms after typing pauses; the console (errors and

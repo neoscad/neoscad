@@ -369,7 +369,7 @@ sketch() { p = point([2, 3]); fix(p); q = point([0, 0]); fix(q, at = [1, 1]); }
 ## Fillets and chamfers
 
 `fillet(corner, r)` rounds the corner where exactly two profile curves
-meet, two lines or a line and an arc, with a tangent arc of radius `r`;
+meet, lines or arcs, with a tangent arc of radius `r`;
 `chamfer(corner, d)` cuts it with a straight line. Both are applied
 after the solve, so they add no unknowns, and the corner point stays the
 sharp corner the dimensions refer to (FreeCAD's fillet with "preserve
@@ -384,7 +384,13 @@ corner" keeps such a point too).
   and the arc where it is `d` from the corner in a straight line. Where
   the line runs on along the arc's tangent there is no corner, which is
   an `invalid-argument` error.
-- Between two arcs: not supported yet.
+- Between two arcs, each arc is shortened on its own circle. A fillet
+  touches each arc from inside its circle where the other arc runs into
+  that circle (a lens's corners) and from outside where it runs away (the
+  waist where two discs' outlines meet), so it can be inside one and
+  outside the other (a crescent's tip). A chamfer cuts each arc where it
+  is `d` from the corner in a straight line. Arcs that run on along each
+  other's tangent have no corner (`invalid-argument`).
 
 A fillet or chamfer that needs more of a curve than there is is an
 error with the largest size that fits as its fix

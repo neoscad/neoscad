@@ -26,7 +26,10 @@ change meant to alter them, and read the diff.
 - `fillets.scad`: fillets and chamfers between a line and an arc
   (stage 7), from inside and outside the arc's circle, and their errors
   (too large, with the size that fits as the hint's edit, applied by
-  the test; a tangent join; two arcs).
+  the test; a tangent join).
+- `arc-corners.scad`: fillets and chamfers between two arcs, inside
+  both circles, inside one and outside the other, and outside both, the
+  widest fillet a lens takes, and the same errors.
 
 For `diagnostics.scad` and `hints.scad`, `NAME.json` holds the
 diagnostics as JSON (`docs/cli-json.md`), hints and their edits
