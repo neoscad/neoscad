@@ -63,6 +63,12 @@ pub(crate) struct Args {
     #[arg(long, value_name = "NAME")]
     sketch: Option<String>,
 
+    /// A fillet or chamfer call's selected edges (`--enable fillet`):
+    /// the call by its number in `check`'s `fillets` (from 1) or by its
+    /// selector (`"|z"`).
+    #[arg(long, value_name = "INDEX|SELECTOR")]
+    fillet: Option<String>,
+
     /// Also write the section's outline as SVG.
     #[arg(long, value_name = "FILE", requires = "section")]
     svg: Option<String>,
@@ -108,6 +114,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
         "center": a.center,
         "profile": a.profile,
         "sketch": a.sketch,
+        "fillet": a.fillet,
         "svg": a.svg,
         "json": match a.format.as_deref() {
             None => false,
@@ -132,6 +139,17 @@ pub fn main(args: Vec<OsString>) -> u8 {
 
 fn fail(msg: impl std::fmt::Display) -> Outcome {
     Outcome::fail(EXIT_ERROR, format!("neoscad measure: {msg}"))
+}
+
+/// The `fillet` parameter of `measure` and `snapshot`: a call's index
+/// (a JSON number from MCP and serve clients, a string from the command
+/// line) or its selector.
+pub fn fillet_param(params: &Value) -> Option<String> {
+    match params.get("fillet")? {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 /// The measure request a command's parameters give (`part`, `between`
@@ -189,6 +207,7 @@ pub fn request_of(params: &Value, run: session::Run) -> Result<MeasureRequest, S
         .get("sketch")
         .and_then(Value::as_str)
         .map(str::to_string);
+    req.fillet = fillet_param(params);
     req.svg = matches!(
         params.get("svg"),
         Some(Value::String(_)) | Some(Value::Bool(true))

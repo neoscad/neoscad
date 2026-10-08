@@ -635,7 +635,7 @@ params = [
     "expect: number = undef -- the number of edges the selection must match, or the call is an error",
 ]
 example = "fillet_edges(r = 2, edges = \"|z\") cube([40, 30, 20]);"
-notes = "Selector strings are a subset of CadQuery's: all, none, convex, concave, %line, %circle, %ellipse, %bspline, |z, #z, >z, <z, >>z[i], <<z[i] (any axis, or a vector (a, b, c)), new (edges booleans made), child(i) and child(i, j), part(name) (needs --enable part), @anchor (needs --enable query), box(x0, y0, z0, x1, y1, z1), joined with and, or, exc and not as CadQuery joins them. A selector that does not parse is an error at its column, with a did-you-mean fix. Not built yet in this version: the children are rendered unchanged, with a fillet-not-built warning. Without --enable fillet it is an unknown module, as in OpenSCAD."
+notes = "Selector strings are a subset of CadQuery's: all, none, convex, concave, %line, %circle, %ellipse, %bspline, |z, #z, >z, <z, >>z[i], <<z[i] (any axis, or a vector (a, b, c)), new (edges booleans made), child(i) and child(i, j), part(name) (needs --enable part), @anchor (needs --enable query), box(x0, y0, z0, x1, y1, z1), joined with and, or, exc and not as CadQuery joins them. A selector that does not parse is an error at its column, with a did-you-mean fix. Not built yet in this version: the call reports the edges it selects (check's fillets, measure --fillet, snapshot --fillet draws them numbered) and renders the children unchanged, with a fillet-not-built warning. Without --enable fillet it is an unknown module, as in OpenSCAD."
 
 [[module]]
 name = "chamfer_edges"
@@ -649,7 +649,7 @@ params = [
     "expect: number = undef -- the number of edges the selection must match",
 ]
 example = "chamfer_edges(d = 1, edges = \"%circle and >z\") difference() {\n  cube([20, 20, 10]);\n  translate([10, 10, -1]) cylinder(d = 6, h = 12);\n}"
-notes = "Selectors as for fillet_edges(). Not built yet in this version: the children are rendered unchanged, with a fillet-not-built warning. Without --enable fillet it is an unknown module, as in OpenSCAD."
+notes = "Selectors as for fillet_edges(). Not built yet in this version: the call reports the edges it selects (check's fillets, measure --fillet, snapshot --fillet draws them numbered) and renders the children unchanged, with a fillet-not-built warning. Without --enable fillet it is an unknown module, as in OpenSCAD."
 
 # --- functions: numbers --------------------------------------------------------
 

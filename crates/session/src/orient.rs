@@ -734,7 +734,7 @@ pub fn literal_fix(program: &lang::Program, issue: &InputIssue) -> Option<(Span,
 }
 
 /// The instantiation at `span`, anywhere in the program.
-fn find_inst(scope: &Scope, span: Span) -> Option<&Instantiation> {
+pub(crate) fn find_inst(scope: &Scope, span: Span) -> Option<&Instantiation> {
     for m in &scope.modules {
         if let Some(i) = find_inst(&m.body, span) {
             return Some(i);

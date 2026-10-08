@@ -1966,6 +1966,7 @@ impl Session {
                 "diagnostics": crate::diag::summary_json(&model.log.lines, &model.log.names),
             });
             add_sketches(&mut summary, &model.log);
+            add_fillets(&mut summary, &model.log);
             return Ok(Checked {
                 exit_code: model.exit_code,
                 summary,
@@ -2020,6 +2021,7 @@ impl Session {
             "diagnostics": crate::diag::summary_json(&model.log.lines, &model.log.names),
         });
         add_sketches(&mut summary, &model.log);
+        add_fillets(&mut summary, &model.log);
         Ok(Checked {
             exit_code,
             summary,
@@ -2042,6 +2044,32 @@ fn add_sketches(summary: &mut Value, log: &Log) {
     summary["sketches"] = Value::Array(list.iter().map(crate::sketches::summary).collect());
     if *count > list.len() {
         summary["sketches_omitted"] = json!(count - list.len());
+    }
+}
+
+/// The run's fillet and chamfer calls in a check's summary (`fillets`, and
+/// `fillets_omitted` past [`crate::fillets::MAX_FILLETS`]): each call's
+/// selection, its selected edges and what it skipped
+/// (`docs/cli-json.md`, "check"). Absent for a model with none.
+fn add_fillets(summary: &mut Value, log: &Log) {
+    let (list, count) = (&log.fillets.json, &log.fillets.count);
+    if list.is_empty() {
+        return;
+    }
+    summary["fillets"] = Value::Array(list.clone());
+    if *count > list.len() {
+        summary["fillets_omitted"] = json!(count - list.len());
+    }
+}
+
+/// A line per fillet call of a check's summary.
+fn fillet_lines(out: &mut String, summary: &Value) {
+    for f in summary["fillets"].as_array().into_iter().flatten() {
+        out.push_str(&crate::fillets::line_text(f));
+        out.push('\n');
+    }
+    if let Some(n) = summary["fillets_omitted"].as_u64() {
+        out.push_str(&format!("... and {n} more fillet calls\n"));
     }
 }
 
@@ -2071,6 +2099,7 @@ pub fn text(summary: &Value) -> String {
     if summary["failed"] == json!(true) {
         out.push_str(&format!("check {input}: the model did not render\n"));
         sketch_lines(&mut out, summary);
+        fillet_lines(&mut out, summary);
         return out;
     }
     let c = &summary["counts"];
@@ -2133,6 +2162,7 @@ pub fn text(summary: &Value) -> String {
         out.push_str(&format!("    ... and {n} more {code}\n"));
     }
     sketch_lines(&mut out, summary);
+    fillet_lines(&mut out, summary);
     out
 }
 

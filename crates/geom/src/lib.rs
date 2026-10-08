@@ -31,6 +31,7 @@ pub mod exact;
 pub mod export;
 pub mod extrude;
 pub mod fastbounds;
+pub mod fillet;
 pub mod fragments;
 pub mod hull;
 mod import;

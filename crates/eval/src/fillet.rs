@@ -1,13 +1,15 @@
 //! NeoSCAD's `fillet_edges()` and `chamfer_edges()` (`--enable fillet`,
-//! `docs/fillets.md`): the evaluator's side, stage F0.
+//! `docs/fillets.md`): the evaluator's side.
 //!
 //! A call checks its arguments, parses its selectors ([`selector`]) and
-//! makes a [`NodeKind::Fillet`] node over its children. What the node
-//! holds is everything the result will depend on, so the `.csg` label and
-//! the cache key (one writer, `crate::dump`) cover it. The geometry is not
-//! built yet: the renderer passes the children through as their union,
-//! and the call says so with a `fillet-not-built` warning, so nobody takes
-//! a sharp part for a rounded one.
+//! makes a [`NodeKind::Fillet`] node over its children; once they are
+//! instantiated, `child(i)` indices are checked against them and `@name`
+//! anchors resolved onto the node. What the node holds is everything the
+//! result will depend on, so the `.csg` label and the cache key (one
+//! writer, `crate::dump`) cover it. The geometry is not built yet (the
+//! selection is, in `geom::fillet`): the renderer passes the children
+//! through as their union, and the call says so with a `fillet-not-built`
+//! warning, so nobody takes a sharp part for a rounded one.
 //!
 //! A call whose arguments are wrong is an error (`docs/fillets.md`,
 //! section 18, decision 2): it reports at the argument, with the column
@@ -23,7 +25,7 @@ use crate::builtins::modules::{BuiltinModule, Params};
 use crate::context::ScopeRef;
 use crate::eval::Evaluator;
 use crate::message::Loc;
-use crate::node::{Discretizer, NodeKind};
+use crate::node::{Anchor, Discretizer, Node, NodeKind};
 use crate::value::Value;
 pub use selector::{Item, Selector};
 
@@ -64,6 +66,19 @@ pub struct FilletNode {
     pub expect: Option<u32>,
     /// The blend arcs' `$fn`, `$fa`, `$fs`.
     pub disc: Discretizer,
+    /// The anchors the selectors name (`@name`), resolved against the
+    /// children's anchors when the call was instantiated, in the call's
+    /// frame. Anchors are a side field geometry never reads
+    /// (`docs/fillets.md`, section 5.3), so the ones selection needs are
+    /// copied here, where the cache key covers them.
+    pub anchors: Vec<Anchor>,
+}
+
+impl FilletNode {
+    /// The anchor `name` resolves to.
+    pub fn anchor(&self, name: &str) -> Option<&Anchor> {
+        self.anchors.iter().find(|a| a.name == name)
+    }
 }
 
 /// The parameters in positional order, then the optional ones.
@@ -98,20 +113,7 @@ impl<'a> Evaluator<'a> {
         };
         let disc = self.discretizer(p);
         match self.fillet_node(kind, p, sr, i, disc) {
-            Ok(node) => {
-                let t = format!(
-                    "{}(): edge {} is not built yet in this version of NeoSCAD; \
-                     the children are rendered unchanged",
-                    kind.module(),
-                    if kind == FilletKind::Fillet {
-                        "rounding"
-                    } else {
-                        "chamfering"
-                    }
-                );
-                self.warn(p.loc, DiagCode::FilletNotBuilt, t);
-                NodeKind::Fillet(Box::new(node))
-            }
+            Ok(node) => NodeKind::Fillet(Box::new(node)),
             Err(e) => {
                 self.emit_with_hints(
                     Severity::Error,
@@ -214,7 +216,119 @@ impl<'a> Evaluator<'a> {
             except,
             expect,
             disc,
+            anchors: Vec::new(),
         })
+    }
+
+    /// The end of a fillet call, once its children are instantiated: what
+    /// the selectors say about the children is checked (`child(i)` in
+    /// range, `@name` an anchor of theirs) and the anchors are resolved
+    /// onto the node. A problem is an error at the call, which then
+    /// becomes a plain group, as for a bad argument; otherwise the call
+    /// says that its blends are not built yet.
+    pub(crate) fn fillet_close(&mut self, node: &mut Node) {
+        let NodeKind::Fillet(f) = &node.kind else {
+            return;
+        };
+        let loc = node.origin.as_ref().map(|o| Loc {
+            unit: o.unit,
+            span: o.span,
+        });
+        let m = f.kind.module();
+        let count = node.children.len();
+        // An `anchor()` written directly among the children lands on the
+        // call's own node (in its frame, which is the call's); the rest
+        // are below, placed into the call's frame.
+        let mut found: Vec<Anchor> = node.anchors.as_deref().cloned().unwrap_or_default();
+        found.extend(crate::query::anchors_in(&node.children));
+        let mut problem: Option<(String, Vec<Hint>)> = None;
+        let mut resolved: Vec<Anchor> = Vec::new();
+        let atoms = f.edges.atoms().into_iter().map(|a| ("edges", a)).chain(
+            f.except
+                .iter()
+                .flat_map(|s| s.atoms())
+                .map(|a| ("except", a)),
+        );
+        for (param, atom) in atoms {
+            match atom {
+                selector::Atom::Child(i, j) => {
+                    let bad = std::iter::once(*i).chain(*j).find(|&k| k as usize >= count);
+                    if let Some(k) = bad {
+                        let have = match count {
+                            0 => "has no children".to_string(),
+                            1 => "has 1 child, child(0)".to_string(),
+                            n => format!("has {n} children, child(0) to child({})", n - 1),
+                        };
+                        problem = Some((
+                            format!("{m}(): {param}: {atom} names child {k}, but the call {have}"),
+                            vec![hint(
+                                "children are counted from 0 in the order they are written",
+                            )],
+                        ));
+                        break;
+                    }
+                }
+                selector::Atom::Anchor(name) => {
+                    if resolved.iter().any(|a| &a.name == name) {
+                        continue;
+                    }
+                    match found.iter().find(|a| &a.name == name) {
+                        Some(a) => resolved.push(a.clone()),
+                        None => {
+                            let mut names: Vec<&str> =
+                                found.iter().map(|a| a.name.as_str()).collect();
+                            names.sort_unstable();
+                            names.dedup();
+                            let have = if names.is_empty() {
+                                "the children declare no anchors".to_string()
+                            } else {
+                                let list: Vec<String> =
+                                    names.iter().map(|n| format!("@{n}")).collect();
+                                format!("the children's anchors are {}", list.join(", "))
+                            };
+                            problem = Some((
+                                format!(
+                                    "{m}(): {param}: no anchor named '{name}' among the children; {have}"
+                                ),
+                                vec![hint(
+                                    "declare it with anchor(\"name\", point, direction) inside a child",
+                                )],
+                            ));
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some((text, hints)) = problem {
+            self.emit_with_hints(
+                Severity::Error,
+                DiagCode::FilletSelector,
+                text.as_bytes(),
+                loc,
+                hints,
+            );
+            node.kind = NodeKind::Group { name: None };
+            return;
+        }
+        let NodeKind::Fillet(f) = &mut node.kind else {
+            return;
+        };
+        f.anchors = resolved;
+        let t = format!(
+            "{}(): edge {} is not built yet in this version of NeoSCAD; \
+             the children are rendered unchanged",
+            f.kind.module(),
+            if f.kind == FilletKind::Fillet {
+                "rounding"
+            } else {
+                "chamfering"
+            }
+        );
+        if let Some(loc) = loc {
+            self.warn(loc, DiagCode::FilletNotBuilt, t);
+        }
     }
 
     /// An `edges` or `except` value: a selector string, a BOSL2 direction

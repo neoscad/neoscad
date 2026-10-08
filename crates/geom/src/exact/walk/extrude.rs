@@ -328,7 +328,19 @@ impl Walk<'_> {
                 n,
                 format!("keeps its {f}-sided polygon because $fn is set; leave $fn unset (use $fa and $fs) to export a true circle"),
             );
-            return Ok(Some(self.lines(crate::primitives::circle2d(r, disc))));
+            let t = self.lines(crate::primitives::circle2d(r, disc));
+            if self.trace {
+                // Its sides are one polygon: an extrusion's side planes
+                // swept from them meet at seams, not modelled edges.
+                let polygon = self.polygons;
+                self.polygons += 1;
+                for &tag in t.tags.iter().flatten() {
+                    if tag != FACETED {
+                        self.curve_polygon.insert(tag, polygon);
+                    }
+                }
+            }
+            return Ok(Some(t));
         }
         let segs = meshbrep::primitives::aligned_segments(f.saturating_mul(self.mult));
         let pts: Vec<[f64; 2]> = (0..segs)
@@ -512,6 +524,11 @@ impl Walk<'_> {
                 } else {
                     self.push_curve(new)
                 };
+                if let Some(&p) = self.curve_polygon.get(&*tag)
+                    && k != FACETED
+                {
+                    self.curve_polygon.insert(k, p);
+                }
                 map.insert(*tag, k);
                 *tag = k;
             }
@@ -724,6 +741,7 @@ impl Walk<'_> {
                 of_curve.insert(tag, id);
             }
         }
+        self.mark_polygons(&of_curve);
         for (o, tags) in prof.tags.iter().enumerate() {
             for (i, &tag) in tags.iter().enumerate() {
                 if let Curve2::Circle { sag_normal, .. } = self.curves2[tag as usize] {
@@ -856,6 +874,14 @@ impl Walk<'_> {
                 });
                 tri_surface.push((surfaces.len() - 1) as u32);
             }
+            if self.trace {
+                // Every facet is part of the one polygon of revolution
+                // the user asked for with `$fn`.
+                let polygon = self.polygons;
+                self.polygons += 1;
+                self.pending_polygons
+                    .extend((0..surfaces.len() as u32).map(|s| (s, polygon)));
+            }
             return self.place_mesh(&pos, &wt, &tri_surface, surfaces, m, similarity_scale(m));
         }
         let full = fragments::circular_segments(disc, max_x)
@@ -954,6 +980,7 @@ impl Walk<'_> {
                 of_curve.insert(tag, id);
             }
         }
+        self.mark_polygons(&of_curve);
         // The normal render's sections stand inside the exact surfaces by
         // the sagitta of their angle, and its arcs inside their circles.
         let fac =
@@ -1022,6 +1049,23 @@ impl Walk<'_> {
         self.normal_sagitta = self.normal_sagitta.max((arc_sag + max_x * fac) * k);
         self.normal_volume_bound += bound * k * k * k;
         self.place_mesh(&ps.vertices, &tris, &tri_surface, surfaces, m, scale)
+    }
+
+    /// For a traced walk: the extrusion's surfaces (by their index in the
+    /// table being built, `of_curve`'s values) swept from sides of a `$fn`
+    /// circle, to be marked as that polygon's when they are placed.
+    fn mark_polygons(&mut self, of_curve: &BTreeMap<u32, u32>) {
+        if !self.trace {
+            return;
+        }
+        for (tag, &id) in of_curve {
+            // Entry 2 is the shared faceted record.
+            if let Some(&p) = self.curve_polygon.get(tag)
+                && id != 2
+            {
+                self.pending_polygons.push((id, p));
+            }
+        }
     }
 
     /// A built mesh (welded here) with its surface per triangle, placed

@@ -310,6 +310,9 @@ pub fn run_brep(src: &[u8]) -> String {
     if let Some(scad) = name.strip_prefix("scad:") {
         return run_exact(scad);
     }
+    if let Some(scad) = name.strip_prefix("fillet:") {
+        return run_fillet(scad);
+    }
     let id = Transform::IDENTITY;
     let (a, b) = match name.as_str() {
         // difference() { cube(15, center = true); sphere(10); }
@@ -453,6 +456,67 @@ fn run_exact(scad: &str) -> String {
             )
         }
     }
+}
+
+/// Fillet edge selection (`--enable fillet`, `docs/fillets.md` stage F1)
+/// on a source: each call's child is export-rendered and reconstructed,
+/// its edges measured and the selector applied. A line per call gives the
+/// status and the selected edges, and the SHA-256 of every fact's bits
+/// (`Debug` prints each `f64` in full), which must be the same in wasm32
+/// as natively: the sines and cosines come from `libm`.
+fn run_fillet(scad: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut text = scad.as_bytes().to_vec();
+    text.extend_from_slice(b"\n\x03\n");
+    let program = lang::parse_file(PathBuf::from("/doc/main.scad"), text);
+    let mut out: Vec<u8> = Vec::new();
+    let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(MemFs::new());
+    let mut con = eval::Console::new(&mut out, PathBuf::from(DOC_DIR), fs.clone(), false);
+    let opts = eval::Options {
+        extensions: eval::Extensions::NONE.with(eval::Extension::Fillet),
+        ..eval::Options::default()
+    };
+    let ev = eval::with_stack(eval::DEFAULT_THREAD_STACK, || {
+        eval::evaluate(&program, &[], &[], PathBuf::from(DOC_DIR), &opts, &mut con)
+    });
+    let keys = eval::dump::Keys::new(&ev.root, &*fs);
+    let r = geom::Renderer::new();
+    let ro = geom::RenderOptions::default();
+    if r.render(&ev.root, &keys, ro.clone()).is_err() {
+        return "fillet: render failed\n".into();
+    }
+    let mut lines = String::new();
+    let mut stack = vec![&ev.root];
+    while let Some(n) = stack.pop() {
+        stack.extend(n.children.iter().rev());
+        let Some(p) = geom::fillet::plan(&r, n, &keys, &ro) else {
+            continue;
+        };
+        let digest = format!("{:?}{:?}{:?}", p.facts, p.selected, p.diags);
+        let hash: String = Sha256::digest(digest.as_bytes())
+            .iter()
+            .take(16)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let facts = p.facts.as_ref();
+        let edges: Vec<String> = p
+            .selected
+            .iter()
+            .filter_map(|&i| facts.map(|f| geom::fillet::edge_text(&f.edges[i])))
+            .collect();
+        lines.push_str(&format!(
+            "fillet {}: {} {}, {} of {} edges, facts {hash}\n",
+            p.edges_text,
+            p.kind.module(),
+            p.status.name(),
+            p.selected.len(),
+            facts.map_or(0, |f| f.edges.len()),
+        ));
+        for e in edges {
+            lines.push_str(&format!("  {e}\n"));
+        }
+    }
+    lines
 }
 
 /// `neoscad fmt` and `neoscad test` as a web worker runs them: with

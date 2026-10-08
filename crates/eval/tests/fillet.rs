@@ -283,7 +283,9 @@ fn argument_errors() {
 /// `part(name)` and `@anchor` in a selector need their own extensions.
 #[test]
 fn selector_atoms_of_other_extensions_need_their_flags() {
-    let src = "fillet_edges(1, \"part(lid) or @tip\") cube(10);";
+    // The child declares `tip`: with both flags on, the anchor resolves
+    // (an unknown one is an error since stage F1).
+    let src = "fillet_edges(1, \"part(lid) or @tip\") { cube(10); anchor(\"tip\", [0, 0, 10]); }";
     let o = run(src, on());
     let e = o.only(Severity::Error);
     assert_eq!(o.at(e[0]), "part(lid)");

@@ -190,6 +190,15 @@ impl Ctx<'_> {
             .unwrap_or_default()
     }
 
+    /// The last rendered run's fillet calls, when it read the document's
+    /// current text.
+    pub fn fillets(&self) -> &[Value] {
+        self.sketches
+            .as_ref()
+            .and_then(|f| f.fillets_for_text(self.file().text()))
+            .unwrap_or_default()
+    }
+
     /// The URI of a file: the client's own spelling for a file it has
     /// open (a client matches URIs as strings, and its percent-encoding
     /// may differ from ours), otherwise made from the path.
@@ -322,11 +331,21 @@ impl Server {
     /// Keep a run's sketches for the document at `path` (dropping an
     /// older run's, also when this one has none).
     fn keep_sketches(&self, path: &Path, text: Arc<[u8]>, log: &session::Log) {
+        let mut st = self.state();
+        let key = session::normal(path);
+        // Fillet reports come only from a run that rendered (a host's
+        // supplied log); the server's own runs only evaluate. One of
+        // those must not drop a rendered run's reports of the same text.
+        let fillets = match st.sketches.get(&key) {
+            Some(old) if log.fillets.count == 0 && *old.text == *text => old.fillets.clone(),
+            _ => log.fillets.clone(),
+        };
         let facts = sketch::Facts {
             text,
             sketches: log.sketches.clone(),
+            fillets,
         };
-        self.state().sketches.insert(session::normal(path), facts);
+        st.sketches.insert(key, facts);
     }
 
     /// Publish every due document whose text a supplied run read; the
@@ -488,6 +507,13 @@ impl Server {
                         ctx.file().source(),
                         &ctx.file().path,
                         ctx.sketches(),
+                        range,
+                    ));
+                    list.extend(sketch::pin_count_actions(
+                        uri,
+                        ctx.file().source(),
+                        &ctx.file().path,
+                        ctx.fillets(),
                         range,
                     ));
                 }

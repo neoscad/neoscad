@@ -43,10 +43,57 @@ impl Default for Tolerances {
 }
 
 /// Options for [`crate::reconstruct`].
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Default)]
 pub struct Options {
     /// Tolerances.
     pub tolerances: Tolerances,
+    /// Polled between the stages of reconstruction and once per face
+    /// while faces are checked: when it returns true, reconstruction
+    /// stops with [`Error::Stopped`]. A caller that reconstructs while a
+    /// user waits (an editor's preview) can then abandon a large model at
+    /// once instead of finishing work nobody will look at. `None` never
+    /// stops.
+    pub should_stop: Option<StopFn>,
+}
+
+/// A stop signal for [`Options::should_stop`].
+pub type StopFn = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+impl Options {
+    /// Whether [`Options::should_stop`] asks to stop.
+    pub(crate) fn stopped(&self) -> bool {
+        self.should_stop.as_ref().is_some_and(|f| f())
+    }
+
+    /// `Err(Stopped)` when [`Options::should_stop`] asks to stop.
+    pub(crate) fn poll(&self) -> Result<(), Failure> {
+        if self.stopped() {
+            return Err(Error::Stopped.into());
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for Options {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Options")
+            .field("tolerances", &self.tolerances)
+            .field("should_stop", &self.should_stop.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for Options {
+    /// Equal tolerances and the same stop signal (the same allocation, or
+    /// none on both sides): two closures cannot be compared otherwise.
+    fn eq(&self, o: &Options) -> bool {
+        self.tolerances == o.tolerances
+            && match (&self.should_stop, &o.should_stop) {
+                (None, None) => true,
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
 }
 
 /// The surface classes of the triangles, and per class its surface,
@@ -163,6 +210,7 @@ pub(crate) fn build(
     opts: &Options,
     use_contacts: bool,
 ) -> Result<Built, Failure> {
+    opts.poll()?;
     let nt = mesh.triangles.len();
     if nt == 0 {
         return Err(Error::InvalidInput("the mesh has no triangles".into()).into());
@@ -259,6 +307,7 @@ pub(crate) fn build(
     // 1. Surface classes.
     let cls = classes(mesh, &pos, &tris, &twin, tol)?;
     let tcls = &cls.of_tri;
+    opts.poll()?;
 
     // 2. Faces: connected triangles of one class.
     let mut uf = UnionFind::new(nt);
@@ -509,6 +558,7 @@ pub(crate) fn build(
         })
     };
 
+    opts.poll()?;
     // 6. Chains.
     const NONE: usize = usize::MAX;
     let mut he_chain: Vec<(usize, bool)> = vec![(NONE, false); 3 * nt];
@@ -741,6 +791,7 @@ pub(crate) fn build(
         }
     }
 
+    opts.poll()?;
     // 9. Loops: walk each face's boundary half-edges.
     topo.faces = (0..nf)
         .map(|f| TFace {

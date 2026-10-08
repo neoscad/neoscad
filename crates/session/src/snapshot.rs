@@ -61,6 +61,10 @@ pub struct SnapshotRequest {
     /// Draw the constrained sketch of this name (`--enable sketch`) flat,
     /// with its entities and constraints, instead of the model.
     pub sketch: Option<String>,
+    /// Draw a fillet or chamfer call's edges over the model (`--enable
+    /// fillet`): the call by its index (from 1) or its selector, as
+    /// `measure --fillet` takes it.
+    pub fillet: Option<String>,
 }
 
 impl SnapshotRequest {
@@ -77,6 +81,7 @@ impl SnapshotRequest {
             highlight: Vec::new(),
             issues: None,
             sketch: None,
+            fillet: None,
         }
     }
 }
@@ -388,6 +393,13 @@ impl Session {
                     .into(),
             ));
         }
+        if req.fillet.is_some() && (marking || req.diff.is_some() || req.sketch.is_some()) {
+            return Err(SnapshotError::Failed(
+                "--fillet draws one call's edges over the model: it cannot be combined with \
+                 --highlight, --issues, --diff or --sketch"
+                    .into(),
+            ));
+        }
         let (model, parts) = if req.issues.is_some() {
             self.render_parts(&req.run, &scheme)?
         } else {
@@ -424,6 +436,18 @@ impl Session {
                     crate::snapshot_sketch::sheet(found[0], &scheme)
                         .map_err(SnapshotError::Failed)?,
                 )
+            }
+        };
+        // A fillet call's edges, from the run's plans: an unknown call is
+        // the request's error, listing the calls.
+        let fillet = match &req.fillet {
+            None => None,
+            Some(which) => {
+                let r = &model.log.fillets;
+                let found = crate::fillets::find(&r.json, which).map_err(SnapshotError::Failed)?;
+                let at = r.json.iter().position(|v| std::ptr::eq(v, found));
+                at.and_then(|k| r.plans.get(k))
+                    .map(|p| (crate::fillets::overlay(p), found.clone()))
             }
         };
         let evaluate_ms = model.timings.parse + model.timings.evaluate;
@@ -507,6 +531,13 @@ impl Session {
         }
         let mut markers = Vec::new();
         let mut overlay = None;
+        let mut fillet_overlay = None;
+        if let Some(((o, line, l), json)) = fillet {
+            header.push(line);
+            legend = l;
+            summary.insert("fillet".into(), json);
+            fillet_overlay = Some(o);
+        }
         let (scene, is_2d) = if let Some(sk) = sketch {
             header.extend(sk.header);
             legend = sk.legend;
@@ -675,7 +706,7 @@ impl Session {
             legend,
             lighting: req.lighting,
             markers,
-            sketch: overlay,
+            sketch: overlay.or(fillet_overlay),
         };
         req.run.stage(crate::Stage::Draw);
         let (png, gpu_ms, draw_ms, encode_ms) = self.draw_sheet(&scene, &scheme, &sheet)?;

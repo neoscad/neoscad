@@ -130,6 +130,7 @@ pub fn list() -> Vec<Value> {
                 "highlight": {"type": "array", "items": {"type": "string"}, "description": "Parts in colour, rest ghosted"},
                 "issues": {"type": "boolean", "description": "Mark check findings"},
                 "sketch": {"type": "string", "description": "Sketch name: draw it flat with constraints"},
+                "fillet": {"type": "string", "description": "Fillet call (index from 1, or its selector): its edges drawn, selected ones numbered"},
                 "dims": {"type": "boolean", "description": "Label bbox sizes"},
                 "preview": {"type": "boolean", "description": "Show % and # modifiers"},
                 "output": {"type": "string", "description": "Also save it here"},
@@ -162,6 +163,7 @@ pub fn list() -> Vec<Value> {
                 "center": {"type": "array", "items": {"type": "number"}, "description": "Axis at [a, b]"},
                 "profile": {"type": "array", "items": {"type": "number"}, "description": "[from, to, step]"},
                 "sketch": {"type": "string", "description": "Sketch name: solved entities"},
+                "fillet": {"type": "string", "description": "Fillet call (index from 1, or its selector): its selected edges"},
             }),
             true,
         ),
@@ -821,6 +823,7 @@ impl Tools {
             "highlight": args.get("highlight").cloned().unwrap_or(json!([])),
             "issues": bool_arg(args, "issues"),
             "sketch": str_arg(args, "sketch"),
+            "fillet": args.get("fillet").cloned().unwrap_or(Value::Null),
             "parts": bool_arg(args, "parts") || m.parts,
             "defines": m.defines,
             "supersede": false,
@@ -1056,6 +1059,10 @@ impl Tools {
             text.push('\n');
             text.push_str(&session::sketches::line_text(sk));
         }
+        for f in r["fillets"].as_array().into_iter().flatten() {
+            text.push('\n');
+            text.push_str(&session::fillets::line_text(f));
+        }
         let log =
             json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"]});
         push_log(&mut text, &log);
@@ -1077,6 +1084,9 @@ impl Tools {
         if let Some(sk) = terse_sketches(&r["sketches"], &main) {
             s["sketches"] = sk;
         }
+        if let Some(list) = r["fillets"].as_array().filter(|l| !l.is_empty()) {
+            s["fillets"] = Value::Array(list.iter().map(|f| terse_fillet(f, &main)).collect());
+        }
         Ok((label(&imported, finish(args, text, s, r)), true))
     }
 
@@ -1086,7 +1096,7 @@ impl Tools {
         let imported = m.label.clone();
         let mut p = self.params(&m, args);
         for k in [
-            "part", "between", "section", "axis", "center", "profile", "sketch",
+            "part", "between", "section", "axis", "center", "profile", "sketch", "fillet",
         ] {
             if let Some(v) = args.get(k) {
                 p[k] = v.clone();
@@ -1094,7 +1104,7 @@ impl Tools {
         }
         // Asked for a section, a profile or a distance, the answer is that:
         // the model's own numbers (which `render` gives) are left out.
-        let focused = ["between", "section", "profile", "sketch"]
+        let focused = ["between", "section", "profile", "sketch", "fillet"]
             .iter()
             .any(|k| args.get(*k).is_some_and(|v| !v.is_null()));
         let r = self.run(id, "measure", &p);
@@ -1109,6 +1119,9 @@ impl Tools {
             }
             if let Some(sk) = r.get("sketch").filter(|v| v.is_object()) {
                 lines.push(session::measure::sketch_text(sk).trim_end().to_string());
+            }
+            if let Some(f) = r.get("fillet").filter(|v| v.is_object()) {
+                lines.push(session::measure::fillet_text(f).trim_end().to_string());
             }
             for part in r["parts"].as_array().into_iter().flatten() {
                 lines.push(solid_line(
@@ -1150,6 +1163,9 @@ impl Tools {
         put_echo(&mut s, &log["echo"]);
         if let Some(sk) = s.get("sketch").filter(|v| v.is_object()).cloned() {
             s["sketch"] = terse_place(&sk, &main);
+        }
+        if let Some(f) = s.get("fillet").filter(|v| v.is_object()).cloned() {
+            s["fillet"] = terse_fillet(&f, &main);
         }
         if let Some(e) = s.get("error").and_then(Value::as_str) {
             s["error"] = json!(crate::serve::param_names(e));
@@ -2043,6 +2059,18 @@ fn terse_place(v: &Value, main: &Path) -> Value {
                 *e = terse_place(e, main);
             }
         }
+    }
+    t
+}
+
+/// A fillet call's report as an agent reads it: where it is (file only
+/// when not the model), its selection and edges, without the editor's
+/// spans and the "Pin count" edit.
+fn terse_fillet(v: &Value, main: &Path) -> Value {
+    let mut t = terse_place(v, main);
+    if let Some(o) = t.as_object_mut() {
+        o.remove("pin");
+        o.remove("bbox");
     }
     t
 }

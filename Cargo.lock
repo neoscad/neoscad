@@ -1618,6 +1618,7 @@ name = "neoscad-geom"
 version = "0.5.0"
 dependencies = [
  "clipper2-rust",
+ "libm",
  "manifold-rust",
  "meshbrep",
  "neoscad-eval",

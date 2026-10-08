@@ -272,6 +272,16 @@ else is the same for the same input.
   entities free to move. An unknown name fails the snapshot with the
   names there are. `--sketch` cannot be combined with `--diff`,
   `--highlight` or `--issues`.
+- `fillet`, with `--fillet INDEX|SELECTOR` (and `--enable fillet`): one
+  call's `FILLET` (as `check` reports it), and the call's child drawn
+  with its edges over it: the selected ones bold and numbered as
+  `edges[].index` numbers them (red for an edge of a kind not blended
+  yet), the edges the selector named but that are never filleted
+  dashed, every other selectable edge thin. The lines are drawn over
+  the panels without hiding, so edges behind the model show too. The
+  mode stays `render` or `preview`. An unknown call fails the snapshot
+  with the calls there are. `--fillet` cannot be combined with
+  `--diff`, `--highlight`, `--issues` or `--sketch`.
 
 When the model (or the `--diff` model) cannot be loaded or evaluated
 (a syntax error, `--hardwarnings`), no sheet is written and the summary
@@ -550,6 +560,37 @@ as on the bed), at most 10 findings per code.
   (`sketch 'slot' (line 4): fully constrained, 12 unknowns`). The same
   JSON is in the failed form too, where a model with sketch errors that
   rendered nothing still lists them.
+- `fillets` (only when the model has `fillet_edges()` or
+  `chamfer_edges()` calls, `--enable fillet`; `docs/fillets.md`):
+  `[FILLET, ...]`, each call in tree order, at most 100
+  (`fillets_omitted` counts the rest; a call in a loop is one per
+  iteration). `FILLET`: `{"index": int (from 1), "module":
+  "fillet_edges"|"chamfer_edges", "r"|"d": number, "selector": string,
+  "except": string|null, "expect": int|null, "file", "line", "span",
+  "status": "selected" | "no-edges" | "count" | "unsupported" |
+  "no-brep" | "2d" | "empty", "matched": int, "edges": [EDGE, ...],
+  "edges_omitted"?: int, "unsupported": int, "skipped": [{"reason":
+  "polygon seam"|"tangent"|"faceted", "count", "module"?, "line"?},
+  ...], "selectable": int, "bbox": {"min", "max"}, "codes": [code,
+  ...], "pin"?: {"file", "line", "span", "text", "count"}}`. `selector`
+  and `except` are written as the `.csg` writes them (a string with its
+  quotes, a direction vector, or a list). `EDGE`: `{"index": int (from
+  1), "curve": "line"|"circle"|"ellipse"|"bspline", "sense":
+  "convex"|"concave"|"saddle", "angle": degrees of material at the
+  edge's middle (90 at a box's edge, 270 in an inside corner), "class":
+  "translational"|"rotational"|"other", "length", "center" (its centre
+  of mass), "from", "to", "closed"?: true, "direction"? (a line's),
+  "axis"? and "radius"? (a circle's), "faces": [kind, kind],
+  "children": [[int, ...], [int, ...]] (per face, the call's children
+  it came from), "parts"?: [[name, ...], [name, ...]], "status":
+  "selected"|"unsupported"}`, in the order the selection numbers them.
+  `pin` is the edit that writes `expect = matched` into the call (the
+  language server's "Pin count"), absent when `expect` already says so
+  or nothing was selected. Numbers are rounded to 1e-4. The text report
+  has a line per call (`fillet_edges at line 4: 4 edges (4 line,
+  convex, 90°), r 2, edges = "|z"`). The blends themselves are not built
+  yet (stage F2): the model is the children's union, and each call warns
+  `fillet-not-built`.
 - `timings_ms.check.cuts` is the `cut-away` and `cuts-nothing` stage,
   which runs on the node tree right after the render, before the mesh
   checks; `check.total` does not include it.
@@ -603,9 +644,10 @@ overhang.
 
 `neoscad measure MODEL.scad [--part P] [--between A B] [--section
 z=H|x=H|y=H] [--axis x|y|z] [--center A,B] [--profile FROM:TO:STEP]
-[--sketch NAME] [--svg FILE] [--enable part|sketch] [-D var=val]
-[--format json]` (`crates/session/src/measure.rs`). Exit status 0, or 1
-when the model fails or a named part or sketch does not exist (then
+[--sketch NAME] [--fillet INDEX|SELECTOR] [--svg FILE] [--enable
+part|sketch|fillet] [-D var=val] [--format json]`
+(`crates/session/src/measure.rs`). Exit status 0, or 1 when the model
+fails or a named part, sketch or fillet call does not exist (then
 `error` says which there are).
 
 ```json
@@ -613,7 +655,7 @@ when the model fails or a named part or sketch does not exist (then
  "model": SOLID|GEOM2D|null, "parts": [SOLID + {"name", "instances",
  "context"}, ...],
  "between": BETWEEN, "section": SECTION|null, "profile": PROFILE|null,
- "sketch": SKETCH,
+ "sketch": SKETCH, "fillet": FILLET,
  "timings_ms": {"evaluate", "geometry", "measure", "total"},
  "diagnostics": DIAG}
 ```
@@ -669,6 +711,12 @@ when the model fails or a named part or sketch does not exist (then
   (`pitch_span`: the first and last crest fitted). The pilot's M24x2
   adapter gives pitch 2 over crests 2..10 and radii 10.64..11.64 in
   the thread.
+- `fillet` (with `--fillet` and `--enable fillet`): one call's
+  `FILLET`, as `check` reports it, named by its `index` or by its
+  selector (`"|z"`, with or without the quotes). The text report has the
+  call's line, then a line per selected edge (`1. line (convex, 90°,
+  translational) at [0, 0, 10], 20 long, plane | plane`) and per group
+  of skipped edges.
 - `sketch` (with `--sketch NAME` and `--enable sketch`): the first
   sketch named `NAME`, as `check`'s `SKETCH` plus `"instances"` (how
   many sketches have that name) and `"entities": [ENTITY, ...]`, every
@@ -1042,3 +1090,8 @@ have them.
 - Language extensions, stage 7: `measure --sketch`'s entities gain
   `free` and its object `constraints`; `snapshot --sketch NAME` with
   the `sketch` mode and object. Additive.
+- Fillets, stage F1 (`docs/fillets.md`): `check`'s `fillets` and
+  `fillets_omitted` (only for a model with fillet calls), `measure
+  --fillet` and `snapshot --fillet` with their `fillet` object, and the
+  diagnostic codes `fillet-count`, `fillet-no-edges`, `fillet-skipped`,
+  `fillet-unsupported-edge`, `fillet-no-brep` and `fillet-2d`. Additive.

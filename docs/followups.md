@@ -2296,7 +2296,10 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   working copy and NeoSCAD keeps its path dependency; each milestone is
   copied to that repository (src/ and tests/ byte-identical), released
   there, and published. Once fillets settle, switch NeoSCAD to the
-  crates.io release as with sketch-solver.
+  crates.io release as with sketch-solver. Since 0.1.0 the working copy
+  has `Options::should_stop` and `Error::Stopped` (fillet stage F1,
+  `tests/stop.rs`): `Options` is no longer `Copy` and `Error` has a new
+  variant, so the next release is 0.2.0, not 0.1.1.
 Stage 1a of `docs/audits/exact-geometry-rust.md` is `crates/meshbrep`;
 stage 1b is `geom::exact` and `-o x.step` behind `--enable exact`; stage
 2 (extrusions, tori, `offset(r)`, sketch arcs) is `geom::exact::profile`
@@ -2595,38 +2598,64 @@ pass's leftovers first, then stage 1b's, then the crate's.
   not happened in the test models.
 
 ## Fillets and chamfers
-Stage F0 of `docs/fillets.md` is built: `--enable fillet`, the two
-builtins, the selector parser (`eval::fillet::selector`) and
-`NodeKind::Fillet`. What F0 leaves, beyond the later stages themselves:
+Stages F0 and F1 of `docs/fillets.md` are built: `--enable fillet`, the
+two builtins, the selector parser (`eval::fillet::selector`),
+`NodeKind::Fillet`, and the plan without geometry (`geom::fillet`: the
+child's B-rep, edge facts, selection; `session::fillets`: diagnostics
+and the `check`/`measure`/`snapshot` reports; "Pin count" in the
+language server). What they leave, beyond the later stages themselves:
 - **A failed call does not make an export exit non-zero yet** (decision
-  2). Argument and selector errors are `ERROR` lines and the call
-  becomes a group, but `run.rs` decides the exit code from fatal errors
-  only. F2's geometry failures need the same path, so wire both then
-  (`crates/cli/src/run.rs`, `render_frame` and `export_step`, and
-  `check`'s status).
-- **`child(i)` indices are not checked against the number of children**,
-  and `@name` is not resolved against the children's anchors (an
-  unknown anchor with the anchors that exist, 5.2 and 5.3). Both need
-  the instantiated children and belong with F1's selection; anchors
-  resolve in the evaluator, by `child_anchors()`'s walk, and their
-  points go on the node (and so into its key).
-- **A 2D child is not refused** (`fillet-2d`): the dimension is known
-  only when rendering, so it waits for F1's render of the child.
+  2). Argument and selector errors and F1's `fillet-count`,
+  `fillet-unsupported-edge`, `fillet-no-brep` and `fillet-2d` are
+  `ERROR` lines, but `run.rs` decides the exit code from fatal errors
+  only, and `check`'s `counts`/`exit_code` count its own findings, not
+  diagnostics. F2's geometry failures need the same path, so wire them
+  all then (`crates/cli/src/run.rs`, `render_frame` and `export_step`,
+  and `check`'s status).
 - **`fillet-not-built`** is a temporary code: retire it (or keep it only
   for edge classes still unbuilt, which `fillet-unsupported-edge` covers)
   when F2 lands, and make `Extension::implemented()` true for `fillet`
   then, so `serve` advertises it.
-- **`>>z` without an index is CadQuery's `-1`**, and which end of the
-  order index 0 is (CadQuery's `CenterNthSelector` with `directionMax`)
-  was not checked; F1 decides it against `cadquery/selectors.py`.
 - **The STEP export walk** treats the node as a leaf it cannot see into
-  (`geom::exact::walk::Walk::branch` returns `None`), so a filleted
-  model's STEP export facets that subtree today; F2 adds the walk.
-- **Surfaces** (F4): LSP completion inside selector strings, hover, the
-  "Pin count" action, MCP recipe, the apps' and /try's toggles, editor
-  colouring. Builtin completion offers `fillet_edges` and
-  `chamfer_edges` with the flag off, as it does `part` and `sketch`
-  (only the query names are gated, `crates/lsp/src/world.rs`).
+  (`geom::exact::walk::Walk::branch` returns `None` unless the walk is
+  the traced one selection uses), so a filleted model's STEP export
+  facets that subtree today; F2 adds the walk.
+- **`Limits::fillet_edges`** (section 10: edges selected per evaluation,
+  100,000 under `Limits::AGENT`) is not added. Selection is linear in
+  the edges and the B-rep is built under the request's time limit and
+  cancellation, so nothing runs away today; the limit matters once F2
+  generates a tool per edge.
+- **The facts cache ignores the limits.** `geom::fillet`'s cache on the
+  renderer is keyed by the children alone. A child whose export render
+  (finer than the normal one, up to 4 times the segments after a
+  topology mismatch) a tighter limit would stop is answered from the
+  cache when an earlier request under looser limits built it, where a
+  cold request reports nothing. Record the export render's demand with
+  the facts, as the geometry cache does (`evaluate.rs`, `Demand`).
+- **Polygon seams of `offset(r)` with `$fn`** (and of a sketch's or a
+  polygon's many short sides) are not tracked: the 2D walk records
+  which curves are sides of a `$fn` circle (`Walk::curve_polygon`), but
+  `attribute_offset` makes new curve entries for an offset's arcs, so a
+  `linear_extrude() offset(r = 2, $fn = 16) square(10)` has its arc
+  facets' edges selectable. Carry the polygon through
+  `exact::profile::attribute_offset`.
+- **Anchors in a `.csg` round trip.** `@name` is resolved onto the node
+  and written into its key only; the `.csg` has no anchors, so reading a
+  `.csg` of a call that uses `@name` back gives an unknown-anchor error.
+  Printing the resolved points as a hidden argument would fix it.
+- **The snapshot overlay is not depth-tested**: `snapshot --fillet`
+  draws every edge over the panels, so edges behind the model show
+  through. A hidden-line pass against the panel's depth (or dimming
+  back-facing edges) would make dense models readable.
+- **"Pin count" needs a rendered run**: the language server's own runs
+  only evaluate, so the action appears only after a host supplies a log
+  that rendered (`Server::supply_log`, as the apps do). An editor with
+  only `neoscad lsp --stdio` never sees it.
+- **Surfaces** (F4): LSP completion inside selector strings, hover, MCP
+  recipe, the apps' and /try's toggles, editor colouring. Builtin
+  completion offers `fillet_edges` and `chamfer_edges` with the flag
+  off, as it does `part` and `sketch` (only the query names are gated,
+  `crates/lsp/src/world.rs`).
 
 ## Structure
 - The tier 3 baseline needs the pinned nightly installed as its renderer.

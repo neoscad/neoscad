@@ -109,6 +109,30 @@ pub struct ExportMesh {
     /// The leaf nodes that made surfaces: module and source location,
     /// each location once.
     pub origins: Vec<(&'static str, Option<MsgLoc>)>,
+    /// Per entry of the mesh's surface table, where it came from in the
+    /// tree: filled by [`export_render_traced`] only (empty otherwise).
+    pub provenance: Vec<Provenance>,
+}
+
+/// Where one surface record of a traced export render came from: what
+/// fillet edge selection asks of a face (`docs/fillets.md`, section 5.1).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Provenance {
+    /// The index of the top node's child the record lies under (in
+    /// `children`, background ones counted); `None` when the top node is
+    /// itself the leaf.
+    pub child: Option<u32>,
+    /// The full dotted name of the innermost `part()` around it.
+    pub part: Option<String>,
+    /// The leaf node instance that made it, numbered in tree order: two
+    /// records from one leaf share it (a `for` loop's cubes do not).
+    pub leaf: u32,
+    /// For a facet of a polygon kept because `$fn` is set (a cylinder's
+    /// sides, a sphere's quads, the sides an extrusion sweeps from a
+    /// `$fn` circle), the polygon it belongs to: the edge between two
+    /// records of one polygon is a seam of the tessellation the user
+    /// asked for, not an edge of the shape they modelled.
+    pub polygon: Option<u32>,
 }
 
 /// How the export render builds `linear_extrude` and `rotate_extrude`.
@@ -158,7 +182,42 @@ pub fn export_render_with(
     mult: u32,
     extrusions: Extrusions,
 ) -> Result<ExportMesh, (Unsupported, Vec<Substitution>)> {
+    run_walk(renderer, top, keys, opts, mult, extrusions, false)
+}
+
+/// The export render of `top`'s children as one union (`top` is the
+/// fillet node whose child is to be selected on), with
+/// [`ExportMesh::provenance`] filled in. Fillet nodes are walked as the
+/// union of their children, which is what the normal render makes of
+/// them until their blends are built.
+pub fn export_render_traced(
+    renderer: &Renderer,
+    top: &Node,
+    keys: &Keys,
+    opts: &RenderOptions,
+    mult: u32,
+) -> Result<ExportMesh, (Unsupported, Vec<Substitution>)> {
+    run_walk(renderer, top, keys, opts, mult, Extrusions::Exact, true)
+}
+
+fn run_walk(
+    renderer: &Renderer,
+    top: &Node,
+    keys: &Keys,
+    opts: &RenderOptions,
+    mult: u32,
+    extrusions: Extrusions,
+    trace: bool,
+) -> Result<ExportMesh, (Unsupported, Vec<Substitution>)> {
     let mut w = Walk {
+        trace,
+        here: (None, None),
+        leaves: 0,
+        polygons: 0,
+        polygon_of: HashMap::new(),
+        curve_polygon: HashMap::new(),
+        pending_polygons: Vec::new(),
+        provenance: Vec::new(),
         renderer,
         keys,
         opts,
@@ -213,6 +272,7 @@ pub fn export_render_with(
         exact_extrusions: w.exact_extrusions,
         surface_origin: w.surface_origin,
         origins: w.origins,
+        provenance: w.provenance,
     })
 }
 
@@ -251,9 +311,27 @@ struct Walk<'a> {
     surface_origin: Vec<u32>,
     origins: Vec<(&'static str, Option<MsgLoc>)>,
     origin_index: HashMap<OriginKey, u32>,
+    /// [`export_render_traced`]: record [`Provenance`].
+    trace: bool,
+    /// The top's child and the innermost part of the leaf being built.
+    here: (Option<u32>, Option<String>),
+    /// Leaves built so far.
+    leaves: u32,
+    /// `$fn` polygons seen so far ([`Provenance::polygon`]).
+    polygons: u32,
+    /// Surface records that are facets of a `$fn` polygon, and which.
+    polygon_of: HashMap<usize, u32>,
+    /// 2D curve-table entries that are sides of a `$fn` circle, and which
+    /// polygon: an extrusion's side planes inherit it.
+    curve_polygon: HashMap<u32, u32>,
+    /// Surfaces of the primitive about to be placed that belong to a
+    /// polygon: (index in its own table, polygon), taken by `place`.
+    pending_polygons: Vec<(u32, u32)>,
+    /// See [`ExportMesh::provenance`].
+    provenance: Vec<Provenance>,
 }
 
-fn loc_of(n: &Node) -> Option<MsgLoc> {
+pub(crate) fn loc_of(n: &Node) -> Option<MsgLoc> {
     n.origin.as_ref().map(|o| MsgLoc {
         unit: o.unit,
         span: o.span,
@@ -504,7 +582,20 @@ impl Walk<'_> {
                         kids: Vec::with_capacity(n.children.len()),
                         next: 0,
                     }),
-                    None => done = Some(self.leaf_traced(n, &m)?),
+                    None => {
+                        if self.trace {
+                            // The waiting nodes are the leaf's ancestors:
+                            // the bottom one is the top, whose `next`
+                            // has just moved past the child being built.
+                            let child = stack.first().map(|w| (w.next - 1) as u32);
+                            let part = stack.iter().rev().find_map(|w| match &w.n.kind {
+                                NodeKind::Part { name } => Some(name.clone()),
+                                _ => None,
+                            });
+                            self.here = (child, part);
+                        }
+                        done = Some(self.leaf_traced(n, &m)?)
+                    }
                 }
             }
             if let Some(r) = done {
@@ -549,6 +640,11 @@ impl Walk<'_> {
                 Some((OpType::Intersect, *m))
             }
             NodeKind::Csg(CsgOp::Difference) => Some((OpType::Subtract, *m)),
+            // A traced walk selects on a fillet's child, whose own nested
+            // fillets are still the union of their children (their blends
+            // are not built). The STEP export leaves them to the normal
+            // render, as before.
+            NodeKind::Fillet(_) if self.trace => Some((OpType::Add, *m)),
             NodeKind::Transform { matrix, .. } => {
                 let next = mul(m, matrix);
                 let d = det3(&next);
@@ -565,7 +661,24 @@ impl Walk<'_> {
     /// [`Walk::leaf`], recording `n` as the origin of every surface it
     /// adds to the table.
     fn leaf_traced(&mut self, n: &Node, m: &Matrix) -> Result<Res, Unsupported> {
-        let r = self.leaf(n, m)?;
+        let base = self.surfaces.len();
+        let r = self.leaf(n, m);
+        // Marks for a primitive that was delegated after all are void.
+        self.pending_polygons.clear();
+        let r = r?;
+        if self.trace {
+            let (child, part) = self.here.clone();
+            let leaf = self.leaves;
+            self.leaves += 1;
+            for s in base..self.surfaces.len() {
+                self.provenance.push(Provenance {
+                    child,
+                    part: part.clone(),
+                    leaf,
+                    polygon: self.polygon_of.get(&s).copied(),
+                });
+            }
+        }
         if self.surface_origin.len() < self.surfaces.len() {
             let module = module_name(&n.kind);
             let loc = loc_of(n);
@@ -838,6 +951,9 @@ impl Walk<'_> {
         let base = self.surfaces.len() as u64;
         self.surfaces
             .extend(t.surfaces.iter().map(|s| transform_surface(s, m, scale)));
+        for (s, p) in std::mem::take(&mut self.pending_polygons) {
+            self.polygon_of.insert(base as usize + s as usize, p);
+        }
         let flip = det3(m) < 0.0;
         let positions: Vec<f64> = t.positions.iter().flat_map(|&p| apply(m, p)).collect();
         let tri_verts: Vec<u64> = t
@@ -886,6 +1002,13 @@ impl Walk<'_> {
         let base = self.surfaces.len();
         let mut tri_verts = Vec::new();
         let mut face_id = Vec::new();
+        // The polygon's facets, for fillet selection: a sphere's every
+        // face, a cylinder's sides but not its caps (whose rims are
+        // edges of the modelled shape). A cap is the face whose normal,
+        // before the transform, is the cylinder's axis.
+        let polygon = self.polygons;
+        self.polygons += 1;
+        let cylinder = matches!(n.kind, NodeKind::Cylinder { .. });
         let scale = pts
             .iter()
             .flat_map(|p| p.iter().map(|x| x.abs()))
@@ -899,6 +1022,17 @@ impl Walk<'_> {
             let nrm = crate::polyset::newell(&poly);
             let l = norm(nrm);
             let id = (self.surfaces.len()) as u64;
+            if self.trace {
+                let cap = cylinder && {
+                    let local: Vec<[f64; 3]> = f.iter().map(|&i| ps.vertices[i as usize]).collect();
+                    let ln = crate::polyset::newell(&local);
+                    let ll = norm(ln);
+                    ll > 0.0 && ln[2].abs() >= ll * (1.0 - 1e-12)
+                };
+                if !cap {
+                    self.polygon_of.insert(self.surfaces.len(), polygon);
+                }
+            }
             if l > 0.0 {
                 let nrm = nrm.map(|x| x / l);
                 let o = poly[0];

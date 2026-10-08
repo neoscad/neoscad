@@ -143,6 +143,9 @@ pub(crate) struct Post {
     /// `if`: its arguments are on top of `heap_args`, kept alive until
     /// now, as its native frame holds them, for the memory estimate.
     args: bool,
+    /// `fillet_edges()`/`chamfer_edges()`: check the selectors against
+    /// the children (`Evaluator::fillet_close`).
+    fillet: bool,
     /// The stack mark of the builtin's own frame (its parameters, or a
     /// `let`'s variables), or `NO_MARK`.
     mark: usize,
@@ -156,6 +159,7 @@ const PLAIN: Post = Post {
     part: false,
     sketch: 0,
     args: false,
+    fillet: false,
     mark: NO_MARK,
 };
 
@@ -279,6 +283,9 @@ impl<'a> Evaluator<'a> {
                 }
                 let mut node = self.heap_nodes.pop().expect("a builtin's node");
                 let r = r.map(|kids| node.children = kids);
+                if post.fillet && r.is_ok() {
+                    self.fillet_close(&mut node);
+                }
                 if post.part {
                     self.part_stack.pop();
                 }
@@ -851,6 +858,7 @@ impl<'a> Evaluator<'a> {
                 let node = self.new_node(kind, sr, i);
                 let post = Post {
                     mark: p.mark,
+                    fillet: true,
                     ..PLAIN
                 };
                 self.begin_wrap(node, post, sr, i, ctx)

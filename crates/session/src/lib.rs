@@ -58,6 +58,7 @@ mod docfs;
 pub mod docs;
 pub mod exact;
 pub mod export;
+pub mod fillets;
 pub mod format;
 pub mod measure;
 pub mod memory;
@@ -392,6 +393,10 @@ pub struct Log {
     /// ([`sketches`]): the first [`sketches::MAX_SKETCHES`], and how many
     /// there were in all.
     pub sketches: Arc<(Vec<Value>, usize)>,
+    /// The fillet and chamfer calls the render selected edges for, as
+    /// JSON ([`fillets`]): the first [`fillets::MAX_FILLETS`], and how
+    /// many there were. Empty for a request that did not render.
+    pub fillets: Arc<fillets::Reports>,
 }
 
 impl Log {
@@ -868,6 +873,8 @@ struct Pipe {
     inputs: Vec<orient::InputIssue>,
     /// The evaluation's sketches ([`Log::sketches`]).
     sketches: Arc<(Vec<Value>, usize)>,
+    /// The render's fillet plans ([`Log::fillets`]).
+    fillets: Arc<fillets::Reports>,
 }
 
 /// The core. See the crate documentation.
@@ -1427,6 +1434,7 @@ impl Session {
             fs: Arc::new(docfs::Recorder::new(self.fs.clone())),
             inputs: Vec::new(),
             sketches: Arc::default(),
+            fillets: Arc::default(),
         }
     }
 
@@ -1444,6 +1452,7 @@ impl Session {
             lines,
             names: Arc::new(names),
             sketches: pipe.sketches.clone(),
+            fillets: pipe.fillets.clone(),
         }
     }
 
@@ -1461,6 +1470,7 @@ impl Session {
                 lines,
                 names: Arc::new(names),
                 sketches: pipe.sketches.clone(),
+                fillets: pipe.fillets.clone(),
             },
             pipe.timings,
         )
@@ -1810,10 +1820,11 @@ impl Session {
             .get(&doc)
             .filter(|p| p.key == key)
             .cloned();
+        let opts = Self::render_options(pipe, loaded, scheme, mode, job, fonts);
         let product = match reuse {
             Some(p) => p,
             None => {
-                let opts = Self::render_options(pipe, loaded, scheme, mode, job, fonts);
+                let opts = opts.clone();
                 let built = if mode == Mode::Preview {
                     geom::csg::CsgTree::build(top, &renderer, &keys, opts, csg_limit).map(|t| {
                         let messages = t.messages.clone();
@@ -1873,6 +1884,22 @@ impl Session {
             _ => None,
         };
         self.report_inputs(pipe, loaded, top, &import_mesh, Some(&keys));
+        // Fillet calls select edges on their children's B-rep, which
+        // takes the geometry (`fillets`); a model without one skips this.
+        if fillets::any(top) {
+            pipe.fillets = Arc::new(fillets::report(
+                &mut pipe.con,
+                top,
+                &renderer,
+                &keys,
+                &opts,
+                &|u| loaded.unit_program(u),
+                &pipe.paths.cwd,
+            ));
+            if job.stopped() {
+                return Err(self.interrupted(pipe, loaded, job));
+            }
+        }
         pipe.timings.geometry = self.now() - t;
         let stats = renderer.stats();
         Ok((product, stats, renderer, keys))

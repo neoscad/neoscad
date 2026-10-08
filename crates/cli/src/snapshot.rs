@@ -82,6 +82,13 @@ pub(crate) struct Args {
     #[arg(long, value_name = "NAME", conflicts_with_all = ["diff", "highlight", "issues"])]
     sketch: Option<String>,
 
+    /// Draw a fillet or chamfer call's edges over the model (`--enable
+    /// fillet`): selected ones bold and numbered, skipped ones dashed,
+    /// the others thin. The call by its number in `check`'s `fillets`
+    /// (from 1) or by its selector (`"|z"`).
+    #[arg(long, value_name = "INDEX|SELECTOR", conflicts_with_all = ["diff", "highlight", "issues", "sketch"])]
+    fillet: Option<String>,
+
     /// `part`: neoscad's `part("name") { ... }` extension; parts are then
     /// drawn in colours with a legend. `sketch`: constrained sketches.
     #[arg(long, value_name = "FEATURE", action = clap::ArgAction::Append)]
@@ -126,6 +133,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
         "highlight": a.highlight,
         "issues": a.issues,
         "sketch": a.sketch,
+        "fillet": a.fillet,
         "enable": a.enable,
         "json": match a.format.as_deref() {
             None => false,
@@ -225,6 +233,7 @@ pub fn request(
         highlight: strings("highlight"),
         issues,
         sketch: s("sketch").map(str::to_string),
+        fillet: crate::measure::fillet_param(params),
     })
 }
 

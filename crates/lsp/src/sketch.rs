@@ -88,6 +88,9 @@ pub fn snippet(name: &str) -> Option<&'static str> {
 pub struct Facts {
     pub text: Arc<[u8]>,
     pub sketches: Arc<(Vec<Value>, usize)>,
+    /// The run's fillet calls (`--enable fillet`), for "Pin count";
+    /// empty when the run did not render.
+    pub fillets: Arc<session::fillets::Reports>,
 }
 
 impl Facts {
@@ -95,6 +98,49 @@ impl Facts {
     pub fn for_text(&self, text: &[u8]) -> Option<&[Value]> {
         (*self.text == *text).then_some(&self.sketches.0[..])
     }
+
+    /// The fillet calls' reports, if `text` is the text the run read.
+    pub fn fillets_for_text(&self, text: &[u8]) -> Option<&[Value]> {
+        (*self.text == *text).then_some(&self.fillets.json[..])
+    }
+}
+
+/// The title of the "Pin count" action.
+pub const PIN_COUNT_TITLE: &str = "Pin count";
+
+/// `textDocument/codeAction`'s refactorings for fillet calls: "Pin count:
+/// expect = N" for the call the range is in, writing the number of edges
+/// the last run selected (`docs/fillets.md`, section 5.4), so a later
+/// change that makes the selector match other edges is an error.
+pub fn pin_count_actions(
+    uri: &str,
+    src: &SourceFile,
+    path: &Path,
+    fillets: &[Value],
+    range: (u32, u32),
+) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for f in around(src, path, fillets, range) {
+        let Some(pin) = f.get("pin") else {
+            continue;
+        };
+        if !in_file(pin, path) {
+            continue;
+        }
+        let Some(span) = span_of(src, pin) else {
+            continue;
+        };
+        let title = format!("{PIN_COUNT_TITLE}: expect = {}", pin["count"]);
+        if out.iter().any(|a| a["title"] == json!(title)) {
+            continue;
+        }
+        out.push(json!({
+            "title": title,
+            "kind": "refactor.rewrite",
+            "edit": {"changes": {uri: [{"range": proto::range(src, span), "newText": pin["text"]}]}},
+        }));
+    }
+    out
 }
 
 /// Whether a fact (a sketch, an entity, an edit) is in the file `path`.

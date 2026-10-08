@@ -72,7 +72,7 @@ use std::fmt;
 
 pub use measure::{Measure, measure};
 pub use model::*;
-pub use reconstruct::{Options, Tolerances};
+pub use reconstruct::{Options, StopFn, Tolerances};
 pub use step::{StepOptions, write_step};
 pub use tangency::find_tangencies;
 pub use validate::{Validation, validate};
@@ -98,6 +98,8 @@ pub enum Error {
     /// finer attribution mesh usually cures the first; the caller owns the
     /// tessellation, so retrying is the caller's.
     TopologyMismatch(String),
+    /// [`Options::should_stop`] asked reconstruction to stop.
+    Stopped,
 }
 
 impl fmt::Display for Error {
@@ -110,6 +112,7 @@ impl fmt::Display for Error {
             Error::TopologyMismatch(s) => {
                 write!(f, "the mesh's topology differs from the exact model's: {s}")
             }
+            Error::Stopped => write!(f, "stopped by the caller"),
         }
     }
 }
@@ -165,17 +168,29 @@ pub fn reconstruct_located(mesh: &TaggedMesh, options: &Options) -> Result<Brep,
 fn reconstruct_with(mesh: &TaggedMesh, options: &Options, contacts: bool) -> Result<Brep, Failure> {
     let built = reconstruct::build(mesh, options, contacts)?;
     let mut topo = built.topo;
+    options.poll()?;
     let max_pcurve = seams::parametrise(&mut topo, built.scale, options.tolerances.fit)?;
+    options.poll()?;
     let max_edge = topo.edges.iter().map(|e| e.dev).fold(0.0, f64::max);
     let mut b = assemble(topo);
     let touch_tol = options.tolerances.fit.max(1e-9 * built.scale);
+    let mut stopped = false;
     let folded: Vec<(usize, String)> = (0..b.faces.len())
         .filter_map(|f| {
+            // Once per face: each check walks the face's loops, which is
+            // most of the time left on a large model.
+            if stopped || options.stopped() {
+                stopped = true;
+                return None;
+            }
             validate::face_crossing(&b, f)
                 .or_else(|| validate::face_touch(&b, f, touch_tol))
                 .map(|m| (f, m))
         })
         .collect();
+    if stopped {
+        return Err(Error::Stopped.into());
+    }
     if !folded.is_empty() {
         // The first few: a rotated Menger sponge has dozens, and the
         // message ends up in a user's report.

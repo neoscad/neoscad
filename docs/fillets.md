@@ -1,9 +1,12 @@
 # Design: 3D fillets and chamfers (`--enable fillet`)
 
-Status: stage F0 built (the flag, both builtins, the selector parser and
-the node; section 15.1 records how, and where it departs from this
-text); F1 onwards not started. A call checks its arguments and passes its
-children through unchanged with a `fillet-not-built` warning. Written
+Status: stages F0 and F1 built (the flag, both builtins, the selector
+parser and the node; then the plan without geometry: the child's B-rep,
+per-edge facts, selection, and the reports in `check`, `measure` and
+`snapshot`; sections 15.1 and 15.2 record how, and where they depart
+from this text); F2 onwards not started. A call reports its selection
+and passes its children through unchanged with a `fillet-not-built`
+warning ("selection only", as the plan allows). Written
 2026-10-08 against `127be03` and the reference checkouts in
 `.reference/openscad` and `.reference/BOSL2`.
 Claims about this codebase cite `path:line`; claims about OpenSCAD and
@@ -946,6 +949,121 @@ F0–F4: 9–13.5 person-weeks.
 - **Not in F0** (`docs/followups.md`, "Fillets and chamfers"): export
   exit codes for a failed call, `child(i)` range checks and anchor
   resolution, the 2D-child error.
+
+### 15.2 Stage F1 as built
+
+- **The child's B-rep.** `geom::fillet` (`crates/geom/src/fillet/`)
+  export-renders the call's children with
+  `geom::exact::walk::export_render_traced`, which walks the fillet node
+  as the union of its children and records per surface record a
+  `Provenance`: the call's child it lies under (an index into the node's
+  children, `%` ones counted), the innermost `part()`'s dotted name, the
+  leaf instance (numbered in tree order, so a `for` loop's cubes differ),
+  and for a facet of a `$fn` polygon which polygon. Nested fillet nodes
+  are walked as unions too (their blends are not built), and the STEP
+  export still leaves the node to the normal render. Then
+  `meshbrep::reconstruct_located`, retried at 2 and 4 times the segments
+  after a topology mismatch, as the STEP export does. The facts are
+  cached on the `Renderer` (32 entries) by the children's keys and `%`
+  flags, so the selector, `expect` and anchors are not part of that key.
+  An interrupted request is not cached.
+- **Cancellation.** `meshbrep::Options` gained `should_stop`
+  (`Option<Arc<dyn Fn() -> bool + Send + Sync>>`), polled between
+  reconstruction's stages and once per face in its final face checks,
+  ending in the new `Error::Stopped`. `Options` is no longer `Copy`, and
+  `Error` has a variant more, so the next meshbrep release is 0.2
+  (`docs/followups.md`, "Exact geometry"). The fillet pass sets it from
+  the request's interrupt flag and limit guard.
+- **Per-edge facts.** For every B-rep edge that is not a periodic
+  face's seam: the curve kind; the sense from the two faces' outward
+  normals at five points along it (`(n_A × n_B) · d_A > 0` is convex,
+  `d_A` the edge's direction in face A's loop), smooth where the normals
+  agree within 1e-7, saddle where the sign changes; the material angle at
+  the middle; the class (lines between planes or cylinders parallel to
+  them; circles whose faces are planes perpendicular to the axis, or
+  cylinders, cones, spheres and tori on it); length; centre of mass;
+  ends; the two faces' kinds, children, parts and leaves; and a polyline
+  for drawing and for `box()`. Normals and points use `libm`'s sines, so
+  the facts are the same bits on wasm32. Edges are numbered in the order
+  (class, curve, centre, length).
+- **Never selected** (5.1): edges with a faceted face, polygon seams (two
+  faces sharing a `$fn` polygon: a cylinder's sides but not its caps, a
+  sphere's facets, the side planes `linear_extrude` and `rotate_extrude`
+  sweep from a `$fn` circle, and every facet of a `$fn` `rotate_extrude`),
+  and tangent edges. A `$fn` cylinder's rims stay real edges: the user
+  asked for that prism. Seams of `offset(r)` with `$fn` and of other
+  polygons with many short sides are not tracked (`docs/followups.md`).
+- **Selection.** `all` and `not` range over the selectable edges; every
+  other atom tests every edge, so only an atom that names an edge can
+  report it skipped (`fillet-skipped`, info, grouped by reason and
+  leaf). `>z`, `>>z[i]` follow CadQuery's `CenterNthSelector` as its
+  code has it (`cadquery/selectors.py`, `_NthSelector.filter` and
+  `cluster`, retrieved 2026-10-08): centres projected on the direction
+  and sorted ascending, clustered by distance from each cluster's first
+  key (tolerance 1e-6 of the box diagonal), reversed for `<`/`<<`, then
+  indexed. So `>>z[0]` is the bottom group, `>>z[-1]` (and `>z`) the top
+  one, and `<<z[0]` the top one; an index past the end matches nothing
+  (CadQuery raises). This settles the F0 followup. `child(i, j)` with
+  `i ≠ j` is narrower than "a face of each": one face must be `i`'s and
+  not `j`'s, the other `j`'s and not `i`'s. Coplanar faces of two
+  children merge into one face with both, and with the looser rule the
+  L-bracket's flush legs (12.1) matched all fifteen of its edges instead
+  of the inner corner. `new` likewise needs faces with no leaf in
+  common. `part(name)` matches the part and the parts nested in it.
+  `@name` matches edges within the tolerance of the anchor's point and,
+  with a direction, lines parallel to it or circles whose axis is.
+  BOSL2 vectors use the export render's bounding box.
+- **Anchors and child indices** are checked when the call's children
+  have been instantiated (`Evaluator::fillet_close`): a `child(i)` past
+  the children, or an `@name` no child declares, is a `fillet-selector`
+  error at the call listing what exists, and the call becomes a group.
+  Anchors are looked for among the children and on the call itself (an
+  `anchor()` written directly in the call's body lands there). The
+  resolved anchors are stored on the node and written into its key, not
+  into the `.csg` (which has no anchors), so a `.csg` round trip of a
+  call using `@name` fails to resolve it. `fillet-not-built` is now said
+  at this point, after the children's own messages.
+- **Diagnostics** (section 8), at the call: `fillet-count` (error; the
+  selection listed, up to 8 edges, and a hint whose edit writes the
+  matched count into `expect`), `fillet-no-edges` (warning, not when
+  `expect = 0`), `fillet-skipped` (info), `fillet-unsupported-edge`
+  (warning under `edges = "all"`, written or by default, else error;
+  class "other" or a saddle), `fillet-no-brep` and `fillet-2d` (errors).
+  Empty children say nothing. They print as OpenSCAD-style lines from
+  every host: `session::fillets::report` runs after the render in the
+  session (`Session::build`, so `check`, `measure`, `snapshot`, preview
+  and export requests alike) and on the command line (`run.rs`), only
+  for a tree that has a fillet node.
+- **Reports.** `check`'s `fillets` (one object per call, the selected
+  edges, the skipped ones by reason, `codes`, and `pin`, the "Pin count"
+  edit) and a text line per call; `measure --fillet INDEX|SELECTOR`;
+  `snapshot --fillet INDEX|SELECTOR`, the selected edges bold and
+  numbered over the model through the sketch overlay
+  (`render::snapshot::SketchOverlay`, not depth-tested, so hidden edges
+  show), skipped ones dashed, the others thin. The same through `serve`
+  (the commands' parameters) and MCP (`fillet` on `measure` and
+  `snapshot`; `check`'s text and structured content list the calls).
+  Shapes are in `docs/cli-json.md`.
+- **"Pin count".** The language server offers it as a refactoring on a
+  call when a host has supplied a rendered run's log for the document's
+  current text (`Server::supply_log`, as the apps do); its own runs only
+  evaluate, so they keep a rendered run's reports of the same text
+  rather than drop them. On a wrong `expect`, the same edit is the
+  `fillet-count` diagnostic's quick fix.
+- **Corrections to this text.** Section 12.2's lid: `child(0, 1)` is
+  also the lip's *inner* wall where it stands on the lid, so the call
+  selects eight concave lines (with the lip's own corner fillets unbuilt)
+  where the text describes only the outer outline;
+  `"child(0, 1) and not box(...)"` around the inside picks the outer
+  four. And until F2 builds blends, a call nested around another (12.1's
+  outer call, 12.2's top outline) selects on the inner call's
+  *unrounded* child: 12.2's `>z` is four lines, not the chain of lines
+  and arcs it will be.
+- **Not in F1:** `Limits::fillet_edges`, export exit codes for a failed
+  call and `check`'s status (`check` counts its own findings; a
+  `fillet-count` error is in `diagnostics` but not in `counts`), LSP hover
+  and completion, and the blends (`docs/followups.md`, "Fillets and
+  chamfers").
 
 ## 16. Test plan
 

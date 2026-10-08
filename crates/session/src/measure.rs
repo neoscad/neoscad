@@ -242,6 +242,9 @@ pub struct MeasureRequest {
     /// A constrained sketch's solved values, by its `name`
     /// (`--enable sketch`; `docs/language-extensions.md`, section 4.8).
     pub sketch: Option<String>,
+    /// A fillet or chamfer call's selection, by its index (from 1) or
+    /// its selector (`--enable fillet`; `docs/fillets.md`, section 11).
+    pub fillet: Option<String>,
 }
 
 impl MeasureRequest {
@@ -255,6 +258,7 @@ impl MeasureRequest {
             axis: Axis::default(),
             profile: None,
             sketch: None,
+            fillet: None,
         }
     }
 }
@@ -942,6 +946,13 @@ impl Session {
             };
             out.insert("sketch".into(), sketch_json(&found));
         }
+        if let Some(which) = &req.fillet {
+            let found = match crate::fillets::find(&model.log.fillets.json, which) {
+                Ok(f) => f.clone(),
+                Err(e) => return Ok(fail(model.log, 1, Some(e))),
+            };
+            out.insert("fillet".into(), found);
+        }
         let part_json: Vec<Value> = parts
             .iter()
             .filter(|p| chosen.is_none_or(|c| is_within(&p.name, c)))
@@ -1061,6 +1072,34 @@ pub fn sketch_text(s: &Value) -> String {
     out
 }
 
+/// The text of `measure --fillet`: the call's summary, then a line per
+/// selected edge and per group of skipped ones.
+pub fn fillet_text(f: &Value) -> String {
+    let mut out = crate::fillets::line_text(f);
+    out.push('\n');
+    for e in f["edges"].as_array().into_iter().flatten() {
+        out.push_str("  ");
+        out.push_str(&crate::fillets::edge_text(e));
+        out.push('\n');
+    }
+    if let Some(n) = f["edges_omitted"].as_u64() {
+        out.push_str(&format!("  ... and {n} more edges\n"));
+    }
+    for s in f["skipped"].as_array().into_iter().flatten() {
+        let of = match (s["module"].as_str(), s["line"].as_u64()) {
+            (Some(m), Some(l)) => format!(" of {m}() at line {l}"),
+            (Some(m), None) => format!(" of {m}()"),
+            _ => String::new(),
+        };
+        out.push_str(&format!(
+            "  skipped: {} {}{of}\n",
+            s["count"],
+            s["reason"].as_str().unwrap_or("")
+        ));
+    }
+    out
+}
+
 /// The human-readable report of a measurement.
 pub fn text(summary: &Value) -> String {
     let n = |v: &Value| render::snapshot::number(v.as_f64().unwrap_or(0.0));
@@ -1100,6 +1139,9 @@ pub fn text(summary: &Value) -> String {
     };
     if let Some(s) = summary.get("sketch") {
         out.push_str(&sketch_text(s));
+    }
+    if let Some(f) = summary.get("fillet") {
+        out.push_str(&fillet_text(f));
     }
     if summary["model"].is_null() {
         out.push_str(&format!("{input}: empty\n"));

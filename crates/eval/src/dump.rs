@@ -365,6 +365,26 @@ impl Writer<'_> {
                 }
                 self.lit(", ");
                 self.disc(&f.disc);
+                // The resolved anchors are in the key only: the `.csg`
+                // carries no anchors, and selection depends on where they
+                // are, so two calls whose `@lip` sits in different places
+                // must not share a cached plan.
+                if self.style == Style::Key {
+                    for a in &f.anchors {
+                        self.lit(",@");
+                        self.quoted(&a.name);
+                        for x in a.point {
+                            self.lit(",");
+                            self.num(x);
+                        }
+                        if let Some(d) = a.dir {
+                            for x in d {
+                                self.lit(",");
+                                self.num(x);
+                            }
+                        }
+                    }
+                }
                 self.lit(")");
             }
             NodeKind::Fill => self.lit("fill()"),

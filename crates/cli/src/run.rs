@@ -807,6 +807,19 @@ fn render_frame<W: Write>(
             &paths.cwd,
         );
     }
+    // Fillet calls (`--enable fillet`) select their edges on the rendered
+    // children and say what they selected, as every other host does.
+    if (rendered.is_some() || tree.is_some()) && session::fillets::any(top) {
+        session::fillets::report(
+            con,
+            top,
+            renderer,
+            &keys,
+            &opts,
+            &|u| unit_program(loaded, u),
+            &paths.cwd,
+        );
+    }
     let cache_entries = rendered.as_ref().map_or(0, |r| r.cache_entries);
     // A preview (no `rendered`) reports an empty cache, as its entry count
     // already does; the budget is the renderer's either way.

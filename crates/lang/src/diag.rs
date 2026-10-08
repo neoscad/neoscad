@@ -185,6 +185,21 @@ pub enum DiagCode {
     /// A fillet or chamfer call whose geometry this version does not
     /// build yet: the children are rendered unchanged (warning).
     FilletNotBuilt,
+    /// A fillet call matched a different number of edges than its
+    /// `expect` (error).
+    FilletCount,
+    /// A fillet call whose selector matched no edge (warning).
+    FilletNoEdges,
+    /// Edges a selector named that are never filleted: polygon seams,
+    /// tangent edges, edges of faceted regions (info).
+    FilletSkipped,
+    /// Selected edges of a kind the blends do not cover (error, or a
+    /// warning under the default `edges = "all"`).
+    FilletUnsupportedEdge,
+    /// A fillet call whose child has no B-rep to select edges on.
+    FilletNoBrep,
+    /// A fillet call on 2D children.
+    Fillet2d,
 }
 
 impl DiagCode {
@@ -251,6 +266,12 @@ impl DiagCode {
             DiagCode::QueryUnavailable => "query-unavailable",
             DiagCode::FilletSelector => "fillet-selector",
             DiagCode::FilletNotBuilt => "fillet-not-built",
+            DiagCode::FilletCount => "fillet-count",
+            DiagCode::FilletNoEdges => "fillet-no-edges",
+            DiagCode::FilletSkipped => "fillet-skipped",
+            DiagCode::FilletUnsupportedEdge => "fillet-unsupported-edge",
+            DiagCode::FilletNoBrep => "fillet-no-brep",
+            DiagCode::Fillet2d => "fillet-2d",
         }
     }
 }

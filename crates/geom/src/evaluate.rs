@@ -211,6 +211,10 @@ pub struct Renderer {
     /// IDs each block turned out to need beyond [`BLOCK`], so the next tree
     /// pass reserves enough (see [`Overflow`]).
     needs: Mutex<Needs>,
+    /// The edge facts of recent fillet children ([`crate::fillet`]), by
+    /// their children's keys, most recently used last: one export render
+    /// and reconstruction per distinct child, however many requests ask.
+    pub(crate) fillet_facts: Mutex<crate::fillet::FactsCache>,
     /// Worker threads with the evaluator's stack size: the tree walk
     /// recurses once per level, and trees from recursive modules are as
     /// deep as the evaluator allowed, far beyond a default 2 MiB stack.
@@ -1213,6 +1217,11 @@ impl Renderer {
             budget,
             ..Cache::default()
         };
+        drop(c);
+        self.fillet_facts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     /// A preview product kept by [`Renderer::keep_product`] or

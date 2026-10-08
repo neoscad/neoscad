@@ -35,6 +35,10 @@ manifold-rust = { version = "=0.16.0", default-features = false }
 # Exact B-rep reconstruction and the STEP writer behind `--enable exact`
 # (`exact`); MIT OR Apache-2.0, pure Rust, no NeoSCAD dependency.
 meshbrep = { path = "../meshbrep" }
+# Sines and cosines of fillet edge facts (`fillet`), so the numbers a
+# report prints and the selection decisions made from them are the same
+# bits natively and on wasm32. Already in the build through `meshbrep`.
+libm = "0.2.16"
 rayon = { workspace = true, optional = true }
 # A preview product's cache key (`csg::product_key`), hashed as
 # the evaluator hashes subtree keys. Already in the build through `eval`.

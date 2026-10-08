@@ -1,7 +1,7 @@
 //! The edge selector language of `fillet_edges()` and `chamfer_edges()`
 //! (`docs/fillets.md`, section 5.2): parsing and printing only. Which
-//! edges a selector matches is decided on the child's B-rep, later
-//! (stage F1); the evaluator parses once and stores the result on the
+//! edges a selector matches is decided on the child's B-rep, in
+//! `geom::fillet`; the evaluator parses once and stores the result on the
 //! node, so geometry never parses strings.
 //!
 //! The strings are a subset of CadQuery's selector strings with the same
@@ -138,6 +138,40 @@ impl Selector {
     pub fn all() -> Selector {
         Selector {
             items: vec![Item::Expr(Expr::Atom(Atom::All))],
+        }
+    }
+
+    /// Whether this is `"all"` (written or by default): unsupported edges
+    /// it matches are warnings, not errors (`docs/fillets.md`, section 8).
+    pub fn is_all(&self) -> bool {
+        matches!(self.items.as_slice(), [Item::Expr(Expr::Atom(Atom::All))])
+    }
+
+    /// Every atom of every string item, in order.
+    pub fn atoms(&self) -> Vec<&Atom> {
+        let mut out = Vec::new();
+        for item in &self.items {
+            if let Item::Expr(e) = item {
+                e.atoms(&mut out);
+            }
+        }
+        out
+    }
+}
+
+impl Expr {
+    /// The atoms of the expression, left to right.
+    pub fn atoms<'a>(&'a self, out: &mut Vec<&'a Atom>) {
+        let mut stack = vec![self];
+        while let Some(e) = stack.pop() {
+            match e {
+                Expr::Atom(a) => out.push(a),
+                Expr::Not(x) => stack.push(x),
+                Expr::And(a, b) | Expr::Or(a, b) | Expr::Exc(a, b) => {
+                    stack.push(b);
+                    stack.push(a);
+                }
+            }
         }
     }
 }
