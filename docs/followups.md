@@ -2109,6 +2109,10 @@ lead them, come roughly in order of user impact.
   the agent did not see.
 
 ## Windows
+- winget: microsoft/winget-pkgs#443995 (New package, NeoSCAD.NeoSCAD
+  0.4.2) is left at 0.4.2 while it waits for review (owner, 2026-10-08).
+  After it merges, submit 0.5.0 and later versions as ordinary update PRs
+  from each release's `neoscad-winget-manifests.tar.gz`.
 - `windows-installer.yml`'s `winget` job (fill the winget manifests from
   the attached MSIs, attach `neoscad-winget-manifests.tar.gz`) has not
   run yet; `fill-manifests.sh --winget` was checked locally on v0.4.2's
