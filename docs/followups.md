@@ -2504,33 +2504,81 @@ pass's leftovers first, then stage 1b's, then the crate's.
   are the likely cause (as F3 found on spheres).
 - **Gate 5 (reconstruction and writing within 50% of the render) is
   still missed on faceted-heavy models.** (reconstruct + check + write) /
-  render: `csg_spheres` 3.7× → 2.0–2.4× (runs vary), `text_30lines`
-  16× → 10.9×; medians 0.65 → 0.52 on the render tests, 1.23 → 1.02 on
-  BOSL2, 5.4 → 3.1 on the benchmarks. Done: plane faces
-  integrate in closed form, the export takes the volume from the
-  validator instead of integrating twice, lines between planes skip
-  sampling, and the writer formats numbers without temporary strings
-  (same bytes). Left: the STEP text itself (`csg_spheres` is 152 MB,
-  `text_30lines` 107 MB) costs about as much as the render, and the
-  crossing and touch checks run twice (in `reconstruct`, then in
-  `validate`). A faceted region written as one `FACETED_BREP`-like shell
-  without reconstruction is the remaining large step; parallelising per
-  face would need a wasm-safe fallback.
+  render, from one `conformance exact` sweep before and one after the
+  2026-10-09 pass, on one machine with another build running (runs vary
+  by 15% or so): medians 1.72 → 1.31 on the audit's cases, 0.73 → 0.55
+  on the render tests, 1.39 → 1.09 on BOSL2 and 4.40 → 4.15 on the
+  benchmarks; `csg_spheres` 2.17 → 1.75, `text_30lines` 15.2 → 9.4,
+  `import_stl` 2.01 → 1.55, the BOSL2 fractal tree 40.8 → 20.0. Of the
+  629 files the sweep writes, 627 are byte-identical to before (the other
+  two hold copies placed by the export render's memo, below), so their
+  validity and OCCT's verdicts stand; of the two, `ball_bearings__004`
+  reads back valid in OCCT with our volume, and the fractal tree is
+  still not read within 2 GB. Valid and partial counts are the same in
+  every corpus. Most of it is in `meshbrep` (unreleased, after 0.3.0,
+  and patched in for these numbers; taken here when released):
+  `validate` no longer repeats the crossing check reconstruction made
+  (`Report::faces_uncrossed`); small planar faces of straight edges are
+  checked for crossing or touching themselves without the general
+  search's allocations and sorts, answering exactly as it does (a test
+  compares them on every 4- and 5-cornered polygon of a grid); seam
+  placement is no longer quadratic (an edge-count scan per candidate
+  meridian and a rebuild of every loop per split edge: the fractal tree's
+  reconstructions 19.9 s → 9.1 s); the STEP writer appends entities to
+  one buffer (a quarter faster); fewer allocations in half-edge pairing,
+  vertex lookup, Gauss–Newton steps and planar loop areas. Here, the
+  cross-check's strip residual collects only mesh edges with a curved
+  side (a map of every edge was a third of a faceted model's checks).
+  No separate writer for faceted regions: `meshbrep` already makes their
+  coplanar triangles one planar face, keeps their corners at the mesh's
+  positions and joins them with straight edges without solving; what
+  they cost was the generic checks and allocations above, and a
+  `FACETED_BREP` shell cannot share edges with an `ADVANCED_BREP` one in
+  one solid. Left:
+  - Reconstruction's generic topology (surface classes, chains, loops,
+    corner placement) is now most of a faceted model's time:
+    `text_30lines` reconstructs 243,500 triangles in 236 ms against a
+    51 ms render.
+  - The STEP text: formatting reals is half of writing (Rust's shortest
+    round-trip formatting, which the bytes depend on); `csg_spheres`
+    writes 152 MB in 265 ms against a 380 ms render.
+  - The fractal tree reconstructs three times: exact at 1× and 2× the
+    segments, which fail where child cylinders stand on their parents'
+    caps (a corner on another edge of its face, `TopologyMismatch`), then
+    the partial fallback. A touch of that kind is not cured by a finer
+    mesh; telling it from a sliver in `meshbrep`'s error would save the
+    2× attempt.
+  - Parallelising per face would need a wasm-safe fallback.
 - **Mesh-only models still dominate the fallbacks.** 170 of 457 valid
   real models are all facets after stage 2 (228 of 456 before): BOSL2's
   `vnf_polyhedron` shapes, text, twisted extrusions, hulls. Polyhedra
   that are not closed solids (24 failures, mostly BOSL2 `vnf` and
   `nurbs` examples of open surfaces) are refused, correctly: OpenSCAD's
   own render cannot make them a solid either.
-- **The export render has no cache of its own.** Tagged solids are not
-  cached (their surface numbers depend on the tree), so a module
-  instantiated 400 times is built 400 times; delegated faceted subtrees
-  do come from the normal render's cache. The BOSL2 fractal tree spends
-  9 s in the export render's unions against 0.5 s of normal render,
-  whose cache builds each of its ten levels once. A per-export memo of
-  a subtree's solid in its own frame, keyed by subtree key, placed by
-  transforming positions and surface records, would cut that. Gate 5
-  does not count the export render, so it was left for now.
+- **The export render places copies of large recurring subtrees**
+  (`geom::exact::walk::memo`, 2026-10-09). The first instance of a
+  subtree whose key and source locations recur, and whose solid has at
+  least 4,096 triangles, is kept; another instance whose placement
+  differs from the first's by a similarity is that solid moved, its
+  surface records mapped and numbered where it stands in the tree, its
+  substitutions counted again. The BOSL2 fractal tree's export render
+  went from 9.1 s to 1.0 s (normal render 0.5 s), its peak memory no
+  higher. Left:
+  - A copy differs from an in-place build by rounding, and where faces
+    are flush or touch, rounding decides whether Manifold's mesh
+    reconstructs. Kept for every recurring subtree, the memo turned four
+    BOSL2 examples into refusals (`shapes3d__006`'s `show_anchors()`
+    arrows, `sliders__004`, `miscellaneous__002` and `__007`) and one
+    refusal into an export (`bottlecaps__002`). So small subtrees are
+    built in place (they are cheap), and a model refused with copies is
+    exported again with none (`export_step`; the time of both counted).
+    A refused model with large recurring subtrees pays for both
+    exports; a model exported partly as facets with copies is not
+    retried.
+  - The memo lasts one walk: the retry at twice the segments builds
+    again.
+  - An instance placed by more than a similarity relative to the first
+    (a non-uniform scale) is built in place.
 - **Stage 3 (wired everywhere) leftovers.** `serve`, MCP (`render`/`check`
   with `export: "x.step"` on `neoscad mcp --enable exact`), the three apps
   and /try export STEP through `Session::export` with the

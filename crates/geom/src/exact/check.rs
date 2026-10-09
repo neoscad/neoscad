@@ -366,18 +366,43 @@ fn normal(s: &Surface, ev: Option<&Evaluator>, p: V3) -> Option<V3> {
 /// far that puts it off the other surface. It is measured at each edge's
 /// ends and middle and taken along the edge's length.
 fn strips(mesh: &TaggedMesh, evs: &[Option<Evaluator>]) -> f64 {
-    // Ordered, so the sum (and the tolerance printed) is the same bits on
-    // every run.
-    let mut sides: std::collections::BTreeMap<(u32, u32), [(u32, usize); 2]> = Default::default();
+    let curved = |s: &Surface| !matches!(s, Surface::Plane { .. } | Surface::Faceted);
+    // Each mesh edge with a curved (or B-spline) side, with the first and
+    // the last triangle along it, in the order of the edge's ends, so the
+    // sum (and the tolerance printed) is the same bits on every run. An
+    // edge between two planar sides is skipped below whatever they are,
+    // so it is not collected: a map of every edge was a third of a large
+    // faceted model's checks.
+    let flat = |t: usize| !curved(&mesh.surfaces[mesh.triangle_surface[t] as usize]);
+    let key = |tri: &[u32; 3], k: usize| {
+        let (i, j) = (tri[k], tri[(k + 1) % 3]);
+        (i.min(j), i.max(j))
+    };
+    let mut wanted: Vec<(u32, u32)> = Vec::new();
     for (t, tri) in mesh.triangles.iter().enumerate() {
-        let s = (mesh.triangle_surface[t], t);
-        for k in 0..3 {
-            let (i, j) = (tri[k], tri[(k + 1) % 3]);
-            let key = (i.min(j), i.max(j));
-            sides.entry(key).and_modify(|e| e[1] = s).or_insert([s, s]);
+        if !flat(t) {
+            wanted.extend((0..3).map(|k| key(tri, k)));
         }
     }
-    let curved = |s: &Surface| !matches!(s, Surface::Plane { .. } | Surface::Faceted);
+    wanted.sort_unstable();
+    wanted.dedup();
+    let mut halves: Vec<((u32, u32), usize)> = Vec::new();
+    for (t, tri) in mesh.triangles.iter().enumerate() {
+        for k in 0..3 {
+            let e = key(tri, k);
+            if !flat(t) || wanted.binary_search(&e).is_ok() {
+                halves.push((e, t));
+            }
+        }
+    }
+    // A stable sort keeps each edge's triangles in mesh order.
+    halves.sort_by_key(|h| h.0);
+    // (surface, triangle) of each side.
+    let side = |t: usize| (mesh.triangle_surface[t], t);
+    let sides: Vec<_> = halves
+        .chunk_by(|a, b| a.0 == b.0)
+        .map(|g| (g[0].0, [side(g[0].1), side(g[g.len() - 1].1)]))
+        .collect();
     // A faceted side is the plane of its own triangle.
     let surface = |(s, t): (u32, usize)| match &mesh.surfaces[s as usize] {
         Surface::BSpline(_) => (Surface::Faceted, evs[s as usize].as_ref()),
@@ -400,7 +425,7 @@ fn strips(mesh: &TaggedMesh, evs: &[Option<Evaluator>]) -> f64 {
         other => (other.clone(), None),
     };
     let mut total = 0.0;
-    for (&(i, j), &[s1, s2]) in &sides {
+    for &((i, j), [s1, s2]) in &sides {
         if s1.0 == s2.0 {
             continue;
         }

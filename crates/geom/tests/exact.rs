@@ -818,3 +818,110 @@ fn a_region_that_does_not_reconstruct_is_written_as_facets() {
     // The same bytes again.
     assert!(export(src).step == e.step);
 }
+
+/// A subtree that recurs is built once by the export render and placed
+/// again (`walk::memo`): a module instantiated under rotations, a mirror
+/// and a uniform scale exports as the same solid, with the same report,
+/// as the same instances written out at separate lines (which the memo
+/// keeps apart, so they are each built in place). An instance under a
+/// non-uniform scale is built in place, its cylinders as facets. The
+/// fine `$fa`/`$fs` make the subtree large enough to be kept
+/// (`memo::MIN_TRIANGLES`).
+#[test]
+fn a_recurring_subtree_is_built_once_and_placed() {
+    let body = "difference() { cylinder(r = 3, h = 5); translate([0, 0, -1]) cylinder(r = 1, h = 7); cube([8, 1, 2], center = true); }";
+    let module = format!("$fa = 0.5; $fs = 0.01;\nmodule m() {body}\n");
+    let placements = [
+        "translate([10, 0, 0])",
+        "rotate(90) translate([10, 0, 0])",
+        "rotate([30, 0, 180]) translate([10, 0, 0])",
+        "mirror([0, 1, 0]) translate([10, 0, 20])",
+        "translate([0, -20, 0]) scale(1.5)",
+        "translate([0, 20, 0]) scale([1, 1.5, 1])",
+    ];
+    let looped = format!(
+        "{module}for (i = [0:{}]) {}\n",
+        placements.len() - 1,
+        placements
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("if (i == {i}) {p} m();"))
+            .collect::<Vec<_>>()
+            .join(" else ")
+    );
+    // The same instances, each with its own copy of the module on a line
+    // of its own: subtrees whose substitutions are reported at different
+    // places, which the memo builds apart.
+    let apart: String = std::iter::once("$fa = 0.5; $fs = 0.01;\n".to_string())
+        .chain(
+            placements
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("module m{i}() {body}\n{p} m{i}();\n")),
+        )
+        .collect();
+    let placed = |src: &str| {
+        let ev = tree(src);
+        let keys = eval::dump::Keys::new(&ev.root, &lang::loader::StdFs);
+        geom::exact::walk::export_render(
+            &Renderer::new(),
+            &ev.root,
+            &keys,
+            &RenderOptions::default(),
+            1,
+        )
+        .unwrap_or_else(|_| panic!("export render"))
+        .placed_copies
+    };
+    // The loop's instances share one source location (the similar ones
+    // after the first are placed); the second model's do not.
+    assert_eq!(placed(&looped), 4);
+    assert_eq!(placed(&apart), 0);
+
+    let (a, b) = (export(&looped), export(&apart));
+    assert!(a.stats.partial.is_none() && b.stats.partial.is_none());
+    assert_eq!(
+        (a.stats.faces, a.stats.exact_faces, a.stats.edges),
+        (b.stats.faces, b.stats.exact_faces, b.stats.edges)
+    );
+    assert!(
+        (a.stats.volume - b.stats.volume).abs() < 1e-12 * b.stats.volume,
+        "{} {}",
+        a.stats.volume,
+        b.stats.volume
+    );
+    // The same substitutions, as many times (at one line each in the
+    // loop, spread over the copies' lines apart).
+    let report = |e: &ExactExport| {
+        let mut s: std::collections::BTreeMap<String, u32> = Default::default();
+        for x in &e.substitutions {
+            *s.entry(format!("{:?} {} {}", x.kind, x.module, x.detail))
+                .or_default() += x.count;
+        }
+        s
+    };
+    assert_eq!(report(&a), report(&b));
+    // Each of the two cylinders exact in the five similar instances, the
+    // placed ones counted, and as facets in the stretched one.
+    let counts = |kind: SubstitutionKind| -> Vec<u32> {
+        a.substitutions
+            .iter()
+            .filter(|s| s.kind == kind && s.module == "cylinder")
+            .map(|s| s.count)
+            .collect()
+    };
+    assert_eq!(
+        counts(SubstitutionKind::Exact),
+        [5, 5],
+        "{:?}",
+        a.substitutions
+    );
+    assert_eq!(
+        counts(SubstitutionKind::Faceted),
+        [1, 1],
+        "{:?}",
+        a.substitutions
+    );
+    // The same bytes again.
+    assert!(export(&looped).step == a.step);
+}

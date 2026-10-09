@@ -237,6 +237,7 @@ and SolidWorks were not run on them (the audit's section 11).
   export as exact cylinders, tori, cones and spheres, under the same `$fn`
   rule.
 - **Time.** The export renders the model a second time for
-  reconstruction; on large models it can take several times as long as
-  the render (`docs/audits/exact-geometry-rust.md`, gate 5).
+  reconstruction (building a large module instantiated many times once
+  and placing its copies); on large models it can take several times as
+  long as the render (`docs/audits/exact-geometry-rust.md`, gate 5).
 - **Some models are refused** (previous section).

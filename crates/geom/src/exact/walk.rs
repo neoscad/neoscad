@@ -18,9 +18,12 @@
 //!   `color()`, `ManifoldGeometry::make_original`), and keys its cache on
 //!   subtrees whose triangles would need renumbering in each new tree. Here
 //!   `render()`, `color()` and `part()` are plain unions, there is no cache
-//!   of tagged solids, and every leaf draws its surface numbers and its
-//!   original ID from one counter in tree order, so the numbering (and so
-//!   the file) does not depend on what ran before or on the thread count.
+//!   of tagged solids across renders, and every leaf draws its surface
+//!   numbers and its original ID from one counter in tree order, so the
+//!   numbering (and so the file) does not depend on what ran before or on
+//!   the thread count. Within one walk, a large subtree that recurs is
+//!   built once and its copies placed, renumbered where each stands
+//!   ([`memo`]).
 //! - **Transforms go to the leaves.** Each primitive is built in place
 //!   under the product of its ancestors' matrices, so its surface records
 //!   are transformed once, exactly, instead of being carried through
@@ -32,6 +35,7 @@
 //! as planar faces. Those are the substitutions the caller reports.
 
 mod extrude;
+mod memo;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -117,6 +121,9 @@ pub struct ExportMesh {
     /// Per entry of the mesh's surface table, where it came from in the
     /// tree: filled by [`export_render_traced`] only (empty otherwise).
     pub provenance: Vec<Provenance>,
+    /// Subtrees placed as copies of an earlier instance of themselves
+    /// rather than built ([`memo`]).
+    pub placed_copies: u32,
 }
 
 /// Where one surface record of a traced export render came from: what
@@ -190,6 +197,22 @@ pub fn export_render_with(
     run_walk(renderer, top, keys, opts, mult, extrusions, Trace::Off)
 }
 
+/// [`export_render_with`] with every subtree built in place, none placed
+/// as a copy of an earlier instance ([`memo`]): what the export falls back
+/// to when a model built with copies is refused, since a copy differs from
+/// an in-place build by rounding, and in a model of flush or touching
+/// faces rounding can decide whether the mesh reconstructs.
+pub fn export_render_in_place(
+    renderer: &Renderer,
+    top: &Node,
+    keys: &Keys,
+    opts: &RenderOptions,
+    mult: u32,
+    extrusions: Extrusions,
+) -> Result<ExportMesh, (Unsupported, Vec<Substitution>)> {
+    run_walk(renderer, top, keys, opts, mult, extrusions, Trace::InPlace)
+}
+
 /// The export render of `top`'s children as one union (`top` is the
 /// fillet node whose child is to be selected on), with
 /// [`ExportMesh::provenance`] filled in. Fillet nodes inside it are built
@@ -221,6 +244,8 @@ pub fn export_render_traced(
 enum Trace {
     /// The export itself: no provenance.
     Off,
+    /// The export with no subtree placed as a copy.
+    InPlace,
     /// Provenance; a fillet top is its children's union.
     Children,
     /// Provenance; a fillet top is its children's union with its own
@@ -238,7 +263,7 @@ fn run_walk(
     trace: Trace,
 ) -> Result<ExportMesh, (Unsupported, Vec<Substitution>)> {
     let mut w = Walk {
-        trace: trace != Trace::Off,
+        trace: matches!(trace, Trace::Children | Trace::FirstPass(_)),
         first_pass: match trace {
             Trace::FirstPass(s) => Some(s),
             _ => None,
@@ -268,6 +293,15 @@ fn run_walk(
         surface_origin: Vec::new(),
         origins: Vec::new(),
         origin_index: HashMap::new(),
+        // A traced walk records where each record came from, leaf by
+        // leaf, which a placed copy would not.
+        memo_plan: if trace == Trace::Off {
+            memo::plan(top, keys)
+        } else {
+            HashMap::new()
+        },
+        memo: HashMap::new(),
+        placed_copies: 0,
     };
     let res = match w.node(top, &crate::IDENTITY) {
         Ok(r) => r,
@@ -307,6 +341,7 @@ fn run_walk(
         surface_origin: w.surface_origin,
         origins: w.origins,
         provenance: w.provenance,
+        placed_copies: w.placed_copies,
     })
 }
 
@@ -378,6 +413,12 @@ struct Walk<'a> {
     pending_polygons: Vec<(u32, u32)>,
     /// See [`ExportMesh::provenance`].
     provenance: Vec<Provenance>,
+    /// The nodes whose subtrees recur ([`memo`]), and the first instances
+    /// built of them.
+    memo_plan: HashMap<usize, memo::MemoKey>,
+    memo: HashMap<memo::MemoKey, memo::Entry>,
+    /// See [`ExportMesh::placed_copies`].
+    placed_copies: u32,
 }
 
 pub(crate) fn loc_of(n: &Node) -> Option<MsgLoc> {
@@ -677,6 +718,8 @@ impl Walk<'_> {
             op: OpType,
             kids: Vec<Res>,
             next: usize,
+            /// A recurring subtree's first instance: kept when done.
+            memo: Option<memo::Start>,
         }
         let mut stack: Vec<Waiting<'_>> = Vec::new();
         let mut visit: Option<(&Node, Matrix)> = Some((top, *m));
@@ -686,14 +729,26 @@ impl Walk<'_> {
                 if self.stopped() {
                     return Err(Unsupported::interrupted());
                 }
+                let key = self.memo_plan.get(&memo::node_id(n)).copied();
+                let placed = match key {
+                    Some(k) => self.place_memo(k, &m),
+                    None => None,
+                };
                 match self.branch(n, &m) {
-                    Some((op, child_m)) => stack.push(Waiting {
-                        n,
-                        m: child_m,
-                        op,
-                        kids: Vec::with_capacity(n.children.len()),
-                        next: 0,
-                    }),
+                    _ if placed.is_some() => done = placed,
+                    Some((op, child_m)) => {
+                        let memo = key
+                            .filter(|k| !self.memo.contains_key(k))
+                            .map(|k| self.memo_start(k, &m));
+                        stack.push(Waiting {
+                            n,
+                            m: child_m,
+                            op,
+                            kids: Vec::with_capacity(n.children.len()),
+                            next: 0,
+                            memo,
+                        })
+                    }
                     None => {
                         if self.trace {
                             // The waiting nodes are the leaf's ancestors:
@@ -752,6 +807,9 @@ impl Walk<'_> {
                     self.here = (child, part);
                 }
                 r = self.fillet(w.n, &w.m, r, passes)?;
+            }
+            if let Some(start) = w.memo {
+                self.memo_keep(start, &r);
             }
             // Then on with the parent's next child.
             match stack.last_mut() {
@@ -1246,6 +1304,152 @@ impl Walk<'_> {
             .map(|&s| u64::from(s) + base)
             .collect();
         Ok(self.solid(positions, tri_verts, face_id))
+    }
+
+    /// What the walk has before the first instance of a recurring subtree
+    /// ([`memo`]) is built under `m`. The sagitta is a maximum, so it is
+    /// started afresh and the subtree's own read at the end; the volume
+    /// bound goes on accumulating in tree order as it always did (the
+    /// first instance adds exactly what it added before), and its share
+    /// is the difference.
+    fn memo_start(&mut self, key: memo::MemoKey, m: &Matrix) -> memo::Start {
+        let start = memo::Start {
+            key,
+            m: *m,
+            base: self.surfaces.len(),
+            subs: self.subs.iter().map(|s| s.count).collect(),
+            sagitta: self.normal_sagitta,
+            volume_bound: self.normal_volume_bound,
+            exact_extrusions: self.exact_extrusions,
+        };
+        self.normal_sagitta = 0.0;
+        start
+    }
+
+    /// Keeps the first instance of a recurring subtree, built as `r`.
+    fn memo_keep(&mut self, start: memo::Start, r: &Res) {
+        let sagitta = self.normal_sagitta;
+        self.normal_sagitta = start.sagitta.max(sagitta);
+        let end = self.surfaces.len();
+        let result = match r {
+            // Too small to be worth placing rather than building (see
+            // `memo::MIN_TRIANGLES`): later instances are built in place.
+            Res::Solid(s) if s.num_tri() < memo::MIN_TRIANGLES => return,
+            Res::Nothing | Res::TwoD => return,
+            Res::Solid(s) => {
+                let gl = s.get_mesh_gl64(-1);
+                let np = (gl.num_prop as usize).max(3);
+                // Its triangles name only the records it added (each leaf
+                // adds its own); anything else and it is not kept.
+                let range = start.base as u64..end as u64;
+                if !gl.face_id.iter().all(|f| range.contains(f))
+                    || gl.face_id.len() * 3 != gl.tri_verts.len()
+                {
+                    return;
+                }
+                memo::Mesh {
+                    positions: gl
+                        .vert_properties
+                        .chunks(np)
+                        .flat_map(|c| [c[0], c[1], c[2]])
+                        .collect(),
+                    tri_verts: gl.tri_verts,
+                    face_id: gl.face_id,
+                }
+            }
+        };
+        if self.surface_origin.len() != end {
+            return;
+        }
+        let subs = self
+            .subs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let added = s.count - start.subs.get(i).copied().unwrap_or(0);
+                (added > 0).then_some((i, added))
+            })
+            .collect();
+        let entry = memo::Entry {
+            m: start.m,
+            result,
+            surfaces: self.surfaces[start.base..].to_vec(),
+            base: start.base,
+            origins: self.surface_origin[start.base..].to_vec(),
+            subs,
+            sagitta,
+            volume_bound: self.normal_volume_bound - start.volume_bound,
+            exact_extrusions: self.exact_extrusions - start.exact_extrusions,
+        };
+        self.memo.insert(start.key, entry);
+    }
+
+    /// Another instance of a recurring subtree, under `m`: the first
+    /// instance moved by the similarity between their placements, with
+    /// fresh surface records and its reports counted again. `None` when
+    /// there is no first instance yet, or the placements differ by more
+    /// than a similarity (the subtree is then built as any other).
+    fn place_memo(&mut self, key: memo::MemoKey, m: &Matrix) -> Option<Res> {
+        let entry = self.memo.get(&key)?;
+        let rel = mul(m, &invert(&entry.m)?);
+        let scale = similarity_scale(&rel)?;
+        let mesh = match &entry.result {
+            memo::Mesh { tri_verts, .. } if tri_verts.is_empty() => {
+                Err(Res::Solid(Manifold::empty()))
+            }
+            memo::Mesh {
+                positions,
+                tri_verts,
+                face_id,
+            } => {
+                let flip = det3(&rel) < 0.0;
+                let positions: Vec<f64> = positions
+                    .chunks(3)
+                    .flat_map(|c| apply(&rel, [c[0], c[1], c[2]]))
+                    .collect();
+                let tri_verts: Vec<u64> = tri_verts
+                    .chunks(3)
+                    .flat_map(|c| {
+                        if flip {
+                            [c[0], c[2], c[1]]
+                        } else {
+                            [c[0], c[1], c[2]]
+                        }
+                    })
+                    .collect();
+                let base = self.surfaces.len() as u64;
+                let first = entry.base as u64;
+                let face_id: Vec<u64> = face_id.iter().map(|f| f - first + base).collect();
+                Ok((positions, tri_verts, face_id))
+            }
+        };
+        let result = match mesh {
+            Err(r) => r,
+            Ok((positions, tri_verts, face_id)) => {
+                match self.solid(positions, tri_verts, face_id) {
+                    // Placed, it is no longer a valid mesh (rounding closed a
+                    // gap): this instance is built in place instead.
+                    Res::Solid(s) if s.is_empty() => return None,
+                    r => r,
+                }
+            }
+        };
+        let entry = &self.memo[&key];
+        self.surfaces.extend(
+            entry
+                .surfaces
+                .iter()
+                .map(|s| transform_surface(s, &rel, Some(scale))),
+        );
+        self.surface_origin.extend_from_slice(&entry.origins);
+        for &(i, added) in &entry.subs {
+            self.subs[i].count += added;
+        }
+        self.normal_sagitta = self.normal_sagitta.max(entry.sagitta * scale);
+        self.normal_volume_bound += entry.volume_bound * scale * scale * scale;
+        self.exact_extrusions += entry.exact_extrusions;
+        self.placed_copies += 1;
+        Some(result)
     }
 
     fn solid(&mut self, positions: Vec<f64>, tri_verts: Vec<u64>, face_id: Vec<u64>) -> Res {

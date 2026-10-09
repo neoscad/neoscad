@@ -8,7 +8,10 @@
 //!    a tessellation chosen for reconstruction rather than OpenSCAD's.
 //!    Curves whose fragments come from `$fa`/`$fs` become exact; an
 //!    explicit `$fn` keeps OpenSCAD's polygon; everything else is faceted.
-//!    Extrusions sweep their profiles' exact curves ([`profile`]).
+//!    Extrusions sweep their profiles' exact curves ([`profile`]). A large
+//!    subtree that recurs is built once and its copies placed; a model
+//!    refused when built so is exported again with every subtree built in
+//!    place ([`export_step`]).
 //! 2. **Reconstruction** with `meshbrep`: faces, exact edges and vertices.
 //!    When the mesh's topology differs from the exact model's
 //!    (`TopologyMismatch`, slivers at a near-tangency, intersection curves
@@ -312,6 +315,46 @@ pub fn export_step(
     normal: &Geometry,
     x: &ExactOptions<'_>,
 ) -> Result<ExactExport, Box<ExactFailure>> {
+    let mut placed = 0;
+    let first = export_once(renderer, top, keys, opts, normal, x, false, &mut placed);
+    let failed = match &first {
+        Err(f) if placed > 0 && f.interrupted.is_none() => f.stats.clone(),
+        _ => return first,
+    };
+    // The export render placed copies of recurring subtrees (`walk::memo`),
+    // which differ from in-place builds by rounding; in a model of flush
+    // or touching faces that can decide whether the mesh reconstructs. A
+    // model refused so is exported as it was before the memo, every
+    // subtree built in place, so that no model the memo touches is refused
+    // where it exported without it. Both exports' work is counted.
+    let mut unused = 0;
+    let mut second = export_once(renderer, top, keys, opts, normal, x, true, &mut unused);
+    let stats = match &mut second {
+        Ok(e) => &mut e.stats,
+        Err(f) => &mut f.stats,
+    };
+    stats.attempts += failed.attempts;
+    let (t, u) = (&mut stats.timings, failed.timings);
+    t.export_render_ms += u.export_render_ms;
+    t.reconstruct_ms += u.reconstruct_ms;
+    t.check_ms += u.check_ms;
+    t.write_ms += u.write_ms;
+    second
+}
+
+/// [`export_step`]'s attempts, with the export render placing copies of
+/// recurring subtrees unless `in_place`; `placed` counts the copies.
+#[allow(clippy::too_many_arguments)]
+fn export_once(
+    renderer: &Renderer,
+    top: &Node,
+    keys: &Keys,
+    opts: &RenderOptions,
+    normal: &Geometry,
+    x: &ExactOptions<'_>,
+    in_place: bool,
+    placed: &mut u32,
+) -> Result<ExactExport, Box<ExactFailure>> {
     let now = || x.clock.map_or(0.0, |c| c());
     let mut stats = ExactStats::default();
     let (normal_volume, normal_box) = normal_measures(normal);
@@ -400,8 +443,16 @@ pub fn export_step(
         }
         stats.attempts += 1;
         let t0 = now();
-        let built = match walk::export_render_with(renderer, top, keys, opts, mult, mode) {
-            Ok(b) => b,
+        let walked = if in_place {
+            walk::export_render_in_place(renderer, top, keys, opts, mult, mode)
+        } else {
+            walk::export_render_with(renderer, top, keys, opts, mult, mode)
+        };
+        let built = match walked {
+            Ok(b) => {
+                *placed += b.placed_copies;
+                b
+            }
             Err((u, subs)) => {
                 stats.timings.export_render_ms += now() - t0;
                 substitutions = subs;

@@ -281,6 +281,27 @@ in its Export menu and downloads the wasm core's file. No measurement
 changes: the export itself is stage 2's with the partial fallback. The
 user reference is `docs/step-export.md`.
 
+**Update, gate 5 remainders (2026-10-09):** faster checks and writing
+in `meshbrep` (unreleased after 0.3.0, patched in for these numbers:
+`validate` no longer repeats
+reconstruction's crossing check, small straight-edged planar faces skip
+the general crossing and touch searches, seam placement is no longer
+quadratic, the writer keeps one buffer), a cheaper strip residual in
+the cross-check, and an export render that builds a large recurring
+subtree once and places its copies (`walk::memo`; a model refused with
+copies is exported again without). Gate 5 is still missed:
+(reconstruct + check + write) / render medians 0.73 → 0.55 on the
+render tests, 1.39 → 1.09 on BOSL2, 4.40 → 4.15 on the benchmarks
+(`text_30lines` 15.2 → 9.4, `csg_spheres` 2.17 → 1.75, the fractal tree
+40.8 → 20.0, its export render 9.1 s → 1.0 s), one sweep each on one
+machine. Validity is unchanged: the same valid, partial and failed
+models in every corpus (333 of 350 eligible models, the cases included,
+fully exact; 340 with the partial fallback), and 627 of the 629 files
+written byte-identical to
+before; the other two hold placed copies, and `ball_bearings__004`
+reads back valid in OCCT. Gate 3: 152 cases, worst 4.5e-9. What is left
+is in `docs/followups.md`, "Exact geometry".
+
 It follows `docs/audits/brep-feasibility.md` (below, "the previous
 audit"), which found that only OCCT survives OpenSCAD-shaped trees. The
 owner prefers an exact backend written in-house: pure Rust, publishable as
