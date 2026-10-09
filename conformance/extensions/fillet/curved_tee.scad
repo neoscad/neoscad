@@ -2,7 +2,7 @@
 // of unequal cylinders), the concave junction filleted with r = 1: a
 // ball rolled round it, the blend two rational B-spline patches.
 // No closed form: the volume is the reference integration of
-// `crates/meshbrep/tests/sweep.rs` (`golden_reference_volumes`): the base
+// meshbrep's `tests/sweep.rs` (`golden_reference_volumes`): the base
 // solid's volume plus the blend's region swept in the normal planes of
 // its exact spine, `∫ ds ∬ (1 − κξ) dA`, to about 1e-11.
 // volume: 2562.946181356

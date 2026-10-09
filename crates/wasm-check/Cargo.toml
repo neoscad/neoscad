@@ -25,7 +25,7 @@ lsp = { package = "neoscad-lsp", path = "../lsp" }
 manifold-rust = { version = "=0.16.0", default-features = false }
 # Exact B-rep reconstruction and STEP, checked to give the same bytes in
 # wasm32 as natively.
-meshbrep = { path = "../meshbrep" }
+meshbrep.workspace = true
 # Without the GPU: the module is loaded by node without wasm-bindgen glue,
 # so it runs the renderer's CPU side only. `scripts/wasm-check.sh` builds
 # the GPU side for wasm32 separately.

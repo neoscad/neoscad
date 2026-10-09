@@ -32,9 +32,9 @@
 //! that stayed exact (exact faces over exact faces plus regions faceted).
 //!
 //! With `--occt PATH` (or `MESHBREP_OCCT_CHECK`), every written file is
-//! read back by OCCT (`crates/meshbrep/oracle`): valid closed solids (one
-//! per separate body) with no free edges, and OCCT's volume within 1e-6 of
-//! ours.
+//! read back by OCCT (the checker `oracle/build.sh` builds in
+//! github.com/neoscad/meshbrep): valid closed solids (one per separate
+//! body) with no free edges, and OCCT's volume within 1e-6 of ours.
 //!
 //! Results go to `target/conformance/exact/results-<corpora>.json` (never
 //! `progress/`).

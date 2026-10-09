@@ -19,6 +19,11 @@ blend does not yet meet another blend at a vertex.
 Written
 2026-10-08 against `127be03` and the reference checkouts in
 `.reference/openscad` and `.reference/BOSL2`.
+Paths written `meshbrep/…` are files of the `meshbrep` crate, now
+developed in github.com/neoscad/meshbrep; when this was written it was
+`crates/meshbrep` in this repository, and its line numbers are as of
+then (NeoSCAD switched to meshbrep 0.3.0 from crates.io, whose `src/`
+and `tests/` equal the last in-tree copy).
 Claims about this codebase cite `path:line`; claims about OpenSCAD and
 BOSL2 cite the reference checkouts; claims about other projects cite what
 was retrieved on 2026-10-08, or say "unverified".
@@ -279,8 +284,8 @@ Selection runs on the B-rep of the child, built as the STEP export
 builds it: the export render of the subtree (`geom::exact::walk::export_render`,
 `crates/geom/src/exact/walk.rs:142-150`, which takes any node and a
 segment multiplier), then `meshbrep::reconstruct`
-(`crates/meshbrep/src/lib.rs:155`). For each edge the B-rep has its
-curve (line, circle, ellipse, B-spline; `crates/meshbrep/src/model.rs:108-145`),
+(`meshbrep/src/lib.rs:155`). For each edge the B-rep has its
+curve (line, circle, ellipse, B-spline; `meshbrep/src/model.rs:108-145`),
 its two faces through the coedges of their loops (`model.rs:233-290`),
 and each face's exact surface and orientation (`model.rs:10-87`,
 `:249-266`). From those, per edge, at sample points along it:
@@ -416,7 +421,7 @@ cross-section, and the blend surface is a cylinder or a torus.
   with parallel axes.
 - **Rotational class.** Both faces are surfaces of revolution about one
   axis: a plane perpendicular to it, cylinders, cones, spheres centred on
-  it, coaxial tori (`Surface`, `crates/meshbrep/src/model.rs:10-62`). The
+  it, coaxial tori (`Surface`, `meshbrep/src/model.rs:10-62`). The
   edge is a circle or an arc about the axis. In the meridian half-plane
   the faces are lines and circles; the 2D fillet arc is revolved into a
   **torus** (a cylinder or plane when degenerate), a chamfer line into a
@@ -464,7 +469,7 @@ For the rotational class the same 2D region is revolved about the axis
 by the edge's sweep (a whole turn for a full rim, the arc's angle for a
 partial one). `meshbrep::primitives` already builds tagged revolved and
 swept primitives: `torus(major, minor, segments, tube_segments, angle, t)`
-with planar ends for partial sweeps (`crates/meshbrep/src/primitives.rs:379-454`),
+with planar ends for partial sweeps (`meshbrep/src/primitives.rs:379-454`),
 `frustum` (`:213`), `sphere` (`:285`), `prism` (`:318`), all tagging each
 triangle with its exact surface.
 
@@ -680,8 +685,8 @@ shows something and `check` exits with the error (question 4).
   lexicographic, length) before anything uses their order; tools are
   generated and combined in that order, in one thread; every sine and
   cosine goes through `libm`, as `meshbrep`'s do
-  (`crates/meshbrep/Cargo.toml`, "Transcendental functions in pure
-  Rust"; `crates/meshbrep/src/math.rs:3`), so tool vertices are the same
+  (`meshbrep/Cargo.toml`, "Transcendental functions in pure
+  Rust"; `meshbrep/src/math.rs:3`), so tool vertices are the same
   bits natively and on wasm32. Tools draw original IDs from the node's
   reserved block (`crates/geom/src/evaluate.rs:209`, `:513`), so a warm
   render equals a cold one. Tests at 1, 2 and 8 threads, cold and warm,
@@ -696,7 +701,7 @@ shows something and `check` exits with the error (question 4).
 - **Cancellation.** The export render and the booleans already run under
   the interrupt flag and guard (`kernel_token`, `walk.rs:166`).
   `meshbrep::reconstruct` takes no stop signal today
-  (`crates/meshbrep/src/reconstruct.rs:47-50`: `Options` holds only
+  (`meshbrep/src/reconstruct.rs:47-50`: `Options` holds only
   tolerances); stage F1 adds a `should_stop` callback polled per face, so
   a preview of a large filleted child can be cancelled.
 - **WASM.** Nothing new: `meshbrep` and Manifold already run in the web
@@ -851,7 +856,7 @@ faces, the tools of sections 12.1–12.4 and a box corner were written by
 hand as ordinary OpenSCAD CSG (cylinders, cubes, `rotate_extrude` of
 "square minus circle", a sphere for the corner) and exported with the
 current release, `neoscad 0.5.0 --enable exact -o x.step`, then read back
-with the OCCT 8.0.1 oracle (`crates/meshbrep/oracle/build.sh`,
+with the OCCT 8.0.1 oracle (`meshbrep/oracle/build.sh`,
 `check.cpp`). The prototype files were throwaway and are not in the tree.
 
 | Case | Faces (ours) | Surfaces | OCCT valid | Volume (OCCT) | Closed form |
@@ -1088,7 +1093,7 @@ F0–F4: 9–13.5 person-weeks.
 
 ### 15.3 Stage F2 as built
 
-- **The tool generator** is `meshbrep::blend` (`crates/meshbrep/src/blend.rs`,
+- **The tool generator** is `meshbrep::blend` (`meshbrep/src/blend.rs`,
   MIT OR Apache-2.0, no NeoSCAD dependency): a `BlendSpec` (profile,
   size, edges with their two faces as exact planes or parallel
   cylinders with their outward sides, how each end ends, sphere
@@ -1229,7 +1234,7 @@ F0–F4: 9–13.5 person-weeks.
 
 ### 15.4 Stage F3 as built
 
-- **Revolved tools** (`crates/meshbrep/src/blend/revolve.rs`): an edge's
+- **Revolved tools** (`meshbrep/src/blend/revolve.rs`): an edge's
   `Path::Arc` (centre, axis, radius, sweep, sections) makes its
   cross-section in the meridian half-plane through its start, where a
   plane square to the axis, a coaxial cylinder or cone are lines and a
@@ -1668,7 +1673,7 @@ surfaces, and build the ones a blend needs. **Phase 2** is the rest of
 render, the STEP walk, reports, goldens and the corpus).
 
 - **The surface.** `Surface::BSpline(BSplineSurface)`
-  (`crates/meshbrep/src/model.rs`): degrees, a control net, clamped
+  (`meshbrep/src/model.rs`): degrees, a control net, clamped
   knot vectors, and weights when rational. Evaluation with derivatives
   to second order and point inversion are in `nurbs.rs` (Piegl and
   Tiller's A2.3, A3.6 and A4.4; inversion as in their section 6.1): the
@@ -1742,7 +1747,7 @@ render, the STEP walk, reports, goldens and the corpus).
   rounding for a straight spine, 7.3e-11 round a quarter circle whose
   curves were fitted within 1e-9); `ruled_surface` (degree 1 across,
   for chamfers).
-- **Tests** (`crates/meshbrep/tests/bspline.rs`): eight solids built
+- **Tests** (`meshbrep/tests/bspline.rs`): eight solids built
   by hand or with Manifold, each at five tagging resolutions (4 to 24
   segments), reconstructed, validated at 1e-6, measured against a
   closed form, written twice to the same bytes, and read back by OCCT
@@ -1821,7 +1826,7 @@ between planes, cylinders, cones, spheres and tori that share no axis
 plate at a slant, a rod in a ball) are a new class, `swept`, and are
 rounded and chamfered exactly.
 
-- **The spine** (`crates/meshbrep/src/blend/sweep.rs`, the module
+- **The spine** (`meshbrep/src/blend/sweep.rs`, the module
   comment and `Rolled`). Each face is its exact signed distance
   (`Field`), and the spine is where both are `−r` (a concave fillet;
   `+r` convex, 0 for a chamfer's edge). It is marched as 15.7 says
@@ -1906,7 +1911,7 @@ rounded and chamfered exactly.
   two faces touch there"; B-spline faces of the child itself.
 - **Goldens** (`conformance/extensions/fillet/curved_*`, eight):
   their volumes are a reference integration
-  (`crates/meshbrep/tests/sweep.rs`, `golden_reference_volumes`): the
+  (`meshbrep/tests/sweep.rs`, `golden_reference_volumes`): the
   base solid plus `∫ ds ∬ (1 − κξ) dA` over the blend's region in the
   normal planes of the exact spine (Gauss–Legendre, the spine by the
   same corrector), which matches Pappus's theorem to rounding on a

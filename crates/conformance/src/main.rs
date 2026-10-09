@@ -298,7 +298,7 @@ enum Cmd {
         /// Binary under test (default: target/release/neoscad).
         #[arg(long)]
         binary: Option<PathBuf>,
-        /// OCCT read-back checker (`crates/meshbrep/oracle/build.sh`;
+        /// OCCT read-back checker (`oracle/build.sh` in github.com/neoscad/meshbrep;
         /// default: $MESHBREP_OCCT_CHECK).
         #[arg(long)]
         occt: Option<PathBuf>,
@@ -329,7 +329,7 @@ enum Cmd {
         /// Binary under test (default: target/release/neoscad).
         #[arg(long)]
         binary: Option<PathBuf>,
-        /// OCCT read-back checker (`crates/meshbrep/oracle/build.sh`;
+        /// OCCT read-back checker (`oracle/build.sh` in github.com/neoscad/meshbrep;
         /// default: $MESHBREP_OCCT_CHECK).
         #[arg(long)]
         occt: Option<PathBuf>,

@@ -1,7 +1,7 @@
 // Stage F5b: a hole of radius 4 through a plate 8 thick at 30°; both
 // rims (ellipses, convex) filleted with r = 1.
 // No closed form: the volume is the reference integration of
-// `crates/meshbrep/tests/sweep.rs` (`golden_reference_volumes`): the base
+// meshbrep's `tests/sweep.rs` (`golden_reference_volumes`): the base
 // solid's volume plus the blend's region swept in the normal planes of
 // its exact spine, `∫ ds ∬ (1 − κξ) dA`, to about 1e-11.
 // volume: 12319.415435677

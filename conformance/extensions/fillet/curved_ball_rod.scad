@@ -2,7 +2,7 @@
 // 2 off the ball's centre; the junction (between the sphere and the
 // cylinder) filleted with r = 1.
 // No closed form: the volume is the reference integration of
-// `crates/meshbrep/tests/sweep.rs` (`golden_reference_volumes`): the base
+// meshbrep's `tests/sweep.rs` (`golden_reference_volumes`): the base
 // solid's volume plus the blend's region swept in the normal planes of
 // its exact spine, `∫ ds ∬ (1 − κξ) dA`, to about 1e-11.
 // volume: 2331.750528339

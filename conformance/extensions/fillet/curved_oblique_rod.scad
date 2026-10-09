@@ -1,7 +1,7 @@
 // Stage F5b: a rod of radius 4 through a plate 8 thick at 30°; both
 // junctions (ellipses, concave) filleted with r = 1.5.
 // No closed form: the volume is the reference integration of
-// `crates/meshbrep/tests/sweep.rs` (`golden_reference_volumes`): the base
+// meshbrep's `tests/sweep.rs` (`golden_reference_volumes`): the base
 // solid's volume plus the blend's region swept in the normal planes of
 // its exact spine, `∫ ds ∬ (1 − κξ) dA`, to about 1e-11.
 // volume: 13881.095589710

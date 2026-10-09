@@ -2290,17 +2290,20 @@ verbatim `\\?\` form (`lang::paths`) and made relative paths in messages,
   for Linux too (`expectVersion`).
 
 ## Exact geometry (STEP)
-- `meshbrep` 0.1.0 is published from github.com/neoscad/meshbrep (a
-  signed copy of `crates/meshbrep` at 9f3f3fd). While the fillet tool
-  generator is built (docs/fillets.md), `crates/meshbrep` here stays the
-  working copy and NeoSCAD keeps its path dependency; each milestone is
-  copied to that repository (src/ and tests/ byte-identical), released
-  there, and published. Once fillets settle, switch NeoSCAD to the
-  crates.io release as with sketch-solver. Since 0.1.0 the working copy
-  has `Options::should_stop` and `Error::Stopped` (fillet stage F1,
-  `tests/stop.rs`): `Options` is no longer `Copy` and `Error` has a new
-  variant, so the next release is 0.2.0, not 0.1.1.
-Stage 1a of `docs/audits/exact-geometry-rust.md` is `crates/meshbrep`;
+- `meshbrep` (reconstruction, STEP, the fillet and chamfer tools) is
+  upstream in github.com/neoscad/meshbrep, and NeoSCAD depends on its
+  crates.io releases (`meshbrep` in the root Cargo.toml, 0.3.0 since the
+  in-tree `crates/meshbrep` was removed; its `src/` and `tests/` were
+  byte-identical to that release). Its own tests and the OCCT oracle
+  live there; NeoSCAD keeps the tests that drive it through `geom`. A
+  change is made, tested and released there first, then taken here with
+  `cargo update -p meshbrep` (or a version bump). wasm-check's `brep-*`
+  cases hash STEP written with meshbrep's default originating system,
+  "meshbrep <version>", so every release moves their digests (not their
+  sizes while the version string keeps its length); NeoSCAD's own STEP
+  files name "NeoSCAD" and do not change. To work on both at once, use
+  the commented `[patch.crates-io]` entry in the root Cargo.toml.
+Stage 1a of `docs/audits/exact-geometry-rust.md` is the `meshbrep` crate;
 stage 1b is `geom::exact` and `-o x.step` behind `--enable exact`; stage
 2 (extrusions, tori, `offset(r)`, sketch arcs) is `geom::exact::profile`
 and `walk/extrude.rs`. The stop-rule numbers are in the audit's status
@@ -2578,17 +2581,14 @@ pass's leftovers first, then stage 1b's, then the crate's.
   and a revolved line of one profile). Arc merging is not reached by
   any test model; a unit test reaches it by turning analytic contacts
   off.
-- **The OCCT oracle is not in CI.** `crates/meshbrep/oracle/build.sh`
-  downloads cadrum's prebuilt OCCT 8.0.1 (about 140 MB) and builds
-  `check`; `MESHBREP_OCCT_CHECK=… cargo test -p meshbrep --release --test
-  occt` reads back the 28 models at six resolutions. A CI job (cached
-  OCCT) would keep it honest.
-- **The declared MSRV is unverified.** `rust-version = "1.85"` (edition
-  2024's minimum), tested only on 1.98.1.
-- **Publishing:** move `crates/meshbrep` to `github.com/neoscad/meshbrep`,
-  publish it, and make NeoSCAD depend on the published version. The tests'
-  `manifold-rust` dev-dependency then resolves to crates.io rather than
-  `vendor/`.
+- **The OCCT oracle is not in CI.** `oracle/build.sh` in
+  github.com/neoscad/meshbrep downloads cadrum's prebuilt OCCT 8.0.1
+  (about 140 MB) and builds `check` and `fillet`; there,
+  `MESHBREP_OCCT_CHECK=… cargo test --release --test occt` reads back the
+  28 models at six resolutions, and here the same `check` drives
+  `geom`'s `fillet_build` tests and `conformance exact --occt`. A CI job
+  (cached OCCT), in either repository, would keep it honest. (meshbrep's
+  declared MSRV, 1.88, is now checked by that repository's CI.)
 - `measure` integrates in closed form along `u` (exact for planes,
   cylinders, cones, spheres and tori: a torus's integrand has the same
   `A + B cos u + C sin u` form, checked against `inner_quadrature`). An

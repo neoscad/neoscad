@@ -160,7 +160,10 @@ fn field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 #[test]
 fn occt_reads_the_golden_cases_back() {
     let Some(check) = std::env::var_os("MESHBREP_OCCT_CHECK") else {
-        eprintln!("skipped: set MESHBREP_OCCT_CHECK to crates/meshbrep/oracle/build.sh's check");
+        eprintln!(
+            "skipped: set MESHBREP_OCCT_CHECK to the check built by oracle/build.sh \
+             in github.com/neoscad/meshbrep"
+        );
         return;
     };
     let dir = std::env::temp_dir().join(format!("neoscad-fillet-occt-{}", std::process::id()));
@@ -542,8 +545,9 @@ fn an_equal_tee_is_refused_at_its_tangent_points() {
 }
 
 /// The curved goldens against OCCT 8.0.1's own `BRepFilletAPI_MakeFillet`
-/// and `MakeChamfer` on the same solids (`crates/meshbrep/oracle`'s
-/// `fillet`; set `MESHBREP_OCCT_FILLET` to it): OCCT's blends between
+/// and `MakeChamfer` on the same solids (`fillet`, built by
+/// `oracle/build.sh` in github.com/neoscad/meshbrep; set
+/// `MESHBREP_OCCT_FILLET` to it): OCCT's blends between
 /// curved faces are approximations of the rolling ball, so its fillets
 /// agree with the reference volumes to about 2e-5, its chamfers (ruled
 /// between the same feet) to 1e-7.

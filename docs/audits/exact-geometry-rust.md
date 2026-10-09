@@ -4,8 +4,9 @@ Status: judgement plus measurements. Written 2026-10-07 against
 `56cb815` and the reference checkout at `28fe66b`.
 
 **Update, stage 1a built (2026-10-07):** path 1 is approved. Its
-reconstruction is the standalone crate `crates/meshbrep` (`MIT OR
-Apache-2.0`, no NeoSCAD dependency, to move to `neoscad/meshbrep`). It is
+reconstruction is the standalone crate `meshbrep` (`MIT OR
+Apache-2.0`, no NeoSCAD dependency; built as `crates/meshbrep`, now
+developed in github.com/neoscad/meshbrep and taken from crates.io). It is
 driven by tests and not yet wired into the evaluator or CLI (stage 1b).
 It now has:
 

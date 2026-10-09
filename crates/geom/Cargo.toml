@@ -33,8 +33,9 @@ lang = { package = "neoscad-lang", path = "../lang" }
 # (triangle topology, run order) is part of what the tier 3 images see.
 manifold-rust = { version = "=0.16.0", default-features = false }
 # Exact B-rep reconstruction and the STEP writer behind `--enable exact`
-# (`exact`); MIT OR Apache-2.0, pure Rust, no NeoSCAD dependency.
-meshbrep = { path = "../meshbrep" }
+# (`exact`), and the fillet tools (`fillet`); MIT OR Apache-2.0, pure Rust,
+# released from github.com/neoscad/meshbrep (root Cargo.toml).
+meshbrep.workspace = true
 # Sines and cosines of fillet edge facts (`fillet`), so the numbers a
 # report prints and the selection decisions made from them are the same
 # bits natively and on wasm32. Already in the build through `meshbrep`.
