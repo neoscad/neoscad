@@ -31,10 +31,11 @@ let
       (root + "/LICENSE")
       (root + "/NOTICE")
       (root + "/assets")
-      # The extensions' golden models and cases (sketch, query, exact),
+      # The extensions' golden models and cases (sketch, query, exact, fillet),
       # which the session and geom tests read.
       (root + "/conformance/extensions")
-      # The two reference pages whose examples the session tests evaluate.
+      # The reference pages whose examples the session tests evaluate.
+      (root + "/docs/fillet-edges.md")
       (root + "/docs/geometry-queries.md")
       (root + "/docs/sketch.md")
       (root + "/crates")
