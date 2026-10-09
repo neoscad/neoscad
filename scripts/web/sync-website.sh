@@ -48,6 +48,14 @@ for f in index.html SOURCE.txt THIRD-PARTY-LICENSES.txt build.json; do
         exit 1
     fi
 done
+# The site is public: refuse a bundle that names a home directory (a
+# bundle made before scripts/web/remap-paths.sh mapped every path rustc
+# writes, or built by hand).
+if leaks=$(LC_ALL=C grep -rlaE "/(Users|home)/[^/]+/" "$staging"); then
+    echo "error: the bundle contains local paths:" >&2
+    echo "$leaks" | sed "s|^$staging/|  |" >&2
+    exit 1
+fi
 echo "$name $actual" > "$staging/BUNDLE.txt"
 rm -rf "$site/try"
 mv "$staging" "$site/try"

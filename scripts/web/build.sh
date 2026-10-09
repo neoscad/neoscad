@@ -238,7 +238,7 @@ EOF
 # --- No local paths ---------------------------------------------------------
 # The bundle is published: nothing in it may name the builder's home
 # directory (scripts/web/remap-paths.sh maps the paths rustc writes).
-if leaks=$(grep -rlaF "$HOME/" "$out"); then
+if leaks=$(LC_ALL=C grep -rlaF "$HOME/" "$out"); then
     echo "error: the bundle contains local paths ($HOME/...):" >&2
     echo "$leaks" | sed "s|^$out/|  |" >&2
     exit 1
