@@ -11,7 +11,9 @@ backfill: rebuilds progress.json for runs recorded before run_cad.py wrote
   one, from what each run saved (the STL versions and their times, the
   transcript and its arrival times), into OUT/runs/<record>/<run>/.
 render: every model version of the representative runs to PNG with
-  NeoSCAD's command line, from one camera per task, into OUT/frames/.
+  NeoSCAD's command line, from one camera per task, into OUT/frames/:
+  every STL version, and for the .scad conditions every saved source
+  version too (CadQuery sources are not run outside the sandbox).
 compose: OUT/hero-<task>.png (1200 x 630, for og:image and twitter:image)
   and OUT/hero-<task>.mp4 (an animated GIF without ffmpeg), plus
   OUT/hero-<task>.json saying which runs were picked and why.
@@ -361,44 +363,145 @@ def composite_scale(args, chosen):
     return (max(known) if known else None), diags
 
 
+def frame_scad(files, boxes):
+    return "".join(f'color("{PART_COLORS[i % len(PART_COLORS)]}") import("{f}");\n'
+                   for i, (p, f) in enumerate(files.items()) if boxes.get(p))
+
+
+def frame_key(key, diag, size):
+    return f"{key}:{diag}:{ROTATION}:{FILL}:{size}"
+
+
+def cached(out, index, name, cam_key):
+    entry = index.get(name)
+    return bool(entry and entry.get("key") == cam_key and (entry["status"] != "ok" or (out / name).exists()))
+
+
+def render_state(args, out, index, stem, files, key, diag):
+    """Renders one model state, files {part: STL path}, at each size to
+    out/<stem>-<size>.png, recording each frame's status in index under
+    the cache key (the state's content and the camera)."""
+    missing = [p for p, f in files.items() if not Path(f).exists()]
+    boxes = {p: stl_bbox(f) for p, f in files.items() if Path(f).exists()}
+    bb = union_bbox(boxes.values())
+    for size_name, size in SIZES.items():
+        name = f"{stem}-{size_name}.png"
+        cam_key = frame_key(key, diag, size)
+        if cached(out, index, name, cam_key):
+            continue
+        if missing and not boxes:
+            index[name] = {"key": cam_key, "status": "missing", "detail": f"no STL for {missing}"}
+            continue
+        if bb is None:
+            index[name] = {"key": cam_key, "status": "empty", "detail": "the STL has no triangles"}
+            continue
+        center = [(bb[0][k] + bb[1][k]) / 2 for k in range(3)]
+        d = diag or diagonal(bb)
+        distance = d / (FOV_SPAN * FILL * min(1.0, size[0] / size[1]))
+        ok, err = neoscad_png(args, frame_scad(files, boxes), out / name, size, center, distance)
+        index[name] = {"key": cam_key, "status": "ok" if ok else "failed", "detail": "" if ok else err,
+                       "center": center, "distance": distance}
+
+
+def renders_sources(run):
+    return run["condition"] in pg.SOURCE_RENDER_EXT
+
+
+def source_versions(run):
+    """The run's source states worth a frame (progress.source_versions),
+    for the conditions whose sources NeoSCAD can render; [] otherwise."""
+    if not renders_sources(run):
+        return []
+    if "_src_versions" not in run:
+        def read(s):
+            f = Path(run["dir"]) / s["copy"] if s.get("copy") else None
+            return f.read_text(errors="replace") if f and f.exists() else None
+        run["_src_versions"] = pg.source_versions(run.get("sources", []), run["parts"],
+                                                  pg.SOURCE_RENDER_EXT[run["condition"]], read)
+    return run["_src_versions"]
+
+
+def timeline(run):
+    """STL and source versions on the run's clock (progress.timeline)."""
+    return pg.timeline(run["versions"], source_versions(run))
+
+
+def run_enable(args, run):
+    """What a source render of this run may --enable
+    (progress.enabled_features), from its mcp.json and transcript under
+    --src."""
+    rec, run_id = run["id"].split("/", 1)
+    keep = args.src / rec / run_id
+    mcp = keep / "mcp.json"
+    config = json.loads(mcp.read_text()) if mcp.exists() else None
+    tr = keep / "transcript.jsonl"
+    lines = [(0.0, x) for x in tr.read_text(errors="replace").splitlines()] if tr.exists() else []
+    return pg.enabled_features(run["condition"], config, lines)
+
+
+def render_sources(args, run, out, index, diag, enable):
+    """Renders every source version of a .scad run: each part exported to
+    STL by the same neoscad (under guard.run, 2 GB / 300 s, with only the
+    features the run's own tools allowed), then drawn exactly as an STL
+    version is. A version that needs a file the run directory did not
+    have then (or whose text is unknown) is marked incomplete and not
+    rendered, rather than filled in from a later version; one that does
+    not export is marked failed ("render error")."""
+    flags = [x for f in enable for x in ("--enable", f)]
+    ext = pg.SOURCE_RENDER_EXT[run["condition"]]
+    for v in source_versions(run):
+        h = hashlib.sha1(json.dumps([sorted(v["closure"].items()), v["parts"], enable]).encode())
+        key = "src:" + h.hexdigest()[:16]
+        stem = f"s{v['n']:02d}"
+        names = {f"{stem}-{s}.png": frame_key(key, diag, size) for s, size in SIZES.items()}
+        if all(cached(out, index, n, k) for n, k in names.items()):
+            continue
+        if v["problems"]:
+            for n, k in names.items():
+                index[n] = {"key": k, "status": "incomplete", "detail": "; ".join(v["problems"])}
+            continue
+        with tempfile.TemporaryDirectory(prefix="hero-src-") as d:
+            d = Path(d)
+            for path, text in v["closure"].items():
+                (d / path).parent.mkdir(parents=True, exist_ok=True)
+                (d / path).write_text(text)
+            (d / "out").mkdir(exist_ok=True)
+            errors = []
+            for p in v["parts"]:
+                stl = d / "out" / f"{p}.stl"
+                rc, _, err, _, _ = guard.run([str(args.neoscad), "-q", "-o", str(stl), *flags, str(d / f"{p}{ext}")],
+                                             cwd=d, timeout=300)
+                if rc != 0 or not stl.exists():
+                    errors.append(f"{p}: exit {rc}: {(err or '').strip()[-300:]}")
+            if errors:
+                for n, k in names.items():
+                    index[n] = {"key": k, "status": "failed", "detail": "; ".join(errors)}
+            else:
+                render_state(args, out, index, stem, {p: d / "out" / f"{p}.stl" for p in v["parts"]}, key, diag)
+        check_self_memory()
+
+
 def render_run(args, run, diag):
-    """Renders every version of one run at each size; writes frames.json
-    with each frame's status (ok, empty, missing, failed) for compose."""
+    """Renders every version of one run at each size (STL versions as
+    v<n>, and for the .scad conditions every source version as s<n>);
+    writes frames.json with each frame's status (ok, empty, missing,
+    failed, incomplete) for compose."""
     out = args.out / "frames" / run["id"]
     out.mkdir(parents=True, exist_ok=True)
     index_path = out / "frames.json"
     index = json.loads(index_path.read_text()) if index_path.exists() else {}
     for v in run["versions"]:
         files = version_files(run, v)
-        missing = [p for p, f in files.items() if not f.exists()]
-        boxes = {p: stl_bbox(f) for p, f in files.items() if f.exists()}
-        bb = union_bbox(boxes.values())
         h = hashlib.sha1()
         for p, f in files.items():
             h.update(p.encode())
             h.update(f.read_bytes() if f.exists() else b"")
-        key = h.hexdigest()[:16]
-        for size_name, size in SIZES.items():
-            name = f"v{v['n']:02d}-{size_name}.png"
-            entry = index.get(name)
-            cam_key = f"{key}:{diag}:{ROTATION}:{FILL}:{size}"
-            if entry and entry.get("key") == cam_key and (entry["status"] != "ok" or (out / name).exists()):
-                continue
-            if missing and not boxes:
-                index[name] = {"key": cam_key, "status": "missing", "detail": f"no STL for {missing}"}
-                continue
-            if bb is None:
-                index[name] = {"key": cam_key, "status": "empty", "detail": "the STL has no triangles"}
-                continue
-            center = [(bb[0][k] + bb[1][k]) / 2 for k in range(3)]
-            d = diag or diagonal(bb)
-            distance = d / (FOV_SPAN * FILL * min(1.0, size[0] / size[1]))
-            scad = "".join(f'color("{PART_COLORS[i % len(PART_COLORS)]}") import("{f}");\n'
-                           for i, (p, f) in enumerate(files.items()) if boxes.get(p))
-            ok, err = neoscad_png(args, scad, out / name, size, center, distance)
-            index[name] = {"key": cam_key, "status": "ok" if ok else "failed", "detail": "" if ok else err,
-                           "center": center, "distance": distance}
+        render_state(args, out, index, f"v{v['n']:02d}", files, h.hexdigest()[:16], diag)
         check_self_memory()
+    if renders_sources(run):
+        enable = run_enable(args, run)
+        index["_source_render"] = {"enable": enable, "versions": len(source_versions(run))}
+        render_sources(args, run, out, index, diag, enable)
     index_path.write_text(json.dumps(index, indent=1))
     return index
 
@@ -409,8 +512,11 @@ def render(args):
     (args.out / f"scale-{args.task}.json").write_text(json.dumps({"diagonal": diag, "from": diags}, indent=1))
     for cond, c in chosen.items():
         idx = render_run(args, c["run"], diag)
-        bad = {k: v["status"] for k, v in idx.items() if v["status"] != "ok"}
-        log(f"{args.task} {cond}: {c['run']['id']} ({c['rule']}); {len(idx)} frames"
+        frames = {k: v for k, v in idx.items() if not k.startswith("_")}
+        bad = {k: v["status"] for k, v in frames.items() if v["status"] != "ok"}
+        src = idx.get("_source_render")
+        log(f"{args.task} {cond}: {c['run']['id']} ({c['rule']}); {len(frames)} frames"
+            + (f" ({src['versions']} source versions, --enable {src['enable'] or 'nothing'})" if src else "")
             + (f", not rendered: {bad}" if bad else ""))
     return chosen
 
@@ -468,29 +574,55 @@ class Canvas:
         return self.images[key]
 
 
-def frame_for(args, run, version, size_name):
-    """(png path or None, placeholder text) for one version of a run."""
-    if version is None:
+def frame_for(args, run, item, size_name):
+    """(png path or None, placeholder text) for one timeline item of a run
+    ({"kind": "stl"|"src", "n"}, from timeline())."""
+    if item is None:
         return None, "no model yet"
     out = args.out / "frames" / run["id"]
     cache = args.__dict__.setdefault("_frame_index", {})
     if run["id"] not in cache:
         f = out / "frames.json"
         cache[run["id"]] = json.loads(f.read_text()) if f.exists() else {}
-    e = cache[run["id"]].get(f"v{version['n']:02d}-{size_name}.png")
+    name = f"{'s' if item['kind'] == 'src' else 'v'}{item['n']:02d}-{size_name}.png"
+    e = cache[run["id"]].get(name)
     if not e:
         return None, "not rendered"
     if e["status"] == "ok":
-        return out / f"v{version['n']:02d}-{size_name}.png", None
-    return None, {"empty": "empty mesh", "missing": "STL missing", "failed": "render failed"}[e["status"]]
+        return out / name, None
+    src = item["kind"] == "src"
+    return None, {"empty": "empty mesh", "missing": "STL missing", "failed": "render error" if src else "render failed",
+                  "incomplete": "incomplete\n(a used file is missing)"}[e["status"]]
+
+
+def badge_for(item, done=False, final=False):
+    """The cell's corner label: STL versions by number, source-rendered
+    frames marked "src" so the image never passes a render of the source
+    off as an exported model."""
+    if item is None:
+        return "done" if done else None
+    words = (["final"] if final else []) + (["src"] if item["kind"] == "src" else [f"v{item['n']}"])
+    return " ".join(words + (["done"] if done and not final else []))
 
 
 def waiting_text(run, t):
-    """The placeholder before a run's first STL: says so, with how many
+    """The placeholder before a run's first frame: says so, with how many
     source writes the agent had made by then, so an agent that previews
     through its own tool and exports late does not look idle."""
     edits = sum(1 for s in run.get("sources", []) if s.get("t") is not None and s["t"] <= t)
-    return "no STL yet" + (f"\n{edits} source edit{'s' if edits != 1 else ''}" if edits else "")
+    head = "no model yet" if renders_sources(run) else "no STL yet"
+    return head + (f"\n{edits} source edit{'s' if edits != 1 else ''}" if edits else "")
+
+
+def final_item(run):
+    """The large cell's frame: the last STL version, which is what the
+    grader judged; a source edited after it is not shown there, since the
+    pass/fail line beside it is about the export. Only a run that never
+    exported shows its newest source frame (badged src)."""
+    if run["versions"]:
+        return {"kind": "stl", "n": run["versions"][-1]["n"], "t": run["versions"][-1]["t"]}
+    srcs = [x for x in timeline(run) if x["kind"] == "src"]
+    return srcs[-1] if srcs else None
 
 
 def text_center(draw, box, text, font, fill):
@@ -591,30 +723,31 @@ def compose_still(args, cv, chosen, t_max):
     for (x, cw), cond in zip(column_boxes(len(conds)), conds):
         run = chosen[cond]["run"]
         draw_header(cv, draw, x, cw, cond, run, run.get("wall_s"), True)
-        final = run["versions"][-1] if run["versions"] else None
+        line = timeline(run)
+        final = final_item(run)
         path, ph = frame_for(args, run, final, "still")
-        paste_cell(cv, img, draw, (x, 122, x + cw, 400), path, ph or "no STL exported",
-                   badge=f"final v{final['n']}" if final else None)
-        used[cond] = {"final": final and final["n"], "strip": []}
+        paste_cell(cv, img, draw, (x, 122, x + cw, 400), path, ph if final else "no STL exported",
+                   badge=badge_for(final, final=True) if final else None)
+        used[cond] = {"final": final and {"kind": final["kind"], "n": final["n"]}, "strip": []}
         gap = 8
         sw = (cw - 2 * gap) // 3
         for i, ts in enumerate(strip_times):
-            v = pg.state_at(run["versions"], ts)
+            v = pg.state_at(line, ts)
             sx = x + i * (sw + gap)
             path, ph = frame_for(args, run, v, "still")
             done = run.get("wall_s") is not None and ts >= run["wall_s"]
             if v is None:
                 ph = waiting_text(run, ts)
             paste_cell(cv, img, draw, (sx, 410, sx + sw, 494), path, ph if path is None else None,
-                       badge="done" if done else None)
+                       badge=badge_for(v, done=done) if (done or (v and v["kind"] == "src")) else None)
             draw.text((sx + sw / 2, 512), f"at {pg.fmt_clock(ts)}", font=cv.font("mono", 14), fill=MUTED,
                       anchor="ms")
-            used[cond]["strip"].append({"t": round(ts, 1), "version": v and v["n"]})
+            used[cond]["strip"].append({"t": round(ts, 1), "frame": v and {"kind": v["kind"], "n": v["n"]}})
         draw_bar(cv, draw, x, cw, 536, run, t_max, t_max)
         draw_axis_labels(cv, draw, x, cw, 572, t_max)
-    draw.text((24, 610), "Frames at shared clock times; every bar uses one axis, 0 to the slowest run. "
-              "Ticks: STL versions (tall), source edits (short).", font=cv.font("sans", 14), fill=MUTED,
-              anchor="ls")
+    draw.text((24, 610), "Shared clock times, one axis (0 to the slowest run). Ticks: STL versions (tall), "
+              "source edits (short). src: rendered from the saved source.", font=cv.font("sans", 14),
+              fill=MUTED, anchor="ls")
     out = args.out / f"hero-{args.task}.png"
     img.save(out, optimize=True)
     return out, {"strip_times": [round(t, 1) for t in strip_times], "frames": used}
@@ -643,15 +776,16 @@ def compose_animation(args, cv, chosen, t_max):
             wall = run.get("wall_s") or 0
             done = t >= wall
             draw_header(cv, draw, x, cw, cond, run, min(t, wall), done)
-            v = pg.state_at(run["versions"], min(t, wall))
+            v = pg.state_at(timeline(run), min(t, wall))
             path, ph = frame_for(args, run, v, "anim")
             if v is None:
-                ph = "no STL exported" if done else waiting_text(run, t)
+                ph = "no model" if done else waiting_text(run, t)
             paste_cell(cv, img, draw, (x, 122, x + cw, 502), path, ph,
-                       badge=(f"v{v['n']}" + (" final" if done else "")) if v else None)
+                       badge=badge_for(v, final=done) if v else None)
             draw_bar(cv, draw, x, cw, 530, run, t_max, t)
             draw_axis_labels(cv, draw, x, cw, 566, t_max)
-        draw.text((24, 610), "Each column runs on one shared clock and stops when its agent finished.",
+        draw.text((24, 610), "Each column runs on one shared clock and stops when its agent finished. "
+                  "src: rendered from the saved source, not an exported STL.",
                   font=cv.font("sans", 14), fill=MUTED, anchor="ls")
         if proc:
             proc.stdin.write(img.tobytes())
@@ -690,6 +824,12 @@ def compose(args, chosen=None):
                    "renderer": subprocess.run([str(args.neoscad), "--version"], capture_output=True,
                                               text=True).stdout.strip() if Path(args.neoscad).exists() else None},
         "animation_s": {"sweep": args.duration, "hold": args.hold, "fps": args.fps},
+        "source_frames": {
+            "rule": "for the .scad conditions, a frame at time t shows the newest of the STL versions and the "
+                    "rendered source versions at or before t (an STL wins a tie); source frames are badged src. "
+                    "CadQuery columns show STL versions only.",
+            **{cond: json.loads((args.out / "frames" / c["run"]["id"] / "frames.json").read_text())
+               .get("_source_render") for cond, c in chosen.items() if renders_sources(c["run"])}},
         **layout,
     }
     (args.out / f"hero-{args.task}.json").write_text(json.dumps(meta, indent=1))

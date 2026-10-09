@@ -9,11 +9,15 @@ unittest, synthetic runs only: no model calls, no recorded results).
    at a clock time, the animation clock.
 3. Stream accounting and the replay of Write/Edit calls that backfill
    rebuilds sources from.
-4. The capture side: run_cad's Watcher keeping source versions and
+4. Source frames: which saved .scad states get a frame or are
+   incomplete, what a render may enable, the STL/source timeline, and
+   hero.render_run driving a stand-in neoscad (no real rendering).
+5. The capture side: run_cad's Watcher keeping source versions and
    write_progress writing progress.json.
 """
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -219,6 +223,180 @@ class Stream(unittest.TestCase):
         self.assertTrue(rec["versions"][0]["complete"])
         self.assertEqual(rec["final"], {"t": 10.0, "turns": 6, "cost_usd": 1.5, "assistant_messages": 6})
         json.dumps(rec)
+
+
+def src(t, path, text, copy=True):
+    return {"t": t, "path": path, "text": text, "copy": f"sources/{t}-{path}" if copy else None}
+
+
+def read_text(s):
+    return s["text"] if s.get("copy") else None
+
+
+class SourceFrames(unittest.TestCase):
+    def test_scad_refs_ignore_comments_and_strings(self):
+        text = ('include <a.scad>\n// use <gone.scad>\n/* include <also_gone.scad> */\n'
+                'echo("use <not_a_ref.scad>");\nuse <lib/b.scad>;\n')
+        self.assertEqual(pg.scad_refs(text), ["a.scad", "lib/b.scad"])
+
+    def test_resolve_ref_is_relative_to_the_including_file(self):
+        self.assertEqual(pg.resolve_ref("bracket.scad", "lib/x.scad"), "lib/x.scad")
+        self.assertEqual(pg.resolve_ref("lib/x.scad", "y.scad"), "lib/y.scad")
+        self.assertEqual(pg.resolve_ref("lib/x.scad", "../z.scad"), "z.scad")
+        self.assertIsNone(pg.resolve_ref("bracket.scad", "../outside.scad"))
+        self.assertIsNone(pg.resolve_ref("bracket.scad", "/abs/lib.scad"))
+
+    def test_versions_follow_part_saves_and_their_includes(self):
+        sources = [
+            src(1.0, "check.scad", "cube(1);"),             # not a part: no frame yet
+            src(2.0, "base.scad", "include <dims.scad>\ncube(w);"),  # needs dims.scad: incomplete
+            src(3.0, "dims.scad", "w = 2;"),                # now complete
+            src(4.0, "check.scad", "cube(3);"),             # check edits change nothing shown
+            src(5.0, "notes.py", "x = 1"),                  # not the condition's extension
+            src(6.0, "lid.scad", "sphere(1);"),             # second part appears
+            src(7.0, "dims.scad", "w = 2;"),                # same text again: no new frame
+            src(8.0, "dims.scad", "w = 4;"),                # an include changed: a new frame
+        ]
+        vs = pg.source_versions(sources, ["base", "lid"], ".scad", read_text)
+        self.assertEqual([(v["n"], v["t"]) for v in vs], [(1, 2.0), (2, 3.0), (3, 6.0), (4, 8.0)])
+        self.assertEqual(vs[0]["parts"], ["base"])
+        self.assertEqual(vs[0]["problems"], ["dims.scad: not in the run directory"])
+        self.assertEqual(vs[1]["problems"], [])
+        self.assertEqual(sorted(vs[1]["closure"]), ["base.scad", "dims.scad"])
+        self.assertEqual(vs[2]["parts"], ["base", "lid"])
+        self.assertEqual(vs[3]["closure"]["dims.scad"], "w = 4;")
+
+    def test_unknown_text_or_outside_reference_is_incomplete(self):
+        unknown = pg.source_versions([src(1.0, "a.scad", None, copy=False)], ["a"], ".scad", read_text)
+        self.assertEqual(len(unknown), 1)
+        self.assertIn("text unknown", unknown[0]["problems"][0])
+        lib = pg.source_versions([src(1.0, "a.scad", "use <MCAD/gears.scad>\ncube(1);")], ["a"], ".scad",
+                                 read_text)
+        self.assertIn("MCAD/gears.scad: not in the run directory", lib[0]["problems"])
+        out = pg.source_versions([src(1.0, "a.scad", "include <../x.scad>")], ["a"], ".scad", read_text)
+        self.assertIn("outside the run directory", out[0]["problems"][0])
+
+    def test_enabled_features(self):
+        cfg = {"mcpServers": {"neoscad": {"command": "neoscad",
+                                          "args": ["mcp", "--root", "/w", "--enable", "sketch", "--enable=fillet"]}}}
+        plain = {"mcpServers": {"neoscad": {"command": "neoscad", "args": ["mcp", "--root", "/w"]}}}
+        parts_call = [(1.0, assistant("m1", [tool_use(1, "mcp__neoscad__snapshot", file="a.scad", parts=True)], 1))]
+        self.assertEqual(pg.enabled_features("neoscad", cfg, []), ["fillet", "sketch"])
+        self.assertEqual(pg.enabled_features("neoscad", plain, []), [])
+        self.assertEqual(pg.enabled_features("neoscad", plain, parts_call), ["part"])
+        self.assertEqual(pg.enabled_features("neoscad", None, []), [])
+        # The OpenSCAD condition is plain OpenSCAD whatever the transcript says.
+        self.assertEqual(pg.enabled_features("openscad", cfg, parts_call), [])
+
+    def test_timeline_shows_the_newest_and_an_export_wins_a_tie(self):
+        line = pg.timeline([{"n": 1, "t": 50.0}, {"n": 2, "t": 90.0}],
+                           [{"n": 1, "t": 10.0}, {"n": 2, "t": 50.0}, {"n": 3, "t": 70.0}])
+        at = {t: (lambda x: x and (x["kind"], x["n"]))(pg.state_at(line, t)) for t in (5, 10, 50, 69, 70, 95)}
+        self.assertEqual(at, {5: None, 10: ("src", 1), 50: ("stl", 1), 69: ("stl", 1), 70: ("src", 3),
+                              95: ("stl", 2)})
+        self.assertEqual(pg.timeline([], []), [])
+
+
+FAKE_NEOSCAD = '''#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+with open(os.environ["FAKE_NEOSCAD_LOG"], "a") as f:
+    f.write(json.dumps({"argv": a, "files": sorted(os.listdir(os.getcwd()))}) + "\\n")
+out = a[a.index("-o") + 1]
+src = a[-1]
+if out.endswith(".stl"):
+    if "BROKEN" in open(src).read():
+        sys.exit("ERROR: Parser error")
+    open(out, "w").write("solid x\\nfacet normal 0 0 1\\nouter loop\\nvertex 0 0 0\\nvertex 1 0 0\\n"
+                         "vertex 0 1 1\\nendloop\\nendfacet\\nendsolid x\\n")
+else:
+    open(out, "wb").write(b"png")
+'''
+
+
+class SourceRender(unittest.TestCase):
+    """hero.render_run's source frames, with a stand-in neoscad that
+    records its arguments: what gets exported, with which flags and
+    files, and what each frame's status becomes. No real rendering."""
+
+    def setUp(self):
+        import hero
+        self.hero = hero
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.log = d / "calls.jsonl"
+        fake = d / "neoscad"
+        fake.write_text(FAKE_NEOSCAD)
+        fake.chmod(0o755)
+        self.src_root, self.out = d / "src", d / "out"
+        keep = self.src_root / "cad-x" / "T1-neoscad-1"
+        keep.mkdir(parents=True)
+        (keep / "mcp.json").write_text(json.dumps({"mcpServers": {"neoscad": {
+            "command": "neoscad", "args": ["mcp", "--root", "/w", "--enable", "sketch"]}}}))
+        (keep / "transcript.jsonl").write_text("")
+        (keep / "sources").mkdir()
+        texts = [("bracket.scad", "include <dims.scad>\ncube(w);"), ("dims.scad", "w = 2;"),
+                 ("bracket.scad", "BROKEN")]
+        sources = []
+        for i, (p, text) in enumerate(texts):
+            (keep / "sources" / f"{i:03d}-{p}").write_text(text)
+            sources.append({"t": float(i + 1), "path": p, "copy": f"sources/{i:03d}-{p}"})
+        self.run = {"id": "cad-x/T1-neoscad-1", "dir": str(keep), "condition": "neoscad", "parts": ["bracket"],
+                    "versions": [], "sources": sources, "stl_root": "history"}
+
+        class A:
+            pass
+        self.args = A()
+        self.args.neoscad, self.args.src, self.args.out = str(fake), self.src_root, self.out
+        os.environ["FAKE_NEOSCAD_LOG"] = str(self.log)
+
+    def tearDown(self):
+        os.environ.pop("FAKE_NEOSCAD_LOG", None)
+        self.tmp.cleanup()
+
+    def calls(self):
+        return [json.loads(x) for x in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def test_statuses_flags_and_files(self):
+        idx = self.hero.render_run(self.args, self.run, 10.0)
+        status = {k: v["status"] for k, v in idx.items() if not k.startswith("_")}
+        self.assertEqual(status, {"s01-still.png": "incomplete", "s01-anim.png": "incomplete",
+                                  "s02-still.png": "ok", "s02-anim.png": "ok",
+                                  "s03-still.png": "failed", "s03-anim.png": "failed"})
+        self.assertEqual(idx["_source_render"], {"enable": ["sketch"], "versions": 3})
+        exports = [c for c in self.calls() if c["argv"][c["argv"].index("-o") + 1].endswith(".stl")]
+        # The incomplete version is never exported; the others are, with the
+        # server's own --enable and the include beside the part.
+        self.assertEqual(len(exports), 2)
+        for c in exports:
+            self.assertEqual(c["argv"][c["argv"].index("--enable") + 1], "sketch")
+        self.assertIn("dims.scad", exports[0]["files"])
+        n = len(self.calls())
+        self.hero.render_run(self.args, self.run, 10.0)  # cached: nothing runs again
+        self.assertEqual(len(self.calls()), n)
+
+    def test_compose_side_badges_and_placeholders(self):
+        self.hero.render_run(self.args, self.run, 10.0)
+        line = self.hero.timeline(self.run)
+        first, ok, broken = line
+        self.assertEqual(self.hero.frame_for(self.args, self.run, first, "still"),
+                         (None, "incomplete\n(a used file is missing)"))
+        self.assertEqual(self.hero.frame_for(self.args, self.run, broken, "anim"), (None, "render error"))
+        self.assertTrue(str(self.hero.frame_for(self.args, self.run, ok, "anim")[0]).endswith("s02-anim.png"))
+        self.assertEqual(self.hero.badge_for(ok), "src")
+        self.assertEqual(self.hero.badge_for(ok, final=True), "final src")
+        self.assertEqual(self.hero.badge_for({"kind": "stl", "n": 3}, done=True), "v3 done")
+        # With no STL ever exported, the large cell shows the newest source.
+        self.assertEqual(self.hero.final_item(self.run)["kind"], "src")
+        self.assertEqual(self.hero.waiting_text(self.run, 0.5), "no model yet")
+
+    def test_cadquery_sources_are_never_run(self):
+        self.run["condition"] = "cadquery"
+        self.run["sources"] = [{"t": 1.0, "path": "bracket.py", "copy": "sources/000-bracket.scad"}]
+        idx = self.hero.render_run(self.args, self.run, 10.0)
+        self.assertEqual(idx, {})
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.hero.waiting_text(self.run, 5.0), "no STL yet\n1 source edit")
 
 
 class Capture(unittest.TestCase):

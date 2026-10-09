@@ -310,6 +310,33 @@ under `guard.run` (2 GB, 300 s), and `hero.py` stops itself above 2 GB.
 A version with no triangles, a missing STL or a failed render gets a
 placeholder frame that says which.
 
+**Source frames** (OpenSCAD and NeoSCAD conditions). NeoSCAD's agents
+preview through the MCP server's `snapshot` tool and export an STL late,
+so STL frames alone left that column empty for most of its run. For the
+two `.scad` conditions `render` therefore also draws every saved source
+version: after each save, the part files (`<part>.scad`) and everything
+they `use` or `include` from the run directory, as they stood then
+(`progress.source_versions`; a save that changes none of these, such as
+a check script, adds no frame). Each part is exported to STL by the same
+`neoscad` under `guard.run` (2 GB, 300 s) and drawn exactly as an STL
+version is. The render enables only what the condition allowed
+(`progress.enabled_features`): nothing for OpenSCAD; for NeoSCAD the
+`--enable` arguments in the run's `mcp.json`, plus `part` when one of
+the agent's MCP calls passed `parts: true`, which the server grants per
+call. A version that needs a file the run directory did not have at that
+time (a library path, a file outside the run directory, or one whose
+text the backfill could not replay) shows "incomplete" and is not
+rendered, rather than filled in from a later version; one that does not
+export shows "render error". CadQuery sources are Python and would have
+to run outside the sandbox, so that column keeps STL frames only.
+
+A frame at clock time t shows the newest of the STL versions and the
+rendered source versions at or before t; at an equal time the STL wins.
+Source-rendered frames carry a `src` badge. The large "final" cell is
+always the last STL version, the file the grader judged, so its pass or
+fail line describes what it shows; only a run that never exported falls
+back to its newest source frame there.
+
 **Representative run** (`progress.representative`, tested in
 `test_progress.py`): per task and condition, among the passing runs
 the one with the median wall time; with no passing run, the median of all
@@ -334,15 +361,16 @@ directory:
   ffmpeg: every column on one linear clock with a running timer, each
   freezing at its run's end;
 - `hero-<task>.json`: the runs picked and the rule, every candidate, the
-  timing notes, the camera and the renderer's version.
+  timing notes, the camera, the renderer's version, and per `.scad`
+  column the features its source frames enabled.
 
 Composition needs Pillow, which the CadQuery venv has; under another
 Python, `hero.py` re-executes itself with the venv's interpreter
 (`--pillow-python` to choose one). Fonts are the vendored Liberation
 Sans and Mono; colours are the site's dark theme. `hero.py all --task T`
-runs backfill, render and compose in turn. The frames are STL exports:
-an agent that previews through its own tool and exports late shows
-"no STL yet" (with its source edits so far) until its first export.
+runs backfill, render and compose in turn. Before a column's first
+frame it says "no model yet" ("no STL yet" for CadQuery), with the
+source edits made so far.
 
 Everything `hero.py` writes is a result: it goes to `progress/` (or
 `results/` with `--out`) and is never committed.

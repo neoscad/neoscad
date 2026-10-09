@@ -14,7 +14,11 @@ tests (test_progress.py) can check it on synthetic runs:
 - `build_progress`: the `progress.json` record;
 - `representative`: the one run per condition that the hero shows;
 - the time-axis layout: `state_at`, `sample_times`, `axis_x`,
-  `animation_clock`, `fmt_clock`.
+  `animation_clock`, `fmt_clock`;
+- source frames for the .scad conditions: `source_versions` (which saved
+  states get a frame, and which are incomplete), `enabled_features`
+  (what a render may --enable) and `timeline` (STL and source versions
+  on one clock).
 
 Times are seconds since the run started, on the harness's monotonic clock
 (the reader thread stamps every stream line as it arrives; the watcher
@@ -23,6 +27,8 @@ stamps every file copy). Nothing here reads the wall clock.
 
 import json
 import math
+import posixpath
+import re
 
 SCHEMA = 1
 CONDITION_ORDER = ("openscad", "cadquery", "neoscad")
@@ -295,3 +301,156 @@ def animation_clock(t_max, duration_s, fps, hold_s):
 def speedup(t_max, duration_s):
     """How many run seconds one second of the animation shows."""
     return t_max / duration_s if duration_s > 0 else math.inf
+
+
+# ---------------------------------------------------------------------------
+# Source frames
+#
+# NeoSCAD's agents preview through the MCP server's snapshot tool and
+# export an STL only near the end, so frames from STL versions alone left
+# that column on "no STL yet" for most of its run. For the .scad
+# conditions the hero also renders each saved source version (with the
+# same renderer and camera); these helpers decide which versions those
+# are and what they may enable. CadQuery sources are Python and would have
+# to run outside the sandbox, so that column keeps STL frames only.
+
+SOURCE_RENDER_EXT = {"openscad": ".scad", "neoscad": ".scad"}
+
+_SCAD_REF = re.compile(r"\b(?:include|use)\s*<([^>]*)>")
+
+
+def strip_scad_comments(text):
+    """The text with // and /* */ comments and string contents blanked, so
+    a commented-out include (or one quoted in an echo) is not taken for a
+    dependency: it would make a version "incomplete" that OpenSCAD
+    renders fine."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            out.append('""')  # a string's contents are never a use/include
+            i = j + 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            out.append("\n" * text.count("\n", i, n if j < 0 else j))
+            i = n if j < 0 else j + 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def scad_refs(text):
+    """The paths a .scad file includes or uses, in order."""
+    return [m.group(1).strip() for m in _SCAD_REF.finditer(strip_scad_comments(text))]
+
+
+def resolve_ref(including, ref):
+    """A use/include path as a path relative to the run directory, or None
+    when it points outside it. OpenSCAD looks first beside the including
+    file, then on its library path (.reference/openscad
+    src/core/parsersettings.cc:98-104); the library path of the agent's
+    run is not recorded, so only the run directory counts here and a
+    library reference makes the version incomplete rather than guessed."""
+    if ref.startswith("/"):
+        return None
+    p = posixpath.normpath(posixpath.join(posixpath.dirname(including), ref))
+    return None if p == ".." or p.startswith("../") else p
+
+
+def source_closure(files, parts, ext=".scad"):
+    """The files one source state needs: every part file present
+    (`<part><ext>` at the top of the run directory) and what they use or
+    include, transitively. files: {relative path: text, or None when the
+    text of that version is unknown}. Returns (closure {path: text},
+    present parts, problems [str]): a reference to a file the state does
+    not have, or a needed file whose text is unknown. A part whose file
+    does not exist yet is simply absent, as in the STL frames."""
+    present = [p for p in parts if f"{p}{ext}" in files]
+    closure, problems = {}, []
+    todo = [f"{p}{ext}" for p in present]
+    while todo:
+        path = todo.pop(0)
+        if path in closure:
+            continue
+        text = files.get(path)
+        if text is None:
+            problems.append(f"{path}: text unknown (changed outside Write/Edit)" if path in files
+                            else f"{path}: not in the run directory")
+            closure[path] = None
+            continue
+        closure[path] = text
+        for ref in scad_refs(text):
+            target = resolve_ref(path, ref)
+            if target is None:
+                problems.append(f"{path}: <{ref}> is outside the run directory")
+            elif target not in closure:
+                todo.append(target)
+    return closure, present, problems
+
+
+def source_versions(sources, parts, ext, read):
+    """The source states worth a frame: after each saved version (sources
+    sorted by time, as in progress.json), the closure of the part files,
+    kept only when it differs from the previous state's (a save to a
+    check script, or a save of identical text, adds no frame). read(entry)
+    returns the saved text of a sources entry, or None when the entry has
+    no copy. Returns [{"n", "t", "closure", "parts", "problems"}], n from 1."""
+    files, out, last = {}, [], None
+    for s in sorted((s for s in sources if s.get("t") is not None), key=lambda s: s["t"]):
+        if not s["path"].endswith(ext):
+            continue
+        files[s["path"]] = read(s)
+        closure, present, problems = source_closure(files, parts, ext)
+        if not present:
+            continue
+        sig = (tuple(sorted(closure.items(), key=lambda kv: kv[0])), tuple(present))
+        if sig == last:
+            continue
+        last = sig
+        out.append({"n": len(out) + 1, "t": s["t"], "closure": closure, "parts": present, "problems": problems})
+    return out
+
+
+def enabled_features(condition, mcp_config, lines):
+    """The --enable features a source render of this run may use: none for
+    OpenSCAD (plain language: the agent ran the OpenSCAD nightly, whose
+    experiments it was not told about), and for NeoSCAD what its MCP
+    server was started with (mcp.json's --enable arguments) plus `part`
+    if any of the agent's MCP calls passed `parts: true`, which the server
+    grants per call. Rendering with more would draw sources the agent's
+    own tools rejected; with less, sources they accepted would fail."""
+    if condition != "neoscad":
+        return []
+    feats = []
+    for server in ((mcp_config or {}).get("mcpServers") or {}).values():
+        a = server.get("args") or []
+        for i, x in enumerate(a):
+            if x == "--enable" and i + 1 < len(a):
+                feats.append(a[i + 1])
+            elif x.startswith("--enable="):
+                feats.append(x.split("=", 1)[1])
+    for _, m in _events(lines):
+        if m.get("type") != "assistant":
+            continue
+        content = (m.get("message") or {}).get("content") if isinstance(m.get("message"), dict) else None
+        for c in content or []:
+            if isinstance(c, dict) and c.get("type") == "tool_use" and str(c.get("name", "")).startswith(
+                    "mcp__neoscad__") and (c.get("input") or {}).get("parts") is True:
+                feats.append("part")
+    return sorted(set(feats))
+
+
+def timeline(stl_versions, src_versions):
+    """STL and source versions on one clock: [{"kind": "stl"|"src", "n",
+    "t"}] sorted by time. At an equal time the STL sorts last, so
+    state_at shows the export (what was graded) over the source frame."""
+    items = [{"kind": "src", "n": v["n"], "t": v["t"]} for v in src_versions] + \
+            [{"kind": "stl", "n": v["n"], "t": v["t"]} for v in stl_versions]
+    return sorted(items, key=lambda x: (x["t"], x["kind"] == "stl", x["n"]))
