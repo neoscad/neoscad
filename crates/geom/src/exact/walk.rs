@@ -99,6 +99,11 @@ pub struct ExportMesh {
     /// render's polygons: the sum, over the curved primitives made exact,
     /// of their curved area times their sagitta.
     pub normal_volume_bound: f64,
+    /// How far a fitted B-spline blend may be from the faces it was made
+    /// to meet (`meshbrep::blend::Tool::fit`, in the export's
+    /// coordinates): what reconstruction must allow at their contacts
+    /// ([`tolerances`]). 0 when there is none.
+    pub surface_fit: f64,
     /// How many `linear_extrude`/`rotate_extrude` nodes were built with
     /// exact surfaces (none with [`Extrusions::Faceted`]).
     pub exact_extrusions: u32,
@@ -256,6 +261,7 @@ fn run_walk(
         sub_index: HashMap::new(),
         normal_sagitta: 0.0,
         normal_volume_bound: 0.0,
+        surface_fit: 0.0,
         curves2: vec![Curve2::Faceted],
         extrusions,
         exact_extrusions: 0,
@@ -296,11 +302,24 @@ fn run_walk(
         substitutions: w.subs,
         normal_sagitta: w.normal_sagitta,
         normal_volume_bound: w.normal_volume_bound,
+        surface_fit: w.surface_fit,
         exact_extrusions: w.exact_extrusions,
         surface_origin: w.surface_origin,
         origins: w.origins,
         provenance: w.provenance,
     })
+}
+
+/// The reconstruction tolerances for an export render: the defaults, with
+/// the B-spline blends' contacts allowed ten times their fit (the side of
+/// a fitted patch lies on its face only to within it, and the contact is
+/// recognised from samples of it).
+pub fn tolerances(em: &ExportMesh) -> meshbrep::Tolerances {
+    let d = meshbrep::Tolerances::default();
+    meshbrep::Tolerances {
+        surface_fit: d.surface_fit.max(10.0 * em.surface_fit),
+        ..d
+    }
 }
 
 type SubKey = (
@@ -329,6 +348,7 @@ struct Walk<'a> {
     sub_index: HashMap<SubKey, usize>,
     normal_sagitta: f64,
     normal_volume_bound: f64,
+    surface_fit: f64,
     /// The 2D curve table of the profiles built so far
     /// ([`crate::exact::profile`]); entry 0 is the facet.
     curves2: Vec<Curve2>,
@@ -593,6 +613,18 @@ fn transform_surface(s: &Surface, m: &Matrix, scale: Option<f64>) -> Surface {
             major_radius: major_radius * k,
             minor_radius: minor_radius * k,
         },
+        // A B-spline patch (a blend between curved faces) is the same
+        // patch of the mapped control points under any affine map, a
+        // non-uniform scale included: rational ones too, weights kept.
+        (Surface::BSpline(b), _) => {
+            let mut b = b.clone();
+            for row in &mut b.control {
+                for q in row.iter_mut() {
+                    *q = apply(m, *q);
+                }
+            }
+            Surface::BSpline(b)
+        }
         _ => Surface::Faceted,
     }
 }
@@ -840,6 +872,19 @@ impl Walk<'_> {
                 }
             }
             self.record(n, base);
+            // The fit scales with the placement (a similarity's factor;
+            // the largest stretch of any other affine map).
+            let stretch = scale.unwrap_or_else(|| {
+                (0..3)
+                    .map(|j| {
+                        let c = [m[0][j], m[1][j], m[2][j]];
+                        (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()
+                    })
+                    .fold(0.0, f64::max)
+            });
+            for t in &blends.tools {
+                self.surface_fit = self.surface_fit.max(t.fit * stretch);
+            }
             tools += blends.tools.len();
             explicit_fn |= blends.explicit_fn;
             sagitta = sagitta.max(blends.sagitta);

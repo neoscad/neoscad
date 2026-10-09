@@ -77,7 +77,12 @@ pub enum Class {
     /// A circle whose faces are surfaces of revolution about its axis: a
     /// 2D fillet revolved about it.
     Rotational,
-    /// Anything else: not blended in v1.
+    /// Any other curve between two faces that are planes, cylinders,
+    /// cones, spheres or tori sharing no axis (a tee of two cylinders, a
+    /// cylinder through a plane at a slant): a ball rolled along it, the
+    /// blend a B-spline surface (`docs/fillets.md`, section 15.9).
+    Swept,
+    /// Anything else (an edge of a B-spline face): not blended.
     Other,
 }
 
@@ -86,6 +91,7 @@ impl Class {
         match self {
             Class::Translational => "translational",
             Class::Rotational => "rotational",
+            Class::Swept => "swept",
             Class::Other => "other",
         }
     }
@@ -364,6 +370,12 @@ fn compute(
         if em.mesh.triangles.is_empty() {
             return Err(Unavailable::Empty);
         }
+        // A first pass's blends between curved faces are fitted B-spline
+        // surfaces, which meet their faces only to within their fit.
+        let options = meshbrep::Options {
+            tolerances: walk::tolerances(&em),
+            ..options.clone()
+        };
         match meshbrep::reconstruct_located(&em.mesh, &options) {
             Ok(b) => return Ok(build(b, &em, mult)),
             Err(f) if f.error == meshbrep::Error::Stopped => {
@@ -635,8 +647,30 @@ fn off_line(p: V, o: V, d: V) -> f64 {
     norm(sub(v, curve::mul(d, dot(v, d))))
 }
 
-/// The edge's blend class (`docs/fillets.md`, 6.1).
+/// The edge's blend class (`docs/fillets.md`, 6.1 and 15.9).
 fn class_of(c: &Curve, a: &Surface, b: &Surface, tol: f64) -> Class {
+    let analytic = |s: &Surface| {
+        matches!(
+            s,
+            Surface::Plane { .. }
+                | Surface::Cylinder { .. }
+                | Surface::Cone { .. }
+                | Surface::Sphere { .. }
+                | Surface::Torus { .. }
+        )
+    };
+    // Whatever the two classes below do not cover, between faces whose
+    // exact distance is known: a ball rolled along it.
+    let swept = || {
+        if analytic(a)
+            && analytic(b)
+            && !matches!((a, b), (Surface::Plane { .. }, Surface::Plane { .. }))
+        {
+            Class::Swept
+        } else {
+            Class::Other
+        }
+    };
     match c {
         Curve::Line { direction, .. } => {
             let ok = |s: &Surface| match s {
@@ -647,7 +681,7 @@ fn class_of(c: &Curve, a: &Surface, b: &Surface, tol: f64) -> Class {
             if ok(a) && ok(b) {
                 Class::Translational
             } else {
-                Class::Other
+                swept()
             }
         }
         Curve::Circle { center, normal, .. } => {
@@ -669,10 +703,10 @@ fn class_of(c: &Curve, a: &Surface, b: &Surface, tol: f64) -> Class {
             if ok(a) && ok(b) {
                 Class::Rotational
             } else {
-                Class::Other
+                swept()
             }
         }
-        _ => Class::Other,
+        _ => swept(),
     }
 }
 
@@ -1093,7 +1127,7 @@ pub(crate) fn plan_with(f: &FilletNode, facts: Result<Arc<Facts>, Unavailable>) 
             },
             code: DiagCode::FilletUnsupportedEdge,
             message: format!(
-                "{m}(): {} {} not of a kind this version blends: {}; only lines between planes (or cylinders parallel to them) and circles about one axis of revolution are",
+                "{m}(): {} {} not of a kind this version blends: {}; edges between planes, cylinders, cones, spheres and tori are, where the faces meet at an angle all along",
                 if k == 1 { "1 selected edge" } else { "selected edges" },
                 if k == 1 { "is" } else { "are" },
                 list.join(", ")
@@ -1131,7 +1165,7 @@ fn decide(f: &FilletNode, p: &mut Plan, facts: &Facts) {
     {
         return;
     }
-    let list: Vec<usize> = p
+    let mut list: Vec<usize> = p
         .selected
         .iter()
         .copied()
@@ -1140,7 +1174,64 @@ fn decide(f: &FilletNode, p: &mut Plan, facts: &Facts) {
     if list.is_empty() {
         return;
     }
-    match build::prepare(facts, &list, profile_of(f), f.size) {
+    // Under the default "all", an edge between curved faces that cannot
+    // be built (at a vertex with other blends, too large, beside a face
+    // it overlaps) is left sharp with a warning, as every edge outside
+    // the blends' classes was before they took such edges: a call that
+    // rounded a model's other edges keeps rounding them.
+    let mut left: Vec<usize> = Vec::new();
+    let result = loop {
+        let r = build::prepare(facts, &list, profile_of(f), f.size);
+        let named: Vec<usize> = match &r {
+            Err(build::Problem::Vertex { edges, mixed, .. })
+                if !(*mixed
+                    && [Sense::Convex, Sense::Concave]
+                        .iter()
+                        .all(|&s| list.iter().any(|&i| facts.edges[i].sense == s))) =>
+            {
+                edges.clone()
+            }
+            Err(build::Problem::TooLarge { edge, .. }) => vec![*edge],
+            Err(build::Problem::Overlap { edges, .. }) => edges.to_vec(),
+            _ => Vec::new(),
+        };
+        let swept: Vec<usize> = named
+            .iter()
+            .map(|&k| list[k])
+            .filter(|&i| facts.edges[i].class == Class::Swept)
+            .collect();
+        if r.is_err() && f.edges.is_all() && !swept.is_empty() && swept.len() < list.len() {
+            list.retain(|i| !swept.contains(i));
+            left.extend(swept);
+            continue;
+        }
+        break r;
+    };
+    if !left.is_empty() {
+        left.sort_unstable();
+        let words: Vec<String> = left
+            .iter()
+            .take(LISTED)
+            .map(|&i| {
+                let at = p.selected.iter().position(|&s| s == i).map_or(0, |x| x + 1);
+                format!("edge {at} ({})", edge_text(&facts.edges[i]))
+            })
+            .collect();
+        p.diags.push(PlanDiag {
+            severity: Severity::Warning,
+            code: DiagCode::FilletUnsupportedEdge,
+            message: format!(
+                "{}(): {} between curved faces {} left sharp: {}; such an edge is rounded only where its blend fits and ends on plane faces clear of other blends",
+                f.kind.module(),
+                if left.len() == 1 { "1 edge" } else { "edges" },
+                if left.len() == 1 { "is" } else { "are" },
+                words.join(", ")
+            ),
+            hints: vec!["select it on its own to see why".into()],
+            fix: None,
+        });
+    }
+    match result {
         Ok(b) => {
             p.status = Status::Built;
             p.build = Some(Arc::new(b));

@@ -1,10 +1,10 @@
 # Fillet and chamfer cases
 
-Stages F2, F3 and F5a of `docs/fillets.md`: `fillet_edges()` and
+Stages F2, F3, F5a and F5b of `docs/fillets.md`: `fillet_edges()` and
 `chamfer_edges()` (`--enable fillet`) on straight edges, on circles and
-arcs about an axis, and on convex and concave edges that meet (two
-passes in one call), each with its volume in a `// volume:` comment:
-a closed form, or for two F5a cases with none written out
+arcs about an axis, on convex and concave edges that meet (two
+passes in one call), and between curved faces with no common axis, each with its volume in a `// volume:` comment:
+a closed form, a reference integration (the `curved_*` cases, below), or for two F5a cases with none written out
 (`block_plate_all`, `chamfer_bracket_all`) OCCT 8.0.1's volume of the
 exported file, as their comments say. They are not in `conformance/manifest.json`, and
 `conformance run` does not read them.
@@ -30,3 +30,17 @@ arcs at other angles; their `A ρ̄` was integrated on the boundary
 (Green's theorem, each arc by 40-point Gauss–Legendre quadrature, which
 for these smooth integrands converges to rounding), and the result agrees
 with OCCT's volume of the exported file to 3e-14 or better.
+
+The `curved_*` cases (stage F5b) blend curved faces that share no axis:
+tees and a boss on a rod, a hole across a rod, a rod and a hole through
+a plate at 30°, a rod in a ball. Their blends have no closed form; the
+volume is a reference integration in `crates/meshbrep/tests/sweep.rs`
+(`golden_reference_volumes`): the base solid plus the blend's region
+swept along its exact spine, which agrees with Pappus's theorem to
+rounding where one applies, and with the exported B-rep's volume to
+about 1e-11. `fillet_build.rs` holds them to 1e-9 like the rest. OCCT's
+own `BRepFilletAPI_MakeFillet` and `MakeChamfer` on the same solids
+(`crates/meshbrep/oracle`'s `fillet`, `MESHBREP_OCCT_FILLET`;
+`occt_fillets_of_the_curved_goldens_agree`) come within 1.6e-5 of the
+reference volumes for fillets (its blends between curved faces are
+approximations of the rolling ball) and 1.6e-8 for chamfers.

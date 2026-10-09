@@ -233,7 +233,7 @@ fn descriptor(facts: &Facts, d: [i8; 3]) -> Vec<bool> {
 }
 
 /// Whether the edge is of a class the blends cover (`docs/fillets.md`,
-/// section 6.1) and a sense they handle: the rest is
+/// sections 6.1 and 15.9) and a sense they handle: the rest is
 /// `fillet-unsupported-edge`.
 pub(crate) fn supported(e: &EdgeFact) -> bool {
     e.class != Class::Other && matches!(e.sense, Sense::Convex | Sense::Concave)

@@ -48,7 +48,7 @@ pub(super) fn arc_ends(
             .filter(|x| x[0].is_finite() && x[1].is_finite())
             .map(|x| (x[0], x[1]))
             .collect(),
-        Path::Line => Vec::new(),
+        Path::Line | Path::Curve { .. } => Vec::new(),
     };
     let order = |t: &mut Vec<Sect>| {
         t.sort_by(|x, y| x.0.total_cmp(&y.0));

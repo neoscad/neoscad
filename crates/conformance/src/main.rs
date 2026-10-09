@@ -335,7 +335,9 @@ enum Cmd {
         occt: Option<PathBuf>,
         /// `all`: stage F3's models with about two in five replaced by
         /// F5a's (mixed corners, spheres, rotations, nested calls, spindle
-        /// rims); `f3`: F3's corpus exactly, for its stop-rule numbers.
+        /// rims) and about one in seven by F5b's blends between curved
+        /// faces; `f3`: F3's corpus exactly, for its stop-rule numbers;
+        /// `curved`: F5b's family alone.
         #[arg(long, default_value = "all")]
         set: String,
     },
@@ -602,7 +604,8 @@ fn dispatch(cmd: Cmd) -> Result<u8, String> {
             let set = match set.as_str() {
                 "all" => fillet_corpus::Set::All,
                 "f3" => fillet_corpus::Set::F3,
-                other => return Err(format!("--set must be all or f3, not {other}")),
+                "curved" => fillet_corpus::Set::Curved,
+                other => return Err(format!("--set must be all, f3 or curved, not {other}")),
             };
             fillet_corpus::command(
                 &ctx,

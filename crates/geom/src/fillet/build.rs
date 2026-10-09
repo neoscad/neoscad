@@ -1,7 +1,9 @@
-//! Stages F2 and F3 of `docs/fillets.md`: the blends of the translational
-//! class (straight edges between planes, or cylinders parallel to them)
-//! and the rotational class (circles and arcs between surfaces of
-//! revolution about one axis), from the child's B-rep to
+//! Stages F2, F3 and F5b of `docs/fillets.md`: the blends of the
+//! translational class (straight edges between planes, or cylinders
+//! parallel to them), the rotational class (circles and arcs between
+//! surfaces of revolution about one axis) and the swept class (any other
+//! curve between planes, cylinders, cones, spheres and tori: a ball
+//! rolled along it, section 15.9), from the child's B-rep to
 //! `meshbrep::blend`'s specification, with the checks that run before any
 //! boolean.
 //!
@@ -33,7 +35,7 @@ use meshbrep::blend::{
 use meshbrep::{Brep, Curve, Edge, Face, Surface};
 
 use super::curve::{self, V, add, cross, dot, mul, norm, sub, unit};
-use super::{Facts, Sense};
+use super::{Class, Facts, Sense};
 
 /// Why a call's blends cannot be built: the call is an error and its
 /// child stays sharp.
@@ -240,10 +242,16 @@ pub(crate) fn prepare(
         let convex = e.sense == Sense::Convex;
         let mut ends = [End::Open { face: None }, End::Open { face: None }];
         let closed = be.start == be.end;
+        let swept = e.class == Class::Swept;
+        let class_at = |x: u32| fact(x).map(|fi| facts.edges[fi as usize].class);
         for (end, slot) in ends.iter_mut().enumerate() {
             if closed {
-                // A whole circle has no ends.
+                // A whole circle (or loop) has no ends.
                 break;
+            }
+            if swept {
+                *slot = swept_end(facts, &t, e, k, end, &in_list, convex)?;
+                continue;
             }
             let vi = e.vertices[end];
             let vp = b.vertices[vi as usize];
@@ -328,6 +336,11 @@ pub(crate) fn prepare(
             if mixed {
                 return Err(vertex_problem(
                     "convex and concave edges meet, which one pass cannot round",
+                ));
+            }
+            if selected.iter().any(|&x| class_at(x) == Some(Class::Swept)) {
+                return Err(vertex_problem(
+                    "a blend along a curve between curved faces meets another blend",
                 ));
             }
             let simple = others.len() == 1 && around.len() == 2;
@@ -492,6 +505,17 @@ pub(crate) fn prepare(
             }
         }
         let (path, margin) = match arc {
+            _ if swept => (
+                // The B-rep edge's points: its start and direction seed the
+                // march, its length and ends bound it. The facets the
+                // tool conforms to are the mesh's it is applied to
+                // (`result::sectioned`).
+                Path::Curve {
+                    points: curve::samples(be, curve::sample_count(be).max(64)),
+                    facets: [Vec::new(), Vec::new()],
+                },
+                None,
+            ),
             Some((c, axis, sweep, radius)) => (
                 Path::Arc {
                     center: c,
@@ -559,6 +583,120 @@ pub(crate) fn prepare(
     }
 }
 
+/// How a blend along a curve between curved faces ends at end `end` of
+/// its edge (`k` in the build list): on a plane face of the solid the edge
+/// runs into (cut by it), or past one into the air (a convex edge leaving
+/// the material). Anything else at the vertex is a vertex problem: another
+/// selected edge (those corners are not built, `docs/fillets.md` 15.7),
+/// a curved third face, more than three faces, or the edge running on
+/// between the same two faces (where they touch, the blend would shrink
+/// to nothing; elsewhere the curve is one blend split in two).
+#[allow(clippy::too_many_arguments)]
+fn swept_end(
+    facts: &Facts,
+    t: &Topo,
+    e: &super::EdgeFact,
+    k: usize,
+    end: usize,
+    in_list: &BTreeMap<u32, usize>,
+    convex: bool,
+) -> Result<End, Problem> {
+    let b = &*facts.brep;
+    let vi = e.vertices[end];
+    let vp = b.vertices[vi as usize];
+    let d_out = mul(leaving(b, e.brep_edge, vi), -1.0);
+    let around: Vec<u32> = t.vertex_edges[vi as usize]
+        .iter()
+        .copied()
+        .filter(|&x| x != e.brep_edge)
+        .collect();
+    let ab = [e.brep_faces[0], e.brep_faces[1]];
+    let selected: Vec<u32> = around
+        .iter()
+        .copied()
+        .filter(|x| in_list.contains_key(x))
+        .collect();
+    let fact = |be: u32| facts.fact_of.get(be as usize).copied().flatten();
+    let mixed = selected
+        .iter()
+        .any(|&x| fact(x).map(|fi| facts.edges[fi as usize].sense) != Some(e.sense));
+    let problem = |why: &str| {
+        let mut es = vec![k];
+        es.extend(selected.iter().map(|x| in_list[x]));
+        es.sort_unstable();
+        Problem::Vertex {
+            at: vp,
+            edges: es,
+            why: why.to_string(),
+            mixed,
+        }
+    };
+    if around
+        .iter()
+        .any(|&x| ab.iter().all(|f| t.edge_faces[x as usize].contains(f)))
+    {
+        // Two faces meeting along one curve split at a vertex: where they
+        // touch (an equal tee's sides) the blend would shrink to a point,
+        // which no patch can do; elsewhere one blend would be split in two.
+        let (fa, fb) = (&b.faces[ab[0] as usize], &b.faces[ab[1] as usize]);
+        let touch = norm(cross(curve::outward(fa, vp), curve::outward(fb, vp))) <= 1e-6;
+        let mut es = vec![k];
+        es.extend(selected.iter().map(|x| in_list[x]));
+        es.sort_unstable();
+        return Err(Problem::Vertex {
+            at: vp,
+            edges: es,
+            why: if touch {
+                "the same two faces touch there, where a blend between them would shrink to a point"
+                    .into()
+            } else {
+                "the curve runs on between the same two faces, split there".into()
+            },
+            mixed: false,
+        });
+    }
+    if mixed {
+        return Err(problem(
+            "convex and concave edges meet, which one pass cannot round",
+        ));
+    }
+    if !selected.is_empty() {
+        return Err(problem(
+            "a blend along a curve between curved faces meets another blend",
+        ));
+    }
+    let others: BTreeSet<u32> = around
+        .iter()
+        .flat_map(|&x| t.edge_faces[x as usize].iter().copied())
+        .filter(|f| !ab.contains(f))
+        .collect();
+    let simple = others.len() == 1 && around.len() == 2;
+    let third = others.iter().next().map(|&f| &b.faces[f as usize]);
+    match third {
+        Some(f) if simple && matches!(f.surface, Surface::Plane { .. }) => {
+            let nf = curve::outward(f, vp);
+            let origin = match &f.surface {
+                Surface::Plane { origin, .. } => *origin,
+                _ => vp,
+            };
+            let away = dot(d_out, nf) > 0.0;
+            Ok(if convex && away {
+                End::Open {
+                    face: Some((origin, nf)),
+                }
+            } else {
+                End::Plane {
+                    origin,
+                    normal: if away { nf } else { mul(nf, -1.0) },
+                }
+            })
+        }
+        _ => Err(problem(
+            "a blend along a curve between curved faces ends only on a plane face",
+        )),
+    }
+}
+
 /// How far a concave arc's tool may overlap into the material behind its
 /// curved face: a coaxial face of the child just behind it (the inside of
 /// a tube, a lip's inner wall) limits it to half the gap, so the tool's
@@ -599,6 +737,7 @@ fn wall(facts: &Facts, e: &super::EdgeFact, c: V, axis: V, size: f64) -> Option<
 /// One place along an edge where the checks look across it: the point,
 /// the edge's direction there, and the tangent points of its blend in
 /// that cross-section.
+#[derive(Clone)]
 struct Across {
     p: V,
     d: V,
@@ -618,33 +757,76 @@ fn turn(p: V, c: V, a: V, t: f64) -> V {
     )
 }
 
+/// Rays cast across a curve's blend (between curved faces) for the strip
+/// checks: its section changes along it, each one marched.
+const CURVE_RAYS: usize = 24;
+
 /// The checks before any boolean, at the specification's size.
 fn check(facts: &Facts, t: &Topo, built: &Built) -> Result<(), Problem> {
     let spec = &built.spec;
     let b = &*facts.brep;
+    let too_large = |i: usize| {
+        let fi = built.edges[i];
+        let kinds = facts.edges[fi].faces;
+        Problem::TooLarge {
+            edge: i,
+            face: if kinds[0] == "plane" {
+                kinds[1]
+            } else {
+                kinds[0]
+            },
+            need: None,
+            have: None,
+            best: None,
+        }
+    };
     let mut sections: Vec<Section> = Vec::with_capacity(spec.edges.len());
+    // A curve's blend changes along it: its sections where the rays are
+    // cast (fractions of its length), from the march.
+    let mut curve_at: Vec<Option<Vec<Across>>> = Vec::with_capacity(spec.edges.len());
     for i in 0..spec.edges.len() {
-        match blend::section(spec, i) {
-            Ok(s) => sections.push(s),
-            Err(BlendError::TooLarge(_)) => {
-                let fi = built.edges[i];
-                let kinds = facts.edges[fi].faces;
-                return Err(Problem::TooLarge {
-                    edge: i,
-                    face: if kinds[0] == "plane" {
-                        kinds[1]
-                    } else {
-                        kinds[0]
-                    },
-                    need: None,
-                    have: None,
-                    best: None,
-                });
+        let res = match spec.edges[i].path {
+            Path::Curve { .. } => {
+                let fracs: Vec<f64> = (0..CURVE_RAYS)
+                    .map(|j| (j as f64 + 0.5) / CURVE_RAYS as f64)
+                    .collect();
+                blend::curve_sections(spec, i, &fracs).map(|v| {
+                    let mut widths = [0.0f64; 2];
+                    let list: Vec<Across> = v
+                        .into_iter()
+                        .map(|(p, d, s)| {
+                            for (w, sw) in widths.iter_mut().zip(s.widths) {
+                                *w = w.max(sw);
+                            }
+                            Across {
+                                p,
+                                d,
+                                tangents: s.tangents,
+                            }
+                        })
+                        .collect();
+                    (
+                        Section {
+                            center: None,
+                            tangents: list[0].tangents,
+                            widths,
+                        },
+                        Some(list),
+                    )
+                })
             }
+            _ => blend::section(spec, i).map(|s| (s, None)),
+        };
+        match res {
+            Ok((s, c)) => {
+                sections.push(s);
+                curve_at.push(c);
+            }
+            Err(BlendError::TooLarge(_)) => return Err(too_large(i)),
             Err(e) => return Err(Problem::Failed(e.to_string())),
         }
     }
-    // Per (face, edge): the strip's width.
+    // Per (face, edge): the strip's width (a curve's widest).
     let mut width: BTreeMap<(u32, u32), f64> = BTreeMap::new();
     for (i, s) in sections.iter().enumerate() {
         let e = &facts.edges[built.edges[i]];
@@ -669,10 +851,15 @@ fn check(facts: &Facts, t: &Topo, built: &Built) -> Result<(), Problem> {
                 sweep,
                 ..
             } => Some((*center, *axis, *sweep)),
-            Path::Line => None,
+            Path::Line | Path::Curve { .. } => None,
         };
+        let curve_list = curve_at[i].as_ref();
         // Where to look across the edge.
         let at = |frac: f64| -> Across {
+            if let Some(list) = curve_list {
+                let j = ((frac * CURVE_RAYS as f64) as usize).min(list.len() - 1);
+                return list[j].clone();
+            }
             match arc {
                 None => Across {
                     p: add(from, mul(sub(to, from), frac)),
@@ -692,6 +879,9 @@ fn check(facts: &Facts, t: &Topo, built: &Built) -> Result<(), Problem> {
             }
         };
         let fracs: Vec<f64> = match arc {
+            None if curve_list.is_some() => (0..CURVE_RAYS)
+                .map(|j| (j as f64 + 0.5) / CURVE_RAYS as f64)
+                .collect(),
             None => vec![0.1, 0.3, 0.5, 0.7, 0.9],
             Some((_, _, sweep)) => {
                 let n = ((64.0 * sweep / std::f64::consts::TAU).ceil() as usize).max(8);
@@ -730,6 +920,20 @@ fn check(facts: &Facts, t: &Topo, built: &Built) -> Result<(), Problem> {
                     a * radius
                 };
                 let v = match (&face.surface, arc) {
+                    // A curve's strip: straight across, in the plane across
+                    // the edge (its width is measured the same way), and
+                    // only for boundary points ahead, within 45° of the
+                    // strip's direction: that plane also cuts the face
+                    // across a hole's far side, which is not in the way.
+                    _ if curve_list.is_some() => {
+                        let w = sub(h, x.p);
+                        let along = dot(w, into);
+                        if along >= std::f64::consts::FRAC_1_SQRT_2 * norm(w) {
+                            along
+                        } else {
+                            -1.0
+                        }
+                    }
                     (
                         Surface::Cylinder {
                             origin,
@@ -837,7 +1041,7 @@ fn check(facts: &Facts, t: &Topo, built: &Built) -> Result<(), Problem> {
                             }
                             consider(dist(&at(th / sweep), h), other);
                         }
-                    } else {
+                    } else if curve_list.is_none() {
                         // Along a line, every boundary point across from
                         // it too: a hole in the face beside the edge comes
                         // nearest between the five rays. A circle's
@@ -914,9 +1118,10 @@ fn check(facts: &Facts, t: &Topo, built: &Built) -> Result<(), Problem> {
         }
     }
     // The tools themselves, cheaply: end caps that cross are an edge too
-    // short for the blend.
-    match blend::tools(spec, &|_| 1) {
-        Ok(_) => Ok(()),
+    // short for the blend; a curve's spine is marched from end to end
+    // (the ball fits all along) and its swept arc must not fold.
+    match blend::check(spec) {
+        Ok(()) => Ok(()),
         Err(BlendError::TooShort(i)) | Err(BlendError::TooLarge(i)) => Err(Problem::TooLarge {
             edge: i,
             face: "edge",

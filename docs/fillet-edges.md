@@ -274,13 +274,24 @@ chamfer_edges(d = 1, edges = "%circle and >z")
   two passes (above).
 - **Chains**: lines and arcs that run on into each other (a rounded
   rectangle's outline) are rounded as one piece.
+- **Curved faces with no common axis**: a branch or boss on a rod (two
+  cylinders at a tee, axes crossing or offset), a hole across a rod, a
+  rod or hole through a plate at a slant (an ellipse), a rod in a ball,
+  and the like between planes, cylinders, cones, spheres and tori. The
+  blend is a B-spline surface fitted to the rolling ball to about 1e-9 of
+  the edge's size, and STEP export writes it exact. Such a
+  blend ends on a plane (open or against a wall) or closes on itself; it
+  does not meet another selected edge at a vertex.
 - **Chamfers** are equal-distance, on the same edges; three convex
   chamfers meet in a point at a corner.
 
-Other edges (two cylinders crossing, ellipses, B-splines, edges whose
-sense changes along them) are not rounded yet: named, they are an error;
-under the default `"all"` they stay sharp with a warning and the rest is
-built.
+Other edges (B-spline faces, edges whose sense changes along them) are
+not rounded yet: named, they are an error; under the default `"all"`
+they stay sharp with a warning and the rest is built. So do the blends
+between curved faces that would meet another blend, or whose faces
+touch along the edge (a tee of two equal cylinders, where the blend
+would shrink to a point), under `"all"`; named, they are
+`fillet-unsupported-vertex`.
 
 ## Diagnostics and fixes
 
@@ -477,10 +488,14 @@ build123d's `Select.NEW` is
 What the design leaves for later, and what is known not to work yet,
 is in `docs/followups.md` ("Fillets and chamfers"). In short:
 
-- **Edges between curved faces with no common axis** (two cylinders
-  crossing, ellipses, B-splines) are not rounded (stage F5b), and
-  **variable radii and asymmetric chamfers** are not supported; unequal
-  radii are nested calls.
+- **Blends between curved faces with no common axis** do not meet
+  other blends: where such an edge meets another selected edge, and
+  where its two faces touch (a tee of equal cylinders), it is left sharp
+  under `"all"` and refused when named. Very small ones (under about
+  twice the depth of the faces' polygons beside them) can export partly
+  as facets, and their STEP files are large (about 1.7 MB for a tee and
+  a cross hole). **Variable radii and asymmetric chamfers** are not
+  supported; unequal radii are nested calls.
 - **Mixed corners** are two passes, not a rolling-ball vertex blend: a
   block's vertical blend ends square where its base's blends meet it,
   and the mitre curve between the base's blends stays sharp.

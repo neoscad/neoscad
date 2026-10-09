@@ -263,6 +263,30 @@ with its outline) closes.
 - `Tolerances::surface_fit` (default 1e-7): how far a B-spline patch's
   side may be from the surface it touches. Breaking for a caller that
   builds `Tolerances` with a struct literal (use `..Default::default()`).
+- Blends between curved surfaces with no common axis: `blend::Path::Curve`
+  (an edge's points, and per face the triangles near it that the tool is
+  conformed to). The ball's centre is marched along the intersection of
+  the two faces' offsets, and the blend is a canal (fillet) or ruled
+  (chamfer) B-spline surface fitted to it, two patches for a closed curve;
+  its ends are `End::Plane` or `End::Open`. Breaking for a caller that
+  matches `Path` exhaustively.
+- `blend::Tool::fit`: how far a tool's B-spline blends may be from the
+  faces they meet (0 when every blend is a quadric or torus); a caller
+  reconstructing the result sets `Tolerances::surface_fit` to at least
+  that. Breaking for a caller that builds `Tool` with a struct literal.
+- `blend::curve_sections` (a curve's blend across it at fractions of its
+  length) and `blend::check` (what `tools` would refuse, without fitting
+  or meshing the curves' blends), for size checks run many times.
+- Reconstruction: a parameter-space curve along a tangent contact is
+  refined until its image stays on the edge's own curve too, not only
+  on the other face (across a tangent contact the distance to that face
+  changes only to second order, so a coarse curve passed 1e-4 off it).
+  Files with tangent blends grow (a plate's straight and rim fillets:
+  137 KB to 325 KB). A mesh chain along a B-spline patch's contact side
+  is accepted within a fifth of the patch's width (before: 1e-4 of the
+  chain's length), measured after moving it onto the other face; and a
+  corner where contact sides of different patches meet is taken where
+  they meet.
 
 ## Licence
 

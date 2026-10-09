@@ -586,7 +586,8 @@ as on the bed), at most 10 findings per code.
   1), "curve": "line"|"circle"|"ellipse"|"bspline", "sense":
   "convex"|"concave"|"saddle", "angle": degrees of material at the
   edge's middle (90 at a box's edge, 270 in an inside corner), "class":
-  "translational"|"rotational"|"other", "length", "center" (its centre
+  "translational"|"rotational"|"swept" (between curved faces with no
+  common axis: a B-spline blend)|"other", "length", "center" (its centre
   of mass), "from", "to", "closed"?: true, "direction"? (a line's),
   "axis"? and "radius"? (a circle's), "faces": [kind, kind],
   "children": [[int, ...], [int, ...]] (per face, the call's children

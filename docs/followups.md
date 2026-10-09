@@ -2614,8 +2614,8 @@ toggles, editor colouring and the user reference
 `docs/fillet-edges.md`; section 15.5). Stage F5a (section 15.6) rounds
 convex and concave edges that meet in two passes in one call, and
 builds spindle tori (`DEGENERATE_TOROIDAL_SURFACE`, read back by OCCT).
-What they leave, beyond F5b (section 15.7, exact blends between curved
-surfaces with no common axis):
+Stage F5b (sections 15.8 and 15.9) blends curved faces with no common
+axis as exact B-spline surfaces. What they leave:
 - **Rolling-ball vertex blends at mixed corners**: two passes make what
   nested calls make. At a block standing on a plate the vertical edges'
   blends end square where the base's mitred blends meet them, and the
@@ -2764,13 +2764,68 @@ surfaces with no common axis):
   model opens with the extension as the recipient's page has it (off by
   default), so the calls are unknown modules. The page has no sketch or
   query toggles either.
-- **CHANGELOG**: fillets (F0 to F5a) are not in `CHANGELOG.md` yet;
+- **CHANGELOG**: fillets (F0 to F5b) are not in `CHANGELOG.md` yet;
   the entry goes with the release that ships them. `meshbrep`'s changes
-  since 0.2.0 (spindle tori, the corner margin, B-spline surfaces) are
+  since 0.2.0 (spindle tori, the corner margin, B-spline surfaces, curved blends) are
   listed in its README for its next release.
-- **F5b phase 2** (`docs/fillets.md` 15.7, and what 15.8 says it needs
-  from phase 1's API): spine marching, the swept-arc and ruled tools in
-  `meshbrep::blend`, their checks, and NeoSCAD's side.
+- **Blends between curved faces do not meet other blends** (F5b phase
+  2, `docs/fillets.md` 15.9): a swept edge ending at a vertex with
+  another selected edge is `fillet-unsupported-vertex` (left sharp
+  under `"all"`). A tee's blend meeting the branch's rim blend, or the
+  two rims of a cross hole meeting a third edge, need either a vertex
+  blend or a swept tool cut by the other tool's surface rather than a
+  plane.
+- **Equal tees pinch**: where the two faces touch along the edge (two
+  equal cylinders at a tee, at the two points where the curve's halves
+  meet) the blend would shrink to a point, which a regular B-spline
+  patch cannot represent; the call is refused there. OCCT builds it
+  (volume 2968.0178 for `r = 5` rods with `r = 1`). A patch split at the
+  pinch with a collapsed side (a pole, which phase 1 does not support)
+  would cover it.
+- **Tiny curved blends against deep facets**: the swept tool is
+  conformed to the faces' polygons within a band of four times their
+  depth; a blend smaller than about twice that depth cannot follow them,
+  and the export retries at four times the segments, then writes facets.
+  In the full corpus (seed 2) curved blends under 0.25 succeed in 55 of
+  71 models, against 118 of 126 at 0.5 or more; the 9 timeouts (60 s)
+  and 5 interrupted export renders are blends of 0.11 to 0.29. Refusing
+  a curved blend under about twice its faces' polygon depth, with a
+  hint, or retrying at finer segments sooner, would turn these into
+  diagnostics.
+- **Fine-resolution reconstruction of curved blends is slow**: at `$fa =
+  1; $fs = 0.05` a tee's blend makes a mesh of about a hundred thousand
+  triangles, and reconstruction (projection onto the B-spline patches
+  for every chain point) takes far longer than the analytic classes; it
+  can also fail on an island of the rod's face. The goldens' fine check
+  uses the mesh volume only, and the export's four-times retry is
+  skipped above 20,000 triangles.
+- **Curved blends' STEP files are large**: the spine and contacts are
+  fitted to 1e-9 of the edge's size with up to 8,193 points a piece, so
+  a tee and a cross hole write 1.7 MB. Fitting to the export tolerance,
+  or knot removal, would shrink it.
+- **Exact pcurves of circles on planes**: since F5b phase 2 a
+  parameter-space curve along a tangent contact must stay on the edge
+  as well as on the other face, which the cubic fit of a circle meets
+  only with many points (the wasm-check plate with straight and rim
+  fillets went from 137 KB to 325 KB). A rational quadratic circle in
+  the plane's parameters is exact with nine control points.
+- **Large curved blends disagree with OCCT's volume**: some exports
+  that OCCT reads back valid have OCCT volumes 1e-5 to 1e-4 off ours,
+  and OCCT's two integrators disagree with each other by as much
+  (`--set curved`, seed 1: 0083, a chamfer of 5.03; seed 2 of the full
+  set: 0382, 1405, 1746, blends of 1.5 to 2.6 on oblique rods and a
+  cone on a rod, and 1056, a 0.19 fillet whose file has tolerances of
+  9e-6). Not explained yet: a patch OCCT integrates badly, or a fold
+  the checks miss. A reference integration of one of them
+  (`crates/meshbrep/tests/sweep.rs`'s) would tell.
+- **Curved blends that export partly as facets**: of the full set's
+  curved models (seed 2), 15 do: 7 tees and cones on rods (several with
+  close radii, 6.45 on 5.1, 6.55 on 4.22), 6 rods in balls, 2 holes
+  through a plate turned about two axes, at sizes 0.12 to 0.92 (4 of
+  them under 0.25, the class above). The contact runs steeply across
+  the polygons' facets there; which step loses the face is not yet
+  diagnosed. One chamfer on a ball (1643) exports with a volume 9e-7
+  off its mesh's, past the cross-check's tolerance.
 - **B-spline faces are slow to reconstruct** (F5b phase 1): every
   implicit evaluation projects onto the patch (a seed search and Newton),
   and corner solving and edge fitting evaluate thousands of times, so

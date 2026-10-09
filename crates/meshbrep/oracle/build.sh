@@ -3,7 +3,7 @@
 # A test tool only: meshbrep never depends on OCCT.
 #
 #   oracle/build.sh DIR      download OCCT into DIR (about 140 MB unpacked)
-#                            and build DIR/check
+#                            and build DIR/check and DIR/fillet
 #
 # Then run the read-back test with it:
 #
@@ -41,3 +41,8 @@ extra=()
 c++ -std=c++17 -O1 -Wno-deprecated-declarations -o "$dir/check" "$here/check.cpp" -I "$occt/include/opencascade" \
     "${args[@]}" ${extra[@]+"${extra[@]}"}
 echo "built $dir/check"
+# OCCT's own fillets of the same solids (fillet.cpp), for the volumes of
+# blends between curved faces (MESHBREP_OCCT_FILLET).
+c++ -std=c++17 -O1 -Wno-deprecated-declarations -o "$dir/fillet" "$here/fillet.cpp" -I "$occt/include/opencascade" \
+    "$occt/lib/libTKFillet.a" "${args[@]}" ${extra[@]+"${extra[@]}"}
+echo "built $dir/fillet"

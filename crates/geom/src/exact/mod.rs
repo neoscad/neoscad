@@ -326,6 +326,10 @@ pub fn export_step(
     // The latest exact attempt that failed somewhere in particular: its
     // mesh, where, and why. A partial fallback starts from it.
     let mut located: Option<(walk::ExportMesh, Vec<u32>)> = None;
+    // Whether the export has fitted blends between curved faces, and the
+    // last attempt failed where a finer mesh may succeed.
+    let mut fitted = false;
+    let mut last_retry = false;
     let plan = [
         (1u32, walk::Extrusions::Exact),
         (2, walk::Extrusions::Exact),
@@ -337,8 +341,13 @@ pub fn export_step(
             // Rejected for a reason a finer mesh cannot cure.
             continue;
         }
-        if k == 2 && held.is_none() {
-            // Four times the segments only to settle a loose first check.
+        if k == 2 && held.is_none() && !(fitted && last_retry) {
+            // Four times the segments only to settle a loose first check,
+            // or for a blend between curved faces that twice failed to
+            // reconstruct: one smaller than about twice the depth of the
+            // polygons beside it cannot follow their facets
+            // (`meshbrep::blend`, `sweep`), and at four times their
+            // segments that depth is a sixteenth.
             continue;
         }
         if mode == walk::Extrusions::Faceted {
@@ -395,6 +404,9 @@ pub fn export_step(
         };
         stats.timings.export_render_ms += now() - t0;
         substitutions = built.substitutions.clone();
+        // A large mesh at four times its segments costs more than a
+        // retry is worth (a fine `$fs` already makes the facets shallow).
+        fitted |= built.surface_fit > 0.0 && built.mesh.triangles.len() <= RETRY_FITTED_TRIANGLES;
         if mode == walk::Extrusions::Exact {
             exact_extrusions = exact_extrusions.max(built.exact_extrusions);
         }
@@ -455,6 +467,7 @@ pub fn export_step(
                 });
             }
             Attempt::Rejected { message, retry, at } => {
+                last_retry = retry;
                 if mode == walk::Extrusions::Exact && !at.is_empty() {
                     located = Some((built, at));
                 } else if mode == walk::Extrusions::Faceted && !at.is_empty() {
@@ -516,6 +529,10 @@ pub fn export_step(
         substitutions,
     }))
 }
+
+/// The largest export mesh, in triangles, whose fitted blends get a
+/// retry at four times the segments after two failures.
+const RETRY_FITTED_TRIANGLES: usize = 20_000;
 
 /// How many rounds [`partial`] grows the faceted region before giving up.
 /// Each is one more reconstruction; the corpora's models that pass take
@@ -768,7 +785,11 @@ fn attempt(
         };
     }
     let t0 = now();
-    let brep = meshbrep::reconstruct_located(mesh, &meshbrep::Options::default());
+    let options = meshbrep::Options {
+        tolerances: walk::tolerances(built),
+        ..meshbrep::Options::default()
+    };
+    let brep = meshbrep::reconstruct_located(mesh, &options);
     stats.timings.reconstruct_ms += now() - t0;
     let brep = match brep {
         Ok(b) => b,

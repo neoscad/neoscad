@@ -41,6 +41,24 @@ fn evaluate(src: &str) -> eval::Evaluation {
     })
 }
 
+/// The normal render's volume of `src`, with `renderer` (no export: at a
+/// fine `$fs` a blend between curved faces makes a mesh of a hundred
+/// thousand triangles, which the export's reconstruction takes far longer
+/// over than the check needs).
+fn mesh_volume(renderer: &Renderer, src: &str) -> f64 {
+    let ev = evaluate(src);
+    let keys = eval::dump::Keys::new(&ev.root, &lang::loader::StdFs);
+    match renderer
+        .render(&ev.root, &keys, RenderOptions::default())
+        .expect("renders")
+        .geometry
+        .expect("geometry")
+    {
+        geom::Geometry::Manifold(m) => m.manifold.volume(),
+        other => panic!("not a solid: {other:?}"),
+    }
+}
+
 /// The normal render's volume and the exact export (STEP text and its
 /// B-rep volume) of `src`, with `renderer`.
 fn render(renderer: &Renderer, src: &str) -> (f64, Result<(String, f64), String>) {
@@ -121,7 +139,7 @@ fn golden_cases_match_their_closed_forms() {
         );
         // Finer arcs close in on the closed form. At 1° a polygon's area
         // is within 5e-5 of its circle's, so what is left is the blends'.
-        let (fine, _) = render(&Renderer::new(), &format!("$fa = 1; $fs = 0.05;\n{src}"));
+        let fine = mesh_volume(&Renderer::new(), &format!("$fa = 1; $fs = 0.05;\n{src}"));
         assert!(
             (fine - want).abs() / want < 2e-4,
             "{name}: fine mesh {fine} vs {want}"
@@ -171,7 +189,12 @@ fn occt_reads_the_golden_cases_back() {
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(f64::NAN)
         };
-        let rel = (num("volume") - want).abs() / want;
+        // The better of OCCT's two integrators: each misjudges some
+        // B-spline patches (`docs/fillets.md`, 15.8). On `curved_ball_rod`
+        // the adaptive one is 7.3e-6 off while estimating its error at
+        // 7e-10, and the fixed-order one agrees to 7e-9.
+        let rel =
+            ((num("volume") - want).abs() / want).min((num("volume_fixed") - want).abs() / want);
         let ok = field(line, "valid") == Some("true")
             && num("solids") == 1.0
             && num("free_edges") == 0.0
@@ -211,12 +234,15 @@ fn bytes_are_the_same_at_any_thread_count_and_cache_state() {
                 "block_plate_all",
                 "boss_spindle",
                 "nested_unequal",
+                "curved_tee",
+                "curved_oblique_chamfer",
+                "curved_ball_rod",
             ]
             .contains(&n.as_str())
         })
         .map(|(_, s, _)| s)
         .collect();
-    assert_eq!(models.len(), 14);
+    assert_eq!(models.len(), 17);
     let both = |r: &Renderer, m: &String| {
         let (mesh, exact) = render(r, m);
         (mesh.to_bits(), exact.unwrap().0)
@@ -492,4 +518,100 @@ fn whole_blends_report_nothing() {
         assert_eq!(p.status, Status::Built, "{src}");
         assert!(p.diags.is_empty(), "{src}: {:?}", p.diags);
     }
+}
+
+/// A tee of two equal cylinders: the faces touch where the two halves of
+/// the junction meet, and a blend there would shrink to a point, which a
+/// B-spline patch cannot do (stage F5b). The call is refused at those
+/// vertices, and the child stays sharp.
+#[test]
+fn an_equal_tee_is_refused_at_its_tangent_points() {
+    let p = plan(
+        "fillet_edges(r = 1, edges = \"concave\") { rotate([0, 90, 0]) cylinder(r = 5, h = 30, center = true); cylinder(r = 5, h = 12); }",
+    );
+    assert_eq!(p.status, Status::UnsupportedVertex, "{:?}", p.diags);
+    assert!(
+        p.diags
+            .iter()
+            .any(|d| d.code == DiagCode::FilletUnsupportedVertex
+                && d.message.contains("same two faces touch there")),
+        "{:?}",
+        p.diags
+    );
+}
+
+/// The curved goldens against OCCT 8.0.1's own `BRepFilletAPI_MakeFillet`
+/// and `MakeChamfer` on the same solids (`crates/meshbrep/oracle`'s
+/// `fillet`; set `MESHBREP_OCCT_FILLET` to it): OCCT's blends between
+/// curved faces are approximations of the rolling ball, so its fillets
+/// agree with the reference volumes to about 2e-5, its chamfers (ruled
+/// between the same feet) to 1e-7.
+#[test]
+fn occt_fillets_of_the_curved_goldens_agree() {
+    let Some(bin) = std::env::var_os("MESHBREP_OCCT_FILLET") else {
+        eprintln!("skipped: set MESHBREP_OCCT_FILLET to oracle/build.sh's fillet");
+        return;
+    };
+    let tilted = "0 -0.5 0.8660254037844386";
+    let cases: Vec<(&str, String)> = vec![
+        (
+            "curved_tee",
+            "fillet 1 union cyl 5 30 -15 0 0 1 0 0 cyl 3 12 0 0 0 0 0 1".into(),
+        ),
+        (
+            "curved_boss",
+            "fillet 1.5 union cyl 8 40 -20 0 0 1 0 0 cyl 3 12 0 2 0 0 0 1".into(),
+        ),
+        (
+            "curved_tee_chamfer",
+            "chamfer 0.8 union cyl 5 30 -15 0 0 1 0 0 cyl 3 12 0 0 0 0 0 1".into(),
+        ),
+        (
+            "curved_cross_hole",
+            "fillet 1 cut cyl 8 40 -20 0 0 1 0 0 cyl 3 20 4 0 -10 0 0 1".into(),
+        ),
+        (
+            "curved_oblique_hole",
+            format!("fillet 1 cut box 0 0 0 40 40 8 cyl 4 40 20 30 -13.320508075688775 {tilted}"),
+        ),
+        (
+            "curved_oblique_chamfer",
+            format!("chamfer 1 cut box 0 0 0 40 40 8 cyl 4 40 20 30 -13.320508075688775 {tilted}"),
+        ),
+        (
+            "curved_oblique_rod",
+            format!(
+                "fillet 1.5 union box 0 0 0 40 40 8 cyl 4 30 20 27.5 -8.99038105676658 {tilted}"
+            ),
+        ),
+        (
+            "curved_ball_rod",
+            "fillet 1 union sphere 8 0 0 0 cyl 3 14 2 0 0 0 0 1".into(),
+        ),
+    ];
+    let want: std::collections::BTreeMap<String, f64> =
+        golden().into_iter().map(|(n, _, v)| (n, v)).collect();
+    let mut failures = Vec::new();
+    for (name, args) in cases {
+        let out = std::process::Command::new(&bin)
+            .args(args.split_whitespace())
+            .output()
+            .expect("run the oracle");
+        let line = String::from_utf8_lossy(&out.stdout).to_string();
+        let v = field(&line, "volume")
+            .and_then(|x| x.parse::<f64>().ok())
+            .unwrap_or(f64::NAN);
+        let w = want[name];
+        let rel = (v - w) / w;
+        eprintln!("{name}: OCCT {v:.6}, reference {w:.6}, rel {rel:.1e}");
+        let tol = if args.starts_with("chamfer") {
+            1e-7
+        } else {
+            3e-5
+        };
+        if !line.contains("\"valid\":true") || rel.abs() > tol || rel.is_nan() {
+            failures.push(format!("{name}: {line}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
 }

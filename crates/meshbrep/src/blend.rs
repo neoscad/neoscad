@@ -1,7 +1,9 @@
 //! Blend tools: the solids that round or chamfer the edges of a solid
 //! when a mesh kernel subtracts them (convex edges) or adds them (concave
-//! edges): straight edges, and circles and arcs about an axis
-//! ([`Path::Arc`], whose cross-section is revolved: `revolve`).
+//! edges): straight edges, circles and arcs about an axis
+//! ([`Path::Arc`], whose cross-section is revolved: `revolve`), and
+//! curves between faces that share no axis ([`Path::Curve`], along which
+//! a ball is rolled: `sweep`, a B-spline blend).
 //!
 //! A constant-radius fillet is the envelope of a ball rolling in contact
 //! with both faces of an edge. When both faces are swept along the edge (a
@@ -41,6 +43,7 @@ use crate::math::*;
 use crate::model::{Surface, TaggedMesh};
 
 mod revolve;
+mod sweep;
 
 /// A face beside a blended edge.
 #[derive(Clone, Debug, PartialEq)]
@@ -155,6 +158,34 @@ pub enum Path {
         /// partial arc's ends are always sections; angles outside the
         /// sweep are ignored. Empty: regular sections, 32 to a turn.
         sections: Vec<[f64; 2]>,
+    },
+    /// Any other curve between two faces (planes, cylinders, cones,
+    /// spheres, tori) that share no axis: an ellipse where a plane cuts a
+    /// cylinder at a slant, the curve where two cylinders meet at a tee.
+    /// The ball's centre runs along the intersection of the two faces
+    /// offset by the blend's radius (the spine), traced from the exact
+    /// surfaces; the blend is a B-spline surface, a canal surface for a
+    /// fillet and a ruled one for a chamfer, fitted to it (`sweep`). A
+    /// closed curve (`to` equal to `from`) gets two patches. Its ends
+    /// are [`End::Plane`] or [`End::Open`] only.
+    Curve {
+        /// Points along the edge, in order from `from` to `to` (the same
+        /// point twice, first and last, for a closed one): its start and
+        /// its direction there seed the march, and its length and ends
+        /// bound it. A few dozen points of the exact curve are enough.
+        points: Vec<[f64; 3]>,
+        /// Per face, its triangles in the mesh the tool is applied to,
+        /// near the edge (those of the face's polygon there): the tool is
+        /// conformed to them, as an arc's tangent ring runs through the
+        /// polygon's vertices. Its contact with the face has vertices
+        /// where the contact crosses the triangles' creases and lies on
+        /// the triangles between, and its vertices near the face are moved
+        /// by the triangles' depth under the exact face, so that the
+        /// kernel's boolean leaves the blend meeting the faceted face
+        /// along the tool's own row rather than a sliver of facet standing
+        /// over it. Empty: the tool is on the exact face (a plane needs
+        /// nothing).
+        facets: [Vec<[[f64; 3]; 3]>; 2],
     },
 }
 
@@ -293,8 +324,15 @@ pub struct Tool {
     /// keeps of the tool. One per edge and corner it was made for: the
     /// edges of a sphere corner and the corner's patch are one tool.
     pub blend: Vec<u32>,
-    /// What each entry of `blend` was made for.
+    /// What each entry of `blend` was made for. A closed curve's blend
+    /// is two B-spline patches, two entries for one edge.
     pub sources: Vec<Source>,
+    /// How far the tool's B-spline blends may be from the faces they were
+    /// made to meet (the fit of their spines and contacts, and of the
+    /// arcs between): 0 when every blend is an exact quadric or torus. A
+    /// caller reconstructing the result allows at least this
+    /// ([`crate::Tolerances::surface_fit`]).
+    pub fit: f64,
 }
 
 /// Why a tool could not be made.
@@ -415,6 +453,11 @@ fn frame(e: &BlendEdge, index: usize) -> Result<Frame, BlendError> {
     } = &e.path
     {
         return arc_frame(e, index, V::from(*center), V::from(*axis), *radius, *sweep);
+    }
+    if matches!(e.path, Path::Curve { .. }) {
+        return Err(BlendError::Invalid(format!(
+            "edge {index}: a curve's blend has no cross-section of its own"
+        )));
     }
     let e0 = V::from(e.from);
     let e1 = V::from(e.to);
@@ -1040,7 +1083,107 @@ pub fn section(spec: &BlendSpec, index: usize) -> Result<Section, BlendError> {
         .edges
         .get(index)
         .ok_or_else(|| BlendError::Invalid(format!("no edge {index}")))?;
+    if matches!(e.path, Path::Curve { .. }) {
+        let mut s = sweep::sections(spec, index, &[0.0])?;
+        return Ok(s.remove(0).2);
+    }
     profile(spec, e, index, &|_| 1, None).map(|(_, p)| p.section)
+}
+
+/// One station of [`curve_sections`]: the edge's point, its unit
+/// direction there, and the blend's section across it.
+pub type CurveSection = ([f64; 3], [f64; 3], Section);
+
+/// A curve edge's blend across it at each of `fracs` (fractions of its
+/// length from `from`): the edge's point, its unit direction there, and
+/// the section (the ball's centre, where it touches the faces, and the
+/// straight distances from the edge to those points). For the checks
+/// before anything is built: a curve's section changes along it.
+pub fn curve_sections(
+    spec: &BlendSpec,
+    index: usize,
+    fracs: &[f64],
+) -> Result<Vec<CurveSection>, BlendError> {
+    match spec.edges.get(index) {
+        Some(BlendEdge {
+            path: Path::Curve { .. },
+            ..
+        }) => Ok(sweep::sections(spec, index, fracs)?
+            .into_iter()
+            .map(|(p, d, s)| (p.arr(), d.arr(), s))
+            .collect()),
+        Some(_) => Err(BlendError::Invalid(format!("edge {index} is not a curve"))),
+        None => Err(BlendError::Invalid(format!("no edge {index}"))),
+    }
+}
+
+/// What [`tools`] would refuse, without fitting or meshing the blends of
+/// curves: their spines are marched and checked (the ball fits all along,
+/// the swept arc does not fold, the end planes do not cross), and every
+/// other edge's tool is made, cheaply. For checks run many times (a
+/// bisection for the largest size that fits).
+pub fn check(spec: &BlendSpec) -> Result<(), BlendError> {
+    for i in 0..spec.edges.len() {
+        if matches!(spec.edges[i].path, Path::Curve { .. }) {
+            sweep::check(spec, i)?;
+        }
+    }
+    let (rest, keep) = without_curves(spec)?;
+    tools(&rest, &|_| 1).map(|_| ()).map_err(|e| match e {
+        BlendError::TooLarge(i) => BlendError::TooLarge(keep[i]),
+        BlendError::TooShort(i) => BlendError::TooShort(keep[i]),
+        other => other,
+    })
+}
+
+/// `spec` without its curve edges, and the original index of each edge
+/// left. Edges of other kinds may not end at a curve edge (a chain, a
+/// mitre or a corner with one).
+fn without_curves(spec: &BlendSpec) -> Result<(BlendSpec, Vec<usize>), BlendError> {
+    let keep: Vec<usize> = (0..spec.edges.len())
+        .filter(|&i| !matches!(spec.edges[i].path, Path::Curve { .. }))
+        .collect();
+    let mut new_index = vec![usize::MAX; spec.edges.len()];
+    for (k, &i) in keep.iter().enumerate() {
+        new_index[i] = k;
+    }
+    let remap = |i: usize, at: usize| -> Result<usize, BlendError> {
+        match new_index.get(i) {
+            Some(&k) if k != usize::MAX => Ok(k),
+            Some(_) => Err(BlendError::Invalid(format!(
+                "edge {at} ends at a curve's blend, which joins nothing"
+            ))),
+            None => Err(BlendError::Invalid(format!("edge {at}: no edge {i}"))),
+        }
+    };
+    let mut edges = Vec::with_capacity(keep.len());
+    for &i in &keep {
+        let mut e = spec.edges[i].clone();
+        for end in &mut e.ends {
+            match end {
+                End::Chain { with } | End::Mitre { with, .. } => with.0 = remap(with.0, i)?,
+                _ => {}
+            }
+        }
+        edges.push(e);
+    }
+    let mut corners = Vec::with_capacity(spec.corners.len());
+    for c in &spec.corners {
+        let mut c = c.clone();
+        for x in &mut c.edges {
+            x.0 = remap(x.0, x.0)?;
+        }
+        corners.push(c);
+    }
+    Ok((
+        BlendSpec {
+            profile: spec.profile,
+            size: spec.size,
+            edges,
+            corners,
+        },
+        keep,
+    ))
 }
 
 /// The ball's centre at a corner: `σ r` inside each of its three planes.
@@ -1073,6 +1216,64 @@ fn corner_offset(n: [V; 3], h: [f64; 3]) -> Option<V> {
 /// says what each blend surface is for). `segments(sweep)` is how many
 /// segments a fillet arc sweeping `sweep` radians gets (at least 1).
 pub fn tools(spec: &BlendSpec, segments: &dyn Fn(f64) -> u32) -> Result<Vec<Tool>, BlendError> {
+    if !spec
+        .edges
+        .iter()
+        .any(|e| matches!(e.path, Path::Curve { .. }))
+    {
+        return tools_of(spec, segments);
+    }
+    // Curve edges' tools stand alone (their ends are planes or the air);
+    // the rest are made as before, and both are put back in the order of
+    // their lowest edge.
+    let (rest, keep) = without_curves(spec)?;
+    let mut out: Vec<(usize, Tool)> = Vec::new();
+    let back = |e: BlendError| match e {
+        BlendError::TooLarge(i) => BlendError::TooLarge(keep[i]),
+        BlendError::TooShort(i) => BlendError::TooShort(keep[i]),
+        other => other,
+    };
+    for mut t in tools_of(&rest, segments).map_err(back)? {
+        for s in &mut t.sources {
+            match s {
+                Source::Edge(i) => *i = keep[*i],
+                Source::Corner(_) => {}
+            }
+        }
+        let first = t
+            .sources
+            .iter()
+            .filter_map(|s| match s {
+                Source::Edge(i) => Some(*i),
+                Source::Corner(_) => None,
+            })
+            .min()
+            .unwrap_or(0);
+        out.push((first, t));
+    }
+    for i in 0..spec.edges.len() {
+        if !matches!(spec.edges[i].path, Path::Curve { .. }) {
+            continue;
+        }
+        let mut m = Mesh::new();
+        let b = sweep::tool_into(&mut m, spec, i, segments)?;
+        let mesh = m.finish(&format!("the tool of edge {i}"))?;
+        out.push((
+            i,
+            Tool {
+                mesh,
+                add: !spec.edges[i].convex,
+                sources: vec![Source::Edge(i); b.blends.len()],
+                blend: b.blends,
+                fit: b.fit,
+            },
+        ));
+    }
+    out.sort_by_key(|x| x.0);
+    Ok(out.into_iter().map(|x| x.1).collect())
+}
+
+fn tools_of(spec: &BlendSpec, segments: &dyn Fn(f64) -> u32) -> Result<Vec<Tool>, BlendError> {
     let adjust = adjustments(spec)?;
     let mut profs = Vec::with_capacity(spec.edges.len());
     for (i, e) in spec.edges.iter().enumerate() {
@@ -1310,6 +1511,7 @@ pub fn tools(spec: &BlendSpec, segments: &dyn Fn(f64) -> u32) -> Result<Vec<Tool
             add: !spec.edges[root].convex,
             blend: blend.iter().map(|b| b.0).collect(),
             sources: blend.iter().map(|b| b.1).collect(),
+            fit: 0.0,
         });
     }
     Ok(out)

@@ -12,8 +12,10 @@ how, and where they depart from this text). The stop rule's corpus
 passes (99.7% of supported cases exact, section 15.4). F5 is split:
 F5a built (convex and concave corners in two passes in one call, and
 spindle tori: section 15.6); F5b, blends between curved surfaces with
-no common axis, planned (section 15.7), its first phase (B-spline
-surfaces in `meshbrep`) built (section 15.8).
+no common axis (planned in section 15.7), built in two phases: B-spline
+surfaces in `meshbrep` (section 15.8), then the marched spine, the
+swept-arc and ruled tools and NeoSCAD's side (section 15.9). Such a
+blend does not yet meet another blend at a vertex.
 Written
 2026-10-08 against `127be03` and the reference checkouts in
 `.reference/openscad` and `.reference/BOSL2`.
@@ -901,7 +903,7 @@ Person-weeks, wide bands, in the audit's terms (its stage 4 estimate was
 | F4 | Surfaces: LSP (hover, completion, code actions), MCP recipe and docs, the apps' and /try's toggle, a user reference page (as `docs/step-export.md` is for exact export), editor colouring | 1–2 |
 | F5 (optional) | Blends between curved surfaces with no common axis (spine as the intersection of offset surfaces, a faceted pipe, or B-spline surfaces later), unequal-radius and mixed corners, automatic two-pass calls | 3–6, decided after F3 |
 | F5a | Mixed corners as two passes in one call, selection of the second pass by provenance, spindle tori, corpus families for corners, spheres, rotations, nested calls (built: 15.6) | — |
-| F5b | Exact blends between curved surfaces with no common axis: spine marching, B-spline surfaces in `meshbrep` (planned: 15.7; phase 1, B-spline surfaces in `meshbrep`, built: 15.8) | 4–6 |
+| F5b | Exact blends between curved surfaces with no common axis: spine marching, B-spline surfaces in `meshbrep` (planned: 15.7; phase 1, B-spline surfaces in `meshbrep`, built: 15.8; phase 2, the spine, tools, checks, export, goldens and corpus, built: 15.9) | 4–6 |
 
 F0–F4: 9–13.5 person-weeks.
 
@@ -1810,6 +1812,159 @@ render, the STEP walk, reports, goldens and the corpus).
   `geom::fillet::curve::outward` (`Evaluator::project`, then
   `Evaluator::normal`), which selection on a result with a blend will
   need.
+
+### 15.9 Stage F5b phase 2 as built
+
+Phase 2 builds the blends 15.7 planned on phase 1's surfaces: edges
+between planes, cylinders, cones, spheres and tori that share no axis
+(tees, bosses on a rod's side, cross holes, rods and holes through a
+plate at a slant, a rod in a ball) are a new class, `swept`, and are
+rounded and chamfered exactly.
+
+- **The spine** (`crates/meshbrep/src/blend/sweep.rs`, the module
+  comment and `Rolled`). Each face is its exact signed distance
+  (`Field`), and the spine is where both are `−r` (a concave fillet;
+  `+r` convex, 0 for a chamfer's edge). It is marched as 15.7 says
+  (predictor along `n_a × n_b`, Newton onto both offsets in the plane
+  across the step), started from the edge's first point, and run past
+  the edge's ends until the end planes are behind it, or round to the
+  start. **Off from 15.7**: the marched points are not what is fitted.
+  They are interpolated by a cubic (the guide), and the spine at each
+  guide parameter is the corrector's point in the guide's normal plane
+  there, so the fit samples an exact curve at any parameter it asks
+  for; a fitted piece is kept at least half the spine's length inside
+  the guide, whose ends are less accurate. Points at other offsets (the
+  region's corner beside the edge) are followed from the edge's point
+  in eight steps of the offset (`offset_point`): one step from it lands
+  a large ball's corner beside a thin branch on another branch of the
+  offsets' intersection. The feet are where the ball touches each face
+  (or where a chamfer meets it). Spine, feet and the canal or
+  ruled patch are fitted to 1e-9 of the edge's size (`FIT`), tightened
+  up to twice when the canal's own error exceeds ten times that; the
+  worst is `Tool::fit`.
+- **Checks** (`blend::check`, `sweep::check`, `folds`): the corrector
+  converges all along (the ball fits), each arc is under a half circle,
+  and `r` times the spine's curvature towards any point of the arc stays
+  under 0.95 (the swept arc does not fold). NeoSCAD's checks
+  (`geom::fillet::build::check`) cast their rays across a curve's
+  blend at 24 stations (`CURVE_RAYS`) from `blend::curve_sections`, so
+  the strip and overlap checks and their size hints work as for the
+  other classes.
+- **The tool.** Rows of the patch (`Evaluator::eval` at the canal's own
+  parameters) and, for the rest of the region, the same sides as the
+  straight and revolved tools; open ends are cut by the end planes as a
+  straight tool's are; a closed blend is two patches. **Off from 15.7**:
+  vertices on the exact contact are not enough on a curved face. The
+  face in the mesh is its polygon, up to the sagitta inside the exact
+  face, so the kernel's boolean cut the contact's chords across the
+  polygon's creases and left slivers that reconstruction could not
+  attribute. The caller now passes each face's triangles near the edge
+  (`Path::Curve::facets`, gathered by `geom::fillet::result`'s
+  `faces_facets`), and the tool is conformed to them (`Facets`): every
+  row gets a vertex where it crosses a crease, rows near the face are
+  moved down by the facets' depth under the exact face within a band of
+  four times that depth, and rows with different stations are zipped by
+  parameter, synced at the crease vertices. A ring's two patches are
+  split clear of crease crossings (`splits`): split near one, the
+  corners folded.
+- **Reconstruction** needed three fixes in `meshbrep`, all general.
+  (1) A parameter-space curve along a tangent contact is refined until
+  its image stays on the edge's own curve as well as on the other face
+  (`seams.rs`, `pcurve`): across a tangent contact the distance to the
+  other face changes only to second order, so a coarse curve passed
+  while 1e-4 off, and a cylinder's area beside a blend came out 5e-4
+  wrong. It applies to every tangent contact, the straight and rim
+  fillets' too: their volumes move by about 1e-10 and their STEP files
+  grow (the wasm-check plate with straight and rim fillets: 137 KB to
+  325 KB). (2) A mesh chain is taken as a patch's contact side when,
+  moved onto the other face, it stays within a fifth of the patch's
+  width of the side (`edges.rs`, `boundary_edge`; phase 1 required 1e-4
+  of its length, which a conformed contact on a coarse polygon misses).
+  (3) A corner where contact sides of two patches meet (a ring's two
+  patches, a blend's end on the next face) is taken where the sides
+  meet (`reconstruct.rs`, `corner_of_sides`): the Gauss–Newton along one
+  side left it 8e-6 off the other's.
+- **NeoSCAD's side.** `Class::Swept` (`geom::fillet`, `class_of`);
+  ends (`build::swept_end`): a swept blend ends on a plane third face
+  (open or against it) or closes; one meeting another selected edge at
+  a vertex, or where its two faces touch, is
+  `fillet-unsupported-vertex`, and under the default `"all"` such edges
+  are dropped with a `fillet-unsupported-edge` warning and the rest
+  built (`decide`), so a nested call's `"all"` on a body with a tee does
+  not fail. `curve::outward` takes B-spline faces (projection and the
+  patch's normal). The STEP walk (`exact::walk`) maps B-spline patches
+  under any affine placement (control points mapped, weights kept) and
+  records the tools' fit, scaled; reconstruction allows ten times it
+  (`walk::tolerances`); the export retries at four times the segments
+  when fitted blends fail twice, below 20,000 triangles
+  (`RETRY_FITTED_TRIANGLES`). The exact check after the boolean
+  (`exact/check.rs`) bounds B-spline faces by their normal coordinates.
+- **Not built.** A swept blend meeting another blend at a vertex (a
+  tee's blend and the branch's rim blend; F2's rule, as 15.7 planned);
+  an equal tee, where the faces touch and the blend would shrink to a
+  point (a patch with a pole; OCCT builds it): refused with "the same
+  two faces touch there"; B-spline faces of the child itself.
+- **Goldens** (`conformance/extensions/fillet/curved_*`, eight):
+  their volumes are a reference integration
+  (`crates/meshbrep/tests/sweep.rs`, `golden_reference_volumes`): the
+  base solid plus `∫ ds ∬ (1 − κξ) dA` over the blend's region in the
+  normal planes of the exact spine (Gauss–Legendre, the spine by the
+  same corrector), which matches Pappus's theorem to rounding on a
+  revolved case (`the_reference_integration_matches_pappus`). Ours
+  match them to 1e-9 in `fillet_build.rs`; OCCT 8.0.1 reads every file
+  back valid, within 7e-9 (the better of its two integrators: the
+  adaptive one is 7.3e-6 off on `curved_ball_rod`). OCCT's own fillets
+  of the same solids (`oracle/fillet.cpp`, `BRepFilletAPI_MakeFillet`
+  and `MakeChamfer`) are approximations:
+
+  | Golden | Reference volume | OCCT's own blend, relative |
+  |---|---|---|
+  | `curved_tee` (r 3 on r 5, r = 1) | 2562.946181356 | 2.8e-6 |
+  | `curved_boss` (r 3 on r 8, 2 off axis, r = 1.5) | 8173.690799999 | −1.7e-6 |
+  | `curved_tee_chamfer` (d = 0.8) | 2566.814173266 | −1.6e-8 |
+  | `curved_cross_hole` (both rims, r = 1) | 7580.873559849 | −1.6e-5 |
+  | `curved_oblique_hole` (30°, r = 1) | 12319.415435677 | 3.1e-6 |
+  | `curved_oblique_chamfer` (d = 1) | 12308.518475017 | −4.9e-10 |
+  | `curved_oblique_rod` (r = 1.5) | 13881.095589710 | −1.4e-5 |
+  | `curved_ball_rod` (r = 1) | 2331.750528339 | −9.9e-7 |
+
+- **`meshbrep`'s harness** (`tests/sweep.rs`, 19 cases: tees, a half
+  tee, oblique and cross holes, a ball and rod, a cone boss, both
+  senses and chamfers, 2 to 64 segments): every one valid, every face
+  exact, volumes within 2.2e-10 of the reference integration (most near
+  1e-11), fits 2e-9 to 2.5e-8, OCCT read-back valid with tolerances
+  1e-7. Each takes 150 to 500 ms (tool, boolean, reconstruction, STEP)
+  and writes 190 to 790 KB.
+- **The corpus** gains a `curved` family (`--set curved` alone; in
+  `all`, a stream of its own replaces about one model in seven, so the
+  others are F5a's models at the same ids): tees, bosses and cones on
+  rods (offset or not), cross holes, holes and rods through a plate at
+  a slant, rods in balls; fillets and (one in four) chamfers; sizes
+  drawn log-uniformly from 0.1 to 0.9 of the smaller radius, so a share are fixed by their
+  hint. Results, all with OCCT read-back. **The full set**, 2,000
+  models (seed 2): 1,691 of 1,769 supported (95.6%; F5a: 1,701 of
+  1,768 on its models), 58 refused (56 vertices), 3 mesh failures (as
+  F5a). `curved`: 230 of 264 (87.1%), 216 built and 14 fixed; by size,
+  55 of 71 under 0.25, 57 of 67 from 0.25 to 0.5, 118 of 126 at 0.5 or
+  more. Its 34 failures: 15 export partly as facets, 9 time out (60 s)
+  and 5 export renders are interrupted (all but two of those 14 under
+  0.2), 4 have OCCT volumes 1e-5 to 1e-4 off ours with OCCT's two
+  integrators disagreeing by as much, 1 misses the mesh cross-check
+  (`docs/followups.md`). The other families, on the same models as F5a
+  less the replaced ones: `plate` 385 of 385, `box` 214 of 214,
+  `spindle` 123 of 123, `rounded` 168 of 170, `bracket` 169 of 171,
+  `mixed` 183 of 192 (95.3%; F5a 93.5%), `nested` 70 of 77 (90.9%;
+  91.7%), `rotated` 82 of 89 (92.1%; 92.5%), `sphere` 67 of 93 (72.0%;
+  70.6%). **F3's set**, 2,000 models (seed 2): 1,755 of 1,761 (99.7%),
+  1,237 built and 518 fixed, the same as F5a; its 60 refusals are 59
+  vertices and 1 child with no B-rep (F5a's 4 unsupported edges are
+  now swept edges refused at their vertices). The default 300 (seed 1):
+  247 of 257 (96.1%; F5a 249 of 260), `curved` 33 of 37.
+- **Determinism and wasm32.** `fillet_build.rs`'s byte-identity test
+  covers three curved goldens (a tee, an oblique chamfer, the ball and
+  rod) at 1, 2 and 8 threads and cold and warm caches; wasm-check's
+  `fillet-curved-step` (a tee and a cross hole) hashes the same in node
+  as natively (15 faces, all exact, 1.67 MB).
 
 ## 16. Test plan
 

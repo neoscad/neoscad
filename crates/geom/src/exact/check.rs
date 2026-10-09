@@ -20,6 +20,7 @@
 //! loose enough for a coarse one, instead of one number that is wrong for
 //! one of them.
 
+use meshbrep::spline::Evaluator;
 use meshbrep::{Surface, TaggedMesh};
 
 /// The tagged mesh's volume corrected onto its exact surfaces, and the
@@ -75,7 +76,39 @@ fn reject(a: V3, axis: V3) -> V3 {
 /// - Cylinder and cone, `ρ` the distance from the axis and `R` the
 ///   surface's radius at `p`'s height: `dθ dz = (n·ρ̂) dA / ρ` spans
 ///   `(R² - ρ²) / 2 · dθ dz`.
-fn cap(s: &Surface, p: V3, n: V3) -> Option<(f64, f64)> {
+/// - B-spline patch (a blend between curved faces, `ev` its evaluator):
+///   along its normal from the closest point `q` (unit normal `m`, turned
+///   to face as the triangle does, `p = q + h m`). In normal coordinates
+///   the volume element is `(1 − 2Hs + Ks²) ds dA_q` (`H`, `K` the mean
+///   and Gaussian curvatures for `m`), and the triangle's `dA` projects to
+///   `dA_q = (n·m) dA / (1 − 2Hh + Kh²)`, so the cap is
+///   `−(h − Hh² + Kh³/3) (n·m) / (1 − 2Hh + Kh²)` per unit of `dA`.
+fn cap(s: &Surface, ev: Option<&Evaluator>, p: V3, n: V3) -> Option<(f64, f64)> {
+    if let Some(ev) = ev {
+        let [u, v] = ev.project(p);
+        let d = ev.derivatives(u, v);
+        let nn = cross(d.du, d.dv);
+        let l = dot(nn, nn).sqrt();
+        if l == 0.0 {
+            return Some((0.0, 0.0));
+        }
+        let mut m = scaled(nn, 1.0 / l);
+        if dot(m, n) < 0.0 {
+            m = scaled(m, -1.0);
+        }
+        let h = dot(sub(p, d.point), m);
+        let (e, f, g) = (dot(d.du, d.du), dot(d.du, d.dv), dot(d.dv, d.dv));
+        let (ll, mm, nn2) = (dot(d.duu, m), dot(d.duv, m), dot(d.dvv, m));
+        let det = e * g - f * f;
+        if det <= 0.0 {
+            return Some((0.0, h.abs()));
+        }
+        let k = (ll * nn2 - mm * mm) / det;
+        let hm = (e * nn2 - 2.0 * f * mm + g * ll) / (2.0 * det);
+        let jac = 1.0 - 2.0 * hm * h + k * h * h;
+        let f = -(h - hm * h * h + k * h * h * h / 3.0) * dot(n, m) / jac;
+        return Some((f, h.abs()));
+    }
     match s {
         Surface::Sphere { center, radius } => {
             let d = sub(p, *center);
@@ -173,14 +206,21 @@ const RULE: [([f64; 3], f64); 7] = {
 /// the triangle is split in four, up to four times, so a coarse
 /// tessellation (8 segments round a sphere puts 45° under one triangle)
 /// is integrated as finely as a fine one.
-fn integrate(s: &Surface, t: [V3; 3], n: V3, depth: u32, floor: f64) -> (f64, f64, f64) {
+fn integrate(
+    s: &Surface,
+    ev: Option<&Evaluator>,
+    t: [V3; 3],
+    n: V3,
+    depth: u32,
+    floor: f64,
+) -> (f64, f64, f64) {
     let [a, b, c] = t;
     let area = dot(cross(sub(b, a), sub(c, a)), cross(sub(b, a), sub(c, a))).sqrt() / 2.0;
     let at = |w: [f64; 3]| [0, 1, 2].map(|k| w[0] * a[k] + w[1] * b[k] + w[2] * c[k]);
     let mut i5 = 0.0;
     let mut interior: f64 = 0.0;
     for (w, wt) in RULE {
-        let Some((f, h)) = cap(s, at(w), n) else {
+        let Some((f, h)) = cap(s, ev, at(w), n) else {
             return (0.0, 0.0, 0.0);
         };
         i5 += wt * f;
@@ -192,7 +232,7 @@ fn integrate(s: &Surface, t: [V3; 3], n: V3, depth: u32, floor: f64) -> (f64, f6
         [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0],
         [1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0],
     ] {
-        i2 += cap(s, at(w), n).map_or(0.0, |x| x.0) / 3.0;
+        i2 += cap(s, ev, at(w), n).map_or(0.0, |x| x.0) / 3.0;
     }
     let err = (i5 - i2).abs() * area;
     if depth < 4 && err > floor * area {
@@ -200,7 +240,7 @@ fn integrate(s: &Surface, t: [V3; 3], n: V3, depth: u32, floor: f64) -> (f64, f6
         let (ab, bc, ca) = (mid(a, b), mid(b, c), mid(c, a));
         let mut out = (0.0, 0.0, interior);
         for sub_t in [[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]] {
-            let (v, e, h) = integrate(s, sub_t, n, depth + 1, floor);
+            let (v, e, h) = integrate(s, ev, sub_t, n, depth + 1, floor);
             out.0 += v;
             out.1 += e;
             out.2 = out.2.max(h);
@@ -215,7 +255,12 @@ fn integrate(s: &Surface, t: [V3; 3], n: V3, depth: u32, floor: f64) -> (f64, f6
 /// The closest point of a surface to `p` along the projection [`cap`]
 /// uses (radial from a sphere's centre, perpendicular to an axis), and the
 /// distance of `p` from the surface. A plane or facet projects nothing.
-fn project(s: &Surface, p: V3) -> (V3, f64) {
+fn project(s: &Surface, ev: Option<&Evaluator>, p: V3) -> (V3, f64) {
+    if let Some(ev) = ev {
+        let [u, v] = ev.project(p);
+        let q = ev.eval(u, v);
+        return (q, dot(sub(p, q), sub(p, q)).sqrt());
+    }
     let radial = |base: V3, q: V3, r: f64| {
         let rho = dot(q, q).sqrt();
         if rho == 0.0 {
@@ -267,11 +312,15 @@ const MIN_SIN: f64 = 0.02;
 
 /// The unit normal of a surface at `p` (on or near it), up to sign. `None`
 /// for a facet.
-fn normal(s: &Surface, p: V3) -> Option<V3> {
+fn normal(s: &Surface, ev: Option<&Evaluator>, p: V3) -> Option<V3> {
     let unit = |v: V3| {
         let l = dot(v, v).sqrt();
         (l > 0.0).then(|| scaled(v, 1.0 / l))
     };
+    if let Some(ev) = ev {
+        let [u, v] = ev.project(p);
+        return unit(ev.normal(u, v));
+    }
     match s {
         Surface::Plane { normal, .. } => Some(*normal),
         Surface::Sphere { center, .. } => unit(sub(p, *center)),
@@ -308,7 +357,7 @@ fn normal(s: &Surface, p: V3) -> Option<V3> {
 /// section, where `eᵢ` is how far side `i` moved the point and `dᵢ` how
 /// far that puts it off the other surface. It is measured at each edge's
 /// ends and middle and taken along the edge's length.
-fn strips(mesh: &TaggedMesh) -> f64 {
+fn strips(mesh: &TaggedMesh, evs: &[Option<Evaluator>]) -> f64 {
     // Ordered, so the sum (and the tolerance printed) is the same bits on
     // every run.
     let mut sides: std::collections::BTreeMap<(u32, u32), [(u32, usize); 2]> = Default::default();
@@ -323,28 +372,32 @@ fn strips(mesh: &TaggedMesh) -> f64 {
     let curved = |s: &Surface| !matches!(s, Surface::Plane { .. } | Surface::Faceted);
     // A faceted side is the plane of its own triangle.
     let surface = |(s, t): (u32, usize)| match &mesh.surfaces[s as usize] {
-        Surface::Faceted => {
-            let [a, b, c] = mesh.triangles[t].map(|i| mesh.positions[i as usize]);
-            let n = cross(sub(b, a), sub(c, a));
-            let l = dot(n, n).sqrt();
-            if l == 0.0 {
-                Surface::Faceted
-            } else {
-                Surface::Plane {
-                    origin: a,
-                    normal: scaled(n, 1.0 / l),
+        Surface::BSpline(_) => (Surface::Faceted, evs[s as usize].as_ref()),
+        Surface::Faceted => (
+            {
+                let [a, b, c] = mesh.triangles[t].map(|i| mesh.positions[i as usize]);
+                let n = cross(sub(b, a), sub(c, a));
+                let l = dot(n, n).sqrt();
+                if l == 0.0 {
+                    Surface::Faceted
+                } else {
+                    Surface::Plane {
+                        origin: a,
+                        normal: scaled(n, 1.0 / l),
+                    }
                 }
-            }
-        }
-        other => other.clone(),
+            },
+            None,
+        ),
+        other => (other.clone(), None),
     };
     let mut total = 0.0;
     for (&(i, j), &[s1, s2]) in &sides {
         if s1.0 == s2.0 {
             continue;
         }
-        let (a, b) = (surface(s1), surface(s2));
-        if !curved(&a) && !curved(&b) {
+        let ((a, ea_), (b, eb_)) = (surface(s1), surface(s2));
+        if !curved(&a) && ea_.is_none() && !curved(&b) && eb_.is_none() {
             continue;
         }
         let (p, q) = (mesh.positions[i as usize], mesh.positions[j as usize]);
@@ -352,16 +405,16 @@ fn strips(mesh: &TaggedMesh) -> f64 {
         let mid = [0, 1, 2].map(|k| (p[k] + q[k]) / 2.0);
         let mut worst: f64 = 0.0;
         for m in [p, mid, q] {
-            let (pa, ea) = project(&a, m);
-            let (pb, eb) = project(&b, m);
-            let da = project(&b, pa).1;
-            let db = project(&a, pb).1;
+            let (pa, ea) = project(&a, ea_, m);
+            let (pb, eb) = project(&b, eb_, m);
+            let da = project(&b, eb_, pa).1;
+            let db = project(&a, ea_, pb).1;
             // Where the surfaces meet at a grazing angle θ, the exact
             // curve lies up to the gap / sin θ along them from the mesh's,
             // not the gap: a cylinder poking 0.01 mm through a plane (the
             // overlap BOSL2 gives every mask) meets it at 2.6° and left a
             // sliver ten times the bound without this.
-            let sin = match (normal(&a, pa), normal(&b, pb)) {
+            let sin = match (normal(&a, ea_, pa), normal(&b, eb_, pb)) {
                 (Some(na), Some(nb)) => {
                     let c = cross(na, nb);
                     dot(c, c).sqrt()
@@ -375,6 +428,26 @@ fn strips(mesh: &TaggedMesh) -> f64 {
     total
 }
 
+/// An evaluator for each B-spline surface of the mesh's table that a
+/// triangle uses (blends between curved faces), made once: projecting
+/// onto one keeps a grid of seeds.
+fn evaluators(mesh: &TaggedMesh) -> Vec<Option<Evaluator>> {
+    let mut used = vec![false; mesh.surfaces.len()];
+    for &s in &mesh.triangle_surface {
+        if let Some(u) = used.get_mut(s as usize) {
+            *u = true;
+        }
+    }
+    mesh.surfaces
+        .iter()
+        .zip(&used)
+        .map(|(s, &u)| match s {
+            Surface::BSpline(b) if u => Evaluator::new(b).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The corrected volume of a tagged mesh (see the module comment).
 pub fn corrected_volume(mesh: &TaggedMesh) -> Corrected {
     let mut out = Corrected {
@@ -384,6 +457,7 @@ pub fn corrected_volume(mesh: &TaggedMesh) -> Corrected {
         max_cap: 0.0,
     };
     let mut correction = 0.0;
+    let evs = evaluators(mesh);
     // 1e-8 of the model's size, as a height: see [`integrate`]. The
     // degree-2 difference it is compared with overstates the degree-5
     // rule's error by orders of magnitude, so the integral is far more
@@ -411,17 +485,18 @@ pub fn corrected_volume(mesh: &TaggedMesh) -> Corrected {
             continue;
         }
         let n = scaled(nn, 1.0 / len);
-        let (integral, quad_err, interior) = integrate(s, [a, b, c], n, 0, floor);
+        let ev = evs[mesh.triangle_surface[t] as usize].as_ref();
+        let (integral, quad_err, interior) = integrate(s, ev, [a, b, c], n, 0, floor);
         correction += integral;
         out.residual_bound += quad_err;
         out.max_cap = out.max_cap.max(interior);
         for p in [a, b, c] {
-            if let Some((_, h)) = cap(s, p, n) {
+            if let Some((_, h)) = cap(s, ev, p, n) {
                 out.max_cap = out.max_cap.max(h);
             }
         }
     }
-    out.residual_bound += strips(mesh);
+    out.residual_bound += strips(mesh, &evs);
     out.volume = out.mesh + correction;
     out
 }
@@ -455,6 +530,7 @@ pub fn cap_volume(mesh: &TaggedMesh, triangles: &[u32]) -> Caps {
         (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max)
     };
     let mut out = Caps::default();
+    let evs = evaluators(mesh);
     for &t in triangles {
         let [a, b, c] = mesh.triangles[t as usize].map(|i| mesh.positions[i as usize]);
         let s = &mesh.surfaces[mesh.triangle_surface[t as usize] as usize];
@@ -466,7 +542,8 @@ pub fn cap_volume(mesh: &TaggedMesh, triangles: &[u32]) -> Caps {
         if len == 0.0 {
             continue;
         }
-        let (integral, quad_err, _) = integrate(s, [a, b, c], scaled(nn, 1.0 / len), 0, floor);
+        let ev = evs[mesh.triangle_surface[t as usize] as usize].as_ref();
+        let (integral, quad_err, _) = integrate(s, ev, [a, b, c], scaled(nn, 1.0 / len), 0, floor);
         out.signed += integral;
         out.size += integral.abs();
         out.error += quad_err;

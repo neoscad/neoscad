@@ -938,18 +938,42 @@ fn pcurve(
         } else {
             bspline::interpolate_at(&uv, &ts)
         };
-        let dev = match &other {
-            Some(o) => {
-                let m = (4 * uv.len()).min(16384);
-                let [t0, t1] = [bs.knots[0], *bs.knots.last().expect("knots")];
-                (0..=m)
-                    .map(|i| {
-                        let q = bspline::eval(&bs, t0 + (t1 - t0) * i as f64 / m as f64);
-                        o.f(param.eval(q[0], q[1])).abs()
-                    })
-                    .fold(0.0, f64::max)
-            }
-            None => 0.0,
+        // How far the curve's image strays from the other face. Across a
+        // tangent contact that distance changes only to second order with
+        // a stray off the edge: a coarse curve on a cylinder beside a
+        // blend passed while lying 1e-4 off the contact, and the face's
+        // area came out 5e-4 wrong. There the stray across the edge's own
+        // curve at the same parameter (the parameter-space curve shares
+        // it) counts too, away from the ends (which are the vertices).
+        // Only at tangent contacts: across a transversal edge the other
+        // face sees any stray, while the edge's 3D curve (an intersection
+        // fitted to its own tolerance) is no better a guide, and holding
+        // the image to it there refined every such pcurve to thousands of
+        // points, doubling STEP files.
+        let ce = CurveEval::new(&ed.curve);
+        let [t0, t1] = [bs.knots[0], *bs.knots.last().expect("knots")];
+        let tangent = other.as_ref().is_some_and(|o| {
+            let pm = ce.at(0.5 * (t0 + t1));
+            let (nf, no) = (param.s.grad(pm).norm(), o.grad(pm).norm());
+            nf.cross(no).len() < 0.05
+        });
+        let dev = {
+            let m = (4 * uv.len()).min(16384);
+            (0..=m)
+                .map(|i| {
+                    let t = t0 + (t1 - t0) * i as f64 / m as f64;
+                    let q = bspline::eval(&bs, t);
+                    let p = param.eval(q[0], q[1]);
+                    let off = other.as_ref().map_or(0.0, |o| o.f(p).abs());
+                    let across = if !tangent || i == 0 || i == m {
+                        0.0
+                    } else {
+                        let d = p - ce.at(t);
+                        d.reject(ce.deriv(t).norm()).len()
+                    };
+                    off.max(across)
+                })
+                .fold(0.0, f64::max)
         };
         if dev < fit_tol || n >= 4096 {
             return (bs, end_u, dev);

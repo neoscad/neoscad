@@ -275,13 +275,28 @@ pub enum Set {
     /// F3's models, with about two in five replaced by stage F5a's
     /// kinds: mixed corners (one call over convex and concave edges,
     /// built in two passes), spheres, rotations, nested calls of unequal
-    /// sizes and large boss rims (spindle tori).
+    /// sizes and large boss rims (spindle tori); and, decided first by a
+    /// stream of their own so that every other model is the one F5a's set
+    /// had, about one in seven replaced by stage F5b's `curved` family
+    /// (blends between curved faces with no common axis).
     All,
+    /// F5b's `curved` family alone, model for model the ones `All` has
+    /// at the same seed and index where it has one.
+    Curved,
 }
 
 /// Model `i` of the corpus seeded with `seed`.
 fn case(seed: u64, i: usize, set: Set) -> Case {
-    // A stream of its own decides, so the models it keeps are F3's.
+    if set == Set::Curved {
+        return case_curved(seed, i);
+    }
+    // Streams of their own decide, so the models they keep are F5a's,
+    // and of those, F3's.
+    if set == Set::All
+        && Rng(seed ^ (i as u64).wrapping_mul(0x6a09_e667_f3bc_c909) ^ 0xf5b).chance(1.0 / 7.0)
+    {
+        return case_curved(seed, i);
+    }
     let mut pick = Rng(seed ^ (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5f5a);
     if set == Set::All && pick.chance(0.4) {
         return case_f5(seed, i);
@@ -632,6 +647,174 @@ fn case_f5(seed: u64, i: usize) -> Case {
     }
 }
 
+/// A model of stage F5b's `curved` family (`docs/fillets.md`, section
+/// 15.9): faces with no common axis meeting at an angle all along, as
+/// parts have them. A branch standing on a rod (a tee, off the rod's axis
+/// or on it; a boss when short; a cone), a hole across a rod, a hole or a
+/// rod through a plate at a slant, a rod standing in a ball off its
+/// centre. The sizes run from small to past what fits; the selectors pick
+/// the junction, the rims, or everything.
+fn case_curved(seed: u64, i: usize) -> Case {
+    let mut g = Rng(seed ^ (i as u64).wrapping_mul(0x3c6e_f372_fe94_f82b) ^ 0xc0ed);
+    let chamfer = g.chance(0.25);
+    let (module, arg) = if chamfer {
+        ("chamfer_edges", "d")
+    } else {
+        ("fillet_edges", "r")
+    };
+    let edges = |s: &str| {
+        if s.is_empty() {
+            String::new()
+        } else {
+            format!(", edges = \"{s}\"")
+        }
+    };
+    let kind = g.below(6);
+    let (solid, sel, top) = match kind {
+        0 | 1 => {
+            // A branch (cylinder, or a cone narrowing upwards) standing on
+            // a rod along x, its axis off the rod's by up to 0.4 of the
+            // rod's radius; short, a boss.
+            let big = g.range(4.0, 12.0);
+            let small = g.range(0.25, 0.8) * big;
+            let off = g.range(-0.4, 0.4) * (big - small);
+            let len = g.range(3.0, 5.0) * big;
+            let h = big + g.range(0.3, 2.0) * small;
+            let branch = if kind == 1 && g.chance(0.5) {
+                format!(
+                    "translate([0, {}, 0]) cylinder(r1 = {}, r2 = {}, h = {});",
+                    n(off),
+                    n(small),
+                    n(small * g.range(0.4, 0.9)),
+                    n(h)
+                )
+            } else {
+                format!(
+                    "translate([0, {}, 0]) cylinder(r = {}, h = {});",
+                    n(off),
+                    n(small),
+                    n(h)
+                )
+            };
+            (
+                format!(
+                    "{{ rotate([0, 90, 0]) cylinder(r = {}, h = {}, center = true); {branch} }}",
+                    n(big),
+                    n(len)
+                ),
+                *g.pick(&["concave", "concave", "", "not %circle"]),
+                small,
+            )
+        }
+        2 => {
+            // A hole across a rod along x, off its axis.
+            let big = g.range(4.0, 12.0);
+            let small = g.range(0.2, 0.6) * big;
+            let off = g.range(-0.3, 0.3) * (big - small);
+            let len = g.range(3.0, 5.0) * big;
+            (
+                format!(
+                    "difference() {{ rotate([0, 90, 0]) cylinder(r = {}, h = {}, center = true); translate([{}, {}, 0]) cylinder(r = {}, h = {}, center = true); }}",
+                    n(big),
+                    n(len),
+                    n(g.range(-0.2, 0.2) * len),
+                    n(off),
+                    n(small),
+                    n(3.0 * big)
+                ),
+                *g.pick(&[
+                    "convex and not %circle",
+                    ">z and not %circle",
+                    "not %circle",
+                ]),
+                small,
+            )
+        }
+        3 => {
+            // A hole through a plate at a slant.
+            let l = g.range(30.0, 60.0);
+            let w = g.range(30.0, 50.0);
+            let t = g.range(4.0, 12.0);
+            let r = g.range(2.0, 0.15 * l.min(w));
+            let a = g.range(10.0, 45.0);
+            (
+                format!(
+                    "difference() {{ cube([{}, {}, {}]); translate([{}, {}, {}]) rotate([{}, {}, 0]) cylinder(r = {}, h = {}, center = true); }}",
+                    n(l),
+                    n(w),
+                    n(t),
+                    n(l / 2.0),
+                    n(w / 2.0),
+                    n(t / 2.0),
+                    n(a),
+                    n(g.range(-15.0, 15.0)),
+                    n(r),
+                    n(3.0 * t + 2.0 * l.min(w))
+                ),
+                *g.pick(&[
+                    "%ellipse",
+                    "%ellipse and >z",
+                    "not |z and not %line",
+                    "%ellipse or %bspline",
+                ]),
+                r,
+            )
+        }
+        4 => {
+            // A rod through a plate at a slant.
+            let l = g.range(30.0, 60.0);
+            let w = g.range(30.0, 50.0);
+            let t = g.range(4.0, 12.0);
+            let r = g.range(2.0, 0.12 * l.min(w));
+            let a = g.range(10.0, 40.0);
+            (
+                format!(
+                    "union() {{ cube([{}, {}, {}]); translate([{}, {}, {}]) rotate([{}, 0, {}]) cylinder(r = {}, h = {}, center = true); }}",
+                    n(l),
+                    n(w),
+                    n(t),
+                    n(l / 2.0),
+                    n(w / 2.0),
+                    n(t / 2.0),
+                    n(a),
+                    n(g.range(0.0, 90.0)),
+                    n(r),
+                    n(t + 2.0 * g.range(4.0, 15.0))
+                ),
+                *g.pick(&["concave", "%ellipse", "concave and >z"]),
+                r,
+            )
+        }
+        _ => {
+            // A rod standing in a ball, off its centre.
+            let rb = g.range(5.0, 12.0);
+            let r = g.range(0.2, 0.5) * rb;
+            let off = g.range(0.0, 0.5) * (rb - r);
+            (
+                format!(
+                    "{{ sphere(r = {}); translate([{}, 0, 0]) cylinder(r = {}, h = {}); }}",
+                    n(rb),
+                    n(off),
+                    n(r),
+                    n(rb + g.range(2.0, 10.0))
+                ),
+                *g.pick(&["concave", "%bspline", "concave or %circle"]),
+                r,
+            )
+        }
+    };
+    let text = format!(
+        "{module}({arg} = {}{})\n  {solid}\n",
+        n(size(&mut g, 0.1, 0.9 * top)),
+        edges(sel)
+    );
+    Case {
+        id: format!("{i:04}"),
+        family: "curved",
+        text,
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct Run {
     killed: Option<String>,
@@ -776,7 +959,13 @@ fn judge(run: &Run, occt_on: bool) -> Option<(String, String)> {
         };
         let num = |k: &str| o[k].as_f64().unwrap_or(f64::NAN);
         let ours = e["volume"].as_f64().unwrap_or(f64::NAN);
-        let rel = (num("volume") - ours).abs() / ours.abs().max(1e-300);
+        // The better of OCCT's two integrators: each misjudges some
+        // B-spline patches (its adaptive one is 4e-6 off on a ruled
+        // chamfer between two cylinders whose fixed-order volume agrees
+        // with ours to 1e-8; `crates/meshbrep/tests/bspline.rs` reads
+        // them the same way).
+        let off = |k: &str| (num(k) - ours).abs() / ours.abs().max(1e-300);
+        let rel = off("volume").min(off("volume_fixed"));
         let ok = o["valid"].as_bool() == Some(true)
             && num("free_edges") == 0.0
             && num("shells") == num("closed_shells")
@@ -1066,12 +1255,12 @@ mod tests {
         assert_eq!(fams.len(), 4, "{fams:?}");
         let fams: std::collections::BTreeSet<&str> =
             (0..400).map(|i| case(1, i, Set::All).family).collect();
-        assert_eq!(fams.len(), 9, "{fams:?}");
-        // The models the full set keeps are F3's.
+        assert_eq!(fams.len(), 10, "{fams:?}");
+        // The models the full set keeps are F3's: about 6/7 × 3/5 of them.
         let kept = (0..400)
             .filter(|&i| case(1, i, Set::All).text == case(1, i, Set::F3).text)
             .count();
-        assert!((200..300).contains(&kept), "{kept}");
+        assert!((160..260).contains(&kept), "{kept}");
     }
 
     #[test]

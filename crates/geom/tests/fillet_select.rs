@@ -417,33 +417,55 @@ fn expect_pins_the_count() {
 }
 
 #[test]
-fn unsupported_edges_warn_under_all_and_fail_when_named() {
-    // A plane cutting a cylinder obliquely: an ellipse.
+fn curved_edges_build_and_edges_of_blends_do_not() {
+    // A plane cutting a cylinder obliquely: an ellipse between curved
+    // and plane faces, rounded by a ball rolled along it (stage F5b).
     let body = "difference() { cylinder(r = 5, h = 10); translate([0, 0, 6]) rotate([30, 0, 0]) translate([-10, -10, 0]) cube(20); }";
     let p = one(&format!("fillet_edges(r = 1) {body}"));
-    // The ellipse is left sharp with a warning; the rest of "all" (the
-    // cylinder's bottom rim, a circle) is built.
-    assert_eq!(p.status, Status::Built);
+    assert_eq!(p.status, Status::Built, "{:?}", p.diags);
+    assert!(p.unsupported.is_empty());
+    let f = p.facts.as_ref().unwrap();
+    assert!(
+        p.selected
+            .iter()
+            .any(|&i| f.edges[i].class == Class::Swept && f.edges[i].curve.name() == "ellipse")
+    );
+    // A tee of two cylinders: their junction too.
+    let p = one(
+        "fillet_edges(r = 1, edges = \"child(0, 1)\") { cylinder(r = 5, h = 20); translate([0, 0, 10]) rotate([0, 90, 0]) cylinder(r = 3, h = 20); }",
+    );
+    assert_eq!(p.status, Status::Built, "{:?}", p.diags);
+    assert!(p.unsupported.is_empty() && !p.selected.is_empty());
+    // An edge of a B-spline blend (an earlier call's, between curved
+    // faces) where a plane cuts it is not: a warning under "all", an
+    // error when named.
+    let half = "difference() { fillet_edges(r = 1, edges = \"concave\") { rotate([0, 90, 0]) cylinder(r = 5, h = 30, center = true); cylinder(r = 3, h = 12); } translate([-50, -100, -50]) cube(100); }";
+    let p = plans(&format!("fillet_edges(r = 0.3) {half}")).remove(0);
+    assert_eq!(p.size, 0.3);
+    let f = p.facts.as_ref().unwrap();
+    assert!(
+        p.unsupported
+            .iter()
+            .any(|&i| f.edges[i].faces.contains(&"bspline") && f.edges[i].class == Class::Other),
+        "{}",
+        listing(&p)
+    );
     let d = p
         .diags
         .iter()
         .find(|d| d.code == DiagCode::FilletUnsupportedEdge)
         .unwrap();
     assert_eq!(d.severity, lang::diag::Severity::Warning);
-    assert!(d.message.contains("ellipse between a"), "{}", d.message);
-    let p = one(&format!("fillet_edges(r = 1, edges = \"%ellipse\") {body}"));
+    let p = plans(&format!(
+        "fillet_edges(r = 0.3, edges = \"%bspline\") {half}"
+    ))
+    .remove(0);
     let d = p
         .diags
         .iter()
         .find(|d| d.code == DiagCode::FilletUnsupportedEdge)
         .unwrap();
     assert_eq!(d.severity, lang::diag::Severity::Error);
-    // A tee of two cylinders: their intersection is no circle.
-    let p = one(
-        "fillet_edges(r = 1, edges = \"child(0, 1)\") { cylinder(r = 5, h = 20); translate([0, 0, 10]) rotate([0, 90, 0]) cylinder(r = 3, h = 20); }",
-    );
-    assert_eq!(p.selected.len(), p.unsupported.len());
-    assert!(!p.selected.is_empty());
 }
 
 #[test]

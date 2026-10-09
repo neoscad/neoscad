@@ -12,6 +12,7 @@ use crate::model::{BSpline, Curve};
 use crate::solve::solve;
 use crate::surf::Surf;
 use crate::tangency::Cont;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) struct Built {
@@ -342,18 +343,53 @@ fn boundary_edge(
     }
     let mid = chain[chain.len() / 2];
     let (s, sd) = c.nearest_side(mid)?;
-    // The chain must follow the side: its mesh vertices were put on the
-    // contact, so they lie on the side to within the fit, far closer
-    // than this; another intersection of the two surfaces lies a
-    // distance of the order of the model away.
+    // The chain must follow the side, not another intersection of the two
+    // surfaces, which lies a distance of the order of the model away. Its
+    // mesh vertices were put on the contact, but a tessellation leaves
+    // them only near it: a vertex conformed to the other face's polygon
+    // lies on the polygon's facet, inside the exact face by up to the
+    // polygon's sagitta (measured once moved back onto that face along
+    // its normal, which undoes that); a kernel's boolean adds vertices on
+    // the chords between them, and where the contact runs along a ridge
+    // of the polygon and bulges across it, the chain follows the ridge.
+    // Since the two surfaces are tangent along the whole side, any chain
+    // between them near it can only be the contact: the chain is
+    // accepted while it stays within a fifth of the patch's width across
+    // the side (the distance to its opposite side), or 1e-4 of its own
+    // length.
+    let other = match a {
+        Surf::Spline(x) if Arc::ptr_eq(x, s) => b,
+        _ => a,
+    };
+    let onto = |q: V| {
+        let mut x = q;
+        for _ in 0..3 {
+            let g = other.grad(x);
+            if !g.is_finite() || g.len() == 0.0 {
+                return q;
+            }
+            x = x - g.norm() * other.f(x);
+        }
+        if x.is_finite() { x } else { q }
+    };
     let length: f64 = chain.windows(2).map(|w| (w[1] - w[0]).len()).sum();
-    let near = 1e-4 * length;
     let param_on = |q: V| {
         let (u, v) = s.project(q, false);
         if sd.fixed_u { v } else { u }
     };
+    let [olo, ohi] = s.iso_range(!sd.fixed_u);
+    let opposite = if (sd.at - olo).abs() <= (sd.at - ohi).abs() {
+        ohi
+    } else {
+        olo
+    };
     for &q in &chain[1..chain.len() - 1] {
-        if (s.iso(sd.fixed_u, sd.at, param_on(q)).0 - q).len() > near {
+        let q = onto(q);
+        let t = param_on(q);
+        let on = s.iso(sd.fixed_u, sd.at, t).0;
+        let width = (s.iso(sd.fixed_u, opposite, t).0 - on).len();
+        let near = (1e-4 * length).max(0.2 * width);
+        if (on - q).len() > near {
             return None;
         }
     }

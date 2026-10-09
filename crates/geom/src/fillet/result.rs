@@ -13,7 +13,8 @@ use eval::fillet::FilletNode;
 use eval::node::{Node, NodeKind};
 use lang::diag::{DiagCode, Severity};
 use meshbrep::Surface;
-use meshbrep::blend::{End, Source, Tool};
+use meshbrep::blend::{BlendFace, End, Path, Source, Tool};
+use meshbrep::spline::Evaluator;
 
 use super::curve::{V, add, cross, dot, mul, norm, sub, unit};
 use super::{Pass, Plan, PlanDiag, Unavailable, build, facts, plan_with, point_text};
@@ -132,7 +133,6 @@ pub fn blends(
 /// with its facets. Arcs beside other faces (a sphere's rings do not pass
 /// through the rim) keep regular sections.
 fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> build::Built {
-    use meshbrep::blend::{BlendFace, Path};
     let mut out = b.clone();
     let mut points: Vec<V> = tris.iter().flatten().copied().collect();
     points.sort_by(|x, y| {
@@ -142,6 +142,10 @@ fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> build::Built {
     });
     points.dedup();
     for e in &mut out.spec.edges {
+        if let Path::Curve { points, facets } = &mut e.path {
+            *facets = [0, 1].map(|k| faces_facets(&e.faces[k], points, tris, tol));
+            continue;
+        }
         let from = e.from;
         let polygonal = e
             .faces
@@ -194,6 +198,143 @@ fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> build::Built {
     out
 }
 
+/// The triangles of `tris` (the mesh a tool is applied to) that are the
+/// faceted face `f` near a curve edge (`points`): their vertices and
+/// centroid within the polygon's depth under the exact face (measured
+/// on the polygon's own chords, those of its edges whose ends are on the
+/// exact face), facing the way the face does (its outward normal and the
+/// triangle's agree), and near the edge (within the box of its points, grown by
+/// twice their spread across, enough for any blend that fits). A plane
+/// gives none: its facets are the plane. The curve's tool is conformed
+/// to them (`meshbrep::blend::Path::Curve`).
+fn faces_facets(f: &BlendFace, points: &[V], tris: &[[V; 3]], tol: f64) -> Vec<[V; 3]> {
+    // The face's signed distance, its outward normal, and its least
+    // radius of curvature.
+    let field = |p: V| -> Option<(f64, V, f64)> {
+        match *f {
+            BlendFace::Plane { .. } => None,
+            BlendFace::Cylinder {
+                origin,
+                axis,
+                radius,
+                convex,
+            } => {
+                let q = sub(p, origin);
+                let r = sub(q, mul(axis, dot(q, axis)));
+                let s = if convex { 1.0 } else { -1.0 };
+                Some(((norm(r) - radius) * s, mul(unit(r), s), radius))
+            }
+            BlendFace::Cone {
+                apex,
+                axis,
+                slope,
+                convex,
+            } => {
+                let q = sub(p, apex);
+                let h = dot(q, axis);
+                let r = sub(q, mul(axis, h));
+                let l = (1.0 + slope * slope).sqrt();
+                let s = if convex { 1.0 } else { -1.0 };
+                let n = mul(sub(unit(r), mul(axis, slope)), s / l);
+                Some(((norm(r) - slope * h) * s / l, n, (norm(r) * l).max(tol)))
+            }
+            BlendFace::Sphere {
+                center,
+                radius,
+                convex,
+            } => {
+                let q = sub(p, center);
+                let s = if convex { 1.0 } else { -1.0 };
+                Some(((norm(q) - radius) * s, mul(unit(q), s), radius))
+            }
+            BlendFace::Torus {
+                center,
+                axis,
+                major_radius,
+                minor_radius,
+                convex,
+            } => {
+                let q = sub(p, center);
+                let tube = add(
+                    center,
+                    mul(unit(sub(q, mul(axis, dot(q, axis)))), major_radius),
+                );
+                let d = sub(p, tube);
+                let s = if convex { 1.0 } else { -1.0 };
+                Some(((norm(d) - minor_radius) * s, mul(unit(d), s), minor_radius))
+            }
+        }
+    };
+    if matches!(f, BlendFace::Plane { .. }) || points.is_empty() {
+        return Vec::new();
+    }
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in points {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let spread = (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max);
+    let grow = spread.max(tol);
+    let lo = lo.map(|x| x - grow);
+    let hi = hi.map(|x| x + grow);
+    // Candidates: near the edge, facing the way the face does.
+    let candidates: Vec<[V; 3]> = tris
+        .iter()
+        .filter(|t| {
+            // Near the edge: the triangle's box meets the grown box.
+            (0..3).all(|k| {
+                let a = t[0][k].min(t[1][k]).min(t[2][k]);
+                let b = t[0][k].max(t[1][k]).max(t[2][k]);
+                b >= lo[k] && a <= hi[k]
+            })
+        })
+        .filter(|t| {
+            let c = mul(add(add(t[0], t[1]), t[2]), 1.0 / 3.0);
+            let Some((_, n, _)) = field(c) else {
+                return false;
+            };
+            let tn = cross(sub(t[1], t[0]), sub(t[2], t[0]));
+            norm(tn) > 0.0 && dot(unit(tn), n) >= 0.75
+        })
+        .copied()
+        .collect();
+    // How deep the polygon's facets lie under the exact face: the deepest
+    // midpoint of a candidate's edge between two of the polygon's own
+    // vertices (on the exact face), with a margin for a facet's middle.
+    // A bound from the coarsest polygon instead takes in nearby faces
+    // that are not the polygon's (a branch's top cap over the top of the
+    // rod it stands on), and the tool then followed them up the branch.
+    let on = |v: V| field(v).is_some_and(|(d, _, _)| d.abs() <= tol);
+    let mut chord: f64 = 0.0;
+    for t in &candidates {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            if on(a) && on(b) {
+                let m = mul(add(a, b), 0.5);
+                chord = chord.max(field(m).map_or(0.0, |(d, _, _)| d.abs()));
+            }
+        }
+    }
+    if chord <= 0.0 {
+        return Vec::new();
+    }
+    // Inscribed polygons lie on the axis's side: in the material of a
+    // rod, in the air of a hole.
+    let band = 1.5 * chord + tol;
+    candidates
+        .into_iter()
+        .filter(|t| {
+            let c = mul(add(add(t[0], t[1]), t[2]), 1.0 / 3.0);
+            t.iter()
+                .chain(std::iter::once(&c))
+                .all(|&v| field(v).is_some_and(|(d, _, _)| d.abs() <= band))
+        })
+        .collect()
+}
+
 /// The distance from `p` to triangle `t`.
 fn to_triangle(p: V, t: &[V; 3]) -> f64 {
     let [a, b, c] = *t;
@@ -231,7 +372,6 @@ fn to_triangle(p: V, t: &[V; 3]) -> f64 {
 /// the inscribed polygon by up to its sagitta) would leave the facet
 /// standing over part of the blend, with a crease.
 fn conformed(b: &build::Built, tris: &[[V; 3]]) -> build::Built {
-    use meshbrep::blend::{BlendFace, Path};
     let mut out = b.clone();
     for (i, e) in out.spec.edges.iter_mut().enumerate() {
         // A circular edge's coaxial cylinder is conformed by its
@@ -336,6 +476,45 @@ fn tri_area(a: V, b: V, c: V) -> f64 {
     0.5 * norm(cross(sub(b, a), sub(c, a)))
 }
 
+/// The blend surfaces of a tool, ready to measure points against: a
+/// B-spline blend (between curved faces) needs an evaluator, made once.
+struct Exact<'a> {
+    s: &'a Surface,
+    ev: Option<Evaluator>,
+}
+
+impl<'a> Exact<'a> {
+    fn new(s: &'a Surface) -> Exact<'a> {
+        let ev = match s {
+            Surface::BSpline(b) => Evaluator::new(b).ok(),
+            _ => None,
+        };
+        Exact { s, ev }
+    }
+
+    /// Distance of `p` from the surface.
+    fn off(&self, p: V) -> f64 {
+        match &self.ev {
+            Some(ev) => {
+                let [u, v] = ev.project(p);
+                norm(sub(ev.eval(u, v), p))
+            }
+            None => off_surface(self.s, p),
+        }
+    }
+
+    /// Its unit normal at (or near) `p`, either way.
+    fn normal(&self, p: V) -> V {
+        match &self.ev {
+            Some(ev) => {
+                let [u, v] = ev.project(p);
+                ev.normal(u, v)
+            }
+            None => surface_normal(self.s, p),
+        }
+    }
+}
+
 /// Distance of `p` from the exact blend surface `s`.
 fn off_surface(s: &Surface, p: V) -> f64 {
     match s {
@@ -407,20 +586,22 @@ fn blend_shape(t: &Tool) -> (f64, f64) {
     let m = &t.mesh;
     let mut dev: f64 = 0.0;
     let mut area = 0.0;
+    let exact: Vec<(u32, Exact)> = t
+        .blend
+        .iter()
+        .map(|&b| (b, Exact::new(&m.surfaces[b as usize])))
+        .collect();
     for (tri, &s) in m.triangles.iter().zip(&m.triangle_surface) {
-        if !t.blend.contains(&s) {
+        let Some((_, ex)) = exact.iter().find(|x| x.0 == s) else {
             continue;
-        }
+        };
         let surf = &m.surfaces[s as usize];
         let p = tri.map(|i| m.positions[i as usize]);
         for k in 0..3 {
             let mid = mul(add(p[k], p[(k + 1) % 3]), 0.5);
-            dev = dev.max(off_surface(surf, mid));
+            dev = dev.max(ex.off(mid));
         }
-        dev = dev.max(off_surface(
-            surf,
-            mul(add(add(p[0], p[1]), p[2]), 1.0 / 3.0),
-        ));
+        dev = dev.max(ex.off(mul(add(add(p[0], p[1]), p[2]), 1.0 / 3.0)));
         // A sphere's facet is furthest inside where the centre's
         // perpendicular meets it, which no edge midpoint shows.
         if let Surface::Sphere { center, radius } = surf {
@@ -454,15 +635,19 @@ fn piece_of(p: &[V; 3], f: &[V; 3], eps: f64) -> bool {
 fn facing(t: &Tool) -> f64 {
     let m = &t.mesh;
     let mut worst: f64 = 1.0;
+    let exact: Vec<(u32, Exact)> = t
+        .blend
+        .iter()
+        .map(|&b| (b, Exact::new(&m.surfaces[b as usize])))
+        .collect();
     for (tri, &s) in m.triangles.iter().zip(&m.triangle_surface) {
-        if !t.blend.contains(&s) {
+        let Some((_, ex)) = exact.iter().find(|x| x.0 == s) else {
             continue;
-        }
-        let surf = &m.surfaces[s as usize];
+        };
         let p = tri.map(|i| m.positions[i as usize]);
         let n = unit(cross(sub(p[1], p[0]), sub(p[2], p[0])));
         for v in p {
-            worst = worst.min(dot(n, surface_normal(surf, v)).abs());
+            worst = worst.min(dot(n, ex.normal(v)).abs());
         }
     }
     (worst - 0.05).max(0.5)
@@ -694,8 +879,20 @@ fn measure(
             let mut limits: Vec<(V, V)> = Vec::new();
             if let Source::Edge(i) = src {
                 let e = &b.spec.edges[i];
-                let d = unit(sub(e.to, e.from));
+                // A curve leaves its ends along its own direction there.
+                let d_end = |end: usize| match &e.path {
+                    Path::Curve { points, .. } if points.len() >= 2 => {
+                        let n = points.len();
+                        if end == 0 {
+                            unit(sub(points[1], points[0]))
+                        } else {
+                            unit(sub(points[n - 1], points[n - 2]))
+                        }
+                    }
+                    _ => unit(sub(e.to, e.from)),
+                };
                 for (end, at) in [(0usize, e.from), (1, e.to)] {
+                    let d = d_end(end);
                     let out_dir = if end == 0 { mul(d, -1.0) } else { d };
                     if let End::Open { face } = &e.ends[end] {
                         limits.push(match face {
@@ -749,7 +946,7 @@ fn measure(
             if expected <= 0.0 {
                 continue;
             }
-            let surface = &mesh.surfaces[surf as usize];
+            let surface = Exact::new(&mesh.surfaces[surf as usize]);
             // The tool's own facets on this blend: what the boolean keeps
             // of the blend are pieces of them, in their planes.
             let facets: Vec<[V; 3]> = mesh
@@ -765,7 +962,7 @@ fn measure(
                 let inside = p
                     .iter()
                     .all(|v| (0..3).all(|k| v[k] >= lo[k] && v[k] <= hi[k]));
-                if !inside || !p.iter().all(|v| off_surface(surface, *v) <= band) {
+                if !inside || !p.iter().all(|v| surface.off(*v) <= band) {
                     continue;
                 }
                 let n = cross(sub(p[1], p[0]), sub(p[2], p[0]));
@@ -780,7 +977,7 @@ fn measure(
                 // where the tool's facets turn further from the surface
                 // than that allows (a coarse polygon revolved), a piece
                 // of one of its facets.
-                let sn = surface_normal(surface, c);
+                let sn = surface.normal(c);
                 if dot(n, sn).abs() >= facing || facets.iter().any(|f| piece_of(p, f, flat)) {
                     found += a;
                 }

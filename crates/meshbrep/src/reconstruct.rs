@@ -1034,19 +1034,28 @@ fn place_vertex(
     let mut taken = vec![false; cl.len()];
     let mut cons: Vec<Surf> = Vec::new();
     let mut sides: Vec<(std::sync::Arc<Spline>, Side)> = Vec::new();
+    // Sides of the contacts not taken above (each face takes part in one):
+    // they decide nothing alone, but where two of them end at one corner
+    // (a closed blend's two patches and the face both touch), that corner
+    // is the vertex, exactly ([`on_sides`]).
+    let mut more: Vec<(std::sync::Arc<Spline>, Side)> = Vec::new();
     for i in 0..cl.len() {
         for j in i + 1..cl.len() {
+            let Some(c) = contact_of(cl[i], cl[j]) else {
+                continue;
+            };
             if taken[i] || taken[j] {
+                if let Some((s, sd)) = c.nearest_side(pos[p]) {
+                    more.push((s.clone(), sd));
+                }
                 continue;
             }
-            if let Some(c) = contact_of(cl[i], cl[j]) {
-                match c.nearest_side(pos[p]) {
-                    Some((s, sd)) => sides.push((s.clone(), sd)),
-                    None => cons.extend(c.constraints()),
-                }
-                taken[i] = true;
-                taken[j] = true;
+            match c.nearest_side(pos[p]) {
+                Some((s, sd)) => sides.push((s.clone(), sd)),
+                None => cons.extend(c.constraints()),
             }
+            taken[i] = true;
+            taken[j] = true;
         }
     }
     for (i, &c) in cl.iter().enumerate() {
@@ -1054,11 +1063,67 @@ fn place_vertex(
             cons.push(cls.surf[c].clone());
         }
     }
+    if !sides.is_empty()
+        && let Some(q) = corner_of_sides(&sides[0], &more, pos[p])
+    {
+        return (q, residual(q));
+    }
     if let Some(q) = on_sides(&sides, &mut cons, pos[p]) {
         return (q, residual(q));
     }
     let q = solve(&cons, pos[p]).0;
     (q, residual(q))
+}
+
+/// The corner where side `first` meets one of `more` (the sides of a
+/// vertex's other contacts): another side of the same patch across it
+/// (its corner), or a side of another patch whose end lies on it (two
+/// patches of one blend meeting end to end, a closed blend's halves).
+/// Solving for that point along `first` instead meets the other patch
+/// tangentially, where Gauss–Newton stops some 1e-5 short (the function
+/// is flat to second order there), and the edges ending there miss it by
+/// that much. The candidate nearest `p0`.
+fn corner_of_sides(
+    first: &(std::sync::Arc<Spline>, Side),
+    more: &[(std::sync::Arc<Spline>, Side)],
+    p0: V,
+) -> Option<V> {
+    let (s, sd) = first;
+    let mut best: Option<(f64, V)> = None;
+    // A candidate counts within a twentieth of the other side's length of
+    // the mesh's vertex (which stands off the corner by the tessellation's
+    // sagitta at most): a corner elsewhere on the side is another vertex's.
+    let mut consider = |c: V, side: f64| {
+        let d = (c - p0).len();
+        if d <= 0.05 * side && best.is_none_or(|x| d < x.0) {
+            best = Some((d, c));
+        }
+    };
+    for (t, td) in more {
+        let [a, b] = t.iso_range(td.fixed_u);
+        let side = (t.iso(td.fixed_u, td.at, a).0 - t.iso(td.fixed_u, td.at, b).0).len();
+        if std::sync::Arc::ptr_eq(t, s) || t.same(s, 0.0) {
+            if td.fixed_u != sd.fixed_u {
+                let (u, v) = if sd.fixed_u {
+                    (sd.at, td.at)
+                } else {
+                    (td.at, sd.at)
+                };
+                consider(s.eval(u, v), side);
+            }
+            continue;
+        }
+        for end in [a, b] {
+            let c = t.iso(td.fixed_u, td.at, end).0;
+            let (u, v) = s.project(c, false);
+            let w = if sd.fixed_u { v } else { u };
+            let on = s.iso(sd.fixed_u, sd.at, w).0;
+            if (on - c).len() <= 1e-9 * (1.0 + c.len()) {
+                consider(c, side);
+            }
+        }
+    }
+    best.map(|b| b.1)
 }
 
 /// A vertex on a side of a B-spline patch that touches another surface
