@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.6.0
+
+### New
+
+- **Edge fillets and chamfers** (`--enable fillet`,
+  `docs/fillet-edges.md`). `fillet_edges(r = 2, edges = "|z")` rounds,
+  and `chamfer_edges(d = 1, edges = "%circle and >z")` bevels, chosen
+  edges of any solid, as FreeCAD's PartDesign Fillet and Chamfer or
+  CadQuery's `.edges(...).fillet(...)` do. Edges are chosen by
+  CadQuery-style selector strings (direction, position, convex or
+  concave, line or circle, parts and anchors), and the default is every
+  edge.
+  - Straight edges between planes at any angle, rims of holes, bosses,
+    cones and spheres, edges that run from lines into arcs, corners
+    where three fillets meet, corners of mixed inside and outside edges
+    (done in two passes by one call), and edges where two curved faces
+    meet with no common axis (tees, bosses on a rod, cross and oblique
+    holes).
+  - With `--enable exact`, STEP export writes the blends as true
+    cylinders, tori, cones, spheres and B-spline surfaces; a `$fn` set
+    on the call keeps them as facets.
+  - A radius that is too large, or blends that overlap, are errors with
+    a fix that names the largest size that fits; a failed call leaves
+    its child sharp, and an export of the model exits with an error, so
+    a script or an agent cannot ship a sharp part believing it rounded.
+  - The language server completes selector strings, explains them on
+    hover and applies the fixes; `check` reports each call, and MCP's
+    `measure` and `snapshot` take `fillet` to list or draw a call's
+    edges; MCP serves a fillet recipe; the apps and /try have a toggle.
+
+### Changed
+
+- `serve` advertises `fillet`.
+- Hover on a builtin's named argument shows that parameter
+  (`linear_extrude(scale = 2)` showed the `scale()` module).
+
+### Fixed
+
+- Exact export of offset outlines with round joins (slots and pockets)
+  places the joins' centres exactly, so blends and faces that touch them
+  reconstruct.
+- In exact STEP export, the cylinder or plane beside a tangent blend had
+  its area slightly wrong (about 5e-4); its edges on the face are now
+  accurate.
+
+
 ## 0.5.0
 
 NeoSCAD now extends OpenSCAD's language. The extensions are off by
