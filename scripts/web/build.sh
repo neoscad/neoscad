@@ -235,6 +235,15 @@ NeoSCAD project will provide it for three years from the date of this
 build, for no more than the cost of distribution.
 EOF
 
+# --- No local paths ---------------------------------------------------------
+# The bundle is published: nothing in it may name the builder's home
+# directory (scripts/web/remap-paths.sh maps the paths rustc writes).
+if leaks=$(grep -rlaF "$HOME/" "$out"); then
+    echo "error: the bundle contains local paths ($HOME/...):" >&2
+    echo "$leaks" | sed "s|^$out/|  |" >&2
+    exit 1
+fi
+
 # --- Archives and checksums ------------------------------------------------
 git archive --format=tar.gz --prefix="$name-source/" -o "$dist/$name-source.tar.gz" HEAD
 repro_tar "$dist/$name.tar.gz" "$dist" "$name"

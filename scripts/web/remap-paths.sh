@@ -7,7 +7,10 @@
 # root). `--remap-path-prefix` rewrites them to neutral prefixes, so the
 # module is the same whoever builds it and says nothing about their
 # machine. rustc applies the last matching mapping, so the most specific
-# prefixes come last. std's own paths are already /rustc/<hash>/.
+# prefixes come last. std's paths are /rustc/<hash>/ in the shipped
+# library, but rustc rewrites them to the toolchain's rust-src copy when
+# that component is installed (<home>/.rustup/toolchains/<name>/lib/
+# rustlib/src/rust/...), so the sysroot is mapped back to /rustc/src.
 #
 # The flags go into CARGO_ENCODED_RUSTFLAGS (separated by 0x1f), which
 # keeps a path with spaces as one argument, and extend any RUSTFLAGS or
@@ -25,6 +28,9 @@ neoscad_remap_paths() {
     local flags=()
     local target_abs
     target_abs=$(mkdir -p "$target_dir" && cd "$target_dir" && pwd)
+    local sysroot
+    sysroot=$(rustc --print sysroot)
+    flags+=("--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/src")
     flags+=("--remap-path-prefix=$root=/neoscad")
     flags+=("--remap-path-prefix=$cargo_home/registry/src=/cargo/registry/src")
     flags+=("--remap-path-prefix=$cargo_home/git/checkouts=/cargo/git/checkouts")
