@@ -250,3 +250,102 @@ each run's old figures in `grade_at_run` and its new grades in
 with the transcript, arrival times, calls, every STL version and its
 grade, and a copy of the run directory, and one line per eval in
 `progress/agent-eval/cad-index.jsonl`.
+
+### Progress snapshots and the hero image
+
+`run_cad.py` keeps, for every run, each version of the model as the
+agent wrote it, so a side-by-side can show how each condition's model
+came together and how long it took. `hero.py` turns that into a still
+for `og:image`/`twitter:image` and an animation.
+
+**What is captured** (`cad-<ts>/<run>/progress.json`, beside the run's
+other files). Every time is seconds since the run started on the
+harness's monotonic clock; nothing reads the wall clock.
+
+- `versions`: each STL version (as in the metrics above) with its time
+  (the watcher's first sight of the finished file; it polls every 0.5 s),
+  its `{part: copy}` state under `history/`, and the turn and output
+  tokens reached by then.
+- `sources`: each saved version of every `.scad` and `.py` file in the
+  run directory, copied to `sources/` by a second watcher (same poll), with
+  its non-blank line count. Files over 2 MB are noted, not copied.
+- `stream`: one point per assistant message as the stream-json line
+  arrived (the reader thread stamps each line): the message count so far
+  and output tokens so far. The stream carries no cost until its result
+  event, so cost is known only at the end (`final`).
+- `timing`: how exact each kind of time is, in words.
+
+The watchers only read the run directory; the agent sees nothing new.
+A failure writing `progress.json` is logged and does not fail the run.
+
+**Backfill** for runs recorded before this existed:
+
+    scripts/agent-eval/cad/hero.py backfill [cad-<ts> ...]
+
+reads `progress/agent-eval/` (`--src`) and writes
+`progress/agent-eval/hero/runs/<record>/<run>/` (`--out`). STL versions
+and their times come from the record (the newest regrade, whose version
+states are complete): these are the harness clock recorded during the
+run, as exact as live capture. Source versions are rebuilt by replaying
+the transcript's successful Write, Edit and MultiEdit calls, each timed
+by the arrival of its result line on the same clock (`arrivals.json`),
+so within the stream's buffering of the real write. Files changed by
+shell commands (`sed -i`, heredocs) are not seen: `source_replay` says,
+per file, whether the replayed text matches the run's saved final copy.
+A run without `arrivals.json` falls back on the events' own timestamps,
+and failing those on order only; `timing` says which applied.
+
+**Render**: `hero.py render --task T --neoscad PATH` renders every
+version of the selected runs with NeoSCAD's command line (one renderer
+for all three conditions, so their frames look alike): each part
+imported, coloured from the site's palette, orthographic from one
+fixed rotation (55, 0, 25), with one camera distance for every frame of
+the composite. That distance comes from the largest bounding-box
+diagonal among the task's reference solution (`refs/`) and the selected
+runs' final models: the specs leave some sizes open, so a distance from
+the reference alone cut larger models off, while a diagonal bounds every
+projection of its box. Each frame is centred on its own model's bounding
+box, since agents put parts at different origins. Every `neoscad` runs
+under `guard.run` (2 GB, 300 s), and `hero.py` stops itself above 2 GB.
+A version with no triangles, a missing STL or a failed render gets a
+placeholder frame that says which.
+
+**Representative run** (`progress.representative`, tested in
+`test_progress.py`): per task and condition, among the passing runs
+the one with the median wall time; with no passing run, the median of all
+runs. An even count takes the lower median, ties go to the smaller run
+id, and pass comes from the record's newest regrade. No run is chosen
+by hand. The pool is every record found; pass `--records cad-a,cad-b`
+to compare like with like (`hero.py` warns when the selected runs differ
+in model or effort). The task is the caller's choice (`--task`), one
+composite per task.
+
+**Compose**: `hero.py compose --task T` writes, under the output
+directory:
+
+- `hero-<task>.png`, 1200 × 630 (the `og:image` size): a column per
+  condition with its name, its wall time and whether its final model
+  passes, the final render large, three smaller frames at shared clock
+  times (a quarter, half and three quarters of the slowest selected
+  run), and a bar on one axis from 0 to that run's time, with ticks for
+  STL versions (tall) and source writes (short);
+- `hero-<task>.mp4` (H.264, 1200 × 630, 15 fps, a 12 s sweep and a 3 s
+  hold; `--duration`, `--hold`, `--fps`), or an animated GIF without
+  ffmpeg: every column on one linear clock with a running timer, each
+  freezing at its run's end;
+- `hero-<task>.json`: the runs picked and the rule, every candidate, the
+  timing notes, the camera and the renderer's version.
+
+Composition needs Pillow, which the CadQuery venv has; under another
+Python, `hero.py` re-executes itself with the venv's interpreter
+(`--pillow-python` to choose one). Fonts are the vendored Liberation
+Sans and Mono; colours are the site's dark theme. `hero.py all --task T`
+runs backfill, render and compose in turn. The frames are STL exports:
+an agent that previews through its own tool and exports late shows
+"no STL yet" (with its source edits so far) until its first export.
+
+Everything `hero.py` writes is a result: it goes to `progress/` (or
+`results/` with `--out`) and is never committed.
+
+    scripts/agent-eval/cad/test_progress.py      # selection rule, time axis, capture (synthetic runs)
+    scripts/agent-eval/cad/hero.py all --task T2 --neoscad target/release/neoscad

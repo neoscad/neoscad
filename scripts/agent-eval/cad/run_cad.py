@@ -17,9 +17,10 @@ process is under guard.py (2 GB per geometry process, 45 min per run).
 
 Results: progress/agent-eval/cad-<ts>.json (a new file per eval, rewritten
 after each run so a crash keeps what finished), transcripts, sources, STL
-versions and grades under progress/agent-eval/cad-<ts>/, one summary line
-in progress/agent-eval/cad-index.jsonl. summarize.py turns a record into
-the post's markdown tables.
+versions and grades under progress/agent-eval/cad-<ts>/ (with each run's
+progress.json: every model version with its time, for hero.py), one
+summary line in progress/agent-eval/cad-index.jsonl. summarize.py turns a
+record into the post's markdown tables.
 """
 
 import argparse
@@ -40,6 +41,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE))
 import guard  # noqa: E402
+import progress  # noqa: E402
 
 SPEC = json.loads((HERE / "tasks.json").read_text())
 OPENSCAD = "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD"
@@ -47,6 +49,10 @@ VENV = ROOT / ".cache" / "agent-eval" / "cadquery-venv"
 MCP_TOOLS = ["evaluate", "render", "snapshot", "check", "measure", "test", "format", "docs"]
 BASE_TOOLS = ["Bash", "Read", "Write", "Edit"]
 MAX_KEEP_BYTES = 200 * 2**20  # never copy a file bigger than this out of a run
+# Source versions for progress.json: the model's .scad and .py files. A
+# source over 2 MB is not hand-written; it is logged but not copied.
+SOURCE_GLOBS = tuple(f"*{e}" for e in progress.SOURCE_EXTS)
+MAX_SOURCE_BYTES = 2 * 2**20
 
 
 def log(msg):
@@ -196,10 +202,14 @@ def command(task, cond, workdir, args, keep, aux=None):
 
 class Watcher:
     """Snapshots every STL written in the run directory, with the time it
-    appeared, so versions can be counted and graded after the run."""
+    appeared, so versions can be counted and graded after the run. With
+    other `globs` it keeps the sources' versions the same way (for
+    progress.json and the hero image); `max_bytes` caps what is copied."""
 
-    def __init__(self, workdir, history, t0):
+    def __init__(self, workdir, history, t0, globs=("*.stl",), max_bytes=MAX_KEEP_BYTES):
         self.workdir, self.history, self.t0 = workdir, history, t0
+        self.globs, self.max_bytes = globs, max_bytes
+        self.history.mkdir(parents=True, exist_ok=True)
         self.events = []
         self.seen = {}
         self.pending = {}
@@ -209,7 +219,9 @@ class Watcher:
 
     def _scan(self):
         now = time.monotonic() - self.t0
-        for p in self.workdir.rglob("*.stl"):
+        for p in (q for g in self.globs for q in self.workdir.rglob(g)):
+            if "__pycache__" in p.parts:
+                continue
             try:
                 st = p.stat()
             except OSError:
@@ -224,7 +236,7 @@ class Watcher:
                 continue
             first_seen = self.pending.pop(rel)[1]
             self.seen[rel] = key
-            if st.st_size > MAX_KEEP_BYTES:
+            if st.st_size > self.max_bytes:
                 self.events.append({"t": round(first_seen, 2), "path": rel, "size": st.st_size, "skipped": "too big"})
                 continue
             data = p.read_bytes()
@@ -495,6 +507,36 @@ def copy_tree(src, dst):
             shutil.copy2(f, t)
 
 
+def write_progress(keep, task, cond, rep, parts, lines, vers, source_events, wall, timed_out, passed):
+    """progress.json beside the run's other files: every STL version and
+    every source version with its time on the harness clock, and the
+    turn and output-token counts at each (hero.py renders and composes
+    them). A failure here is logged and never fails the run: the record
+    and its grades matter more than the picture."""
+    try:
+        sources = []
+        for e in sorted(source_events, key=lambda e: e["t"]):
+            if "copy" not in e:
+                sources.append({"t": e["t"], "path": e["path"], "copy": None, "via": "watcher",
+                                "skipped": e.get("skipped")})
+                continue
+            text = (keep / "sources" / e["copy"]).read_text(errors="replace")
+            sources.append({"t": e["t"], "path": e["path"], "copy": f"sources/{e['copy']}", "via": "watcher",
+                            "lines": sum(1 for line in text.splitlines() if line.strip())})
+        rec = progress.build_progress(
+            task=task, condition=cond, rep=rep, parts=parts, wall_s=round(wall, 2), timed_out=timed_out,
+            passed=passed, versions=vers, sources=sources, points=progress.stream_points(lines),
+            stl_root="history", record=keep.parent.name,
+            timing={"source": "live",
+                    "versions": "harness clock: the watcher's first sight of the finished file "
+                                "(polled every 0.5 s)",
+                    "sources": "harness clock: the watcher's first sight of the saved file (polled every 0.5 s)",
+                    "stream": "harness clock: arrival of each stream-json line"})
+        (keep / "progress.json").write_text(json.dumps(rec, indent=1))
+    except Exception as e:  # noqa: BLE001 -- see the docstring
+        log(f"  progress.json not written: {type(e).__name__}: {e}")
+
+
 def run_one(task, cond, rep, args, rundir):
     keep = rundir / f"{task}-{cond}-{rep}"
     (keep / "history").mkdir(parents=True, exist_ok=True)
@@ -512,6 +554,7 @@ def run_one(task, cond, rep, args, rundir):
                          text=True, start_new_session=True, env=env)
     g = guard.Guard(p.pid, args.mem_limit_mb, exempt=(os.path.realpath(args.claude),), exempt_limit_mb=4096, log=log)
     w = Watcher(workdir, keep / "history", t0)
+    sw = Watcher(workdir, keep / "sources", t0, globs=SOURCE_GLOBS, max_bytes=MAX_SOURCE_BYTES)
 
     def read():
         for line in p.stdout:
@@ -533,6 +576,7 @@ def run_one(task, cond, rep, args, rundir):
     reader.join(timeout=10)
     g.stop()
     w.stop()
+    sw.stop()
     transcript.close()
     stderr.close()
     (keep / "arrivals.json").write_text(json.dumps([t for t, _ in lines]))
@@ -566,6 +610,7 @@ def run_one(task, cond, rep, args, rundir):
     shutil.rmtree(aux, ignore_errors=True)
     s = acc["summary"]
     (keep / "calls.json").write_text(json.dumps(acc["calls"], indent=1))
+    write_progress(keep, task, cond, rep, parts, lines, vers, sw.events, wall, timed_out, final.get("pass"))
     run = {
         "task": task, "condition": cond, "rep": rep,
         "pass": final.get("pass"), "clean": final.get("clean"),
