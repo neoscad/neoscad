@@ -903,7 +903,7 @@ Person-weeks, wide bands, in the audit's terms (its stage 4 estimate was
 | F4 | Surfaces: LSP (hover, completion, code actions), MCP recipe and docs, the apps' and /try's toggle, a user reference page (as `docs/step-export.md` is for exact export), editor colouring | 1–2 |
 | F5 (optional) | Blends between curved surfaces with no common axis (spine as the intersection of offset surfaces, a faceted pipe, or B-spline surfaces later), unequal-radius and mixed corners, automatic two-pass calls | 3–6, decided after F3 |
 | F5a | Mixed corners as two passes in one call, selection of the second pass by provenance, spindle tori, corpus families for corners, spheres, rotations, nested calls (built: 15.6) | — |
-| F5b | Exact blends between curved surfaces with no common axis: spine marching, B-spline surfaces in `meshbrep` (planned: 15.7; phase 1, B-spline surfaces in `meshbrep`, built: 15.8; phase 2, the spine, tools, checks, export, goldens and corpus, built: 15.9) | 4–6 |
+| F5b | Exact blends between curved surfaces with no common axis: spine marching, B-spline surfaces in `meshbrep` (planned: 15.7; phase 1, B-spline surfaces in `meshbrep`, built: 15.8; phase 2, the spine, tools, checks, export, goldens and corpus, built: 15.9; fix pass: 15.10) | 4–6 |
 
 F0–F4: 9–13.5 person-weeks.
 
@@ -1965,6 +1965,92 @@ rounded and chamfered exactly.
   rod) at 1, 2 and 8 threads and cold and warm caches; wasm-check's
   `fillet-curved-step` (a tee and a cross hole) hashes the same in node
   as natively (15 faces, all exact, 1.67 MB).
+
+### 15.10 Stage F5b fix pass
+
+The curved family's 34 failures of the full corpus (seed 2) were five
+problems, all in reconstruction and the export rather than the tools.
+
+- **Time-outs and interrupted export renders (14) were slow failures.**
+  Nearly all of a tiny blend's export went into fitting edges that could
+  not be fitted (a tool's slivers attributed to the wrong pair of faces):
+  each doubled to 4,096 points, every point a solve whose every step
+  projected onto the patch three times and, at the projection's rounding,
+  ran all 60 steps. Now (`meshbrep`) the solver takes the value and the
+  gradient from one projection (`Surf::f_grad`, the same bits), stops a
+  solve on a patch once the residual has not halved for four steps and
+  keeps the best point (`solve.rs`; analytic solves are unchanged, since
+  at a corner of nearly tangent planes and cylinders the point slides
+  2e-6 while the residual crawls from 1e-13 to 1e-15, and stopping it
+  left a box's corner off its edges), and gives up an edge fit on a patch
+  after three doublings that do not halve its deviation, or once it is
+  larger than the chain (`edges.rs`). A tee's r 0.15 blend on an r 8 rod
+  exports in 2.4 s instead of 19.7 s, to the same bytes; every former
+  time-out finishes in 2 to 9 s.
+- **A seam through a hair from a vertex** (5 of the time-outs, once
+  they finished): a hole's wall carries both rims' blends, and the seam
+  chosen through a vertex of one rim passed 2e-9 from a vertex of the
+  other, splitting off an edge the validator calls degenerate. A seam
+  that would pass within 1e-6 of the model's size from a vertex now
+  costs more than any other candidate (`seams.rs`).
+- **Partly faceted results (15)**: 13 were files that passed every
+  check with slivers of the tool beside the blend written as facets: lens
+  faces of two edges where the contact runs steeply across the facets of
+  a rod or ball with a close radius. At twice or four times the segments
+  the polygons are shallow enough: an export with fitted blends whose
+  first attempts leave faces as facets now tries the finer renders and
+  writes the first that is all exact, or the held file
+  (`geom::exact::export_step`). The other two (0671, 1623) failed to
+  reconstruct at every resolution and fell back to facets in part.
+- **OCCT's volumes (4)**: a reference integration
+  (`tests/sweep.rs`, `corpus_reference_volumes`) puts ours right on each
+  (0382 to 5e-12, 1405 6.8e-10, 1056 4.7e-9). On 1405, 1746 and 1056 the
+  files were also poor: edges fitted through points the solves left
+  wandering, which OCCT read with tolerances raised to 5e-5; with the
+  best points kept, OCCT's adaptive volumes of 1746 and 1056 are within
+  2e-9 of ours, and its Gauss–Kronrod one of 1405 within 7e-10. On 0382
+  both of OCCT's integrators are off (2.0e-6 and 7.7e-6), and its
+  Gauss–Kronrod integration split at the knots (`VolumePropertiesGK`
+  with spans) agrees with ours to 4e-12: `oracle/check.cpp` reports it
+  as `volume_gk`, and the corpus, the goldens' read-back and
+  `tests/sweep.rs` take the best of the three.
+- **The mesh cross-check (1, and 1 more once 1623 reconstructed)**:
+  chamfers on a ball, right to 1e-10 by the reference integration, whose
+  corrected mesh volume missed the B-rep's by 1.0 to 1.3 times the
+  tolerance at every resolution. The check's projection onto a patch
+  was clamped to its domain, so mesh points just past a chamfer's
+  contact side measured no gap to the ball, and the strip bound came out
+  a fifth of its size.
+  It now projects onto the patch as its end spans continue it
+  (`spline::Evaluator::project_extended`, as reconstruction's implicit
+  form does).
+
+**STEP size**: the growth of tangent-blend files in 15.9 was not circles
+on planes (planes have no parameter-space curves) but box corners' sphere
+patches, whose three quarter circles were curves in longitude and
+latitude needing 129 points each to follow the edge to 1e-7. A sphere
+face none of whose circles can be parallels is now framed with its poles
+square to its mean direction and one circle a meridian (a segment): the
+wasm-check plate with straight and rim fillets is 198 KB (325 KB before,
+137 KB before 15.9). Predicting the count from the cubic's fourth-power
+error instead of doubling made one corner's face invalid to OCCT 8.0.1
+(seed 2's 1973, `BadOrientationOfSubshape` with 46 and 41 points where
+65 passed, for no reason found) and is not used.
+
+**Results** (with OCCT read-back). The full set, 2,000 models (seed 2):
+1,724 of 1,778 supported (97.0%; before, 1,691 of 1,769 and 9 killed),
+none killed, 2 mesh failures (3). `curved`: 263 of 264 (99.6%; 87.1%),
+249 built and 14 fixed. Every other family has the same outcome on every
+model as before: `plate` 385 of 385, `box` 214 of 214, `spindle` 123 of
+123, `rounded` 168 of 170, `bracket` 169 of 171, `mixed` 183 of 192,
+`nested` 70 of 77, `rotated` 82 of 89, `sphere` 67 of 93. The default
+300 (seed 1): 250 of 259 (96.5%; 247 of 257), `curved` 36 of 37.
+
+**Left**: seed 2's 0671 (a d 0.64 chamfer of both rims of a hole at a
+slant through a plate) leaves slivers of the tool on the plate's faces at
+every resolution; seed 1's 0226 (an r 0.69 fillet of a rod in a ball)
+keeps one face of six as facets at four times the segments. Both are
+reported as partly faceted, not written wrong; `docs/followups.md`.
 
 ## 16. Test plan
 

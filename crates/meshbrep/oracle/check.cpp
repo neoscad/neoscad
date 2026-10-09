@@ -86,6 +86,15 @@ static void report(const char *file, const TopoDS_Shape &s) {
   const double vol_err = BRepGProp::VolumeProperties(s, vp, 1e-9);
   BRepGProp::SurfaceProperties(s, sp, 1e-9);
   BRepGProp::VolumeProperties(s, vfix);
+  // And Gauss-Kronrod integration split at the knots of B-spline faces
+  // ("volume_gk"): both of the above misjudge some blends between curved
+  // faces by 1e-6 to 1e-5 (a chamfer of a rod through a plate at a slant,
+  // fillet corpus seed 2 model 382: adaptive 2.0e-6 and fixed-order
+  // 7.7e-6 off a reference integration of the solid that this one and
+  // meshbrep's own volume match to 5e-12). Integrating across a knot
+  // treats the jump in the patch's derivatives as smooth.
+  GProp_GProps vgk;
+  BRepGProp::VolumePropertiesGK(s, vgk, 1e-10, false, true);
   // And by OCCT's own fine triangulation of the faces, independent of
   // both integrators, when $MESH_DEFLECTION is set (fine deflections need
   // gigabytes near sphere poles; 0 otherwise).
@@ -129,9 +138,9 @@ static void report(const char *file, const TopoDS_Shape &s) {
     if (ef(i).Extent() == 1 && !BRep_Tool::IsClosed(e, TopoDS::Face(ef(i).First()))) free_edges++;
   }
   printf("{\"file\":\"%s\",\"valid\":%s,\"solids\":%d,\"shells\":%d,\"closed_shells\":%d,"
-         "\"volume\":%.10f,\"volume_err\":%.2g,\"volume_fixed\":%.10f,\"volume_mesh\":%.10f,\"area\":%.10f,\"faces\":%d,\"edges\":%d,\"free_edges\":%d,"
+         "\"volume\":%.10f,\"volume_err\":%.2g,\"volume_fixed\":%.10f,\"volume_mesh\":%.10f,\"volume_gk\":%.10f,\"area\":%.10f,\"faces\":%d,\"edges\":%d,\"free_edges\":%d,"
          "\"max_tol\":%.3g,\"face_types\":{",
-         file, valid ? "true" : "false", solids, shells, closed_shells, vp.Mass(), vol_err, vfix.Mass(), vmesh.Mass(), sp.Mass(),
+         file, valid ? "true" : "false", solids, shells, closed_shells, vp.Mass(), vol_err, vfix.Mass(), vmesh.Mass(), vgk.Mass(), sp.Mass(),
          faces.Extent(), edges.Extent(), free_edges, maxtol);
   bool first = true;
   for (auto &kv : ft) {

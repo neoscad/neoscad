@@ -473,6 +473,18 @@ impl Spline {
         self.normal(u, v)
     }
 
+    /// [`Spline::f`] and [`Spline::grad`] from one projection. Their
+    /// values are the same bits as the two calls give: both evaluate the
+    /// same derivatives at the same parameters. Solvers that need both
+    /// at a point use this, since the projection is nearly all of the
+    /// cost and was made twice (or three times) per step before.
+    pub fn f_grad(&self, p: V) -> (f64, V) {
+        let (u, v) = self.project(p, true);
+        let d = self.ders(u, v, 1);
+        let n = d[1][0].cross(d[0][1]).norm();
+        ((p - d[0][0]).dot(n), n)
+    }
+
     /// Whether `o` is the same surface: the same degrees and knots
     /// (within 1e-12 relative), weights within 1e-12 relative, and control
     /// points within `tol`.

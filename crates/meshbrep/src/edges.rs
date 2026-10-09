@@ -306,12 +306,31 @@ pub(crate) fn make_edge(
     // Densify until the curve is within the fit tolerance of both. The
     // number of points depends on the curve, not on the mesh: a cubic
     // interpolant's error falls with the fourth power of the spacing.
+    //
+    // On a B-spline face, a fit that is not converging is given up early:
+    // three doublings in a row that do not halve the deviation, or a
+    // deviation larger than the chain itself once the points are dense.
+    // Those are a pair that does not meet along the chain (faces nearly
+    // tangent with a gap, or a chain attributed to the wrong pair), whose
+    // points land anywhere; carrying them to 4,096 points, each a solve
+    // projecting onto the patch, cost seconds per edge on a fitted blend,
+    // and the edge fails validation either way. Analytic pairs are cheap
+    // to carry on, and keep their results.
+    let fitted = matches!(s, Surf::Spline(_)) || matches!(t, Surf::Spline(_));
+    let length: f64 = chain.windows(2).map(|w| (w[1] - w[0]).len()).sum();
     let mut n = 8;
+    let mut last = f64::INFINITY;
+    let mut stalled = 0;
     loop {
         let curve = fit(s, t, chain, n);
         let range = [0.0, 1.0];
         let dev = deviation(&curve, range, s, t);
         if dev < fit_tol || n >= 4096 {
+            return Built { curve, range, dev };
+        }
+        stalled = if dev > 0.5 * last { stalled + 1 } else { 0 };
+        last = dev;
+        if fitted && (stalled >= 3 || (n >= 64 && dev > length)) {
             return Built { curve, range, dev };
         }
         n *= 2;

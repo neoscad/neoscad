@@ -1008,7 +1008,10 @@ fn occt_reads_curve_blends_back() {
     let mut failures = Vec::new();
     for (line, (name, volume)) in lines.iter().zip(&ours) {
         let rel = |x: f64| ((x - volume) / volume).abs();
-        let best = rel(field(line, "volume")).min(rel(field(line, "volume_fixed")));
+        // The best of OCCT's three integrators (`oracle/check.cpp`).
+        let best = rel(field(line, "volume"))
+            .min(rel(field(line, "volume_fixed")))
+            .min(rel(field(line, "volume_gk")));
         eprintln!("{name}: OCCT {line}");
         let ok = line.contains("\"valid\":true")
             && field(line, "solids") == 1.0
@@ -1671,3 +1674,65 @@ fn the_reference_integration_matches_pappus() {
         );
     }
 }
+
+/// The reference volumes of fillet corpus models (`conformance
+/// fillet-corpus`, seed 2) whose exports OCCT read back with volumes 1e-6
+/// to 1e-4 off ours, or whose export's mesh cross-check refused them
+/// (`docs/fillets.md`, 15.10). Each is the solid [`solids`] integrates,
+/// against the volume NeoSCAD's export of it measures: ours agree to
+/// 5e-9 or better, where OCCT's adaptive and fixed-order integrators were
+/// 2e-6 and 8e-6 off on 0382 (its Gauss-Kronrod one split at the knots,
+/// `volume_gk`, agrees). A rotation about z after the slant
+/// (`rotate([a, 0, b])`) leaves a rod through a plate's volume as
+/// `rotate([a, 0, 0])` has it, as long as the rod's ends clear the
+/// plate's sides.
+#[test]
+fn corpus_reference_volumes() {
+    use solids::Blend::{Chamfer, Fillet};
+    use solids::*;
+    let cross = |big, len, small, x0, y0, r| {
+        // Only the top rim is selected (`>z`): by symmetry, half of both
+        // rims' blends on the base.
+        let both = cross_hole(big, len, small, x0, y0, Fillet(r));
+        0.5 * (cross_hole_base(big, len, small, y0) + both)
+    };
+    let cases = [
+        (
+            "0382",
+            oblique(42.5, 49.72, 6.82, 3.46, 37.99, 35.97, true, Chamfer(1.58)),
+            EXPORT_0382,
+        ),
+        (
+            "1405",
+            oblique(56.81, 36.84, 4.34, 3.24, 35.54, 33.62, true, Fillet(1.47)),
+            EXPORT_1405,
+        ),
+        (
+            "1056",
+            cross(6.39, 20.89, 3.72, 0.15, -0.57, 0.19),
+            EXPORT_1056,
+        ),
+        (
+            "1623",
+            ball_rod(5.68, 1.46, 2.1, 8.23, Chamfer(0.14)),
+            EXPORT_1623,
+        ),
+        (
+            "1643",
+            ball_rod(5.03, 1.57, 0.63, 10.55, Chamfer(0.58)),
+            EXPORT_1643,
+        ),
+    ];
+    for (id, reference, export) in cases {
+        let rel = (export - reference).abs() / reference;
+        eprintln!("{id}: reference {reference:.9}, export {export:.9}, rel {rel:.1e}");
+        assert!(rel < 1e-8, "{id}: {rel:.1e}");
+    }
+}
+
+// The volumes NeoSCAD's STEP export of each model measured.
+const EXPORT_0382: f64 = 15500.382669542634;
+const EXPORT_1405: f64 = 10049.675369127259;
+const EXPORT_1056: f64 = 2150.9058992366818;
+const EXPORT_1623: f64 = 788.2012303265576;
+const EXPORT_1643: f64 = 578.7930124048897;

@@ -959,13 +959,16 @@ fn judge(run: &Run, occt_on: bool) -> Option<(String, String)> {
         };
         let num = |k: &str| o[k].as_f64().unwrap_or(f64::NAN);
         let ours = e["volume"].as_f64().unwrap_or(f64::NAN);
-        // The better of OCCT's two integrators: each misjudges some
+        // The best of OCCT's three integrators: each misjudges some
         // B-spline patches (its adaptive one is 4e-6 off on a ruled
         // chamfer between two cylinders whose fixed-order volume agrees
-        // with ours to 1e-8; `crates/meshbrep/tests/bspline.rs` reads
-        // them the same way).
+        // with ours to 1e-8; both are 2e-6 and more off a chamfer of a
+        // rod through a plate at a slant, seed 2's model 382, where the
+        // Gauss-Kronrod one split at the knots agrees with ours and with a
+        // reference integration to 5e-12; `oracle/check.cpp`). An older
+        // oracle without `volume_gk` gives NaN there, which `min` skips.
         let off = |k: &str| (num(k) - ours).abs() / ours.abs().max(1e-300);
-        let rel = off("volume").min(off("volume_fixed"));
+        let rel = off("volume").min(off("volume_fixed")).min(off("volume_gk"));
         let ok = o["valid"].as_bool() == Some(true)
             && num("free_edges") == 0.0
             && num("shells") == num("closed_shells")

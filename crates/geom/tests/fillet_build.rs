@@ -189,12 +189,13 @@ fn occt_reads_the_golden_cases_back() {
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(f64::NAN)
         };
-        // The better of OCCT's two integrators: each misjudges some
-        // B-spline patches (`docs/fillets.md`, 15.8). On `curved_ball_rod`
-        // the adaptive one is 7.3e-6 off while estimating its error at
-        // 7e-10, and the fixed-order one agrees to 7e-9.
-        let rel =
-            ((num("volume") - want).abs() / want).min((num("volume_fixed") - want).abs() / want);
+        // The best of OCCT's integrators: each misjudges some B-spline
+        // patches (`docs/fillets.md`, 15.8 and 15.10). On
+        // `curved_ball_rod` the adaptive one is 7.3e-6 off while
+        // estimating its error at 7e-10, and the fixed-order one agrees
+        // to 7e-9; `volume_gk` is the Gauss-Kronrod one split at knots.
+        let off = |k: &str| (num(k) - want).abs() / want;
+        let rel = off("volume").min(off("volume_fixed")).min(off("volume_gk"));
         let ok = field(line, "valid") == Some("true")
             && num("solids") == 1.0
             && num("free_edges") == 0.0

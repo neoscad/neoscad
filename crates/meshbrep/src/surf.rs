@@ -212,6 +212,15 @@ impl Surf {
         }
     }
 
+    /// [`Surf::f`] and [`Surf::grad`] at once, the same values: a
+    /// B-spline face projects `p` once for both.
+    pub fn f_grad(&self, p: V) -> (f64, V) {
+        match *self {
+            Surf::Spline(ref s) => s.f_grad(p),
+            _ => (self.f(p), self.grad(p)),
+        }
+    }
+
     /// The axis (point, unit direction) of a surface of revolution with a
     /// fixed axis.
     pub fn axis(&self) -> Option<(V, V)> {

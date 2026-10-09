@@ -291,6 +291,32 @@ fn base_param(topo: &Topo, f: usize) -> Param {
                 cands.extend(counts.iter().filter(|x| x.1 == k).map(|x| x.0));
             }
             cands.push(v(0.0, 0.0, 1.0));
+            // Then axes square to the face's mean direction, so that both
+            // poles are as far from it as they can be, each also square to
+            // one bounding circle's normal: a great circle square to the
+            // axis is a meridian (constant u), whose parameter-space curve
+            // is a segment. A box corner's patch, bounded by three quarter
+            // circles through each other's poles, had its pole near or
+            // inside it under the fixed axes below, and its circles needed
+            // a hundred points or more each to follow longitude and
+            // latitude there (most of a rounded box's STEP file).
+            let mut mean = V::default();
+            for &(e, _) in face.loops.iter().flatten() {
+                let ed = &topo.edges[e];
+                for p in curve::sample(&ed.curve, ed.range, 8) {
+                    mean = mean + (p - c).norm();
+                }
+            }
+            if mean.len() > 1e-6 {
+                let m = mean.norm();
+                for &(n, _) in &counts {
+                    let z = m.cross(n);
+                    if z.len() > 0.1 {
+                        cands.push(z.norm());
+                    }
+                }
+                cands.push(m.perp());
+            }
             // Then axes no model aligns with by accident.
             for d in [
                 [1.0, 2.0, 3.0],
@@ -750,6 +776,22 @@ fn frames_and_seams_from(topo: &mut Topo, scale: f64, at: &mut usize) -> Result<
                     }
                     if !xs[0].at_start && !movable(topo, lp) {
                         cost += 1;
+                        // A crossing a hair from a vertex of the loop
+                        // would split off an edge too short to be one
+                        // (a ring blend's two patches meet a hole's wall
+                        // at vertices nearly opposite those of the other
+                        // rim, and a seam through one passed 2e-9 from the
+                        // other, an edge the validator calls degenerate):
+                        // any other meridian is better.
+                        let (e, fwd) = lp[xs[0].ci];
+                        let p = curve::eval(&topo.edges[e].curve, xs[0].t);
+                        let ends = [topo.start((e, fwd)), topo.start((e, !fwd))];
+                        if ends
+                            .iter()
+                            .any(|&v| (topo.verts[v] - p).len() < 1e-6 * scale)
+                        {
+                            cost += 1000;
+                        }
                     }
                     chosen[i] = Some(xs[0]);
                 } else if !xs.is_empty() {

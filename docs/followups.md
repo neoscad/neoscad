@@ -2785,13 +2785,13 @@ axis as exact B-spline surfaces. What they leave:
 - **Tiny curved blends against deep facets**: the swept tool is
   conformed to the faces' polygons within a band of four times their
   depth; a blend smaller than about twice that depth cannot follow them,
-  and the export retries at four times the segments, then writes facets.
-  In the full corpus (seed 2) curved blends under 0.25 succeed in 55 of
-  71 models, against 118 of 126 at 0.5 or more; the 9 timeouts (60 s)
-  and 5 interrupted export renders are blends of 0.11 to 0.29. Refusing
-  a curved blend under about twice its faces' polygon depth, with a
-  hint, or retrying at finer segments sooner, would turn these into
-  diagnostics.
+  and the export retries at twice and four times the segments (also when
+  a first attempt leaves slivers as facets), then writes facets. Since
+  the F5b fix pass (`docs/fillets.md` 15.10) every curved blend of the
+  full corpus under 0.5 exports exact, the smallest in 2 to 9 s (the 14
+  time-outs and interrupted renders before were slow failures, not slow
+  successes). What is left of the class is the retry's cost: three
+  export renders and reconstructions for a tiny blend.
 - **Fine-resolution reconstruction of curved blends is slow**: at `$fa =
   1; $fs = 0.05` a tee's blend makes a mesh of about a hundred thousand
   triangles, and reconstruction (projection onto the B-spline patches
@@ -2803,37 +2803,44 @@ axis as exact B-spline surfaces. What they leave:
   fitted to 1e-9 of the edge's size with up to 8,193 points a piece, so
   a tee and a cross hole write 1.7 MB. Fitting to the export tolerance,
   or knot removal, would shrink it.
-- **Exact pcurves of circles on planes**: since F5b phase 2 a
-  parameter-space curve along a tangent contact must stay on the edge
-  as well as on the other face, which the cubic fit of a circle meets
-  only with many points (the wasm-check plate with straight and rim
-  fillets went from 137 KB to 325 KB). A rational quadratic circle in
-  the plane's parameters is exact with nine control points.
-- **Large curved blends disagree with OCCT's volume**: some exports
-  that OCCT reads back valid have OCCT volumes 1e-5 to 1e-4 off ours,
-  and OCCT's two integrators disagree with each other by as much
-  (`--set curved`, seed 1: 0083, a chamfer of 5.03; seed 2 of the full
-  set: 0382, 1405, 1746, blends of 1.5 to 2.6 on oblique rods and a
-  cone on a rod, and 1056, a 0.19 fillet whose file has tolerances of
-  9e-6). Not explained yet: a patch OCCT integrates badly, or a fold
-  the checks miss. A reference integration of one of them
-  (`crates/meshbrep/tests/sweep.rs`'s) would tell.
-- **Curved blends that export partly as facets**: of the full set's
-  curved models (seed 2), 15 do: 7 tees and cones on rods (several with
-  close radii, 6.45 on 5.1, 6.55 on 4.22), 6 rods in balls, 2 holes
-  through a plate turned about two axes, at sizes 0.12 to 0.92 (4 of
-  them under 0.25, the class above). The contact runs steeply across
-  the polygons' facets there; which step loses the face is not yet
-  diagnosed. One chamfer on a ball (1643) exports with a volume 9e-7
-  off its mesh's, past the cross-check's tolerance.
+- **Parameter-space curves of a box corner's sphere patch**: since F5b
+  phase 2 a parameter-space curve along a tangent contact must stay on
+  the edge as well as on the other face. The growth this caused (the
+  wasm-check plate with straight and rim fillets, 137 KB to 325 KB) was
+  the corners' quarter circles in longitude and latitude, not circles on
+  planes (which have no parameter-space curves). The fix pass frames
+  such a patch with one circle a meridian (a segment; 198 KB); the other
+  two still take 65 points each. A frame with the pole at the corner's
+  vertex would make all three iso-lines, but needs a degenerate edge at
+  the pole, which reconstruction does not make. Predicting the point
+  count from the cubic's error instead of doubling made one corner face
+  invalid to OCCT (seed 2's 1973, unexplained) and is not used.
+- **OCCT misintegrates some B-spline patches**: both its adaptive and
+  fixed-order volume integrators can be 1e-6 to 1e-5 off a blend patch
+  (seed 2's 0382, a chamfer of a rod through a plate at a slant, where a
+  reference integration and ours agree to 5e-12). The oracle now also
+  reports `volume_gk` (Gauss–Kronrod split at knots), which agreed on
+  every case tried, and the checks take the best of the three. Not
+  reported to OCCT; a minimal file reproducing it would be the report.
+- **Curved blends that export partly as facets**: after the F5b fix
+  pass, two corpus models: seed 2's 0671 (a d 0.64 chamfer of both rims
+  of a hole through a plate turned about two axes), whose tool leaves
+  slivers on the plate's top and bottom faces at every resolution (the
+  ruled patch meets the plane at an angle, and the tool's sides stand
+  within the polygon's depth of it), and seed 1's 0226 (an r 0.69 fillet
+  of a rod in a ball), one face of six as facets even at four times the
+  segments. The others of this class were lens-shaped slivers a finer
+  render cures, which the export now tries (`docs/fillets.md` 15.10).
 - **B-spline faces are slow to reconstruct** (F5b phase 1): every
   implicit evaluation projects onto the patch (a seed search and Newton),
-  and corner solving and edge fitting evaluate thousands of times, so
-  the B-spline cases of `crates/meshbrep/tests/bspline.rs` take 4 to
-  60 ms against under 1 ms for their analytic counterparts. Warm starts
-  (the previous parameters along a chain), fewer, coarser seeds for
-  small patches, or caching f and its gradient per point would cut it
-  before a model has dozens of blends.
+  and corner solving and edge fitting evaluate thousands of times. The
+  fix pass made a solve's step one projection instead of three, stops a
+  solve on a patch at its rounding instead of after 60 steps, and gives
+  up non-converging edge fits early (a tiny tee's export: 19.7 s to
+  2.4 s), but a patch is still far slower than an analytic face. Warm
+  starts (the previous parameters along a chain) or fewer, coarser seeds
+  for small patches would cut it further; both change results in their
+  last digits, so they need the determinism tests' attention.
 - **A B-spline patch's crossing sides are fitted**, not taken as its
   sides (F5b phase 1): where a side lies on a neighbour that it crosses
   (a rational quarter cylinder cut by the planes its arcs lie in), the

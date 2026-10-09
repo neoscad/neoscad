@@ -287,6 +287,24 @@ with its outline) closes.
   chain's length), measured after moving it onto the other face; and a
   corner where contact sides of different patches meet is taken where
   they meet.
+- `spline::Evaluator::project_extended`: projection that may run a
+  little past the patch's sides onto the surface its end spans continue
+  (what reconstruction's implicit form uses), for measuring how far
+  points beside a side stand off the patch.
+- Reconstruction of B-spline faces is several times faster: the corner
+  and edge solver projects once per step for both the value and the
+  gradient, stops (on a patch only) once the residual stops halving and
+  keeps the best point, and an edge fit on a patch that does not
+  converge is given up after three doublings without progress. Points
+  that solves left wandering at the projection's rounding are now the
+  best ones found, so fitted edges change in their last digits.
+- A sphere face none of whose bounding circles can be parallels (a box
+  corner's patch) is framed with its poles square to the face and as
+  many bounding circles as possible meridians, whose parameter-space
+  curves are segments: a rounded box's STEP file shrinks (a plate's
+  straight and rim fillets: 325 KB to 198 KB). A periodic face's seam
+  avoids passing within 1e-6 of the model's size from a vertex of
+  another loop, which split off a degenerate edge.
 
 ## Licence
 

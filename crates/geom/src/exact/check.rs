@@ -83,9 +83,17 @@ fn reject(a: V3, axis: V3) -> V3 {
 ///   and Gaussian curvatures for `m`), and the triangle's `dA` projects to
 ///   `dA_q = (n·m) dA / (1 − 2Hh + Kh²)`, so the cap is
 ///   `−(h − Hh² + Kh³/3) (n·m) / (1 − 2Hh + Kh²)` per unit of `dA`.
+///   The closest point may lie a little past the patch's sides, on the
+///   surface its end spans continue (`Evaluator::project_extended`): the
+///   mesh beside a chamfer's contact (a ruled patch meeting a sphere at an
+///   angle) lies past the side, and clamped onto it, its points measured
+///   their gap to the other face as nearly zero, so the strip bound
+///   ([`strips`]) came out a fifth of its size, under the error it is
+///   meant to bound even with its margin of four, and the check refused
+///   two chamfers whose volume was right to 1e-10.
 fn cap(s: &Surface, ev: Option<&Evaluator>, p: V3, n: V3) -> Option<(f64, f64)> {
     if let Some(ev) = ev {
-        let [u, v] = ev.project(p);
+        let [u, v] = ev.project_extended(p);
         let d = ev.derivatives(u, v);
         let nn = cross(d.du, d.dv);
         let l = dot(nn, nn).sqrt();
@@ -257,7 +265,7 @@ fn integrate(
 /// distance of `p` from the surface. A plane or facet projects nothing.
 fn project(s: &Surface, ev: Option<&Evaluator>, p: V3) -> (V3, f64) {
     if let Some(ev) = ev {
-        let [u, v] = ev.project(p);
+        let [u, v] = ev.project_extended(p);
         let q = ev.eval(u, v);
         return (q, dot(sub(p, q), sub(p, q)).sqrt());
     }
@@ -318,7 +326,7 @@ fn normal(s: &Surface, ev: Option<&Evaluator>, p: V3) -> Option<V3> {
         (l > 0.0).then(|| scaled(v, 1.0 / l))
     };
     if let Some(ev) = ev {
-        let [u, v] = ev.project(p);
+        let [u, v] = ev.project_extended(p);
         return unit(ev.normal(u, v));
     }
     match s {

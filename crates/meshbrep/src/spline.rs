@@ -97,6 +97,17 @@ impl Evaluator {
         let (u, v) = self.0.project(V::from(p), false);
         [u, v]
     }
+
+    /// As [`Evaluator::project`], but the projection may run a little
+    /// past each side of the domain (half the end span, at most a tenth
+    /// of the domain), where the end spans' polynomials continue the
+    /// patch smoothly: what reconstruction's implicit form of the patch
+    /// uses. A point beside a side then projects along the normal of the
+    /// continued surface instead of onto the side's nearest point.
+    pub fn project_extended(&self, p: [f64; 3]) -> [f64; 2] {
+        let (u, v) = self.0.project(V::from(p), true);
+        [u, v]
+    }
 }
 
 /// The cubic B-spline curve through `points` at the increasing

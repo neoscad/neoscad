@@ -330,6 +330,11 @@ pub fn export_step(
     // last attempt failed where a finer mesh may succeed.
     let mut fitted = false;
     let mut last_retry = false;
+    // An attempt with fitted blends that passed every check with some
+    // faces written as facets: (file, its stats, its substitutions). It
+    // is what the export writes unless a finer attempt makes every face
+    // exact (see the `Done` arm below).
+    let mut partly: Option<(String, ExactStats, Vec<Substitution>)> = None;
     let plan = [
         (1u32, walk::Extrusions::Exact),
         (2, walk::Extrusions::Exact),
@@ -341,7 +346,7 @@ pub fn export_step(
             // Rejected for a reason a finer mesh cannot cure.
             continue;
         }
-        if k == 2 && held.is_none() && !(fitted && last_retry) {
+        if k == 2 && held.is_none() && partly.is_none() && !(fitted && last_retry) {
             // Four times the segments only to settle a loose first check,
             // or for a blend between curved faces that twice failed to
             // reconstruct: one smaller than about twice the depth of the
@@ -349,6 +354,20 @@ pub fn export_step(
             // (`meshbrep::blend`, `sweep`), and at four times their
             // segments that depth is a sixteenth.
             continue;
+        }
+        if mode == walk::Extrusions::Faceted
+            && let Some((step, mut s, subs)) = partly.take()
+        {
+            // No finer attempt did better than the one with some faces
+            // as facets, which passed every check.
+            s.attempts = stats.attempts;
+            s.timings = stats.timings;
+            s.retried_because = None;
+            return Ok(ExactExport {
+                step,
+                stats: s,
+                substitutions: subs,
+            });
         }
         if mode == walk::Extrusions::Faceted {
             // Before giving up on exact extrusions altogether: the exact
@@ -455,6 +474,29 @@ pub fn export_step(
                 first_reason = Some(format!(
                     "the mesh is too coarse to check the B-rep's volume closely (tolerance {:.1e})",
                     stats.volume_tolerance
+                ));
+                continue;
+            }
+            Attempt::Done(step)
+                if fitted
+                    && mode == walk::Extrusions::Exact
+                    && k < 2
+                    && stats.exact_faces < stats.faces =>
+            {
+                // A blend between curved faces whose tool left slivers
+                // standing beside it (lens-shaped faces of two edges
+                // where its contact runs steeply across the polygon's
+                // facets of the face it meets, so they reconstruct as
+                // facets). The faces' polygons at twice or four times
+                // the segments are shallow enough that the tool follows
+                // them; this file is kept in case they do not.
+                if partly.is_none() {
+                    partly = Some((step, stats.clone(), substitutions.clone()));
+                }
+                first_reason = Some(format!(
+                    "{} of {} faces were written as facets",
+                    stats.faces - stats.exact_faces,
+                    stats.faces
                 ));
                 continue;
             }
