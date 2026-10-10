@@ -33,7 +33,7 @@ regex = { version = "1", default-features = false, features = ["std", "unicode-p
 # wasm-check STEP digests even when no geometry changes. To try an
 # unreleased change, point the entry under [patch.crates-io] below at a
 # local checkout of that repository (and keep it out of the commit).
-meshbrep = "0.3.0"
+meshbrep = "0.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

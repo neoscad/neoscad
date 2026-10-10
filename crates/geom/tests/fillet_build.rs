@@ -712,7 +712,6 @@ fn corpus_gaps_export_exact() {
 /// corner patch (its frame's poles kept off it, 900). Ignored until
 /// NeoSCAD depends on a `meshbrep` release with them.
 #[test]
-#[ignore = "needs a meshbrep release after 0.3.0 (needles, looped edges, sphere frames)"]
 fn corpus_gaps_meshbrep_fixed_export_exact() {
     let cases = [
         "fillet_edges(r = 0.51) union() { cube([35.85, 27.54, 6.2]); cube([35.85, 3.15, 16.64]); }",

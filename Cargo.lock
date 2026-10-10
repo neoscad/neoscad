@@ -1371,9 +1371,9 @@ dependencies = [
 
 [[package]]
 name = "meshbrep"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db4b9b09657bea486476a6d63d53113bca78e84b6888a2d1cda6977efdbf76cd"
+checksum = "29dab895ece5c66a315fba07749fb6a18acbb43e30c8458f35b3a6044ee70ec4"
 dependencies = [
  "libm",
 ]
