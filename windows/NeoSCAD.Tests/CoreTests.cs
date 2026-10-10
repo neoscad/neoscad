@@ -336,6 +336,101 @@ public class DocumentSessionTests
             Assert.Null(await doc.ExportAsync(output, "step"));
             Assert.StartsWith("ISO-10303-21;", File.ReadAllText(output));
             Assert.StartsWith("STEP: 6 of 6 faces exact (100%).", doc.LastStepReport);
+            // Turned off again, STEP is refused again: the toggle is
+            // read at each export, not once.
+            File.Delete(output);
+            doc.SetEnable(new LanguageSettings().Names());
+            Assert.Contains("--enable exact", await doc.ExportAsync(output, "step"));
+            Assert.False(File.Exists(output));
+        }
+        finally
+        {
+            doc.Dispose();
+            Directory.Delete(dir, true);
+        }
+    }
+
+    /// <summary>
+    /// The report File > Export As > STEP shows in its dialog: the share
+    /// of exact faces, the curves made exact and each region written as
+    /// facets at its line (the macOS app's <c>ExportTests</c> check the
+    /// same model).
+    /// </summary>
+    [Fact]
+    public async Task StepReportsItsFacetedRegions()
+    {
+        var (doc, _, _, dir) = Session();
+        try
+        {
+            doc.SetEnable(new LanguageSettings { Exact = true }.Names());
+            doc.LoadUntitled(
+                "difference() {\n  cube(20);\n  translate([10, 10, -1]) cylinder(r = 4, h = 22);\n"
+                + "  hull() { cube(1); translate([2, 2, 2]) cube(1); }\n}\n", autorun: false);
+            var output = Path.Combine(dir, "part.step");
+            Assert.Null(await doc.ExportAsync(output, "step"));
+            var report = doc.LastStepReport ?? "";
+            Assert.StartsWith("STEP: 7 of 16 faces exact (43.8%).\n1 curve made exact.\nFaceted: hull() at ", report);
+            Assert.Contains(", line 4 is exported as planar facets", report);
+            var text = File.ReadAllText(output);
+            Assert.StartsWith("ISO-10303-21;", text);
+            Assert.Single(System.Text.RegularExpressions.Regex.Matches(text, "CYLINDRICAL_SURFACE"));
+        }
+        finally
+        {
+            doc.Dispose();
+            Directory.Delete(dir, true);
+        }
+    }
+
+    /// <summary>
+    /// Fillets with exact export on: the blends are written as exact
+    /// cylinders, one per edge. With fillets off, <c>fillet_edges()</c>
+    /// is OpenSCAD's unknown module and there is nothing to export.
+    /// </summary>
+    [Fact]
+    public async Task StepWritesFilletsExact()
+    {
+        var (doc, _, _, dir) = Session();
+        try
+        {
+            doc.SetEnable(new LanguageSettings { Exact = true, Fillet = true }.Names());
+            doc.LoadUntitled("fillet_edges(r = 1, edges = \"|y\") cube([20, 10, 4]);\n", autorun: false);
+            var output = Path.Combine(dir, "filleted.step");
+            Assert.Null(await doc.ExportAsync(output, "step"));
+            Assert.StartsWith("STEP: 10 of 10 faces exact (100%).", doc.LastStepReport);
+            var text = File.ReadAllText(output);
+            Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(text, "CYLINDRICAL_SURFACE").Count);
+            File.Delete(output);
+            doc.SetEnable(new LanguageSettings { Exact = true }.Names());
+            Assert.Contains("empty", await doc.ExportAsync(output, "step"));
+            Assert.False(File.Exists(output));
+        }
+        finally
+        {
+            doc.Dispose();
+            Directory.Delete(dir, true);
+        }
+    }
+
+    /// <summary>
+    /// A model that cannot be a valid B-rep (a fin of no thickness) is
+    /// refused with <c>exact</c> on: the failure is the report, which
+    /// says why, and no file is written.
+    /// </summary>
+    [Fact]
+    public async Task ARefusedStepExportSaysWhyAndWritesNothing()
+    {
+        var (doc, _, _, dir) = Session();
+        try
+        {
+            doc.SetEnable(new LanguageSettings { Exact = true }.Names());
+            doc.LoadUntitled("cube(10); translate([10, 0, 0]) cube([10, 10, 0.000001]);\n", autorun: false);
+            var output = Path.Combine(dir, "fin.step");
+            var failure = await doc.ExportAsync(output, "step") ?? "";
+            Assert.StartsWith("STEP export refused: ", failure);
+            Assert.EndsWith("No file was written.", failure);
+            Assert.Equal(failure, doc.LastStepReport);
+            Assert.False(File.Exists(output));
         }
         finally
         {

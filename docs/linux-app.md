@@ -447,7 +447,11 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
 - `cargo test -p neoscad-linux-app` (any platform): the bridge, the
   resources, titles and edited state, runs and exports without a GPU
   (every geometry format, a 2D model to a 3D format saying why, a
-  cancelled export leaving the old file, the stages reported), the
+  cancelled export leaving the old file, the stages reported; STEP with
+  Preferences > Language's names: refused without `exact`, a hull's
+  faceted region at its line in an alert's text, fillets written as
+  exact cylinders with `fillet` and nothing to export without it, a fin
+  of no thickness refused with no file), the
   language server (real capabilities, answers in order, nothing after
   stop, a run's diagnostics published as markers for the client's
   version), where a definition opens, the customizer (each control,
@@ -472,7 +476,15 @@ neoscad-linux-dev` and `docker volume rm neoscad-linux-target`.
   first finding (the overlay's box), Alt+3 and Enter measure,
   Ctrl+Shift+E and Enter export an STL beside the model; then it renames
   a new version of the used file over it and waits for the run that
-  follows. With `SHOTS` that runs in both styles and saves
+  follows. With `TYPE=1` it also exports STEP: with `exact` and `fillet`
+  in the settings file Preferences > Language writes, it activates the
+  File > Export > STEP item's action (`win.export`, sent with `gdbus`
+  to the window's `org.gtk.Actions` on the session bus) and presses
+  Enter in the save dialog, three times on one window whose model is
+  rewritten on disk in between: a filleted part (all faces exact, four
+  exact cylinders in the file), a part with a hull (its faceted region
+  in the alert) and a fin (refused, no file). The Preferences switch
+  itself is not driven. With `SHOTS` that runs in both styles and saves
   `customizer-`, `check-` and `measure-light.png` and `-dark.png`. It
   kills the app above 2 GB of memory.
 - AI agents: `cargo test -p neoscad-linux-app` covers the consent (off by

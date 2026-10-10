@@ -595,8 +595,13 @@ binding in `rust:<pinned toolchain>`, then runs `dotnet test` on
 `NeoSCAD.Tests` in `mcr.microsoft.com/dotnet/sdk:10.0` against it: the
 binding's checksums, records, objects, a C#-implemented observer, the
 UTF-16 edits, and the document loop end to end (a pause runs a preview
-whose console reaches the session; save; STL export). The WinUI project
-needs Windows to build. With `--with-cli` it also builds the `neoscad`
+whose console reaches the session; save; STL export; STEP refused
+without `exact`, written with it and refused again once it is off, a
+hull's faceted region in the report, fillets written as exact
+cylinders with `fillet` and nothing to export without it, and a fin of
+no thickness refused with no file). The WinUI project needs Windows to
+build, so the dialog that shows a STEP report is checked only by
+`windows-app.yml`'s build, which also runs these tests on Windows. With `--with-cli` it also builds the `neoscad`
 command line in the Rust container and runs the agent end-to-end test
 with it (`AgentEndToEndTests`: the real `neoscad mcp` reading and editing
 the C# host's document over the link's Unix socket); without it that

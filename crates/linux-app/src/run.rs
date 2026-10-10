@@ -486,6 +486,107 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// File > Export > STEP as a window runs it: with the `--enable`
+    /// names Preferences > Language keeps (`extensions::Settings::names`,
+    /// which `run_options` hands every export), the message the window
+    /// shows (`export_message`; one with further lines is an alert, not a
+    /// toast) and the file. The macOS app's `ExportTests` check the same
+    /// mixed model's report.
+    #[test]
+    fn a_step_export_reports_its_substitutions_fillets_and_refusals() {
+        use crate::extensions::Settings;
+        let c = client();
+        let dir =
+            std::env::temp_dir().join(format!("neoscad-linux-app-step-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let options = |s: Settings| client::RunOptions {
+            enable: s.names(),
+            ..Default::default()
+        };
+        let export = |name: &str, text: &str, s: Settings| {
+            let doc = dir.join(format!("{name}.scad"));
+            let doc = doc.to_str().unwrap();
+            c.open(doc, Some(text.into())).unwrap();
+            let out = dir.join(format!("{name}.step"));
+            let r = export_file(
+                &c,
+                doc,
+                out.to_str().unwrap(),
+                "step",
+                &options(s),
+                None,
+                None,
+            );
+            (export_message(&out, &r).unwrap(), r, out)
+        };
+        let exact = Settings {
+            exact: true,
+            ..Default::default()
+        };
+
+        // A hole made exact and a hull written as facets: the share of
+        // exact faces, the curve counted and the faceted region at its
+        // line, in an alert since it has more than one line.
+        let (message, r, out) = export(
+            "part",
+            "difference() {\n  cube(20);\n  translate([10, 10, -1]) cylinder(r = 4, h = 22);\n\
+             \x20 hull() { cube(1); translate([2, 2, 2]) cube(1); }\n}\n",
+            exact,
+        );
+        let message = message.unwrap();
+        assert!(message.starts_with("Exported part.step ("), "{message}");
+        assert!(
+            message.contains(
+                "STEP: 7 of 16 faces exact (43.8%).\n1 curve made exact.\n\
+                 Faceted: hull() at part.scad, line 4 is exported as planar facets"
+            ),
+            "{message}"
+        );
+        let step = r.unwrap().step.unwrap();
+        assert!(step.ok && step.faceted_regions.len() == 1, "{step:?}");
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.starts_with("ISO-10303-21;"));
+        assert_eq!(text.matches("CYLINDRICAL_SURFACE").count(), 1);
+
+        // Fillets on as well: the blends are exact cylinders, one per
+        // edge, and the whole part is exact.
+        let both = Settings {
+            exact: true,
+            fillet: true,
+            ..Default::default()
+        };
+        let filleted = "fillet_edges(r = 1, edges = \"|y\") cube([20, 10, 4]);\n";
+        let (message, _, out) = export("filleted", filleted, both);
+        let message = message.unwrap();
+        assert!(
+            message.contains("STEP: 10 of 10 faces exact (100%)."),
+            "{message}"
+        );
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(text.matches("CYLINDRICAL_SURFACE").count(), 4);
+        // With `fillet` off, `fillet_edges()` is OpenSCAD's unknown
+        // module: nothing is left to export, and the alert says so.
+        std::fs::remove_file(&out).unwrap();
+        let (message, _, out) = export("filleted", filleted, exact);
+        let why = message.unwrap_err();
+        assert!(why.contains("empty"), "{why}");
+        assert!(!out.exists());
+
+        // Refused with `exact` on: a fin of no thickness cannot be a
+        // valid B-rep. The report is the alert, and no file is written.
+        let (message, r, out) = export(
+            "fin",
+            "cube(10); translate([10, 0, 0]) cube([10, 10, 0.000001]);\n",
+            exact,
+        );
+        let why = message.unwrap_err();
+        assert!(why.starts_with("STEP export refused: "), "{why}");
+        assert!(why.ends_with("No file was written."), "{why}");
+        assert!(!r.unwrap().step.unwrap().ok);
+        assert!(!out.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A run reports the included files on disk, which the window
     /// watches, and not the document itself.
     #[test]

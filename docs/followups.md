@@ -2591,11 +2591,29 @@ pass's leftovers first, then stage 1b's, then the crate's.
   with `export: "x.step"` on `neoscad mcp --enable exact`), the three apps
   and /try export STEP through `Session::export` with the
   `session::exact::ExactReport` (`docs/step-export.md`). Left:
-  - The macOS app is tested end to end (`ExportTests`); the Linux app's
-    GTK side and the Windows app's WinUI side compile and are tested
-    only in their Docker/CI jobs, and neither has a test that drives the
-    menu toggle itself (the Linux and Windows tests drive
-    `export_file`/`DocumentSession.ExportAsync` and the settings).
+  - The macOS app is tested end to end (`ExportTests`). The Linux app's
+    export is driven through the GTK window by `linux/smoke.sh` (`TYPE=1`:
+    File > Export > STEP's action over the session bus and the save
+    dialog, with `exact` and `fillet` from the settings file) and its
+    `export_file` by `run.rs`'s tests; the Windows app's
+    `DocumentSession.ExportAsync` by `NeoSCAD.Tests` (Docker and
+    `windows-app.yml`). Not driven by any test: the Preferences >
+    Language switches and Design > NeoSCAD Extensions toggles themselves
+    (the tests write the settings or call `SetEnable`), and the WinUI
+    report dialog, which only `windows-app.yml` builds.
+  - **A failed fillet does not fail an app's export** (decision 2,
+    `docs/fillets.md`, section 18, holds only for the command line's
+    `-o`, `crates/cli/src/run.rs`). `Session::export` returns exit code
+    0 when a `fillet_edges()` call failed, so the three apps write the
+    sharp part and report success (`serve`'s `export` calls it too; its
+    and MCP's replies were not checked):
+    `fillet_edges(r = 3, edges = "|y") cube([20, 10, 4]);` with `exact`
+    and `fillet` on exports "STEP: 6 of 6 faces exact (100%)." with the
+    call's `ERROR` only in the result's console. The fix is in
+    `Session::export` or `client::Client::export` (`failed_fillets()`
+    in the log), and the apps then need to say that a file was written
+    but its fillets failed, rather than "was not exported". No app test
+    covers it yet.
   - A refused STEP export reports `geometry: null` (`Session::export`
     keeps the geometry only for a finished export), so `serve`'s and
     MCP's refusal text says "empty: no geometry" beside the reason.

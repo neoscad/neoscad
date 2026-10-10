@@ -10,7 +10,9 @@
 # problem and marks it in the view, a measurement reports the volume,
 # Export Again writes an STL beside the model, rewriting a used file
 # on disk runs the model again (file watching), and rewriting the model
-# itself is taken into the editor and run. CI's
+# itself is taken into the editor and run, and with Preferences >
+# Language's exact and fillet on File > Export > STEP writes a filleted
+# part all exact, lists a hull's faceted region and refuses a fin. CI's
 # linux-app job runs it; docs/linux-app.md shows how to run it in Docker
 # from macOS.
 #
@@ -19,7 +21,8 @@
 # Environment:
 #   SHOTS=DIR   also save screenshots (light.png, typed.png, dark.png,
 #               and with TYPE=1 customizer-, check- and measure-light.png
-#               and -dark.png; needs ImageMagick's `import`)
+#               and -dark.png, and step-filleted, -faceted and
+#               -refused.png; needs ImageMagick's `import`)
 #   TYPE=1      type into the editor and require a second preview, and
 #               drive the panels (needs the editor bundle and xdotool)
 #
@@ -222,6 +225,86 @@ EOF
     sleep 1
 }
 
+# STEP export, end to end: with Preferences > Language's `exact` and
+# `fillet` on (the settings file its switches write), File > Export >
+# STEP (exact surfaces) saves beside the model, through the save dialog,
+# and the window says what it wrote. The menu item's action (`win.export`
+# with "step") is sent over the session bus, where GTK publishes a
+# window's actions (org.gtk.Actions): a popover menu has no stable keys
+# or coordinates to click. A filleted part is all exact with one exact
+# cylinder per blend; rewritten on disk to a part with a hull, its alert
+# lists the hull as written in facets at its line; rewritten again to a
+# fin of no thickness, the export is refused with the reason and leaves
+# no file. Each report is an alert, which Escape closes.
+step_check() {
+    local log=$work/step.log dir=$work/step config=$work/step-config bus=$work/step-bus
+    mkdir -p "$dir" "$config/neoscad"
+    local part=$dir/part.scad out=$dir/part.step
+    printf '{"exact": true, "fillet": true}\n' >"$config/neoscad/language.json"
+    printf 'fillet_edges(r = 1, edges = "|y") cube([20, 10, 4]);\n' >"$part"
+    # The launcher's bus, for gdbus.
+    XDG_CONFIG_HOME=$config dbus-run-session -- \
+        sh -c 'printf %s "$DBUS_SESSION_BUS_ADDRESS" >"$0"; exec "$@"' "$bus" "$bin" "$part" \
+        >"$log" 2>&1 &
+    launcher=$!
+    wait_for "run 1 (Preview)" "$log" 300
+    # File > Export > STEP: the app is the bus's only client (NON_UNIQUE,
+    # so it owns no well-known name), at its application id's path.
+    export_step() {
+        local addr name
+        addr=$(cat "$bus")
+        for name in $(DBUS_SESSION_BUS_ADDRESS=$addr gdbus call --session \
+            --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+            --method org.freedesktop.DBus.ListNames | grep -o "':[0-9.]*'" | tr -d "'"); do
+            if DBUS_SESSION_BUS_ADDRESS=$addr gdbus call --session --dest "$name" \
+                --object-path /org/neoscad/NeoSCAD/window/1 \
+                --method org.gtk.Actions.Activate export "[<'step'>]" '{}' >/dev/null 2>&1; then
+                sleep 3
+                xdotool key Return
+                return 0
+            fi
+        done
+        echo "no window answered org.gtk.Actions on the bus" >&2
+        return 1
+    }
+    # Rewrite the model on disk (the window has no unsaved changes, so
+    # it takes the text in and runs it) and drop the last export, so the
+    # save dialog does not ask to replace it.
+    rewrite() {
+        local runs
+        runs=$(grep -c "run [0-9]* (Preview)" "$log")
+        printf '%s' "$1" >"$part.tmp"
+        mv "$part.tmp" "$part"
+        rm -f "$out"
+        wait_for "run $((runs + 1)) (Preview)" "$log" 120
+    }
+    export_step
+    wait_for "export: Exported part.step (.*STEP: 10 of 10 faces exact (100%)" "$log" 120
+    head -c 13 "$out" | grep -qx "ISO-10303-21;"
+    [ "$(grep -o CYLINDRICAL_SURFACE "$out" | wc -l)" -eq 4 ]
+    sleep 1
+    shot step-filleted
+    xdotool key Escape
+    rewrite $'difference() {\n  cube(20);\n  translate([10, 10, -1]) cylinder(r = 4, h = 22);\n  hull() { cube(1); translate([2, 2, 2]) cube(1); }\n}\n'
+    export_step
+    wait_for "export: Exported part.step (.*STEP: 7 of 16 faces exact (43.8%)" "$log" 120
+    wait_for "^Faceted: hull() at part.scad, line 4 " "$log" 10
+    test -s "$out"
+    sleep 1
+    shot step-faceted
+    xdotool key Escape
+    rewrite $'cube(10); translate([10, 0, 0]) cube([10, 10, 0.000001]);\n'
+    export_step
+    wait_for "export: part.step failed: STEP export refused: .*No file was written." "$log" 120
+    test ! -e "$out"
+    sleep 1
+    shot step-refused
+    xdotool key Escape
+    grep "export:\|^Faceted:" "$log"
+    pkill -x "$name" || true
+    sleep 1
+}
+
 # AI agents, end to end: with agents allowed (the consent kept in the
 # settings file, as a user's earlier "Allow" leaves it), the real
 # `neoscad mcp` finds the running app by itself (NEOSCAD_AGENT_DIR keeps the
@@ -374,6 +457,7 @@ if [ -f "$NEOSCAD_EDITOR_DIR/editor.html" ]; then
     fi
 fi
 if [ "${TYPE:-}" = 1 ]; then
+    step_check
     panels_check light
     if [ -n "${SHOTS:-}" ]; then
         panels_check dark
