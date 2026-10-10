@@ -140,7 +140,7 @@ extension:
 | Driving / reference dimensions | `isDriving` flag per constraint | — | — | all constraints drive; solved values are reported by `measure` |
 | Parameters | Spreadsheet and expression engine | Python variables | OpenSCAD variables | OpenSCAD variables and the customizer |
 | Placement relative to other geometry | Attachment (`AttachExtension`: support, map mode, offset) | selectors (`faces(">Z")`, `edges("\|Z")`) | `attachable()`, `attach()`, `position()`, `named_anchor()` | `child_anchors()`, `child_bounds()`, `child_measure()` |
-| Output | B-rep (OpenCASCADE), STEP export | B-rep (OpenCASCADE), STEP export | mesh (OpenSCAD) | mesh, as OpenSCAD. No B-rep and no STEP |
+| Output | B-rep (OpenCASCADE), STEP export | B-rep (OpenCASCADE), STEP export | mesh (OpenSCAD) | mesh, as OpenSCAD; with `--enable exact`, STEP export with exact surfaces reconstructed from the mesh (`docs/step-export.md`), not a B-rep modelling kernel |
 
 Sources for the table: FreeCAD `src/Mod/Sketcher/App/Constraint.h:52-77`
 (constraint types) and `:240` (`isDriving`), `SketchObject.h:441-475`
