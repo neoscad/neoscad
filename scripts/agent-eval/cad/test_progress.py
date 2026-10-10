@@ -39,31 +39,83 @@ class Representative(unittest.TestCase):
         self.assertEqual(chosen["id"], "r4")  # passing walls 100, 200, 300
         self.assertIn("passing", rule)
 
-    def test_even_count_takes_the_lower_median(self):
-        runs = [run(1, True, 400), run(2, True, 100), run(3, True, 300), run(4, True, 200)]
-        self.assertEqual(pg.representative(runs)[0]["id"], "r4")  # 100 200 | 300 400 -> 200
+    def test_two_passing_runs_show_the_slower_one(self):
+        # The case the lower-median rule got wrong: a fast and a slow pass
+        # (2:17 and 5:57, median 4:07). Both are equally far from the
+        # median, and the tie goes to the slower run, never the flattering one.
+        runs = [run(1, True, 137), run(2, False, 60), run(3, True, 357)]
+        for order in (runs, list(reversed(runs))):
+            self.assertEqual(pg.representative(order)[0]["id"], "r3")
+        st = pg.pool_stats(runs)
+        self.assertEqual(st, {"basis": "passing", "n": 2, "of": 3, "median_s": 247.0})
+        self.assertEqual(pg.pool_caption(st), "median 4:07 of 2 passing")
+
+    def test_even_count_takes_the_slower_middle_run(self):
+        # 100 300 | 340 400: median 320. The two middle runs are always
+        # equally far from their mean, so an even count shows the slower one.
+        runs = [run(1, True, 400), run(2, True, 100), run(3, True, 300), run(4, True, 340)]
+        self.assertEqual(pg.representative(runs)[0]["id"], "r4")
+        self.assertEqual(pg.pool_stats(runs)["median_s"], 320.0)
+
+    def test_odd_count_takes_the_median_run(self):
+        runs = [run(1, True, 900), run(2, True, 100), run(3, True, 120)]
+        self.assertEqual(pg.representative(runs)[0]["id"], "r3")  # not the nearest to the mean
 
     def test_no_passing_run_falls_back_to_all_runs(self):
         runs = [run(1, False, 50), run(2, None, 70), run(3, False, 60)]
         chosen, rule = pg.representative(runs)
         self.assertEqual(chosen["id"], "r3")
         self.assertIn("no passing run", rule)
+        self.assertEqual(pg.pool_caption(pg.pool_stats(runs)), "median 1:00 of 3 runs, none passing")
 
     def test_single_passing_run_wins_over_faster_failures(self):
         runs = [run(1, False, 10), run(2, False, 20), run(3, True, 900)]
         self.assertEqual(pg.representative(runs)[0]["id"], "r3")
+        self.assertEqual(pg.pool_caption(pg.pool_stats(runs)), "median 15:00 of 1 passing")
 
-    def test_ties_go_to_the_smaller_id_whatever_the_input_order(self):
+    def test_equal_times_go_to_the_smaller_id_whatever_the_input_order(self):
         a = [run(2, True, 100), run(1, True, 100)]
         self.assertEqual(pg.representative(a)[0]["id"], "r1")
         self.assertEqual(pg.representative(list(reversed(a)))[0]["id"], "r1")
 
-    def test_missing_wall_time_sorts_last(self):
+    def test_missing_wall_time_is_left_out_of_the_median(self):
         runs = [run(1, True, None), run(2, True, 100), run(3, True, 200)]
+        self.assertEqual(pg.pool_stats(runs)["median_s"], 150.0)
+        self.assertEqual(pg.pool_stats(runs)["n"], 3)
         self.assertEqual(pg.representative(runs)[0]["id"], "r3")
+        untimed = [run(2, True, None), run(1, True, None)]
+        self.assertEqual(pg.representative(untimed)[0]["id"], "r1")
+        self.assertEqual(pg.pool_caption(pg.pool_stats(untimed)), "median – of 2 passing")
 
     def test_empty(self):
         self.assertEqual(pg.representative([]), (None, None))
+
+    def test_header_states_run_and_median_and_cadquery_caption(self):
+        import hero
+        runs = [run(1, True, 137), run(3, True, 357)]
+        chosen, _ = pg.representative(runs)
+        lines = hero.header_lines("neoscad", chosen, pg.pool_stats(runs))
+        self.assertEqual(lines, ["run 5:57 · median 4:07 of 2 passing"])
+        lines = hero.header_lines("cadquery", chosen, pg.pool_stats(runs))
+        self.assertEqual(lines[1], hero.CADQUERY_CAPTION)
+
+    def test_record_warnings(self):
+        import hero
+
+        def meta(name, sha="a", model="m", effort=None, neoscad="neoscad 0.3.1"):
+            return {"name": name, "record_file": f"{name}.json", "sha": sha, "model": model, "effort": effort,
+                    "neoscad": neoscad}
+        same = [meta("cad-1"), meta("cad-2")]
+        self.assertEqual(hero.record_warnings(same, "neoscad 0.3.1"), [])
+        w = hero.record_warnings([meta("cad-1"), meta("cad-2", sha="b", effort="high")], "neoscad 0.3.1")
+        self.assertEqual(len(w), 2)
+        self.assertIn("harness commit", w[0])
+        self.assertIn("effort", w[1])
+        # A version is compared only where recorded; the renderer is checked against it.
+        w = hero.record_warnings([meta("cad-1"), meta("cad-2", neoscad=None)], "neoscad 0.5.0")
+        self.assertEqual(len(w), 1)
+        self.assertIn("rendered with neoscad 0.5.0", w[0])
+        self.assertEqual(hero.record_warnings([{"name": "cad-3", "record_file": None}], None), [])
 
 
 class TimeAxis(unittest.TestCase):

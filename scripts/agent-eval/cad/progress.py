@@ -214,27 +214,68 @@ def build_progress(*, task, condition, rep, parts, wall_s, timed_out, passed, ve
 # Selection
 
 
-RULE = ("per task and condition: the passing run with the median wall time (the lower median for an even "
-        "count, ties to the smaller id); with no passing run, the median of all runs")
+RULE = ("per task and condition: of the passing runs (all runs if none passes), the run whose wall time is "
+        "closest to their median; ties to the slower run, then the smaller id")
+
+
+def pool_stats(runs):
+    """The pool a condition's representative is drawn from, and the
+    figures the image prints beside it: the passing runs (all runs when
+    none passes), how many there are, and the median of their wall times
+    (the mean of the two middle times for an even count, as the post's
+    table computes it). Runs without a wall time count in `n` but not in
+    the median.
+
+    Returns {"basis": "passing"|"all", "n", "of", "median_s"}; median_s is
+    None when no run in the pool has a wall time."""
+    passing = [r for r in runs if r.get("pass")]
+    pool = passing or list(runs)
+    walls = sorted(r["wall_s"] for r in pool if r.get("wall_s") is not None)
+    k = len(walls)
+    med = None if not k else (walls[k // 2] if k % 2 else (walls[k // 2 - 1] + walls[k // 2]) / 2)
+    return {"basis": "passing" if passing else "all", "n": len(pool), "of": len(runs), "median_s": med}
+
+
+def pool_caption(stats):
+    """The pool line under a column's header ("median 4:07 of 2 passing"),
+    so the image states the same median as the post's table even when the
+    run it shows is not at that median."""
+    med = fmt_clock(stats["median_s"])
+    if stats["basis"] == "passing":
+        return f"median {med} of {stats['n']} passing"
+    return f"median {med} of {stats['n']} runs, none passing"
 
 
 def representative(runs):
     """The run that represents a condition, by a fixed rule, never by hand:
-    among the passing runs, the one with the median wall time; with no
-    passing run, the median of all runs. With an even count the lower
-    median is taken (the faster of the two middle runs), and ties in wall
-    time go to the smaller id, so the choice is deterministic. A run with
-    no wall time sorts last.
+    among the passing runs (all runs when none passes), the one whose wall
+    time is closest to the median of their wall times (pool_stats).
+
+    The image shows a real run, so with an even count it cannot show the
+    median itself. An earlier rule took the lower median, which with two
+    passing runs showed a tool's faster run while its median was much
+    slower, so the image flattered that tool against the post's own table.
+    Ties in distance therefore go to the slower run (with two runs, always
+    the slower one), then to the smaller id, so the choice never flatters
+    a tool and is deterministic. A run with no wall time is chosen only
+    when no run in the pool has one (then the smallest id).
 
     runs: [{"id", "pass", "wall_s", ...}]. Returns (run, rule) or
     (None, None) for an empty list; `rule` says which branch applied."""
     if not runs:
         return None, None
-    passing = [r for r in runs if r.get("pass")]
-    pool, rule = (passing, "median wall time of the passing runs") if passing else \
-        (list(runs), "no passing run: median wall time of all runs")
-    pool = sorted(pool, key=lambda r: (r.get("wall_s") is None, r.get("wall_s") or 0, str(r.get("id"))))
-    return pool[(len(pool) - 1) // 2], f"{rule} ({len(pool)} of {len(runs)})"
+    st = pool_stats(runs)
+    passing = st["basis"] == "passing"
+    pool = [r for r in runs if r.get("pass")] if passing else list(runs)
+    rule = "closest to the median wall time of the passing runs" if passing else \
+        "no passing run: closest to the median wall time of all runs"
+    med = st["median_s"]
+    if med is None:
+        chosen = min(pool, key=lambda r: str(r.get("id")))
+    else:
+        timed = [r for r in pool if r.get("wall_s") is not None]
+        chosen = min(timed, key=lambda r: (abs(r["wall_s"] - med), -r["wall_s"], str(r.get("id"))))
+    return chosen, f"{rule} ({len(pool)} of {len(runs)})"
 
 
 # ---------------------------------------------------------------------------

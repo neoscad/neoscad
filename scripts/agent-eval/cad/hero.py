@@ -4,8 +4,8 @@
 
     hero.py backfill [RECORD ...] [--src DIR] [--out DIR]
     hero.py render --task T [--out DIR] [--neoscad PATH] [--records A,B]
-    hero.py compose --task T [--out DIR] [--records A,B] [--duration 12]
-    hero.py all --task T [RECORD ...] [--out DIR] [--neoscad PATH]
+    hero.py compose --task T --records A,B|--all-records [--out DIR] [--duration 12]
+    hero.py all --task T --records A,B|--all-records [--out DIR] [--neoscad PATH]
 
 backfill: rebuilds progress.json for runs recorded before run_cad.py wrote
   one, from what each run saved (the STL versions and their times, the
@@ -242,22 +242,78 @@ def load_runs(args):
     return runs
 
 
+def renderer_version(args):
+    """`neoscad --version` of the renderer, or None without one."""
+    if not Path(args.neoscad).exists():
+        return None
+    return subprocess.run([str(args.neoscad), "--version"], capture_output=True, text=True,
+                          timeout=30).stdout.strip() or None
+
+
+def record_meta(args, names):
+    """What each pooled record says about how it was run: the harness
+    commit, model, effort and the NeoSCAD the agents used, from the record
+    file (the newest regrade, which keeps the run's own fields)."""
+    out = []
+    for name in sorted(names):
+        if not (args.src / f"{name}.json").exists():
+            out.append({"name": name, "record_file": None})
+            continue
+        record, used = latest_record(args.src, name)
+        out.append({"name": name, "record_file": used, "sha": record.get("sha"), "dirty": record.get("dirty"),
+                    "model": record.get("model"), "effort": record.get("effort"),
+                    "neoscad": (record.get("versions") or {}).get("neoscad")})
+    return out
+
+
+def record_warnings(metas, renderer):
+    """Reasons a pool may not compare like with like: records that differ
+    in harness commit, model, effort or NeoSCAD version (the version only
+    where recorded), and a renderer other than the NeoSCAD the runs used.
+    A pool silently mixing harness versions is what made the first hero
+    images disagree with the post's table, so each difference is named."""
+    warns = []
+    known = [m for m in metas if m.get("record_file")]
+    for key, what in (("sha", "harness commit"), ("model", "model"), ("effort", "effort"),
+                      ("neoscad", "NeoSCAD version")):
+        vals = {m["name"]: m.get(key) for m in known
+                if key in ("model", "effort") or m.get(key) is not None}
+        if len(set(vals.values())) > 1:
+            warns.append(f"the records differ in {what}: " +
+                         ", ".join(f"{n}: {v}" for n, v in sorted(vals.items())))
+    used = sorted({m["neoscad"] for m in known if m.get("neoscad")})
+    if renderer and used and renderer not in used:
+        warns.append(f"frames are rendered with {renderer}, but the runs used {', '.join(used)} "
+                     "(pass --neoscad with that release to render what the agents saw)")
+    return warns
+
+
+def warn_loudly(lines):
+    for w in lines:
+        print(f"\n!!! WARNING: {w}\n", file=sys.stderr, flush=True)
+
+
 def select(args, runs):
-    """One run per condition for the task, by progress.representative."""
+    """One run per condition for the task, by progress.representative,
+    with its pool's median and pass count (progress.pool_stats) for the
+    image's header, the pooled records' metadata and any warnings about
+    mixing them (record_warnings, printed loudly)."""
     chosen = {}
     for cond in pg.CONDITION_ORDER:
         pool = [r for r in runs if r["task"] == args.task and r["condition"] == cond]
         run, rule = pg.representative(pool)
         if run:
-            chosen[cond] = {"run": run, "rule": rule,
+            chosen[cond] = {"run": run, "rule": rule, "pool": pg.pool_stats(pool),
                             "candidates": [{"id": r["id"], "pass": r.get("pass"), "wall_s": r.get("wall_s")}
                                            for r in pool]}
     if not chosen:
         sys.exit(f"no runs of {args.task} found (backfill first, or check --src/--records)")
-    models = sorted({str((c["run"].get("model"), c["run"].get("effort"))) for c in chosen.values()})
-    if len(models) > 1:
-        log(f"warning: the selected runs differ in model/effort: {models}; pass --records to compare like "
-            "with like")
+    names = {r["id"].split("/")[0] for r in runs if r["task"] == args.task}
+    metas = record_meta(args, names)
+    renderer = renderer_version(args)
+    warns = record_warnings(metas, renderer)
+    warn_loudly(warns)
+    args._provenance = {"records": metas, "renderer": renderer, "warnings": warns}
     return chosen
 
 
@@ -658,8 +714,26 @@ def column_boxes(n):
     return [(margin + i * (cw + gap), cw) for i in range(n)]
 
 
-def draw_header(cv, draw, x, cw, cond, run, shown_t, done):
+CELL_TOP = 152  # below the header's four lines (draw_header)
+CADQUERY_CAPTION = "frames: exported STLs only (sources not run)"
+
+
+def header_lines(cond, run, pool):
+    """The small lines under a column's header: the shown run's time
+    beside its pool's median and pass count, so a reader comparing the
+    image with the post's table of medians sees both; and for CadQuery,
+    that its frames are exported STLs only, since its Python sources are
+    not executed outside the sandbox and so it has no source frames."""
+    lines = [f"run {pg.fmt_clock(run.get('wall_s'))} · {pg.pool_caption(pool)}"] if pool else []
+    if cond == "cadquery":
+        lines.append(CADQUERY_CAPTION)
+    return lines
+
+
+def draw_header(cv, draw, x, cw, cond, run, shown_t, done, pool=None):
     draw.text((x, 84), pg.LABEL.get(cond, cond), font=cv.font("bold", 30), fill=TEXT, anchor="ls")
+    for i, s in enumerate(header_lines(cond, run, pool)):
+        draw.text((x, 126 + 18 * i), s, font=cv.font("sans", 14), fill=MUTED, anchor="ls")
     t = pg.fmt_clock(shown_t)
     f = cv.font("monob", 30)
     draw.text((x + cw - draw.textlength(t, font=f), 84), t, font=f, fill=ACCENT if done else TEXT, anchor="ls")
@@ -722,11 +796,11 @@ def compose_still(args, cv, chosen, t_max):
     used = {}
     for (x, cw), cond in zip(column_boxes(len(conds)), conds):
         run = chosen[cond]["run"]
-        draw_header(cv, draw, x, cw, cond, run, run.get("wall_s"), True)
+        draw_header(cv, draw, x, cw, cond, run, run.get("wall_s"), True, chosen[cond].get("pool"))
         line = timeline(run)
         final = final_item(run)
         path, ph = frame_for(args, run, final, "still")
-        paste_cell(cv, img, draw, (x, 122, x + cw, 400), path, ph if final else "no STL exported",
+        paste_cell(cv, img, draw, (x, CELL_TOP, x + cw, 400), path, ph if final else "no STL exported",
                    badge=badge_for(final, final=True) if final else None)
         used[cond] = {"final": final and {"kind": final["kind"], "n": final["n"]}, "strip": []}
         gap = 8
@@ -775,12 +849,12 @@ def compose_animation(args, cv, chosen, t_max):
             run = chosen[cond]["run"]
             wall = run.get("wall_s") or 0
             done = t >= wall
-            draw_header(cv, draw, x, cw, cond, run, min(t, wall), done)
+            draw_header(cv, draw, x, cw, cond, run, min(t, wall), done, chosen[cond].get("pool"))
             v = pg.state_at(timeline(run), min(t, wall))
             path, ph = frame_for(args, run, v, "anim")
             if v is None:
                 ph = "no model" if done else waiting_text(run, t)
-            paste_cell(cv, img, draw, (x, 122, x + cw, 502), path, ph,
+            paste_cell(cv, img, draw, (x, CELL_TOP, x + cw, 502), path, ph,
                        badge=badge_for(v, final=done) if v else None)
             draw_bar(cv, draw, x, cw, 530, run, t_max, t)
             draw_axis_labels(cv, draw, x, cw, 566, t_max)
@@ -812,17 +886,19 @@ def compose(args, chosen=None):
     cv = Canvas()
     still, layout = compose_still(args, cv, chosen, t_max)
     anim = compose_animation(args, cv, chosen, t_max)
+    prov = args._provenance
     meta = {
         "task": args.task, "t_max": t_max, "still": still.name, "animation": anim.name,
         "selection_rule": pg.RULE,
         "selected": {cond: {"id": c["run"]["id"], "rule": c["rule"], "pass": c["run"].get("pass"),
-                            "wall_s": c["run"].get("wall_s"), "timing": c["run"].get("timing"),
+                            "wall_s": c["run"].get("wall_s"), "pool": c.get("pool"),
+                            "timing": c["run"].get("timing"),
                             "grade_source": c["run"].get("grade_source"), "candidates": c["candidates"]}
                      for cond, c in chosen.items()},
         "camera": {"rotation": ROTATION, "projection": "ortho", "fill": FILL, "colorscheme": COLORSCHEME,
                    "scale": json.loads((args.out / f"scale-{args.task}.json").read_text()),
-                   "renderer": subprocess.run([str(args.neoscad), "--version"], capture_output=True,
-                                              text=True).stdout.strip() if Path(args.neoscad).exists() else None},
+                   "renderer": prov["renderer"]},
+        "records": prov["records"], "renderer": prov["renderer"], "warnings": prov["warnings"],
         "animation_s": {"sweep": args.duration, "hold": args.hold, "fps": args.fps},
         "source_frames": {
             "rule": "for the .scad conditions, a frame at time t shows the newest of the STL versions and the "
@@ -834,12 +910,18 @@ def compose(args, chosen=None):
     }
     (args.out / f"hero-{args.task}.json").write_text(json.dumps(meta, indent=1))
     log(f"wrote {still}\nwrote {anim}\nwrote {args.out / f'hero-{args.task}.json'}")
+    warn_loudly(prov["warnings"])  # again, after the render logs, so the last thing on screen
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("step", choices=["backfill", "render", "compose", "all"])
-    ap.add_argument("records", nargs="*", help="record names (cad-<ts>); default: every record in --src")
+    ap.add_argument("records", nargs="*", help="record names (cad-<ts>), as --records")
+    ap.add_argument("--records", dest="records_opt", action="append", default=[],
+                    help="record names, comma-separated, to pool (required for compose and all unless "
+                         "--all-records; backfill defaults to every record in --src)")
+    ap.add_argument("--all-records", action="store_true",
+                    help="pool every record found under --src and --out, whatever harness made it")
     ap.add_argument("--src", type=Path, default=ROOT / "progress" / "agent-eval",
                     help="where run_cad.py wrote the records and their run directories (read only)")
     ap.add_argument("--out", type=Path, default=ROOT / "progress" / "agent-eval" / "hero")
@@ -852,8 +934,13 @@ def main():
     args = ap.parse_args()
     args.src, args.out = args.src.resolve(), args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
-    if args.records and "," in ",".join(args.records):
-        args.records = [x for r in args.records for x in r.split(",") if x]
+    args.records = [x for r in args.records + args.records_opt for x in r.split(",") if x]
+    # An unpinned pool silently mixed records from different harness
+    # versions into one image; naming the records is what makes the image
+    # match the table it illustrates, so pooling everything must be asked for.
+    if args.step in ("compose", "all") and not args.records and not args.all_records:
+        sys.exit("pass --records cad-a,cad-b (the records the post's table uses), or --all-records to pool "
+                 "every record found")
     if args.task and args.task not in SPEC["tasks"]:
         sys.exit(f"unknown task {args.task}")
     if args.step in ("render", "compose", "all") and not args.task:

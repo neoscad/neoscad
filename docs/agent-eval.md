@@ -339,20 +339,36 @@ back to its newest source frame there.
 
 **Representative run** (`progress.representative`, tested in
 `test_progress.py`): per task and condition, among the passing runs
-the one with the median wall time; with no passing run, the median of all
-runs. An even count takes the lower median, ties go to the smaller run
-id, and pass comes from the record's newest regrade. No run is chosen
-by hand. The pool is every record found; pass `--records cad-a,cad-b`
-to compare like with like (`hero.py` warns when the selected runs differ
-in model or effort). The task is the caller's choice (`--task`), one
-composite per task.
+(all runs when none passes), the run whose wall time is closest to
+their median. The image shows a real run, so with an even count it
+cannot show the median itself: ties in distance go to the slower run,
+then to the smaller run id. With two passing runs that is always the
+slower one; an earlier rule took the lower median and so showed a
+tool's fastest run while its median was much slower, flattering it
+against the post's table. Pass comes from the record's newest regrade;
+no run is chosen by hand. Each column prints the shown run's time
+beside the pool's median and pass count ("run 2:17 · median 4:07 of 2
+passing"), so the image agrees with a table of medians. The task is the
+caller's choice (`--task`), one composite per task.
+
+**Which records**: `compose` and `all` need `--records cad-a,cad-b`
+(the records the post's table is computed from), or `--all-records` to
+pool every record found; pooling records from different harness
+versions by default once put the wrong runs in an image. `hero.py`
+warns loudly when the pooled records differ in harness commit, model,
+effort or NeoSCAD version (where the record has one), and when the
+renderer is not the NeoSCAD the runs used. When comparing across
+rounds, render with the release binary those runs used (`--neoscad`;
+the record's `versions.neoscad` names it) rather than a current build,
+since rendering and export can change between releases.
 
 **Compose**: `hero.py compose --task T` writes, under the output
 directory:
 
 - `hero-<task>.png`, 1200 × 630 (the `og:image` size): a column per
   condition with its name, its wall time and whether its final model
-  passes, the final render large, three smaller frames at shared clock
+  passes, the pool's median and pass count, for CadQuery a caption that
+  its frames are exported STLs only, the final render large, three smaller frames at shared clock
   times (a quarter, half and three quarters of the slowest selected
   run), and a bar on one axis from 0 to that run's time, with ticks for
   STL versions (tall) and source writes (short);
@@ -360,15 +376,17 @@ directory:
   hold; `--duration`, `--hold`, `--fps`), or an animated GIF without
   ffmpeg: every column on one linear clock with a running timer, each
   freezing at its run's end;
-- `hero-<task>.json`: the runs picked and the rule, every candidate, the
-  timing notes, the camera, the renderer's version, and per `.scad`
-  column the features its source frames enabled.
+- `hero-<task>.json`: the runs picked and the rule, each pool's median
+  and counts, every candidate, the records pooled (file, harness commit,
+  model, effort, NeoSCAD version), the renderer's version
+  (`neoscad --version`), any warnings, the timing notes, the camera, and
+  per `.scad` column the features its source frames enabled.
 
 Composition needs Pillow, which the CadQuery venv has; under another
 Python, `hero.py` re-executes itself with the venv's interpreter
 (`--pillow-python` to choose one). Fonts are the vendored Liberation
-Sans and Mono; colours are the site's dark theme. `hero.py all --task T`
-runs backfill, render and compose in turn. Before a column's first
+Sans and Mono; colours are the site's dark theme. `hero.py all --task T
+--records ...` runs backfill, render and compose in turn. Before a column's first
 frame it says "no model yet" ("no STL yet" for CadQuery), with the
 source edits made so far.
 
@@ -376,4 +394,4 @@ Everything `hero.py` writes is a result: it goes to `progress/` (or
 `results/` with `--out`) and is never committed.
 
     scripts/agent-eval/cad/test_progress.py      # selection rule, time axis, capture (synthetic runs)
-    scripts/agent-eval/cad/hero.py all --task T2 --neoscad target/release/neoscad
+    scripts/agent-eval/cad/hero.py all --task T2 --records cad-<ts>,cad-<ts> --neoscad PATH/TO/RELEASE/neoscad
