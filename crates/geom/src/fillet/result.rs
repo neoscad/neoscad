@@ -110,19 +110,19 @@ pub fn blends(
             }
         }
     };
-    let b = match conform {
+    let (b, warps) = match conform {
         Some(tris) => sectioned(&b, tris, tol),
-        None => (*b).clone(),
+        None => ((*b).clone(), Vec::new()),
     };
     if facets && let Some(tris) = conform {
         let c = conformed(&b, tris);
         if c != b
-            && let Ok(x) = made(f, &c, mult)
+            && let Ok(x) = made(f, &c, mult, &warps)
         {
             return Ok(Some(x));
         }
     }
-    Ok(made(f, &b, mult).ok())
+    Ok(made(f, &b, mult, &warps).ok())
 }
 
 /// `b` with each circular edge's tool sectioned at the angles of the
@@ -130,10 +130,22 @@ pub fn blends(
 /// beside it is a cylinder or a cone: the vertices of that face's polygon,
 /// where the plane or the other face cuts its straight sides. The tool's
 /// tangent ring then runs through the polygon's vertices, chord for chord
-/// with its facets. Arcs beside other faces (a sphere's rings do not pass
-/// through the rim) keep regular sections.
-fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> build::Built {
+/// with its facets.
+///
+/// A sphere's or a torus's rings do not pass through the rim, and the
+/// tool's tangent ring on such a face lies on the exact surface, outside
+/// the polygon by up to its depth: the boolean then left the tool's side
+/// (the cone along the face's normal from the tangent ring) standing in
+/// that gap as a band of no width at the polygon's vertices, which
+/// reconstruction could not make a face of ("empty parameter range" on
+/// a ball sunk part way into a plate). Such an arc is sectioned where its
+/// tangent ring crosses the polygon's creases instead, and the tool is
+/// conformed to the facets after it is made (the [`Warp`]s returned, as
+/// `meshbrep` conforms a curve's tool), so that its ring lies on the
+/// polygon, chord for chord with the facets.
+fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> (build::Built, Vec<Warp>) {
     let mut out = b.clone();
+    let mut warps = Vec::new();
     let mut points: Vec<V> = tris.iter().flatten().copied().collect();
     points.sort_by(|x, y| {
         x[0].total_cmp(&y[0])
@@ -141,7 +153,7 @@ fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> build::Built {
             .then(x[2].total_cmp(&y[2]))
     });
     points.dedup();
-    for e in &mut out.spec.edges {
+    for (i, e) in out.spec.edges.iter_mut().enumerate() {
         if let Path::Curve { points, facets } = &mut e.path {
             *facets = [0, 1].map(|k| faces_facets(&e.faces[k], points, tris, tol));
             continue;
@@ -151,6 +163,7 @@ fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> build::Built {
             .faces
             .iter()
             .any(|f| matches!(f, BlendFace::Cylinder { .. } | BlendFace::Cone { .. }));
+        let faces = e.faces.clone();
         let Path::Arc {
             center,
             axis,
@@ -161,9 +174,6 @@ fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> build::Built {
         else {
             continue;
         };
-        if !polygonal {
-            continue;
-        }
         let (c, a) = (*center, *axis);
         let radial = |p: V| {
             let q = sub(p, c);
@@ -172,30 +182,262 @@ fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> build::Built {
         let r0 = radial(from);
         let rho = *radius;
         let u0 = unit(r0);
-        let mut found: Vec<[f64; 2]> = Vec::new();
-        for &p in &points {
-            if dot(sub(p, c), a).abs() > tol {
-                continue;
-            }
-            let r = radial(p);
-            let off = norm(r) - rho;
-            if off.abs() > tol {
-                continue;
-            }
+        let full = *sweep >= std::f64::consts::TAU * (1.0 - 1e-12);
+        let angle = |r: V| {
             let mut th = libm::atan2(dot(cross(u0, r), a), dot(u0, r));
             if th < 0.0 {
                 th += std::f64::consts::TAU;
             }
-            if *sweep < std::f64::consts::TAU * (1.0 - 1e-12) && th >= *sweep {
+            th
+        };
+        let mut found: Vec<[f64; 2]> = Vec::new();
+        if polygonal {
+            for &p in &points {
+                if dot(sub(p, c), a).abs() > tol {
+                    continue;
+                }
+                let r = radial(p);
+                let off = norm(r) - rho;
+                if off.abs() > tol {
+                    continue;
+                }
+                let th = angle(r);
+                if !full && th >= *sweep {
+                    continue;
+                }
+                found.push([th, off]);
+            }
+        }
+        let mut curved = false;
+        for (k, face) in faces.iter().enumerate() {
+            if !matches!(face, BlendFace::Sphere { .. } | BlendFace::Torus { .. }) {
                 continue;
             }
-            found.push([th, off]);
+            let Ok(sec) = meshbrep::blend::section(&b.spec, i) else {
+                continue;
+            };
+            // The arc's points, for the facets near it.
+            let n = 64;
+            let v0 = cross(a, u0);
+            let arc: Vec<V> = (0..=n)
+                .map(|j| {
+                    let t = *sweep * f64::from(j) / f64::from(n);
+                    let (s, co) = (libm::sin(t), libm::cos(t));
+                    add(c, add(mul(u0, rho * co), mul(v0, rho * s)))
+                })
+                .collect();
+            let near = faces_facets(face, &arc, tris, tol);
+            let Some(w) = Warp::new(face.clone(), near, tol) else {
+                continue;
+            };
+            // Where the tangent ring (the section's tangent point turned
+            // about the axis) crosses a crease: a section there, so that
+            // each of the ring's chords lies on one facet.
+            let h = dot(sub(sec.tangents[k], c), a);
+            for &(p, q) in &w.creases {
+                let (hp, hq) = (dot(sub(p, c), a) - h, dot(sub(q, c), a) - h);
+                if hp * hq > 0.0 || hp == hq {
+                    continue;
+                }
+                let x = add(p, mul(sub(q, p), hp / (hp - hq)));
+                let th = angle(radial(x));
+                if !full && th >= *sweep {
+                    continue;
+                }
+                found.push([th, 0.0]);
+            }
+            warps.push(w);
+            curved = true;
+        }
+        if found.is_empty() || (!polygonal && !curved) {
+            continue;
         }
         found.sort_by(|x, y| x[0].total_cmp(&y[0]).then(x[1].total_cmp(&y[1])));
         found.dedup_by(|x, y| (x[0] - y[0]).abs() <= 1e-9);
         *sections = found;
     }
-    out
+    (out, warps)
+}
+
+/// The faceted polygon of a sphere or a torus beside an arc, to conform
+/// the arc's tool to after it is made: every tool vertex within a band of
+/// a few times the polygon's depth of the exact face is moved along the
+/// face's normal by the polygon's depth under its foot, in full on the
+/// face and fading to nothing at the band's edge. A vertex then keeps the
+/// side of the faceted face it had of the exact one, and the tangent ring
+/// lies on the facets (as `meshbrep` conforms a curve's tool,
+/// `Path::Curve`).
+#[derive(Debug, Clone)]
+struct Warp {
+    face: BlendFace,
+    tris: Vec<[V; 3]>,
+    /// The polygon's creases: edges shared by two facets at an angle.
+    creases: Vec<(V, V)>,
+    band: f64,
+    tol: f64,
+}
+
+impl Warp {
+    fn new(face: BlendFace, tris: Vec<[V; 3]>, tol: f64) -> Option<Warp> {
+        let tris: Vec<[V; 3]> = tris
+            .into_iter()
+            .filter(|t| norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) > 0.0)
+            .collect();
+        if tris.is_empty() {
+            return None;
+        }
+        let mut depth: f64 = 0.0;
+        for t in &tris {
+            for p in [
+                mul(add(add(t[0], t[1]), t[2]), 1.0 / 3.0),
+                mul(add(t[0], t[1]), 0.5),
+                mul(add(t[1], t[2]), 0.5),
+                mul(add(t[2], t[0]), 0.5),
+            ] {
+                depth = depth.max(face_field(&face, p, tol).map_or(0.0, |x| x.0.abs()));
+            }
+        }
+        if depth <= tol {
+            return None;
+        }
+        let key = |p: V| p.map(f64::to_bits);
+        let mut edges: std::collections::BTreeMap<([u64; 3], [u64; 3]), Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (i, t) in tris.iter().enumerate() {
+            for k in 0..3 {
+                let (a, b) = (key(t[k]), key(t[(k + 1) % 3]));
+                edges
+                    .entry(if a < b { (a, b) } else { (b, a) })
+                    .or_default()
+                    .push(i);
+            }
+        }
+        let normal = |t: &[V; 3]| unit(cross(sub(t[1], t[0]), sub(t[2], t[0])));
+        let creases = edges
+            .iter()
+            .filter(|(_, ts)| {
+                ts.len() == 2 && norm(cross(normal(&tris[ts[0]]), normal(&tris[ts[1]]))) > 1e-9
+            })
+            .map(|((a, b), _)| (a.map(f64::from_bits), b.map(f64::from_bits)))
+            .collect();
+        Some(Warp {
+            face,
+            tris,
+            creases,
+            band: 4.0 * depth,
+            tol,
+        })
+    }
+
+    /// `x` conformed: moved along the face's normal by the polygon's
+    /// depth under its foot, faded across the band.
+    fn apply(&self, x: V) -> V {
+        let Some((h, n, _)) = face_field(&self.face, x, self.tol) else {
+            return x;
+        };
+        let w = 1.0 - h.abs() / self.band;
+        if w <= 0.0 {
+            return x;
+        }
+        let foot = sub(x, mul(n, h));
+        // The nearest facet along the normal through the foot, within the
+        // band: none (past the polygon given) leaves the vertex alone.
+        let down = mul(n, -1.0);
+        let mut best: Option<f64> = None;
+        for t in &self.tris {
+            if let Some(s) = ray_triangle(foot, down, t)
+                && s.abs() <= self.band
+                && best.is_none_or(|b: f64| s.abs() < b.abs())
+            {
+                best = Some(s);
+            }
+        }
+        match best {
+            Some(d) => sub(x, mul(n, d * w)),
+            None => x,
+        }
+    }
+}
+
+/// Where the line through `o` along unit `d` meets triangle `t`: the
+/// parameter along the line, if it meets it (its edges included).
+fn ray_triangle(o: V, d: V, t: &[V; 3]) -> Option<f64> {
+    let e1 = sub(t[1], t[0]);
+    let e2 = sub(t[2], t[0]);
+    let p = cross(d, e2);
+    let det = dot(e1, p);
+    if det.abs() <= 1e-300 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let s = sub(o, t[0]);
+    let u = dot(s, p) * inv;
+    let q = cross(s, e1);
+    let w = dot(d, q) * inv;
+    let eps = 1e-9;
+    if u < -eps || w < -eps || u + w > 1.0 + eps {
+        return None;
+    }
+    Some(dot(e2, q) * inv)
+}
+
+/// A curved face's signed distance at `p` (positive outside the
+/// material), its outward normal, and its least radius of curvature;
+/// `None` for a plane.
+fn face_field(f: &BlendFace, p: V, tol: f64) -> Option<(f64, V, f64)> {
+    match *f {
+        BlendFace::Plane { .. } => None,
+        BlendFace::Cylinder {
+            origin,
+            axis,
+            radius,
+            convex,
+        } => {
+            let q = sub(p, origin);
+            let r = sub(q, mul(axis, dot(q, axis)));
+            let s = if convex { 1.0 } else { -1.0 };
+            Some(((norm(r) - radius) * s, mul(unit(r), s), radius))
+        }
+        BlendFace::Cone {
+            apex,
+            axis,
+            slope,
+            convex,
+        } => {
+            let q = sub(p, apex);
+            let h = dot(q, axis);
+            let r = sub(q, mul(axis, h));
+            let l = (1.0 + slope * slope).sqrt();
+            let s = if convex { 1.0 } else { -1.0 };
+            let n = mul(sub(unit(r), mul(axis, slope)), s / l);
+            Some(((norm(r) - slope * h) * s / l, n, (norm(r) * l).max(tol)))
+        }
+        BlendFace::Sphere {
+            center,
+            radius,
+            convex,
+        } => {
+            let q = sub(p, center);
+            let s = if convex { 1.0 } else { -1.0 };
+            Some(((norm(q) - radius) * s, mul(unit(q), s), radius))
+        }
+        BlendFace::Torus {
+            center,
+            axis,
+            major_radius,
+            minor_radius,
+            convex,
+        } => {
+            let q = sub(p, center);
+            let tube = add(
+                center,
+                mul(unit(sub(q, mul(axis, dot(q, axis)))), major_radius),
+            );
+            let d = sub(p, tube);
+            let s = if convex { 1.0 } else { -1.0 };
+            Some(((norm(d) - minor_radius) * s, mul(unit(d), s), minor_radius))
+        }
+    }
 }
 
 /// The triangles of `tris` (the mesh a tool is applied to) that are the
@@ -208,63 +450,7 @@ fn sectioned(b: &build::Built, tris: &[[V; 3]], tol: f64) -> build::Built {
 /// gives none: its facets are the plane. The curve's tool is conformed
 /// to them (`meshbrep::blend::Path::Curve`).
 fn faces_facets(f: &BlendFace, points: &[V], tris: &[[V; 3]], tol: f64) -> Vec<[V; 3]> {
-    // The face's signed distance, its outward normal, and its least
-    // radius of curvature.
-    let field = |p: V| -> Option<(f64, V, f64)> {
-        match *f {
-            BlendFace::Plane { .. } => None,
-            BlendFace::Cylinder {
-                origin,
-                axis,
-                radius,
-                convex,
-            } => {
-                let q = sub(p, origin);
-                let r = sub(q, mul(axis, dot(q, axis)));
-                let s = if convex { 1.0 } else { -1.0 };
-                Some(((norm(r) - radius) * s, mul(unit(r), s), radius))
-            }
-            BlendFace::Cone {
-                apex,
-                axis,
-                slope,
-                convex,
-            } => {
-                let q = sub(p, apex);
-                let h = dot(q, axis);
-                let r = sub(q, mul(axis, h));
-                let l = (1.0 + slope * slope).sqrt();
-                let s = if convex { 1.0 } else { -1.0 };
-                let n = mul(sub(unit(r), mul(axis, slope)), s / l);
-                Some(((norm(r) - slope * h) * s / l, n, (norm(r) * l).max(tol)))
-            }
-            BlendFace::Sphere {
-                center,
-                radius,
-                convex,
-            } => {
-                let q = sub(p, center);
-                let s = if convex { 1.0 } else { -1.0 };
-                Some(((norm(q) - radius) * s, mul(unit(q), s), radius))
-            }
-            BlendFace::Torus {
-                center,
-                axis,
-                major_radius,
-                minor_radius,
-                convex,
-            } => {
-                let q = sub(p, center);
-                let tube = add(
-                    center,
-                    mul(unit(sub(q, mul(axis, dot(q, axis)))), major_radius),
-                );
-                let d = sub(p, tube);
-                let s = if convex { 1.0 } else { -1.0 };
-                Some(((norm(d) - minor_radius) * s, mul(unit(d), s), minor_radius))
-            }
-        }
-    };
+    let field = |p: V| face_field(f, p, tol);
     if matches!(f, BlendFace::Plane { .. }) || points.is_empty() {
         return Vec::new();
     }
@@ -429,7 +615,7 @@ fn conformed(b: &build::Built, tris: &[[V; 3]]) -> build::Built {
     out
 }
 
-fn made(f: &FilletNode, b: &build::Built, mult: u32) -> Result<Blends, String> {
+fn made(f: &FilletNode, b: &build::Built, mult: u32, warps: &[Warp]) -> Result<Blends, String> {
     let seg = |sweep: f64| segments(f, sweep).saturating_mul(mult.max(1));
     // Arcs with no polygon to conform to are revolved through the call's
     // own segments for a circle of their radius, a multiple of 4 so that
@@ -456,7 +642,19 @@ fn made(f: &FilletNode, b: &build::Built, mult: u32) -> Result<Blends, String> {
                 .collect();
         }
     }
-    let tools = build::tools(&b, &seg)?;
+    let mut tools = build::tools(&b, &seg)?;
+    // Conform the tools beside spheres and tori to their polygons
+    // ([`sectioned`]); before the sagitta is measured, which then counts
+    // the depth the vertices moved by.
+    if !warps.is_empty() {
+        for t in &mut tools {
+            for p in &mut t.mesh.positions {
+                for w in warps {
+                    *p = w.apply(*p);
+                }
+            }
+        }
+    }
     let mut sagitta: f64 = 0.0;
     let mut area = 0.0;
     for t in &tools {
@@ -842,11 +1040,11 @@ fn measure(
     out: &mut Vec<PlanDiag>,
 ) {
     let m = f.kind.module();
-    let sb = sectioned(b, conform, tolerance);
+    let (sb, warps) = sectioned(b, conform, tolerance);
     let c = conformed(&sb, conform);
-    let made_now = match made(f, &c, 1) {
+    let made_now = match made(f, &c, 1, &warps) {
         Ok(x) => Ok(x),
-        Err(_) => made(f, &sb, 1),
+        Err(_) => made(f, &sb, 1, &warps),
     };
     let blends = match made_now {
         Ok(x) => x,

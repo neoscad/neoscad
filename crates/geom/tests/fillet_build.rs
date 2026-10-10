@@ -620,3 +620,149 @@ fn occt_fillets_of_the_curved_goldens_agree() {
     }
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+/// Every face of `src`'s exact export, or why not; with
+/// `MESHBREP_OCCT_CHECK` set, also OCCT's reading of the file (one valid
+/// closed solid, no free edges, its volume within 1e-6 of ours).
+fn export_all_exact(src: &str, name: &str) -> Result<(), String> {
+    let ev = evaluate(src);
+    let keys = eval::dump::Keys::new(&ev.root, &lang::loader::StdFs);
+    let r = Renderer::new();
+    let opts = RenderOptions::default();
+    let normal = r
+        .render(&ev.root, &keys, opts.clone())
+        .expect("renders")
+        .geometry
+        .expect("geometry");
+    let x = ExactOptions {
+        step: meshbrep::StepOptions::default(),
+        clock: None,
+    };
+    let e =
+        geom::exact::export_step(&r, &ev.root, &keys, &opts, &normal, &x).map_err(|f| f.message)?;
+    if e.stats.exact_faces != e.stats.faces {
+        return Err(format!(
+            "{} of {} faces exact: {:?}",
+            e.stats.exact_faces, e.stats.faces, e.stats.partial
+        ));
+    }
+    let Some(check) = std::env::var_os("MESHBREP_OCCT_CHECK") else {
+        return Ok(());
+    };
+    let dir = std::env::temp_dir().join(format!("neoscad-fillet-gaps-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.step"));
+    std::fs::write(&path, &e.step).unwrap();
+    let out = std::process::Command::new(&check)
+        .arg(&path)
+        .output()
+        .expect("run the oracle");
+    let _ = std::fs::remove_file(&path);
+    let line = String::from_utf8_lossy(&out.stdout).to_string();
+    let num = |k: &str| {
+        field(&line, k)
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(f64::NAN)
+    };
+    let want = e.stats.volume;
+    let off = |k: &str| (num(k) - want).abs() / want;
+    let rel = off("volume").min(off("volume_fixed")).min(off("volume_gk"));
+    if field(&line, "valid") != Some("true")
+        || num("solids") != 1.0
+        || num("free_edges") != 0.0
+        || rel >= 1e-6
+    {
+        return Err(format!("OCCT: {line}"));
+    }
+    Ok(())
+}
+
+/// Models of `conformance fillet-corpus` (seed 2 unless said) that
+/// exported partly as facets, or failed the export's checks, before the
+/// fillet gap pass (`docs/fillets.md` 15.11), each standing for a class
+/// NeoSCAD's side fixed: a ball sunk to near its equator (its rim's tool
+/// conformed to the sphere's polygon, 42), a turned box with rounded
+/// sides (192, at the size its hint gives once the strips at an angle
+/// are checked), and a turned bracket cut flush on three sides (built in
+/// its own frame and turned, seed 1 model 22).
+#[test]
+fn corpus_gaps_export_exact() {
+    let cases = [
+        "fillet_edges(r = 1.08, edges = \"%circle\") union() { cube([27, 39.45, 8.01]); translate([15.92, 30.59, 7.52]) sphere(r = 7.02); }",
+        "fillet_edges(r = 1.03, edges = \"%circle\") rotate([28.46, 89.91, 89.37]) difference() { fillet_edges(r = 4.88, edges = \"|z\") cube([38, 29.98, 13.36]); translate([34.71, 23, 6.9]) cylinder(r = 1.97, h = 7.46); translate([9.49, 10.28, -1]) cylinder(r = 3.4, h = 15.36); translate([9.49, 10.28, 9.28]) cylinder(r1 = 3.4, r2 = 8.48, h = 5.08); }",
+        "fillet_edges(r = 0.28, edges = \"convex\") rotate([89.25, 39, 79.87]) difference() { cube([46.42, 36.78, 5.03]); cube([5.03, 36.78, 16.29]); translate([9.63, 27.77, -1]) cylinder(r = 1.93, h = 7.03); translate([9.63, 27.77, 2.86]) cylinder(r1 = 1.93, r2 = 5.09, h = 3.16); }",
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .enumerate()
+        .filter_map(|(i, src)| {
+            export_all_exact(src, &format!("gap{i}"))
+                .err()
+                .map(|e| format!("{src}: {e}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The classes of the gap pass that `meshbrep`'s reconstruction fixed,
+/// after its 0.3.0: an L-bracket rounded all over whose end arc's torus
+/// touches the wall (a looped edge, which only OCCT refused: run with
+/// `MESHBREP_OCCT_CHECK`, model 19), a block on a plate (needles where a
+/// convex blend ends square on the concave one, 1404), and a turned box's
+/// corner patch (its frame's poles kept off it, 900). Ignored until
+/// NeoSCAD depends on a `meshbrep` release with them.
+#[test]
+#[ignore = "needs a meshbrep release after 0.3.0 (needles, looped edges, sphere frames)"]
+fn corpus_gaps_meshbrep_fixed_export_exact() {
+    let cases = [
+        "fillet_edges(r = 0.51) union() { cube([35.85, 27.54, 6.2]); cube([35.85, 3.15, 16.64]); }",
+        "fillet_edges(r = 0.42) union() { cube([27.06, 25.19, 5.53]); translate([5.12, 1.45, 0]) cube([11.13, 12.03, 10.18]); }",
+        "fillet_edges(r = 3.45, edges = \"%line and convex\") rotate([71.7, 1.18, 72.02]) difference() { cube([46.99, 23.2, 25.53]); translate([10.09, 14.43, 14.95]) cylinder(r = 4.51, h = 11.58); }",
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .enumerate()
+        .filter_map(|(i, src)| {
+            export_all_exact(src, &format!("meshbrep{i}"))
+                .err()
+                .map(|e| format!("{src}: {e}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Two strips that overlap at an angle on a plane (a rounded box's corner
+/// arc and a pocket corner's rim beside it, corpus model 1366) are refused
+/// as an overlap before any boolean, and the hint's size builds.
+#[test]
+fn strips_overlapping_at_an_angle_are_refused() {
+    let src = "fillet_edges(r = R, edges = \"%circle and convex\") difference() { fillet_edges(r = 5.38, edges = \"|z\") cube([28.25, 31.11, 21.67]); translate([8.59, 18.09, 9.88]) linear_extrude(12.79) offset(r = 1.97) offset(delta = -1.97) square([9.56, 12.54], center = true); }";
+    let p = plan(&src.replace('R', "2.89"));
+    assert_eq!(p.status, Status::Overlap, "{:?}", p.diags);
+    let d = p.diags.last().unwrap();
+    let Some(Fix::Size(fix)) = d.fix else {
+        panic!("no size: {d:?}")
+    };
+    let fixed = plan(&src.replace('R', &fillet::number_text(fix)));
+    assert_eq!(fixed.status, Status::Built, "{fix}: {:?}", fixed.diags);
+}
+
+/// A size that fits only far below a ten-thousandth of the part (a nested
+/// call's first pass leaving a sliver of a face, corpus model 1136, whose
+/// hint offered r = 0.0004 for 0.84) is not offered as an edit: the hint
+/// says what fits and why.
+#[test]
+fn a_size_too_small_to_build_is_not_offered() {
+    let src = "fillet_edges(r = 0.84) fillet_edges(r = 0.83, edges = \"%line and convex\") difference() { union() { cube([41.22, 38.63, 6.16]); cube([6.16, 38.63, 20.71]); translate([31.57, 9.14, 0]) cylinder(r = 5.5, h = 15.72); } translate([32.41, 28.91, -1]) cylinder(r = 2.58, h = 8.16); translate([32.41, 28.91, 4.22]) cylinder(r1 = 2.58, r2 = 5.52, h = 2.94); }";
+    let p = plans(src).remove(0);
+    let d = p
+        .diags
+        .iter()
+        .find(|d| d.code == DiagCode::FilletTooLarge || d.code == DiagCode::FilletOverlap)
+        .unwrap_or_else(|| panic!("{:?}", p.diags));
+    assert!(d.fix.is_none(), "{d:?}");
+    assert!(
+        d.hints.iter().any(|h| h.contains("too small to build")),
+        "{d:?}"
+    );
+}

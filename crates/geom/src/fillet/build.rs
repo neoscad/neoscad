@@ -744,6 +744,133 @@ struct Across {
     tangents: [V; 2],
 }
 
+/// Stations along a blend's edge for [`oblique`]: per station the edge's
+/// point and where the blend touches face `k` there.
+fn stations(
+    spec: &BlendSpec,
+    i: usize,
+    s: &Section,
+    curve: Option<&Vec<Across>>,
+    k: usize,
+) -> Vec<(V, V)> {
+    if let Some(list) = curve {
+        return list.iter().map(|x| (x.p, x.tangents[k])).collect();
+    }
+    let e = &spec.edges[i];
+    let n = 64;
+    (0..=n)
+        .map(|j| {
+            let f = j as f64 / n as f64;
+            match &e.path {
+                Path::Arc {
+                    center,
+                    axis,
+                    sweep,
+                    ..
+                } => {
+                    let th = sweep * f;
+                    (
+                        turn(e.from, *center, *axis, th),
+                        turn(s.tangents[k], *center, *axis, th),
+                    )
+                }
+                _ => {
+                    let off = mul(sub(e.to, e.from), f);
+                    (add(e.from, off), add(s.tangents[k], off))
+                }
+            }
+        })
+        .collect()
+}
+
+/// Two blends' strips that overlap on a plane they share, where the rays
+/// [`check`] casts across each edge do not see it: they look for the other
+/// edge straight across, and two strips meeting at an angle (a rounded
+/// box's corner arc, whose strip on the top is wide, and the rim of a
+/// pocket's corner beside it) overlap off those rays. Built, the tools
+/// overlapped and the export fell back to facets (fillet corpus seed 2
+/// model 1366). The test: where one blend touches the plane, no point may
+/// lie inside the other's strip, within its width of its edge on the
+/// side its blend runs into the face. Edges that share a vertex are left
+/// to the corner rules.
+fn oblique(
+    facts: &Facts,
+    built: &Built,
+    sections: &[Section],
+    curve_at: &[Option<Vec<Across>>],
+) -> Option<Problem> {
+    let spec = &built.spec;
+    let b = &*facts.brep;
+    let tol = facts.tolerance;
+    let n = spec.edges.len();
+    for i in 0..n {
+        let ei = &facts.edges[built.edges[i]];
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            let ej = &facts.edges[built.edges[j]];
+            if ei.vertices.iter().any(|v| ej.vertices.contains(v)) {
+                continue;
+            }
+            for ki in 0..2 {
+                let fid = ei.brep_faces[ki];
+                let Some(kj) = (0..2).find(|&k| ej.brep_faces[k] == fid) else {
+                    continue;
+                };
+                if !matches!(b.faces[fid as usize].surface, Surface::Plane { .. }) {
+                    continue;
+                }
+                let wj = sections[j].widths[kj];
+                let mine = stations(spec, i, &sections[i], curve_at[i].as_ref(), ki);
+                let theirs = stations(spec, j, &sections[j], curve_at[j].as_ref(), kj);
+                for &(x, p) in &mine {
+                    // The nearest point of edge `j` to `p`, inside its
+                    // length, and its strip's direction there.
+                    let mut near: Option<(f64, V, V)> = None;
+                    for w in theirs.windows(2) {
+                        let (a, c) = (w[0].0, w[1].0);
+                        let d = sub(c, a);
+                        let dd = dot(d, d);
+                        if dd <= 0.0 {
+                            continue;
+                        }
+                        let s = dot(sub(p, a), d) / dd;
+                        if !(0.0..=1.0).contains(&s) {
+                            continue;
+                        }
+                        let q = add(a, mul(d, s));
+                        let dist = norm(sub(p, q));
+                        if near.is_none_or(|(x, _, _)| dist < x) {
+                            let into = sub(add(w[0].1, mul(sub(w[1].1, w[0].1), s)), q);
+                            near = Some((dist, q, into));
+                        }
+                    }
+                    let Some((dist, q, into)) = near else {
+                        continue;
+                    };
+                    // Ends of the other edge's range are not inside it.
+                    let (first, last) = (theirs[0].0, theirs[theirs.len() - 1].0);
+                    if norm(sub(q, first)) <= tol || norm(sub(q, last)) <= tol {
+                        continue;
+                    }
+                    if dot(sub(p, q), into) > 0.0 && dist < wj - tol {
+                        let have = norm(sub(x, q));
+                        return Some(Problem::Overlap {
+                            edges: [i.min(j), i.max(j)],
+                            face: ei.faces[ki],
+                            need: [sections[i].widths[ki], wj],
+                            have,
+                            best: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Turns `p` about the axis through `c` along unit `a` by `t` radians
 /// (`libm`'s trig, the same bits on wasm32).
 fn turn(p: V, c: V, a: V, t: f64) -> V {
@@ -1116,6 +1243,9 @@ fn check(facts: &Facts, t: &Topo, built: &Built) -> Result<(), Problem> {
                 _ => {}
             }
         }
+    }
+    if let Some(p) = oblique(facts, built, &sections, &curve_at) {
+        return Err(p);
     }
     // The tools themselves, cheaply: end caps that cross are an edge too
     // short for the blend; a curve's spine is marched from end to end

@@ -1317,7 +1317,22 @@ pub(crate) fn problem_diag(
     let num = |k: usize| names.num(k);
     let quote = |k: usize| names.words.get(k).cloned().unwrap_or_default();
     let size = number_text(f.size);
+    // A size under a ten-thousandth of the part (a hundred times the
+    // tolerance positions compare within) is not offered as an edit: it
+    // comes of a sliver face beside the edges (a nested call's first pass
+    // leaving 0.0008 of a plane), and blends that small are far inside the
+    // polygons of the curved faces around them, so the edit built a model
+    // that did not export exact (r = 0.0004 offered for 0.84, fillet corpus
+    // seed 2 model 1136). The hint still says what fits.
+    let tiny = 100.0 * facts.tolerance;
     let fit_hint = |best: Option<[f64; 2]>| match best {
+        Some([_, limit]) if limit < tiny => (
+            format!(
+                "the largest {sn} that fits is under {}, too small to build: a face beside these edges is a sliver; select fewer edges",
+                number_text(limit)
+            ),
+            None,
+        ),
         Some([b, limit]) => (
             format!(
                 "use {sn} = {}: the largest that fits is just under {}, which leaves almost nothing of the face beside the blend",

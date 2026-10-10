@@ -15,7 +15,9 @@ spindle tori: section 15.6); F5b, blends between curved surfaces with
 no common axis (planned in section 15.7), built in two phases: B-spline
 surfaces in `meshbrep` (section 15.8), then the marched spine, the
 swept-arc and ruled tools and NeoSCAD's side (section 15.9). Such a
-blend does not yet meet another blend at a vertex.
+blend does not yet meet another blend at a vertex. A fix pass (15.10)
+and a gap pass (15.11) brought the full corpus to 99.6% (the default
+300 to all of theirs); equal tees are still refused.
 Written
 2026-10-08 against `127be03` and the reference checkouts in
 `.reference/openscad` and `.reference/BOSL2`.
@@ -2060,6 +2062,140 @@ slant through a plate) leaves slivers of the tool on the plate's faces at
 every resolution; seed 1's 0226 (an r 0.69 fillet of a rod in a ball)
 keeps one face of six as facets at four times the segments. Both are
 reported as partly faceted, not written wrong; `docs/followups.md`.
+
+### 15.11 The gap pass
+
+The full corpus's failures after 15.10 (seed 2: 54 of 1,778 supported)
+were seven kinds of problem: three in `meshbrep`'s reconstruction, two
+in NeoSCAD's tools and size checks, one in the export render, one in
+the hints. Seven models are left (below).
+
+- **Rims beside spheres and tori** (`sphere`, 26): a sphere's rings do
+  not pass through a rim's tangent ring, which lay on the exact sphere,
+  outside its polygon by up to the polygon's depth; the tool's side
+  (the cone along the sphere's normal from that ring) stood in the gap
+  as a band of no width at the polygon's vertices, which reconstruction
+  could not make a face of ("empty parameter range"), and the export
+  wrote the blend as facets. Such an arc is now sectioned where its
+  tangent ring crosses the polygon's creases, and the tool's vertices
+  within four times the polygon's depth of the face are moved along its
+  normal by the depth under them, fading out across that band
+  (`geom::fillet::result`, `sectioned` and `Warp`): what `meshbrep` does
+  for a curve's tool (15.9), done on the arc's finished tool in both
+  renders. The new golden `sphere_equator` (a ball sunk to 0.4 below
+  its equator, r = 1.5) exported with one face of facets before; it is
+  now all exact, its volume within 2e-16 of the closed form, and OCCT's
+  within 5e-15.
+- **Needles** (`mixed`, `bracket` and `rotated`, 6): where a convex blend ends
+  square on a concave one (a block on a plate rounded all over), three
+  faces meet along one line, and the mesh left the wall a strip of no
+  width along it: the wall's loop ran out along one edge and back
+  along another, a corner on its own edge, which the validator refuses.
+  `meshbrep` now removes such needles after its collapses (`topo.rs`,
+  `remove_needles`): the longer edge is split at the shorter's far
+  corner and the two faces either side share the needle's line.
+- **Looped edges** (`mixed`, 6; the L-bracket band of `docs/followups.md`):
+  at the end of an L-bracket rounded all over, the end arc's convex
+  torus touches the wall at the corner of the concave blend, four faces
+  tangent at one point. The mesh gave the wall a needle between two
+  strips of the torus, one chain out and back, and the edge fitted
+  between its ends (which solve to one point) ran round a whole lobe of
+  the figure of eight the wall cuts from the torus: a face OCCT reads as
+  `BadOrientationOfSubshape`. An edge whose corners are one point and
+  whose chain retraces itself is now collapsed as a short one is
+  (`TEdge::retraced`); so is one whose corners are one point and whose
+  fitted curve is a wisp (under a thousand times the merge tolerance)
+  while its chain runs on (`TEdge::stray`: a turned box's rounded side
+  and a countersink's rim, a 3.5e-7 B-spline the validator called
+  degenerate).
+- **Sphere frames** (`rotated`, 1): a box corner's patch turned by
+  arbitrary angles kept the fixed z axis as its frame, whose pole lay
+  inside the patch 0.03 radians from its boundary, and the seam to it
+  crossed the boundary in parameter space. Past the bounding circles'
+  own normals, an axis is now taken only with both poles outside the
+  face (`seams.rs`, `face_reach`); a turned octant of a ball (`meshbrep`
+  test case `x12`) has no seam and a quarter of the file.
+- **Turned operations** (`rotated`, 2): the export render pushed a
+  transform down to the primitives, so a turned bracket's wall, cut from
+  its base flush on three sides, met the base's faces only to rounding,
+  and the kernel left slivers of no volume along them, which put the
+  export render's box 4 off the normal render's while the volumes
+  agreed. A transform that turns an operation by other than a multiple
+  of 90° now has the operation built in its parent's frame and the
+  result and its surface records turned into place (`exact::walk`,
+  `turned`), as the normal render turns its result.
+- **Strips at an angle** (`rounded`, 2, and `rotated` 0192 at its first size): `check` casts rays across each
+  edge, so a rounded box's corner arc (a wide spindle strip on the top)
+  and a pocket corner's rim beside it overlapped off the rays and were
+  built. Where one blend touches a plane it shares with another, no
+  point may now lie inside the other's strip (`build::oblique`); the
+  call is `fillet-overlap`, with the hint's size. It moved one model of
+  the full set that built valid (1042, an arc's strip overlapping a
+  hole's by 0.05 at the arc's end) to fixed by its hint.
+- **Hints far below the size asked** (`nested`, 2): a size under a
+  ten-thousandth of the part (r = 0.0004 for 0.84, from a nested call's
+  first pass leaving a sliver) is no longer offered as an edit
+  (`fillet::problem_diag`): the hint says what fits and that a face
+  beside the edges is a sliver. Those two models are now refused.
+
+**Results** (with OCCT read-back). The full set, 2,000 models (seed 2):
+1,768 of 1,775 supported (99.6%; before, 1,724 of 1,778), 415 of them
+fixed by their hint, 61 refused (58), no mesh failures (2). By family,
+before and after: `sphere` 67 → 93 of 93, `mixed` 183 → 192 of 192,
+`rotated` 82 of 89 → 88 of 88, `rounded` 168 → 170 of 170, `bracket`
+169 → 170 of 171, `nested` 70 of 77 → 70 of 75, `curved` 263 of 264,
+`plate` 385, `box` 214 and `spindle` 123 all of theirs, as before. No
+model that passed fails. The default 300 (seed 1): 259 of 259 (250 of
+259 before), every family whole.
+
+**Left**: seven of the full set. Five `nested` (four where a second
+call's edges lie on a first call's tori among its tools' sides, with
+boundaries crossing in parameter space or edges of 5e-8; one whose
+first pass sees a "360°" line, two faces folded onto each other, and
+whose hint is still too large), F2's pocketed bracket (1287), and the
+slanted hole's chamfer of 15.10 (0671). Model 0325 (`rotated`) is now
+refused: built in its own frame, its first pass's result does not
+reconstruct ("face 24 on a cylinder: unsupported topology"), so the
+second pass has no B-rep to select on; it failed in the export before.
+
+**Not built, and why.** *Equal tees* stay refused. Each half of the
+blend runs from one pinch to the other, where the faces touch and the
+ball's two contacts meet: the canal patch's arc there spans no angle,
+so a patch with its contacts as sides has a collapsed side (a pole) at
+each end. Reading `meshbrep`: validation closes a face's loop by its
+vertices, not in parameter space, and would take the gap a pole leaves
+between the two contacts' parameter-space curves; `measure` integrates
+`∮ G dv` along those curves, so the collapsed side's segment (a line of
+constant `u` on such a patch) would have to be added. The spine is
+where the two faces' offsets meet, and at a pinch they touch: the
+corrector's system (both offsets and the plane across the step) is
+singular there and loses accuracy as the inverse of the distance to
+it, while the patch is fitted to 1e-9 of the edge. The tool's
+cross-section shrinks to a point, and reconstruction's projection onto
+the patch, its pcurves and its corners near the pole are untested.
+A patch extended past both contacts would have no pole, but its
+contacts would lie inside it, and reconstruction takes a B-spline
+face's tangent contacts only along its sides. Either is a stage of its
+own, not a fix. *Swept blends meeting another blend at a vertex* stay
+refused too: two passes already separate convex from concave edges
+(`fillet::mod`, the pending second pass), and two blends of one sense
+meeting need a vertex blend, or a swept tool cut by the other tool's
+surface, whose end would lie on a B-spline or torus face. Four models
+of the full set are refused where such a blend meets another, two
+where one would end on a curved face.
+
+`meshbrep`'s changes are one patch for its next release (they change no
+public item): `remove_needles`, `retraced`, `stray` and the sphere frame,
+with unit tests of the first three and the `x12` case. The numbers above
+are with it. On `meshbrep` 0.3.0, NeoSCAD's side alone gives 1,756 of
+1,775 (98.9%): the looped edges, needles and sphere frames fail as
+before (`mixed` 183 of 192, `bracket` 169 of 171, `rotated` 86 of 88),
+and on the default 300, 253 of 259, where two `rotated` models (0166,
+0295) that passed before fail: built in their own frame, their meshes
+leave boundaries crossing or touching themselves that only the patched
+reconstruction resolves. NeoSCAD's side is meant to land
+with the release that carries the patch; `fillet_build.rs`'s
+`corpus_gaps_meshbrep_fixed_export_exact` is ignored until then.
 
 ## 16. Test plan
 

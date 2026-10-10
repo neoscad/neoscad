@@ -82,7 +82,10 @@ Each face of the file lies on the surface the model's source describes:
   shear and uniform `scale` keep surfaces exact. A non-uniform scale or a
   shear makes a cylinder elliptic and a sphere an ellipsoid, which are
   written as facets (reported). A `scale()` that flattens a dimension to
-  zero is dropped, as the render drops it.
+  zero is dropped, as the render drops it. An operation turned by an
+  angle other than a multiple of 90° is built in its own frame and its
+  result turned, as the render does, so faces its children share stay
+  flush (`exact::walk`, `turned`; `docs/fillets.md` 15.11).
 - **Booleans:** `union`, `difference` and `intersection` (and the
   implicit union of a module's children) are rendered by Manifold as
   usual; the exact faces are recovered from the result, so the

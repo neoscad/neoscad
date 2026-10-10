@@ -45,6 +45,7 @@ use eval::dump::Keys;
 use eval::node::{CsgOp, Discretizer, Node, NodeKind};
 use lang::diag::PathBase;
 use manifold_rust::csg_tree::CsgNode;
+use manifold_rust::linalg::{Mat3x4, Vec3};
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::{Error as KernelError, MeshGL64, OpType};
 use meshbrep::primitives::{self, Transform};
@@ -551,6 +552,61 @@ fn faceted_blend(t: &meshbrep::blend::Tool) -> TaggedMesh {
     m
 }
 
+/// For a transform node `n` under `m` (its children placed under
+/// `child_m`) that turns a boolean operation by an angle other than a
+/// multiple of 90°: the similarity that moves the operation, built in the
+/// parent's frame `m`, into place. The normal render computes an
+/// operation in its own frame and turns the result; built turned, the
+/// faces its children share (a bracket's wall cut from its base, flush on
+/// three sides) are no longer flush after rounding, and the kernel left
+/// slivers of no volume along them, which put the export render's box 4
+/// off the normal render's while the volumes agreed (fillet corpus seed 1
+/// model 22, seed 2 model 135). `None` for anything else, which is built
+/// in place as before.
+fn turned(n: &Node, m: &Matrix, child_m: &Matrix) -> Option<Matrix> {
+    let NodeKind::Transform { matrix, .. } = &n.kind else {
+        return None;
+    };
+    let s = similarity_scale(matrix)?;
+    // A signed permutation (times the scale) turns flush faces into flush
+    // faces exactly.
+    let square = (0..3).all(|j| (0..3).filter(|&i| matrix[i][j].abs() > 1e-12 * s).count() == 1);
+    if square || !boolean_below(n) {
+        return None;
+    }
+    let rel = mul(child_m, &invert(m)?);
+    similarity_scale(&rel)?;
+    Some(rel)
+}
+
+/// Whether the single child of `n`, through wrappers of one child, is an
+/// operation on two or more children: what a turn can leave slivers in.
+fn boolean_below(n: &Node) -> bool {
+    let mut at = n;
+    for _ in 0..64 {
+        let kids: Vec<&Node> = at.children.iter().filter(|c| !is_background(c)).collect();
+        match (&at.kind, kids.as_slice()) {
+            (NodeKind::Csg(_) | NodeKind::Fillet(_) | NodeKind::Group { .. }, k)
+                if k.len() >= 2 =>
+            {
+                return true;
+            }
+            (NodeKind::Fillet(_), [_]) => return true,
+            (
+                NodeKind::Transform { .. }
+                | NodeKind::Group { .. }
+                | NodeKind::Csg(_)
+                | NodeKind::Color { .. }
+                | NodeKind::Part { .. }
+                | NodeKind::Render { .. },
+                [one],
+            ) => at = one,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// A transform node whose matrix is finite but flattens space (a zero
 /// scale): its children have no volume however they are built.
 fn flattening(n: &Node) -> bool {
@@ -756,6 +812,10 @@ impl Walk<'_> {
             next: usize,
             /// A recurring subtree's first instance: kept when done.
             memo: Option<memo::Start>,
+            /// A turned operation built in its parent's frame
+            /// ([`turned`]): the first surface record it adds, and
+            /// the similarity that turns it into place.
+            local: Option<(usize, Matrix)>,
         }
         let mut stack: Vec<Waiting<'_>> = Vec::new();
         let mut visit: Option<(&Node, Matrix)> = Some((top, *m));
@@ -776,13 +836,15 @@ impl Walk<'_> {
                         let memo = key
                             .filter(|k| !self.memo.contains_key(k))
                             .map(|k| self.memo_start(k, &m));
+                        let local = turned(n, &m, &child_m).map(|rel| (self.surfaces.len(), rel));
                         stack.push(Waiting {
                             n,
-                            m: child_m,
+                            m: if local.is_some() { m } else { child_m },
                             op,
                             kids: Vec::with_capacity(n.children.len()),
                             next: 0,
                             memo,
+                            local,
                         })
                     }
                     None => {
@@ -843,6 +905,9 @@ impl Walk<'_> {
                     self.here = (child, part);
                 }
                 r = self.fillet(w.n, &w.m, r, passes)?;
+            }
+            if let Some((base, rel)) = w.local {
+                r = self.turn_into_place(r, base, &rel);
             }
             if let Some(start) = w.memo {
                 self.memo_keep(start, &r);
@@ -1486,6 +1551,54 @@ impl Walk<'_> {
         self.exact_extrusions += entry.exact_extrusions;
         self.placed_copies += 1;
         Some(result)
+    }
+
+    /// A turned operation built in its parent's frame ([`turned`]), moved
+    /// into place by `rel`: its mesh, and the surface records it added
+    /// from `base` on.
+    fn turn_into_place(&mut self, r: Res, base: usize, rel: &Matrix) -> Res {
+        let scale = similarity_scale(rel);
+        for s in &mut self.surfaces[base..] {
+            *s = transform_surface(s, rel, scale);
+        }
+        let Res::Solid(s) = r else {
+            return r;
+        };
+        if s.is_empty() {
+            return Res::Solid(s);
+        }
+        let gl = s.get_mesh_gl64(-1);
+        let np = (gl.num_prop as usize).max(3);
+        if gl.face_id.len() * 3 != gl.tri_verts.len() {
+            // No surface records to carry: the kernel's own transform.
+            let col = |c: usize| Vec3::new(rel[0][c], rel[1][c], rel[2][c]);
+            return Res::Solid(s.transform(&Mat3x4::from_cols(col(0), col(1), col(2), col(3))));
+        }
+        let flip = det3(rel) < 0.0;
+        let positions: Vec<f64> = gl
+            .vert_properties
+            .chunks(np)
+            .flat_map(|c| apply(rel, [c[0], c[1], c[2]]))
+            .collect();
+        let tri_verts: Vec<u64> = gl
+            .tri_verts
+            .chunks(3)
+            .flat_map(|c| {
+                if flip {
+                    [c[0], c[2], c[1]]
+                } else {
+                    [c[0], c[1], c[2]]
+                }
+            })
+            .collect();
+        match self.solid(positions, tri_verts, gl.face_id) {
+            // Turned, it is no longer a valid mesh: the kernel's transform.
+            Res::Solid(t) if t.is_empty() => {
+                let col = |c: usize| Vec3::new(rel[0][c], rel[1][c], rel[2][c]);
+                Res::Solid(s.transform(&Mat3x4::from_cols(col(0), col(1), col(2), col(3))))
+            }
+            other => other,
+        }
     }
 
     fn solid(&mut self, positions: Vec<f64>, tri_verts: Vec<u64>, face_id: Vec<u64>) -> Res {

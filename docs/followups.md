@@ -2696,34 +2696,40 @@ axis as exact B-spline surfaces. What they leave:
   blends end square where the base's mitred blends meet them, and the
   mitre curve between those stays sharp. A vertex patch (the horn torus
   of question 5, or a blend between the three blends) would round it.
-- **A chain from a line into an arc on an earlier concave blend**, the
-  end faces of an L-bracket rounded with every edge: for a band of
-  sizes (with r = 2.19 and a wall 5 thick, plates 6.15 to 6.4 thick) the
-  export keeps a closed B-spline edge between the plate's top and the
-  arc's torus near the point where the torus touches the plate, which
-  our validator passes and OCCT 8.0.1 rejects (11 of the 2,300 extended
-  corpus models, `mixed`). The nested calls on 8930933 make the same
-  file; it is F3's chain, which two passes now reach routinely.
-- **Concave rims of spheres** whose rim lies within about a tenth of the
-  sphere's radius of its equator (a ball sunk about halfway into a
-  plate) export partly as facets ("degenerate edge"); 31 of 2,000
-  extended corpus models (`sphere`), and on 8930933 as well. Conforming
-  the tool to the sphere's tessellation (below) or re-tessellating the
-  sphere about the rim's axis is the likely cure.
-- **Two strips meeting obliquely** are not compared: the size checks
-  cast across each edge and look for other boundaries, so a box arc's
-  wide (spindle) strip and a pocket corner's rim strip that overlap off
-  those rays are built, and the export falls back to facets (corpus
-  seed 2, `f3` set, model 1366).
-- **Rotated bodies** (the corpus's `rotated` family, an F3 body turned by
-  arbitrary angles inside the call): 8 of 106 fail, mostly the
-  reconstruction's topology checks or the box cross-check (a blind
-  hole's rims turned by 81°/82°/83° export with a box 3.8 off the mesh's
-  while the volumes agree; the same on 8930933).
-- **Hints far below the size asked** (r = 0.0004 for 0.84, where a
-  nested call's first pass leaves a sliver face) build but do not
-  reconstruct exact; a hint under the export's tolerance should be
-  refused instead (with the sliver item below).
+- **What the fillet gap pass left** (`docs/fillets.md` 15.11): of the
+  full corpus (seed 2, 2,000 models) seven supported models still fail,
+  six exporting partly as facets and one hint whose edit does not fix
+  its call. Five are `nested` (0049, 1168, 1321, 1937: a second call's
+  edges on a first call's tori and the tool sides around them, with
+  boundaries crossing in parameter space or edges of 5e-8; 0150: a
+  "360°" concave line, two faces folded onto each other, whose hint
+  size is still too large); 1287 is F2's pocketed bracket (a top face
+  with more than one outer loop, lines only); 0671 is the d 0.64 chamfer
+  of a hole through a plate at a slant (15.10). Model 0325 (`rotated`) is
+  now refused rather than failed: built in its own frame, its first
+  pass's result no longer reconstructs ("face 24 on a cylinder:
+  unsupported topology"), so the second pass has no B-rep to select on.
+  Those figures need `meshbrep`'s fillet-gap patch (needles, looped
+  edges, sphere frames); on 0.3.0 two default-corpus `rotated` models
+  (seed 1, 0166 and 0295) fail that passed before, and
+  `corpus_gaps_meshbrep_fixed_export_exact` is ignored until the bump.
+- **Strips meeting obliquely on curved faces** are not compared:
+  `fillet::build::oblique` tests where one blend touches a plane they
+  share against the other's strip, and only on planes. Two strips on a
+  cylinder or a sphere that overlap off the rays `check` casts are built.
+- **Turned operations are built in their own frame** in the export
+  render (`exact::walk::turned`) only where the turn is by an angle other
+  than a multiple of 90° and the transform's child is an operation (or
+  a fillet); a turned primitive, or a turn several wrappers above the
+  operation (more than 64 single-child nodes), is built turned as
+  before. Unions and differences under a general similarity (a mirror
+  and a turn) are covered; a non-uniform scale never was exact.
+- **Sizes far below the one asked**: a size hint under a ten-thousandth
+  of the part (a hundred times the tolerance positions compare within)
+  is no longer offered as an edit (`fillet::problem_diag`); a user who
+  types such a size still gets a call that builds and does not
+  reconstruct exact. Refusing such sizes outright, or writing the
+  slivers as facets on purpose, would close it.
 - **Two-pass cost**: a two-pass call reconstructs what its first pass
   makes (cached under the call's key, the first sense and the size), and
   a size hint on one plans the call again up to six times. Fine for
@@ -2745,12 +2751,13 @@ axis as exact B-spline surfaces. What they leave:
   generator's sliver) builds but does not reconstruct exact (1 of
   1,740). Blends near the export's tolerance (1e-6 of the model) could
   be refused or written as facets on purpose.
-- **Arcs beside spheres and tori are not conformed** to the mesh: a
-  sphere's rings do not pass through the rim, so the normal render keeps
-  the sphere's facets standing over the blend by up to their sagitta
-  (the STEP export is exact). Conforming would need the tool's tangent
-  ring on the sphere's polygon, or the sphere re-tessellated about the
-  rim's axis.
+- **The sphere and torus conforming is NeoSCAD's, not meshbrep's**: an
+  arc's tool beside a sphere or a torus is sectioned where its tangent
+  ring crosses the polygon's creases and its vertices moved onto the
+  facets afterwards (`fillet::result::Warp`), which repeats what
+  `meshbrep` does for a curve's tool (`Path::Curve`'s `facets`).
+  `Path::Arc` taking facets too would put both in one place; that is a
+  breaking change to `meshbrep`'s `Path`, for its next minor release.
 - **A concave tool's overlap into the material** behind a curved face
   is capped at half the gap to a coaxial cylinder behind it
   (`fillet::build::wall`), not against other walls (a plane, or a cone,
@@ -2840,19 +2847,27 @@ axis as exact B-spline surfaces. What they leave:
   since 0.2.0 (spindle tori, the corner margin, B-spline surfaces, curved blends) are
   listed in its README for its next release.
 - **Blends between curved faces do not meet other blends** (F5b phase
-  2, `docs/fillets.md` 15.9): a swept edge ending at a vertex with
-  another selected edge is `fillet-unsupported-vertex` (left sharp
-  under `"all"`). A tee's blend meeting the branch's rim blend, or the
-  two rims of a cross hole meeting a third edge, need either a vertex
-  blend or a swept tool cut by the other tool's surface rather than a
-  plane.
-- **Equal tees pinch**: where the two faces touch along the edge (two
-  equal cylinders at a tee, at the two points where the curve's halves
-  meet) the blend would shrink to a point, which a regular B-spline
-  patch cannot represent; the call is refused there. OCCT builds it
-  (volume 2968.0178 for `r = 5` rods with `r = 1`). A patch split at the
-  pinch with a collapsed side (a pole, which phase 1 does not support)
-  would cover it.
+  2, `docs/fillets.md` 15.9; still so after 15.11): a swept edge ending
+  at a vertex with another selected edge of the same sense is
+  `fillet-unsupported-vertex` (left sharp under `"all"`). Two passes do
+  not help there: they already separate convex from concave, and two
+  blends of one sense meeting need a vertex blend, or a swept tool cut
+  by the other tool's surface rather than a plane, whose end then lies
+  on a B-spline or torus face that reconstruction has to meet. Of the
+  2,000 full-corpus models, four are refused where such a blend meets
+  another and two where one would end on a curved face.
+- **Equal tees pinch** (still refused after 15.11): where the two faces
+  touch along the edge (two equal cylinders at a tee, at the two points
+  where the curve's halves meet) the blend shrinks to a point, and the
+  call is refused there. OCCT builds it (volume 2968.0178 for `r = 5`
+  rods with `r = 1`). `docs/fillets.md` 15.11 sets out what building it
+  needs: a canal patch per half with a collapsed side at each pinch
+  (validation closes loops by their vertices and would take it;
+  `measure` integrates along the parameter-space curves and would need
+  the collapsed side's segment added; the spine's corrector, the tool
+  and reconstruction near the pole would need work), or a patch
+  extended past both contacts, which needs tangent contacts inside a
+  B-spline face rather than along its sides.
 - **Tiny curved blends against deep facets**: the swept tool is
   conformed to the faces' polygons within a band of four times their
   depth; a blend smaller than about twice that depth cannot follow them,

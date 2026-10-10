@@ -275,7 +275,9 @@ chamfer_edges(d = 1, edges = "%circle and >z")
   between a plane square to the axis, a coaxial cylinder, cone or
   torus, or a sphere centred on it. A boss's top rim takes any radius
   that leaves some of its top (past half the boss's radius the blend is
-  the outer part of a spindle torus).
+  the outer part of a spindle torus). A rim on a sphere or a torus, at
+  any height (a ball sunk to its equator in a plate), is fitted to the
+  sphere's facets in the mesh and exact in STEP.
 - **Mixed corners**: convex and concave edges meeting at a vertex, in
   two passes (above).
 - **Chains**: lines and arcs that run on into each other (a rounded
@@ -312,8 +314,8 @@ the editor offers as a quick fix.
 | `fillet-count` | error | The selection is not `expect` edges; lists them. Fix: the matched count written into `expect` |
 | `fillet-no-edges` | warning | The selector matched nothing; the child is unchanged |
 | `fillet-skipped` | info | Edges the selector named that are never rounded (polygon seams, tangent edges), by reason |
-| `fillet-too-large` | error | A blend does not fit its cross-section or the face beside it. Fix: a size 5% under the largest that fits |
-| `fillet-overlap` | error | Two blends overlap on the face between them. Same fix |
+| `fillet-too-large` | error | A blend does not fit its cross-section or the face beside it. Fix: a size 5% under the largest that fits; no edit when that is under a ten-thousandth of the part (a sliver of face beside the edges), which no export holds exactly |
+| `fillet-overlap` | error | Two blends overlap on the face between them, across it or, on a plane, meeting at an angle (a rounded corner's arc beside a pocket's rim). Same fix |
 | `fillet-unsupported-vertex` | error | Selected edges meet at a vertex the call cannot round, even in two passes (three concave chamfers, more than three faces, a curved third face, an arc ending on a face off its axis). Select fewer edges there, or round them in nested calls of your own. A problem in one of a call's two passes names the pass |
 | `fillet-unsupported-edge` | error, or a warning under the default `"all"` | A selected edge of a kind not rounded yet (above) |
 | `fillet-no-brep` | error | The children could not be read as faces and edges (bodies touching along an edge only, say); overlap them |
@@ -508,14 +510,12 @@ is in `docs/followups.md` ("Fillets and chamfers"). In short:
 - **An arc's blend** ends only where it runs on smoothly into another
   edge or on a plane through its axis; other ends are
   `fillet-unsupported-vertex`.
-- **Concave rims on spheres** near the sphere's equator (a ball sunk
-  about half its radius into a plate) can come out of the STEP export
-  partly as facets.
+- **Strips at an angle** are compared on planes only: two blends whose
+  strips overlap on a cylinder or a sphere off the line straight across
+  each edge are built, and the export may fall back to facets there.
 - **Near the largest size that fits**, a sliver of face can be left that
   the STEP export writes as facets; the size hints keep 5% under it for
   this reason.
-- **The mesh beside spheres and tori** keeps the sphere's facets standing
-  over the blend by up to their sagitta (the STEP export is exact).
 - **Colours and parts**: a blend takes the children's colour or part
   only when all their faces share one.
 - **Seams of `offset(r)` with `$fn`** are selectable edges, so `"all"`

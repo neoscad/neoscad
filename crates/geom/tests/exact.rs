@@ -495,16 +495,34 @@ fn a_tunnel_of_no_thickness_in_the_mesh_is_a_note() {
     );
 }
 
-/// A rotated Menger sponge: bodies that touch along edges, which Manifold
-/// keeps apart and rounding then joins on the wrong side, so a corner of
-/// a face lies on another edge of the same face. The file used to pass
-/// our checks and read back from OCCT with a face split and a solid that
-/// would not close (`example024.scad`: 60 free edges). It is refused.
+/// A Menger sponge whose cubes are each turned on their own: bodies that
+/// touch along edges, which Manifold keeps apart and rounding then joins
+/// on the wrong side, so a corner of a face lies on another edge of the
+/// same face. The file used to pass our checks and read back from OCCT
+/// with a face split and a solid that would not close (`example024.scad`
+/// turned: 60 free edges). It is refused.
 #[test]
 fn a_boundary_touching_itself_is_refused() {
-    let src = "module m(s, l) { cube([30, s / 3, s / 3], center = true);\n  if (l > 1) for (i = [-1:1], j = [-1:1]) if (i || j) translate([0, i * s / 3, j * s / 3]) m(s / 3, l - 1); }\nrotate([45, atan(1 / sqrt(2)), 0]) difference() { cube(27, center = true); for (v = [[0, 0, 0], [0, 0, 90], [0, 90, 0]]) rotate(v) m(27, 2); }";
+    let src = "difference() { rotate([45, atan(1 / sqrt(2)), 0]) cube(27, center = true); for (v = [[0, 0, 0], [0, 0, 90], [0, 90, 0]]) for (i = [-1:1], j = [-1:1]) if (i || j) rotate([45, atan(1 / sqrt(2)), 0]) rotate(v) translate([0, i * 9, j * 9]) cube([30, 3, 3], center = true); for (v = [[0, 0, 0], [0, 0, 90], [0, 90, 0]]) rotate([45, atan(1 / sqrt(2)), 0]) rotate(v) cube([30, 9, 9], center = true); }";
     let err = export_with(&Renderer::new(), src).unwrap_err();
     assert!(err.contains("touches itself"), "{err}");
+}
+
+/// The same sponge turned as a whole, `example024.scad`'s way: the
+/// operation is built in its own frame and its result turned, as the
+/// normal render does, so the bodies touching along edges stay apart as
+/// they were built, and the export holds the exact volume (27³ less the
+/// level-2 holes: 10,800). It was refused as the one above is.
+#[test]
+fn a_turned_operation_is_built_in_its_own_frame() {
+    let src = "module m(s, l) { cube([30, s / 3, s / 3], center = true);\n  if (l > 1) for (i = [-1:1], j = [-1:1]) if (i || j) translate([0, i * s / 3, j * s / 3]) m(s / 3, l - 1); }\nrotate([45, atan(1 / sqrt(2)), 0]) difference() { cube(27, center = true); for (v = [[0, 0, 0], [0, 0, 90], [0, 90, 0]]) rotate(v) m(27, 2); }";
+    let e = export(src);
+    assert_eq!(e.stats.exact_faces, e.stats.faces);
+    assert!(
+        (e.stats.volume - 10800.0).abs() < 1e-9,
+        "{}",
+        e.stats.volume
+    );
 }
 
 /// A cube cut by two others whose faces miss each other by 1e-10: the
