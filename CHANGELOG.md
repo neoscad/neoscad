@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2
+
+### Fixed
+
+- **The Windows installers build again.** 0.6.1 shipped without them: the
+  Windows app did not compile. 0.6.2 is 0.6.1 with that fixed, and
+  nothing else changes.
+
 ## 0.6.1
 
 ### Fixed
