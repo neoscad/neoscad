@@ -351,12 +351,17 @@ fn export_counted(src: &str) -> (Result<ExactExport, Box<geom::exact::ExactFailu
 
 /// A model of no curves is the same mesh at twice the segments, so a
 /// mismatch at the first attempt is not reconstructed again only to fail
-/// the same way: two blocks on a plate touching along an edge, rotated so
-/// that rounding joins the plate's top face around them on one side. The
-/// regions around the touch are written as facets from that mesh.
+/// the same way: three blocks on a plate, the middle one touching each of
+/// the others along an edge, turned so that rounding leaves a corner of
+/// the plate's top face lying on that face's own boundary ("touches
+/// itself"). The regions around the touch are written as facets from that
+/// mesh. (Two blocks touching along one edge, `rotate([30, 20, 10])`, did
+/// this until the export render built a turned operation in its parent's
+/// frame and meshbrep 0.4.0 resolved that touch; that model now exports
+/// with every face exact, so it no longer reaches the fallback.)
 #[test]
 fn a_mismatch_in_the_same_mesh_is_reconstructed_once() {
-    let src = "rotate([30, 20, 10]) { translate([0, 0, -1]) cube([2, 2, 1]); cube(1); translate([1, 1, 0]) cube(1); }";
+    let src = "rotate([45, 73, 20]) { translate([0, 0, -1]) cube([3, 3, 1]); cube(1); translate([1, 1, 0]) cube(1); translate([2, 0, 0]) cube(1); }";
     let (r, triangles_at_1) = export_counted(src);
     let e = r.unwrap_or_else(|f| panic!("{}", f.message));
     let p = e.stats.partial.as_ref().expect("a partial export");
