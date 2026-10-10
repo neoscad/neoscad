@@ -1700,7 +1700,7 @@ impl Window {
                             file_name(&o.to_string_lossy())
                         ))),
                         Err(CoreError::Cancelled) => None,
-                        Err(e) => Some(Err(e.to_string())),
+                        Err(e) => Some(Err(run::ExportFailure::not_written(e.to_string()))),
                     }
                 }
                 _ => run::export_message(
@@ -1717,7 +1717,11 @@ impl Window {
                 ),
             })
             .await
-            .unwrap_or_else(|_| Some(Err("The export panicked (a bug in NeoSCAD).".into())));
+            .unwrap_or_else(|_| {
+                Some(Err(run::ExportFailure::not_written(
+                    "The export panicked (a bug in NeoSCAD).".into(),
+                )))
+            });
             toast.dismiss();
             let Some(w) = me.upgrade() else { return };
             {
@@ -1745,11 +1749,16 @@ impl Window {
                     w.toast(&message);
                 }
                 Some(Err(why)) => {
-                    glib::g_debug!("neoscad", "export: {name} failed: {why}");
-                    let alert = adw::AlertDialog::new(
-                        Some(&format!("“{name}” Was Not Exported")),
-                        Some(&why),
-                    );
+                    glib::g_debug!("neoscad", "export: {name} failed: {}", why.message);
+                    // Written with failed fillets: the file is there, so
+                    // the title says so, and the message why it is not
+                    // the part that was modelled.
+                    let title = if why.written {
+                        format!("“{name}” Exported, but Its Fillets Failed")
+                    } else {
+                        format!("“{name}” Was Not Exported")
+                    };
+                    let alert = adw::AlertDialog::new(Some(&title), Some(&why.message));
                     alert.add_response("close", "_Close");
                     alert.present(Some(&w.win));
                 }

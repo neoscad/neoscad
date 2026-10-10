@@ -564,18 +564,30 @@ public sealed partial class DocumentSession
     public string? LastStepReport { get; private set; }
 
     /// <summary>
+    /// Whether the last export that failed wrote its file all the same: a
+    /// model whose fillet or chamfer calls failed is written with those
+    /// edges sharp and the export still fails (docs/fillets.md, section
+    /// 18, decision 2), so the window says it was exported, and why it is
+    /// not the part that was modelled, rather than "was not exported".
+    /// </summary>
+    public bool LastExportWritten { get; private set; }
+
+    /// <summary>
     /// Export the model to <paramref name="output"/> as <paramref
     /// name="format"/> (an id from <c>NeoScad.ExportFormats()</c>): a full
     /// render of the current text with the customizer's values, on the
     /// thread pool, reporting each stage to <paramref name="stage"/> (on
     /// the core's thread) and stopped by <paramref name="cancel"/>. The
-    /// core writes geometry atomically. Returns why it failed, or null.
+    /// core writes geometry atomically. Returns why it failed, or null;
+    /// failed but written (<see cref="LastExportWritten"/>) when only
+    /// its fillets failed.
     /// </summary>
     public async Task<string?> ExportAsync(string output, string format, Action<string>? stage = null,
         CancelToken? cancel = null)
     {
         if (core is null) return $"The core did not start: {CoreService.Error}";
         output = Path.GetFullPath(output);
+        LastExportWritten = false;
         try
         {
             var info = Array.Find(NeoScad.ExportFormats(), f => f.Id == format);
@@ -597,6 +609,13 @@ public sealed partial class DocumentSession
             var r = await CoreService.Run(() => core.ExportFile(path, output, options, run, cancel, listener));
             LastStepReport = r.Step?.Summary;
             var failure = NeoScad.ExportFailureReason(r);
+            // Written with failed fillets: the core's reason says the file
+            // was written and which calls left their edges sharp.
+            if (failure is not null && r.Written && r.FilletErrors.Length > 0)
+            {
+                LastExportWritten = true;
+                return failure;
+            }
             // A refused STEP export's report says why, with the faceted
             // regions it found.
             return failure is not null && r.Step is { } step ? step.Summary : failure;

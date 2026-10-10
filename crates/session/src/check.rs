@@ -1991,15 +1991,7 @@ impl Session {
         // is not what it says, so the check fails as an export does
         // (`docs/fillets.md`, section 18, decision 2). Its diagnostics
         // are in `diagnostics`; the count is here.
-        let fillet_errors = model
-            .log
-            .lines
-            .iter()
-            .filter(|l| match (l.severity, l.code) {
-                (Some(s), Some(c)) => eval::is_fillet_error(s, c, &l.message),
-                _ => false,
-            })
-            .count();
+        let fillet_errors = model.log.fillet_errors().count();
         let errors = count(Level::Error) + fillet_errors;
         let exit_code = if errors > 0 { 1 } else { 0 };
         let mut timings = serde_json::Map::new();

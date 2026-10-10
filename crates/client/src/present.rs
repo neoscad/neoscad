@@ -242,9 +242,21 @@ pub fn export_format_info(id: &str) -> Option<ExportFormatInfo> {
 /// lines (every line but warnings when there is no `ERROR` line, such as
 /// "Current top level object is not a 3D object."), else the exit code.
 /// `None` when it succeeded.
+///
+/// A file written with failed fillet or chamfer calls (`r.written` with
+/// `r.fillet_errors`) is a failure too, said as one: "The file was
+/// written, but 1 fillet_edges() call failed and its edges are sharp:
+/// ...". A host that titles its alert by `written` says it was exported;
+/// one that does not still never reports the sharp part as a success.
 pub fn export_failure_reason(r: &ExportResult) -> Option<String> {
     if r.exit_code == 0 {
         return None;
+    }
+    if r.written && !r.fillet_errors.is_empty() {
+        return Some(format!(
+            "The file was written, but {}",
+            session::fillets::failure_text(&r.fillet_errors)
+        ));
     }
     let lines: Vec<&str> = r.console.split('\n').filter(|l| !l.is_empty()).collect();
     let errors: Vec<&str> = lines

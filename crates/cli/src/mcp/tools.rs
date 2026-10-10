@@ -795,13 +795,23 @@ impl Tools {
         text.push('\n');
         text.push_str(&geometry_line_of(&r["geometry"], &r["diagnostics"]));
         let mut back = Value::Null;
+        // Written is not the same as succeeded: a model whose fillet or
+        // chamfer calls failed is written with those edges sharp and the
+        // export fails (`docs/fillets.md`, section 18, decision 2), so the
+        // agent hears both rather than shipping the part as rounded.
+        let written = r["written"].as_bool().unwrap_or(r["exit_code"] == 0);
+        let fillet_errors = fillet_errors_of(&r);
         if let Some(out) = &export
-            && r["exit_code"] == 0
+            && written
         {
             text.push_str(&format!("\nwrote {} ({} bytes)", out.display(), r["bytes"]));
             back = read_back(out);
             if !back.is_null() {
                 text.push_str(&format!("; {}", read_back_text(&back)));
+            }
+            if !fillet_errors.is_empty() {
+                text.push_str("\nbut ");
+                text.push_str(&session::fillets::failure_text(&fillet_errors));
             }
         }
         // A STEP export says how much of it is exact and where it is not,
@@ -823,9 +833,12 @@ impl Tools {
         if export.is_some() {
             // Only a written file is an output: `check` says "wrote" for
             // one, and a refused STEP export writes nothing.
-            if r["exit_code"] == 0 {
+            if written {
                 s["output"] = r["output"].clone();
                 s["bytes"] = r["bytes"].clone();
+            }
+            if !fillet_errors.is_empty() {
+                s["fillet_errors"] = json!(fillet_errors);
             }
             if !back.is_null() {
                 s["read_back"] = back;
@@ -994,6 +1007,11 @@ impl Tools {
                                 out.text
                                     .push_str(&format!("; {}", read_back_text(&s["read_back"])));
                             }
+                            let failed = fillet_errors_of(s);
+                            if !failed.is_empty() {
+                                out.text.push_str("\nbut ");
+                                out.text.push_str(&session::fillets::failure_text(&failed));
+                            }
                         }
                         None => out.text.push_str("\nexport failed: nothing was written"),
                     }
@@ -1007,6 +1025,9 @@ impl Tools {
                     out.structured["export"] = json!({
                         "output": s["output"], "bytes": s["bytes"], "read_back": s["read_back"],
                     });
+                    if !s["fillet_errors"].is_null() {
+                        out.structured["export"]["fillet_errors"] = s["fillet_errors"].clone();
+                    }
                     if !s["exact"].is_null() {
                         out.structured["export"]["exact"] = s["exact"].clone();
                     }
@@ -1845,6 +1866,17 @@ fn join_strs(v: &[Value]) -> String {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The failed fillet and chamfer calls' messages of a served `export`
+/// (or a `render` result that carries them), empty when there are none.
+fn fillet_errors_of(r: &Value) -> Vec<String> {
+    r["fillet_errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
 }
 
 /// `ok`, or why not, and the counts.

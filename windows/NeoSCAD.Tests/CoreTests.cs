@@ -400,6 +400,19 @@ public class DocumentSessionTests
             Assert.StartsWith("STEP: 10 of 10 faces exact (100%).", doc.LastStepReport);
             var text = File.ReadAllText(output);
             Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(text, "CYLINDRICAL_SURFACE").Count);
+            Assert.False(doc.LastExportWritten);
+            // A radius that does not fit (docs/fillets.md, section 18,
+            // decision 2): the part is written with those edges sharp, and
+            // the export still fails, saying the file was written.
+            doc.LoadUntitled("fillet_edges(r = 3, edges = \"|y\") cube([20, 10, 4]);\n", autorun: false);
+            var sharp = Path.Combine(dir, "sharp.step");
+            var failure = await doc.ExportAsync(sharp, "step") ?? "";
+            Assert.StartsWith("The file was written, but 1 fillet_edges() call failed and its edges are sharp: "
+                + "fillet_edges(): the blends of edges 1 and 2 overlap", failure);
+            Assert.True(doc.LastExportWritten);
+            Assert.StartsWith("STEP: 6 of 6 faces exact (100%).", doc.LastStepReport);
+            Assert.StartsWith("ISO-10303-21;", File.ReadAllText(sharp));
+            doc.LoadUntitled("fillet_edges(r = 1, edges = \"|y\") cube([20, 10, 4]);\n", autorun: false);
             File.Delete(output);
             doc.SetEnable(new LanguageSettings { Exact = true }.Names());
             Assert.Contains("empty", await doc.ExportAsync(output, "step"));

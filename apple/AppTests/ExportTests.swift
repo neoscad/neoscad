@@ -134,6 +134,48 @@ private func tempDirectory() throws -> URL {
         doc.close()
     }
 
+    /// A fillet that does not fit (docs/fillets.md, section 18, decision
+    /// 2): the part is written with those edges sharp, and the export
+    /// still ends in a warning alert that says the file was written and
+    /// why it is not the rounded part, never in "exported" alone.
+    @Test func aFailedFilletIsWrittenAndSaysSo() async throws {
+        let dir = try tempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (exact, fillets) = (LanguageSettings.exact, LanguageSettings.fillets)
+        defer {
+            LanguageSettings.exact = exact
+            LanguageSettings.fillets = fillets
+        }
+        LanguageSettings.exact = true
+        LanguageSettings.fillets = true
+        let doc = try await openDocument("fillet_edges(r = 3, edges = \"|y\") cube([20, 10, 4]);\n")
+        let step = dir.appendingPathComponent("sharp.step")
+        var s = ExportSettings()
+        s.format = .step
+        guard case .writtenButFailed(_, let bytes, let alert) = await doc.performExport(to: step, settings: s) else {
+            Issue.record("a failed fillet was not reported as written but failed")
+            return
+        }
+        #expect(bytes > 0)
+        #expect(alert.title == "“sharp.step” was exported, but its fillets failed")
+        #expect(
+            alert.message.hasPrefix(
+                "The file was written, but 1 fillet_edges() call failed and its edges are sharp: "
+                    + "fillet_edges(): the blends of edges 1 and 2 overlap"))
+        #expect(alert.message.hasSuffix("STEP: 6 of 6 faces exact (100%)."))
+        let text = try String(contentsOf: step, encoding: .utf8)
+        #expect(text.hasPrefix("ISO-10303-21;"))
+        // The same for a mesh.
+        let stl = dir.appendingPathComponent("sharp.stl")
+        s.format = .binaryStl
+        guard case .writtenButFailed = await doc.performExport(to: stl, settings: s) else {
+            Issue.record("a failed fillet's STL was not reported as written but failed")
+            return
+        }
+        #expect(FileManager.default.fileExists(atPath: stl.path))
+        doc.close()
+    }
+
     @Test func aTwoDimensionalRenderStartsOnSVG() async throws {
         let doc = try await openDocument("square(10);\n")
         doc.renderDocument(nil)

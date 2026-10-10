@@ -418,6 +418,17 @@ impl Log {
     pub fn count(&self, s: Severity) -> usize {
         self.lines.iter().filter(|l| l.severity == Some(s)).count()
     }
+
+    /// The errors of failed `fillet_edges()`/`chamfer_edges()` calls
+    /// (`eval::is_fillet_error`): each left its child sharp. `check`
+    /// counts these as `counts.fillet_errors` and an export fails with
+    /// them, so the two always agree on what a failed fillet is.
+    pub fn fillet_errors(&self) -> impl Iterator<Item = &eval::Logged> {
+        self.lines.iter().filter(|l| match (l.severity, l.code) {
+            (Some(s), Some(c)) => eval::is_fillet_error(s, c, &l.message),
+            _ => false,
+        })
+    }
 }
 
 /// Timings of one request, in milliseconds (0 without a clock).
@@ -638,7 +649,21 @@ pub struct SummaryFacts<'a> {
 /// The result of [`Session::export`].
 #[derive(Debug)]
 pub struct Exported {
+    /// 0, or 1 when the export failed. A model with failed fillet or
+    /// chamfer calls exits 1 even though its files were written
+    /// (`written`), as the command line's `-o` does (`docs/fillets.md`,
+    /// section 18, decision 2): otherwise a host would report success for
+    /// a part whose edges are sharp.
     pub exit_code: u8,
+    /// Every output was written. True for an exit code of 0, and for an
+    /// exit code of 1 caused by `fillet_errors`: the host then says the
+    /// file was written but its fillets failed, never that it was not
+    /// exported.
+    pub written: bool,
+    /// The messages of the failed `fillet_edges()`/`chamfer_edges()`
+    /// calls' errors ([`Log::fillet_errors`], what `check` counts as
+    /// `counts.fillet_errors`), in the order printed.
+    pub fillet_errors: Vec<String>,
     pub log: Log,
     pub geometry: Option<geom::Geometry>,
     pub timings: Timings,
@@ -2328,14 +2353,24 @@ impl Session {
             geometry = root.clone();
             Ok(if ok { 0 } else { EXIT_ERROR })
         })();
-        let exit_code = match step {
+        let (mut exit_code, written) = match step {
             Err(Stop::Cancelled) => return Err(self.cancelled()),
-            Err(Stop::Exit(c)) => c,
-            Ok(c) => c,
+            Err(Stop::Exit(c)) => (c, false),
+            Ok(c) => (c, true),
         };
         let (log, timings) = self.finish(pipe);
+        // A fillet or chamfer call that failed left its child sharp: the
+        // files are written (so the model can be looked at), but the
+        // export fails, as `-o` does (`crates/cli/src/run.rs`), so no host
+        // reports a sharp part as exported the way it was modelled.
+        let fillet_errors: Vec<String> = log.fillet_errors().map(|l| l.message.clone()).collect();
+        if !fillet_errors.is_empty() {
+            exit_code = exit_code.max(EXIT_ERROR);
+        }
         Ok(Exported {
             exit_code,
+            written,
+            fillet_errors,
             log,
             geometry: geometry.filter(|g| !g.is_empty()),
             timings,

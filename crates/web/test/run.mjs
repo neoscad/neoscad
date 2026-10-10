@@ -257,6 +257,22 @@ await test('export STEP with its report', 5000, () => {
     assert.match(reply.result.step.summary, /^STEP: 7 of 7 faces exact \(100%\)\./);
 });
 
+// A failed fillet call (docs/fillets.md, section 18, decision 2): the
+// part is written with its edges sharp, and the export still fails, with
+// the core's wording of why, so the page never calls it exported.
+await test('a failed fillet writes the file and fails the export', 5000, () => {
+    ok('open', { path: '/doc/sharp.scad', text: 'fillet_edges(r = 3, edges = "|y") cube([20, 10, 4]);\n' });
+    const { reply } = call('export', { path: '/doc/sharp.scad', format: 'step', run: { overrides: [], parts: false, enable: ['exact', 'fillet'] } });
+    assert.equal(reply.ok, true);
+    const r = reply.result;
+    assert.equal(r.exitCode, 1, r.console);
+    assert.equal(r.written, true);
+    assert.equal(r.filletErrors.length, 1);
+    assert.ok(new TextDecoder().decode(r.data).startsWith('ISO-10303-21;'));
+    assert.match(r.failure, /^The file was written, but 1 fillet_edges\(\) call failed and its edges are sharp: fillet_edges/);
+    console.log(`     ${r.failure}`);
+});
+
 // Deep recursion ends in OpenSCAD's error, not a trap: the module is
 // linked with the 8 MiB stack the evaluator's budget assumes.
 await test('runaway recursion is an error, not a crash', 5000, () => {

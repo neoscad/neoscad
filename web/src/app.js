@@ -28,6 +28,7 @@ import {
   checkReport,
   docPath,
   enabledExtensions,
+  exportOutcome,
   fileURI,
   fileViewChanged,
   measureResult,
@@ -903,17 +904,10 @@ class App {
         Requests.export(d.path, format, runOptions(d.customizer.values, d.parts, enable)),
       );
       if (r.step) this.console.setLines(stepLines(r.step, d));
-      if (r.exitCode !== 0 || !r.data) {
-        const why = r.step?.error
-          ? `STEP export refused: ${r.step.error}.`
-          : (r.console ?? "").trim().split("\n").pop() || `exit code ${r.exitCode}`;
-        this.console.setSummary(`Export failed: ${why}`, "failed");
-        return;
-      }
       const name = `${d.example.file.replace(/\.scad$/, "")}.${f.ext}`;
-      download(r.data, name, r.mime);
-      const share = r.step ? ` ${r.step.summary.split("\n")[0]}` : "";
-      this.console.setSummary(`Exported ${name} (${r.bytes} bytes).${share}`, "done");
+      const outcome = exportOutcome(r, name);
+      if (outcome.download) download(r.data, name, r.mime);
+      this.console.setSummary(outcome.text, outcome.kind);
     } catch (e) {
       this.fail(e);
     }

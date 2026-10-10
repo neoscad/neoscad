@@ -1057,6 +1057,38 @@ fn check_exports_step_with_its_report() {
     assert!(!dir.join("other.step").exists());
 }
 
+/// A failed fillet (`docs/fillets.md`, section 18, decision 2): `render`
+/// and `check` with `export` write the part with those edges sharp, and
+/// say both, so an agent does not ship it believing it rounded.
+#[test]
+fn a_failed_fillet_export_says_written_but_sharp() {
+    let dir = scratch("sharp");
+    let src = "fillet_edges(r = 3, edges = \"|y\") cube([20, 10, 4]);\n";
+    let mut s = Mcp::start(&dir, &["--enable", "exact", "--enable", "fillet"]);
+    let but = "but 1 fillet_edges() call failed and its edges are sharp: \
+               fillet_edges(): the blends of edges 1 and 2 overlap";
+    let r = s.tool("render", json!({"source": src, "export": "part.step"}));
+    let t = text(&r);
+    assert!(t.starts_with("failed (exit 1)"), "{t}");
+    assert!(t.contains("wrote "), "{t}");
+    assert!(t.contains(but), "{t}");
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["fillet_errors"].as_array().unwrap().len(), 1, "{r}");
+    assert!(sc["output"].is_string(), "{r}");
+    assert!(
+        std::fs::read_to_string(dir.join("part.step"))
+            .unwrap()
+            .starts_with("ISO-10303-21;")
+    );
+    let r = s.tool("check", json!({"source": src, "export": "part.stl"}));
+    let t = text(&r);
+    assert!(t.contains("wrote "), "{t}");
+    assert!(t.contains(but), "{t}");
+    let e = &r["structuredContent"]["export"];
+    assert_eq!(e["fillet_errors"].as_array().unwrap().len(), 1, "{r}");
+    assert!(dir.join("part.stl").exists());
+}
+
 #[test]
 fn bad_calls_are_explained_in_the_callers_terms() {
     let dir = scratch("args");

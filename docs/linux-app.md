@@ -135,7 +135,11 @@ package and run it, and what comes next.
   model. An export runs detached, with the customizer's values, under a
   toast that names its stage (`session::Progress`) and has a Cancel
   button; success is a toast, a failure an alert with the core's reason
-  (`client::export_failure_reason`), never silence.
+  (`client::export_failure_reason`), never silence. A model whose fillet
+  or chamfer calls failed is written with those edges sharp and still
+  fails (`docs/fillets.md`, section 18, decision 2): its alert is
+  "Exported, but Its Fillets Failed" with "Wrote part.step (N bytes),
+  but 1 fillet_edges() call failed and its edges are sharp: ...".
 
 ## How it is put together
 

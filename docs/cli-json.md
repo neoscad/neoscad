@@ -320,7 +320,11 @@ fields are only added. Keys sorted, compact, a trailing newline.
 ```
 
 - `outputs`: each `-o`, with the format identifier it was written as.
-- `exit_code`: the process's (it exits with it too).
+- `exit_code`: the process's (it exits with it too). A run whose
+  `fillet_edges()` or `chamfer_edges()` calls failed (`--enable
+  fillet`) writes its outputs, with those calls' children sharp, and
+  exits 1 (`docs/fillets.md`, section 18, decision 2); the errors are in
+  `diagnostics`. A served run (`served`) does the same.
 - `served`: whether a running `neoscad serve` did the work
   (`docs/serve-protocol.md`).
 - `diagnostics`: errors, warnings and deprecations in order, as
@@ -1127,3 +1131,8 @@ have them.
   `not-built` and the code `fillet-not-built` are gone; a size hint's
   edit writes 5% under the largest size that fits, which its message
   names. Not additive for a reader that matched `not-built`.
+- 0.6.1: a run served by `neoscad serve` (`served: true`) whose fillet
+  or chamfer calls failed exits 1, as a local run does; it exited 0 and
+  wrote the sharp part as a success. `neoscad serve`'s `export` adds
+  `written` and `fillet_errors` (`docs/serve-protocol.md`). Not
+  additive for a script that relied on the served exit code.

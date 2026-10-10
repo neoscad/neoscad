@@ -741,6 +741,8 @@ impl Client {
     /// sink knows what it wrote, and the host fills it in. A failure (a 2D
     /// model to a 3D format, an empty model, a sink that cannot write) is
     /// an `exit_code` of 1 with the reason in `console` and `diagnostics`.
+    /// So is a failed fillet or chamfer call, but its file is written
+    /// (`written`, `fillet_errors`; [`crate::export_failure_reason`]).
     pub fn export(
         &self,
         run: session::Run,
@@ -763,6 +765,8 @@ impl Client {
         let r = self.session.export(&req, sink)?;
         Ok(ExportResult {
             exit_code: r.exit_code,
+            written: r.written,
+            fillet_errors: r.fillet_errors.clone(),
             format: format.id().to_string(),
             bytes: 0,
             geometry: r

@@ -134,6 +134,11 @@ enum ExportOutcome: Equatable {
     /// Written, with a report the user should see: a STEP export's share
     /// of exact faces and the regions it wrote as facets.
     case writtenWithReport(URL, bytes: UInt64, report: ExportAlert)
+    /// Written, but the export failed: fillet or chamfer calls that
+    /// failed left their edges sharp (docs/fillets.md, section 18,
+    /// decision 2). The file is there, so the alert says it was exported,
+    /// and why it is not the part that was modelled.
+    case writtenButFailed(URL, bytes: UInt64, alert: ExportAlert)
     case cancelled
     case failed(ExportAlert)
 
@@ -142,6 +147,15 @@ enum ExportOutcome: Equatable {
     /// such as "Current top level object is not a 3D object."). A STEP
     /// export says why in its report, refusal and faceted regions alike.
     static func of(_ r: ExportResult, to url: URL) -> ExportOutcome {
+        if r.written && !r.filletErrors.isEmpty {
+            let reason = (try? exportFailureReason(result: r)) ?? nil
+            let message = [reason ?? "Its fillets failed.", r.step?.summary].compactMap { $0 }
+                .joined(separator: "\n\n")
+            return .writtenButFailed(
+                url, bytes: r.bytes,
+                alert: ExportAlert(
+                    title: "“\(url.lastPathComponent)” was exported, but its fillets failed", message: message))
+        }
         guard let reason = (try? exportFailureReason(result: r)) ?? nil else {
             if let step = r.step {
                 return .writtenWithReport(
@@ -223,7 +237,7 @@ extension SCADDocument {
             }
             if let sheet { sheet.sheetParent?.endSheet(sheet) }
             switch outcome {
-            case .failed(let a): self.present(a)
+            case .failed(let a), .writtenButFailed(_, _, let a): self.present(a)
             case .writtenWithReport(_, _, let a): self.present(a, style: .informational)
             default: break
             }

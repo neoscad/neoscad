@@ -387,7 +387,8 @@ export class MockCore {
     // As the core: STEP only with the `exact` extension on the run.
     if (msg.format === "step" && !(msg.run?.enable ?? []).includes("exact")) {
       return {
-        result: { exitCode: 1, format: "step", bytes: 0, mime: MIME.step, data: null, geometry: null, diagnostics: [],
+        result: { exitCode: 1, written: false, filletErrors: [], format: "step", bytes: 0, mime: MIME.step, data: null,
+          failure: "ERROR: STEP export needs NeoSCAD's exact extension (--enable exact).", geometry: null, diagnostics: [],
           console: "ERROR: STEP export needs NeoSCAD's exact extension (--enable exact).\n",
           timings: { parseMs: 0, evaluateMs: 0, geometryMs: 0, totalMs: 1 }, step: null },
       };
@@ -397,6 +398,9 @@ export class MockCore {
     return {
       result: {
         exitCode: 0,
+        written: true,
+        filletErrors: [],
+        failure: null,
         format: msg.format,
         bytes: data.byteLength,
         mime: MIME[msg.format],

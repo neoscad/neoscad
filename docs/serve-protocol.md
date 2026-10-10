@@ -26,7 +26,7 @@ change would get a new `protocol` number; there has been none.
 
 | `protocol` | Changes |
 |---|---|
-| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. Parsing each included file once (`9dbb98b`) added `stats`' `parse_cache.fragment_files` and `fragment_bytes`. `enable` now also takes OpenSCAD's experimental features (`textmetrics`, `object-function`, `import-function`, `vector-swizzle`, and on `export`/`cli.export` `predictible-output`). The `docs` method's `file_arg` was added after the CAD run cad-20260929T031249Z. Exact export stage 3 added `step` to `export` (with `enable: ["exact"]`), its `exact` report, `step` in `export_formats` and `exact` in `features`. |
+| 1 | First version (phase 7a). Phase 7b added, additively: `check`, `measure`, `cli.check`, `cli.measure`, the `enable`/`parts` parameters, the snapshot's `highlight` and `issues`, the `check`, `measure` and `features` capabilities, and error -32603 for a request that panicked. Phase 7b-2 added `format`, `docs` and `test`, and their capabilities. Phase 7c added the `supersede` parameter. Hardening (H4) added the `limits` parameter and resource limits (a `resource-limit` diagnostic), the `docs` method's `brief`, and the diagnostic codes `input-not-found` and `output-not-writable`; document versions now count each document's own changes. Parsing each included file once (`9dbb98b`) added `stats`' `parse_cache.fragment_files` and `fragment_bytes`. `enable` now also takes OpenSCAD's experimental features (`textmetrics`, `object-function`, `import-function`, `vector-swizzle`, and on `export`/`cli.export` `predictible-output`). The `docs` method's `file_arg` was added after the CAD run cad-20260929T031249Z. Exact export stage 3 added `step` to `export` (with `enable: ["exact"]`), its `exact` report, `step` in `export_formats` and `exact` in `features`. 0.6.1 added `export`'s `written` and `fillet_errors`; an export whose fillet or chamfer calls failed now has `exit_code` 1, as the command line's `-o` has. |
 
 ## Transports
 
@@ -274,14 +274,25 @@ Params: the common ones, `output` (written by the server, relative to
 `cwd`), `format` (an OpenSCAD format identifier; default: the output's
 extension), `force` (bool), `options` (`-O` settings, e.g.
 `["export-svg/fill=true"]`), `enable` (`["predictible-output"]` for a
-sorted mesh file). Result: `exit_code`, `output`, `format`,
-`bytes` (written), `geometry` (`null` for the non-mesh formats),
-`diagnostics`, `echo`, `counts`, `timings_ms`. A model that fails (wrong
-dimension, empty, a syntax error) has a non-zero `exit_code` and writes
-nothing, except `echo`, whose file holds the messages that say why. A
-mesh output that cannot be written has `exit_code` 1 and an
-`output-not-writable` error, and a missing input an `input-not-found`
-one (as for every model method).
+sorted mesh file). Result: `exit_code`, `written` (whether the file was
+written), `output`, `format`, `bytes` (written), `geometry` (`null` for
+the non-mesh formats), `diagnostics`, `echo`, `counts`, `timings_ms`,
+and for the mesh, 2D and STEP formats `fillet_errors`. A model that
+fails (wrong dimension, empty, a syntax error) has a non-zero
+`exit_code` and writes nothing, except `echo`, whose file holds the
+messages that say why. A mesh output that cannot be written has
+`exit_code` 1 and an `output-not-writable` error, and a missing input an
+`input-not-found` one (as for every model method).
+
+A model whose `fillet_edges()` or `chamfer_edges()` calls failed
+(`--enable fillet`; `docs/fillets.md`, section 18, decision 2) is
+written, with those calls' children sharp, and still fails: `exit_code`
+1, `written` true, and `fillet_errors` the errors' messages (the same
+errors `check` counts as `counts.fillet_errors`; each is also in
+`diagnostics`). This is what `neoscad -o` does (it writes the file and
+exits 1), so a client can say "wrote part.step, but 1 fillet_edges() call
+failed and its edges are sharp" rather than either "exported" or "not
+exported". `fillet_errors` is `[]` when none failed.
 
 - Mesh and 2D formats (`stl`, `binstl`, `off`, `obj`, `3mf`, `wrl`,
   `pov`, `svg`, `dxf`, `pdf`) go through the command line's encoder,

@@ -984,6 +984,12 @@ fn export(server: &Server, run: session::Run, params: &Value, w: &Writer, doc: &
     Ok(merge(
         json!({
             "exit_code": r.exit_code,
+            // A model with failed fillet or chamfer calls is written and
+            // still fails (`docs/fillets.md`, section 18, decision 2):
+            // `written` says the file is there, `fillet_errors` why it
+            // fails.
+            "written": r.written,
+            "fillet_errors": r.fillet_errors,
             "output": output,
             "format": format.id(),
             "bytes": files.bytes,
@@ -1075,6 +1081,7 @@ fn export_other(
     Ok(merge(
         json!({
             "exit_code": exit_code,
+            "written": data.is_some(),
             "output": output,
             "format": id,
             "bytes": bytes,

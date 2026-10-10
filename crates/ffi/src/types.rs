@@ -243,9 +243,18 @@ pub struct SnapshotResult {
 /// The result of `export`.
 #[uniffi::remote(Record)]
 pub struct ExportResult {
-    /// 0, or the exit code of the failure (the file is then not written,
-    /// or incomplete; `console` says why).
+    /// 0, or the exit code of the failure (`console` says why). The file
+    /// is then not written unless `written` says so: a model whose fillet
+    /// or chamfer calls failed is written and still exits 1.
     pub exit_code: u8,
+    /// Whether the file was written: always with an `exit_code` of 0, and
+    /// with 1 when the only failure is `fillet_errors` (the part was
+    /// written with those calls' edges sharp, as `-o` writes it).
+    pub written: bool,
+    /// The messages of the failed `fillet_edges()`/`chamfer_edges()`
+    /// calls' errors (what `check` counts as `counts.fillet_errors`);
+    /// each left its child sharp, and any fails the export.
+    pub fillet_errors: Vec<String>,
     /// OpenSCAD's format id (`stl`, `3mf`, `svg`, ...).
     pub format: String,
     /// Bytes written.

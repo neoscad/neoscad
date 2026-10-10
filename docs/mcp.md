@@ -379,8 +379,15 @@ skipped edges by reason, the codes of its diagnostics, and its line) and
 its text a line per call (`fillet_edges at line 4: 4 edges (4 line,
 convex, 90°), r 2, edges = "|z" [built]`); a failed call is an error
 with its fix (the size that fits) and fails the
-check. `measure` with `fillet` lists that call's edges, and `snapshot`
-with `fillet` draws them numbered over the model.
+check. An export (`render` or `check` with `export`) of a model with a
+failed call writes the file, with that call's child sharp, and fails
+(`docs/fillets.md`, section 18, decision 2, as `neoscad -o` does):
+`render`'s text starts `failed (exit 1)`, both say `wrote PATH (N
+bytes)` and then `but 1 fillet_edges() call failed and its edges
+are sharp: <the error>`, and the structured content (`check`'s under
+`export`) adds `fillet_errors`, the errors' messages. `measure` with
+`fillet` lists that call's edges, and `snapshot` with `fillet` draws
+them numbered over the model.
 `crates/cli/tests/mcp.rs` checks that the recipe builds and that the
 tools say so.
 

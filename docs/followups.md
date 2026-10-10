@@ -2593,19 +2593,6 @@ pass's leftovers first, then stage 1b's, then the crate's.
     Language switches and Design > NeoSCAD Extensions toggles themselves
     (the tests write the settings or call `SetEnable`), and the WinUI
     report dialog, which only `windows-app.yml` builds.
-  - **A failed fillet does not fail an app's export** (decision 2,
-    `docs/fillets.md`, section 18, holds only for the command line's
-    `-o`, `crates/cli/src/run.rs`). `Session::export` returns exit code
-    0 when a `fillet_edges()` call failed, so the three apps write the
-    sharp part and report success (`serve`'s `export` calls it too; its
-    and MCP's replies were not checked):
-    `fillet_edges(r = 3, edges = "|y") cube([20, 10, 4]);` with `exact`
-    and `fillet` on exports "STEP: 6 of 6 faces exact (100%)." with the
-    call's `ERROR` only in the result's console. The fix is in
-    `Session::export` or `client::Client::export` (`failed_fillets()`
-    in the log), and the apps then need to say that a file was written
-    but its fillets failed, rather than "was not exported". No app test
-    covers it yet.
   - A refused STEP export reports `geometry: null` (`Session::export`
     keeps the geometry only for a finished export), so `serve`'s and
     MCP's refusal text says "empty: no geometry" beside the reason.

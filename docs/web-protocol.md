@@ -366,8 +366,10 @@ ray comes from the viewer (`ray_at`), in model coordinates.
   options?: { threemfColorMode?: "model" | "noColor" | "selectedOnly",
               threemfColor?: "#rrggbb" | name, threemfMaterial?: "color" | "baseMaterial" },
   run?: RunOptions, creationDate?: "2026-09-29T12:00:00Z" }
-→ { exitCode, format, bytes: u64, mime: "model/stl",
-    data: ArrayBuffer | null,          // transferred; null when exitCode ≠ 0
+→ { exitCode, written: bool, format, bytes: u64, mime: "model/stl",
+    data: ArrayBuffer | null,          // transferred; null unless written
+    failure: string | null,            // why it failed, worded for the page
+    filletErrors: [string],            // failed fillet/chamfer calls' errors
     geometry: GeometryStats | null, diagnostics, console, timings,
     step: StepReport | null }          // a STEP export's report, else null
 ```
@@ -378,7 +380,18 @@ PDF metadata) comes from the page, because the worker has no wall clock;
 default `1970-01-01T00:00:00Z`. The model's title in 3MF and PDF
 metadata is the document's file name; the page names the download
 itself. A failed export (a 2D model to a 3D format, an empty model) has
-`exitCode` 1, `data: null` and the reason in `console`.
+`exitCode` 1, `written: false`, `data: null` and the reason in
+`console` and `failure` (`client::export_failure_reason`, the apps'
+alert text).
+
+A model whose `fillet_edges()` or `chamfer_edges()` calls failed
+(`docs/fillets.md`, section 18, decision 2) is written with those calls'
+children sharp and still fails, as the command line's `-o` does:
+`exitCode` 1, `written: true`, its `data`, `filletErrors` (the errors'
+messages, what `check` counts as `fillet_errors`) and `failure` saying
+"The file was written, but 1 fillet_edges() call failed and its edges
+are sharp: ...". The page downloads the file and shows that as a failed
+summary, never as "Exported".
 
 `step` (STEP with exact surfaces, `docs/step-export.md`) needs
 `"exact"` in `run.enable`; without it the export fails with that

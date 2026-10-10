@@ -394,8 +394,13 @@ suits the model (`suggest_export_format`). Geometry goes through
 `Core.export_file` with the customizer's values and a `CancelToken`; a
 `ContentDialog` shows the stage (`ProgressListener`) with Cancel, after
 400 ms so a quick export does not flash one. The core writes through a
-temporary file, so a cancelled or failed export leaves the old file. The
-core has no AMF writer, so neither does the menu.
+temporary file, so a cancelled or failed export leaves the old file. A
+model whose fillet or chamfer calls failed is the exception: it is
+written with those edges sharp and the export still fails
+(`docs/fillets.md`, section 18, decision 2), so a dialog titled "NAME was
+exported, but its fillets failed" gives the core's reason
+(`DocumentSession.LastExportWritten`). The core has no AMF writer, so
+neither does the menu.
 
 **Shortcuts in the editor.** A WinUI `KeyboardAccelerator` sees only
 keys that reach XAML; keys typed in WebView2 do not, and WinUI 3's

@@ -138,7 +138,11 @@ chamfer_edges(d, edges = "all", except = undef, expect = undef) children;
   round) is an error at the call; its children are left sharp, the rest
   of the model renders, and an export (`-o`) writes its file and exits
   with status 1, so a script or an agent never ships a sharp part
-  believing it rounded. `check` fails with it too.
+  believing it rounded. `check` fails with it too. Every other export
+  does the same: the apps' File > Export and /try write (or download)
+  the file and say "was exported, but its fillets failed" with the
+  error, and `neoscad serve`'s and MCP's exports fail with `written`
+  and `fillet_errors` (`docs/serve-protocol.md`, `docs/mcp.md`).
 
 ## Selecting edges
 

@@ -1208,7 +1208,11 @@ F0–F4: 9–13.5 person-weeks.
   the module's name) is counted by the console
   (`eval::Console::failed_fillets`); `-o` writes its files and exits 1
   (`crates/cli/src/run.rs`), and `check` adds them to `counts.errors` as
-  `counts.fillet_errors` and fails. `Extension::implemented()` is true
+  `counts.fillet_errors` and fails. Since 0.6.1 every other export does
+  too, from one place: `Session::export` writes the files and returns
+  exit code 1 with `written` and the errors' messages
+  (`Log::fillet_errors`, the errors `check` counts), which `serve`,
+  MCP, the apps and /try report as "written, but its fillets failed". `Extension::implemented()` is true
   for `fillet`, so `serve` advertises it.
 - **Results.** The golden models (`conformance/extensions/fillet`, 15
   cases: the L-bracket, the box corner, every edge of a cube, the box

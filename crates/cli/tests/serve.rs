@@ -714,6 +714,58 @@ fn step_is_served_with_the_exact_extension() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// A failed fillet call (`docs/fillets.md`, section 18, decision 2): the
+/// served export writes the part with those edges sharp and fails, as
+/// `-o` does, with `written` and the call's error in `fillet_errors`.
+#[test]
+fn a_failed_fillet_is_written_and_fails_the_export() {
+    let d = scratch("sharp");
+    std::fs::write(
+        d.join("m.scad"),
+        "fillet_edges(r = 3, edges = \"|y\") cube([20, 10, 4]);\n",
+    )
+    .unwrap();
+    let mut s = Stdio_::start(&d);
+    s.result("initialize", json!({}));
+    let p = d.join("m.scad");
+    for out in ["m.stl", "m.step"] {
+        let x = s.result(
+            "export",
+            json!({"path": p, "output": out, "enable": ["exact", "fillet"]}),
+        );
+        assert_eq!(x["exit_code"], 1, "{x}");
+        assert_eq!(x["written"], true, "{x}");
+        let errors = x["fillet_errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1, "{x}");
+        assert!(
+            errors[0]
+                .as_str()
+                .unwrap()
+                .starts_with("fillet_edges(): the blends of edges 1 and 2 overlap"),
+            "{x}"
+        );
+        assert!(std::fs::metadata(d.join(out)).unwrap().len() > 0, "{out}");
+        // The command line agrees: the same file, and exit 1.
+        let served = std::fs::read(d.join(out)).unwrap();
+        let cli = neoscad(
+            &d,
+            None,
+            &[
+                "--enable", "exact", "--enable", "fillet", "-o", out, "m.scad",
+            ],
+        );
+        assert_eq!(cli.status.code(), Some(1), "{out}");
+        assert_eq!(std::fs::read(d.join(out)).unwrap(), served, "{out}");
+    }
+    // A failure of its own (a 2D format) is not written.
+    let flat = s.result(
+        "export",
+        json!({"path": p, "output": "m.svg", "enable": ["fillet"]}),
+    );
+    assert_eq!(flat["written"], false, "{flat}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[test]
 fn format_docs_and_test_are_served() {
     let d = scratch("fdt");

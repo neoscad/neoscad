@@ -803,7 +803,11 @@ impl State {
         result.bytes = sink.data.len() as u64;
         let mut v = to_json(&result);
         v["mime"] = json!(mime(format));
-        v["data"] = if result.exit_code == 0 {
+        // Why it failed, worded as the apps word it (`null` on success).
+        // A model with failed fillet calls is still `written`, so the
+        // page downloads it and says its edges are sharp.
+        v["failure"] = json!(client::export_failure_reason(&result));
+        v["data"] = if result.written {
             let at = out.len();
             out.push(sink.data);
             json!({ "$buffer": at })

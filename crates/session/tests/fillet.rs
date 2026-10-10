@@ -403,3 +403,101 @@ fn docs_examples_check() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Keeps each output's bytes by target.
+#[derive(Default)]
+struct Sink(Vec<(String, Vec<u8>)>);
+
+impl session::ExportSink for Sink {
+    fn write(&mut self, target: &str, data: &[u8]) -> Result<(), String> {
+        self.0.push((target.to_string(), data.to_vec()));
+        Ok(())
+    }
+    fn summary(&mut self, _: &session::SummaryFacts<'_>, _: &mut eval::Console<Vec<u8>>) -> bool {
+        true
+    }
+}
+
+fn export(s: &Session, run: Run, outputs: &[&str]) -> (session::Exported, Sink) {
+    let scheme = render::ColorScheme::cornfield();
+    let req = session::ExportRequest {
+        run,
+        outputs: outputs
+            .iter()
+            .map(|o| {
+                let id = o.rsplit('.').next().unwrap();
+                (o.to_string(), session::export::Format::from_id(id).unwrap())
+            })
+            .collect(),
+        force: false,
+        scheme: scheme.clone(),
+        settings: session::export::Settings {
+            scheme: scheme.geometry_scheme(),
+            svg: io::svg::SvgStyle::default(),
+            pdf: io::pdf::PdfOptions::default(),
+            pdf_warnings: Vec::new(),
+            threemf: io::threemf::Options::default(),
+            threemf_warning: None,
+            title: "m.scad".into(),
+            source_path: "m.scad".into(),
+            creation_date: "2026-01-01T00:00:00Z".to_string(),
+            pov_camera: None,
+            predictible_output: false,
+        },
+    };
+    let mut sink = Sink::default();
+    let r = s.export(&req, &mut sink).expect("not cancelled");
+    (r, sink)
+}
+
+/// A failed call fails every host's export (decision 2), as `-o` does:
+/// the files are written with the child sharp, the exit code is 1, and
+/// the result names the failed call's error (what `check` counts as
+/// `counts.fillet_errors`), so an app, `serve`, MCP or /try can say
+/// "written, but its fillets failed" rather than "exported".
+#[test]
+fn a_failed_call_writes_the_export_and_fails_it() {
+    let src = "fillet_edges(r = 3, edges = \"|y\") cube([20, 10, 4]);\n";
+    let s = session(src.as_bytes());
+    let mut exact = run(true);
+    exact.extensions = exact.extensions.with(eval::Extension::Exact);
+    let (r, sink) = export(&s, exact.clone(), &["m.stl", "m.step"]);
+    assert_eq!(r.exit_code, 1, "{}", String::from_utf8_lossy(&r.log.stderr));
+    assert!(r.written);
+    assert_eq!(r.fillet_errors.len(), 1);
+    assert!(
+        r.fillet_errors[0].starts_with("fillet_edges(): the blends of edges 1 and 2 overlap"),
+        "{:?}",
+        r.fillet_errors
+    );
+    let targets: Vec<&str> = sink.0.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(targets, ["m.stl", "m.step"]);
+    assert!(sink.0[1].1.starts_with(b"ISO-10303-21;"));
+    // The STEP file itself was fine: it is the sharp box.
+    assert_eq!(r.exact.as_ref().map(|e| e.ok), Some(true));
+    // The same count `check` reports.
+    let v = check(&s, true);
+    assert_eq!(v["counts"]["fillet_errors"], r.fillet_errors.len());
+    // The words every host uses after "Wrote m.step, but ".
+    assert_eq!(
+        session::fillets::failure_text(&r.fillet_errors),
+        format!(
+            "1 fillet_edges() call failed and its edges are sharp: {}",
+            r.fillet_errors[0]
+        )
+    );
+
+    // An export that fails for another reason as well writes nothing and
+    // is not `written`: a 2D format for the 3D part.
+    let (r, sink) = export(&s, run(true), &["m.svg"]);
+    assert_eq!(r.exit_code, 1);
+    assert!(!r.written && sink.0.is_empty());
+    assert_eq!(r.fillet_errors.len(), 1);
+
+    // The fix applied: the export succeeds and names nothing.
+    let s = session(src.replacen("r = 3", "r = 1.9", 1).as_bytes());
+    let (r, sink) = export(&s, exact, &["m.step"]);
+    assert_eq!(r.exit_code, 0, "{}", String::from_utf8_lossy(&r.log.stderr));
+    assert!(r.written && r.fillet_errors.is_empty());
+    assert_eq!(sink.0.len(), 1);
+}

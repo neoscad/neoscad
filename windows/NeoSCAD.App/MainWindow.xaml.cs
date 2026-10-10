@@ -424,6 +424,25 @@ public sealed partial class MainWindow : Window
         }
         Status.Text = failure ?? $"Exported {file.Name}";
         if (failure is not null) AppLog.Write($"export {format.Id} failed: {failure}");
+        // Written, but its fillets failed (docs/fillets.md, section 18,
+        // decision 2): the file is there with those edges sharp. A dialog
+        // for every format, since the status line alone is easy to miss
+        // and the part is not the one that was modelled.
+        if (failure is not null && format.Kind == ExportKind.Geometry && document.LastExportWritten && !dialogShowing)
+        {
+            Status.Text = $"Exported {file.Name}, but its fillets failed";
+            var report = document.LastStepReport is { } r ? $"{failure}\n\n{r}" : failure;
+            dialogShowing = true;
+            await new ContentDialog
+            {
+                XamlRoot = Root.XamlRoot,
+                Title = $"{file.Name} was exported, but its fillets failed",
+                Content = new TextBlock { Text = report, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true },
+                CloseButtonText = "Close",
+            }.ShowAsync();
+            dialogShowing = false;
+            return;
+        }
         // A STEP export's report: the share of exact faces and the regions
         // written as facets, or why it was refused.
         if (format.Id == "step" && document.LastStepReport is { } report && !dialogShowing)

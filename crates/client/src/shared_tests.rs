@@ -124,6 +124,8 @@ fn export_formats_agree_with_the_session() {
 fn a_failed_export_says_why() {
     let mut r = ExportResult {
         exit_code: 0,
+        written: true,
+        fillet_errors: vec![],
         format: "stl".into(),
         bytes: 3,
         geometry: None,
@@ -144,6 +146,23 @@ fn a_failed_export_says_why() {
         "Current top level object is not a 3D object."
     );
     r.console = "WARNING: w\nnote\nERROR: a\nERROR: b\n".into();
+    assert_eq!(export_failure_reason(&r).unwrap(), "ERROR: a\nERROR: b");
+    // Written with a failed fillet: a failure that says the file is
+    // there and its edges are sharp, never "was not exported".
+    r.fillet_errors = vec!["fillet_edges: r = 3 is too large".into()];
+    assert_eq!(
+        export_failure_reason(&r).unwrap(),
+        "The file was written, but 1 fillet_edges() call failed and its edges are sharp: \
+         fillet_edges: r = 3 is too large"
+    );
+    r.fillet_errors.push("chamfer_edges(): bad d".into());
+    assert_eq!(
+        export_failure_reason(&r).unwrap(),
+        "The file was written, but 2 fillet_edges()/chamfer_edges() errors left their calls' \
+         edges sharp:\n- fillet_edges: r = 3 is too large\n- chamfer_edges(): bad d"
+    );
+    // Not written (an unwritable folder as well): the console's reason.
+    r.written = false;
     assert_eq!(export_failure_reason(&r).unwrap(), "ERROR: a\nERROR: b");
 }
 

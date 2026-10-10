@@ -234,30 +234,68 @@ pub fn stage_label(stage: session::Stage) -> &'static str {
     }
 }
 
+/// An export that failed, as its alert says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportFailure {
+    /// The file was written all the same: a model whose fillet or chamfer
+    /// calls failed is written with those edges sharp, and the export
+    /// still fails (`docs/fillets.md`, section 18, decision 2). The alert
+    /// then says it was exported, not that it was not.
+    pub written: bool,
+    pub message: String,
+}
+
+impl ExportFailure {
+    pub fn not_written(message: String) -> Self {
+        Self {
+            written: false,
+            message,
+        }
+    }
+}
+
 /// The message for a finished export of `output`: what was written, or
 /// why nothing was (the core's reason, never silence). `Ok` for a toast,
 /// `Err` for an alert. A STEP export adds its report: the share of exact
 /// faces, and on further lines (an alert rather than a toast) the regions
-/// written as facets; refused, the report is the reason.
+/// written as facets; refused, the report is the reason. A file written
+/// with failed fillets is an `Err` that is `written`: "Wrote part.step
+/// (N bytes), but 1 fillet_edges() call failed and its edges are sharp:
+/// ...", so the user never takes the sharp part for the rounded one.
 pub fn export_message(
     output: &Path,
     r: &Result<client::ExportResult, CoreError>,
-) -> Option<Result<String, String>> {
+) -> Option<Result<String, ExportFailure>> {
     let name = output.file_name().map_or_else(
         || output.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
     Some(match r {
         Err(CoreError::Cancelled) => return None,
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(ExportFailure::not_written(e.to_string())),
+        Ok(r) if r.written && !r.fillet_errors.is_empty() => {
+            let mut message = format!(
+                "Wrote {name} ({} bytes), but {}",
+                r.bytes,
+                session::fillets::failure_text(&r.fillet_errors)
+            );
+            if let Some(step) = &r.step {
+                message.push_str("\n\n");
+                message.push_str(&step.summary);
+            }
+            Err(ExportFailure {
+                written: true,
+                message,
+            })
+        }
         Ok(r) => match (client::export_failure_reason(r), &r.step) {
             (None, Some(step)) => Ok(format!(
                 "Exported {name} ({} bytes). {}",
                 r.bytes, step.summary
             )),
             (None, None) => Ok(format!("Exported {name} ({} bytes)", r.bytes)),
-            (Some(_), Some(step)) => Err(step.summary.clone()),
-            (Some(why), None) => Err(why),
+            (Some(_), Some(step)) => Err(ExportFailure::not_written(step.summary.clone())),
+            (Some(why), None) => Err(ExportFailure::not_written(why)),
         },
     })
 }
@@ -420,7 +458,7 @@ mod tests {
             None,
             None,
         );
-        let why = export_message(&out, &r).unwrap().unwrap_err();
+        let why = export_message(&out, &r).unwrap().unwrap_err().message;
         assert!(why.contains("3D"), "{why}");
         // STEP: refused with the reason without Preferences > Language's
         // `exact`, and with it written with the report.
@@ -434,7 +472,7 @@ mod tests {
             None,
             None,
         );
-        let why = export_message(&out, &r).unwrap().unwrap_err();
+        let why = export_message(&out, &r).unwrap().unwrap_err().message;
         assert!(why.contains("--enable exact"), "{why}");
         assert!(!out.exists());
         let exact = client::RunOptions {
@@ -564,11 +602,40 @@ mod tests {
         );
         let text = std::fs::read_to_string(&out).unwrap();
         assert_eq!(text.matches("CYLINDRICAL_SURFACE").count(), 4);
+        // A radius that does not fit (decision 2): the part is written
+        // with those edges sharp, and the alert says so rather than
+        // "Exported" (or "Was Not Exported").
+        let sharp = filleted.replacen("r = 1", "r = 3", 1);
+        let (message, r, sharp_out) = export("sharp", &sharp, both);
+        let failure = message.unwrap_err();
+        assert!(failure.written);
+        assert!(
+            failure.message.starts_with(
+                "Wrote sharp.step (6419 bytes), but 1 fillet_edges() call failed and its edges \
+                 are sharp: fillet_edges(): the blends of edges 1 and 2 overlap"
+            ),
+            "{}",
+            failure.message
+        );
+        assert!(
+            failure
+                .message
+                .ends_with("\n\nSTEP: 6 of 6 faces exact (100%)."),
+            "{}",
+            failure.message
+        );
+        let r = r.unwrap();
+        assert_eq!((r.exit_code, r.fillet_errors.len()), (1, 1));
+        assert!(
+            std::fs::read_to_string(&sharp_out)
+                .unwrap()
+                .starts_with("ISO-10303-21;")
+        );
         // With `fillet` off, `fillet_edges()` is OpenSCAD's unknown
         // module: nothing is left to export, and the alert says so.
         std::fs::remove_file(&out).unwrap();
         let (message, _, out) = export("filleted", filleted, exact);
-        let why = message.unwrap_err();
+        let why = message.unwrap_err().message;
         assert!(why.contains("empty"), "{why}");
         assert!(!out.exists());
 
@@ -579,7 +646,7 @@ mod tests {
             "cube(10); translate([10, 0, 0]) cube([10, 10, 0.000001]);\n",
             exact,
         );
-        let why = message.unwrap_err();
+        let why = message.unwrap_err().message;
         assert!(why.starts_with("STEP export refused: "), "{why}");
         assert!(why.ends_with("No file was written."), "{why}");
         assert!(!r.unwrap().step.unwrap().ok);

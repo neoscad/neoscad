@@ -21,6 +21,40 @@ use lang::diag::{Diagnostic, Hint, PathBase};
 use lang::source::{SourceMap, Span};
 use serde_json::{Value, json};
 
+/// What a host says after "Wrote part.step, but " when an export's
+/// fillet or chamfer calls failed ([`crate::Exported::fillet_errors`]):
+/// how many, that their edges are sharp, and each error's message. Every
+/// host words it the same way, from this one place. One error is
+/// usually one call, but an argument error and a build error can come
+/// from the same call, so more than one is counted as errors rather
+/// than calls.
+pub fn failure_text(errors: &[String]) -> String {
+    match errors {
+        [] => String::new(),
+        [one] => {
+            let module = if one.starts_with("chamfer_edges") {
+                "chamfer_edges()"
+            } else if one.starts_with("fillet_edges") {
+                "fillet_edges()"
+            } else {
+                "fillet_edges()/chamfer_edges()"
+            };
+            format!("1 {module} call failed and its edges are sharp: {one}")
+        }
+        all => {
+            let mut s = format!(
+                "{} fillet_edges()/chamfer_edges() errors left their calls' edges sharp:",
+                all.len()
+            );
+            for e in all {
+                s.push_str("\n- ");
+                s.push_str(e);
+            }
+            s
+        }
+    }
+}
+
 /// The selector language (`docs/fillets.md`, section 5.2), for the
 /// language server's completion and hover inside an `edges` string.
 pub use eval::fillet::selector;

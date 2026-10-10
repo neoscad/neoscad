@@ -11,6 +11,7 @@ import {
   applyEdits,
   enabledExtensions,
   checkReport,
+  exportOutcome,
   consoleLines,
   control,
   editorEdits,
@@ -198,4 +199,23 @@ test("file URIs round-trip with spaces", () => {
   const p = "/doc/my model.scad";
   assert.equal(fileURI(p), "file:///doc/my%20model.scad");
   assert.equal(uriPath(fileURI(p)), p);
+});
+
+test("an export with failed fillets is downloaded and still fails", () => {
+  const data = new ArrayBuffer(4);
+  const step = { ok: true, error: null, summary: "STEP: 6 of 6 faces exact (100%)." };
+  assert.deepEqual(exportOutcome({ exitCode: 0, written: true, bytes: 4, data, step }, "m.step"), {
+    download: true,
+    kind: "done",
+    text: "Exported m.step (4 bytes). STEP: 6 of 6 faces exact (100%).",
+  });
+  // Decision 2 (docs/fillets.md, section 18): written, sharp, failed.
+  const failure = "The file was written, but 1 fillet_edges() call failed and its edges are sharp: fillet_edges(): too large";
+  const sharp = exportOutcome({ exitCode: 1, written: true, filletErrors: ["fillet_edges(): too large"], failure, bytes: 4, data, step }, "m.step");
+  assert.deepEqual(sharp, { download: true, kind: "failed", text: `m.step: ${failure} STEP: 6 of 6 faces exact (100%).` });
+  // Not written: the reason, and nothing to download.
+  const refused = exportOutcome({ exitCode: 1, written: false, data: null, failure: "ERROR: x", step: { ok: false, error: "a fin" } }, "m.step");
+  assert.deepEqual(refused, { download: false, kind: "failed", text: "Export failed: STEP export refused: a fin." });
+  assert.equal(exportOutcome({ exitCode: 1, written: false, data: null, failure: "Current top level object is empty." }, "m.stl").text,
+    "Export failed: Current top level object is empty.");
 });

@@ -283,6 +283,27 @@ export function runResult(r) {
   };
 }
 
+/// How an export ended, for the console's summary: whether there is a
+/// file to download, and the summary's text and kind. Written is not the
+/// same as succeeded: a model whose fillet or chamfer calls failed is
+/// written (`written`, with its bytes) with those edges sharp and still
+/// fails (`docs/fillets.md`, section 18, decision 2), so the page hands
+/// the file over and says so in red, rather than calling it exported or
+/// throwing it away. `failure` is the core's wording
+/// (`client::export_failure_reason`), the one the apps' alerts use.
+export function exportOutcome(r, name) {
+  const written = r.written ?? r.exitCode === 0;
+  const share = r.step?.ok ? ` ${r.step.summary.split("\n")[0]}` : "";
+  if (written && r.data) {
+    if (r.exitCode === 0) return { download: true, kind: "done", text: `Exported ${name} (${r.bytes} bytes).${share}` };
+    return { download: true, kind: "failed", text: `${name}: ${r.failure ?? `exit code ${r.exitCode}`}${share}` };
+  }
+  const why = r.step?.error
+    ? `STEP export refused: ${r.step.error}.`
+    : r.failure ?? ((r.console ?? "").trim().split("\n").pop() || `exit code ${r.exitCode}`);
+  return { download: false, kind: "failed", text: `Export failed: ${why}` };
+}
+
 /// A check report with its lists always present.
 export function checkReport(r) {
   return { ...r, findings: r?.findings ?? [], truncated: r?.truncated ?? [], parts: r?.parts ?? [] };
