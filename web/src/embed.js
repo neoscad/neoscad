@@ -14,7 +14,7 @@ import { ensureFonts, ensureLibraries, createEngine } from "./engine/index.js";
 import { EngineRestarted } from "./engine/client.js";
 import { Requests, docPath, fileViewChanged, runResult } from "./engine/protocol.js";
 import { loadExampleText, loadManifest } from "./examples.js";
-import { DEFAULT_NAME, ShareError, decodeSource, exampleHash, fileName } from "./share.js";
+import { ShareError, codeHash, decodeSource, exampleHash, fileName } from "./share.js";
 import { applyTheme, loadSite } from "./site.js";
 import { clear, h } from "./ui/dom.js";
 import { DEFAULT_VIEW, createViewer } from "./view/index.js";
@@ -48,7 +48,8 @@ export class EmbedApp {
     // The whole page's link to the same model: the payload as it came
     // (no need to encode it again), or the example.
     const page = new URL("./", location.href).href;
-    this.open.href = share.code !== null ? `${page}#code=${share.code}${doc.file === DEFAULT_NAME ? "" : `&name=${encodeURIComponent(doc.file)}`}` : `${page}${exampleHash(doc.id)}`;
+    this.open.href =
+      share.code !== null ? `${page}${codeHash(share.code, { name: doc.file, enable: share.enable })}` : `${page}${exampleHash(doc.id)}`;
     this.open.hidden = false;
     this.open.title = `Open ${doc.file} in NeoSCAD, with the editor (a new tab)`;
     document.title = `${doc.file} – NeoSCAD`;
@@ -70,7 +71,14 @@ export class EmbedApp {
     new ResizeObserver(() => this.viewer.resize()).observe(canvas);
     await started;
 
-    this.doc = { ...doc, path: docPath(doc.file) };
+    // The link's extensions (`enable=`, share.js): the embed keeps no
+    // settings, so they are all it runs with, and `part` is its Parts.
+    this.doc = {
+      ...doc,
+      path: docPath(doc.file),
+      parts: share.enable.includes("part"),
+      enable: share.enable.filter((n) => n !== "part"),
+    };
     await this.engine.open(this.doc.path, doc.text);
     root.dataset.ready = "true";
     if (doc.heavy) {
@@ -105,7 +113,16 @@ export class EmbedApp {
     try {
       await ensureLibraries(this.engine, d.text, { onProgress: (name) => this.say(`Loading ${name}…`, "running") });
       const run = () =>
-        this.engine.run(Requests.run({ path: d.path, mode: "preview", camera: this.viewer.camera(), colorScheme: DEFAULT_VIEW.scheme }));
+        this.engine.run(
+          Requests.run({
+            path: d.path,
+            mode: "preview",
+            parts: d.parts,
+            enable: d.enable,
+            camera: this.viewer.camera(),
+            colorScheme: DEFAULT_VIEW.scheme,
+          }),
+        );
       let raw = await run();
       if (raw?.superseded) return;
       let r = runResult(raw);

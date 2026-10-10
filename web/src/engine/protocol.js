@@ -119,24 +119,37 @@ export const Requests = {
     return r;
   },
   readFile: (path) => ({ type: "readFile", path }),
-  lsp: (message) => ({ type: "lsp", message }),
+  /// `enable`, when given: the language extensions the page's documents
+  /// run with. Without it the server would know them only from the last
+  /// run, so a document not run yet (a heavy example) or a toggle changed
+  /// before the next run would complete and hover without them.
+  lsp: (message, enable = null) => (enable ? { type: "lsp", message, enable } : { type: "lsp", message }),
 };
 
 /// NeoSCAD's language extensions the page can turn on for every run
-/// (`--enable` on the command line), each a View menu toggle kept in the
-/// settings under its name: `fillet` (`fillet_edges()`/`chamfer_edges()`,
-/// docs/fillet-edges.md). `exact` is not here: it only adds STEP to the
-/// Export menu, and is sent with that export alone.
+/// (`--enable` on the command line): the View menu's "NeoSCAD extensions"
+/// toggles, each kept in the settings under its name. The same set, order
+/// and labels as the apps' (macOS Settings > Language, Linux Preferences >
+/// Language, Windows Design > NeoSCAD Extensions), so a model that runs in
+/// one runs the same in the others. `part` is not here: as in the apps it
+/// is the check and measure panels' per-document Parts toggle.
 export const LANGUAGE_EXTENSIONS = {
+  sketch: { label: "Constrained sketches (sketch)" },
+  query: { label: "Geometry queries (query)" },
+  exact: { label: "Exact STEP export (exact)" },
   fillet: { label: "Edge fillets and chamfers (fillet)" },
 };
 
-/// The `enable` names of the language extensions `settings` turns on.
-export const enabledExtensions = (settings) => Object.keys(LANGUAGE_EXTENSIONS).filter((name) => settings?.[name] === true);
+/// The `enable` names of the language extensions `settings` turns on,
+/// plus `extra` (a link's, on for its document only), in
+/// LANGUAGE_EXTENSIONS's order. Names it does not know are left out.
+export const enabledExtensions = (settings, extra = []) =>
+  Object.keys(LANGUAGE_EXTENSIONS).filter((name) => settings?.[name] === true || (extra ?? []).includes(name));
 
 /// The Export menu's formats. `extension` names the NeoSCAD extension a
 /// format needs (`--enable` on the command line): the menu lists it only
-/// while the Export menu's toggle for it is on, and the export sends it.
+/// while that extension is on, as the apps' export menus list STEP only
+/// with `exact` on, and the export sends it.
 export const EXPORT_FORMATS = {
   stl: { label: "STL", ext: "stl" },
   "3mf": { label: "3MF", ext: "3mf" },

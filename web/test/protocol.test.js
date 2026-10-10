@@ -5,6 +5,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  EXPORT_FORMATS,
+  LANGUAGE_EXTENSIONS,
   Requests,
   applyEdits,
   enabledExtensions,
@@ -136,11 +138,21 @@ test("requests carry the protocol's fields", () => {
     camera: { vpt: [0, 0, 0], vpr: [55, 0, 25], vpd: 140, vpf: 22.5 },
     colorScheme: "Metallic",
   });
-  // The page's language extensions: on in the settings, sent with every
-  // run; `exact` goes with its export alone.
-  assert.deepEqual(enabledExtensions({ fillet: true, exact: true }), ["fillet"]);
-  assert.deepEqual(enabledExtensions({ fillet: false }), []);
+  // The page's language extensions: the apps' four, on in the settings
+  // or by a link (`extra`), sent with every run in one order.
+  assert.deepEqual(Object.keys(LANGUAGE_EXTENSIONS), ["sketch", "query", "exact", "fillet"]);
+  assert.equal(LANGUAGE_EXTENSIONS.sketch.label, "Constrained sketches (sketch)");
+  assert.equal(LANGUAGE_EXTENSIONS.query.label, "Geometry queries (query)");
+  assert.equal(LANGUAGE_EXTENSIONS.exact.label, "Exact STEP export (exact)");
+  assert.equal(LANGUAGE_EXTENSIONS.fillet.label, "Edge fillets and chamfers (fillet)");
+  assert.deepEqual(enabledExtensions({ fillet: true, exact: true }), ["exact", "fillet"]);
+  assert.deepEqual(enabledExtensions({ fillet: false, sketch: "yes" }), [], "only true turns one on");
   assert.deepEqual(enabledExtensions(undefined), []);
+  assert.deepEqual(enabledExtensions({ query: true }, ["fillet", "sketch", "part", "bogus"]), ["sketch", "query", "fillet"]);
+  assert.deepEqual(enabledExtensions({}, null), []);
+  assert.equal(EXPORT_FORMATS.step.extension, "exact");
+  assert.deepEqual(Requests.lsp("{}"), { type: "lsp", message: "{}" });
+  assert.deepEqual(Requests.lsp("{}", []), { type: "lsp", message: "{}", enable: [] });
   assert.deepEqual(Requests.run({ path: "/doc/a.scad", mode: "preview", enable: enabledExtensions({ fillet: true }) }).enable, ["fillet"]);
   assert.deepEqual(Requests.section(4, "z", 2), { type: "section", measurement: 4, axis: "z", offset: 2 });
   assert.deepEqual(Requests.section(4, "z", 2, "lid").part, "lid");

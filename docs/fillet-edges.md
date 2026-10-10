@@ -57,8 +57,10 @@ and the JSON hint names the flag. Turn them on with:
 - the apps: Settings > Language > "Edge fillets and chamfers (fillet)"
   on macOS, Preferences > Language on Linux, and Design > NeoSCAD
   Extensions on Windows. Changing it runs the open documents again;
-- the web page (neoscad.org/try): View > "Edge fillets and chamfers
-  (fillet)".
+- the web page (neoscad.org/try): View > NeoSCAD extensions > "Edge
+  fillets and chamfers (fillet)". Its Copy link carries the switch, so
+  a filleted model opens with it on for whoever opens the link
+  (web/README.md, "Links and embeds").
 
 Every surface marks the two modules with the label "NeoSCAD extension
 (`--enable fillet`); not in OpenSCAD": `neoscad docs fillet_edges`, the

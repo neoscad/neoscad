@@ -63,6 +63,7 @@ export class EngineClient {
     this.libraries = new Set(); // names of the lazy libraries added
     this.lspInit = []; // the language client's initialize and initialized
     this.lspDocs = new Map(); // uri -> {languageId, version, text}
+    this.extensions = []; // the language server's `enable` (setExtensions)
     this.inFlight = null; // {started, request}
     this.waiting = null; // {request, resolve, reject}
     this.staleTimer = null;
@@ -269,7 +270,7 @@ export class EngineClient {
         // for a respawned worker must not be in the state replayed to it,
         // or the server would see its change twice.
         this.remember(message);
-        return this.send(Requests.lsp(message), { quiet: true });
+        return this.send(Requests.lsp(message, this.extensions), { quiet: true });
       })
       .then((r) => {
         for (const m of r?.messages ?? []) this.emit("lsp", m);
@@ -319,15 +320,24 @@ export class EngineClient {
   /// Give a new worker's language server what the old one had been told.
   async replayLanguage() {
     if (!this.lspInit.length) return;
-    for (const m of this.lspInit) await this.send(Requests.lsp(JSON.stringify(m)), { quiet: true });
+    for (const m of this.lspInit) await this.send(Requests.lsp(JSON.stringify(m), this.extensions), { quiet: true });
     for (const [uri, d] of this.lspDocs) {
       const open = {
         jsonrpc: "2.0",
         method: "textDocument/didOpen",
         params: { textDocument: { uri, languageId: d.languageId, version: d.version, text: d.text } },
       };
-      await this.send(Requests.lsp(JSON.stringify(open)), { quiet: true });
+      await this.send(Requests.lsp(JSON.stringify(open), this.extensions), { quiet: true });
     }
+  }
+
+  /// The language extensions the page's documents run with (`--enable`
+  /// names). Every language server message carries them from now on, and
+  /// a respawned worker's replay too: runs also tell the server theirs,
+  /// but a toggle changed before the next run, or a heavy example not run
+  /// yet, would otherwise complete with the last run's set (or none).
+  setExtensions(names) {
+    this.extensions = [...names];
   }
 
   // --- Runs, coalesced ------------------------------------------------------

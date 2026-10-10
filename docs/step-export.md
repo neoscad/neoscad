@@ -217,8 +217,8 @@ and SolidWorks were not run on them (the audit's section 11).
 - **Windows app:** Design > NeoSCAD Extensions > "Exact STEP Export
   (exact)", then File > Export As > STEP (exact surfaces)
   (`docs/windows-app.md`).
-- **Web (neoscad.org/try):** Export > "Exact STEP export (exact)", then
-  Export > STEP (exact surfaces). The same engine runs in the browser,
+- **Web (neoscad.org/try):** View > NeoSCAD extensions > "Exact STEP
+  export (exact)", then Export > STEP (exact surfaces). The same engine runs in the browser,
   so the file is the command line's (the same bytes for the same file
   name, which the header records).
 

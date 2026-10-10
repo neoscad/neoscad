@@ -100,14 +100,19 @@ test("Export downloads a file named after the example", async ({ page }) => {
   expect([...readFileSync(await threemf.path()).subarray(0, 2)]).toEqual([0x50, 0x4b]);
 });
 
-test("STEP export is behind its toggle and reports how much is exact", async ({ page }) => {
+test("STEP export is behind the exact extension and reports how much is exact", async ({ page }) => {
   await open(page);
   await expect(summary(page)).toContainText("Previewed");
   await page.getByTestId("export-menu").click();
   await expect(page.getByRole("menuitem", { name: "STEP (exact surfaces)…" })).toHaveCount(0);
+  // The toggle is with the other extensions in the View menu, as in the
+  // apps, whose export menus list STEP only while it is on.
+  await expect(page.getByRole("menuitemcheckbox", { name: "Exact STEP export (exact)" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await page.getByTestId("view-menu").click();
   await page.getByRole("menuitemcheckbox", { name: "Exact STEP export (exact)" }).click();
+  await expect(summary(page)).toContainText("Previewed");
   await page.getByTestId("export-menu").click();
-  await expect(page.getByRole("menuitemcheckbox", { name: "Exact STEP export (exact)" })).toHaveAttribute("aria-checked", "true");
   const [step] = await Promise.all([
     page.waitForEvent("download"),
     page.getByRole("menuitem", { name: "STEP (exact surfaces)…" }).click(),
@@ -141,6 +146,29 @@ test("the fillet extension is a View menu setting that runs the model again", as
   await expect(summary(page)).toContainText("Previewed");
   await page.getByTestId("view-menu").click();
   await expect(page.getByRole("menuitemcheckbox", { name: "Edge fillets and chamfers (fillet)" })).toHaveAttribute("aria-checked", "true");
+});
+
+test("the View menu has the apps' extensions, and each reaches the runs and the language server", async ({ page }) => {
+  await open(page);
+  await expect(summary(page)).toContainText("Previewed");
+  const labels = ["Constrained sketches (sketch)", "Geometry queries (query)", "Exact STEP export (exact)", "Edge fillets and chamfers (fillet)"];
+  await page.getByTestId("view-menu").click();
+  for (const name of labels) await expect(page.getByRole("menuitemcheckbox", { name })).toHaveAttribute("aria-checked", "false");
+  await page.keyboard.press("Escape");
+  // What the page sends: every run's options, and the language server's.
+  const sent = () => page.evaluate(() => ({ run: window.NeoSCADWeb.runOptions().enable, lsp: window.NeoSCADWeb.engine.extensions }));
+  expect(await sent()).toEqual({ run: [], lsp: [] });
+  for (const name of [labels[1], labels[0]]) {
+    await page.getByTestId("view-menu").click();
+    await page.getByRole("menuitemcheckbox", { name }).click();
+    await expect(summary(page)).toContainText("Previewed");
+  }
+  expect(await sent()).toEqual({ run: ["sketch", "query"], lsp: ["sketch", "query"] });
+  // Off again: out of both.
+  await page.getByTestId("view-menu").click();
+  await page.getByRole("menuitemcheckbox", { name: labels[0] }).click();
+  await expect(summary(page)).toContainText("Previewed");
+  expect(await sent()).toEqual({ run: ["query"], lsp: ["query"] });
 });
 
 test("F5 previews instead of reloading, F6 and Mod-Enter render", async ({ page }) => {

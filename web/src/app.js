@@ -70,13 +70,14 @@ const SETTINGS = {
   view: DEFAULT_VIEW,
   check: {},
   layout: { left: 34, right: 22, console: 30 },
-  // NeoSCAD's `exact` extension (Export > Exact STEP export): STEP with
-  // exact surfaces in the Export menu. Off by default, as on the command
-  // line, where `.step` is OpenSCAD's unknown suffix without it.
+  // NeoSCAD's language extensions (View > NeoSCAD extensions,
+  // LANGUAGE_EXTENSIONS), sent with every run. Off by default, as on the
+  // command line, where without them their modules and functions are
+  // unknown and `.step` is an unknown suffix: off, a file means what it
+  // means in OpenSCAD. `exact` also lists STEP in the Export menu.
+  sketch: false,
+  query: false,
   exact: false,
-  // NeoSCAD's `fillet` extension (View > Edge fillets and chamfers):
-  // `fillet_edges()` and `chamfer_edges()` in every run. Off by default,
-  // as on the command line, where they are unknown modules without it.
   fillet: false,
 };
 
@@ -186,11 +187,19 @@ class App {
     if (share.code !== null) {
       try {
         const text = await decodeSource(share.code);
+        // The link's extensions are its document's, not the visitor's
+        // settings: a model shared with `fillet` on must not run as
+        // unknown modules for a visitor who has it off, and opening a link
+        // must not change what their own examples run with. `part` is the
+        // document's Parts toggle.
+        const parts = share.enable.includes("part");
         this.shared = {
-          example: { id: SHARED_ID, shared: true, title: share.name, file: share.name, parts: false, heavy: false, autorun: true, note: "" },
+          example: { id: SHARED_ID, shared: true, title: share.name, file: share.name, parts, heavy: false, autorun: true, note: "" },
           original: text,
           text,
           values: {},
+          parts,
+          enable: share.enable.filter((n) => n in LANGUAGE_EXTENSIONS),
         };
       } catch (e) {
         shareFailed = e instanceof ShareError ? e.message : `it could not be read (${e.message})`;
@@ -205,6 +214,18 @@ class App {
     // In the banner: the console's summary would be overwritten by the
     // example's own preview a moment later.
     if (shareFailed) this.banner(`The link's model could not be opened: ${shareFailed}. This is the example you had open instead.`);
+    // Said where it stays visible: a model running with an extension the
+    // visitor turned off would otherwise look like it does in their
+    // other documents, and they could not tell why.
+    const lent = this.shared?.enable.filter((n) => this.settings[n] !== true) ?? [];
+    if (lent.length) {
+      const names = lent.map((n) => LANGUAGE_EXTENSIONS[n].label).join(", ");
+      const many = lent.length > 1;
+      this.banner(
+        `The link's model uses ${many ? "NeoSCAD extensions" : "a NeoSCAD extension"} you have off: ${names}. ` +
+          `${many ? "They are" : "It is"} on for this model only, not your examples (View > NeoSCAD extensions).`,
+      );
+    }
     document.documentElement.dataset.ready = "true";
     // Connect an agent: the link this page was opened with, or this tab's
     // link from before a reload (quietly: its agent may be gone).
@@ -241,17 +262,11 @@ class App {
       "Export",
       () => [
         ...Object.entries(EXPORT_FORMATS)
-          .filter(([, f]) => !f.extension || this.settings[f.extension])
+          .filter(([, f]) => !f.extension || this.extensions().includes(f.extension))
           .map(([id, f]) => ({
             label: `${f.label}…`,
             run: () => this.export(id),
           })),
-        "-",
-        {
-          label: "Exact STEP export (exact)",
-          checked: this.settings.exact,
-          run: () => this.saveSettings({ exact: !this.settings.exact }),
-        },
         "-",
         { heading: "Share" },
         { label: "Copy link", run: () => this.copyLink() },
@@ -537,6 +552,10 @@ class App {
     this.tabs = [];
     this.activeTab = null;
     this.renderTabs();
+    // Before the editor opens it in the language server, so completion
+    // knows this document's extensions (a link's may differ from the
+    // examples').
+    this.engine.setExtensions(this.extensions());
     this.editor.load(text, fileURI(path), false);
     this.customizer.setModel(this.doc.customizer);
     this.check.setParts(this.doc.parts);
@@ -562,9 +581,9 @@ class App {
     if (!this.doc) return;
     const id = this.doc.example.id;
     if (this.doc.example.shared) {
-      // Back to the text the link brought.
+      // Back to the text the link brought, with its Parts toggle.
       Object.assign(this.shared, { text: this.shared.original, values: {} });
-      this.shared.example.parts = false;
+      this.shared.example.parts = this.shared.parts;
       this.openExample(id);
       return;
     }
@@ -762,8 +781,16 @@ class App {
     }
   }
 
+  /// The language extensions the open document runs with: the visitor's
+  /// (View > NeoSCAD extensions) and, for a link's document, the link's.
+  /// Every run, check, measurement and export takes them, and so does the
+  /// language server.
+  extensions() {
+    return enabledExtensions(this.settings, this.doc?.example.shared ? this.shared.enable : []);
+  }
+
   runOptions() {
-    return runOptions(this.doc.customizer.values, this.doc.parts, enabledExtensions(this.settings));
+    return runOptions(this.doc.customizer.values, this.doc.parts, this.extensions());
   }
 
   async run(mode) {
@@ -793,9 +820,9 @@ class App {
           mode,
           values: d.customizer.values,
           parts: d.parts,
-          // The language extensions on (View menu); the worker's language
-          // server takes them from the run, so completion matches.
-          enable: enabledExtensions(this.settings),
+          // The language extensions on (View menu, or the link's); the
+          // worker's language server takes them from the run too.
+          enable: this.extensions(),
           // The view the model is shown in, for `$vpt` and friends, and the
           // scheme its face colours are baked in (the viewer cannot
           // recolour a packed scene).
@@ -867,10 +894,10 @@ class App {
     const f = EXPORT_FORMATS[format];
     this.console.setSummary(`Exporting ${f.label}…`, "running");
     if (!(await this.libraries())) return;
-    // A format's extension is sent with its export only: the runs that
-    // draw the model do not need it, and keep their cache entries. The
-    // language extensions on go with every run, this one too.
-    const enable = [...enabledExtensions(this.settings), ...(f.extension ? [f.extension] : [])];
+    // The menu lists a format only while its extension is on, so it is
+    // already among the document's; added again in case the menu was
+    // open across a toggle.
+    const enable = [...new Set([...this.extensions(), ...(f.extension ? [f.extension] : [])])];
     try {
       const r = await this.engine.request(
         Requests.export(d.path, format, runOptions(d.customizer.values, d.parts, enable)),
@@ -896,10 +923,14 @@ class App {
   /// with `embed` its embed view. Always the text itself, never
   /// `#example=`: whoever opens the link may have edited that example in
   /// their own browser, and would see their version instead. Customizer
-  /// values are not carried; they live in the visitor's storage.
+  /// values are not carried; they live in the visitor's storage. The
+  /// document's extensions are (`enable=`, with `part` for its Parts
+  /// toggle): without them a filleted model opens as unknown modules for
+  /// anyone who has fillets off, which is everyone by default.
   async shareLink({ embed = false } = {}) {
     const d = this.doc;
-    const hash = await shareHash(d.text, { name: d.example.file, embed });
+    const enable = [...(d.parts ? ["part"] : []), ...this.extensions()];
+    const hash = await shareHash(d.text, { name: d.example.file, embed, enable });
     return location.origin + location.pathname + location.search + hash;
   }
 
@@ -1067,7 +1098,7 @@ class App {
       { heading: "NeoSCAD extensions" },
       ...Object.entries(LANGUAGE_EXTENSIONS).map(([name, x]) => ({
         label: x.label,
-        checked: this.settings[name] === true,
+        checked: this.extensions().includes(name),
         run: () => this.toggleExtension(name),
       })),
     ];
@@ -1075,8 +1106,18 @@ class App {
 
   /// Turn a language extension on or off and run the document again
   /// with it, in the mode last run, as the apps do when theirs change.
+  /// Each item shows what the open document runs with, a link's
+  /// extensions included. Turning one on is the visitor's setting, for
+  /// every document; turning one off takes it from the setting and from
+  /// the link's document too (otherwise the item could not be unchecked).
   toggleExtension(name) {
-    this.saveSettings({ [name]: !(this.settings[name] === true) });
+    if (this.extensions().includes(name)) {
+      if (this.doc?.example.shared) this.shared.enable = this.shared.enable.filter((n) => n !== name);
+      this.saveSettings({ [name]: false });
+    } else {
+      this.saveSettings({ [name]: true });
+    }
+    this.engine.setExtensions(this.extensions());
     if (this.doc && this.lastMode) this.run(this.lastMode);
   }
 

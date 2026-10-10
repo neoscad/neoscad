@@ -306,6 +306,11 @@ struct AddFiles {
 #[derive(Deserialize)]
 struct Lsp {
     message: String,
+    /// The page's language extensions, when it sends them: they replace
+    /// the server's before the message is handled, so completion and
+    /// hover follow a View menu toggle at once rather than from the next
+    /// run (which a heavy example does not start by itself).
+    enable: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -536,6 +541,11 @@ impl Worker {
             }
             "lsp" => {
                 let r: Lsp = fields(request)?;
+                if let Some(names) = &r.enable {
+                    state
+                        .lsp
+                        .set_extensions(eval::Extensions::from_names(names));
+                }
                 let messages = state.lsp.handle(&c.session, &r.message);
                 Ok(json!({ "messages": messages }))
             }

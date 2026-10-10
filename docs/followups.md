@@ -2102,6 +2102,14 @@ lead them, come roughly in order of user impact.
   BOSL2 is on the native library path, while the page fetches its own
   copy. Shipping BOSL2 with the CLI (as MCAD is), or falling back to the
   page's own engine for those runs, would close the gap.
+- **The model tools on the page's text ignore its extensions**: the
+  page's `read` (`web/src/agent/page.js`) sends its `part()` switch but
+  not the View menu's NeoSCAD extensions (or a link's), so `evaluate`
+  and the other tools run the page's text with `neoscad mcp`'s own
+  `--enable`. A `sketch` model that previews on the page is unknown
+  modules to the agent unless the MCP server was started with the same
+  flag. Sending the page's `enable` from `read` and having the MCP
+  server use it for page-text runs would close it.
 - **The agent's edits and the user's typing race only at version
   granularity:** an edit made on version N is refused once the user has
   typed. Rebasing a small edit over concurrent typing (as the editor's
@@ -2808,10 +2816,6 @@ axis as exact B-spline surfaces. What they leave:
   declare (from the last run, or `child_anchors()`'s walk) would do.
   `part(name)` is offered even without `--enable part`, since the apps
   turn parts on per window rather than through the language server.
-- **/try's toggle is not in share links**: a shared link of a filleted
-  model opens with the extension as the recipient's page has it (off by
-  default), so the calls are unknown modules. The page has no sketch or
-  query toggles either.
 - **CHANGELOG**: fillets (F0 to F5b) are not in `CHANGELOG.md` yet;
   the entry goes with the release that ships them. `meshbrep`'s changes
   since 0.2.0 (spindle tori, the corner margin, B-spline surfaces, curved blends) are

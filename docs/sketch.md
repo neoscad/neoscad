@@ -46,7 +46,10 @@ of the sketch vocabulary exists. Turn them on with:
   extensions;
 - the apps: Settings > Language > "Constrained sketches (sketch)" on
   macOS, Preferences > Language on Linux, and Design > NeoSCAD
-  Extensions on Windows. Changing it runs the open documents again.
+  Extensions on Windows. Changing it runs the open documents again;
+- the web page (neoscad.org/try): View > NeoSCAD extensions >
+  "Constrained sketches (sketch)". Its Copy link carries the switch, so
+  a shared sketch opens with it on (web/README.md, "Links and embeds").
 
 Every surface marks the vocabulary with the label "NeoSCAD extension
 (`--enable sketch`); not in OpenSCAD": `neoscad docs sketch`, the

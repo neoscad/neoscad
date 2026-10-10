@@ -36,6 +36,20 @@ const ready = () => {
   return core;
 };
 
+test("an extension's module is unknown unless the run enables it, as in the core", () => {
+  const core = ready();
+  const path = docPath("f.scad");
+  core.handle({ type: "open", path, text: 'fillet_edges(r = 1, edges = "|z") cube(10);\nsketch() {}\n' });
+  const warnings = (enable) =>
+    core
+      .handle({ type: "run", path, mode: "preview", enable })
+      .result.console.filter((l) => l.kind === "warning")
+      .map((l) => l.text);
+  assert.deepEqual(warnings([]), ["WARNING: Ignoring unknown module 'sketch'", "WARNING: Ignoring unknown module 'fillet_edges'"]);
+  assert.deepEqual(warnings(["fillet"]), ["WARNING: Ignoring unknown module 'sketch'"]);
+  assert.deepEqual(warnings(["sketch", "fillet"]), []);
+});
+
 test("the mock answers in the wire's shapes", () => {
   const core = new MockCore();
   assert.throws(() => core.handle({ type: "run", path: "/doc/a.scad", mode: "preview" }), (e) => e.kind === "invalidArgument");

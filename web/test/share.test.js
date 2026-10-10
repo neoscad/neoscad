@@ -8,7 +8,9 @@ import { Duplex } from "node:stream";
 import zlib from "node:zlib";
 import {
   DEFAULT_NAME,
+  LINK_EXTENSIONS,
   MAX_SOURCE_BYTES,
+  codeHash,
   ShareError,
   decodeSource,
   encodeSource,
@@ -113,8 +115,15 @@ test("file names are made safe", () => {
 });
 
 test("the fragment's parameters, and taking them out", () => {
-  assert.deepEqual(parseShare("#embed=1&code=z:abc&name=gear.scad"), { code: "z:abc", name: "gear.scad", example: null, embed: true });
-  assert.deepEqual(parseShare("#example=csg"), { code: null, name: DEFAULT_NAME, example: "csg", embed: false });
+  assert.deepEqual(parseShare("#embed=1&code=z:abc&name=gear.scad"), { code: "z:abc", name: "gear.scad", example: null, embed: true, enable: [] });
+  assert.deepEqual(parseShare("#example=csg"), { code: null, name: DEFAULT_NAME, example: "csg", embed: false, enable: [] });
+  // Extensions: known names only, once each, in one order, however the
+  // link wrote them (URLSearchParams' %2C included).
+  assert.deepEqual(parseShare("#code=abc&enable=fillet,part,bogus,fillet").enable, ["part", "fillet"]);
+  assert.deepEqual(parseShare("#code=abc&enable=query%2Csketch%2C%20exact").enable, ["sketch", "query", "exact"]);
+  assert.deepEqual(parseShare("#code=abc&enable=").enable, []);
+  assert.deepEqual(parseShare("#code=abc&enable=all").enable, [], "`all` is OpenSCAD's experiments, never an extension");
+  assert.equal(stripShare("#code=abc&enable=fillet&example=csg"), "#example=csg");
   // URLSearchParams' own encoding of the marker is read the same.
   assert.equal(parseShare("#code=z%3Aabc").code, "z:abc");
   assert.equal(parseShare("").code, null);
@@ -131,6 +140,16 @@ test("shareHash and exampleHash build links that parse back", async () => {
   assert.equal(await decodeSource(p.code, opts), SOURCE);
   assert.ok(!(await shareHash("cube(1);", { streams })).includes("name="));
   assert.ok((await shareHash("cube(1);", { embed: true, streams })).startsWith("#embed=1&code="));
+  // A link without extensions is the same as one made before links had
+  // them; with them it lists the known ones in LINK_EXTENSIONS's order.
+  assert.ok(!(await shareHash("cube(1);", { enable: [], streams })).includes("enable="));
+  const on = await shareHash("cube(1);", { name: "f", enable: ["fillet", "bogus", "part", "sketch"], streams });
+  assert.match(on, /&name=f\.scad&enable=part,sketch,fillet$/);
+  assert.deepEqual(parseShare(on).enable, ["part", "sketch", "fillet"]);
+  assert.equal(await decodeSource(parseShare(on).code, opts), "cube(1);");
+  assert.deepEqual(LINK_EXTENSIONS, ["part", "sketch", "query", "exact", "fillet"]);
+  assert.equal(codeHash("abc", { embed: true, enable: ["query"] }), "#embed=1&code=abc&enable=query");
+  assert.equal(codeHash("abc"), "#code=abc");
   assert.equal(exampleHash("csg"), "#example=csg");
   assert.equal(exampleHash("a b", { embed: true }), "#embed=1&example=a%20b");
 });

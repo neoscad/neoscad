@@ -330,6 +330,26 @@ await test('menger depth 5 preview is thrown together, not a crash', 5000, () =>
     assert.ok(JSON.parse(r.scene.meta).draws.length > 0);
 });
 
+// The page's extensions reach the language server with its messages
+// (`lsp`'s `enable`), not only from a run: with `fillet` on, a fillet
+// call's `edges` string completes as a selector before anything has run;
+// with the page's set empty again, it completes nothing.
+await test('an lsp message carries the language extensions', 2000, () => {
+    const lsp = (m, enable) =>
+        ok('lsp', { message: JSON.stringify(m), ...(enable ? { enable } : {}) }).messages.map((s) => JSON.parse(s));
+    const uri = 'file:///doc/fillet-lsp.scad';
+    const text = 'fillet_edges(r = 1, edges = "|z and ") cube(10);\n';
+    ok('open', { path: '/doc/fillet-lsp.scad', text });
+    lsp({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { capabilities: {} } });
+    lsp({ jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri, languageId: 'openscad', version: 1, text } } });
+    const complete = (enable) =>
+        (lsp({ jsonrpc: '2.0', id: 9, method: 'textDocument/completion', params: { textDocument: { uri }, position: { line: 0, character: 36 } } }, enable)[0]
+            .result?.items ?? []).map((i) => i.label);
+    assert.ok(complete(['fillet']).includes('convex'), 'a selector word, with fillet on');
+    assert.ok(complete(undefined).includes('convex'), 'a message without enable keeps the set');
+    assert.deepEqual(complete([]), []);
+});
+
 // The Menger example at depth 4 previews in about 10 s here (as long as
 // its render), nearly all of it in the product booleans, which once ran on
 // past the time limit. Under a

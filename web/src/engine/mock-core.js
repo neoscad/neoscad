@@ -40,7 +40,10 @@ const MOCK_STEP_REPORT = {
   summary: "STEP: 7 of 16 faces exact (43.8%).\n1 curve made exact.\nFaceted: hull() at CSG.scad, line 2 is exported as planar facets",
 };
 
-const CHECK_DEFAULTS = { nozzle: 0.4, minWall: 0.8, maxOverhang: 45, bed: null, bedTolerance: 0.5, maxFindings: 50 };
+/// The modules each NeoSCAD extension adds (docs/language-extensions.md);
+/// `query`'s are functions, which the mock does not look for.
+const EXTENSION_MODULES = { sketch: ["sketch"], fillet: ["fillet_edges", "chamfer_edges"] };
+const CHECK_DEFAULTS ={ nozzle: 0.4, minWall: 0.8, maxOverhang: 45, bed: null, bedTolerance: 0.5, maxFindings: 50 };
 const LIMITS = {
   timeSeconds: 60,
   memoryBytes: 1 << 30,
@@ -243,6 +246,17 @@ export class MockCore {
     }
     if (/\bpart\s*\(/.test(text) && !msg.parts) {
       console.push({ kind: "warning", text: "WARNING: Ignoring unknown module 'part'", location: null });
+    }
+    // A NeoSCAD extension's module the run did not enable is OpenSCAD's
+    // unknown module, as in the core: what lets the mock build's tests see
+    // whether a toggle or a link's extensions reached the run.
+    for (const [name, modules] of Object.entries(EXTENSION_MODULES)) {
+      if ((msg.enable ?? []).includes(name)) continue;
+      for (const m of modules) {
+        if (new RegExp(`\\b${m}\\s*\\(`).test(text)) {
+          console.push({ kind: "warning", text: `WARNING: Ignoring unknown module '${m}'`, location: null });
+        }
+      }
     }
     const model = mockModel(text, msg.mode);
     this.model = model;

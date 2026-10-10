@@ -194,3 +194,22 @@ test("language-server messages are requests; replies come back as events", async
   assert.equal(got[0].result.capabilities.positionEncoding, "utf-16");
   assert.ok(!statuses.slice(before).includes("working"), "language requests do not show as work");
 });
+
+test("the page's language extensions go with every language-server message, and its replay", async () => {
+  const { c, workers } = client();
+  await c.start();
+  c.lsp(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }));
+  await settle(10);
+  assert.deepEqual(workers[0].received.at(-1).enable, [], "none until the page says");
+  c.setExtensions(["sketch", "fillet"]);
+  c.lsp(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "textDocument/completion", params: {} }));
+  await settle(10);
+  assert.deepEqual(workers[0].received.at(-1).enable, ["sketch", "fillet"]);
+  // A respawned worker's server is told them with the replayed state.
+  c.restart("boom");
+  await c.ready;
+  await settle(10);
+  const replayed = workers[1].received.filter((m) => m.type === "lsp");
+  assert.ok(replayed.length > 0);
+  for (const m of replayed) assert.deepEqual(m.enable, ["sketch", "fillet"]);
+});

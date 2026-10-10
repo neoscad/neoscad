@@ -14,10 +14,18 @@
 //   name=<file>      the document's file name (default untitled.scad)
 //   example=<id>     a bundled example instead (examples/manifest.json)
 //   embed=1          the embed view (embed.js) rather than the whole page
+//   enable=<names>   NeoSCAD's language extensions the code runs with:
+//                    comma-separated `--enable` names (`part`, `sketch`,
+//                    `query`, `exact`, `fillet`), for the code's document
+//                    only. Names the page does not know are ignored; a
+//                    link without it (every link made before it) runs
+//                    with the visitor's settings, as it always did
 //
 // It is the fragment, not the query, because the browser never sends a
 // fragment to the server: a model shared this way stays between the
 // people who have the link.
+
+import { LANGUAGE_EXTENSIONS } from "./engine/protocol.js";
 
 /// The most source a link may carry, decoded. A fragment this long is
 /// still well within what browsers keep in an address (all of them take
@@ -33,11 +41,20 @@ const MAX_PAYLOAD = Math.ceil((MAX_SOURCE_BYTES * 4) / 3) + 2;
 
 export const DEFAULT_NAME = "untitled.scad";
 
+/// The extensions a link can carry, in the order a link lists them:
+/// `part` (the document's Parts toggle) and the View menu's.
+export const LINK_EXTENSIONS = ["part", ...Object.keys(LANGUAGE_EXTENSIONS)];
+
+/// `names` as a link's extensions: the known ones, once each, in
+/// LINK_EXTENSIONS's order, so one set always makes the same link.
+export const linkExtensions = (names) => LINK_EXTENSIONS.filter((n) => (names ?? []).includes(n));
+
 /// A link's model that could not be opened: the message is for the user.
 export class ShareError extends Error {}
 
-/// What a fragment asks for: `{code, name, example, embed}`, with `code`
-/// the undecoded payload (null without one) and `name` checked.
+/// What a fragment asks for: `{code, name, example, embed, enable}`, with
+/// `code` the undecoded payload (null without one), `name` checked, and
+/// `enable` the extensions it names that the page knows ([] for none).
 export function parseShare(hash) {
   const p = new URLSearchParams(String(hash ?? "").replace(/^#/, ""));
   return {
@@ -45,16 +62,18 @@ export function parseShare(hash) {
     name: fileName(p.get("name")),
     example: p.get("example"),
     embed: p.get("embed") === "1",
+    enable: linkExtensions((p.get("enable") ?? "").split(",").map((n) => n.trim())),
   };
 }
 
-/// A fragment without the share parameters (`code`, `name`, `embed`),
-/// "" when nothing is left. `example` stays: it is the page's own record
-/// of what is open, not a payload. A fragment without them comes back as
-/// it was (URLSearchParams would turn `#agent` into `#agent=`).
+/// A fragment without the share parameters (`code`, `name`, `embed`,
+/// `enable`), "" when nothing is left. `example` stays: it is the page's
+/// own record of what is open, not a payload. A fragment without them
+/// comes back as it was (URLSearchParams would turn `#agent` into
+/// `#agent=`).
 export function stripShare(hash) {
   const p = new URLSearchParams(String(hash ?? "").replace(/^#/, ""));
-  const keys = ["code", "name", "embed"];
+  const keys = ["code", "name", "embed", "enable"];
   if (!keys.some((k) => p.has(k))) return String(hash ?? "");
   for (const k of keys) p.delete(k);
   const rest = p.toString();
@@ -185,12 +204,24 @@ export async function decodeSource(payload, { streams = browserStreams, max = MA
   }
 }
 
-/// The fragment that opens `text` (`embed` for the embed view). `name`
-/// is left out when it is the default.
-export async function shareHash(text, { name = DEFAULT_NAME, embed = false, streams } = {}) {
-  const code = await encodeSource(text, { streams });
+/// The fragment that opens `text` (`embed` for the embed view), run with
+/// the extensions `enable` names. `name` is left out when it is the
+/// default, and `enable` when it names none, so a model that needs no
+/// extension gets the same link as before links carried them.
+export async function shareHash(text, { name = DEFAULT_NAME, embed = false, enable = [], streams } = {}) {
+  return codeHash(await encodeSource(text, { streams }), { name, embed, enable });
+}
+
+/// shareHash's fragment for a payload already encoded (the embed view's
+/// link to the whole page passes on the one it came with).
+export function codeHash(code, { name = DEFAULT_NAME, embed = false, enable = [] } = {}) {
   const n = fileName(name);
-  return `#${embed ? "embed=1&" : ""}code=${code}${n === DEFAULT_NAME ? "" : `&name=${encodeURIComponent(n)}`}`;
+  const on = linkExtensions(enable);
+  return (
+    `#${embed ? "embed=1&" : ""}code=${code}` +
+    (n === DEFAULT_NAME ? "" : `&name=${encodeURIComponent(n)}`) +
+    (on.length ? `&enable=${on.join(",")}` : "")
+  );
 }
 
 /// The fragment that opens a bundled example.

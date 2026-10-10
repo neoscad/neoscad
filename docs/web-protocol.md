@@ -165,8 +165,11 @@ the view, the editor's markers and (through `parameters`) the customizer.
   lists OpenSCAD's experimental features and NeoSCAD's extensions as
   `--enable` names them (`textmetrics`, `object-function`, `part`, ...).
   A run's NeoSCAD extensions also become the language server's, so its
-  completion and hover follow the run (the page sends `fillet` with every
-  run while View > "Edge fillets and chamfers (fillet)" is on).
+  completion and hover follow the run. The page sends the extensions on
+  in View > "NeoSCAD extensions" (`sketch`, `query`, `exact`, `fillet`,
+  the apps' set) with every `run`, `check`, `measure` and `export`, plus
+  those a link turned on for its document (web/README.md, "Links and
+  embeds"); `parts` is the panels' Parts toggle.
 - `camera` is the view the model is shown in, for `$vpt`, `$vpr`, `$vpd`,
   `$vpf` (OpenSCAD's GUI passes its view the same way). Default:
   OpenSCAD's default camera.
@@ -383,8 +386,9 @@ reason. Its `mime` is `model/step`, and `step` is the report
 (`client::StepReport`): `{ ok, error, faces, exactFaces, exactPercent,
 exactCurves, polygons, partial, fallback, facetedRegions: [{ module,
 file, line, count, detail }], summary }`, also when the export was
-refused. The page's Export menu lists STEP only while its "Exact STEP
-export (exact)" toggle is on (a saved setting), and shows the summary's
+refused. The page's Export menu lists STEP only while `exact` is on
+(View > NeoSCAD extensions > "Exact STEP export (exact)", as the apps'
+export menus do), and shows the summary's
 first line in the console summary and the faceted regions as console
 lines that jump to their source.
 
@@ -421,8 +425,15 @@ go-to-definition.
 ### `lsp`
 
 ```js
-{ type: "lsp", message: "<one JSON-RPC message>" } → { messages: ["<JSON-RPC>", ...] }
+{ type: "lsp", message: "<one JSON-RPC message>", enable?: [string] } → { messages: ["<JSON-RPC>", ...] }
 ```
+
+`enable`, when present, replaces the server's NeoSCAD extensions
+(`--enable` names, as in `run`) before the message is handled. The page
+sends its current set with every message and with the replay to a
+respawned worker, so completion and hover follow a View menu toggle at
+once, and know the extensions of a document that has not run yet (a
+heavy example); a `run` sets them too.
 
 The language server (`crates/lsp`) for the editor's
 `@codemirror/lsp-client`: pass each message the client sends, and each

@@ -263,6 +263,32 @@ test("the fillet setting reaches the engine's runs", async ({ page }) => {
   await expect(summary(page)).toContainText("Previewed");
 });
 
+// A link's `enable=` reaches the engine the same way, for its document:
+// a constrained sketch opens solved, with the visitor's setting still off.
+test("a link's extensions reach the engine's runs", async ({ page }) => {
+  // docs/sketch.md's quick start.
+  const plate = `w = 40; h = 20;
+linear_extrude(4)
+sketch(name = "plate") {
+  o = point([0, 0]); a = point([w, 0]); b = point([w, h]); c = point([0, h]);
+  bottom = line(o, a); right = line(a, b); top = line(b, c); left = line(c, o);
+  fix(o); horizontal(bottom); vertical(right); horizontal(top); vertical(left);
+  length(bottom, w); length(left, h);
+  hole = circle([w / 2, h / 2], d = 6);
+  distance(o, hole.center, w / 2, along = "x");
+  distance(o, hole.center, h / 2, along = "y");
+  fillet(o, 3); fillet(a, 3); fillet(b, 3); fillet(c, 3);
+}
+`;
+  await open(page, `${codeLink(plate)}&enable=sketch`);
+  await expect.poll(() => page.evaluate(() => window.NeoSCADWeb.lastRun?.exitCode), { timeout: 60000 }).toBe(0);
+  const lines = (await page.locator(".console-line").allInnerTexts()).join("\n");
+  expect(lines).not.toContain("unknown");
+  await expectDrawn(page);
+  await expect(page.locator("#banner")).toContainText("Constrained sketches (sketch)");
+  expect(await page.evaluate(() => window.NeoSCADWeb.settings.sketch)).toBe(false);
+});
+
 // The fonts are not in the core: fonts.tar.gz is fetched the first time a
 // model draws text, either because the page sees `text(` in it or because
 // the core says a run wanted fonts (text drawn inside a library), and

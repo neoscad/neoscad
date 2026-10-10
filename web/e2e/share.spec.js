@@ -144,6 +144,81 @@ test("Copy link makes a link that opens the same text", async ({ page, context, 
   }
 });
 
+// A link carries the document's NeoSCAD extensions (`enable=`): opening
+// it turns them on for that document only, says so, and leaves the
+// visitor's settings alone; Copy link passes them on; a link from before
+// (no `enable=`) still opens, with none.
+test("a link carries its extensions, for its document only", async ({ page, context, browserName }) => {
+  if (browserName === "chromium") await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  page.on("dialog", (d) => d.accept());
+  const FILLETED = 'fillet_edges(r = 1, edges = "|z") cube(10);\n';
+  const lines = async (p) => (await p.locator(".console-line").allInnerTexts()).join("\n");
+  const fillet = (p) => p.getByRole("menuitemcheckbox", { name: "Edge fillets and chamfers (fillet)" });
+  const settings = (p) => p.evaluate(() => JSON.parse(localStorage.getItem("neoscad.try.v1.settings") ?? "{}"));
+
+  // A link from before links had extensions: the call is OpenSCAD's
+  // unknown module, and nothing is said about extensions.
+  await fresh(page, `#code=${plain(FILLETED)}&name=old`);
+  await expect(summary(page)).toContainText("Previewed");
+  expect(await lines(page)).toContain("unknown module 'fillet_edges'");
+  await expect(page.locator("#banner")).not.toContainText("extension");
+
+  const { errors } = await fresh(page, `#code=${plain(FILLETED)}&name=new&enable=fillet,part`);
+  await expect(summary(page)).toContainText("Previewed");
+  expect(await lines(page)).not.toContain("unknown module");
+  await expect(page.locator("#banner")).toContainText("uses a NeoSCAD extension you have off: Edge fillets and chamfers (fillet)");
+  await expect(page.locator("#banner")).toContainText("on for this model only");
+  expect(await page.evaluate(() => location.hash)).toBe("");
+  await page.getByTestId("view-menu").click();
+  await expect(fillet(page)).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Escape");
+  expect(await page.evaluate(() => window.NeoSCADWeb.engine.extensions)).toEqual(["fillet"]);
+  expect(await page.evaluate(() => window.NeoSCADWeb.doc.parts), "`part` is the document's Parts").toBe(true);
+  // The visitor's setting is still off.
+  expect((await settings(page)).fillet).not.toBe(true);
+
+  // Copy link passes them on, and the link opens the same way.
+  await page.getByTestId("export-menu").click();
+  await page.getByRole("menuitem", { name: "Copy link", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.NeoSCADWeb.lastLink)).toContain("&enable=part,fillet");
+  const link = await page.evaluate(() => window.NeoSCADWeb.lastLink);
+  const other = await context.newPage();
+  await other.goto(link);
+  await other.waitForSelector("html[data-ready]");
+  expect(await editorText(other)).toBe(FILLETED);
+  await expect(summary(other)).toContainText("Previewed");
+  expect(await lines(other)).not.toContain("unknown module");
+  await other.close();
+
+  // An example runs with the visitor's own settings: fillet off.
+  await page.getByTestId("example-picker").selectOption("csg");
+  await expect(summary(page)).toContainText("Previewed");
+  await page.getByTestId("view-menu").click();
+  await expect(fillet(page)).toHaveAttribute("aria-checked", "false");
+  await page.keyboard.press("Escape");
+  expect(await page.evaluate(() => window.NeoSCADWeb.engine.extensions)).toEqual([]);
+  // And back on the link's document, its extensions again.
+  await page.getByTestId("example-picker").selectOption("#link");
+  await expect(summary(page)).toContainText("Previewed");
+  expect(await page.evaluate(() => window.NeoSCADWeb.runOptions().enable)).toEqual(["fillet"]);
+  // Turned off there, it is off for the document and stays off in the
+  // settings.
+  await page.getByTestId("view-menu").click();
+  await fillet(page).click();
+  await expect(summary(page)).toContainText("Previewed");
+  await expect.poll(() => lines(page)).toContain("unknown module 'fillet_edges'");
+  expect((await settings(page)).fillet).toBe(false);
+  expect(errors).toEqual([]);
+});
+
+test("an embed link runs with its extensions and passes them to the whole page", async ({ page }) => {
+  const errors = await openEmbed(page, `#embed=1&code=${plain('fillet_edges(r = 1, edges = "|z") cube(10);\n')}&enable=fillet`);
+  expect(errors).toEqual([]);
+  await expect(page.locator("html")).toHaveAttribute("data-ran", "ok");
+  expect(await page.evaluate(() => window.NeoSCADEmbed.doc.enable)).toEqual(["fillet"]);
+  await expect(page.getByTestId("embed-open")).toHaveAttribute("href", /\/try\/#code=[A-Za-z0-9_-]+&enable=fillet$/);
+});
+
 test("the embed view: the 3D view alone, previewed, saving nothing", async ({ page }) => {
   // A new context: the storage starts empty, and must stay so.
   const errors = await openEmbed(page, `#embed=1&code=${packed(SOURCE)}&name=part`);

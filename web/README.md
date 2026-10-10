@@ -50,6 +50,7 @@ The page reads its fragment (never sent to the server), `src/share.js`:
 | `#example=<id>` | A bundled example (`examples/manifest.json`), with the visitor's own edits to it if they have any. |
 | `#code=<payload>[&name=<file>]` | The source in the link, as a document of its own named `<file>` (default `untitled.scad`, `.scad` added). The payload is the base64url (RFC 4648 §5, no padding) of the UTF-8 source, or `z:` and the base64url of the source deflated with raw DEFLATE (`CompressionStream("deflate-raw")`; in node, `zlib.deflateRawSync`). At most 64 KB decoded. |
 | `#embed=1&code=…` or `#embed=1&example=<id>` | The embed view (`src/embed.js`), for an iframe: below. |
+| `…&enable=<names>` | With any of the above: the NeoSCAD language extensions the model runs with, comma-separated `--enable` names (`part`, `sketch`, `query`, `exact`, `fillet`; others are ignored), on top of the visitor's own. Without it, only the visitor's (none in the embed view, which has no settings). |
 
 A `#code=` link is taken out of the address bar once read, like an
 agent's `#connect=`. Its document is in the example picker as
@@ -60,7 +61,29 @@ base64url, damaged or not UTF-8 opens the usual example, with a banner
 saying why. The Export menu's **Copy link** and **Copy embed link** make
 such links for the document as it is (always its text, never
 `#example=`, since whoever opens it may have edited that example
-themselves; customizer values are not carried).
+themselves; customizer values are not carried). They carry the
+document's extensions as `enable=`: those on in View > NeoSCAD
+extensions (or brought by the link it came from), and `part` when the
+check and measure panels' Parts toggle is on.
+
+A `#code=` link's extensions are its document's alone. Those the visitor
+has off are turned on for that document, with a banner naming them, and
+the View menu shows them checked while it is open; the visitor's
+settings, and so their examples, are unchanged. Turning one off there
+turns it off for the document and in the settings; turning one on is the
+setting, as it always is. `part` turns the document's Parts toggle on.
+A link without `enable=` (every link made before it existed) opens with
+the visitor's settings, as it always did. On `#example=` links the page
+ignores `enable=`: an example runs with the visitor's settings.
+
+The View menu's **NeoSCAD extensions** are the apps' (macOS Settings >
+Language, Linux Preferences > Language, Windows Design > NeoSCAD
+Extensions), with their labels, off by default and saved as settings:
+Constrained sketches (sketch), Geometry queries (query), Exact STEP
+export (exact), which also lists STEP in the Export menu, and Edge
+fillets and chamfers (fillet). Every run, check, measurement and export
+takes the document's extensions, and so does the worker's language
+server, with each message.
 
 The embed view is the 3D view alone, previewed on load (a heavy example
 waits for its Preview button), with "Open in NeoSCAD" opening the same

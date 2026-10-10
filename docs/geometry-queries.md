@@ -49,7 +49,10 @@ Turn queries on with:
 
 - the apps: Settings > Language > "Geometry queries (query)" on macOS,
   Preferences > Language on Linux, and Design > NeoSCAD Extensions on
-  Windows. Changing it runs the open documents again.
+  Windows. Changing it runs the open documents again;
+- the web page (neoscad.org/try): View > NeoSCAD extensions >
+  "Geometry queries (query)". Its Copy link carries the switch
+  (web/README.md, "Links and embeds").
 
 Nothing is new syntax: the queries are functions and `anchor()` is a
 module, so a file parses, formats and prints its `.ast` the same with
