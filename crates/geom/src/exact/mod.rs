@@ -16,7 +16,8 @@
 //!    When the mesh's topology differs from the exact model's
 //!    (`TopologyMismatch`, slivers at a near-tangency, intersection curves
 //!    far further off the exact edges than the tessellation explains), the
-//!    export render is built again at twice the segments. A result whose
+//!    export render is built again at twice the segments (and not
+//!    reconstructed again when that is the same mesh). A result whose
 //!    volume check is too loose to trust is held until a finer mesh
 //!    vouches for it (see `LOOSE_CHECK`). If the exact attempts fail
 //!    somewhere in particular, the source regions there (connected
@@ -39,6 +40,8 @@
 pub mod check;
 pub mod profile;
 pub mod walk;
+
+use std::rc::Rc;
 
 use eval::dump::Keys;
 use eval::node::Node;
@@ -289,6 +292,7 @@ struct Facets {
 
 /// One attempt's outcome: the written file, or why it was rejected and
 /// whether a finer export render could cure it.
+#[derive(Clone)]
 enum Attempt {
     /// The STEP text.
     Done(String),
@@ -368,7 +372,16 @@ fn export_once(
     let mut held: Option<(String, ExactStats, Vec<Substitution>)> = None;
     // The latest exact attempt that failed somewhere in particular: its
     // mesh, where, and why. A partial fallback starts from it.
-    let mut located: Option<(walk::ExportMesh, Vec<u32>)> = None;
+    let mut located: Option<(Rc<walk::ExportMesh>, Vec<u32>)> = None;
+    // The previous exact attempt: its export render, its outcome, and the
+    // stats that attempt left. A finer attempt whose export render is the
+    // same mesh (a model with no curve whose segments the multiplier
+    // changes: polyhedra, cubes, `$fn` polygons) would reconstruct and
+    // check exactly as it did, so its outcome is taken from here rather
+    // than computed again. Polyhedral models refused at the default
+    // resolution spent half their time on that second, identical
+    // reconstruction (`rounding__105`, `skin__084`, the Menger sponge).
+    let mut previous: Option<(Rc<walk::ExportMesh>, Attempt, ExactStats)> = None;
     // Whether the export has fitted blends between curved faces, and the
     // last attempt failed where a finer mesh may succeed.
     let mut fitted = false;
@@ -451,7 +464,7 @@ fn export_once(
         let built = match walked {
             Ok(b) => {
                 *placed += b.placed_copies;
-                b
+                Rc::new(b)
             }
             Err((u, subs)) => {
                 stats.timings.export_render_ms += now() - t0;
@@ -480,17 +493,44 @@ fn export_once(
         if mode == walk::Extrusions::Exact {
             exact_extrusions = exact_extrusions.max(built.exact_extrusions);
         }
-        let outcome = attempt(
-            &built,
-            &built.mesh,
-            Facets::default(),
-            normal_volume,
-            normal_box,
-            k == 0,
-            x,
-            &mut stats,
-            &now,
-        );
+        let repeated = match previous.take() {
+            Some((prev, outcome, prev_stats))
+                if mode == walk::Extrusions::Exact && walk::same_export(&prev, &built) =>
+            {
+                Some((outcome, prev_stats))
+            }
+            _ => None,
+        };
+        let outcome = match repeated {
+            Some((outcome, prev_stats)) => {
+                // The same input as the previous attempt: the same
+                // B-rep, checks and file. Only `first` differed, which
+                // turns a loose check into a held file; on a later
+                // attempt the same file is simply done.
+                let (attempts, timings) = (stats.attempts, stats.timings);
+                stats = prev_stats;
+                stats.attempts = attempts;
+                stats.timings = timings;
+                match outcome {
+                    Attempt::Loose(step) => Attempt::Done(step),
+                    other => other,
+                }
+            }
+            None => attempt(
+                &built,
+                &built.mesh,
+                Facets::default(),
+                normal_volume,
+                normal_box,
+                k == 0,
+                x,
+                &mut stats,
+                &now,
+            ),
+        };
+        if mode == walk::Extrusions::Exact && !matches!(outcome, Attempt::Done(_)) {
+            previous = Some((Rc::clone(&built), outcome.clone(), stats.clone()));
+        }
         if mode == walk::Extrusions::Exact
             && k > 0
             && matches!(outcome, Attempt::Rejected { .. })

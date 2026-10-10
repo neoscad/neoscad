@@ -302,6 +302,17 @@ before; the other two hold placed copies, and `ball_bearings__004`
 reads back valid in OCCT. Gate 3: 152 cases, worst 4.5e-9. What is left
 is in `docs/followups.md`, "Exact geometry".
 
+**Update, gate 5 second pass (2026-10-09):** a faster STEP writer
+(whole numbers and recurring reals without `fmt`, common entities
+without `format!`) and fewer maps in reconstruction and its touch checks
+in `meshbrep` (unreleased, on top of the first pass's), and an export
+that does not reconstruct a finer export render that is the same mesh.
+Gate 5 is still missed: medians 1.61 → 1.41 on the cases, 0.56 → 0.43
+on the render tests, 1.11 → 0.76 on BOSL2, 3.33 → 2.60 on the
+benchmarks (the minimum per model of two alternated sweeps on each side,
+both with the first pass's `meshbrep`). Every file the sweep writes is
+byte-identical, and every status the same.
+
 It follows `docs/audits/brep-feasibility.md` (below, "the previous
 audit"), which found that only OCCT survives OpenSCAD-shaped trees. The
 owner prefers an exact backend written in-house: pure Rust, publishable as

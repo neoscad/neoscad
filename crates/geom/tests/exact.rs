@@ -318,6 +318,85 @@ fn touching_bodies_export_and_inside_out_bodies_are_refused() {
     assert!(e.contains("inside out"), "{e}");
 }
 
+/// The export of `src` with a clock that ticks once per reading, so that
+/// each stage's "time" is how many times it ran (every stage reads the
+/// clock once before and once after its work).
+fn export_counted(src: &str) -> (Result<ExactExport, Box<geom::exact::ExactFailure>>, f64) {
+    let ev = tree(src);
+    let renderer = Renderer::new();
+    let keys = eval::dump::Keys::new(&ev.root, &lang::loader::StdFs);
+    let opts = RenderOptions::default();
+    let normal = renderer
+        .render(&ev.root, &keys, opts.clone())
+        .expect("supported")
+        .geometry
+        .expect("geometry");
+    let ticks = std::cell::Cell::new(0.0);
+    let clock = || {
+        ticks.set(ticks.get() + 1.0);
+        ticks.get()
+    };
+    let x = ExactOptions {
+        step: step_options(),
+        clock: Some(&clock),
+    };
+    let r = geom::exact::export_step(&renderer, &ev.root, &keys, &opts, &normal, &x);
+    let triangles_at_1 = geom::exact::walk::export_render(&renderer, &ev.root, &keys, &opts, 1)
+        .unwrap_or_else(|_| panic!("export render"))
+        .mesh
+        .triangles
+        .len();
+    (r, triangles_at_1 as f64)
+}
+
+/// A model of no curves is the same mesh at twice the segments, so a
+/// mismatch at the first attempt is not reconstructed again only to fail
+/// the same way: two blocks on a plate touching along an edge, rotated so
+/// that rounding joins the plate's top face around them on one side. The
+/// regions around the touch are written as facets from that mesh.
+#[test]
+fn a_mismatch_in_the_same_mesh_is_reconstructed_once() {
+    let src = "rotate([30, 20, 10]) { translate([0, 0, -1]) cube([2, 2, 1]); cube(1); translate([1, 1, 0]) cube(1); }";
+    let (r, triangles_at_1) = export_counted(src);
+    let e = r.unwrap_or_else(|f| panic!("{}", f.message));
+    let p = e.stats.partial.as_ref().expect("a partial export");
+    assert!(p.reason.contains("touches itself"), "{p:?}");
+    let t = e.stats.timings;
+    // Built at both resolutions; reconstructed once for the exact
+    // attempts, then once per round of the partial fallback.
+    assert_eq!(t.export_render_ms, 2.0, "{t:?}");
+    assert_eq!(t.reconstruct_ms, f64::from(1 + p.rounds), "{t:?}");
+    assert_eq!(e.stats.triangles as f64, triangles_at_1);
+}
+
+/// A model whose export render at twice the segments is the same mesh
+/// (`$fa = 60` leaves the sphere at its fewest fragments either way) is
+/// not reconstructed and checked again: its first attempt's volume check
+/// was too loose to trust alone, and the second opinion it waits for is
+/// that same B-rep's, so the file is the first attempt's, written once.
+#[test]
+fn the_same_mesh_twice_is_reconstructed_once() {
+    let src = "$fa = 60; difference() { cube(15, center = true); sphere(10); }";
+    let (r, triangles_at_1) = export_counted(src);
+    let e = r.unwrap_or_else(|f| panic!("{}", f.message));
+    assert!(
+        e.stats
+            .retried_because
+            .as_deref()
+            .is_some_and(|w| w.contains("too coarse")),
+        "{:?}",
+        e.stats
+    );
+    let t = e.stats.timings;
+    assert_eq!(t.export_render_ms, 2.0, "{t:?}");
+    assert_eq!(t.reconstruct_ms, 1.0, "{t:?}");
+    assert_eq!(t.write_ms, 1.0, "{t:?}");
+    assert_eq!(e.stats.attempts, 2);
+    assert_eq!(e.stats.triangles as f64, triangles_at_1);
+    // The same bytes again.
+    assert_eq!(sha(&e.step), sha(&export(src).step));
+}
+
 /// A tree as deep as recursive modules make them exports on a small
 /// stack: the export render walks it iteratively, as the normal render
 /// does, so a model the normal render handles cannot overflow it.

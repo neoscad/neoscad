@@ -345,6 +345,42 @@ fn run_walk(
     })
 }
 
+/// Whether two export renders are the same input to reconstruction and
+/// to every check after it, bit for bit: the same mesh (positions
+/// compared by their bits, surfaces by their shortest round-trip text,
+/// which tells `-0.0` from `0.0`), the same tolerances and bounds, and
+/// the same records of where its faces came from. An export render at
+/// twice the segments of a model with no curve the multiplier changes is
+/// one ([`super::export_step`] then reuses the first attempt's outcome).
+/// Which subtrees were placed as copies is not compared: it does not
+/// reach reconstruction except through the mesh.
+pub fn same_export(a: &ExportMesh, b: &ExportMesh) -> bool {
+    let bits = |x: f64, y: f64| x.to_bits() == y.to_bits();
+    let (m, n) = (&a.mesh, &b.mesh);
+    m.triangles == n.triangles
+        && m.triangle_surface == n.triangle_surface
+        && m.positions.len() == n.positions.len()
+        && m.positions
+            .iter()
+            .zip(&n.positions)
+            .all(|(p, q)| (0..3).all(|k| bits(p[k], q[k])))
+        && bits(a.volume, b.volume)
+        && bits(a.normal_sagitta, b.normal_sagitta)
+        && bits(a.normal_volume_bound, b.normal_volume_bound)
+        && bits(a.surface_fit, b.surface_fit)
+        && a.exact_extrusions == b.exact_extrusions
+        && a.surface_origin == b.surface_origin
+        && a.origins == b.origins
+        && a.substitutions == b.substitutions
+        && a.provenance == b.provenance
+        && m.surfaces.len() == n.surfaces.len()
+        && m.surfaces == n.surfaces
+        && m.surfaces
+            .iter()
+            .zip(&n.surfaces)
+            .all(|(s, t)| format!("{s:?}") == format!("{t:?}"))
+}
+
 /// The reconstruction tolerances for an export render: the defaults, with
 /// the B-spline blends' contacts allowed ten times their fit (the side of
 /// a fitted patch lies on its face only to within it, and the contact is

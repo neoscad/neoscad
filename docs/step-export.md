@@ -152,7 +152,9 @@ When reconstruction fails, the export tries again before refusing:
 1. **A finer mesh.** A mesh whose topology does not match the exact
    model at a near-tangency is rebuilt at twice the segments, and a
    result whose volume check is loose (coarse fragments) is held until a
-   mesh at twice or four times the segments vouches for it.
+   mesh at twice or four times the segments vouches for it. A finer
+   mesh that comes out the same (a model with no curves the segments
+   change) is not reconstructed again.
 2. **Faceted extrusions.** If the exact extrusions do not reconstruct,
    they are written as facets, as before extrusions were exact.
 3. **Partial faceted fallback.** If reconstruction or validation fails

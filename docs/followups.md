@@ -2534,20 +2534,37 @@ pass's leftovers first, then stage 1b's, then the crate's.
   positions and joins them with straight edges without solving; what
   they cost was the generic checks and allocations above, and a
   `FACETED_BREP` shell cannot share edges with an `ADVANCED_BREP` one in
-  one solid. Left:
-  - Reconstruction's generic topology (surface classes, chains, loops,
-    corner placement) is now most of a faceted model's time:
-    `text_30lines` reconstructs 243,500 triangles in 236 ms against a
-    51 ms render.
-  - The STEP text: formatting reals is half of writing (Rust's shortest
-    round-trip formatting, which the bytes depend on); `csg_spheres`
-    writes 152 MB in 265 ms against a 380 ms render.
-  - The fractal tree reconstructs three times: exact at 1× and 2× the
-    segments, which fail where child cylinders stand on their parents'
-    caps (a corner on another edge of its face, `TopologyMismatch`), then
-    the partial fallback. A touch of that kind is not cured by a finer
-    mesh; telling it from a sliver in `meshbrep`'s error would save the
-    2× attempt.
+  one solid. A second pass the same day (`meshbrep` changes on top of the
+  first's, unreleased; minimum per model of two alternated sweeps on each
+  side, both with the first pass's `meshbrep`): medians 1.61 → 1.41 on
+  the cases, 0.56 → 0.43 on the render tests, 1.11 → 0.76 on BOSL2, 3.33
+  → 2.60 on the benchmarks; `csg_spheres` 1.51 → 1.14, `text_30lines`
+  9.6 → 6.6, `import_stl` 1.61 → 0.94, the fractal tree 20.3 → 14.9. All
+  629 files byte-identical, every status, message and attempt count the
+  same, the fillet corpus's 300 cases the same. The writer formats whole
+  numbers without `fmt`, keeps reals it wrote by their bits, writes the
+  common entities without `format!` and builds the file in its own
+  buffer (writing halved); reconstruction finds contacts and chain ends
+  from sorted lists instead of maps filled per half-edge, a faceted
+  group's plane by index, and the touch checks skip their 160-evaluation
+  search for a corner clear of a straight edge's whole line (the fractal
+  tree's checks 761 → 108 ms). Here, a finer export render that is the
+  same mesh (a model without curves the segments change; 27 corpus models
+  retry with as many triangles at 2× as at 1×) is not reconstructed
+  again: its first attempt's outcome is reused
+  (`ex_menger` reconstructs in 90 ms, was 138). Left:
+  - Reconstruction's generic topology is still most of a faceted model's
+    time: corner placement (a Gauss–Newton solve per corner, even of
+    three planes; a closed form would change the bits), the touch
+    search's per-face sorts on large faces, per-vertex face lists.
+    `text_30lines` reconstructs in 193 ms against a 51 ms render.
+  - Formatting reals that do not recur is still most of writing.
+  - The fractal tree still reconstructs three times (1×, 2×, then the
+    partial fallback). Telling a touch from a fold does not say which
+    retry is futile: fillet-corpus model 0166 fails at 1× with only a
+    touch (a corner exactly on a line edge of a cylinder face, the
+    offset pocket's) and exports at 2×, so skipping touch-only retries
+    turned it into a failure and was not kept.
   - Parallelising per face would need a wasm-safe fallback.
 - **Mesh-only models still dominate the fallbacks.** 170 of 457 valid
   real models are all facets after stage 2 (228 of 456 before): BOSL2's
@@ -2574,9 +2591,14 @@ pass's leftovers first, then stage 1b's, then the crate's.
     exported again with none (`export_step`; the time of both counted).
     A refused model with large recurring subtrees pays for both
     exports; a model exported partly as facets with copies is not
-    retried.
+    retried. No corpus model takes the second export (only
+    `ball_bearings__004` and the fractal tree place copies, and both
+    export), and no refusal can be shown unrelated to the copies: a
+    copy's rounding reaches every boolean it takes part in.
   - The memo lasts one walk: the retry at twice the segments builds
-    again.
+    again (it cannot use copies made at another tessellation). The
+    faceted-extrusion walk could reuse the first walk's entries that
+    hold no extrusion, but no corpus model takes that walk with copies.
   - An instance placed by more than a similarity relative to the first
     (a non-uniform scale) is built in place.
 - **Stage 3 (wired everywhere) leftovers.** `serve`, MCP (`render`/`check`
