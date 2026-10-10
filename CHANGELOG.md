@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.6.1
+
+### Fixed
+
+- **A failed fillet or chamfer now fails the export everywhere.** In
+  0.6.0 only the command line's `-o` did: the apps, /try, `serve` and
+  MCP wrote the sharp part and reported success. The file is still
+  written, but the export fails and names the call ("…was exported, but
+  its fillets failed"), so nobody ships a sharp part believing it
+  rounded.
+- **More fillets export exact.** Rims beside spheres and tori, mixed
+  corners and rotated parts now come out as exact STEP; on a generated
+  set of 2,000 filleted parts, 99.6% of the supported cases are fully
+  exact (97% in 0.6.0). Blends whose strips overlap at an angle are
+  refused with a size hint instead of failing later, and no size is
+  offered when the one that fits is too small to be useful.
+- **Rotated operations export exact.** An operation turned by an angle
+  that is not a multiple of 90° is built in its own frame and then
+  turned, as the normal render does, so touching bodies inside it no
+  longer leave slivers (a turned Menger sponge exports valid).
+- The /try bundle no longer contains a path from the build machine.
+
+### Changed
+
+- **Faster exact STEP export.** A large subtree used many times is built
+  once per export and placed; a retry whose mesh is unchanged reuses the
+  attempt it repeats; reconstruction and writing are faster (meshbrep
+  0.4.0). Across the export test corpus the median time to export,
+  relative to the render, falls by about a third, with the same files.
+- **/try** has a toggle for every extension the apps have (View >
+  NeoSCAD extensions; STEP appears under Export while `exact` is on),
+  and share links and embeds carry the extensions a model uses: opening
+  one turns them on for that model only and says so.
+- **Agents connected to an app or to /try** get the extensions you have
+  on there, on top of the server's own `--enable`.
+- `serve`'s `export` reply has `written` and `fillet_errors`; MCP's
+  `render` and `check` say when an export was written but its fillets
+  failed.
+
+
 ## 0.6.0
 
 ### New
