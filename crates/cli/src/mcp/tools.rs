@@ -288,6 +288,15 @@ struct Model<'a> {
     /// rather than the text's defaults.
     defines: Vec<String>,
     parts: bool,
+    /// The NeoSCAD extensions the page runs its text with (View > NeoSCAD
+    /// extensions, or a link's `enable=`), as `enable` names. The session
+    /// adds them to the server's own `--enable`, as `parts` is added to
+    /// the call's: without them a `sketch` model that previews on the page
+    /// was unknown modules to the agent. Only extension names get here
+    /// (`browser.rs`, `Page::read`); OpenSCAD's experimental features stay
+    /// the server's, since `import-function` and the like change what a
+    /// model may read and the page is not the one who started the server.
+    enable: Vec<String>,
     _turn: Option<MutexGuard<'a, ()>>,
     /// The app's "is checking the model" while a model tool runs on its
     /// document.
@@ -449,10 +458,11 @@ impl Tools {
     }
 
     /// Refuses a `.step`/`.stp` export on a server without NeoSCAD's
-    /// `exact` extension, before any work: the extension is server-wide
-    /// (`neoscad mcp --enable exact`), so the agent cannot turn it on in
-    /// the call, and the user has to be told what to change.
-    fn step_allowed(&self, out: &Path) -> Result<(), String> {
+    /// `exact` extension, before any work: the extension is the server's
+    /// (`neoscad mcp --enable exact`) or the web page's whose text is the
+    /// model (`page`, [`Model::enable`]), so the agent cannot turn it on
+    /// in the call, and the user has to be told what to change.
+    fn step_allowed(&self, out: &Path, page: &[String]) -> Result<(), String> {
         let ext = out
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
@@ -462,12 +472,17 @@ impl Tools {
             .session()
             .config()
             .extensions
-            .has(session::Extension::Exact);
+            .has(session::Extension::Exact)
+            || page.iter().any(|n| n == "exact");
         if (ext == "step" || ext == "stp") && !on {
-            return Err(
-                "STEP export needs NeoSCAD's exact extension: start the server as `neoscad mcp --enable exact`"
-                    .into(),
-            );
+            let page_too = if self.browser.is_some() {
+                ", or turn on exact in the web page's View > NeoSCAD extensions"
+            } else {
+                ""
+            };
+            return Err(format!(
+                "STEP export needs NeoSCAD's exact extension: start the server as `neoscad mcp --enable exact`{page_too}"
+            ));
         }
         Ok(())
     }
@@ -607,6 +622,15 @@ impl Tools {
         Ok(Some(real))
     }
 
+    /// Whether [`Self::model`] would take the connected page's (or app's)
+    /// text: no `path` or `source`, and something connected to take it
+    /// from.
+    fn page_is_model(&self, args: &Value) -> bool {
+        str_arg(args, "source").is_none()
+            && str_arg(args, "path").is_none()
+            && (self.browser.is_some() || self.apps.as_ref().is_some_and(|a| a.connected()))
+    }
+
     /// The model of `path` or `source` (`inline` names the document inline
     /// source is opened as).
     fn model(&self, args: &Value, inline: &str) -> Result<Model<'_>, String> {
@@ -649,6 +673,7 @@ impl Tools {
                     label: Label::Import(call),
                     defines: Vec::new(),
                     parts: false,
+                    enable: Vec::new(),
                     _turn: Some(turn),
                     _activity: None,
                 })
@@ -660,6 +685,7 @@ impl Tools {
                 label: Label::None,
                 defines: Vec::new(),
                 parts: false,
+                enable: Vec::new(),
                 _turn: None,
                 _activity: None,
             }),
@@ -679,6 +705,7 @@ impl Tools {
                     label: Label::None,
                     defines: Vec::new(),
                     parts: false,
+                    enable: Vec::new(),
                     _turn: Some(turn),
                     _activity: None,
                 })
@@ -698,6 +725,7 @@ impl Tools {
             "path": m.path,
             "cwd": m.base,
             "parts": bool_arg(args, "parts") || m.parts,
+            "enable": m.enable,
             "defines": m.defines,
             "supersede": false,
         })
@@ -738,7 +766,9 @@ impl Tools {
             }
         };
         if let Some(out) = &export
-            && let Err(e) = self.step_allowed(out).and_then(|()| make_dir(out))
+            && let Err(e) = self
+                .step_allowed(out, &m.enable)
+                .and_then(|()| make_dir(out))
         {
             self.done(m);
             return Err(e);
@@ -839,6 +869,7 @@ impl Tools {
             "sketch": str_arg(args, "sketch"),
             "fillet": args.get("fillet").cloned().unwrap_or(Value::Null),
             "parts": bool_arg(args, "parts") || m.parts,
+            "enable": m.enable,
             "defines": m.defines,
             "supersede": false,
         });
@@ -925,11 +956,16 @@ impl Tools {
     /// only when the agent decides it needs one. Without these arguments
     /// the result is exactly the plain check's.
     fn check(&self, id: &Value, args: &Value) -> Reply {
-        // Refuse a bad export path before any work.
+        // Refuse a bad export path before any work. The page's own
+        // extensions are only known once its text is read, so with the
+        // page as the model a STEP export without `exact` is refused by
+        // `render` instead, after the check.
         if str_arg(args, "export").is_some() {
             let base = self.base(args)?;
-            if let Some(out) = self.writable(&base, args, "export", EXPORT_FORMATS)? {
-                self.step_allowed(&out)?;
+            if let Some(out) = self.writable(&base, args, "export", EXPORT_FORMATS)?
+                && !self.page_is_model(args)
+            {
+                self.step_allowed(&out, &[])?;
             }
         }
         let (mut out, rendered) = self.check_only(id, args)?;

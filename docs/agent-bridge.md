@@ -211,6 +211,13 @@ fetched in the page). Add `browser_connect` to get started. Sizes are in
 `docs/mcp.md`. They are listed only with `--browser`, so sessions without
 it pay nothing.
 
+The page's `read` answer carries what the model tools need to run its
+text as it previews: the customizer values, the `part()` switch and the
+NeoSCAD extensions on (`enable`, the View menu's and a link's, as
+`--enable` names), which the server adds to its own `--enable`
+(`docs/mcp.md`). A page that sends no `enable` (one older than the
+field) runs on the server's alone.
+
 `view_capture` draws the view offscreen at the requested size, with the
 user's camera, grid and annotations (`Viewport::copy_as_shown`). A WebGPU
 or WebGL canvas cannot be read back after it is presented. The export

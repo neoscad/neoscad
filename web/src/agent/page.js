@@ -73,6 +73,11 @@ export class PageAgent {
       selection: this.app.activeTab === null ? editor.selectionPositions() : null,
       values: d.customizer.values,
       parts: !!d.parts,
+      // The NeoSCAD extensions the page runs with (View menu, or a link's),
+      // which the agent's model tools add to its server's --enable: a
+      // `sketch` model that previews here must not be unknown modules to
+      // the agent.
+      enable: this.app.extensions(),
       run: this.run(),
       diagnostics: diagnostics(this.app.console.lines, d.path),
     };

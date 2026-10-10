@@ -615,17 +615,29 @@ on stderr.
 
 Once a page is connected, **`evaluate`, `render`, `snapshot`, `check` and
 `measure` given neither `path` nor `source` use the page's text**, with
-its customizer values (as `-D` assignments) and its `part()` switch, under
-the page's file name in `base_dir`; the result starts with `the web page's
-gears.scad (version 12)` and has `"page": {"file", "version"}`. `format`
-with neither reformats the page's text in place (one undoable edit, or
-with `check` says what would change). `test` and `docs` do not use it.
-Without `--browser` none of this is listed or costs context.
+its customizer values (as `-D` assignments), its `part()` switch and its
+NeoSCAD extensions, under the page's file name in `base_dir`; the result
+starts with `the web page's gears.scad (version 12)` and has `"page":
+{"file", "version"}`. `format` with neither reformats the page's text in
+place (one undoable edit, or with `check` says what would change). `test`
+and `docs` do not use it. Without `--browser` none of this is listed or
+costs context.
+
+The page's extensions (View > NeoSCAD extensions, or a link's `enable=`)
+are **added to** the server's `--enable` for those calls, as its `part()`
+switch is added to a call's `parts`: a model that previews on the page
+evaluates for the agent too, and an extension the server was started
+without is on when the user turned it on in the page (`exact` that way
+also allows a `.step` export of the page's text). Only extension names
+(`part`, `sketch`, `query`, `exact`, `fillet`) are taken from the page;
+OpenSCAD's experimental features stay the server's, since some of them
+(`import-function`) change what a model may read. A `path` or `source`
+call, and a page older than this, run on the server's `--enable` alone.
 
 | Tool | What it does | Arguments |
 |---|---|---|
 | `browser_connect` | the link, and whether (and how) a page is connected; what to tell the user | `open`, `wait_seconds` (wait up to this long, at most 120, for a page to connect) |
-| `editor_read` | the text with numbered lines, its `version`, the selection, customizer values, the last run's summary, errors and warnings | |
+| `editor_read` | the text with numbered lines, its `version`, the selection, customizer values, `part()` and the extensions on, the last run's summary, errors and warnings | |
 | `editor_edit` | changes the text as one undoable step, highlighted in the editor; refuses a stale `version` | `version` (required), `edits`: `[{old, new}]` (unique match) or `[{at: [line, col, end_line, end_col], new}]`; or `text` (all of it) |
 | `editor_reveal` | selects and scrolls to a place, to show the user | `at` `[line, col?, end_line?, end_col?]` or `text` |
 | `view_camera` | gets or sets the camera (`$vpt`, `$vpr`, `$vpd`, `$vpf`) | `vpt`, `vpr`, `vpd`, `view` (top ... diagonal; `iso` too), `fit` |

@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { AgentConnection, REPLACED } from "../src/agent/connection.js";
+import { PageAgent } from "../src/agent/page.js";
 import {
   agentLine,
   allowDirectHint,
@@ -214,4 +215,37 @@ test("Chrome and Edge are told how to allow the direct way next time", () => {
   assert.equal(allowDirectHint("Mozilla/5.0 (Macintosh) Gecko/20100101 Firefox/155.0"), null);
   assert.equal(allowDirectHint("Mozilla/5.0 AppleWebKit/605.1.15 Version/27.0 Safari/605.1.15"), null);
   assert.equal(allowDirectHint(""), null);
+});
+
+test("read sends the page's text, part() switch and extensions", () => {
+  // The agent's model tools run the page's text as it previews: with its
+  // customizer values, its part() switch, and the NeoSCAD extensions
+  // App.extensions() gives (the View menu's and a link's), which
+  // `neoscad mcp` adds to its own --enable.
+  const app = {
+    doc: {
+      example: { file: "box.scad" },
+      path: "/box.scad",
+      text: "cube(1);\n",
+      parts: true,
+      customizer: { values: { size: 7 } },
+    },
+    revision: 4,
+    activeTab: null,
+    editor: { selectionPositions: () => ({ anchor: [0, 0], head: [0, 0] }) },
+    console: { lines: [{ kind: "warning", text: "w" }, { kind: "echo", text: "e" }], summaryText: "ok", summaryKind: "ok" },
+    lastMode: "preview",
+    extensions: () => ["sketch", "query"],
+  };
+  const r = new PageAgent(app, {}).read();
+  assert.equal(r.text, "cube(1);\n");
+  assert.equal(r.version, 4);
+  assert.equal(r.parts, true);
+  assert.deepEqual(r.values, { size: 7 });
+  assert.deepEqual(r.enable, ["sketch", "query"]);
+  assert.equal(r.diagnostics.length, 1);
+  // None on: an empty list, not a missing field (a missing one is an
+  // older page, which the server reads as none too).
+  app.extensions = () => [];
+  assert.deepEqual(new PageAgent(app, {}).read().enable, []);
 });

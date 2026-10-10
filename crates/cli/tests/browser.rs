@@ -182,6 +182,9 @@ struct Seen {
 struct Doc {
     text: String,
     version: u64,
+    /// The page's `enable` (its NeoSCAD extensions); `None` answers as a
+    /// page older than the field does, without it.
+    enable: Option<Value>,
 }
 
 /// `[line, UTF-16 column]` as a byte offset in `text` (the editor's
@@ -211,7 +214,16 @@ fn answer(doc: &mut Doc, method: &str, p: &Value) -> Result<Value, String> {
             "values": {"size": 7}, "parts": false,
             "run": {"summary": "Previewed in 3 ms."},
             "diagnostics": [{"kind": "warning", "line": 3, "text": "a warning"}],
-        }),
+        })
+        .as_object()
+        .cloned()
+        .map(|mut r| {
+            if let Some(e) = &doc.enable {
+                r.insert("enable".into(), e.clone());
+            }
+            Value::Object(r)
+        })
+        .unwrap(),
         "edit" => {
             if p["version"] != doc.version {
                 return Err("stale".into());
@@ -246,6 +258,11 @@ fn answer(doc: &mut Doc, method: &str, p: &Value) -> Result<Value, String> {
 /// Connect a fake tab that answers like the page; what it sees goes to
 /// the returned log.
 fn fake_tab(port: u16, token: &str, text: &str) -> Arc<Mutex<Seen>> {
+    fake_tab_with(port, token, text, None)
+}
+
+/// [`fake_tab`] for a page that sends `enable`.
+fn fake_tab_with(port: u16, token: &str, text: &str, enable: Option<Value>) -> Arc<Mutex<Seen>> {
     let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     let req = tungstenite::http::Request::builder()
         .uri(format!("ws://127.0.0.1:{port}/ws?token={token}"))
@@ -270,6 +287,7 @@ fn fake_tab(port: u16, token: &str, text: &str) -> Arc<Mutex<Seen>> {
     let mut doc = Doc {
         text: text.to_string(),
         version: 1,
+        enable,
     };
     std::thread::spawn(move || {
         loop {
@@ -442,6 +460,94 @@ fn the_tools_act_on_the_connected_page() {
     assert!(s.tool("view_annotate", json!({"markers": [{"point": [1, 2]}]}))["isError"] == true);
     assert!(text(&s.tool("view_annotate", json!({}))).contains("cleared"));
     assert!(text(&s.tool("console_read", json!({}))).contains("echo: ECHO: 7"));
+}
+
+/// A model that needs the `query` extension, and an OpenSCAD experiment
+/// (`object-function`) the page cannot turn on.
+const QUERY_MODEL: &str = "size = 5;\nmodule show() { echo(child_bounds(0)); children(0); }\nshow() cube(size);\necho(object(a = 1));\n";
+
+/// The page's NeoSCAD extensions (View > NeoSCAD extensions, or a link's
+/// `enable=`) are added to the server's `--enable` for the model tools on
+/// its text, as its `part()` switch is: the user turned them on in the
+/// page, so its model previews there and must evaluate the same for the
+/// agent. Before, a page with `query` on got "unknown function" back.
+/// OpenSCAD's experiments stay the server's, and a page older than the
+/// field runs on the server's `--enable` alone.
+#[test]
+fn the_page_extensions_apply_to_its_text() {
+    // An older page: no `enable`, so `child_bounds` is unknown and a STEP
+    // export is refused with what to turn on.
+    let dir = scratch("ext-old");
+    let mut s = Mcp::start(&dir, &["--browser", "--browser-url", PAGE]);
+    let (port, token) = s.link();
+    let _tab = fake_tab(port, &token, QUERY_MODEL);
+    let t = text(&s.tool("editor_read", json!({})));
+    assert!(!t.contains("extensions:"), "{t}");
+    let t = text(&s.tool("evaluate", json!({})));
+    assert!(t.contains("unknown function 'child_bounds'"), "{t}");
+    let r = s.tool("render", json!({"export": "old.step"}));
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(
+        text(&r).contains("turn on exact in the web page's View > NeoSCAD extensions"),
+        "{r}"
+    );
+    assert!(!dir.join("old.step").exists());
+    // The same server's `--enable query` still applies to such a page.
+    drop(s);
+    let mut s = Mcp::start(
+        &dir,
+        &["--browser", "--browser-url", PAGE, "--enable", "query"],
+    );
+    let (port, token) = s.link();
+    let _tab = fake_tab(port, &token, QUERY_MODEL);
+    let t = text(&s.tool("evaluate", json!({})));
+    assert!(t.contains("ECHO: [[0, 0, 0], [7, 7, 7]]"), "{t}");
+
+    // A page with `query` and `exact` on, on a server with neither: its
+    // text evaluates with them. Unknown names and OpenSCAD's experiments
+    // in `enable` are dropped, and a repeat counted once.
+    let dir = scratch("ext-new");
+    let mut s = Mcp::start(&dir, &["--browser", "--browser-url", PAGE]);
+    let (port, token) = s.link();
+    let _tab = fake_tab_with(
+        port,
+        &token,
+        QUERY_MODEL,
+        Some(json!([
+            "query",
+            "exact",
+            "object-function",
+            "bogus",
+            "query",
+            3
+        ])),
+    );
+    let t = text(&s.tool("editor_read", json!({})));
+    assert!(t.contains("; extensions: query, exact\n"), "{t}");
+    let t = text(&s.tool("evaluate", json!({})));
+    assert!(t.contains("ECHO: [[0, 0, 0], [7, 7, 7]]"), "{t}");
+    assert!(
+        t.contains("Experimental builtin function 'object' is not enabled"),
+        "{t}"
+    );
+    let r = s.tool("render", json!({"export": "page.step"}));
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(
+        std::fs::read_to_string(dir.join("page.step"))
+            .unwrap()
+            .starts_with("ISO-10303-21;")
+    );
+    let r = s.tool("check", json!({"export": "checked.step"}));
+    assert!(text(&r).contains("wrote "), "{r}");
+    assert!(dir.join("checked.step").exists());
+    // A path or source is not the page's: the server's extensions only.
+    let t = text(&s.tool("evaluate", json!({"source": QUERY_MODEL})));
+    assert!(t.contains("unknown function 'child_bounds'"), "{t}");
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(1);", "export": "src.step"}),
+    );
+    assert_eq!(r["isError"], true, "{r}");
 }
 
 #[test]

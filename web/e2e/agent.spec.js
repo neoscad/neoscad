@@ -164,6 +164,27 @@ test("through the connection window, with edits the user approves", async ({ pag
   await expect(page.locator("html")).toHaveAttribute("data-agent", "closed", { timeout: 5000 });
 });
 
+// The page's NeoSCAD extensions reach the agent's model tools: a model
+// that previews on the page with an extension on (View menu) evaluates for
+// the agent too, though its `neoscad mcp` was started without `--enable`.
+test("the agent's model tools run the page's text with its extensions", async ({ page }) => {
+  const link = await agent.link();
+  const { errors } = await open(page, link.slice("/try/".length));
+  await connected(page);
+  const version = Number((await agent.text("editor_read")).match(/, version (\d+),/)[1]);
+  const model = "module show() { echo(child_bounds(0)); children(0); }\nshow() cube(3);\n";
+  const r = await agent.tool("editor_edit", { version, text: model });
+  expect(r.isError, JSON.stringify(r)).toBe(false);
+  await expect.poll(() => editorText(page)).toBe(model);
+  // Off, as on the command line: OpenSCAD's unknown function.
+  expect(await agent.text("evaluate")).toContain("unknown function 'child_bounds'");
+  await page.getByTestId("view-menu").click();
+  await page.getByRole("menuitemcheckbox", { name: "Geometry queries (query)" }).click();
+  expect(await agent.text("editor_read")).toContain("; extensions: query");
+  expect(await agent.text("evaluate")).toContain("ECHO: [[0, 0, 0], [3, 3, 3]]");
+  expect(errors).toEqual([]);
+});
+
 test("a second tab takes the connection over", async ({ page, context }) => {
   const link = await agent.link();
   await open(page, link.slice("/try/".length));

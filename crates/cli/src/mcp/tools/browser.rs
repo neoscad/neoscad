@@ -210,6 +210,8 @@ struct Page {
     text: String,
     defines: Vec<String>,
     parts: bool,
+    /// The NeoSCAD extensions the page has on ([`page_extensions`]).
+    enable: Vec<String>,
     raw: Value,
 }
 
@@ -255,6 +257,7 @@ impl Page {
             text,
             defines,
             parts: r["parts"].as_bool().unwrap_or(false),
+            enable: page_extensions(&r["enable"]),
             raw: r,
         })
     }
@@ -262,6 +265,24 @@ impl Page {
     fn source(&self) -> SourceFile {
         SourceFile::new(PathBuf::from(&self.file), self.text.as_bytes().to_vec())
     }
+}
+
+/// The NeoSCAD extensions a page's `read` says it runs with (`enable`,
+/// /try's `App.extensions()`: the View menu's and a link's), each once.
+/// Only extension names are kept: the page turns on what the user turned
+/// on in it, which only changes which modules and functions exist (and
+/// whether `.step` is a format), never what the server may read or write;
+/// OpenSCAD's experimental features (`import-function` reads files) stay
+/// what the server was started with. A page older than this field sends
+/// none, and runs as before on the server's `--enable` alone.
+fn page_extensions(v: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in v.as_array().into_iter().flatten().filter_map(Value::as_str) {
+        if eval::Extension::from_name(n).is_some() && !out.iter().any(|o| o == n) {
+            out.push(n.to_string());
+        }
+    }
+    out
 }
 
 /// The page's file name as a document name here: a plain `.scad` name, or
@@ -378,7 +399,7 @@ impl Tools {
     }
 
     /// The page's text as the model of a tool call, with the page's
-    /// customizer values and `part()` switch.
+    /// customizer values, `part()` switch and extensions.
     pub(super) fn page_model(
         &self,
         s: &Surface,
@@ -430,6 +451,7 @@ impl Tools {
             },
             defines: page.defines,
             parts: page.parts,
+            enable: page.enable,
             _turn: Some(turn),
             _activity: activity,
         })
@@ -580,6 +602,9 @@ fn editor_read(s: &Surface) -> Reply {
     }
     if page.parts {
         text.push_str("; part() on");
+    }
+    if !page.enable.is_empty() {
+        text.push_str(&format!("; extensions: {}", page.enable.join(", ")));
     }
     if let Some(s) = r["run"]["summary"].as_str().filter(|s| !s.is_empty()) {
         text.push_str(&format!("\nlast run: {s}"));
