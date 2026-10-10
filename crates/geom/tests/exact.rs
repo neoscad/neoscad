@@ -359,9 +359,16 @@ fn export_counted(src: &str) -> (Result<ExactExport, Box<geom::exact::ExactFailu
 /// this until the export render built a turned operation in its parent's
 /// frame and meshbrep 0.4.0 resolved that touch; that model now exports
 /// with every face exact, so it no longer reaches the fallback.)
+///
+/// The turn is `rotate([45, 73, 20])` written out as a `multmatrix` of
+/// the doubles macOS computes for it. `rotate`'s entries depend on the
+/// platform (its sines come from libm, and it fuses products only on
+/// aarch64, as the nightly does), and on Linux CI the corner landed off
+/// the boundary and the model exported fully exact. Decimal literals
+/// parse to the same doubles everywhere.
 #[test]
 fn a_mismatch_in_the_same_mesh_is_reconstructed_once() {
-    let src = "rotate([45, 73, 20]) { translate([0, 0, -1]) cube([3, 3, 1]); cube(1); translate([1, 1, 0]) cube(1); translate([2, 0, 0]) cube(1); }";
+    let src = "multmatrix([[0.27473953345455226, 0.3935843877364968, 0.8772739130324474, 0], [0.09999701235364052, 0.895740321113685, -0.4331857276636646, 0], [-0.9563047559630354, 0.20673801503651812, 0.20673801503651812, 0]]) { translate([0, 0, -1]) cube([3, 3, 1]); cube(1); translate([1, 1, 0]) cube(1); translate([2, 0, 0]) cube(1); }";
     let (r, triangles_at_1) = export_counted(src);
     let e = r.unwrap_or_else(|f| panic!("{}", f.message));
     let p = e.stats.partial.as_ref().expect("a partial export");
@@ -506,9 +513,15 @@ fn a_tunnel_of_no_thickness_in_the_mesh_is_a_note() {
 /// same face. The file used to pass our checks and read back from OCCT
 /// with a face split and a solid that would not close (`example024.scad`
 /// turned: 60 free edges). It is refused.
+///
+/// The turn is `rotate([45, atan(1 / sqrt(2)), 0])` written out as the
+/// doubles macOS computes for it (`r`). `atan`, and the sines `rotate`
+/// takes of it, come from the platform's libm: glibc's differ in the last
+/// bit of three entries, and with those the export passed on Linux.
+/// Decimal literals parse to the same doubles everywhere.
 #[test]
 fn a_boundary_touching_itself_is_refused() {
-    let src = "difference() { rotate([45, atan(1 / sqrt(2)), 0]) cube(27, center = true); for (v = [[0, 0, 0], [0, 0, 90], [0, 90, 0]]) for (i = [-1:1], j = [-1:1]) if (i || j) rotate([45, atan(1 / sqrt(2)), 0]) rotate(v) translate([0, i * 9, j * 9]) cube([30, 3, 3], center = true); for (v = [[0, 0, 0], [0, 0, 90], [0, 90, 0]]) rotate([45, atan(1 / sqrt(2)), 0]) rotate(v) cube([30, 9, 9], center = true); }";
+    let src = "r = [[0.816496580927726, 0.408248290463863, 0.408248290463863, 0], [0, 0.7071067811865476, -0.7071067811865476, 0], [-0.5773502691896257, 0.5773502691896258, 0.5773502691896258, 0]];\ndifference() { multmatrix(r) cube(27, center = true); for (v = [[0, 0, 0], [0, 0, 90], [0, 90, 0]]) for (i = [-1:1], j = [-1:1]) if (i || j) multmatrix(r) rotate(v) translate([0, i * 9, j * 9]) cube([30, 3, 3], center = true); for (v = [[0, 0, 0], [0, 0, 90], [0, 90, 0]]) multmatrix(r) rotate(v) cube([30, 9, 9], center = true); }";
     let err = export_with(&Renderer::new(), src).unwrap_err();
     assert!(err.contains("touches itself"), "{err}");
 }
