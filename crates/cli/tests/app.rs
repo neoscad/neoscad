@@ -42,6 +42,9 @@ struct Doc {
     path: Option<String>,
     text: String,
     version: u64,
+    /// The app's extensions for it (its language settings); empty answers
+    /// as an app older than the field does.
+    enable: Vec<String>,
 }
 
 /// The test app: its documents' text and versions, and what the agent did.
@@ -76,6 +79,7 @@ impl AgentHost for App {
             selection: None,
             overrides: Vec::new(),
             parts: false,
+            enable: d.enable,
             run: AgentRunStatus {
                 mode: None,
                 summary: "Previewed".into(),
@@ -312,6 +316,7 @@ fn gear(dir: &Path) -> Doc {
         path: Some(path.to_string_lossy().into_owned()),
         text,
         version: 1,
+        enable: Vec::new(),
     }
 }
 
@@ -601,6 +606,7 @@ fn two_documents_the_focused_one_by_default() {
         path: None,
         text: "sphere(3);\n".into(),
         version: 5,
+        enable: Vec::new(),
     };
     // Opened in this order, so the second is focused last.
     let app = start_app(&rv, &[first, second]);
@@ -641,5 +647,70 @@ fn two_documents_the_focused_one_by_default() {
     assert!(text(&r).contains("document 5 is not open"), "{r}");
     drop(m);
     drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A model that needs NeoSCAD's `query` extension.
+const QUERY_MODEL: &str =
+    "module show() { echo(child_bounds(0)); children(0); }\nshow() cube(7);\n";
+
+/// An unsaved document of [`QUERY_MODEL`] that the app runs with `enable`.
+fn query_doc(enable: &[&str]) -> Doc {
+    Doc {
+        id: 3,
+        file: "Untitled".into(),
+        path: None,
+        text: QUERY_MODEL.into(),
+        version: 1,
+        enable: enable.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// The app's language settings (macOS Settings > Language, Linux
+/// Preferences > Language, Windows Design > NeoSCAD Extensions) are added
+/// to the server's `--enable` for its document's text, as the web page's
+/// are: a `query` model the user sees run in the app was "unknown
+/// function" to the agent before. An app older than the field sends no
+/// extensions and runs on the server's `--enable` alone, and a STEP
+/// export refused then says where in the app to turn `exact` on.
+#[test]
+fn the_apps_extensions_apply_to_its_document() {
+    let dir = scratch("extold");
+    let rv = dir.join("rv");
+    let app = start_app(&rv, &[query_doc(&[])]);
+    let mut m = Mcp::start(&dir, &rv);
+    let t = text(&m.tool("editor_read", json!({})));
+    assert!(!t.contains("extensions:"), "{t}");
+    let t = text(&m.tool("evaluate", json!({})));
+    assert!(t.contains("unknown function 'child_bounds'"), "{t}");
+    let r = m.tool("render", json!({"export": "old.step"}));
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(
+        text(&r).contains("turn on exact in the NeoSCAD app (Settings > Language on macOS"),
+        "{r}"
+    );
+    assert!(!dir.join("work/old.step").exists());
+    drop((m, app));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let dir = scratch("extnew");
+    let rv = dir.join("rv");
+    let app = start_app(&rv, &[query_doc(&["query", "exact", "bogus"])]);
+    let mut m = Mcp::start(&dir, &rv);
+    let t = text(&m.tool("editor_read", json!({})));
+    assert!(t.contains("; extensions: query, exact"), "{t}");
+    let t = text(&m.tool("evaluate", json!({})));
+    assert!(t.contains("ECHO: [[0, 0, 0], [7, 7, 7]]"), "{t}");
+    let r = m.tool("render", json!({"export": "app.step"}));
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(
+        std::fs::read_to_string(dir.join("work/app.step"))
+            .unwrap()
+            .starts_with("ISO-10303-21;")
+    );
+    // A source is not the app's document: the server's extensions only.
+    let t = text(&m.tool("evaluate", json!({"source": QUERY_MODEL})));
+    assert!(t.contains("unknown function 'child_bounds'"), "{t}");
+    drop((m, app));
     let _ = std::fs::remove_dir_all(&dir);
 }

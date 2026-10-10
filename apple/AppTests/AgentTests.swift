@@ -433,6 +433,19 @@ private func onLinkThread<T: Sendable>(_ body: @escaping @Sendable () throws -> 
         #expect(state.version == doc.agentRevision)
         #expect(state.selection != nil)
 
+        // Settings > Language goes with it: the agent server adds these to
+        // its own `--enable` for this text, so a query or sketch model the
+        // app runs is not unknown functions to the agent.
+        let savedQueries = LanguageSettings.queries
+        defer { LanguageSettings.queries = savedQueries }
+        LanguageSettings.queries = true
+        let withQueries = try await onLinkThread { try host.read(document: id) }
+        #expect(withQueries.enable.contains("query"))
+        #expect(withQueries.enable == LanguageSettings.enable)
+        LanguageSettings.queries = false
+        let without = try await onLinkThread { try host.read(document: id) }
+        #expect(!without.enable.contains("query"))
+
         // `r = 5` -> `r = 7`: one undoable, highlighted step.
         let request = edit(state.version, (0, 4), (0, 5), "7")
         let outcome = try await onLinkThread { try host.edit(document: id, edit: request) }

@@ -84,7 +84,8 @@ extension SCADDocument {
         }
         return AgentDocumentState(
             version: version, text: text, selection: selection, overrides: overrides,
-            parts: model.partsEnabled, run: runStatus, console: model.console)
+            parts: model.partsEnabled, enable: LanguageSettings.enable, run: runStatus,
+            console: model.console)
     }
 
     private static func position(_ any: Any?) -> EditorPosition? {

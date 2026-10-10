@@ -289,7 +289,8 @@ struct Model<'a> {
     defines: Vec<String>,
     parts: bool,
     /// The NeoSCAD extensions the page runs its text with (View > NeoSCAD
-    /// extensions, or a link's `enable=`), as `enable` names. The session
+    /// extensions, or a link's `enable=`; an app's document, its language
+    /// settings), as `enable` names. The session
     /// adds them to the server's own `--enable`, as `parts` is added to
     /// the call's: without them a `sketch` model that previews on the page
     /// was unknown modules to the agent. Only extension names get here
@@ -459,8 +460,8 @@ impl Tools {
 
     /// Refuses a `.step`/`.stp` export on a server without NeoSCAD's
     /// `exact` extension, before any work: the extension is the server's
-    /// (`neoscad mcp --enable exact`) or the web page's whose text is the
-    /// model (`page`, [`Model::enable`]), so the agent cannot turn it on
+    /// (`neoscad mcp --enable exact`) or that of the web page or app whose
+    /// text is the model (`page`, [`Model::enable`]), so the agent cannot turn it on
     /// in the call, and the user has to be told what to change.
     fn step_allowed(&self, out: &Path, page: &[String]) -> Result<(), String> {
         let ext = out
@@ -475,8 +476,14 @@ impl Tools {
             .has(session::Extension::Exact)
             || page.iter().any(|n| n == "exact");
         if (ext == "step" || ext == "stp") && !on {
+            // Name where the user turns it on, so the agent can relay it:
+            // the page's View menu, or the app's language settings, whose
+            // extensions its document's `read` carries.
             let page_too = if self.browser.is_some() {
                 ", or turn on exact in the web page's View > NeoSCAD extensions"
+            } else if self.apps.as_ref().is_some_and(|a| a.connected()) {
+                ", or turn on exact in the NeoSCAD app (Settings > Language on macOS, \
+                 Preferences > Language on Linux, Design > NeoSCAD Extensions on Windows)"
             } else {
                 ""
             };

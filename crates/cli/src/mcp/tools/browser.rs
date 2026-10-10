@@ -273,8 +273,11 @@ impl Page {
 /// on in it, which only changes which modules and functions exist (and
 /// whether `.step` is a format), never what the server may read or write;
 /// OpenSCAD's experimental features (`import-function` reads files) stay
-/// what the server was started with. A page older than this field sends
-/// none, and runs as before on the server's `--enable` alone.
+/// what the server was started with. A native app's document sends its
+/// language settings' extensions the same way
+/// (`client::agent::AgentDocumentState::enable`). A page or app older than
+/// this field sends none, and runs as before on the server's `--enable`
+/// alone.
 fn page_extensions(v: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for n in v.as_array().into_iter().flatten().filter_map(Value::as_str) {

@@ -339,7 +339,14 @@ The model tools given neither `path` nor `source` run the focused
 document's text (unsaved changes included) under its real path, so its
 includes resolve beside it; while a document is open its directory is
 readable (owner decision 5), never writable. An unsaved document runs as
-a plain name under the working directory, as the web page's does. While a
+a plain name under the working directory, as the web page's does. It runs
+with the document's customizer values, its `part()` switch and the app's
+NeoSCAD extensions (`read`'s `enable`: macOS Settings > Language, Linux
+Preferences > Language, Windows Design > NeoSCAD Extensions), which the
+server adds to its own `--enable` as it does the web page's, so a sketch
+or query model that runs in the app runs for the agent too, and `exact`
+on in the app allows a `.step` export of its text. An app older than the
+field sends no `enable` and runs on the server's alone. While a
 model tool runs on the app's document, the app is told (`activity`), so
 it can show "Claude Code is checking the model".
 
@@ -358,7 +365,8 @@ for Swift and C#):
 - `AgentHost`, which the app implements: one call per request, on the
   link's threads (the host hops to its main thread and may block there).
   `read(document) -> AgentDocumentState` (version, text, selection,
-  customizer overrides, `part()` switch, last run, console lines),
+  customizer overrides, `part()` switch, `enable` (the `--enable` names
+  of the app's language settings), last run, console lines),
   `edit(document, AgentEditRequest) -> Applied(version) | Stale(version)
   | Declined`, `reveal(document, from, to)`, `camera(document, change)`,
   `capture(document, maxSide)`, `annotate(document, lines, markers)`.

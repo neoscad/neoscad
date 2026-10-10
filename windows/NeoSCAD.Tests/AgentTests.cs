@@ -196,6 +196,14 @@ public sealed class AgentTests : IDisposable
         Assert.Equal("teeth = 16;\ncube(teeth);\n", state.Text);
         Assert.Equal(before + 1, state.Version);
 
+        // Design > NeoSCAD Extensions go with it: the agent server adds
+        // them to its own for this text, so a query or sketch model the
+        // window runs is not unknown functions to the agent.
+        Assert.Empty(state.Enable);
+        doc.SetEnable(new LanguageSettings { Query = true, Exact = true }.Names());
+        state = OnLink(() => host.Read(AgentDocumentHost.DocumentId));
+        Assert.Equal(new[] { "query", "exact" }, state.Enable);
+
         var e = Assert.ThrowsAny<AgentHostException>(() => OnLink(() => host.Read(2)));
         Assert.Equal("the document was closed", Message(e));
     }

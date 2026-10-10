@@ -98,6 +98,9 @@ pub struct AgentDocumentState {
     pub selection: Option<EditorSelection>,
     pub overrides: Vec<ParameterOverride>,
     pub parts: bool,
+    /// The `--enable` names the document runs with (the app's language
+    /// settings), added to the agent server's own for its text.
+    pub enable: Vec<String>,
     pub run: AgentRunStatus,
     pub console: Vec<ConsoleLine>,
 }

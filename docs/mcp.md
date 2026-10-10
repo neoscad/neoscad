@@ -680,7 +680,10 @@ While an app is connected:
 - `evaluate`, `render`, `snapshot`, `check`, `measure` and `format`
   given neither `path` nor `source` use that document's text, unsaved
   changes included, under its real path (its includes resolve beside it;
-  its directory is readable while it is open, not writable); the result
+  its directory is readable while it is open, not writable), with its
+  customizer values, `part()` switch and the app's NeoSCAD extensions
+  (its language settings), added to the server's `--enable` as the web
+  page's are; the result
   starts with `gear.scad in NeoSCAD (document 1, version 12)` and has
   `"document": {"number", "file", "version"}`;
 - the instructions gain one sentence when an app is connected as the

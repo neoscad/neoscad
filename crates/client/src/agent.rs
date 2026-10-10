@@ -149,6 +149,15 @@ pub struct AgentDocumentState {
     pub overrides: Vec<ParameterOverride>,
     /// The `part()` switch.
     pub parts: bool,
+    /// The NeoSCAD extensions the document runs with, as `--enable` names
+    /// (`sketch`, `query`, `exact`, `fillet`): the app's language
+    /// settings. `neoscad mcp` adds them to its own `--enable` when a
+    /// model tool runs this document's text, so a sketch the user sees
+    /// built in the app also builds for the agent instead of failing as
+    /// an unknown module. Defaulted so an answer serialized by an app
+    /// older than this field still reads, as no extensions.
+    #[serde(default)]
+    pub enable: Vec<String>,
     pub run: AgentRunStatus,
     /// The console of the last run, as the console panel shows it.
     pub console: Vec<ConsoleLine>,
@@ -700,6 +709,7 @@ fn read_json(s: &AgentDocumentState, path: Option<&str>) -> Value {
         })),
         "values": values,
         "parts": s.parts,
+        "enable": s.enable,
         "run": run_json(&s.run),
         "diagnostics": s.console.iter()
             .filter(|l| matches!(l.kind, ConsoleKind::Error | ConsoleKind::Warning))

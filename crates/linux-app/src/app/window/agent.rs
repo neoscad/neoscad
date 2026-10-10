@@ -208,6 +208,7 @@ impl Window {
             selection,
             overrides: st.lp.overrides(),
             parts: st.lp.parts(),
+            enable: st.lp.enable().to_vec(),
             run: AgentRunStatus {
                 mode: st.lp.last_mode(),
                 summary: st.summary.clone(),

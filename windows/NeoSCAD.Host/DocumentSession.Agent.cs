@@ -47,8 +47,10 @@ public sealed partial class DocumentSession
         {
             overrides = [];
         }
+        // Enable: Design > NeoSCAD Extensions, which the agent server adds
+        // to its own for this text, so the agent's runs match the window's.
         return new AgentDocumentState(Revision, Text, selection, overrides, state.Parts,
-            new AgentRunStatus(mode, summary, running), [.. Console]);
+            [.. enable], new AgentRunStatus(mode, summary, running), [.. Console]);
     }
 
     /// <summary>

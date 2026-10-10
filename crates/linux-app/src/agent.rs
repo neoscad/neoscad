@@ -968,6 +968,7 @@ mod tests {
                 selection: None,
                 overrides: Vec::new(),
                 parts: false,
+                enable: Vec::new(),
                 run: AgentRunStatus {
                     mode: None,
                     summary: String::new(),

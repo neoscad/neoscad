@@ -54,6 +54,7 @@ impl AgentHost for FakeApp {
                 value: ParameterValue::Number { value: 12.0 },
             }],
             parts: false,
+            enable: vec!["sketch".into(), "exact".into()],
             run: AgentRunStatus {
                 mode: Some(RenderMode::Preview),
                 summary: "Previewed".into(),
@@ -217,6 +218,9 @@ fn read_answers_in_the_web_pages_shape() {
     assert_eq!(r["values"]["teeth"], 12.0);
     assert_eq!(r["run"]["summary"], "Previewed");
     assert_eq!(r["run"]["mode"], "preview");
+    // The app's extensions, which `neoscad mcp` adds to its own `--enable`
+    // for this text.
+    assert_eq!(r["enable"], json!(["sketch", "exact"]));
     // Errors and warnings only, 1-based, the file named only when it is
     // not the document.
     assert_eq!(

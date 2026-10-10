@@ -2102,14 +2102,6 @@ lead them, come roughly in order of user impact.
   BOSL2 is on the native library path, while the page fetches its own
   copy. Shipping BOSL2 with the CLI (as MCAD is), or falling back to the
   page's own engine for those runs, would close the gap.
-- **The model tools on a native app's document ignore its extensions**:
-  the web page's `read` now sends `enable`, which `neoscad mcp` adds to
-  its `--enable` for the page's text (`docs/mcp.md`), but the apps'
-  `AgentDocumentState` (`crates/client/src/agent.rs`, `read_json`) has
-  only `parts`, so a `sketch` document open in the macOS, Linux or
-  Windows app runs for the agent on the server's `--enable` alone. An
-  `extensions` field there, filled by each host from its View menu, would
-  close it; the server already reads `enable` from an app's answer.
 - **The agent's edits and the user's typing race only at version
   granularity:** an edit made on version N is refused once the user has
   typed. Rebasing a small edit over concurrent typing (as the editor's
