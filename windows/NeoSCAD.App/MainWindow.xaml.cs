@@ -431,13 +431,13 @@ public sealed partial class MainWindow : Window
         if (failure is not null && format.Kind == ExportKind.Geometry && document.LastExportWritten && !dialogShowing)
         {
             Status.Text = $"Exported {file.Name}, but its fillets failed";
-            var report = document.LastStepReport is { } r ? $"{failure}\n\n{r}" : failure;
+            var message = document.LastStepReport is { } r ? $"{failure}\n\n{r}" : failure;
             dialogShowing = true;
             await new ContentDialog
             {
                 XamlRoot = Root.XamlRoot,
                 Title = $"{file.Name} was exported, but its fillets failed",
-                Content = new TextBlock { Text = report, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true },
+                Content = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true },
                 CloseButtonText = "Close",
             }.ShowAsync();
             dialogShowing = false;
