@@ -6,6 +6,7 @@
 mod agent;
 mod console;
 mod customizer;
+mod default_app;
 mod editor;
 mod inspect;
 mod library;
@@ -59,6 +60,10 @@ pub struct Shared {
     /// AI agents: the consent, the link to `neoscad mcp` and its status
     /// (`agent.rs`).
     agents: agent::Agents,
+    /// The offer to be the default app for OpenSCAD files: "Don't ask
+    /// again" and whether this run has considered asking
+    /// (`default_app.rs`).
+    default_app: default_app::DefaultApp,
     /// Preferences > Language: the extensions every window runs with
     /// (`linux_app::extensions`), and where they are kept.
     extensions: RefCell<linux_app::extensions::Settings>,
@@ -189,6 +194,7 @@ pub fn run() -> glib::ExitCode {
             editor_dir,
             updates: update::Updates::new(),
             agents: agent::Agents::new(),
+            default_app: default_app::DefaultApp::new(),
             extensions: RefCell::new(linux_app::extensions::Settings::load(
                 &linux_app::extensions::settings_path(&glib::user_config_dir()),
             )),
@@ -207,17 +213,25 @@ pub fn run() -> glib::ExitCode {
     let s = shared.clone();
     app.connect_activate(move |app| {
         if let Some(sh) = s.borrow().clone() {
-            new_window(app, &sh).widget().present();
+            let w = new_window(app, &sh);
+            w.widget().present();
+            default_app::after_launch(&sh, &w);
         }
     });
 
     let s = shared;
     app.connect_open(move |app, files, _hint| {
         if let Some(sh) = s.borrow().clone() {
+            let mut shown = None;
             for f in files {
                 if let Some(p) = f.path() {
-                    open_path(app, &sh, p);
+                    shown = open_path(app, &sh, p).or(shown);
                 }
+            }
+            // Launched to open files (the desktop's Open With, say): the
+            // window that shows the last one is the one to ask over.
+            if let Some(w) = shown {
+                default_app::after_launch(&sh, &w);
             }
         }
     });

@@ -298,7 +298,8 @@ pub fn show_details(sh: &Rc<Shared>, parent: &gtk::Window) {
     dialog.present(Some(parent));
 }
 
-/// Main menu > Preferences: the two update settings, the Language page
+/// Main menu > Preferences: the two update settings and the default app
+/// for OpenSCAD files (`super::default_app::group`), the Language page
 /// (NeoSCAD's extensions, `linux_app::extensions`), and the Agents page
 /// (`super::agent::page`).
 pub fn preferences(sh: &Rc<Shared>, parent: Option<&gtk::Window>) {
@@ -349,6 +350,7 @@ pub fn preferences(sh: &Rc<Shared>, parent: Option<&gtk::Window>) {
         .icon_name("preferences-system-symbolic")
         .build();
     page.add(&group);
+    page.add(&super::default_app::group());
     let dialog = adw::PreferencesDialog::new();
     dialog.add(&page);
     dialog.add(&language_page(sh));

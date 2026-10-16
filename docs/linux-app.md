@@ -568,6 +568,9 @@ checked by `client::update::check`, the code the CLI uses.
   with the serials in `updates.json` under the user's configuration
   directory (`~/.config/neoscad/`, or
   `~/.var/app/org.neoscad.NeoSCAD/config/neoscad/` in the Flatpak).
+- **OpenSCAD Files** (Preferences > General): whether NeoSCAD is the
+  default app for OpenSCAD files, with **Make Default** when it isn't
+  and the system lets it be ("Default app for OpenSCAD files" below).
 - **Language** (Preferences > Language): "Constrained sketches
   (sketch)", "Geometry queries (query)", "Exact STEP export (exact)"
   and "Edge fillets and chamfers (fillet)", NeoSCAD's extensions (the
@@ -591,6 +594,40 @@ Once the Flatpak repository the audit recommends exists (owner decision:
 its own GitHub Pages site), installs from it are updated by `flatpak
 update` and GNOME Software, and the app's notice for them should say so
 instead of offering a bundle (`docs/followups.md`, "Linux").
+
+## Default app for OpenSCAD files
+
+About a second after the first window is shown, the app may ask "Make
+NeoSCAD the default app for OpenSCAD files?" (**Make Default** / **Not
+Now**, with a **Don't ask again** check). It asks only when all of these
+hold (`linux_app::default_app::should_ask`):
+
+- It is not in a sandbox: no `/.flatpak-info`, `FLATPAK_ID` or `SNAP`.
+  `g_app_info_set_as_default_for_type` writes `mimeapps.list` under the
+  configuration directory, and a sandbox's is its own, so the change
+  would never reach the desktop. The released Flatpak therefore never
+  asks; its exported desktop entry claims `application/x-openscad`, and
+  the desktop's Open With settings can choose it.
+- Its desktop entry, `org.neoscad.NeoSCAD.desktop`, is installed where
+  gio finds it (`gio::AppInfo::all()`; for a source build, copy
+  `linux/data/org.neoscad.NeoSCAD.desktop` to
+  `~/.local/share/applications/` and the MIME XML to
+  `~/.local/share/mime/packages/`, then `update-mime-database
+  ~/.local/share/mime`). Run from `target/` there is nothing to make
+  default.
+- `gio::AppInfo::default_for_type("application/x-openscad")` is not
+  already that entry.
+- The user hasn't ticked **Don't ask again** (kept as `dontAsk` in
+  `default-app.json` beside `updates.json`), and neither
+  `NEOSCAD_NO_DEFAULT_APP_PROMPT` nor `CI` is set (`linux/smoke.sh`
+  sets the first).
+
+**Not Now** alone asks again at the next launch. **Make Default** sets
+the default and says so in a toast, or that the default didn't change,
+with gio's error. Nothing else opens a dialog at launch (the update
+check shows a banner), and the offer is skipped for that run if a dialog
+is already up, so two never stack. Preferences > General > OpenSCAD
+Files shows the current default the same way at any time.
 
 ## Flatpak
 

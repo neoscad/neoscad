@@ -10,14 +10,16 @@
 //! exports off the main thread (`run`), the 3D view's drawing and input
 //! (`view`), the side panels' logic (`customizer`, `inspect`), which
 //! files a window watches (`watch`), the language extensions on
-//! (`extensions`) and the update check's settings and
-//! notice (`update`). Everything else a front end does comes from
+//! (`extensions`), the update check's settings and notice (`update`)
+//! and when to offer to be the default app for OpenSCAD files
+//! (`default_app`). Everything else a front end does comes from
 //! `crates/client`, the port boundary (docs/architecture.md).
 //! The window itself (`src/app/`) is compiled only with the `gtk` feature.
 
 pub mod agent;
 pub mod bridge;
 pub mod customizer;
+pub mod default_app;
 pub mod document;
 pub mod extensions;
 pub mod host;

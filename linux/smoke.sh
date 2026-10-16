@@ -43,6 +43,10 @@ export G_MESSAGES_DEBUG=neoscad GTK_A11Y=none NO_AT_BRIDGE=1 GDK_BACKEND=x11
 # Containers and CI runners have no user namespaces for WebKit's
 # bubblewrap sandbox; this is a test of the app, not of the sandbox.
 export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+# The offer to be the default app for .scad files would cover the window
+# the screenshots and typing need, on a machine where the desktop entry is
+# installed (crates/linux-app/src/default_app.rs).
+export NEOSCAD_NO_DEFAULT_APP_PROMPT=1
 export NEOSCAD_EDITOR_DIR=${NEOSCAD_EDITOR_DIR:-$PWD/apple/Editor/web/dist}
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$work/xdg}
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
