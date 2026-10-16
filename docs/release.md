@@ -1056,6 +1056,16 @@ published files, downloaded through a browser so they are quarantined:
       too (stapled ticket).
 - [ ] `spctl -a -vv /Applications/NeoSCAD.app` says
       `accepted source=Notarized Developer ID`.
+- [ ] Once its first window is up, NeoSCAD offers (a sheet) to be the
+      default app for OpenSCAD files, unless it already is; "Make
+      Default" brings up macOS's own confirmation ("Do you want all
+      documents with the extension .scad to open with NeoSCAD?"), and
+      choosing "Don't Change" there says the default didn't change.
+      "Not Now" asks again at the next launch, "Don't ask again" never
+      does, and Settings > General shows the state with a "Make Default"
+      button either way (`apple/App/Document/DefaultApp.swift`). Launched
+      from the DMG, App Translocation, a Debug build or the tests, it
+      doesn't ask.
 - [ ] Double-click a `.scad` file in Finder: it opens in NeoSCAD; the
       preview renders; `text()` renders with the default font; an
       `include <MCAD/...>` resolves.

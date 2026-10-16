@@ -204,7 +204,10 @@ launched_at=
 launch() {
     : >"$work/server.log"
     launched_at=$(date '+%Y-%m-%d %H:%M:%S')
-    open -n -F -a "$app" --args -ApplePersistenceIgnoreState YES "$@"
+    # -DefaultAppDontAsk: a release build in a writable folder would offer
+    # to open .scad files (apple/App/Document/DefaultApp.swift), and that
+    # sheet is a second window the update check below would count.
+    open -n -F -a "$app" --args -ApplePersistenceIgnoreState YES -DefaultAppDontAsk YES "$@"
     pid=
     for _ in $(seq 100); do
         pid=$(pgrep -f "^$exe" | head -1 || true)

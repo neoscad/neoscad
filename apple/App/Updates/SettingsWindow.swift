@@ -1,5 +1,7 @@
-// The Settings window (NeoSCAD > Settings…, Command-comma), in two panes:
+// The Settings window (NeoSCAD > Settings…, Command-comma), in four panes:
 //
+// - General: whether NeoSCAD opens .scad files from Finder, and a button
+//   to make it so (Document/DefaultApp.swift);
 // - Updates: the choices the owner decided on (docs/audits/auto-update.md,
 //   "Decisions"): automatic checks, on by default, and the opt-in
 //   release-candidate channel;
@@ -23,13 +25,15 @@ final class SettingsWindowController: NSWindowController {
     static let shared = SettingsWindowController()
 
     enum Tab: Int {
-        case updates, agents, language
+        case general, updates, agents, language
     }
 
     private let tabs = NSTabViewController()
 
     private init() {
         tabs.tabStyle = .toolbar
+        tabs.addTabViewItem(
+            Self.pane("General", "gearshape", DefaultAppSettingsView(model: DefaultAppSettingsModel())))
         tabs.addTabViewItem(
             Self.pane(
                 "Updates", "arrow.triangle.2.circlepath",
@@ -123,6 +127,90 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Settings > General's default-app row. Read again whenever the pane
+/// appears, since the default can change in Finder's Get Info while the
+/// window is closed.
+@MainActor
+final class DefaultAppSettingsModel: ObservableObject {
+    private let context: DefaultApp.Context
+    private let workspace: DefaultAppWorkspace
+    @Published private(set) var isDefault = false
+    /// The app that opens .scad files now, when it isn't NeoSCAD.
+    @Published private(set) var currentName: String?
+    /// Why this copy can't be registered (the DMG, App Translocation).
+    let cannotRegister: String?
+    @Published private(set) var working = false
+    @Published private(set) var failure: String?
+
+    init(context: DefaultApp.Context = .current, workspace: DefaultAppWorkspace = NSWorkspace.shared) {
+        self.context = context
+        self.workspace = workspace
+        cannotRegister = DefaultApp.reasonNotToRegister(appAt: context.bundleURL)
+        refresh()
+    }
+
+    func refresh() {
+        isDefault = DefaultApp.isDefault(context, workspace: workspace)
+        currentName = isDefault ? nil : workspace.defaultApplicationName(for: DefaultApp.scadType)
+    }
+
+    func makeDefault() {
+        working = true
+        failure = nil
+        DefaultApp.makeDefault(context, workspace: workspace) { [weak self] failure in
+            guard let self else { return }
+            self.working = false
+            self.failure = failure
+            self.refresh()
+        }
+    }
+}
+
+/// Settings > General.
+struct DefaultAppSettingsView: View {
+    @ObservedObject var model: DefaultAppSettingsModel
+
+    var body: some View {
+        Form {
+            Section("OpenSCAD files") {
+                HStack {
+                    if model.isDefault {
+                        Label("NeoSCAD opens .scad files", systemImage: "checkmark.circle.fill")
+                    } else {
+                        Text(
+                            model.currentName.map { "\($0) opens .scad files" }
+                                ?? "No app is the default for .scad files")
+                        Spacer()
+                        Button("Make Default") { model.makeDefault() }
+                            .disabled(model.working || model.cannotRegister != nil)
+                    }
+                }
+                if let reason = model.cannotRegister, !model.isDefault {
+                    footnote("This copy of NeoSCAD can't be the default because \(reason).")
+                } else if let failure = model.failure, !model.isDefault {
+                    footnote(failure)
+                } else {
+                    footnote("The app Finder opens OpenSCAD files with when you double-click them.")
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        .fixedSize(horizontal: false, vertical: true)
+        .onAppear { model.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refresh()
+        }
+    }
+
+    private func footnote(_ text: String) -> some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

@@ -45,6 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Listen for AI agents again if the user allowed them before
             // (Agents/AgentService.swift); nothing at all otherwise.
             AgentService.shared.startIfAllowed()
+            // Offer to open .scad files from Finder (Document/DefaultApp.swift),
+            // as a sheet once the first document window is up. Not under
+            // XCTest: the tests must not see an alert or touch LaunchServices.
+            DefaultAppPrompt.scheduleAtLaunch()
         }
     }
 
