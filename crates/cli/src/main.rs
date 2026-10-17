@@ -26,6 +26,8 @@
 //! ([`serve`]) keeps a session's caches warm behind JSON-RPC; exports and
 //! snapshots use a running one automatically ([`client`], [`delegate`]).
 //! `neoscad lsp --stdio` ([`lsp`]) is the language server for editors.
+//! `neoscad add`, `remove`, `fetch`, `update`, `tree`, `vendor` and
+//! `store` ([`pkg`]) manage a project's dependencies (`scad.toml`).
 //! `neoscad generate` ([`generate`]) prints the manual page and shell
 //! completions, from these same clap definitions; [`SUBCOMMANDS`] lists
 //! every subcommand for both dispatch and generation.
@@ -61,6 +63,7 @@ mod memory;
 mod modeltest;
 mod outcome;
 mod param_json;
+mod pkg;
 mod png;
 mod report;
 mod rpc;
@@ -378,6 +381,41 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = {
             name: "docs",
             run: docs::main,
             command: docs::Args::command,
+        },
+        Subcommand {
+            name: "add",
+            run: pkg::add_main,
+            command: pkg::add_command,
+        },
+        Subcommand {
+            name: "remove",
+            run: pkg::remove_main,
+            command: pkg::remove_command,
+        },
+        Subcommand {
+            name: "fetch",
+            run: pkg::fetch_main,
+            command: pkg::fetch_command,
+        },
+        Subcommand {
+            name: "update",
+            run: pkg::update_main,
+            command: pkg::update_command,
+        },
+        Subcommand {
+            name: "tree",
+            run: pkg::tree_main,
+            command: pkg::tree_command,
+        },
+        Subcommand {
+            name: "vendor",
+            run: pkg::vendor_main,
+            command: pkg::vendor_command,
+        },
+        Subcommand {
+            name: "store",
+            run: pkg::store_main,
+            command: pkg::store_command,
         },
         Subcommand {
             name: "serve",

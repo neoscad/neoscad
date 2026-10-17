@@ -1523,6 +1523,7 @@ dependencies = [
  "neoscad-text",
  "png",
  "roff",
+ "scad-deps",
  "serde_json",
  "tungstenite",
  "windows-sys",
@@ -1600,6 +1601,7 @@ dependencies = [
  "neoscad-session",
  "neoscad-text",
  "objc2-quartz-core",
+ "scad-deps",
  "serde_json",
  "uniffi",
  "wgpu",
@@ -1669,6 +1671,7 @@ dependencies = [
  "neoscad-render",
  "neoscad-session",
  "neoscad-text",
+ "scad-deps",
  "serde_json",
  "soup3",
  "webkit6",
@@ -2269,6 +2272,18 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "scad-deps"
+version = "0.1.0"
+dependencies = [
+ "basic-toml",
+ "clap",
+ "dirs",
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "scopeguard"

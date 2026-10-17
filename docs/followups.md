@@ -2998,3 +2998,42 @@ axis as exact B-spline surfaces. What they leave:
   reference cache: `merge-base --is-ancestor METHOD_SINCE <sha>` fails
   for an id that no longer exists. Either translate ids in those paths
   too or rewrite the records once with the map.
+
+## Project dependencies
+From the dependency manager (`docs/dependencies.md`, issue #1).
+- The apps show the "declared but not fetched" hint but cannot fetch:
+  a "Fetch missing libraries" banner (macOS, Windows, Linux) would call
+  `scad_deps::fetch` from the app's core.
+- The MCP server and the LSP report unfetched dependencies as hints but
+  do not offer to fetch them (an MCP `fetch` tool, an LSP code action).
+- `neoscad docs` with no `--in` does not index the modules of every
+  dependency; `docs --in FILE` follows the file's includes into them.
+- The web demo has no disk, so no project: dependencies would need a
+  fetch proxy or vendored files in the page.
+- An optional index of well-known libraries (option C of the proposal),
+  so `neoscad add BOSL2` needs no URL.
+- `import()` and `surface()` of files from a dependency are not limited to
+  the dependency tree.
+- A path dependency outside the MCP server's roots is not readable there
+  (the store is); the server could add each project's path targets as
+  read roots.
+- `neoscad fetch` re-hashes every linked checkout on each run (about
+  12 MB for BOSL2), which keeps tampering visible but is most of the fast
+  path's time; a per-checkout stamp (size and mtime of every file) would
+  make it near free.
+- Submodules and git LFS objects of a dependency are not checked out.
+- scad-deps is meant to move to its own repository (as sketch-solver
+  did), with NeoSCAD depending on it from crates.io; `crates/project` is
+  self-contained for that (its own version, licence, lints and tests).
+- On Windows a fetch makes a directory symbolic link, else a copy (no
+  junction: see `docs/dependencies.md`, "Links"). The `windows` job in
+  `ci.yml` runs scad-deps' tests (`cargo test -p neoscad-cli -p
+  neoscad-lang -p scad-deps`), which take whichever of the two the
+  runner allows; the other one is not exercised there. A junction made
+  through `DeviceIoControl` (no `cmd`) would save Windows users without
+  Developer Mode a copy per project.
+- The session's parse cache does not notice a new file that would shadow
+  a library include (a `Lib/x.scad` created next to the main file after a
+  warm parse that found it in a library directory); this predates the
+  dependency manager, which adds the library path and a stamp of the
+  project's links to the key.

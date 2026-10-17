@@ -27,6 +27,14 @@ results included, with CadQuery-style selectors
 CadQuery's fillets do, and exports them as exact cylinders, tori and
 cones with `--enable exact` (`docs/fillet-edges.md`).
 
+Libraries such as BOSL2 can be project dependencies: `neoscad add BOSL2
+--git https://github.com/BelfrySCAD/BOSL2 --tag v2.0.716` records them in
+`scad.toml`, pins each to a commit and a content hash in `scad.lock`,
+checks every revision out once per machine into a shared store and links
+it into the project, so `include <BOSL2/std.scad>` finds the pinned copy
+with no change to the source. `neoscad vendor` copies them into a plain
+folder for stock OpenSCAD (`docs/dependencies.md`).
+
 - Website: <https://neoscad.org>
 - Try it in the browser: <https://neoscad.org/try>
 
@@ -117,6 +125,11 @@ NeoSCAD binaries, which combine the two, are effectively under GPLv3 (or
 later; see the FSF's
 [licence list](https://www.gnu.org/licenses/license-list.html#apache2)).
 The source files themselves remain GPL-2.0-or-later.
+
+One member crate is MIT-licensed instead: `scad-deps` (`crates/project`,
+the dependency manager), so that tools under any licence can share its
+formats and store. It depends on nothing under the GPL, and its notice
+ships with the binaries (`packaging/licenses/`).
 
 ## Credits
 

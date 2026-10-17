@@ -34,6 +34,9 @@ pub fn config(resource_dir: Option<&str>) -> session::Config {
     libs.0.push(root.clone());
     let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(Arc::new(StdFs), root));
     let mut cfg = session::Config::new(fs.clone(), libs);
+    // A document's project (the nearest scad.toml above it) puts its
+    // fetched dependencies before OPENSCADPATH (docs/dependencies.md).
+    cfg.project = Some(Arc::new(project_libs));
     let home_fonts = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fonts"));
     cfg.fonts = Arc::new(move |used: &[String]| {
         let mut db = text::FontDb::with_fs(fs.clone());
@@ -110,4 +113,24 @@ pub fn viewport_gpu() -> Result<Arc<render::viewport::Gpu>, String> {
             .map_err(|e| e.to_string())
     })
     .clone()
+}
+
+/// The project a main file belongs to (the nearest `scad.toml` above it),
+/// from scad-deps' answer: its `.scad/libraries` and `[paths]` go in front
+/// of the library path (`docs/dependencies.md`).
+pub(crate) fn project_libs(main: &Path) -> Option<lang::project::ProjectLibs> {
+    let p = scad_deps::search::project_for(main)?;
+    Some(lang::project::ProjectLibs {
+        root: p.root,
+        dirs: p.dirs,
+        declared: p
+            .declared
+            .into_iter()
+            .map(|d| lang::project::Declared {
+                folder: d.folder,
+                fetched: d.fetched,
+            })
+            .collect(),
+        stamp: p.stamp,
+    })
 }

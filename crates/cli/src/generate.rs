@@ -277,19 +277,32 @@ fn description() -> Roff {
     r.text([roman(
         "It also has commands of its own (see COMMANDS): printability checks and \
          measurements, image contact sheets of a model, a formatter, model tests, \
-         reference documentation, a JSON-RPC server that keeps caches warm between \
-         exports, a Model Context Protocol server for AI agents and a language server \
-         for editors.",
+         reference documentation, project dependencies (scad.toml, fetched into a \
+         shared store and linked into the project), a JSON-RPC server that keeps caches \
+         warm between exports, a Model Context Protocol server for AI agents and a \
+         language server for editors.",
     )]);
     r
 }
 
 fn environment() -> Roff {
-    let vars: [(&str, &str); 7] = [
+    let vars: [(&str, &str); 9] = [
         (
             "OPENSCADPATH",
             "Directories searched for include and use files, as in OpenSCAD \
-             (separated by colons, or semicolons on Windows).",
+             (separated by colons, or semicolons on Windows). Inside a project (a \
+             scad.toml above the file) its .scad/libraries comes first.",
+        ),
+        (
+            scad_deps::store::STORE_ENV,
+            "The store of shared git mirrors and dependency checkouts, instead of the \
+             platform's cache directory (neoscad store path prints it). NEOSCAD_STORE, \
+             its older name, is read when it is unset; --store overrides both.",
+        ),
+        (
+            scad_deps::git::GIT_ENV,
+            "The git executable that neoscad fetch runs, instead of git on the PATH. \
+             NEOSCAD_GIT, its older name, is read when it is unset.",
         ),
         (
             "OPENSCAD_FONT_PATH",
@@ -373,6 +386,10 @@ pub(crate) const EXAMPLES: &[(&str, &str)] = &[
     (
         "Check a part for FDM printing on a 220 by 220 by 250 mm bed, as JSON:",
         "neoscad check --bed 220x220x250 --format json part.scad",
+    ),
+    (
+        "Make BOSL2 a pinned dependency of the project, so include <BOSL2/std.scad> finds it:",
+        "neoscad add BOSL2 --git https://github.com/BelfrySCAD/BOSL2 --tag v2.0.716",
     ),
     (
         "Install zsh completions for the current user (with ~/.zfunc on zsh's fpath):",

@@ -589,10 +589,14 @@ output's directory is created.
 ## Safety
 
 - **Files:** the allowed roots are the working directory and each
-  `--root`, read and write, and the temp directories below; the library path (`OPENSCADPATH`, the user
-  library directory) and font directories are readable, and so is the
+  `--root`, read and write, and the temp directories below; the library
+  path (`OPENSCADPATH`, the user library directory), the checkouts in
+  the store of project dependencies (`docs/dependencies.md`; a project's
+  `.scad/libraries` links into them; not the store's mirrors or its
+  index of projects) and font directories are readable, and so is the
   directory of each document open in a connected NeoSCAD app, while it
-  is open ("The desktop apps").
+  is open ("The desktop apps"). A path dependency outside the roots is
+  not readable: add its directory with `--root`.
 - **The working directory is a root only when it looks like a
   project.** A client may start the server anywhere: Claude Desktop
   starts it with an undefined working directory, "like `/` on macOS"

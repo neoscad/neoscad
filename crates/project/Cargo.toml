@@ -1,0 +1,76 @@
+[package]
+name = "scad-deps"
+description = "Dependency manager for OpenSCAD-language projects: scad.toml, scad.lock, a per-machine store of shared git mirrors and read-only checkouts linked into each project"
+# Its own version, not NeoSCAD's: this crate is published on its own and
+# is self-contained (no workspace-inherited fields), so it can move to its
+# own repository as it is.
+version = "0.1.0"
+edition = "2024"
+# `File::lock` (the store's lock) is the newest std API it uses.
+rust-version = "1.89"
+# MIT, unlike the rest of NeoSCAD (GPL-2.0-or-later): nothing it depends
+# on is under the GPL, and NeoSCAD's GPL binaries may include it.
+license = "MIT"
+repository = "https://github.com/neoscad/neoscad"
+homepage = "https://github.com/neoscad/neoscad/tree/main/crates/project"
+documentation = "https://docs.rs/scad-deps"
+readme = "README.md"
+keywords = ["openscad", "scad", "dependencies", "package-manager", "cad"]
+categories = ["development-tools", "command-line-utilities"]
+authors = ["The NeoSCAD contributors"]
+publish = true
+# What ships (`cargo package --list`): the sources, the tests, the README
+# and the licence.
+include = ["src/**/*.rs", "tests/**/*.rs", "README.md", "LICENSE"]
+
+[lib]
+name = "scad_deps"
+
+# The standalone command line, for stock-OpenSCAD users and other tools:
+# `cargo install scad-deps --features cli`. `neoscad add`, `fetch` and the
+# rest run the same code (`scad_deps::cli`).
+[[bin]]
+name = "scad-deps"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
+[features]
+default = []
+# The command line (`scad_deps::cli` and the `scad-deps` binary): clap and
+# serde_json, which library users don't need.
+cli = ["dep:clap", "dep:serde_json"]
+
+[dependencies]
+# Reading scad.toml, scad.lock and the store's project index. Small,
+# serde-based, MIT OR Apache-2.0. The lockfile and the index are written
+# here by hand, so their bytes are this crate's to keep stable.
+basic-toml = "0.1.10"
+# The platform cache directory the store lives in by default.
+dirs = "7"
+serde = { version = "1", features = ["derive"] }
+# The content hash of a checkout (src/hash.rs).
+sha2 = "0.10"
+# The command line (feature `cli`). `string`: a subcommand's name carries
+# the program's (`neoscad fetch`, `scad-deps fetch`).
+clap = { version = "4", optional = true, default-features = false, features = ["std", "help", "usage", "error-context", "derive", "string"] }
+serde_json = { version = "1", optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+
+# Not one of NeoSCAD's release artifacts: cargo-dist ships `neoscad` only.
+[package.metadata.dist]
+dist = false
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"

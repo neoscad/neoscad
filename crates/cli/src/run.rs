@@ -235,11 +235,21 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
     }
     text.extend_from_slice(&suffix);
 
-    let host = Host::from_env();
+    let mut host = Host::from_env();
+    // A project's dependencies (the nearest scad.toml above the input)
+    // go after the input's own directory and before OPENSCADPATH.
+    let project = crate::host::project_libs(&path);
+    if let Some(p) = &project {
+        host.libs = p.library_path(&host.libs);
+    }
     let (fs, libs) = (&*host.fs, &host.libs);
     let mut program = parse_program(path, text, fs, libs);
     crate::deps::add_sources(&program.sources);
-    let stopped = parser_diagnostics(&program, job.hardwarnings, paths, con);
+    let hints = Hints {
+        project: project.as_ref(),
+        print: !job.json && !job.quiet,
+    };
+    let stopped = parser_diagnostics(&program, job.hardwarnings, paths, con, &hints);
     if stopped || program.has_syntax_errors() {
         con.print(None, format!("Can't parse file '{display}'!\n").as_bytes());
         return Err(EXIT_ERROR);
@@ -274,7 +284,7 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
         }
         match (&lib.program, lib.open_error()) {
             (Some(p), _) => {
-                if parser_diagnostics(p, job.hardwarnings, paths, con) {
+                if parser_diagnostics(p, job.hardwarnings, paths, con, &hints) {
                     // The library's parse failed on the warning, so it
                     // defines nothing; evaluation goes on without it.
                     lib.program = None;
@@ -313,9 +323,23 @@ fn parser_diagnostics<W: Write>(
     hardwarnings: bool,
     paths: &Paths,
     con: &mut Console<W>,
+    hints: &Hints<'_>,
 ) -> bool {
     for d in program.openscad_diags() {
-        con.diagnostic(d, &program.sources, &paths.cwd);
+        match hints.project.and_then(|p| p.annotate(d)) {
+            Some(h) => {
+                con.diagnostic(&h, &program.sources, &paths.cwd);
+                if hints.print
+                    && let Some(hint) = h.hints.last()
+                {
+                    // NeoSCAD's own line, only in a project that declares
+                    // dependencies (OpenSCAD has no such projects), on
+                    // stderr even when the console is an `.echo` export.
+                    eprintln!("neoscad: hint: {}", hint.message);
+                }
+            }
+            None => con.diagnostic(d, &program.sources, &paths.cwd),
+        }
         if hardwarnings
             && d.severity == Severity::Warning
             && let Some(span) = d.span
@@ -331,6 +355,15 @@ fn parser_diagnostics<W: Write>(
         }
     }
     false
+}
+
+/// The project's hints for includes it could not resolve
+/// (`lang::project::ProjectLibs::missing_hint`): in the JSON report's
+/// diagnostics, and printed after the warning when `print` (not for
+/// `--format json`, nor under `-q`, which keeps the warning quiet too).
+struct Hints<'a> {
+    project: Option<&'a lang::project::ProjectLibs>,
+    print: bool,
 }
 
 /// What a run's console resolves message paths through: the disk, as

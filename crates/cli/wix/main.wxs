@@ -128,6 +128,9 @@
                         <Component Id='LicenseClipper' Guid='*'>
                             <File Id='LicenseClipperFile' Name='clipper2-rust-BSL-1.0.txt' DiskId='1' Source='../../packaging/licenses/clipper2-rust-BSL-1.0.txt' KeyPath='yes'/>
                         </Component>
+                        <Component Id='LicenseScadDeps' Guid='*'>
+                            <File Id='LicenseScadDepsFile' Name='scad-deps-MIT.txt' DiskId='1' Source='../../packaging/licenses/scad-deps-MIT.txt' KeyPath='yes'/>
+                        </Component>
                     </Directory>
 
                     <Directory Id='Bin' Name='bin'>
@@ -174,6 +177,7 @@
             <ComponentRef Id='LicenseMcad'/>
             <ComponentRef Id='LicenseManifold'/>
             <ComponentRef Id='LicenseClipper'/>
+            <ComponentRef Id='LicenseScadDeps'/>
 
             <ComponentRef Id='binary0'/>
 

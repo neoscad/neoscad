@@ -20,6 +20,7 @@ const HOSTS: &[&str] = &[
     "conformance",
     "ffi",
     "linux-app",
+    "project",
     "uniffi-bindgen",
     "wasm-check",
     "web",

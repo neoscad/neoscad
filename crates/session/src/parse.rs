@@ -430,6 +430,22 @@ impl ParseCache {
     }
 }
 
+/// The library path as part of a cache key. A parse records which files
+/// its includes read, not which directory each was found in, so the path
+/// they were searched along must be in the key: two projects
+/// (`Config::project`) resolve one file's includes differently, and a
+/// project's `salt` (its links' stamp) changes when a fetch relinks a
+/// dependency. Both the main program's key and each library's take it,
+/// or a warm session keeps a `use`d library's includes from before.
+fn search_key(libs: &LibraryPath) -> Vec<u8> {
+    let mut dirs = Vec::new();
+    for d in &libs.0 {
+        dirs.extend_from_slice(generic(d).as_bytes());
+        dirs.push(0);
+    }
+    dirs
+}
+
 /// The main program: `text` (with the suffix already appended) parsed as
 /// `path`, from the cache when its includes are unchanged.
 pub fn main_program(
@@ -439,8 +455,15 @@ pub fn main_program(
     text: Vec<u8>,
     fs: &dyn FileSystem,
     libs: &LibraryPath,
+    salt: u64,
 ) -> Arc<Program> {
-    let k = key(&[b"main", generic(path).as_bytes(), &text]);
+    let k = key(&[
+        b"main",
+        generic(path).as_bytes(),
+        &text,
+        &search_key(libs),
+        &salt.to_le_bytes(),
+    ]);
     if let Some(p) = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -523,7 +546,7 @@ fn resolve(name: &str, dir: &Path, fs: &dyn FileSystem, libs: &LibraryPath) -> O
 
 /// `lang::deps::load_dependencies` with each library's parse from the
 /// cache: every library `root` uses, transitively, in the order OpenSCAD
-/// processes them.
+/// processes them. `salt` is the project's, as for [`main_program`].
 pub fn libraries(
     cache: &std::sync::Mutex<ParseCache>,
     stores: Stores<'_>,
@@ -531,6 +554,7 @@ pub fn libraries(
     suffix: &[u8],
     fs: &dyn FileSystem,
     libs: &LibraryPath,
+    salt: u64,
 ) -> Vec<Lib> {
     let main = root.sources.path(root.main).to_path_buf();
     let dir = main.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -543,6 +567,8 @@ pub fn libraries(
         suffix,
         fs,
         libs,
+        search: search_key(libs),
+        salt,
     };
     ctx.visit(&root.ast.uses, &dir, &mut seen, &mut out);
     out
@@ -555,6 +581,9 @@ struct Visit<'a> {
     suffix: &'a [u8],
     fs: &'a dyn FileSystem,
     libs: &'a LibraryPath,
+    /// [`search_key`] of `libs`.
+    search: Vec<u8>,
+    salt: u64,
 }
 
 impl Visit<'_> {
@@ -606,6 +635,8 @@ impl Visit<'_> {
             generic(path).as_bytes(),
             generic(self.main).as_bytes(),
             self.suffix,
+            &self.search,
+            &self.salt.to_le_bytes(),
         ]);
         if let Some(p) = self
             .cache
