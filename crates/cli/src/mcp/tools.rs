@@ -1155,9 +1155,17 @@ impl Tools {
         let mut r = r?;
         // With the echo going to a `.echo` export, it stays out of the
         // check's own text and structured content too.
-        if str_arg(args, "export").is_some_and(|e| is_echo(Path::new(e))) {
+        // Nor does the result then point at a `.echo` export for the
+        // lines it leaves out: `logged` is how many lines the log holds.
+        let echo_file = str_arg(args, "export").is_some_and(|e| is_echo(Path::new(e)));
+        if echo_file {
             r["diagnostics"]["echo"] = json!([]);
         }
+        let logged = if echo_file {
+            json!(0)
+        } else {
+            r["diagnostics"]["echoes"].clone()
+        };
         let printing = args.get("printability").and_then(Value::as_bool) != Some(false);
         if r.get("failed").and_then(Value::as_bool) == Some(true) || r["model"].is_null() {
             let mut text = format!(
@@ -1170,7 +1178,7 @@ impl Tools {
                 "counts": {"errors": d["errors"], "warnings": d["warnings"], "echoes": d["echoes"]},
                 "diagnostics": d["items"],
                 "echo": d["echo"],
-                "echoes": d["echoes"],
+                "echoes": logged,
             });
             push_log(&mut text, &log);
             return Ok((
@@ -1216,7 +1224,7 @@ impl Tools {
             text.push('\n');
             text.push_str(&session::fillets::line_text(f));
         }
-        let log = json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"], "echoes": r["diagnostics"]["echoes"]});
+        let log = json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"], "echoes": logged});
         push_log(&mut text, &log);
         // The model's own warnings and echo go in the structured content
         // too, not only the text: Claude Code shows an agent the structured

@@ -1757,6 +1757,7 @@ fn an_echo_export_holds_every_line_and_the_result_none() {
         let t = text(&r);
         assert!(t.contains("(30 echo lines, "), "{tool}: {t}");
         assert!(!t.contains("ECHO:"), "{tool}: {t}");
+        assert!(!t.contains("more echo lines"), "{tool}: {t}");
         let sc = &r["structuredContent"];
         assert!(sc.get("echo").is_none(), "{tool}: {sc}");
         let lines = if tool == "render" {

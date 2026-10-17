@@ -772,7 +772,7 @@ mod tests {
             )),
             None
         );
-        let long = Path::new("/Users/ada/Applications/NeoSCAD.app/Contents/Helpers/neoscad");
+        let long = Path::new("/Volumes/ada/Applications/NeoSCAD.app/Contents/Helpers/neoscad");
         for exe in [exe, long] {
             let text = instructions(Extra::None, Some(exe));
             assert!(text.contains(&format!("`{}`", exe.display())), "{text}");
